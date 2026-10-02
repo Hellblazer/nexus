@@ -39,6 +39,7 @@ from nexus.collection_shape import (
     gather_facts,
     run_checks,
 )
+from tests._chunk_seed import seed_chunks_direct
 
 _REPO = Path(__file__).resolve().parents[1]
 
@@ -497,7 +498,10 @@ class TestAgainstTheEngine:
         client = HttpVectorClient()  # the real service client; the in-memory unit substrate has no stats route
         texts = [f"alpha text {tag}", f"beta text {tag}"]
         ids = [hashlib.sha256(x.encode()).hexdigest() for x in texts]  # chunk ids are the chash
-        client.upsert_chunks(live, ids, texts, [{"content_hash": i} for i in ids])
+        # Substrate SQL with the engine's real embedding: the engine refuses an
+        # ownerless upsert-chunks write from RDR-223 Phase 3 on, and these two
+        # chunks have no manifest row here.
+        seed_chunks_direct(live, ids, texts, [{"content_hash": i} for i in ids], embed=True)
 
         report = audit(catalog=active_reader(), t3=client, write_model_for=_cloud_write_model)
 

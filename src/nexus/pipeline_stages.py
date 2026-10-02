@@ -8,7 +8,7 @@ Three concurrent stages connected by the engine-backed pipeline buffer
 
 1. **extractor_loop** — extracts pages → ``pdf_pages`` buffer
 2. **chunker_loop** — polls pages, chunks stable prefix, embeds → ``pdf_chunks``
-3. **uploader_loop** — reads embedded chunks, upserts to T3
+3. **uploader_loop** — reads embedded chunks, writes them to T3 with their owner rows (RDR-223)
 
 After all three stages complete, the orchestrator runs post-passes to:
 - Enrich chunk metadata from the ExtractionResult (title, author, etc.)
@@ -156,29 +156,26 @@ def extractor_loop(
 
     ext = PDFExtractor()
     try:
-        try:
-            result = ext.extract(
-                pdf_path, extractor=extractor, on_formula_oom=on_formula_oom, on_page=on_page,
-                allow_degraded=allow_degraded_extraction,
-            )
-        except PipelineCancelled:
-            return ExtractionResult(text="", metadata={"page_count": 0, "table_regions": []})
+        result = ext.extract(
+            pdf_path, extractor=extractor, on_formula_oom=on_formula_oom, on_page=on_page,
+            allow_degraded=allow_degraded_extraction,
+        )
+    except PipelineCancelled:
+        return ExtractionResult(text="", metadata={"page_count": 0, "table_regions": []})
 
-        page_count = result.metadata.get("page_count", 0)
-        db.update_progress(content_hash, total_pages=page_count)
-        # Store extraction metadata for resume (avoids re-extraction on crash recovery).
-        db.store_extraction_metadata(content_hash, result.metadata)
-        return result
-    finally:
-        # nexus-2fyb code-review C-int-1: must signal extraction_done even on
-        # raise. The chunker_loop spins on extraction_done.wait(timeout=0.5)
-        # and would otherwise block for a full timeout cycle on every
-        # extraction failure (math PDF without MinerU, etc.). The
-        # cancel-set + wait-not_done shutdown path observes this eventually,
-        # so today this is liveness-degradation not deadlock — but raise must
-        # NOT be allowed to leave downstream stages waiting.
-        if extraction_done is not None:
-            extraction_done.set()
+    page_count = result.metadata.get("page_count", 0)
+    db.update_progress(content_hash, total_pages=page_count)
+    # Store extraction metadata for resume (avoids re-extraction on crash recovery).
+    db.store_extraction_metadata(content_hash, result.metadata)
+    # Signalled ONLY when extraction completed (RDR-223, nexus-z0o2p.11). The chunker takes the
+    # event as "no more pages" and writes the final chunks, and the uploader's last request sweeps
+    # the previous version's chunks, so a failed extraction must not look like a finished one. The
+    # old code signalled from a ``finally`` so a stage waiting on the event never blocked; that is
+    # not needed, because the orchestrator sets ``cancel`` on the first stage failure and every
+    # stage polls it at least once per poll interval.
+    if extraction_done is not None:
+        extraction_done.set()
+    return result
 
 
 # ── Stage 2: Chunker ────────────────────────────────────────────────────────
@@ -317,9 +314,9 @@ def _embed_and_write_batch(
             # nexus-9n1u3: service mode — the JVM embeds server-side at upload.
             # Write a non-NULL empty-blob sentinel (not None) so
             # ``read_uploadable_chunks`` (``embedding IS NOT NULL``) still picks
-            # the chunk up; the uploader struct.unpacks ``b""`` to ``[]`` and
-            # ``HttpVectorClient.upsert_chunks_with_embeddings`` discards the
-            # empty vector and embeds from the chunk text. Mirrors the batch
+            # the chunk up; the uploader struct.unpacks ``b""`` to ``[]`` and the
+            # writer sends only the chunk text (no client vector), which the
+            # engine embeds. Mirrors the batch
             # path (doc_indexer server-side-embed branch). The service-mode
             # check is LOCAL (not inferred from embed_fn=None) so a caller that
             # bypasses the orchestrator and passes embed_fn=None outside service
@@ -387,18 +384,52 @@ def chunker_loop(
         if chunking_done is not None:
             chunking_done.set()
 
-    # Indexing review C2: every exit path must signal chunking_done so the
-    # uploader doesn't block forever. Previously ``_signal_done()`` sat after
-    # the while loop and after the early-return in the final branch — an
-    # exception in the embed/write step skipped both, relying on the
-    # orchestrator's cancel.set() to rescue. Wrap in try/finally instead
-    # so the event fires regardless of how we leave the loop.
-    try:
-        # Seed cache from existing pages (resume case).
-        existing_pages = db.read_pages(content_hash)
-        if existing_pages:
+    # chunking_done is signalled only on a SUCCESSFUL finish (the two ``return`` paths below;
+    # RDR-223, nexus-z0o2p.11). The uploader reads it as "every chunk is in the buffer": it then
+    # sends the writer's last request, whose sweep removes what the previous version owned and this
+    # one dropped. A chunker that failed (an embed error, the zero-chunk refusal) must not release
+    # that request. The orchestrator sets ``cancel`` on the first stage failure, which the uploader
+    # polls, so it does not wait on an event that never comes (this replaces the old finally that
+    # signalled from every exit, indexing review C2).
+    # Seed cache from existing pages (resume case).
+    existing_pages = db.read_pages(content_hash)
+    if existing_pages:
+        parts = []
+        for row in existing_pages:
+            meta = json.loads(row["metadata_json"]) if isinstance(row["metadata_json"], str) else row["metadata_json"]
+            accumulated_boundaries.append({
+                "page_number": meta.get("page_number", row["page_index"] + 1),
+                "start_char": char_pos,
+                "page_text_length": len(row["page_text"]) + 1,
+            })
+            parts.append(row["page_text"])
+            char_pos += len(row["page_text"]) + 1
+        accumulated_text = "\n".join(parts)
+        pages_cached = len(existing_pages)
+
+    while not cancel.is_set():
+        is_final = False
+        if extraction_done is not None:
+            is_final = extraction_done.is_set()
+        else:
+            state = db.get_pipeline_state(content_hash)
+            if state and state["total_pages"] is not None and state["pages_extracted"] >= state["total_pages"]:
+                is_final = True
+
+        # Read only NEW pages (O(new_pages) not O(all_pages)).
+        new_pages = db.read_pages_from(content_hash, pages_cached)
+
+        if not new_pages and not is_final:
+            if extraction_done is not None:
+                extraction_done.wait(timeout=0.5)
+            else:
+                time.sleep(_POLL_INTERVAL)
+            continue
+
+        # Append new pages to cache.
+        if new_pages:
             parts = []
-            for row in existing_pages:
+            for row in new_pages:
                 meta = json.loads(row["metadata_json"]) if isinstance(row["metadata_json"], str) else row["metadata_json"]
                 accumulated_boundaries.append({
                     "page_number": meta.get("page_number", row["page_index"] + 1),
@@ -407,104 +438,142 @@ def chunker_loop(
                 })
                 parts.append(row["page_text"])
                 char_pos += len(row["page_text"]) + 1
-            accumulated_text = "\n".join(parts)
-            pages_cached = len(existing_pages)
-
-        while not cancel.is_set():
-            is_final = False
-            if extraction_done is not None:
-                is_final = extraction_done.is_set()
+            if accumulated_text:
+                accumulated_text += "\n" + "\n".join(parts)
             else:
-                state = db.get_pipeline_state(content_hash)
-                if state and state["total_pages"] is not None and state["pages_extracted"] >= state["total_pages"]:
-                    is_final = True
+                accumulated_text = "\n".join(parts)
+            pages_cached += len(new_pages)
 
-            # Read only NEW pages (O(new_pages) not O(all_pages)).
-            new_pages = db.read_pages_from(content_hash, pages_cached)
+        if not accumulated_text:
+            if is_final:
+                db.update_progress(content_hash, chunks_created=0, chunks_embedded=0)
+                _signal_done()
+                return
+            continue
 
-            if not new_pages and not is_final:
-                if extraction_done is not None:
-                    extraction_done.wait(timeout=0.5)
-                else:
-                    time.sleep(_POLL_INTERVAL)
-                continue
+        chunk_metadata = {"page_boundaries": accumulated_boundaries, "table_regions": []}
+        chunks = chunker.chunk(accumulated_text, chunk_metadata)
 
-            # Append new pages to cache.
-            if new_pages:
-                parts = []
-                for row in new_pages:
-                    meta = json.loads(row["metadata_json"]) if isinstance(row["metadata_json"], str) else row["metadata_json"]
-                    accumulated_boundaries.append({
-                        "page_number": meta.get("page_number", row["page_index"] + 1),
-                        "start_char": char_pos,
-                        "page_text_length": len(row["page_text"]) + 1,
-                    })
-                    parts.append(row["page_text"])
-                    char_pos += len(row["page_text"]) + 1
-                if accumulated_text:
-                    accumulated_text += "\n" + "\n".join(parts)
-                else:
-                    accumulated_text = "\n".join(parts)
-                pages_cached += len(new_pages)
-
-            if not accumulated_text:
-                if is_final:
-                    db.update_progress(content_hash, chunks_created=0, chunks_embedded=0)
-                    return
-                continue
-
-            chunk_metadata = {"page_boundaries": accumulated_boundaries, "table_regions": []}
-            chunks = chunker.chunk(accumulated_text, chunk_metadata)
-
-            if is_final and not chunks and accumulated_text.strip():
-                # nexus-aold: extraction succeeded with non-empty text but the
-                # chunker produced zero chunks. Pre-fix this fell through to
-                # ``return`` after a no-op ``_embed_and_write_batch`` (the
-                # silent 0-chunk failure mode the bead names). Raise so the
-                # orchestrator surfaces it instead of completing "successfully".
-                raise RuntimeError(
-                    f"chunker produced zero chunks for {pdf_path} despite "
-                    f"non-empty extracted text ({len(accumulated_text)} chars "
-                    f"across {pages_cached} pages). This usually indicates a "
-                    "chunker bug or a mismatch between extractor output and "
-                    "chunker expectations; rerun with --extractor mineru or "
-                    "file a bug with the source PDF."
-                )
-
-            batch_kwargs = dict(
-                pdf_path=pdf_path, corpus=corpus, target_model=current_model,
-                now_iso=now_iso, git_meta=git_meta,
+        if is_final and not chunks and accumulated_text.strip():
+            # nexus-aold: extraction succeeded with non-empty text but the
+            # chunker produced zero chunks. Pre-fix this fell through to
+            # ``return`` after a no-op ``_embed_and_write_batch`` (the
+            # silent 0-chunk failure mode the bead names). Raise so the
+            # orchestrator surfaces it instead of completing "successfully".
+            raise RuntimeError(
+                f"chunker produced zero chunks for {pdf_path} despite "
+                f"non-empty extracted text ({len(accumulated_text)} chars "
+                f"across {pages_cached} pages). This usually indicates a "
+                "chunker bug or a mismatch between extractor output and "
+                "chunker expectations; rerun with --extractor mineru or "
+                "file a bug with the source PDF."
             )
 
-            if is_final:
-                new_chunks = chunks[written_up_to:]
-                count, actual_model = _embed_and_write_batch(
-                    new_chunks, content_hash, db, embed_fn, cancel,
-                    total_embedded, **batch_kwargs,
-                )
-                total_embedded += count
-                written_up_to += count
-                current_model = actual_model
-                db.update_progress(content_hash, chunks_created=len(chunks), chunks_embedded=total_embedded)
-                return
+        batch_kwargs = dict(
+            pdf_path=pdf_path, corpus=corpus, target_model=current_model,
+            now_iso=now_iso, git_meta=git_meta,
+        )
 
-            # Hold back the last chunk — its boundary may shift when more pages arrive.
-            stable_end = max(written_up_to, len(chunks) - 1)
-            new_chunks = chunks[written_up_to:stable_end]
-            if new_chunks:
-                count, actual_model = _embed_and_write_batch(
-                    new_chunks, content_hash, db, embed_fn, cancel,
-                    total_embedded, **batch_kwargs,
-                )
-                current_model = actual_model
-                total_embedded += count
-                written_up_to += count
-                db.update_progress(content_hash, chunks_created=written_up_to)
-    finally:
-        _signal_done()
+        if is_final:
+            new_chunks = chunks[written_up_to:]
+            count, actual_model = _embed_and_write_batch(
+                new_chunks, content_hash, db, embed_fn, cancel,
+                total_embedded, **batch_kwargs,
+            )
+            total_embedded += count
+            written_up_to += count
+            current_model = actual_model
+            db.update_progress(content_hash, chunks_created=len(chunks), chunks_embedded=total_embedded)
+            _signal_done()
+            return
+
+        # Hold back the last chunk — its boundary may shift when more pages arrive.
+        stable_end = max(written_up_to, len(chunks) - 1)
+        new_chunks = chunks[written_up_to:stable_end]
+        if new_chunks:
+            count, actual_model = _embed_and_write_batch(
+                new_chunks, content_hash, db, embed_fn, cancel,
+                total_embedded, **batch_kwargs,
+            )
+            current_model = actual_model
+            total_embedded += count
+            written_up_to += count
+            db.update_progress(content_hash, chunks_created=written_up_to)
 
 
 # ── Stage 3: Uploader ───────────────────────────────────────────────────────
+
+
+class PartialUploadResumeError(RuntimeError):
+    """An uploader with no writer was handed a buffer whose first chunk to send is not chunk 0.
+
+    An internal invariant, not a state the orchestrator lets a run reach. The multi-batch writer
+    keeps its state (the pre-run manifest snapshot, the positions and chashes it wrote) in the
+    process that runs it. A process killed part way through the upload took that state with it; a
+    writer started on the remaining chunks alone would replace the document's manifest with that
+    tail and sweep the head as superseded, and the completion check would pass on the tail's row
+    count. :func:`pipeline_index_pdf` therefore puts the buffer's upload flags back before the
+    stages start (:func:`_reconcile_resumed_run`), so the uploader always begins at chunk 0 and
+    this is never raised from a run it orchestrates. The uploader keeps the check as its own
+    invariant: a direct caller handed such a buffer refuses to send.
+    """
+
+
+def _make_upload_catalog() -> Any:
+    """The catalog writer the streaming run's writer sends through (a test patch target: the run's
+    own registration goes through ``make_catalog_writer`` too, and must not be replaced with it)."""
+    from nexus.catalog.factory import make_catalog_writer  # noqa: PLC0415 — deferred import
+
+    return make_catalog_writer()
+
+
+class UploadRun:
+    """The multi-batch writer one streaming run uploads through, and what the run needs of it later.
+
+    The uploader creates the writer when its first batch arrives and the orchestrator stamps it
+    complete after the post-passes (``defer_completion``): the passes enrich chunk metadata after
+    the last chunk has landed, and a process killed between the stamp and the passes would leave a
+    document that looks complete and is missing its title and author. A run made by a direct
+    caller of :func:`uploader_loop` (no *run* given) stamps in ``finish()``.
+    """
+
+    def __init__(self, on_request: Callable[[], None] | None = None) -> None:
+        self.writer: Any = None
+        self.cat: Any = None
+        self.finished = False          # every chunk landed: the writer's finish() returned
+        self._raw_cat: Any = None
+        #: Called AFTER a chunk-carrying request that has, or may have, written chunks: when it
+        #: answered, or failed with its outcome open (see ``MetadataMergingCatalog._send``). Never
+        #: for a request that did not reach the engine or that the engine refused.
+        self._on_request = on_request
+
+    def open_writer(
+        self, *, doc_id: str, collection: str, content_hash: str, force_re_embed: bool,
+        defer_completion: bool,
+    ) -> Any:
+        from nexus.catalog.multi_batch_write import MultiBatchDocumentWriter  # noqa: PLC0415 — deferred: multi_batch_write imports the vector client
+        from nexus.catalog.metadata_merging_catalog import MetadataMergingCatalog  # noqa: PLC0415 — deferred: shared with the other RDR-223 writers
+
+        self._raw_cat = _make_upload_catalog()
+        # The streaming stub's metadata is deliberately partial (the post-pass fills title, author
+        # and extraction method), so the write MERGES it into what is stored and names no keys to
+        # delete: replacing would strip the ``bib_*`` enrichment a forced re-index must keep.
+        self.cat = MetadataMergingCatalog(self._raw_cat, collection, [], on_request=self._on_request)
+        self.writer = MultiBatchDocumentWriter(
+            self.cat, doc_id=doc_id, collection=collection, content_hash=content_hash,
+            force_re_embed=force_re_embed, defer_completion=defer_completion)
+        return self.writer
+
+    def close(self) -> None:
+        close = getattr(self._raw_cat, "close", None)
+        self._raw_cat = None
+        if close is not None:
+            close()
+
+
+#: One batch handed to the writer and not yet flagged uploaded: (rows, ids, documents,
+#: embeddings, metadatas).
+_Held = tuple[list[dict], list[str], list[str], list[list[float]], list[dict]]
 
 
 def uploader_loop(
@@ -519,146 +588,197 @@ def uploader_loop(
     hooks: "HookRegistry | None" = None,
     dry_run: bool = False,
     force_re_embed: bool = False,
+    run: UploadRun | None = None,
 ) -> None:
-    """Poll chunk buffer for embedded chunks and upsert to T3 ChromaDB.
+    """Poll the chunk buffer for embedded chunks and write them, with their owner rows, to T3.
 
-    *catalog_doc_id* (RDR-108 Phase 3) — catalog ``Document.tumbler``
-    string for the document this pipeline run is processing. Threaded
-    through to ``HookRegistry.fire_batch`` so ``manifest_write_batch_hook``
-    can write the manifest without having to read it from chunk metadata
-    (which Phase 3 retired).
+    RDR-223 (nexus-z0o2p.11): every batch of up to ``_UPLOAD_BATCH_SIZE`` chunks goes to the
+    document's multi-batch writer (:class:`~nexus.catalog.multi_batch_write.MultiBatchDocumentWriter`)
+    as its rows (positions are the chunker's global ``chunk_index``) plus the chunk payloads its
+    rows reference. The writer begins the index-run fence with its first request, replaces the
+    manifest with that request (sweep off), appends every later batch with its chunks and owner rows
+    in one transaction, and after the last one sweeps what the previous version owned and this one
+    dropped. A process killed part way leaves every chunk it wrote owned. There is no separate
+    chunk upload and no manifest hook for these chunks.
 
-    Pass *dry_run=True* (nexus-uxg4u round 2) to skip ``hooks.fire_batch``/
-    ``fire_single`` for every uploaded batch — default hooks
-    (``install_default_hooks``, reached whenever a caller passes
-    ``hooks=None``) wire a REAL T2 aspect-extraction-queue write via
-    ``aspect_extraction_enqueue_hook``, which does not itself check
-    *catalog_doc_id* truthiness before enqueueing. The T3 upsert into
-    *t3* itself is unaffected — ``pipeline_index_pdf``'s caller already
-    controls whether *t3* is the real or an ephemeral client; this flag
-    only stops the CATALOG-adjacent hook fan-out.
+    The writer holds the newest batch back until it knows whether it is the last, so a chunk is
+    flagged uploaded in the buffer only once its request was sent, one batch behind. A chunk's
+    post-store hooks fire at the same point. A buffer whose first chunk to send is not chunk 0 (an
+    earlier process flagged the head and died) is refused with :class:`PartialUploadResumeError`;
+    the orchestrator never hands one over, it resets the flags first (see there).
 
-    *force_re_embed* (nexus-8143o): forwarded verbatim to every batch's
-    ``t3.upsert_chunks_with_embeddings`` call — the RDR-181 server-side
-    existence-partition control. This is the ONLY place in the streaming
-    pipeline that talks to that control: ``embed_fn`` (the chunker
-    stage's client-side embedder, local/dry-run mode only) has nothing to
-    do with it, see ``pipeline_index_pdf``'s docstring.
+    *catalog_doc_id* is the document that owns the chunks; without one (and not *dry_run*) the
+    run cannot write and raises ``CatalogIdentityMissingError``.
+
+    *run* (the orchestrator passes one) holds the writer so the orchestrator can stamp the run
+    complete after the post-passes; a direct caller passes none and the writer stamps itself.
+
+    Pass *dry_run=True* (nexus-uxg4u round 2) for a preview: the chunks go straight into *t3*,
+    the caller's throwaway store, with no owner row and no catalog write, and the hook fan-out
+    (which would make a real T2 aspect-queue write) is skipped.
+
+    *force_re_embed* (nexus-8143o): forwarded to the writer, the engine's RDR-181 existence
+    partition control.
     """
-    # nexus-6m9zy.1 (#3): seed the running total from persisted progress,
-    # not 0. On a crash-resume, chunks uploaded before the crash are
-    # already marked uploaded=true and read_uploadable_chunks never
-    # returns them again, so a running total that restarts at 0 can only
-    # ever count THIS run's uploads — chunks_uploaded then never reaches
-    # chunks_created and both resume-completion checks below poll
-    # forever.
-    #
-    # This is sound because the one call site that wipes the WAL
-    # (pipeline_index_pdf's first_exc handler, via
-    # _mark_failed_and_reset_wal -> db.clear_orphan_wal) also zeroes this
-    # counter -- nexus-33q80: the ENGINE does it in the SAME transaction
-    # as the wipe now (PipelineRepository.clearOrphanWal), not a second
-    # client call that could independently fail. Without that pairing,
-    # chunks_uploaded would survive clear_orphan_wal exactly like
-    # pages_extracted did before nexus-gl99l's fix, and this seed would
-    # trust a phantom prior-upload count no chunk in the (now-empty) WAL
-    # backs. (substantive-critic finding on the first cut of this fix, T2
-    # nexus/critique-59c07fe5b-uploader-chunks-uploaded-inflation-
-    # nexus-6m9zy [26147], ship-blocker: reproduced a persisted
-    # chunks_uploaded of 20 for a true 10-chunk document across a
-    # mark_failed+clear_orphan_wal cycle, which fails the completion
-    # fence's manifest-count check instead of merely hanging.)
+    from nexus.hook_registry import HookRegistry, install_default_hooks  # noqa: PLC0415 - deferred to avoid circular import at module load
+
+    # nexus-6m9zy.1 (#3): seed the running total from persisted progress, not 0. Chunks a
+    # previous process flagged uploaded are never returned by read_uploadable_chunks again, so a
+    # total that restarts at 0 could only count THIS run's uploads, and chunks_uploaded would
+    # never reach chunks_created. Sound because the one place that wipes the WAL (the
+    # orchestrator's first_exc handler, via _mark_failed_and_reset_wal -> db.clear_orphan_wal)
+    # zeroes this counter in the same engine transaction (nexus-33q80).
     _resume_state = db.get_pipeline_state(content_hash)
-    total_uploaded = (
+    persisted_uploaded = (
         _resume_state["chunks_uploaded"]
         if _resume_state and _resume_state["chunks_uploaded"] is not None
         else 0
     )
+    total_uploaded = persisted_uploaded
 
-    while not cancel.is_set():
-        chunks = db.read_uploadable_chunks(content_hash, limit=_UPLOAD_BATCH_SIZE)
+    if hooks is None:
+        hooks = HookRegistry()
+        install_default_hooks(hooks)
+    if not dry_run:
+        # The manifest is written by the writer, with the chunks; the batch manifest hook would
+        # replace it a second time and stash a deferred sweep for a stamp nobody is waiting for.
+        from nexus.mcp_infra import manifest_write_batch_hook  # noqa: PLC0415 - deferred: avoids a module-load-time cross-import
 
-        if chunks:
-            for batch_start in range(0, len(chunks), _UPLOAD_BATCH_SIZE):
+        hooks = hooks.without_batch(manifest_write_batch_hook)
+
+    own_run = run is None
+    if run is None:
+        run = UploadRun()
+    held: _Held | None = None
+    last_added = -1
+
+    def _flag(batch: _Held) -> None:
+        """The batch's request was sent: post-store hooks (RDR-095), then flag it uploaded."""
+        nonlocal total_uploaded
+        batch_rows, ids, documents, embeddings, metadatas = batch
+        # Both single-doc and batch chains fire from every storage event; the per-doc loop
+        # covers single-shape consumers on CLI ingest.
+        if not dry_run:
+            hooks.fire_batch(
+                ids, collection, documents, embeddings, metadatas,
+                catalog_doc_id=catalog_doc_id,
+            )
+            for _did, _doc in zip(ids, documents):
+                hooks.fire_single(_did, collection, _doc)
+        db.mark_uploaded(content_hash, [row["chunk_index"] for row in batch_rows])
+        total_uploaded += len(batch_rows)
+        db.update_progress(content_hash, chunks_uploaded=total_uploaded)
+
+    def _land_held() -> None:
+        """Finish the writer (its last request, the deferred sweep, the stamp unless deferred),
+        then flag the batch it held back. Nothing to do when the writer never started, already
+        finished, or held nothing."""
+        nonlocal held
+        if held is None or run.writer is None or run.finished:
+            return
+        result = run.writer.finish()
+        run.finished = True
+        run.cat.account_unexplained_skips(catalog_doc_id, result.sweep_skipped)
+        _flag(held)
+        held = None
+
+    try:
+        while not cancel.is_set():
+            # One held batch is still unflagged in the buffer, so read past it.
+            rows = db.read_uploadable_chunks(content_hash, limit=2 * _UPLOAD_BATCH_SIZE)
+            batch_rows = [r for r in rows if r["chunk_index"] > last_added][:_UPLOAD_BATCH_SIZE]
+
+            if batch_rows:
                 if cancel.is_set():
                     return
-                batch = chunks[batch_start : batch_start + _UPLOAD_BATCH_SIZE]
-
-                ids = [row["chunk_id"] for row in batch]
-                documents = [row["chunk_text"] for row in batch]
+                ids = [row["chunk_id"] for row in batch_rows]
+                documents = [row["chunk_text"] for row in batch_rows]
                 embeddings = [
                     list(struct.unpack(f"{len(row['embedding']) // 4}f", row["embedding"]))
-                    for row in batch
+                    for row in batch_rows
                 ]
                 metadatas = [
                     json.loads(row["metadata_json"]) if isinstance(row["metadata_json"], str) else row["metadata_json"]
-                    for row in batch
+                    for row in batch_rows
                 ]
+                batch: _Held = (batch_rows, ids, documents, embeddings, metadatas)
 
-                t3.upsert_chunks_with_embeddings(collection, ids, documents, embeddings, metadatas, force_re_embed=force_re_embed)
+                if dry_run:
+                    from nexus.doc_indexer import _preview_upsert  # noqa: PLC0415 - deferred to avoid circular import at module load
+                    _preview_upsert(t3, collection, ids, documents, embeddings, metadatas,
+                                    force_re_embed=force_re_embed)
+                    _flag(batch)
+                else:
+                    if not catalog_doc_id:
+                        from nexus.doc_indexer import _raise_identity_missing  # noqa: PLC0415 - deferred to avoid circular import at module load
+                        _raise_identity_missing(f"PDF {content_hash[:12]}", collection, None)
+                    if run.writer is None and batch_rows[0]["chunk_index"] > 0:
+                        # Read from the rows, not the progress counter: the counter is buffered
+                        # and lags the flags by up to a poll interval.
+                        raise PartialUploadResumeError(
+                            f"the first chunk left to send is chunk #{batch_rows[0]['chunk_index']}, "
+                            "so an earlier process already sent the chunks before it and its write "
+                            "state is gone with that process; sending only the rest would replace "
+                            "the document's manifest with a fragment and sweep the head as "
+                            "superseded. The orchestrator resets the upload flags first "
+                            "(_reconcile_resumed_run), so the document is re-sent from chunk 0."
+                        )
+                    if run.writer is None:
+                        run.open_writer(
+                            doc_id=catalog_doc_id, collection=collection, content_hash=content_hash,
+                            force_re_embed=force_re_embed, defer_completion=not own_run)
+                    # The chunk's natural ID is its chash; the row's position is the chunker's
+                    # global ordering. The chunk payload carries the stub the chunker stamped: the
+                    # chunk_index is the row's position, not chunk metadata (RDR-108 Phase 3).
+                    from nexus.mcp_infra import _manifest_chunk_rows  # noqa: PLC0415 - deferred: avoids a module-load-time cross-import
 
-                # RDR-108 Phase 3: inject the per-row global chunk_index
-                # from T2 into the metadata blob BEFORE firing the batch
-                # chain. The blob in T2 was stamped via
-                # ``make_chunk_metadata`` (post-Phase-3, no chunk_index),
-                # so the manifest hook would otherwise default to a
-                # batch-local enumeration index — wrong for multi-batch
-                # streaming where each batch resets to 0. T3 has already
-                # been upserted with the post-Phase-3 metadata; mutating
-                # the local copy now is safe and only affects the hook
-                # payload. ``row["chunk_index"]`` is the chunker's
-                # canonical global ordering.
-                for _i, row in enumerate(batch):
-                    metadatas[_i]["chunk_index"] = row["chunk_index"]
+                    manifest_rows = _manifest_chunk_rows([
+                        (row["chunk_index"], {**meta, "chunk_index": row["chunk_index"]})
+                        for row, meta in zip(batch_rows, metadatas)
+                    ])
+                    for m_row, chash in zip(manifest_rows, ids):
+                        m_row["chash"] = chash
+                    run.writer.add_batch(manifest_rows, [
+                        {"chash": chash, "text": text, "metadata": meta}
+                        for chash, text, meta in zip(ids, documents, metadatas)
+                    ])
+                    # Handing this batch over sent every batch before it.
+                    if held is not None:
+                        _flag(held)
+                    held = batch
+                last_added = batch_rows[-1]["chunk_index"]
 
-                # Post-store hook chains (RDR-095). Both single-doc and
-                # batch chains fire from every storage event; the per-doc
-                # loop covers single-shape consumers on CLI ingest.
-                if hooks is None:
-                    from nexus.hook_registry import HookRegistry, install_default_hooks  # noqa: PLC0415 - deferred to avoid circular import at module load
-                    hooks = HookRegistry()
-                    install_default_hooks(hooks)
-                if not dry_run:
-                    hooks.fire_batch(
-                        ids, collection, documents, embeddings, metadatas,
-                        catalog_doc_id=catalog_doc_id,
-                    )
-                    for _did, _doc in zip(ids, documents):
-                        hooks.fire_single(_did, collection, _doc)
-
-                indices = [row["chunk_index"] for row in batch]
-                db.mark_uploaded(content_hash, indices)
-                total_uploaded += len(batch)
-                db.update_progress(content_hash, chunks_uploaded=total_uploaded)
-
-        chunker_finished = chunking_done is not None and chunking_done.is_set()
-        if not chunker_finished:
-            if chunking_done is None:
-                # Resume path (no event): use durable state. Safe because on resume
-                # the chunker runs to completion before the uploader starts — there
-                # is no incremental chunks_created race.
+            if chunking_done is not None:
+                # Orchestrated path: wait for chunking_done event — don't trust provisional
+                # chunks_created during incremental chunking.
+                chunker_finished = chunking_done.is_set()
+            else:
+                # Resume path (no event): use durable state. Safe because on resume the chunker
+                # runs to completion before the uploader starts — there is no incremental
+                # chunks_created race.
                 state = db.get_pipeline_state(content_hash)
-                if state and state["chunks_created"] is not None:
-                    if state["chunks_uploaded"] >= state["chunks_created"]:
-                        db.mark_completed(content_hash)
-                        return
-            # Orchestrated path: wait for chunking_done event — don't trust
-            # provisional chunks_created during incremental chunking.
+                chunker_finished = bool(state and state["chunks_created"] is not None)
+            if not chunker_finished:
+                time.sleep(_POLL_INTERVAL)
+                continue
+
+            if cancel.is_set():
+                return
+            if batch_rows:
+                continue
+
+            # The chunker is done and nothing new is readable: the writer's last request, the
+            # sweep, and (for a direct caller) the stamp.
+            _land_held()
+            state = db.get_pipeline_state(content_hash)
+            if state and state["chunks_created"] is not None and state["chunks_uploaded"] >= state["chunks_created"]:
+                db.mark_completed(content_hash)
+                return
+
             time.sleep(_POLL_INTERVAL)
-            continue
-
-        if cancel.is_set():
-            return
-        remaining = db.read_uploadable_chunks(content_hash, limit=1)
-        if remaining:
-            continue
-
-        state = db.get_pipeline_state(content_hash)
-        if state and state["chunks_created"] is not None and state["chunks_uploaded"] >= state["chunks_created"]:
-            db.mark_completed(content_hash)
-            return
-
-        time.sleep(_POLL_INTERVAL)
+    finally:
+        if own_run:
+            run.close()
 
 
 # ── Orchestrator ─────────────────────────────────────────────────────────────
@@ -1012,6 +1132,119 @@ def _mark_failed_and_reset_wal(db: HttpPipelineDB, content_hash: str, first_exc:
     return False
 
 
+def _reconcile_resumed_run(db: HttpPipelineDB, doc_id: str, content_hash: str) -> str:
+    """Decide what a RESUMED run does with the buffer an earlier process left (RDR-223).
+
+    Returns ``"fresh"`` when the buffer holds no upload evidence, ``"tail"`` when the earlier
+    process sent every chunk and only the completion stamp is left, ``"reset"`` when it was sent
+    in part (or the stamp would not be safe) and the buffer's upload flags were put back so the
+    run re-sends the document from position 0, and ``"restarted"`` when the buffer itself was
+    unusable and was discarded.
+
+    The multi-batch writer's state lives in the process that ran it, so a resume cannot continue
+    an upload that was under way: sending the remaining chunks alone would replace the document's
+    manifest with that tail and sweep the head. What the killed process left that is worth keeping
+    is the extracted pages and the chunks with their embeddings, and those are untouched by the
+    upload flags. The resume therefore asks the engine to reset the flags
+    (:meth:`~nexus.db.http_pipeline_client.HttpPipelineDB.reset_uploaded`, which carries the run's
+    epoch) and runs the stages again: the extractor finds its pages, the chunker its chunks, and
+    the uploader re-sends from chunk 0 through a fresh writer. Nothing is extracted again, and the
+    engine's existence partition (RDR-181) means nothing is embedded again. Evidence of an upload
+    is a chunk flagged uploaded or a progress counter above zero, both read, because the counter
+    is buffered and lags the flags by up to a poll interval.
+
+    The state is read with COUNTS (:meth:`~nexus.db.http_pipeline_client.HttpPipelineDB.chunk_counts`),
+    never by reading the unflagged rows.
+
+    The one resume that keeps its flags is the finished upload, and it must prove the upload
+    FINISHED, not merely that every chunk written so far is flagged:
+
+    * extraction is complete (``pages_extracted == total_pages``) and the chunker is done
+      (``chunks_embedded`` is set, and only the chunker's final branch sets it; its progressive
+      updates set ``chunks_created`` alone), so ``chunks_created`` is the final count. While the
+      chunker runs ``chunks_created`` is provisional and the uploader holds its newest batch
+      back, so "every chunk flagged" is never true of an upload in flight, but a test pins that
+      rather than trusting it: a run whose buffer says ``chunks_created == flagged`` without
+      those two signals is reset, not stamped;
+    * the embedded rows, the flagged rows and ``chunks_created`` all agree;
+    * the document's index-run fence is still ``indexing`` for THIS content hash, which is what a
+      run leaves that sent its last request and never stamped (a failed post-pass, a kill before
+      the stamp). If the document was indexed at other bytes since, the fence carries their hash
+      and the manifest is not this buffer's.
+
+    What the tail's stamp proves, and what it does not (M-3): the proof is the file-content hash
+    (the buffer and the fence name the same bytes) plus the engine's own check at stamp time, which
+    compares the manifest's ROW COUNT and the chunks' existence against the ``chunk_count`` the
+    stamp carries and refuses otherwise. A buffer whose manifest was written by a DIFFERENT run of
+    the same bytes that left the same fence hash (a ``--streaming never`` run of this PDF chunks it
+    differently and stops before its stamp) is caught by that row-count and existence check, not by
+    anything this function reads; a manifest with the right count and existing chunks that differs
+    in content would pass, and the engine has nothing to compare it against either.
+
+    A buffer the chunker finished whose embedded rows disagree with ``chunks_created`` cannot be
+    re-sent (a chunk is missing), so it is the one case that is cleared with
+    :meth:`~nexus.db.http_pipeline_client.HttpPipelineDB.clear_orphan_wal` and run from scratch.
+    """
+    state = db.get_pipeline_state(content_hash) or {}
+    counter = int(state.get("chunks_uploaded") or 0)
+    embedded, uploaded = db.chunk_counts(content_hash)
+    if not uploaded and not counter:
+        return "fresh"
+    created = state.get("chunks_created")
+    total_pages = state.get("total_pages")
+    extraction_complete = total_pages is not None and int(state.get("pages_extracted") or 0) >= total_pages
+    chunking_complete = state.get("chunks_embedded") is not None and created is not None
+    if chunking_complete and embedded != created:
+        db.clear_orphan_wal(content_hash)
+        _log.warning(
+            "pipeline_resume_unusable_buffer_discarded",
+            content_hash=content_hash, embedded_rows=embedded, chunks_created=created,
+            reason="the chunker finished but the buffer holds a different number of embedded chunks "
+                   "than it created; the buffer is discarded and the document runs again from scratch",
+        )
+        return "restarted"
+    if extraction_complete and chunking_complete and uploaded == embedded == created:
+        from nexus.doc_indexer import _index_fence_state  # noqa: PLC0415 - deferred to avoid circular import at module load
+
+        fence_state, fence_hash = _index_fence_state(doc_id)
+        if fence_state == "indexing" and fence_hash == content_hash:
+            if counter != created:
+                db.update_progress(content_hash, chunks_uploaded=created)
+            _log.info(
+                "pipeline_resume_finished_upload_kept",
+                content_hash=content_hash, chunks=created,
+                reason="every chunk was sent and the fence is still indexing for this content; "
+                       "only the completion stamp is left",
+            )
+            return "tail"
+        why = (f"every chunk was sent but the document's fence reads state={fence_state!r} "
+               f"hash={'other' if fence_hash != content_hash else 'this'}: the manifest may not be "
+               "this buffer's")
+    else:
+        why = "an earlier process sent part of the document and its write state is gone"
+    flagged_reset = db.reset_uploaded(content_hash)
+    _log.warning(
+        "pipeline_resume_uploads_reset",
+        content_hash=content_hash, flagged_rows=flagged_reset, embedded_rows=embedded,
+        counter=counter,
+        reason=why + "; the upload flags are reset and the document is sent again from chunk 0 "
+                     "(nothing is extracted again, and chunks the engine already holds are not "
+                     "re-embedded)",
+    )
+    return "reset"
+
+
+def _rearm_failed(db: HttpPipelineDB, content_hash: str, reason: str) -> None:
+    """Move the pipeline row to ``failed`` so the next run RESUMES it (``create`` answers
+    ``resuming``) instead of finding a leftover and wiping it. Best effort: it keeps the buffer, so
+    a failure to write the state costs a re-extraction on the next run and must never mask the
+    failure that is propagating."""
+    try:
+        db.mark_failed(content_hash, error=reason)
+    except Exception:  # noqa: BLE001 — boundary catch: best-effort bookkeeping, mirrors the other terminal-state writes in this module
+        _log.warning("pipeline_terminal_mark_failed", content_hash=content_hash, reason=reason, exc_info=True)
+
+
 def pipeline_index_pdf(
     pdf_path: Path,
     content_hash: str,
@@ -1035,6 +1268,7 @@ def pipeline_index_pdf(
     on_doc_registered: Callable[[str, bool], None] | None = None,
     extraction_stats: dict | None = None,
     title_override: str = "",
+    on_write_started: Callable[[], None] | None = None,
 ) -> int:
     """Three-stage streaming pipeline for PDFs.
 
@@ -1085,11 +1319,9 @@ def pipeline_index_pdf(
             them, refreshing only metadata. ``force`` alone does NOT
             imply a fresh embed on a re-index.
         force_re_embed: DECOUPLED from *force* (nexus-8143o, mirroring
-            nexus-4jj40 round 5's ``repo`` split and doc_indexer.py's
-            ``_upsert_skip_reembed``). Forwarded to ``uploader_loop``,
-            which forwards it verbatim to every batch's
-            ``t3.upsert_chunks_with_embeddings`` call — the actual RDR-181
-            server-side re-embed control. This is the streaming pipeline's
+            nexus-4jj40 round 5's ``repo`` split). Forwarded to ``uploader_loop``,
+            which hands it to the multi-batch writer for every request of the
+            document — the actual RDR-181 server-side re-embed control. This is the streaming pipeline's
             OWN skip point; it has nothing to do with ``embed_fn`` (the
             chunker stage's optional client-side embedder, used only in
             local/dry-run mode to populate the pipeline staging buffer —
@@ -1105,11 +1337,12 @@ def pipeline_index_pdf(
     a caller that swaps in a no-op embedder for a preview must say so
     explicitly, or a future change reintroducing a real query against
     that throwaway handle would silently start touching the catalog
-    again. The pipeline buffer (``db``/``HttpPipelineDB``) itself is
-    UNCHANGED by this flag — it is transient extraction/chunking
-    staging, not the catalog Document graph, and is what makes the
-    preview's chunk counts real; it is already cleaned up via
-    ``db.delete_pipeline_data`` on a successful run.
+    again. The pipeline buffer is an IN-MEMORY one on a dry run (RDR-223,
+    :func:`~nexus.db.inmemory_pipeline.make_in_memory_pipeline_db`): it is
+    the same staging the stages always use, which is what makes the
+    preview's chunk counts real, but it sends the engine nothing and never
+    shares a row with a real run of the same bytes. A *db* passed with
+    *dry_run* must be one of those (``DryRunStoreError`` otherwise).
 
     Pass *on_doc_registered* (nexus-uxg4u round 2, code-review-expert
     Finding B) to be notified as ``(doc_id, created)`` whenever THIS
@@ -1123,8 +1356,27 @@ def pipeline_index_pdf(
     ``index_pdf``'s own closure) has no way to see it without this
     callback.
 
+    *on_write_started* is called just before each request that carries chunks (RDR-223): from
+    the first one the document may have chunks in the store, all with owner rows, and a caller
+    that would undo a fresh registration on failure must not (``index_pdf``'s rollback). A failure
+    of the completion stamp after the last chunk landed is one such failure: it propagates, and the
+    document's fence stays ``indexing``.
+
     Returns total chunks indexed.
     """
+    if dry_run:
+        from nexus.doc_indexer import _require_throwaway_pipeline, _require_throwaway_store  # noqa: PLC0415 - deferred to avoid circular import at module load
+
+        _require_throwaway_store(t3, "pipeline_index_pdf")
+        if db is None:
+            # A preview sends the engine nothing, so its buffer is in memory: the same stages run
+            # against it, it never shares (or flags, or resets) a real run's row for these bytes,
+            # and a preview that dies leaves nothing behind.
+            from nexus.db.inmemory_pipeline import make_in_memory_pipeline_db  # noqa: PLC0415 - deferred: only a dry run needs the twin
+
+            db, _ = make_in_memory_pipeline_db()
+        else:
+            _require_throwaway_pipeline(db, "pipeline_index_pdf")
     if db is None:
         # Unconditional — no local/service mode dispatch (resolves the
         # bead's backend-selection question): post-RDR-155-P4a the
@@ -1170,6 +1422,12 @@ def pipeline_index_pdf(
         if on_doc_registered is not None:
             on_doc_registered(doc_id, _fallback_created)
 
+    # RDR-223: a chunk is written together with its owner row, and there is no owner without a
+    # catalog document. Refuse before extracting, not after minutes of work.
+    if not doc_id and not dry_run:
+        from nexus.doc_indexer import _raise_identity_missing  # noqa: PLC0415 - deferred to avoid circular import at module load
+        _raise_identity_missing(pdf_path, collection, None)
+
     # nexus-9ji: --force must break the partial-ingest deadlock. Both
     # pipeline-buffer state and T3 orphan chunks can independently block
     # re-ingest; wipe both before the pre-flight.
@@ -1201,9 +1459,9 @@ def pipeline_index_pdf(
         if is_vector_service_mode():
             # nexus-9n1u3 / RDR-152 Seam B: leave embed_fn=None — the service
             # embeds server-side at upload time. The embed stage writes a
-            # non-NULL empty-blob sentinel and the uploader routes through
-            # HttpVectorClient.upsert_chunks_with_embeddings (JVM embeds).
-            # Mirrors the batch path (doc_indexer._index_pdf_document).
+            # non-NULL empty-blob sentinel and the uploader's write ignores
+            # client vectors (the JVM embeds).
+            # Mirrors the non-streaming path (doc_indexer.index_pdf).
             pass
         else:
             # nexus-sghyo: non-service streaming embedding was retired —
@@ -1223,312 +1481,351 @@ def pipeline_index_pdf(
                 "(the default) or unset it."
             )
 
-    # nexus-5xn3k.4 RUNFENCE C2: commit the fence BEFORE the first chunk
-    # upsert (memo §3.5 T0) — right before the executor starts the
-    # uploader stage. Gated on doc_id per the no-catalog ingest contract
-    # (nexus-uxg4u: and explicitly on dry_run, though doc_id is already
-    # "" for a dry run given the gate above).
-    if doc_id and not dry_run:
-        from nexus.doc_indexer import _fence_begin  # noqa: PLC0415 - deferred to avoid circular import at module load
-        _fence_begin(doc_id, content_hash, collection)
-
-    cancel = threading.Event()
-    extraction_done = threading.Event()
-    chunking_done = threading.Event()
-    first_exc: BaseException | None = None
-
-    with ThreadPoolExecutor(max_workers=3) as pool:
-        extract_future = pool.submit(
-            extractor_loop, pdf_path, content_hash, db, cancel,
-            extractor=extractor, on_formula_oom=on_formula_oom,
-            extraction_done=extraction_done,
-            allow_degraded_extraction=allow_degraded_extraction,
-        )
-        chunk_future = pool.submit(
-            chunker_loop, content_hash, db, cancel, embed_fn,
-            extraction_done=extraction_done, chunking_done=chunking_done,
-            pdf_path=str(pdf_path), corpus=corpus, target_model=target_model,
-            git_meta=git_meta, doc_id=doc_id,
-        )
-        if hooks is None:
-            from nexus.hook_registry import HookRegistry, install_default_hooks  # noqa: PLC0415 - deferred to avoid circular import at module load
-            hooks = HookRegistry()
-            install_default_hooks(hooks)
-        upload_future = pool.submit(
-            uploader_loop, content_hash, db, t3, collection, cancel,
-            chunking_done,
-            catalog_doc_id=doc_id,
-            hooks=hooks,
-            dry_run=dry_run,
-            force_re_embed=force_re_embed,
-        )
-
-        all_futures: set[Future] = {extract_future, chunk_future, upload_future}
-
+    # A resumed row may carry an upload an earlier process died in the middle of; see
+    # _reconcile_resumed_run. A dry run sends nothing to an engine, so it leaves the buffer alone.
+    resumed_tail = False
+    if result == "resuming" and not dry_run:
         try:
-            done, not_done = wait(all_futures, return_when=FIRST_EXCEPTION)
-            for f in done:
+            resumed_tail = _reconcile_resumed_run(db, doc_id, content_hash) == "tail"
+        except BaseException as exc:
+            # create_pipeline answered 'resuming' and the row is 'running' now. A reconcile that
+            # dies here (a failed read, the reset call) would leave it so, and the next run would
+            # be refused with a 409 until the heartbeat aged out. Hand the row back as failed, the
+            # buffer untouched, so the next run resumes it.
+            if not isinstance(exc, PipelineRunFenced):
+                _rearm_failed(db, content_hash, f"resume reconcile failed: {exc}")
+            raise
+
+    # RDR-223: the index-run fence begins inside the writer, as its first request, so no chunk
+    # lands before it (the old explicit begin sat here). The writer stays open until the tail
+    # stamps it complete, after the post-passes.
+    run = UploadRun(on_request=on_write_started)
+    try:
+        cancel = threading.Event()
+        extraction_done = threading.Event()
+        chunking_done = threading.Event()
+        first_exc: BaseException | None = None
+
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            extract_future = pool.submit(
+                extractor_loop, pdf_path, content_hash, db, cancel,
+                extractor=extractor, on_formula_oom=on_formula_oom,
+                extraction_done=extraction_done,
+                allow_degraded_extraction=allow_degraded_extraction,
+            )
+            chunk_future = pool.submit(
+                chunker_loop, content_hash, db, cancel, embed_fn,
+                extraction_done=extraction_done, chunking_done=chunking_done,
+                pdf_path=str(pdf_path), corpus=corpus, target_model=target_model,
+                git_meta=git_meta, doc_id=doc_id,
+            )
+            if hooks is None:
+                from nexus.hook_registry import HookRegistry, install_default_hooks  # noqa: PLC0415 - deferred to avoid circular import at module load
+                hooks = HookRegistry()
+                install_default_hooks(hooks)
+            upload_future = pool.submit(
+                uploader_loop, content_hash, db, t3, collection, cancel,
+                chunking_done,
+                catalog_doc_id=doc_id,
+                hooks=hooks,
+                dry_run=dry_run,
+                force_re_embed=force_re_embed,
+                run=run,
+            )
+
+            all_futures: set[Future] = {extract_future, chunk_future, upload_future}
+
+            try:
+                done, not_done = wait(all_futures, return_when=FIRST_EXCEPTION)
+                for f in done:
+                    exc = f.exception()
+                    if exc is not None:
+                        first_exc = exc
+                        cancel.set()
+                        break
+                if not_done:
+                    wait(not_done, return_when=ALL_COMPLETED)
+            except BaseException as exc:  # noqa: BLE001 — nexus-6m9zy.3 (#4): see below
+                # A KeyboardInterrupt (Ctrl-C) delivered to THIS thread lands
+                # here, inside the blocking wait() call, NOT inside any stage
+                # future -- the `for f in done` loop above never runs, so
+                # cancel was never set. Left uncaught, this exception would
+                # propagate straight out of the `with` block; ThreadPoolExecutor
+                # .__exit__ still calls shutdown(wait=True) first, which blocks
+                # until all three stages run to NATURAL completion (nothing
+                # ever told them to stop), and the uploader's own
+                # resume-completion check marks the row 'completed' out from
+                # under the interrupted caller -- every later run then hits
+                # create_pipeline's 'completed' -> skip path and reports 0
+                # chunks until --force. Setting cancel here makes the stages
+                # stop promptly (each polls cancel.is_set() at least once per
+                # poll interval / per page), and falling through to the SAME
+                # first_exc handling below as any other caught stage
+                # exception marks the row 'failed' + clears the orphan WAL,
+                # so a retry resumes instead of silently skipping.
+                cancel.set()
+                if first_exc is None:
+                    first_exc = exc
+
+        if first_exc is None:
+            for f in all_futures:
                 exc = f.exception()
                 if exc is not None:
                     first_exc = exc
-                    cancel.set()
                     break
-            if not_done:
-                wait(not_done, return_when=ALL_COMPLETED)
-        except BaseException as exc:  # noqa: BLE001 — nexus-6m9zy.3 (#4): see below
-            # A KeyboardInterrupt (Ctrl-C) delivered to THIS thread lands
-            # here, inside the blocking wait() call, NOT inside any stage
-            # future -- the `for f in done` loop above never runs, so
-            # cancel was never set. Left uncaught, this exception would
-            # propagate straight out of the `with` block; ThreadPoolExecutor
-            # .__exit__ still calls shutdown(wait=True) first, which blocks
-            # until all three stages run to NATURAL completion (nothing
-            # ever told them to stop), and the uploader's own
-            # resume-completion check marks the row 'completed' out from
-            # under the interrupted caller -- every later run then hits
-            # create_pipeline's 'completed' -> skip path and reports 0
-            # chunks until --force. Setting cancel here makes the stages
-            # stop promptly (each polls cancel.is_set() at least once per
-            # poll interval / per page), and falling through to the SAME
-            # first_exc handling below as any other caught stage
-            # exception marks the row 'failed' + clears the orphan WAL,
-            # so a retry resumes instead of silently skipping.
-            cancel.set()
-            if first_exc is None:
-                first_exc = exc
 
-    if first_exc is None:
-        for f in all_futures:
-            exc = f.exception()
-            if exc is not None:
-                first_exc = exc
-                break
+        if first_exc is not None:
+            # nexus-2fyb code-review C-int-2: keep the pipeline row marked
+            # 'failed' with the error message (audit trail) BUT clear the
+            # orphan pdf_pages / pdf_chunks rows. Otherwise the next
+            # create_pipeline() transitions failed → resuming and the
+            # chunker_loop seed cache replays the orphaned pages, causing
+            # deterministic failures (math PDF + MinerU unavailable) to cycle
+            # forever: failed → resuming → re-fail with replayed orphans.
+            # The cleared WAL means retry runs extract from scratch — same
+            # RuntimeError fires immediately, which is correct.
+            # nexus-rewgw (review of the ptctu fix): mark_failed's /fail POST can
+            # ITSELF fail (persistent app-level 500 — the gtltb doc-3 class). If
+            # that raised through here, clear_orphan_wal and `raise first_exc`
+            # would never run: the caller would see the /fail transport error
+            # instead of the ORIGINAL failure, and the row would strand
+            # 'running' with no audit trail — ptctu's both consequences, one
+            # call downstream. The terminal-state writes are best-effort;
+            # first_exc propagating is the load-bearing part. The residual (row
+            # stays 'running' when the engine's /fail endpoint is down) is
+            # covered systemically by lcmbp's young-running-row conflict
+            # semantics: the NEXT retry is loud, never a silent skip.
+            # nexus-8vu8p: a run the engine fenced (a newer resume of the same
+            # document took the row over) owns nothing any more. Its terminal
+            # bookkeeping is refused, and it must not stamp the catalog document
+            # failed either: that is the SAME doc_id the new owner is indexing
+            # (a takeover is per document), and a late stamp would flip a
+            # document the new owner has already completed. The fence is
+            # discovered either as the stage's own exception or inside the
+            # cleanup's /fail call, hence both checks.
+            fenced = isinstance(first_exc, PipelineRunFenced)
+            if fenced:
+                _log.warning(
+                    "pipeline_run_fenced",
+                    content_hash=content_hash,
+                    pipeline_id=first_exc.pipeline_id,
+                    run_epoch=first_exc.run_epoch,
+                    current_epoch=first_exc.current_epoch,
+                )
+            else:
+                fenced = _mark_failed_and_reset_wal(db, content_hash, first_exc)
+            # nexus-5xn3k.4: _fence_fail never raises, so first_exc propagation
+            # below cannot be masked by a fence-write failure. nexus-uxg4u:
+            # never touch the catalog on a dry run (doc_id is already "" in
+            # that case per the pre-flight gate above, but check explicitly
+            # for the same defense-in-depth reason as the fence-begin gate).
+            if doc_id and not dry_run and not fenced:
+                from nexus.doc_indexer import _fence_fail  # noqa: PLC0415 - deferred to avoid circular import at module load
+                _fence_fail(doc_id, str(first_exc))
+            elif doc_id and fenced:
+                # nexus-4pj54: the fenced path skips _fence_fail, which is where
+                # a failed run's deferred superseded-vector sweep is discarded.
+                # Discard it here instead: this run no longer owns the manifest,
+                # so its held candidates must never be swept.
+                from nexus.mcp_infra import discard_deferred_superseded_vectors  # noqa: PLC0415 - deferred to avoid circular import at module load
+                discard_deferred_superseded_vectors(doc_id)
+            raise first_exc
 
-    if first_exc is not None:
-        # nexus-2fyb code-review C-int-2: keep the pipeline row marked
-        # 'failed' with the error message (audit trail) BUT clear the
-        # orphan pdf_pages / pdf_chunks rows. Otherwise the next
-        # create_pipeline() transitions failed → resuming and the
-        # chunker_loop seed cache replays the orphaned pages, causing
-        # deterministic failures (math PDF + MinerU unavailable) to cycle
-        # forever: failed → resuming → re-fail with replayed orphans.
-        # The cleared WAL means retry runs extract from scratch — same
-        # RuntimeError fires immediately, which is correct.
-        # nexus-rewgw (review of the ptctu fix): mark_failed's /fail POST can
-        # ITSELF fail (persistent app-level 500 — the gtltb doc-3 class). If
-        # that raised through here, clear_orphan_wal and `raise first_exc`
-        # would never run: the caller would see the /fail transport error
-        # instead of the ORIGINAL failure, and the row would strand
-        # 'running' with no audit trail — ptctu's both consequences, one
-        # call downstream. The terminal-state writes are best-effort;
-        # first_exc propagating is the load-bearing part. The residual (row
-        # stays 'running' when the engine's /fail endpoint is down) is
-        # covered systemically by lcmbp's young-running-row conflict
-        # semantics: the NEXT retry is loud, never a silent skip.
-        # nexus-8vu8p: a run the engine fenced (a newer resume of the same
-        # document took the row over) owns nothing any more. Its terminal
-        # bookkeeping is refused, and it must not stamp the catalog document
-        # failed either: that is the SAME doc_id the new owner is indexing
-        # (a takeover is per document), and a late stamp would flip a
-        # document the new owner has already completed. The fence is
-        # discovered either as the stage's own exception or inside the
-        # cleanup's /fail call, hence both checks.
-        fenced = isinstance(first_exc, PipelineRunFenced)
-        if fenced:
-            _log.warning(
-                "pipeline_run_fenced",
-                content_hash=content_hash,
-                pipeline_id=first_exc.pipeline_id,
-                run_epoch=first_exc.run_epoch,
-                current_epoch=first_exc.current_epoch,
-            )
-        else:
-            fenced = _mark_failed_and_reset_wal(db, content_hash, first_exc)
-        # nexus-5xn3k.4: _fence_fail never raises, so first_exc propagation
-        # below cannot be masked by a fence-write failure. nexus-uxg4u:
-        # never touch the catalog on a dry run (doc_id is already "" in
-        # that case per the pre-flight gate above, but check explicitly
-        # for the same defense-in-depth reason as the fence-begin gate).
-        if doc_id and not dry_run and not fenced:
-            from nexus.doc_indexer import _fence_fail  # noqa: PLC0415 - deferred to avoid circular import at module load
-            _fence_fail(doc_id, str(first_exc))
-        elif doc_id and fenced:
-            # nexus-4pj54: the fenced path skips _fence_fail, which is where
-            # a failed run's deferred superseded-vector sweep is discarded.
-            # Discard it here instead: this run no longer owns the manifest,
-            # so its held candidates must never be swept.
-            from nexus.mcp_infra import discard_deferred_superseded_vectors  # noqa: PLC0415 - deferred to avoid circular import at module load
-            discard_deferred_superseded_vectors(doc_id)
-        raise first_exc
+        # ── Post-passes (after all three stages complete) ────────────────────────
 
-    # ── Post-passes (after all three stages complete) ────────────────────────
+        extraction_result = extract_future.result()
+        if extraction_stats is not None:
+            _em = getattr(extraction_result, "metadata", None) or {}
+            extraction_stats["page_count"] = int(_em.get("page_count", 0) or 0)
+            # None when the extraction predates the field (a resumed pipeline
+            # buffer written by an older version): "unverified", never "no pages".
+            _pwt = _em.get("pages_with_text")
+            extraction_stats["pages_with_text"] = list(_pwt) if _pwt is not None else None
 
-    extraction_result = extract_future.result()
-    if extraction_stats is not None:
-        _em = getattr(extraction_result, "metadata", None) or {}
-        extraction_stats["page_count"] = int(_em.get("page_count", 0) or 0)
-        # None when the extraction predates the field (a resumed pipeline
-        # buffer written by an older version): "unverified", never "no pages".
-        _pwt = _em.get("pages_with_text")
-        extraction_stats["pages_with_text"] = list(_pwt) if _pwt is not None else None
+        # Resolve collection once for all post-passes (avoids repeated API calls).
+        col = t3.get_or_create_collection(collection)
 
-    # Resolve collection once for all post-passes (avoids repeated API calls).
-    col = t3.get_or_create_collection(collection)
+        # From here until the stamp has landed, the buffer is what a retry needs: the uploader has
+        # marked the row 'completed', and a 'completed' leftover is WIPED by the next create (so a
+        # kill in the post-passes or before the stamp would cost a full re-extraction). Hand the
+        # row back as 'failed' now, so the next run resumes it and _reconcile_resumed_run sends
+        # only the stamp. The buffer is deleted after the stamp, never before.
+        _rearm_failed(db, content_hash, "upload finished — kept until the completion stamp lands")
 
-    # Track post-pass success — pipeline data preserved on failure (nexus-pfmr).
-    post_pass_ok = True
+        # Track post-pass success — pipeline data preserved on failure (nexus-pfmr).
+        post_pass_ok = True
 
-    # 1. Metadata enrichment from ExtractionResult.
-    if not _enrich_metadata_from_extraction(
-        content_hash, extraction_result, pdf_path, t3, col, collection,
-        title_override=title_override,
-    ):
-        post_pass_ok = False
-
-    # 2. table_regions post-pass.
-    table_regions = extraction_result.metadata.get("table_regions", [])
-    if table_regions:
-        table_pages: set[int] = {r["page"] for r in table_regions}
-
-        def _tag_table_page(meta: dict) -> bool:
-            if meta.get("page_number", 0) in table_pages and meta.get("chunk_type") != "table_page":
-                meta["chunk_type"] = "table_page"
-                return True
-            return False
-
-        if not _update_chunk_metadata(t3, col, collection, content_hash, _tag_table_page):
+        # 1. Metadata enrichment from ExtractionResult.
+        if not _enrich_metadata_from_extraction(
+            content_hash, extraction_result, pdf_path, t3, col, collection,
+            title_override=title_override,
+        ):
             post_pass_ok = False
 
-    # 3. Stale chunk pruning: DELETED dead code (nexus-tbkk1). This used
-    # to query T3 via nexus.doc_indexer._identity_where's source_path
-    # fallback, which RDR-102 D2 (2026-05-02) made permanently unable to
-    # match any real chunk row (make_chunk_metadata dropped source_path
-    # entirely). The real cross-document dedup/prune protection is
-    # mcp_infra._sweep_superseded_vectors (manifest-diff based), proven
-    # end-to-end at tests/integration/test_tp8yk_manifest_never_outruns_
-    # chunks.py::test_union_guard_keeps_shared_chunk_at_the_production_
-    # wiring.
-    #
-    # SIGNAL NARROWING (both reviewers, nexus-tbkk1 fix round): the
-    # deleted step's own try/except used to set post_pass_ok=False (and
-    # so preserve this run's checkpoint for retry, see below) on a T3
-    # QUERY failure during the prune window — that specific signal is
-    # gone. Narrow: passes 1/2 above already probe the same T3
-    # collection, so a genuinely degraded service is still very likely
-    # caught there; only a failure window unique to the (now-removed)
-    # prune's own query timing is silently lost.
+        # 2. table_regions post-pass.
+        table_regions = extraction_result.metadata.get("table_regions", [])
+        if table_regions:
+            table_pages: set[int] = {r["page"] for r in table_regions}
 
-    state = db.get_pipeline_state(content_hash)
-    total_chunks = state["chunks_uploaded"] if state else 0
+            def _tag_table_page(meta: dict) -> bool:
+                if meta.get("page_number", 0) in table_pages and meta.get("chunk_type") != "table_page":
+                    meta["chunk_type"] = "table_page"
+                    return True
+                return False
 
-    if post_pass_ok:
-        db.delete_pipeline_data(content_hash)
-    else:
-        _log.warning(
-            "pipeline_data_preserved",
-            content_hash=content_hash,
-            reason="one or more post-passes failed — data kept for retry",
-        )
-        # nexus-6m9zy.5 (#10): uploader_loop already called
-        # db.mark_completed() -- BEFORE any post-pass ran -- the moment
-        # chunks_uploaded caught up to chunks_created. Leaving the row at
-        # status='completed' used to make the NEXT create_pipeline() call
-        # return "skip", so pipeline_index_pdf never reached this function
-        # again; since nexus-edjmu a document-identity create RESETS a
-        # completed leftover instead (WAL wiped, answered "created"), which
-        # would discard the very checkpoint this branch preserves and
-        # re-extract everything. Move the row to 'failed' (never
-        # clear_orphan_wal: that would delete the chunk/page data too) so
-        # the next create_pipeline() call sees 'failed' -> 'resuming'. All
-        # three stages then short-circuit near-instantly on resume
-        # (everything is already uploaded), and execution reaches the
-        # post-passes again for a genuine retry.
-        try:
-            db.mark_failed(content_hash, error="post-pass failed — kept for retry")
-        except Exception:  # noqa: BLE001 — boundary catch: best-effort, mirrors the other terminal-state writes in this function
+            if not _update_chunk_metadata(t3, col, collection, content_hash, _tag_table_page):
+                post_pass_ok = False
+
+        # 3. Stale chunk pruning: DELETED dead code (nexus-tbkk1). This used
+        # to query T3 via nexus.doc_indexer._identity_where's source_path
+        # fallback, which RDR-102 D2 (2026-05-02) made permanently unable to
+        # match any real chunk row (make_chunk_metadata dropped source_path
+        # entirely). The real cross-document dedup/prune protection is
+        # mcp_infra._sweep_superseded_vectors (manifest-diff based), proven
+        # end-to-end at tests/integration/test_tp8yk_manifest_never_outruns_
+        # chunks.py::test_union_guard_keeps_shared_chunk_at_the_production_
+        # wiring.
+        #
+        # SIGNAL NARROWING (both reviewers, nexus-tbkk1 fix round): the
+        # deleted step's own try/except used to set post_pass_ok=False (and
+        # so preserve this run's checkpoint for retry, see below) on a T3
+        # QUERY failure during the prune window — that specific signal is
+        # gone. Narrow: passes 1/2 above already probe the same T3
+        # collection, so a genuinely degraded service is still very likely
+        # caught there; only a failure window unique to the (now-removed)
+        # prune's own query timing is silently lost.
+
+        state = db.get_pipeline_state(content_hash)
+        total_chunks = state["chunks_uploaded"] if state else 0
+
+        if not post_pass_ok:
+            # nexus-6m9zy.5 (#10): uploader_loop already called db.mark_completed() -- BEFORE any
+            # post-pass ran -- the moment chunks_uploaded caught up to chunks_created. A
+            # 'completed' leftover is wiped by the next create_pipeline() (nexus-edjmu), which
+            # would discard the very checkpoint this branch preserves. The row was handed back as
+            # 'failed' above (never clear_orphan_wal: that would delete the chunk/page data too),
+            # so the next create sees 'failed' -> 'resuming', every stage short-circuits (all of it
+            # is uploaded) and the post-passes run again for a genuine retry.
             _log.warning(
-                "pipeline_terminal_mark_failed",
+                "pipeline_data_preserved",
                 content_hash=content_hash,
-                reason="post-pass retry re-arm",
-                exc_info=True,
+                reason="one or more post-passes failed — data kept for retry",
             )
 
-    # Catalog hook: register PDF in catalog (opt-in, graceful absence)
-    # 2026-08-19: this used to read ``metadata["title"]`` / ``["author"]`` —
-    # keys no extractor writes (``docling_title``/``pdf_title``/``pdf_author``
-    # are the real ones) — so every streamed PDF registered as its filename
-    # stem with no author. One shared chain for all PDF title resolution.
-    #
-    # nexus-uxg4u: never touch the catalog on a dry run — this hook
-    # (unlike the fence calls above) writes unconditionally regardless of
-    # *doc_id*, so it needs its own explicit gate, not just an empty
-    # *doc_id* check.
-    if not dry_run:
-        from nexus.indexer_utils import resolve_pdf_title  # noqa: PLC0415 - circular-dep avoidance (nexus.indexer_utils)
-        _meta = getattr(extraction_result, "metadata", None) or {}
-        title = title_override or resolve_pdf_title(_meta, pdf_path, getattr(extraction_result, "text", None))
-        author = str(_meta.get("pdf_author") or _meta.get("author") or "")
-        # Extract year from pdf_creation_date or explicit year field
-        year_raw = 0
-        if _meta:
-            year_raw = _meta.get("year", 0)
-            if not year_raw:
-                creation_date = _meta.get("pdf_creation_date", "")
-                if creation_date:
-                    import re as _re  # noqa: PLC0415 - branch-local; deferred to call time
-                    m = _re.search(r"(\d{4})", str(creation_date))
-                    if m:
-                        year_raw = int(m.group(1))
-        _catalog_pdf_hook(
-            pdf_path=pdf_path,
-            collection_name=collection,
-            title=title,
-            author=author,
-            year=int(year_raw) if year_raw else 0,
-            corpus=corpus,
-            chunk_count=total_chunks,
-            source_uri=source_uri,
-        )
-
-        # RDR-089 document-grain chain — once per PDF boundary at the
-        # streaming pipeline tail. content="" (PDF text streamed not
-        # retained); the hook reads source_path itself per the P0.1
-        # content-sourcing contract.
-        # nexus-tdgc: _catalog_pdf_hook ran above so the catalog entry
-        # now exists; resolve the doc_id and forward it to the document
-        # chain.
-        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 - deferred to avoid circular import at module load
-        from nexus.doc_indexer import _lookup_existing_doc_id  # noqa: PLC0415 - deferred to avoid circular import at module load
-        _cat = make_catalog_reader()
-        hooks.fire_document(
-            str(pdf_path), collection, "",
-            doc_id=_lookup_existing_doc_id(_cat, str(pdf_path), corpus),
-        )
-
-    # nexus-5xn3k.4 RUNFENCE C2: the fence tail — after every possible
-    # manifest touch (including the fire_document hook above), before
-    # returning. Gated on doc_id per the no-catalog ingest contract
-    # (nexus-uxg4u: and explicitly on dry_run).
-    if doc_id and not dry_run:
-        from nexus.doc_indexer import _fence_complete, _fence_fail  # noqa: PLC0415 - deferred to avoid circular import at module load
-        if total_chunks == 0:
-            # MUST: zero extraction is a FAILURE, never /complete(0) — a
-            # zero-chunk run would trivially satisfy the fail-closed gate
-            # (referenced=0 == chunk_count=0) and stamp 'complete' on a
-            # silently-failed extraction. No content-free exception exists
-            # for PDFs.
-            _fence_fail(doc_id, "zero chunks extracted")
-        elif post_pass_ok:
-            _fence_complete(doc_id, content_hash, total_chunks)
-        else:
-            _log.warning(
-                "index_run_complete_skipped_post_pass_failed",
-                doc_id=doc_id,
-                content_hash=content_hash,
-                reason="post-pass failed — fence stays 'indexing' for retry",
+        # Catalog hook: register PDF in catalog (opt-in, graceful absence)
+        # 2026-08-19: this used to read ``metadata["title"]`` / ``["author"]`` —
+        # keys no extractor writes (``docling_title``/``pdf_title``/``pdf_author``
+        # are the real ones) — so every streamed PDF registered as its filename
+        # stem with no author. One shared chain for all PDF title resolution.
+        #
+        # nexus-uxg4u: never touch the catalog on a dry run — this hook
+        # (unlike the fence calls above) writes unconditionally regardless of
+        # *doc_id*, so it needs its own explicit gate, not just an empty
+        # *doc_id* check.
+        if not dry_run:
+            from nexus.indexer_utils import resolve_pdf_title  # noqa: PLC0415 - circular-dep avoidance (nexus.indexer_utils)
+            _meta = getattr(extraction_result, "metadata", None) or {}
+            title = title_override or resolve_pdf_title(_meta, pdf_path, getattr(extraction_result, "text", None))
+            author = str(_meta.get("pdf_author") or _meta.get("author") or "")
+            # Extract year from pdf_creation_date or explicit year field
+            year_raw = 0
+            if _meta:
+                year_raw = _meta.get("year", 0)
+                if not year_raw:
+                    creation_date = _meta.get("pdf_creation_date", "")
+                    if creation_date:
+                        import re as _re  # noqa: PLC0415 - branch-local; deferred to call time
+                        m = _re.search(r"(\d{4})", str(creation_date))
+                        if m:
+                            year_raw = int(m.group(1))
+            _catalog_pdf_hook(
+                pdf_path=pdf_path,
+                collection_name=collection,
+                title=title,
+                author=author,
+                year=int(year_raw) if year_raw else 0,
+                corpus=corpus,
+                chunk_count=total_chunks,
+                source_uri=source_uri,
             )
 
-    return total_chunks
+            # RDR-089 document-grain chain — once per PDF boundary at the
+            # streaming pipeline tail. content="" (PDF text streamed not
+            # retained); the hook reads source_path itself per the P0.1
+            # content-sourcing contract.
+            # nexus-tdgc: _catalog_pdf_hook ran above so the catalog entry
+            # now exists; resolve the doc_id and forward it to the document
+            # chain.
+            from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 - deferred to avoid circular import at module load
+            from nexus.doc_indexer import _lookup_existing_doc_id  # noqa: PLC0415 - deferred to avoid circular import at module load
+            _cat = make_catalog_reader()
+            hooks.fire_document(
+                str(pdf_path), collection, "",
+                doc_id=_lookup_existing_doc_id(_cat, str(pdf_path), corpus),
+            )
+
+        # nexus-5xn3k.4 RUNFENCE C2: the fence tail — after every possible
+        # manifest touch (including the fire_document hook above), before
+        # returning. Gated on doc_id per the no-catalog ingest contract
+        # (nexus-uxg4u: and explicitly on dry_run).
+        if doc_id and not dry_run:
+            from nexus.doc_indexer import _fence_fail  # noqa: PLC0415 - deferred to avoid circular import at module load
+            if total_chunks == 0:
+                # MUST: zero extraction is a FAILURE, never /complete(0) — a
+                # zero-chunk run would trivially satisfy the fail-closed gate
+                # (referenced=0 == chunk_count=0) and stamp 'complete' on a
+                # silently-failed extraction. No content-free exception exists
+                # for PDFs.
+                _fence_fail(doc_id, "zero chunks extracted")
+            elif post_pass_ok:
+                from nexus.errors import IndexRunVerifyRefused  # noqa: PLC0415 - deferred: keeps the module import light
+
+                try:
+                    if run.writer is not None and run.finished:
+                        # The writer sent every request and left the run 'indexing'
+                        # (defer_completion): the post-passes above have run, so the document is
+                        # whole. A refusal propagates, as the explicit stamp's did; the writer
+                        # recorded it.
+                        run.writer.complete()
+                    elif resumed_tail:
+                        # Every chunk was written by an earlier process (a retry of a run whose
+                        # post-pass failed, or that died before its stamp: nothing was left to
+                        # upload, so no writer ran) and the document's fence proved the manifest
+                        # is that run's (_reconcile_resumed_run). Stamp it, fail-closed: an
+                        # unstamped answer or a transport failure raises and the fence stays
+                        # 'indexing'.
+                        from nexus.doc_indexer import _stamp_finished_upload  # noqa: PLC0415 - deferred to avoid circular import at module load
+                        _stamp_finished_upload(doc_id, content_hash, total_chunks)
+                    else:
+                        raise RuntimeError(
+                            f"pipeline_index_pdf: {total_chunks} chunk(s) are uploaded for "
+                            f"{content_hash[:12]} but no writer finished and the buffer is not a "
+                            "finished upload; refusing to stamp the document complete"
+                        )
+                except IndexRunVerifyRefused:
+                    # The engine says this buffer is not the document (row count or chunk
+                    # existence). Re-stamping it would be refused again for ever, so the buffer
+                    # goes and the next run extracts afresh. The fence stays 'indexing'.
+                    db.delete_pipeline_data(content_hash)
+                    raise
+                # Any other stamp failure leaves the row 'failed' and the buffer in place (above),
+                # so the next run resumes it as a tail.
+            else:
+                _log.warning(
+                    "index_run_complete_skipped_post_pass_failed",
+                    doc_id=doc_id,
+                    content_hash=content_hash,
+                    reason="post-pass failed — fence stays 'indexing' for retry",
+                )
+
+        # The buffer goes LAST, after the stamp (or where none is needed): a stamp that failed, or
+        # a kill before it, must find the buffer so the next run sends only the stamp.
+        if post_pass_ok:
+            db.delete_pipeline_data(content_hash)
+
+        return total_chunks
+    finally:
+        run.close()
 
 
 def _enrich_metadata_from_extraction(

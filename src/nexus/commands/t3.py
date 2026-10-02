@@ -6,11 +6,12 @@
 collection's source_path values, removes chunks whose on-disk source
 file is missing.
 
-``nx t3 gc`` (RDR-101 Phase 6 / nexus-r5eo) is the SOLE post-Phase-3
-emitter of ``ChunkOrphaned`` events and the SOLE post-Phase-3 path that
-deletes T3 chunks. It joins the catalog projection (alive doc_ids per
-collection) with T3 chunk metadata and removes chunks whose ``doc_id``
-is dead AND whose ``indexed_at`` predates the orphan window.
+``nx t3 gc`` (RDR-101 Phase 6 / nexus-r5eo; RDR-192 Step 8 / nexus-wbfpw.18)
+quarantines the chunks the engine's reapable predicate selects. It lists
+candidates from ``POST /v1/vectors/reapable`` (advisory) and moves them with
+the engine route ``POST /v1/vectors/gc/quarantine-orphans``, whose own
+statement carries the predicate and takes the sweep gate. It never deletes by
+chunk id.
 
 The collection mode iterates ``T3Database.list_unique_source_paths``
 plus a ``Path(p).exists()`` check; the staleness predicate is
@@ -26,10 +27,8 @@ Out of scope:
 """
 from __future__ import annotations
 
-import contextlib
 import json
 import os
-import re
 import signal
 import sys
 from datetime import UTC, datetime, timedelta
@@ -42,12 +41,6 @@ import structlog
 from nexus import config as _config
 
 _log = structlog.get_logger(__name__)
-
-#: How many chunk ids the ``t3_gc_chunks_deleted`` log event and the
-#: gc_audit row's ``details.chunk_ids_sample`` carry verbatim (nexus-fduai);
-#: the rest is a count. The row's ``chashes`` list is NOT sampled here —
-#: the engine caps it itself and keeps ``chash_count`` exact.
-_GC_AUDIT_ID_SAMPLE = 50
 
 # SIG-6 (nexus-872w): resumable backfill state file.
 # The state file is a JSON dict mapping collection name → list of doc_ids
@@ -68,43 +61,6 @@ _BACKFILL_STATE_FILE_ENV = "NEXUS_BACKFILL_STATE_FILE"
 # `_backfill_state_path` below for that).
 _BACKFILL_STATE_DEFAULT_DOC = "~/.config/nexus/backfill_state.json"
 _PROGRESS_INTERVAL = 10  # emit progress every N docs across all collections
-
-
-_DEFAULT_ORPHAN_WINDOW = "30d"
-_WINDOW_PATTERN = re.compile(r"^\s*(\d+)\s*([smhdw])\s*$", re.IGNORECASE)
-_WINDOW_UNIT_SECONDS = {
-    "s": 1,
-    "m": 60,
-    "h": 3600,
-    "d": 86400,
-    "w": 604800,
-}
-
-
-def _parse_orphan_window(spec: str) -> timedelta:
-    """Parse ``"30d"`` / ``"24h"`` / ``"2w"`` into a :class:`timedelta`.
-
-    Supports s/m/h/d/w suffixes. A bare integer is rejected: operators
-    must be explicit about the unit so a typo cannot silently mean
-    ``30 seconds`` instead of ``30 days``. Zero (``"0d"``) is rejected:
-    a zero window means every chunk older than "now" is eligible,
-    which is rarely intentional and is dangerous when paired with
-    ``--no-dry-run --yes``.
-    """
-    match = _WINDOW_PATTERN.match(spec)
-    if not match:
-        raise click.BadParameter(
-            f"--orphan-window must be e.g. '30d' / '12h' / '2w', got {spec!r}"
-        )
-    n = int(match.group(1))
-    if n <= 0:
-        raise click.BadParameter(
-            f"--orphan-window must be positive, got {spec!r}. "
-            f"A zero or negative window would treat every orphaned chunk "
-            f"as immediately eligible for deletion."
-        )
-    unit = match.group(2).lower()
-    return timedelta(seconds=n * _WINDOW_UNIT_SECONDS[unit])
 
 
 def _backfill_state_path() -> Path:
@@ -152,8 +108,8 @@ def _make_catalog():
 
     Without the init gate, running ``nx t3 gc`` on a fresh install
     either crashes with an opaque traceback inside ``Catalog.__init__``
-    or, worse, silently produces an empty alive-set so every chunk is
-    treated as orphan (catastrophic when paired with --no-dry-run --yes).
+    or, worse, reads an empty catalog as having nothing to protect (the
+    index-state breaker and the unknown-collection guard both read it).
 
     Patched in tests for isolation.
     """
@@ -165,14 +121,6 @@ def _make_catalog():
             "Catalog is empty. Index or store documents before 'nx t3 gc' (nx index repo / nx store put)."
         )
     return cat
-
-
-def _make_catalog_writer():
-    """Open the write-only catalog proxy ``nx t3 gc`` reports its audit row
-    through (nexus-fduai). Patched in tests for isolation."""
-    from nexus.catalog.factory import make_catalog_writer  # noqa: PLC0415 — command-local import deferred to avoid CLI startup cost (nexus.catalog.factory)
-
-    return make_catalog_writer()
 
 
 def _make_t3_for_backfill():
@@ -258,40 +206,180 @@ def prune_stale_cmd(collection: str, dry_run: bool, confirm: bool) -> None:
     )
 
 
+#: Page size of the advisory reapable listing (the engine clamps to 300, the AGENTS.md paging
+#: convention). A module constant so a test can force several pages without 300+ real rows.
+_GC_LISTING_PAGE = 300
+
+_ORPHAN_WINDOW_REMOVED = (
+    "--orphan-window was removed (nexus-wbfpw.18). nx t3 gc now takes its candidates from the "
+    "engine's reapable machinery, whose grace window (30 days, counted from when the chunk last "
+    "lost an owner) is fixed in the engine and not tunable from a client, so there is no window "
+    "to pass. Run the verb without the flag; `nx store list --reapable -c COLLECTION` shows what "
+    "it would take."
+)
+
+_GC_NO_ROUTE_MESSAGE = (
+    "The connected engine predates the reapable routes (POST /v1/vectors/reapable and the "
+    "reapable-aware gc_quarantine_orphans; RDR-192 Step 8, beads nexus-wbfpw.16 and "
+    "nexus-wbfpw.17), so nx t3 gc cannot run. Upgrade to an engine tag that carries them "
+    "(compare the deployed engine's own version against REQUIRED_ENGINE_VERSION in "
+    "src/nexus/engine_version.py)."
+)
+
+
+def _refuse_orphan_window(ctx: click.Context, param: click.Parameter, value: str | None) -> None:
+    """Callback for the retired ``--orphan-window`` option: any use is a refusal that names the
+    removal, so a script still passing it fails loudly instead of silently ignoring a window it
+    believes it is setting."""
+    if value is not None:
+        raise click.UsageError(_ORPHAN_WINDOW_REMOVED)
+
+
+#: The census buckets the verb refuses on when above zero (RDR-192 R8): ``legacy-unmanifested`` is a
+#: live legacy note the route would take once old; ``unclassified`` is a row the census itself cannot
+#: classify, so the reapable verdict for it is not understood. The reaper refuses on both.
+_GC_CENSUS_BLOCKERS = ("legacy-unmanifested", "unclassified")
+
+
+def _census_blocker_totals(census: dict, collection: str) -> dict[str, int]:
+    """The blocking buckets' totals from one census response. A response missing a blocking bucket
+    cannot be read as zero: refuse to act without it."""
+    totals = census.get("totals") or {}
+    missing = [b for b in _GC_CENSUS_BLOCKERS if totals.get(b) is None]
+    if missing:
+        raise click.ClickException(
+            f"The manifest-less census for {collection!r} carried no {', '.join(missing)} total; "
+            f"refusing to act without it (RDR-192 R8)."
+        )
+    return {b: int(totals[b]) for b in _GC_CENSUS_BLOCKERS}
+
+
+def _census_scope_total(census: dict, collection: str) -> int:
+    """``scope_chunk_total`` from one census response: every chunk the collection holds. It is the
+    floor's denominator and half of the empty-manifest guard, so a response without it cannot be read
+    as 0 (that would switch both off): refuse to act without it."""
+    raw = census.get("scope_chunk_total")
+    if raw is None:
+        raise click.ClickException(
+            f"The manifest-less census for {collection!r} carried no scope_chunk_total; refusing to "
+            f"act without it, since the fraction floor and the empty-manifest guard both read it "
+            f"(RDR-192 R8)."
+        )
+    return int(raw)
+
+
+def _census_blocker_reasons(collection: str, blockers: dict[str, int], *, prior: bool = False) -> list[str]:
+    """One refusal reason per blocking bucket above zero. *prior* words them for the re-read made
+    immediately before the move ("now reads ...; it read 0 when this run began")."""
+    reasons: list[str] = []
+    lead = (
+        f"the manifest-less census for '{collection}' now reads"
+        if prior else f"the manifest-less census for '{collection}' reads"
+    )
+    tail = "; it read 0 when this run began" if prior else ""
+    if blockers["legacy-unmanifested"]:
+        reasons.append(
+            f"{lead} legacy-unmanifested = {blockers['legacy-unmanifested']}, not 0{tail}. A live "
+            f"legacy note with no manifest row reads reapable once old, and the engine route takes "
+            f"no exclusion list, so moving this collection could quarantine a live note. Inspect "
+            f"with 'nx t3 census-manifest-less -c {collection}', re-put those notes (so each has a "
+            f"manifest row), then re-run (RDR-192 R8)."
+        )
+    if blockers["unclassified"]:
+        reasons.append(
+            f"{lead} unclassified = {blockers['unclassified']}, not 0{tail}. A row the census "
+            f"cannot classify is a collection state nobody has understood, so the reapable "
+            f"verdict on it cannot be trusted; the reaper refuses on it too. Inspect with "
+            f"'nx t3 census-manifest-less -c {collection}' (it exits 1 on unclassified) and "
+            f"resolve the rows, then re-run (RDR-192 R8)."
+        )
+    return reasons
+
+
+def _expire_client_quarantine(t3_db, collection: str, qname: str, *, moved: int) -> None:
+    """The client expiry ``nx t3 gc`` runs after its own move (and on a run with nothing to move), as
+    ``nx index repo`` runs it (``indexer._gc_serverside``): rows in the quarantine sibling past the
+    client cutoff (``NX_GC_QUARANTINE_DAYS``) that the engine's reaper did not tag, behind the same
+    ``NX_GC_FLOOR_FRACTION`` floor (``NX_GC_FORCE=1`` overrides). The verb runs it so a collection no
+    repo index sweeps (every ``knowledge__*``) still expires its own quarantine; without it nothing
+    would ever expire what this verb moved. A failure is exit 1 after saying the move stands."""
+    from nexus.catalog.chunk_quarantine import (  # noqa: PLC0415 — command-local import (nexus.catalog.chunk_quarantine)
+        expire_quarantine_serverside,
+        quarantine_days,
+    )
+    from nexus.db.http_vector_client import VectorServiceError  # noqa: PLC0415 — command-local import (nexus.db.http_vector_client)
+    from nexus.indexer import _GC_FLOOR_MIN_CHUNKS, _gc_floor_fraction  # noqa: PLC0415 — command-local import (nexus.indexer is heavy)
+
+    force = os.environ.get("NX_GC_FORCE", "") == "1"
+    cutoff = (datetime.now(UTC) - timedelta(days=quarantine_days())).strftime("%Y-%m-%dT%H:%M:%SZ")
+    try:
+        expiry = expire_quarantine_serverside(
+            t3_db, qname, collection, cutoff,
+            floor_fraction=_gc_floor_fraction(), floor_min_chunks=_GC_FLOOR_MIN_CHUNKS, force=force,
+        )
+    except VectorServiceError as exc:
+        click.echo(
+            f"\nSummary: {f'the move succeeded ({moved} chunk(s) quarantined) but' if moved else 'nothing needed moving, but'}"
+            f" the client expiry of {qname} FAILED: {exc}. Nothing was expired; re-run this verb to retry it.",
+            err=True,
+        )
+        raise click.exceptions.Exit(1) from exc
+    if expiry is not None:
+        expired, refused = expiry
+        # The engine's `refused` is two things: chunks the origin collection's manifest references
+        # again (kept always; FORCE does not reach them) plus, when the floor fires, the whole eligible
+        # set (the engine then reports expired = 0). So expired > 0 means the floor did not fire and
+        # every refusal is a manifest keep; expired == 0 cannot tell the two apart.
+        if not refused:
+            why = ""
+        elif expired:
+            why = " (kept: the manifest references them again; NX_GC_FORCE=1 does not change that)"
+        else:
+            why = (
+                " (kept: the manifest references them again, or the NX_GC_FLOOR_FRACTION floor held the "
+                "whole expiry; NX_GC_FORCE=1 overrides only the floor)"
+            )
+        click.echo(
+            f"  Client expiry of {qname} (older than {quarantine_days()} day(s), rows the engine's "
+            f"reaper tagged excluded): {expired} expired, {refused} refused{why}."
+        )
+
+
 @t3.command("gc")
 @click.option(
     "--collection",
     "-c",
     required=True,
-    help="Collection to GC. Required (orphan diff is per-collection).",
+    help="Collection to GC. Required (the engine's reapable predicate is per-collection).",
 )
 @click.option(
     "--orphan-window",
-    default=_DEFAULT_ORPHAN_WINDOW,
-    show_default=True,
-    help="Grace period before an orphaned chunk becomes eligible for "
-    "deletion. Format: e.g. '30d', '12h', '2w'. The default protects "
-    "against transient orphans during a re-index.",
+    default=None,
+    hidden=True,
+    expose_value=False,
+    callback=_refuse_orphan_window,
+    help="REMOVED (nexus-wbfpw.18). The grace window is fixed in the engine.",
 )
 @click.option(
     "--dry-run/--no-dry-run",
     default=True,
-    help="Report-only (default). Use --no-dry-run to actually delete.",
+    help="Report-only (default). Use --no-dry-run to actually quarantine.",
 )
 @click.option(
     "--yes",
     is_flag=True,
     default=False,
-    help="Required alongside --no-dry-run to actually delete chunks. "
+    help="Required alongside --no-dry-run to actually move chunks. "
     "Without --yes, the command falls back to report-only.",
 )
 @click.option(
     "--allow-empty-manifest-set",
     is_flag=True,
     default=False,
-    help="Override the empty-alive-set refusal (nexus-jqrtp). DANGEROUS: "
-    "only pass this once you've confirmed the collection really is fully "
-    "orphaned, not a fresh/mis-scoped tenant or an unbackfilled manifest.",
+    help="Override the empty-manifest-set (nexus-jqrtp) and unknown-collection "
+    "(nexus-v1zdu) refusals. DANGEROUS: only pass this once you've confirmed "
+    "the collection really is fully orphaned, not a fresh/mis-scoped tenant, an "
+    "unbackfilled manifest or a mistyped name.",
 )
 @click.option(
     "--allow-incomplete-index-state",
@@ -305,108 +393,109 @@ def prune_stale_cmd(collection: str, dry_run: bool, confirm: bool) -> None:
 )
 def gc_cmd(
     collection: str,
-    orphan_window: str,
     dry_run: bool,
     yes: bool,
     allow_empty_manifest_set: bool,
     allow_incomplete_index_state: bool,
 ) -> None:
-    """Garbage-collect orphaned T3 chunks via the catalog manifest (RDR-108 Phase 4).
+    """Quarantine T3 chunks the engine's reapable predicate selects (RDR-192 Step 8).
 
     \b
-    A chunk is an orphan when:
-      - its full ``meta.chunk_text_hash`` is NOT referenced by any
-        manifest entry in the catalog ``document_chunks`` table for
-        ``--collection``, AND
-      - its ``indexed_at`` predates ``--orphan-window`` (default 30d).
+    A chunk is reapable when the ENGINE says so (``nexus.chunk_is_reapable``):
+    no manifest row in this collection names it in any owner state (a
+    tombstoned owner still counts, so ``nx catalog purge-trash`` owns those),
+    and it has been ownerless for the engine's 30 day grace. Aging runs on the
+    later of ``last_written_at`` and the moment the chunk last lost an owner
+    row (recorded in the side table ``nexus.chunk_orphaned_at``), NOT on
+    ``indexed_at``; a chunk with no ``indexed_at`` is therefore a candidate once
+    it is old enough.
 
     \b
-    The manifest path matches what ``indexer._prune_deleted_files``
-    (run at the end of ``nx index``) does. Both paths are now
-    semantically equivalent; this CLI is the operator-driven one with
-    explicit dry-run + --yes confirmation, plus ``ChunkOrphaned``
-    event emission for audit trail.
+    The verb MOVES, it does not delete. The act is the engine route
+    ``POST /v1/vectors/gc/quarantine-orphans`` (``gc_quarantine_orphans``, the
+    BOUNDED form: 2000 rows per call, looped until ``remaining`` is 0): its
+    own statement carries the predicate, takes the exclusive per-collection
+    sweep gate, and moves the rows to the ``quarantine-*`` sibling. A client
+    that re-writes a chunk after the listing wins, because the predicate is
+    evaluated against the rows the statement actually locks. The route is
+    collection-wide: it takes no chunk list, no exclusion list and no window.
+    The engine records each batch in ``gc_audit`` (actor ``engine``); this verb
+    writes no audit row of its own. The listing printed here is advisory (a
+    lock-free snapshot, paged by keyset) and is what the route would take at
+    that instant.
 
     \b
-    TOMBSTONE PROTECTION (nexus-dkymw, Sam's second 2026-09-07 ruling,
-    superseding nexus-mqd6t's original immediate-exclusion filter): the
-    "referenced by any manifest entry" set above is read from the
-    catalog's ``chashesForCollection`` alive-set, which now includes a
-    tombstoned-but-not-yet-purged document's chashes, not just live
-    documents'. Deleting a document with ``nx catalog delete`` does NOT
-    make its chunks orphan-eligible here — only ``nx catalog purge-trash``
-    physically reclaiming the row does. This keeps ``nx catalog restore``
-    honest: without it, this command's own ``--orphan-window`` clock
-    (independent of purge-trash's ``--older-than-days``) could reap a
-    just-tombstoned document's chunks inside the restore window, and
-    restore would resurrect an empty shell.
+    The verb frees no storage by itself: the moved chunks sit in
+    ``quarantine-*`` until they are expired, and each side expires only what it
+    moved. After its own move this verb runs the client expiry (as
+    ``nx index repo`` does for a repo's code, docs and rdr collections): rows in
+    the quarantine sibling older than ``NX_GC_QUARANTINE_DAYS`` (default 14) that
+    the engine's reaper did not tag are hard-deleted, behind the same
+    ``NX_GC_FLOOR_FRACTION`` floor (``NX_GC_FORCE=1`` overrides). That is how a
+    ``knowledge__*`` quarantine ever expires, since no repo index sweeps it. A
+    chunk the engine's reaper moved (tagged ``quarantined_by``) is expired by the
+    engine alone, on its own retention. A chunk whose document is re-registered
+    is restored automatically by the ``nx index repo`` run. The operator restore
+    verb ``nx t3 quarantine restore`` (nexus-wbfpw.49; on develop, its engine route
+    in the same engine tag as the reaper) refuses
+    this verb's ``gc_quarantine_orphans`` audit rows (they list a sample only), so
+    restore a chunk this verb moved with its ``--quarantined-since`` /
+    ``--quarantined-before`` window or explicit ``--chash`` values. Each engine batch commits on its own, so a run that stops part
+    way leaves its earlier batches moved and re-running it is safe.
 
     \b
-    Every run (dry-run and ``--no-dry-run --yes`` alike, nexus-zewg3)
-    reports "Protected by pending tombstones: N chunk(s)" — the count of
-    chunks in ``--collection`` kept alive ONLY by a tombstone, distinct
-    from chunks a live document still references. The engine computes
-    this count itself (``CatalogRepository.tombstoneProtectedChunkCount``,
-    the same anti-join ``nexus.purge_trash``'s own chunk sweep uses); an
-    engine that predates the field reports the line as unavailable rather
-    than a confident zero. This is a distinct signal from the note-shaped
-    and RUNFENCE protections below: only ``nx catalog purge-trash``
-    reclaims this class, never another ``nx t3 gc`` run.
+    ``--orphan-window`` was REMOVED: the engine exposes no tunable grace, so a
+    script that still passes it is refused with a message naming the removal.
 
     \b
-    Per RF-101-3, ``nx t3 gc`` is the SOLE emitter of ``ChunkOrphaned``
-    events. The strict order on each candidate is:
-
-        1. Append ``ChunkOrphaned(chunk_id, reason)`` to the event log.
-        2. Call ``T3Database.delete_by_chunk_ids`` for that chunk.
+    Refusals (a ``--dry-run`` says which a real run would hit, and exits 1 when
+    it names one, so ``nx t3 gc ... --dry-run && nx t3 gc ... --no-dry-run --yes``
+    stops where the real run would):
+      - RUNFENCE (nexus-g6k6b): any document in the collection not
+        ``index_state='complete'`` (an in-flight or fence-failed run). Override:
+        ``--allow-incomplete-index-state``.
+      - Manifest-less census (RDR-192 R8): ``POST /v1/vectors/manifest-less-census``
+        is called at the start of every run and again right before the move, and
+        ``legacy-unmanifested`` AND ``unclassified`` must both read 0 (as the
+        reaper requires). A live legacy note with no manifest row reads
+        reapable once old, and the route has no exclusion list, so the verb
+        refuses rather than move it. Clear the bucket (re-put the notes, see
+        ``nx t3 census-manifest-less``) first.
+      - Fraction floor: a pass of at least 100 reapable chunks that is more than
+        ``NX_GC_FLOOR_FRACTION`` (default 0.25) of the collection's chunks is the
+        manifest-gap misclassification shape (the engine's own reading: the 100
+        minimum counts the reapable set, the fraction divides by every stored
+        chunk). Override: ``NX_GC_FORCE=1``. The
+        floor is this verb's own for now (nexus-wbfpw.52 tracks one on the route): the route this verb moves with
+        carries none (the engine reaper's floor never reaches it, and
+        ``indexer._prune_deleted_files`` calls the same route with no floor at
+        all). Because it is checked on the advisory listing, the bounded drain
+        can move more than the floor admits if chunks age in mid-run.
+      - Empty manifest set (nexus-jqrtp): the collection holds chunks but none
+        has a manifest row in it (read off the census: stored chunks minus the
+        manifest-less buckets is 0), the shape of a fresh or mis-scoped tenant
+        or an unbackfilled manifest. Override: ``--allow-empty-manifest-set``.
+      - Unknown collection (nexus-v1zdu): a name the catalog does not know.
+        Override: ``--allow-empty-manifest-set``.
 
     \b
-    A crash between (1) and (2) leaves the log consistent with T3 (event
-    present + delete failed): the next ``nx t3 gc`` run idempotently
-    retries the delete. The opposite ordering would leave T3 ahead of
-    the log (delete succeeded + crash before event), violating
-    replay-equality.
-
-    \b
-    Chunks missing ``chunk_text_hash`` (pre-RDR-053 relics) are
-    UNDECIDABLE here and skipped with a warning: re-index the source
-    or run ``nx t3 reidentify`` to populate the field. Same carve-out
-    as the indexer's manifest GC.
-
-    \b
-    NOTE (RDR-108 Phase 4): post-Phase-3 chunks have no ``doc_id`` in
-    metadata and so are skipped here. The manifest-based GC inside
-    ``nx index`` (``indexer._prune_deleted_files``) handles them.
-    Reconciliation of the two paths is tracked in nexus-e5aw.
-
-    \b
-    RUNFENCE precondition (nexus-g6k6b): if any document registered
-    under ``--collection`` is not ``index_state='complete'`` (actively
-    ``'indexing'``, fenced ``'failed'``, or explicitly unresolved/NULL —
-    excluding manifest-less notes, which are separately and always
-    protected), a ``--no-dry-run --yes`` run REFUSES rather than risk
-    deleting chunks an in-flight or fence-damaged reindex has not yet
-    re-manifested. Pass ``--allow-incomplete-index-state`` once you have
-    confirmed no reindex is concurrently running.
+    Needs an engine that carries the reapable routes (RDR-192 Step 8); against
+    an older engine the verb refuses with a message saying so.
 
     \b
     Examples:
       nx t3 gc -c knowledge__delos --dry-run                # report only
-      nx t3 gc -c rdr__nexus-571b8edd --no-dry-run --yes    # actually GC
-      nx t3 gc -c code__nexus --orphan-window 7d --dry-run  # tighter window
+      nx t3 gc -c rdr__nexus-571b8edd --no-dry-run --yes    # quarantine
     """
     from nexus.db import make_t3  # noqa: PLC0415 — command-local import deferred to avoid CLI startup cost (nexus.db)
+    from nexus.db.http_vector_client import VectorServiceError  # noqa: PLC0415 — command-local import deferred to avoid CLI startup cost (nexus.db.http_vector_client)
 
-    window = _parse_orphan_window(orphan_window)
-    cutoff = datetime.now(UTC) - window
-
-    will_delete = (not dry_run) and yes
+    will_act = (not dry_run) and yes
     if (not dry_run) and not yes:
         click.echo(
             "--no-dry-run alone is treated as report-only. "
-            "Add --yes to actually delete chunks."
+            "Add --yes to actually quarantine chunks."
         )
-        will_delete = False
 
     t3_db = make_t3()
     cat = _make_catalog()
@@ -426,85 +515,24 @@ def gc_cmd(
             "the names t3 gc takes."
         )
 
-    try:
-        # Manifest path (RDR-108 nexus-e5aw): the catalog
-        # document_chunks table is the authoritative source of truth
-        # for which chashes belong to which collection. A chunk is
-        # orphan when its content hash is not referenced by any
-        # manifest row for this collection's documents. Same SQL the
-        # indexer's _prune_deleted_files uses.
-        #
-        # nexus-dkymw (Sam's second 2026-09-07 ruling, superseding
-        # nexus-mqd6t's original DELETED_AT.isNull() filter for this one
-        # read): "referenced" here includes a tombstoned-but-not-yet-
-        # purged document's chashes, not just live documents' -- the
-        # alive-set protects them until nx catalog purge-trash physically
-        # reclaims the row, so this --orphan-window clock cannot reap a
-        # just-tombstoned document's chunks inside nx catalog restore's
-        # recovery window.
-        #
-        # nexus-zewg3: of `referenced`, how many chashes are held alive
-        # ONLY by a pending tombstone (never by a live document) -- the
-        # engine computes this with the SAME anti-join
-        # nexus.purge_trash's own chunk sweep uses
-        # (CatalogRepository.tombstoneProtectedChunkCount), in the SAME
-        # round trip as `referenced` itself. `None` means an engine older
-        # than the one that shipped this field -- see the report line
-        # below, which never prints a confident 0 for that case.
-        referenced, tombstone_protected_count = (
-            cat.chashes_for_collection_with_tombstone_protected(collection)
-        )
-    except Exception as exc:  # noqa: BLE001 — boundary catch; logged then re-raised as a domain error
-        click.echo(f"Failed to read catalog manifest: {exc}")
-        raise click.exceptions.Exit(1)
-
-    # nexus-39upx hazard 2 (RDR-145) + nexus-g6k6b (RUNFENCE precondition):
-    # chashes_for_collection only sees chashes with a manifest row. A
-    # legacy store_put / nx store put NOTE (stored before nexus-b6enc) may
-    # have none — reads hide such a chunk since RDR-192 Step 5, but this
-    # deleting sweep keeps the notes guard until RDR-192 Step 11 — so
-    # a note's chash is indistinguishable from a chash that fell out of a
-    # live document's manifest via re-index; both simply read "not
-    # referenced" above. Separately, Hal's 2026-08-02 comment on this bead
-    # is a BINDING requirement: the corpus-wide sweep must filter on
-    # index_state='complete', since sweeping a document that is mid-index
-    # (or fence-failed) could delete chunks an in-flight run has already
-    # written but has not yet manifested.
-    #
-    # ONE fetch (catalog_documents_for_collection) serves BOTH guards.
-    # Deliberately FAILS LOUD on lookup failure, not fail-open: this is
-    # the operator-driven --yes path, and an unverifiable note/index-state
-    # set must refuse the run rather than risk deleting live content.
+    # nexus-g6k6b (RUNFENCE precondition): one catalog read of the collection's documents, for the
+    # index_state circuit breaker. Deliberately FAILS LOUD on lookup failure, not fail-open: an
+    # unverifiable index-run state must refuse the run rather than risk moving chunks an
+    # in-flight reindex has written but not yet manifested.
     from nexus.indexer_utils import (  # noqa: PLC0415 — command-local import deferred to avoid CLI startup cost (nexus.indexer_utils)
         catalog_documents_for_collection,
-        live_note_chashes,
         non_complete_documents,
     )
 
     try:
         collection_documents = catalog_documents_for_collection(cat, collection)
-    except Exception as exc:  # noqa: BLE001 — boundary catch; refuses the run rather than risk deleting live content
+    except Exception as exc:  # noqa: BLE001 — boundary catch; refuses the run rather than risk moving live content
         click.echo(
-            f"Failed to verify manifest-less note protection / index-run "
-            f"state for {collection!r}: {exc}. Refusing to compute orphan "
-            f"candidates without it — a store_put/nx store put note's "
-            f"chash is indistinguishable from a genuine re-index orphan "
-            f"without this check (nexus-39upx hazard 2 / nexus-g6k6b)."
+            f"Failed to verify index-run state for {collection!r}: {exc}. Refusing to compute "
+            f"candidates without it — an in-flight or fence-failed document's chunks are not "
+            f"garbage (nexus-g6k6b)."
         )
         raise click.exceptions.Exit(1)
-
-    note_chashes = live_note_chashes(collection_documents)
-    # nexus-sis0m.3: count only the note chunks the manifest does not
-    # already reference; live_note_chashes returns every note-shaped
-    # document's chunk, and the label said "manifest-less" for all of them
-    # (shakeout 7.64.1 F11: census-manifest-less read 0 while this read N).
-    manifest_less_notes = note_chashes - referenced
-    if manifest_less_notes:
-        click.echo(
-            f"  protecting {len(manifest_less_notes)} manifest-less note "
-            f"chunk(s) from orphan classification (RDR-145)"
-        )
-    referenced = referenced | note_chashes
 
     incomplete_docs = non_complete_documents(collection_documents)
     if incomplete_docs:
@@ -518,283 +546,251 @@ def gc_cmd(
             f"--allow-incomplete-index-state (nexus-g6k6b)"
         )
 
-    candidates: list[tuple[str, str]] = []  # (chunk_id, chash)
-    skipped_no_chash = 0
-    skipped_no_indexed_at = 0
-    skipped_within_window = 0
-
+    # RDR-192 R8 (nexus-wbfpw.18): the census is read on EVERY run, immediately before acting. A
+    # live legacy note (no manifest row) reads reapable once old and the route has no exclusion
+    # list, so legacy-unmanifested must be 0 or the verb refuses. scope_chunk_total (every chunk the
+    # collection holds, any manifest state) is the floor's denominator, from the same round trip.
+    census_fn = getattr(t3_db, "manifest_less_census", None)
+    reapable_fn = getattr(t3_db, "reapable_chunks", None)
+    if census_fn is None or reapable_fn is None:
+        raise click.ClickException(
+            "This verb needs the engine-backed T3 handle (nexus.db.make_t3()); this one carries no "
+            "reapable routes."
+        )
     try:
-        chunks = list(t3_db.list_chunks_with_metadata(
-            collection, fields=("chunk_text_hash", "indexed_at"),
-        ))
-    except Exception as exc:  # noqa: BLE001 — boundary catch; logged then re-raised as a domain error
-        click.echo(f"Failed to list chunks for {collection}: {exc}")
-        raise click.exceptions.Exit(1)
+        census = census_fn(collection, limit=1)
+    except VectorServiceError as exc:
+        if exc.code == 404:
+            raise click.ClickException(_GC_NO_ROUTE_MESSAGE) from exc
+        raise click.ClickException(
+            f"Failed to read the manifest-less census for {collection!r}: {exc}"
+        ) from exc
+    census_blockers = _census_blocker_totals(census, collection)
+    scope_chunk_total = _census_scope_total(census, collection)
+    # Chunks carrying an own-collection manifest row = everything the collection holds minus the five
+    # manifest-less buckets (the census classifies exactly the chunks with no such row).
+    manifest_less_total = sum(int(n) for n in (census.get("totals") or {}).values())
+    owned_chunks = scope_chunk_total - manifest_less_total
 
+    # The advisory listing: what POST /v1/vectors/reapable (grace absent = the engine default,
+    # the same grace gc_quarantine_orphans uses) would hand the route right now, paged by keyset.
+    try:
+        candidates = list(reapable_fn(collection, page_limit=_GC_LISTING_PAGE))
+    except VectorServiceError as exc:
+        if exc.code == 404:
+            raise click.ClickException(_GC_NO_ROUTE_MESSAGE) from exc
+        raise click.ClickException(
+            f"Failed to list reapable chunks for {collection!r}: {exc}"
+        ) from exc
 
-    for chunk_id, meta in chunks:
-        chash = meta.get("chunk_text_hash") or ""  # RDR-180: full digest — the truncation was the quarantine-class bug
-        if not chash:
-            # Pre-RDR-053 relic: no content hash to compare against
-            # the manifest. Skip with operator-visible count. Same
-            # carve-out semantics as indexer._prune_deleted_files.
-            skipped_no_chash += 1
-            continue
-        if chash in referenced:
-            continue  # live: manifest still references this chunk
-        indexed_at = meta.get("indexed_at", "")
-        if not indexed_at:
-            skipped_no_indexed_at += 1
-            continue
-        try:
-            indexed_dt = datetime.fromisoformat(indexed_at)
-        except ValueError:
-            skipped_no_indexed_at += 1
-            continue
-        if indexed_dt > cutoff:
-            skipped_within_window += 1
-            continue
-        candidates.append((chunk_id, chash))
-
-    click.echo(
-        f"{collection}: {len(candidates)} orphan chunk(s) eligible "
-        f"(window={orphan_window})"
-    )
-    if skipped_no_chash:
-        click.echo(
-            f"  skipped {skipped_no_chash} chunk(s) with no chunk_text_hash "
-            f"(pre-RDR-053 relics; re-index source or run 'nx t3 reidentify')"
-        )
-    if skipped_no_indexed_at:
-        click.echo(
-            f"  skipped {skipped_no_indexed_at} chunk(s) with no/bad indexed_at"
-        )
-    if skipped_within_window:
-        click.echo(
-            f"  skipped {skipped_within_window} chunk(s) inside the orphan window"
-        )
-
-    # nexus-zewg3: always printed, dry-run and --no-dry-run --yes alike --
-    # a chash referenced ONLY by a pending tombstone is in `referenced`
-    # exactly like a live-referenced one (nexus-dkymw dropped that
-    # distinction from chashes_for_collection), so t3 gc will never
-    # reclaim it on its own no matter how many times it runs; only
-    # nx catalog purge-trash does, once the tombstone ages past its own
-    # --older-than-days window. An engine that cannot answer the question
-    # (tombstone_protected_count is None) says so honestly instead of
-    # printing a confident zero.
-    if tombstone_protected_count is None:
-        click.echo("  Protected by pending tombstones: unavailable on this engine")
-    else:
-        click.echo(
-            f"  Protected by pending tombstones: {tombstone_protected_count} "
-            f"chunk(s) (reclaimed by 'nx catalog purge-trash' once past its "
-            f"--older-than-days window, never by t3 gc)"
-        )
-
-    for chunk_id, chash in candidates:
-        click.echo(f"  {chunk_id}  ->  chash={chash}")
+    click.echo(f"{collection}: {len(candidates)} reapable chunk(s) (of {scope_chunk_total} stored)")
+    if not will_act:
+        for row in candidates:
+            title = f"  {row['title']}" if row.get("title") else ""
+            click.echo(f"  chash={row['chash']}{title}")
 
     if not candidates:
-        click.echo("\nSummary: 0 orphan(s); nothing to do.")
+        click.echo("\nSummary: 0 reapable chunk(s); nothing to do.")
+        if will_act:
+            # Nothing to move still leaves what an earlier run moved: expire it on schedule.
+            from nexus.catalog.chunk_quarantine import quarantine_collection_name  # noqa: PLC0415 — command-local import (nexus.catalog.chunk_quarantine)
+
+            _expire_client_quarantine(t3_db, collection, quarantine_collection_name(collection), moved=0)
         return
 
-    if not will_delete:
-        click.echo(
-            f"\nSummary: would delete {len(candidates)} chunk(s) from {collection}."
-        )
-        return
+    # The refusals. Each is a reason a --no-dry-run --yes run stops; a dry run prints them as
+    # warnings so an operator planning a real run sees them coming.
+    from nexus.indexer import _GC_FLOOR_MIN_CHUNKS, _gc_floor_fraction  # noqa: PLC0415 — command-local import (nexus.indexer is heavy)
 
-    # nexus-v1zdu (audit residual #1, HIGH): catalog_documents_for_collection
-    # does NOT distinguish "collection known, zero documents" from
-    # "collection unknown" -- an unregistered/typo'd COLLECTION reads as
-    # zero documents, which reads as "nothing to protect" for the
-    # manifest-less-note (RDR-145) and RUNFENCE (nexus-g6k6b) guards above,
-    # exactly backwards for this operator-driven --yes path. Checked HERE
-    # (last line of defence before deletion, same placement as nexus-jqrtp
-    # below) rather than unconditionally early, so a --dry-run / report-only
-    # invocation (which never deletes anything) is not refused over a
-    # collection that merely lacks a `collections` registry row -- the same
-    # un-backfilled-but-real state nexus-jqrtp's own guard already tolerates
-    # via --allow-empty-manifest-set, which is why this check shares that
-    # SAME override rather than minting a second flag for the same risk
-    # category (an unverifiable/empty catalog state proceeding to delete).
-    # INDEPENDENT of the nexus-jqrtp guard's own condition otherwise: this
-    # one fires off `collection_documents`, not `referenced`, so a divergent
-    # or stale referenced-chash read that happens to be non-empty does not
-    # mask an unknown collection here.
-    if not allow_empty_manifest_set:
-        from nexus.catalog.membership import refuse_if_collection_unknown  # noqa: PLC0415 — command-local import (nexus.catalog.membership)
-
-        refuse_if_collection_unknown(cat, collection, collection_documents)
-    elif not collection_documents:
-        # The override is the operator asserting "this collection really is
-        # fully orphaned", which is also the only state in which an unknown
-        # name is a legitimate gc target. Said out loud, because with the
-        # override nothing else stands between this name and deletion
-        # (review of 6129b9d35).
-        from nexus.catalog.membership import collection_is_known  # noqa: PLC0415 — command-local import (nexus.catalog.membership)
-
-        if not collection_is_known(cat, collection):
-            click.echo(
-                f"WARNING: the catalog does not know a collection named "
-                f"'{collection}'. --allow-empty-manifest-set overrides that "
-                f"refusal: every chunk T3 holds under this exact name is an "
-                f"orphan candidate. Check the name against `nx collection list`."
-            )
-
-    # nexus-jqrtp: the empty-alive-set guard. `cat is None` in _make_catalog()
-    # was written to stop exactly this catastrophe but only ever fired for a
-    # SQLite-only "catalog absent" condition; in service mode the factory
-    # always returns a handle, so it never fired there — and "catalog
-    # PRESENT but its manifest references NOTHING for this collection" was
-    # never guarded on either substrate. An empty `referenced` set here is
-    # reachable without anything client-visible being wrong (fresh/mis-scoped
-    # tenant, an unbackfilled manifest, a collection with no catalog
-    # projection) and makes EVERY chunk in the collection an orphan
-    # candidate — the last line of defence before --no-dry-run --yes deletes
-    # it all. Refuse unless the operator has confirmed the collection really
-    # is fully orphaned and passed --allow-empty-manifest-set.
-    if not referenced and not allow_empty_manifest_set:
-        click.echo(
-            f"\nREFUSING to delete: the catalog manifest for '{collection}' "
-            f"references ZERO chashes, but {len(candidates)} chunk(s) are "
-            f"about to be treated as orphans. This is indistinguishable from "
-            f"a fresh/mis-scoped tenant or an unbackfilled manifest without "
-            f"deciding the collection's disposition first. Investigate with "
-            f"'nx t3 backfill-manifest -c {collection}' or "
-            f"'nx catalog reconcile', or — if the collection really is "
-            f"fully orphaned — re-run with --allow-empty-manifest-set."
-        )
-        raise click.exceptions.Exit(1)
-
-    # nexus-g6k6b (RUNFENCE precondition, nexus-39upx round 2 CRITICAL):
-    # Hal's 2026-08-02 comment, binding, verbatim: "The corpus-wide sweep
-    # (b) MUST filter on index_state = 'complete'. Sweeping a document
-    # that is mid-index would delete chunks an in-flight run has already
-    # written but has not yet manifested." A T3 chunk carries no doc_id
-    # (post-RDR-108), so a candidate cannot be attributed to the specific
-    # document that most recently owned it — the conservative,
-    # structurally-honest response when candidates cannot be attributed
-    # to individual documents is a collection-level circuit breaker: ANY
-    # non-complete document in this collection means no candidate can be
-    # PROVEN safe, so refuse rather than delete anything.
+    reasons: list[str] = []
     if incomplete_docs and not allow_incomplete_index_state:
         _names = ", ".join(sorted({
             f"{d.title!r} ({d.index_state!r})" for d in incomplete_docs
         }))
-        click.echo(
-            f"\nREFUSING to delete: {len(incomplete_docs)} document(s) in "
-            f"'{collection}' are not index_state='complete': {_names}. "
-            f"An in-flight or fence-failed document's chunks are not "
-            f"garbage — they are a run in progress or a documented-damaged "
-            f"state with its own remedy (finish the reindex, or re-index "
-            f"with --force). If you have confirmed no reindex is "
-            f"concurrently running against this collection, re-run with "
-            f"--allow-incomplete-index-state."
+        reasons.append(
+            f"{len(incomplete_docs)} document(s) in '{collection}' are not "
+            f"index_state='complete': {_names}. An in-flight or fence-failed document's chunks "
+            f"are not garbage — they are a run in progress or a documented-damaged state with "
+            f"its own remedy (finish the reindex, or re-index with --force). If you have "
+            f"confirmed no reindex is concurrently running against this collection, re-run "
+            f"with --allow-incomplete-index-state."
         )
-        raise click.exceptions.Exit(1)
+    reasons.extend(_census_blocker_reasons(collection, census_blockers))
+    if scope_chunk_total <= 0:
+        reasons.append(
+            f"the listing names {len(candidates)} reapable chunk(s) in '{collection}' but the census "
+            f"reads scope_chunk_total = {scope_chunk_total}. The two disagree, so the floor and the "
+            f"empty-manifest guard have no denominator; refusing rather than moving on an "
+            f"unverifiable collection (RDR-192 R8)."
+        )
+    if scope_chunk_total > 0 and owned_chunks <= 0 and not allow_empty_manifest_set:
+        reasons.append(
+            f"the catalog manifest for '{collection}' names NONE of the {scope_chunk_total} "
+            f"chunk(s) it holds, so every one reads as an orphan candidate. That is "
+            f"indistinguishable from a fresh/mis-scoped tenant or an unbackfilled manifest "
+            f"without deciding the collection's disposition first (nexus-jqrtp). Investigate "
+            f"with 'nx t3 backfill-manifest -c {collection}' or 'nx catalog reconcile', or, if "
+            f"the collection really is fully orphaned, re-run with --allow-empty-manifest-set."
+        )
+    # THE FLOOR IS PERMANENT, and it is this verb's own. gc_quarantine_orphans (the route this verb
+    # moves with) carries no fraction floor; the reaper's floor lives inside reaper_quarantine_chunks,
+    # which has no HTTP route, so no engine-side floor reaches this verb (and
+    # indexer._prune_deleted_files moves through the same route with none at all). The variable is
+    # NX_GC_FLOOR_FRACTION (with NX_GC_FORCE), the name the indexer's quarantine-expiry floor already
+    # reads through the same fail-safe parser, the same default (0.25) and the same 100-chunk minimum:
+    # one name for the operator across the client GC floors. NX_REAPER_FLOOR_FRACTION is NOT reused:
+    # it configures the engine-side reaper, a different process whose environment a CLI invocation
+    # does not set, so honouring it here would make the floor follow a variable nobody exports.
+    floor_fraction = _gc_floor_fraction()
+    force = os.environ.get("NX_GC_FORCE", "") == "1"
+    # The engine's reading (reaper_quarantine_chunks, gc_expire_quarantine): the 100-chunk minimum
+    # counts the REAPABLE set, the fraction is reapable / every stored chunk, compared strictly by
+    # division (never `n > f * total`, whose float product misjudges an exact boundary such as
+    # 0.57 * 100 = 56.99999999999999).
+    if (
+        scope_chunk_total > 0
+        and len(candidates) >= _GC_FLOOR_MIN_CHUNKS
+        and len(candidates) / scope_chunk_total > floor_fraction
+        and not force
+    ):
+        reasons.append(
+            f"{len(candidates)} of {scope_chunk_total} chunk(s) "
+            f"({len(candidates) / scope_chunk_total:.0%}) in '{collection}' are reapable, over "
+            f"the NX_GC_FLOOR_FRACTION floor of {floor_fraction:.0%} (applies from "
+            f"{_GC_FLOOR_MIN_CHUNKS} reapable chunks up). A verdict this large is the manifest-gap "
+            f"misclassification shape, not routine churn. The engine route this verb moves with "
+            f"carries no floor, so this verb holds it. If the collection really is mostly "
+            f"garbage, re-run with NX_GC_FORCE=1 (the chunks go to quarantine, not away)."
+        )
 
-    # NOTE on the manifest snapshot: ``referenced`` was sampled at the
-    # top of this command. A doc registered concurrently between
-    # snapshot and execution would not appear in the referenced set,
-    # so its chunks could be GC'd despite the doc being live again. The
-    # index_state check above closes the common case (a NEW re-index
-    # begun after this command started would stamp 'indexing' before its
-    # first chunk upsert — nexus-5xn3k.4 fence-begin ordering — and would
-    # be caught by the NEXT invocation, though not retroactively by this
-    # already-in-flight one); the residual snapshot-to-execution race is
-    # single-operator-driven and acceptably small in practice.
-    #
-    # AUDIT TRAIL (nexus-fduai; closes the nexus-i711w item-20 window, Hal
-    # ruling 2026-07-30): the local ChunkOrphaned EventLog died with the
-    # local catalog. The engine's gc_audit table that replaced it is fed
-    # server-side by the background reaps (sweepChunks / purge_trash /
-    # gc_quarantine_orphans, actor="engine"), but the delete THIS verb
-    # performs happens client-side, so the engine cannot see it — which is
-    # exactly why it ships a client-facing producer, POST /gc_audit/record
-    # (nexus-jqvzk, "the rows recordGcAudit writes for nx t3 gc"). This
-    # verb reports its delete there in the same breath, then mirrors it as
-    # the structured ``t3_gc_chunks_deleted`` event. A dry run records
-    # nothing (report-only runs would swamp the trail); an audit write that
-    # fails after the delete succeeded is WARNED and fails the exit code —
-    # a delete with no forensic row is the blind spot nexus-sybbh named.
-    pending_chunk_ids: list[str] = [chunk_id for chunk_id, _chash in candidates]
-
-    deleted_total = 0
-    delete_failed = 0
-    try:
-        deleted_total = t3_db.delete_by_chunk_ids(collection, pending_chunk_ids)
-    except Exception as exc:  # noqa: BLE001 — best-effort path; failure logged, must not crash caller
-        delete_failed = len(pending_chunk_ids)
-        click.echo(
-            f"  batch delete failed ({len(pending_chunk_ids)} chunk(s)): "
-            f"{exc}. Next 'nx t3 gc' run will retry.",
-            err=True,
-        )
-
-    if delete_failed:
-        click.echo(
-            f"\nSummary: batch delete FAILED for {delete_failed} chunk(s)."
-        )
-    else:
-        click.echo(
-            f"\nSummary: deleted {deleted_total} chunk(s) from {collection}."
-        )
-        audit_id: int | None = None
-        audit_error: str | None = None
-        writer = None
-        try:
-            writer = _make_catalog_writer()
-            audit_id = writer.record_gc_audit(
-                operation="t3_gc",
-                collection=collection,
-                actor="nx t3 gc",
-                dry_run=False,
-                chashes=[chash for _chunk_id, chash in candidates],
-                details={
-                    "deleted": deleted_total,
-                    "requested": len(pending_chunk_ids),
-                    "chunk_ids_sample": pending_chunk_ids[:_GC_AUDIT_ID_SAMPLE],
-                    "chunk_ids_truncated": max(
-                        len(pending_chunk_ids) - _GC_AUDIT_ID_SAMPLE, 0,
-                    ),
-                    # nexus-zewg3: how many OTHER chunks in this collection
-                    # (not part of this run's deletes) are held alive only
-                    # by a pending tombstone, not by any live document.
-                    # None (never 0) when the engine could not answer.
-                    "tombstone_protected": tombstone_protected_count,
-                },
-            )
-        except Exception as exc:  # noqa: BLE001 — the delete already happened; surface the missing audit row loudly, never a traceback
-            audit_error = f"{type(exc).__name__}: {exc}"
-        # Closing the proxy is housekeeping: a close() that raises after the
-        # row was written must not report the row as unwritten.
-        close = getattr(writer, "close", None)
-        if callable(close):
-            with contextlib.suppress(Exception):
-                close()
-        _log.info(
-            "t3_gc_chunks_deleted",
-            collection=collection,
-            deleted=deleted_total,
-            requested=len(pending_chunk_ids),
-            chunk_ids_sample=pending_chunk_ids[:_GC_AUDIT_ID_SAMPLE],
-            chunk_ids_truncated=max(len(pending_chunk_ids) - _GC_AUDIT_ID_SAMPLE, 0),
-            tombstone_protected=tombstone_protected_count,
-            gc_audit_id=audit_id,
-            gc_audit_error=audit_error,
-        )
-        if audit_error is not None:
+    if not will_act:
+        for reason in reasons:
+            click.echo(f"  a --no-dry-run --yes run will REFUSE: {reason}")
+        if reasons:
             click.echo(
-                f"  WARNING: the {deleted_total} chunk(s) above were deleted "
-                f"but the gc_audit row recording it could NOT be written "
-                f"({audit_error}) — the deletion has no forensic record in "
-                f"nexus.gc_audit. Keep this output; see the "
-                f"t3_gc_chunks_deleted log event for the ids.",
-                err=True,
+                f"\nSummary: a --no-dry-run --yes run would REFUSE for {collection} "
+                f"({len(reasons)} reason(s) above); {len(candidates)} chunk(s) are listed but none "
+                f"would move. Exiting 1 so a script gating the real run on this one stops."
             )
             raise click.exceptions.Exit(1)
+        click.echo(
+            f"\nSummary: would quarantine up to {len(candidates)} chunk(s) from {collection}."
+        )
+        return
+
+    # The unknown-collection guard (nexus-v1zdu), last line of defence before the move.
+    # catalog_documents_for_collection does NOT distinguish "collection known, zero documents"
+    # from "collection unknown", so an unregistered/typo'd name reads as having nothing to
+    # protect. Checked here, not early, so a --dry-run is not refused over a collection that
+    # merely lacks a `collections` registry row.
+    if not allow_empty_manifest_set:
+        from nexus.catalog.membership import refuse_if_collection_unknown  # noqa: PLC0415 — command-local import (nexus.catalog.membership)
+
+        refuse_if_collection_unknown(cat, collection, collection_documents)
+    elif not collection_documents and not _collection_is_known(cat, collection):
+        click.echo(
+            f"WARNING: the catalog does not know a collection named "
+            f"'{collection}'. --allow-empty-manifest-set overrides that "
+            f"refusal. Check the name against `nx collection list`."
+        )
+
+    if reasons:
+        for reason in reasons:
+            click.echo(f"\nREFUSING to move: {reason}")
+        raise click.exceptions.Exit(1)
+
+    # R8, again, as close to the move as the verb can get: the census above was read before the
+    # listing paged, and a note can go legacy-unmanifested in between. The in-engine per-pass
+    # re-run is the reaper's requirement (nexus-2x9xa); this is the verb's own call.
+    try:
+        recheck = census_fn(collection, limit=1)
+    except VectorServiceError as exc:
+        raise click.ClickException(
+            f"Failed to re-read the manifest-less census for {collection!r} before the move: {exc}"
+        ) from exc
+    recheck_reasons = _census_blocker_reasons(
+        collection, _census_blocker_totals(recheck, collection), prior=True,
+    )
+    if recheck_reasons:
+        for reason in recheck_reasons:
+            click.echo(f"\nREFUSING to move: {reason}")
+        raise click.exceptions.Exit(1)
+
+    # The act: the engine's own move. No chunk ids cross the wire; the route's statement carries
+    # the predicate and takes the sweep gate, so a racing client write wins.
+    from nexus.catalog.chunk_quarantine import (  # noqa: PLC0415 — command-local import (nexus.catalog.chunk_quarantine)
+        GC_AUDIT_MAX_CHASHES,
+        BoundedDrainIncomplete,
+        quarantine_collection_name,
+        quarantine_orphans_bounded_serverside,
+        quarantine_orphans_serverside,
+    )
+
+    qname = quarantine_collection_name(collection)
+    stamp = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    try:
+        moved_result = quarantine_orphans_bounded_serverside(
+            t3_db, collection, qname, stamp, sample_limit=GC_AUDIT_MAX_CHASHES, strict=True,
+        )
+        if moved_result is None:
+            moved_result = quarantine_orphans_serverside(
+                t3_db, collection, qname, stamp, sample_limit=GC_AUDIT_MAX_CHASHES,
+            )
+    except BoundedDrainIncomplete as exc:
+        # Every batch commits on its own: what moved before the stop is moved, audited and sitting in
+        # quarantine. The verb says so, so an operator does not read a failure as "nothing happened".
+        left = "unknown" if exc.remaining is None else str(exc.remaining)
+        detail = f": {exc.__cause__}" if exc.__cause__ is not None else ""
+        unknown = (
+            " The failed batch's own outcome is unknown (a timeout or transport error can follow a "
+            "server commit); nx catalog gc-audit list shows what the engine recorded."
+            if exc.reason == "batch failed" else ""
+        )
+        click.echo(
+            f"\nSummary: the engine move for {collection} STOPPED ({exc.reason}{detail}). "
+            f"{exc.moved} chunk(s) were moved into {qname} in {exc.batches} earlier batch(es); each "
+            f"batch committed on its own and stays moved, so re-running this verb is safe."
+            f"{unknown} Still reapable when it stopped: {left}.",
+            err=True,
+        )
+        raise click.exceptions.Exit(1) from exc
+    except VectorServiceError as exc:
+        if exc.code == 404:
+            raise click.ClickException(_GC_NO_ROUTE_MESSAGE) from exc
+        click.echo(
+            f"\nSummary: the engine move FAILED for {collection} on its first batch: {exc}. No batch "
+            f"is known to have moved a chunk, but a timeout or transport error can follow a server "
+            f"commit, so nx catalog gc-audit list is the record of what the engine did. Re-running "
+            f"this verb is safe.",
+            err=True,
+        )
+        raise click.exceptions.Exit(1) from exc
+    if moved_result is None:
+        raise click.ClickException(
+            "this T3 handle carries no gc_quarantine_orphans route; this verb needs the "
+            "engine-backed handle."
+        )
+    moved, _sample = moved_result
+    click.echo(
+        f"\nSummary: quarantined {moved} chunk(s) from {collection} into {qname}. The engine "
+        f"recorded each batch in gc_audit (nx catalog gc-audit list). The chunks are moved, not "
+        f"freed: the client expiry below hard-deletes them once they are older than "
+        f"NX_GC_QUARANTINE_DAYS (a later run of this verb, or of 'nx index repo' for a repo "
+        f"collection, does it)."
+    )
+    if moved < len(candidates):
+        click.echo(
+            f"  The listing named {len(candidates)}; the engine moved {moved}. It re-checks the "
+            f"predicate under its own lock, so a chunk a client re-wrote since the listing stays."
+        )
+    elif moved > len(candidates):
+        click.echo(
+            f"  The listing named {len(candidates)}; the engine moved {moved}, MORE than listed: "
+            f"chunks aged past the grace while the drain ran. The floor was judged on the listing, "
+            f"so check {qname} (nx catalog gc-audit list) if the extra count matters."
+        )
+
+    _expire_client_quarantine(t3_db, collection, qname, moved=moved)
 
 
 @t3.command("backfill-manifest")
@@ -960,6 +956,7 @@ def backfill_manifest_cmd(
     total_reverse_discovered = 0
     total_cross_collection_forward_owner_skipped = 0
     total_reverse_multi_piece_skipped = 0
+    total_chunk_count_mismatch_skipped = 0
     skipped_taxonomy = 0
     errors: list[str] = []
     docs_processed_overall = 0
@@ -1067,12 +1064,21 @@ def backfill_manifest_cmd(
             if result.docs_reverse_multi_piece_skipped
             else ""
         )
+        # nexus-wbfpw.41: forward-path documents whose matched chunks cannot
+        # be one manifest (duplicate positions, or a count that differs from
+        # the registered chunk_count under --only-gapped) -- never silent.
+        chunk_count_mismatch_part = (
+            f" ({result.docs_skipped_chunk_count_mismatch} skipped: "
+            f"chunk_count_mismatch)"
+            if result.docs_skipped_chunk_count_mismatch
+            else ""
+        )
         print(
             f"[{idx}/{total}] {coll_name}: processed {result.docs_processed} "
             f"doc(s), {verb} {result.chunks_would_write if dry_run else result.chunks_written} chunk manifest row(s)"
             f"{skipped_part}{zero_chunks_part}{phase3_no_index_part}"
             f"{has_manifest_part}{chash_divergent_part}{fk_409_part}{reverse_part}"
-            f"{cross_collection_part}{reverse_multi_piece_part}",
+            f"{cross_collection_part}{reverse_multi_piece_part}{chunk_count_mismatch_part}",
             file=sys.stderr,
         )
 
@@ -1127,6 +1133,12 @@ def backfill_manifest_cmd(
                 if result.docs_reverse_multi_piece_skipped
                 else ""
             )
+            + (
+                f" ({result.docs_skipped_chunk_count_mismatch} skipped: "
+                f"more matched chunks than the document's chunk count, or two at one position)"
+                if result.docs_skipped_chunk_count_mismatch
+                else ""
+            )
         )
 
         total_docs += result.docs_processed
@@ -1142,6 +1154,7 @@ def backfill_manifest_cmd(
             result.docs_cross_collection_forward_owner_skipped
         )
         total_reverse_multi_piece_skipped += result.docs_reverse_multi_piece_skipped
+        total_chunk_count_mismatch_skipped += result.docs_skipped_chunk_count_mismatch
         docs_processed_overall += result.docs_processed
 
         # SIG-6: periodic progress every _PROGRESS_INTERVAL docs.
@@ -1185,6 +1198,7 @@ def backfill_manifest_cmd(
                 + result.docs_skipped_zero_chunks
                 + result.docs_cross_collection_forward_owner_skipped
                 + result.docs_reverse_multi_piece_skipped
+                + result.docs_skipped_chunk_count_mismatch
             )
             if residual > 0:
                 state[coll_name] = [
@@ -1194,6 +1208,7 @@ def backfill_manifest_cmd(
                     f"zero_chunks={result.docs_skipped_zero_chunks}",
                     f"cross_collection_forward_owner={result.docs_cross_collection_forward_owner_skipped}",
                     f"reverse_multi_piece={result.docs_reverse_multi_piece_skipped}",
+                    f"chunk_count_mismatch={result.docs_skipped_chunk_count_mismatch}",
                 ]
                 click.echo(
                     f"  {coll_name}: NOT marked done -- {residual} doc(s) "
@@ -1202,7 +1217,8 @@ def backfill_manifest_cmd(
                     f"zero_chunks={result.docs_skipped_zero_chunks}, "
                     f"cross_collection_forward_owner="
                     f"{result.docs_cross_collection_forward_owner_skipped}, "
-                    f"reverse_multi_piece={result.docs_reverse_multi_piece_skipped}); "
+                    f"reverse_multi_piece={result.docs_reverse_multi_piece_skipped}, "
+                    f"chunk_count_mismatch={result.docs_skipped_chunk_count_mismatch}); "
                     f"a future --resume will reprocess this collection"
                 )
             else:
@@ -1267,6 +1283,12 @@ def backfill_manifest_cmd(
         if total_reverse_multi_piece_skipped
         else ""
     )
+    chunk_count_mismatch_part = (
+        f", {total_chunk_count_mismatch_skipped} doc(s) skipped "
+        f"(chunk count mismatch)"
+        if total_chunk_count_mismatch_skipped
+        else ""
+    )
     click.echo(
         f"\nSummary: processed {total_docs} doc(s), "
         f"{verb} {total_chunks} manifest row(s)"
@@ -1279,213 +1301,8 @@ def backfill_manifest_cmd(
         + reverse_discovered_part
         + cross_collection_forward_owner_part
         + reverse_multi_piece_part
+        + chunk_count_mismatch_part
         + (f", skipped {skipped_taxonomy} taxonomy collection(s)" if skipped_taxonomy else "")
-        + (f", {len(errors)} error(s)" if errors else "")
-    )
-
-    if errors:
-        raise SystemExit(1)
-
-
-@t3.command("reidentify")
-@click.option(
-    "--collection",
-    "-c",
-    default="",
-    help="Limit to one collection. Mutually exclusive with --all-collections.",
-)
-@click.option(
-    "--all-collections",
-    "all_collections",
-    is_flag=True,
-    default=False,
-    help="Re-identify every T3 collection. Mutually exclusive with --collection.",
-)
-@click.option(
-    "--dry-run/--no-dry-run",
-    default=True,
-    help="Report-only (default). Use --no-dry-run to perform the migration.",
-)
-@click.option(
-    "--max-workers",
-    type=int,
-    default=4,
-    show_default=True,
-    help=(
-        "Number of collections to process in parallel under "
-        "--all-collections. Each collection has an independent ID "
-        "namespace so concurrent execution is safe; ChromaDB Cloud "
-        "rate limits are the practical ceiling. Set to 1 for "
-        "deterministic serial output."
-    ),
-)
-def reidentify_cmd(
-    collection: str,
-    all_collections: bool,
-    dry_run: bool,
-    max_workers: int,
-) -> None:
-    """Re-upsert T3 chunks under content-derived natural IDs (RDR-108 D1).
-
-    \b
-    Per collection, paginates T3 chunks (300/op), computes a new natural
-    ID from the full chunk_text_hash (RDR-180), and re-upserts each chunk under the new
-    ID using the existing embedding (no Voyage call). Document-level
-    metadata fields (doc_id, chunk_index, chunk_count) are stripped at
-    re-upsert; the catalog manifest table is now authoritative for those.
-    Old chunk IDs are batch-deleted after the get-loop completes.
-
-    \b
-    The command is idempotent: re-running on a fully-migrated collection
-    is a zero-write no-op. It is also crash-resumable: re-invoking after
-    an interrupted run safely sweeps the un-deleted old IDs.
-
-    \b
-    Carve-outs:
-      - taxonomy__* collections are skipped (centroids use centroid_hash).
-      - Pre-RDR-053 chunks missing chunk_text_hash raise an error;
-        re-index that collection from source before running.
-
-    \b
-    Performance (RDR-108 nexus-qlm2):
-      - --all-collections processes collections in parallel via a
-        ThreadPoolExecutor (--max-workers, default 4). Each collection
-        has an independent ID namespace so concurrent execution is
-        correctness-preserving; the practical ceiling is the operator's
-        service-side rate limits, not local CPU.
-      - Per-collection completion order is non-deterministic under
-        max_workers > 1. Pass --max-workers 1 for serial dispatch and
-        operator-readable output.
-
-    \b
-    Examples:
-      nx t3 reidentify --collection code__nexus            # dry-run report
-      nx t3 reidentify -c code__nexus --no-dry-run         # one collection
-      nx t3 reidentify --all-collections --no-dry-run      # full corpus, 4 workers
-      nx t3 reidentify --all-collections --max-workers 8   # higher concurrency
-    """
-    from concurrent.futures import ThreadPoolExecutor, as_completed  # noqa: PLC0415 — deliberate deferred import: branch-local / startup-cost avoidance
-    from nexus.db.t3_reidentify import (  # noqa: PLC0415 — command-local import deferred to avoid CLI startup cost (nexus.db.t3_reidentify)
-        MissingChunkHashError,
-        reidentify_collection,
-    )
-
-    # XOR: exactly one of --collection / --all-collections must be set.
-    if bool(collection) == bool(all_collections):
-        raise click.UsageError(
-            "Specify exactly one of --collection NAME or --all-collections."
-        )
-
-    if max_workers < 1:
-        raise click.UsageError("--max-workers must be >= 1.")
-
-    t3_db = _make_t3_for_backfill()
-
-    if dry_run:
-        click.echo("(dry-run: no T3 writes or deletes will be performed)")
-
-    if collection:
-        collections_to_process = [collection]
-    else:
-        collections_to_process = [
-            c["name"] for c in t3_db.list_collections()
-        ]
-        if not collections_to_process:
-            click.echo("No T3 collections found; nothing to do.")
-            return
-
-    total = len(collections_to_process)
-    # Single-collection invocations are inherently serial; skip the
-    # executor overhead and keep the per-collection progress line shape
-    # the operator already knows from --collection mode.
-    workers = min(max_workers, total) if total > 1 else 1
-
-    def _process_one(idx: int, coll_name: str) -> tuple[
-        int, str, "object | None", str | None
-    ]:
-        """Run reidentify_collection in a worker. Returns (idx, name,
-        result_or_None, error_or_None) so the main thread can render
-        output deterministically by index."""
-        print(
-            f"[{idx}/{total}] {coll_name}: processing ...",
-            file=sys.stderr,
-        )
-        try:
-            res = reidentify_collection(
-                t3_db, coll_name, dry_run=dry_run, known_to_exist=not collection,
-            )
-        except MissingChunkHashError as exc:
-            return idx, coll_name, None, str(exc)
-        except Exception as exc:  # noqa: BLE001 — per-collection worker; error returned in result tuple, not raised
-            return idx, coll_name, None, f"{coll_name}: {exc}"
-        return idx, coll_name, res, None
-
-    total_examined = 0
-    total_migrated = 0
-    total_already = 0
-    total_deleted = 0
-    skipped_taxonomy = 0
-    errors: list[str] = []
-
-    def _render(results_iter):
-        nonlocal total_examined, total_migrated, total_already, total_deleted
-        nonlocal skipped_taxonomy
-        for _idx, coll_name, result, error in results_iter:
-            if error is not None:
-                click.echo(f"ERROR: {error}", err=True)
-                errors.append(error)
-                continue
-
-            if result.skipped_taxonomy:
-                click.echo(f"  {coll_name}: skipped (taxonomy carve-out)")
-                skipped_taxonomy += 1
-                continue
-
-            verb = "would migrate" if dry_run else "migrated"
-            delete_part = (
-                f", {result.chunks_deleted} old id(s) deleted"
-                if not dry_run and result.chunks_deleted
-                else ""
-            )
-            click.echo(
-                f"  {coll_name}: examined {result.chunks_examined} chunk(s), "
-                f"{verb} {result.chunks_migrated}, "
-                f"{result.chunks_already_migrated} already migrated"
-                + delete_part
-            )
-
-            total_examined += result.chunks_examined
-            total_migrated += result.chunks_migrated
-            total_already += result.chunks_already_migrated
-            total_deleted += result.chunks_deleted
-
-    if workers == 1:
-        # Deterministic serial path: dispatch + render in input order.
-        _render(
-            _process_one(i, n)
-            for i, n in enumerate(collections_to_process, start=1)
-        )
-    else:
-        # Parallel dispatch; collect + render INSIDE the executor's
-        # ``with`` block so __exit__ blocks until in-flight workers
-        # finish (nexus-uv06: prior code called executor.shutdown(
-        # wait=False) from a finally that fired BEFORE the lazy
-        # results_iter generator was consumed, leaking worker threads
-        # if the consumer raised or returned early).
-        with ThreadPoolExecutor(max_workers=workers) as executor:
-            futures = [
-                executor.submit(_process_one, i, n)
-                for i, n in enumerate(collections_to_process, start=1)
-            ]
-            _render(f.result() for f in as_completed(futures))
-
-    verb = "would migrate" if dry_run else "migrated"
-    click.echo(
-        f"\nSummary: examined {total_examined} chunk(s) across "
-        f"{total} collection(s); {verb} {total_migrated}, "
-        f"{total_already} already migrated, "
-        f"{total_deleted} old id(s) deleted"
-        + (f", skipped {skipped_taxonomy} taxonomy" if skipped_taxonomy else "")
         + (f", {len(errors)} error(s)" if errors else "")
     )
 
@@ -1600,11 +1417,39 @@ def _census_one_collection(client, collection: str) -> dict:
     }
 
 
-def _render_census_text(result: dict) -> None:
+def _legacy_owner_titles(results: list[dict]) -> dict[str, str]:
+    """Titles of the owner documents of every legacy-unmanifested chunk,
+    keyed by tumbler, in ONE batched catalog read (nexus-wbfpw.41). Those
+    chunks are hidden from ``nx store get`` and search, so the owner's title
+    is the only thing an operator has to recognise the note by and to re-put
+    it under. Best-effort: a catalog that cannot answer just prints no titles."""
+    tumblers = sorted({
+        owner_tumbler
+        for result in results
+        for chash in result["chashes"].get("legacy-unmanifested", [])
+        if (owner_tumbler := (result["owners"].get(chash) or {}).get("owner_tumbler"))
+    })
+    if not tumblers:
+        return {}
+    try:
+        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — command-local import deferred to avoid CLI startup cost (nexus.catalog.factory)
+
+        reader = make_catalog_reader()
+        if reader is None:
+            return {}
+        return {t: entry.title for t, entry in reader.resolve_many(tumblers).items() if entry.title}
+    except Exception as exc:  # noqa: BLE001 — titles are a convenience; the census itself must still print
+        _log.debug("census_owner_titles_unavailable", error=str(exc))
+        return {}
+
+
+def _render_census_text(result: dict, titles: dict[str, str] | None = None) -> None:
     """Print one collection's census in text form, naming each item's
     owner tumbler and path (forward, reverse, or none) so an operator can
     see which document keeps a chunk live and whether the reverse
-    tie-break chose it (nexus-wbfpw.5 acceptance criteria)."""
+    tie-break chose it (nexus-wbfpw.5 acceptance criteria). A
+    legacy-unmanifested row also carries its owner document's title when
+    ``titles`` has it (nexus-wbfpw.41)."""
     click.echo(f"{result['collection']}:")
     owners = result["owners"]
     for bucket in _CENSUS_BUCKETS:
@@ -1614,7 +1459,9 @@ def _render_census_text(result: dict) -> None:
             owner = owners.get(chash) or {}
             tumbler = owner.get("owner_tumbler") or "-"
             path = owner.get("owner_path") or "none"
-            click.echo(f"    {chash}  owner={tumbler} ({path})")
+            title = (titles or {}).get(tumbler) if bucket == "legacy-unmanifested" else None
+            title_part = f'  title="{title}"' if title else ""
+            click.echo(f"    {chash}  owner={tumbler} ({path}){title_part}")
     click.echo(f"  total: {result['scope_chunk_total']}")
 
 
@@ -1686,8 +1533,9 @@ def _finish_census(
             "exit_code": exit_code,
         }, indent=2))
     else:
+        titles = _legacy_owner_titles(results)
         for result in results:
-            _render_census_text(result)
+            _render_census_text(result, titles)
 
     if zero_violations:
         # Always stderr (review round 1 CRITICAL finding): this line used
@@ -1886,3 +1734,11 @@ def census_manifest_less_cmd(
         as_json=as_json, results=results, collections_discovered=collections_discovered,
         census_error=census_error, require_zero=require_zero,
     )
+
+
+# ── RDR-192 Step 9 Day-2 (bead nexus-2x9xa): `nx t3 quarantine ...` ─────────
+# Registered here, defined in its own module: this file is already large and the
+# verb shares nothing with it but the group.
+from nexus.commands.t3_cmds.quarantine import quarantine_group as _quarantine_group  # noqa: E402 — must follow the `t3` group definition above
+
+t3.add_command(_quarantine_group)

@@ -490,7 +490,20 @@ _MAX_CONCURRENT_PG_BOOTS = 4
 #: in slot order (0, 1, 2, ...), never a per-boot-named file, so this
 #: directory itself never accumulates debris the way a per-boot tempdir
 #: would.
-_BOOT_SEMAPHORE_DIR = Path(tempfile.gettempdir()) / "nexus_t2_substrate_boot_locks"
+#:
+#: PER USER (nexus-c6lsu): the tempdir is shared by every Unix user on a box, and the first
+#: user to boot creates the directory 0775, so a second user gets PermissionError opening
+#: ``slot-0.lock`` and every substrate test errors at setup. The uid is part of the name, so
+#: each user gets a directory it owns; the cap then bounds one user's concurrent boots.
+_BOOT_SEMAPHORE_DIR_PREFIX = "nexus_t2_substrate_boot_locks"
+
+
+def _boot_semaphore_dir(root: Path, uid: int | None = None) -> Path:
+    """The boot-lock directory for one Unix user under ``root`` (``uid`` defaults to ours)."""
+    return root / f"{_BOOT_SEMAPHORE_DIR_PREFIX}-{os.getuid() if uid is None else uid}"
+
+
+_BOOT_SEMAPHORE_DIR = _boot_semaphore_dir(Path(tempfile.gettempdir()))
 
 #: Generous: a slow/loaded box waiting out a genuine queue of concurrent
 #: boots is expected, not a hang. Failing loud after this window (rather
@@ -532,7 +545,9 @@ def _boot_semaphore_slot(
     duration of the context.
 
     Bounds how many PG boot sequences (initdb + pg_ctl start) can run
-    CONCURRENTLY across every pytest process on the machine (nexus-ui654)
+    CONCURRENTLY across every pytest process of THIS Unix user (the lock directory is
+    per uid, nexus-c6lsu; the SysV shm budget it protects is machine-wide, so N users
+    can each hold ``max_concurrent`` slots) (nexus-ui654)
     -- deliberately NOT the substrate's full session lifetime; callers
     wrap only the shm-heavy initdb/pg_ctl-start window and release
     immediately after, so a booted-and-running substrate never occupies a
@@ -765,6 +780,21 @@ def throwaway_pg_cluster(
         shutil.rmtree(pgdata, ignore_errors=True)
 
 
+def _pin_ownerless_write_mode(env: dict[str, str]) -> None:
+    """RDR-223 Phase 3 Step 2 (nexus-z0o2p.24): an UNSET NX_OWNERLESS_WRITE_MODE is log-only on
+    the engine, but the suite pins the posture the local launch ships (enforce) so every
+    substrate-backed test sees the refusal. An explicit value in the caller's environment (a
+    log-only census run) wins.
+
+    An EMPTY or blank value counts as unset, the same rule the local launcher applies
+    (``storage_service_daemon._spawn_service``): the engine parses blank as log-only, so
+    ``env.setdefault``, which keeps an empty string, would hand the suite a silently log-only
+    engine and every refusal test would pass vacuously or fail for the wrong reason.
+    """
+    if not env.get("NX_OWNERLESS_WRITE_MODE", "").strip():
+        env["NX_OWNERLESS_WRITE_MODE"] = "enforce"
+
+
 def _jar_ready_reason(jar: Path) -> str | None:
     """The boot-time jar verdict, waiting for a build first (nexus-wwaqm).
 
@@ -952,6 +982,7 @@ def _boot() -> dict:
         "NX_DB_ADMIN_PASS": "",
     }
     env.pop("NX_STORAGE_BACKEND", None)
+    _pin_ownerless_write_mode(env)
     if onnx_root is not None:
         env["NX_ONNX_MODEL_DIR"] = str(onnx_root)
     # Engine output goes to a FILE, never a PIPE (nexus-j0nec root cause):

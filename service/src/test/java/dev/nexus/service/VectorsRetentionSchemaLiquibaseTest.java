@@ -32,7 +32,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  *
  * <p>Uses {@link DimTables#CHUNKS} for every column referenced, including
  * {@link DimTables.ChunkTable#retention()} -- fix round 1 replaced
- * {@code PgVectorRepository#referenceOnlyInsertQuery}'s Phase-A ad-hoc
+ * the reference-only INSERT builder's (since removed) Phase-A ad-hoc
  * {@code DSL.field(DSL.name("retention"), ...)} placeholder with the same
  * generated accessor this test now uses, so there is no longer a distinct
  * "ad-hoc idiom" to model here (no raw SQL strings either way; the

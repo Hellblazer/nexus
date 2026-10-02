@@ -35,8 +35,22 @@
 #   capture B's IN-FLIGHT DIRTY bytes instead — this test then fails with
 #   the final tree equal to B's abandoned stamp, not the true baseline.
 #
+# Tests 3-7 (nexus-z0o2p.42 round 2): the SEED-release derivation itself, on
+#   fixture repos with tagged history. A paired release (the tree's floor is
+#   pinned by no release yet) selects the newest older-pinned release WITH a
+#   notice, skipping a release that pins a newer engine and a release newer than
+#   the tree; the override obeys the same two bounds; a tree with no usable
+#   release refuses and names `git fetch --tags`.
+#
 # Run with: bash tests/e2e/migration-rehearsal/run_sh_guard_test.sh
 set -u -o pipefail
+
+# The suite builds its own fake repo and assumes the lease root is that repo's
+# own. An inherited NX_BUILD_LEASE_ROOT (CI's lease step exports it, and so
+# does the documented hand-run setup) would point the lease at the shared
+# root: the lease dir is then missing from the fake repo, and the fixture
+# leases this suite writes would land in the shared root.
+unset NX_BUILD_LEASE_ROOT NX_SUITE_LEASE_WAIT NX_SUITE_LEASE_HELD_BY
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$HERE/../../.." && pwd)"
@@ -73,10 +87,36 @@ rm -f "$repo/tests/e2e/migration-rehearsal/run.sh.bak"
 
 echo 'REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (9, 9, 9)' > "$repo/src/nexus/engine_version.py"
 printf 'release_version=\nbuild_ref=\nname=nexus\n' > "$repo/$props_rel"
+printf 'version = "1.0.0"\n' > "$repo/pyproject.toml"
 
 git -C "$repo" init -q
 git -C "$repo" -c user.email=test@test -c user.name=test add -A
 git -C "$repo" -c user.email=test@test -c user.name=test commit -q -m init
+# nexus-z0o2p.42: --candidate-migration derives its SEED release from release
+# tags (the newest one whose pinned engine equals the floor), so the fixture
+# carries one: v1.0.0 pins the same engine (9.9.9) as the tree, which makes it
+# the derived seed. Without a tag the leg refuses before it reaches the code
+# these tests probe.
+git -C "$repo" -c user.email=test@test -c user.name=test tag v1.0.0
+
+# Fixture builder for the derivation tests: a copy of the base repo with its tag
+# replaced by tagged history. Args: name tree_version floor [tag:pin ...]. Each
+# tag lands on its own commit whose engine_version.py carries that pin; the final
+# commit is the tree (version + floor), so the tags sit strictly behind it.
+mkfix() {
+  local d="$WORKDIR/$1" ver="$2" floor="$3" spec tag pin; shift 3
+  local g=(git -C "$d" -c user.email=test@test -c user.name=test)
+  rm -rf "$d"; cp -R "$repo" "$d"
+  "${g[@]}" tag -d v1.0.0 >/dev/null
+  for spec in "$@"; do
+    tag="${spec%%:*}"; pin="${spec##*:}"
+    printf 'REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (%s)\n' "${pin//./, }" > "$d/src/nexus/engine_version.py"
+    "${g[@]}" commit -q -am "pin $pin" && "${g[@]}" tag "$tag"
+  done
+  printf 'REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (%s)\n' "${floor//./, }" > "$d/src/nexus/engine_version.py"
+  printf 'version = "%s"\n' "$ver" > "$d/pyproject.toml"
+  "${g[@]}" commit -q -am "tree $ver"
+}
 
 DOCKER_CALLS="$WORKDIR/docker-calls"
 UV_CALLS="$WORKDIR/uv-calls"
@@ -124,6 +164,15 @@ run_a() {
     NX_BUILD_LEASE_WAIT="${1:-10}" \
     bash "$repo/tests/e2e/migration-rehearsal/run.sh" --candidate-migration
 }
+
+echo "Test 0 (nexus-z0o2p.42): an override naming a release with no readable tag refuses before any build, naming git fetch --tags"
+out0="$(env -i NX_NO_TELEMETRY=1 PATH="$WORKDIR/bin:/usr/bin:/bin:/usr/local/bin" HOME="$HOME" \
+    TMPDIR="${TMPDIR:-/tmp}" NEXUS_PREV_RELEASE=1.0.0 NEXUS_PREV_ENGINE_TAG=engine-service-v0.0.1 \
+    NEXUS_SEED_RELEASE=9.9.9 NX_BUILD_LEASE_WAIT=5 \
+    bash "$repo/tests/e2e/migration-rehearsal/run.sh" --candidate-migration 2>&1)"; rc0=$?
+[[ $rc0 -eq 2 ]] && ok "refused with rc 2" || bad "expected rc 2, got $rc0: $out0"
+[[ "$out0" == *"NEXUS_SEED_RELEASE=9.9.9 refused: v9.9.9 has no readable REQUIRED_ENGINE_VERSION"* && "$out0" == *"git fetch --tags"* ]] && ok "refusal names the release and git fetch --tags" || bad "no unreadable-tag refusal text: $out0"
+[[ ! -s "$DOCKER_CALLS" && ! -s "$UV_CALLS" ]] && ok "no docker or uv invoked" || bad "docker/uv invoked before the seed check"
 
 echo "Test 1: pre-dirtied release.properties refuses before any build"
 printf 'release_version=9.9.8\nbuild_ref=abandoned-B\nname=nexus\n' > "$repo/$props_rel"
@@ -173,6 +222,10 @@ if [[ $rc2 -eq 1 && "$out2" == *"no wheel in dist/"* ]]; then
 else
   bad "A did not reach the expected stopping point (rc $rc2): $out2"
 fi
+# The derivation path itself (not only the override refusal): the fixture's
+# v1.0.0 pins the floor exactly, so it is selected, with no below-floor notice.
+[[ "$out2" == *"SEED release: conexus==1.0.0 (pins engine-service-v9.9.9"* ]] && ok "derivation selected v1.0.0 (pin == floor)" || bad "derivation did not select v1.0.0: $out2"
+[[ "$out2" != *"BELOW the floor"* ]] && ok "no below-floor notice when the pin equals the floor" || bad "unexpected below-floor notice: $out2"
 final="$(cat "$repo/$props_rel")"
 if [[ "$final" == "$baseline" ]]; then
   ok "final tree equals the true baseline — B's abandoned stamp was never adopted"
@@ -184,6 +237,49 @@ fi
   || bad "unexpected docker run count: $(cat "$DOCKER_CALLS" 2>/dev/null)"
 lease_dir_common="$(git -C "$repo" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)/nexus-build-lease/service"
 [[ ! -d "$lease_dir_common" ]] && ok "service lease not left held after A exits" || bad "service lease still held: $lease_dir_common"
+
+# ── Tests 3-7: the seed derivation on tagged history ────────────────────────
+run_cm() {
+  local r="$1"; shift
+  env -i NX_NO_TELEMETRY=1 PATH="$WORKDIR/bin:/usr/bin:/bin:/usr/local/bin" HOME="$HOME" \
+    TMPDIR="${TMPDIR:-/tmp}" NEXUS_PREV_RELEASE=1.0.0 NEXUS_PREV_ENGINE_TAG=engine-service-v0.0.1 \
+    NX_BUILD_LEASE_WAIT=10 "$@" \
+    bash "$r/tests/e2e/migration-rehearsal/run.sh" --candidate-migration 2>&1
+}
+
+# Paired release: tree 1.2.0, floor 9.9.9. v1.0.0 pins 9.9.7, v1.1.0 pins 9.9.8
+# (the newest qualifying), v1.1.5 pins 9.9.10 (newer than the floor: skipped even
+# though it is newer than v1.1.0), v1.3.0 pins 9.9.8 (newer than the tree:
+# skipped).
+mkfix paired 1.2.0 9.9.9 v1.0.0:9.9.7 v1.1.0:9.9.8 v1.1.5:9.9.10 v1.3.0:9.9.8
+rm -f "$DOCKER_CALLS" "$UV_CALLS"
+
+echo "Test 3: paired release selects the newest older-pinned release, with a notice"
+out3="$(run_cm "$WORKDIR/paired")"
+[[ "$out3" == *"SEED release: conexus==1.1.0 (pins engine-service-v9.9.8"* ]] && ok "selected v1.1.0 (newest pin <= floor and version <= tree; skipped v1.1.5 and v1.3.0)" || bad "wrong seed selected: $out3"
+[[ "$out3" == *"BELOW the floor 9.9.9"* ]] && ok "below-floor notice printed" || bad "no below-floor notice: $out3"
+
+echo "Test 4: the override obeys the pin bound"
+rm -f "$DOCKER_CALLS" "$UV_CALLS"
+out4="$(run_cm "$WORKDIR/paired" NEXUS_SEED_RELEASE=1.1.5)"
+[[ "$out4" == *"NEXUS_SEED_RELEASE=1.1.5 refused: v1.1.5 pins engine 9.9.10, NEWER than the floor 9.9.9"* ]] && ok "override pinning a newer engine refused" || bad "override pin bound not enforced: $out4"
+[[ ! -s "$DOCKER_CALLS" && ! -s "$UV_CALLS" ]] && ok "no docker or uv invoked" || bad "docker/uv invoked before the override refusal"
+
+echo "Test 5: the override obeys the tree-version bound"
+out5="$(run_cm "$WORKDIR/paired" NEXUS_SEED_RELEASE=1.3.0)"
+[[ "$out5" == *"NEXUS_SEED_RELEASE=1.3.0 refused: v1.3.0 is newer than this tree's own version 1.2.0"* ]] && ok "override newer than the tree refused" || bad "override version bound not enforced: $out5"
+
+echo "Test 6: an older-pinned override is accepted (with the notice)"
+out6="$(run_cm "$WORKDIR/paired" NEXUS_SEED_RELEASE=1.0.0)"
+[[ "$out6" == *"SEED release: conexus==1.0.0 (pins engine-service-v9.9.7"* && "$out6" == *"BELOW the floor"* ]] && ok "override v1.0.0 accepted below the floor" || bad "older-pinned override not accepted: $out6"
+
+echo "Test 7: no usable release tag refuses and names git fetch --tags"
+mkfix tagless 1.2.0 9.9.9
+rm -f "$DOCKER_CALLS" "$UV_CALLS"
+out7="$(run_cm "$WORKDIR/tagless")"; rc7=$?
+[[ $rc7 -eq 2 ]] && ok "refused with rc 2" || bad "expected rc 2, got $rc7: $out7"
+[[ "$out7" == *"cannot derive the --candidate-migration SEED release"* && "$out7" == *"git fetch --tags"* ]] && ok "FATAL names the missing release and git fetch --tags" || bad "no-release FATAL text wrong: $out7"
+[[ ! -s "$DOCKER_CALLS" && ! -s "$UV_CALLS" ]] && ok "no docker or uv invoked" || bad "docker/uv invoked before the no-release refusal"
 
 echo
 echo "run_sh_guard_test.sh: $PASS passed, $FAIL failed"

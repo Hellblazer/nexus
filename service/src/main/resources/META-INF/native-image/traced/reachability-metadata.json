@@ -3496,24 +3496,6 @@
       "glob": "META-INF/services/org.slf4j.spi.SLF4JServiceProvider"
     },
     {
-      "glob": "ai/onnxruntime/native/osx-aarch64/libonnxruntime.dylib"
-    },
-    {
-      "glob": "ai/onnxruntime/native/osx-aarch64/libonnxruntime4j_jni.dylib"
-    },
-    {
-      "glob": "ai/onnxruntime/native/osx-aarch64/libonnxruntime_providers_shared.dylib"
-    },
-    {
-      "glob": "com/sun/jna/darwin-aarch64/libjnidispatch.jnilib"
-    },
-    {
-      "glob": "darwin-aarch64/libcudart.dylib"
-    },
-    {
-      "glob": "darwin/libcudart.dylib"
-    },
-    {
       "glob": "db/changelog/aspects-001-baseline.xml"
     },
     {
@@ -3605,9 +3587,6 @@
     },
     {
       "glob": "jooq-settings.xml"
-    },
-    {
-      "glob": "libcudart.dylib"
     },
     {
       "glob": "liquibase.build.properties"

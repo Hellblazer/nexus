@@ -23,10 +23,12 @@ WHY IT LIVES IN PYTEST AND QUERIES A LIVE DATABASE
 --------------------------------------------------
 Two placement facts, both verified rather than assumed:
 
-1. ``service-ci`` is NOT a required check on develop or main (nexus-hq9na). A Java
-   test of this invariant would be ADVISORY at merge — which, for a class that has
-   now recurred three times and shipped a P0 twice, is not a gate at all. This file
-   rides ``pytest-gate``, which IS required.
+1. When this was written ``service-ci`` was NOT a required check on
+   develop or main (nexus-hq9na), so a Java test of this invariant would have been
+   ADVISORY at merge — which, for a class that has now recurred three times and
+   shipped a P0 twice, is not a gate at all. The Java job is required on both
+   branches now (nexus-rjk2a, 2026-09-30); this file stays in pytest for the
+   reason in point 2, and because it rides ``pytest-gate``, which is required too.
 
 2. The obvious cheap implementation — regex the Liquibase changelogs — would make
    this gate a PROXY FOR THE SCHEMA. That is precisely the failure shape of the three
@@ -133,6 +135,19 @@ _DOCUMENTED_EXCLUSIONS: dict[tuple[str, str], str] = {
         "safely where chash_remap cannot. The accepted consequence -- a rename does "
         "not re-home chash_remap, so its ledger detaches from the renamed collection's "
         "current name -- is tracked as its own bug: nexus-lgef3."
+    ),
+    ("chunk_orphaned_at", "collection"): (
+        "RDR-192 reapable(c) (nexus-wbfpw.15, vectors-021-1): the side table of orphaning "
+        "times, one row per chunk, keyed (tenant_id, collection, chash) with a foreign key "
+        "to nexus.chunks that is ON UPDATE CASCADE ON DELETE CASCADE. It is carried by "
+        "nexus.chunks, which IS registered: renameCollectionTxn's UPDATE of chunks.collection "
+        "rewrites these rows through the cascade (pinned through the real rename route by "
+        "ChunkIsReapableIntegrationTest.aRecordFollowsItsChunkThroughTheRenameRoute), and a "
+        "row cannot exist unless its chunk does, so collectionIsEmpty is already answered "
+        "by the chunks entry. Writing the table directly in a re-home would duplicate work "
+        "the cascade does and can conflict with it mid-statement (the "
+        "CASCADE_CARRIED_TABLES reasoning). Registering it would add nothing the chunks "
+        "entry does not already give."
     ),
     ("chash_remap", "target_collection"): (
         "Same ledger and same ruling as source_collection above; the target leg is "

@@ -31,6 +31,7 @@ from nexus.db.http_vector_client import HttpVectorClient
 from nexus.errors import CollectionNotFoundError
 from nexus.exporter import export_collection, import_collection
 from nexus.mcp.core import store_delete
+from tests._chunk_seed import seed_chunks_direct
 
 pytestmark = pytest.mark.integration
 
@@ -51,8 +52,8 @@ def _note(writer, client, owner, collection: str, title: str, content: str) -> t
         physical_collection=collection, source_uri=source_uri,
     ))
     chash = hashlib.sha256(content.encode()).hexdigest()
-    client.upsert_chunks_with_embeddings(
-        collection, ids=[chash], documents=[content], embeddings=[],
+    seed_chunks_direct(
+        collection, ids=[chash], documents=[content], embed=True,
         metadatas=[{
             "title": title, "chunk_text_hash": chash,
             "indexed_at": datetime.now(UTC).isoformat(),

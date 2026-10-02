@@ -42,6 +42,11 @@ import structlog
 
 from nexus.bounded_subprocess import run_bounded
 
+#: The genuine spawn, captured at import. ``_run_manager`` refuses a mutating
+#: verb under a fence only when ``run_bounded`` is STILL this function: a caller
+#: that substituted the module's documented seam never reaches a real manager.
+_REAL_RUN_BOUNDED = run_bounded
+
 _log = structlog.get_logger(__name__)
 
 
@@ -361,6 +366,72 @@ def _manager_executable(name: str) -> str:
     return name
 
 
+#: Verbs that only READ manager state. Everything else -- an unknown verb, an
+#: argv with no verb at all -- is treated as MUTATING: this list is what a fenced
+#: process is allowed to ask a real manager, so it fails closed.
+_READ_ONLY_MANAGER_VERBS: dict[str, frozenset[str]] = {
+    "launchctl": frozenset({
+        "print", "print-disabled", "list", "blame", "managerpid", "manageruid",
+        "managername", "hostinfo", "version", "help", "error",
+    }),
+    "systemctl": frozenset({
+        "is-enabled", "is-active", "is-failed", "show", "status", "cat",
+        "list-units", "list-unit-files", "list-dependencies", "list-jobs",
+        "list-sockets", "list-timers", "get-default", "is-system-running",
+        "show-environment",
+    }),
+}
+
+
+def is_service_manager_cmd(cmd: list[str]) -> bool:
+    """True when *cmd* invokes ``launchctl`` or ``systemctl`` (by basename).
+    Anything else routed through :func:`_run_manager` -- the test suite's fake
+    managers are ``sleep`` and ``true`` -- is not a service manager and is
+    outside the fence."""
+    return bool(cmd) and os.path.basename(cmd[0]) in _READ_ONLY_MANAGER_VERBS
+
+
+def is_mutating_manager_cmd(cmd: list[str]) -> bool:
+    """True unless *cmd* is a known read-only ``launchctl`` / ``systemctl`` verb.
+
+    The verb is the first argument that is not a flag (``--user``, ``--now``,
+    ``-q`` ...). Fails closed: an unrecognised manager, an unknown verb or a
+    missing verb is mutating. One definition, shared by the fenced-process
+    refusal in :func:`_run_manager` and the test suite's autouse tripwire.
+    """
+    if not cmd:
+        return True
+    verbs = _READ_ONLY_MANAGER_VERBS.get(os.path.basename(cmd[0]))
+    if verbs is None:
+        return True
+    verb = next((a for a in cmd[1:] if not a.startswith("-")), None)
+    return verb is None or verb not in verbs
+
+
+def _manager_found(name: str) -> bool:
+    """True when :func:`_manager_executable` resolves *name* to a real binary."""
+    if shutil.which(name):
+        return True
+    return any(
+        os.access(c, os.X_OK) for c in _MANAGER_ABSOLUTE_PATHS.get(os.path.basename(name), ())
+    )
+
+
+#: Set by the test fence (``tests/_fence_home.py``, ``tests/e2e/lib/fence_home.sh``)
+#: and inherited by every child. NOT ``is_dev_checkout_process()``: that is true
+#: for any run from a source checkout, including a developer's own
+#: ``nx daemon service install``, which must keep working.
+FENCED_HOME_ENV = "NX_FENCED_HOME"
+
+
+class ManagerRefusedUnderFence(FileNotFoundError):
+    """A mutating ``launchctl`` / ``systemctl`` verb was refused because this
+    process runs under a test fence. A ``FileNotFoundError`` on purpose: every
+    caller already treats that as "no service manager on this box" and degrades
+    (``ActivationError`` unless ``--force``, a removal warning, ``NO_MANAGER``)
+    instead of crashing."""
+
+
 def _run_manager(
     cmd: list[str], *, timeout: float, **kwargs: object
 ) -> subprocess.CompletedProcess[str]:
@@ -391,6 +462,25 @@ def _run_manager(
     :func:`run_bounded` -- which always captures via its own
     ``stdout``/``stderr`` defaults.
     """
+    # HOME does not isolate a service manager: `launchctl bootout gui/<uid>/<label>`
+    # and `systemctl --user disable --now <unit>` are addressed by label / over the
+    # bus (nexus-q81g7: a unit test destroyed a real autostart unit through this
+    # funnel). Under a test fence a mutating verb is refused HERE, in the product
+    # code, so a real `nx` child of a fenced test or gate is covered as well as
+    # the in-process tests the suite's tripwire wraps. Only when it WOULD really
+    # spawn: a caller that replaced ``run_bounded`` never reaches a manager, and
+    # a manager that is not installed keeps raising the OS's own error.
+    if (
+        os.environ.get(FENCED_HOME_ENV)
+        and run_bounded is _REAL_RUN_BOUNDED
+        and is_service_manager_cmd(cmd)
+        and is_mutating_manager_cmd(cmd)
+        and _manager_found(cmd[0])
+    ):
+        raise ManagerRefusedUnderFence(
+            f"refused `{' '.join(cmd)}`: {FENCED_HOME_ENV} is set, so this process "
+            "runs under a test fence and may not change a real service manager"
+        )
     argv = [_manager_executable(cmd[0]), *cmd[1:]]
     rest = {k: v for k, v in kwargs.items() if k != "capture_output"}
     return run_bounded(argv, timeout=timeout, **rest)  # type: ignore[arg-type]

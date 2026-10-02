@@ -2161,6 +2161,18 @@ def test_on_flush_threads_through_to_chunk_batcher(tmp_path, monkeypatch):
             return {}
 
         @property
+        def throttled_files(self) -> dict:
+            return {}
+
+        @property
+        def throttle_retry_after(self) -> float | None:
+            return None
+
+        @property
+        def throttle_breaker_open(self) -> bool:
+            return False
+
+        @property
         def stats(self) -> dict:
             return {"flushes": 0.0, "flush_seconds": 0.0, "upload_seconds": 0.0}
 
@@ -2196,6 +2208,18 @@ def test_on_flush_defaults_to_none_when_omitted(tmp_path, monkeypatch):
         @property
         def failed_files(self) -> dict:
             return {}
+
+        @property
+        def throttled_files(self) -> dict:
+            return {}
+
+        @property
+        def throttle_retry_after(self) -> float | None:
+            return None
+
+        @property
+        def throttle_breaker_open(self) -> bool:
+            return False
 
         @property
         def stats(self) -> dict:

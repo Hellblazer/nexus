@@ -29,6 +29,7 @@ from nexus import health
 from nexus.db import make_t3
 from nexus.health import _is_pdf_stub_metadata
 from tests._catalog_fixture_ops import ActiveCatalog
+from tests._chunk_seed import seed_chunks_direct
 
 _COLLECTION = "knowledge__rte90-pdf-stub__bge-base-en-v15-768__v1"
 _LABEL = "PDF chunk metadata"
@@ -47,11 +48,11 @@ def _meta(**kw) -> dict:
 
 def _seed(t3, rows: list[tuple[str, dict]]) -> list[str]:
     ids = [f"{i:064x}" for i in range(1, len(rows) + 1)]
-    t3.upsert_chunks_with_embeddings(
+    seed_chunks_direct(
         _COLLECTION,
         ids=ids,
         documents=[text for text, _ in rows],
-        embeddings=[],
+        embed=True,
         metadatas=[meta for _, meta in rows],
     )
     return ids

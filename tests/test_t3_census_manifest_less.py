@@ -60,11 +60,10 @@ def _seed_all_reachable_buckets(tenant: str, coll: str) -> dict[str, str]:
     """Seed one manifest-less chunk per reachable bucket, plus one properly
     manifested chunk (excluded from every bucket, counted in
     scope_chunk_total). Returns {bucket_or_label: chash}."""
-    import nexus.db.http_vector_client as hvc
     from tests._catalog_fixture_ops import ActiveCatalog
+    from tests._chunk_seed import seed_chunks_direct
 
     cat = ActiveCatalog()
-    db = hvc.HttpVectorClient(tenant=tenant)
     owner = cat.register_owner("wbfpw5census", "curator")
 
     chash_no_owner = _chash(f"{coll}:no-owner")
@@ -99,9 +98,11 @@ def _seed_all_reachable_buckets(tenant: str, coll: str) -> dict[str, str]:
 
     # T3 chunks must exist BEFORE the manifest write below -- catalog-029's
     # fk_catalog_chunks_chunk 409s a manifest row against a chash with no
-    # nexus.chunks row yet.
-    db.upsert_chunks_with_embeddings(
-        coll,
+    # nexus.chunks row yet. Substrate SQL, not upsert-chunks: the engine
+    # refuses that route's ownerless writes from RDR-223 Phase 3 on, and four
+    # of these five chunks are ownerless by design (that is the census's subject).
+    seed_chunks_direct(
+        coll, tenant=tenant,
         ids=[chash_no_owner, chash_legacy_reverse, chash_dead_owner,
              chash_superseded, chash_manifested],
         documents=[
@@ -109,7 +110,6 @@ def _seed_all_reachable_buckets(tenant: str, coll: str) -> dict[str, str]:
             "dead-owner probe text", "superseded probe text",
             "manifested probe text",
         ],
-        embeddings=[],
         metadatas=[
             {"chunk_text_hash": chash_no_owner, "title": "no-owner.txt:1-1"},
             {"chunk_text_hash": chash_legacy_reverse, "title": "legacy-reverse.txt:1-1"},
@@ -143,7 +143,6 @@ def _seed_all_reachable_buckets(tenant: str, coll: str) -> dict[str, str]:
     }
 
 
-@pytest.mark.integration
 def test_census_reports_every_reachable_bucket_with_owner_and_exits_clean(
     runner: CliRunner, t2_service_env,
 ) -> None:
@@ -175,7 +174,6 @@ def test_census_reports_every_reachable_bucket_with_owner_and_exits_clean(
     assert ids["manifested"] not in result.output
 
 
-@pytest.mark.integration
 def test_census_json_parses_and_matches_text_counts_plus_owners(
     runner: CliRunner, t2_service_env,
 ) -> None:
@@ -217,7 +215,6 @@ def test_census_json_parses_and_matches_text_counts_plus_owners(
         assert f"{bucket}: {row['totals'][bucket]}" in text_result.output
 
 
-@pytest.mark.integration
 def test_census_require_zero_violation_exits_2(
     runner: CliRunner, t2_service_env,
 ) -> None:
@@ -235,7 +232,6 @@ def test_census_require_zero_violation_exits_2(
     assert "no-owner" in result.output
 
 
-@pytest.mark.integration
 def test_census_json_with_require_zero_violation_stdout_still_parses(
     runner: CliRunner, t2_service_env,
 ) -> None:
@@ -271,7 +267,6 @@ def test_census_json_with_require_zero_violation_stdout_still_parses(
     assert "violated" not in result.stdout.lower()
 
 
-@pytest.mark.integration
 def test_census_quarantine_collection_exits_engine_error_never_traceback(
     runner: CliRunner, t2_service_env,
 ) -> None:
@@ -293,7 +288,6 @@ def test_census_quarantine_collection_exits_engine_error_never_traceback(
     assert "quarantine-wbfpw5-census-probe" in result.output
 
 
-@pytest.mark.integration
 def test_census_all_on_a_tenant_with_no_collections_exits_3(
     runner: CliRunner, t2_service_env,
 ) -> None:

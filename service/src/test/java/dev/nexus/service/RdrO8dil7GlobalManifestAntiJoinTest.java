@@ -6,7 +6,6 @@ import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.CatalogRepository;
 import dev.nexus.service.db.Chash;
-import dev.nexus.service.db.StagingPromoteOps;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.jooq.binding.Vector;
 import dev.nexus.service.jooq.binding.VectorBinding;
@@ -107,24 +106,17 @@ import static org.assertj.core.api.Assertions.assertThat;
  * producer.
  *
  * <p><strong>Anti-join key: {@code (tenant_id, collection, chash)}</strong>
- * — deliberately NOT {@link dev.nexus.service.db.ChashSqlIdioms
- * #danglingManifestCountDsl}, kept as an INDEPENDENT implementation rather
- * than a caller of it. {@code danglingManifestCountDsl} WAS chash-only (no
- * tenant, no collection predicate) — the exact shape that understated the
- * live corpus census by 2.2x (T2 {@code nexus/rdr-191-dangling-definition-
- * of-record} [22364]'s reconciliation section) — until nexus-eanej
- * (2026-09-05) re-keyed it to this SAME {@code (tenant_id, collection,
- * chash)} triple. It is STILL not reused here, for two reasons that
- * outlive that fix: (1) a tripwire sharing implementation with the thing
- * it guards cannot catch a regression common to both — this class computes
- * the anti-join itself so a future change to {@code danglingManifestCountDsl}
- * (or a revert of nexus-eanej) is caught by an INDEPENDENT count, not
- * reflected back at itself; (2) {@code danglingManifestCountDsl} carries no
- * owner-liveness predicate at all — a manifest row whose owning document is
- * soft-tombstoned (class b) is invisible to it either way, whereas {@link
- * #globalDanglingCount} below explicitly joins {@code catalog_documents} and
- * requires {@code d.deleted_at IS NULL}, so class (b) rows are correctly
- * excluded rather than incidentally absent. <strong>Also deliberately NOT
+ * — computed here by this class itself, never by a production helper: a
+ * tripwire sharing implementation with the thing it guards cannot catch a
+ * regression common to both. (The engine's own {@code danglingManifestCountDsl}
+ * was chash-only — no tenant, no collection predicate, the exact shape that
+ * understated the live corpus census by 2.2x, T2 {@code nexus/rdr-191-dangling-
+ * definition-of-record} [22364] — until nexus-eanej re-keyed it to this SAME
+ * triple; it was deleted with the staging routes at nexus-z0o2p.27, its only
+ * caller.) {@link #globalDanglingCount} below also explicitly joins {@code
+ * catalog_documents} and requires {@code d.deleted_at IS NULL}, so a manifest
+ * row whose owner is soft-tombstoned (class b) is correctly excluded rather
+ * than incidentally absent. <strong>Also deliberately NOT
  * built on {@code nexus.manifest_verify}/{@code manifest_verify_all} or
  * {@code manifest_orphans}</strong> — this tripwire must survive RDR-191
  * Phase 6 deleting those functions (the plan's own retirement item), so it
@@ -148,8 +140,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  * </ol>
  *
  * <p>Harness: the ~40-line hand-rolled recipe every integration test in
- * this package copies (no base class / JUnit extension exists —
- * {@code StagingPromoteOpsIntegrationTest.java}). {@code
+ * this package copies (no base class / JUnit extension exists). {@code
  * SharedCluster.acquireDatabase()} (via {@link PgContainerHelper#start()})
  * clones a per-CLASS database from a migrated template but reuses the
  * CLUSTER (and its roles) across every test class in the fork — role
@@ -171,7 +162,6 @@ class RdrO8dil7GlobalManifestAntiJoinTest {
     TenantScope scope;
     CatalogRepository catalogRepo;
     PgVectorRepository vectorRepo;
-    StagingPromoteOps promoteOps;
 
     @BeforeAll
     void startAll() throws Exception {
@@ -200,7 +190,6 @@ class RdrO8dil7GlobalManifestAntiJoinTest {
         catalogRepo = new CatalogRepository(scope);
         var embedder = new ConstantEmbedder(1024);
         vectorRepo = new PgVectorRepository(scope, embedder, embedder);
-        promoteOps = new StagingPromoteOps(scope);
     }
 
     @AfterAll
@@ -224,27 +213,6 @@ class RdrO8dil7GlobalManifestAntiJoinTest {
         @Override
         public void close() { }
     }
-
-    // ── staging.* fixed-shape typed handles (nexus-cbo4a batch 11) ───────────
-    // staging.* carries no generated jOOQ Table (codegen's <schemata> covers only
-    // nexus/t1) -- same DSL.field(DSL.name(col), Type.class) house pattern
-    // StagingHandler/StagingPromoteOps/StagingPromoteOpsIntegrationTest already use.
-
-    private static final Table<?> STAGING_CHUNKS = DSL.table(DSL.name("staging", "chunks"));
-    private static final Field<String> SC_TENANT_ID = DSL.field(DSL.name("tenant_id"), String.class);
-    private static final Field<String> SC_COLLECTION = DSL.field(DSL.name("collection"), String.class);
-    private static final Field<Integer> SC_DIM = DSL.field(DSL.name("dim"), Integer.class);
-    private static final Field<String> SC_LEGACY_REF = DSL.field(DSL.name("legacy_ref"), String.class);
-    private static final Field<String> SC_CHUNK_TEXT = DSL.field(DSL.name("chunk_text"), String.class);
-    private static final Field<Vector> SC_EMBEDDING = DSL.field(DSL.name("embedding"),
-        SQLDataType.OTHER.asConvertedDataType(new VectorBinding()));
-    private static final Field<String> SC_MODEL = DSL.field(DSL.name("model"), String.class);
-
-    private static final Table<?> STAGING_DOCUMENT_CHUNKS = DSL.table(DSL.name("staging", "document_chunks"));
-    private static final Field<String> SDC_TENANT_ID = DSL.field(DSL.name("tenant_id"), String.class);
-    private static final Field<String> SDC_DOC_ID = DSL.field(DSL.name("doc_id"), String.class);
-    private static final Field<Integer> SDC_POSITION = DSL.field(DSL.name("position"), Integer.class);
-    private static final Field<String> SDC_CHASH = DSL.field(DSL.name("chash"), String.class);
 
     // ── THE TRIPWIRE ITSELF ───────────────────────────────────────────────
 
@@ -307,15 +275,6 @@ class RdrO8dil7GlobalManifestAntiJoinTest {
 
     // ── fixture helpers ───────────────────────────────────────────────────
 
-    private static String digestHex(String text) {
-        try {
-            return java.util.HexFormat.of().formatHex(
-                MessageDigest.getInstance("SHA-256").digest(text.getBytes(StandardCharsets.UTF_8)));
-        } catch (Exception e) {
-            throw new IllegalStateException(e);
-        }
-    }
-
     /** Returns a QUOTED vector literal, e.g. {@code '[0.1,0.1]'} — ready to
      *  splice directly before {@code ::nexus.vector} with no extra quoting needed
      *  at call sites. */
@@ -325,7 +284,7 @@ class RdrO8dil7GlobalManifestAntiJoinTest {
 
     /** Typed-DSL counterpart to {@link #vec} — every component set to {@code value}
      *  (nexus-cbo4a batch 11), for {@link VectorBinding}-backed inserts against a
-     *  generated/{@code STAGING_CHUNKS}-style {@code embedding}/{@code
+     *  generated {@code embedding}/{@code
      *  embedding_&lt;dim&gt;} field, replacing the quoted {@code '[0.1,...]'::nexus.vector}
      *  literal {@link #vec} builds for raw SQL. */
     private static Vector allValueVector(int dim, float value) {
@@ -348,14 +307,12 @@ class RdrO8dil7GlobalManifestAntiJoinTest {
 
     /** Runs {@code query} against a raw superuser {@link Connection} and returns its
      *  {@code int} result (nexus-cbo4a batch 11 -- retires the {@code rows(Connection,
-     *  String)} raw-SQL wrapper the same way {@code StagingPromoteOpsIntegrationTest}'s
-     *  {@code count(String sql)} was retired in this same batch). */
+     *  String)} raw-SQL wrapper). */
     private static int rows(Connection su, Function<DSLContext, ? extends Number> query) {
         return query.apply(DSL.using(su, SQLDialect.POSTGRES)).intValue();
     }
 
-    /** {@code CHUNKS.embedding_<dim>} resolved by name, mirroring {@code
-     *  StagingPromoteOps}'s own {@code DimTables.embeddingColumn}-driven lookup. */
+    /** {@code CHUNKS.embedding_<dim>} resolved by name via {@code DimTables.embeddingColumn}. */
     @SuppressWarnings("unchecked")
     private static Field<Vector> embeddingColumn(int dim) {
         return (Field<Vector>) CHUNKS.field(DimTables.embeddingColumn(dim));
@@ -373,15 +330,15 @@ class RdrO8dil7GlobalManifestAntiJoinTest {
     }
 
     // ── Order 10: UPSERT arm — CatalogRepository.writeManifest ────────────
+    // (Order 20, the PROMOTE arm over StagingPromoteOps.finalizeTenant, left with the
+    // staging routes at nexus-z0o2p.27: the producer it drove no longer exists.)
 
     @Test
     @Order(10)
     void upsertPath_writeManifest_producesNoDanglingRows() throws Exception {
         String coll = "code__gate2-upsert__voyage-code-3__v1";
-        // chash MUST be the actual digest of the stored text — StagingPromoteOps
-        // .finalizeTenant's in-txn residual-mismatch check (invoked by the promote
-        // arm test below, same tenant) scans every chunks_* row for this tenant
-        // and fails loud on chash != sha256(chunk_text).
+        // chash is the actual digest of the stored text (the write boundary's own
+        // chash == sha256(chunk_text) invariant).
         String content = "upsert content";
         String chash = Chash.ofText(content).toHex();
 
@@ -411,57 +368,6 @@ class RdrO8dil7GlobalManifestAntiJoinTest {
                 .isGreaterThan(0);
             assertThat(globalDanglingCount(su))
                 .as("upsert path (writeManifest): zero dangling manifest rows").isZero();
-        }
-    }
-
-    // ── Order 20: PROMOTE arm — StagingPromoteOps.finalizeTenant (F12b) ────
-
-    @Test
-    @Order(20)
-    void promotePath_finalizeTenant_producesNoDanglingRows() throws Exception {
-        String coll = "knowledge__gate2-promote__bge-base-en-v15-768__v1";
-        String text = "gate2 promote content " + System.nanoTime();
-        String canonical = digestHex(text);
-
-        // RDR-204 nexus-ft04v.7 retired StagingPromoteOps's own auto-stub-on-write;
-        // the collection must be registered explicitly before promoteCollection runs.
-        try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, coll);
-        }
-        scope.withTenant(TENANT, ctx -> {
-            ctx.insertInto(STAGING_CHUNKS, SC_TENANT_ID, SC_COLLECTION, SC_DIM, SC_LEGACY_REF, SC_CHUNK_TEXT,
-                           SC_EMBEDDING, SC_MODEL)
-               .values(TENANT, coll, 768, canonical, text, allValueVector(768, 0.1f), "bge-768")
-               .execute();
-            return null;
-        });
-        Map<String, Object> promoted = promoteOps.promoteCollection(TENANT, coll, 768);
-        assertThat(promoted.get("promoted"))
-            .as("precondition: the staged chunk actually landed content").isEqualTo(1);
-
-        catalogRepo.upsertDocument(TENANT, Map.of(
-            "tumbler", "gate2-promote-doc",
-            "title", "gate2 promote fixture",
-            "content_type", "knowledge",
-            "corpus", "knowledge",
-            "physical_collection", coll));
-        scope.withTenant(TENANT, ctx -> {
-            ctx.insertInto(STAGING_DOCUMENT_CHUNKS, SDC_TENANT_ID, SDC_DOC_ID, SDC_POSITION, SDC_CHASH)
-               .values(TENANT, "gate2-promote-doc", 0, canonical)
-               .execute();
-            return null;
-        });
-
-        Map<String, Object> fin = promoteOps.finalizeTenant(TENANT, false);
-        assertThat(fin.get("manifest_promoted"))
-            .as("precondition: finalizeTenant actually promoted a manifest row — the anti-join "
-                + "below would pass on an empty set")
-            .isEqualTo(1);
-
-        try (Connection su = pg.createConnection("")) {
-            assertThat(globalDanglingCount(su))
-                .as("promote path (finalizeTenant): zero dangling manifest rows").isZero();
         }
     }
 
@@ -727,6 +633,8 @@ class RdrO8dil7GlobalManifestAntiJoinTest {
                 .isEqualTo(orphanContent);
         }
 
+        // RDR-192 Step 8: the sweep honours the 30 day grace window.
+        ReapableFixtures.agePastGrace(pg, TENANT, coll);
         var outcome = vectorRepo.quarantineOrphans(TENANT, coll, quarantineColl,
             "2026-08-13T00:00:00Z", 10);
         assertThat(outcome.moved())

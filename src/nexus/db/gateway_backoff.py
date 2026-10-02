@@ -82,7 +82,9 @@ _EMBED_WRITE_504_BACKOFF_FLOOR_S = _EDGE_UPSTREAM_BOUND_S
 #: ``http_vector_client._T3_WRITE_PATH_SUFFIXES`` uses) for routes where the
 #: engine performs a SYNCHRONOUS server-side embed as part of the write
 #: itself -- exactly the routes :data:`_EMBED_WRITE_504_BACKOFF_FLOOR_S`
-#: exists for. THREE such routes, spanning both HTTP clients:
+#: exists for. FIVE such routes (RDR-223 P2.0 added ``/manifest/append`` and
+#: ``/manifest/append_many``, listed after the three below, with the same
+#: conditional as write_many), spanning both HTTP clients:
 #:
 #:   * ``/v1/vectors/upsert-chunks``   -- ``http_vector_client.py``,
 #:     ``HttpVectorClient.upsert_chunks``. Always embeds.
@@ -103,9 +105,19 @@ _EMBED_SERVER_SIDE_WRITE_PATH_SUFFIXES: tuple[str, ...] = (
     "/upsert-chunks",
     "/store-put",
     "/manifest/write_many",
+    # RDR-223 P2.0 (nexus-z0o2p.10): append and append_many carry the same optional inline
+    # ``chunks`` and embed them synchronously in the request, so they share write_many's
+    # conditional (embeds only when the body carries a non-empty ``chunks``).
+    "/manifest/append",
+    "/manifest/append_many",
 )
 
-_WRITE_MANY_SUFFIX = "/manifest/write_many"
+#: The routes whose embed is CONDITIONAL on the body carrying a non-empty ``chunks`` list.
+_CHUNKS_CONDITIONAL_SUFFIXES: tuple[str, ...] = (
+    "/manifest/write_many",
+    "/manifest/append",
+    "/manifest/append_many",
+)
 
 
 def _is_embed_server_side_write_path(path: str, body: dict | None = None) -> bool:
@@ -131,8 +143,8 @@ def _is_embed_server_side_write_path(path: str, body: dict | None = None) -> boo
     """
     if not any(path.endswith(suffix) for suffix in _EMBED_SERVER_SIDE_WRITE_PATH_SUFFIXES):
         return False
-    if path.endswith(_WRITE_MANY_SUFFIX):
-        return bool(body.get("chunks"))
+    if path.endswith(_CHUNKS_CONDITIONAL_SUFFIXES):
+        return bool(body and body.get("chunks"))
     return True
 
 
@@ -170,6 +182,7 @@ _NON_IDEMPOTENT_SWEEP_PATH_SUFFIXES: tuple[str, ...] = (
     "/gc/quarantine-orphans",
     "/gc/restore-rereferenced",
     "/gc/expire-quarantine",
+    "/gc/quarantine-restore",
 )
 
 

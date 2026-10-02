@@ -79,7 +79,7 @@ def _seed_for_store_put(content: str, collection: str = "fixture-subject") -> No
 
 
 @pytest.fixture
-def inject_local_t3(local_t3: T3Database):
+def inject_local_t3(local_t3: T3Database, monkeypatch: pytest.MonkeyPatch):
     """Inject ``local_t3`` into the mcp_infra ``_t3_instance`` singleton
     AND patch the local-name binding in ``mcp.core``. Both layers are
     necessary because:
@@ -92,6 +92,11 @@ def inject_local_t3(local_t3: T3Database):
         suspenders.
     """
     from nexus.mcp_infra import inject_t3
+    from tests._note_write_double import route_note_writes_to
+
+    # RDR-223 P2.2 (nexus-z0o2p.12): the note write is one request to the engine;
+    # these tests read the chunk back from the fake T3, so the note is routed there.
+    route_note_writes_to(monkeypatch, local_t3)
     inject_t3(local_t3)
     yield local_t3
     # Reset singleton after the test so we don't leak into the next.
@@ -266,10 +271,11 @@ def test_mcp_store_put_rolls_back_when_catalog_hook_raises(
     resolve-or-skip decision. That contract is exactly the no-owner
     census shape RDR-192 exists to close — a live, manifest-less T3
     chunk with no catalog document at all. store_put now detects the
-    blank ``catalog_doc_id`` right after the registration attempt, rolls
-    back the chunk ``put_note_pieces`` already wrote, and returns an
-    explicit error BEFORE any post-store hook (including
-    ``fire_document``) ever runs.
+    blank ``catalog_doc_id`` right after the registration attempt and
+    returns an explicit error BEFORE any post-store hook (including
+    ``fire_document``) ever runs. Since RDR-223 P2.2 (nexus-z0o2p.12) it
+    does so before writing anything: a note is written together with its
+    catalog entry, so there is no chunk to roll back.
     """
     import structlog.testing
 
@@ -308,17 +314,22 @@ def test_mcp_store_put_rolls_back_when_catalog_hook_raises(
     assert "catalog registration failed" in result
 
     assert called == [], (
-        "a rolled-back store_put must never reach fire_document — the "
-        f"chunk it would enqueue is being deleted; got {called!r}"
+        "a failed store_put must never reach fire_document — there is "
+        f"no chunk to enqueue; got {called!r}"
     )
     import hashlib as _hashlib
+    from nexus.db.http_vector_client import HttpVectorClient, VectorServiceError
+
     chash = _hashlib.sha256(content.encode()).hexdigest()
-    cols = [c["name"] for c in local_t3.list_collections()
-            if c["name"].startswith("knowledge__")]
-    assert cols, "expected the knowledge collection to exist in T3"
-    assert local_t3.get_by_id(cols[0], chash) is None, (
-        "a failed catalog registration must roll back the chunk it just "
-        "wrote, not leave a no-owner orphan in T3"
+    col = "knowledge__fixture-subject__bge-base-en-v15-768__v1"
+    try:
+        present = set(HttpVectorClient().existing_ids(col, [chash]))
+    except VectorServiceError as exc:
+        assert "not registered" in str(exc), exc  # nothing was ever written to the collection
+        present = set()
+    assert present == set(), (
+        "a failed catalog registration must not write the chunk: a note "
+        "is never written without its owner"
     )
 
 

@@ -41,6 +41,7 @@ __all__ = [
     "register_real_doc_id",
     "restore_fk_after_dangling_seeds",
     "seed_manifest_chunks",
+    "seed_note_manifest",
     "unroutable_write_target",
 ]
 
@@ -229,9 +230,10 @@ def seed_manifest_chunks(collection: str, chashes: Iterable[str], *, dim: int | 
     seed the same chash more than once (e.g. re-writing a manifest for an
     idempotency test) without consequence.
 
-    Uses the same-model PASSTHROUGH form (explicit zero ``embeddings``,
-    ``nexus.db.http_vector_client.HttpVectorClient.upsert_chunks``'s
-    ``embeddings=`` kwarg) rather than letting the server embed — two
+    Stores zero ``embeddings`` of the collection's registered width, or of *dim* when given (``tests/_chunk_seed.seed_chunks_direct``;
+    it was ``HttpVectorClient.upsert_chunks``'s same-model PASSTHROUGH until
+    RDR-223 P3.1 took the write off the ownerless route) rather than letting the
+    server embed — two
     reasons: (1) it works uniformly for BOTH locally-embeddable collection
     names (``bge-base-en-v15-768`` / ``minilm-l6-v2-384``) and cloud-model
     names (``voyage-*``), which the test substrate's ``onnx-local``
@@ -262,19 +264,39 @@ def seed_manifest_chunks(collection: str, chashes: Iterable[str], *, dim: int | 
     model beforehand (e.g. an explicit ``register_collection`` override)
     passes ``dim=`` to match it.
     """
-    from nexus.db.http_vector_client import HttpVectorClient
-    from nexus.db.local_ef import _MODEL_TOKENS, _TIER1_MODEL
-    from nexus.db.reconcile import dim_for_model_token
+    from tests._chunk_seed import seed_chunks_direct
 
     ids = sorted({c for c in chashes if c})
     if not ids:
         return
-    if dim is None:
-        dim = dim_for_model_token(_MODEL_TOKENS[_TIER1_MODEL])
-    HttpVectorClient().upsert_chunks(
+    # RDR-223 P3.1: substrate SQL, not upsert-chunks. The chunk lands before
+    # its manifest row (the FK requires that order), which is exactly the
+    # ownerless write the engine refuses from Phase 3 on.
+    seed_chunks_direct(
         collection, ids, [f"fk-stub chunk for {c}" for c in ids],
-        embeddings=[[0.0] * dim for _ in ids],
+        embeddings=None if dim is None else [[0.0] * dim for _ in ids],
     )
+
+
+def seed_note_manifest(catalog_doc_id: str, manifest_metadatas: list[dict], *, collection: str) -> None:
+    """Write the manifest rows for a note whose chunks a fixture already seeded.
+
+    For a fixture that needs chunk metadata :func:`nexus.catalog.note_write.write_note` cannot
+    carry (a backdated ``indexed_at``, a TTL, a hand-shaped ``doc_id``): seed the chunk rows with
+    ``tests._chunk_seed.seed_chunks_direct``, then call this. It replaces the direct manifest
+    write of the retired split note path (RDR-223, nexus-z0o2p.32) for that purpose: one
+    ``atomic_manifest_replace`` with the rows :func:`nexus.catalog.note_write.note_manifest_rows`
+    builds, then ``resync_chunk_count_cache``. No verify, no reap, no retry, because no fixture's
+    subject is any of them. A fixture whose chunks carry nothing special goes through ``write_note``
+    instead, which writes chunks and owner in one request as production does.
+    """
+    from nexus.catalog.note_write import note_manifest_rows
+
+    rows = note_manifest_rows(manifest_metadatas)
+    assert rows, "seed_note_manifest: no chunk_text_hash in the metadatas, nothing to catalog"
+    cat = ActiveCatalog()
+    cat.atomic_manifest_replace(catalog_doc_id, rows, collection=collection)
+    cat.resync_chunk_count_cache(catalog_doc_id)
 
 
 def _run_psql(sql: str) -> None:

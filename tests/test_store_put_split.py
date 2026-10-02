@@ -20,15 +20,12 @@ from unittest.mock import patch
 import pytest
 from tokenizers import Tokenizer, models, pre_tokenizers
 
-from nexus.catalog import recovery_bundle, store_hook
+from nexus.catalog import store_hook
 from nexus.corpus import t3_collection_name
-from nexus.db.minilm_direct import MiniLMDirectEmbeddingFunction as DefaultEmbeddingFunction
-from nexus.db.t3 import T3Database
 from nexus.embed_window import TokenWindow
 from nexus.mcp.core import store_get, store_put
 from nexus.mcp_infra import inject_t3
-from tests._catalog_fixture_ops import active_reader, documents_by_title, seed_manifest_chunks
-from tests.conftest import make_vector_test_client
+from tests._catalog_fixture_ops import active_reader, documents_by_title
 
 SUBJECT = "fixture-subject"
 NOTE = " ".join(f"Sentence {i:03d} is part of a long note." for i in range(60))
@@ -39,14 +36,18 @@ def _sha(text: str) -> str:
 
 
 @pytest.fixture
-def local_t3() -> T3Database:
-    return T3Database(_client=make_vector_test_client(), _ef_override=DefaultEmbeddingFunction())
+def engine_t3(t2_service_env: str):
+    """The real engine's vector client, injected as the MCP tools' T3.
 
+    RDR-223 P2.2 (nexus-z0o2p.12): ``store_put`` writes a note's pieces and its
+    manifest in one request to the engine, so what it wrote is read back from
+    the engine, not from an in-memory double.
+    """
+    from nexus.db.http_vector_client import HttpVectorClient
 
-@pytest.fixture
-def inject_local_t3(local_t3: T3Database):
-    inject_t3(local_t3)
-    yield local_t3
+    client = HttpVectorClient(tenant=t2_service_env)
+    inject_t3(client)
+    yield client
     inject_t3(None)
 
 
@@ -79,7 +80,7 @@ def windowless(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(store_hook, "window_for_model", lambda model: None)
 
 
-def _store(t3: T3Database, content: str, title: str) -> str:
+def _store(t3, content: str, title: str) -> str:
     with patch("nexus.mcp.core._get_t3", return_value=t3):
         return store_put(content=content, collection=SUBJECT, title=title)
 
@@ -158,17 +159,16 @@ def test_one_piece_keeps_the_single_chunk_manifest_exactly() -> None:
 # ── store_put and store_get through the real catalog ─────────────────────────
 
 def test_store_put_writes_every_piece_and_a_manifest_in_order(
-    inject_local_t3, catalog_env, small_window,
+    engine_t3, catalog_env, small_window,
 ) -> None:
     col_name = t3_collection_name(SUBJECT)
     pieces = store_hook.note_pieces(NOTE, col_name)
-    seed_manifest_chunks(col_name, [_sha(p) for p in pieces])
 
-    result = _store(inject_local_t3, NOTE, "long-note")
+    result = _store(engine_t3, NOTE, "long-note")
 
     assert result.startswith(f"Stored: {_sha(pieces[0])}"), result
     for piece in pieces:
-        entry = inject_local_t3.get_by_id(col_name, _sha(piece))
+        entry = engine_t3.get_by_id(col_name, _sha(piece))
         assert entry is not None and entry["content"] == piece
     docs = documents_by_title("long-note")
     assert len(docs) == 1
@@ -177,14 +177,13 @@ def test_store_put_writes_every_piece_and_a_manifest_in_order(
 
 
 def test_store_get_returns_the_whole_note_by_id_and_by_title(
-    inject_local_t3, catalog_env, small_window,
+    engine_t3, catalog_env, small_window,
 ) -> None:
     col_name = t3_collection_name(SUBJECT)
     pieces = store_hook.note_pieces(NOTE, col_name)
-    seed_manifest_chunks(col_name, [_sha(p) for p in pieces])
-    _store(inject_local_t3, NOTE, "long-note-get")
+    _store(engine_t3, NOTE, "long-note-get")
 
-    with patch("nexus.mcp.core._get_t3", return_value=inject_local_t3):
+    with patch("nexus.mcp.core._get_t3", return_value=engine_t3):
         by_id = store_get(_sha(pieces[0]), SUBJECT)
         by_title = store_get("long-note-get", SUBJECT)
 
@@ -194,7 +193,7 @@ def test_store_get_returns_the_whole_note_by_id_and_by_title(
 
 
 def test_store_get_by_a_later_chunk_names_the_note_not_that_chunk(
-    inject_local_t3, catalog_env, small_window,
+    engine_t3, catalog_env, small_window,
 ) -> None:
     """nexus-zdzm5 (7.64.1 shakeout surface C F10): store_get by a
     non-first chunk hash reassembled the note but printed that chunk's hash
@@ -202,10 +201,9 @@ def test_store_get_by_a_later_chunk_names_the_note_not_that_chunk(
     col_name = t3_collection_name(SUBJECT)
     pieces = store_hook.note_pieces(NOTE, col_name)
     assert len(pieces) > 1
-    seed_manifest_chunks(col_name, [_sha(p) for p in pieces])
-    _store(inject_local_t3, NOTE, "long-note-later-chunk")
+    _store(engine_t3, NOTE, "long-note-later-chunk")
 
-    with patch("nexus.mcp.core._get_t3", return_value=inject_local_t3):
+    with patch("nexus.mcp.core._get_t3", return_value=engine_t3):
         out = store_get(_sha(pieces[-1]), SUBJECT)
 
     assert out.splitlines()[0] == f"ID:         {_sha(pieces[0])}"
@@ -213,7 +211,7 @@ def test_store_get_by_a_later_chunk_names_the_note_not_that_chunk(
 
 
 def test_store_get_reassembles_a_windowless_split_note(
-    inject_local_t3, catalog_env, windowless,
+    engine_t3, catalog_env, windowless,
 ) -> None:
     """nexus-b2tld read side. Until note_pieces learned to split a windowless
     collection, `only a collection whose model has a small token window can
@@ -226,10 +224,9 @@ def test_store_get_reassembles_a_windowless_split_note(
     col_name = t3_collection_name(SUBJECT)
     pieces = store_hook.note_pieces(NOTE, col_name)
     assert len(pieces) > 1, "fixture note must cross NOTE_SPLIT_CHARS"
-    seed_manifest_chunks(col_name, [_sha(p) for p in pieces])
-    _store(inject_local_t3, NOTE, "windowless-note-get")
+    _store(engine_t3, NOTE, "windowless-note-get")
 
-    with patch("nexus.mcp.core._get_t3", return_value=inject_local_t3):
+    with patch("nexus.mcp.core._get_t3", return_value=engine_t3):
         by_id = store_get(_sha(pieces[0]), SUBJECT)
         by_title = store_get("windowless-note-get", SUBJECT)
 
@@ -240,7 +237,7 @@ def test_store_get_reassembles_a_windowless_split_note(
 
 
 def test_a_windowless_single_chunk_note_still_reads_back_plain(
-    inject_local_t3, catalog_env, windowless,
+    engine_t3, catalog_env, windowless,
 ) -> None:
     """The other side of dropping the has_small_window short-circuit: a note
     that fits in one piece has a one-row manifest, so split_note_text must
@@ -248,10 +245,9 @@ def test_a_windowless_single_chunk_note_still_reads_back_plain(
     short = "A short windowless note."
     col_name = t3_collection_name(SUBJECT)
     assert store_hook.note_pieces(short, col_name) == [short]
-    seed_manifest_chunks(col_name, [_sha(short)])
-    _store(inject_local_t3, short, "windowless-short")
+    _store(engine_t3, short, "windowless-short")
 
-    with patch("nexus.mcp.core._get_t3", return_value=inject_local_t3):
+    with patch("nexus.mcp.core._get_t3", return_value=engine_t3):
         out = store_get(_sha(short), SUBJECT)
 
     assert short in out
@@ -259,97 +255,6 @@ def test_a_windowless_single_chunk_note_still_reads_back_plain(
 
 
 # ── failure, hook shape, resolver (review round 1) ───────────────────────────
-
-class _FailingT3:
-    """put() fails on the call numbered *fail_at*; records deletes."""
-
-    def __init__(self, fail_at: int, existing: set[str]) -> None:
-        self.fail_at = fail_at
-        self.existing = existing
-        self.calls = 0
-        self.deleted: list[str] = []
-
-    def existing_ids(self, collection: str, ids: list[str]) -> set[str]:
-        return {i for i in ids if i in self.existing}
-
-    def put(self, *, collection: str, content: str, **kwargs) -> str:
-        self.calls += 1
-        if self.calls == self.fail_at:
-            raise RuntimeError("engine said no")
-        return _sha(content)
-
-    def batch_delete(self, collection: str, ids: list[str]) -> int:
-        self.deleted.extend(ids)
-        return len(ids)
-
-
-def test_a_failed_piece_write_removes_only_the_pieces_this_call_wrote() -> None:
-    """Pieces written before the failure would otherwise stay searchable with
-    no manifest. A piece that already existed is identical text another note
-    also holds, so it must survive."""
-    t3 = _FailingT3(fail_at=3, existing={_sha("b")})
-    with pytest.raises(RuntimeError, match="engine said no"):
-        store_hook.put_note_pieces(t3, "c", ["a", "b", "c", "d"], title="t")
-    assert t3.deleted == [_sha("a")]
-
-
-def test_one_piece_is_a_single_put_with_no_existence_probe() -> None:
-    class _T3:
-        def existing_ids(self, *a, **k):
-            raise AssertionError("a one-piece note must not pay an existence probe")
-
-        def put(self, *, collection: str, content: str, **kwargs) -> str:
-            return _sha(content)
-
-    assert store_hook.put_note_pieces(_T3(), "c", ["x"], title="t") == [_sha("x")]
-
-
-def test_recovery_import_of_a_split_note_extracts_aspects_once_from_the_whole_note(monkeypatch) -> None:
-    """MCP store_put's shape: every piece reaches the single and batch
-    chains, and the document chain (aspect extraction) sees the note once,
-    whole. fire_store_chains would fire it once per fragment."""
-
-    events: list[tuple] = []
-
-    class _Hooks:
-        def fire_single(self, doc_id, collection, content, **kw):
-            events.append(("single", doc_id, content))
-
-        def fire_batch(self, doc_ids, collection, contents, embeddings=None, metadatas=None, **kw):
-            events.append(("batch", tuple(doc_ids), tuple(contents), kw.get("catalog_doc_id")))
-
-        def fire_document(self, source_path, collection, content, **kw):
-            events.append(("document", source_path, content, kw.get("doc_id")))
-
-        def fire_store_chains(self, *a, **kw):
-            raise AssertionError("a split note must not ride fire_store_chains")
-
-    monkeypatch.setattr(
-        "nexus.corpus.t3_collection_name",
-        lambda name, t3=None, for_write=False, allow_placeholder=False: "knowledge__x",
-    )
-    monkeypatch.setattr(store_hook, "note_pieces", lambda content, collection: ["ab", "cd"])
-    monkeypatch.setattr(
-        store_hook, "catalog_store_hook_tracked",
-        lambda title, doc_id, collection_name, **_kw: ("1.2.3", True),
-    )
-    monkeypatch.setattr(store_hook, "store_put_manifest_direct", lambda doc_id, metadatas, collection: None)
-    monkeypatch.setattr("nexus.doc_indexer._fence_begin", lambda *a, **k: None)
-    monkeypatch.setattr("nexus.hook_registry.HookRegistry", lambda: _Hooks())
-    monkeypatch.setattr("nexus.hook_registry.install_default_hooks", lambda h: None)
-
-    recovery_bundle._default_import_doc(_FailingT3(fail_at=0, existing=set()), {
-        "record": "knowledge_doc", "source_uri": "", "collection": "x",
-        "title": "t", "tags": "", "category": "", "content": "abcd",
-    })
-
-    assert events == [
-        ("single", _sha("ab"), "ab"),
-        ("single", _sha("cd"), "cd"),
-        ("batch", (_sha("ab"), _sha("cd")), ("ab", "cd"), "1.2.3"),
-        ("document", _sha("ab"), "abcd", "1.2.3"),
-    ]
-
 
 def test_the_split_uses_the_calibrated_model_resolver(monkeypatch) -> None:
     """embedding_model_for_collection reads a legacy two-segment local

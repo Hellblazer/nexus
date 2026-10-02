@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 import fnmatch
-import hashlib
 import sys
 from collections.abc import Callable
 from typing import Any
@@ -961,7 +960,13 @@ def reindex_cmd(name: str, force: bool) -> None:
     except Exception:  # noqa: BLE001 — best-effort chash index probe; falls through to per-chunk path
         pass
     while True:
-        batch = col.get(limit=300, offset=offset, include=["metadatas"])
+        # include_non_live (RDR-192 / nexus-wbfpw.35): the scan guards a DELETE,
+        # so it reads every stored chunk. before_count is the stored count, and a
+        # live-only read made a collection of unowned chunks look empty here,
+        # which skipped the "would destroy every chunk" refusal below.
+        batch = col.get(
+            limit=300, offset=offset, include=["metadatas"], include_non_live=True,
+        )
         # nexus-vn48: page-batch chash -> doc_id resolution to amortise
         # SQLite calls across the page rather than per-chunk.
         page_chashes = [
@@ -1012,6 +1017,44 @@ def reindex_cmd(name: str, force: bool) -> None:
             break
         offset += 300
 
+    # nexus-wbfpw.35 fix rounds 2-3: the scan above reads STORED chunks, which
+    # includes those of TOMBSTONED catalog documents. The collection is deleted
+    # wholesale below and every path in source_paths is then re-indexed into a NEW
+    # live document, so a path the catalog holds only as a deleted document would
+    # be revived. Drop exactly those paths from the rebuild and say so.
+    #
+    # The guard fails CLOSED. A path is dropped only when a tombstone's file_path
+    # EQUALS it (after making it relative to that tombstone owner's repo_root) and
+    # the catalog holds NO live document in this collection that names it, under
+    # ANY owner and in either path form: a re-indexed file has a tombstone AND a live
+    # document at one path, and one file can be catalogued under two owners
+    # (nexus-z0lu4), so a deleted document's owner is not the only one to ask.
+    # Dropping a path a live document names would purge its chunks and rebuild
+    # none of them. A catalog that cannot be
+    # read, or an engine whose trash listing carries no file_path, refuses the
+    # verb instead of running it unguarded.
+    deleted: list[str] = []
+    if source_paths:
+        from nexus.catalog.tombstones import deleted_only_sources, read_tombstones  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+
+        if _cat is None:
+            raise click.ClickException(
+                f"Refusing to reindex '{name}': the catalog could not be read, so "
+                f"the verb cannot tell a source that was deleted on purpose from "
+                f"one that was not, and re-indexing would revive it. Nothing was "
+                f"deleted."
+            )
+        tombstones = read_tombstones(_cat)
+        deleted = deleted_only_sources(_cat, tombstones, source_paths, collection=name)
+        if deleted:
+            source_paths.difference_update(deleted)
+            click.echo(
+                f"Skipping {len(deleted)} source(s) of deleted catalog "
+                f"documents (not re-indexed): "
+                + ", ".join(Path(d).name for d in deleted[:5])
+                + (" ..." if len(deleted) > 5 else "")
+            )
+
     # If EVERY entry is sourceless, --force does nothing useful — there is
     # no source to reindex from, so the operation collapses to "delete the
     # collection". GitHub #367: a user lost 28 store_put-only entries this
@@ -1022,8 +1065,9 @@ def reindex_cmd(name: str, force: bool) -> None:
             f"Refusing to reindex '{name}': all {len(sourceless)} entries "
             f"lack source_path (e.g. manual store_put entries, "
             f"taxonomy__centroids, or other programmatically-populated "
-            f"collections). There is no source to re-index from — this "
-            f"would destroy every chunk with no recovery path.\n\n"
+            f"collections, or chunks hidden from every listing because no "
+            f"live catalog document owns them). There is no source to re-index "
+            f"from — this would destroy every chunk with no recovery path.\n\n"
             f"  • If you want to delete the collection, run:\n"
             f"      nx collection delete {name}\n"
             f"  • In-place re-embedding (preserve content, swap embedding "
@@ -1031,11 +1075,24 @@ def reindex_cmd(name: str, force: bool) -> None:
             f"--force does not bypass this check — there is nothing to force."
         )
 
+    if deleted and not source_paths:
+        raise click.ClickException(
+            f"Refusing to reindex '{name}': every source in it ({len(deleted)}) "
+            f"belongs to a deleted catalog document, so there is nothing to "
+            f"rebuild and the verb would purge the collection and leave it empty. "
+            f"Restore a document (`nx catalog restore`), or run "
+            f"`nx collection delete {name}` if the collection should go."
+        )
+
     if sourceless and not force:
         raise click.ClickException(
-            f"{len(sourceless)} entries lack source_path (manual entries) "
-            f"and {len(source_paths)} have source files. The {len(sourceless)} "
-            f"sourceless entries cannot be re-indexed and will be LOST. "
+            f"{len(sourceless)} entries lack source_path and "
+            f"{len(source_paths)} have source files. The {len(sourceless)} "
+            f"sourceless entries cannot be re-indexed and will be LOST. They "
+            f"are manual store_put entries and/or hidden chunks: chunks with no "
+            f"live catalog document, which a plain listing does not show "
+            f"(`nx collection info {name}` reports live and stored counts; the "
+            f"difference is the hidden chunks). "
             f"Use --force to proceed and accept that loss."
         )
 
@@ -1355,249 +1412,6 @@ def verify_cmd(name: str, deep: bool) -> None:
         raise click.exceptions.Exit(1)
 
 
-_BACKFILL_BATCH = 300
-
-# Collections whose rows store embedding + label metadata only — no document
-# text — so chunk_text_hash backfill cannot meaningfully process them. Walking
-# them produces one ``backfill_chunk_text_hash_none_doc`` warning per row with
-# no actionable signal. nexus-uebj.
-_DOCUMENTLESS_COLLECTIONS: frozenset[str] = frozenset({"taxonomy__centroids"})
-
-
-def _backfill_chunk_text_hash(
-    col,
-    on_progress: Callable[[int, int, int], None] | None = None,
-) -> tuple[int, int, int]:
-    """Add chunk_text_hash to chunks that are missing it. Returns (updated, skipped, total).
-
-    Args:
-        col: ChromaDB collection.
-        on_progress: Optional callback(updated, skipped, total) called after each batch.
-
-    RDR-155 P4b P3 / RDR-187: the ``chash_index`` kwarg and its T2 dual-write
-    are GONE. RDR-187 dropped ``nexus.chash_index`` (the chunks tables ARE the
-    chash-keyed store) and 410'd the /v1/chash writes, so registering
-    ``(chash, physical_collection)`` rows could not land in either mode --
-    service writes 410, local mode wrote a SQLite file nothing reads. What
-    survives is the half that was always independently meaningful: backfilling
-    ``chunk_text_hash`` into the T3 chunks themselves (RDR-180 widths).
-
-    Implementation (nexus-o9an): two-pass walk, mirrors
-    ``reidentify_collection``. Pass 1 paginates ``col.get(include=[])``
-    to collect every chunk id; pass 2 fetches by exact id and re-upserts
-    chunks needing the hash with a canonical-schema-normalized payload.
-
-    Why two-pass: ChromaDB Cloud's offset-based ``col.get`` is order-
-    unstable, so a naive ``offset += len(ids)`` loop can revisit some
-    chunks and miss others. The two-pass design sidesteps this entirely
-    (pass 2's exact-id lookups are deterministic).
-
-    Why upsert + normalize instead of update: many legacy collections
-    carry chunks with 32+ metadata keys (pre-RDR-101-Phase-5c cargo +
-    pre-RDR-108 doc/chunk fields). ``col.update`` MERGES metadata, so
-    adding ``chunk_text_hash`` would push them to 33+ and trip the
-    ChromaDB Cloud per-row ``NumMetadataKeys`` quota. The previous
-    implementation caught the quota error and silently incremented
-    ``skipped``, leaving the chunks broken. The upsert + normalize
-    path REPLACES metadata via the canonical schema funnel, dropping
-    cargo so the row lands back under quota.
-    """
-    if getattr(col, "name", "") in _DOCUMENTLESS_COLLECTIONS:
-        return (0, 0, 0)
-
-    from nexus.db.t3 import _normalize_for_write  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
-
-    # Pass 1: collect every chunk id. Lightweight payload (no metadata,
-    # no documents, no embeddings); offset is stable because pass 1 only
-    # reads. ChromaDB Cloud's offset semantics are order-unstable across
-    # long walks, but pass 1 (read-only, ids only) completes fast enough
-    # for the single-operator scenario that the collection state stays
-    # consistent. Best-effort only: concurrent indexer writes during
-    # pass 1 may produce incomplete coverage on this iteration. The verb
-    # is idempotent, so re-running picks up any chunks the previous pass
-    # missed. nexus-2exh review caveat #4.
-    all_ids: list[str] = []
-    offset = 0
-    while True:
-        page = col.get(limit=_BACKFILL_BATCH, offset=offset, include=[])
-        ids = page.get("ids") if isinstance(page, dict) else []
-        if not ids or not isinstance(ids, list):
-            break
-        all_ids.extend(ids)
-        if len(ids) < _BACKFILL_BATCH:
-            break
-        offset += _BACKFILL_BATCH
-
-    updated = 0
-    skipped = 0
-    total = len(all_ids)
-    coll_name = getattr(col, "name", "")
-
-    # Pass 2: fetch by exact id (deterministic), then upsert chunks
-    # needing the hash with canonical-schema-normalized metadata.
-    for start in range(0, len(all_ids), _BACKFILL_BATCH):
-        batch_ids = all_ids[start : start + _BACKFILL_BATCH]
-        page = col.get(
-            ids=batch_ids,
-            include=["documents", "embeddings", "metadatas"],
-        )
-        page_ids = page.get("ids") or []
-        page_docs = page.get("documents") or [None] * len(page_ids)
-        page_embs = page.get("embeddings")
-        if page_embs is None:
-            page_embs = [None] * len(page_ids)
-        page_metas = page.get("metadatas") or [{}] * len(page_ids)
-
-        upsert_ids: list[str] = []
-        upsert_docs: list[str] = []
-        upsert_embs: list = []
-        upsert_metas: list[dict] = []
-        # Parallel lists for the T2 reconciliation write: ids + metas for
-        for chunk_id, doc, emb, meta in zip(
-            page_ids, page_docs, page_embs, page_metas
-        ):
-            if meta and meta.get("chunk_text_hash"):
-                skipped += 1
-                continue
-            if doc is None:
-                # nexus-p03z: Cloud T3 occasionally returns rows whose
-                # ``documents`` entry is None even when the chunk exists.
-                # Hashing a missing doc is impossible; skip and keep
-                # going.
-                skipped += 1
-                _log.warning(
-                    "backfill_chunk_text_hash_none_doc",
-                    chunk_id=chunk_id,
-                    collection=coll_name,
-                )
-                continue
-            new_meta = dict(meta) if meta else {}
-            new_meta["chunk_text_hash"] = hashlib.sha256(
-                doc.encode()
-            ).hexdigest()
-            # Canonical schema funnel: drops cargo (corpus, store_type,
-            # expires_at, etc — nexus-1oguj later promoted
-            # extraction_method OUT of this cargo set, into canonical) so
-            # chunks with 32+ keys land back under the per-row metadata
-            # quota.
-            normalized = _normalize_for_write(new_meta, coll_name)
-            upsert_ids.append(chunk_id)
-            upsert_docs.append(doc)
-            upsert_embs.append(emb)
-            upsert_metas.append(normalized)
-
-        if upsert_ids:
-            try:
-                col.upsert(
-                    ids=upsert_ids,
-                    documents=upsert_docs,
-                    embeddings=upsert_embs,
-                    metadatas=upsert_metas,
-                )
-                updated += len(upsert_ids)
-            except Exception as exc:
-                exc_msg = str(exc)
-                if "Quota exceeded" in exc_msg or "NumMetadataKeys" in exc_msg:
-                    # Even after normalization the row is over quota;
-                    # operator must re-index from source. Count as
-                    # skipped so the totals still balance.
-                    skipped += len(upsert_ids)
-                    _log.warning(
-                        "backfill_chunk_text_hash_quota_after_normalize",
-                        collection=coll_name,
-                        affected=len(upsert_ids),
-                    )
-                else:
-                    raise
-        if on_progress:
-            on_progress(updated, skipped, total)
-
-    return updated, skipped, total
-
-
-# RDR-185 P4.1 (nexus-n7u38.28): DEMOTED to an internal primitive — hidden
-# from the user-facing surface, still callable + tested for surgical/dev use.
-# Its job is the upgrade ladder's now (upgrade-era repair; the ladder's manifest heal covers it).
-# NOT deleted: hiding keeps scripts/surgical use working, and RDR-155 P4b
-# owns the migration module's actual deletion (standing blocker).
-@collection.command("backfill-hash", hidden=True)
-@click.argument("name", required=False, default=None)
-@click.option("--all", "all_collections", is_flag=True, help="Backfill all collections")
-def backfill_hash_cmd(name: str | None, all_collections: bool) -> None:
-    """Add chunk_text_hash to chunks missing it (no re-embedding).
-
-    Reads each chunk's stored text from T3 and computes
-    sha256(text.encode()).hexdigest(). Updates metadata in-place —
-    embeddings and documents are untouched.
-
-    \\b
-    Examples:
-      nx collection backfill-hash code__myrepo   # single collection
-      nx collection backfill-hash --all           # all collections
-    """
-    if not name and not all_collections:
-        raise click.ClickException("specify a collection name or use --all")
-
-    db = _t3()
-
-    if all_collections:
-        targets = [c["name"] for c in db.list_collections()]
-    else:
-        targets = [name]
-
-    # RDR-155 P4b P3: the long-lived ChashIndex connection this used to open
-    # for the whole run is gone with the T2 dual-write (see
-    # _backfill_chunk_text_hash). The backfill is now purely a T3 operation.
-    from tqdm import tqdm  # noqa: PLC0415 — heavy/optional dep deferred
-
-    grand_updated = 0
-    for i, col_name in enumerate(sorted(targets), 1):
-        try:
-            # nexus-5z0us sibling: get_collection re-lists the tenant per call.
-            col = db.get_or_create_collection(col_name) if all_collections else db.get_collection(col_name)
-        except Exception as exc:  # noqa: BLE001 — per-collection resolution failure surfaced via click.echo, loop continues
-            click.echo(f"  [{i}/{len(targets)}] {col_name}: {type(exc).__name__}, skipping", err=True)
-            continue
-
-        # Query collection count so tqdm has a known total. On quota
-        # failure, fall back to an indeterminate bar.
-        try:
-            col_total = col.count()
-        except Exception:  # noqa: BLE001 — best-effort count() for progress bar; indeterminate bar on failure
-            col_total = 0
-
-        # disable=None lets tqdm auto-detect TTY — bar shows in an
-        # interactive terminal, silently no-ops in CI logs. The
-        # per-collection click.echo summary below is always emitted.
-        bar = tqdm(
-            total=col_total or None,
-            disable=None,
-            desc=f"[{i}/{len(targets)}] {col_name}",
-            unit="chunk",
-            leave=False,
-        )
-
-        def _progress(updated: int, skipped: int, total: int) -> None:
-            # total = cumulative scanned so far; update bar position.
-            bar.n = total
-            bar.refresh()
-
-        try:
-            updated, skipped, total_count = _backfill_chunk_text_hash(
-                col, on_progress=_progress,
-            )
-        finally:
-            bar.close()
-
-        grand_updated += updated
-        if updated:
-            click.echo(f"  [{i}/{len(targets)}] {col_name}: {updated} updated, {skipped} already had hash ({total_count} total)")
-        else:
-            click.echo(f"  [{i}/{len(targets)}] {col_name}: all {total_count} chunks already have hash")
-
-    click.echo(f"Done: {grand_updated} chunks updated across {len(targets)} collection(s)")
-
-
 _REEMBED_SUPPORTED_MODELS = ("voyage-3", "voyage-code-3", "voyage-context-3")
 
 #: Chunks per upsert request during a re-embed (nexus-tysei). Every chunk in
@@ -1607,6 +1421,57 @@ _REEMBED_SUPPORTED_MODELS = ("voyage-3", "voyage-code-3", "voyage-context-3")
 #: on a normal minute, past 50 s on a slow one, and an abort loses the whole
 #: request. 100 keeps one wave's worth of margin.
 _REEMBED_UPSERT_BATCH = 100
+
+#: Resends of one re-embed batch after the engine refused it as ownerless
+#: (RDR-223 Phase 3 Step 2). Each resend follows a live re-read that dropped at
+#: least the chunks that lost their owner, so a batch converges in one or two;
+#: the bound is only for a refusal the re-read cannot explain.
+_REEMBED_OWNER_RETRIES = 3
+
+
+def _upsert_reembed_batch(
+    db, col, col_name: str,
+    ids: list[str], docs: list[str], metas: list,
+) -> tuple[list[str], list[str], list, int]:
+    """Write one re-embed batch; returns ``(ids, docs, metas, dropped)`` of what was written.
+
+    RDR-223 Phase 3 Step 2: the engine refuses a whole ``upsert-chunks`` request when any
+    chash in it has no live manifest row. A chunk can lose its owner between this command's
+    live read of the page and this write (a note superseded, a document deleted, by another
+    process), which would abort the command on the first such race with no way to resume.
+    On that refusal the batch is re-read through the live-filtered get and only the chashes
+    still owned are resent; the ones that vanished are counted in ``dropped`` and are not
+    written, so no ownerless chunk is recreated for them.
+
+    Any other failure propagates. A refusal the re-read cannot explain (every chash still
+    reads live) is retried a bounded number of times, then raised.
+    """
+    from nexus.db.engine_reasons import OWNERLESS_CHUNK_WRITE_REASON  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+    from nexus.db.http_vector_client import VectorServiceError  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+
+    dropped = 0
+    for attempt in range(_REEMBED_OWNER_RETRIES + 1):
+        if not ids:
+            return [], [], [], dropped
+        try:
+            db.upsert_chunks(col_name, ids, docs, metadatas=metas, force_re_embed=True)
+            return ids, docs, metas, dropped
+        except VectorServiceError as exc:
+            if exc.reason != OWNERLESS_CHUNK_WRITE_REASON or attempt == _REEMBED_OWNER_RETRIES:
+                raise
+            live = set((col.get(ids=ids, include=[]).get("ids")) or [])
+            keep = [i for i, cid in enumerate(ids) if cid in live]
+            lost = len(ids) - len(keep)
+            _log.warning(
+                "reembed_batch_refused_ownerless",
+                collection=col_name, requested=len(ids), still_owned=len(keep),
+                lost_owner=lost, attempt=attempt + 1,
+            )
+            dropped += lost
+            ids = [ids[i] for i in keep]
+            docs = [docs[i] for i in keep]
+            metas = [metas[i] for i in keep]
+    return [], [], [], dropped  # unreachable: the loop returns or raises
 
 
 def _reembed_collection(
@@ -1618,10 +1483,12 @@ def _reembed_collection(
     on_progress=None,
     hooks=None,
 ) -> tuple[int, int]:
-    """Re-embed every chunk in *col_name* with *target_model*.
+    """Re-embed every LIVE chunk in *col_name* with *target_model*.
 
     Preserves chunk id, document text, and metadata. Only the embedding
-    vector changes. Returns ``(processed, skipped)``.
+    vector changes. Returns ``(processed, skipped)``. A chunk with no live
+    catalog document is not read and keeps its vector (see the decision
+    comment below); the caller reports how many stored chunks that left behind.
 
     nexus-bw65: in-place re-embed for Voyage models. CCE
     (``voyage-context-3``) was refused here while the CLIENT embedded,
@@ -1660,6 +1527,20 @@ def _reembed_collection(
     if total == 0:
         return 0, 0
 
+    # LIVE ROWS ONLY, deliberately (nexus-wbfpw.35 fix rounds 2-3). `total` is the
+    # STORED count (an upper bound: the loop below ends on the first empty live
+    # page, so hidden rows only make it stop earlier than `total`), while the
+    # reads below see live rows. Chunks with no live owner are not re-embedded.
+    # For a never-owned chunk the write would refresh last_written_at, the anchor
+    # of the reaper's grace window (vectors-020), and extend its life; that grace
+    # argument holds for those chunks only. For a chunk owned only by a
+    # tombstoned document the refresh extends nothing under the final design
+    # (nexus-wbfpw.15: nexus.chunk_orphaned_at, reapable keyed on
+    # GREATEST(last_written_at, orphaned_at)); the reasons there are cost, since
+    # every re-embed is a billed Voyage call per chunk, and pointlessness, since
+    # the document is deleted. A document restored later keeps its pre-repair
+    # vectors until the next run, which sees them live. The chunks left on the
+    # old model are counted by the caller and reported.
     processed = 0
     skipped = 0
     page = QUOTAS.MAX_QUERY_RESULTS  # 300
@@ -1701,13 +1582,24 @@ def _reembed_collection(
             # server re-embeds with the correct model. force_re_embed=True
             # bypasses the existence-partition skip so every chash is
             # genuinely recomputed, not treated as already-current.
+            # RDR-223 Phase 3 Step 2: a batch the engine refuses as ownerless (a chunk
+            # lost its owner since the page was read) is narrowed to the chunks still
+            # owned and resent; ``written_*`` is what actually landed.
+            written_ids: list[str] = []
+            written_docs: list[str] = []
+            written_metas: list = []
             for s in range(0, len(v_ids), _REEMBED_UPSERT_BATCH):
-                db.upsert_chunks(
-                    col_name, v_ids[s:s + _REEMBED_UPSERT_BATCH],
+                b_ids, b_docs, b_metas, b_dropped = _upsert_reembed_batch(
+                    db, col, col_name,
+                    v_ids[s:s + _REEMBED_UPSERT_BATCH],
                     v_docs[s:s + _REEMBED_UPSERT_BATCH],
-                    metadatas=v_metas[s:s + _REEMBED_UPSERT_BATCH],
-                    force_re_embed=True,
+                    v_metas[s:s + _REEMBED_UPSERT_BATCH],
                 )
+                written_ids += b_ids
+                written_docs += b_docs
+                written_metas += b_metas
+                skipped += b_dropped
+            v_ids, v_docs, v_metas = written_ids, written_docs, written_metas
             # nexus-bw65 / nexus-9099: fire post-store chains so the
             # invariant 'every CLI T3 write also fires the chain'
             # (test_every_cli_t3_write_function_fires_store_chains)
@@ -1720,19 +1612,20 @@ def _reembed_collection(
                 hooks = HookRegistry()
                 install_default_hooks(hooks)
 
-            hooks.fire_store_chains(
-                v_ids, col_name, v_docs,
-                source_paths=[
-                    (m.get("source_path", "") if isinstance(m, dict) else "")
-                    for m in v_metas
-                ],
-                # nexus-sghyo: no client-computed vector to pass — the
-                # server (or test EF) computed it inside upsert_chunks
-                # above.
-                embeddings=None,
-                metadatas=v_metas,
-                catalog_doc_id="",
-            )
+            if v_ids:  # every chunk of the page may have lost its owner
+                hooks.fire_store_chains(
+                    v_ids, col_name, v_docs,
+                    source_paths=[
+                        (m.get("source_path", "") if isinstance(m, dict) else "")
+                        for m in v_metas
+                    ],
+                    # nexus-sghyo: no client-computed vector to pass — the
+                    # server (or test EF) computed it inside upsert_chunks
+                    # above.
+                    embeddings=None,
+                    metadatas=v_metas,
+                    catalog_doc_id="",
+                )
 
         processed += len(v_ids)
         if on_progress is not None:
@@ -1759,9 +1652,11 @@ def reembed_cmd(
 ) -> None:
     """In-place re-embed: preserve content, swap embedding model.
 
-    nexus-bw65: rebuild embeddings for every chunk in NAME using
-    --to MODEL. Chunk ids, document text, and metadata are
-    preserved; only the vector changes.
+    nexus-bw65: rebuild embeddings for every chunk in NAME that has a
+    live catalog document, using --to MODEL. Chunk ids, document text,
+    and metadata are preserved; only the vector changes. A chunk with no
+    live document (no owner, or owned only by a deleted document) is left
+    on its old vector, and the summary says how many.
 
     Use case: an embedding-model upgrade on a sourceless collection
     (store_put-only / MCP-promoted notes). For source-backed
@@ -1781,8 +1676,9 @@ def reembed_cmd(
     """
     if not dry_run and not yes:
         click.confirm(
-            f"Re-embed {name!r} with {target_model!r}? This rewrites "
-            f"every chunk's vector in place.",
+            f"Re-embed {name!r} with {target_model!r}? This rewrites the vector "
+            f"of every chunk that has a live catalog document, in place; chunks "
+            f"with none keep their old vector.",
             abort=True,
         )
 
@@ -1822,8 +1718,9 @@ def reembed_cmd(
                 f"collection {name!r}: {type(exc).__name__}: {exc}"
             )
         click.echo(
-            f"dry-run: would re-embed {n} chunk(s) in {name!r} with "
-            f"{target_model!r}. Pass --no-dry-run --yes to apply."
+            f"dry-run: would re-embed up to {n} stored chunk(s) in {name!r} with "
+            f"{target_model!r} (chunks with no live catalog document are left as "
+            f"they are). Pass --no-dry-run --yes to apply."
         )
         return
 
@@ -1837,8 +1734,23 @@ def reembed_cmd(
         )
     click.echo(
         f"re-embedded {processed} chunk(s) in {name!r} with "
-        f"{target_model!r}; skipped {skipped} empty-document row(s)."
+        f"{target_model!r}; skipped {skipped} row(s) (empty document, or no "
+        f"longer owned by a live document when the write reached the engine)."
     )
+    # nexus-wbfpw.35 fix round 3: the walk reads live rows, so a stored chunk with
+    # no live catalog document is never visited. Say how many stayed on the old
+    # model rather than let "re-embedded N" read as the whole collection.
+    try:
+        stored = db.get_collection(name).count()
+    except Exception:  # noqa: BLE001 — the count only decorates a finished run
+        stored = None
+    if stored is not None and stored > processed:
+        click.echo(
+            f"{stored - processed} of {stored} stored chunk(s) were not "
+            f"re-embedded and keep their old vectors: the skipped rows above, "
+            f"and chunks with no live catalog document (`nx collection info "
+            f"{name}` shows live and stored counts)."
+        )
 
 
 @collection.command("rewrite-metadata")

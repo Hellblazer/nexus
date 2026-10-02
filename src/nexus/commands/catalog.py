@@ -14,6 +14,11 @@ import structlog
 
 from typing import TYPE_CHECKING
 
+from nexus.catalog.tombstones import (
+    TombstoneGuardUnavailable,
+    has_live_document,
+    read_tombstones,
+)
 from nexus.catalog.tumbler import Tumbler
 
 if TYPE_CHECKING:
@@ -1109,7 +1114,12 @@ def _owner_by_name(cat: "CatalogReader", name: str) -> Tumbler | None:
     """
     # nexus-xnz0o: use curator_owner_tumbler_by_name() (portable API).
     prefix = cat.curator_owner_tumbler_by_name(name)
-    return Tumbler.parse(prefix) if prefix else None
+    if not prefix:
+        return None
+    # The service client already returns a Tumbler; re-parsing one raised
+    # AttributeError ('Tumbler' has no 'split') on every re-run of a backfill whose
+    # curator exists (found by the nexus-wbfpw.35 fix-round-2 tests).
+    return prefix if isinstance(prefix, Tumbler) else Tumbler.parse(str(prefix))
 
 
 def _get_or_create_curator(cat: "CatalogReader", name: str, *, writer: object = None) -> Tumbler:
@@ -1200,6 +1210,30 @@ def _backfill_repos(
     return count, claimed
 
 
+def _stored_chunk_count(collection_row: dict) -> int:
+    """Chunks a collection PHYSICALLY holds, from a ``list_collections`` row.
+
+    ``count`` there is the live count (RDR-192 Step 5): a collection whose chunks
+    are all unowned reads ``count=0`` and ``stored_count=N``. A backfill exists to
+    find exactly those, so it filters on the stored count (nexus-wbfpw.35). An
+    engine older than the amendment omits ``stored_count``; ``count`` then stands
+    for both.
+    """
+    return int(collection_row.get("stored_count", collection_row.get("count", 0)) or 0)
+
+
+def _note_skipped_deleted(collection: str, skipped: int) -> None:
+    """Say, once per collection, that stored chunks were left alone because the
+    catalog holds their document as a tombstone (nexus-wbfpw.35 fix round 2)."""
+    if not skipped:
+        return
+    click.echo(
+        f"  {collection}: skipped {skipped} path(s) the catalog holds as deleted "
+        f"documents (restore with `nx catalog restore`, or purge-trash reclaims them)"
+    )
+    _log.info("backfill_skipped_tombstoned", collection=collection, skipped=skipped)
+
+
 def _backfill_knowledge(cat: "CatalogReader", t3: object, dry_run: bool, *, writer: object = None) -> int:
     """Register knowledge__* collections in catalog."""
     # RDR-204 Phase 3 (nexus-ft04v.26), class (d): this command's entire
@@ -1247,9 +1281,21 @@ def _backfill_rdrs(cat: "CatalogReader", t3: object, dry_run: bool, *, writer: o
 
     w = writer if writer is not None else cat
     collections = t3.list_collections()
-    rdr_cols = [c for c in collections if split_candidate_collection_name(c["name"])[0] == "rdr" and c["count"] > 0]
+    rdr_cols = [
+        c for c in collections
+        if split_candidate_collection_name(c["name"])[0] == "rdr"
+        and _stored_chunk_count(c) > 0
+    ]
     count = 0
     unreadable: list[str] = []
+
+    # nexus-wbfpw.35 fix rounds 2-3: the stored-chunk reads below also see the
+    # chunks of TOMBSTONED documents, and `existing` below excludes tombstones, so
+    # a deliberately deleted document would register anew. Read the trash ONCE,
+    # before the loop and outside its per-collection catch: an engine that cannot
+    # list deleted documents with their paths refuses the whole pass rather than
+    # being reported as one unreadable collection.
+    tombstones = read_tombstones(cat) if rdr_cols else None
 
     for col_info in rdr_cols:
         col_name = col_info["name"]
@@ -1266,7 +1312,12 @@ def _backfill_rdrs(cat: "CatalogReader", t3: object, dry_run: bool, *, writer: o
             use_doc_id: bool | None = None
             offset = 0
             while True:
-                result = col.get(include=["metadatas"], limit=200, offset=offset)
+                # RDR-192 / nexus-wbfpw.35: discovery reads STORED chunks. A chunk
+                # with no live owner is exactly what a backfill exists to register.
+                result = col.get(
+                    include=["metadatas"], limit=200, offset=offset,
+                    include_non_live=True,
+                )
                 metas = result.get("metadatas", [])
                 if metas and use_doc_id is None:
                     use_doc_id = any(
@@ -1354,12 +1405,20 @@ def _backfill_rdrs(cat: "CatalogReader", t3: object, dry_run: bool, *, writer: o
                 # the other content types.
                 owner = _get_or_create_curator(cat, "orphaned-rdrs", writer=w)
 
+            skipped_deleted = 0
             for path, title in seen_paths.items():
+                fp = make_relative(path, repo_root) if repo_root else path
+                # Skip only a path the catalog holds as a tombstone and nowhere
+                # live: a re-registered document has both, and is not deleted.
+                if tombstones.covers_path((path, fp), owner=str(owner)) and not has_live_document(
+                    cat, (path, fp), owner=str(owner),
+                ):
+                    skipped_deleted += 1
+                    continue
                 if dry_run:
                     click.echo(f"  [dry-run] {title} → {col_name}")
                     count += 1
                     continue
-                fp = make_relative(path, repo_root) if repo_root else path
                 existing = [
                     e for e in cat.by_owner(owner)
                     if e.file_path in (path, fp)
@@ -1370,6 +1429,7 @@ def _backfill_rdrs(cat: "CatalogReader", t3: object, dry_run: bool, *, writer: o
                         file_path=fp, physical_collection=col_name,
                     )
                     count += 1
+            _note_skipped_deleted(col_name, skipped_deleted)
         except Exception as exc:  # noqa: BLE001 — best-effort; error surfaced via log/echo, must not crash caller
             click.echo(f"  warning: {col_name} — {exc}")
             _log.debug("backfill_rdrs_error", col=col_name, exc_info=True)
@@ -1403,10 +1463,17 @@ def _backfill_papers(
     paper_cols = [
         c for c in collections
         if split_candidate_collection_name(c["name"])[0] == "docs"
-        and c["count"] > 0
+        and _stored_chunk_count(c) > 0
         and c["name"] not in repo_cols
     ]
     count = 0
+
+    # nexus-wbfpw.35 fix round 3: the trash is read once for the whole pass (it was
+    # re-paged per collection), on first need: a pass whose collections all fail
+    # their metadata read registers nothing and has nothing to guard. An engine
+    # that cannot list it refuses the pass at that point (outside the per-
+    # collection catch above), not as one skipped collection.
+    tombstones = None
 
     total = len(paper_cols)
     for i, col_info in enumerate(paper_cols, 1):
@@ -1420,7 +1487,7 @@ def _backfill_papers(
 
         try:
             col = t3.get_or_create_collection(col_name)
-            result = col.get(limit=1, include=["metadatas"])
+            result = col.get(limit=1, include=["metadatas"], include_non_live=True)
             if result.get("ids") and result.get("metadatas"):
                 meta = result["metadatas"][0]
                 title = meta.get("title", "") or title
@@ -1446,6 +1513,24 @@ def _backfill_papers(
             _log.warning("backfill_papers_metadata_error", col=col_name, exc_info=True)
             continue
 
+        # nexus-wbfpw.35 fix round 2: the stored first chunk may belong to a
+        # TOMBSTONED paper, which the live `existing` lookup below cannot see.
+        # One paper per collection: a collection the papers curator holds only as
+        # a deleted document is not a gap to register.
+        paper_owner = _owner_by_name(cat, "papers")
+        if paper_owner is not None:
+            live_here = [
+                e for e in cat.by_owner(paper_owner) if e.physical_collection == col_name
+            ]
+            if not live_here:
+                if tombstones is None:
+                    tombstones = read_tombstones(cat)
+                if tombstones.covers_collection(
+                    owner=str(paper_owner), collection=col_name, content_type="paper",
+                ):
+                    _note_skipped_deleted(col_name, 1)
+                    continue
+
         if dry_run:
             click.echo(f"  [dry-run] Would register paper: {title} → {col_name}")
             count += 1
@@ -1470,44 +1555,6 @@ def _backfill_papers(
 def _make_t3():
     from nexus.db import make_t3  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
     return make_t3()
-
-
-def _backfill_all_chunk_text_hashes(t3) -> int:
-    """Backfill ``chunk_text_hash`` across every T3 collection; return chunks updated.
-
-    No-op in vector-service mode (nexus-84gbt): the Java service owns chunk
-    identity (chash) via its manifest + post-store path, and the local,
-    Chroma-specific paginate-and-upsert backfill reaches into ``t3._client``
-    (a ``chromadb`` client attribute). In service mode ``t3`` is an
-    ``HttpVectorClient`` with no ``_client`` — calling it there raised
-    ``AttributeError`` and degraded ``nx catalog setup`` to "Hash backfill
-    partial", leaving the manifest empty. Skip cleanly instead.
-    """
-    from nexus.db.http_vector_client import is_service_backed  # noqa: PLC0415 — circular-dep avoidance (nexus.db.http_vector_client)
-
-    # Instance-based guard (NOT env-based is_vector_service_mode): a service-
-    # backed handle is an HttpVectorClient with no chroma ._client. Keying on the
-    # handle keeps injected chroma-backed T3Database test fixtures on the legacy
-    # branch regardless of NX_STORAGE_BACKEND_VECTORS (the documented preference
-    # in http_vector_client.is_service_backed).
-    if is_service_backed(t3):
-        click.echo(
-            "  (service mode: chunk_text_hash is owned by the service; "
-            "skipping local backfill)"
-        )
-        return 0
-
-    from nexus.commands.collection import _backfill_chunk_text_hash  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
-
-    hash_updated = 0
-    for col_info in t3.list_collections():
-        # NOT an at2ff site: the is_service_backed(t3) guard above already
-        # returned for HttpVectorClient, so this branch only ever sees the
-        # legacy chroma-backed T3Database, where ``._client`` is correct.
-        col = t3._client.get_collection(col_info["name"])
-        updated, _, _ = _backfill_chunk_text_hash(col)
-        hash_updated += updated
-    return hash_updated
 
 
 def _make_registry():
@@ -1637,6 +1684,7 @@ def _backfill_per_file_from_t3(
     while True:
         page = col.get(
             include=["metadatas"], limit=page_size, offset=offset,
+            include_non_live=True,
         )
         ids = page.get("ids") or []
         if not ids:
@@ -1665,6 +1713,8 @@ def _backfill_per_file_from_t3(
         offset += page_size
 
     registered = 0
+    skipped_deleted = 0
+    tombstones = read_tombstones(cat)  # raises TombstoneGuardUnavailable: fail closed
     for abs_path in sorted(seen_paths):
         # Anchor relative to repo_root when possible; fall back to the
         # raw path. The register-time guard rejects paths outside
@@ -1673,6 +1723,16 @@ def _backfill_per_file_from_t3(
             rel = abs_path[len(repo_root) + 1:]
         else:
             rel = abs_path
+
+        # nexus-wbfpw.35 fix round 2: a stored chunk of a TOMBSTONED document
+        # reaches this loop now, and by_file_path (live rows only) would call it
+        # a gap. A path the catalog holds as a deleted document stays deleted.
+        # Only when no LIVE document holds the path too (delete + re-register).
+        if tombstones.covers_path((abs_path, rel), owner=str(owner)) and not has_live_document(
+            cat, (abs_path, rel), owner=str(owner),
+        ):
+            skipped_deleted += 1
+            continue
 
         if dry_run:
             registered += 1
@@ -1743,6 +1803,7 @@ def _backfill_per_file_from_t3(
                 error=str(exc),
             )
 
+    _note_skipped_deleted(collection, skipped_deleted)
     return registered
 
 
@@ -1824,6 +1885,11 @@ def backfill_cmd(
                 mode = "would register" if dry_run else "registered"
                 click.echo(f"  {target}: {mode} {count} row(s)")
                 total_registered += count
+            except TombstoneGuardUnavailable:
+                # The engine cannot list deleted documents: every remaining
+                # collection would hit the same wall, and a skip-and-continue
+                # sweep would read as "done". Refuse the whole verb.
+                raise
             except click.ClickException as exc:
                 # Non-repo-owned collection in --all sweep: skip with a note.
                 if from_t3_all:
@@ -1855,15 +1921,8 @@ def backfill_cmd(
     click.echo("Pass 3: Knowledge collections...")
     knowledge_count = _backfill_knowledge(cat, t3, dry_run, writer=writer)
 
-    hash_updated = 0
-    if not dry_run:
-        click.echo("Pass 4: chunk_text_hash backfill...")
-        hash_updated = _backfill_all_chunk_text_hashes(t3)
-
     mode = "dry-run" if dry_run else "registered"
     click.echo(f"\nBackfill complete ({mode}):")
     click.echo(f"  Repos:     {repo_count}")
     click.echo(f"  Papers:    {paper_count}")
     click.echo(f"  Knowledge: {knowledge_count}")
-    if not dry_run:
-        click.echo(f"  Hash:      {hash_updated} chunks updated")

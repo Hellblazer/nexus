@@ -236,7 +236,30 @@ class JooqRecordReflectionFeatureTest {
     // the pre-existing nexus.catalog_collections table -- a column-count
     // change only, no new Record type (same shape as telemetry-012's and
     // memory-004's column-only bumps above). No delta.
-    private static final int EXPECTED_RECORD_TYPES = 106;
+    // 106 -> 107: nexus-wbfpw.15, vectors-021-chunk-is-reapable-function.xml
+    // added nexus.chunk_is_reapable, a RETURNS TABLE(reapable boolean)
+    // function, one generated Record type (ChunkIsReapableRecord), +1.
+    // 107 -> 108: nexus-wbfpw.15 (Sam's option b, 2026-10-01), the same file
+    // also added nexus.chunk_orphaned_at, the side table the orphaning
+    // triggers write, one generated Record type (ChunkOrphanedAtRecord), +1.
+    // 108 -> 109: nexus-2x9xa, vectors-024-reaper-quarantine-chunks.xml
+    // added nexus.reaper_quarantine_chunks, a RETURNS TABLE(moved,
+    // reapable_count, total_count, refused, remaining) function, one
+    // generated Record type (ReaperQuarantineChunksRecord), +1.
+    // 109 -> 110: nexus-2x9xa (round 3), vectors-024-reaper-quarantine-chunks.xml
+    // (vectors-024-2) added nexus.reaper_expire_quarantine, a RETURNS TABLE(
+    // expired, refused, protected_count) function, one generated Record type
+    // (ReaperExpireQuarantineRecord), +1.
+    // 110 -> 111: nexus-2x9xa, vectors-025-quarantine-restore-chunks.xml
+    // added nexus.quarantine_restore_chunks, a RETURNS TABLE(r_chash,
+    // r_outcome, r_audit_id, r_no_manifest, r_reapable_after, r_reattach,
+    // r_attached, r_owner, r_owner_title, r_position, r_chunk_title,
+    // r_reason, r_owner_rows, r_owner_chunks) function, one generated Record
+    // type (QuarantineRestoreChunksRecord), +1. Rounds 2 and 3
+    // (nexus-wbfpw.49) widened that record's columns and added
+    // nexus.quarantine_reattach_plan, which RETURNS jsonb (a scalar, no
+    // Record type): no further delta from it.
+    private static final int EXPECTED_RECORD_TYPES = 111;
 
     @Test
     void enumeratesEveryGeneratedRecordTypeViaTheSchemaModel() {

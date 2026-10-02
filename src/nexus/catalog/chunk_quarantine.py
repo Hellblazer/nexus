@@ -3,8 +3,8 @@
 
 Instead of hard-deleting orphan chunks (or refusing over-floor sweeps with
 a recurring warning — the nexus-mr89x nag), the GC MOVES orphans to a
-sibling collection named ``quarantine__<owner>__<model>__v<n>``. The
-``quarantine`` prefix is in NO search corpus, so quarantined chunks are
+sibling collection named ``quarantine-<origin collection name>``
+(see :func:`quarantine_collection_name`). The ``quarantine-`` prefix is in NO search corpus, so quarantined chunks are
 excluded from every retrieval surface by construction — no filters, no
 metadata-update primitive, no schema change.
 
@@ -323,9 +323,29 @@ def restore_rereferenced_bounded_serverside(
     return total
 
 
+class BoundedDrainIncomplete(Exception):
+    """A strict bounded quarantine drain stopped before ``remaining`` reached 0.
+
+    Raised only when :func:`quarantine_orphans_bounded_serverside` is called with
+    ``strict=True`` (``nx t3 gc``). Each engine batch commits on its own, so
+    ``moved`` chunks were moved and audited before the stop and stay quarantined;
+    re-running the move is safe. ``reason`` is one of ``"iteration cap"``,
+    ``"no progress"`` or ``"batch failed"`` (the failing call is ``__cause__``);
+    ``remaining`` is the engine's last answer (``None`` for a failed batch).
+    """
+
+    def __init__(self, reason: str, moved: int, remaining: int | None, batches: int) -> None:
+        self.reason, self.moved, self.remaining, self.batches = reason, moved, remaining, batches
+        super().__init__(
+            f"bounded quarantine drain stopped ({reason}) after {batches} batch(es): "
+            f"{moved} moved, remaining={remaining}"
+        )
+
+
 def quarantine_orphans_bounded_serverside(
     db: Any, collection_name: str, quarantine_name: str, quarantined_at: str,
     sample_limit: int = 20, row_limit: int = GC_QUARANTINE_ROW_LIMIT_DEFAULT,
+    *, strict: bool = False,
 ) -> tuple[int, list[dict]] | None:
     """Try the server-side BOUNDED quarantine sweep (nexus-e8h5x review
     round 2). The engine route (catalog-037/nexus-a6mon,
@@ -348,6 +368,14 @@ def quarantine_orphans_bounded_serverside(
     or ``None`` if the bounded route is unavailable at the client-capability
     level (caller falls back to :func:`quarantine_orphans_serverside`'s
     unbounded call).
+
+    ``strict=True`` (``nx t3 gc``, nexus-wbfpw.18) turns every way the drain can
+    end short of ``remaining == 0`` into :class:`BoundedDrainIncomplete`: the
+    iteration cap with ``remaining > 0``, a batch that moved nothing while
+    ``remaining > 0`` (a stuck engine would otherwise be polled to the cap), and a
+    batch that raises after earlier batches already committed (the first batch's
+    own failure is re-raised as is, nothing having moved). Without it (the
+    indexer's end-of-run prune) the behaviour is unchanged: a warning, never a raise.
     """
     fn = getattr(db, "gc_quarantine_orphans_bounded", None)
     if fn is None:
@@ -356,9 +384,17 @@ def quarantine_orphans_bounded_serverside(
     sample: list[dict] = []
     max_iterations = _gc_loop_max_iterations(row_limit)
     remaining = None
+    batches = 0
     for _ in range(max_iterations):
-        result = fn(collection_name, quarantine_name, quarantined_at, sample_limit, row_limit)
-        total_moved += int(result.get("moved", 0))
+        try:
+            result = fn(collection_name, quarantine_name, quarantined_at, sample_limit, row_limit)
+        except Exception as exc:  # noqa: BLE001 — strict mode re-labels a mid-drain failure; otherwise re-raised unchanged
+            if strict and batches:
+                raise BoundedDrainIncomplete("batch failed", total_moved, None, batches) from exc
+            raise
+        batches += 1
+        batch_moved = int(result.get("moved", 0))
+        total_moved += batch_moved
         if len(sample) < sample_limit:
             batch_sample = list(result.get("sample") or [])
             sample.extend(batch_sample[: sample_limit - len(sample)])
@@ -368,6 +404,10 @@ def quarantine_orphans_bounded_serverside(
             return total_moved, sample
         if int(remaining) <= 0:
             return total_moved, sample
+        if strict and batch_moved <= 0:
+            raise BoundedDrainIncomplete("no progress", total_moved, int(remaining), batches)
+    if strict:
+        raise BoundedDrainIncomplete("iteration cap", total_moved, int(remaining), batches)
     _log.warning(
         "gc_quarantine_bounded_loop_iteration_cap_reached",
         collection=collection_name, quarantine_collection=quarantine_name,

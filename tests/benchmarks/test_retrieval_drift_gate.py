@@ -231,8 +231,8 @@ def java_service(pg_instance):
 
 
 @pytest.fixture(scope="module")
-def seeded_client(java_service):
-    """HttpVectorClient with the judged corpus upserted (server-side embed)."""
+def seeded_client(java_service, pg_instance):
+    """HttpVectorClient with the judged corpus stored and owned (engine-side embed)."""
     base_url, token = java_service
     saved = {
         k: os.environ.get(k)
@@ -259,8 +259,31 @@ def seeded_client(java_service):
         ids.append(chash)
         docs.append(d["content"])
         chash_to_doc[chash] = d["id"]
-    client.upsert_chunks(_COLLECTION, ids, docs,
-                         metadatas=[{"doc_id": d["id"]} for d in corpus])
+    # RDR-223 P3.1: the engine refuses an ownerless upsert-chunks write from
+    # Phase 3 on, and the manifest write below needs the chunk first, so the
+    # judged chunks go in as the hermetic PG's superuser with the engine's own
+    # /v1/vectors/embed vectors (the ones the route would have stored).
+    from nexus.corpus import ensure_collection_registered
+    from tests._chunk_seed import chunks_insert_sql
+
+    def _psql_out(sql: str, stdin: str | None = None) -> str:
+        args = [str(_PSQL), "-h", "127.0.0.1", "-p", str(pg_instance["port"]),
+                "-U", pg_instance["user"], "-d", pg_instance["dbname"],
+                "-v", "ON_ERROR_STOP=1", "-A", "-t"]
+        args += ["-f", "-"] if stdin is not None else ["-c", sql]
+        proc = subprocess.run(args, input=stdin, capture_output=True, text=True)
+        assert proc.returncode == 0, proc.stderr
+        return proc.stdout.strip()
+
+    ensure_collection_registered(_COLLECTION)
+    tenant = _psql_out(
+        f"SELECT tenant_id FROM nexus.catalog_collections WHERE name = '{_COLLECTION}'"
+    )
+    assert tenant, f"{_COLLECTION!r} was not registered"
+    _psql_out("", stdin=chunks_insert_sql(
+        tenant, _COLLECTION, ids, docs, [{"doc_id": d["id"]} for d in corpus],
+        client.embed_for_collection(_COLLECTION, docs),
+    ))
 
     # RDR-192 Step 5 live(c) (nexus-wbfpw.10, engine fc99baac9): every
     # content read -- get_embeddings included -- now returns only chunks
@@ -269,10 +292,9 @@ def seeded_client(java_service):
     # purpose is a REAL retrieval corpus for search/topic-boost gates
     # downstream, so the judged docs need real ownership, not a
     # maintenance include_non_live escape hatch -- registering each one
-    # through the same catalog_store_hook_tracked + store_put_manifest_
-    # direct path the real indexing path uses (mirrors
-    # tests/test_wbfpw2_client_liveness_matrix.py's pattern).
-    from nexus.catalog.store_hook import catalog_store_hook_tracked, store_put_manifest_direct
+    # through catalog_store_hook_tracked + seed_note_manifest.
+    from nexus.catalog.store_hook import catalog_store_hook_tracked
+    from tests._catalog_fixture_ops import seed_note_manifest
 
     for chash, d in zip(ids, corpus, strict=True):
         owner_tumbler, _created = catalog_store_hook_tracked(
@@ -282,7 +304,7 @@ def seeded_client(java_service):
             f"catalog document registration must succeed for judged doc "
             f"{d['id']!r} against the real engine substrate"
         )
-        store_put_manifest_direct(
+        seed_note_manifest(
             owner_tumbler, [{"chunk_text_hash": chash}], collection=_COLLECTION,
         )
 

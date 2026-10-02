@@ -233,17 +233,34 @@ def test_doctor_empty_registry_is_ok(monkeypatch: pytest.MonkeyPatch) -> None:
     assert results[0].ok is True
 
 
-def test_doctor_real_registry_on_service_mode_reports_no_pending(
-    monkeypatch: pytest.MonkeyPatch,
+def test_doctor_real_registry_reports_the_rdr192_rung_until_it_is_recorded(
+    monkeypatch: pytest.MonkeyPatch, t2_service_env,
 ) -> None:
-    """P1 review Critical companion: on a SERVICE-mode install the REAL
-    registry's t2-schema rung is N/A (detect-and-skip before any path is
-    touched), so doctor reports no pending rungs instead of a spurious
-    'run nx upgrade' remedy against the immutable local source."""
-    monkeypatch.setenv("NX_STORAGE_BACKEND", "service")
-    results = _check_pending_rungs()  # real default_registry, real probe
-    assert results[0].ok is True
-    assert "no pending rungs" in results[0].detail
+    """The REAL registry holds `rdr192-manifest-backfill` (nexus-wbfpw.41).
+    Its detect() reads the completion ledger and never takes a census, so on a
+    fresh tenant doctor reports it pending (soft warning, remedy `nx upgrade`)
+    without a single census request, and once the walk has recorded it
+    reports no pending rungs."""
+    import nexus.db.http_vector_client as hvc
+
+    census_calls: list[str] = []
+    real = hvc.HttpVectorClient.manifest_less_census
+    monkeypatch.setattr(
+        hvc.HttpVectorClient, "manifest_less_census",
+        lambda self, *a, **kw: census_calls.append("census") or real(self, *a, **kw),
+    )
+
+    before = _check_pending_rungs()[0]
+    assert before.warn is True
+    assert "rdr192-manifest-backfill" in before.detail and "no completion recorded" in before.detail
+    assert census_calls == [], "doctor's pending-rungs row must not census"
+
+    _run_ladder(dry_run=False, auto_mode=True)  # records on the empty tenant
+    census_calls.clear()
+
+    after = _check_pending_rungs()[0]
+    assert after.ok is True and "no pending rungs" in after.detail
+    assert census_calls == [], "a recorded rung is converged without a census"
 
 
 def test_doctor_check_is_crash_proof(monkeypatch: pytest.MonkeyPatch) -> None:

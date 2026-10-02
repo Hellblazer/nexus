@@ -214,7 +214,75 @@ jobs:
     timeout-minutes: 5
     outputs:
       code: ${{ steps.gate.outputs.code }}
+      ci_runner: ${{ steps.route.outputs.ci_runner }}
     steps:
+      - name: Decide where the full pytest suite runs (qwen-linux or the hosted shards)
+        id: route
+        # WHERE THE PYTEST SUITE RUNS (Sam, 2026-10-01, session nexus_654).
+        # THE DEFAULT IS THE HOSTED SHARDS. The qwen route is OPT-IN (Sam,
+        # 2026-10-01): an OWNER PUSH to develop runs the whole suite as ONE
+        # `-n 8` job on the self-hosted `qwen-linux` runner (job `test-qwen`
+        # below), and the six hosted shards (`test`, with `service-jar`) are
+        # skipped, ONLY when the repository variable QWEN_CI_PUSH_RUNNER is
+        # exactly `qwen-linux`. Unset, empty, a typo, a different case, a
+        # trailing space or any other value (`hellmini`, `ubuntu-latest`
+        # included) keeps the hosted shards. Landing this file therefore changes
+        # nothing; enabling the route is a deliberate later act (the sequence is
+        # in docs/contributing.md, "First run of the qwen-linux route": the
+        # isolation probe green as ghci first, then the variable).
+        #
+        # Every pull_request, and every push by anyone but the repo owner, keeps
+        # the hosted shards whatever the variable says; `test-qwen` is skipped
+        # there. Same owner rule as service-ci.yml's hellmini-ci routing (see the
+        # long comment on that job's runs-on): account id AND triggering actor
+        # both the owner, push event only. The id compares accounts, not logins
+        # (a renamed login can be re-registered); triggering_actor keeps a
+        # re-run by another account from reaching the self-hosted box.
+        #
+        # THE DECISION IS MADE ONCE, HERE, and read by every consumer
+        # (`service-jar`, `test`, `test-qwen`, `pytest-gate`) through the
+        # `ci_runner` output, so the jobs cannot disagree about which path ran.
+        # A job-level `if:` cannot host the actor rule on its own, because
+        # skipping would leave a non-owner push untested instead of rerouting
+        # it: the hosted shards run whenever this output is not `qwen-linux`.
+        #
+        # WHY THE VARIABLE IS COMPARED IN BASH, NOT IN THE EXPRESSION. Every
+        # `==` in a GitHub expression ignores case, so `Qwen-Linux` would enable
+        # the route there. "Exactly qwen-linux" needs a case-sensitive test, and
+        # bash `=` is one. The expression only carries the owner-push rule (the
+        # login comparison SHOULD ignore case); the variable travels raw in env.
+        # The label this step can publish is one of two literals, and the qwen
+        # job's runs-on is a literal label set, so the variable can never send a
+        # push to a release or Service CI runner and a typo cannot queue a job
+        # for a label no runner has.
+        #
+        # The variable is read when the `changes` job runs, and "Re-run failed
+        # jobs" does not re-run `changes` because it succeeded: a re-run of only
+        # the failed jobs keeps the OLD `ci_runner` output, whichever way the
+        # variable moved since. To change the route for a commit already pushed,
+        # use "Re-run all jobs" (or push a new commit); cancelling and re-running
+        # only the queued qwen job does nothing. There is NO automatic fallback
+        # if the runner is offline while the variable is on: the qwen job queues,
+        # pytest-gate pends until the 24 h limit, and someone must unset the
+        # variable.
+        #
+        # This is a ROUTING RULE, NOT a security boundary (same caveat as
+        # service-ci.yml: the expression lives in a file whoever can push a
+        # branch controls). The controls are the collaborator list, the fork-PR
+        # approval policy and branch protection (AGENTS.md § Self-hosted
+        # runners and fork PRs).
+        env:
+          OWNER_PUSH: ${{ github.event_name == 'push' && github.actor_id == github.repository_owner_id && github.triggering_actor == github.repository_owner }}
+          QWEN_CI_PUSH_RUNNER: ${{ vars.QWEN_CI_PUSH_RUNNER }}
+        run: |
+          set -euo pipefail
+          CI_RUNNER=ubuntu-latest
+          if [ "$OWNER_PUSH" = "true" ] && [ "$QWEN_CI_PUSH_RUNNER" = "qwen-linux" ]; then
+            CI_RUNNER=qwen-linux
+          fi
+          echo "ci_runner=$CI_RUNNER" >> "$GITHUB_OUTPUT"
+          echo "pytest suite routing: $CI_RUNNER (event=$GITHUB_EVENT_NAME owner_push=$OWNER_PUSH)"
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
         with:
           fetch-depth: 0  # full history needed to resolve the base/before commit below
@@ -369,8 +437,12 @@ jobs:
     # false only by the coincidence of an empty outputs.code — success()
     # makes the fail-loud-on-broken-predicate behavior explicit instead of
     # accidental.
+    #
+    # Also skipped when the owner-push route sends the suite to qwen-linux
+    # (`changes.outputs.ci_runner`): that job builds its own stamped jar with
+    # scripts/build-gate-jar.sh, so this artifact has no consumer there.
     needs: changes
-    if: success() && needs.changes.outputs.code == 'true'
+    if: success() && needs.changes.outputs.code == 'true' && needs.changes.outputs.ci_runner != 'qwen-linux'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
 
@@ -407,7 +479,7 @@ jobs:
           if-no-files-found: error
 
   test:
-    name: pytest (Python ${{ matrix.python-version }}, shard ${{ matrix.shard }}/4)
+    name: pytest (Python ${{ matrix.python-version }}, shard ${{ matrix.shard }}/6)
     runs-on: ubuntu-latest
     # nexus-eqxxh: the engine-substrate tests need the shaded jar. One build,
     # shared by every matrix leg (see the service-jar job's cost note).
@@ -422,8 +494,12 @@ jobs:
     # instead run and fail later at the "Fetch the service jar" download
     # step, which still fails the leg (and therefore the pytest-gate fan-in)
     # but wastes a full job slot getting there.
+    #
+    # The six hosted shards are SKIPPED on an owner push routed to qwen-linux
+    # (`changes.outputs.ci_runner`, see the `route` step); `test-qwen` runs the
+    # whole suite there instead. pytest-gate requires exactly one of the two.
     needs: [changes, service-jar]
-    if: success() && needs.changes.outputs.code == 'true'
+    if: success() && needs.changes.outputs.code == 'true' && needs.changes.outputs.ci_runner != 'qwen-linux'
     env:
       # NON-VACUITY BACKSTOP, armed in the SAME change that provisions — which
       # is the whole point. tests/conftest.py::t2_service_env skips
@@ -459,17 +535,19 @@ jobs:
     # nexus-n0ful: 45m -> 25m. The 45m ceiling was sized for one process
     # running the WHOLE unit suite (17:05 measured locally, 25-30m on
     # runners, cache-save overhead on top — see the history below, kept for
-    # provenance). A 4-way duration-balanced shard puts each leg at roughly
-    # a quarter of that wall time; 25m is a ceiling with real headroom over
-    # the balanced-shard estimate, not a tight bound — a timeout is a
+    # provenance). A duration-balanced shard (4-way when this was written, 6-way
+    # since nexus-qzxzh below) puts each leg at roughly 1/N of that wall time;
+    # 25m was a ceiling with real headroom over the balanced-shard estimate,
+    # not a tight bound — a timeout is a
     # CEILING, not a reservation, GitHub bills actual runtime either way.
     #
-    # Review-earned arithmetic (why not 20m): the shard divides only
+    # Review-earned arithmetic (why not 20m; figures are the 4-way ones from
+    # n0ful): the shard divides only
     # RECORDED TEST time (~206s/leg, balanced via .test_durations.json). The
     # fixed per-leg setup pipeline — JDK/GraalVM, PG bundle, uv sync, HF +
     # docling cache restore (or a COLD FETCH on a cache miss), ci_warm_docling.py,
     # service-jar download — is paid by EVERY shard independently, not
-    # divided by 4, and is exactly what drove both prior emergency bumps
+    # divided by the shard count, and is exactly what drove both prior emergency bumps
     # (nexus-cxsbs: cold model fetch; nexus-aqbrk: the engine arm). On top of
     # that, ~200s of session-fixture/engine-boot overhead is visible in the
     # 1025s local wall vs the 825s recorded-test sum. 25m covers a cold-cache
@@ -484,11 +562,38 @@ jobs:
     # which measured 17:05 locally versus 13:33 for the since-deleted SQLite
     # arm and 25-30m on the runners — 3.12 was cancelled at 30m18s under the
     # old cap.
-    timeout-minutes: 25
+    #
+    # nexus-qzxzh: 25m -> 35m. The suite outgrew the n0ful estimate: on
+    # 2026-09-30 passing shards took 18-22m of job time and two of three
+    # develop runs lost one shard to the 25m cap with no failing test
+    # (b6af1878c shard 4 was cancelled at 93% after 24m of tests). The
+    # durations file had been refreshed the day before (3130s recorded,
+    # ~13m per shard), so this is runner speed, not stale balance (1.6-1.9x
+    # the recorded times when measured then; 1.1-1.4x on the test step alone
+    # once re-measured on the 6-shard runs below). The "fifth shard if job
+    # times pass 30m" plan became the six-way split below.
+    #
+    # nexus-qzxzh (Sam, 2026-09-30): 4 -> 6 shards. The 35m ceiling kept the
+    # tail shard alive but did not fix it: the split balances RECORDED
+    # durations, and the recorded file misses the substrate/engine setup the
+    # runners pay, which clusters in the collection-order tail (the
+    # top-level tests/test_*.py files), so the last shard ran 19-25m while
+    # shard 1 ran 14-16m. Six legs cut every leg's test time by a third at the
+    # cost of ~2m fixed setup per extra leg (billed on actual runtime). The
+    # 35m ceiling stays as headroom, not a budget.
+    #
+    # Measured on the three 6-shard runs of 2026-09-30 (36782096550,
+    # 36784801648, 36785966097): job 10.9 to 13.5 min, test step 8:32 to 11:53,
+    # and the same shard ran 8:32 on one run and 11:53 on another, so run-to-run
+    # noise on one shard (about 40%) exceeds the residual imbalance between
+    # shards. 35m is therefore about 2.6x the worst job, and a wedged shard
+    # delays its red by about 22 min. Revisit toward 25m after about 10 runs
+    # (nexus-vyg07); the earlier "revisit at 30m" note no longer applies.
+    timeout-minutes: 35
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4]
+        shard: [1, 2, 3, 4, 5, 6]
         # 3.13 RUNS ONLY AT THE MERGE BOUNDARY (Hal, 2026-07-28). i711w deleted
         # the SQLite arm, so every pytest leg now costs the engine arm's ~33.5
         # min; paying that twice on interior PRs bought little. `pytest (Python
@@ -686,10 +791,12 @@ jobs:
         # failure now means the artifacts are wrong and retrying cannot help.
         run: uv run python scripts/ci_warm_docling.py
 
-      - name: Run tests (shard ${{ matrix.shard }}/4)
+      - name: Run tests (shard ${{ matrix.shard }}/6)
         # nexus-n0ful: pytest-split partitions the SAME collection every leg
         # sees (addopts' `-m 'not integration and not slow'` applies
-        # uniformly) into 4 duration-balanced groups, keyed off the committed
+        # uniformly) into 6 duration-balanced groups (the count is the `shard`
+        # matrix length; tests/scripts/test_ci_shard_count_lint.py fails when the
+        # matrix, this `--splits` and the job and step names disagree), keyed off the committed
         # .test_durations.json. Refresh cadence (JSON has no comment syntax,
         # so it lives here + pyproject.toml's pytest-split dev-dep comment):
         # regenerate on demand with
@@ -707,7 +814,7 @@ jobs:
         run: |
           set -euo pipefail
           uv run pytest tests/ -q --durations=25 \
-            --splits 4 --group ${{ matrix.shard }} \
+            --splits 6 --group ${{ matrix.shard }} \
             --durations-path=.test_durations.json | tee shard-output.txt
 
       # nexus-lemv5: per-shard executed-count floor — the same backstop the
@@ -715,12 +822,524 @@ jobs:
       # at the shard matrix pytest-gate trusts blindly via needs.test. The
       # marker-scoped conftest guards (scenario / mandatory-pin) cannot see
       # a mass-skip of the GENERAL corpus; pytest exits 0 on all-skipped.
-      # Floor 1500/shard against ~3290/shard actual (13150 default-selected
-      # / 4, measured 2026-08-18): generous headroom for corpus shrinkage
-      # and split imbalance, structurally impossible for a near-zero shard
-      # to pass.
+      # The floor reads the EXECUTED count (passed + failed + errored, skipped
+      # excluded; check_lint_leg_non_vacuity.py), not the collected count.
+      # Measured on the 6-shard runs of 2026-09-30 (nexus-qzxzh, runs 36782096550,
+      # 36784801648, 36785966097): 3406 to 5946 executed per shard, about 27.7k
+      # default-selected tests in all. 1500 is 44% of the smallest shard: it
+      # catches a shard that skipped its corpus down to near zero, not half a
+      # shard vanishing, and not a dropped group (a shard that never ran has no
+      # count to read; tests/scripts/test_ci_shard_count_lint.py covers that).
       - name: Executed-count floor (nexus-lemv5 — a shard that skipped its corpus must not report green)
         run: uv run python scripts/check_lint_leg_non_vacuity.py shard-output.txt --floor 1500 --label "test shard ${{ matrix.shard }}"
+
+  test-qwen:
+    # The full Python suite as ONE job on the self-hosted `qwen-linux` runner,
+    # for OWNER PUSHES to develop only (Sam, 2026-10-01, session nexus_654).
+    # It replaces the six hosted shards (`test`) and `service-jar` on that path;
+    # the routing decision is the `route` step of the `changes` job above, which
+    # also carries the opt-in (the job runs only when the repository variable
+    # QWEN_CI_PUSH_RUNNER is exactly `qwen-linux`) and the reasoning. Every
+    # pull_request and every non-owner push runs the hosted shards and skips this
+    # job, and so does an owner push while the variable is not `qwen-linux`.
+    #
+    # THE HOST. qwentescence (Beelink GTR9 Pro, Windows 11) runs the runner in
+    # WSL as the user `ghci` (Ubuntu 26.04, 16 CPUs and 40 GB for WSL), with a
+    # private TMPDIR (/home/ghci/tmp, set in the runner's .env) and JAVA_HOME
+    # (OpenJDK 25.0.4.1, same file). The host also serves production llama
+    # inference, so a suite run costs it about 10% decode while it runs
+    # (accepted by Sam). The host's glibc is too new for release artifacts, so
+    # this runner takes tests only, never a release job. The same WSL distro
+    # also hosts a live nexus install (user `nexus`), and `ghci` is in the
+    # `docker` group, which is root on the distro: isolation of this job from
+    # that install is intended, not proven (AGENTS.md § Self-hosted runners and
+    # fork PRs; the probe workflow is qwen-linux-isolation-probe.yml). Because
+    # docker is root, a job could rewrite /etc/wsl.conf for the NEXT WSL restart
+    # and bring the Windows side back; the first step below re-checks the
+    # Windows side on EVERY run, so that is caught after the fact, not
+    # prevented. The probe does not bound docker.
+    #
+    # THE SHARED SUITE LEASE. A hand-run suite by the `nxtest` user overlapping
+    # this job would put two full suites on a 40 GB WSL VM that hosts the live
+    # service, so the two serialize on ONE lease. The suite lease
+    # (tests/_suite_lease.py) and the build lease (scripts/lib/build-lease.sh)
+    # both live under NX_BUILD_LEASE_ROOT, which defaults to the checkout's git
+    # dir, and a CI checkout and nxtest's clone have different ones. The job
+    # therefore points NX_BUILD_LEASE_ROOT at a host directory both users
+    # share (QWEN_SUITE_LEASE_ROOT, default /var/lib/nx-suite-lease; the
+    # repository variable of the same name overrides it) and sets
+    # NX_SUITE_LEASE_WAIT=1 so an overlap queues instead of failing the job
+    # with exit 75. The directory must exist and be writable by ghci, and must
+    # NOT be sticky (a sticky bit would stop either user reclaiming the other's
+    # dead lease); the lease step fails loud, with the setup text, when it is
+    # not, because tests/_suite_lease.py itself runs UNGUARDED, silently, on an
+    # unwritable root. Every hand run by nxtest must export the same two
+    # variables (its .bashrc). Both ends are host state this file cannot
+    # enforce; the lease step proves ghci's end every run.
+    #
+    # THE BOX LOCK (host owner's request, 2026-10-01). The suite lease covers
+    # pytest only. The WSL VM wedged twice on 2026-10-01 when one `-n 12` suite
+    # overlapped a Maven gate-jar build (which holds the separate `service`
+    # build lease, so the two never queued on each other). The host convention
+    # is ONE box-wide lock held across the whole heavy stretch of a run:
+    # `flock /var/lib/nx-suite-lease/box.lock bash -c '<jar build> && <pytest>'`.
+    # The job's last two heavy steps are therefore ONE step that takes
+    # `$QWEN_SUITE_LEASE_ROOT/box.lock` with `flock -w` (a bounded wait, a log
+    # line when it has to wait, a loud failure naming the lock when the wait runs
+    # out) from before scripts/build-gate-jar.sh through the end of pytest, so CI
+    # and a hand run cannot overlap at any stage. The lock file is cross-user
+    # because the directory is group nx-suite 2775 and flock opens it read-only.
+    # The suite lease stays: this job's own pytest takes it inside the box
+    # lock. A hand run that took only the suite lease (a bare pytest) would skip
+    # the box lock and the priority marker, and would hold the lease this job's
+    # pytest needs after it took the box lock, so it is not a supported hand-run
+    # form; hand runs go through scripts/qwen-hand-run.sh. No flock on the host
+    # is a host defect and fails closed (the toolchain preflight and the step
+    # both refuse). Nothing
+    # else heavy runs outside the lock: the setup steps before it (uv sync, the
+    # model primes, the docling warm-up) are downloads and a venv, not a jar
+    # build or a suite. Maven and engine suites do NOT run on this box at all
+    # (hellmini takes them).
+    #
+    # CI PRIORITY (nexus-0wp30, Sam 2026-10-02). flock does not order its
+    # waiters and this job gives up after QWEN_BOX_LOCK_WAIT_SECONDS (1800), so
+    # a queue of hand runs starved CI for about 24 minutes. The lock alone cannot
+    # express "CI first". So the job posts a marker, $CI_WAIT_MARKER
+    # (`$QWEN_SUITE_LEASE_ROOT/ci-waiting.<run>.<attempt>`, named once in the env
+    # below), in the lease root before it waits, and HOLDS A KERNEL LOCK ON IT
+    # for as long as it is queued. The lock is the liveness signal, not the
+    # file's age: scripts/qwen-hand-run.sh, the only supported hand-run entry,
+    # treats a marker as live only while it cannot take a shared lock on it, and
+    # the kernel drops the lock when this process dies, SIGKILL included, so a
+    # killed job stops blocking hand runs at once. The wrapper falls back to the
+    # file's mtime (2100 s, this wait plus 300 s) only where it cannot test the
+    # lock; keep that bound above QWEN_BOX_LOCK_WAIT_SECONDS, which
+    # tests/test_pytest_gate_qwen_route.py pins. The file is removed the moment
+    # the step holds the box lock (CI queued becomes CI running), by the step's
+    # EXIT trap on every other way out, and by the always() step after it. A
+    # cancel is handled in the step: the lock wait is a background job the step
+    # `wait`s on, because bash defers a trapped signal until a foreground child
+    # ends, and a cancel while queued is the common one. fd 8, the marker lock,
+    # is closed for that job so a waiting flock, the jar build or an orphan never
+    # keeps the marker looking live. What CI can still wait on is a hand run
+    # already HOLDING the lock when CI arrives, or one that started during this
+    # job's setup steps, before the marker exists: both are capped by the
+    # wrapper's own hold limit (QWEN_HAND_RUN_HOLD_SECONDS, 1500 s, below this
+    # wait), so neither can outrun it. Posting the marker earlier, in a first
+    # step, was considered and not done: a lock cannot outlive the step that
+    # holds it, so it would need a background holder whose fate under the
+    # runner's step and job cleanup is unmeasured, and an orphaned holder would
+    # block hand runs until its own timeout. How long a run takes at -n 8 is
+    # not yet measured, so no duration is stated here.
+    #
+    # LABELS. `runs-on: qwen-linux` names only the custom label (Sam, 2026-10-02:
+    # the runner is to be re-registered with --no-default-labels, so it will carry
+    # no `self-hosted`/`Linux`/`X64`; today's registration already has `qwen-linux`
+    # as its own label, so this works before and after). No other runner has it,
+    # and a job naming a generic label can no longer reach this box. runs-on is a
+    # LITERAL, never an expression over a variable.
+    #
+    # WHAT IT RUNS. `uv run pytest tests/ -n 8`: the same default selection the
+    # hosted shards run (addopts deselect integration, slow and lint), without
+    # pytest-split, so `.test_durations.json` and the shard balance are untouched
+    # on the hosted path. -n 8, not 12, at the host owner's request (2026-10-01):
+    # each xdist worker boots its own Postgres substrate and needs about 2.5 GB
+    # on Linux, and the 40 GB WSL VM is shared with a production llama-server, so
+    # 12 workers left too little headroom (two wedges that day). Measured
+    # 2026-10-01 by hand as the `nxtest` user on develop d572ba7b0 at -n 12:
+    # 25,705 passed and 2 failed (the /tmp/nexus-e2e-locks directory, since fixed
+    # host-side) in 9m50s; the hosted shards take 10.9 to 13.5 min each in
+    # parallel. -n 8 is not yet measured on this job and will run longer.
+    #
+    # TOOLCHAIN. The runner's own, no setup-* action: uv at /usr/local/bin/uv
+    # (UV_PYTHON pins 3.12, which uv fetches once and keeps in ghci's home),
+    # OpenJDK from JAVA_HOME in the runner's .env, Maven, and a rootful Docker
+    # that ghci reaches through the docker group (the jOOQ codegen inside
+    # build-gate-jar.sh needs it). Where a hosted job restores a cache (uv wheels,
+    # the MiniLM and HuggingFace models, the PG bundle), this one relies on the
+    # persistent home of the runner user instead: the same directories, kept
+    # between jobs on disk. The two models that have a self-hosted release asset
+    # still go through their prime actions (cache, else the asset), which makes
+    # the first run on a clean home work and leaves later runs a cache restore.
+    # No ripgrep: nothing in tests/, src/ or scripts/ calls rg since nexus-06aei,
+    # so the hosted `Install ripgrep` step is vestigial.
+    #
+    # THE JAR. (Runs inside the box lock, see above.) scripts/build-gate-jar.sh builds the stamped shaded jar, or copies
+    # it from the content-keyed cache kept in this checkout's common git dir (the
+    # runner's checkout persists, its .git included), then NX_T2_SUBSTRATE_EXPECTED
+    # arms the fail-loud backstop exactly as on the shards: an absent or stale jar
+    # fails the leg instead of skipping the engine-substrate family. The jar's
+    # mtime is NOT touched (the shards re-stamp a downloaded artifact; this job
+    # builds in place, so the freshness gate is meaningful).
+    #
+    # NON-VACUITY. The shard floor (nexus-lemv5) applies to the whole run: the
+    # executed count must clear 20,000 (25,705 measured here, about 27.7k summed
+    # from the hosted shards), so a run that mass-skipped its corpus cannot report
+    # green. pytest-gate additionally requires THIS job to have succeeded on a
+    # qwen route and to have been skipped on the hosted route; a skipped,
+    # cancelled or absent result on the qwen route fails the gate.
+    #
+    # TIMEOUT. 75 minutes: the box-lock wait (QWEN_BOX_LOCK_WAIT_SECONDS, 30
+    # minutes, so the job fails loudly naming the lock before GitHub cancels it
+    # silently) plus a run that, at -n 8, is estimated at 12 to 18 min warm (the
+    # -n 12 suite took 10; -n 8 is unmeasured) and adds the 9-minute jar build,
+    # the Maven and uv downloads and the model primes cold. Revisit after about
+    # 10 develop runs.
+    name: pytest (qwen-linux full suite)
+    needs: [changes]
+    if: success() && needs.changes.outputs.code == 'true' && needs.changes.outputs.ci_runner == 'qwen-linux'
+    runs-on: qwen-linux
+    timeout-minutes: 75
+    permissions:
+      contents: read
+    env:
+      # Same backstop as the shards (see the `test` job's env): provisioning is
+      # armed in the same change, so an absent or stale jar FAILS LOUDLY.
+      NX_T2_SUBSTRATE_EXPECTED: "1"
+      # The shards pin 3.12 through setup-uv's python-version input.
+      UV_PYTHON: "3.12"
+      # The directory ghci and nxtest share for the suite and build leases (see
+      # THE SHARED SUITE LEASE above). The lease step validates it and then
+      # exports NX_BUILD_LEASE_ROOT and NX_SUITE_LEASE_WAIT for the later steps.
+      QWEN_SUITE_LEASE_ROOT: ${{ vars.QWEN_SUITE_LEASE_ROOT || '/var/lib/nx-suite-lease' }}
+      # The CI-priority marker (CI PRIORITY in the comment above), named ONCE here
+      # so the locked step and the always() cleanup step cannot disagree about it.
+      # The root expression is repeated because an env value cannot read a sibling.
+      CI_WAIT_MARKER: ${{ vars.QWEN_SUITE_LEASE_ROOT || '/var/lib/nx-suite-lease' }}/ci-waiting.${{ github.run_id }}.${{ github.run_attempt }}
+      # How long the jar-build-plus-suite step waits for the box lock
+      # ($QWEN_SUITE_LEASE_ROOT/box.lock, see THE BOX LOCK above) before it
+      # fails naming the lock. Kept well under timeout-minutes so the failure is
+      # ours and loud, not GitHub's silent cancel.
+      QWEN_BOX_LOCK_WAIT_SECONDS: "1800"
+    steps:
+      - name: Windows-side preflight (fails closed on every run, before the checkout)
+        shell: bash
+        run: |
+          set -uo pipefail
+          # WHY EVERY RUN. The qwen-linux distro runs on a Windows 11 host, and
+          # with WSL interop or the /mnt automount ON a process of this user
+          # could start Windows programs as the Windows user and read its
+          # drives (measured: the Windows user's SSH key, cmd.exe as a Windows
+          # admin). The fix is host-side (/etc/wsl.conf) and the probe checks it
+          # once; but `ghci` is in the docker group, which is root on the
+          # distro, so a job can rewrite wsl.conf for the next restart. This
+          # step is the per-run check that catches that. It guards against HOST
+          # DRIFT (a wsl.conf change, a handler or drive that came back), not
+          # against a hostile commit: this workflow file is itself part of the
+          # pushed commit, so a commit that edits this step out runs without it.
+          # It runs before actions/checkout only so that it reads the host as the
+          # previous job left it.
+          # The paths are plain assignments so the tests can point them at a
+          # fake tree; nothing in the environment can move them. Output is
+          # pass or fail and counts only: no path, name or drive content.
+          proc_version=/proc/version
+          binfmt_dir=/proc/sys/fs/binfmt_misc
+          mounts_file=/proc/mounts
+          mnt_root=/mnt
+          fix="set /etc/wsl.conf to [interop] enabled=false, appendWindowsPath=false and [automount] enabled=false, then run wsl --shutdown from Windows"
+          # POSITIVE CONTROL: every check below is true on a machine that is not
+          # WSL, or where binfmt_misc is unmounted and the handler list is
+          # invisible. A step that passed there would prove nothing, so it fails.
+          if ! grep -qi microsoft "$proc_version" 2>/dev/null; then
+            echo "::error::this is not a WSL kernel: the Windows-side checks cannot be established here, so the job fails closed (host prerequisite)"
+            exit 1
+          fi
+          if [ ! -e "$binfmt_dir/status" ]; then
+            echo "::error::binfmt_misc is not mounted: a WSLInterop handler would not be visible, so the interop check cannot be established and the job fails closed"
+            exit 1
+          fi
+          handlers=0
+          for entry in WSLInterop WSLInterop-late; do
+            if [ -e "$binfmt_dir/$entry" ]; then handlers=$((handlers + 1)); fi
+          done
+          cmds=0
+          for c in "$mnt_root"/*/Windows/System32/cmd.exe; do
+            if [ -e "$c" ]; then cmds=$((cmds + 1)); fi
+          done
+          nonempty=0
+          for d in "$mnt_root"/[a-zA-Z]; do
+            if [ -d "$d" ] && [ -n "$(ls -A "$d" 2>/dev/null)" ]; then nonempty=$((nonempty + 1)); fi
+          done
+          drive_mounts=0
+          if [ -r "$mounts_file" ]; then
+            drive_mounts="$(awk -v root="$mnt_root" '($3 == "drvfs" || $3 == "9p") && length($2) == length(root) + 2 && substr($2, 1, length(root) + 1) == root "/" && substr($2, length($2)) ~ /[a-zA-Z]/ { n++ } END { print n + 0 }' "$mounts_file")"
+          fi
+          pathn=0
+          old_ifs="$IFS"
+          IFS=:
+          for entry in $PATH; do
+            case "$entry" in
+              "$mnt_root"|"$mnt_root"/*) pathn=$((pathn + 1)) ;;
+            esac
+          done
+          IFS="$old_ifs"
+          echo "windows-side preflight: WSL kernel and binfmt_misc present (positive control); WSLInterop handlers=$handlers cmd.exe=$cmds non-empty-drives=$nonempty drive-mounts=$drive_mounts path-entries=$pathn"
+          if [ $((handlers + cmds + nonempty + drive_mounts + pathn)) -gt 0 ]; then
+            echo "::error::the Windows side is reachable from this runner user (counts above; names withheld). Fix on the host: $fix"
+            exit 1
+          fi
+          echo "no WSLInterop handler, no Windows cmd.exe, no non-empty or mounted /mnt drive, no /mnt entry on PATH (expected)"
+
+      - name: Self-hosted runner consistency check
+        shell: bash
+        env:
+          ACTOR_ID: ${{ github.actor_id }}
+          OWNER_ID: ${{ github.repository_owner_id }}
+          TRIGGERING_ACTOR: ${{ github.triggering_actor }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          # Consistency check, not a security control (see the `route` step):
+          # the routing should never have sent any other event or account here.
+          # It is the only guard for a partial "Re-run failed jobs" by another
+          # account, which keeps the old `changes` output and so lands here.
+          if [ "$GITHUB_EVENT_NAME" != "push" ] || [ "$ACTOR_ID" != "$OWNER_ID" ] || [ "$TRIGGERING_ACTOR" != "$OWNER" ]; then
+            echo "::error::routing inconsistency: a self-hosted runner got event=$GITHUB_EVENT_NAME actor_id=$ACTOR_ID triggering_actor=$TRIGGERING_ACTOR (expected an owner push)"
+            exit 1
+          fi
+
+      - name: Shared suite lease directory (must exist, writable, not sticky)
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The suite lease's opt-out is for a hand run; CI never sets it, and the
+          # lint test pins that no workflow does. A host-side runner .env or a
+          # profile on the runner account could still put it in this job's
+          # environment, where it would turn the guard off silently, so refuse here
+          # (round-4 review L5). Only the fact is printed, never a value.
+          if [ -n "${NX_SUITE_LEASE_UNGUARDED:-}" ]; then
+            echo "::error::the suite lease opt-out is set in this job's environment (a runner .env or the runner account's profile?): the guard against a hand-run suite would be off. Unset it on the host."
+            exit 1
+          fi
+          root="$QWEN_SUITE_LEASE_ROOT"
+          fix="Host admin, once: sudo groupadd -f nx-suite; sudo usermod -aG nx-suite ghci; sudo usermod -aG nx-suite nxtest; sudo install -d -o root -g nx-suite -m 2775 $root; then restart the runner service (new group) and have nxtest export NX_BUILD_LEASE_ROOT=$root NX_SUITE_LEASE_WAIT=1 in its .bashrc."
+          if [ ! -d "$root" ] || [ -L "$root" ]; then
+            echo "::error::suite lease directory $root is missing (or a symlink); this job would run without the guard against a hand-run suite. $fix"
+            exit 1
+          fi
+          if [ -k "$root" ]; then
+            echo "::error::suite lease directory $root has the sticky bit: neither user could reclaim the other's dead lease, and the next run would wait out its timeout. Fix: sudo chmod 2775 $root. $fix"
+            exit 1
+          fi
+          probe="$root/.write-probe.$$"
+          if ! mkdir "$probe" 2>/dev/null; then
+            echo "::error::the runner user cannot create entries in $root. tests/_suite_lease.py would run unguarded without saying so. $fix"
+            exit 1
+          fi
+          rmdir "$probe"
+          {
+            echo "NX_BUILD_LEASE_ROOT=$root"
+            echo "NX_SUITE_LEASE_WAIT=1"
+          } >> "$GITHUB_ENV"
+          echo "suite lease root: $root (exists, not a symlink, not sticky, writable by the runner user)"
+
+      - name: Toolchain preflight
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Preflight: name a missing host prerequisite at once instead of
+          # failing minutes later inside uv, maven or a prime action.
+          # TMPDIR stays on the runner's persistent private directory ON
+          # PURPOSE (service-ci pins it to RUNNER_TEMP; this job must not):
+          # the test substrate's orphan sweep (tests/_engine_substrate.py)
+          # finds a killed run's Postgres cluster and engine JVM through
+          # sidecar files under tempfile.gettempdir(), at the start of the next
+          # boot. The runner empties RUNNER_TEMP at the end of every job, which
+          # would delete those sidecars together with a cancelled run's live
+          # data directory and leave its postmaster and JVM running with no one
+          # able to find them. /tmp and /var/tmp are shared with nxtest and
+          # nexus, so they are refused.
+          case "${TMPDIR:-}" in
+            ""|/tmp|/tmp/*|/var/tmp|/var/tmp/*)
+              echo "::error::TMPDIR is '${TMPDIR:-unset}': the runner's .env must set a private persistent directory (/home/ghci/tmp), not a path shared with the other users of this distro"
+              exit 1
+              ;;
+          esac
+          mkdir -p "$TMPDIR"
+          missing=""
+          for tool in uv java git curl tar shasum docker flock; do
+            command -v "$tool" >/dev/null 2>&1 || missing="$missing $tool"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::qwen-linux is missing host tools:$missing (host prerequisite, not a repo defect)"
+            exit 1
+          fi
+          if [ -z "${JAVA_HOME:-}" ]; then
+            echo "::error::JAVA_HOME is unset in the runner environment (the runner's .env should carry it)"
+            exit 1
+          fi
+          if ! docker info >/dev/null 2>&1; then
+            echo "::error::docker is not reachable by the runner user (the jOOQ codegen in build-gate-jar.sh needs it)"
+            exit 1
+          fi
+          echo "TMPDIR=$TMPDIR ($(du -sh "$TMPDIR" 2>/dev/null | cut -f1) in use)"
+          uv --version
+          java -version 2>&1 | head -1
+          docker --version
+          nproc
+          free -g | head -2
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
+        with:
+          # No fetch-tags or fetch-depth, same as the `test` shards (nexus-dhs30).
+          # The job token must not sit in a persistent workspace's .git/config
+          # after the job (this runner keeps its workspace). Nothing later
+          # pushes or fetches with it; the prime-* actions pass github.token
+          # through their own env.
+          persist-credentials: false
+
+      - name: Prime bge-768 ONNX (cache or self-hosted asset)
+        # Same step and reason as the shards: the engine jar constructs
+        # Bge768Embedder before it binds its port.
+        uses: ./.github/actions/prime-bge-onnx
+
+      - name: Install project + dev deps
+        run: uv sync --group dev
+
+      - name: Prime docling artifacts (cache or self-hosted asset)
+        # WE HOST THESE; nothing here may reach HuggingFace (see the `test` job).
+        uses: ./.github/actions/prime-docling
+
+      - name: Verify docling extracts from the mirrored models
+        run: uv run python scripts/ci_warm_docling.py
+
+      - name: Build the stamped service jar and run the full suite under the box lock (-n 8)
+        # ONE step, ONE flock, on purpose (see THE BOX LOCK in the job comment):
+        # the jar build and pytest both run inside a single `flock -w ... box.lock
+        # bash -c '...'`, so nothing heavy runs outside the lock and a hand run
+        # that takes the same lock cannot overlap either stage. Do not split this
+        # back into two steps: a lock cannot span steps.
+        shell: bash
+        run: |
+          set -uo pipefail
+          # Fail closed: without flock the run would be unserialized, which is
+          # the overlap that wedged the VM twice on 2026-10-01.
+          if ! command -v flock >/dev/null 2>&1; then
+            echo "::error::flock is not installed on this runner: the box lock cannot be taken, so the jar build and the suite would run unserialized against a hand run. Host prerequisite (util-linux)."
+            exit 1
+          fi
+          lock="$QWEN_SUITE_LEASE_ROOT/box.lock"
+          wait_s="$QWEN_BOX_LOCK_WAIT_SECONDS"
+          # CI PRIORITY (nexus-0wp30; see CI PRIORITY in the job comment). The
+          # marker is $CI_WAIT_MARKER (ci-waiting.<run>.<attempt> in the lease
+          # root, named once in the job env), posted BEFORE waiting on the lock.
+          # Its liveness is a KERNEL LOCK this shell holds on fd 8 for as long as
+          # it is queued: scripts/qwen-hand-run.sh treats the marker as live only
+          # while it cannot take a shared lock on it, and the kernel drops the
+          # lock when this process dies, SIGKILL included, so no clock decides it.
+          # The file is dropped the moment this step holds the box lock (inside
+          # the bash -c below), by the EXIT trap on every other way out, and by the
+          # always() step after this one.
+          marker="$CI_WAIT_MARKER"
+          fpid=""
+          # TERM and INT (the runner's cancel) must end the wait AT ONCE. The
+          # lock wait below is a background job this shell `wait`s on, because
+          # bash defers a trapped signal until a FOREGROUND child ends, and the
+          # common cancel (a newer push) arrives while this step is queued. The
+          # trap stops the waiting flock and exits; the EXIT trap then removes
+          # the marker. The runner's process-tree kill is the backstop for a
+          # suite that is already running. pkill is procps, which the runner
+          # image has; on an image without it the `kill "$fpid"` below still
+          # stops the waiting flock itself.
+          # shellcheck disable=SC2329  # called from the TERM and INT traps below
+          on_signal() {
+            if [ -n "$fpid" ]; then
+              pkill -TERM -P "$fpid" 2>/dev/null || true
+              kill "$fpid" 2>/dev/null || true
+            fi
+            exit "$1"
+          }
+          trap 'rm -f "$marker"' EXIT
+          trap 'on_signal 143' TERM
+          trap 'on_signal 130' INT
+          # The other user (nxtest) tests the lock read-only, so the file must be
+          # readable by it whatever this account's umask is.
+          old_umask="$(umask)"
+          umask 022
+          # A blocking lock with a short wait, not -n: a hand run's own probe holds
+          # a shared lock for an instant, and a non-blocking take would lose to it.
+          if { exec 8>"$marker"; } 2>/dev/null && flock -w 10 -x 8; then
+            printf 'run=%s attempt=%s\n' "${GITHUB_RUN_ID:-norun}" "${GITHUB_RUN_ATTEMPT:-0}" >&8
+            echo "CI priority marker $marker posted and locked: hand runs started through scripts/qwen-hand-run.sh now yield to this job"
+          else
+            exec 8>&-
+            rm -f "$marker"
+            echo "::warning::could not post and lock the CI priority marker $marker (is the lease root writable?): a hand run will not yield to this job, so the lock wait may run long"
+          fi
+          umask "$old_umask"
+          # A plain probe, only to say in the log whether this run will queue.
+          if flock -n "$lock" true 2>/dev/null; then
+            echo "box lock $lock is free; taking it for the jar build and the suite"
+          else
+            echo "box lock $lock is held (a hand run or another job); waiting up to ${wait_s}s for it"
+          fi
+          # Exit 200 is flock's own timeout code here (-E), chosen because neither
+          # pytest (0 to 5) nor the jar build uses it. `set -euo pipefail` inside
+          # the bash -c is load-bearing: without it the suite's status is tee's
+          # and a red suite reports green. -rs puts every skip reason in the log
+          # (see the floor step). The jar is cached on the exact service/ content.
+          # `|| rc=$?` keeps the runner's `bash -e` from exiting on the 200 before
+          # the message below can name the lock. The flock runs as a background
+          # job (see on_signal above) with fd 8 CLOSED for it, so the marker's
+          # lock is held by this shell alone: a waiting flock, the jar build or
+          # an orphan from the suite must never keep the marker looking live.
+          rc=0
+          # shellcheck disable=SC2016  # $CI_WAIT_MARKER is meant to expand in the inner shell, from the job env
+          flock -w "$wait_s" -E 200 "$lock" bash -c 'set -euo pipefail; rm -f "$CI_WAIT_MARKER"; scripts/build-gate-jar.sh; uv run pytest tests/ -q -rs -n 8 --durations=25 | tee suite-output.txt' 8>&- &
+          fpid=$!
+          wait "$fpid" || rc=$?
+          fpid=""
+          if [ "$rc" -eq 200 ]; then
+            echo "::error::could not take the box lock $lock within ${wait_s}s: a hand run or another job still holds it. Nothing was built or run. Re-run once the box is free (the lock is released when its holder's command ends)."
+            exit 1
+          fi
+          exit "$rc"
+
+      - name: Executed-count floor (a run that skipped its corpus must not report green)
+        # TODO(qwen-floor): 20000 is deliberately loose. Measured by hand on
+        # d572ba7b0: 25,705 passed here against about 27.7k summed from the
+        # hosted shards, a gap of about 2k that is unexplained and plausibly
+        # tests skipped for a tool this box lacks, so this job is the SOLE suite
+        # gate on an owner push yet would pass with up to ~5.7k tests silently
+        # missing. RECONCILIATION STEP, on the first real run: diff the `-rs`
+        # skip reasons in suite-output.txt against a hosted run of the same
+        # tree (docs/contributing.md, "First run of the qwen-linux route"), fix
+        # or accept each reason, then raise the floor to about measured minus
+        # 2% (a measured 25,700 means about 25,200). Until then do not read a
+        # green floor as parity with the hosted shards.
+        run: uv run python scripts/check_lint_leg_non_vacuity.py suite-output.txt --floor 20000 --label "qwen-linux full suite"
+
+      - name: Drop the CI priority marker (always)
+        if: always()
+        shell: bash
+        run: |
+          # A second path to the same end as the locked step's own EXIT trap, for
+          # the case that trap cannot cover: the step shell killed outright. (Even
+          # then the marker's kernel lock is gone with the process, so a hand run
+          # already treats it as dead; this removes the file.) Nothing there is
+          # fine; the marker is also removed inside the box lock.
+          rm -f -- "$CI_WAIT_MARKER"
+
+      - name: Report substrate processes left behind (report only)
+        if: always()
+        shell: bash
+        run: |
+          # Postgres clusters and engine JVMs of THIS runner user that outlived
+          # the suite (a job killed at its timeout can leave them). Report only:
+          # reaping is the host owner's decision on a box that also serves
+          # inference.
+          if pgrep -u "$(id -u)" -af 'postgres|nexus-service'; then
+            echo "::warning::processes of the runner user still running after the suite (listed above)"
+          else
+            echo "no substrate processes left behind"
+          fi
+          # The persistent TMPDIR is reaped by the next boot's orphan sweep;
+          # say how big it is and what it still holds, so growth is visible.
+          echo "TMPDIR $TMPDIR: $(du -sh "$TMPDIR" 2>/dev/null | cut -f1) in use, $(find "$TMPDIR" -maxdepth 1 -name 'nexus_t2_substrate_pg_*' 2>/dev/null | wc -l) substrate cluster dir(s)"
+          if docker ps -q 2>/dev/null | grep -q .; then
+            echo "::warning::containers still running on the shared docker daemon after the suite:"
+            docker ps --format '{{.ID}} {{.Image}} {{.Names}}' 2>&1 | head -20
+          fi
 
   test-lint:
     # test-suite-compression P0 (nexus-test-cleanup, 2026-08-05): the `lint`
@@ -835,7 +1454,7 @@ jobs:
 
   test-mode-census:
     # nexus-vdti6 (candidate 1, chosen over: candidate 2 — an out-of-band
-    # merge across the 4 shard processes, more plumbing for no benefit over
+    # merge across the shard processes, more plumbing for no benefit over
     # this precedent; candidate 3 — reverting to a filesystem/AST-only
     # census, explicitly scoped OUT by this census's own design because it
     # needs pytest's fixture-resolution machinery (item.fixturenames) to
@@ -848,13 +1467,14 @@ jobs:
     # reads request.session.items — the collected-and-selected test list —
     # to scan the WHOLE default-loop corpus for undeclared voyage-mode
     # references. CI's real PR-gating `test` job above runs
-    # `pytest tests/ --splits 4 --group N` (pytest-split);
+    # `pytest tests/ --splits 6 --group N` (pytest-split);
     # pytest_split/plugin.py:168 does `items[:] = group.selected` inside
     # its own pytest_collection_modifyitems — the IDENTICAL session.items-
     # mutation mechanism `-m`/`-k` deselection uses (the same mechanism
     # nexus-8x4le's `-m lint` blind spot exploited). Under that real
-    # invocation the census only ever saw its own shard (~20-25% of the
-    # corpus): enforcement was shard-placement luck, not real coverage.
+    # invocation the census only ever saw its own shard (1/N of the corpus,
+    # about 17% at 6 shards): enforcement was shard-placement luck, not real
+    # coverage.
     # tests/conftest.py's partial_session_view_reason guard now makes the
     # census SKIP (never silently scan a partial view) whenever
     # --splits/--group is active — which is unconditionally true in the
@@ -863,8 +1483,9 @@ jobs:
     # trustworthy view.
     #
     # HOW IT STAYS CHEAP WITHOUT THE ENGINE SUBSTRATE: this job still needs
-    # request.session.items to be the REAL full corpus (~13.1k raw / ~11.7k
-    # default-loop items, measured live 2026-08-06), which means COLLECTING
+    # request.session.items to be the REAL full corpus (about 27.7k
+    # default-selected items, summed from the shard outputs 2026-09-30; it was
+    # ~13.1k raw / ~11.7k default-loop on 2026-08-06), which means COLLECTING
     # the whole tests/ tree — but collecting is not the same as EXECUTING.
     # NX_CENSUS_ONLY_JOB=1 (tests/conftest.py's pytest_collection_
     # modifyitems) SKIP-MARKS every item outside
@@ -874,9 +1495,10 @@ jobs:
     # `pytest_runtest_setup` (`@hookimpl(tryfirst=True)`), which raises
     # BEFORE `_pytest/runner.py`'s own `pytest_runtest_setup` — the one that
     # calls `item.setup()` and instantiates fixtures — ever runs, so the
-    # ~11.7k skip-marked tests never touch the engine substrate, PG, or the
-    # service jar. Measured locally: collection alone is ~8s (11733/13101
-    # items); this job pays that plus per-item skip overhead for the
+    # skip-marked tests (all but the census modules) never touch the engine
+    # substrate, PG, or the service jar. Measured locally 2026-08-06:
+    # collection alone was ~8s (11733/13101 items, a corpus less than half
+    # today's); this job pays that plus per-item skip overhead for the
     # rest, not fixture/engine cost — no service-jar / PG-bundle / docling
     # provisioning steps below, unlike the `test` matrix.
     name: pytest (mode-declarations census)
@@ -1002,24 +1624,41 @@ jobs:
     # condition for the exact same reason.
     name: pytest-gate
     if: always()
-    needs: [changes, test, test-lint, test-mode-census, release-ledger-gate]
+    #
+    # TWO PATHS TO THE SUITE (the owner-push qwen-linux route, `changes`'
+    # `route` step): `test` (six hosted shards) and `test-qwen` (the whole suite
+    # on qwen-linux). Exactly one of them runs for a given run, chosen by
+    # `changes.outputs.ci_runner`, and this gate reads that same output rather
+    # than inferring the path from the two results (a skipped result is
+    # ambiguous between "correctly skipped" and "silently never ran"). On
+    # code=true the chosen path MUST be `success` and the other MUST be
+    # `skipped`: a qwen job that was skipped, cancelled, failed, timed out or
+    # never reported fails the gate on the qwen route, and the shards doing the
+    # work on a qwen route (or the qwen job doing it on a hosted route) is a
+    # routing inconsistency that fails too. An unrecognised ci_runner fails
+    # loud. tests/test_pytest_gate_qwen_route.py drives this step against every
+    # combination.
+    needs: [changes, test, test-qwen, test-lint, test-mode-census, release-ledger-gate]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Verify the sharded pytest matrix (or its legitimate skip)
+      - name: Verify the pytest suite (hosted shards or qwen-linux) or its legitimate skip
         run: |
           set -euo pipefail
           changes_result="${{ needs.changes.result }}"
           code="${{ needs.changes.outputs.code }}"
+          ci_runner="${{ needs.changes.outputs.ci_runner }}"
           test_result="${{ needs.test.result }}"
+          test_qwen_result="${{ needs.test-qwen.result }}"
           test_lint_result="${{ needs.test-lint.result }}"
           test_mode_census_result="${{ needs.test-mode-census.result }}"
           release_ledger_result="${{ needs.release-ledger-gate.result }}"
           event_name="${{ github.event_name }}"
           base_ref="${{ github.base_ref }}"
 
-          echo "changes job result: $changes_result (code=$code)"
+          echo "changes job result: $changes_result (code=$code ci_runner=$ci_runner)"
           echo "test matrix result: $test_result"
+          echo "test-qwen result: $test_qwen_result"
           echo "test-lint result: $test_lint_result"
           echo "test-mode-census result: $test_mode_census_result"
           echo "release-ledger-gate result: $release_ledger_result (event=$event_name base_ref=$base_ref)"
@@ -1031,10 +1670,37 @@ jobs:
 
           case "$code" in
             true)
-              if [ "$test_result" != "success" ]; then
-                echo "::error::code changed but the pytest shard matrix reported '$test_result' instead of success"
-                exit 1
-              fi
+              # Exactly one suite path runs, the one `changes` routed to. The
+              # chosen path must be success and the other must be skipped: a
+              # skipped result on the chosen path is NOT a pass (a qwen job that
+              # never ran must not satisfy this gate), and the unchosen path
+              # having run is a routing inconsistency.
+              case "$ci_runner" in
+                qwen-linux)
+                  if [ "$test_qwen_result" != "success" ]; then
+                    echo "::error::the suite was routed to qwen-linux but the test-qwen job reported '$test_qwen_result' instead of success"
+                    exit 1
+                  fi
+                  if [ "$test_result" != "skipped" ]; then
+                    echo "::error::the suite was routed to qwen-linux but the hosted pytest shard matrix reported '$test_result' instead of skipped (routing inconsistency)"
+                    exit 1
+                  fi
+                  ;;
+                ubuntu-latest)
+                  if [ "$test_result" != "success" ]; then
+                    echo "::error::code changed but the pytest shard matrix reported '$test_result' instead of success"
+                    exit 1
+                  fi
+                  if [ "$test_qwen_result" != "skipped" ]; then
+                    echo "::error::the suite was routed to the hosted shards but the test-qwen job reported '$test_qwen_result' instead of skipped (routing inconsistency)"
+                    exit 1
+                  fi
+                  ;;
+                *)
+                  echo "::error::unrecognised ci_runner '$ci_runner' from the changes job — failing loud instead of guessing which suite path was required"
+                  exit 1
+                  ;;
+              esac
               if [ "$test_lint_result" != "success" ]; then
                 echo "::error::code changed but the lint-marker leg (test-lint) reported '$test_lint_result' instead of success"
                 exit 1
@@ -1049,6 +1715,13 @@ jobs:
                 success|skipped) ;;
                 *)
                   echo "::error::doc-only diff but the pytest shard matrix reported '$test_result' instead of skipped/success"
+                  exit 1
+                  ;;
+              esac
+              case "$test_qwen_result" in
+                success|skipped) ;;
+                *)
+                  echo "::error::doc-only diff but the test-qwen job reported '$test_qwen_result' instead of skipped/success"
                   exit 1
                   ;;
               esac
@@ -1686,7 +2359,35 @@ jobs:
         # (run 29258747763: 5632m reported as 31.3% of system memory, 1208
         # heap-pressure GCs) — the pom's 5632m default is sized for a 7GB
         # runner this job no longer uses.
-        run: ./mvnw -q -Pnative -Pprebuilt-jooq -DskipTests -Dnative.image.opt=-Ob -Dnative.image.maxheap=11g package
+        #
+        # nexus-vwfc0: two additions for the embedded-resources trip-wire in the
+        # next step. NATIVE_IMAGE_OPTIONS makes native-image write
+        # target/embedded-resources.json (every embedded resource and its
+        # origins). And NO -q: the checker reads the `--- jar:...:jar`,
+        # `--- native:...:compile-no-fork`, `--- shade:...:shade` execution
+        # lines to prove build order, and -q suppresses them. The log goes to
+        # $RUNNER_TEMP through tee, with pipefail so a failed build still
+        # fails the step (a bare pipe into tee would exit with tee's status).
+        run: |
+          set -euo pipefail
+          export NATIVE_IMAGE_OPTIONS="-H:+UnlockExperimentalVMOptions -H:+GenerateEmbeddedResourcesFile"
+          ./mvnw -B -ntp -Pnative -Pprebuilt-jooq -DskipTests -Dnative.image.opt=-Ob -Dnative.image.maxheap=11g package 2>&1 | tee "$RUNNER_TEMP/native-build.log"
+
+      - name: Check the embedded native resources (nexus-vwfc0)
+        # Reads what the binary ACTUALLY embeds, not what the pom says it should.
+        # Fails on a native library embedded from more than one origin, a
+        # foreign-platform onnxruntime/djl path, .pdb/.dSYM debug symbols, a
+        # jar -> native -> shade order violation, or an empty/vacuous report.
+        # Platform dirs are per library: onnxruntime names ubuntu-latest
+        # linux-x64, djl names it linux-x86_64. JNA is exempt (it ships every
+        # platform through its own metadata; see the checker).
+        if: steps.changes.outputs.svc == 'true'
+        run: |
+          python3 scripts/check_native_embedded_resources.py \
+            --report service/target/embedded-resources.json \
+            --build-log "$RUNNER_TEMP/native-build.log" \
+            --platform-dir onnxruntime=linux-x64 \
+            --platform-dir djl=linux-x86_64
 
   write-seam-gate:
     # nexus-h29w1 — Behavioural cross-boundary write-seam CI gate (F1 closure).

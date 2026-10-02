@@ -188,6 +188,19 @@ class StatusHandlerTest {
     }
 
     @Test
+    void suppliedVectorMismatchesTotal_topLevelFieldReflectsTheGlobalCounterDelta() throws Exception {
+        // RDR-223 P1.5 (bead nexus-z0o2p.6), [additive]: same delta discipline as
+        // raced_embeds_total above.
+        start(new StatusHandler(null));
+        long before = get().get("supplied_vector_mismatches_total").asLong();
+
+        dev.nexus.service.vectors.SuppliedVectorMismatchActivity.record(2);
+
+        long after = get().get("supplied_vector_mismatches_total").asLong();
+        assertThat(after - before).isEqualTo(2L);
+    }
+
+    @Test
     void processStartTime_reflectsTheExplicitlyProvidedInstant() throws Exception {
         // RDR-222 Phase 0 fix round (bead nexus-ulrjq, critic #2): production
         // wiring (NexusService) passes VersionHandler's OWN processStartMillis()
@@ -213,6 +226,71 @@ class StatusHandlerTest {
         assertThat(body.get("process_start_time").isTextual()).isTrue();
         // Parses as an ISO instant without throwing.
         java.time.Instant.parse(body.get("process_start_time").asText());
+    }
+
+    // ── the reaper's liveness (nexus-wbfpw.56, RDR-192 Phase 3 gate S5), [additive] ─────────────────────────────
+
+    @Test
+    void reaper_keyIsAbsentWhenNoReaperSupplierIsWired() throws Exception {
+        // The shape an engine that predates the field answers in: a client reads "no key" as "cannot tell".
+        start(new StatusHandler(null));
+        assertThat(get().has("reaper")).isFalse();
+    }
+
+    @Test
+    void reaper_reportsTheLastCompletedPassAndTheIntervalItRunsAt() throws Exception {
+        var status = new StatusHandler.ReaperStatus(true, 3600L, 600L, java.time.Instant.parse("2026-10-02T07:00:00Z"), 2L);
+        start(new StatusHandler(null, null, 0L, null, () -> status));
+
+        JsonNode reaper = get().get("reaper");
+        assertThat(reaper.get("enabled").asBoolean()).isTrue();
+        assertThat(reaper.get("interval_seconds").asLong()).isEqualTo(3600L);
+        assertThat(reaper.get("wall_clock_budget_seconds").asLong()).isEqualTo(600L);
+        assertThat(reaper.get("last_completed_pass_at").asText()).isEqualTo("2026-10-02T07:00:00Z");
+        assertThat(reaper.get("failed_passes_total").asLong()).isEqualTo(2L);
+    }
+
+    @Test
+    void reaper_beforeItsFirstPassTheLastCompletedTimeIsNull_notAFabricatedValue() throws Exception {
+        var status = new StatusHandler.ReaperStatus(true, 3600L, 600L, null, 0L);
+        start(new StatusHandler(null, null, 0L, null, () -> status));
+
+        JsonNode reaper = get().get("reaper");
+        assertThat(reaper.get("enabled").asBoolean()).isTrue();
+        assertThat(reaper.get("last_completed_pass_at").isNull()).isTrue();
+    }
+
+    @Test
+    void reaper_reportsWhatTheLastCompletedPassDidWithItsTenants() throws Exception {
+        // nexus-wbfpw.55 round 2: a pass completes whatever its tenants did, so the status carries the counts.
+        var status = new StatusHandler.ReaperStatus(true, 3600L, 600L, java.time.Instant.parse("2026-10-02T07:00:00Z"),
+            0L, new StatusHandler.ReaperStatus.LastPass(3, 1, 2));
+        start(new StatusHandler(null, null, 0L, null, () -> status));
+
+        JsonNode lastPass = get().get("reaper").get("last_pass");
+        assertThat(lastPass.get("tenants_visited").asInt()).isEqualTo(3);
+        assertThat(lastPass.get("tenants_errored").asInt()).isEqualTo(1);
+        assertThat(lastPass.get("tenants_refused").asInt()).isEqualTo(2);
+    }
+
+    @Test
+    void reaper_lastPassIsNullBeforeTheFirstPassAndForAStatusWithNoSummary() throws Exception {
+        var status = new StatusHandler.ReaperStatus(true, 3600L, 600L, null, 0L);
+        start(new StatusHandler(null, null, 0L, null, () -> status));
+
+        JsonNode reaper = get().get("reaper");
+        assertThat(reaper.has("last_pass")).as("the key is always there for an enabled reaper").isTrue();
+        assertThat(reaper.get("last_pass").isNull()).isTrue();
+    }
+
+    @Test
+    void reaper_aSupplierThatReturnsNullSaysTheReaperIsNotRunning() throws Exception {
+        start(new StatusHandler(null, null, 0L, null, () -> null));
+
+        JsonNode reaper = get().get("reaper");
+        assertThat(reaper.get("enabled").asBoolean()).isFalse();
+        assertThat(reaper.has("last_completed_pass_at")).as("nothing to report for a reaper that is not scheduled")
+            .isFalse();
     }
 
     @Test

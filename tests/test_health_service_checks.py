@@ -1076,6 +1076,7 @@ _ALL_TENANT_TABLES = [
     # ("nexus.chash_alias" removed — nexus-lgdel.l1: dropped table
     # (legacy-001-drop-chash-alias.xml), mirrors health._RLS_TENANT_TABLES)
     "nexus.chash_remap",
+    "nexus.chunk_orphaned_at",  # RDR-192 reapable(c), nexus-wbfpw.15 (mirrors health._RLS_TENANT_TABLES)
     "nexus.chunks",  # RDR-191 Phase 4 (nexus-o8dil.51)
     "nexus.claude_assisted_remediation_consents",
     "nexus.document_aspects",
@@ -3050,9 +3051,10 @@ class TestCheckStaleIndexingRuns:
 
     def _entry(
         self, *, index_state, index_started_at="", source_uri="", tumbler="",
-        index_state_reported=True, indexed_at="",
+        index_state_reported=True, indexed_at="", content_type="",
     ):
         return type("E", (), {
+            "content_type": content_type,
             "index_state": index_state,
             "index_started_at": index_started_at,
             "source_uri": source_uri,
@@ -3093,6 +3095,30 @@ class TestCheckStaleIndexingRuns:
         assert r.ok is False and r.warn is True
         assert "file:///a.pdf" in r.detail
         assert "1 document(s)" in r.detail
+
+    def test_a_stale_note_gets_the_re_put_remedy_not_the_repo_index_one(self, monkeypatch) -> None:
+        """nexus-z0o2p.34: a note killed or failed after its write (or whose stamp failed) stays
+        'indexing' and nothing reruns it: it is not a file, so `nx index <path>` cannot reach it. The
+        remedy is to put it again (an idempotent re-write that fires its chains and stamps it)."""
+        entries = [
+            self._entry(index_state="indexing", index_started_at=self._iso_hours_ago(10),
+                        tumbler="1.1.7", content_type="knowledge"),
+            self._entry(index_state="indexing", index_started_at=self._iso_hours_ago(11),
+                        source_uri="file:///a.pdf", content_type="paper"),
+        ]
+        r = self._run(monkeypatch, entries)
+        assert r.ok is False and r.warn is True
+        assert "1.1.7" in r.detail and "file:///a.pdf" in r.detail
+        assert "note" in r.detail and "nx store put" in r.detail and "nx memory promote" in r.detail
+        joined = " ".join(r.fix_suggestions)
+        assert "nx store put" in joined, "the note remedy is a fix suggestion"
+        assert "nx index <path>" in joined, "and the file remedy is still offered for the file"
+
+    def test_a_stale_file_alone_does_not_get_the_note_remedy(self, monkeypatch) -> None:
+        entries = [self._entry(index_state="indexing", index_started_at=self._iso_hours_ago(10),
+                               source_uri="file:///a.pdf", content_type="paper")]
+        r = self._run(monkeypatch, entries)
+        assert "nx store put" not in r.detail and "nx store put" not in " ".join(r.fix_suggestions)
 
     def test_recent_indexing_document_is_not_stale(self, monkeypatch) -> None:
         entries = [self._entry(

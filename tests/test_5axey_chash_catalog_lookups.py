@@ -56,8 +56,8 @@ def _populate_knowledge_doc(cat: ActiveCatalog, *, title: str, chash: str,
                              collection: str) -> str:
     """Register a store_put-shaped knowledge document AND write its
     single-chunk manifest row, mirroring the real MCP store_put flow
-    (catalog_store_hook_tracked mints the tumbler; store_put_manifest_direct
-    writes the (doc_id=tumbler, chash, position=0) manifest row after).
+    (catalog_store_hook_tracked mints the tumbler; the note write then lands
+    the (doc_id=tumbler, chash, position=0) manifest row).
     Returns the tumbler string.
     """
     from nexus.catalog.store_hook import catalog_store_hook_tracked

@@ -185,8 +185,19 @@ copy in Typora. Each finding is a T2 record, `nexus_rdr/221-research-N`.
 - [ ] **Voice kept.** Sam judges edited essays still in his voice. —
   **Status**: Unverified — **Method**: Phase 2
 - [ ] **Memory helps.** A rejected edit is not proposed again, and a
-  style-sheet entry is applied on the next document. — **Status**: Unverified
-  — **Method**: Phase 1 test, Phase 2 observation
+  style-sheet entry is applied on the next document. — **Status**: Measured,
+  narrowly (nexus-ger02.16): the same change at the same place is not shown
+  again after one rerun in which the author rejected every shown edit: 0 of 57
+  rejected edits in 13 measurable runs on two documents (a no-memory editor
+  repeats 92.6% on the small one and 38.3% on the storage one), and 0 of 20 in
+  10 runs on the small one with two edits rejected and the rest held. Not
+  measured: a class of change (another em dash is proposed again, by design), a
+  different change at the same spot, several reruns, a document changed
+  between runs (scripted test only), and the style-sheet half. In the first
+  batch the small document had 4 measurable runs and the storage one 9, short
+  of the 10 the decision asks for; the second batch added 10 on the small one.
+  — **Method**:
+  Phase 1 test, Phase 2 observation
 - [x] **Readable in Typora.** Typora renders inline `<del>` and `<ins>` in a
   Markdown file, and Sam finds the marked-up copy workable. — **Status**:
   Verified — **Method**: Spike (2026-09-28)
@@ -210,7 +221,8 @@ Its brief for each run:
 - a voice card for the document, built from the document and the exemplars
   before any edit;
 - the style sheet (user level, then repo level, then this document);
-- the "not a defect" entries from past rejections;
+- the "not a defect" entries from past rejections, and this document's own
+  stored rejections;
 - a change budget;
 - an instruction to prefer cutting.
 
@@ -267,9 +279,21 @@ range it came from, so a later edit to the source file does not change it.
 | Document voice card, style notes, stored rejections | `<repo>_prose` | `doc/<path>` |
 | Session log (proposals, accepted, rejected) | `<repo>_prose` | `log/<path>/<utc timestamp>`, 90-day TTL |
 
-A rejected sentence edit is stored verbatim (its old and new strings) in the
-document's record, and `memory.py` drops any later proposal with the same old
-string for that document before the author sees it. A rejection becomes a
+A sentence edit is rejected only when the author says so: `reject N` or
+`reject the rest`, with an optional one-line reason (to tell a wrong edit from
+a right one the author does not want). An edit the author does not name is held,
+neither applied nor stored. A rejection is stored verbatim (its old and new
+strings) in the document's record. It matches a later proposal by its minimal
+change: the old and new strings with the words they share at the start and at
+the end trimmed at word boundaries. `memory.py` drops a later proposal with the
+same minimal change for that document before the author sees it (the dropped
+edit stays visible in the marked-up copy), and the document's rejections are
+also put in the editor's brief so it does not propose them. Overlap alone is not
+a match. Two limits are deliberate. The key has no position, so a stored cut of a
+word also drops that cut anywhere else in the document, and an insertion matches
+the same insertion anywhere. And a fix the brief holds back is never proposed, so
+there is nothing to drop and nothing to see: it is invisible except through the
+editor's note, which nothing enforces. A rejection becomes a
 general "not a defect" entry at user or repo level only when the author says
 so and has read the entry's text. `/prose-edit rejections <path>` lists a
 document's stored rejections, numbered, and
@@ -388,8 +412,12 @@ using; a project skill iterates faster and carries no release work.
   are written as diagnostics with exceptions; the author reviews the sheet
   when adding to it.
 - **Risk**: stored rejections hide proposals the author would now accept.
-  **Mitigation**: rejections are verbatim and per document, listed on demand,
-  and removable; only the author generalises one.
+  **Mitigation**: rejections are per document, listed on demand, and removable;
+  only the author generalises one. They match by minimal change, not verbatim,
+  and the brief carries them to the editor. A filter drop stays visible in the
+  marked-up copy; a fix the brief held back does not (see the limits above), and
+  the key's missing position can drop a stored cut of a word where the author
+  would have accepted it.
 
 ### Failure Modes
 
@@ -415,7 +443,7 @@ The record shapes above. A small stdlib script,
 `.claude/skills/prose-edit/scripts/memory.py`, reads the layers in order
 (user, repo, document) and writes sessions, through the `nx memory` CLI, so
 the merge order is the same every time. It also resolves `<repo>`, drops
-proposals whose old string matches a stored rejection for the document, and
+proposals whose minimal change matches a stored rejection for the document, and
 lists and removes stored rejections. It lists log entries with
 `nx memory list` rather than a partial-title `get`, and deletes with `-y`
 (Discovery 11).
@@ -540,8 +568,10 @@ enough.
 
 ### Assumption Verification
 
-Readable in Typora is verified. Memory helps is verified in Phase 1;
-Worth accepting and Voice kept in Phase 2.
+Readable in Typora is verified. Memory helps is measured in Phase 1 (nexus-ger02.16:
+the rate at which a rejected fix is shown again, against a threshold fixed before the
+runs; the counts are in `tests/prose_edit/acceptance/README.md`); Worth accepting and
+Voice kept in Phase 2.
 
 ### Scope Verification
 

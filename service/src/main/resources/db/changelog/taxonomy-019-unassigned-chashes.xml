@@ -20,8 +20,12 @@
 
     "Unassigned" here means specifically: a chunk with a non-null embedding
     at the collection's own dim, in a collection that HAS centroids at that
-    dim, whose chash is STILL referenced by at least one live catalog
-    manifest row (see the MANIFEST-LESS EXCLUSION paragraph below), with no
+    dim, whose chash is STILL referenced by at least one catalog
+    manifest row (see the MANIFEST-LESS EXCLUSION paragraph below; "referenced"
+    means a row EXISTS, whatever the state of the document that owns it: there
+    is no tombstone check, so a chunk owned only by a deleted document still
+    counts, which differs from live(c) on R3 and R9 of the RDR-192 liveness
+    matrix and is recorded there, nexus-wbfpw.37), with no
     nexus.topic_assignments row whose topic BELONGS TO THIS COLLECTION
     (topics.collection = p_collection) — i.e. a gap in the OWN-collection
     ("centroid") assign_from_chashes pass specifically. A chunk that already
@@ -34,7 +38,7 @@
 
     MANIFEST-LESS EXCLUSION (rework round, code-review-expert's and
     substantive-critic's parallel Significant finding on the first cut of
-    this changeset): without a manifest check, a chunk with NO live catalog
+    this changeset): without a manifest check, a chunk with NO catalog
     manifest reference (RDR-192's still-open "manifest-less != live"
     population; this project's own T2 record names a measured ~55k-row
     own-collection manifest-less-chunk population on the live system) would

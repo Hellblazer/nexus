@@ -185,11 +185,12 @@ ALLOWLIST: dict[str, tuple[int, str]] = {
            "PG/engine fresh per run; 2 extra matches are echo/label lines.",
     ),
     "tests/e2e/migration-rehearsal/rehearse_candidate_migration.sh": (
-        9, "CONTAINER: runs INSIDE the container (own header comment); Stage 2b "
-           "is `nx init --service` provisioning its own bundled PG fresh per "
-           "run; 8 more matches, all container-scoped, including Stage 3e's "
-           "`nx index repo` seeding the RDR-204 P1.9 MVV's code/docs "
-           "collections (bead nexus-ft04v.10).",
+        11, "CONTAINER: runs INSIDE the container (own header comment); Stage 2b "
+            "is `nx init --service` provisioning its own bundled PG fresh per "
+            "run; 10 more matches, all container-scoped, including Stage 3e's "
+            "`nx index repo` seeding the RDR-204 P1.9 MVV's code/docs "
+            "collections (bead nexus-ft04v.10) and, from nexus-z0o2p.42 "
+            "round 2, Stage 3a's two shared-chash `nx store put` seeds.",
     ),
     "tests/e2e/migration-rehearsal/rehearse_era_hop.sh": (
         1, "CONTAINER: runs INSIDE the container (own header comment: "
@@ -311,10 +312,6 @@ ALLOWLIST: dict[str, tuple[int, str]] = {
     ),
     "scripts/bundle_sandbox_probe.py": (
         1, "READ-ONLY: operator_extract/operator_summarize only (lines 98-113).",
-    ),
-    "scripts/migrate_art_papers.py": (
-        1, "PROSE-ONLY: line 229 is inside a print() suggesting a command to a human "
-           "operator, never executed by this script itself.",
     ),
     "scripts/spikes/bench_rdr089_sql_fast_path.py": (
         3, "READ-ONLY: operator_filter/operator_groupby/operator_aggregate imports.",

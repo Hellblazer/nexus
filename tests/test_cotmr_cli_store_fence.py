@@ -127,13 +127,20 @@ class TestCliStorePutFence:
         exactly) rather than leaving a chunk_count=0 ghost stamped
         'failed' — the fence stamp fires first (still exercised, just no
         longer observable afterward since the row it was on is gone)."""
-        import nexus.commands.store as store_mod
-
         title = "cotmr-cli-put-failed"
-        monkeypatch.setattr(
-            store_mod, "_store_put_manifest_direct_with_recovery",
-            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("manifest write refused")),
-        )
+        # RDR-223 P2.6 (nexus-z0o2p.16): the chunk and its owner rows are one
+        # request, so the failure to inject is a refused request. The engine
+        # refuses the document (a 4xx answer), nothing of the note lands, and
+        # put_note removes the row it minted.
+        from nexus.catalog.http_catalog_client import HttpCatalogClient
+
+        real = HttpCatalogClient.write_manifest_many
+
+        def _refused(self, docs, *a, **k):
+            doc, rows = docs[0]
+            return real(self, [(doc, [*rows, {"chash": "f" * 64, "position": len(rows)}])], *a, **k)
+
+        monkeypatch.setattr(HttpCatalogClient, "write_manifest_many", _refused)
         result = _invoke_store_put(tmp_path, _local_t3(), title, "cli fence failure body")
         assert result.exit_code != 0
         assert documents_by_title(title) == [], (
@@ -153,22 +160,33 @@ class TestMemoryPromoteFence:
         assert result.exit_code == 0, result.output
         assert _index_state_for(title) == "complete"
 
-    def test_manifest_failure_rolls_back_the_freshly_minted_row(
+    def test_a_refused_write_rolls_back_the_freshly_minted_row(
         self, catalog_env: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """RDR-192 Step 3a fix-round 1 (nexus-wbfpw.28, Important, both
-        reviewers): superseding this test's old 'stamped failed, row
-        survives' contract — see the CLI sibling test above for the
-        full rationale."""
+        reviewers): a failed write on a document THIS CALL minted rolls the
+        catalog row back entirely rather than leaving a chunk_count=0 ghost
+        stamped 'failed'. RDR-223 P2.7 (nexus-z0o2p.17): promote writes its note
+        in one request through ``put_note``, so the failure is injected where
+        it happens now, the engine refusing that request (a manifest row naming
+        a chunk the request does not carry; the per-document transaction rolls
+        back). The fence stamp fires first, then the minted row is removed."""
+        from nexus.catalog.http_catalog_client import HttpCatalogClient
+
+        real = HttpCatalogClient.write_manifest_many
+
+        def refused(self, docs, *a, **k):
+            doc, rows = docs[0]
+            return real(self, [(doc, [*rows, {"chash": "f" * 64, "position": len(rows)}])], *a, **k)
+
+        monkeypatch.setattr(HttpCatalogClient, "write_manifest_many", refused)
         title = "cotmr-promote-failed"
-        monkeypatch.setattr(
-            "nexus.catalog.store_hook.store_put_manifest_direct",
-            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("manifest write refused")),
-        )
-        result = _invoke_promote(tmp_path, _local_t3(), title, "promote fence failure body")
+        with patch("nexus.doc_indexer._fence_fail") as fence_fail:
+            result = _invoke_promote(tmp_path, _real_t3(), title, "promote fence failure body")
         assert result.exit_code != 0
+        assert fence_fail.call_count == 1, "the failed write stamps the fence failed"
         assert documents_by_title(title) == [], (
-            "a manifest failure on a freshly-minted document must roll "
+            "a failed write on a freshly-minted document must roll "
             "back the catalog row, not leave a chunk_count=0 ghost "
             "stamped 'failed'"
         )
@@ -206,55 +224,38 @@ class TestAcquireGateJourneyDoctorClean:
     def test_artificially_unfenced_document_still_warns(
         self, catalog_env: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """KILL CONTROL / non-vacuity companion (critique item 5): with
-        ``_fence_begin`` disabled (simulating the exact pre-cotmr gap —
-        a producer that fires fire_batch/fire_store_chains without ever
-        fencing), the document's index_state stays NULL and doctor's
-        check WARNs — proving the clean result above is powered by the
-        real fence wiring, not a coincidentally-quiet check. Mechanism
-        note (critique T2 [21535] round 2): the NULL here comes from
-        disabled-begin TOGETHER WITH this test's local T3 — against a
-        real T3, completion can stamp 'complete' without a prior begin,
-        so this control pins the wiring, not a begin-dependency in the
-        engine. Patches the
-        SAME symbol commands/store.py resolves via its deferred import
-        (``from nexus.doc_indexer import _fence_begin`` — module-level
-        patch target, matching the existing "test patch target" comment
-        convention already on that import)."""
+        """KILL CONTROL / non-vacuity companion (critique item 5): a document
+        whose producer never fenced (no ``_fence_begin``, no completion stamp)
+        keeps a NULL index_state and doctor's check WARNs — proving the clean
+        result above is powered by the real fence wiring, not a
+        coincidentally-quiet check. Doctor's check itself is UNCHANGED by
+        nexus-cotmr round 2 (the note-exemption was reverted).
+
+        RDR-223 P2.6 (nexus-z0o2p.16): ``nx store put`` can no longer produce
+        such a document — ``put_note`` begins the fence and the completion stamp
+        rides the note's one request, so disabling ``_fence_begin`` still ends
+        ``complete`` — so the unfenced producer is built directly: register the
+        document and write its note with ``write_note`` and no ``content_hash``,
+        the exact pre-cotmr gap."""
         import nexus.health as h
-
-        monkeypatch.setattr(
-            "nexus.doc_indexer._fence_begin",
-            lambda *a, **k: None,
+        from nexus.catalog.note_write import write_note
+        from nexus.catalog.store_hook import (
+            catalog_store_hook_tracked,
+            note_manifest_metadata,
+            note_pieces,
         )
-        title = "cotmr-artificially-unfenced"
-        # nexus-dbzxb (RDR-191 Phase 5 Python collateral, round 2): unlike
-        # the other _local_t3() call above (test_manifest_failure_is_
-        # explicit_error, which mocks the manifest write itself and never
-        # reaches the real FK), this test's manifest write is REAL and
-        # unmocked — fk_catalog_chunks_chunk requires a matching real
-        # nexus.chunks row for it to land. Round 1 used seed_manifest_
-        # chunks (idiom 1/2, a REAL T3 upsert) here, which broke this
-        # test's own documented premise: per the docstring above, the
-        # expected NULL index_state depends on the chunk being genuinely
-        # ABSENT from the real engine's T3 (this test's local_t3 is a fake
-        # client specifically so the manifest_complete ride's fail-closed
-        # verify sees nothing and correctly refuses to stamp 'complete')
-        # — "against a real T3, completion can stamp 'complete' without a
-        # prior begin". A real seed reintroduces exactly the confound the
-        # fake-T3 design exists to avoid. fk_dropped_for_dangling_seed
-        # (idiom 3b) satisfies the FK without making the chunk genuinely
-        # present, preserving the original test intent bit-for-bit.
-        from tests._catalog_fixture_ops import fk_dropped_for_dangling_seed
+        from nexus.corpus import t3_collection_name
 
-        _content = "artificially unfenced body"
-        with fk_dropped_for_dangling_seed():
-            result = _invoke_store_put(tmp_path, _local_t3(), title, _content)
-        assert result.exit_code == 0, result.output
+        title = "cotmr-artificially-unfenced"
+        content = "artificially unfenced body"
+        col = t3_collection_name("fixture-subject", for_write=True)
+        pieces = note_pieces(content, col)
+        first, _ = note_manifest_metadata(pieces)
+        doc, _minted = catalog_store_hook_tracked(title=title, doc_id=first, collection_name=col)
+        assert doc
+        write_note(catalog_doc_id=doc, collection=col, pieces=pieces, content_hash=None)
         assert _index_state_for(title) is None, (
-            "with _fence_begin disabled, index_state must stay NULL "
-            "(manifest_complete's ride only stamps 'complete' for a "
-            "document the fence actually began)"
+            "a note written with no fence and no stamp must keep a NULL index_state"
         )
 
         results = h._check_stale_indexing_runs()

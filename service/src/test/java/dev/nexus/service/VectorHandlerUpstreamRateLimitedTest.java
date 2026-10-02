@@ -108,7 +108,13 @@ class VectorHandlerUpstreamRateLimitedTest {
         http.send(warmup, HttpResponse.BodyHandlers.ofString());
 
         try (Connection su = pg.createConnection("")) {
-            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, COLLECTION);
+            var dsl = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCollection(dsl, TENANT, COLLECTION);
+            // RDR-223 P3.1 (nexus-z0o2p.23): own the chash the test POSTs (the engine refuses an
+            // ownerless upsert-chunks write from Phase 3) and POST with force_re_embed so the
+            // throwing embedder is still reached for it.
+            PgContainerHelper.insertOwnedChunks(dsl, TENANT, COLLECTION, 1024,
+                Chash.ofText("url429-c1").toHex());
         }
     }
 
@@ -135,7 +141,8 @@ class VectorHandlerUpstreamRateLimitedTest {
             "collection", COLLECTION,
             "ids",        List.of(Chash.ofText("url429-c1").toHex()),
             "documents",  List.of("chunk that will hit the simulated RPM ceiling"),
-            "metadatas",  List.of(Map.of())));
+            "metadatas",  List.of(Map.of()),
+            "force_re_embed", true));
 
         assertThat(resp.statusCode())
             .as("must be the honest 429 — never the opaque 500 the 2026-08-15"
@@ -186,23 +193,6 @@ class VectorHandlerUpstreamRateLimitedTest {
         assertThat(arm).contains("HttpUtil.sendRequestDeadlineExceeded(exchange, e)");
         int genericIdx = src.indexOf("catch (Exception e)", armIdx);
         assertThat(genericIdx).isGreaterThan(armIdx);
-    }
-
-    @Test
-    void stagingHandlerMapsBothEmbedFailuresThroughTheirShapes() throws Exception {
-        // nexus-qajw7 fix round: embed_fill calls the embedder directly, so both
-        // typed embed exceptions must be caught ahead of the generic 500 arm.
-        String src = Files.readString(Path.of(
-            "src", "main", "java", "dev", "nexus", "service", "http", "StagingHandler.java"));
-        int deadlineIdx = src.indexOf("catch (dev.nexus.service.vectors.RequestDeadlineExceededException");
-        int rateIdx = src.indexOf("catch (dev.nexus.service.vectors.UpstreamRateLimitedException");
-        assertThat(deadlineIdx).isPositive();
-        assertThat(rateIdx).isPositive();
-        assertThat(src.substring(deadlineIdx, deadlineIdx + 800))
-            .contains("HttpUtil.sendRequestDeadlineExceeded(exchange, e)");
-        assertThat(src.substring(rateIdx, rateIdx + 900)).contains("Retry-After").contains("429");
-        int genericIdx = src.indexOf("catch (Exception e)", Math.max(deadlineIdx, rateIdx));
-        assertThat(genericIdx).isGreaterThan(Math.max(deadlineIdx, rateIdx));
     }
 
     /** Always throws the typed exception, simulating a budget-exhausted sustained 429. */

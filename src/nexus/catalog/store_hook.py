@@ -8,9 +8,10 @@ Previously this function lived in ``commands/store.py`` and was
 imported FROM ``mcp/core.py:1029`` — a layering inversion flagged
 by the post-4.32.4 multi-agent audit.
 
-Callers: ``mcp/core.py`` (MCP ``store_put`` tool),
-``commands/store.py`` (``nx store put`` CLI),
-``commands/memory.py`` (``nx memory promote`` CLI).
+Callers: :mod:`nexus.catalog.note_write` (``put_note``, the one writer behind MCP
+``store_put``, ``nx store put``, ``nx memory promote`` and the recovery-bundle
+import), plus the read-side and cleanup helpers ``mcp/core.py`` and
+``commands/store.py`` use for ``store_get``, ``store_list`` and ``store_delete``.
 """
 from __future__ import annotations
 
@@ -30,82 +31,18 @@ _log = structlog.get_logger(__name__)
 
 
 class ManifestVerifyUncertainError(RuntimeError):
-    """:func:`store_put_manifest_direct`'s verify step could not confirm
-    whether the manifest write landed (RDR-192 Step 3a fix-round 1,
-    nexus-wbfpw.28, critic Critical 1) — the catalog reader used to verify
-    was unavailable, or the verify READ ITSELF raised, on every one of
-    the bounded retry attempts (fix-round 2 Decision 2). This is distinct
-    from ``RuntimeError`` (the plain exception this module raises when the
-    write itself failed or verify SUCCEEDED and proved the chashes
-    missing): both of those mean the write is CONFIRMED not to have
-    landed, safe to roll back. This one means the outcome is UNKNOWN — the
-    write may have landed and simply couldn't be observed. Callers must
-    NOT roll back the chunk on this exception; they must report the
-    uncertainty instead. See ``store_put_manifest_direct``'s own docstring
-    for the three-way outcome split this class exists to make callers
-    handle correctly.
+    """The note writer could not confirm whether its one-request write landed.
+
+    Raised by :mod:`nexus.catalog.note_write` (RDR-192 Step 3a, nexus-wbfpw.28;
+    RDR-223) when the catalog reader used to verify was unavailable, or the
+    verify READ ITSELF raised, on every one of the bounded retry attempts
+    (:func:`_read_manifest_rows_with_retry`), or when the write returned without
+    being stamped complete. This is distinct from ``NoteWriteError``, which
+    means the write is CONFIRMED not to have landed. This one means the outcome is UNKNOWN: the write may have landed and
+    simply could not be observed, so callers report the uncertainty and never
+    treat the note as absent. See :mod:`nexus.catalog.note_write`'s module
+    docstring for the outcome split.
     """
-
-
-class ManifestMissingChunkError(RuntimeError):
-    """:func:`store_put_manifest_direct`'s write call raised a
-    ``fk_catalog_chunks_chunk`` foreign-key violation (RDR-192 Step 3a
-    fix-round 2, critic/reviewer Decision (b)): the chash(es) in
-    *missing_chashes* have no matching ``nexus.chunks`` row, because a
-    CONCURRENT rollback (:func:`rollback_uncataloged_chunk_write`) deleted
-    them between THIS call's own ``t3.put`` and its manifest INSERT — the
-    mirror-image ordering of fix-round 1's Significant 3 race (there, B's
-    delete landed AFTER A's manifest write; here, B's delete lands
-    BEFORE A's manifest write even starts).
-
-    ``store_put_manifest_direct`` itself has no access to the raw chunk
-    content (only ``metadatas``), so it cannot recover on its own — it
-    raises this instead of a plain ``RuntimeError`` so a caller that DOES
-    have the content can. :func:`store_put_manifest_direct_with_recovery`
-    is that caller: re-put each missing chash via an injected callback
-    and retry the manifest write exactly once. A caller with no recovery
-    path may treat this as an ordinary confirmed failure (it IS a
-    ``RuntimeError``).
-    """
-
-    def __init__(self, message: str, *, missing_chashes: frozenset[str]) -> None:
-        super().__init__(message)
-        self.missing_chashes = missing_chashes
-
-
-def _is_missing_chunk_fk_violation(exc: BaseException) -> bool:
-    """True when *exc* (raised by ``atomic_manifest_replace``) is the
-    ``fk_catalog_chunks_chunk`` foreign-key violation — the manifest
-    INSERT named a chash with no matching ``nexus.chunks`` row (RDR-192
-    Step 3a fix-round 2, Decision (b)).
-
-    Read from the engine's structured 409 body: ``HttpUtil.java``'s
-    class-23 branch (nexus-0ehwe item 6) sends
-    ``{"error": "integrity constraint violation", "sqlstate": ...,
-    "constraint": "<name>"}``, and the client's raise-for-status keeps
-    only ``error`` in the exception MESSAGE — so the constraint name is
-    on ``exc.response``, never in ``str(exc)``. Measured against the real
-    engine: the message is ``... HTTP 409: integrity constraint
-    violation`` with no constraint name, and a message-only match never
-    fired. Walks the ``__cause__`` / ``__context__`` chain so a wrapped
-    ``HTTPStatusError`` is still classified; a message substring match is
-    kept as a fallback for a non-HTTP path that does name the constraint.
-    """
-    seen: set[int] = set()
-    cur: BaseException | None = exc
-    while cur is not None and id(cur) not in seen:
-        seen.add(id(cur))
-        if "fk_catalog_chunks_chunk" in str(cur):
-            return True
-        if isinstance(cur, httpx.HTTPStatusError) and cur.response is not None:
-            try:
-                body = cur.response.json()
-            except Exception:  # noqa: BLE001 — a non-JSON body cannot name the constraint
-                body = None
-            if isinstance(body, dict) and body.get("constraint") == "fk_catalog_chunks_chunk":
-                return True
-        cur = cur.__cause__ or cur.__context__
-    return False
 
 
 #: RDR-192 Step 3a fix-round 2 (critic (a) / Decision 2): a bounded number
@@ -133,19 +70,18 @@ def _manifest_verify_retry_sleep(seconds: float) -> None:
     time.sleep(seconds)
 
 
-def _read_manifest_chashes_with_retry(catalog_doc_id: str, *, context: str) -> set[str]:
-    """Read *catalog_doc_id*'s current manifest chashes, retrying up to
-    :data:`_MANIFEST_VERIFY_RETRY_ATTEMPTS` times with
-    :data:`_MANIFEST_VERIFY_RETRY_BACKOFF_S` backoff between attempts
-    before giving up (RDR-192 Step 3a fix-round 2, critic (a) / Decision
-    2). Raises :class:`ManifestVerifyUncertainError` — never returns a
-    partial or best-guess result — when EVERY attempt fails: no catalog
-    reader available, or the read itself raises.
+def _read_manifest_rows_with_retry(catalog_doc_id: str, *, context: str) -> list[tuple[int, str]]:
+    """Read *catalog_doc_id*'s current manifest as ``[(position, chash), ...]`` in position
+    order, retrying up to :data:`_MANIFEST_VERIFY_RETRY_ATTEMPTS` times with
+    :data:`_MANIFEST_VERIFY_RETRY_BACKOFF_S` backoff between attempts before giving up
+    (RDR-192 Step 3a fix-round 2, critic (a) / Decision 2). Raises
+    :class:`ManifestVerifyUncertainError` -- never returns a partial or best-guess result --
+    when EVERY attempt fails: no catalog reader available, or the read itself raises.
 
     *context* names the calling situation (e.g. "post-write verify" or
     "write-exception arbitration") so the eventual uncertain-outcome
     message is legible without a caller having to infer which of
-    :func:`store_put_manifest_direct`'s two verify call sites raised.
+    the note writer's verify call sites raised.
     """
     from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid circular import at module load
 
@@ -158,7 +94,7 @@ def _read_manifest_chashes_with_retry(catalog_doc_id: str, *, context: str) -> s
             reader = make_catalog_reader()
             if reader is None:
                 raise RuntimeError("catalog reader unavailable")  # noqa: TRY301 — converted to ManifestVerifyUncertainError below if every attempt fails
-            return {row.chash for row in reader.get_manifest(catalog_doc_id)}
+            return sorted((int(getattr(row, "position", 0)), row.chash) for row in reader.get_manifest(catalog_doc_id))
         except Exception as exc:  # noqa: BLE001 — retried; converted below if every attempt fails
             last_exc = exc
         finally:
@@ -175,16 +111,16 @@ def _read_manifest_chashes_with_retry(catalog_doc_id: str, *, context: str) -> s
 
 def single_chunk_manifest_metadata(content: str) -> tuple[str, list[dict]]:
     """Compute the T3 natural id and manifest-hook chunk metadata for a
-    single-chunk store event (MCP ``store_put`` / CLI ``nx store put``).
+    single-chunk note (what :func:`note_manifest_metadata` returns for a
+    one-piece note).
 
     Mirrors ``T3Database.put``'s single-chunk derivation (RDR-108 D1 /
     nexus-kmb6; width per RDR-180): the T3 natural id is the FULL
     ``sha256(content).hexdigest()``. ``manifest_write_batch_hook``
     (GH #1371) gets the same full hex under ``chunk_text_hash``
     (stored verbatim — the [:32] write-time truncation is retired).
-    Both MCP
-    ``store_put`` and CLI ``nx store put`` are single-chunk by
-    construction, so ``chunk_start_char=0`` / ``chunk_end_char=len(content)``
+    A one-piece note is single-chunk by construction, so
+    ``chunk_start_char=0`` / ``chunk_end_char=len(content)``
     span the whole document and position defaults to 0 (the batch's only
     element).
 
@@ -194,7 +130,7 @@ def single_chunk_manifest_metadata(content: str) -> tuple[str, list[dict]]:
     here ``manifest_write_batch_hook`` short-circuits on
     ``if not metadatas: return`` and no ``catalog_document_chunks``
     manifest row (nor the ``documents.chunk_count`` update) is ever
-    written for these two callers (GH #1370 Defect 4b). (Historically
+    written for a single-chunk note (GH #1370 Defect 4b). (Historically
     this also unblocked the chash dual-write hook, which hit the same
     ``metadatas`` guard — that hook was retired by RDR-187 /
     nexus-piwya.4.)
@@ -298,46 +234,6 @@ def note_content_hash(content: str, manifest_metadatas: list[dict]) -> str:
     if len(manifest_metadatas) == 1:
         return manifest_metadatas[0].get("chunk_text_hash", "")
     return hashlib.sha256(content.encode()).hexdigest()
-
-
-def put_note_pieces(t3: Any, collection: str, pieces: list[str], **put_kwargs: Any) -> list[str]:
-    """Write each piece with ``t3.put`` under the same title, tags and
-    catalog document; returns the chunk ids in order.
-
-    A one-piece note is the single ``t3.put`` it always was. For several
-    pieces, a failure part-way would leave the pieces already written in T3
-    with no manifest, searchable and unlinked, so this deletes the pieces
-    the call newly wrote and re-raises. A piece that existed before the
-    call is identical text another note holds, and is left alone.
-
-    "Existed" means physically stored, whether or not it has a live owner, so
-    the probe is ``existing_ids`` rather than ``get_by_id``: since RDR-192
-    Step 5 a read returns only chunks with a live own-collection owner, and a
-    stored chunk without one (a superseded piece not yet reaped, a legacy
-    note) would otherwise read as absent and be deleted here.
-    """
-    if len(pieces) == 1:
-        return [t3.put(collection=collection, content=pieces[0], **put_kwargs)]
-    chashes = [hashlib.sha256(p.encode()).hexdigest() for p in pieces]
-    preexisting = set(t3.existing_ids(collection, chashes))
-    written: list[str] = []
-    try:
-        for piece in pieces:
-            written.append(t3.put(collection=collection, content=piece, **put_kwargs))
-    except Exception:
-        orphans = [chash for chash in written if chash not in preexisting]
-        if orphans:
-            try:
-                t3.batch_delete(collection, orphans)
-            except Exception:  # noqa: BLE001 — compensation is best-effort; the put failure is what propagates
-                _log.warning(
-                    "store_put_split_compensation_failed",
-                    collection=collection,
-                    orphans=orphans,
-                    exc_info=True,
-                )
-        raise
-    return written
 
 
 def manifest_doc_index(
@@ -676,15 +572,13 @@ def raise_if_oversized(content: str, *, doc_id: str, collection: str) -> None:
     ``HttpVectorClient.put`` already refuse an over-quota document with
     ``PutOversizedError`` (``fail_on_oversized=True``) — but ONLY once
     called, which is AFTER ``catalog_store_hook_tracked`` has already
-    minted a catalog row for every one of this function's three callers
-    (``mcp/core.py::store_put``, ``commands/store.py::put_cmd``,
-    ``catalog/recovery_bundle.py::_default_import_doc`` — all three call
-    :func:`single_chunk_manifest_metadata` then immediately
-    ``catalog_store_hook_tracked`` before ``put()``). Every oversized
-    attempt was paying for a wasted mint + rollback round trip. Calling
-    this FIRST — right after :func:`single_chunk_manifest_metadata`,
-    before ``catalog_store_hook_tracked`` — fails fast with no catalog
-    side effect at all. ``put()``'s own check stays as the
+    minted a catalog row for every one of the note producers (MCP
+    ``store_put``, ``nx store put``, ``nx memory promote``, the recovery
+    import). Every oversized attempt was paying for a wasted mint + rollback
+    round trip. Its one caller now is
+    :func:`nexus.catalog.note_write.put_note`, which calls this FIRST — right
+    after splitting the note, before ``catalog_store_hook_tracked`` — so an
+    over-quota note fails fast with no catalog side effect at all. ``put()``'s own check stays as the
     defense-in-depth backstop for any caller that skips this pre-check
     (direct test calls, future callers).
 
@@ -868,6 +762,7 @@ def catalog_store_hook(
 def catalog_store_hook_tracked(
     title: str, doc_id: str, collection_name: str, *,
     pre_call_doc_id_out: dict[str, str] | None = None,
+    error_out: dict[str, str] | None = None,
 ) -> tuple[str, bool]:
     """Register a knowledge entry in the catalog.
 
@@ -943,13 +838,19 @@ def catalog_store_hook_tracked(
             ``pre_call_doc_id_out["doc_id"]`` to that row's
             ``meta.doc_id`` AS IT STOOD BEFORE this call's own
             ``writer.update`` overwrites it — the value the caller needs
-            to tell :func:`rollback_uncataloged_chunk_write` "this is
+            to tell :func:`restore_pre_call_stamp` "this is
             what the document legitimately owned before I touched it",
             distinct from what it owns NOW (which may be this call's
             own not-yet-landed, and possibly about-to-fail, content).
             Left untouched (absent) on the brand-new-mint leg
             (``writer.register``, ``created=True``): a freshly minted
             document has no prior identity to protect by construction.
+        error_out: Optional out-parameter, like *pre_call_doc_id_out* (no
+            return-shape change). The ``("", False)`` return does not say
+            WHY; when it is returned, ``error_out["error"]`` names the
+            cause (``"RuntimeError: catalog service is down"``, or that no
+            catalog is available), so a caller can report it instead of a
+            bare "registration failed" (RDR-223 Phase 2 review).
     """
     # RDR-146 P1.2: this hook fires on every store_put / memory promote,
     # including the long-lived MCP server process. It MUST NOT open a
@@ -971,6 +872,8 @@ def catalog_store_hook_tracked(
         # opt-out mode with an uninitialised local catalog.
         reader = make_catalog_reader()
         if reader is None:
+            if error_out is not None:
+                error_out["error"] = "no catalog is available (make_catalog_reader returned None)"
             return "", False
 
         # nexus-sdp0u: stable, collection-scoped identity for this document.
@@ -1085,10 +988,9 @@ def catalog_store_hook_tracked(
         if source_uri is not None:
             existing_by_uri = reader.by_source_uri(source_uri)
             if existing_by_uri is not None:
-                # nexus-k54nk fix-round 1 (T2 nexus/critique-k54nk Critical
-                # 1, SETTLED against T2 nexus/review-k54nk-code by direct
-                # test: TestK54nkRollbackLiveNoteGuard::
-                # test_case_a_content_changing_repute_self_collision_is_fixed):
+                # nexus-k54nk fix-round 1 (T2 nexus/critique-k54nk Critical 1):
+                # pinned now by b6enc's TestZ0o2p12McpFailedReput::
+                # test_a_failed_reput_leaves_the_old_note_whole_and_restores_the_stamp.
                 # THIS branch is the mainline note-edit path and fires on
                 # ANY re-put of an existing title, regardless of whether
                 # content changed — capture the row's meta.doc_id AS IT
@@ -1188,7 +1090,13 @@ def catalog_store_hook_tracked(
         # nexus-ou4tb: the "" return is indistinguishable from "no tumbler
         # assigned", so at DEBUG this was a silent non-registration. WARNING +
         # audit row so nx doctor can say how many documents are affected.
-        _log.warning("catalog_store_hook_failed", exc_info=True)
+        # An anticipated failure (the catalog service down, a refused registration) prints no
+        # traceback; anything else keeps its stack (see note_write.is_anticipated_failure).
+        from nexus.catalog.note_write import _stack_unless_anticipated  # noqa: PLC0415 — deferred: note_write imports this module
+
+        _log.warning("catalog_store_hook_failed", **_stack_unless_anticipated(exc))
+        if error_out is not None:
+            error_out["error"] = f"{type(exc).__name__}: {exc}"
         from nexus.hook_registry import record_catalog_hook_failure  # noqa: PLC0415 — deferred, avoids an import cycle
 
         record_catalog_hook_failure(
@@ -1213,8 +1121,9 @@ def rollback_minted_catalog_entry(tumbler: str, *, original_error: str = "") -> 
     """Best-effort delete of a catalog row minted earlier IN THIS CALL
     (nexus-b6enc C2 ghost-register compensation).
 
-    Both ``store_put`` paths register the catalog row BEFORE ``t3.put``;
-    when the put fails the just-minted row must not survive as a ghost
+    Every note producer registers the catalog row BEFORE the write
+    (:func:`nexus.catalog.note_write.put_note`); when the write fails the
+    just-minted row must not survive as a ghost
     (row + zero manifest + zero chunks — unrecoverable content loss for
     agent callers that drop MCP error strings). Callers invoke this ONLY
     when :func:`catalog_store_hook_tracked` reported ``created=True`` —
@@ -1285,477 +1194,42 @@ def rollback_minted_catalog_entry(tumbler: str, *, original_error: str = "") -> 
                 pass
 
 
-def store_put_manifest_direct(
-    catalog_doc_id: str, metadatas: list[dict], *, collection: str,
-) -> None:
-    """Direct, fail-loud manifest write for the store_put path
-    (nexus-b6enc C3 / F2).
-
-    RDR-191 (Hal ruling 2026-08-12): *collection* is REQUIRED — the T3
-    collection this store_put call targets, already in scope at every
-    caller (``col_name`` / ``collection``), threaded through to
-    ``atomic_manifest_replace`` so the engine stamps it verbatim instead of
-    inferring it from chunk membership.
-
-    The generic ``fire_batch`` chain swallows every hook exception by
-    contract (best-effort, correct for indexer batches). For store_put
-    the manifest leg is load-bearing — a swallowed failure leaves the
-    catalog row at ``chunk_count=0`` with zero manifest rows while the
-    tool still returns "Stored:". This helper writes the manifest
-    DIRECTLY via the whitelisted write ops (``atomic_manifest_replace``
-    + ``resync_chunk_count_cache`` — both implemented on the local
-    Catalog and the service ``HttpCatalogClient``) and then VERIFIES the
-    rows landed via a fresh reader.
-
-    FOUR-WAY OUTCOME (RDR-192 Step 3a; fix-round 1 critic Critical 1
-    named the first three, fix-round 2 critic Critical/ship-blocker
-    fixed how outcome 1 is reached and added outcome 4) — callers must
-    tell these apart, not treat every raise the same:
-
-    1. **Confirmed not landed.** Either ``atomic_manifest_replace``
-       raised AND a (retried) verify read shows the expected chashes
-       genuinely missing, or the verify read succeeded on a call whose
-       write did NOT raise and still proved them missing (the "silent
-       no-op write" shape). Raises a plain ``RuntimeError``. Safe to
-       roll back the chunk (:func:`rollback_uncataloged_chunk_write`).
-       NOTE: ``resync_chunk_count_cache`` raising is deliberately NOT a
-       trigger for this outcome — by the time it runs,
-       ``atomic_manifest_replace`` already committed, so a resync
-       failure means only that ``documents.chunk_count`` is stale
-       (recoverable via ``nx catalog reconcile``), never that the write
-       failed to land; it is logged and swallowed below, and the verify
-       step remains the real arbiter.
-
-       fix-round 2 (ship-blocker): ``atomic_manifest_replace`` RAISING is
-       no longer treated as confirmed failure by itself — the POST may
-       have committed server-side with only the acknowledgment lost, in
-       which case a caller that assumed "confirmed failed" would
-       tombstone the just-minted catalog row and the rollback's union
-       guard would then delete a chunk a LIVE manifest still references
-       (``docs_for_chashes`` excludes tombstoned owners, so the very
-       protection fix-round 1 added stops seeing the reference the
-       instant the row is tombstoned). Every write-call exception is now
-       routed through the SAME verify-read arbitration outcome 3 below
-       uses, before any confirmed-failure conclusion is drawn.
-    2. **Missing chunk (a concurrent rollback raced this write).** The
-       write call raised, verify confirms the chashes are genuinely
-       missing, AND the raised exception is a
-       ``fk_catalog_chunks_chunk`` violation — this call's own chunk(s)
-       were deleted by a CONCURRENT :func:`rollback_uncataloged_chunk_write`
-       between this call's ``t3.put`` and its manifest INSERT (the
-       mirror-image ordering of fix-round 1's Significant 3 race).
-       Raises :class:`ManifestMissingChunkError`, carrying the missing
-       chashes, so a caller that still has the raw content can re-put it
-       and retry once (:func:`store_put_manifest_direct_with_recovery`
-       does exactly this). A caller with no recovery path may treat it
-       as an ordinary confirmed failure — it IS a ``RuntimeError``.
-    3. **Outcome unknown.** The verify read's OWN infrastructure failed
-       on EVERY one of its bounded retry attempts (fix-round 2 Decision
-       2, :data:`_MANIFEST_VERIFY_RETRY_ATTEMPTS`) — no catalog reader
-       available, or the read itself raised, every time. Raises
-       :class:`ManifestVerifyUncertainError`. The write may well have
-       landed; a caller that rolls back here can delete a chunk a live
-       manifest row already references (the engine's own anti-join in
-       ``PgVectorRepository.delete`` — RDR-191 F10c — silently no-ops that
-       specific delete rather than losing data, but the caller's own
-       error text must not claim "rolled back" when it didn't happen).
-       Callers must report the uncertainty and skip rollback entirely.
-    4. **Success.** Returns normally — including when the write call
-       raised but a (retried) verify read shows every expected chash
-       present: the POST committed server-side, only the acknowledgment
-       was lost, and the recovered exception is logged at WARNING rather
-       than surfaced as a failure.
-
-    Never a bare success or a "stored but NOT cataloged" result with an
-    orphan left behind for outcome 1 or 3 — see each of the four
-    callers' own except-clause ordering (``ManifestVerifyUncertainError``
-    first, then whatever recovery :func:`store_put_manifest_direct_with_
-    recovery` performs for ``ManifestMissingChunkError``, plain
-    ``Exception`` last).
-
-    Does not replace the fire_batch manifest hook for other producers;
-    the store_put re-write it implies is an idempotent replace.
-
-    SAME-CALL SUPERSEDE REAP (nexus-bb6n2): a re-put that changes a
-    note's content (this replace's *chunks* differ from what the
-    document's manifest referenced before it) writes new chunk(s) under
-    new content-derived chashes and repoints the manifest at them here —
-    but the OLD chunk row, now referenced by nothing, used to simply
-    stay in T3, still returned by raw vector search, competing with its
-    own replacement (the ``_sweep_superseded_vectors`` mechanism that
-    reaps this class for the indexer's ``atomic_manifest_replace`` path
-    was never reachable from here — this function bypasses that generic
-    ``fire_batch`` chain entirely, by design, per the docstring above).
-    The manifest read BEFORE the replace below, diffed against the
-    replace's own *chunks*, is what lets this call reap its own drop
-    without a separate sweep pass ever needing to run.
-    """
-    if not catalog_doc_id:
-        return
-    chunks = [
-        {
-            "chash": m.get("chunk_text_hash", ""),
-            "position": int(m.get("chunk_index", i)),
-            "chunk_index": m.get("chunk_index"),
-            "line_start": m.get("line_start") or None,
-            "line_end": m.get("line_end") or None,
-            "char_start": m.get("chunk_start_char") or None,
-            "char_end": m.get("chunk_end_char") or None,
-        }
-        for i, m in enumerate(metadatas or [])
-    ]
-    chunks = [c for c in chunks if c["chash"]]
-    if not chunks:
-        raise RuntimeError(
-            f"manifest write for {catalog_doc_id}: no chunk_text_hash in "
-            "metadatas — nothing to catalog"
-        )
-    from nexus.catalog.factory import make_catalog_reader, make_catalog_writer  # noqa: PLC0415 — deferred to avoid circular import at module load
-
-    # nexus-bb6n2: capture what this document's manifest referenced BEFORE
-    # the replace, so the chunk(s) a supersede drops can be reaped in this
-    # same call. Best-effort — a read failure here means the reap below
-    # simply has nothing to compare against (empty `before`), never that
-    # the manifest write itself is blocked; no sweep beats a wrong sweep.
-    # Constructing the reader is inside the try too: a reader that cannot
-    # be built is the same "nothing to compare against" as one whose read
-    # raises, and must not abort the write.
-    before_reader = None
-    before: set[str] = set()
-    try:
-        before_reader = make_catalog_reader()
-        if before_reader is not None:
-            before = {row.chash for row in before_reader.get_manifest(catalog_doc_id) if row.chash}
-    except Exception:  # noqa: BLE001 — no sweep beats a wrong sweep
-        _log.warning(
-            "store_put_supersede_before_read_failed",
-            doc_id=catalog_doc_id, collection=collection, exc_info=True,
-        )
-        before = set()
-    finally:
-        if before_reader is not None:
-            try:
-                before_reader._db.close()
-            except Exception:  # noqa: BLE001 — service-mode reader has no SQLite handle (property raises)
-                pass
-
-    writer = make_catalog_writer(priority="interactive")
-    write_exc: Exception | None = None
-    try:
-        try:
-            writer.atomic_manifest_replace(catalog_doc_id, chunks, collection=collection)
-        except Exception as exc:  # noqa: BLE001 — RDR-192 Step 3a fix-round 2 (ship-blocker): NOT assumed confirmed-failed — the POST may have committed with the ack lost; arbitrated via the verify read below
-            write_exc = exc
-        else:
-            # RDR-192 Step 3a fix-round 1 (critic Critical 1, same defect
-            # class swept here too): the replace above already committed —
-            # a resync failure is NOT evidence the manifest write failed to
-            # land, only that documents.chunk_count is stale (recoverable via
-            # `nx catalog reconcile`). Letting it propagate as an
-            # indistinguishable-from-write-failure exception would make the
-            # verify step below moot and trigger a rollback of a chunk that
-            # DID land. Log and continue; the verify step is the real arbiter.
-            try:
-                writer.resync_chunk_count_cache(catalog_doc_id)
-            except Exception:  # noqa: BLE001 — see comment above: not evidence of a failed write
-                _log.warning(
-                    "store_put_manifest_resync_chunk_count_failed",
-                    doc_id=catalog_doc_id, collection=collection, exc_info=True,
-                )
-    finally:
-        try:
-            writer.close()
-        except Exception:  # noqa: BLE001 — best-effort handle cleanup
-            pass
-
-    # VERIFY the rows landed (nexus-b6enc F2: never trust a silent path) —
-    # ALWAYS, whether or not the write call above raised (fix-round 2
-    # ship-blocker: a write-call exception is arbitrated here, not assumed
-    # confirmed-failed). Bounded-retry (fix-round 2 Decision 2): a lone
-    # transient verify-read failure must not immediately declare the
-    # outcome uncertain. Raises ManifestVerifyUncertainError itself once
-    # every attempt is exhausted — that exception type IS the "outcome
-    # unknown" branch of the four-way split above; nothing further to do
-    # here but let it propagate.
-    expected = {c["chash"] for c in chunks}
-    try:
-        landed = _read_manifest_chashes_with_retry(
-            catalog_doc_id,
-            context="post-write verify" if write_exc is None else "write-exception arbitration",
-        )
-    except ManifestVerifyUncertainError as verify_exc:
-        if write_exc is None:
-            raise
-        # Both the write and every arbitration read failed. The outcome is
-        # still unknown (no rollback), but the write's own error is the
-        # first thing an operator needs, so it rides the raised message.
-        _log.warning(
-            "store_put_manifest_write_exception_unarbitrated",
-            doc_id=catalog_doc_id, collection=collection,
-            error=str(write_exc)[:300],
-        )
-        raise ManifestVerifyUncertainError(
-            f"{verify_exc}; the manifest write call itself had raised: {write_exc}"
-        ) from verify_exc
-    missing = expected - landed
-
-    if write_exc is not None:
-        if not missing:
-            # SUCCESS (fix-round 2 ship-blocker): the write call raised,
-            # but a (retried) verify read shows every expected chash
-            # present — the POST committed server-side and only the
-            # acknowledgment was lost. Log the recovered exception and
-            # fall through as if the write had succeeded outright; never
-            # roll back a chunk that is confirmed to have landed.
-            _log.warning(
-                "store_put_manifest_write_exception_but_landed",
-                doc_id=catalog_doc_id, collection=collection,
-                error=str(write_exc)[:300],
-            )
-        elif _is_missing_chunk_fk_violation(write_exc):
-            # Fix-round 2 Decision (b): the write raised because a chash
-            # it needs no longer has a matching nexus.chunks row — a
-            # CONCURRENT rollback's DELETE landed before this write's own
-            # manifest INSERT (the opposite-ordering race from fix-round
-            # 1's Significant 3). This function has no raw content to
-            # re-put; a caller that does can recover (see
-            # store_put_manifest_direct_with_recovery).
-            raise ManifestMissingChunkError(
-                f"manifest write for {catalog_doc_id}: a concurrent "
-                f"rollback deleted {len(missing)} of {len(expected)} "
-                f"chunk(s) before this write's own manifest insert "
-                f"landed (fk_catalog_chunks_chunk): {write_exc}",
-                missing_chashes=frozenset(missing),
-            )
-        else:
-            # CONFIRMED not landed: the write call raised AND a (retried)
-            # verify read proves the expected chashes are genuinely
-            # missing, for a reason other than the recoverable FK race
-            # above.
-            raise RuntimeError(
-                f"manifest write for {catalog_doc_id} failed: {write_exc}"
-            ) from write_exc
-    elif missing:
-        # CONFIRMED not landed: the write call did NOT raise, but a
-        # (retried) verify read proves the expected chashes are absent —
-        # the "silent no-op write" shape C3 exists to catch.
-        raise RuntimeError(
-            f"manifest write for {catalog_doc_id} did not land: "
-            f"{len(missing)} of {len(expected)} chunk hashes missing "
-            f"after write (e.g. {sorted(missing)[0][:16]}…)"
-        )
-
-    # nexus-bb6n2: reap what the supersede dropped, same call, so no new
-    # orphan is minted between this write and whatever sweep might
-    # otherwise have found it. A fresh reader — the verify reader above is
-    # already closed, and this reap is a distinct, best-effort step that
-    # must not be entangled with the fail-loud verify above.
-    dropped = before - expected
-    if dropped:
-        reap_reader = make_catalog_reader()
-        try:
-            _reap_superseded_note_chunks(
-                reap_reader, catalog_doc_id, dropped, collection=collection,
-            )
-        finally:
-            if reap_reader is not None:
-                try:
-                    reap_reader._db.close()
-                except Exception:  # noqa: BLE001 — service-mode reader has no SQLite handle (property raises)
-                    pass
-
-
-def store_put_manifest_direct_with_recovery(
-    catalog_doc_id: str, metadatas: list[dict], *, collection: str,
-    repiece: Callable[[str], None],
-) -> None:
-    """:func:`store_put_manifest_direct`, with the bounded single-retry
-    recovery RDR-192 Step 3a fix-round 2 Decision (b) requires: when the
-    write raises :class:`ManifestMissingChunkError` (a CONCURRENT
-    rollback deleted this call's own chunk between its ``t3.put`` and
-    this manifest write — the opposite-ordering race from fix-round 1's
-    Significant 3), re-put each missing chash via *repiece* and retry
-    the manifest write EXACTLY once.
-
-    Every other outcome — success, :class:`ManifestVerifyUncertainError`,
-    a plain confirmed-failure ``RuntimeError``, or a SECOND
-    ``ManifestMissingChunkError``/repiece failure on the retry —
-    propagates completely unchanged. Callers need no new except clause:
-    swap the bare :func:`store_put_manifest_direct` call for this one and
-    keep the existing ``ManifestVerifyUncertainError`` / ``Exception``
-    handling as-is; ``ManifestMissingChunkError`` is caught here or not
-    at all, never surfaces to a caller that lacks a recovery path.
-
-    Args:
-        catalog_doc_id: as :func:`store_put_manifest_direct`.
-        metadatas: as :func:`store_put_manifest_direct`.
-        collection: as :func:`store_put_manifest_direct`.
-        repiece: called with ONE missing chash at a time; must re-put
-            that exact chash's content (an idempotent, chash-keyed
-            ``t3.put`` — the caller's own put mechanism already knows
-            the (collection, title, tags, ...) shape) and raise on
-            failure. A chash *store_put_manifest_direct* reports missing
-            that is not among *metadatas* at all is a caller bug — the
-            original :class:`ManifestMissingChunkError` propagates
-            unchanged rather than calling *repiece* with content this
-            call never wrote.
-
-    Raises:
-        Whatever :func:`store_put_manifest_direct` itself can raise, on
-        either the original attempt or (if recovery was attempted) the
-        retry — with the race context folded into the message (fix-round
-        2, "make the already-deleted-by-a-concurrent-rollback case word
-        itself truthfully if it still reaches the error path") whenever
-        recovery itself is what failed.
-    """
-    known_chashes = {m.get("chunk_text_hash", "") for m in (metadatas or [])}
-    try:
-        store_put_manifest_direct(catalog_doc_id, metadatas, collection=collection)
-    except ManifestMissingChunkError as exc:
-        if not exc.missing_chashes <= known_chashes:
-            # A chash this call never wrote — recovering it here would be
-            # acting on a different call's content; not this function's
-            # bug to paper over.
-            raise
-        repieced: list[str] = []
-        for chash in sorted(exc.missing_chashes):
-            try:
-                repiece(chash)
-            except Exception as repiece_exc:
-                already = (
-                    f" {len(repieced)} other chunk(s) were re-put before this "
-                    f"failure and are left unreferenced, so the caller's "
-                    f"rollback removes them too."
-                    if repieced else ""
-                )
-                raise RuntimeError(
-                    f"manifest write for {catalog_doc_id}: a concurrent "
-                    f"rollback deleted chash {chash[:16]}… before this "
-                    f"call's own manifest write landed, and re-putting it "
-                    f"to recover also failed: {repiece_exc}.{already}"
-                ) from repiece_exc
-            repieced.append(chash)
-        try:
-            store_put_manifest_direct(catalog_doc_id, metadatas, collection=collection)
-        except ManifestVerifyUncertainError:
-            raise
-        except Exception as retry_exc:
-            raise RuntimeError(
-                f"manifest write for {catalog_doc_id}: recovered from a "
-                f"concurrent rollback by re-putting "
-                f"{len(exc.missing_chashes)} chunk(s), but the retried "
-                f"manifest write still failed: {retry_exc}"
-            ) from retry_exc
-
-
-@dataclass(frozen=True)
-class ChunkRollbackOutcome:
-    """What :func:`rollback_uncataloged_chunk_write` actually did (RDR-192
-    Step 3a fix-round 1, nexus-wbfpw.28, critic/reviewer Significant 4) —
-    a caller words its error message from THIS, never from what it hoped
-    happened. ``requested`` is every chash the caller asked to roll back;
-    the other three fields partition (not always exhaustively — see
-    ``deleted_count`` below) what became of them.
-
-    Attributes:
-        requested: every chash the caller's put wrote this call.
-        protected: the subset found still referenced by a live document's
-            manifest (:func:`nexus.indexer_utils.orphaned_chashes`, this
-            call's own included — see that function's caller-side note)
-            OR named by a manifest-less legacy note's own ``meta.doc_id``
-            (:func:`nexus.indexer_utils.live_note_chashes`, nexus-k54nk) —
-            never attempted for delete.
-        attempted: ``requested`` minus ``protected`` — the chashes this
-            call actually asked the engine to delete.
-        deleted_count: rows the engine reports it removed. May be LESS
-            than ``len(attempted)`` even on a clean call: the engine's own
-            anti-join (``PgVectorRepository.delete``, RDR-191 F10c) is the
-            final authority and can silently keep a chash this function's
-            own (necessarily point-in-time) check missed a fresh
-            reference for — which specific chash(es) is not reported back
-            by a batch delete, only the count.
-        delete_error: non-empty when the delete call itself raised —
-            ``deleted_count`` is then always 0, and the true state of
-            ``attempted`` is unknown (the call may have partially applied
-            server-side before raising).
-    """
-
-    requested: tuple[str, ...]
-    protected: tuple[str, ...] = ()
-    attempted: tuple[str, ...] = ()
-    deleted_count: int = 0
-    delete_error: str = ""
-
-
-def describe_rollback_outcome(outcome: ChunkRollbackOutcome) -> str:
-    """The honest sentence a caller appends to its failure message after
-    naming *reason* (RDR-192 Step 3a fix-round 1, Significant 4) — never
-    "rolled back" or "retry is safe" when the outcome says otherwise.
-    """
-    if not outcome.requested:
-        return "No new chunk was written for this call; there is nothing to roll back."
-    if outcome.delete_error:
-        return (
-            f"The rollback delete itself failed ({outcome.delete_error}) — "
-            f"the chunk may still be present in T3; check via store_get "
-            f"before retrying."
-        )
-    if outcome.protected and not outcome.attempted:
-        return (
-            "The chunk is still referenced by a live document's manifest "
-            "(this call's own, or another one's), so it was correctly "
-            "left in place rather than risk deleting content that's "
-            "actually live — nothing was deleted."
-        )
-    if outcome.attempted and outcome.deleted_count < len(outcome.attempted):
-        return (
-            f"{outcome.deleted_count} of {len(outcome.attempted)} chunk(s) "
-            f"were confirmed removed; the rest may still be referenced by "
-            f"another document and were left in place — check via "
-            f"store_get before assuming a clean retry."
-        )
-    if outcome.attempted:
-        return "The chunk was rolled back — nothing new was stored; retry is safe."
-    return "Nothing needed to be rolled back."
-
-
-def _restore_pre_call_stamp(
+def restore_pre_call_stamp(
     catalog_doc_id: str, pre_call_doc_id: str, stamped_doc_id: str,
 ) -> None:
-    """Undo :func:`catalog_store_hook_tracked`'s own pre-manifest-write
-    stamp on a confirmed-failed call (nexus-k54nk fix-round 2, T2
-    ``nexus/review-k54nk-code-r2`` Significant 1 / ``nexus/critique-k54nk-r2``
-    Significant 1, both ship-blocker-adjacent).
+    """Undo :func:`catalog_store_hook_tracked`'s own pre-write identity
+    stamp on a refused or failed note write (nexus-k54nk fix-round 2).
 
     Every RECONCILE branch in :func:`catalog_store_hook_tracked` (chash-
     dedup, ``by_source_uri``, ghost-by-title) stamps *catalog_doc_id*'s
-    document's ``meta.doc_id`` to *stamped_doc_id`` (``doc_ids[0]`` — the
-    not-yet-manifested chash the call is about to try) BEFORE the manifest
-    write is even attempted. Left in place after a confirmed failure, that
-    stamp names a chash this same rollback call has just deleted (or
-    protected — either way, no longer a live identity for this document):
-    the manifest-blind :func:`nexus.indexer_utils.live_note_chashes`
-    predicate then treats the document as permanently note-shaped for a
-    chash that no longer exists anywhere, and a LATER write that happens
-    to collide with it is wrongly protected — concretely, an identical-
-    content RETRY of a confirmed-failed call captures the dangling value
-    as ITS OWN ``pre_call_doc_id`` and re-protects the very chunk it is
-    trying to delete, reopening nexus-wbfpw.28 on a two-consecutive-
-    identical-failures sequence.
+    document's ``meta.doc_id`` to *stamped_doc_id* (``doc_ids[0]``, the
+    first chash of the note about to be written) BEFORE the write is
+    attempted. Left in place after a write that did not land, that stamp
+    names a chunk that was never written.
 
-    Restores *catalog_doc_id*'s ``meta.doc_id`` to *pre_call_doc_id* — the
-    same document's identity as it stood before this call touched it — or
+    This function exists because the one remaining consumer of
+    :func:`nexus.indexer_utils.live_note_chashes`, the ``mcp_infra``
+    supersede sweeps (``nx t3 gc`` and the prune sites no longer read it),
+    reads a document's ``meta.doc_id`` as "a manifest-less note owns this
+    chash" and so protects a chash the stamp names from deletion. That guard
+    is permanent (RDR-192 Step 11 retains it by decision, Sam 2026-10-02), so
+    this function, ``pre_call_doc_id_out`` and their test stay with it. A
+    dangling stamp over-retains: a later note that owns and then drops that
+    chash has it kept until the reaper collects it.
+
+    Restores *catalog_doc_id*'s ``meta.doc_id`` to *pre_call_doc_id*, the
+    same document's identity as it stood before this call touched it, or
     ``""`` (an unstamped document's own shape, per every reconcile
     branch's own ``.get("doc_id", "")`` default) when this call minted a
-    brand-new row with no prior identity to protect (e.g. Case E: a
-    minted row whose own delete then failed).
+    brand-new row with no prior identity and the row's removal failed.
+    :func:`nexus.catalog.note_write.put_note` calls it on every failure
+    leg that leaves the row standing.
 
     COMPARE-AND-SET, not a blind write: only when the document's CURRENT
     ``meta.doc_id`` still equals *stamped_doc_id* (this call's own,
     about-to-be-stale value) is it restored. A concurrent re-put that has
     already re-stamped the SAME document (its own
-    ``catalog_store_hook_tracked`` ran again before this rollback got
-    here) has moved ``meta.doc_id`` on to ITS OWN new value —
+    ``catalog_store_hook_tracked`` ran again before this restore ran) has moved ``meta.doc_id`` on to ITS OWN new value —
     unconditionally overwriting that with this call's now-stale
     *pre_call_doc_id* would silently undo a newer, possibly-still-landing
     call's own stamp. Not a true compare-and-swap (no such primitive on
@@ -1763,9 +1237,9 @@ def _restore_pre_call_stamp(
     this narrows the window, it does not close it.
 
     Best-effort like every other step in
-    :func:`rollback_uncataloged_chunk_write`: a lookup or write failure
-    here is logged and never raises — the caller's own store_put error is
-    what must surface, never masked by this cleanup step.
+    :func:`nexus.catalog.note_write.put_note`'s failure path: a lookup or
+    write failure here is logged and never raises — the caller's own
+    error is what must surface, never masked by this cleanup step.
     """
     if not catalog_doc_id or not stamped_doc_id:
         return
@@ -1804,324 +1278,6 @@ def _restore_pre_call_stamp(
         "store_put_rollback_stamp_restored",
         catalog_doc_id=catalog_doc_id,
         restored_to=pre_call_doc_id or "(cleared)",
-    )
-
-
-def rollback_uncataloged_chunk_write(
-    t3: Any, doc_ids: list[str], *, collection: str, catalog_doc_id: str = "",
-    pre_call_doc_id: str = "",
-) -> ChunkRollbackOutcome:
-    """Delete the T3 chunk rows a store_put-shaped write just wrote, when
-    catalog registration failed or the direct manifest write is CONFIRMED
-    not to have landed (RDR-192 Step 3a / nexus-wbfpw.28; Sam's ruling
-    2026-09-26: rollback, not a marker column). Never call this for a
-    :class:`ManifestVerifyUncertainError` — see
-    :func:`store_put_manifest_direct`'s three-way-outcome docstring.
-
-    Shared by every store_put-shaped producer — MCP ``store_put``, CLI
-    ``nx store put``, ``nx memory promote``, and the recovery-bundle
-    importer (``catalog/recovery_bundle.py::_default_import_doc``) — so
-    the compensation lives in one place, not four. Call this AFTER
-    ``put_note_pieces``/``t3.put`` has already written *doc_ids* (the
-    chash(es) of the piece(s) just stored), once the caller has decided
-    the put failed: either :func:`catalog_store_hook_tracked` returned no
-    tumbler (*catalog_doc_id* blank) or :func:`store_put_manifest_direct`
-    raised a plain ``RuntimeError`` (confirmed not landed) for the
-    tumbler it did mint. Left uncorrected, the chunk is a live,
-    manifest-less T3 row — exactly the no-owner / legacy-unmanifested
-    shape RDR-192's census classifies, and that a future reaper (Phase 3)
-    would remove anyway, only later and silently.
-
-    UNION GUARD — DEFENSIVE, NOT LOAD-BEARING (plan-audit round 2
-    residual, fix-round 1 critic Critical 1; downgraded to defensive by
-    fix-round 2's ship-blocker fix, code-review note): identical chunk
-    TEXT collapses to ONE T3 row (CLAUDE.md § catalog/T3 split), so a
-    chash this call is about to delete can be the SAME physical row a
-    DIFFERENT live document depends on. This reuses
-    :func:`nexus.indexer_utils.orphaned_chashes` — the identical union
-    guard :func:`_reap_superseded_note_chunks` above uses for the
-    supersede-reap path — so a chash any live document's manifest still
-    references is left alone; ``""`` is passed for the "owning document"
-    the guard excludes (never *catalog_doc_id*), so a reference from
-    THIS call's own document counts exactly like any other's.
-
-    NOTES GUARD (nexus-k54nk, T2 ``nexus/critique-wbfpw2`` Critical 2):
-    ``orphaned_chashes`` alone cannot see a manifest-less LEGACY note
-    (pre-nexus-b6enc shape: a live document whose ``meta.doc_id`` names
-    its chunk, no manifest row anywhere — ``docs_for_chashes`` is a
-    manifest-based reverse lookup and a legacy note has no manifest row
-    to find). This now composes :func:`nexus.indexer_utils.
-    live_note_chashes` over :func:`nexus.indexer_utils.
-    catalog_documents_for_collection` on top of the union guard's
-    result, the identical two-guard composition :func:`_reap_superseded_
-    note_chunks` and ``mcp_infra._sweep_superseded_vectors[_many]``
-    already use — so a fresh store_put of byte-identical content whose
-    manifest write is confirmed failed never deletes a chash a legacy
-    note still depends on. Same fail-open direction as the union guard:
-    a notes-lookup failure keeps everything (cannot prove note-safety),
-    never narrows the keep set.
-
-    SELF-EXCLUSION (nexus-k54nk fix-round 1, T2 ``nexus/critique-k54nk``
-    Critical 1): the document identified by *catalog_doc_id* is THIS
-    call's own — when :func:`catalog_store_hook_tracked` reconciled a
-    re-put onto a pre-existing row, it stamps that row's ``meta.doc_id``
-    to THIS call's new (not-yet-manifested, possibly about-to-fail)
-    chash BEFORE the manifest write is even attempted. Composing the
-    notes guard over ALL documents unfiltered — the naive form this
-    function shipped with before this fix-round — makes a confirmed-
-    failed re-put of an EXISTING, already-manifested note look note-
-    shaped for its OWN just-written, never-landed chash and protects
-    exactly the chunk this call is supposed to delete: a ship-blocker,
-    since re-putting an existing title is the mainline note-edit path,
-    not an edge case. This function now excludes *catalog_doc_id*'s own
-    document from the set passed to :func:`live_note_chashes`, then adds
-    back *pre_call_doc_id* (the SAME document's ``meta.doc_id`` as it
-    stood BEFORE this call touched it) as a single extra protected
-    chash — so a candidate is protected by this document only when it
-    was ALREADY that document's identity going into this call, never
-    when this call itself just assigned it. This keeps the pre-existing,
-    already-covered collision (a fresh store_put of byte-identical
-    content colliding with an unrelated legacy note's own untouched
-    chash) working exactly as before — that document is never
-    *catalog_doc_id* and is never excluded — while closing the self-
-    collision gap.
-
-    Before fix-round 2, this guard was the ONLY thing standing between a
-    write-call exception and deleting a chunk whose manifest write had
-    actually landed (the ack-lost race): ``store_put_manifest_direct``
-    treated every write-call exception as confirmed failure, and the
-    guard's fresh read was what could still catch a since-landed
-    reference before the delete. Fix-round 2 closed that at the SOURCE
-    — ``store_put_manifest_direct`` now arbitrates every write-call
-    exception through a (retried) verify read BEFORE ever raising
-    confirmed-failure, so by the time THIS function is ever called, the
-    verify read has already, moments earlier, proven the chash(es)
-    genuinely absent from every manifest it could see. This function's
-    own union-guard check is now a SECOND, DEFENSIVE read — protection
-    against whatever changed in the window between that verify and this
-    delete (e.g. a brand-new, independent concurrent store of identical
-    content landing in between), not the primary mechanism that makes
-    rollback safe. The engine's own anti-join (``PgVectorRepository.
-    delete``, RDR-191 F10c) is a THIRD, independent backstop against
-    ever losing a still-referenced chunk even if both Python-side checks
-    were wrong — see :class:`ChunkRollbackOutcome`'s ``deleted_count``
-    field.
-
-    STAMP RESTORE (nexus-k54nk fix-round 2, T2 ``nexus/review-k54nk-
-    code-r2`` Significant 1): after deciding what to do about the T3
-    chunk(s) (deleted, protected, or the delete itself failed), this
-    function also calls :func:`_restore_pre_call_stamp` to undo
-    :func:`catalog_store_hook_tracked`'s own pre-manifest-write stamp on
-    *catalog_doc_id*'s document — see that function's docstring for the
-    dangling-reference hazard it closes and its compare-and-set contract.
-    Best-effort, same fail-open direction as everything else here.
-
-    Fail-open and best-effort throughout, same direction as every other
-    T3-deleting sweep in this module: a lookup or delete failure is
-    logged and returned on the outcome, never raised — the caller's own
-    store_put error is what must surface, and this compensation must
-    never mask it. Over-retention is recoverable (``nx t3 gc``, or the
-    RDR-192 reaper once shipped, catches it later); over-deletion is not.
-
-    Args:
-        t3: the SAME T3 handle the caller just wrote *doc_ids* through
-            (never re-derived via ``make_t3()`` here — a caller under
-            test may have injected a fake/in-memory client, and deriving
-            a fresh handle would silently miss it).
-        doc_ids: the chash(es) of the piece(s) this call's put just
-            wrote (``put_note_pieces``'s return, or a single-item list
-            wrapping ``t3.put``'s return for a non-split caller).
-        collection: the T3 collection *doc_ids* were written into.
-        catalog_doc_id: the tumbler :func:`catalog_store_hook_tracked`
-            returned for this call, or ``""`` when registration itself
-            failed. No longer passed to the union guard (see the race-
-            guard note above) — now used ONLY by the SELF-EXCLUSION guard
-            above, to identify and exclude this call's own document from
-            the notes-protection set.
-        pre_call_doc_id: nexus-k54nk fix-round 1. The SAME document's
-            (*catalog_doc_id*'s) ``meta.doc_id`` as it stood BEFORE this
-            call's own ``catalog_store_hook_tracked`` stamp — from
-            that function's ``pre_call_doc_id_out`` out-parameter, or
-            ``""`` when this call minted a brand-new row (no prior
-            identity to protect) or registration failed outright.
-
-    Returns:
-        A :class:`ChunkRollbackOutcome` describing exactly what happened;
-        callers word their error text from it via
-        :func:`describe_rollback_outcome`, never by assuming success.
-    """
-    ids = tuple(sorted({d for d in doc_ids if d}))
-    if not ids or not collection:
-        return ChunkRollbackOutcome(requested=ids)
-    # nexus-k54nk fix-round 2: the FIRST piece's chash is the exact value
-    # catalog_store_hook_tracked stamped onto catalog_doc_id's meta.doc_id
-    # (note_manifest_metadata/single_chunk_manifest_metadata's return, and
-    # every producer's doc_ids[0] — see _restore_pre_call_stamp's own
-    # docstring). From the ORIGINAL *doc_ids* order, not the deduped/
-    # sorted `ids` above — sorting can reorder a multi-piece note's chunks.
-    stamped_doc_id = next((d for d in doc_ids if d), "")
-    from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid circular import at module load
-    from nexus.indexer_utils import (  # noqa: PLC0415 — deferred: avoids a module-load-time cross-import
-        catalog_documents_for_collection,
-        live_note_chashes,
-        orphaned_chashes,
-    )
-
-    reader = make_catalog_reader()
-    try:
-        orphaned = orphaned_chashes(reader, "", list(ids), collection=collection)
-        if orphaned:
-            try:
-                documents = catalog_documents_for_collection(reader, collection)
-                # nexus-k54nk fix-round 1 SELF-EXCLUSION (see the docstring's
-                # NOTES GUARD section): this call's own document must not
-                # protect its own not-yet-landed, now-failed chash via a
-                # stamp THIS call just wrote. Excluded from the general
-                # note-set unconditionally; pre_call_doc_id below is the
-                # one exception readmitted per-candidate.
-                if catalog_doc_id:
-                    documents = [
-                        d for d in documents if str(d.tumbler) != catalog_doc_id
-                    ]
-                notes = live_note_chashes(documents)
-                if pre_call_doc_id:
-                    notes.add(pre_call_doc_id)
-            except Exception:  # noqa: BLE001 — cannot prove note-safety: keep everything, same fail-open direction as orphaned_chashes
-                _log.warning(
-                    "store_put_rollback_skipped_note_lookup_failed",
-                    collection=collection, candidates=len(orphaned),
-                    exc_info=True,
-                )
-                orphaned = []
-            else:
-                orphaned = [h for h in orphaned if h not in notes]
-    finally:
-        if reader is not None:
-            try:
-                reader._db.close()
-            except Exception:  # noqa: BLE001 — service-mode reader has no SQLite handle (property raises)
-                pass
-    protected = tuple(sorted(set(ids) - set(orphaned)))
-    attempted = tuple(sorted(orphaned))
-    if not attempted:
-        _restore_pre_call_stamp(catalog_doc_id, pre_call_doc_id, stamped_doc_id)
-        return ChunkRollbackOutcome(requested=ids, protected=protected)
-    try:
-        result = t3.get_collection(collection).delete(ids=list(attempted))
-    except Exception as exc:  # noqa: BLE001 — store_put's own error return must not depend on cleanup succeeding
-        _log.warning(
-            "store_put_rollback_chunk_delete_failed",
-            collection=collection, chashes=len(attempted), exc_info=True,
-        )
-        _restore_pre_call_stamp(catalog_doc_id, pre_call_doc_id, stamped_doc_id)
-        return ChunkRollbackOutcome(
-            requested=ids, protected=protected, attempted=attempted,
-            delete_error=str(exc),
-        )
-    deleted_count = result if isinstance(result, int) else len(attempted)
-    _log.warning(
-        "store_put_rollback_chunk_deleted",
-        collection=collection, catalog_doc_id=catalog_doc_id,
-        deleted=deleted_count, requested=len(attempted),
-    )
-    _restore_pre_call_stamp(catalog_doc_id, pre_call_doc_id, stamped_doc_id)
-    return ChunkRollbackOutcome(
-        requested=ids, protected=protected, attempted=attempted,
-        deleted_count=deleted_count,
-    )
-
-
-def _reap_superseded_note_chunks(
-    reader, catalog_doc_id: str, dropped: set[str], *, collection: str,
-) -> None:
-    """Delete T3 chunk rows a store_put supersede just dropped from
-    *catalog_doc_id*'s manifest (nexus-bb6n2).
-
-    Called from :func:`store_put_manifest_direct` right after its
-    ``atomic_manifest_replace`` has landed and verified — the *dropped*
-    set is what the document's manifest referenced before this replace
-    minus what it references now. Content-addressed chunk text (CLAUDE.md
-    § catalog/T3 split) collapses identical text from different documents
-    onto ONE T3 row, so "not in THIS document's manifest any more" is not
-    "unreferenced": deleting on that basis alone would remove a chunk
-    another live document still depends on. This reuses the exact same two
-    guards ``mcp_infra._sweep_superseded_vectors`` uses for the indexer's
-    own supersede path:
-
-    1. The union guard (:func:`nexus.indexer_utils.orphaned_chashes`) —
-       keeps any candidate a DIFFERENT live document's manifest still
-       references.
-    2. The note guard (:func:`nexus.indexer_utils.live_note_chashes` over
-       :func:`nexus.indexer_utils.catalog_documents_for_collection`) —
-       keeps any candidate that is itself a manifest-less note's own
-       identity elsewhere in *collection*.
-
-    Fail-open and best-effort throughout: a lookup failure or a delete
-    failure is logged and swallowed, never raised — store_put's own
-    success must never hinge on whether the OLD chunk could be reaped.
-    Over-retention is recoverable (a later re-put, or ``nx t3 gc``,
-    catches it); over-deletion is not.
-    """
-    if not dropped or not collection:
-        return
-    from nexus.indexer_utils import (  # noqa: PLC0415 — deferred: avoids a module-load-time cross-import
-        catalog_documents_for_collection,
-        live_note_chashes,
-        orphaned_chashes,
-    )
-
-    orphaned = orphaned_chashes(reader, catalog_doc_id, dropped, collection=collection)
-    shared = len(dropped) - len(orphaned)
-    if not orphaned:
-        # nexus-wbfpw.12: union guard cleared every candidate — every
-        # dropped chash is shared with another live document, nothing
-        # reaches the note lookup or a delete.
-        _log.info(
-            "superseded_sweep_kept", site="_reap_superseded_note_chunks",
-            collection=collection, doc_id=catalog_doc_id, dropped=len(dropped),
-            kept=shared, kept_notes=0,
-        )
-        return
-    try:
-        documents = catalog_documents_for_collection(reader, collection)
-        notes = live_note_chashes(documents)
-    except Exception:  # noqa: BLE001 — cannot prove note-safety: keep everything, same fail-open direction as orphaned_chashes
-        _log.warning(
-            "store_put_supersede_reap_skipped_note_lookup_failed",
-            doc_id=catalog_doc_id, collection=collection, candidates=len(orphaned),
-            exc_info=True,
-        )
-        return
-    kept_notes = len(orphaned)
-    orphaned = [h for h in orphaned if h not in notes]
-    kept_notes -= len(orphaned)
-    if not orphaned:
-        # nexus-wbfpw.12: note guard cleared every surviving candidate —
-        # each is itself a manifest-less note's own identity elsewhere in
-        # this collection. Same silence hazard as the union-guard return
-        # above.
-        _log.info(
-            "superseded_sweep_kept", site="_reap_superseded_note_chunks",
-            collection=collection, doc_id=catalog_doc_id, dropped=len(dropped),
-            kept=shared + kept_notes, kept_notes=kept_notes,
-        )
-        return
-    try:
-        from nexus.db import make_t3  # noqa: PLC0415 — deferred: hot path
-
-        result = make_t3().get_collection(collection).delete(ids=orphaned)
-    except Exception:  # noqa: BLE001 — store_put's own success must not depend on cleanup
-        _log.warning(
-            "store_put_supersede_reap_failed",
-            doc_id=catalog_doc_id, collection=collection, orphans=len(orphaned),
-            exc_info=True,
-        )
-        return
-    actual = result if isinstance(result, int) else len(orphaned)
-    _log.info(
-        "store_put_supersede_reaped",
-        doc_id=catalog_doc_id, collection=collection, deleted=actual,
-        requested=len(orphaned),
     )
 
 

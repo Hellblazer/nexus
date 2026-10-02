@@ -464,11 +464,13 @@ class TestCheckOrphanCheckpoints:
         return d
 
     def _write_ckpt(self, ckpt_dir, pdf, content_hash, collection="knowledge__art"):
-        from nexus.checkpoint import CheckpointData, write_checkpoint
-        write_checkpoint(CheckpointData(
-            pdf=pdf, collection=collection, content_hash=content_hash,
-            chunks_upserted=10, total_chunks=100, embedding_model="voyage-context-3",
-        ))
+        # The on-disk shape an older client wrote (no indexing path writes one any more, RDR-223).
+        import json
+        (ckpt_dir / f"{content_hash}-{collection}.json").write_text(json.dumps({
+            "pdf": pdf, "collection": collection, "content_hash": content_hash,
+            "chunks_upserted": 10, "total_chunks": 100, "embedding_model": "voyage-context-3",
+            "timestamp": "2026-01-01T00:00:00+00:00",
+        }))
 
     @pytest.mark.parametrize("setup", ["no_dir", "empty_dir"])
     def test_missing_or_empty_reports_ok(self, tmp_path, monkeypatch, setup):

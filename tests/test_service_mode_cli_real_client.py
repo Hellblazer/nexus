@@ -13,8 +13,9 @@ ported in the same wave:
 
   - ``expire``                      (nx store expire,      nexus-h8rf6.5)
   - ``update_source_path``          (nx doctor --fix-paths, nexus-h8rf6.6)
-  - ``list_chunks_with_metadata``   (nx t3 gc,             nexus-h8rf6.7)
-  - ``delete_by_chunk_ids``         (nx t3 gc,             nexus-h8rf6.7)
+  - ``manifest_less_census`` / ``reapable_chunks`` / ``gc_quarantine_orphans_bounded``
+                                    (nx t3 gc,             nexus-wbfpw.18; the verb
+                                    lists, then moves through the engine route)
   - ``list_unique_source_paths``    (nx t3 prune-stale,    nexus-h8rf6.7)
   - ``collection_metadata``         (doctor model-drift probe, nexus-h8rf6.8)
 
@@ -159,75 +160,70 @@ class TestFixPathsRealClient:
         assert "chunks updated" not in result.output
 
 
-# ── nx t3 gc (list_chunks_with_metadata + delete_by_chunk_ids, h8rf6.7) ──────
+# ── nx t3 gc (RDR-192 Step 8, nexus-wbfpw.18) ────────────────────────────────
 
 
-def test_t3_gc_service_mode_real_client(tmp_path, runner, real_client, monkeypatch):
-    """Orphan scan + batch delete through the real client. Catalog is
-    faked (empty manifest -> everything with an old indexed_at is orphan)."""
+def test_t3_gc_service_mode_real_client(tmp_path, runner, real_client, monkeypatch, cloud_mode):
+    """The reapable census + listing + engine move through the real client. Pins the client's own
+    wiring (method names, request bodies, response reads); the verb's refusals and the engine's
+    behaviour are ``test_wbfpw18_t3_gc_wire.py`` and ``test_wbfpw18_t3_gc_substrate.py``. The
+    pre-.18 version of this test pinned a list-then-delete-by-id sweep through /store-delete."""
     chash = "a" * 64
     posted = []
 
     def fake_post(path, body, **kw):
         posted.append((path, body))
-        if path == "/v1/vectors/get":
-            if body["offset"] > 0:
-                return {"ids": [], "metadatas": []}
+        if path == "/v1/vectors/manifest-less-census":
             return {
-                "ids": ["orphan1"],
-                "metadatas": [
-                    {
-                        "chunk_text_hash": chash,
-                        "indexed_at": "2020-01-01T00:00:00+00:00",
-                    },
-                ],
+                "collection": _KNOWLEDGE, "returned": 0, "chashes": {}, "owners": {},
+                "totals": {"superseded": 0, "legacy-unmanifested": 0, "dead-owner": 0,
+                           "no-owner": 0, "unclassified": 0},
+                "scope_chunk_total": 1,
             }
-        if path == "/v1/vectors/store-delete":
-            return {"deleted": len(body["ids"])}
+        if path == "/v1/vectors/reapable":
+            return {"collection": _KNOWLEDGE, "grace_seconds": None, "returned": 1,
+                    "next_after": None, "chunks": [{
+                        "chash": chash, "created_at": "2020-01-01T00:00:00Z",
+                        "last_written_at": "2020-01-01T00:00:00Z", "title": "t",
+                        "catalog_doc_id": None}]}
+        if path == "/v1/vectors/gc/quarantine-orphans":
+            return {"moved": 1, "sample": [{"chash": chash, "title": "t"}], "remaining": 0,
+                    "row_limit": body.get("row_limit")}
+        if path == "/v1/vectors/gc/expire-quarantine":
+            return {"expired": 0, "refused": 0}
         raise AssertionError(f"unexpected path {path}")
 
-    # Spec'd against the REAL service-mode catalog client so attributes it
-    # doesn't have (like the local catalog's _dir) raise instead of
-    # auto-materializing. Live-shakeout finding #4: the original bare mock
-    # set fake_cat._dir = tmp_path, masking that gc's EventLog(cat._dir)
-    # crashed with AttributeError on every real service-mode --no-dry-run.
+    # Spec'd against the REAL service-mode catalog client so attributes it doesn't have raise
+    # instead of auto-materializing (live-shakeout finding #4).
     from nexus.catalog.http_catalog_client import HttpCatalogClient
     fake_cat = MagicMock(spec=HttpCatalogClient)
-    fake_cat.chashes_for_collection_with_tombstone_protected.return_value = (set(), None)
-
-    # nexus-fduai: the audit write goes through the catalog WRITER proxy,
-    # not the reader — fake it at the verb's own seam.
-    fake_writer = MagicMock()
-    fake_writer.record_gc_audit.return_value = 42
+    fake_cat.get_collection.return_value = object()
 
     monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
+    monkeypatch.setattr(
+        "nexus.db.http_vector_client._get",
+        lambda path, **kw: [{"name": _KNOWLEDGE, "count": 1, "content_type": "knowledge",
+                             "owner_id": "nexus-1-1", "embedding_model": "voyage-context-3"}],
+    )
     with (
         patch("nexus.db.make_t3", return_value=real_client),
         patch("nexus.commands.t3._make_catalog", return_value=fake_cat),
-        patch("nexus.commands.t3._make_catalog_writer", return_value=fake_writer),
+        patch("nexus.indexer_utils.catalog_documents_for_collection", return_value=[]),
     ):
-        result = runner.invoke(
-            main,
-            # --allow-empty-manifest-set: this fixture's manifest references
-            # zero chashes by construction (the test pins the real-client
-            # wiring, not manifest semantics), which the nexus-jqrtp guard
-            # otherwise refuses — same override as the test_t3_gc.py siblings.
-            ["t3", "gc", "-c", _KNOWLEDGE, "--no-dry-run", "--yes",
-             "--allow-empty-manifest-set"],
-        )
+        result = runner.invoke(main, ["t3", "gc", "-c", _KNOWLEDGE, "--no-dry-run", "--yes"])
     assert result.exit_code == 0, result.output
-    assert "deleted 1 chunk(s)" in result.output
-    deletes = [b for p, b in posted if p == "/v1/vectors/store-delete"]
-    assert deletes == [{"collection": _KNOWLEDGE, "ids": ["orphan1"]}]
-    fake_writer.record_gc_audit.assert_called_once()
-    audit = fake_writer.record_gc_audit.call_args.kwargs
-    assert audit["operation"] == "t3_gc"
-    assert audit["collection"] == _KNOWLEDGE
-    assert audit["actor"] == "nx t3 gc"
-    assert audit["dry_run"] is False
-    assert audit["chashes"] == [chash]
-    assert audit["details"]["deleted"] == 1
-    fake_writer.close.assert_called_once()
+    assert "quarantined 1 chunk(s)" in result.output
+    paths = [p for p, _ in posted]
+    assert paths == [
+        "/v1/vectors/manifest-less-census",
+        "/v1/vectors/reapable",
+        "/v1/vectors/manifest-less-census",  # re-read immediately before the move
+        "/v1/vectors/gc/quarantine-orphans",
+        "/v1/vectors/gc/expire-quarantine",  # the client expiry of the sibling it just filled
+    ]
+    move = posted[-2][1]
+    assert move["collection"] == _KNOWLEDGE
+    assert move["quarantine_collection"].startswith("quarantine-")
 
 
 # ── nx t3 prune-stale (RETIRED, nexus-bm8dd) ─────────────────────────────────

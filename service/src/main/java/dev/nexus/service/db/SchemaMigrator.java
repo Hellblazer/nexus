@@ -443,10 +443,42 @@ public final class SchemaMigrator {
             } catch (DataAccessException e) {
                 throw new SQLException("SET TIME ZONE 'UTC' (via set_config) failed", e);
             }
+            logWalkStartSession(conn);
+            pinSearchPathToPublic(conn);
+            refuseSplitHistory(conn);
             preflightChashConstraints(conn);
 
             Database database = DatabaseFactory.getInstance()
                 .findCorrectDatabaseImplementation(new JdbcConnection(conn));
+
+            // nexus-q81g7: pin Liquibase's bookkeeping to public. Without this,
+            // Liquibase puts DATABASECHANGELOG (and its lock table) in whatever
+            // schema current_schema() reports, and PostgreSQL's default
+            // search_path ("$user", public) makes that the schema named after
+            // the migrating role once such a schema exists. A role called
+            // nexus, t1 or staging (the three schemas this changelog creates)
+            // therefore boots once with the history in public, creates its own
+            // schema mid-walk, and on boot 2 reads an EMPTY history there,
+            // re-plans every changeset and dies re-creating nexus.memory
+            // ("relation already exists"). Every engine query on the history
+            // table already hardcodes public.databasechangelog (VersionHandler,
+            // and the count helpers below), and so does grants-nexus-svc.xml's
+            // GRANT, so public is the one place it can live.
+            //
+            // Both names are set: liquibaseSchemaName places the history and
+            // lock tables; defaultSchemaName is what Liquibase resolves
+            // unqualified objects and its own existence checks against, and it
+            // follows the same current_schema(). The session search_path is
+            // pinned too (pinSearchPathToPublic above): Liquibase's
+            // DatabaseUtils.initializeDatabase leaves a search_path that already
+            // starts with the default schema alone, and otherwise PREPENDS it to
+            // the existing one (public, $user, public), which keeps the
+            // role's own schema in the path. For a role with no like-named
+            // schema (the production nexus_admin) current_schema() is already
+            // public, so all three are no-ops there and existing installs are
+            // unchanged.
+            database.setLiquibaseSchemaName("public");
+            database.setDefaultSchemaName("public");
 
             try (Liquibase liquibase = new Liquibase(
                     MASTER_CHANGELOG,
@@ -579,6 +611,136 @@ public final class SchemaMigrator {
         }
     }
 
+    // ── nexus-q81g7: session pin, walk-start diagnostics, split-history refusal ──
+
+    /**
+     * Pins this migration connection's session {@code search_path} to
+     * {@code public}. Same shape as the time-zone pin above ({@code set_config(...,
+     * false)} is the session-scoped {@code SET}); the connection is the migration
+     * pool's own and is closed after the walk (Main), so nothing else inherits it.
+     * Set BEFORE Liquibase touches the connection: its own search-path handling
+     * leaves a path that already starts with the default schema alone.
+     *
+     * <p>Without it {@code "$user", public} resolves an unqualified name in a
+     * changeset to {@code public} on boot 1 and to a role-named schema from
+     * boot 2 on, the same root cause as the history-table split, one level over.
+     */
+    private static void pinSearchPathToPublic(Connection conn) throws SQLException {
+        try {
+            DSL.using(conn, SQLDialect.POSTGRES)
+                .select(DSL.function("set_config", SQLDataType.VARCHAR,
+                    DSL.val("search_path"), DSL.val("public"), DSL.val(false)))
+                .fetchOne();
+        } catch (DataAccessException e) {
+            throw new SQLException("pinning the migration session's search_path to public failed", e);
+        }
+    }
+
+    /**
+     * Logs the migrating role, its {@code current_schema()}, its session
+     * {@code search_path} and every {@code pg_db_role_setting} row that applies to
+     * it (role-level and database-level {@code ALTER ROLE/DATABASE ... SET}), as
+     * they are BEFORE the pin. Nothing at walk start recorded which of these a
+     * deployment actually had, and a role-level {@code search_path} is invisible
+     * from the changelog. Best effort: a diagnostic that cannot run never stops a
+     * boot.
+     */
+    private static void logWalkStartSession(Connection conn) {
+        try {
+            DSLContext ctx = DSL.using(conn, SQLDialect.POSTGRES);
+            String role = ctx.select(DSL.currentUser()).fetchOne(0, String.class);
+            String currentSchema = ctx.select(DSL.currentSchema()).fetchOne(0, String.class);
+            String searchPath = ctx.select(DSL.function("current_setting", SQLDataType.VARCHAR,
+                DSL.val("search_path"))).fetchOne(0, String.class);
+            List<String> roleSettings = ctx.select(DSL.function("array_to_string",
+                    SQLDataType.VARCHAR,
+                    DSL.field(DSL.name("setconfig"), SQLDataType.OTHER), DSL.inline(",")))
+                .from(DSL.table(DSL.name("pg_catalog", "pg_db_role_setting")))
+                .where(DSL.field(DSL.name("setrole"), SQLDataType.BIGINT).in(
+                    DSL.inline(0L),
+                    DSL.field(DSL.select(DSL.field(DSL.name("oid"), SQLDataType.BIGINT))
+                        .from(DSL.table(DSL.name("pg_catalog", "pg_roles")))
+                        .where(DSL.field(DSL.name("rolname"), SQLDataType.VARCHAR)
+                            .eq(DSL.currentUser())))))
+                .fetch(0, String.class);
+            log.info("event=schema_migration_session role={} current_schema={} "
+                    + "search_path={} pg_db_role_setting={}",
+                role, currentSchema, searchPath, roleSettings);
+        } catch (DataAccessException e) {
+            log.warn("event=schema_migration_session_unavailable error={}", e.getMessage());
+        }
+    }
+
+    /**
+     * Refuses to walk when {@code databasechangelog} lives in a schema other than
+     * {@code public} and public holds FEWER rows of it (none, usually). The engine
+     * and Liquibase (pinned above) read {@code public.databasechangelog} only, so
+     * such a database would be read as empty, every changeset replanned, and the
+     * walk would die at the first non-idempotent one, after the preflight and
+     * every {@code runAlways} side effect had already run. This is exactly the
+     * state a migrating role named for a schema that existed before its first boot
+     * leaves behind (the cloud DBA step that relocates the extensions into
+     * {@code nexus}, for one).
+     *
+     * <p>A stray, empty {@code <schema>.databasechangelog} next to a full public
+     * history (a failed boot 2 of the original bug) is NOT a split and does not
+     * refuse. A history table the migration role cannot read is logged and skipped:
+     * it is not ours to judge.
+     */
+    private static void refuseSplitHistory(Connection conn) throws SQLException {
+        try {
+            DSLContext ctx = DSL.using(conn, SQLDialect.POSTGRES);
+            Field<String> relname = DSL.field(DSL.name("c", "relname"), String.class);
+            Field<String> nspname = DSL.field(DSL.name("n", "nspname"), String.class);
+            List<String> schemas = ctx.select(nspname)
+                .from(DSL.table(DSL.name("pg_catalog", "pg_class")).as("c"))
+                .join(DSL.table(DSL.name("pg_catalog", "pg_namespace")).as("n"))
+                .on(DSL.field(DSL.name("c", "relnamespace"))
+                    .eq(DSL.field(DSL.name("n", "oid"))))
+                .where(relname.eq("databasechangelog"))
+                .and(nspname.ne("public"))
+                .and(nspname.notLike("pg\\_%", '\\'))
+                .and(nspname.ne("information_schema"))
+                .fetch(nspname);
+            if (schemas.isEmpty()) {
+                return;
+            }
+            String publicRegclass = ctx.select(DSL.function("to_regclass", SQLDataType.VARCHAR,
+                DSL.val("public.databasechangelog"))).fetchOne(0, String.class);
+            int publicRows = publicRegclass == null ? 0 : rowCount(ctx, "public");
+            for (String schema : schemas) {
+                int rows;
+                try {
+                    rows = rowCount(ctx, schema);
+                } catch (DataAccessException e) {
+                    log.warn("event=schema_migration_history_unreadable schema={} error={}",
+                        schema, e.getMessage());
+                    continue;
+                }
+                if (rows > publicRows) {
+                    throw new MigrationException(
+                        "Liquibase history is split: " + schema + ".databasechangelog holds "
+                        + rows + " rows but public.databasechangelog holds " + publicRows
+                        + ". The engine reads public.databasechangelog only, so walking now "
+                        + "would replan every changeset against an already-migrated schema. "
+                        + "Refusing to migrate. Move the history first, as the table's owner: "
+                        + "ALTER TABLE " + schema + ".databasechangelog SET SCHEMA public"
+                        + (publicRegclass == null ? "" : " (after dropping the partial "
+                            + "public.databasechangelog)")
+                        + "; and likewise " + schema + ".databasechangeloglock if it exists.");
+                }
+            }
+        } catch (DataAccessException e) {
+            throw new SQLException("split-history check failed", e);
+        }
+    }
+
+    private static int rowCount(DSLContext ctx, String schema) {
+        return ctx.selectCount()
+            .from(DSL.table(DSL.name(schema, "databasechangelog")))
+            .fetchOne(0, int.class);
+    }
+
     /**
      * Builds the "migration succeeded, counts unknown" outcome and logs
      * {@code schema_migration_complete} with the {@link #COUNTS_UNAVAILABLE}
@@ -599,9 +761,11 @@ public final class SchemaMigrator {
     // nexus-cbo4a batch 9 item 0 (Sam's directive, 2026-09-05): databasechangelog
     // is explicitly schema-qualified as "public" below (DSL.name("public",
     // "databasechangelog")), matching VersionHandler's own DATABASECHANGELOG
-    // constant -- this table is Liquibase's own bookkeeping table, created via a
-    // migration connection that carries no search_path override, so it lands in
-    // Postgres's own default schema ("$user", public) resolving to public.
+    // constant -- this is Liquibase's own bookkeeping table. migrate() PINS it
+    // there (setLiquibaseSchemaName("public") plus a public-only session
+    // search_path, nexus-q81g7) instead of trusting the role's default
+    // search_path to resolve to public, which it does only for a role with no
+    // like-named schema.
     //
     // nexus-zrcj7 step 4 review follow-up (critic, T2 [24235]): the methods below
     // run on the BARE bootstrap Connection Liquibase itself borrows, before this
@@ -611,8 +775,8 @@ public final class SchemaMigrator {
     // elsewhere: DSL.table(DSL.name("public", "databasechangelog")) /
     // DSL.field(DSL.name(...), Class) for Liquibase's own bookkeeping table
     // (outside jOOQ codegen's modeled schemata, but nameable via the same safe
-    // quoted-identifier idiom ChashCensus.java/StagingPromoteOps.java/this bead's
-    // own TaxonomyRepository#advanceTopicsIdSequence conversion already use).
+    // quoted-identifier idiom this bead's own
+    // TaxonomyRepository#advanceTopicsIdSequence conversion already uses).
     // Throws SQLException (matching migrate()'s own catch(SQLException) at its
     // call site) by catching jOOQ's unchecked DataAccessException and rethrowing
     // checked -- jOOQ itself never throws SQLException directly.
@@ -1007,6 +1171,10 @@ public final class SchemaMigrator {
     public static final class MigrationException extends RuntimeException {
         public MigrationException(String message, Throwable cause) {
             super(message, cause);
+        }
+
+        public MigrationException(String message) {
+            super(message);
         }
     }
 }

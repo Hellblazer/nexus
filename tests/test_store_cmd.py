@@ -19,7 +19,7 @@ def _seed_for_store_put(content: str, collection: str = "fixture-subject") -> No
 
     ``mock_store`` / the inline ``MagicMock(spec=HttpVectorClient)`` fully
     mock the T3 write here, but the catalog manifest write
-    (``store_put_manifest_direct``) always goes through the REAL engine
+    (``note_write.write_note``) always goes through the REAL engine
     catalog (autouse ``_pin_t2_substrate``). ``fk_catalog_chunks_chunk``
     now requires the manifest's chash to have a matching REAL
     ``nexus.chunks`` row. Computes the exact ``(collection, chash)``
@@ -173,26 +173,44 @@ def test_store_put_stdin_requires_title(runner, mock_store):
     assert "--title" in result.output
 
 
-def test_store_put_stdin_with_title_succeeds(runner, mock_store):
-    mock_store.put.return_value = "doc-id-abc"
+def _route_note_writes(monkeypatch, mock_store):
+    """RDR-223 P2.6 (nexus-z0o2p.16): ``nx store put`` writes a note through the note
+    writer (one request to the engine), not ``t3.put``. Tests whose subject is the
+    command's wiring rather than the write route the note into the mocked T3 (the
+    same double the MCP ``store_put`` tests use); ``put`` answers with the chunk's
+    real id, as ``T3Database.put`` does."""
+    from tests._note_write_double import route_note_writes_to
+
+    mock_store.put.side_effect = lambda **kw: _chash_of(kw["content"])
+    route_note_writes_to(monkeypatch, mock_store)
+
+
+def _chash_of(text: str) -> str:
+    import hashlib
+
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
+def test_store_put_stdin_with_title_succeeds(runner, mock_store, monkeypatch):
+    _route_note_writes(monkeypatch, mock_store)
     _seed_for_store_put("content here")
     result = runner.invoke(main, ["store", "put", "--collection", "fixture-subject", "-", "--title", "my-title.md"], input="content here")
-    assert result.exit_code == 0
-    assert "doc-id-abc" in result.output
+    assert result.exit_code == 0, result.output
+    assert _chash_of("content here") in result.output
     mock_store.put.assert_called_once()
     kw = mock_store.put.call_args.kwargs
     assert kw["title"] == "my-title.md"
     assert kw["content"] == "content here"
 
 
-def test_store_put_file_uses_filename_as_title(runner, mock_store, tmp_path):
+def test_store_put_file_uses_filename_as_title(runner, mock_store, tmp_path, monkeypatch):
     src = tmp_path / "analysis.md"
     src.write_text("finding: important")
-    mock_store.put.return_value = "doc-id-xyz"
+    _route_note_writes(monkeypatch, mock_store)
     _seed_for_store_put("finding: important")
     result = runner.invoke(main, ["store", "put", "--collection", "fixture-subject", str(src)])
-    assert result.exit_code == 0
-    assert "doc-id-xyz" in result.output
+    assert result.exit_code == 0, result.output
+    assert _chash_of("finding: important") in result.output
     assert mock_store.put.call_args.kwargs["title"] == "analysis.md"
 
 
@@ -242,21 +260,27 @@ def test_store_put_profile_refusal_is_a_clean_click_error(runner, mock_store, tm
     """7.38.0 shakeout (2026-09-09): the registration seam's refusals (a
     Voyage intent against a bge profile; a Voyage intent with no key) name
     the service restart in their message and must reach the operator as a
-    clean ClickException, not a raw traceback."""
-    import nexus.corpus as corpus_mod  # noqa: PLC0415 — deferred, matches the file's other in-test imports
+    clean ClickException, not a raw traceback.
 
-    # Keep the catalog hook out of it (no service endpoint under CliRunner);
-    # same alias patch as test_store_put_oversized_content_never_mints_catalog_row.
-    monkeypatch.setattr("nexus.commands.store._catalog_store_hook_tracked", lambda *a, **k: ("", False))
+    RDR-223 P2.6 (nexus-z0o2p.16): the seam now runs inside the note's one
+    write_manifest_many call, before anything is sent, so the refusal is a
+    note that was not stored (and the catalog row the call minted is gone),
+    not an unknown outcome."""
+    import nexus.corpus as corpus_mod  # noqa: PLC0415 — deferred, matches the file's other in-test imports
 
     exc_cls = getattr(corpus_mod, exc_cls_name)
     message = "content_type='knowledge': this install's configured intent is 'voyage-context-3', but the engine's embedding_profile still says 'bge-base-en-v15-768'. A restart is required: `nx daemon service stop && nx daemon service start`."
     # EmbeddingProfileMismatchError builds its message from structured
     # fields since nexus-aotql; the credential error still takes one string.
     if exc_cls_name == "EmbeddingProfileMismatchError":
-        mock_store.put.side_effect = exc_cls("knowledge", "voyage-context-3", "bge-base-en-v15-768")
+        refusal = exc_cls("knowledge", "voyage-context-3", "bge-base-en-v15-768")
     else:
-        mock_store.put.side_effect = exc_cls(message)
+        refusal = exc_cls(message)
+
+    def _refuse(*_a, **_k):
+        raise refusal
+
+    monkeypatch.setattr("nexus.corpus.ensure_collection_registered", _refuse)
 
     src = tmp_path / "note.md"
     src.write_text("a note under a mismatched embedding intent")
@@ -269,6 +293,15 @@ def test_store_put_profile_refusal_is_a_clean_click_error(runner, mock_store, tm
     assert "Traceback" not in result.output, result.output
     assert result.output.rstrip().splitlines()[-1].startswith("Error: ")
     assert "nx daemon service stop && nx daemon service start" in result.output
+    # RDR-223 Phase 2 joint review: a client-side refusal leads with its own remedy and says
+    # nothing was sent; it never says "retry is safe" (a retry fails the same way until the
+    # operator acts) or "could not catalog <source>" (the refusal has nothing to do with cataloging).
+    assert result.output.rstrip().splitlines()[-1].startswith("Error: " + str(refusal)[:40]), result.output
+    assert "The note was not written and its chunks and manifest are unchanged" in result.output
+    for wrong in ("may already have succeeded", "retry is safe", "no chunk was left behind",
+                  "could not catalog"):
+        assert wrong not in result.output, (wrong, result.output)
+    mock_store.put.assert_not_called()
 
 
 def test_store_put_oversized_content_never_mints_catalog_row(runner, mock_store, tmp_path, monkeypatch):
@@ -283,11 +316,9 @@ def test_store_put_oversized_content_never_mints_catalog_row(runner, mock_store,
         mint_calls.append((args, kwargs))
         return ("", False)
 
+    # put_note (nexus.catalog.note_write) looks the name up on the store_hook
+    # module at call time, so this one patch covers the command (RDR-223 P2.6).
     monkeypatch.setattr(store_hook_module, "catalog_store_hook_tracked", _spy)
-    # commands/store.py imported the symbol under a private alias at
-    # module load time, so the module-level patch above alone would miss
-    # it -- patch the alias too.
-    monkeypatch.setattr("nexus.commands.store._catalog_store_hook_tracked", _spy)
 
     src = tmp_path / "big.md"
     src.write_text("x" * (QUOTAS.MAX_DOCUMENT_BYTES + 1))
@@ -319,22 +350,25 @@ def test_store_put_heartbeat_ticks_during_a_slow_embed(runner, mock_store, tmp_p
     monkeypatch.setattr(index_mod, "_PhaseHeartbeat", _FastPhaseHeartbeat)
     # RDR-192 Step 3a (nexus-wbfpw.28): a blank catalog_doc_id is now a
     # fail-loud rollback, not a degraded-but-successful put — so this test
-    # can no longer skip the manifest-write path by forcing registration
-    # to return ("", False). Let real registration run against the engine
-    # substrate instead, pre-seeding the T3 chunk row its manifest write's
-    # FK needs (mock_store never writes a real one) via _seed_for_store_put,
-    # the same pattern the other real-registration tests in this file use.
+    # can no longer skip the registration by forcing it to return ("", False).
+    # Real registration and the real write run against the engine substrate;
+    # RDR-223 P2.6 (nexus-z0o2p.16): the slow step is the note's one write
+    # request (the embed), so that is what is slowed down.
+    import nexus.catalog.note_write as note_write_mod
+
+    real_write_note = note_write_mod.write_note
+
+    def _slow_write_note(**kwargs):
+        time.sleep(0.09)  # several 0.02s intervals elapse with nothing done
+        return real_write_note(**kwargs)
+
+    monkeypatch.setattr(note_write_mod, "write_note", _slow_write_note)
+
     content = "a large document"
     _seed_for_store_put(content)
-
     src = tmp_path / "big.md"
     src.write_text(content)
 
-    def _slow_put(**kwargs):
-        time.sleep(0.09)  # several 0.02s intervals elapse with nothing done
-        return "doc-id-slow"
-
-    mock_store.put.side_effect = _slow_put
     result = runner.invoke(main, ["store", "put", "--collection", "fixture-subject", str(src)])
 
     assert result.exit_code == 0, result.output
@@ -370,12 +404,17 @@ def test_store_put_heartbeat_disarmed_on_exception(runner, mock_store, tmp_path,
             super().__init__(is_tty=is_tty, echo=echo, interval=0.02, prefix=prefix)
 
     monkeypatch.setattr(index_mod, "_PhaseHeartbeat", _FastPhaseHeartbeat)
-    monkeypatch.setattr("nexus.commands.store._catalog_store_hook_tracked", lambda **kw: ("", False))
+
+    def _boom(**kwargs):
+        raise RuntimeError("boom")
+
+    # RDR-223 P2.6 (nexus-z0o2p.16): the failing step is the note's write; put_note
+    # settles it (fails the fence, removes the row it minted) and re-raises.
+    monkeypatch.setattr("nexus.catalog.note_write.write_note", _boom)
 
     src = tmp_path / "boom.md"
     src.write_text("content that triggers a put failure")
 
-    mock_store.put.side_effect = RuntimeError("boom")
     result = runner.invoke(main, ["store", "put", "--collection", "fixture-subject", str(src)])
 
     assert result.exit_code != 0
@@ -809,7 +848,7 @@ def test_store_import_heartbeat_ticks_during_a_slow_import(runner, tmp_path, mon
         result = runner.invoke(main, ["store", "import", str(dummy)])
 
     assert result.exit_code == 0, result.output
-    assert "[embed]" in result.output
+    assert "[import]" in result.output
     assert "still running" in result.output
     assert "elapsed)" in result.output
 
@@ -825,7 +864,7 @@ def test_store_import_heartbeat_silent_on_a_fast_import(runner, tmp_path):
         result = runner.invoke(main, ["store", "import", str(dummy)])
 
     assert result.exit_code == 0, result.output
-    assert "[embed]" not in result.output
+    assert "[import]" not in result.output
     assert "still running" not in result.output
 
 

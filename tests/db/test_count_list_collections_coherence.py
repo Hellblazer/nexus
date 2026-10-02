@@ -41,6 +41,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from tests._chunk_seed import seed_chunks_direct
 
 pytestmark = [pytest.mark.integration]
 
@@ -104,12 +105,14 @@ def test_count_list_collections_and_reindex_existence_agree_on_mixed_dim_collect
         f"w84ho mixed-dim foreign-dim chunk {tenant}".encode()
     ).hexdigest()
 
-    # Own-dim row via the real application write path (server-side embeds at
-    # bge-768's dispatched dim). This ALSO registers nexus.catalog_collections
+    # Own-dim row at bge-768's dispatched dim. This ALSO registers nexus.catalog_collections
     # for _COLLECTION, satisfying the FK the foreign-dim raw insert below
     # relies on -- same ordering PgVectorRepositoryDimGuardTest.java uses.
-    client.upsert_chunks_with_embeddings(
-        _COLLECTION, ids=[own_chash], documents=[own_content], embeddings=[],
+    # RDR-223 P3.1: substrate SQL with the engine's real embedding (the
+    # engine refuses an ownerless upsert-chunks write from Phase 3 on); the
+    # helper registers the collection the way the route's first write did.
+    seed_chunks_direct(
+        _COLLECTION, ids=[own_chash], documents=[own_content], embed=True,
         metadatas=[{"title": "w84ho-own-dim", "chunk_text_hash": own_chash}],
     )
 
@@ -120,18 +123,18 @@ def test_count_list_collections_and_reindex_existence_agree_on_mixed_dim_collect
     # with no catalog manifest owner is invisible to it even though the
     # unfiltered count() still sees it (a plain store-get is filtered too;
     # only include_non_live sees it). Give both rows a real owner via the
-    # same catalog_store_hook_tracked + store_put_manifest_direct path the
-    # real indexing path uses (mirrors
-    # tests/test_wbfpw2_client_liveness_matrix.py), so the dim-agnostic
+    # same catalog_store_hook_tracked + seed_note_manifest pair the
+    # real indexing path is modelled on, so the dim-agnostic
     # invariant is exercised against a realistically-owned mixed-dim
     # collection rather than one only a maintenance read could see.
-    from nexus.catalog.store_hook import catalog_store_hook_tracked, store_put_manifest_direct
+    from nexus.catalog.store_hook import catalog_store_hook_tracked
+    from tests._catalog_fixture_ops import seed_note_manifest
 
     own_tumbler, _created = catalog_store_hook_tracked(
         title="w84ho-own-dim", doc_id=own_chash, collection_name=_COLLECTION,
     )
     assert own_tumbler, "catalog document registration must succeed for the own-dim row"
-    store_put_manifest_direct(
+    seed_note_manifest(
         own_tumbler, [{"chunk_text_hash": own_chash}], collection=_COLLECTION,
     )
 
@@ -156,7 +159,7 @@ def test_count_list_collections_and_reindex_existence_agree_on_mixed_dim_collect
         title="w84ho-foreign-dim", doc_id=foreign_chash, collection_name=_COLLECTION,
     )
     assert foreign_tumbler, "catalog document registration must succeed for the foreign-dim row"
-    store_put_manifest_direct(
+    seed_note_manifest(
         foreign_tumbler, [{"chunk_text_hash": foreign_chash}], collection=_COLLECTION,
     )
 

@@ -30,6 +30,30 @@ artifact-identity guard (nexus-mbeke) refuse every remaining leg. Cut the
 worktree before Step 1's expensive legs, so the artifacts are built once and in
 the tree that actually ships.
 
+### Freeze develop (nexus-eusu6)
+
+At release start, before the battery, post the freeze:
+
+```bash
+scripts/develop-freeze.sh set --reason "release vX.Y.Z" [--holder <your session name>]
+```
+
+`scripts/git-push-develop.sh` reads that post and refuses every non-override push
+(`PUSH_REFUSED_FROZEN`, naming you, the reason and the age), so the freeze reaches
+sessions nobody messaged. Message the peers you know about too, but the post is the
+authority (a session not on a hand-picked list pushed mid-freeze on 2026-09-29).
+`scripts/develop-freeze.sh status` reads it back (exit 10 while frozen). A push you
+yourself sanction during the freeze, such as the Step 11b back-merge, goes through
+`NX_PUSH_FREEZE_OVERRIDE='<reason>'`. Clear the freeze at thaw, in Step 11b, after
+the tag and the main-to-develop back-merge have landed. Posts expire after 7 days,
+so a freeze you forget to clear lapses on its own, but do not rely on that.
+
+**If the release is abandoned at any step, clear the freeze before you stop:**
+`scripts/develop-freeze.sh clear --reason "vX.Y.Z abandoned: <why>"`. An
+abandoned release otherwise holds develop frozen for every session until the
+board's 7-day expiry. The override and `clear` are honour-system: any session
+can post either, so they are for the release owner's own freeze only.
+
 ### 0. Engine-freshness gate (PREREQUISITE — the two-lifecycle check)
 
 The Java **engine-service** is a SEPARATE release artifact from this PyPI release: its own `engine-service-vX.Y.Z` tag fires `engine-service-release.yml`, version is tag-stamped (no manifest bump), and it is **decoupled from the luxe6 / RDR-155-P4a develop release boundary**. This PyPI release pins ONE engine IDENTITY, `REQUIRED_ENGINE_VERSION` (`src/nexus/engine_version.py`) — the engine the release was built and gated with, installed on EVERY path (fresh init AND upgrade). It is NOT a compatibility minimum and NOT a range (Hal directive 2026-07-15). `PINNED_SERVICE_TAG` (`src/nexus/daemon/binary_install.py`, the exact tag a fresh local `nx init --service` install downloads) is DERIVED from it, not an independently hand-typed literal — there is no floor/exact split to reason about, bumping the one constant moves both together, by construction.
@@ -66,7 +90,7 @@ git log --oneline <last-engine-tag>..HEAD -- service/        # cloud-relevant dr
 
 1. Confirm the pinned engine tag is (a) cloud-DEPLOYED and (b) cloud-GATED (recall + hybrid parity, xr7.8.9-style) — read the authoritative bead + conexus bus, **not memory** (cross-repo gate state goes stale fast: 2026-06-26 a `luxe6` condition had been cleared a week earlier than memory implied).
 2. If `service/` has drifted with cloud-relevant changes (pooler/RLS, pgvector, catalog conformance, aspect queue, batch endpoints), cut a fresh engine FIRST — see **AGENTS.md § Engine-service release** — bump `REQUIRED_ENGINE_VERSION` to it IN THIS release (this alone also moves `PINNED_SERVICE_TAG` — nothing else to bump), gate the release battery against that engine, and arm the deploy relay to fire at client-tag push, parallel with the PyPI publish (paired-release choreography; send the relay to the conexus instance DIRECTLY — tuple mailbox or cross-session `SendMessage`, both reach it — and never frame the cross-instance deploy as autonomous: a relay carries the tag, the gate evidence and what changed, never authorization. See `engine-release` SKILL.md's deploy section, which retired the older "the bus is passive, surface the relay to Hal" wording by name on 2026-09-16 for reading as "you cannot talk to conexus", which is false and cost a round trip). The engine cut is NOT luxe6-gated, so refreshing it never blocks on the develop boundary, and it is never blocked by client-release preconditions either — those gate the DEPLOY, and pairing satisfies them the instant the client tag exists.
-3. The engine cut itself: full `service/` suite green on the tagged commit (confirm the `service/` tree equals a green-`service-ci` commit — the Java CI is advisory and does not block auto-merge, so verify), then the **human** pushes `engine-service-vX.Y.Z`.
+3. The engine cut itself: full `service/` suite green on the tagged commit (confirm the `service/` tree equals a green-`service-ci` commit — the Java CI `Java tests + jOOQ codegen drift guard` is a required check on `main` and `develop`, so a PR into either is gated on it, but a direct push to `develop` is not and a run can be cancelled or time out, so verify the tree), then the **human** pushes `engine-service-vX.Y.Z`.
 
 This gate exists because the engine silently drifted 22 `service/` commits / 4 days behind the cloud (2026-06-26); the PyPI checklist had no step that would have caught it.
 
@@ -145,6 +169,7 @@ tests/e2e/release-battery.sh         # nexus-mfage: every E2E gate below (and 1b
 scripts/pins-preflight.sh            # step 0: every cheap pin at once
 uv run pytest -n auto && uv run pytest -m lint   # unit suite and the lint bucket (two runs)
 tests/e2e/local-service-gate.sh      # integration incl. the local-service functional gate
+tests/e2e/mandatory-pins-gate.sh     # the GitHub-backed mandatory_regression_pin tests, real HOME with gh auth, zero skip budget (nexus-z0o2p.41: moved out of the gate above, whose fenced HOME has no gh); a battery leg (pins)
 tests/e2e/migration-rehearsal/run.sh --package-upgrade   # ONE-engine convergence MVV (nexus-cfgo9)
 tests/e2e/migration-rehearsal/run.sh --candidate-migration   # REQUIRED when the tree carries a changeset (nexus-z0ylb)
 tests/e2e/fresh-install-mvv.sh       # VIRGIN-journey gate (nexus-nolqs) — see below
@@ -606,7 +631,10 @@ Both must report `vX.Y.Z` / `X.Y.Z`. **Do not declare done before this check pas
 git checkout develop && git pull
 git merge origin/main --no-edit    # trivially clean right after a release:
                                    # the release branch just CONTAINED develop
-scripts/git-push-develop.sh HEAD   # the merge commit vouches for what it merged in (nexus-9wxu6)
+NX_PUSH_FREEZE_OVERRIDE='release vX.Y.Z back-merge' \
+  scripts/git-push-develop.sh HEAD \
+  && scripts/develop-freeze.sh clear --reason "vX.Y.Z tagged and back-merged"   # THAW only once the back-merge is on develop (nexus-eusu6)
+# the merge commit vouches for what it merged in (nexus-9wxu6); the override crosses YOUR OWN freeze
 ```
 
 Why mandatory (2026-07-23 incident): from 6.12.0 through 6.17.0 no release

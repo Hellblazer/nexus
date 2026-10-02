@@ -20,6 +20,23 @@ from typing import Any
 #: ``collection`` and ``remedy``.
 UNREGISTERED_COLLECTION_REASON: str = "unregistered_collection"
 
+#: ``upsert-chunks`` or ``store-put`` asked to write a chash with no live
+#: manifest row in the collection (HTTP 422, RDR-223 Phase 3 Step 2). Also
+#: carries ``unowned_count``, ``requested_count`` and ``unowned_chashes`` (a
+#: sample of at most eight). The remedy is the combined write, never a retry.
+OWNERLESS_CHUNK_WRITE_REASON: str = "ownerless_chunk_write"
+
+#: ``POST /v1/vectors/gc/quarantine-restore`` could not take the collection's sweep
+#: gate (or an owning document's index-run lock) inside its 2 s bound, or ran past its
+#: statement bound (HTTP 503, nexus-wbfpw.49); the statement that tripped rolled back.
+#: Also carries ``retry_after_seconds``, ``nothing_moved`` (False when an earlier
+#: quarantine sibling of the call had already committed: each sibling is its own
+#: transaction), ``audit_ids`` and ``moved_chashes`` (both empty when nothing
+#: moved; nexus-wbfpw.55). Retryable: the same call may be sent
+#: again. The route is a non-idempotent sweep route, so the client's gateway ladder
+#: does not retry it on its own; the CLI reads this and says so.
+QUARANTINE_RESTORE_BUSY_REASON: str = "quarantine_restore_busy"
+
 
 def error_reason(body: Any) -> str | None:
     """The ``reason`` of a decoded error body, or None when it has none.

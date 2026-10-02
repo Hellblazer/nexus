@@ -296,6 +296,16 @@ public final class Main {
             // nexus-g17tf: same fail-fast for NX_SEARCH_STATEMENT_TIMEOUT_MS.
             log.info("event=search_statement_timeout timeout_ms={}",
                      dev.nexus.service.db.PgSession.startupSearchStatementTimeoutMs());
+            // nexus-wbfpw.47: the search scan budget. Validates NX_HNSW_MAX_SCAN_TUPLES /
+            // NX_HNSW_SCAN_MEM_BUDGET_MB, reads the engine role's effective work_mem and
+            // derives hnsw.scan_mem_multiplier from the fixed memory budget.
+            var scanBudget = dev.nexus.service.db.PgSession.startupScanBudget(
+                org.jooq.impl.DSL.using(ds, org.jooq.SQLDialect.POSTGRES));
+            log.info("event=hnsw_scan_budget max_scan_tuples={} work_mem_bytes={} "
+                     + "mem_budget_bytes={} mem_multiplier={} effective_mem_bytes={}",
+                     scanBudget.maxScanTuples(), scanBudget.workMemBytes(),
+                     scanBudget.budgetBytes(), scanBudget.memMultiplier(),
+                     scanBudget.effectiveMemBytes());
             // nexus-r0vkh: same fail-fast for the taxonomy assign bounds.
             log.info("event=taxonomy_assign_bounds statement_timeout_ms={} lock_timeout_ms={}",
                      dev.nexus.service.db.PgSession.startupTaxonomyAssignStatementTimeoutMs(),
@@ -303,7 +313,7 @@ public final class Main {
         } catch (Throwable t) {
             ds.close();
             // One catch for every env-resolved PgSession bound above (ef_search,
-            // the search statement timeout, the taxonomy assign bounds); the
+            // the search statement timeout, the scan budget, the taxonomy assign bounds); the
             // parse's own message names the variable that failed.
             log.error("event=pg_session_env_invalid error=\"{}\"", t.getMessage(), t);
             System.exit(1);

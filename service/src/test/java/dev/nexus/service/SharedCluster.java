@@ -11,10 +11,13 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.testcontainers.containers.PostgreSQLContainer;
 
+import java.net.ConnectException;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.SQLException;
+import java.time.Duration;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.BooleanSupplier;
 
 /**
  * Per-fork-JVM shared PostgreSQL cluster (nexus-yhmav): ONE {@link PostgreSQLContainer}
@@ -100,6 +103,12 @@ final class SharedCluster {
     private static final Object BOOTSTRAP_LOCK = new Object();
     private static final AtomicInteger DB_COUNTER = new AtomicInteger();
 
+    /** How long a connect waits for the container's published port to accept a connection.
+     *  The observed colima window is milliseconds; 10 s bounds what a permanently refused
+     *  port costs each rawConnect (review nexus/review-33prh-code suggestion 1). */
+    private static final Duration CONNECT_DEADLINE = Duration.ofSeconds(10);
+    private static final Duration CONNECT_RETRY_SLEEP = Duration.ofMillis(100);
+
     private SharedCluster() {}
 
     /** Allocate a fresh, already-migrated per-class database on this fork's shared
@@ -156,7 +165,83 @@ final class SharedCluster {
     private static Connection rawConnect(PostgreSQLContainer<?> c, String dbName) throws SQLException {
         String url = "jdbc:postgresql://" + c.getHost() + ":" + c.getMappedPort(PostgreSQLContainer.POSTGRESQL_PORT)
             + "/" + dbName + "?sslmode=disable";
-        return DriverManager.getConnection(url, PgContainerHelper.USERNAME, PgContainerHelper.PASSWORD);
+        return connectWithRetry(
+            () -> DriverManager.getConnection(url, PgContainerHelper.USERNAME, PgContainerHelper.PASSWORD),
+            c::isRunning, CONNECT_DEADLINE, CONNECT_RETRY_SLEEP);
+    }
+
+    /** One connect attempt; may throw {@link SQLException}. */
+    @FunctionalInterface
+    interface ConnectAttempt<T> {
+        T connect() throws SQLException;
+    }
+
+    /**
+     * Run {@code attempt}, retrying while the port is merely not reachable yet (nexus-33prh).
+     *
+     * <p>Why: {@code PostgreSQLContainer} readiness is log-only, so {@code start()} can return
+     * before the host-side {@code localhost:<port>} forward exists. On a colima VM (Service CI on
+     * hellmini-ci) lima sets that forward up asynchronously, and the bootstrap's first connect
+     * to the fork's first container got {@code ECONNREFUSED} (develop 998c771de and 69d493b52).
+     * Every other connect in this tree goes through {@link FailFastPostgreSQLContainer}'s retry
+     * loop; the bootstrap used a bare {@code DriverManager.getConnection}.
+     *
+     * <p>Retries only when the cause chain holds a {@link ConnectException} (nothing is
+     * listening yet), every {@code sleep}, until {@code deadline} passes or {@code running}
+     * turns false. Anything else (auth SQLSTATE 28P01/28000, a server-side error) is rethrown at
+     * once, so a real failure never waits out the deadline.
+     */
+    static <T> T connectWithRetry(ConnectAttempt<T> attempt, BooleanSupplier running,
+                                  Duration deadline, Duration sleep) throws SQLException {
+        long deadlineNanos = System.nanoTime() + deadline.toNanos();
+        int attempts = 0;
+        while (true) {
+            attempts++;
+            SQLException failure;
+            try {
+                return attempt.connect();
+            } catch (SQLException e) {
+                if (!hasConnectExceptionCause(e)) {
+                    throw e;
+                }
+                failure = e;
+            }
+            if (!running.getAsBoolean()) {
+                throw new SQLException("nexus-33prh: container is not running; stopped retrying the connect"
+                    + " after " + attempts + " attempt(s): " + rootMessage(failure), failure);
+            }
+            if (System.nanoTime() - deadlineNanos >= 0) {
+                throw new SQLException("nexus-33prh: published port did not become reachable within "
+                    + deadline.toMillis() + "ms (" + attempts + " attempts): " + rootMessage(failure), failure);
+            }
+            try {
+                Thread.sleep(sleep.toMillis());
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                throw new SQLException("nexus-33prh: interrupted while waiting for the published port: "
+                    + rootMessage(failure), failure);
+            }
+        }
+    }
+
+    private static boolean hasConnectExceptionCause(Throwable t) {
+        for (Throwable c = t; c != null; c = c.getCause()) {
+            if (c instanceof ConnectException) {
+                return true;
+            }
+            if (c.getCause() == c) {
+                break;
+            }
+        }
+        return false;
+    }
+
+    private static String rootMessage(Throwable t) {
+        Throwable root = t;
+        while (root.getCause() != null && root.getCause() != root) {
+            root = root.getCause();
+        }
+        return root.getClass().getSimpleName() + ": " + root.getMessage();
     }
 
     private static PostgreSQLContainer<?> ensureBootstrapped() throws SQLException {

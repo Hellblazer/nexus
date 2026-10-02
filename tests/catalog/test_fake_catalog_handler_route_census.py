@@ -309,16 +309,25 @@ ROUTE_EXCLUSIONS: dict[str, str] = {
         "retires with RDR-187 .11"
     ),
     "/gc_audit/record": (
-        "nexus-jqvzk, engine surface shipped AHEAD of its client half: the "
-        "engine owns the destructive-T3-op audit record, and `nx t3 gc` does "
-        "not yet emit through it. REMOVE THIS ENTRY when the gc verb starts "
-        "writing — an exclusion outliving its reason is the stale-allowlist "
-        "class this repo has been bitten by (see the mode-lint orphans, "
-        "nexus-th15h)"
+        "nexus-jqvzk, an engine surface with no client caller. `nx t3 gc` "
+        "emitted through it (nexus-fduai) until nexus-wbfpw.18 moved the verb "
+        "onto the engine's bounded quarantine route, which writes its own "
+        "gc_audit row per batch (actor engine); HttpCatalogClient."
+        "record_gc_audit was deleted with its last caller. REMOVE THIS ENTRY "
+        "when a client caller returns — an exclusion outliving its reason is "
+        "the stale-allowlist class this repo has been bitten by (see the "
+        "mode-lint orphans, nexus-th15h)"
     ),
     "/gc_audit/list": (
-        "nexus-jqvzk, the read half of the same not-yet-consumed audit "
-        "surface. Same removal condition as /gc_audit/record"
+        "nexus-jqvzk, the read half of the audit surface. It HAS client "
+        "consumers (HttpCatalogClient.gc_audit_list, called by `nx catalog "
+        "gc-audit list` and by the nx doctor purge-trash audit check in "
+        "health.py); it is excluded here only because the live fake server "
+        "carries no gc_audit table to answer from, and those consumers are "
+        "exercised against a mocked transport (tests/test_catalog_gc_audit_cmd.py, "
+        "tests/test_health_service_checks.py) and against the real engine "
+        "substrate (tests/test_wbfpw18_t3_gc_substrate.py). Delete this entry "
+        "if a FakeCatalogHandler branch for it is ever added"
     ),
 }
 

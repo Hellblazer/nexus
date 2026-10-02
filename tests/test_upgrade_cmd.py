@@ -230,6 +230,66 @@ class TestUpgradeBackfillsInstallModeRecord:
         assert result.exit_code == 0, result.output
 
 
+class TestDeferredRungDoesNotAbortTheRestOfTheUpgrade:
+    """nexus-wbfpw.41 review: a rung that DEFERS with a permanent residual
+    (an unhealable legacy chunk) must not raise out of the ladder walk, or the
+    steps after it -- install-mode record, git hooks, plugin lockstep, agent
+    refresh, beads prime, repos.json -- are skipped on that tenant forever."""
+
+    def _residual_registry(self, monkeypatch: pytest.MonkeyPatch):
+        from nexus.upgrade_ladder import registry as ladder_registry
+        from nexus.upgrade_ladder.protocol import ConvergeOutcome, ConvergeResult, RungStatus
+        from nexus.upgrade_ladder.registry import LadderRegistry
+
+        class ResidualRung:
+            name = "residual-test-rung"
+
+            def detect(self):
+                return RungStatus(applicable=True, converged=False, pending_detail="1 stranded")
+
+            def converge(self, report):
+                return ConvergeResult(ConvergeOutcome.DEFERRED, detail="1 legacy chunk stranded in knowledge__x")
+
+            def verify(self):  # pragma: no cover - never reached on DEFERRED
+                return False
+
+        monkeypatch.setattr(
+            ladder_registry, "default_registry", lambda **kw: LadderRegistry((ResidualRung(),)),
+        )
+
+    def test_the_steps_after_the_ladder_still_run_and_the_exit_is_zero(
+        self, runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        cfg = TestUpgradeBackfillsInstallModeRecord()._cfg_dir(tmp_path, monkeypatch)
+        self._residual_registry(monkeypatch)
+        calls: list[str] = []
+        monkeypatch.setattr("nexus.commands.upgrade._refresh_all_git_hooks", lambda: calls.append("git-hooks"))
+        monkeypatch.setattr("nexus.commands.upgrade._converge_plugins", lambda **kw: calls.append("plugins"))
+        monkeypatch.setattr("nexus.commands.upgrade._refresh_generated_agents", lambda **kw: calls.append("agents"))
+
+        result = runner.invoke(main, ["upgrade"])
+
+        assert result.exit_code == 0, result.output
+        assert "rung 'residual-test-rung' deferred" in result.output
+        assert "knowledge__x" in result.output
+        import yaml
+        assert yaml.safe_load((cfg / "config.yml").read_text())["install"]["mode"] == "local", (
+            "the install-mode backfill after the ladder did not run"
+        )
+        assert {"git-hooks", "plugins", "agents"} <= set(calls), calls
+
+    def test_auto_mode_is_silent_and_also_runs_the_rest(
+        self, runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        cfg = TestUpgradeBackfillsInstallModeRecord()._cfg_dir(tmp_path, monkeypatch)
+        self._residual_registry(monkeypatch)
+        result = runner.invoke(main, ["upgrade", "--auto"])
+        assert result.exit_code == 0, result.output
+        assert "Upgrade ladder:" not in result.output, "--auto prints no ladder notice"
+        import yaml
+        assert yaml.safe_load((cfg / "config.yml").read_text())["install"]["mode"] == "local"
+
+
 class TestBeadsPrimeWiring:
     """nexus-cnzei.8: ``nx upgrade`` installs/refreshes the user-level beads
     PRIME.md — a filesystem write, gated the same as the git-hooks refresh

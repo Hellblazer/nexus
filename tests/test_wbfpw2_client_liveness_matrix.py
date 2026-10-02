@@ -29,15 +29,15 @@ production code changes with it.
 from __future__ import annotations
 
 import hashlib
-import time
-from datetime import UTC, datetime
 
-import pytest
 from click.testing import CliRunner
 
 from nexus.cli import main
+from tests._chunk_seed import seed_chunks_direct
+from tests._reapable_age import age_chunks_past_grace
 
-pytestmark = [pytest.mark.integration]
+# Not integration-marked (nexus-wbfpw.38): the substrate provisions itself,
+# and CI's default selection must run this RDR-192 pin.
 
 _MODEL = "bge-base-en-v15-768"
 
@@ -51,26 +51,18 @@ def _chash(text: str) -> str:
 
 
 def _write_chunk(client, collection: str, chash: str, text: str) -> None:
-    """Bare T3 write, no catalog call -- same upsert shape store_hook's
-    own note-write uses (mirrors ``test_bb6n2_supersede_reap.py::
-    _put_note``'s per-piece upsert), used for every row that needs a
-    physical chunk row with no (or a separately-built) manifest entry.
+    """Bare T3 write, no catalog call -- substrate SQL with the engine's real
+    embedding (the engine refuses an ownerless upsert-chunks write from RDR-223
+    Phase 3 on; mirrors ``test_bb6n2_supersede_reap.py::_put_note``'s
+    per-piece seed), used for every row that needs a physical chunk row with
+    no (or a separately-built) manifest entry.
 
-    ``indexed_at`` is stamped explicitly: the real ``store_put`` path
-    (``HttpVectorClient.put``, ``http_vector_client.py`` ~2885) stamps it
-    via ``make_chunk_metadata`` before every upsert, but the lower-level
-    ``upsert_chunks_with_embeddings`` this helper (and ``_put_note``
-    below) calls directly does NOT add it on its own -- omitting it here
-    would leave every row's ``nx t3 gc`` candidacy answered by "no
-    indexed_at" (predicate 8's own skip path) rather than by the
-    liveness relationship this test exists to pin.
+    No ``indexed_at`` is stamped: since RDR-192 Step 8 (nexus-wbfpw.18) ``nx t3 gc``
+    takes its candidates from the engine's reapable predicate, which never reads it.
     """
-    client.upsert_chunks_with_embeddings(
-        collection, ids=[chash], documents=[text], embeddings=[],
-        metadatas=[{
-            "chunk_text_hash": chash, "title": collection,
-            "indexed_at": datetime.now(UTC).isoformat(),
-        }],
+    seed_chunks_direct(
+        collection, ids=[chash], documents=[text], embed=True,
+        metadatas=[{"chunk_text_hash": chash, "title": collection}],
     )
 
 
@@ -95,18 +87,16 @@ def _search_visible(client, collection: str, chash: str, text: str) -> bool:
 
 
 def _put_note(client, *, collection: str, title: str, content: str) -> tuple[str, list[str]]:
-    """R7's write path: the store_put shape (a registered note whose
-    manifest names its chunks), mirroring ``test_bb6n2_supersede_reap.py::
-    _put_note``. Not the MCP tool's exact sequence: it writes chunks with
-    ``upsert_chunks_with_embeddings`` and the bare
-    ``store_put_manifest_direct`` rather than ``put_note_pieces`` and the
-    recovery wrapper; none of the five predicates read the difference.
-    Returns ``(tumbler, chashes)``."""
+    """R7's write path: a registered note whose manifest names its chunks,
+    written the way MCP ``store_put`` writes it now (RDR-223 P2.2,
+    nexus-z0o2p.12): the catalog reconcile, then one ``write_manifest_many``
+    request carrying the pieces and the manifest. Returns ``(tumbler, chashes)``."""
+    from nexus.catalog.note_write import write_note
     from nexus.catalog.store_hook import (
         catalog_store_hook_tracked,
+        note_content_hash,
         note_manifest_metadata,
         note_pieces,
-        store_put_manifest_direct,
     )
 
     pieces = note_pieces(content, collection)
@@ -114,17 +104,11 @@ def _put_note(client, *, collection: str, title: str, content: str) -> tuple[str
     tumbler, _created = catalog_store_hook_tracked(
         title=title, doc_id=doc_id, collection_name=collection,
     )
-    chashes = [m["chunk_text_hash"] for m in manifest_metadatas]
-    for piece, chash, meta in zip(pieces, chashes, manifest_metadatas):
-        client.upsert_chunks_with_embeddings(
-            collection, ids=[chash], documents=[piece], embeddings=[],
-            metadatas=[{
-                "title": title, "chunk_text_hash": chash, "doc_id": tumbler,
-                "indexed_at": datetime.now(UTC).isoformat(),
-            }],
-        )
-    store_put_manifest_direct(tumbler, manifest_metadatas, collection=collection)
-    return tumbler, chashes
+    write_note(
+        catalog_doc_id=tumbler, collection=collection, pieces=pieces, title=title,
+        content_hash=note_content_hash(content, manifest_metadatas),
+    )
+    return tumbler, [m["chunk_text_hash"] for m in manifest_metadatas]
 
 
 def _orphaned(reader, collection: str, chash: str) -> bool:
@@ -151,53 +135,15 @@ def _live_note(reader, collection: str, chash: str) -> bool:
 
 
 def _t3_gc_candidate(runner: CliRunner, collection: str, chash: str) -> bool:
-    """``nx t3 gc --dry-run`` candidacy -- predicate 8. ``--orphan-window
-    1s`` so age is never the deciding factor for chunks this same test
-    wrote moments ago (RDR-192 Step 1's own instruction)."""
-    result = runner.invoke(
-        main, ["t3", "gc", "-c", collection, "--dry-run", "--orphan-window", "1s"],
-    )
-    assert result.exit_code == 0, result.output
+    """``nx t3 gc --dry-run`` candidacy -- predicate 8. Since RDR-192 Step 8 (nexus-wbfpw.18) the
+    verb's candidates ARE the engine's default-grace reapable listing; the row chunks are aged past
+    that grace first (``age_chunks_past_grace``), and no window is passed (there is none to pass)."""
+    result = runner.invoke(main, ["t3", "gc", "-c", collection, "--dry-run"])
+    # A dry run that names a refusal a real run would hit exits 1 (nexus-wbfpw.18 round 3) but still
+    # prints the listing: the candidacy read here is the listing, so accept that exit only when the
+    # output says it is a refusal, never a crash.
+    assert result.exit_code == 0 or "would REFUSE" in result.output, result.output
     return chash in result.output
-
-
-def _rollback_decision(client, catalog_doc_id: str, collection: str, chash: str) -> str:
-    """``store_hook.rollback_uncataloged_chunk_write``'s own composed
-    verdict for one chash (nexus-wbfpw.8, T2 nexus/review-rdr-192-phase1-
-    code finding 4): the code review found this composition -- the union
-    guard (``orphaned_chashes``) plus the notes guard (``live_note_
-    chashes``) plus self-exclusion of the rolled-back call's OWN document
-    -- built directly on top of two of this file's own pinned primitives,
-    yet never itself pinned against the SAME R1-R8 rows.
-
-    Called as though the rolled-back write belonged to *catalog_doc_id*,
-    an UNRELATED document -- never the row's own owner -- so self-
-    exclusion is exercised as a genuine no-op for every row here (the
-    self-collision it exists to prevent is covered separately by
-    ``test_b6enc_store_put_ghost_compensation.py``; this table's purpose
-    is pinning the ordinary cross-row composition, not the self-collision
-    edge case).
-
-    DESTRUCTIVE: a 'delete' verdict really deletes the T3 row via the
-    engine's own delete call. Must be the LAST predicate read for its
-    row -- every other column for this row must already be captured
-    before this is called.
-
-    Returns 'delete' when *chash* lands in the outcome's ``attempted``
-    tuple, 'protect' when it lands in ``protected`` instead -- one or the
-    other always holds; nothing else is a valid outcome for a chash that
-    was actually written (see ``ChunkRollbackOutcome``'s own contract).
-    """
-    from nexus.catalog.store_hook import rollback_uncataloged_chunk_write
-
-    outcome = rollback_uncataloged_chunk_write(
-        client, [chash], collection=collection, catalog_doc_id=catalog_doc_id,
-    )
-    if chash in outcome.attempted:
-        assert chash not in outcome.protected, outcome
-        return "delete"
-    assert chash in outcome.protected, outcome
-    return "protect"
 
 
 def test_client_liveness_matrix_pins_todays_verdict(t2_service_env):
@@ -214,15 +160,6 @@ def test_client_liveness_matrix_pins_todays_verdict(t2_service_env):
     runner = CliRunner()
 
     owner = cat.register_owner("wbfpw2-owner", "curator")
-
-    # An UNRELATED document, never any row's own owner -- passed as
-    # rollback_uncataloged_chunk_write's catalog_doc_id for every row's
-    # probe below so self-exclusion is exercised as a genuine no-op (see
-    # _rollback_decision's own docstring).
-    unrelated_doc = str(cat.register(
-        owner, "wbfpw2-rollback-unrelated-doc", content_type="knowledge",
-        physical_collection=_coll("rollback-unrelated"),
-    ))
 
     rows: dict[str, dict] = {}
 
@@ -333,10 +270,17 @@ def test_client_liveness_matrix_pins_todays_verdict(t2_service_env):
     )
     rows["R8"] = {"collection": coll, "chash": chash, "text": text}
 
-    # Give indexed_at a moment's headroom so a 1s orphan-window is never
-    # ambiguous with "just written" (RDR-192 Step 1's own instruction:
-    # a window small enough that age is not the deciding factor).
-    time.sleep(1.5)
+    # nx t3 gc takes its candidates from the engine's reapable predicate, which honours a 30 day
+    # grace on last_written_at and has no tunable window. Every row's chunks stand for chunks that
+    # were orphaned long ago, so age them past it; ownership, not age, then decides each verdict.
+    for fx in rows.values():
+        age_chunks_past_grace(fx["collection"])
+
+    # The verb's candidacy IS the default-grace reapable listing (RDR-192 Step 8, nexus-wbfpw.18).
+    listings = {
+        row: {r["chash"] for r in client.reapable_chunks(fx["collection"])}
+        for row, fx in rows.items()
+    }
 
     observed: dict[str, dict[str, bool]] = {}
     for row, fx in rows.items():
@@ -347,16 +291,10 @@ def test_client_liveness_matrix_pins_todays_verdict(t2_service_env):
             "live_note_chashes": _live_note(reader, fx["collection"], fx["chash"]),
             "t3_gc_candidate": _t3_gc_candidate(runner, fx["collection"], fx["chash"]),
         }
-        # DESTRUCTIVE -- must come last: a "delete" verdict really removes
-        # the chash from T3, so nothing above may re-read this row's chunk
-        # afterward. See _rollback_decision's own docstring.
-        observed[row]["rollback"] = _rollback_decision(
-            client, unrelated_doc, fx["collection"], fx["chash"],
-        )
 
     _PREDICATES = (
         "search", "get", "orphaned_chashes", "live_note_chashes",
-        "t3_gc_candidate", "rollback",
+        "t3_gc_candidate",
     )
     _ROWS = ("R1", "R2", "R3", "R4", "R5", "R6", "R7", "R8")
 
@@ -387,11 +325,10 @@ def test_client_liveness_matrix_pins_todays_verdict(t2_service_env):
     #    and orphaned_chashes AGREES here (True: deletable) -- a tombstoned
     #    owner's manifest reference does not count as "still referenced"
     #    for this guard. t3_gc_candidate is still False, though, because
-    #    ``nx t3 gc``'s own alive-set (``chashes_for_collection_with_
-    #    tombstone_protected``) is DELIBERATELY wider than orphaned_
-    #    chashes: nexus-dkymw's ruling protects a tombstoned-but-not-yet-
-    #    purged document's chashes too, so ``nx catalog purge-trash``'s
-    #    recovery window is never raced by ``nx t3 gc``'s own clock. So R3
+    #    the engine's reapable predicate (which ``nx t3 gc`` now takes its
+    #    candidates from, nexus-wbfpw.18) counts a manifest row in ANY owner
+    #    state: a tombstoned owner keeps its row, so the chunk is
+    #    ``nx catalog purge-trash``'s (nexus-dkymw's ruling), not gc's. So R3
     #    disagrees across THREE predicates at once: dead (search/get),
     #    deletable (orphaned_chashes), protected (t3 gc) -- a real,
     #    already-existing three-way split this bead's own table exists to
@@ -412,43 +349,36 @@ def test_client_liveness_matrix_pins_todays_verdict(t2_service_env):
     #    to every OTHER predicate; search/get and orphaned_chashes now read
     #    it exactly like R1 (HIDDEN by live(c) / no protective reference
     #    respectively) since neither of those consult live_note_chashes on
-    #    its own -- t3 gc DOES consult it (t3.py unions referenced with
-    #    live_note_chashes before deciding candidacy, and its own listing
-    #    is now the physical, non-live-filtered scan per the RDR-192
-    #    amendment), so R8 is the one row where live_note_chashes=True
-    #    changes t3_gc_candidate from what R1/R4/R6's shape would
-    #    otherwise produce.
+    #    its own. ``nx t3 gc`` no longer consults it either (nexus-wbfpw.18):
+    #    its candidates are the engine's reapable listing, and an aged R8
+    #    chunk satisfies every condition of that predicate (RDR-192 R8), so
+    #    the dry-run NAMES it. What protects it now is the verb's census
+    #    gate: the collection reads legacy-unmanifested = 1, so a real run
+    #    refuses (``test_wbfpw18_t3_gc_substrate.py``). The column flipped
+    #    False -> True with that move.
     #
-    # rollback (nexus-wbfpw.8, finding 4): store_hook.rollback_uncataloged_
-    # chunk_write's own composed verdict -- the union guard alone decides
-    # UNLESS the notes guard also protects it, in which case notes wins.
-    # Written as literal per-row expectations, not derived from the
-    # orphaned_chashes/live_note_chashes columns above, so a future change
-    # to either predicate that this table's own asserts would catch is
-    # ALSO independently caught here if it silently changed rollback's
-    # actual delete/protect decision.
-    #   R1 delete  -- union guard alone: nothing references it anywhere.
-    #   R2 protect -- union guard alone: still referenced (own manifest).
-    #   R3 delete  -- union guard alone: tombstoned owner does not protect.
-    #   R4 delete  -- union guard alone: stranded, nothing references it.
-    #   R5 protect -- union guard alone: the OTHER document still does.
-    #   R6 delete  -- union guard alone: the B-only manifest can't reach A.
-    #   R7 protect -- union guard alone: its own manifest still references it.
-    #   R8 protect -- union guard says deletable, but the notes guard
-    #      rescues it (a live document's own meta.doc_id still names it) --
-    #      the ONE row where the two guards disagree and the notes guard's
-    #      own composition, not the union guard alone, decides the outcome.
+    # (The per-row ``rollback`` verdict this table once pinned went with
+    # the client-side chunk rollback at nexus-z0o2p.32: no writer
+    # leaves a chunk without its owner any more, so nothing rolls a chunk back.)
     EXPECTED = {
-        "R1": {"search": False, "get": False, "orphaned_chashes": True, "live_note_chashes": False, "t3_gc_candidate": True, "rollback": "delete"},
-        "R2": {"search": True, "get": True, "orphaned_chashes": False, "live_note_chashes": False, "t3_gc_candidate": False, "rollback": "protect"},
-        "R3": {"search": False, "get": False, "orphaned_chashes": True, "live_note_chashes": False, "t3_gc_candidate": False, "rollback": "delete"},
-        "R4": {"search": False, "get": False, "orphaned_chashes": True, "live_note_chashes": False, "t3_gc_candidate": True, "rollback": "delete"},
-        "R5": {"search": True, "get": True, "orphaned_chashes": False, "live_note_chashes": False, "t3_gc_candidate": False, "rollback": "protect"},
-        "R6": {"search": False, "get": False, "orphaned_chashes": True, "live_note_chashes": False, "t3_gc_candidate": True, "rollback": "delete"},
-        "R7": {"search": True, "get": True, "orphaned_chashes": False, "live_note_chashes": True, "t3_gc_candidate": False, "rollback": "protect"},
-        "R8": {"search": False, "get": False, "orphaned_chashes": True, "live_note_chashes": True, "t3_gc_candidate": False, "rollback": "protect"},
+        "R1": {"search": False, "get": False, "orphaned_chashes": True, "live_note_chashes": False, "t3_gc_candidate": True},
+        "R2": {"search": True, "get": True, "orphaned_chashes": False, "live_note_chashes": False, "t3_gc_candidate": False},
+        "R3": {"search": False, "get": False, "orphaned_chashes": True, "live_note_chashes": False, "t3_gc_candidate": False},
+        "R4": {"search": False, "get": False, "orphaned_chashes": True, "live_note_chashes": False, "t3_gc_candidate": True},
+        "R5": {"search": True, "get": True, "orphaned_chashes": False, "live_note_chashes": False, "t3_gc_candidate": False},
+        "R6": {"search": False, "get": False, "orphaned_chashes": True, "live_note_chashes": False, "t3_gc_candidate": True},
+        "R7": {"search": True, "get": True, "orphaned_chashes": False, "live_note_chashes": True, "t3_gc_candidate": False},
+        "R8": {"search": False, "get": False, "orphaned_chashes": True, "live_note_chashes": True, "t3_gc_candidate": True},
     }
     assert observed == EXPECTED, f"today's verdict changed:\n  observed={observed}\n  expected={EXPECTED}"
+
+    # nexus-wbfpw.18: the verb's dry-run candidacy equals the default-grace reapable listing, row
+    # by row, and the listings are not all empty (a vacuous equality proves nothing).
+    for row, fx in rows.items():
+        assert observed[row]["t3_gc_candidate"] == (fx["chash"] in listings[row]), (
+            f"{row}: dry-run candidacy diverged from the reapable listing {listings[row]}"
+        )
+    assert any(listings.values()), "non-vacuity: at least one row's reapable listing is non-empty"
 
     # RDR-192's own MVV (a) / this bead's acceptance criterion: R7 (a
     # current, correctly-manifested note) must be a non-candidate for

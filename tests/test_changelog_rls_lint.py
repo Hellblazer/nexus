@@ -54,12 +54,12 @@ corpus contains exactly one instance (catalog-014-0's
 toggle-wrap discipline around the SELECT itself, not because the analyzer sees
 inside the function body.
 
-Why Python-side and not the Java/Testcontainers suite: the Java ``service-ci``
-workflow is advisory only (does not gate auto-merge — see AGENTS.md "Java schema
-changes verify with FULL mvn suite"), and Testcontainers itself runs Liquibase as
-the Postgres superuser, which structurally cannot reproduce the RLS-owner no-op this
-lint exists to catch. This test has no such blind spot: it is required, always-on
-Python CI (``pyproject.toml`` addopts only excludes ``integration``/``slow``/
+Why Python-side and not the Java/Testcontainers suite: Testcontainers itself runs
+Liquibase as the Postgres superuser, which structurally cannot reproduce the RLS-owner
+no-op this lint exists to catch. (This module once also gave as a reason that the Java
+``service-ci`` workflow was advisory only; that no longer holds, it is a required
+check on main and develop.) This test has no such blind spot: it is required,
+always-on Python CI (``pyproject.toml`` addopts only excludes ``integration``/``slow``/
 ``stress`` markers; this file carries none of them).
 
 Additional documented static blind spots (substantive-critic review, nexus-fqnii /

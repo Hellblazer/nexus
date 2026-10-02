@@ -30,6 +30,13 @@ on:
   pull_request:
     branches: [main, develop]
 
+# Explicit least privilege (the repo default is read, but the setting lives
+# outside this file). contents: read is what checkout needs; pull-requests: read
+# is what dorny/paths-filter needs to list a PR's files in the `changes` job.
+permissions:
+  contents: read
+  pull-requests: read
+
 concurrency:
   group: service-ci-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -48,7 +55,60 @@ jobs:
       # (`java-test-and-drift-guard`'s `if:`) now see only a value that
       # already passed the true/false case check, not the raw dorny output.
       service: ${{ steps.decide.outputs.service }}
+      # Which runner the Java job below takes (nexus-xyrtc). Published by the
+      # `route` step, which makes the decision in bash; see that step.
+      java_runner: ${{ steps.route.outputs.java_runner }}
     steps:
+      - name: Decide which runner the Java job takes (ubuntu-latest or hellmini-ci)
+        id: route
+        # THE DEFAULT IS GITHUB-HOSTED (Sam, 2026-10-02, nexus-xyrtc). The Java
+        # job runs on the self-hosted `hellmini-ci` runner ONLY for an OWNER PUSH
+        # while the repository variable SERVICE_CI_PUSH_RUNNER is exactly
+        # `hellmini-ci`. Unset, empty, a typo, a different case, a stray space or
+        # any other value (`hellmini` and `ubuntu-latest` included) means
+        # `ubuntu-latest`. Every pull_request, and every push by anyone but the
+        # repo owner, gets `ubuntu-latest` whatever the variable says.
+        #
+        # WHY THIS IS BASH AND NOT A `runs-on` EXPRESSION. Every `==` in a
+        # GitHub expression ignores case, so `Hellmini-CI` would opt in there.
+        # "Exactly hellmini-ci" needs a case-sensitive test, and bash `=` is
+        # one. The expression below only carries the owner-push rule (the login
+        # comparison SHOULD ignore case); the variable travels raw in env. The
+        # label this step can publish is one of two literals, so the variable
+        # can never send a push to the `hellmini` release runner or any other
+        # label, and a typo cannot queue the job for a label no runner has.
+        # Same shape as ci.yml's `route` step for QWEN_CI_PUSH_RUNNER.
+        #
+        # The owner rule is the one the Java job's consistency check re-asserts
+        # on the self-hosted side: account id AND triggering actor both the
+        # owner, push event only. The id compares accounts, not logins (a
+        # renamed login can be re-registered); triggering_actor keeps a re-run
+        # by another account of the owner's push off the self-hosted runner. A
+        # job-level `if:` cannot host this rule, because skipping would leave a
+        # non-owner push untested instead of rerouting it.
+        #
+        # The variable is read when this job runs. "Re-run failed jobs" does not
+        # re-run `changes` once it has succeeded, so it keeps the OLD
+        # `java_runner`, whichever way the variable moved since: to change the
+        # route for a commit already pushed, use "Re-run all jobs" (or push).
+        # There is NO automatic fallback if hellmini-ci is offline while the
+        # variable is on: the Java job queues until GitHub gives up, and someone
+        # must unset the variable.
+        #
+        # A ROUTING RULE, NOT A SECURITY BOUNDARY: this file is controlled by
+        # whoever can push a branch (see the comment on the Java job's runs-on).
+        env:
+          OWNER_PUSH: ${{ github.event_name == 'push' && github.actor_id == github.repository_owner_id && github.triggering_actor == github.repository_owner }}
+          SERVICE_CI_PUSH_RUNNER: ${{ vars.SERVICE_CI_PUSH_RUNNER }}
+        run: |
+          set -euo pipefail
+          JAVA_RUNNER=ubuntu-latest
+          if [ "$OWNER_PUSH" = "true" ] && [ "$SERVICE_CI_PUSH_RUNNER" = "hellmini-ci" ]; then
+            JAVA_RUNNER=hellmini-ci
+          fi
+          echo "java_runner=$JAVA_RUNNER" >> "$GITHUB_OUTPUT"
+          echo "Service CI Java job routing: $JAVA_RUNNER (event=$GITHUB_EVENT_NAME owner_push=$OWNER_PUSH)"
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
         with:
           # Full history so dorny/paths-filter resolves the merge-base without
@@ -120,15 +180,211 @@ jobs:
     name: Java tests + jOOQ codegen drift guard
     needs: changes
     if: needs.changes.outputs.service == 'true'
-    runs-on: ubuntu-latest
-    # Testcontainers pulls pgvector/pgvector:pg17 on first run (~180 MB);
-    # subsequent runs use the Docker layer cache.  30m covers a cold
-    # runner: Maven cache miss + Docker image pull + suite (~8s locally).
-    timeout-minutes: 30
+    # WHERE THIS JOB RUNS (nexus-f5i1m; Sam, 2026-09-30, session nexus_654;
+    # default inverted 2026-10-02, nexus-xyrtc).
+    # THE DEFAULT IS GITHUB-HOSTED `ubuntu-latest`. The job runs on the
+    # `hellmini-ci` self-hosted runner (the hellmini Mac mini, macOS arm64,
+    # Docker via a per-job colima VM) only for an owner push while the
+    # repository variable SERVICE_CI_PUSH_RUNNER is exactly `hellmini-ci`; the
+    # `route` step in the `changes` job decides and publishes `java_runner`, and
+    # `runs-on` below only reads it. pull_request always stays on ubuntu-latest.
+    # The route stays implemented, and the runner registered, as an opt-in.
+    # History: the job took 21 to 34 min on GitHub-hosted runners, timed out,
+    # flaked on chance-based tests, and every develop push queued behind it, so
+    # on 2026-09-30 owner pushes went to hellmini-ci by default; the review
+    # below reversed that.
+    #
+    # OWN RUNNER, OWN USER. `hellmini-ci` runs as the macOS user `ghci`, with its
+    # own Maven repo, tool cache and per-job colima. Release jobs (the
+    # engine-service release legs, the PG-bundle cache seed) stay on the
+    # `hellmini` runner under user `ghrunner`. The intent is that this job's test
+    # code, Maven plugins and caches cannot reach the dependencies and toolchain
+    # that feed the signed release binaries. A separate macOS user is not a
+    # sandbox, and whether the separation holds is host state that nothing in
+    # this file can assert. The evidence is a run of the negative-control probe,
+    # .github/workflows/hellmini-ci-isolation-probe.yml (owner-only
+    # workflow_dispatch, runs on hellmini-ci): ghrunner's paths unreadable,
+    # `sudo -n` refused, no Developer ID signing identity visible. Until a run of
+    # that probe is green, read "isolated" here as "intended".
+    #
+    # WHAT THE ROUTING DOES. THIS workflow's routing never selects a
+    # self-hosted runner for a pull_request or for a push by anyone but the repo
+    # owner (any other actor gets ubuntu-latest, so a push by someone else is
+    # still tested, just not on the self-hosted box), and never without the
+    # variable being exactly `hellmini-ci`. That is a routing rule, NOT a
+    # security boundary: the `route` step and the guard step live in this file,
+    # and whoever can push a branch controls this file. A write collaborator
+    # could target a self-hosted runner from their own workflow change (a
+    # same-repo PR that edits runs-on or adds a workflow; a fork PR too once the
+    # approval policy lets it run), and the owner's later push to a tip
+    # containing a collaborator's merged code would run that code there while
+    # the variable is on. As of 2026-09-30 (Sam) the repo has no write
+    # collaborators, so only the owner can push or run workflows; that, the
+    # fork-PR approval policy and branch protection are the real controls, and
+    # adding a collaborator back reopens the paths above.
+    #
+    # The first step below is a CONSISTENCY CHECK on the same github.* values
+    # the `route` step reads: it catches an editing mistake in the route, not a
+    # hostile edit. It compares account ids, not logins (a renamed login can be
+    # re-registered), and includes triggering_actor so a re-run by another
+    # account of the owner's push does not land on the self-hosted runner.
+    #
+    # WHAT CHANGES WHEN THE ROUTE IS ON. The job tests macOS arm64 on push while
+    # PRs test linux amd64, so a platform-specific red on push has no PR-side
+    # twin. It also does not get faster: the probe (on the release runner,
+    # before hellmini-ci existed) took 24.4 min against 21 to 34 min on
+    # GitHub-hosted runners. What it removes is the hosted-runner timeout exposure and the queueing
+    # behind a slow hosted job.
+    #
+    # REVIEW (Sam, 2026-09-30 plan, decided 2026-10-02): the plan was about 10
+    # develop runs on hellmini-ci, then compare job minutes with hosted and set
+    # SERVICE_CI_PUSH_RUNNER away from hellmini-ci unless it was clearly faster.
+    # After 21 runs: hellmini-ci green Java jobs 18.2 to 34.4 min (median 20.6),
+    # hosted 21.1 to 34.1 (median 25.2, 2026-09-29/30); hosted jobs started
+    # 2 to 4 s after change detection, so no queueing was avoided; three false
+    # reds on 2026-10-02 came from colima port leaks. Sam first set the variable to
+    # `ubuntu-latest`, then (same day, nexus-xyrtc) inverted the default so that
+    # hosted is what an unset variable means. The earlier four-run measurements
+    # (hosted median about 31, hellmini about 27) are superseded.
+    #
+    # OFFLINE FALLBACK AND THE ALLOWLIST. A job queued for a runner that is down
+    # waits until GitHub gives up (hellmini needs a KVM unlock after a FileVault
+    # reboot). To use hellmini-ci, set the repository variable
+    # SERVICE_CI_PUSH_RUNNER to exactly `hellmini-ci` (Settings > Secrets and
+    # variables > Actions > Variables); delete the variable (or set anything
+    # else) and the next push runs on GitHub's runners with no code change. The
+    # `route` step treats that one value as the only opt-in: unset, any other
+    # value, `hellmini` included, a typo, a different case, all mean
+    # ubuntu-latest. So the variable can never send a push to the
+    # release-signing runner, and a typo cannot queue the job for a label that
+    # no runner has. The variable is read when `changes` runs, so a run already
+    # queued for a dead runner must be cancelled and re-run with "Re-run all
+    # jobs" (a failed-jobs re-run keeps the old output).
+    #
+    # RUNNER SHARING. `hellmini-ci` is a separate runner from the release
+    # runner, so this job no longer queues behind a release build, and a release
+    # build no longer queues behind it. It still shares the machine. The
+    # concurrency group and cancel-in-progress above are unchanged (a pending
+    # push run is still replaced by a newer one; a started run is never
+    # cancelled by a push).
+    #
+    # CONTAINER CLEANUP. There is deliberately no end-of-job container sweep.
+    # The runner runs its own colima VM per job, started by the runner's
+    # job-started hook and pruned and stopped by its job-completed hook, so the
+    # job's Docker state does not outlive the job. Testcontainers' Ryuk is the
+    # in-job reaper: it is pinned on in the first step (the
+    # TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE set there is what lets it mount the
+    # socket on colima), one Ryuk starts per Maven JVM and reaps that JVM's
+    # containers when its connection drops, including on a hard kill at the job
+    # timeout. The last steps list any container left behind, report only.
+    #
+    # KNOWN LIMITATION: no lease is shared between this job and hand-run suites.
+    # The job's Docker daemon is separate from the always-on one that
+    # scripts/mvnw-leased.sh suites use (user hhildebrand), so the two do not
+    # collide on containers. They do compete for the host's 24 GB of RAM: a full
+    # host `pytest -n auto` uses about 23 GB, and a release mac-arm64 native
+    # build on `hellmini` brings its own colima VM and a 5632m heap, so a push
+    # job's colima VM running at the same time can thrash. Nothing serializes
+    # the two runners. mvnw-leased.sh serializes builders through a
+    # lock in the git common dir of the clone it runs from, and this job runs
+    # from the runner's own checkout, so the two never see each other's lock.
+    #
+    # COST DISCIPLINE. AGENTS.md § CI Cost Discipline reads "BILLED
+    # macOS/premium runners only where the artifact requires the platform" and
+    # names the self-hosted hellmini exception: owned hardware, no per-minute
+    # charge. (Hosted minutes are also free on a public repo, so this move saves
+    # no money; see the review plan above.)
+    # Read from the `route` step (see the `changes` job). The `|| 'ubuntu-latest'`
+    # is a belt for an empty output; the step publishes one of two literals.
+    runs-on: ${{ needs.changes.outputs.java_runner || 'ubuntu-latest' }}
+    permissions:
+      contents: read
+    # nexus-rjk2a, measured 2026-09-29/30 (14 runs in 30 hours): the job took
+    # 21 to 34 min. The old 30-minute limit cut three runs with no test failure
+    # (release PR #1583, 5de0e23f9 at 30m flat, 54d37bf43 at 30m16s); the
+    # longest run so far, 36733252314, took 34m06s (suite step 22m04s,
+    # integration step 11m30s). Runner variance is real: two trees differing
+    # only in non-test files differed by 5.5 min in the suite step.
+    #
+    # How the three bounds interact (the job bound is not a sum of the others):
+    #   - suite step: surefire kills a wedged fork at 45 min
+    #     (forkedProcessTimeoutInSeconds, service/pom.xml) and the step fails.
+    #     The integration step is then skipped, so a killed suite never adds
+    #     the integration time to the job. Setup before the suite is a few
+    #     minutes, so the job ends at about 50 min with a surefire timeout
+    #     message, before the 60-minute line below.
+    #   - integration step: it starts after a normal suite (about 22 min) and
+    #     has its own 45-minute fork bound, which would fire at about 70 min
+    #     into the job. The 60-minute job line fires first, about 35 min into
+    #     that step. So an integration-step hang is caught by THIS line, not
+    #     by the fork bound.
+    #   - 60 sits above the longest job measured (34m06s) with room for the
+    #     suite step to grow toward its fork bound, and above 45 min + setup so
+    #     that a wedged suite fork gets surefire's own message.
+    # It is a STOPGAP sized from one afternoon of data, not a derived
+    # steady-state bound: the per-class timing step at the end of this job
+    # exists to replace it with one once a few runs of per-class data are in.
+    # This is a REQUIRED check on main and develop, so a timeout blocks a merge.
+    timeout-minutes: 60
 
     steps:
+      # Runs only on a self-hosted runner (hellmini-ci): a consistency check of the
+      # routing, then the Docker and temp-dir setup the GitHub-hosted image gets
+      # for free.
+      - name: Self-hosted runner consistency check and setup
+        if: runner.environment == 'self-hosted'
+        shell: bash
+        env:
+          ACTOR_ID: ${{ github.actor_id }}
+          OWNER_ID: ${{ github.repository_owner_id }}
+          TRIGGERING_ACTOR: ${{ github.triggering_actor }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          # Consistency check, not a security control (see the comment on
+          # the `route` step): the route should never have sent any other
+          # event or account here.
+          if [ "$GITHUB_EVENT_NAME" != "push" ] || [ "$ACTOR_ID" != "$OWNER_ID" ] || [ "$TRIGGERING_ACTOR" != "$OWNER" ]; then
+            echo "::error::routing inconsistency: a self-hosted runner got event=$GITHUB_EVENT_NAME actor_id=$ACTOR_ID triggering_actor=$TRIGGERING_ACTOR (expected an owner push)"
+            exit 1
+          fi
+          # Temp files of this job land in the runner's per-job temp dir, which
+          # the runner wipes, instead of a directory that persists between jobs
+          # on this box. TMPDIR covers shell tools (curl, tar, python). The JDK
+          # on macOS takes java.io.tmpdir from the per-user dir and ignores
+          # TMPDIR, so the JVMs (Maven, surefire forks, Testcontainers,
+          # @TempDir) need the property itself, via JAVA_TOOL_OPTIONS, which
+          # every JVM in the job inherits.
+          # Also pin Ryuk on: a TESTCONTAINERS_RYUK_DISABLED in the runner's
+          # environment or a ~/.testcontainers.properties would otherwise turn
+          # the container reaper off silently. The report step at the end of
+          # the job lists anything that still leaks.
+          {
+            echo "TMPDIR=$RUNNER_TEMP"
+            echo "JAVA_TOOL_OPTIONS=-Djava.io.tmpdir=$RUNNER_TEMP"
+            echo "TESTCONTAINERS_RYUK_DISABLED=false"
+          } >> "$GITHUB_ENV"
+          # Testcontainers does not read docker contexts. On colima the
+          # daemon's socket is not /var/run/docker.sock on the host, so point
+          # Testcontainers at the active context's endpoint, and tell Ryuk
+          # (which bind-mounts the socket into its own container) the path
+          # INSIDE the colima VM, where it is /var/run/docker.sock.
+          if [ -z "${DOCKER_HOST:-}" ]; then
+            host="$(docker context inspect --format '{{.Endpoints.docker.Host}}')"
+            echo "DOCKER_HOST=$host" >> "$GITHUB_ENV"
+          fi
+          if [ -z "${TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE:-}" ]; then
+            echo "TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE=/var/run/docker.sock" >> "$GITHUB_ENV"
+          fi
+          docker info --format 'docker daemon: arch={{.Architecture}} cpus={{.NCPU}} mem={{.MemTotal}}'
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
         with:
+          # The job token must not sit in a persistent workspace's .git/config
+          # after the job (the self-hosted runner keeps its workspace). No later step pushes;
+          # the prime-* actions pass github.token through their own env, and the
+          # rehearsal's fallback `git fetch origin tag` reads a public repo.
+          persist-credentials: false
           # SchemaUpgradeRehearsalIntegrationTest (nexus-4m6i0.6) needs an old
           # engine-service tag's changelog tree via `git archive <tag>`. Default
           # checkout (fetch-depth 1) fetches no tags at all; fetch-tags fetches
@@ -142,7 +398,10 @@ jobs:
           java-version: '25'
           distribution: 'graalvm'
           # Cache Maven local repo across runs; bust when pom.xml changes.
-          cache: 'maven'
+          # Skipped on self-hosted: the hellmini-ci runner's own Maven local repo
+          # already persists between jobs, so restoring and re-saving a tarball of it
+          # is pure cost.
+          cache: ${{ runner.environment == 'github-hosted' && 'maven' || '' }}
 
       - name: Cache MiniLM ONNX model
         # EmbedParityTest constructs OnnxEmbedder, which loads the
@@ -167,8 +426,8 @@ jobs:
             echo "ONNX model not in cache; downloading."
             mkdir -p "$MODEL_DIR"
             curl -fsSL https://chroma-onnx-models.s3.amazonaws.com/all-MiniLM-L6-v2/onnx.tar.gz \
-              -o /tmp/onnx.tar.gz
-            tar -xzf /tmp/onnx.tar.gz -C "$MODEL_DIR"
+              -o "$RUNNER_TEMP/onnx.tar.gz"
+            tar -xzf "$RUNNER_TEMP/onnx.tar.gz" -C "$MODEL_DIR"
             test -f "$MODEL_DIR/onnx/model.onnx" || { echo "model.onnx missing after extract"; exit 1; }
           else
             echo "ONNX model restored from cache."
@@ -201,11 +460,12 @@ jobs:
       # verbatim because the PR status-check name is referenced by branch
       # protection; renaming would strand required checks.
       # nexus-13eb0: forkCount default (4) is the LOCAL-loop parallelism
-      # lever. GH-hosted ubuntu-latest runners are 4-core/16GB, sized for
-      # the existing serial job shape, not evaluated for N concurrent
-      # Testcontainers PG forks; pin CI to the pre-existing serial behavior
-      # explicitly rather than silently inheriting the new local default.
-      # Revisit deliberately if CI itself is ever parallelized.
+      # lever. forks=1 is pinned for CI because RAM, not core count, is the
+      # limit: each fork boots its own Testcontainers Postgres, and neither CI
+      # target was sized for N of them. GH-hosted ubuntu-latest is 4-core/16GB;
+      # the hellmini-ci push job runs in a colima VM of 8 CPUs and 8 GiB. The
+      # serial shape is still right on both. Revisit deliberately if CI itself
+      # is ever parallelized.
       - name: Run Java test suite
         working-directory: service
         run: ./mvnw -q test -Dnexus.test.forks=1
@@ -220,7 +480,9 @@ jobs:
       # the cross-check between the combined-query functions and the repository
       # path, which is precisely the surface an engine release changes. A parity
       # suite that never runs is worse than none, because its existence gets
-      # cited as coverage. ~3 minutes for 25 tests, measured locally.
+      # cited as coverage. Cost on CI: 5.5 to 11.5 min over 14 runs on
+      # 2026-09-29/30 (an earlier local figure of ~3 min for 25 tests was
+      # wrong for the CI runner), across the 9 classes carrying the tag.
       - name: Run Java integration group (SQL-vs-stitch parity fixtures)
         working-directory: service
         run: ./mvnw -q test -Dtest.excluded.groups= -Dgroups=integration -Dnexus.test.forks=1
@@ -263,6 +525,43 @@ jobs:
           python3 scripts/assert_bge_gates_ran.py \
             service/target/surefire-reports/TEST-dev.nexus.service.Bge768ParityTest.xml \
             service/target/surefire-reports/TEST-dev.nexus.service.vectors.Bge768BatchCompositionTest.xml
+
+      # nexus-rjk2a: per-class timing, so the next duration question has data.
+      # `-q` only quiets maven's console; surefire still writes TEST-*.xml (the
+      # asserts above read them). Both mvn invocations write into the same
+      # surefire-reports directory (the integration classes are excluded from
+      # the first, and nothing cleans between), so ONE call sees every class.
+      # `if: always()` so a timed-out or red run still leaves the ranking; the
+      # script never fails, so it cannot redden a run on its own. Python
+      # stdlib only, no uv sync.
+      - name: Slowest test classes (diagnostic, never fails)
+        if: always()
+        run: python3 scripts/surefire_slowest.py service/target/surefire-reports --top 25
+
+      # Self-hosted only, REPORT-ONLY: lists Testcontainers containers still on
+      # the job's Docker daemon so a Ryuk miss shows up in this log instead of
+      # in the next job's RAM. Never removes anything. It waits up to 30 s for
+      # the list to empty first: Ryuk reaps a JVM's containers a few seconds
+      # AFTER that JVM exits, and the first probe (run 36776716369) listed the
+      # last Maven invocation's pgvector container and two Ryuk containers 2 s
+      # after it ended, all inside that grace window, which read as a leak.
+      - name: Report leftover Testcontainers containers (self-hosted, report only)
+        if: always() && runner.environment == 'self-hosted'
+        shell: bash
+        run: |
+          set -uo pipefail
+          left=""
+          for _ in 1 2 3 4 5 6; do
+            left="$(docker ps -a --filter label=org.testcontainers=true --format '{{.ID}} {{.Image}} {{.Status}}' 2>&1)" || true
+            [ -z "$left" ] && break
+            sleep 5
+          done
+          if [ -n "$left" ]; then
+            echo "$left"
+            echo "::warning::Testcontainers containers remain 30 s after the suite (listed above; not removed)"
+          else
+            echo "no Testcontainers containers remain."
+          fi
 
   # 2026-07-06 CI-cost pass: the native-image-build-and-smoke job that lived
   # here was removed — every service/** push was building the native image

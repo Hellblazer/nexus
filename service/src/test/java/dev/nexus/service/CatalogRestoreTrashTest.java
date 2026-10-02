@@ -255,4 +255,55 @@ class CatalogRestoreTrashTest {
         var trashA = catalogRepo.listTrash(TENANT_A, 200, 0);
         assertThat(trashA).extracting(d -> d.get("tumbler")).doesNotContain(tumbler);
     }
+
+    @Test
+    @Order(80)
+    void trash_carriesTheTombstonedDocumentsFilePath() {
+        // nexus-wbfpw.35 fix round 2: the client's backfill verbs skip a stored
+        // chunk path that matches a tombstoned document, and the path is the only
+        // key they hold for a chunk. A listing without it cannot be matched.
+        String tumbler = catalogRepo.registerDocument(
+            TENANT_A, "trash-file-path", regDoc("Trash path", "docs/rdr/trash-path.md"));
+        assertThat(catalogRepo.deleteDocument(TENANT_A, tumbler)).isEqualTo(1);
+
+        var entry = catalogRepo.listTrash(TENANT_A, 200, 0).stream()
+            .filter(d -> tumbler.equals(d.get("tumbler"))).findFirst().orElseThrow();
+        assertThat(entry.get("file_path")).isEqualTo("docs/rdr/trash-path.md");
+    }
+
+    /**
+     * nexus-wbfpw.35 fix round 3: a batch delete stamps every row with the one
+     * transaction timestamp, so the listing's {@code ORDER BY deleted_at DESC}
+     * left the order inside a tie to the planner, and an OFFSET page boundary
+     * inside a tie could skip a tombstone. The client's revival guard pages this
+     * whole listing (300 a page), so a skipped tombstone is a document it
+     * re-registers. 700 tombstones sharing one {@code deleted_at} straddle two
+     * 300-row boundaries (700 > 2 x 300 also makes PG bound-sort the first page
+     * with a heap, which does not keep ties in scan order); every one must come
+     * back exactly once.
+     */
+    @Test
+    @Order(90)
+    void trash_pagesAcrossTiedDeletedAtWithoutSkippingOrRepeating() {
+        var tumblers = new java.util.ArrayList<String>();
+        for (int i = 0; i < 700; i++) {
+            tumblers.add(catalogRepo.registerDocument(
+                TENANT_A, "trash-tie-" + i, regDoc("Tie " + i, "tie/" + i + ".md")));
+        }
+        assertThat(catalogRepo.deleteDocumentsMany(TENANT_A, tumblers)).hasSize(700);
+        assertThat(catalogRepo.listTrash(TENANT_A, 1, 0).get(0).get("deleted_at"))
+            .as("premise: the whole batch carries one deleted_at")
+            .isEqualTo(catalogRepo.listTrash(TENANT_A, 1, 699).get(0).get("deleted_at"));
+
+        var seen = new java.util.ArrayList<Object>();
+        for (int offset = 0; ; offset += 300) {
+            var page = catalogRepo.listTrash(TENANT_A, 300, offset);
+            page.forEach(d -> seen.add(d.get("tumbler")));
+            if (page.size() < 300) break;
+        }
+
+        assertThat(seen).as("no tombstone repeated across pages").doesNotHaveDuplicates();
+        assertThat(seen).as("no tombstone skipped at the page boundary")
+            .containsAll(tumblers);
+    }
 }

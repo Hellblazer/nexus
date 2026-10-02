@@ -359,7 +359,7 @@ class CatalogManifestSweepRepositoryTest {
         // catalog_document_chunks rows anywhere, ever (the legacy pre-
         // nexus-vw594 shape, still live in production today; current
         // store_put ALSO writes a manifest row for the note's own document
-        // via store_put_manifest_direct, but that fix does not retroactively
+        // through note_write.put_note, but that fix does not retroactively
         // manifest pre-existing legacy notes).
         String col = "code__swp3__minilm-l6-v2-384__v1";
         String noteChash = ch("swp3-genuine-note");
@@ -394,6 +394,15 @@ class CatalogManifestSweepRepositoryTest {
             .as("a genuine manifest-less note must survive its shared T3 row even though "
                 + "nothing currently manifests it -- the notes guard, not the union guard, "
                 + "is what protects it here").isEqualTo(0);
+        // RDR-192 Step 13 (Phase 4 gate, code review S-3): the chash the notes arm kept is in the
+        // sweep's dropped set but not in what it deleted, so the Superseded line must not name it.
+        // Order 60 pins that for the union guard; this pins it for the notes arm.
+        var detail = onlyDetail(result);
+        assertThat(detail).containsEntry("dropped", 1).containsEntry("swept", 0).containsEntry("kept", 1);
+        assertThat((List<?>) detail.get("swept_chashes"))
+            .as("the notes arm kept the note's chash, so the deleted-chash list is empty")
+            .isEmpty();
+        assertThat(detail).containsEntry("swept_chashes_truncated", false);
         assertThat(chunk384Exists(TENANT_A, col, noteChash))
             .as("note's T3 row must be untouched").isTrue();
     }
@@ -481,8 +490,10 @@ class CatalogManifestSweepRepositoryTest {
             // must classify as the catch-all "sweep_failed".
             @SuppressWarnings("unchecked")
             var detail15 = (List<Map<String, Object>>) result.get("sweep_detail");
-            assertThat(detail15).singleElement().satisfies(d ->
-                assertThat(d.get("reason")).isEqualTo("sweep_failed"));
+            assertThat(detail15).singleElement().satisfies(d -> {
+                assertThat(d.get("reason")).isEqualTo("sweep_failed");
+                assertNoSweptChashesReported(d);
+            });
             // The manifest replace committed: swp.6 now has the NEW row, not the old.
             assertThat(repo.getManifest(TENANT_A, "swp.6"))
                 .singleElement()
@@ -733,6 +744,7 @@ class CatalogManifestSweepRepositoryTest {
                 // method's own read happens BEFORE that method is ever
                 // called), so it must carry its own distinct reason value.
                 assertThat(d.get("reason")).isEqualTo("before_read_failed");
+                assertNoSweptChashesReported(d);
             });
         assertThat(repo.getManifest(TENANT_A, "swp.9"))
             .singleElement()
@@ -778,8 +790,10 @@ class CatalogManifestSweepRepositoryTest {
             // "gate_timeout", distinct from a DELETE-side failure.
             @SuppressWarnings("unchecked")
             var detail20 = (List<Map<String, Object>>) result.get("sweep_detail");
-            assertThat(detail20).singleElement().satisfies(d ->
-                assertThat(d.get("reason")).isEqualTo("gate_timeout"));
+            assertThat(detail20).singleElement().satisfies(d -> {
+                assertThat(d.get("reason")).isEqualTo("gate_timeout");
+                assertNoSweptChashesReported(d);
+            });
             assertThat(chunk384Exists(TENANT_A, col, x))
                 .as("chunk survives while the gate is externally held").isTrue();
 
@@ -895,105 +909,16 @@ class CatalogManifestSweepRepositoryTest {
         assertThat(repo.getManifest(TENANT_A, "swp.11e")).hasSize(1);
     }
 
-    // ── nexus-kl2z6 increment 2 / nexus-vc6dh: staging guard (§4.2) + sweep_detail.reason (§3) ──
-
-    /** Lands one {@code staging.document_chunks} row (superuser connection -- FORCE RLS
-     *  never applies to superusers, so no {@code nexus.tenant} GUC is needed here, matching
-     *  {@link #seedChunk384}'s sibling helpers). */
-    private void seedStagingDocumentChunk(String tenant, String docId, int position, String chashText)
-            throws Exception {
-        try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            var ps = su.prepareStatement(
-                "INSERT INTO staging.document_chunks (tenant_id, doc_id, position, chash) VALUES (?, ?, ?, ?)");
-            ps.setString(1, tenant);
-            ps.setString(2, docId);
-            ps.setInt(3, position);
-            ps.setString(4, chashText);
-            ps.executeUpdate();
-        }
-    }
-
-    /** Surgically clears the staged rows for ONE {@code (tenant, doc_id)} -- never a blanket
-     *  truncate, so this test class's other staging users (none today, but future-proofing)
-     *  are unaffected. */
-    private void clearStagingDocumentChunks(String tenant, String docId) throws Exception {
-        try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            var ps = su.prepareStatement("DELETE FROM staging.document_chunks WHERE tenant_id = ? AND doc_id = ?");
-            ps.setString(1, tenant);
-            ps.setString(2, docId);
-            ps.executeUpdate();
-        }
-    }
-
-    @Test @Order(30)
-    void writeManifestMany_sweepTrue_stagingGuard_directHexArm_protectsChash_thenSweptAfterClear() throws Exception {
-        // nexus-kl2z6 increment 2 / nexus-vc6dh §4.2 REV 2: a staged manifest row
-        // referencing a chash DIRECTLY by its own 64-hex text must protect that chash
-        // from the sweep, exactly like a live manifest reference -- "the sweep may
-        // delete a chunk only when no live declaration of intent references it"
-        // (design memo §4.4). stagingGuardCondition's former SECOND clause (the
-        // chash_alias-mapped legacy-ref arm) is RETIRED at nexus-lgdel.l1 along with
-        // the table -- this is now the guard's ONLY clause (falsified during
-        // development by commenting it out and confirming this test fails).
-        String col = "code__swp30__minilm-l6-v2-384__v1";
-        String x = ch("swp30-x");
-        seedChunk384(TENANT_A, col, x);
-        registerDoc(TENANT_A, "swp.30", col);
-        writeManifestManySeeded(TENANT_A, List.of(
-            Map.<String, Object>of("doc_id", "swp.30", "rows", List.<Map<String, Object>>of(
-                Map.<String, Object>of("position", 0, "chash", x, "chunk_index", 0)))), col);
-
-        // A staged (not-yet-promoted) manifest row for a DIFFERENT doc_id references x
-        // by its canonical 64-hex text directly -- the "declaration of intent" that
-        // already exists durably in staging.document_chunks per the design memo.
-        seedStagingDocumentChunk(TENANT_A, "swp.30-staged", 0, x);
-        try {
-            // swp.30 drops its OWN reference to x -- nothing LIVE manifests it anymore,
-            // but the staged reference must still protect it.
-            var result = writeManifestManySeeded(TENANT_A, List.of(
-                Map.<String, Object>of("doc_id", "swp.30", "rows", List.<Map<String, Object>>of(
-                    Map.<String, Object>of("position", 0, "chash", ch("swp30-y"), "chunk_index", 0)))), col,
-                null, true);
-
-            assertThat(result.get("swept"))
-                .as("a staged manifest row (direct-hex arm) must protect x from the sweep").isEqualTo(0);
-            @SuppressWarnings("unchecked")
-            var detail = (List<Map<String, Object>>) result.get("sweep_detail");
-            assertThat(detail).singleElement().satisfies(d -> {
-                assertThat(d.get("dropped")).isEqualTo(1);
-                assertThat(d.get("swept")).isEqualTo(0);
-                assertThat(d.get("kept")).isEqualTo(1);
-            });
-            assertThat(chunk384Exists(TENANT_A, col, x))
-                .as("staging guard (direct-hex arm) kept the chunk").isTrue();
-        } finally {
-            clearStagingDocumentChunks(TENANT_A, "swp.30-staged");
-        }
-
-        // Clear staging, re-run: x is no longer referenced by ANYTHING, live or staged.
-        // Re-add a live reference (the chunk row itself was never touched -- the guard
-        // blocked the delete, nothing to re-seed) then drop it again to exercise a
-        // fresh sweep decision on the SAME chash with the guard now silent.
-        writeManifestManySeeded(TENANT_A, List.of(
-            Map.<String, Object>of("doc_id", "swp.30", "rows", List.<Map<String, Object>>of(
-                Map.<String, Object>of("position", 0, "chash", x, "chunk_index", 0)))), col);
-        var result2 = writeManifestManySeeded(TENANT_A, List.of(
-            Map.<String, Object>of("doc_id", "swp.30", "rows", List.<Map<String, Object>>of())), col,
-            null, true);
-
-        assertThat(result2.get("swept"))
-            .as("staging cleared -- the guard no longer protects x").isEqualTo(1);
-        assertThat(chunk384Exists(TENANT_A, col, x)).isFalse();
-    }
-
-    // nexus-lgdel.l1: Order(31)
-    // (writeManifestMany_sweepTrue_stagingGuard_chashAliasArm_protectsChash_thenSweptAfterClear)
-    // DELETED — its subject, stagingGuardCondition's chash_alias-mapped
-    // legacy-ref NOT EXISTS clause, is retired with the table. The
-    // surviving Order(30) test above covers the guard's one remaining
-    // clause.
+    // ── nexus-kl2z6 increment 2: sweep_detail.reason (§3) ──
+    //
+    // nexus-z0o2p.27: the staging-guard tests that lived here (Order 30, and the
+    // Order 33 EXPLAIN plan-shape pin over stagingGuardCondition) are DELETED. Their
+    // subject, the sweep's third NOT EXISTS guard over staging.document_chunks, left
+    // the DELETE with the staging schema itself (staging-6-drop-landing-schema): no
+    // row can be staged, so no staged reference can protect a chash. "A live manifest
+    // reference protects the chunk" is still pinned by the shared-chash and tombstoned-
+    // referrer tests in this class; the retired guard added nothing a live reference
+    // does not already carry.
 
     @Test @Order(32)
     void writeManifestMany_sweepTrue_statementTimeout_reasonIsStatementTimeout() throws Exception {
@@ -1034,8 +959,10 @@ class CatalogManifestSweepRepositoryTest {
             assertThat(result.get("swept")).isEqualTo(0);
             @SuppressWarnings("unchecked")
             var detail = (List<Map<String, Object>>) result.get("sweep_detail");
-            assertThat(detail).singleElement().satisfies(d ->
-                assertThat(d.get("reason")).isEqualTo("statement_timeout"));
+            assertThat(detail).singleElement().satisfies(d -> {
+                assertThat(d.get("reason")).isEqualTo("statement_timeout");
+                assertNoSweptChashesReported(d);
+            });
             assertThat(chunk384Exists(TENANT_A, col, x))
                 .as("statement-timeout sweep must leave the chunk untouched").isTrue();
         } finally {
@@ -1044,179 +971,6 @@ class CatalogManifestSweepRepositoryTest {
                 su.createStatement().execute(
                     "DROP TRIGGER IF EXISTS test_slow_sweep_delete_trigger ON nexus.chunks");
                 su.createStatement().execute("DROP FUNCTION IF EXISTS test_slow_sweep_delete()");
-            }
-        }
-    }
-
-    @Test @Order(33)
-    void stagingGuard_isIndexCapable_notFunctionWrappedOnStagingSide() throws Exception {
-        // nexus-ajt86 rebuild (critic Significant on kl2z6 increment 2 -- T2 review
-        // [22002] Lens 3 / critique [22003]): the PRIOR version of this test hand-
-        // reconstructed the guard SQL as a string and EXPLAINed it on the SUPERUSER
-        // connection with a single (n=1) outer candidate. Three fidelity gaps
-        // closed here:
-        //   1. Drift risk: the SQL is now the REAL jOOQ-rendered statement, captured
-        //      via CatalogRepository.renderSweepChunksDeleteSql -- extracted from
-        //      the production sweepChunks method itself (sweepChunksQuery), not
-        //      a hand-kept mirror that can silently fall out of sync with it.
-        //      (RDR-191, nexus-o8dil.48: renamed from renderSweepChunks384DeleteSql/
-        //      sweepChunks384 now that chunks_384/768/1024 are one nexus.chunks.)
-        //   2. RLS fidelity: EXPLAIN now runs through tenantScope.withTenant -- the
-        //      SAME SVC_ROLE / FORCE-RLS-scoped connection repo.writeManifestMany
-        //      uses in production, not a superuser connection (which bypasses RLS
-        //      entirely). The 50k-row staging seed below is deliberately under
-        //      TENANT_A itself, not a throwaway tenant: FORCE RLS auto-injects a
-        //      tenant_id predicate into every staging.document_chunks access, so
-        //      seeding under a different tenant would make those rows invisible to
-        //      this EXPLAIN and silently collapse the "realistic scale" claim to
-        //      n=0 visible rows while still LOOKING like a 50k-row test.
-        //   3. Outer/bounded-side cardinality: CANDIDATE_COUNT nexus.chunks rows, not
-        //      the single candidate the prior version of this test carried.
-        //      CANDIDATE_COUNT is per_collection_chunk_cap's REAL, pinned value for
-        //      code__ collections (src/nexus/db/http_vector_client.py
-        //      _CODE_UPSERT_CHUNK_CAP = 300) -- the actual per-flush dropped-chash
-        //      ceiling this guard runs under, not the bead's own "~500" approximation.
-        //
-        // FINDING (empirical, this rebuild -- traced with sequential-thinking before
-        // landing, not silently patched over): the direct-hex arm's own NOT EXISTS
-        // plans as a Hash Anti Join (Seq Scan + Hash over the full staging table),
-        // NOT the Nested Loop / Index Scan the ORIGINAL version of this test asserted
-        // must be the ONLY acceptable shape -- and this is NOT primarily a function of
-        // CANDIDATE_COUNT. Isolated by bisection: reproducing the OLD test's own n=1
-        // cardinality, with and without the ANALYZE nexus.chunks call the old test
-        // never had, STILL plans as Hash Anti Join once run through tenantScope
-        // .withTenant (SVC_ROLE, FORCE RLS) instead of the superuser connection the
-        // old test used. The rendered SQL for the guard clause itself is structurally
-        // byte-for-byte identical to the old hand-copied text (verified directly) --
-        // what changed is exactly gap #2 above: fixing the RLS-fidelity gap this bead
-        // was filed to close is ITSELF what invalidates the old plan-shape assertion,
-        // independent of the candidate-count fix. Under FORCE RLS, every access to
-        // staging.document_chunks carries a per-row `tenant_id = current_setting(...)`
-        // filter that the superuser-run original test never paid or saw; that shifts
-        // PostgreSQL's cost balance enough to prefer hashing the (still fully within-
-        // tenant, 100%-selective) staging table once over per-candidate index probes,
-        // even at n=1. CANDIDATE_COUNT=300 (realistic scale) reproduces the identical
-        // outcome, so this is not an n=1 fluke either. This is NOT a regression to
-        // REV-1's rejected shape: REV-1 was rejected because it applied encode()/
-        // decode() TO THE STAGING SIDE's join key, which made the staging index
-        // UNUSABLE under ANY join strategy and forced an expensive per-row function
-        // evaluation across the whole table for every probe. REV-2 (this shape)
-        // applies encode() only to the bounded/candidate side -- s.chash is
-        // referenced bare -- so BOTH a Hash Anti Join (cheap: one sequential pass, no
-        // per-row function evaluation) and an index-driven Nested Loop remain
-        // available, and PostgreSQL's cost-based optimizer is free to pick whichever
-        // is cheaper. (Historical: a second NOT EXISTS clause, the chash_alias ->
-        // staging join, used to prove idx_staging_document_chunks_chash live via a
-        // genuine Index Scan at this same scale -- chash_alias had few rows per
-        // tenant, so a Nested Loop driven by it was cheap regardless of staging
-        // table size. That clause, and nexus.chash_alias itself, are RETIRED at
-        // nexus-lgdel.l1 -- and EMPIRICALLY, at this test's own 300-candidate /
-        // 50,000-staging-row scale, the surviving direct-hex arm ALONE now plans
-        // as a Hash Anti Join, not the Nested Loop / Index Scan the alias arm used
-        // to force (verified by actually running this test post-retirement, not
-        // assumed). The EXPLAIN-based index-liveness assertion this comment used
-        // to introduce is therefore RETIRED below along with the mechanism that
-        // demonstrated it -- REV-2's real invariant does not depend on the
-        // planner CHOOSING the index at any given scale, only on the index
-        // remaining ELIGIBLE, which the rendered-SQL-text assertion proves
-        // directly.) The invariant that actually
-        // matters -- and the one REV-2 bought over REV-1 -- is asserted directly
-        // below against the RENDERED SQL TEXT (deterministic, immune to planner-
-        // version / statistics drift): no function ever wraps the staging alias's
-        // own chash column.
-        //
-        // EXPLAIN only (no ANALYZE) -- the CHOSEN plan shape is the evidence this
-        // test needs; execution timing at true migration scale (300K rows) stays a
-        // repro-only number per vc6dh's own close caveat, not re-proven in CI here.
-        String col = "code__swp33__minilm-l6-v2-384__v1";
-        int candidateCount = 300; // per_collection_chunk_cap("code__...") -- see above
-        List<String> dropped = new ArrayList<>(candidateCount);
-        for (int i = 0; i < candidateCount; i++) {
-            dropped.add(ch("swp33-explain-candidate-" + i));
-        }
-        repo.upsertCollection(TENANT_A, Map.of(
-            "name", col, "content_type", "code", "owner_id", "sweep-owner",
-            "embedding_model", "minilm-l6-v2-384", "model_version", "v1"));
-
-        int stagingRows = 50_000;
-        try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-
-            // Bulk-seed CANDIDATE_COUNT nexus.chunks rows -- the outer/bounded side of
-            // the guard's correlated NOT EXISTS, at the real per-flush cap for a
-            // code__ collection (per_collection_chunk_cap). RDR-191: embedding_384
-            // replaces the bare embedding column now that chunks_384 is unified.
-            String zeroVec = "[" + "0,".repeat(383) + "0]";
-            try (var ps = su.prepareStatement(
-                    "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_384)"
-                    + " VALUES (?, ?, ?, ?, ?::nexus.vector) ON CONFLICT (tenant_id, collection, chash) DO NOTHING")) {
-                for (String hex : dropped) {
-                    ps.setString(1, TENANT_A);
-                    ps.setString(2, col);
-                    ps.setBytes(3, java.util.HexFormat.of().parseHex(hex));
-                    ps.setString(4, "seed text " + hex);
-                    ps.setString(5, zeroVec);
-                    ps.addBatch();
-                }
-                ps.executeBatch();
-            }
-
-            // Bulk-seed a realistic-scale staging table with distinct 64-hex chashes
-            // (sha256(bytea) is a PostgreSQL-BUILT-IN function since PG11, no
-            // extension needed) -- under TENANT_A (see javadoc above), doc_id-
-            // prefixed so cleanup below cannot touch any other test's staging rows.
-            su.createStatement().execute(
-                "INSERT INTO staging.document_chunks (tenant_id, doc_id, position, chash) "
-                + "SELECT '" + TENANT_A + "', 'explain-plan.' || i, 0, "
-                + "encode(sha256(('explain-seed-' || i)::bytea), 'hex') "
-                + "FROM generate_series(1, " + stagingRows + ") AS i");
-            // staging.document_chunks: the staging schema is outside jOOQ codegen
-            // scope (service/pom.xml's jOOQ codegen config lists only the nexus/t1
-            // schemas), so no generated Table exists -- PgContainerHelper's
-            // Name-taking analyzeTable overload (nexus-cbo4a batch 4) builds the
-            // qualified identifier via DSL.name instead of a hand-typed string.
-            PgContainerHelper.analyzeTable(su, DSL.name("staging", "document_chunks"));
-            PgContainerHelper.analyzeTable(su, CHUNKS);
-        }
-
-        try {
-            String realSql = tenantScope.withTenant(TENANT_A, ctx ->
-                CatalogRepository.renderSweepChunksDeleteSql(ctx, TENANT_A, col, dropped, true));
-
-            // The REV-1-vs-REV-2 distinguishing property, proven directly on the
-            // rendered SQL text rather than a specific EXPLAIN plan shape: the
-            // staging alias's OWN chash column is never wrapped in encode()/decode()
-            // -- only the bounded candidate side is. This is what keeps the staging
-            // index usable/available under any join strategy, and it cannot drift
-            // out of sync with production because realSql IS what sweepChunks
-            // executes (see the drift-risk fix above).
-            assertThat(realSql)
-                .as("REV-1's rejected shape wrapped the STAGING side's join key in a "
-                    + "function, making its index unusable under any join strategy -- the "
-                    + "staging alias's chash column must stay bare (no encode()/decode()) "
-                    + "for this guard's real, jOOQ-rendered SQL (sweepChunksQuery, RDR-191 "
-                    + "unified):\n" + realSql)
-                .doesNotContainPattern("(?i)(encode|decode)\\(\\s*\"s2?\"\\.\"chash\"");
-
-            // nexus-lgdel.l1: the EXPLAIN-based "idx_staging_document_chunks_chash
-            // must appear in the chosen plan" assertion that used to run here is
-            // RETIRED -- it depended on the (now-deleted) chash_alias arm to force
-            // an index-scan-friendly plan at this candidate scale; the surviving
-            // direct-hex arm alone plans as a Hash Anti Join here, which is a
-            // CORRECT, cost-based choice, not a regression. The rendered-SQL-text
-            // assertion above (no encode()/decode() wrapping the staging side) is
-            // what actually keeps the index ELIGIBLE for the planner at any scale
-            // where it IS the cheaper choice; that is the invariant this test still
-            // proves.
-        } finally {
-            try (Connection su = pg.createConnection("")) {
-                su.setAutoCommit(true);
-                su.createStatement().execute(
-                    "DELETE FROM staging.document_chunks WHERE tenant_id = '" + TENANT_A
-                    + "' AND doc_id LIKE 'explain-plan.%'");
-                su.createStatement().execute(
-                    "DELETE FROM nexus.chunks WHERE tenant_id = '" + TENANT_A
-                    + "' AND collection = '" + col + "'");
             }
         }
     }
@@ -1521,5 +1275,118 @@ class CatalogManifestSweepRepositoryTest {
         assertThat(fieldValue(line, "swept")).isEqualTo("1");
         assertThat(fieldValue(line, "kept")).isEqualTo("0");
         assertThat(chunk384Exists(TENANT_A, col, x)).as("the sweep this event reports actually ran").isFalse();
+    }
+    // ── RDR-192 Step 13 (nexus-wbfpw.25): sweep_detail names the chashes the sweep deleted ──
+
+    /**
+     * nexus-wbfpw.25 fix round 2: an errored sweep_detail entry (any reason) carries the
+     * report fields as an empty list and false, never absent and never stale. Pinned per
+     * reason below because the three putSweptChashes call sites are separate (the
+     * before-read catch, the success path, runSweepTransaction's catch).
+     */
+    private static void assertNoSweptChashesReported(Map<String, Object> entry) {
+        assertThat((List<?>) entry.get("swept_chashes"))
+            .as("an errored sweep deleted nothing it can name").isEmpty();
+        assertThat(entry).containsEntry("swept_chashes_truncated", false);
+    }
+
+    /** The single sweep_detail entry of a one-document sweep response. */
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> onlyDetail(Map<String, Object> result) {
+        var detail = (List<Map<String, Object>>) result.get("sweep_detail");
+        assertThat(detail).hasSize(1);
+        return detail.getFirst();
+    }
+
+    @Test @Order(60)
+    void sweepDetail_namesExactlyTheChashesTheSweepDeleted_notTheKeptOnes() throws Exception {
+        String col = "code__swp60__minilm-l6-v2-384__v1";
+        String x = ch("swp60-x");
+        String z = ch("swp60-z");
+        String shared = ch("swp60-shared");
+        for (String c : List.of(x, z, shared)) seedChunk384(TENANT_A, col, c);
+        registerDoc(TENANT_A, "swp.60a", col);
+        registerDoc(TENANT_A, "swp.60b", col);
+        writeManifestManySeeded(TENANT_A, List.of(
+            Map.<String, Object>of("doc_id", "swp.60a", "rows", List.<Map<String, Object>>of(
+                Map.<String, Object>of("position", 0, "chash", x, "chunk_index", 0),
+                Map.<String, Object>of("position", 1, "chash", shared, "chunk_index", 1),
+                Map.<String, Object>of("position", 2, "chash", z, "chunk_index", 2))),
+            Map.<String, Object>of("doc_id", "swp.60b", "rows", List.<Map<String, Object>>of(
+                Map.<String, Object>of("position", 0, "chash", shared, "chunk_index", 0)))), col);
+
+        // 60a drops x, shared and z. B still owns `shared`, so the sweep keeps it.
+        var result = writeManifestManySeeded(TENANT_A, List.of(
+            Map.<String, Object>of("doc_id", "swp.60a", "rows", List.<Map<String, Object>>of(
+                Map.<String, Object>of("position", 0, "chash", ch("swp60-new"), "chunk_index", 0)))), col,
+            null, true);
+
+        var d = onlyDetail(result);
+        assertThat(d).containsEntry("dropped", 3).containsEntry("swept", 2).containsEntry("kept", 1);
+        assertThat(d.get("swept_chashes"))
+            .as("exactly the chashes the sweep deleted: the kept shared chash is NOT listed")
+            .isEqualTo(List.of(x, z).stream().sorted().toList());
+        assertThat(d).containsEntry("swept_chashes_truncated", false);
+        assertThat(chunk384Exists(TENANT_A, col, x)).isFalse();
+        assertThat(chunk384Exists(TENANT_A, col, z)).isFalse();
+        assertThat(chunk384Exists(TENANT_A, col, shared)).isTrue();
+    }
+
+    @Test @Order(61)
+    void sweepDetail_sweptChashesAreCapped_andTheCountStaysExact() throws Exception {
+        String col = "code__swp61__minilm-l6-v2-384__v1";
+        int total = CatalogRepository.SWEPT_CHASHES_REPORT_CAP + 5;
+        List<Map<String, Object>> rows = new ArrayList<>();
+        List<String> all = new ArrayList<>();
+        for (int i = 0; i < total; i++) {
+            String c = ch("swp61-" + i);
+            all.add(c);
+            rows.add(Map.<String, Object>of("position", i, "chash", c, "chunk_index", i));
+        }
+        registerDoc(TENANT_A, "swp.61", col);
+        seedChunk384(TENANT_A, col, all.getFirst());   // registers the collection
+        writeManifestManySeeded(TENANT_A, List.of(
+            Map.<String, Object>of("doc_id", "swp.61", "rows", rows)), col);
+
+        var result = writeManifestManySeeded(TENANT_A, List.of(
+            Map.<String, Object>of("doc_id", "swp.61", "rows", List.<Map<String, Object>>of())), col,
+            null, true);
+
+        var d = onlyDetail(result);
+        assertThat(d).containsEntry("dropped", total).containsEntry("swept", total).containsEntry("kept", 0);
+        assertThat((List<?>) d.get("swept_chashes"))
+            .as("the list is bounded; swept (the count) is not").hasSize(CatalogRepository.SWEPT_CHASHES_REPORT_CAP);
+        assertThat(d).containsEntry("swept_chashes_truncated", true);
+        @SuppressWarnings("unchecked")
+        List<String> listed = (List<String>) d.get("swept_chashes");
+        assertThat(listed)
+            .as("the listed 300 are the 300 lowest, ascending: an unsorted prefix of the RETURNING"
+                + " order would not equal this")
+            .isEqualTo(all.stream().sorted().limit(CatalogRepository.SWEPT_CHASHES_REPORT_CAP).toList());
+        assertThat(result.get("swept")).isEqualTo(total);
+    }
+
+    @Test @Order(62)
+    void sweepDetail_aSweepThatDeletedNothingCarriesAnEmptyList() throws Exception {
+        String col = "code__swp62__minilm-l6-v2-384__v1";
+        String shared = ch("swp62-shared");
+        seedChunk384(TENANT_A, col, shared);
+        registerDoc(TENANT_A, "swp.62a", col);
+        registerDoc(TENANT_A, "swp.62b", col);
+        writeManifestManySeeded(TENANT_A, List.of(
+            Map.<String, Object>of("doc_id", "swp.62a", "rows", List.<Map<String, Object>>of(
+                Map.<String, Object>of("position", 0, "chash", shared, "chunk_index", 0))),
+            Map.<String, Object>of("doc_id", "swp.62b", "rows", List.<Map<String, Object>>of(
+                Map.<String, Object>of("position", 0, "chash", shared, "chunk_index", 0)))), col);
+
+        var result = writeManifestManySeeded(TENANT_A, List.of(
+            Map.<String, Object>of("doc_id", "swp.62a", "rows", List.<Map<String, Object>>of(
+                Map.<String, Object>of("position", 0, "chash", ch("swp62-new"), "chunk_index", 0)))), col,
+            null, true);
+
+        var d = onlyDetail(result);
+        assertThat(d).containsEntry("swept", 0).containsEntry("kept", 1);
+        assertThat((List<?>) d.get("swept_chashes")).isEmpty();
+        assertThat(d).containsEntry("swept_chashes_truncated", false);
     }
 }

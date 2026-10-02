@@ -115,6 +115,14 @@ set -euo pipefail
 # anonymous install ping must not count them (tests/test_e2e_no_telemetry_lint.py).
 export NX_NO_TELEMETRY=1
 
+# nexus-0kmat critique S1: the vector leg below carries the cut battery's only positive control (one
+# deliberate ownerless write the engine must count and log). The knob that drops it would leave a green
+# cut gate with no control, so cut mode refuses it up front rather than after a 20-minute run.
+if [ "${NX_CUT_MODE:-0}" = 1 ] && [ -n "${NEXUS_GATE_NO_VECTOR_SMOKE:-}" ]; then
+  echo "[gate] NEXUS_GATE_NO_VECTOR_SMOKE is set in cut mode: it drops the vector leg's deliberate ownerless write, the only positive control for the engine's refusal counters (nexus-0kmat). Unset it." >&2
+  exit 2
+fi
+
 
 # ── Vacuity-guard summary-line parser (nexus-edwlp Task 6) ──────────────────
 # Extracts a count (e.g. "77" from "77 passed") out of a pytest -q summary
@@ -310,6 +318,10 @@ source "$REPO_ROOT/scripts/lib/release-props-lease.sh"   # nexus-56qvf: holds th
 GATE_HOME="$SCRATCH/home"
 fence_home "$REAL_HOME" "$GATE_HOME" ".config/nexus"
 export HOME="$GATE_HOME"
+# nexus-q81g7: the service manager is not isolated by HOME. Empty
+# XDG_RUNTIME_DIR / no bus address (Linux) and NX_FENCED_HOME, which makes every
+# `nx` this gate spawns refuse mutating launchctl/systemctl verbs.
+fence_home_env "$GATE_HOME"
 # uv resolves its cache off HOME at process start; pin it explicitly so the
 # mirror is not the only thing between this gate and a cold 250-package
 # resolve.
@@ -614,7 +626,7 @@ echo "[gate] throwaway service on 127.0.0.1:$SERVICE_PORT"
 # LIVED_IN_EXPECTED / CLOUD_MODE_EXPECTED below: every assertion increments
 # SMOKE_PASSED, and a mismatch against SMOKE_EXPECTED FAILS the gate — an
 # unreachable service or a malformed response fails loud, never skips.
-SMOKE_EXPECTED=13  # 12->13 (nexus-wbfpw.10 live(c)): the vector leg writes a manifest row so its chunk has a live owner; 11->12 (nexus-ft04v.7): the vector leg registers its collection first; 12->11 at 3b2901141: the manifest/verify leg was retired
+SMOKE_EXPECTED=14  # 9 pre-vector checks + 5 vector-leg checks (collections/upsert, write_many, owned upsert-chunks re-post, ownerless upsert-chunks refused, search); NEXUS_GATE_NO_VECTOR_SMOKE drops the 5
                    # with the catalog-030 subtraction but the count was not
                    # lowered, making the gate structurally unpassable (caught
                    # by its own vacuity guard in the 7.8.0 battery).
@@ -767,6 +779,13 @@ smoke_check "GET /v1/catalog/show -> index_state==failed (fence round-trip)" "d.
 # prior local-mode use already has it (verified present on this box; no
 # download is triggered by this leg). NEXUS_GATE_NO_VECTOR_SMOKE=1 drops the
 # leg (and SMOKE_EXPECTED with it) if that assumption stops holding somewhere.
+#
+# GATE_OWNERLESS_CONTROLS counts the DELIBERATE ownerless writes this gate sends its engine (the
+# negative control below, one per run, none when the vector leg is dropped). The end-of-journey
+# engine read (candidate_engine.py refusals --controls) must find EXACTLY that many refusals in
+# the counters and the engine log, so the control doubles as a positive control for both. Bump it
+# next to any control added here, never at the read.
+GATE_OWNERLESS_CONTROLS=0
 if [ -z "${NEXUS_GATE_NO_VECTOR_SMOKE:-}" ]; then
   SMOKE_CHASH="$(python3 -c "import hashlib;print(hashlib.sha256(b'gate-smoke-chunk-$SMOKE_UID').hexdigest())")"
   SMOKE_VEC_COLLECTION="knowledge__gate-smoke__bge-base-en-v15-768__v1"
@@ -779,21 +798,54 @@ if [ -z "${NEXUS_GATE_NO_VECTOR_SMOKE:-}" ]; then
   [ "$SMOKE_CODE" = "200" ] || smoke_fail "POST /v1/catalog/collections/upsert"
   smoke_check "POST /v1/catalog/collections/upsert -> ok" "d.get('ok') is True"
 
+  # RDR-223 P3: the chunk and its owner land in ONE request. The engine refuses
+  # an ownerless chunk write (upsert-chunks / store-put), so this leg no longer
+  # posts the raw route and then a manifest write: it posts the combined write
+  # the real client uses (write_many with an inline `chunks` array), reusing the
+  # smoke document registered in step c. RDR-192 Step 5 still applies: a chunk is
+  # searchable only when a manifest row ties it to a live document in the same
+  # collection, and the combined write commits that row with the chunk.
+  smoke_request POST /v1/catalog/manifest/write_many \
+    "$(python3 -c "import json;print(json.dumps({'collection':'$SMOKE_VEC_COLLECTION','docs':[{'doc_id':'$SMOKE_DOC_TUMBLER','rows':[{'position':0,'chash':'$SMOKE_CHASH'}]}],'chunks':[{'chash':'$SMOKE_CHASH','text':'$SMOKE_CHUNK_TEXT','metadata':{'source':'gate-smoke'}}]}))")"
+  [ "$SMOKE_CODE" = "200" ] || smoke_fail "POST /v1/catalog/manifest/write_many"
+  smoke_check "POST /v1/catalog/manifest/write_many -> chunks_written==1 (the combined write stored one chunk; the search below proves its owner is live)" "d.get('chunks_written')==1"
+
+  # Raw-route coverage: re-post the SAME, now owned, chash through
+  # /v1/vectors/upsert-chunks. An owned write is valid before and after the
+  # RDR-223 P3.2 refusal of ownerless writes, so this keeps the route under
+  # the gate without seeding an orphan.
   smoke_request POST /v1/vectors/upsert-chunks \
     "$(python3 -c "import json;print(json.dumps({'collection':'$SMOKE_VEC_COLLECTION','ids':['$SMOKE_CHASH'],'documents':['$SMOKE_CHUNK_TEXT'],'metadatas':[{'source':'gate-smoke'}]}))")"
-  [ "$SMOKE_CODE" = "200" ] || smoke_fail "POST /v1/vectors/upsert-chunks"
-  smoke_check "POST /v1/vectors/upsert-chunks -> upserted=1" "d.get('upserted')==1"
+  [ "$SMOKE_CODE" = "200" ] || smoke_fail "POST /v1/vectors/upsert-chunks (owned chash)"
+  smoke_check "POST /v1/vectors/upsert-chunks (owned chash) -> upserted=1" "d.get('upserted')==1"
 
-  # RDR-192 Step 5 (fc99baac9, nexus-wbfpw.10): every content read goes
-  # through live(c), so a chunk is searchable only when a catalog manifest
-  # row ties it to a live (non-tombstoned) document in the same collection.
-  # A real client always follows a chunk write with a manifest write; so
-  # does this leg, reusing the smoke document registered in step c. Without
-  # it the search below returns nothing against engine-service-v0.1.137+.
-  smoke_request POST /v1/catalog/manifest/write \
-    "$(python3 -c "import json;print(json.dumps({'doc_id':'$SMOKE_DOC_TUMBLER','collection':'$SMOKE_VEC_COLLECTION','rows':[{'position':0,'chash':'$SMOKE_CHASH'}]}))")"
-  [ "$SMOKE_CODE" = "200" ] || smoke_fail "POST /v1/catalog/manifest/write"
-  smoke_check "POST /v1/catalog/manifest/write -> ok, count=1 (chunk gets a live owner)" "d.get('ok') is True and d.get('count')==1"
+  # RDR-223 P3.2 (nexus-z0o2p.24): the NEGATIVE leg. In the default enforce mode a chash no manifest
+  # row owns is refused 422 with the typed reason a client keys on, naming the combined routes.
+  # NX_OWNERLESS_WRITE_MODE=log-only (the engine inherits it) is the writer-census posture: the same
+  # write is accepted and /v1/status counts it, so the pytest legs after this one can run and list
+  # every ownerless writer in the engine log.
+  SMOKE_ORPHAN="$(python3 -c "import hashlib;print(hashlib.sha256(b'gate-smoke-orphan-$SMOKE_UID').hexdigest())")"
+  # The log-only check is a counter DELTA around this one write, never ">=1": the counter is a
+  # since-boot total, so any earlier would-refuse (another leg, a retry) would satisfy ">=1" with
+  # the write under test counted by nothing. -1 (unreadable before-value) fails the check below.
+  SMOKE_WR_BEFORE=-1
+  if [ "${NX_OWNERLESS_WRITE_MODE:-enforce}" = "log-only" ]; then
+    smoke_request GET /v1/status
+    SMOKE_WR_BEFORE="$(python3 -c "import json;print(int(json.load(open('$SMOKE_DIR/resp.json')).get('ownerless_writes_would_refuse_total',-1)))" 2>/dev/null)" || SMOKE_WR_BEFORE=-1
+  fi
+  smoke_request POST /v1/vectors/upsert-chunks \
+    "$(python3 -c "import json;print(json.dumps({'collection':'$SMOKE_VEC_COLLECTION','ids':['$SMOKE_ORPHAN'],'documents':['gate smoke orphan chunk $SMOKE_UID'],'metadatas':[{}]}))")"
+  GATE_OWNERLESS_CONTROLS=$((GATE_OWNERLESS_CONTROLS + 1))   # the one deliberate ownerless write (see the declaration above)
+  if [ "${NX_OWNERLESS_WRITE_MODE:-enforce}" = "log-only" ]; then
+    [ "$SMOKE_CODE" = "200" ] || smoke_fail "POST /v1/vectors/upsert-chunks (ownerless chash, log-only) want 200"
+    smoke_request GET /v1/status
+    smoke_check "GET /v1/status -> log-only counted the ownerless write (counter +1 over the write)" \
+      "d.get('ownerless_write_mode')=='log-only' and $SMOKE_WR_BEFORE>=0 and d.get('ownerless_writes_would_refuse_total',-1)==$SMOKE_WR_BEFORE+1"
+  else
+    [ "$SMOKE_CODE" = "422" ] || smoke_fail "POST /v1/vectors/upsert-chunks (ownerless chash) want 422"
+    smoke_check "POST /v1/vectors/upsert-chunks (ownerless chash) -> 422 ownerless_chunk_write naming write_many and append" \
+      "d.get('reason')=='ownerless_chunk_write' and '/v1/catalog/manifest/write_many' in d.get('error','') and '/v1/catalog/manifest/append' in d.get('error','')"
+  fi
 
   smoke_request POST /v1/vectors/search \
     "$(python3 -c "import json;print(json.dumps({'query':'$SMOKE_CHUNK_TEXT','collections':['$SMOKE_VEC_COLLECTION'],'n_results':5}))")"
@@ -892,6 +944,21 @@ if [ "$CLOUD_MODE_COUNT" -ne "$CLOUD_MODE_EXPECTED" ]; then
   exit 1
 fi
 
+# The mandatory_regression_pin carve-out (nexus-z0o2p.41). The GitHub-backed pins skip under this
+# gate's fenced HOME (the fence never mirrors ~/.config/gh), and conftest holds a skipped pin to a zero
+# budget, so they read this gate FAILED on every run. They run in tests/e2e/mandatory-pins-gate.sh,
+# under a real HOME. Same exact-count discipline as the carve-outs above, same reason: the marker
+# must never become a place to park a red test, and a pin that left this selection must still exist.
+# The selection expression and the count live in tests/e2e/lib/mandatory_pins.sh, shared with that gate.
+# shellcheck source=lib/mandatory_pins.sh
+. "$REPO_ROOT/tests/e2e/lib/mandatory_pins.sh"
+MANDATORY_PIN_COUNT="$(NX_TEST_T2_SUBSTRATE=none uv run pytest -m "$MANDATORY_PIN_MARK_EXPR" --collect-only -q 2>/dev/null | grep -cE '::' || true)"
+if [ "$MANDATORY_PIN_COUNT" -ne "$MANDATORY_PIN_EXPECTED" ]; then
+  echo "[gate] VACUITY GUARD TRIPPED: mandatory_regression_pin carve-out is $MANDATORY_PIN_COUNT tests, expected exactly $MANDATORY_PIN_EXPECTED" >&2
+  echo "[gate] (a new pin must bump MANDATORY_PIN_EXPECTED in tests/e2e/lib/mandatory_pins.sh; it runs in tests/e2e/mandatory-pins-gate.sh, not here)" >&2
+  exit 1
+fi
+
 set +e
 # NEXUS_CONFIG_DIR pinned to the scratch dir (2026-07-13): without it,
 # get_credential()'s config.yml fallback read the OPERATOR's real
@@ -937,7 +1004,7 @@ NX_SERVICE_HOST=127.0.0.1 NX_SERVICE_PORT="$SERVICE_PORT" NX_SERVICE_TOKEN="$SER
   NX_GATE_SERVICE_EXPECTED=1 \
   NX_GATE_SERVICE_HOST=127.0.0.1 NX_GATE_SERVICE_PORT="$SERVICE_PORT" NX_GATE_SERVICE_TOKEN="$SERVICE_TOKEN" \
   NEXUS_CONFIG_DIR="$SCRATCH" \
-  uv run pytest -m "integration and not lived_in and not cloud_mode" -q -rs --color=no "$@" 2>&1 | tee "$SCRATCH/pytest.out"
+  uv run pytest -m "$LSG_PYTEST_MARK_EXPR" -q -rs --color=no "$@" 2>&1 | tee "$SCRATCH/pytest.out"
 STATUS=${PIPESTATUS[0]}
 set -e
 
@@ -955,6 +1022,32 @@ set -e
 # editing this script.
 FLOOR="${NX_GATE_FLOOR:-440}"
 BUDGET="${NX_GATE_BUDGET:-40}"
+
+# nexus-0kmat: name the engine this gate served and read its ownerless-write
+# counters and engine log, while it is still up (the EXIT trap stops it). The
+# pytest run above drives the heaviest writers in the repo against this one
+# engine, and a refused write 422s inside a test only when the test asserts on
+# it; a background or hook writer fails in the engine log alone, which is the
+# half this read adds. The candidate here is the artifacts jar this gate copied
+# in (NX_GATE_ARTIFACTS), judged by sha256, so a battery cut that names a
+# different --candidate-engine cannot make this leg pass against the wrong
+# bytes. Outside cut mode the two lines are printed and never fail the gate. In cut mode the reading must
+# equal this gate's own declared control (GATE_OWNERLESS_CONTROLS), not zero: the smoke leg sent one
+# deliberate ownerless write to this same engine, so a zero would mean the counter is dead.
+GATE_CAND_ENV=()
+[ -z "${NX_GATE_ARTIFACTS:-}" ] || [ -z "${GATE_JAR_REL:-}" ] \
+  || GATE_CAND_ENV=("NX_CANDIDATE_ENGINE=$NX_GATE_ARTIFACTS/$GATE_JAR_REL")
+GATE_ENGINE_FAIL=0
+for _cand_cmd in identity refusals; do
+  env ${GATE_CAND_ENV[@]+"${GATE_CAND_ENV[@]}"} \
+    python3 "$REPO_ROOT/tests/e2e/lib/candidate_engine.py" "$_cand_cmd" "$SCRATCH" --label local-service-gate \
+      --controls "$GATE_OWNERLESS_CONTROLS" \
+    || GATE_ENGINE_FAIL=1
+done
+if [ "$GATE_ENGINE_FAIL" = 1 ] && [ "${NX_CUT_MODE:-0}" = 1 ]; then
+  echo "[gate] ENGINE CANDIDATE/REFUSAL CHECK FAILED (cut mode): see CANDIDATE ENGINE CHECK FAILED above" >&2
+  STATUS=1
+fi
 
 SUMMARY_LINE="$(select_summary_line "$SCRATCH/pytest.out")"
 PASSED_COUNT="$(parse_summary_count passed "$SUMMARY_LINE")"

@@ -982,8 +982,10 @@ def get_collection_row(name: str, *, refresh: bool = True) -> dict | None:
     ``None`` covers two cases the caller cannot tell apart from here alone
     (and does not need to: both mean "this name is not a live, registered
     collection with catalog attributes"): the name was never registered,
-    or it is registered but owns zero live chunks and so never appears in
-    the ``/v1/vectors/stats`` response at all (see
+    or it is registered but holds no stored chunk at all and so never
+    appears in the ``/v1/vectors/stats`` response (that response has a row
+    for every collection that physically holds any chunk, live(c) or not,
+    RDR-192 Step 5 amendment; see
     :func:`_refresh_collections_cache_if_stale`'s docstring on the
     stats-route population). A caller reading an EXISTING collection's
     attributes and getting ``None`` back should fail loud rather than
@@ -1964,7 +1966,32 @@ taxonomy_assign_batch_hook.batch_grain = "flush"
 # ``hook_failures`` (the durable record ``nx taxonomy status``/triage
 # reads) is unaffected: it is written unconditionally, by a separate
 # function, earlier in the same HookRegistry.fire_batch except block.
+#
+# Which per-run collectors share the flag (T2 nexus/mcp-infra-collector-gating):
+# the two above plus every other LIST a long-lived process can reach:
+# ``_COMPLETE_REFUSALS`` (``note_write._stamp_refused`` on the MCP store_put
+# path), ``_SUPERSEDED_SWEEP_SKIPS`` (``MetadataMergingCatalog._note``) and
+# ``_EPHEMERAL_REGISTRATION_SKIPS`` (indexer-only today; gated so a future
+# long-lived caller cannot grow it). Left ungated on purpose, each with its
+# reason: the int counters (``_SUPERSEDED_SWEEP_SWEPT_TOTAL``,
+# ``_SUPERSEDED_SWEEP_DEFERRED_DISCARDED``, ``_RECONCILED_COLLECTIONS_COUNT``)
+# are O(1); ``_MANIFEST_PARTIAL_DOC_SKIP_COUNTS`` and the ``_PENDING_SWEEP_*``
+# state are fed only by ``manifest_write_batch_hook``, which
+# ``note_write.fire_note_chains`` excludes, so the MCP server never reaches
+# them, and the pending-sweep state is live data a later completion fence
+# consumes, not a report, so a skipped stash would silently drop a sweep.
 _identity_drop_collectors_active = False
+
+
+def _arm_run_collectors() -> None:
+    """Mark this process as running a CLI index run (see the section comment
+    above). Every per-run collector whose reset a CLI caller can reach on its
+    own arms through here, so a caller resetting only that collector still gets
+    it recording. One-way within a process, by design: a CLI invocation is
+    short-lived, and the MCP server never resets."""
+    global _identity_drop_collectors_active
+    _identity_drop_collectors_active = True
+
 
 _manifest_write_failures_lock = threading.Lock()
 _MANIFEST_WRITE_FAILURES: list[str] = []
@@ -2109,15 +2136,36 @@ def _record_manifest_partial_doc_skip(doc_id: str) -> int:
 # rows stayed at chunk_count=0 and were invisible to catalog-aware search.
 _manifest_identity_drops_lock = threading.Lock()
 _MANIFEST_IDENTITY_DROPS: list[dict] = []
+# nexus-z0o2p.20: {file path: cause} for every drop that named its file, so a
+# caller can ask "was THIS file dropped?" in O(1) (the CLI progress counter)
+# and a run can find the files dropped AFTER its up-front refusal pass (the
+# oversize backstop, the flush) without re-walking the list per file.
+_IDENTITY_DROPPED_FILES: dict[str, str] = {}
 
 
 def get_manifest_identity_drops() -> list[dict]:
     """Batches dropped for missing doc identity this process/run.
 
-    Each entry: ``{"collection": str, "batch_size": int}``. Snapshot copy.
+    Each entry: ``{"collection": str, "batch_size": int}``, plus ``"written": False``
+    when the chunks were refused before any write (RDR-223,
+    :func:`_record_manifest_identity_drop`'s ``written``) and ``"files"`` when the
+    drop names its files. Snapshot copy.
     """
     with _manifest_identity_drops_lock:
         return [dict(d) for d in _MANIFEST_IDENTITY_DROPS]
+
+
+def get_identity_dropped_files() -> dict[str, str]:
+    """``{file path: cause}`` for every drop this process/run that named its file
+    (nexus-z0o2p.20). Snapshot copy; empty when no CLI run armed the collector."""
+    with _manifest_identity_drops_lock:
+        return dict(_IDENTITY_DROPPED_FILES)
+
+
+def is_identity_dropped_file(path: object) -> bool:
+    """Was *path* named by an identity drop this run? O(1)."""
+    with _manifest_identity_drops_lock:
+        return str(path) in _IDENTITY_DROPPED_FILES
 
 
 def reset_manifest_identity_drops() -> None:
@@ -2129,18 +2177,40 @@ def reset_manifest_identity_drops() -> None:
     _identity_drop_collectors_active = True
     with _manifest_identity_drops_lock:
         _MANIFEST_IDENTITY_DROPS.clear()
+        _IDENTITY_DROPPED_FILES.clear()
 
 
-def _record_manifest_identity_drop(collection: str, batch_size: int) -> None:
+def _record_manifest_identity_drop(
+    collection: str, batch_size: int, *, written: bool = True,
+    files: "list[dict] | None" = None,
+) -> None:
     """No-op when no active CLI index run has reset the collector
     (nexus-wbfpw.29 round 2) — see the section comment above
-    ``_manifest_write_failures_lock``."""
+    ``_manifest_write_failures_lock``.
+
+    *written* (RDR-223, nexus-z0o2p.13): ``True`` (the default) is the original
+    meaning, chunks stored with no manifest rows. ``False`` is a document refused
+    BEFORE any write because it has no catalog document to own its chunks
+    (``doc_indexer._index_document``); the entry then carries ``"written": False``
+    so the summary can say nothing was stored instead of pointing at a reconcile
+    that has nothing to repair.
+
+    *files* (nexus-z0o2p.20, RDR-223 P2.10): ``[{"file", "chunks", "cause"}, ...]``
+    naming the files behind the drop, so the run summary can say which ones and
+    why (``nx index repo`` refuses a file with no catalog document before
+    chunking it, and again at the flush). Absent for callers that have no file
+    to name."""
     if not _identity_drop_collectors_active:
         return
+    entry: dict = {"collection": collection, "batch_size": batch_size}
+    if not written:
+        entry["written"] = False
+    if files:
+        entry["files"] = [dict(f) for f in files]
     with _manifest_identity_drops_lock:
-        _MANIFEST_IDENTITY_DROPS.append(
-            {"collection": collection, "batch_size": batch_size}
-        )
+        _MANIFEST_IDENTITY_DROPS.append(entry)
+        for f in files or ():
+            _IDENTITY_DROPPED_FILES[str(f["file"])] = str(f.get("cause", "unexplained"))
 
 
 # nexus-5xn3k.4 (RUNFENCE): docs whose manifest rows were written correctly but
@@ -2164,7 +2234,10 @@ def get_complete_refusals() -> list[str]:
 
 def reset_complete_refusals() -> None:
     """Clear the collector (CLI callers reset at the start of an indexing
-    run, mirroring ``reset_manifest_write_failures``)."""
+    run, mirroring ``reset_manifest_write_failures``). Also arms
+    ``_identity_drop_collectors_active``: recording is a no-op until a CLI
+    run has reset (see :func:`_arm_run_collectors`)."""
+    _arm_run_collectors()
     with _complete_refusals_lock:
         _COMPLETE_REFUSALS.clear()
 
@@ -2195,12 +2268,16 @@ def get_ephemeral_registration_skips() -> list[dict]:
 
 def reset_ephemeral_registration_skips() -> None:
     """Clear the collector (CLI callers reset at the start of an indexing
-    run, mirroring ``reset_manifest_write_failures``)."""
+    run, mirroring ``reset_manifest_write_failures``). Also arms
+    ``_identity_drop_collectors_active`` (see :func:`_arm_run_collectors`)."""
+    _arm_run_collectors()
     with _ephemeral_registration_skips_lock:
         _EPHEMERAL_REGISTRATION_SKIPS.clear()
 
 
 def _record_ephemeral_registration_skip(path: str, owner: str, reason: str = "") -> None:
+    if not _identity_drop_collectors_active:
+        return
     with _ephemeral_registration_skips_lock:
         _EPHEMERAL_REGISTRATION_SKIPS.append(
             {"path": path, "owner": owner, "reason": reason}
@@ -2208,9 +2285,16 @@ def _record_ephemeral_registration_skip(path: str, owner: str, reason: str = "")
 
 
 def _record_complete_refusal(doc_id: str) -> None:
+    # No-op until a CLI run has reset the collectors (nexus-wbfpw.29 round 2
+    # pattern, see the section comment above ``_identity_drop_collectors_active``):
+    # the MCP store_put path reaches this through ``note_write._stamp_refused``
+    # and never reads the list, so recording there only grows it for the life
+    # of the process.
     # Idempotent per doc_id: a duplicated engine response row (or the
     # count-mismatch conservative branch overlapping the listed refusals)
     # must not double-count once .6 wires a count-based consumer.
+    if not _identity_drop_collectors_active:
+        return
     with _complete_refusals_lock:
         if doc_id not in _COMPLETE_REFUSALS:
             _COMPLETE_REFUSALS.append(doc_id)
@@ -2227,7 +2311,8 @@ _SUPERSEDED_SWEEP_SWEPT_TOTAL = 0
 _SUPERSEDED_SWEEP_SKIPS: list[dict] = []
 # nexus-4pj54: deferred-sweep entries a failed or fenced run threw away
 # (``discard_deferred_superseded_vectors``). Their superseded rows stay in
-# T3 until ``nx t3 gc``.
+# T3 until the engine's reapable predicate takes them (30 days after they lost
+# their last owner), which ``nx t3 gc`` then moves into quarantine.
 _SUPERSEDED_SWEEP_DEFERRED_DISCARDED = 0
 
 
@@ -2267,11 +2352,14 @@ def get_superseded_sweep_stats() -> dict:
 
 def reset_superseded_sweep_stats() -> None:
     """Clear the collector (CLI callers reset at the start of an indexing
-    run, mirroring ``reset_manifest_write_failures``). Does not touch the
+    run, mirroring ``reset_manifest_write_failures``). Also arms
+    ``_identity_drop_collectors_active`` (see :func:`_arm_run_collectors`).
+    Does not touch the
     pending deferred-sweep entries themselves: those are live state, not
     counters. It only forgets which of them this run stashed, so the next
     run's pending stat does not inherit them."""
     global _SUPERSEDED_SWEEP_SWEPT_TOTAL, _SUPERSEDED_SWEEP_DEFERRED_DISCARDED
+    _arm_run_collectors()
     with _pending_sweep_lock:
         _PENDING_SWEEP_STASHED_SINCE_RESET.clear()
     with _superseded_sweep_stats_lock:
@@ -2289,6 +2377,12 @@ def _record_superseded_swept(count: int) -> None:
 
 
 def _record_superseded_sweep_skip(doc_id: str, collection: str | None, reason: str) -> None:
+    # No-op until a CLI run has reset the collectors: MetadataMergingCatalog
+    # (the MCP store path) records here and nothing in that process reads the
+    # list. The two int counters beside it stay unconditional: O(1) memory,
+    # no growth to bound.
+    if not _identity_drop_collectors_active:
+        return
     with _superseded_sweep_stats_lock:
         _SUPERSEDED_SWEEP_SKIPS.append(
             {"doc_id": doc_id, "collection": collection or "", "reason": reason}
@@ -2577,11 +2671,13 @@ def _apply_combined_write_response(
 
 
 # nexus-4pj54: a REPLACE whose batch is not PROVABLY the whole document
-# (a streaming multi-batch upload's first batch legitimately carries
-# position 0 -- the position-0 gate above -- without being complete; see
-# doc_indexer.py's ``_index_pdf_incremental`` and pipeline_stages.py's
-# ``uploader_loop``, neither of which ever populates ``manifest_complete``
-# for the same reason) must not sweep its dropped chashes immediately --
+# (a multi-batch upload's first batch legitimately carries position 0 --
+# the position-0 gate above -- without being complete. The two PDF producers
+# that used to land here, doc_indexer.py's ``_index_pdf_incremental`` and
+# pipeline_stages.py's ``uploader_loop``, now write through the multi-batch
+# writer (RDR-223, nexus-z0o2p.11/.15), which sweeps after its last request
+# and never reaches this hook; the reasoning stands for any producer that
+# still does) must not sweep its dropped chashes immediately --
 # they may be rows a LATER batch in the same run is about to re-append.
 # Measured (T2 nexus/swept-count-streaming-reindex-2026-09-25): a 66-chunk
 # PDF re-index reported "swept 64" against 2 truly superseded chashes; 62
@@ -2598,9 +2694,9 @@ def _apply_combined_write_response(
 # only, by design: an interrupted run loses its pending entry rather than
 # risking deletion of a row a later batch was about to re-append -- no sweep
 # beats a wrong sweep. Superseded rows left unswept this way stay in T3
-# until an operator runs ``nx t3 gc`` (manual, the only backstop that exists
-# today); the automatic reaper is planned in RDR-192 Phase 3 (nexus-2x9xa,
-# OPEN) and is not built.
+# until an operator runs ``nx t3 gc`` (manual) or the engine's hourly reaper
+# (RDR-192 Step 9, nexus-2x9xa) quarantines them 30 days after they lose
+# their owner.
 #
 # Concurrent runs on one doc_id in one process share this entry (keyed on
 # doc_id alone, no run epoch). Epoch fencing does NOT cover it: the fence
@@ -2609,7 +2705,7 @@ def _apply_combined_write_response(
 # more batch and then, on discovering the fence, discard the MERGED entry,
 # the newer owner's candidates included. The newer owner's completion then
 # finds nothing to sweep. Accepted residual, safe direction only: rows are
-# left for ``nx t3 gc``, never wrongly deleted.
+# left for the reapable predicate and ``nx t3 gc``, never wrongly deleted.
 _pending_sweep_lock = threading.Lock()
 _PENDING_SWEEP_CANDIDATES: dict[str, tuple[str, set[str]]] = {}
 # doc_ids stashed since the last ``reset_superseded_sweep_stats``. The
@@ -2704,7 +2800,8 @@ def discard_deferred_superseded_vectors(doc_id: str) -> int:
     ``_fence_fail``). The manifest is not confirmed complete on any of these
     paths, so a sweep could delete a row the document
     still needs; holding the entry instead would leak it for the life of
-    the process. The superseded rows stay in T3 until ``nx t3 gc``; the
+    the process. The superseded rows stay in T3 until they are reapable and
+    ``nx t3 gc`` moves them; the
     discard is counted in :func:`get_superseded_sweep_stats` so the run
     summary names it. Returns the number of candidate chashes dropped
     (0 when nothing was pending). Never raises.
@@ -2723,6 +2820,16 @@ def discard_deferred_superseded_vectors(doc_id: str) -> int:
         collection=collection, candidates=len(candidates),
     )
     return len(candidates)
+
+
+def _union_guard_reason(orphaned: object) -> str:
+    """Why the union guard returned no orphan, for the ``superseded_sweep_kept``
+    event (nexus-wbfpw.35): ``orphaned_chashes`` fails open to an empty result, so
+    "every candidate is shared with another live document" and "the reverse lookup
+    could not be made" look alike without this."""
+    if getattr(orphaned, "lookup_failed", False):
+        return "reverse_lookup_failed"
+    return "shared_with_another_live_document"
 
 
 def _sweep_superseded_vectors(cat, doc_id, before: set[str], chunks: list[dict],
@@ -2749,8 +2856,10 @@ def _sweep_superseded_vectors(cat, doc_id, before: set[str], chunks: list[dict],
     sees MANIFESTED references, so it cannot tell a chash that fell out of
     THIS document's manifest from a chash that never had one at all — a
     manifest-less legacy ``store_put`` / ``nx store put`` note (reads hide
-    it since RDR-192 Step 5, but deleting sweeps keep it until Step 11
-    removes this guard). Surviving
+    it since RDR-192 Step 5, but deleting sweeps keep it, permanently: RDR-192
+    Step 11 retains this guard by decision, Sam 2026-10-02, because a legacy
+    note's chash can reach a dropped set through an unrelated document that
+    shared its text, and the delete has no notes guard of its own). Surviving
     union-guard candidates are additionally checked against
     ``notes_provider()`` (typically ``nexus.indexer_utils.live_note_chashes``
     over a ``CollectionDocumentsCache``-memoized document list — round 2
@@ -2796,14 +2905,16 @@ def _sweep_superseded_vectors(cat, doc_id, before: set[str], chunks: list[dict],
     orphaned = orphaned_chashes(reader, doc_id, dropped, collection=collection)
     shared = len(dropped) - len(orphaned)
     if not orphaned:
-        # nexus-wbfpw.12: union guard cleared every candidate — every
-        # dropped chash is shared with another live document, nothing
+        # nexus-wbfpw.12: union guard cleared every candidate, so nothing
         # reaches the note lookup or a delete. Log the kept count so this
         # is not indistinguishable, in the logs, from "nothing to do".
+        # nexus-wbfpw.35: and say why: every dropped chash is shared with
+        # another live document, OR the reverse lookup failed and nothing
+        # could be proven orphaned (fail-open).
         structlog.get_logger().info(
             "superseded_sweep_kept", site="_sweep_superseded_vectors",
             collection=collection, doc_id=doc_id, dropped=len(dropped),
-            kept=shared, kept_notes=0)
+            kept=shared, kept_notes=0, reason=_union_guard_reason(orphaned))
         return
     try:
         notes = notes_provider()
@@ -2967,7 +3078,7 @@ def _sweep_superseded_vectors_many(
         structlog.get_logger().info(
             "superseded_sweep_kept", site="_sweep_superseded_vectors_many",
             collection=collection, doc_id=_batch_label, dropped=len(candidates),
-            kept=shared, kept_notes=0)
+            kept=shared, kept_notes=0, reason=_union_guard_reason(orphaned))
         return
     try:
         notes = notes_provider()
@@ -3154,13 +3265,11 @@ def _manifest_write_loop(cat, by_doc, collection: str, *, reader,
             # continuation slice, and replacing would DELETE its
             # earlier rows (silent manifest corruption). The flush-grain
             # producer (ChunkBatcher) is file-atomic so position 0 is
-            # always present there; the streaming PDF pipeline
-            # (pipeline_stages.uploader_loop) and doc_indexer's
-            # ``_index_pdf_incremental`` ALSO land here with position 0
-            # in their FIRST batch even though that batch is NOT the
-            # whole document (nexus-4pj54 correction — this comment
-            # previously assumed only a file-atomic producer could reach
-            # this branch). The CATALOG replace below is still correct
+            # always present there. A multi-batch producer that lands here
+            # carries position 0 in its FIRST batch even though that batch
+            # is NOT the whole document (nexus-4pj54 correction). The PDF
+            # producers that did so no longer reach this hook: they write
+            # through the multi-batch writer (RDR-223). The CATALOG replace below is still correct
             # for a partial-first-batch producer (later batches append
             # onto it); what is NOT safe for one is treating the replace
             # as proof of completeness for the T3 SWEEP, which is why that

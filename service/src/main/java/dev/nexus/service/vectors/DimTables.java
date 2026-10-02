@@ -6,6 +6,9 @@ import dev.nexus.service.jooq.nexus.Tables;
 import org.jooq.Field;
 import org.jooq.JSONB;
 import org.jooq.Table;
+import org.jooq.impl.DSL;
+import org.jooq.impl.SQLDataType;
+import java.time.OffsetDateTime;
 import java.util.Map;
 
 /**
@@ -70,11 +73,23 @@ public final class DimTables {
         // ChunkTable column uses (chunkText/embedding/metadata) -- not a
         // static reference into codegen's Tables.CHUNKS.RETENTION. It
         // replaces the ad-hoc DSL.field(DSL.name("retention"), ...)
-        // placeholder PgVectorRepository#referenceOnlyInsertQuery carried
+        // placeholder the (since removed) reference-only INSERT builder carried
         // before the column existed in the migrated schema jOOQ codegen
         // ran against -- a misspelled column name here still fails only
         // at runtime, exactly like every other field in this record.
-        Field<String> retention
+        Field<String> retention,
+        // nexus-wbfpw.43 (vectors-020-chunks-last-written-at.xml): TIMESTAMPTZ NOT NULL
+        // DEFAULT now(), the reapable(c) grace anchor. An UPDATE sets it to now() ONLY for
+        // a client write that re-writes an existing chunk (see lastWrittenNow());
+        // maintenance and stamping UPDATEs (metadata stamps, collection re-home, rename,
+        // move) must never touch it. Every INSERT that omits the column takes DEFAULT
+        // now(), including the quarantine and return-from-quarantine SQL functions'
+        // INSERTs (catalog-037-1, catalog-043): a move into or out of quarantine DOES
+        // reset it. That over-refreshes, which is the safe direction (a reap is delayed,
+        // never caused), and ChunkLastWrittenAtIntegrationTest pins it. Same runtime
+        // field lookup as retention. ChunksWriterLastWrittenAtScanTest lists every
+        // chunks writer and why it refreshes or not.
+        Field<OffsetDateTime> lastWrittenAt
     ) {
         @SuppressWarnings("unchecked")
         static ChunkTable of(Table<?> t, int dim) {
@@ -89,8 +104,18 @@ public final class DimTables {
                 t.field("chunk_text", String.class),
                 (Field<Vector>) t.field(embeddingColumn(dim)),
                 t.field("metadata", JSONB.class),
-                t.field("retention", String.class));
+                t.field("retention", String.class),
+                t.field("last_written_at", OffsetDateTime.class));
         }
+    }
+
+    /**
+     * {@code now()} as the value a client re-write assigns to
+     * {@link ChunkTable#lastWrittenAt()}: the SAME expression as the column's
+     * DEFAULT, so a refreshed row and a fresh insert are stamped alike.
+     */
+    public static Field<OffsetDateTime> lastWrittenNow() {
+        return DSL.function("now", SQLDataType.TIMESTAMPWITHTIMEZONE);
     }
 
     /** {@code nexus.taxonomy_centroids} accessor, embedding column selected per dim. */

@@ -7,7 +7,7 @@ Real engine substrate (``t2_service_env``) for every test that exercises
 export/import against a live catalog: owner resolution reads
 ``docs_for_chashes``/``get_manifests``/``resolve_many`` and writes
 ``register``/``write_manifest`` on the real ``HttpCatalogClient``, which a
-mocked T3 client cannot stand in for. ``test_accumulate_owner_group_*`` is
+mocked T3 client cannot stand in for. ``test_locate_owner_group_*`` is
 the one pure-unit exception (no catalog or T3 call at all).
 """
 from __future__ import annotations
@@ -36,16 +36,15 @@ from nexus.db.http_vector_client import HttpVectorClient
 from nexus.db.limits import QUOTAS
 from nexus.errors import NexusError
 from nexus.exporter import (
-    _accumulate_owner_group,
-    _manifest_rows,
+    _locate_owner_group,
     _resolve_import_owner_tumbler,
     export_collection,
     import_collection,
 )
+from tests._chunk_seed import seed_chunks_direct
 
-# nexus-wbfpw.31: only the tests that touch a real catalog/T3 substrate are
-# integration-marked (per-function below); test_accumulate_owner_group_*
-# is pure-unit (fakes only) and stays in the default fast suite.
+# Not integration-marked (nexus-wbfpw.38): the substrate provisions itself
+# and CI's default selection must run these import-owner pins.
 
 _MODEL = "bge-base-en-v15-768"
 _DIM = 768
@@ -73,8 +72,8 @@ def _owned_doc(writer, client, collection: str, owner_tumbler, title: str, conte
     chashes: list[str] = []
     for content in contents:
         chash = hashlib.sha256(content.encode()).hexdigest()
-        client.upsert_chunks_with_embeddings(
-            collection, ids=[chash], documents=[content], embeddings=[],
+        seed_chunks_direct(
+            collection, ids=[chash], documents=[content], embed=True,
             metadatas=[{
                 "title": title, "chunk_text_hash": chash,
                 "indexed_at": datetime.now(UTC).isoformat(),
@@ -87,6 +86,31 @@ def _owned_doc(writer, client, collection: str, owner_tumbler, title: str, conte
         collection=collection,
     )
     return str(tumbler), source_uri, chashes
+
+
+
+class _CombinedWrites(list):
+    """Doc ids named by every combined write; ``chashes`` are the chunk payloads those writes carried."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.chashes: set[str] = set()
+
+
+def _spy_combined_writes(monkeypatch) -> _CombinedWrites:
+    """Doc ids named by every combined write (``write_many`` / ``append_many``) the test makes, and the
+    chashes of the chunk payloads they carried."""
+    named = _CombinedWrites()
+    for name in ("write_manifest_many", "append_manifest_many"):
+        real = getattr(hcc.HttpCatalogClient, name)
+
+        def _wrap(self, docs, *a, _real=real, **kw):
+            named.extend(d for d, _ in docs)
+            named.chashes.update(c["chash"] for c in (kw.get("chunks") or ()))
+            return _real(self, docs, *a, **kw)
+
+        monkeypatch.setattr(hcc.HttpCatalogClient, name, _wrap)
+    return named
 
 
 def _read_nxexp_records(path: Path) -> list[dict]:
@@ -128,70 +152,43 @@ def _write_hand_crafted_nxexp(
                 gz.write(msgpack.packb(r, use_bin_type=True))
 
 
-# ── Unit: _accumulate_owner_group (no catalog, no T3) ───────────────────────
+# ── Unit: _locate_owner_group (no catalog, no T3) ───────────────────────────
 
 
-def test_accumulate_owner_group_position_and_uri_synthesis():
+def test_locate_owner_group_position_and_uri_synthesis():
 
     target = "knowledge__x__bge-base-en-v15-768__v1"
     groups: dict = {}
+    kw = dict(fallback_source_uri="nxexp://col/f", fallback_title="f",
+              fallback_content_type="knowledge", target_collection=target)
 
     # Explicit source_uri + explicit position: honored verbatim.
-    _accumulate_owner_group(
+    group, position = _locate_owner_group(
         groups,
         {"source_uri": "file:///a", "title": "A", "content_type": "knowledge", "position": 3},
-        "chashA",
-        fallback_source_uri="nxexp://col/f", fallback_title="f",
-        fallback_content_type="knowledge", target_collection=target,
+        **kw,
     )
-    assert groups["file:///a"]["rows"] == [(3, "chashA")]
-    assert groups["file:///a"]["content_type"] == "knowledge"
+    assert position == 3
+    assert groups["file:///a"] is group
+    assert group["content_type"] == "knowledge"
 
     # Title-only owner (no source_uri): synthesizes the SAME chroma://
     # convention catalog_store_hook_tracked uses for a title-only note.
-    _accumulate_owner_group(
-        groups, {"title": "B"}, "chashB",
-        fallback_source_uri="nxexp://col/f", fallback_title="f",
-        fallback_content_type="knowledge", target_collection=target,
-    )
+    group, position = _locate_owner_group(groups, {"title": "B"}, **kw)
     synthesized = uri_for(target, "B")
-    assert groups[synthesized]["rows"] == [(0, "chashB")]
+    assert groups[synthesized] is group and position == 0
 
-    # No owner field at all: file-fallback identity, sequential position.
-    _accumulate_owner_group(
-        groups, None, "chashC",
-        fallback_source_uri="nxexp://col/f", fallback_title="f",
-        fallback_content_type="knowledge", target_collection=target,
-    )
-    _accumulate_owner_group(
-        groups, None, "chashD",
-        fallback_source_uri="nxexp://col/f", fallback_title="f",
-        fallback_content_type="knowledge", target_collection=target,
-    )
-    assert groups["nxexp://col/f"]["rows"] == [(0, "chashC"), (1, "chashD")]
-    assert groups["nxexp://col/f"]["title"] == "f"
-
-
-def test_manifest_rows_orders_and_renumbers_colliding_positions():
-
-    # Distinct positions: kept verbatim, ordered by position.
-    assert _manifest_rows([(3, "a"), (0, "b")]) == [
-        {"chash": "b", "position": 0}, {"chash": "a", "position": 3},
-    ]
-    # A mixed file can give two chunks position 0 (explicit owner position
-    # plus a position-less record's running count): keep order, renumber,
-    # never hand write_manifest a duplicate primary key.
-    assert _manifest_rows([(0, "a"), (0, "b"), (2, "c")]) == [
-        {"chash": "a", "position": 0},
-        {"chash": "b", "position": 1},
-        {"chash": "c", "position": 2},
-    ]
+    # No owner field at all: file-fallback identity, sequential position across calls.
+    g1, p1 = _locate_owner_group(groups, None, **kw)
+    g2, p2 = _locate_owner_group(groups, None, **kw)
+    assert g1 is g2 is groups["nxexp://col/f"]
+    assert (p1, p2) == (0, 1)
+    assert g1["title"] == "f"
 
 
 # ── Round trip: multi-batch documents stay owned ────────────────────────────
 
 
-@pytest.mark.integration
 def test_round_trip_multi_batch_document_stays_owned(t2_service_env, tmp_path, monkeypatch):
 
     client = HttpVectorClient(tenant=t2_service_env)
@@ -281,7 +278,6 @@ def test_round_trip_multi_batch_document_stays_owned(t2_service_env, tmp_path, m
 # ── Legacy export (no owner, no doc_id): one document per import file ──────
 
 
-@pytest.mark.integration
 def test_legacy_export_gets_file_fallback_owner_and_is_idempotent(t2_service_env, tmp_path):
 
     client = HttpVectorClient(tenant=t2_service_env)
@@ -324,7 +320,6 @@ def test_legacy_export_gets_file_fallback_owner_and_is_idempotent(t2_service_env
 # ── --skip-existing: a skipped record still ends up owned ──────────────────
 
 
-@pytest.mark.integration
 def test_skip_existing_records_still_end_up_owned(t2_service_env, tmp_path):
 
     client = HttpVectorClient(tenant=t2_service_env)
@@ -363,7 +358,6 @@ def test_skip_existing_records_still_end_up_owned(t2_service_env, tmp_path):
 # ── One owner group failing does not strand the others ─────────────────────
 
 
-@pytest.mark.integration
 def test_one_failed_owner_group_does_not_strand_the_rest(t2_service_env, tmp_path, monkeypatch):
 
     client = HttpVectorClient(tenant=t2_service_env)
@@ -401,7 +395,6 @@ def test_one_failed_owner_group_does_not_strand_the_rest(t2_service_env, tmp_pat
 # ── Export fails loud when the catalog cannot answer ────────────────────────
 
 
-@pytest.mark.integration
 def test_export_fails_loud_when_catalog_unreachable(t2_service_env, tmp_path, monkeypatch):
 
     client = HttpVectorClient(tenant=t2_service_env)
@@ -425,7 +418,6 @@ def test_export_fails_loud_when_catalog_unreachable(t2_service_env, tmp_path, mo
 # ── Owner-tumbler resolution: code/docs use the collection's owner segment ─
 
 
-@pytest.mark.integration
 def test_resolve_import_owner_tumbler_reads_the_collection_row_not_the_name(t2_service_env):
     """nexus-wbfpw.33: the owner comes from the collection's catalog row.
     An owner segment is not always tumbler-derived (gate-xr789's
@@ -460,7 +452,6 @@ def test_resolve_import_owner_tumbler_reads_the_collection_row_not_the_name(t2_s
     assert _resolve_import_owner_tumbler(odd, reader, writer) == curator
 
 
-@pytest.mark.integration
 def test_import_into_slug_owned_code_collection_is_owned(t2_service_env, tmp_path):
     """The conexus-sdyq failure end to end: re-import into a code collection
     whose owner segment is a slug, --skip-existing, chunks already stored."""
@@ -480,8 +471,8 @@ def test_import_into_slug_owned_code_collection_is_owned(t2_service_env, tmp_pat
     for i in range(2):
         content = f"wbfpw33 slug chunk {i}"
         chash = hashlib.sha256(content.encode()).hexdigest()
-        client.upsert_chunks_with_embeddings(
-            dst, ids=[chash], documents=[content], embeddings=[],
+        seed_chunks_direct(
+            dst, ids=[chash], documents=[content], embed=True,
             metadatas=[{"chunk_text_hash": chash, "indexed_at": datetime.now(UTC).isoformat()}],
         )
         records.append({"id": chash, "document": content, "metadata": {"chunk_text_hash": chash}})
@@ -532,7 +523,6 @@ def test_import_into_slug_owned_code_collection_is_owned(t2_service_env, tmp_pat
         assert r["id"] in client.get_collection(dst).get(ids=[r["id"]], include=[])["ids"]
 
 
-@pytest.mark.integration
 def test_resolve_import_owner_tumbler_uses_knowledge_curator_for_knowledge_collection(
     t2_service_env,
 ):
@@ -553,7 +543,6 @@ def test_resolve_import_owner_tumbler_uses_knowledge_curator_for_knowledge_colle
 # ── Legacy doc_id records: owned whether their document is live, dead or gone ─
 
 
-@pytest.mark.integration
 def test_legacy_doc_id_records_are_owned_even_when_skipped(t2_service_env, tmp_path):
     """The gate-xr789 shape (conexus-sdyq): chunks already in the target with
     no manifest, carrying meta.doc_id that names a live document, a
@@ -590,8 +579,8 @@ def test_legacy_doc_id_records_are_owned_even_when_skipped(t2_service_env, tmp_p
         idx = per_doc.get(doc_id, 0)
         per_doc[doc_id] = idx + 1
         meta = {"chunk_text_hash": chash, "doc_id": doc_id, "chunk_index": idx}
-        client.upsert_chunks_with_embeddings(
-            dst, ids=[chash], documents=[content], embeddings=[],
+        seed_chunks_direct(
+            dst, ids=[chash], documents=[content], embed=True,
             metadatas=[{**meta, "indexed_at": datetime.now(UTC).isoformat()}],
         )
         records.append({"id": chash, "document": content, "metadata": meta, "chash": chash})
@@ -624,7 +613,6 @@ def test_legacy_doc_id_records_are_owned_even_when_skipped(t2_service_env, tmp_p
         assert [r.chash for r in rows] == by_doc[orig]
 
 
-@pytest.mark.integration
 def test_live_document_with_owner_and_legacy_chunks_keeps_all_of_them(t2_service_env, tmp_path):
     """A live document whose chunks arrive partly as owner-tagged records
     (with a stale meta.doc_id beside the owner) and partly as legacy
@@ -650,8 +638,8 @@ def test_live_document_with_owner_and_legacy_chunks_keeps_all_of_them(t2_service
         content = f"wbfpw31 mixed chunk {i}"
         chash = hashlib.sha256(content.encode()).hexdigest()
         meta = {"chunk_text_hash": chash, "doc_id": doc, "chunk_index": i}
-        client.upsert_chunks_with_embeddings(
-            dst, ids=[chash], documents=[content], embeddings=[],
+        seed_chunks_direct(
+            dst, ids=[chash], documents=[content], embed=True,
             metadatas=[{**meta, "indexed_at": datetime.now(UTC).isoformat()}],
         )
         rec = {"id": chash, "document": content, "metadata": meta}
@@ -667,6 +655,8 @@ def test_live_document_with_owner_and_legacy_chunks_keeps_all_of_them(t2_service
     _write_hand_crafted_nxexp(f, dst, records)
     result = import_collection(db=client, input_path=f, target_collection=dst, skip_existing=True)
     assert result["owned_count"] == 4
+    assert reader.resolve(doc).index_state == "complete", (
+        "two owner groups, one document: it is finished once, when all four records have arrived")
 
     rows = sorted(reader.get_manifest(doc), key=lambda r: r.position)
     assert [r.chash for r in rows] == chashes
@@ -674,14 +664,17 @@ def test_live_document_with_owner_and_legacy_chunks_keeps_all_of_them(t2_service
         assert chash in client.get_collection(dst).get(ids=[chash], include=[])["ids"]
 
 
-def test_import_leaves_an_existing_documents_current_manifest_alone(t2_service_env, tmp_path):
+def test_import_leaves_an_existing_documents_current_manifest_alone(t2_service_env, tmp_path, monkeypatch):
     """nexus-wbfpw.40 (Sam, 2026-09-29: keep existing). An import that
     resolves to a live document which already owns chunks must not replace
     its manifest with the file's rows: the engine's manifest write deletes
     every row for the document first, so an older export imported over a
-    re-put note hid the correction and made it reapable. The file's chunks
-    the document does not own stay unowned, and the result says how many.
-    Not integration-marked, so CI's default selection runs it."""
+    re-put note hid the correction and made it reapable. RDR-223
+    (nexus-z0o2p.19) changed what happens to the file's chunks the document
+    does not own: they are no longer stored ownerless, they are skipped and
+    counted (``unowned_count`` now means "left out of the import"), and NO
+    write of any kind reaches the document. Not integration-marked, so CI's
+    default selection runs it."""
     client = HttpVectorClient(tenant=t2_service_env)
     reader = make_catalog_reader()
     writer = make_catalog_writer(priority="interactive")
@@ -695,21 +688,28 @@ def test_import_leaves_an_existing_documents_current_manifest_alone(t2_service_e
     # The note is re-put: its manifest now names only v2.
     v2_text = "wbfpw40 version two, the correction"
     v2 = hashlib.sha256(v2_text.encode()).hexdigest()
-    client.upsert_chunks_with_embeddings(
-        coll, ids=[v2], documents=[v2_text], embeddings=[],
+    seed_chunks_direct(
+        coll, ids=[v2], documents=[v2_text], embed=True,
         metadatas=[{"title": "wbfpw40 note", "chunk_text_hash": v2,
                     "indexed_at": datetime.now(UTC).isoformat()}],
     )
     writer.write_manifest(doc, [{"chash": v2, "position": 0}], collection=coll)
 
+    writes = _spy_combined_writes(monkeypatch)
     result = import_collection(db=client, input_path=old_export, target_collection=coll, skip_existing=True)
 
     assert [r.chash for r in reader.get_manifest(doc)] == [v2], "the import replaced the current manifest"
+    assert doc not in writes, "the import must not write to a document that keeps its manifest"
     assert v2 in client.get_collection(coll).get(ids=[v2], include=[])["ids"], "the correction must stay visible"
     assert v1 not in client.get_collection(coll).get(ids=[v1], include=[])["ids"], "the old export must not resurrect v1"
+    # The read above is live-filtered, so it cannot tell "not written" from "written ownerless":
+    # nothing carrying v1 may have been sent at all.
+    assert v1 not in writes.chashes, "a kept document's chunk was sent to the engine"
     assert result["owned_count"] == 0
+    assert (result["imported_count"], result["skipped_count"]) == (0, 1), result
     assert result["unowned_count"] == 1
-    assert result["unowned_documents"] == [{"tumbler": doc, "title": "wbfpw40 note"}]
+    assert result["unowned_documents"] == [
+        {"tumbler": doc, "title": "wbfpw40 note", "index_state": None, "left_out": 1}]
 
     # The CLI turns that into a command the operator can run as printed.
     with patch("nexus.commands.store._t3", return_value=client):
@@ -723,9 +723,11 @@ def test_import_leaves_an_existing_documents_current_manifest_alone(t2_service_e
     again = import_collection(db=client, input_path=current_export, target_collection=coll, skip_existing=True)
     assert [r.chash for r in reader.get_manifest(doc)] == [v2]
     assert (again["owned_count"], again["unowned_count"]) == (1, 0)
+    assert (again["imported_count"], again["skipped_count"]) == (0, 1), again
+    assert doc not in writes
 
 
-def test_legacy_doc_id_import_leaves_an_existing_documents_manifest_alone(t2_service_env, tmp_path):
+def test_legacy_doc_id_import_leaves_an_existing_documents_manifest_alone(t2_service_env, tmp_path, monkeypatch):
     """nexus-wbfpw.40 review round: the legacy meta.doc_id shape reached the
     same replace through the per-batch manifest_write_batch_hook, which
     fired for each upserted batch BEFORE the keep-existing check and then
@@ -745,17 +747,23 @@ def test_legacy_doc_id_import_leaves_an_existing_documents_manifest_alone(t2_ser
         "id": v3, "document": v3_text,
         "metadata": {"chunk_text_hash": v3, "doc_id": doc, "chunk_index": 0},
     }])
+    writes = _spy_combined_writes(monkeypatch)
     result = import_collection(db=client, input_path=f, target_collection=coll)
 
     assert [r.chash for r in reader.get_manifest(doc)] == [v2], "the legacy import replaced the current manifest"
     assert v2 in client.get_collection(coll).get(ids=[v2], include=[])["ids"]
     assert (result["owned_count"], result["unowned_count"]) == (0, 1)
+    # RDR-223: the stale record's chunk is left out of the import, not stored hidden.
+    assert client.existing_ids(coll, [v3]) == set(), "a chunk of a kept document must not be stored"
+    assert (result["imported_count"], result["skipped_count"]) == (0, 1), result
+    assert doc not in writes
 
 
 def test_a_failed_manifest_read_never_overwrites(t2_service_env, tmp_path, monkeypatch):
     """If the existing manifest cannot be read, the document is reported as
-    failed and its manifest is not written: an unread manifest may hold
-    chunks the write would hide."""
+    failed and nothing is written to it: an unread manifest may hold chunks
+    a write would hide. The read is one batched ``get_manifests`` per page
+    (nexus-z0o2p.19), so the failure covers the documents of that page."""
     client = HttpVectorClient(tenant=t2_service_env)
     reader = make_catalog_reader()
     writer = make_catalog_writer(priority="interactive")
@@ -765,20 +773,16 @@ def test_a_failed_manifest_read_never_overwrites(t2_service_env, tmp_path, monke
     out = tmp_path / "readfail.nxexp"
     export_collection(db=client, collection_name=coll, output_path=out)
 
-    def _boom(self, doc_id):
+    def _boom(self, doc_ids):
         raise RuntimeError("wbfpw40 injected manifest read failure")
 
-    real_get = hcc.HttpCatalogClient.get_manifest
-    monkeypatch.setattr(hcc.HttpCatalogClient, "get_manifest", _boom)
-    writes: list[str] = []
-    real_write = hcc.HttpCatalogClient.write_manifest
-    monkeypatch.setattr(hcc.HttpCatalogClient, "write_manifest",
-                        lambda self, d, rows, **kw: (writes.append(d), real_write(self, d, rows, **kw))[1])
+    real_get = hcc.HttpCatalogClient.get_manifests
+    monkeypatch.setattr(hcc.HttpCatalogClient, "get_manifests", _boom)
+    writes = _spy_combined_writes(monkeypatch)
     with pytest.raises(NexusError, match="injected manifest read failure"):
         import_collection(db=client, input_path=out, target_collection=coll, skip_existing=True)
     assert doc not in writes
-    monkeypatch.setattr(hcc.HttpCatalogClient, "get_manifest", real_get)
-    monkeypatch.setattr(hcc.HttpCatalogClient, "write_manifest", real_write)
+    monkeypatch.setattr(hcc.HttpCatalogClient, "get_manifests", real_get)
     assert [r.chash for r in reader.get_manifest(doc)] == [v1]
 
 
@@ -795,8 +799,8 @@ def test_delete_then_import_restores_a_document_from_the_file(t2_service_env, tm
     export_collection(db=client, collection_name=coll, output_path=out)
     v2_text = "wbfpw40 restore v2"
     v2 = hashlib.sha256(v2_text.encode()).hexdigest()
-    client.upsert_chunks_with_embeddings(
-        coll, ids=[v2], documents=[v2_text], embeddings=[],
+    seed_chunks_direct(
+        coll, ids=[v2], documents=[v2_text], embed=True,
         metadatas=[{"title": "wbfpw40 restore note", "chunk_text_hash": v2,
                     "indexed_at": datetime.now(UTC).isoformat()}],
     )
@@ -823,8 +827,8 @@ def test_the_printed_delete_command_quotes_a_hostile_title(t2_service_env, tmp_p
     export_collection(db=client, collection_name=coll, output_path=out)
     v2_text = "wbfpw40 hostile v2"
     v2 = hashlib.sha256(v2_text.encode()).hexdigest()
-    client.upsert_chunks_with_embeddings(
-        coll, ids=[v2], documents=[v2_text], embeddings=[],
+    seed_chunks_direct(
+        coll, ids=[v2], documents=[v2_text], embed=True,
         metadatas=[{"title": title, "chunk_text_hash": v2, "indexed_at": datetime.now(UTC).isoformat()}],
     )
     writer.write_manifest(doc, [{"chash": v2, "position": 0}], collection=coll)

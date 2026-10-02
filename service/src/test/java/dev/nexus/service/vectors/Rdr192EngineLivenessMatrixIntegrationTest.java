@@ -11,6 +11,7 @@ import dev.nexus.service.db.ChashHex;
 import dev.nexus.service.db.TaxonomyRepository;
 import dev.nexus.service.db.TenantScope;
 import org.jooq.SQLDialect;
+import org.jooq.impl.SQLDataType;
 import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
@@ -20,12 +21,16 @@ import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.sql.Connection;
 import java.sql.PreparedStatement;
+import java.time.Duration;
+import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.Map;
 
+import static dev.nexus.service.jooq.nexus.Tables.CHUNK_IS_REAPABLE;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNK_LIVE_OWNERS;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.LIVE_CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATE_PROBE_384;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -462,7 +467,7 @@ class Rdr192EngineLivenessMatrixIntegrationTest {
      * from liveness): {@link PgVectorRepository#presentRows} answers "which of these
      * chashes are physically stored in this collection", ignoring ownership, for
      * callers whose question is existence, not visibility (existing_ids: catalog
-     * verify, migration ETL, skip-existing, the put_note_pieces delete guard). Every
+     * verify, migration ETL, skip-existing). Every
      * fixture row is physically in A, so all nine come back, including the six that
      * live(c) hides; a chash stored only in B does not.
      */
@@ -484,6 +489,30 @@ class Rdr192EngineLivenessMatrixIntegrationTest {
         assertThat((List<?>) vecRepo.presentRows(tenant, COLLECTION_A, List.of()).get("ids")).isEmpty();
     }
 
+    // ── fetchChunkText: the chroma:// permalink is a physical read ───────────
+
+    /**
+     * RDR-192 Phase 2 gate M7 (nexus-wbfpw.35): {@link PgVectorRepository#fetchChunkText}
+     * backs the {@code chroma://<collection>/<chash>} resolver and reads by (collection, chash)
+     * with no liveness filter, while search, get and list are live(c). That is the contract for
+     * a content-addressed permalink, so it is pinned rather than left implicit: the two rows live(c)
+     * hides in this collection (R1 unowned, R3 tombstoned-owner only) still resolve, and so does a live
+     * one.
+     */
+    @Test
+    void fetchChunkText_readsPhysically_regardlessOfLiveness() throws Exception {
+        String tenant = "wbfpw1-ro";
+        Fixture fx = seedLivenessFixture(tenant);
+
+        assertThat(vecRepo.fetchChunkText(tenant, COLLECTION_A, fx.r2())).as("R2, live").isEqualTo("r2 text");
+        assertThat(vecRepo.fetchChunkText(tenant, COLLECTION_A, fx.r1())).as("R1, unowned, hidden by live(c)")
+            .isEqualTo("r1 text");
+        assertThat(vecRepo.fetchChunkText(tenant, COLLECTION_A, fx.r3()))
+            .as("R3, owner tombstoned, hidden by live(c)").isEqualTo("r3 text");
+        assertThat(vecRepo.fetchChunkText(tenant, COLLECTION_B, fx.r1()))
+            .as("a chash stored only in A does not resolve in B").isNull();
+    }
+
     // ── P1h: hybridSearch() visibility (text_gated_search_*_<dim>) ───────────
 
     @Test
@@ -502,6 +531,29 @@ class Rdr192EngineLivenessMatrixIntegrationTest {
             List<String> visible = rows.stream().map(r -> (String) r.get("id")).toList();
             assertVisibility(visible, fx, "P1h");
         }
+    }
+
+    // ── P1p: text_gate_probe_384 (the hybrid dispatch's gate count) ──────────
+
+    /**
+     * nexus-wbfpw.35 (Phase 2 gate M2): the probe is the gate the hybrid dispatch counts to
+     * choose between the exact-rank and HNSW-first plans, and it kept the tenant-wide dead-set
+     * anti-join after vectors-019 moved every other read path onto live(c). A chunk live(c)
+     * hides was still counted, so a gate selective among live rows could read as dense. Every
+     * fixture chunk's text contains "text", so the lexical gate admits all nine and the only
+     * thing deciding presence is liveness.
+     */
+    @Test
+    void p1p_textGateProbeVisibility() throws Exception {
+        String tenant = "wbfpw1-ro";
+        Fixture fx = seedLivenessFixture(tenant);
+
+        List<String> probed = tenantScope.withTenant(tenant, ctx -> {
+            org.jooq.Table<?> probe = TEXT_GATE_PROBE_384.call(
+                "text", new String[] {COLLECTION_A}, null, null, 300);
+            return ctx.selectFrom(probe).fetch(r -> java.util.HexFormat.of().formatHex(r.get(0, byte[].class)));
+        });
+        assertVisibility(probed, fx, "P1p");
     }
 
     // ── P1t: searchTopicScoped() visibility (search_topic_scoped_<dim>) ──────
@@ -659,6 +711,7 @@ class Rdr192EngineLivenessMatrixIntegrationTest {
     void p7_gcQuarantineOrphans_unbounded() throws Exception {
         String tenant = "wbfpw1-p7u";
         Fixture fx = seedLivenessFixture(tenant);
+        ageTenantChunks(tenant);
         String quarantineCollection = "quarantine-knowledge__wbfpw1-p7u-a__minilm-l6-v2-384__v1";
 
         var outcome = vecRepo.quarantineOrphans(tenant, COLLECTION_A, quarantineCollection,
@@ -676,6 +729,7 @@ class Rdr192EngineLivenessMatrixIntegrationTest {
     void p7_gcQuarantineOrphans_bounded() throws Exception {
         String tenant = "wbfpw1-p7b";
         Fixture fx = seedLivenessFixture(tenant);
+        ageTenantChunks(tenant);
         String quarantineCollection = "quarantine-knowledge__wbfpw1-p7b-a__minilm-l6-v2-384__v1";
 
         var outcome = vecRepo.quarantineOrphansBounded(tenant, COLLECTION_A, quarantineCollection,
@@ -685,6 +739,142 @@ class Rdr192EngineLivenessMatrixIntegrationTest {
             .isEqualTo(4);
         assertThat(outcome.remaining()).isZero();
         assertExistencePredicate(tenant, fx, "P7");
+    }
+
+    /**
+     * RDR-192 Step 8 (nexus-wbfpw.16): P7 selects with reapable(c), so it honours the
+     * grace window. Every row of a freshly seeded fixture is younger than 30 days, so
+     * not one of the four orphans (R1, R4, R6, R8) moves; before Step 8 it moved all four.
+     */
+    @Test
+    void p7_freshOrphans_areNotQuarantined_graceWindowApplies_unbounded() throws Exception {
+        String tenant = "wbfpw1-p7uf";
+        Fixture fx = seedLivenessFixture(tenant);
+        String quarantineCollection = "quarantine-knowledge__wbfpw1-p7uf-a__minilm-l6-v2-384__v1";
+
+        var outcome = vecRepo.quarantineOrphans(tenant, COLLECTION_A, quarantineCollection,
+            "2026-09-26T00:00:00Z", 100);
+
+        assertThat(outcome.moved()).as("nothing has aged past the grace window").isZero();
+        for (String row : ROWS) {
+            assertThat(chunkExistsInCollection(tenant, COLLECTION_A, chashForRow(fx, row)))
+                .as("%s stays in A: fresh", row).isTrue();
+        }
+    }
+
+    @Test
+    void p7_freshOrphans_areNotQuarantined_graceWindowApplies_bounded() throws Exception {
+        String tenant = "wbfpw1-p7bf";
+        Fixture fx = seedLivenessFixture(tenant);
+        String quarantineCollection = "quarantine-knowledge__wbfpw1-p7bf-a__minilm-l6-v2-384__v1";
+
+        var outcome = vecRepo.quarantineOrphansBounded(tenant, COLLECTION_A, quarantineCollection,
+            "2026-09-26T00:00:00Z", 100, 100);
+
+        assertThat(outcome.moved()).isZero();
+        assertThat(outcome.remaining()).as("the bounded form's remaining count is reapable(c) too").isZero();
+        for (String row : ROWS) {
+            assertThat(chunkExistsInCollection(tenant, COLLECTION_A, chashForRow(fx, row)))
+                .as("%s stays in A: fresh", row).isTrue();
+        }
+    }
+
+    /** A mixed population: one aged orphan moves, a fresh orphan of the identical shape does not. */
+    @Test
+    void p7_agedOrphanMoves_whileAFreshOrphanOfTheSameShapeStays() throws Exception {
+        String tenant = "wbfpw1-p7m";
+        Fixture fx = seedLivenessFixture(tenant);
+        ageTenantChunks(tenant);
+        String freshR1 = ch(tenant + "-r1-fresh");
+        vecRepo.upsertChunks(tenant, COLLECTION_A, List.of(freshR1), List.of("r1 fresh text"), List.of(Map.of()));
+        String quarantineCollection = "quarantine-knowledge__wbfpw1-p7m-a__minilm-l6-v2-384__v1";
+
+        var outcome = vecRepo.quarantineOrphans(tenant, COLLECTION_A, quarantineCollection,
+            "2026-09-26T00:00:00Z", 100);
+
+        assertThat(outcome.moved()).as("R1, R4, R6, R8 aged; the fresh R1 twin is not").isEqualTo(4);
+        assertExistencePredicate(tenant, fx, "P7");
+        assertThat(chunkExistsInCollection(tenant, COLLECTION_A, freshR1)).as("fresh R1 stays").isTrue();
+    }
+
+    // ── REAP: EXISTS(nexus.chunk_is_reapable(...)) (RDR-192 Step 7, bead nexus-wbfpw.15) ──
+
+    /** Pushes every chunk of {@code tenant} 40 days into the past (past the 30 day default grace). */
+    private void ageTenantChunks(String tenant) throws Exception {
+        OffsetDateTime then = OffsetDateTime.now().minus(Duration.ofDays(40));
+        try (Connection su = pg.createConnection("")) {
+            DSL.using(su, SQLDialect.POSTGRES).update(CHUNKS)
+               .set(CHUNKS.CREATED_AT, then).set(CHUNKS.LAST_WRITTEN_AT, then)
+               .where(CHUNKS.TENANT_ID.eq(tenant)).execute();
+        }
+    }
+
+    /** reapable(c) for {@code chashHex} in {@code collection}, as the RLS-subject service role, default grace. */
+    private boolean chunkIsReapable(String tenant, String collection, String chashHex) {
+        byte[] chash = Chash.fromHex(chashHex).toBytes();
+        return tenantScope.withTenant(tenant, ctx -> ctx.fetchExists(
+            ctx.selectOne().from(CHUNKS)
+               .where(CHUNKS.TENANT_ID.eq(tenant).and(CHUNKS.COLLECTION.eq(collection))
+                      .and(CHUNKS.CHASH.eq(chash)))
+               .and(DSL.exists(DSL.selectFrom(CHUNK_IS_REAPABLE.call(
+                   CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.LAST_WRITTEN_AT,
+                   DSL.val(null, SQLDataType.INTERVAL)))))));
+    }
+
+    @Test
+    void reap_chunkIsReapableFunction_agedRows() throws Exception {
+        String tenant = "wbfpw1-reap";
+        Fixture fx = seedLivenessFixture(tenant);
+        ageTenantChunks(tenant);
+
+        for (String row : ROWS) {
+            String chash = chashForRow(fx, row);
+            boolean expected = expected(row, "REAP");
+            assertThat(chunkIsReapable(tenant, COLLECTION_A, chash))
+                .as("%s / REAP in %s: expected %s", row, COLLECTION_A, expected)
+                .isEqualTo(expected);
+        }
+    }
+
+    /** The same fixture seeded at created-now: every REAP cell is false, whatever the owner state. */
+    @Test
+    void reap_chunkIsReapableFunction_freshRows_areNeverReapable() throws Exception {
+        String tenant = "wbfpw1-reapf";
+        Fixture fx = seedLivenessFixture(tenant);
+
+        for (String row : ROWS) {
+            assertThat(chunkIsReapable(tenant, COLLECTION_A, chashForRow(fx, row)))
+                .as("%s / REAP when created now", row).isFalse();
+        }
+    }
+
+    /** R1's shape, created now, next to aged R1: the grace window is the only difference. */
+    @Test
+    void reap_freshR1_isNotReapable_agedR1IsReapable() throws Exception {
+        String tenant = "wbfpw1-reapr1";
+        Fixture fx = seedLivenessFixture(tenant);
+        ageTenantChunks(tenant);
+        String freshR1 = ch(tenant + "-r1-fresh");
+        vecRepo.upsertChunks(tenant, COLLECTION_A, List.of(freshR1), List.of("r1 fresh text"), List.of(Map.of()));
+
+        assertThat(chunkIsReapable(tenant, COLLECTION_A, fx.r1())).as("aged R1").isTrue();
+        assertThat(chunkIsReapable(tenant, COLLECTION_A, freshR1)).as("fresh R1").isFalse();
+    }
+
+    /** R4, R6 and R9 are owned in B only (or tombstoned in A): reapable(c) is collection-scoped like live(c). */
+    @Test
+    void reap_isCollectionScoped_r4R6R9_inB() throws Exception {
+        String tenant = "wbfpw1-reapb";
+        Fixture fx = seedLivenessFixture(tenant);
+        ageTenantChunks(tenant);
+
+        assertThat(chunkIsReapable(tenant, COLLECTION_A, fx.r4())).as("R4 in A").isTrue();
+        assertThat(chunkIsReapable(tenant, COLLECTION_B, fx.r4())).as("R4 in B").isFalse();
+        assertThat(chunkIsReapable(tenant, COLLECTION_A, fx.r6())).as("R6 in A").isTrue();
+        assertThat(chunkIsReapable(tenant, COLLECTION_B, fx.r6())).as("R6 in B").isFalse();
+        assertThat(chunkIsReapable(tenant, COLLECTION_A, fx.r9()))
+            .as("R9 in A: a manifest row exists, its owner is tombstoned").isFalse();
+        assertThat(chunkIsReapable(tenant, COLLECTION_B, fx.r9())).as("R9 in B").isFalse();
     }
 
     // ── LIVE: EXISTS(nexus.chunk_live_owners(tenant, collection, chash)) (RDR-192 Step 4, bead nexus-wbfpw.9) ──
@@ -745,14 +935,14 @@ class Rdr192EngineLivenessMatrixIntegrationTest {
     private static final List<String> ROWS =
         List.of("R1", "R2", "R3", "R4", "R5", "R6", "R7", "R8", "R9");
     private static final List<String> PREDICATES =
-        List.of("P1g", "P1s", "P1h", "P1t", "P2", "P3", "P4", "P6", "P7", "P9", "LIVE");
+        List.of("P1g", "P1s", "P1h", "P1p", "P1t", "P2", "P3", "P4", "P6", "P7", "P9", "LIVE", "REAP");
 
     /**
      * The verdict for every (row, predicate) pair. This table is the SOURCE the
      * per-predicate {@code @Test} methods assert FROM (via {@link
      * #assertVisibility}/{@link #assertExistencePredicate}/{@link
      * #live_chunkIsLiveFunction}), so it cannot silently drift from the live
-     * checks. "true" means: P1g/P1s/P1h/P1t/P2/P9/LIVE visible/live, P3 sweep
+     * checks. "true" means: P1g/P1s/P1h/P1p/P1t/P2/P9/LIVE visible/live, P3 sweep
      * candidate, P4 swept, P6 deletable, P7 orphaned/moved. Every cell is scoped
      * to COLLECTION_A; R6 and R9's COLLECTION_B verdict is pinned separately by
      * {@link #live_r6AndR9_falseInA_trueInB} and {@link
@@ -761,7 +951,8 @@ class Rdr192EngineLivenessMatrixIntegrationTest {
      * <p>RDR-192 Step 5 (nexus-wbfpw.10) moved every read-visibility predicate
      * (P1g get/list, P1s plain search, P1h hybrid search, P1t topic-scoped search,
      * P2 {@code live_chunks}) onto live(c), so those five columns equal LIVE on
-     * every row. Before Step 5 they differed from LIVE on R1, R4, R6 and R8, the
+     * every row. P1p, the hybrid dispatch's gate probe ({@code text_gate_probe_<dim>}),
+     * followed in vectors-023 (nexus-wbfpw.35) and equals LIVE too. Before Step 5 they differed from LIVE on R1, R4, R6 and R8, the
      * rows with no live own-collection owner that the old dead-set anti-join kept
      * visible, and P2 differed on R9 as well because its check was tenant-wide.
      * They always agreed on R3 (tombstoned owner only).
@@ -769,18 +960,29 @@ class Rdr192EngineLivenessMatrixIntegrationTest {
      * <p>P9 ({@code taxonomy_unassigned_chashes}) keeps its own shape (RDR-192
      * Migration order, item 3): it asks only whether an own-collection manifest
      * row exists, with no tombstone check, so it differs from LIVE on R3 and R9.
-     * The destructive columns P3, P4, P6 and P7 are Phase 3 and Phase 4 work.
+     * The destructive columns P3, P4 and P6 are Phase 4 work.
+     *
+     * <p>REAP is reapable(c) (RDR-192 Step 7, nexus-wbfpw.15): no own-collection
+     * manifest row in ANY owner state, last_written_at older than the grace window
+     * and no in-flight index run naming the chunk's document. The cells assume rows
+     * aged past the 30 day default (a row created now is false in every row; the
+     * fresh-R1 control pins that). It is not the complement of LIVE: R3 and R9 are
+     * neither live nor reapable (a manifest row exists, so the chunk is dead but
+     * belongs to purge_trash's tombstone arm), and R1, R4, R6 and R8 are reapable
+     * only once aged. On aged rows REAP, P6 and P7 agree cell for cell; P6 (delete's
+     * anti-join) keeps no grace window and P7 moved onto REAP in Step 8
+     * (nexus-wbfpw.16), so a row created now separates them.
      */
     private static final Map<String, Map<String, Boolean>> EXPECTED_VALUE_TABLE = Map.ofEntries(
-        Map.entry("R1", Map.ofEntries(Map.entry("P1g", false), Map.entry("P1s", false), Map.entry("P1h", false), Map.entry("P1t", false), Map.entry("P2", false), Map.entry("P3", false), Map.entry("P4", true), Map.entry("P6", true), Map.entry("P7", true), Map.entry("P9", false), Map.entry("LIVE", false))),
-        Map.entry("R2", Map.ofEntries(Map.entry("P1g", true), Map.entry("P1s", true), Map.entry("P1h", true), Map.entry("P1t", true), Map.entry("P2", true), Map.entry("P3", false), Map.entry("P4", false), Map.entry("P6", false), Map.entry("P7", false), Map.entry("P9", true), Map.entry("LIVE", true))),
-        Map.entry("R3", Map.ofEntries(Map.entry("P1g", false), Map.entry("P1s", false), Map.entry("P1h", false), Map.entry("P1t", false), Map.entry("P2", false), Map.entry("P3", true), Map.entry("P4", false), Map.entry("P6", false), Map.entry("P7", false), Map.entry("P9", true), Map.entry("LIVE", false))),
-        Map.entry("R4", Map.ofEntries(Map.entry("P1g", false), Map.entry("P1s", false), Map.entry("P1h", false), Map.entry("P1t", false), Map.entry("P2", false), Map.entry("P3", false), Map.entry("P4", false), Map.entry("P6", true), Map.entry("P7", true), Map.entry("P9", false), Map.entry("LIVE", false))),
-        Map.entry("R5", Map.ofEntries(Map.entry("P1g", true), Map.entry("P1s", true), Map.entry("P1h", true), Map.entry("P1t", true), Map.entry("P2", true), Map.entry("P3", false), Map.entry("P4", false), Map.entry("P6", false), Map.entry("P7", false), Map.entry("P9", true), Map.entry("LIVE", true))),
-        Map.entry("R6", Map.ofEntries(Map.entry("P1g", false), Map.entry("P1s", false), Map.entry("P1h", false), Map.entry("P1t", false), Map.entry("P2", false), Map.entry("P3", false), Map.entry("P4", false), Map.entry("P6", true), Map.entry("P7", true), Map.entry("P9", false), Map.entry("LIVE", false))),
-        Map.entry("R7", Map.ofEntries(Map.entry("P1g", true), Map.entry("P1s", true), Map.entry("P1h", true), Map.entry("P1t", true), Map.entry("P2", true), Map.entry("P3", false), Map.entry("P4", false), Map.entry("P6", false), Map.entry("P7", false), Map.entry("P9", true), Map.entry("LIVE", true))),
-        Map.entry("R8", Map.ofEntries(Map.entry("P1g", false), Map.entry("P1s", false), Map.entry("P1h", false), Map.entry("P1t", false), Map.entry("P2", false), Map.entry("P3", false), Map.entry("P4", false), Map.entry("P6", true), Map.entry("P7", true), Map.entry("P9", false), Map.entry("LIVE", false))),
-        Map.entry("R9", Map.ofEntries(Map.entry("P1g", false), Map.entry("P1s", false), Map.entry("P1h", false), Map.entry("P1t", false), Map.entry("P2", false), Map.entry("P3", true), Map.entry("P4", false), Map.entry("P6", false), Map.entry("P7", false), Map.entry("P9", true), Map.entry("LIVE", false)))
+        Map.entry("R1", Map.ofEntries(Map.entry("P1g", false), Map.entry("P1s", false), Map.entry("P1h", false), Map.entry("P1p", false), Map.entry("P1t", false), Map.entry("P2", false), Map.entry("P3", false), Map.entry("P4", true), Map.entry("P6", true), Map.entry("P7", true), Map.entry("P9", false), Map.entry("LIVE", false), Map.entry("REAP", true))),
+        Map.entry("R2", Map.ofEntries(Map.entry("P1g", true), Map.entry("P1s", true), Map.entry("P1h", true), Map.entry("P1p", true), Map.entry("P1t", true), Map.entry("P2", true), Map.entry("P3", false), Map.entry("P4", false), Map.entry("P6", false), Map.entry("P7", false), Map.entry("P9", true), Map.entry("LIVE", true), Map.entry("REAP", false))),
+        Map.entry("R3", Map.ofEntries(Map.entry("P1g", false), Map.entry("P1s", false), Map.entry("P1h", false), Map.entry("P1p", false), Map.entry("P1t", false), Map.entry("P2", false), Map.entry("P3", true), Map.entry("P4", false), Map.entry("P6", false), Map.entry("P7", false), Map.entry("P9", true), Map.entry("LIVE", false), Map.entry("REAP", false))),
+        Map.entry("R4", Map.ofEntries(Map.entry("P1g", false), Map.entry("P1s", false), Map.entry("P1h", false), Map.entry("P1p", false), Map.entry("P1t", false), Map.entry("P2", false), Map.entry("P3", false), Map.entry("P4", false), Map.entry("P6", true), Map.entry("P7", true), Map.entry("P9", false), Map.entry("LIVE", false), Map.entry("REAP", true))),
+        Map.entry("R5", Map.ofEntries(Map.entry("P1g", true), Map.entry("P1s", true), Map.entry("P1h", true), Map.entry("P1p", true), Map.entry("P1t", true), Map.entry("P2", true), Map.entry("P3", false), Map.entry("P4", false), Map.entry("P6", false), Map.entry("P7", false), Map.entry("P9", true), Map.entry("LIVE", true), Map.entry("REAP", false))),
+        Map.entry("R6", Map.ofEntries(Map.entry("P1g", false), Map.entry("P1s", false), Map.entry("P1h", false), Map.entry("P1p", false), Map.entry("P1t", false), Map.entry("P2", false), Map.entry("P3", false), Map.entry("P4", false), Map.entry("P6", true), Map.entry("P7", true), Map.entry("P9", false), Map.entry("LIVE", false), Map.entry("REAP", true))),
+        Map.entry("R7", Map.ofEntries(Map.entry("P1g", true), Map.entry("P1s", true), Map.entry("P1h", true), Map.entry("P1p", true), Map.entry("P1t", true), Map.entry("P2", true), Map.entry("P3", false), Map.entry("P4", false), Map.entry("P6", false), Map.entry("P7", false), Map.entry("P9", true), Map.entry("LIVE", true), Map.entry("REAP", false))),
+        Map.entry("R8", Map.ofEntries(Map.entry("P1g", false), Map.entry("P1s", false), Map.entry("P1h", false), Map.entry("P1p", false), Map.entry("P1t", false), Map.entry("P2", false), Map.entry("P3", false), Map.entry("P4", false), Map.entry("P6", true), Map.entry("P7", true), Map.entry("P9", false), Map.entry("LIVE", false), Map.entry("REAP", true))),
+        Map.entry("R9", Map.ofEntries(Map.entry("P1g", false), Map.entry("P1s", false), Map.entry("P1h", false), Map.entry("P1p", false), Map.entry("P1t", false), Map.entry("P2", false), Map.entry("P3", true), Map.entry("P4", false), Map.entry("P6", false), Map.entry("P7", false), Map.entry("P9", true), Map.entry("LIVE", false), Map.entry("REAP", false)))
     );
 
     /**

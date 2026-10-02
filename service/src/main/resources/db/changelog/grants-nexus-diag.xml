@@ -213,6 +213,17 @@ $$;
 
     <changeSet id="grants-nexus-diag-3" author="nexus-8yz1p" runAlways="true">
         <comment>
+            RETIRED PART (nexus-z0o2p.27, RDR-223 Phase 3): the staging-schema
+            SELECT grants this changeset was created for (USAGE on schema
+            staging, SELECT on all its tables, and the default privilege) are
+            REMOVED from the body below, because staging-6-drop-landing-schema
+            drops the schema earlier in the same walk (it is included ahead of
+            this file) and a runAlways GRANT naming a missing schema would abort
+            the boot. Only the view-era re-grant (nexus-lhuhe, below) remains.
+            The id stays: a changeset id is identity, and renaming it would
+            re-stamp a new DATABASECHANGELOG row. The paragraphs below are the
+            original rationale, kept as history.
+
             bead nexus-8yz1p (2026-08-16): nexus_diag gets staging schema
             SELECT, ERA-INDEPENDENT. Deliberately its OWN changeset rather
             than folded into grants-nexus-diag-1's body: the LEGACY/VIEW
@@ -301,13 +312,9 @@ $$;
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nexus_diag') THEN
-        RAISE NOTICE 'nexus_diag absent — staging grants skipped (created by pg_provision/DBA; self-heals next boot)';
+        RAISE NOTICE 'nexus_diag absent — view-era grants skipped (created by pg_provision/DBA; self-heals next boot)';
         RETURN;
     END IF;
-
-    GRANT USAGE  ON SCHEMA staging TO nexus_diag;
-    GRANT SELECT ON ALL TABLES IN SCHEMA staging TO nexus_diag;
-    ALTER DEFAULT PRIVILEGES IN SCHEMA staging GRANT SELECT ON TABLES TO nexus_diag;
 
     -- VIEW-ERA RE-GRANT (bead nexus-lhuhe, P1). See this changeset's own
     -- comment element above for the full derivation. View existence

@@ -94,7 +94,8 @@ from nexus.catalog.types import ManifestRow, _CROSS_PROJECT_OVERRIDE_ENV
 from nexus.catalog.collection_name import CollectionName, owner_segment_for_tumbler
 from nexus.db.limits import QUOTAS
 from nexus.db.t2._refreshable_client import RefreshableHttpStoreMixin
-from nexus.errors import CombinedWriteEmbedTimeoutError, IndexRunVerifyRefused
+from nexus.catalog.write_outcome import PreSendArgumentError
+from nexus.errors import CombinedWriteEmbedTimeoutError, EngineOlderThanClientError, IndexRunVerifyRefused
 
 _log = structlog.get_logger(__name__)
 
@@ -248,6 +249,133 @@ _find_all_by_file_paths_404_warned: bool = False
 # ``nexus/assess-local-index-cluster-2026-08-10`` items 6-7 — explicitly
 # NOT this fix.
 _COMBINED_WRITE_EMBED_TIMEOUT_S = 600.0
+
+#: The engine's caps on the RDR-223 append routes (Phase 1, P1.3/P1.4). Refused here, locally and
+#: before any round trip, so a violation reads as a client bug naming the cap instead of a 400
+#: that arrives after an embed budget was set aside. ``sweep_chashes`` at most this many per
+#: append (per document, on ``append_many``): a longer list is split across several appends by
+#: the caller (``nexus.catalog.multi_batch_write``).
+MANIFEST_APPEND_SWEEP_CHASHES_CAP = 300
+#: ``append_many`` accepts at most this many documents / request-level chunks; the client holds
+#: ``append`` to the same chunk count.
+MANIFEST_APPEND_MANY_MAX_DOCS = 1000
+MANIFEST_APPEND_MANY_MAX_CHUNKS = 300
+
+
+#: The most keys one request may name in ``metadata_delete_keys`` (the engine refuses more).
+METADATA_DELETE_KEYS_CAP = 64
+
+
+def _metadata_mode_fields(
+    what: str, metadata_merge: bool, metadata_delete_keys: "list[str] | None",
+) -> dict:
+    """The request fields for the combined routes' metadata write mode (RDR-223, nexus-z0o2p.13).
+
+    Empty (the engine's replace behaviour, and what every older client sends) unless
+    *metadata_merge*. With it the engine stores ``(stored - metadata_delete_keys) || incoming``
+    for a chunk whose chash it already holds, instead of replacing the stored metadata. Checked
+    here, before any round trip: keys without merge, more than
+    :data:`METADATA_DELETE_KEYS_CAP` keys, or a blank / non-string key.
+    """
+    keys = list(metadata_delete_keys or ())
+    if keys and not metadata_merge:
+        raise PreSendArgumentError(f"{what}: metadata_delete_keys requires metadata_merge=True")
+    if len(keys) > METADATA_DELETE_KEYS_CAP:
+        raise PreSendArgumentError(
+            f"{what}: {len(keys)} metadata_delete_keys exceeds the {METADATA_DELETE_KEYS_CAP}-key cap")
+    if any(not isinstance(k, str) or not k.strip() for k in keys):
+        raise PreSendArgumentError(f"{what}: metadata_delete_keys must be non-blank strings")
+    if not metadata_merge:
+        return {}
+    out: dict = {"metadata_merge": True}
+    if keys:
+        out["metadata_delete_keys"] = keys
+    return out
+
+
+def _answer_object(what: str, raw: Any) -> dict:
+    """The engine's answer as an object. An empty body reads as ``{}`` (a missing field is then the
+    caller's to name); anything else that is not a JSON object is a CORRUPT answer, which an engine
+    upgrade does not fix, so it is a :class:`~nexus.errors.BatchWriteFailedError`, never "engine older"."""
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        from nexus.errors import BatchWriteFailedError  # noqa: PLC0415 — deferred: only the corrupt-answer path needs it
+
+        raise BatchWriteFailedError(
+            doc_id="", batch=0,
+            reason=f"{what}: the engine's answer is not a JSON object ({type(raw).__name__}); "
+                   "the write's outcome cannot be trusted")
+    return raw
+
+
+def _check_metadata_merge_echo(what: str, merge_fields: dict, result: "dict | None") -> None:
+    """ACK-ECHO for the metadata write mode (RDR-223, nexus-z0o2p.13): a request that asked for
+    ``metadata_merge`` is answered with ``metadata_merge: true`` by an engine that applied it. An
+    engine that predates the field ignores it and REPLACES the stored metadata (clearing ``bib_*``
+    enrichment), so its answer carries NO such key and this raises
+    :class:`~nexus.errors.EngineOlderThanClientError`; client and engine are released as a pair,
+    there is no old-engine fallback. A key that is PRESENT and not true, or an answer that is not an
+    object, is a contradicting answer an upgrade does not fix: a
+    :class:`~nexus.errors.BatchWriteFailedError`."""
+    if not merge_fields:
+        return
+    result = _answer_object(what, result)
+    if "metadata_merge" not in result:
+        raise EngineOlderThanClientError(
+            f"{what}: asked for metadata_merge but the response did not echo it; the engine "
+            "predates the metadata write mode and REPLACED the stored chunk metadata"
+        )
+    if result["metadata_merge"] is not True:
+        from nexus.errors import BatchWriteFailedError  # noqa: PLC0415 — deferred: only the corrupt-answer path needs it
+
+        raise BatchWriteFailedError(
+            doc_id="", batch=0,
+            reason=f"{what}: asked for metadata_merge and the response echoed "
+                   f"{result['metadata_merge']!r}; whether the stored metadata was merged is unknown")
+
+
+def _check_sweep_chashes(what: str, sweep_chashes: "list[str] | None") -> None:
+    """Refuse an over-cap ``sweep_chashes`` list locally (the engine 400s it, but only after the
+    request was built and, on a chunk-carrying append, an embed budget was set aside)."""
+    if sweep_chashes and len(sweep_chashes) > MANIFEST_APPEND_SWEEP_CHASHES_CAP:
+        raise PreSendArgumentError(
+            f"{what}: {len(sweep_chashes)} sweep_chashes exceeds the engine cap of "
+            f"{MANIFEST_APPEND_SWEEP_CHASHES_CAP} per request; split the list across appends"
+        )
+
+
+def _echo_supplied_vectors(
+    what: str, chunks: "list[dict] | None", result: dict,
+) -> None:
+    """Ack-echo for client-supplied vectors: a request that carried an ``embedding`` and got a
+    response with no ``vectors_supplied`` key was handled by an engine that does not know the
+    field, which would have embedded the text itself and ignored the vector. That is silent
+    substitution of content the caller chose, so it is a hard error (the client and the engine
+    are released as a pair; there is no old-engine fallback)."""
+    if any(c.get("embedding") is not None for c in (chunks or ())) and "vectors_supplied" not in result:
+        raise EngineOlderThanClientError(
+            f"{what}: sent client-supplied embeddings but the response carried no "
+            "'vectors_supplied' key; the engine does not understand supplied vectors and "
+            "embedded the text itself"
+        )
+
+
+def _check_supplied_vectors(
+    what: str, chunks: "list[dict] | None", embedding_model: "str | None",
+) -> None:
+    """A chunk carrying a client-supplied ``embedding`` needs the request's ``embedding_model``
+    (RDR-223 P1.5: the engine refuses a vector it cannot tie to the collection's model). Checked
+    before any round trip."""
+    if embedding_model:
+        return
+    for i, c in enumerate(chunks or ()):
+        if c.get("embedding") is not None:
+            raise PreSendArgumentError(
+                f"{what}: chunks[{i}] carries a client-supplied 'embedding' but no "
+                "'embedding_model' was given; the engine refuses a vector it cannot tie to the "
+                "collection's embedding model"
+            )
 
 #: Page size for update_many POSTs — same MAX_BATCH_DOC_IDS cap as
 #: register_many (nexus-xedhp).
@@ -931,7 +1059,7 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
     # ══════════════════════════════════════════════════════════════════════
 
     def begin_index_run_many(
-        self, docs: list[dict], collection: str,
+        self, docs: list[dict], collection: str, *, snapshot_manifest: bool = False,
     ) -> dict:
         """POST /v1/catalog/index-run/begin-many — batch ``index_state=
         'indexing'`` stamp for N documents in ONE round trip (nexus-vw594
@@ -941,42 +1069,73 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         flush-grain repo path pays ONE round trip per FLUSH instead of one
         per FILE (the ``indexer.py`` ``:3631`` cost objection this closes).
 
+        *snapshot_manifest* (RDR-223, nexus-z0o2p.19; additive engine field): also return each
+        document's PRE-RUN manifest, read in the same transaction as that document's stamp, as
+        ``{"snapshots": {doc_id: {"prior_chashes": [...distinct, position order], "prior_count":
+        <manifest ROW count>}}}``. A document whose begin failed has no entry (it is in
+        ``failed_doc_ids``). ACK-ECHO: a response with no ``snapshots`` key means the engine
+        ignored the field, so this raises ``RuntimeError`` (client and engine are released as a
+        pair; there is no old-engine fallback).
+
         Returns ``{}`` on a 404 (pre-fence engine, engine-floor-tolerated:
         logged at WARNING) — same sentinel-vs-empty-success distinction as
         :meth:`begin_index_run`'s single-doc 404 handling. Any other
         transport failure propagates; the caller (:func:`nexus.doc_indexer.
         _fence_begin_many`) wraps this in its own advisory fail-open catch.
         """
+        body: dict = {"docs": docs, "collection": collection}
+        if snapshot_manifest:
+            body["snapshot_manifest"] = True
         try:
-            return self._post("/index-run/begin-many", {
-                "docs": docs, "collection": collection,
-            }) or {}
+            result = self._post("/index-run/begin-many", body) or {}
         except httpx.HTTPStatusError as exc:
             if exc.response is not None and exc.response.status_code == 404:
                 _log.warning("index_run_begin_many_engine_floor", doc_count=len(docs))
                 return {}
             raise
+        if snapshot_manifest and result and not isinstance(result.get("snapshots"), dict):
+            raise EngineOlderThanClientError(
+                f"begin_index_run_many: asked for snapshot_manifest for {len(docs)} document(s) in "
+                f"{collection!r} but the response carried no 'snapshots' object; the engine "
+                "predates the manifest snapshot and a sweep computed without it is not safe"
+            )
+        return result
 
     def begin_index_run(
         self, doc_id: str, content_hash: str, run_id: str, collection: str,
-    ) -> None:
+        *, snapshot_manifest: bool = False,
+    ) -> dict | None:
         """POST /v1/catalog/index-run/begin — stamp ``index_state='indexing'``
         BEFORE the first chunk upsert (memo §3.5 T0: the fence is committed
         before the first byte of content and cleared only after the last).
 
         Idempotent; NOT a lock (nexus-lcmbp non-goal, memo §5) — a retry or a
         second concurrent run simply re-stamps the same shape.
+
+        *snapshot_manifest* (RDR-223, nexus-z0o2p.10; additive engine field): also return the
+        document's PRE-RUN manifest, read in the same transaction as the stamp:
+        ``{"ok": True, "prior_chashes": [<distinct chash, position order>], "prior_count":
+        <manifest ROW count>}``. A multi-batch writer computes its deferred sweep from it. Without
+        the flag the response is ``{"ok": True}`` and no manifest is read.
+
+        Returns the response dict, or ``None`` on a 404 (an engine with no fence route, logged at
+        WARNING). Existing callers ignore the value; a caller that needs the fence or the snapshot
+        must treat ``None`` as an error.
         """
+        body: dict = {
+            "doc_id": doc_id, "content_hash": content_hash,
+            "run_id": run_id, "collection": collection,
+        }
+        if snapshot_manifest:
+            body["snapshot_manifest"] = True
         try:
-            self._post("/index-run/begin", {
-                "doc_id": doc_id, "content_hash": content_hash,
-                "run_id": run_id, "collection": collection,
-            })
+            result = self._post("/index-run/begin", body)
         except httpx.HTTPStatusError as exc:
             if exc.response is not None and exc.response.status_code == 404:
                 _log.warning("index_run_begin_engine_floor", doc_id=doc_id)
-                return
+                return None
             raise
+        return result if isinstance(result, dict) else {}
 
     def complete_index_run(
         self, doc_id: str, content_hash: str, chunk_count: int,
@@ -1630,11 +1789,12 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         CARVE-OUT (review round 2, T2 [24834]; narrowed by Sam's second
         2026-09-07 ruling on nexus-dkymw): the grace-window guarantee above
         holds for tombstones made by :meth:`delete_document` /
-        :meth:`purge_trash`, AND — as of the dkymw alive-set fix — for
-        ``nx t3 gc``'s orphan sweep too: its alive-set now protects a
-        tombstoned-but-not-yet-purged document's chashes, so it can no
-        longer reap a just-tombstoned document's chunks inside this
-        window. Two other paths still reach the same content outside this
+        :meth:`purge_trash`, AND for the orphan sweeps too: the engine's
+        reapable predicate (``nexus.chunk_is_reapable``, RDR-192 Step 7)
+        counts a tombstoned owner as an owner, so neither ``nx t3 gc`` nor
+        the indexer's prune moves a just-tombstoned document's chunks
+        inside this window (nexus-dkymw's contract, now structural; it was
+        a client alive-set filter before nexus-wbfpw.18). Two other paths still reach the same content outside this
         contract, and this method cannot undo their loss: the MCP
         ``store_delete`` tool (tombstones the row and hard-deletes the T3
         chunk in the SAME call — no window at all); and
@@ -1657,12 +1817,13 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
 
     def list_trash(self, *, limit: int = 200, offset: int = 0) -> list[dict[str, Any]]:
         """GET /v1/catalog/trash — this tenant's tombstoned documents,
-        newest-tombstoned first (nexus-dkymw). Read-only counterpart to
+        newest-tombstoned first, ties on ``deleted_at`` broken by tumbler
+        (nexus-dkymw). Read-only counterpart to
         :meth:`restore_document`: lets a caller see what is restorable
         before calling it. Each entry carries ``tumbler``, ``title``,
-        ``physical_collection``, ``corpus``, ``content_type``, and
-        ``deleted_at``, returned verbatim from the engine (this method does
-        not reshape it).
+        ``physical_collection``, ``corpus``, ``content_type``, ``file_path``
+        (an empty string when the document has none) and ``deleted_at``, returned
+        verbatim from the engine (this method does not reshape it).
 
         A pre-nexus-dkymw engine has no matching route and answers 404 —
         propagated raw, same discipline as :meth:`restore_document`.
@@ -1728,14 +1889,13 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
 
         CARVE-OUT (review round 2, T2 [24834]; narrowed by Sam's second
         2026-09-07 ruling on nexus-dkymw): this window applies to
-        tombstones made by :meth:`delete_document` only, and — as of the
-        dkymw alive-set fix — ``nx t3 gc``'s orphan sweep now RESPECTS it
-        too: its alive-set (``chashesForCollection``, the GC input the
-        engine's ``nx t3 gc`` / indexer-prune reads) protects a
-        tombstoned-but-not-yet-purged document's chashes, superseding
-        nexus-mqd6t's original immediate-exclusion filter for that one
-        read, so ``nx t3 gc`` can no longer reap a just-tombstoned
-        document's chunks inside this window. The MCP ``store_delete``
+        tombstones made by :meth:`delete_document` only, and the orphan
+        sweeps RESPECT it: the engine's reapable predicate
+        (``nexus.chunk_is_reapable``) counts a tombstoned owner as an
+        owner, so ``nx t3 gc`` and the indexer's prune cannot move a
+        just-tombstoned document's chunks inside this window (nexus-dkymw,
+        superseding nexus-mqd6t's immediate-exclusion filter; structural
+        since nexus-wbfpw.18 replaced the client alive-set read). The MCP ``store_delete``
         tool (tombstones the catalog row and hard-deletes the T3 chunk in
         the SAME call — no window here at all) and ``delete_collection`` /
         collection-prune (irreversible, never tombstones) still reach the
@@ -1854,47 +2014,6 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
             limit=limit, offset=offset,
         )
         return (result or {}).get("entries", [])
-
-    def record_gc_audit(
-        self,
-        *,
-        operation: str,
-        collection: str | None = None,
-        actor: str | None = None,
-        dry_run: bool = False,
-        chashes: list[str] | tuple[str, ...] = (),
-        details: dict[str, Any] | None = None,
-    ) -> int:
-        """POST /v1/catalog/gc_audit/record — append ONE destructive-T3-op
-        audit row on the caller's say-so (nexus-jqvzk); returns its id.
-
-        The client-facing producer the engine built for ``nx t3 gc``
-        (nexus-fduai): the engine's own reap paths write their rows
-        server-side with ``actor="engine"``, but a T3 delete the CLIENT
-        performs is invisible to it until the client reports it here, in
-        the same breath as the delete. The engine truncates ``chashes`` at
-        its own cap (``GC_AUDIT_MAX_CHASHES``) while keeping ``chash_count``
-        exact, so pass the FULL list — never pre-sample it client-side.
-        ``chashes`` is what the caller REPORTS — the candidates it asked to
-        delete — not an engine-confirmed deleted set; put the confirmed
-        count in ``details`` (``nx t3 gc`` records ``details.deleted``).
-
-        A pre-nexus-jqvzk engine has no matching route and answers 404 —
-        propagated like :meth:`gc_audit_list`, never swallowed.
-        """
-        body: dict[str, Any] = {
-            "operation": operation,
-            "dry_run": dry_run,
-            "chashes": list(chashes),
-        }
-        if collection:
-            body["collection"] = collection
-        if actor:
-            body["actor"] = actor
-        if details:
-            body["details"] = details
-        result = self._post("/gc_audit/record", body) or {}
-        return int(result.get("id", 0))
 
     def find(
         self, query: str, *, content_type: str | None = None, limit: int = 0,
@@ -3427,20 +3546,265 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
             "rows": self._manifest_rows(chunks),
         })
 
-    def append_manifest_chunks(self, doc_id: str, chunks: list[dict], *, collection: str) -> None:
-        """Append manifest rows for doc_id.
+    def append_manifest_chunks(
+        self, doc_id: str, chunks: list[dict], *, collection: str,
+        chunk_payload: "list[dict] | None" = None,
+        sweep_chashes: "list[str] | None" = None,
+        force_re_embed: bool = False,
+        embedding_model: str | None = None,
+        metadata_merge: bool = False,
+        metadata_delete_keys: "list[str] | None" = None,
+    ) -> dict:
+        """Append manifest rows for doc_id (rows upsert BY POSITION).
 
         RDR-191: *collection* is REQUIRED — see :meth:`write_manifest`.
+
+        *chunks* is the manifest ROW list (``{chash, position, ...}``), as it has always been.
+        RDR-223 P2.0 adds four optional, keyword-only fields, each a Phase 1 engine addition:
+
+        *chunk_payload* — ``[{chash, text, metadata[, embedding]}, ...]``: the chunk rows the
+        appended rows reference, embedded (RDR-181 existence partition) and inserted in the SAME
+        transaction as the rows, so no chunk lands without an owner. Same element shape as
+        :meth:`write_manifest_many`'s ``chunks``. Uses the combined write's embed budget and, like
+        it, never retries a ReadTimeout (a retry would start an uncancelled duplicate embed): the
+        timeout surfaces as :class:`~nexus.errors.CombinedWriteEmbedTimeoutError`. ACK-ECHO: a
+        response with no ``chunks_written`` means the engine dropped the unknown field (it predates
+        RDR-223) and the chunks were NOT written, so this raises ``RuntimeError`` rather than let
+        the caller carry on with a manifest naming chunks that never landed.
+
+        *sweep_chashes* — at most :data:`MANIFEST_APPEND_SWEEP_CHASHES_CAP` chashes the engine
+        sweeps after this append commits, under its NOT EXISTS guards (a chash a later batch
+        re-added, or another document owns, survives). An empty *chunks* with a non-empty
+        *sweep_chashes* is a sweep-only append. ACK-ECHO: a response with no ``swept`` key means
+        the engine ignored the field and did not sweep; that raises ``RuntimeError`` (client and
+        engine are released as a pair, there is no old-engine fallback).
+
+        *force_re_embed* mirrors :meth:`write_manifest_many`'s. *embedding_model* is required as
+        soon as any *chunk_payload* element carries an ``embedding`` (a client-supplied vector);
+        checked locally before any round trip. *metadata_merge* / *metadata_delete_keys* are
+        :meth:`write_manifest_many`'s, and apply to *chunk_payload* only.
+
+        Returns the engine's response (``{ok, count[, chunks_written, chunks_deduped,
+        embed_skipped, embed_embedded, swept, sweep_skipped, sweep_detail]}``).
         """
         if not collection:
-            raise ValueError(
+            raise PreSendArgumentError(
                 "append_manifest_chunks: 'collection' is required and must "
                 "be non-blank (RDR-191 — the engine no longer infers it)"
             )
-        self._post("/manifest/append", {
+        _check_sweep_chashes("append_manifest_chunks", sweep_chashes)
+        _check_supplied_vectors("append_manifest_chunks", chunk_payload, embedding_model)
+        merge_fields = _metadata_mode_fields(
+            "append_manifest_chunks", metadata_merge, metadata_delete_keys)
+        if chunk_payload is not None and len(chunk_payload) > MANIFEST_APPEND_MANY_MAX_CHUNKS:
+            raise PreSendArgumentError(
+                f"append_manifest_chunks: {len(chunk_payload)} chunks exceeds the "
+                f"{MANIFEST_APPEND_MANY_MAX_CHUNKS}-chunk request cap (the engine caps "
+                "append_many at that and append follows it)"
+            )
+        body: dict = {
             "doc_id": doc_id, "collection": collection,
             "rows": self._manifest_rows(chunks),
-        })
+        }
+        if sweep_chashes:
+            body["sweep_chashes"] = list(sweep_chashes)
+        if chunk_payload is None:
+            result = self._post("/manifest/append", body)
+        else:
+            from nexus.corpus import ensure_collection_registered  # noqa: PLC0415 — deferred: nexus.corpus imports back into catalog
+            ensure_collection_registered(collection, registrar=self._catalog_registrar)
+            body["chunks"] = chunk_payload
+            if force_re_embed:
+                body["force_re_embed"] = True
+            if embedding_model:
+                body["embedding_model"] = embedding_model
+            body.update(merge_fields)
+            result = self._post_embedding_write(
+                "/manifest/append", body, collection=collection, chunk_count=len(chunk_payload))
+        out: dict = dict(_answer_object("append_manifest_chunks", result))
+        if chunk_payload is not None:
+            _check_metadata_merge_echo("append_manifest_chunks", merge_fields, out)
+        if chunk_payload is not None and "chunks_written" not in out:
+            raise EngineOlderThanClientError(
+                f"append ack mismatch for {collection!r} doc {doc_id!r}: sent "
+                f"{len(chunk_payload)} chunks but the response carried no 'chunks_written' "
+                "key — the engine may predate RDR-223's append-with-chunks; refusing to treat "
+                "the chunk content as durably written"
+            )
+        if sweep_chashes and "swept" not in out:
+            raise EngineOlderThanClientError(
+                f"append ack mismatch for {collection!r} doc {doc_id!r}: sent "
+                f"{len(sweep_chashes)} sweep_chashes but the response carried no 'swept' key; "
+                "the engine did not run the deferred sweep"
+            )
+        _echo_supplied_vectors("append_manifest_chunks", chunk_payload, out)
+        return out
+
+    def append_manifest_many(
+        self, docs: "list[tuple[str, list[dict]]]", *, collection: str,
+        chunks: "list[dict] | None" = None,
+        sweep_chashes: "dict[str, list[str]] | None" = None,
+        complete: "dict[str, tuple[str, int]] | None" = None,
+        force_re_embed: bool = False,
+        embedding_model: str | None = None,
+        metadata_merge: bool = False,
+        metadata_delete_keys: "list[str] | None" = None,
+    ) -> dict:
+        """Append rows for several documents in ONE request (RDR-223 P1.4, ``append_many``).
+
+        ``write_manifest_many``'s request shape with append semantics: each document's rows
+        upsert by position in its own transaction together with the chunk rows THAT document's
+        rows reference (from the request-level *chunks*, deduped and embedded once), so a failing
+        document rolls back alone. *sweep_chashes* maps a ``doc_id`` in *docs* to the chashes swept
+        after that document commits (run after every document of the request has been appended).
+
+        *complete* (RDR-223 fix round, nexus-z0o2p.19; additive engine field) maps a ``doc_id``
+        in *docs* to ``(content_hash, manifest ROW count)``: after that document's rows (and
+        chunks) land, in the SAME transaction, the engine runs ``write_many``'s fail-closed verify
+        (no manifest row names a missing chunk AND the manifest has exactly that many ROWS, so a
+        chash used at two positions counts twice) and stamps ``index_state='complete'``. A failed
+        verify does NOT fail the append (the rows are correct); the document lands in the response's
+        ``complete_refused`` and ``complete_refused_count`` counts it. ACK-ECHO: a request that
+        sent *complete* and got a response with no ``complete_refused_count`` was handled by an
+        engine that ignores the field, so this raises ``RuntimeError`` rather than let the caller
+        believe the document is stamped.
+
+        Caps, refused locally before any round trip: :data:`MANIFEST_APPEND_MANY_MAX_DOCS`
+        documents, :data:`MANIFEST_APPEND_MANY_MAX_CHUNKS` chunks,
+        :data:`MANIFEST_APPEND_SWEEP_CHASHES_CAP` sweep chashes per document.
+
+        A chunk-carrying request rides the combined write's embed budget and never retries a
+        ReadTimeout, and its ack is echoed as for :meth:`append_manifest_chunks`. An engine with
+        no such route answers 404, raised as :class:`~nexus.errors.ManifestAppendManyUnsupportedError`;
+        there is NO per-document fallback (it would orphan chunks).
+
+        Returns the engine's response: ``{docs, rows, failed_doc_ids, failed, chunks_written,
+        swept, sweep_skipped, sweep_detail, results}`` (``results`` one entry per document in
+        request order: ``{doc_id, ok, ...}``) plus the embed counts when *chunks* was sent. A
+        document that failed is in ``failed_doc_ids``; it is NOT an exception here.
+        """
+        if not collection:
+            raise PreSendArgumentError(
+                "append_manifest_many: 'collection' is required and must be non-blank"
+            )
+        if len(docs) > MANIFEST_APPEND_MANY_MAX_DOCS:
+            raise PreSendArgumentError(
+                f"append_manifest_many: {len(docs)} docs exceeds the engine cap of "
+                f"{MANIFEST_APPEND_MANY_MAX_DOCS} docs per request"
+            )
+        if chunks is not None and len(chunks) > MANIFEST_APPEND_MANY_MAX_CHUNKS:
+            raise PreSendArgumentError(
+                f"append_manifest_many: {len(chunks)} chunks exceeds the engine cap of "
+                f"{MANIFEST_APPEND_MANY_MAX_CHUNKS} chunks per request"
+            )
+        sweeps = sweep_chashes or {}
+        known = {d for d, _ in docs}
+        stray = sorted(set(sweeps) - known)
+        if stray:
+            raise PreSendArgumentError(
+                f"append_manifest_many: sweep_chashes names document(s) not in docs: {stray}"
+            )
+        for d, lst in sweeps.items():
+            _check_sweep_chashes(f"append_manifest_many sweep_chashes[{d!r}]", lst)
+        sweep_requested = any(sweeps.values())
+        stamps = complete or {}
+        stray = sorted(set(stamps) - known)
+        if stray:
+            raise PreSendArgumentError(
+                f"append_manifest_many: complete names document(s) not in docs: {stray}")
+        for d, (content_hash, row_count) in stamps.items():
+            if not content_hash or isinstance(row_count, bool) or not isinstance(row_count, int) or row_count < 0:
+                raise PreSendArgumentError(
+                    f"append_manifest_many: complete[{d!r}] needs a non-empty content hash and a "
+                    f"non-negative integer row count, got ({content_hash!r}, {row_count!r})")
+        _check_supplied_vectors("append_manifest_many", chunks, embedding_model)
+        merge_fields = _metadata_mode_fields(
+            "append_manifest_many", metadata_merge, metadata_delete_keys)
+        body_docs: list[dict] = []
+        for d, rows in docs:
+            entry: dict = {"doc_id": d, "rows": self._manifest_rows(rows)}
+            if sweeps.get(d):
+                entry["sweep_chashes"] = list(sweeps[d])
+            if d in stamps:
+                entry["complete"] = {"content_hash": stamps[d][0], "chunk_count": stamps[d][1]}
+            body_docs.append(entry)
+        body: dict = {"docs": body_docs, "collection": collection}
+        try:
+            if chunks is None:
+                result = self._post("/manifest/append_many", body)
+            else:
+                from nexus.corpus import ensure_collection_registered  # noqa: PLC0415 — deferred: nexus.corpus imports back into catalog
+                ensure_collection_registered(collection, registrar=self._catalog_registrar)
+                body["chunks"] = chunks
+                if force_re_embed:
+                    body["force_re_embed"] = True
+                if embedding_model:
+                    body["embedding_model"] = embedding_model
+                body.update(merge_fields)
+                result = self._post_embedding_write(
+                    "/manifest/append_many", body, collection=collection,
+                    chunk_count=len(chunks))
+        except httpx.HTTPStatusError as exc:
+            if exc.response is not None and exc.response.status_code == 404:
+                from nexus.errors import ManifestAppendManyUnsupportedError  # noqa: PLC0415 — deferred: only the 404 path needs it
+                raise ManifestAppendManyUnsupportedError(
+                    collection=collection, doc_count=len(docs)) from exc
+            raise
+        out: dict = dict(_answer_object("append_manifest_many", result))
+        if chunks is not None:
+            _check_metadata_merge_echo("append_manifest_many", merge_fields, out)
+        if chunks is not None and "chunks_written" not in out:
+            raise EngineOlderThanClientError(
+                f"append_many ack mismatch for {collection!r}: sent {len(chunks)} chunks but "
+                "the response carried no 'chunks_written' key — refusing to treat the chunk "
+                "content as durably written"
+            )
+        if sweep_requested and "swept" not in out:
+            raise EngineOlderThanClientError(
+                f"append_many ack mismatch for {collection!r}: sent sweep_chashes but the "
+                "response carried no 'swept' key; the engine did not run the deferred sweeps"
+            )
+        if stamps and "complete_refused_count" not in out:
+            raise EngineOlderThanClientError(
+                f"append_many ack mismatch for {collection!r}: sent complete for {len(stamps)} "
+                "document(s) but the response carried no 'complete_refused_count' key; the engine "
+                "does not stamp on append_many and the documents are NOT complete"
+            )
+        _echo_supplied_vectors("append_manifest_many", chunks, out)
+        return out
+
+    def _post_embedding_write(
+        self, path: str, body: dict, *, collection: str, chunk_count: int,
+    ) -> Any:
+        """POST a chunk-carrying combined-write request (nexus-y9t08).
+
+        The engine embeds synchronously inside the request, so it gets the embed budget instead
+        of the control-plane default, and a ReadTimeout is neither retried here
+        (``retry_read_timeout=False``) nor at the outer ``_manifest_write_with_retry`` layer: it
+        is converted to :class:`~nexus.errors.CombinedWriteEmbedTimeoutError`, raised OUTSIDE the
+        ``except`` block so no ``__context__`` chains back to the ReadTimeout (a chained context
+        would still classify as connectivity at the outer layer).
+        """
+        # The one choke point every chunk-carrying combined write reaches (write_many, append,
+        # append_many), so it is where the size of a request is measurable. The e2e shakeout reads
+        # the largest ``count`` from this event to prove the per-request chunk cap actually bound
+        # (nexus-z0o2p.35, F3); the oversize writer's requests used to be visible as
+        # ``http_vector_upsert_chunks_request`` and no longer touch that route.
+        _log.info(
+            "http_catalog_combined_write_request",
+            path=path, collection=collection or "", count=chunk_count,
+        )
+        pending: httpx.ReadTimeout | None = None
+        result: Any = None
+        try:
+            result = self._post(
+                path, body, timeout=_COMBINED_WRITE_EMBED_TIMEOUT_S, retry_read_timeout=False)
+        except httpx.ReadTimeout as rt:
+            pending = rt
+        if pending is not None:
+            raise CombinedWriteEmbedTimeoutError(
+                collection=collection or "", chunk_count=chunk_count, original=str(pending))
+        return result
 
     def get_manifest(self, doc_id: str) -> list[ManifestRow]:
         """Return ordered manifest rows — typed like local Catalog.get_manifest.
@@ -3476,9 +3840,8 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
 
         A page failure propagates (whole call fails loud). Deliberate:
         every caller already handles the exception in its own safe
-        direction — build_staleness_cache degrades to full re-index,
-        embed_migrate blocks its destructive re-index, and catalog
-        doctor must see a hard error rather than a silent partial that
+        direction — build_staleness_cache degrades to full re-index, and
+        catalog doctor must see a hard error rather than a silent partial that
         reads as data corruption.
 
         nexus-b9puj: same union-guard chain as nexus-ocf52
@@ -3621,7 +3984,7 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         that flat list directly (the pre-fix behaviour) crashed every consumer
         that does ``by_chash.items()`` (``indexer_utils.build_staleness_cache``,
         ``search_engine._attach_doc_ids_from_catalog``, ``mcp/core.py``,
-        ``db/embed_migrate.py``, ``commands/collection.py``,
+        ``commands/collection.py``,
         ``commands/catalog_cmds/doctor.py``) with ``AttributeError: 'list' object
         has no attribute 'items'`` — silently swallowed to a warning, degrading
         every service-mode ``nx index repo`` to a full re-chunk + re-embed.
@@ -3733,10 +4096,7 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         self, physical_collection: str, result: dict,
     ) -> set[str]:
         """Shared count-reconciliation body for the ``/manifest/chashes``
-        response, factored out of :meth:`chashes_for_collection` (nexus-zewg3)
-        so :meth:`chashes_for_collection_with_tombstone_protected` can share
-        ONE HTTP round trip with it instead of re-deriving the alive-set with
-        a second call.
+        response, factored out of :meth:`chashes_for_collection` (nexus-zewg3).
 
         nexus-ir6eh: this list is the indexer GC's alive-set — chunks
         absent from it are classified orphan and DELETED, so a
@@ -3792,42 +4152,6 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         result = result if isinstance(result, dict) else {}
         return self._manifest_chashes_reconciled(physical_collection, result)
 
-    def chashes_for_collection_with_tombstone_protected(
-        self, physical_collection: str,
-    ) -> tuple[set[str], int | None]:
-        """``chashes_for_collection`` plus ``tombstone_protected_count``, in
-        ONE round trip (nexus-zewg3).
-
-        Returns ``(chashes, tombstone_protected_count)``. The engine's
-        ``GET /manifest/chashes`` envelope carries ``tombstone_protected_count``
-        (of *chashes*, how many are referenced by a tombstoned document only,
-        tenant-wide — see ``CatalogRepository.tombstoneProtectedChunkCount``)
-        as an ADDITIVE, OPT-IN field: it is computed only when this method
-        passes ``with_tombstone_protected=1`` (the sibling
-        :meth:`chashes_for_collection` never passes it, so the indexer's hot
-        per-collection call pays nothing extra — code review T2
-        nexus/critique-nexus-zewg3-engine-side Significant 1). An engine
-        older than the one that shipped the field, or a response that
-        omitted the param, simply omits the key. The second element is
-        ``None`` in that case — NEVER coerced to ``0`` — so a caller (``nx
-        t3 gc``) can tell "verified zero" from "this engine cannot answer
-        that question" and report the difference honestly instead of
-        printing a confident zero that is actually unknown.
-        """
-        result = self._get(
-            "/manifest/chashes",
-            collection=physical_collection,
-            with_tombstone_protected="1",
-        )
-        result = result if isinstance(result, dict) else {}
-        chashes = self._manifest_chashes_reconciled(physical_collection, result)
-        tombstone_protected = (
-            int(result["tombstone_protected_count"])
-            if "tombstone_protected_count" in result
-            else None
-        )
-        return chashes, tombstone_protected
-
     def purge_manifest_for_doc(self, doc_id: str) -> None:
         self._post("/manifest/purge", {"doc_id": doc_id})
 
@@ -3873,6 +4197,9 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         chunks: "list[dict] | None" = None,
         collection: str,
         force_re_embed: bool = False,
+        embedding_model: str | None = None,
+        metadata_merge: bool = False,
+        metadata_delete_keys: "list[str] | None" = None,
     ) -> dict:
         """Atomic per-doc manifest REPLACE for many docs in one POST.
 
@@ -3949,9 +4276,39 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         counts are carried separately so a truncated list is detectable
         (bead-amendment MUST, same discipline ``complete_refused_count``
         already established).
+
+        RDR-223 P2.0 (nexus-z0o2p.10) adds to that result, each key present ONLY when the
+        engine sent it, so absence stays distinguishable from zero:
+
+        * ``dropped_chashes`` — ``{doc_id: [chash, ...]}``, the chashes each committed write
+          dropped from that document's PREVIOUS manifest (empty for a new or unchanged
+          document; a failed document has no entry), merged across pages. Present whether or
+          not *sweep* is on; with *sweep* off nothing is swept and this is the list a
+          multi-batch writer carries to the document's last append as ``sweep_chashes``. The
+          key is present exactly when the engine sent it; this method does not invent it, and
+          the multi-batch writer treats its absence for a committed document as an error.
+        * ``dropped_count`` / ``dropped_unknown`` — the engine's per-document count of the
+          dropped list (``{doc_id: n}``) and the doc_ids whose previous-manifest read failed
+          after the commit (their drop list is UNKNOWN, not empty). Passed through when sent.
+        * ``embed_embedded`` / ``embed_skipped`` / ``chunks_deduped`` /
+          ``vectors_supplied`` / ``vector_mismatches`` — the combined write's counters, when
+          *chunks* was sent.
+
+        *embedding_model* (RDR-223 P1.5) names the model that produced any ``embedding`` a
+        chunk carries — REQUIRED as soon as one does (checked here, before any round trip) and
+        ignored by the engine otherwise. Sent on the chunk-carrying page only.
+
+        *metadata_merge* / *metadata_delete_keys* (RDR-223, nexus-z0o2p.13; additive) choose how
+        the engine writes the metadata of a chunk whose chash it already holds. Default (both
+        unset) is the replace behaviour: stored metadata becomes the incoming metadata, so a
+        writer that omits a key clears it. With ``metadata_merge=True`` stored metadata becomes
+        ``(stored - metadata_delete_keys) || incoming``, the ``upsert-chunks`` semantics, so an
+        indexer that owns only some keys (the ones ``nexus.metadata_schema.rewrite_delete_keys``
+        names) leaves the ``bib_*`` enrichment another writer set. Sent on the chunk-carrying
+        page only; a chunk not stored yet takes the incoming metadata under either mode.
         """
         if not collection:
-            raise ValueError(
+            raise PreSendArgumentError(
                 "write_manifest_many: 'collection' is required and must be "
                 "non-blank on every call (RDR-191 — the engine no longer "
                 "infers it; previously this was only enforced when 'chunks' "
@@ -3973,6 +4330,9 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         # (nexus-dvgsf): a client pinned to a second engine must register
         # the collection where it is about to write it.
         ensure_collection_registered(collection, registrar=self._catalog_registrar)
+        _check_supplied_vectors("write_manifest_many", chunks, embedding_model)
+        merge_fields = _metadata_mode_fields(
+            "write_manifest_many", metadata_merge, metadata_delete_keys)
         failed: list[str] = []
         refused: list[dict] = []
         refused_count = 0
@@ -3980,6 +4340,10 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         sweep_skipped_total = 0
         sweep_detail: list[dict] = []
         chunks_written: int | None = None
+        dropped_chashes: dict[str, list[str]] | None = None
+        dropped_counts: dict[str, int] | None = None
+        dropped_unknown: list[str] | None = None
+        combined_counts: dict[str, int] = {}
         for page_num, start in enumerate(range(0, len(docs), _MANIFEST_GET_MANY_PAGE)):
             page = docs[start : start + _MANIFEST_GET_MANY_PAGE]
             # RDR-191: 'collection' rides EVERY page's body, not only the
@@ -3993,12 +4357,9 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
                 ],
                 "collection": collection,
             }
-            if complete:
-                page_complete = {
-                    d: complete[d] for d, _ in page if d in complete
-                }
-                if page_complete:
-                    body["complete"] = page_complete
+            page_complete = {d: complete[d] for d, _ in page if d in complete} if complete else {}
+            if page_complete:
+                body["complete"] = page_complete
             if sweep:
                 body["sweep"] = True
             page_carries_chunks = chunks is not None and page_num == 0
@@ -4006,6 +4367,9 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
                 body["chunks"] = chunks
                 if force_re_embed:
                     body["force_re_embed"] = True
+                if embedding_model:
+                    body["embedding_model"] = embedding_model
+                body.update(merge_fields)
             if page_carries_chunks:
                 # nexus-y9t08: this page's POST triggers a synchronous
                 # server-side embed — give it the embed-appropriate
@@ -4030,28 +4394,27 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
                 # would still classify as connectivity at the outer layer
                 # despite the new top-level type (verified: `raise ... from
                 # None` clears __cause__ but NOT __context__).
-                _pending_timeout: httpx.ReadTimeout | None = None
-                try:
-                    result = self._post(
-                        "/manifest/write_many", body,
-                        timeout=_COMBINED_WRITE_EMBED_TIMEOUT_S,
-                        retry_read_timeout=False,
-                    )
-                except httpx.ReadTimeout as _rt:
-                    _pending_timeout = _rt
-                if _pending_timeout is not None:
-                    raise CombinedWriteEmbedTimeoutError(
-                        collection=collection or "",
-                        chunk_count=len(chunks) if chunks else 0,
-                        original=str(_pending_timeout),
-                    )
+                result = self._post_embedding_write(
+                    "/manifest/write_many", body, collection=collection,
+                    chunk_count=len(chunks) if chunks else 0)
             else:
                 result = self._post("/manifest/write_many", body)
-            result = result if isinstance(result, dict) else {}
+            result = _answer_object("write_manifest_many", result)
+            if page_complete and "complete_refused_count" not in result:
+                # ACK-ECHO for the completion stamp (nexus-z0o2p.35): an engine that ignored
+                # ``complete`` answers without ``complete_refused_count`` (the key is always present
+                # on an engine that stamps), and reading that as "stamped" would report a write
+                # STORED that was never stamped complete. Same check, same key, as append_many.
+                raise EngineOlderThanClientError(
+                    f"write_many ack mismatch for {collection!r}: sent complete for "
+                    f"{len(page_complete)} document(s) but the response carried no "
+                    "'complete_refused_count' key; the engine does not stamp on write_many "
+                    "and the documents are NOT complete"
+                )
             if page_carries_chunks:
                 # nexus-wxjr6 ack-echo (design memo §5.2) — see docstring.
                 if "chunks_written" not in result:
-                    raise RuntimeError(
+                    raise EngineOlderThanClientError(
                         f"write_many ack mismatch for {collection!r}: sent "
                         f"{len(chunks)} chunks but the response carried no "
                         "'chunks_written' key — the engine may not "
@@ -4060,6 +4423,25 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
                         "written"
                     )
                 chunks_written = int(result.get("chunks_written") or 0)
+                _check_metadata_merge_echo("write_manifest_many", merge_fields, result)
+                _echo_supplied_vectors("write_manifest_many", chunks, result)
+                for k in ("embed_embedded", "embed_skipped", "chunks_deduped",
+                          "vectors_supplied", "vector_mismatches"):
+                    if k in result:
+                        combined_counts[k] = int(result.get(k) or 0)
+            page_dropped = result.get("dropped_chashes")
+            if isinstance(page_dropped, dict):
+                if dropped_chashes is None:
+                    dropped_chashes = {}
+                for d, lst in page_dropped.items():
+                    dropped_chashes[d] = list(lst or [])
+            page_counts = result.get("dropped_count")
+            if isinstance(page_counts, dict):
+                dropped_counts = {**(dropped_counts or {}),
+                                  **{d: int(n) for d, n in page_counts.items()}}
+            page_unknown = result.get("dropped_unknown")
+            if isinstance(page_unknown, list):
+                dropped_unknown = [*(dropped_unknown or []), *page_unknown]
             failed.extend(result.get("failed_doc_ids", []))
             refused.extend(result.get("complete_refused") or [])
             refused_count += int(result.get("complete_refused_count") or 0)
@@ -4087,6 +4469,13 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         }
         if chunks is not None:
             out["chunks_written"] = chunks_written or 0
+            out.update(combined_counts)
+        if dropped_chashes is not None:
+            out["dropped_chashes"] = dropped_chashes
+        if dropped_counts is not None:
+            out["dropped_count"] = dropped_counts
+        if dropped_unknown is not None:
+            out["dropped_unknown"] = dropped_unknown
         return out
 
     def resync_chunk_count_cache(self, doc_id: str) -> None:

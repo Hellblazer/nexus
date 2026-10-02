@@ -173,7 +173,9 @@ _GH_EXPR_RE = re.compile(r"\$\{\{\s*(.+?)\s*\}\}")
 _BASE_VALUES = {
     "needs.changes.result": "success",
     "needs.changes.outputs.code": "true",
+    "needs.changes.outputs.ci_runner": "ubuntu-latest",
     "needs.test.result": "success",
+    "needs.test-qwen.result": "skipped",
     "needs.test-lint.result": "success",
     "needs.test-mode-census.result": "success",
     "needs.release-ledger-gate.result": "skipped",
@@ -213,7 +215,7 @@ def _render(run_text: str, values: dict[str, str]) -> str:
 
 def _pytest_gate_script(**overrides: str) -> str:
     job = _doc()["jobs"][FANIN_JOB_NAME]
-    step = _find_step(job, "Verify the sharded pytest matrix")
+    step = _find_step(job, "Verify the pytest suite")
     values = {**_BASE_VALUES, **overrides}
     return _render(step["run"], values)
 

@@ -225,8 +225,8 @@ public final class PgContainerHelper {
      * Run the PRODUCT master changelog ({@code db/changelog/db.changelog-master.xml})
      * against {@code su} — the single place every test class's own hand-rolled
      * {@code new Liquibase("db/changelog/db.changelog-master.xml", ...)} call
-     * used to live (nexus-cbo4a batch 1a). Creates the {@code nexus}/{@code staging}
-     * schemas and every product table, and — via {@code role-001-nexus-svc.xml}, the
+     * used to live (nexus-cbo4a batch 1a). Creates the {@code nexus}
+     * schema and every product table, and — via {@code role-001-nexus-svc.xml}, the
      * FIRST include in the master changelog — creates the {@code nexus_svc} role
      * itself if it does not already exist, so callers never need to pre-create it by
      * hand before this call (see {@link SharedCluster}'s template-bootstrap comment
@@ -276,7 +276,7 @@ public final class PgContainerHelper {
      * add_fk_not_valid_composite3}/{@code set_force_rls}/{@code
      * grant_execute_on_function} test-lifecycle functions {@link #dropConstraint}
      * and friends need. {@code nexus_test} is entirely separate from
-     * {@code nexus}/{@code staging}/{@code public} and inert with respect to
+     * {@code nexus}/{@code public} and inert with respect to
      * product-schema migration testing — installing it changes nothing the
      * product changelog walk can observe. Never part of the product changelog;
      * the codegen-time counterpart is db.changelog-test-master.xml (see the
@@ -312,7 +312,7 @@ public final class PgContainerHelper {
      * {@code svcRole} (LOGIN, NOSUPERUSER, NOBYPASSRLS) if absent,
      * redundantly/idempotently ensures {@code nexus_svc} exists too (see
      * {@link #applyProductSchema}'s javadoc — always a no-op here in practice), and
-     * grants {@code svcRole} the same {@code nexus}+{@code staging} DML/sequence
+     * grants {@code svcRole} the same {@code nexus} DML/sequence
      * access {@link #grantServiceSchemaAccess} used to hand-grant. Deliberately does
      * NOT set {@code svcRole}'s {@code search_path} (nexus-cbo4a batch 9 item 1,
      * Sam's directive nexus-zrcj7): every legitimate query already goes through
@@ -321,7 +321,7 @@ public final class PgContainerHelper {
      *
      * <p><b>Call AFTER {@link #applyProductSchema}</b> — the {@code GRANT ... ON ALL
      * TABLES}/{@code ON ALL SEQUENCES} statements inside the test changelog require
-     * the {@code nexus}/{@code staging} schemas and their tables to already exist.
+     * the {@code nexus} schema and its tables to already exist.
      *
      * <p><b>Leaves {@code su} with {@code autoCommit(true)} restored</b> (real bug
      * found converting the six classes that also call {@link #seedServiceToken}, then
@@ -744,6 +744,154 @@ public final class PgContainerHelper {
            .execute();
     }
 
+    private static final com.fasterxml.jackson.databind.ObjectMapper CHUNK_METADATA_MAPPER =
+        new com.fasterxml.jackson.databind.ObjectMapper();
+
+    /**
+     * Seed {@code nexus.chunks} rows with NO manifest row, through generated jOOQ DSL
+     * rather than the write routes (RDR-223 P3.1, nexus-z0o2p.23). From Phase 3 the
+     * engine refuses an ownerless write on {@code /v1/vectors/upsert-chunks},
+     * {@code /store-put} and {@code /upsert-reference-only}, so a test that needs a
+     * chunk before its owner exists (the manifest FK wants the chunk first) or an
+     * orphan on purpose builds it here. The Python twin is {@code tests/_chunk_seed.py}.
+     *
+     * <p>Unlike {@link #insertChunk384} this carries the text, the metadata and the
+     * caller's real vectors, so it can stand in for an {@code upsert-chunks} POST for a
+     * FIRST write. It is deliberately looser than the Python twin
+     * ({@code tests/_chunk_seed.py}), not the same contract:
+     * <ul>
+     *   <li>it runs as whatever role {@code ctx} carries (the superuser in the existing
+     *       callers, so RLS does not apply) and sets no tenant GUC;</li>
+     *   <li>a repeat of an existing {@code (tenant, collection, chash)} is left alone
+     *       ({@code ON CONFLICT DO NOTHING}): no text or vector replace, no metadata merge,
+     *       no {@code retention} reset, no {@code last_written_at} restamp, where the route
+     *       and the Python twin all do those;</li>
+     *   <li>the embedding column follows the vector's width (384, 768 or 1024), not the
+     *       collection's registered model, so a mismatch is not refused.</li>
+     * </ul>
+     * The collection must already be registered ({@link #insertCollection}); the caller
+     * pairs this with {@link #ownChunks} when the test wants the chunks live.
+     *
+     * @param ctx        a {@link DSLContext} over a role that may INSERT into {@code nexus.chunks}
+     *                   for {@code tenant} (the superuser used by the other seeds here, or the
+     *                   service role inside a {@code TenantScope.withTenant})
+     * @param chashHex   64-lowercase-hex chashes, one per chunk
+     * @param texts      chunk texts, aligned with {@code chashHex}
+     * @param embeddings vectors, aligned with {@code chashHex}, all one width
+     * @param metadatas  per-chunk metadata maps, aligned with {@code chashHex}
+     */
+    public static void insertChunks(DSLContext ctx, String tenant, String collection,
+                                    java.util.List<String> chashHex, java.util.List<String> texts,
+                                    java.util.List<float[]> embeddings,
+                                    java.util.List<Map<String, Object>> metadatas) {
+        int n = chashHex.size();
+        if (texts.size() != n || embeddings.size() != n || metadatas.size() != n) {
+            throw new IllegalArgumentException("insertChunks: ids/texts/embeddings/metadatas must align ("
+                + n + "/" + texts.size() + "/" + embeddings.size() + "/" + metadatas.size() + ")");
+        }
+        for (int i = 0; i < n; i++) {
+            byte[] chash = dev.nexus.service.db.Chash.fromHex(chashHex.get(i)).toBytes();
+            float[] v = embeddings.get(i);
+            org.jooq.JSONB meta;
+            try {
+                meta = org.jooq.JSONB.jsonb(CHUNK_METADATA_MAPPER.writeValueAsString(metadatas.get(i)));
+            } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+                throw new IllegalArgumentException("insertChunks: metadata is not JSON-serialisable", e);
+            }
+            var col = switch (v.length) {
+                case 384 -> CHUNKS.EMBEDDING_384;
+                case 768 -> CHUNKS.EMBEDDING_768;
+                case 1024 -> CHUNKS.EMBEDDING_1024;
+                default -> throw new IllegalArgumentException("insertChunks: no embedding column of width " + v.length);
+            };
+            ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.CHUNK_TEXT,
+                           col, CHUNKS.METADATA)
+               .values(tenant, collection, chash, texts.get(i), Vector.of(v), meta)
+               .onConflictDoNothing()
+               .execute();
+        }
+    }
+
+    /**
+     * {@link #insertChunks} with the vectors taken from {@code embedder}, the way the
+     * {@code upsert-chunks} route computes them server-side.
+     */
+    public static void insertChunks(DSLContext ctx, String tenant, String collection,
+                                    java.util.List<String> chashHex, java.util.List<String> texts,
+                                    java.util.List<Map<String, Object>> metadatas,
+                                    dev.nexus.service.vectors.Embedder embedder) {
+        insertChunks(ctx, tenant, collection, chashHex, texts, embedder.embed(texts), metadatas);
+    }
+
+    /**
+     * Seed OWNED chunks for a test that POSTs to {@code /v1/vectors/upsert-chunks} to exercise
+     * something other than an ownerless first write (RDR-223 P3.1, nexus-z0o2p.23). From Phase 3
+     * the engine refuses that route for a chash with no live manifest row, so such a test
+     * pre-seeds the chash with an owner and POSTs with {@code force_re_embed} (an owned chash
+     * with a stored vector skips the embedder otherwise, and the embedder is what these tests
+     * reach for).
+     *
+     * <p>Each chunk gets a zero vector of {@code dim} (the width the collection's registered
+     * model routes to) and the text {@code "seed"}; {@link #insertChunks} and {@link #ownChunks}
+     * do the rest, so it runs as whatever role {@code ctx} carries (the superuser, in the callers)
+     * and the collection must already be registered ({@link #insertCollection}).
+     */
+    public static void insertOwnedChunks(DSLContext ctx, String tenant, String collection, int dim,
+                                         String... chashHex) {
+        var hex = java.util.List.of(chashHex);
+        insertChunks(ctx, tenant, collection, hex,
+            hex.stream().map(h -> "seed").toList(),
+            hex.stream().map(h -> new float[dim]).toList(),
+            hex.stream().map(h -> Map.<String, Object>of()).toList());
+        ownChunks(ctx, tenant, collection, chashHex);
+    }
+
+    /**
+     * Seed one REFERENCE-ONLY {@code nexus.chunks} row ({@code chunk_text} NULL,
+     * {@code retention='reference-only'}, RDR-169 G4) with NO manifest row. This is the only
+     * writer of such a row in the tree: the engine's own writer
+     * ({@code PgVectorRepository#upsertReferenceOnlyChunk}, and the route over it) is gone
+     * (RDR-223 Phase 3, nexus-z0o2p.36), so a test that needs a reference-only row builds it
+     * here, the way {@link #insertChunks} builds a content row.
+     *
+     * <p>A repeat of the same {@code (tenant, collection, chash)} refreshes the embedding and
+     * REPLACES the metadata, and never touches {@code chunk_text} (so a row that was full stays
+     * full; the guard against a full to reference-only change belonged to the removed writer, not
+     * to the schema). It runs as whatever role {@code ctx} carries (the superuser, in the
+     * callers), sets no tenant GUC, and the collection must already be registered
+     * ({@link #insertCollection}).
+     *
+     * @param chashHex  the 64-lowercase-hex chash
+     * @param embedding the vector; its width (384, 768 or 1024) picks the embedding column
+     * @param metadata  chunk metadata, may be empty
+     */
+    public static void insertReferenceOnlyChunk(DSLContext ctx, String tenant, String collection,
+                                                String chashHex, float[] embedding,
+                                                Map<String, Object> metadata) {
+        org.jooq.JSONB meta;
+        try {
+            meta = org.jooq.JSONB.jsonb(CHUNK_METADATA_MAPPER.writeValueAsString(metadata));
+        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+            throw new IllegalArgumentException("insertReferenceOnlyChunk: metadata is not JSON-serialisable", e);
+        }
+        var col = switch (embedding.length) {
+            case 384 -> CHUNKS.EMBEDDING_384;
+            case 768 -> CHUNKS.EMBEDDING_768;
+            case 1024 -> CHUNKS.EMBEDDING_1024;
+            default -> throw new IllegalArgumentException(
+                "insertReferenceOnlyChunk: no embedding column of width " + embedding.length);
+        };
+        byte[] chash = dev.nexus.service.db.Chash.fromHex(chashHex).toBytes();
+        ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.CHUNK_TEXT,
+                       col, CHUNKS.METADATA, CHUNKS.RETENTION)
+           .values(tenant, collection, chash, null, Vector.of(embedding), meta, "reference-only")
+           .onConflict(CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH)
+           .doUpdate()
+           .set(col, org.jooq.impl.DSL.excluded(col))
+           .set(CHUNKS.METADATA, org.jooq.impl.DSL.excluded(CHUNKS.METADATA))
+           .execute();
+    }
+
     /**
      * Allowlist of GUC names {@link #setTenant} may stamp — the same two names {@link
      * TenantScope#PERMITTED_GUCS} enforces (that field is package-private inside {@code
@@ -833,24 +981,6 @@ public final class PgContainerHelper {
     public static void analyzeTable(Connection conn, Table<?> table) throws SQLException {
         DSLContext ctx = DSL.using(conn, SQLDialect.POSTGRES);
         Routines.analyzeTable(ctx.configuration(), ctx.render(table));
-    }
-
-    /**
-     * Overload for a table outside jOOQ codegen scope -- the {@code staging} schema is not
-     * one of service/pom.xml's jOOQ codegen {@code <schemata>} (only {@code nexus}/{@code t1}
-     * are), so no generated {@link Table} exists for e.g. {@code staging.document_chunks}.
-     * Takes a jOOQ-constructed qualified {@link Name} instead (e.g.
-     * {@code DSL.name("staging", "document_chunks")}) -- still never a hand-typed SQL
-     * string -- rendered via {@code ctx.render(DSL.table(qualifiedName))} exactly like the
-     * generated-{@code Table} overload above before reaching {@code nexus.analyze_table}.
-     *
-     * @param conn          the connection to run ANALYZE on
-     * @param qualifiedName the schema-qualified table identifier (e.g.
-     *                      {@code DSL.name("staging", "document_chunks")})
-     */
-    public static void analyzeTable(Connection conn, Name qualifiedName) throws SQLException {
-        DSLContext ctx = DSL.using(conn, SQLDialect.POSTGRES);
-        Routines.analyzeTable(ctx.configuration(), ctx.render(DSL.table(qualifiedName)));
     }
 
     /**

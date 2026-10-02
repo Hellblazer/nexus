@@ -246,6 +246,18 @@ def test_run_index_batch_flush_forwards_force_re_embed(tmp_path, monkeypatch):
             return {}
 
         @property
+        def throttled_files(self) -> dict:
+            return {}
+
+        @property
+        def throttle_retry_after(self) -> float | None:
+            return None
+
+        @property
+        def throttle_breaker_open(self) -> bool:
+            return False
+
+        @property
         def stats(self) -> dict:
             return {"flushes": 0.0, "flush_seconds": 0.0, "upload_seconds": 0.0}
 
@@ -269,6 +281,15 @@ def test_run_index_batch_flush_forwards_force_re_embed(tmp_path, monkeypatch):
     assert catalog_writer.write_manifest_many.call_count == 1
     kwargs = catalog_writer.write_manifest_many.call_args.kwargs
     assert kwargs["force_re_embed"] is True
+    # RDR-223 P2.4: the flush asks for the metadata merge mode (the replaced upsert-chunks call
+    # merged), so a normal-size file's re-index keeps another writer's bib_* enrichment; the
+    # delete list names owned keys the rows dropped (this fixture's row carries none of them).
+    from nexus.metadata_schema import rewrite_delete_keys
+
+    assert kwargs["metadata_merge"] is True
+    assert kwargs["metadata_delete_keys"] == rewrite_delete_keys([{"m": 1}])
+    assert kwargs["metadata_delete_keys"] and not any(
+        k.startswith("bib_") for k in kwargs["metadata_delete_keys"])
 
 
 def test_run_index_batch_flush_force_false_omits_force_re_embed(tmp_path, monkeypatch):
@@ -315,6 +336,18 @@ def test_run_index_batch_flush_force_false_omits_force_re_embed(tmp_path, monkey
         @property
         def failed_files(self) -> dict:
             return {}
+
+        @property
+        def throttled_files(self) -> dict:
+            return {}
+
+        @property
+        def throttle_retry_after(self) -> float | None:
+            return None
+
+        @property
+        def throttle_breaker_open(self) -> bool:
+            return False
 
         @property
         def stats(self) -> dict:
@@ -402,6 +435,18 @@ def test_run_index_batch_flush_retries_transient_failure_then_succeeds(tmp_path,
             return {}
 
         @property
+        def throttled_files(self) -> dict:
+            return {}
+
+        @property
+        def throttle_retry_after(self) -> float | None:
+            return None
+
+        @property
+        def throttle_breaker_open(self) -> bool:
+            return False
+
+        @property
         def stats(self) -> dict:
             return {"flushes": 0.0, "flush_seconds": 0.0, "upload_seconds": 0.0}
 
@@ -429,22 +474,17 @@ def test_run_index_batch_flush_retries_transient_failure_then_succeeds(tmp_path,
     reset_superseded_sweep_stats()
 
 
-def test_run_index_batch_flush_shared_chash_orphan_copy_survives_identity_doc_failure(
+def test_run_index_batch_flush_shared_chash_is_not_copied_into_an_ownerless_upsert(
     tmp_path, monkeypatch,
 ):
-    """nexus-3mwuo (P3, C1-residual from the wxjr6 delta re-review, T2
-    review-wxjr6-client-2026-08-09 [22014]): a chash shared by an
-    identity file ("has_id.py", catalog_doc_id="1.1") and an orphan
-    file ("no_id.py", no catalog identity) must survive even when the
-    identity doc's OWN per-doc write lands in the combined-write
-    response's ``failed_doc_ids`` — a real, already-modeled server-side
-    outcome. Fix direction (a): the shared chash rides BOTH paths, so
-    ``db.upsert_chunks_with_embeddings`` (the legacy, idempotent-via-
-    ON-CONFLICT orphan route) carries it regardless of what the combined
-    write's response says about doc "1.1". This test is fake-level (the
-    engine-side idempotency of the legacy upsert is already proven
-    elsewhere) — it only asserts the CLIENT unconditionally sends the
-    orphan copy.
+    """nexus-3mwuo, superseded by nexus-z0o2p.20 (RDR-223 P2.10): a chash
+    shared by an identity file ("has_id.py", catalog_doc_id="1.1") and an
+    identity-less file ("no_id.py") used to ride BOTH the combined write and
+    the legacy ownerless upsert, so it survived the identity document's own
+    failed write (``failed_doc_ids``). The ownerless upsert is gone: the
+    engine refuses ownerless writes, and a chunk is written with its owner
+    or not at all. The shared chash now rides only the identity document's
+    combined write; ``db.upsert_chunks_with_embeddings`` is never called.
     """
     from nexus.db.http_vector_client import HttpVectorClient
     from nexus.indexer import _run_index
@@ -489,6 +529,18 @@ def test_run_index_batch_flush_shared_chash_orphan_copy_survives_identity_doc_fa
             return {}
 
         @property
+        def throttled_files(self) -> dict:
+            return {}
+
+        @property
+        def throttle_retry_after(self) -> float | None:
+            return None
+
+        @property
+        def throttle_breaker_open(self) -> bool:
+            return False
+
+        @property
         def stats(self) -> dict:
             return {"flushes": 0.0, "flush_seconds": 0.0, "upload_seconds": 0.0}
 
@@ -531,22 +583,12 @@ def test_run_index_batch_flush_shared_chash_orphan_copy_survives_identity_doc_fa
             fctx,
         )
 
-    # The combined write still ran (and its response says doc "1.1"
-    # failed) — but that is orthogonal to whether the orphan copy landed.
+    # The combined write ran and carries the shared chash exactly once.
     assert catalog_writer.write_manifest_many.call_count == 1
-    # The legacy orphan-path upsert must have been called with the
-    # shared chash, UNCONDITIONALLY — it is dispatched before the
-    # combined write's response is even known, so it cannot react to
-    # (and does not need to wait for) doc "1.1"'s outcome.
-    db.upsert_chunks_with_embeddings.assert_called_once()
-    upsert_kwargs = db.upsert_chunks_with_embeddings.call_args.kwargs
-    assert upsert_kwargs["ids"] == [shared_chash], (
-        "shared chash did not ride the orphan (legacy upsert) path — "
-        "if doc 1.1's per-doc write fails server-side (as simulated by "
-        "failed_doc_ids above), this chash would be lost for BOTH "
-        "has_id.py and no_id.py with no recovery path (nexus-3mwuo)"
-    )
-    assert upsert_kwargs["documents"] == ["shared"]
+    sent = catalog_writer.write_manifest_many.call_args.kwargs["chunks"]
+    assert [c["chash"] for c in sent] == [shared_chash]
+    # No ownerless copy: not even when doc "1.1"'s own write failed.
+    db.upsert_chunks_with_embeddings.assert_not_called()
 
 
 def test_run_index_service_mode_uses_get_t3_not_make_t3(tmp_path, monkeypatch):
@@ -611,8 +653,8 @@ def _make_doc_indexer_db():
 
 def test_index_document_service_mode_skips_embed_fallback(tmp_path, monkeypatch):
     """In service mode, _index_document must NOT attempt any non-service
-    embed path — the service embeds server-side. Instead it calls
-    db.upsert_chunks_with_embeddings directly with a stub.
+    embed path — the service embeds server-side. Instead it hands the
+    chunks to the combined chunk+owner write (RDR-223, nexus-z0o2p.13).
 
     nexus-sghyo (2026-08-06): the legacy non-service embed path
     (``_embed_with_fallback``) is deleted outright — the client does no
@@ -635,20 +677,16 @@ def test_index_document_service_mode_skips_embed_fallback(tmp_path, monkeypatch)
     mock_hooks = MagicMock()
 
     with patch("nexus.doc_indexer._register_or_lookup_doc_id", return_value="doc-1"), \
-         patch("nexus.doc_indexer._fence_begin"), \
-         patch("nexus.doc_indexer._fence_complete"), \
+         patch("nexus.doc_indexer._write_chunks_with_owner_rows") as owner_write, \
          patch("nexus.doc_indexer._vector_with_retry", side_effect=lambda fn, **kw: fn(**kw)), \
          patch("nexus.hook_registry.HookRegistry", return_value=mock_hooks), \
          patch("nexus.hook_registry.install_default_hooks"):
-        # nexus-tp8yk D2a: _index_document now calls the PROPAGATING
-        # _fence_complete explicitly (mirrors _index_pdf_incremental's
-        # pre-existing shape, see that test's identical comment below in
-        # this file) — the mocked db never lands chunks in the substrate
-        # the real engine's fail-closed /complete verifies against, so
-        # unstubbed it correctly raises IndexRunVerifyRefused. This test
-        # proves the service-mode embed guard, not fence integration
-        # (nexus-5xn3k.7 / nexus-tp8yk's own gates own the genuine proof);
-        # stub the fence like every other decoupled-substrate test here.
+        # RDR-223 (nexus-z0o2p.13): the chunks and their owner rows are one
+        # request to the real engine, which this mocked db never lands chunks
+        # in (and which would refuse the fake id and doc). This test proves the
+        # service-mode embed guard, not the write (its real-engine coverage is
+        # tests/integration/test_rdr223_index_document_journey.py): the write
+        # is replaced by a mock.
         _index_document(
             test_file,
             corpus="test-corpus",
@@ -659,8 +697,8 @@ def test_index_document_service_mode_skips_embed_fallback(tmp_path, monkeypatch)
 
 
 def test_index_document_service_mode_calls_upsert_chunks(tmp_path, monkeypatch):
-    """In service mode, _index_document must call upsert_chunks_with_embeddings
-    (with empty embeddings that the server discards) to complete the write."""
+    """In service mode, _index_document must hand its chunks to the combined
+    chunk+owner write (RDR-223) rather than upsert them separately."""
     from nexus.doc_indexer import _index_document
 
     monkeypatch.setenv("NX_STORAGE_BACKEND_VECTORS", "service")
@@ -676,12 +714,11 @@ def test_index_document_service_mode_calls_upsert_chunks(tmp_path, monkeypatch):
     mock_hooks = MagicMock()
 
     with patch("nexus.doc_indexer._register_or_lookup_doc_id", return_value="doc-1"), \
-         patch("nexus.doc_indexer._fence_begin"), \
-         patch("nexus.doc_indexer._fence_complete"), \
+         patch("nexus.doc_indexer._write_chunks_with_owner_rows") as owner_write, \
          patch("nexus.doc_indexer._vector_with_retry", side_effect=lambda fn, **kw: fn(**kw)), \
          patch("nexus.hook_registry.HookRegistry", return_value=mock_hooks), \
          patch("nexus.hook_registry.install_default_hooks"):
-        # nexus-tp8yk D2a: see the identical rationale on
+        # See the identical rationale on
         # test_index_document_service_mode_skips_embed_fallback above.
         _index_document(
             test_file,
@@ -690,10 +727,10 @@ def test_index_document_service_mode_calls_upsert_chunks(tmp_path, monkeypatch):
             t3=db,
             embed_fn=None,
         )
-        # upsert_chunks_with_embeddings must be called (service ignores embeddings)
-        assert db.upsert_chunks_with_embeddings.called, (
-            "expected upsert_chunks_with_embeddings call in service mode"
-        )
+        # The combined chunk+owner write must be called (the service embeds),
+        # and the chunk upsert it replaced must not be.
+        assert owner_write.called, "expected the combined chunk+owner write in service mode"
+        assert not db.upsert_chunks_with_embeddings.called
 
 
 def test_index_document_service_mode_t3_none_no_credentials_error(tmp_path, monkeypatch):
@@ -729,12 +766,11 @@ def test_index_document_service_mode_t3_none_no_credentials_error(tmp_path, monk
          patch("nexus.doc_indexer.make_t3", mock_make_t3), \
          patch("nexus.doc_indexer._make_local_embed_fn") as local_embed_mock, \
          patch("nexus.doc_indexer._register_or_lookup_doc_id", return_value="doc-1"), \
-         patch("nexus.doc_indexer._fence_begin"), \
-         patch("nexus.doc_indexer._fence_complete"), \
+         patch("nexus.doc_indexer._write_chunks_with_owner_rows") as owner_write, \
          patch("nexus.doc_indexer._vector_with_retry", side_effect=lambda fn, **kw: fn(**kw)), \
          patch("nexus.hook_registry.HookRegistry", return_value=mock_hooks), \
          patch("nexus.hook_registry.install_default_hooks"):
-        # nexus-tp8yk D2a: see the identical rationale on
+        # See the identical rationale on
         # test_index_document_service_mode_skips_embed_fallback above.
         # Must NOT raise CredentialsMissingError or any credential-related error
         count = _index_document(
@@ -788,19 +824,15 @@ def test_index_pdf_incremental_service_mode_skips_embed_fallback(tmp_path, monke
 
     mock_hooks = MagicMock()
 
-    with patch("nexus.doc_indexer.read_checkpoint", return_value=None), \
-         patch("nexus.doc_indexer.write_checkpoint"), \
-         patch("nexus.doc_indexer.delete_checkpoint"), \
+    # RDR-223 (nexus-z0o2p.15): the chunks and their owner rows are one write to the real engine,
+    # which this test's fake handle never sees; the recorder stands in for it. This test proves the
+    # service-mode embed guard, not the write (tests/integration/test_rdr223_pdf_journey.py owns that).
+    from tests import _owner_write_double
+    _owner_write_double.install(monkeypatch)
+
+    with patch("nexus.doc_indexer.delete_checkpoint"), \
          patch("nexus.doc_indexer._register_or_lookup_doc_id", return_value="doc-1"), \
-         patch("nexus.doc_indexer._fence_begin"), \
-         patch("nexus.doc_indexer._fence_complete"), \
          patch("nexus.doc_indexer._vector_with_retry", side_effect=lambda fn, **kw: fn(**kw)):
-        # RUNFENCE (nexus-5xn3k.4): the mocked t3 never lands chunks in the
-        # substrate the real engine's fail-closed /complete verifies against —
-        # unstubbed, _fence_complete correctly raises IndexRunVerifyRefused.
-        # This test proves the service-mode embed guard, not fence integration
-        # (nexus-5xn3k.7 owns the genuine proof); stub the fence like every
-        # other decoupled-substrate test in the suite.
         _index_pdf_incremental(
             tmp_path / "test.pdf",
             corpus="test-corpus",

@@ -203,8 +203,8 @@ class TestCallerLoopsIsolatePerItem:
         # dead_code.)
         ("src/nexus/commands/catalog_cmds/integrity.py", "catalog_verify_collection_unreadable"),
         # (RDR-155 P4b: migration/collision_audit.py's guarded page loop
-        # died with the file.)
-        ("src/nexus/db/reconcile.py", "vector_etl_verify_fill_page_unreachable"),
+        # died with the file. RDR-223 P3.3, nexus-z0o2p.25: db/reconcile.py's
+        # verify-fill page loop died with its dead module code.)
     ]
 
     @pytest.mark.parametrize(("path", "marker"), SITES)
@@ -297,36 +297,47 @@ class TestCallerLoopsIsolatePerItem:
         ``_always_raises``'s docstring for the counterexample this
         closes) — silence, not the mere presence of a try/except, is
         what would actually strand registration.
+
+        nexus-z0o2p.34 (RDR-223, Sam 2026-09-30): the registration moved INTO the
+        small-doc branch's own ``try``, ahead of the completion stamp (a kill in
+        the enrichment must leave the fence ``indexing``). The invariant is the
+        same, restated structurally: the ``_register_in_catalog(metadatas_list,
+        ...)`` call precedes the stamp, and every ``try`` that encloses it has
+        handlers that always re-raise, so no swallowing handler can strand it.
         """
         from pathlib import Path
 
         src = Path("src/nexus/doc_indexer.py").read_text()
-        # nexus-tbkk1's "stale-chunk prune ... DELETED" comment appears at
-        # all three deleted prune sites verbatim; rindex the LAST one
-        # (index_pdf's small-doc branch, the only one that precedes
-        # _register_in_catalog) rather than the first (_index_document's).
-        marker = src.rindex(
-            "nexus-tbkk1: stale-chunk prune via _identity_where's source_path"
-        )
-        register = src.index("_register_in_catalog(metadatas_list", marker)
-        marker_line = src.count("\n", 0, marker) + 1
-        register_line = src.count("\n", 0, register) + 1
-
         tree = ast.parse(src, filename="src/nexus/doc_indexer.py")
+        (index_pdf,) = [
+            n for n in ast.walk(tree)
+            if isinstance(n, ast.FunctionDef) and n.name == "index_pdf"]
+        (register,) = [
+            c for c in ast.walk(index_pdf)
+            if isinstance(c, ast.Call) and isinstance(c.func, ast.Name)
+            and c.func.id == "_register_in_catalog"
+            and c.args and isinstance(c.args[0], ast.Name) and c.args[0].id == "metadatas_list"]
+        (stamp,) = [
+            c for c in ast.walk(index_pdf)
+            if isinstance(c, ast.Call) and isinstance(c.func, ast.Attribute)
+            and c.func.attr == "complete" and isinstance(c.func.value, ast.Name)
+            and c.func.value.id == "pending"]
+        assert register.lineno < stamp.lineno, (
+            "the small-doc catalog registration must run ahead of the completion stamp")
+        enclosing = [
+            t for t in ast.walk(index_pdf)
+            if isinstance(t, ast.Try)
+            and any(x is register for stmt in t.body for x in ast.walk(stmt))]
+        assert enclosing, "non-vacuity: the registration sits inside the stamp's try"
         offending: list[str] = []
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Try):
-                continue
-            if not (marker_line <= node.lineno <= register_line):
-                continue
+        for node in enclosing:
             for handler in node.handlers:
                 if not _always_raises(handler.body):
                     offending.append(ast.dump(handler.type) if handler.type else "bare except")
         assert not offending, (
-            "a SWALLOWING except (no raise in its body) reappeared between "
-            "the deleted prune site and catalog registration in index_pdf's "
-            "small-doc branch — registration must run unconditionally, "
-            f"never isolated behind a swallowable failure: {offending}"
+            "a SWALLOWING except (no raise in its body) reappeared around catalog "
+            "registration in index_pdf's small-doc branch — registration must run "
+            f"unconditionally, never isolated behind a swallowable failure: {offending}"
         )
 
     def test_always_raises_helper_rejects_the_reviewers_counterexample(self) -> None:

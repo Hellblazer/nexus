@@ -111,7 +111,13 @@ class VectorHandlerVoyageTooManyTokensTest {
         http.send(warmup, HttpResponse.BodyHandlers.ofString());
 
         try (Connection su = pg.createConnection("")) {
-            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, COLLECTION);
+            var dsl = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCollection(dsl, TENANT, COLLECTION);
+            // RDR-223 P3.1 (nexus-z0o2p.23): own the chash the test POSTs (the engine refuses an
+            // ownerless upsert-chunks write from Phase 3) and POST with force_re_embed so the
+            // throwing embedder is still reached for it.
+            PgContainerHelper.insertOwnedChunks(dsl, TENANT, COLLECTION, 1024,
+                Chash.ofText("vtmt-c1").toHex());
         }
     }
 
@@ -138,7 +144,8 @@ class VectorHandlerVoyageTooManyTokensTest {
             "collection", COLLECTION,
             "ids",        List.of(Chash.ofText("vtmt-c1").toHex()),
             "documents",  List.of("pretend-oversized chunk text"),
-            "metadatas",  List.of(Map.of())));
+            "metadatas",  List.of(Map.of()),
+            "force_re_embed", true));
 
         assertThat(resp.statusCode())
             .as("must be 422 (actionable, non-retryable) -- never the generic 500 the critic"

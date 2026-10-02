@@ -21,8 +21,7 @@ import java.util.regex.Pattern;
  * every {@code SELECT} read and {@code UPDATE} write against
  * {@code CATALOG_DOCUMENTS} (or one of the four tombstone-aware
  * {@code catalog-019} read-shape views) in {@link CatalogRepository},
- * {@link dev.nexus.service.vectors.PgVectorRepository}, and
- * {@link StagingPromoteOps} must exclude tombstoned rows from its result
+ * and {@link dev.nexus.service.vectors.PgVectorRepository} must exclude tombstoned rows from its result
  * set, OR sit on a named, rationale-carrying exemption. Same rule for
  * {@code CATALOG_DOCUMENT_CHUNKS} reads (a tombstoned parent's chunks must
  * not leak through a chunk-level query either — the nexus-mqd6t BUG 1/2
@@ -132,9 +131,7 @@ class TombstoneFilterGateTest {
         "CatalogRepository.java",
             Path.of("src", "main", "java", "dev", "nexus", "service", "db", "CatalogRepository.java"),
         "PgVectorRepository.java",
-            Path.of("src", "main", "java", "dev", "nexus", "service", "vectors", "PgVectorRepository.java"),
-        "StagingPromoteOps.java",
-            Path.of("src", "main", "java", "dev", "nexus", "service", "db", "StagingPromoteOps.java")
+            Path.of("src", "main", "java", "dev", "nexus", "service", "vectors", "PgVectorRepository.java")
     );
 
     // ── Tokens ──────────────────────────────────────────────────────────────
@@ -208,8 +205,9 @@ class TombstoneFilterGateTest {
      * get-family it needs no out-of-band chash; a plain listing surfaced tombstoned content by
      * default. A live sweep of every {@code DimTables.CHUNKS.get(dim)} occurrence in the file at
      * fix time found exactly one other unfiltered candidate (this one); {@code count} is
-     * PRE-EXISTING tracked scope of nexus-dzs62 (left untouched); {@code fetchChunkText} has zero
-     * live HTTP callers (left untouched, noted as a landmine); every other occurrence is either
+     * PRE-EXISTING tracked scope of nexus-dzs62 (left untouched); {@code fetchChunkText} has one
+     * HTTP caller, the {@code chroma://} permalink resolver (nexus-aphki), and is a physical read
+     * on purpose (see its javadoc, nexus-wbfpw.35); every other occurrence is either
      * already filtered (get-family above) or a write-path / existence-probe helper feeding the
      * upsert flow, not a content-serving read.
      */
@@ -270,6 +268,11 @@ class TombstoneFilterGateTest {
      * particular gate mechanism did.
      */
     private static final List<ExemptEntry> TOMBSTONE_EXEMPT = List.of(
+        new ExemptEntry("CatalogRepository.java", "registeredDocIds",
+            "existence pre-check for append_many (RDR-223): answers 'is there a catalog_documents row', "
+            + "tombstoned rows included, exactly like requireDocumentExists (a selectOne the gate does not "
+            + "scan); it only decides whether to spend an embed, and a tombstoned document is refused "
+            + "by the authoritative in-transaction write (409), so filtering here would change nothing"),
         new ExemptEntry("CatalogRepository.java", "highestChildSeq",
             "tumbler allocator: the tumbler PK does not exclude tombstones, and filtering "
             + "would re-issue an already-taken child sequence number to a NEW document"),
@@ -313,10 +316,6 @@ class TombstoneFilterGateTest {
             + "in the same method: a tombstoned or unknown tumbler throws IllegalStateException "
             + "before this select ever executes (found during gate authorship; undocumented "
             + "before this)"),
-        new ExemptEntry("StagingPromoteOps.java", "finalizeTenant",
-            "RDR-180 land-then-transform migration leg (nexus-jxizy.10.3/10.4) — same sanction "
-            + "class as RawSqlGateTest's raw-SQL allowance for this file: one-shot migration "
-            + "statements over a landing zone, never serving-path"),
         new ExemptEntry("CatalogRepository.java", "agedTombstoneCount",
             "nexus-3ck2g E3 (/v1/catalog/purge-trash): this read's whole PURPOSE is counting "
             + "the TOMBSTONED population itself (deleted_at IS NOT NULL), mirroring "

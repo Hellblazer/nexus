@@ -3,8 +3,7 @@
 companion test for ``_SERVICE_ONLY_WRITE_OPS`` gaining ``delete_collection``
 (``src/nexus/catalog/factory.py``), mirroring the established per-entry
 precedent every other member of that frozenset already carries
-(``tests/test_catalog_purge_trash.py``'s ``purge_trash`` pair,
-``tests/test_gc_audit_record_client.py:50-60``'s ``record_gc_audit`` pair).
+(``tests/test_catalog_purge_trash.py``'s ``purge_trash`` pair).
 
 Grepped the whole tree for "_ServiceCatalogWriter" + "delete_collection"
 together before this file: zero hits -- the only prior coverage was

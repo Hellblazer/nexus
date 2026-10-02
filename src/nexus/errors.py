@@ -406,6 +406,17 @@ class SourceUriCollectionMismatchError(NexusError):
     """
 
 
+class DryRunStoreError(NexusError):
+    """A PDF dry run was handed a store that is not a throwaway in-memory one (RDR-223).
+
+    A dry run previews extraction and chunking into a store that is discarded with the process and
+    touches no catalog, so its chunks have no owner row. That is safe only for such a store: the
+    engine's client would take the same ownerless ``upsert-chunks`` request as a real write, and the
+    engine refuses those. Every dry-run entry checks before it touches the store, and
+    ``_preview_upsert`` checks again before it writes.
+    """
+
+
 class UnchunkableContentError(NexusError):
     """A file passed directly to the doc_indexer family (``nx index
     md``/``pdf``/``rdr``) is zero-byte or decodes as binary content, so
@@ -430,6 +441,23 @@ class UnchunkableContentError(NexusError):
 
     def __init__(self, message: str) -> None:
         super().__init__(message)
+
+
+class CatalogIdentityMissingError(NexusError):
+    """A document reached the chunk write with no catalog document to own its chunks.
+
+    RDR-223 (nexus-z0o2p.13): ``doc_indexer._index_document`` writes a document's
+    chunks and their owner rows as one request, and there is no owner row without a
+    catalog document. Before, a document whose pre-flight registration returned no
+    identity had its chunks written ownerless (hidden from every read by ``live(c)``
+    until the reaper removed them) and the run reported success unless a summary
+    collector happened to be active. Now the write is refused before anything lands,
+    the run fails, and ``_record_manifest_identity_drop`` still feeds the batch
+    summaries. A per-record-raisable member of :data:`PER_RECORD_SURVIVABLE_
+    EXCEPTIONS`: one record without identity must fail THAT record, never abort the
+    rest of a batch. A plain ``NexusError`` subclass taking a positional message,
+    like the SourceUri pair above.
+    """
 
 
 class PutOversizedError(NexusError):
@@ -473,44 +501,6 @@ class PutOversizedError(NexusError):
             f"there is no multi-chunk write tool. Split the content into "
             f"titled parts and store each with its own put() call under "
             f"the same tags (e.g. \"my-note (1/2)\", \"my-note (2/2)\")."
-        )
-
-
-class ChunkLandingUnverifiedError(NexusError):
-    """A metadata-only chunk update returned ``missing=None`` — the engine's
-    response omitted the "missing" field, so the client cannot tell whether
-    any of the updated ids were a stale-positive probe miss (nexus-tp8yk D1,
-    design memo §1 P1: ``_upsert_skip_reembed`` used to treat this as "no
-    reroute" and proceed silently, letting the caller's manifest hook write
-    rows for chunks that were never confirmed present in T3).
-
-    ``None`` means "cannot tell", never "zero misses" — ``REQUIRED_ENGINE_
-    VERSION`` pins one engine identity per release (CLAUDE.md § Releases),
-    so this should be unreachable against a correctly-deployed fleet; when
-    it fires anyway (a pre-nexus-5xn3k engine, or a mixed-version fleet
-    mid-rolling-deploy) the caller must refuse to proceed rather than
-    silently commit manifest rows for an unconfirmed batch. The caller
-    (``doc_indexer``'s fence-bracketed call sites) converts this into a
-    failed index run — the fence stays ``'indexing'``, over-work on the
-    next pass, never silent under-work.
-
-    Attributes:
-        collection: T3 collection the update targeted.
-        count: number of ids whose landing could not be confirmed.
-    """
-
-    def __init__(self, *, collection: str, count: int) -> None:
-        self.collection = collection
-        self.count = count
-        super().__init__(
-            f"cannot confirm {count} chunk(s) landed in T3 collection "
-            f"{collection!r} — the engine's update-chunks response omitted "
-            f"the 'missing' field, so a stale-positive probe result cannot "
-            f"be distinguished from a genuine landing. Refusing to proceed: "
-            f"committing a manifest for these chunks would risk rows that "
-            f"reference content never confirmed present. Re-run once the "
-            f"engine fleet is on a consistent version (see REQUIRED_ENGINE_"
-            f"VERSION), or check 'nx doctor' for a version mismatch."
         )
 
 
@@ -666,6 +656,67 @@ class CombinedWriteEmbedTimeoutError(NexusError):
         )
 
 
+class ManifestAppendManyUnsupportedError(NexusError):
+    """The engine has no ``POST /v1/catalog/manifest/append_many`` route (RDR-223 P1.4).
+
+    An engine older than the route answers 404. There is deliberately NO fallback to a per-document
+    ``append_manifest_chunks`` loop: the multi-document append exists so a chunk and its owner row
+    land in one transaction per document, and the per-document form of the split write is exactly the
+    orphan-producing shape RDR-223 closes. The caller reports that this engine cannot take the write
+    and stops.
+    """
+
+    def __init__(self, *, collection: str, doc_count: int) -> None:
+        self.collection = collection
+        self.doc_count = doc_count
+        super().__init__(
+            f"the engine has no /v1/catalog/manifest/append_many route (collection "
+            f"{collection!r}, {doc_count} document(s)): it predates RDR-223. Upgrade the "
+            f"engine service; there is no per-document fallback, because that path can leave "
+            f"chunks without an owner."
+        )
+
+
+#: What to do about an engine that lacks a route or a field an RDR-223 client needs. One sentence,
+#: shared by every refusal of that kind so the wording cannot drift between them.
+ENGINE_OLDER_THAN_CLIENT_REMEDY = (
+    "The engine is older than this client. Upgrade the local engine (`nx upgrade`, then "
+    "`nx daemon service start`), or for a cloud target wait for the cloud engine deploy."
+)
+
+
+class EngineOlderThanClientError(RuntimeError):
+    """The engine answered a request without a field this client's protocol needs, which means it
+    predates the client (RDR-223, nexus-z0o2p.19). There is no old-engine fallback: the message names
+    the missing piece and :data:`ENGINE_OLDER_THAN_CLIENT_REMEDY`.
+
+    A ``RuntimeError`` so the ack-echo checks that raised one before keep their type. Raised AFTER the
+    request was sent, so the engine may already have acted on it (``begin-many`` stamps its documents
+    before the client sees there is no snapshot); a caller that fenced documents must mark them."""
+
+    def __init__(self, what: str) -> None:
+        super().__init__(f"{what}. {ENGINE_OLDER_THAN_CLIENT_REMEDY}")
+
+
+class BatchWriteFailedError(NexusError):
+    """A request of a multi-batch combined write did not land, or the engine's answer cannot be
+    trusted (RDR-223, ``nexus.catalog.multi_batch_write``).
+
+    Defined here, and re-exported by ``multi_batch_write``, so it can join
+    :data:`PER_RECORD_SURVIVABLE_EXCEPTIONS`: a writer failure on one document of a batch
+    (``nx dt index``) must fail THAT record, not abort the rest.
+
+    Attributes: ``doc_id``, ``batch`` (1-based index of the request or step that failed),
+    ``reason``.
+    """
+
+    def __init__(self, *, doc_id: str, batch: int, reason: str) -> None:
+        self.doc_id = doc_id
+        self.batch = batch
+        self.reason = reason
+        super().__init__(f"multi-batch write of {doc_id!r} failed at batch {batch}: {reason}")
+
+
 # SystemicExtractionFailureError DELETED (nexus-deyd5 round 3, coordinator
 # directive, 2026-08-21). Round 2 added this type for run_file_loop to
 # raise on a systemic-skip breach; a code-review HIGH finding traced that
@@ -724,9 +775,10 @@ class CombinedWriteEmbedTimeoutError(NexusError):
 #:     remember to go check four call sites for.
 #:
 #: doc_indexer's per-record ingest paths (index_pdf / index_markdown) are
-#: the origin of the first two members: ChunkLandingUnverifiedError fires
-#: from ``_upsert_skip_reembed`` before any manifest row is committed;
-#: IndexRunVerifyRefused fires from the RUNFENCE completion-verify gate.
+#: the origin of the first member: IndexRunVerifyRefused fires from the
+#: RUNFENCE completion-verify gate. (ChunkLandingUnverifiedError, the
+#: original second member, was raised only by ``_upsert_skip_reembed``,
+#: removed at RDR-223; nothing raised it afterwards and it was deleted.)
 #: ExtractionQualityError (nexus-wi1uv occurrence 5 of this exact class,
 #: caught by this tripwire before it shipped) fires from
 #: ``PDFExtractor.extract()``, deep inside ``index_pdf`` -> ``_pdf_chunks``
@@ -751,12 +803,19 @@ class CombinedWriteEmbedTimeoutError(NexusError):
 #: dispatches the second. One record naming a collection that disagrees with its
 #: document's home must fail THAT record — aborting the rest is precisely the
 #: regression class this tuple exists to prevent (nexus-2fyb/qo84l/9800y/hb10j).
+#: CatalogIdentityMissingError (nexus-z0o2p.13, RDR-223) fires from
+#: ``_index_document`` when a document's registration returned no identity and so
+#: its chunks have no owner to be written with; one such record must fail THAT
+#: record only.
 PER_RECORD_SURVIVABLE_EXCEPTIONS: tuple[type[NexusError], ...] = (
-    ChunkLandingUnverifiedError,
     IndexRunVerifyRefused,
     ExtractionQualityError,
     UnchunkableContentError,
     UnextractableContentError,
     SourceUriNotFoundError,
     SourceUriCollectionMismatchError,
+    CatalogIdentityMissingError,
+    # RDR-223 (nexus-z0o2p.10): one document's multi-batch write failing (a request that did
+    # not land, or an engine answer the writer cannot trust) fails that record only.
+    BatchWriteFailedError,
 )

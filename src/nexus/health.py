@@ -3431,6 +3431,10 @@ _RLS_TENANT_TABLES: tuple[str, ...] = (
     # dropped-tables exemption in tests/test_health_service_checks.py
     # carries the matching entry.
     "nexus.chash_remap",
+    # nexus.chunk_orphaned_at: RDR-192 reapable(c) (nexus-wbfpw.15),
+    # vectors-021-1, ENABLE + FORCE + tenant_isolation. The side table the
+    # manifest triggers write when a chunk loses an owner row.
+    "nexus.chunk_orphaned_at",
     # nexus.chunks: RDR-191 Phase 4 unify (nexus-o8dil.51). Added in the SAME
     # engine release as vectors-004-unify-chunks.xml, which creates the
     # unified table WITH RLS in the same changeset that drops chunks_384/
@@ -3832,6 +3836,262 @@ def _check_engine_convergence(config_dir: Path | None = None) -> list[HealthResu
     )]
 
 
+_OWNERLESS_WRITES_LABEL = "Ownerless writes"
+
+#: "No status was passed in; fetch it". ``None`` already means "the fetch ran and failed".
+_ENGINE_STATUS_UNSET: object = object()
+
+
+def _status_int(value: object) -> int:
+    """A counter from the engine's status body as an int; anything else is 0."""
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else 0
+
+
+def _check_ownerless_writes(engine_status: object = _ENGINE_STATUS_UNSET) -> list[HealthResult]:
+    """nexus-20onx (RDR-223 P3.2): has the engine seen a chunk write with no owner?
+
+    The engine refuses (``enforce``) or counts (``log-only``) a write to
+    ``/v1/vectors/upsert-chunks`` or ``/v1/vectors/store-put`` whose chash no
+    live manifest row owns. Only a client released before the RDR-223 Phase 2
+    migration writes that way, so a non-zero counter means some machine that
+    writes to this engine runs old code: not yet upgraded, or upgraded but a
+    long-lived ``nx-mcp`` server or hook-spawned ``nx`` still running what it
+    started with. The counters are since-boot, so the row says which engine
+    reading it examined.
+
+    Not applicable (ok, no warning) when the engine cannot be reached or does
+    not report the counters, so a virgin box and an engine that predates the
+    refusal stay green. The row never reads the client's own version: the
+    engine's counters and its log line (which names the route, collection,
+    ``User-Agent`` and ``X-Nexus-Client-Version``) are the oracle, and a stale
+    process on THIS machine is the ``Process freshness`` row's job.
+    """
+    label = _OWNERLESS_WRITES_LABEL
+    status: dict | None
+    if engine_status is _ENGINE_STATUS_UNSET:
+        try:
+            from nexus.db.http_engine_status import fetch_engine_status  # noqa: PLC0415 — deferred to keep CLI startup fast
+            status = fetch_engine_status()
+        except Exception as exc:  # noqa: BLE001 — best-effort: must not crash `nx doctor`
+            _log.debug("doctor_ownerless_writes_probe_failed", error=str(exc))
+            status = None
+    else:
+        status = engine_status if isinstance(engine_status, dict) else None
+    if status is None:
+        return [HealthResult(
+            label=label, ok=True,
+            detail="not applicable: the engine's status endpoint could not be read",
+        )]
+    mode = status.get("ownerless_write_mode")
+    if mode is None:
+        return [HealthResult(
+            label=label, ok=True,
+            detail="not applicable: this engine predates the ownerless-write refusal",
+        )]
+    refused = _status_int(status.get("ownerless_writes_refused_total"))
+    would = _status_int(status.get("ownerless_writes_would_refuse_total"))
+    if not refused and not would:
+        return [HealthResult(
+            label=label, ok=True,
+            detail=f"engine mode={mode}: no ownerless chunk write since the engine started",
+        )]
+    parts = []
+    if refused:
+        parts.append(f"{refused} refused")
+    if would:
+        parts.append(f"{would} accepted that enforce mode would refuse")
+    return [HealthResult(
+        label=label, ok=False, warn=True,
+        detail=(
+            f"engine mode={mode}: {' and '.join(parts)} since the engine started. A client "
+            "older than the RDR-223 Phase 2 release writes a chunk before its owner, a "
+            "process upgraded on disk still runs the old code, or a caller that is not the "
+            "nexus client (curl, a script) writes that way. The counters are since the "
+            "engine started and name no cause."
+        ),
+        fix_suggestions=[
+            "On every machine that writes to this engine, upgrade conexus, then RESTART every "
+            "long-lived nx-mcp server (each Claude Code session) and hook-spawned nx; "
+            "`nx daemon restart-stale` lists what predates the install",
+            "The engine log line `ownerless_chunk_write_would_refuse` (or `_refused`) names "
+            "the route, collection, User-Agent and X-Nexus-Client-Version of each writer; a "
+            "missing version is a client older than the cut OR a caller that never sends it "
+            "(curl, a script), which an upgrade cannot fix",
+            "Flip NX_OWNERLESS_WRITE_MODE from log-only to enforce only after this count "
+            "stops moving with every client restarted (docs/operations/ownerless-write-cutover.md)",
+        ],
+    )]
+
+
+_ENGINE_REAPER_LABEL = "Engine reaper"
+
+#: A pass is stale when older than this many of the engine's own intervals, plus the pass's own wall-clock budget
+#: (completions are at most interval + budget apart) and a fixed margin for clock skew between this box and a
+#: managed engine.
+_REAPER_STALE_INTERVALS = 3
+_REAPER_STALE_MARGIN_SECONDS = 120
+
+
+def _span(seconds: float) -> str:
+    """A duration in the largest unit that keeps the number readable: seconds under two minutes, minutes under two
+    hours, hours under two days, else days."""
+    s = max(0, int(seconds))
+    if s < 120:
+        return f"{s} seconds"
+    if s < 7200:
+        return f"{s // 60} minutes"
+    if s < 172800:
+        return f"{s // 3600} hours"
+    return f"{s // 86400} days"
+
+
+def _instant(value: object) -> datetime | None:
+    """An engine timestamp (``2026-10-02T07:00:00Z``) as an aware datetime, or None when it is not one."""
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+
+
+def _reaper_did_nothing(last_pass: object) -> tuple[int, int, int] | None:
+    """``(visited, errored, refused)`` when the engine's last completed pass visited tenants and none of them
+    succeeded, else None (including every body the row cannot read: no summary, a non-dict, a missing or non-int
+    count, a bool). The engine counts a tenant refused when the backfill gate kept it out whole and errored when the
+    tenant, one of its collections or one of its quarantine siblings threw; a tenant that is neither was worked on."""
+    if not isinstance(last_pass, dict):
+        return None
+    counts = [last_pass.get(k) for k in ("tenants_visited", "tenants_errored", "tenants_refused")]
+    if any(not isinstance(n, int) or isinstance(n, bool) or n < 0 for n in counts):
+        return None
+    visited, errored, refused = counts
+    if visited > 0 and errored + refused >= visited:
+        return visited, errored, refused
+    return None
+
+
+def _check_engine_reaper(
+    engine_status: object = _ENGINE_STATUS_UNSET, *, now: datetime | None = None,
+) -> list[HealthResult]:
+    """nexus-wbfpw.56 (RDR-192 Phase 3 gate S5): is the engine's chunk reaper still making passes?
+
+    The reaper is the safety net for manifest-less chunks and the failure mode the RDR names as the one to
+    design against is a dead one. A pass with nothing to move writes no ``gc_audit`` row and a cloud operator
+    has no engine log, so the engine reports the time of its last COMPLETED pass under ``reaper`` in
+    ``GET /v1/status`` (a pass that died does not move it). This row warns when that time is older than
+    three of the engine's own intervals plus the length a pass may take.
+
+    A pass completes whatever its tenants did, so a recent time alone does not prove the reaper is working: the
+    engine also reports ``reaper.last_pass`` (``tenants_visited`` / ``tenants_errored`` / ``tenants_refused``), and
+    a recent pass that visited tenants where every one was refused or errored warns "alive but doing nothing"
+    (nexus-wbfpw.55 round 2). An engine that sends no summary is judged on the time alone.
+
+    Not applicable (ok, no warning) when the engine cannot be reached (a virgin box), when it predates the
+    field, when its reaper is not running, and when the body cannot be read, so nothing on a box with no
+    engine to ask can warn. A reaper that has not made its first pass is judged against the engine's own
+    start time, which the same body carries; without it the row cannot tell and says so.
+    """
+    label = _ENGINE_REAPER_LABEL
+    status: dict | None
+    if engine_status is _ENGINE_STATUS_UNSET:
+        try:
+            from nexus.db.http_engine_status import fetch_engine_status  # noqa: PLC0415 — deferred to keep CLI startup fast
+            status = fetch_engine_status()
+        except Exception as exc:  # noqa: BLE001 — best-effort: must not crash `nx doctor`
+            _log.debug("doctor_engine_reaper_probe_failed", error=str(exc))
+            status = None
+    else:
+        status = engine_status if isinstance(engine_status, dict) else None
+
+    def _na(why: str) -> list[HealthResult]:
+        return [HealthResult(label=label, ok=True, detail=f"not applicable: {why}")]
+
+    if status is None:
+        return _na("the engine's status endpoint could not be read")
+    reaper = status.get("reaper")
+    if reaper is None:
+        return _na("this engine predates the reaper liveness field")
+    if not isinstance(reaper, dict):
+        return _na("the engine's reaper status could not be read")
+    if reaper.get("enabled") is False:
+        return _na("the engine reaper is not running on this engine")
+    interval = reaper.get("interval_seconds")
+    if not isinstance(interval, int) or isinstance(interval, bool) or interval <= 0:
+        return _na("the engine's reaper status could not be read")
+
+    now = now or datetime.now(UTC)
+    budget = _status_int(reaper.get("wall_clock_budget_seconds"))
+    limit = _REAPER_STALE_INTERVALS * interval + budget + _REAPER_STALE_MARGIN_SECONDS
+    last_raw = reaper.get("last_completed_pass_at")
+    failed = _status_int(reaper.get("failed_passes_total"))
+    failed_note = (f"; {failed} pass{'es' if failed != 1 else ''} failed since the engine started"
+                   if failed else "")
+    fixes = [
+        "Read the engine log for event=reaper_pass_failed and event=reaper_scheduled_run_failed (and "
+        "event=reaper_run, one line per pass): a thrown Error is caught and logged, and the schedule stays alive",
+        "A reaper that stopped making passes is restarted by restarting the engine "
+        "(`nx daemon service stop && nx daemon service start` for a local engine); NX_REAPER_ENABLED=false "
+        "switches it off on purpose, and then this row reads not applicable",
+        "docs/operations/engine-reaper.md: the refusal table, the settings and what a pass does",
+    ]
+
+    if last_raw is None:
+        started = _instant(status.get("process_start_time"))
+        if started is None:
+            return _na("the engine has made no completed reaper pass yet and does not report its start time, "
+                       "so a stalled reaper cannot be told from a young engine")
+        up = (now - started).total_seconds()
+        if up <= limit:
+            return [HealthResult(
+                label=label, ok=True,
+                detail=(f"no completed pass yet; the engine started {_span(up)} ago and its first pass is "
+                        f"due about a minute after boot{failed_note}"),
+            )]
+        return [HealthResult(
+            label=label, ok=False, warn=True,
+            detail=(f"no completed pass since the engine started {_span(up)} ago (more than "
+                    f"{_REAPER_STALE_INTERVALS} intervals of {_span(interval)}); the reaper may be dead{failed_note}"),
+            fix_suggestions=fixes,
+        )]
+
+    last = _instant(last_raw)
+    if last is None:
+        return _na("the engine's last-pass time could not be read")
+    age = max(0.0, (now - last).total_seconds())
+    if age <= limit:
+        idle = _reaper_did_nothing(reaper.get("last_pass"))
+        if idle is not None:
+            visited, errored, refused = idle
+            parts = [f"{n} {what}" for n, what in ((errored, "errored"), (refused, "refused")) if n]
+            return [HealthResult(
+                label=label, ok=False, warn=True,
+                detail=(f"alive but doing nothing: the last completed pass, {_span(age)} ago, visited "
+                        f"{visited} tenant{'s' if visited != 1 else ''} and every tenant was refused or errored "
+                        f"({', '.join(parts)}); counts are per tenant, and one errored collection marks its tenant errored, "
+                        f"so no tenant finished a clean pass{failed_note}"),
+                fix_suggestions=[
+                    *(["A refused tenant has no verified RDR-192 backfill record (BACKFILL_INCOMPLETE): run "
+                       "`nx upgrade` against the tenant"] if refused else []),
+                    *(["An errored tenant: read the engine log for event=reaper_tenant_failed and "
+                       "event=reaper_collection_failed (a permission or grants regression errors every "
+                       "collection and the pass still completes)"] if errored else []),
+                    "docs/operations/engine-reaper.md: the refusal table, the settings and what a pass does",
+                ],
+            )]
+        return [HealthResult(
+            label=label, ok=True,
+            detail=f"last completed pass {_span(age)} ago (interval {_span(interval)}){failed_note}",
+        )]
+    return [HealthResult(
+        label=label, ok=False, warn=True,
+        detail=(f"last completed pass {_span(age)} ago, more than {_REAPER_STALE_INTERVALS} intervals of "
+                f"{_span(interval)}; the reaper may be dead{failed_note}"),
+        fix_suggestions=fixes,
+    )]
+
+
 def _check_t2_launchagent_stray() -> list[HealthResult]:
     """nexus-c0vby (GH #1405 defect 2): backstop for the automatic
     ``unload_stale_t2_launchagent`` finish-pass leg
@@ -4168,7 +4428,7 @@ def _check_migration_state(
             )]
 
     # Query 1: total row count (also verifies the table exists).
-    total_sql = "SELECT COUNT(*) FROM databasechangelog;"
+    total_sql = "SELECT COUNT(*) FROM public.databasechangelog;"
     proc = _run_psql(
         psql_bin, host, port, dbname, user, password, total_sql,
         psql_runner=psql_runner,
@@ -4234,7 +4494,7 @@ def _check_migration_state(
         "SELECT COUNT(*) FILTER (WHERE exectype='FAILED'), "
         "COUNT(DISTINCT (id, author, filename)) "
         "FILTER (WHERE exectype NOT IN ('EXECUTED','FAILED')) "
-        "FROM databasechangelog;"
+        "FROM public.databasechangelog;"
     )
     proc2 = _run_psql(
         psql_bin, host, port, dbname, user, password, drift_sql,
@@ -4282,7 +4542,7 @@ def _check_migration_state(
                 "(mid-run failure, partial state)"
             ),
             fix_suggestions=[
-                "Inspect: psql -c \"SELECT id,exectype FROM databasechangelog "
+                "Inspect: psql -c \"SELECT id,exectype FROM public.databasechangelog "
                 "WHERE exectype='FAILED'\"",
                 "Re-run: nx init --service to recover",
             ],
@@ -4300,7 +4560,7 @@ def _check_migration_state(
     # A NULL checksum causes Liquibase validation to fail on next boot even
     # though the changeset row is present.
     null_md5_sql = (
-        "SELECT COUNT(*) FROM databasechangelog "
+        "SELECT COUNT(*) FROM public.databasechangelog "
         "WHERE exectype='EXECUTED' AND md5sum IS NULL;"
     )
     proc3 = _run_psql(
@@ -4338,7 +4598,7 @@ def _check_migration_state(
                 "NULL md5sum — Liquibase will fail validation on next service boot"
             ),
             fix_suggestions=[
-                "Inspect: psql -c \"SELECT id,md5sum FROM databasechangelog "
+                "Inspect: psql -c \"SELECT id,md5sum FROM public.databasechangelog "
                 "WHERE exectype='EXECUTED' AND md5sum IS NULL\"",
                 "Re-run: nx init --service to re-apply and restore checksums",
             ],
@@ -5089,7 +5349,7 @@ def _check_stranded_install() -> list[HealthResult]:
     """
     label = "Stranded pre-PG install"
     from nexus.config import detect_stranded_install_default  # noqa: PLC0415 — deferred to avoid circular import
-    from nexus.stranded_install import LAST_MIGRATION_CAPABLE  # noqa: PLC0415 — leaf module, deferred for symmetry
+    from nexus.stranded_install import LAST_MIGRATION_CAPABLE, LOCAL_ENGINE_CLAUSE  # noqa: PLC0415 — leaf module, deferred for symmetry
 
     if LAST_MIGRATION_CAPABLE is None:
         return [HealthResult(
@@ -5120,7 +5380,7 @@ def _check_stranded_install() -> list[HealthResult]:
         detail=stranded.message_for(first_hop),
         fix_suggestions=[
             f"Install the last migration-capable release: {first_hop}",
-            "Run: nx upgrade (the ladder converges the pre-PG data migration)",
+            f"Run: nx upgrade there (the ladder converges the pre-PG data migration) {LOCAL_ENGINE_CLAUSE}",
             "Then upgrade back to this version",
         ],
     )]
@@ -6570,8 +6830,11 @@ def _check_pending_rungs() -> list[HealthResult]:
     """RDR-185 P0.4 (nexus-n7u38.4): read-only upgrade-ladder surface.
 
     Reports pending ladder rungs from each rung's READ-ONLY ``detect()`` —
-    zero writes, zero work, the completion store is never opened (the
-    ``resolve_pending_steps`` dry-run-truth precedent). Pending rungs are a
+    zero writes, zero work (the ``resolve_pending_steps`` dry-run-truth
+    precedent). A rung's ``detect()`` may READ the completion ledger or other
+    engine state (``rdr192-manifest-backfill`` reads its record and the
+    residual note), so this row needs a reachable engine to be exact; an
+    unreachable one degrades to a pending row that says why. Pending rungs are a
     soft warning with `nx upgrade` (the single trigger) as the remedy.
     Crash-proof: any failure ABOVE the per-rung loop (deferred imports,
     ``default_registry()`` construction) degrades to a SOFT WARNING, never a
@@ -6875,8 +7138,12 @@ def _check_embedding_profile() -> list[HealthResult]:
             label=_QUARANTINED_LABEL, ok=False, warn=True,
             detail=f"{len(quarantined)} quarantined collection(s): {_name_list(quarantined)}",
             fix_suggestions=[
-                "quarantined chunks are restored when a re-index references them again and "
-                "expire after NX_GC_QUARANTINE_DAYS; curate with nx collection shape",
+                "quarantined chunks are restored when a re-index references them again. "
+                "Chunks nx index repo or nx t3 gc moved expire after NX_GC_QUARANTINE_DAYS "
+                "(default 14), on the client's own run, and the client never expires a chunk "
+                "the engine reaper moved; those expire in the engine, NX_REAPER_QUARANTINE_"
+                "RETENTION_DAYS (default 14) after the move, and the engine never expires a "
+                "chunk the client moved; curate with nx collection shape",
             ],
         ) if quarantined else HealthResult(label=_QUARANTINED_LABEL, ok=True, detail="none")
     )
@@ -7760,6 +8027,12 @@ def _check_stale_indexing_runs(documents: list | None = None) -> list[HealthResu
 
     now = datetime.now(UTC)
     stale: list[tuple[str, str]] = []  # (identifier, age)
+    # nexus-z0o2p.34: the stale documents that are NOTES (content_type "knowledge": MCP store_put,
+    # nx store put, nx memory promote, the recovery import). A note killed in a post-store chain, or
+    # whose completion stamp failed, stays 'indexing' and no command reruns it, so it needs its own
+    # remedy: put it again. `nx catalog reconcile-fences` is deliberately NOT the remedy: it would
+    # stamp the note complete without firing the chains that never ran.
+    stale_notes: set[str] = set()
     checked = 0
     # nexus-vw594 F3 (root cause of nexus-biq4x): a THIRD population,
     # distinct from both "checked" (real index_state, non-null) and the old
@@ -7916,6 +8189,8 @@ def _check_stale_indexing_runs(documents: list | None = None) -> list[HealthResu
                     or "?"
                 )
                 stale.append((ident, f"{age_hours:.1f}h"))
+                if str(getattr(entry, "content_type", "") or "") == "knowledge":
+                    stale_notes.add(ident)
     except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash `nx doctor`
         _log.debug("doctor_stale_indexing_scan_failed", error=str(exc))
         return [HealthResult(label=label, ok=True, detail="skipped (corpus scan failed)")]
@@ -8132,9 +8407,29 @@ def _check_stale_indexing_runs(documents: list | None = None) -> list[HealthResu
         ))
 
     if stale:
-        names = "; ".join(f"{ident} ({age})" for ident, age in stale[:10])
+        names = "; ".join(
+            f"{ident} ({age}{', note' if ident in stale_notes else ''})"
+            for ident, age in stale[:10])
         if len(stale) > 10:
             names += f"; +{len(stale) - 10} more"
+        note_hint = ""
+        suggestions = [
+            "nx index <path>   (a normal re-index clears the fence; "
+            "--force is not required)",
+        ]
+        if stale_notes:
+            note_hint = (
+                f" {len(stale_notes)} of them are notes (marked 'note'): a note killed in a "
+                "post-store chain, or whose completion stamp failed, is whole and owned but "
+                "stays 'indexing', and no command reruns it. Put it again with the same title "
+                "(`nx store put`, MCP `store_put`, `nx memory promote`): the re-put is an "
+                "idempotent re-write that fires its chains and stamps it."
+            )
+            suggestions = [
+                "nx store put - --title <title> -c <subject> < note.txt   (re-put a stranded "
+                "note: it fires the chains and stamps it; also MCP store_put, nx memory promote)",
+                *(suggestions if len(stale_notes) < len(stale) else []),
+            ]
         results.append(HealthResult(
             label=label,
             ok=False,
@@ -8147,12 +8442,9 @@ def _check_stale_indexing_runs(documents: list | None = None) -> list[HealthResu
                 "for a repo document that means its own repo's next "
                 "`nx index repo` pass, no --force needed. If it keeps "
                 "recurring, check for a stuck run or a rolling deploy that "
-                "split a begin/complete pair across engine versions."
+                "split a begin/complete pair across engine versions." + note_hint
             ),
-            fix_suggestions=[
-                "nx index <path>   (a normal re-index clears the fence; "
-                "--force is not required)",
-            ],
+            fix_suggestions=suggestions,
         ))
 
     if results:
@@ -8593,12 +8885,12 @@ def _check_failed_runs_hidden_chunks(documents: list | None = None) -> list[Heal
     between the two, the chunks stay stored with no owner, and engine
     v0.1.137's live(c) hides them from every read. Measured 2026-09-28
     (shakeout 7.64.1): FootPrintRAGVA 1.82.146/147, 395 chunks, repaired
-    by hand with ``nx catalog reconcile``. ``_fence_fail`` now heals the
-    document at failure time; this row finds what that could not (a run
-    killed outright, a heal that failed, anything written before the
-    heal existed). Like the heal, it covers documents with no manifest yet
-    (a failed first run); a failed re-index keeps its old, readable
-    manifest and is not counted.
+    by hand with ``nx catalog reconcile``. Since RDR-223 every writer sends a chunk with its
+    owner row, so a failed run no longer leaves ownerless chunks and ``_fence_fail`` no longer heals
+    (the heal was retired, nexus-z0o2p.35); this row finds what remains: a failed document written
+    before the combined write, or by a client older than it. Like the old heal, it covers documents
+    with no manifest yet (a failed first run); a failed re-index keeps its old, readable manifest
+    and is not counted.
 
     Walks the corpus for ``index_state='failed'`` documents, then runs the
     shared heal core in dry-run mode over just those, so the count is the
@@ -9084,13 +9376,21 @@ def _check_taxonomy_discover_health() -> list[HealthResult]:
     )]
 
 
-def run_health_checks(git_hooks_scope: str | Path | None = None) -> tuple[list[HealthResult], bool]:
+def run_health_checks(
+    git_hooks_scope: str | Path | None = None,
+    engine_status: object = _ENGINE_STATUS_UNSET,
+) -> tuple[list[HealthResult], bool]:
     """Run all health checks.
 
     ``git_hooks_scope``: forwarded to :func:`_check_git_hooks` (nexus-jds59)
     to restrict the git-hooks stanza-drift walk to repos at or under the
     given root. ``None`` (default) preserves the original behavior of
     walking every repo registered on the machine.
+
+    ``engine_status``: the ``GET /v1/status`` body (or ``None`` when the fetch
+    failed) when the caller already fetched it, so one ``nx doctor`` run makes
+    one status request for the "Ownerless writes" row and the engine-activity
+    block together. Left unset, the row fetches its own.
 
     Returns (results, is_local_mode).
     """
@@ -9216,6 +9516,8 @@ def run_health_checks(git_hooks_scope: str | Path | None = None) -> tuple[list[H
     # so they are always safe to run.
     results.extend(_check_storage_service_health())
     results.extend(_check_engine_convergence())
+    results.extend(_check_ownerless_writes(engine_status))  # nexus-20onx
+    results.extend(_check_engine_reaper(engine_status))  # nexus-wbfpw.56
     results.extend(_check_t2_launchagent_stray())
     results.extend(_check_service_launchagent_stray())
     results.extend(_check_service_autostart_drift())

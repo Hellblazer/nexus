@@ -282,7 +282,7 @@ def test_every_cli_ingest_site_fires_both_chains() -> None:
 # doc_indexer.py:index_pdf has two branch tails, and indexer.py has the
 # legacy PDF path plus the duoak-2C deferred-hook closure (a file
 # traverses exactly one of the two).
-# Mirrors CLI_SITE_FILES above plus mcp/core.py:store_put.
+# Mirrors CLI_SITE_FILES above plus note_write.py:fire_note_chains.
 DOCUMENT_HOOK_FIRE_SITES: dict[str, int] = {
     "src/nexus/indexer.py": 1,             # _index_pdf_file (legacy path) only.
                                            # nexus-nj4ch: _fire_deferred_hooks's
@@ -300,7 +300,11 @@ DOCUMENT_HOOK_FIRE_SITES: dict[str, int] = {
     "src/nexus/code_indexer.py": 1,        # index_code_file
     "src/nexus/prose_indexer.py": 1,       # index_prose_file
     "src/nexus/pipeline_stages.py": 1,     # pipeline_index_pdf (post _catalog_pdf_hook)
-    "src/nexus/mcp/core.py": 1,            # store_put
+    "src/nexus/catalog/note_write.py": 1,  # fire_note_chains: the one firing
+                                           # MCP store_put, nx store put, nx memory
+                                           # promote and the recovery import share
+                                           # (RDR-223 Phase 2; store_put used to
+                                           # fire it inline in mcp/core.py)
 }
 
 
@@ -345,23 +349,30 @@ def test_mcp_store_put_calls_document_hook_synchronously() -> None:
     targets ``fire_document`` (the method attr), then assert no
     enclosing parent is an ``await`` or an ``asyncio.to_thread`` call.
     """
-    rel = "src/nexus/mcp/core.py"
-    path = PROJECT_ROOT / rel
-    tree = ast.parse(path.read_text(), filename=str(path))
+    # RDR-223 Phase 2: store_put's document chain fires inside
+    # note_write.fire_note_chains now (the one firing every note producer
+    # shares), so the contract is pinned at both ends: the fire_document
+    # call there, and store_put's call of fire_note_chains in mcp/core.py.
+    rels = ("src/nexus/catalog/note_write.py", "src/nexus/mcp/core.py")
+    trees = {
+        rel: ast.parse((PROJECT_ROOT / rel).read_text(), filename=rel) for rel in rels
+    }
 
     # Build child→parent map for ancestry checks.
     parents: dict[int, ast.AST] = {}
-    for parent in ast.walk(tree):
-        for child in ast.iter_child_nodes(parent):
-            parents[id(child)] = parent
+    for tree in trees.values():
+        for parent in ast.walk(tree):
+            for child in ast.iter_child_nodes(parent):
+                parents[id(child)] = parent
 
     def _is_doc_hook_call(node: ast.AST) -> bool:
         if not isinstance(node, ast.Call):
             return False
         # hooks.fire_document(...) — Attribute access on a name/attribute receiver
         if isinstance(node.func, ast.Attribute):
-            return node.func.attr == "fire_document"
-        return False
+            return node.func.attr in {"fire_document", "fire_note_chains"}
+        # fire_note_chains(...) — the shared firing, called by name
+        return isinstance(node.func, ast.Name) and node.func.id == "fire_note_chains"
 
     def _is_to_thread_call(node: ast.AST) -> bool:
         if not isinstance(node, ast.Call):
@@ -373,10 +384,21 @@ def test_mcp_store_put_calls_document_hook_synchronously() -> None:
             return True
         return False
 
+    doc_hook_calls = [
+        (rel, node)
+        for rel, tree in trees.items()
+        for node in ast.walk(tree)
+        if _is_doc_hook_call(node)
+    ]
+    # Non-vacuity: the firing exists at both ends, so this cannot pass by
+    # having found nothing to check.
+    for rel in rels:
+        assert any(r == rel for r, _n in doc_hook_calls), (
+            f"no fire_document / fire_note_chains call found in {rel}"
+        )
+
     offending_calls: list[str] = []
-    for node in ast.walk(tree):
-        if not _is_doc_hook_call(node):
-            continue
+    for rel, node in doc_hook_calls:
         # Walk up from this call to ensure no ancestor is await or to_thread.
         cur: ast.AST | None = node
         line = getattr(node, "lineno", 0)
@@ -387,12 +409,12 @@ def test_mcp_store_put_calls_document_hook_synchronously() -> None:
                 break
             if isinstance(cur, ast.Await):
                 offending_calls.append(
-                    f"line {line}: fire_document wrapped in await"
+                    f"{rel} line {line}: document chain wrapped in await"
                 )
                 break
             if _is_to_thread_call(cur):
                 offending_calls.append(
-                    f"line {line}: fire_document routed through "
+                    f"{rel} line {line}: document chain routed through "
                     f"asyncio.to_thread"
                 )
                 break
@@ -509,6 +531,11 @@ T3_WRITE_PARITY_FILES: list[str] = [
     ),
     # Library module that backs ``nx store import``.
     "src/nexus/exporter.py",
+    # RDR-223 Phase 2: the note producers that are not command modules. MCP
+    # ``store_put`` and the recovery-bundle import write through ``put_note``
+    # like ``nx store put`` and ``nx memory promote`` do.
+    "src/nexus/mcp/core.py",
+    "src/nexus/catalog/recovery_bundle.py",
 ]
 
 
@@ -521,13 +548,22 @@ def _function_writes_to_t3(func: ast.AST) -> bool:
       T2Database.put uses ``project=…`` and is correctly skipped.
     * ``X.upsert_chunks_with_embeddings(collection_name=…)`` — bulk
       import write; the only caller is exporter.import_collection.
+    * ``put_note(…)`` — the note writer (RDR-223 Phase 2, nexus-z0o2p.12):
+      the one function ``nx store put``, ``nx memory promote``, MCP
+      ``store_put`` and the recovery import write a note through. It
+      replaced the ``X.put(collection=…)`` shape in all four, so without
+      this shape a note producer that fires nothing is invisible here.
     """
     for sub in ast.walk(func):
         if not isinstance(sub, ast.Call):
             continue
+        if isinstance(sub.func, ast.Name) and sub.func.id == "put_note":
+            return True
         if not isinstance(sub.func, ast.Attribute):
             continue
         attr = sub.func.attr
+        if attr == "put_note":
+            return True
         kwarg_names = {kw.arg for kw in sub.keywords if kw.arg}
         if attr == "put" and "collection" in kwarg_names:
             return True
@@ -546,6 +582,9 @@ _FIRE_STORE_CHAINS_WRAPPERS: frozenset[str] = frozenset({
     "fire_store_chains",
     # exporter.py: groups by meta["doc_id"] then fires per-group (4.32.5).
     "_fire_store_chains_grouped_by_doc",
+    # catalog/note_write.py (RDR-223 Phase 2): the note producers' one firing of
+    # the three chains for a stored note.
+    "fire_note_chains",
 })
 
 
@@ -622,6 +661,16 @@ def test_t3_write_helper_detects_known_shapes() -> None:
         "positional_put": (
             "def f():\n    db.put(c, x)\n", False,
         ),
+        # RDR-223 Phase 2: the note writer is a T3 write shape too.
+        "put_note_name": (
+            "def f():\n    out = put_note(content=c, collection=col)\n", True,
+        ),
+        "put_note_attr": (
+            "def f():\n    out = note_write.put_note(content=c, collection=col)\n", True,
+        ),
+        "put_note_mention_only": (
+            "def f():\n    # put_note(content=c)\n    return 'put_note'\n", False,
+        ),
     }
     for name, (src, expected) in snippets.items():
         tree = ast.parse(src)
@@ -631,3 +680,47 @@ def test_t3_write_helper_detects_known_shapes() -> None:
             f"_function_writes_to_t3 mis-classified {name!r}: "
             f"expected {expected}, got {actual}"
         )
+
+
+def test_a_note_producer_that_fires_nothing_is_an_offender() -> None:
+    """RDR-223 Phase 2: a function that writes a note through ``put_note`` and
+    never fires the chains fails the parity guard above; one that fires them
+    through ``fire_note_chains`` passes. Applied here to synthetic functions
+    with the same two predicates the guard uses."""
+    silent = ast.parse(
+        "def producer():\n    out = put_note(content=c, collection=col)\n    return out\n"
+    ).body[0]
+    firing = ast.parse(
+        "def producer():\n    out = put_note(content=c, collection=col)\n"
+        "    fire_note_chains(out, c)\n"
+    ).body[0]
+    assert _function_writes_to_t3(silent) and not _function_calls_fire_store_chains(silent)
+    assert _function_writes_to_t3(firing) and _function_calls_fire_store_chains(firing)
+
+
+def test_the_parity_guard_reaches_every_note_producer() -> None:
+    """Non-vacuity for the put_note shape: the four note producers are all inside
+    the files the parity guard scans, each is seen as a T3 write, and each fires
+    through a recognised wrapper."""
+    seen: dict[str, bool] = {}
+    for rel in T3_WRITE_PARITY_FILES:
+        path = PROJECT_ROOT / rel
+        tree = ast.parse(path.read_text(), filename=str(path))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.FunctionDef):
+                continue
+            uses_put_note = any(
+                isinstance(c, ast.Call)
+                and ((isinstance(c.func, ast.Name) and c.func.id == "put_note")
+                     or (isinstance(c.func, ast.Attribute) and c.func.attr == "put_note"))
+                for c in ast.walk(node)
+            )
+            if uses_put_note:
+                assert _function_writes_to_t3(node)
+                seen[f"{rel}::{node.name}"] = _function_calls_fire_store_chains(node)
+    assert seen == {
+        "src/nexus/commands/memory.py::promote_cmd": True,
+        "src/nexus/commands/store.py::put_cmd": True,
+        "src/nexus/mcp/core.py::store_put": True,
+        "src/nexus/catalog/recovery_bundle.py::_default_import_doc": True,
+    }, seen

@@ -4259,3 +4259,100 @@ class TestResolveContent:
             client.resolve_content(collection="col", chash="deadbeef")
         assert excinfo2.value.code == 404
         assert "reference_only" not in str(excinfo2.value)
+
+
+class TestUpdateChunksMissing:
+    """``HttpVectorClient.update_chunks``'s reading of the engine's ``missing`` field
+    (nexus-5xn3k.5, memo §3.6). These were pinned through ``doc_indexer._upsert_skip_reembed``,
+    which RDR-223 (nexus-z0o2p.15) removed; the behavior is still live for the four remaining
+    callers (the two streaming post-passes, ``indexer.py``, ``T3Database``), so the pins moved
+    here, onto the method itself.
+
+    Contract: the union of ``missing`` across pages when EVERY page reported the field; ``None``
+    (cannot tell, never "zero misses") when ANY page omitted it; a non-empty union logs
+    ``update_chunks_missing_reported`` whatever the caller does with the return; an omission logs
+    ``update_chunks_missing_unreported`` once per process."""
+
+    @pytest.fixture(autouse=True)
+    def _fresh_structlog_and_throttle(self, monkeypatch):
+        import structlog
+
+        import nexus.db.http_vector_client as hvc
+
+        # Another test file may have routed structlog through stdlib logging; capture_logs only
+        # swaps processors, so a level-filtering wrapper would drop the DEBUG echo asserted below.
+        structlog.reset_defaults()
+        monkeypatch.setattr(hvc, "_update_chunks_missing_unreported_logged", False)
+
+    def _pages(self, monkeypatch, schedule: list[dict], *, page_size: int = 2) -> list[dict]:
+        """Answer the Nth ``update-metadata`` call with ``schedule[N]``; return the bodies sent."""
+        from nexus.db.limits import ServiceLimits
+
+        sent: list[dict] = []
+
+        def fake_post(path, body, **_kw):
+            assert path == "/v1/vectors/update-metadata"
+            sent.append(body)
+            return schedule[len(sent) - 1]
+
+        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
+        monkeypatch.setattr("nexus.db.limits.QUOTAS", ServiceLimits(MAX_RECORDS_PER_WRITE=page_size))
+        return sent
+
+    def test_a_mixed_page_omission_makes_the_whole_call_unknown(self, monkeypatch):
+        """4 ids, 2 per page. Page 1 reports (and names both ids missing), page 2 omits the field.
+        OR-accumulating "did any page report it" would return page 1's ids as if page 2 were clean;
+        the answer is ``None`` for the whole call, so the caller cannot mistake it for a report."""
+        sent = self._pages(monkeypatch, [{"updated": 0, "missing": ["a", "b"]}, {"updated": 2}])
+        got = HttpVectorClient().update_chunks(
+            "col", ["a", "b", "c", "d"], [{"n": i} for i in range(4)])
+        assert len(sent) == 2, "non-vacuity: the call really was two pages"
+        assert got is None
+
+    def test_every_page_reporting_returns_the_union(self, monkeypatch):
+        """The inverse control: both pages report (one of them an empty list), so the union is
+        trusted and returned, and no cannot-tell warning fires."""
+        from structlog.testing import capture_logs
+
+        self._pages(monkeypatch, [{"updated": 0, "missing": ["a", "b"]}, {"updated": 2, "missing": []}])
+        with capture_logs() as logs:
+            got = HttpVectorClient().update_chunks(
+                "col", ["a", "b", "c", "d"], [{"n": i} for i in range(4)])
+        assert got == ["a", "b"]
+        assert not [e for e in logs if e["event"] == "update_chunks_missing_unreported"]
+
+    def test_an_empty_report_is_zero_misses_and_logs_nothing(self, monkeypatch):
+        from structlog.testing import capture_logs
+
+        self._pages(monkeypatch, [{"updated": 1, "missing": []}])
+        with capture_logs() as logs:
+            got = HttpVectorClient().update_chunks("col", ["a"], [{"n": 1}])
+        assert got == []
+        assert not [e for e in logs if e["event"].startswith("update_chunks_missing")]
+
+    def test_a_reported_miss_is_logged_even_when_the_caller_ignores_the_return(self, monkeypatch):
+        """The signal comes from inside ``update_chunks``, so it reaches callers that do nothing
+        with the return value."""
+        from structlog.testing import capture_logs
+
+        self._pages(monkeypatch, [{"updated": 1, "missing": ["stale-id"]}])
+        with capture_logs() as logs:
+            HttpVectorClient().update_chunks("col", ["stale-id", "fresh-id"], [{"a": 1}, {"b": 2}])
+        reported = [e for e in logs if e["event"] == "update_chunks_missing_reported"]
+        assert len(reported) == 1, f"expected exactly one, got: {logs}"
+        assert reported[0]["log_level"] == "warning"
+        assert reported[0]["count"] == 1 and reported[0]["total"] == 2
+
+    def test_the_unreported_warning_is_once_per_process(self, monkeypatch):
+        """Two calls against an engine that omits ``missing`` emit one WARNING; the second echoes at
+        DEBUG. Without the throttle a full-repo reindex against a pre-fence engine would drown the
+        rarer ``update_chunks_missing_reported`` signal."""
+        from structlog.testing import capture_logs
+
+        self._pages(monkeypatch, [{"updated": 0}, {"updated": 0}], page_size=300)
+        client = HttpVectorClient()
+        with capture_logs() as logs:
+            client.update_chunks("col", ["a"], [{"x": 1}])
+            client.update_chunks("col", ["b"], [{"y": 2}])
+        unreported = [e for e in logs if e["event"] == "update_chunks_missing_unreported"]
+        assert [e["log_level"] for e in unreported] == ["warning", "debug"], unreported

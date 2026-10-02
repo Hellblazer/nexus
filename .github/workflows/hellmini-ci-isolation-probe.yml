@@ -1,0 +1,151 @@
+# nexus-vyg07: negative-control probe for the `hellmini-ci` self-hosted runner.
+#
+# WHY. service-ci.yml runs its Java job on `hellmini-ci` (macOS user `ghci`) for
+# owner pushes, and leaves the release legs on the `hellmini` runner (user
+# `ghrunner`). The point of the second runner is that test code run as ghci
+# cannot reach what feeds the signed release binaries. That is host state: a
+# separate macOS user, a mounted volume's ownership mode and a keychain search
+# list. No workflow file can assert it by reading itself, so this probe asserts
+# it from the runner, as the user the Java job runs as.
+#
+# WHAT IT CHECKS, each as its own step so one failure does not hide the rest:
+#   1. the job really runs as `ghci`, not in the admin group (otherwise every
+#      check below proves nothing);
+#   2. ghrunner's paths, /Volumes/Bulk/ghrunner and /Users/ghrunner, cannot be
+#      listed, and the refusal is "Permission denied", not "No such file" (a
+#      moved path would otherwise pass);
+#   3. /Volumes/Bulk is mounted without `noowners` (an "ignore ownership" mount
+#      makes file modes stop separating users);
+#   4. `sudo -n true` fails (no passwordless sudo);
+#   5. `security find-identity -v -p codesigning` lists no Developer ID identity.
+#
+# A check that cannot reach its own evidence fails rather than passes (the
+# non-vacuity rule). Evidence is a green RUN of this workflow; service-ci.yml and
+# AGENTS.md say "isolated" only as far as the latest green run supports.
+#
+# TRIGGER. workflow_dispatch only, owner only, never pull_request or push: the
+# job runs on a self-hosted runner in a public repo. The `if:` compares account
+# ids (a renamed login can be re-registered) and is a routing rule, not a
+# security boundary: this file lives where a write collaborator's branch could
+# replace it. The repo has had no write collaborators since 2026-09-30.
+#
+# The probe reads no secrets and prints no environment. It runs no checkout and
+# no third-party action, so nothing from the repo executes on the runner.
+name: hellmini-ci-isolation-probe
+
+on:
+  workflow_dispatch: {}
+
+concurrency:
+  group: hellmini-ci-isolation-probe
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  probe:
+    name: Negative control (hellmini-ci cannot reach the release runner)
+    if: github.event_name == 'workflow_dispatch' && github.actor_id == github.repository_owner_id && github.triggering_actor == github.repository_owner
+    runs-on: hellmini-ci
+    timeout-minutes: 10
+    steps:
+      - name: Identity (the probe runs as ghci, outside the admin group)
+        shell: bash
+        run: |
+          set -uo pipefail
+          user="$(id -un)"
+          groups_of_user="$(id -Gn)"
+          echo "user=$user"
+          echo "groups=$groups_of_user"
+          rc=0
+          if [ "$user" != "ghci" ]; then
+            echo "::error::runs as '$user', not ghci: the checks below would prove nothing"
+            rc=1
+          fi
+          for g in $groups_of_user; do
+            case "$g" in
+              admin|wheel|_appserveradm|_appserverusr)
+                echo "::error::ghci is in group '$g'"
+                rc=1
+                ;;
+            esac
+          done
+          exit "$rc"
+
+      - name: ghrunner paths are not listable
+        if: always()
+        shell: bash
+        run: |
+          set -uo pipefail
+          rc=0
+          for p in /Volumes/Bulk/ghrunner /Users/ghrunner; do
+            # GitHub runs steps under bash -e, and a refused ls is the EXPECTED
+            # result, so capture its status instead of letting -e end the step.
+            status=0
+            out="$(ls -A "$p" 2>&1)" || status=$?
+            echo "--- $p: ls exit=$status"
+            ls -ld "$p" 2>&1 || true
+            if [ "$status" -eq 0 ]; then
+              echo "::error::$p is listable by ghci"
+              rc=1
+            elif printf '%s' "$out" | grep -q "Permission denied"; then
+              echo "refused with Permission denied (expected)"
+            elif printf '%s' "$out" | grep -q "No such file"; then
+              echo "::error::$p does not exist on this host: the probe has no evidence, update the path"
+              rc=1
+            else
+              echo "::error::$p: unexpected result, not counted as a refusal"
+              rc=1
+            fi
+          done
+          exit "$rc"
+
+      - name: /Volumes/Bulk keeps ownership (no noowners)
+        if: always()
+        shell: bash
+        run: |
+          set -uo pipefail
+          line="$(mount | grep " on /Volumes/Bulk " || true)"
+          if [ -z "$line" ]; then
+            echo "::error::/Volumes/Bulk is not mounted: the ghrunner path check above has no meaning without it"
+            exit 1
+          fi
+          echo "$line"
+          if printf '%s' "$line" | grep -q "noowners"; then
+            echo "::error::/Volumes/Bulk is mounted noowners: file modes do not separate users there"
+            exit 1
+          fi
+          echo "ownership is honoured (expected)"
+
+      - name: sudo without a password is refused
+        if: always()
+        shell: bash
+        run: |
+          set -uo pipefail
+          if ! command -v sudo >/dev/null 2>&1; then
+            echo "::error::no sudo on PATH: the probe has no evidence"
+            exit 1
+          fi
+          if sudo -n true 2>/dev/null; then
+            echo "::error::sudo -n true succeeded: ghci has passwordless sudo"
+            exit 1
+          fi
+          echo "sudo -n true failed (expected)"
+
+      - name: No Developer ID signing identity is visible
+        if: always()
+        shell: bash
+        run: |
+          set -uo pipefail
+          out="$(security find-identity -v -p codesigning 2>&1)"
+          status=$?
+          echo "$out"
+          if [ "$status" -ne 0 ] || ! printf '%s' "$out" | grep -Eq "[0-9]+ valid identities found"; then
+            echo "::error::security find-identity gave no summary line: the probe has no evidence"
+            exit 1
+          fi
+          if printf '%s' "$out" | grep -q "Developer ID"; then
+            echo "::error::a Developer ID identity is visible to ghci"
+            exit 1
+          fi
+          echo "no Developer ID identity (expected)"

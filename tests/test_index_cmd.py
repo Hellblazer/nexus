@@ -378,6 +378,69 @@ def test_index_repo_durable_write_failure_surfaces_a_loud_warning(runner, repo_d
     assert "1 failure(s)" in result.stderr
 
 
+def test_index_repo_identity_less_durable_write_failure_surfaces_a_warning(
+    runner, repo_dir, mock_reg,
+):
+    """nexus-z0o2p.20: the dropped-file record (error class IdentityLessFile) is
+    advisory, but a failed write means `nx index failures` and `nx doctor` cannot
+    see the files, so the summary says so (as nukn3's write does). Exit stays 0
+    here only because this stub reports no drop collector entry; a real run with a
+    drop fails through the collector."""
+    result, _mock_idx = _invoke_repo(
+        runner, [str(repo_dir)], mock_reg,
+        index_return={
+            "files_changed": 3,
+            "identity_less_dropped_files": 2,
+            "identity_less_durable_write_failed": True,
+        },
+    )
+    assert result.exit_code == 0, result.output
+    assert "2 dropped file(s) could not be durably recorded" in result.stderr
+    assert "nx doctor" in result.stderr
+
+
+def test_index_repo_identity_less_durable_write_ok_stays_quiet(runner, repo_dir, mock_reg):
+    result, _mock_idx = _invoke_repo(
+        runner, [str(repo_dir)], mock_reg,
+        index_return={
+            "files_changed": 3,
+            "identity_less_dropped_files": 2,
+            "identity_less_durable_write_failed": False,
+        },
+    )
+    assert result.exit_code == 0, result.output
+    assert "durably recorded" not in result.stderr
+
+
+def test_a_file_the_oversize_backstop_dropped_is_not_reported_as_index_fresh(
+    runner, repo_dir, mock_reg,
+):
+    """nexus-z0o2p.20: an oversize fallback that refuses a file with no catalog
+    document returns 0 chunks, which the progress counter used to read as a
+    staleness no-op ("skipped: index fresh"). The file is dropped, and the drop
+    summary names it; only the genuinely unchanged file is "fresh"."""
+    from nexus.mcp_infra import _record_manifest_identity_drop
+
+    def fake_index(path, reg, **kwargs):
+        kwargs["on_start"](2)
+        _record_manifest_identity_drop(
+            "code__repo__m__v1", 7, written=False,
+            files=[{"file": "/r/big.py", "chunks": 7, "cause": "oversize_no_catalog_document"}],
+        )
+        kwargs["on_file"](Path("/r/big.py"), 0, 0.1)
+        kwargs["on_file"](Path("/r/unchanged.py"), 0, 0.1)
+        return {}
+
+    result, _ = _invoke_repo(
+        runner, [str(repo_dir), "--monitor"], mock_reg, index_side_effect=fake_index,
+    )
+    assert result.exit_code != 0, result.output  # the drop fails the run
+    assert "skipped: index fresh (use --force) \u2014 1 of 2 file(s) unchanged" in result.output
+    assert "not indexed: /r/big.py (oversize_no_catalog_document)" in result.output
+    assert "[1/2] big.py \u2014 not indexed (no catalog document)" in result.output
+    assert "[2/2] unchanged.py \u2014 skipped" in result.output
+
+
 def test_index_repo_read_back_failure_alone_stays_quiet(runner, repo_dir, mock_reg):
     """The write itself succeeded (index_failures_write_failed absent/False)
     -- only the read-back confirmation query failed, which does not lose
@@ -2195,8 +2258,10 @@ class TestPdfMdIdentityDropRegisterThrow:
 
         assert result.exit_code != 0, result.output
         assert str(md) in result.output, result.output
-        assert "orphaned" in result.output.lower(), result.output
-        assert "nx catalog reconcile" in result.output
+        # RDR-223 (nexus-z0o2p.13): the chunks are not written ownerless any more;
+        # the run fails before writing anything and says so.
+        assert "no catalog document to own" in result.output, result.output
+        assert "nothing was written" in result.output, result.output
 
     def test_md_register_ok_summary_unchanged(self, runner, home, monkeypatch):
         from nexus.cli import main as cli_main
@@ -2210,9 +2275,10 @@ class TestPdfMdIdentityDropRegisterThrow:
 
         reader, writer = self._broken_catalog(register_raises=False)
 
+        # RDR-223 (nexus-z0o2p.13): see the dt twin of this test — the write is
+        # replaced; this pins the registration-ok summary.
         with patch("nexus.doc_indexer.make_t3", return_value=self._empty_t3()), \
-             patch("nexus.doc_indexer._fence_begin"), \
-             patch("nexus.doc_indexer._fence_complete"), \
+             patch("nexus.doc_indexer._write_chunks_with_owner_rows"), \
              patch("nexus.catalog.factory.make_catalog_reader", return_value=reader), \
              patch("nexus.catalog.factory.make_catalog_writer", return_value=writer):
             result = runner.invoke(cli_main, ["index", "md", str(md)])
@@ -2251,8 +2317,10 @@ class TestPdfMdIdentityDropRegisterThrow:
 
         assert result.exit_code != 0, result.output
         assert str(pdf) in result.output, result.output
-        assert "orphaned" in result.output.lower(), result.output
-        assert "nx catalog reconcile" in result.output
+        # RDR-223 (nexus-z0o2p.11, .15): the chunks are not written ownerless any more; the run
+        # fails before writing anything and says so.
+        assert "no catalog document to own" in result.output, result.output
+        assert "nothing was written" in result.output, result.output
 
     def test_pdf_register_ok_summary_unchanged(self, runner, home, monkeypatch):
         from tests.test_doc_indexer import pdf_extract_patches_ctx
@@ -2269,9 +2337,9 @@ class TestPdfMdIdentityDropRegisterThrow:
 
         reader, writer = self._broken_catalog(register_raises=False)
 
+        # RDR-223 (nexus-z0o2p.15): the write is replaced; this pins the registration-ok summary.
         with patch("nexus.doc_indexer.make_t3", return_value=self._empty_t3()), \
-             patch("nexus.doc_indexer._fence_begin"), \
-             patch("nexus.doc_indexer._fence_complete"), \
+             patch("nexus.doc_indexer._write_chunks_with_owner_rows"), \
              patch("nexus.catalog.factory.make_catalog_reader", return_value=reader), \
              patch("nexus.catalog.factory.make_catalog_writer", return_value=writer), \
              pdf_extract_patches_ctx():
@@ -2365,8 +2433,10 @@ class TestPdfMdIdentityDropRegisterThrow:
 
         assert result.exit_code != 0, result.output
         assert str(pdf) in result.output, result.output
-        assert "orphaned" in result.output.lower(), result.output
-        assert "nx catalog reconcile" in result.output
+        # RDR-223 (nexus-z0o2p.11, .15): the chunks are not written ownerless any more; the run
+        # fails before writing anything and says so.
+        assert "no catalog document to own" in result.output, result.output
+        assert "nothing was written" in result.output, result.output
 
 
 # ── nexus-7f5qj AC4: --dir batch mode audit ─────────────────────────────────

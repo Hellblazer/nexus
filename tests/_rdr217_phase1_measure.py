@@ -184,23 +184,50 @@ def precheck(query_set, corpus: list[dict], k: int) -> None:
 
 
 def seed(db: hvc.HttpVectorClient, corpus: list[dict]) -> float:
-    """Bulk-build the index in one pass. Returns elapsed seconds."""
+    """Bulk-build the index in one pass. Returns elapsed seconds.
+
+    Chunks go in with substrate SQL (``tests/_chunk_seed.py``, vectors embedded server-side by the
+    local bge-768 route, no credentials), because the write routes refuse an ownerless chunk from
+    RDR-223 Phase 3. Then one catalog document per source file owns its chunks: a chunk with no
+    live owner is invisible to every read (``live(c)``), so without the owner rows every query
+    returns nothing and the measurement refuses to record itself. The owner rows are written
+    inside the timed window, since they are part of building a searchable index.
+    """
+    from nexus.catalog.factory import make_catalog_writer
+    from tests._chunk_seed import seed_chunks_direct
+
     batch = QUOTAS.MAX_RECORDS_PER_WRITE
     started = time.monotonic()
     for i in range(0, len(corpus), batch):
         part = corpus[i:i + batch]
-        db.upsert_chunks_with_embeddings(
+        seed_chunks_direct(
             COLLECTION,
             ids=[r["id"] for r in part],
             documents=[r["content"] for r in part],
-            embeddings=[],  # server-side embedding, local bge-768, no credentials
             metadatas=[{"chunk_text_hash": r["id"], "title": r["title"],
                         "source_path": r["source_uri"]} for r in part],
+            embed=True,
         )
         done = min(i + batch, len(corpus))
         elapsed = time.monotonic() - started
         _say(f"[seed] {done}/{len(corpus)} chunks  {elapsed:6.1f}s  "
              f"{done / max(elapsed, 0.001):6.1f} chunks/s")
+
+    writer = make_catalog_writer(priority="interactive")
+    owner = writer.register_owner("rdr217-baseline", "repo")
+    by_file: dict[str, list[str]] = {}
+    for r in corpus:
+        by_file.setdefault(r["source_uri"], []).append(r["id"])
+    for source_uri, chashes in by_file.items():
+        doc = writer.register(
+            owner=owner, title=source_uri, content_type="code",
+            physical_collection=COLLECTION, source_uri=f"file:///rdr217-baseline/{source_uri}",
+        )
+        writer.write_manifest(
+            str(doc), [{"chash": c, "position": n} for n, c in enumerate(chashes)],
+            collection=COLLECTION,
+        )
+    _say(f"[seed] {len(by_file)} documents own the {len(corpus)} chunks")
     return time.monotonic() - started
 
 

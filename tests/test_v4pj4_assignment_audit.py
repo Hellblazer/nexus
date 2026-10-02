@@ -47,6 +47,7 @@ from nexus.doctor_assignments import (
     probe_collection,
 )
 from tests._catalog_fixture_ops import give_chunks_a_live_owner
+from tests._chunk_seed import seed_chunks_direct
 
 _SRC = "knowledge__v4pj4-src__bge-base-en-v15-768__v1"
 _DST = "knowledge__v4pj4-dst__bge-base-en-v15-768__v1"
@@ -89,9 +90,9 @@ def _seed_src_with_two_dst_topics(t3, tax) -> tuple[list[str], int, int]:
     and ``ids[-1]``'s is unambiguously ``topic_b``.
     """
     ids = [_chash(t) for t in _TEXTS]
-    t3.upsert_chunks_with_embeddings(
-        collection_name=_SRC, ids=ids, documents=_TEXTS,
-        embeddings=[[] for _ in ids], metadatas=[{}] * len(ids),
+    seed_chunks_direct(
+        collection=_SRC, ids=ids, documents=_TEXTS,
+        embed=True, metadatas=[{}] * len(ids),
     )
     # RDR-192 Step 5 (nexus-wbfpw.10): get_embeddings and the probe's own
     # col.get() are live-visibility gated; a raw upsert with no catalog
@@ -624,9 +625,9 @@ def test_a_topic_added_after_assignment_does_not_alarm(t2_service_env) -> None:
     ids = [_chash(t) for t in _TEXTS]
     t3 = make_t3()
     tax = HttpTaxonomyStore()
-    t3.upsert_chunks_with_embeddings(
-        collection_name=_SRC, ids=ids, documents=_TEXTS,
-        embeddings=[[] for _ in ids], metadatas=[{}] * len(ids),
+    seed_chunks_direct(
+        collection=_SRC, ids=ids, documents=_TEXTS,
+        embed=True, metadatas=[{}] * len(ids),
     )
     # RDR-192 Step 5 (nexus-wbfpw.10): see the sibling fixture above.
     give_chunks_a_live_owner(_SRC, ids)
@@ -674,10 +675,10 @@ def test_a_collection_with_no_live_foreign_centroid_is_not_applicable(t2_service
 
     ids = [_chash(f"v4pj4 bare chunk {i}") for i in range(3)]
     t3 = make_t3()
-    t3.upsert_chunks_with_embeddings(
-        collection_name=_BARE, ids=ids,
+    seed_chunks_direct(
+        collection=_BARE, ids=ids,
         documents=[f"v4pj4 bare chunk {i}" for i in range(3)],
-        embeddings=[[] for _ in ids], metadatas=[{}] * len(ids),
+        embed=True, metadatas=[{}] * len(ids),
     )
     # RDR-192 Step 5 (nexus-wbfpw.10): without a live owner the live count
     # this probe samples over is 0, so the run never reaches cross_preview
@@ -696,10 +697,10 @@ def test_an_engine_without_cross_preview_is_named_not_applicable(t2_service_env,
 
     ids = [_chash(f"v4pj4 old-engine chunk {i}") for i in range(3)]
     t3 = make_t3()
-    t3.upsert_chunks_with_embeddings(
-        collection_name=_SRC, ids=ids,
+    seed_chunks_direct(
+        collection=_SRC, ids=ids,
         documents=[f"v4pj4 old-engine chunk {i}" for i in range(3)],
-        embeddings=[[] for _ in ids], metadatas=[{}] * len(ids),
+        embed=True, metadatas=[{}] * len(ids),
     )
     # RDR-192 Step 5 (nexus-wbfpw.10): see the sibling fixture above.
     give_chunks_a_live_owner(_SRC, ids)

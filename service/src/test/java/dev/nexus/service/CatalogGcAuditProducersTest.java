@@ -295,7 +295,9 @@ class CatalogGcAuditProducersTest {
             ps.setString(5, zeroVec);
             ps.executeUpdate();
         }
-        // No manifest row for `orphan` -- it is unreferenced, so quarantineOrphans moves it.
+        // No manifest row for `orphan` -- it is unreferenced, so quarantineOrphans moves it
+        // once it is older than the grace window (RDR-192 Step 8).
+        ReapableFixtures.agePastGrace(pg, TENANT, collection);
 
         assertThat(repo.listGcAudit(TENANT, collection, "gc_quarantine_orphans", 100, 0)).isEmpty();
 

@@ -1,0 +1,196 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    RDR-192 Phase 2 gate minor M2 (bead nexus-wbfpw.35): nexus.text_gate_probe_384/768/1024
+    move onto live(c), the predicate vectors-019 gave every other read path:
+
+        EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))
+
+    vectors-019 migrated plain_search, text_gated_search_{hnsw_first,by_chash}, hybrid_search
+    and search_topic_scoped but left the probe on the tenant-wide dead-set anti-join of
+    vectors-011-1 (carried through search-path-002), a tenth liveness definition. The probe
+    is the hybrid dispatch's gate: PgVectorRepository#hybridSearch fetches up to
+    SELECTIVE_GATE_MAX + 1 gate chashes, ranks them by exact distance when the gate is
+    selective and falls back to the HNSW-first plan when it is not. With the old predicate
+    the probe counted chunks live(c) hides (no owner, or owners all tombstoned), so a gate
+    that is selective among live rows could read as dense and take the HNSW-first plan,
+    the starvation class nexus-lcogi closed. Correctness never depended on it (both ranking
+    functions apply live(c)); the dispatch did.
+
+    The body is the search-path-002 body with its liveness block replaced by the live(c)
+    call and nothing else changed (the pg_trgm operator stays schema-qualified, and there is
+    still no function-level SET search_path, which would stop the planner inlining the
+    function). The rollback is the previous body verbatim.
+
+    No DATA EFFECT: function definitions only; no row changes.
+
+    Placed after vectors-020 (the tail of this family when this landed) and before the
+    grants blocks (D0.1 late-append convention).
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="vectors-023-1" author="nexus-wbfpw.35">
+        <comment>nexus.text_gate_probe_384/768/1024: the liveness filter becomes live(c), EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash)), replacing the tenant-wide dead-set anti-join of vectors-011-1, so the hybrid dispatch's gate count means the same rows every other read path returns (RDR-192 Phase 2 gate M2). Bodies otherwise unchanged.</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.text_gate_probe_384(
+    p_text         text,
+    p_collections  text[],
+    p_where        jsonb,
+    p_where_path   text,
+    p_cap          int
+) RETURNS SETOF bytea
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT c.chash
+      FROM nexus.chunks c
+     WHERE c.collection = ANY(p_collections)
+       AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))
+       AND (p_where IS NULL OR c.metadata @&gt; p_where)
+       AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
+       AND (c.chunk_tsv @@ plainto_tsquery('english', p_text) OR p_text OPERATOR(nexus.&lt;%) c.chunk_text)
+     LIMIT p_cap
+$$;
+
+CREATE OR REPLACE FUNCTION nexus.text_gate_probe_768(
+    p_text         text,
+    p_collections  text[],
+    p_where        jsonb,
+    p_where_path   text,
+    p_cap          int
+) RETURNS SETOF bytea
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT c.chash
+      FROM nexus.chunks c
+     WHERE c.collection = ANY(p_collections)
+       AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))
+       AND (p_where IS NULL OR c.metadata @&gt; p_where)
+       AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
+       AND (c.chunk_tsv @@ plainto_tsquery('english', p_text) OR p_text OPERATOR(nexus.&lt;%) c.chunk_text)
+     LIMIT p_cap
+$$;
+
+CREATE OR REPLACE FUNCTION nexus.text_gate_probe_1024(
+    p_text         text,
+    p_collections  text[],
+    p_where        jsonb,
+    p_where_path   text,
+    p_cap          int
+) RETURNS SETOF bytea
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT c.chash
+      FROM nexus.chunks c
+     WHERE c.collection = ANY(p_collections)
+       AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))
+       AND (p_where IS NULL OR c.metadata @&gt; p_where)
+       AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
+       AND (c.chunk_tsv @@ plainto_tsquery('english', p_text) OR p_text OPERATOR(nexus.&lt;%) c.chunk_text)
+     LIMIT p_cap
+$$;
+        </sql>
+        <rollback>
+            <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.text_gate_probe_384(
+    p_text         text,
+    p_collections  text[],
+    p_where        jsonb,
+    p_where_path   text,
+    p_cap          int
+) RETURNS SETOF bytea
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT c.chash
+      FROM nexus.chunks c
+     WHERE c.collection = ANY(p_collections)
+       AND (NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m
+                         JOIN nexus.catalog_documents d
+                           ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+                        WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash
+                          AND d.deleted_at IS NOT NULL
+                          AND NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m2
+                                            JOIN nexus.catalog_documents d2
+                                              ON d2.tenant_id = m2.tenant_id AND d2.tumbler = m2.doc_id
+                                           WHERE m2.tenant_id = m.tenant_id AND m2.chash = m.chash
+                                             AND d2.deleted_at IS NULL)))
+       AND (p_where IS NULL OR c.metadata @&gt; p_where)
+       AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
+       AND (c.chunk_tsv @@ plainto_tsquery('english', p_text) OR p_text OPERATOR(nexus.&lt;%) c.chunk_text)
+     LIMIT p_cap
+$$;
+
+CREATE OR REPLACE FUNCTION nexus.text_gate_probe_768(
+    p_text         text,
+    p_collections  text[],
+    p_where        jsonb,
+    p_where_path   text,
+    p_cap          int
+) RETURNS SETOF bytea
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT c.chash
+      FROM nexus.chunks c
+     WHERE c.collection = ANY(p_collections)
+       AND (NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m
+                         JOIN nexus.catalog_documents d
+                           ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+                        WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash
+                          AND d.deleted_at IS NOT NULL
+                          AND NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m2
+                                            JOIN nexus.catalog_documents d2
+                                              ON d2.tenant_id = m2.tenant_id AND d2.tumbler = m2.doc_id
+                                           WHERE m2.tenant_id = m.tenant_id AND m2.chash = m.chash
+                                             AND d2.deleted_at IS NULL)))
+       AND (p_where IS NULL OR c.metadata @&gt; p_where)
+       AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
+       AND (c.chunk_tsv @@ plainto_tsquery('english', p_text) OR p_text OPERATOR(nexus.&lt;%) c.chunk_text)
+     LIMIT p_cap
+$$;
+
+CREATE OR REPLACE FUNCTION nexus.text_gate_probe_1024(
+    p_text         text,
+    p_collections  text[],
+    p_where        jsonb,
+    p_where_path   text,
+    p_cap          int
+) RETURNS SETOF bytea
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT c.chash
+      FROM nexus.chunks c
+     WHERE c.collection = ANY(p_collections)
+       AND (NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m
+                         JOIN nexus.catalog_documents d
+                           ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+                        WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash
+                          AND d.deleted_at IS NOT NULL
+                          AND NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m2
+                                            JOIN nexus.catalog_documents d2
+                                              ON d2.tenant_id = m2.tenant_id AND d2.tumbler = m2.doc_id
+                                           WHERE m2.tenant_id = m.tenant_id AND m2.chash = m.chash
+                                             AND d2.deleted_at IS NULL)))
+       AND (p_where IS NULL OR c.metadata @&gt; p_where)
+       AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
+       AND (c.chunk_tsv @@ plainto_tsquery('english', p_text) OR p_text OPERATOR(nexus.&lt;%) c.chunk_text)
+     LIMIT p_cap
+$$;
+            </sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

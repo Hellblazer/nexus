@@ -726,11 +726,18 @@ def test_required_check_contexts_matches_live_branch_protection():
             "REQUIRED_CHECK_CONTEXTS against live branch protection."
         )
 
+    import os
+
     try:
+        # nexus-z0o2p.41: hand the token this test just found to `gh` rather than trusting `gh` to
+        # find it again. The suite runs under a throwaway HOME (tests/conftest.py), where a
+        # keychain- or hosts.yml-backed login is invisible to `gh api` (exit 4, "gh auth login")
+        # even though `gh auth token` above returned a token, so on a box with real gh auth this
+        # pin skipped and the pins gate's zero budget read it red.
         proc = subprocess.run(
             ["gh", "api", f"repos/{_REPO}/branches/main/protection",
              "--jq", ".required_status_checks.contexts"],
-            capture_output=True, text=True,
+            capture_output=True, text=True, env={**os.environ, "GH_TOKEN": token},
         )
     except (OSError, subprocess.SubprocessError) as exc:
         # GITHUB_TOKEN can be set without `gh` being installed at all --

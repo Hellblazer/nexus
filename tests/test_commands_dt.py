@@ -719,18 +719,19 @@ class TestStampFailedSummary:
         assert "stamp-failed" not in result.output
 
 
-# ── nexus-hb10j: --dt-content per-record catches must include the two ──────
-# NexusError subclasses tp8yk/w6wp0 introduced (ChunkLandingUnverifiedError, ─
-# IndexRunVerifyRefused) — collect-and-continue, mirroring the file-backed ──
-# _index_record call site (dt.py 748-805), not a whole-batch abort. ─────────
+# ── nexus-hb10j: --dt-content per-record catches must include the ─────────
+# NexusError subclasses tp8yk/w6wp0 introduced (IndexRunVerifyRefused, and ──
+# ChunkLandingUnverifiedError until RDR-223 deleted it) — collect-and-continue,
+# mirroring the file-backed _index_record call site (dt.py 748-805), not a ──
+# whole-batch abort. ────────────────────────────────────────────────────────
 
 
 class TestDtContentExceptionHandling:
     """``_index_dt_content_record`` (the ``--dt-content`` non-file-backed
     ingest path) only caught ``(RuntimeError, ImportError, OSError)`` around
-    its ``index_markdown()`` call — ``ChunkLandingUnverifiedError`` and
-    ``IndexRunVerifyRefused`` (both ``NexusError`` subclasses raised since
-    tp8yk/w6wp0) fell through uncaught and aborted the WHOLE ``--dt-content``
+    its ``index_markdown()`` call — ``IndexRunVerifyRefused`` and (until
+    RDR-223 deleted it) ``ChunkLandingUnverifiedError`` (``NexusError``
+    subclasses raised since tp8yk/w6wp0) fell through uncaught and aborted the WHOLE ``--dt-content``
     batch on the first affected record (third occurrence of the
     nexus-2fyb/qo84l/9800y regression class — filed by the 2xu6t critic, T2
     [21480]).
@@ -743,49 +744,6 @@ class TestDtContentExceptionHandling:
         import nexus.mcp_client.devonthink as _dt_mod
 
         monkeypatch.setattr(_dt_mod, "available", lambda **kw: True)
-
-    def test_chunk_landing_unverified_collects_and_continues(
-        self, runner, fake_selectors, monkeypatch,
-    ):
-        from nexus.cli import main
-        from nexus.errors import ChunkLandingUnverifiedError
-
-        fake_selectors["selection"].return_value = [
-            ("U-BAD", "x-devonthink-item://bad"),
-            ("U-OK", "x-devonthink-item://ok"),
-        ]
-
-        def fake_index(uuid, *, collection, corpus, extraction_source="dt_content", force=False, force_re_embed=False):
-            if uuid == "U-BAD":
-                raise ChunkLandingUnverifiedError(collection=collection, count=3)
-            return True
-
-        monkeypatch.setattr(
-            "nexus.commands.dt._index_dt_content_record", fake_index,
-        )
-
-        result = runner.invoke(main, ["dt", "index", "--selection", "--dt-content"])
-
-        # Collect-and-continue: U-OK must still be processed despite
-        # U-BAD's exception — a whole-batch abort would report "Indexed 0
-        # record(s)" (and, pre-fix, a raw traceback / empty output — see
-        # the RED run) and never reach U-OK at all.
-        assert "Indexed 1 record(s)" in result.output, result.output
-        assert "1 from DT content" in result.output, result.output
-        assert "1 failed" in result.output, result.output
-        assert "U-BAD" in result.output, result.output
-        assert "cannot confirm 3 chunk(s)" in result.output, result.output
-        # ChunkLandingUnverifiedError fires BEFORE any manifest write
-        # (doc_indexer.py:1202-1206, D1's whole point) and — unlike
-        # IndexRunVerifyRefused's _record_complete_refusal side effect —
-        # touches none of the three run-level gate collectors
-        # (get_manifest_write_failures / get_manifest_identity_drops /
-        # get_complete_refusals). So the per-record ``failed`` bucket
-        # alone does not force a nonzero exit here; that's the run-level
-        # gate's job (see test_dt_content_refusal_still_honours_run_
-        # level_gate below), and this pin matches the file-backed
-        # sibling's identical existing contract (dt.py 782-805).
-        assert result.exit_code == 0, result.output
 
     def test_index_run_verify_refused_collects_and_continues(
         self, runner, fake_selectors, monkeypatch,
@@ -955,7 +913,7 @@ class TestDtContentExceptionHandling:
 # the AST tripwire (tests/test_rlkgu_per_record_catch_tripwire.py) inspects
 # except-clause TYPES, not handler BODIES. Its gates went green on a dt.py
 # dispatch shaped `if isinstance(exc, IndexRunVerifyRefused): ... else: #
-# assumes ChunkLandingUnverifiedError` — a hypothetical THIRD
+# assumes one known exception's fields` — a hypothetical THIRD
 # PER_RECORD_SURVIVABLE_EXCEPTIONS member would hit the else branch, access
 # an attribute it doesn't have (.collection/.count), raise AttributeError
 # INSIDE the handler, and escape the try/except — occurrence-4 of the
@@ -975,16 +933,17 @@ class TestDtContentExceptionHandling:
 #   proves the generic else branch survives it. Manually verified during
 #   implementation: reverting dt.py's total dispatch back to the binary
 #   if/else form (`if isinstance(exc, IndexRunVerifyRefused): ... else:
-#   <ChunkLandingUnverifiedError-shaped access>`) turns both tests in that
+#   <access to one known exception's fields>`) turns both tests in that
 #   class RED with an AttributeError escaping the handler; restoring the
 #   fix turns them green again (see the developer's T1 scratch write-back
 #   for the exact revert/restore transcript).
 
 from nexus.errors import (  # noqa: E402 — grouped with this section's test-only imports
-    ChunkLandingUnverifiedError,
+    BatchWriteFailedError,
     ExtractionQualityError,
     IndexRunVerifyRefused,
     NexusError as _NexusError,
+    CatalogIdentityMissingError,
     SourceUriCollectionMismatchError,
     SourceUriNotFoundError,
     UnchunkableContentError,
@@ -992,9 +951,9 @@ from nexus.errors import (  # noqa: E402 — grouped with this section's test-on
 )
 
 _MEMBER_KWARGS: dict[type, dict] = {
-    ChunkLandingUnverifiedError: {
-        "collection": "docs__dt-test__voyage-context-3__v1", "count": 3,
-    },
+    # nexus-z0o2p.10: the RDR-223 writer's per-document failure fails that
+    # record, never the rest of an nx dt index batch.
+    BatchWriteFailedError: {"doc_id": "1.99.1", "batch": 1, "reason": "write_many named the document in failed_doc_ids"},
     IndexRunVerifyRefused: {
         "doc_id": "1.99.1", "referenced": 5, "present": 3, "missing": 2,
         "chunk_count": 5,
@@ -1024,6 +983,10 @@ _MEMBER_KWARGS: dict[type, dict] = {
     # SURVIVES the type, not what the message says.
     SourceUriNotFoundError: {},
     SourceUriCollectionMismatchError: {},
+    # nexus-z0o2p.13 (RDR-223): a record whose registration returned no identity
+    # has no owner for its chunks; it fails that record only. Plain positional
+    # message like the SourceUri pair above.
+    CatalogIdentityMissingError: {},
     UnchunkableContentError: {
         "message": (
             "refusing to index empty.md: file is zero bytes — nothing "
@@ -1209,8 +1172,7 @@ def test_a_source_uri_failure_fails_one_record_not_the_batch(
 class _SyntheticThirdMember(_NexusError):
     """Test-only third ``PER_RECORD_SURVIVABLE_EXCEPTIONS`` member — NEVER
     added to the real production tuple. Deliberately carries neither
-    ``ChunkLandingUnverifiedError``'s ``(.collection, .count)`` nor
-    ``IndexRunVerifyRefused``'s field set: a handler whose fallback branch
+    ``IndexRunVerifyRefused``'s field set nor any other known member's: a handler whose fallback branch
     blindly assumes either shape raises ``AttributeError`` on this class."""
 
     def __init__(self, *, detail: str) -> None:
@@ -1410,13 +1372,18 @@ class TestIdentityDropSummary:
             result = runner.invoke(main, ["dt", "index", "--selection"])
 
         # Collect-and-continue (nexus-9800y convention): the register
-        # exception on record A must not abort record B — both land.
-        assert "Indexed 2 record(s)" in result.output, result.output
-        # Distinct, non-clean outcome — never the plain success summary.
-        assert (
-            "WITHOUT a catalog document identity" in result.output
-        ), result.output
-        assert "nx catalog reconcile" in result.output
+        # exception on record A must not abort record B — both are attempted.
+        # RDR-223 (nexus-z0o2p.13): a record with no catalog identity has no
+        # owner for its chunks, so neither lands (they used to land ownerless).
+        assert "Indexed 0 record(s)" in result.output, result.output
+        assert "2 failed" in result.output, result.output
+        assert "recA.md" in result.output and "recB.md" in result.output, result.output
+        assert "no catalog document to own" in result.output, result.output
+        # Distinct, non-clean outcome — the refused records feed the identity-drop
+        # summary, worded for a write that never happened (nothing to reconcile).
+        assert "were NOT indexed" in result.output, result.output
+        assert "nothing was written" in result.output, result.output
+        assert "WITHOUT a catalog document identity" not in result.output, result.output
         # pbawi acceptance item 3, verbatim requirement: must NOT exit 0.
         assert result.exit_code != 0, result.output
 
@@ -1438,9 +1405,11 @@ class TestIdentityDropSummary:
 
         reader, writer = self._broken_catalog(register_raises=False)
 
+        # RDR-223 (nexus-z0o2p.13): the chunks and owner rows are one write to the
+        # real engine, which this test's doubles do not model; this test pins the
+        # registration-ok SUMMARY, so the write is replaced.
         with patch("nexus.doc_indexer.make_t3", return_value=self._empty_t3()), \
-             patch("nexus.doc_indexer._fence_begin"), \
-             patch("nexus.doc_indexer._fence_complete"), \
+             patch("nexus.doc_indexer._write_chunks_with_owner_rows"), \
              patch("nexus.catalog.factory.make_catalog_reader", return_value=reader), \
              patch("nexus.catalog.factory.make_catalog_writer", return_value=writer):
             result = runner.invoke(main, ["dt", "index", "--selection"])

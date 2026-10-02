@@ -6,7 +6,11 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from nexus.db.engine_reasons import UNREGISTERED_COLLECTION_REASON, error_reason
+from nexus.db.engine_reasons import (
+    OWNERLESS_CHUNK_WRITE_REASON,
+    UNREGISTERED_COLLECTION_REASON,
+    error_reason,
+)
 
 _HTTP_UTIL = (
     Path(__file__).resolve().parents[1]
@@ -20,6 +24,24 @@ def test_the_client_constant_equals_the_engines() -> None:
     )
     assert match, "HttpUtil no longer declares UNREGISTERED_COLLECTION_REASON"
     assert match.group(1) == UNREGISTERED_COLLECTION_REASON
+
+
+def test_the_ownerless_write_reason_equals_the_engines() -> None:
+    match = re.search(
+        r'OWNERLESS_CHUNK_WRITE_REASON\s*=\s*"([a-z_]+)"', _HTTP_UTIL.read_text(),
+    )
+    assert match, "HttpUtil no longer declares OWNERLESS_CHUNK_WRITE_REASON"
+    assert match.group(1) == OWNERLESS_CHUNK_WRITE_REASON
+
+
+def test_the_quarantine_restore_busy_reason_equals_the_engines() -> None:
+    from nexus.db.engine_reasons import QUARANTINE_RESTORE_BUSY_REASON  # noqa: PLC0415 — test-local import
+
+    match = re.search(
+        r'QUARANTINE_RESTORE_BUSY_REASON\s*=\s*"([a-z_]+)"', _HTTP_UTIL.read_text(),
+    )
+    assert match, "HttpUtil no longer declares QUARANTINE_RESTORE_BUSY_REASON"
+    assert match.group(1) == QUARANTINE_RESTORE_BUSY_REASON
 
 
 def test_every_reader_uses_the_one_module() -> None:

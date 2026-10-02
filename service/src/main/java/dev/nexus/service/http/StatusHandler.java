@@ -6,7 +6,10 @@ import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 import dev.nexus.service.vectors.EmbedActivitySnapshot;
 import dev.nexus.service.vectors.EmbedderRouter;
+import dev.nexus.service.vectors.OwnerlessWriteActivity;
+import dev.nexus.service.vectors.OwnerlessWritePolicy;
 import dev.nexus.service.vectors.RacedEmbedActivity;
+import dev.nexus.service.vectors.SuppliedVectorMismatchActivity;
 
 import java.io.IOException;
 import java.util.Map;
@@ -32,7 +35,20 @@ import java.util.function.Supplier;
  *    "deadline_aborts_total":0,"admission_refusals_total":0},
  *  "embedder_activity":{"bge-base-en-v15-768":{...same shape...}},
  *  "raced_embeds_total":0,
+ *  "supplied_vector_mismatches_total":0,
  *  "process_start_time":"2026-09-12T09:00:00Z"}</pre>
+ *
+ * <p>{@code reaper} (RDR-192 Phase 3 gate S5, bead nexus-wbfpw.56, ADDITIVE) is the engine reaper's liveness:
+ * {@code {"enabled":true,"interval_seconds":3600,"wall_clock_budget_seconds":600,"last_completed_pass_at":"2026-10-02T07:00:00Z"|null,
+ * "failed_passes_total":0,"last_pass":{"tenants_visited":3,"tenants_errored":0,"tenants_refused":0}|null}}, or
+ * {@code {"enabled":false}} when no reaper is scheduled in this process. {@code last_pass} says what the last completed
+ * pass did with its tenants, because a pass completes whatever they did. See {@link ReaperStatus}.
+ *
+ * <p>{@code supplied_vector_mismatches_total} (RDR-223 P1.5, bead nexus-z0o2p.6, ADDITIVE) is
+ * a process-wide, lifetime counter (see {@link SuppliedVectorMismatchActivity}) of client-supplied
+ * vectors the combined write routes did not store because the chash already had a stored vector
+ * for the same text and the two differed. Top-level for the same reason as {@code
+ * raced_embeds_total}: it has no embedder dimension.
  *
  * <p>{@code raced_embeds_total} (RDR-222 Phase 0, bead nexus-ulrjq, ADDITIVE) is a
  * process-wide, lifetime counter (see {@link RacedEmbedActivity}) of chashes a
@@ -90,6 +106,8 @@ public final class StatusHandler implements HttpHandler {
     private final EmbedderRouter embedderRouter;   // nullable — mode "unknown"
     private final Supplier<EmbedActivitySnapshot> localEmbedActivitySupplier; // nullable
     private final long processStartMillis;
+    private final OwnerlessWritePolicy ownerlessWritePolicy;   // nullable — mode field omitted
+    private final Supplier<ReaperStatus> reaperStatus;          // nullable — "reaper" key omitted
 
     public StatusHandler(EmbedderRouter embedderRouter) {
         this(embedderRouter, null);
@@ -138,9 +156,72 @@ public final class StatusHandler implements HttpHandler {
             EmbedderRouter embedderRouter,
             Supplier<EmbedActivitySnapshot> localEmbedActivitySupplier,
             long processStartMillis) {
+        this(embedderRouter, localEmbedActivitySupplier, processStartMillis, null);
+    }
+
+    /**
+     * @param ownerlessWritePolicy RDR-223 Phase 3 Step 2 (nexus-z0o2p.24): the policy
+     *                             {@code VectorHandler} applies to ownerless chunk writes, so
+     *                             {@code ownerless_write_mode} can say which mode this process runs.
+     *                             Null omits that one field; the two counters are always present.
+     */
+    public StatusHandler(
+            EmbedderRouter embedderRouter,
+            Supplier<EmbedActivitySnapshot> localEmbedActivitySupplier,
+            long processStartMillis,
+            OwnerlessWritePolicy ownerlessWritePolicy) {
+        this(embedderRouter, localEmbedActivitySupplier, processStartMillis, ownerlessWritePolicy, null);
+    }
+
+    /**
+     * What the engine reaper reports on this route (RDR-192 Phase 3 gate S5, bead nexus-wbfpw.56, [additive]):
+     * the one durable sign that it is alive, since a pass with nothing to move writes no {@code gc_audit} row and a
+     * cloud operator has no engine log. {@code lastCompletedPassAt} is null before the first pass and is NOT moved by
+     * a pass that died; a client flags it when it is older than a few {@code intervalSeconds}.
+     *
+     * @param enabled              the reaper is scheduled in this process
+     * @param intervalSeconds      the delay between the end of one pass and the start of the next
+     * @param wallClockBudgetSeconds the longest one pass runs (its wall-clock budget), so a client can tell a slow
+     *                             pass from a dead reaper: completions are at most interval plus this far apart
+     * @param lastCompletedPassAt  when the last pass that ran to the end finished; null before the first
+     * @param failedPassesTotal    passes since boot that died or could not list their tenants
+     * @param lastPass             what the last COMPLETED pass did with its tenants (nexus-wbfpw.55 round 2); null
+     *                             before the first. A pass completes whatever its tenants did, so this is what tells
+     *                             a reaper that works from one whose every tenant was refused or errored
+     */
+    public record ReaperStatus(boolean enabled, long intervalSeconds, long wallClockBudgetSeconds,
+                               java.time.Instant lastCompletedPassAt, long failedPassesTotal, LastPass lastPass) {
+        /** A reaper that reports no pass summary (what an engine wired without one answers in). */
+        public ReaperStatus(boolean enabled, long intervalSeconds, long wallClockBudgetSeconds,
+                            java.time.Instant lastCompletedPassAt, long failedPassesTotal) {
+            this(enabled, intervalSeconds, wallClockBudgetSeconds, lastCompletedPassAt, failedPassesTotal, null);
+        }
+
+        /**
+         * @param tenantsVisited tenants the pass reached (a wall-clock cut leaves the rest for the next pass)
+         * @param tenantsErrored tenants where the tenant, a collection or a quarantine sibling threw
+         * @param tenantsRefused tenants the RDR-192 backfill gate kept out whole
+         */
+        public record LastPass(int tenantsVisited, int tenantsErrored, int tenantsRefused) {}
+    }
+
+    /**
+     * @param reaperStatus RDR-192 Phase 3 gate S5 (nexus-wbfpw.56): the reaper's liveness. Null omits the
+     *                     {@code reaper} key altogether (what an engine predating the field answers in, so tests
+     *                     and older wirings read as "cannot tell"); a supplier that returns null reports
+     *                     {@code {"enabled":false}} (no reaper is scheduled in this process).
+     */
+    public StatusHandler(
+            EmbedderRouter embedderRouter,
+            Supplier<EmbedActivitySnapshot> localEmbedActivitySupplier,
+            long processStartMillis,
+            OwnerlessWritePolicy ownerlessWritePolicy,
+            Supplier<ReaperStatus> reaperStatus) {
         this.embedderRouter = embedderRouter;
         this.localEmbedActivitySupplier = localEmbedActivitySupplier;
         this.processStartMillis = processStartMillis;
+        this.ownerlessWritePolicy = ownerlessWritePolicy;
+        this.reaperStatus = reaperStatus;
     }
 
     @Override
@@ -177,6 +258,51 @@ public final class StatusHandler implements HttpHandler {
         // RDR-222 Phase 0 (bead nexus-ulrjq), [additive]: process-wide lifetime
         // counter, not per-embedder — see this class's own javadoc.
         body.append(",\"raced_embeds_total\":").append(RacedEmbedActivity.total());
+
+        // RDR-223 P1.5 (bead nexus-z0o2p.6), [additive]: same shape and lifetime as the
+        // raced-embed counter above.
+        body.append(",\"supplied_vector_mismatches_total\":").append(SuppliedVectorMismatchActivity.total());
+
+        // RDR-223 Phase 3 Step 2 (bead nexus-z0o2p.24), [additive]: requests the ownerless-write
+        // check refused (enforce) or let through and counted (log-only), since boot, plus the mode
+        // this process runs. A log-only run's reader asks "did anything write ownerless?" here.
+        body.append(",\"ownerless_writes_refused_total\":").append(OwnerlessWriteActivity.refusedTotal());
+        body.append(",\"ownerless_writes_would_refuse_total\":").append(OwnerlessWriteActivity.wouldRefuseTotal());
+        if (ownerlessWritePolicy != null) {
+            body.append(",\"ownerless_write_mode\":")
+                .append(HttpUtil.jsonString(ownerlessWritePolicy.mode().wire()));
+        }
+
+        // RDR-192 Phase 3 gate S5 (bead nexus-wbfpw.56), [additive]: the engine reaper's liveness. Absent key =
+        // an engine (or wiring) that predates it; {"enabled":false} = no reaper in this process.
+        if (reaperStatus != null) {
+            ReaperStatus r = reaperStatus.get();
+            body.append(",\"reaper\":");
+            if (r == null) {
+                body.append("{\"enabled\":false}");
+            } else {
+                body.append("{\"enabled\":").append(r.enabled())
+                    .append(",\"interval_seconds\":").append(r.intervalSeconds())
+                    .append(",\"wall_clock_budget_seconds\":").append(r.wallClockBudgetSeconds())
+                    .append(",\"last_completed_pass_at\":");
+                if (r.lastCompletedPassAt() == null) {
+                    body.append("null");
+                } else {
+                    body.append(HttpUtil.jsonString(
+                        r.lastCompletedPassAt().truncatedTo(java.time.temporal.ChronoUnit.SECONDS).toString()));
+                }
+                body.append(",\"failed_passes_total\":").append(r.failedPassesTotal());
+                body.append(",\"last_pass\":");
+                if (r.lastPass() == null) {
+                    body.append("null");
+                } else {
+                    body.append("{\"tenants_visited\":").append(r.lastPass().tenantsVisited())
+                        .append(",\"tenants_errored\":").append(r.lastPass().tenantsErrored())
+                        .append(",\"tenants_refused\":").append(r.lastPass().tenantsRefused()).append('}');
+                }
+                body.append('}');
+            }
+        }
 
         // RDR-222 Phase 0 fix round (bead nexus-ulrjq, critic #2), [additive]:
         // VersionHandler.startTimeIso is the SAME rendering /version's field of

@@ -47,7 +47,9 @@ export NX_ALLOW_PROD_WRITE="cloud-client-path-gate: deliberate post-deploy MVV w
 #      embedding_models non-empty (RDR-002 + nexus-pebfx.5 contract).
 #   B  edge auth contract the client relies on (Sam, 2026-09-28): an
 #      UNAUTHENTICATED /health is refused by the edge (403), and the minted
-#      data token the client sends is accepted on /v1 (200). The old
+#      data token the client sends is accepted on /v1 (200). Optional B3
+#      (nexus-20onx fix round): when NX_EXPECTED_OWNERLESS_WRITE_MODE is set,
+#      /v1/status through the edge must report that ownerless_write_mode. The old
 #      authenticated-/health probe is retired: its only consumer,
 #      guided_upgrade's readiness gate, was deleted at RDR-155 P4b, and the
 #      static service_token it used was revoked 2026-09-28.
@@ -103,12 +105,29 @@ export NX_ALLOW_PROD_WRITE="cloud-client-path-gate: deliberate post-deploy MVV w
 # it exists to close (feedback_gates_scripted_not_ambient).
 #
 # Usage: tests/e2e/cloud-client-path-gate.sh
+#   NX_EXPECTED_OWNERLESS_WRITE_MODE=log-only tests/e2e/cloud-client-path-gate.sh
+#       also asserts the LIVE engine's ownerless-write refusal mode (RDR-223
+#       Phase 3 Step 2; nexus-z0o2p.24): `log-only` after the first deploy,
+#       `enforce` after the flip redeploy. Nothing else in this repo reads the
+#       live mode, and conexus wires the knob: a mis-wired parameter would
+#       enforce on the first deploy and refuse every legacy write from the
+#       hosts. The engine-release skill's Step 6.1 sets it on every cut that
+#       carries the refusal. Unset, an engine that reports a mode FAILS the
+#       gate (a live mode nobody asserted); an engine that reports none
+#       (before P3.2) reports B3 NOT RUN and the final sentinel line says so.
 # Exit 0 == CLOUD CLIENT-PATH GATE PASSED (literal sentinel on last line).
 # Exit 2 == not applicable (not a cloud-mode box). Any other == FAILED.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$REPO_ROOT"
+
+# nexus-20onx fix round: the optional live-mode assertion (leg B3).
+NX_EXPECTED_OWNERLESS_WRITE_MODE="${NX_EXPECTED_OWNERLESS_WRITE_MODE:-}"
+case "$NX_EXPECTED_OWNERLESS_WRITE_MODE" in
+    ""|log-only|enforce) ;;
+    *) echo "FATAL: NX_EXPECTED_OWNERLESS_WRITE_MODE=$NX_EXPECTED_OWNERLESS_WRITE_MODE is not one of: (unset), log-only, enforce." >&2; exit 2 ;;
+esac
 
 # Legs accumulate violations instead of fail-fast: a red run is relay
 # evidence, and "which legs are broken" is the payload.
@@ -138,6 +157,61 @@ _fail() { echo "CLOUD CLIENT-PATH GATE FAILED: $*" >&2; exit 1; }
 LEGS_RAN=0
 EXPECTED_LEGS=8
 _leg_enter() { LEGS_RAN=$((LEGS_RAN + 1)); echo "[$1] $2"; }
+
+# Leg B3's compare logic (nexus-20onx; nexus-i1oh4 doctrine applied to it in the
+# round-3 fix): the live engine's ownerless-write mode read from /v1/status.
+# Takes the status body and the expected mode (may be empty); prints one line and
+# returns 0 = asserted and holds, 1 = violation, 3 = not run. A sub-check is not
+# a leg, so LEGS_RAN cannot see it; this function is why an unset
+# NX_EXPECTED_OWNERLESS_WRITE_MODE can never read as a clean pass:
+#   - body unreadable (no JSON object with embedding_mode: curl failure, edge
+#     401/403/502/WAF page), expected set or not -> 1 (never "no mode")
+#   - expected set, observed equal            -> 0
+#   - expected set, observed other or absent  -> 1
+#   - expected UNSET, engine reports a mode   -> 1 (a mode is live and nobody
+#     asserted it: the dangerous mis-wire is a valid `enforce`, which boots fine)
+#   - expected UNSET, engine reports no mode  -> 3, and the final sentinel line
+#     says so (B3_NOT_RUN); this is an engine that predates RDR-223 P3.2, or an
+#     edge that strips the field, and the two cannot be told apart from here.
+# The test (tests/e2e/cloud_client_path_gate_b3_test.sh) sources this function
+# from the real script.
+_ownerless_mode_verdict() {
+    local body="$1" expected="${2:-}" observed
+    # A served /v1/status always carries embedding_mode (StatusHandler writes it
+    # first, on every engine that has the endpoint), so a body without it is not
+    # a status body: a curl failure, an edge 401/403/502 page, a WAF block.
+    # That reads as UNREADABLE, never as "an engine with no mode" (nexus-20onx
+    # round 4, critic S4).
+    observed="$(printf '%s' "$body" | python3 -c "
+import json, sys
+try:
+    doc = json.load(sys.stdin)
+    if not isinstance(doc, dict) or 'embedding_mode' not in doc:
+        raise ValueError('not a status body')
+    print(doc.get('ownerless_write_mode') or '')
+except Exception:
+    print('@@UNREADABLE@@')
+")"
+    if [ "$observed" = "@@UNREADABLE@@" ]; then
+        echo "B3: /v1/status through the edge returned no readable status body (a curl failure, or an edge 401/403/502/WAF page), so the live ownerless-write mode could not be read; this is a failure whether or not NX_EXPECTED_OWNERLESS_WRITE_MODE is set"
+        return 1
+    fi
+    if [ -n "$expected" ]; then
+        if [ "$observed" = "$expected" ]; then
+            echo "ok [B3]: /v1/status reports ownerless_write_mode=$observed (expected $expected)"
+            return 0
+        fi
+        echo "B3: /v1/status reports ownerless_write_mode='${observed:-(absent)}', expected '$expected' — the deployed engine lacks the refusal, or conexus wired NX_OWNERLESS_WRITE_MODE to another value (a mis-wired first deploy enforces and refuses every legacy write)"
+        return 1
+    fi
+    if [ -n "$observed" ]; then
+        echo "B3: /v1/status reports ownerless_write_mode='$observed' but NX_EXPECTED_OWNERLESS_WRITE_MODE is unset, so the live mode was not asserted — re-run with NX_EXPECTED_OWNERLESS_WRITE_MODE=log-only (after the first deploy) or enforce (after the flip)"
+        return 1
+    fi
+    echo "NOT RUN [B3]: NX_EXPECTED_OWNERLESS_WRITE_MODE is unset and /v1/status reports no ownerless_write_mode (an engine before RDR-223 P3.2, or an edge that strips the field), so the live mode was not asserted"
+    return 3
+}
+B3_NOT_RUN=0
 
 # Every python whose STDOUT is captured below configures cli logging first:
 # structlog's unconfigured default writes to stdout, and a log line there
@@ -276,6 +350,16 @@ else
     else
         _leg_fail "B2: /v1/catalog/collections/list returned HTTP $V1_STATUS with the client's bearer (pinned: 200) — every cloud client's reads and writes go through this"
     fi
+    # B3 (nexus-20onx fix round): the live engine's ownerless-write mode, read
+    # from /v1/status through the edge with the same bearer. Read-only.
+    STATUS_BODY="$(curl -sS -m 20 -H @"$BEARER_FILE" "$SERVICE_URL/v1/status" || echo "")"
+    B3_RC=0
+    B3_LINE="$(_ownerless_mode_verdict "$STATUS_BODY" "$NX_EXPECTED_OWNERLESS_WRITE_MODE")" || B3_RC=$?
+    case "$B3_RC" in
+        0) echo "  $B3_LINE" ;;
+        3) echo "  $B3_LINE"; B3_NOT_RUN=1 ;;
+        *) _leg_fail "$B3_LINE" ;;
+    esac
 fi
 rm -f "$BEARER_FILE"
 
@@ -770,4 +854,8 @@ fi
 if [ "$VIOLATIONS" -gt 0 ]; then
     _fail "$VIOLATIONS leg(s) violated — the public edge does not deliver the engine's pinned client contract"
 fi
-echo "CLOUD CLIENT-PATH GATE PASSED — legs=$LEGS_RAN/$EXPECTED_LEGS violations=0"
+if [ "$B3_NOT_RUN" = 1 ]; then
+    echo "CLOUD CLIENT-PATH GATE PASSED — legs=$LEGS_RAN/$EXPECTED_LEGS violations=0 (ownerless-write mode NOT asserted: B3 not run)"
+else
+    echo "CLOUD CLIENT-PATH GATE PASSED — legs=$LEGS_RAN/$EXPECTED_LEGS violations=0"
+fi

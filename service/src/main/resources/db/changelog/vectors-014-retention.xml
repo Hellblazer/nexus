@@ -46,8 +46,9 @@
 
     Re-index / retention-transition semantics (RDR-169 Technical Design):
     a full -> reference-only transition is PROHIBITED at the application
-    layer (PgVectorRepository#upsertReferenceOnlyChunk's pre-INSERT guard
-    SELECT, nexus-xvb6b). The GUARD is still application-level (a DB CHECK
+    layer (the pre-INSERT guard SELECT of the reference-only writer, nexus-xvb6b,
+    since removed: nexus-z0o2p.36 deleted that writer, so no engine path writes
+    such a row today). The GUARD is still application-level (a DB CHECK
     cannot express "reject this specific transition, but allow the row to
     already be in the target state") - but the STATIC invariant the guard
     relies on, "chunk_text IS NULL iff retention='reference-only'", IS now
@@ -62,7 +63,7 @@
     incrementally mid-UPDATE, and neither upsertChunksInternal's ordinary
     DO UPDATE (always pairs non-null chunk_text with retention='full',
     fix round 1's own added `.set(ch.retention(), "full")`) nor
-    upsertReferenceOnlyChunk's DO UPDATE (never touches chunk_text, always
+    the removed reference-only writer's DO UPDATE (never touched chunk_text, always
     binds retention='reference-only') ever asks Postgres to accept a row
     where the two columns disagree, transiently or otherwise). The ONE-WAY
     full->reference-only prohibition itself remains app-level, because the

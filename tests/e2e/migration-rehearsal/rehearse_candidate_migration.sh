@@ -10,9 +10,12 @@
 # populated rows, RDR-191) reached the tag gate with zero pre-tag
 # rehearsal against a populated store. This leg closes that gap.
 #
-#   Stage 1  uv tool install the WORKING-TREE wheel (the client under
-#            test throughout — this leg tests the ENGINE delta, not a
-#            client-upgrade axis; no old release is ever installed).
+#   Stage 1  uv tool install the RELEASED conexus ($SEED_RELEASE, real PyPI)
+#            that pins the floor engine — the client production was seeded
+#            with (nexus-z0o2p.42). A working-tree client newer than the
+#            floor REFUSES it (EngineOlderThanClientError on every write), so
+#            seeding through the working tree measured nothing; the
+#            working-tree wheel arrives at Stage 4 instead.
 #   Stage 2  install-binary the PUBLISHED FLOOR engine for real, provision
 #            + serve it.
 #   Stage 3  POPULATE through the floor engine — the leg's soul: store
@@ -29,7 +32,10 @@
 #            RLS-guarded table instead of an empty one. Seeded under two
 #            tenants when the floor supports minting a second one.
 #   Stage 4  stop the service (PG stays up — nx daemon service stop
-#            without --with-pg); hand-swap the LOCALLY-BUILT candidate
+#            without --with-pg); UPGRADE THE CLIENT to the working-tree
+#            wheel (the real user upgrade path: seeded under the release,
+#            then client + engine move forward together — every Stage 5
+#            assert runs with the working-tree client); hand-swap the LOCALLY-BUILT candidate
 #            binary in at the well-known location; rewrite ONLY the
 #            provenance sidecar's sha256 field to match the candidate's
 #            real bytes, keeping tag/version pinned at the floor. This
@@ -44,7 +50,36 @@
 #            the leg without saying so.
 #   Stage 5  start; assert healthy — the candidate's FULL Liquibase pass
 #            over the populated store. Assert the changeset delta, EXACT
-#            row invariants, and that reads/writes/search still serve.
+#            row invariants, and that reads/writes/search still serve. Read
+#            the pending upgrade rungs BEFORE `nx upgrade` and assert they are
+#            only rungs the seed release did not know (an `nx upgrade` repairs
+#            rung state, so a candidate boot that regressed state a rung
+#            probes would otherwise be repaired before anything looked); then
+#            run `nx upgrade` with the working-tree client (the user's verb
+#            after a package move; nexus-z0o2p.42) and assert nx doctor clean.
+#
+# STAGE 3 CONTRACT (nexus-z0o2p.42 round 2): every Stage 3 heredoc and `nx`
+# call runs against the SEED (released) client, and every Stage 5 one against
+# the working-tree client. A Stage 3 heredoc may therefore use only surface
+# the seed release also has (HttpTupleStore._post, the tuple/store CLI flags);
+# a private-API refactor between the seed and the tree breaks Stage 3 and
+# nothing else says so.
+#
+# COVERAGE NOTE (nexus-z0o2p.42): the population Stage 3 writes is ONE client
+# generation's output (the seed release) through ONE engine generation (the
+# floor). It is closer to production than a working-tree-seeded store, but it is
+# not what a production store holds: that is the cumulative output of many
+# client versions through many engines, rewritten by every earlier changeset,
+# with an aged databasechangelog. What it does not cover: earlier-era chunk
+# metadata shapes, duplicate DATABASECHANGELOG rows, and any state older than
+# the seed release (the 13 duplicate-row shape and the shared-chash census bug
+# of nexus-wbfpw.60 were both found only on a fork of production). Stage 3a
+# seeds one chash shared by two documents because that shape escaped this leg
+# once. Every post-walk assert reads rows by SQL or through the working-tree
+# client after the upgrade; none depends on the seeding client being the
+# working tree. This leg therefore also exercises that a store the release wrote
+# is read, searched and written by the working-tree client against the
+# candidate.
 #
 # COVERAGE (substantive-critic finding, 2026-08-14, T2
 # nexus/critique-nexus-z0ylb-candidate-migration-rehearsal-2026-08-14
@@ -60,7 +95,7 @@
 # checksum/row-count integrity (Liquibase's own checksum re-validation,
 # plus this leg's EXACT row-invariant asserts).
 #
-# It structurally CANNOT catch four classes, by construction of what this
+# It structurally CANNOT catch five classes, by construction of what this
 # leg seeds:
 #   (a) CROSS-SHARD PK COLLISION (the vectors-004/taxonomy-007-style
 #       "cross-shard (tenant_id, collection, ...) collision" DO $$ guard
@@ -88,6 +123,13 @@
 #       tuples-004's consumed-body UPDATE scan the whole table, so their
 #       lock duration at real volume is measured by the pre-deploy walk
 #       against a PITR fork of production, not here.
+#   (e) STATE OLDER THAN, OR SHAPED BY GENERATIONS OTHER THAN, THE SEED
+#       RELEASE (nexus-z0o2p.42 round 2): one client generation through one
+#       engine generation, about 190 rows. No earlier-era chunk metadata
+#       shapes, no duplicate DATABASECHANGELOG rows, nothing a changeset older
+#       than the floor rewrote. The shared-chash shape (Stage 3a) is the one
+#       production shape this leg seeds on purpose; the rest is the PITR-fork
+#       walk's to find.
 #
 # Row invariants captured span T3 (chunks, catalog manifest/documents,
 # taxonomy centroids/assignments) — the chunk-migration surface this leg
@@ -103,7 +145,7 @@
 # consumed-body cleanup would apply against an EMPTY table on every
 # rehearsal — vacuous coverage of exactly the risk those changesets exist
 # to retire. Stage 3h seeds mailbox rows in every claim state, an
-# over-4096-byte body (written past the working-tree client's OWN mirrored
+# over-4096-byte body (written past the seeding (released) client's OWN mirrored
 # 4096-byte pre-check, when the FLOOR predates the cap and enforces nothing;
 # a floor from engine-service-v0.1.118 on carries tuples-003 and refuses it
 # with TooLarge, which the leg asserts instead, skipping the over-cap asserts
@@ -160,17 +202,40 @@ test -x "$SVC_NATIVE_DIR/nexus-service" && ok "candidate native binary staged at
 
 WHEEL="$(ls "$HOME"/worktree-wheel/conexus-*.whl 2>/dev/null | head -1)"
 [ -n "$WHEEL" ] || { bad "no worktree wheel in $HOME/worktree-wheel/"; say "ABORT"; exit 1; }
+SEED_RELEASE="${SEED_RELEASE:?SEED_RELEASE must be set (the released conexus that pins the floor engine, e.g. 7.67.0; run.sh derives it)}"
 
-# ── Stage 1: the working-tree wheel (the ONLY client this leg ever runs) ──
-say "Stage 1 — uv tool install the working-tree wheel"
-if uv tool install --python 3.12 "$WHEEL" 2>&1 | tail -4 | sed 's/^/       /'; then
-  ok "tool-installed the working-tree wheel"
+# ── Stage 1: the RELEASED client that pins the floor (seeds Stages 2-3) ───
+say "Stage 1 — uv tool install conexus==$SEED_RELEASE (real PyPI; the release that pins $FLOOR_TAG)"
+if uv tool install --python 3.12 "conexus==$SEED_RELEASE" 2>&1 | tail -4 | sed 's/^/       /'; then
+  ok "tool-installed the released conexus==$SEED_RELEASE"
 else
-  bad "uv tool install $WHEEL failed"; say "ABORT"; exit 1
+  bad "uv tool install conexus==$SEED_RELEASE failed"; say "ABORT"; exit 1
 fi
 nx --version >/dev/null 2>&1 && ok "nx installed ($(nx --version 2>&1))" || { bad "nx --version failed"; say "ABORT"; exit 1; }
+SEED_VER_OUT="$(nx --version 2>&1)"
+SEED_CLIENT_VER=""
+[[ "$SEED_VER_OUT" =~ ([0-9]+\.[0-9]+\.[0-9]+) ]] && SEED_CLIENT_VER="${BASH_REMATCH[1]}"
+[ "$SEED_CLIENT_VER" = "$SEED_RELEASE" ] && ok "nx --version reports $SEED_CLIENT_VER (the seeding client is the released $SEED_RELEASE, not the working tree)" \
+  || bad "nx --version reports '${SEED_CLIENT_VER:-?}', expected the seed release $SEED_RELEASE"
 TOOLPY="$HOME/.local/share/uv/tools/conexus/bin/python"
 [ -x "$TOOLPY" ] || { bad "no python at $TOOLPY"; say "ABORT"; exit 1; }
+# The upgrade-ladder rungs the SEED release knows, read from its own registry.
+# Stage 5 asserts that every rung pending before `nx upgrade` is one the seed
+# did not know. A release without the module (or without default_registry)
+# knows none, so the set is empty and every tree rung counts as new.
+_ladder_rungs() {
+  "$TOOLPY" - <<'PYEOF' 2>/dev/null | sed -n 's/^RUNG://p' | sort -u
+try:
+    from nexus.upgrade_ladder import registry as r
+    names = [rung.name for rung in r.default_registry()]
+except Exception:
+    names = []
+for n in names:
+    print("RUNG:" + n)
+PYEOF
+}
+SEED_RUNGS="$(_ladder_rungs)"
+note "upgrade rungs the seed release v$SEED_RELEASE knows: ${SEED_RUNGS:-<none>}"
 
 # ── Stage 2: the PUBLISHED FLOOR engine — install for real, provision ────
 say "Stage 2a — install-binary the PUBLISHED FLOOR engine ($FLOOR_TAG)"
@@ -293,6 +358,26 @@ for i in $(seq 1 "$SEED_N"); do
     || bad "nx store put failed for marker note $i"
 done
 ok "seeded $SEED_N marker notes"
+
+# One chunk named by TWO documents' manifests (identical text under two titles
+# collapses to one T3 row by design; the manifest keeps both). This is the shape
+# behind nexus-wbfpw.60: the census's scope_chunk_total counted chunk x
+# own-manifest-row join rows, so a census read on engines <= 0.1.142 over-reports
+# here. Asserted non-vacuous right after seeding, and read back after the walk.
+SHARED_MARKER="candmigsharedchashbody"
+for t in a b; do
+  printf 'candidate-migration rehearsal shared-chash note %s' "$SHARED_MARKER" \
+    | nx store put - --title "candmig-shared-$t" --collection knowledge__candmig >/dev/null 2>&1 \
+    || bad "nx store put failed for shared-chash note $t"
+done
+SHARED_COLLECTION="$(diag_sql "SELECT collection FROM nexus.chunks WHERE chunk_text LIKE '%${SHARED_MARKER}%' LIMIT 1")"
+SHARED_CHUNK_ROWS="$(diag_sql "SELECT count(*) FROM nexus.chunks WHERE chunk_text LIKE '%${SHARED_MARKER}%'")"
+SHARED_MANIFEST_ROWS="$(diag_sql "SELECT count(*) FROM nexus.catalog_document_chunks WHERE chash IN (SELECT chash FROM nexus.chunks WHERE chunk_text LIKE '%${SHARED_MARKER}%')")"
+if [ "$SHARED_CHUNK_ROWS" = 1 ] && [ "$SHARED_MANIFEST_ROWS" = 2 ] && [ -n "$SHARED_COLLECTION" ]; then
+  ok "shared-chash shape seeded: 1 chunk row named by 2 manifest rows in $SHARED_COLLECTION"
+else
+  bad "shared-chash shape NOT seeded (chunk rows='$SHARED_CHUNK_ROWS', manifest rows='$SHARED_MANIFEST_ROWS', collection='$SHARED_COLLECTION'; expected 1, 2) — the census scope assert below would be vacuous"
+fi
 
 say "Stage 3b — index 2 docs-shaped markdown files"
 DOC1=/tmp/candmig-doc-1.md
@@ -623,7 +708,7 @@ _tuple_seed_tenant() {
   fi
 
   # at-cap body: exactly 4096 UTF-8 bytes, at the GLOBAL limit -- accepted
-  # by both the working-tree client and (once tuples-003 lands) the
+  # by both the seeding client and (once tuples-003 lands) the
   # candidate's own DB constraint. Left unclaimed; must survive untouched.
   if OUT=$("${NXTOK[@]}" nx tuple out "mailbox/candmig-atcap-$label" \
       --key to="candmig-atcap-$label" --dim from="candmig-sender-$label" \
@@ -633,7 +718,7 @@ _tuple_seed_tenant() {
     bad "seeding the at-cap mailbox row failed ($label): $OUT"
   fi
 
-  # over-cap body: over the working-tree client's OWN 4096-byte pre-check
+  # over-cap body: over the seeding (released) client's OWN 4096-byte pre-check
   # (nexus-r7xao mirrors the engine-side limit client-side), so written by
   # calling HttpTupleStore._post() directly -- past out()'s pre-checks,
   # never past the transport/auth machinery those sit in front of -- the
@@ -664,7 +749,7 @@ PYEOF
   ); then
     if [[ "$OVER_OUT" == *"RESULT:ID="* ]]; then
       OVERCAP_SEEDED[$label]=1
-      ok "seeded the over-cap (5000-byte body) mailbox row past the working-tree client's own pre-check, straight to the floor ($label)"
+      ok "seeded the over-cap (5000-byte body) mailbox row past the seeding client's own pre-check, straight to the floor ($label)"
     else
       bad "seeding the over-cap mailbox row did not report an id ($label): $OVER_OUT"
     fi
@@ -758,6 +843,21 @@ for TUPLE_LABEL in "${TUPLE_TENANT_IDS[@]}"; do
   fi
 done
 
+# ── Stage 3 close: the engine the store was populated through is the floor ──
+# The seed client may pin an OLDER engine than the floor (a paired client
+# release: no published release pins the floor yet). Stage 2a installed the
+# floor explicitly; a seed client that converged the engine to ITS pin during
+# population would make this leg seed through the wrong engine, so read the
+# sidecar and the running /version again before the swap.
+say "Stage 3 close — the populated engine is still the floor $FLOOR_TAG"
+SEED_SIDECAR="$SVC_WELL_KNOWN_DIR/nexus-service.meta.json"
+SEED_SIDECAR_VER="$(python3 -c "import json;print(json.load(open('$SEED_SIDECAR')).get('version',''))" 2>/dev/null)"
+[ "$SEED_SIDECAR_VER" = "$FLOOR_VERSION" ] && ok "provenance sidecar still names the floor ($SEED_SIDECAR_VER) after population" \
+  || bad "provenance sidecar names '${SEED_SIDECAR_VER:-?}' after population, expected the floor $FLOOR_VERSION (the seed client converged the engine?)"
+RV_POP="$(_release_version)"
+[ "$RV_POP" = "$FLOOR_VERSION" ] && ok "/version release_version=$RV_POP after population" \
+  || bad "/version release_version='${RV_POP:-?}' after population, expected the floor $FLOOR_VERSION"
+
 # ── Stage 4: stop; hand-swap the CANDIDATE binary; harness bookkeeping ───
 say "Stage 4 — nx daemon service stop (PG stays up: no --with-pg)"
 if nx daemon service stop 2>&1 | tail -6 | sed 's/^/       /'; then
@@ -765,6 +865,50 @@ if nx daemon service stop 2>&1 | tail -6 | sed 's/^/       /'; then
 else
   bad "nx daemon service stop failed"; say "ABORT"; exit 1
 fi
+
+say "Stage 4 — upgrade the client: uv tool install --reinstall <working-tree wheel> over conexus==$SEED_RELEASE"
+# The real user upgrade path (release -> develop client) at the moment the
+# engine moves. The engine is stopped, so nothing talks to it during the swap
+# of packages. Same TOOLPY path afterwards; the proof that the WORKING-TREE
+# code is what is installed (the wheel can carry the same version string as
+# the release it replaces, so nx --version alone cannot tell) is a byte compare
+# of every .py in the wheel against the installed package.
+if uv tool install --python 3.12 --reinstall "$WHEEL" 2>&1 | tail -4 | sed 's/^/       /'; then
+  ok "client upgraded to the working-tree wheel"
+else
+  bad "uv tool install --reinstall $WHEEL failed"; say "ABORT"; exit 1
+fi
+WHEEL_CMP="$("$TOOLPY" - "$WHEEL" <<'PYEOF' 2>&1
+import hashlib, importlib.util, pathlib, sys, zipfile
+
+wheel = sys.argv[1]
+spec = importlib.util.find_spec("nexus")
+root = pathlib.Path(spec.submodule_search_locations[0]).parent
+same = diff = missing = 0
+with zipfile.ZipFile(wheel) as z:
+    for name in z.namelist():
+        if not name.startswith("nexus/") or not name.endswith(".py"):
+            continue
+        p = root / name
+        if not p.is_file():
+            missing += 1
+        elif hashlib.sha256(p.read_bytes()).digest() == hashlib.sha256(z.read(name)).digest():
+            same += 1
+        else:
+            diff += 1
+print(f"RESULT:same={same} different={diff} missing={missing}")
+PYEOF
+)"
+note "$WHEEL_CMP"
+if [[ "$WHEEL_CMP" == *"RESULT:same="* && "$WHEEL_CMP" == *"different=0 missing=0"* && "$WHEEL_CMP" != *"same=0 "* ]]; then
+  ok "every nexus/*.py in the working-tree wheel is byte-identical to the installed package (the upgrade took)"
+else
+  bad "the installed package is not the working-tree wheel: $WHEEL_CMP"; say "ABORT"; exit 1
+fi
+TREE_RUNGS="$(_ladder_rungs)"
+# Rungs the working-tree client carries that the seed release did not know.
+NEW_RUNGS="$(comm -13 <(printf '%s\n' "$SEED_RUNGS") <(printf '%s\n' "$TREE_RUNGS") | sed '/^$/d')"
+note "upgrade rungs in the working-tree client: ${TREE_RUNGS:-<none>}; new since the seed: ${NEW_RUNGS:-<none>}"
 
 say "Stage 4 — hand-swap the locally-built CANDIDATE binary into the well-known location"
 CAND_SHA="$(sha256sum "$SVC_NATIVE_DIR/nexus-service" | awk '{print $1}')"
@@ -983,6 +1127,86 @@ else
   bad "nx store put FAILED through the candidate"
 fi
 
+say "Assert — nx upgrade: the user's one verb after a client upgrade, run with the working-tree client (nexus-z0o2p.42)"
+# The store was seeded by the RELEASED client, so the working-tree client's
+# upgrade ladder carries rungs the seeding client never recorded (measured:
+# rdr192-manifest-backfill, "the census runs on `nx upgrade`"). Running `nx
+# upgrade` is exactly what a user does after moving the package, so it is part
+# of the journey, and every row-invariant assert above has already read the
+# store BEFORE it. It must not re-acquire the floor engine over the candidate:
+# the binary sha and the /version stamp are re-checked right after.
+# Pending rungs BEFORE the upgrade, read by the ladder's own detect() sweep (the
+# same read `nx doctor` renders). `nx upgrade` repairs rung state, so a rung the
+# SEED knew that reads pending here means the candidate boot regressed state it
+# probes, and the post-upgrade doctor assert below could never see it.
+PENDING_PRE_OUT="$("$TOOLPY" - <<'PYEOF' 2>&1
+try:
+    from nexus.upgrade_ladder import registry as r
+    from nexus.upgrade_ladder.runner import pending_rungs
+    for name, status in pending_rungs(r.default_registry()):
+        if status.pending:
+            print("PENDING:" + name)
+    print("READ-OK")
+except Exception as exc:
+    print("READ-FAILED:" + repr(exc))
+PYEOF
+)"
+if [[ "$PENDING_PRE_OUT" == *"READ-OK"* ]]; then
+  PENDING_PRE="$(printf '%s\n' "$PENDING_PRE_OUT" | sed -n 's/^PENDING://p' | sort -u)"
+  note "pending upgrade rungs before nx upgrade: ${PENDING_PRE:-<none>}"
+  UNEXPECTED_PENDING="$(comm -23 <(printf '%s\n' "$PENDING_PRE") <(printf '%s\n' "$NEW_RUNGS") | sed '/^$/d')"
+  if [ -z "$UNEXPECTED_PENDING" ]; then
+    ok "every rung pending before nx upgrade is one the seed release did not know (${PENDING_PRE:-none pending})"
+  else
+    bad "rung(s) the seed release knew read PENDING after the candidate boot, before nx upgrade (the boot regressed state they probe): $(printf '%s' "$UNEXPECTED_PENDING" | tr '\n' ' ')"
+  fi
+else
+  printf '%s\n' "$PENDING_PRE_OUT" | tail -5 | sed 's/^/       /'
+  bad "could not read the pending upgrade rungs before nx upgrade"
+fi
+
+UPG_OUT="$(nx upgrade 2>&1 < /dev/null)"; UPG_RC=$?
+printf '%s\n' "$UPG_OUT" | tail -12 | sed 's/^/       /'
+[ "$UPG_RC" = 0 ] && ok "nx upgrade exited 0 over the candidate-booted store" || bad "nx upgrade exited $UPG_RC"
+UPG_SHA="$(sha256sum "$SVC_WELL_KNOWN_DIR/nexus-service" | awk '{print $1}')"
+[ "$UPG_SHA" = "$CAND_SHA" ] && ok "nx upgrade left the swapped-in candidate binary in place" \
+  || bad "nx upgrade replaced the candidate binary (sha $UPG_SHA, expected $CAND_SHA)"
+UPG_RV="$(_release_version)"
+[ "$UPG_RV" = "$FLOOR_VERSION" ] && ok "/version release_version=$UPG_RV after nx upgrade" \
+  || bad "/version release_version=$UPG_RV after nx upgrade, expected $FLOOR_VERSION"
+
+say "Assert — RDR-192 backfill rung recorded, and the census scope counts chunks (nexus-wbfpw.60)"
+# The rung is the reaper's gate (Rdr192BackfillGate.requireComplete) and now ran
+# against the candidate. Its completion record is read straight from the ledger
+# table, not inferred from the doctor row, and the census it gates on is read
+# through the working-tree client: scope_chunk_total must equal the SQL chunk
+# count of the collection, which the shared-chash note seeded in Stage 3a makes
+# a non-vacuous comparison (the old join counted that chunk twice).
+if [[ $'\n'"$TREE_RUNGS"$'\n' == *$'\n'rdr192-manifest-backfill$'\n'* ]]; then
+  REC_N="$(diag_sql "SELECT count(*) FROM nexus.ladder_completions WHERE rung_name='rdr192-manifest-backfill'")"
+  if [ "${REC_N:-0}" -ge 1 ] 2>/dev/null; then
+    ok "rdr192-manifest-backfill completion record present in nexus.ladder_completions ($REC_N row(s))"
+  else
+    bad "no rdr192-manifest-backfill completion record after nx upgrade (rows='$REC_N') — the reaper gate would refuse"
+  fi
+else
+  bad "the working-tree client's ladder registry does not carry rdr192-manifest-backfill ($TREE_RUNGS) — the reaper-gate assert has nothing to read; update this leg"
+fi
+CENSUS_OUT="$(nx t3 census-manifest-less -c "$SHARED_COLLECTION" --json 2>/dev/null < /dev/null)"; CENSUS_RC=$?
+CENSUS_SCOPE="$(printf '%s' "$CENSUS_OUT" | python3 -c 'import sys,json
+try:
+    d = json.loads(sys.stdin.read())
+    print(d["collections"][0]["scope_chunk_total"])
+except Exception:
+    print("")' 2>/dev/null)"
+SQL_COLL_CHUNKS="$(diag_sql "SELECT count(*) FROM nexus.chunks WHERE collection='${SHARED_COLLECTION}'")"
+note "census rc=$CENSUS_RC scope_chunk_total=${CENSUS_SCOPE:-?} sql_chunks=$SQL_COLL_CHUNKS in $SHARED_COLLECTION"
+if [ -n "$CENSUS_SCOPE" ] && [ "$CENSUS_SCOPE" = "$SQL_COLL_CHUNKS" ]; then
+  ok "census scope_chunk_total=$CENSUS_SCOPE equals the SQL chunk count (a chunk named by $SHARED_MANIFEST_ROWS manifest rows counts once)"
+else
+  bad "census scope_chunk_total='${CENSUS_SCOPE:-unreadable}' (rc $CENSUS_RC) does not equal the SQL chunk count '$SQL_COLL_CHUNKS' in $SHARED_COLLECTION"
+fi
+
 say "Assert — nx doctor: clean, no pending rungs, no engine-convergence-pending"
 DOC_OUT="$(nx doctor 2>&1 < /dev/null)"
 printf '%s\n' "$DOC_OUT" | grep -iE 'upgrade ladder|engine convergence' | sed 's/^/       /' || true
@@ -1075,6 +1299,36 @@ if [ "$MVV_CLAUSES_RUN" -eq 3 ]; then
   ok "MVV non-vacuity — exactly 3 clause(s) executed"
 else
   bad "MVV non-vacuity — expected exactly 3 clauses executed, counted $MVV_CLAUSES_RUN — a run in which fewer clauses executed is a FAILURE, not a pass"
+fi
+
+# ── Engine identity + ownerless-write refusals (nexus-0kmat) ────────────────
+# This journey is the heaviest writer the cut battery runs against the candidate
+# NATIVE binary (verb matrix, incremental index, concurrent load, native-smoke).
+# Read, while the engine is still up, which engine served it and whether it
+# refused or would refuse an ownerless chunk write: a background or hook writer
+# fails only in the engine log. The candidate is the staged binary; the module is
+# the same stdlib one the host gates run (staged into lib/ by run.sh). Outside cut
+# mode the two lines print and never fail the journey; in cut mode (NX_CUT_MODE=1,
+# forwarded by run.sh) a missing module is itself a failure.
+say "Engine — candidate identity + ownerless-write refusals (nexus-0kmat)"
+# The lease engine's declared control count: this journey sends the engine no deliberate
+# ownerless write.
+ENGINE_CONTROLS=0
+ENGINE_READ_PY="$HOME/lib/candidate_engine.py"
+if [ -f "$ENGINE_READ_PY" ]; then
+  for engine_cmd in identity refusals; do
+    if NX_CANDIDATE_ENGINE="$SVC_NATIVE_DIR/nexus-service" python3 "$ENGINE_READ_PY" "$engine_cmd" "$HOME/.config/nexus" --label candidate-migration --controls "$ENGINE_CONTROLS"; then
+      ok "engine $engine_cmd"
+    elif [ "${NX_CUT_MODE:-0}" = 1 ]; then
+      bad "engine $engine_cmd failed in cut mode (see CANDIDATE ENGINE CHECK FAILED above)"
+    else
+      note "engine $engine_cmd could not be read (not a cut-mode run, not a failure)"
+    fi
+  done
+elif [ "${NX_CUT_MODE:-0}" = 1 ]; then
+  bad "cut mode, but $ENGINE_READ_PY is not in the image: the engine's ownerless-write counters and log were not read"
+else
+  note "candidate_engine.py is not in the image; engine read skipped (not a cut-mode run)"
 fi
 
 say "RESULT"

@@ -6,6 +6,15 @@
 #   bash scripts/build-gate-jar_test.sh
 set -u -o pipefail
 
+# The suite builds its own fake repo and assumes the lease root is that repo's
+# own. An inherited NX_BUILD_LEASE_ROOT (CI's lease step exports it, and so does
+# the documented hand-run setup on a shared host) would point build-gate-jar.sh's
+# lease at the shared root, where a live peer run may hold it: the suite then
+# waits on that holder instead of finishing (nexus-mntbl). Scrubbed here, like the
+# suites that already do, and pinned by test_shell_suite_wiring.py's
+# TestSuitesIgnoreAnInheritedLeaseRoot.
+unset NX_BUILD_LEASE_ROOT NX_SUITE_LEASE_WAIT NX_SUITE_LEASE_HELD_BY
+
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/build_gate_jar_test.XXXXXX")"
 trap 'rm -rf "$WORKDIR"' EXIT

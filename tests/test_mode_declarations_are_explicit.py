@@ -687,7 +687,9 @@ _MODE_LINT_EXCLUDE_FILES_CEILING = 1
 # (non-taxonomy collections get their ids rehashed on import, breaking
 # this test's own fetch-by-original-id assertions). Full per-entry
 # rationale is beside each entry in conftest.py.
-_MODE_LINT_EXCLUDE_NODEIDS_CEILING = 65
+# 65 -> 64 (nexus-z0o2p.25, RDR-223 P3.3): the TestIsSameModelPassthrough entry
+# was deleted with db/reconcile's _is_same_model_passthrough and its tests.
+_MODE_LINT_EXCLUDE_NODEIDS_CEILING = 64
 
 
 def test_mode_lint_exclude_files_ratchet() -> None:
@@ -1418,7 +1420,7 @@ def test_mode_declarations_census_skips_loud_under_real_pytest_split_shard() -> 
             # removes. Redirected into the private temp dir with everything
             # else, so its presence is proof of an attempt that survives the
             # attempt being swept.
-            boot_locks = probe_tmp / "nexus_t2_substrate_boot_locks"
+            boot_locks = _substrate._boot_semaphore_dir(probe_tmp)
             assert not boot_locks.exists(), (
                 f"group {group}/4: the nested invocation created {boot_locks}, "
                 f"so it ATTEMPTED an engine boot despite "
@@ -1519,7 +1521,7 @@ def test_mode_declarations_census_executes_for_real_under_ci_env_shape() -> None
 def test_the_boot_lock_dir_resolves_under_the_running_process_tmpdir() -> None:
     """The resolution half of the split-shard probe's boot-lock guard (nexus-61vos).
 
-    The probe looks for ``nexus_t2_substrate_boot_locks`` inside the private TMPDIR it
+    The probe looks for ``nexus_t2_substrate_boot_locks-<uid>`` inside the private TMPDIR it
     handed the nested run. That is only a guard if a boot attempt actually puts it
     there, which is a claim about ``_BOOT_SEMAPHORE_DIR`` -- and that constant is
     evaluated at IMPORT time from ``tempfile.gettempdir()``, so no in-process TMPDIR
@@ -1564,7 +1566,7 @@ def test_the_boot_lock_dir_resolves_under_the_running_process_tmpdir() -> None:
             f"the boot-slot probe did not run:\n{probe.stdout}\n{probe.stderr}"
         )
         resolved = pathlib.Path(probe.stdout.strip())
-        assert resolved == private / "nexus_t2_substrate_boot_locks", (
+        assert resolved == _substrate._boot_semaphore_dir(private), (
             f"_BOOT_SEMAPHORE_DIR resolved to {resolved}, not under the TMPDIR the "
             f"subprocess was given ({private}). The split-shard probe checks the "
             f"private tree, so a boot attempt would land somewhere it never looks."
@@ -1597,7 +1599,7 @@ def test_the_boot_lock_guard_sees_a_boot_attempt_under_a_private_tmpdir() -> Non
     """
     private = pathlib.Path(tempfile.mkdtemp(prefix="boot-lock-probe-"))
     try:
-        lock_dir = private / "nexus_t2_substrate_boot_locks"
+        lock_dir = _substrate._boot_semaphore_dir(private)
         assert not lock_dir.exists(), "precondition: the private tree starts clean"
 
         with _substrate._boot_semaphore_slot(lock_dir=lock_dir):

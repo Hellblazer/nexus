@@ -18,6 +18,9 @@ import hashlib
 
 import pytest
 
+from tests._catalog_fixture_ops import give_chunks_a_live_owner
+from tests._chunk_seed import seed_chunks_direct
+
 pytestmark = [pytest.mark.integration]
 
 _DIM = 768
@@ -54,6 +57,26 @@ def test_armed_box_runs_on_data_tokens_with_no_static_token(
     collection = f"knowledge__xzeml-{tenant}__bge-base-en-v15-768__v1"
     ensure_collection_registered(collection)
 
+    # RDR-223 P3.1: the write under test must stay one the engine accepts once
+    # ownerless writes are refused, so the chunk is seeded and owned here while
+    # the static tenant token is valid, and the data-token write below is an
+    # owned rewrite of it that changes the title.
+    content = f"nexus-xzeml armed box, no static token ({tenant})"
+    chash = hashlib.sha256(content.encode()).hexdigest()
+    seed_chunks_direct(
+        collection, [chash], [content],
+        [{"title": "xzeml-seed", "chunk_text_hash": chash}], embeddings=[[0.1] * _DIM],
+    )
+    give_chunks_a_live_owner(collection, [chash])
+
+    # The process-singleton vector client (if an earlier test left one) probes
+    # /version for the write's chunk cap using tenant "default", which this
+    # mint-locked credential cannot mint for. Drop it so the write below builds
+    # its cap decision without that probe, as it does when this test runs alone.
+    from nexus.db.http_vector_client import reset_http_vector_client_for_tests
+
+    reset_http_vector_client_for_tests()
+
     monkeypatch.delenv("NX_SERVICE_TOKEN", raising=False)
     monkeypatch.setenv("NX_MINT_TOKEN", mint_locked)
     monkeypatch.setenv("NX_MINT_TENANT", tenant)
@@ -69,22 +92,15 @@ def test_armed_box_runs_on_data_tokens_with_no_static_token(
         import nexus.db.http_vector_client as hvc
 
         client = hvc.HttpVectorClient(tenant=tenant)
-        content = f"nexus-xzeml armed box, no static token ({tenant})"
-        chash = hashlib.sha256(content.encode()).hexdigest()
         client.upsert_chunks_with_embeddings(
             collection, ids=[chash], documents=[content], embeddings=[[0.1] * _DIM],
             metadatas=[{"title": "xzeml", "chunk_text_hash": chash}],
         )
-        # nexus-wbfpw.10 (RDR-192 Step 5 live(c), engine fc99baac9): this
-        # round trip proves data-token auth works with no static bearer, not
-        # a retrieval-relevance property -- the chunk has no catalog
-        # manifest owner, so read back with the maintenance
-        # include_non_live=True escape hatch (same rationale as the
-        # nexus-wrwb7 sibling in test_data_token_manager_e2e.py).
-        present = client.get_collection(collection).get(
-            ids=[chash], include=[], include_non_live=True,
-        )
+        # The chunk is owned (seeded above), so a live read sees it; the
+        # rewritten title proves the data-token POST landed.
+        present = client.get_collection(collection).get(ids=[chash], include=["metadatas"])
         assert chash in (present.get("ids") or [])
+        assert present["metadatas"][0]["title"] == "xzeml", "the rewrite landed"
 
         from nexus.db.t2.http_memory_store import HttpMemoryStore
 

@@ -1,0 +1,368 @@
+{
+ "small": {
+  "1": [
+   {
+    "old": "The queue is basically ordered,",
+    "new": "The queue is ordered,"
+   },
+   {
+    "old": "The worker really quite simply retries",
+    "new": "The worker simply retries"
+   },
+   {
+    "old": "It should be noted that the retry path is unchanged",
+    "new": "The retry path is unchanged"
+   }
+  ],
+  "2": [
+   {
+    "old": "The queue is basically ordered,",
+    "new": "The queue is ordered,"
+   },
+   {
+    "old": "really quite simply retries",
+    "new": "simply retries"
+   },
+   {
+    "old": "It should be noted that the retry path",
+    "new": "The retry path"
+   }
+  ],
+  "3": [
+   {
+    "old": "The queue is basically ordered,",
+    "new": "The queue is ordered,"
+   },
+   {
+    "old": "The worker really quite simply retries",
+    "new": "The worker simply retries"
+   },
+   {
+    "old": "It should be noted that the retry path is unchanged",
+    "new": "The retry path is unchanged"
+   },
+   {
+    "old": "The scheduler just wakes every ten seconds",
+    "new": "The scheduler wakes every ten seconds"
+   }
+  ],
+  "4": [
+   {
+    "old": "The queue is basically ordered,",
+    "new": "The queue is ordered,"
+   },
+   {
+    "old": "really quite simply retries",
+    "new": "simply retries"
+   },
+   {
+    "old": "It should be noted that the retry path",
+    "new": "The retry path"
+   },
+   {
+    "old": "The scheduler just wakes",
+    "new": "The scheduler wakes"
+   }
+  ],
+  "5": [
+   {
+    "old": "basically ",
+    "new": ""
+   },
+   {
+    "old": "really quite ",
+    "new": ""
+   },
+   {
+    "old": "It should be noted that the retry path",
+    "new": "The retry path"
+   },
+   {
+    "old": "The scheduler just wakes",
+    "new": "The scheduler wakes"
+   }
+  ],
+  "6": [
+   {
+    "old": "The queue is basically ordered,",
+    "new": "The queue is ordered,"
+   },
+   {
+    "old": "The worker really quite simply retries",
+    "new": "The worker simply retries"
+   },
+   {
+    "old": "It should be noted that the retry path is unchanged",
+    "new": "The retry path is unchanged"
+   },
+   {
+    "old": "The scheduler just wakes every ten seconds",
+    "new": "The scheduler wakes every ten seconds"
+   }
+  ],
+  "7": [
+   {
+    "old": "is basically ordered",
+    "new": "is ordered"
+   },
+   {
+    "old": "really quite simply",
+    "new": "simply"
+   },
+   {
+    "old": "It should be noted that the retry path",
+    "new": "The retry path"
+   }
+  ],
+  "8": [
+   {
+    "old": "The queue is basically ordered,",
+    "new": "The queue is ordered,"
+   },
+   {
+    "old": "really quite simply retries",
+    "new": "simply retries"
+   },
+   {
+    "old": "It should be noted that the retry path",
+    "new": "The retry path"
+   },
+   {
+    "old": "The scheduler just wakes",
+    "new": "The scheduler wakes"
+   }
+  ],
+  "9": [
+   {
+    "old": "The queue is basically ordered",
+    "new": "The queue is ordered"
+   },
+   {
+    "old": "really quite simply retries",
+    "new": "simply retries"
+   },
+   {
+    "old": "It should be noted that the retry path",
+    "new": "The retry path"
+   }
+  ],
+  "10": [
+   {
+    "old": "The queue is basically ordered,",
+    "new": "The queue is ordered,"
+   },
+   {
+    "old": "The worker really quite simply retries",
+    "new": "The worker simply retries"
+   },
+   {
+    "old": "It should be noted that the retry path",
+    "new": "The retry path"
+   },
+   {
+    "old": "The scheduler just wakes",
+    "new": "The scheduler wakes"
+   }
+  ]
+ },
+ "storage": {
+  "1": [
+   {
+    "old": "call the same Python APIs directly — no Bash dependency.",
+    "new": "call the same Python APIs directly, with no Bash dependency."
+   },
+   {
+    "old": "are paged — pass `offset=N` for subsequent pages.",
+    "new": "are paged; pass `offset=N` for subsequent pages."
+   },
+   {
+    "old": "the **service backend** — the native `nexus-service` over Postgres 17 — and since RDR-155",
+    "new": "the **service backend** (the native `nexus-service` over Postgres 17), and since RDR-155"
+   },
+   {
+    "old": "frozen migration sources only — migrate via the last migration-capable 6.x release.",
+    "new": "frozen migration sources only; migrate via the last migration-capable 6.x release."
+   },
+   {
+    "old": "`~/.config/nexus/current_session` — a\nmachine-wide, last-writer-wins record",
+    "new": "`~/.config/nexus/current_session`, a\nmachine-wide, last-writer-wins record"
+   }
+  ],
+  "3": [
+   {
+    "old": "call the same Python APIs directly — no Bash dependency.",
+    "new": "call the same Python APIs directly, with no Bash dependency."
+   },
+   {
+    "old": "last resort the flat file `~/.config/nexus/current_session` — a",
+    "new": "last resort the flat file `~/.config/nexus/current_session`, a"
+   },
+   {
+    "old": "(nexus-4lkmz, 2026-08: \"T1 exists in PG only\") — setting it now hard-fails",
+    "new": "(nexus-4lkmz, 2026-08: \"T1 exists in PG only\"); setting it now hard-fails"
+   },
+   {
+    "old": "(the only backend since RDR-158 — the historical direct-",
+    "new": "(the only backend since RDR-158; the historical direct-"
+   },
+   {
+    "old": "This is internal telemetry — not exposed as an MCP tool.",
+    "new": "This is internal telemetry, not exposed as an MCP tool."
+   }
+  ],
+  "4": [
+   {
+    "old": "which call the same Python APIs directly — no Bash dependency.",
+    "new": "which call the same Python APIs directly, with no Bash dependency."
+   },
+   {
+    "old": "are paged — pass `offset=N` for subsequent pages.",
+    "new": "are paged: pass `offset=N` for subsequent pages."
+   },
+   {
+    "old": "frozen migration sources only — migrate via the last migration-capable 6.x release.",
+    "new": "frozen migration sources only; migrate via the last migration-capable 6.x release."
+   },
+   {
+    "old": "\"T1 exists in PG only\") — setting it now hard-fails",
+    "new": "\"T1 exists in PG only\"). Setting it now hard-fails"
+   },
+   {
+    "old": "This is internal telemetry — not exposed as an MCP tool.",
+    "new": "This is internal telemetry, not exposed as an MCP tool."
+   }
+  ],
+  "5": [
+   {
+    "old": "which call the same Python APIs directly — no Bash dependency.",
+    "new": "which call the same Python APIs directly, with no Bash dependency."
+   },
+   {
+    "old": "are paged — pass `offset=N` for subsequent pages.",
+    "new": "are paged: pass `offset=N` for subsequent pages."
+   },
+   {
+    "old": "(nexus-4lkmz, 2026-08: \"T1 exists in PG only\") — setting it now hard-fails",
+    "new": "(nexus-4lkmz, 2026-08: \"T1 exists in PG only\"); setting it now hard-fails"
+   },
+   {
+    "old": "idempotent by default — only previously-missing builtins insert",
+    "new": "idempotent by default: only previously-missing builtins insert"
+   },
+   {
+    "old": "This is internal telemetry — not exposed as an MCP tool.",
+    "new": "This is internal telemetry, not exposed as an MCP tool."
+   }
+  ],
+  "6": [
+   {
+    "old": "call the same Python APIs directly — no Bash dependency.",
+    "new": "call the same Python APIs directly, with no Bash dependency."
+   },
+   {
+    "old": "**service backend** — the native `nexus-service` over Postgres 17 — and since RDR-155",
+    "new": "**service backend** (the native `nexus-service` over Postgres 17), and since RDR-155"
+   },
+   {
+    "old": "frozen migration sources only — migrate via",
+    "new": "frozen migration sources only; migrate via"
+   },
+   {
+    "old": "**Access tracking** on T1 and T2 — every successful read bumps",
+    "new": "**Access tracking** on T1 and T2: every successful read bumps"
+   },
+   {
+    "old": "(nexus-4lkmz, 2026-08: \"T1 exists in PG only\") — setting it now hard-fails",
+    "new": "(nexus-4lkmz, 2026-08: \"T1 exists in PG only\"); setting it now hard-fails"
+   }
+  ],
+  "7": [
+   {
+    "old": "Agents use MCP tools (`mcp__plugin_conexus_nexus__*`) which call the same Python APIs directly — no Bash dependency.",
+    "new": "Agents use MCP tools (`mcp__plugin_conexus_nexus__*`), which call the same Python APIs directly with no Bash dependency."
+   },
+   {
+    "old": "are paged — pass `offset=N` for subsequent pages.",
+    "new": "are paged; pass `offset=N` for subsequent pages."
+   },
+   {
+    "old": "Effective TTL becomes `base_ttl * (1 + log(access_count + 1))` — frequently-accessed entries survive longer.",
+    "new": "Effective TTL becomes `base_ttl * (1 + log(access_count + 1))`, so frequently-accessed entries survive longer."
+   },
+   {
+    "old": "This is internal telemetry — not exposed as an MCP tool.",
+    "new": "This is internal telemetry, not exposed as an MCP tool."
+   },
+   {
+    "old": "Code, docs, and RDR collections are never expired — they are refreshed via re-indexing.",
+    "new": "Code, docs, and RDR collections are never expired; they are refreshed via re-indexing."
+   }
+  ],
+  "8": [
+   {
+    "old": "which call the same Python APIs directly — no Bash dependency.",
+    "new": "which call the same Python APIs directly, with no Bash dependency."
+   },
+   {
+    "old": "(nexus-4lkmz, 2026-08: \"T1 exists in PG only\") — setting it now hard-fails",
+    "new": "(nexus-4lkmz, 2026-08: \"T1 exists in PG only\"); setting it now hard-fails"
+   },
+   {
+    "old": "a project, a title, and content — like a flat filesystem",
+    "new": "a project, a title, and content, like a flat filesystem"
+   },
+   {
+    "old": "This is internal telemetry — not exposed as an MCP tool.",
+    "new": "This is internal telemetry, not exposed as an MCP tool."
+   },
+   {
+    "old": "Code, docs, and RDR collections are never expired — they are refreshed via re-indexing.",
+    "new": "Code, docs, and RDR collections are never expired; they are refreshed via re-indexing."
+   }
+  ],
+  "9": [
+   {
+    "old": "which call the same Python APIs directly — no Bash dependency.",
+    "new": "which call the same Python APIs directly, with no Bash dependency."
+   },
+   {
+    "old": "frozen migration sources only — migrate via the last migration-capable 6.x release.",
+    "new": "frozen migration sources only; migrate via the last migration-capable 6.x release."
+   },
+   {
+    "old": "(the only backend since RDR-158 — the historical",
+    "new": "(the only backend since RDR-158; the historical"
+   },
+   {
+    "old": "Code, docs, and RDR collections are never expired — they are refreshed via re-indexing.",
+    "new": "Code, docs, and RDR collections are never expired; they are refreshed via re-indexing."
+   },
+   {
+    "old": "Embedding model validation is enforced on import — importing",
+    "new": "Embedding model validation is enforced on import: importing"
+   }
+  ],
+  "10": [
+   {
+    "old": "directly — no Bash dependency.",
+    "new": "directly, with no Bash dependency."
+   },
+   {
+    "old": "the **service backend** — the native `nexus-service` over Postgres 17 — and since RDR-155",
+    "new": "the **service backend** (the native `nexus-service` over Postgres 17), and since RDR-155"
+   },
+   {
+    "old": "This is internal telemetry — not exposed as an MCP tool.",
+    "new": "This is internal telemetry, not exposed as an MCP tool."
+   },
+   {
+    "old": "are never expired — they are refreshed via re-indexing.",
+    "new": "are never expired; they are refreshed via re-indexing."
+   },
+   {
+    "old": "validation is enforced on import — importing",
+    "new": "validation is enforced on import: importing"
+   }
+  ]
+ }
+}

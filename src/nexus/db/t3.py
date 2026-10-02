@@ -900,17 +900,9 @@ class T3Database:
 
         # Derive content_type from the collection prefix so the factory
         # can stamp it through normalize().
-        prefix_to_ct = {
-            "code__": "code",
-            "docs__": "prose",
-            "rdr__": "markdown",
-            "knowledge__": "prose",
-        }
-        content_type = "prose"
-        for prefix, ct in prefix_to_ct.items():
-            if collection.startswith(prefix):
-                content_type = ct
-                break
+        from nexus.metadata_schema import chunk_content_type_for_collection  # noqa: PLC0415 — circular-dep avoidance (metadata_schema)
+
+        content_type = chunk_content_type_for_collection(collection)
 
         # RDR-101 Phase 5c dropped store_type, corpus, git_meta. Title
         # kept (find_ids_by_title is load-bearing for nx store delete
@@ -1651,7 +1643,9 @@ class T3Database:
         with empty strings for missing keys, so callers do not need to
         guard each key access. The default fields support RDR-101 Phase 6
         ``nx t3 gc`` (``doc_id`` for orphan detection, ``indexed_at`` for
-        the orphan-window filter).
+        the orphan-window filter). Since RDR-192 Step 8 (nexus-wbfpw.18) that
+        verb takes its candidates from the engine instead and no longer calls
+        this.
         """
         try:
             col = self._client_for(collection_name).get_collection(collection_name)
@@ -1677,27 +1671,6 @@ class T3Database:
             offset += len(page_ids)
             if len(page_ids) < page_limit:
                 break
-
-    def delete_by_chunk_ids(
-        self, collection_name: str, chunk_ids: list[str],
-    ) -> int:
-        """Delete chunks by explicit Chroma id. Returns count deleted.
-
-        The per-chunk-id deletion primitive used by ``nx t3 gc`` (RDR-101
-        Phase 6) and any future maintenance verb that selects orphan
-        candidates outside the ``source_path``/``doc_id`` join paths.
-        Empty ``chunk_ids`` is a no-op (returns 0); missing collection
-        returns 0 without raising. Same paginated batching as
-        :meth:`delete_by_source` via :meth:`_delete_batch`.
-        """
-        if not chunk_ids:
-            return 0
-        try:
-            col = self._client_for(collection_name).get_collection(collection_name)
-        except _NotFoundErrors:
-            return 0
-        self._delete_batch(col, collection_name, chunk_ids)
-        return len(chunk_ids)
 
     def update_source_path(
         self, collection_name: str, old_path: str, new_path: str

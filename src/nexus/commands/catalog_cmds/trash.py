@@ -40,12 +40,11 @@ restore does NOT undo their chunk/row loss:
   (``purge_collection_cascade``) — irreversible, never tombstones.
 
 ``nx t3 gc``'s orphan sweep is NO LONGER on this list (Sam's second
-2026-09-07 ruling on nexus-dkymw): its alive-set (``chashesForCollection``)
-now PROTECTS a tombstoned-but-not-yet-purged document's chashes, superseding
-nexus-mqd6t's original immediate-exclusion filter for that one read, so its
-clock (chunk ``indexed_at`` vs ``--orphan-window``, still independent of
-``purge-trash``'s own window) can no longer reap a just-tombstoned
-document's chunks inside the grace window above.
+2026-09-07 ruling on nexus-dkymw, structural since nexus-wbfpw.18): the
+engine's reapable predicate, which it takes its candidates from, counts a
+tombstoned-but-not-yet-purged document's manifest row as an owner, so its own
+30 day clock (independent of ``purge-trash``'s window) can no longer move a
+just-tombstoned document's chunks inside the grace window above.
 
 After either of the two remaining paths, recovery is a RE-INDEX, not ``nx
 catalog restore``. ``restore`` reports success on the CATALOG ROW regardless

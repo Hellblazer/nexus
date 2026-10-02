@@ -5,8 +5,8 @@
 Context (substantive-critic diagnosis, T1 3fe5e91c; nexus-hb10j
 adjudication): nexus-hb10j was the THIRD occurrence of the same
 wrapper-gap class -- a per-record ingest loop's narrow except tuple lets
-a newly-introduced NexusError subclass (ChunkLandingUnverifiedError,
-IndexRunVerifyRefused) propagate uncaught and abort the WHOLE batch
+a newly-introduced NexusError subclass (IndexRunVerifyRefused,
+ChunkLandingUnverifiedError until RDR-223 deleted it) propagate uncaught and abort the WHOLE batch
 instead of just the offending record. Prior occurrences: nexus-9800y
 (dt.py file-backed branch), the tp8yk-era commands/index.py sites,
 nexus-hb10j (dt.py --dt-content branch). Root-cause-after-3-patches: the
@@ -117,21 +117,16 @@ _SAFE_HANDLER_NAMES: frozenset[str] = frozenset({
 })
 
 #: Files swept for per-record loop call sites, relative to SRC_ROOT.
-#: Started as the bead's two named files (dt.py/index.py); widened by
-#: substantive-critic SIGNIFICANT (nexus-a1zv2, round-2 review of
-#: nexus-rlkgu, T2 [21492]): db/embed_migrate.py's ``_default_reindex``
-#: has an IDENTICAL-shape unguarded per-record loop, and it was invisible
-#: to this tripwire purely because it lived outside the original scope
-#: list -- an inherited scope claim, not a verified one. Scope is now
-#: exhaustive over every module found to call an index_*-family function
-#: from a loop, not just the two the bead happened to name.
+#: Started as the bead's two named files (dt.py/index.py). It was widened to
+#: ``db/embed_migrate.py`` (nexus-a1zv2, round-2 review of nexus-rlkgu, T2
+#: [21492]), whose ``_default_reindex`` had an identical-shape unguarded
+#: per-record loop; that module was deleted as dead code (RDR-223 P3.3,
+#: nexus-z0o2p.25), so the scope is dt.py and index.py again.
 #: ``nexus.indexer_utils.run_file_loop`` (nx index repo's per-file loop,
 #: with its own documented first-exception-aborts contract) is still
-#: outside this list -- it is not in ANY of these three files, so it
+#: outside this list -- it is not in either of these files, so it
 #: remains naturally excluded rather than needing an allowlist carve-out.
-_SCAN_RELPATHS: tuple[str, ...] = (
-    "commands/dt.py", "commands/index.py", "db/embed_migrate.py",
-)
+_SCAN_RELPATHS: tuple[str, ...] = ("commands/dt.py", "commands/index.py")
 
 
 @dataclass(frozen=True)
@@ -151,63 +146,20 @@ class _LoopAllowlistEntry:
 #: the shared-tuple/broad-Exception mechanism but is still safe (or at
 #: least dispositioned) for a documented reason (mirrors
 #: test_vw594_fence_coverage_gate.py's _ALLOWLIST shape: keyed by call
-#: site, reason mandatory).
+#: site, reason mandatory). CONTENT-KEYED, not line-keyed (nexus-vkpr3): the
+#: third tuple element is the call's own stripped source text PLUS its nearest
+#: preceding non-blank line (the mandatory two-line convention -- see
+#: ``tests._lint_line_anchor``'s MANDATORY TWO-LINE MINIMUM section), resolved
+#: to its CURRENT line number by ``tests._lint_line_anchor.resolve_anchor`` on
+#: every run.
 #:
-#: dt.py/index.py have zero entries -- the nexus-rlkgu refactor made
-#: every real per-record loop site there pass by construction (the two
-#: dt.py sites now catch PER_RECORD_SURVIVABLE_EXCEPTIONS by name;
-#: index.py's --dir batch loop already used a broad ``except Exception``).
-#:
-#: db/embed_migrate.py's two sites (nexus-a1zv2, T2 [21492]) are
-#: GENUINELY unguarded -- ``_default_reindex``'s per-record loop has NO
-#: try/except at all around its index_pdf/index_markdown calls. They are
-#: allowlisted, not fixed, because the module is unwired: no production
-#: caller imports embed_migrate (grep-verified against src/nexus/ at
-#: nexus-a1zv2 triage time; the only src/ hit is a docstring MENTION in
-#: catalog/http_catalog_client.py, not an import), and
-#: tests/test_kmo9h_catalog_gate_census.py already documents it as
-#: "Chroma-era tool on frozen sources; dies at P4b" -- the module's own
-#: docstring claim of "via nx init" integration is FALSE as of this
-#: triage. Disposition (delete vs. rewire vs. leave dead) is tracked as
-#: nexus-a1zv2, not resolved here -- this entry's job is only to make the
-#: tripwire's scope claim exhaustive rather than silently inherited.
-#: CONTENT-KEYED, not line-keyed (nexus-vkpr3): the third tuple element
-#: is the call's own stripped source text PLUS its nearest preceding
-#: non-blank line (the mandatory two-line convention -- see
-#: ``tests._lint_line_anchor``'s MANDATORY TWO-LINE MINIMUM section),
-#: resolved to its CURRENT line number by
-#: ``tests._lint_line_anchor.resolve_anchor`` on every run. This entry
-#: set was itself retargeted once by line-shift arithmetic before the
-#: conversion (287/289 -> 303/305, RDR-204 Phase 3 growing
-#: db/embed_migrate.py above both sites) -- a content anchor makes that
-#: retargeting unnecessary, since an insertion above either call changes
-#: neither call's own text.
-_LOOP_ALLOWLIST: dict[tuple[str, str, tuple[str, ...]], _LoopAllowlistEntry] = {
-    (
-        "db/embed_migrate.py", "_default_reindex",
-        (
-            'if p.suffix.lower() == ".pdf":',
-            "count = index_pdf(p, corpus=corpus, collection_name=target_name, force=True)",
-        ),
-    ): _LoopAllowlistEntry(
-        reason=(
-            "unwired module, docstring claims nx init integration "
-            "falsely — disposition tracked as nexus-a1zv2"
-        ),
-    ),
-    (
-        "db/embed_migrate.py", "_default_reindex",
-        (
-            "else:",
-            "count = index_markdown(p, corpus=corpus, collection_name=target_name, force=True)",
-        ),
-    ): _LoopAllowlistEntry(
-        reason=(
-            "unwired module, docstring claims nx init integration "
-            "falsely — disposition tracked as nexus-a1zv2"
-        ),
-    ),
-}
+#: EMPTY since RDR-223 P3.3 (nexus-z0o2p.25): its only two entries were the
+#: genuinely unguarded per-record loop in ``db/embed_migrate.py``'s
+#: ``_default_reindex``, an unwired module that was deleted as dead code. The
+#: mechanism stays: the gate below still turns an unlisted uncovered site red,
+#: and ``test_scanner_finds_the_known_per_record_loop_sites`` pins that none
+#: is uncovered today.
+_LOOP_ALLOWLIST: dict[tuple[str, str, tuple[str, ...]], _LoopAllowlistEntry] = {}
 
 
 def _resolve_loop_allowlist() -> tuple[
@@ -343,7 +295,7 @@ def _nexus_error_subclass_names(errors_file: pathlib.Path = ERRORS_FILE) -> set[
 #: tuple can assert the two independently-maintained lists agree --
 #: catching drift in EITHER direction.
 _RECORD_LEVEL: frozenset[str] = frozenset({
-    "ChunkLandingUnverifiedError", "IndexRunVerifyRefused",
+    "IndexRunVerifyRefused",
     # nexus-wi1uv (occurrence 5 of the wrapper-gap class, caught by this
     # tripwire pre-merge): fires from PDFExtractor.extract() deep inside
     # index_pdf -> _pdf_chunks, reachable from dt.py's nx dt index
@@ -377,6 +329,17 @@ _RECORD_LEVEL: frozenset[str] = frozenset({
     # gained them.
     "SourceUriNotFoundError",
     "SourceUriCollectionMismatchError",
+    # nexus-z0o2p.13 (RDR-223): fires from doc_indexer._index_document when a
+    # document's registration returned no identity, so its chunks have no owner
+    # to be written with. Reachable from batch_index_markdowns and dt.py's
+    # per-record loops; one record without identity must fail that record only.
+    # Single-file `nx index md` converts it to a ClickException.
+    "CatalogIdentityMissingError",
+    # RDR-223 (nexus-z0o2p.10): MultiBatchDocumentWriter raises it when one document's
+    # combined write fails or the engine's answer cannot be trusted. The writer runs once per
+    # document inside the per-record loops (nx dt index, index_markdown/index_pdf), so one
+    # document's failed write must fail that record only.
+    "BatchWriteFailedError",
 })
 
 #: Command-level: every OTHER NexusError subclass, with a specific,
@@ -387,6 +350,22 @@ _RECORD_LEVEL: frozenset[str] = frozenset({
 #: tripwire; the fix is a deliberate classification decision, not a
 #: blanket exemption.
 _COMMAND_LEVEL_REASONS: dict[str, str] = {
+    "DryRunStoreError": (
+        "RDR-223 (nexus-z0o2p.11/.15): raised by doc_indexer._require_throwaway_store when a PDF "
+        "dry run is handed a store that is not a throwaway in-memory one. Only `nx index pdf "
+        "--dry-run` passes dry_run=True, it builds the in-memory store itself, and it refuses "
+        "--dry-run with --dir; no dt.py or index.py batch loop runs a dry run, so no per-record "
+        "body can raise it. It is a programming error in a direct caller, not a property of a record."
+    ),
+    "ManifestAppendManyUnsupportedError": (
+        "RDR-223 (nexus-z0o2p.10): raised by HttpCatalogClient.append_manifest_many on a "
+        "404 -- the ENGINE has no /manifest/append_many route. That is a property of the "
+        "whole engine, not of one record: every later record would hit the same 404, so "
+        "the batch must stop and report an engine that cannot take the write (there is "
+        "deliberately no per-document fallback that would orphan chunks). Its only "
+        "caller is the .nxexp import, a command-level operation, not a per-record "
+        "ingest loop in dt.py or index.py."
+    ),
     "SearchEmbeddingProfileMismatchError": (
         "Read path only (nexus-vply6): raised by search_engine."
         "search_cross_corpus and built by nexus.errors."
@@ -519,35 +498,25 @@ def test_scanner_finds_the_known_per_record_loop_sites() -> None:
     """Non-vacuity / kill-control proof for the scanner itself, pinning
     the exact sites found on the live tree right now: two within dt.py's
     index_cmd (the --dt-content branch and the file-backed branch, both
-    guarded via the SAME `for uuid, path in records:` loop), one within
-    index.py's index_pdf_cmd (the --dir batch loop), and two within
-    db/embed_migrate.py's _default_reindex (nexus-a1zv2 — genuinely
-    unguarded, allowlisted rather than covered). If this count ever drops
-    to zero, test_every_per_record_loop_site_is_covered_or_allowlisted
+    guarded via the SAME `for uuid, path in records:` loop) and one within
+    index.py's index_pdf_cmd (the --dir batch loop). If this count ever
+    drops to zero, test_every_per_record_loop_site_is_covered_or_allowlisted
     above would pass VACUOUSLY -- this test is what catches that."""
     sites = _find_loop_call_sites(SRC_ROOT, _SCAN_RELPATHS)
     found = sorted({(s.rel_path, s.function) for s in sites})
     assert found == [
         ("commands/dt.py", "index_cmd"),
         ("commands/index.py", "index_pdf_cmd"),
-        ("db/embed_migrate.py", "_default_reindex"),
     ], found
-    assert len(sites) == 5, sites
+    assert len(sites) == 3, sites
     uncovered = {(s.rel_path, s.function, s.lineno) for s in sites if not s.covered}
-    assert uncovered == {
-        ("db/embed_migrate.py", "_default_reindex", 305),
-        ("db/embed_migrate.py", "_default_reindex", 307),
-    }, (
-        "the set of genuinely-uncovered sites changed -- either a real "
-        "coverage regression (fix it) or embed_migrate.py's line numbers "
-        "shifted (update _LOOP_ALLOWLIST's keys to match): "
-        f"{uncovered}"
+    assert uncovered == set(), (
+        "a per-record loop site lost its except coverage -- either a real "
+        f"coverage regression (fix it) or a deliberate carve-out (add a "
+        f"reasoned _LOOP_ALLOWLIST entry): {uncovered}"
     )
-    # And every uncovered site above is exactly the allowlisted set --
-    # the actual gate (test_every_per_record_loop_site_is_covered_or_
-    # allowlisted) is what turns an UNLISTED uncovered site red; this
-    # assertion just pins today's known-uncovered set stays == today's
-    # allowlist, so the two can't silently drift apart from each other.
+    # The allowlist must stay exactly the uncovered set, so the two cannot
+    # silently drift apart from each other.
     resolved_allowlist, problems = _resolve_loop_allowlist()
     assert not problems, problems
     assert uncovered == set(resolved_allowlist), (uncovered, set(resolved_allowlist))
@@ -808,12 +777,12 @@ def test_kill_control_new_subclass_is_discovered_by_scanner(
     fixture = tmp_path / "errors_fixture.py"
     fixture.write_text(
         "class NexusError(Exception):\n    pass\n\n"
-        "class ChunkLandingUnverifiedError(NexusError):\n    pass\n\n"
+        "class IndexRunVerifyRefused(NexusError):\n    pass\n\n"
         "class BrandNewError(NexusError):\n    pass\n\n"
         "class IndirectError(BrandNewError):\n    pass\n"
     )
     names = _nexus_error_subclass_names(fixture)
-    assert names == {"ChunkLandingUnverifiedError", "BrandNewError", "IndirectError"}
+    assert names == {"IndexRunVerifyRefused", "BrandNewError", "IndirectError"}
 
     # And the completeness check itself would flag the unclassified pair:
     classified = _RECORD_LEVEL | set(_COMMAND_LEVEL_REASONS)

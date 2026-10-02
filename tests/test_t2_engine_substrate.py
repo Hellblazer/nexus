@@ -93,7 +93,6 @@ class TestB6encStoreHookEngineSubstrate:
             catalog_store_hook_tracked,
             rollback_minted_catalog_entry,
             single_chunk_manifest_metadata,
-            store_put_manifest_direct,
         )
 
         content = "b6enc engine substrate smoke content"
@@ -116,13 +115,13 @@ class TestB6encStoreHookEngineSubstrate:
 
         # nexus-dbzxb (RDR-191 Phase 5 Python collateral): fk_catalog_
         # chunks_chunk requires a matching real nexus.chunks row before
-        # store_put_manifest_direct's write lands.
-        from tests._catalog_fixture_ops import seed_manifest_chunks
+        # the manifest write lands.
+        from tests._catalog_fixture_ops import seed_manifest_chunks, seed_note_manifest
 
         seed_manifest_chunks(col, [chash])
 
-        # Direct fail-loud manifest write + its verify leg, over the wire.
-        store_put_manifest_direct(tumbler, metadatas, collection=col)
+        # The manifest write, over the wire.
+        seed_note_manifest(tumbler, metadatas, collection=col)
         reader = make_catalog_reader()
         assert {r.chash for r in reader.get_manifest(tumbler)} == {chash}
 

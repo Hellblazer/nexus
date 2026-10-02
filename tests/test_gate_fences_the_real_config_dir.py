@@ -53,12 +53,12 @@ def mirrored(tmp_path: Path):
     real = tmp_path / "real"
     for rel in (
         ".docker/run", ".m2/repository", ".cache/uv", ".cache/nexus/onnx_models",
-        ".local/bin", ".claude/plugins", ".config/nexus", ".config/gh", "Documents",
+        ".local/bin", ".claude/plugins", ".config/nexus", ".config/xtool", "Documents",
     ):
         (real / rel).mkdir(parents=True, exist_ok=True)
     (real / ".testcontainers.properties").write_text("testcontainers.ryuk.disabled=true\n")
     (real / ".config" / "nexus" / "last_seen_version").write_text("7.17.0\n")
-    (real / ".config" / "gh" / "hosts.yml").write_text("github.com: {}\n")
+    (real / ".config" / "xtool" / "hosts.yml").write_text("github.com: {}\n")
 
     gate = tmp_path / "gate"
     r = _run_fence(real, gate)
@@ -125,7 +125,7 @@ def test_the_shadowed_config_dir_is_empty_not_the_real_one(mirrored) -> None:
         (".cache", "71GB uv cache + the 504MB nexus model cache"),
         (".local", "fastembed cache and the installed tool"),
         (".claude", "plugin-install-mode fixtures health.py reads"),
-        (".config/gh", "an unrelated ~/.config tenant that must not be collateral"),
+        (".config/xtool", "an unrelated ~/.config tenant that must not be collateral"),
     ],
 )
 def test_the_mirror_passes_through(mirrored, entry: str, why: str) -> None:
@@ -140,10 +140,10 @@ def test_the_mirror_passes_through(mirrored, entry: str, why: str) -> None:
 
 def test_only_the_nexus_config_is_shadowed(mirrored) -> None:
     """Positive control on the SCOPE. A mirror that shadowed all of ~/.config
-    would pass every passthrough case above except the gh one, and would
+    would pass every passthrough case above except the xtool one, and would
     silently break any other tool keeping state there."""
     _real, gate = mirrored
-    assert (gate / ".config" / "gh" / "hosts.yml").exists()
+    assert (gate / ".config" / "xtool" / "hosts.yml").exists()
     assert not (gate / ".config" / "nexus" / "last_seen_version").exists()
 
 
@@ -205,6 +205,9 @@ def test_the_gate_sources_and_calls_the_real_fence(mirrored) -> None:
     assert "lib/fence_home.sh" in body, "the gate no longer sources the fence helper"
     assert 'fence_home "$REAL_HOME" "$GATE_HOME" ".config/nexus"' in body
     assert 'export HOME="$GATE_HOME"' in body
+    # nexus-q81g7: the manager half of the fence, after HOME is exported
+    assert 'fence_home_env "$GATE_HOME"' in body
+    assert body.index('export HOME="$GATE_HOME"') < body.index('fence_home_env "$GATE_HOME"')
     assert 'export PATH="$GATE_SHIM:$PATH"' in body
 
 

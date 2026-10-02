@@ -78,7 +78,7 @@ DROP_IN_METHODS = [
     "update_source_path",
     # nexus-h8rf6.7: nx t3 gc / prune-stale silently no-oped (call sites
     # try/except-wrapped, so the missing methods degraded instead of crashing).
-    "delete_by_chunk_ids",
+    # (delete_by_chunk_ids was deleted from both classes with nexus-wbfpw.18.)
     "list_unique_source_paths",
     "list_chunks_with_metadata",
     # nexus-h8rf6.8: doctor's model-drift probe degraded to outcome='error'
@@ -1333,9 +1333,9 @@ class TestExpire:
 
 
 class TestT3GcPrimitives:
-    """nexus-h8rf6.7: delete_by_chunk_ids / list_unique_source_paths /
-    list_chunks_with_metadata were missing — `nx t3 gc` and `nx t3
-    prune-stale` degrade to silent no-ops in service mode (call sites are
+    """nexus-h8rf6.7: list_unique_source_paths / list_chunks_with_metadata (and a third method,
+    deleted with nexus-wbfpw.18 when `nx t3 gc` moved onto the engine's quarantine route) were
+    missing — `nx t3 gc` and `nx t3 prune-stale` degrade to silent no-ops in service mode (call sites are
     try/except-wrapped, so no traceback, just zero effect).
 
     The two ``list_unique_source_paths`` cases MOVED to
@@ -1343,49 +1343,6 @@ class TestT3GcPrimitives:
     metadata key RDR-102 D2 removed, so it now raises. `nx t3 gc` never used
     it — that was `nx t3 prune-stale`, which is retired.
     """
-
-    def test_delete_by_chunk_ids_deletes_and_counts(self, monkeypatch):
-        posted = []
-
-        def fake_post(path, body, **kw):
-            posted.append((path, body))
-            return {}
-
-        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
-        n = HttpVectorClient().delete_by_chunk_ids(
-            collection_name="c", chunk_ids=["a", "b", "c"],
-        )
-        assert n == 3
-        assert posted == [
-            ("/v1/vectors/store-delete", {"collection": "c", "ids": ["a", "b", "c"]}),
-        ]
-
-    def test_delete_by_chunk_ids_reports_the_servers_deleted_count(self, monkeypatch):
-        # The engine skips an id a live manifest still references (RDR-191 F10c)
-        # and reports what it actually removed; the client must report that
-        # number, not the batch size, or nx t3 gc overstates its deletions.
-        def fake_post(path, body, **kw):
-            return {"deleted": 1}
-
-        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
-        assert HttpVectorClient().delete_by_chunk_ids("c", ["a", "b"]) == 1
-
-    def test_delete_by_chunk_ids_empty_is_noop(self, monkeypatch):
-        def fake_post(path, body, **kw):  # pragma: no cover — must not be called
-            raise AssertionError("no HTTP call expected")
-
-        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
-        assert HttpVectorClient().delete_by_chunk_ids("c", []) == 0
-
-    def test_delete_by_chunk_ids_missing_collection_returns_zero(self, monkeypatch):
-        # T3Database parity: missing collection -> 0 without raising.
-        from nexus.db.http_vector_client import VectorServiceError
-
-        def fake_post(path, body, **kw):
-            raise VectorServiceError("not found", code=404)
-
-        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
-        assert HttpVectorClient().delete_by_chunk_ids("gone", ["a"]) == 0
 
     def test_list_chunks_with_metadata_yields_field_subset(self, monkeypatch):
         def fake_post(path, body, **kw):
@@ -1485,37 +1442,3 @@ class TestCollectionMetadata:
         monkeypatch.setattr(HttpVectorClient, "count", fake_count)
         with pytest.raises(VectorServiceError):
             HttpVectorClient().collection_metadata(self._CONFORMANT)
-
-
-class TestDeleteByChunkIdsPartialFailure:
-    """Wave review #2: a failure AFTER a successful batch must not be
-    reported as 0 — nx t3 gc would log 'deleted 0' despite partial deletion.
-    """
-
-    def test_failure_after_first_batch_reraises(self, monkeypatch):
-        from nexus.db.http_vector_client import VectorServiceError
-
-        calls = []
-
-        def fake_post(path, body, **kw):
-            calls.append(body)
-            if len(calls) > 1:
-                raise VectorServiceError("gone mid-run", code=404)
-            return {}
-
-        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
-        ids = [f"id{i}" for i in range(301)]  # 2 batches at the 300 quota
-        with pytest.raises(VectorServiceError):
-            HttpVectorClient().delete_by_chunk_ids("c", ids)
-        assert len(calls) == 2  # first batch succeeded, second raised
-
-    def test_404_on_first_batch_still_returns_zero(self, monkeypatch):
-        from nexus.db.http_vector_client import VectorServiceError
-
-        def fake_post(path, body, **kw):
-            raise VectorServiceError("not found", code=404)
-
-        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
-        assert HttpVectorClient().delete_by_chunk_ids("gone", ["a"]) == 0
-
-

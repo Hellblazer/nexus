@@ -30,7 +30,6 @@ import dev.nexus.service.http.PipelineHandler;
 import dev.nexus.service.http.PlanHandler;
 import dev.nexus.service.http.RemapHandler;
 import dev.nexus.service.http.ResolveHandler;
-import dev.nexus.service.http.StagingHandler;
 import dev.nexus.service.http.ScratchHandler;
 import dev.nexus.service.http.SessionTokenHandler;
 import dev.nexus.service.http.TaxonomyHandler;
@@ -230,6 +229,16 @@ public final class NexusService {
     private final TupleRepository tupleRepo;
 
     /**
+     * RDR-192 Step 9 (bead nexus-2x9xa): the state-derived chunk reaper, scheduled on {@link #sweepScheduler}.
+     * Null when this instance has no vector backend (nothing to reap) or {@value ChunkReaper#ENABLED_ENV} turns it
+     * off.
+     */
+    private final ChunkReaper chunkReaper;
+
+    /** The exact {@link Runnable} handed to {@link #sweepScheduler} for the reaper, or null when none was wired. */
+    private final Runnable reaperScheduledTask;
+
+    /**
      * RDR-169 G3 (bead nexus-aphki): the {@code https://} handler owns a real
      * {@link java.net.http.HttpClient} that must be closed on shutdown — held here
      * (rather than only inside {@link UriSchemeResolverRegistry}, which has no
@@ -237,6 +246,15 @@ public final class NexusService {
      * unconditionally in every constructor overload, so never null.
      */
     private final HttpsSchemeHandler httpsSchemeHandler;
+
+    /**
+     * RDR-223 Phase 3 Step 2 (nexus-z0o2p.24): what {@code upsert-chunks} and {@code store-put} do
+     * with a chash that has no live manifest row, from {@code NX_OWNERLESS_WRITE_MODE}: unset means
+     * log-only, only an explicit {@code enforce} enforces, an invalid value fails the boot (this field
+     * initialiser throws out of the constructor). Mutable only through the holder, for tests.
+     */
+    private final dev.nexus.service.vectors.OwnerlessWritePolicy ownerlessWritePolicy =
+            dev.nexus.service.vectors.OwnerlessWritePolicy.fromEnv();
 
     /**
      * Convenience constructor: no vector backend (original signature for existing tests).
@@ -423,6 +441,23 @@ public final class NexusService {
                         dev.nexus.service.vectors.Reranker reranker,
                         java.util.function.Supplier<dev.nexus.service.vectors.EmbedActivitySnapshot> localEmbedActivitySupplier,
                         TemplateRegistry tupleTemplateRegistry) throws IOException {
+        this(port, token, dataSource, docEmbedderRouter, pgVectorRepository, reranker, localEmbedActivitySupplier,
+                tupleTemplateRegistry, null);
+    }
+
+    /**
+     * The full constructor with a seam for the sweep scheduler (nexus-2x9xa, round 3). Null makes the real
+     * single-thread scheduler. A test passes a scheduler that RECORDS what is registered on it, so a wiring test
+     * can fail when the reaper's {@code scheduleWithFixedDelay} call is deleted: a test that only runs the reaper's
+     * task body cannot see that the schedule call is gone. Package-private: production never passes one.
+     */
+    NexusService(int port, String token, DataSource dataSource,
+                        EmbedderRouter docEmbedderRouter,
+                        PgVectorRepository pgVectorRepository,
+                        dev.nexus.service.vectors.Reranker reranker,
+                        java.util.function.Supplier<dev.nexus.service.vectors.EmbedActivitySnapshot> localEmbedActivitySupplier,
+                        TemplateRegistry tupleTemplateRegistry,
+                        ScheduledExecutorService sweepSchedulerOverride) throws IOException {
         this.tenantScope = new TenantScope(dataSource);
         this.dataSource = dataSource;
 
@@ -478,7 +513,7 @@ public final class NexusService {
         // moment) -- the "no second clock source" requirement in one place.
         server.createContext("/v1/status",
                 new dev.nexus.service.http.StatusHandler(docEmbedderRouter, localEmbedActivitySupplier,
-                        versionHandler.processStartMillis()));
+                        versionHandler.processStartMillis(), ownerlessWritePolicy, this::reaperStatus));
 
         // /v1/install-ping — unauthenticated anonymous daily client beacon
         // (nexus-h5olw). Local-mode installs have no tenant or token, and they
@@ -533,14 +568,6 @@ public final class NexusService {
         var remapCtx = server.createContext("/v1/remap", new RemapHandler(remapRepo));
         remapCtx.getFilters().addAll(authFilter);
 
-        // /v1/staging/* — RDR-180 land-then-transform (nexus-jxizy.10.4):
-        // verbatim landing + embed-fill + in-DB promote/finalize + clear/counts
-        var stagingCtx = server.createContext("/v1/staging",
-                new StagingHandler(tenantScope,
-                    new dev.nexus.service.db.StagingPromoteOps(tenantScope),
-                    docEmbedderRouter));
-        stagingCtx.getFilters().addAll(authFilter);
-
         // /v1/ladder/* — upgrade-ladder completion bookkeeping (RDR-186
         // nexus-146xx.12: the ladder.db retirement's PG write/read surface)
         var ladderCtx = server.createContext("/v1/ladder", new LadderHandler(ladderRepo));
@@ -592,7 +619,7 @@ public final class NexusService {
         // repository for storage/query, embedder router for /embed) is absent — a
         // missing backend is a refusal, never a 404 that masquerades as an unknown route.
         var vectorCtx = server.createContext("/v1/vectors",
-                new VectorHandler(docEmbedderRouter, pgVectorRepository, reranker));
+                new VectorHandler(docEmbedderRouter, pgVectorRepository, reranker, ownerlessWritePolicy));
         vectorCtx.getFilters().addAll(authFilter);
         log.info("event=vector_endpoints_registered has_embed_router={} has_pgvector={} has_reranker={}",
                 docEmbedderRouter != null, pgVectorRepository != null, reranker != null);
@@ -638,19 +665,14 @@ public final class NexusService {
         // BYPASSRLS connection is required because token-bearing tenants are
         // enumerable from service_tokens (read pre-tenant by design) and any
         // tenant that wrote scratch necessarily presented a token.
-        this.sweepScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
-            Thread t = new Thread(r, "t1-ttl-sweep");
-            t.setDaemon(true);
-            return t;
-        });
+        this.sweepScheduler = sweepSchedulerOverride != null ? sweepSchedulerOverride
+            : Executors.newSingleThreadScheduledExecutor(r -> {
+                Thread t = new Thread(r, "t1-ttl-sweep");
+                t.setDaemon(true);
+                return t;
+            });
         this.sweepScheduler.scheduleAtFixedRate(
-            () -> {
-                try {
-                    runScheduledSweep(OffsetDateTime.now(ZoneOffset.UTC));
-                } catch (Exception ex) {
-                    log.warn("event=t1_scheduled_sweep_failed error={}", ex.getMessage(), ex);
-                }
-            },
+            surviving("t1_scheduled_sweep_failed", () -> runScheduledSweep(OffsetDateTime.now(ZoneOffset.UTC))),
             SWEEP_INTERVAL_HOURS, SWEEP_INTERVAL_HOURS, TimeUnit.HOURS
         );
 
@@ -664,16 +686,118 @@ public final class NexusService {
         // was never loaded, not that it degraded).
         if (this.tupleRepo != null) {
             this.sweepScheduler.scheduleAtFixedRate(
-                () -> {
-                    try {
-                        runScheduledTupleSweep(OffsetDateTime.now(ZoneOffset.UTC));
-                    } catch (Exception ex) {
-                        log.warn("event=tuple_scheduled_sweep_failed error={}", ex.getMessage(), ex);
-                    }
-                },
+                surviving("tuple_scheduled_sweep_failed",
+                    () -> runScheduledTupleSweep(OffsetDateTime.now(ZoneOffset.UTC))),
                 SWEEP_INTERVAL_HOURS, SWEEP_INTERVAL_HOURS, TimeUnit.HOURS
             );
         }
+
+        // RDR-192 Step 9 (bead nexus-2x9xa): the state-derived chunk reaper, a THIRD scheduled task on the SAME
+        // sweepScheduler, at its own interval (NX_REAPER_INTERVAL_SECONDS, default one hour). It recomputes what
+        // is reapable from the manifest on every pass, so it is the safety net for the post-commit sweep's
+        // fail-open paths and keeps no drop set. It quarantines, never hard-deletes. Tenants are the ones the T1
+        // sweep visits: the default tenant plus every token-bearing tenant (nexus.chunks is FORCE RLS, so a
+        // tenant cannot be enumerated from the chunks table itself).
+        // The same pass also expires the quarantine it filled (reaper_expire_quarantine, 14 days, only the chunks
+        // it tagged; the client's gc_expire_quarantine skips those in turn), so ONE kill switch
+        // (NX_REAPER_ENABLED) and ONE wall-clock budget cover both. The first pass runs ChunkReaper.INITIAL_DELAY
+        // after boot, not a full interval: an engine that restarts more often than hourly must still reap.
+        ChunkReaper.Settings reaperSettings = ChunkReaper.Settings.fromEnv(System::getenv);
+        if (pgVectorRepository != null && reaperSettings.enabled()) {
+            ChunkReaper reaper = new ChunkReaper(
+                new dev.nexus.service.vectors.ReaperRepository(tenantScope), pgVectorRepository, catalogRepo,
+                new dev.nexus.service.db.Rdr192BackfillGate(ladderRepo), this::reaperTenants, reaperSettings,
+                java.time.Clock.systemUTC());
+            this.chunkReaper = reaper;
+            // The Runnable the scheduler runs, held in a field so a test runs THAT object and not a copy of its
+            // body: a test that called reaper.run() directly stayed green with the schedule turned into a no-op.
+            this.reaperScheduledTask = surviving("reaper_scheduled_run_failed", reaper::run);
+            this.sweepScheduler.scheduleWithFixedDelay(
+                this.reaperScheduledTask,
+                ChunkReaper.INITIAL_DELAY.toSeconds(), reaperSettings.interval().toSeconds(), TimeUnit.SECONDS
+            );
+            log.info("event=reaper_scheduled initial_delay_seconds={} interval_seconds={} batch_size={} "
+                    + "floor_fraction={} floor_min_chunks={} census_timeout_seconds={} wall_clock_budget_seconds={} "
+                    + "quarantine_retention_days={} floor_exempt_collections={}",
+                ChunkReaper.INITIAL_DELAY.toSeconds(), reaperSettings.interval().toSeconds(),
+                reaperSettings.batchSize(), reaperSettings.floorFraction(), reaperSettings.floorMinChunks(),
+                reaperSettings.censusTimeout().toSeconds(), reaperSettings.wallClockBudget().toSeconds(),
+                reaperSettings.quarantineRetention().toDays(), new java.util.TreeSet<>(reaperSettings.floorExemptCollections()));
+        } else {
+            this.chunkReaper = null;
+            this.reaperScheduledTask = null;
+            log.info("event=reaper_not_scheduled has_pgvector={} enabled={}",
+                pgVectorRepository != null, reaperSettings.enabled());
+        }
+    }
+
+    /**
+     * The reaper's tenants: the default tenant plus every tenant that holds a row in {@code service_tokens}, as
+     * {@link #runScheduledSweep}. {@code nexus.chunks} is FORCE RLS, so a tenant cannot be enumerated from the chunks
+     * table itself. A tenant with chunks and no {@code service_tokens} row (a scope=data JIT token row is deleted 7
+     * days after it expires, so an idle cloud tenant can lose its last one) is NOT visited until it holds a token
+     * again: the safe direction, a liveness gap, never a wrong deletion.
+     */
+    private List<String> reaperTenants() {
+        var out = new java.util.LinkedHashSet<String>();
+        out.add(DEFAULT_TENANT);
+        out.addAll(tokenStore.listKnownTenants(SweepBounds.STATEMENT_TIMEOUT));
+        return List.copyOf(out);
+    }
+
+    /** The scheduled reaper, or null when none was wired. Package-private for the wiring test. */
+    ChunkReaper chunkReaper() {
+        return chunkReaper;
+    }
+
+    /**
+     * The very {@link Runnable} the scheduler runs for the reaper, or null when none was wired. Package-private: the
+     * wiring test runs THIS object, so a schedule turned into a no-op fails it.
+     */
+    Runnable reaperScheduledTask() {
+        return reaperScheduledTask;
+    }
+
+    /**
+     * The reaper's liveness as {@code GET /v1/status} reports it: null when none is scheduled in this process (the
+     * route then says {@code enabled:false}). Read through a method, not a captured field, because the status route
+     * is registered before the reaper is built.
+     */
+    dev.nexus.service.http.StatusHandler.ReaperStatus reaperStatus() {
+        ChunkReaper r = chunkReaper;
+        if (r == null) return null;
+        ChunkReaper.LastPass last = r.lastPass();
+        return new dev.nexus.service.http.StatusHandler.ReaperStatus(true, r.settings().interval().toSeconds(),
+            r.settings().wallClockBudget().toSeconds(), r.lastCompletedPassAt(), r.failedPassesTotal(),
+            last == null ? null : new dev.nexus.service.http.StatusHandler.ReaperStatus.LastPass(
+                last.tenantsVisited(), last.tenantsErrored(), last.tenantsRefused()));
+    }
+
+    /**
+     * A scheduled task that cannot end its own schedule. {@code scheduleAtFixedRate} and
+     * {@code scheduleWithFixedDelay} both suppress every later run of a task whose {@link Runnable} threw, and the
+     * three scheduled tasks (T1 sweep, tuple sweep, chunk reaper) share one thread, so an {@link Error}
+     * (OutOfMemoryError, StackOverflowError, NoClassDefFoundError) caught by a {@code catch (Exception)} that does
+     * not cover it stops the task for the life of the process, with no log line and no alarm
+     * (nexus-wbfpw.56, RDR-192 Phase 3 gate S5). Everything is caught here and logged; the schedule stays alive.
+     */
+    static Runnable surviving(String event, Runnable task) {
+        return () -> {
+            try {
+                task.run();
+            } catch (Throwable t) {
+                if (t instanceof Error) {
+                    log.error("event={} error_class={} error={}", event, t.getClass().getName(), t.getMessage(), t);
+                } else {
+                    log.warn("event={} error={}", event, t.getMessage(), t);
+                }
+            }
+        };
+    }
+
+    /** The tenant set the scheduled reaper visits. Package-private for the wiring test. */
+    List<String> reaperTenantsForTests() {
+        return reaperTenants();
     }
 
     /** Start the HTTP server (non-blocking). */
@@ -1421,6 +1545,11 @@ public final class NexusService {
         catalogRepo.close();
         server.stop(0);
         log.info("event=service_stopped");
+    }
+
+    /** The ownerless-write policy this service applies; tests flip it between enforce and log-only. */
+    public dev.nexus.service.vectors.OwnerlessWritePolicy ownerlessWritePolicy() {
+        return ownerlessWritePolicy;
     }
 
     /**

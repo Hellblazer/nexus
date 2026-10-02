@@ -688,64 +688,113 @@ def index_code_file(ctx: IndexContext, file_path: Path) -> int:
     ):
         return total_chunks
 
-    # nexus-vw594 F1: producer #5 (nx index repo, code, legacy per-file
+    # nexus-vw594 F1: producer #5 (nx index repo, code, per-file
     # fallback — reached when the ChunkBatcher rejects the file or is
     # absent). nexus-hg2dw critique round 2: the fence-begin for this
     # file already fired above, right after the staleness check — no
     # second call needed here.
 
-    # nexus-w94eo: the engine merges metadata, so a writer-owned key this full
-    # rewrite dropped would survive on the stored row; name it for removal.
-    from nexus.metadata_schema import rewrite_delete_keys  # noqa: PLC0415 — circular-dep avoidance (nexus.metadata_schema)
-    _dk = rewrite_delete_keys(metadatas)
-    with _stage("upload"):
-        _log.debug("upserting", file=str(file_path), chunks=total_chunks)
-        try:
-            ctx.db.upsert_chunks_with_embeddings(  # type: ignore[attr-defined]
-                collection_name=ctx.corpus,
-                ids=ids,
-                documents=documents,
-                embeddings=embeddings,
-                metadatas=metadatas,
-                force_re_embed=ctx.force_re_embed,
-                **({"delete_keys": _dk} if _dk else {}),
-            )
-        except Exception as upload_exc:
-            # nexus-bhlfy: mirrors commands/store.py's cotmr fix — stamp
-            # 'failed' unconditionally so the fence does not wedge at
-            # 'indexing' with only the 6h doctor sweep as signal.
-            # _fence_fail never raises, so the re-raise below always
-            # carries the original exception unmasked.
-            if catalog_doc_id:
-                from nexus.doc_indexer import _fence_fail  # noqa: PLC0415 — deferred import; test patch target
-                _fence_fail(catalog_doc_id, str(upload_exc))
-            raise
+    # RDR-223 P2.4 (nexus-z0o2p.14): an oversize file — the ChunkBatcher is
+    # present and refused it — writes its chunks together with their owner
+    # rows through the multi-batch combined writer, so a client that dies
+    # partway leaves no chunk without an owner (see nexus.oversize_write).
+    # use_writer() picks the path by what the T3 is: a service-backed one
+    # (every real install) writes through the combined writer, and a
+    # non-service T3 (the in-memory test topology, which the engine's combined
+    # write cannot reach) keeps the old upsert. A file with no catalog
+    # document on a service-backed T3 is written by neither: it has no owner
+    # row to write a chunk with (RDR-223, nexus-z0o2p.20), so it is counted
+    # as a drop and nothing is written.
+    from nexus.oversize_write import (  # noqa: PLC0415 — deferred: rare oversize path
+        complete_oversize_write,
+        refuse_identity_less_file,
+        use_writer,
+        write_oversize_file,
+    )
 
-    with _stage("hooks"):
-        # Post-store hook chains (RDR-095). Both single-doc and batch
-        # chains fire from every storage event; the per-doc loop covers
-        # single-shape consumers on CLI ingest. Own stage bucket
-        # (nexus-cfc72): under concurrent indexing these serialize on
-        # LockedHookRegistry, and lock-wait must not read as upload time.
-        # nexus-vw594 F1: this file's whole chunk set lands in the ONE
-        # upsert above (file-atomic, same guarantee ChunkBatcher's
-        # flush-grain ride relies on) — manifest_complete rides this
-        # existing call through manifest_write_batch_hook's
-        # write_manifest_many completion stamp, no extra round trip.
-        ctx.hooks.fire_batch(
-            ids, ctx.corpus, documents, embeddings, metadatas,
-            catalog_doc_id=catalog_doc_id,
-            manifest_complete={catalog_doc_id: content_hash} if catalog_doc_id else None,
-        )
-        for _did, _doc in zip(ids, documents):
-            ctx.hooks.fire_single(_did, ctx.corpus, _doc)
-        # RDR-089 document-grain chain — once per code-file boundary.
-        # content="" (chunk-level scope only); hook reads source_path.
-        # nexus-tdgc: forward catalog doc_id when available.
-        ctx.hooks.fire_document(
-            str(file_path), ctx.corpus, "",
-            doc_id=catalog_doc_id,
-        )
+    if refuse_identity_less_file(ctx.db, catalog_doc_id, file_path, ctx.corpus, len(ids)):
+        return 0
+    _via_writer = use_writer(ctx.db, ctx.batcher, catalog_doc_id)
+    # The completion stamp is sent after the hooks below (RDR-223, nexus-z0o2p.34).
+    _pending = None
+    if _via_writer:
+
+        with _stage("upload"):
+            _log.debug("oversize_file_write", file=str(file_path), chunks=total_chunks)
+            _pending = write_oversize_file(
+                catalog_doc_id=catalog_doc_id, content_hash=content_hash, collection=ctx.corpus,
+                ids=ids, documents=documents, metadatas=metadatas,
+                force_re_embed=ctx.force_re_embed, defer_completion=True,
+            )
+    else:
+        # nexus-w94eo: the engine merges metadata, so a writer-owned key this full
+        # rewrite dropped would survive on the stored row; name it for removal.
+        from nexus.metadata_schema import rewrite_delete_keys  # noqa: PLC0415 — circular-dep avoidance (nexus.metadata_schema)
+        _dk = rewrite_delete_keys(metadatas)
+        with _stage("upload"):
+            _log.debug("upserting", file=str(file_path), chunks=total_chunks)
+            try:
+                ctx.db.upsert_chunks_with_embeddings(  # type: ignore[attr-defined]
+                    collection_name=ctx.corpus,
+                    ids=ids,
+                    documents=documents,
+                    embeddings=embeddings,
+                    metadatas=metadatas,
+                    force_re_embed=ctx.force_re_embed,
+                    **({"delete_keys": _dk} if _dk else {}),
+                )
+            except Exception as upload_exc:
+                # nexus-bhlfy: mirrors commands/store.py's cotmr fix — stamp
+                # 'failed' unconditionally so the fence does not wedge at
+                # 'indexing' with only the 6h doctor sweep as signal.
+                # _fence_fail never raises, so the re-raise below always
+                # carries the original exception unmasked.
+                if catalog_doc_id:
+                    from nexus.doc_indexer import _fence_fail  # noqa: PLC0415 — deferred import; test patch target
+                    _fence_fail(catalog_doc_id, str(upload_exc))
+                raise
+
+    try:
+        with _stage("hooks"):
+            # Post-store hook chains (RDR-095). Both single-doc and batch
+            # chains fire from every storage event; the per-doc loop covers
+            # single-shape consumers on CLI ingest. Own stage bucket
+            # (nexus-cfc72): under concurrent indexing these serialize on
+            # LockedHookRegistry, and lock-wait must not read as upload time.
+            # nexus-vw594 F1: on the old upsert path this file's whole chunk set
+            # lands in the ONE upsert above (file-atomic, same guarantee
+            # ChunkBatcher's flush-grain ride relies on) — manifest_complete rides
+            # this existing call through manifest_write_batch_hook's
+            # write_manifest_many completion stamp, no extra round trip. On the
+            # writer path the manifest is already written, so the manifest hook
+            # is excluded (a second write would double-count the sweep
+            # accounting) and no completion claim rides along; the stamp follows
+            # the hooks.
+            _chain: dict = {"manifest_complete": {catalog_doc_id: content_hash} if catalog_doc_id else None}
+            if _via_writer:
+                from nexus.mcp_infra import manifest_write_batch_hook  # noqa: PLC0415 — deferred: mcp_infra imports the indexers
+                _chain = {"skip_hooks": {manifest_write_batch_hook}}
+            ctx.hooks.fire_batch(
+                ids, ctx.corpus, documents, embeddings, metadatas,
+                catalog_doc_id=catalog_doc_id, **_chain,
+            )
+            for _did, _doc in zip(ids, documents):
+                ctx.hooks.fire_single(_did, ctx.corpus, _doc)
+            # RDR-089 document-grain chain — once per code-file boundary.
+            # content="" (chunk-level scope only); hook reads source_path.
+            # nexus-tdgc: forward catalog doc_id when available.
+            ctx.hooks.fire_document(
+                str(file_path), ctx.corpus, "",
+                doc_id=catalog_doc_id,
+            )
+        # The stamp, LAST: a kill in a hook above leaves the fence 'indexing', so the next run
+        # redoes the file and fires its hooks again.
+        if _pending is not None:
+            with _stage("upload"):
+                complete_oversize_write(_pending)
+    finally:
+        if _pending is not None:
+            _pending.close()
 
     return len(ids)
 

@@ -17,15 +17,19 @@
 # positioned by the driver only at Stage 4 (the hand-swap), never before.
 # The FLOOR engine is acquired at RUNTIME by the product's own code
 # (`nx daemon service install-binary`), triggered explicitly here rather
-# than via converge_engine's auto-transition (this leg never swaps client
-# packages, so there is no version transition to trigger it).
+# than via converge_engine's auto-transition. The leg DOES swap client
+# packages (Stage 4 installs the working-tree wheel over the seed release), so
+# a version transition exists whenever the tree's version differs from the
+# seed's; the guards that keep it from re-acquiring the floor engine over the
+# candidate are the sidecar rewrite, the post-start sha assert, the
+# restart-stale dry run, and the post-`nx upgrade` sha and /version re-checks.
 #
-# NO pre-installed conexus. The driver `uv tool install`s the WORKING-TREE
-# wheel directly (no old release involved — this leg tests the ENGINE
-# delta, not a client upgrade axis) into a `uv tool install` venv (not a
-# plain pip venv) purely for staging-convention parity with the other
-# runtime-acquisition legs; nothing here actually depends on the
-# tool-install/venv distinction.
+# NO pre-installed conexus. The driver `uv tool install`s the RELEASED conexus
+# that pins the floor engine ($SEED_RELEASE, from real PyPI) and seeds through
+# it, the way production was seeded (nexus-z0o2p.42: a working-tree client
+# newer than the floor refuses the floor engine). At the candidate swap it
+# installs the WORKING-TREE wheel over it (`uv tool install --reinstall`, the
+# real user upgrade path) and runs every post-walk assert with that client.
 FROM debian:trixie-slim
 
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -58,7 +62,8 @@ RUN pip3 install --no-cache-dir --break-system-packages uv
 USER nexus
 WORKDIR /home/nexus
 
-# The working-tree wheel (real PEP 427 name preserved) and the driver.
+# The working-tree wheel (real PEP 427 name preserved; installed only at the
+# Stage 4 client upgrade, never as the seeding client) and the driver.
 COPY --chown=nexus:nexus worktree-wheel/ /home/nexus/worktree-wheel/
 # The locally-built CANDIDATE binary + its native-image .so siblings
 # (run.sh's -Ob quick build, stamped with the floor version by the

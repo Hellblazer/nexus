@@ -6,11 +6,12 @@ psql, exactly as conexus will run it against production -- as ``nexus_svc``
 ``set_config('nexus.tenant', ...)`` inside the file's own transaction.
 
 Real engine substrate (``t2_service_env``; see ``tests/_engine_substrate.py``
-and ``tests/test_wbfpw31_nxexp_owner.py``): chunks and catalog rows are
-created through ``HttpVectorClient.upsert_chunks_with_embeddings`` and the
-real catalog writer (``register``/``write_manifest``/``delete_document``),
-the same paths production writes through -- never a raw INSERT that could
-seed a shape the engine itself cannot produce.
+and ``tests/test_wbfpw31_nxexp_owner.py``): catalog rows are created through
+the real catalog writer (``register``/``write_manifest``/``delete_document``).
+The chunks are INSERTed with substrate SQL (``tests/_chunk_seed.py``): the
+engine refuses an ownerless ``/v1/vectors/upsert-chunks`` write from RDR-223
+Phase 3 on, and the ``no-manifest`` / ``other-collection-only`` shapes this
+census exists to classify are ownerless chunks by definition.
 """
 from __future__ import annotations
 
@@ -23,9 +24,12 @@ import pytest
 import nexus.db.http_vector_client as hvc
 from nexus.catalog.chunk_quarantine import now_stamp, quarantine_collection_name
 from tests._catalog_fixture_ops import ActiveCatalog
+from tests._chunk_seed import seed_chunks_direct
+from tests._reapable_age import age_chunks_past_grace
 from tests._engine_substrate import ensure_engine, mint_test_tenant
 
-pytestmark = [pytest.mark.integration]
+# Not integration-marked (nexus-wbfpw.38): the substrate provisions itself,
+# and CI's default selection must run this RDR-192 pin.
 
 _SQL_PATH = Path(__file__).resolve().parents[1] / "scripts" / "sql" / "livec_census.sql"
 
@@ -54,7 +58,6 @@ def _seed_one_chunk_per_cause(coll: str, coll2: str) -> dict[str, str]:
     than being a test-only shortcut.
     """
     cat = ActiveCatalog()
-    db = hvc.HttpVectorClient(tenant="unused-client-side-tag")
     owner = cat.register_owner(f"{coll}-owner", "curator")
 
     chash_live = _chash(f"{coll}:live")
@@ -62,14 +65,13 @@ def _seed_one_chunk_per_cause(coll: str, coll2: str) -> dict[str, str]:
     chash_other = _chash(f"{coll}:other")
     chash_none = _chash(f"{coll}:none")
 
-    db.upsert_chunks_with_embeddings(
+    seed_chunks_direct(
         coll,
         ids=[chash_live, chash_tomb, chash_other, chash_none],
         documents=[
             "livec census live chunk", "livec census tombstoned-owner chunk",
             "livec census other-collection-only chunk", "livec census no-manifest chunk",
         ],
-        embeddings=[],
         metadatas=[
             {"chunk_text_hash": chash_live, "title": "live.txt:1-1"},
             {"chunk_text_hash": chash_tomb, "title": "tomb.txt:1-1"},
@@ -78,11 +80,10 @@ def _seed_one_chunk_per_cause(coll: str, coll2: str) -> dict[str, str]:
         ],
     )
     # FK-satisfying copy: same chash, physically stored under coll2 too.
-    db.upsert_chunks_with_embeddings(
+    seed_chunks_direct(
         coll2,
         ids=[chash_other],
         documents=["livec census other-collection-only chunk"],
-        embeddings=[],
         metadatas=[{"chunk_text_hash": chash_other, "title": "other.txt:1-1"}],
     )
 
@@ -163,7 +164,6 @@ def test_livec_census_sql_file_exists() -> None:
     assert _SQL_PATH.is_file(), f"census script missing: {_SQL_PATH}"
 
 
-@pytest.mark.integration
 def test_livec_census_classifies_each_cause_and_scopes_by_tenant(
     t2_service_env: str, substrate_state: dict, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -220,7 +220,6 @@ def test_livec_census_classifies_each_cause_and_scopes_by_tenant(
     assert by_key_b[(coll_b, "no-manifest")] == 1
 
 
-@pytest.mark.integration
 def test_livec_census_catches_a_missing_tombstone_join(
     t2_service_env: str, substrate_state: dict, tmp_path: Path,
 ) -> None:
@@ -261,7 +260,6 @@ def test_livec_census_catches_a_missing_tombstone_join(
     )
 
 
-@pytest.mark.integration
 def test_livec_census_reports_quarantine_siblings_as_their_own_cause(
     t2_service_env: str, substrate_state: dict,
 ) -> None:
@@ -272,13 +270,12 @@ def test_livec_census_reports_quarantine_siblings_as_their_own_cause(
     Seeded through the real GC route, not a hand-named collection."""
     coll = _coll("quar")
     cat = ActiveCatalog()
-    db = hvc.HttpVectorClient(tenant="unused-client-side-tag")
+    db = hvc.HttpVectorClient(tenant="unused-client-side-tag")  # gc route only
     owner = cat.register_owner(f"{coll}-owner", "curator")
     live, orphan = _chash(f"{coll}:live"), _chash(f"{coll}:orphan")
-    db.upsert_chunks_with_embeddings(
+    seed_chunks_direct(
         coll, ids=[live, orphan],
         documents=["livec census quarantine live chunk", "livec census quarantine orphan chunk"],
-        embeddings=[],
         metadatas=[
             {"chunk_text_hash": live, "title": "qlive.txt:1-1"},
             {"chunk_text_hash": orphan, "title": "qorphan.txt:1-1"},
@@ -289,6 +286,9 @@ def test_livec_census_reports_quarantine_siblings_as_their_own_cause(
         physical_collection=coll, file_path=f"/tmp/{coll}/qlive.txt",
     ))
     cat.write_manifest(doc, [{"chash": live, "position": 0}], collection=coll)
+    # gc selects with reapable(c), which honours a 30 day grace window (RDR-192 Step 8):
+    # this orphan stands for one orphaned long ago.
+    age_chunks_past_grace(coll)
 
     sibling = quarantine_collection_name(coll)
     moved = db.gc_quarantine_orphans(coll, sibling, now_stamp(), 20)
@@ -302,7 +302,6 @@ def test_livec_census_reports_quarantine_siblings_as_their_own_cause(
     assert by_key[(coll, "no-manifest")] == 0
 
 
-@pytest.mark.integration
 def test_livec_census_refuses_an_unset_or_empty_tenant(
     t2_service_env: str, substrate_state: dict,
 ) -> None:
@@ -317,7 +316,6 @@ def test_livec_census_refuses_an_unset_or_empty_tenant(
     assert "holds no chunks" in wrong.stderr
 
 
-@pytest.mark.integration
 def test_livec_census_manifest_probe_is_an_index_condition_under_rls(
     t2_service_env: str, substrate_state: dict,
 ) -> None:
@@ -338,13 +336,28 @@ def test_livec_census_manifest_probe_is_an_index_condition_under_rls(
     assert flags.returncode == 0, flags.stderr
     assert flags.stdout.split() == ["byteaeq,t", "texteq,t"], flags.stdout
 
-    # On a near-empty table the planner may cost (tenant, collection) the
-    # same as (tenant, chash) and pick it, which says nothing about pushdown.
-    # So, as the substrate superuser, drop that competitor inside a
-    # transaction that is rolled back, switch to nexus_svc, and require the
-    # chash equality to appear in the Index Cond of idx_catalog_chunks_chash.
+    # On a near-empty table the planner may cost any tenant_id-leading index
+    # the same as (tenant, chash) and pick it, which says nothing about
+    # pushdown. Dropping only idx_catalog_chunks_collection was not enough:
+    # CI then picked idx_catalog_chunks_doc_id with chash as a Filter
+    # (nexus-wbfpw.38, the first time a routine gate ran this test). So, as
+    # the substrate superuser, drop EVERY other index and the primary key
+    # inside a transaction that is rolled back, switch to nexus_svc, and
+    # require the chash equality in the Index Cond of the one index left.
+    # If byteaeq stops being leakproof the chash test becomes a Filter and
+    # the cond assertion below still fails.
     q = (
-        "BEGIN; DROP INDEX nexus.idx_catalog_chunks_collection; "
+        "BEGIN; DO $$ DECLARE r record; BEGIN "
+        "FOR r IN SELECT conname FROM pg_constraint "
+        "WHERE conrelid = 'nexus.catalog_document_chunks'::regclass "
+        "AND contype IN ('p', 'u') LOOP "
+        "EXECUTE format('ALTER TABLE nexus.catalog_document_chunks "
+        "DROP CONSTRAINT %I CASCADE', r.conname); END LOOP; "
+        "FOR r IN SELECT i.relname FROM pg_index x "
+        "JOIN pg_class i ON i.oid = x.indexrelid "
+        "WHERE x.indrelid = 'nexus.catalog_document_chunks'::regclass "
+        "AND i.relname <> 'idx_catalog_chunks_chash' LOOP "
+        "EXECUTE format('DROP INDEX nexus.%I', r.relname); END LOOP; END $$; "
         "SET LOCAL ROLE nexus_svc; SET LOCAL enable_seqscan = off; "
         f"SELECT set_config('nexus.tenant', '{t2_service_env}', true); "
         "EXPLAIN SELECT 1 FROM nexus.catalog_document_chunks m "

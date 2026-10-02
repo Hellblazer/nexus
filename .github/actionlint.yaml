@@ -4,5 +4,16 @@ self-hosted-runner:
   # -- no 'self-hosted'/'macos'/'arm64' defaults -- hence `runs-on: hellmini`
   # (a bare custom label, not an array with 'self-hosted') in the workflows
   # that target it.
+  #
+  # hellmini-ci: the second runner on the same box, macOS user `ghci`, for the
+  # Service CI Java job on owner pushes (nexus-f5i1m) and the isolation probe
+  # (nexus-vyg07). Same bare-label registration. service-ci.yml's runs-on is an
+  # expression, which actionlint does not resolve, so only the probe needs this.
+  #
+  # qwen-linux: the WSL runner on qwentescence, Linux user `ghci`. Today it also
+  # carries the default labels (self-hosted, Linux, X64); Sam is re-registering it
+  # with --no-default-labels (2026-10-02), so the jobs name only `qwen-linux`.
   labels:
     - hellmini
+    - hellmini-ci
+    - qwen-linux

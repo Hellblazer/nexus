@@ -28,7 +28,17 @@ This is the sibling gate for that surface, same idiom as F4:
    independently AST-verify that the enclosing function calls
    ``_fence_begin`` — mirroring F4's own same-function proof rather than
    trusting the registry's prose.
-4. Non-vacuity: the allowlist is neither empty nor stale.
+4. Non-vacuity: the allowlist is exactly the two known callers (:data:`_KNOWN_CALLERS`), neither
+   grown nor shrunk without this file changing with it.
+
+State after RDR-223 Phase 2 (nexus-z0o2p.16 / .17 / .18): ``nx store put``, ``nx memory promote``
+and the recovery-bundle import no longer call ``fire_store_chains``: they write their note through
+``note_write.put_note`` (the fence begins there) and fire through ``note_write.fire_note_chains``,
+whose fence coverage is ``test_vw594_fence_coverage_gate.py``'s (the ``fire_batch`` leg). What this
+gate still polices is the remaining ``fire_store_chains`` callers, both deliberately unfenced, and,
+above all, a NEW caller: the nexus-tafjk gap was a producer nobody listed. It is kept for that, and
+for the fenced-entry proof below, which has no ``fenced=True`` entry to prove today but is exercised
+against real functions so it cannot rot into a loop over nothing.
 """
 from __future__ import annotations
 
@@ -54,24 +64,11 @@ class _Coverage:
 
 # (relative-path-from-src-nexus, enclosing-function-name) -> coverage record.
 _ALLOWLIST: dict[tuple[str, str], _Coverage] = {
-    ("commands/store.py", "put_cmd"): _Coverage(
-        reason=(
-            "nx store put: _fence_begin called in this same function "
-            "before db.put; manifest_complete rides the fire_store_chains "
-            "call at the tail, mirroring MCP core.py::store_put's F2 "
-            "pattern verbatim (nexus-cotmr)."
-        ),
-        fenced=True,
-    ),
-    ("commands/memory.py", "promote_cmd"): _Coverage(
-        reason=(
-            "nx memory promote: _fence_begin called in this same function "
-            "before t3.put; manifest_complete rides the fire_store_chains "
-            "call at the tail, mirroring MCP core.py::store_put's F2 "
-            "pattern verbatim (nexus-cotmr)."
-        ),
-        fenced=True,
-    ),
+    # Neither nx store put (put_cmd, RDR-223 P2.6, nexus-z0o2p.16) nor nx memory
+    # promote (promote_cmd, P2.7, nexus-z0o2p.17) is here any more: both write their
+    # note through note_write.put_note (the fence begins there) and fire the chains
+    # one by one, so neither has a fire_store_chains call left to fence. The fire_batch
+    # leg is test_vw594_fence_coverage_gate.py's.
     ("exporter.py", "_fire_store_chains_grouped_by_doc"): _Coverage(
         reason=(
             "nx store import: KNOWN, NAMED residual gap (nexus-tafjk "
@@ -85,18 +82,6 @@ _ALLOWLIST: dict[tuple[str, str], _Coverage] = {
             "a future bead does this properly."
         ),
         fenced=False,
-    ),
-    ("catalog/recovery_bundle.py", "_default_import_doc"): _Coverage(
-        reason=(
-            "nx catalog import (recovery bundle, nexus-xn3fr review-fold): "
-            "_fence_begin called in this same function before t3.put when a "
-            "catalog row was minted; manifest_complete rides the "
-            "fire_store_chains call at the tail, mirroring MCP "
-            "core.py::store_put's F2 pattern. Single-chunk by construction "
-            "(single_chunk_manifest_metadata), so the F2 shape transplants "
-            "directly, unlike exporter.py's multi-chunk groups."
-        ),
-        fenced=True,
     ),
     ("commands/collection.py", "_reembed_collection"): _Coverage(
         reason=(
@@ -193,12 +178,23 @@ def test_every_fire_store_chains_producer_is_accounted_for() -> None:
     )
 
 
+#: The two ``fire_store_chains`` callers left after RDR-223 Phase 2, by design unfenced.
+_KNOWN_CALLERS = frozenset({
+    ("commands/collection.py", "_reembed_collection"),
+    ("exporter.py", "_fire_store_chains_grouped_by_doc"),
+})
+
+
 def test_allowlist_is_non_vacuous() -> None:
-    assert len(_ALLOWLIST) >= 4, (
-        f"allowlist has only {len(_ALLOWLIST)} entries — expected at least "
-        "4 (one per known fire_store_chains call site); a shrunk allowlist "
-        "likely means a call site was silently dropped from tracking."
+    """The allowlist is EXACTLY the two known callers. A floor (``len >= N``) would have let the
+    three Phase 2 deletions empty the fenced-entry proof below without a test going red; an exact
+    pin makes adding or dropping a caller a deliberate edit of this file."""
+    assert set(_ALLOWLIST) == _KNOWN_CALLERS, (
+        f"allowlist is {sorted(_ALLOWLIST)}, expected exactly {sorted(_KNOWN_CALLERS)}: a caller "
+        "was added or silently dropped from tracking."
     )
+    assert {site.rel_path + "::" + site.function for site in _all_sites()} == {
+        f"{a}::{b}" for a, b in _KNOWN_CALLERS}, "every known caller must still call fire_store_chains"
     for key, cov in _ALLOWLIST.items():
         assert cov.reason.strip(), f"{key}: allowlist entry with an empty reason"
         assert len(cov.reason.strip()) > 20, (
@@ -216,36 +212,49 @@ def test_allowlist_has_no_stale_entries() -> None:
     )
 
 
+def _tree_for(rel_path: str, trees: dict[str, ast.Module]) -> ast.Module:
+    if rel_path not in trees:
+        trees[rel_path] = ast.parse(
+            (SRC_ROOT / rel_path).read_text(encoding="utf-8"), filename=rel_path)
+    return trees[rel_path]
+
+
 def test_fenced_allowlist_entries_are_proven() -> None:
     """For every allowlist entry claiming fenced=True, independently
     verify via AST that the named function really does call
     _fence_begin — the registry's prose is not trusted blindly.
 
-    KILL CONTROL: commenting out the ``_fence_begin(...)`` call in
-    ``commands/store.py``'s ``put_cmd`` (or ``commands/memory.py``'s
-    ``promote_cmd``) turns this test RED for that specific entry while
-    leaving every other test in this file green — verified manually
-    during implementation, 2026-08-06."""
+    No entry claims fenced=True today (the three that did, ``put_cmd``, ``promote_cmd`` and the
+    recovery import's ``_default_import_doc``, moved to ``note_write.put_note`` at RDR-223 Phase 2
+    and are the vw594 gate's), so the loop over entries proves nothing by itself. That is asserted
+    instead of hidden, and the predicate it would apply is exercised on real functions below
+    (:func:`test_the_fence_predicate_separates_a_fencing_function_from_one_that_does_not`), so the
+    day a ``fenced=True`` entry is added the proof is live and a broken predicate cannot pass it."""
     trees: dict[str, ast.Module] = {}
-
-    def _tree_for(rel_path: str) -> ast.Module:
-        if rel_path not in trees:
-            trees[rel_path] = ast.parse(
-                (SRC_ROOT / rel_path).read_text(encoding="utf-8"),
-                filename=rel_path,
-            )
-        return trees[rel_path]
-
+    fenced = {k: cov for k, cov in _ALLOWLIST.items() if cov.fenced}
+    assert fenced == {}, (
+        f"a fenced=True entry was added ({sorted(fenced)}); extend this test's pin and keep the loop")
     unproven = []
-    for (rel_path, function), cov in _ALLOWLIST.items():
-        if not cov.fenced:
-            continue
-        if not _function_calls_fence_begin(_tree_for(rel_path), function):
+    for (rel_path, function), cov in fenced.items():
+        if not _function_calls_fence_begin(_tree_for(rel_path, trees), function):
             unproven.append(f"{rel_path}:{function}()")
     assert not unproven, (
         "nexus-cotmr: allowlist entries claim fence coverage but no "
         f"_fence_begin call was found in that function: {unproven}"
     )
+
+
+def test_the_fence_predicate_separates_a_fencing_function_from_one_that_does_not() -> None:
+    """The predicate the fenced-entry proof applies, exercised on real functions: a function that
+    begins the fence (``prose_indexer.py::index_prose_file``; the PDF paths no longer call
+    ``_fence_begin`` themselves, their writer sends the begin) passes, both known callers (which
+    do not) fail, and a name that is nowhere fails too. KILL CONTROL: making the predicate return
+    a constant turns this RED, so the proof above cannot silently become a pass-all."""
+    trees: dict[str, ast.Module] = {}
+    assert _function_calls_fence_begin(_tree_for("prose_indexer.py", trees), "index_prose_file")
+    for rel_path, function in _KNOWN_CALLERS:
+        assert not _function_calls_fence_begin(_tree_for(rel_path, trees), function), (rel_path, function)
+    assert not _function_calls_fence_begin(_tree_for("doc_indexer.py", trees), "no_such_function")
 
 
 def test_unfenced_entries_are_the_documented_minimum() -> None:

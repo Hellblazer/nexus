@@ -183,6 +183,32 @@ def test_emit_identity_drop_summary_surfaces_identity_drops(capsys):
     assert "nx catalog reconcile" in err
 
 
+def test_emit_identity_drop_summary_words_a_refused_document_as_not_written(capsys):
+    """RDR-223 (nexus-z0o2p.13): a document refused before any write (no catalog
+    document to own its chunks) is not 'indexed WITHOUT an identity' and has
+    nothing for 'nx catalog reconcile' to repair; it gets its own line, and the
+    original wording is unchanged for a drop that did store its chunks."""
+    from nexus.mcp_infra import _record_manifest_identity_drop
+
+    _record_manifest_identity_drop("docs__x", 6, written=False)
+    _record_manifest_identity_drop("docs__x", 2, written=False)
+
+    assert emit_identity_drop_summary(indexed_count=0) is True
+    err = capsys.readouterr().err
+    assert (
+        "WARNING: 2 document(s) (8 chunks; collection(s): docs__x) were NOT indexed" in err
+    )
+    assert "nothing was written" in err
+    assert "WITHOUT a catalog document identity" not in err
+    assert "nx catalog reconcile" not in err
+
+    _record_manifest_identity_drop("docs__y", 3)
+    emit_identity_drop_summary(indexed_count=0)
+    err = capsys.readouterr().err
+    assert "WARNING: 1 chunk batch(es) (3 chunks; collection(s): docs__y) were indexed WITHOUT" in err
+    assert "WARNING: 2 document(s) (8 chunks; collection(s): docs__x) were NOT indexed" in err
+
+
 def test_emit_identity_drop_summary_surfaces_complete_refusals(capsys):
     from nexus.mcp_infra import _record_complete_refusal
 
@@ -506,6 +532,23 @@ def test_raise_identity_drop_exception_for_file_names_file_and_remedy(tmp_path):
     assert str(target) in msg
     assert "7 chunk" in msg
     assert "orphaned" in msg.lower()
+
+
+def test_raise_identity_drop_exception_for_file_says_nothing_was_written_for_a_refusal(tmp_path):
+    """nexus-wbfpw.34: since RDR-223 (nexus-z0o2p.20) a file with no catalog
+    document writes no chunk. The single-file message used to say its chunks
+    "landed and are searchable", which is false for that drop."""
+    from nexus.mcp_infra import _record_manifest_identity_drop
+
+    target = tmp_path / "refused.pdf"
+    _record_manifest_identity_drop("docs__x", 7, written=False)
+    with pytest.raises(click.ClickException) as exc_info:
+        raise_identity_drop_exception_for_file(target, chunks=7)
+    msg = str(exc_info.value)
+    assert str(target) in msg
+    assert "nothing was written" in msg
+    assert "searchable" not in msg
+    assert "was indexed" not in msg
 
 
 def test_resolve_confirmed_write_failure_doc_ids_empty_when_nothing_failed():

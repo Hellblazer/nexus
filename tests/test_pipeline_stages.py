@@ -17,6 +17,7 @@ from nexus.pdf_chunker import TextChunk
 from nexus.pdf_extractor import ExtractionResult
 from nexus.db.t3 import T3Database
 from nexus.db.http_pipeline_client import HttpPipelineDB, PipelineConflictRunning
+from tests._owner_write_double import install_streaming_writer, throwaway_t3 as _make_throwaway_t3
 from tests.pipeline_fake_engine import make_fake_engine_db
 from nexus.pipeline_stages import (
     _enrich_metadata_from_extraction,
@@ -119,11 +120,20 @@ def done_event() -> threading.Event:
 
 
 @pytest.fixture()
+def throwaway_t3():
+    """A dry run's store: in-memory, the only kind a PDF dry run accepts (RDR-223)."""
+    return _make_throwaway_t3()
+
+
+@pytest.fixture()
 def mock_t3() -> MagicMock:
     m = create_autospec(T3Database, instance=True)
     m.get_or_create_collection.return_value = MagicMock(
         get=MagicMock(return_value={"ids": [], "metadatas": []}))
     return m
+
+
+from tests._bounded_polling import bound_the_polling as _bound_the_polling  # noqa: E402 — shared with the journeys
 
 
 def _pop_pages(db: HttpPipelineDB, h: str, n: int) -> None:
@@ -132,6 +142,30 @@ def _pop_pages(db: HttpPipelineDB, h: str, n: int) -> None:
         db.write_page(h, i, f"Page {i} content here.",
                       metadata={"page_number": i + 1, "text_length": 22})
     db.update_progress(h, total_pages=n, pages_extracted=n)
+
+
+def _pop_killed_upload(
+    db: HttpPipelineDB, h: str, n: int, flagged: int, *, counter: int | None = None,
+    embedded_rows: int | None = None,
+) -> None:
+    """What a process killed hard part way through an upload leaves: the pages and chunks the run
+    extracted and embedded, the chunks it had flagged uploaded, and a pipeline row marked failed
+    (the handler a survived failure runs never ran, the row stays until it goes stale). Extraction
+    is complete (``total_pages`` reached, metadata stored) and so is chunking (``chunks_embedded``
+    set). *embedded_rows* writes fewer chunk rows than ``chunks_created`` claims (a damaged
+    buffer)."""
+    db.create_pipeline(h, "/a.pdf", "docs__test")
+    for i in range(2):
+        db.write_page(h, i, f"Page {i} content.", metadata={"page_number": i + 1, "text_length": 15})
+    db.store_extraction_metadata(h, {"page_count": 2, "table_regions": [], "extraction_method": "docling"})
+    db.update_progress(h, total_pages=2, pages_extracted=2, chunks_created=n, chunks_embedded=n)
+    for i in range(n if embedded_rows is None else embedded_rows):
+        db.write_chunk(h, i, f"chunk {i} text", f"{h[:16]}_{i}",
+                       metadata={"page": 1, "content_hash": h}, embedding=_fake_embedding(i))
+    db.mark_uploaded(h, list(range(flagged)))
+    if counter:
+        db.update_progress(h, chunks_uploaded=counter)
+    db.mark_failed(h, error="killed")
 
 
 def _pop_chunks(db: HttpPipelineDB, h: str, n: int) -> None:
@@ -182,16 +216,21 @@ class TestServiceModeStreaming:
     """nexus-9n1u3: PDF streaming pipeline must server-side-embed in service
     mode instead of demanding a Voyage key (which broke ALL PDF ingestion)."""
 
-    def test_service_mode_no_voyage_completes_and_server_embeds(self, db) -> None:
+    @pytest.fixture(autouse=True)
+    def writer(self, monkeypatch: pytest.MonkeyPatch):
+        return install_streaming_writer(monkeypatch)
+
+    def test_service_mode_no_voyage_completes_and_server_embeds(self, db, writer) -> None:
         t3, _ = _run_service_mode(
             db, _er(2), _tc(("chunk a", 0, {}), ("chunk b", 1, {})))
-        # Did NOT raise; the uploader routed to the server-side-embed upsert.
-        t3.upsert_chunks_with_embeddings.assert_called()
-        # Forwarded embeddings are empty — the service embeds, client vectors
-        # are discarded (HttpVectorClient.upsert_chunks_with_embeddings).
-        ca = t3.upsert_chunks_with_embeddings.call_args
-        embs = ca.args[3] if len(ca.args) > 3 else ca.kwargs["embeddings"]
-        assert embs and all(e == [] for e in embs)
+        # Did NOT raise; the uploader wrote the chunks with their owner rows and no chunk upload
+        # of its own.
+        t3.upsert_chunks_with_embeddings.assert_not_called()
+        (w,) = writer.instances
+        (rows, chunks), = w.batches
+        assert len(chunks) == 2
+        # The service embeds: no client vector rides the write (RDR-152 Seam B).
+        assert all("embedding" not in c for c in chunks)
 
     def test_non_service_no_voyage_still_raises(self, db) -> None:
         # nexus-sghyo (2026-08-06): the legacy (non-service) embed path is
@@ -468,41 +507,69 @@ class TestChunkerLoop:
 
 
 class TestUploaderLoop:
-    def test_uploads_chunks_via_t3_api(self, db) -> None:
+    """RDR-223 (nexus-z0o2p.11): the uploader hands every batch to the document's multi-batch writer
+    (rows + the chunks they reference); it makes no chunk upload of its own. ``writer`` records the
+    calls the real writer would send (the real engine refuses these tests' fake chunk ids); the
+    writer's behaviour against the real engine is in ``tests/integration/test_rdr223_pdf_journey.py``."""
+
+    @pytest.fixture(autouse=True)
+    def writer(self, monkeypatch: pytest.MonkeyPatch):
+        return install_streaming_writer(monkeypatch)
+
+    def _up(self, db, *, t3=None, cancel=None, chunking_done=None, **kw) -> None:
+        kw.setdefault("catalog_doc_id", "1.1.1")
+        uploader_loop("h1", db, t3 if t3 is not None else MagicMock(), "docs__test",
+                      cancel or threading.Event(), chunking_done, **kw)
+
+    def test_hands_the_chunks_to_the_writer_and_makes_no_upsert(self, db, writer) -> None:
         _pop_chunks(db, "h1", 3)
         t3 = MagicMock()
-        uploader_loop("h1", db, t3, "docs__test", threading.Event())
-        t3.upsert_chunks_with_embeddings.assert_called_once()
-        assert len(t3.upsert_chunks_with_embeddings.call_args[0][1]) == 3
-        assert db.read_uploadable_chunks("h1") == []
+        self._up(db, t3=t3)
+        t3.upsert_chunks_with_embeddings.assert_not_called()
+        (w,) = writer.instances
+        (rows, chunks), = w.batches
+        assert [r["position"] for r in rows] == [0, 1, 2], "position is the chunker's global index"
+        assert [r["chash"] for r in rows] == [c["chash"] for c in chunks] == [f"h1_{i}" for i in range(3)]
+        assert [c["text"] for c in chunks] == [f"chunk {i} text" for i in range(3)]
+        assert all("chunk_index" not in c["metadata"] for c in chunks), \
+            "the chunk's position is its manifest row, not chunk metadata (RDR-108 Phase 3)"
+        assert w.kwargs["doc_id"] == "1.1.1" and w.kwargs["collection"] == "docs__test"
+        assert w.kwargs["content_hash"] == "h1"
+        assert w.finished and db.read_uploadable_chunks("h1") == []
 
-    def test_force_re_embed_true_forwards_true(self, db) -> None:
-        """nexus-8143o: uploader_loop's own force_re_embed kwarg (default
-        False) is forwarded verbatim to every batch's
-        upsert_chunks_with_embeddings call -- the streaming pipeline's
-        one and only RDR-181 server-side re-embed control point."""
+    def test_a_direct_caller_gets_a_writer_that_stamps_itself(self, db, writer) -> None:
+        _pop_chunks(db, "h1", 2)
+        self._up(db)
+        assert writer.instances[0].kwargs["defer_completion"] is False
+        assert ("complete",) not in writer.events
+
+    def test_an_orchestrated_run_defers_the_stamp_to_the_orchestrator(self, db, writer) -> None:
+        from nexus.pipeline_stages import UploadRun
+
+        _pop_chunks(db, "h1", 2)
+        run = UploadRun()
+        self._up(db, run=run)
+        assert writer.instances[0].kwargs["defer_completion"] is True
+        assert run.finished and run.writer is writer.instances[0]
+        assert ("complete",) not in writer.events, "only the orchestrator stamps"
+
+    def test_force_re_embed_true_reaches_the_writer(self, db, writer) -> None:
+        """nexus-8143o: uploader_loop's own force_re_embed kwarg (default False) is the writer's
+        force_re_embed -- the streaming pipeline's one RDR-181 server-side re-embed control."""
         _pop_chunks(db, "h1", 3)
-        t3 = MagicMock()
-        uploader_loop("h1", db, t3, "docs__test", threading.Event(), force_re_embed=True)
-        t3.upsert_chunks_with_embeddings.assert_called_once()
-        _, kwargs = t3.upsert_chunks_with_embeddings.call_args
-        assert kwargs.get("force_re_embed") is True
+        self._up(db, force_re_embed=True)
+        assert writer.instances[0].kwargs["force_re_embed"] is True
 
-    def test_force_re_embed_default_forwards_false(self, db) -> None:
-        """Omitting force_re_embed (the default) must NOT set True on the
-        server call -- the whole point of this bead's decoupling."""
+    def test_force_re_embed_default_is_false(self, db, writer) -> None:
         _pop_chunks(db, "h1", 3)
-        t3 = MagicMock()
-        uploader_loop("h1", db, t3, "docs__test", threading.Event())
-        t3.upsert_chunks_with_embeddings.assert_called_once()
-        _, kwargs = t3.upsert_chunks_with_embeddings.call_args
-        assert kwargs.get("force_re_embed") is False
+        self._up(db)
+        assert writer.instances[0].kwargs["force_re_embed"] is False
 
-    def test_batch_sizing(self, db) -> None:
+    def test_batch_sizing(self, db, writer) -> None:
         _pop_chunks(db, "h1", 200)
-        t3 = MagicMock()
-        uploader_loop("h1", db, t3, "docs__test", threading.Event())
-        assert t3.upsert_chunks_with_embeddings.call_count == 2
+        self._up(db)
+        assert [len(r) for r, _ in writer.instances[0].batches] == [128, 72]
+        assert len(writer.instances) == 1, "one writer for the whole document"
 
     def test_cancel_exits(self, db) -> None:
         db.create_pipeline("h1", "/a.pdf", "docs__test")
@@ -512,57 +579,83 @@ class TestUploaderLoop:
         uploader_loop("h1", db, MagicMock(), "docs__test", cancel)
         t.join()
 
-    def test_marks_uploaded_per_batch(self, db) -> None:
+    def test_marks_uploaded_per_batch_once_its_request_was_sent(self, db, writer) -> None:
         _pop_chunks(db, "h1", 200)
-        t3 = MagicMock()
         orig, calls = db.mark_uploaded, []
-        db.mark_uploaded = lambda ch, idx: (calls.append(len(idx)), orig(ch, idx))  # type: ignore[assignment]
-        uploader_loop("h1", db, t3, "docs__test", threading.Event())
-        assert calls == [128, 72]
+        db.mark_uploaded = lambda ch, idx: (calls.append((len(idx), list(writer.events))), orig(ch, idx))  # type: ignore[assignment]
+        self._up(db)
+        assert [n for n, _ in calls] == [128, 72]
+        # The writer holds a batch back until it knows whether it is the last: batch 0 is flagged
+        # after batch 1 arrived (which sent it), batch 1 only after finish() sent it.
+        assert ("sent", 0) in calls[0][1] and ("sent", 1) not in calls[0][1]
+        assert ("finish",) in calls[1][1] and ("sent", 1) in calls[1][1]
 
     def test_done_when_all_uploaded(self, db) -> None:
         _pop_chunks(db, "h1", 2)
-        uploader_loop("h1", db, MagicMock(), "docs__test", threading.Event())
+        self._up(db)
         s = db.get_pipeline_state("h1")
         assert s["chunks_uploaded"] == 2 and s["status"] == "completed"
 
-    def test_done_via_chunking_done_event(self, db) -> None:
+    def test_done_via_chunking_done_event(self, db, writer) -> None:
         _pop_chunks(db, "h1", 3)
-        t3 = MagicMock()
         cd = threading.Event()
         cd.set()
-        uploader_loop("h1", db, t3, "docs__test", threading.Event(), cd)
+        self._up(db, chunking_done=cd)
         s = db.get_pipeline_state("h1")
         assert s["chunks_uploaded"] == 3 and s["status"] == "completed"
-        t3.upsert_chunks_with_embeddings.assert_called_once()
+        assert len(writer.instances[0].batches) == 1
 
-    def test_resume_adds_to_persisted_chunks_uploaded(self, db) -> None:
-        """nexus-6m9zy.1 (#3): a crash-resume must ADD this run's uploads
-        to the persisted chunks_uploaded count, not overwrite it.
-        read_uploadable_chunks never returns an already-uploaded row, so
-        if the running total restarts at 0 on every resume, chunks_uploaded
-        can never reach chunks_created again and the uploader polls
-        forever. Run on a thread with a bounded join so a regression
-        hangs the assertion, not the test process."""
-        _pop_chunks(db, "h1", 6)
-        db.mark_uploaded("h1", [0, 1, 2, 3])  # run 1 uploaded 4 of 6, then crashed
-        db.update_progress("h1", chunks_uploaded=4)
-        t3 = MagicMock()
+    def test_the_last_batch_waits_for_the_chunker_to_finish(self, db, writer) -> None:
+        """The writer's last request carries the sweep, so it must not be sent while the chunker can
+        still produce chunks: the uploader hands over what it has and waits."""
+        _pop_chunks(db, "h1", 3)
+        cd = threading.Event()
         cancel = threading.Event()
-        th = threading.Thread(
-            target=uploader_loop, args=("h1", db, t3, "docs__test", cancel), daemon=True,
-        )
+        th = threading.Thread(target=self._up, args=(db,), kwargs={"chunking_done": cd, "cancel": cancel},
+                              daemon=True)
         th.start()
-        th.join(timeout=2.0)
-        completed_in_time = not th.is_alive()
-        cancel.set()
-        th.join(timeout=1.0)
-        assert completed_in_time, "uploader never reached completion: chunks_uploaded never caught up to chunks_created"
-        t3.upsert_chunks_with_embeddings.assert_called_once()
-        assert len(t3.upsert_chunks_with_embeddings.call_args[0][1]) == 2
+        time.sleep(0.3)
+        assert th.is_alive() and not writer.instances[0].finished, "held until the chunker is done"
+        cd.set()
+        th.join(timeout=3.0)
+        assert not th.is_alive() and writer.instances[0].finished
+
+    def test_a_resume_with_everything_already_uploaded_needs_no_writer(self, db, writer) -> None:
+        """A retry of a run whose post-pass failed: every chunk was flagged by the earlier process,
+        so there is nothing to send and no writer runs (the orchestrator stamps the run itself)."""
+        _pop_chunks(db, "h1", 6)
+        db.mark_uploaded("h1", list(range(6)))
+        db.update_progress("h1", chunks_uploaded=6)
+        cd = threading.Event()
+        cd.set()
+        self._up(db, chunking_done=cd)
+        assert writer.instances == []
         s = db.get_pipeline_state("h1")
-        assert s["chunks_uploaded"] == 6, f"expected 4 already-uploaded + 2 this run, got {s['chunks_uploaded']}"
-        assert s["status"] == "completed"
+        assert s["chunks_uploaded"] == 6 and s["status"] == "completed"
+
+    @pytest.mark.parametrize("counter", [4, 0], ids=["counter-current", "counter-lagging"])
+    def test_a_writer_less_uploader_whose_first_chunk_is_not_the_first_refuses(
+        self, db, writer, counter, monkeypatch,
+    ) -> None:
+        """Internal invariant. nexus-6m9zy.1 (#3) was a crash-resume that added its uploads to the
+        persisted count. With one writer per document that resume is unsafe: the writer's state (the
+        pre-run manifest snapshot, the positions written) died with the process, and sending only
+        the remaining chunks would replace the manifest with that tail and sweep the head as
+        superseded. The orchestrator discards such a buffer before it gets here; an uploader that is
+        handed one anyway refuses to send. It reads the first chunk it would send, not the counter
+        (the counter is buffered and lags)."""
+        from nexus.pipeline_stages import PartialUploadResumeError
+
+        _bound_the_polling(monkeypatch)
+        _pop_chunks(db, "h1", 6)
+        db.mark_uploaded("h1", [0, 1, 2, 3])  # run 1 uploaded 4 of 6, then died
+        if counter:
+            db.update_progress("h1", chunks_uploaded=counter)
+        cd = threading.Event()
+        cd.set()
+        with pytest.raises(PartialUploadResumeError, match=r"chunk #4"):
+            self._up(db, chunking_done=cd)
+        assert writer.instances == [], "nothing was sent"
 
     def test_second_stage_failure_after_upload_progress_does_not_inflate_chunks_uploaded(self, db) -> None:
         """nexus-6m9zy.1 (#3) ship-blocker fix (substantive-critic T2
@@ -594,7 +687,8 @@ class TestUploaderLoop:
         # not the chunking_done=None resume branch (critique of df5c4f035).
         _done = threading.Event()
         _done.set()
-        uploader_loop(h, db, MagicMock(), "docs__test", threading.Event(), _done)
+        uploader_loop(h, db, MagicMock(), "docs__test", threading.Event(), _done,
+                      catalog_doc_id="1.1.1")
         assert db.get_pipeline_state(h)["chunks_uploaded"] == 4
 
         # A later stage now fails: pipeline_index_pdf's own first_exc
@@ -613,12 +707,10 @@ class TestUploaderLoop:
             db.write_chunk(h, i, f"chunk {i} text v2", f"{h}_{i}",
                            metadata={"page": 1}, embedding=_fake_embedding(i))
         db.update_progress(h, chunks_created=10, chunks_embedded=10)
-        # chunking_done is a real, already-set Event: the orchestrated branch
-        # every production caller takes (pipeline_index_pdf always passes one),
-        # not the chunking_done=None resume branch (critique of df5c4f035).
         _done = threading.Event()
         _done.set()
-        uploader_loop(h, db, MagicMock(), "docs__test", threading.Event(), _done)
+        uploader_loop(h, db, MagicMock(), "docs__test", threading.Event(), _done,
+                      catalog_doc_id="1.1.1")
 
         final = db.get_pipeline_state(h)
         assert final["chunks_uploaded"] == 10, (
@@ -627,86 +719,63 @@ class TestUploaderLoop:
         )
         assert final["status"] == "completed"
 
-    def test_uploader_injects_global_chunk_index_into_hook_payload(self, db) -> None:
-        """RDR-108 Phase 3 (nexus-bdag): the streaming uploader populates
-        the per-batch hook chain with a metadata blob that carries the
-        global ``chunk_index`` from T2's ``chunk_index`` column. Without
-        the injection the manifest hook falls through to a batch-local
-        enumeration that resets each batch — which would silently
-        truncate the manifest for documents that span multiple upload
-        batches.
-
-        Verifies the injection happens AFTER ``upsert_chunks_with_embeddings``
-        returns: T3 receives the post-Phase-3 metadata (no
-        ``chunk_index``); the hook receives the injected value.
-        """
-
+    def test_batch_hooks_fire_per_landed_batch_with_the_chunks_the_writer_sent(self, db, writer) -> None:
+        """The batch hook chain (taxonomy assign) reads stored chunks, so it fires for a batch only
+        once the writer sent it: batch 0 after batch 1 arrived, batch 1 after finish. The manifest
+        hook is left out (the writer writes the manifest with the chunks)."""
         _pop_chunks(db, "h1", 200)
-        t3 = MagicMock()
+        seen: list[tuple[int, list]] = []
 
-        # Capture the metadata seen by the batch hook chain and the T3 upsert.
-        seen_in_hook: list[list[dict]] = []
-        seen_in_t3: list[list[dict]] = []
-        t3.upsert_chunks_with_embeddings.side_effect = (
-            lambda collection, ids, documents, embeddings, metadatas, **_kwargs:
-            seen_in_t3.append([dict(m) for m in metadatas])
-        )
-
-        def _capture_batch(doc_ids, collection, contents, embeddings, metadatas, **_kwargs):
-            seen_in_hook.append([dict(m) for m in metadatas])
+        def _capture_batch(doc_ids, collection, contents, embeddings, metadatas, **kwargs):
+            seen.append((len(doc_ids), list(writer.events)))
+            assert kwargs.get("catalog_doc_id") == "1.1.1"
 
         from nexus.hook_registry import HookRegistry
+        from nexus.mcp_infra import manifest_write_batch_hook
         hooks = HookRegistry()
         hooks.register_batch(_capture_batch)
+        hooks.register_batch(manifest_write_batch_hook)
 
-        uploader_loop("h1", db, t3, "docs__test", threading.Event(), hooks=hooks)
+        self._up(db, hooks=hooks)
 
-        # Two batches expected: 128 + 72.
-        assert [len(b) for b in seen_in_hook] == [128, 72]
-        # Hook payload carries global chunk_index 0..127 then 128..199.
-        assert [m["chunk_index"] for m in seen_in_hook[0]] == list(range(128))
-        assert [m["chunk_index"] for m in seen_in_hook[1]] == list(range(128, 200))
-        # T3 received the unmutated copy: no ``chunk_index`` should have
-        # been injected before the T3 upsert. (The injection happens
-        # after ``upsert_chunks_with_embeddings`` returns; ``side_effect``
-        # captures the dict at call time.)
-        for batch in seen_in_t3:
-            for m in batch:
-                assert "chunk_index" not in m, (
-                    f"chunk_index leaked into T3 upsert payload: {m!r}. "
-                    f"The injection must happen AFTER "
-                    f"upsert_chunks_with_embeddings returns."
-                )
+        assert [n for n, _ in seen] == [128, 72]
+        assert ("sent", 0) in seen[0][1] and ("sent", 1) not in seen[0][1]
+        assert ("sent", 1) in seen[1][1]
 
-    def test_upsert_precedes_fire_batch_ordering(self, db) -> None:
-        """nexus-tp8yk design memo §0 ("already correct — do not touch"):
-        the streaming uploader's manifest-hook chain must only ever see
-        chunks the T3 upsert already confirmed. Regression fence — pins
-        the ordering so a future refactor cannot silently reorder
-        ``fire_batch`` ahead of ``upsert_chunks_with_embeddings`` and
-        reintroduce the P1 mechanism (manifest rows for chunks that never
-        landed) one call site over from the ones nexus-tp8yk fixed
-        directly (doc_indexer's single-flush paths).
-        """
+    def test_the_manifest_hook_is_not_fired(self, db, monkeypatch) -> None:
         _pop_chunks(db, "h1", 3)
-        t3 = MagicMock()
-        seq: list[str] = []
-        t3.upsert_chunks_with_embeddings.side_effect = (
-            lambda *a, **k: seq.append("upsert")
-        )
+        fired: list[int] = []
 
-        def _capture_batch(doc_ids, collection, contents, embeddings, metadatas, **_kwargs):
-            seq.append("fire_batch")
+        def fake_manifest_hook(doc_ids, collection, contents, embeddings, metadatas, **kwargs):
+            fired.append(len(doc_ids))
 
         from nexus.hook_registry import HookRegistry
+        monkeypatch.setattr("nexus.mcp_infra.manifest_write_batch_hook", fake_manifest_hook)
         hooks = HookRegistry()
-        hooks.register_batch(_capture_batch)
+        hooks.register_batch(fake_manifest_hook)
+        self._up(db, hooks=hooks)
+        assert fired == [], "the writer writes the manifest with the chunks; the hook would write it twice"
 
-        uploader_loop("h1", db, t3, "docs__test", threading.Event(), hooks=hooks)
+    def test_no_catalog_document_means_no_write(self, db, writer) -> None:
+        from nexus.errors import CatalogIdentityMissingError
 
-        assert seq == ["upsert", "fire_batch"], (
-            f"upsert must strictly precede fire_batch — got {seq}"
-        )
+        _pop_chunks(db, "h1", 3)
+        with pytest.raises(CatalogIdentityMissingError):
+            self._up(db, catalog_doc_id="")
+        assert writer.instances == []
+
+    def test_a_dry_run_puts_the_chunks_in_the_throwaway_store_and_writes_no_catalog(
+        self, db, writer, throwaway_t3,
+    ) -> None:
+        _pop_chunks(db, "h1", 3)
+        t3 = throwaway_t3
+        spy = MagicMock(wraps=t3.upsert_chunks_with_embeddings)
+        t3.upsert_chunks_with_embeddings = spy
+        self._up(db, t3=t3, dry_run=True, catalog_doc_id="")
+        spy.assert_called_once()
+        assert len(spy.call_args[0][1]) == 3
+        assert writer.instances == []
+        assert db.get_pipeline_state("h1")["chunks_uploaded"] == 3
 
 
 class TestMarkFailedAndResetWal:
@@ -737,7 +806,14 @@ class TestMarkFailedAndResetWal:
 
 
 class TestPipelineIndexPdf:
-    def test_full_pipeline(self, db, mock_t3) -> None:
+    @pytest.fixture(autouse=True)
+    def writer(self, monkeypatch: pytest.MonkeyPatch):
+        """The multi-batch writer is a recorder here: this class drives the orchestration with
+        fake chunk ids the real engine refuses (its behaviour against the engine is in
+        ``tests/integration/test_rdr223_pdf_journey.py``)."""
+        return install_streaming_writer(monkeypatch)
+
+    def test_full_pipeline(self, db, mock_t3, writer) -> None:
         fc = _tc(("chunk 0", 0, {"page_number": 1, "chunk_type": "text"}),
                  ("chunk 1", 1, {"page_number": 2, "chunk_type": "text"}))
         fr = _er(3)
@@ -747,7 +823,12 @@ class TestPipelineIndexPdf:
             total = pipeline_index_pdf(Path("/test/doc.pdf"), "abc123", "docs__test",
                                        mock_t3, db=db, embed_fn=_embed, corpus="test")
         assert total == 2
-        mock_t3.upsert_chunks_with_embeddings.assert_called_once()
+        mock_t3.upsert_chunks_with_embeddings.assert_not_called()
+        (w,) = writer.instances
+        assert [len(r) for r, _ in w.batches] == [2]
+        # The stamp is the orchestrator's, after the post-passes: the writer finished, then it was
+        # stamped complete.
+        assert writer.events[-2:] == [("finish",), ("complete",)]
         assert db.get_pipeline_state("abc123") is None
 
     def test_post_pass_failure_can_be_retried_not_skipped(self, db) -> None:
@@ -806,11 +887,10 @@ class TestPipelineIndexPdf:
             "the retry must actually re-attempt the failed post-pass, not just re-report the old total"
         )
 
-    def test_force_re_embed_true_forwards_true(self, db, mock_t3) -> None:
+    def test_force_re_embed_true_forwards_true(self, db, mock_t3, writer) -> None:
         """nexus-8143o: pipeline_index_pdf's own force_re_embed kwarg
-        reaches uploader_loop's upsert_chunks_with_embeddings call as
-        force_re_embed=True -- the fix for the ship-blocker where --force
-        --re-embed was a no-op on the streaming path (_STREAMING_THRESHOLD=0,
+        reaches the multi-batch writer as force_re_embed=True -- the fix for the ship-blocker where
+        --force --re-embed was a no-op on the streaming path (_STREAMING_THRESHOLD=0,
         nearly every real PDF)."""
         fc = _tc(("chunk 0", 0, {"page_number": 1, "chunk_type": "text"}))
         fr = _er(3)
@@ -820,13 +900,11 @@ class TestPipelineIndexPdf:
             pipeline_index_pdf(Path("/test/doc2.pdf"), "abc124", "docs__test",
                                mock_t3, db=db, embed_fn=_embed, corpus="test",
                                force_re_embed=True)
-        mock_t3.upsert_chunks_with_embeddings.assert_called_once()
-        _, kwargs = mock_t3.upsert_chunks_with_embeddings.call_args
-        assert kwargs.get("force_re_embed") is True
+        assert writer.instances[0].kwargs["force_re_embed"] is True
 
-    def test_force_re_embed_default_forwards_false(self, db, mock_t3) -> None:
+    def test_force_re_embed_default_forwards_false(self, db, mock_t3, writer) -> None:
         """force_re_embed defaulting to False must NOT set True on the
-        server call -- the whole point of this bead's decoupling (the
+        write -- the whole point of this bead's decoupling (the
         deadlock-break *force* flag, tested separately, is orthogonal --
         see pipeline_index_pdf's docstring)."""
         fc = _tc(("chunk 0", 0, {"page_number": 1, "chunk_type": "text"}))
@@ -836,11 +914,9 @@ class TestPipelineIndexPdf:
             MC.return_value.chunk.return_value = fc
             pipeline_index_pdf(Path("/test/doc3.pdf"), "abc125", "docs__test",
                                mock_t3, db=db, embed_fn=_embed, corpus="test")
-        mock_t3.upsert_chunks_with_embeddings.assert_called_once()
-        _, kwargs = mock_t3.upsert_chunks_with_embeddings.call_args
-        assert kwargs.get("force_re_embed") is False
+        assert writer.instances[0].kwargs["force_re_embed"] is False
 
-    def test_streaming_register_failure_feeds_identity_drop_collector(self, db, mock_t3) -> None:
+    def test_streaming_register_failure_feeds_identity_drop_collector(self, db, mock_t3, writer) -> None:
         """nexus-2xu6t follow-up (critic round, 2026-08-05): a preflight
         catalog-register exception must feed the nexus-94fxl identity-drop
         collector on the STREAMING path too, not just the non-streaming
@@ -849,30 +925,21 @@ class TestPipelineIndexPdf:
 
         ``_STREAMING_THRESHOLD = 0`` (doc_indexer.py) means every REAL PDF
         that ``index_pdf`` can open with pymupdf routes through THIS
-        function (``pipeline_index_pdf``) unconditionally — the batch/
-        single-flush path the sibling test exercises is reached only when
-        pymupdf's page-count probe fails (an unopenable file), which is
-        the FALLBACK, not the forced production route. The critic caught
-        that the sibling test's ``sample_pdf`` fixture (fake, unopenable
-        bytes) accidentally exercises exactly that fallback, leaving the
-        actually-forced streaming path unpinned.
+        function (``pipeline_index_pdf``) unconditionally, so the streaming
+        path is the forced production route.
 
-        This drives ``pipeline_index_pdf`` directly (the routing decision
-        itself — pymupdf openability -> streaming vs batch — is already
-        pinned by ``TestStreamingRouting`` in test_doc_indexer.py, not
-        this test's job) with a broken catalog writer, proving the same
-        ``_register_or_lookup_doc_id`` swallow (doc_indexer.py, ``except
-        Exception`` -> returns ``""``) reaches ``uploader_loop``'s
-        ``hooks.fire_batch(catalog_doc_id="")`` -> ``manifest_write_
-        batch_hook`` -> ``_record_manifest_identity_drop`` chain here too.
-
-        Kill-control (manual, run during review): commenting out
-        ``_record_manifest_identity_drop(...)`` in
-        ``manifest_write_batch_hook`` (src/nexus/mcp_infra.py) turns this
-        RED — same probe already applied to the non-streaming sibling
-        test and to the ``nx dt index`` CLI-layer tests in
-        ``tests/test_commands_dt.py::TestIdentityDropSummary``.
+        RDR-223 (nexus-z0o2p.11): a chunk is written together with its owner
+        row and there is no owner without a catalog document, so a run whose
+        registration failed no longer uploads its chunks and reports an
+        unindexed document: it raises ``CatalogIdentityMissingError`` BEFORE
+        it extracts anything, writes nothing, and the identity-drop collector
+        records the document as one that was NOT written (``written=False``).
+        This drives ``pipeline_index_pdf`` directly (the routing decision is
+        pinned by ``TestStreamingRouting`` in test_doc_indexer.py) with a
+        broken catalog writer, proving the ``_register_or_lookup_doc_id``
+        swallow (returns ``""``) reaches the refusal.
         """
+        from nexus.errors import CatalogIdentityMissingError
         from nexus.mcp_infra import (
             get_manifest_identity_drops,
             reset_manifest_identity_drops,
@@ -884,8 +951,8 @@ class TestPipelineIndexPdf:
         reader.by_file_path.return_value = None
         reader.by_source_uri.return_value = None
         reader.curator_owner_tumbler_by_name.return_value = "1.99"
-        writer = MagicMock()
-        writer.register.side_effect = RuntimeError("integrity constraint violation")
+        cat_writer = MagicMock()
+        cat_writer.register.side_effect = RuntimeError("integrity constraint violation")
 
         fake_result = _er(2)
         fake_chunks = _tc(
@@ -894,28 +961,29 @@ class TestPipelineIndexPdf:
 
         with patch(_P_EXT) as ME, patch(_P_CHK) as MC, \
              patch("nexus.catalog.factory.make_catalog_reader", return_value=reader), \
-             patch("nexus.catalog.factory.make_catalog_writer", return_value=writer):
+             patch("nexus.catalog.factory.make_catalog_writer", return_value=cat_writer):
             ME.return_value.extract.side_effect = _fx(fake_result.metadata["page_count"], fake_result)
             MC.return_value.chunk.return_value = fake_chunks
-            total = pipeline_index_pdf(
-                Path("/streamreg.pdf"), "streamregfail1", "docs__test",
-                mock_t3, db=db, embed_fn=_embed, corpus="test",
-            )
+            with pytest.raises(CatalogIdentityMissingError, match="no catalog document to own"):
+                pipeline_index_pdf(
+                    Path("/streamreg.pdf"), "streamregfail1", "docs__test",
+                    mock_t3, db=db, embed_fn=_embed, corpus="test",
+                )
+            ME.return_value.extract.assert_not_called()
 
-        # Collect-and-continue: the register exception must not abort the
-        # streaming upload — the chunk still lands.
-        assert total == 1, "register failure must not abort the streaming upload"
-        mock_t3.upsert_chunks_with_embeddings.assert_called_once()
-        # writer.register was reached at least once (the pre-flight call in
-        # pipeline_index_pdf) — confirms the broken double was actually on
-        # the path, not bypassed.
-        writer.register.assert_called()
+        # Nothing was written, and no pipeline row was created for the refused run.
+        mock_t3.upsert_chunks_with_embeddings.assert_not_called()
+        assert writer.instances == []
+        assert db.get_pipeline_state("streamregfail1") is None
+        # cat_writer.register was reached (the pre-flight call in pipeline_index_pdf) --
+        # confirms the broken double was actually on the path, not bypassed.
+        cat_writer.register.assert_called()
 
         drops = get_manifest_identity_drops()
-        assert drops, (
+        assert drops and all(d.get("written") is False for d in drops), (
             "a preflight catalog-register exception on the STREAMING path "
-            "did not feed the identity-drop collector — nx dt index / nx "
-            "index pdf would report plain success on this failure when "
+            "did not feed the identity-drop collector as a document that was not written "
+            "-- nx dt index / nx index pdf would report plain success on this failure when "
             "routed through pipeline_index_pdf"
         )
 
@@ -943,6 +1011,252 @@ class TestPipelineIndexPdf:
                                    db=db, embed_fn=lambda t, m: ([], m))
         s = db.get_pipeline_state("h1")
         assert s["status"] == "failed" and "boom" in s["error"]
+
+    def test_the_stamp_waits_for_the_post_pass_and_a_failed_post_pass_never_stamps(
+        self, db, writer, monkeypatch,
+    ) -> None:
+        """The writer sends every request and leaves the run 'indexing'; the orchestrator stamps it
+        after the post-passes. A post-pass that fails leaves it unstamped, so a process killed
+        between the last chunk and the enrichment never leaves a complete-looking document that is
+        missing its title and author (RDR-223, nexus-z0o2p.11)."""
+        mock_col = MagicMock()
+        mock_col.get.return_value = {"ids": ["abc123_0"], "metadatas": [
+            {"page_number": 1, "chunk_type": "text", "content_hash": "abc123"}]}
+        t3 = create_autospec(T3Database, instance=True)
+        t3.get_or_create_collection.return_value = mock_col
+        t3.update_chunks.side_effect = Exception("quota exceeded")
+        with patch(_P_EXT) as ME, patch(_P_CHK) as MC:
+            ME.return_value.extract.side_effect = _fx(1, _er(1))
+            MC.return_value.chunk.return_value = _tc(("chunk 0", 0, {"page_number": 1}))
+            pipeline_index_pdf(Path("/postpass.pdf"), "abc123", "docs__test", t3,
+                               db=db, embed_fn=_embed, corpus="test")
+        (w,) = writer.instances
+        assert w.finished, "every request was sent"
+        assert not w.completed and ("complete",) not in writer.events
+
+    def test_a_post_pass_retry_with_nothing_left_to_upload_stamps_without_a_writer(
+        self, db, writer, monkeypatch,
+    ) -> None:
+        """The retry of a run whose post-pass failed finds every chunk already flagged uploaded: no
+        writer runs, and the orchestrator stamps the run through the fail-closed helper (see
+        ``tests/test_rdr223_pdf_resume_tail.py`` for what that helper does on a missing route or a
+        transport failure)."""
+        mock_col = MagicMock()
+        mock_col.get.return_value = {"ids": ["abc123_0"], "metadatas": [
+            {"page_number": 1, "chunk_type": "text", "content_hash": "abc123"}]}
+        t3 = create_autospec(T3Database, instance=True)
+        t3.get_or_create_collection.return_value = mock_col
+        t3.update_chunks.side_effect = [Exception("quota exceeded"), None]
+        calls: list[tuple] = []
+        # The buffer must still exist WHEN the stamp is sent: it goes after the stamp, never before
+        # (a stamp that fails, or a kill before it, needs the buffer to send only the stamp).
+        monkeypatch.setattr(
+            "nexus.doc_indexer._stamp_finished_upload",
+            lambda *a: calls.append((*a, db.get_pipeline_state("abc123") is not None)))
+        # The document's fence as the earlier run left it: begun for this content, never stamped.
+        # (The writer here is a recorder, so the real engine's fence was never begun.)
+        monkeypatch.setattr("nexus.doc_indexer._index_fence_state", lambda doc_id: ("indexing", "abc123"))
+
+        def _run() -> int:
+            with patch(_P_EXT) as ME, patch(_P_CHK) as MC:
+                ME.return_value.extract.side_effect = _fx(1, _er(1))
+                MC.return_value.chunk.return_value = _tc(("chunk 0", 0, {"page_number": 1}))
+                return pipeline_index_pdf(Path("/postpass.pdf"), "abc123", "docs__test", t3,
+                                          db=db, embed_fn=_embed, corpus="test")
+
+        _run()
+        assert calls == [], "the failed post-pass stamped nothing"
+        assert _run() == 1
+        assert len(writer.instances) == 1, "the retry had nothing to send and made no writer"
+        assert len(calls) == 1 and calls[0][1:] == ("abc123", 1, True)
+        assert db.get_pipeline_state("abc123") is None, "the buffer goes once the stamp landed"
+
+    @pytest.mark.parametrize("refused", [False, True], ids=["transport-failure", "refusal"])
+    def test_a_failed_stamp_keeps_the_buffer_for_a_stamp_only_retry_and_a_refusal_discards_it(
+        self, db, mock_t3, writer, monkeypatch, refused,
+    ) -> None:
+        """The buffer is deleted only after the stamp landed. A stamp that fails for any reason
+        but a refusal leaves the pipeline row failed and the buffer in place, so the next run sends
+        the stamp alone. A REFUSAL (the engine says this buffer is not the document: row count or
+        chunk existence) discards the buffer: stamping it again would be refused for ever."""
+        from nexus.errors import IndexRunVerifyRefused
+
+        exc = (IndexRunVerifyRefused(doc_id="1.1.1", referenced=0, present=0, missing=0, chunk_count=1)
+               if refused else RuntimeError("stamp transport down"))
+
+        def _complete(self):
+            raise exc
+
+        monkeypatch.setattr(writer, "complete", _complete)
+        monkeypatch.setattr("nexus.doc_indexer._register_or_lookup_doc_id",
+                            lambda *a, with_created=False, **kw: ("1.1.1", False) if with_created else "1.1.1")
+        with patch(_P_EXT) as ME, patch(_P_CHK) as MC:
+            ME.return_value.extract.side_effect = _fx(1, _er(1))
+            MC.return_value.chunk.return_value = _tc(("chunk 0", 0, {"page_number": 1}))
+            with pytest.raises(type(exc)):
+                pipeline_index_pdf(Path("/stamp.pdf"), "abc123", "docs__test", mock_t3,
+                                   db=db, embed_fn=_embed, corpus="test")
+
+        state = db.get_pipeline_state("abc123")
+        if refused:
+            assert state is None, "a refused buffer is discarded"
+        else:
+            assert state is not None and state["status"] == "failed", "kept, and resumable"
+            assert db.chunk_counts("abc123")[0] == 1
+
+    @pytest.mark.parametrize("counter", [4, 0], ids=["counter-current", "counter-lagging"])
+    def test_a_resume_after_a_killed_upload_resends_from_chunk_zero_without_extracting_or_embedding(
+        self, db, mock_t3, writer, counter, monkeypatch,
+    ) -> None:
+        """An earlier process flagged 4 of 6 chunks uploaded and died with its writer's state. The
+        resumed run must not send the other 2 alone (that would replace the manifest with a
+        fragment and sweep the head as superseded). The pages and chunks it extracted and embedded
+        are still in the buffer, so it asks the engine to reset the upload flags and re-sends the
+        whole document from position 0 through a fresh writer: the extractor is NOT called again
+        and nothing is embedded again (RDR-223, decision D1).
+
+        ``counter=0`` is the kill that lands after the flag and before the buffered progress counter
+        flushed (the counter lags by up to a poll interval): the rows say 4 chunks went out, the
+        counter says none. The decision reads the rows."""
+        _bound_the_polling(monkeypatch)
+        _pop_killed_upload(db, "h1", 6, 4, counter=counter)
+        six = _tc(*[(f"chunk {i} text", i, {"page_number": 1}) for i in range(6)])
+        embedded: list[int] = []
+
+        def _counting_embed(texts, model):
+            embedded.append(len(texts))
+            return _embed(texts, model)
+
+        with patch(_P_EXT) as ME, patch(_P_CHK) as MC:
+            ME.return_value.extract.side_effect = AssertionError("the PDF must not be extracted again")
+            MC.return_value.chunk.return_value = six
+            n = pipeline_index_pdf(Path("/a.pdf"), "h1", "docs__test", mock_t3,
+                                   db=db, embed_fn=_counting_embed, corpus="test")
+
+        assert n == 6
+        ME.return_value.extract.assert_not_called()
+        assert embedded == [], "nothing is embedded again"
+        (w,) = writer.instances
+        assert sum(len(r) for r, _ in w.batches) == 6, "the whole document went through one writer"
+        assert [r["position"] for rows, _ in w.batches for r in rows] == list(range(6)), \
+            "never a tail alone: positions start at 0"
+        assert db.get_pipeline_state("h1") is None, "the run finished and cleaned up its buffer"
+
+    def test_a_buffer_the_chunker_finished_but_damaged_is_cleared_and_extracted_again(
+        self, db, mock_t3, writer, monkeypatch,
+    ) -> None:
+        """The one case a reset cannot serve: the chunker says it created 6 chunks and the buffer
+        holds 4 embedded rows, so a chunk is missing. The buffer is cleared and the run starts
+        from scratch (extract, chunk, upload), which is the pre-D1 behaviour kept for exactly this
+        case."""
+        _bound_the_polling(monkeypatch)
+        _pop_killed_upload(db, "h1", 6, 2, counter=2, embedded_rows=4)
+        six = _tc(*[(f"chunk {i} text", i, {"page_number": 1}) for i in range(6)])
+        cleared: list[str] = []
+        real_clear = db.clear_orphan_wal
+        db.clear_orphan_wal = lambda ch: (cleared.append(ch), real_clear(ch))[1]  # type: ignore[method-assign]
+
+        with patch(_P_EXT) as ME, patch(_P_CHK) as MC:
+            ME.return_value.extract.side_effect = _fx(2)
+            MC.return_value.chunk.return_value = six
+            n = pipeline_index_pdf(Path("/a.pdf"), "h1", "docs__test", mock_t3,
+                                   db=db, embed_fn=_embed, corpus="test")
+
+        assert n == 6
+        assert cleared == ["h1"]
+        ME.return_value.extract.assert_called_once()
+        (w,) = writer.instances
+        assert [r["position"] for rows, _ in w.batches for r in rows] == list(range(6))
+
+    def test_a_dry_run_builds_its_own_buffer_and_sends_the_engine_nothing(
+        self, throwaway_t3, monkeypatch,
+    ) -> None:
+        """A dry run previews extraction and chunking and sends the engine nothing, so its buffer
+        is an in-memory one of its own (RDR-223). Two things follow and both are asserted: no
+        request of any kind goes to a pipeline client that is not the in-memory one, and a real
+        run's row for the same bytes (here another buffer standing for the engine's) is never
+        created, flagged, reset or deleted.
+
+        This replaces a test that called itself "leaves the buffer alone" and asserted only that
+        ``clear_orphan_wal`` was not called on a buffer the dry run was handed."""
+        from nexus.db.t2._refreshable_client import RefreshableHttpStoreMixin
+
+        real_db = HttpPipelineDB
+        seen: list[tuple[bool, str]] = []
+        real_post, real_get = RefreshableHttpStoreMixin._post, RefreshableHttpStoreMixin._get
+
+        def _post(self, path, *a, **kw):
+            seen.append((bool(getattr(self, "in_memory", False)), path))
+            return real_post(self, path, *a, **kw)
+
+        def _get(self, path, *a, **kw):
+            seen.append((bool(getattr(self, "in_memory", False)), path))
+            return real_get(self, path, *a, **kw)
+
+        monkeypatch.setattr(RefreshableHttpStoreMixin, "_post", _post)
+        monkeypatch.setattr(RefreshableHttpStoreMixin, "_get", _get)
+        engine_db, engine = make_fake_engine_db()     # stands for the real engine's buffer
+        _pop_killed_upload(engine_db, "h1", 6, 4, counter=4)
+        before = engine.counts({"content_hash": "h1"}) if hasattr(engine, "counts") else None
+        seen.clear()
+        six = _tc(*[(f"chunk {i} text", i, {"page_number": 1}) for i in range(6)])
+
+        with patch(_P_EXT) as ME, patch(_P_CHK) as MC:
+            ME.return_value.extract.side_effect = _fx(3)
+            MC.return_value.chunk.return_value = six
+            n = pipeline_index_pdf(Path("/a.pdf"), "h1", "docs__test", throwaway_t3,
+                                   embed_fn=_embed, corpus="test", dry_run=True)
+
+        assert n == 6
+        assert seen, "non-vacuity: the dry run used a pipeline buffer"
+        assert [p for in_memory, p in seen if not in_memory] == [], "the engine saw no pipeline request"
+        ME.return_value.extract.assert_called_once()   # it had no buffer of anyone else's to reuse
+        assert engine_db.chunk_counts("h1") == (6, 4), "the real run's flags were not touched"
+        assert engine_db.get_pipeline_state("h1")["status"] == "failed"
+        if before is not None:
+            assert engine.counts({"content_hash": "h1"}) == before
+        assert real_db is HttpPipelineDB
+
+    def test_a_dry_run_handed_the_engines_buffer_is_refused(self, mock_t3, throwaway_t3) -> None:
+        from nexus.errors import DryRunStoreError
+
+        engine_backed = HttpPipelineDB(base_url="http://engine.invalid", _token="t")
+        with pytest.raises(DryRunStoreError, match="in-memory pipeline buffer"):
+            pipeline_index_pdf(Path("/a.pdf"), "h1", "docs__test", throwaway_t3,
+                               db=engine_backed, embed_fn=_embed, dry_run=True)
+
+    def test_a_reconcile_that_fails_hands_the_row_back_so_the_next_run_is_not_locked_out(
+        self, db, mock_t3, writer, monkeypatch,
+    ) -> None:
+        """``create_pipeline`` answered 'resuming', so the row is 'running'. A reconcile that dies
+        (the reset call here) must not leave it so: the next run would be refused with a 409 until
+        the heartbeat aged out. The row is handed back as failed with the buffer untouched, and the
+        next run resumes it."""
+        from nexus.db.http_pipeline_client import PipelineConflictRunning
+
+        _bound_the_polling(monkeypatch)
+        _pop_killed_upload(db, "h1", 6, 4, counter=4)
+        six = _tc(*[(f"chunk {i} text", i, {"page_number": 1}) for i in range(6)])
+        real_reset = db.reset_uploaded
+        db.reset_uploaded = lambda ch: (_ for _ in ()).throw(RuntimeError("reset endpoint down"))  # type: ignore[method-assign]
+
+        def _run():
+            with patch(_P_EXT) as ME, patch(_P_CHK) as MC:
+                ME.return_value.extract.side_effect = _fx(2)
+                MC.return_value.chunk.return_value = six
+                return pipeline_index_pdf(Path("/a.pdf"), "h1", "docs__test", mock_t3,
+                                          db=db, embed_fn=_embed, corpus="test")
+
+        with pytest.raises(RuntimeError, match="reset endpoint down"):
+            _run()
+        assert db.get_pipeline_state("h1")["status"] == "failed", "handed back, not left running"
+        assert db.chunk_counts("h1") == (6, 4), "the buffer is untouched"
+
+        db.reset_uploaded = real_reset  # type: ignore[method-assign]
+        try:
+            assert _run() == 6
+        except PipelineConflictRunning:  # pragma: no cover - the failure this test exists to catch
+            pytest.fail("the next run was locked out by the row the failed reconcile left running")
 
     def test_resume_from_partial(self, db, mock_t3) -> None:
         db.create_pipeline("h1", "/a.pdf", "docs__test")
@@ -1145,21 +1459,19 @@ class TestPipelineIndexPdf:
                 pipeline_index_pdf(Path("/a.pdf"), "h1", "docs__test", mock_t3, db=db)
 
     def test_streaming_pdf_does_not_emit_source_path(
-        self, db, tmp_path, monkeypatch,
+        self, db, tmp_path, monkeypatch, writer,
     ) -> None:
         """RDR-102 Phase B / D2: pipeline_stages._build_chunk_metadata
-        at line 145 (the make_chunk_metadata call inside the streaming
-        chunker_loop) must drop source_path from its kwargs. The
-        streaming PDF write path was missed in the original RDR-102
-        draft and added at the substantive-critic gate (RF-4 row 4).
-        Without this drop, every PDF indexed via the streaming pipeline
-        would continue regressing source_path post-Phase-B.
+        (the make_chunk_metadata call inside the streaming chunker_loop)
+        must drop source_path from its kwargs. The streaming PDF write path
+        was missed in the original RDR-102 draft and added at the
+        substantive-critic gate (RF-4 row 4). Without this drop, every PDF
+        indexed via the streaming pipeline would continue regressing
+        source_path post-Phase-B. The chunks' metadata is what the multi-batch
+        writer sends (RDR-223), so it is read from the writer's payload.
         """
         from nexus.db.t3 import T3Database
 
-        # nexus-i711w terminal deletion: the local ``Catalog.init`` seeding
-        # died with the local catalog; the pipeline registers via the
-        # service-only factory into the live per-test tenant.
         monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
         monkeypatch.delenv("CHROMA_API_KEY", raising=False)
         monkeypatch.setattr(
@@ -1188,31 +1500,28 @@ class TestPipelineIndexPdf:
                 corpus="rdr102_stream_b",
             )
 
-        col = t3.get_or_create_collection(f"docs__rdr102-stream-b__{_local_token()}__v1")
-        rows = col.get(include=["metadatas"])
-        assert rows["metadatas"], "expected chunks to land"
-        leaked = [m for m in rows["metadatas"] if "source_path" in m]
+        metas = [c["metadata"] for w in writer.instances for _, chunks in w.batches for c in chunks]
+        assert metas, "expected chunks to land"
+        leaked = [m for m in metas if "source_path" in m]
         assert not leaked, (
-            f"{len(leaked)}/{len(rows['metadatas'])} streaming-pipeline "
+            f"{len(leaked)}/{len(metas)} streaming-pipeline "
             f"chunks still carry source_path. Phase B must drop "
-            f"source_path=pdf_path from _build_chunk_metadata at "
-            f"pipeline_stages.py:145 — the streaming PDF write path."
+            f"source_path=pdf_path from _build_chunk_metadata "
+            f"— the streaming PDF write path."
         )
 
     def test_writes_doc_id_when_catalog_initialized(
-        self, db, tmp_path, monkeypatch,
+        self, db, tmp_path, monkeypatch, writer,
     ) -> None:
         """RDR-108 Phase 3: pipeline_index_pdf no longer stamps ``doc_id``
-        on chunks. The streaming pipeline still registers the catalog
-        Document at the entry boundary; the catalog manifest hook
-        populates ``document_chunks`` from the post-store batch fire.
-        Verify chunks lack doc_id and the manifest carries it instead.
+        on chunks. The streaming pipeline registers the catalog Document at
+        the entry boundary and (RDR-223) writes the chunks together with
+        that document's manifest rows. Verify chunks lack doc_id and the
+        write names the registered Document, one row per chunk at its
+        global position.
         """
         from nexus.db.t3 import T3Database
 
-        # nexus-i711w terminal deletion: the local ``Catalog.init`` seeding
-        # died with the local catalog; the pipeline registers via the
-        # service-only factory into the live per-test tenant.
         monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
         monkeypatch.delenv("CHROMA_API_KEY", raising=False)
         monkeypatch.setattr(
@@ -1225,26 +1534,6 @@ class TestPipelineIndexPdf:
         client = make_vector_test_client()
         t3 = T3Database(_client=client, local_mode=True)
 
-        # nexus-dbzxb (RDR-191 Phase 5 Python collateral): t3 is a fake
-        # in-memory client, but pipeline_index_pdf's manifest write always
-        # goes through the REAL engine catalog; fk_catalog_chunks_chunk
-        # now requires a matching real nexus.chunks row. Wrap the write
-        # choke point so the real ids this pipeline computes are also
-        # seeded into the real engine (mirrors test_indexer_duplicate_
-        # content.py's _do_index / test_doc_indexer.py's
-        # _wrap_write_batch_with_fk_seed).
-        from tests._catalog_fixture_ops import seed_manifest_chunks
-
-        _orig_write_batch = t3._write_batch
-
-        def _seeding_write_batch(col, collection_name, ids, documents, metadatas,
-                                  embeddings=None, **kwargs):
-            _orig_write_batch(col, collection_name, ids, documents, metadatas,
-                               embeddings, **kwargs)
-            seed_manifest_chunks(collection_name, ids)
-
-        monkeypatch.setattr(t3, "_write_batch", _seeding_write_batch)
-
         fc = _tc(
             ("chunk 0 text", 0, {"page_number": 1, "chunk_type": "text",
                                   "chunk_start_char": 0, "chunk_end_char": 12}),
@@ -1252,38 +1541,30 @@ class TestPipelineIndexPdf:
                                   "chunk_start_char": 12, "chunk_end_char": 24}),
         )
         fr = _er(2)
+        collection = f"docs__rdr102-stream__{_local_token()}__v1"
         with patch(_P_EXT) as ME, patch(_P_CHK) as MC:
             ME.return_value.extract.side_effect = _fx(2, fr)
             MC.return_value.chunk.return_value = fc
             total = pipeline_index_pdf(
-                pdf_path, "rdr102streamhash", f"docs__rdr102-stream__{_local_token()}__v1",
+                pdf_path, "rdr102streamhash", collection,
                 t3, db=db, embed_fn=_embed,
                 corpus="rdr102_stream",
             )
         assert total == 2, f"expected 2 chunks uploaded; got {total}"
 
-        col = t3.get_or_create_collection(f"docs__rdr102-stream__{_local_token()}__v1")
-        rows = col.get(include=["metadatas"])
-        assert rows["metadatas"], (
-            "expected at least one chunk in docs__rdr102_stream"
-        )
+        (w,) = writer.instances
+        (rows, chunks), = w.batches
+        assert len(chunks) == 2
         # Phase 3: no doc_id on chunk metadata.
-        for m in rows["metadatas"]:
-            assert "doc_id" not in m
+        for c in chunks:
+            assert "doc_id" not in c["metadata"]
 
-        # Manifest carries the doc-to-chunk binding instead.
-        # nexus-aqbrk: pipeline_index_pdf registers via the factory, so the raw
-        # local .catalog.db read was empty on the engine arm.
-        documents = active_reader().list_by_collection(
-            f"docs__rdr102-stream__{_local_token()}__v1"
-        )
+        # nexus-aqbrk: pipeline_index_pdf registers via the factory.
+        documents = active_reader().list_by_collection(collection)
         assert documents, "catalog must register a Document for the streaming PDF"
-        for entry in documents:
-            tumbler = str(entry.tumbler)
-            assert active_reader().get_manifest(tumbler), (
-                f"manifest_write_batch_hook must populate document_chunks "
-                f"for doc_id={tumbler!r}"
-            )
+        assert w.kwargs["doc_id"] in {str(e.tumbler) for e in documents}
+        assert [r["position"] for r in rows] == [0, 1]
+        assert [r["chash"] for r in rows] == [c["chash"] for c in chunks]
 
     def test_keyboard_interrupt_stops_stages_and_does_not_complete(self, db, mock_t3) -> None:
         """nexus-6m9zy.3 (#4): a KeyboardInterrupt landing in the
@@ -1344,7 +1625,7 @@ class TestPipelineIndexPdfDryRun:
     fence refusal (IndexRunVerifyRefused, claimed_chunk_count=84) came
     through when called via doc_indexer.index_pdf."""
 
-    def test_dry_run_never_registers_or_touches_catalog(self, db, mock_t3) -> None:
+    def test_dry_run_never_registers_or_touches_catalog(self, db, throwaway_t3) -> None:
         fc = _tc(("chunk 0", 0, {"page_number": 1, "chunk_type": "text"}))
         fr = _er(1)
         with patch(_P_EXT) as ME, patch(_P_CHK) as MC, \
@@ -1357,7 +1638,7 @@ class TestPipelineIndexPdfDryRun:
             MC.return_value.chunk.return_value = fc
             total = pipeline_index_pdf(
                 Path("/dry-run.pdf"), "dryrun123", "docs__test",
-                mock_t3, db=db, embed_fn=_embed, corpus="test", dry_run=True,
+                throwaway_t3, db=db, embed_fn=_embed, corpus="test", dry_run=True,
             )
         assert total == 1
         mock_register.assert_not_called()
@@ -1367,7 +1648,7 @@ class TestPipelineIndexPdfDryRun:
         mock_hook.assert_not_called()
 
     def test_dry_run_with_default_hooks_uploader_loop_fires_zero_hooks(
-        self, db, mock_t3,
+        self, db, throwaway_t3,
     ) -> None:
         """nexus-uxg4u round 2 (Critical, both reviewers): uploader_loop
         (Stage 3, spawned via pool.submit) fires hooks.fire_batch/
@@ -1388,7 +1669,7 @@ class TestPipelineIndexPdfDryRun:
             MC.return_value.chunk.return_value = fc
             total = pipeline_index_pdf(
                 Path("/dry-run-hooks.pdf"), "dryrunhooks123", "docs__test",
-                mock_t3, db=db, embed_fn=_embed, corpus="test", dry_run=True,
+                throwaway_t3, db=db, embed_fn=_embed, corpus="test", dry_run=True,
                 hooks=None,
             )
         assert total == 1
@@ -1611,3 +1892,187 @@ class TestStreamingCatalogHookTitle:
                 fake_chunks=_tc(("c0", 0, {"page_number": 1, "chunk_type": "text"})),
                 pdf_path="/2512.11001.pdf")
         assert hook.call_args.kwargs["title"] == "Rethinking Query Optimization"
+
+
+
+class TestReconcileResumedRun:
+    """``_reconcile_resumed_run`` decides what a resumed run does with a buffer an earlier process
+    left: nothing ('fresh'), stamp only ('tail'), reset the upload flags and re-send from chunk 0
+    ('reset'), or discard a damaged buffer ('restarted'). The tail is the one outcome that skips
+    the upload, so it must prove the upload FINISHED."""
+
+    @pytest.fixture(autouse=True)
+    def _fence(self, monkeypatch):
+        self.fence = ("indexing", "h1")
+        monkeypatch.setattr("nexus.doc_indexer._index_fence_state", lambda doc_id: self.fence)
+
+    def _reconcile(self, db):
+        from nexus.pipeline_stages import _reconcile_resumed_run
+
+        return _reconcile_resumed_run(db, "1.1.1", "h1")
+
+    def test_a_buffer_with_no_upload_evidence_is_fresh(self, db) -> None:
+        _pop_killed_upload(db, "h1", 6, 0)
+        assert self._reconcile(db) == "fresh"
+        assert db.chunk_counts("h1") == (6, 0)
+
+    def test_a_finished_upload_under_its_own_fence_is_a_tail_and_its_flags_are_kept(self, db) -> None:
+        _pop_killed_upload(db, "h1", 6, 6, counter=6)
+        assert self._reconcile(db) == "tail"
+        assert db.chunk_counts("h1") == (6, 6)
+
+    def test_the_decision_counts_and_never_reads_the_unflagged_rows(self, db) -> None:
+        _pop_killed_upload(db, "h1", 6, 4, counter=4)
+
+        def _no_row_reads(*a, **kw):
+            raise AssertionError("the reconcile read chunk rows instead of counting them")
+
+        db.read_uploadable_chunks = _no_row_reads  # type: ignore[method-assign]
+        assert self._reconcile(db) == "reset"
+
+    @pytest.mark.parametrize("why", [
+        "chunker-still-running", "extraction-incomplete", "fence-for-other-bytes",
+        "fence-already-complete", "fence-failed", "no-fence",
+    ])
+    def test_anything_short_of_a_proven_finished_upload_is_reset_not_stamped(self, db, why) -> None:
+        """The pin on the tail invariant. The first two cases are the ones the flags alone cannot
+        distinguish: ``chunks_created`` equals the flagged count (so "every chunk is flagged" reads
+        true) while the buffer says the run was not finished: the chunker's final count was never
+        set (its progressive updates set ``chunks_created`` alone), or extraction had not reached
+        ``total_pages``. They go red if the tail is ever decided from the flags alone, which is
+        what holds today only because the uploader keeps its newest batch unflagged until the next
+        batch or ``finish`` sent it."""
+        if why == "chunker-still-running":
+            db.create_pipeline("h1", "/a.pdf", "docs__test")
+            for i in range(2):
+                db.write_page("h1", i, f"Page {i} content.", metadata={"page_number": i + 1, "text_length": 15})
+            db.update_progress("h1", total_pages=2, pages_extracted=2, chunks_created=6)
+            for i in range(6):
+                db.write_chunk("h1", i, f"chunk {i} text", f"h1_{i}", metadata={}, embedding=_fake_embedding(i))
+            db.mark_uploaded("h1", list(range(6)))
+            db.update_progress("h1", chunks_uploaded=6)
+            db.mark_failed("h1", error="killed")
+        else:
+            _pop_killed_upload(db, "h1", 6, 6, counter=6)
+            if why == "extraction-incomplete":
+                db.update_progress("h1", total_pages=3)
+            self.fence = {
+                "fence-for-other-bytes": ("indexing", "other-hash"),
+                "fence-already-complete": ("complete", "h1"),
+                "fence-failed": ("failed", "h1"),
+                "no-fence": (None, None),
+            }.get(why, self.fence)
+        assert self._reconcile(db) == "reset", why
+        assert db.chunk_counts("h1")[1] == 0, "the flags were put back"
+
+    def test_a_damaged_buffer_is_discarded(self, db) -> None:
+        _pop_killed_upload(db, "h1", 6, 2, counter=2, embedded_rows=4)
+        assert self._reconcile(db) == "restarted"
+        assert db.get_pipeline_state("h1")["chunks_uploaded"] == 0
+
+
+class TestDoneSignalsMeanSuccess:
+    """``extraction_done`` and ``chunking_done`` are read downstream as "no more pages" and "every
+    chunk is in the buffer", and the uploader's last request sweeps the previous version's chunks.
+    A stage that FAILED must not set them (RDR-223, nexus-z0o2p.11)."""
+
+    def test_a_failed_extraction_does_not_signal_done(self, db) -> None:
+        done = threading.Event()
+        db.create_pipeline("h1", "/a.pdf", "docs__test")
+        with patch(_P_EXT) as ME:
+            ME.return_value.extract.side_effect = RuntimeError("extract boom")
+            with pytest.raises(RuntimeError, match="extract boom"):
+                extractor_loop(Path("/a.pdf"), "h1", db, threading.Event(), extraction_done=done)
+        assert not done.is_set()
+
+    def test_a_finished_extraction_signals_done(self, db) -> None:
+        done = threading.Event()
+        db.create_pipeline("h1", "/a.pdf", "docs__test")
+        with patch(_P_EXT) as ME:
+            ME.return_value.extract.side_effect = _fx(2, _er(2))
+            extractor_loop(Path("/a.pdf"), "h1", db, threading.Event(), extraction_done=done)
+        assert done.is_set()
+
+    def test_a_failed_chunker_does_not_signal_done(self, db, done_event) -> None:
+        _pop_pages(db, "h1", 3)
+        chunking_done = threading.Event()
+
+        def _embed_boom(texts, model):
+            raise RuntimeError("embed boom")
+
+        with patch(_P_CHK) as MC:
+            MC.return_value.chunk.return_value = _tc(("chunk 0", 0, {}), ("chunk 1", 1, {}))
+            with pytest.raises(RuntimeError, match="embed boom"):
+                chunker_loop("h1", db, threading.Event(), embed_fn=_embed_boom,
+                             extraction_done=done_event, chunking_done=chunking_done)
+        assert not chunking_done.is_set()
+
+    def test_the_zero_chunk_refusal_does_not_signal_done(self, db, done_event) -> None:
+        _pop_pages(db, "h1", 3)
+        chunking_done = threading.Event()
+        with patch(_P_CHK) as MC:
+            MC.return_value.chunk.return_value = []
+            with pytest.raises(RuntimeError, match="zero chunks"):
+                chunker_loop("h1", db, threading.Event(), embed_fn=_embed, extraction_done=done_event,
+                             chunking_done=chunking_done, pdf_path="/a.pdf")
+        assert not chunking_done.is_set()
+
+    def test_a_finished_chunker_signals_done(self, db, done_event) -> None:
+        _pop_pages(db, "h1", 3)
+        chunking_done = threading.Event()
+        with patch(_P_CHK) as MC:
+            MC.return_value.chunk.return_value = _tc(("chunk 0", 0, {}), ("chunk 1", 1, {}))
+            chunker_loop("h1", db, threading.Event(), embed_fn=_embed, extraction_done=done_event,
+                         chunking_done=chunking_done)
+        assert chunking_done.is_set()
+
+    def test_a_chunker_that_found_no_text_and_finished_signals_done(self, db, done_event) -> None:
+        db.create_pipeline("h1", "/a.pdf", "docs__test")
+        chunking_done = threading.Event()
+        chunker_loop("h1", db, threading.Event(), embed_fn=_embed, extraction_done=done_event,
+                     chunking_done=chunking_done)
+        assert chunking_done.is_set()
+
+    def test_a_failed_extraction_never_releases_the_writers_last_request(
+        self, db, mock_t3, monkeypatch,
+    ) -> None:
+        """End to end through the orchestrator. The extractor delivers three pages and then fails.
+        The chunker writes every chunk but the last, the uploader starts its writer, and, were the
+        extractor's failure to read as "extraction finished", the chunker would write the final
+        chunk and signal done and the uploader would send the writer's LAST request, whose sweep
+        removes what the previous version owned and this one dropped, for a document that was never
+        fully extracted. The orchestrator's ``wait`` is slowed so the stages get the time a real
+        run's network calls give them before ``cancel`` is set."""
+        import nexus.pipeline_stages as stages
+
+        writer = install_streaming_writer(monkeypatch)
+        real_wait = stages.wait
+
+        def _slow_wait(fs, *a, **kw):
+            # The chunker polls a pending extraction every 0.5 s (``extraction_done.wait``), so the
+            # stages need more than one of those before ``cancel`` is set.
+            time.sleep(3.0)
+            return real_wait(fs, *a, **kw)
+
+        monkeypatch.setattr(stages, "wait", _slow_wait)
+        six = _tc(*[(f"chunk {i} text", i, {"page_number": 1}) for i in range(6)])
+
+        def _extract_then_fail(pdf_path, *, extractor="auto", on_formula_oom="fail", on_page=None,
+                               allow_degraded=False):
+            # Pages arrive over time, as a real extraction delivers them, so the chunker sees new
+            # pages while extraction is still pending and chunks the stable prefix.
+            for i in range(3):
+                on_page(i, f"Page {i} content.", {"page_number": i + 1, "text_length": 15})
+                time.sleep(0.2)
+            raise RuntimeError("extract boom")
+
+        with patch(_P_EXT) as ME, patch(_P_CHK) as MC:
+            ME.return_value.extract.side_effect = _extract_then_fail
+            MC.return_value.chunk.return_value = six
+            with pytest.raises(RuntimeError, match="extract boom"):
+                pipeline_index_pdf(Path("/a.pdf"), "h1", "docs__test", mock_t3,
+                                   db=db, embed_fn=_embed, corpus="test")
+
+        assert writer.instances, "non-vacuity: the uploader started its writer"
+        assert ("finish",) not in writer.events, "the writer's last request (and its sweep) was sent"
+        assert not any(w.finished for w in writer.instances)

@@ -66,14 +66,17 @@ _COLLECTION = "knowledge__rnqbw-reap-ordering__bge-base-en-v15-768__v1"
 
 def _seed_owned_note(client, content: str, title: str) -> str:
     """Seed a real store_put-shaped single-owner note: catalog row +
-    manifest row + T3 chunk, all real, no TTL involved -- nexus-rnqbw is
-    about the ORDINARY same-call delete path, not TTL expiry (that is
-    nexus-o8dil.5's own scope). Returns the chash.
+    manifest row + T3 chunk, all real, written the way MCP ``store_put`` now
+    writes them (RDR-223 P2.2, nexus-z0o2p.12): one ``write_manifest_many``
+    request, so the chunk and its owner row land together. No TTL involved --
+    nexus-rnqbw is about the ORDINARY same-call delete path, not TTL expiry
+    (that is nexus-o8dil.5's own scope). Returns the chash.
     """
+    from nexus.catalog.note_write import write_note
     from nexus.catalog.store_hook import (
         catalog_store_hook_tracked,
+        note_content_hash,
         single_chunk_manifest_metadata,
-        store_put_manifest_direct,
     )
 
     chash, manifest_metadatas = single_chunk_manifest_metadata(content)
@@ -81,18 +84,10 @@ def _seed_owned_note(client, content: str, title: str) -> str:
         title=title, doc_id=chash, collection_name=_COLLECTION,
     )
     assert created is True
-    # RDR-194 P3d / catalog-029-manifest-chunk-fk.xml: the T3 chunk must
-    # land BEFORE the manifest write below (chunk-then-manifest, matching
-    # production's real hook ordering) -- the FK now refuses a manifest row
-    # naming a chash with no matching nexus.chunks row.
-    client.upsert_chunks_with_embeddings(
-        _COLLECTION,
-        ids=[chash],
-        documents=[content],
-        embeddings=[],
-        metadatas=[{"title": title, "chunk_text_hash": chash, "doc_id": tumbler}],
+    write_note(
+        catalog_doc_id=tumbler, collection=_COLLECTION, pieces=[content], title=title,
+        content_hash=note_content_hash(content, manifest_metadatas),
     )
-    store_put_manifest_direct(tumbler, manifest_metadatas, collection=_COLLECTION)
     return chash
 
 

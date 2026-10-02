@@ -258,6 +258,10 @@ public final class ChashRepository {
                           .where(ch.tenantId().eq(tenant)
                               .and(ch.collection().eq(newCollection))))))
                .execute();
+            // nexus-wbfpw.43: deliberately does NOT refresh last_written_at. Re-homing
+            // a chunk to another collection is maintenance: it re-writes no client
+            // content, and refreshing the reapable(c) grace window here would keep an
+            // unowned chunk alive by moving it.
             int total = ctx.update(ch.table())
                         .set(ch.collection(), newCollection)
                         .where(ch.tenantId().eq(tenant)

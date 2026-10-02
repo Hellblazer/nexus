@@ -10,15 +10,19 @@ read, so the content was stored and unreachable until ``nx catalog
 reconcile`` ran by hand.
 
 RDR-223 removes the split write that opens this window (chunks commit
-before their owner rows). Until it lands, ``doc_indexer._fence_fail`` (the
-funnel every index failure path and the exit handler use) rebuilds the
-failed document's manifest from the chunks it did store. The document stays
-``failed``, so the next run re-indexes it; its stored content stays readable
-meanwhile.
+before their owner rows). ``_index_document`` (``nx index md`` / ``rdr`` /
+DEVONthink markdown) no longer has the window (nexus-z0o2p.13): its chunks
+and owner rows are one request. The other paths keep it until their beads
+land, so ``doc_indexer._fence_fail`` (the funnel every index failure path and
+the exit handler use) still rebuilds the failed document's manifest from the
+chunks it did store. The document stays ``failed``, so the next run
+re-indexes it; its stored content stays readable meanwhile.
 
 These tests drive the production ``index_markdown`` entry against the real
-engine and inject the failure at the post-store hook chain, after the real
-upsert, which is where a manifest-write failure lands.
+engine. The failure is injected after the real write, at the post-store hook
+chain, and the two tests that need the old hidden-chunk state (a run killed
+between its chunk upload and its owner rows) build it by hand, since the
+markdown path can no longer produce it.
 """
 from __future__ import annotations
 
@@ -27,8 +31,10 @@ from unittest.mock import patch
 import pytest
 
 from nexus.db.http_vector_client import HttpVectorClient
+from tests._chunk_seed import seed_chunks_direct
 
-pytestmark = pytest.mark.integration
+# Not integration-marked (nexus-wbfpw.38): the substrate provisions itself,
+# and CI's default selection must run this RDR-192 pin.
 
 _COLLECTION = "docs__ntxj-failed-run__bge-base-en-v15-768__v1"
 
@@ -49,6 +55,40 @@ def _doc_for(path) -> object:
     return matches[0]
 
 
+def _seed_killed_split_run(md) -> None:
+    """A run killed between its chunk upload and its owner rows, built by hand: the split write
+    RDR-223 removed from the markdown path. The document is registered, its fence begun with the
+    file's hash, its chunks inserted with substrate SQL and no owner row (the write routes refuse
+    that state from RDR-223 Phase 3), and its run stamped failed."""
+    import uuid
+    from datetime import UTC, datetime
+
+    from nexus.catalog.factory import make_catalog_writer
+    from nexus.corpus import index_model_for_collection
+    from nexus.doc_indexer import _markdown_chunks, _register_or_lookup_doc_id, _sha256
+
+    path = md.resolve()
+    doc_id = _register_or_lookup_doc_id(
+        path, "ntxj", content_type="prose", physical_collection=_COLLECTION)
+    assert doc_id
+    content_hash = _sha256(path)
+    prepared = _markdown_chunks(
+        path, content_hash, index_model_for_collection(_COLLECTION),
+        datetime.now(UTC).isoformat(), "ntxj", doc_id=doc_id)
+    assert prepared
+    cat = make_catalog_writer()
+    try:
+        cat.begin_index_run(doc_id, content_hash, uuid.uuid4().hex, _COLLECTION)
+        seed_chunks_direct(
+            _COLLECTION, [p[0] for p in prepared], [p[1] for p in prepared],
+            [p[2] for p in prepared], embed=True)
+        cat.fail_index_run(doc_id, "seeded: the run was killed before its owner rows")
+    finally:
+        close = getattr(cat, "close", None)
+        if close is not None:
+            close()
+
+
 def _stored_and_visible(client: HttpVectorClient) -> tuple[set[str], set[str]]:
     col = client.get_collection(_COLLECTION)
     stored = set(col.get(include=[], include_non_live=True)["ids"])
@@ -64,7 +104,7 @@ def test_manifest_failure_after_upsert_leaves_the_chunks_readable(t2_service_env
     client = HttpVectorClient(tenant=t2_service_env)
 
     def _hook_chain_dies(self, *args, **kwargs):
-        raise RuntimeError("injected: manifest hook failed after the chunk upsert")
+        raise RuntimeError("injected: the hook chain failed after the write")
 
     with patch("nexus.hook_registry.HookRegistry.fire_batch", _hook_chain_dies), \
             pytest.raises(RuntimeError, match="injected"):
@@ -95,7 +135,7 @@ def test_the_next_run_completes_the_failed_document(t2_service_env, tmp_path):
     client = HttpVectorClient(tenant=t2_service_env)
 
     def _hook_chain_dies(self, *args, **kwargs):
-        raise RuntimeError("injected: manifest hook failed after the chunk upsert")
+        raise RuntimeError("injected: the hook chain failed after the write")
 
     with patch("nexus.hook_registry.HookRegistry.fire_batch", _hook_chain_dies), \
             pytest.raises(RuntimeError):
@@ -115,20 +155,12 @@ def test_doctor_names_unhealed_hidden_chunks_and_reconcile_repairs_them(t2_servi
     from click.testing import CliRunner
 
     from nexus.cli import main
-    from nexus.doc_indexer import index_markdown
     from nexus.health import _check_failed_runs_hidden_chunks
 
     md = tmp_path / "ntxj-killed.md"
     md.write_text(f"# ntxj killed\n\n{_BODY}\n")
     client = HttpVectorClient(tenant=t2_service_env)
-
-    def _hook_chain_dies(self, *args, **kwargs):
-        raise RuntimeError("injected: manifest hook failed after the chunk upsert")
-
-    with patch("nexus.hook_registry.HookRegistry.fire_batch", _hook_chain_dies), \
-            patch("nexus.doc_indexer._heal_failed_document", lambda doc_id: None), \
-            pytest.raises(RuntimeError):
-        index_markdown(md, corpus="ntxj", t3=client, collection_name=_COLLECTION)
+    _seed_killed_split_run(md)
 
     stored, visible = _stored_and_visible(client)
     assert stored and not visible, "control: the chunks are stored and hidden"
@@ -167,14 +199,18 @@ def test_a_failed_reindex_keeps_the_previous_content_readable(t2_service_env, tm
 
     md.write_text(f"# ntxj reindex v2\n\n{_BODY.replace('sentence', 'clause')}\n")
 
-    def _hook_chain_dies(self, *args, **kwargs):
-        raise RuntimeError("injected: manifest hook failed after the chunk upsert")
+    def _write_dies(self, *args, **kwargs):
+        raise RuntimeError("injected: the combined write failed")
 
-    with patch("nexus.hook_registry.HookRegistry.fire_batch", _hook_chain_dies), \
-            pytest.raises(RuntimeError):
+    # RDR-223 (nexus-z0o2p.13): the chunks and the manifest are one request, so a failure
+    # before the request leaves the previous version whole. (Before, the new chunks were
+    # uploaded first and the manifest failure was injected after them.)
+    with patch("nexus.catalog.http_catalog_client.HttpCatalogClient.write_manifest_many", _write_dies), \
+            pytest.raises(RuntimeError, match="injected"):
         index_markdown(md, corpus="ntxj", t3=client, collection_name=_COLLECTION)
 
     after = [r.chash for r in sorted(reader.get_manifest(str(doc.tumbler)), key=lambda r: r.position)]
     assert after == before, "the failed re-index must not replace the readable manifest"
     visible = set(client.get_collection(_COLLECTION).get(ids=before, include=[])["ids"])
     assert visible == set(before)
+    assert _doc_for(md).index_state == "failed"

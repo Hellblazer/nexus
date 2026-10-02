@@ -10,6 +10,21 @@ descriptor's `name`.
 
 ## traced/reachability-metadata.json
 
+- **No platform-specific native-library globs** (nexus-lhr6a, widened by nexus-vwfc0). The file
+  is traced on one host, so a glob such as
+  `ai/onnxruntime/native/osx-aarch64/libonnxruntime.dylib` embeds that host's
+  library into every other platform's binary: linux and windows carried the
+  mac onnxruntime until 2026-09-29. Each platform's own onnxruntime and DJL
+  libraries come from the pom's `native-libs-*` profiles; JNA embeds its own
+  per-platform libraries through its own metadata. A re-trace re-adds these
+  globs; delete them again. `tests/test_native_image_embedded_libs.py` fails on
+  any glob with a native-library suffix (`.so`, `.so.N`, `.dylib`, `.jnilib`,
+  `.dll`) or a platform directory segment (darwin, osx, macos, linux, win,
+  windows, with `-aarch64` / `-x86-64` / `-x64` variants), plus the per-library
+  paths `ai/onnxruntime/native/<dir>/` and `native/lib/<dir>/`. The CI native
+  trip-wire checks the resulting binary's actual embedded set
+  (`scripts/check_native_embedded_resources.py`).
+
 - **`ai.onnxruntime.OrtException`** (hand-added, nexus-o5xyx.3)
   `libonnxruntime4j_jni` throws it from native code through `FindClass` plus
   the `(int, String)` constructor whenever an ORT call returns an error

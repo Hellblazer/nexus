@@ -258,7 +258,7 @@ class TestStorePutHook:
         )
 
         # Simulate the manifest population that follows every real re-put
-        # (store_put_manifest_direct) — chunk_count becomes > 0, so the
+        # (the note write) — chunk_count becomes > 0, so the
         # ghost-by-title fallback is no longer reachable for this row.
         seed_manifest_chunks("knowledge__legacy__bge-base-en-v15-768__v1", ["b" * 64])
         cat.append_manifest_chunks(

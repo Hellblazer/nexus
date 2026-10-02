@@ -173,6 +173,7 @@ public final class CatalogHandler implements HttpHandler {
                 // ── Manifest ──────────────────────────────────────────────────
                 case "/manifest/write"        -> handleManifestWrite(exchange, tenant, method);
                 case "/manifest/append"       -> handleManifestAppend(exchange, tenant, method);
+                case "/manifest/append_many"  -> handleManifestAppendMany(exchange, tenant, method);
                 case "/manifest/write_many"   -> handleManifestWriteMany(exchange, tenant, method);
                 case "/manifest/get"          -> handleManifestGet(exchange, tenant, method);
                 case "/manifest/get_many"     -> handleManifestGetMany(exchange, tenant, method);
@@ -763,7 +764,7 @@ public final class CatalogHandler implements HttpHandler {
      * calling {@code nx catalog restore}. Response shape mirrors {@link
      * #handleList}: {@code {"documents": [...], "count": N}}, each entry
      * carrying {@code tumbler}, {@code title}, {@code physical_collection},
-     * {@code corpus}, {@code content_type}, and {@code deleted_at}.
+     * {@code corpus}, {@code content_type}, {@code file_path}, and {@code deleted_at}.
      */
     private void handleTrash(HttpExchange exchange, String tenant, String method) throws IOException {
         if (!"GET".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
@@ -1101,7 +1102,21 @@ public final class CatalogHandler implements HttpHandler {
         HttpUtil.send(exchange, 200, "{\"ok\":true,\"count\":" + rows.size() + "}");
     }
 
-    /** POST /v1/catalog/manifest/append */
+    /**
+     * POST /v1/catalog/manifest/append
+     *
+     * <p>RDR-223 P1.1 (bead nexus-z0o2p.2): optional {@code "chunks": [{"chash",
+     * "text", "metadata"}, ...]}, the same element shape as {@code write_many}'s.
+     * When present, the chunk rows the appended {@code rows} reference land in the
+     * SAME transaction as those rows (via {@link dev.nexus.service.db.CombinedWriteService#appendCombined}),
+     * embedded under the RDR-181 existence partition. The response then also carries
+     * {@code chunks_written}, {@code chunks_deduped}, {@code embed_skipped} and
+     * {@code embed_embedded}; the presence of {@code chunks_written} is a client's
+     * only runtime signal that this engine understood {@code chunks} (an old engine
+     * silently drops the unknown field). Optional {@code "force_re_embed"} mirrors
+     * {@code write_many}. 503 when no {@code CombinedWriteService} is wired. Absent
+     * {@code chunks} is byte-for-byte the pre-RDR-223 path and response.
+     */
     private void handleManifestAppend(HttpExchange exchange, String tenant, String method) throws IOException {
         if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
         Map<String, Object> body = readBody(exchange);
@@ -1113,8 +1128,288 @@ public final class CatalogHandler implements HttpHandler {
         if (collection == null) return;
         List<Map<String, Object>> rows = strictRows(body.get("rows"));
         requireCanonicalChashes(rows);
+        // Validated up front, before any transaction: a refusal on the LAST append of a
+        // multi-batch write, after its rows would already have committed, must never
+        // read as a lost batch (nexus-z0o2p.1 finding 4).
+        List<String> sweepChashes = parseSweepChashes(body.get("sweep_chashes"));
+        Object rawChunks = body.get("chunks");
+        if (rawChunks != null) {
+            if (combinedWriteService == null) {
+                HttpUtil.send(exchange, 503, "{\"error\":\"combined write not configured"
+                    + " (no CombinedWriteService)\"}");
+                return;
+            }
+            List<Map<String, Object>> chunks = parseChunks(rawChunks);
+            if (chunks.size() > MAX_CHUNKS_PER_APPEND) {
+                HttpUtil.send(exchange, 400, "{\"error\":\"too many chunks (max "
+                    + MAX_CHUNKS_PER_APPEND + ")\"}"); return;
+            }
+            boolean forceReEmbed = Boolean.TRUE.equals(body.get("force_re_embed"));
+            var combined = combinedWriteService.appendCombined(
+                tenant, collection, docId, rows, chunks, forceReEmbed, sweepChashes,
+                parseEmbeddingModel(body.get("embedding_model")), parseMetadataMode(body));
+            if (combined.tokens() > 0) {
+                exchange.getResponseHeaders().set(
+                    VectorHandler.USAGE_TOKENS_HEADER, Long.toString(combined.tokens()));
+            }
+            HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(combined.response()));
+            return;
+        }
+        if (!sweepChashes.isEmpty()) {
+            // sweep_chashes without chunks: an append (possibly sweep-only, empty rows) that
+            // sweeps after its commit. No embed, so no CombinedWriteService is needed.
+            var outcome = repo.appendManifestChunks(
+                tenant, docId, collection, rows, null, null, sweepChashes);
+            Map<String, Object> response = new LinkedHashMap<>();
+            response.put("ok", true);
+            response.put("count", rows.size());
+            outcome.addSweepFieldsTo(response);
+            HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(response));
+            return;
+        }
         repo.appendManifestChunks(tenant, docId, collection, rows);
         HttpUtil.send(exchange, 200, "{\"ok\":true,\"count\":" + rows.size() + "}");
+    }
+
+    /**
+     * Most {@code chunks} one {@code append} or {@code append_many} request carries (the 300-record
+     * write cap). {@code write_many} is deliberately NOT capped: the released client sends it with
+     * up to {@code NX_ONNX_LOCAL_UPSERT_CHUNK_CAP} chunks, which has no upper bound. Both append
+     * routes are new, so no released client can be refused.
+     */
+    private static final int MAX_CHUNKS_PER_APPEND = 300;
+
+    /**
+     * POST /v1/catalog/manifest/append_many (RDR-223 P1.4, bead nexus-z0o2p.5).
+     *
+     * <p>Body {@code {"collection": "...", "docs": [{"doc_id", "rows", "sweep_chashes"?}, ...],
+     * "chunks"?: [{"chash","text","metadata"}, ...], "force_re_embed"?}}: {@code write_many}'s
+     * request shape with append semantics. Each document is appended (rows upserted BY
+     * POSITION) in its own transaction, together with the chunk rows its own rows reference
+     * (from the request-level {@code chunks}), and its {@code sweep_chashes} are swept after
+     * its own commit. A failing document rolls back alone. Caps: {@value #MAX_BATCH_DOC_IDS}
+     * docs, {@value #MAX_CHUNKS_PER_APPEND} chunks, {@link
+     * CatalogRepository#MAX_SWEEP_CHASHES_PER_APPEND} {@code sweep_chashes} per document.
+     * Response: {@code {docs, rows, failed_doc_ids, failed, chunks_written, swept,
+     * sweep_skipped, sweep_detail, results}} plus, when {@code chunks} was sent,
+     * {@code chunks_deduped}/{@code embed_skipped}/{@code embed_embedded} and the
+     * {@code X-Nexus-Usage-Tokens} header; {@code results} is one entry per document in
+     * request order. 503 for {@code chunks} with no {@code CombinedWriteService}.
+     */
+    @SuppressWarnings("unchecked")
+    private void handleManifestAppendMany(HttpExchange exchange, String tenant, String method) throws IOException {
+        if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
+        Map<String, Object> body = readBody(exchange);
+        if (!(body.get("docs") instanceof List<?> l)) {
+            HttpUtil.send(exchange, 400, "{\"error\":\"'docs' must be a list\"}"); return;
+        }
+        if (l.stream().anyMatch(o -> !(o instanceof Map))) {
+            HttpUtil.send(exchange, 400, "{\"error\":\"every 'docs' element must be an object\"}"); return;
+        }
+        if (l.size() > MAX_BATCH_DOC_IDS) {
+            HttpUtil.send(exchange, 400, "{\"error\":\"too many docs (max "
+                + MAX_BATCH_DOC_IDS + ")\"}"); return;
+        }
+        String collection = requireCollection(exchange, body);
+        if (collection == null) return;
+        // Every document is validated up front, so the whole request 400s before ANY transaction.
+        List<Map<String, Object>> docs = new ArrayList<>(l.size());
+        for (int d = 0; d < l.size(); d++) {
+            Map<String, Object> in = (Map<String, Object>) l.get(d);
+            try {
+                if (!(in.get("doc_id") instanceof String docId) || docId.isBlank()) {
+                    throw new IllegalArgumentException("'doc_id' required");
+                }
+                List<Map<String, Object>> rows = strictRows(in.get("rows"));
+                requireCanonicalChashes(rows);
+                Map<String, Object> doc = new LinkedHashMap<>();
+                doc.put("doc_id", docId);
+                doc.put("rows", rows);
+                doc.put("sweep_chashes", parseSweepChashes(in.get("sweep_chashes")));
+                Map<String, Object> complete = parseDocComplete(in.get("complete"));
+                if (complete != null) doc.put("complete", complete);
+                docs.add(doc);
+            } catch (IllegalArgumentException e) {
+                throw new IllegalArgumentException("docs[" + d + "]." + e.getMessage());
+            }
+        }
+        Object rawChunks = body.get("chunks");
+        List<Map<String, Object>> chunks = null;
+        if (rawChunks != null) {
+            if (combinedWriteService == null) {
+                HttpUtil.send(exchange, 503, "{\"error\":\"combined write not configured"
+                    + " (no CombinedWriteService)\"}");
+                return;
+            }
+            chunks = parseChunks(rawChunks);
+            if (chunks.size() > MAX_CHUNKS_PER_APPEND) {
+                HttpUtil.send(exchange, 400, "{\"error\":\"too many chunks (max "
+                    + MAX_CHUNKS_PER_APPEND + ")\"}"); return;
+            }
+        }
+        if (chunks == null) {
+            // No embed: the rows reference chunks that already exist. Same repository entry point,
+            // so the response shape is the one the chunks path returns, minus the embed counts.
+            HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(
+                repo.appendManifestMany(tenant, collection, docs, null)));
+            return;
+        }
+        boolean forceReEmbed = Boolean.TRUE.equals(body.get("force_re_embed"));
+        var combined = combinedWriteService.appendManyCombined(tenant, collection, docs, chunks, forceReEmbed,
+            parseEmbeddingModel(body.get("embedding_model")), parseMetadataMode(body));
+        if (combined.tokens() > 0) {
+            exchange.getResponseHeaders().set(
+                VectorHandler.USAGE_TOKENS_HEADER, Long.toString(combined.tokens()));
+        }
+        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(combined.response()));
+    }
+
+    /** Most keys one request may name in {@code metadata_delete_keys}. */
+    private static final int MAX_METADATA_DELETE_KEYS = 64;
+
+    /**
+     * The request's metadata write mode (RDR-223, bead nexus-z0o2p.13): optional {@code
+     * "metadata_merge": true} makes the combined routes MERGE the incoming chunk metadata into
+     * the stored metadata of a chash that already exists (stored minus {@code
+     * metadata_delete_keys}, then the incoming keys) instead of replacing it, the semantics of
+     * {@code /v1/vectors/upsert-chunks}. Absent or false is the replace behaviour every earlier
+     * client gets. {@code metadata_delete_keys} (an array of non-blank strings, at most {@value
+     * #MAX_METADATA_DELETE_KEYS}) names the keys the writer owns and dropped from this write;
+     * it is refused without {@code metadata_merge}. Only chunks are affected, so both fields are
+     * ignored on a request that carries no {@code chunks}.
+     */
+    static dev.nexus.service.db.CombinedWriteService.MetadataMode parseMetadataMode(Map<String, Object> body) {
+        Object rawMerge = body.get("metadata_merge");
+        if (rawMerge != null && !(rawMerge instanceof Boolean)) {
+            throw new IllegalArgumentException("'metadata_merge' must be a boolean");
+        }
+        boolean merge = Boolean.TRUE.equals(rawMerge);
+        Object rawKeys = body.get("metadata_delete_keys");
+        List<String> keys = new ArrayList<>();
+        if (rawKeys != null) {
+            if (!(rawKeys instanceof List<?> l)) {
+                throw new IllegalArgumentException("'metadata_delete_keys' must be an array of strings");
+            }
+            if (l.size() > MAX_METADATA_DELETE_KEYS) {
+                throw new IllegalArgumentException("'metadata_delete_keys' has " + l.size()
+                    + " keys; the limit is " + MAX_METADATA_DELETE_KEYS);
+            }
+            for (Object o : l) {
+                if (!(o instanceof String k) || k.isBlank()) {
+                    throw new IllegalArgumentException(
+                        "'metadata_delete_keys' must be an array of non-blank strings");
+                }
+                keys.add(k);
+            }
+        }
+        return new dev.nexus.service.db.CombinedWriteService.MetadataMode(merge, keys);
+    }
+
+    /**
+     * The request's top-level {@code embedding_model} (RDR-223 P1.5): the model that produced
+     * any {@code embedding} a chunk carries. Absent or null is {@code null}; the service refuses
+     * a request whose chunks carry vectors and this is absent, or names another model than the
+     * collection's.
+     */
+    private static String parseEmbeddingModel(Object raw) {
+        if (raw == null) return null;
+        if (!(raw instanceof String model)) {
+            throw new IllegalArgumentException("'embedding_model' must be a string");
+        }
+        return model;
+    }
+
+    /**
+     * Validates one {@code append_many} document's optional {@code complete} (RDR-223 fix round,
+     * bead nexus-z0o2p.19): {@code {content_hash: non-blank string, chunk_count: integer >= 0}},
+     * the pair {@code write_many}'s {@code complete} map carries (there the row count is the
+     * request's rows, which for a replace is the whole manifest; an append sees only a part of the
+     * manifest, so the caller states the manifest ROW count it expects). Absent or null is no stamp.
+     * Throws {@link IllegalArgumentException} (mapped to 400) naming the problem.
+     */
+    private static Map<String, Object> parseDocComplete(Object raw) {
+        if (raw == null) return null;
+        if (!(raw instanceof Map<?, ?> m)) {
+            throw new IllegalArgumentException("'complete' must be an object {content_hash, chunk_count}");
+        }
+        if (!(m.get("content_hash") instanceof String hash) || hash.isBlank()) {
+            throw new IllegalArgumentException("complete.content_hash required (non-blank string)");
+        }
+        Object count = m.get("chunk_count");
+        if (!(count instanceof Integer || count instanceof Long || count instanceof Short)
+                || ((Number) count).longValue() < 0 || ((Number) count).longValue() > Integer.MAX_VALUE) {
+            throw new IllegalArgumentException("complete.chunk_count required (integer >= 0)");
+        }
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("content_hash", hash);
+        out.put("chunk_count", ((Number) count).intValue());
+        return out;
+    }
+
+    /**
+     * Validates {@code sweep_chashes} (RDR-223 P1.3): absent or null is no sweep; otherwise a
+     * list of canonical 64-hex chashes, at most {@link
+     * CatalogRepository#MAX_SWEEP_CHASHES_PER_APPEND}. Throws {@link IllegalArgumentException}
+     * (mapped to 400) naming the offending element or the cap.
+     */
+    private static List<String> parseSweepChashes(Object raw) {
+        if (raw == null) return List.of();
+        if (!(raw instanceof List<?> l)) {
+            throw new IllegalArgumentException("'sweep_chashes' must be a list");
+        }
+        List<String> out = new ArrayList<>(l.size());
+        for (int i = 0; i < l.size(); i++) {
+            if (!(l.get(i) instanceof String s)) {
+                throw new IllegalArgumentException("sweep_chashes[" + i + "]: every element must be a string");
+            }
+            out.add(dev.nexus.service.db.Chash.requireCanonical(s, "sweep_chashes[" + i + "]"));
+        }
+        // Size last: an element that is not a chash is the more specific complaint.
+        return CatalogRepository.normalizeSweepChashes(out);
+    }
+
+    /**
+     * Validates and normalizes a combined-write {@code chunks} payload (RDR-223:
+     * shared by {@code write_many} and {@code append}): a list of objects, each
+     * with a canonical 64-hex {@code chash} and a string {@code text}. Throws
+     * {@link IllegalArgumentException} (mapped to 400 by the dispatcher) naming the
+     * offending element.
+     */
+    @SuppressWarnings("unchecked")
+    private static List<Map<String, Object>> parseChunks(Object rawChunks) {
+        if (!(rawChunks instanceof List<?> cl)) {
+            throw new IllegalArgumentException("'chunks' must be a list");
+        }
+        List<Map<String, Object>> chunks = new ArrayList<>(cl.size());
+        for (int i = 0; i < cl.size(); i++) {
+            if (!(cl.get(i) instanceof Map)) {
+                throw new IllegalArgumentException("chunks[" + i + "]: every element must be an object");
+            }
+            Map<String, Object> chunk = new LinkedHashMap<>((Map<String, Object>) cl.get(i));
+            if (!(chunk.get("chash") instanceof String chashStr)) {
+                throw new IllegalArgumentException("chunks[" + i + "]: 'chash' required (string)");
+            }
+            chunk.put("chash", dev.nexus.service.db.Chash.requireCanonical(chashStr, "chunks[" + i + "]"));
+            if (!(chunk.get("text") instanceof String)) {
+                throw new IllegalArgumentException("chunks[" + i + "]: 'text' required (string)");
+            }
+            // RDR-223 P1.5: an optional client-supplied vector. Shape only here; its length and
+            // the request's embedding_model are checked against the collection by the service.
+            Object embedding = chunk.get("embedding");
+            if (embedding != null) {
+                if (!(embedding instanceof List<?> nums)) {
+                    throw new IllegalArgumentException("chunks[" + i + "]: 'embedding' must be an array of numbers");
+                }
+                for (Object n : nums) {
+                    if (!(n instanceof Number)) {
+                        throw new IllegalArgumentException(
+                            "chunks[" + i + "]: 'embedding' contains a non-numeric component");
+                    }
+                }
+            }
+            chunks.add(chunk);
+        }
+        return chunks;
     }
 
     /**
@@ -1233,37 +1528,12 @@ public final class CatalogHandler implements HttpHandler {
                     + " (no CombinedWriteService)\"}");
                 return;
             }
-            if (!(rawChunks instanceof List<?> cl)) {
-                HttpUtil.send(exchange, 400, "{\"error\":\"'chunks' must be a list\"}"); return;
-            }
             // 'collection' already validated above (required unconditionally).
-            List<Map<String, Object>> chunks = new ArrayList<>(cl.size());
-            for (int i = 0; i < cl.size(); i++) {
-                if (!(cl.get(i) instanceof Map)) {
-                    HttpUtil.send(exchange, 400,
-                        "{\"error\":\"chunks[" + i + "]: every element must be an object\"}"); return;
-                }
-                Map<String, Object> chunk = new LinkedHashMap<>((Map<String, Object>) cl.get(i));
-                Object chashObj = chunk.get("chash");
-                if (!(chashObj instanceof String chashStr)) {
-                    HttpUtil.send(exchange, 400,
-                        "{\"error\":\"chunks[" + i + "]: 'chash' required (string)\"}"); return;
-                }
-                try {
-                    chunk.put("chash", dev.nexus.service.db.Chash.requireCanonical(chashStr, "chunks[" + i + "]"));
-                } catch (IllegalArgumentException e) {
-                    HttpUtil.send(exchange, 400,
-                        "{\"error\":" + MAPPER.writeValueAsString(e.getMessage()) + "}"); return;
-                }
-                if (!(chunk.get("text") instanceof String)) {
-                    HttpUtil.send(exchange, 400,
-                        "{\"error\":\"chunks[" + i + "]: 'text' required (string)\"}"); return;
-                }
-                chunks.add(chunk);
-            }
+            List<Map<String, Object>> chunks = parseChunks(rawChunks);
             boolean forceReEmbed = Boolean.TRUE.equals(body.get("force_re_embed"));
             var combined = combinedWriteService.writeManyCombined(
-                tenant, collection, chunks, docs, complete, sweep, forceReEmbed);
+                tenant, collection, chunks, docs, complete, sweep, forceReEmbed,
+                parseEmbeddingModel(body.get("embedding_model")), parseMetadataMode(body));
             if (combined.tokens() > 0) {
                 exchange.getResponseHeaders().set(
                     VectorHandler.USAGE_TOKENS_HEADER, Long.toString(combined.tokens()));
@@ -2858,8 +3128,17 @@ public final class CatalogHandler implements HttpHandler {
         String contentHash = (String) body.get("content_hash");
         String runId       = (String) body.get("run_id");
         String collection  = (String) body.get("collection");
-        repo.beginIndexRun(tenant, docId, contentHash, runId, collection);
-        HttpUtil.send(exchange, 200, "{\"ok\":true}");
+        // RDR-223 (nexus-z0o2p.10): opt-in pre-run manifest snapshot, additive response fields.
+        boolean snapshot = Boolean.TRUE.equals(body.get("snapshot_manifest"));
+        var prior = repo.beginIndexRun(tenant, docId, contentHash, runId, collection, snapshot);
+        if (prior == null) {
+            HttpUtil.send(exchange, 200, "{\"ok\":true}");
+            return;
+        }
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("ok", true);
+        response.putAll(prior);
+        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(response));
     }
 
     /**
@@ -2881,7 +3160,9 @@ public final class CatalogHandler implements HttpHandler {
                 + MAX_BATCH_DOC_IDS + ")\"}"); return;
         }
         String collection = (String) body.get("collection");
-        var result = repo.beginIndexRunMany(tenant, docs, collection);
+        // RDR-223 fix round (nexus-z0o2p.19): optional, like /index-run/begin's snapshot_manifest.
+        boolean snapshotManifest = Boolean.TRUE.equals(body.get("snapshot_manifest"));
+        var result = repo.beginIndexRunMany(tenant, docs, collection, snapshotManifest);
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(result));
     }
 

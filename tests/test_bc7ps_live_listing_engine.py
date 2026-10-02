@@ -3,8 +3,9 @@ collection produced by the real prune path is in the full listing and absent
 from the routing listing on BOTH clients, and taxonomy discovery never
 enumerates it.
 
-The quarantine row is made the way production makes it: server-embedded
-chunks with no manifest row are orphans, ``_prune_deleted_files`` moves them
+The quarantine row is made the way production makes it: chunks with no
+manifest row (inserted with substrate SQL, since the engine refuses the
+ownerless route) are orphans, ``_prune_deleted_files`` moves them
 through ``gc_quarantine_orphans`` into ``quarantine-<name>``, which the engine
 registers with ``lifecycle_state = 'quarantine'`` (hygiene-005). No fixture
 inserts the row by hand, so the pin holds against the registration path the
@@ -22,6 +23,8 @@ from nexus.catalog.http_catalog_client import HttpCatalogClient
 from nexus.commands.taxonomy_cmd import _enumerate_discoverable_collections
 from nexus.indexer import _prune_deleted_files
 from tests._catalog_fixture_ops import ActiveCatalog
+from tests._chunk_seed import seed_chunks_direct
+from tests._reapable_age import age_chunks_past_grace
 
 # Deliberately in the default suite, not integration-marked: it is the one pin
 # on the class this bead closed, it needs only the engine substrate every
@@ -35,7 +38,11 @@ def _seed_orphans(cat, db, coll_name: str, owner: str, n_live: int, n_orphan: in
         ids.append(chash)
         docs.append(f"def bc7ps_probe_{i}(): return {i}\n")
         metas.append({"chunk_text_hash": chash, "title": f"bc7ps_probe_{i}.py:1-1"})
-    db.upsert_chunks_with_embeddings(coll_name, ids=ids, documents=docs, embeddings=[], metadatas=metas)
+    # Substrate SQL: the orphans are this test's subject, and the engine refuses
+    # an ownerless upsert-chunks write from RDR-223 Phase 3 on.
+    seed_chunks_direct(coll_name, ids, docs, metas)
+    # gc selects with reapable(c), which honours a 30 day grace window (RDR-192 Step 8).
+    age_chunks_past_grace(coll_name)
     for i in range(n_live):
         tumbler = str(cat.register(
             owner, f"bc7ps_probe_{i}.py", content_type="code",

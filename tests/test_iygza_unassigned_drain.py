@@ -32,6 +32,7 @@ from nexus.db import make_t3
 from nexus.db.t2.http_taxonomy_store import HttpTaxonomyStore
 from nexus.mcp_infra import DrainResult, drain_unassigned_chunks
 from tests._catalog_fixture_ops import ActiveCatalog
+from tests._chunk_seed import seed_chunks_direct
 
 _COLL = "knowledge__iygza-drain__bge-base-en-v15-768__v1"
 _BARE = "knowledge__iygza-bare__bge-base-en-v15-768__v1"
@@ -51,9 +52,9 @@ def _seed(collection: str, n: int, *, topic: bool) -> tuple[list[str], int | Non
     t3 = make_t3()
     docs = [f"iygza drain chunk {i} about lighthouses and tides" for i in range(n)]
     ids = [_chash(d) for d in docs]
-    t3.upsert_chunks_with_embeddings(
-        collection_name=collection, ids=ids, documents=docs,
-        embeddings=[[] for _ in ids], metadatas=[{} for _ in ids],
+    seed_chunks_direct(
+        collection=collection, ids=ids, documents=docs,
+        embed=True, metadatas=[{} for _ in ids],
     )
     cat = ActiveCatalog()
     owner = cat.register_owner("iygza-owner", "curator")

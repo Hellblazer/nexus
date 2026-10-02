@@ -133,6 +133,18 @@ class ResolveHandlerTest {
         });
     }
 
+    /**
+     * Seed a reference-only row (RDR-169 G4) through the test fixture, as {@link #TENANT_A};
+     * the engine has no writer for one (RDR-223 Phase 3, nexus-z0o2p.36).
+     */
+    private void seedReferenceOnly(String chash, Map<String, Object> metadata) {
+        new TenantScope(svcDs).withTenant(TENANT_A, ctx -> {
+            PgContainerHelper.insertReferenceOnlyChunk(ctx, TENANT_A, COLLECTION, chash,
+                StubEmbedder.unitVector(1024), metadata);
+            return null;
+        });
+    }
+
     private HttpResponse<String> post(String token, Object body) throws Exception {
         var req = HttpRequest.newBuilder()
             .uri(URI.create("http://127.0.0.1:" + service.getPort() + "/v1/vectors/resolve"))
@@ -184,9 +196,7 @@ class ResolveHandlerTest {
         String fullUri = "chroma://" + COLLECTION + "/" + fullChash;
 
         String refChash = Chash.ofText("resolve-reference-only-row").toHex();
-        repo.upsertReferenceOnlyChunk(TENANT_A, COLLECTION, refChash,
-            StubEmbedder.unitVector(1024),
-            Map.of("source_uri", fullUri));
+        seedReferenceOnly(refChash, Map.of("source_uri", fullUri));
         own(refChash);
 
         var resp = post(TOKEN_A, Map.of("collection", COLLECTION, "chash", refChash));
@@ -227,8 +237,7 @@ class ResolveHandlerTest {
     @Test
     void chromaSourceUri_targetIsReferenceOnly_returns404WithReferenceOnlyReason() throws Exception {
         String refChash = Chash.ofText("resolve-direct-reference-only-target").toHex();
-        repo.upsertReferenceOnlyChunk(TENANT_A, COLLECTION, refChash,
-            StubEmbedder.unitVector(1024), Map.of());
+        seedReferenceOnly(refChash, Map.of());
         String refUri = "chroma://" + COLLECTION + "/" + refChash;
 
         var resp = post(TOKEN_A, Map.of("source_uri", refUri));

@@ -63,11 +63,8 @@ _PRIVATE_HANDLE_ATTRS = frozenset({"_client", "_client_for"})
 #: This may only shrink. A new entry means someone reached into another
 #: object's private handle, which is the nexus-at2ff class.
 PRIVATE_HANDLE_CENSUS: dict[str, int] = {
-    # Guarded: is_service_backed(t3) returns before this line, so it only ever
-    # sees the legacy chroma-backed T3Database where ._client is correct. This
-    # exact site was changed by pattern during the at2ff sweep and REVERTED —
-    # it is the false positive that proves receiver-blind fixing is wrong too.
-    "src/nexus/commands/catalog.py": 1,
+    # src/nexus/commands/catalog.py: 1 -> 0 (the chunk_text_hash backfill helper, the one
+    # guarded site, was deleted with `nx collection backfill-hash`).
     # Guarded: :86 by is_service_backed(t3); :1200 by
     # _require_supported_taxonomy_backend(t3, db.taxonomy) refusing the
     # split-backend config before the raw path.
@@ -234,8 +231,10 @@ def test_the_fixed_sites_stay_fixed() -> None:
         "src/nexus/commands/catalog_cmds/orphan_backfill.py",
         # db/migrations.py entry removed — RDR-158 P4 Stage 4 (nexus-i711w):
         # the file is DELETED (a deleted file trivially holds zero).
-        "src/nexus/db/t3_reidentify.py",
-        "src/nexus/db/embed_migrate.py",
+        # db/t3_reidentify.py entry removed — RDR-223 P3.3 (nexus-z0o2p.25):
+        # the file is DELETED (a deleted file trivially holds zero).
+        # db/embed_migrate.py entry removed — RDR-223 P3.3 (nexus-z0o2p.25):
+        # the file is DELETED (a deleted file trivially holds zero).
     ):
         assert rel not in live, (
             f"{rel} reacquired a private-handle reach at "

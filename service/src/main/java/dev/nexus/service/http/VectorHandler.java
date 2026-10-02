@@ -13,6 +13,9 @@ import com.sun.net.httpserver.HttpHandler;
 import dev.nexus.service.vectors.EmbedResult;
 import dev.nexus.service.vectors.EmbedderRouter;
 import dev.nexus.service.vectors.EmbeddingModelUnavailableException;
+import dev.nexus.service.vectors.OwnerlessChunkWriteException;
+import dev.nexus.service.vectors.OwnerlessWritePolicy;
+import dev.nexus.service.vectors.OwnershipGuard;
 import dev.nexus.service.vectors.PgVectorRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -20,6 +23,7 @@ import org.slf4j.LoggerFactory;
 import java.io.IOException;
 import java.io.InputStream;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -30,7 +34,7 @@ import java.util.Map;
  * <p>Routes (all under {@code /v1/vectors/}):
  * <pre>
  *   POST /v1/vectors/upsert-chunks   server-side embed + pgvector write
- *   POST /v1/vectors/upsert-reference-only  precomputed-vector, NULL-content upsert (RDR-169 G4)
+ *   POST /v1/vectors/upsert-reference-only  410 Gone (retired, RDR-223 Phase 3 Step 2, nexus-z0o2p.24)
  *   POST /v1/vectors/search          embed query server-side + cosine rank (multi-collection)
  *   POST /v1/vectors/query           alias for search (mirrors MCP query tool)
  *   POST /v1/vectors/hybrid-search   pgvector hybrid fusion (tsvector+pg_trgm gate, vector rank) — RDR-155 P3
@@ -55,6 +59,7 @@ import java.util.Map;
  *   GET  /v1/vectors/stats           per-collection live stats (count/dim/last_write) — RDR-156 P3
  *   POST /v1/vectors/embed           embed-only (parity gate); 503 without a router
  *   POST /v1/vectors/manifest-less-census  read-only manifest-less classification — RDR-192 S2
+ *   POST /v1/vectors/reapable        read-only listing of the chunks reapable(c) selects — RDR-192 S8
  * </pre>
  *
  * <p><strong>Fused rerank stage (RDR-188, bead nexus-9o6y2.2).</strong> The five
@@ -142,6 +147,7 @@ public final class VectorHandler implements HttpHandler {
     private final EmbedderRouter      embedderRouter;
     private final PgVectorRepository  pgRepo;
     private final RerankStage         rerankStage;
+    private final OwnerlessWritePolicy ownerlessWritePolicy;
 
     /**
      * @param embedderRouter collection-aware embedder router for /embed (may be null —
@@ -166,9 +172,22 @@ public final class VectorHandler implements HttpHandler {
      */
     public VectorHandler(EmbedderRouter embedderRouter, PgVectorRepository pgRepo,
                          dev.nexus.service.vectors.Reranker reranker) {
+        this(embedderRouter, pgRepo, reranker, OwnerlessWritePolicy.fromEnv());
+    }
+
+    /**
+     * Full wiring plus the ownerless-write policy (RDR-223 Phase 3 Step 2, nexus-z0o2p.24).
+     *
+     * @param ownerlessWritePolicy what {@code upsert-chunks} and {@code store-put} do with a chash that
+     *                             has no live manifest row: refuse it (the default) or log and count it
+     */
+    public VectorHandler(EmbedderRouter embedderRouter, PgVectorRepository pgRepo,
+                         dev.nexus.service.vectors.Reranker reranker,
+                         OwnerlessWritePolicy ownerlessWritePolicy) {
         this.embedderRouter = embedderRouter;
         this.pgRepo         = pgRepo;
         this.rerankStage    = new RerankStage(reranker);
+        this.ownerlessWritePolicy = ownerlessWritePolicy;
     }
 
     @Override
@@ -181,7 +200,7 @@ public final class VectorHandler implements HttpHandler {
         try {
             switch (op) {
                 case "/upsert-chunks" -> handleUpsertChunks(exchange, method);
-                case "/upsert-reference-only" -> handleUpsertReferenceOnlyChunk(exchange, method); // RDR-169 G4
+                case "/upsert-reference-only" -> handleUpsertReferenceOnlyGone(exchange); // RDR-223 P3.2: retired
                 case "/search"        -> handleSearch(exchange, method);
                 case "/query"         -> handleSearch(exchange, method);   // alias
                 case "/hybrid-search" -> handleHybridSearch(exchange, method);  // RDR-155 P3
@@ -204,7 +223,9 @@ public final class VectorHandler implements HttpHandler {
                 case "/gc/quarantine-orphans"  -> handleGcQuarantineOrphans(exchange, method);   // RDR-191 P1
                 case "/gc/restore-rereferenced" -> handleGcRestoreRereferenced(exchange, method); // RDR-191 P1
                 case "/gc/expire-quarantine"   -> handleGcExpireQuarantine(exchange, method);     // RDR-191 P1
+                case "/gc/quarantine-restore"  -> handleGcQuarantineRestore(exchange, method);    // RDR-192 S9 Day-2
                 case "/manifest-less-census"   -> handleManifestLessCensus(exchange, method);     // RDR-192 S2
+                case "/reapable"               -> handleReapable(exchange, method);               // RDR-192 S8
                 default -> HttpUtil.send(exchange, 404, "{\"error\":\"not found\"}");
             }
         } catch (SkipHandlerException e) {
@@ -281,20 +302,48 @@ public final class VectorHandler implements HttpHandler {
             // so the request is retried against the restarted engine.
             log.info("event=vector_refused_shutting_down op={} error={}", op, e.getMessage());
             HttpUtil.send(exchange, 503, json(Map.of("error", e.getMessage())));
+        } catch (OwnerlessChunkWriteException e) {
+            // RDR-223 Phase 3 Step 2 (nexus-z0o2p.24): the write names a chash no live document
+            // owns. 422 (well-formed, refused), with a reason a client can branch on and the first
+            // few offending chashes; not one of the client's gateway retry codes, since resending
+            // the identical write is refused identically. The repository logged the refusal.
+            HttpUtil.send(exchange, 422, json(Map.of(
+                "error", e.getMessage(),
+                "reason", HttpUtil.OWNERLESS_CHUNK_WRITE_REASON,
+                "unowned_count", e.unownedCount(),
+                "requested_count", e.requestedCount(),
+                "unowned_chashes", e.unownedSample())));
         } catch (IllegalArgumentException e) {
             log.debug("event=vector_bad_request op={} error={}", op, e.getMessage());
             HttpUtil.send(exchange, 400, json(Map.of("error", e.getMessage())));
         } catch (IllegalStateException e) {
             // Shared arm for every well-formed-but-rejected request across routes:
             // get-all-metadata's row-count cap (too big for the single-round-trip
-            // fast path) and upsert-reference-only's full→reference-only transition
-            // guard (RDR-169 §Re-index PROHIBITS, bead nexus-zw2em) both land here.
+            // fast path) and the repository's own state guards land here.
             // 422 distinguishes this from a malformed request (400) or a real
             // server error (500); the Python client falls back to paginated /get
             // (or surfaces the error) on any non-2xx, so the exact code just needs
             // to be non-2xx and logged with enough op context to disambiguate.
             log.debug("event=vector_illegal_state op={} error={}", op, e.getMessage());
             HttpUtil.send(exchange, 422, json(Map.of("error", e.getMessage())));
+        } catch (PgVectorRepository.QuarantineRestoreBusyException e) {
+            // nexus-wbfpw.49: the restore's lock or statement bound tripped. A typed, retryable 503 with the stable
+            // reason a client branches on and a Retry-After, never the opaque 500. POST /gc/quarantine-restore is a
+            // non-idempotent sweep route, so the client's gateway ladder does not retry it by itself; the CLI reads
+            // this body and says so. nexus-wbfpw.55: a restore across several quarantine siblings is one
+            // transaction per sibling, so "nothing_moved" is true only when no earlier sibling had committed; when
+            // one had, the body carries the audit rows it wrote and the chashes it restored or attached.
+            log.warn("event=quarantine_restore_busy op={} nothing_moved={} audit_ids={} error={}", op,
+                !e.somethingMoved(), e.auditIds(), e.getMessage());
+            exchange.getResponseHeaders().set("Retry-After",
+                Integer.toString(PgVectorRepository.QuarantineRestoreBusyException.RETRY_AFTER_SECONDS));
+            HttpUtil.send(exchange, 503, json(Map.of(
+                "error", e.getMessage(),
+                "reason", HttpUtil.QUARANTINE_RESTORE_BUSY_REASON,
+                "retry_after_seconds", PgVectorRepository.QuarantineRestoreBusyException.RETRY_AFTER_SECONDS,
+                "nothing_moved", !e.somethingMoved(),
+                "audit_ids", e.auditIds(),
+                "moved_chashes", e.movedChashes())));
         } catch (Exception e) {
             // Shared typed-DB-error ladder: pool-exhaustion 503 + class-23 409
             // (nexus-h8rf6.2 / nexus-7e057) — see HttpUtil.sendTypedDbError.
@@ -307,6 +356,30 @@ public final class VectorHandler implements HttpHandler {
     }
 
     // ── Per-request guards ────────────────────────────────────────────────────
+
+    /**
+     * The ownership check a chunk-write route asks the repository for (RDR-223 Phase 3 Step 2,
+     * nexus-z0o2p.24): every chash in the request must have a live manifest row in the collection.
+     * The policy decides whether a miss refuses the request or is only logged and counted.
+     */
+    private OwnershipGuard ownershipGuard(HttpExchange ex, String route) {
+        var headers = ex.getRequestHeaders();
+        return new OwnershipGuard(ownerlessWritePolicy.mode(), route,
+                headers.getFirst("User-Agent"), headers.getFirst(CLIENT_VERSION_HEADER));
+    }
+
+    /**
+     * Header the final-cut client's vector, T2, catalog and scratch clients send (RDR-223 Phase 3
+     * Step 2, nexus-z0o2p.24): the conexus version. The hook paths (mailbox drain, tuple ledger
+     * projection) and the engine-status probe do not send it. The ownerless-write log line carries
+     * it, and its absence names a client older than the cut or one of those paths.
+     */
+    public static final String CLIENT_VERSION_HEADER = "X-Nexus-Client-Version";
+
+    /** The policy this handler applies to ownerless chunk writes; the test seam and the status source. */
+    public OwnerlessWritePolicy ownerlessWritePolicy() {
+        return ownerlessWritePolicy;
+    }
 
     /**
      * 503 + skip when no pgvector repository is wired (matches the /embed
@@ -429,78 +502,36 @@ public final class VectorHandler implements HttpHandler {
                         "embeddings length " + embeddings.size() + " != ids length " + ids.size());
             }
             repo.upsertChunksWithVectors(tenant, collection, ids, documents, embeddings, metadatas,
-                    deleteKeys);
+                    deleteKeys, ownershipGuard(ex, "upsert-chunks"));
             emitTokenUsage(ex, 0L);
             HttpUtil.send(ex, 200, json(Map.of("upserted", ids.size(), "tokens", 0)));
             return;
         }
 
         var upsertResult = repo.upsertChunksWithTokens(
-                tenant, collection, ids, documents, metadatas, forceReEmbed, deleteKeys);
+                tenant, collection, ids, documents, metadatas, forceReEmbed, deleteKeys,
+                ownershipGuard(ex, "upsert-chunks"));
         // Emit token count from the doc-embedding call (bead nexus-ehc4q).
         emitTokenUsage(ex, upsertResult.tokens());
         HttpUtil.send(ex, 200, json(Map.of("upserted", ids.size())));
     }
 
     /**
-     * POST /v1/vectors/upsert-reference-only  (RDR-169 G4, embed-without-store; Gap 4's
-     * option (b) route, bead nexus-zw2em landed the schema this route needs).
+     * POST /v1/vectors/upsert-reference-only: RETIRED (RDR-223 Phase 3 Step 2, nexus-z0o2p.24).
      *
-     * <p>Request:
-     * <pre>
-     * {
-     *   "collection": "knowledge__owner__voyage-context-3__v1",
-     *   "chash":      "&lt;64-hex sha256&gt;",
-     *   "embedding":  [0.1, 0.2, ...],      // precomputed vector, dim must match collection
-     *   "metadata":   {"source_uri": "obsidian://vault/note#heading", ...}  // optional
-     * }
-     * </pre>
-     *
-     * <p>Stores {@code chunk_text=NULL} + {@code retention='reference-only'} with the
-     * caller-supplied vector verbatim — no embedder call, token usage always 0. Rejects
-     * (422, {@link IllegalStateException}) overwriting a chash that already carries full
-     * content (RDR-169 §Re-index PROHIBITS a full→reference-only transition); the caller
-     * must explicitly delete + re-insert to change retention.
-     *
-     * <p>Response 200: {@code {"upserted": true}}.
+     * <p>The route wrote a chunk with no manifest row, which is the ownerless write this phase
+     * refuses everywhere, and it could never write a NEW chunk once the refusal applied (the
+     * manifest FK wants the chunk first, the refusal wants the manifest first). It had no client
+     * caller, and the production edge log showed no request to it in its whole life (Sam,
+     * 2026-10-01, WAF logs 2026-07-03 to 2026-10-01). 410 Gone, as {@code ChashHandler} answers its retired
+     * routes; a reference-only chunk, if RDR-169 G4 is ever built, is written through the combined
+     * routes.
      */
-    private void handleUpsertReferenceOnlyChunk(HttpExchange ex, String method) throws IOException {
-        requireMethod(ex, method, "POST");
-        var repo   = requirePgRepo(ex);
-        var tenant = requireTenant(ex);
-        Map<String, Object> body = readBody(ex);
-        String collection = requireString(body, "collection");
-        String chash       = requireString(body, "chash");
-        dev.nexus.service.db.Chash.requireCanonical(chash, "chash");
-        float[] embedding = requireFloatArray(body, "embedding");
-        Map<String, Object> metadata = optMap(body, "metadata");
-        if (metadata == null) metadata = Map.of();
-
-        repo.upsertReferenceOnlyChunk(tenant, collection, chash, embedding, metadata);
-        emitTokenUsage(ex, 0L);
-        HttpUtil.send(ex, 200, json(Map.of("upserted", true)));
-    }
-
-    /**
-     * Required single-vector field (as opposed to {@link #optEmbeddingsList}'s array of
-     * vectors) — the reference-only route accepts exactly one precomputed embedding per
-     * request. Malformed shapes fail loud, mirroring {@link #optEmbeddingsList}'s row
-     * parsing.
-     */
-    private float[] requireFloatArray(Map<String, Object> body, String key) {
-        Object val = body.get(key);
-        if (!(val instanceof List<?> nums)) {
-            throw new IllegalArgumentException("field '" + key + "' must be an array of numbers");
-        }
-        float[] vec = new float[nums.size()];
-        for (int i = 0; i < nums.size(); i++) {
-            Object n = nums.get(i);
-            if (!(n instanceof Number num)) {
-                throw new IllegalArgumentException("field '" + key + "' contains a non-numeric component");
-            }
-            vec[i] = num.floatValue();
-        }
-        return vec;
+    private void handleUpsertReferenceOnlyGone(HttpExchange ex) throws IOException {
+        HttpUtil.send(ex, 410, json(Map.of(
+            "error", "POST /v1/vectors/upsert-reference-only is retired: it wrote chunks no document owns. "
+                + "Write chunks and their manifest rows together through POST /v1/catalog/manifest/write_many "
+                + "and POST /v1/catalog/manifest/append")));
     }
 
     /**
@@ -747,11 +778,15 @@ public final class VectorHandler implements HttpHandler {
         Map<String, Object> body = readBody(ex);
         String collection  = requireString(body, "collection");
         String docId       = requireString(body, "doc_id");
+        // RDR-223 P3.2: a non-canonical id is a 400 BEFORE the repository resolves the collection or
+        // asks about ownership, as on upsert-chunks (the id IS the chash).
+        dev.nexus.service.db.Chash.requireCanonical(docId, "doc_id");
         String content     = requireString(body, "content");
         Map<String, Object> metadata = optMap(body, "metadata");
         if (metadata == null) metadata = Map.of();
 
-        var putResult = repo.putWithTokens(tenant, collection, docId, content, metadata);
+        var putResult = repo.putWithTokens(tenant, collection, docId, content, metadata,
+                ownershipGuard(ex, "store-put"));
         // Emit token count from the doc-embedding call (bead nexus-ehc4q).
         emitTokenUsage(ex, putResult.tokens());
         HttpUtil.send(ex, 200, json(Map.of("id", putResult.value())));
@@ -1247,6 +1282,11 @@ public final class VectorHandler implements HttpHandler {
      * <p>Response 200: {"expired": N, "refused": M} — the nexus-mr89x safety
      * floor (see catalog-023 changelog): {@code refused &gt; 0} means the
      * floor fired and nothing was deleted this call.
+     *
+     * <p>Since vectors-026 this route expires only the rows a CLIENT moved: chunks the engine
+     * reaper tagged ({@code quarantined_by = engine-reaper}) are skipped, with or without
+     * {@code force}, and the floor counts only the untagged rows. The engine expires its own
+     * rows (RDR-192, nexus-2x9xa).
      */
     private void handleGcExpireQuarantine(HttpExchange ex, String method) throws IOException {
         requireMethod(ex, method, "POST");
@@ -1263,6 +1303,190 @@ public final class VectorHandler implements HttpHandler {
         var outcome = repo.expireQuarantine(tenant, quarantineCollection, originCollection,
                 cutoff, floorFraction, floorMinChunks, force);
         HttpUtil.send(ex, 200, json(Map.of("expired", outcome.expired(), "refused", outcome.refused())));
+    }
+
+    /**
+     * Most chashes one {@code /v1/vectors/gc/quarantine-restore} call takes, from any source. The repository's own
+     * ceiling is {@link PgVectorRepository#MAX_QUARANTINE_RESTORE_CHASHES} (5000, gc_audit's chash ceiling); one
+     * HTTP call stays well inside the edge's ~30 s deadline at 1000 rows with three vector columns each, and the
+     * client pages with {@code next_after} / {@code source.next_offset}.
+     */
+    static final int MAX_QUARANTINE_RESTORE_PER_CALL = 1000;
+
+    /**
+     * POST /v1/vectors/gc/quarantine-restore (RDR-192 Step 9 Day-2, bead nexus-2x9xa; serves
+     * {@code nx t3 quarantine restore})
+     *
+     * <p>Moves chunks from the origin's quarantine sibling(s) back to
+     * {@code origin_collection}, finding the sibling itself (nexus-wbfpw.55: the reaper's own name for the origin and
+     * every quarantine collection holding chunks tagged {@code origin_collection} = the origin; see
+     * {@link PgVectorRepository#resolveQuarantineSiblings}), with no manifest row required, in one statement under the exclusive sweep gate
+     * ({@code nexus.quarantine_restore_chunks}, vectors-025). A chash the origin already has is skipped, never
+     * overwritten; the restored row takes a fresh {@code last_written_at}, so the reaper does not take it at its
+     * next pass; one {@code quarantine_restore} gc_audit row records the full list of restored chashes.
+     * Tenant-scoped under RLS.
+     *
+     * <p>Request: {@code origin_collection} (a {@code quarantine_collection} is accepted and ignored: clients before
+     * nexus-wbfpw.55 derived one from the catalog row, which disagrees with the reaper's for a row that disagrees with
+     * its name), and EXACTLY ONE source:
+     * <pre>
+     * { "chashes": ["64-hex", ...] }                                 // 1 to 1000 named chashes
+     * { "audit_id": 123, "offset": 0, "limit": 1000 }                // the chash list of a gc_audit row
+     * { "quarantined_since": "2026-09-01T00:00:00Z",                 // chunks quarantined from the origin in a
+     *   "quarantined_before": "2026-09-08T00:00:00Z",                // window; one bound or both
+     *   "after_chash": "64-hex", "limit": 1000 }
+     * </pre>
+     * plus optional {@code dry_run} (classify only: no gate, no move, no audit row), {@code reattach} (default
+     * {@code true}) and {@code actor} (recorded on the audit row; default {@code operator}). With {@code reattach}, a
+     * chunk whose metadata names a document that is still live in the origin also gets that document's manifest row
+     * at its position, so it is visible to search and get again (a position the document's manifest already holds
+     * another chunk at reports {@code superseded} and writes nothing; see {@code vectors-025}). An {@code audit_id}
+     * row must be this tenant's, name the origin, be an operation that quarantined chunks and list every chash it
+     * moved (the sibling it records, when it records one, is the one restored from): a {@code gc_quarantine_orphans} row lists only
+     * a sample and is refused with 400, the way back for those is the {@code quarantined_since} window.
+     *
+     * <p>Response 200: {@code {"origin_collection", "quarantine_collection" (the first sibling found, null when none),
+     * "quarantine_collections" (every sibling found), "dry_run", "audit_id": N|null, "audit_ids" (one per sibling that
+     * wrote an audit row),
+     * "restored": n, "would_restore": n, "present": n, "dim_conflict": n, "missing": n, "reattach": bool,
+     * "attached": n, "superseded": n, "no_live_owner": n, "no_position": n, "rows": [{"chash", "outcome",
+     * "no_manifest": bool|null, "reapable_after": ISO-8601|null, "reattach": str|null, "attached": bool,
+     * "owner": tumbler|null, "owner_title": str|null, "position": int|null, "chunk_title": str|null,
+     * "reason": str|null, "owner_rows": int|null, "owner_chunks": int|null}, ...],
+     * "source": {...}|null, "next_after": "64-hex"|null}}. {@code rows} has one entry per distinct requested chash,
+     * in request order. {@code outcome} is {@code restored}, {@code would_restore} (dry run), {@code present} (the
+     * origin has it), {@code dim_conflict} (as present, with a different embedding width in the quarantine copy) or
+     * {@code missing}. For a {@code restored} row {@code no_manifest} says the chunk has no own-collection manifest
+     * row after the call and {@code reapable_after} is when the reaper may take it again unless an owner row is
+     * repaired first; such a chunk is hidden from search and get until it has one. {@code row.reattach} is what the
+     * reattach step judged ({@code attach}, {@code superseded}, {@code no_live_owner}, {@code no_position},
+     * {@code owned}, or null) whether or not it ran, and {@code attached} says this call wrote the manifest row.
+     * {@code reason} says why {@code superseded} was reached ({@code indexing}, {@code complete}, {@code failed}, {@code version},
+     * {@code position_taken}, {@code rival}, {@code other_collection}, {@code has_rows}, {@code past_end}, {@code race}),
+     * and {@code owner_rows} / {@code owner_chunks} are the owner's manifest rows in the origin after the call
+     * against its registered chunk count (a partial attach reads M of N).
+     * Page by sending {@code next_after} back as {@code after_chash} (window source) or {@code source.next_offset}
+     * back as {@code offset} (audit source) while it is not null.
+     *
+     * <p>503 {@code {"reason": "quarantine_restore_busy", "retry_after_seconds", "nothing_moved", "audit_ids",
+     * "moved_chashes"}} when the collection's sweep gate (or an owning document's index-run lock) is held past the 2 s
+     * bound or a statement runs past its bound. Each quarantine sibling is its own transaction, so
+     * {@code nothing_moved} is true only when the trip was on the first sibling that moved anything; when it was on a
+     * later one, {@code nothing_moved} is false and {@code audit_ids} / {@code moved_chashes} name what the earlier
+     * siblings had already committed. Either way the same call may be sent again (a restored chash reads present).
+     */
+    private void handleGcQuarantineRestore(HttpExchange ex, String method) throws IOException {
+        requireMethod(ex, method, "POST");
+        var repo   = requirePgRepo(ex);
+        var tenant = requireTenant(ex);
+        Map<String, Object> body = readBody(ex);
+        String origin     = requireString(body, "origin_collection");
+        // nexus-wbfpw.55: a "quarantine_collection" in the body is accepted and IGNORED. The engine finds the
+        // sibling itself (origin name + the chunks' origin_collection tag): a client-derived name disagrees with
+        // the reaper's for any origin whose catalog row disagrees with its name (catalog-044), and a restore that
+        // trusted it read every chash missing or answered 422. Clients before the fix still send one.
+        boolean dryRun = optBool(body, "dry_run", false);
+        boolean reattach = optBool(body, "reattach", true);
+        String actor = java.util.Objects.requireNonNullElse(optString(body, "actor"), "operator");
+
+        List<String> chashes = body.get("chashes") == null ? null : requireStringList(body, "chashes");
+        Object auditRaw = body.get("audit_id");
+        String sinceRaw = optString(body, "quarantined_since");
+        String beforeRaw = optString(body, "quarantined_before");
+        int sources = (chashes != null ? 1 : 0) + (auditRaw != null ? 1 : 0)
+                    + (sinceRaw != null || beforeRaw != null ? 1 : 0);
+        if (sources != 1) {
+            throw new IllegalArgumentException("name exactly one source: chashes, audit_id, or "
+                + "quarantined_since / quarantined_before (got " + sources + ")");
+        }
+        int limit = Math.max(1, Math.min(optInt(body, "limit", MAX_QUARANTINE_RESTORE_PER_CALL),
+                                         MAX_QUARANTINE_RESTORE_PER_CALL));
+
+        PgVectorRepository.QuarantineRestoreOutcome result;
+        if (chashes != null) {
+            if (chashes.size() > MAX_QUARANTINE_RESTORE_PER_CALL) {
+                throw new IllegalArgumentException("at most " + MAX_QUARANTINE_RESTORE_PER_CALL
+                    + " chashes per call, got " + chashes.size());
+            }
+            result = repo.quarantineRestore(tenant, origin, null, chashes, actor, dryRun, reattach);
+        } else if (auditRaw != null) {
+            long auditId;
+            try {
+                auditId = auditRaw instanceof Number n ? n.longValue() : Long.parseLong(auditRaw.toString());
+            } catch (NumberFormatException e) {
+                throw new IllegalArgumentException("field 'audit_id' must be an integer");
+            }
+            int offset = Math.max(0, optInt(body, "offset", 0));
+            result = repo.quarantineRestoreFromAudit(tenant, origin, null, auditId, offset, limit, actor, dryRun,
+                                                     reattach);
+        } else {
+            result = repo.quarantineRestoreSelected(tenant, origin, null,
+                parseInstant("quarantined_since", sinceRaw), parseInstant("quarantined_before", beforeRaw),
+                parseAfterChash(body.get("after_chash")), limit, actor, dryRun, reattach);
+        }
+
+        var rows = new ArrayList<Map<String, Object>>(result.rows().size());
+        for (var r : result.rows()) {
+            var item = new LinkedHashMap<String, Object>();
+            item.put("chash", r.chash());
+            item.put("outcome", r.outcome());
+            item.put("no_manifest", r.noManifest());
+            item.put("reapable_after", r.reapableAfter());
+            item.put("reattach", r.reattach());
+            item.put("attached", r.attached());
+            item.put("owner", r.owner());
+            item.put("owner_title", r.ownerTitle());
+            item.put("position", r.position());
+            item.put("chunk_title", r.chunkTitle());
+            item.put("reason", r.reason());
+            item.put("owner_rows", r.ownerRows());
+            item.put("owner_chunks", r.ownerChunks());
+            rows.add(item);
+        }
+        Map<String, Object> source = null;
+        if (result.source() != null) {
+            source = new LinkedHashMap<>();
+            source.put("audit_id", result.source().auditId());
+            source.put("operation", result.source().operation());
+            source.put("chash_count", result.source().chashCount());
+            source.put("chashes_listed", result.source().chashesListed());
+            source.put("offset", result.source().offset());
+            source.put("next_offset", result.source().nextOffset());
+        }
+        var out = new LinkedHashMap<String, Object>();
+        out.put("origin_collection", origin);
+        // The sibling the engine found (the first when several hold chunks of the origin), null when none does.
+        out.put("quarantine_collection", result.quarantineCollections().isEmpty()
+            ? null : result.quarantineCollections().get(0));
+        out.put("quarantine_collections", result.quarantineCollections());
+        out.put("dry_run", dryRun);
+        out.put("audit_id", result.auditId());
+        out.put("audit_ids", result.auditIds());
+        out.put("restored", result.restored().size());
+        out.put("would_restore", result.wouldRestore().size());
+        out.put("present", result.present().size());
+        out.put("dim_conflict", result.dimConflict().size());
+        out.put("missing", result.missing().size());
+        out.put("reattach", reattach);
+        out.put("attached", result.attached().size());
+        out.put("superseded", result.reattachVerdict("superseded").size());
+        out.put("no_live_owner", result.reattachVerdict("no_live_owner").size());
+        out.put("no_position", result.reattachVerdict("no_position").size());
+        out.put("rows", rows);
+        out.put("source", source);
+        out.put("next_after", result.nextAfter());
+        HttpUtil.send(ex, 200, json(out));
+    }
+
+    /** An optional ISO-8601 UTC instant field of {@code /gc/quarantine-restore}: null stays null. */
+    static java.time.Instant parseInstant(String field, String raw) {
+        if (raw == null) return null;
+        try {
+            return java.time.Instant.parse(raw);
+        } catch (java.time.format.DateTimeParseException e) {
+            throw new IllegalArgumentException("field '" + field
+                + "' must be an ISO-8601 UTC instant such as 2026-09-01T00:00:00Z, got: " + raw);
+        }
     }
 
     /**
@@ -1344,8 +1568,128 @@ public final class VectorHandler implements HttpHandler {
         if (collection != null && collection.startsWith("quarantine-")) {
             throw new IllegalArgumentException(
                 "collection " + collection + " is a quarantine collection; quarantine rows "
-                + "are out of the manifest-less census by construction (RDR-192 MVV (a))");
+                + "are out of the manifest-less census and the reapable listing by construction (RDR-192 MVV (a))");
         }
+    }
+
+    /**
+     * Upper bound on the {@code limit} field accepted by {@code /v1/vectors/reapable}
+     * (RDR-192 S8, bead nexus-wbfpw.17): the AGENTS.md paging convention (N &lt;= 300). Clamped,
+     * never rejected, like {@link #MAX_CENSUS_LIMIT}.
+     */
+    static final int MAX_REAPABLE_LIMIT = 300;
+
+    /** Largest {@code grace_seconds} accepted: ten years, far past any real window and well inside interval range. */
+    static final long MAX_REAPABLE_GRACE_SECONDS = 315_360_000L;
+
+    /**
+     * POST /v1/vectors/reapable (RDR-192 Step 8, bead nexus-wbfpw.17; serves {@code nx t3 gc} and
+     * {@code nx store list --reapable})
+     *
+     * <p>Read-only and tenant-scoped: lists the chunks of {@code collection} that
+     * {@code nexus.chunk_is_reapable} (RDR-192 Step 7) selects now, ordered by chash ascending. Any
+     * collection prefix (knowledge, docs, code, rdr); a {@code quarantine-} collection is refused with
+     * 400. Selection is that predicate and nothing else. With {@code grace_seconds} absent or null the
+     * list is what {@code gc_quarantine_orphans} (which passes NULL, the 30 day default) would take at
+     * this instant, and what a reaper that passes the same default would take. A {@code grace_seconds}
+     * below the default is accepted unclamped (0 to ten years) because this route never deletes, and it
+     * lists chunks no destructive consumer takes yet: it is an advisory preview, and a caller must not
+     * present it as what a gc pass would do. It is a snapshot: no sweep gate, no lock.
+     *
+     * <p>Request:
+     * <pre>
+     * {
+     *   "collection":    "docs__owner__voyage-context-3__v1",
+     *   "grace_seconds": 86400,   // optional, integer 0 to 315360000; absent or null = engine default (30 days)
+     *   "after_chash":   "64-hex", // optional keyset cursor, exclusive; absent or null starts at the beginning
+     *   "limit":         100,     // optional, default 100, clamped to 1..300
+     *   "offset":        0        // optional, default 0, applied after the cursor
+     * }
+     * </pre>
+     * <p>Response 200: {@code {"collection": "...", "grace_seconds": N|null, "returned": N, "next_after":
+     * "64-hex"|null, "chunks": [{"chash": "64-hex", "created_at": ISO-8601, "last_written_at": ISO-8601,
+     * "ownerless_since": ISO-8601, "title": str|null, "catalog_doc_id": str|null}, ...]}}.
+     * {@code ownerless_since} is the instant the grace counts from, {@code GREATEST(last_written_at,
+     * orphaned_at)} (the later of the last write and the moment the chunk last lost an owner, read from
+     * {@code nexus.chunk_orphaned_at}); it is never earlier than {@code last_written_at}, and a chunk with no
+     * orphaning record reports its {@code last_written_at}. Additive and for display only: the predicate alone
+     * decides which chunks are listed. {@code grace_seconds} echoes the request,
+     * {@code null} meaning the default. {@code title} and {@code catalog_doc_id} come from the chunk's own
+     * metadata ({@code null} when absent or empty; {@code catalog_doc_id} falls back to {@code doc_id}).
+     * Page by sending {@code next_after} back as {@code after_chash} while it is not null; {@code next_after}
+     * is null when fewer than {@code limit} rows came back. Use the cursor, not {@code offset}, for any
+     * consumer that acts on a page before fetching the next: acting shrinks the set, and an offset then skips rows.
+     * The listing is a lock-free snapshot, so a consumer that deletes must not delete by these ids: it needs a
+     * route that re-checks the predicate in its own statement.
+     */
+    private void handleReapable(HttpExchange ex, String method) throws IOException {
+        requireMethod(ex, method, "POST");
+        var repo   = requirePgRepo(ex);
+        var tenant = requireTenant(ex);
+        Map<String, Object> body = readBody(ex);
+        String collection = requireString(body, "collection");
+        requireNotQuarantineCollection(collection);
+        int limit  = Math.max(1, Math.min(optInt(body, "limit", 100), MAX_REAPABLE_LIMIT));
+        int offset = Math.max(0, optInt(body, "offset", 0));
+        Long graceSeconds = parseGraceSeconds(body.get("grace_seconds"));
+        String afterChash = parseAfterChash(body.get("after_chash"));
+
+        var rows = repo.reapableChunks(tenant, collection, graceSeconds, afterChash, limit, offset);
+        var chunks = new ArrayList<Map<String, Object>>(rows.size());
+        for (var r : rows) {
+            // LinkedHashMap, not Map.of: title and catalog_doc_id are null when the metadata has none.
+            var item = new LinkedHashMap<String, Object>();
+            item.put("chash", r.chash());
+            item.put("created_at", r.createdAt());
+            item.put("last_written_at", r.lastWrittenAt());
+            item.put("ownerless_since", r.ownerlessSince());
+            item.put("title", r.title());
+            item.put("catalog_doc_id", r.catalogDocId());
+            chunks.add(item);
+        }
+        var out = new LinkedHashMap<String, Object>();
+        out.put("collection", collection);
+        out.put("grace_seconds", graceSeconds);
+        out.put("returned", chunks.size());
+        out.put("next_after", chunks.size() >= limit ? chunks.get(chunks.size() - 1).get("chash") : null);
+        out.put("chunks", chunks);
+        HttpUtil.send(ex, 200, json(out));
+    }
+
+    /**
+     * {@code after_chash} of {@code /v1/vectors/reapable}: absent, null or empty is no cursor;
+     * otherwise a canonical 64-character lowercase hex chash. Package-private for a direct unit pin.
+     */
+    static String parseAfterChash(Object raw) {
+        if (raw == null) return null;
+        if (!(raw instanceof String str)) {
+            throw new IllegalArgumentException("field 'after_chash' must be a 64-character hex chash");
+        }
+        if (str.isEmpty()) return null;
+        if (!str.matches("[0-9a-f]{64}")) {
+            throw new IllegalArgumentException("field 'after_chash' must be a 64-character lowercase hex chash");
+        }
+        return str;
+    }
+
+    /**
+     * {@code grace_seconds} of {@code /v1/vectors/reapable}: absent or null is {@code null} (the
+     * engine default); otherwise a whole number from 0 to {@link #MAX_REAPABLE_GRACE_SECONDS}.
+     * A string, a fraction or a negative number is a 400. Package-private for a direct unit pin.
+     */
+    static Long parseGraceSeconds(Object raw) {
+        if (raw == null) return null;
+        long v;
+        if (raw instanceof Integer || raw instanceof Long || raw instanceof Short || raw instanceof Byte) {
+            v = ((Number) raw).longValue();
+        } else {
+            throw new IllegalArgumentException("field 'grace_seconds' must be a whole number of seconds");
+        }
+        if (v < 0 || v > MAX_REAPABLE_GRACE_SECONDS) {
+            throw new IllegalArgumentException(
+                "field 'grace_seconds' must be between 0 and " + MAX_REAPABLE_GRACE_SECONDS + ", got " + v);
+        }
+        return v;
     }
 
     /**

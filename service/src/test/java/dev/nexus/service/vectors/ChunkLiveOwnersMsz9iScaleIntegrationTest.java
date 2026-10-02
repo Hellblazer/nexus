@@ -41,6 +41,7 @@ import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * RDR-192 Step 4 (bead nexus-wbfpw.9), round-2 rework (critique T2
@@ -94,6 +95,11 @@ import static org.assertj.core.api.Assertions.assertThat;
  * catches a chunk with zero manifest rows (this fixture's own manifest-less
  * slice) while chunk_live_owners correctly does. See the recall test's own
  * javadoc below for the full explanation.
+ *
+ * <p><b>Scope of the recall gate (nexus-wbfpw.47):</b> the 3/10/30/60% series never reach
+ * the regime where pgvector's scan caps bind; {@link #recall_correlatedHighDead_prodHoldsTheFloor_legacyFailsIt}
+ * adds 95/98/99% correlated series and a legacy-settings negative control. Its 76k-row
+ * fixture is still far below the 200,000-tuple serving cap, so it cannot exercise that cap.
  */
 @Tag("integration")
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
@@ -129,12 +135,14 @@ class ChunkLiveOwnersMsz9iScaleIntegrationTest {
      *  pin vector, so all of them are drawn from one distribution. */
     private static final float[][] PROJECTION = gaussianMatrix(new Random(20260927099L), DIM, LOW_RANK);
 
-    /** Production search's own HNSW GUCs (PgVectorRepository#search): {@code
-     *  hnsw.iterative_scan=relaxed_order}, {@code hnsw.ef_search =
-     *  max(PgSession.DEFAULT_EF_SEARCH_FLOOR=200, nResults)} -- for K=10 that floor
-     *  wins, so ef_search=200 here reproduces the real value production would set. */
-    private static final String PROD_ITERATIVE_SCAN = "relaxed_order";
-    private static final String PROD_EF_SEARCH = "200";
+    /** Which session settings a search runs under. PROD goes through the SAME PgSession
+     *  helpers PgVectorRepository's search paths call (iterative scan, ef_search sized to K,
+     *  and the serving scan budget, nexus-wbfpw.47), so a change to the serving settings moves
+     *  this gate with it instead of leaving a stale copy that passes identically.
+     *  LEGACY is production BEFORE nexus-wbfpw.47: no scan budget, so pgvector's 20000-tuple,
+     *  1x-memory defaults; the negative control that proves this gate can see that loss.
+     *  STARVED is iterative scan off, ef_search=K: the positive control for filtering loss. */
+    enum Profile { PROD, LEGACY, STARVED }
 
     PostgreSQLContainer<?> pg;
     HikariDataSource svcDs;
@@ -458,20 +466,36 @@ class ChunkLiveOwnersMsz9iScaleIntegrationTest {
      *  #AFTER_CHUNK_LIVE_OWNERS}) with production HNSW GUCs and returns the ordered
      *  chash-hex result list. */
     private List<String> runProd(String sql, float[] vec, int n) {
-        return runHnsw(sql, vec, n, PROD_ITERATIVE_SCAN, PROD_EF_SEARCH);
+        return runHnsw(sql, vec, n, Profile.PROD);
     }
 
-    /** {@link #runProd} with the two HNSW GUCs supplied, for the recall test's positive
-     *  control (a deliberately starved search that MUST lose recall). */
-    private List<String> runHnsw(String sql, float[] vec, int n, String iterativeScan, String efSearch) {
+    /** {@link #runProd} under an explicit {@link Profile}. */
+    private List<String> runHnsw(String sql, float[] vec, int n, Profile profile) {
         Result<Record> rows = tenantScope.withTenant(TENANT, ctx -> {
-            PgSession.setLocal(ctx, "hnsw.iterative_scan", iterativeScan);
-            PgSession.setLocal(ctx, "hnsw.ef_search", efSearch);
+            applyProfile(ctx, profile);
             return ctx.fetch(sql, COLLECTION, vectorLiteral(vec), n);
         });
         List<String> ids = new ArrayList<>(rows.size());
         for (var rec : rows) ids.add(rec.get(0, String.class));
         return ids;
+    }
+
+    private static void applyProfile(DSLContext ctx, Profile profile) {
+        switch (profile) {
+            case PROD -> {
+                PgSession.setLocal(ctx, "hnsw.iterative_scan", "relaxed_order");
+                PgSession.setHnswEfSearch(ctx, K);
+                PgSession.setHnswScanBudget(ctx);
+            }
+            case LEGACY -> {
+                PgSession.setLocal(ctx, "hnsw.iterative_scan", "relaxed_order");
+                PgSession.setHnswEfSearch(ctx, K);
+            }
+            case STARVED -> {
+                PgSession.setLocal(ctx, "hnsw.iterative_scan", "off");
+                PgSession.setLocal(ctx, "hnsw.ef_search", Integer.toString(K));
+            }
+        }
     }
 
     private static final String PROD_ORDER_BY =
@@ -521,8 +545,7 @@ class ChunkLiveOwnersMsz9iScaleIntegrationTest {
      *  execution time from it. SANCTIONED RAW (nexus-wbfpw.9, TEST-TREE RATCHET). */
     private String explainProd(String sql, float[] vec, int n) {
         return tenantScope.withTenant(TENANT, ctx -> {
-            PgSession.setLocal(ctx, "hnsw.iterative_scan", PROD_ITERATIVE_SCAN);
-            PgSession.setLocal(ctx, "hnsw.ef_search", PROD_EF_SEARCH);
+            applyProfile(ctx, Profile.PROD);
             // Inline concatenation (not a separately-named variable) so this raw-SQL call
             // site starts with a literal '"', the shape RawSqlGateTest's scan anchors on --
             // a variable named anything other than sql/SQL is invisible to that scan (its
@@ -615,10 +638,15 @@ class ChunkLiveOwnersMsz9iScaleIntegrationTest {
     }
 
     private List<Double> recallSeries(String approxSql, String oracleSql, List<float[]> queries) {
+        return recallSeries(approxSql, oracleSql, queries, Profile.PROD);
+    }
+
+    private List<Double> recallSeries(String approxSql, String oracleSql, List<float[]> queries,
+                                      Profile profile) {
         List<Double> recalls = new ArrayList<>(queries.size());
         for (float[] vec : queries) {
             List<String> oracle = runExact(oracleSql, vec, K);
-            List<String> approx = runProd(approxSql, vec, K);
+            List<String> approx = runHnsw(approxSql, vec, K, profile);
             recalls.add(recallAt(approx, oracle, K));
         }
         return recalls;
@@ -683,8 +711,8 @@ class ChunkLiveOwnersMsz9iScaleIntegrationTest {
         float[] probeVec = fixtureVector(rnd);
 
         System.out.println("[nexus-wbfpw.9 MSZ9I SWEEP] fixture=" + NUM_CHUNKS + " chunks / "
-            + NUM_MANIFEST + " manifest rows / " + NUM_DOCS + " docs, hnsw.iterative_scan="
-            + PROD_ITERATIVE_SCAN + " hnsw.ef_search=" + PROD_EF_SEARCH);
+            + NUM_MANIFEST + " manifest rows / " + NUM_DOCS + " docs, settings=production"
+            + " (PgSession helpers: relaxed_order, ef_search=max(floor,K), scan budget)");
         System.out.println("tombstone% | before_server_ms | after_server_ms | before_client_p50_ms |"
             + " after_client_p50_ms | before_hnsw | after_hnsw | after_inlined");
 
@@ -777,8 +805,8 @@ class ChunkLiveOwnersMsz9iScaleIntegrationTest {
             ctx.fetch("SELECT current_setting('hnsw.max_scan_tuples')").get(0).get(0, String.class));
 
         System.out.println("[nexus-wbfpw.9 RECALL CONTROLS] hnsw.max_scan_tuples=" + maxScanTuples
-            + " (never set by production code -- pgvector's own compiled-in default)"
-            + " hnsw.ef_search=" + PROD_EF_SEARCH + " hnsw.iterative_scan=" + PROD_ITERATIVE_SCAN);
+            + " (the connection default; production searches SET LOCAL their own budget, nexus-wbfpw.47)"
+            + " settings=production (PgSession helpers)");
         // The oracle is only an oracle if HNSW cannot serve it. Pinned on both predicates
         // (and the unfiltered form) before any recall number is trusted.
         float[] pinVec = fixtureVector(new Random(20260927100L));
@@ -913,7 +941,7 @@ class ChunkLiveOwnersMsz9iScaleIntegrationTest {
         for (int q = 0; q < RECALL_QUERY_COUNT; q++) {
             float[] vec = fixtureVector(rnd);
             List<String> oracle = runExact(AFTER_CHUNK_LIVE_OWNERS, vec, K);
-            List<String> approx = runHnsw(AFTER_CHUNK_LIVE_OWNERS, vec, K, "off", Integer.toString(K));
+            List<String> approx = runHnsw(AFTER_CHUNK_LIVE_OWNERS, vec, K, Profile.STARVED);
             starved.add(recallAt(approx, oracle, K));
         }
         double starvedAvg = avg(starved);
@@ -923,5 +951,46 @@ class ChunkLiveOwnersMsz9iScaleIntegrationTest {
             .as("positive control: a starved filtered search at 60%% tombstoned must lose recall,"
                 + " or this fixture cannot detect filtering loss at all. Per query: %s", starved)
             .isLessThan(0.9);
+    }
+
+    /**
+     * nexus-wbfpw.47: correlated deletion PAST 90% dead, where pgvector's scan caps start to
+     * bind. The 3/10/30/60 series above never reach that regime, so it passed identically with
+     * the serving scan budget deleted. Here the SAME live(c) statement is graded at 95/98/99%
+     * dead under {@link Profile#PROD} (must clear the floor and both per-query guards, uniform
+     * queries and queries aimed into the dead cap), and the {@link Profile#LEGACY} negative
+     * control at 99% inside the cap must FAIL the same gate: measured 0.937 on average (2026-09-30,
+     * T2 nexus/rdr-192-livec-recall-extended-2026-09-30), with short results and single queries
+     * near 0. A gate that does not fail on the legacy settings cannot see the loss it exists for.
+     *
+     * <p>LIMIT OF THIS FIXTURE: 76k rows is far below the 200,000-tuple serving cap, so at 99%
+     * dead the scan may visit the whole index and this proves the budget RAISES the caps past
+     * the 20000-tuple default; it cannot exercise the 200k cap itself, nor a multi-million-row
+     * shared cloud index. Those remain unmeasured (see the PgSession.DEFAULT_MAX_SCAN_TUPLES
+     * javadoc).
+     */
+    @Test
+    void recall_correlatedHighDead_prodHoldsTheFloor_legacyFailsIt() throws Exception {
+        System.out.println("case     | tombstone% | avg_recall@10 | per_query");
+        for (int pct : new int[] {95, 98, 99}) {
+            setTombstoneFraction(pct, Tombstones.CORRELATED);
+            List<Double> uniform = recallSeries(AFTER_CHUNK_LIVE_OWNERS, AFTER_CHUNK_LIVE_OWNERS, 20260927700L + pct);
+            List<float[]> inCap = deadRegionQueries(20260927800L + pct);
+            List<Double> prodIn = recallSeries(AFTER_CHUNK_LIVE_OWNERS, AFTER_CHUNK_LIVE_OWNERS, inCap, Profile.PROD);
+            System.out.printf("%-8s | %10d | %13.3f | %s%n", "c-prod", pct, avg(uniform), uniform);
+            System.out.printf("%-8s | %10d | %13.3f | %s (inside the deleted cap)%n", "c-inCap", pct, avg(prodIn), prodIn);
+            assertLiveRecall("correlated deletion, production settings", pct, uniform);
+            assertLiveRecall("correlated deletion, queries inside the deleted region, production settings", pct, prodIn);
+
+            if (pct == 99) {
+                List<Double> legacyIn = recallSeries(AFTER_CHUNK_LIVE_OWNERS, AFTER_CHUNK_LIVE_OWNERS, inCap, Profile.LEGACY);
+                System.out.printf("%-8s | %10d | %13.3f | %s (LEGACY settings, inside the deleted cap)%n",
+                    "c-legacy", pct, avg(legacyIn), legacyIn);
+                assertThatThrownBy(() -> assertLiveRecall("legacy settings", 99, legacyIn))
+                    .as("negative control: the pre-nexus-wbfpw.47 settings (no scan budget) must FAIL this"
+                        + " gate at 99%% dead inside the cap, or the gate cannot see the loss. Per query: %s", legacyIn)
+                    .isInstanceOf(AssertionError.class);
+            }
+        }
     }
 }

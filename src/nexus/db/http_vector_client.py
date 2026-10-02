@@ -46,6 +46,7 @@ from nexus.db.gateway_backoff import (
     _is_embed_server_side_write_path,
     is_non_idempotent_sweep_path,
 )
+from nexus.db.client_identity import client_identity_headers
 from nexus.db.engine_reasons import UNREGISTERED_COLLECTION_REASON, error_reason
 from nexus.logging_setup import emit_import_time_warning
 from nexus.rate_brake import is_deadline_abort
@@ -614,6 +615,9 @@ def _request_once(
     headers = {
         "Authorization": f"Bearer {token}",
         "X-Nexus-Tenant": tenant,
+        # RDR-223 Phase 3 Step 2 (nexus-z0o2p.24): names this client to the engine's
+        # ownerless-write log; absent on a client older than this release.
+        **client_identity_headers(),
     }
     # nexus-umue1: stash the EXACT bearer this attempt is about to send so
     # a caller catching an exception below can single-flight the 401
@@ -1577,6 +1581,7 @@ _T3_WRITE_PATH_SUFFIXES: tuple[str, ...] = (
     "/gc/expire-quarantine",
     "/gc/quarantine-orphans",
     "/gc/restore-rereferenced",
+    "/gc/quarantine-restore",
 )
 
 
@@ -1711,6 +1716,7 @@ def _post(path: str, body: dict, *, tenant: str = "default", timeout: int = 120)
             msg += f"\n{remedy}"
         raise VectorServiceError(
             msg, code=e.code, edge_refusal=bool(edge_server), reason=error_reason(err),
+            engine_body=err if isinstance(err, dict) else None,
         ) from e
     except (urllib.error.URLError, ConnectionError, TimeoutError) as e:
         # Connection-level failure (bad/unreachable endpoint). Reframe with a
@@ -1806,6 +1812,7 @@ def _get(path: str, *, tenant: str = "default") -> Any:
             msg += f"\n{remedy}"
         raise VectorServiceError(
             msg, code=e.code, edge_refusal=bool(edge_server), reason=error_reason(err),
+            engine_body=err if isinstance(err, dict) else None,
         ) from e
     except (urllib.error.URLError, ConnectionError, TimeoutError) as e:
         remedy = _managed_remedy()
@@ -1958,9 +1965,16 @@ class VectorServiceError(RuntimeError):
         code: int | None = None,
         edge_refusal: bool = False,
         reason: str | None = None,
+        engine_body: dict | None = None,
     ) -> None:
         super().__init__(message)
         self.code = code
+        #: The engine's decoded error body when it sent a JSON object, else
+        #: ``None``. A typed error carries fields beyond ``reason`` that a caller
+        #: acts on (``nothing_moved`` / ``audit_ids`` on the restore verb's
+        #: ``quarantine_restore_busy`` 503, nexus-wbfpw.55); a caller reads them
+        #: with ``.get`` since an older engine sends none of them.
+        self.engine_body = engine_body
         #: nexus-bgvnx: the engine's stable machine-readable ``reason`` from a
         #: typed error body (``unregistered_collection`` on the 422 for a
         #: collection with no catalog row); ``None`` when the body carried
@@ -2626,8 +2640,8 @@ class HttpVectorClient:
         on (indexers: code/prose/doc indexers, pipeline_stages, the
         ChunkBatcher). Pass ``retry=False`` for a caller that ALREADY owns
         its own retry/backoff stack and would otherwise get THREE nested
-        retry layers on the same failure: ``db/reconcile.py``'s verify-fill
-        path wraps this call in ``_etl_batch_with_breaker`` ->
+        retry layers on the same failure: the verify-fill path (deleted by
+        nexus-z0o2p.25) wrapped this call in ``_etl_batch_with_breaker`` ->
         ``_etl_with_retry``, which — stacked on this method's own
         ``_vector_with_retry`` PLUS ``_request``'s inner gateway retry — put
         worst-case latency far beyond any documented ceiling and tripped/
@@ -2807,8 +2821,8 @@ class HttpVectorClient:
             #
             # nexus-cy9u7 round-3 CRITICAL C2: this wrap is skipped when
             # ``retry=False`` (see the method docstring's ``retry`` param) —
-            # db/reconcile.py's verify-fill path opts out because it already
-            # owns its own retry/breaker stack; wrapping here TOO gave that
+            # the (since deleted) verify-fill path opted out because it already
+            # owned its own retry/breaker stack; wrapping here TOO gave that
             # call site three nested retry layers on one failure.
             if retry:
                 from nexus.retry import _vector_with_retry  # noqa: PLC0415 — deferred import: avoids a module-load-time httpx dependency for this otherwise-urllib-only module (matches the deferred-import convention every other _vector_with_retry caller uses)
@@ -2912,9 +2926,10 @@ class HttpVectorClient:
         as a drop-in.
 
         Param name ``collection_name`` (not ``collection``) matches
-        ``T3Database.upsert_chunks_with_embeddings`` so callers using the kwarg
-        form (code_indexer.py:470, prose_indexer.py:233, exporter.py:431,448)
-        don't get a TypeError (nexus-7zuzz).
+        ``T3Database.upsert_chunks_with_embeddings`` so a caller using the kwarg
+        form doesn't get a TypeError (nexus-7zuzz). The callers that did
+        (``code_indexer``, ``prose_indexer``, ``exporter``) now write through the combined
+        chunk-plus-owner route (RDR-223) and reach this only on the in-memory T3 double.
 
         ``force_re_embed`` (RDR-181 §Approach step 3): forwarded verbatim to
         :meth:`upsert_chunks` so the indexer's ``--force`` path reaches the
@@ -3028,17 +3043,9 @@ class HttpVectorClient:
 
         # Derive content_type from collection prefix — mirrors T3Database.put
         # at t3.py:860-870 exactly.
-        prefix_to_ct = {
-            "code__": "code",
-            "docs__": "prose",
-            "rdr__": "markdown",
-            "knowledge__": "prose",
-        }
-        content_type = "prose"
-        for prefix, ct in prefix_to_ct.items():
-            if collection.startswith(prefix):
-                content_type = ct
-                break
+        from nexus.metadata_schema import chunk_content_type_for_collection  # noqa: PLC0415 — circular-dep avoidance (metadata_schema)
+
+        content_type = chunk_content_type_for_collection(collection)
 
         metadata = make_chunk_metadata(
             content_type=content_type,
@@ -3886,6 +3893,85 @@ class HttpVectorClient:
             tenant=self._tenant,
         )
 
+    def gc_quarantine_restore(
+        self,
+        origin_collection: str,
+        *,
+        chashes: list[str] | None = None,
+        audit_id: int | None = None,
+        offset: int | None = None,
+        quarantined_since: str | None = None,
+        quarantined_before: str | None = None,
+        after_chash: str | None = None,
+        limit: int | None = None,
+        dry_run: bool = False,
+        reattach: bool | None = None,
+        actor: str | None = None,
+    ) -> dict:
+        """POST /v1/vectors/gc/quarantine-restore (RDR-192 Step 9 Day-2, bead
+        nexus-2x9xa; serves ``nx t3 quarantine restore``).
+
+        Moves chunks from the origin's quarantine collection(s) back to
+        ``origin_collection`` with no manifest row required, in one engine
+        statement under the exclusive sweep gate. The engine finds the quarantine
+        collection itself (the reaper's own name for the origin, and every
+        quarantine collection holding chunks tagged with the origin), so this
+        method names none: a sibling derived from the origin's catalog row
+        disagrees with where the reaper put the chunks once the row disagrees
+        with the name (catalog-044, nexus-wbfpw.55). Name EXACTLY ONE source: ``chashes`` (at most
+        1000), ``audit_id`` (the chash list of a gc_audit row, paged by
+        ``offset``/``limit``), or a ``quarantined_since`` / ``quarantined_before``
+        window over the sibling (paged by ``after_chash``/``limit``). Only the
+        fields given are sent. ``dry_run`` classifies without moving or auditing.
+        ``reattach`` (the engine's default is true when it is not sent) also writes
+        the owning document's manifest row for a chunk whose metadata names a live
+        document, so the chunk is visible to search and get again; ``False`` moves
+        bytes only (nexus-wbfpw.49).
+
+        Returns ``{"origin_collection", "quarantine_collection": str|None (the
+        first quarantine collection found), "quarantine_collections": [str]
+        (all of them), "dry_run", "audit_id": int|None, "audit_ids": [int] (one
+        per quarantine collection that wrote an audit row), "restored": n, "would_restore": n, "present": n,
+        "dim_conflict": n, "missing": n, "reattach": bool, "attached": n,
+        "superseded": n, "no_live_owner": n, "no_position": n, "rows": [{"chash",
+        "outcome", "no_manifest": bool|None, "reapable_after": str|None,
+        "reattach": str|None, "attached": bool, "owner": str|None,
+        "owner_title": str|None, "position": int|None, "chunk_title":
+        str|None, "reason": str|None, "owner_rows": int|None,
+        "owner_chunks": int|None}], "source": {...}|None, "next_after":
+        str|None}``. ``reason`` says why a ``superseded`` verdict was reached
+        (``indexing``, ``complete``, ``failed``, ``version``, ``position_taken``,
+        ``rival``, ``other_collection``, ``has_rows``, ``past_end``, ``race``);
+        ``owner_rows`` / ``owner_chunks`` are the owner's manifest rows in the
+        origin after the call against its registered chunk count. See the
+        engine route's docstring (``VectorHandler#handleGcQuarantineRestore``) for
+        the outcomes.
+
+        A write that is never auto-retried on a gateway-transient code
+        (:data:`nexus.db.gateway_backoff._NON_IDEMPOTENT_SWEEP_PATH_SUFFIXES`).
+        Raises :class:`VectorServiceError` (``code=404`` on an engine that
+        predates the route, ``400`` for a refused request such as a sample-only
+        audit row, ``422`` for an unregistered collection, ``503`` with
+        ``reason == "quarantine_restore_busy"`` when a manifest writer held a lock:
+        the busy statement rolled back and the call may be sent again. Each
+        quarantine sibling is its own transaction, so ``engine_body["nothing_moved"]``
+        is False, with ``audit_ids`` and ``moved_chashes``, when an earlier sibling
+        had already committed).
+        """
+        body: dict = {"origin_collection": origin_collection}
+        for key, value in (
+            ("chashes", chashes), ("audit_id", audit_id), ("offset", offset),
+            ("quarantined_since", quarantined_since), ("quarantined_before", quarantined_before),
+            ("after_chash", after_chash), ("limit", limit), ("actor", actor),
+        ):
+            if value is not None:
+                body[key] = value
+        if dry_run:
+            body["dry_run"] = True
+        if reattach is not None:
+            body["reattach"] = reattach
+        return _post("/v1/vectors/gc/quarantine-restore", body, tenant=self._tenant)
+
     def manifest_less_census(
         self, collection: str, limit: int = 100, offset: int = 0,
     ) -> dict:
@@ -3925,6 +4011,64 @@ class HttpVectorClient:
             {"collection": collection, "limit": limit, "offset": offset},
             tenant=self._tenant,
         )
+
+    def reapable(
+        self, collection: str, *, grace_seconds: int | None = None,
+        after_chash: str | None = None, limit: int = 300,
+    ) -> dict:
+        """POST /v1/vectors/reapable (RDR-192 S8, bead nexus-wbfpw.17), one page.
+
+        Read-only: lists the chunks of ``collection`` that the engine's
+        ``nexus.chunk_is_reapable`` selects at this instant, ordered by chash.
+        Returns ``{"collection", "grace_seconds", "returned", "next_after",
+        "chunks": [{"chash", "created_at", "last_written_at", "ownerless_since",
+        "title", "catalog_doc_id"}, ...]}``. ``ownerless_since`` is the instant
+        the grace counts from, the later of ``last_written_at`` and the moment
+        the chunk last lost an owner; an engine older than that field omits it,
+        so a reader must tolerate its absence.
+
+        ``grace_seconds`` is OMITTED from the request when ``None`` (the engine
+        default, 30 days, is what ``gc_quarantine_orphans`` itself uses, so the
+        default listing is what a move would take). ``after_chash`` is the
+        exclusive keyset cursor; there is deliberately no ``offset`` parameter,
+        because a consumer that acts on a page shrinks the set and an offset
+        then skips rows. The listing is a lock-free snapshot: a consumer that
+        deletes must not delete by these ids (the move goes through
+        ``gc_quarantine_orphans``, whose own statement re-checks the predicate).
+
+        Raises :class:`VectorServiceError` -- ``code=404`` when the connected
+        engine predates the route, ``code=400`` on a ``quarantine-*`` collection.
+        """
+        body: dict[str, Any] = {"collection": collection, "limit": limit}
+        if grace_seconds is not None:
+            body["grace_seconds"] = grace_seconds
+        if after_chash:
+            body["after_chash"] = after_chash
+        return _post("/v1/vectors/reapable", body, tenant=self._tenant)
+
+    def reapable_chunks(
+        self, collection: str, *, grace_seconds: int | None = None, page_limit: int = 300,
+    ):
+        """Yield every row :meth:`reapable` lists for ``collection``, paged by
+        keyset (``next_after`` sent back as ``after_chash``), never by offset.
+
+        A cursor that fails to advance is an engine fault, not a reason to loop
+        forever: it raises :class:`VectorServiceError`.
+        """
+        after: str | None = None
+        while True:
+            page = self.reapable(
+                collection, grace_seconds=grace_seconds, after_chash=after, limit=page_limit,
+            )
+            yield from page.get("chunks") or []
+            nxt = page.get("next_after")
+            if not nxt:
+                return
+            if nxt == after:
+                raise VectorServiceError(
+                    f"POST /v1/vectors/reapable returned a cursor that did not advance ({nxt})",
+                )
+            after = nxt
 
     #: Catalog attribute keys the RDR-204 Phase 2 engine joins into
     #: ``/v1/vectors/stats`` rows (``PgVectorRepository`` joins
@@ -4166,7 +4310,7 @@ class HttpVectorClient:
         Presence, not visibility: ``include_non_live`` makes the engine answer
         for a stored chunk whether or not it has a live owner (RDR-192 Step 5
         amendment), because every caller asks "is this already stored" (verify,
-        the migration ETL, skip-existing, the ``put_note_pieces`` delete guard).
+        the migration ETL, skip-existing).
         An engine older than that ignores the field and answers from its own
         read filter, which before Step 5 already returned unowned chunks.
 
@@ -4264,22 +4408,24 @@ class HttpVectorClient:
         A genuinely non-empty ``missing`` (every page reported, at least one
         id was actually stale) ALSO logs a WARNING — ``update_chunks_missing_
         reported`` — from THIS method, unconditionally, regardless of what
-        the caller does with the return value. Every call site (the
-        frecency-only reindex path, ``pipeline_stages.py``, ``indexer.py``,
-        and ``doc_indexer.py``'s repair reroute below) gets the anomaly
-        signal for free, not just the one caller that happens to act on it.
-        ``doc_indexer._upsert_skip_reembed`` additionally logs its own
-        ``update_chunks_missing_rerouted`` when it re-routes — that is the
-        separate CALLER-SIDE repair log, not a duplicate of this one.
+        the caller does with the return value. Every call site gets the
+        anomaly signal for free: the four callers left are the two streaming
+        post-passes in ``pipeline_stages.py``, ``indexer.py``'s metadata pass and
+        ``T3Database``'s own, and none of them acts on the return value.
+        (``doc_indexer._upsert_skip_reembed``, the one caller that used to
+        re-route a stale positive through a full upsert and log
+        ``update_chunks_missing_rerouted``, was removed at RDR-223: every
+        indexer writes chunks with their owner rows in one request now, so no
+        caller reroutes.)
 
-        Division of labor (nexus-5xn3k.5 vs .4): this method — and its one
-        reroute caller — repairs a STALE-POSITIVE PROBE miss: the id was
-        reported present by ``existing_ids`` but was already gone by the
-        time this metadata-only update ran. It does NOT protect against a
-        row vanishing AFTER a successful write (a post-repair race) — that
-        window is the ``/index-run/complete`` fail-closed verify's job
-        (bead nexus-5xn3k.4, RUNFENCE verify-then-stamp). Do not treat this
-        path as covering that later window.
+        Division of labor (nexus-5xn3k.5 vs .4): this method REPORTS a
+        STALE-POSITIVE miss (an id the caller believed present that was
+        already gone by the time this metadata-only update ran); it does not
+        repair one, and it cannot protect against a row vanishing AFTER a
+        successful write. That window is the ``/index-run/complete``
+        fail-closed verify's job (bead nexus-5xn3k.4, RUNFENCE
+        verify-then-stamp). The pins for the contract above live in
+        ``tests/db/test_http_vector_client.py::TestUpdateChunksMissing``.
         """
         if not ids:
             return []
@@ -4673,47 +4819,6 @@ class HttpVectorClient:
             f"{_SOURCE_PATH_RETIRED}"
         )
 
-    def delete_by_chunk_ids(
-        self, collection_name: str, chunk_ids: list[str],
-    ) -> int:
-        """Delete chunks by explicit id. Returns count deleted.
-
-        nexus-h8rf6.7: was missing — ``nx t3 gc``'s orphan deletion silently
-        no-oped in service mode (the call site is try/except-wrapped, so the
-        AttributeError degraded instead of crashing). T3Database parity:
-        empty ``chunk_ids`` is a no-op (0), missing collection returns 0
-        without raising. Delegates to :meth:`batch_delete` for the
-        quota-bounded batching.
-        """
-        if not chunk_ids:
-            return 0
-        from nexus.db.limits import QUOTAS  # noqa: PLC0415 — command-local import (db.limits)
-
-        size = QUOTAS.MAX_RECORDS_PER_WRITE
-        deleted = 0
-        for start in range(0, len(chunk_ids), size):
-            batch = chunk_ids[start:start + size]
-            try:
-                result = _post(
-                    "/v1/vectors/store-delete",
-                    {"collection": collection_name, "ids": batch},
-                    tenant=self._tenant,
-                )
-            except VectorServiceError as exc:
-                # 404 before anything was deleted = missing collection (T3
-                # parity: 0). A failure AFTER a successful batch must NOT be
-                # reported as 0 — the caller (nx t3 gc) would log "deleted 0"
-                # despite partial deletion (wave review, sibling convention:
-                # mid-pagination failures are never swallowed).
-                if exc.code == 404 and deleted == 0:
-                    return 0
-                raise
-            # The engine skips an id a live manifest still references (RDR-191
-            # F10c) and reports what it removed; count that, not the batch.
-            reported = (result or {}).get("deleted")
-            deleted += int(reported) if reported is not None else len(batch)
-        return deleted
-
     def list_unique_source_paths(self, collection_name: str) -> list[str]:
         """UNSUPPORTED — chunk metadata has no ``source_path`` (nexus-bm8dd).
 
@@ -4747,6 +4852,11 @@ class HttpVectorClient:
         elsewhere (or nowhere); a live(c)-filtered listing structurally
         cannot see them (an owned chunk is never a candidate; an unowned one
         is exactly what live(c) hides).
+
+        nexus-wbfpw.18: ``nx t3 gc`` no longer calls this (it takes its
+        candidates from the engine's reapable route). No verb does; the one
+        remaining consumer is the era-hop rehearsal's chunk-id conformance
+        probe (tests/e2e/migration-rehearsal/rehearse_era_hop.sh).
         """
         from nexus.db.limits import QUOTAS  # noqa: PLC0415 — command-local import (db.limits)
 
@@ -4949,12 +5059,17 @@ class HttpVectorClient:
         store list``'s total-count display, ``nx collection info``, and
         ``nx collection reindex`` in service mode.
 
-        Raises ``KeyError`` when *name* has no live chunks -- T3Database
-        parity ("not found"). On the pgvector path a collection with zero
-        live rows is indistinguishable from an absent one (matches
+        ``count`` is the STORED chunk count (every physical row, owned or
+        not; RDR-192 Step 5 amendment), not the live count. Raises ``KeyError``
+        when *name* holds no stored chunks -- T3Database parity ("not found").
+        On the pgvector path a collection with zero stored rows is
+        indistinguishable from an absent one (matches
         :meth:`collection_exists`'s already-established semantics, RDR-156
         Decision 6) -- callers (``nx collection reindex``) rely on the
-        ``KeyError`` to detect a genuinely missing collection. No
+        ``KeyError`` to detect a genuinely missing collection. A collection
+        holding only unowned chunks therefore does NOT raise: it reads
+        ``count=N`` here and ``count=0, stored_count=N`` in
+        :meth:`list_collections`. No
         ``metadata`` equivalent exists server-side (Chroma-native collection
         metadata is not exposed by the service API), so that key is always
         ``{}``.
@@ -4969,11 +5084,13 @@ class HttpVectorClient:
 
         Shared by :meth:`collection_info` and :meth:`collection_metadata`
         (wave review: the block was duplicated verbatim). On the pgvector
-        path a collection with zero live rows is indistinguishable from an
+        path a collection with zero stored rows is indistinguishable from an
         absent one (RDR-156 Decision 6), so ``count == 0`` also raises.
         NOTE: callers that enumerate via :meth:`list_collections` can never
-        hit the zero-count branch — that listing only returns collections
-        with live chunks — so the doctor probes iterating it are unaffected.
+        hit the zero-count branch — that listing returns a row for every
+        collection holding ANY stored chunk (its live ``count`` may be 0, its
+        ``stored_count`` is not) — so the doctor probes iterating it are
+        unaffected.
         """
         try:
             n = self.count(name)
@@ -5000,7 +5117,7 @@ class HttpVectorClient:
         Keys returned: ``name``, ``count``, ``embedding_model`` (query-time
         model), ``index_model`` (index-time model, may differ for CCE
         collections). Raises ``KeyError`` if the collection does not exist
-        — on pgvector, zero live rows is indistinguishable from absent
+        — on pgvector, zero stored rows is indistinguishable from absent
         (:meth:`collection_info` semantics, RDR-156 Decision 6).
         """
         from nexus.corpus import (  # noqa: PLC0415 — circular-dep avoidance (corpus imports config)

@@ -462,6 +462,15 @@ def _emit_write_failed_warning(
     return True
 
 
+# nexus-z0o2p.20: how many not-indexed files the summary names before "and N more".
+# Kept at 10 on purpose: the summary is read on a terminal at the end of a run, where
+# a catalog outage can drop thousands of files, and ten names plus a count is what
+# fits. Nothing is lost to the cap: the complete list is the durable per-file record
+# (`nx index failures`, error class IdentityLessFile, uncapped), and the structured
+# log line carries the first 20 (indexer._refuse_identity_less_files).
+_MAX_NAMED_DROPS = 10
+
+
 def _emit_identity_drops_warning() -> bool:
     """GH #1397 / nexus-94fxl: batches DROPPED for missing document
     identity never reach the write, so they are invisible to the
@@ -471,20 +480,47 @@ def _emit_identity_drops_warning() -> bool:
 
     from nexus.mcp_infra import get_manifest_identity_drops  # noqa: PLC0415 — deliberate function-local import: rare branch, only reached when checked
 
-    drops = get_manifest_identity_drops()
-    if not drops:
+    all_drops = get_manifest_identity_drops()
+    if not all_drops:
         return False
-    n_chunks = sum(d["batch_size"] for d in drops)
-    cols = sorted({d["collection"] for d in drops})
-    click.echo(
-        f"  WARNING: {len(drops)} chunk batch(es) ({n_chunks} chunks; "
-        f"collection(s): {', '.join(cols)}) were indexed WITHOUT a "
-        f"catalog document identity — their manifests were not "
-        f"written and the documents will not appear in "
-        f"catalog-aware queries. Run 'nx catalog reconcile' to "
-        f"repair.",
-        err=True,
-    )
+    # RDR-223 (nexus-z0o2p.13): a drop with written=False was refused before any
+    # write (no catalog document to own its chunks), so there is nothing stored to
+    # reconcile; the two kinds get different wording.
+    drops = [d for d in all_drops if d.get("written", True)]
+    refused = [d for d in all_drops if not d.get("written", True)]
+    if drops:
+        n_chunks = sum(d["batch_size"] for d in drops)
+        cols = sorted({d["collection"] for d in drops})
+        click.echo(
+            f"  WARNING: {len(drops)} chunk batch(es) ({n_chunks} chunks; "
+            f"collection(s): {', '.join(cols)}) were indexed WITHOUT a "
+            f"catalog document identity — their manifests were not "
+            f"written and the documents will not appear in "
+            f"catalog-aware queries. Run 'nx catalog reconcile' to "
+            f"repair.",
+            err=True,
+        )
+    if refused:
+        n_chunks = sum(d["batch_size"] for d in refused)
+        cols = sorted({d["collection"] for d in refused})
+        chunk_text = f"{n_chunks} chunks; " if n_chunks else ""
+        click.echo(
+            f"  WARNING: {len(refused)} document(s) ({chunk_text}"
+            f"collection(s): {', '.join(cols)}) were NOT indexed: catalog "
+            f"registration returned no document identity to own their "
+            f"chunks, so nothing was written. Fix the registration failure "
+            f"(see the 'catalog_hook_register_failed', 'catalog_hook_failed' "
+            f"or 'preflight_register_failed' log event) and re-run the index.",
+            err=True,
+        )
+        # nexus-z0o2p.20: name the files and the reason each has no document.
+        named = [f for d in refused for f in d.get("files", ())]
+        for f in named[:_MAX_NAMED_DROPS]:
+            click.echo(f"    not indexed: {f['file']} ({f['cause']})", err=True)
+        if len(named) > _MAX_NAMED_DROPS:
+            click.echo(
+                f"    ... and {len(named) - _MAX_NAMED_DROPS} more", err=True,
+            )
     return True
 
 
@@ -810,10 +846,18 @@ def raise_identity_drop_exception(
     if write_failed and not identity_dropped:
         remedies.append("Run 'nx catalog reconcile' to repair the manifests")
     if identity_dropped:
-        remedies.append(
-            f"Run 'nx catalog reconcile' to repair the manifests; re-index "
-            f"with --force any {subject} still missing afterwards"
-        )
+        # nexus-z0o2p.20: a drop that wrote nothing (no document to own the
+        # chunks) has no manifest for reconcile to repair.
+        if all(not d.get("written", True) for d in get_manifest_identity_drops()):
+            remedies.append(
+                f"Fix the registration failure named above and re-run the "
+                f"index; no chunk of the affected {subject}s was written"
+            )
+        else:
+            remedies.append(
+                f"Run 'nx catalog reconcile' to repair the manifests; re-index "
+                f"with --force any {subject} still missing afterwards"
+            )
     if refused:
         remedies.append(
             f"Run 'nx catalog show <tumbler>' to inspect a specific "
@@ -837,21 +881,36 @@ def raise_identity_drop_exception_for_file(path: Path, *, chunks: int) -> None:
     command (``nx index pdf <file>`` / ``nx index md <file>``) whose
     catalog registration failed this run (nexus-7f5qj).
 
-    For a one-file command a register failure means THIS document is
-    orphaned: its chunks landed and are searchable (over-work-never-
-    under-work — nothing was lost), but no catalog Document/tumbler
-    exists for them, so it is invisible to every catalog-aware query.
-    Distinct wording from :func:`raise_identity_drop_exception` (a batch
-    run's generic count) — names the file and the remedy directly. Call
-    only after :func:`emit_identity_drop_summary` returned ``True``.
+    For a one-file command a register failure means THIS document has no
+    catalog Document/tumbler. Two shapes, told apart by the drop collector
+    (nexus-wbfpw.34): a drop recorded with ``written=False`` (RDR-223,
+    nexus-z0o2p.20: no document to own the chunks, so NOTHING was written)
+    and the older shape where chunks landed but their manifest did not
+    (written, hidden by live(c) until reconciled). Distinct wording from
+    :func:`raise_identity_drop_exception` (a batch run's generic count) —
+    names the file and the remedy directly. Call only after
+    :func:`emit_identity_drop_summary` returned ``True``.
     """
     import click  # noqa: PLC0415 — deliberate function-local import: avoids click dependency at module import time
 
+    from nexus.mcp_infra import get_manifest_identity_drops  # noqa: PLC0415 — deliberate function-local import: rare branch, only reached on a fail-loud exit
+
+    drops = get_manifest_identity_drops()
+    if drops and all(not d.get("written", True) for d in drops):
+        raise click.ClickException(
+            f"{path} was NOT indexed: its catalog document identity failed to "
+            f"register this run, so there was no document to own its "
+            f"{chunks} chunk(s) and nothing was written — see the WARNING "
+            f"line(s) above. Re-run once the engine/catalog is reachable "
+            f"(see the 'catalog_hook_register_failed' or "
+            f"'preflight_register_failed' log event)."
+        )
     raise click.ClickException(
         f"{path} was indexed ({chunks} chunk(s) written) but its catalog "
         f"document identity failed to register this run — see the "
-        f"WARNING line(s) above. The chunks are searchable but orphaned "
-        f"(no tumbler, invisible to catalog-aware queries). Re-run once "
+        f"WARNING line(s) above. The chunks are orphaned: with no "
+        f"manifest owner they are hidden from search and every "
+        f"catalog-aware query until repaired. Re-run once "
         f"the engine/catalog is reachable — the write is idempotent and "
         f"the chunks reconcile via upsert identity — or run 'nx catalog "
         f"reconcile' to repair without re-indexing."

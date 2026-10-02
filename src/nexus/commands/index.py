@@ -775,6 +775,12 @@ class _ETATicker:
             )
             self._thread.start()
 
+    def reduce_total(self, count: int) -> None:
+        """Files announced to :meth:`start` that will never be recorded
+        (nexus-z0o2p.20: refused for want of a catalog document)."""
+        with self._lock:
+            self._total = max(self._total - count, 0)
+
     def start(self, total: int) -> None:
         # Review remediation (Reviewer A/S-4): refuse double-start. Two
         # threads would share ``_done`` + ``_lock`` and ``stop()`` only
@@ -1181,7 +1187,7 @@ def index_repo_cmd(
         # first; index_pdf_cmd / index_md_cmd are now the third and
         # fourth).
         from nexus.commands._helpers import reset_identity_drop_collectors  # noqa: PLC0415 — deliberate function-local import (per-run failure collector reset)
-        from nexus.mcp_infra import reset_ephemeral_registration_skips  # noqa: PLC0415 — deliberate function-local import (per-run failure collector reset)
+        from nexus.mcp_infra import is_identity_dropped_file, reset_ephemeral_registration_skips  # noqa: PLC0415 — deliberate function-local import (per-run failure collector reset)
         reset_identity_drop_collectors()
         # nexus-u8n4r: zero the worktree/tempdir registration-skip collector
         # so the end-of-run summary reflects only this run's refusals.
@@ -1196,6 +1202,10 @@ def index_repo_cmd(
         total = 0
         total_chunks = 0
         skipped_files = 0
+        # nexus-z0o2p.20: files that came back with zero chunks because an
+        # oversize fallback refused them for want of a catalog document. They
+        # are dropped, not "index fresh": the drop summary names them.
+        dropped_files = 0
         # nexus-s71lr: 5s (was 60s) — the bead's own reproduction ("a
         # 33-chunk file is 15 seconds of silence") falls entirely inside
         # the old 60s window, so this ticker never got a chance to fire
@@ -1251,12 +1261,28 @@ def index_repo_cmd(
             if count:
                 eta_ticker.restart_phase("rdr", count)
 
+        def on_refused(count: int) -> None:
+            # nexus-z0o2p.20: `count` of the files announced by on_start were
+            # refused for want of a catalog document and will not be
+            # dispatched; shrink the totals so the bar and the ETA end at 100%.
+            nonlocal total
+            if count <= 0:
+                return
+            total = max(total - count, 0)
+            if bar is not None:
+                bar.total = total
+                bar.refresh()
+            eta_ticker.reduce_total(count)
+
         def on_file(fpath: Path, chunks: int, elapsed: float) -> None:
-            nonlocal n, total_chunks, skipped_files
+            nonlocal n, total_chunks, skipped_files, dropped_files
             n += 1
             total_chunks += chunks
             if not chunks:
-                skipped_files += 1
+                if is_identity_dropped_file(fpath):
+                    dropped_files += 1
+                else:
+                    skipped_files += 1
             if n == 1:
                 # Heartbeat double-fire fix (T2 22168 follow-up): the FIRST
                 # genuine per-file completion is real "still alive"
@@ -1295,7 +1321,10 @@ def index_repo_cmd(
                     postfix["skip"] = skipped_files
                 bar.set_postfix(**postfix)
             if monitor or not sys.stdout.isatty():
-                lbl = f"{chunks} chunks" if chunks else "skipped"
+                lbl = f"{chunks} chunks" if chunks else (
+                    "not indexed (no catalog document)" if is_identity_dropped_file(fpath)
+                    else "skipped"
+                )
                 counter = f"rdr {n - rdr_base}/{rdr_total}" if rdr_total else f"{n}/{total}"
                 line = f"  [{counter}] {fpath.name} \u2014 {lbl}  ({elapsed:.1f}s)"
                 if bar is not None and sys.stdout.isatty():
@@ -1405,7 +1434,7 @@ def index_repo_cmd(
                 resolve_confirmed_write_failure_doc_ids,
             )
             nonlocal manifest_problems_detected, _confirmed_write_failure_doc_ids
-            indexed_files = n - skipped_files
+            indexed_files = n - skipped_files - dropped_files
             # nexus-wbfpw.29 round 3 (round 6: verified by reading the
             # catalog manifest back after the WHOLE run, self-heal
             # included, instead of trusting self-heal's own AT-HEAL-TIME
@@ -1546,7 +1575,7 @@ def index_repo_cmd(
             stats = index_repository(path, reg, frecency_only=frecency_only, force=force,
                                      force_re_embed=re_embed,
                                      since_head=since_head,
-                                     on_locked=on_locked, on_start=on_start, on_rdr_start=on_rdr_start, on_file=on_file,
+                                     on_locked=on_locked, on_start=on_start, on_rdr_start=on_rdr_start, on_refused=on_refused, on_file=on_file,
                                      on_phase=on_phase,
                                      on_flush=on_flush_progress if monitor else None,
                                      on_stage_timers=on_stage_timers,
@@ -1812,6 +1841,25 @@ def index_repo_cmd(
                 f"above used the in-memory count instead.",
                 err=True,
             )
+        # nexus-z0o2p.20: the durable record of the files this run dropped for want
+        # of a catalog document could not be written, so `nx index failures` and
+        # `nx doctor` cannot see them. The run's own summary above still names them
+        # and its exit code is unaffected (the drop collector fails the run).
+        if (stats or {}).get("identity_less_durable_write_failed", False):
+            click.echo(
+                f"WARNING: {(stats or {}).get('identity_less_dropped_files', 0)} "
+                f"dropped file(s) could not be durably recorded (nx index "
+                f"failures write failed) -- see the WARNING log line above. The "
+                f"files are named in the summary above; `nx doctor` will not "
+                f"report them.",
+                err=True,
+            )
+        # RDR-223 P2.4 round 3 (nexus-z0o2p.14): every failure below is RECORDED in
+        # ``_run_failure`` (the first one wins, in the order the checks run) and raised once,
+        # after every warning line has printed. A raise in the middle used to hide the warning
+        # lines of the checks after it, so a run with a deferred file AND another failure named
+        # only one of them.
+        _run_failure: click.ClickException | None = None
         if manifest_problems_detected:
             from nexus.commands._helpers import raise_identity_drop_exception  # noqa: PLC0415 — deliberate function-local import (rare branch: only on failure)
             # nexus-wbfpw.29 round 3 (round 6: same VERIFIED set the
@@ -1820,12 +1868,15 @@ def index_repo_cmd(
             # than recomputed, since verification does a real catalog
             # round trip), so a self-healed write failure never appears
             # in the "causes" list either.
-            raise_identity_drop_exception(
-                subject="document",
-                healed_doc_ids=_confirmed_write_failure_doc_ids,
-            )
+            try:
+                raise_identity_drop_exception(
+                    subject="document",
+                    healed_doc_ids=_confirmed_write_failure_doc_ids,
+                )
+            except click.ClickException as _exc:
+                _run_failure = _run_failure or _exc
         if pdf_quality_gate_failed:
-            raise click.ClickException(
+            _run_failure = _run_failure or click.ClickException(
                 f"{pdf_quality_gate_failed} PDF(s) failed the post-extraction "
                 f"quality gate (nexus-wi1uv) — see the WARNING line(s) above "
                 f"for the affected file(s). Retry an individual file with "
@@ -1849,7 +1900,7 @@ def index_repo_cmd(
         if (stats or {}).get("systemic_extraction_failure", False):
             _attempted = (stats or {}).get("files_attempted_total", 0)
             _pct = f"{skipped_unextractable_files / _attempted:.0%}" if _attempted else "?"
-            raise click.ClickException(
+            _run_failure = _run_failure or click.ClickException(
                 f"skipped {skipped_unextractable_files} of {_attempted} files "
                 f"({_pct}) — extraction may be broken (nexus-deyd5). If this "
                 f"corpus contains scanned/image-only PDFs, the default "
@@ -1860,8 +1911,8 @@ def index_repo_cmd(
                 f"for the affected path(s) and reason(s)."
             )
         # nexus-4s1ww / GH #1432: when every (or some) file's chunk-batch
-        # flush permanently fails (post bisect-retry — ChunkBatcher.
-        # failed_files, see indexer._run_index), the write path silently
+        # flush is rejected (after its bisect-retry — ChunkBatcher.
+        # failed_files minus the throttled ones, see indexer._run_index), the write path silently
         # dropped chunks while the run still printed "Done." and exited 0.
         # A stdout WARNING (click.echo(), plain — never print(), never
         # structlog for the user-facing line) plus a non-zero exit close
@@ -1870,6 +1921,68 @@ def index_repo_cmd(
         # above: one file's chunks permanently missing is the same
         # severity class as all of them, just smaller in count — not
         # gated on "every file failed."
+        # RDR-223 P2.4 review (nexus-z0o2p.14): a file deferred on a transient
+        # write error (_contain_transient_upsert) wrote nothing this run, and
+        # used to leave one structlog WARNING and rc=0 — a clean-looking run
+        # that had not indexed it. Same channel-and-shape precedent as
+        # chunk_flush_failed_files below (stdout click.echo() Warning, then a
+        # non-zero exit): print the count and the paths, name the remedy, and
+        # fail the run after the rest of it completed. Printed before the
+        # chunk-flush block so a run with both shows both lines.
+        transient_upsert_deferred_files = (stats or {}).get("transient_upsert_deferred_files", 0)
+        if transient_upsert_deferred_files:
+            _deferred_paths = list((stats or {}).get("transient_upsert_deferred_paths") or [])
+            _shown = _deferred_paths[:10]
+            _more = len(_deferred_paths) - len(_shown)
+            click.echo(
+                f"Warning: {transient_upsert_deferred_files}/{n} file(s) deferred on a "
+                f"transient write error (nothing was indexed for them this run): "
+                + (", ".join(_shown) if _shown else "paths not recorded")
+                + (f" and {_more} more" if _more > 0 else "")
+                + ". Re-run 'nx index repo' to retry."
+            )
+        # nexus-eoido: files whose flush the SERVICE THROTTLED (429, 503 with Retry-After, an engine
+        # deadline abort), or that the throttle breaker deferred unsent after consecutive throttled
+        # flushes. Reported apart from rejected files: nothing is wrong with the file, the remedy is
+        # to wait and re-run. Same channel-and-shape as the blocks around it (stdout Warning, bounded
+        # path list, non-zero exit after the rest of the run completed).
+        chunk_flush_throttled_files = (stats or {}).get("chunk_flush_throttled_files", 0)
+        _throttle_failure: click.ClickException | None = None
+        if chunk_flush_throttled_files:
+            _throttled_paths = list((stats or {}).get("chunk_flush_throttled_paths") or [])
+            _shown = _throttled_paths[:10]
+            _more = len(_throttled_paths) - len(_shown)
+            _retry_after = (stats or {}).get("chunk_flush_throttle_retry_after")
+            _breaker_open = bool((stats or {}).get("chunk_flush_throttle_breaker_open", False))
+            _wait = (
+                f"the service asked for a {_retry_after:g}s wait (Retry-After)"
+                if _retry_after is not None else "the service gave no Retry-After"
+            )
+            click.echo(
+                f"Warning: {chunk_flush_throttled_files}/{n} file(s) throttled by the service "
+                f"(nothing was indexed for them this run): "
+                + (", ".join(_shown) if _shown else "paths not recorded")
+                + (f" and {_more} more" if _more > 0 else "")
+                + f"; {_wait}"
+                + (
+                    "; stopped sending after consecutive throttled flushes and deferred the "
+                    "rest of the run"
+                    if _breaker_open else ""
+                )
+                + ". Wait, then re-run 'nx index repo' to retry."
+            )
+            _throttle_failure = click.ClickException(
+                f"the service throttled this run's writes (nexus-eoido): "
+                f"{chunk_flush_throttled_files} file(s) not indexed, {_wait}"
+                + (
+                    "; stopped sending after consecutive throttled flushes"
+                    if _breaker_open else ""
+                )
+                + ". Wait, then re-run 'nx index repo'."
+            )
+            if _breaker_open:
+                # The run was cut short: that is the headline, ahead of any per-file failure below.
+                _run_failure = _run_failure or _throttle_failure
         chunk_flush_failed_files = (stats or {}).get("chunk_flush_failed_files", 0)
         if chunk_flush_failed_files:
             click.echo(
@@ -1880,10 +1993,19 @@ def index_repo_cmd(
                 f"affected files are stale and will be retried "
                 f"automatically."
             )
-            raise click.ClickException(
+            _run_failure = _run_failure or click.ClickException(
                 f"{chunk_flush_failed_files} file(s) failed to flush chunk "
                 f"uploads this run (nexus-4s1ww) — see the WARNING line "
                 f"above."
+            )
+        if _throttle_failure is not None:
+            _run_failure = _run_failure or _throttle_failure
+
+        if transient_upsert_deferred_files:
+            _run_failure = _run_failure or click.ClickException(
+                f"{transient_upsert_deferred_files} file(s) deferred on a transient write "
+                f"error this run (nexus-z0o2p.14) — see the WARNING line above. Re-run "
+                f"'nx index repo' to retry."
             )
 
         # nexus-7lw6a: taxonomy_assign_batch_failed (an HTTP 500 or other
@@ -1920,21 +2042,24 @@ def index_repo_cmd(
                 f"successful re-index."
             )
             if taxonomy_assign_batches_failed == taxonomy_assign_batches_attempted:
-                raise click.ClickException(
+                _run_failure = _run_failure or click.ClickException(
                     f"all {taxonomy_assign_batches_failed} taxonomy-assign "
                     f"batch(es) failed this run (nexus-7lw6a) — no chunks "
                     f"received a topic assignment. See the WARNING line "
                     f"above."
                 )
-            raise click.ClickException(
-                f"{taxonomy_assign_batches_failed}/"
-                f"{taxonomy_assign_batches_attempted} taxonomy-assign "
-                f"batch(es) failed this run (nexus-7lw6a) — "
-                f"{taxonomy_assign_chunks_failed} chunk(s) lost their topic "
-                f"assignment; the index itself completed. Re-run once the "
-                f"assign endpoint is healthy to repair. See the WARNING line "
-                f"above."
-            )
+            else:
+                _run_failure = _run_failure or click.ClickException(
+                    f"{taxonomy_assign_batches_failed}/"
+                    f"{taxonomy_assign_batches_attempted} taxonomy-assign "
+                    f"batch(es) failed this run (nexus-7lw6a) — "
+                    f"{taxonomy_assign_chunks_failed} chunk(s) lost their topic "
+                    f"assignment; the index itself completed. Re-run once the "
+                    f"assign endpoint is healthy to repair. See the WARNING line "
+                    f"above."
+                )
+        if _run_failure is not None:
+            raise _run_failure
 
 
 def _taxonomy_incomplete(collections: list[str], *, client=None) -> bool:
@@ -2881,7 +3006,6 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
     from nexus.corpus import t3_collection_name  # noqa: PLC0415 — deliberate function-local import (deferred to command invocation)
     from nexus.doc_indexer import index_pdf as _index_pdf_raw  # noqa: PLC0415 — deliberate function-local import (heavy doc_indexer dep deferred; startup-cost)
     from nexus.errors import (  # noqa: PLC0415 — deliberate function-local import (deferred to command invocation)
-        ChunkLandingUnverifiedError,
         CredentialsMissingError,
         ExtractionQualityError,
         IndexingError,
@@ -2890,6 +3014,7 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
         SourceUriCollectionMismatchError,
         SourceUriNotFoundError,
         UnchunkableContentError,
+        CatalogIdentityMissingError,
     )
 
     # Local wrapper: convert the typed credential/identity errors into a
@@ -2908,21 +3033,14 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
             # see index_pdf's guard and index_md_cmd's identical
             # UnchunkableContentError handling for the full rationale.
             raise click.ClickException(str(e)) from e
-        except ChunkLandingUnverifiedError as e:
-            # nexus-tp8yk D1 substantive-critic SIGNIFICANT (2026-08-04):
-            # this raise already exits non-zero via Click's default
-            # unhandled-exception path, but as a raw traceback rather
-            # than the exception's own actionable message — the
-            # nexus-2fyb convention this wrapper exists for. The
-            # exception's __init__ already builds a clean, human-
-            # readable message (collection + count + remedy), so
-            # str(e) alone is sufficient here (unlike
-            # IndexRunVerifyRefused, which needs _index_run_refused_
-            # message's dedicated reformatting of its raw field dump).
+        except CatalogIdentityMissingError as e:
+            # nexus-z0o2p.11 / .15 (RDR-223): registration returned no identity, so the chunks
+            # have no owner to be written with and nothing was written. The message names the
+            # cause and the remedy.
             raise click.ClickException(str(e)) from e
         except IndexingError as e:
-            # nexus-w6wp0 review round (code-review-expert + substantive-
-            # critic, 2026-08-05): index_pdf's streaming return_metadata
+            # nexus-w6wp0 review round (code-review-expert + substantive-critic,
+            # 2026-08-05): index_pdf's streaming return_metadata
             # path can raise IndexingError (chunks written but the
             # metadata query found none) -- same nexus-2fyb translation
             # convention as the other typed errors above, so this new
@@ -3462,13 +3580,13 @@ def index_md_cmd(path: Path, corpus: str, collection: str | None, force: bool, r
     )
     from nexus.doc_indexer import index_markdown  # noqa: PLC0415 — deliberate function-local import (heavy doc_indexer dep deferred; startup-cost)
     from nexus.errors import (  # noqa: PLC0415 — deliberate function-local import (deferred to command invocation)
-        ChunkLandingUnverifiedError,
         CredentialsMissingError,
         IndexRunVerifyRefused,
         EphemeralPathRefusedError,
         SourceUriCollectionMismatchError,
         SourceUriNotFoundError,
         UnchunkableContentError,
+        CatalogIdentityMissingError,
     )
 
     if re_embed and not force:
@@ -3545,6 +3663,10 @@ def index_md_cmd(path: Path, corpus: str, collection: str | None, force: bool, r
         # explicitly on this command must fail loud, before any catalog
         # write -- see index_markdown's guard for the full rationale.
         raise click.ClickException(str(exc)) from exc
+    except CatalogIdentityMissingError as exc:
+        # nexus-z0o2p.13 (RDR-223): registration returned no identity, so the
+        # chunks have no owner to be written with and nothing was written.
+        raise click.ClickException(str(exc)) from exc
     except IndexRunVerifyRefused as exc:
         # nexus-tp8yk substantive-critic SIGNIFICANT (2026-08-04): this
         # command never caught the RUNFENCE completion refusal at all —
@@ -3553,11 +3675,6 @@ def index_md_cmd(path: Path, corpus: str, collection: str | None, force: bool, r
         # traceback instead of the clean, actionable wording every other
         # CLI surface renders for the identical exception.
         raise click.ClickException(_index_run_refused_message(exc, target_collection=collection or "", corpus=corpus)) from exc
-    except ChunkLandingUnverifiedError as exc:
-        # nexus-tp8yk D1 substantive-critic SIGNIFICANT (2026-08-04): see
-        # the identical rationale on index_pdf_cmd's wrapper. The
-        # exception's own message is already clean and actionable.
-        raise click.ClickException(str(exc)) from exc
 
     # nexus-7f5qj: see the identical ordering rationale on index_pdf_cmd —
     # checked right after the write, before the rest of this run's
@@ -3741,11 +3858,13 @@ def index_rdr_cmd(path: Path, force: bool, re_embed: bool, monitor: bool) -> Non
     # raise) used to run AFTER arm(), so a raise there left the heartbeat
     # armed with no disarm ever reached (a leaked background thread).
     file_heartbeat.arm(f"0/{len(rdr_files)} RDR document(s)")
+    rdr_errors: dict[str, str] = {}
     try:
         results = batch_index_markdowns(rdr_files, corpus=basename, collection_name=collection,
                                         content_type="rdr", force=force, force_re_embed=re_embed,
                                         on_file=on_file,
-                                        base_path=repo_root, embed_fn=_embed_fn)
+                                        base_path=repo_root, embed_fn=_embed_fn,
+                                        on_error=lambda p, e: rdr_errors.__setitem__(str(p), str(e)))
     finally:
         file_heartbeat.disarm()
     bar.close()
@@ -3763,3 +3882,12 @@ def index_rdr_cmd(path: Path, force: bool, re_embed: bool, monitor: bool) -> Non
         click.echo(f"  skipped: index fresh (use --force) — {unchanged} document(s)")
     if rdr_failed:
         click.echo(f"  {rdr_failed} document(s) failed — see structured logs")
+        # nexus-z0o2p.13: say why, per document. A registration that returned no
+        # identity (CatalogIdentityMissingError) names its own remedy in the message.
+        for failed_path in sorted(p for p, s in results.items() if s == "failed"):
+            reason = rdr_errors.get(failed_path)
+            if reason:
+                click.echo(f"    {Path(failed_path).name}: {reason}")
+        # A batch with failed documents must not exit 0: the run did not index what
+        # it was asked to.
+        raise click.ClickException(f"{rdr_failed} RDR document(s) failed to index")

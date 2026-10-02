@@ -23,7 +23,9 @@ import org.jooq.impl.SQLDataType;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.CHUNK_IS_REAPABLE;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNK_LIVE_OWNERS;
+import static dev.nexus.service.jooq.nexus.Tables.CHUNK_ORPHANED_AT;
 import static dev.nexus.service.jooq.nexus.Tables.SEARCH_ASPECT_SCOPED_1024;
 import static dev.nexus.service.jooq.nexus.Tables.SEARCH_ASPECT_SCOPED_384;
 import static dev.nexus.service.jooq.nexus.Tables.SEARCH_ASPECT_SCOPED_768;
@@ -37,7 +39,9 @@ import static dev.nexus.service.jooq.nexus.Tables.SEARCH_ASPECT_SCOPED_768;
 // DimTables.CHUNKS.get(dim) for the typed accessor.
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.COLLECTION_VECTOR_STATS;
+import static dev.nexus.service.jooq.nexus.Tables.GC_AUDIT;
 import static dev.nexus.service.jooq.nexus.Tables.GC_EXPIRE_QUARANTINE;
+import static dev.nexus.service.jooq.nexus.Tables.QUARANTINE_RESTORE_CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.GC_QUARANTINE_ORPHANS;
 import static dev.nexus.service.jooq.nexus.Tables.GC_QUARANTINE_ORPHANS_BOUNDED;
 import static dev.nexus.service.jooq.nexus.Tables.GC_RESTORE_REREFERENCED_BOUNDED;
@@ -531,9 +535,26 @@ public final class PgVectorRepository {
                                                     List<Map<String, Object>> metadatas,
                                                     boolean forceReEmbed,
                                                     List<String> deleteKeys) {
+        return upsertChunksWithTokens(tenant, collection, ids, documents, metadatas, forceReEmbed,
+                deleteKeys, null);
+    }
+
+    /**
+     * Ownership-guarded sibling (RDR-223 Phase 3 Step 2, nexus-z0o2p.24): {@code guard} non-null
+     * asks for the "every chash has a live manifest row" check before anything is embedded or
+     * written (see {@link #checkOwnership}); {@code null} is the unguarded write every other
+     * caller keeps.
+     */
+    public Tokened<Integer> upsertChunksWithTokens(String tenant, String collection,
+                                                    List<String> ids,
+                                                    List<String> documents,
+                                                    List<Map<String, Object>> metadatas,
+                                                    boolean forceReEmbed,
+                                                    List<String> deleteKeys,
+                                                    OwnershipGuard guard) {
         long[] tokensOut = {0L};
         upsertChunksInternal(tenant, collection, ids, documents, metadatas, tokensOut, null, forceReEmbed,
-                deleteKeys);
+                deleteKeys, guard);
         return new Tokened<>(ids.size(), tokensOut[0]);
     }
 
@@ -542,7 +563,8 @@ public final class PgVectorRepository {
                              List<String> ids,
                              List<String> documents,
                              List<Map<String, Object>> metadatas) {
-        upsertChunksInternal(tenant, collection, ids, documents, metadatas, null, null, false, List.of());
+        upsertChunksInternal(tenant, collection, ids, documents, metadatas, null, null, false, List.of(),
+                null);
     }
 
     /** {@code forceReEmbed}-aware sibling of {@link #upsertChunks} — see {@link #upsertChunksWithTokens(String, String, List, List, List, boolean)}. */
@@ -552,7 +574,7 @@ public final class PgVectorRepository {
                              List<Map<String, Object>> metadatas,
                              boolean forceReEmbed) {
         upsertChunksInternal(tenant, collection, ids, documents, metadatas, null, null, forceReEmbed,
-                List.of());
+                List.of(), null);
     }
 
     /** {@code deleteKeys}-aware sibling of {@link #upsertChunks} — see {@link #upsertChunksWithTokens(String, String, List, List, List, boolean, List)}. */
@@ -563,7 +585,7 @@ public final class PgVectorRepository {
                              boolean forceReEmbed,
                              List<String> deleteKeys) {
         upsertChunksInternal(tenant, collection, ids, documents, metadatas, null, null, forceReEmbed,
-                deleteKeys);
+                deleteKeys, null);
     }
 
     /**
@@ -595,6 +617,21 @@ public final class PgVectorRepository {
                                         List<float[]> embeddings,
                                         List<Map<String, Object>> metadatas,
                                         List<String> deleteKeys) {
+        upsertChunksWithVectors(tenant, collection, ids, documents, embeddings, metadatas, deleteKeys, null);
+    }
+
+    /**
+     * Ownership-guarded sibling of the passthrough write (RDR-223 Phase 3 Step 2, nexus-z0o2p.24):
+     * see {@link #upsertChunksWithTokens(String, String, List, List, List, boolean, List,
+     * OwnershipGuard)}. Supplied vectors do not exempt a chash from the check.
+     */
+    public void upsertChunksWithVectors(String tenant, String collection,
+                                        List<String> ids,
+                                        List<String> documents,
+                                        List<float[]> embeddings,
+                                        List<Map<String, Object>> metadatas,
+                                        List<String> deleteKeys,
+                                        OwnershipGuard guard) {
         // nexus-e0hd2 review F2: this is the server-to-server ingest path
         // (MigrationHandler /ingest-cloud) — ids arrive from an EXTERNAL
         // source with no HTTP-boundary validation. Validate here so a
@@ -618,7 +655,193 @@ public final class PgVectorRepository {
         // forceReEmbed is ever consulted. Pass false — never wire this true here,
         // it would be dead plumbing with no behavioral effect.
         upsertChunksInternal(tenant, collection, ids, documents, metadatas, null, embeddings, false,
-                deleteKeys);
+                deleteKeys, guard);
+    }
+
+    /** Chashes per ownership-check query (well under the Bind-message parameter ceiling). */
+    private static final int OWNERSHIP_CHECK_BATCH = 300;
+
+    /**
+     * Metadata keys a refusal / would-refuse log line carries for the first unowned chunk, to name
+     * its writer. {@code source_path} and {@code title} ARE tenant content (a file path, a document
+     * title): they are logged on purpose, 120 characters each, because "which writer is this" is
+     * the question the line exists to answer and the operator reading the engine log is the party
+     * that already holds the tenant's data (RDR-223 names them as the line's content). What is left
+     * out is what that question does not need and what is most sensitive: no {@code source_uri} (a
+     * full URL that can carry credentials or query strings) and no chunk text. A value that is itself
+     * a URL loses its userinfo, query and fragment ({@link OwnerlessLogText#redactUrl}). The line's
+     * retention is the deployment's log retention (docs/privacy-policy.md, "Engine logs").
+     */
+    private static final List<String> OWNERSHIP_LOG_META_KEYS = List.of("source_path", "title", "source_agent");
+
+    /** Longest {@code User-Agent} / {@code X-Nexus-Client-Version} the log line carries (same bound as the metadata fields). */
+    static final int OWNERSHIP_LOG_FIELD_MAX = 120;
+
+    /** Longest collection name the log line carries; the collection is quoted and cleaned like a header. */
+    static final int OWNERSHIP_LOG_COLLECTION_MAX = 256;
+
+    /** Rate limit for the refusal / would-refuse WARN line: one per (route, tenant, collection) per minute. */
+    private final OwnerlessLogLimiter ownerlessLogLimiter = OwnerlessLogLimiter.system();
+
+    /**
+     * The chashes of {@code distinctHex} that have a LIVE manifest row in {@code collection}: a
+     * {@code catalog_document_chunks} row whose document is not tombstoned, the same owner {@code
+     * nexus.chunk_live_owners} reports, so "owned" is exactly live(c). Scoped to the tenant AND the
+     * collection: a chash owned in another collection, or by another tenant, does not count. Runs on
+     * {@code ctx}, so the caller picks the transaction.
+     *
+     * <p>{@code public} so a test can call it on a connection that bypasses row-level security: on
+     * the service's own connections RLS also scopes the read to the tenant, which would hide a
+     * dropped tenant predicate. Not part of the engine's surface; nothing in main calls it from
+     * outside this class.
+     */
+    public static Set<String> liveOwnedChashes(DSLContext ctx, String tenant, String collection,
+                                                List<String> distinctHex) {
+        Set<String> owned = new HashSet<>(distinctHex.size() * 2);
+        for (int start = 0; start < distinctHex.size(); start += OWNERSHIP_CHECK_BATCH) {
+            List<byte[]> batch = new ArrayList<>(OWNERSHIP_CHECK_BATCH);
+            for (String hex : distinctHex.subList(start,
+                    Math.min(start + OWNERSHIP_CHECK_BATCH, distinctHex.size()))) {
+                batch.add(dev.nexus.service.db.Chash.fromHex(hex).toBytes());
+            }
+            owned.addAll(ctx.selectDistinct(ChashHex.hex(CATALOG_DOCUMENT_CHUNKS.CHASH))
+                .from(CATALOG_DOCUMENT_CHUNKS)
+                .join(CATALOG_DOCUMENTS)
+                    .on(CATALOG_DOCUMENTS.TENANT_ID.eq(CATALOG_DOCUMENT_CHUNKS.TENANT_ID)
+                        .and(CATALOG_DOCUMENTS.TUMBLER.eq(CATALOG_DOCUMENT_CHUNKS.DOC_ID)))
+                .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(tenant)
+                    .and(CATALOG_DOCUMENT_CHUNKS.COLLECTION.eq(collection))
+                    .and(CATALOG_DOCUMENT_CHUNKS.CHASH.in(batch))
+                    .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
+                .fetch(0, String.class));
+        }
+        return owned;
+    }
+
+    /**
+     * RDR-223 Phase 3 Step 2 (nexus-z0o2p.24), first of two ownership checks: every chash in
+     * {@code ids} must already have a live manifest row in {@code collection} (see {@link
+     * #liveOwnedChashes}). Anything else is an ownerless write: this route would put a chunk in
+     * the collection that no document owns, which is what {@code /v1/catalog/manifest/write_many}
+     * and {@code /append} exist to prevent.
+     *
+     * <p>This one runs in its own short read transaction BEFORE embedding and before every branch
+     * that could skip the embed or write first, so a refused request pays no embedder call and
+     * changes no row (not even the metadata-only refresh the existence partition commits for a chunk
+     * it already holds). It cannot be the only check: the embedder call must stay outside any
+     * transaction (RDR-181), so a chash can lose its last owner between this read and the write, and
+     * the post-commit sweep may then delete its chunk row, after which the write's {@code INSERT ...
+     * ON CONFLICT} would create a NEW ownerless row. The write transaction therefore checks again
+     * under the sweep gate (see {@link #recheckOwnershipInWriteTransaction}).
+     *
+     * <p>A supplied field naming a document or owner never satisfies the check: only a manifest
+     * row does. Duplicate ids count once.
+     *
+     * @return true when chashes were unowned and log-only let the request proceed (so the in-transaction
+     *         recheck does not count the same request twice)
+     * @throws OwnerlessChunkWriteException under {@link OwnerlessWriteMode#ENFORCE} when any chash is unowned
+     */
+    private boolean checkOwnership(String tenant, String collection, List<String> ids,
+                                   List<Map<String, Object>> metadatas, OwnershipGuard guard) {
+        List<String> distinct = new ArrayList<>(new java.util.LinkedHashSet<>(ids));
+        Set<String> owned = tenantScope.withTenant(tenant, ctx ->
+            liveOwnedChashes(ctx, tenant, collection, distinct));
+        List<String> unowned = new ArrayList<>();
+        for (String hex : distinct) {
+            if (!owned.contains(hex)) {
+                unowned.add(hex);
+            }
+        }
+        if (!unowned.isEmpty()) {
+            reportUnowned(tenant, collection, ids, metadatas, distinct.size(), unowned, guard, "pre_embed");
+            return true;   // only reached under log-only: enforce threw
+        }
+        return false;
+    }
+
+    /**
+     * Second ownership check, INSIDE the write transaction, after the embed and under the shared
+     * sweep gate ({@link CatalogRepository#acquireSweepGateShared}; the post-commit sweep takes it
+     * EXCLUSIVE, so it cannot delete a chunk row between this read and the insert that follows in the
+     * same transaction). Covers only the rows the insert will write: the chashes the existence
+     * partition already settled were updated in place and create nothing.
+     */
+    private void recheckOwnershipInWriteTransaction(DSLContext ctx, String tenant, String collection,
+                                                    List<String> insertChashes, List<String> allIds,
+                                                    List<Map<String, Object>> metadatas, OwnershipGuard guard) {
+        CatalogRepository.acquireSweepGateShared(ctx, tenant, collection);
+        List<String> distinct = new ArrayList<>(new java.util.LinkedHashSet<>(insertChashes));
+        Set<String> owned = liveOwnedChashes(ctx, tenant, collection, distinct);
+        List<String> unowned = new ArrayList<>();
+        for (String hex : distinct) {
+            if (!owned.contains(hex)) {
+                unowned.add(hex);
+            }
+        }
+        if (!unowned.isEmpty()) {
+            reportUnowned(tenant, collection, allIds, metadatas, distinct.size(), unowned, guard, "in_tx");
+        }
+    }
+
+    /**
+     * A request header for the log line: "absent" when null or blank, else cleaned by {@link
+     * OwnerlessLogText#quoted}: control characters and Unicode line separators collapsed to a space,
+     * cut to {@link #OWNERSHIP_LOG_FIELD_MAX}, with {@code "} and a backslash neutralised. The caller
+     * wraps the result in double quotes, so a header value cannot close the quote and append
+     * {@code key=value} pairs of its own, or end the line.
+     */
+    private static String clipLogField(String value) {
+        return OwnerlessLogText.quoted(value, OWNERSHIP_LOG_FIELD_MAX);
+    }
+
+    /**
+     * Count, log (rate limited) and, under enforce, refuse a request that carries unowned chashes.
+     * The log line names the writer: the request's {@code User-Agent} and {@code
+     * X-Nexus-Client-Version} (absent = a client older than the cut that sends it) and the first
+     * unowned chunk's {@code source_path}/{@code title}/{@code source_agent}. The counters count every
+     * request; only the log line is limited.
+     */
+    private void reportUnowned(String tenant, String collection, List<String> ids,
+                               List<Map<String, Object>> metadatas, int requested, List<String> unowned,
+                               OwnershipGuard guard, String phase) {
+        List<String> sample = unowned.subList(0, Math.min(8, unowned.size()));
+        boolean enforce = guard.mode() == OwnerlessWriteMode.ENFORCE;
+        if (enforce) {
+            OwnerlessWriteActivity.recordRefused();
+        } else {
+            OwnerlessWriteActivity.recordWouldRefuse();
+        }
+        long suppressed = ownerlessLogLimiter.tryAcquire(guard.route() + "|" + tenant + "|" + collection);
+        if (suppressed >= 0) {
+            String writer = "";
+            int firstIdx = ids.indexOf(unowned.get(0));
+            if (metadatas != null && firstIdx >= 0 && firstIdx < metadatas.size()
+                    && metadatas.get(firstIdx) != null) {
+                Map<String, Object> meta = metadatas.get(firstIdx);
+                StringBuilder sb = new StringBuilder();
+                for (String key : OWNERSHIP_LOG_META_KEYS) {
+                    Object v = meta.get(key);
+                    if (v != null && !String.valueOf(v).isBlank()) {
+                        // the bracket pair, ';' and '=' delimit first_chunk_meta: a value carries none of them
+                        sb.append(key).append('=')
+                          .append(OwnerlessLogText.metaValue(String.valueOf(v), OWNERSHIP_LOG_FIELD_MAX)).append(';');
+                    }
+                }
+                writer = sb.toString();
+            }
+            String clientVersion = clipLogField(guard.clientVersion());
+            String userAgent = clipLogField(guard.userAgent());
+            log.warn("event={} route={} tenant={} collection=\"{}\" phase={} unowned={} requested={} sample={} "
+                            + "user_agent=\"{}\" client_version=\"{}\" suppressed_since_last={} first_chunk_meta=[{}]",
+                    enforce ? "ownerless_chunk_write_refused" : "ownerless_chunk_write_would_refuse",
+                    guard.route(), tenant, OwnerlessLogText.quoted(collection, OWNERSHIP_LOG_COLLECTION_MAX),
+                    phase, unowned.size(), requested,
+                    String.join(",", sample), userAgent, clientVersion, suppressed, writer);
+        }
+        if (enforce) {
+            throw new OwnerlessChunkWriteException(
+                    guard.route(), collection, unowned.size(), requested, sample);
+        }
     }
 
     private void upsertChunksInternal(String tenant, String collection,
@@ -628,9 +851,20 @@ public final class PgVectorRepository {
                                       long[] tokensOut,
                                       List<float[]> providedEmbeddings,
                                       boolean forceReEmbed,
-                                      List<String> deleteKeys) {
+                                      List<String> deleteKeys,
+                                      OwnershipGuard guard) {
         if (ids.isEmpty()) return;
         int dim = dimForCollection(tenant, collection);
+
+        // RDR-223 Phase 3 Step 2 (nexus-z0o2p.24): the ownership check runs here, after the
+        // collection resolved (an unregistered collection answers 'register it first' ahead of
+        // this) and BEFORE the force_re_embed / supplied-vector / existence-partition branches and
+        // BEFORE embedding, so a refused write never pays the embedder and no branch skips it.
+        boolean ownershipReportedLogOnly = false;
+        if (guard != null) {
+            ownershipReportedLogOnly = checkOwnership(tenant, collection, ids, metadatas, guard);
+        }
+        final boolean recheckInTransaction = guard != null && !ownershipReportedLogOnly;
 
         // De-duplicate IDs (first-wins, matching T3Database._write_batch). Also required
         // for correctness: ON CONFLICT cannot affect the same row twice within one
@@ -872,6 +1106,13 @@ public final class PgVectorRepository {
             DeadlockRetry.run(collection, () -> tenantScope.withTenant(tenant, ctx -> {
                 racedThisWrite.set(0);
                 racedChashSampleHolder[0] = new ArrayList<>();
+                // RDR-223 Phase 3 Step 2 (nexus-z0o2p.24): the second ownership check, in the
+                // write's own transaction, under the shared sweep gate, ahead of the insert.
+                if (recheckInTransaction) {
+                    List<String> insertChashes = new ArrayList<>(finalInsertIdx.size());
+                    for (int idx : finalInsertIdx) insertChashes.add(dedupIds.get(idx));
+                    recheckOwnershipInWriteTransaction(ctx, tenant, collection, insertChashes, ids, metadatas, guard);
+                }
                 // Bead nexus-h8rf6.2 (reduce per-request connection hold time): ONE
                 // multi-row INSERT ... ON CONFLICT instead of dedupIds.size() sequential
                 // round trips. The old per-row loop held this transaction's connection
@@ -929,6 +1170,13 @@ public final class PgVectorRepository {
                       // from this statement's column list); this only needs stating for
                       // the conflict branch.
                       .set(ch.retention(), "full")
+                      // nexus-wbfpw.43: a client re-write of an existing chunk restarts
+                      // reapable(c)'s grace window. created_at is write-once, so without
+                      // this a re-indexed old chunk looks old to the reaper, which can
+                      // delete it between this write and the manifest write. A fresh
+                      // INSERT takes the column DEFAULT now(), so only the conflict
+                      // branch needs stating.
+                      .set(ch.lastWrittenAt(), DimTables.lastWrittenNow())
                       // RDR-222 Phase 0 (bead nexus-ulrjq, M-a): (xmax = 0) is the
                       // standard Postgres RETURNING idiom for "this row was genuinely
                       // INSERTed, not reached via the ON CONFLICT DO UPDATE branch" —
@@ -966,159 +1214,15 @@ public final class PgVectorRepository {
     }
 
     // -------------------------------------------------------------------------
-    // RDR-169 G4: embed-without-store / reference-only upsert
+    // RDR-169 G4 reference-only rows: the engine has NO writer for them (RDR-223 Phase 3,
+    // nexus-z0o2p.36). POST /v1/vectors/upsert-reference-only is RETIRED (410) and the
+    // repository method behind it, with its SQL builder and write gate, was deleted: a
+    // chunk with no manifest row is the ownerless write this phase refuses, and nothing in
+    // production called it. The read path still serves rows that already carry
+    // retention='reference-only' (NULL chunk_text); tests build such rows with
+    // PgContainerHelper#insertReferenceOnlyChunk. A future writer must go through the
+    // combined routes, so the row gets its manifest row in the same transaction.
     // -------------------------------------------------------------------------
-
-    /**
-     * Write gate (RDR-169 G4, nexus-xvb6b) for {@link #upsertReferenceOnlyChunk}. Phase A
-     * (nexus-xvb6b) shipped this {@code false}: the {@code retention} column did not exist
-     * yet, so the method ran all pre-SQL validation but short-circuited before the
-     * retention-binding INSERT. Phase B (bead nexus-zw2em, changeset
-     * {@code vectors-014-retention.xml}) landed the column, so this now stays {@code true} —
-     * every code path below the guard reaches the real INSERT.
-     */
-    static final boolean REFERENCE_ONLY_WRITES_ENABLED = true;
-
-    /**
-     * Build the reference-only upsert as a jOOQ query (nexus-xtmtf: DSL form of the retired
-     * {@code referenceOnlyInsertSql} string). {@code retention} is now the GENERATED
-     * {@link DimTables.ChunkTable#retention()} field (RDR-169 Phase B, nexus-zw2em) — the
-     * Phase-A ad-hoc {@code DSL.field(DSL.name("retention"), ...)} placeholder is retired now
-     * that the column and its jOOQ codegen both exist. {@code chunk_text} is intentionally
-     * EXCLUDED from the DO UPDATE — reference-only rewrites refresh embedding+metadata but
-     * must never overwrite a non-NULL {@code chunk_text} (the caller's guard catches
-     * full→ref before SQL; this omission is defense-in-depth). Package-private so the
-     * SQL-shape test renders it.
-     */
-    static org.jooq.Query referenceOnlyInsertQuery(
-            org.jooq.DSLContext ctx, int dim, String tenant, String collection,
-            String chash, float[] embedding, String metadataJson) {
-        DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
-        return ctx.insertInto(ch.table())
-                  .columns(ch.tenantId(), ch.collection(), ch.chash(), ch.chunkText(),
-                           ch.embedding(), ch.metadata(), ch.retention())
-                  .values(tenant, collection, chash, null,
-                          Vector.of(embedding),
-                          JSONB.jsonb(metadataJson), "reference-only")
-                  .onConflict(ch.tenantId(), ch.collection(), ch.chash())
-                  .doUpdate()
-                  .set(ch.embedding(), DSL.excluded(ch.embedding()))
-                  // nexus-w94eo: merge, not replace — see the sibling ON CONFLICT above
-                  // in upsertChunksInternal for the full rationale. No delete keys: the
-                  // upsert-reference-only route carries no delete_keys field, and no
-                  // client in src/nexus calls that route today.
-                  .set(ch.metadata(),  mergeMetadata(ch.metadata(), DSL.excluded(ch.metadata()), null))
-                  .set(ch.retention(), DSL.excluded(ch.retention()));
-    }
-
-    /**
-     * Upserts a reference-only chunk: stores a pre-computed embedding + metadata with
-     * {@code chunk_text=NULL} and {@code retention='reference-only'} (RDR-169 G4,
-     * embed-without-store).
-     *
-     * <h3>Phase B status (live)</h3>
-     * The {@code retention} column landed in {@code vectors-014-retention.xml} (bead
-     * nexus-zw2em) and {@link #REFERENCE_ONLY_WRITES_ENABLED} is {@code true} — every
-     * validation path below reaches the real retention-binding INSERT. The
-     * {@code POST /v1/vectors/upsert-reference-only} route ({@link
-     * dev.nexus.service.http.VectorHandler}) dispatches here.
-     *
-     * <h3>Null and dim validation (pre-SQL)</h3>
-     * {@code embedding} must be non-null, non-empty, and its length must equal the dimension
-     * implied by {@code collection}.  Mismatch fails loud — no silent truncation.
-     *
-     * <h3>full → reference-only transition guard (pre-INSERT SELECT)</h3>
-     * If a chunk with the same {@code (tenant, collection, chash)} already exists and has a
-     * non-NULL {@code chunk_text}, this method throws {@link IllegalStateException}.  The
-     * caller must explicitly delete + re-insert to change retention (RDR-169 §Re-index).
-     * {@code reference-only → reference-only} rewrites (embedding/metadata refresh) are
-     * permitted; the INSERT's DO UPDATE clause omits {@code chunk_text} as defense-in-depth.
-     *
-     * <h3>Known residual seam</h3>
-     * There remains a TOCTOU window between the guard SELECT (step 3) and the INSERT (step
-     * 6): two concurrent full→reference-only attempts against the same, previously-absent
-     * chash can both pass the guard before either INSERTs, and the second INSERT's
-     * {@code ON CONFLICT DO UPDATE} would win with whichever payload lands last. Guarding
-     * against a genuinely full row is unaffected (the guard SELECT sees committed data),
-     * but a race between two concurrent reference-only writers to a brand-new chash is not
-     * serialized at the DB layer here (no unique constraint or trigger closes it — RDR-169's
-     * Technical Design leaves the transition prohibition to the application-layer guard).
-     * Tracked as a residual, not blocking Phase B (which targets the correctness invariant
-     * RDR-169 names: full content is never silently NULLed).
-     *
-     * @param tenant     tenant principal for RLS scoping
-     * @param collection four-segment conformant collection name
-     * @param chash      64-hex content-addressed chunk ID (the full sha256, RDR-180)
-     * @param embedding  precomputed vector (non-null, non-empty) — dim must match collection
-     * @param metadata   chunk metadata (may be empty, not null)
-     * @throws IllegalArgumentException if {@code embedding} is null/empty or dim mismatches
-     * @throws IllegalStateException    if a full-content chunk already occupies this chash
-     */
-    public void upsertReferenceOnlyChunk(String tenant, String collection,
-                                         String chash,
-                                         float[] embedding,
-                                         Map<String, Object> metadata) {
-        // (1) Null / empty guard — pre-SQL, mirrors upsertChunksWithVectors null check.
-        if (embedding == null || embedding.length == 0) {
-            throw new IllegalArgumentException(
-                "upsertReferenceOnlyChunk: embedding must be non-null and non-empty for chash '"
-                + chash + "' in collection '" + collection + "'");
-        }
-
-        // (2) Dim validation — pre-SQL, fail loud, no silent truncation.
-        int dim = dimForCollection(tenant, collection);
-        if (embedding.length != dim) {
-            throw new IllegalArgumentException(
-                "upsertReferenceOnlyChunk: " + embedding.length + "-dim vector for collection '"
-                + collection + "' which dispatches to embedding_" + dim
-                + " (dim mismatch — no silent truncation)");
-        }
-
-        tenantScope.withTenant(tenant, ctx -> {
-            // (3) full → reference-only guard: SELECT before INSERT.
-            // Reads only chunk_text (not retention) — correctness relies on the schema
-            // invariant chunk_text NOT NULL ⇒ retention='full', which the CHECK constraint
-            // does not itself enforce (see the method javadoc's "Known residual seam").
-            // A previously-full chunk must never be silently NULLed (RDR-169 §Re-index PROHIBITS).
-            DimTables.ChunkTable existingCh = DimTables.CHUNKS.get(dim);
-            var existing = ctx.select(existingCh.chunkText()).from(existingCh.table())
-                              .where(existingCh.tenantId().eq(tenant)
-                                  .and(existingCh.collection().eq(collection))
-                                  .and(existingCh.chash().eq(chash)))
-                              .fetchOne();
-            if (existing != null && existing.value1() != null) {
-                throw new IllegalStateException(
-                    "upsertReferenceOnlyChunk: chash '" + chash + "' in collection '"
-                    + collection + "' already has full content (chunk_text IS NOT NULL). "
-                    + "A full→reference-only transition is prohibited by RDR-169 §Re-index. "
-                    + "Delete + re-insert to change retention.");
-            }
-
-            // (4) Write gate — kept as a kill switch (Phase A shipped it false, before the
-            // retention column existed; Phase B, nexus-zw2em, flips it true permanently
-            // now that vectors-014-retention.xml has landed).
-            if (!REFERENCE_ONLY_WRITES_ENABLED) {
-                throw new IllegalStateException(
-                    "upsertReferenceOnlyChunk: reference-only writes are disabled "
-                    + "(REFERENCE_ONLY_WRITES_ENABLED=false)");
-            }
-
-            // (5) RDR-204 Phase 1 (bead nexus-ft04v.7): require catalog_collections to
-            // already carry a row for `collection` before any chunk write. Replaces the
-            // RDR-70r3c-era stub INSERT ... ON CONFLICT DO NOTHING (mirrored
-            // upsertChunksInternal's, deriving content_type/owner_id/embedding_model from
-            // the name) with a fail-loud check.
-            CollectionRegistry.requireRegistered(ctx, tenant, collection);
-
-            // (6) Reference-only chunk INSERT (Phase B, live — retention column present;
-            // see referenceOnlyInsertQuery).
-            referenceOnlyInsertQuery(ctx, dimForCollection(tenant, collection), tenant,
-                    collection, chash, embedding,
-                    toJson(sanitizeNulDeep(metadata))).execute();
-            return null;
-        });
-        log.debug("event=upsert_reference_only_done collection={} chash={}", collection, chash);
-    }
 
     /**
      * Semantic search: embed the query server-side, then
@@ -1240,6 +1344,8 @@ public final class PgVectorRepository {
             // cannot recover neighbors the ef-bounded traversal already pruned
             // (cross-tenant crowd-out; see PgSession.DEFAULT_EF_SEARCH_FLOOR).
             PgSession.setHnswEfSearch(ctx, nResults);
+            // nexus-wbfpw.47: raise the iterative-scan budget so recall holds past 95% dead.
+            PgSession.setHnswScanBudget(ctx);
             // nexus-g17tf: bound the statement so an orphaned or pathological
             // scan cancels (57014) instead of pinning xmin for hours.
             PgSession.setSearchStatementTimeout(ctx);
@@ -1563,6 +1669,8 @@ public final class PgVectorRepository {
             // nexus-4ktfm: crowd-out headroom for the traversal itself (see
             // PgSession.DEFAULT_EF_SEARCH_FLOOR).
             PgSession.setHnswEfSearch(ctx, nResults);
+            // nexus-wbfpw.47: raise the iterative-scan budget so recall holds past 95% dead.
+            PgSession.setHnswScanBudget(ctx);
             org.jooq.Table<?> hnswFirstFn = switch (dim) {
                 case 384  -> TEXT_GATED_SEARCH_HNSW_FIRST_384.call(
                     queryVec, gateQueryText, colls, wherePlan.containment(), wherePlan.jsonPath(), nResults);
@@ -1694,7 +1802,7 @@ public final class PgVectorRepository {
      * liveness): every read that returns content uses live(c) ({@link
      * #liveChunksCondition}), but a caller whose question is "is this chunk stored
      * here, and what does its metadata say" (existing_ids: catalog verify, the
-     * migration ETL, skip-existing, the put_note_pieces delete guard; the manifest
+     * migration ETL, skip-existing; the manifest
      * backfill's reverse lookup) must see a stored chunk whether or not it has a
      * live owner. The where-scan reads offer the same with {@code includeNonLive}.
      */
@@ -1808,9 +1916,16 @@ public final class PgVectorRepository {
      */
     public Tokened<String> putWithTokens(String tenant, String collection, String docId,
                                           String content, Map<String, Object> metadata) {
+        return putWithTokens(tenant, collection, docId, content, metadata, null);
+    }
+
+    /** Ownership-guarded sibling (RDR-223 Phase 3 Step 2, nexus-z0o2p.24); {@code null} guard is the plain put. */
+    public Tokened<String> putWithTokens(String tenant, String collection, String docId,
+                                          String content, Map<String, Object> metadata,
+                                          OwnershipGuard guard) {
         Tokened<Integer> result = upsertChunksWithTokens(
             tenant, collection, List.of(docId), List.of(content),
-            List.of(metadata != null ? metadata : Map.of()));
+            List.of(metadata != null ? metadata : Map.of()), false, List.of(), guard);
         return new Tokened<>(docId, result.tokens());
     }
 
@@ -2547,6 +2662,8 @@ public final class PgVectorRepository {
             // nexus-4ktfm: crowd-out headroom — the combined-query SQL functions run
             // inside this same transaction, so the GUC governs their HNSW scans.
             PgSession.setHnswEfSearch(ctx, nResults);
+            // nexus-wbfpw.47: raise the iterative-scan budget so recall holds past 95% dead.
+            PgSession.setHnswScanBudget(ctx);
             // nexus-g17tf: bound the statement so an orphaned or pathological
             // scan cancels (57014) instead of pinning xmin for hours.
             PgSession.setSearchStatementTimeout(ctx);
@@ -2584,6 +2701,8 @@ public final class PgVectorRepository {
             PgSession.setLocal(ctx, "hnsw.iterative_scan", "relaxed_order");
             // nexus-4ktfm: same crowd-out headroom as runCombinedQuery.
             PgSession.setHnswEfSearch(ctx, nResults);
+            // nexus-wbfpw.47: raise the iterative-scan budget so recall holds past 95% dead.
+            PgSession.setHnswScanBudget(ctx);
             // nexus-g17tf: bound the statement so an orphaned or pathological
             // scan cancels (57014) instead of pinning xmin for hours.
             PgSession.setSearchStatementTimeout(ctx);
@@ -2997,6 +3116,12 @@ public final class PgVectorRepository {
 --   row_kind = 'scope' -- exactly 1 row, ALWAYS present: scope_chunk_total
 --                         is the count of every chunk nexus.chunks holds
 --                         for this tenant+collection, any manifest state;
+--                         one per chunk, however many own-collection
+--                         manifest rows name its chash (identical text
+--                         shared by several documents is ONE chunk row
+--                         named by one manifest row per document; the
+--                         own-manifest test is an anti-join, never a join,
+--                         so it cannot multiply base rows; nexus-wbfpw.60);
 --                         chash, bucket, bucket_total and both owner
 --                         columns are NULL.
 WITH live_notes AS MATERIALIZED (
@@ -3023,7 +3148,13 @@ rev_candidates AS MATERIALIZED (
 base AS (
     SELECT
         encode(c.chash, 'hex') AS chash,
-        (own_manifest.chash IS NULL) AS is_manifest_less,
+        NOT EXISTS (
+            SELECT 1
+            FROM nexus.catalog_document_chunks own_manifest
+            WHERE own_manifest.tenant_id = c.tenant_id
+              AND own_manifest.collection = c.collection
+              AND own_manifest.chash = c.chash
+        ) AS is_manifest_less,
         owner.tumbler AS owner_tumbler,
         owner.path AS owner_path,
         CASE
@@ -3035,10 +3166,6 @@ base AS (
             ELSE 'unclassified'
         END AS bucket
     FROM nexus.chunks c
-    LEFT JOIN nexus.catalog_document_chunks own_manifest
-           ON own_manifest.tenant_id = c.tenant_id
-          AND own_manifest.collection = c.collection
-          AND own_manifest.chash = c.chash
     LEFT JOIN nexus.catalog_documents fwd_owner
            ON fwd_owner.tenant_id = c.tenant_id
           AND fwd_owner.tumbler = COALESCE(
@@ -3162,14 +3289,33 @@ FROM scope s
     // query from the hand-runnable psql copy Sam's ruling requires.
     public ManifestLessCensusResult manifestLessCensus(
             String tenant, String collection, int limit, int offset) {
+        return manifestLessCensusBounded(tenant, collection, limit, offset, null);
+    }
+
+    /**
+     * {@link #manifestLessCensus(String, String, int, int)} bounded by {@code statementTimeout} (null: no bound, the
+     * route's own behaviour). This is the method that runs the sanctioned statement; the four-argument form
+     * delegates here with no bound. The reaper's per-pass census runs on the shared scheduler thread, so it must not run
+     * unbounded: the statement is a per-chunk LATERAL join whose cost grows with the manifest size of each chunk's
+     * owner, and one document owning 79,900 of 80,000 chunks read 112 to 152 seconds under the application role
+     * (T2 nexus/reaper-2x9xa-round2). The bound is its OWN statement before the census, so it is real. A census
+     * cancelled by it throws with SQLSTATE 57014; the caller must treat that as "not read", never as clean.
+     */
+    public ManifestLessCensusResult manifestLessCensusBounded(
+            String tenant, String collection, int limit, int offset, java.time.Duration statementTimeout) {
         // Six positional binds, in the SQL text's own left-to-right order (see the
         // SQL header's "substituting each positional placeholder" list): tenant and
         // collection for live_notes' scope, then tenant and collection again for
         // base's own scope, then limit/offset (round 3, the live_notes/rev_candidates
         // rewrite adds the second tenant+collection pair).
-        Result<Record> rows = tenantScope.withTenant(tenant, ctx ->
-            ctx.resultQuery(MANIFEST_LESS_CENSUS_SQL, tenant, collection, tenant, collection, limit, offset)
-               .fetch());
+        Result<Record> rows = tenantScope.withTenant(tenant, ctx -> {
+            if (statementTimeout != null) {
+                PgSession.setStatementAndLockBounds(ctx, (int) Math.min(statementTimeout.toMillis(), Integer.MAX_VALUE),
+                    2_000);
+            }
+            return ctx.resultQuery(MANIFEST_LESS_CENSUS_SQL, tenant, collection, tenant, collection, limit, offset)
+               .fetch();
+        });
 
         Map<String, List<String>> chashes = new LinkedHashMap<>();
         Map<String, Map<String, String>> owners = new LinkedHashMap<>();
@@ -3208,6 +3354,95 @@ FROM scope s
             }
         }
         return new ManifestLessCensusResult(returned, chashes, owners, totals, scopeChunkTotal);
+    }
+
+    /** One chunk {@code reapable(c)} selects (RDR-192 Step 8, bead nexus-wbfpw.17). {@code ownerlessSince}
+     *  is the instant the predicate's grace counts from, {@code GREATEST(last_written_at, orphaned_at)}
+     *  (the later of the last write and the moment the chunk last lost an owner,
+     *  {@code nexus.chunk_orphaned_at}); for display only, the predicate decides what is listed.
+     *  {@code sourcePath} is the chunk's {@code source_path} metadata (the reaper's audit samples).
+     *  {@code ownerlessSince} and {@code sourcePath} are both Strings: the select in
+     *  {@link #reapableChunks} feeds this record by position, so keep the two in step
+     *  ({@code VectorHandlerReapableRouteTest#everyReapableChunkFieldHoldsItsOwnColumn} pins it). */
+    public record ReapableChunk(String chash, String createdAt, String lastWrittenAt, String ownerlessSince,
+                                String title, String catalogDocId, String sourcePath) {}
+
+    /**
+     * Read-only listing of the chunks {@code nexus.chunk_is_reapable} (vectors-021) selects in
+     * {@code collection}, ordered by chash ascending. Selection is that function and nothing else:
+     * the call shape is the one every consumer uses (RDR-192 Step 7), so with {@code graceSeconds}
+     * {@code null} a chunk is listed exactly when {@code gc_quarantine_orphans} (which passes NULL)
+     * would move it, at the same instant. A smaller {@code graceSeconds} lists more than any
+     * destructive consumer would take: it is an advisory preview and is not clamped, because this
+     * method never deletes.
+     *
+     * <p>{@code graceSeconds} {@code null} means the function's own default (30 days, owned by the
+     * function and by nothing in Java, so it cannot drift); a value is passed as an interval in exact
+     * seconds. Any collection prefix is listed; a {@code quarantine-*} collection is refused before
+     * this is called (see {@code VectorHandler#requireNotQuarantineCollection}) and the predicate
+     * itself excludes a quarantine sibling by {@code lifecycle_state}.
+     *
+     * <p>Paging: {@code afterChash} (a 64-hex chash, exclusive) is a keyset cursor and the way to
+     * walk a set a consumer is shrinking as it goes; {@code offset} skips rows after the cursor and
+     * is only safe for a set that does not change between pages. {@code afterChash} {@code null}
+     * starts at the beginning.
+     *
+     * <p>A snapshot, not a reservation: the listing takes no sweep gate and no lock, so a chunk may
+     * be refreshed or owned the moment after it is listed. A destructive consumer must take the gate
+     * and re-check the predicate in its own statement (as {@code gc_quarantine_orphans} does), never
+     * delete by the ids this returns.
+     */
+    public List<ReapableChunk> reapableChunks(String tenant, String collection, Long graceSeconds,
+                                              String afterChash, int limit, int offset) {
+        Field<org.jooq.types.YearToSecond> grace = DSL.val(
+            graceSeconds == null ? null : exactSeconds(graceSeconds), SQLDataType.INTERVAL);
+        Field<String> title = DSL.jsonbGetAttributeAsText(CHUNKS.METADATA, "title");
+        Field<String> sourcePath = DSL.jsonbGetAttributeAsText(CHUNKS.METADATA, "source_path");
+        // The predicate no longer reads metadata; this is the document the chunk says wrote it, for
+        // display only: catalog_doc_id, falling back to the legacy doc_id.
+        Field<String> catalogDocId = DSL.coalesce(
+            DSL.nullif(DSL.jsonbGetAttributeAsText(CHUNKS.METADATA, "catalog_doc_id"), ""),
+            DSL.nullif(DSL.jsonbGetAttributeAsText(CHUNKS.METADATA, "doc_id"), ""));
+        // The instant the grace counts from: the later of the last write and the orphaning record. A
+        // scalar subquery on the primary key, tenant-scoped explicitly as well as by RLS; GREATEST
+        // skips a NULL, so a chunk with no record reads its last_written_at. Display only: the
+        // predicate below stays the one thing that decides what is listed.
+        Field<java.time.OffsetDateTime> ownerlessSince = DSL.greatest(CHUNKS.LAST_WRITTEN_AT,
+            DSL.field(DSL.select(CHUNK_ORPHANED_AT.ORPHANED_AT).from(CHUNK_ORPHANED_AT)
+                .where(CHUNK_ORPHANED_AT.TENANT_ID.eq(CHUNKS.TENANT_ID))
+                .and(CHUNK_ORPHANED_AT.COLLECTION.eq(CHUNKS.COLLECTION))
+                .and(CHUNK_ORPHANED_AT.CHASH.eq(CHUNKS.CHASH))));
+        org.jooq.Condition after = afterChash == null
+            ? DSL.noCondition() : CHUNKS.CHASH.gt(dev.nexus.service.db.Chash.fromHex(afterChash).toBytes());
+        return tenantScope.withTenant(tenant, ctx ->
+            ctx.select(ChashHex.hex(CHUNKS.CHASH), CHUNKS.CREATED_AT, CHUNKS.LAST_WRITTEN_AT, title, catalogDocId,
+                       ownerlessSince, sourcePath)
+               .from(CHUNKS)
+               .where(CHUNKS.TENANT_ID.eq(tenant).and(CHUNKS.COLLECTION.eq(collection)))
+               .and(after)
+               .and(DSL.exists(DSL.selectFrom(CHUNK_IS_REAPABLE.call(
+                   CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.LAST_WRITTEN_AT, grace))))
+               .orderBy(CHUNKS.CHASH)
+               .limit(limit).offset(offset)
+               .fetch(r -> new ReapableChunk(
+                   r.value1(), r.value2().toInstant().toString(), r.value3().toInstant().toString(),
+                   r.value6().toInstant().toString(),
+                   blankToNull(r.value4()), blankToNull(r.value5()), blankToNull(r.value7()))));
+    }
+
+    /**
+     * {@code seconds} as an interval whose whole magnitude sits in the day-to-second fields. Not
+     * {@code YearToSecond.valueOf(Duration)}: that normalises into months and years with a fixed
+     * 30-day month (CatalogRepository#olderThanInterval, nexus-ff85q).
+     */
+    private static org.jooq.types.YearToSecond exactSeconds(long seconds) {
+        return new org.jooq.types.YearToSecond(
+            new org.jooq.types.YearToMonth(0, 0),
+            org.jooq.types.DayToSecond.valueOf(java.time.Duration.ofSeconds(seconds)));
+    }
+
+    private static String blankToNull(String s) {
+        return s == null || s.isEmpty() ? null : s;
     }
 
     /**
@@ -3633,23 +3868,606 @@ FROM scope s
     }
 
     /**
+     * The most chashes one {@link #quarantineRestore} call takes: {@code gc_audit}'s own chash ceiling
+     * ({@code CatalogRepository.GC_AUDIT_MAX_CHASHES}), which is also the most one reaper pass moves.
+     */
+    public static final int MAX_QUARANTINE_RESTORE_CHASHES = 5000;
+
+    /**
+     * What {@link #quarantineRestore} reports: one {@link Row} per distinct requested chash, in request order.
+     * {@code outcome} is one of {@code restored}, {@code would_restore} (dry run), {@code present} (the origin
+     * already has the chash: never overwritten, any quarantine copy left for expiry), {@code dim_conflict} (as
+     * present, and the origin row and the quarantine copy hold embeddings of different widths) or {@code missing}
+     * (neither this origin's quarantine sibling nor the origin has it). For a {@code restored} row,
+     * {@code noManifest} says the chunk has no own-collection manifest row AFTER the call (false when reattach
+     * wrote one) and {@code reapableAfter} is the instant the reaper may take it again (restore time plus the
+     * default grace) unless an owner row is repaired first; both are null for every other outcome (and
+     * {@code reapableAfter} for an attached chunk).
+     *
+     * <p>{@code reattach} is what the reattach step judged for the chunk, whether or not it ran: {@code attach}
+     * (its owning document is live in the origin and the position is free), {@code superseded} (the document is
+     * live but its manifest already holds another chunk at that position, was re-indexed, or is not safe to
+     * extend), {@code no_live_owner}, {@code no_position}, {@code owned} (a present chunk that already has a
+     * manifest row), or null for a chunk that is missing or a {@code dim_conflict}. {@code attached} is true
+     * only when this call wrote the manifest row. {@code owner} and {@code ownerTitle} name the document the
+     * metadata resolved to (null when none), {@code position} the manifest position it takes, and
+     * {@code chunkTitle} the chunk's own metadata title, for the operator's re-put recipe. {@code reason} says
+     * why a {@code superseded} verdict was reached ({@code indexing}, {@code complete}, {@code failed}, {@code version},
+     * {@code position_taken}, {@code rival}, {@code other_collection}, {@code has_rows}, {@code past_end}, or
+     * {@code race} for an attach that lost a race) and is null for every other verdict. {@code ownerRows} and
+     * {@code ownerChunks} are the owner's manifest rows in the origin after the call (before it, on a dry run)
+     * and its registered chunk count, so a partial attach reads as M of N; null when no owner resolved
+     * ({@code ownerChunks} also when the owner registers no count).
+     *
+     * <p>{@code auditId} is the {@code quarantine_restore} gc_audit row, null for a dry run or a call that
+     * restored and attached nothing. {@code source} is set when the chashes came from a gc_audit row
+     * ({@link #quarantineRestoreFromAudit}); {@code nextAfter} when they were selected from the sibling by
+     * {@code quarantined_at} ({@link #quarantineRestoreSelected}), the chash to pass as {@code afterChash} for the
+     * next page, null when the selection is exhausted.
+     *
+     * <p>{@code quarantineCollections} is the quarantine siblings that hold chunks of the origin, in the order the
+     * restore tries them (nexus-wbfpw.55): the engine finds them itself, from the origin's name and from the chunks' own
+     * {@code origin_collection} tag, never from what a client derived from the catalog row. Empty when no
+     * quarantine collection holds anything of this origin. {@code auditIds} is the {@code quarantine_restore} row of
+     * each sibling that moved or attached something, in the same order; {@code auditId} is the first of them (the
+     * one a caller that knew of a single sibling reads).
+     */
+    public record QuarantineRestoreOutcome(List<Row> rows, Long auditId, boolean dryRun, Source source,
+                                           String nextAfter, List<Long> auditIds, List<String> quarantineCollections) {
+        /** The shape a single-sibling call reports: at most one audit row, no sibling list. */
+        public QuarantineRestoreOutcome(List<Row> rows, Long auditId, boolean dryRun, Source source,
+                                        String nextAfter) {
+            this(rows, auditId, dryRun, source, nextAfter, auditId == null ? List.of() : List.of(auditId), List.of());
+        }
+
+        public record Row(String chash, String outcome, Boolean noManifest, String reapableAfter,
+                          String reattach, boolean attached, String owner, String ownerTitle, Integer position,
+                          String chunkTitle, String reason, Integer ownerRows, Integer ownerChunks) {}
+
+        /**
+         * The gc_audit row a restore was sourced from. {@code chashCount} is the row's full count and
+         * {@code chashesListed} how many the row actually lists; this call took the slice starting at
+         * {@code offset}, and {@code nextOffset} is where the next call starts, null when this slice reached the
+         * end of the list.
+         */
+        public record Source(long auditId, String operation, int chashCount, int chashesListed,
+                             int offset, Integer nextOffset) {}
+
+        private List<String> chashesWith(String outcome) {
+            return rows.stream().filter(r -> r.outcome().equals(outcome)).map(Row::chash).toList();
+        }
+
+        public List<String> restored() { return chashesWith("restored"); }
+        public List<String> wouldRestore() { return chashesWith("would_restore"); }
+        public List<String> present() { return chashesWith("present"); }
+        public List<String> dimConflict() { return chashesWith("dim_conflict"); }
+        public List<String> missing() { return chashesWith("missing"); }
+        /** The chashes whose manifest row this call wrote. */
+        public List<String> attached() { return rows.stream().filter(Row::attached).map(Row::chash).toList(); }
+        /** The chashes the reattach step judged with {@code verdict} (see {@link Row}). */
+        public List<String> reattachVerdict(String verdict) {
+            return rows.stream().filter(r -> verdict.equals(r.reattach())).map(Row::chash).toList();
+        }
+    }
+
+    /** The gc_audit operations whose chash list names chunks that were moved INTO a quarantine sibling. */
+    static final Set<String> QUARANTINING_OPERATIONS =
+        Set.of("reaper_quarantine", "gc_quarantine_orphans", "gc_quarantine_orphans_bounded");
+
+    /**
+     * Quarantine RESTORE (Sam's ruling 2026-10-01, RDR-192 Step 9 Day-2): moves the named chunks from the
+     * origin's {@code quarantine-} sibling back to the origin, with no manifest row required, in one statement
+     * under the exclusive sweep gate ({@code nexus.quarantine_restore_chunks}, vectors-025). A chash the origin
+     * already has is skipped, never overwritten; a chash that is nowhere reports missing; the restored row takes
+     * a fresh {@code last_written_at}, so it is not immediately reapable. {@code dryRun} classifies only: no gate,
+     * no move, no audit row. The statement bound is set here, as its own statement before the call, for the
+     * reason {@link #restoreRereferencedBounded} gives.
+     *
+     * <p><strong>The sibling.</strong> {@code quarantineCollection} null (what {@code POST /gc/quarantine-restore}
+     * always passes) means the engine finds the sibling or siblings itself ({@link #resolveQuarantineSiblings}), so
+     * the verb reaches a chunk wherever it was put, whatever the origin's catalog row says (nexus-wbfpw.55). A
+     * non-null name restricts the call to exactly that registered quarantine collection.
+     *
+     * @throws IllegalArgumentException an empty or oversized list, a malformed chash, an origin that is itself a
+     *         quarantine collection, or a sibling that is not a registered quarantine collection
+     */
+    public QuarantineRestoreOutcome quarantineRestore(String tenant, String originCollection,
+                                                       String quarantineCollection, List<String> chashes,
+                                                       String actor, boolean dryRun) {
+        return quarantineRestore(tenant, originCollection, quarantineCollection, chashes, actor, dryRun, true);
+    }
+
+    /**
+     * {@link #quarantineRestore(String, String, String, List, String, boolean)} with an explicit {@code reattach}
+     * choice. With {@code reattach} (the default) a chunk whose metadata names a document that is still live in
+     * the origin also gets that document's manifest row at the chunk's position, so it is visible to search and
+     * get again; a position the document's manifest already holds a different chunk at reports {@code superseded}
+     * and writes nothing. Without it the chunks move as bytes only, and the result still says what reattach would
+     * have done. See {@code vectors-025}'s header for the full rules.
+     */
+    public QuarantineRestoreOutcome quarantineRestore(String tenant, String originCollection,
+                                                       String quarantineCollection, List<String> chashes,
+                                                       String actor, boolean dryRun, boolean reattach) {
+        return quarantineRestore(tenant, originCollection, quarantineCollection, chashes, actor, dryRun, reattach,
+                                 null, null, null);
+    }
+
+    /**
+     * {@link #quarantineRestore} for the chashes a gc_audit row lists: the slice {@code [offset, offset + limit)}
+     * of the row's chash list. Page with {@code outcome.source().nextOffset()} while it is not null. The row must be
+     * this tenant's (RLS hides another tenant's, which reads as no such row), name {@code originCollection}, and
+     * be an operation that moved chunks into quarantine. A row that lists only a SAMPLE of what it moved
+     * ({@code details.chashes_is_sample}: every {@code gc_quarantine_orphans} row, which is how {@code nx index repo}
+     * and {@code nx t3 gc} quarantine) is refused, because restoring the sample would restore some of the chunks
+     * and silently leave the rest; select those from the sibling by {@code quarantined_at}
+     * ({@link #quarantineRestoreSelected}) instead. A {@code quarantine_restore} row lists chashes that moved the
+     * other way and is refused.
+     */
+    public QuarantineRestoreOutcome quarantineRestoreFromAudit(String tenant, String originCollection,
+                                                                String quarantineCollection, long auditId,
+                                                                int offset, int limit, String actor,
+                                                                boolean dryRun) {
+        return quarantineRestoreFromAudit(tenant, originCollection, quarantineCollection, auditId, offset, limit,
+                                          actor, dryRun, true);
+    }
+
+    /** {@link #quarantineRestoreFromAudit(String, String, String, long, int, int, String, boolean)} with an explicit reattach choice. */
+    public QuarantineRestoreOutcome quarantineRestoreFromAudit(String tenant, String originCollection,
+                                                                String quarantineCollection, long auditId,
+                                                                int offset, int limit, String actor,
+                                                                boolean dryRun, boolean reattach) {
+        if (offset < 0 || limit <= 0) {
+            throw new IllegalArgumentException("offset must be >= 0 and limit >= 1, got " + offset + "/" + limit);
+        }
+        var row = tenantScope.withTenant(tenant, ctx -> ctx
+            .select(GC_AUDIT.OPERATION, GC_AUDIT.COLLECTION, GC_AUDIT.CHASH_COUNT, GC_AUDIT.CHASHES, GC_AUDIT.DETAILS)
+            .from(GC_AUDIT)
+            .where(GC_AUDIT.TENANT_ID.eq(tenant).and(GC_AUDIT.ID.eq(auditId)))
+            .fetchOne());
+        if (row == null) {
+            throw new IllegalArgumentException("no gc_audit row " + auditId + " for this tenant");
+        }
+        String operation = row.value1();
+        if (!QUARANTINING_OPERATIONS.contains(operation)) {
+            throw new IllegalArgumentException("gc_audit row " + auditId + " is a " + operation
+                + " row, not one that moved chunks into quarantine (expected one of "
+                + new java.util.TreeSet<>(QUARANTINING_OPERATIONS) + ")");
+        }
+        if (!originCollection.equals(row.value2())) {
+            throw new IllegalArgumentException("gc_audit row " + auditId + " is for collection " + row.value2()
+                + ", not " + originCollection);
+        }
+        List<String> listed;
+        boolean isSample = false;
+        String movedInto = null;
+        try {
+            listed = MAPPER.readValue(row.value4().data(), new TypeReference<List<String>>() {});
+            if (row.value5() != null) {
+                var details = MAPPER.readTree(row.value5().data());
+                isSample = details.path("chashes_is_sample").asBoolean(false);
+                movedInto = details.hasNonNull("quarantine_collection")
+                    ? details.get("quarantine_collection").asText() : null;
+            }
+        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+            throw new IllegalStateException("gc_audit row " + auditId + " has an unreadable chash list", e);
+        }
+        if (isSample) {
+            throw new IllegalArgumentException("gc_audit row " + auditId + " (" + operation + ") lists only a sample of "
+                + "the " + row.value3() + " chashes it moved (chashes_is_sample), " + listed.size()
+                + " of them, so restoring from it would leave the rest in quarantine without saying so; "
+                + "select them from the quarantine collection by quarantined_at instead "
+                + "(quarantined_since / quarantined_before)");
+        }
+        // The audit row records where THIS move actually put the chunks, so it is the sibling of an audit restore:
+        // a caller that names another one (the explicit form; the route names none) is refused by name rather than
+        // discovered by a wall of "missing". A row that records no sibling falls back to the engine's own lookup.
+        if (movedInto != null && quarantineCollection != null && !movedInto.equals(quarantineCollection)) {
+            throw new IllegalArgumentException("gc_audit row " + auditId + " moved its chunks into " + movedInto
+                + ", not " + quarantineCollection + "; the quarantine collection of an audit restore is the one the "
+                + "row names");
+        }
+        int end = Math.min(listed.size(), offset + limit);
+        List<String> slice = offset >= listed.size() ? List.of() : listed.subList(offset, end);
+        Integer next = end < listed.size() ? end : null;
+        var source = new QuarantineRestoreOutcome.Source(auditId, operation, row.value3(), listed.size(),
+                                                         offset, next);
+        if (slice.isEmpty()) {
+            return new QuarantineRestoreOutcome(List.of(), null, dryRun, source, null);
+        }
+        String[] hex = canonicalChashes(slice);
+        List<String> siblings = resolveRestoreSiblings(tenant, originCollection,
+            quarantineCollection != null ? quarantineCollection : movedInto);
+        return restoreAcross(tenant, originCollection, siblings, hex, actor, dryRun, reattach, auditId, source, null);
+    }
+
+    /**
+     * {@link #quarantineRestore} for the chunks that sit in the origin's quarantine sibling and were quarantined
+     * from {@code originCollection} within a window: {@code quarantined_at} (the stamp the move writes into the
+     * chunk's metadata) at or after {@code since} and strictly before {@code before}, either bound optional but not
+     * both absent (restoring a whole sibling is something to ask for by naming a very early {@code since}, not
+     * something to get by leaving a flag off). Takes at most {@code limit} chashes past {@code afterChash} in chash
+     * order; page with {@code outcome.nextAfter()} while it is not null. This is the way back for a
+     * {@code gc_quarantine_orphans} move, whose gc_audit row carries only a sample.
+     *
+     * <p>The selection is a snapshot and the restore re-checks everything, so a chunk that left the sibling between
+     * the two simply reports missing.
+     */
+    public QuarantineRestoreOutcome quarantineRestoreSelected(String tenant, String originCollection,
+                                                               String quarantineCollection,
+                                                               java.time.Instant since, java.time.Instant before,
+                                                               String afterChash, int limit, String actor,
+                                                               boolean dryRun) {
+        return quarantineRestoreSelected(tenant, originCollection, quarantineCollection, since, before, afterChash,
+                                         limit, actor, dryRun, true);
+    }
+
+    /** {@link #quarantineRestoreSelected(String, String, String, java.time.Instant, java.time.Instant, String, int, String, boolean)} with an explicit reattach choice. */
+    public QuarantineRestoreOutcome quarantineRestoreSelected(String tenant, String originCollection,
+                                                               String quarantineCollection,
+                                                               java.time.Instant since, java.time.Instant before,
+                                                               String afterChash, int limit, String actor,
+                                                               boolean dryRun, boolean reattach) {
+        if (since == null && before == null) {
+            throw new IllegalArgumentException(
+                "name a quarantined_at window: quarantined_since and/or quarantined_before");
+        }
+        if (since != null && before != null && !since.isBefore(before)) {
+            throw new IllegalArgumentException("quarantined_since must be before quarantined_before, got "
+                + since + " / " + before);
+        }
+        if (limit <= 0 || limit > MAX_QUARANTINE_RESTORE_CHASHES) {
+            throw new IllegalArgumentException("limit must be 1 to " + MAX_QUARANTINE_RESTORE_CHASHES + ", got " + limit);
+        }
+        List<String> siblings = resolveRestoreSiblings(tenant, originCollection, quarantineCollection);
+        String after = afterChash == null ? null
+            : dev.nexus.service.db.Chash.requireCanonical(afterChash, "after_chash");
+
+        Field<String> stampText = DSL.jsonbGetAttributeAsText(CHUNKS.METADATA, "quarantined_at");
+        // A stamp that is not a timestamp (never written by the engine or the client) reads null here rather than
+        // failing the cast for every row of the collection, and so is never selected.
+        Field<java.time.OffsetDateTime> stamp = DSL.when(
+                stampText.likeRegex("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+(Z|[+-][0-9:]+)$"),
+                stampText.cast(SQLDataType.TIMESTAMPWITHTIMEZONE))
+            .else_(DSL.castNull(SQLDataType.TIMESTAMPWITHTIMEZONE));
+        org.jooq.Condition win = DSL.noCondition();
+        if (since != null) win = win.and(stamp.ge(since.atOffset(java.time.ZoneOffset.UTC)));
+        if (before != null) win = win.and(stamp.lt(before.atOffset(java.time.ZoneOffset.UTC)));
+        final org.jooq.Condition window = win;
+        Field<String> originStamp = DSL.jsonbGetAttributeAsText(CHUNKS.METADATA, "origin_collection");
+        org.jooq.Condition fromThisOrigin = originStamp.isNull().or(originStamp.eq(originCollection));
+        org.jooq.Condition past = after == null
+            ? DSL.noCondition() : CHUNKS.CHASH.gt(dev.nexus.service.db.Chash.fromHex(after).toBytes());
+        if (siblings.isEmpty()) {
+            return new QuarantineRestoreOutcome(List.of(), null, dryRun, null, null, List.of(), siblings);
+        }
+        // Distinct chashes in order: the same chunk can sit in two siblings (the reaper's and a client's), and the
+        // cursor pages by chash, so a chash is selected once however many siblings hold it.
+        List<String> selected = tenantScope.withTenant(tenant, ctx ->
+            ctx.select(ChashHex.hex(CHUNKS.CHASH))
+               .from(CHUNKS)
+               .where(CHUNKS.TENANT_ID.eq(tenant).and(CHUNKS.COLLECTION.in(siblings)))
+               .and(fromThisOrigin).and(window).and(past)
+               .groupBy(CHUNKS.CHASH)
+               .orderBy(CHUNKS.CHASH)
+               .limit(limit)
+               .fetch(r -> r.value1()));
+        if (selected.isEmpty()) {
+            return new QuarantineRestoreOutcome(List.of(), null, dryRun, null, null, List.of(), siblings);
+        }
+        String next = selected.size() == limit ? selected.get(selected.size() - 1) : null;
+        var out = restoreAcross(tenant, originCollection, siblings, canonicalChashes(selected), actor, dryRun,
+                                reattach, null, null, null);
+        return new QuarantineRestoreOutcome(out.rows(), out.auditId(), dryRun, null, next, out.auditIds(),
+                                            out.quarantineCollections());
+    }
+
+    /** The origin of a restore: a registered, live, non-quarantine collection, never a bare name. */
+    private void checkRestoreOrigin(String tenant, String originCollection) {
+        if (originCollection == null || originCollection.isBlank() || originCollection.startsWith("quarantine-")) {
+            throw new IllegalArgumentException("the origin collection must be a non-quarantine collection, got: "
+                + originCollection + " (name the collection the chunks came from, not its quarantine- sibling)");
+        }
+        // The origin is the registered catalog row, never a name: an origin that is gone fails loud here. It must
+        // be live, the only state the reaper visits; restoring into a dormant or disputed collection would put
+        // chunks where nothing is looking after them.
+        var origin = CollectionRegistry.lookup(tenantScope, tenant, originCollection);
+        if (!"live".equals(origin.lifecycleState())) {
+            throw new IllegalArgumentException(originCollection + " is not a live collection (lifecycle_state="
+                + origin.lifecycleState() + "); a restore goes into a live collection");
+        }
+    }
+
+    /** A sibling a caller named: a registered quarantine collection. */
+    private void checkRestoreSibling(String tenant, String quarantineCollection) {
+        if (quarantineCollection == null || !quarantineCollection.startsWith("quarantine-")) {
+            throw new IllegalArgumentException("the quarantine collection must be a quarantine- sibling, got: "
+                + quarantineCollection);
+        }
+        var sibling = CollectionRegistry.lookup(tenantScope, tenant, quarantineCollection);
+        if (!"quarantine".equals(sibling.lifecycleState())) {
+            throw new IllegalArgumentException(quarantineCollection + " is not a quarantine collection (lifecycle_state="
+                + sibling.lifecycleState() + ")");
+        }
+    }
+
+    /**
+     * The quarantine siblings a restore into {@code originCollection} looks in. {@code named} is the sibling a
+     * caller (or an audit row) names, restricting the call to exactly that one; null means the engine finds them
+     * itself, via {@link #resolveQuarantineSiblings}. Either way the origin is checked first, so an origin that is
+     * gone or not live is refused before anything is looked up.
+     */
+    private List<String> resolveRestoreSiblings(String tenant, String originCollection, String named) {
+        checkRestoreOrigin(tenant, originCollection);
+        if (named != null) {
+            checkRestoreSibling(tenant, named);
+            return List.of(named);
+        }
+        return resolveQuarantineSiblings(tenant, originCollection);
+    }
+
+    /**
+     * Where chunks of {@code originCollection} may be quarantined, found by the engine and not by what a client
+     * derived (nexus-wbfpw.55, RDR-192 Phase 3 gate I-1). The reaper names its sibling from the collection's NAME
+     * ({@code quarantine-<name>}); the client's {@code nx index repo} names its from the catalog ROW; catalog-044
+     * rewrote {@code owner_id} on repo collections after chunks had been moved, so the two disagree in production
+     * and a client-derived name reaches nothing. So a sibling here is either
+     * <ul>
+     *   <li>the reaper's own name for the origin ({@code quarantine-} + the origin's name), when registered, or
+     *   <li>any registered quarantine collection of the tenant that holds at least one chunk whose
+     *       {@code origin_collection} tag names the origin (the tag the move writes into every chunk it takes,
+     *       never parsed out of the sibling's name).
+     * </ul>
+     * Two origins that share one sibling (what the row rule gave a slug collection and its conformant twin) both
+     * find it, and each restores only its own chunks, because the restore function matches the tag too. The
+     * reaper's own name comes first, the rest by name. Probed per registered quarantine collection, so the cost is
+     * the quarantined rows themselves, never the tenant's whole chunk table. Empty when nothing is quarantined from
+     * the origin.
+     */
+    public List<String> resolveQuarantineSiblings(String tenant, String originCollection) {
+        String reaperName = "quarantine-" + originCollection;
+        Field<String> originTag = DSL.jsonbGetAttributeAsText(CHUNKS.METADATA, "origin_collection");
+        List<String> found = tenantScope.withTenant(tenant, ctx ->
+            ctx.select(CATALOG_COLLECTIONS.NAME).from(CATALOG_COLLECTIONS)
+               .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)
+                   .and(CATALOG_COLLECTIONS.LIFECYCLE_STATE.eq("quarantine"))
+                   .and(CATALOG_COLLECTIONS.NAME.eq(reaperName).or(DSL.exists(
+                       DSL.selectOne().from(CHUNKS)
+                          .where(CHUNKS.TENANT_ID.eq(CATALOG_COLLECTIONS.TENANT_ID)
+                              .and(CHUNKS.COLLECTION.eq(CATALOG_COLLECTIONS.NAME))
+                              .and(originTag.eq(originCollection)))))))
+               .fetch(CATALOG_COLLECTIONS.NAME));
+        var ordered = new ArrayList<String>(found.size());
+        if (found.contains(reaperName)) ordered.add(reaperName);
+        found.stream().filter(n -> !n.equals(reaperName)).sorted().forEach(ordered::add);
+        return List.copyOf(ordered);
+    }
+
+    private static String[] canonicalChashes(List<String> chashes) {
+        if (chashes == null || chashes.isEmpty()) {
+            throw new IllegalArgumentException("at least one chash is required");
+        }
+        if (chashes.size() > MAX_QUARANTINE_RESTORE_CHASHES) {
+            throw new IllegalArgumentException("at most " + MAX_QUARANTINE_RESTORE_CHASHES
+                + " chashes per call, got " + chashes.size());
+        }
+        String[] hex = new String[chashes.size()];
+        for (int i = 0; i < hex.length; i++) {
+            hex[i] = dev.nexus.service.db.Chash.requireCanonical(chashes.get(i), "chashes[" + i + "]");
+        }
+        return hex;
+    }
+
+    private QuarantineRestoreOutcome quarantineRestore(String tenant, String originCollection,
+                                                        String quarantineCollection, List<String> chashes,
+                                                        String actor, boolean dryRun, boolean reattach,
+                                                        Long sourceAuditId,
+                                                        QuarantineRestoreOutcome.Source source, String nextAfter) {
+        String[] hex = canonicalChashes(chashes);
+        List<String> siblings = resolveRestoreSiblings(tenant, originCollection, quarantineCollection);
+        return restoreAcross(tenant, originCollection, siblings, hex, actor, dryRun, reattach, sourceAuditId, source,
+                             nextAfter);
+    }
+
+    /**
+     * Runs the restore statement against each sibling in turn for the chashes still unresolved. A chash another
+     * sibling had already restored, or that the origin already holds, is final and is not asked about again; one
+     * that reads {@code missing} goes on to the next sibling. Each sibling that moved or attached something writes
+     * its own {@code quarantine_restore} gc_audit row (the statement is per sibling, and so is the row). With no
+     * sibling every chash reads missing.
+     *
+     * <p>Each sibling is its OWN transaction, so the call as a whole is not atomic. A lock or statement bound that
+     * trips on a later sibling leaves the earlier ones committed; the {@link QuarantineRestoreBusyException} then
+     * carries their audit ids and chashes, and the same call sent again finishes the rest (a chash already restored
+     * reads {@code present}).
+     */
+    private QuarantineRestoreOutcome restoreAcross(String tenant, String originCollection, List<String> siblings,
+                                                    String[] hex, String actor, boolean dryRun, boolean reattach,
+                                                    Long sourceAuditId, QuarantineRestoreOutcome.Source source,
+                                                    String nextAfter) {
+        var byChash = new java.util.LinkedHashMap<String, QuarantineRestoreOutcome.Row>();
+        for (String h : hex) byChash.putIfAbsent(h, missingRow(h));
+        var auditIds = new ArrayList<Long>();
+        List<String> pending = new ArrayList<>(byChash.keySet());
+        for (String sibling : siblings) {
+            if (pending.isEmpty()) break;
+            org.jooq.Result<?> rows;
+            try {
+                rows = restoreRows(tenant, originCollection, sibling, pending.toArray(String[]::new), actor, dryRun,
+                                   reattach, sourceAuditId);
+            } catch (QuarantineRestoreBusyException busy) {
+                // Each sibling is its own transaction, so a trip here leaves the earlier siblings committed. Say so:
+                // the caller reports "nothing moved" only when that is true of the whole call.
+                if (auditIds.isEmpty()) throw busy;
+                throw busy.withProgress(auditIds, byChash.values().stream()
+                    .filter(row -> "restored".equals(row.outcome()) || row.attached())
+                    .map(QuarantineRestoreOutcome.Row::chash).toList());
+            }
+            Long auditId = null;
+            for (var r : rows) {
+                var reapable = r.get(QUARANTINE_RESTORE_CHUNKS.R_REAPABLE_AFTER);
+                byChash.put(r.get(QUARANTINE_RESTORE_CHUNKS.R_CHASH), new QuarantineRestoreOutcome.Row(
+                    r.get(QUARANTINE_RESTORE_CHUNKS.R_CHASH),
+                    r.get(QUARANTINE_RESTORE_CHUNKS.R_OUTCOME), r.get(QUARANTINE_RESTORE_CHUNKS.R_NO_MANIFEST),
+                    reapable == null ? null : reapable.toInstant().toString(),
+                    r.get(QUARANTINE_RESTORE_CHUNKS.R_REATTACH),
+                    Boolean.TRUE.equals(r.get(QUARANTINE_RESTORE_CHUNKS.R_ATTACHED)),
+                    r.get(QUARANTINE_RESTORE_CHUNKS.R_OWNER), r.get(QUARANTINE_RESTORE_CHUNKS.R_OWNER_TITLE),
+                    r.get(QUARANTINE_RESTORE_CHUNKS.R_POSITION), r.get(QUARANTINE_RESTORE_CHUNKS.R_CHUNK_TITLE),
+                    r.get(QUARANTINE_RESTORE_CHUNKS.R_REASON), r.get(QUARANTINE_RESTORE_CHUNKS.R_OWNER_ROWS),
+                    r.get(QUARANTINE_RESTORE_CHUNKS.R_OWNER_CHUNKS)));
+                if (auditId == null) auditId = r.get(QUARANTINE_RESTORE_CHUNKS.R_AUDIT_ID);
+            }
+            if (auditId != null) auditIds.add(auditId);
+            pending = byChash.values().stream().filter(row -> "missing".equals(row.outcome()))
+                .map(QuarantineRestoreOutcome.Row::chash).toList();
+        }
+        return new QuarantineRestoreOutcome(List.copyOf(byChash.values()), auditIds.isEmpty() ? null : auditIds.get(0),
+                                            dryRun, source, nextAfter, List.copyOf(auditIds), List.copyOf(siblings));
+    }
+
+    private static QuarantineRestoreOutcome.Row missingRow(String chash) {
+        return new QuarantineRestoreOutcome.Row(chash, "missing", null, null, null, false, null, null, null, null,
+                                                null, null, null);
+    }
+
+    /**
+     * Runs {@code nexus.quarantine_restore_chunks} for ONE sibling and maps a held lock or a statement that ran past
+     * its bound to {@link QuarantineRestoreBusyException}. This statement is one transaction and it rolled back:
+     * nothing moved, nothing was attached, no audit row was written BY IT. ({@link #restoreAcross} adds what earlier
+     * siblings of the same call had committed.) That is a condition to retry, not a fault, so it gets its own typed
+     * answer instead of the opaque 500 an unmapped database error becomes.
+     */
+    private org.jooq.Result<?> restoreRows(String tenant, String originCollection, String quarantineCollection,
+                                            String[] hex, String actor, boolean dryRun, boolean reattach,
+                                            Long sourceAuditId) {
+        try {
+            return tenantScope.withTenant(tenant, ctx -> {
+                PgSession.setStatementAndLockBounds(ctx, PgSession.DEFAULT_GC_RESTORE_BOUNDED_STATEMENT_TIMEOUT_MS,
+                                                    PgSession.DEFAULT_GC_RESTORE_BOUNDED_LOCK_TIMEOUT_MS);
+                return ctx.selectFrom(QUARANTINE_RESTORE_CHUNKS.call(
+                        tenant, originCollection, quarantineCollection, hex, actor, sourceAuditId, dryRun, reattach))
+                   .fetch();
+            });
+        } catch (RuntimeException e) {
+            String state = sqlState(e);
+            if (LOCK_NOT_AVAILABLE.equals(state) || QUERY_CANCELED.equals(state)
+                    || DEADLOCK_DETECTED.equals(state)) {
+                throw new QuarantineRestoreBusyException(
+                    (LOCK_NOT_AVAILABLE.equals(state)
+                        ? "a manifest writer or an index run holds the collection's lock"
+                        : DEADLOCK_DETECTED.equals(state)
+                            ? "the restore deadlocked with another writer of the same rows (the reaper's expiry, "
+                              + "for one) and was chosen as the victim"
+                            : "the restore ran past its statement time bound"), e);
+            }
+            throw e;
+        }
+    }
+
+    private static final String LOCK_NOT_AVAILABLE = "55P03";
+    private static final String QUERY_CANCELED = "57014";
+    private static final String DEADLOCK_DETECTED = "40P01";
+
+    /** The SQLSTATE of the first {@link java.sql.SQLException} in {@code t}'s cause chain, or null. */
+    private static String sqlState(Throwable t) {
+        for (int depth = 0; t != null && depth < 32; depth++, t = t.getCause()) {
+            if (t instanceof java.sql.SQLException se && se.getSQLState() != null) return se.getSQLState();
+        }
+        return null;
+    }
+
+    /**
+     * The restore could not take a lock (or finish a statement) inside its bound, and that statement rolled back.
+     * A restore across several quarantine siblings runs one transaction per sibling (nexus-wbfpw.55), so what the
+     * call as a whole did depends on where it tripped: on the first sibling nothing moved, nothing was attached and
+     * no audit row was written; on a later one the earlier siblings had already committed, and
+     * {@link #somethingMoved()} says so, with the {@link #auditIds()} they wrote and the chashes they
+     * {@link #movedChashes() moved or attached}. Either way the same call may simply be sent again (a chash an earlier
+     * sibling restored reads {@code present}). The route answers it as a typed 503
+     * ({@code reason: quarantine_restore_busy}, {@code nothing_moved} true only when nothing had).
+     */
+    public static final class QuarantineRestoreBusyException extends RuntimeException {
+        /** Seconds a client should wait before sending the same call again. */
+        public static final int RETRY_AFTER_SECONDS = 5;
+
+        private final String reason;
+        private final List<Long> auditIds;
+        private final List<String> movedChashes;
+
+        /** The statement that tripped had nothing committed before it in this call. */
+        public QuarantineRestoreBusyException(String reason, Throwable cause) {
+            this(reason, cause, List.of(), List.of());
+        }
+
+        private QuarantineRestoreBusyException(String reason, Throwable cause, List<Long> auditIds,
+                                               List<String> movedChashes) {
+            super(auditIds.isEmpty()
+                ? reason + "; nothing was moved, attached or audited"
+                : reason + "; an earlier quarantine sibling of this call had already committed ("
+                    + movedChashes.size() + " chunk(s) restored or attached, gc_audit row(s) "
+                    + auditIds + "), the rest were not moved. Send the same call again: a chunk already "
+                    + "restored reads present", cause);
+            this.reason = reason;
+            this.auditIds = List.copyOf(auditIds);
+            this.movedChashes = List.copyOf(movedChashes);
+        }
+
+        /** This exception, carrying what earlier siblings of the same call had already committed. */
+        QuarantineRestoreBusyException withProgress(List<Long> auditIds, List<String> movedChashes) {
+            return new QuarantineRestoreBusyException(reason, getCause(), auditIds, movedChashes);
+        }
+
+        /** True when an earlier sibling of this call had already committed a move or an attach. */
+        public boolean somethingMoved() { return !auditIds.isEmpty(); }
+
+        /** The {@code quarantine_restore} gc_audit rows the earlier siblings wrote, in order; empty when none did. */
+        public List<Long> auditIds() { return auditIds; }
+
+        /** The chashes the earlier siblings restored or attached; empty when none did. */
+        public List<String> movedChashes() { return movedChashes; }
+    }
+
+    /**
      * RDR-191 Phase 1: hard-deletes quarantine rows past the grace window —
      * {@code chunk_quarantine.py}'s {@code expire_quarantine}, server-side.
      * Carries the nexus-mr89x safety floor verbatim (see the catalog-023
      * changelog header): {@code refused &gt; 0} means the floor fired and
      * nothing was deleted.
+     *
+     * <p>This is the CLIENT's expiry (nx index repo). Since vectors-026 it skips
+     * the rows the engine reaper moved (metadata {@code quarantined_by =
+     * engine-reaper} with {@code reaper_quarantined_at} equal to
+     * {@code quarantined_at}) and judges its floor on the untagged rows only,
+     * {@code force} included; the engine expires its own rows with
+     * {@code reaper_expire_quarantine} (vectors-024-2).
      */
     public record ExpireOutcome(long expired, long refused) {}
 
     public ExpireOutcome expireQuarantine(String tenant, String quarantineCollection, String originCollection,
                                            String cutoff, double floorFraction, int floorMinChunks,
                                            boolean force) {
+        return expireQuarantine(tenant, quarantineCollection, originCollection, cutoff, floorFraction,
+                                floorMinChunks, force, 0);
+    }
+
+    /**
+     * {@link #expireQuarantine(String, String, String, String, double, int, boolean)} with a statement bound
+     * ({@code statementTimeoutMs > 0}; 0 is no bound), set as its own statement before the call. The periodic
+     * reaper no longer calls this (it expires with {@code reaper_expire_quarantine}); the HTTP route passes 0.
+     */
+    public ExpireOutcome expireQuarantine(String tenant, String quarantineCollection, String originCollection,
+                                           String cutoff, double floorFraction, int floorMinChunks,
+                                           boolean force, int statementTimeoutMs) {
         int dim = dimForCollection(tenant, originCollection);
-        var rec = tenantScope.withTenant(tenant, ctx ->
-            ctx.selectFrom(GC_EXPIRE_QUARANTINE.call(
+        var rec = tenantScope.withTenant(tenant, ctx -> {
+            if (statementTimeoutMs > 0) {
+                PgSession.setStatementAndLockBounds(ctx, statementTimeoutMs, 2_000);
+            }
+            return ctx.selectFrom(GC_EXPIRE_QUARANTINE.call(
                     dim, tenant, quarantineCollection, originCollection, cutoff,
                     floorFraction, floorMinChunks, force))
-               .fetchOne());
+               .fetchOne();
+        });
         return new ExpireOutcome(rec.get(GC_EXPIRE_QUARANTINE.EXPIRED), rec.get(GC_EXPIRE_QUARANTINE.REFUSED));
     }
 
@@ -3762,9 +4580,9 @@ FROM scope s
      * @param deleteKeys top-level keys to strip from the stored value before the merge;
      *                   {@code null}/empty strips nothing
      */
-    private static org.jooq.Field<JSONB> mergeMetadata(org.jooq.Field<JSONB> current,
-                                                        org.jooq.Field<JSONB> incoming,
-                                                        List<String> deleteKeys) {
+    public static org.jooq.Field<JSONB> mergeMetadata(org.jooq.Field<JSONB> current,
+                                                       org.jooq.Field<JSONB> incoming,
+                                                       List<String> deleteKeys) {
         // jsonb_delete(jsonb, text) and jsonb_concat(jsonb, jsonb) are the pg_catalog
         // functions behind the `-` and `||` operators: typed calls, no SQL template
         // (RawSqlGateTest). The key is cast to text so the (jsonb, text) overload is
@@ -3801,6 +4619,11 @@ FROM scope s
         // Same NUL defense as upsertChunks: jsonb rejects NUL just like text does
         // (nexus-rvfwj, dual-review M2).
         org.jooq.Field<JSONB> incoming = DSL.val(JSONB.jsonb(toJson(sanitizeNulDeep(metadata))));
+        // nexus-wbfpw.43: deliberately does NOT set last_written_at. This is the
+        // update-metadata route (frecency stamps, post-extraction enrichment): it
+        // annotates a chunk that already exists and re-writes nothing the reaper
+        // cares about. Refreshing the grace window here would let any periodic
+        // stamp keep a chunk with no live owner alive forever.
         return ctx.update(ch.table())
                   .set(ch.metadata(), mergeMetadata(ch.metadata(), incoming, deleteKeys))
                   .where(ch.collection().eq(collection).and(ch.chash().eq(chash)))
@@ -3884,13 +4707,15 @@ FROM scope s
      * {@link #batchUpdateMetadata(DSLContext, DimTables.ChunkTable, String, List, List, List)}
      * with a write mode (nexus-w94eo / nexus-y8xjh). {@code deleteKeys == null} REPLACES
      * each row's metadata wholesale, the pre-nexus-w94eo semantics: that is the
-     * combined-write caller ({@code CombinedWriteService}), whose insert branch
-     * ({@code CatalogRepository.upsertManifestChunkVectors}) also still replaces, so its
+     * combined-write caller ({@code CombinedWriteService}) by default, whose insert branch
+     * ({@code CatalogRepository.upsertManifestChunkVectors}) also replaces, so its
      * metadata-only branch must too or a clean re-index could not clear a sparse key
      * through that endpoint. A non-null list (possibly empty) MERGES via {@link
      * #mergeMetadata}, stripping the named keys from the stored value first: that is
      * {@link #resolveNeedEmbedIdx}'s have-vector branch of {@code upsert-chunks}, which
-     * carries the request's {@code delete_keys}.
+     * carries the request's {@code delete_keys}, and the combined write under its
+     * {@code metadata_merge} mode (RDR-223, nexus-z0o2p.13), whose insert branch then
+     * merges with the same list in its own ON CONFLICT.
      */
     public static List<Integer> batchUpdateMetadata(DSLContext ctx, DimTables.ChunkTable ch,
                                                        String collection, List<String> ids,
@@ -3915,8 +4740,17 @@ FROM scope s
                 org.jooq.Field<JSONB> value = deleteKeys == null
                     ? incoming
                     : mergeMetadata(ch.metadata(), incoming, deleteKeys);
+                // nexus-wbfpw.43: this method has exactly two callers, both client
+                // re-writes of a chunk whose text did not change: the have-vector
+                // branch of upsert-chunks (resolveNeedEmbedIdx) and the combined
+                // write's identical-text branch. A re-index of an unchanged file is
+                // this UPDATE and nothing else, so it must restart reapable(c)'s
+                // grace window. Do NOT reuse this method for a maintenance or
+                // stamping update: it would keep dead chunks alive. Those go through
+                // updateMetadataOneRow, which deliberately leaves last_written_at alone.
                 queries.add(ctx.update(ch.table())
                                .set(ch.metadata(), value)
+                               .set(ch.lastWrittenAt(), DimTables.lastWrittenNow())
                                .where(ch.collection().eq(collection).and(ch.chash().eq(ids.get(idx)))));
             }
             int[] affectedCounts = ctx.batch(queries).execute();
@@ -4351,6 +5185,16 @@ FROM scope s
      * resolver level if needed; this method treats both as "no stored text."
      * RLS is enforced via {@link dev.nexus.service.db.TenantScope#withTenant} —
      * cross-tenant rows are invisible.
+     *
+     * <p><b>Physical read, deliberately not live(c)</b> (RDR-192 Phase 2 gate M7,
+     * nexus-wbfpw.35). Its one caller is the {@code chroma://<collection>/<chash>} URI
+     * resolver ({@link dev.nexus.service.resolver.ChromaSchemeHandler}), and a URI
+     * that names a chash is a content-addressed permalink: it resolves whatever is
+     * stored at that (collection, chash), including a chunk live(c) hides (no owner,
+     * or owners all tombstoned). Everything that serves a chunk by search, get or list
+     * goes through {@code liveChunksCondition} or a live(c) function instead.
+     * {@code Rdr192EngineLivenessMatrixIntegrationTest#fetchChunkText_readsPhysically_regardlessOfLiveness}
+     * pins this.
      *
      * @param tenant     the requesting tenant principal
      * @param collection four-segment conformant collection name (drives dim dispatch)

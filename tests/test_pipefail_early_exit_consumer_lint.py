@@ -982,14 +982,14 @@ _PIPEFAIL_EARLY_EXIT_EXEMPT: frozenset[tuple[str, tuple[str, ...]]] = frozenset(
         # (nexus-cm5km's smoke-probe extraction, nexus-9gaj7's launch-line
         # comment, nexus-ft04v.16's embed-probe growth); dropped, since
         # content anchors make retargeting unnecessary going forward.
-        ("service/native-smoke.sh", ('echo "version: $VER"', 'echo "$VER" | grep -qE \'"schema_changeset_count":[1-9]\' || { echo "FAIL: migration did not apply"; tail -40 /tmp/native-smoke-svc.log; exit 1; }')),
+        ("service/native-smoke.sh", ('echo "version: $VER"', 'echo "$VER" | grep -qE \'"schema_changeset_count":[1-9]\' || { echo "FAIL: migration did not apply"; tail -40 "$SMOKE_TMP/svc.log"; exit 1; }')),
         ("service/native-smoke.sh", ('PUT_RESP=$(curl -fsS "${T1[@]}" "${J[@]}" -X POST -d \'{"id":"native-smoke-t1-id","session_id":"native-smoke-t1","content":"t1 native smoke","tags":"","flagged":false}\' "$U/v1/t1/put")', 'echo "$PUT_RESP" | grep -q \'"id"\' && echo "  ok   t1/put (INSERT) -> 200" || { echo "  FAIL t1/put -> $PUT_RESP"; fail=1; }')),
         ("service/native-smoke.sh", ('rm -rf "$T1_PY_TMPDIR"', 'if echo "$PY_OUT" | grep -q "^OK$"; then')),
         ("service/native-smoke.sh", ('rm -rf "$T2_PY_TMPDIR"', 'if echo "$PY_OUT" | grep -q "^OK$"; then')),
-        ("service/native-smoke.sh", ('if grep -qiE "MissingReflection|NoClassDefFound|UnsatisfiedLink|NullPointerException" /tmp/native-smoke-svc.log; then', 'echo "FAIL: native runtime error in service log:"; grep -iE "MissingReflection|NoClassDefFound|UnsatisfiedLink|NullPointerException" /tmp/native-smoke-svc.log | head; fail=1')),
-        ("service/native-smoke.sh", ('else', 'echo "  FAIL voyage mode not selected:"; grep embedding_mode_banner /tmp/native-smoke-voyage.log | head; fail=1')),
-        ("service/native-smoke.sh", ('else', 'echo "  FAIL egress proxy not configured from HTTPS_PROXY:"; grep egress_proxy /tmp/native-smoke-voyage.log | head; fail=1')),
-        ("service/native-smoke.sh", ('if grep -qiE "MissingReflection|NoClassDefFound|UnsatisfiedLink|NullPointerException" /tmp/native-smoke-voyage.log; then', 'echo "FAIL: native runtime error in voyage-mode service log:"; grep -iE "MissingReflection|NoClassDefFound|UnsatisfiedLink|NullPointerException" /tmp/native-smoke-voyage.log | head; fail=1')),
+        ("service/native-smoke.sh", ('if grep -qiE "MissingReflection|NoClassDefFound|UnsatisfiedLink|NullPointerException" "$SMOKE_TMP/svc.log"; then', 'echo "FAIL: native runtime error in service log:"; grep -iE "MissingReflection|NoClassDefFound|UnsatisfiedLink|NullPointerException" "$SMOKE_TMP/svc.log" | head; fail=1')),
+        ("service/native-smoke.sh", ('else', 'echo "  FAIL voyage mode not selected:"; grep embedding_mode_banner "$SMOKE_TMP/voyage.log" | head; fail=1')),
+        ("service/native-smoke.sh", ('else', 'echo "  FAIL egress proxy not configured from HTTPS_PROXY:"; grep egress_proxy "$SMOKE_TMP/voyage.log" | head; fail=1')),
+        ("service/native-smoke.sh", ('if grep -qiE "MissingReflection|NoClassDefFound|UnsatisfiedLink|NullPointerException" "$SMOKE_TMP/voyage.log"; then', 'echo "FAIL: native runtime error in voyage-mode service log:"; grep -iE "MissingReflection|NoClassDefFound|UnsatisfiedLink|NullPointerException" "$SMOKE_TMP/voyage.log" | head; fail=1')),
         # --- service/linux-native-verify.sh:43 (1 entry): a GENUINE
         # FALSE POSITIVE, not a "needs live infra" deferral -- the
         # matched pipe (`native-image --version | head -1`) sits inside a

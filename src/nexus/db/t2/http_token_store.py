@@ -37,6 +37,7 @@ DEFAULT_TENANT: str = "default"
 # nexus-bgh2j: construction-time resolution gets the SAME evidence-gated
 # bounded wait as the nine mixin adopters (call sites unchanged — only
 # the alias target moved to the gated resolver).
+from nexus.db.client_identity import client_identity_headers
 from nexus.db.service_endpoint import (
     resolve_service_endpoint_with_evidence_gate as _resolve_endpoint,
 )
@@ -175,7 +176,12 @@ class HttpTokenStore:
         # indexer turned out not to construct stores per file at all
         # (T2 nexus_rdr/198-research-2, 198-research-3). Convert BEFORE
         # sharing, never after.
-        headers = {"X-Nexus-Tenant": self._tenant, "Content-Type": "application/json"}
+        headers = {
+            "X-Nexus-Tenant": self._tenant,
+            "Content-Type": "application/json",
+            # RDR-223 Phase 3 Step 2 (nexus-z0o2p.24): names this client to the engine's logs.
+            **client_identity_headers(),
+        }
         if self._auth_token:
             # nexus-xzeml: a mint-armed box may resolve no static bearer; an
             # empty "Bearer " is an illegal header value, so send none and let

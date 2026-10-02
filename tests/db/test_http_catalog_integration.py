@@ -1702,7 +1702,8 @@ class TestServiceModeIndexMVV:
         return repo
 
     def _run_service_mode_index_and_find_code_doc(
-        self, fixture_repo: Path, cat, service, monkeypatch: pytest.MonkeyPatch
+        self, fixture_repo: Path, cat, service, monkeypatch: pytest.MonkeyPatch,
+        pg_instance: dict,
     ):
         """Run the real indexer in service mode against the live stack; return the code
         CatalogEntry that THIS run registered.
@@ -1759,6 +1760,16 @@ class TestServiceModeIndexMVV:
         # this box's own live supervisor install can otherwise satisfy
         # that fallback with an unrelated real endpoint.
         from tests._catalog_fixture_ops import seed_manifest_chunks
+
+        # seed_manifest_chunks inserts with substrate SQL (RDR-223 P3.1), which
+        # by default targets the shared engine substrate's Postgres; this
+        # gate's engine runs on its own, so point the seed at that one.
+        import json as _json
+
+        monkeypatch.setenv("NX_CHUNK_SEED_PG", _json.dumps({
+            "pg_bin": str(_PSQL.parent), "pg_port": str(pg_instance["port"]),
+            "pg_user": pg_instance["user"], "pg_dbname": pg_instance["dbname"],
+        }))
 
         def _mirror_to_engine(collection: str, ids: list) -> None:
             if not ids:
@@ -1843,7 +1854,8 @@ class TestServiceModeIndexMVV:
         return code_docs[0]
 
     def test_service_mode_index_populates_catalog_and_manifest(
-        self, fixture_repo: Path, cat, service, monkeypatch: pytest.MonkeyPatch
+        self, fixture_repo: Path, cat, service, monkeypatch: pytest.MonkeyPatch,
+        pg_instance: dict,
     ) -> None:
         """End-to-end: service-mode `nx index repo` populates DOCUMENTS and the MANIFEST.
 
@@ -1856,7 +1868,7 @@ class TestServiceModeIndexMVV:
           ManifestRow return-type fixes).
         """
         code_doc = self._run_service_mode_index_and_find_code_doc(
-            fixture_repo, cat, service, monkeypatch
+            fixture_repo, cat, service, monkeypatch, pg_instance
         )
         assert str(code_doc.tumbler)  # registered with a real tumbler
 

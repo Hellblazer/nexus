@@ -133,6 +133,10 @@ _SERVICE_HOST: str = "127.0.0.1"
 _LIBC = _pdeathsig.LIBC
 _set_pdeathsig_preexec = _pdeathsig.set_pdeathsig_preexec
 
+#: The engine setting that decides whether an ownerless chunk write is refused or only logged
+#: (RDR-223 Phase 3 Step 2). An unset value means log-only on the engine; the local launch sets enforce.
+OWNERLESS_WRITE_MODE_ENV = "NX_OWNERLESS_WRITE_MODE"
+
 
 class HealthProbe(Enum):
     """Outcome of a ``GET /health`` probe (nexus-7f7gb).
@@ -1173,6 +1177,16 @@ class StorageServiceSupervisor:
         # dead supervisor never leaves an orphaned-but-serving service. NX_SERVICE_BIND
         # (container bind override, default loopback) passes through via env inheritance.
         env["NX_SERVICE_PARENT_DEATH_EXIT"] = "1"
+        # RDR-223 Phase 3 Step 2 (nexus-z0o2p.24): the engine treats an UNSET
+        # NX_OWNERLESS_WRITE_MODE as log-only (the first production deploy must not refuse
+        # anything until the would-refuse log has been read). A LOCAL install has no such
+        # soak: it runs the engine this client was built and gated with, so it enforces. Set
+        # explicitly, but never over an operator's own value (a log-only census run sets it).
+        # An EMPTY or blank value is "unset", not an operator's choice: the engine parses blank
+        # as log-only (OwnerlessWriteMode.parse), so setdefault, which keeps an empty string,
+        # would hand a local install a silently log-only engine.
+        if not env.get(OWNERLESS_WRITE_MODE_ENV, "").strip():
+            env[OWNERLESS_WRITE_MODE_ENV] = "enforce"
 
         # nexus-ogccs: pass the provisioner's resolved onnx_models root
         # explicitly so supervisor and engine agree by construction. The
@@ -1628,7 +1642,7 @@ class StorageServiceSupervisor:
             # Snapshot who holds the lock BEFORE releasing it, so the
             # WARNING below is a visible correction (who/since), not silent.
             select_sql = (
-                "SELECT lockedby, lockgranted FROM databasechangeloglock "
+                "SELECT lockedby, lockgranted FROM public.databasechangeloglock "
                 "WHERE id=1 AND locked=true;"
             )
             snap = _run_psql(psql_bin, host, port, dbname, user, password, select_sql)
@@ -1670,7 +1684,7 @@ class StorageServiceSupervisor:
                         terminated_pids.append(int(pid_field))
 
             release_sql = (
-                "UPDATE databasechangeloglock SET locked=false, lockgranted=NULL, "
+                "UPDATE public.databasechangeloglock SET locked=false, lockgranted=NULL, "
                 "lockedby=NULL WHERE id=1 AND locked=true;"
             )
             released = _run_psql(

@@ -64,8 +64,13 @@ def _seed_for_store_put(content: str, collection: str = "fixture-subject") -> No
 
 
 @pytest.fixture
-def inject_local_t3(local_t3: T3Database):
+def inject_local_t3(local_t3: T3Database, monkeypatch: pytest.MonkeyPatch):
     from nexus.mcp_infra import inject_t3
+    from tests._note_write_double import route_note_writes_to
+
+    # RDR-223 P2.2: the note write is one request to the engine; this test reads the
+    # chunk's attribution back from the fake T3, so the note is routed there.
+    route_note_writes_to(monkeypatch, local_t3)
     inject_t3(local_t3)
     yield local_t3
     inject_t3(None)

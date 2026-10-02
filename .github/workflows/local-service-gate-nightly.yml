@@ -21,8 +21,8 @@ name: Local-service functional gate (nightly)
 # idempotent ensure-databases probe against the real ChromaCloud tenant" — but
 # tests/e2e/local-service-gate.sh contains ZERO chroma references, so the probe
 # had already gone and three live credentials were being injected into a nightly
-# run that could not consume them. The repo secrets themselves can be deleted;
-# nothing reads them.
+# run that could not consume them. The three repo secrets were deleted on
+# 2026-09-30 (Sam); nothing read them.
 #
 # Guard bounds: the script's built-in FLOOR/BUDGET were pinned on macOS
 # (446 passed / 31 skipped). This runner differs (CA-3 bundle present
@@ -209,25 +209,19 @@ jobs:
           # legitimately-conditional skip and read as a regression. Lowered by
           # exactly the carve-out size, no more: the same rule that says
           # additions bump it consciously says removals do too.
-          NX_GATE_FLOOR: "452"
+          #
+          # 452 -> 449 (nexus-z0o2p.41, 2026-10-01): the mandatory_regression_pin carve-out
+          # DESELECTS 4 tests and they run in the next step instead. The floor counts PASSED, so it
+          # drops by the PASSES the carve-out removes, not by its size: 3 of the 4 passed here and the
+          # 4th (the branch-protection pin) skipped on the job token's 403, and a skip was never in
+          # the count. 452 - 3 = 449, which keeps the same 4 tests of slack under the reachable
+          # maximum (456 - 3 = 453) that 452 had under 456. The first cut said 448 (the full
+          # carve-out size), which was 5 under and widened the slack by one; the review (round 4
+          # verify, L2) caught it. Derivation, not a recount: the selection cannot be collected
+          # here (it needs this runner's VOYAGE_API_KEY and bundle). The first nightly after this
+          # lands prints the real `passed=N`; N - 449 above 4 means re-derive.
+          NX_GATE_FLOOR: "449"
           NX_GATE_BUDGET: "25"
-          # nexus-f6qzj (Sam, 2026-08-20: "grant it the read token"): the
-          # gate's `-m integration` run collects the `mandatory_regression_pin`
-          # tests, which authenticate via GITHUB_TOKEN / `gh auth token`
-          # (tests/scripts/test_check_release_ci_evidence.py::_live_github_token).
-          # Without a token all four skipped and the session-level
-          # non-vacuity guard reddened every nightly since the pins landed.
-          # Job token, read-only permissions above. MEASURED by dispatch
-          # (run 32401440865, 2026-08-20): 3/4 pins now run; the ONE residual
-          # is test_required_check_contexts_matches_live_branch_protection,
-          # which skips with `gh: Resource not accessible by integration
-          # (HTTP 403)` — reading branch protection needs push/admin access a
-          # job token cannot carry. Budget sized to EXACTLY that pin; any
-          # second skip still reds the run. Lifting it needs a PAT secret
-          # (Sam-provisioned), not a permissions line.
-          GITHUB_TOKEN: ${{ github.token }}
-          GH_TOKEN: ${{ github.token }}
-          NX_MANDATORY_PIN_SKIP_BUDGET: "1"
         run: |
           set -euo pipefail
           if [ -z "$VOYAGE_API_KEY" ]; then
@@ -235,6 +229,31 @@ jobs:
             exit 1
           fi
           tests/e2e/local-service-gate.sh
+
+      - name: Mandatory regression pins (nexus-z0o2p.41)
+        # The GitHub-backed `mandatory_regression_pin` tests used to run inside the gate above. The
+        # gate's fenced HOME never mirrors ~/.config/gh (tests/e2e/lib/fence_home.sh), so on a box that
+        # authenticates through `gh` they skipped and the zero skip budget reddened the gate; Sam
+        # moved them out (nexus-z0o2p.41). Here they run with the job token, outside the fence, in
+        # their own script, which also asserts they ran (exactly the declared count, at most the
+        # budget skipped, at least one run).
+        env:
+          # nexus-f6qzj (Sam, 2026-08-20: "grant it the read token"): the pins authenticate via
+          # GITHUB_TOKEN / `gh auth token`
+          # (tests/scripts/test_check_release_ci_evidence.py::_live_github_token).
+          # Job token, read-only permissions above. MEASURED by dispatch
+          # (run 32401440865, 2026-08-20): 3/4 pins run; the ONE residual
+          # is test_required_check_contexts_matches_live_branch_protection,
+          # which skips with `gh: Resource not accessible by integration
+          # (HTTP 403)` -- reading branch protection needs push/admin access a
+          # job token cannot carry. Budget sized to EXACTLY that pin; any
+          # second skip still reds the run. Lifting it needs a PAT secret
+          # (Sam-provisioned), not a permissions line. An operator box with
+          # real gh auth runs the same script at the default budget of 0.
+          GITHUB_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ github.token }}
+          NX_MANDATORY_PIN_SKIP_BUDGET: "1"
+        run: tests/e2e/mandatory-pins-gate.sh
 
       - name: Ungated integration files (nexus-5opzu)
         # The tests/db files with NO other automated gate anywhere —

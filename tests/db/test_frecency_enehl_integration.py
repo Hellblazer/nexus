@@ -250,6 +250,7 @@ def _svc_post(base_url: str, token: str, path: str, body: dict) -> dict:
 
 def test_frecency_service_mode_update_lands_in_service_chroma(
     local_service: tuple[str, str],
+    pg_instance: dict,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -258,7 +259,7 @@ def test_frecency_service_mode_update_lands_in_service_chroma(
     store-get — proves no split-brain and frecency is restored.
 
     Steps:
-      1. Seed a chunk directly via the service /v1/vectors/upsert-chunks.
+      1. Seed a chunk with substrate SQL (the route refuses an ownerless write from P3.2).
       2. Set up a registry pointing to that collection.
       3. Mock batch_frecency to return a known score for the test file.
       4. Run _run_index_frecency_only in service mode.
@@ -306,20 +307,26 @@ def test_frecency_service_mode_update_lands_in_service_chroma(
     # /v1/vectors/upsert-chunks directly via raw urllib -- bypassing
     # HttpVectorClient's own write_with_registration_retry self-heal
     # entirely. Register explicitly first.
+    #
+    # RDR-223 P3.1: the chunk goes in with substrate SQL into this suite's hermetic Postgres, not
+    # through /v1/vectors/upsert-chunks, which the engine refuses for an ownerless chash from
+    # Phase 3 (the owner row is written below, after the chunk, as the manifest FK requires).
+    # The vector is the engine's own embedding of the text, as the route computed it, because
+    # step 6 searches for the chunk.
     from nexus.corpus import ensure_collection_registered
+    from nexus.db.http_vector_client import HttpVectorClient
+    from tests.db._service_fixture import seed_chunks_sql
+
     ensure_collection_registered(collection)
-    upsert_result = _svc_post(base_url, token, "/v1/vectors/upsert-chunks", {
-        "collection": collection,
-        "ids": [chunk_id],
-        "documents": [chunk_text],
-        "metadatas": [{
+    [vector] = HttpVectorClient().embed_for_collection(collection, [chunk_text])
+    seed_chunks_sql(
+        pg_instance, "default", collection, [chunk_id], [chunk_text],
+        [{
             "frecency_score": 0.0,
             "doc_id": "1.1.1",
             "source_path": str(tmp_path / "test_file.py"),
         }],
-    })
-    assert upsert_result.get("upserted") == 1, (
-        f"Failed to seed chunk: {upsert_result}"
+        [list(vector)],
     )
 
     # RDR-192 Step 5 live(c) (nexus-wbfpw.10, engine fc99baac9): a T3 chunk
@@ -329,16 +336,15 @@ def test_frecency_service_mode_update_lands_in_service_chroma(
     # step 6 below, both of which this test depends on to prove the
     # frecency update actually landed. Register a real catalog document for
     # this chunk and write its manifest row the way the real indexing path
-    # does (mirrors tests/test_wbfpw2_client_liveness_matrix.py's
-    # catalog_store_hook_tracked + store_put_manifest_direct pattern),
+    # does (catalog_store_hook_tracked + seed_note_manifest),
     # rather than reading back via a maintenance include_non_live escape
     # hatch -- steps 5 and 6 exercise genuine retrieval, not just
     # write-acceptance, so the fixture must be a realistically-owned chunk.
     from nexus.catalog.store_hook import (
         catalog_store_hook_tracked,
         single_chunk_manifest_metadata,
-        store_put_manifest_direct,
     )
+    from tests._catalog_fixture_ops import seed_note_manifest
     manifest_doc_id, manifest_metadatas = single_chunk_manifest_metadata(chunk_text)
     assert manifest_doc_id == chunk_id
     owner_tumbler, _created = catalog_store_hook_tracked(
@@ -348,7 +354,7 @@ def test_frecency_service_mode_update_lands_in_service_chroma(
         "catalog document registration must succeed against the real "
         "engine substrate before the manifest write below"
     )
-    store_put_manifest_direct(owner_tumbler, manifest_metadatas, collection=collection)
+    seed_note_manifest(owner_tumbler, manifest_metadatas, collection=collection)
 
     # Step 2: Build a fake registry pointing to this collection
     fake_registry = MagicMock()

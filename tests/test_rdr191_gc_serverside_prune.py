@@ -35,15 +35,18 @@ from __future__ import annotations
 import hashlib
 from unittest.mock import patch
 
-import pytest
+from tests._chunk_seed import seed_chunks_direct
+from tests._reapable_age import age_chunks_past_grace
 
-pytestmark = [pytest.mark.integration]
+# Not integration-marked (nexus-wbfpw.38): the substrate provisions itself,
+# and CI's default selection must run this RDR-192 pin.
 
 
 def _seed(cat, db, coll_name: str, owner: str, n_live: int, n_orphan: int):
-    """Real server-embedded chunks (n_live + n_orphan) in *coll_name*, a
-    manifest row for exactly the first *n_live* chashes. Returns
-    (chashes, live_chashes, orphan_chashes)."""
+    """Chunks (n_live + n_orphan) in *coll_name*, inserted with substrate SQL
+    because the engine refuses an ownerless upsert-chunks write from RDR-223
+    Phase 3 on, and a manifest row for exactly the first *n_live* chashes.
+    Returns (chashes, live_chashes, orphan_chashes)."""
     ids: list[str] = []
     chashes: list[str] = []
     docs: list[str] = []
@@ -56,9 +59,12 @@ def _seed(cat, db, coll_name: str, owner: str, n_live: int, n_orphan: int):
         docs.append(text)
         metas.append({"chunk_text_hash": chash, "title": f"gcq_probe_{i}.py:1-1"})
 
-    db.upsert_chunks_with_embeddings(
-        coll_name, ids=ids, documents=docs, embeddings=[], metadatas=metas,
+    seed_chunks_direct(
+        coll_name, ids=ids, documents=docs, metadatas=metas,
     )
+    # gc selects with reapable(c), which honours a 30 day grace window (RDR-192 Step 8):
+    # these orphans stand for chunks orphaned long ago.
+    age_chunks_past_grace(coll_name)
 
     live_chashes = chashes[:n_live]
     for i in range(n_live):

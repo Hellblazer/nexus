@@ -135,6 +135,11 @@ def test_sqlite_error_carries_the_stranded_install_redirect(
     assert "nx upgrade" in msg
     assert "migration-capable" in msg
     assert "nx doctor" in msg
+    # The hop runs against a LOCAL engine: the message names the config key and the
+    # runbook, not just the env var (nexus-z0o2p.27 round 2).
+    assert "service_url" in msg
+    assert "migration-runbook.md" in msg
+    assert "or export NX_LOCAL=1" not in msg
 
 
 def test_per_store_sqlite_error_names_the_per_store_key(

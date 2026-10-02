@@ -284,7 +284,8 @@ class RawSqlGateTest {
         // avoidance discipline as the rawVectorFetch removal immediately above.
         Map.entry("PgVectorRepository.java", Map.of(
             // SANCTIONED RAW (nexus-wbfpw.4, round-1 fix, code-review Important):
-            // manifestLessCensus executes MANIFEST_LESS_CENSUS_SQL, the PUBLISHED
+            // manifestLessCensusBounded (the four-argument manifestLessCensus delegates to it with no
+            // statement bound, nexus-2x9xa) executes MANIFEST_LESS_CENSUS_SQL, the PUBLISHED
             // statement scripts/sql/manifest_less_census.sql and
             // ManifestLessCensusSqlIdentityTest pin byte-identical to it -- same
             // precedent as ChashRepository#lookup/PROBE_SQL above. EMPTY statement
@@ -298,9 +299,9 @@ class RawSqlGateTest {
             // asked to close -- see the round-1 fix's own report for why the
             // RAW_EXECUTE regex is not widened to close the _SQL-suffix blind spot
             // in this change). Registered here anyway so a future LITERAL raw call
-            // accidentally added to manifestLessCensus is caught immediately
+            // accidentally added to manifestLessCensusBounded is caught immediately
             // rather than silently inheriting a blanket excuse.
-            "manifestLessCensus", Map.of())),
+            "manifestLessCensusBounded", Map.of())),
         Map.entry("CatalogRepository.java", Map.of(
             // nexus-zrcj7: acquireIndexRunLock's entry (SANCTIONED RAW,
             // nexus-5xn3k.2 — pg_advisory_xact_lock over a hashtext'd
@@ -868,8 +869,8 @@ class RawSqlGateTest {
      * <p>Standalone census tool recipe (nexus-cbo4a, unchanged in shape from
      * batch 2/7): copy this file into a scratch package dir, strip the one
      * {@code @Test} method referencing {@code dev.nexus.service.vectors.
-     * DimTables}/{@code ChashSqlIdioms} (the only two real jOOQ-generated
-     * classes this file's otherwise-pure regex/string logic touches) down to
+     * DimTables} (the one real jOOQ-generated
+     * class this file's otherwise-pure regex/string logic touches) down to
      * an empty body, compile it alongside a small {@code Census.java} in the
      * SAME package that calls {@link #scan} directly (package-private,
      * visible within {@code dev.nexus.service.db}) against
@@ -912,7 +913,7 @@ class RawSqlGateTest {
         Map.entry("dev/nexus/service/CatalogGcAuditProducersTest.java", 10),
         Map.entry("dev/nexus/service/CatalogHandlerManifestEnvelopeTest.java", 1),
         Map.entry("dev/nexus/service/CatalogHandlerRenameTest.java", 4),
-        Map.entry("dev/nexus/service/CatalogManifestSweepRepositoryTest.java", 23),
+        Map.entry("dev/nexus/service/CatalogManifestSweepRepositoryTest.java", 17),
         Map.entry("dev/nexus/service/CatalogPurgeTrashPopulationParityTest.java", 7),
         Map.entry("dev/nexus/service/CatalogPurgeTrashTest.java", 13),
         Map.entry("dev/nexus/service/CatalogPurgeTrashVacuumTest.java", 5),
@@ -939,7 +940,7 @@ class RawSqlGateTest {
         // call sites (one per function family, each looped over the three
         // dims) -- no jOOQ codegen for GRANT EXECUTE.
         Map.entry("dev/nexus/service/CrossPreviewRepositoryTest.java", 4),
-        Map.entry("dev/nexus/service/DenseGateScanBudgetIntegrationTest.java", 7),
+        Map.entry("dev/nexus/service/DenseGateScanBudgetIntegrationTest.java", 5),
         // nexus-brxnp: new file at 3 -- metadataField's raw executeQuery
         // (metadata->>key read, no jOOQ codegen shortcut used here) and
         // insertManifestRowBypassingFk's two ALTER TABLE DROP/ADD CONSTRAINT
@@ -1076,7 +1077,10 @@ class RawSqlGateTest {
         // .from(DSL.role(...))) -- the same revoke/grant shape
         // ScratchSchemaLiquibaseTest and StagingPromoteOpsIntegrationTest
         // already use. Net raw-SQL count for this file: unchanged, still 55.
-        Map.entry("dev/nexus/service/SchemaMigratorIntegrationTest.java", 55),
+        // nexus-q81g7: 55 -> 52. The new role-named-for-a-schema tests share ONE
+        // multi-statement bootstrapRole helper (1 site), and the jl08t aged-box
+        // test's own 5-statement role bootstrap now calls it too (-5 +1 +1 ALTER).
+        Map.entry("dev/nexus/service/SchemaMigratorIntegrationTest.java", 52),
         // nexus-cbo4a batch 9 item 0: 32 -> 37 (extension-ownership-transfer dance);
         // round 2 (T2 nexus/critique-nexus-cbo4a-batch-9-gated IMPORTANT 1): 37 -> 39 (REVOKE EXECUTE ... FROM PUBLIC hardening on both SECURITY DEFINER mirrors).
         // nexus-cbo4a batch 12: 39 -> 16. Converted seed inserts (10 sites: HEAD-schema
@@ -1118,7 +1122,15 @@ class RawSqlGateTest {
         Map.entry("dev/nexus/service/SharedCluster.java", 3),
         Map.entry("dev/nexus/service/SharedClusterMutationFalsifyTest.java", 1),
         Map.entry("dev/nexus/service/SharedDatabaseHandle.java", 1),
-        Map.entry("dev/nexus/service/StagingHandlerJourneyTest.java", 4),
+        // nexus-z0o2p.27: CREATE ROLE nexus_diag (jOOQ's open-source DSL has no CREATE ROLE) and the
+        // three-statement GRANT / ALTER DEFAULT PRIVILEGES the old grants-nexus-diag-3 gave that role
+        // on schema staging; both set up the aged shape the drop is walked over. Fix round 3: +12, all of
+        // them st.execute calls with a string-literal first argument (what RAW_EXECUTE matches): the ops_dba
+        // role and its two ALTER TABLE ... OWNER TO (3), the staging_nonowner role with its GRANT, SET ROLE and
+        // RESET ROLE (4), and the NOSUPERUSER owner provisioning, CREATE ROLE / GRANT, the
+        // SchemaMigratorIntegrationTest idiom (5). The st.execute(body) and st.execute(rollback) calls take a
+        // variable, not a literal, so they are not counted.
+        Map.entry("dev/nexus/service/StagingSchemaDropLiquibaseTest.java", 14),
         Map.entry("dev/nexus/service/Taxonomy010BackfillDirectIntegrationTest.java", 19),
         Map.entry("dev/nexus/service/Taxonomy011ForeignOwnedDiagViewTest.java", 11),
         Map.entry("dev/nexus/service/Taxonomy014TenantFkRepointTest.java", 11),
@@ -1150,7 +1162,7 @@ class RawSqlGateTest {
         Map.entry("dev/nexus/service/TaxonomyUnassignedChashesRepositoryTest.java", 10),
         Map.entry("dev/nexus/service/TenantPoolingIsolationTest.java", 1),
         Map.entry("dev/nexus/service/Tk070P6aTtlDaysCountedDeleteTest.java", 2),
-        Map.entry("dev/nexus/service/Tk070P6bTtlDaysCountedUpdateTest.java", 2),
+        Map.entry("dev/nexus/service/Tk070P6bTtlDaysCountedUpdateTest.java", 1),
         Map.entry("dev/nexus/service/TokenBoundaryAdversarialTest.java", 2),
         Map.entry("dev/nexus/service/TokenStoreDataTokenSweepTest.java", 1),
         Map.entry("dev/nexus/service/TopicsDocCountDeadlockConcurrencyTest.java", 8),
@@ -1242,6 +1254,14 @@ class RawSqlGateTest {
         // test (production code never sets this GUC, so its value is read directly to
         // report it, per the coordinator's explicit request).
         Map.entry("dev/nexus/service/vectors/ChunkLiveOwnersMsz9iScaleIntegrationTest.java", 5),
+        // RDR-192 live(c) recall, extended (beads nexus-wbfpw.44/.45/.46): 2 raw-JDBC sites.
+        // rawRows(String, Object...) is the one raw read -- the exact oracle
+        // (ORDER BY (distance) + 0, so HNSW cannot serve it), its EXPLAIN and the live-count
+        // pin; the same OPERATOR(nexus.<=>)/set-returning-function-in-EXISTS reason as the
+        // sibling entries above. The production statement itself goes through the generated
+        // plain_search_<dim> function table, not raw SQL. The second site is the opt-in
+        // REINDEX (maintenance syntax with no jOOQ form).
+        Map.entry("dev/nexus/service/vectors/ChunkLiveOwnersRecallExtendedIntegrationTest.java", 2),
         Map.entry("dev/nexus/service/vectors/ManifestLessCensusNotesGuardIndexPlanShapeTest.java", 5),
         Map.entry("dev/nexus/service/vectors/PgVectorEmbedSkipIntegrationTest.java", 3),
         Map.entry("dev/nexus/service/vectors/PgVectorMetadataBatchParityTest.java", 4),
@@ -1341,7 +1361,7 @@ class RawSqlGateTest {
      * the INSERT — never set to a literal SQL NULL — when the argument is
      * {@code null}) where the site needs those columns.
      * {@code ServiceTokenScopeBackfillTest}/{@code
-     * ServiceTokenSchemaLiquibaseTest}/{@code ReferenceOnlyChunkUpsertTest}
+     * ServiceTokenSchemaLiquibaseTest}/{@code ReferenceOnlyChunkUpsertTest} (now {@code ReferenceOnlyChunkReadPathTest})
      * insert LITERAL (fake) hashes to assert on later, not a real token's
      * sha256 -- these convert onto the typed jOOQ {@code SERVICE_TOKENS} DSL
      * DIRECTLY instead, since {@code seedServiceToken} always hashes its
@@ -1349,7 +1369,7 @@ class RawSqlGateTest {
      * #TEST_TREE_RAW_SQL_CEILING} entries are removed outright (145 -&gt; 133
      * files): {@code Bge768ServiceEmbedIntegrationTest}, {@code
      * ChashVectorConcurrencyTest}, {@code PgVectorUpsertDeadlockTest}, {@code
-     * ReferenceOnlyChunkUpsertTest}, {@code RerankStageIntegrationTest},
+     * ReferenceOnlyChunkUpsertTest} (since renamed {@code ReferenceOnlyChunkReadPathTest}), {@code RerankStageIntegrationTest},
      * {@code VectorHandlerAspectFieldGuardTest}, {@code
      * VectorHandlerCombinedQueryModelGuardTest}, {@code
      * VectorHandlerEmbeddingModeTest}, {@code VectorHandlerTokenUsageTest},
@@ -1637,6 +1657,14 @@ class RawSqlGateTest {
     // nexus-brxnp fix round: 977 -> 979 (+2: CatalogGcAuditProducersTest.java
     // 8 -> 10, insertManifestRowBypassingFk's two ALTER TABLE execute() calls
     // -- see that entry's own comment).
+    // nexus-wbfpw.44/.45/.46: 979 -> 981 (+2: new test file
+    // vectors/ChunkLiveOwnersRecallExtendedIntegrationTest.java at 2 -- see that entry's own
+    // comment).
+    // nexus-z0o2p.27: 976 -> 967 against develop (StagingHandlerJourneyTest.java 4 removed,
+    // CatalogManifestSweepRepositoryTest.java 23 -> 17, Tk070P6bTtlDaysCountedUpdateTest.java
+    // 2 -> 1, new StagingSchemaDropLiquibaseTest.java at 2). Set to the measured per-file sum
+    // so the ceiling carries no slack.
+    // nexus-z0o2p.27 fix round 3: 967 -> 979 (+12, StagingSchemaDropLiquibaseTest.java 2 -> 14, see its entry).
     private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 979;
 
     /**
@@ -2121,9 +2149,7 @@ class RawSqlGateTest {
      * old canary's question, {@code ChashSqlIdioms.CHUNK_TABLES.hasSize(3)})
      * is no longer the drift signal a future dimension change needs. The
      * live signal is {@code DimTables.CHUNKS}/{@code CENTROIDS} map size
-     * (pinned below); {@code CHUNK_TABLES} itself is now a single-element
-     * list (see its own javadoc) kept only as a checklist artifact, not a
-     * per-dim table-name enumeration.
+     * (pinned below).
      *
      * <p>nexus-o8dil.41 comment 7 (2026-08-13, [22416] Part-9-derived
      * finding): the OLD checklist covered ~16 sites against ~110 real
@@ -2175,11 +2201,10 @@ class RawSqlGateTest {
      *       CatalogRepository.PURGE_VACUUM_TABLES} (three-way lockstep with
      *       the grants channel below, {@code
      *       TenantScopeVacuumMaintainGrantParityTest}); {@code
-     *       ChashCensus.KNOWN_INVENTORY} / {@code TEXT_EXCLUSIONS}; {@code
      *       CatalogRepository.MANIFEST_DIMS} / {@code
      *       COLLECTION_SCOPED_TABLES}; every {@code DIMS}/{@code
-     *       VALID_DIMS} array (ChashRepository, TaxonomyCentroidRepository,
-     *       RekeyOps, StagingPromoteOps) — each of these is a loop-over-dim
+     *       VALID_DIMS} array (ChashRepository, TaxonomyCentroidRepository)
+     *       — each of these is a loop-over-dim
      *       site that, post-unification, MUST filter on {@code
      *       embedding_<dim> IS NOT NULL} rather than relying on table
      *       membership to scope a dim (the D1 hazard: looping the SAME
@@ -2206,21 +2231,41 @@ class RawSqlGateTest {
                 + "column choice, not a table identity")
             .hasSize(3);
         assertThat(dev.nexus.service.vectors.DimTables.CENTROIDS).hasSize(3);
-        assertThat(ChashSqlIdioms.CHUNK_TABLES)
-            .as("the unified chunks table is ONE physical table regardless of how "
-                + "many dims it carries — this list stays single-element; a change "
-                + "here means the unification itself was reverted, not that a dim "
-                + "was added")
-            .containsExactly(dev.nexus.service.vectors.DimTables.CHUNKS_TABLE_NAME);
+        // (A third assertion pinned ChashSqlIdioms.CHUNK_TABLES as a single-element list.
+        // That class was deleted with the staging routes at nexus-z0o2p.27, its last
+        // callers gone; DimTables.CHUNKS_TABLE_NAME is the one table-name authority.)
     }
 
     // ── nexus-4okz4 increment 5, item (c): mechanical THE INLINE-VS-BIND
     //    RULE enforcement (critic Significant #2, T2 critique-4okz4-
     //    increment3-2026-08-09 [21952]) ──
+    //
+    // THE INLINE-VS-BIND RULE (nexus-4okz4 increment 3). Its canonical text lived in
+    // ChashSqlIdioms' class javadoc until that class was deleted with the staging routes
+    // (nexus-z0o2p.27); it is carried here, beside the gate that enforces it.
+    //
+    // DSL.val(literal) mints an INDEPENDENT bind placeholder (a fresh $N) per TEXTUAL
+    // occurrence of the rendered SQL, even when every occurrence comes from the SAME Java
+    // Field object reused across clauses. PostgreSQL validates SELECT DISTINCT ON (...)
+    // against its leading ORDER BY expressions, and validates GROUP BY coverage of any
+    // ungrouped SELECT-list expression, by PARSE-TREE STRUCTURAL EQUALITY, evaluated
+    // BEFORE parameter binding. Two occurrences of the identical expression that differ
+    // only in which $N they bind are NOT recognised as equal, so PostgreSQL reports a
+    // DISTINCT-ON/ORDER-BY mismatch, or "column must appear in the GROUP BY clause", even
+    // though both placeholders bind the SAME value at execution time. A fragment used
+    // once per statement (a WHERE predicate, a SET target) never hits it; a fragment
+    // reused in two clauses that need structural matching does. The fix is DSL.inline(
+    // literal), which renders the (jOOQ-escaped) literal directly into the SQL text, so
+    // every occurrence is byte-for-byte identical. Safe ONLY for FIXED PROTOCOL
+    // CONSTANTS (encoding names such as "UTF8", "hex") hardcoded in the same file, never a
+    // value that could originate from a caller or user. Before composing a NEW
+    // multi-occurrence DSL statement from shared fragments, check whether a fragment
+    // embeds a DSL.val(...) literal; if it does and the same expression is needed twice,
+    // inline the literal locally. Do not rediscover this through a PostgreSQL error.
 
     /** Only a compile-time literal (string/char/numeric/boolean/null) is a
      * safe {@code DSL.inline(...)} argument per THE INLINE-VS-BIND RULE
-     * (ChashSqlIdioms.java class javadoc): fixed protocol constants
+     * (see the section header above): fixed protocol constants
      * hardcoded in-file, never caller/user-derived values. */
     private static final Pattern COMPILE_TIME_LITERAL = Pattern.compile(
         "^\"([^\"\\\\]|\\\\.)*\"$"
@@ -2320,8 +2365,8 @@ class RawSqlGateTest {
             if (!allowed) {
                 violations.add(fileName + ":" + line + "  DSL.inline(" + arg + ") -- argument "
                     + "is not a compile-time literal (THE INLINE-VS-BIND RULE requires only "
-                    + "fixed protocol constants ever be inlined -- ChashSqlIdioms.java class "
-                    + "javadoc); bind via DSL.val(...) instead, or add a scoped, justified "
+                    + "fixed protocol constants ever be inlined -- see the INLINE-VS-BIND "
+                    + "section header in RawSqlGateTest); bind via DSL.val(...) instead, or add a scoped, justified "
                     + "entry to INLINE_NONLITERAL_SANCTIONED if the value is PROVABLY "
                     + "injection-safe by construction despite not being a literal"
                     + (owner != null ? " [inside " + owner + ", but this exact text is not "
@@ -2351,7 +2396,7 @@ class RawSqlGateTest {
         assertThat(violations)
             .as("DSL.inline(...) call sites whose argument is not a compile-time literal — "
                 + "see this class's mechanical enforcement of THE INLINE-VS-BIND RULE "
-                + "(ChashSqlIdioms.java class javadoc): only fixed protocol constants "
+                + "(section header in RawSqlGateTest): only fixed protocol constants "
                 + "hardcoded in-file may ever be inlined")
             .isEmpty();
     }

@@ -9,12 +9,11 @@ vector search, accumulating one orphan per content-changing re-put
 (measured live: nexus/nexus-bb6n2-measurement-2026-09-23, 97 orphans
 across 4 knowledge__* collections on the production tenant).
 
-Root cause (confirmed by reading ``store_put_manifest_direct``): it
-bypasses the generic ``fire_batch``/``manifest_write_batch_hook`` chain
-entirely (a deliberate, load-bearing, fail-loud path — see its own
-docstring), so the indexer's ``mcp_infra._sweep_superseded_vectors``
-mechanism, which reaps this exact class for ``atomic_manifest_replace``
-callers that DO go through that chain, was never reachable from here.
+The split write this pinned (a chunk put, a direct manifest write, a client reap) is
+gone (RDR-223, nexus-z0o2p.32). Every note writer now sends the note as one
+``write_manifest_many`` request with ``sweep`` on, and the engine sweeps what the
+supersede dropped under the same NOT EXISTS guard; these tests pin that sweep
+through ``note_write.write_note``.
 
 Real engine substrate (``t2_service_env``) is required, matching the
 sibling nexus-rnqbw suite this borrows its seeding shape from — the
@@ -25,9 +24,8 @@ trip, not something an in-memory double can stand in for.
 """
 from __future__ import annotations
 
-import pytest
-
-pytestmark = [pytest.mark.integration]
+# Not integration-marked (nexus-wbfpw.38): the substrate provisions itself,
+# and CI's default selection must run this RDR-192 pin.
 
 _COLLECTION = "knowledge__bb6n2-supersede-reap__bge-base-en-v15-768__v1"
 
@@ -43,16 +41,15 @@ def _chunk_present(client, chash: str) -> bool:
 
 
 def _put_note(client, *, title: str, content: str) -> tuple[str, list[str]]:
-    """Real store_put-shaped write (single or split), mirroring the MCP
-    ``store_put`` tool's own call sequence: catalog reconcile, T3
-    chunk(s), then the direct manifest write under test. Returns
-    ``(tumbler, chashes)``.
+    """Real store_put-shaped write (single or split): catalog reconcile, then
+    the one-request note writer. Returns ``(tumbler, chashes)``.
     """
+    from nexus.catalog.note_write import write_note
     from nexus.catalog.store_hook import (
         catalog_store_hook_tracked,
+        note_content_hash,
         note_manifest_metadata,
         note_pieces,
-        store_put_manifest_direct,
     )
 
     pieces = note_pieces(content, _COLLECTION)
@@ -61,15 +58,10 @@ def _put_note(client, *, title: str, content: str) -> tuple[str, list[str]]:
         title=title, doc_id=doc_id, collection_name=_COLLECTION,
     )
     chashes = [m["chunk_text_hash"] for m in manifest_metadatas]
-    for piece, chash, meta in zip(pieces, chashes, manifest_metadatas):
-        client.upsert_chunks_with_embeddings(
-            _COLLECTION,
-            ids=[chash],
-            documents=[piece],
-            embeddings=[],
-            metadatas=[{"title": title, "chunk_text_hash": chash, "doc_id": tumbler}],
-        )
-    store_put_manifest_direct(tumbler, manifest_metadatas, collection=_COLLECTION)
+    write_note(
+        catalog_doc_id=tumbler, collection=_COLLECTION, pieces=pieces, title=title,
+        content_hash=note_content_hash(content, manifest_metadatas),
+    )
     return tumbler, chashes
 
 
@@ -140,7 +132,9 @@ def test_supersede_still_protects_a_chunk_genuinely_shared_with_a_live_document(
     # Now supersede the FIRST note with different content — its own
     # manifest drops shared_chash, but the permanent twin's manifest
     # still references it.
-    _put_note(client, title="bb6n2-twin-note", content="bb6n2 superseding content, unrelated text")
+    _put_note(
+        client, title="bb6n2-twin-note", content="bb6n2 superseding content, unrelated text",
+    )
 
     assert _chunk_present(client, shared_chash), (
         "a chunk another LIVE document's manifest still references must "

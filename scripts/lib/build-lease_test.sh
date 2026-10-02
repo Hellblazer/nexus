@@ -9,6 +9,13 @@
 # Mirrors tests/e2e/lib/lock_test.sh's ok/bad/PASS/FAIL convention.
 set -u -o pipefail
 
+# The suite builds its own fake repo and assumes the lease root is that repo's
+# own. An inherited NX_BUILD_LEASE_ROOT (CI's lease step exports it, and so
+# does the documented hand-run setup) would point the lease at the shared
+# root: the lease dir is then missing from the fake repo, and the fixture
+# leases this suite writes would land in the shared root.
+unset NX_BUILD_LEASE_ROOT NX_SUITE_LEASE_WAIT NX_SUITE_LEASE_HELD_BY
+
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/build_lease_test.XXXXXX")"
@@ -334,6 +341,34 @@ if [[ ! -d "$repo9/service/.build-lease/service" ]]; then
     ok "lease released after both wrappers finished"
 else
     bad "lease dir still present after both wrappers finished"
+fi
+
+# ── Test 10: a process group owned by ANOTHER USER is alive, not stale ───
+# Two users sharing one lease root (NX_BUILD_LEASE_ROOT) is the shape: the
+# holder's `kill -0 -- -PGID` gets EPERM from the second user, which must
+# read as "still held" (build-lease.sh header), not as a dead group.
+echo "Test 10: a group the caller cannot signal (another user's) counts as alive"
+repo10="$WORKDIR/repo10"
+_fake_repo "$repo10"
+if [[ "$(id -u)" -eq 0 ]]; then
+    ok "skipped: root can signal every group (no EPERM to observe)"
+else
+    # Not group 1: `kill -0 -- -1` is "every process" (pid -1), which always succeeds.
+    foreign_pgid="$(ps -axo pgid=,user= 2>/dev/null | awk '$2 == "root" && $1 > 1 { print $1; exit }')"
+    if [[ -z "$foreign_pgid" ]]; then
+        bad "found no root-owned process group to probe with: the test has no evidence (it must not pass vacuously)"
+    else
+        if bash -c "source '$repo10/scripts/lib/build-lease.sh'; _build_lease_group_alive $foreign_pgid"; then
+            ok "root's group $foreign_pgid reads as alive from an unprivileged user (EPERM is not ESRCH)"
+        else
+            bad "root's group $foreign_pgid read as DEAD: a second user would reclaim a live build lease"
+        fi
+    fi
+    if bash -c "source '$repo10/scripts/lib/build-lease.sh'; _build_lease_group_alive 3999999"; then
+        bad "a group that does not exist read as alive"
+    else
+        ok "a group that does not exist still reads as dead"
+    fi
 fi
 
 echo

@@ -885,15 +885,12 @@ def cite_cmd(
         # RDR-086 gate finding S2: empty-index short-circuit.
         if _chash_index_is_empty(chash_index):
             # RDR-187 (nexus-piwya.4): in service mode "empty" now means the
-            # store holds no chunks at all — backfill-hash is moot there
-            # (the router it backfilled is retired; index content instead).
-            # The backfill hint remains correct only for pre-migration
-            # SQLite installs whose router was never populated.
+            # store holds no chunks at all (the router is retired, and the
+            # chunk id is the chash, so there is nothing to backfill): index
+            # content.
             click.echo(
                 "no chash-addressable chunks found — index content first "
-                "(nx index …). On a pre-migration (SQLite) install an "
-                "unpopulated chash_index can instead be reconciled with "
-                "'nx collection backfill-hash --all'.",
+                "(nx index …).",
                 err=True,
             )
             raise click.exceptions.Exit(2)

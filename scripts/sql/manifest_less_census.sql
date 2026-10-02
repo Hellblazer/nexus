@@ -184,6 +184,12 @@
 --   row_kind = 'scope' -- exactly 1 row, ALWAYS present: scope_chunk_total
 --                         is the count of every chunk nexus.chunks holds
 --                         for this tenant+collection, any manifest state;
+--                         one per chunk, however many own-collection
+--                         manifest rows name its chash (identical text
+--                         shared by several documents is ONE chunk row
+--                         named by one manifest row per document; the
+--                         own-manifest test is an anti-join, never a join,
+--                         so it cannot multiply base rows; nexus-wbfpw.60);
 --                         chash, bucket, bucket_total and both owner
 --                         columns are NULL.
 WITH live_notes AS MATERIALIZED (
@@ -210,7 +216,13 @@ rev_candidates AS MATERIALIZED (
 base AS (
     SELECT
         encode(c.chash, 'hex') AS chash,
-        (own_manifest.chash IS NULL) AS is_manifest_less,
+        NOT EXISTS (
+            SELECT 1
+            FROM nexus.catalog_document_chunks own_manifest
+            WHERE own_manifest.tenant_id = c.tenant_id
+              AND own_manifest.collection = c.collection
+              AND own_manifest.chash = c.chash
+        ) AS is_manifest_less,
         owner.tumbler AS owner_tumbler,
         owner.path AS owner_path,
         CASE
@@ -222,10 +234,6 @@ base AS (
             ELSE 'unclassified'
         END AS bucket
     FROM nexus.chunks c
-    LEFT JOIN nexus.catalog_document_chunks own_manifest
-           ON own_manifest.tenant_id = c.tenant_id
-          AND own_manifest.collection = c.collection
-          AND own_manifest.chash = c.chash
     LEFT JOIN nexus.catalog_documents fwd_owner
            ON fwd_owner.tenant_id = c.tenant_id
           AND fwd_owner.tumbler = COALESCE(

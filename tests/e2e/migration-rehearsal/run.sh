@@ -148,7 +148,7 @@ RELEASE_PROPS="service/src/main/resources/META-INF/nexus/release.properties"
 # suite when it drifts. Following the old wording blocked the 7.6.0 release
 # battery (2026-08-10). A prose comment that contradicts a mechanical test
 # loses to the test.
-COLD_TAG="${NEXUS_SERVICE_TAG:-engine-service-v0.1.142}"
+COLD_TAG="${NEXUS_SERVICE_TAG:-engine-service-v0.1.143}"
 # nexus-cfgo9: the PACKAGE-UPGRADE leg's starting point — a REAL, already
 # published PyPI release + the engine tag ITS OWN PINNED_SERVICE_TAG
 # resolves to (see CHANGELOG.md's "[6.9.0]" entry: "Ships with (and
@@ -333,6 +333,82 @@ fi
   echo "FATAL: PREV_ENGINE_TAG ($PREV_ENGINE_TAG) already equals the current REQUIRED_ENGINE_VERSION ($GUIDED_STAMP_VERSION) — the package-upgrade scenario is no longer 'stale'. Bump NEXUS_PREV_RELEASE/NEXUS_PREV_ENGINE_TAG in run.sh to the release immediately before this floor bump." >&2
   exit 2
 }
+
+# nexus-z0o2p.42: --candidate-migration's SEED release. Stages 1-3 (provision the
+# floor engine, populate it) must run a RELEASED client, the way production was
+# seeded: a working-tree client newer than the floor refuses it
+# (EngineOlderThanClientError on every write) the moment develop carries a
+# client half the floor lacks. So the leg installs this release from real PyPI,
+# populates through it, and upgrades to the working-tree wheel only at the
+# candidate swap (the real user upgrade path).
+# SELECTOR (round 2): the newest release `v*` TAG whose pinned engine is <= the
+# floor this leg provisions (GUIDED_STAMP_VERSION) AND whose version is <= the
+# tree's own version. Two shapes, both legitimate:
+#   * pin == floor: the ordinary case (the tree is a release or a successor of
+#     one that pins the floor).
+#   * pin <  floor: a PAIRED client release, where the tree's floor is the NEW
+#     engine that no published release pins yet. An older client against a
+#     newer engine is the safe direction (the refusal this leg exists to avoid
+#     is a NEWER client against an OLDER engine), so it is selected with a loud
+#     notice. The leg installs the floor engine EXPLICITLY (install-binary of
+#     the floor tag) whatever the seed client pins, and asserts the sidecar and
+#     /version still name the floor after population, so an older client that
+#     quietly converged the engine down would fail the leg rather than seed the
+#     wrong engine.
+# A release newer than the tree is never selected (a backport tree must not be
+# seeded by a client newer than itself); the tree's own version IS allowed.
+# NEXUS_SEED_RELEASE overrides the derivation and must obey the same two rules,
+# failing loud otherwise.
+# These are git TAGS, not a PyPI listing: a tag whose publish failed is
+# selectable and fails loud at Stage 1's `uv tool install`; a box that never
+# fetched tags (a fetch-only remote) sees none, which the FATAL names.
+# (No pipe into head/grep -q here: under pipefail the producer's SIGPIPE can be promoted over the consumer's status.)
+_ver_le() { local sorted; sorted="$(sort -V <<<"$1"$'\n'"$2")"; [ "${sorted%%$'\n'*}" = "$1" ]; }
+_self_version() { sed -n '/^version = "/{s/^version = "\(.*\)"/\1/;p;q;}' "$(pwd)/pyproject.toml" 2>/dev/null; }
+# Echoes the reason when $1 does NOT qualify as a seed; echoes nothing when it does.
+_seed_refusal() {
+  local rel="$1" self pin
+  self="$(_self_version)"
+  [ -n "$self" ] || { echo "cannot read the tree's own version from pyproject.toml"; return 0; }
+  pin="$(_engine_tuple_at_release "$rel" || true)"
+  [ -n "$pin" ] || { echo "v$rel has no readable REQUIRED_ENGINE_VERSION (is the tag fetched? try: git fetch --tags)"; return 0; }
+  _ver_le "$pin" "$GUIDED_STAMP_VERSION" \
+    || { echo "v$rel pins engine $pin, NEWER than the floor $GUIDED_STAMP_VERSION this leg provisions (a client newer than its engine is the refusal this seed exists to avoid)"; return 0; }
+  _ver_le "$rel" "$self" \
+    || { echo "v$rel is newer than this tree's own version $self (a backport tree must not be seeded by a client newer than itself)"; return 0; }
+  return 0
+}
+_seed_qualifies() { [ -z "$(_seed_refusal "$1")" ]; }
+_derive_seed_release() {
+  local rel
+  for rel in $(git tag -l 'v[0-9]*' \
+               | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sed 's/^v//' | sort -V \
+               | awk '{a[NR]=$0} END{for(i=NR;i>=1;i--) print a[i]}'); do
+    if _seed_qualifies "$rel"; then printf '%s' "$rel"; return 0; fi
+  done
+  echo "FATAL: cannot derive the --candidate-migration SEED release — no release tag has a pinned engine <= the floor $GUIDED_STAMP_VERSION and a version <= this tree's own. Release tags may be unfetched on this box: run 'git fetch --tags' and retry, or set NEXUS_SEED_RELEASE to a released conexus version that qualifies." >&2
+  exit 2
+}
+SEED_RELEASE=""
+SEED_PIN=""
+if [ "$CANDIDATE_MIGRATION" = 1 ]; then
+  if [ -n "${NEXUS_SEED_RELEASE:-}" ]; then
+    SEED_RELEASE="$NEXUS_SEED_RELEASE"
+    _seed_why="$(_seed_refusal "$SEED_RELEASE")"
+    [ -z "$_seed_why" ] || {
+      echo "FATAL: NEXUS_SEED_RELEASE=$SEED_RELEASE refused: $_seed_why (nexus-z0o2p.42)." >&2
+      exit 2
+    }
+  else
+    SEED_RELEASE="$(_derive_seed_release)" || exit 2
+  fi
+  [ -n "$SEED_RELEASE" ] || exit 2
+  SEED_PIN="$(_engine_tuple_at_release "$SEED_RELEASE" || true)"
+  echo "[run.sh] --candidate-migration SEED release: conexus==$SEED_RELEASE (pins engine-service-v$SEED_PIN; seeds through the floor engine-service-v$GUIDED_STAMP_VERSION, then upgrades to the working-tree wheel at the swap)"
+  if [ "$SEED_PIN" != "$GUIDED_STAMP_VERSION" ]; then
+    echo "[run.sh] NOTE: seed release v$SEED_RELEASE pins engine $SEED_PIN, BELOW the floor $GUIDED_STAMP_VERSION (no published release pins the floor yet: a paired client release). An older client against a newer engine is the safe direction; the leg installs the floor engine explicitly and asserts it is still the floor after population."
+  fi
+fi
 
 # --guided: stamp release.properties so the native binary reports a release
 # version (an unstamped build -> release_version=null -> version-pin fail-closes,
@@ -550,13 +626,16 @@ fi
 # the same host.
 # shellcheck source=../lib/lock.sh disable=SC1091
 source "$SCRIPT_DIR/../lib/lock.sh"
-LOCKDIR="/tmp/nexus-e2e-locks/migration-rehearsal.lock"
+# Per-USER root (nexus-c6lsu): the uid is in the name, because /tmp is shared across Unix users and a
+# root another user created is unwritable here (lock_acquire fails). $(id -u) is context-independent,
+# so the cross-context contention above is unchanged for one user.
+LOCKDIR="/tmp/nexus-e2e-locks-$(id -u)/migration-rehearsal.lock"
 # nexus-mfage: an --artifacts invocation mutates none of the machine-global
 # resources the lock above serializes (no dist/, no service/target, no fixed
 # image tag, no shared docker config), so it takes a PER-LEG lock instead:
 # two different legs run side by side; two invocations of the same leg
 # still serialize (same per-leg image tag).
-[ -n "$ARTIFACTS" ] && LOCKDIR="/tmp/nexus-e2e-locks/migration-rehearsal-${LEG}.lock"
+[ -n "$ARTIFACTS" ] && LOCKDIR="/tmp/nexus-e2e-locks-$(id -u)/migration-rehearsal-${LEG}.lock"
 mkdir -p "$(dirname "$LOCKDIR")"
 lock_acquire "$LOCKDIR" || exit 1
 # nexus-c00dw: the native-build docker step further down writes
@@ -1003,11 +1082,12 @@ elif [ "$CANDIDATE_MIGRATION" = 1 ]; then
   # nexus-z0ylb: BOTH staging shapes at once — the native/ candidate (like
   # the default/--shakeout path: the locally-built, now-stamped -Ob binary,
   # hand-swapped in at Stage 4) AND the working-tree
-  # wheel under its own subdirectory (like --era-hop/--package-upgrade:
-  # installed via `uv tool install` at runtime, never
-  # colliding with anything `pip`/`uv` resolves from real PyPI — this leg
-  # installs no OLD release at all, so there is nothing to collide with,
-  # but the own-subdirectory convention is kept for staging uniformity).
+  # wheel under its own subdirectory (like --era-hop/--package-upgrade).
+  # nexus-z0o2p.42: the wheel is NOT the seeding client any more — Stages 1-3
+  # run the RELEASED conexus ($SEED_RELEASE, real PyPI) that pins the floor, and
+  # this wheel is installed over it only at the candidate swap (the real user
+  # upgrade path). The own-subdirectory convention keeps it from colliding
+  # with that PyPI install.
   # No engine artifact of any kind travels in — the FLOOR engine is
   # acquired for real by `nx daemon service install-binary` inside the
   # container (Stage 2).
@@ -1017,6 +1097,7 @@ elif [ "$CANDIDATE_MIGRATION" = 1 ]; then
   cp "$HERE/Dockerfile.candidate-migration" "$STAGE/Dockerfile"
   cp "$HERE/rehearse_candidate_migration.sh" "$STAGE/"
   cp -R "$HERE/lib" "$STAGE/lib"   # assert_build_ref.sh (nexus-mfage)
+  cp "$HERE/../lib/candidate_engine.py" "$STAGE/lib/"   # nexus-0kmat: end-of-journey engine read
 else
   # The native binary travels into the image, and ONLY the binary: a RELEASE
   # binary (engine-service-v*) is self-contained with no .so siblings, and
@@ -1039,6 +1120,10 @@ else
   # was undefined in-container for its whole life; caught 2026-08-10).
   # Directory-wide on both sides so a second lib does not repeat it.
   cp -R "$HERE/lib" "$STAGE/lib"
+  # nexus-0kmat: the in-container end-of-journey engine read (identity + ownerless
+  # refusals) is the SAME stdlib module the host gates run; it lives in tests/e2e/lib,
+  # not this directory's lib/, so it is copied in by name.
+  cp "$HERE/../lib/candidate_engine.py" "$STAGE/lib/"
 fi
 
 # Docker Desktop's credsStore=desktop helper can't reach a locked login keychain
@@ -1082,6 +1167,18 @@ BUILD_ARGS=()
 docker build ${BUILD_ARGS[@]+"${BUILD_ARGS[@]}"} -f "$STAGE/Dockerfile" -t "$IMAGE" "$STAGE"
 
 run_env=(-e "WITH_CLOUD=$WITH_CLOUD" -e "COMPREHENSIVE=$COMPREHENSIVE" -e "STRESS=$STRESS")
+# nexus-0kmat: cut mode reaches the in-container journeys that run the candidate
+# NATIVE binary (--shakeout, --candidate-migration): they read the engine's
+# ownerless-write counters and log at the end and, in cut mode, fail on a refusal
+# or on an engine that is not the staged candidate. Forwarded only when set, so a
+# plain run is byte-identical to before; never forwarded for a leg that stages no
+# candidate engine (its container would read the published engine, which has no
+# ownership check, and cut mode would then fail it for the wrong reason).
+if [ "$SHAKEOUT" = 1 ] || [ "$CANDIDATE_MIGRATION" = 1 ]; then
+  [ -z "${NX_CUT_MODE:-}" ] || run_env+=(-e "NX_CUT_MODE=$NX_CUT_MODE")
+  [ -z "${NX_CANDIDATE_EXPECT_OWNERLESS_MODE:-}" ] || \
+    run_env+=(-e "NX_CANDIDATE_EXPECT_OWNERLESS_MODE=$NX_CANDIDATE_EXPECT_OWNERLESS_MODE")
+fi
 # nexus-h5olw follow-on: every rehearsal install is a throwaway, never a
 # user; the anonymous install ping must not count it. `-e` is the only
 # channel into the container, so the opt-out is forwarded here, not exported.
@@ -1134,6 +1231,10 @@ if [ "$STRANDED" = 1 ]; then
 fi
 if [ "$CANDIDATE_MIGRATION" = 1 ]; then
   run_env+=(-e "FLOOR_VERSION=$GUIDED_STAMP_VERSION")
+  # nexus-z0o2p.42: the released client that seeds through the floor, and the
+  # uv HTTP timeout its PyPI install needs (same reason as --package-upgrade:
+  # this -e list is the only channel into the container).
+  run_env+=(-e "SEED_RELEASE=$SEED_RELEASE" -e "UV_HTTP_TIMEOUT=${UV_HTTP_TIMEOUT:-300}")
   # nexus-z0ylb: optional non-vacuity knob — when set, the leg asserts the
   # changeset delta EQUALS this count instead of merely reporting it. Only
   # forwarded when actually set (same "dead through the only documented

@@ -9,7 +9,10 @@
       - nexus.live_chunks view: anti-join over chunks_384/768/1024, no deleted_at exposed.
 
     EXPLAIN EVIDENCE (recorded against live production cluster, pgvector/pg17, tenant='default',
-    98k chunks, 2026-06-11; command run in a BEGIN…ROLLBACK transaction to avoid schema persistence):
+    98k chunks, 2026-06-11; command run in a BEGIN…ROLLBACK transaction to avoid schema persistence).
+    It describes the view AS CREATED HERE; vectors-019 later repointed nexus.live_chunks to
+    live(c) over nexus.chunk_live_owners, so the plan and the manifest-less short circuit below
+    are not what the view runs now:
 
       EXPLAIN (ANALYZE, BUFFERS) SELECT * FROM nexus.live_chunks WHERE tenant_id='default' LIMIT 10;
         Limit (cost=0.00..17.21 rows=1 width=1266) (actual time=0.361..0.361 rows=1 loops=1)
@@ -31,12 +34,13 @@
       - Purge = physical DELETE of catalog_documents WHERE deleted_at <= NOW() - older_than.
         fk-001 CASCADE then removes manifest/aspects/highlights/queue for those rows.
       - Orphan chunk sweep in purge_trash: a chunk is sweepable ONLY IF it has at least
-        one manifest row AND none of its manifest rows belong to a live doc. Manifest-less
-        chunks (MCP store_put / nx store put notes — no catalog_document_chunks rows) are
-        never swept. Contract: manifest-backed identity for notes is draft RDR-145 scope;
-        this arm is the safety contract until then.
-      - live_chunks view: a chunk is visible if it has NO manifest rows at all (note chunk)
-        OR has at least one live-doc manifest row. Same manifest-less-is-live contract.
+        one manifest row AND none of its manifest rows belong to a live doc. A chunk with no
+        manifest row in its own collection is never purge_trash's; it is the engine
+        reaper's (see CURRENT CONTRACT below).
+      - live_chunks view, AS CREATED HERE: a chunk is visible if it has NO manifest rows at
+        all OR has at least one live-doc manifest row. That "manifest-less is live" rule
+        was written for notes stored before they carried a manifest row (RDR-145). It is no
+        longer the contract (see CURRENT CONTRACT below).
       - purge_trash GUC guard: RAISES if nexus.tenant is unset — prevents unscoped
         cross-tenant purges even by superuser/BYPASSRLS callers.
       - document_trash guards AND deleted_at IS NULL — double-trash does not reset the
@@ -44,6 +48,33 @@
       - ZERO triggers: implemented as explicit function logic per Decision 6.
       - Function changesets use splitStatements="false" (one function per changeset)
         because Liquibase's semicolon splitter cannot parse dollar-quoted plpgsql bodies.
+
+    CURRENT CONTRACT (RDR-192). This paragraph was rewritten after the changesets below were
+    released, and only comment text outside every changeset changed, so no checksum moved.
+    Liveness is nexus.chunk_live_owners (vectors-018), the one predicate the search and get
+    paths read: a chunk is live only when a manifest row in its OWN collection names it and
+    that row's document is not tombstoned. A manifest-less chunk is not live: raw search and
+    get do not return it. Every note now gets a manifest row when it is stored (RDR-145,
+    nexus-b6enc), and the superseded chunk of a re-put is swept by the engine in the same
+    write_manifest_many request that replaces the manifest (RDR-223); a note re-put's client
+    sweeps nothing. The sweep keeps a chunk that another manifest row or a note identity
+    still names. The indexer's non-combined paths still run a client sweep
+    (mcp_infra.py _sweep_superseded_vectors and _sweep_superseded_vectors_many). Debris that
+    sweep leaves behind (a gate or statement timeout, a crashed multi-request index run) is
+    the engine reaper's. By default, once a chunk has had no owning manifest row for 30 days
+    (nexus.chunk_is_reapable, vectors-021) the hourly pass MOVES it to
+    quarantine-<collection>, tags it, and deletes it 14 days after the move
+    (nexus.reaper_expire_quarantine, vectors-024; docs/operations/engine-reaper.md). The
+    30 days, the hourly interval and the 14 days are defaults (ChunkReaper Settings;
+    NX_REAPER_QUARANTINE_RETENTION_DAYS sets the 14). The move is not unconditional: the pass
+    refuses a collection that fails the floor (a large reapable fraction) or the census (any
+    legacy-unmanifested chunk), and a genuine legacy note with no manifest row is never
+    collected. The reaper quarantines first, so nothing is deleted at once, and
+    nx t3 quarantine restore brings a chunk back within the retention window; the restored
+    chunk stays hidden from search and get unless a live owner exists or reattach writes one.
+    The SQL comment inside purge_trash's body
+    (changeset 5) and the text of changeset 6 still describe the rule as it stood when they
+    were released; the first is part of the checksummed SQL, so both are left as written.
 -->
 <databaseChangeLog
     xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
