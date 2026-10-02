@@ -139,7 +139,10 @@ def _t3_gc_candidate(runner: CliRunner, collection: str, chash: str) -> bool:
     verb's candidates ARE the engine's default-grace reapable listing; the row chunks are aged past
     that grace first (``age_chunks_past_grace``), and no window is passed (there is none to pass)."""
     result = runner.invoke(main, ["t3", "gc", "-c", collection, "--dry-run"])
-    assert result.exit_code == 0, result.output
+    # A dry run that names a refusal a real run would hit exits 1 (nexus-wbfpw.18 round 3) but still
+    # prints the listing: the candidacy read here is the listing, so accept that exit only when the
+    # output says it is a refusal, never a crash.
+    assert result.exit_code == 0 or "would REFUSE" in result.output, result.output
     return chash in result.output
 
 

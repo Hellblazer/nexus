@@ -189,6 +189,8 @@ def test_t3_gc_service_mode_real_client(tmp_path, runner, real_client, monkeypat
         if path == "/v1/vectors/gc/quarantine-orphans":
             return {"moved": 1, "sample": [{"chash": chash, "title": "t"}], "remaining": 0,
                     "row_limit": body.get("row_limit")}
+        if path == "/v1/vectors/gc/expire-quarantine":
+            return {"expired": 0, "refused": 0}
         raise AssertionError(f"unexpected path {path}")
 
     # Spec'd against the REAL service-mode catalog client so attributes it doesn't have raise
@@ -217,8 +219,9 @@ def test_t3_gc_service_mode_real_client(tmp_path, runner, real_client, monkeypat
         "/v1/vectors/reapable",
         "/v1/vectors/manifest-less-census",  # re-read immediately before the move
         "/v1/vectors/gc/quarantine-orphans",
+        "/v1/vectors/gc/expire-quarantine",  # the client expiry of the sibling it just filled
     ]
-    move = posted[-1][1]
+    move = posted[-2][1]
     assert move["collection"] == _KNOWLEDGE
     assert move["quarantine_collection"].startswith("quarantine-")
 
