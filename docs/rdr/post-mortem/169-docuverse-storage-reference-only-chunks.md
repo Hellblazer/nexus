@@ -89,3 +89,15 @@ tables and routes against the current changelog, on the bead, not in the
 developer's head. And when a change makes a nullable value reachable on
 the wire, grep every client read of that field before calling the change
 additive.
+
+## Addendum 2026-10-01: the reference-only route is retired
+
+Gap 4's `POST /v1/vectors/upsert-reference-only` no longer exists in
+service. RDR-223 Phase 3 (P3.2, nexus-z0o2p.24) retired it: the route answers
+410 Gone, because it wrote chunk rows with no owner row and had no client
+caller (zero production requests from 2026-07-03 to 2026-10-01). The schema
+half of Gap 1 and Gap 2 (the `retention` column, nullable `chunk_text`, the
+search functions) is unchanged. If RDR-169's G4 is built, it writes through
+the combined catalog routes, which write the owner row in the same
+transaction. The repository method `upsertReferenceOnlyChunk` is still public
+and unguarded until nexus-z0o2p.36 closes.

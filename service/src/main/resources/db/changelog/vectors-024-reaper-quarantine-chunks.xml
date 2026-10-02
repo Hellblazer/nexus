@@ -1,0 +1,460 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    RDR-192 Step 9 (bead nexus-2x9xa): nexus.reaper_quarantine_chunks, the one SQL statement the periodic
+    engine reaper (dev.nexus.service.ChunkReaper) moves chunks with, and nexus.reaper_expire_quarantine, the one
+    it expires them with. It QUARANTINES, it never hard-deletes
+    (Sam, 2026-10-01): a reapable chunk is copied into the collection's quarantine sibling, where it stays
+    restorable until the engine's own expiry (changeset vectors-024-2) takes it after its retention window.
+
+    WHY A NEW FUNCTION AND NOT gc_quarantine_orphans_bounded (vectors-022-2). Three things the reaper needs
+    and the existing pair cannot give it: the grace must be injectable by a test (the pair passes a literal
+    NULL, so a test of "the sweep failed and the reaper cleans up next pass" would have to wait 30 days or
+    rewrite a column the orphaning stamp owns); a fraction floor ON THE MOVE (nothing in the pair refuses a
+    mass move; NX_GC_FLOOR_FRACTION guards only the 14 day EXPIRY); and an audit row naming the reaper as
+    the actor. Everything else is carried over: exclusive per-collection sweep gate, victim set chosen once,
+    cross-dim collision guard, sibling registered from the ORIGIN's catalog_collections row (never parsed
+    from a name, RDR-204), created_at carried through.
+
+    THE STATEMENT. Reapability is decided by nexus.chunk_is_reapable (vectors-021) and by nothing else, and
+    the call sits in the DELETE's own WHERE, so a client write that refreshes the chunk after the victim set
+    was chosen wins at the READ COMMITTED recheck (the DELETE blocks on the writer's row lock, then
+    re-evaluates the predicate against the new row version). The copy into quarantine is the DELETE's own
+    RETURNING, in one statement: a chunk that was refreshed and therefore not deleted is not copied either,
+    so there is no stranded sibling copy of a live chunk (vectors-022 has that harmless-but-untidy window;
+    this function does not).
+
+    FLOOR. Mirrors gc_expire_quarantine's rule (catalog-027) and NX_GC_FLOOR_FRACTION's semantics: when the
+    collection's WHOLE reapable set is at least p_floor_min_chunks (the Java default is 100) and is more than
+    p_floor_fraction of the collection's chunks (default 0.25), the move is REFUSED: nothing is copied or
+    deleted and the caller gets refused = true plus the two counts. The comparison is on the whole reapable
+    set, not on the at most p_row_limit chunks one pass would take, because the floor exists for the paths
+    that make MANY chunks reapable at once (a TRUNCATE of the manifest, a replica-mode delete, the one-shot
+    cliff at deploy + 30 days, all named in RDR-192's consequence table); measured on the batch, it could
+    never trip on a collection past 1200 chunks. A collection that is legitimately more than a quarter
+    garbage is drained by exempting that one collection from the MOVE floor (NX_REAPER_FLOOR_EXEMPT_COLLECTIONS,
+    which passes a fraction of 1.0 for it and nothing else) for ceil(reapable / 300) passes; the exemption is
+    named, logged on every pass and visible as floor_fraction 1.0 in this function's audit row, never silent.
+    nx t3 gc is NOT that path: it is the client's hard-delete verb, and this function never hard-deletes.
+    The Java caller (ChunkReaper) judges the SAME rule first, on the dry run's counts and before it pays for
+    the manifest-less census, so a floor-refused collection costs one count an hour and no census; this
+    function re-judges it under the gate, on the counts that are true while no manifest writer can move
+    the ground. ChunkReaperIntegrationTest pins both against a batch-judged floor.
+
+    DRY RUN. p_dry_run = true counts and returns without taking the gate or moving anything; the reaper
+    uses it to decide whether a collection needs the census at all (nothing reapable, nothing at risk),
+    to judge the floor before the census, and to check the census read the same number of chunks
+    (scope_chunk_total = total_count).
+
+    GRACE. p_grace is passed straight to chunk_is_reapable, so this function is a consumer whose grace is not
+    a literal NULL, and ReapableConsumersScanTest carries it in SQL_CONSUMERS with the reason. NULL is the
+    30 day default and is what production passes: the reaper has no grace setting, so there is no user-tuned
+    window for a floor clamp to guard. Only the package-private test entry (ChunkReaper#runOnce(Duration))
+    passes anything else.
+
+    AUDIT. One gc_audit row per call that moves anything: operation 'reaper_quarantine', actor
+    'engine-reaper', the moved chashes (a call moves at most p_row_limit, capped at the audit table's own
+    5000 chash ceiling), in the same transaction as the move. A refused or empty call writes no row; the
+    caller logs it.
+
+    A BOUND ON ITS OWN STATEMENT. The in-body statement_timeout below is inert for the statement already
+    running it (see PgSession#setGcQuarantineBoundedBounds); the Java caller sets the real bound as its own
+    statement first. lock_timeout is armed per lock wait, so the body's 2 s gate bound works. A gate that
+    cannot be taken raises lock_not_available and the caller counts it as a skipped collection.
+
+    THE TAG (Sam, 2026-10-01). Every chunk this function moves carries metadata quarantined_by =
+    'engine-reaper' and reaper_quarantined_at = the stamp it wrote into quarantined_at. The engine's own
+    expiry (changeset vectors-024-2, nexus.reaper_expire_quarantine) deletes ONLY chunks that carry the tag,
+    so quarantine a client filled (nx index repo, nx t3 gc) keeps the client's retention
+    (NX_GC_QUARANTINE_DAYS) and is never touched by the engine, and vectors-026-1 makes the client's expiry
+    skip the tagged rows in return. The stamp is stored twice on purpose: a chunk
+    later restored and moved again by a client keeps a stale quarantined_by (the restore functions strip only
+    quarantined_at and origin_collection), but the client's move writes a NEW quarantined_at, so the two stamps
+    differ and the engine no longer treats the chunk as its own.
+
+    No row changes at deploy, so there is no DATA EFFECT line. Placed after vectors-022 and before the grants
+    blocks.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="vectors-024-1" author="nexus-2x9xa">
+        <comment>nexus.reaper_quarantine_chunks: the periodic reaper's move. Selects with nexus.chunk_is_reapable (injectable grace), takes the exclusive sweep gate, refuses a move over the fraction floor, copies to the quarantine sibling through the DELETE's own RETURNING with the predicate in the DELETE's WHERE, tags every moved chunk quarantined_by=engine-reaper, writes one actor engine-reaper gc_audit row. Dry-run form counts only.</comment>
+        <sql splitStatements="false" stripComments="false"><![CDATA[
+CREATE OR REPLACE FUNCTION nexus.reaper_quarantine_chunks(
+    p_tenant_id              text,
+    p_collection             text,
+    p_quarantine_collection  text,
+    p_quarantined_at         text,
+    p_row_limit              int,
+    p_grace                  interval,
+    p_floor_fraction         float8,
+    p_floor_min_chunks       int,
+    p_dry_run                boolean
+)
+RETURNS TABLE(moved bigint, reapable_count bigint, total_count bigint, refused boolean, remaining bigint)
+LANGUAGE plpgsql
+SECURITY INVOKER
+AS $$
+DECLARE
+    v_moved                   bigint;
+    v_chashes                 jsonb;
+    v_reapable                bigint;
+    v_total                   bigint;
+    v_row_limit               int;
+    v_collision_count         bigint;
+    v_collision_sample        text[];
+    v_origin_content_type     text;
+    v_origin_owner_id         text;
+    v_origin_embedding_model  text;
+    v_origin_model_version    text;
+    v_origin_dimension        int;
+BEGIN
+    IF COALESCE(p_row_limit, 0) <= 0 THEN
+        RAISE EXCEPTION
+            'reaper_quarantine_chunks: p_row_limit must be positive, got %', p_row_limit
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+    IF p_floor_fraction IS NULL OR p_floor_fraction < 0 OR p_floor_fraction > 1
+       OR p_floor_min_chunks IS NULL OR p_floor_min_chunks < 0 THEN
+        RAISE EXCEPTION
+            'reaper_quarantine_chunks: the floor must be a fraction in [0, 1] and a non-negative minimum, got % / %',
+            p_floor_fraction, p_floor_min_chunks
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+    v_row_limit := LEAST(p_row_limit, 5000);
+
+    IF p_dry_run THEN
+        SELECT count(*),
+               count(*) FILTER (WHERE EXISTS (SELECT 1 FROM nexus.chunk_is_reapable(
+                     c.tenant_id, c.collection, c.chash, c.last_written_at, p_grace)))
+          INTO v_total, v_reapable
+          FROM nexus.chunks c
+         WHERE c.tenant_id = p_tenant_id AND c.collection = p_collection;
+        RETURN QUERY SELECT 0::bigint, v_reapable, v_total, false, v_reapable;
+        RETURN;
+    END IF;
+
+    PERFORM set_config('lock_timeout', '2000', true);
+    PERFORM set_config('statement_timeout', '25000', true);
+    BEGIN
+        PERFORM pg_advisory_xact_lock(hashtext('sweepgate:' || p_tenant_id || '/' || p_collection));
+    EXCEPTION
+        WHEN lock_not_available THEN
+            RAISE EXCEPTION
+                'reaper_quarantine_chunks: timed out acquiring the RDR-191 sweep gate for tenant=%, collection=% -- a manifest writer holds it; the reaper skips this collection until its next pass',
+                p_tenant_id, p_collection
+                USING ERRCODE = 'lock_not_available';
+    END;
+
+    -- Counted again UNDER the gate: the dry run's snapshot may be a pass old, and the floor must be judged
+    -- on what is true while no manifest writer can move the ground.
+    SELECT count(*),
+           count(*) FILTER (WHERE EXISTS (SELECT 1 FROM nexus.chunk_is_reapable(
+                 c.tenant_id, c.collection, c.chash, c.last_written_at, p_grace)))
+      INTO v_total, v_reapable
+      FROM nexus.chunks c
+     WHERE c.tenant_id = p_tenant_id AND c.collection = p_collection;
+
+    IF v_reapable = 0 THEN
+        RETURN QUERY SELECT 0::bigint, 0::bigint, v_total, false, 0::bigint;
+        RETURN;
+    END IF;
+
+    -- The floor on the move (see the header). Same shape as gc_expire_quarantine's: at least the minimum, and
+    -- strictly more than the fraction.
+    IF v_reapable >= p_floor_min_chunks AND v_reapable::float8 / v_total::float8 > p_floor_fraction THEN
+        RETURN QUERY SELECT 0::bigint, v_reapable, v_total, true, v_reapable;
+        RETURN;
+    END IF;
+
+    -- THE VICTIM SET, chosen once and ordered for deterministic progress.
+    CREATE TEMP TABLE IF NOT EXISTS _x9_victim(chash bytea PRIMARY KEY) ON COMMIT DROP;
+    DELETE FROM _x9_victim;
+    INSERT INTO _x9_victim(chash)
+    SELECT c.chash
+      FROM nexus.chunks c
+     WHERE c.tenant_id = p_tenant_id AND c.collection = p_collection
+       AND EXISTS (SELECT 1 FROM nexus.chunk_is_reapable(
+                 c.tenant_id, c.collection, c.chash, c.last_written_at, p_grace))
+     ORDER BY c.chash
+     LIMIT v_row_limit;
+
+    -- Cross-dim collision guard (vectors-004's N7 guard): the unified PK cannot hold two different-dim rows.
+    SELECT count(*),
+           COALESCE(array_agg(encode(x.chash, 'hex') ORDER BY x.chash), '{}'::text[])
+      INTO v_collision_count, v_collision_sample
+      FROM (
+        SELECT c.chash,
+               CASE WHEN c.embedding_384  IS NOT NULL THEN 384
+                    WHEN c.embedding_768  IS NOT NULL THEN 768
+                    WHEN c.embedding_1024 IS NOT NULL THEN 1024 END AS src_dim,
+               CASE WHEN e.embedding_384  IS NOT NULL THEN 384
+                    WHEN e.embedding_768  IS NOT NULL THEN 768
+                    WHEN e.embedding_1024 IS NOT NULL THEN 1024 END AS existing_dim
+          FROM nexus.chunks c
+          JOIN _x9_victim v ON v.chash = c.chash
+          JOIN nexus.chunks e
+            ON e.tenant_id  = p_tenant_id
+           AND e.collection = p_quarantine_collection
+           AND e.chash      = c.chash
+         WHERE c.tenant_id = p_tenant_id AND c.collection = p_collection
+      ) x
+     WHERE x.src_dim IS DISTINCT FROM x.existing_dim;
+
+    IF v_collision_count > 0 THEN
+        RAISE EXCEPTION
+            'reaper_quarantine_chunks: % cross-dim (tenant_id, collection, chash) collision(s) at quarantine target % for tenant=%, origin collection=%. Sample chashes: %. Refusing to overwrite.',
+            v_collision_count, p_quarantine_collection, p_tenant_id, p_collection, v_collision_sample
+            USING ERRCODE = 'unique_violation';
+    END IF;
+
+    -- The sibling's attributes come from the ORIGIN's registered row, never from a name (RDR-204,
+    -- hygiene-005-1). An unregistered origin is a fail-loud precondition.
+    SELECT content_type, owner_id, embedding_model, model_version, dimension
+      INTO v_origin_content_type, v_origin_owner_id, v_origin_embedding_model,
+           v_origin_model_version, v_origin_dimension
+      FROM nexus.catalog_collections
+     WHERE tenant_id = p_tenant_id AND name = p_collection;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION
+            'reaper_quarantine_chunks: origin collection % is not registered for tenant % -- attributes for the quarantine sibling are copied from the origin row, never parsed from a name; register the origin before quarantining chunks',
+            p_collection, p_tenant_id;
+    END IF;
+
+    INSERT INTO nexus.catalog_collections
+        (tenant_id, name, content_type, owner_id, embedding_model, model_version, dimension, lifecycle_state)
+    VALUES (
+        p_tenant_id, p_quarantine_collection,
+        v_origin_content_type, v_origin_owner_id, v_origin_embedding_model,
+        v_origin_model_version, v_origin_dimension, 'quarantine'
+    )
+    ON CONFLICT (tenant_id, name) DO UPDATE
+      SET content_type    = EXCLUDED.content_type,
+          owner_id        = EXCLUDED.owner_id,
+          embedding_model = EXCLUDED.embedding_model,
+          model_version   = EXCLUDED.model_version,
+          dimension       = EXCLUDED.dimension;
+
+    -- The move: DELETE with the predicate in its own WHERE, copy through RETURNING, one statement. A chunk a
+    -- client refreshed after the victim set was chosen fails the recheck, is not deleted, and is not copied.
+    WITH del AS (
+        DELETE FROM nexus.chunks c
+         USING _x9_victim v
+         WHERE c.tenant_id = p_tenant_id AND c.collection = p_collection
+           AND c.chash = v.chash
+           AND EXISTS (SELECT 1 FROM nexus.chunk_is_reapable(
+                 c.tenant_id, c.collection, c.chash, c.last_written_at, p_grace))
+        RETURNING c.chash, c.chunk_text, c.embedding_384, c.embedding_768, c.embedding_1024,
+                  c.metadata, c.created_at
+    ),
+    copied AS (
+        INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text,
+                                   embedding_384, embedding_768, embedding_1024,
+                                   metadata, created_at)
+        SELECT p_tenant_id, p_quarantine_collection, d.chash, d.chunk_text,
+               d.embedding_384, d.embedding_768, d.embedding_1024,
+               COALESCE(d.metadata, '{}'::jsonb)
+                 || jsonb_build_object('quarantined_at', p_quarantined_at,
+                                        'origin_collection', p_collection,
+                                        'quarantined_by', 'engine-reaper',
+                                        'reaper_quarantined_at', p_quarantined_at),
+               d.created_at
+          FROM del d
+        ON CONFLICT (tenant_id, collection, chash) DO UPDATE
+          SET chunk_text     = EXCLUDED.chunk_text,
+              embedding_384  = EXCLUDED.embedding_384,
+              embedding_768  = EXCLUDED.embedding_768,
+              embedding_1024 = EXCLUDED.embedding_1024,
+              metadata       = EXCLUDED.metadata,
+              created_at     = EXCLUDED.created_at
+        RETURNING 1
+    )
+    SELECT count(*), COALESCE(jsonb_agg(encode(d.chash, 'hex')), '[]'::jsonb)
+      INTO v_moved, v_chashes
+      FROM del d;
+
+    IF v_moved > 0 THEN
+        INSERT INTO nexus.gc_audit
+            (tenant_id, operation, collection, actor, dry_run, chash_count, chashes, details)
+        VALUES (
+            p_tenant_id, 'reaper_quarantine', p_collection, 'engine-reaper', false, v_moved, v_chashes,
+            jsonb_build_object(
+                'quarantine_collection', p_quarantine_collection,
+                'row_limit', v_row_limit,
+                'grace', COALESCE(p_grace::text, 'default'),
+                'floor_fraction', p_floor_fraction,
+                'floor_min_chunks', p_floor_min_chunks,
+                'reapable_before', v_reapable,
+                'total_before', v_total,
+                'remaining_after', GREATEST(v_reapable - v_moved, 0)));
+    END IF;
+
+    RETURN QUERY SELECT v_moved, v_reapable, v_total, false, GREATEST(v_reapable - v_moved, 0);
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION nexus.reaper_quarantine_chunks(text, text, text, text, int, interval, float8, int, boolean) TO nexus_svc;
+]]>
+        </sql>
+        <rollback>
+            <sql splitStatements="false" stripComments="false">DROP FUNCTION IF EXISTS nexus.reaper_quarantine_chunks(text, text, text, text, int, interval, float8, int, boolean);</sql>
+        </rollback>
+    </changeSet>
+
+    <!--
+        vectors-024-2: the engine's expiry, ONLY for what the engine itself moved (Sam, 2026-10-01).
+
+        WHY NOT gc_expire_quarantine. That function expires every row of a quarantine sibling past a cutoff the
+        CALLER chooses, whoever moved the row. The reaper runs hourly on every tenant, so with it the engine
+        would hard-delete quarantine that nx index repo and nx t3 gc filled, at the engine's retention and not the
+        client's NX_GC_QUARANTINE_DAYS, including the quarantine of repositories nobody has indexed for months.
+        This function adds one condition: the row must carry the tag vectors-024-1 writes (quarantined_by =
+        'engine-reaper', and reaper_quarantined_at equal to quarantined_at, so a chunk a client later re-moved is
+        not the engine's any more). The split is symmetric: vectors-026-1 makes gc_expire_quarantine skip exactly
+        the rows this function owns, so each side expires only what it moved.
+
+        NO FRACTION FLOOR (Sam, 2026-10-01). An earlier draft judged a floor on the tagged rows. It wedged every
+        drain: a burst of 100 to ~1200 chunks ages past the cutoff together, is 100% of the tagged rows, and was
+        refused forever, and the tail of any drain wedged the same way. The floor on the MOVE bounds what one
+        pass quarantines; what protects against a manifest defect is the manifest recheck below, the 14 day
+        window, the audit row that names every deleted chash, and the restore verb.
+
+        THE COUNTS. Two: expired (rows this call deleted, counted from the DELETE's own RETURNING, so a chunk a
+        concurrent writer took or re-referenced is not counted) and protected_count (rows past the cutoff that a
+        manifest row of the origin still names: benign, a chunk that was re-referenced after the move, never
+        deleted, nothing to act on).
+
+        ROW CAP. A call deletes at most p_row_limit rows (ordered by chash; the Java caller passes 5000, the audit
+        row's own chash ceiling), so one statement under the caller's bound never carries an unbounded DELETE.
+        The rest expire on the next pass.
+
+        AUDIT. One gc_audit row per call that deletes anything: operation 'reaper_expire_quarantine', actor
+        'engine-reaper', collection = the quarantine sibling, in the same transaction as the DELETE.
+
+        A BOUND ON ITS OWN STATEMENT. As with the move, the caller sets statement_timeout as its own statement;
+        lock_timeout is armed here. No row changes at deploy, so there is no DATA EFFECT line.
+    -->
+    <changeSet id="vectors-024-2" author="nexus-2x9xa">
+        <comment>nexus.reaper_expire_quarantine: the engine's expiry of the chunks the reaper moved. Deletes at most p_row_limit rows tagged quarantined_by=engine-reaper whose reaper_quarantined_at equals quarantined_at, past the cutoff, with no manifest row of the origin naming them, no fraction floor; returns expired and protected_count (manifest-named); one engine-reaper gc_audit row per call that deletes.</comment>
+        <sql splitStatements="false" stripComments="false"><![CDATA[
+CREATE OR REPLACE FUNCTION nexus.reaper_expire_quarantine(
+    p_tenant_id              text,
+    p_quarantine_collection  text,
+    p_origin_collection      text,
+    p_cutoff                 text,
+    p_row_limit              int
+)
+RETURNS TABLE(expired bigint, protected_count bigint)
+LANGUAGE plpgsql
+SECURITY INVOKER
+AS $$
+DECLARE
+    v_chashes    bytea[];
+    v_protected  bigint;
+    v_deleted    bytea[];
+    v_expired    bigint;
+BEGIN
+    IF COALESCE(p_row_limit, 0) <= 0 THEN
+        RAISE EXCEPTION
+            'reaper_expire_quarantine: p_row_limit must be positive, got %', p_row_limit
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+
+    PERFORM set_config('lock_timeout', '2000', true);
+
+    -- Past the cutoff, the engine's own rows (tagged by the move, tag still valid, from this origin) that a
+    -- manifest row of the origin still names: never deleted, counted so the caller can label them.
+    SELECT count(*)
+      INTO v_protected
+      FROM nexus.chunks c
+     WHERE c.tenant_id  = p_tenant_id
+       AND c.collection = p_quarantine_collection
+       AND c.metadata->>'quarantined_by'        = 'engine-reaper'
+       AND c.metadata->>'origin_collection'     = p_origin_collection
+       AND c.metadata->>'reaper_quarantined_at' = c.metadata->>'quarantined_at'
+       AND c.metadata->>'quarantined_at'       <= p_cutoff
+       AND EXISTS (
+             SELECT 1 FROM nexus.catalog_document_chunks m
+              WHERE m.tenant_id  = c.tenant_id
+                AND m.collection = p_origin_collection
+                AND m.chash      = c.chash);
+
+    SELECT COALESCE(array_agg(s.chash ORDER BY s.chash), '{}'::bytea[])
+      INTO v_chashes
+      FROM (
+        SELECT c.chash
+          FROM nexus.chunks c
+         WHERE c.tenant_id  = p_tenant_id
+           AND c.collection = p_quarantine_collection
+           AND c.metadata->>'quarantined_by'        = 'engine-reaper'
+           AND c.metadata->>'origin_collection'     = p_origin_collection
+           AND c.metadata->>'reaper_quarantined_at' = c.metadata->>'quarantined_at'
+           AND c.metadata->>'quarantined_at'       <= p_cutoff
+           AND NOT EXISTS (
+                 SELECT 1 FROM nexus.catalog_document_chunks m
+                  WHERE m.tenant_id  = c.tenant_id
+                    AND m.collection = p_origin_collection
+                    AND m.chash      = c.chash)
+         ORDER BY c.chash
+         LIMIT p_row_limit) s;
+
+    IF COALESCE(array_length(v_chashes, 1), 0) = 0 THEN
+        RETURN QUERY SELECT 0::bigint, v_protected;
+        RETURN;
+    END IF;
+
+    -- The delete re-checks every condition, so a chunk a writer re-referenced or re-moved since the read above
+    -- survives, and the count returned is what this statement really deleted.
+    WITH del AS (
+        DELETE FROM nexus.chunks c
+         WHERE c.tenant_id  = p_tenant_id
+           AND c.collection = p_quarantine_collection
+           AND c.chash      = ANY(v_chashes)
+           AND c.metadata->>'quarantined_by'        = 'engine-reaper'
+           AND c.metadata->>'origin_collection'     = p_origin_collection
+           AND c.metadata->>'reaper_quarantined_at' = c.metadata->>'quarantined_at'
+           AND c.metadata->>'quarantined_at'       <= p_cutoff
+           AND NOT EXISTS (
+                 SELECT 1 FROM nexus.catalog_document_chunks m
+                  WHERE m.tenant_id  = c.tenant_id
+                    AND m.collection = p_origin_collection
+                    AND m.chash      = c.chash)
+        RETURNING c.chash
+    )
+    SELECT COALESCE(array_agg(d.chash ORDER BY d.chash), '{}'::bytea[]) INTO v_deleted FROM del d;
+
+    v_expired := COALESCE(array_length(v_deleted, 1), 0);
+
+    IF v_expired > 0 THEN
+        INSERT INTO nexus.gc_audit
+            (tenant_id, operation, collection, actor, dry_run, chash_count, chashes, details)
+        VALUES (
+            p_tenant_id, 'reaper_expire_quarantine', p_quarantine_collection, 'engine-reaper', false, v_expired,
+            COALESCE(
+                (SELECT jsonb_agg(encode(x, 'hex'))
+                   FROM unnest(v_deleted[1:LEAST(v_expired, 5000)]) x),
+                '[]'::jsonb),
+            jsonb_build_object('origin_collection', p_origin_collection, 'cutoff', p_cutoff,
+                               'protected', v_protected, 'row_limit', p_row_limit)
+                || CASE WHEN v_expired > 5000
+                        THEN jsonb_build_object('chashes_truncated', true, 'chashes_stored', 5000)
+                        ELSE '{}'::jsonb END);
+    END IF;
+
+    RETURN QUERY SELECT v_expired, v_protected;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION nexus.reaper_expire_quarantine(text, text, text, text, int) TO nexus_svc;
+]]>
+        </sql>
+        <rollback>
+            <sql splitStatements="false" stripComments="false">DROP FUNCTION IF EXISTS nexus.reaper_expire_quarantine(text, text, text, text, int);</sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

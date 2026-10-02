@@ -109,3 +109,44 @@ def test_ci_workflow_calls_the_composite_action_not_an_inline_fetch() -> None:
         "ci.yml should no longer inline the docling tarball fetch; "
         "it belongs in .github/actions/prime-docling"
     )
+
+
+def test_the_fetch_writes_its_tarball_under_the_runner_temp_dir_not_a_fixed_tmp_path(tmp_path) -> None:
+    """On a self-hosted box shared by several users a fixed /tmp name collides across users (and is
+    a symlink-replacement target). Run the real fetch step with a stub curl and see where it writes."""
+    import os
+    import subprocess
+    import tarfile
+
+    action = _load_action()
+    step = next(s for s in action["runs"]["steps"] if "releases/download" in s.get("run", ""))
+    assert "/tmp/docling-artifacts" not in step["run"]
+
+    payload = tmp_path / "payload"
+    payload.mkdir()
+    (payload / "model.bin").write_text("x")
+    bundle = tmp_path / "bundle.tar.gz"
+    with tarfile.open(bundle, "w:gz") as tf:
+        tf.add(payload / "model.bin", arcname="model.bin")
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    seen = tmp_path / "curl-target"
+    stub = bindir / "curl"
+    stub.write_text(
+        "#!/bin/sh\n"
+        'while [ "$#" -gt 0 ]; do case "$1" in -o) out="$2"; shift;; esac; shift; done\n'
+        f'printf %s "$out" > {seen}\n'
+        f'cp {bundle} "$out"\n'
+    )
+    stub.chmod(0o755)
+    home, runner_temp = tmp_path / "home", tmp_path / "runner_temp"
+    home.mkdir()
+    runner_temp.mkdir()
+    env = {"PATH": f"{bindir}:/usr/bin:/bin", "HOME": str(home), "RUNNER_TEMP": str(runner_temp),
+           "ASSET_TAG": "ci-assets-docling-v1", "GITHUB_REPOSITORY": "o/r"}
+    proc = subprocess.run(["bash", "-eo", "pipefail", "-c", step["run"]], capture_output=True, text=True, env=env)
+    assert proc.returncode == 0, (proc.stdout, proc.stderr)
+    target = seen.read_text()
+    assert target.startswith(str(runner_temp) + os.sep) and "docling-artifacts" in target
+    assert not os.path.exists(target), "the tarball is removed when the step ends"
+    assert (home / ".cache/nexus/docling-artifacts/model.bin").read_text() == "x"

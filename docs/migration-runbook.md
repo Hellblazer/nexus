@@ -39,7 +39,8 @@ has nothing to do.
 
 A note stored before nexus-b6enc has a catalog document but never got a
 manifest row. Since RDR-192 Phase 2 the engine hides such a chunk from search
-and get, and the RDR-192 reaper will delete it once it ages out. The rung
+and get, and the RDR-192 reaper moves it to quarantine once it has had no owner for
+30 days (quarantine is deleted 14 days later; `docs/operations/engine-reaper.md`). The rung
 censuses every non-quarantine collection (`nx t3 census-manifest-less`'s
 route), backfills each collection that holds a `legacy-unmanifested` chunk
 (`nx t3 backfill-manifest --no-dry-run --only-gapped`'s call), and records
@@ -65,7 +66,7 @@ reaper.
   owner document's title using `nx t3 census-manifest-less --collection <c>`,
   then re-put your copy with `nx store put - --collection <c> --title '<title>'`
   under the same title: the new chunk is manifested under the same document and
-  the old one becomes the reaper's.
+  the old one becomes the reaper's to quarantine, 30 days after it lost its owner.
 - Retries: a residual is not re-examined at all for 24 hours at the same
   package version (a T2 note, `upgrade_ladder_state/rdr192-manifest-backfill.residual`,
   holds its fingerprint and time), so a stuck tenant pays no census per session
@@ -155,6 +156,31 @@ machinery that performed that migration no longer ships:
      left its local service running (`nx daemon service status`; stop it with
      `nx daemon service stop`). The pin's own engine (v0.1.52) must be the one
      it provisions, not a newer engine that no longer has the routes
+   - **Use a Postgres data directory no 7.x engine has booted on.** The nx-managed
+     cluster (`<pg_data>`: `<config>/postgres`, which is `~/.config/nexus/postgres`
+     unless `NEXUS_CONFIG_DIR` is set; the `PG_DATA` key of `<config>/pg_credentials`
+     names it, and it holds `pg.log`) is shared by every engine version on the box, and an engine migrates the schema at boot. A 7.x
+     engine boot on that cluster has already applied the RDR-191 unified-chunks
+     changesets (the per-dimension `chunks_384/768/1024` tables folded into
+     `nexus.chunks`), and a boot of an engine at or after the staging-retirement
+     tag (nexus-z0o2p.27) has already dropped the `staging` schema, which the
+     pin's `/v1/staging` landing writes into. The pin's v0.1.52 engine cannot undo
+     either, and it is not expected to land through those routes on such a
+     cluster. So: if a 7.x engine has run on this box, do not point the pin at
+     that cluster. Move the cluster aside (stop the service first, rename
+     `<pg_data>`; keep the old directory until the hop is done, because it also
+     holds whatever the 7.x install stored) so the pin should initialise a fresh one,
+     and expect the 7.x data to be absent from the new cluster. Leave
+     `<config>/pg_credentials` in place: its `PG_DATA` names `<pg_data>`, which no
+     longer exists after the rename. In the current `provision()` (the pin's copy
+     of that function was not read) the missing `PG_VERSION` marker skips the
+     already-running shortcut, the port and passwords come from that file, initdb
+     runs at `<pg_data>`, and `PG_DATA` is rewritten. **All of this is read from
+     the current changelog and source, not measured**: nobody has booted
+     v0.1.52 against a cluster a current engine already migrated, or run the
+     pin's provisioning after the rename, and counted what it did, and there is
+     no measured alternative to the fresh cluster. A box
+     that never ran a 7.x engine is not affected
    - **A Voyage-embedded source needs a Voyage-keyed local engine.** If the
      Chroma data is Voyage-embedded (a ChromaDB Cloud store, or any
      `voyage-*` collection), run the local engine with `NX_VOYAGE_API_KEY`

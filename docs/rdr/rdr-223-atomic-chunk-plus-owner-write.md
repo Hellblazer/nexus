@@ -188,9 +188,20 @@ nexus-76's store-path and import review.
 
 ### Approach
 
-One rule: every chunk the engine inserts is written in the same transaction
-as at least one owner row, so a client never needs two requests to make a
-chunk owned.
+One rule: every chunk the engine inserts through the routes named here is
+written in the same transaction as at least one owner row, so a client never
+needs two requests to make a chunk owned. The rule is enforced for those
+routes (the combined write routes, and the refusal on `upsert-chunks` and
+`store-put`), not for every insert the engine can perform. Known exceptions:
+the SQL functions whose live definition inserts into `nexus.chunks` (the last
+definition of each function in the changelog's include order, rollback blocks
+excluded). The list is `_CHUNK_INSERTER_ALLOWLIST` in
+`tests/test_changelog_chunk_inserter_lint.py`, each entry with its reason, and
+that lint is the source of truth: it fails when a function that is not on the
+list inserts into `nexus.chunks` and when an entry no longer does. A change that
+adds such a function (the reaper's, the quarantine restore verb planned under
+nexus-wbfpw.49 under RDR-192) extends the list there, so this paragraph names
+none of them and cannot go stale when one is redefined.
 
 ### Technical Design
 
@@ -292,9 +303,13 @@ chunk owned.
    - *Where.* The handlers pass an ownership guard to the repository's upsert
      methods; the repository methods called without one (the contract and
      fixture tests, the migration ingest) are unchanged, and
-     `OwnershipGuardCoverageScan` reads the main sources so a handler cannot
-     call a guarded method without building a guard, nor can a new route write
-     chunks without one. The check runs twice. The first runs after the
+     `OwnershipGuardCoverageScan` reads the main sources, as text, for the four
+     named repository methods (`upsertChunksWithTokens`, `upsertChunksWithVectors`,
+     `putWithTokens`, `upsertChunks`), so a handler cannot call one of them
+     without building a guard. It is a name match: a new repository method that
+     writes chunks, a direct SQL insert, or a changeset that inserts chunks is
+     invisible to it. The reference-only writer `upsertReferenceOnlyChunk` was
+     removed from the engine (nexus-z0o2p.36). The check runs twice. The first runs after the
      collection resolves and BEFORE the `force_re_embed`, supplied-vector and
      existence-partition branches and before embedding, so no branch skips it,
      a refused write never pays the embedder, and the existence partition's
@@ -346,7 +361,7 @@ chunk owned.
      `source_path`, `title` and `source_agent`, 120 characters each). The line is
      rate limited to one per route, tenant and collection per minute, with the number
      suppressed since the last; the counters are not limited. The client names
-     itself in `X-Nexus-Client-Version` on every engine request; the log records
+     itself in `X-Nexus-Client-Version` through the shared client classes (the vector client, the T2 stores, the catalog client, the token store and the scratch store; not the hook calls or the status, version and health probes); the log records
      `absent` when it is missing, which marks a client older than the release that
      sends it. The `User-Agent` cannot do that job (`Python-urllib/3.12` or
      `python-httpx/0.28`: the transport, not the product).
@@ -714,7 +729,11 @@ if nexus-b50zw closes, retire the staging routes. Sam's decisions of
   sweep-guard branch that reads them (nexus-z0o2p.27), and nexus-b50zw closes.
   A follow-up bead: `ChunkBatcher` must not bisect a failed flush on a 429 or
   a deadline error.
-Built and gated as nexus-z0o2p.24 (Technical Design 5, "As built").
+Built as nexus-z0o2p.24 (Technical Design 5, "As built"); the gating is
+pending: the real-engine cut-mode run (nexus-z0o2p.37), the cut battery
+against the candidate engine (nexus-0kmat), and the published-client write
+gate (nexus-9a6io) are open, and each blocks the final tag. The flip from
+log-only to enforce on the cloud engine is owned by nexus-z0o2p.40.
 
 ### Day 2 Operations
 

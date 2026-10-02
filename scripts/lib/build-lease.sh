@@ -250,10 +250,22 @@ _build_lease_pid_alive() {
 # reason, the failure direction is always "treat as still held", disclosed
 # in the caller's WARNING/REFUSED text rather than silently assumed.
 _build_lease_group_alive() {
-    local pgid="$1"
+    local pgid="$1" err rc
     [[ "$pgid" =~ ^[0-9]+$ ]] || return 1
-    kill -0 -- "-$pgid" 2>/dev/null
-    return $?
+    # `kill -0` exits non-zero for BOTH ESRCH (no such group: dead) and EPERM
+    # (the group exists but belongs to another user: alive). Treating EPERM as
+    # dead let a second USER reclaim a live build's lease -- the case that
+    # appears the moment two users share a lease root via NX_BUILD_LEASE_ROOT
+    # (the qwen-linux host: CI as `ghci`, hand runs as `nxtest`), and the
+    # opposite of this header's own "treat as still held". The only way to tell
+    # them apart from the shell is the message, so pin the locale for it.
+    err="$(LC_ALL=C kill -0 -- "-$pgid" 2>&1)"
+    rc=$?
+    [[ $rc -eq 0 ]] && return 0
+    case "$err" in
+        *"not permitted"*|*EPERM*) return 0 ;;
+    esac
+    return 1
 }
 
 # _build_lease_populate <dir> <holder-label> <command-line> — fill an

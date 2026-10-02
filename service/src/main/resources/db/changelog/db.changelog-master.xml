@@ -1681,6 +1681,28 @@
     <include file="db/changelog/vectors-022-gc-quarantine-orphans-reapable.xml"/>
 
     <!--
+        nexus-2x9xa (RDR-192 Step 9): nexus.reaper_quarantine_chunks, the periodic
+        reaper's move: reapable(c) with an injectable grace, the exclusive sweep gate,
+        a fraction floor on the move, quarantine (never a hard delete), an
+        actor 'engine-reaper' gc_audit row, and a quarantined_by tag on every moved
+        chunk; and nexus.reaper_expire_quarantine, the engine's expiry of ONLY the
+        chunks that carry that tag, with no fraction floor (Sam, 2026-10-01). vectors-023 is reserved for the
+        nexus-wbfpw.35 text-gate probe (unlanded). Placed after
+        vectors-022, before the grants blocks.
+    -->
+    <include file="db/changelog/vectors-024-reaper-quarantine-chunks.xml"/>
+
+    <!--
+        nexus-2x9xa: the other half of the symmetric expiry split. gc_expire_quarantine
+        (a released function, catalog-033-3) skips the rows the reaper tagged, so the
+        client expires only what the client moved and the engine only what it moved.
+        New changeset, never an edit of the released one. vectors-025 is the restore
+        verb's (nexus-wbfpw.49) and vectors-023 is reserved; this is 026. Placed after
+        vectors-024, before the grants blocks.
+    -->
+    <include file="db/changelog/vectors-026-gc-expire-quarantine-skips-engine-rows.xml"/>
+
+    <!--
         RDR-223 Phase 3 step 2 (nexus-z0o2p.27): DROP the staging landing
         schema, retired with the /v1/staging routes — see the included file's
         own header for the dependents (grants-nexus-diag-3, the staging-4

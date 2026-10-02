@@ -54,8 +54,18 @@ class ReapableConsumersScanTest {
     /** Java consumers other than the listing, each with the reason it is gated. Empty today. */
     private static final Map<String, String> JAVA_CONSUMERS = new TreeMap<>();
 
-    /** SQL consumers whose grace is not a literal NULL, each with where its floor clamp lives. Empty today. */
+    /** SQL consumers whose grace is not a literal NULL, each with why that is safe (a floor clamp, or no production setting). */
     private static final Map<String, String> SQL_CONSUMERS = new TreeMap<>();
+
+    static {
+        // nexus-2x9xa. The reaper's move passes its p_grace straight through so a test can inject zero. Production
+        // passes NULL: ChunkReaper#run() calls runOnce(null) and the class has no grace setting, so there is no
+        // user-tuned window for a clamp to guard; only the package-private runOnce(Duration) a test calls passes
+        // anything else. The allowlist waives ONLY the literal-NULL rule: the scan below still demands the exclusive
+        // sweep gate of this unit, and ChunkReaperIntegrationTest holds a shared gate to prove the gate is real.
+        SQL_CONSUMERS.put("vectors-024-reaper-quarantine-chunks.xml#nexus.reaper_quarantine_chunks",
+            "grace is injected by tests only; production passes NULL (the 30 day default), no setting, no clamp needed");
+    }
 
     private static final Pattern UNIT_START = Pattern.compile(
         "(?i)CREATE\\s+(?:OR\\s+REPLACE\\s+)?(FUNCTION|PROCEDURE)\\s+([^\\s(]+)");
@@ -97,6 +107,16 @@ class ReapableConsumersScanTest {
         }
         out.add(cur.toString().trim());
         return out;
+    }
+
+    /**
+     * Whether an allowlisted consumer's violation is waived: exactly the call text {@code p_grace} in the grace
+     * position, the injectable parameter the reaper passes straight through (production passes NULL). A clamp such as
+     * {@code GREATEST(p_grace, ...)}, a {@code make_interval(...)} or any other expression is NOT waived: that is a
+     * decision to make in review, not an exemption the allowlist grants by unit.
+     */
+    static boolean waivable(String violation) {
+        return violation.contains("is called with grace 'p_grace', not a literal NULL");
     }
 
     /** Why {@code body} (one function, procedure or DO block) breaks the obligations, or an empty list. */
@@ -165,8 +185,12 @@ class ReapableConsumersScanTest {
                         if (!MENTION.matcher(unit.getValue()).find()) continue;
                         String id = p.getFileName() + "#" + name;
                         found.add(id);
-                        if (SQL_CONSUMERS.containsKey(id)) continue;
-                        problems.addAll(violations(id, unit.getValue()));
+                        boolean allowlisted = SQL_CONSUMERS.containsKey(id);
+                        for (String v : violations(id, unit.getValue())) {
+                            // An allowlisted consumer is exempt from the NULL-grace rule for the bare parameter
+                            // `p_grace` ONLY, never from the gate, and never for a clamp or any other expression.
+                            if (!(allowlisted && waivable(v))) problems.add(v);
+                        }
                     }
                 }
             }
@@ -226,6 +250,20 @@ class ReapableConsumersScanTest {
     void theScannerFlagsADeleteWithoutTheGate() {
         assertThat(violations("bad", DELETE + "(c.tenant_id, c.collection, c.chash, c.last_written_at, NULL))"))
             .anyMatch(v -> v.contains("without taking the exclusive sweep gate"));
+    }
+
+    @Test
+    void theAllowlistWaivesTheBareParameterOnly_aClampOrAnyOtherExpressionIsStillAViolation() {
+        List<String> bare = violations("u",
+            GATED + DELETE + "(c.tenant_id, c.collection, c.chash, c.last_written_at, p_grace))");
+        assertThat(bare).isNotEmpty().allMatch(ReapableConsumersScanTest::waivable);
+
+        for (String grace : List.of("GREATEST(p_grace, interval '1 day')", "make_interval(days => 1)", "p_grace * 2",
+                                    "p_grace2", "interval '0'")) {
+            List<String> v = violations("u",
+                GATED + DELETE + "(c.tenant_id, c.collection, c.chash, c.last_written_at, " + grace + "))");
+            assertThat(v).as(grace).isNotEmpty().noneMatch(ReapableConsumersScanTest::waivable);
+        }
     }
 
     @Test

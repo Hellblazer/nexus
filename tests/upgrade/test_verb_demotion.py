@@ -103,9 +103,16 @@ def test_deleted_verbs_are_fully_gone(runner: CliRunner, verb: str) -> None:
     assert f"No such command '{verb}'" in result.output
 
 
-def test_collection_upgrade_era_repair_is_demoted(runner: CliRunner) -> None:
-    out = _help(runner, "collection")
-    assert "backfill-hash" not in out  # upgrade-era repair -> the ladder heals
+def test_collection_backfill_hash_is_deleted_not_demoted(runner: CliRunner) -> None:
+    """RDR-223 P3 follow-up: ``nx collection backfill-hash`` called ``col.upsert`` on a
+    collection handle, and the service-backed handle (``_ServiceCollectionStub``) has no
+    ``upsert`` (the same defect class that deleted ``nx t3 reidentify``). In the PG era the chunk
+    id IS the chash, so there is no ``chunk_text_hash`` metadata to repair; the verb raised
+    ``AttributeError`` on every real install. Invoking it must fail as an unknown command."""
+    assert "backfill-hash" not in _help(runner, "collection")
+    result = runner.invoke(main, ["collection", "backfill-hash", "--help"])
+    assert result.exit_code != 0
+    assert "No such command 'backfill-hash'" in result.output
 
 
 def test_collection_verbs_with_a_real_job_stay(runner: CliRunner) -> None:

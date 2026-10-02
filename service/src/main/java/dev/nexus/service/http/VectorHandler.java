@@ -1263,6 +1263,11 @@ public final class VectorHandler implements HttpHandler {
      * <p>Response 200: {"expired": N, "refused": M} — the nexus-mr89x safety
      * floor (see catalog-023 changelog): {@code refused &gt; 0} means the
      * floor fired and nothing was deleted this call.
+     *
+     * <p>Since vectors-026 this route expires only the rows a CLIENT moved: chunks the engine
+     * reaper tagged ({@code quarantined_by = engine-reaper}) are skipped, with or without
+     * {@code force}, and the floor counts only the untagged rows. The engine expires its own
+     * rows (RDR-192, nexus-2x9xa).
      */
     private void handleGcExpireQuarantine(HttpExchange ex, String method) throws IOException {
         requireMethod(ex, method, "POST");

@@ -488,8 +488,9 @@ def test_a_rerun_after_a_crash_sweeps_the_crashed_runs_chunks_but_not_the_origin
     """v1 completes. v2 dies after its first batch: the manifest is now v2's batch 1 and v1's
     chunks that v2 dropped are ownerless (the deferred sweep never ran). v3, different content,
     reruns: its snapshot is v2's batch 1, so those chunks are swept. v1's tail is NOT in that
-    snapshot (v2's first batch already dropped it from the manifest), so it stays until
-    `nx t3 gc` (the RDR-192 reaper, nexus-2x9xa, covers knowledge__ only)."""
+    snapshot (v2's first batch already dropped it from the manifest), so it stays until the
+    engine reaper (RDR-192 Step 9, nexus-2x9xa, every collection prefix) quarantines it 30 days
+    after it lost its owner, or `nx t3 gc` takes it sooner."""
     cat = _writer_proxy()
     doc = _register(tmp_path, "crash-rerun")
     v1 = _batches("crash-v1", [2, 2])

@@ -284,7 +284,8 @@ class RawSqlGateTest {
         // avoidance discipline as the rawVectorFetch removal immediately above.
         Map.entry("PgVectorRepository.java", Map.of(
             // SANCTIONED RAW (nexus-wbfpw.4, round-1 fix, code-review Important):
-            // manifestLessCensus executes MANIFEST_LESS_CENSUS_SQL, the PUBLISHED
+            // manifestLessCensusBounded (the four-argument manifestLessCensus delegates to it with no
+            // statement bound, nexus-2x9xa) executes MANIFEST_LESS_CENSUS_SQL, the PUBLISHED
             // statement scripts/sql/manifest_less_census.sql and
             // ManifestLessCensusSqlIdentityTest pin byte-identical to it -- same
             // precedent as ChashRepository#lookup/PROBE_SQL above. EMPTY statement
@@ -298,9 +299,9 @@ class RawSqlGateTest {
             // asked to close -- see the round-1 fix's own report for why the
             // RAW_EXECUTE regex is not widened to close the _SQL-suffix blind spot
             // in this change). Registered here anyway so a future LITERAL raw call
-            // accidentally added to manifestLessCensus is caught immediately
+            // accidentally added to manifestLessCensusBounded is caught immediately
             // rather than silently inheriting a blanket excuse.
-            "manifestLessCensus", Map.of())),
+            "manifestLessCensusBounded", Map.of())),
         Map.entry("CatalogRepository.java", Map.of(
             // nexus-zrcj7: acquireIndexRunLock's entry (SANCTIONED RAW,
             // nexus-5xn3k.2 — pg_advisory_xact_lock over a hashtext'd
@@ -1368,7 +1369,7 @@ class RawSqlGateTest {
      * #TEST_TREE_RAW_SQL_CEILING} entries are removed outright (145 -&gt; 133
      * files): {@code Bge768ServiceEmbedIntegrationTest}, {@code
      * ChashVectorConcurrencyTest}, {@code PgVectorUpsertDeadlockTest}, {@code
-     * ReferenceOnlyChunkUpsertTest}, {@code RerankStageIntegrationTest},
+     * ReferenceOnlyChunkUpsertTest} (since renamed {@code ReferenceOnlyChunkReadPathTest}), {@code RerankStageIntegrationTest},
      * {@code VectorHandlerAspectFieldGuardTest}, {@code
      * VectorHandlerCombinedQueryModelGuardTest}, {@code
      * VectorHandlerEmbeddingModeTest}, {@code VectorHandlerTokenUsageTest},

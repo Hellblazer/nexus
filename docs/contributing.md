@@ -201,11 +201,107 @@ https://github.com/Hellblazer/nexus/settings/branches:
   - Require a pull request before merging
   - Require status checks to pass before merging:
     - `pytest-gate` (one required check on both `main` and `develop`; it fans
-      in over the sharded pytest matrix — the swap from the prior
-      `pytest (Python 3.12)` / `pytest (Python 3.13)` two-check shape
-      happened at nexus-n0ful)
+      in over whichever suite path ran: the sharded hosted pytest matrix, or
+      the single `test-qwen` job on the self-hosted `qwen-linux` runner for an
+      owner push to develop while `QWEN_CI_PUSH_RUNNER` is `qwen-linux`, and it
+      fails when the chosen path did not
+      succeed or the other did not skip, plus the lint and census legs. The
+      swap from the prior `pytest (Python 3.12)` / `pytest (Python 3.13)`
+      two-check shape happened at nexus-n0ful)
   - Require branches to be up to date before merging
   - Do not allow force-pushes (the develop reset on 2026-05-21 was a one-time bypass via the API; routine resets are not permitted).
+
+### First run of the qwen-linux route
+
+The qwen route is OPT-IN (Sam, 2026-10-01): `test-qwen` and its routing do
+nothing until the repository variable `QWEN_CI_PUSH_RUNNER` is exactly
+`qwen-linux`. Unset, empty, a typo, another case or a trailing space all mean the
+hosted shards. So landing the change is safe, and enabling it is a deliberate
+sequence. Once enabled, the route fires on every owner push to develop whose diff
+is not doc-only, not only on merges that touch `ci.yml`. The host facts are in T2
+`nexus/qwentescence-test-host-howto`.
+
+The enable sequence, in order; stop at the first red:
+
+1. **Land the change.** The variable is unset, so the hosted shards still run.
+   Check `gh variable list` first: a leftover `qwen-linux` would make the landing
+   push route to the qwen runner.
+2. **Host steps, once.** Without them the job fails at its lease step, by design.
+   Create the shared lease directory (`QWEN_SUITE_LEASE_ROOT`, default
+   `/var/lib/nx-suite-lease`: `sudo groupadd -f nx-suite`,
+   `sudo usermod -aG nx-suite ghci`, `sudo usermod -aG nx-suite nxtest`,
+   `sudo install -d -o root -g nx-suite -m 2775 /var/lib/nx-suite-lease`),
+   restart the runner service so `ghci` has the group, and have `nxtest` export
+   `NX_BUILD_LEASE_ROOT=/var/lib/nx-suite-lease NX_SUITE_LEASE_WAIT=1` (its
+   `.bashrc`, which non-interactive ssh reads too). Apply the `/etc/wsl.conf` fix
+   (WSL interop and the `/mnt` automount off, `AGENTS.md` § Self-hosted runners
+   and fork PRs).
+3. **Run the probe as `ghci` and read it green.** A `workflow_dispatch` is offered
+   only for a workflow file on the default branch (`main`), and this file is not
+   there until a release promotes it. Until then push a throwaway branch named
+   `runner-probe/qwen-<date>` from the commit under test (`git push origin
+   HEAD:refs/heads/runner-probe/qwen-<date>`): the probe's second trigger is a
+   push to that pattern, owner only, and neither `ci.yml` nor `hellmini-probe.yml`
+   (which excludes `runner-probe/qwen-*`) triggers on it. Read the run (every
+   step green: identity as `ghci`, no `sudo`, no readable file under the nexus
+   config directory, the Windows side passing with its positive control). **Read
+   the credential line, not just the colour: `NOT CHECKED` is not a pass.** It
+   means the nexus config directory was absent or closed to `ghci`, so the
+   credential check never ran; the run is still green, and carries a warning
+   annotation on its summary. Do not record a run with that warning as the
+   isolation evidence; fix the host (or the path) and run again. Then delete the branch (`git push origin :refs/heads/runner-probe/qwen-<date>`).
+   The same push works after the file is on `main`; a dispatch works then too.
+4. **Record the green run id** in `AGENTS.md` (the "Probe run record" line under
+   the routing section), in the change that does step 5.
+5. **Set the variable:** `gh variable set QWEN_CI_PUSH_RUNNER --body qwen-linux`,
+   then confirm with `gh variable list`.
+6. **Push once and walk the checklist below.**
+
+Turn it off with `gh variable delete QWEN_CI_PUSH_RUNNER`. **"Re-run failed jobs"
+keeps the OLD route** (the `changes` job succeeded, so it is not re-run, and its
+`ci_runner` output stays): after changing the variable use "Re-run all jobs" or
+push again. A green probe is one point in time. `ghci` is in the `docker` group,
+which is root on the distro, so a job could rewrite `/etc/wsl.conf` for the next
+WSL restart; the first step of `test-qwen` re-checks the Windows side on every run
+and fails the job closed (it notices after the fact, it does not prevent).
+
+First cold run:
+1. The job lands on `qwen-linux` (runner name in the log header); the consistency,
+   lease and toolchain steps are green as `ghci`.
+2. bge and docling prime and `ci_warm_docling.py` pass.
+3. `build-gate-jar.sh` is a cache hit or a roughly 9 minute build; the jar is stamped.
+4. The suite step reports 20000 or more passed and none failed, in 10 to 15 minutes;
+   the floor step is green.
+5. The six hosted shards and `service-jar` show skipped, and `pytest-gate` passes.
+6. The board has `queued`, `in_progress` and `completed` posts for
+   `pytest (qwen-linux full suite)` with an unmangled name, and
+   `scripts/ci_status.py <sha>` exits 0.
+7. The leftover-process report says no substrate processes were left behind.
+
+Then, before the route is called settled:
+8. A second warm run: checkout `clean` deletes `.venv` and `service/target`, so
+   this proves the cache paths (uv, models, the jar cache in the git common dir).
+9. A cancel test: push twice in quick succession so the first run is cancelled
+   mid-suite, then check on the host for orphan Postgres and `nexus-service`
+   processes, containers on the shared docker daemon, and shared-memory
+   segments (`ipcs -m`). The next run's orphan sweep should clear what it left.
+10. One overlap with a hand run: start a full suite as `nxtest` (with the two
+    exported variables), push, and see the CI job queue behind the lease and
+    start when the hand run ends, with no OOM on the distro.
+11. The skip-reason diff (the `TODO(qwen-floor)` in `ci.yml`): diff the `-rs`
+    skip reasons in `suite-output.txt` against a hosted run of the same tree. The
+    measured gap is about 2k tests (25,705 passed here against about 27.7k from
+    the shards). Fix or accept each reason, then raise the floor to about
+    measured minus 2% and delete the TODO.
+12. One exercise of the toggle: delete `QWEN_CI_PUSH_RUNNER`, push, see the hosted
+    shards run and `test-qwen` skip, then set it back to `qwen-linux`. "Re-run
+    failed jobs" keeps the old route, so a toggle takes a new push or "Re-run all
+    jobs".
+
+A green run does not show the overlap or flake behaviour (that takes about ten
+runs), signal-timing tests under `-n 12` while the host's inference is loaded,
+or the `GITHUB_ACTIONS` CI-only skip branches (`NX_T2_SUBSTRATE_EXPECTED=1`
+disarms them, so only their fail-loud twins run).
 
 ## License
 
@@ -679,7 +775,7 @@ Trigger: this release's tag (client `vX.Y.Z` or engine `engine-service-vX.Y.Z`) 
 
 3. **A freeze window derived from measurement, not a guess.** Generalizing the `nexus-o8dil.22` window pre-flight (T2 [22420] / [22427] / [22485]): (a) copy-peak — the largest transient storage footprint the migration needs mid-flight; (b) WAL budget — retained WAL under the deployment's replication settings during the window, checked against `max_wal_size`; (c) disk floor — abort unless available disk clears (steady-state floor + copy-peak) with a stated margin, re-measured immediately before executing (corpus growth between planning and execution shrinks the margin). Record the threshold and the abort condition in the operator runbook, not just the target duration.
 
-4. **Post-deploy data-integrity verification beyond version identity.** A `/version` match proves the binary shipped, not that the data survived. Verify, per T2 [22485]'s pattern: exact row-count reconciliation pre vs. post (per dimension/table, not an aggregate), that `ANALYZE` actually fired, and that the standing functional gates (`tests/e2e/cloud-client-path-gate.sh`; the deploy gate's parity/recall legs) are green post-migration. [22485]'s own verdict is the bar: "ROW INVARIANT EXACT: 385,484 pre == post ... ANALYZE fired ... STEP-6 green (112/113 parity, recall 12/12 pools identical), cloud client-path gate PASSED all four legs."
+4. **Post-deploy data-integrity verification beyond version identity.** A `/version` match proves the binary shipped, not that the data survived. Verify, per T2 [22485]'s pattern: exact row-count reconciliation pre vs. post (per dimension/table, not an aggregate), that `ANALYZE` actually fired, and that the standing functional gates (`tests/e2e/cloud-client-path-gate.sh`, run with `NX_EXPECTED_OWNERLESS_WRITE_MODE=<the live mode>` once the engine carries the RDR-223 ownerless-write refusal, because the plain form fails leg B3 on any engine that reports a mode; the deploy gate's parity/recall legs) are green post-migration. [22485]'s own verdict is the bar: "ROW INVARIANT EXACT: 385,484 pre == post ... ANALYZE fired ... STEP-6 green (112/113 parity, recall 12/12 pools identical), cloud client-path gate PASSED all four legs."
 
 ### Break-glass: retry, yank, revert, and tag retraction
 

@@ -12,10 +12,20 @@ import java.util.Objects;
  * <p>The check is requested by the HANDLER, through this guard, and is not part of the
  * repository's write methods: a repository method called without a guard (the contract and
  * fixture tests, the migration ingest) writes ownerless chunks as it always did.
- * {@code OwnershipGuardCoverageScan} scans the main sources so a handler cannot call a guarded
- * repository method with a null guard, or add a new chunk-write route that never builds one. The
- * scan matches direct calls and method references to the guarded methods, as text, so it also reads
- * comments: name a guarded method in prose without the call or the double-colon syntax.
+ * {@code OwnershipGuardCoverageScan} scans the main sources, by name, for the four guarded
+ * repository methods ({@code upsertChunksWithTokens}, {@code upsertChunksWithVectors},
+ * {@code putWithTokens}, {@code upsertChunks}), so a handler cannot call one of them with a null
+ * guard. It matches direct calls and method references as text, so it also reads comments: name a
+ * guarded method in prose without the call or the double-colon syntax. It does not see a chunk
+ * write that goes through another method or through direct SQL. Known writers outside the guard are
+ * the SQL functions whose live definition inserts into {@code nexus.chunks} (the last definition of
+ * each function in the changelog's include order, rollback blocks excluded). The source of truth is
+ * {@code _CHUNK_INSERTER_ALLOWLIST} in {@code tests/test_changelog_chunk_inserter_lint.py}, each entry
+ * with its reason: that lint fails when a function that is not on the list inserts into
+ * {@code nexus.chunks}, and when an entry no longer does, so a change that adds such a function (the
+ * reaper's and the quarantine restore's) extends the list there and this paragraph needs no edit. It
+ * deliberately names none of them here, nor the changeset that defines them, because that goes stale
+ * the moment a function is redefined.
  *
  * @param mode          enforce or log-only
  * @param route         the route name for the error and the log, e.g. {@code upsert-chunks}

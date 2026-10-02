@@ -38,6 +38,13 @@
 # Run with: bash tests/e2e/migration-rehearsal/run_sh_guard_test.sh
 set -u -o pipefail
 
+# The suite builds its own fake repo and assumes the lease root is that repo's
+# own. An inherited NX_BUILD_LEASE_ROOT (CI's lease step exports it, and so
+# does the documented hand-run setup) would point the lease at the shared
+# root: the lease dir is then missing from the fake repo, and the fixture
+# leases this suite writes would land in the shared root.
+unset NX_BUILD_LEASE_ROOT NX_SUITE_LEASE_WAIT NX_SUITE_LEASE_HELD_BY
+
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$HERE/../../.." && pwd)"
 WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/run_sh_guard_test.XXXXXX")"

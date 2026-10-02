@@ -9,6 +9,11 @@ self-hosted-runner:
   # Service CI Java job on owner pushes (nexus-f5i1m) and the isolation probe
   # (nexus-vyg07). Same bare-label registration. service-ci.yml's runs-on is an
   # expression, which actionlint does not resolve, so only the probe needs this.
+  #
+  # qwen-linux: the WSL runner on qwentescence, Linux user `ghci`. Unlike the two
+  # above it carries the default labels too (self-hosted, Linux, X64), so ci.yml's
+  # `test-qwen` job names the whole set; this entry declares the custom one.
   labels:
     - hellmini
     - hellmini-ci
+    - qwen-linux
