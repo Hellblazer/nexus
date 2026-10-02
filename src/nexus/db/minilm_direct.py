@@ -28,7 +28,9 @@ from __future__ import annotations
 
 import hashlib
 import os
+import shutil
 import tarfile
+import tempfile
 import threading
 from pathlib import Path
 from typing import Any
@@ -79,41 +81,91 @@ _MODEL_SHA256 = "913d7300ceae3b2dbc2c50d1de4baacab4be7b9380491c27fab7418616a16ec
 _MAX_TOKENS = 256
 
 
+def _artifact_complete(artifact: Path) -> bool:
+    return (artifact / "model.onnx").is_file() and (
+        artifact / "tokenizer.json"
+    ).is_file()
+
+
 def ensure_artifact() -> Path:
     """Download + extract the MiniLM ONNX artifact if absent (idempotent).
 
     Fail-loud on sha256 mismatch — never runs an unverified model.
     Returns :func:`artifact_dir`.
+
+    Safe under concurrent first use (nexus-ccre5): every caller streams into
+    its OWN temp archive and extracts into its OWN temp directory, both inside
+    :func:`download_path` so the final rename stays on one filesystem, then
+    publishes the extracted ``onnx/`` with one atomic rename. A caller that
+    loses the race finds a complete artifact already in place and treats that
+    as success. The shared cache path is therefore never half-written: a
+    reader sees either no ``onnx/`` or a complete one. Before this, all
+    callers shared one ``onnx.tar.gz`` and one extraction target, and a peer
+    truncating the archive failed another caller's ``extractall`` with
+    ``EOFError`` (CI run 36962623595, eight xdist workers on a cold cache).
     """
     artifact = artifact_dir()
-    if (artifact / "model.onnx").is_file() and (
-        artifact / "tokenizer.json"
-    ).is_file():
+    if _artifact_complete(artifact):
         return artifact
 
     import httpx  # noqa: PLC0415 — download path only, keep import cheap
 
     download = download_path()
     download.mkdir(parents=True, exist_ok=True)
-    archive = download / _ARCHIVE_FILENAME
-    _log.info("minilm_artifact_download_start", url=_MODEL_DOWNLOAD_URL)
-    digest = hashlib.sha256()
-    with httpx.stream("GET", _MODEL_DOWNLOAD_URL, follow_redirects=True) as resp:
-        resp.raise_for_status()
-        with archive.open("wb") as fh:
-            for chunk in resp.iter_bytes(chunk_size=65536):
-                fh.write(chunk)
-                digest.update(chunk)
-    if digest.hexdigest() != _MODEL_SHA256:
+    fd, archive_name = tempfile.mkstemp(
+        dir=download, prefix=f".{_ARCHIVE_FILENAME}.", suffix=".part"
+    )
+    archive = Path(archive_name)
+    stage = Path(tempfile.mkdtemp(dir=download, prefix=".onnx.extract."))
+    try:
+        _log.info("minilm_artifact_download_start", url=_MODEL_DOWNLOAD_URL)
+        digest = hashlib.sha256()
+        with os.fdopen(fd, "wb") as fh:
+            with httpx.stream("GET", _MODEL_DOWNLOAD_URL, follow_redirects=True) as resp:
+                resp.raise_for_status()
+                for chunk in resp.iter_bytes(chunk_size=65536):
+                    fh.write(chunk)
+                    digest.update(chunk)
+        if digest.hexdigest() != _MODEL_SHA256:
+            raise RuntimeError(
+                f"MiniLM artifact sha256 mismatch: got {digest.hexdigest()}, "
+                f"expected {_MODEL_SHA256} — refusing to extract."
+            )
+        with tarfile.open(archive, "r:gz") as tar:
+            tar.extractall(stage, filter="data")
+        staged = stage / artifact.name
+        if not _artifact_complete(staged):
+            raise RuntimeError(
+                f"MiniLM archive did not contain {artifact.name}/model.onnx and "
+                f"{artifact.name}/tokenizer.json"
+            )
+        _publish(staged, artifact)
+    finally:
         archive.unlink(missing_ok=True)
-        raise RuntimeError(
-            f"MiniLM artifact sha256 mismatch: got {digest.hexdigest()}, "
-            f"expected {_MODEL_SHA256} — refusing to extract."
-        )
-    with tarfile.open(archive, "r:gz") as tar:
-        tar.extractall(download, filter="data")
+        shutil.rmtree(stage, ignore_errors=True)
     _log.info("minilm_artifact_ready", path=str(artifact))
     return artifact
+
+
+def _publish(staged: Path, artifact: Path) -> None:
+    """Atomically rename ``staged`` onto ``artifact``.
+
+    A complete ``artifact`` that appears first (a peer won) is success. An
+    incomplete one (a crashed pre-fix extraction) is cleared once and the
+    rename retried.
+    """
+    for attempt in (1, 2):
+        try:
+            os.rename(staged, artifact)
+            return
+        except OSError:
+            # rename onto a non-empty directory: ENOTEMPTY / EEXIST.
+            if _artifact_complete(artifact):
+                _log.info("minilm_artifact_peer_published", path=str(artifact))
+                return
+            if attempt == 2:
+                raise
+            shutil.rmtree(artifact, ignore_errors=True)
 
 
 class MiniLMDirectEmbeddingFunction:
