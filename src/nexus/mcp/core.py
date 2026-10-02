@@ -5321,10 +5321,16 @@ def _annotation_line_for_entry(entry) -> str:
 
 # HISTORY. Empty-title semantics (nexus-sdp0u): re-putting the same
 # (collection, title) pair reconciles onto the existing document (manifest
-# replaced, not duplicated) instead of minting a sibling; "replaced, not
-# duplicated" is a CATALOG-level guarantee only — the OLD T3 chunk itself
-# is not deleted and may remain independently visible via raw vector
-# search until a future sweep (nexus-39upx class) reaps it. Placeholder
+# replaced, not duplicated) instead of minting a sibling. The old chunk is
+# swept in the same request: put_note writes the chunks and the manifest as
+# ONE write_manifest_many with sweep=True (RDR-223), and the engine deletes
+# what the new manifest dropped in its own transaction after the manifest
+# commits. If that sweep errors (a gate or statement timeout), the old chunk
+# stays in T3 but raw search and get no longer return it: it has no live
+# own-collection manifest row, so live(c) hides it (RDR-192). The engine
+# reaper then moves it to a quarantine-* collection once it has been
+# ownerless for 30 days and deletes it 14 days after that (nexus-2x9xa;
+# docs/operations/engine-reaper.md). Placeholder
 # refusal is nexus-0fw11: there is no default subject, because "default"
 # is what minted `knowledge__knowledge`. `agent` attribution defaulting to
 # the "mcp" marker (never blank, never the indexer's own "nexus-indexer"
