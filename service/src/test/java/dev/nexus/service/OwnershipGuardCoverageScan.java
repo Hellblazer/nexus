@@ -19,7 +19,8 @@ import static org.assertj.core.api.Assertions.assertThat;
  * outside the repository itself must be in {@code VectorHandler} and must build its guard with
  * {@code ownershipGuard(}. It is a name match, not a proof about routes: a new repository method
  * that writes chunks, a direct SQL insert, or a changeset that inserts chunks is invisible to it
- * (see the SQL chunk inserters named in {@code OwnershipGuard}).
+ * (the SQL chunk inserters are listed, with reasons, in the allowlist that {@code OwnershipGuard}'s
+ * Javadoc names).
  *
  * <p>Method references are caught too: a {@code repo::upsertChunks} cannot carry a guard, so any
  * {@code ::<guarded method>} outside the repository fails, in any file. A call through reflection
