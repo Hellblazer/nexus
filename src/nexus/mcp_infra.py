@@ -1964,7 +1964,32 @@ taxonomy_assign_batch_hook.batch_grain = "flush"
 # ``hook_failures`` (the durable record ``nx taxonomy status``/triage
 # reads) is unaffected: it is written unconditionally, by a separate
 # function, earlier in the same HookRegistry.fire_batch except block.
+#
+# Which per-run collectors share the flag (T2 nexus/mcp-infra-collector-gating):
+# the two above plus every other LIST a long-lived process can reach:
+# ``_COMPLETE_REFUSALS`` (``note_write._stamp_refused`` on the MCP store_put
+# path), ``_SUPERSEDED_SWEEP_SKIPS`` (``MetadataMergingCatalog._note``) and
+# ``_EPHEMERAL_REGISTRATION_SKIPS`` (indexer-only today; gated so a future
+# long-lived caller cannot grow it). Left ungated on purpose, each with its
+# reason: the int counters (``_SUPERSEDED_SWEEP_SWEPT_TOTAL``,
+# ``_SUPERSEDED_SWEEP_DEFERRED_DISCARDED``, ``_RECONCILED_COLLECTIONS_COUNT``)
+# are O(1); ``_MANIFEST_PARTIAL_DOC_SKIP_COUNTS`` and the ``_PENDING_SWEEP_*``
+# state are fed only by ``manifest_write_batch_hook``, which
+# ``note_write.fire_note_chains`` excludes, so the MCP server never reaches
+# them, and the pending-sweep state is live data a later completion fence
+# consumes, not a report, so a skipped stash would silently drop a sweep.
 _identity_drop_collectors_active = False
+
+
+def _arm_run_collectors() -> None:
+    """Mark this process as running a CLI index run (see the section comment
+    above). Every per-run collector whose reset a CLI caller can reach on its
+    own arms through here, so a caller resetting only that collector still gets
+    it recording. One-way within a process, by design: a CLI invocation is
+    short-lived, and the MCP server never resets."""
+    global _identity_drop_collectors_active
+    _identity_drop_collectors_active = True
+
 
 _manifest_write_failures_lock = threading.Lock()
 _MANIFEST_WRITE_FAILURES: list[str] = []
@@ -2207,7 +2232,10 @@ def get_complete_refusals() -> list[str]:
 
 def reset_complete_refusals() -> None:
     """Clear the collector (CLI callers reset at the start of an indexing
-    run, mirroring ``reset_manifest_write_failures``)."""
+    run, mirroring ``reset_manifest_write_failures``). Also arms
+    ``_identity_drop_collectors_active``: recording is a no-op until a CLI
+    run has reset (see :func:`_arm_run_collectors`)."""
+    _arm_run_collectors()
     with _complete_refusals_lock:
         _COMPLETE_REFUSALS.clear()
 
@@ -2238,12 +2266,16 @@ def get_ephemeral_registration_skips() -> list[dict]:
 
 def reset_ephemeral_registration_skips() -> None:
     """Clear the collector (CLI callers reset at the start of an indexing
-    run, mirroring ``reset_manifest_write_failures``)."""
+    run, mirroring ``reset_manifest_write_failures``). Also arms
+    ``_identity_drop_collectors_active`` (see :func:`_arm_run_collectors`)."""
+    _arm_run_collectors()
     with _ephemeral_registration_skips_lock:
         _EPHEMERAL_REGISTRATION_SKIPS.clear()
 
 
 def _record_ephemeral_registration_skip(path: str, owner: str, reason: str = "") -> None:
+    if not _identity_drop_collectors_active:
+        return
     with _ephemeral_registration_skips_lock:
         _EPHEMERAL_REGISTRATION_SKIPS.append(
             {"path": path, "owner": owner, "reason": reason}
@@ -2251,9 +2283,16 @@ def _record_ephemeral_registration_skip(path: str, owner: str, reason: str = "")
 
 
 def _record_complete_refusal(doc_id: str) -> None:
+    # No-op until a CLI run has reset the collectors (nexus-wbfpw.29 round 2
+    # pattern, see the section comment above ``_identity_drop_collectors_active``):
+    # the MCP store_put path reaches this through ``note_write._stamp_refused``
+    # and never reads the list, so recording there only grows it for the life
+    # of the process.
     # Idempotent per doc_id: a duplicated engine response row (or the
     # count-mismatch conservative branch overlapping the listed refusals)
     # must not double-count once .6 wires a count-based consumer.
+    if not _identity_drop_collectors_active:
+        return
     with _complete_refusals_lock:
         if doc_id not in _COMPLETE_REFUSALS:
             _COMPLETE_REFUSALS.append(doc_id)
@@ -2310,11 +2349,14 @@ def get_superseded_sweep_stats() -> dict:
 
 def reset_superseded_sweep_stats() -> None:
     """Clear the collector (CLI callers reset at the start of an indexing
-    run, mirroring ``reset_manifest_write_failures``). Does not touch the
+    run, mirroring ``reset_manifest_write_failures``). Also arms
+    ``_identity_drop_collectors_active`` (see :func:`_arm_run_collectors`).
+    Does not touch the
     pending deferred-sweep entries themselves: those are live state, not
     counters. It only forgets which of them this run stashed, so the next
     run's pending stat does not inherit them."""
     global _SUPERSEDED_SWEEP_SWEPT_TOTAL, _SUPERSEDED_SWEEP_DEFERRED_DISCARDED
+    _arm_run_collectors()
     with _pending_sweep_lock:
         _PENDING_SWEEP_STASHED_SINCE_RESET.clear()
     with _superseded_sweep_stats_lock:
@@ -2332,6 +2374,12 @@ def _record_superseded_swept(count: int) -> None:
 
 
 def _record_superseded_sweep_skip(doc_id: str, collection: str | None, reason: str) -> None:
+    # No-op until a CLI run has reset the collectors: MetadataMergingCatalog
+    # (the MCP store path) records here and nothing in that process reads the
+    # list. The two int counters beside it stay unconditional: O(1) memory,
+    # no growth to bound.
+    if not _identity_drop_collectors_active:
+        return
     with _superseded_sweep_stats_lock:
         _SUPERSEDED_SWEEP_SKIPS.append(
             {"doc_id": doc_id, "collection": collection or "", "reason": reason}

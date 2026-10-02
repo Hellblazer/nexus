@@ -3836,6 +3836,93 @@ def _check_engine_convergence(config_dir: Path | None = None) -> list[HealthResu
     )]
 
 
+_OWNERLESS_WRITES_LABEL = "Ownerless writes"
+
+#: "No status was passed in; fetch it". ``None`` already means "the fetch ran and failed".
+_ENGINE_STATUS_UNSET: object = object()
+
+
+def _status_int(value: object) -> int:
+    """A counter from the engine's status body as an int; anything else is 0."""
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else 0
+
+
+def _check_ownerless_writes(engine_status: object = _ENGINE_STATUS_UNSET) -> list[HealthResult]:
+    """nexus-20onx (RDR-223 P3.2): has the engine seen a chunk write with no owner?
+
+    The engine refuses (``enforce``) or counts (``log-only``) a write to
+    ``/v1/vectors/upsert-chunks`` or ``/v1/vectors/store-put`` whose chash no
+    live manifest row owns. Only a client released before the RDR-223 Phase 2
+    migration writes that way, so a non-zero counter means some machine that
+    writes to this engine runs old code: not yet upgraded, or upgraded but a
+    long-lived ``nx-mcp`` server or hook-spawned ``nx`` still running what it
+    started with. The counters are since-boot, so the row says which engine
+    reading it examined.
+
+    Not applicable (ok, no warning) when the engine cannot be reached or does
+    not report the counters, so a virgin box and an engine that predates the
+    refusal stay green. The row never reads the client's own version: the
+    engine's counters and its log line (which names the route, collection,
+    ``User-Agent`` and ``X-Nexus-Client-Version``) are the oracle, and a stale
+    process on THIS machine is the ``Process freshness`` row's job.
+    """
+    label = _OWNERLESS_WRITES_LABEL
+    status: dict | None
+    if engine_status is _ENGINE_STATUS_UNSET:
+        try:
+            from nexus.db.http_engine_status import fetch_engine_status  # noqa: PLC0415 — deferred to keep CLI startup fast
+            status = fetch_engine_status()
+        except Exception as exc:  # noqa: BLE001 — best-effort: must not crash `nx doctor`
+            _log.debug("doctor_ownerless_writes_probe_failed", error=str(exc))
+            status = None
+    else:
+        status = engine_status if isinstance(engine_status, dict) else None
+    if status is None:
+        return [HealthResult(
+            label=label, ok=True,
+            detail="not applicable: the engine's status endpoint could not be read",
+        )]
+    mode = status.get("ownerless_write_mode")
+    if mode is None:
+        return [HealthResult(
+            label=label, ok=True,
+            detail="not applicable: this engine predates the ownerless-write refusal",
+        )]
+    refused = _status_int(status.get("ownerless_writes_refused_total"))
+    would = _status_int(status.get("ownerless_writes_would_refuse_total"))
+    if not refused and not would:
+        return [HealthResult(
+            label=label, ok=True,
+            detail=f"engine mode={mode}: no ownerless chunk write since the engine started",
+        )]
+    parts = []
+    if refused:
+        parts.append(f"{refused} refused")
+    if would:
+        parts.append(f"{would} accepted that enforce mode would refuse")
+    return [HealthResult(
+        label=label, ok=False, warn=True,
+        detail=(
+            f"engine mode={mode}: {' and '.join(parts)} since the engine started. A client "
+            "older than the RDR-223 Phase 2 release writes a chunk before its owner, a "
+            "process upgraded on disk still runs the old code, or a caller that is not the "
+            "nexus client (curl, a script) writes that way. The counters are since the "
+            "engine started and name no cause."
+        ),
+        fix_suggestions=[
+            "On every machine that writes to this engine, upgrade conexus, then RESTART every "
+            "long-lived nx-mcp server (each Claude Code session) and hook-spawned nx; "
+            "`nx daemon restart-stale` lists what predates the install",
+            "The engine log line `ownerless_chunk_write_would_refuse` (or `_refused`) names "
+            "the route, collection, User-Agent and X-Nexus-Client-Version of each writer; a "
+            "missing version is a client older than the cut OR a caller that never sends it "
+            "(curl, a script), which an upgrade cannot fix",
+            "Flip NX_OWNERLESS_WRITE_MODE from log-only to enforce only after this count "
+            "stops moving with every client restarted (docs/operations/ownerless-write-cutover.md)",
+        ],
+    )]
+
+
 def _check_t2_launchagent_stray() -> list[HealthResult]:
     """nexus-c0vby (GH #1405 defect 2): backstop for the automatic
     ``unload_stale_t2_launchagent`` finish-pass leg
@@ -9116,13 +9203,21 @@ def _check_taxonomy_discover_health() -> list[HealthResult]:
     )]
 
 
-def run_health_checks(git_hooks_scope: str | Path | None = None) -> tuple[list[HealthResult], bool]:
+def run_health_checks(
+    git_hooks_scope: str | Path | None = None,
+    engine_status: object = _ENGINE_STATUS_UNSET,
+) -> tuple[list[HealthResult], bool]:
     """Run all health checks.
 
     ``git_hooks_scope``: forwarded to :func:`_check_git_hooks` (nexus-jds59)
     to restrict the git-hooks stanza-drift walk to repos at or under the
     given root. ``None`` (default) preserves the original behavior of
     walking every repo registered on the machine.
+
+    ``engine_status``: the ``GET /v1/status`` body (or ``None`` when the fetch
+    failed) when the caller already fetched it, so one ``nx doctor`` run makes
+    one status request for the "Ownerless writes" row and the engine-activity
+    block together. Left unset, the row fetches its own.
 
     Returns (results, is_local_mode).
     """
@@ -9248,6 +9343,7 @@ def run_health_checks(git_hooks_scope: str | Path | None = None) -> tuple[list[H
     # so they are always safe to run.
     results.extend(_check_storage_service_health())
     results.extend(_check_engine_convergence())
+    results.extend(_check_ownerless_writes(engine_status))  # nexus-20onx
     results.extend(_check_t2_launchagent_stray())
     results.extend(_check_service_launchagent_stray())
     results.extend(_check_service_autostart_drift())

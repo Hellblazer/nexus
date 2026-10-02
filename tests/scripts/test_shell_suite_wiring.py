@@ -183,6 +183,19 @@ SUITES = [
     # run or container does. Deleting Test 10 still turns either floor red.
     _Suite("scripts/lib/build-lease_test.sh", 39 if os.geteuid() == 0 else 40),
     _Suite("scripts/mvnw-leased_test.sh", 22),
+    # nexus-9a6io: the published-client gate's verdict section (RDR-223 P3.2
+    # ownerless-write modes), extracted from the real script and run against
+    # canned /v1/status bodies. 47 cases (18 + 4 ack-evidence, nexus-9a6io fix round; +4 non-integer
+    # counter, +9 refusal-classifier cases sourced from the real script, round 3; +4 journey call
+    # sites and +8 console-evidence cases, round 4).
+    _Suite("tests/e2e/published_client_write_gate_verdict_test.sh", 47),
+    # nexus-20onx round 3: leg B3's compare logic, sourced from the real cloud
+    # gate script and fed canned /v1/status bodies (11 cases + 3 wiring checks;
+    # round 4: 4 unreadable-body cases, S4, 17 in all).
+    _Suite("tests/e2e/cloud_client_path_gate_b3_test.sh", 17),
+    # nexus-k9fs1 round 4: two-walk-check.sh's three decisions (walk 1 pin, final
+    # sentinel, start-count guard), sourced from the real script.
+    _Suite("tests/e2e/two_walk_check_decisions_test.sh", 15),
 ]
 
 

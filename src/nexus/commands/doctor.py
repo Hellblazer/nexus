@@ -1440,7 +1440,11 @@ def _run_check_index_failures() -> None:
 # ── --check-engine-activity (nexus-s71lr) ────────────────────────────────────
 
 
-def _report_engine_activity() -> None:
+#: "No status was passed in; fetch it". ``None`` already means "the fetch ran and failed".
+_ENGINE_STATUS_UNSET: object = object()
+
+
+def _report_engine_activity(status: object = _ENGINE_STATUS_UNSET) -> None:
     """"What is the engine doing right now" — bead nexus-s71lr deliverable 3.
 
     One unauthenticated GET (``fetch_engine_status``), always exit 0 —
@@ -1451,18 +1455,19 @@ def _report_engine_activity() -> None:
     traceback or a false "everything is fine").
     """
     from nexus.db.http_engine_status import fetch_engine_status, format_engine_activity_line  # noqa: PLC0415 — deferred to keep CLI startup fast
-    status = fetch_engine_status()
-    click.echo(format_engine_activity_line(status))
+    if status is _ENGINE_STATUS_UNSET:
+        status = fetch_engine_status()
+    click.echo(format_engine_activity_line(status if isinstance(status, dict) else None))
 
 
-def _run_check_engine_activity() -> None:
+def _run_check_engine_activity(status: object = _ENGINE_STATUS_UNSET) -> None:
     """Report the engine's live embed-activity counters from GET /v1/status.
 
     Bead nexus-s71lr: the client-side half of "is the engine still
     embedding, or has it hung" — the SAME question the engine's own
     rate-limited progress log line answers, without tailing logs.
     """
-    _report_engine_activity()
+    _report_engine_activity(status)
 
 
 # ── --check-fanout-floor (nexus-rbhci) ───────────────────────────────────────
@@ -2388,7 +2393,7 @@ _OPT_IN_ONLY_CHECKS: tuple[str, ...] = (
 )
 
 
-def _run_supplementary_checks() -> None:
+def _run_supplementary_checks(engine_status: object = _ENGINE_STATUS_UNSET) -> None:
     """Run the cheap/read-only opt-in checks promoted into the default
     sweep (see the classification table above). Purely additive output --
     never affects the caller's exit code (see the non-gating note above).
@@ -2407,7 +2412,7 @@ def _run_supplementary_checks() -> None:
         "taxonomy": _run_check_taxonomy,
         "aspect-queue": _run_check_aspect_queue,
         "t1": _run_check_t1,
-        "engine-activity": _run_check_engine_activity,
+        "engine-activity": lambda: _run_check_engine_activity(engine_status),
         "index-failures": _run_check_index_failures,
         "fanout-floor": _run_check_fanout_floor,
         "tuple-projection": _run_check_tuple_projection,
@@ -3249,7 +3254,11 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
     # ── Health check path — delegates to nexus.health ─────────────────────────
     from nexus.health import run_health_checks, format_health_for_cli, format_health_for_json  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
-    results, is_local = run_health_checks(git_hooks_scope=git_hooks_scope)
+    # One GET /v1/status serves the "Ownerless writes" row and the engine-activity block.
+    from nexus.db.http_engine_status import fetch_engine_status  # noqa: PLC0415 — deferred to keep CLI startup fast
+
+    engine_status = fetch_engine_status()
+    results, is_local = run_health_checks(git_hooks_scope=git_hooks_scope, engine_status=engine_status)
     output, failed = format_health_for_cli(results, local_mode=is_local)
     if json_out:
         # nexus-0vycz: machine-parseable JSON on stdout only -- no human
@@ -3257,7 +3266,7 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
         click.echo(format_health_for_json(results, local_mode=is_local))
     else:
         click.echo(output)
-        _run_supplementary_checks()
+        _run_supplementary_checks(engine_status)
 
     # RDR-185 P4.2 (nexus-n7u38.29): the nexus-0rwwv bridge notice is RETIRED
     # here. A pending Chroma→pgvector cutover is reported by the ladder's own
