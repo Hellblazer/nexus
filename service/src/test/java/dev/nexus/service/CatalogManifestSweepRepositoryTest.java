@@ -481,8 +481,10 @@ class CatalogManifestSweepRepositoryTest {
             // must classify as the catch-all "sweep_failed".
             @SuppressWarnings("unchecked")
             var detail15 = (List<Map<String, Object>>) result.get("sweep_detail");
-            assertThat(detail15).singleElement().satisfies(d ->
-                assertThat(d.get("reason")).isEqualTo("sweep_failed"));
+            assertThat(detail15).singleElement().satisfies(d -> {
+                assertThat(d.get("reason")).isEqualTo("sweep_failed");
+                assertNoSweptChashesReported(d);
+            });
             // The manifest replace committed: swp.6 now has the NEW row, not the old.
             assertThat(repo.getManifest(TENANT_A, "swp.6"))
                 .singleElement()
@@ -733,6 +735,7 @@ class CatalogManifestSweepRepositoryTest {
                 // method's own read happens BEFORE that method is ever
                 // called), so it must carry its own distinct reason value.
                 assertThat(d.get("reason")).isEqualTo("before_read_failed");
+                assertNoSweptChashesReported(d);
             });
         assertThat(repo.getManifest(TENANT_A, "swp.9"))
             .singleElement()
@@ -778,8 +781,10 @@ class CatalogManifestSweepRepositoryTest {
             // "gate_timeout", distinct from a DELETE-side failure.
             @SuppressWarnings("unchecked")
             var detail20 = (List<Map<String, Object>>) result.get("sweep_detail");
-            assertThat(detail20).singleElement().satisfies(d ->
-                assertThat(d.get("reason")).isEqualTo("gate_timeout"));
+            assertThat(detail20).singleElement().satisfies(d -> {
+                assertThat(d.get("reason")).isEqualTo("gate_timeout");
+                assertNoSweptChashesReported(d);
+            });
             assertThat(chunk384Exists(TENANT_A, col, x))
                 .as("chunk survives while the gate is externally held").isTrue();
 
@@ -945,8 +950,10 @@ class CatalogManifestSweepRepositoryTest {
             assertThat(result.get("swept")).isEqualTo(0);
             @SuppressWarnings("unchecked")
             var detail = (List<Map<String, Object>>) result.get("sweep_detail");
-            assertThat(detail).singleElement().satisfies(d ->
-                assertThat(d.get("reason")).isEqualTo("statement_timeout"));
+            assertThat(detail).singleElement().satisfies(d -> {
+                assertThat(d.get("reason")).isEqualTo("statement_timeout");
+                assertNoSweptChashesReported(d);
+            });
             assertThat(chunk384Exists(TENANT_A, col, x))
                 .as("statement-timeout sweep must leave the chunk untouched").isTrue();
         } finally {
@@ -1262,6 +1269,18 @@ class CatalogManifestSweepRepositoryTest {
     }
     // ── RDR-192 Step 13 (nexus-wbfpw.25): sweep_detail names the chashes the sweep deleted ──
 
+    /**
+     * nexus-wbfpw.25 fix round 2: an errored sweep_detail entry (any reason) carries the
+     * report fields as an empty list and false, never absent and never stale. Pinned per
+     * reason below because the three putSweptChashes call sites are separate (the
+     * before-read catch, the success path, runSweepTransaction's catch).
+     */
+    private static void assertNoSweptChashesReported(Map<String, Object> entry) {
+        assertThat((List<?>) entry.get("swept_chashes"))
+            .as("an errored sweep deleted nothing it can name").isEmpty();
+        assertThat(entry).containsEntry("swept_chashes_truncated", false);
+    }
+
     /** The single sweep_detail entry of a one-document sweep response. */
     @SuppressWarnings("unchecked")
     private static Map<String, Object> onlyDetail(Map<String, Object> result) {
@@ -1331,7 +1350,10 @@ class CatalogManifestSweepRepositoryTest {
         assertThat(d).containsEntry("swept_chashes_truncated", true);
         @SuppressWarnings("unchecked")
         List<String> listed = (List<String>) d.get("swept_chashes");
-        assertThat(all).as("every listed chash was a dropped one").containsAll(listed);
+        assertThat(listed)
+            .as("the listed 300 are the 300 lowest, ascending: an unsorted prefix of the RETURNING"
+                + " order would not equal this")
+            .isEqualTo(all.stream().sorted().limit(CatalogRepository.SWEPT_CHASHES_REPORT_CAP).toList());
         assertThat(result.get("swept")).isEqualTo(total);
     }
 
