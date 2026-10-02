@@ -346,7 +346,8 @@ final class ChunkReaper {
      * row of the origin still names (benign, labelled {@code expiry_protected}, never a refusal). {@code refusal}
      * and {@code error} are null when absent; {@code refusal} is a skip (a lock wait timed out, or the sibling is
      * resting after repeated timeouts) or {@link Refusal#STATEMENT_TIMED_OUT}. Expiry has no floor, so it has no
-     * floor refusal.
+     * floor refusal. {@code expired} and {@code protectedCount} are what the sibling's earlier origins already
+     * deleted or protected, kept when a later origin ends the pass with a refusal or an error (nexus-wbfpw.53).
      */
     record ExpiryResult(String quarantineCollection, long expired, long protectedCount,
                         Refusal refusal, String error) {}
@@ -989,9 +990,12 @@ final class ChunkReaper {
             return new ExpiryResult(quarantine, 0, 0, Refusal.STATEMENT_BACKOFF, null);
         }
         String cutoff = clock.instant().minus(settings.quarantineRetention()).truncatedTo(ChronoUnit.SECONDS).toString();
+        // Kept outside the try: a refusal or a failure on a LATER origin must report what the earlier origins of the
+        // same sibling already deleted (their rows are gone and audited; nexus-wbfpw.53 fixed the result and the log
+        // dropping them).
+        long expired = 0;
+        long protectedCount = 0;
         try {
-            long expired = 0;
-            long protectedCount = 0;
             for (String origin : store.taggedOrigins(tenant, quarantine, STATEMENT_TIMEOUT_MS)) {
                 if (!states.containsKey(origin)) {
                     // An origin with no catalog row is a catalog anomaly or a retired collection; nothing is expired
@@ -1019,9 +1023,10 @@ final class ChunkReaper {
                 // clears itself, counted with the other lock skips, never an error and never a refusal.
                 long n = lockTimeoutTotal.incrementAndGet();
                 log.info("event=reaper_expire_skipped tenant={} quarantine={} reason={} lock_timeout_total={} "
-                        + "detail={}", tenant, quarantine, Refusal.LOCK_TIMEOUT, n,
+                        + "expired_before_refusal={} expiry_protected_before_refusal={} detail={}", tenant, quarantine,
+                    Refusal.LOCK_TIMEOUT, n, expired, protectedCount,
                     "a lock wait timed out during expiry; retried next pass");
-                return new ExpiryResult(quarantine, 0, 0, Refusal.LOCK_TIMEOUT, null);
+                return new ExpiryResult(quarantine, expired, protectedCount, Refusal.LOCK_TIMEOUT, null);
             }
             if ("57014".equals(sqlState(e))) {
                 // The expiry (or the listing of the sibling's origins) hit its bound: a counted refusal, audited
@@ -1029,17 +1034,21 @@ final class ChunkReaper {
                 long timedOut = statementTimedOutTotal.incrementAndGet();
                 long rest = noteTimeout(key, pass);
                 long n = refusedTotal.incrementAndGet();
-                String detail = "the expiry statement exceeded its " + (STATEMENT_TIMEOUT_MS / 1000)
-                    + "s bound and deleted nothing; statement_timed_out_total=" + timedOut
+                String detail = "the expiry statement exceeded its " + (STATEMENT_TIMEOUT_MS / 1000) + "s bound and "
+                    + (expired > 0 ? "deleted " + expired + " chunk(s) of the origins it reached first, none after"
+                        : "deleted nothing")
+                    + "; statement_timed_out_total=" + timedOut
                     + streakDetail(timeoutStreaks.get(key).consecutive, rest);
-                log.warn("event=reaper_expire_refused tenant={} quarantine={} reason={} refused_total={} detail={}",
-                    tenant, quarantine, Refusal.STATEMENT_TIMED_OUT, n, detail);
+                log.warn("event=reaper_expire_refused tenant={} quarantine={} reason={} refused_total={} "
+                        + "expired_before_refusal={} expiry_protected_before_refusal={} detail={}", tenant, quarantine,
+                    Refusal.STATEMENT_TIMED_OUT, n, expired, protectedCount, detail);
                 recordRefusal(tenant, quarantine, Refusal.STATEMENT_TIMED_OUT, 0, 0, detail, List.of());
-                return new ExpiryResult(quarantine, 0, 0, Refusal.STATEMENT_TIMED_OUT, null);
+                return new ExpiryResult(quarantine, expired, protectedCount, Refusal.STATEMENT_TIMED_OUT, null);
             }
-            log.warn("event=reaper_expire_failed tenant={} quarantine={} error={}", tenant, quarantine,
+            log.warn("event=reaper_expire_failed tenant={} quarantine={} expired_before_refusal={} "
+                    + "expiry_protected_before_refusal={} error={}", tenant, quarantine, expired, protectedCount,
                 e.getMessage(), e);
-            return new ExpiryResult(quarantine, 0, 0, null, String.valueOf(e.getMessage()));
+            return new ExpiryResult(quarantine, expired, protectedCount, null, String.valueOf(e.getMessage()));
         }
     }
 

@@ -1943,6 +1943,135 @@ class ChunkReaperIntegrationTest extends AtomicWriteTestBase {
         assertThat(r.runOnce(null).tenant(t).expiry(q).expired()).as("the next pass takes both").isEqualTo(2);
     }
 
+    // ── a refusal or a failure on a LATER origin keeps what the EARLIER origins of the sibling already expired
+    //    (nexus-wbfpw.53; the catch blocks returned ExpiryResult(.., 0, 0, ..) and dropped the accumulators) ──
+
+    /** One sibling, quarantine-{@code first}, holding aged engine-tagged chunks of two origins; {@code first} sorts before {@code second}. */
+    private record TwoOriginSibling(String tenant, String first, String second, String sibling,
+                                    List<String> firstChunks, List<String> secondChunks) {}
+
+    private TwoOriginSibling twoOriginSibling(int nFirst, int nSecond) throws Exception {
+        String t = newTenant();
+        openGate(t);
+        String x = col("knowledge");
+        String y = col("knowledge");
+        String first = x.compareTo(y) < 0 ? x : y;
+        String second = first.equals(x) ? y : x;
+        String sibling = quarantineOf(first);
+        List<String> a = quarantined(t, first, "old", nFirst, 15, true);
+        String stamp = CLOCK.instant().minus(Duration.ofDays(15)).truncatedTo(java.time.temporal.ChronoUnit.SECONDS)
+            .toString();
+        List<String> hexes = new ArrayList<>();
+        List<String> texts = new ArrayList<>();
+        List<float[]> vecs = new ArrayList<>();
+        List<Map<String, Object>> metas = new ArrayList<>();
+        for (int i = 0; i < nSecond; i++) {
+            hexes.add(Chash.ofText(sibling + "/second" + i).toHex());
+            texts.add("second" + i);
+            vecs.add(new float[384]);
+            metas.add(Map.of("quarantined_at", stamp, "origin_collection", second,
+                "quarantined_by", "engine-reaper", "reaper_quarantined_at", stamp));
+        }
+        try (Connection su = pg.createConnection("")) {
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCollection(ctx, t, second);
+            PgContainerHelper.insertChunks(ctx, t, sibling, hexes, texts, vecs, metas);
+        }
+        return new TwoOriginSibling(t, first, second, sibling, a, hexes);
+    }
+
+    @Test
+    void aLockTimeoutOnALaterOrigin_keepsTheCountTheEarlierOriginAlreadyExpired() throws Throwable {
+        TwoOriginSibling s = twoOriginSibling(2, 1);
+        String t = s.tenant();
+        ChunkReaper r = reaper(t);
+        ChunkReaper.TenantResult[] result = new ChunkReaper.TenantResult[1];
+        List<String> logs;
+        try (Connection writer = svcDs.getConnection()) {
+            writer.setAutoCommit(false);
+            PgContainerHelper.setTenant(writer, TenantScope.DEFAULT_TENANT_GUC, t, true);
+            // A client holds an uncommitted write on the SECOND origin's chunk past the 2 s lock bound.
+            DSL.using(writer, SQLDialect.POSTGRES).update(CHUNKS).set(CHUNKS.LAST_WRITTEN_AT, OffsetDateTime.now())
+               .where(CHUNKS.TENANT_ID.eq(t).and(CHUNKS.COLLECTION.eq(s.sibling()))
+                      .and(CHUNKS.CHASH.eq(Chash.fromHex(s.secondChunks().get(0)).toBytes()))).execute();
+            logs = captureLogs(() -> result[0] = r.runOnce(null).tenant(t));
+            writer.rollback();
+        }
+
+        ChunkReaper.ExpiryResult e = result[0].expiry(s.sibling());
+        assertThat(e.refusal()).as("refusal semantics unchanged").isEqualTo(Refusal.LOCK_TIMEOUT);
+        assertThat(e.error()).isNull();
+        assertThat(inCollection(t, s.sibling(), s.firstChunks().get(0))).as("the earlier origin's rows are gone").isFalse();
+        assertThat(inCollection(t, s.sibling(), s.secondChunks().get(0))).as("the locked row survives").isTrue();
+        assertThat(e.expired()).as("the result carries what was deleted before the refusal").isEqualTo(2);
+        assertThat(result[0].expired()).isEqualTo(2);
+        assertThat(result[0].skipped()).isEqualTo(1);
+        assertThat(result[0].refused()).isZero();
+        assertThat(logs).as("the pass line carries the partial total")
+            .anyMatch(l -> l.contains("event=reaper_pass") && l.contains("expired=2 "));
+        assertThat(logs).as("and so does the skip line")
+            .anyMatch(l -> l.contains("event=reaper_expire_skipped") && l.contains("reason=LOCK_TIMEOUT")
+                && l.contains("expired_before_refusal=2"));
+        assertThat(r.runOnce(null).tenant(t).expiry(s.sibling()).expired()).as("the next pass takes the rest").isEqualTo(1);
+    }
+
+    /** The real repository, except that expiring {@code failingOrigin} raises {@code failure}. */
+    private ReaperRepository failingOnOrigin(String failingOrigin, RuntimeException failure) {
+        return new ReaperRepository(tenantScope) {
+            @Override
+            public Expiry expire(String tenant, String quarantineCollection, String originCollection, String cutoff,
+                                 int rowLimit, int statementTimeoutMs, int lockTimeoutMs) {
+                if (originCollection.equals(failingOrigin)) throw failure;
+                return super.expire(tenant, quarantineCollection, originCollection, cutoff, rowLimit,
+                    statementTimeoutMs, lockTimeoutMs);
+            }
+        };
+    }
+
+    @Test
+    void aStatementTimeoutOnALaterOrigin_keepsTheCountTheEarlierOriginAlreadyExpired_andStillRefuses() throws Throwable {
+        TwoOriginSibling s = twoOriginSibling(2, 1);
+        String t = s.tenant();
+        ChunkReaper r = reaperOver(failingOnOrigin(s.second(), statementTimeout()), t);
+
+        ChunkReaper.TenantResult[] result = new ChunkReaper.TenantResult[1];
+        List<String> logs = captureLogs(() -> result[0] = r.runOnce(null).tenant(t));
+
+        ChunkReaper.ExpiryResult e = result[0].expiry(s.sibling());
+        assertThat(e.refusal()).as("refusal semantics unchanged").isEqualTo(Refusal.STATEMENT_TIMED_OUT);
+        assertThat(e.expired()).isEqualTo(2);
+        assertThat(result[0].expired()).isEqualTo(2);
+        assertThat(result[0].refused()).isEqualTo(1);
+        assertThat(r.refusedTotal()).isEqualTo(1);
+        assertThat(inCollection(t, s.sibling(), s.firstChunks().get(0))).isFalse();
+        assertThat(logs).anyMatch(l -> l.contains("event=reaper_pass") && l.contains("expired=2 "));
+        assertThat(logs).anyMatch(l -> l.contains("event=reaper_expire_refused") && l.contains("expired_before_refusal=2"));
+        assertThat(refusedRows(t)).singleElement().satisfies(a -> {
+            assertThat(a.collection()).isEqualTo(s.sibling());
+            assertThat(a.details()).as("the audit row no longer says it deleted nothing").doesNotContain("deleted nothing")
+                .contains("deleted 2");
+        });
+    }
+
+    @Test
+    void anUnclassifiedFailureOnALaterOrigin_keepsTheCountTheEarlierOriginAlreadyExpired_andStillReportsTheError()
+            throws Throwable {
+        TwoOriginSibling s = twoOriginSibling(2, 1);
+        String t = s.tenant();
+        ChunkReaper r = reaperOver(failingOnOrigin(s.second(), new IllegalStateException("boom")), t);
+
+        ChunkReaper.TenantResult[] result = new ChunkReaper.TenantResult[1];
+        List<String> logs = captureLogs(() -> result[0] = r.runOnce(null).tenant(t));
+
+        ChunkReaper.ExpiryResult e = result[0].expiry(s.sibling());
+        assertThat(e.error()).isEqualTo("boom");
+        assertThat(e.refusal()).isNull();
+        assertThat(e.expired()).isEqualTo(2);
+        assertThat(result[0].failed()).isTrue();
+        assertThat(logs).anyMatch(l -> l.contains("event=reaper_pass") && l.contains("expired=2 "));
+        assertThat(logs).anyMatch(l -> l.contains("event=reaper_expire_failed") && l.contains("expired_before_refusal=2"));
+    }
+
     // ── the floor exemption: one named collection, move floor only ───────────
 
     private static Settings exempting(String... collections) {
@@ -2124,7 +2253,7 @@ class ChunkReaperIntegrationTest extends AtomicWriteTestBase {
         assertThat(r.statementBackoffTotal()).isEqualTo(2);
         assertThat(refusedRows(t)).singleElement().satisfies(a -> {
             assertThat(a.collection()).as("filed under the quarantine- name").isEqualTo(q);
-            assertThat(a.details()).contains("STATEMENT_TIMED_OUT");
+            assertThat(a.details()).contains("STATEMENT_TIMED_OUT").contains("deleted nothing");
         });
         assertThat(logs).noneMatch(l -> l.contains("event=reaper_expire_failed"));
         assertThat(countIn(t, q)).as("nothing deleted").isEqualTo(2);
