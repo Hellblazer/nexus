@@ -228,6 +228,47 @@ class StatusHandlerTest {
         java.time.Instant.parse(body.get("process_start_time").asText());
     }
 
+    // ── the reaper's liveness (nexus-wbfpw.56, RDR-192 Phase 3 gate S5), [additive] ─────────────────────────────
+
+    @Test
+    void reaper_keyIsAbsentWhenNoReaperSupplierIsWired() throws Exception {
+        // The shape an engine that predates the field answers in: a client reads "no key" as "cannot tell".
+        start(new StatusHandler(null));
+        assertThat(get().has("reaper")).isFalse();
+    }
+
+    @Test
+    void reaper_reportsTheLastCompletedPassAndTheIntervalItRunsAt() throws Exception {
+        var status = new StatusHandler.ReaperStatus(true, 3600L, java.time.Instant.parse("2026-10-02T07:00:00Z"), 2L);
+        start(new StatusHandler(null, null, 0L, null, () -> status));
+
+        JsonNode reaper = get().get("reaper");
+        assertThat(reaper.get("enabled").asBoolean()).isTrue();
+        assertThat(reaper.get("interval_seconds").asLong()).isEqualTo(3600L);
+        assertThat(reaper.get("last_completed_pass_at").asText()).isEqualTo("2026-10-02T07:00:00Z");
+        assertThat(reaper.get("failed_passes_total").asLong()).isEqualTo(2L);
+    }
+
+    @Test
+    void reaper_beforeItsFirstPassTheLastCompletedTimeIsNull_notAFabricatedValue() throws Exception {
+        var status = new StatusHandler.ReaperStatus(true, 3600L, null, 0L);
+        start(new StatusHandler(null, null, 0L, null, () -> status));
+
+        JsonNode reaper = get().get("reaper");
+        assertThat(reaper.get("enabled").asBoolean()).isTrue();
+        assertThat(reaper.get("last_completed_pass_at").isNull()).isTrue();
+    }
+
+    @Test
+    void reaper_aSupplierThatReturnsNullSaysTheReaperIsNotRunning() throws Exception {
+        start(new StatusHandler(null, null, 0L, null, () -> null));
+
+        JsonNode reaper = get().get("reaper");
+        assertThat(reaper.get("enabled").asBoolean()).isFalse();
+        assertThat(reaper.has("last_completed_pass_at")).as("nothing to report for a reaper that is not scheduled")
+            .isFalse();
+    }
+
     @Test
     void nonGetMethodIsRejected() throws Exception {
         start(new StatusHandler(null));

@@ -38,6 +38,11 @@ import java.util.function.Supplier;
  *  "supplied_vector_mismatches_total":0,
  *  "process_start_time":"2026-09-12T09:00:00Z"}</pre>
  *
+ * <p>{@code reaper} (RDR-192 Phase 3 gate S5, bead nexus-wbfpw.56, ADDITIVE) is the engine reaper's liveness:
+ * {@code {"enabled":true,"interval_seconds":3600,"last_completed_pass_at":"2026-10-02T07:00:00Z"|null,
+ * "failed_passes_total":0}}, or {@code {"enabled":false}} when no reaper is scheduled in this process. See
+ * {@link ReaperStatus}.
+ *
  * <p>{@code supplied_vector_mismatches_total} (RDR-223 P1.5, bead nexus-z0o2p.6, ADDITIVE) is
  * a process-wide, lifetime counter (see {@link SuppliedVectorMismatchActivity}) of client-supplied
  * vectors the combined write routes did not store because the chash already had a stored vector
@@ -101,6 +106,7 @@ public final class StatusHandler implements HttpHandler {
     private final Supplier<EmbedActivitySnapshot> localEmbedActivitySupplier; // nullable
     private final long processStartMillis;
     private final OwnerlessWritePolicy ownerlessWritePolicy;   // nullable — mode field omitted
+    private final Supplier<ReaperStatus> reaperStatus;          // nullable — "reaper" key omitted
 
     public StatusHandler(EmbedderRouter embedderRouter) {
         this(embedderRouter, null);
@@ -163,10 +169,40 @@ public final class StatusHandler implements HttpHandler {
             Supplier<EmbedActivitySnapshot> localEmbedActivitySupplier,
             long processStartMillis,
             OwnerlessWritePolicy ownerlessWritePolicy) {
+        this(embedderRouter, localEmbedActivitySupplier, processStartMillis, ownerlessWritePolicy, null);
+    }
+
+    /**
+     * What the engine reaper reports on this route (RDR-192 Phase 3 gate S5, bead nexus-wbfpw.56, [additive]):
+     * the one durable sign that it is alive, since a pass with nothing to move writes no {@code gc_audit} row and a
+     * cloud operator has no engine log. {@code lastCompletedPassAt} is null before the first pass and is NOT moved by
+     * a pass that died; a client flags it when it is older than a few {@code intervalSeconds}.
+     *
+     * @param enabled              the reaper is scheduled in this process
+     * @param intervalSeconds      the delay between the end of one pass and the start of the next
+     * @param lastCompletedPassAt  when the last pass that ran to the end finished; null before the first
+     * @param failedPassesTotal    passes since boot that died or could not list their tenants
+     */
+    public record ReaperStatus(boolean enabled, long intervalSeconds, java.time.Instant lastCompletedPassAt,
+                               long failedPassesTotal) {}
+
+    /**
+     * @param reaperStatus RDR-192 Phase 3 gate S5 (nexus-wbfpw.56): the reaper's liveness. Null omits the
+     *                     {@code reaper} key altogether (what an engine predating the field answers in, so tests
+     *                     and older wirings read as "cannot tell"); a supplier that returns null reports
+     *                     {@code {"enabled":false}} (no reaper is scheduled in this process).
+     */
+    public StatusHandler(
+            EmbedderRouter embedderRouter,
+            Supplier<EmbedActivitySnapshot> localEmbedActivitySupplier,
+            long processStartMillis,
+            OwnerlessWritePolicy ownerlessWritePolicy,
+            Supplier<ReaperStatus> reaperStatus) {
         this.embedderRouter = embedderRouter;
         this.localEmbedActivitySupplier = localEmbedActivitySupplier;
         this.processStartMillis = processStartMillis;
         this.ownerlessWritePolicy = ownerlessWritePolicy;
+        this.reaperStatus = reaperStatus;
     }
 
     @Override
@@ -216,6 +252,27 @@ public final class StatusHandler implements HttpHandler {
         if (ownerlessWritePolicy != null) {
             body.append(",\"ownerless_write_mode\":")
                 .append(HttpUtil.jsonString(ownerlessWritePolicy.mode().wire()));
+        }
+
+        // RDR-192 Phase 3 gate S5 (bead nexus-wbfpw.56), [additive]: the engine reaper's liveness. Absent key =
+        // an engine (or wiring) that predates it; {"enabled":false} = no reaper in this process.
+        if (reaperStatus != null) {
+            ReaperStatus r = reaperStatus.get();
+            body.append(",\"reaper\":");
+            if (r == null) {
+                body.append("{\"enabled\":false}");
+            } else {
+                body.append("{\"enabled\":").append(r.enabled())
+                    .append(",\"interval_seconds\":").append(r.intervalSeconds())
+                    .append(",\"last_completed_pass_at\":");
+                if (r.lastCompletedPassAt() == null) {
+                    body.append("null");
+                } else {
+                    body.append(HttpUtil.jsonString(
+                        r.lastCompletedPassAt().truncatedTo(java.time.temporal.ChronoUnit.SECONDS).toString()));
+                }
+                body.append(",\"failed_passes_total\":").append(r.failedPassesTotal()).append('}');
+            }
         }
 
         // RDR-222 Phase 0 fix round (bead nexus-ulrjq, critic #2), [additive]:

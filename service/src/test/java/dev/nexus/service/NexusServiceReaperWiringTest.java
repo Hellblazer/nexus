@@ -256,6 +256,145 @@ class NexusServiceReaperWiringTest {
         }
     }
 
+    // ── a thrown Error must not end a schedule (nexus-wbfpw.56, RDR-192 Phase 3 gate S5) ─────────────────────
+
+    @Test
+    void aThrownErrorDoesNotEndAnyScheduledTask_theTtlSweepAndTheReaperKeepTheirSchedule() throws Exception {
+        var failing = new java.util.concurrent.atomic.AtomicBoolean();
+        var thrown = new AtomicInteger();
+        javax.sql.DataSource flaky = (javax.sql.DataSource) java.lang.reflect.Proxy.newProxyInstance(
+            getClass().getClassLoader(), new Class<?>[] {javax.sql.DataSource.class}, (proxy, method, args) -> {
+                if (failing.get() && method.getName().equals("getConnection")) {
+                    thrown.incrementAndGet();
+                    throw new NoClassDefFoundError("simulated: a class the driver needs is gone");
+                }
+                try {
+                    return method.invoke(ds, args);
+                } catch (java.lang.reflect.InvocationTargetException e) {
+                    throw e.getCause();
+                }
+            });
+        var recording = new RecordingScheduler();
+        var zero = new dev.nexus.service.vectors.Embedder() {
+            @Override public List<float[]> embed(List<String> texts) {
+                return texts.stream().map(t -> new float[384]).toList();
+            }
+            @Override public void close() { }
+        };
+        var vectors = new PgVectorRepository(new TenantScope(ds), zero, zero);
+        NexusService service = new NexusService(0, "reaper-wiring-token", flaky, null, vectors, null, null, null,
+            recording);
+        try {
+            assertThat(recording.registrations).as("the TTL sweep and the reaper share the one scheduler thread")
+                .hasSizeGreaterThanOrEqualTo(2);
+            failing.set(true);
+            for (var registration : recording.registrations) {
+                // scheduleAtFixedRate and scheduleWithFixedDelay both suppress every later run of a task whose
+                // Runnable threw: an Error that gets out is a silently dead schedule on a shared thread.
+                org.assertj.core.api.Assertions.assertThatCode(() -> registration.task().run())
+                    .as("the " + registration.kind() + " task registered at delay " + registration.initialDelay())
+                    .doesNotThrowAnyException();
+            }
+            assertThat(thrown.get()).as("every task really did hit the Error").isGreaterThanOrEqualTo(2);
+        } finally {
+            failing.set(false);
+            stopQuietly(service);
+        }
+    }
+
+    @Test
+    void theSurvivingWrapperKeepsAFixedDelayScheduleAlive_whereAnExceptionOnlyCatchDoesNot() throws Exception {
+        var pool = new java.util.concurrent.ScheduledThreadPoolExecutor(1, r -> {
+            Thread t = new Thread(r, "survive-test");
+            t.setDaemon(true);
+            return t;
+        });
+        try {
+            var wrapped = new AtomicInteger();
+            var exceptionOnly = new AtomicInteger();
+            pool.scheduleWithFixedDelay(NexusService.surviving("test_task_failed", () -> {
+                wrapped.incrementAndGet();
+                throw new NoClassDefFoundError("simulated");
+            }), 0, 20, TimeUnit.MILLISECONDS);
+            // The control: what the three scheduled tasks did before the fix.
+            pool.scheduleWithFixedDelay(() -> {
+                try {
+                    exceptionOnly.incrementAndGet();
+                    throw new NoClassDefFoundError("simulated");
+                } catch (Exception ignored) {
+                    // an Error is not an Exception
+                }
+            }, 0, 20, TimeUnit.MILLISECONDS);
+
+            long deadline = System.nanoTime() + java.time.Duration.ofSeconds(10).toNanos();
+            while (wrapped.get() < 3 && System.nanoTime() < deadline) Thread.sleep(10);
+            assertThat(wrapped.get()).as("the wrapped task ran again after each Error").isGreaterThanOrEqualTo(3);
+            assertThat(exceptionOnly.get()).as("the Exception-only task never ran a second time").isEqualTo(1);
+        } finally {
+            pool.shutdownNow();
+        }
+    }
+
+    // ── the reaper's liveness reaches GET /v1/status ─────────────────────────
+
+    @Test
+    void theStatusRouteReportsTheReapersLastCompletedPass_nullBeforeItsFirst() throws Exception {
+        var zero = new dev.nexus.service.vectors.Embedder() {
+            @Override public List<float[]> embed(List<String> texts) {
+                return texts.stream().map(t -> new float[384]).toList();
+            }
+            @Override public void close() { }
+        };
+        NexusService service = new NexusService(0, "reaper-wiring-token", ds, null,
+            new PgVectorRepository(new TenantScope(ds), zero, zero), null, null, null);
+        try {
+            service.start();
+            var http = java.net.http.HttpClient.newHttpClient();
+            var mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+            java.util.function.Supplier<com.fasterxml.jackson.databind.JsonNode> status = () -> {
+                try {
+                    var resp = http.send(java.net.http.HttpRequest.newBuilder(
+                        java.net.URI.create("http://127.0.0.1:" + service.getPort() + "/v1/status")).GET().build(),
+                        java.net.http.HttpResponse.BodyHandlers.ofString());
+                    return mapper.readTree(resp.body()).get("reaper");
+                } catch (Exception e) {
+                    throw new IllegalStateException(e);
+                }
+            };
+
+            var before = status.get();
+            assertThat(before.get("enabled").asBoolean()).isTrue();
+            assertThat(before.get("interval_seconds").asLong()).isEqualTo(3600L);
+            assertThat(before.get("last_completed_pass_at").isNull()).as("no pass yet").isTrue();
+
+            service.reaperScheduledTask().run();
+
+            var after = status.get();
+            assertThat(after.get("last_completed_pass_at").isTextual()).isTrue();
+            assertThat(java.time.Instant.parse(after.get("last_completed_pass_at").asText()))
+                .isBetween(java.time.Instant.now().minusSeconds(120), java.time.Instant.now().plusSeconds(5));
+        } finally {
+            stopQuietly(service);
+        }
+    }
+
+    @Test
+    void anInstanceWithNoReaperReportsItAsNotRunning_notAsAbsent() throws Exception {
+        NexusService service = new NexusService(0, "reaper-wiring-token", ds, null, null, null, null, null);
+        try {
+            service.start();
+            var resp = java.net.http.HttpClient.newHttpClient().send(java.net.http.HttpRequest.newBuilder(
+                java.net.URI.create("http://127.0.0.1:" + service.getPort() + "/v1/status")).GET().build(),
+                java.net.http.HttpResponse.BodyHandlers.ofString());
+            var reaper = new com.fasterxml.jackson.databind.ObjectMapper().readTree(resp.body()).get("reaper");
+            assertThat(reaper).as("the key is present so a client can tell 'disabled' from 'engine predates this'")
+                .isNotNull();
+            assertThat(reaper.get("enabled").asBoolean()).isFalse();
+        } finally {
+            stopQuietly(service);
+        }
+    }
+
     private static void stopQuietly(NexusService service) {
         try {
             service.stop();

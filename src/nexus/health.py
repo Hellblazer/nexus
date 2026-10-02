@@ -3923,6 +3923,133 @@ def _check_ownerless_writes(engine_status: object = _ENGINE_STATUS_UNSET) -> lis
     )]
 
 
+_ENGINE_REAPER_LABEL = "Engine reaper"
+
+#: A pass is stale when older than this many of the engine's own intervals (plus a fixed margin for the pass's own
+#: run time and for clock skew between this box and a managed engine).
+_REAPER_STALE_INTERVALS = 3
+_REAPER_STALE_MARGIN_SECONDS = 120
+
+
+def _span(seconds: float) -> str:
+    """A duration in the largest unit that keeps the number readable: seconds under two minutes, minutes under two
+    hours, hours under two days, else days."""
+    s = max(0, int(seconds))
+    if s < 120:
+        return f"{s} seconds"
+    if s < 7200:
+        return f"{s // 60} minutes"
+    if s < 172800:
+        return f"{s // 3600} hours"
+    return f"{s // 86400} days"
+
+
+def _instant(value: object) -> datetime | None:
+    """An engine timestamp (``2026-10-02T07:00:00Z``) as an aware datetime, or None when it is not one."""
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+
+
+def _check_engine_reaper(
+    engine_status: object = _ENGINE_STATUS_UNSET, *, now: datetime | None = None,
+) -> list[HealthResult]:
+    """nexus-wbfpw.56 (RDR-192 Phase 3 gate S5): is the engine's chunk reaper still making passes?
+
+    The reaper is the safety net for manifest-less chunks and the failure mode the RDR names as the one to
+    design against is a dead one. A pass with nothing to move writes no ``gc_audit`` row and a cloud operator
+    has no engine log, so the engine reports the time of its last COMPLETED pass under ``reaper`` in
+    ``GET /v1/status`` (a pass that died does not move it). This row warns when that time is older than
+    three of the engine's own intervals.
+
+    Not applicable (ok, no warning) when the engine cannot be reached (a virgin box), when it predates the
+    field, when its reaper is not running, and when the body cannot be read, so nothing on a box with no
+    engine to ask can warn. A reaper that has not made its first pass is judged against the engine's own
+    start time, which the same body carries; without it the row cannot tell and says so.
+    """
+    label = _ENGINE_REAPER_LABEL
+    status: dict | None
+    if engine_status is _ENGINE_STATUS_UNSET:
+        try:
+            from nexus.db.http_engine_status import fetch_engine_status  # noqa: PLC0415 — deferred to keep CLI startup fast
+            status = fetch_engine_status()
+        except Exception as exc:  # noqa: BLE001 — best-effort: must not crash `nx doctor`
+            _log.debug("doctor_engine_reaper_probe_failed", error=str(exc))
+            status = None
+    else:
+        status = engine_status if isinstance(engine_status, dict) else None
+
+    def _na(why: str) -> list[HealthResult]:
+        return [HealthResult(label=label, ok=True, detail=f"not applicable: {why}")]
+
+    if status is None:
+        return _na("the engine's status endpoint could not be read")
+    reaper = status.get("reaper")
+    if reaper is None:
+        return _na("this engine predates the reaper liveness field")
+    if not isinstance(reaper, dict):
+        return _na("the engine's reaper status could not be read")
+    if reaper.get("enabled") is False:
+        return _na("the engine reaper is not running on this engine")
+    interval = reaper.get("interval_seconds")
+    if not isinstance(interval, int) or isinstance(interval, bool) or interval <= 0:
+        return _na("the engine's reaper status could not be read")
+
+    now = now or datetime.now(UTC)
+    limit = _REAPER_STALE_INTERVALS * interval + _REAPER_STALE_MARGIN_SECONDS
+    last_raw = reaper.get("last_completed_pass_at")
+    failed = _status_int(reaper.get("failed_passes_total"))
+    failed_note = (f"; {failed} pass{'es' if failed != 1 else ''} failed since the engine started"
+                   if failed else "")
+    fixes = [
+        "Read the engine log for event=reaper_pass_failed and event=reaper_scheduled_run_failed (and "
+        "event=reaper_run, one line per pass): a thrown Error is caught and logged, and the schedule stays alive",
+        "A reaper that stopped making passes is restarted by restarting the engine "
+        "(`nx daemon service stop && nx daemon service start` for a local engine); NX_REAPER_ENABLED=false "
+        "switches it off on purpose, and then this row reads not applicable",
+        "docs/operations/engine-reaper.md: the refusal table, the settings and what a pass does",
+    ]
+
+    if last_raw is None:
+        started = _instant(status.get("process_start_time"))
+        if started is None:
+            return _na("the engine has made no completed reaper pass yet and does not report its start time, "
+                       "so a stalled reaper cannot be told from a young engine")
+        up = (now - started).total_seconds()
+        if up <= limit:
+            return [HealthResult(
+                label=label, ok=True,
+                detail=(f"no completed pass yet; the engine started {_span(up)} ago and its first pass is "
+                        f"due about a minute after boot{failed_note}"),
+            )]
+        return [HealthResult(
+            label=label, ok=False, warn=True,
+            detail=(f"no completed pass since the engine started {_span(up)} ago (more than "
+                    f"{_REAPER_STALE_INTERVALS} intervals of {_span(interval)}); the reaper may be dead{failed_note}"),
+            fix_suggestions=fixes,
+        )]
+
+    last = _instant(last_raw)
+    if last is None:
+        return _na("the engine's last-pass time could not be read")
+    age = max(0.0, (now - last).total_seconds())
+    if age <= limit:
+        return [HealthResult(
+            label=label, ok=True,
+            detail=f"last completed pass {_span(age)} ago (interval {_span(interval)}){failed_note}",
+        )]
+    return [HealthResult(
+        label=label, ok=False, warn=True,
+        detail=(f"last completed pass {_span(age)} ago, more than {_REAPER_STALE_INTERVALS} intervals of "
+                f"{_span(interval)}; the reaper may be dead{failed_note}"),
+        fix_suggestions=fixes,
+    )]
+
+
 def _check_t2_launchagent_stray() -> list[HealthResult]:
     """nexus-c0vby (GH #1405 defect 2): backstop for the automatic
     ``unload_stale_t2_launchagent`` finish-pass leg
@@ -9348,6 +9475,7 @@ def run_health_checks(
     results.extend(_check_storage_service_health())
     results.extend(_check_engine_convergence())
     results.extend(_check_ownerless_writes(engine_status))  # nexus-20onx
+    results.extend(_check_engine_reaper(engine_status))  # nexus-wbfpw.56
     results.extend(_check_t2_launchagent_stray())
     results.extend(_check_service_launchagent_stray())
     results.extend(_check_service_autostart_drift())

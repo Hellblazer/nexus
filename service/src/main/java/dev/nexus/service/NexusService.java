@@ -513,7 +513,7 @@ public final class NexusService {
         // moment) -- the "no second clock source" requirement in one place.
         server.createContext("/v1/status",
                 new dev.nexus.service.http.StatusHandler(docEmbedderRouter, localEmbedActivitySupplier,
-                        versionHandler.processStartMillis(), ownerlessWritePolicy));
+                        versionHandler.processStartMillis(), ownerlessWritePolicy, this::reaperStatus));
 
         // /v1/install-ping — unauthenticated anonymous daily client beacon
         // (nexus-h5olw). Local-mode installs have no tenant or token, and they
@@ -672,13 +672,7 @@ public final class NexusService {
                 return t;
             });
         this.sweepScheduler.scheduleAtFixedRate(
-            () -> {
-                try {
-                    runScheduledSweep(OffsetDateTime.now(ZoneOffset.UTC));
-                } catch (Exception ex) {
-                    log.warn("event=t1_scheduled_sweep_failed error={}", ex.getMessage(), ex);
-                }
-            },
+            surviving("t1_scheduled_sweep_failed", () -> runScheduledSweep(OffsetDateTime.now(ZoneOffset.UTC))),
             SWEEP_INTERVAL_HOURS, SWEEP_INTERVAL_HOURS, TimeUnit.HOURS
         );
 
@@ -692,13 +686,8 @@ public final class NexusService {
         // was never loaded, not that it degraded).
         if (this.tupleRepo != null) {
             this.sweepScheduler.scheduleAtFixedRate(
-                () -> {
-                    try {
-                        runScheduledTupleSweep(OffsetDateTime.now(ZoneOffset.UTC));
-                    } catch (Exception ex) {
-                        log.warn("event=tuple_scheduled_sweep_failed error={}", ex.getMessage(), ex);
-                    }
-                },
+                surviving("tuple_scheduled_sweep_failed",
+                    () -> runScheduledTupleSweep(OffsetDateTime.now(ZoneOffset.UTC))),
                 SWEEP_INTERVAL_HOURS, SWEEP_INTERVAL_HOURS, TimeUnit.HOURS
             );
         }
@@ -722,13 +711,7 @@ public final class NexusService {
             this.chunkReaper = reaper;
             // The Runnable the scheduler runs, held in a field so a test runs THAT object and not a copy of its
             // body: a test that called reaper.run() directly stayed green with the schedule turned into a no-op.
-            this.reaperScheduledTask = () -> {
-                try {
-                    reaper.run();
-                } catch (Exception ex) {
-                    log.warn("event=reaper_scheduled_run_failed error={}", ex.getMessage(), ex);
-                }
-            };
+            this.reaperScheduledTask = surviving("reaper_scheduled_run_failed", reaper::run);
             this.sweepScheduler.scheduleWithFixedDelay(
                 this.reaperScheduledTask,
                 ChunkReaper.INITIAL_DELAY.toSeconds(), reaperSettings.interval().toSeconds(), TimeUnit.SECONDS
@@ -773,6 +756,40 @@ public final class NexusService {
      */
     Runnable reaperScheduledTask() {
         return reaperScheduledTask;
+    }
+
+    /**
+     * The reaper's liveness as {@code GET /v1/status} reports it: null when none is scheduled in this process (the
+     * route then says {@code enabled:false}). Read through a method, not a captured field, because the status route
+     * is registered before the reaper is built.
+     */
+    dev.nexus.service.http.StatusHandler.ReaperStatus reaperStatus() {
+        ChunkReaper r = chunkReaper;
+        if (r == null) return null;
+        return new dev.nexus.service.http.StatusHandler.ReaperStatus(true, r.settings().interval().toSeconds(),
+            r.lastCompletedPassAt(), r.failedPassesTotal());
+    }
+
+    /**
+     * A scheduled task that cannot end its own schedule. {@code scheduleAtFixedRate} and
+     * {@code scheduleWithFixedDelay} both suppress every later run of a task whose {@link Runnable} threw, and the
+     * three scheduled tasks (T1 sweep, tuple sweep, chunk reaper) share one thread, so an {@link Error}
+     * (OutOfMemoryError, StackOverflowError, NoClassDefFoundError) caught by a {@code catch (Exception)} that does
+     * not cover it stops the task for the life of the process, with no log line and no alarm
+     * (nexus-wbfpw.56, RDR-192 Phase 3 gate S5). Everything is caught here and logged; the schedule stays alive.
+     */
+    static Runnable surviving(String event, Runnable task) {
+        return () -> {
+            try {
+                task.run();
+            } catch (Throwable t) {
+                if (t instanceof Error) {
+                    log.error("event={} error_class={} error={}", event, t.getClass().getName(), t.getMessage(), t);
+                } else {
+                    log.warn("event={} error={}", event, t.getMessage(), t);
+                }
+            }
+        };
     }
 
     /** The tenant set the scheduled reaper visits. Package-private for the wiring test. */

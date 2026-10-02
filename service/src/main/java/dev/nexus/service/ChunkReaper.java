@@ -13,6 +13,7 @@ import org.slf4j.LoggerFactory;
 
 import java.time.Clock;
 import java.time.Duration;
+import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -420,6 +421,10 @@ final class ChunkReaper {
     private final Clock clock;
     private final Census census;
     private final LongSupplier nanos;
+    /** When the last pass that ran to the end finished; null before the first. Read by the status route's thread. */
+    private volatile Instant lastCompletedPassAt;
+    /** Passes since boot that died, or that could not list their tenants. */
+    private final AtomicLong failedPassesTotal = new AtomicLong();
     /** Refusals since boot: a counter a log reader can alert on, where a one-off line would scroll past. */
     private final AtomicLong refusedTotal = new AtomicLong();
     /** Collections skipped since boot because a manifest writer held the sweep gate. Not a refusal. */
@@ -551,6 +556,22 @@ final class ChunkReaper {
         return lastRun.get();
     }
 
+    /**
+     * When the last pass that RAN TO THE END finished (the reaper's clock), or null before the first. A pass that
+     * died (an {@link Error} out of a statement, the tenant list failing) is not a completed pass and does not move
+     * this: it is the one trace of the reaper being alive that a {@code candidates=0} pass leaves, since such a
+     * pass writes no {@code gc_audit} row (nexus-wbfpw.56). Served as {@code reaper.last_completed_pass_at} on
+     * {@code GET /v1/status}.
+     */
+    Instant lastCompletedPassAt() {
+        return lastCompletedPassAt;
+    }
+
+    /** Passes since boot that died or could not list their tenants; a pass whose collections failed one by one is not one. */
+    long failedPassesTotal() {
+        return failedPassesTotal.get();
+    }
+
     /** One scheduled pass: the predicate's own 30 day grace. */
     RunResult run() {
         return runOnce(null);
@@ -558,9 +579,25 @@ final class ChunkReaper {
 
     /**
      * One pass over every tenant, with {@code grace} injected: null is the predicate's default (what production
-     * runs), anything else is for tests. Never throws: a failure is a counted, logged outcome.
+     * runs), anything else is for tests. Never throws, not even an {@link Error}: a failure is a counted, logged
+     * outcome (nexus-wbfpw.56; this said "never throws" while catching RuntimeException only, and an Error that got
+     * out of the scheduled task ended every later run of the schedule, silently, on the thread the T1 and tuple
+     * sweeps share).
      */
     RunResult runOnce(Duration grace) {
+        try {
+            return runPass(grace);
+        } catch (Throwable t) {
+            long n = failedPassesTotal.incrementAndGet();
+            log.error("event=reaper_pass_failed error_class={} error={} failed_passes_total={}",
+                t.getClass().getName(), t.getMessage(), n, t);
+            RunResult failed = new RunResult(List.of(), false);
+            lastRun.set(failed);
+            return failed;
+        }
+    }
+
+    private RunResult runPass(Duration grace) {
         long deadline = nanos.getAsLong() + settings.wallClockBudget().toNanos();
         long pass = passNumber.incrementAndGet();
         List<TenantResult> results = new ArrayList<>();
@@ -575,6 +612,7 @@ final class ChunkReaper {
         } catch (RuntimeException e) {
             log.warn("event=reaper_run tenants=0 candidates=0 moved=0 audit_rows=0 expired=0 expiry_protected=0 "
                 + "refused=0 skipped=0 errors=1 wall_clock_cut=false error={}", e.getMessage(), e);
+            failedPassesTotal.incrementAndGet();
             RunResult failed = new RunResult(List.of(), false);
             lastRun.set(failed);
             return failed;
@@ -615,6 +653,7 @@ final class ChunkReaper {
             refusedTotal.get(), censusTimedOutTotal.get(), statementTimedOutTotal.get());
         RunResult out = new RunResult(results, cut);
         lastRun.set(out);
+        lastCompletedPassAt = clock.instant().truncatedTo(ChronoUnit.SECONDS);
         return out;
     }
 
@@ -771,11 +810,21 @@ final class ChunkReaper {
             timeoutStreaks.remove(streakKey);   // it completed, whatever it said: the streak is over
             // Non-vacuity: a census that read a different set than the one being judged (a wrong tenant or an
             // unset RLS GUC reads 0) proves nothing, and its zero must not be taken for a clean collection.
-            if (c.scopeChunkTotal() != probe.total()) {
+            // Growth is not a mismatch (nexus-wbfpw.56, gate M6): a chunk written between the dry run and the census,
+            // up to the census bound apart, makes the census read MORE, and refusing for it made every pass on a busy
+            // collection refuse and write an audit row per state change. Growth is safe: the census classifies every
+            // chunk it reads (a new legacy-shaped one refuses below) and the move re-judges the rule under the gate.
+            // A census that read FEWER chunks than the dry run (a wrong tenant or an unset RLS GUC reads 0, a
+            // concurrent delete reads fewer) is still refused: its buckets describe a different set.
+            if (c.scopeChunkTotal() < probe.total()) {
                 return refuse(tenant, name, Refusal.CENSUS_SCOPE_MISMATCH, probe.reapable(), probe.total(),
                     "census saw scope_chunk_total=" + c.scopeChunkTotal() + " but the dry run counted " + probe.total()
-                        + " chunks; chunks changed between the two reads, or the census read the wrong scope. "
+                        + " chunks; chunks were removed between the two reads, or the census read the wrong scope. "
                         + "Retried next pass", List.of());
+            }
+            if (c.scopeChunkTotal() > probe.total()) {
+                log.info("event=reaper_census_scope_grew tenant={} collection={} dry_run_total={} census_total={}",
+                    tenant, name, probe.total(), c.scopeChunkTotal());
             }
             long legacy = c.totals().getOrDefault("legacy-unmanifested", 0L);
             long unclassified = c.totals().getOrDefault("unclassified", 0L);

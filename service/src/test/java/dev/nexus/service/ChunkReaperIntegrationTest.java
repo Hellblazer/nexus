@@ -781,6 +781,98 @@ class ChunkReaperIntegrationTest extends AtomicWriteTestBase {
     }
 
     @Test
+    void aCensusThatSawMoreChunksThanTheDryRun_isNotAMismatch_growthBetweenTheTwoReadsIsNormal() throws Exception {
+        // nexus-wbfpw.56 / RDR-192 Phase 3 gate M6: a chunk written between the dry run and the census (up to 60 s
+        // apart) made every pass on a busy collection refuse and write an audit row per state change.
+        String t = newTenant();
+        openGate(t);
+        String c = col("knowledge");
+        String h = orphan(t, c, "x");
+        ChunkReaper.Census grew = (tenant, collection, limit, timeout) -> censusOf(2, Map.of());
+
+        CollectionResult cr = reaper(Settings.defaults(), grew, System::nanoTime, t).runOnce(Duration.ZERO)
+            .tenant(t).collection(c);
+
+        assertThat(cr.refusal()).as("growth is not a mismatch").isNull();
+        assertThat(cr.moved()).isEqualTo(1);
+        assertThat(inCollection(t, quarantineOf(c), h)).isTrue();
+        assertThat(refusedRows(t)).isEmpty();
+    }
+
+    @Test
+    void aCensusThatSawFewerChunksThanTheDryRun_isStillAMismatch_evenWhenItIsNotZero() throws Exception {
+        String t = newTenant();
+        openGate(t);
+        String c = col("knowledge");
+        String a = orphan(t, c, "a");
+        String b = orphan(t, c, "b");
+        ChunkReaper.Census shrank = (tenant, collection, limit, timeout) -> censusOf(1, Map.of());
+
+        CollectionResult cr = reaper(Settings.defaults(), shrank, System::nanoTime, t).runOnce(Duration.ZERO)
+            .tenant(t).collection(c);
+
+        assertThat(cr.refusal()).isEqualTo(Refusal.CENSUS_SCOPE_MISMATCH);
+        assertThat(cr.moved()).isZero();
+        assertThat(inCollection(t, c, a)).isTrue();
+        assertThat(inCollection(t, c, b)).isTrue();
+    }
+
+    // ── a pass that dies, and the time of the last one that did not (nexus-wbfpw.56, gate S5) ──────────────────
+
+    @Test
+    void anErrorOutOfAPassIsAFailedPass_notAThrowableThatEscapesRunOnce_andTheNextPassRuns() throws Exception {
+        String t = newTenant();
+        openGate(t);
+        String c = col("knowledge");
+        orphan(t, c, "x");
+        var armed = new java.util.concurrent.atomic.AtomicBoolean(true);
+        // An Error from deep inside a collection's pass: passCollection catches RuntimeException only.
+        ChunkReaper.Census dies = (tenant, collection, limit, timeout) -> {
+            if (armed.get()) throw new NoClassDefFoundError("simulated: a class the census needs is gone");
+            return censusOf(1, Map.of());
+        };
+        ChunkReaper r = reaper(Settings.defaults(), dies, System::nanoTime, t);
+        assertThat(r.lastCompletedPassAt()).as("before the first pass").isNull();
+
+        RunResult failed = r.runOnce(Duration.ZERO);       // must return, not throw
+
+        assertThat(failed.tenants()).isEmpty();
+        assertThat(r.failedPassesTotal()).isEqualTo(1);
+        assertThat(r.lastCompletedPassAt()).as("a pass that died is not a completed pass").isNull();
+
+        armed.set(false);
+        RunResult next = r.runOnce(Duration.ZERO);
+        assertThat(next.tenant(t).collection(c).moved()).as("the reaper is still alive").isEqualTo(1);
+        assertThat(r.lastCompletedPassAt()).isEqualTo(CLOCK.instant());
+        assertThat(r.failedPassesTotal()).isEqualTo(1);
+    }
+
+    @Test
+    void anErrorFromTheTenantListIsAFailedPassToo() {
+        ChunkReaper r = new ChunkReaper(store, vectors, repo, gate,
+            () -> { throw new StackOverflowError("simulated"); }, Settings.defaults(), CLOCK);
+
+        RunResult failed = r.runOnce(null);
+
+        assertThat(failed.tenants()).isEmpty();
+        assertThat(r.failedPassesTotal()).isEqualTo(1);
+        assertThat(r.lastCompletedPassAt()).isNull();
+    }
+
+    @Test
+    void aPassThatCompletesStampsItsTime_evenWhenItMovedNothing() throws Exception {
+        // A candidates=0 pass writes no gc_audit row; this stamp is the only trace that the reaper is alive.
+        String t = newTenant();
+        openGate(t);
+        ChunkReaper r = reaper(t);
+        assertThat(r.lastCompletedPassAt()).isNull();
+
+        r.runOnce(null);
+
+        assertThat(r.lastCompletedPassAt()).isEqualTo(CLOCK.instant());
+    }
+
+    @Test
     void aCensusCancelledByItsStatementBoundIsARefusal_notAZero() throws Exception {
         String t = newTenant();
         openGate(t);
