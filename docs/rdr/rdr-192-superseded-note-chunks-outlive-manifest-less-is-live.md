@@ -1025,7 +1025,15 @@ grown.
   `Exception` escapes the scheduled task and suppresses every later run without a trace
   (`NexusService.java` wraps the pass in `catch (Exception)`). The fix, catching
   `Throwable` at each scheduled task and exposing the last completed pass time with an
-  `nx doctor` row for a stale one, is tracked as `nexus-wbfpw.56`, still open.
+  `nx doctor` row for a stale one, is built (`nexus-wbfpw.56`): `GET /v1/status` carries
+  `reaper.last_completed_pass_at` and the row warns on a dead reaper. A pass completes
+  whatever its tenants did, so a reaper that is alive but refusing every tenant (the
+  backfill rung not run) or erroring on every collection (a grants regression) still
+  stamps the time; `reaper.last_pass` (`tenants_visited`, `tenants_errored`,
+  `tenants_refused`) closes that, and the row warns "alive but doing nothing" when a
+  recent pass visited tenants and none worked. Not yet closed: nothing automated runs
+  `nx doctor` against a cloud engine, and the cloud gate has no leg that asserts the
+  `reaper` key survives the edge (`nexus-wbfpw.50`).
 - **The census reads a live document as `no-owner`** (Phase 3 gate O2). The census
   resolves a chunk's owner from its metadata (`catalog_doc_id`, then `doc_id`) or a
   note-shaped reverse match. A `docs__` or `code__` chunk written after RDR-108 carries no

@@ -2015,7 +2015,7 @@ Exit codes:
 | 3 | Every requested chunk is back, but at least one stays hidden from search and get: no live owner names it, reattach refused it (`superseded`), or `--no-reattach` left it. A dry run exits 3 when a real run would leave it hidden. `--json` carries the count as `hidden`. |
 | 4 | The connected engine predates the route. Upgrade it (compare its version against `REQUIRED_ENGINE_VERSION` in `src/nexus/engine_version.py`). |
 | 5 | The engine refused the request or failed: a sample-only audit row, an audit row for another collection or quarantine collection, a collection that is not registered or not live, a transient 5xx; or the client hit an unexpected error. One line on stderr says which. |
-| 6 | The engine was busy (the typed `quarantine_restore_busy` 503, with `Retry-After: 5`): a manifest writer held the collection's lock for more than 2 seconds, or the call lost a deadlock with another writer. That call rolled back whole, nothing moved, was attached or audited; run the same command again. |
+| 6 | The engine was busy (the typed `quarantine_restore_busy` 503, with `Retry-After: 5`): a manifest writer held a lock for more than 2 seconds, or the call lost a deadlock with another writer. The busy statement rolled back. Each quarantine collection is restored in its own transaction, so the message says whether an earlier one had already committed (`nothing_moved: false` on the wire) and names its `gc_audit` ids, which `--json` also puts in `audit_ids`; a chunk it restored reads `present` on the rerun. Run the same command again. |
 
 A failure on a later page (exit 4, 5 or 6) still prints the report, the totals and the `gc_audit` ids of the pages already committed, then the error; `--json` keeps its one document and adds an `error` key. The verb pages itself: chashes go in batches of 1000, an audit row by offset, a window by chash cursor. Needs the engine and the client from the same release (the route first ships in the engine that carries changeset `vectors-025`); against an older engine it exits 4.
 
@@ -3779,7 +3779,12 @@ intervals plus the pass's own wall-clock budget (`wall_clock_budget_seconds`) pl
 died does not move the time, and a pass with nothing to move writes no `gc_audit` row, so this
 is the one durable sign that the reaper is alive (a cloud operator has no engine log). The row
 is green and says "not applicable" when the engine cannot be reached (a box with no engine),
-predates the field, or runs with the reaper off (`NX_REAPER_ENABLED=false`).
+predates the field, or runs with the reaper off (`NX_REAPER_ENABLED=false`). A pass completes whatever its
+tenants did, so the object also carries `last_pass` (`tenants_visited`, `tenants_errored`, `tenants_refused`
+for the last completed pass, null before the first): when a recent pass visited tenants and every one was
+refused (the RDR-192 backfill rung not run: `nx upgrade`) or errored (read the engine log for
+`reaper_tenant_failed`), the row warns "alive but doing nothing". An engine that sends no `last_pass` is
+judged on the time alone.
 
 **Restart after the ownerless-write release.** The engine in this release refuses a chunk
 write that no document owns, and a local install enforces from the first boot of the
