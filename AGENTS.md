@@ -223,19 +223,18 @@ order and stop at the first red:
 To turn it off: `gh variable delete QWEN_CI_PUSH_RUNNER`; the next push (or a
 "Re-run all jobs") runs the hosted shards.
 
-**Probe run record: run 36971401953, green, 2026-10-02** (develop bb206eb8c,
-branch `runner-probe/qwen-2026-10-02`, deleted after). Identity exactly `ghci`,
-passwordless sudo refused, Docker reachable (root-equivalent, as documented), and
-the Windows side clean (WSL kernel and binfmt_misc present, no `WSLInterop`
-handler, no `cmd.exe`, the `/mnt` drive directories empty, no `/mnt` on PATH).
-The credential line read `NOT CHECKED: /home/nexus/.config/nexus is absent or
-unreachable`. The cause is the host's mode, not a missing file: `/home/nexus` is
-0700 (the host owner set it 2026-09-30; `ghci` is in the groups `ghci`, `docker`
-and `nx-suite` only), so `ghci` cannot search it. That is the closed-home state
-and it passes under the rule below. The host owner ruled on 2026-10-02 to keep
-`/home/nexus` closed, not to open it to 0711. The run itself could not tell the
-two causes apart (it ran the probe before the closed-home line below existed); a
-run of the current probe says so in its own REPORT line.
+**Probe run record: run 36980355165, green, 2026-10-02** (the current probe at
+c82471f2d, branch `runner-probe/qwen-2026-10-02b`, deleted after). Identity exactly
+`ghci`, passwordless sudo refused, Docker reachable (root-equivalent, as
+documented), and the Windows side clean (no `WSLInterop` handler, no `cmd.exe`,
+the `/mnt` drive directories empty). The credential line is the closed-home pass,
+in the probe's own words: `/home/nexus exists and is closed to the runner user (no
+search permission) ... the stronger state, and the credential line passes`, with no
+`::warning::`. `/home/nexus` is 0700 (the host owner set it 2026-09-30; `ghci` is
+in the groups `ghci`, `docker` and `nx-suite` only), and the host owner ruled on
+2026-10-02 to keep it closed, not to open it to 0711. The run before it, 36971401953
+(develop bb206eb8c, the probe before the closed-home line existed), logged the same
+state as a generic `NOT CHECKED` with a warning.
 
 **Correction to the earlier record.** Run 36956876942 (2026-10-02 02:42Z,
 develop 5a31da34f plus the box-lock change, branch `runner-probe/qwen-2026-10-01`)

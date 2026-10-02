@@ -746,7 +746,7 @@ def test_the_docs_give_the_enable_sequence_in_order_and_the_rerun_caveat() -> No
     record = re.search(r"\*\*Probe run record: run (\d{8,}), green", agents)
     assert record, "the green probe run id is recorded here"
     flat = " ".join(agents.split())
-    assert record.group(1) == "36971401953", "the current record is the run that passed on the closed-home state"
+    assert record.group(1) == "36980355165", "the current record is the run of the current probe that logged the closed-home pass"
     # run 36956876942 was recorded as CHECKED but logged NOT CHECKED: the correction stays in the record
     assert "Correction to the earlier record" in flat and "36956876942" in flat and "was not" in flat
     # the rule: two passing states, one failing state, and every other NOT CHECKED is still not a pass
