@@ -1640,10 +1640,13 @@ class QuarantineRestoreIntegrationTest extends AtomicWriteTestBase {
         String t = newTenant();
         String slug = col("knowledge");
         String twin = col("knowledge");
-        // Same chash text in both would be one chunk each in their own siblings, as the reaper names them by name.
+        // The reaper names each sibling by the collection's own name, so each chunk sits in ITS OWN sibling here;
+        // this test does not put two origins' chunks in one sibling (aSharedSiblingIsFoundByTheOriginTagNotByItsName
+        // does). What it pins: after catalog-044 both rows read the same owner, so a client deriving the sibling
+        // from the row would name ONE sibling for the two and reach neither chunk; the engine reaches only the
+        // chunks of the origin it was asked about and never restores the twin's into the slug.
         String hSlug = quarantined(t, slug, "slug").get(0);
         String hTwin = quarantined(t, twin, "twin").get(0);
-        // After catalog-044 both rows read the same owner, so the row-derived sibling of the two is ONE name.
         setOwner(t, slug, "curator-9");
         setOwner(t, twin, "curator-9");
 
@@ -1780,6 +1783,182 @@ class QuarantineRestoreIntegrationTest extends AtomicWriteTestBase {
         assertThat(out.restored()).containsExactly(h);
         assertThat(inCollection(t, clientSibling, h)).as("the second copy is left for expiry, as a present chash's is")
             .isTrue();
+    }
+
+    /** A chunk a client move left in {@code sibling}, tagged for {@code origin}, as the real tag shape carries it. */
+    private String clientSiblingChunk(String tenant, String origin, String sibling, String seed,
+                                      Map<String, Object> extraMeta) throws Exception {
+        String hex = Chash.ofText(origin + "/client/" + seed).toHex();
+        var meta = new java.util.LinkedHashMap<String, Object>(extraMeta);
+        meta.put("title", seed);
+        meta.put("origin_collection", origin);
+        meta.put("quarantined_at", "2026-09-01T00:00:00Z");
+        try (Connection su = pg.createConnection("")) {
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCollection(ctx, tenant, sibling);
+            PgContainerHelper.insertChunks(ctx, tenant, sibling, List.of(hex), List.of(seed + " text"),
+                embedder.embed(List.of(seed + " text")), List.of(meta));
+        }
+        return hex;
+    }
+
+    // ── a busy trip after an earlier sibling committed (nexus-wbfpw.55 round 2) ───────────────────────────────
+
+    @Test
+    void aBusyTripOnALaterSiblingSaysWhatTheEarlierSiblingAlreadyCommitted_notNothingMoved() throws Exception {
+        // Each sibling's restore is its own transaction. Sibling one commits (bytes moved, a manifest row, an audit
+        // row); sibling two then trips the index-run lock of its chunk's document. The old answer, "nothing was
+        // moved, attached or audited", was true of that one statement and false of the call.
+        String t = newTenant();
+        String c = col("knowledge");
+        String first = quarantinedWith(t, c, Map.of("first-sibling", Map.<String, Object>of(
+            "catalog_doc_id", "1.40.1", "chunk_index", 0))).get(0);
+        String clientSibling = rowDerivedSibling(c, "old-owner");
+        String second = clientSiblingChunk(t, c, clientSibling, "second-sibling",
+            Map.of("catalog_doc_id", "1.40.2", "chunk_index", 0));
+        liveDoc(t, c, "1.40.1", "Free document", 1, "f.md", Map.of());
+        liveDoc(t, c, "1.40.2", "Locked document", 1, "l.md", Map.of());
+        setOwner(t, c, "curator-9");
+        assertThat(vectors.resolveQuarantineSiblings(t, c)).containsExactly(quarantineOf(c), clientSibling);
+
+        try (Connection holder = pg.createConnection("")) {
+            holder.setAutoCommit(false);
+            DSL.using(holder, SQLDialect.POSTGRES).select(DSL.function("pg_advisory_xact_lock", SQLDataType.OTHER,
+                DSL.function("hashtext", SQLDataType.INTEGER, DSL.val("indexrun:" + t + ":1.40.2")))).execute();
+
+            assertThatThrownBy(() -> vectors.quarantineRestore(t, c, null, List.of(first, second), ACTOR, false))
+                .isInstanceOfSatisfying(PgVectorRepository.QuarantineRestoreBusyException.class, busy -> {
+                    assertThat(busy.somethingMoved()).as("the first sibling had committed").isTrue();
+                    assertThat(busy.auditIds()).as("and wrote its audit row").hasSize(1);
+                    assertThat(busy.getMessage()).doesNotContain("nothing was moved");
+                    assertThat(busy.getMessage()).contains("already");
+                });
+            holder.rollback();
+        }
+
+        assertThat(inCollection(t, c, first)).as("the first sibling's chunk is home").isTrue();
+        assertThat(manifest(t, "1.40.1")).as("and attached").hasSize(1);
+        assertThat(audit(t, "quarantine_restore")).as("its audit row exists").hasSize(1);
+        assertThat(inCollection(t, clientSibling, second)).as("the tripped sibling's chunk did not move").isTrue();
+        // Sent again, the call finishes: the done chash reads present, the other is restored.
+        QuarantineRestoreOutcome again = vectors.quarantineRestore(t, c, null, List.of(first, second), ACTOR, false);
+        assertThat(again.present()).containsExactly(first);
+        assertThat(again.restored()).containsExactly(second);
+    }
+
+    @Test
+    void aBusyTripOnTheFirstSiblingStillSaysNothingMoved() throws Exception {
+        // The control: nothing had committed, so "nothing moved" is true and somethingMoved() is false.
+        String t = newTenant();
+        String c = col("knowledge");
+        String h = quarantinedWith(t, c, Map.of("only", Map.<String, Object>of(
+            "catalog_doc_id", "1.41.1", "chunk_index", 0))).get(0);
+        liveDoc(t, c, "1.41.1", "Locked", 1, "l.md", Map.of());
+        try (Connection holder = pg.createConnection("")) {
+            holder.setAutoCommit(false);
+            DSL.using(holder, SQLDialect.POSTGRES).select(DSL.function("pg_advisory_xact_lock", SQLDataType.OTHER,
+                DSL.function("hashtext", SQLDataType.INTEGER, DSL.val("indexrun:" + t + ":1.41.1")))).execute();
+            assertThatThrownBy(() -> vectors.quarantineRestore(t, c, null, List.of(h), ACTOR, false))
+                .isInstanceOfSatisfying(PgVectorRepository.QuarantineRestoreBusyException.class, busy -> {
+                    assertThat(busy.somethingMoved()).isFalse();
+                    assertThat(busy.auditIds()).isEmpty();
+                    assertThat(busy.getMessage()).contains("nothing was moved");
+                });
+            holder.rollback();
+        }
+    }
+
+    // ── the rival check spans every sibling of the origin (nexus-wbfpw.55 round 2) ───────────────────────────
+
+    /** Two versions of one position of one document, one in the reaper's sibling and one in a client-named one. */
+    private record Rivals(String t, String c, String clientSibling, String inReaperSibling, String inClientSibling,
+                          String control) {}
+
+    private Rivals rivalsAcrossSiblings() throws Exception {
+        String t = newTenant();
+        String c = col("knowledge");
+        String x = quarantinedWith(t, c, Map.of("version-in-reaper-sibling", Map.<String, Object>of(
+            "catalog_doc_id", "1.42.1", "chunk_index", 0, "title", "x"))).get(0);
+        String clientSibling = rowDerivedSibling(c, "old-owner");
+        String y = clientSiblingChunk(t, c, clientSibling, "version-in-client-sibling",
+            Map.of("catalog_doc_id", "1.42.1", "chunk_index", 0));
+        String z = clientSiblingChunk(t, c, clientSibling, "position-one-alone",
+            Map.of("catalog_doc_id", "1.42.1", "chunk_index", 1));
+        liveDoc(t, c, "1.42.1", "Two versions of position zero", 2, "p.md", Map.of());
+        setOwner(t, c, "curator-9");
+        assertThat(vectors.resolveQuarantineSiblings(t, c)).containsExactly(quarantineOf(c), clientSibling);
+        return new Rivals(t, c, clientSibling, x, y, z);
+    }
+
+    @Test
+    void twoVersionsOfOnePositionInDifferentSiblingsAreRefusedForBoth_inOneCall() throws Exception {
+        Rivals r = rivalsAcrossSiblings();
+
+        QuarantineRestoreOutcome dry = vectors.quarantineRestore(r.t(), r.c(), null,
+            List.of(r.inReaperSibling(), r.inClientSibling(), r.control()), ACTOR, true);
+        assertThat(reasonOf(dry, r.inReaperSibling())).as("the dry run predicts what the real call does")
+            .isEqualTo("rival");
+        assertThat(reasonOf(dry, r.inClientSibling())).isEqualTo("rival");
+        assertThat(verdictOf(dry, r.control())).isEqualTo("attach");
+
+        QuarantineRestoreOutcome out = vectors.quarantineRestore(r.t(), r.c(), null,
+            List.of(r.inReaperSibling(), r.inClientSibling(), r.control()), ACTOR, false);
+
+        assertThat(verdictOf(out, r.inReaperSibling())).isEqualTo("superseded");
+        assertThat(reasonOf(out, r.inReaperSibling())).isEqualTo("rival");
+        assertThat(verdictOf(out, r.inClientSibling())).isEqualTo("superseded");
+        assertThat(reasonOf(out, r.inClientSibling())).isEqualTo("rival");
+        assertThat(verdictOf(out, r.control())).as("a position with one chunk attaches").isEqualTo("attach");
+        assertThat(manifest(r.t(), "1.42.1")).extracting(ManifestRow::position).containsExactly(1);
+    }
+
+    @Test
+    void twoVersionsOfOnePositionInDifferentSiblingsAreRefusedForBoth_reaperSiblingFirstInSeparateCalls()
+            throws Exception {
+        Rivals r = rivalsAcrossSiblings();
+
+        QuarantineRestoreOutcome one = vectors.quarantineRestore(r.t(), r.c(), null, List.of(r.inReaperSibling()),
+            ACTOR, false);
+        assertThat(reasonOf(one, r.inReaperSibling())).as("the other version sits in the client sibling")
+            .isEqualTo("rival");
+        QuarantineRestoreOutcome two = vectors.quarantineRestore(r.t(), r.c(), null, List.of(r.inClientSibling()),
+            ACTOR, false);
+        assertThat(reasonOf(two, r.inClientSibling())).as("and now the first version is in the origin")
+            .isEqualTo("rival");
+        assertThat(manifest(r.t(), "1.42.1")).as("neither version was chosen for the operator").isEmpty();
+    }
+
+    @Test
+    void twoVersionsOfOnePositionInDifferentSiblingsAreRefusedForBoth_clientSiblingFirstInSeparateCalls()
+            throws Exception {
+        Rivals r = rivalsAcrossSiblings();
+
+        QuarantineRestoreOutcome one = vectors.quarantineRestore(r.t(), r.c(), null, List.of(r.inClientSibling()),
+            ACTOR, false);
+        assertThat(reasonOf(one, r.inClientSibling())).as("the other version sits in the reaper's sibling")
+            .isEqualTo("rival");
+        QuarantineRestoreOutcome two = vectors.quarantineRestore(r.t(), r.c(), null, List.of(r.inReaperSibling()),
+            ACTOR, false);
+        assertThat(reasonOf(two, r.inReaperSibling())).isEqualTo("rival");
+        assertThat(manifest(r.t(), "1.42.1")).isEmpty();
+    }
+
+    @Test
+    void aQuarantinedChunkOfAnotherOriginDoesNotMakeARival() throws Exception {
+        // The control for the wider scan: a chunk in a sibling that names ANOTHER origin is not this origin's
+        // version of the document, so it must not refuse an attach.
+        String t = newTenant();
+        String c = col("knowledge");
+        String other = col("knowledge");
+        String mine = quarantinedWith(t, c, Map.of("mine", Map.<String, Object>of(
+            "catalog_doc_id", "1.43.1", "chunk_index", 0))).get(0);
+        String clientSibling = rowDerivedSibling(c, "shared");
+        clientSiblingChunk(t, other, clientSibling, "theirs", Map.of("catalog_doc_id", "1.43.1", "chunk_index", 0));
+        liveDoc(t, c, "1.43.1", "Mine", 1, "m.md", Map.of());
+
+        QuarantineRestoreOutcome out = vectors.quarantineRestore(t, c, null, List.of(mine), ACTOR, false);
+
+        assertThat(verdictOf(out, mine)).isEqualTo("attach");
     }
 
     /** Blocks until a backend is waiting on an advisory lock inside a quarantine_restore_chunks call. */

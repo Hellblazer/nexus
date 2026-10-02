@@ -451,6 +451,58 @@ class VectorHandlerQuarantineRestoreRouteTest {
     }
 
     @Test
+    void aBusyTripOnALaterSiblingIs503WithNothingMovedFalseAndTheAuditIdsAlreadyWritten() throws Exception {
+        // nexus-wbfpw.55 round 2: each sibling restores in its own transaction. Sibling one commits; sibling two
+        // trips the index-run lock of its chunk's document. "nothing_moved: true" would be false of the call.
+        String o = col();
+        String[] seg = o.split("__");
+        String clientSibling = "quarantine-" + seg[0] + "__old-owner__" + seg[2] + "__" + seg[3];
+        String h1 = Chash.ofText(o + "/first").toHex();
+        String h2 = Chash.ofText(o + "/second").toHex();
+        su(ctx -> {
+            PgContainerHelper.insertCollection(ctx, TENANT_A, o);
+            PgContainerHelper.insertCollection(ctx, TENANT_A, "quarantine-" + o);
+            PgContainerHelper.insertCollection(ctx, TENANT_A, clientSibling);
+            PgContainerHelper.insertChunks(ctx, TENANT_A, "quarantine-" + o, List.of(h1), List.of("first text"),
+                List.of(new float[384]), List.of(Map.<String, Object>of("title", "first",
+                    "quarantined_at", "2026-09-01T00:00:00Z", "origin_collection", o)));
+            PgContainerHelper.insertChunks(ctx, TENANT_A, clientSibling, List.of(h2), List.of("second text"),
+                List.of(new float[384]), List.of(Map.<String, Object>of("title", "second",
+                    "quarantined_at", "2026-09-01T00:00:00Z", "origin_collection", o,
+                    "catalog_doc_id", "9.7.1", "chunk_index", 0)));
+            ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
+                    CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, CATALOG_DOCUMENTS.CHUNK_COUNT,
+                    CATALOG_DOCUMENTS.FILE_PATH, CATALOG_DOCUMENTS.METADATA)
+               .values(TENANT_A, "9.7.1", "Locked", o, 1, "l.md", JSONB.jsonb("{}")).execute();
+        });
+
+        try (Connection holder = pg.createConnection("")) {
+            holder.setAutoCommit(false);
+            DSL.using(holder, SQLDialect.POSTGRES).select(DSL.function("pg_advisory_xact_lock",
+                org.jooq.impl.SQLDataType.OTHER, DSL.function("hashtext", org.jooq.impl.SQLDataType.INTEGER,
+                    DSL.val("indexrun:" + TENANT_A + ":9.7.1")))).execute();
+            var body = req(o, "chashes", List.of(h1, h2));
+            body.remove("quarantine_collection");
+            var r = post(TOKEN_A, body);
+
+            assertThat(r.statusCode()).as(r.body()).isEqualTo(503);
+            var j = json(r);
+            assertThat(j.get("reason")).isEqualTo("quarantine_restore_busy");
+            assertThat(j.get("nothing_moved")).as("sibling one had committed").isEqualTo(false);
+            assertThat((List<?>) j.get("audit_ids")).as("and wrote an audit row").hasSize(1);
+            assertThat(j.get("moved_chashes")).isEqualTo(List.of(h1));
+            assertThat(j.get("error").toString()).doesNotContain("nothing was moved");
+            assertThat(r.headers().firstValue("Retry-After")).hasValue("5");
+            holder.rollback();
+        }
+        assertThat(in(TENANT_A, o, h1)).as("the first sibling's chunk is home").isTrue();
+        assertThat(in(TENANT_A, clientSibling, h2)).as("the tripped sibling's did not move").isTrue();
+        var again = json(post(TOKEN_A, req(o, "chashes", List.of(h1, h2))));
+        assertThat(again.get("present")).isEqualTo(1);
+        assertThat(again.get("restored")).isEqualTo(1);
+    }
+
+    @Test
     void aHeldSweepGateIsATypedRetryable503_withNothingMoved() throws Exception {
         String o = col();
         List<String> hs = quarantined(TENANT_A, o, "2026-09-01T00:00:00Z", "busy");
@@ -466,6 +518,8 @@ class VectorHandlerQuarantineRestoreRouteTest {
             var body = json(r);
             assertThat(body.get("reason")).isEqualTo("quarantine_restore_busy");
             assertThat(body.get("nothing_moved")).isEqualTo(true);
+            assertThat(body.get("audit_ids")).as("nothing was committed, so nothing was audited").isEqualTo(List.of());
+            assertThat(body.get("moved_chashes")).isEqualTo(List.of());
             assertThat(body.get("retry_after_seconds")).isEqualTo(5);
             assertThat(r.headers().firstValue("Retry-After")).hasValue("5");
             assertThat(body.get("error").toString()).as("not the opaque 500 text").doesNotContain("internal server error");

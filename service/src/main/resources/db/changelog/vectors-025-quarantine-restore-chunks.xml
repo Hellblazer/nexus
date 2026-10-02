@@ -117,7 +117,9 @@
                        version         the chunk's metadata content_hash differs from the document's
                                        index_content_hash (both present): the chunk was cut from another version
                        position_taken  the document's manifest already holds another row at that position
-                       rival           another chunk, in the origin or in this origin's quarantine sibling, names
+                       rival           another chunk, in the origin or in ANY quarantine collection that holds
+                                       chunks tagged for this origin (the reaper's sibling and every client-named
+                                       one, nexus-wbfpw.55 round 2), names
                                        the same document at the same position, for a forward-placed chunk and for a
                                        single-chunk legacy note at position 0 alike (a keyed chunk with no
                                        chunk_index counts as position 0 when the document registers at most one
@@ -206,6 +208,27 @@
 
     No DATA EFFECT: two functions; no existing row changes at deploy. Placed after vectors-024 (the reaper's move;
     vectors-023 belongs to another branch) and before the grants blocks.
+
+    THE RIVAL SCOPE (nexus-wbfpw.55 round 2). The restore verb finds every quarantine sibling of the origin
+    itself, so one origin can have chunks in several: the reaper's own (quarantine-<origin>) and the ones nx index
+    repo named from the catalog row before catalog-044 rewrote owner_id. The rival check used to see the origin and
+    the ONE sibling being restored, so two versions of one (document, position) held in DIFFERENT siblings were not
+    seen as rivals: the first sibling's chunk attached, and the other then read position_taken. The scan now covers
+    the origin, p_quarantine_collection, and every quarantine-state collection of the tenant that holds a chunk whose
+    origin_collection tag names this origin. Both versions are refused whichever sibling is restored first, in one
+    call or several, and the dry run predicts the same. A chunk of ANOTHER origin sitting in a shared sibling is not
+    a rival (the tag must name this origin).
+
+    RE-WALK (nexus-wbfpw.55 round 2). vectors-025 is in no engine tag, so vectors-025-1 (the changed changeSet:
+    quarantine_reattach_plan, its SQL and its comment) is edited in place and no new changeset id carries the
+    function (Sam, 2026-10-02, the vectors-024/026 precedent of nexus-wbfpw.57). vectors-025-2 is unchanged. A
+    database that ran an earlier develop build of vectors-025-1 fails Liquibase validation on the changed checksum,
+    and SchemaMigrator wraps that into a MigrationException: a boot crash loop. The remedy is to delete the
+    DATABASECHANGELOG row for vectors-025-1 (it is CREATE OR REPLACE and GRANT, so re-running it is idempotent) or
+    to recreate the database. Do NOT null the md5sum instead: that accepts the changeset as already run, keeps the
+    old function body, and the rival scan stays per-sibling. A test substrate and the local-service gate use
+    throwaway databases and are not affected; a standing local dev service, or a rehearsal database that walked an
+    earlier develop build, is.
 -->
 <databaseChangeLog
     xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
@@ -214,7 +237,7 @@
         http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
 
     <changeSet id="vectors-025-1" author="nexus-2x9xa">
-        <comment>nexus.quarantine_reattach_plan: the read-only classifier behind the restore verb's reattach step. For each named chash it resolves the live owning document (forward by metadata catalog_doc_id/doc_id, else reverse by a single live note's own doc_id, the census's two paths) and the manifest position, and returns a jsonb array of {chash, verdict, why, doc, title, pos, chunk_title, ls, le, cs, ce} with verdict attach, superseded (why says which of ten reasons), no_live_owner, no_position or owned. A complete, failed or mid-run owner, a content hash that differs from the document's, another chunk of the same document at the same position (in the collection or its quarantine sibling), and a taken or out-of-range position all refuse. Never writes.</comment>
+        <comment>nexus.quarantine_reattach_plan: the read-only classifier behind the restore verb's reattach step. For each named chash it resolves the live owning document (forward by metadata catalog_doc_id/doc_id, else reverse by a single live note's own doc_id, the census's two paths) and the manifest position, and returns a jsonb array of {chash, verdict, why, doc, title, pos, chunk_title, ls, le, cs, ce} with verdict attach, superseded (why says which of ten reasons), no_live_owner, no_position or owned. A complete, failed or mid-run owner, a content hash that differs from the document's, another chunk of the same document at the same position (in the collection or in any quarantine collection holding chunks tagged for it), and a taken or out-of-range position all refuse. Never writes.</comment>
         <sql splitStatements="false" stripComments="false"><![CDATA[
 CREATE OR REPLACE FUNCTION nexus.quarantine_reattach_plan(
     p_tenant_id              text,
@@ -296,13 +319,16 @@ placed AS (
       LEFT JOIN own o ON o.chash = k.chash
 ),
 rival_rows AS MATERIALIZED (
-    -- Every OTHER chunk, in the origin or in this origin's quarantine sibling, whose forward key names one of the
-    -- documents being judged, whichever path (forward or reverse) placed the chunk on it: the stored versions of
-    -- the document, not only the chashes this call names. Two chunks that claim one (document, position) are two
-    -- versions of it, and a call that took only one of them (a 1000-row page boundary, a second call) must still
-    -- see the other. A single-chunk legacy note (reverse path, position 0) is judged the same way: a keyed chunk
-    -- that names the note at position 0 (or, the note registering at most one chunk, at no position) is its rival.
-    -- One scan of the two collections.
+    -- Every OTHER chunk, in the origin or in ANY quarantine collection that holds chunks tagged for this origin,
+    -- whose forward key names one of the documents being judged, whichever path (forward or reverse) placed the
+    -- chunk on it: the stored versions of the document, not only the chashes this call names. Two chunks that claim
+    -- one (document, position) are two versions of it, and a call that took only one of them (a 1000-row page
+    -- boundary, a second call, the other sibling) must still see the other. A single-chunk legacy note (reverse
+    -- path, position 0) is judged the same way: a keyed chunk that names the note at position 0 (or, the note
+    -- registering at most one chunk, at no position) is its rival. The origin and p_quarantine_collection are
+    -- scanned as before (an untagged chunk there is taken for this origin's); any OTHER quarantine collection of
+    -- the tenant counts only for a chunk whose origin_collection tag names this origin, so a chunk of another
+    -- origin in a shared sibling is no rival. One scan of the origin and the siblings.
     SELECT x.chash AS x_chash,
            COALESCE(NULLIF(x.metadata->>'catalog_doc_id', ''), NULLIF(x.metadata->>'doc_id', '')) AS x_key,
            x.metadata->>'chunk_index' AS x_ci
@@ -310,6 +336,20 @@ rival_rows AS MATERIALIZED (
      WHERE x.tenant_id = p_tenant_id
        AND x.collection IN (p_origin_collection, p_quarantine_collection)
        AND COALESCE(x.metadata->>'origin_collection', p_origin_collection) = p_origin_collection
+       AND COALESCE(NULLIF(x.metadata->>'catalog_doc_id', ''), NULLIF(x.metadata->>'doc_id', ''))
+           IN (SELECT pp.tumbler FROM placed pp WHERE pp.tumbler IS NOT NULL)
+    UNION ALL
+    -- The other quarantine collections, one indexed probe per collection (a join, not an OR, so the collection
+    -- index is used); a chunk counts only when its own tag names this origin.
+    SELECT x.chash,
+           COALESCE(NULLIF(x.metadata->>'catalog_doc_id', ''), NULLIF(x.metadata->>'doc_id', '')),
+           x.metadata->>'chunk_index'
+      FROM nexus.catalog_collections cc
+      JOIN nexus.chunks x
+        ON x.tenant_id = cc.tenant_id AND x.collection = cc.name
+     WHERE cc.tenant_id = p_tenant_id AND cc.lifecycle_state = 'quarantine'
+       AND cc.name <> p_quarantine_collection
+       AND x.metadata->>'origin_collection' = p_origin_collection
        AND COALESCE(NULLIF(x.metadata->>'catalog_doc_id', ''), NULLIF(x.metadata->>'doc_id', ''))
            IN (SELECT pp.tumbler FROM placed pp WHERE pp.tumbler IS NOT NULL)
 ),

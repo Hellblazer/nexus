@@ -327,18 +327,23 @@ public final class VectorHandler implements HttpHandler {
             log.debug("event=vector_illegal_state op={} error={}", op, e.getMessage());
             HttpUtil.send(exchange, 422, json(Map.of("error", e.getMessage())));
         } catch (PgVectorRepository.QuarantineRestoreBusyException e) {
-            // nexus-wbfpw.49: the restore's lock or statement bound tripped and the call rolled back whole. A typed,
-            // retryable 503 with the stable reason a client branches on and a Retry-After, never the opaque 500.
-            // POST /gc/quarantine-restore is a non-idempotent sweep route, so the client's gateway ladder does not
-            // retry it by itself; the CLI reads this body and says so.
-            log.warn("event=quarantine_restore_busy op={} error={}", op, e.getMessage());
+            // nexus-wbfpw.49: the restore's lock or statement bound tripped. A typed, retryable 503 with the stable
+            // reason a client branches on and a Retry-After, never the opaque 500. POST /gc/quarantine-restore is a
+            // non-idempotent sweep route, so the client's gateway ladder does not retry it by itself; the CLI reads
+            // this body and says so. nexus-wbfpw.55: a restore across several quarantine siblings is one
+            // transaction per sibling, so "nothing_moved" is true only when no earlier sibling had committed; when
+            // one had, the body carries the audit rows it wrote and the chashes it restored or attached.
+            log.warn("event=quarantine_restore_busy op={} nothing_moved={} audit_ids={} error={}", op,
+                !e.somethingMoved(), e.auditIds(), e.getMessage());
             exchange.getResponseHeaders().set("Retry-After",
                 Integer.toString(PgVectorRepository.QuarantineRestoreBusyException.RETRY_AFTER_SECONDS));
             HttpUtil.send(exchange, 503, json(Map.of(
                 "error", e.getMessage(),
                 "reason", HttpUtil.QUARANTINE_RESTORE_BUSY_REASON,
                 "retry_after_seconds", PgVectorRepository.QuarantineRestoreBusyException.RETRY_AFTER_SECONDS,
-                "nothing_moved", true)));
+                "nothing_moved", !e.somethingMoved(),
+                "audit_ids", e.auditIds(),
+                "moved_chashes", e.movedChashes())));
         } catch (Exception e) {
             // Shared typed-DB-error ladder: pool-exhaustion 503 + class-23 409
             // (nexus-h8rf6.2 / nexus-7e057) — see HttpUtil.sendTypedDbError.
@@ -1363,9 +1368,12 @@ public final class VectorHandler implements HttpHandler {
      * Page by sending {@code next_after} back as {@code after_chash} (window source) or {@code source.next_offset}
      * back as {@code offset} (audit source) while it is not null.
      *
-     * <p>503 {@code {"reason": "quarantine_restore_busy", "retry_after_seconds", "nothing_moved": true}} when the
-     * collection's sweep gate (or an owning document's index-run lock) is held past the 2 s bound or the statement
-     * runs past its bound: the call rolled back whole and may be sent again.
+     * <p>503 {@code {"reason": "quarantine_restore_busy", "retry_after_seconds", "nothing_moved", "audit_ids",
+     * "moved_chashes"}} when the collection's sweep gate (or an owning document's index-run lock) is held past the 2 s
+     * bound or a statement runs past its bound. Each quarantine sibling is its own transaction, so
+     * {@code nothing_moved} is true only when the trip was on the first sibling that moved anything; when it was on a
+     * later one, {@code nothing_moved} is false and {@code audit_ids} / {@code moved_chashes} name what the earlier
+     * siblings had already committed. Either way the same call may be sent again (a restored chash reads present).
      */
     private void handleGcQuarantineRestore(HttpExchange ex, String method) throws IOException {
         requireMethod(ex, method, "POST");

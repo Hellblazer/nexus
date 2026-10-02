@@ -4266,6 +4266,11 @@ FROM scope s
      * that reads {@code missing} goes on to the next sibling. Each sibling that moved or attached something writes
      * its own {@code quarantine_restore} gc_audit row (the statement is per sibling, and so is the row). With no
      * sibling every chash reads missing.
+     *
+     * <p>Each sibling is its OWN transaction, so the call as a whole is not atomic. A lock or statement bound that
+     * trips on a later sibling leaves the earlier ones committed; the {@link QuarantineRestoreBusyException} then
+     * carries their audit ids and chashes, and the same call sent again finishes the rest (a chash already restored
+     * reads {@code present}).
      */
     private QuarantineRestoreOutcome restoreAcross(String tenant, String originCollection, List<String> siblings,
                                                     String[] hex, String actor, boolean dryRun, boolean reattach,
@@ -4277,8 +4282,18 @@ FROM scope s
         List<String> pending = new ArrayList<>(byChash.keySet());
         for (String sibling : siblings) {
             if (pending.isEmpty()) break;
-            var rows = restoreRows(tenant, originCollection, sibling, pending.toArray(String[]::new), actor, dryRun,
+            org.jooq.Result<?> rows;
+            try {
+                rows = restoreRows(tenant, originCollection, sibling, pending.toArray(String[]::new), actor, dryRun,
                                    reattach, sourceAuditId);
+            } catch (QuarantineRestoreBusyException busy) {
+                // Each sibling is its own transaction, so a trip here leaves the earlier siblings committed. Say so:
+                // the caller reports "nothing moved" only when that is true of the whole call.
+                if (auditIds.isEmpty()) throw busy;
+                throw busy.withProgress(auditIds, byChash.values().stream()
+                    .filter(row -> "restored".equals(row.outcome()) || row.attached())
+                    .map(QuarantineRestoreOutcome.Row::chash).toList());
+            }
             Long auditId = null;
             for (var r : rows) {
                 var reapable = r.get(QUARANTINE_RESTORE_CHUNKS.R_REAPABLE_AFTER);
@@ -4308,10 +4323,11 @@ FROM scope s
     }
 
     /**
-     * Runs {@code nexus.quarantine_restore_chunks} and maps a held lock or a statement that ran past its bound to
-     * {@link QuarantineRestoreBusyException}. The whole call is one transaction and it rolled back: nothing moved,
-     * nothing was attached, no audit row was written. That is a condition to retry, not a fault, so it gets its own
-     * typed answer instead of the opaque 500 an unmapped database error becomes.
+     * Runs {@code nexus.quarantine_restore_chunks} for ONE sibling and maps a held lock or a statement that ran past
+     * its bound to {@link QuarantineRestoreBusyException}. This statement is one transaction and it rolled back:
+     * nothing moved, nothing was attached, no audit row was written BY IT. ({@link #restoreAcross} adds what earlier
+     * siblings of the same call had committed.) That is a condition to retry, not a fault, so it gets its own typed
+     * answer instead of the opaque 500 an unmapped database error becomes.
      */
     private org.jooq.Result<?> restoreRows(String tenant, String originCollection, String quarantineCollection,
                                             String[] hex, String actor, boolean dryRun, boolean reattach,
@@ -4334,8 +4350,7 @@ FROM scope s
                         : DEADLOCK_DETECTED.equals(state)
                             ? "the restore deadlocked with another writer of the same rows (the reaper's expiry, "
                               + "for one) and was chosen as the victim"
-                            : "the restore ran past its statement time bound")
-                    + "; nothing was moved, attached or audited", e);
+                            : "the restore ran past its statement time bound"), e);
             }
             throw e;
         }
@@ -4354,17 +4369,54 @@ FROM scope s
     }
 
     /**
-     * The restore could not take the collection's lock (or finish its statement) inside its bound, and rolled back.
-     * Nothing moved, nothing was attached, no audit row was written; the same call may simply be sent again. The
-     * route answers it as a typed 503 ({@code reason: quarantine_restore_busy}).
+     * The restore could not take a lock (or finish a statement) inside its bound, and that statement rolled back.
+     * A restore across several quarantine siblings runs one transaction per sibling (nexus-wbfpw.55), so what the
+     * call as a whole did depends on where it tripped: on the first sibling nothing moved, nothing was attached and
+     * no audit row was written; on a later one the earlier siblings had already committed, and
+     * {@link #somethingMoved()} says so, with the {@link #auditIds()} they wrote and the chashes they
+     * {@link #movedChashes() moved or attached}. Either way the same call may simply be sent again (a chash an earlier
+     * sibling restored reads {@code present}). The route answers it as a typed 503
+     * ({@code reason: quarantine_restore_busy}, {@code nothing_moved} true only when nothing had).
      */
     public static final class QuarantineRestoreBusyException extends RuntimeException {
         /** Seconds a client should wait before sending the same call again. */
         public static final int RETRY_AFTER_SECONDS = 5;
 
-        public QuarantineRestoreBusyException(String message, Throwable cause) {
-            super(message, cause);
+        private final String reason;
+        private final List<Long> auditIds;
+        private final List<String> movedChashes;
+
+        /** The statement that tripped had nothing committed before it in this call. */
+        public QuarantineRestoreBusyException(String reason, Throwable cause) {
+            this(reason, cause, List.of(), List.of());
         }
+
+        private QuarantineRestoreBusyException(String reason, Throwable cause, List<Long> auditIds,
+                                               List<String> movedChashes) {
+            super(auditIds.isEmpty()
+                ? reason + "; nothing was moved, attached or audited"
+                : reason + "; an earlier quarantine sibling of this call had already committed ("
+                    + movedChashes.size() + " chunk(s) restored or attached, gc_audit row(s) "
+                    + auditIds + "), the rest were not moved. Send the same call again: a chunk already "
+                    + "restored reads present", cause);
+            this.reason = reason;
+            this.auditIds = List.copyOf(auditIds);
+            this.movedChashes = List.copyOf(movedChashes);
+        }
+
+        /** This exception, carrying what earlier siblings of the same call had already committed. */
+        QuarantineRestoreBusyException withProgress(List<Long> auditIds, List<String> movedChashes) {
+            return new QuarantineRestoreBusyException(reason, getCause(), auditIds, movedChashes);
+        }
+
+        /** True when an earlier sibling of this call had already committed a move or an attach. */
+        public boolean somethingMoved() { return !auditIds.isEmpty(); }
+
+        /** The {@code quarantine_restore} gc_audit rows the earlier siblings wrote, in order; empty when none did. */
+        public List<Long> auditIds() { return auditIds; }
+
+        /** The chashes the earlier siblings restored or attached; empty when none did. */
+        public List<String> movedChashes() { return movedChashes; }
     }
 
     /**
