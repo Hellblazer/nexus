@@ -5,6 +5,7 @@ package dev.nexus.service.vectors;
 import dev.nexus.service.db.PgSession;
 import dev.nexus.service.db.TenantScope;
 
+import org.jooq.Condition;
 import org.jooq.Field;
 import org.jooq.impl.DSL;
 
@@ -14,6 +15,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
+import static dev.nexus.service.jooq.nexus.Routines.reaperOwnsQuarantinedRow;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.REAPER_EXPIRE_QUARANTINE;
@@ -128,22 +130,21 @@ public class ReaperRepository {   // not final: ChunkReaperIntegrationTest raise
 
     /**
      * The origins of the chunks the reaper itself moved into {@code quarantineCollection}: the distinct
-     * {@code origin_collection} tags of its engine-owned rows (tag and both stamps agreeing, the same predicate the
-     * expiry function uses). The expiry reads the origin from the chunk, never by parsing the sibling's name, so a
-     * sibling whose name is not {@code quarantine-<origin>} (the Python client builds it from the origin's catalog
+     * {@code origin_collection} tags of its engine-owned rows ({@code nexus.reaper_owns_quarantined_row}, the one
+     * predicate the expiry functions call too). The expiry reads the origin from the chunk, never by parsing the
+     * sibling's name, so a sibling whose name is not {@code quarantine-<origin>} (the Python client builds it from the origin's catalog
      * row, which agrees with the name only for a conformant one) is still expired against the right manifest.
      */
     public List<String> taggedOrigins(String tenant, String quarantineCollection, int statementTimeoutMs) {
-        Field<String> by = DSL.jsonbGetAttributeAsText(CHUNKS.METADATA, "quarantined_by");
         Field<String> origin = DSL.jsonbGetAttributeAsText(CHUNKS.METADATA, "origin_collection");
-        Field<String> stamp = DSL.jsonbGetAttributeAsText(CHUNKS.METADATA, "quarantined_at");
-        Field<String> reaperStamp = DSL.jsonbGetAttributeAsText(CHUNKS.METADATA, "reaper_quarantined_at");
+        // The ownership test is the database's one definition (vectors-024-2), never the three keys written here.
+        Condition engineOwned = DSL.condition(reaperOwnsQuarantinedRow(CHUNKS.METADATA));
         return tenantScope.withTenant(tenant, ctx -> {
             PgSession.setStatementAndLockBounds(ctx, statementTimeoutMs, 2_000);
             // No ORDER BY: SELECT DISTINCT cannot order by an expression it rebinds. Sorted below instead.
             return ctx.selectDistinct(origin).from(CHUNKS)
                 .where(CHUNKS.TENANT_ID.eq(tenant).and(CHUNKS.COLLECTION.eq(quarantineCollection))
-                    .and(by.eq("engine-reaper")).and(reaperStamp.eq(stamp)).and(origin.isNotNull()))
+                    .and(engineOwned).and(origin.isNotNull()))
                 .fetch(origin).stream().sorted().toList();
         });
     }
