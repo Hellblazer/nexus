@@ -453,7 +453,7 @@ def gc_cmd(
         manifest-gap misclassification shape (the engine's own reading: the 100
         minimum counts the reapable set, the fraction divides by every stored
         chunk). Override: ``NX_GC_FORCE=1``. The
-        floor is this verb's own and permanent: the route this verb moves with
+        floor is this verb's own for now (nexus-wbfpw.52 tracks one on the route): the route this verb moves with
         carries none (the engine reaper's floor never reaches it, and
         ``indexer._prune_deleted_files`` calls the same route with no floor at
         all). Because it is checked on the advisory listing, the bounded drain
