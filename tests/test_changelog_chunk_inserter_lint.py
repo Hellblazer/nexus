@@ -216,7 +216,7 @@ _NO_INSERT = "UPDATE nexus.chunks SET metadata = metadata;"
     ("a lower-case, unqualified insert is still an insert into the table",
      {"a.xml": _fn("g", "insert into chunks (tenant_id) values (p_tenant);")}, ["a.xml"], {"g": "a.xml"}),
     ("a different table with the same prefix is not",
-     {"a.xml": _fn("h", "INSERT INTO nexus.chunks_768 (tenant_id) VALUES (p_tenant);")}, ["a.xml"], {}),
+     {"a.xml": _fn("h", "INSERT INTO nexus.chunks_archive (tenant_id) VALUES (p_tenant);")}, ["a.xml"], {}),
 ])
 def test_the_walk_reads_the_last_live_definition(
     tmp_path: Path, case: str, files: dict[str, str], order: list[str], expected: dict[str, str],
