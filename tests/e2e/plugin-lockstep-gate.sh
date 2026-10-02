@@ -63,6 +63,10 @@ set -euo pipefail
 export NX_NO_TELEMETRY=1
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# One interpreter >= 3.10, resolved once; never a bare python3 (nexus-u67ow).
+# shellcheck source=lib/python.sh disable=SC1091
+source "$REPO_ROOT/tests/e2e/lib/python.sh"
+e2e_python_resolve || exit 2
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/nx-plugin-lockstep.XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
 _fail() { echo "PLUGIN-LOCKSTEP GATE FAILED — $*" >&2; exit 1; }
@@ -110,7 +114,7 @@ _claude plugin install conexus@nexus-plugins -y </dev/null || _fail "install con
 _claude plugin install sn@nexus-plugins -y </dev/null || _fail "install sn@$PREV_TAG failed"
 SB_REGISTRY="$SB/.claude/plugins/installed_plugins.json"
 [ -f "$SB_REGISTRY" ] || _fail "sandbox registry not written at $SB_REGISTRY (isolation broken?)"
-_ver() { python3 -c "import json,sys; print(json.load(open('$SB_REGISTRY'))['plugins']['$1@nexus-plugins'][0]['version'])"; }
+_ver() { "$E2E_PYTHON" -c "import json,sys; print(json.load(open('$SB_REGISTRY'))['plugins']['$1@nexus-plugins'][0]['version'])"; }
 [ "$(_ver conexus)" = "$PREV" ] || _fail "conexus installed at $(_ver conexus), expected $PREV"
 [ "$(_ver sn)" = "$PREV" ] || _fail "sn installed at $(_ver sn), expected $PREV"
 echo "  installed conexus + sn at $PREV"
@@ -151,7 +155,7 @@ env -i HOME="$SB" PATH="$PATH" TERM=dumb NX_NO_TELEMETRY=1 ${HTTPS_PROXY:+HTTPS_
     || _unverified "uv pip install conexus==$PREV failed (network/PyPI): $(tail -2 "$WORK/prev-install.log" | tr '\n' ' ')"
 PREV_NX_V="$("$VENV/bin/nx" --version 2>/dev/null | awk '{print $NF}')"
 [ "$PREV_NX_V" = "$PREV" ] || _fail "previous CLI in the venv reports $PREV_NX_V, expected $PREV"
-NEW_PLUGIN_ROOT="$(python3 -c "import json; print(json.load(open('$SB_REGISTRY'))['plugins']['conexus@nexus-plugins'][0]['installPath'])")"
+NEW_PLUGIN_ROOT="$("$E2E_PYTHON" -c "import json; print(json.load(open('$SB_REGISTRY'))['plugins']['conexus@nexus-plugins'][0]['installPath'])")"
 [ -f "$NEW_PLUGIN_ROOT/hooks/scripts/version_lockstep_hook.py" ] || _fail "no lockstep hook under $NEW_PLUGIN_ROOT"
 HOOK_OUT="$WORK/hook.out"
 set +e
@@ -163,7 +167,7 @@ set +e
 env -i HOME="$SB" PATH="$VENV/bin:$PATH" TERM=dumb NX_NO_TELEMETRY=1 \
     NEXUS_CONFIG_DIR="$SB/.config/nexus" CLAUDE_PLUGIN_ROOT="$NEW_PLUGIN_ROOT" \
     NX_LOCKSTEP_MARKER="$SB/.config/nexus/cli_lockstep_marker" NX_LOCKSTEP_LOG="$SB/.config/nexus/lockstep.log" \
-    python3 "$NEW_PLUGIN_ROOT/hooks/scripts/version_lockstep_hook.py" \
+    "$E2E_PYTHON" "$NEW_PLUGIN_ROOT/hooks/scripts/version_lockstep_hook.py" \
     </dev/null >"$HOOK_OUT" 2>"$WORK/hook.err"
 HRC=$?
 set -e
@@ -184,7 +188,7 @@ echo "── 6/9 same-version ref move: a plugin-only cut with no version bump (
 # see, no network required for this leg.
 MARKER="__nexus_konsk_gate_marker__"
 echo "gate marker $(date +%s)" >"$CLONE/conexus/$MARKER"
-python3 - "$CLONE" "$NEW" <<'PYEOF'
+"$E2E_PYTHON" - "$CLONE" "$NEW" <<'PYEOF'
 import json, sys
 clone, new = sys.argv[1], sys.argv[2]
 path = f"{clone}/.claude-plugin/marketplace.json"
@@ -206,7 +210,7 @@ git -C "$CLONE" add -A
 git -C "$CLONE" -c user.email=gate@example.invalid -c user.name=gate commit -q -m "plugin-only cut (gate rehearsal, nexus-konsk)"
 git -C "$CLONE" tag "plugin-v$NEW-1"
 
-SHA_BEFORE="$(python3 -c "import json; print(json.load(open('$SB_REGISTRY'))['plugins']['conexus@nexus-plugins'][0].get('gitCommitSha',''))")"
+SHA_BEFORE="$("$E2E_PYTHON" -c "import json; print(json.load(open('$SB_REGISTRY'))['plugins']['conexus@nexus-plugins'][0].get('gitCommitSha',''))")"
 [ -n "$SHA_BEFORE" ] || _fail "sandbox registry carries no gitCommitSha for conexus after step 3/7 (cannot exercise the ref-drift check)"
 
 echo "── 7/9 SessionStart hook detects the same-version ref move directly (nexus-konsk) ──"
@@ -256,7 +260,7 @@ set +e
 env -i HOME="$SB" PATH="$VENV/bin:$PATH" TERM=dumb NX_NO_TELEMETRY=1 \
     NEXUS_CONFIG_DIR="$SB/.config/nexus" CLAUDE_PLUGIN_ROOT="$NEW_PLUGIN_ROOT" \
     NX_LOCKSTEP_MARKER="$MARKER_FOR_HOOK" NX_LOCKSTEP_LOG="$SB/.config/nexus/lockstep.log" \
-    python3 "$REPO_ROOT/conexus/hooks/scripts/version_lockstep_hook.py" \
+    "$E2E_PYTHON" "$REPO_ROOT/conexus/hooks/scripts/version_lockstep_hook.py" \
     </dev/null >"$HOOK_OUT2" 2>"$WORK/hook2.err"
 HRC2=$?
 set -e
@@ -281,11 +285,11 @@ sed 's/^/  | /' "$OUT2" | tail -15
 grep -q "^Plugin update: conexus@nexus-plugins $NEW: picked up a plugin-only release" "$OUT2" \
     || _fail "no ref-move pickup line in output (nexus-konsk regression): $(tail -5 "$OUT2")"
 
-SHA_AFTER="$(python3 -c "import json; print(json.load(open('$SB_REGISTRY'))['plugins']['conexus@nexus-plugins'][0].get('gitCommitSha',''))")"
+SHA_AFTER="$("$E2E_PYTHON" -c "import json; print(json.load(open('$SB_REGISTRY'))['plugins']['conexus@nexus-plugins'][0].get('gitCommitSha',''))")"
 [ "$SHA_AFTER" != "$SHA_BEFORE" ] || _fail "registry gitCommitSha for conexus did not move (still $SHA_BEFORE): the plugin-only cut was not picked up"
 [ "$(_ver conexus)" = "$NEW" ] || _fail "conexus version moved from $NEW during the ref-move leg (should never move)"
 
-NEW_INSTALL_PATH="$(python3 -c "import json; print(json.load(open('$SB_REGISTRY'))['plugins']['conexus@nexus-plugins'][0]['installPath'])")"
+NEW_INSTALL_PATH="$("$E2E_PYTHON" -c "import json; print(json.load(open('$SB_REGISTRY'))['plugins']['conexus@nexus-plugins'][0]['installPath'])")"
 [ -f "$NEW_INSTALL_PATH/$MARKER" ] || _fail "the plugin-only cut's content (marker file) never reached the install at $NEW_INSTALL_PATH -- registry sha moved but the files did not"
 echo "  conexus@nexus-plugins $NEW: ref moved $SHA_BEFORE -> $SHA_AFTER, content delivered, version unchanged"
 

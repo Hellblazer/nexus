@@ -47,6 +47,10 @@ _fail() { echo "$GATE FAILED: $*" >&2; exit 1; }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+# One interpreter >= 3.10, resolved once; never a bare python3 (nexus-u67ow).
+# shellcheck source=lib/python.sh disable=SC1091
+source "$REPO_ROOT/tests/e2e/lib/python.sh"
+e2e_python_resolve || exit 2
 LADDER="$SCRIPT_DIR/lib/gen_flip_holder.py"
 
 [ -f "$LADDER" ] || _fail "ladder driver is missing: $LADDER"
@@ -54,9 +58,9 @@ LADDER="$SCRIPT_DIR/lib/gen_flip_holder.py"
 command -v uv >/dev/null 2>&1 || _fail "uv is required to build a generation and is not on PATH"
 UV_BIN="$(cd "$(dirname "$(command -v uv)")" && pwd)"
 
-# A python3 for the driver itself. It is stdlib-only and drives the artifact
+# The resolved interpreter for the driver itself (lib/python.sh). It is stdlib-only and drives the artifact
 # from OUTSIDE, so it deliberately is not the generation's interpreter.
-DRIVER_PY="$(command -v python3)" || _fail "python3 is required and is not on PATH"
+DRIVER_PY="$E2E_PYTHON"
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/nexus-gen-flip.XXXXXX")"
 GATE_OK=0

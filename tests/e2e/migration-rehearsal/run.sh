@@ -74,6 +74,10 @@ trap 'diag_exit_guard' EXIT
 
 cd "$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel)"  # the SCRIPT's checkout, never the caller's cwd: invoked from another checkout this built the wrong tree (2026-09-05 A/B)
 HERE="tests/e2e/migration-rehearsal"
+# One interpreter >= 3.11, resolved once; never a bare python3 (nexus-u67ow).
+# shellcheck source=lib/python.sh disable=SC1091
+source "$SCRIPT_DIR/../lib/python.sh"
+e2e_python_resolve 11 || exit 2
 IMAGE="nexus-migration-rehearsal"
 WITH_CLOUD=0
 DO_BUILD=1
@@ -111,7 +115,7 @@ ARTIFACTS=""
 # fail-closed the v0.1.37 pre-tag rehearsal at the version gate. No fallback:
 # if the constant can't be parsed, abort loudly.
 GUIDED_STAMP_VERSION="$(
-  python3 - <<'PY'
+  "$E2E_PYTHON" - <<'PY'
 import re, pathlib
 src = pathlib.Path("src/nexus/engine_version.py").read_text()
 m = re.search(r"REQUIRED_ENGINE_VERSION[^=]*=\s*\((\d+),\s*(\d+),\s*(\d+)\)", src)
@@ -316,7 +320,7 @@ done
 # every other leg of the harness.
 if [ "$STRANDED" = 1 ]; then
   STRAND_PIN_RELEASE="$(
-    python3 - <<'PY'
+    "$E2E_PYTHON" - <<'PY'
 import re, pathlib
 src = pathlib.Path("src/nexus/stranded_install.py").read_text()
 m = re.search(r'LAST_MIGRATION_CAPABLE:\s*str \| None\s*=\s*"([^"]+)"', src)
@@ -324,7 +328,7 @@ print(m.group(1) if m else "")
 PY
   )"
   [ -n "$STRAND_PIN_RELEASE" ] || { echo "FATAL: could not parse LAST_MIGRATION_CAPABLE from src/nexus/stranded_install.py — the stranded-redirect leg's pin would be wrong; fix the regex/path before rehearsing" >&2; exit 2; }
-  [ "$STRAND_PIN_RELEASE" = "$(python3 -c 'import tomllib,pathlib;print(tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["version"])')" ] && {
+  [ "$STRAND_PIN_RELEASE" = "$("$E2E_PYTHON" -c 'import tomllib,pathlib;print(tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["version"])')" ] && {
     echo "FATAL: STRAND_PIN_RELEASE ($STRAND_PIN_RELEASE) equals the working tree's own version — LAST_MIGRATION_CAPABLE was rotated forward without leaving a distinct pin, and the stranded-redirect leg's hop-1 assertions would be vacuous (redirecting a release to itself)." >&2
     exit 2
   }
@@ -578,15 +582,15 @@ MANIFEST_TREE=""
 if [ -n "$ARTIFACTS" ]; then
   [ "$DO_BUILD" = 1 ] || { echo "--artifacts already means 'do not build here'; --no-build is contradictory (drop one)" >&2; exit 2; }
   ARTIFACTS="$(cd "$ARTIFACTS" 2>/dev/null && pwd)" || { echo "--artifacts: no such directory" >&2; exit 3; }
-  if ! MANIFEST_JSON="$(python3 "$SCRIPT_DIR/../lib/artifact_manifest.py" verify "$ARTIFACTS" "$PWD")"; then
+  if ! MANIFEST_JSON="$("$E2E_PYTHON" "$SCRIPT_DIR/../lib/artifact_manifest.py" verify "$ARTIFACTS" "$PWD")"; then
     diag_record_err "$LINENO" "artifact_manifest.py verify refused $ARTIFACTS (see the ARTIFACTS REFUSED lines above)"
     exit 3
   fi
-  MANIFEST_BUILD_REF="$(python3 -c 'import json,sys;print(json.loads(sys.argv[1])["build_ref"])' "$MANIFEST_JSON")"
-  MANIFEST_TREE="$(python3 -c 'import json,sys;print(json.loads(sys.argv[1])["tree_hash"][:12])' "$MANIFEST_JSON")"
-  MANIFEST_RELEASE_VERSION="$(python3 -c 'import json,sys;print(json.loads(sys.argv[1])["release_version"])' "$MANIFEST_JSON")"
+  MANIFEST_BUILD_REF="$("$E2E_PYTHON" -c 'import json,sys;print(json.loads(sys.argv[1])["build_ref"])' "$MANIFEST_JSON")"
+  MANIFEST_TREE="$("$E2E_PYTHON" -c 'import json,sys;print(json.loads(sys.argv[1])["tree_hash"][:12])' "$MANIFEST_JSON")"
+  MANIFEST_RELEASE_VERSION="$("$E2E_PYTHON" -c 'import json,sys;print(json.loads(sys.argv[1])["release_version"])' "$MANIFEST_JSON")"
   [ "$MANIFEST_RELEASE_VERSION" = "$GUIDED_STAMP_VERSION" ] || { echo "ARTIFACTS REFUSED (exit 3): manifest release_version=$MANIFEST_RELEASE_VERSION but this tree's REQUIRED_ENGINE_VERSION is $GUIDED_STAMP_VERSION" >&2; exit 3; }
-  ARTIFACT_WHEEL="$(python3 -c 'import json,sys;print(json.loads(sys.argv[1])["artifacts"]["wheel"]["path"])' "$MANIFEST_JSON")"
+  ARTIFACT_WHEEL="$("$E2E_PYTHON" -c 'import json,sys;print(json.loads(sys.argv[1])["artifacts"]["wheel"]["path"])' "$MANIFEST_JSON")"
   ARTIFACT_WHEEL="$ARTIFACTS/$ARTIFACT_WHEEL"
   if [ "$COLD" = 0 ] && [ "$HOLE_PUNCH" = 0 ] && [ "$PACKAGE_UPGRADE" = 0 ] && [ "$ERA_HOP" = 0 ] && [ "$STRANDED" = 0 ] && [ "$ACQUIRE" = 0 ]; then
     [ -x "$ARTIFACTS/native/nexus-service" ] || { echo "ARTIFACTS REFUSED (exit 3): --$LEG consumes the native candidate but $ARTIFACTS has none (built with --no-native?)" >&2; exit 3; }
@@ -987,7 +991,7 @@ elif [ "$PACKAGE_UPGRADE" = 1 ]; then
     PYPI_META="$(mktemp)"
     curl -fsSL "https://pypi.org/pypi/conexus/$NEXUS_TARGET_RELEASE/json" -o "$PYPI_META" \
       || { rm -f "$PYPI_META"; echo "FATAL: could not fetch PyPI metadata for conexus==$NEXUS_TARGET_RELEASE — is it published?" >&2; exit 1; }
-    TARGET_INFO="$(python3 -c "
+    TARGET_INFO="$("$E2E_PYTHON" -c "
 import json
 with open('$PYPI_META') as f:
     d = json.load(f)
@@ -1006,7 +1010,7 @@ else:
     TARGET_WHEEL_NAME="$(sed -n '3p' <<<"$TARGET_INFO")"
     curl -fsSL -o "$STAGE/worktree-wheel/$TARGET_WHEEL_NAME" "$TARGET_WHEEL_URL" \
       || { echo "FATAL: download of $TARGET_WHEEL_URL failed" >&2; exit 1; }
-    GOT_SHA256="$(python3 -c "
+    GOT_SHA256="$("$E2E_PYTHON" -c "
 import hashlib
 h = hashlib.sha256()
 with open('$STAGE/worktree-wheel/$TARGET_WHEEL_NAME', 'rb') as f:
@@ -1141,7 +1145,7 @@ if [ -n "$ARTIFACTS" ]; then
   [ -n "$_docker_host" ] && export DOCKER_HOST="$_docker_host"
   mkdir -p "$STAGE/docker-config"
   if [ -f "$DCFG" ]; then
-    python3 -c "import json,sys;d=json.load(open(sys.argv[1]));d.pop('credsStore',None);json.dump(d,open(sys.argv[2],'w'),indent=2)" "$DCFG" "$STAGE/docker-config/config.json"
+    "$E2E_PYTHON" -c "import json,sys;d=json.load(open(sys.argv[1]));d.pop('credsStore',None);json.dump(d,open(sys.argv[2],'w'),indent=2)" "$DCFG" "$STAGE/docker-config/config.json"
   else
     echo '{}' > "$STAGE/docker-config/config.json"
   fi
@@ -1149,7 +1153,7 @@ if [ -n "$ARTIFACTS" ]; then
   echo "      (per-invocation DOCKER_CONFIG=$DOCKER_CONFIG, DOCKER_HOST=${DOCKER_HOST:-<default>})"
 elif [ -f "$DCFG" ] && grep -q '"credsStore"' "$DCFG"; then
   cp "$DCFG" "$STAGE/.docker-config.bak"
-  python3 -c "import json,os;p=os.path.expanduser('~/.docker/config.json');d=json.load(open(p));d.pop('credsStore',None);json.dump(d,open(p,'w'),indent=2)"
+  "$E2E_PYTHON" -c "import json,os;p=os.path.expanduser('~/.docker/config.json');d=json.load(open(p));d.pop('credsStore',None);json.dump(d,open(p,'w'),indent=2)"
   trap 'diag_exit_guard; _guided_restore; cp "$STAGE/.docker-config.bak" "$DCFG"; rm -rf "$STAGE"; build_lease_release service 2>/dev/null || true; lock_release "$LOCKDIR" 2>/dev/null || true' EXIT
   echo "      (temporarily stripped credsStore from ~/.docker/config.json — restored on exit)"
 fi
@@ -1286,12 +1290,12 @@ if [ "$FULLSTACK" = 1 ]; then
   # shape, T2 nexus_rdr/219-research-10), so the value reaches the
   # container without ever touching argv, a mounted file, or disk. Real,
   # billed calls; data/PG stay container-isolated.
-  if ! python3 "$CRED_TOOL" status >/dev/null 2>&1; then
+  if ! "$E2E_PYTHON" "$CRED_TOOL" status >/dev/null 2>&1; then
     echo "--fullstack needs the harness automation token:" >&2
-    python3 "$CRED_TOOL" status >&2 || true
+    "$E2E_PYTHON" "$CRED_TOOL" status >&2 || true
     exit 1
   fi
-  python3 "$CRED_TOOL" run -- docker run --rm "${run_env[@]}" \
+  "$E2E_PYTHON" "$CRED_TOOL" run -- docker run --rm "${run_env[@]}" \
     "$IMAGE"
 elif [ "$SHAKEOUT_E2E" = 1 ]; then
   # nexus-33hpq-class daily-driver shakeout: same automation-token gating
@@ -1299,12 +1303,12 @@ elif [ "$SHAKEOUT_E2E" = 1 ]; then
   # too), but override the image's default entrypoint (rehearse_fullstack.sh)
   # to run this journey's own driver instead — mirrors how --acquire/
   # --shakeout override the entrypoint on a shared/reused image.
-  if ! python3 "$CRED_TOOL" status >/dev/null 2>&1; then
+  if ! "$E2E_PYTHON" "$CRED_TOOL" status >/dev/null 2>&1; then
     echo "--shakeout-e2e needs the harness automation token:" >&2
-    python3 "$CRED_TOOL" status >&2 || true
+    "$E2E_PYTHON" "$CRED_TOOL" status >&2 || true
     exit 1
   fi
-  python3 "$CRED_TOOL" run -- docker run --rm "${run_env[@]}" \
+  "$E2E_PYTHON" "$CRED_TOOL" run -- docker run --rm "${run_env[@]}" \
     --entrypoint /bin/bash "$IMAGE" /home/nexus/rehearse_shakeout_e2e.sh
 elif [ "$HOLE_PUNCH" = 1 ]; then
   # nexus-s3dd4.7: override the cold box's default entrypoint to drive the

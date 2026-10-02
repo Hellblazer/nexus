@@ -17,6 +17,10 @@
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/../../.." && pwd)"
+# One interpreter >= 3.10, resolved once; never a bare python3 (nexus-u67ow).
+# shellcheck source=lib/python.sh disable=SC1091
+source "$ROOT/tests/e2e/lib/python.sh"
+e2e_python_resolve || exit 2
 CRED_TOOL="$ROOT/tests/e2e/lib/claude_credentials.py"
 PUBLISHED=""
 while [ $# -gt 0 ]; do
@@ -94,7 +98,7 @@ cp -R "$SRC/hooks/scripts/." "$STAGE/plugin/hooks/scripts/"
 # ("nx hook session-start") and the exec form ("nx-hook" + args). The
 # neighbouring session_start_hook.py spells it with an underscore and
 # cannot collide. No block, or more than one, is a hard failure here.
-MATCHER="$(python3 -c '
+MATCHER="$("$E2E_PYTHON" -c '
 import json, sys
 blocks = [b for b in json.load(open(sys.argv[1]))["hooks"]["SessionStart"]
           if "session-start" in json.dumps(b.get("hooks", []))]
@@ -117,7 +121,7 @@ print(blocks[0]["matcher"])
 # affect this). tests/test_rdr208_mvv_wiring.py pins the verb's existence, so
 # a future bead retiring it fails there naming this file, rather than leaving
 # a container whose SessionStart hook silently never runs.
-python3 - "$STAGE/plugin/hooks/hooks.json" "$MATCHER" <<'PY'
+"$E2E_PYTHON" - "$STAGE/plugin/hooks/hooks.json" "$MATCHER" <<'PY'
 import json, sys
 json.dump({"hooks": {
     "SessionStart": [{"matcher": sys.argv[2], "hooks": [
@@ -157,7 +161,7 @@ printf '{"skipDangerousModePermissionPrompt": true}\n' > "$STAGE/settings.json"
 # research-14 verified authentication needs only CLAUDE_CODE_OAUTH_TOKEN in
 # the environment in this launch shape (A2), among others. Mounted
 # read-only; the container copies it into place.
-python3 - "$STAGE/claude.json" <<'PY'
+"$E2E_PYTHON" - "$STAGE/claude.json" <<'PY'
 import json, pathlib, sys
 out = pathlib.Path(sys.argv[1])
 data = {
@@ -181,7 +185,7 @@ set +e
 # nexus.install_pings. `-e` is the only channel into the container —
 # exporting the opt-out here would not reach it, because docker run does
 # not inherit the host environment.
-python3 "$CRED_TOOL" run -- docker run --rm -v "$ART:/home/nexus/artifacts" -e MVV_ARTIFACTS=/home/nexus/artifacts \
+"$E2E_PYTHON" "$CRED_TOOL" run -- docker run --rm -v "$ART:/home/nexus/artifacts" -e MVV_ARTIFACTS=/home/nexus/artifacts \
     -e NX_NO_TELEMETRY=1 \
     -v "$STAGE/claude.json":/home/nexus/seed/claude.json:ro \
     -e CLAUDE_CODE_OAUTH_TOKEN \

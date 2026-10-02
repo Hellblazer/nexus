@@ -22,6 +22,10 @@ unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT 2>/dev/null || true
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+# One interpreter >= 3.10, resolved once; never a bare python3 (nexus-u67ow).
+# shellcheck source=lib/python.sh disable=SC1091
+source "$REPO_ROOT/tests/e2e/lib/python.sh"
+e2e_python_resolve || exit 2
 ONLY_SCENARIO=""
 CRED_TOOL="$SCRIPT_DIR/lib/claude_credentials.py"
 
@@ -75,7 +79,7 @@ fi
 # env-var key and rejects the placeholder with "Invalid API key" on every
 # request.
 if [[ -z "${ANTHROPIC_API_KEY:-}" ]]; then
-    if ! CRED_STATUS="$(python3 "$CRED_TOOL" status)"; then
+    if ! CRED_STATUS="$("$E2E_PYTHON" "$CRED_TOOL" status)"; then
         echo "Error: neither ANTHROPIC_API_KEY nor the automation token is usable." >&2
         echo "  $CRED_STATUS" >&2
         echo "  Set ANTHROPIC_API_KEY in .env, or run \`claude setup-token\` and store the" >&2
@@ -235,7 +239,7 @@ _tmux kill-session -t e2e 2>/dev/null || true
 # pane's shell then inherits. Every later tmux call in this harness targets
 # the same already-running server via _tmux/NX_TMUX_SOCKET and needs no
 # further wrapping.
-python3 "$CRED_TOOL" run -- tmux -L "$NX_TMUX_SOCKET" new-session -d -s e2e -x 220 -y 50
+"$E2E_PYTHON" "$CRED_TOOL" run -- tmux -L "$NX_TMUX_SOCKET" new-session -d -s e2e -x 220 -y 50
 
 # Source the env file in the pane so subsequent commands use TEST_HOME
 _tmux send-keys -t "e2e" "source $TEST_HOME/.env.test" Enter

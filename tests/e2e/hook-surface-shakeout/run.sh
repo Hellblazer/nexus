@@ -38,6 +38,10 @@
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/../../.." && pwd)"
+# One interpreter >= 3.10, resolved once; never a bare python3 (nexus-u67ow).
+# shellcheck source=lib/python.sh disable=SC1091
+source "$ROOT/tests/e2e/lib/python.sh"
+e2e_python_resolve || exit 2
 CRED_TOOL="$ROOT/tests/e2e/lib/claude_credentials.py"
 MVV="$ROOT/tests/e2e/rdr208-mvv"
 KEEP=""
@@ -59,9 +63,9 @@ command -v docker > /dev/null || { echo "docker is required" >&2; exit 2; }
 # --- credential: the harness's own automation token (RDR-219), never the
 # operator's interactive login. `status` never prints token material --
 # it only reports presence/expiry -- so it is safe to run as a gate.
-if ! python3 "$CRED_TOOL" status > /dev/null 2>&1; then
+if ! "$E2E_PYTHON" "$CRED_TOOL" status > /dev/null 2>&1; then
     echo "HOOK-SURFACE SHAKEOUT UNVERIFIED: no usable automation token" >&2
-    python3 "$CRED_TOOL" status >&2 || true
+    "$E2E_PYTHON" "$CRED_TOOL" status >&2 || true
     exit 2
 fi
 
@@ -110,7 +114,7 @@ cp -R "$ROOT/conexus/hooks/scripts" "$STAGE/plugin/hooks/scripts"
 # never ran. nx-mcp is ours and every dispatch crosses its stdin as JSON-RPC
 # naming the tool, whether or not the handler says anything. Teeing that is
 # the server-side roster without changing the wheel under test to measure it.
-python3 - "$ROOT/conexus/.mcp.json" "$STAGE/plugin/.mcp.json" <<'PY'
+"$E2E_PYTHON" - "$ROOT/conexus/.mcp.json" "$STAGE/plugin/.mcp.json" <<'PY'
 import json, os, sys
 d = json.load(open(sys.argv[1]))
 d.pop("sequential-thinking", None)   # shells to npx; no node in this image
@@ -158,7 +162,7 @@ chmod +x "$STAGE/mcp_tee.sh"
 # The UNSHIMMED manifest travels too: it is the census denominator.
 cp "$ROOT/conexus/hooks/hooks.json" "$STAGE/hooks.json.original"
 mkdir -p "$STAGE/shims"
-python3 - "$ROOT/conexus/hooks/hooks.json" "$STAGE/plugin/hooks/hooks.json" "$STAGE/shims" "$HERE/hook_census.py" <<'PY'
+"$E2E_PYTHON" - "$ROOT/conexus/hooks/hooks.json" "$STAGE/plugin/hooks/hooks.json" "$STAGE/shims" "$HERE/hook_census.py" <<'PY'
 import json, os, stat, sys
 src, dst, shimdir = sys.argv[1], sys.argv[2], sys.argv[3]
 d = json.load(open(src))
@@ -323,11 +327,11 @@ if [ -n "$KEEP" ]; then
     CONTAINER_NAME="hook-shakeout-$SHA"
     docker rm -f "$CONTAINER_NAME" > /dev/null 2>&1 || true
     echo "[run] --keep: container will survive as $CONTAINER_NAME for inspection -- remove it yourself (docker rm -f $CONTAINER_NAME) when done" >&2
-    python3 "$CRED_TOOL" run -- \
+    "$E2E_PYTHON" "$CRED_TOOL" run -- \
         bash -c 'exec docker run --name "$0" -e CLAUDE_CODE_OAUTH_TOKEN "$@"' \
         "$CONTAINER_NAME" "${DOCKER_ARGS[@]}" "$IMAGE"
 else
-    python3 "$CRED_TOOL" run -- docker run --rm "${DOCKER_ARGS[@]}" "$IMAGE"
+    "$E2E_PYTHON" "$CRED_TOOL" run -- docker run --rm "${DOCKER_ARGS[@]}" "$IMAGE"
 fi
 rc=$?
 set -e

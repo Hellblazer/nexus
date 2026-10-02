@@ -10,6 +10,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$HERE/../../.." && pwd)"
 # shellcheck source=./candidate_engine.sh disable=SC1091
 source "$HERE/candidate_engine.sh"
+e2e_python_resolve || exit 2   # nexus-u67ow: candidate_engine.sh sourced lib/python.sh
 
 WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/candidate_engine_test.XXXXXX")"
 STUB_PID=""
@@ -96,16 +97,16 @@ expect_has "NEXUS_SERVICE_JAR present inside env -i" "$WORKDIR/o7" "NEXUS_SERVIC
 if grep -q '^NX_CANDIDATE_ENGINE=' "$WORKDIR/o7"; then bad "NX_CANDIDATE_ENGINE leaked into the scrubbed env"; else ok "the scrub still drops NX_* itself"; fi
 
 echo "Test 7b: a stage dir gives each gate a private copy (the supervisor matches engines by argv)"
-python3 "$HERE/candidate_engine.py" env --stage "$WORKDIR/stage-a" >/dev/null 2>&1; rc=$?
+"$E2E_PYTHON" "$HERE/candidate_engine.py" env --stage "$WORKDIR/stage-a" >/dev/null 2>&1; rc=$?
 expect_rc "env --stage without a candidate set is the unchanged default" 0 "$rc"
-NX_CANDIDATE_ENGINE="$JAR" JAVA_HOME="$WORKDIR" python3 "$HERE/candidate_engine.py" env --stage "$WORKDIR/stage-a" >"$WORKDIR/o7a" 2>&1
-NX_CANDIDATE_ENGINE="$JAR" JAVA_HOME="$WORKDIR" python3 "$HERE/candidate_engine.py" env --stage "$WORKDIR/stage-b" >"$WORKDIR/o7b" 2>&1
+NX_CANDIDATE_ENGINE="$JAR" JAVA_HOME="$WORKDIR" "$E2E_PYTHON" "$HERE/candidate_engine.py" env --stage "$WORKDIR/stage-a" >"$WORKDIR/o7a" 2>&1
+NX_CANDIDATE_ENGINE="$JAR" JAVA_HOME="$WORKDIR" "$E2E_PYTHON" "$HERE/candidate_engine.py" env --stage "$WORKDIR/stage-b" >"$WORKDIR/o7b" 2>&1
 expect_has "gate a's variables name its own copy" "$WORKDIR/o7a" "stage-a"
 expect_has "gate b's variables name its own copy" "$WORKDIR/o7b" "stage-b"
 if [ -f "$WORKDIR/stage-a/engine candidate.jar" ] && [ -f "$WORKDIR/stage-b/engine candidate.jar" ]; then ok "both copies exist"; else bad "a staged copy is missing"; fi
 
 echo "Test 8: identity + refusals against a stub engine (candidate, then the pinned binary)"
-python3 "$HERE/candidate_engine_stub.py" "$WORKDIR" >"$WORKDIR/stub.out" 2>&1 &
+"$E2E_PYTHON" "$HERE/candidate_engine_stub.py" "$WORKDIR" >"$WORKDIR/stub.out" 2>&1 &
 STUB_PID=$!
 for _ in $(seq 1 50); do [ -s "$WORKDIR/stub.port" ] && break; sleep 0.1; done
 if [ -s "$WORKDIR/stub.port" ]; then ok "stub engine up on an ephemeral port"; else bad "stub engine did not start: $(cat "$WORKDIR/stub.out")"; fi

@@ -11,6 +11,11 @@
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# The gate fragments this suite extracts call "$E2E_PYTHON", which the real gate sets by sourcing
+# lib/python.sh at start; the extraction has no such preamble (nexus-u67ow).
+# shellcheck source=lib/python.sh disable=SC1091
+source "$HERE/lib/python.sh"
+e2e_python_resolve || exit 2
 GATE="$HERE/cloud-client-path-gate.sh"
 NAME="cloud_client_path_gate_b3_test.sh"
 PASS=0

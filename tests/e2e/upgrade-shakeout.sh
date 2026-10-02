@@ -79,6 +79,10 @@ export NX_NO_TELEMETRY=1
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+# One interpreter >= 3.10, resolved once; never a bare python3 (nexus-u67ow).
+# shellcheck source=lib/python.sh disable=SC1091
+source "$REPO_ROOT/tests/e2e/lib/python.sh"
+e2e_python_resolve || exit 2
 SANDBOX="$HOME/nexus-upgrade-sandbox"
 FAKE_REPO="$SANDBOX/fakerepo"
 
@@ -345,7 +349,7 @@ REPO_PKG_VERSION="${REPO_PKG_VERSION_ALL%%$'\n'*}"
 if [[ -z "$FROM_VERSION" ]]; then
     FROM_VERSION=$(
         curl -s "https://pypi.org/pypi/conexus/json" \
-        | NX_TARGET="$REPO_PKG_VERSION" python3 -c "
+        | NX_TARGET="$REPO_PKG_VERSION" "$E2E_PYTHON" -c "
 import json, os, re, sys
 def key(v):
     return tuple(int(p) for p in v.split('.'))
@@ -370,7 +374,7 @@ rm -rf "$SANDBOX"
 mkdir -p "$SANDBOX/.config/nexus"
 mkdir -p "$FAKE_REPO/.git/hooks"
 # Fake repo registry entry so nx doctor's _check_git_hooks sees the repo.
-python3 -c "
+"$E2E_PYTHON" -c "
 import json, pathlib
 p = pathlib.Path('$SANDBOX/.config/nexus/repos.json')
 p.write_text(json.dumps({'repos': {'$FAKE_REPO': {}}}))
@@ -576,7 +580,7 @@ grep -q '"name": "conexus"' "$MJ" \
 ! grep -q '"name": "nx"' "$MJ" \
     || _die "REPO_ROOT marketplace.json still contains 'name: nx' (rename incomplete)"
 # Source uses git-subdir object form with path + ref pinning
-python3 -c "
+"$E2E_PYTHON" -c "
 import json, pathlib, re, sys
 mj = json.loads(pathlib.Path('$MJ').read_text())
 for p in mj['plugins']:

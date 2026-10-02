@@ -54,6 +54,11 @@ unset NX_BUILD_LEASE_ROOT NX_SUITE_LEASE_WAIT NX_SUITE_LEASE_HELD_BY
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$HERE/../../.." && pwd)"
+# run.sh resolves a python >= 3.11 and refuses without one. The fixture's PATH (a stub `uv` ahead of
+# /usr/bin) is not the box's real one, so resolve here and hand the result in (nexus-u67ow).
+# shellcheck source=../lib/python.sh disable=SC1091
+source "$REPO_ROOT/tests/e2e/lib/python.sh"
+e2e_python_resolve 11 || exit 2
 WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/run_sh_guard_test.XXXXXX")"
 trap 'rm -rf "$WORKDIR"' EXIT
 PASS=0; FAIL=0
@@ -75,6 +80,7 @@ mkdir -p \
 cp "$REPO_ROOT/tests/e2e/migration-rehearsal/run.sh" "$repo/tests/e2e/migration-rehearsal/run.sh"
 cp "$REPO_ROOT/tests/e2e/lib/exit_diagnostics.sh" "$repo/tests/e2e/lib/exit_diagnostics.sh"
 cp "$REPO_ROOT/tests/e2e/lib/lock.sh" "$repo/tests/e2e/lib/lock.sh"
+cp "$REPO_ROOT/tests/e2e/lib/python.sh" "$repo/tests/e2e/lib/python.sh"   # run.sh sources it (nexus-u67ow)
 cp "$REPO_ROOT/scripts/lib/build-lease.sh" "$repo/scripts/lib/build-lease.sh"
 cp "$REPO_ROOT/scripts/lib/release-props-lease.sh" "$repo/scripts/lib/release-props-lease.sh"
 
@@ -156,6 +162,7 @@ run_a() {
   # release-tag history for them to walk.
   env -i \
     NX_NO_TELEMETRY=1 \
+    E2E_PYTHON="$E2E_PYTHON" \
     PATH="$WORKDIR/bin:/usr/bin:/bin:/usr/local/bin" \
     HOME="$HOME" \
     TMPDIR="${TMPDIR:-/tmp}" \

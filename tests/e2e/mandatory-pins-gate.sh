@@ -23,6 +23,10 @@
 set -uo pipefail
 export NX_NO_TELEMETRY=1
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# One interpreter >= 3.10, resolved once; never a bare python3 (nexus-u67ow).
+# shellcheck source=lib/python.sh disable=SC1091
+source "$REPO_ROOT/tests/e2e/lib/python.sh"
+e2e_python_resolve || exit 2
 cd "$REPO_ROOT" || exit 2
 # shellcheck source=lib/mandatory_pins.sh
 . "$REPO_ROOT/tests/e2e/lib/mandatory_pins.sh"
@@ -60,6 +64,6 @@ uv run pytest -o addopts="" -m "$MANDATORY_PIN_MARK_EXPR" -q -rs --color=no --ju
 PYTEST_RC=$?
 [ "$PYTEST_RC" -eq 0 ] || fail "pytest exited $PYTEST_RC"
 
-python3 "$REPO_ROOT/tests/e2e/lib/mandatory_pins_check.py" "$SCRATCH/pins.xml" "$MANDATORY_PIN_EXPECTED" "$BUDGET" \
+"$E2E_PYTHON" "$REPO_ROOT/tests/e2e/lib/mandatory_pins_check.py" "$SCRATCH/pins.xml" "$MANDATORY_PIN_EXPECTED" "$BUDGET" \
   || fail "the junit read found the pins did not all run (see the MANDATORY PINS line above)"
 echo "MANDATORY PINS GATE PASSED"

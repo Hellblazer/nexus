@@ -124,6 +124,10 @@ export NX_NO_TELEMETRY=1
 }
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# One interpreter >= 3.10, resolved once; never a bare python3 (nexus-u67ow).
+# shellcheck source=lib/python.sh disable=SC1091
+source "$REPO_ROOT/tests/e2e/lib/python.sh"
+e2e_python_resolve || exit 2
 
 say()  { printf '\n\033[1m== %s ==\033[0m\n' "$*"; }
 ok()   { printf '  \033[32mPASS\033[0m %s\n' "$*"; }
@@ -324,9 +328,9 @@ _emit_json() {
 # fallback on a correctness decision — a one-line parse error became 60s
 # of opaque polling ending in a verdict accusing a healthy service): it
 # prints the sentinel PARSE_ERROR so the caller can fail loud immediately.
-# $1 = payload text, $2 = python interpreter (default: python3).
+# $1 = payload text, $2 = python interpreter (default: the resolved $E2E_PYTHON).
 _health_from_status_json() {
-    printf '%s' "$1" | "${2:-python3}" -c '
+    printf '%s' "$1" | "${2:-$E2E_PYTHON}" -c '
 import json, sys
 raw = sys.stdin.read()
 dec = json.JSONDecoder()
@@ -489,8 +493,8 @@ EOF
     # args: peak_gb cap timeout flushes flushes_at_cap legacy_pages_at_cap killed wall_s manifest_retries refreshable_retries
     json="$(_emit_json "3.03" 16 600.0 8 2 0 0 187 0 0)"
     printf '%s\n' "$json"
-    if command -v python3 >/dev/null 2>&1; then
-        if printf '%s' "$json" | python3 -c 'import json,sys
+    if [ -n "${E2E_PYTHON:-}" ]; then
+        if printf '%s' "$json" | "$E2E_PYTHON" -c 'import json,sys
 d=json.load(sys.stdin)
 assert d["peak_gb"]==3.03
 assert d["cap"]==16
@@ -505,7 +509,7 @@ assert d["flushes_at_cap"] <= d["flushes"], "D4: flushes_at_cap must never excee
             failures=$((failures + 1))
         fi
     else
-        note "no python3 on PATH — skipped structural JSON validation (string shape only)"
+        note "no resolved python interpreter — skipped structural JSON validation (string shape only)"
     fi
 
     say "self-test: bash -n on this script itself"
@@ -595,7 +599,7 @@ _resolve_path() {
     # Portable "realpath -m" (macOS ships neither GNU readlink -f nor
     # realpath by default): resolves via python3, which every dev box here
     # has. Does NOT require the path to exist.
-    python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$1" 2>/dev/null || echo "$1"
+    "$E2E_PYTHON" -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$1" 2>/dev/null || echo "$1"
 }
 
 if [ -n "${NEXUS_CONFIG_DIR:-}" ]; then

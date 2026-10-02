@@ -20,6 +20,10 @@ set -euo pipefail
 # (RDR-184 P0.2, nexus-ccs9v.2).
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$(dirname "$0")/../../.."   # repo root
+# One interpreter >= 3.10, resolved once; never a bare python3 (nexus-u67ow).
+# shellcheck source=lib/python.sh disable=SC1091
+source "$SCRIPT_DIR/../lib/python.sh"
+e2e_python_resolve || exit 2
 
 GRAAL_IMAGE="container-registry.oracle.com/graalvm/native-image-community:25"
 OUT="tests/e2e/gc-ab/out"
@@ -106,7 +110,7 @@ measure_variant() { # gc-name
   sleep 2
 
   local port
-  port=$(python3 -c "import socket;s=socket.socket();s.bind(('',0));print(s.getsockname()[1]);s.close()")
+  port=$("$E2E_PYTHON" -c "import socket;s=socket.socket();s.bind(('',0));print(s.getsockname()[1]);s.close()")
   docker run -d --name "$svc" --network "$net" -p "${port}:8080" \
     -e NX_NO_TELEMETRY=1 \
     -v "$PWD/$OUT/$gc":/svc:ro \
@@ -147,7 +151,7 @@ for gc in serial G1; do measure_variant "$gc"; done
 
 echo
 echo "== GC A/B summary (linux -Ob, ${WORKERS}x${ITERS}x3 requests) =="
-python3 - <<'PYEOF'
+"$E2E_PYTHON" - <<'PYEOF'
 import json
 for gc in ("serial", "G1"):
     r = json.load(open(f"tests/e2e/gc-ab/out/result-{gc}.json"))

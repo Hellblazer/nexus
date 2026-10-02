@@ -26,6 +26,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import threading
 from pathlib import Path
 
@@ -763,7 +764,9 @@ def _bash(script: str, tmp_path: Path, env: dict[str, str] | None = None, timeou
     path.write_text(script)
     return subprocess.run(
         ["bash", str(path)], capture_output=True, text=True, timeout=timeout,
-        env={"PATH": os.environ["PATH"], **(env or {})},
+        # The extracted battery/gate blocks call "$E2E_PYTHON", which the real scripts set by
+        # sourcing lib/python.sh at start (nexus-u67ow); the harness has no such preamble.
+        env={"PATH": os.environ["PATH"], "E2E_PYTHON": sys.executable, **(env or {})},
     )
 
 

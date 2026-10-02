@@ -257,6 +257,10 @@ if [ "${NX_GATE_SELFTEST:-0}" = "1" ]; then
 fi
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# One interpreter >= 3.10, resolved once; never a bare python3 (nexus-u67ow).
+# shellcheck source=lib/python.sh disable=SC1091
+source "$REPO_ROOT/tests/e2e/lib/python.sh"
+e2e_python_resolve || exit 2
 cd "$REPO_ROOT"
 
 SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/nx-local-service-gate.XXXXXX")"
@@ -473,7 +477,7 @@ JAR="$REPO_ROOT/service/target/nexus-service-1.0-SNAPSHOT.jar"
 # RELEASE_PROPS is set once, above cleanup() (nexus-iws18); its byte
 # snapshot is taken later, inside the stamp step below, only once the
 # build lease is held and the guard has passed (nexus-iexvl).
-GATE_STAMP="$(python3 -c '
+GATE_STAMP="$("$E2E_PYTHON" -c '
 import re, pathlib
 src = pathlib.Path("src/nexus/engine_version.py").read_text()
 m = re.search(r"REQUIRED_ENGINE_VERSION[^=]*=\s*\((\d+),\s*(\d+),\s*(\d+)\)", src)
@@ -491,9 +495,9 @@ if [ -n "${NX_GATE_ARTIFACTS:-}" ]; then
   # manifest's per-BUILD build_ref is what the smoke leg's discriminator
   # (nexus-308ph) asserts against /version, in place of the per-run nonce.
   [ -z "${NEXUS_SERVICE_BIN:-}" ] || { echo "[gate] NX_GATE_ARTIFACTS and NEXUS_SERVICE_BIN are contradictory launch artifacts; set one" >&2; exit 2; }
-  GATE_MANIFEST="$(python3 "$REPO_ROOT/tests/e2e/lib/artifact_manifest.py" verify "$NX_GATE_ARTIFACTS" "$REPO_ROOT")" || exit 3
-  GATE_BUILD_REF="$(python3 -c 'import json,sys;print(json.loads(sys.argv[1])["build_ref"])' "$GATE_MANIFEST")"
-  GATE_JAR_REL="$(python3 -c 'import json,sys;print(json.loads(sys.argv[1])["artifacts"]["jar"]["path"])' "$GATE_MANIFEST")"
+  GATE_MANIFEST="$("$E2E_PYTHON" "$REPO_ROOT/tests/e2e/lib/artifact_manifest.py" verify "$NX_GATE_ARTIFACTS" "$REPO_ROOT")" || exit 3
+  GATE_BUILD_REF="$("$E2E_PYTHON" -c 'import json,sys;print(json.loads(sys.argv[1])["build_ref"])' "$GATE_MANIFEST")"
+  GATE_JAR_REL="$("$E2E_PYTHON" -c 'import json,sys;print(json.loads(sys.argv[1])["artifacts"]["jar"]["path"])' "$GATE_MANIFEST")"
   cp "$NX_GATE_ARTIFACTS/$GATE_JAR_REL" "$SCRATCH/gate-service.jar"
   JAR="$SCRATCH/gate-service.jar"
   echo "[gate] artifacts: jar from $NX_GATE_ARTIFACTS (build_ref=$GATE_BUILD_REF) — no jar rebuild, no stamp"
@@ -611,8 +615,8 @@ env "${START_ENV[@]}" uv run nx daemon service start
 
 # 4. Read the lease.
 LEASE_JSON="$(cat "$SCRATCH"/storage_service_addr.*)"
-SERVICE_PORT="$(printf '%s' "$LEASE_JSON" | python3 -c "import sys,json;d=json.load(sys.stdin);print(d.get('endpoint',d)['port'])")"
-SERVICE_TOKEN="$(printf '%s' "$LEASE_JSON" | python3 -c "import sys,json;d=json.load(sys.stdin);print(d.get('endpoint',d)['token'])")"
+SERVICE_PORT="$(printf '%s' "$LEASE_JSON" | "$E2E_PYTHON" -c "import sys,json;d=json.load(sys.stdin);print(d.get('endpoint',d)['port'])")"
+SERVICE_TOKEN="$(printf '%s' "$LEASE_JSON" | "$E2E_PYTHON" -c "import sys,json;d=json.load(sys.stdin);print(d.get('endpoint',d)['token'])")"
 echo "[gate] throwaway service on 127.0.0.1:$SERVICE_PORT"
 
 # ── 5. Direct smoke leg (nexus-x81ks) ───────────────────────────────────────
@@ -666,7 +670,7 @@ smoke_fail() {
 # returns). A falsy expression or a JSON-decode failure fails the leg loud.
 smoke_check() {
   local desc="$1" expr="$2"
-  python3 -c "
+  "$E2E_PYTHON" -c "
 import json, sys
 d = json.load(open('$SMOKE_DIR/resp.json'))
 sys.exit(0 if bool($expr) else 1)
@@ -722,17 +726,17 @@ fi
 # c. Catalog round-trip: owner upsert -> doc/register -> show, title round-trips.
 SMOKE_OWNER_PREFIX="9.$SMOKE_UID"
 smoke_request POST /v1/catalog/owners/upsert \
-  "$(python3 -c "import json;print(json.dumps({'tumbler_prefix':'$SMOKE_OWNER_PREFIX','name':'gate-smoke-owner','owner_type':'gate_smoke'}))")"
+  "$("$E2E_PYTHON" -c "import json;print(json.dumps({'tumbler_prefix':'$SMOKE_OWNER_PREFIX','name':'gate-smoke-owner','owner_type':'gate_smoke'}))")"
 [ "$SMOKE_CODE" = "200" ] || smoke_fail "POST /v1/catalog/owners/upsert"
 smoke_check "POST /v1/catalog/owners/upsert -> ok" "d.get('ok') is True"
 
 SMOKE_TITLE="gate-smoke-doc-$SMOKE_UID"
 smoke_request POST /v1/catalog/doc/register \
-  "$(python3 -c "import json;print(json.dumps({'owner_prefix':'$SMOKE_OWNER_PREFIX','title':'$SMOKE_TITLE','content_type':'knowledge','file_path':'/gate-smoke/$SMOKE_UID.md'}))")"
+  "$("$E2E_PYTHON" -c "import json;print(json.dumps({'owner_prefix':'$SMOKE_OWNER_PREFIX','title':'$SMOKE_TITLE','content_type':'knowledge','file_path':'/gate-smoke/$SMOKE_UID.md'}))")"
 [ "$SMOKE_CODE" = "200" ] || smoke_fail "POST /v1/catalog/doc/register"
 smoke_check "POST /v1/catalog/doc/register -> tumbler under $SMOKE_OWNER_PREFIX" \
   "isinstance(d.get('tumbler'), str) and d['tumbler'].startswith('$SMOKE_OWNER_PREFIX.')"
-SMOKE_DOC_TUMBLER="$(python3 -c "import json;print(json.load(open('$SMOKE_DIR/resp.json'))['tumbler'])")"
+SMOKE_DOC_TUMBLER="$("$E2E_PYTHON" -c "import json;print(json.load(open('$SMOKE_DIR/resp.json'))['tumbler'])")"
 
 smoke_request GET "/v1/catalog/show?tumbler=$SMOKE_DOC_TUMBLER"
 [ "$SMOKE_CODE" = "200" ] || smoke_fail "GET /v1/catalog/show"
@@ -754,7 +758,7 @@ smoke_check "GET /v1/catalog/show -> title round-trips" "d.get('title')=='$SMOKE
 # (begin/fail/show state transitions) — build_ref is the discriminator of
 # record; this step no longer carries that responsibility.
 smoke_request POST /v1/catalog/index-run/begin \
-  "$(python3 -c "import json;print(json.dumps({'doc_id':'$SMOKE_DOC_TUMBLER','run_id':'gate-smoke-$SMOKE_UID','collection':'knowledge__gate-smoke__bge-base-en-v15-768__v1'}))")"
+  "$("$E2E_PYTHON" -c "import json;print(json.dumps({'doc_id':'$SMOKE_DOC_TUMBLER','run_id':'gate-smoke-$SMOKE_UID','collection':'knowledge__gate-smoke__bge-base-en-v15-768__v1'}))")"
 [ "$SMOKE_CODE" = "200" ] || smoke_fail "POST /v1/catalog/index-run/begin"
 smoke_check "POST /v1/catalog/index-run/begin -> ok" "d.get('ok') is True"
 
@@ -765,7 +769,7 @@ smoke_check "POST /v1/catalog/index-run/begin -> ok" "d.get('ok') is True"
 # elsewhere in this script, not by this now-gone read-only route.
 
 smoke_request POST /v1/catalog/index-run/fail \
-  "$(python3 -c "import json;print(json.dumps({'doc_id':'$SMOKE_DOC_TUMBLER','error':'gate-smoke synthetic failure'}))")"
+  "$("$E2E_PYTHON" -c "import json;print(json.dumps({'doc_id':'$SMOKE_DOC_TUMBLER','error':'gate-smoke synthetic failure'}))")"
 [ "$SMOKE_CODE" = "200" ] || smoke_fail "POST /v1/catalog/index-run/fail"
 smoke_check "POST /v1/catalog/index-run/fail -> ok" "d.get('ok') is True"
 
@@ -787,14 +791,14 @@ smoke_check "GET /v1/catalog/show -> index_state==failed (fence round-trip)" "d.
 # next to any control added here, never at the read.
 GATE_OWNERLESS_CONTROLS=0
 if [ -z "${NEXUS_GATE_NO_VECTOR_SMOKE:-}" ]; then
-  SMOKE_CHASH="$(python3 -c "import hashlib;print(hashlib.sha256(b'gate-smoke-chunk-$SMOKE_UID').hexdigest())")"
+  SMOKE_CHASH="$("$E2E_PYTHON" -c "import hashlib;print(hashlib.sha256(b'gate-smoke-chunk-$SMOKE_UID').hexdigest())")"
   SMOKE_VEC_COLLECTION="knowledge__gate-smoke__bge-base-en-v15-768__v1"
   SMOKE_CHUNK_TEXT="gate smoke vector round-trip probe $SMOKE_UID"
   # RDR-204 Phase 1 (nexus-ft04v.7): a chunk write against an unregistered
   # collection is a 422; the engine no longer auto-registers. Register the
   # way the client does, with the tenant profile's bge model.
   smoke_request POST /v1/catalog/collections/upsert \
-    "$(python3 -c "import json;print(json.dumps({'name':'$SMOKE_VEC_COLLECTION','content_type':'knowledge','owner_id':'gate-smoke','embedding_model':'bge-base-en-v15-768'}))")"
+    "$("$E2E_PYTHON" -c "import json;print(json.dumps({'name':'$SMOKE_VEC_COLLECTION','content_type':'knowledge','owner_id':'gate-smoke','embedding_model':'bge-base-en-v15-768'}))")"
   [ "$SMOKE_CODE" = "200" ] || smoke_fail "POST /v1/catalog/collections/upsert"
   smoke_check "POST /v1/catalog/collections/upsert -> ok" "d.get('ok') is True"
 
@@ -806,7 +810,7 @@ if [ -z "${NEXUS_GATE_NO_VECTOR_SMOKE:-}" ]; then
   # searchable only when a manifest row ties it to a live document in the same
   # collection, and the combined write commits that row with the chunk.
   smoke_request POST /v1/catalog/manifest/write_many \
-    "$(python3 -c "import json;print(json.dumps({'collection':'$SMOKE_VEC_COLLECTION','docs':[{'doc_id':'$SMOKE_DOC_TUMBLER','rows':[{'position':0,'chash':'$SMOKE_CHASH'}]}],'chunks':[{'chash':'$SMOKE_CHASH','text':'$SMOKE_CHUNK_TEXT','metadata':{'source':'gate-smoke'}}]}))")"
+    "$("$E2E_PYTHON" -c "import json;print(json.dumps({'collection':'$SMOKE_VEC_COLLECTION','docs':[{'doc_id':'$SMOKE_DOC_TUMBLER','rows':[{'position':0,'chash':'$SMOKE_CHASH'}]}],'chunks':[{'chash':'$SMOKE_CHASH','text':'$SMOKE_CHUNK_TEXT','metadata':{'source':'gate-smoke'}}]}))")"
   [ "$SMOKE_CODE" = "200" ] || smoke_fail "POST /v1/catalog/manifest/write_many"
   smoke_check "POST /v1/catalog/manifest/write_many -> chunks_written==1 (the combined write stored one chunk; the search below proves its owner is live)" "d.get('chunks_written')==1"
 
@@ -815,7 +819,7 @@ if [ -z "${NEXUS_GATE_NO_VECTOR_SMOKE:-}" ]; then
   # RDR-223 P3.2 refusal of ownerless writes, so this keeps the route under
   # the gate without seeding an orphan.
   smoke_request POST /v1/vectors/upsert-chunks \
-    "$(python3 -c "import json;print(json.dumps({'collection':'$SMOKE_VEC_COLLECTION','ids':['$SMOKE_CHASH'],'documents':['$SMOKE_CHUNK_TEXT'],'metadatas':[{'source':'gate-smoke'}]}))")"
+    "$("$E2E_PYTHON" -c "import json;print(json.dumps({'collection':'$SMOKE_VEC_COLLECTION','ids':['$SMOKE_CHASH'],'documents':['$SMOKE_CHUNK_TEXT'],'metadatas':[{'source':'gate-smoke'}]}))")"
   [ "$SMOKE_CODE" = "200" ] || smoke_fail "POST /v1/vectors/upsert-chunks (owned chash)"
   smoke_check "POST /v1/vectors/upsert-chunks (owned chash) -> upserted=1" "d.get('upserted')==1"
 
@@ -824,17 +828,17 @@ if [ -z "${NEXUS_GATE_NO_VECTOR_SMOKE:-}" ]; then
   # NX_OWNERLESS_WRITE_MODE=log-only (the engine inherits it) is the writer-census posture: the same
   # write is accepted and /v1/status counts it, so the pytest legs after this one can run and list
   # every ownerless writer in the engine log.
-  SMOKE_ORPHAN="$(python3 -c "import hashlib;print(hashlib.sha256(b'gate-smoke-orphan-$SMOKE_UID').hexdigest())")"
+  SMOKE_ORPHAN="$("$E2E_PYTHON" -c "import hashlib;print(hashlib.sha256(b'gate-smoke-orphan-$SMOKE_UID').hexdigest())")"
   # The log-only check is a counter DELTA around this one write, never ">=1": the counter is a
   # since-boot total, so any earlier would-refuse (another leg, a retry) would satisfy ">=1" with
   # the write under test counted by nothing. -1 (unreadable before-value) fails the check below.
   SMOKE_WR_BEFORE=-1
   if [ "${NX_OWNERLESS_WRITE_MODE:-enforce}" = "log-only" ]; then
     smoke_request GET /v1/status
-    SMOKE_WR_BEFORE="$(python3 -c "import json;print(int(json.load(open('$SMOKE_DIR/resp.json')).get('ownerless_writes_would_refuse_total',-1)))" 2>/dev/null)" || SMOKE_WR_BEFORE=-1
+    SMOKE_WR_BEFORE="$("$E2E_PYTHON" -c "import json;print(int(json.load(open('$SMOKE_DIR/resp.json')).get('ownerless_writes_would_refuse_total',-1)))" 2>/dev/null)" || SMOKE_WR_BEFORE=-1
   fi
   smoke_request POST /v1/vectors/upsert-chunks \
-    "$(python3 -c "import json;print(json.dumps({'collection':'$SMOKE_VEC_COLLECTION','ids':['$SMOKE_ORPHAN'],'documents':['gate smoke orphan chunk $SMOKE_UID'],'metadatas':[{}]}))")"
+    "$("$E2E_PYTHON" -c "import json;print(json.dumps({'collection':'$SMOKE_VEC_COLLECTION','ids':['$SMOKE_ORPHAN'],'documents':['gate smoke orphan chunk $SMOKE_UID'],'metadatas':[{}]}))")"
   GATE_OWNERLESS_CONTROLS=$((GATE_OWNERLESS_CONTROLS + 1))   # the one deliberate ownerless write (see the declaration above)
   if [ "${NX_OWNERLESS_WRITE_MODE:-enforce}" = "log-only" ]; then
     [ "$SMOKE_CODE" = "200" ] || smoke_fail "POST /v1/vectors/upsert-chunks (ownerless chash, log-only) want 200"
@@ -848,7 +852,7 @@ if [ -z "${NEXUS_GATE_NO_VECTOR_SMOKE:-}" ]; then
   fi
 
   smoke_request POST /v1/vectors/search \
-    "$(python3 -c "import json;print(json.dumps({'query':'$SMOKE_CHUNK_TEXT','collections':['$SMOKE_VEC_COLLECTION'],'n_results':5}))")"
+    "$("$E2E_PYTHON" -c "import json;print(json.dumps({'query':'$SMOKE_CHUNK_TEXT','collections':['$SMOKE_VEC_COLLECTION'],'n_results':5}))")"
   [ "$SMOKE_CODE" = "200" ] || smoke_fail "POST /v1/vectors/search"
   smoke_check "POST /v1/vectors/search -> returns the upserted chunk" \
     "any(r.get('id')=='$SMOKE_CHASH' for r in d)"
@@ -1040,7 +1044,7 @@ GATE_CAND_ENV=()
 GATE_ENGINE_FAIL=0
 for _cand_cmd in identity refusals; do
   env ${GATE_CAND_ENV[@]+"${GATE_CAND_ENV[@]}"} \
-    python3 "$REPO_ROOT/tests/e2e/lib/candidate_engine.py" "$_cand_cmd" "$SCRATCH" --label local-service-gate \
+    "$E2E_PYTHON" "$REPO_ROOT/tests/e2e/lib/candidate_engine.py" "$_cand_cmd" "$SCRATCH" --label local-service-gate \
       --controls "$GATE_OWNERLESS_CONTROLS" \
     || GATE_ENGINE_FAIL=1
 done

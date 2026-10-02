@@ -30,7 +30,7 @@ else
         echo "    content: $(cat "$plugins_json")"
     fi
     # nx specifically must NOT load from the plugin cache (that would be the live v1)
-    if python3 -c "
+    if "$E2E_PYTHON" -c "
 import json, sys
 d = json.load(open(sys.argv[1]))
 entries = d.get('plugins', {}).get('conexus@nexus-plugins', [])

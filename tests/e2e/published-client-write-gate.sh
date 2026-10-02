@@ -191,6 +191,10 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# One interpreter >= 3.10, resolved once; never a bare python3 (nexus-u67ow).
+# shellcheck source=lib/python.sh disable=SC1091
+source "$REPO_ROOT/tests/e2e/lib/python.sh"
+e2e_python_resolve || exit 2
 cd "$REPO_ROOT"
 
 # nexus-jspsn: step 1's `nx init --service` PROVISIONS the candidate engine
@@ -351,8 +355,8 @@ env "${START_ENV[@]}" uv run nx daemon service start 2>&1 | tee "$LOGS/start.log
 
 LEASE_JSON="$(cat "$ENGINE_HOME"/storage_service_addr.* 2>/dev/null)" \
   || _fail "no lease file under $ENGINE_HOME/storage_service_addr.* after start"
-SERVICE_PORT="$(printf '%s' "$LEASE_JSON" | python3 -c "import sys,json;d=json.load(sys.stdin);print(d.get('endpoint',d)['port'])")"
-SERVICE_TOKEN="$(printf '%s' "$LEASE_JSON" | python3 -c "import sys,json;d=json.load(sys.stdin);print(d.get('endpoint',d)['token'])")"
+SERVICE_PORT="$(printf '%s' "$LEASE_JSON" | "$E2E_PYTHON" -c "import sys,json;d=json.load(sys.stdin);print(d.get('endpoint',d)['port'])")"
+SERVICE_TOKEN="$(printf '%s' "$LEASE_JSON" | "$E2E_PYTHON" -c "import sys,json;d=json.load(sys.stdin);print(d.get('endpoint',d)['token'])")"
 echo "[gate] candidate engine serving on 127.0.0.1:$SERVICE_PORT"
 
 healthy=0
@@ -480,7 +484,7 @@ _names_ownerless_refusal() {
 # unbroken run of 48 or more key characters), and 300 characters at most. The
 # journey's output is whatever a client prints, and an error can echo a header.
 _scrub_console_line() {
-  python3 - "$1" <<'PY'
+  "$E2E_PYTHON" - "$1" <<'PY'
 import re, sys
 
 text = sys.argv[1]
@@ -528,13 +532,13 @@ if _names_ownerless_refusal "$STORE_PUT_OUT"; then STORE_REFUSED=1; fi
 _journey_evidence "store put" "$STORE_PUT_OUT"
 STORE_SHOW_JSON="$(_provisioner_nx catalog show "$STORE_TITLE" --json 2>/dev/null)" || STORE_SHOW_JSON=""
 if [ -n "$STORE_SHOW_JSON" ]; then
-  STORE_TUMBLER="$(printf '%s' "$STORE_SHOW_JSON" | python3 -c "import sys,json;print(json.load(sys.stdin).get('tumbler',''))" 2>/dev/null)"
+  STORE_TUMBLER="$(printf '%s' "$STORE_SHOW_JSON" | "$E2E_PYTHON" -c "import sys,json;print(json.load(sys.stdin).get('tumbler',''))" 2>/dev/null)"
 else
   STORE_TUMBLER=""
 fi
 if [ -n "$STORE_TUMBLER" ]; then
   STORE_GET_JSON="$(_manifest_get_count "$STORE_TUMBLER")"
-  STORE_COUNT="$(printf '%s' "$STORE_GET_JSON" | python3 -c "import sys,json;print(json.load(sys.stdin).get('count',-1))" 2>/dev/null || echo -1)"
+  STORE_COUNT="$(printf '%s' "$STORE_GET_JSON" | "$E2E_PYTHON" -c "import sys,json;print(json.load(sys.stdin).get('count',-1))" 2>/dev/null || echo -1)"
   if [ "$STORE_COUNT" = "1" ]; then
     STORE_OK=1
     echo "[gate] store put OK: tumbler=$STORE_TUMBLER manifest count=1 (exact expected count)"
@@ -562,13 +566,13 @@ if _names_ownerless_refusal "$MD_OUT"; then MD_REFUSED=1; fi
 _journey_evidence "index md" "$MD_OUT"
 MD_SHOW_JSON="$(_provisioner_nx catalog show "$MD_TITLE" --json 2>/dev/null)" || MD_SHOW_JSON=""
 if [ -n "$MD_SHOW_JSON" ]; then
-  MD_TUMBLER="$(printf '%s' "$MD_SHOW_JSON" | python3 -c "import sys,json;print(json.load(sys.stdin).get('tumbler',''))" 2>/dev/null)"
+  MD_TUMBLER="$(printf '%s' "$MD_SHOW_JSON" | "$E2E_PYTHON" -c "import sys,json;print(json.load(sys.stdin).get('tumbler',''))" 2>/dev/null)"
 else
   MD_TUMBLER=""
 fi
 if [ -n "$MD_TUMBLER" ]; then
   MD_GET_JSON="$(_manifest_get_count "$MD_TUMBLER")"
-  MD_COUNT="$(printf '%s' "$MD_GET_JSON" | python3 -c "import sys,json;print(json.load(sys.stdin).get('count',-1))" 2>/dev/null || echo -1)"
+  MD_COUNT="$(printf '%s' "$MD_GET_JSON" | "$E2E_PYTHON" -c "import sys,json;print(json.load(sys.stdin).get('count',-1))" 2>/dev/null || echo -1)"
   if [ "$MD_COUNT" = "1" ]; then
     MD_OK=1
     echo "[gate] index md OK: tumbler=$MD_TUMBLER manifest count=1 (exact expected count)"
@@ -584,7 +588,7 @@ echo "── 4/4 Verdict ──"
 
 # numeric tuple compare, not lexical: "7.10.0" >= "7.7.0" must hold.
 _version_ge() {
-  python3 -c "
+  "$E2E_PYTHON" -c "
 import sys
 a = tuple(int(x) for x in sys.argv[1].split('.'))
 b = tuple(int(x) for x in sys.argv[2].split('.'))
@@ -599,7 +603,7 @@ CLIENT_IS_FIXED="$(_version_ge "$CLIENT_VERSION" "$FIXED_IN_VERSION")"
 # report them (a candidate that predates P3.2) leaves the three fields empty.
 STATUS_JSON="$(curl -sS -H "Authorization: Bearer $SERVICE_TOKEN" \
   "http://127.0.0.1:$SERVICE_PORT/v1/status" 2>/dev/null)" || STATUS_JSON=""
-OW_FIELDS="$(printf '%s' "$STATUS_JSON" | python3 -c "
+OW_FIELDS="$(printf '%s' "$STATUS_JSON" | "$E2E_PYTHON" -c "
 import sys, json
 try:
     d = json.load(sys.stdin)
