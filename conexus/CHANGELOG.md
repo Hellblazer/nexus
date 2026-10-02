@@ -1,5 +1,15 @@
 # Changelog
 
+## [7.68.0] - 2026-10-02
+
+Plugin version aligned with conexus 7.68.0. The plugin-side change held since
+7.67.0 goes live as `source.ref` advances to `v7.68.0`.
+
+- `skills/upgrade/SKILL.md` drops two sentences the new `rdr192-manifest-backfill`
+  ladder rung made false ("never opens the completion store", "neither needs a
+  service token") and adds a section on that rung and its deferred failure mode
+  (nexus-wbfpw.41).
+
 ## [7.67.0] - 2026-09-29
 
 Plugin version aligned with conexus 7.67.0. The plugin-side changes held since

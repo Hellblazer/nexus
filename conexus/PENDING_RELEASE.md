@@ -41,10 +41,10 @@ stale -- and stays exactly where it is until moved back deliberately.
 
 
 
-## Awaiting the next release or plugin cut (pinned: v7.67.0)
+## Awaiting the next release or plugin cut (pinned: v7.68.0)
 
 ONE PATH PER BULLET, on the bullet's FIRST line.
 
 ## Deferred to the next client release
 
-- nexus-wbfpw.41: `conexus/skills/upgrade/SKILL.md` drops two sentences the new `rdr192-manifest-backfill` ladder rung made false ("never opens the completion store", "neither needs a service token") and adds a short section on that rung and its deferred failure mode. Deferred because the bead also touches `src/` (the rung itself), which a plugin cut refuses deterministically; the skill text describes behaviour that ships with the client release.
+_Empty. The entry deferred here (nexus-wbfpw.41, the `skills/upgrade/SKILL.md` text for the `rdr192-manifest-backfill` rung) shipped with the 7.68.0 client release._
