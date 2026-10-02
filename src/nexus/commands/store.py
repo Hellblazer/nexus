@@ -295,14 +295,16 @@ def _age_days(stamp: str) -> str:
 
 def _reapable_known_collection(db: T3Database, col_name: str) -> bool:
     """True when *col_name* is a collection T3 holds chunks for or the catalog has registered, the
-    same test ``nx t3 gc`` applies. The engine answers a reapable listing for ANY name with an empty
-    200, so without this a typo reads "0 reapable chunks", the same words a clean collection gets."""
+    same test ``nx t3 gc`` applies (``membership.collection_is_known`` for the catalog half). The
+    engine answers a reapable listing for ANY name with an empty 200, so without this a typo reads
+    "0 reapable chunks", the same words a clean collection gets."""
     if col_name in {c["name"] for c in db.list_collections(strict=True)}:
         return True
     from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred for startup cost (nexus.catalog.factory)
+    from nexus.catalog.membership import collection_is_known  # noqa: PLC0415 — deferred for startup cost (nexus.catalog.membership)
 
     cat = make_catalog_reader()
-    return cat is not None and cat.get_collection(col_name) is not None
+    return cat is not None and collection_is_known(cat, col_name)
 
 
 def _list_reapable(db: T3Database, col_name: str, limit: int) -> None:
@@ -311,11 +313,12 @@ def _list_reapable(db: T3Database, col_name: str, limit: int) -> None:
     advisory: a lock-free snapshot with the engine's default grace, i.e. what ``nx t3 gc`` would
     take at this instant. Paged by keyset; ``limit`` bounds the rows printed.
 
-    The age shown is days since ``last_written_at``, the one clock column the route returns. The
-    engine's grace runs from the later of that and the moment the chunk last lost an owner
-    (``nexus.chunk_orphaned_at``, not returned), so the age here is at least the grace for every
-    listed chunk and can overstate how long the chunk has been ownerless. ``created_at`` is shown
-    beside it: it is write-once, so it is never the grace clock and is never younger than the age."""
+    The age shown is days since ``ownerless_since``, the instant the engine's grace counts from: the
+    later of ``last_written_at`` and the moment the chunk last lost an owner
+    (``nexus.chunk_orphaned_at``). An engine that does not return the key (one older than the field)
+    gets the write age in its place, which is at least the grace for every listed chunk but can
+    overstate how long the chunk has been ownerless. ``last_written_at`` and ``created_at`` are
+    printed beside it; ``created_at`` is write-once, so it is never the grace clock."""
     from nexus.db.http_vector_client import VectorServiceError  # noqa: PLC0415 — deferred for startup cost (nexus.db.http_vector_client)
 
     reapable_chunks = getattr(db, "reapable_chunks", None)
@@ -338,16 +341,17 @@ def _list_reapable(db: T3Database, col_name: str, limit: int) -> None:
                 break
             if shown == 0:
                 click.echo(
-                    f"{col_name}  (chash, last_written_at, days since last write, created_at, "
-                    f"title, catalog_doc_id)\n"
+                    f"{col_name}  (chash, ownerless_since, days ownerless, last_written_at, "
+                    f"created_at, title, catalog_doc_id)\n"
                 )
             written = row.get("last_written_at") or ""
+            ownerless = row.get("ownerless_since") or written
             created = row.get("created_at") or ""
             title = (row.get("title") or "")[:40]
             doc = row.get("catalog_doc_id") or "-"
             click.echo(
-                f"  {row.get('chash', '')}  {written}  {_age_days(written):>5}  {created}  "
-                f"{title:<40}  {doc}"
+                f"  {row.get('chash', '')}  {ownerless}  {_age_days(ownerless):>5}  {written}  "
+                f"{created}  {title:<40}  {doc}"
             )
             shown += 1
     except VectorServiceError as exc:

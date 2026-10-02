@@ -46,13 +46,22 @@ def _ts(days_old: int) -> str:
     return (datetime.now(UTC) - timedelta(days=days_old)).isoformat().replace("+00:00", "Z")
 
 
-def _row(i: int, *, days_old: int = 40, doc: str | None = None, created_days_old: int | None = None) -> dict:
-    """*days_old* is the age of last_written_at (the engine's grace clock column); created_at is the
-    same unless *created_days_old* says it is older (it is write-once, so it can only be older)."""
+def _row(
+    i: int, *, days_old: int = 40, doc: str | None = None, created_days_old: int | None = None,
+    ownerless_days_old: int | None = None, with_ownerless: bool = True,
+) -> dict:
+    """*days_old* is the age of last_written_at; created_at is the same unless *created_days_old* says
+    it is older (it is write-once, so it can only be older). ``ownerless_since`` (the engine's grace
+    clock, the later of the write and the orphaning record) defaults to the write; pass
+    *ownerless_days_old* (younger than the write) for a chunk that lost its owner after it was
+    written, or ``with_ownerless=False`` for an engine that predates the field."""
     written = _ts(days_old)
     created = _ts(created_days_old) if created_days_old is not None else written
-    return {"chash": _chash(i), "created_at": created, "last_written_at": written,
-            "title": f"title-{i}", "catalog_doc_id": doc}
+    row = {"chash": _chash(i), "created_at": created, "last_written_at": written,
+           "title": f"title-{i}", "catalog_doc_id": doc}
+    if with_ownerless:
+        row["ownerless_since"] = _ts(ownerless_days_old) if ownerless_days_old is not None else written
+    return row
 
 
 class _Engine:
@@ -109,7 +118,7 @@ def test_reapable_with_the_default_value_spelled_out_is_accepted(runner, real_cl
     assert result.exit_code == 0, result.output
 
 
-def test_reapable_lists_chash_written_age_created_title_and_catalog_doc_id(runner, real_client):
+def test_reapable_lists_chash_ownerless_age_written_created_title_and_catalog_doc_id(runner, real_client):
     engine = _Engine([_row(1, days_old=40, doc="1.2.3"), _row(2, days_old=33, doc=None)])
     result = _invoke(runner, real_client, engine, ["--reapable", "-c", _COLL])
     assert result.exit_code == 0, result.output
@@ -118,20 +127,33 @@ def test_reapable_lists_chash_written_age_created_title_and_catalog_doc_id(runne
     assert "T" in line1  # the timestamps are printed
     line2 = next(line for line in result.output.splitlines() if _chash(2) in line)
     assert "title-2" in line2 and "33d" in line2
+    # No grace is passed: the default listing is what a gc pass would take.
+    assert engine.posted and all("grace_seconds" not in body for _p, body in engine.posted)
 
 
-def test_the_age_is_days_since_last_write_not_since_creation(runner, real_client):
-    """The engine's grace runs from last_written_at (and the orphaning time), never created_at, which
-    is write-once and so always overstates. A chunk created 400 days ago and re-written 35 days ago
-    shows 35d; created_at is printed beside it, and no age is derived from it."""
-    engine = _Engine([_row(1, days_old=35, created_days_old=400)])
+def test_the_age_is_days_since_ownerless_since_not_since_the_write_or_creation(runner, real_client):
+    """The engine's grace runs from the later of the last write and the orphaning record
+    (``ownerless_since``), never from created_at (write-once, always overstates). A chunk created 400
+    days ago, last written 200 days ago and orphaned 31 days ago shows 31d, the answer to "how long
+    ownerless"; the write and creation stamps are printed beside it and no age is derived from them."""
+    engine = _Engine([_row(1, days_old=200, created_days_old=400, ownerless_days_old=31)])
     result = _invoke(runner, real_client, engine, ["--reapable", "-c", _COLL])
     assert result.exit_code == 0, result.output
     line = next(line for line in result.output.splitlines() if _chash(1) in line)
-    assert "35d" in line and "400d" not in line
-    assert re.findall(r"\b\d+d\b", line) == ["35d"], "exactly one age is shown, and it is the write age"
-    assert _ts(400)[:10] in line and _ts(35)[:10] in line, "both timestamps are printed"
-    assert "last write" in result.output  # the header names the clock
+    assert re.findall(r"\b\d+d\b", line) == ["31d"], "exactly one age is shown, and it is the ownerless age"
+    assert _ts(31)[:10] in line and _ts(200)[:10] in line and _ts(400)[:10] in line, (
+        "ownerless_since, last_written_at and created_at are all printed")
+    assert "days ownerless" in result.output  # the header names the clock
+
+
+def test_an_engine_without_ownerless_since_falls_back_to_the_write_age(runner, real_client):
+    """An engine older than the field omits the key: the listing still works and the age is the write
+    age (>= the grace for every listed chunk), never a crash and never a blank."""
+    engine = _Engine([_row(1, days_old=35, created_days_old=400, with_ownerless=False)])
+    result = _invoke(runner, real_client, engine, ["--reapable", "-c", _COLL])
+    assert result.exit_code == 0, result.output
+    line = next(line for line in result.output.splitlines() if _chash(1) in line)
+    assert re.findall(r"\b\d+d\b", line) == ["35d"]
 
 
 def test_an_unknown_collection_is_refused_not_reported_as_clean(runner, real_client):
@@ -151,8 +173,6 @@ def test_a_catalog_registered_empty_collection_is_known_and_reads_clean(runner, 
     result = _invoke(runner, real_client, engine, ["--reapable", "-c", _COLL], known=(), catalog_knows=True)
     assert result.exit_code == 0, result.output
     assert f"0 reapable chunks in {_COLL}" in result.output
-    # No grace is passed: the default listing is what a gc pass would take.
-    assert all("grace_seconds" not in body for _p, body in engine.posted)
 
 
 def test_nothing_reapable_prints_the_empty_line_and_exits_zero(runner, real_client):

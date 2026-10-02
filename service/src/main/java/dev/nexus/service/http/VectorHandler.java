@@ -1405,7 +1405,12 @@ public final class VectorHandler implements HttpHandler {
      * </pre>
      * <p>Response 200: {@code {"collection": "...", "grace_seconds": N|null, "returned": N, "next_after":
      * "64-hex"|null, "chunks": [{"chash": "64-hex", "created_at": ISO-8601, "last_written_at": ISO-8601,
-     * "title": str|null, "catalog_doc_id": str|null}, ...]}}. {@code grace_seconds} echoes the request,
+     * "ownerless_since": ISO-8601, "title": str|null, "catalog_doc_id": str|null}, ...]}}.
+     * {@code ownerless_since} is the instant the grace counts from, {@code GREATEST(last_written_at,
+     * orphaned_at)} (the later of the last write and the moment the chunk last lost an owner, read from
+     * {@code nexus.chunk_orphaned_at}); it is never earlier than {@code last_written_at}, and a chunk with no
+     * orphaning record reports its {@code last_written_at}. Additive and for display only: the predicate alone
+     * decides which chunks are listed. {@code grace_seconds} echoes the request,
      * {@code null} meaning the default. {@code title} and {@code catalog_doc_id} come from the chunk's own
      * metadata ({@code null} when absent or empty; {@code catalog_doc_id} falls back to {@code doc_id}).
      * Page by sending {@code next_after} back as {@code after_chash} while it is not null; {@code next_after}
@@ -1434,6 +1439,7 @@ public final class VectorHandler implements HttpHandler {
             item.put("chash", r.chash());
             item.put("created_at", r.createdAt());
             item.put("last_written_at", r.lastWrittenAt());
+            item.put("ownerless_since", r.ownerlessSince());
             item.put("title", r.title());
             item.put("catalog_doc_id", r.catalogDocId());
             chunks.add(item);

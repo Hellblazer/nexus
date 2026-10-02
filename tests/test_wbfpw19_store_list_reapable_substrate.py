@@ -37,12 +37,19 @@ def test_lists_exactly_the_reapable_rows_of_the_fixture(env):
     for chash in fx.reapable:
         line = next(line for line in result.output.splitlines() if chash in line)
         assert "wbfpw19-list orphan" in line  # the chunk's title, from its own metadata
-        assert re.search(r"\b\d+d\b", line), line  # age in days, from last_written_at
+        assert re.search(r"\b\d+d\b", line), line  # age in days, from ownerless_since
         assert "Z" in line  # the timestamps, as the engine reports them
     # Read-only: listing moved nothing.
     from nexus.db.http_vector_client import HttpVectorClient
 
     client = HttpVectorClient()
+    # The engine reports the grace clock; it is never earlier than the last write.
+    from datetime import datetime
+
+    rows = list(client.reapable_chunks(fx.name))
+    assert {r["chash"] for r in rows} == fx.reapable
+    for r in rows:
+        assert datetime.fromisoformat(r["ownerless_since"]) >= datetime.fromisoformat(r["last_written_at"]), r
     assert set(client.get_collection(fx.name).get_all_metadata(include_non_live=True)["ids"]) == fx.everything
 
 

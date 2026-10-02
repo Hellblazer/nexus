@@ -34,6 +34,7 @@ import java.util.Set;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.CHUNK_ORPHANED_AT;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -65,6 +66,7 @@ class VectorHandlerReapableRouteTest {
 
     private PostgreSQLContainer<?> pg;
     private HikariDataSource svcDs;
+    private PgVectorRepository repo;
     private NexusService service;
     private HttpClient http;
 
@@ -88,7 +90,7 @@ class VectorHandlerReapableRouteTest {
         svcDs = new HikariDataSource(cfg);
 
         FakeEmbedder embedder = new FakeEmbedder(384);
-        var repo = new PgVectorRepository(new TenantScope(svcDs), embedder, embedder);
+        repo = new PgVectorRepository(new TenantScope(svcDs), embedder, embedder);
         service = new NexusService(0, TOKEN_A, svcDs, null, repo);
         service.start();
         http = TestHttp.client();
@@ -265,6 +267,7 @@ class VectorHandlerReapableRouteTest {
 
         Map<String, Object> r1 = chunks(body).stream().filter(c -> fx.r1().equals(c.get("chash"))).findFirst().get();
         assertThat(r1.get("title")).isEqualTo("r1.txt:1-1");
+        assertThat(r1).as("every item carries the grace clock").containsKey("ownerless_since");
         assertThat(r1.get("catalog_doc_id")).as("R1 names no document").isNull();
         assertThat(OffsetDateTime.parse((String) r1.get("created_at"))).isBefore(OffsetDateTime.now().minusDays(30));
         assertThat(OffsetDateTime.parse((String) r1.get("last_written_at")))
@@ -473,5 +476,88 @@ class VectorHandlerReapableRouteTest {
     void anUnknownCollectionListsNothing() throws Exception {
         Map<String, Object> body = reapable(TOKEN_A, "knowledge__reaproute-nothing__minilm-l6-v2-384__v1", Map.of());
         assertThat(chunks(body)).isEmpty();
+    }
+
+    // ── ownerless_since ───────────────────────────────────────────────────────
+
+    /** Writes (or overwrites) the chunk's orphaning record in {@code collection}, {@code age} ago. */
+    private void recordOrphaning(String tenant, String collection, String hex, Duration age) throws Exception {
+        OffsetDateTime then = OffsetDateTime.now().minus(age);
+        su(ctx -> ctx.insertInto(CHUNK_ORPHANED_AT, CHUNK_ORPHANED_AT.TENANT_ID, CHUNK_ORPHANED_AT.COLLECTION,
+                CHUNK_ORPHANED_AT.CHASH, CHUNK_ORPHANED_AT.ORPHANED_AT)
+            .values(tenant, collection, bytes(hex), then)
+            .onConflict(CHUNK_ORPHANED_AT.TENANT_ID, CHUNK_ORPHANED_AT.COLLECTION, CHUNK_ORPHANED_AT.CHASH)
+            .doUpdate().set(CHUNK_ORPHANED_AT.ORPHANED_AT, then).execute());
+    }
+
+    private Map<String, Object> item(Map<String, Object> body, String hex) {
+        return chunks(body).stream().filter(c -> hex.equals(c.get("chash"))).findFirst().orElseThrow();
+    }
+
+    @Test
+    void ownerlessSinceIsTheLaterOfTheLastWriteAndTheOrphaningRecord() throws Exception {
+        String colX = "knowledge__reaproute-os-x__minilm-l6-v2-384__v1";
+        String colY = "knowledge__reaproute-os-y__minilm-l6-v2-384__v1";
+        register(TENANT_A, colX);
+        register(TENANT_A, colY);
+        // Written 200 days ago, lost its owner 31 days ago: reapable, and ownerless for 31 days.
+        String lost = chunk(TENANT_A, colX, "os-lost", Duration.ofDays(200), Map.of());
+        recordOrphaning(TENANT_A, colX, lost, Duration.ofDays(31));
+        // Never had an owner: no record, so the clock is its write.
+        String never = chunk(TENANT_A, colX, "os-never", Duration.ofDays(45), Map.of());
+        // The same chunk text in another collection of the same tenant, orphaned only 5 days ago: that
+        // record belongs to colY and must not move colX's clock.
+        String shared = chunk(TENANT_A, colX, "os-shared", Duration.ofDays(200), Map.of());
+        chunk(TENANT_A, colY, "os-shared", Duration.ofDays(200), Map.of());
+        recordOrphaning(TENANT_A, colX, shared, Duration.ofDays(33));
+        recordOrphaning(TENANT_A, colY, shared, Duration.ofDays(5));
+
+        Map<String, Object> body = reapable(TOKEN_A, colX, Map.of());
+
+        assertThat(chashes(body)).containsExactlyInAnyOrder(lost, never, shared);
+        OffsetDateTime now = OffsetDateTime.now();
+        Map<String, Object> l = item(body, lost);
+        assertThat(OffsetDateTime.parse((String) l.get("last_written_at"))).isBefore(now.minusDays(199));
+        assertThat(OffsetDateTime.parse((String) l.get("ownerless_since")))
+            .as("the orphaning record is later than the write, so it is the clock")
+            .isBetween(now.minusDays(31).minusMinutes(5), now.minusDays(31).plusMinutes(5));
+        Map<String, Object> n = item(body, never);
+        assertThat(n.get("ownerless_since")).as("no record: the last write").isEqualTo(n.get("last_written_at"));
+        Map<String, Object> sh = item(body, shared);
+        assertThat(OffsetDateTime.parse((String) sh.get("ownerless_since")))
+            .as("colX's own record (33 days), not colY's (5 days)")
+            .isBetween(now.minusDays(33).minusMinutes(5), now.minusDays(33).plusMinutes(5));
+    }
+
+    /**
+     * {@code ReapableChunk} holds two Strings that no type check tells apart, {@code ownerlessSince} and
+     * {@code sourcePath}, and the select feeds the record by position (value6, value7). A swap compiles
+     * and passes every route test (the route never returns sourcePath); the reaper's samples are the
+     * only other reader. This pins every field BY NAME straight off the repository, each seeded with a
+     * value no other field could hold.
+     */
+    @Test
+    void everyReapableChunkFieldHoldsItsOwnColumn() throws Exception {
+        String col = "knowledge__reaproute-fields__minilm-l6-v2-384__v1";
+        register(TENANT_A, col);
+        String hex = chunk(TENANT_A, col, "fields-1", Duration.ofDays(200),
+            Map.of("title", "The Title", "source_path", "/the/source/path.md", "catalog_doc_id", "1.2.3"));
+        recordOrphaning(TENANT_A, col, hex, Duration.ofDays(31));
+
+        List<PgVectorRepository.ReapableChunk> rows = repo.reapableChunks(TENANT_A, col, null, null, 10, 0);
+
+        assertThat(rows).hasSize(1);
+        PgVectorRepository.ReapableChunk r = rows.get(0);
+        OffsetDateTime now = OffsetDateTime.now();
+        assertThat(r.chash()).isEqualTo(hex);
+        assertThat(OffsetDateTime.parse(r.createdAt())).isBefore(now.minusDays(199));
+        assertThat(OffsetDateTime.parse(r.lastWrittenAt())).isBefore(now.minusDays(199));
+        assertThat(OffsetDateTime.parse(r.ownerlessSince()))
+            .as("ownerlessSince is the orphaning record, not the path")
+            .isBetween(now.minusDays(31).minusMinutes(5), now.minusDays(31).plusMinutes(5));
+        assertThat(r.title()).isEqualTo("The Title");
+        assertThat(r.catalogDocId()).isEqualTo("1.2.3");
+        assertThat(r.sourcePath()).as("sourcePath is the source_path metadata, not the clock")
+            .isEqualTo("/the/source/path.md");
     }
 }

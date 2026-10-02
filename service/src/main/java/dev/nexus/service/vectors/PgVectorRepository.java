@@ -25,6 +25,7 @@ import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNK_IS_REAPABLE;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNK_LIVE_OWNERS;
+import static dev.nexus.service.jooq.nexus.Tables.CHUNK_ORPHANED_AT;
 import static dev.nexus.service.jooq.nexus.Tables.SEARCH_ASPECT_SCOPED_1024;
 import static dev.nexus.service.jooq.nexus.Tables.SEARCH_ASPECT_SCOPED_384;
 import static dev.nexus.service.jooq.nexus.Tables.SEARCH_ASPECT_SCOPED_768;
@@ -3345,9 +3346,16 @@ FROM scope s
         return new ManifestLessCensusResult(returned, chashes, owners, totals, scopeChunkTotal);
     }
 
-    /** One chunk {@code reapable(c)} selects (RDR-192 Step 8, bead nexus-wbfpw.17). */
-    public record ReapableChunk(String chash, String createdAt, String lastWrittenAt, String title,
-                                String catalogDocId, String sourcePath) {}
+    /** One chunk {@code reapable(c)} selects (RDR-192 Step 8, bead nexus-wbfpw.17). {@code ownerlessSince}
+     *  is the instant the predicate's grace counts from, {@code GREATEST(last_written_at, orphaned_at)}
+     *  (the later of the last write and the moment the chunk last lost an owner,
+     *  {@code nexus.chunk_orphaned_at}); for display only, the predicate decides what is listed.
+     *  {@code sourcePath} is the chunk's {@code source_path} metadata (the reaper's audit samples).
+     *  {@code ownerlessSince} and {@code sourcePath} are both Strings: the select in
+     *  {@link #reapableChunks} feeds this record by position, so keep the two in step
+     *  ({@code VectorHandlerReapableRouteTest#everyReapableChunkFieldHoldsItsOwnColumn} pins it). */
+    public record ReapableChunk(String chash, String createdAt, String lastWrittenAt, String ownerlessSince,
+                                String title, String catalogDocId, String sourcePath) {}
 
     /**
      * Read-only listing of the chunks {@code nexus.chunk_is_reapable} (vectors-021) selects in
@@ -3385,11 +3393,20 @@ FROM scope s
         Field<String> catalogDocId = DSL.coalesce(
             DSL.nullif(DSL.jsonbGetAttributeAsText(CHUNKS.METADATA, "catalog_doc_id"), ""),
             DSL.nullif(DSL.jsonbGetAttributeAsText(CHUNKS.METADATA, "doc_id"), ""));
+        // The instant the grace counts from: the later of the last write and the orphaning record. A
+        // scalar subquery on the primary key, tenant-scoped explicitly as well as by RLS; GREATEST
+        // skips a NULL, so a chunk with no record reads its last_written_at. Display only: the
+        // predicate below stays the one thing that decides what is listed.
+        Field<java.time.OffsetDateTime> ownerlessSince = DSL.greatest(CHUNKS.LAST_WRITTEN_AT,
+            DSL.field(DSL.select(CHUNK_ORPHANED_AT.ORPHANED_AT).from(CHUNK_ORPHANED_AT)
+                .where(CHUNK_ORPHANED_AT.TENANT_ID.eq(CHUNKS.TENANT_ID))
+                .and(CHUNK_ORPHANED_AT.COLLECTION.eq(CHUNKS.COLLECTION))
+                .and(CHUNK_ORPHANED_AT.CHASH.eq(CHUNKS.CHASH))));
         org.jooq.Condition after = afterChash == null
             ? DSL.noCondition() : CHUNKS.CHASH.gt(dev.nexus.service.db.Chash.fromHex(afterChash).toBytes());
         return tenantScope.withTenant(tenant, ctx ->
             ctx.select(ChashHex.hex(CHUNKS.CHASH), CHUNKS.CREATED_AT, CHUNKS.LAST_WRITTEN_AT, title, catalogDocId,
-                       sourcePath)
+                       ownerlessSince, sourcePath)
                .from(CHUNKS)
                .where(CHUNKS.TENANT_ID.eq(tenant).and(CHUNKS.COLLECTION.eq(collection)))
                .and(after)
@@ -3399,7 +3416,8 @@ FROM scope s
                .limit(limit).offset(offset)
                .fetch(r -> new ReapableChunk(
                    r.value1(), r.value2().toInstant().toString(), r.value3().toInstant().toString(),
-                   blankToNull(r.value4()), blankToNull(r.value5()), blankToNull(r.value6()))));
+                   r.value6().toInstant().toString(),
+                   blankToNull(r.value4()), blankToNull(r.value5()), blankToNull(r.value7()))));
     }
 
     /**
