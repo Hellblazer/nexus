@@ -10,9 +10,12 @@
 # populated rows, RDR-191) reached the tag gate with zero pre-tag
 # rehearsal against a populated store. This leg closes that gap.
 #
-#   Stage 1  uv tool install the WORKING-TREE wheel (the client under
-#            test throughout — this leg tests the ENGINE delta, not a
-#            client-upgrade axis; no old release is ever installed).
+#   Stage 1  uv tool install the RELEASED conexus ($SEED_RELEASE, real PyPI)
+#            that pins the floor engine — the client production was seeded
+#            with (nexus-z0o2p.42). A working-tree client newer than the
+#            floor REFUSES it (EngineOlderThanClientError on every write), so
+#            seeding through the working tree measured nothing; the
+#            working-tree wheel arrives at Stage 4 instead.
 #   Stage 2  install-binary the PUBLISHED FLOOR engine for real, provision
 #            + serve it.
 #   Stage 3  POPULATE through the floor engine — the leg's soul: store
@@ -29,7 +32,10 @@
 #            RLS-guarded table instead of an empty one. Seeded under two
 #            tenants when the floor supports minting a second one.
 #   Stage 4  stop the service (PG stays up — nx daemon service stop
-#            without --with-pg); hand-swap the LOCALLY-BUILT candidate
+#            without --with-pg); UPGRADE THE CLIENT to the working-tree
+#            wheel (the real user upgrade path: seeded under the release,
+#            then client + engine move forward together — every Stage 5
+#            assert runs with the working-tree client); hand-swap the LOCALLY-BUILT candidate
 #            binary in at the well-known location; rewrite ONLY the
 #            provenance sidecar's sha256 field to match the candidate's
 #            real bytes, keeping tag/version pinned at the floor. This
@@ -44,7 +50,17 @@
 #            the leg without saying so.
 #   Stage 5  start; assert healthy — the candidate's FULL Liquibase pass
 #            over the populated store. Assert the changeset delta, EXACT
-#            row invariants, and that reads/writes/search still serve.
+#            row invariants, and that reads/writes/search still serve; then
+#            run `nx upgrade` with the working-tree client (the user's verb
+#            after a package move; nexus-z0o2p.42) and assert nx doctor clean.
+#
+# COVERAGE NOTE (nexus-z0o2p.42): the population Stage 3 writes is the
+# RELEASED client's output through the FLOOR engine, which is exactly what a
+# production store holds at upgrade time. Every post-walk assert reads rows by
+# SQL or through the working-tree client after the upgrade; none depends on the
+# seeding client being the working tree. This leg therefore also exercises that
+# a store the release wrote is read, searched and written by the working-tree
+# client against the candidate.
 #
 # COVERAGE (substantive-critic finding, 2026-08-14, T2
 # nexus/critique-nexus-z0ylb-candidate-migration-rehearsal-2026-08-14
@@ -103,7 +119,7 @@
 # consumed-body cleanup would apply against an EMPTY table on every
 # rehearsal — vacuous coverage of exactly the risk those changesets exist
 # to retire. Stage 3h seeds mailbox rows in every claim state, an
-# over-4096-byte body (written past the working-tree client's OWN mirrored
+# over-4096-byte body (written past the seeding (released) client's OWN mirrored
 # 4096-byte pre-check, when the FLOOR predates the cap and enforces nothing;
 # a floor from engine-service-v0.1.118 on carries tuples-003 and refuses it
 # with TooLarge, which the leg asserts instead, skipping the over-cap asserts
@@ -160,15 +176,21 @@ test -x "$SVC_NATIVE_DIR/nexus-service" && ok "candidate native binary staged at
 
 WHEEL="$(ls "$HOME"/worktree-wheel/conexus-*.whl 2>/dev/null | head -1)"
 [ -n "$WHEEL" ] || { bad "no worktree wheel in $HOME/worktree-wheel/"; say "ABORT"; exit 1; }
+SEED_RELEASE="${SEED_RELEASE:?SEED_RELEASE must be set (the released conexus that pins the floor engine, e.g. 7.67.0; run.sh derives it)}"
 
-# ── Stage 1: the working-tree wheel (the ONLY client this leg ever runs) ──
-say "Stage 1 — uv tool install the working-tree wheel"
-if uv tool install --python 3.12 "$WHEEL" 2>&1 | tail -4 | sed 's/^/       /'; then
-  ok "tool-installed the working-tree wheel"
+# ── Stage 1: the RELEASED client that pins the floor (seeds Stages 2-3) ───
+say "Stage 1 — uv tool install conexus==$SEED_RELEASE (real PyPI; the release that pins $FLOOR_TAG)"
+if uv tool install --python 3.12 "conexus==$SEED_RELEASE" 2>&1 | tail -4 | sed 's/^/       /'; then
+  ok "tool-installed the released conexus==$SEED_RELEASE"
 else
-  bad "uv tool install $WHEEL failed"; say "ABORT"; exit 1
+  bad "uv tool install conexus==$SEED_RELEASE failed"; say "ABORT"; exit 1
 fi
 nx --version >/dev/null 2>&1 && ok "nx installed ($(nx --version 2>&1))" || { bad "nx --version failed"; say "ABORT"; exit 1; }
+SEED_VER_OUT="$(nx --version 2>&1)"
+SEED_CLIENT_VER=""
+[[ "$SEED_VER_OUT" =~ ([0-9]+\.[0-9]+\.[0-9]+) ]] && SEED_CLIENT_VER="${BASH_REMATCH[1]}"
+[ "$SEED_CLIENT_VER" = "$SEED_RELEASE" ] && ok "nx --version reports $SEED_CLIENT_VER (the seeding client is the released $SEED_RELEASE, not the working tree)" \
+  || bad "nx --version reports '${SEED_CLIENT_VER:-?}', expected the seed release $SEED_RELEASE"
 TOOLPY="$HOME/.local/share/uv/tools/conexus/bin/python"
 [ -x "$TOOLPY" ] || { bad "no python at $TOOLPY"; say "ABORT"; exit 1; }
 
@@ -623,7 +645,7 @@ _tuple_seed_tenant() {
   fi
 
   # at-cap body: exactly 4096 UTF-8 bytes, at the GLOBAL limit -- accepted
-  # by both the working-tree client and (once tuples-003 lands) the
+  # by both the seeding client and (once tuples-003 lands) the
   # candidate's own DB constraint. Left unclaimed; must survive untouched.
   if OUT=$("${NXTOK[@]}" nx tuple out "mailbox/candmig-atcap-$label" \
       --key to="candmig-atcap-$label" --dim from="candmig-sender-$label" \
@@ -633,7 +655,7 @@ _tuple_seed_tenant() {
     bad "seeding the at-cap mailbox row failed ($label): $OUT"
   fi
 
-  # over-cap body: over the working-tree client's OWN 4096-byte pre-check
+  # over-cap body: over the seeding (released) client's OWN 4096-byte pre-check
   # (nexus-r7xao mirrors the engine-side limit client-side), so written by
   # calling HttpTupleStore._post() directly -- past out()'s pre-checks,
   # never past the transport/auth machinery those sit in front of -- the
@@ -664,7 +686,7 @@ PYEOF
   ); then
     if [[ "$OVER_OUT" == *"RESULT:ID="* ]]; then
       OVERCAP_SEEDED[$label]=1
-      ok "seeded the over-cap (5000-byte body) mailbox row past the working-tree client's own pre-check, straight to the floor ($label)"
+      ok "seeded the over-cap (5000-byte body) mailbox row past the seeding client's own pre-check, straight to the floor ($label)"
     else
       bad "seeding the over-cap mailbox row did not report an id ($label): $OVER_OUT"
     fi
@@ -764,6 +786,46 @@ if nx daemon service stop 2>&1 | tail -6 | sed 's/^/       /'; then
   ok "storage service stopped"
 else
   bad "nx daemon service stop failed"; say "ABORT"; exit 1
+fi
+
+say "Stage 4 — upgrade the client: uv tool install --reinstall <working-tree wheel> over conexus==$SEED_RELEASE"
+# The real user upgrade path (release -> develop client) at the moment the
+# engine moves. The engine is stopped, so nothing talks to it during the swap
+# of packages. Same TOOLPY path afterwards; the proof that the WORKING-TREE
+# code is what is installed (the wheel can carry the same version string as
+# the release it replaces, so nx --version alone cannot tell) is a byte compare
+# of every .py in the wheel against the installed package.
+if uv tool install --python 3.12 --reinstall "$WHEEL" 2>&1 | tail -4 | sed 's/^/       /'; then
+  ok "client upgraded to the working-tree wheel"
+else
+  bad "uv tool install --reinstall $WHEEL failed"; say "ABORT"; exit 1
+fi
+WHEEL_CMP="$("$TOOLPY" - "$WHEEL" <<'PYEOF' 2>&1
+import hashlib, importlib.util, pathlib, sys, zipfile
+
+wheel = sys.argv[1]
+spec = importlib.util.find_spec("nexus")
+root = pathlib.Path(spec.submodule_search_locations[0]).parent
+same = diff = missing = 0
+with zipfile.ZipFile(wheel) as z:
+    for name in z.namelist():
+        if not name.startswith("nexus/") or not name.endswith(".py"):
+            continue
+        p = root / name
+        if not p.is_file():
+            missing += 1
+        elif hashlib.sha256(p.read_bytes()).digest() == hashlib.sha256(z.read(name)).digest():
+            same += 1
+        else:
+            diff += 1
+print(f"RESULT:same={same} different={diff} missing={missing}")
+PYEOF
+)"
+note "$WHEEL_CMP"
+if [[ "$WHEEL_CMP" == *"RESULT:same="* && "$WHEEL_CMP" == *"different=0 missing=0"* && "$WHEEL_CMP" != *"same=0 "* ]]; then
+  ok "every nexus/*.py in the working-tree wheel is byte-identical to the installed package (the upgrade took)"
+else
+  bad "the installed package is not the working-tree wheel: $WHEEL_CMP"; say "ABORT"; exit 1
 fi
 
 say "Stage 4 — hand-swap the locally-built CANDIDATE binary into the well-known location"
@@ -982,6 +1044,24 @@ else
   printf '%s\n' "$POST_PUT" | tail -10 | sed 's/^/       /'
   bad "nx store put FAILED through the candidate"
 fi
+
+say "Assert — nx upgrade: the user's one verb after a client upgrade, run with the working-tree client (nexus-z0o2p.42)"
+# The store was seeded by the RELEASED client, so the working-tree client's
+# upgrade ladder carries rungs the seeding client never recorded (measured:
+# rdr192-manifest-backfill, "the census runs on `nx upgrade`"). Running `nx
+# upgrade` is exactly what a user does after moving the package, so it is part
+# of the journey, and every row-invariant assert above has already read the
+# store BEFORE it. It must not re-acquire the floor engine over the candidate:
+# the binary sha and the /version stamp are re-checked right after.
+UPG_OUT="$(nx upgrade 2>&1 < /dev/null)"; UPG_RC=$?
+printf '%s\n' "$UPG_OUT" | tail -12 | sed 's/^/       /'
+[ "$UPG_RC" = 0 ] && ok "nx upgrade exited 0 over the candidate-booted store" || bad "nx upgrade exited $UPG_RC"
+UPG_SHA="$(sha256sum "$SVC_WELL_KNOWN_DIR/nexus-service" | awk '{print $1}')"
+[ "$UPG_SHA" = "$CAND_SHA" ] && ok "nx upgrade left the swapped-in candidate binary in place" \
+  || bad "nx upgrade replaced the candidate binary (sha $UPG_SHA, expected $CAND_SHA)"
+UPG_RV="$(_release_version)"
+[ "$UPG_RV" = "$FLOOR_VERSION" ] && ok "/version release_version=$UPG_RV after nx upgrade" \
+  || bad "/version release_version=$UPG_RV after nx upgrade, expected $FLOOR_VERSION"
 
 say "Assert — nx doctor: clean, no pending rungs, no engine-convergence-pending"
 DOC_OUT="$(nx doctor 2>&1 < /dev/null)"

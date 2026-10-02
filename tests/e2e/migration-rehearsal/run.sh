@@ -334,6 +334,44 @@ fi
   exit 2
 }
 
+# nexus-z0o2p.42: --candidate-migration's SEED release. Stages 1-3 (provision the
+# floor engine, populate it) must run the RELEASED client that pins the floor,
+# the way production was seeded: a working-tree client newer than the floor
+# refuses it (EngineOlderThanClientError on every write) the moment develop
+# carries a client half the floor lacks. So the leg installs this release from
+# real PyPI, populates through it, and upgrades to the working-tree wheel only
+# at the candidate swap (the real user upgrade path).
+# SELECTOR: the newest published canonical `v*` release whose
+# REQUIRED_ENGINE_VERSION equals GUIDED_STAMP_VERSION (the floor this leg
+# provisions). Unlike _derive_prev_release the tree's own version is NOT
+# excluded: a tree that is itself the newest release pinning the floor is
+# exactly the seed. Override with NEXUS_SEED_RELEASE; an override that does not
+# pin the floor, and a derivation that finds nothing, both fail loud (a seed
+# release that pins a different engine would re-open the refusal this exists
+# to avoid, or seed through an engine the floor does not match).
+_derive_seed_release() {
+  local rel tuple
+  for rel in $(git tag -l 'v[0-9]*' \
+               | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sed 's/^v//' | sort -V \
+               | awk '{a[NR]=$0} END{for(i=NR;i>=1;i--) print a[i]}'); do
+    tuple="$(_engine_tuple_at_release "$rel" || true)"
+    [ "$tuple" = "$GUIDED_STAMP_VERSION" ] && { printf '%s' "$rel"; return 0; }
+  done
+  echo "FATAL: cannot derive the --candidate-migration SEED release — no published v* release pins the floor engine $GUIDED_STAMP_VERSION. Set NEXUS_SEED_RELEASE to a released conexus version that pins engine-service-v$GUIDED_STAMP_VERSION." >&2
+  exit 2
+}
+SEED_RELEASE=""
+if [ "$CANDIDATE_MIGRATION" = 1 ]; then
+  SEED_RELEASE="${NEXUS_SEED_RELEASE:-$(_derive_seed_release)}"
+  [ -n "$SEED_RELEASE" ] || exit 2
+  SEED_PIN="$(_engine_tuple_at_release "$SEED_RELEASE" || true)"
+  [ "$SEED_PIN" = "$GUIDED_STAMP_VERSION" ] || {
+    echo "FATAL: SEED release v$SEED_RELEASE pins engine '${SEED_PIN:-<unreadable>}', not the floor $GUIDED_STAMP_VERSION this leg provisions — the seeding client must be the release that pins the floor (nexus-z0o2p.42)." >&2
+    exit 2
+  }
+  echo "[run.sh] --candidate-migration SEED release: conexus==$SEED_RELEASE (pins engine-service-v$SEED_PIN; seeds through the floor, then upgrades to the working-tree wheel at the swap)"
+fi
+
 # --guided: stamp release.properties so the native binary reports a release
 # version (an unstamped build -> release_version=null -> version-pin fail-closes,
 # which is not the success path this MVV exercises). Force a native rebuild so
@@ -1006,11 +1044,12 @@ elif [ "$CANDIDATE_MIGRATION" = 1 ]; then
   # nexus-z0ylb: BOTH staging shapes at once — the native/ candidate (like
   # the default/--shakeout path: the locally-built, now-stamped -Ob binary,
   # hand-swapped in at Stage 4) AND the working-tree
-  # wheel under its own subdirectory (like --era-hop/--package-upgrade:
-  # installed via `uv tool install` at runtime, never
-  # colliding with anything `pip`/`uv` resolves from real PyPI — this leg
-  # installs no OLD release at all, so there is nothing to collide with,
-  # but the own-subdirectory convention is kept for staging uniformity).
+  # wheel under its own subdirectory (like --era-hop/--package-upgrade).
+  # nexus-z0o2p.42: the wheel is NOT the seeding client any more — Stages 1-3
+  # run the RELEASED conexus ($SEED_RELEASE, real PyPI) that pins the floor, and
+  # this wheel is installed over it only at the candidate swap (the real user
+  # upgrade path). The own-subdirectory convention keeps it from colliding
+  # with that PyPI install.
   # No engine artifact of any kind travels in — the FLOOR engine is
   # acquired for real by `nx daemon service install-binary` inside the
   # container (Stage 2).
@@ -1154,6 +1193,10 @@ if [ "$STRANDED" = 1 ]; then
 fi
 if [ "$CANDIDATE_MIGRATION" = 1 ]; then
   run_env+=(-e "FLOOR_VERSION=$GUIDED_STAMP_VERSION")
+  # nexus-z0o2p.42: the released client that seeds through the floor, and the
+  # uv HTTP timeout its PyPI install needs (same reason as --package-upgrade:
+  # this -e list is the only channel into the container).
+  run_env+=(-e "SEED_RELEASE=$SEED_RELEASE" -e "UV_HTTP_TIMEOUT=${UV_HTTP_TIMEOUT:-300}")
   # nexus-z0ylb: optional non-vacuity knob — when set, the leg asserts the
   # changeset delta EQUALS this count instead of merely reporting it. Only
   # forwarded when actually set (same "dead through the only documented

@@ -84,6 +84,12 @@ printf 'release_version=\nbuild_ref=\nname=nexus\n' > "$repo/$props_rel"
 git -C "$repo" init -q
 git -C "$repo" -c user.email=test@test -c user.name=test add -A
 git -C "$repo" -c user.email=test@test -c user.name=test commit -q -m init
+# nexus-z0o2p.42: --candidate-migration derives its SEED release from release
+# tags (the newest one whose pinned engine equals the floor), so the fixture
+# carries one: v1.0.0 pins the same engine (9.9.9) as the tree, which makes it
+# the derived seed. Without a tag the leg refuses before it reaches the code
+# these tests probe.
+git -C "$repo" -c user.email=test@test -c user.name=test tag v1.0.0
 
 DOCKER_CALLS="$WORKDIR/docker-calls"
 UV_CALLS="$WORKDIR/uv-calls"
@@ -131,6 +137,15 @@ run_a() {
     NX_BUILD_LEASE_WAIT="${1:-10}" \
     bash "$repo/tests/e2e/migration-rehearsal/run.sh" --candidate-migration
 }
+
+echo "Test 0 (nexus-z0o2p.42): a SEED release that does not pin the floor refuses before any build"
+out0="$(env -i NX_NO_TELEMETRY=1 PATH="$WORKDIR/bin:/usr/bin:/bin:/usr/local/bin" HOME="$HOME" \
+    TMPDIR="${TMPDIR:-/tmp}" NEXUS_PREV_RELEASE=1.0.0 NEXUS_PREV_ENGINE_TAG=engine-service-v0.0.1 \
+    NEXUS_SEED_RELEASE=9.9.9 NX_BUILD_LEASE_WAIT=5 \
+    bash "$repo/tests/e2e/migration-rehearsal/run.sh" --candidate-migration 2>&1)"; rc0=$?
+[[ $rc0 -eq 2 ]] && ok "refused with rc 2" || bad "expected rc 2, got $rc0: $out0"
+[[ "$out0" == *"SEED release v9.9.9 pins engine"* ]] && ok "refusal names the seed release and its pin" || bad "no seed-pin refusal text: $out0"
+[[ ! -s "$DOCKER_CALLS" && ! -s "$UV_CALLS" ]] && ok "no docker or uv invoked" || bad "docker/uv invoked before the seed check"
 
 echo "Test 1: pre-dirtied release.properties refuses before any build"
 printf 'release_version=9.9.8\nbuild_ref=abandoned-B\nname=nexus\n' > "$repo/$props_rel"

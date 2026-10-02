@@ -61,8 +61,11 @@ Must end `PASSED`. A fix that is on develop does not ride a tag placed on an old
 > cut touches stranded_install.py or the migration-rehearsal harness),
 > `--candidate-migration` (nexus-z0ylb: the locally-built CANDIDATE
 > engine's full Liquibase walk over a POPULATED store — provisions the
-> PUBLISHED FLOOR engine for real, populates through it (content + catalog
-> manifests + a real taxonomy-discovery pass), hand-swaps the candidate
+> PUBLISHED FLOOR engine for real, populates through it with the RELEASED
+> conexus that pins the floor, installed from PyPI (content + catalog
+> manifests + a real taxonomy-discovery pass; a working-tree client newer than
+> the floor refuses it, nexus-z0o2p.42), upgrades the client to the working-tree
+> wheel at the swap, hand-swaps the candidate
 > binary in with the provenance sidecar's tag/version kept pinned at the
 > floor (HARNESS bookkeeping, not a production technique — a real release
 > `install-binary`'s an honest sidecar at download time; this rewrite only
@@ -176,7 +179,7 @@ tuples-003 + nexus-8zoyp).** Stage 3h seeds `nexus.tuples` through the
 FLOOR engine before the swap: mailbox rows in every claim state
 (unclaimed, claimed-and-left, consumed with and without a reply,
 dead-lettered via 3 claim/nack cycles), an over-4096-byte body (written
-past the working-tree client's own mirrored 4096-byte pre-check, when
+past the seeding (released) client's own mirrored 4096-byte pre-check, when
 the floor enforces no size limit; a floor from v0.1.118 on refuses it with
 TooLarge, which the leg asserts in place of the over-cap checks), an
 exactly-4096-byte body, and
