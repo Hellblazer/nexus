@@ -1985,7 +1985,7 @@ nx t3 quarantine restore --collection NAME (--chash HEX ... | --audit-id N | --q
 
 Moves chunks from a collection's `quarantine-` sibling back to the collection (RDR-192 Step 9 Day-2, beads nexus-2x9xa and nexus-wbfpw.49), through the engine route `POST /v1/vectors/gc/quarantine-restore`. It is the way back for a chunk the engine reaper moved wrongly. That chunk has no manifest row (a manifest defect is why the reaper took it), and the only other restore, `gc_restore_rereferenced` (run by `nx index repo`), needs a manifest row in the collection naming the chunk, so before this verb the recovery was hand SQL against the `gc_audit` chash list. The step-by-step procedure, with what to do about a chunk that comes back hidden, is [Getting a chunk back](operations/engine-reaper.md#getting-a-chunk-back) in the reaper runbook.
 
-`--collection` is the collection the chunks were quarantined FROM, not the sibling; the verb finds the sibling from the collection's catalog row. Name the chunks one of three ways, exactly one:
+`--collection` is the collection the chunks were quarantined FROM, not the sibling; the engine finds the sibling itself, from the collection's name and from the chunks' own `origin_collection` tag, never from the collection's catalog row (which disagrees with the name for repo collections since catalog-044, nexus-wbfpw.55), and the output names every quarantine collection it looked in. Name the chunks one of three ways, exactly one:
 
 | Source | What it takes | Use it when |
 |--------|---------------|-------------|
@@ -3771,6 +3771,15 @@ green and says "not applicable" when the engine cannot be reached or predates th
 refusal. The row warns from since-boot totals and cannot clear after the cause is
 fixed until the engine restarts. The order of operations for the cloud engine is
 [`docs/operations/ownerless-write-cutover.md`](operations/ownerless-write-cutover.md).
+
+**Engine reaper (nexus-wbfpw.56).** `nx doctor`'s "Engine reaper" row reads the `reaper`
+object of `GET /v1/status`: `last_completed_pass_at`, the time the engine's chunk reaper
+last finished a pass, and `interval_seconds`. It warns when the last pass is older than three
+intervals plus two minutes, and when an engine more than that old has made none. A pass that
+died does not move the time, and a pass with nothing to move writes no `gc_audit` row, so this
+is the one durable sign that the reaper is alive (a cloud operator has no engine log). The row
+is green and says "not applicable" when the engine cannot be reached (a box with no engine),
+predates the field, or runs with the reaper off (`NX_REAPER_ENABLED=false`).
 
 **Restart after the ownerless-write release.** The engine in this release refuses a chunk
 write that no document owns, and a local install enforces from the first boot of the
