@@ -326,10 +326,22 @@ def _expire_client_quarantine(t3_db, collection: str, qname: str, *, moved: int)
         raise click.exceptions.Exit(1) from exc
     if expiry is not None:
         expired, refused = expiry
+        # The engine's `refused` is two things: chunks the origin collection's manifest references
+        # again (kept always; FORCE does not reach them) plus, when the floor fires, the whole eligible
+        # set (the engine then reports expired = 0). So expired > 0 means the floor did not fire and
+        # every refusal is a manifest keep; expired == 0 cannot tell the two apart.
+        if not refused:
+            why = ""
+        elif expired:
+            why = " (kept: the manifest references them again; NX_GC_FORCE=1 does not change that)"
+        else:
+            why = (
+                " (kept: the manifest references them again, or the NX_GC_FLOOR_FRACTION floor held the "
+                "whole expiry; NX_GC_FORCE=1 overrides only the floor)"
+            )
         click.echo(
             f"  Client expiry of {qname} (older than {quarantine_days()} day(s), rows the engine's "
-            f"reaper tagged excluded): {expired} expired, {refused} refused by the NX_GC_FLOOR_FRACTION "
-            f"floor{' (NX_GC_FORCE=1 overrides)' if refused else ''}."
+            f"reaper tagged excluded): {expired} expired, {refused} refused{why}."
         )
 
 

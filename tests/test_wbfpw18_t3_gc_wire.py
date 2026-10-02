@@ -738,12 +738,29 @@ def test_the_client_expiry_honours_the_gc_environment(runner, real_client, monke
     assert abs((datetime.now(UTC) - timedelta(days=3)) - cutoff) < timedelta(minutes=5)
 
 
-def test_an_expiry_refused_by_the_floor_is_reported_not_hidden(runner, real_client, monkeypatch):
+def test_an_expiry_that_expired_nothing_names_both_things_that_can_refuse(runner, real_client, monkeypatch):
+    """expired = 0 with refused > 0 cannot tell a floor refusal from manifest keeps, so the line names
+    both and says FORCE overrides only the floor."""
     monkeypatch.delenv("NX_GC_FORCE", raising=False)
     engine = _Engine(total=10, reapable=[1], expire={"expired": 0, "refused": 120})
     result = _invoke(runner, real_client, engine, ["--no-dry-run", "--yes"])
     assert result.exit_code == 0, result.output
-    assert "0 expired, 120 refused" in result.output and "NX_GC_FORCE=1 overrides" in result.output
+    assert "0 expired, 120 refused" in result.output
+    assert "the manifest references them again, or the NX_GC_FLOOR_FRACTION floor" in result.output
+    assert "NX_GC_FORCE=1 overrides only the floor" in result.output
+
+
+def test_a_refusal_next_to_an_expiry_is_a_manifest_keep_not_the_floor(runner, real_client, monkeypatch):
+    """The engine reports expired = 0 when the floor fires, so expired > 0 with refused > 0 means the
+    floor did not fire: those chunks were kept because the manifest references them again, which
+    NX_GC_FORCE does not change. The line must not blame the floor or offer FORCE for them."""
+    monkeypatch.delenv("NX_GC_FORCE", raising=False)
+    engine = _Engine(total=10, reapable=[1], expire={"expired": 4, "refused": 2})
+    result = _invoke(runner, real_client, engine, ["--no-dry-run", "--yes"])
+    assert result.exit_code == 0, result.output
+    assert "4 expired, 2 refused (kept: the manifest references them again" in result.output
+    assert "NX_GC_FORCE=1 does not change that" in result.output
+    assert "FLOOR_FRACTION floor" not in result.output.split("Client expiry of", 1)[1].split("\n", 1)[0]
 
 
 def test_a_failed_expiry_after_a_good_move_exits_one_and_says_the_move_stands(runner, real_client):
