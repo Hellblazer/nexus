@@ -179,7 +179,11 @@ jobs:
           # directory that is searchable but not listable (mode 0711) with a
           # world-readable config.yml in it counts 0 there while `cat` succeeds by
           # name. That one file is therefore tested by name as well (round-4 review L1).
-          readable="$(find "$cfg" -type f -readable 2>/dev/null | wc -l | tr -d ' ')"
+          # The runner shell is `bash -eo pipefail`: a find that cannot descend into
+          # an unlistable directory exits non-zero, and without the guard that
+          # status ended the step silently (rc 1, no message) whether or not a file
+          # was readable. The guard keeps whatever find did count.
+          readable="$({ find "$cfg" -type f -readable 2>/dev/null || true; } | wc -l | tr -d ' ')"
           if [ "$readable" -eq 0 ] && [ -r "$cfg/config.yml" ]; then
             readable=1
           fi

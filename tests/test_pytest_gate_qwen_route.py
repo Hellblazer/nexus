@@ -298,21 +298,30 @@ def test_the_qwen_job_prints_no_account_name_group_list_mode_or_owner() -> None:
 
 
 def test_the_lease_step_failure_message_names_no_user_mode_owner_or_group(tmp_path: Path) -> None:
+    """Hermetic: the account name is INJECTED (a stub `id`/`whoami`/`logname` on PATH plus USER/LOGNAME).
+
+    The step's fixed wording says "the runner user"; asserting on the host's real account name breaks when that
+    account is itself named `runner` (GitHub's hosted runner), so the name here is one no fixed text can contain.
+    """
+    acct = "zz-probe-acct-7"
+    bin_dir = tmp_path / "idbin"
+    bin_dir.mkdir()
+    for tool in ("id", "whoami", "logname"):
+        stub = bin_dir / tool
+        stub.write_text(f"#!/bin/sh\necho {acct}\n")
+        stub.chmod(0o755)
     root = tmp_path / "lease"
     root.mkdir()
     os.chmod(root, 0o555)
     try:
-        proc, _ = _lease(tmp_path, root)
+        proc, _ = _lease(tmp_path, root, PATH=f"{bin_dir}:/usr/bin:/bin", USER=acct, LOGNAME=acct)
     finally:
         os.chmod(root, 0o755)
     if os.geteuid() == 0:
         pytest.skip("root can write anywhere, so the refusal cannot be observed")
     out = proc.stdout + proc.stderr
     assert proc.returncode == 1 and "cannot create entries" in out
-    import getpass
-
-    me = getpass.getuser()
-    assert not (len(me) >= 4 and me in out.replace(str(tmp_path), "<tmp>")), "the account name must not be printed"
+    assert acct not in out, "the account name must not be printed"
     assert "mode " not in out and "owner" not in out and "groups of" not in out
 
 
@@ -733,7 +742,10 @@ def test_the_docs_give_the_enable_sequence_in_order_and_the_rerun_caveat() -> No
         assert "gh variable set QWEN_CI_PUSH_RUNNER --body qwen-linux" in text
         assert "Re-run failed jobs" in text
     assert "runner-probe/qwen-<date>" in contributing and "default branch" in contributing
-    assert "Probe run record: none yet" in agents, "the run id is recorded here when the probe has run green"
+    # the record carries a numeric run id and the NOT-CHECKED caveat (a run that never read the credentials is no pass)
+    record = re.search(r"\*\*Probe run record: run (\d{8,}), green", agents)
+    assert record, "the green probe run id is recorded here"
+    assert "`NOT CHECKED` on the credential line is not a pass" in " ".join(agents.split())
     assert "EVERY owner push to develop whose diff is not doc-only" in agents, "the scope claim is not 'merges touching ci.yml'"
 
 

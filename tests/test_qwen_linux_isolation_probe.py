@@ -6,7 +6,6 @@ its shape are pinned here; the steps that can run anywhere are executed.
 """
 from __future__ import annotations
 
-import getpass
 import os
 import re
 import shutil
@@ -48,6 +47,20 @@ def _run(step: dict, env: dict[str, str] | None = None) -> subprocess.CompletedP
 
 OWNER = "Hellblazer"
 OWNER_ID = "1234"
+
+# A name no fixed wording in a step can contain. The steps say "the runner user", so asserting on the HOST's real
+# account (GitHub's hosted runner is literally named `runner`) false-matches; the account is injected instead.
+ACCT = "zz-probe-acct-7"
+
+
+def _fake_id(tmp_path: Path, name: str = ACCT, groups: str = f"{ACCT} docker") -> str:
+    """A PATH whose `id` reports an injected account and group list, ahead of the real tools (never the host's identity)."""
+    bin_dir = tmp_path / "idbin"
+    bin_dir.mkdir(exist_ok=True)
+    stub = bin_dir / "id"
+    stub.write_text(f'#!/bin/sh\ncase "$*" in\n  -un) echo {name} ;;\n  -nG) echo {groups} ;;\n  *) exit 2 ;;\nesac\n')
+    stub.chmod(0o755)
+    return f"{bin_dir}:/usr/bin:/bin"
 
 
 class _GhStr(str):
@@ -182,20 +195,22 @@ def test_the_identity_step_asserts_exactly_the_runner_user_ghci() -> None:
     assert re.search(r'\[ "\$user" != "\$expected" \]', run), "a different user, nxtest and root included, must fail"
 
 
-@pytest.mark.skipif(getpass.getuser() == "ghci", reason="this account IS the runner user, so the refusal cannot be observed")
-def test_the_identity_step_fails_for_any_account_that_is_not_ghci() -> None:
-    proc = _run(_step("Identity"))
+def test_the_identity_step_fails_for_any_account_that_is_not_ghci(tmp_path: Path) -> None:
+    proc = _run(_step("Identity"), env={"PATH": _fake_id(tmp_path)})
     assert proc.returncode == 1, (proc.stdout, proc.stderr)
-    assert "does not run as the runner user" in proc.stdout and getpass.getuser() not in proc.stdout.split()
+    assert "does not run as the runner user" in proc.stdout and ACCT not in proc.stdout + proc.stderr
 
 
-def test_the_identity_step_passes_when_the_account_is_the_expected_one_and_reports_docker_membership() -> None:
-    """The positive half: repoint `expected` at this account, as the host's runner user would match it."""
-    run = _step("Identity")["run"].replace("expected=ghci\n", f"expected={getpass.getuser()}\n")
-    proc = _run({"run": run})
+@pytest.mark.parametrize(("groups", "needle"), [(f"{ACCT} docker", "docker group: member"),
+                                                 (f"{ACCT} users", "docker group: not a member")])
+def test_the_identity_step_passes_when_the_account_is_the_expected_one_and_reports_docker_membership(
+        tmp_path: Path, groups: str, needle: str) -> None:
+    """The positive half: repoint `expected` at the injected account, as the host's runner user would match it."""
+    run = _step("Identity")["run"].replace("expected=ghci\n", f"expected={ACCT}\n")
+    proc = _run({"run": run}, env={"PATH": _fake_id(tmp_path, groups=groups)})
     assert proc.returncode == 0, (proc.stdout, proc.stderr)
-    assert "docker group:" in proc.stdout and "runs as the runner user (expected)" in proc.stdout
-    assert "groups=" not in proc.stdout and getpass.getuser() not in proc.stdout.split()
+    assert needle in proc.stdout and "runs as the runner user (expected)" in proc.stdout
+    assert "groups=" not in proc.stdout and ACCT not in proc.stdout + proc.stderr
 
 
 def _fake_docker(tmp_path: Path, exit_code: int) -> str:
@@ -373,7 +388,12 @@ def test_a_path_entry_that_only_resembles_a_drive_is_not_flagged(tmp_path: Path)
 
 
 def _homes_probe(cfg: Path) -> dict:
-    return {"run": _step("Other users' homes")["run"].replace("/home/nexus/.config/nexus", str(cfg))}
+    """The real homes step with its paths pointed at a fixture tree (cfg = <tmp>/home/.config/nexus), never the host's /home."""
+    run = _step("Other users' homes")["run"]
+    assert "for home in /home/nexus /home/nxtest; do" in run
+    run = run.replace("for home in /home/nexus /home/nxtest; do",
+                      f"for home in {cfg.parents[1]}/h-nexus {cfg.parents[1]}/h-nxtest; do")
+    return {"run": run.replace("/home/nexus/.config/nexus", str(cfg))}
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="uses GNU find -readable")
@@ -516,11 +536,9 @@ def test_a_runner_probe_qwen_branch_fires_this_probe_and_no_other_workflow() -> 
     assert _branch_globs_match(["runner-probe/**", "!runner-probe/qwen-*"], "runner-probe/hellmini-2026-10-02")
 
 
-def test_the_homes_step_with_no_nexus_config_reports_and_passes() -> None:
-    """On a host with no /home/nexus (this one, or the hosted runner) there is nothing to read."""
-    if Path("/home/nexus/.config/nexus").is_dir():
-        pytest.skip("this host has a live /home/nexus/.config/nexus")
-    proc = _run(_step("Other users' homes"))
+def test_the_homes_step_with_no_nexus_config_reports_and_passes(tmp_path: Path) -> None:
+    """With no nexus config directory there is nothing to read (a fixture tree, not this host's /home)."""
+    proc = _run(_homes_probe(tmp_path / "nohome" / ".config" / "nexus"))
     assert proc.returncode == 0, (proc.stdout, proc.stderr)
     assert "REPORT" in proc.stdout and "NOT CHECKED" in proc.stdout
 
@@ -551,20 +569,18 @@ def test_the_public_log_carries_no_modes_owners_or_user_names_from_any_step() ->
 
 
 def test_no_step_prints_the_account_name_it_runs_as(tmp_path: Path) -> None:
-    """Dynamic twin of the source scan: run every step this host can and look for the account name in the output."""
-    me = getpass.getuser()
-    if len(me) < 4 or me in {"root", "nobody"}:
-        pytest.skip("this account name is ordinary prose in the reports (docker = root), so its absence proves nothing")
+    """Dynamic twin of the source scan: run every step against an INJECTED account and look for its name in the output."""
+    fake = _fake_id(tmp_path)
     outputs = []
-    ident = _step("Identity")["run"].replace("expected=ghci\n", f"expected={me}\n")
-    outputs.append(_run({"run": ident}))
-    outputs.append(_run({"run": ident.replace(f"expected={me}", "expected=somebody-else")}))
-    outputs.append(_run(_step("Passwordless sudo")))
-    outputs.append(_run(_step("Other users' homes")))
+    ident = _step("Identity")["run"].replace("expected=ghci\n", f"expected={ACCT}\n")
+    outputs.append(_run({"run": ident}, env={"PATH": fake}))
+    outputs.append(_run({"run": ident.replace(f"expected={ACCT}", "expected=somebody-else")}, env={"PATH": fake}))
+    outputs.append(_run(_step("Passwordless sudo"), env={"PATH": fake}))
+    cfg = tmp_path / "home" / ".config" / "nexus"
+    cfg.mkdir(parents=True)
+    outputs.append(_run(_homes_probe(cfg), env={"PATH": fake}))
     outputs.append(_run(_step("Docker reachability"), env={"PATH": _fake_docker(tmp_path, 0)}))
-    outputs.append(_windows_run(tmp_path))
+    outputs.append(_windows_run(tmp_path, path=fake))
+    assert len(outputs) == 6 and all(p.stdout for p in outputs), "non-vacuity: every step produced output to inspect"
     for proc in outputs:
-        # the fake /mnt root is under this test's tmp dir, which can carry the account name; production's is /mnt
-        text = (proc.stdout + proc.stderr).replace(str(tmp_path), "<tmp>")
-        assert me not in text
-
+        assert ACCT not in proc.stdout + proc.stderr
