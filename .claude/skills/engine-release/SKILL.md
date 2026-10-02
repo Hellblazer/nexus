@@ -201,7 +201,26 @@ dead-lettered row's `claim_state`/`attempts` shape matches what the
 sweep's own release/purge arms key their `WHERE` clauses on), not by
 observing a scheduled pass execute.
 
-It structurally CANNOT catch four classes, by construction of what this leg
+**Seed generation and what runs after the walk (bead nexus-z0o2p.42).**
+Stages 1-3 run a RELEASED client from real PyPI, the way production was
+seeded: `run.sh` picks the newest release tag whose pinned engine is at or
+below the floor and whose version is at or below the tree's own
+(`NEXUS_SEED_RELEASE` overrides it under the same two rules; the leg refuses
+loudly otherwise, naming `git fetch --tags` when no tag is visible). A pin
+below the floor (a paired client release, whose new engine no published
+release pins yet) is selected with a notice, and the leg installs the floor
+engine explicitly and re-reads the sidecar and `/version` after population.
+Stage 4 reinstalls the working-tree wheel, byte-compared against the installed
+package. Stage 5 reads the pending upgrade rungs BEFORE `nx upgrade` and
+asserts they are only rungs the seed release did not know (an upgrade repairs
+rung state, so a candidate boot that regressed state a rung probes would
+otherwise be repaired unseen), then runs `nx upgrade` and asserts the
+`rdr192-manifest-backfill` completion record in `nexus.ladder_completions`
+and that `nx t3 census-manifest-less` reports `scope_chunk_total` equal to the
+SQL chunk count of a collection that holds one chunk named by two documents'
+manifests (the nexus-wbfpw.60 shape).
+
+It structurally CANNOT catch five classes, by construction of what this leg
 seeds:
 - **Cross-shard PK collision** (the "cross-shard collision" `DO $$` guards
   that vectors-004/taxonomy-007-style changesets carry) — this leg seeds
@@ -223,6 +242,11 @@ seeds:
   (2026-09-13). tuples-003's DELETE and VALIDATE and tuples-004's
   consumed-body UPDATE scan the whole table; their lock duration at real
   volume is the PITR-fork walk's to measure, not this leg's.
+- **State older than, or shaped by generations other than, the seed
+  release**: the store is one client generation's output through one engine
+  generation, about 190 rows, not the cumulative, many-times-rewritten state
+  of production. Earlier-era chunk metadata and duplicate
+  `databasechangelog` rows are absent; the PITR-fork walk finds those.
 
 This is strictly stronger than the `--guided` gate it replaces. It performs the
 same native-image build — the `-Ob` quick build has the SAME reachability

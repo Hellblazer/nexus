@@ -335,41 +335,79 @@ fi
 }
 
 # nexus-z0o2p.42: --candidate-migration's SEED release. Stages 1-3 (provision the
-# floor engine, populate it) must run the RELEASED client that pins the floor,
-# the way production was seeded: a working-tree client newer than the floor
-# refuses it (EngineOlderThanClientError on every write) the moment develop
-# carries a client half the floor lacks. So the leg installs this release from
-# real PyPI, populates through it, and upgrades to the working-tree wheel only
-# at the candidate swap (the real user upgrade path).
-# SELECTOR: the newest published canonical `v*` release whose
-# REQUIRED_ENGINE_VERSION equals GUIDED_STAMP_VERSION (the floor this leg
-# provisions). Unlike _derive_prev_release the tree's own version is NOT
-# excluded: a tree that is itself the newest release pinning the floor is
-# exactly the seed. Override with NEXUS_SEED_RELEASE; an override that does not
-# pin the floor, and a derivation that finds nothing, both fail loud (a seed
-# release that pins a different engine would re-open the refusal this exists
-# to avoid, or seed through an engine the floor does not match).
+# floor engine, populate it) must run a RELEASED client, the way production was
+# seeded: a working-tree client newer than the floor refuses it
+# (EngineOlderThanClientError on every write) the moment develop carries a
+# client half the floor lacks. So the leg installs this release from real PyPI,
+# populates through it, and upgrades to the working-tree wheel only at the
+# candidate swap (the real user upgrade path).
+# SELECTOR (round 2): the newest release `v*` TAG whose pinned engine is <= the
+# floor this leg provisions (GUIDED_STAMP_VERSION) AND whose version is <= the
+# tree's own version. Two shapes, both legitimate:
+#   * pin == floor: the ordinary case (the tree is a release or a successor of
+#     one that pins the floor).
+#   * pin <  floor: a PAIRED client release, where the tree's floor is the NEW
+#     engine that no published release pins yet. An older client against a
+#     newer engine is the safe direction (the refusal this leg exists to avoid
+#     is a NEWER client against an OLDER engine), so it is selected with a loud
+#     notice. The leg installs the floor engine EXPLICITLY (install-binary of
+#     the floor tag) whatever the seed client pins, and asserts the sidecar and
+#     /version still name the floor after population, so an older client that
+#     quietly converged the engine down would fail the leg rather than seed the
+#     wrong engine.
+# A release newer than the tree is never selected (a backport tree must not be
+# seeded by a client newer than itself); the tree's own version IS allowed.
+# NEXUS_SEED_RELEASE overrides the derivation and must obey the same two rules,
+# failing loud otherwise.
+# These are git TAGS, not a PyPI listing: a tag whose publish failed is
+# selectable and fails loud at Stage 1's `uv tool install`; a box that never
+# fetched tags (a fetch-only remote) sees none, which the FATAL names.
+# (No pipe into head/grep -q here: under pipefail the producer's SIGPIPE can be promoted over the consumer's status.)
+_ver_le() { local sorted; sorted="$(sort -V <<<"$1"$'\n'"$2")"; [ "${sorted%%$'\n'*}" = "$1" ]; }
+_self_version() { sed -n '/^version = "/{s/^version = "\(.*\)"/\1/;p;q;}' "$(pwd)/pyproject.toml" 2>/dev/null; }
+# Echoes the reason when $1 does NOT qualify as a seed; echoes nothing when it does.
+_seed_refusal() {
+  local rel="$1" self pin
+  self="$(_self_version)"
+  [ -n "$self" ] || { echo "cannot read the tree's own version from pyproject.toml"; return 0; }
+  pin="$(_engine_tuple_at_release "$rel" || true)"
+  [ -n "$pin" ] || { echo "v$rel has no readable REQUIRED_ENGINE_VERSION (is the tag fetched? try: git fetch --tags)"; return 0; }
+  _ver_le "$pin" "$GUIDED_STAMP_VERSION" \
+    || { echo "v$rel pins engine $pin, NEWER than the floor $GUIDED_STAMP_VERSION this leg provisions (a client newer than its engine is the refusal this seed exists to avoid)"; return 0; }
+  _ver_le "$rel" "$self" \
+    || { echo "v$rel is newer than this tree's own version $self (a backport tree must not be seeded by a client newer than itself)"; return 0; }
+  return 0
+}
+_seed_qualifies() { [ -z "$(_seed_refusal "$1")" ]; }
 _derive_seed_release() {
-  local rel tuple
+  local rel
   for rel in $(git tag -l 'v[0-9]*' \
                | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sed 's/^v//' | sort -V \
                | awk '{a[NR]=$0} END{for(i=NR;i>=1;i--) print a[i]}'); do
-    tuple="$(_engine_tuple_at_release "$rel" || true)"
-    [ "$tuple" = "$GUIDED_STAMP_VERSION" ] && { printf '%s' "$rel"; return 0; }
+    if _seed_qualifies "$rel"; then printf '%s' "$rel"; return 0; fi
   done
-  echo "FATAL: cannot derive the --candidate-migration SEED release — no published v* release pins the floor engine $GUIDED_STAMP_VERSION. Set NEXUS_SEED_RELEASE to a released conexus version that pins engine-service-v$GUIDED_STAMP_VERSION." >&2
+  echo "FATAL: cannot derive the --candidate-migration SEED release — no release tag has a pinned engine <= the floor $GUIDED_STAMP_VERSION and a version <= this tree's own. Release tags may be unfetched on this box: run 'git fetch --tags' and retry, or set NEXUS_SEED_RELEASE to a released conexus version that qualifies." >&2
   exit 2
 }
 SEED_RELEASE=""
+SEED_PIN=""
 if [ "$CANDIDATE_MIGRATION" = 1 ]; then
-  SEED_RELEASE="${NEXUS_SEED_RELEASE:-$(_derive_seed_release)}"
+  if [ -n "${NEXUS_SEED_RELEASE:-}" ]; then
+    SEED_RELEASE="$NEXUS_SEED_RELEASE"
+    _seed_why="$(_seed_refusal "$SEED_RELEASE")"
+    [ -z "$_seed_why" ] || {
+      echo "FATAL: NEXUS_SEED_RELEASE=$SEED_RELEASE refused: $_seed_why (nexus-z0o2p.42)." >&2
+      exit 2
+    }
+  else
+    SEED_RELEASE="$(_derive_seed_release)" || exit 2
+  fi
   [ -n "$SEED_RELEASE" ] || exit 2
   SEED_PIN="$(_engine_tuple_at_release "$SEED_RELEASE" || true)"
-  [ "$SEED_PIN" = "$GUIDED_STAMP_VERSION" ] || {
-    echo "FATAL: SEED release v$SEED_RELEASE pins engine '${SEED_PIN:-<unreadable>}', not the floor $GUIDED_STAMP_VERSION this leg provisions — the seeding client must be the release that pins the floor (nexus-z0o2p.42)." >&2
-    exit 2
-  }
-  echo "[run.sh] --candidate-migration SEED release: conexus==$SEED_RELEASE (pins engine-service-v$SEED_PIN; seeds through the floor, then upgrades to the working-tree wheel at the swap)"
+  echo "[run.sh] --candidate-migration SEED release: conexus==$SEED_RELEASE (pins engine-service-v$SEED_PIN; seeds through the floor engine-service-v$GUIDED_STAMP_VERSION, then upgrades to the working-tree wheel at the swap)"
+  if [ "$SEED_PIN" != "$GUIDED_STAMP_VERSION" ]; then
+    echo "[run.sh] NOTE: seed release v$SEED_RELEASE pins engine $SEED_PIN, BELOW the floor $GUIDED_STAMP_VERSION (no published release pins the floor yet: a paired client release). An older client against a newer engine is the safe direction; the leg installs the floor engine explicitly and asserts it is still the floor after population."
+  fi
 fi
 
 # --guided: stamp release.properties so the native binary reports a release

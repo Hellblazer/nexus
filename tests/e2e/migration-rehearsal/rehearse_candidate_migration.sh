@@ -50,17 +50,36 @@
 #            the leg without saying so.
 #   Stage 5  start; assert healthy — the candidate's FULL Liquibase pass
 #            over the populated store. Assert the changeset delta, EXACT
-#            row invariants, and that reads/writes/search still serve; then
+#            row invariants, and that reads/writes/search still serve. Read
+#            the pending upgrade rungs BEFORE `nx upgrade` and assert they are
+#            only rungs the seed release did not know (an `nx upgrade` repairs
+#            rung state, so a candidate boot that regressed state a rung
+#            probes would otherwise be repaired before anything looked); then
 #            run `nx upgrade` with the working-tree client (the user's verb
 #            after a package move; nexus-z0o2p.42) and assert nx doctor clean.
 #
-# COVERAGE NOTE (nexus-z0o2p.42): the population Stage 3 writes is the
-# RELEASED client's output through the FLOOR engine, which is exactly what a
-# production store holds at upgrade time. Every post-walk assert reads rows by
-# SQL or through the working-tree client after the upgrade; none depends on the
-# seeding client being the working tree. This leg therefore also exercises that
-# a store the release wrote is read, searched and written by the working-tree
-# client against the candidate.
+# STAGE 3 CONTRACT (nexus-z0o2p.42 round 2): every Stage 3 heredoc and `nx`
+# call runs against the SEED (released) client, and every Stage 5 one against
+# the working-tree client. A Stage 3 heredoc may therefore use only surface
+# the seed release also has (HttpTupleStore._post, the tuple/store CLI flags);
+# a private-API refactor between the seed and the tree breaks Stage 3 and
+# nothing else says so.
+#
+# COVERAGE NOTE (nexus-z0o2p.42): the population Stage 3 writes is ONE client
+# generation's output (the seed release) through ONE engine generation (the
+# floor). It is closer to production than a working-tree-seeded store, but it is
+# not what a production store holds: that is the cumulative output of many
+# client versions through many engines, rewritten by every earlier changeset,
+# with an aged databasechangelog. What it does not cover: earlier-era chunk
+# metadata shapes, duplicate DATABASECHANGELOG rows, and any state older than
+# the seed release (the 13 duplicate-row shape and the shared-chash census bug
+# of nexus-wbfpw.60 were both found only on a fork of production). Stage 3a
+# seeds one chash shared by two documents because that shape escaped this leg
+# once. Every post-walk assert reads rows by SQL or through the working-tree
+# client after the upgrade; none depends on the seeding client being the
+# working tree. This leg therefore also exercises that a store the release wrote
+# is read, searched and written by the working-tree client against the
+# candidate.
 #
 # COVERAGE (substantive-critic finding, 2026-08-14, T2
 # nexus/critique-nexus-z0ylb-candidate-migration-rehearsal-2026-08-14
@@ -76,7 +95,7 @@
 # checksum/row-count integrity (Liquibase's own checksum re-validation,
 # plus this leg's EXACT row-invariant asserts).
 #
-# It structurally CANNOT catch four classes, by construction of what this
+# It structurally CANNOT catch five classes, by construction of what this
 # leg seeds:
 #   (a) CROSS-SHARD PK COLLISION (the vectors-004/taxonomy-007-style
 #       "cross-shard (tenant_id, collection, ...) collision" DO $$ guard
@@ -104,6 +123,13 @@
 #       tuples-004's consumed-body UPDATE scan the whole table, so their
 #       lock duration at real volume is measured by the pre-deploy walk
 #       against a PITR fork of production, not here.
+#   (e) STATE OLDER THAN, OR SHAPED BY GENERATIONS OTHER THAN, THE SEED
+#       RELEASE (nexus-z0o2p.42 round 2): one client generation through one
+#       engine generation, about 190 rows. No earlier-era chunk metadata
+#       shapes, no duplicate DATABASECHANGELOG rows, nothing a changeset older
+#       than the floor rewrote. The shared-chash shape (Stage 3a) is the one
+#       production shape this leg seeds on purpose; the rest is the PITR-fork
+#       walk's to find.
 #
 # Row invariants captured span T3 (chunks, catalog manifest/documents,
 # taxonomy centroids/assignments) — the chunk-migration surface this leg
@@ -193,6 +219,23 @@ SEED_CLIENT_VER=""
   || bad "nx --version reports '${SEED_CLIENT_VER:-?}', expected the seed release $SEED_RELEASE"
 TOOLPY="$HOME/.local/share/uv/tools/conexus/bin/python"
 [ -x "$TOOLPY" ] || { bad "no python at $TOOLPY"; say "ABORT"; exit 1; }
+# The upgrade-ladder rungs the SEED release knows, read from its own registry.
+# Stage 5 asserts that every rung pending before `nx upgrade` is one the seed
+# did not know. A release without the module (or without default_registry)
+# knows none, so the set is empty and every tree rung counts as new.
+_ladder_rungs() {
+  "$TOOLPY" - <<'PYEOF' 2>/dev/null | sed -n 's/^RUNG://p' | sort -u
+try:
+    from nexus.upgrade_ladder import registry as r
+    names = [rung.name for rung in r.default_registry()]
+except Exception:
+    names = []
+for n in names:
+    print("RUNG:" + n)
+PYEOF
+}
+SEED_RUNGS="$(_ladder_rungs)"
+note "upgrade rungs the seed release v$SEED_RELEASE knows: ${SEED_RUNGS:-<none>}"
 
 # ── Stage 2: the PUBLISHED FLOOR engine — install for real, provision ────
 say "Stage 2a — install-binary the PUBLISHED FLOOR engine ($FLOOR_TAG)"
@@ -315,6 +358,26 @@ for i in $(seq 1 "$SEED_N"); do
     || bad "nx store put failed for marker note $i"
 done
 ok "seeded $SEED_N marker notes"
+
+# One chunk named by TWO documents' manifests (identical text under two titles
+# collapses to one T3 row by design; the manifest keeps both). This is the shape
+# behind nexus-wbfpw.60: the census's scope_chunk_total counted chunk x
+# own-manifest-row join rows, so a census read on engines <= 0.1.142 over-reports
+# here. Asserted non-vacuous right after seeding, and read back after the walk.
+SHARED_MARKER="candmigsharedchashbody"
+for t in a b; do
+  printf 'candidate-migration rehearsal shared-chash note %s' "$SHARED_MARKER" \
+    | nx store put - --title "candmig-shared-$t" --collection knowledge__candmig >/dev/null 2>&1 \
+    || bad "nx store put failed for shared-chash note $t"
+done
+SHARED_COLLECTION="$(diag_sql "SELECT collection FROM nexus.chunks WHERE chunk_text LIKE '%${SHARED_MARKER}%' LIMIT 1")"
+SHARED_CHUNK_ROWS="$(diag_sql "SELECT count(*) FROM nexus.chunks WHERE chunk_text LIKE '%${SHARED_MARKER}%'")"
+SHARED_MANIFEST_ROWS="$(diag_sql "SELECT count(*) FROM nexus.catalog_document_chunks WHERE chash IN (SELECT chash FROM nexus.chunks WHERE chunk_text LIKE '%${SHARED_MARKER}%')")"
+if [ "$SHARED_CHUNK_ROWS" = 1 ] && [ "$SHARED_MANIFEST_ROWS" = 2 ] && [ -n "$SHARED_COLLECTION" ]; then
+  ok "shared-chash shape seeded: 1 chunk row named by 2 manifest rows in $SHARED_COLLECTION"
+else
+  bad "shared-chash shape NOT seeded (chunk rows='$SHARED_CHUNK_ROWS', manifest rows='$SHARED_MANIFEST_ROWS', collection='$SHARED_COLLECTION'; expected 1, 2) — the census scope assert below would be vacuous"
+fi
 
 say "Stage 3b — index 2 docs-shaped markdown files"
 DOC1=/tmp/candmig-doc-1.md
@@ -780,6 +843,21 @@ for TUPLE_LABEL in "${TUPLE_TENANT_IDS[@]}"; do
   fi
 done
 
+# ── Stage 3 close: the engine the store was populated through is the floor ──
+# The seed client may pin an OLDER engine than the floor (a paired client
+# release: no published release pins the floor yet). Stage 2a installed the
+# floor explicitly; a seed client that converged the engine to ITS pin during
+# population would make this leg seed through the wrong engine, so read the
+# sidecar and the running /version again before the swap.
+say "Stage 3 close — the populated engine is still the floor $FLOOR_TAG"
+SEED_SIDECAR="$SVC_WELL_KNOWN_DIR/nexus-service.meta.json"
+SEED_SIDECAR_VER="$(python3 -c "import json;print(json.load(open('$SEED_SIDECAR')).get('version',''))" 2>/dev/null)"
+[ "$SEED_SIDECAR_VER" = "$FLOOR_VERSION" ] && ok "provenance sidecar still names the floor ($SEED_SIDECAR_VER) after population" \
+  || bad "provenance sidecar names '${SEED_SIDECAR_VER:-?}' after population, expected the floor $FLOOR_VERSION (the seed client converged the engine?)"
+RV_POP="$(_release_version)"
+[ "$RV_POP" = "$FLOOR_VERSION" ] && ok "/version release_version=$RV_POP after population" \
+  || bad "/version release_version='${RV_POP:-?}' after population, expected the floor $FLOOR_VERSION"
+
 # ── Stage 4: stop; hand-swap the CANDIDATE binary; harness bookkeeping ───
 say "Stage 4 — nx daemon service stop (PG stays up: no --with-pg)"
 if nx daemon service stop 2>&1 | tail -6 | sed 's/^/       /'; then
@@ -827,6 +905,10 @@ if [[ "$WHEEL_CMP" == *"RESULT:same="* && "$WHEEL_CMP" == *"different=0 missing=
 else
   bad "the installed package is not the working-tree wheel: $WHEEL_CMP"; say "ABORT"; exit 1
 fi
+TREE_RUNGS="$(_ladder_rungs)"
+# Rungs the working-tree client carries that the seed release did not know.
+NEW_RUNGS="$(comm -13 <(printf '%s\n' "$SEED_RUNGS") <(printf '%s\n' "$TREE_RUNGS") | sed '/^$/d')"
+note "upgrade rungs in the working-tree client: ${TREE_RUNGS:-<none>}; new since the seed: ${NEW_RUNGS:-<none>}"
 
 say "Stage 4 — hand-swap the locally-built CANDIDATE binary into the well-known location"
 CAND_SHA="$(sha256sum "$SVC_NATIVE_DIR/nexus-service" | awk '{print $1}')"
@@ -1053,6 +1135,36 @@ say "Assert — nx upgrade: the user's one verb after a client upgrade, run with
 # of the journey, and every row-invariant assert above has already read the
 # store BEFORE it. It must not re-acquire the floor engine over the candidate:
 # the binary sha and the /version stamp are re-checked right after.
+# Pending rungs BEFORE the upgrade, read by the ladder's own detect() sweep (the
+# same read `nx doctor` renders). `nx upgrade` repairs rung state, so a rung the
+# SEED knew that reads pending here means the candidate boot regressed state it
+# probes, and the post-upgrade doctor assert below could never see it.
+PENDING_PRE_OUT="$("$TOOLPY" - <<'PYEOF' 2>&1
+try:
+    from nexus.upgrade_ladder import registry as r
+    from nexus.upgrade_ladder.runner import pending_rungs
+    for name, status in pending_rungs(r.default_registry()):
+        if status.pending:
+            print("PENDING:" + name)
+    print("READ-OK")
+except Exception as exc:
+    print("READ-FAILED:" + repr(exc))
+PYEOF
+)"
+if [[ "$PENDING_PRE_OUT" == *"READ-OK"* ]]; then
+  PENDING_PRE="$(printf '%s\n' "$PENDING_PRE_OUT" | sed -n 's/^PENDING://p' | sort -u)"
+  note "pending upgrade rungs before nx upgrade: ${PENDING_PRE:-<none>}"
+  UNEXPECTED_PENDING="$(comm -23 <(printf '%s\n' "$PENDING_PRE") <(printf '%s\n' "$NEW_RUNGS") | sed '/^$/d')"
+  if [ -z "$UNEXPECTED_PENDING" ]; then
+    ok "every rung pending before nx upgrade is one the seed release did not know (${PENDING_PRE:-none pending})"
+  else
+    bad "rung(s) the seed release knew read PENDING after the candidate boot, before nx upgrade (the boot regressed state they probe): $(printf '%s' "$UNEXPECTED_PENDING" | tr '\n' ' ')"
+  fi
+else
+  printf '%s\n' "$PENDING_PRE_OUT" | tail -5 | sed 's/^/       /'
+  bad "could not read the pending upgrade rungs before nx upgrade"
+fi
+
 UPG_OUT="$(nx upgrade 2>&1 < /dev/null)"; UPG_RC=$?
 printf '%s\n' "$UPG_OUT" | tail -12 | sed 's/^/       /'
 [ "$UPG_RC" = 0 ] && ok "nx upgrade exited 0 over the candidate-booted store" || bad "nx upgrade exited $UPG_RC"
@@ -1062,6 +1174,38 @@ UPG_SHA="$(sha256sum "$SVC_WELL_KNOWN_DIR/nexus-service" | awk '{print $1}')"
 UPG_RV="$(_release_version)"
 [ "$UPG_RV" = "$FLOOR_VERSION" ] && ok "/version release_version=$UPG_RV after nx upgrade" \
   || bad "/version release_version=$UPG_RV after nx upgrade, expected $FLOOR_VERSION"
+
+say "Assert — RDR-192 backfill rung recorded, and the census scope counts chunks (nexus-wbfpw.60)"
+# The rung is the reaper's gate (Rdr192BackfillGate.requireComplete) and now ran
+# against the candidate. Its completion record is read straight from the ledger
+# table, not inferred from the doctor row, and the census it gates on is read
+# through the working-tree client: scope_chunk_total must equal the SQL chunk
+# count of the collection, which the shared-chash note seeded in Stage 3a makes
+# a non-vacuous comparison (the old join counted that chunk twice).
+if [[ $'\n'"$TREE_RUNGS"$'\n' == *$'\n'rdr192-manifest-backfill$'\n'* ]]; then
+  REC_N="$(diag_sql "SELECT count(*) FROM nexus.ladder_completions WHERE rung_name='rdr192-manifest-backfill'")"
+  if [ "${REC_N:-0}" -ge 1 ] 2>/dev/null; then
+    ok "rdr192-manifest-backfill completion record present in nexus.ladder_completions ($REC_N row(s))"
+  else
+    bad "no rdr192-manifest-backfill completion record after nx upgrade (rows='$REC_N') — the reaper gate would refuse"
+  fi
+else
+  bad "the working-tree client's ladder registry does not carry rdr192-manifest-backfill ($TREE_RUNGS) — the reaper-gate assert has nothing to read; update this leg"
+fi
+CENSUS_OUT="$(nx t3 census-manifest-less -c "$SHARED_COLLECTION" --json 2>/dev/null < /dev/null)"; CENSUS_RC=$?
+CENSUS_SCOPE="$(printf '%s' "$CENSUS_OUT" | python3 -c 'import sys,json
+try:
+    d = json.loads(sys.stdin.read())
+    print(d["collections"][0]["scope_chunk_total"])
+except Exception:
+    print("")' 2>/dev/null)"
+SQL_COLL_CHUNKS="$(diag_sql "SELECT count(*) FROM nexus.chunks WHERE collection='${SHARED_COLLECTION}'")"
+note "census rc=$CENSUS_RC scope_chunk_total=${CENSUS_SCOPE:-?} sql_chunks=$SQL_COLL_CHUNKS in $SHARED_COLLECTION"
+if [ -n "$CENSUS_SCOPE" ] && [ "$CENSUS_SCOPE" = "$SQL_COLL_CHUNKS" ]; then
+  ok "census scope_chunk_total=$CENSUS_SCOPE equals the SQL chunk count (a chunk named by $SHARED_MANIFEST_ROWS manifest rows counts once)"
+else
+  bad "census scope_chunk_total='${CENSUS_SCOPE:-unreadable}' (rc $CENSUS_RC) does not equal the SQL chunk count '$SQL_COLL_CHUNKS' in $SHARED_COLLECTION"
+fi
 
 say "Assert — nx doctor: clean, no pending rungs, no engine-convergence-pending"
 DOC_OUT="$(nx doctor 2>&1 < /dev/null)"
