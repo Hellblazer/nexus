@@ -56,6 +56,12 @@ _CHUNK_INSERTER_ALLOWLIST: dict[str, str] = {
         "(no owner row anywhere, past the grace) into the quarantine sibling under the exclusive sweep gate; "
         "nothing owned becomes ownerless"
     ),
+    "quarantine_restore_chunks": (
+        "the operator-driven restore verb's move (vectors-025, nexus-wbfpw.49): copies chunks the operator names "
+        "from a quarantine sibling back to their origin in one statement under the exclusive sweep gate; ownerless "
+        "in quarantine and no worse in the origin, and with reattach (default) the same transaction writes the "
+        "owning document's manifest row where the chunk names a live document at a free position"
+    ),
 }
 
 _DEFINITION = re.compile(
