@@ -102,11 +102,64 @@ To stop the engine deleting anything while you look at what it moved, set `NX_RE
 
 ## Getting a chunk back
 
-A chunk moved to `quarantine-<collection>` keeps its text and embedding. If a later `nx index repo` (or a heal) names it in a manifest row of the origin collection, the indexer's restore pass moves it back; for a `knowledge__` collection nothing does, and a manifest row that names the chunk only protects the quarantine copy from expiry. There is no operator verb that restores by chash in this change: a restore route and `nx t3 quarantine restore` are a separate piece of work (finished on a branch, not yet landed; it must be on `develop` and in the deployed engine before the first drain at deploy plus 30 days, and bead nexus-wbfpw.49 blocks the RDR-192 Phase 3 gate on it). Until it lands, a chunk the reaper moved can be found by `reaper_quarantine` audit row (its `chashes`, in `details`'s quarantine collection) and by `store_get_many` with `collection=quarantine-<name>`, which returns its text and metadata; the chunks are in the sibling for the retention window.
+A chunk moved to `quarantine-<collection>` keeps its text and embedding for the retention window (14 days). `nx t3 quarantine restore` brings it back by chash, `gc_audit` id or `quarantined_at` window, and with `--reattach` (the default) also makes it visible again when its own metadata names a document that is still live. This section is the whole procedure; [the CLI reference](../cli-reference.md#nx-t3-quarantine-restore) has the flags. The verb must be in the deployed engine before the first drain at deploy plus 30 days (nexus-wbfpw.49).
+
+**What it can make visible, and what it cannot.** Moving a chunk back is not enough: since RDR-192 Phase 2 a chunk with no live owning manifest row is hidden from search and `store_get`, and a restored chunk has no manifest row until reattach writes one. Reattach reaches exactly two kinds of chunk: one whose own metadata names its document (`catalog_doc_id`, else `doc_id`; written before RDR-108, or by `nx store put`), and a single-chunk legacy note whose document carries the chunk's chash as its `doc_id`. A chunk the indexer cut from a file carries neither key, so a `docs__`, `code__` or `rdr__` chunk comes back as bytes only, even when its file's document is live, and the output says `no live owner names it` (see [Known limits](#known-limits), the first item). The fix for those is to re-index the owning file, not to restore again. The population this was built for is the one the RDR-192 census gate is meant to have cleared before the reaper's first move: legacy notes with a document and no manifest rows.
+
+**Procedure.**
+
+1. Find what moved. `nx catalog gc-audit list --operation reaper_quarantine --collection <c>` lists the reaper's passes, each with an id and the full chash list. The cleanup at the end of `nx index repo` and `nx t3 gc` write `gc_quarantine_orphans` rows that list only a 20-chash sample, and the verb refuses those; use the date window below for them.
+2. Preview, then restore. Name the collection the chunks came from, not the `quarantine-` name:
+
+   ```bash
+   nx t3 quarantine restore -c <c> --audit-id 4125 --dry-run
+   nx t3 quarantine restore -c <c> --audit-id 4125
+   nx t3 quarantine restore -c <c> --quarantined-since 2026-09-28 --quarantined-before 2026-09-29
+   nx t3 quarantine restore -c <c> --chash <64-hex> --chash <64-hex>
+   ```
+
+3. Read the NOTE column, the lines under the totals, and the exit status. Every chunk reads one of these:
+
+   | Outcome | Meaning |
+   |---|---|
+   | `attached` | The chunk is back and the document's manifest row now names it at the chunk's `chunk_index` (0 for a one-chunk document). It is returned by search and get again, and it is not the reaper's. |
+   | `present` | The collection already holds the chash. Nothing is overwritten and the quarantine copy is left for expiry. A present chunk with no manifest row is reattached by the same run. |
+   | `superseded` | The chunk is back as bytes and stays hidden, because it is not the document's to take back. The reason is on the row (below). |
+   | `no_live_owner` | Bytes only, hidden: the chunk names no document, a tombstoned one, one registered under another collection, or a note several live notes claim. |
+   | `no_position` | Bytes only, hidden: the chunk names a live document of several chunks and records no `chunk_index`. |
+   | `missing` | Neither the collection nor this origin's quarantine sibling holds it. A chunk another collection quarantined into the same sibling reads `missing` too. |
+   | `dim_conflict` | `present`, and the quarantine copy has another embedding width. Nothing is overwritten; the collection's model identity needs a look. |
+
+4. What to do about a chunk that stays hidden depends on why:
+   - `superseded`, the document's current text is live (its manifest already holds a chunk at that position, it is stamped complete, the chunk was cut from another content hash, or the position is past the document's registered chunk count): nothing to do unless you need the old text. Do not re-put the note: that would replace its current text with the stale chunk.
+   - `superseded`, the document is mid index run: run the same command again once it has finished.
+   - `superseded`, the document's manifest rows sit under another collection: its current text is live there; nothing to do unless you need the old text here.
+   - `superseded`, another stored chunk, in the collection or in quarantine, names the same document and position (`rival`): the version is ambiguous, so none was attached. Compare the text (`nx store get <chash>`), then re-index the document or re-put the note. Judged against what is stored, so two versions that land on different pages of one run, or in different runs, are both refused.
+   - `no_live_owner` or `no_position` in a `knowledge__` collection: re-put your own copy of the note under the title the output names, `nx store put - --collection <c> --title '<title>'`, text on stdin. The new chunk is manifested under the same document and the old one becomes the reaper's. The output prints one command per owner.
+   - `no_live_owner` or `no_position` in a `docs__`, `code__` or `rdr__` collection: the owning file is probably still indexed but its chunks carry no key. Re-index it with `nx index repo --force` (or `nx index pdf`, `nx index md`, `nx index rdr` for a file indexed on its own). A re-put there would mint a stray note in a file collection and leave the file's chunks hidden.
+   - Reattach was switched off (`--no-reattach`): run the verb again without it. The chunks read `present` and are attached.
+
+   `nx t3 backfill-manifest` does nothing for any of these. A chunk that stays hidden is eligible for the engine reaper again 30 days after the restore (the output prints the date); an owner row by then keeps it.
+5. A multi-chunk document can end up partly attached, because attach never changes `documents.chunk_count`. The output says so, for example `'Notes' (1.4.2): 2 of 3 attached: restore the rest or re-index it`, and `--json` carries `owners` and `partial_owners` with `manifest_rows` against `chunk_count`. Restore the remaining chunks (the same audit id or window names them) or re-index the document.
+6. Exit status:
+
+   | Code | Meaning |
+   |---|---|
+   | 0 | Every requested chunk was restored or already present, and is visible (attached, or already owned). |
+   | 1 | A requested chunk is missing or its embedding width conflicts. A dry run exits 1 for the same reasons. Wins over 3. |
+   | 2 | A bad option; nothing was sent. |
+   | 3 | Every requested chunk is back but at least one stays hidden from search and get (including all of them with `--no-reattach`). A dry run exits 3 when a real run would leave one hidden. `--json` carries the count as `hidden`. |
+   | 4 | The connected engine predates the route. |
+   | 5 | The engine refused the request or failed, or the client failed on an unexpected error; the report of any page already committed is printed first. |
+   | 6 | The engine was busy: a manifest writer held the collection's lock for more than 2 seconds, or the call lost a deadlock. That call rolled back whole, nothing moved, was attached or audited; run the same command again. The 503 carries `Retry-After: 5` and `reason: quarantine_restore_busy`. |
+
+7. Each restore or attach writes one `quarantine_restore` row to `gc_audit` (`nx catalog gc-audit list --operation quarantine_restore`) with the full chash list, the actor, the source audit id and the per-outcome counts. A dry run writes none. There is no verb that undoes an attach; to take a chunk out again, delete its manifest row by hand.
+
+What the move does, for the record: one engine statement under the exclusive sweep gate moves the chunk from the sibling to the collection with its text, vector and `created_at`, strips the quarantine stamp and the reaper's own tags, and sets `last_written_at` to the restore time, so the 30 day grace starts over and the next hourly pass does not take it. The manifest row, when there is one, is written in the same transaction after the chunk's owning document is judged again under its index-run lock; a chunk that cannot be attached is never attached by guess, and the manifest is never changed to make room.
 
 ## Known limits
 
-**The census can read a live document as `no-owner`.** It resolves a chunk's owner from the chunk's own metadata (`catalog_doc_id`, then `doc_id`) or a note-shaped reverse match. A `docs__` or `code__` chunk written after RDR-108 carries no document id, so a live document whose manifest rows are missing reads `no-owner`, not `legacy-unmanifested`, and the census passes. The backstops are the 30 day grace, the floor, and the retention window in quarantine. A collection under 100 reapable chunks is exempt from the floor and is emptied in one pass, so for small collections the grace and the quarantine are the whole protection.
+**The census can read a live document as `no-owner`.** It resolves a chunk's owner from the chunk's own metadata (`catalog_doc_id`, then `doc_id`) or a note-shaped reverse match. A `docs__` or `code__` chunk written after RDR-108 carries no document id, so a live document whose manifest rows are missing reads `no-owner`, not `legacy-unmanifested`, and the census passes. The restore verb cannot make such a chunk visible either (it returns as bytes; the owning file needs re-indexing, see [Getting a chunk back](#getting-a-chunk-back)). The backstops are the 30 day grace, the floor, and the retention window in quarantine. A collection under 100 reapable chunks is exempt from the floor and is emptied in one pass, so for small collections the grace and the quarantine are the whole protection.
 
 **Pathological collections.** The census is a per-chunk join whose cost grows with the number of manifest rows of each chunk's owning document. Measured on PG17 under the application role at 80,000 chunks: 8,000 documents of 10 chunks each, 560 ms (the dry run, 240 ms); one document owning all 80,000 chunks, 393 seconds. The second shape reaches `CENSUS_TIMED_OUT` at the 60 s default. After three passes in a row, the census for that collection rests for 2, then 4, 8, 16 passes and so on, at most 24 hours, and is retried after each rest; any completed census ends the streak. The first timeout in a streak writes the one durable `reaper_refused` row, and `census_timed_out_total` counts every timeout. While it rests the collection logs `reaper_collection_skipped reason=CENSUS_BACKOFF`. The collection is never moved while its census times out. To let it through, raise `NX_REAPER_CENSUS_TIMEOUT_SECONDS` (up to 3600; 600 clears the measured 393 s case) in the engine environment and restart; the streak is forgotten at restart. The census runs on the shared sweep thread, so the longer bound is paid there once per pass, bounded by the 600 s wall-clock budget.
 

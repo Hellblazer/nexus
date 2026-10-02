@@ -67,6 +67,8 @@ reaper.
   then re-put your copy with `nx store put - --collection <c> --title '<title>'`
   under the same title: the new chunk is manifested under the same document and
   the old one becomes the reaper's to quarantine, 30 days after it lost its owner.
+  If the reaper has already moved the note, see
+  [Restoring chunks the reaper quarantined](#restoring-chunks-the-reaper-quarantined).
 - Retries: a residual is not re-examined at all for 24 hours at the same
   package version (a T2 note, `upgrade_ladder_state/rdr192-manifest-backfill.residual`,
   holds its fingerprint and time), so a stuck tenant pays no census per session
@@ -95,73 +97,9 @@ reaper.
 
 ### Restoring chunks the reaper quarantined
 
-The reaper moves a chunk it judges ownerless into the collection's `quarantine-`
-sibling; it never deletes. The chunk stays restorable until `gc_expire_quarantine`
-takes it (14 days by default, under its own floors). If the reaper took something it
-should not have (a note with no manifest row is the usual cause), bring it back with
-`nx t3 quarantine restore`, which needs no manifest row. This is the one full copy
-of the procedure; the CLI reference ([nx t3 quarantine restore](cli-reference.md#nx-t3-quarantine-restore))
-has the flags and exit codes.
-
-1. Find what moved. `nx catalog gc-audit list --operation reaper_quarantine
-   --collection <c>` lists the reaper's passes, each with an id and the full chash
-   list. The cleanup at the end of `nx index repo` and `nx t3 gc` write
-   `gc_quarantine_orphans` rows that hold only a 20-chash sample; for those, use
-   the date window in step 2.
-2. Preview, then restore, naming the collection the chunks came from (not the
-   `quarantine-` name):
-
-   ```bash
-   nx t3 quarantine restore -c <c> --audit-id 4125 --dry-run
-   nx t3 quarantine restore -c <c> --audit-id 4125
-   nx t3 quarantine restore -c <c> --quarantined-since 2026-09-28 --quarantined-before 2026-09-29
-   nx t3 quarantine restore -c <c> --chash <64-hex> --chash <64-hex>
-   ```
-
-3. Read the NOTE column and the lines under it. Moving a chunk back is not what
-   makes it visible: a chunk with no live owning manifest row is hidden from
-   `nx store get` and search, and the engine does not return it. So the verb also
-   **reattaches** (`--reattach`, the default): when the chunk's metadata names a
-   document that is still live in the collection, it writes that document's manifest
-   row at the chunk's position, and the chunk comes back to search and get. The
-   row says `attached to '<title>' (<tumbler>) at position N`. The preview
-   (`--dry-run`) says `would attach` and names the same document.
-4. A chunk it did not attach is restored as **bytes only and stays hidden**. The
-   output says so and prints a re-put command per owner:
-
-   ```text
-   3 chunks stay HIDDEN from search and get: no live owner row names them, ...
-     nx store put - --collection <c> --title 'Legacy Note'   # owner 1.4.2, 2 chunks
-   ```
-
-   Re-put your own copy of the note under that title (`nx store put - --collection
-   <c> --title '<title>'`, text on stdin): the new chunk is manifested under the same
-   document and the old one becomes the reaper's. The reasons, per chunk:
-   - `superseded`: the document is live, but its manifest already holds a different
-     chunk at that position (it was re-indexed since), the position is past the
-     document's registered chunk count, two restored chunks claim one position, or
-     the document is mid index run or has manifest rows under another collection.
-     The manifest is never changed to make room. The document's current text is
-     already visible; re-put only if the old text matters.
-   - `no_live_owner`: the metadata names no document, a tombstoned one, one
-     registered under another collection, or a note several live notes claim. The
-     recipe uses the chunk's own title.
-   - `no_position`: a live owner of several chunks, and nothing on the chunk says
-     which one it is.
-
-   `nx t3 backfill-manifest` does nothing for this class. A chunk that stays hidden
-   is eligible for the engine reaper again 30 days after the restore (the output
-   prints the date); an owner row by then keeps it.
-5. `--no-reattach` moves the bytes only. The output still says what reattach would
-   have done, and running the verb again without the flag attaches the chunks (they
-   read `present`, `attached`).
-6. A chunk the collection already holds is left alone (`present`), and a chash
-   found nowhere reads `missing`; exit status 1 means one of those or a
-   `dim_conflict`, and a dry run exits 1 for the same reasons. Exit status 6 means a
-   manifest writer held the collection's lock for more than 2 seconds: that call
-   rolled back whole, so run the same command again. A failure on a later page
-   still prints the report and `gc_audit` ids of the pages already committed. Each
-   restore or attach writes a `quarantine_restore` row to the same audit trail.
+`nx t3 quarantine restore` brings back chunks the engine reaper moved to a `quarantine-` collection, by chash, `gc_audit` id or date window, and with `--reattach` (the default) makes them visible again when their own metadata names a live document.
+The whole procedure, including what to do about a chunk that comes back hidden (a file collection's chunks need the file re-indexed, not a re-put), is [Getting a chunk back](operations/engine-reaper.md#getting-a-chunk-back) in the reaper runbook.
+The flags and exit codes are in the [CLI reference](cli-reference.md#nx-t3-quarantine-restore).
 
 ## Verifying
 
