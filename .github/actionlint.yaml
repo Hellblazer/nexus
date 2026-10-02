@@ -10,9 +10,9 @@ self-hosted-runner:
   # (nexus-vyg07). Same bare-label registration. service-ci.yml's runs-on is an
   # expression, which actionlint does not resolve, so only the probe needs this.
   #
-  # qwen-linux: the WSL runner on qwentescence, Linux user `ghci`. Unlike the two
-  # above it carries the default labels too (self-hosted, Linux, X64), so ci.yml's
-  # `test-qwen` job names the whole set; this entry declares the custom one.
+  # qwen-linux: the WSL runner on qwentescence, Linux user `ghci`. Today it also
+  # carries the default labels (self-hosted, Linux, X64); Sam is re-registering it
+  # with --no-default-labels (2026-10-02), so the jobs name only `qwen-linux`.
   labels:
     - hellmini
     - hellmini-ci

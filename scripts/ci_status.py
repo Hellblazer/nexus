@@ -131,7 +131,6 @@ _PAGE: int = 200
 PUSH_CANCELS_IN_PROGRESS: frozenset[str] = frozenset({
     "CI",
     "CI commit coverage audit (nexus-of2x8)",
-    "hellmini-probe",
     "mac-signing-rehearsal",
     "pg-bundle-cache-seed",
     "plugin drift ledger",

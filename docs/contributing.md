@@ -231,8 +231,8 @@ The enable sequence, in order; stop at the first red:
    `/var/lib/nx-suite-lease`: `sudo groupadd -f nx-suite`,
    `sudo usermod -aG nx-suite ghci`, `sudo usermod -aG nx-suite nxtest`,
    `sudo install -d -o root -g nx-suite -m 2775 /var/lib/nx-suite-lease`),
-   restart the runner service so `ghci` has the group. Once item 10 of the
-   first-run checklist has been run green, a hand run goes through
+   restart the runner service so `ghci` has the group. Item 10 of the
+   first-run checklist was run green on 2026-10-02, so a hand run goes through
    `scripts/qwen-hand-run.sh` (below), which takes the box lock and
    passes `NX_BUILD_LEASE_ROOT` and `NX_SUITE_LEASE_WAIT=1` itself. Do not
    export them from `nxtest`'s `.bashrc`: bash reads it in non-interactive ssh
@@ -247,8 +247,8 @@ The enable sequence, in order; stop at the first red:
    there until a release promotes it. Until then push a throwaway branch named
    `runner-probe/qwen-<date>` from the commit under test (`git push origin
    HEAD:refs/heads/runner-probe/qwen-<date>`): the probe's second trigger is a
-   push to that pattern, owner only, and neither `ci.yml` nor `hellmini-probe.yml`
-   (which excludes `runner-probe/qwen-*`) triggers on it. Read the run (every
+   push to that pattern, owner only, and no other workflow triggers on it
+   (`hellmini-probe.yml` is dispatch-only since 2026-10-02). Read the run (every
    step green: identity as `ghci`, no `sudo`, no readable file under the nexus
    config directory, the Windows side passing with its positive control). **Read
    the credential line, not just the colour.** It passes when it is CHECKED with
@@ -298,8 +298,8 @@ Then, before the route is called settled:
    processes, containers on the shared docker daemon, and shared-memory
    segments (`ipcs -m`). The next run's orphan sweep should clear what it left.
 10. The overlap check: five cases, all through `scripts/qwen-hand-run.sh` as
-    `nxtest`, and none of them can be run from the laptop. A hand run is not
-    supported on this host until this item has been run green.
+    `nxtest`, and none of them can be run from the laptop. It was run green on
+    2026-10-02.
     (a) Start a hand run, push, and see in the CI job log that the box lock is held and
     that it posted and locked its marker (`CI priority marker .../ci-waiting.<run>.<attempt>
     posted and locked`); the CI job waits for the hand run to finish and starts when it
@@ -316,9 +316,9 @@ Then, before the route is called settled:
     (d) The marker must be readable by `nxtest`: `ls -l` on it while CI is queued
     shows group or other read, and `flock -n -s -E 200 <marker> true` run as `nxtest`
     returns 200, not an error.
-    (e) Time a hand run at `-n 8`, warm and cold, and record both: the hold cap
-    (`QWEN_HAND_RUN_HOLD_SECONDS`, 1500) is a guess until then, and the docs state
-    no duration for the same reason.
+    (e) Time a hand run at `-n 8`, warm and cold. Measured 2026-10-02: 801 s cold,
+    723 s warm, so the hold cap (`QWEN_HAND_RUN_HOLD_SECONDS`, 1500) has about
+    a 1.9x margin over the cold run.
 11. The skip-reason diff (the `TODO(qwen-floor)` in `ci.yml`): diff the `-rs`
     skip reasons in `suite-output.txt` against a hosted run of the same tree. The
     measured gap is about 2k tests (25,705 passed here against about 27.7k from
@@ -341,7 +341,7 @@ build and the suite, so a hand run and CI cannot overlap at any stage (the WSL V
 wedged twice on 2026-10-01 when a suite overlapped a Maven gate-jar build; the
 suite lease alone does not cover the build).
 
-Policy (Sam, 2026-10-02): agents' full suites use hellmini. qwentescence is CI's until item 10 of `docs/contributing.md` § First run of the qwen-linux route (the overlap check) has been run green on the host; after that a hand run there is supported only through `scripts/qwen-hand-run.sh`, and only for a case that needs Linux.
+Policy (Sam, 2026-10-02): agents' full suites use hellmini. Item 10 of `docs/contributing.md` § First run of the qwen-linux route (the overlap check) was run green on the host on 2026-10-02, so a hand run there is supported only through `scripts/qwen-hand-run.sh`, and only for a case that needs Linux.
 
 **CI has strict priority on that lock** (nexus-0wp30). `flock` does not order its
 waiters and the `test-qwen` job gives up after 1800 s, so on 2026-10-02 a queue of
@@ -383,8 +383,8 @@ group first and releases the lock only once that group is gone (exit 129, 130 or
 143); a descendant that ignores `TERM` is killed after `QWEN_HAND_RUN_KILL_SECONDS`
 (20). A `SIGKILL` of the wrapper itself is not covered: the lock is released and the
 suite keeps running until someone stops it. A hand run that already holds the lock
-when CI arrives is not interrupted; CI waits for it, for at most the hold cap. How long a run takes at `-n 8`, warm or
-cold, has not been measured (item 10e). A raw `flock ... box.lock` or a bare
+when CI arrives is not interrupted; CI waits for it, for at most the hold cap. A run at `-n 8` took 801 s cold and
+723 s warm (item 10e, 2026-10-02). A raw `flock ... box.lock` or a bare
 `pytest` is not a supported hand-run form: it takes the lock, or the suite lease
 CI's own pytest needs, with no regard for a queued CI job.
 

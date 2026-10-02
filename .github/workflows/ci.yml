@@ -932,11 +932,11 @@ jobs:
     # block hand runs until its own timeout. How long a run takes at -n 8 is
     # not yet measured, so no duration is stated here.
     #
-    # LABELS. `[self-hosted, Linux, X64, qwen-linux]` is the full label set the
-    # runner carries (read from the repository's runner list on 2026-10-01):
-    # `qwen-linux` is its own custom label and no other runner has it, so the job
-    # can land nowhere else. The Windows runner `gtr-windows` lacks `Linux` and
-    # `qwen-linux`; `hellmini` and `hellmini-ci` carry neither label. runs-on is a
+    # LABELS. `runs-on: qwen-linux` names only the custom label (Sam, 2026-10-02:
+    # the runner is to be re-registered with --no-default-labels, so it will carry
+    # no `self-hosted`/`Linux`/`X64`; today's registration already has `qwen-linux`
+    # as its own label, so this works before and after). No other runner has it,
+    # and a job naming a generic label can no longer reach this box. runs-on is a
     # LITERAL, never an expression over a variable.
     #
     # WHAT IT RUNS. `uv run pytest tests/ -n 8`: the same default selection the
@@ -988,7 +988,7 @@ jobs:
     name: pytest (qwen-linux full suite)
     needs: [changes]
     if: success() && needs.changes.outputs.code == 'true' && needs.changes.outputs.ci_runner == 'qwen-linux'
-    runs-on: [self-hosted, Linux, X64, qwen-linux]
+    runs-on: qwen-linux
     timeout-minutes: 75
     permissions:
       contents: read

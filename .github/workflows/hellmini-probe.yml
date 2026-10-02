@@ -6,8 +6,7 @@
 # and that the expected toolchain (GraalVM, uv, Docker via colima) is present
 # and working.
 #
-# Deliberately scoped to workflow_dispatch + push on a throwaway
-# 'runner-probe/**' branch, never pull_request or push to develop/main — this
+# Deliberately scoped to workflow_dispatch, never pull_request or push — this
 # runner takes release jobs (Sam's directive). Since 2026-09-30 the Service CI
 # Java job (service-ci.yml; nexus-f5i1m) runs on a separate runner, label
 # `hellmini-ci` under its own macOS user, not on this one; its isolation from
@@ -17,15 +16,10 @@
 # routine PR/push trigger.
 name: hellmini-probe
 
+# workflow_dispatch only (2026-10-02 audit): the one-shot yd9po check is done, and a
+# runner-probe/** push trigger fired a 20-minute job on the RELEASE runner each time.
 on:
   workflow_dispatch: {}
-  push:
-    branches:
-      - 'runner-probe/**'
-      # qwen-linux-isolation-probe.yml owns runner-probe/qwen-*; without this
-      # exclusion its throwaway branch also fired a 20-minute probe on the
-      # hellmini release runner (round-4 review L2).
-      - '!runner-probe/qwen-*'
 
 concurrency:
   group: hellmini-probe-${{ github.ref }}

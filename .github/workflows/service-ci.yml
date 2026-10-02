@@ -128,8 +128,14 @@ jobs:
     needs: changes
     if: needs.changes.outputs.service == 'true'
     # WHERE THIS JOB RUNS (nexus-f5i1m; Sam, 2026-09-30, session nexus_654).
+    # CURRENT STATE (Sam, 2026-10-02): the repository variable
+    # SERVICE_CI_PUSH_RUNNER is set to `ubuntu-latest`, so owner pushes run on
+    # GitHub-hosted runners like everything else. The text below describes the
+    # `hellmini-ci` route, which this file still implements and which is what an
+    # UNSET variable (or any value but `ubuntu-latest`) selects.
     # Pushes to main/develop run on the `hellmini-ci` self-hosted runner (the
-    # hellmini Mac mini, macOS arm64, Docker via a per-job colima VM);
+    # hellmini Mac mini, macOS arm64, Docker via a per-job colima VM) when
+    # that route is on;
     # pull_request stays on ubuntu-latest. The job took 21 to 34 min on
     # GitHub-hosted runners, timed out, flaked on chance-based tests, and every
     # develop push queued behind it; hellmini is otherwise idle.
@@ -177,21 +183,23 @@ jobs:
     # What it removes is the hosted-runner timeout exposure and the queueing
     # behind a slow hosted job.
     #
-    # REVIEW PLAN (Sam, 2026-09-30): Service CI stays on hellmini-ci for now.
-    # After about 10 develop runs on it, note the host load during each and
-    # compare job minutes with the hosted runs, then set SERVICE_CI_PUSH_RUNNER
-    # to `ubuntu-latest` (below) unless hellmini-ci is clearly faster. The
-    # measurements behind this decision overlap: hosted 21.8 to 31.2 min (median
-    # about 31, n=4), hellmini 24.4 to 30.8 (median about 27, steady state about
-    # 22, n=4). The hosted minutes cost nothing on a public repo, so speed is
-    # the only thing the move buys.
+    # REVIEW (Sam, 2026-09-30 plan, decided 2026-10-02): the plan was about 10
+    # develop runs on hellmini-ci, then compare job minutes with hosted and set
+    # SERVICE_CI_PUSH_RUNNER to `ubuntu-latest` unless hellmini-ci was clearly
+    # faster. After 21 runs: hellmini-ci green Java jobs 18.2 to 34.4 min (median
+    # 20.6), hosted 21.1 to 34.1 (median 25.2, 2026-09-29/30); hosted jobs started
+    # 2 to 4 s after change detection, so no queueing was avoided; three false
+    # reds on 2026-10-02 came from colima port leaks. Sam set the variable to
+    # `ubuntu-latest`. The earlier four-run measurements (hosted median about 31,
+    # hellmini about 27) are superseded.
     #
     # OFFLINE FALLBACK AND THE ALLOWLIST. A job queued for a runner that is down
     # waits until GitHub gives up (hellmini needs a KVM unlock after a FileVault
     # reboot). Set the repository variable SERVICE_CI_PUSH_RUNNER to exactly
     # `ubuntu-latest` (Settings > Secrets and variables > Actions > Variables)
     # and the next push runs on GitHub's runners with no code change; delete the
-    # variable to return to hellmini-ci. The expression treats that one value as
+    # variable to return to hellmini-ci (the route stays implemented and the
+    # runner registered, as an opt-in). The expression treats that one value as
     # the only override: unset, any other value, `hellmini` included, a typo,
     # all mean hellmini-ci. So the variable can never send a push to the
     # release-signing runner, and a typo cannot queue the job for a label that

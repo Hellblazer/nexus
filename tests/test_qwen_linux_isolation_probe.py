@@ -138,8 +138,8 @@ def test_the_probe_condition_admits_exactly_an_owner_dispatch_or_an_owner_push()
     assert _runs(actor_id=OWNER_ID, triggering_actor="a-collaborator") is False
 
 
-def test_the_probe_runs_on_the_qwen_runner_label_set_and_runs_no_repo_or_third_party_code() -> None:
-    assert _job()["runs-on"] == ["self-hosted", "Linux", "X64", "qwen-linux"]
+def test_the_probe_runs_on_the_qwen_custom_label_only_and_runs_no_repo_or_third_party_code() -> None:
+    assert _job()["runs-on"] == "qwen-linux"
     assert not any("uses" in s for s in _steps()), "no checkout and no action: nothing from the repo executes on the runner"
     assert "secrets." not in PROBE.read_text()
 

@@ -233,12 +233,13 @@ def test_the_route_step_publishes_one_of_two_outputs_and_nothing_on_a_shell_erro
 # ── the qwen job ──────────────────────────────────────────────────────────
 
 
-def test_the_qwen_job_runs_on_a_literal_label_set_that_only_the_qwen_runner_carries() -> None:
+def test_the_qwen_job_runs_on_the_custom_label_only_that_only_the_qwen_runner_carries() -> None:
+    """Sam, 2026-10-02: the runner is re-registered with --no-default-labels, so no generic label may be named."""
     job = _doc()["jobs"]["test-qwen"]
     runs_on = job["runs-on"]
-    assert runs_on == ["self-hosted", "Linux", "X64", QWEN_LABEL], runs_on
+    assert runs_on == QWEN_LABEL, runs_on
     assert "${{" not in str(runs_on)
-    assert not {"hellmini", "hellmini-ci", "gtr-windows", "ubuntu-latest"} & set(runs_on)
+    assert runs_on not in {"hellmini", "hellmini-ci", "gtr-windows", "ubuntu-latest", "self-hosted"}
 
 
 def test_the_qwen_job_is_gated_on_the_route_and_needs_only_changes() -> None:
@@ -1097,9 +1098,9 @@ def test_the_real_flock_times_out_with_exit_200_on_a_lock_another_process_holds(
     assert _calls(env) == [], "the jar build and the suite must not start without the lock"
 
 
-_POLICY = ("Policy (Sam, 2026-10-02): agents' full suites use hellmini. qwentescence is CI's until item 10 of "
-           "`docs/contributing.md` § First run of the qwen-linux route (the overlap check) has been run green on "
-           "the host; after that a hand run there is supported only through `scripts/qwen-hand-run.sh`, and only "
+_POLICY = ("Policy (Sam, 2026-10-02): agents' full suites use hellmini. Item 10 of "
+           "`docs/contributing.md` § First run of the qwen-linux route (the overlap check) was run green on "
+           "the host on 2026-10-02, so a hand run there is supported only through `scripts/qwen-hand-run.sh`, and only "
            "for a case that needs Linux.")
 
 
