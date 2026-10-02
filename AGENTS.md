@@ -159,7 +159,7 @@ This repo is public and has four self-hosted runners:
 |---|---|---|
 | `hellmini` | Mac mini, macOS user `ghrunner` | release jobs: the engine-service release legs, the PG-bundle cache seed (Sam, 2026-09-28, nexus-yd9po) |
 | `hellmini-ci` | same Mac mini, macOS user `ghci` | the Service CI Java job, on owner pushes only (Sam, 2026-09-30, nexus-f5i1m) |
-| `qwen-linux` (labels `self-hosted`, `Linux`, `X64`, `qwen-linux`) | qwentescence, WSL, Linux user `ghci` (private TMPDIR) | the full Python pytest suite as one `-n 12` job (`test-qwen` in `ci.yml`), on owner pushes to develop only, and only while the repository variable `QWEN_CI_PUSH_RUNNER` is `qwen-linux` (opt-in; Sam, 2026-10-01) |
+| `qwen-linux` (labels `self-hosted`, `Linux`, `X64`, `qwen-linux`) | qwentescence, WSL, Linux user `ghci` (private TMPDIR) | the full Python pytest suite as one `-n 8` job (`test-qwen` in `ci.yml`), on owner pushes to develop only, and only while the repository variable `QWEN_CI_PUSH_RUNNER` is `qwen-linux` (opt-in; Sam, 2026-10-01) |
 | `gtr-windows` (`[self-hosted, X64, Windows]`, registered earlier as `qwen-windows`) | host not recorded in this repo | no workflow in this repo; intended (Sam, 2026-09-30) |
 
 The two qwen runners carry the generic self-hosted labels. Any job in any
@@ -181,8 +181,9 @@ not say "exactly"). Unset, empty, a typo, `Qwen-Linux`, a trailing space,
 `ubuntu-latest` or any other value means `ubuntu-latest`: the hosted shards run
 and `test-qwen` is skipped. So landing the route changes nothing; the default
 is the shards. When it is on, `test-qwen` runs the whole default suite as one
-`uv run pytest tests/ -n 12` on the qwen runner (the runner's own uv, JDK and
-Docker, no `setup-*` action; `scripts/build-gate-jar.sh` for the stamped jar)
+`uv run pytest tests/ -n 8` on the qwen runner (the runner's own uv, JDK and
+Docker, no `setup-*` action; `scripts/build-gate-jar.sh` for the stamped jar,
+built and tested under one box lock, see below)
 and the six hosted shards and `service-jar` are skipped. Every `pull_request`
 and any other actor's push gets the hosted shards whatever the variable says.
 The job's `runs-on` is a literal label set, so the variable cannot reach a
@@ -244,11 +245,35 @@ a cancelled run's Postgres and JVM through sidecar files there, which a per-job
 suite run costs it about 10% decode while it runs (accepted by Sam). A qwen-only
 red on push has no PR-side twin, and the difference is more than the platform:
 PRs run the hosted shards on the GitHub Ubuntu image with GraalVM, serial inside
-each of six `pytest-split` shards, while the qwen job is one `xdist -n 12` run
+each of six `pytest-split` shards, while the qwen job is one `xdist -n 8` run
 on Ubuntu 26.04 with OpenJDK 25.0.4.1 as a persistent non-root user. Coverage is
 not yet reconciled: 25,705 tests passed there against about 27.7k summed from the
 shards, so the executed-count floor stays at 20000 until the skip-reason diff in
 `docs/contributing.md` § First run of the qwen-linux route has been done.
+
+**The box lock (host owner's request, 2026-10-01).** The suite lease covers
+pytest only, and the qwentescence WSL VM (40 GB, shared with a production
+llama-server) wedged twice on 2026-10-01 when one `-n 12` suite overlapped a
+Maven gate-jar build, which holds the separate `service` build lease. So there
+is ONE box-wide lock, `box.lock` in the same lease directory
+(`$QWEN_SUITE_LEASE_ROOT/box.lock`, default `/var/lib/nx-suite-lease/box.lock`;
+the directory is `root:nx-suite` 2775, `ghci` and `nxtest` are both in
+`nx-suite`, so the file is cross-user), and everything heavy runs under it. In
+`test-qwen` the gate-jar build and pytest are ONE step: `flock -w <wait> -E 200
+box.lock bash -c 'scripts/build-gate-jar.sh; uv run pytest ... -n 8'`. A held
+lock logs a waiting line; a wait that outruns `QWEN_BOX_LOCK_WAIT_SECONDS`
+(1800, under the job's 75-minute timeout) fails the job naming the lock; a host
+without `flock` fails the job closed. The suite lease stays, for pytest-only
+hand runs. Worker count is `-n 8`, not 12: each xdist worker boots its own
+Postgres at about 2.5 GB and 12 left the VM too little headroom. **Hand runs on
+qwentescence follow the same convention**, as `nxtest` in a worktree under
+`~/src/nexus-wt/`:
+`flock /var/lib/nx-suite-lease/box.lock bash -c 'uv sync -q && scripts/build-gate-jar.sh && uv run pytest -n 8 -q'`.
+No Maven or engine suites on qwentescence at all (`scripts/mvnw-leased.sh`,
+`service/` test runs, `-Pnative`): the Java engine suites run on hellmini. The
+stamped-jar build that tests need is the only Maven the box runs, and only
+inside the lock. The T2 how-to `nexus/qwentescence-test-host-howto` carries the
+full host recipe.
 
 **Service CI routing.** `service-ci.yml`'s comments are the one authoritative
 copy of how it works; this is the summary. An owner push (account id and
