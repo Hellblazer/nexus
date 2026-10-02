@@ -346,9 +346,15 @@ def live_note_chashes(documents) -> set[str]:
     Reads no longer show a manifest-less chunk (RDR-192 Step 5: every
     engine read path uses live(c), which requires a live own-collection
     owner), but a legacy note stored before ``nexus-b6enc`` may still have
-    no manifest row, so deleting sweeps keep this guard until RDR-192
-    Step 11 removes it once the legacy-note census reads zero. A
-    manifest-diff sweep (``orphaned_chashes`` above, or
+    no manifest row. The one remaining caller is the ``mcp_infra``
+    superseded-vector sweeps (via ``_legacy_notes_provider``), which keep
+    this guard for a tenant whose ``rdr192-manifest-backfill`` rung record is
+    not verified and drop it once the record is (RDR-192 Step 11,
+    nexus-wbfpw.22: the guard cannot go for every install at once, because a
+    legacy note's chash can reach a dropped set through an unrelated document
+    that shared its text, and the delete those sweeps issue has no notes
+    guard of its own). ``nx t3 gc`` and the prune sites no longer call it.
+    A manifest-diff sweep (``orphaned_chashes`` above, or
     the retired client alive-set diff) only ever sees the
     SECOND half of that OR: both ``docs_for_chashes`` and
     ``chashes_for_collection`` query ``catalog_document_chunks``, so a
@@ -425,15 +431,20 @@ def non_complete_documents(documents) -> list:
     Classification, per Hal's follow-up comment (2026-08-02 17:02) —
     honored verbatim, not paraphrased down:
       - Note-shaped documents (the same ``file_path==""`` +
-        ``meta["doc_id"]`` shape :func:`live_note_chashes` protects) are
+        ``meta["doc_id"]`` shape :func:`live_note_chashes` reads) are
         EXCLUDED from this list. Hal: "store_put-origin documents NEVER
         carry index_state (registered exclusion on nexus-5xn3k, accepted
-        design)... That is the conservative direction (their chunks are
-        never swept: over-retention, not deletion) and is correct" —
-        i.e. notes are ALREADY, separately, unconditionally protected;
-        re-flagging them here would make every knowledge collection
-        holding even one note permanently refuse gc, which is not the
-        behavior "over-retention... is correct" describes.
+        design)". A note has no index run to be in the middle of: its
+        write is one request (RDR-223), so there is no in-flight state
+        for this circuit breaker to guard, and re-flagging it would make
+        every knowledge collection holding even one note permanently
+        refuse gc. The reason is the missing ``index_state``, not a
+        notes guard in gc: since RDR-192 Step 8 (nexus-wbfpw.18) ``nx t3
+        gc`` no longer consults :func:`live_note_chashes`. A current note's
+        chunk is protected by its manifest row, and a legacy manifest-less
+        note's by the gc census gate, which refuses the whole collection
+        while any legacy-unmanifested chunk remains (nexus-wbfpw.22
+        re-checked this exemption against that fact).
       - Every OTHER document with ``index_state`` != ``'complete'``
         counts, INCLUDING ``None`` (reported explicitly as null).
         Hal: "do not 'fix' it by widening the filter to NULL — NULL
@@ -458,7 +469,7 @@ def non_complete_documents(documents) -> list:
     out = []
     for e in documents or []:
         if is_note_shaped(e):
-            continue  # note-shaped: live_note_chashes's exemption already covers it
+            continue  # a note carries no index_state and has no index run to be mid-way through (its chunk is protected by its manifest row, or by gc's census gate when legacy)
         if not getattr(e, "index_state_reported", True):
             continue  # pre-RUNFENCE engine: floor-tolerant, no signal to act on
         if getattr(e, "index_state", None) != "complete":
