@@ -14,6 +14,7 @@ from tests.prose_edit.conftest import Prose, git
 from tests.prose_edit.test_brief import (
     AGENT,
     BRIEF,
+    NAMES_A_REPAIR,
     ORDER,
     SKILL,
     _frontmatter,
@@ -26,6 +27,7 @@ from tests.prose_edit.test_brief import (
     seed,
 )
 
+REVIEW = BRIEF.with_name("review.py")
 PLAIN = "Plain editable sentence stays."
 
 
@@ -266,7 +268,8 @@ def test_a_service_that_is_down_exits_three_from_build_and_filter(prose: Prose, 
     prose.env["PROSE_EDIT_NX"] = f"{sys.executable} {fake}"
     built = run_brief(prose, "build", "docs/x.md")
     assert built.returncode == 3 and "unavailable" in built.stderr and built.stdout == ""
-    assert "Do not run nx, start a service or repair anything." in built.stderr  # said where the model reads it
+    assert "Stop here and tell the author." in built.stderr  # said where the model reads it
+    assert not NAMES_A_REPAIR.search(built.stderr)
     filtered = run_brief(prose, "filter", "docs/x.md", stdin=fenced(proposal([])))
     assert filtered.returncode == 3 and "unavailable" in filtered.stderr and filtered.stdout == ""
 
@@ -493,14 +496,26 @@ def test_the_skill_never_lets_the_model_pick_a_genre_and_the_agent_greps_by_glob
     assert "Pass each entry as the Grep `glob`, with `path` left at the repository root." in agent
 
 
-def test_a_failed_helper_never_sends_the_model_off_to_repair_services() -> None:
+def test_a_failed_helper_stops_the_model_without_naming_an_action_to_avoid() -> None:
     skill = _skill()
-    line = "On any failure, show stderr and stop. Never run `nx`, start a service or repair anything."
+    line = "On any failure, show stderr and stop."
     assert skill.count(line) >= 4  # steps 1, 4 and 9 and the Rules table
-    assert "If a `MEMORY` command fails, show stderr and stop. Never run `nx`, start a service or repair anything." in skill
-    rules = skill[skill.index("## Rules"):]
-    assert line in rules
+    assert "If a `MEMORY` command fails, show stderr and stop." in skill
+    assert line in skill[skill.index("## Rules"):]
     assert "Use Grep for nothing else." in _agent()
+
+
+def test_no_instruction_the_model_reads_names_nx_a_service_or_a_repair() -> None:
+    """Sam, nexus-ger02.15: naming the forbidden action primes the model to do it. A five-times-repeated
+    prohibition did not stop `uv run nx daemon service start` after a T2 failure, so the wording is gone
+    and the instruction is the neutral one: show stderr and stop."""
+    skill = _skill()
+    assert not NAMES_A_REPAIR.search(skill), NAMES_A_REPAIR.search(skill)
+    assert not NAMES_A_REPAIR.search(_agent())
+    for script in (BRIEF, REVIEW):
+        text = script.read_text(encoding="utf-8")
+        assert "Stop here and tell the author." in text
+        assert "start a service" not in text and "repair anything" not in text
 
 
 def test_a_null_genre_from_parse_is_not_a_reason_to_ask() -> None:

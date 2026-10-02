@@ -1038,8 +1038,7 @@ def main(argv: list[str] | None = None) -> int:
         sys.stderr.write(f"{exc}\n")
         code = int(getattr(exc, "code", 1))
         if code == 3:
-            sys.stderr.write("review.py: T2 is unavailable. Stop here and tell the author. "
-                             "Do not run nx, start a service or repair anything.\n")
+            sys.stderr.write("review.py: T2 is unavailable. Stop here and tell the author.\n")
         return code
     except UserError as exc:
         sys.stderr.write(f"review.py: {exc}\n")

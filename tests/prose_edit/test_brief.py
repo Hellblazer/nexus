@@ -27,6 +27,8 @@ MEMORY = SKILLS / "prose-edit" / "scripts" / "memory.py"
 SITE_PAGE = SKILLS / "site-page" / "SKILL.md"
 AGENT = ROOT / ".claude" / "agents" / "line-editor.md"
 SKILL = SKILLS / "prose-edit" / "SKILL.md"
+# What no instruction or message the model reads may name (nexus-ger02.15): naming the action primes it.
+NAMES_A_REPAIR = re.compile(r"\bnx\b|start a service|repair|daemon|doctor", re.IGNORECASE)
 
 # The six treatments the live repo style sheet holds, decoded exactly as `nx memory get` returns them.
 IGNORED = [

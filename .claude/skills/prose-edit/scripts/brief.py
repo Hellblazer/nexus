@@ -1166,8 +1166,7 @@ def main(argv: list[str] | None = None) -> int:
     except Passthrough as exc:
         sys.stderr.write(f"{exc}\n")
         if exc.code == 3:
-            sys.stderr.write("brief.py: T2 is unavailable. Stop here and tell the author. "
-                             "Do not run nx, start a service or repair anything.\n")
+            sys.stderr.write("brief.py: T2 is unavailable. Stop here and tell the author.\n")
         return exc.code
     except _MEM.UserError as exc:
         sys.stderr.write(f"brief.py: {exc}\n")

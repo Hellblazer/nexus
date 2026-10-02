@@ -21,6 +21,7 @@ import pytest
 
 from tests.prose_edit.conftest import REPO_PROJECT, ROOT, Prose, git, t2_get, t2_json, t2_titles
 from tests.prose_edit.test_brief import (
+    NAMES_A_REPAIR,
     SKILL,
     brief_ok,
     edit,
@@ -688,7 +689,8 @@ def test_a_service_that_is_down_stops_the_apply_with_exit_three_and_leaves_file_
     env = {**prose.env, "PROSE_EDIT_NX": f"{sys.executable} {fake}"}
     proc = run_review(prose, "apply", "--work", str(work), "--accept", "1", env=env)
     assert proc.returncode == 3 and "unavailable" in proc.stderr and proc.stdout == ""
-    assert "Do not run nx, start a service or repair anything." in proc.stderr
+    assert "Stop here and tell the author." in proc.stderr
+    assert not NAMES_A_REPAIR.search(proc.stderr)
     assert (repo / "docs" / "s.md").read_text(encoding="utf-8") == DOC and work.is_dir()
     run_review(prose, "apply", "--work", str(work), "--accept", "none")
 
