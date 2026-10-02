@@ -3,6 +3,7 @@
 package dev.nexus.service;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 
 import java.net.ConnectException;
 import java.sql.SQLException;
@@ -16,7 +17,9 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * nexus-33prh: pure-unit coverage of {@link SharedCluster#connectWithRetry}, the bounded
  * retry the shared cluster's bootstrap connect uses so it survives colima's asynchronous
  * host-port forward (a refused first connect to a just-started container). No Docker.
+ * The class timeout turns a broken deadline check into a red, not a hang.
  */
+@Timeout(30)
 final class SharedClusterConnectRetryTest {
 
     private static final Duration SLEEP = Duration.ofMillis(5);
@@ -109,5 +112,20 @@ final class SharedClusterConnectRetryTest {
         }, () -> true, Duration.ofSeconds(10), SLEEP);
 
         assertThat(result).isEqualTo("ok");
+    }
+
+    @Test
+    void anInterruptWhileWaitingRestoresTheFlagAndFails() {
+        Thread.currentThread().interrupt();
+        try {
+            assertThatThrownBy(() -> SharedCluster.connectWithRetry(() -> {
+                throw refused();
+            }, () -> true, Duration.ofSeconds(10), SLEEP))
+                .isInstanceOf(SQLException.class)
+                .hasMessageContaining("interrupted");
+            assertThat(Thread.currentThread().isInterrupted()).isTrue();
+        } finally {
+            Thread.interrupted();
+        }
     }
 }

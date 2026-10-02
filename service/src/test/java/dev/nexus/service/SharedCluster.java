@@ -103,8 +103,10 @@ final class SharedCluster {
     private static final Object BOOTSTRAP_LOCK = new Object();
     private static final AtomicInteger DB_COUNTER = new AtomicInteger();
 
-    /** How long the bootstrap waits for the container's published port to accept a connection. */
-    private static final Duration CONNECT_DEADLINE = Duration.ofSeconds(30);
+    /** How long a connect waits for the container's published port to accept a connection.
+     *  The observed colima window is milliseconds; 10 s bounds what a permanently refused
+     *  port costs each rawConnect (review nexus/review-33prh-code suggestion 1). */
+    private static final Duration CONNECT_DEADLINE = Duration.ofSeconds(10);
     private static final Duration CONNECT_RETRY_SLEEP = Duration.ofMillis(100);
 
     private SharedCluster() {}
