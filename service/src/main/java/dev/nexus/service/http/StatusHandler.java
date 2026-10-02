@@ -39,7 +39,7 @@ import java.util.function.Supplier;
  *  "process_start_time":"2026-09-12T09:00:00Z"}</pre>
  *
  * <p>{@code reaper} (RDR-192 Phase 3 gate S5, bead nexus-wbfpw.56, ADDITIVE) is the engine reaper's liveness:
- * {@code {"enabled":true,"interval_seconds":3600,"last_completed_pass_at":"2026-10-02T07:00:00Z"|null,
+ * {@code {"enabled":true,"interval_seconds":3600,"wall_clock_budget_seconds":600,"last_completed_pass_at":"2026-10-02T07:00:00Z"|null,
  * "failed_passes_total":0}}, or {@code {"enabled":false}} when no reaper is scheduled in this process. See
  * {@link ReaperStatus}.
  *
@@ -180,11 +180,13 @@ public final class StatusHandler implements HttpHandler {
      *
      * @param enabled              the reaper is scheduled in this process
      * @param intervalSeconds      the delay between the end of one pass and the start of the next
+     * @param wallClockBudgetSeconds the longest one pass runs (its wall-clock budget), so a client can tell a slow
+     *                             pass from a dead reaper: completions are at most interval plus this far apart
      * @param lastCompletedPassAt  when the last pass that ran to the end finished; null before the first
      * @param failedPassesTotal    passes since boot that died or could not list their tenants
      */
-    public record ReaperStatus(boolean enabled, long intervalSeconds, java.time.Instant lastCompletedPassAt,
-                               long failedPassesTotal) {}
+    public record ReaperStatus(boolean enabled, long intervalSeconds, long wallClockBudgetSeconds,
+                               java.time.Instant lastCompletedPassAt, long failedPassesTotal) {}
 
     /**
      * @param reaperStatus RDR-192 Phase 3 gate S5 (nexus-wbfpw.56): the reaper's liveness. Null omits the
@@ -264,6 +266,7 @@ public final class StatusHandler implements HttpHandler {
             } else {
                 body.append("{\"enabled\":").append(r.enabled())
                     .append(",\"interval_seconds\":").append(r.intervalSeconds())
+                    .append(",\"wall_clock_budget_seconds\":").append(r.wallClockBudgetSeconds())
                     .append(",\"last_completed_pass_at\":");
                 if (r.lastCompletedPassAt() == null) {
                     body.append("null");

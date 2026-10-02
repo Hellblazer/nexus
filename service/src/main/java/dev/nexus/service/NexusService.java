@@ -767,7 +767,7 @@ public final class NexusService {
         ChunkReaper r = chunkReaper;
         if (r == null) return null;
         return new dev.nexus.service.http.StatusHandler.ReaperStatus(true, r.settings().interval().toSeconds(),
-            r.lastCompletedPassAt(), r.failedPassesTotal());
+            r.settings().wallClockBudget().toSeconds(), r.lastCompletedPassAt(), r.failedPassesTotal());
     }
 
     /**

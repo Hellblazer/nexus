@@ -26,10 +26,12 @@ def _iso(delta: timedelta) -> str:
 
 
 def _status(*, last: timedelta | None, interval: int = HOUR, started: timedelta | None = timedelta(days=3),
-            failed: int = 0, enabled: bool = True) -> dict:
+            failed: int = 0, enabled: bool = True, budget: int | None = None) -> dict:
     body: dict = {"embedding_mode": "onnx-local", "reaper": {
         "enabled": enabled, "interval_seconds": interval,
         "last_completed_pass_at": None if last is None else _iso(last), "failed_passes_total": failed}}
+    if budget is not None:
+        body["reaper"]["wall_clock_budget_seconds"] = budget
     if started is not None:
         body["process_start_time"] = _iso(started)
     return body
@@ -103,6 +105,15 @@ def test_a_stale_pass_warns_names_the_age_and_says_where_to_look() -> None:
     assert "reaper_scheduled_run_failed" in fixes and "reaper_pass_failed" in fixes
     assert "NX_REAPER_ENABLED" in fixes
     assert "docs/operations/engine-reaper.md" in fixes
+
+
+def test_the_threshold_includes_the_time_a_pass_may_take() -> None:
+    # Completions are at most interval + the pass's wall-clock budget apart: a one-minute interval with the default
+    # ten minute budget must not read a pass finished eleven minutes ago as a dead reaper.
+    eleven_minutes = timedelta(minutes=11)
+    assert _row(_status(last=eleven_minutes, interval=60)).warn is True, "no budget reported: interval alone"
+    assert _row(_status(last=eleven_minutes, interval=60, budget=600)).ok is True
+    assert _row(_status(last=timedelta(minutes=16), interval=60, budget=600)).warn is True
 
 
 def test_the_threshold_follows_the_engines_own_interval() -> None:

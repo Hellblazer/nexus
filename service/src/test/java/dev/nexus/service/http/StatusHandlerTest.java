@@ -239,19 +239,20 @@ class StatusHandlerTest {
 
     @Test
     void reaper_reportsTheLastCompletedPassAndTheIntervalItRunsAt() throws Exception {
-        var status = new StatusHandler.ReaperStatus(true, 3600L, java.time.Instant.parse("2026-10-02T07:00:00Z"), 2L);
+        var status = new StatusHandler.ReaperStatus(true, 3600L, 600L, java.time.Instant.parse("2026-10-02T07:00:00Z"), 2L);
         start(new StatusHandler(null, null, 0L, null, () -> status));
 
         JsonNode reaper = get().get("reaper");
         assertThat(reaper.get("enabled").asBoolean()).isTrue();
         assertThat(reaper.get("interval_seconds").asLong()).isEqualTo(3600L);
+        assertThat(reaper.get("wall_clock_budget_seconds").asLong()).isEqualTo(600L);
         assertThat(reaper.get("last_completed_pass_at").asText()).isEqualTo("2026-10-02T07:00:00Z");
         assertThat(reaper.get("failed_passes_total").asLong()).isEqualTo(2L);
     }
 
     @Test
     void reaper_beforeItsFirstPassTheLastCompletedTimeIsNull_notAFabricatedValue() throws Exception {
-        var status = new StatusHandler.ReaperStatus(true, 3600L, null, 0L);
+        var status = new StatusHandler.ReaperStatus(true, 3600L, 600L, null, 0L);
         start(new StatusHandler(null, null, 0L, null, () -> status));
 
         JsonNode reaper = get().get("reaper");

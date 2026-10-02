@@ -365,6 +365,8 @@ class NexusServiceReaperWiringTest {
             var before = status.get();
             assertThat(before.get("enabled").asBoolean()).isTrue();
             assertThat(before.get("interval_seconds").asLong()).isEqualTo(3600L);
+            assertThat(before.get("wall_clock_budget_seconds").asLong()).as("the default 10 minute budget")
+                .isEqualTo(600L);
             assertThat(before.get("last_completed_pass_at").isNull()).as("no pass yet").isTrue();
 
             service.reaperScheduledTask().run();

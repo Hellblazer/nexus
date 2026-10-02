@@ -3775,7 +3775,7 @@ fixed until the engine restarts. The order of operations for the cloud engine is
 **Engine reaper (nexus-wbfpw.56).** `nx doctor`'s "Engine reaper" row reads the `reaper`
 object of `GET /v1/status`: `last_completed_pass_at`, the time the engine's chunk reaper
 last finished a pass, and `interval_seconds`. It warns when the last pass is older than three
-intervals plus two minutes, and when an engine more than that old has made none. A pass that
+intervals plus the pass's own wall-clock budget (`wall_clock_budget_seconds`) plus two minutes, and when an engine more than that old has made none. A pass that
 died does not move the time, and a pass with nothing to move writes no `gc_audit` row, so this
 is the one durable sign that the reaper is alive (a cloud operator has no engine log). The row
 is green and says "not applicable" when the engine cannot be reached (a box with no engine),

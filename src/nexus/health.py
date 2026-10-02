@@ -3925,8 +3925,9 @@ def _check_ownerless_writes(engine_status: object = _ENGINE_STATUS_UNSET) -> lis
 
 _ENGINE_REAPER_LABEL = "Engine reaper"
 
-#: A pass is stale when older than this many of the engine's own intervals (plus a fixed margin for the pass's own
-#: run time and for clock skew between this box and a managed engine).
+#: A pass is stale when older than this many of the engine's own intervals, plus the pass's own wall-clock budget
+#: (completions are at most interval + budget apart) and a fixed margin for clock skew between this box and a
+#: managed engine.
 _REAPER_STALE_INTERVALS = 3
 _REAPER_STALE_MARGIN_SECONDS = 120
 
@@ -3964,7 +3965,7 @@ def _check_engine_reaper(
     design against is a dead one. A pass with nothing to move writes no ``gc_audit`` row and a cloud operator
     has no engine log, so the engine reports the time of its last COMPLETED pass under ``reaper`` in
     ``GET /v1/status`` (a pass that died does not move it). This row warns when that time is older than
-    three of the engine's own intervals.
+    three of the engine's own intervals plus the length a pass may take.
 
     Not applicable (ok, no warning) when the engine cannot be reached (a virgin box), when it predates the
     field, when its reaper is not running, and when the body cannot be read, so nothing on a box with no
@@ -4000,7 +4001,8 @@ def _check_engine_reaper(
         return _na("the engine's reaper status could not be read")
 
     now = now or datetime.now(UTC)
-    limit = _REAPER_STALE_INTERVALS * interval + _REAPER_STALE_MARGIN_SECONDS
+    budget = _status_int(reaper.get("wall_clock_budget_seconds"))
+    limit = _REAPER_STALE_INTERVALS * interval + budget + _REAPER_STALE_MARGIN_SECONDS
     last_raw = reaper.get("last_completed_pass_at")
     failed = _status_int(reaper.get("failed_passes_total"))
     failed_note = (f"; {failed} pass{'es' if failed != 1 else ''} failed since the engine started"
