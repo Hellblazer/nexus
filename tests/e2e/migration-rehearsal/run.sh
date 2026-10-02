@@ -74,10 +74,11 @@ trap 'diag_exit_guard' EXIT
 
 cd "$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel)"  # the SCRIPT's checkout, never the caller's cwd: invoked from another checkout this built the wrong tree (2026-09-05 A/B)
 HERE="tests/e2e/migration-rehearsal"
-# One interpreter >= 3.11, resolved once; never a bare python3 (nexus-u67ow).
+# One interpreter >= 3.10, resolved once; never a bare python3 (nexus-u67ow). The only tomllib read
+# (the --stranded leg) asks for 3.11 where it reads, so --help and every other leg run on 3.10.
 # shellcheck source=lib/python.sh disable=SC1091
 source "$SCRIPT_DIR/../lib/python.sh"
-e2e_python_resolve 11 || exit 2
+e2e_python_resolve || exit 2
 IMAGE="nexus-migration-rehearsal"
 WITH_CLOUD=0
 DO_BUILD=1
@@ -319,6 +320,7 @@ done
 # Significant-2): a parse failure here must fail THIS leg loud, not FATAL
 # every other leg of the harness.
 if [ "$STRANDED" = 1 ]; then
+  e2e_python_resolve 11 || exit 2   # this leg reads tomllib (3.11+)
   STRAND_PIN_RELEASE="$(
     "$E2E_PYTHON" - <<'PY'
 import re, pathlib

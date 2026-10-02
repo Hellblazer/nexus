@@ -164,10 +164,21 @@ set +e
 # (`"command": "python3", "args": [<script>]`), so invoke it that way --
 # this gate now proves the shape production actually runs, not a launcher
 # path production no longer uses.
+# nexus-u67ow: the launch is a BARE `python3` resolved through PATH="$VENV/bin:...",
+# not "$E2E_PYTHON". Production runs the hook under the generation venv's
+# interpreter (the hook refuses < 3.12); the host's resolved floor-10
+# interpreter is not that one. _assert_venv_python3 proves PATH resolves the
+# name to the venv's own python3 before each launch.
+_assert_venv_python3() {
+    local got
+    got="$(env -i PATH="$VENV/bin:$PATH" sh -c 'command -v python3')"
+    [ "$got" = "$VENV/bin/python3" ] || _fail "bare python3 under PATH=\$VENV/bin:... resolves to ${got:-nothing}, not $VENV/bin/python3: the gate would not launch the hook the way production does"
+}
+_assert_venv_python3
 env -i HOME="$SB" PATH="$VENV/bin:$PATH" TERM=dumb NX_NO_TELEMETRY=1 \
     NEXUS_CONFIG_DIR="$SB/.config/nexus" CLAUDE_PLUGIN_ROOT="$NEW_PLUGIN_ROOT" \
     NX_LOCKSTEP_MARKER="$SB/.config/nexus/cli_lockstep_marker" NX_LOCKSTEP_LOG="$SB/.config/nexus/lockstep.log" \
-    "$E2E_PYTHON" "$NEW_PLUGIN_ROOT/hooks/scripts/version_lockstep_hook.py" \
+    python3 "$NEW_PLUGIN_ROOT/hooks/scripts/version_lockstep_hook.py" \
     </dev/null >"$HOOK_OUT" 2>"$WORK/hook.err"
 HRC=$?
 set -e
@@ -257,10 +268,12 @@ set +e
 # (bare `python3`), not the retired `_run_python_hook.sh` launcher -- a
 # shape correction alongside the deletion, so this gate proves what
 # production actually runs rather than a path it no longer uses.
+# Bare python3 through the venv PATH on purpose (nexus-u67ow; see the first launch above).
+_assert_venv_python3
 env -i HOME="$SB" PATH="$VENV/bin:$PATH" TERM=dumb NX_NO_TELEMETRY=1 \
     NEXUS_CONFIG_DIR="$SB/.config/nexus" CLAUDE_PLUGIN_ROOT="$NEW_PLUGIN_ROOT" \
     NX_LOCKSTEP_MARKER="$MARKER_FOR_HOOK" NX_LOCKSTEP_LOG="$SB/.config/nexus/lockstep.log" \
-    "$E2E_PYTHON" "$REPO_ROOT/conexus/hooks/scripts/version_lockstep_hook.py" \
+    python3 "$REPO_ROOT/conexus/hooks/scripts/version_lockstep_hook.py" \
     </dev/null >"$HOOK_OUT2" 2>"$WORK/hook2.err"
 HRC2=$?
 set -e

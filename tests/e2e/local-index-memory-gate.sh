@@ -435,8 +435,10 @@ EOF
     say "self-test: _service_pids / _service_rss_kb_total against a marker that matches nothing"
     # Real pgrep call (safe: the marker is a random, self-test-only token
     # nothing on the box can match), not a stub — proves the zero-samples
-    # path without faking `ps`. Deliberately no dependency on uv/python
-    # here: --self-test must run with nothing but bash + pgrep + ps.
+    # path without faking `ps`. This check itself needs only bash + pgrep + ps
+    # (no uv, no nexus); the script as a whole resolves a python >= 3.10 at
+    # the top (nexus-u67ow), before --self-test runs, and the JSON check
+    # below uses it.
     local nomatch rss
     nomatch="nx-memgate-selftest-no-such-marker-$$-$RANDOM-$RANDOM"
     rss="$(_service_rss_kb_total "$nomatch")"
@@ -493,8 +495,9 @@ EOF
     # args: peak_gb cap timeout flushes flushes_at_cap legacy_pages_at_cap killed wall_s manifest_retries refreshable_retries
     json="$(_emit_json "3.03" 16 600.0 8 2 0 0 187 0 0)"
     printf '%s\n' "$json"
-    if [ -n "${E2E_PYTHON:-}" ]; then
-        if printf '%s' "$json" | "$E2E_PYTHON" -c 'import json,sys
+    # E2E_PYTHON is always set here: e2e_python_resolve at the top exits 2 when no
+    # interpreter qualifies, so there is no "skip the structural check" branch.
+    if printf '%s' "$json" | "$E2E_PYTHON" -c 'import json,sys
 d=json.load(sys.stdin)
 assert d["peak_gb"]==3.03
 assert d["cap"]==16
@@ -503,13 +506,10 @@ assert d["flushes"]==8
 assert d["flushes_at_cap"]==2
 assert d["legacy_pages_at_cap"]==0
 assert d["flushes_at_cap"] <= d["flushes"], "D4: flushes_at_cap must never exceed flushes"' 2>/dev/null; then
-            ok "JSON line parses and round-trips the fields it claims, D4 coherence holds (flushes_at_cap <= flushes)"
-        else
-            bad "JSON line failed to parse, a field did not round-trip, or D4 coherence was violated"
-            failures=$((failures + 1))
-        fi
+        ok "JSON line parses and round-trips the fields it claims, D4 coherence holds (flushes_at_cap <= flushes)"
     else
-        note "no resolved python interpreter — skipped structural JSON validation (string shape only)"
+        bad "JSON line failed to parse, a field did not round-trip, or D4 coherence was violated"
+        failures=$((failures + 1))
     fi
 
     say "self-test: bash -n on this script itself"

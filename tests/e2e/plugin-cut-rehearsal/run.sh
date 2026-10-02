@@ -76,10 +76,14 @@ KEEP=0
 PROMOTE=0
 BASE_TAG=""
 SOURCE_REPO="$DEFAULT_REPO"
-# One interpreter >= 3.11, resolved once; never a bare python3 (nexus-u67ow).
+# One interpreter >= 3.10, resolved once; never a bare python3 (nexus-u67ow). The one tomllib read
+# (BASE_TAG from pyproject.toml, below) asks for 3.11 where it reads, so --help and a run given
+# --base-tag need only 3.10. Container mode runs this same script a second time INSIDE the image
+# (`bash /src/.../run.sh --host`), so lib/python.sh must exist in the /src mount (a worktree source
+# is staged by clone, i.e. committed files only) and the image's python must be >= 3.10.
 # shellcheck source=lib/python.sh disable=SC1091
 source "$SCRIPT_DIR/../lib/python.sh"
-e2e_python_resolve 11 || exit 2
+e2e_python_resolve || exit 2
 IMAGE="nexus-plugin-cut-rehearsal:latest"
 
 usage() { sed -n '2,45p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
@@ -100,6 +104,7 @@ done
 
 SOURCE_REPO="$(cd "$SOURCE_REPO" && pwd)"
 if [ -z "$BASE_TAG" ]; then
+    e2e_python_resolve 11 || exit 2   # tomllib (3.11+)
     BASE_TAG="v$("$E2E_PYTHON" -c "import tomllib,sys;print(tomllib.load(open(sys.argv[1],'rb'))['project']['version'])" "$SOURCE_REPO/pyproject.toml")"
 fi
 

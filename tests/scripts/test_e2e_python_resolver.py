@@ -106,12 +106,31 @@ _REHEARSE_PREFIX = "migration-rehearsal/rehearse_"  # every rehearse_*.sh runs i
 _LINES = {
     ("release-sandbox.sh", "(run: python3 tests/e2e/lib/claude_credentials.py status)"): "operator-facing message text",
     ("local-service-gate.sh", "uv run python3 -c"): "runs in the repo's uv environment, not the host python",
+    ("rdr208-mvv/run.sh", '"command": "python3",'): "hooks.json text written for the container image, which has its own python3",
+    ("hook-surface-shakeout/run.sh", '"command": "python3 /home/nexus/turn_end.py"'): (
+        "hooks.json text written for the shakeout container image"
+    ),
+    # The lockstep gate launches the plugin hook the way production does: exec form, bare python3,
+    # resolved through PATH="$VENV/bin:..." to the generation venv's interpreter (the hook refuses
+    # < 3.12; the host's resolved floor-10 python is not that one). _assert_venv_python3 proves the
+    # PATH resolution before each launch.
+    ("plugin-lockstep-gate.sh", "command -v python3"): "the resolution proof for the two launches below",
+    ("plugin-lockstep-gate.sh", "bare python3 under PATH="): "the failure message of that proof",
+    ("plugin-lockstep-gate.sh", 'python3 "$NEW_PLUGIN_ROOT/hooks/scripts/version_lockstep_hook.py"'): (
+        "production exec form: the generation venv's python3 via PATH"
+    ),
+    ("plugin-lockstep-gate.sh", 'python3 "$REPO_ROOT/conexus/hooks/scripts/version_lockstep_hook.py"'): (
+        "production exec form: the generation venv's python3 via PATH"
+    ),
 }
 
 #: Scripts that use "$E2E_PYTHON" without sourcing python.sh themselves.
 _NO_OWN_SOURCE = {"scenarios/00_debug_load.sh": "sourced by run.sh, which resolves first"}
 
-_BARE = re.compile(r"(?<![\w./$\"'-])python3(?![\w.=-])")
+# Quote and hyphen are NOT in the lookbehind: `bash -c "python3 ..."`, `eval "python3 ..."` and
+# `"${X:-python3}"` are all host-side calls (the last is the pre-change shape at
+# local-index-memory-gate.sh). Text that merely names python3 goes in _LINES with the reason.
+_BARE = re.compile(r"(?<![\w./$])python3(?![\w.=-])")
 
 
 def _host_scripts() -> list[Path]:
@@ -128,6 +147,21 @@ def _code_lines(path: Path) -> list[tuple[int, str]]:
     return [(i, ln) for i, ln in enumerate(path.read_text().splitlines(), 1) if not ln.lstrip().startswith("#")]
 
 
+def _bare_hits(path: Path, rel: str, used: set[tuple[str, str]] | None = None) -> list[str]:
+    """Code lines of ``path`` that name a bare python3 and are not allowlisted in _LINES."""
+    hits: list[str] = []
+    for i, ln in _code_lines(path):
+        if not _BARE.search(ln):
+            continue
+        hit = next(((f, frag) for (f, frag) in _LINES if f == rel and frag in ln), None)
+        if hit:
+            if used is not None:
+                used.add(hit)
+            continue
+        hits.append(f"{rel}:{i}: {ln.strip()[:120]}")
+    return hits
+
+
 def test_no_host_side_e2e_script_calls_a_bare_python3() -> None:
     offenders: list[str] = []
     used: set[tuple[str, str]] = set()
@@ -135,14 +169,7 @@ def test_no_host_side_e2e_script_calls_a_bare_python3() -> None:
     for path in _host_scripts():
         rel = path.relative_to(E2E).as_posix()
         scanned += 1
-        for i, ln in _code_lines(path):
-            if not _BARE.search(ln):
-                continue
-            hit = next(((f, frag) for (f, frag) in _LINES if f == rel and frag in ln), None)
-            if hit:
-                used.add(hit)
-                continue
-            offenders.append(f"{rel}:{i}: {ln.strip()[:120]}")
+        offenders += _bare_hits(path, rel, used)
     assert not offenders, (
         "bare python3 on the host side of the e2e harness (nexus-u67ow): route it through "
         '"$E2E_PYTHON" after `source tests/e2e/lib/python.sh; e2e_python_resolve`, or, for text '
@@ -155,27 +182,100 @@ def test_no_host_side_e2e_script_calls_a_bare_python3() -> None:
     assert not stale, f"allowlist entries that match no line any more: {stale}"
 
 
+#: Each shape a host call can take that a name-boundary lookbehind once let through. Every one of
+#: these must be flagged; the control lines must not be.
+_SHAPES = [
+    'bash -c "python3 -c \'print(1)\'"',
+    'eval "python3 \"$script\" --check"',
+    'out="$(printf x | "${PY:-python3}" -c \'import sys\')"',
+    'out="$(python3 -c \'print(1)\')"',
+    "python3 tool.py",
+]
+_CONTROLS = [
+    '"$E2E_PYTHON" -c \'print(1)\'',
+    'out="$("${PY:-$E2E_PYTHON}" -c \'print(1)\')"',
+    "/usr/bin/python3 tool.py",   # an explicit path is a deliberate choice, not a PATH lookup
+    "uv run python3.12 -c x",
+    "# python3 in a comment",
+]
+
+
+@pytest.mark.parametrize("shape", _SHAPES)
+def test_the_lint_flags_every_shape_of_a_bare_python3(tmp_path: Path, shape: str) -> None:
+    """The lint's own falsifiability: a temp script carrying one shape is flagged by the same
+    function the tree scan uses. Mutation: put a quote or a hyphen back in _BARE's lookbehind and
+    the bash -c / eval / ${X:-python3} cases go green-on-the-bug, i.e. this test goes red."""
+    script = tmp_path / "gate.sh"
+    script.write_text(f"#!/usr/bin/env bash\n{shape}\n")
+    assert _bare_hits(script, "gate.sh"), f"not flagged: {shape}"
+
+
+@pytest.mark.parametrize("control", _CONTROLS)
+def test_the_lint_passes_the_resolved_and_explicit_forms(tmp_path: Path, control: str) -> None:
+    script = tmp_path / "gate.sh"
+    script.write_text(f"#!/usr/bin/env bash\n{control}\n")
+    assert not _bare_hits(script, "gate.sh"), f"flagged but fine: {control}"
+
+
+# lib/candidate_engine.sh sources python.sh itself (its own entry is checked like any other script's),
+# so a script that sources it has python.sh sourced too.
+_SOURCE_LINE = re.compile(r"^\s*(?:source|\.)\s+.*\b(?:python|candidate_engine)\.sh\b")
+_RESOLVE_CALL = re.compile(r"\be2e_python_resolve\b")
+
+
+def _first(path: Path, pred) -> int | None:
+    return next((i for i, ln in _code_lines(path) if pred(ln)), None)
+
+
 def test_the_sweep_actually_routed_the_calls_through_the_resolver() -> None:
     """A lint that only forbids a spelling passes on a tree where the calls were deleted. Count the
-    routed sites, and require that every script using them resolves first."""
+    routed sites, and require, per script, that it sources python.sh, calls the resolver, and does
+    both BEFORE the first line that uses $E2E_PYTHON."""
     routed = 0
-    unresolved: list[str] = []
+    problems: list[str] = []
     for path in _host_scripts():
         rel = path.relative_to(E2E).as_posix()
         text = "\n".join(ln for _, ln in _code_lines(path))
-        n = text.count("$E2E_PYTHON")
-        routed += n
-        if n and rel not in _NO_OWN_SOURCE and "python.sh" not in text:
-            unresolved.append(rel)
+        routed += text.count("$E2E_PYTHON")
+        if "$E2E_PYTHON" not in text or rel in _NO_OWN_SOURCE:
+            continue
+        src = _first(path, _SOURCE_LINE.search)
+        res = _first(path, lambda ln: bool(_RESOLVE_CALL.search(ln)) and not _SOURCE_LINE.search(ln))
+        use = _first(path, lambda ln: "$E2E_PYTHON" in ln)
+        if src is None or res is None:
+            problems.append(f"{rel}: uses $E2E_PYTHON but never sources lib/python.sh and calls e2e_python_resolve")
+        elif not (src < res <= use):
+            problems.append(f"{rel}: first use at line {use} precedes source (line {src}) / resolve (line {res})")
     assert routed >= 100, f"only {routed} routed call sites; the sweep was undone"
-    assert not unresolved, f"use $E2E_PYTHON but never source lib/python.sh: {unresolved}"
+    assert not problems, "\n".join(problems)
+
+
+def test_the_ordering_check_catches_a_use_before_the_resolve(tmp_path: Path) -> None:
+    """The ordering predicate above is not a tautology: on a script that uses $E2E_PYTHON on a line
+    before it resolves, source < resolve <= use is false."""
+    bad = tmp_path / "bad.sh"
+    bad.write_text('"$E2E_PYTHON" -c x\nsource "$R/tests/e2e/lib/python.sh"\ne2e_python_resolve || exit 2\n')
+    src = _first(bad, _SOURCE_LINE.search)
+    res = _first(bad, lambda ln: bool(_RESOLVE_CALL.search(ln)) and not _SOURCE_LINE.search(ln))
+    use = _first(bad, lambda ln: "$E2E_PYTHON" in ln)
+    assert (src, res, use) == (2, 3, 1)
+    assert not (src < res <= use)
 
 
 @pytest.mark.parametrize("rel", sorted(_NO_OWN_SOURCE))
 def test_the_scripts_that_do_not_resolve_themselves_are_sourced_by_one_that_does(rel: str) -> None:
-    run_sh = (E2E / "run.sh").read_text()
-    assert "e2e_python_resolve" in run_sh
-    assert "scenarios" in run_sh, f"run.sh no longer sources the scenarios, so {rel} would run with no resolved interpreter"
+    """run.sh resolves, then sources every scenario in a loop. Checked on code lines only (the
+    header comment names the scenarios too), in order: resolve, then the scenario loop, and the
+    loop's body calls a function that ``source``s its argument."""
+    run_sh = E2E / "run.sh"
+    resolve = _first(run_sh, lambda ln: bool(_RESOLVE_CALL.search(ln)) and not _SOURCE_LINE.search(ln))
+    loop = _first(run_sh, lambda ln: ln.lstrip().startswith("for ") and "/scenarios/" in ln)
+    sourcing = _first(run_sh, lambda ln: re.match(r"^\s*source\s+\"\$file\"\s*$", ln) is not None)
+    assert resolve is not None, "run.sh no longer calls e2e_python_resolve"
+    assert loop is not None, f"run.sh no longer loops over scenarios/, so {rel} would never run"
+    assert sourcing is not None, f'run.sh no longer does `source "$file"`, so {rel} would never be sourced'
+    assert resolve < loop, "run.sh sources the scenarios before it resolves an interpreter"
+    assert (E2E / rel).is_file()
 
 
 def test_the_resolver_floor_matches_the_one_module_that_needs_it() -> None:
