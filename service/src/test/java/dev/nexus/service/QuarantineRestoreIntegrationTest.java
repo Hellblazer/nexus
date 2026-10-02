@@ -1464,6 +1464,34 @@ class QuarantineRestoreIntegrationTest extends AtomicWriteTestBase {
         assertThat(manifest(t, doc)).isEmpty();
     }
 
+    @Test
+    void aPositionTheManifestAlreadyNamesIsPositionTaken_notAnAmbiguity_evenWhenThatChunkCarriesTheKeyToo()
+            throws Exception {
+        // The current chunk names the same document and position as the stale one, so a rival scan alone would call
+        // this ambiguous; but a manifest row already holds the position, which is the stronger, plainer fact.
+        String t = newTenant();
+        String c = col("knowledge");
+        String doc = "1.28.1";
+        String stale = quarantinedWith(t, c, Map.of("stale", Map.<String, Object>of(
+            "catalog_doc_id", doc, "chunk_index", 0))).get(0);
+        liveDoc(t, c, doc, "Re-indexed", 1, "r.md", Map.of());
+        String current = orphan(t, c, "current-keyed", Map.<String, Object>of("catalog_doc_id", doc, "chunk_index", 0));
+        try (Connection su = pg.createConnection("")) {
+            DSL.using(su, SQLDialect.POSTGRES)
+                .insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
+                    CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
+                    CATALOG_DOCUMENT_CHUNKS.CHUNK_INDEX, CATALOG_DOCUMENT_CHUNKS.COLLECTION)
+                .values(t, doc, 0, Chash.fromHex(current).toBytes(), 0, c).execute();
+        }
+
+        QuarantineRestoreOutcome out = vectors.quarantineRestore(t, c, quarantineOf(c), List.of(stale), ACTOR, false);
+
+        assertThat(verdictOf(out, stale)).isEqualTo("superseded");
+        assertThat(reasonOf(out, stale)).as("the document has moved on: not 'compare the two versions'")
+            .isEqualTo("position_taken");
+        assertThat(manifest(t, doc)).containsExactly(new ManifestRow(0, current, c));
+    }
+
     /** Blocks until a backend is waiting on an advisory lock inside a quarantine_restore_chunks call. */
     private void awaitAdvisoryLockWaiter() throws Exception {
         var activity = DSL.table(DSL.name("pg_catalog", "pg_stat_activity"));
