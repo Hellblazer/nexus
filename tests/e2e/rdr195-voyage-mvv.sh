@@ -132,7 +132,7 @@ echo "[mvv] VOYAGE_API_KEY loaded from .env (redacted)"
 PG_BIN="$(uv run python -c "
 from tests.db._service_fixture import pg_bin_dir
 print(pg_bin_dir())
-")"
+" | tail -n 1)"   # last line only: a structlog debug line can land on stdout ahead of the path
 if [[ ! -x "$PG_BIN/initdb" ]]; then
   echo "RDR-195 MVV FAILED: no usable PG bundle at $PG_BIN" >&2
   exit 1
@@ -229,6 +229,11 @@ END \$\$;
 fi
 PG_USER="${PG_USER:-$USER}"
 echo "[mvv] PG up (pid via postmaster.pid in $PGDATA)"
+
+# The client runs from this dev checkout, so the production-write guard
+# (nexus-a2qhz) refuses every write unless the target is opted in. The only
+# write target here is the throwaway engine this script just provisioned.
+export NX_ALLOW_PROD_WRITE="${NX_ALLOW_PROD_WRITE:-rdr195 voyage MVV: writes go to the throwaway local engine this script provisions}"
 
 # ── Boot the engine jar in VOYAGE mode ────────────────────────────────
 SVC_PORT="$(free_port)"

@@ -85,7 +85,8 @@ Known misreadings, all of them:
 
 An expected job that never posted (nexus-vyg07). A board fold only sees posts,
 and ``queued``/``in_progress`` posts expire at 6 h while ``completed`` posts last
-3 days. Service CI's Java job runs on ``hellmini-ci`` for a develop push; with
+3 days. Service CI's Java job runs on ``hellmini-ci`` for a develop push while
+``SERVICE_CI_PUSH_RUNNER`` is ``hellmini-ci`` (opt-in; hosted otherwise); with
 that runner offline the job sits queued, its ``queued`` post expires, and the one
 post left for the commit is ``service change detection`` success: one green job,
 exit 0, for a commit whose engine suite never ran. ``EXPECTED_JOBS`` names, per

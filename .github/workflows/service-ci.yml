@@ -55,7 +55,60 @@ jobs:
       # (`java-test-and-drift-guard`'s `if:`) now see only a value that
       # already passed the true/false case check, not the raw dorny output.
       service: ${{ steps.decide.outputs.service }}
+      # Which runner the Java job below takes (nexus-xyrtc). Published by the
+      # `route` step, which makes the decision in bash; see that step.
+      java_runner: ${{ steps.route.outputs.java_runner }}
     steps:
+      - name: Decide which runner the Java job takes (ubuntu-latest or hellmini-ci)
+        id: route
+        # THE DEFAULT IS GITHUB-HOSTED (Sam, 2026-10-02, nexus-xyrtc). The Java
+        # job runs on the self-hosted `hellmini-ci` runner ONLY for an OWNER PUSH
+        # while the repository variable SERVICE_CI_PUSH_RUNNER is exactly
+        # `hellmini-ci`. Unset, empty, a typo, a different case, a stray space or
+        # any other value (`hellmini` and `ubuntu-latest` included) means
+        # `ubuntu-latest`. Every pull_request, and every push by anyone but the
+        # repo owner, gets `ubuntu-latest` whatever the variable says.
+        #
+        # WHY THIS IS BASH AND NOT A `runs-on` EXPRESSION. Every `==` in a
+        # GitHub expression ignores case, so `Hellmini-CI` would opt in there.
+        # "Exactly hellmini-ci" needs a case-sensitive test, and bash `=` is
+        # one. The expression below only carries the owner-push rule (the login
+        # comparison SHOULD ignore case); the variable travels raw in env. The
+        # label this step can publish is one of two literals, so the variable
+        # can never send a push to the `hellmini` release runner or any other
+        # label, and a typo cannot queue the job for a label no runner has.
+        # Same shape as ci.yml's `route` step for QWEN_CI_PUSH_RUNNER.
+        #
+        # The owner rule is the one the Java job's consistency check re-asserts
+        # on the self-hosted side: account id AND triggering actor both the
+        # owner, push event only. The id compares accounts, not logins (a
+        # renamed login can be re-registered); triggering_actor keeps a re-run
+        # by another account of the owner's push off the self-hosted runner. A
+        # job-level `if:` cannot host this rule, because skipping would leave a
+        # non-owner push untested instead of rerouting it.
+        #
+        # The variable is read when this job runs. "Re-run failed jobs" does not
+        # re-run `changes` once it has succeeded, so it keeps the OLD
+        # `java_runner`, whichever way the variable moved since: to change the
+        # route for a commit already pushed, use "Re-run all jobs" (or push).
+        # There is NO automatic fallback if hellmini-ci is offline while the
+        # variable is on: the Java job queues until GitHub gives up, and someone
+        # must unset the variable.
+        #
+        # A ROUTING RULE, NOT A SECURITY BOUNDARY: this file is controlled by
+        # whoever can push a branch (see the comment on the Java job's runs-on).
+        env:
+          OWNER_PUSH: ${{ github.event_name == 'push' && github.actor_id == github.repository_owner_id && github.triggering_actor == github.repository_owner }}
+          SERVICE_CI_PUSH_RUNNER: ${{ vars.SERVICE_CI_PUSH_RUNNER }}
+        run: |
+          set -euo pipefail
+          JAVA_RUNNER=ubuntu-latest
+          if [ "$OWNER_PUSH" = "true" ] && [ "$SERVICE_CI_PUSH_RUNNER" = "hellmini-ci" ]; then
+            JAVA_RUNNER=hellmini-ci
+          fi
+          echo "java_runner=$JAVA_RUNNER" >> "$GITHUB_OUTPUT"
+          echo "Service CI Java job routing: $JAVA_RUNNER (event=$GITHUB_EVENT_NAME owner_push=$OWNER_PUSH)"
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
         with:
           # Full history so dorny/paths-filter resolves the merge-base without
@@ -127,18 +180,19 @@ jobs:
     name: Java tests + jOOQ codegen drift guard
     needs: changes
     if: needs.changes.outputs.service == 'true'
-    # WHERE THIS JOB RUNS (nexus-f5i1m; Sam, 2026-09-30, session nexus_654).
-    # CURRENT STATE (Sam, 2026-10-02): the repository variable
-    # SERVICE_CI_PUSH_RUNNER is set to `ubuntu-latest`, so owner pushes run on
-    # GitHub-hosted runners like everything else. The text below describes the
-    # `hellmini-ci` route, which this file still implements and which is what an
-    # UNSET variable (or any value but `ubuntu-latest`) selects.
-    # Pushes to main/develop run on the `hellmini-ci` self-hosted runner (the
-    # hellmini Mac mini, macOS arm64, Docker via a per-job colima VM) when
-    # that route is on;
-    # pull_request stays on ubuntu-latest. The job took 21 to 34 min on
-    # GitHub-hosted runners, timed out, flaked on chance-based tests, and every
-    # develop push queued behind it; hellmini is otherwise idle.
+    # WHERE THIS JOB RUNS (nexus-f5i1m; Sam, 2026-09-30, session nexus_654;
+    # default inverted 2026-10-02, nexus-xyrtc).
+    # THE DEFAULT IS GITHUB-HOSTED `ubuntu-latest`. The job runs on the
+    # `hellmini-ci` self-hosted runner (the hellmini Mac mini, macOS arm64,
+    # Docker via a per-job colima VM) only for an owner push while the
+    # repository variable SERVICE_CI_PUSH_RUNNER is exactly `hellmini-ci`; the
+    # `route` step in the `changes` job decides and publishes `java_runner`, and
+    # `runs-on` below only reads it. pull_request always stays on ubuntu-latest.
+    # The route stays implemented, and the runner registered, as an opt-in.
+    # History: the job took 21 to 34 min on GitHub-hosted runners, timed out,
+    # flaked on chance-based tests, and every develop push queued behind it, so
+    # on 2026-09-30 owner pushes went to hellmini-ci by default; the review
+    # below reversed that.
     #
     # OWN RUNNER, OWN USER. `hellmini-ci` runs as the macOS user `ghci`, with its
     # own Maven repo, tool cache and per-job colima. Release jobs (the
@@ -153,59 +207,59 @@ jobs:
     # `sudo -n` refused, no Developer ID signing identity visible. Until a run of
     # that probe is green, read "isolated" here as "intended".
     #
-    # WHAT THE EXPRESSION DOES. THIS workflow's routing never selects a
+    # WHAT THE ROUTING DOES. THIS workflow's routing never selects a
     # self-hosted runner for a pull_request or for a push by anyone but the repo
-    # owner (any other actor falls through to ubuntu-latest, so a push by
-    # someone else is still tested, just not on the self-hosted box). That is a
-    # routing rule, NOT a security boundary: the expression and the guard step
-    # live in this file, and whoever can push a branch controls this file. A
-    # write collaborator could target a self-hosted runner from their own
-    # workflow change (a same-repo PR that edits runs-on or adds a workflow; a
-    # fork PR too once the approval policy lets it run), and the owner's later
-    # push to a tip containing a collaborator's merged code would run that code
-    # there. As of 2026-09-30 (Sam) the repo has no write collaborators, so only
-    # the owner can push or run workflows; that, the fork-PR approval policy and
-    # branch protection are the real controls, and adding a collaborator back
-    # reopens the paths above.
+    # owner (any other actor gets ubuntu-latest, so a push by someone else is
+    # still tested, just not on the self-hosted box), and never without the
+    # variable being exactly `hellmini-ci`. That is a routing rule, NOT a
+    # security boundary: the `route` step and the guard step live in this file,
+    # and whoever can push a branch controls this file. A write collaborator
+    # could target a self-hosted runner from their own workflow change (a
+    # same-repo PR that edits runs-on or adds a workflow; a fork PR too once the
+    # approval policy lets it run), and the owner's later push to a tip
+    # containing a collaborator's merged code would run that code there while
+    # the variable is on. As of 2026-09-30 (Sam) the repo has no write
+    # collaborators, so only the owner can push or run workflows; that, the
+    # fork-PR approval policy and branch protection are the real controls, and
+    # adding a collaborator back reopens the paths above.
     #
-    # The first step is a CONSISTENCY CHECK on the same github.* values the
-    # expression reads: it catches an editing mistake in the expression, not a
+    # The first step below is a CONSISTENCY CHECK on the same github.* values
+    # the `route` step reads: it catches an editing mistake in the route, not a
     # hostile edit. It compares account ids, not logins (a renamed login can be
     # re-registered), and includes triggering_actor so a re-run by another
     # account of the owner's push does not land on the self-hosted runner.
-    # A job-level `if:` cannot host the actor rule, because skipping would
-    # leave a non-owner push untested instead of rerouting it.
     #
-    # WHAT CHANGES. The job now tests macOS arm64 on push while PRs test linux
-    # amd64, so a platform-specific red on push has no PR-side twin. It also
-    # does not get faster: the probe (on the release runner, before hellmini-ci
-    # existed) took 24.4 min against 21 to 34 min on GitHub-hosted runners.
-    # What it removes is the hosted-runner timeout exposure and the queueing
+    # WHAT CHANGES WHEN THE ROUTE IS ON. The job tests macOS arm64 on push while
+    # PRs test linux amd64, so a platform-specific red on push has no PR-side
+    # twin. It also does not get faster: the probe (on the release runner,
+    # before hellmini-ci existed) took 24.4 min against 21 to 34 min on
+    # GitHub-hosted runners. What it removes is the hosted-runner timeout exposure and the queueing
     # behind a slow hosted job.
     #
     # REVIEW (Sam, 2026-09-30 plan, decided 2026-10-02): the plan was about 10
     # develop runs on hellmini-ci, then compare job minutes with hosted and set
-    # SERVICE_CI_PUSH_RUNNER to `ubuntu-latest` unless hellmini-ci was clearly
-    # faster. After 21 runs: hellmini-ci green Java jobs 18.2 to 34.4 min (median
-    # 20.6), hosted 21.1 to 34.1 (median 25.2, 2026-09-29/30); hosted jobs started
+    # SERVICE_CI_PUSH_RUNNER away from hellmini-ci unless it was clearly faster.
+    # After 21 runs: hellmini-ci green Java jobs 18.2 to 34.4 min (median 20.6),
+    # hosted 21.1 to 34.1 (median 25.2, 2026-09-29/30); hosted jobs started
     # 2 to 4 s after change detection, so no queueing was avoided; three false
-    # reds on 2026-10-02 came from colima port leaks. Sam set the variable to
-    # `ubuntu-latest`. The earlier four-run measurements (hosted median about 31,
-    # hellmini about 27) are superseded.
+    # reds on 2026-10-02 came from colima port leaks. Sam first set the variable to
+    # `ubuntu-latest`, then (same day, nexus-xyrtc) inverted the default so that
+    # hosted is what an unset variable means. The earlier four-run measurements
+    # (hosted median about 31, hellmini about 27) are superseded.
     #
     # OFFLINE FALLBACK AND THE ALLOWLIST. A job queued for a runner that is down
     # waits until GitHub gives up (hellmini needs a KVM unlock after a FileVault
-    # reboot). Set the repository variable SERVICE_CI_PUSH_RUNNER to exactly
-    # `ubuntu-latest` (Settings > Secrets and variables > Actions > Variables)
-    # and the next push runs on GitHub's runners with no code change; delete the
-    # variable to return to hellmini-ci (the route stays implemented and the
-    # runner registered, as an opt-in). The expression treats that one value as
-    # the only override: unset, any other value, `hellmini` included, a typo,
-    # all mean hellmini-ci. So the variable can never send a push to the
+    # reboot). To use hellmini-ci, set the repository variable
+    # SERVICE_CI_PUSH_RUNNER to exactly `hellmini-ci` (Settings > Secrets and
+    # variables > Actions > Variables); delete the variable (or set anything
+    # else) and the next push runs on GitHub's runners with no code change. The
+    # `route` step treats that one value as the only opt-in: unset, any other
+    # value, `hellmini` included, a typo, a different case, all mean
+    # ubuntu-latest. So the variable can never send a push to the
     # release-signing runner, and a typo cannot queue the job for a label that
-    # no runner has. The variable is read at job start, so a run already queued
-    # for a dead runner must be cancelled and re-run to pick it up (not verified
-    # that a re-run re-reads it).
+    # no runner has. The variable is read when `changes` runs, so a run already
+    # queued for a dead runner must be cancelled and re-run with "Re-run all
+    # jobs" (a failed-jobs re-run keeps the old output).
     #
     # RUNNER SHARING. `hellmini-ci` is a separate runner from the release
     # runner, so this job no longer queues behind a release build, and a release
@@ -240,7 +294,9 @@ jobs:
     # names the self-hosted hellmini exception: owned hardware, no per-minute
     # charge. (Hosted minutes are also free on a public repo, so this move saves
     # no money; see the review plan above.)
-    runs-on: ${{ github.event_name == 'push' && github.actor_id == github.repository_owner_id && github.triggering_actor == github.repository_owner && (vars.SERVICE_CI_PUSH_RUNNER == 'ubuntu-latest' && 'ubuntu-latest' || 'hellmini-ci') || 'ubuntu-latest' }}
+    # Read from the `route` step (see the `changes` job). The `|| 'ubuntu-latest'`
+    # is a belt for an empty output; the step publishes one of two literals.
+    runs-on: ${{ needs.changes.outputs.java_runner || 'ubuntu-latest' }}
     permissions:
       contents: read
     # nexus-rjk2a, measured 2026-09-29/30 (14 runs in 30 hours): the job took
@@ -286,7 +342,7 @@ jobs:
         run: |
           set -euo pipefail
           # Consistency check, not a security control (see the comment on
-          # runs-on): the runs-on expression should never have sent any other
+          # the `route` step): the route should never have sent any other
           # event or account here.
           if [ "$GITHUB_EVENT_NAME" != "push" ] || [ "$ACTOR_ID" != "$OWNER_ID" ] || [ "$TRIGGERING_ACTOR" != "$OWNER" ]; then
             echo "::error::routing inconsistency: a self-hosted runner got event=$GITHUB_EVENT_NAME actor_id=$ACTOR_ID triggering_actor=$TRIGGERING_ACTOR (expected an owner push)"

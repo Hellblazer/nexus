@@ -158,7 +158,7 @@ This repo is public and has four self-hosted runners:
 | Label | Host and user | Takes |
 |---|---|---|
 | `hellmini` | Mac mini, macOS user `ghrunner` | release jobs: the engine-service release legs, the PG-bundle cache seed (Sam, 2026-09-28, nexus-yd9po) |
-| `hellmini-ci` | same Mac mini, macOS user `ghci` | nothing by default since 2026-10-02: the Service CI Java job's owner-push route, off while `SERVICE_CI_PUSH_RUNNER` is `ubuntu-latest` (see Service CI routing; Sam, 2026-09-30 to 2026-10-02, nexus-f5i1m) |
+| `hellmini-ci` | same Mac mini, macOS user `ghci` | nothing by default since 2026-10-02: the Service CI Java job's owner-push route, on only while `SERVICE_CI_PUSH_RUNNER` is exactly `hellmini-ci` (opt-in; see Service CI routing; Sam, 2026-09-30 to 2026-10-02, nexus-f5i1m, nexus-xyrtc) |
 | `qwen-linux` (custom label `qwen-linux`; today's registration also carries `self-hosted`, `Linux`, `X64`, to be dropped, see below) | qwentescence, WSL, Linux user `ghci` (private TMPDIR) | the full Python pytest suite as one `-n 8` job (`test-qwen` in `ci.yml`), on owner pushes to develop only, and only while the repository variable `QWEN_CI_PUSH_RUNNER` is `qwen-linux` (opt-in; Sam, 2026-10-01) |
 | `gtr-windows` (`[self-hosted, X64, Windows]`, registered earlier as `qwen-windows`) | host not recorded in this repo | no workflow in this repo. Sam will deregister it (decided 2026-10-02; pending host action, still online until then) |
 
@@ -327,36 +327,46 @@ inside the lock. The T2 how-to `nexus/qwentescence-test-host-howto` carries the
 full host recipe.
 
 **Service CI routing.** `service-ci.yml`'s comments are the one authoritative
-copy of how it works; this is the summary. An owner push (account id and
-triggering actor both the repo owner) runs the Java job on `hellmini-ci` when
-the repository variable `SERVICE_CI_PUSH_RUNNER` is unset or anything but
-`ubuntu-latest`; every `pull_request` and any other actor's push runs on
-`ubuntu-latest`. **Current state (Sam, 2026-10-02): the variable is set to
-`ubuntu-latest`, so owner pushes run on GitHub-hosted runners.** The decision
-followed the 10-run review Sam set on 2026-09-30 (21 runs on `hellmini-ci` by then):
+copy of how it works; this is the summary. **The default is GitHub-hosted
+`ubuntu-latest` (Sam, 2026-10-02, nexus-xyrtc).** An owner push (account id and
+triggering actor both the repo owner) runs the Java job on `hellmini-ci` ONLY
+when the repository variable `SERVICE_CI_PUSH_RUNNER` is exactly `hellmini-ci`;
+unset, empty, a typo, `Hellmini-CI`, a stray space, `hellmini`, `ubuntu-latest`
+or any other value means `ubuntu-latest`, and every `pull_request` and any other
+actor's push runs on `ubuntu-latest` whatever the variable says. The decision is
+made in bash, in the `route` step of the `changes` job (output `java_runner`,
+read by the Java job's `runs-on`), because every `==` in a GitHub expression
+ignores case and "exactly `hellmini-ci`" needs a case-sensitive test; the
+expression only carries the owner-push rule. The step publishes one of two
+literals, so the variable can never route to `hellmini` or any other label.
+Like `QWEN_CI_PUSH_RUNNER`, the variable is read when `changes` runs and a
+"Re-run failed jobs" keeps the old output; use "Re-run all jobs" or push.
+Before this the default was `hellmini-ci` and the variable was set to
+`ubuntu-latest` as the off switch; that is inverted, and the variable is
+currently set to `ubuntu-latest`, which now means the same thing as unset (the
+setting is harmless and can be deleted). The decision followed the 10-run
+review Sam set on 2026-09-30 (21 runs on `hellmini-ci` by then):
 `hellmini-ci` green Java jobs had a median of 20.6 min against 25.2 min hosted,
 a gain of about 4.6 min on a check nothing blocks on for develop pushes, and
 hosted jobs showed no queueing (started 2 to 4 s after change detection). Against
-that, three false reds on 2026-10-02 came from colima port leaks. Only the exact
-value `ubuntu-latest` selects hosted; deleting the variable, or any other value,
-returns owner pushes to `hellmini-ci` (the expression is unchanged, and the
-variable can never route to `hellmini`). `hellmini-ci` stays registered as that
-opt-in route. When it is in use the Java job tests macOS arm64 on push while PRs
-test linux amd64, so a platform-specific red on push has no PR-side twin. The
-`ghci` runner carries a host-side guard (`wait-for-host.sh`, a runner hook that
-exists only on the host, not in this repo) that holds the job up to 20 minutes
-while the `ghrunner` runner has a job running or a suite or service lease is
-held, then proceeds. It is one-directional: it does not stop a hand run or a
-release leg that starts after the CI job. A full `pytest -n auto` or a native
-release build on the same 24 GB box can still thrash it.
+that, three false reds on 2026-10-02 came from colima port leaks.
+`hellmini-ci` stays registered as the opt-in route. When it is in use the Java
+job tests macOS arm64 on push while PRs test linux amd64, so a platform-specific
+red on push has no PR-side twin. The `ghci` runner carries a host-side guard
+(`wait-for-host.sh`, a runner hook that exists only on the host, not in this
+repo) that holds the job up to 20 minutes while the `ghrunner` runner has a job
+running or a suite or service lease is held, then proceeds. It is
+one-directional: it does not stop a hand run or a release leg that starts after
+the CI job. A full `pytest -n auto` or a native release build on the same 24 GB
+box can still thrash it.
 
-**What is and is not a control.** The `runs-on` expression is a routing rule,
+**What is and is not a control.** The routing (a `runs-on` label, or the bash `route` step that feeds one) is a routing rule,
 not a security boundary: it lives in a file whoever can push a branch controls.
 The controls are the collaborator list (owner only since 2026-09-30, when four
 write collaborators were removed), the fork-PR approval policy (all external
 contributors need an approval click), and branch protection. A merged external
 or Dependabot PR runs its code on `hellmini-ci` at the owner's next `service/**`
-push while the Service CI route is on `hellmini-ci` (not the current state), and, once `QWEN_CI_PUSH_RUNNER` is `qwen-linux`, on `qwen-linux` at the owner's next push to develop that changes
+push while the Service CI route is on `hellmini-ci` (variable exactly `hellmini-ci`; not the current state), and, once `QWEN_CI_PUSH_RUNNER` is `qwen-linux`, on `qwen-linux` at the owner's next push to develop that changes
 anything outside the doc-only set (`docs/**`, `web/**`, root `README.md`,
 `CHANGELOG*` and `LICENSE*`, `conexus/CHANGELOG.md`), by design: that is `src/`,
 `tests/`, `scripts/`, `pyproject.toml`, `uv.lock`, `service/`, `conexus/`, `sn/`
@@ -441,7 +451,8 @@ Maven, model and PG-bundle caches and the `TMPDIR`.
 - any `runs-on` that names a self-hosted label, `self-hosted`, `hellmini`,
   `hellmini-ci`, `qwen-linux` or `gtr-windows`;
 - `service/` tests and `pom.xml` (merged, they run on `hellmini-ci` at the next
-  owner push that changes `service/**`, and on `qwen-linux` at the next owner push
+  owner push that changes `service/**` while `SERVICE_CI_PUSH_RUNNER` is exactly
+  `hellmini-ci` (not the default), and on `qwen-linux` at the next owner push
   to develop: `scripts/build-gate-jar.sh` runs Maven, its plugins and the jOOQ
   codegen there as `ghci`, with docker);
 - anything the `code` predicate admits, which is everything but the doc-only set

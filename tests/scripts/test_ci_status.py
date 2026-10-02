@@ -514,7 +514,8 @@ def test_the_policy_set_names_ci_and_not_service_ci() -> None:
 
 # ── an expected job that never posted (nexus-vyg07) ─────────────────────────
 #
-# Service CI's Java job runs on hellmini-ci for a develop push. When that runner
+# Service CI's Java job runs on hellmini-ci for a develop push while the opt-in
+# variable SERVICE_CI_PUSH_RUNNER is `hellmini-ci`. When that runner
 # is offline the job sits queued; its queued post expires at 6 h, and the only
 # post left for the commit is `service change detection` success. The fold saw
 # one green job and exit 0 on a commit whose engine suite never ran. A push run
