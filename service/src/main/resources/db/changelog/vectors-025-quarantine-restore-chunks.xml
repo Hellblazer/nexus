@@ -106,6 +106,9 @@
     WHEN IT WRITES NOTHING (r_reattach, per chunk; the chunk is still restored, bytes only, still hidden):
       superseded     the owner is live but the chunk is not the document's to take back. r_reason says which:
                        indexing        the document is in the middle of an index run (index_state indexing)
+                       failed          the document's last index run failed (index_state failed): a failed run
+                                       leaves the manifest it had written, partial and of unknown shape, so the
+                                       restore does not extend it. Re-index the document, then run again
                        complete        the document is stamped complete: its manifest is verified and authoritative
                                        for its text, so a manifest-less chunk of it is stale by definition. This
                                        includes a document emptied on purpose (chunk_count 0, complete), which a
@@ -115,7 +118,10 @@
                                        index_content_hash (both present): the chunk was cut from another version
                        position_taken  the document's manifest already holds another row at that position
                        rival           another chunk, in the origin or in this origin's quarantine sibling, names
-                                       the same document at the same position. Judged against what is STORED, not
+                                       the same document at the same position, for a forward-placed chunk and for a
+                                       single-chunk legacy note at position 0 alike (a keyed chunk with no
+                                       chunk_index counts as position 0 when the document registers at most one
+                                       chunk). Judged against what is STORED, not
                                        against what this call names, so two versions of one position are caught
                                        when they land on different 1000-row pages or in different calls; every one
                                        of them is refused and the operator decides by reading the text
@@ -138,11 +144,27 @@
     metadata.doc_id equal to the chunk. Chunks cut from files by the indexer carry neither, so they read no_live_owner
     and come back as bytes, hidden: the remedy is to re-index the owning file.
 
-    LOCKS FOR THE WRITE. After the move, for each document the plan would attach to, in tumbler order, the
-    per-document index-run advisory lock manifest writers take (acquireIndexRunLock) is taken, then the plan is
-    computed again under it and the rows are inserted ON CONFLICT DO NOTHING. The sweep gate is already held
-    exclusive, so no manifest writer is running; the index-run lock orders this against completeIndexRun's
-    verify-then-stamp for the same document, as every manifest mutation does.
+    LOCKS FOR THE WRITE. After the move, for each document the first plan names, WHATEVER its verdict, in tumbler
+    order, the per-document index-run advisory lock manifest writers take (acquireIndexRunLock) is taken, then the
+    plan is computed again under it and the rows are inserted ON CONFLICT DO NOTHING. Every named document is
+    locked, not only the ones the first plan would attach to: a document that was refused in the first plan (a
+    rival that left, a run that finished) can be attachable in the second, and must not be written with no lock
+    held. The sweep gate is already held exclusive, so no manifest writer is running; the index-run lock orders this
+    against completeIndexRun's verify-then-stamp for the same document, as every manifest mutation does.
+
+    WHAT THE LOCKS DO NOT ORDER (stated, and accepted). beginIndexRun (CatalogRepository) takes neither the sweep gate
+    nor the index-run lock: it is one UPDATE of the document's fence columns (index_state 'indexing', content hash,
+    run id, start time), optionally followed by a manifest read in the same transaction, and unlocked by design
+    ("the fence is NOT a lock"), so a run can announce itself without waiting behind anything. So the 'indexing'
+    refusal is ordered against completeIndexRun, stampComplete and the manifest writes, but NOT against a begin
+    that commits between the second plan and the INSERT. That window is two statements inside one transaction that
+    holds the exclusive gate. What it can leave is one attached row that the run's begin-time manifest snapshot did
+    not contain: the run's own manifest write needs the gate shared, so it waits for this commit and then rewrites
+    the positions it writes (a row at one of them is replaced), but a multi-batch run's deferred sweep, computed
+    from the snapshot, does not know the row, and a row at a position the run does not write stays until the next
+    index run replaces the manifest. Closing the window would make begin take the index-run lock, which puts every
+    index run behind a restore's lock set; that is a cost on the hot path for a two-statement window on an
+    operator-driven verb, and it is not taken here.
 
     THE DATE IT BECOMES REAPABLE AGAIN. A restored chunk that stays without a manifest row (every case above
     that is not attach, or reattach off) is reapable again at restore + the grace unless an owner row is repaired
@@ -192,7 +214,7 @@
         http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
 
     <changeSet id="vectors-025-1" author="nexus-2x9xa">
-        <comment>nexus.quarantine_reattach_plan: the read-only classifier behind the restore verb's reattach step. For each named chash it resolves the live owning document (forward by metadata catalog_doc_id/doc_id, else reverse by a single live note's own doc_id, the census's two paths) and the manifest position, and returns a jsonb array of {chash, verdict, why, doc, title, pos, chunk_title, ls, le, cs, ce} with verdict attach, superseded (why says which of nine reasons), no_live_owner, no_position or owned. A complete or mid-run owner, a content hash that differs from the document's, another chunk of the same document at the same position (in the collection or its quarantine sibling), and a taken or out-of-range position all refuse. Never writes.</comment>
+        <comment>nexus.quarantine_reattach_plan: the read-only classifier behind the restore verb's reattach step. For each named chash it resolves the live owning document (forward by metadata catalog_doc_id/doc_id, else reverse by a single live note's own doc_id, the census's two paths) and the manifest position, and returns a jsonb array of {chash, verdict, why, doc, title, pos, chunk_title, ls, le, cs, ce} with verdict attach, superseded (why says which of ten reasons), no_live_owner, no_position or owned. A complete, failed or mid-run owner, a content hash that differs from the document's, another chunk of the same document at the same position (in the collection or its quarantine sibling), and a taken or out-of-range position all refuse. Never writes.</comment>
         <sql splitStatements="false" stripComments="false"><![CDATA[
 CREATE OR REPLACE FUNCTION nexus.quarantine_reattach_plan(
     p_tenant_id              text,
@@ -275,9 +297,12 @@ placed AS (
 ),
 rival_rows AS MATERIALIZED (
     -- Every OTHER chunk, in the origin or in this origin's quarantine sibling, whose forward key names one of the
-    -- documents being judged: the stored versions of the document, not only the chashes this call names. Two
-    -- chunks that claim one (document, position) are two versions of it, and a call that took only one of them
-    -- (a 1000-row page boundary, a second call) must still see the other. One scan of the two collections.
+    -- documents being judged, whichever path (forward or reverse) placed the chunk on it: the stored versions of
+    -- the document, not only the chashes this call names. Two chunks that claim one (document, position) are two
+    -- versions of it, and a call that took only one of them (a 1000-row page boundary, a second call) must still
+    -- see the other. A single-chunk legacy note (reverse path, position 0) is judged the same way: a keyed chunk
+    -- that names the note at position 0 (or, the note registering at most one chunk, at no position) is its rival.
+    -- One scan of the two collections.
     SELECT x.chash AS x_chash,
            COALESCE(NULLIF(x.metadata->>'catalog_doc_id', ''), NULLIF(x.metadata->>'doc_id', '')) AS x_key,
            x.metadata->>'chunk_index' AS x_ci
@@ -286,7 +311,7 @@ rival_rows AS MATERIALIZED (
        AND x.collection IN (p_origin_collection, p_quarantine_collection)
        AND COALESCE(x.metadata->>'origin_collection', p_origin_collection) = p_origin_collection
        AND COALESCE(NULLIF(x.metadata->>'catalog_doc_id', ''), NULLIF(x.metadata->>'doc_id', ''))
-           IN (SELECT pp.tumbler FROM placed pp WHERE pp.path = 'forward' AND pp.tumbler IS NOT NULL)
+           IN (SELECT pp.tumbler FROM placed pp WHERE pp.tumbler IS NOT NULL)
 ),
 judged AS (
     SELECT p.*,
@@ -299,6 +324,9 @@ judged AS (
                -- emptied on purpose reads chunk_count 0 and complete). Legacy documents are unstamped.
                WHEN p.index_state = 'indexing' THEN 'superseded:indexing'
                WHEN p.index_state = 'complete' THEN 'superseded:complete'
+               -- An index run that FAILED (CatalogRepository.failIndexRun) leaves whatever manifest it had written:
+               -- partial, and unknown to this function. Refuse rather than guess, as for a mid-run document.
+               WHEN p.index_state = 'failed' THEN 'superseded:failed'
                WHEN p.pos IS NULL THEN 'no_position'
                -- The chunk records the content hash of the file version it was cut from; a document that has
                -- since been indexed from other content records a different one.
@@ -307,7 +335,7 @@ judged AS (
                WHEN EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m
                              WHERE m.tenant_id = p_tenant_id AND m.doc_id = p.tumbler AND m.position = p.pos)
                     THEN 'superseded:position_taken'
-               WHEN p.path = 'forward' AND EXISTS (
+               WHEN EXISTS (
                         SELECT 1 FROM rival_rows r
                          WHERE r.x_key = p.tumbler AND r.x_chash <> p.chash_b
                            AND (CASE WHEN r.x_ci ~ '^[0-9]{1,9}$' THEN r.x_ci::integer
@@ -562,7 +590,7 @@ BEGIN
             FOR v_doc IN
                 SELECT DISTINCT pl.doc
                   FROM jsonb_to_recordset(v_plan) AS pl(chash text, verdict text, doc text)
-                 WHERE pl.verdict = 'attach'
+                 WHERE pl.doc IS NOT NULL
                  ORDER BY pl.doc
             LOOP
                 PERFORM pg_advisory_xact_lock(hashtext('indexrun:' || p_tenant_id || ':' || v_doc));

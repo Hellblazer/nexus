@@ -3884,7 +3884,7 @@ FROM scope s
      * only when this call wrote the manifest row. {@code owner} and {@code ownerTitle} name the document the
      * metadata resolved to (null when none), {@code position} the manifest position it takes, and
      * {@code chunkTitle} the chunk's own metadata title, for the operator's re-put recipe. {@code reason} says
-     * why a {@code superseded} verdict was reached ({@code indexing}, {@code complete}, {@code version},
+     * why a {@code superseded} verdict was reached ({@code indexing}, {@code complete}, {@code failed}, {@code version},
      * {@code position_taken}, {@code rival}, {@code other_collection}, {@code has_rows}, {@code past_end}, or
      * {@code race} for an attach that lost a race) and is null for every other verdict. {@code ownerRows} and
      * {@code ownerChunks} are the owner's manifest rows in the origin after the call (before it, on a dry run)

@@ -1350,7 +1350,7 @@ public final class VectorHandler implements HttpHandler {
      * repaired first; such a chunk is hidden from search and get until it has one. {@code row.reattach} is what the
      * reattach step judged ({@code attach}, {@code superseded}, {@code no_live_owner}, {@code no_position},
      * {@code owned}, or null) whether or not it ran, and {@code attached} says this call wrote the manifest row.
-     * {@code reason} says why {@code superseded} was reached ({@code indexing}, {@code complete}, {@code version},
+     * {@code reason} says why {@code superseded} was reached ({@code indexing}, {@code complete}, {@code failed}, {@code version},
      * {@code position_taken}, {@code rival}, {@code other_collection}, {@code has_rows}, {@code past_end}, {@code race}),
      * and {@code owner_rows} / {@code owner_chunks} are the owner's manifest rows in the origin after the call
      * against its registered chunk count (a partial attach reads M of N).

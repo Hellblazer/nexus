@@ -1495,6 +1495,109 @@ class QuarantineRestoreIntegrationTest extends AtomicWriteTestBase {
         assertThat(manifest(t, doc)).containsExactly(new ManifestRow(0, current, c));
     }
 
+    // ── round 4 (nexus-wbfpw.49): the reverse path's rival, a failed index run, every named document locked ────
+
+    @Test
+    void aSingleChunkNoteIsNotAttachedWhenAnotherStoredChunkNamesItAtPositionZero_whereverThatChunkSits()
+            throws Exception {
+        // Sam's ruling: never attach when another stored chunk, in the origin or in the quarantine sibling, names
+        // the same document and position. The reverse path (a legacy note found by its own metadata.doc_id) is
+        // judged by it exactly as the forward path is.
+        String t = newTenant();
+        String c = col("knowledge");
+        // One reaper pass moves all five (the fifth is the keyed rival that will sit in the sibling); the keyed
+        // rivals in the ORIGIN are stored afterwards, or the same pass would have moved them too.
+        Map<String, Map<String, Object>> meta = new java.util.LinkedHashMap<>();
+        meta.put("note-lonely", Map.of("title", "lonely"));
+        meta.put("note-rival-at-zero", Map.of("title", "at zero"));
+        meta.put("note-rival-no-index", Map.of("title", "no index"));
+        meta.put("note-rival-in-quarantine", Map.of("title", "in quarantine"));
+        meta.put("keyed-in-quarantine", Map.of("catalog_doc_id", "1.29.4", "chunk_index", 0));
+        List<String> hs = quarantinedWith(t, c, meta);
+        String lonely = hs.get(0), atZero = hs.get(1), noIndex = hs.get(2), inSibling = hs.get(3);
+        liveDoc(t, c, "1.29.1", "Lonely note", 1, "", Map.of("doc_id", lonely));
+        liveDoc(t, c, "1.29.2", "Note with a keyed rival at 0", 1, "", Map.of("doc_id", atZero));
+        liveDoc(t, c, "1.29.3", "Note with a keyed rival, no position", 1, "", Map.of("doc_id", noIndex));
+        liveDoc(t, c, "1.29.4", "Note with a rival in quarantine", 1, "", Map.of("doc_id", inSibling));
+        orphan(t, c, "keyed-at-zero", Map.<String, Object>of("catalog_doc_id", "1.29.2", "chunk_index", 0));
+        orphan(t, c, "keyed-no-index", Map.<String, Object>of("doc_id", "1.29.3"));
+
+        QuarantineRestoreOutcome out = vectors.quarantineRestore(t, c, quarantineOf(c),
+            List.of(lonely, atZero, noIndex, inSibling), ACTOR, false);
+
+        assertThat(verdictOf(out, lonely)).as("the control: a note nothing else names attaches").isEqualTo("attach");
+        for (String h : List.of(atZero, noIndex, inSibling)) {
+            assertThat(verdictOf(out, h)).isEqualTo("superseded");
+            assertThat(reasonOf(out, h)).isEqualTo("rival");
+            assertThat(visibleToGet(t, c, h)).isFalse();
+        }
+        assertThat(out.attached()).containsExactly(lonely);
+        assertThat(manifest(t, "1.29.1")).containsExactly(new ManifestRow(0, lonely, c));
+        assertThat(manifest(t, "1.29.2")).isEmpty();
+        assertThat(manifest(t, "1.29.3")).isEmpty();
+        assertThat(manifest(t, "1.29.4")).isEmpty();
+    }
+
+    @Test
+    void aDocumentWhoseLastIndexRunFailedIsNotAReattachTarget_butAnUnstampedOneIs() throws Exception {
+        // failIndexRun stamps index_state 'failed' and leaves whatever manifest the run had written: partial, of
+        // unknown shape. The restore refuses rather than guesses.
+        String t = newTenant();
+        String c = col("knowledge");
+        Map<String, Map<String, Object>> meta = new java.util.LinkedHashMap<>();
+        meta.put("failed-run", Map.of("catalog_doc_id", "1.30.1", "chunk_index", 1));
+        meta.put("control", Map.of("catalog_doc_id", "1.30.2", "chunk_index", 1));
+        List<String> hs = quarantinedWith(t, c, meta);
+        liveDoc(t, c, "1.30.1", "Failed run", 3, "f.md", Map.of());
+        setIndexState(t, "1.30.1", "failed");
+        liveDoc(t, c, "1.30.2", "Unstamped", 3, "u.md", Map.of());
+
+        QuarantineRestoreOutcome out = vectors.quarantineRestore(t, c, quarantineOf(c), hs, ACTOR, false);
+
+        assertThat(verdictOf(out, hs.get(0))).isEqualTo("superseded");
+        assertThat(reasonOf(out, hs.get(0))).isEqualTo("failed");
+        assertThat(manifest(t, "1.30.1")).as("a partial manifest is not extended").isEmpty();
+        assertThat(visibleToGet(t, c, hs.get(0))).isFalse();
+        assertThat(verdictOf(out, hs.get(1))).as("the control: the same shape, unstamped, attaches").isEqualTo("attach");
+        assertThat(manifest(t, "1.30.2")).containsExactly(new ManifestRow(1, hs.get(1), c));
+    }
+
+    @Test
+    void everyDocumentThePlanNamesIsLockedWhateverItsVerdict_soOneThatBecomesAttachableWhileTheRestoreWaitsIsJudgedUnderTheLock()
+            throws Exception {
+        // The first plan reads 'indexing' (not an attach), so a lock set taken from attach verdicts alone would be
+        // empty and the second plan would run at once, still reading 'indexing'. With every named document locked
+        // the restore waits for the holder, which clears the run state and commits; the second plan then attaches.
+        String t = newTenant();
+        String c = col("knowledge");
+        String doc = "1.31.1";
+        String h = quarantinedWith(t, c, Map.of("was-mid-run", Map.<String, Object>of(
+            "catalog_doc_id", doc, "chunk_index", 0))).get(0);
+        liveDoc(t, c, doc, "Run finished meanwhile", 1, "m.md", Map.of());
+        setIndexState(t, doc, "indexing");
+
+        var pool = java.util.concurrent.Executors.newSingleThreadExecutor();
+        try (Connection holder = pg.createConnection("")) {
+            holder.setAutoCommit(false);
+            DSLContext hctx = DSL.using(holder, SQLDialect.POSTGRES);
+            hctx.select(DSL.function("pg_advisory_xact_lock", SQLDataType.OTHER,
+                DSL.function("hashtext", SQLDataType.INTEGER, DSL.val("indexrun:" + t + ":" + doc)))).execute();
+            var call = pool.submit(() -> vectors.quarantineRestore(t, c, quarantineOf(c), List.of(h), ACTOR, false));
+            awaitAdvisoryLockWaiter();
+            hctx.update(CATALOG_DOCUMENTS).setNull(CATALOG_DOCUMENTS.INDEX_STATE)
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(t).and(CATALOG_DOCUMENTS.TUMBLER.eq(doc))).execute();
+            holder.commit();
+
+            QuarantineRestoreOutcome out = call.get(15, java.util.concurrent.TimeUnit.SECONDS);
+            assertThat(verdictOf(out, h)).as("judged again under the lock: the run is over").isEqualTo("attach");
+            assertThat(out.attached()).containsExactly(h);
+        } finally {
+            pool.shutdownNow();
+        }
+        assertThat(manifest(t, doc)).containsExactly(new ManifestRow(0, h, c));
+        assertThat(visibleToGet(t, c, h)).isTrue();
+    }
+
     /** Blocks until a backend is waiting on an advisory lock inside a quarantine_restore_chunks call. */
     private void awaitAdvisoryLockWaiter() throws Exception {
         var activity = DSL.table(DSL.name("pg_catalog", "pg_stat_activity"));
