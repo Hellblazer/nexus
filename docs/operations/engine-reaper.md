@@ -69,7 +69,7 @@ Four outcomes are not refusals and are never audited: `GATE_BUSY` (a manifest wr
 
 Drain rate is 300 chunks per collection per pass, so a collection with `R` reapable chunks drains in `ceil(R / 300)` hourly passes (147 orphans: one pass; 10,000: 34 hours; 55,000: 7.6 days). Collections drain in parallel, each at its own 300 per hour.
 
-**Preview before the date.** The floor refuses a collection whose reapable set is 100 or more chunks and more than a quarter of it, with one audit row and an hourly WARN. To see which collections that will be, ask the engine what is reapable under a shorter grace. On day `d` after the engine carrying `vectors-020` is deployed, a chunk has been ownerless at most `d` days; those that are ownerless now and still ownerless at day 30 are exactly the ones a grace of `d` days selects today. So send `grace_seconds = d * 86400`, and divide by the collection's chunk count:
+**Preview before the date.** The floor refuses a collection whose reapable set is 100 or more chunks and more than a quarter of it, with one audit row and an hourly WARN. To see which collections that will be, ask the engine what is reapable under a shorter grace. On day `d` after the engine carrying `vectors-020` is deployed, a chunk has been ownerless at most `d` days; those that are ownerless now and still ownerless at day 30 are exactly the ones a grace of `d` days selects today (the predicate is a strict "older than", so a grace of `d` days selects only chunks older than `d` full days). So send `grace_seconds = d * 86400`, and divide by the collection's chunk count:
 
 ```bash
 # Day 19 after deploy: grace_seconds = 19 * 86400 = 1641600.
@@ -82,7 +82,7 @@ curl -s -X POST "$NX_SERVICE_URL/v1/vectors/reapable" \
 curl -s -H "Authorization: Bearer $TOKEN" "$NX_SERVICE_URL/v1/vectors/count?collection=<name>"
 ```
 
-With R pages-worth of chunks that is `ceil(R / 300)` calls. If `reapable / count` is more than 0.25 and the reapable total is at least 100, the floor will refuse that collection at day 30. After day 30 the first `reaper_refused` row for it answers the same question durably: its `details` carry `candidates` and `total`. The route is read-only and uses the same predicate as the reaper; `grace_seconds` is advisory and the reaper never uses it. Run `tests/e2e/cloud-client-path-gate.sh` first if you reach the engine through a public edge, to be sure the edge passes these routes.
+With R pages-worth of chunks that is `ceil(R / 300)` calls. If `reapable / count` is more than 0.25 and the reapable total is at least 100, the floor will refuse that collection at day 30. After day 30 the first `reaper_refused` row for it answers the same question durably: its `details` carry `candidates` and `total`. The route is read-only and uses the same predicate as the reaper; `grace_seconds` is advisory and the reaper never uses it. `tests/e2e/cloud-client-path-gate.sh` has no leg for `/v1/vectors/reapable` or `/v1/vectors/count` today, so nothing proves a public edge passes them; the legs for `reapable`, the census route and `/v1/vectors/gc/*` are pending in nexus-wbfpw.50, and `count` is in none. Through an edge, check that one `reapable` call returns the engine's own JSON before you trust the preview.
 
 **Draining a collection the floor refuses.** If a collection is legitimately mostly garbage (you have read the sample), exempt that one collection from the MOVE floor:
 
@@ -108,7 +108,7 @@ A chunk moved to `quarantine-<collection>` keeps its text and embedding for the 
 
 **Procedure.**
 
-1. Find what moved. `nx catalog gc-audit list --operation reaper_quarantine --collection <c>` lists the reaper's passes, each with an id and the full chash list. The cleanup at the end of `nx index repo` and `nx t3 gc` write `gc_quarantine_orphans` rows that list only a 20-chash sample, and the verb refuses those; use the date window below for them.
+1. Find what moved. `nx catalog gc-audit list --operation reaper_quarantine --collection <c>` lists the reaper's passes, each with an id and the full chash list. The cleanup at the end of `nx index repo` and `nx t3 gc` write `gc_quarantine_orphans` rows that list up to 5,000 chashes (`GC_AUDIT_MAX_CHASHES`) but always carry `chashes_is_sample`, so the list is never taken as complete, and the verb refuses those rows whatever their size; use the date window below for them.
 2. Preview, then restore. Name the collection the chunks came from, not the `quarantine-` name:
 
    ```bash

@@ -436,7 +436,8 @@ def gc_cmd(
     chunk the engine's reaper moved (tagged ``quarantined_by``) is expired by the
     engine alone, on its own retention. A chunk whose document is re-registered
     is restored automatically by the ``nx index repo`` run. The operator restore
-    verb ``nx t3 quarantine restore`` ships separately (nexus-wbfpw.49); it refuses
+    verb ``nx t3 quarantine restore`` (nexus-wbfpw.49; on develop, its engine route
+    in the same engine tag as the reaper) refuses
     this verb's ``gc_quarantine_orphans`` audit rows (they list a sample only), so
     restore a chunk this verb moved with its ``--quarantined-since`` /
     ``--quarantined-before`` window or explicit ``--chash`` values. Each engine batch commits on its own, so a run that stops part
