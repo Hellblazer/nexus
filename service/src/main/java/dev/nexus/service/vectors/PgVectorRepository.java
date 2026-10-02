@@ -1802,7 +1802,7 @@ public final class PgVectorRepository {
      * liveness): every read that returns content uses live(c) ({@link
      * #liveChunksCondition}), but a caller whose question is "is this chunk stored
      * here, and what does its metadata say" (existing_ids: catalog verify, the
-     * migration ETL, skip-existing, the put_note_pieces delete guard; the manifest
+     * migration ETL, skip-existing; the manifest
      * backfill's reverse lookup) must see a stored chunk whether or not it has a
      * live owner. The where-scan reads offer the same with {@code includeNonLive}.
      */

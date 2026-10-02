@@ -2,7 +2,6 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.db;
 
-import org.jooq.DSLContext;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -60,17 +59,6 @@ public final class Rdr192BackfillGate {
             log.warn("event=rdr192_backfill_gate_unreadable tenant={} error={}", tenant, e.getMessage());
             return false;
         }
-    }
-
-    /**
-     * {@link #isComplete} read inside a transaction the caller already holds, for the engine's
-     * superseded-chunk sweep ({@code CatalogRepository#runSweepTransaction}, RDR-192 Step 11,
-     * bead nexus-wbfpw.21): it drops the legacy-note arm of its union guard only for a tenant
-     * this answers true for. The same fact, from the same table, as the reaper reads. Throws on
-     * a database failure; the caller decides what unreadable means (the sweep keeps the arm).
-     */
-    public static boolean isCompleteIn(DSLContext ctx, String tenant) {
-        return LadderRepository.isRungVerifiedIn(ctx, tenant, RUNG_NAME);
     }
 
     /**

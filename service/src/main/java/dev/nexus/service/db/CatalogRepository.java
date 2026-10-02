@@ -5988,10 +5988,7 @@ public final class CatalogRepository {
      * proves "someone references this") and the nl3fn notes guard (a live,
      * note-shaped {@code catalog_documents} row whose identity chash
      * matches the candidate — a manifest-less chunk that must never be
-     * swept regardless of manifest state). RDR-192 Step 11 (nexus-wbfpw.21):
-     * the notes guard applies only while the tenant has no verified {@code
-     * rdr192-manifest-backfill} rung record ({@link Rdr192BackfillGate}); with
-     * one, the union guard is the only guard.
+     * swept regardless of manifest state).
      *
      * <p>Fail-open on ANY failure to acquire the gate within {@link
      * #SWEEP_GATE_LOCK_TIMEOUT_MS} ({@code 55P03}) or to complete the
@@ -6009,23 +6006,15 @@ public final class CatalogRepository {
         try {
             return tenantScope.withTenant(tenant, ctx -> {
                 acquireSweepGateExclusive(ctx, tenant, collection);
-                // RDR-192 Step 11 (nexus-wbfpw.21): the legacy-note arm stays ON unless this
-                // tenant's rdr192-manifest-backfill rung record is verified. Read in this
-                // transaction, after the gate, so the fact and the DELETE see one snapshot of
-                // the tenant. Fail closed: a ledger that cannot be read keeps the arm (the
-                // savepoint contains the failed statement, so the DELETE below still runs).
-                boolean keepLegacyNotes = !withSavepointFailOpen(ctx,
-                    "write_manifest_many_sweep_backfill_gate_unreadable", tenant, docId,
-                    () -> Rdr192BackfillGate.isCompleteIn(ctx, tenant), false);
-                List<String> sweptChashes = sweepChunks(ctx, tenant, collection, dropped, keepLegacyNotes);
+                List<String> sweptChashes = sweepChunks(ctx, tenant, collection, dropped);
                 int swept = sweptChashes.size();
                 int kept = dropped.size() - swept;
                 // nexus-wbfpw.13: unconditional — a run that keeps every
                 // candidate (swept=0) used to log nothing at all, even though
                 // the response map below always carries `kept`. One line per
                 // sweep run, every run.
-                log.info("event=write_manifest_many_swept tenant={} doc_id={} collection={} dropped={} swept={} kept={} legacy_notes_guard={}",
-                          tenant, docId, collection, dropped.size(), swept, kept, keepLegacyNotes);
+                log.info("event=write_manifest_many_swept tenant={} doc_id={} collection={} dropped={} swept={} kept={}",
+                          tenant, docId, collection, dropped.size(), swept, kept);
                 if (swept > 0) {
                     // nexus-sybbh: audit the reap IN THE SAME TRANSACTION as the sweep
                     // DELETE above (same ctx, not yet committed) — this is the exact
@@ -6095,10 +6084,7 @@ public final class CatalogRepository {
      * that {@code chunks_384/768/1024} are one physical table). See {@link
      * #runSweepTransaction} for the full guard rationale (nl3fn: TWO
      * independent {@code NOT EXISTS} clauses, shared-chash union guard AND
-     * notes guard — neither alone is sufficient, until RDR-192 Step 11 / nexus-wbfpw.21:
-     * {@code keepLegacyNotes} is false for a tenant with a verified {@code
-     * rdr192-manifest-backfill} rung record, and the notes guard is then not applied).
-     * The nested selects
+     * notes guard — neither alone is sufficient). The nested selects
      * reference the OUTER delete target's own row ({@code CHUNKS.TENANT_ID}/
      * {@code CHUNKS.CHASH}) — a standard correlated-subquery DELETE, the
      * same shape {@code purge_trash}'s raw SQL uses with an explicit alias.
@@ -6118,8 +6104,7 @@ public final class CatalogRepository {
      * clause is the part reviewers and the RDR-192 liveness tests read.
      */
     private static DeleteConditionStep<?> sweepChunksQuery(
-            DSLContext ctx, String tenant, String collection, List<String> dropped,
-            boolean keepLegacyNotes) {
+            DSLContext ctx, String tenant, String collection, List<String> dropped) {
         return ctx.deleteFrom(CHUNKS)
             .where(CHUNKS.TENANT_ID.eq(tenant))
             .and(CHUNKS.COLLECTION.eq(collection))
@@ -6150,15 +6135,13 @@ public final class CatalogRepository {
             // sweep also refused it — that is the grace-window (Tier 2) side
             // the bead says not to reconcile.
             //
-            // RDR-192 Step 11 (nexus-wbfpw.21): applied only while keepLegacyNotes. A
-            // legacy note's chash CAN reach `dropped` (an unrelated document that shared
-            // its text and then dropped it), so the arm is removed per tenant, not for
-            // everyone: runSweepTransaction passes false only for a tenant whose
-            // rdr192-manifest-backfill rung record is verified (Rdr192BackfillGate, the
-            // reaper's own gate). For such a tenant the census read zero legacy-
-            // unmanifested notes, so a manifest-less note chunk is garbage like any other
-            // and the union guard above is the only guard left.
-            .and(!keepLegacyNotes ? DSL.noCondition() : DSL.notExists(ctx.selectOne().from(CATALOG_DOCUMENTS)
+            // RETAINED BY DECISION (RDR-192 Step 11, Sam 2026-10-02): this arm is permanent,
+            // not gated on the rdr192-manifest-backfill rung record. A legacy note's chash
+            // CAN enter `dropped` (an unrelated document that shared its text, then dropped
+            // it; CatalogManifestSweepRepositoryTest Order 12), the record is an attestation,
+            // and this DELETE is hard with no re-census. The cost is bounded over-retention
+            // (a dangling stamp keeps one chunk until the reaper collects it).
+            .and(DSL.notExists(ctx.selectOne().from(CATALOG_DOCUMENTS)
                 .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant))
                 .and(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION.eq(collection))
                 .and(CATALOG_DOCUMENTS.DELETED_AT.isNull())
@@ -6189,9 +6172,8 @@ public final class CatalogRepository {
      *         plain WHERE/SELECT usage of that field does. The properly generated field
      *         carries no such ambiguity.
      */
-    private static List<String> sweepChunks(DSLContext ctx, String tenant, String collection, List<String> dropped,
-                                             boolean keepLegacyNotes) {
-        List<byte[]> raw = sweepChunksQuery(ctx, tenant, collection, dropped, keepLegacyNotes)
+    private static List<String> sweepChunks(DSLContext ctx, String tenant, String collection, List<String> dropped) {
+        List<byte[]> raw = sweepChunksQuery(ctx, tenant, collection, dropped)
             .returning(CHUNKS.CHASH)
             .fetch(CHUNKS.CHASH);
         List<String> hex = new ArrayList<>(raw.size());
