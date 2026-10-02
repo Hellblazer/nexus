@@ -66,6 +66,14 @@ paths that can still leave a manifest-less chunk searchable.
 
 ### Enumerated gaps to close
 
+*Pointer convention (2026-10-02).* File and line pointers in the Problem Statement, the
+Critical Assumptions and the Technical Design are as of the filing re-verification, develop
+`135bb38a4`, and several have drifted (`CatalogRepository.java`, `PgVectorRepository.java`,
+`note_write.py` and `mcp_infra.py` have all moved). Where a statement is written in the present
+tense about the filing-time code, read it as past tense. Find the code by the method or test
+name; text amended after the filing names tests and methods, not lines, and any line number
+left in an amendment is as of develop `e26cd7381`.
+
 #### Gap 1: `manifest-less-is-live` is defined nine ways, with three answers
 
 `service/src/main/resources/db/changelog/catalog-003-soft-delete.xml:33-39`
@@ -163,12 +171,14 @@ Amended 2026-10-02 (Phase 3 gate, T2 `nexus/review-rdr-192-phase3-critique` D5).
 The client-side reap this Gap describes is gone: `store_hook._reap_superseded_note_chunks`
 and its guards at `store_hook.py:1159-1160` and `:1172-1173` were deleted with the split
 note write by RDR-223 (`nexus-z0o2p.12` and `.32`, commit `a92a02279`), and a note re-put
-now sweeps through the engine (`catalog/note_write.py`, `write_manifest_many` with
-`sweep=True`, `:370` and `:541`). `mcp_infra._sweep_superseded_vectors`
+now sweeps through the engine (`catalog/note_write.py`: `write_note` and its resend after a
+lost acknowledgement both send `write_manifest_many` with `sweep=True` through
+`write_one_request`). `mcp_infra._sweep_superseded_vectors`
 (`mcp_infra.py:2835`) and `_sweep_superseded_vectors_many` (`:2972`) remain, for the
 indexer's non-combined write paths, and since `nexus-wbfpw.12` log `superseded_sweep_kept`
-at their guard returns (`:2915`, `:2937`, `:3079`, `:3101`). The engine's half of the gap is
-Step 6's.
+at their guard returns (`:2915`, `:2937`, `:3079`, `:3101`). The engine's half of the gap was
+Step 6's, and is closed (`nexus-wbfpw.13`): `runSweepTransaction` logs `write_manifest_many_swept`
+on every sweep run, with `kept`.
 
 #### Gap 4: The engine sweep loses its own drop set on failure
 
@@ -201,7 +211,7 @@ Amended 2026-10-02 (Phase 3 gate, D5): the sentence above that sends `store_put`
 reap through the client-side fail-open sweep no longer holds. `put_note` writes a note's
 chunks and manifest as one `write_manifest_many` with `sweep=True`, so a re-put takes the
 engine sweep, and a sweep that errors is reported as `sweep_skipped`
-(`catalog/note_write.py:809-821`). The indexer's non-combined paths still run the
+(`catalog/note_write.py`, `_warn_if_sweep_skipped`, which logs `note_sweep_skipped`). The indexer's non-combined paths still run the
 client-side sweep (`mcp_infra.py:3484`, `:3583`). Both lose their drop set on failure the
 same way, and the state-derived reaper (Step 9) is what recovers it.
 
@@ -386,13 +396,18 @@ develop `135bb38a4` / engine `v0.1.132`, 2026-09-26.
   the one the original assumption named, and is carried forward as a Risk
   under Trade-offs rather than a blocking assumption, since it requires two
   writers racing the same title, not a single-writer ordering defect.
-- [ ] No consumer depends on retrieving superseded note versions from raw
-  search — **Status**: Unverified — **Method**: Source Search. No
-  `include_superseded` parameter or call site was found anywhere in the
-  client; absence of a found consumer is evidence, not proof. This remains
-  the one assumption load-bearing for making raw search current-aware by
-  default (Gap 2's fix), and should be confirmed by a change-log / support
-  scan before Phase 2 ships, not merely re-asserted.
+- [x] No consumer depends on retrieving superseded note versions from raw
+  search — **Status**: Verified (2026-09-26, `nexus-wbfpw.3`, closed; T2
+  `nexus_rdr/192-research-11`; Sam, 2026-09-26) — **Method**: Source Search at
+  filing, then a GitHub issue and CHANGELOG scan, a T2/T3 search and
+  `nexus.search_telemetry`. No `include_superseded` parameter or call site exists in the
+  client, and the scan found zero named consumers: no issue, no CHANGELOG entry, no stored
+  finding and no plugin code reads superseded or `quarantine-*` content as a feature. The
+  collection that holds superseded notes, `quarantine-knowledge__1-1`, has no
+  `search_telemetry` row at all. **Residual**: telemetry records the collection hit, not the
+  caller, so anonymous historical hits on some `quarantine-code`, `-docs` and `-rdr`
+  collections cannot be attributed or ruled out; that was surfaced to Sam rather than
+  rounded to zero, and `live(c)` shipped as the search default with no opt-out.
 - [x] The `knowledge__knowledge` 23.6% unjoined figure contains superseded
   note versions and not only legitimate notes — **Status**: Obsolete. The
   population this figure was measured against no longer exists:
@@ -443,12 +458,13 @@ lands last, behind a completed backfill:
    that client-side reap, so the audit trail is the engine's own: the sweep, the quarantine
    move and the expiry each write a `gc_audit` row.)
 4. **Close the silent skip** (Gap 3): log the kept/filtered count at every
-   site that currently returns silently — `mcp_infra.py:2287-2288`,
+   site that returned silently at filing (`mcp_infra.py:2287-2288`,
    `:2437-2438`, `store_hook.py:1159-1160`, `:1172-1173`, **and** the
-   engine's own `runSweepTransaction` (`CatalogRepository.java:5740-5742`),
-   whose `log.info` fires only when `swept > 0` today even though its
+   engine's own `runSweepTransaction`, `CatalogRepository.java:5740-5742`),
+   whose `log.info` fired only when `swept > 0` even though its
    response map has always carried the `kept` count (`:5756`). The engine
-   is not a model to match here; it has the identical gap.
+   was not a model to match here; it had the identical gap. (Done: Step 6,
+   `nexus-wbfpw.12` for the client sites and `.13` for the engine.)
 5. **Fix the stale documentation** (Gap 6) and **report supersession in the
    `store_put` result** (Gap 7, cheapest, non-blocking). As built (Step 13): a
    `Superseded:` line after `Stored:`, not a `superseded: [...]` field, naming the chunks the
@@ -549,8 +565,11 @@ function (a small user-chosen window reopens the race the grace exists to close)
 gc functions pass NULL, so they have no user-tunable window to clamp.
 `ReapableConsumersScanTest` makes both obligations mechanical: every statement that
 deletes or copies chunks under the predicate sits in a function that takes the
-exclusive sweep gate and passes NULL, and the read-only listing route is the one
-named exemption.
+exclusive sweep gate and passes NULL, with two named exemptions. The read-only listing
+route is one. The other is `reaper_quarantine_chunks`, whose grace is an injectable
+`p_grace` so a test can pass zero; production passes NULL, which the engine reaper does
+(the scan waives the literal-NULL rule for that one call text, and only for `p_grace` passed
+straight through, never a clamp or another expression).
 
 Use `reapable(c)` for predicates 7 (`gc_quarantine_orphans` and its bounded variant,
 vectors-022, nexus-wbfpw.16), the read-only listing route `POST /v1/vectors/reapable`
@@ -675,7 +694,7 @@ bounded by the consumer's own gates (the census gate, the fraction floor on the 
 
 | Path | What the predicate sees | Consequence | Mitigation, and its owner |
 | --- | --- | --- | --- |
-| `TRUNCATE` of the manifest (a superuser; no code path does it; `nexus_svc` holds no `TRUNCATE`, pinned with `has_table_privilege`) | Statement DELETE triggers do not fire, so no record; every chunk reads ownerless with its old `last_written_at` | Reaped early, for a live chunk reaped wrongly, all at once | A floor ON THE MOVE (refuse a pass that would take more than a fraction of a collection) and the 14 day quarantine, from which `nx t3 quarantine restore` brings a chunk back (`nexus-wbfpw.49`; with `--reattach` it also writes the manifest row when the chunk's own metadata names a live document, so the chunk is visible again; that reaches only chunks that name their document (legacy and `store_put` chunks, single-chunk legacy notes), and a chunk it cannot attach, every file-derived chunk included, comes back as bytes, stays hidden, and needs the file re-indexed): the move has no floor today, `nexus-2x9xa` (comment 2026-10-01) |
+| `TRUNCATE` of the manifest (a superuser; no code path does it; `nexus_svc` holds no `TRUNCATE`, pinned with `has_table_privilege`) | Statement DELETE triggers do not fire, so no record; every chunk reads ownerless with its old `last_written_at` | Reaped early, for a live chunk reaped wrongly, all at once | A floor ON THE MOVE (refuse a pass that would take more than a fraction of a collection) and the 14 day quarantine, from which `nx t3 quarantine restore` brings a chunk back (`nexus-wbfpw.49`; with `--reattach` it also writes the manifest row when the chunk's own metadata names a live document, so the chunk is visible again; that reaches only chunks that name their document (legacy and `store_put` chunks, single-chunk legacy notes), and a chunk it cannot attach, every file-derived chunk included, comes back as bytes, stays hidden, and needs the file re-indexed): the reaper's move has a floor, `NX_REAPER_FLOOR_FRACTION` with a `NX_REAPER_FLOOR_MIN_CHUNKS` minimum, judged on the whole reapable set (`ChunkReaperIntegrationTest`: `aPassThatWouldTakeMoreThanTheFloorFractionOfACollectionIsRefusedAndCounted`, `aPassUnderTheFloorFractionMoves`, `aReapableSetBelowTheFloorMinimumIsExemptFromTheFraction`, `theFloorIsConfigurable`, `theMoveFunctionItselfRefusesOnTheWholeSet_notOnlyTheJavaPreJudgement`); only the `gc_quarantine_orphans` route has none (`nx t3 gc` keeps an advisory client-side floor, the indexer's prune none), `nexus-wbfpw.52` |
 | `session_replication_role = replica` (`pg_restore`, logical apply) | Triggers and the FK cascade skipped | A restore inserts and drops nothing. A manual replica-mode DELETE: reaped early | None beyond the consumer gates; accepted |
 | Manifest DML with no tenant GUC, or a role exempt from RLS | Subject to RLS on both tables with no GUC: zero manifest rows deleted, nothing dropped (pinned). Exempt from the manifest policy only: rows deleted, `nexus.chunks` hidden from the trigger, nothing recorded (reasoned; cannot be built without `NO FORCE` on the manifest alone). Exempt from both (`BYPASSRLS`, superuser): recorded correctly (pinned, run as the container superuser). The table owner is not exempt in production: `nexus_admin`, the Liquibase owner role, has no `BYPASSRLS` (catalog-016, catalog-025 headers), so under `FORCE ROW LEVEL SECURITY` it is bound by the policies like `nexus_svc` | Reaped early in the exempt-from-one case | A migration or DBA fix that deletes manifest rows runs as `nexus_admin` and must set the tenant GUC. No bead |
 | The one-hour guard | A chunk written or recorded within the hour is not recorded | Reaped up to one hour early | Accepted; stated in the vectors-021 header |
@@ -787,9 +806,9 @@ column was added for is gone; whether to drop it then is that bead's decision, a
 until it ships the column is the grace anchor.
 
 **State-derived reaper, not a persisted drop set.** The engine's post-commit
-sweep transaction (`runSweepTransaction`, `CatalogRepository.java:5725-5773`)
-keeps its 2 s lock / 5 s statement bound and its advisory lock — those are
-correct and unrelated to this defect. What changes is what happens on
+sweep transaction (`CatalogRepository.runSweepTransaction`; lines 5725-5773 at filing)
+kept its 2 s lock / 5 s statement bound and its advisory lock — those were
+correct and unrelated to this defect, and are unchanged. What changes is what happens on
 failure: instead of the client recording only `{doc_id, reason}` and never
 retrying, a periodic engine-side reaper for every collection prefix (it
 said `knowledge__*` until Sam's 2026-09-30 decision, Step 9 amendment)
@@ -799,8 +818,8 @@ transaction's sweep succeeded. This is the same shape `nexus-iygza` already
 shipped for the taxonomy-assignment half of P0.1 (a state-derived drain
 route, not a durable pending table) and gives Gap 4 an answer without
 inventing a new retry protocol. Every reap writes a `gc_audit` row, parity
-with the engine's other sweep call site (`CatalogRepository.java:5749`),
-`purge_trash`, and quarantine. (Amended 2026-10-02: the client-side reap this
+with the engine's other sweep call site (the `gc_audit` insert inside
+`runSweepTransaction`), `purge_trash`, and quarantine. (Amended 2026-10-02: the client-side reap this
 closed the audit gap of is gone, deleted by RDR-223; the indexer's non-combined
 client sweeps remain and still hard-delete with no audit row.) Tracked day-to-day
 as `nexus-2x9xa`.
@@ -1093,14 +1112,17 @@ grown.
 
 ### Prerequisites
 
-- [ ] Critical Assumption 3 (no consumer depends on superseded raw-search
+- [x] Critical Assumption 3 (no consumer depends on superseded raw-search
       results) reconfirmed against usage data, not just source search, before
-      Phase 2 ships `live(c)` as the search-time default with no opt-out.
-- [ ] A reproduction fixture per manifest state: manifest-less; own-collection
+      Phase 2 ships `live(c)` as the search-time default with no opt-out
+      (`nexus-wbfpw.3`, closed; T2 `nexus_rdr/192-research-11`).
+- [x] A reproduction fixture per manifest state: manifest-less; own-collection
       live; own-collection tombstoned only; cross-collection-only manifest.
       All nine sites (post-migration: `live(c)`, `reapable(c)`, and the
       unchanged predicates 3/4/5/6) must agree on each fixture row's status
-      relative to what they are each supposed to answer.
+      relative to what they are each supposed to answer. Delivered as the
+      engine matrix `Rdr192EngineLivenessMatrixIntegrationTest` (`nexus-wbfpw.1`) and
+      the client matrix `tests/test_wbfpw2_client_liveness_matrix.py` (`nexus-wbfpw.2`).
 
 ### Minimum Viable Validation
 
@@ -1147,13 +1169,14 @@ the reaper's next pass does NOT remove it. A chunk is reapable only after 30 day
 without an owner, and the reaper moves it to quarantine and writes a
 `reaper_quarantine` `gc_audit` row; it deletes nothing on that pass. So (b) is
 demonstrated in two halves. The engine half is
-`ChunkReaperIntegrationTest.java:212-253`: a peer holds the sweep gate through a real
+`ChunkReaperIntegrationTest.aFailedPostCommitSweepLeavesTheOldChunk_theReaperQuarantinesItAndTheAuditRowNamesIt`: a peer holds the sweep gate through a real
 advisory lock, `writeManifestMany` with `sweep=true` returns `sweep_skipped=1`, the
 superseded row is still physically present and hidden by `live(c)`, and one pass with the
 grace injected as zero moves it to quarantine, with an audit row that names its chash. That
 the move tags what it moves (`quarantined_by: engine-reaper`) is asserted in a different
-test, `aChunkTheReaperMovedItself_isKeptAt13Days_andExpiredAtTheRetention_endToEndThroughTheRealMove`
-(`ChunkReaperIntegrationTest.java:1181`). The client half is `tests/test_wbfpw11_reap_fail_visibility.py`:
+test of the same class,
+`aChunkTheReaperMovedItself_isKeptAt13Days_andExpiredAtTheRetention_endToEndThroughTheRealMove`.
+The client half is `tests/test_wbfpw11_reap_fail_visibility.py`:
 since RDR-223 `store_put`'s own engine sweep leaves nothing to strand, it strands the
 chunk with a write that has no sweep and asserts raw `search()` returns only the current
 note while the census still counts the old chunk. The first production evidence is the
@@ -1215,17 +1238,33 @@ either.
 #### Step 3a: `store_put` leaves no manifest-less chunk on a failed catalog or manifest write
 
 Plan audit, 2026-09-26: a census that reads zero once does not stay zero.
-`mcp/core.py:4895-4906` swallows a failed catalog registration and still
-writes the chunk, `catalog/store_hook.py:1022` then returns early on the
-empty `catalog_doc_id`, and a failed manifest write returns "stored but NOT
-cataloged" with the chunk left behind. Each of these writes a new current
-note with no manifest row, which Step 5 would hide from search and Step 9
-would later reap. On a failed catalog or manifest write, `store_put`
-deletes the chunk it just wrote and returns an error (Sam, 2026-09-26:
-rollback, not a marker column). As implemented (`nexus-wbfpw.28`,
-`nexus-k54nk`), the rollback deletes only when a read-back confirms the
-write did not land; an unknown outcome never deletes; and it keeps any
-chunk another live document or a legacy note still owns.
+`mcp/core.py` swallowed a failed catalog registration and still wrote the chunk,
+`catalog/store_hook.py` then returned early on the empty `catalog_doc_id`, and a failed manifest
+write returned "stored but NOT cataloged" with the chunk left behind. Each of these wrote a new
+current note with no manifest row, which Step 5 would hide from search and Step 9 would later
+reap. The decision (Sam, 2026-09-26) was rollback, not a marker column: a failed catalog or
+manifest write must leave no chunk behind. It first shipped as a client-side rollback
+(`nexus-wbfpw.28`, `nexus-k54nk`): delete the chunk only when a read-back confirms the write did
+not land, never on an unknown outcome, and never a chunk another live document or a legacy note
+still owns.
+
+As built, 2026-10-02, the mechanism is different and the invariant is stronger. RDR-223
+(`nexus-z0o2p.12`, `.32`) removed the step that could strand a chunk: no chunk is written ahead
+of its owner. `note_write.write_note` sends the note's chunks and manifest as one
+`write_manifest_many` request, so the engine commits them together or not at all, and the client
+has no chunk to delete. What the client still removes is the catalog row it minted for the note
+(`store_hook.rollback_minted_catalog_entry`, called from `note_write.put_note`), and only when the
+note's manifest is confirmed empty, so a row that holds a landed note is never deleted. The
+read-back rule survives as that confirmation; an unknown outcome removes nothing. Every note
+producer (MCP `store_put`, `nx store put`, `nx memory promote`, the recovery-bundle import) goes
+through `put_note`, so the invariant holds on all of them. The one thing a refused request can
+leave is a metadata refresh of chunks the engine already held, never a chunk without an owner.
+The tests are in
+`tests/test_z0o2p12_note_write.py`:
+`TestFailedRequestLeavesNothing.test_first_write_failure_leaves_no_chunk_and_no_manifest`,
+`TestFailedRequestLeavesNothing.test_a_failed_reput_leaves_the_old_manifest_and_chunks_intact`,
+`TestClientDeath.test_client_dies_after_the_request_no_chunk_is_without_an_owner` and
+`TestPutNote.test_a_minted_row_is_removed_only_when_its_manifest_is_empty`.
 
 #### Step 3b: A failed indexer manifest hook fails the `nx index` run
 
@@ -1329,7 +1368,7 @@ which the Step 5 text above predates.
   (`heal_manifest_gaps` repairs it), so "every chunk gets an owner" holds for
   empty or complete manifests only.
 
-#### Step 6: Close the silent skip (Gap 3) — log `kept`/`kept_notes` at every client site named above, **and** add an unconditional log line to the engine's `runSweepTransaction` (`CatalogRepository.java:5740-5742`), which has the same gate-on-`swept>0` gap
+#### Step 6: Close the silent skip (Gap 3) — log `kept`/`kept_notes` at every client site named above, **and** add an unconditional log line to the engine's `runSweepTransaction` (its `write_manifest_many_swept` event, `CatalogRepository.java:5740-5742` at filing), which had the same gate-on-`swept>0` gap
 
 ### Phase 3: `reapable(c)` and the state-derived reaper (destructive; gated on Phase 1)
 
@@ -1440,7 +1479,12 @@ change). Where this step says the reaper's quarantine is "expired by the existin
 - **The split is symmetric** (`vectors-026`): the client's expiry, `gc_expire_quarantine`
   (what `nx index repo` calls, and the `gc/expire-quarantine` route with or without
   `force`), skips tagged rows and deletes only untagged, client-moved rows, with its floor
-  judged on those rows alone. Each side expires only what it moved.
+  judged on those rows alone. Each side expires only what it moved. One exception, a known gap
+  (`nexus-wbfpw.58`, open): the client derives the sibling's name from the catalog row, and
+  `catalog-044` rewrote that row's owner, so a client-moved chunk (untagged, which the engine's
+  expiry skips) whose origin was renamed that way has no expirer on either side. The cost is
+  storage: the chunk stays hidden, and `nx t3 quarantine restore` still reaches it through the
+  engine-resolved sibling set.
 - The engine's settings are in `docs/operations/engine-reaper.md` § Settings
   (`NX_REAPER_ENABLED`, `_INTERVAL_SECONDS`, `_BATCH_SIZE`, `_FLOOR_FRACTION`,
   `_FLOOR_MIN_CHUNKS`, `_FLOOR_EXEMPT_COLLECTIONS`, `_QUARANTINE_RETENTION_DAYS`,
@@ -1531,7 +1575,7 @@ backfill read zero. It does not, and nothing changes in behavior:
 - **Cost:** bounded over-retention, and the two cases differ. A GENUINE legacy note (no
   manifest row anywhere) is kept by the sweep and is never collected: the reaper's census
   gate refuses the collection while `legacy-unmanifested` is above zero
-  (`ChunkReaper.java` ~780), so only the operator's backfill clears it. A chunk a dangling
+  (`ChunkReaper.java`, the `CENSUS_LEGACY_UNMANIFESTED` refusal in the per-collection pass), so only the operator's backfill clears it. A chunk a dangling
   `meta.doc_id` stamp names, whose owner has manifest rows and so is censused as
   superseded, is kept by the sweep until the reaper (30-day grace by default, 14-day
   restorable quarantine) collects it. Over-retention is recoverable; over-deletion is not.
@@ -1560,9 +1604,13 @@ after `Stored:`:
 - the sweep did not finish (`sweep_skipped`, any reason: gate_timeout, statement_timeout,
   sweep_failed, before_read_failed): `Superseded: the sweep did not finish; up to N replaced
   chunk(s) were not removed. Those no other document owns are hidden from search; the engine
-  reaper collects them later.` `up to N` is the manifest's drop list, an upper bound, since the
-  sweep never ran; with no drop list (the previous manifest could not be read) the line names no
-  count;
+  reaper collects them later, once the collection passes its census and floor.` The reaper
+  promise is conditional on purpose: it moves a chunk only after 30 days without an owner and
+  refuses a collection that fails the floor or holds any legacy-unmanifested chunk (Step 9),
+  and a genuine legacy note is never collected (Step 11). `up to N` is the manifest's drop list,
+  an upper bound, since the sweep never ran; with no drop list (the previous manifest could not
+  be read) the line names no count and says which chunks the put replaced is not known (an
+  identical re-put replaced none, so it does not claim the replaced chunks were not removed);
 - nothing removed and nothing left behind (a first put, an identical re-put, a dropped chunk
   another document owns), or a resend after a lost acknowledgement: no line.
 
@@ -1607,7 +1655,7 @@ can still return. As built (`nexus-wbfpw.26`):
 
 | Resource | List | Info | Delete | Verify | Backup |
 | --- | --- | --- | --- | --- | --- |
-| Superseded/reapable chunks | `nx store list --reapable` (Phase 3, Step 10) | In scope | In scope: the engine reaper and `nx t3 gc` QUARANTINE (restorable 14 days, then expired by the engine's `reaper_expire_quarantine` for chunks the reaper moved and by the client's `gc_expire_quarantine` for chunks the client moved) under a fraction floor on the move and none on expiry (Sam, 2026-10-01; Step 9) | `catalog doctor` check (Phase 4, Step 14) | N/A — content lives in the current chunk. Restore: `nx t3 quarantine restore` (`nexus-wbfpw.49`, Step 9), with `--reattach` so the chunk is visible again; a chunk with no live owner comes back hidden |
+| Superseded/reapable chunks | `nx store list --reapable` (Phase 3, Step 10) | In scope | In scope: the engine reaper and `nx t3 gc` QUARANTINE (restorable 14 days, then expired by the engine's `reaper_expire_quarantine` for chunks the reaper moved and by the client's `gc_expire_quarantine` for chunks the client moved) under a fraction floor on the move, and no floor on the engine's expiry (Sam, 2026-10-01; Step 9; the client keeps its floor on the untagged rows it expires itself) | `catalog doctor` check (Phase 4, Step 14) | N/A — content lives in the current chunk. Restore: `nx t3 quarantine restore` (`nexus-wbfpw.49`, Step 9), with `--reattach` so the chunk is visible again; a chunk with no live owner comes back hidden |
 
 ### New Dependencies
 
@@ -1619,15 +1667,23 @@ None.
   search returns only the new text via `live(c)`; the old chash is absent.
 - **Scenario**: The sweep is forced to fail (simulated sweep-gate contention)
   — **Verify**, in two halves (Phase 3 gate, 2026-10-02). Engine half,
-  `ChunkReaperIntegrationTest.java:212-253`: the superseded row is still physically
+  `ChunkReaperIntegrationTest.aFailedPostCommitSweepLeavesTheOldChunk_theReaperQuarantinesItAndTheAuditRowNamesIt`: the superseded row is still physically
   present and hidden by `live(c)`, and one pass with the grace injected as zero moves it
   to quarantine and writes a `reaper_quarantine` `gc_audit` row naming its chash.
   Client half, `tests/test_wbfpw11_reap_fail_visibility.py`: raw search returns only the
   current text (via `live(c)`, not via a successful sweep) while the census still counts
   the old chunk. Production shows the move at deploy plus 30 days, not on the next pass.
 - **Scenario**: A genuine current note that has never been re-put —
-  **Verify**: never deleted by any predicate, before or after the legacy-note
-  backfill census reads zero. Non-negotiable.
+  **Verify**: no consumer deletes or moves it, before or after the legacy-note
+  backfill census reads zero. Non-negotiable at every consumer, and the protection is each
+  consumer's own gate, not the predicate: `reapable(c)` itself selects a manifest-less legacy
+  note once aged (matrix R8). The sweeps keep it through their retained notes-guard arm
+  (`CatalogManifestSweepRepositoryTest` Order 12); the reaper refuses its collection while
+  `legacy-unmanifested` is above zero
+  (`ChunkReaperIntegrationTest.aStaleRecordWithAResidualLegacyNote_refusesThatCollectionAndDeletesNothing`,
+  `aCurrentNoteNeverReput_isNeverMoved`); `nx t3 gc` refuses on the same census. The
+  `gc_quarantine_orphans` route has no gate of its own (`nexus-wbfpw.52`): its only caller that
+  moves without a census, the indexer's prune, scopes it to `code__`, `docs__` and `rdr__`.
 - **Scenario**: Two documents sharing identical chunk text, one re-put —
   **Verify**: the shared chunk survives under both `live(c)` and
   `reapable(c)`.
@@ -1711,24 +1767,40 @@ for note-shaped rows.
 
 ### Contradiction Check
 
-To be completed at gate (Layer 3 AI critique).
+Gate round 1 (2026-09-26, PASSED: 0 Critical, 6 Significant, 0 ship-blockers; commit
+`141684599`; T2 `nexus_rdr/192-gate-critique-2026-09-26-r1`) found no contradiction left after
+its six findings were fixed in `13bcd8e5e`. The later phase gates (Phase 2, Phase 3, Phase 4;
+T2 `nexus/critique-rdr-192-phase2`, `nexus/review-rdr-192-phase3-critique`,
+`nexus/review-rdr-192-phase4`) each found text that the build had overtaken, and each was
+amended in place with a dated "Amended" note and a Revision History row, not left as a silent
+contradiction: the client-side reap deleted by RDR-223 (Gap 3, Gap 4, Step 3a), the reaper
+moving rather than deleting, the retained notes-guard arms (Step 11), the `--orphan-window`
+removal, and the Phase 4 reconciliation of 2026-10-02.
 
 ### Assumption Verification
 
-Of the four Critical Assumptions: CA1 and CA2 are **Verified** by source
-reading against current code (`nexus-bb6n2`'s manifest-replace-then-reap
-sequence). CA3 (no consumer depends on superseded raw-search results) is
-**Unverified** by source search alone — no call site was found, which is
-evidence but not proof, and it is the one assumption load-bearing for
-shipping `live(c)` as a default with no opt-out; it should be reconfirmed
-against usage/support data before Phase 2, not waved through on a source-search
-negative result. CA4 is **Obsolete**: the population it was measured against
-no longer exists, and Phase 1's census replaces the question it was asking
-with a concrete, gated decomposition requirement.
+Of the four original Critical Assumptions: CA1 and CA2 were **Verified** by source reading at
+filing, against `nexus-bb6n2`'s manifest-replace-then-reap sequence; RDR-223 replaced that
+sequence with one `write_manifest_many` request (Step 3a), so their evidence is filing-time and
+the invariant is now pinned by `CatalogManifestSweepRepositoryTest` and
+`tests/test_z0o2p12_note_write.py`. CA3 (no consumer depends on superseded raw-search results)
+is **Verified** (`nexus-wbfpw.3`, Sam, 2026-09-26) with the unattributable-telemetry residual
+named in the assumption. CA4 is **Obsolete**: the population it was measured against no longer
+exists, and Phase 1's census replaced the question with a concrete, gated decomposition
+requirement. One assumption added later, that a legacy note's chunk cannot enter a sweep's
+dropped set, was **REFUTED** (Step 11).
 
 ### Scope Verification
 
-To be completed at gate (Layer 3 AI critique).
+Phase 4 gate cross-walk (2026-10-02, T2 `nexus/review-rdr-192-phase4`): every Step, Gap, Test
+Plan scenario and Minimum Viable Validation item has a closed bead with code and a test behind
+it, or a named open carrier. Nothing is missing. The open carriers are post-deploy or follow-up
+work, not unbuilt scope: `nexus-wbfpw.51` (the PITR-fork write-path rehearsal, a deploy gate),
+`.54` (the Day-2 to D+44 production evidence), `.50` and `nexus-z0o2p.29.1` (edge legs and the
+deploy-time rung assertion), and the follow-ups `.52` (a census gate on the `gc_quarantine_orphans`
+route), `.58`, `.53` and `.48`. Where scope was reduced it was by decision of Sam and is recorded
+in place: the notes-guard arms retained (Step 11), the reaper quarantining instead of deleting,
+the doctor check narrowed to `knowledge__` (Step 14).
 
 ## Revision History
 
@@ -1972,3 +2044,18 @@ To be completed at gate (Layer 3 AI critique).
   Approach item 5 say the result is a `Superseded:` line, not a `superseded: [...]` field, and
   Step 13 and the Test Plan carry the wire shape, the three lines (removed, sweep did not
   finish, none) and the lost-acknowledgement case.
+- 2026-10-02: Phase 4 gate reconciliation (bead `nexus-wbfpw.39`, `nexus-wbfpw.27`; T2
+  `nexus/review-rdr-192-phase4`, `nexus/review-rdr-192-phase4-code`; text only, no status
+  change). (1) Step 3a is rewritten to the as-built mechanism: since RDR-223 no chunk is written
+  ahead of its owner, so there is nothing to roll back, and the client removes only the catalog row it
+  minted. (2) CA3 is marked verified (`nexus-wbfpw.3`), the two Prerequisite boxes are checked
+  (`.1`, `.2`, `.3`), and the Finalization Gate sections are filled in. (3) Statements the build
+  overtook: the reaper's move has a floor and only the `gc_quarantine_orphans` route has none
+  (`nexus-wbfpw.52`); "each side expires only what it moved" gains the `nexus-wbfpw.58` exception;
+  Day-2 "none on expiry" is the engine's expiry only; Test Plan scenario 3 names each consumer's
+  gate as the protection; the `reaper_quarantine_chunks` waiver in `ReapableConsumersScanTest` is
+  stated. (4) Drifted file and line pointers are replaced by test and method names, and a pointer
+  convention note heads the Problem Statement. (5) The did-not-finish `Superseded:` line no longer
+  promises the reaper collects the chunk unconditionally, and with no drop list it no longer claims
+  replaced chunks were not removed (Step 13). The operator runbook gains the rename-then-restore
+  limit.
