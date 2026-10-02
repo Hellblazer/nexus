@@ -6969,8 +6969,12 @@ def _check_embedding_profile() -> list[HealthResult]:
             label=_QUARANTINED_LABEL, ok=False, warn=True,
             detail=f"{len(quarantined)} quarantined collection(s): {_name_list(quarantined)}",
             fix_suggestions=[
-                "quarantined chunks are restored when a re-index references them again and "
-                "expire after NX_GC_QUARANTINE_DAYS; curate with nx collection shape",
+                "quarantined chunks are restored when a re-index references them again. "
+                "Chunks nx index repo or nx t3 gc moved expire after NX_GC_QUARANTINE_DAYS "
+                "(default 14), on the client's own run, and the client never expires a chunk "
+                "the engine reaper moved; those expire in the engine, NX_REAPER_QUARANTINE_"
+                "RETENTION_DAYS (default 14) after the move, and the engine never expires a "
+                "chunk the client moved; curate with nx collection shape",
             ],
         ) if quarantined else HealthResult(label=_QUARANTINED_LABEL, ok=True, detail="none")
     )

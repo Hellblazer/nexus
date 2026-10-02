@@ -1,0 +1,243 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    RDR-192 Step 9 (bead nexus-2x9xa), Sam's symmetric split of quarantine expiry (2026-10-01):
+    nexus.gc_expire_quarantine, the function the CLIENT's expiry calls (nx index repo, through
+    POST /v1/vectors/gc/expire-quarantine), no longer sees the chunks the engine's reaper moved.
+
+    WHY. vectors-024-1 tags every chunk the reaper moves (metadata quarantined_by = 'engine-reaper' and
+    reaper_quarantined_at = the quarantined_at stamp it wrote) and vectors-024-2's
+    nexus.reaper_expire_quarantine expires ONLY those rows, at the engine's own retention
+    (NX_REAPER_QUARANTINE_RETENTION_DAYS, 14 days). The other half of the split is this function: it used to
+    expire every row of a sibling past the cutoff the caller chose, so a client run with
+    NX_GC_QUARANTINE_DAYS below 14 shortened the retention of a chunk the reaper moved, and the client's
+    force flag deleted engine-moved rows outright. Now each side expires only what it moved: this function
+    deletes the UNTAGGED rows (client-moved) and skips the engine-owned ones, and the engine's function does the
+    reverse.
+
+    "ENGINE-OWNED" IS THE SAME PREDICATE ON BOTH SIDES: quarantined_by = 'engine-reaper' AND
+    reaper_quarantined_at = quarantined_at. A row whose stamps disagree (the reaper moved it, a restore left the
+    tag, a client moved it again with a NEW quarantined_at) is the client's, so a stale tag cannot make a
+    chunk immortal; NULL in either stamp reads as not owned.
+
+    THE FLOOR AND THE COUNTS. The rows this function skips are outside every number it returns: the floor's
+    denominator is the client's own rows (an engine batch does not dilute a client mass-expiry, and a client
+    expiry is not judged against rows it will never delete), and refused / expired count only client rows.
+    The force flag overrides the client's floor only; it can no longer reach an engine-owned row, so the
+    only way to expire those early is the engine's own setting.
+
+    The body is catalog-033-3's (the audit row in the same transaction as the delete, truncated at 5000
+    chashes) with the ownership exclusion in the one WHERE every count reads, and repeated in the DELETE so a
+    row the reaper re-moved between the read and the delete is not taken. The returned count and the audit row
+    now come from the DELETE's own RETURNING, so a row that was not taken is not reported as expired (the old
+    body reported the chashes it had read). The signature, the grant and the return shape are unchanged. gc_expire_quarantine is in a released engine tag, so this is a new changeset,
+    never an edit of catalog-033.
+
+    No row changes at deploy, so there is no DATA EFFECT line.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="vectors-026-1" author="nexus-2x9xa">
+        <comment>nexus.gc_expire_quarantine: skip the rows the engine reaper moved (quarantined_by=engine-reaper with reaper_quarantined_at equal to quarantined_at); the client expires only untagged rows and the floor denominator is the client's own rows. Same signature, grant and return shape; body is catalog-033-3's otherwise.</comment>
+        <sql splitStatements="false" stripComments="false"><![CDATA[
+CREATE OR REPLACE FUNCTION nexus.gc_expire_quarantine(
+    dim                      int,
+    p_tenant_id              text,
+    p_quarantine_collection  text,
+    p_origin_collection      text,
+    p_cutoff                 text,
+    p_floor_fraction         float8,
+    p_floor_min_chunks       int,
+    p_force                  boolean
+)
+RETURNS TABLE(expired bigint, refused bigint)
+LANGUAGE plpgsql
+SECURITY INVOKER
+AS $$
+DECLARE
+    v_mine      bigint;
+    v_chashes   bytea[];
+    v_protected bytea[];
+    v_expired   bigint;
+    v_refused   bigint;
+    v_frac      float8;
+BEGIN
+    IF dim NOT IN (384, 768, 1024) THEN
+        RAISE EXCEPTION
+            'gc_expire_quarantine: unsupported dim %. Supported values: 384, 768, 1024',
+            dim;
+    END IF;
+
+    SELECT count(*),
+           array_agg(c.chash) FILTER (
+               WHERE COALESCE(c.metadata->>'quarantined_at', '9999-12-31T23:59:59Z') <= p_cutoff
+                 AND NOT EXISTS (
+                       SELECT 1 FROM nexus.catalog_document_chunks m
+                        WHERE m.tenant_id  = c.tenant_id
+                          AND m.collection = p_origin_collection
+                          AND m.chash      = c.chash
+                     )),
+           array_agg(c.chash) FILTER (
+               WHERE COALESCE(c.metadata->>'quarantined_at', '9999-12-31T23:59:59Z') <= p_cutoff
+                 AND EXISTS (
+                       SELECT 1 FROM nexus.catalog_document_chunks m
+                        WHERE m.tenant_id  = c.tenant_id
+                          AND m.collection = p_origin_collection
+                          AND m.chash      = c.chash
+                     ))
+      INTO v_mine, v_chashes, v_protected
+      FROM nexus.chunks c
+     WHERE c.tenant_id  = p_tenant_id
+       AND c.collection = p_quarantine_collection
+       AND COALESCE(c.metadata->>'origin_collection', p_origin_collection) = p_origin_collection
+       -- The engine reaper's own rows are expired by nexus.reaper_expire_quarantine, never here (vectors-024-2).
+       AND (c.metadata->>'quarantined_by' = 'engine-reaper'
+            AND c.metadata->>'reaper_quarantined_at' = c.metadata->>'quarantined_at') IS NOT TRUE;
+
+    v_expired := COALESCE(array_length(v_chashes, 1), 0);
+    v_refused := COALESCE(array_length(v_protected, 1), 0);
+
+    IF v_expired = 0 THEN
+        RETURN QUERY SELECT 0::bigint, v_refused;
+        RETURN;
+    END IF;
+
+    v_frac := v_expired::float8 / v_mine::float8;
+    IF v_expired >= p_floor_min_chunks AND v_frac > p_floor_fraction AND NOT p_force THEN
+        RETURN QUERY SELECT 0::bigint, v_expired + v_refused;
+        RETURN;
+    END IF;
+
+    -- The ownership exclusion is repeated here: a row the reaper re-moved (a fresh tag) between the read above
+    -- and this delete is the engine's now, and is not taken.
+    -- What is reported and audited is what this DELETE really removed (RETURNING), not what the read above chose:
+    -- a row the reaper re-moved in between is not counted.
+    WITH del AS (
+        DELETE FROM nexus.chunks c
+         WHERE c.tenant_id = p_tenant_id AND c.collection = p_quarantine_collection
+           AND c.chash = ANY(v_chashes)
+           AND (c.metadata->>'quarantined_by' = 'engine-reaper'
+                AND c.metadata->>'reaper_quarantined_at' = c.metadata->>'quarantined_at') IS NOT TRUE
+        RETURNING c.chash
+    )
+    SELECT COALESCE(array_agg(d.chash ORDER BY d.chash), '{}'::bytea[]) INTO v_chashes FROM del d;
+    v_expired := COALESCE(array_length(v_chashes, 1), 0);
+
+    -- nexus-sybbh: the audit row in the SAME transaction as the delete (catalog-033-3); truncated at 5000 chashes.
+    IF v_expired > 0 THEN
+        INSERT INTO nexus.gc_audit
+            (tenant_id, operation, collection, actor, dry_run, chash_count, chashes, details)
+        VALUES (
+            p_tenant_id, 'gc_expire_quarantine', p_quarantine_collection, 'engine', false, v_expired,
+            COALESCE(
+                (SELECT jsonb_agg(encode(x, 'hex'))
+                   FROM unnest(v_chashes[1:LEAST(v_expired, 5000)]) x),
+                '[]'::jsonb),
+            jsonb_build_object('origin_collection', p_origin_collection, 'refused', v_refused, 'cutoff', p_cutoff)
+                || CASE WHEN v_expired > 5000
+                        THEN jsonb_build_object('chashes_truncated', true, 'chashes_stored', 5000)
+                        ELSE '{}'::jsonb END
+        );
+    END IF;
+
+    RETURN QUERY SELECT v_expired, v_refused;
+END;
+$$
+        ]]></sql>
+        <rollback>
+            <!-- Restores catalog-033-3's body verbatim. -->
+            <sql splitStatements="false" stripComments="false"><![CDATA[
+CREATE OR REPLACE FUNCTION nexus.gc_expire_quarantine(
+    dim                      int,
+    p_tenant_id              text,
+    p_quarantine_collection  text,
+    p_origin_collection      text,
+    p_cutoff                 text,
+    p_floor_fraction         float8,
+    p_floor_min_chunks       int,
+    p_force                  boolean
+)
+RETURNS TABLE(expired bigint, refused bigint)
+LANGUAGE plpgsql
+SECURITY INVOKER
+AS $$
+DECLARE
+    v_mine      bigint;
+    v_chashes   bytea[];
+    v_protected bytea[];
+    v_expired   bigint;
+    v_refused   bigint;
+    v_frac      float8;
+BEGIN
+    IF dim NOT IN (384, 768, 1024) THEN
+        RAISE EXCEPTION
+            'gc_expire_quarantine: unsupported dim %. Supported values: 384, 768, 1024',
+            dim;
+    END IF;
+
+    SELECT count(*),
+           array_agg(c.chash) FILTER (
+               WHERE COALESCE(c.metadata->>'quarantined_at', '9999-12-31T23:59:59Z') <= p_cutoff
+                 AND NOT EXISTS (
+                       SELECT 1 FROM nexus.catalog_document_chunks m
+                        WHERE m.tenant_id  = c.tenant_id
+                          AND m.collection = p_origin_collection
+                          AND m.chash      = c.chash
+                     )),
+           array_agg(c.chash) FILTER (
+               WHERE COALESCE(c.metadata->>'quarantined_at', '9999-12-31T23:59:59Z') <= p_cutoff
+                 AND EXISTS (
+                       SELECT 1 FROM nexus.catalog_document_chunks m
+                        WHERE m.tenant_id  = c.tenant_id
+                          AND m.collection = p_origin_collection
+                          AND m.chash      = c.chash
+                     ))
+      INTO v_mine, v_chashes, v_protected
+      FROM nexus.chunks c
+     WHERE c.tenant_id  = p_tenant_id
+       AND c.collection = p_quarantine_collection
+       AND COALESCE(c.metadata->>'origin_collection', p_origin_collection) = p_origin_collection;
+
+    v_expired := COALESCE(array_length(v_chashes, 1), 0);
+    v_refused := COALESCE(array_length(v_protected, 1), 0);
+
+    IF v_expired = 0 THEN
+        RETURN QUERY SELECT 0::bigint, v_refused;
+        RETURN;
+    END IF;
+
+    v_frac := v_expired::float8 / v_mine::float8;
+    IF v_expired >= p_floor_min_chunks AND v_frac > p_floor_fraction AND NOT p_force THEN
+        RETURN QUERY SELECT 0::bigint, v_expired + v_refused;
+        RETURN;
+    END IF;
+
+    DELETE FROM nexus.chunks c
+     WHERE c.tenant_id = p_tenant_id AND c.collection = p_quarantine_collection
+       AND c.chash = ANY(v_chashes);
+
+    INSERT INTO nexus.gc_audit
+        (tenant_id, operation, collection, actor, dry_run, chash_count, chashes, details)
+    VALUES (
+        p_tenant_id, 'gc_expire_quarantine', p_quarantine_collection, 'engine', false, v_expired,
+        COALESCE(
+            (SELECT jsonb_agg(encode(x, 'hex'))
+               FROM unnest(v_chashes[1:LEAST(COALESCE(array_length(v_chashes, 1), 0), 5000)]) x),
+            '[]'::jsonb),
+        jsonb_build_object('origin_collection', p_origin_collection, 'refused', v_refused, 'cutoff', p_cutoff)
+            || CASE WHEN COALESCE(array_length(v_chashes, 1), 0) > 5000
+                    THEN jsonb_build_object('chashes_truncated', true, 'chashes_stored', 5000)
+                    ELSE '{}'::jsonb END
+    );
+
+    RETURN QUERY SELECT v_expired, v_refused;
+END;
+$$
+            ]]></sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>
