@@ -223,19 +223,41 @@ order and stop at the first red:
 To turn it off: `gh variable delete QWEN_CI_PUSH_RUNNER`; the next push (or a
 "Re-run all jobs") runs the hosted shards.
 
-**Probe run record: run 36956876942, green, 2026-10-02 02:42Z** (develop
-5a31da34f plus the box-lock change, branch `runner-probe/qwen-2026-10-01`,
-deleted after). All five checks passed with the credential line CHECKED:
-identity exactly `ghci`, passwordless sudo refused, nothing readable under the
-nexus config directory, Docker reachable (root-equivalent, as documented), and
-the Windows side clean (no interop handler, no readable `/mnt` drive, no `/mnt`
-on PATH). Host-side the same run showed no earlyoom kill and an idle runner.
-The probe ran no suite, so capacity under a real `test-qwen` run is still
-unmeasured. The isolation boundary is still "owner pushes only", not the Unix
-user, because the `docker` group is root-equivalent. A run id recorded here must be a run
-that checked the credentials: **`NOT CHECKED` on the credential line is not a
-pass** (the run is green and carries a `::warning::` annotation, because an
-absent or closed nexus config directory cannot fail the probe).
+**Probe run record: run 36971401953, green, 2026-10-02** (develop bb206eb8c,
+branch `runner-probe/qwen-2026-10-02`, deleted after). Identity exactly `ghci`,
+passwordless sudo refused, Docker reachable (root-equivalent, as documented), and
+the Windows side clean (WSL kernel and binfmt_misc present, no `WSLInterop`
+handler, no `cmd.exe`, the `/mnt` drive directories empty, no `/mnt` on PATH).
+The credential line read `NOT CHECKED: /home/nexus/.config/nexus is absent or
+unreachable`. The cause is the host's mode, not a missing file: `/home/nexus` is
+0700 (the host owner set it 2026-09-30; `ghci` is in the groups `ghci`, `docker`
+and `nx-suite` only), so `ghci` cannot search it. That is the closed-home state
+and it passes under the rule below. The host owner ruled on 2026-10-02 to keep
+`/home/nexus` closed, not to open it to 0711. The run itself could not tell the
+two causes apart (it ran the probe before the closed-home line below existed); a
+run of the current probe says so in its own REPORT line.
+
+**Correction to the earlier record.** Run 36956876942 (2026-10-02 02:42Z,
+develop 5a31da34f plus the box-lock change, branch `runner-probe/qwen-2026-10-01`)
+was recorded here as having the credential line CHECKED. It was not: it logged the
+same `NOT CHECKED` line as the run above (same cause), and the record was written
+from the green status without reading that line. Its other checks were as above,
+and the same run showed no earlyoom kill and an idle runner on the host.
+
+**The credential line passes in two states and fails in one.** It PASSES when it
+is CHECKED and zero files under the nexus config directory are readable by the
+runner user, or when it is not checked because the live install's home directory
+(`/home/nexus`) exists but is not traversable by the runner user (a stronger state:
+nothing under that home is reachable by file mode, the config directory included;
+the current probe reports it as a closed home and raises no warning). It FAILS
+when any file under the config directory is readable. A `NOT CHECKED` for any
+other cause (the listing did not complete, the config directory is absent while
+the home is traversable, the home is absent) is not a pass: the run is green and
+carries a `::warning::` annotation, because the probe cannot fail on it. A run
+recorded here must be a run that passes, with the state named. The probe ran no
+suite, so capacity under a real `test-qwen` run is still unmeasured. The isolation
+boundary is still "owner pushes only", not the Unix user, because the `docker`
+group is root-equivalent: a closed home does not stop `docker run -v /:/h`.
 
 The job and a hand-run suite by the host's `nxtest` user serialize on one lease,
 not by agreement: `test-qwen` points `NX_BUILD_LEASE_ROOT` at a host directory

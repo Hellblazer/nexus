@@ -454,6 +454,53 @@ def test_a_missing_config_dir_is_reported_as_not_checked_never_as_a_pass(tmp_pat
         assert re.search(r"^::warning::NOT CHECKED: .*not a pass", out, re.M), out
 
 
+@pytest.mark.skipif(os.geteuid() == 0, reason="root searches every directory, so a closed home cannot be built")
+@pytest.mark.parametrize("mode", [0o000, 0o600, 0o644])
+def test_a_home_the_runner_user_cannot_traverse_is_the_stronger_state_and_passes_without_a_warning(
+        tmp_path: Path, mode: int) -> None:
+    """nexus-4r5lv: /home/nexus at 0700 from ghci's side. The config directory cannot be reached through it, so the
+    credential line is a PASS (no readable file is possible), not a NOT CHECKED, and no warning annotation is raised."""
+    home = tmp_path / "home"
+    cfg = home / ".config" / "nexus"
+    cfg.mkdir(parents=True)
+    (cfg / "config.yml").write_text("SECRET-VALUE\n")
+    (cfg / "config.yml").chmod(0o644)
+    home.chmod(mode)  # no search (x) bit for the test user, who owns it: what a peer sees at 0700
+    try:
+        proc = _run(_homes_probe(cfg))
+    finally:
+        home.chmod(0o755)
+    assert proc.returncode == 0, (proc.stdout, proc.stderr)
+    assert "closed to the runner user" in proc.stdout and "stronger state" in proc.stdout, proc.stdout
+    assert "NOT CHECKED" not in proc.stdout and "::warning::" not in proc.stdout, proc.stdout
+    assert "holds no file readable" not in proc.stdout, "the closed home is not the CHECKED-clean line either"
+    out = proc.stdout + proc.stderr
+    assert "config.yml" not in out and "SECRET-VALUE" not in out
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root searches every directory, so a closed home cannot be built")
+def test_a_closed_home_pass_does_not_mask_a_traversable_home_whose_config_directory_is_absent(tmp_path: Path) -> None:
+    """The discriminator is the HOME's traversability: a traversable home with no config directory is still NOT CHECKED
+    with a warning (a moved install looks the same), and so is a missing home. Closed and open are different runs."""
+    home = tmp_path / "home"
+    home.mkdir()
+    cfg = home / ".config" / "nexus"
+    open_home = _run(_homes_probe(cfg))
+    assert open_home.returncode == 0, (open_home.stdout, open_home.stderr)
+    assert "NOT CHECKED" in open_home.stdout and "closed to the runner user" not in open_home.stdout
+    assert re.search(r"^::warning::NOT CHECKED: .*not a pass", open_home.stdout, re.M), open_home.stdout
+    home.chmod(0o000)
+    try:
+        closed = _run(_homes_probe(cfg))
+    finally:
+        home.chmod(0o755)
+    assert "closed to the runner user" in closed.stdout and "::warning::" not in closed.stdout, closed.stdout
+    # a home that does not exist at all is not "closed": nothing was established, so it still warns
+    gone = _run(_homes_probe(tmp_path / "nohome" / ".config" / "nexus"))
+    assert "closed to the runner user" not in gone.stdout
+    assert re.search(r"^::warning::NOT CHECKED: .*not a pass", gone.stdout, re.M), gone.stdout
+
+
 @pytest.mark.skipif(sys.platform != "linux" or os.geteuid() == 0,
                     reason="root lists every directory, so a searchable-but-unlistable one cannot be built")
 def test_a_config_file_readable_by_name_in_an_unlistable_directory_still_fails_the_homes_step(tmp_path: Path) -> None:

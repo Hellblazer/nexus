@@ -745,7 +745,15 @@ def test_the_docs_give_the_enable_sequence_in_order_and_the_rerun_caveat() -> No
     # the record carries a numeric run id and the NOT-CHECKED caveat (a run that never read the credentials is no pass)
     record = re.search(r"\*\*Probe run record: run (\d{8,}), green", agents)
     assert record, "the green probe run id is recorded here"
-    assert "`NOT CHECKED` on the credential line is not a pass" in " ".join(agents.split())
+    flat = " ".join(agents.split())
+    assert record.group(1) == "36971401953", "the current record is the run that passed on the closed-home state"
+    # run 36956876942 was recorded as CHECKED but logged NOT CHECKED: the correction stays in the record
+    assert "Correction to the earlier record" in flat and "36956876942" in flat and "was not" in flat
+    # the rule: two passing states, one failing state, and every other NOT CHECKED is still not a pass
+    assert "passes in two states and fails in one" in flat
+    assert "not traversable by the runner user" in flat and "any file under the config directory is readable" in flat
+    assert "A `NOT CHECKED` for any other cause" in flat and "is not a pass" in flat
+    assert "`NOT CHECKED` on the credential line is not a pass" not in flat, "the unqualified rule is the one this replaced"
     assert "EVERY owner push to develop whose diff is not doc-only" in agents, "the scope claim is not 'merges touching ci.yml'"
 
 

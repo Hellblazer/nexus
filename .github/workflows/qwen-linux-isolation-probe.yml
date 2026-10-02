@@ -35,11 +35,15 @@
 #       (the live install's credentials live in config.yml and sibling files; a
 #       count is printed, never a name; config.yml is also tested by name, since
 #       `find -readable` is blind in a directory this user may search but not
-#       list). An unreachable or absent directory is reported as NOT CHECKED,
-#       which is also what a closed /home/nexus looks like from here, so it cannot
-#       fail. NOT CHECKED means the credential check was never performed: it is
-#       emitted as a `::warning::` annotation on the run summary, and a green run
-#       carrying it is NOT a pass;
+#       list). The line has three outcomes besides the failure. CHECKED with zero
+#       readable files passes. A /home/nexus that exists but is not traversable
+#       by the runner user (mode 0700 from here, which the host owner keeps on
+#       purpose) is reported as a closed home, the stronger state, and passes
+#       with no warning. Every other unchecked cause (the listing did not
+#       complete, the config directory absent while the home is traversable, no
+#       /home/nexus at all) is NOT CHECKED: the credential check was never
+#       performed, it cannot fail, and it is emitted as a `::warning::` annotation
+#       on the run summary, and a green run carrying it is NOT a pass;
 #     - this is not a WSL kernel, or binfmt_misc is not mounted (a positive
 #       control: the Windows-side checks are true on any non-WSL machine, so a
 #       pass there proves nothing);
@@ -158,14 +162,25 @@ jobs:
           echo "--- $cfg"
           if [ ! -d "$cfg" ]; then
             # From here an absent directory and a /home/nexus closed to this user
-            # look the same (the closed home is the EXPECTED good state), so this
-            # cannot fail. It must not read as a pass either: the credential check
-            # was never performed, so the run says so as a WARNING annotation, which
-            # GitHub shows on the run summary, not only as a line in the log (round-4
-            # review M2). A green run with this warning is NOT isolation evidence.
-            if [ -e "$(dirname "$(dirname "$cfg")")" ]; then
-              echo "REPORT: NOT CHECKED: $cfg is absent or unreachable by the runner user (expected when /home/nexus is closed to it; a moved install looks the same)"
-              echo "::warning::NOT CHECKED: the credential check was not performed ($cfg is absent or unreachable by the runner user). A green probe with this warning is not a pass."
+            # look the same, so the two are told apart by the HOME's own
+            # traversability (nexus-4r5lv):
+            #   - the home exists but this user has no search permission on it: the
+            #     config directory cannot be reached through it, which is STRONGER
+            #     than a file-mode check of the files in it. That is a pass: no
+            #     warning, and the line says why. The host owner closes the home on
+            #     purpose (0700, 2026-09-30) and ruled to keep it closed
+            #     (2026-10-02). `-x` is access(2), so an ACL counts too;
+            #   - anything else is NOT CHECKED: the credential check was never
+            #     performed, so the run says so as a WARNING annotation, which GitHub
+            #     shows on the run summary, not only as a line in the log (round-4
+            #     review M2). A green run with this warning is NOT isolation evidence.
+            #     It cannot fail, since an absent directory is not a readable file.
+            parent_home="$(dirname "$(dirname "$cfg")")"
+            if [ -d "$parent_home" ] && [ ! -x "$parent_home" ]; then
+              echo "REPORT: $parent_home exists and is closed to the runner user (no search permission), so $cfg cannot be reached through it: the stronger state, and the credential line passes"
+            elif [ -e "$parent_home" ]; then
+              echo "REPORT: NOT CHECKED: $cfg is absent or unreachable by the runner user ($parent_home is traversable, so this is not a closed home; a moved install looks the same)"
+              echo "::warning::NOT CHECKED: the credential check was not performed ($cfg is absent or unreachable by the runner user and its home is traversable). A green probe with this warning is not a pass."
             else
               echo "REPORT: NOT CHECKED: there is no /home/nexus on this host, so there is no live install's directory to read"
               echo "::warning::NOT CHECKED: the credential check was not performed (there is no /home/nexus on this host). A green probe with this warning is not a pass."
