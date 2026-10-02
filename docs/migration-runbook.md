@@ -39,7 +39,8 @@ has nothing to do.
 
 A note stored before nexus-b6enc has a catalog document but never got a
 manifest row. Since RDR-192 Phase 2 the engine hides such a chunk from search
-and get, and the RDR-192 reaper will delete it once it ages out. The rung
+and get, and the RDR-192 reaper moves it to quarantine once it has had no owner for
+30 days (quarantine is deleted 14 days later; `docs/operations/engine-reaper.md`). The rung
 censuses every non-quarantine collection (`nx t3 census-manifest-less`'s
 route), backfills each collection that holds a `legacy-unmanifested` chunk
 (`nx t3 backfill-manifest --no-dry-run --only-gapped`'s call), and records
@@ -65,7 +66,7 @@ reaper.
   owner document's title using `nx t3 census-manifest-less --collection <c>`,
   then re-put your copy with `nx store put - --collection <c> --title '<title>'`
   under the same title: the new chunk is manifested under the same document and
-  the old one becomes the reaper's.
+  the old one becomes the reaper's to quarantine, 30 days after it lost its owner.
 - Retries: a residual is not re-examined at all for 24 hours at the same
   package version (a T2 note, `upgrade_ladder_state/rdr192-manifest-backfill.residual`,
   holds its fingerprint and time), so a stuck tenant pays no census per session

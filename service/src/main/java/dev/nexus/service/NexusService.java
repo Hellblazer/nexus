@@ -229,6 +229,16 @@ public final class NexusService {
     private final TupleRepository tupleRepo;
 
     /**
+     * RDR-192 Step 9 (bead nexus-2x9xa): the state-derived chunk reaper, scheduled on {@link #sweepScheduler}.
+     * Null when this instance has no vector backend (nothing to reap) or {@value ChunkReaper#ENABLED_ENV} turns it
+     * off.
+     */
+    private final ChunkReaper chunkReaper;
+
+    /** The exact {@link Runnable} handed to {@link #sweepScheduler} for the reaper, or null when none was wired. */
+    private final Runnable reaperScheduledTask;
+
+    /**
      * RDR-169 G3 (bead nexus-aphki): the {@code https://} handler owns a real
      * {@link java.net.http.HttpClient} that must be closed on shutdown — held here
      * (rather than only inside {@link UriSchemeResolverRegistry}, which has no
@@ -431,6 +441,23 @@ public final class NexusService {
                         dev.nexus.service.vectors.Reranker reranker,
                         java.util.function.Supplier<dev.nexus.service.vectors.EmbedActivitySnapshot> localEmbedActivitySupplier,
                         TemplateRegistry tupleTemplateRegistry) throws IOException {
+        this(port, token, dataSource, docEmbedderRouter, pgVectorRepository, reranker, localEmbedActivitySupplier,
+                tupleTemplateRegistry, null);
+    }
+
+    /**
+     * The full constructor with a seam for the sweep scheduler (nexus-2x9xa, round 3). Null makes the real
+     * single-thread scheduler. A test passes a scheduler that RECORDS what is registered on it, so a wiring test
+     * can fail when the reaper's {@code scheduleWithFixedDelay} call is deleted: a test that only runs the reaper's
+     * task body cannot see that the schedule call is gone. Package-private: production never passes one.
+     */
+    NexusService(int port, String token, DataSource dataSource,
+                        EmbedderRouter docEmbedderRouter,
+                        PgVectorRepository pgVectorRepository,
+                        dev.nexus.service.vectors.Reranker reranker,
+                        java.util.function.Supplier<dev.nexus.service.vectors.EmbedActivitySnapshot> localEmbedActivitySupplier,
+                        TemplateRegistry tupleTemplateRegistry,
+                        ScheduledExecutorService sweepSchedulerOverride) throws IOException {
         this.tenantScope = new TenantScope(dataSource);
         this.dataSource = dataSource;
 
@@ -638,11 +665,12 @@ public final class NexusService {
         // BYPASSRLS connection is required because token-bearing tenants are
         // enumerable from service_tokens (read pre-tenant by design) and any
         // tenant that wrote scratch necessarily presented a token.
-        this.sweepScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
-            Thread t = new Thread(r, "t1-ttl-sweep");
-            t.setDaemon(true);
-            return t;
-        });
+        this.sweepScheduler = sweepSchedulerOverride != null ? sweepSchedulerOverride
+            : Executors.newSingleThreadScheduledExecutor(r -> {
+                Thread t = new Thread(r, "t1-ttl-sweep");
+                t.setDaemon(true);
+                return t;
+            });
         this.sweepScheduler.scheduleAtFixedRate(
             () -> {
                 try {
@@ -674,6 +702,82 @@ public final class NexusService {
                 SWEEP_INTERVAL_HOURS, SWEEP_INTERVAL_HOURS, TimeUnit.HOURS
             );
         }
+
+        // RDR-192 Step 9 (bead nexus-2x9xa): the state-derived chunk reaper, a THIRD scheduled task on the SAME
+        // sweepScheduler, at its own interval (NX_REAPER_INTERVAL_SECONDS, default one hour). It recomputes what
+        // is reapable from the manifest on every pass, so it is the safety net for the post-commit sweep's
+        // fail-open paths and keeps no drop set. It quarantines, never hard-deletes. Tenants are the ones the T1
+        // sweep visits: the default tenant plus every token-bearing tenant (nexus.chunks is FORCE RLS, so a
+        // tenant cannot be enumerated from the chunks table itself).
+        // The same pass also expires the quarantine it filled (reaper_expire_quarantine, 14 days, only the chunks
+        // it tagged; the client's gc_expire_quarantine skips those in turn), so ONE kill switch
+        // (NX_REAPER_ENABLED) and ONE wall-clock budget cover both. The first pass runs ChunkReaper.INITIAL_DELAY
+        // after boot, not a full interval: an engine that restarts more often than hourly must still reap.
+        ChunkReaper.Settings reaperSettings = ChunkReaper.Settings.fromEnv(System::getenv);
+        if (pgVectorRepository != null && reaperSettings.enabled()) {
+            ChunkReaper reaper = new ChunkReaper(
+                new dev.nexus.service.vectors.ReaperRepository(tenantScope), pgVectorRepository, catalogRepo,
+                new dev.nexus.service.db.Rdr192BackfillGate(ladderRepo), this::reaperTenants, reaperSettings,
+                java.time.Clock.systemUTC());
+            this.chunkReaper = reaper;
+            // The Runnable the scheduler runs, held in a field so a test runs THAT object and not a copy of its
+            // body: a test that called reaper.run() directly stayed green with the schedule turned into a no-op.
+            this.reaperScheduledTask = () -> {
+                try {
+                    reaper.run();
+                } catch (Exception ex) {
+                    log.warn("event=reaper_scheduled_run_failed error={}", ex.getMessage(), ex);
+                }
+            };
+            this.sweepScheduler.scheduleWithFixedDelay(
+                this.reaperScheduledTask,
+                ChunkReaper.INITIAL_DELAY.toSeconds(), reaperSettings.interval().toSeconds(), TimeUnit.SECONDS
+            );
+            log.info("event=reaper_scheduled initial_delay_seconds={} interval_seconds={} batch_size={} "
+                    + "floor_fraction={} floor_min_chunks={} census_timeout_seconds={} wall_clock_budget_seconds={} "
+                    + "quarantine_retention_days={} floor_exempt_collections={}",
+                ChunkReaper.INITIAL_DELAY.toSeconds(), reaperSettings.interval().toSeconds(),
+                reaperSettings.batchSize(), reaperSettings.floorFraction(), reaperSettings.floorMinChunks(),
+                reaperSettings.censusTimeout().toSeconds(), reaperSettings.wallClockBudget().toSeconds(),
+                reaperSettings.quarantineRetention().toDays(), new java.util.TreeSet<>(reaperSettings.floorExemptCollections()));
+        } else {
+            this.chunkReaper = null;
+            this.reaperScheduledTask = null;
+            log.info("event=reaper_not_scheduled has_pgvector={} enabled={}",
+                pgVectorRepository != null, reaperSettings.enabled());
+        }
+    }
+
+    /**
+     * The reaper's tenants: the default tenant plus every tenant that holds a row in {@code service_tokens}, as
+     * {@link #runScheduledSweep}. {@code nexus.chunks} is FORCE RLS, so a tenant cannot be enumerated from the chunks
+     * table itself. A tenant with chunks and no {@code service_tokens} row (a scope=data JIT token row is deleted 7
+     * days after it expires, so an idle cloud tenant can lose its last one) is NOT visited until it holds a token
+     * again: the safe direction, a liveness gap, never a wrong deletion.
+     */
+    private List<String> reaperTenants() {
+        var out = new java.util.LinkedHashSet<String>();
+        out.add(DEFAULT_TENANT);
+        out.addAll(tokenStore.listKnownTenants(SweepBounds.STATEMENT_TIMEOUT));
+        return List.copyOf(out);
+    }
+
+    /** The scheduled reaper, or null when none was wired. Package-private for the wiring test. */
+    ChunkReaper chunkReaper() {
+        return chunkReaper;
+    }
+
+    /**
+     * The very {@link Runnable} the scheduler runs for the reaper, or null when none was wired. Package-private: the
+     * wiring test runs THIS object, so a schedule turned into a no-op fails it.
+     */
+    Runnable reaperScheduledTask() {
+        return reaperScheduledTask;
+    }
+
+    /** The tenant set the scheduled reaper visits. Package-private for the wiring test. */
+    List<String> reaperTenantsForTests() {
+        return reaperTenants();
     }
 
     /** Start the HTTP server (non-blocking). */

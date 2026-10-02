@@ -94,7 +94,12 @@ A push run of Service CI exists only when ``service/**`` changed, so on the deve
 topic the Java job is always expected. When the row is missing the fold adds one
 with state ``missing``: ``pending`` for ``MISSING_JOB_GRACE_S`` after the anchor
 completed, ``failed`` after that. It adds nothing for a run whose own row says
-``cancelled``. For any other topic nothing is expected.
+``cancelled``. For any other topic nothing is expected. CI's qwen-linux suite job
+is expected the same way (it posts ``queued`` or ``completed skipped`` on every
+develop push), except in a run where a hosted shard (``pytest (Python ...``)
+completed with something other than ``skipped`` (``EXPECTED_UNLESS_PEER_RAN``):
+there the job either did not exist yet, for a sha whose CI run predates it, or
+was routed away from, and a missing row hides no unrun suite.
 
 Exit status: 0 when every job completed green, 1 when any job failed,
 2 when nothing failed but something is still pending, 3 when the topic has
@@ -143,6 +148,28 @@ SUPERSEDE_SKEW_S: int = 30
 #: the names against ``.github/workflows/service-ci.yml``.
 EXPECTED_JOBS: dict[str, dict[str, str]] = {
     "Service CI": {"Java tests + jOOQ codegen drift guard": "service change detection"},
+    # CI's qwen-linux job (owner pushes to develop run the whole suite there). It posts
+    # on EVERY develop push once ``changes`` has finished: ``queued`` when it runs, or
+    # ``completed skipped`` when the route sent the suite to the hosted shards or the
+    # diff was doc-only (a skipped job posts, measured on the board 2026-10-01). So a
+    # missing row means the post was lost or has expired, never a legitimate skip.
+    # Without this entry a job left queued for an offline runner reads green once its
+    # ``queued`` post expires at 6 h, because pytest-gate (which needs it) never queues.
+    "CI": {"pytest (qwen-linux full suite)": "doc-only fast lane predicate"},
+}
+#: Per workflow, ``{expected job: name prefix of a PEER job}``: when a job of the chosen
+#: run whose name starts with the prefix completed with a conclusion other than
+#: ``skipped``, the expected job is NOT synthesized. The peer ran, so either the run
+#: pre-dates the expected job (a develop sha whose CI run was started before the qwen
+#: job existed has no row for it, and reading that as ``failed`` would show a red
+#: suite that never was), or the route sent the suite to the peer and the expected
+#: job is legitimately skipped. Either way a missing row cannot hide a suite that
+#: never ran. The one case that matters, a suite routed to the expected job whose
+#: post is gone, has the peer skipped, so it still reads as missing. Residual: a
+#: doc-only run that pre-dates the job has every shard skipped and still reads
+#: ``failed`` once; it ages out with the board's three-day retention.
+EXPECTED_UNLESS_PEER_RAN: dict[str, dict[str, str]] = {
+    "CI": {"pytest (qwen-linux full suite)": "pytest (Python "},
 }
 #: How long an expected job may go without any post once its anchor completed. The job
 #: posts ``queued`` within seconds of the anchor finishing; a runner that is offline
@@ -348,7 +375,8 @@ def fold(posts: Iterable[tuple[str, dict[str, Any], dict[str, str]]], sha: str, 
                _verdict(state, conclusion, run_conclusion.get(wf)))
         for (wf, job, attempt), (state, conclusion, url, created_at) in current.items()
     ]
-    statuses += _missing_expected(current, run_conclusion, expected_jobs or {}, now or datetime.now(timezone.utc))
+    statuses += _missing_expected(current, run_conclusion, expected_jobs or {}, now or datetime.now(timezone.utc),
+                                  unless_peer_ran=EXPECTED_UNLESS_PEER_RAN)
     return sorted(statuses, key=lambda s: (s.workflow, s.job != "", s.job))
 
 
@@ -357,14 +385,23 @@ def _missing_expected(
     run_conclusion: dict[str, str],
     expected_jobs: dict[str, dict[str, str]],
     now: datetime,
+    *,
+    unless_peer_ran: dict[str, dict[str, str]] | None = None,
 ) -> list[Status]:
-    """A ``missing`` row per expected job with no post once its anchor completed green."""
+    """A ``missing`` row per expected job with no post once its anchor completed green.
+
+    Not for a job whose peer (``EXPECTED_UNLESS_PEER_RAN``) ran in the same run.
+    """
     out: list[Status] = []
     for wf, jobs in expected_jobs.items():
         if run_conclusion.get(wf) == "cancelled":
             continue  # the run row already says why the job never posted
         for job, anchor in jobs.items():
             if any(k[0] == wf and k[1] == job for k in current):
+                continue
+            peer = (unless_peer_ran or {}).get(wf, {}).get(job)
+            if peer and any(k[0] == wf and k[1].startswith(peer) and v[0] == "completed" and v[1] != "skipped"
+                            for k, v in current.items()):
                 continue
             done = [(k, v) for k, v in current.items()
                     if k[0] == wf and k[1] == anchor and v[0] == "completed" and v[1] in GREEN]

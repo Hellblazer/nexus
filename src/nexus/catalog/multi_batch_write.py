@@ -44,9 +44,11 @@ The protocol (RDR-223 Technical Design 1):
 
 A crash at any point leaves every chunk this run wrote with an owner row. What a crash before the
 last append leaves is the previous run's dropped chunks, ownerless and hidden from search. Nothing
-on the client removes them, and the RDR-192 reaper (nexus-2x9xa, not built) is scoped to
-``knowledge__`` collections, so for ``docs__``/``code__``/``rdr__`` they stay until ``nx t3 gc``;
-nexus-2x9xa carries the coverage decision. That is the accepted cost of not sweeping early. A RERUN
+on the client removes them. The engine reaper (RDR-192 Step 9, nexus-2x9xa) covers every collection
+prefix, ``knowledge__``, ``docs__``, ``code__`` and ``rdr__``: once such a chunk has had no owner for
+30 days an hourly pass moves it into the collection's quarantine sibling, and the quarantine is deleted
+14 days after that (``docs/operations/engine-reaper.md``). Until then they stay, hidden from search.
+That is the accepted cost of not sweeping early. A RERUN
 sweeps what its own snapshot shows: the crashed run's chunks that are in the manifest (the crash
 replaced the manifest with batches 1..k) and are absent from the rerun, but NOT the tail of the run
 before the crash, which the crashed run's batch 1 already dropped from the manifest and the rerun's

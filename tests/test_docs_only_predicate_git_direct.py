@@ -82,10 +82,14 @@ def test_changes_job_has_no_dorny_step() -> None:
 
 
 def test_changes_job_outputs_contract_unchanged() -> None:
-    """Downstream consumers only ever read `needs.changes.outputs.code` --
-    that job-level output wiring must be byte-identical."""
+    """`code` stays wired straight from the gate step, byte-identical. The
+    only addition is `ci_runner` (the owner-push qwen-linux route, a separate
+    `route` step that never touches the predicate)."""
     job = _changes_job()
-    assert job["outputs"] == {"code": "${{ steps.gate.outputs.code }}"}
+    assert job["outputs"] == {
+        "code": "${{ steps.gate.outputs.code }}",
+        "ci_runner": "${{ steps.route.outputs.ci_runner }}",
+    }
 
 
 def test_gate_step_id_and_name_present() -> None:
@@ -122,8 +126,11 @@ def test_conservative_family_still_uses_dorny(job_name: str) -> None:
 @pytest.mark.parametrize(
     ("consumer_job", "expected_condition"),
     [
-        ("service-jar", "success() && needs.changes.outputs.code == 'true'"),
-        ("test", "success() && needs.changes.outputs.code == 'true'"),
+        # service-jar and the hosted shards additionally step aside on the
+        # owner-push qwen-linux route (the code predicate itself is unchanged).
+        ("service-jar", "success() && needs.changes.outputs.code == 'true' && needs.changes.outputs.ci_runner != 'qwen-linux'"),
+        ("test", "success() && needs.changes.outputs.code == 'true' && needs.changes.outputs.ci_runner != 'qwen-linux'"),
+        ("test-qwen", "success() && needs.changes.outputs.code == 'true' && needs.changes.outputs.ci_runner == 'qwen-linux'"),
         ("test-lint", "success() && needs.changes.outputs.code == 'true'"),
         ("test-mode-census", "success() && needs.changes.outputs.code == 'true'"),
     ],

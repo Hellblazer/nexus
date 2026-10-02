@@ -22,6 +22,10 @@ on:
   push:
     branches:
       - 'runner-probe/**'
+      # qwen-linux-isolation-probe.yml owns runner-probe/qwen-*; without this
+      # exclusion its throwaway branch also fired a 20-minute probe on the
+      # hellmini release runner (round-4 review L2).
+      - '!runner-probe/qwen-*'
 
 concurrency:
   group: hellmini-probe-${{ github.ref }}
