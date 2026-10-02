@@ -114,6 +114,8 @@ A chunk moved to `quarantine-<collection>` keeps its text and embedding. If a la
 
 **Protected quarantine copies are kept for ever.** A chunk past the retention window that a manifest row of its origin names is never deleted, and nothing removes it later. A manifest row can only name a chunk that exists in the origin collection (a foreign key), so the quarantine copy is a redundant duplicate and the cost is storage, not data. It shows as `expiry_protected` every pass.
 
+**Reaper-moved chunks of an unregistered origin are never expired.** The engine's expiry reads each chunk's origin from its `origin_collection` tag and skips a tagged row whose origin is not in `catalog_collections` (an INFO line every pass), and the client's expiry route no longer reaches tagged rows even with `force` (vectors-026). Such rows stay in the sibling until the origin is registered again or someone deletes them by hand. The cost is storage, not data.
+
 **Tenants that drop out.** The pass enumerates `service_tokens`, because `nexus.chunks` is row-level secured and cannot be enumerated across tenants. A `scope=data` token row is deleted seven days after it expires, so a cloud tenant that is idle with no live token is not visited until it holds a token again. That is a liveness gap, not a deletion hazard.
 
 **It is the safety net, not the fast path.** The post-commit sweep removes the replaced chunks of a re-indexed document inline; the reaper finds what that sweep left behind when it failed open (a gate timeout, a statement timeout) or when a multi-request run crashed. Debris from either is reaped 30 days later, not on the next pass.

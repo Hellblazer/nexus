@@ -1686,8 +1686,8 @@
         a fraction floor on the move, quarantine (never a hard delete), an
         actor 'engine-reaper' gc_audit row, and a quarantined_by tag on every moved
         chunk; and nexus.reaper_expire_quarantine, the engine's expiry of ONLY the
-        chunks that carry that tag, with no fraction floor (Sam, 2026-10-01). There is no vectors-023: the orphaning-stamp
-        rework (nexus-wbfpw.15) shipped as vectors-021 and vectors-022. Placed after
+        chunks that carry that tag, with no fraction floor (Sam, 2026-10-01). vectors-023 is reserved for the
+        nexus-wbfpw.35 text-gate probe (unlanded). Placed after
         vectors-022, before the grants blocks.
     -->
     <include file="db/changelog/vectors-024-reaper-quarantine-chunks.xml"/>
