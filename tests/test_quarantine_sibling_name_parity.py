@@ -24,10 +24,10 @@ _REPO = Path(__file__).resolve().parent.parent
 _REAPER = _REPO / "service" / "src" / "main" / "java" / "dev" / "nexus" / "service" / "ChunkReaper.java"
 
 CONFORMANT_ORIGINS = [
-    "knowledge__distributed-systems__voyage-context-3__v1",
-    "docs__nexus-1-1__voyage-context-3__v1",
-    "code__nexus-1-1__voyage-code-3__v1",
-    "rdr__nexus-1-1__voyage-context-3__v2",
+    "knowledge__distributed-systems__bge-base-en-v1.5__v1",
+    "docs__nexus-1-1__bge-base-en-v1.5__v1",
+    "code__nexus-1-1__minilm-l6-v2-384__v1",
+    "rdr__nexus-1-1__minilm-l6-v2-384__v2",
     "knowledge__rp2__minilm-l6-v2-384__v1",
     "code__nexus-1-1__bge-base-en-v1.5__v1",
 ]
@@ -66,8 +66,8 @@ def test_a_row_that_disagrees_with_its_name_gets_a_different_sibling_so_the_engi
     """The divergence the engine's expiry is built not to depend on (it reads the tag)."""
     import nexus.mcp_infra as mcp_infra
 
-    origin = "knowledge__distributed-systems__voyage-context-3__v1"
-    row = _row_for(origin) | {"embedding_model": "voyage-3"}   # the catalog row wins in the client
+    origin = "knowledge__distributed-systems__bge-base-en-v1.5__v1"
+    row = _row_for(origin) | {"embedding_model": "minilm-l6-v2-384"}   # the catalog row wins in the client
     monkeypatch.setattr(mcp_infra, "get_collection_row", lambda name, **kw: row)
 
     assert cq.quarantine_collection_name(origin) != _java_prefix() + origin
