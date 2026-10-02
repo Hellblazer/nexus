@@ -42,7 +42,7 @@ from nexus.corpus import t3_collection_name
 from nexus.db.http_vector_client import HttpVectorClient, VectorServiceError
 from nexus.mcp.core import store_put
 
-KNOWLEDGE = "knowledge__wbfpw26__voyage-context-3__v1"
+KNOWLEDGE = "knowledge__wbfpw26__bge-base-en-v1.5__v1"
 
 
 # ── strict fake ──────────────────────────────────────────────────────────────
@@ -166,7 +166,7 @@ def test_only_the_superseded_bucket_is_probed(monkeypatch):
 
 
 def test_no_knowledge_collection_is_not_applicable_and_passes():
-    t3 = _FakeT3({}, extra_collections=["code__x__voyage-code-3__v1", "docs__y__voyage-context-3__v1"])
+    t3 = _FakeT3({}, extra_collections=["code__x__bge-base-en-v1.5__v1", "docs__y__bge-base-en-v1.5__v1"])
     report = _run_visible_outside_manifest(t3=t3)
     assert report["pass"] is True and report["not_applicable"] is True
     assert report["findings"] == [] and t3.census_calls == []
@@ -176,7 +176,7 @@ def test_no_knowledge_collection_is_not_applicable_and_passes():
 def test_non_knowledge_and_quarantine_collections_are_never_censused(monkeypatch):
     _no_titles(monkeypatch)
     t3 = _FakeT3({KNOWLEDGE: {"superseded": []}},
-                 extra_collections=["code__x__voyage-code-3__v1", "quarantine-knowledge__a__m__v1"])
+                 extra_collections=["code__x__bge-base-en-v1.5__v1", "quarantine-knowledge__a__m__v1"])
     _run_visible_outside_manifest(t3=t3)
     assert {c for c, _l, _o in t3.census_calls} == {KNOWLEDGE}
 
@@ -230,7 +230,7 @@ def test_time_budget_stops_and_names_the_unreached_collections(monkeypatch):
     first collection is censused and probed, the second is censused but its
     probe starts past the budget, the third is never reached."""
     _no_titles(monkeypatch)
-    names = [f"knowledge__wbfpw26-{c}__voyage-context-3__v1" for c in "abc"]
+    names = [f"knowledge__wbfpw26-{c}__bge-base-en-v1.5__v1" for c in "abc"]
     t3 = _FakeT3({n: {"superseded": [_ch(i)]} for i, n in enumerate(names)})
     now = [0.0]
     real_census = t3.manifest_less_census
@@ -294,7 +294,7 @@ def test_the_flag_emits_json(monkeypatch):
     with patch("nexus.db.make_t3", return_value=clean):
         res = CliRunner().invoke(doctor_cmd, ["--visible-outside-manifest", "--json"])
     assert res.exit_code == 0, res.output
-    payload = json.loads(res.output)["visible_outside_manifest"]
+    payload = json.loads(res.stdout)["visible_outside_manifest"]
     assert payload["checked"] == 1 and payload["total"] == 1 and payload["pass"] is True
 
 
