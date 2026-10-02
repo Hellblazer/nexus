@@ -30,6 +30,8 @@ from __future__ import annotations
 
 import json
 import os
+import time
+from collections.abc import Callable
 from pathlib import Path
 
 import click
@@ -124,6 +126,20 @@ _log = structlog.get_logger(__name__)
     ),
 )
 @click.option(
+    "--visible-outside-manifest",
+    "visible_outside_manifest",
+    is_flag=True,
+    help=(
+        "RDR-192 Step 14 (nexus-wbfpw.26): live(c) regression canary. Per "
+        "knowledge__ collection, takes the census 'superseded' bucket (chunks "
+        "with no own-collection manifest row whose owning note is live) and "
+        "asks the NORMAL reader, never the physical one, whether each is "
+        "visible. FAIL on any visible chunk (collection, note, chash). "
+        "Bounded by a row and a time budget and reports 'checked N of M'; "
+        "not applicable on a box with no knowledge__ collection."
+    ),
+)
+@click.option(
     "--json", "as_json", is_flag=True,
     help="Emit machine-readable JSON instead of text output.",
 )
@@ -135,6 +151,7 @@ def doctor_cmd(
     name_vs_embed_dim: bool,
     store_put_integrity: bool,
     link_coverage: bool,
+    visible_outside_manifest: bool,
     as_json: bool,
 ) -> None:
     """RDR-101 catalog doctor surface.
@@ -150,19 +167,22 @@ def doctor_cmd(
       - ``--chunk-size-distribution`` / ``--chunk-text-dedup`` /
         ``--t3-vs-catalog`` / ``--name-vs-embed-dim`` (nexus-6dan) and
         ``--store-put-integrity``: read-only audits over T3 + catalog.
+      - ``--visible-outside-manifest`` (RDR-192 Step 14, nexus-wbfpw.26): a
+        live(c) regression canary over the census ``superseded`` bucket.
     """
     any_check = (
         collections_drift
         or chunk_size_distribution or chunk_text_dedup or t3_vs_catalog
         or name_vs_embed_dim or store_put_integrity
-        or link_coverage
+        or link_coverage or visible_outside_manifest
     )
     if not any_check:
         raise click.UsageError(
             "Pass a check flag: --collections-drift, "
             "--chunk-size-distribution, --chunk-text-dedup, "
             "--t3-vs-catalog, --name-vs-embed-dim, "
-            "--store-put-integrity, or --link-coverage."
+            "--store-put-integrity, --link-coverage, or "
+            "--visible-outside-manifest."
         )
 
     overall_pass = True
@@ -243,6 +263,18 @@ def doctor_cmd(
             if _printed_anything:
                 click.echo("")
             _print_link_coverage_text(report)
+            _printed_anything = True
+        if not report["pass"]:
+            overall_pass = False
+
+    if visible_outside_manifest:
+        report = _run_visible_outside_manifest()
+        if as_json:
+            json_payload["visible_outside_manifest"] = report
+        else:
+            if _printed_anything:
+                click.echo("")
+            _print_visible_outside_manifest_text(report)
             _printed_anything = True
         if not report["pass"]:
             overall_pass = False
@@ -1298,6 +1330,272 @@ def _print_store_put_integrity_text(report: dict) -> None:
         )
         for e in report["check_errors"][:20]:
             click.echo(f"    {e['tumbler']}  ERROR: {e['error']}")
+
+
+# ── visible chunks outside the manifest (RDR-192 Step 14, nexus-wbfpw.26) ────
+#
+# Under live(c) a chunk with no own-collection manifest row is hidden from
+# search and get. The census ``superseded`` bucket is the manifest-less chunks
+# whose owning document is live and whose manifest names a different chash: the
+# divergence signature RDR-192 Step 14 names ("nx catalog show reports a clean
+# manifest while raw search returns two versions of one title"). This check asks
+# the NORMAL reader whether any of them is visible. After the RDR-192 live(c)
+# work it finds nothing unless live(c) regresses or a new liveness predicate
+# drifts; that is its whole job.
+#
+# Read narrowly, by Sam's ruling recorded in RDR-192 at 357ff6225: a split note
+# legitimately has several live chunks, so "title with more than one live chunk"
+# is NOT the test. A census-superseded chunk the reader can still see is.
+#
+# The reader must stay the live(c)-filtered one. Passing ``include_non_live``
+# (or reading the physical ``chroma://`` permalink) would return exactly the
+# correctly hidden debris this check is looking for and flag all of it, so the
+# probe is a plain ``get(ids=...)`` and nothing else.
+
+#: Superseded chunks probed per run, across every collection. A budget, not a
+#: sample: chashes are taken in census order (ascending chash) per collection,
+#: so a backlog larger than the budget is checked in the same slice every run
+#: until it shrinks.
+VISIBLE_CHECK_ROW_BUDGET: int = 5000
+
+#: Wall-clock seconds for one run, checked between collections, census pages
+#: and probe batches.
+VISIBLE_CHECK_TIME_BUDGET_S: float = 120.0
+
+_VISIBLE_CHECK_PREFIX = "knowledge__"
+
+
+def _titles_for_tumblers(tumblers: list[str]) -> dict[str, str]:
+    """Titles for the owner tumblers of findings, in one batched catalog read.
+    Best-effort: a catalog that cannot answer leaves the title blank and never
+    changes the verdict."""
+    if not tumblers:
+        return {}
+    try:
+        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — command-local import deferred to avoid CLI startup cost (nexus.catalog.factory)
+
+        reader = make_catalog_reader()
+        if reader is None:
+            return {}
+        return {t: e.title for t, e in reader.resolve_many(sorted(set(tumblers))).items() if e.title}
+    except Exception as exc:  # noqa: BLE001 — titles are a convenience; the finding must still print
+        _log.debug("visible_outside_manifest_titles_unavailable", error=str(exc))
+        return {}
+
+
+def _run_visible_outside_manifest(
+    *,
+    t3=None,
+    row_budget: int = VISIBLE_CHECK_ROW_BUDGET,
+    time_budget_s: float = VISIBLE_CHECK_TIME_BUDGET_S,
+    clock: Callable[[], float] = time.monotonic,
+) -> dict:
+    """Canary for a live(c) regression (RDR-192 Step 14, nexus-wbfpw.26).
+
+    For each ``knowledge__*`` collection: page the census route (<= 300 per
+    call), keep the ``superseded`` bucket, and ask the normal reader
+    (``get(ids=batch)``, no ``include_non_live``) which of those chashes it can
+    see. Each visible one is a finding naming collection, owner tumbler, title
+    and chash, and fails the check.
+
+    Bounds: at most ``row_budget`` superseded chunks are probed and at most
+    ``time_budget_s`` seconds are spent. Either stops the run with
+    ``truncated=True`` and a reason; the report always carries ``checked``
+    (chunks probed) and ``total`` (superseded chunks reported by the
+    collections reached), so a clean result states what it covered.
+    ``collections_unreached`` counts collections the run never opened. A
+    truncated run with no finding still passes: the report line carries the
+    caveat, and the next run starts from the same chashes.
+
+    Not applicable, and passing, when there is no ``knowledge__`` collection or
+    the connected engine predates the census route (it predates live(c) too, so
+    there is nothing to regress). Any other failure fails the check.
+    """
+    from nexus.db.limits import QUOTAS  # noqa: PLC0415 — command-local import (nexus.db.limits)
+
+    started = clock()
+    report: dict = {
+        "pass": True, "not_applicable": False, "reason": "",
+        "checked": 0, "total": 0, "findings": [], "collections": [],
+        "collections_unreached": 0, "truncated": False, "truncated_reason": "",
+        "check_errors": [], "elapsed_s": 0.0,
+        "row_budget": row_budget, "time_budget_s": time_budget_s,
+    }
+
+    try:
+        if t3 is None:
+            from nexus.db import make_t3  # noqa: PLC0415 — command-local import (nexus.db)
+
+            t3 = make_t3()
+        names = sorted(
+            c["name"] for c in t3.list_collections()
+            if c["name"].startswith(_VISIBLE_CHECK_PREFIX)
+        )
+    except Exception as exc:  # noqa: BLE001 — an unreadable T3 is UNKNOWN, never a pass
+        report["pass"] = False
+        report["error"] = f"Failed to list T3 collections: {exc}"
+        return report
+
+    if not names:
+        report["not_applicable"] = True
+        report["reason"] = "no knowledge__ collection on this box; nothing to check"
+        return report
+
+    page_limit = QUOTAS.MAX_QUERY_RESULTS  # 300
+
+    def over_time() -> bool:
+        return (clock() - started) > time_budget_s
+
+    def stop(reason: str) -> None:
+        if not report["truncated"]:
+            report["truncated"] = True
+            report["truncated_reason"] = reason
+
+    time_reason = f"time budget of {time_budget_s:g}s reached"
+    row_reason = f"row budget of {row_budget} reached"
+
+    for index, name in enumerate(names):
+        if over_time() or report["checked"] >= row_budget:
+            stop(time_reason if over_time() else row_reason)
+            report["collections_unreached"] = len(names) - index
+            break
+
+        # 1. The superseded chashes, page by page. totals are collection-wide
+        # and identical on every page, so a collection with no superseded chunk
+        # costs exactly one call.
+        superseded: list[str] = []
+        owners: dict[str, dict] = {}
+        superseded_total = 0
+        offset = 0
+        try:
+            while True:
+                page = t3.manifest_less_census(name, limit=page_limit, offset=offset)
+                if offset == 0:
+                    superseded_total = int((page.get("totals") or {}).get("superseded", 0))
+                superseded.extend((page.get("chashes") or {}).get("superseded", []))
+                owners.update(page.get("owners") or {})
+                if (
+                    superseded_total == 0
+                    or len(superseded) >= superseded_total
+                    or int(page.get("returned", 0)) < page_limit
+                ):
+                    break
+                if over_time():
+                    stop(time_reason)
+                    break
+                offset += page_limit
+        except Exception as exc:  # noqa: BLE001 — classified here, never a silent skip
+            if getattr(exc, "code", None) == 404:
+                report.update(
+                    not_applicable=True, findings=[], checked=0, total=0, collections=[],
+                    reason=(
+                        "the connected engine does not carry the manifest-less census route "
+                        "(and so predates live(c)); nothing to check"
+                    ),
+                    elapsed_s=round(clock() - started, 3),
+                )
+                return report
+            report["check_errors"].append({"collection": name, "error": f"census: {exc}"})
+            report["pass"] = False
+            continue
+
+        report["total"] += superseded_total
+        coll_row = {"collection": name, "superseded": superseded_total, "checked": 0}
+        report["collections"].append(coll_row)
+        if len(superseded) < superseded_total:
+            stop("census paging stopped early; not every superseded chunk was listed")
+        if not superseded:
+            continue
+
+        # 2. The normal reader: a plain get(ids=...), filtered by live(c). No
+        # include_non_live and no physical read.
+        try:
+            col = t3.get_or_create_collection(name)
+        except Exception as exc:  # noqa: BLE001 — classified here, never a silent skip
+            report["check_errors"].append({"collection": name, "error": f"open: {exc}"})
+            report["pass"] = False
+            continue
+        visible_here: list[str] = []
+        errored = False
+        for start in range(0, len(superseded), page_limit):
+            remaining = row_budget - report["checked"]
+            if remaining <= 0:
+                stop(row_reason)
+                break
+            if over_time():
+                stop(time_reason)
+                break
+            batch = superseded[start: start + page_limit][:remaining]
+            try:
+                got = col.get(ids=batch, include=["metadatas"])
+            except Exception as exc:  # noqa: BLE001 — classified here, never a silent skip
+                report["check_errors"].append({"collection": name, "error": f"get: {exc}"})
+                report["pass"] = False
+                errored = True
+                break
+            asked = set(batch)
+            visible_here.extend(i for i in (got.get("ids") or []) if i in asked)
+            report["checked"] += len(batch)
+            coll_row["checked"] += len(batch)
+        if not errored and coll_row["checked"] < len(superseded):
+            stop(row_reason)  # the last batch was cut to the remaining row budget
+        for chash in sorted(visible_here):
+            owner = owners.get(chash) or {}
+            report["findings"].append({
+                "collection": name, "chash": chash,
+                "tumbler": owner.get("owner_tumbler") or "", "title": "",
+            })
+
+    if report["findings"]:
+        report["pass"] = False
+        titles = _titles_for_tumblers([f["tumbler"] for f in report["findings"] if f["tumbler"]])
+        for f in report["findings"]:
+            f["title"] = titles.get(f["tumbler"], "")
+    report["elapsed_s"] = round(clock() - started, 3)
+    return report
+
+
+def _print_visible_outside_manifest_text(report: dict) -> None:
+    if report.get("error"):
+        click.echo(f"visible-outside-manifest: ERROR - {report['error']}")
+        return
+    if report.get("not_applicable"):
+        click.echo(f"visible-outside-manifest: not applicable - {report['reason']}")
+        return
+    status = "PASS" if report["pass"] else "FAIL"
+    click.echo(
+        f"visible-outside-manifest: {status} "
+        f"(checked {report['checked']} of {report['total']} census-superseded chunks "
+        f"in {len(report['collections'])} knowledge__ collections, "
+        f"{report['elapsed_s']}s)"
+    )
+    if report["truncated"]:
+        unreached = (
+            f", {report['collections_unreached']} collections not reached"
+            if report["collections_unreached"] else ""
+        )
+        click.echo(
+            f"  PARTIAL: {report['truncated_reason']}; "
+            f"{report['total'] - report['checked']} listed superseded chunks unchecked{unreached}."
+        )
+    if report["findings"]:
+        click.echo(
+            f"  VISIBLE superseded chunks ({len(report['findings'])}): live(c) is not "
+            "hiding a chunk outside its note's manifest:"
+        )
+        for f in report["findings"][:50]:
+            title = f"  {f['title']!r}" if f.get("title") else ""
+            click.echo(
+                f"    {f['collection']}  owner={f['tumbler'] or '-'}{title}  chash={f['chash']}"
+            )
+        click.echo(
+            "  A healthy engine returns none of these from search or get. Treat this as a "
+            "live(c) regression (or a predicate that drifted from it), not as data loss."
+        )
+    if report.get("check_errors"):
+        click.echo(f"  Collections that could not be checked ({len(report['check_errors'])}):")
+        for e in report["check_errors"][:20]:
+            click.echo(f"    {e['collection']}  ERROR: {e['error']}")
 
 
 def register(group: click.Group) -> None:
