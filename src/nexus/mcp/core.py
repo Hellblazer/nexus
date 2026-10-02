@@ -5405,10 +5405,8 @@ def store_put(
 
     Returns "Stored: <id> -> <collection>" (for a split note, the first
     chunk's id, plus "(N chunks, split to the embedding model's token
-    window)"); a re-put whose sweep removed chunks adds a second line,
-    "Superseded: N chunk(s) removed: [<chash>, ...]"; or an explicit
-    error — a failed catalog/manifest write rolls the chunk back, never a
-    partial "Stored:".
+    window)"), or an explicit error — a failed catalog/manifest write
+    rolls the chunk back, never a partial "Stored:".
 
     Constraints:
     - `content` is capped at 16,384 UTF-8 bytes (~3,000-4,000 words).
