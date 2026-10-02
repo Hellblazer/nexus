@@ -477,6 +477,19 @@ class TestCli:
         whole = _run(runner, _Stub([_page([_attached_row(a, owner_rows=3, owner_chunks=3)])]), "--chash", a)
         assert "attached: restore the rest" not in whole.output, "3 of 3 is not partial"
 
+    def test_the_owner_count_is_the_one_from_the_last_page_that_attached_to_it(self, runner) -> None:
+        a, b = _chash("a"), _chash("b")
+        stub = _Stub([
+            _page([_attached_row(a, position=0, owner_rows=1, owner_chunks=3)], next_after=a),
+            _page([_attached_row(b, position=1, owner_rows=2, owner_chunks=3)]),
+        ])
+
+        result = _run(runner, stub, "--quarantined-since", "2026-09-01", "--json")
+
+        doc = _doc(result.stdout)
+        assert doc["owners"] == [{"owner": "1.2.3", "title": "Legacy Note", "attached": 2,
+                                  "manifest_rows": 2, "chunk_count": 3}], "the later page saw the later state"
+
     def test_an_unexpected_failure_on_a_later_page_still_prints_the_report_not_a_traceback(self, runner) -> None:
         hs = [_chash(str(i)) for i in range(1100)]
         first = _page([_attached_row(h) for h in hs[:1000]], audit_id=79)
