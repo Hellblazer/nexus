@@ -231,10 +231,12 @@ The enable sequence, in order; stop at the first red:
    `/var/lib/nx-suite-lease`: `sudo groupadd -f nx-suite`,
    `sudo usermod -aG nx-suite ghci`, `sudo usermod -aG nx-suite nxtest`,
    `sudo install -d -o root -g nx-suite -m 2775 /var/lib/nx-suite-lease`),
-   restart the runner service so `ghci` has the group, and have `nxtest` export
-   `NX_BUILD_LEASE_ROOT=/var/lib/nx-suite-lease NX_SUITE_LEASE_WAIT=1` (its
-   `.bashrc`, which non-interactive ssh reads too), and take the box lock for
-   every hand run (`flock /var/lib/nx-suite-lease/box.lock bash -c '...'`, below).
+   restart the runner service so `ghci` has the group, and take the box lock for
+   every hand run, passing `NX_BUILD_LEASE_ROOT=/var/lib/nx-suite-lease
+   NX_SUITE_LEASE_WAIT=1` explicitly (`flock /var/lib/nx-suite-lease/box.lock env
+   NX_BUILD_LEASE_ROOT=... NX_SUITE_LEASE_WAIT=1 bash -c '...'`, below). Do not
+   export them from `nxtest`'s `.bashrc`: bash reads it in non-interactive ssh
+   shells, and the export leaked into tests that scrub the variable.
    The host needs `flock` (util-linux); the job's toolchain preflight and its
    suite step both fail closed without it. Apply the `/etc/wsl.conf` fix
    (WSL interop and the `/mnt` automount off, `AGENTS.md` § Self-hosted runners
@@ -295,7 +297,7 @@ Then, before the route is called settled:
    processes, containers on the shared docker daemon, and shared-memory
    segments (`ipcs -m`). The next run's orphan sweep should clear what it left.
 10. One overlap with a hand run: start a hand run as `nxtest` under the box lock
-    (`flock /var/lib/nx-suite-lease/box.lock bash -c 'uv sync -q && scripts/build-gate-jar.sh && uv run pytest -n 8 -q'`),
+    (`flock /var/lib/nx-suite-lease/box.lock env NX_BUILD_LEASE_ROOT=/var/lib/nx-suite-lease NX_SUITE_LEASE_WAIT=1 bash -c 'uv sync -q && scripts/build-gate-jar.sh && uv run pytest -n 8 -q'`),
     push, and see the CI job log that the box lock is held, wait, and start when the hand
     run ends, with no OOM on the distro. Then the reverse: a hand run started while the CI job
     holds the lock queues behind it.
@@ -322,7 +324,7 @@ wedged twice on 2026-10-01 when a suite overlapped a Maven gate-jar build; the
 suite lease alone does not cover the build):
 
 ```bash
-flock /var/lib/nx-suite-lease/box.lock bash -c 'uv sync -q && scripts/build-gate-jar.sh && uv run pytest -n 8 -q'
+flock /var/lib/nx-suite-lease/box.lock env NX_BUILD_LEASE_ROOT=/var/lib/nx-suite-lease NX_SUITE_LEASE_WAIT=1 bash -c 'uv sync -q && scripts/build-gate-jar.sh && uv run pytest -n 8 -q'
 ```
 
 `-n 8`, not 12 (about 2.5 GB per worker on a 40 GB VM shared with a production

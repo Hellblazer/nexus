@@ -1074,10 +1074,14 @@ def test_the_real_flock_times_out_with_exit_200_on_a_lock_another_process_holds(
 
 
 def test_the_docs_state_n8_and_the_box_lock_hand_run_convention_and_no_stale_n12() -> None:
-    hand_run = "flock /var/lib/nx-suite-lease/box.lock bash -c 'uv sync -q && scripts/build-gate-jar.sh && uv run pytest -n 8 -q'"
+    hand_run = ("flock /var/lib/nx-suite-lease/box.lock env NX_BUILD_LEASE_ROOT=/var/lib/nx-suite-lease NX_SUITE_LEASE_WAIT=1 "
+                "bash -c 'uv sync -q && scripts/build-gate-jar.sh && uv run pytest -n 8 -q'")
     for name in ("AGENTS.md", "docs/contributing.md"):
         text = (_ROOT / name).read_text()
         assert hand_run in text, name
         assert "box.lock" in text and "hellmini" in text and "-n 8" in text, name
+        # the hand run PASSES the two variables; nxtest's .bashrc must not export them (the export leaked into tests)
+        flat = " ".join(text.split())
+        assert "no longer exports them" in flat or "Do not export them from `nxtest`'s `.bashrc`" in flat, name
         for stale in ("one `-n 12` job", "xdist -n 12", "pytest tests/ -n 12", "under `-n 12`"):
             assert stale not in text, (name, stale)

@@ -262,8 +262,10 @@ group is root-equivalent: a closed home does not stop `docker run -v /:/h`.
 The job and a hand-run suite by the host's `nxtest` user serialize on one lease,
 not by agreement: `test-qwen` points `NX_BUILD_LEASE_ROOT` at a host directory
 (`QWEN_SUITE_LEASE_ROOT`, default `/var/lib/nx-suite-lease`, group-writable,
-not sticky) and sets `NX_SUITE_LEASE_WAIT=1`, and `nxtest` must export the same
-two variables; the job's lease step fails loud, with the host setup text, when
+not sticky) and sets `NX_SUITE_LEASE_WAIT=1`, and a hand run passes the same two
+variables explicitly (`nxtest`'s `.bashrc` no longer exports them: bash reads
+`~/.bashrc` in non-interactive ssh shells, and the export leaked into tests that
+scrub the variable); the job's lease step fails loud, with the host setup text, when
 the directory is missing or unusable (the suite lease itself would otherwise run
 unguarded and say nothing). The suite lease's refusal rules are in § Engine-service
 release, next to the build lease's; a lint test pins that no workflow sets its
@@ -297,7 +299,7 @@ hand runs. Worker count is `-n 8`, not 12: each xdist worker boots its own
 Postgres at about 2.5 GB and 12 left the VM too little headroom. **Hand runs on
 qwentescence follow the same convention**, as `nxtest` in a worktree under
 `~/src/nexus-wt/`:
-`flock /var/lib/nx-suite-lease/box.lock bash -c 'uv sync -q && scripts/build-gate-jar.sh && uv run pytest -n 8 -q'`.
+`flock /var/lib/nx-suite-lease/box.lock env NX_BUILD_LEASE_ROOT=/var/lib/nx-suite-lease NX_SUITE_LEASE_WAIT=1 bash -c 'uv sync -q && scripts/build-gate-jar.sh && uv run pytest -n 8 -q'`.
 No Maven or engine suites on qwentescence at all (`scripts/mvnw-leased.sh`,
 `service/` test runs, `-Pnative`): the Java engine suites run on hellmini. The
 stamped-jar build that tests need is the only Maven the box runs, and only
