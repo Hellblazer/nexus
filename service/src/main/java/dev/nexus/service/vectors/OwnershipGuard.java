@@ -17,10 +17,13 @@ import java.util.Objects;
  * {@code putWithTokens}, {@code upsertChunks}), so a handler cannot call one of them with a null
  * guard. It matches direct calls and method references as text, so it also reads comments: name a
  * guarded method in prose without the call or the double-colon syntax. It does not see a chunk
- * write that goes through another method or through direct SQL. Known writers outside the guard:
- * the SQL chunk inserters in the gc restore and quarantine changesets (catalog-023, 028, 033, 037,
- * 039, 042, 043; hygiene-002, 005, 008), and the quarantine restore verb planned under
- * nexus-wbfpw.49, which restores ownerless chunks by design.
+ * write that goes through another method or through direct SQL. Known writers outside the guard are
+ * the four SQL functions that insert into {@code nexus.chunks}, at their live definitions:
+ * {@code gc_quarantine_orphans} (hygiene-005), {@code gc_quarantine_orphans_bounded} (hygiene-008),
+ * {@code gc_restore_rereferenced} and {@code gc_restore_rereferenced_bounded} (catalog-043). Earlier
+ * definitions of the same four (catalog-023, 024, 028, 033, 037, 039, 042; hygiene-002; vectors-005)
+ * were replaced in place and are not live. The quarantine restore verb planned under nexus-wbfpw.49
+ * is the other, and restores ownerless chunks by design.
  *
  * @param mode          enforce or log-only
  * @param route         the route name for the error and the log, e.g. {@code upsert-chunks}
