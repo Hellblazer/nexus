@@ -475,8 +475,12 @@ def test_a_config_file_readable_by_name_in_an_unlistable_directory_still_fails_t
 
 @pytest.mark.skipif(sys.platform != "linux" or os.geteuid() == 0,
                     reason="root lists every directory, so a searchable-but-unlistable one cannot be built")
-def test_an_unlistable_config_directory_with_no_readable_file_still_passes_the_homes_step(tmp_path: Path) -> None:
-    """The control for the test above: the by-name check must not turn every 0711 directory into a failure."""
+def test_an_unlistable_config_directory_with_no_readable_file_is_not_checked_and_does_not_fail(tmp_path: Path) -> None:
+    """The control for the test above: the by-name check must not turn every 0711 directory into a failure.
+
+    nexus-4r5lv follow-up: it is no longer a PASS line either. find could not list the directory, so a readable file
+    in it would be invisible; the step says NOT CHECKED (a warning annotation, rc 0) instead of "holds no file readable".
+    """
     cfg = tmp_path / "home" / ".config" / "nexus"
     cfg.mkdir(parents=True)
     (cfg / "config.yml").write_text("x")
@@ -488,7 +492,65 @@ def test_an_unlistable_config_directory_with_no_readable_file_still_passes_the_h
         cfg.chmod(0o755)
         (cfg / "config.yml").chmod(0o600)
     assert ok.returncode == 0, (ok.stdout, ok.stderr)
-    assert "holds no file readable by the runner user (expected)" in ok.stdout
+    assert "NOT CHECKED" in ok.stdout
+    assert "holds no file readable" not in ok.stdout
+    assert re.search(r"^::warning::NOT CHECKED: .*not a pass", ok.stdout, re.M), ok.stdout
+
+
+def _fake_find(tmp_path: Path, *, exit_code: int, prints: str = "") -> str:
+    """A PATH whose `find` exits `exit_code` after printing `prints`, ahead of the real tools (a find that failed)."""
+    bin_dir = tmp_path / "findbin"
+    bin_dir.mkdir(exist_ok=True)
+    stub = bin_dir / "find"
+    body = f"echo {prints}" if prints else ":"
+    stub.write_text(f"#!/bin/sh\n{body}\nexit {exit_code}\n")
+    stub.chmod(0o755)
+    return f"{bin_dir}:/usr/bin:/bin"
+
+
+def test_a_find_that_fails_with_nothing_countable_is_not_checked_never_the_pass_line(tmp_path: Path) -> None:
+    """nexus-4r5lv follow-up (both reviewers' S1): `|| true` turned ANY find failure into a count of 0 and the pass line.
+
+    A find that errors (EIO, no -readable, not on PATH) examined nothing, so it must read NOT CHECKED, as an absent
+    directory does. Host-independent: the stub find fails, so this runs on macOS too.
+    """
+    cfg = tmp_path / "home" / ".config" / "nexus"
+    cfg.mkdir(parents=True)
+    proc = _run(_homes_probe(cfg), env={"PATH": _fake_find(tmp_path, exit_code=2)})
+    assert proc.returncode == 0, (proc.stdout, proc.stderr)
+    assert "NOT CHECKED" in proc.stdout
+    assert "holds no file readable" not in proc.stdout
+    assert re.search(r"^::warning::NOT CHECKED: .*not a pass", proc.stdout, re.M), proc.stdout
+
+
+def test_a_find_that_fails_after_listing_a_readable_file_still_fails_the_homes_step(tmp_path: Path) -> None:
+    """A partial listing that already found a readable file is a failure, not a NOT CHECKED."""
+    cfg = tmp_path / "home" / ".config" / "nexus"
+    cfg.mkdir(parents=True)
+    proc = _run(_homes_probe(cfg), env={"PATH": _fake_find(tmp_path, exit_code=1, prints="/x/one")})
+    assert proc.returncode == 1, (proc.stdout, proc.stderr)
+    assert "1 file(s) under" in proc.stdout
+    assert "/x/one" not in proc.stdout + proc.stderr
+
+
+def test_a_find_that_fails_beside_a_world_readable_config_yml_still_fails_by_name(tmp_path: Path) -> None:
+    cfg = tmp_path / "home" / ".config" / "nexus"
+    cfg.mkdir(parents=True)
+    (cfg / "config.yml").write_text("SECRET-VALUE\n")
+    proc = _run(_homes_probe(cfg), env={"PATH": _fake_find(tmp_path, exit_code=2)})
+    assert proc.returncode == 1, (proc.stdout, proc.stderr)
+    assert "1 file(s) under" in proc.stdout
+    assert "SECRET-VALUE" not in proc.stdout + proc.stderr
+
+
+def test_a_find_that_succeeds_with_nothing_readable_still_passes_with_the_pass_line(tmp_path: Path) -> None:
+    """The control: a find that ran and counted 0 is the expected good state, and says so."""
+    cfg = tmp_path / "home" / ".config" / "nexus"
+    cfg.mkdir(parents=True)
+    proc = _run(_homes_probe(cfg), env={"PATH": _fake_find(tmp_path, exit_code=0)})
+    assert proc.returncode == 0, (proc.stdout, proc.stderr)
+    assert "holds no file readable by the runner user (expected)" in proc.stdout
+    assert "NOT CHECKED" not in proc.stdout
 
 
 def _branch_globs_match(patterns: list[str], branch: str) -> bool:
@@ -574,6 +636,8 @@ def test_no_step_prints_the_account_name_it_runs_as(tmp_path: Path) -> None:
     outputs = []
     ident = _step("Identity")["run"].replace("expected=ghci\n", f"expected={ACCT}\n")
     outputs.append(_run({"run": ident}, env={"PATH": fake}))
+    # the stub `id` is consulted: the identity pass run exits 0 (a stub that was ignored would fail the compare here)
+    assert outputs[0].returncode == 0, (outputs[0].stdout, outputs[0].stderr)
     outputs.append(_run({"run": ident.replace(f"expected={ACCT}", "expected=somebody-else")}, env={"PATH": fake}))
     outputs.append(_run(_step("Passwordless sudo"), env={"PATH": fake}))
     cfg = tmp_path / "home" / ".config" / "nexus"

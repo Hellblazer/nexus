@@ -347,7 +347,8 @@ Two controls, and they are different in kind:
   a job that is not running as exactly `ghci`; passwordless `sudo`; ANY file
   under `/home/nexus/.config/nexus` readable by `ghci` (a count, never a name;
   `config.yml` is also tested by name, since `find -readable` is blind in a
-  directory `ghci` may search but not list; an absent or unreachable directory is
+  directory `ghci` may search but not list; an absent or unreachable directory, or
+  a `find` that fails and counts no readable file, is
   reported as NOT CHECKED, which is also what a closed `/home/nexus` looks like,
   so it cannot fail, and so it is emitted as a `::warning::` annotation: NOT
   CHECKED is not a pass); and the Windows

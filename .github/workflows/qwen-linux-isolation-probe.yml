@@ -182,14 +182,26 @@ jobs:
           # The runner shell is `bash -eo pipefail`: a find that cannot descend into
           # an unlistable directory exits non-zero, and without the guard that
           # status ended the step silently (rc 1, no message) whether or not a file
-          # was readable. The guard keeps whatever find did count.
-          readable="$({ find "$cfg" -type f -readable 2>/dev/null || true; } | wc -l | tr -d ' ')"
+          # was readable. find's status is captured on its own line, so the step
+          # keeps whatever find did count AND knows whether find finished: a bare
+          # `|| true` turned every find failure (an unlistable subdirectory, EIO, a
+          # find without -readable) into a count of 0 and the pass line below, a
+          # check that examined nothing reading as a pass (nexus-4r5lv follow-up).
+          frc=0
+          listing="$(find "$cfg" -type f -readable 2>/dev/null)" || frc=$?
+          readable="$(printf '%s\n' "$listing" | sed '/^$/d' | wc -l | tr -d ' ')"
           if [ "$readable" -eq 0 ] && [ -r "$cfg/config.yml" ]; then
             readable=1
           fi
           if [ "$readable" -gt 0 ]; then
             echo "::error::$readable file(s) under $cfg are readable by the runner user (names withheld): the live install's credentials are reachable by file mode"
             rc=1
+          elif [ "$frc" -ne 0 ]; then
+            # find could not finish and counted nothing: a readable file in the part
+            # it could not list would be invisible. Same family as the absent
+            # directory above: it cannot fail, and it must not read as a pass.
+            echo "REPORT: NOT CHECKED: the listing of $cfg did not complete (find exit $frc) and counted no readable file, so the credential check is inconclusive"
+            echo "::warning::NOT CHECKED: the credential check was inconclusive (the listing of $cfg did not complete and counted no readable file). A green probe with this warning is not a pass."
           else
             echo "$cfg is reachable but holds no file readable by the runner user (expected)"
           fi
