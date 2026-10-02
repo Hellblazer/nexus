@@ -43,10 +43,15 @@ _BATCH = 1000
 
 #: Exit codes. 1 is a restore that left a requested chunk unrestored for a reason the operator
 #: should look at (missing, or an embedding-width conflict); a dry run exits 1 for the same
-#: reasons, since a real run would leave them too. 4 and 5 mirror ``nx t3 census-manifest-less``:
-#: the engine predates the route, or answered with an error. 6 is the engine's typed retryable
-#: ``quarantine_restore_busy``: that call rolled back whole and the same command may be run again.
+#: reasons, since a real run would leave them too. 3 is a restore that brought every requested
+#: chunk back but left at least one HIDDEN from search and get (no live owner row names it, or
+#: reattach refused or was switched off): the bytes are in the collection and nothing shows them,
+#: which is the round-1 defect a script must be able to see. 1 wins when both hold. 4 and 5
+#: mirror ``nx t3 census-manifest-less``: the engine predates the route, or answered with an
+#: error. 6 is the engine's typed retryable ``quarantine_restore_busy``: that call rolled back
+#: whole and the same command may be run again.
 EXIT_UNRESTORED = 1
+EXIT_HIDDEN = 3
 EXIT_NO_ROUTE = 4
 EXIT_ENGINE_ERROR = 5
 EXIT_BUSY = 6
@@ -170,7 +175,31 @@ def _hidden(rows: list[dict], reattach: bool) -> list[dict]:
     return out
 
 
-def _row_note(row: dict, dry_run: bool) -> str:
+#: Why a superseded chunk was refused, grouped by what the operator should do about it.
+_AMBIGUOUS = frozenset({"rival", "race"})
+
+
+def _hidden_kind(row: dict, origin: str) -> str:
+    """The guidance class of a hidden chunk: one of ``not_attached`` (reattach was off), ``moved_on``,
+    ``indexing``, ``other_collection``, ``ambiguous``, ``no_key_note`` (a ``knowledge__`` chunk no document
+    names: a re-put can bring it back) or ``no_key_file`` (a chunk of an indexed file, which carries no key
+    at all: the file is what to re-index)."""
+    verdict = row.get("reattach")
+    why = row.get("reason")
+    if verdict == "attach":
+        return "not_attached"
+    if verdict == "superseded":
+        if why == "indexing":
+            return "indexing"
+        if why == "other_collection":
+            return "other_collection"
+        if why in _AMBIGUOUS:
+            return "ambiguous"
+        return "moved_on"
+    return "no_key_note" if origin.startswith("knowledge__") else "no_key_file"
+
+
+def _row_note(row: dict, dry_run: bool, origin: str = "") -> str:
     """The NOTE column: what happened to the chunk's visibility, in words."""
     outcome = row["outcome"]
     verdict = row.get("reattach")
@@ -193,19 +222,29 @@ def _row_note(row: dict, dry_run: bool) -> str:
     elif verdict == "owned":
         parts.append("already has a manifest row")
     elif verdict == "superseded":
-        parts.append(f"{who} has moved on (another chunk at position {pos}, or re-indexed): "
-                     "bytes only, hidden from search and get")
+        kind = _hidden_kind(row, origin)
+        if kind == "indexing":
+            parts.append(f"{who} is mid index run: bytes only, hidden; run again when it finishes")
+        elif kind == "other_collection":
+            parts.append(f"{who}'s manifest rows sit under another collection: bytes only, hidden")
+        elif kind == "ambiguous":
+            parts.append(f"another chunk claims position {pos} of {who}: version ambiguous, nothing attached; "
+                         "bytes only, hidden")
+        else:
+            parts.append(f"{who}'s current text is live: bytes only, hidden")
     elif verdict == "no_position":
         parts.append(f"{who} is multi-chunk and this chunk records no position: bytes only, hidden from search and get")
     elif verdict == "no_live_owner":
-        parts.append("no live owner: bytes only, hidden from search and get")
+        parts.append("no live owner names it: bytes only, hidden from search and get")
     if row.get("outcome") == "restored" and row.get("no_manifest") and row.get("reapable_after"):
         parts.append(f"reapable again {row['reapable_after']}")
     return "; ".join(parts)
 
 
 def _recipes(collection: str, hidden: list[dict]) -> list[str]:
-    """One re-put command per distinct owner document (or, with none named, per chunk title)."""
+    """One re-put command per distinct owner document (or, with none named, per chunk title). Only for a
+    ``knowledge__`` collection, where a note is a document of its own and ``nx store put`` under its title is
+    the way to give the text an owner; a file collection's chunks are re-made by indexing the file."""
     seen: dict[tuple[str | None, str | None], int] = {}
     for r in hidden:
         key = (r.get("owner"), r.get("owner_title") or r.get("chunk_title"))
@@ -224,6 +263,30 @@ def _recipes(collection: str, hidden: list[dict]) -> list[str]:
     return lines
 
 
+def _owners(rows: list[dict]) -> list[dict]:
+    """Per owner document, the chunks this call attached and how many of the document's registered chunks now
+    have a manifest row (the engine's count after the page that attached them; the last page wins)."""
+    seen: dict[str, dict] = {}
+    for r in rows:
+        owner = r.get("owner")
+        if not r.get("attached") or not owner:
+            continue
+        entry = seen.setdefault(owner, {"owner": owner, "title": r.get("owner_title"), "attached": 0,
+                                        "manifest_rows": None, "chunk_count": None})
+        entry["attached"] += 1
+        if r.get("owner_rows") is not None:
+            entry["manifest_rows"] = r["owner_rows"]
+        if r.get("owner_chunks") is not None:
+            entry["chunk_count"] = r["owner_chunks"]
+    return list(seen.values())
+
+
+def _partial(owners: list[dict]) -> list[dict]:
+    """The owners whose manifest still has fewer rows than the chunks they register."""
+    return [o for o in owners
+            if o["manifest_rows"] is not None and o["chunk_count"] and o["manifest_rows"] < o["chunk_count"]]
+
+
 def _render_text(origin: str, sibling: str, dry_run: bool, reattach: bool, rows: list[dict],
                  totals: dict[str, int], audit_ids: list[int], source: dict | None, earliest: str | None) -> None:
     if dry_run:
@@ -237,7 +300,7 @@ def _render_text(origin: str, sibling: str, dry_run: bool, reattach: bool, rows:
         click.echo("")
         click.echo(f"{'CHASH':<64}  {'OUTCOME':<13}  NOTE")
         for row in rows[:_TABLE_ROWS]:
-            click.echo(f"{row['chash']}  {row['outcome']:<13}  {_row_note(row, dry_run)}".rstrip())
+            click.echo(f"{row['chash']}  {row['outcome']:<13}  {_row_note(row, dry_run, origin)}".rstrip())
         if len(rows) > _TABLE_ROWS:
             click.echo(f"... {len(rows) - _TABLE_ROWS} more rows (use --json for every row).")
         click.echo("")
@@ -257,15 +320,49 @@ def _render_text(origin: str, sibling: str, dry_run: bool, reattach: bool, rows:
     if audit_ids:
         click.echo("gc_audit " + ", ".join(str(a) for a in audit_ids)
                    + "  (nx catalog gc-audit list --operation quarantine_restore)")
+    owners = _owners(rows)
+    for o in _partial(owners):
+        label = f"{o['title']!r} ({o['owner']})" if o.get("title") else o["owner"]
+        click.echo(f"{label}: {o['manifest_rows']} of {o['chunk_count']} attached: restore the rest "
+                   "(name them with --chash, or the same window or audit id) or re-index it.")
     hidden = _hidden(rows, reattach)
     if hidden:
         verb = "would stay" if dry_run else "stay"
         click.echo(
             f"\n{len(hidden)} chunk{'s' if len(hidden) != 1 else ''} {verb} HIDDEN from search and get: "
             "no live owner row names them, so the engine does not return them, though their text is back in the "
-            "collection. To make one visible, re-put your own copy of its note under the same title:")
-        for line in _recipes(origin, hidden):
-            click.echo(line)
+            "collection.")
+        groups: dict[str, list[dict]] = {}
+        for r in hidden:
+            groups.setdefault(_hidden_kind(r, origin), []).append(r)
+        for kind, members in groups.items():
+            n = len(members)
+            what = f"{n} chunk{'s' if n != 1 else ''}"
+            if kind == "moved_on":
+                click.echo(f"\n{what}: the document's current text is live; nothing to do unless you need the old text.")
+            elif kind == "indexing":
+                click.echo(f"\n{what}: the document is in the middle of an index run. Run the same command again "
+                           "when it has finished, if you still want the chunk back.")
+            elif kind == "other_collection":
+                click.echo(f"\n{what}: the document's manifest rows sit under another collection, where its current "
+                           "text is live. Nothing to do unless you need the old text here.")
+            elif kind == "ambiguous":
+                click.echo(f"\n{what}: more than one stored chunk (here or in the quarantine collection) claims the "
+                           "same position of the same document, so none was attached and the version is yours to "
+                           "pick. Compare the text with `nx store get CHASH`, then re-index the document or re-put "
+                           "the note.")
+            elif kind == "not_attached":
+                click.echo(f"\n{what}: not attached because of --no-reattach. Run the command again without it.")
+            elif kind == "no_key_note":
+                click.echo(f"\n{what}: no live document names them. To make one visible, re-put your own copy of its "
+                           "note under the same title:")
+                for line in _recipes(origin, members):
+                    click.echo(line)
+            else:
+                click.echo(f"\n{what}: the chunks of an indexed file carry no key naming their document, so the "
+                           "engine cannot tell which one they belong to. The owning file is probably still indexed "
+                           "but its chunks carry no key; re-index it with `nx index repo --force` (or the matching "
+                           "verb: `nx index pdf`, `nx index md`, `nx index rdr`).")
         if earliest:
             click.echo(
                 f"\nUntil then the chunks are also eligible for the engine reaper again on or after {earliest} "
@@ -276,11 +373,13 @@ def _error_for(exc: Exception, pages_done: int) -> tuple[str, int]:
     """The operator's message and exit code for a failure of the engine call, never a traceback."""
     from nexus.db.http_vector_client import VectorServiceError  # noqa: PLC0415 — command-local import deferred to avoid CLI startup cost (nexus.db.http_vector_client)
 
-    if not isinstance(exc, VectorServiceError):
-        raise exc
     after = (f" Pages before it are committed and are in the report above ({pages_done} page"
              f"{'s' if pages_done != 1 else ''}); run the same command again to continue."
              if pages_done else "")
+    if not isinstance(exc, VectorServiceError):
+        # Not an engine answer (a bug, a broken pipe, a decode error): still no traceback over the report of the
+        # pages that did commit, and the type is named so the failure is not a mystery.
+        return (f"quarantine restore failed unexpectedly ({type(exc).__name__}: {exc}).{after}"), EXIT_ENGINE_ERROR
     if exc.code == 404:
         return ("This engine does not carry the quarantine-restore route (RDR-192 Step 9, bead "
                 "nexus-2x9xa): the connected engine predates it. Upgrade the engine (compare its "
@@ -336,26 +435,40 @@ def restore_cmd(collection: str, chashes: tuple[str, ...], audit_id: int | None,
     A chunk with no live owning manifest row is hidden from search and get, so
     moving the bytes is not enough. --reattach (the default) also writes the
     manifest row when the chunk's metadata names a document that is still live in
-    the collection, at the chunk's own position. It writes nothing, and says
-    `superseded`, when that document's manifest already holds a different chunk
-    there (the document was re-indexed since) or the position is past the end of
-    what it registers; the manifest is never changed to make room. A chunk it
-    cannot attach is still restored, stays HIDDEN, and the output prints the
-    `nx store put` command that re-puts the note under its title. A chunk the
-    collection already holds is left alone and reported present (never
-    overwritten), and a present chunk with no manifest row is reattached the
-    same way, so a restore made with --no-reattach can be finished by running it
-    again. A chash that is nowhere reports missing. Every restore or attach writes
-    one gc_audit row (operation quarantine_restore) with the full chash list. Use
-    --dry-run first: it reports the same attach / superseded / no-owner verdicts.
+    the collection, at the chunk's own position. It reaches chunks that name
+    their document in their own metadata (an older legacy chunk, or a note put
+    with `nx store put`) and single-chunk legacy notes; a chunk cut from an
+    indexed file names nothing, comes back as bytes, and needs the file
+    re-indexed. It writes nothing, and says `superseded` with the reason, when
+    the document's current text is live: its manifest already holds a chunk at
+    that position, it is stamped complete, the chunk was cut from another
+    content hash, or the position is past the end of what it registers; or when
+    another stored chunk (in the collection or in quarantine) claims the same
+    position, so the version is ambiguous; or the document is mid index run. The
+    manifest is never changed to make room. A chunk it cannot attach is still
+    restored and stays HIDDEN; the output says what to do about it (for a
+    knowledge__ collection, the `nx store put` that re-puts the note under its
+    title; for a file collection, re-index the file). A chunk the collection
+    already holds is left alone and reported present (never overwritten), and a
+    present chunk with no manifest row is reattached the same way, so a restore
+    made with --no-reattach can be finished by running it again. A chash that is
+    nowhere reports missing. Every restore or attach writes one gc_audit row
+    (operation quarantine_restore) with the full chash list. When some but not
+    all of a multi-chunk document's chunks have a row, the output says
+    "M of N attached". Use --dry-run first: it reports the same verdicts.
 
     \b
     Exit codes:
-      0  every requested chunk was restored or was already present.
+      0  every requested chunk was restored or was already present, and is
+         visible to search and get (attached, or already owned).
       1  a requested chunk is missing from quarantine, or its embedding width
          conflicts with the collection's row; a dry run exits 1 for the same
-         reasons. Chunks left hidden are reported but do not change the status.
+         reasons. Wins over 3.
       2  a bad option (nothing was sent).
+      3  every requested chunk is back but at least one stays HIDDEN from search
+         and get (no live owner names it, reattach refused it, or --no-reattach
+         left it); a dry run exits 3 when a real run would leave it hidden. The
+         JSON document carries the count as "hidden".
       4  the connected engine predates the restore route; upgrade it.
       5  the engine refused the request or failed (the message says why).
       6  the engine was busy (a manifest writer held the collection's lock): that
@@ -412,6 +525,8 @@ def restore_cmd(collection: str, chashes: tuple[str, ...], audit_id: int | None,
                       key=lambda pair: pair[0])
     earliest = reapable[0][1] if reapable else None
     unrestored = totals["missing"] + totals["dim_conflict"]
+    hidden_rows = _hidden(rows, reattach)
+    owners = _owners(rows)
 
     if as_json:
         doc: dict[str, Any] = {
@@ -422,6 +537,9 @@ def restore_cmd(collection: str, chashes: tuple[str, ...], audit_id: int | None,
             "source": source,
             "totals": totals,
             "reattach_totals": _tally(rows),
+            "hidden": len(hidden_rows),
+            "owners": owners,
+            "partial_owners": _partial(owners),
             "audit_ids": audit_ids,
             "reapable_again_after": earliest,
             "rows": rows,
@@ -437,3 +555,5 @@ def restore_cmd(collection: str, chashes: tuple[str, ...], audit_id: int | None,
         sys.exit(failure[1])
     if unrestored:
         sys.exit(EXIT_UNRESTORED)
+    if hidden_rows:
+        sys.exit(EXIT_HIDDEN)

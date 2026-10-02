@@ -107,10 +107,12 @@ class TestWire:
 
 
 def _row(chash: str, outcome: str, *, no_manifest=None, reapable_after=None, reattach=None, attached=False,
-         owner=None, owner_title=None, position=None, chunk_title=None) -> dict:
+         owner=None, owner_title=None, position=None, chunk_title=None, reason=None, owner_rows=None,
+         owner_chunks=None) -> dict:
     return {"chash": chash, "outcome": outcome, "no_manifest": no_manifest, "reapable_after": reapable_after,
             "reattach": reattach, "attached": attached, "owner": owner, "owner_title": owner_title,
-            "position": position, "chunk_title": chunk_title}
+            "position": position, "chunk_title": chunk_title, "reason": reason, "owner_rows": owner_rows,
+            "owner_chunks": owner_chunks}
 
 
 def _hidden_row(chash: str, *, verdict="no_live_owner", reapable_after="2026-10-31T12:00:00Z", **kw) -> dict:
@@ -118,9 +120,9 @@ def _hidden_row(chash: str, *, verdict="no_live_owner", reapable_after="2026-10-
     return _row(chash, "restored", no_manifest=True, reapable_after=reapable_after, reattach=verdict, **kw)
 
 
-def _attached_row(chash: str, owner="1.2.3", title="Legacy Note", position=0) -> dict:
+def _attached_row(chash: str, owner="1.2.3", title="Legacy Note", position=0, **kw) -> dict:
     return _row(chash, "restored", no_manifest=False, reattach="attach", attached=True,
-                owner=owner, owner_title=title, position=position)
+                owner=owner, owner_title=title, position=position, **kw)
 
 
 def _page(rows, *, audit_id=None, dry_run=False, source=None, next_after=None) -> dict:
@@ -131,7 +133,9 @@ def _page(rows, *, audit_id=None, dry_run=False, source=None, next_after=None) -
 
 
 class _Stub:
-    def __init__(self, pages=None, error: Exception | None = None, error_after: int | None = None):
+    def __init__(self, pages=None, error: Exception | None = None, error_after: int | None = None,
+                 origin: str = ORIGIN):
+        self.origin = origin
         self.pages = list(pages or [])
         self.error = error
         #: raise *error* on the call after this many pages were served (None: on the first call)
@@ -139,7 +143,7 @@ class _Stub:
         self.calls: list[dict] = []
 
     def gc_quarantine_restore(self, origin, quarantine, **kw):
-        assert origin == ORIGIN and quarantine == SIBLING
+        assert origin == self.origin and quarantine == SIBLING
         self.calls.append(kw)
         if self.error is not None and (self.error_after is None or len(self.calls) > self.error_after):
             raise self.error
@@ -149,7 +153,7 @@ class _Stub:
 def _run(runner: CliRunner, stub: _Stub, *args: str):
     with patch.object(t3_quarantine, "_make_t3", return_value=stub), \
          patch.object(t3_quarantine, "_quarantine_name", return_value=SIBLING):
-        return runner.invoke(t3, ["quarantine", "restore", "--collection", ORIGIN, *args])
+        return runner.invoke(t3, ["quarantine", "restore", "--collection", stub.origin, *args])
 
 
 class TestCli:
@@ -187,10 +191,11 @@ class TestCli:
         assert "HIDDEN" not in result.output and "nx store put" not in result.output
         assert stub.calls[0]["reattach"] is True, "reattach is the default"
 
-    def test_a_chunk_it_could_not_attach_prints_the_reput_recipe_with_title_and_tumbler(self, runner) -> None:
+    def test_a_knowledge_chunk_with_no_key_prints_the_reput_recipe_and_a_superseded_one_does_not(self, runner) -> None:
         a, b, c = _chash("a"), _chash("b"), _chash("c")
         stub = _Stub([_page([
-            _hidden_row(a, verdict="superseded", owner="1.2.3", owner_title="Legacy Note", position=0),
+            _hidden_row(a, verdict="superseded", reason="position_taken", owner="1.2.3", owner_title="Legacy Note",
+                        position=0),
             _hidden_row(b, verdict="no_position", owner="1.2.4", owner_title="It's a Multi"),
             _hidden_row(c, verdict="no_live_owner", chunk_title="orphan title"),
         ], audit_id=8)])
@@ -198,14 +203,50 @@ class TestCli:
         result = _run(runner, stub, "--chash", a, "--chash", b, "--chash", c)
 
         out = result.output
-        assert result.exit_code == 0, "a hidden chunk is reported, it does not change the status\n" + out
+        assert result.exit_code == t3_quarantine.EXIT_HIDDEN == 3, out
         assert "3 chunks stay HIDDEN from search and get" in out
-        assert f"nx store put - --collection {ORIGIN} --title 'Legacy Note'" in out and "# owner 1.2.3" in out
-        assert "--title 'It'\"'\"'s a Multi'" in out, "a title with a quote is shell-quoted"
+        assert f"nx store put - --collection {ORIGIN} --title 'It'\"'\"'s a Multi'" in out, \
+            "a title with a quote is shell-quoted"
         assert "--title 'orphan title'" in out and "no live owner named" in out
-        assert "another chunk at position 0" in out, "a superseded row says why"
+        assert "--title 'Legacy Note'" not in out, \
+            "a superseded chunk's document is live and current: a re-put would REPLACE its text with the stale chunk"
+        assert "current text is live; nothing to do unless you need the old text" in out
         assert "reattach: attached 0, superseded 1, no live owner 1, no position 1" in out
         assert "backfill-manifest" not in out, "backfill does nothing for this class, so the output never suggests it"
+
+    def test_a_file_collections_keyless_chunks_get_the_reindex_advice_never_a_store_put(self, runner) -> None:
+        origin = "docs__qrestore__voyage-context-3__v1"
+        a, b = _chash("a"), _chash("b")
+        stub = _Stub([_page([
+            _hidden_row(a, verdict="no_live_owner", chunk_title="README.md chunk"),
+            _hidden_row(b, verdict="no_position", owner="1.2.4", owner_title="Big doc"),
+        ])], origin=origin)
+
+        result = _run(runner, stub, "--chash", a, "--chash", b)
+
+        out = result.output
+        assert result.exit_code == 3, out
+        assert "nx store put" not in out, "a store put mints a stray note in a file collection and fixes nothing"
+        assert "probably still indexed but its chunks carry no key" in out
+        assert "nx index repo --force" in out
+
+    def test_each_superseded_reason_gets_its_own_words(self, runner) -> None:
+        hs = [_chash(str(i)) for i in range(5)]
+        reasons = ["complete", "indexing", "other_collection", "rival", "race"]
+        stub = _Stub([_page([
+            _hidden_row(h, verdict="superseded", reason=why, owner="1.2.3", owner_title="Doc", position=0)
+            for h, why in zip(hs, reasons, strict=True)])])
+
+        result = _run(runner, stub, *[x for h in hs for x in ("--chash", h)])
+
+        out = result.output
+        assert result.exit_code == 3, out
+        assert "current text is live; nothing to do unless you need the old text" in out      # complete
+        assert "in the middle of an index run" in out and "Run the same command again" in out  # indexing
+        assert "sit under another collection" in out                                           # other_collection
+        assert "claims the same position" in out and "nx store get CHASH" in out               # rival, race
+        assert "nx store put" not in out
+        assert "mid index run" in out and "version ambiguous" in out, "the NOTE column says it too"
 
     def test_no_reattach_is_passed_through_and_the_output_says_what_it_would_have_done(self, runner) -> None:
         a = _chash("a")
@@ -214,13 +255,14 @@ class TestCli:
 
         result = _run(runner, stub, "--chash", a, "--no-reattach")
 
-        assert result.exit_code == 0, result.output
+        assert result.exit_code == 3, "bytes-only leaves the chunk hidden: a script must see it\n" + result.output
         assert stub.calls[0]["reattach"] is False
         out = result.output
         assert "reattach: off (--no-reattach)" in out and "a run without the flag would attach 1" in out
         assert "NOT attached (--no-reattach)" in out
         assert "HIDDEN from search and get" in out, "a bytes-only restore leaves the chunk hidden, and says so"
-        assert f"--title 'Legacy Note'" in out
+        assert "Run the command again without it" in out
+        assert "nx store put" not in out, "the remedy is a rerun, not a re-put"
 
     def test_a_dry_run_reports_would_attach_and_would_stay_hidden_and_passes_dry_run_through(self, runner) -> None:
         a, b = _chash("a"), _chash("b")
@@ -231,7 +273,7 @@ class TestCli:
 
         result = _run(runner, stub, "--chash", a, "--chash", b, "--dry-run")
 
-        assert result.exit_code == 0, result.output
+        assert result.exit_code == 3, "a dry run exits 3 when a real run would leave a chunk hidden\n" + result.output
         assert stub.calls[0]["dry_run"] is True
         out = result.output
         assert "dry run" in out.lower() and "would restore 2" in out
@@ -316,8 +358,9 @@ class TestCli:
             _attached_row(a), _row(b, "present", reattach="owned"), _hidden_row(c, verdict="superseded"),
         ], audit_id=5)])
         result = _run(runner, stub, "--chash", a, "--chash", b, "--chash", c, "--json")
-        assert result.exit_code == 0, result.output
+        assert result.exit_code == 3, result.output
         doc = _doc(result.stdout)
+        assert doc["hidden"] == 1, "the one superseded chunk stays hidden"
         assert doc["origin_collection"] == ORIGIN and doc["quarantine_collection"] == SIBLING
         assert doc["reattach"] is True
         assert doc["totals"] == {"restored": 2, "would_restore": 0, "present": 1, "dim_conflict": 0, "missing": 0}
@@ -399,6 +442,54 @@ class TestCli:
         assert "Pages before it" not in result.output
 
 
+    def test_exit_3_means_restored_but_hidden_and_exit_0_means_everything_is_visible(self, runner) -> None:
+        a, b = _chash("a"), _chash("b")
+        visible = _run(runner, _Stub([_page([_attached_row(a), _row(b, "present", reattach="owned")])]),
+                       "--chash", a, "--chash", b, "--json")
+        assert visible.exit_code == 0, visible.output
+        assert _doc(visible.stdout)["hidden"] == 0
+
+        hidden = _run(runner, _Stub([_page([_attached_row(a), _hidden_row(b)])]), "--chash", a, "--chash", b, "--json")
+        assert hidden.exit_code == 3 == t3_quarantine.EXIT_HIDDEN, hidden.output
+        assert _doc(hidden.stdout)["hidden"] == 1
+
+    def test_a_missing_chunk_wins_over_a_hidden_one(self, runner) -> None:
+        a, b = _chash("a"), _chash("b")
+        result = _run(runner, _Stub([_page([_hidden_row(a), _row(b, "missing")])]), "--chash", a, "--chash", b)
+        assert result.exit_code == t3_quarantine.EXIT_UNRESTORED, result.output
+        assert "HIDDEN" in result.output, "and the hidden chunk is still reported"
+
+    def test_a_partial_attach_says_m_of_n_and_the_json_carries_it(self, runner) -> None:
+        a, b = _chash("a"), _chash("b")
+        rows = [_attached_row(a, position=0, owner_rows=2, owner_chunks=3),
+                _attached_row(b, position=1, owner_rows=2, owner_chunks=3)]
+
+        result = _run(runner, _Stub([_page(rows)]), "--chash", a, "--chash", b)
+
+        assert result.exit_code == 0, result.output
+        assert "'Legacy Note' (1.2.3): 2 of 3 attached: restore the rest" in result.output
+        assert "or re-index it" in result.output
+        doc = _doc(_run(runner, _Stub([_page(rows)]), "--chash", a, "--chash", b, "--json").stdout)
+        assert doc["owners"] == [{"owner": "1.2.3", "title": "Legacy Note", "attached": 2,
+                                  "manifest_rows": 2, "chunk_count": 3}]
+        assert doc["partial_owners"] == doc["owners"]
+
+        whole = _run(runner, _Stub([_page([_attached_row(a, owner_rows=3, owner_chunks=3)])]), "--chash", a)
+        assert "attached: restore the rest" not in whole.output, "3 of 3 is not partial"
+
+    def test_an_unexpected_failure_on_a_later_page_still_prints_the_report_not_a_traceback(self, runner) -> None:
+        hs = [_chash(str(i)) for i in range(1100)]
+        first = _page([_attached_row(h) for h in hs[:1000]], audit_id=79)
+        stub = _Stub([first], error=RuntimeError("decoder blew up"), error_after=1)
+
+        result = _run(runner, stub, *[x for h in hs for x in ("--chash", h)])
+
+        assert result.exit_code == t3_quarantine.EXIT_ENGINE_ERROR, result.output[-500:]
+        assert "gc_audit 79" in result.output and "restored 1000" in result.output, "the committed page survives"
+        assert "RuntimeError" in result.output and "decoder blew up" in result.output
+        assert result.exception is None or isinstance(result.exception, SystemExit), "no traceback"
+
+
 # ── the verb against the real engine ─────────────────────────────────────────
 
 
@@ -458,14 +549,15 @@ def test_restore_by_quarantined_at_window_and_the_sample_audit_row_is_refused(
 
     dry = runner.invoke(t3, ["quarantine", "restore", "--collection", origin,
                              "--quarantined-since", "2020-01-01", "--dry-run", "--json"])
-    assert dry.exit_code == 0, dry.output
+    assert dry.exit_code == t3_quarantine.EXIT_HIDDEN, "keyless chunks would stay hidden: " + dry.output
     assert _doc(dry.stdout)["totals"]["would_restore"] == 3
+    assert _doc(dry.stdout)["hidden"] == 3
 
     done = runner.invoke(t3, ["quarantine", "restore", "--collection", origin,
                               "--quarantined-since", "2020-01-01", "--json"])
-    assert done.exit_code == 0, done.output
+    assert done.exit_code == t3_quarantine.EXIT_HIDDEN, "restored, and hidden from search and get: " + done.output
     doc = _doc(done.stdout)
-    assert doc["totals"]["restored"] == 3
+    assert doc["totals"]["restored"] == 3 and doc["hidden"] == 3
     assert sorted(r["chash"] for r in doc["rows"]) == sorted(hs)
     assert len(doc["audit_ids"]) == 1
 
@@ -488,13 +580,16 @@ def test_reattach_makes_a_restored_chunk_visible_again_against_the_real_engine(
     result = runner.invoke(t3, ["quarantine", "restore", "--collection", origin,
                                 "--chash", hs[0], "--chash", hs[1], "--json"])
 
-    assert result.exit_code == 0, result.output
+    assert result.exit_code == t3_quarantine.EXIT_HIDDEN, "one chunk stays hidden: exit 3\n" + result.output
     doc_out = _doc(result.stdout)
+    assert doc_out["hidden"] == 1
     by = {r["chash"]: r for r in doc_out["rows"]}
     named, stranger = by[hs[0]], by[hs[1]]
     assert named["attached"] is True and named["reattach"] == "attach"
     assert named["owner"] == doc and named["owner_title"] == "Legacy Note" and named["position"] == 0
     assert named["no_manifest"] is False
+    assert named["owner_rows"] == 1, "the engine reports the owner's manifest rows after the attach"
+    assert named["reason"] is None
     assert stranger["attached"] is False and stranger["reattach"] == "no_live_owner"
     assert stranger["no_manifest"] is True and stranger["chunk_title"] == "Stranger"
     assert doc_out["reattach_totals"]["attached"] == 1 and doc_out["reattach_totals"]["no_live_owner"] == 1
@@ -516,12 +611,13 @@ def test_no_reattach_against_the_real_engine_then_a_rerun_attaches(runner: CliRu
 
     first = runner.invoke(t3, ["quarantine", "restore", "--collection", origin, "--chash", hs[0],
                                "--no-reattach", "--json"])
-    assert first.exit_code == 0, first.output
+    assert first.exit_code == t3_quarantine.EXIT_HIDDEN, "bytes-only leaves it hidden: exit 3\n" + first.output
     row = _doc(first.stdout)["rows"][0]
     assert row["outcome"] == "restored" and row["attached"] is False and row["reattach"] == "attach"
     assert not _visible(origin, hs[0])
 
     second = runner.invoke(t3, ["quarantine", "restore", "--collection", origin, "--chash", hs[0], "--json"])
+    assert second.exit_code == 0, "attached: everything requested is visible\n" + second.output
     row = _doc(second.stdout)["rows"][0]
     assert row["outcome"] == "present" and row["attached"] is True
     assert _visible(origin, hs[0])

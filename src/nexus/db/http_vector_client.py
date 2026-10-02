@@ -3922,7 +3922,13 @@ class HttpVectorClient:
         "outcome", "no_manifest": bool|None, "reapable_after": str|None,
         "reattach": str|None, "attached": bool, "owner": str|None,
         "owner_title": str|None, "position": int|None, "chunk_title":
-        str|None}], "source": {...}|None, "next_after": str|None}``. See the
+        str|None, "reason": str|None, "owner_rows": int|None,
+        "owner_chunks": int|None}], "source": {...}|None, "next_after":
+        str|None}``. ``reason`` says why a ``superseded`` verdict was reached
+        (``indexing``, ``complete``, ``version``, ``position_taken``,
+        ``rival``, ``other_collection``, ``has_rows``, ``past_end``, ``race``);
+        ``owner_rows`` / ``owner_chunks`` are the owner's manifest rows in the
+        origin after the call against its registered chunk count. See the
         engine route's docstring (``VectorHandler#handleGcQuarantineRestore``) for
         the outcomes.
 
