@@ -223,9 +223,16 @@ order and stop at the first red:
 To turn it off: `gh variable delete QWEN_CI_PUSH_RUNNER`; the next push (or a
 "Re-run all jobs") runs the hosted shards.
 
-**Probe run record: none yet.** No `qwen-linux-isolation-probe` run has been
-read green. Until this line carries a run id, read the qwen runner's isolation
-as "intended" and leave the variable unset. A run id recorded here must be a run
+**Probe run record: run 36956876942, green, 2026-10-02 02:42Z** (develop
+5a31da34f plus the box-lock change, branch `runner-probe/qwen-2026-10-01`,
+deleted after). All five checks passed with the credential line CHECKED:
+identity exactly `ghci`, passwordless sudo refused, nothing readable under the
+nexus config directory, Docker reachable (root-equivalent, as documented), and
+the Windows side clean (no interop handler, no readable `/mnt` drive, no `/mnt`
+on PATH). Host-side the same run showed no earlyoom kill and an idle runner.
+The probe ran no suite, so capacity under a real `test-qwen` run is still
+unmeasured. The isolation boundary is still "owner pushes only", not the Unix
+user, because the `docker` group is root-equivalent. A run id recorded here must be a run
 that checked the credentials: **`NOT CHECKED` on the credential line is not a
 pass** (the run is green and carries a `::warning::` annotation, because an
 absent or closed nexus config directory cannot fail the probe).
