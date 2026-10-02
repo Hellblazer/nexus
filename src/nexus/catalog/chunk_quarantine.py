@@ -3,8 +3,8 @@
 
 Instead of hard-deleting orphan chunks (or refusing over-floor sweeps with
 a recurring warning — the nexus-mr89x nag), the GC MOVES orphans to a
-sibling collection named ``quarantine__<owner>__<model>__v<n>``. The
-``quarantine`` prefix is in NO search corpus, so quarantined chunks are
+sibling collection named ``quarantine-<origin collection name>``
+(see :func:`quarantine_collection_name`). The ``quarantine-`` prefix is in NO search corpus, so quarantined chunks are
 excluded from every retrieval surface by construction — no filters, no
 metadata-update primitive, no schema change.
 

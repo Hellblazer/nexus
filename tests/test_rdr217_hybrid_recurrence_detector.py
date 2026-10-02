@@ -256,7 +256,7 @@ def test_the_vector_count_is_a_necessary_conjunct_not_a_decoration(t2_service_en
     # Trashing the OWNER, not deleting the chunks: RDR-191 F10c's anti-join
     # scope makes /v1/vectors/store-delete silently skip an id still
     # referenced by a live catalog_document_chunks row, which _seed's owner
-    # now is, so a raw delete_by_chunk_ids call here would leave the chunks
+    # now is, so a raw store-delete by id here would leave the chunks
     # physically present and (pre-RDR-192) reachable. Trashing the document
     # instead flips its manifest rows non-live, which is exactly what "empty"
     # means to a live(c)-gated read — the collection exists, the engine

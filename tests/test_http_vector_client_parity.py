@@ -1333,9 +1333,9 @@ class TestExpire:
 
 
 class TestT3GcPrimitives:
-    """nexus-h8rf6.7: delete_by_chunk_ids (deleted with nexus-wbfpw.18) /
-    list_unique_source_paths / list_chunks_with_metadata were missing — `nx t3 gc` and `nx t3
-    prune-stale` degrade to silent no-ops in service mode (call sites are
+    """nexus-h8rf6.7: list_unique_source_paths / list_chunks_with_metadata (and a third method,
+    deleted with nexus-wbfpw.18 when `nx t3 gc` moved onto the engine's quarantine route) were
+    missing — `nx t3 gc` and `nx t3 prune-stale` degrade to silent no-ops in service mode (call sites are
     try/except-wrapped, so no traceback, just zero effect).
 
     The two ``list_unique_source_paths`` cases MOVED to

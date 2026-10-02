@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """``nx catalog gc-audit list`` — read the destructive-T3-op audit trail.
 
-``nexus.gc_audit`` (nexus-jqvzk) is written by the engine's background
-reaps (``actor="engine"``) and, since nexus-fduai, by ``nx t3 gc`` reporting
-its own client-side delete (``operation="t3_gc"``). Until this verb the only
+``nexus.gc_audit`` (nexus-jqvzk) is written by the engine's reaps and
+quarantine moves (``actor="engine"``, including the move ``nx t3 gc`` drives,
+nexus-wbfpw.18). From nexus-fduai until that bead ``nx t3 gc`` also reported its
+own client-side delete (``operation="t3_gc"``); those rows stay in the trail,
+and new passes no longer write them. Until this verb the only
 reader was ``nx doctor``'s pass/fail non-empty check — an audit trail with
 no way to look at it (substantive-critic, 2026-08-28). This is the thin
 lister over :meth:`~nexus.catalog.http_catalog_client.HttpCatalogClient.

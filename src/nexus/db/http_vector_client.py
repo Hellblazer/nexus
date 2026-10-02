@@ -3932,8 +3932,11 @@ class HttpVectorClient:
         Read-only: lists the chunks of ``collection`` that the engine's
         ``nexus.chunk_is_reapable`` selects at this instant, ordered by chash.
         Returns ``{"collection", "grace_seconds", "returned", "next_after",
-        "chunks": [{"chash", "created_at", "last_written_at", "title",
-        "catalog_doc_id"}, ...]}``.
+        "chunks": [{"chash", "created_at", "last_written_at", "ownerless_since",
+        "title", "catalog_doc_id"}, ...]}``. ``ownerless_since`` is the instant
+        the grace counts from, the later of ``last_written_at`` and the moment
+        the chunk last lost an owner; an engine older than that field omits it,
+        so a reader must tolerate its absence.
 
         ``grace_seconds`` is OMITTED from the request when ``None`` (the engine
         default, 30 days, is what ``gc_quarantine_orphans`` itself uses, so the

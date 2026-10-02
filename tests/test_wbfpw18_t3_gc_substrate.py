@@ -19,7 +19,7 @@ from click.testing import CliRunner
 from nexus.cli import main
 from tests._catalog_fixture_ops import ActiveCatalog
 from tests._chunk_seed import seed_chunks_direct
-from tests._reapable_age import age_chunks_past_grace
+from tests._reapable_age import age_chunks_past_grace, age_quarantine_past_expiry
 from tests._reapable_cli_fixture import (
     MixedCollection,
     build_mixed_collection,
@@ -81,7 +81,7 @@ def test_the_move_quarantines_exactly_the_reapable_rows_and_the_engine_audits_it
     rows = _audit_rows(fx.name)
     assert len(rows) == 1, rows
     # The BOUNDED form (the unbounded one has a 5 s statement timeout), with the audit sample large
-    # enough that the row names every moved chash: an operator can restore from the audit row.
+    # enough that the row names every moved chash (a sample for forensics; the restore verb refuses it).
     assert rows[0]["operation"] == "gc_quarantine_orphans_bounded"
     assert rows[0]["actor"] == "engine"
     assert rows[0]["chash_count"] == len(fx.reapable)
@@ -183,6 +183,52 @@ def test_a_chunk_a_client_rewrites_between_the_listing_and_the_act_is_not_quaran
     assert "engine moved 1" in result.output
 
 
+# ── the client expiry: how a knowledge__ quarantine ever expires ───────────────
+
+
+def test_the_verb_expires_what_it_moved_once_it_is_past_the_client_cutoff(env):
+    """No repo index sweeps a knowledge__ collection, so nx index repo's expiry never reaches its
+    quarantine. The verb runs the same client expiry itself: the first run moves the orphans (nothing
+    is old enough to expire), and a later run, which has nothing left to move, deletes the quarantined
+    rows once their stamp is past NX_GC_QUARANTINE_DAYS. The origin collection is untouched by it."""
+    client, cat, runner = env
+    fx = build_mixed_collection(cat, "wbfpw18-expire")
+
+    first = _gc(runner, fx.name, "--no-dry-run", "--yes")
+    assert first.exit_code == 0, first.output
+    assert "0 expired, 0 refused" in first.output
+    assert _quarantined_ids(client, fx.name) == fx.reapable, "inside the cutoff: still restorable"
+
+    from nexus.catalog.chunk_quarantine import quarantine_collection_name
+
+    assert age_quarantine_past_expiry(quarantine_collection_name(fx.name)) == len(fx.reapable)
+    second = _gc(runner, fx.name, "--no-dry-run", "--yes")
+    assert second.exit_code == 0, second.output
+    assert "nothing to do" in second.output
+    assert f"{len(fx.reapable)} expired, 0 refused" in second.output
+    # The engine drops a quarantine sibling once its last row expires, so "freed" is empty OR gone.
+    from nexus.errors import CollectionNotFoundError
+
+    try:
+        left = _quarantined_ids(client, fx.name)
+    except CollectionNotFoundError:
+        left = set()
+    assert left == set(), "past the cutoff: the quarantine is freed"
+    assert _origin_ids(client, fx.name) == fx.everything - fx.reapable, "expiry never touches origin"
+
+
+def test_a_dry_run_expires_nothing(env):
+    client, cat, runner = env
+    fx = build_mixed_collection(cat, "wbfpw18-expire-dry")
+    assert _gc(runner, fx.name, "--no-dry-run", "--yes").exit_code == 0
+    from nexus.catalog.chunk_quarantine import quarantine_collection_name
+
+    age_quarantine_past_expiry(quarantine_collection_name(fx.name))
+    dry = _gc(runner, fx.name, "--dry-run")
+    assert dry.exit_code == 0, dry.output
+    assert _quarantined_ids(client, fx.name) == fx.reapable
+
+
 # ── R8: the census gate ───────────────────────────────────────────────────────
 
 
@@ -200,7 +246,7 @@ def test_a_collection_with_a_legacy_unmanifested_note_is_refused_and_nothing_mov
     age_chunks_past_grace(coll)
 
     dry = _gc(runner, coll, "--dry-run")
-    assert dry.exit_code == 0, dry.output
+    assert dry.exit_code == 1, dry.output  # a dry run that names a refusal exits 1
     assert "legacy-unmanifested" in dry.output and "REFUSE" in dry.output
 
     result = _gc(runner, coll, "--no-dry-run", "--yes")
@@ -219,8 +265,8 @@ def test_a_pass_over_the_floor_is_refused_and_nx_gc_force_overrides_it(env, monk
     client, cat, runner = env
     fx = build_mixed_collection(cat, "wbfpw18-floor")
     # 2 of 6 chunks are reapable: a third of the collection, over the 25% default floor once the
-    # collection is big enough for the floor to apply (the real minimum is 100 chunks).
-    monkeypatch.setattr(indexer, "_GC_FLOOR_MIN_CHUNKS", 5)
+    # reapable set is big enough for the floor to apply (the real minimum is 100 reapable chunks).
+    monkeypatch.setattr(indexer, "_GC_FLOOR_MIN_CHUNKS", 2)  # the minimum counts the 2 reapable chunks
 
     result = _gc(runner, fx.name, "--no-dry-run", "--yes")
     assert result.exit_code != 0

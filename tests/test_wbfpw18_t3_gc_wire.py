@@ -28,6 +28,8 @@ from nexus.db.http_vector_client import (
 
 _COLL = "knowledge__nexus-1-1__voyage-context-3__v1"
 _QUARANTINE = "quarantine-knowledge__nexus-1-1__voyage-context-3__v1"
+_MOVE = "/v1/vectors/gc/quarantine-orphans"
+_EXPIRE = "/v1/vectors/gc/expire-quarantine"
 _BUCKETS = ("superseded", "legacy-unmanifested", "dead-owner", "no-owner", "unclassified")
 
 
@@ -63,10 +65,12 @@ class _Engine:
                  in_t3: bool = True, no_owner: int = 0, legacy_on_recheck: int | None = None,
                  unclassified: int = 0, unclassified_on_recheck: int | None = None,
                  batches: list[int] | None = None, omit_scope: bool = False,
-                 move_script: list | None = None, stuck: dict | None = None) -> None:
+                 move_script: list | None = None, stuck: dict | None = None,
+                 expire: dict | Exception | None = None) -> None:
         # move_script: results (dict) or exceptions the move route answers with, in order; stuck: a
         # result the route answers with forever once the script is exhausted.
         self.omit_scope = omit_scope
+        self.expire = {"expired": 0, "refused": 0} if expire is None else expire
         self.move_script = list(move_script) if move_script is not None else None
         self.stuck = stuck
         self.unclassified = unclassified
@@ -141,10 +145,20 @@ class _Engine:
                         "row_limit": body.get("row_limit")}
             return {"moved": len(self.reapable), "sample": [], "remaining": 0,
                     "row_limit": body.get("row_limit")}
+        if path == "/v1/vectors/gc/expire-quarantine":
+            if isinstance(self.expire, Exception):
+                raise self.expire
+            return dict(self.expire)
         raise AssertionError(f"unexpected engine route {path}: nx t3 gc must not use it")
 
     def paths(self) -> list[str]:
         return [p for p, _ in self.posted]
+
+    def moves(self) -> list[dict]:
+        return [b for p, b in self.posted if p == _MOVE]
+
+    def expiries(self) -> list[dict]:
+        return [b for p, b in self.posted if p == _EXPIRE]
 
 
 def _invoke(runner: CliRunner, real_client, engine: _Engine, args: list[str], *, documents=(),
@@ -190,19 +204,20 @@ def test_act_moves_through_the_engine_route_and_never_deletes_by_id(runner, real
     result = _invoke(runner, real_client, engine, ["--no-dry-run", "--yes"])
     assert result.exit_code == 0, result.output
     paths = engine.paths()
-    # The census gate comes first, the move last, and no hard delete by id anywhere.
+    # The census gate comes first, then the move, then the client expiry of the sibling it filled,
+    # and no hard delete by id anywhere.
     assert paths[0] == "/v1/vectors/manifest-less-census"
-    assert paths[-1] == "/v1/vectors/gc/quarantine-orphans"
+    assert paths[-2:] == [_MOVE, _EXPIRE]
     assert "/v1/vectors/store-delete" not in paths
     assert "/v1/vectors/get" not in paths
-    move = engine.posted[-1][1]
+    move = engine.moves()[-1]
     assert move["collection"] == _COLL
     assert move["quarantine_collection"] == _QUARANTINE
     # The route is collection-wide: it carries no chash list and no exclusion list.
     assert not ({"chashes", "ids", "exclude", "exclusions"} & set(move))
     # The BOUNDED form (row_limit present): the unbounded form has a 5 s statement timeout. And the
-    # audit sample is the engine's own ceiling, so every chunk of a batch is in its gc_audit row and
-    # an operator can restore from the row.
+    # audit sample is the engine's own ceiling (the sample is what the audit row carries; it is
+    # not a restore source, see nx t3 quarantine restore).
     assert move["row_limit"] == 2000
     assert move["sample_limit"] == 5000
     assert "quarantined 3 chunk(s)" in result.output
@@ -228,12 +243,31 @@ def test_no_dry_run_without_yes_is_report_only(runner, real_client):
     assert "Add --yes" in result.output
 
 
-def test_nothing_reapable_is_a_clean_noop(runner, real_client):
-    engine = _Engine(total=10, reapable=[])
+def test_nothing_reapable_moves_nothing_but_still_expires_an_earlier_quarantine(runner, real_client):
+    """A run with nothing to move still leaves what an earlier run moved; the client expiry is what
+    ever frees a knowledge__ quarantine, so it runs on every acting run, not only on a run that moved."""
+    engine = _Engine(total=10, reapable=[], expire={"expired": 4, "refused": 0})
     result = _invoke(runner, real_client, engine, ["--no-dry-run", "--yes"])
     assert result.exit_code == 0, result.output
     assert "/v1/vectors/gc/quarantine-orphans" not in engine.paths()
     assert "nothing to do" in result.output
+    (call,) = engine.expiries()
+    assert call["quarantine_collection"] == _QUARANTINE and call["origin_collection"] == _COLL
+    assert "4 expired, 0 refused" in result.output
+
+
+def test_nothing_reapable_on_a_dry_run_expires_nothing(runner, real_client):
+    engine = _Engine(total=10, reapable=[])
+    result = _invoke(runner, real_client, engine, ["--dry-run"])
+    assert result.exit_code == 0, result.output
+    assert engine.expiries() == [] and engine.moves() == []
+
+
+def test_a_failed_expiry_with_nothing_to_move_is_exit_1_and_says_so(runner, real_client):
+    engine = _Engine(total=10, reapable=[], expire=VectorServiceError("engine went away", code=500))
+    result = _invoke(runner, real_client, engine, ["--no-dry-run", "--yes"])
+    assert result.exit_code == 1, result.output
+    assert "nothing needed moving, but the client expiry" in result.output
 
 
 # ── the advisory listing pages by keyset ──────────────────────────────────────
@@ -278,7 +312,7 @@ def test_the_census_is_read_again_immediately_before_the_move(runner, real_clien
 def test_the_census_is_read_on_every_run_not_only_when_acting(runner, real_client):
     engine = _Engine(total=10, reapable=[1], legacy=2)
     result = _invoke(runner, real_client, engine, ["--dry-run"])
-    assert result.exit_code == 0, result.output
+    assert result.exit_code == 1, result.output
     assert "/v1/vectors/manifest-less-census" in engine.paths()
     # A dry run says out loud that a real run would refuse, the way the index-state breaker does.
     assert "legacy-unmanifested" in result.output
@@ -300,7 +334,7 @@ def test_an_engine_without_the_routes_refuses_with_a_clear_message(runner, real_
 def test_a_pass_over_the_floor_is_refused(runner, real_client, monkeypatch):
     monkeypatch.delenv("NX_GC_FLOOR_FRACTION", raising=False)
     monkeypatch.delenv("NX_GC_FORCE", raising=False)
-    engine = _Engine(total=100, reapable=list(range(1, 31)))  # 30% > the 25% default
+    engine = _Engine(total=400, reapable=list(range(1, 121)))  # 30% > the 25% default, 120 >= 100
     result = _invoke(runner, real_client, engine, ["--no-dry-run", "--yes"])
     assert result.exit_code != 0
     assert "NX_GC_FLOOR_FRACTION" in result.output and "NX_GC_FORCE=1" in result.output
@@ -310,26 +344,34 @@ def test_a_pass_over_the_floor_is_refused(runner, real_client, monkeypatch):
 def test_nx_gc_force_overrides_the_floor(runner, real_client, monkeypatch):
     monkeypatch.delenv("NX_GC_FLOOR_FRACTION", raising=False)
     monkeypatch.setenv("NX_GC_FORCE", "1")
-    engine = _Engine(total=100, reapable=list(range(1, 31)))
+    engine = _Engine(total=400, reapable=list(range(1, 121)))
     result = _invoke(runner, real_client, engine, ["--no-dry-run", "--yes"])
     assert result.exit_code == 0, result.output
-    assert engine.paths()[-1] == "/v1/vectors/gc/quarantine-orphans"
+    assert engine.paths()[-2:] == [_MOVE, _EXPIRE]
 
 
-def test_the_floor_does_not_apply_below_the_minimum_collection_size(runner, real_client, monkeypatch):
+def test_the_floor_does_not_apply_below_the_minimum_reapable_count(runner, real_client, monkeypatch):
+    """The engine's reading: the 100 minimum counts the REAPABLE set (reaper_quarantine_chunks:
+    v_reapable >= p_floor_min_chunks), not the collection's size. 99 reapable chunks is exempt however
+    large a share of the collection they are."""
     monkeypatch.delenv("NX_GC_FORCE", raising=False)
+    monkeypatch.delenv("NX_GC_FLOOR_FRACTION", raising=False)
     engine = _Engine(total=99, reapable=list(range(1, 100)))  # 100% of a 99-chunk collection
     result = _invoke(runner, real_client, engine, ["--no-dry-run", "--yes"])
     assert result.exit_code == 0, result.output
-    assert engine.paths()[-1] == "/v1/vectors/gc/quarantine-orphans"
+    assert engine.paths()[-2:] == [_MOVE, _EXPIRE]
 
 
-def test_a_dry_run_over_the_floor_says_a_real_run_would_refuse(runner, real_client, monkeypatch):
+def test_a_dry_run_over_the_floor_says_a_real_run_would_refuse_and_exits_one(runner, real_client, monkeypatch):
+    """A dry run that names a refusal exits 1, so `nx t3 gc --dry-run && nx t3 gc --no-dry-run --yes`
+    stops where the real run would. A clean dry run still exits 0 (pinned by test_dry_run_moves_nothing)."""
     monkeypatch.delenv("NX_GC_FORCE", raising=False)
-    engine = _Engine(total=100, reapable=list(range(1, 31)))
+    monkeypatch.delenv("NX_GC_FLOOR_FRACTION", raising=False)
+    engine = _Engine(total=400, reapable=list(range(1, 121)))
     result = _invoke(runner, real_client, engine, ["--dry-run"])
-    assert result.exit_code == 0, result.output
+    assert result.exit_code == 1, result.output
     assert "REFUSE" in result.output and "NX_GC_FORCE=1" in result.output
+    assert _MOVE not in engine.paths() and _EXPIRE not in engine.paths()
 
 
 # ── the RUNFENCE circuit breaker is unchanged ─────────────────────────────────
@@ -353,7 +395,7 @@ def test_the_incomplete_state_override_lets_the_move_run(runner, real_client):
                      ["--no-dry-run", "--yes", "--allow-incomplete-index-state"],
                      documents=[_indexing_doc()])
     assert result.exit_code == 0, result.output
-    assert engine.paths()[-1] == "/v1/vectors/gc/quarantine-orphans"
+    assert engine.paths()[-2:] == [_MOVE, _EXPIRE]
 
 
 # ── the collection-name guards are unchanged ──────────────────────────────────
@@ -385,7 +427,7 @@ def test_the_override_on_an_unknown_collection_says_so_out_loud(runner, real_cli
                      ["--no-dry-run", "--yes", "--allow-empty-manifest-set"], catalog_knows=False)
     assert result.exit_code == 0, result.output
     assert "WARNING: the catalog does not know a collection named" in result.output
-    assert engine.paths()[-1] == "/v1/vectors/gc/quarantine-orphans"
+    assert engine.paths()[-2:] == [_MOVE, _EXPIRE]
 
 
 def test_a_collection_whose_manifest_names_none_of_its_chunks_refuses(runner, real_client):
@@ -402,7 +444,7 @@ def test_the_empty_manifest_override_lets_the_move_run(runner, real_client):
     engine = _Engine(total=10, reapable=[1, 2], no_owner=10)
     result = _invoke(runner, real_client, engine, ["--no-dry-run", "--yes", "--allow-empty-manifest-set"])
     assert result.exit_code == 0, result.output
-    assert engine.paths()[-1] == "/v1/vectors/gc/quarantine-orphans"
+    assert engine.paths()[-2:] == [_MOVE, _EXPIRE]
 
 
 # ── (RDR-192 side-table critique 28255 issue 1) census, bounded form, permanent floor ───────────
@@ -422,7 +464,7 @@ def test_the_unclassified_gate_is_reported_by_a_dry_run_and_rechecked_before_the
     engine = _Engine(total=10, reapable=[1])
     engine.unclassified = 2
     dry = _invoke(runner, real_client, engine, ["--dry-run"])
-    assert dry.exit_code == 0, dry.output
+    assert dry.exit_code == 1, dry.output
     assert "REFUSE" in dry.output and "unclassified" in dry.output
 
     flipped = _Engine(total=10, reapable=[1], unclassified=0, unclassified_on_recheck=1)
@@ -448,10 +490,10 @@ def test_the_floor_is_the_gc_family_variable_and_never_the_reapers(runner, real_
     monkeypatch.delenv("NX_GC_FORCE", raising=False)
     monkeypatch.setenv("NX_REAPER_FLOOR_FRACTION", "1.0")  # must not loosen the verb's floor
     monkeypatch.setenv("NX_GC_FLOOR_FRACTION", "0.5")
-    over = _Engine(total=100, reapable=list(range(1, 61)))  # 60% > 50%
+    over = _Engine(total=200, reapable=list(range(1, 121)))  # 60% > 50%
     refused = _invoke(runner, real_client, over, ["--no-dry-run", "--yes"])
     assert refused.exit_code != 0 and "NX_GC_FLOOR_FRACTION" in refused.output
-    under = _Engine(total=100, reapable=list(range(1, 41)))  # 40% < 50%
+    under = _Engine(total=250, reapable=list(range(1, 101)))  # 40% < 50%
     allowed = _invoke(runner, real_client, under, ["--no-dry-run", "--yes"])
     assert allowed.exit_code == 0, allowed.output
 
@@ -539,13 +581,13 @@ def test_a_failure_after_earlier_batches_reports_what_already_moved(runner, real
     assert "re-running this verb is safe" in result.output
 
 
-def test_a_failure_of_the_first_batch_says_nothing_moved(runner, real_client):
+def test_a_failure_of_the_first_batch_is_exit_1_with_the_engine_message(runner, real_client):
     engine = _Engine(
         total=10, reapable=[1], move_script=[VectorServiceError("engine went away", code=500)],
     )
     result = _invoke(runner, real_client, engine, ["--no-dry-run", "--yes"])
     assert result.exit_code == 1, result.output
-    assert "before any batch moved a chunk" in result.output
+    assert "No batch is known to have moved a chunk" in result.output
     assert "engine went away" in result.output
 
 
@@ -591,7 +633,7 @@ def test_the_floor_denominator_is_every_stored_chunk_not_just_the_owned_ones(run
     engine = _Engine(total=1000, no_owner=700, reapable=list(range(1, 101)))
     result = _invoke(runner, real_client, engine, ["--no-dry-run", "--yes"])
     assert result.exit_code == 0, result.output
-    assert engine.paths()[-1] == "/v1/vectors/gc/quarantine-orphans"
+    assert engine.paths()[-2:] == [_MOVE, _EXPIRE]
 
 
 def test_a_large_manifest_less_bucket_does_not_hide_a_real_floor_breach(runner, real_client, monkeypatch):
@@ -605,27 +647,176 @@ def test_a_large_manifest_less_bucket_does_not_hide_a_real_floor_breach(runner, 
     assert "/v1/vectors/gc/quarantine-orphans" not in engine.paths()
 
 
-@pytest.mark.parametrize(("candidates", "refused"), [(25, False), (26, True)])
+@pytest.mark.parametrize(("candidates", "refused"), [(100, False), (101, True)])
 def test_the_floor_boundary_is_strictly_greater_than_the_fraction(
     runner, real_client, monkeypatch, candidates, refused,
 ):
-    """Exactly 25% of 100 is allowed; one more chunk is refused. (> not >=.)"""
+    """Exactly 25% of 400 (100 chunks, which is also the 100 minimum) is allowed; one more chunk is
+    refused. (> not >=.)"""
     monkeypatch.delenv("NX_GC_FORCE", raising=False)
     monkeypatch.delenv("NX_GC_FLOOR_FRACTION", raising=False)
-    engine = _Engine(total=100, reapable=list(range(1, candidates + 1)))
+    engine = _Engine(total=400, reapable=list(range(1, candidates + 1)))
     result = _invoke(runner, real_client, engine, ["--no-dry-run", "--yes"])
     if refused:
         assert result.exit_code != 0 and "NX_GC_FLOOR_FRACTION" in result.output
-        assert "/v1/vectors/gc/quarantine-orphans" not in engine.paths()
+        assert _MOVE not in engine.paths()
     else:
         assert result.exit_code == 0, result.output
-        assert engine.paths()[-1] == "/v1/vectors/gc/quarantine-orphans"
+        assert engine.paths()[-2:] == [_MOVE, _EXPIRE]
 
 
-def test_the_floor_applies_at_exactly_the_minimum_collection_size(runner, real_client, monkeypatch):
-    """100 chunks is the first size the floor applies to (99 is exempt, pinned above)."""
+@pytest.mark.parametrize(("candidates", "refused"), [(99, False), (100, True)])
+def test_the_floor_minimum_counts_the_reapable_chunks_not_the_collection_size(
+    runner, real_client, monkeypatch, candidates, refused,
+):
+    """33% of a 300-chunk collection is over the 25% floor, but the floor engages only from 100
+    REAPABLE chunks (the engine's reading). 99 of 300 moves; 100 of 300 is refused. A basis on the
+    collection size (300 >= 100 in both) refuses the 99 too."""
     monkeypatch.delenv("NX_GC_FORCE", raising=False)
     monkeypatch.delenv("NX_GC_FLOOR_FRACTION", raising=False)
-    engine = _Engine(total=100, reapable=list(range(1, 51)))
+    engine = _Engine(total=300, reapable=list(range(1, candidates + 1)))
     result = _invoke(runner, real_client, engine, ["--no-dry-run", "--yes"])
-    assert result.exit_code != 0 and "NX_GC_FLOOR_FRACTION" in result.output
+    if refused:
+        assert result.exit_code != 0 and "NX_GC_FLOOR_FRACTION" in result.output
+        assert _MOVE not in engine.paths()
+    else:
+        assert result.exit_code == 0, result.output
+        assert engine.paths()[-2:] == [_MOVE, _EXPIRE]
+
+
+@pytest.mark.parametrize(("candidates", "refused"), [(116, False), (117, True)])
+def test_the_floor_compares_by_division_not_by_a_float_product(
+    runner, real_client, monkeypatch, candidates, refused,
+):
+    """NX_GC_FLOOR_FRACTION=0.29 over 400 chunks: 116 is exactly 29%, which the engine's
+    v_reapable / v_total > fraction allows. The product 0.29 * 400 is 115.99999999999999, so
+    `116 > 0.29 * 400` refuses a pass the engine would take. One more chunk is over either way."""
+    monkeypatch.delenv("NX_GC_FORCE", raising=False)
+    monkeypatch.setenv("NX_GC_FLOOR_FRACTION", "0.29")
+    engine = _Engine(total=400, reapable=list(range(1, candidates + 1)))
+    result = _invoke(runner, real_client, engine, ["--no-dry-run", "--yes"])
+    if refused:
+        assert result.exit_code != 0 and "NX_GC_FLOOR_FRACTION" in result.output
+        assert _MOVE not in engine.paths()
+    else:
+        assert result.exit_code == 0, result.output
+        assert engine.paths()[-2:] == [_MOVE, _EXPIRE]
+
+
+# ---- (round 3) the verb runs the client expiry after its own move -----------------------------
+
+
+def test_the_act_runs_the_client_expiry_on_the_sibling_it_filled(runner, real_client, monkeypatch):
+    """A knowledge__ collection is swept by no repo index, so without this call nothing would ever
+    expire what this verb moved. Same call, same cutoff rule, same floor parameters as the indexer's."""
+    monkeypatch.delenv("NX_GC_QUARANTINE_DAYS", raising=False)
+    monkeypatch.delenv("NX_GC_FLOOR_FRACTION", raising=False)
+    monkeypatch.delenv("NX_GC_FORCE", raising=False)
+    engine = _Engine(total=10, reapable=[1, 2], expire={"expired": 3, "refused": 0})
+    result = _invoke(runner, real_client, engine, ["--no-dry-run", "--yes"])
+    assert result.exit_code == 0, result.output
+    (call,) = engine.expiries()
+    assert call["quarantine_collection"] == _QUARANTINE and call["origin_collection"] == _COLL
+    assert call["floor_fraction"] == 0.25 and call["floor_min_chunks"] == 100 and call["force"] is False
+    from datetime import UTC, datetime, timedelta
+    cutoff = datetime.strptime(call["cutoff"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
+    assert abs((datetime.now(UTC) - timedelta(days=14)) - cutoff) < timedelta(minutes=5)
+    assert "3 expired, 0 refused" in result.output
+
+
+def test_the_client_expiry_honours_the_gc_environment(runner, real_client, monkeypatch):
+    monkeypatch.setenv("NX_GC_QUARANTINE_DAYS", "3")
+    monkeypatch.setenv("NX_GC_FLOOR_FRACTION", "0.6")
+    monkeypatch.setenv("NX_GC_FORCE", "1")
+    engine = _Engine(total=10, reapable=[1])
+    result = _invoke(runner, real_client, engine, ["--no-dry-run", "--yes"])
+    assert result.exit_code == 0, result.output
+    (call,) = engine.expiries()
+    assert call["floor_fraction"] == 0.6 and call["force"] is True
+    from datetime import UTC, datetime, timedelta
+    cutoff = datetime.strptime(call["cutoff"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
+    assert abs((datetime.now(UTC) - timedelta(days=3)) - cutoff) < timedelta(minutes=5)
+
+
+def test_an_expiry_refused_by_the_floor_is_reported_not_hidden(runner, real_client, monkeypatch):
+    monkeypatch.delenv("NX_GC_FORCE", raising=False)
+    engine = _Engine(total=10, reapable=[1], expire={"expired": 0, "refused": 120})
+    result = _invoke(runner, real_client, engine, ["--no-dry-run", "--yes"])
+    assert result.exit_code == 0, result.output
+    assert "0 expired, 120 refused" in result.output and "NX_GC_FORCE=1 overrides" in result.output
+
+
+def test_a_failed_expiry_after_a_good_move_exits_one_and_says_the_move_stands(runner, real_client):
+    engine = _Engine(total=10, reapable=[1, 2], expire=VectorServiceError("engine went away", code=500))
+    result = _invoke(runner, real_client, engine, ["--no-dry-run", "--yes"])
+    assert result.exit_code == 1, result.output
+    assert "the move succeeded (2 chunk(s) quarantined)" in result.output
+    assert "client expiry" in result.output and "engine went away" in result.output
+
+
+def test_no_expiry_runs_when_the_move_did_not_complete(runner, real_client):
+    engine = _Engine(total=10, reapable=[1], move_script=[VectorServiceError("engine went away", code=500)])
+    result = _invoke(runner, real_client, engine, ["--no-dry-run", "--yes"])
+    assert result.exit_code == 1, result.output
+    assert engine.expiries() == []
+
+
+def test_a_dry_run_runs_no_expiry(runner, real_client):
+    engine = _Engine(total=10, reapable=[1])
+    result = _invoke(runner, real_client, engine, ["--dry-run"])
+    assert result.exit_code == 0, result.output
+    assert engine.expiries() == [] and engine.moves() == []
+
+
+# ---- (round 3) the empty-manifest override does not reach the scope == 0 refusal -------------
+
+
+def test_the_empty_manifest_override_does_not_override_a_zero_scope_census(runner, real_client):
+    """scope_chunk_total = 0 with a non-empty listing is a disagreement the floor cannot be judged
+    on; it is its own refusal and --allow-empty-manifest-set (the nexus-jqrtp / nexus-v1zdu
+    override) is not a license for it. If that flag ever started skipping the scope reason, this
+    would move on an unverifiable collection."""
+    engine = _Engine(total=0, reapable=[1, 2])
+    result = _invoke(runner, real_client, engine, ["--no-dry-run", "--yes", "--allow-empty-manifest-set"])
+    assert result.exit_code != 0
+    assert "scope_chunk_total = 0" in result.output and "REFUSING" in result.output
+    assert _MOVE not in engine.paths() and _EXPIRE not in engine.paths()
+
+
+# ---- (round 3) failure wording: unknown outcome, not "nothing moved"; moved more than listed ---
+
+
+def test_a_failure_of_the_first_batch_claims_no_more_than_it_knows(runner, real_client):
+    """A timeout or transport error can follow a server commit, so 'no batch is known to have moved'
+    is as much as the verb can say, and the audit record is named as the way to find out."""
+    engine = _Engine(total=10, reapable=[1], move_script=[VectorServiceError("edge timeout", code=504)])
+    result = _invoke(runner, real_client, engine, ["--no-dry-run", "--yes"])
+    assert result.exit_code == 1, result.output
+    assert "No batch is known to have moved a chunk" in result.output
+    assert "before any batch moved a chunk" not in result.output
+    assert "gc-audit list" in result.output
+
+
+def test_a_mid_drain_failure_says_the_failed_batchs_own_outcome_is_unknown(runner, real_client):
+    engine = _Engine(
+        total=10, reapable=[1, 2, 3],
+        move_script=[_result(2, 1), VectorServiceError("edge timeout", code=504)],
+    )
+    result = _invoke(runner, real_client, engine, ["--no-dry-run", "--yes"])
+    assert result.exit_code == 1, result.output
+    assert "2 chunk(s) were moved" in result.output
+    assert "failed batch's own outcome is unknown" in result.output
+    # the other stops (no progress, iteration cap) are not 'unknown outcome' failures
+    stuck = _Engine(total=10, reapable=[1], stuck=_result(0, 4), move_script=[])
+    other = _invoke(runner, real_client, stuck, ["--no-dry-run", "--yes"])
+    assert "outcome is unknown" not in other.output
+
+
+def test_a_drain_that_moves_more_than_the_listing_says_so(runner, real_client):
+    """Chunks can age past the grace while the drain runs; the floor was judged on the listing, so
+    the summary names the surplus instead of reporting it as a normal pass."""
+    engine = _Engine(total=10, reapable=[1, 2], move_script=[_result(3, 0)])
+    result = _invoke(runner, real_client, engine, ["--no-dry-run", "--yes"])
+    assert result.exit_code == 0, result.output
+    assert "quarantined 3 chunk(s)" in result.output
+    assert "The listing named 2; the engine moved 3, MORE than listed" in result.output

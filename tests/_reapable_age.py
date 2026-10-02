@@ -45,3 +45,24 @@ def age_chunks_past_grace(collection: str, *, tenant: str | None = None,
             f"age_chunks_past_grace: no chunk of {collection!r} for tenant {tenant!r}; "
             "seed the chunks first")
     return aged
+
+
+def age_quarantine_past_expiry(quarantine_collection: str, *, tenant: str | None = None,
+                               days: int = 20) -> int:
+    """Push the ``quarantined_at`` stamp of every row in *quarantine_collection* back *days* days
+    (the client expiry's cutoff is 14 by default), with substrate SQL. Returns the rows aged and
+    raises on zero, for the same reason :func:`age_chunks_past_grace` does."""
+    tenant = tenant or ambient_tenant()
+    out = _psql_superuser(
+        _pg_state(),
+        "WITH u AS (UPDATE nexus.chunks SET metadata = jsonb_set(metadata, '{quarantined_at}', "
+        "to_jsonb(to_char((now() AT TIME ZONE 'UTC') - "
+        f"interval '{int(days)} days', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'))) "
+        f"WHERE tenant_id = {_lit(tenant)} AND collection = {_lit(quarantine_collection)} "
+        "RETURNING 1) SELECT count(*) FROM u",
+    )
+    aged = int(out)
+    if aged == 0:
+        raise AssertionError(
+            f"age_quarantine_past_expiry: no row in {quarantine_collection!r} for tenant {tenant!r}")
+    return aged

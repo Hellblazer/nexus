@@ -31,7 +31,7 @@ import json
 import os
 import signal
 import sys
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import NoReturn
 
@@ -296,6 +296,43 @@ def _census_blocker_reasons(collection: str, blockers: dict[str, int], *, prior:
     return reasons
 
 
+def _expire_client_quarantine(t3_db, collection: str, qname: str, *, moved: int) -> None:
+    """The client expiry ``nx t3 gc`` runs after its own move (and on a run with nothing to move), as
+    ``nx index repo`` runs it (``indexer._gc_serverside``): rows in the quarantine sibling past the
+    client cutoff (``NX_GC_QUARANTINE_DAYS``) that the engine's reaper did not tag, behind the same
+    ``NX_GC_FLOOR_FRACTION`` floor (``NX_GC_FORCE=1`` overrides). The verb runs it so a collection no
+    repo index sweeps (every ``knowledge__*``) still expires its own quarantine; without it nothing
+    would ever expire what this verb moved. A failure is exit 1 after saying the move stands."""
+    from nexus.catalog.chunk_quarantine import (  # noqa: PLC0415 — command-local import (nexus.catalog.chunk_quarantine)
+        expire_quarantine_serverside,
+        quarantine_days,
+    )
+    from nexus.db.http_vector_client import VectorServiceError  # noqa: PLC0415 — command-local import (nexus.db.http_vector_client)
+    from nexus.indexer import _GC_FLOOR_MIN_CHUNKS, _gc_floor_fraction  # noqa: PLC0415 — command-local import (nexus.indexer is heavy)
+
+    force = os.environ.get("NX_GC_FORCE", "") == "1"
+    cutoff = (datetime.now(UTC) - timedelta(days=quarantine_days())).strftime("%Y-%m-%dT%H:%M:%SZ")
+    try:
+        expiry = expire_quarantine_serverside(
+            t3_db, qname, collection, cutoff,
+            floor_fraction=_gc_floor_fraction(), floor_min_chunks=_GC_FLOOR_MIN_CHUNKS, force=force,
+        )
+    except VectorServiceError as exc:
+        click.echo(
+            f"\nSummary: {f'the move succeeded ({moved} chunk(s) quarantined) but' if moved else 'nothing needed moving, but'}"
+            f" the client expiry of {qname} FAILED: {exc}. Nothing was expired; re-run this verb to retry it.",
+            err=True,
+        )
+        raise click.exceptions.Exit(1) from exc
+    if expiry is not None:
+        expired, refused = expiry
+        click.echo(
+            f"  Client expiry of {qname} (older than {quarantine_days()} day(s), rows the engine's "
+            f"reaper tagged excluded): {expired} expired, {refused} refused by the NX_GC_FLOOR_FRACTION "
+            f"floor{' (NX_GC_FORCE=1 overrides)' if refused else ''}."
+        )
+
+
 @t3.command("gc")
 @click.option(
     "--collection",
@@ -377,21 +414,30 @@ def gc_cmd(
 
     \b
     The verb frees no storage by itself: the moved chunks sit in
-    ``quarantine-*`` until they are expired. A chunk this verb moved is expired
-    by the CLIENT, at the end of an ``nx index repo`` run, once it is older than
-    ``NX_GC_QUARANTINE_DAYS`` (default 14); a chunk the engine's reaper moved is
-    expired by the engine. A chunk whose document is re-registered is restored
-    automatically by the same run. ``nx t3 quarantine restore`` is the operator
-    restore verb (it ships with the reaper work, nexus-2x9xa, not with this
-    verb). Each engine batch commits on its own, so a run that stops part way
-    leaves its earlier batches moved and re-running it is safe.
+    ``quarantine-*`` until they are expired, and each side expires only what it
+    moved. After its own move this verb runs the client expiry (as
+    ``nx index repo`` does for a repo's code, docs and rdr collections): rows in
+    the quarantine sibling older than ``NX_GC_QUARANTINE_DAYS`` (default 14) that
+    the engine's reaper did not tag are hard-deleted, behind the same
+    ``NX_GC_FLOOR_FRACTION`` floor (``NX_GC_FORCE=1`` overrides). That is how a
+    ``knowledge__*`` quarantine ever expires, since no repo index sweeps it. A
+    chunk the engine's reaper moved (tagged ``quarantined_by``) is expired by the
+    engine alone, on its own retention. A chunk whose document is re-registered
+    is restored automatically by the ``nx index repo`` run. The operator restore
+    verb ``nx t3 quarantine restore`` ships separately (nexus-wbfpw.49); it refuses
+    this verb's ``gc_quarantine_orphans`` audit rows (they list a sample only), so
+    restore a chunk this verb moved with its ``--quarantined-since`` /
+    ``--quarantined-before`` window or explicit ``--chash`` values. Each engine batch commits on its own, so a run that stops part
+    way leaves its earlier batches moved and re-running it is safe.
 
     \b
     ``--orphan-window`` was REMOVED: the engine exposes no tunable grace, so a
     script that still passes it is refused with a message naming the removal.
 
     \b
-    Refusals (a ``--dry-run`` says which a real run would hit):
+    Refusals (a ``--dry-run`` says which a real run would hit, and exits 1 when
+    it names one, so ``nx t3 gc ... --dry-run && nx t3 gc ... --no-dry-run --yes``
+    stops where the real run would):
       - RUNFENCE (nexus-g6k6b): any document in the collection not
         ``index_state='complete'`` (an in-flight or fence-failed run). Override:
         ``--allow-incomplete-index-state``.
@@ -402,9 +448,11 @@ def gc_cmd(
         reapable once old, and the route has no exclusion list, so the verb
         refuses rather than move it. Clear the bucket (re-put the notes, see
         ``nx t3 census-manifest-less``) first.
-      - Fraction floor: a pass whose candidates exceed ``NX_GC_FLOOR_FRACTION``
-        (default 0.25) of the collection's chunks, from 100 chunks up, is the
-        manifest-gap misclassification shape. Override: ``NX_GC_FORCE=1``. The
+      - Fraction floor: a pass of at least 100 reapable chunks that is more than
+        ``NX_GC_FLOOR_FRACTION`` (default 0.25) of the collection's chunks is the
+        manifest-gap misclassification shape (the engine's own reading: the 100
+        minimum counts the reapable set, the fraction divides by every stored
+        chunk). Override: ``NX_GC_FORCE=1``. The
         floor is this verb's own and permanent: the route this verb moves with
         carries none (the engine reaper's floor never reaches it, and
         ``indexer._prune_deleted_files`` calls the same route with no floor at
@@ -530,6 +578,11 @@ def gc_cmd(
 
     if not candidates:
         click.echo("\nSummary: 0 reapable chunk(s); nothing to do.")
+        if will_act:
+            # Nothing to move still leaves what an earlier run moved: expire it on schedule.
+            from nexus.catalog.chunk_quarantine import quarantine_collection_name  # noqa: PLC0415 — command-local import (nexus.catalog.chunk_quarantine)
+
+            _expire_client_quarantine(t3_db, collection, quarantine_collection_name(collection), moved=0)
         return
 
     # The refusals. Each is a reason a --no-dry-run --yes run stops; a dry run prints them as
@@ -577,16 +630,21 @@ def gc_cmd(
     # does not set, so honouring it here would make the floor follow a variable nobody exports.
     floor_fraction = _gc_floor_fraction()
     force = os.environ.get("NX_GC_FORCE", "") == "1"
+    # The engine's reading (reaper_quarantine_chunks, gc_expire_quarantine): the 100-chunk minimum
+    # counts the REAPABLE set, the fraction is reapable / every stored chunk, compared strictly by
+    # division (never `n > f * total`, whose float product misjudges an exact boundary such as
+    # 0.57 * 100 = 56.99999999999999).
     if (
-        scope_chunk_total >= _GC_FLOOR_MIN_CHUNKS
-        and len(candidates) > floor_fraction * scope_chunk_total
+        scope_chunk_total > 0
+        and len(candidates) >= _GC_FLOOR_MIN_CHUNKS
+        and len(candidates) / scope_chunk_total > floor_fraction
         and not force
     ):
         reasons.append(
             f"{len(candidates)} of {scope_chunk_total} chunk(s) "
             f"({len(candidates) / scope_chunk_total:.0%}) in '{collection}' are reapable, over "
             f"the NX_GC_FLOOR_FRACTION floor of {floor_fraction:.0%} (applies from "
-            f"{_GC_FLOOR_MIN_CHUNKS} chunks up). A verdict this large is the manifest-gap "
+            f"{_GC_FLOOR_MIN_CHUNKS} reapable chunks up). A verdict this large is the manifest-gap "
             f"misclassification shape, not routine churn. The engine route this verb moves with "
             f"carries no floor, so this verb holds it. If the collection really is mostly "
             f"garbage, re-run with NX_GC_FORCE=1 (the chunks go to quarantine, not away)."
@@ -595,6 +653,13 @@ def gc_cmd(
     if not will_act:
         for reason in reasons:
             click.echo(f"  a --no-dry-run --yes run will REFUSE: {reason}")
+        if reasons:
+            click.echo(
+                f"\nSummary: a --no-dry-run --yes run would REFUSE for {collection} "
+                f"({len(reasons)} reason(s) above); {len(candidates)} chunk(s) are listed but none "
+                f"would move. Exiting 1 so a script gating the real run on this one stops."
+            )
+            raise click.exceptions.Exit(1)
         click.echo(
             f"\nSummary: would quarantine up to {len(candidates)} chunk(s) from {collection}."
         )
@@ -663,11 +728,16 @@ def gc_cmd(
         # quarantine. The verb says so, so an operator does not read a failure as "nothing happened".
         left = "unknown" if exc.remaining is None else str(exc.remaining)
         detail = f": {exc.__cause__}" if exc.__cause__ is not None else ""
+        unknown = (
+            " The failed batch's own outcome is unknown (a timeout or transport error can follow a "
+            "server commit); nx catalog gc-audit list shows what the engine recorded."
+            if exc.reason == "batch failed" else ""
+        )
         click.echo(
             f"\nSummary: the engine move for {collection} STOPPED ({exc.reason}{detail}). "
             f"{exc.moved} chunk(s) were moved into {qname} in {exc.batches} earlier batch(es); each "
-            f"batch committed on its own and stays moved, so re-running this verb is safe. "
-            f"Still reapable when it stopped: {left}.",
+            f"batch committed on its own and stays moved, so re-running this verb is safe."
+            f"{unknown} Still reapable when it stopped: {left}.",
             err=True,
         )
         raise click.exceptions.Exit(1) from exc
@@ -675,8 +745,10 @@ def gc_cmd(
         if exc.code == 404:
             raise click.ClickException(_GC_NO_ROUTE_MESSAGE) from exc
         click.echo(
-            f"\nSummary: the engine move FAILED for {collection} before any batch moved a chunk: "
-            f"{exc}",
+            f"\nSummary: the engine move FAILED for {collection} on its first batch: {exc}. No batch "
+            f"is known to have moved a chunk, but a timeout or transport error can follow a server "
+            f"commit, so nx catalog gc-audit list is the record of what the engine did. Re-running "
+            f"this verb is safe.",
             err=True,
         )
         raise click.exceptions.Exit(1) from exc
@@ -689,13 +761,23 @@ def gc_cmd(
     click.echo(
         f"\nSummary: quarantined {moved} chunk(s) from {collection} into {qname}. The engine "
         f"recorded each batch in gc_audit (nx catalog gc-audit list). The chunks are moved, not "
-        f"freed: they are expired after NX_GC_QUARANTINE_DAYS by the next 'nx index repo' run."
+        f"freed: the client expiry below hard-deletes them once they are older than "
+        f"NX_GC_QUARANTINE_DAYS (a later run of this verb, or of 'nx index repo' for a repo "
+        f"collection, does it)."
     )
     if moved < len(candidates):
         click.echo(
             f"  The listing named {len(candidates)}; the engine moved {moved}. It re-checks the "
             f"predicate under its own lock, so a chunk a client re-wrote since the listing stays."
         )
+    elif moved > len(candidates):
+        click.echo(
+            f"  The listing named {len(candidates)}; the engine moved {moved}, MORE than listed: "
+            f"chunks aged past the grace while the drain ran. The floor was judged on the listing, "
+            f"so check {qname} (nx catalog gc-audit list) if the extra count matters."
+        )
+
+    _expire_client_quarantine(t3_db, collection, qname, moved=moved)
 
 
 @t3.command("backfill-manifest")

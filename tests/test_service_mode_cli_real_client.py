@@ -14,8 +14,8 @@ ported in the same wave:
   - ``expire``                      (nx store expire,      nexus-h8rf6.5)
   - ``update_source_path``          (nx doctor --fix-paths, nexus-h8rf6.6)
   - ``manifest_less_census`` / ``reapable_chunks`` / ``gc_quarantine_orphans_bounded``
-                                    (nx t3 gc,             nexus-wbfpw.18; it used to
-                                    ride list_chunks_with_metadata + delete_by_chunk_ids)
+                                    (nx t3 gc,             nexus-wbfpw.18; the verb
+                                    lists, then moves through the engine route)
   - ``list_unique_source_paths``    (nx t3 prune-stale,    nexus-h8rf6.7)
   - ``collection_metadata``         (doctor model-drift probe, nexus-h8rf6.8)
 

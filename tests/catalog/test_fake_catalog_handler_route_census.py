@@ -319,8 +319,15 @@ ROUTE_EXCLUSIONS: dict[str, str] = {
         "mode-lint orphans, nexus-th15h)"
     ),
     "/gc_audit/list": (
-        "nexus-jqvzk, the read half of the same not-yet-consumed audit "
-        "surface. Same removal condition as /gc_audit/record"
+        "nexus-jqvzk, the read half of the audit surface. It HAS client "
+        "consumers (HttpCatalogClient.gc_audit_list, called by `nx catalog "
+        "gc-audit list` and by the nx doctor purge-trash audit check in "
+        "health.py); it is excluded here only because the live fake server "
+        "carries no gc_audit table to answer from, and those consumers are "
+        "exercised against a mocked transport (tests/test_catalog_gc_audit_cmd.py, "
+        "tests/test_health_service_checks.py) and against the real engine "
+        "substrate (tests/test_wbfpw18_t3_gc_substrate.py). Delete this entry "
+        "if a FakeCatalogHandler branch for it is ever added"
     ),
 }
 
