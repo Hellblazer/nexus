@@ -245,7 +245,8 @@ class CatalogHandlerAppendChunksTest {
         assertThat(ex.status).isEqualTo(200);
         assertThat(ex.bodyString()).contains("\"ok\":true").contains("\"count\":0")
             .contains("\"swept\":1").contains("\"sweep_skipped\":0")
-            .contains("\"sweep_detail\":[{\"doc_id\":\"aph.8\",\"dropped\":1,\"swept\":1,\"kept\":0,\"errored\":false}]");
+            .contains("\"sweep_detail\":[{\"doc_id\":\"aph.8\",\"dropped\":1,\"swept\":1,\"kept\":0,\"errored\":false,"
+                + "\"swept_chashes\":[\"" + x + "\"],\"swept_chashes_truncated\":false}]");
     }
 
     @Test

@@ -1260,4 +1260,102 @@ class CatalogManifestSweepRepositoryTest {
         assertThat(fieldValue(line, "kept")).isEqualTo("0");
         assertThat(chunk384Exists(TENANT_A, col, x)).as("the sweep this event reports actually ran").isFalse();
     }
+    // ── RDR-192 Step 13 (nexus-wbfpw.25): sweep_detail names the chashes the sweep deleted ──
+
+    /** The single sweep_detail entry of a one-document sweep response. */
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> onlyDetail(Map<String, Object> result) {
+        var detail = (List<Map<String, Object>>) result.get("sweep_detail");
+        assertThat(detail).hasSize(1);
+        return detail.getFirst();
+    }
+
+    @Test @Order(60)
+    void sweepDetail_namesExactlyTheChashesTheSweepDeleted_notTheKeptOnes() throws Exception {
+        String col = "code__swp60__minilm-l6-v2-384__v1";
+        String x = ch("swp60-x");
+        String z = ch("swp60-z");
+        String shared = ch("swp60-shared");
+        for (String c : List.of(x, z, shared)) seedChunk384(TENANT_A, col, c);
+        registerDoc(TENANT_A, "swp.60a", col);
+        registerDoc(TENANT_A, "swp.60b", col);
+        writeManifestManySeeded(TENANT_A, List.of(
+            Map.<String, Object>of("doc_id", "swp.60a", "rows", List.<Map<String, Object>>of(
+                Map.<String, Object>of("position", 0, "chash", x, "chunk_index", 0),
+                Map.<String, Object>of("position", 1, "chash", shared, "chunk_index", 1),
+                Map.<String, Object>of("position", 2, "chash", z, "chunk_index", 2))),
+            Map.<String, Object>of("doc_id", "swp.60b", "rows", List.<Map<String, Object>>of(
+                Map.<String, Object>of("position", 0, "chash", shared, "chunk_index", 0)))), col);
+
+        // 60a drops x, shared and z. B still owns `shared`, so the sweep keeps it.
+        var result = writeManifestManySeeded(TENANT_A, List.of(
+            Map.<String, Object>of("doc_id", "swp.60a", "rows", List.<Map<String, Object>>of(
+                Map.<String, Object>of("position", 0, "chash", ch("swp60-new"), "chunk_index", 0)))), col,
+            null, true);
+
+        var d = onlyDetail(result);
+        assertThat(d).containsEntry("dropped", 3).containsEntry("swept", 2).containsEntry("kept", 1);
+        assertThat(d.get("swept_chashes"))
+            .as("exactly the chashes the sweep deleted: the kept shared chash is NOT listed")
+            .isEqualTo(List.of(x, z).stream().sorted().toList());
+        assertThat(d).containsEntry("swept_chashes_truncated", false);
+        assertThat(chunk384Exists(TENANT_A, col, x)).isFalse();
+        assertThat(chunk384Exists(TENANT_A, col, z)).isFalse();
+        assertThat(chunk384Exists(TENANT_A, col, shared)).isTrue();
+    }
+
+    @Test @Order(61)
+    void sweepDetail_sweptChashesAreCapped_andTheCountStaysExact() throws Exception {
+        String col = "code__swp61__minilm-l6-v2-384__v1";
+        int total = CatalogRepository.SWEPT_CHASHES_REPORT_CAP + 5;
+        List<Map<String, Object>> rows = new ArrayList<>();
+        List<String> all = new ArrayList<>();
+        for (int i = 0; i < total; i++) {
+            String c = ch("swp61-" + i);
+            all.add(c);
+            rows.add(Map.<String, Object>of("position", i, "chash", c, "chunk_index", i));
+        }
+        registerDoc(TENANT_A, "swp.61", col);
+        seedChunk384(TENANT_A, col, all.getFirst());   // registers the collection
+        writeManifestManySeeded(TENANT_A, List.of(
+            Map.<String, Object>of("doc_id", "swp.61", "rows", rows)), col);
+
+        var result = writeManifestManySeeded(TENANT_A, List.of(
+            Map.<String, Object>of("doc_id", "swp.61", "rows", List.<Map<String, Object>>of())), col,
+            null, true);
+
+        var d = onlyDetail(result);
+        assertThat(d).containsEntry("dropped", total).containsEntry("swept", total).containsEntry("kept", 0);
+        assertThat((List<?>) d.get("swept_chashes"))
+            .as("the list is bounded; swept (the count) is not").hasSize(CatalogRepository.SWEPT_CHASHES_REPORT_CAP);
+        assertThat(d).containsEntry("swept_chashes_truncated", true);
+        @SuppressWarnings("unchecked")
+        List<String> listed = (List<String>) d.get("swept_chashes");
+        assertThat(all).as("every listed chash was a dropped one").containsAll(listed);
+        assertThat(result.get("swept")).isEqualTo(total);
+    }
+
+    @Test @Order(62)
+    void sweepDetail_aSweepThatDeletedNothingCarriesAnEmptyList() throws Exception {
+        String col = "code__swp62__minilm-l6-v2-384__v1";
+        String shared = ch("swp62-shared");
+        seedChunk384(TENANT_A, col, shared);
+        registerDoc(TENANT_A, "swp.62a", col);
+        registerDoc(TENANT_A, "swp.62b", col);
+        writeManifestManySeeded(TENANT_A, List.of(
+            Map.<String, Object>of("doc_id", "swp.62a", "rows", List.<Map<String, Object>>of(
+                Map.<String, Object>of("position", 0, "chash", shared, "chunk_index", 0))),
+            Map.<String, Object>of("doc_id", "swp.62b", "rows", List.<Map<String, Object>>of(
+                Map.<String, Object>of("position", 0, "chash", shared, "chunk_index", 0)))), col);
+
+        var result = writeManifestManySeeded(TENANT_A, List.of(
+            Map.<String, Object>of("doc_id", "swp.62a", "rows", List.<Map<String, Object>>of(
+                Map.<String, Object>of("position", 0, "chash", ch("swp62-new"), "chunk_index", 0)))), col,
+            null, true);
+
+        var d = onlyDetail(result);
+        assertThat(d).containsEntry("swept", 0).containsEntry("kept", 1);
+        assertThat((List<?>) d.get("swept_chashes")).isEmpty();
+        assertThat(d).containsEntry("swept_chashes_truncated", false);
+    }
 }

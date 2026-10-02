@@ -5478,7 +5478,9 @@ public final class CatalogRepository {
      * doc in this call), {@code sweep_skipped} (docs where the sweep was
      * attempted but could not run to completion — before-read or delete
      * failure; fail-open, NEVER fails the doc's manifest write) and
-     * {@code sweep_detail} (per-doc {@code {doc_id, dropped, swept, kept}}
+     * {@code sweep_detail} (per-doc {@code {doc_id, dropped, swept, kept, errored, swept_chashes,
+     * swept_chashes_truncated}}; {@code swept_chashes} is the chashes the sweep deleted, capped at
+     * {@link #SWEPT_CHASHES_REPORT_CAP}, RDR-192 Step 13)
      * for every doc where at least one chash dropped out of the manifest).
      * All three are present and zero/empty when {@code sweep=false}.
      *
@@ -5668,9 +5670,15 @@ public final class CatalogRepository {
                             // failed, so `dropped` was never determined. Reported
                             // as an honest errored=true outcome, never silently
                             // absorbed into "nothing to sweep".
-                            sweepOutcome[0] = Map.of("doc_id", docId, "dropped", 0,
-                                "swept", 0, "kept", 0, "errored", true,
-                                "reason", "before_read_failed");
+                            Map<String, Object> failedRead = new LinkedHashMap<>();
+                            failedRead.put("doc_id", docId);
+                            failedRead.put("dropped", 0);
+                            failedRead.put("swept", 0);
+                            failedRead.put("kept", 0);
+                            failedRead.put("errored", true);
+                            failedRead.put("reason", "before_read_failed");
+                            putSweptChashes(failedRead, List.of());
+                            sweepOutcome[0] = failedRead;
                         } else if (beforeRead != null) {
                             // nexus-11gh6 rev 2 §2.3: capture `before` for the
                             // POST-COMMIT dropped-chash computation below — this
@@ -6031,6 +6039,7 @@ public final class CatalogRepository {
                 out.put("swept", swept);
                 out.put("kept", kept);
                 out.put("errored", false);
+                putSweptChashes(out, sweptChashes);
                 return out;
             });
         } catch (Exception e) {
@@ -6044,8 +6053,25 @@ public final class CatalogRepository {
             out.put("kept", dropped.size());
             out.put("errored", true);
             out.put("reason", reason);
+            putSweptChashes(out, List.of());
             return out;
         }
+    }
+
+    /**
+     * RDR-192 Step 13 (bead nexus-wbfpw.25): adds {@code swept_chashes} (the chashes the sweep
+     * DELETE actually removed, hex, ascending, at most {@link #SWEPT_CHASHES_REPORT_CAP}) and
+     * {@code swept_chashes_truncated} to a {@code sweep_detail} entry. This is NOT the document's
+     * {@code dropped_chashes}: a dropped chash another document still owns, or that is a live
+     * note's own identity, is dropped from the manifest and kept by the sweep, so it is in the
+     * first list and not in this one. {@code swept} stays the exact count whatever the cap.
+     */
+    private static void putSweptChashes(Map<String, Object> entry, List<String> sweptChashes) {
+        List<String> sorted = new ArrayList<>(sweptChashes);
+        java.util.Collections.sort(sorted);
+        boolean truncated = sorted.size() > SWEPT_CHASHES_REPORT_CAP;
+        entry.put("swept_chashes", truncated ? new ArrayList<>(sorted.subList(0, SWEPT_CHASHES_REPORT_CAP)) : sorted);
+        entry.put("swept_chashes_truncated", truncated);
     }
 
     /**
@@ -6289,6 +6315,15 @@ public final class CatalogRepository {
     public static final int MAX_SWEEP_CHASHES_PER_APPEND = 300;
 
     /**
+     * RDR-192 Step 13 (bead nexus-wbfpw.25): the most chashes one {@code sweep_detail} entry names
+     * as swept ({@code swept_chashes}). The sweep itself is not bounded by it (an index run can
+     * sweep far more) and {@code swept} stays the exact count; only the list is capped, and
+     * {@code swept_chashes_truncated} says when it was. Same number as the per-request write cap
+     * ({@code QUOTAS.MAX_RECORDS_PER_WRITE}), so one entry never outweighs one request's worth of ids.
+     */
+    public static final int SWEPT_CHASHES_REPORT_CAP = 300;
+
+    /**
      * Validates the size of a {@code sweep_chashes} list and returns it de-duplicated in order
      * (a duplicate would inflate the sweep's {@code dropped}/{@code kept} counts). Public so the
      * callers that embed BEFORE calling the repository ({@code CombinedWriteService}) refuse an
@@ -6310,7 +6345,7 @@ public final class CatalogRepository {
     /**
      * What an append did: how many chunk rows it wrote, and, when it carried {@code
      * sweep_chashes}, the outcome of the post-commit sweep ({@code {doc_id, dropped, swept,
-     * kept, errored[, reason]}}, the element {@code write_many} puts in {@code sweep_detail}).
+     * kept, errored[, reason], swept_chashes, swept_chashes_truncated}}, the element {@code write_many} puts in {@code sweep_detail}).
      */
     public record AppendOutcome(int chunksWritten, Map<String, Object> sweep) {
         /** Adds {@code swept}, {@code sweep_skipped} and {@code sweep_detail}, as {@code write_many} returns them. */
