@@ -1,0 +1,538 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    RDR-192 Step 7 (bead nexus-wbfpw.15): reapable(c), the ONE engine
+    predicate for "this chunk is garbage collection's to take", as an
+    inlinable SQL function, and the orphaning record that gives its grace
+    window the meaning RDR-192 needs. Its first consumers are Step 8's
+    gc_quarantine_orphans pair (vectors-022) and the read-only listing route;
+    the periodic reaper (nexus-2x9xa) is the third.
+
+    Three changesets, in dependency order (a SQL function body is checked at
+    creation, so the table comes first):
+      vectors-021-1  nexus.chunk_orphaned_at, the side table the record lives in
+      vectors-021-2  nexus.chunk_is_reapable, the predicate
+      vectors-021-3  the two triggers on nexus.catalog_document_chunks that write it
+    None of the three is in a published engine tag (verified against
+    engine-service-v0.1.139 to v0.1.142 and origin/develop), so the file was
+    edited in place; only a dev database that ran an earlier draft meets a
+    checksum mismatch.
+
+    THE PREDICATE. A chunk row c is reapable when ALL of:
+
+      1. no catalog_document_chunks row names (tenant, collection, chash) in
+         ANY owner state. A tombstoned owner still has a manifest row, so a
+         chunk whose only owners are tombstoned is NOT reapable: it is
+         purge_trash's, which ages the tombstone, not the chunk.
+      2. GREATEST(c.last_written_at, the chunk's orphaned_at, if it has one)
+         is older than now() - grace (default 30 days). last_written_at, not
+         created_at (Sam, 2026-09-29, nexus-wbfpw.43): created_at is write-once,
+         so a re-write would otherwise get no fresh grace. last_written_at is
+         refreshed by every client write path that re-writes an existing chunk
+         (vectors-020's header), including the existence-partition metadata
+         refresh (batchUpdateMetadata). orphaned_at is the time the chunk last
+         lost an owner row (below). The later of the two is the start of the
+         grace, so the grace means "time since the chunk was last written or
+         last lost an owner", i.e. how long it has been ownerless.
+      3. the chunk's collection is not a quarantine sibling
+         (catalog_collections.lifecycle_state = 'quarantine', by state and not
+         by name: RDR-204 retired parsing names). A quarantine sibling never has
+         manifest rows and its rows take a fresh last_written_at on the move, so
+         after 30 days every quarantined chunk would otherwise be reapable and a
+         caller that visits quarantine-* collections would bypass
+         gc_expire_quarantine's own clock and floors.
+
+    THERE IS NO IN-FLIGHT-INDEX PIN. An earlier draft excluded chunks whose
+    metadata catalog_doc_id named a document in index_state 'indexing'. No
+    current writer stamps that key (RDR-108 removed doc_id from chunk metadata;
+    make_chunk_metadata raises on it), so the pin was empty for every chunk the
+    multi-batch writers produce, and its tests passed only on hand-stamped
+    fixtures (review T2 nexus/review-wbfpw15-17-code C1 and -critique Issue 1).
+    The orphaning record does the job without any metadata key.
+
+    THE ORPHANING RECORD (vectors-021-1 and -3). A multi-batch re-index
+    replaces the document's manifest at batch 1, so every old tail chunk is
+    ownerless until a later batch re-adds it (RDR-223 Phase 2 gate critique,
+    S2); a deleted file's chunks lose their owner when the client purges its
+    manifest. In both cases last_written_at is OLD (the chunk was written long
+    ago), so a chunk age grace would let the reaper take it at once. Two
+    statement-level triggers on nexus.catalog_document_chunks (DELETE, and
+    UPDATE) therefore upsert (tenant, collection, chash, orphaned_at = now())
+    into nexus.chunk_orphaned_at for every chunk KEY the statement dropped
+    from the manifest (the deleted rows' keys; for an UPDATE, the old keys
+    minus the new keys, so a row that moves position and chash together still
+    records the old chash), in the same transaction as the manifest change.
+
+    WHY A SIDE TABLE AND NOT last_written_at (Sam, 2026-10-01, option b).
+    The first version of the orphaning stamp UPDATEd nexus.chunks. Every
+    UPDATE of a chunk row writes a new row version, and nexus.chunks carries
+    three full HNSW indexes (vector(384), vector(768), vector(1024)) plus two
+    GIN indexes, so the update re-inserted the row into the 1024-d HNSW graph
+    for a vector that had not changed. Measured below (one laptop-container run,
+    see COST): 11 s for 5000 chunks, against tens of milliseconds for the side
+    table. nexus.chunk_orphaned_at has a primary key
+    and nothing else, so an upsert into it touches no vector index. The cost
+    of the choice is one extra indexed probe in the predicate.
+
+    The triggers do NOT read the manifest to decide whether the chunk is
+    "really" ownerless: two concurrent writers that drop the last two owners of
+    a shared chunk each saw the other's uncommitted row and recorded nothing
+    (reproduced by ChunkIsReapableIntegrationTest.aConcurrentDropOfASharedChunkLeavesItStamped
+    against the first version). Recording every dropped key is safe because
+    reapable(c) needs no owner: a recorded chunk that is still owned is simply
+    not reapable (condition 1), and one that loses its other owners later has
+    its record refreshed.
+
+    LOCKING, AND WHAT IS CLAIMED. Each trigger first runs
+        SELECT 1 FROM nexus.chunks c JOIN (the dropped keys) ...
+         ORDER BY c.tenant_id, c.collection, c.chash FOR NO KEY UPDATE OF c
+    and then upserts. The chunk rows are the rows to lock because a chunk row
+    exists for every key that is recorded (the upsert is driven from the chunk
+    rows, so a key with no chunk is skipped), it is the one row every writer of
+    the key has in common, and it needs no insert, so the lock pass is a single
+    ordered walk over rows that already exist. What that buys, and only that:
+      - two triggers that share chunks lock them in the same total order, so
+        TRIGGER-VERSUS-TRIGGER cannot deadlock on chunk rows;
+      - the lock order is chunk row first, then side-table row, which is the
+        order the foreign key's own cascade takes when a chunk is deleted (the
+        chunk row, then its record), so a trigger and a chunk delete cannot
+        deadlock on that pair;
+      - the INSERT's foreign-key check takes a share lock on the chunk row, and
+        a chunk deleted concurrently would make that check wait and then fail
+        with 23503. Waiting on the chunk row in the pre-lock pass instead
+        (PERFORM blocks, and the later INSERT statement takes a fresh snapshot
+        that no longer sees the deleted chunk) lets the INSERT skip the vanished
+        chunk, so the trigger records nothing for it and the manifest statement
+        succeeds;
+      - the upsert itself then runs in the same key order (ORDER BY on its
+        select), so the side-table rows are also taken in one order.
+    The lock is NOT what keeps two concurrent drops from losing a record: the
+    ON CONFLICT upsert already waits on the other statement's uncommitted index
+    entry and re-evaluates its DO UPDATE guard against the committed row, so the
+    one-hour guard sees the first record whether or not the chunk was locked.
+    No behavioural test depends on the lock (removing it leaves
+    aConcurrentDropOfASharedChunkLeavesItStamped green); the definition pin
+    below is what holds it in place. An earlier version of this header said the
+    lock prevented a lost record, which was wrong.
+    It does not claim to order against other writers. The content upserts
+    (PgVectorRepository.upsertChunks, CatalogRepository.upsertManifestChunkVectors)
+    sort their chunk writes by chash within one (tenant, collection), which
+    makes every pass monotone in chash, but no test pins that, and the manifest
+    write itself is not under DeadlockRetry. A 40P01 against another writer
+    would be loud (an error, not a lost record) and retryable.
+    ChunkIsReapableIntegrationTest pins the ORDER BY and the lock clause in both
+    function bodies (pg_get_functiondef), the concurrent shared-chunk drop, and
+    the record's one-hour guard; the header's no-deadlock claim stops at the
+    pinned part.
+    Chunk-row locking costs about 12 ms per 5000 chunks (measured: 51 to 60 ms
+    with the lock, 39 to 48 ms for the upsert alone) and makes a writer that
+    refreshes one of those chunks wait for the manifest transaction, which is
+    what the first version's UPDATE did as well.
+
+    SECURITY. The functions are SECURITY INVOKER, as every function in the
+    changelog is (an earlier draft made them SECURITY DEFINER only so a test that
+    revokes SELECT (chash) from nexus_svc kept passing; not reading the manifest
+    removes that need). They run under the writer's FORCE RLS and tenant GUC, and
+    join on tenant_id besides, so a tenant-A statement never records a tenant-B
+    chunk; EXECUTE is revoked from PUBLIC (a trigger function cannot be called
+    directly anyway) and ChunkIsReapableIntegrationTest pins prosecdef = false and
+    the ACL. The tenant equality is defence in depth for the service role (RLS
+    already binds it) and the ONLY barrier for a role that bypasses RLS, so it has
+    its own test, run as the container superuser (which bypasses RLS; the
+    production owner role does not, see WHAT IT DOES NOT COVER).
+
+    WHAT IT COVERS. Doing this in the database covers every DML path that drops
+    an owner row (writeManifestRows' replace, append's ON CONFLICT upsert of a
+    position, purgeManifest, delete-collection, the FK cascade of a hard document
+    delete, the SQL maintenance functions, the .nxexp import, anything added
+    later) instead of a list of Java call sites that rots.
+
+    WHAT IT DOES NOT COVER, stated so nobody assumes it does (RDR-192 carries the
+    per-path consequence table):
+      - TRUNCATE of the manifest: statement DELETE triggers do not fire. No code
+        path truncates it, and nexus_svc holds no TRUNCATE on it
+        (ChunkIsReapableIntegrationTest pins that with has_table_privilege). Run by
+        a superuser it orphans every chunk with no record: REAPED EARLY, and for a
+        live chunk REAPED WRONGLY unless a consumer's own gates (census, fraction
+        floor, quarantine) catch it.
+      - a session with session_replication_role = replica (pg_restore, logical
+        apply): triggers do not fire, and neither does the FK cascade. A manual
+        replica-mode DELETE is reaped early.
+      - manifest DML by a role that is exempt from RLS on the manifest alone: the
+        manifest rows are deleted, but the policy on nexus.chunks hides every chunk
+        from a role that is subject to it with no tenant GUC, so nothing is
+        recorded (by reading the policies; it cannot be built in a test without
+        NO FORCE on the manifest alone). A role subject to RLS on both with no GUC
+        deletes ZERO manifest rows, so nothing is dropped (pinned). A role exempt
+        from both (BYPASSRLS, a superuser) records correctly (pinned, run as the
+        container superuser). The table owner is NOT exempt in production: the
+        Liquibase owner role, nexus_admin, has no BYPASSRLS (catalog-016 and
+        catalog-025 headers), so under FORCE ROW LEVEL SECURITY it is subject to
+        the same policies as nexus_svc, and a data-fix changeset that deletes
+        manifest rows must set the tenant GUC.
+      - the one-hour guard (below): up to one hour early.
+      - staging promote is not a hole any more. It was one (a chunk promoted
+        over an existing row, StagingPromoteOps ON CONFLICT DO NOTHING, kept its
+        old clocks and was reapable between the promote and the manifest
+        finalize), and the /v1/staging routes and the staging schema were
+        removed (nexus-z0o2p.27, 8a7831a3d), so no such path remains.
+    The grace therefore protects a run's old tail for 30 days after batch 1, and a
+    deleted file's chunks for 30 days after the purge, on every path that drops a
+    manifest row.
+
+    THE ONE-HOUR GUARD. The writer has usually just refreshed the chunks it then
+    drops from the manifest (the content upsert runs before the manifest delete in
+    the same transaction and sets last_written_at = now()), and such a chunk is
+    already inside its grace by 30 days less an hour. So a chunk is recorded only
+    when BOTH its last_written_at and its existing orphaned_at (if any) are older
+    than one hour: the select filters on last_written_at, the upsert's DO UPDATE
+    is conditioned on the existing orphaned_at. A plain "< now()" would skip only
+    rows the SAME transaction refreshed; the one-hour margin also skips rows an
+    earlier request of the same run refreshed moments ago (the writer and the
+    manifest change are often separate requests, hence separate transactions). The
+    price: a chunk written within the hour before it loses its owner is reapable
+    up to one hour earlier than a recorded chunk would be, 30 days less that hour
+    after its write. It is never reapable at once, and never later.
+
+    COST, measured (nexus-wbfpw.15, 2026-10-01; one Docker pgvector 17.11 container
+    on an Apple-silicon laptop at load average 10 to 13, so the absolute figures
+    carry contention noise and the ratios are the evidence). Table shape: 35,000
+    chunks of 1024 dimensions in one collection, about 1.6 KB of text each, all
+    three HNSW indexes (m = 16, ef_construction = 64), both GIN indexes and the
+    two btrees, the manifest with its foreign key to nexus.chunks, row level
+    security forced on all three tables, the statements run by a NOSUPERUSER
+    NOBYPASSRLS role with the tenant GUC set, shared_buffers 128 MB. All 5000
+    chunks were last written 40 days before; statements rolled back; three runs
+    each, range given. "old" is the first version (UPDATE nexus.chunks);
+    "new" is this changeset; "off" is the triggers dropped.
+
+      DELETE of 5000 manifest rows, one statement
+          off 1-2 ms       old 11.1-13.9 s       new 51-60 ms
+      the same, the 5000 chunks refreshed in the same transaction (the guard path)
+          off 3 ms         old 39-41 ms          new 43-48 ms
+      1000 documents x 5 chunks, 1000 statements (the FK cascade of a hard delete
+      fires one statement per document)
+          off 14-15 ms     old 11.0-12.1 s       new 77-84 ms
+      batch 1 of a multi-batch re-index (5000 old tail chunks dropped), then a later
+      batch re-adds and refreshes them, one transaction
+          stamp: off 2.5 ms, old 10.9 s, new 44 ms; then the refresh (the client's
+          ordinary upsert, 10.5-11.8 s for 5000 rows on this table, the same in
+          every column)
+
+    The "old" column is the figure the critique measured independently on a 35k
+    row table (17 to 19 s under heavier load; 5.3 s on a 7k row table with
+    smaller text). The refresh itself is the client's ordinary chunk upsert and is
+    NOT a cost of this change: it is what any re-write of 5000 existing chunks
+    costs on this table, and the first version paid it a second time for the
+    stamp. The side table's predicate probe adds one primary-key lookup per
+    candidate chunk that already passed the manifest and quarantine tests; the
+    EXPLAIN of the reaper-shaped statement is in
+    ChunkIsReapablePlanIntegrationTest (it asserts chunk_orphaned_at_pk is the
+    probe). A 10,000-chunk old tail dropped at batch 1 of a re-index costs about
+    0.1 s inside the shared sweep gate and the index-run lock, not the tens of
+    seconds the first version cost.
+
+    STALE SIDE ROWS ARE HARMLESS, AND CLEANED. The table cannot hold a row for a
+    chunk that no longer exists: the foreign key to nexus.chunks is ON DELETE
+    CASCADE ON UPDATE CASCADE (the topic_assignments precedent, taxonomy-012), so
+    deleting a chunk (the reaper, the quarantine move, delete-collection,
+    purge_trash) removes its record, and a collection rename or re-home rewrites
+    the key. A record whose chunk is still there but is no longer true cannot make
+    a chunk reapable wrongly, because the record only ever LATE-bounds the grace:
+      - the chunk was re-owned: condition 1 fails, whatever the record says;
+      - the chunk was re-written: last_written_at is newer and wins in GREATEST;
+      - the chunk lost its owner again: the trigger refreshes the record (its
+        existing orphaned_at is older than the hour guard, or the chunk was written
+        within the hour and is inside the grace anyway).
+    ChunkIsReapableIntegrationTest pins each of these, and the cascade.
+
+    R8: THIS PREDICATE IS NOT "NO LIVE OWNER NEEDS THIS CHUNK". A live legacy
+    note stored before nexus-b6enc has a catalog document but no manifest row;
+    once its chunk is old it satisfies every condition above and reads
+    reapable (RDR-192 S1a matrix row R8). The guard is the manifest-less census
+    gate, not the SQL: a consumer that acts on this predicate must first see
+    legacy-unmanifested = 0 for the collection, and a periodic consumer must
+    re-run that census in the engine on every pass rather than trust a stored
+    record (T2 review-wbfpw41-substantive-critique S1). The same text is in
+    COMMENT ON FUNCTION below.
+
+    PARAMETERS. p_grace is an interval; NULL means the default (30 days), which
+    lives here and nowhere else. Tests inject small values; a delete path must
+    clamp a user-supplied grace to a floor before it reaches this function (the
+    SQL stays pure). ReapableConsumersScanTest enforces it: every statement that
+    deletes or copies chunks under this predicate sits in a function that takes
+    the exclusive sweep gate and passes NULL, with the listing route as the named
+    exemption.
+
+    SHAPE. Same as live(c) (vectors-018): a set-returning function, because a
+    scalar RETURNS boolean whose body holds an EXISTS subquery can never be
+    inlined, and an opaque per-row call is what the .9 round-1 EXPLAIN caught.
+    It returns one row when the chunk is reapable and none otherwise, so a
+    caller writes:
+
+        EXISTS (SELECT 1 FROM nexus.chunk_is_reapable(
+                    c.tenant_id, c.collection, c.chash, c.last_written_at, NULL))
+
+    The record is read by a scalar subquery on its primary key inside the
+    GREATEST, not by a LEFT JOIN. The two return the same rows. A join form was
+    measured and its plan depends on the side table's statistics: a freshly
+    created, empty table plans a sequential scan with a nested loop, and a
+    statement that grows the table while it runs (a cascade of 1000 deletes)
+    kept that plan and went quadratic (3.2 s for the 1000 x 5 shape where the
+    primary-key form took 80 ms). The subquery is an InitPlan probe on the primary
+    key that runs only for a row that passed the cheaper tests.
+    ChunkIsReapableIntegrationTest pins the form in the function definition (a
+    scalar "(SELECT o.orphaned_at" and no JOIN): the plan pin in
+    ChunkIsReapablePlanIntegrationTest cannot tell the two apart, because its
+    fixture analyzes an 8000-row side table, which is the case where the join
+    form also plans well.
+
+    The row's own last_written_at is PASSED IN rather than re-read, which is
+    what lets the same call be the WHERE of a DELETE: after inlining, the grace
+    comparison is a qual on the DELETE's own target row, so a client write that
+    refreshes last_written_at while the DELETE waits on its row lock is seen when
+    READ COMMITTED rechecks the new row version, and the DELETE skips it. A
+    select-then-delete-by-key would not see it. The manifest and record
+    sub-queries are not rechecked by that mechanism (they are read in the
+    statement's snapshot): a manifest row committed during the DELETE is the sweep
+    gate's concern (every destructive consumer takes it exclusively), not this
+    function's, and a record written during it can only come from a manifest
+    delete, which the same gate serialises against. The function inlines but
+    PostgreSQL does not pull the EXISTS up into a semi-join, so it plans as a
+    per-row subplan with index probes (idx_catalog_chunks_chash,
+    catalog_collections' primary key, chunk_orphaned_at_pk), the same plan live(c)
+    gets; ChunkIsReapablePlanIntegrationTest pins that under nexus_svc.
+
+    NOT A VIEW JOIN, for the reason vectors-009 and vectors-018 give.
+    LANGUAGE sql, STABLE, SECURITY INVOKER (FORCE RLS on the catalog tables stays
+    the isolation boundary), no function-level SET, not STRICT; EXECUTE is the
+    PUBLIC default, as for chunk_live_owners.
+
+    NO INDEX is added for last_written_at. A btree on it would stop HOT updates
+    for every client re-write of a chunk (nexus-wbfpw.43 review), and the
+    candidate scan is already bounded by the (tenant_id, collection, chash)
+    primary key prefix. ChunkIsReapablePlanIntegrationTest asserts the schema has
+    no such index. The side table is indexed by its primary key alone, which is
+    the probe key.
+
+    STATISTICS. The table grows in bursts (a 5000-chunk drop adds 5000 rows in one
+    statement) from empty, and the predicate's probe on it is a primary-key lookup
+    that the planner only prefers to a sequential scan once it knows the table is
+    not tiny. autovacuum_analyze_scale_factor = 0.02 (default 0.1, the
+    tuples-007 precedent for a table whose churn is high relative to its size)
+    makes autoanalyze fire after a burst rather than after ten times as many rows.
+    The planner also reads the table's physical size at plan time, so the window
+    in which a plan can be stale is a plan cached in a session before the burst.
+
+    GRANTS AND RLS. nexus.chunk_orphaned_at is ENABLE + FORCE ROW LEVEL SECURITY
+    with the tenant_isolation policy (vectors-004 and tuples-007's shape).
+    nexus_svc and nexus_diag pick the table up automatically:
+    grants-nexus-svc.xml and grants-nexus-diag.xml iterate every relation in
+    schema nexus at execution time and run after this file. The foreign key's
+    cascade runs as the table owner and is exempt from RLS, as taxonomy-012's is.
+
+    OTHER PREDICATES. strandedChunkCount (purge_trash Step 1) does NOT move onto
+    this function: it counts chunks that HAVE a manifest row whose owners are all
+    aged tombstones, the complement of arm 2 above, so the two are disjoint by
+    design and together make the dead set. purge_trash keeps its own deleted_at
+    grace. RDR-192 Technical Design records the same decision.
+
+    KNOWN CONSEQUENCE AT DEPLOY. vectors-020's ADD COLUMN ... DEFAULT now() gives
+    every existing chunk the migration time, so for 30 days after the engine
+    carrying vectors-020 is deployed nothing that already exists is reapable.
+
+    ROW TYPES. RETURNS TABLE adds one generated jOOQ record
+    (ChunkIsReapableRecord) and the new table adds another
+    (ChunkOrphanedAtRecord); JooqRecordReflectionFeatureTest's count moves by +2.
+    The new tenant table is also listed in the doctor's RLS canary
+    (src/nexus/health.py _RLS_TENANT_TABLES and its mirror in
+    tests/test_health_service_checks.py).
+
+    No DATA EFFECT: a table, a function and two triggers; no existing row changes at
+    deploy (the table starts empty, and nothing back-fills it, because a chunk that is
+    ownerless today has no recorded orphaning time and its grace runs from
+    last_written_at, which vectors-020 set to the migration time).
+    Placed after vectors-020 and before the grants-nexus-svc.xml runAlways block (D0.1).
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="vectors-021-1" author="nexus-wbfpw.15">
+        <comment>nexus.chunk_orphaned_at: when a chunk last lost an owner row (RDR-192 reapable(c)'s grace anchor for ownerless chunks), written by the manifest triggers of vectors-021-3, read by nexus.chunk_is_reapable. Primary key (tenant_id, collection, chash); foreign key to nexus.chunks ON DELETE CASCADE ON UPDATE CASCADE so a record never outlives or misnames its chunk; RLS ENABLE+FORCE with the tenant_isolation policy. CREATE TABLE only, no data mutation of any existing row, so no DATA EFFECT line applies.</comment>
+        <sql splitStatements="true" stripComments="false">
+CREATE TABLE nexus.chunk_orphaned_at (
+    tenant_id   TEXT        NOT NULL,
+    collection  TEXT        NOT NULL,
+    chash       BYTEA       NOT NULL,
+    orphaned_at TIMESTAMPTZ NOT NULL,
+    CONSTRAINT chunk_orphaned_at_pk PRIMARY KEY (tenant_id, collection, chash),
+    CONSTRAINT chunk_orphaned_at_chunk_fk FOREIGN KEY (tenant_id, collection, chash)
+        REFERENCES nexus.chunks (tenant_id, collection, chash)
+        ON DELETE CASCADE ON UPDATE CASCADE
+) WITH (autovacuum_analyze_scale_factor = 0.02);
+
+ALTER TABLE nexus.chunk_orphaned_at ENABLE ROW LEVEL SECURITY;
+ALTER TABLE nexus.chunk_orphaned_at FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON nexus.chunk_orphaned_at
+    USING      (tenant_id = current_setting('nexus.tenant', true))
+    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
+        </sql>
+        <rollback>
+            <sql splitStatements="true" stripComments="false">
+DROP POLICY IF EXISTS tenant_isolation ON nexus.chunk_orphaned_at;
+ALTER TABLE IF EXISTS nexus.chunk_orphaned_at NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE IF EXISTS nexus.chunk_orphaned_at DISABLE ROW LEVEL SECURITY;
+DROP TABLE IF EXISTS nexus.chunk_orphaned_at;
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="vectors-021-2" author="nexus-wbfpw.15">
+        <comment>nexus.chunk_is_reapable(tenant, collection, chash, last_written_at, grace): RDR-192 reapable(c) as an inlinable set-returning SQL function. One row when the chunk has no own-collection manifest row in any owner state, the later of last_written_at and its orphaned_at (nexus.chunk_orphaned_at) is older than the grace (default 30 days) and its collection is not a quarantine sibling; no row otherwise. No call site migrated here (Step 8).</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.chunk_is_reapable(
+    p_tenant          text,
+    p_collection      text,
+    p_chash           bytea,
+    p_last_written_at timestamptz,
+    p_grace           interval DEFAULT NULL
+) RETURNS TABLE(reapable boolean)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT true
+     WHERE GREATEST(
+               p_last_written_at,
+               (SELECT o.orphaned_at
+                  FROM nexus.chunk_orphaned_at o
+                 WHERE o.tenant_id  = p_tenant
+                   AND o.collection = p_collection
+                   AND o.chash      = p_chash)
+           ) &lt; now() - COALESCE(p_grace, interval '30 days')
+       AND NOT EXISTS (
+             SELECT 1
+               FROM nexus.catalog_document_chunks m
+              WHERE m.tenant_id  = p_tenant
+                AND m.collection = p_collection
+                AND m.chash      = p_chash
+           )
+       AND NOT EXISTS (
+             SELECT 1
+               FROM nexus.catalog_collections cc
+              WHERE cc.tenant_id = p_tenant
+                AND cc.name      = p_collection
+                AND cc.lifecycle_state = 'quarantine'
+           )
+$$;
+
+COMMENT ON FUNCTION nexus.chunk_is_reapable(text, text, bytea, timestamptz, interval) IS
+    'RDR-192 reapable(c): one row when the chunk has no own-collection manifest row in any owner state, the later of its last_written_at and its orphaned_at is older than the grace (NULL = 30 days) and the collection is not a quarantine sibling. NOT "no live owner needs this chunk": a live legacy note with no manifest row (matrix row R8) reads reapable once aged, so a consumer must first see the manifest-less census read legacy-unmanifested = 0 for the collection, and a periodic consumer must re-run it in the engine on every pass. A destructive caller must take the exclusive sweep gate, pass NULL or a floor-clamped grace, and carry this call in its own DELETE so a racing client write wins. orphaned_at (nexus.chunk_orphaned_at) is written by a trigger whenever a manifest statement drops a chunk key, so the grace is time since the chunk was last written or last lost an owner row.';
+        </sql>
+        <rollback>
+            <sql splitStatements="true" stripComments="false">DROP FUNCTION IF EXISTS nexus.chunk_is_reapable(text, text, bytea, timestamptz, interval);</sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="vectors-021-3" author="nexus-wbfpw.15">
+        <comment>The orphaning record: statement-level AFTER DELETE and AFTER UPDATE triggers on nexus.catalog_document_chunks upsert nexus.chunk_orphaned_at (orphaned_at = now()) for every chunk key a statement dropped from the manifest, in the manifest change's own transaction, after locking those chunk rows in key order (FOR NO KEY UPDATE) and honouring a one-hour guard on both last_written_at and the existing orphaned_at. They never write nexus.chunks (a chunk-row UPDATE re-inserts the row into the 1024-d HNSW index), SECURITY INVOKER, EXECUTE revoked from PUBLIC; they do not read the manifest. Covers every DML path that drops an owner row, so reapable(c)'s grace means time since the chunk became ownerless.</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.stamp_chunks_on_manifest_delete()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY INVOKER
+AS $$
+BEGIN
+    -- Lock the chunk rows first, in key order: two writers that drop the last two owners of a shared
+    -- chunk serialize here (the second blocks until the first commits, then reads its committed
+    -- orphaned_at), and writers that share several chunks take their locks in the same order, so two
+    -- of these triggers cannot deadlock on chunk rows. The key list is the same as the upsert's.
+    PERFORM 1
+       FROM nexus.chunks c
+       JOIN (SELECT DISTINCT tenant_id, collection, chash FROM old_rows) o
+         ON o.tenant_id = c.tenant_id AND o.collection = c.collection AND o.chash = c.chash
+      WHERE c.last_written_at &lt; now() - interval '1 hour'
+      ORDER BY c.tenant_id, c.collection, c.chash
+        FOR NO KEY UPDATE OF c;
+
+    -- Record the orphaning. The one-hour guard: a chunk written within the hour is skipped here
+    -- (the select filters on last_written_at) and a chunk already recorded within the hour is
+    -- skipped by the DO UPDATE's WHERE. Driven from the chunk rows, so a key with no chunk (the
+    -- foreign key would refuse it) records nothing.
+    INSERT INTO nexus.chunk_orphaned_at AS q (tenant_id, collection, chash, orphaned_at)
+    SELECT c.tenant_id, c.collection, c.chash, now()
+      FROM nexus.chunks c
+      JOIN (SELECT DISTINCT tenant_id, collection, chash FROM old_rows) o
+        ON o.tenant_id = c.tenant_id AND o.collection = c.collection AND o.chash = c.chash
+     WHERE c.last_written_at &lt; now() - interval '1 hour'
+     ORDER BY c.tenant_id, c.collection, c.chash
+    ON CONFLICT (tenant_id, collection, chash) DO UPDATE
+       SET orphaned_at = EXCLUDED.orphaned_at
+     WHERE q.orphaned_at &lt; now() - interval '1 hour';
+    RETURN NULL;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION nexus.stamp_chunks_on_manifest_update()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY INVOKER
+AS $$
+BEGIN
+    -- The keys the statement dropped are the old keys minus the new keys: a row that keeps its
+    -- (tenant, collection, chash), whatever else changed, drops nothing; one that moves position and
+    -- chash together drops the old chash. Same lock, same upsert, same guard as the DELETE trigger.
+    PERFORM 1
+       FROM nexus.chunks c
+       JOIN (SELECT tenant_id, collection, chash FROM old_rows
+             EXCEPT
+             SELECT tenant_id, collection, chash FROM new_rows) o
+         ON o.tenant_id = c.tenant_id AND o.collection = c.collection AND o.chash = c.chash
+      WHERE c.last_written_at &lt; now() - interval '1 hour'
+      ORDER BY c.tenant_id, c.collection, c.chash
+        FOR NO KEY UPDATE OF c;
+
+    INSERT INTO nexus.chunk_orphaned_at AS q (tenant_id, collection, chash, orphaned_at)
+    SELECT c.tenant_id, c.collection, c.chash, now()
+      FROM nexus.chunks c
+      JOIN (SELECT tenant_id, collection, chash FROM old_rows
+            EXCEPT
+            SELECT tenant_id, collection, chash FROM new_rows) o
+        ON o.tenant_id = c.tenant_id AND o.collection = c.collection AND o.chash = c.chash
+     WHERE c.last_written_at &lt; now() - interval '1 hour'
+     ORDER BY c.tenant_id, c.collection, c.chash
+    ON CONFLICT (tenant_id, collection, chash) DO UPDATE
+       SET orphaned_at = EXCLUDED.orphaned_at
+     WHERE q.orphaned_at &lt; now() - interval '1 hour';
+    RETURN NULL;
+END;
+$$;
+
+REVOKE EXECUTE ON FUNCTION nexus.stamp_chunks_on_manifest_delete() FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION nexus.stamp_chunks_on_manifest_update() FROM PUBLIC;
+
+CREATE TRIGGER trg_catalog_chunks_stamp_on_delete
+    AFTER DELETE ON nexus.catalog_document_chunks
+    REFERENCING OLD TABLE AS old_rows
+    FOR EACH STATEMENT
+    EXECUTE FUNCTION nexus.stamp_chunks_on_manifest_delete();
+
+CREATE TRIGGER trg_catalog_chunks_stamp_on_update
+    AFTER UPDATE ON nexus.catalog_document_chunks
+    REFERENCING OLD TABLE AS old_rows NEW TABLE AS new_rows
+    FOR EACH STATEMENT
+    EXECUTE FUNCTION nexus.stamp_chunks_on_manifest_update();
+        </sql>
+        <rollback>
+            <sql splitStatements="true" stripComments="false">
+DROP TRIGGER IF EXISTS trg_catalog_chunks_stamp_on_update ON nexus.catalog_document_chunks;
+DROP TRIGGER IF EXISTS trg_catalog_chunks_stamp_on_delete ON nexus.catalog_document_chunks;
+DROP FUNCTION IF EXISTS nexus.stamp_chunks_on_manifest_update();
+DROP FUNCTION IF EXISTS nexus.stamp_chunks_on_manifest_delete();
+            </sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

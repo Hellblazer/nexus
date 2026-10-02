@@ -1076,6 +1076,7 @@ _ALL_TENANT_TABLES = [
     # ("nexus.chash_alias" removed — nexus-lgdel.l1: dropped table
     # (legacy-001-drop-chash-alias.xml), mirrors health._RLS_TENANT_TABLES)
     "nexus.chash_remap",
+    "nexus.chunk_orphaned_at",  # RDR-192 reapable(c), nexus-wbfpw.15 (mirrors health._RLS_TENANT_TABLES)
     "nexus.chunks",  # RDR-191 Phase 4 (nexus-o8dil.51)
     "nexus.claude_assisted_remediation_consents",
     "nexus.document_aspects",

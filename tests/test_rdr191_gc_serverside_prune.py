@@ -36,6 +36,7 @@ import hashlib
 from unittest.mock import patch
 
 from tests._chunk_seed import seed_chunks_direct
+from tests._reapable_age import age_chunks_past_grace
 
 # Not integration-marked (nexus-wbfpw.38): the substrate provisions itself,
 # and CI's default selection must run this RDR-192 pin.
@@ -61,6 +62,9 @@ def _seed(cat, db, coll_name: str, owner: str, n_live: int, n_orphan: int):
     seed_chunks_direct(
         coll_name, ids=ids, documents=docs, metadatas=metas,
     )
+    # gc selects with reapable(c), which honours a 30 day grace window (RDR-192 Step 8):
+    # these orphans stand for chunks orphaned long ago.
+    age_chunks_past_grace(coll_name)
 
     live_chashes = chashes[:n_live]
     for i in range(n_live):

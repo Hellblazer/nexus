@@ -18,8 +18,12 @@
     chunk upsert (CatalogRepository#upsertManifestChunkVectors). It is NEVER
     refreshed by maintenance or stamping UPDATEs (frecency and enrichment
     metadata stamps, collection re-homing, collection rename and move): a
-    refresh from those would keep dead chunks alive forever. created_at stays
-    write-once. ChunksWriterLastWrittenAtScanTest lists every chunks writer in
+    refresh from those would keep dead chunks alive forever. The rule has NO
+    exception: the time a chunk last lost an owner row, which reapable(c) needs
+    and which is not a client write, is recorded in its own table,
+    nexus.chunk_orphaned_at (vectors-021), by triggers on the manifest, and never
+    by an UPDATE of nexus.chunks (that rewrote the row into every vector index).
+    created_at stays write-once. ChunksWriterLastWrittenAtScanTest lists every chunks writer in
     service/src/main and fails on one that is neither refreshing nor named
     there with a reason.
 
@@ -35,16 +39,15 @@
     not refresh. Their ON CONFLICT DO NOTHING branch does not, their INSERT
     does.)
 
-    KNOWN RESIDUAL, client-initiated, does NOT refresh: StagingPromoteOps'
-    content INSERT (promoteCollection) and its synthetic-stub INSERT
-    (finalizeTenant) are ON CONFLICT DO NOTHING. A promote that lands a chash
-    already present in the collection leaves that row's last_written_at
-    alone, though a client initiated it. Its manifest rows are written later
-    by finalizeTenant, so the client-write-then-manifest-write gap this
-    column exists for is open here too; StagingPromoteOps names the gap in
-    the "RESIDUAL, honestly named" comment above the content INSERT. This
-    change does not close it. reapable(c) (nexus-wbfpw.15) has to account
-    for it.
+    FORMER RESIDUAL, closed by retirement: StagingPromoteOps' content INSERT
+    (promoteCollection) and its synthetic-stub INSERT (finalizeTenant) were
+    ON CONFLICT DO NOTHING, so a promote that landed a chash already present
+    in the collection left that row's last_written_at alone, though a client
+    initiated it, and its manifest rows were written later by finalizeTenant.
+    That path no longer exists: the /v1/staging routes and the staging schema
+    were removed (nexus-z0o2p.27, 8a7831a3d; staging-003-drop-landing-schema),
+    so no client write path skips the refresh. reapable(c) (nexus-wbfpw.15)
+    has nothing to account for here.
 
     EXISTING ROWS take the value at migration time, i.e. every chunk starts
     with a full grace window at deploy. now() is STABLE, not VOLATILE, so

@@ -55,6 +55,7 @@ _ALLOWED: dict[str, str] = {
     "tests/e2e/lib/admission_load.py": _OWNED + " (re-posts chashes its own write_many owned)",
     "service/native-smoke.sh": _OWNED + " (re-posts chashes the same script owned through write_many)",
     "tests/e2e/local-service-gate.sh": _OWNED + " (re-posts a chash its own write_many owned) and the fixture text that tests the gate's own log parsing",
+    "tests/e2e/published_client_write_gate_verdict_test.sh": "route names inside client error-line fixtures (the measured 7.67.0 refusal lines and negatives) fed to the verdict classifier; posts nothing",
     "tests/e2e/local-index-memory-gate.sh": "greps the http_vector_upsert_chunks_request log event and carries it as fixture text; posts nothing",
     "tests/integration/test_rdr223_index_document_journey.py": _SPY,
     "tests/integration/test_rdr223_pdf_journey.py": _SPY,

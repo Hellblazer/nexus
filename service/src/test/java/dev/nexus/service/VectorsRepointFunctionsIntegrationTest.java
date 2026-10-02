@@ -722,6 +722,8 @@ class VectorsRepointFunctionsIntegrationTest {
                     ps.executeUpdate();
                 }
             }
+            // RDR-192 Step 8: gc_quarantine_orphans honours the 30 day grace window.
+            ReapableFixtures.agePastGrace(rig.pg(), TENANT, origin);
 
             try (Connection conn = rig.pg().createConnection("")) {
                 setTenantGuc(conn, TENANT);
@@ -914,6 +916,8 @@ class VectorsRepointFunctionsIntegrationTest {
                     ps.executeUpdate();
                 }
             }
+            // RDR-192 Step 8: only an orphan older than the grace window reaches the collision guard.
+            ReapableFixtures.agePastGrace(rig.pg(), TENANT, fx.collection());
 
             try (Connection conn = rig.pg().createConnection("")) {
                 setTenantGuc(conn, TENANT);

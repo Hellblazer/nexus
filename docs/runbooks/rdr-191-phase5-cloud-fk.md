@@ -266,6 +266,9 @@ boot completed.
 
    ```bash
    tests/e2e/cloud-client-path-gate.sh
+   # an engine that carries the RDR-223 ownerless-write refusal reports its mode, and the plain
+   # form then FAILS leg B3: name the live mode instead (log-only after the first deploy of that
+   # tag, enforce after the flip): NX_EXPECTED_OWNERLESS_WRITE_MODE=<mode> tests/e2e/cloud-client-path-gate.sh
    ```
 
    from a cloud-mode box. Per nexus-bwulw precedent (three client features

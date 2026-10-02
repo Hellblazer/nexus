@@ -1048,7 +1048,11 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
         with:
-          sparse-checkout: scripts/promote_engine_release.sh
+          # The promote script runs the size ceilings from check_engine_cut_riders.py
+          # (stdlib python), the one place they are defined (nexus-ujbz8).
+          sparse-checkout: |
+            scripts/promote_engine_release.sh
+            scripts/check_engine_cut_riders.py
           sparse-checkout-cone-mode: false
       - name: Assert the complete asset set, then publish
         env:

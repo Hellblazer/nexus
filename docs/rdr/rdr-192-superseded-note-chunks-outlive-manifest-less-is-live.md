@@ -446,42 +446,280 @@ whether it is currently live:
 
 ```sql
 reapable(c) :=
-    NOT EXISTS (
-        SELECT 1 FROM catalog_document_chunks m
+    NOT EXISTS (                                  -- 1. no own-collection manifest row,
+        SELECT 1 FROM catalog_document_chunks m   --    in ANY owner state
         WHERE m.tenant_id = c.tenant_id
           AND m.collection = c.collection
           AND m.chash = c.chash
     )
-    AND c.created_at < now() - <grace window>   -- default 30 days
+    AND GREATEST(c.last_written_at,                     -- 2. default 30 days, counted from the later of
+                 (SELECT o.orphaned_at                  --    the last client write and the last time the chunk
+                    FROM chunk_orphaned_at o            --    lost an owner row (NULL when it never did)
+                   WHERE o.tenant_id = c.tenant_id
+                     AND o.collection = c.collection
+                     AND o.chash = c.chash)) < now() - <grace window>
+    AND NOT EXISTS (                                    -- 3. not a quarantine sibling,
+        SELECT 1 FROM catalog_collections cc            --    by lifecycle_state, not by name
+        WHERE cc.tenant_id = c.tenant_id
+          AND cc.name = c.collection
+          AND cc.lifecycle_state = 'quarantine'
+    )
 ```
 
-Use `reapable(c)` for predicates 7 (`gc_quarantine_orphans`) and 8
-(`nx t3 gc`), and for the new engine reaper below. The grace window exists
-for the same reason `purge_trash`'s does today: recoverability. Note that
-`reapable(c)` says nothing about whether `c` is a note — that guard is
-removed entirely once the legacy-note backfill (Phase 1) reaches zero,
-because after backfill every current note has a manifest row and
-`reapable(c)` already excludes anything with one.
+It ships as `nexus.chunk_is_reapable(tenant, collection, chash, last_written_at,
+grace)` (vectors-021, nexus-wbfpw.15): a set-returning function for the reason
+`live(c)` is one, returning one row when the chunk is reapable and none otherwise,
+so a caller writes `EXISTS (SELECT 1 FROM nexus.chunk_is_reapable(c.tenant_id,
+c.collection, c.chash, c.last_written_at, NULL))`. NULL for the grace means the
+default, which lives in the function and nowhere else. The row's own
+`last_written_at` is passed in, so the grace comparison lands on the caller's own
+row; as the WHERE of a DELETE it is a qual on the DELETE's target, and a client
+write that refreshes `last_written_at` while the DELETE waits on the row lock is
+seen at the READ COMMITTED recheck. The manifest sub-query is not rechecked that
+way: a manifest row committed during the DELETE is the sweep gate's concern, and
+every destructive consumer takes the gate exclusively (the gc functions and
+`runSweepTransaction` already do; the reaper must). `reapable(c)` takes no lock.
+The grace window is injectable for tests and the SQL stays pure; a delete path that
+accepts a user-supplied window must clamp it to a floor before it reaches the
+function (a small `--orphan-window` reopens the race the grace exists to close). The
+gc functions pass NULL, so they have no user-tunable window to clamp.
+`ReapableConsumersScanTest` makes both obligations mechanical: every statement that
+deletes or copies chunks under the predicate sits in a function that takes the
+exclusive sweep gate and passes NULL, and the read-only listing route is the one
+named exemption.
 
-**Basis change: `indexed_at` to `created_at`.** `nx t3 gc` ages its
-candidates on the metadata field `indexed_at` today and skips any chunk
-that lacks one (`commands/t3.py:502`, `:524-531`, `:547-549`);
-`nexus.chunks.created_at` is a `NOT NULL DEFAULT now()` engine column every
-chunk has (`vectors-004-unify-chunks.xml:272`). Moving predicate 8 to
-`reapable(c)` therefore closes that skip gap, but it also changes the clock:
-every chunk `nx t3 gc` ages on `indexed_at` today ages on `created_at`
-after the migration. This is safe only if `created_at` is write-once per
-row, which is confirmed by source reading: `PgVectorRepository`'s two
-`ON CONFLICT ... DO UPDATE` blocks for chunk upserts — the ordinary content
-path (~787-800) and the reference-only path (~838-847) — never list
-`created_at` in their `.set(...)` clause, so a conflicting write to an
-existing `(tenant, collection, chash)` row leaves `created_at` untouched on
-every upsert path this survey found. (The one reset bug on record touching
-this column, `catalog-037-1`'s bounded quarantine move, was a different
-mechanism — an INSERT of a NEW row into the quarantine collection that
-originally omitted `created_at` and was fixed to carry it through — not a
-rewrite of an existing row's `created_at`, and is not evidence against the
-write-once claim above.)
+Use `reapable(c)` for predicates 7 (`gc_quarantine_orphans` and its bounded variant,
+vectors-022, nexus-wbfpw.16), the read-only listing route `POST /v1/vectors/reapable`
+(nexus-wbfpw.17, an advisory listing for `nx store list --reapable` and a dry run; the
+destructive `nx t3 gc` of predicate 8 does not delete by the ids it returns but calls an
+engine route whose own statement carries the predicate, nexus-wbfpw.18), and the new
+engine reaper below (nexus-2x9xa). The grace window exists
+for the same reason `purge_trash`'s does today: recoverability. It covers every
+collection prefix (`knowledge__`, `docs__`, `code__`, `rdr__`; Sam, 2026-09-30), and
+nothing in the predicate names one.
+
+**`reapable(c)` is not "no live owner needs this chunk".** Matrix row R8, a live
+legacy note stored before nexus-b6enc that has no manifest row, reads
+`reapable = true` once aged: the predicate says nothing about whether `c` is a
+note. The guard is the census gate, not the predicate: a consumer that acts on the
+list must first see `legacy-unmanifested == 0` for the collection (and the reaper
+re-runs that census in the engine on every pass; see Step 9). The notes guard is
+removed entirely once the legacy-note backfill (Phase 1) reaches zero, because
+after backfill every current note has a manifest row and `reapable(c)` already
+excludes anything with one.
+
+**The grace is time since the chunk became ownerless (the orphaning record).** An
+earlier draft excluded chunks whose metadata `catalog_doc_id` named a document in
+`index_state = 'indexing'`. That pin was empty for every chunk the multi-batch
+writers produce: RDR-108 removed `doc_id` from chunk metadata and no writer stamps
+`catalog_doc_id` on indexer chunks, so an old tail chunk carried no key, the pin saw
+nothing, and its tests passed only on hand-stamped fixtures (review T2
+`nexus/review-wbfpw15-17-code` C1). It is removed. What protects an old tail chunk
+is a record of WHEN it last lost an owner, kept in its own table. vectors-021 adds
+`nexus.chunk_orphaned_at (tenant_id, collection, chash, orphaned_at)`, keyed like the
+chunk, and two statement-level triggers on `catalog_document_chunks`, one AFTER DELETE
+and one AFTER UPDATE. They upsert `orphaned_at = now()` for every chunk KEY the
+statement dropped from the manifest (for an UPDATE, the old keys minus the new keys),
+in the manifest change's own transaction. The UPDATE trigger fires on every manifest
+UPDATE, because a transition-table trigger cannot name columns; a statement that keeps
+every key drops nothing and records nothing. The grace is then counted from
+`GREATEST(last_written_at, orphaned_at)`: how long the chunk has gone without a write
+or an owner.
+
+*Why a side table, not `last_written_at` (Sam, 2026-10-01, option b).* The first
+version of the stamp UPDATEd `nexus.chunks.last_written_at`. A chunk-row UPDATE writes a
+new row version, and `nexus.chunks` carries three full HNSW indexes plus two GIN
+indexes, so each stamp re-inserted the row into the 1024-d HNSW graph for a vector that
+had not changed. Measured: 11 s for 5000 chunks, against about 50 ms for the side table
+(one laptop-container run; see Cost, below). The side table has a primary key and nothing else. `last_written_at`
+keeps its vectors-020 meaning, "client wrote this chunk", with no exception, and the
+vectors-020 header says so.
+
+The triggers do not read the manifest to ask whether the chunk is "really" ownerless.
+An earlier version did (stamp only when no owner remains), and two concurrent writers
+dropping the last two owners of a shared chunk each saw the other's uncommitted row and
+stamped nothing, which left the chunk reapable at once (verification review T2
+`nexus/review-wbfpw15-17-verify-code` I1; reproduced red by
+`ChunkIsReapableIntegrationTest.aConcurrentDropOfASharedChunkLeavesItStamped`). Recording
+every dropped key is safe because `reapable(c)` needs no owner anyway: a recorded chunk
+that is still owned fails condition 1, and one that loses its other owners later has its
+record refreshed.
+
+*Locking.* Each trigger first locks the chunk rows it will record, `ORDER BY tenant_id,
+collection, chash FOR NO KEY UPDATE OF c`, then upserts in the same key order. A chunk
+row exists for every recorded key, is the one row every writer of the key shares, and
+needs no insert, so the lock pass is one ordered walk over rows that already exist. This
+buys three things. Two triggers that share chunks lock in the same total order, so they
+cannot deadlock on chunk rows. The order is chunk row, then side-table row, which is what
+the foreign key's own cascade takes when a chunk is deleted, so a trigger and a chunk
+delete cannot deadlock on that pair. And the insert's foreign-key check, which takes a
+share lock on the chunk row, cannot fail with 23503 against a chunk deleted concurrently:
+the pre-lock waits on the chunk row, and the later insert statement takes a fresh
+snapshot that no longer sees the deleted chunk, so it skips it and the manifest
+statement succeeds. The lock is not what keeps two concurrent drops from losing a record.
+The `ON CONFLICT` upsert already waits on the other statement's uncommitted index entry
+and re-evaluates its `DO UPDATE` guard against the committed row, so the one-hour guard
+sees the first record with or without the lock (removing it leaves
+`aConcurrentDropOfASharedChunkLeavesItStamped` green). An earlier version of this section
+said the lock prevented a lost record; that was wrong. It does not claim to order against
+other writers. The content upserts sort their chunk writes by chash, so those passes are
+monotone in chash too, but nothing pins that, and the manifest write is not under
+`DeadlockRetry`; a 40P01 against another writer would be loud and retryable, not a lost
+record. `ChunkIsReapableIntegrationTest` pins the `ORDER BY` and the lock clause in both
+function bodies with `pg_get_functiondef` (no behavioural test can fail on their removal,
+so the definition is the only place to hold them), pins that the bodies never UPDATE
+`nexus.chunks`, and pins the concurrent drop.
+
+*Security.* The functions are SECURITY INVOKER like every function in the changelog, run
+under the writer's FORCE RLS and tenant GUC, and join on `tenant_id`; EXECUTE is revoked
+from PUBLIC; a pg_proc pin asserts `prosecdef = false`. The explicit tenant equality is
+defence in depth for the service role (RLS already binds it) and the only barrier for a
+role that bypasses RLS, so it has its own test, run as the container superuser (the production owner role,
+`nexus_admin`, has no `BYPASSRLS` and is bound by the policies): removing the equality
+from the upsert's join in either trigger turns that test red, and the definition pin
+asserts it appears twice in each function, once in the lock pass and once in the upsert.
+
+*The one-hour guard.* A chunk is recorded only when both its `last_written_at` and its
+existing `orphaned_at` are older than one hour (the select filters on the first, the
+upsert's `DO UPDATE ... WHERE` on the second). The writer has usually just refreshed the
+chunks it then drops from the manifest, and such a chunk is already inside its grace by
+30 days less an hour. The price: a chunk written within the hour before it loses its
+owner is reapable up to one hour earlier than a recorded one, never at once and never
+later.
+
+*Stale records.* The table cannot hold a record for a chunk that is gone: its foreign key
+to `nexus.chunks` is `ON DELETE CASCADE ON UPDATE CASCADE` (the `topic_assignments`
+precedent, taxonomy-012), so the reaper's delete, the quarantine move, delete-collection
+and `purge_trash` remove it, and a collection rename rewrites it. A record that is no
+longer true cannot make a chunk reapable wrongly, because it only ever bounds the grace
+from below: a re-owned chunk fails condition 1, a re-written chunk has a newer
+`last_written_at` that wins in `GREATEST`, and a chunk that loses its owner again has its
+record refreshed. Each of those, and the cascade, has a test.
+
+Doing it in the database covers the DML paths that drop an owner row
+(`writeManifestRows`' replace, append's upsert of a position, `purgeManifest`,
+delete-collection, the FK cascade of a hard document delete, the SQL maintenance
+functions, the `.nxexp` import, whatever is added later), where a list of Java call sites
+would rot. "Covers every path" is not "by construction": the table below lists the paths
+it does not cover, with what each costs and what limits it.
+
+*Per-path consequences.* The columns: the consequence is one of never reaped, reaped
+late, reaped early, or reaped wrongly (a live chunk taken). "Early" and "wrongly" are
+bounded by the consumer's own gates (the census gate, the fraction floor on the move, the
+14 day quarantine).
+
+| Path | What the predicate sees | Consequence | Mitigation, and its owner |
+| --- | --- | --- | --- |
+| `TRUNCATE` of the manifest (a superuser; no code path does it; `nexus_svc` holds no `TRUNCATE`, pinned with `has_table_privilege`) | Statement DELETE triggers do not fire, so no record; every chunk reads ownerless with its old `last_written_at` | Reaped early, for a live chunk reaped wrongly, all at once | A floor ON THE MOVE (refuse a pass that would take more than a fraction of a collection) and the 14 day quarantine restore: the move has no floor today, `nexus-2x9xa` (comment 2026-10-01) |
+| `session_replication_role = replica` (`pg_restore`, logical apply) | Triggers and the FK cascade skipped | A restore inserts and drops nothing. A manual replica-mode DELETE: reaped early | None beyond the consumer gates; accepted |
+| Manifest DML with no tenant GUC, or a role exempt from RLS | Subject to RLS on both tables with no GUC: zero manifest rows deleted, nothing dropped (pinned). Exempt from the manifest policy only: rows deleted, `nexus.chunks` hidden from the trigger, nothing recorded (reasoned; cannot be built without `NO FORCE` on the manifest alone). Exempt from both (`BYPASSRLS`, superuser): recorded correctly (pinned, run as the container superuser). The table owner is not exempt in production: `nexus_admin`, the Liquibase owner role, has no `BYPASSRLS` (catalog-016, catalog-025 headers), so under `FORCE ROW LEVEL SECURITY` it is bound by the policies like `nexus_svc` | Reaped early in the exempt-from-one case | A migration or DBA fix that deletes manifest rows runs as `nexus_admin` and must set the tenant GUC. No bead |
+| The one-hour guard | A chunk written or recorded within the hour is not recorded | Reaped up to one hour early | Accepted; stated in the vectors-021 header |
+| Staging promote over an existing chunk (`StagingPromoteOps`, `ON CONFLICT DO NOTHING`) | Retired. It kept the old clocks and recorded no orphaning, so an aged ownerless chunk re-promoted was reapable between promote and finalize. The `/v1/staging` routes and the `staging` schema were removed (`nexus-z0o2p.27`, `8a7831a3d`), so no such path remains | None | None needed |
+| R8: a live legacy note, no manifest row | Reapable once aged; every row took the vectors-020 migration time | Reaped wrongly at deploy + 30 days if a consumer acts without the census gate | The census-zero gate, re-run in the engine on every reaper pass (`nexus-2x9xa`); `nx t3 gc` requires `legacy-unmanifested == 0` before acting (`nexus-wbfpw.18`). The quarantine move (`gc_quarantine_orphans`) carries no gate of its own and its only caller passes code, docs and rdr collections |
+| A tombstoned owner | Still a manifest row, so condition 1 fails | Never reaped by this predicate (`purge_trash` ages the tombstone) | `purge_trash`, unchanged |
+| A floor-refused quarantine chunk; a collection that fails the census | Quarantine siblings are excluded by `lifecycle_state`; a failing collection is refused visibly | Never reaped by the reaper | `gc_expire_quarantine` has its own clock and floor; fix the census |
+| Everything pre-existing at deploy | `vectors-020` gave every row the migration time | Reaped late: nothing existing is reapable for 30 days, then all of it at once (a one-shot cliff at deploy + 30 days, which the RDR-223 Day-2 baseline must carry) | The floor on the move bounds the cliff; baseline update in `nexus-2x9xa` |
+| A deleted file's chunks; a re-index's old tail | Clock starts at the purge, or at batch 1 | Reaped late by design: 30 days after the manifest change | None needed |
+
+**Cost, measured.** One Docker pgvector 17.11 container on an Apple-silicon laptop at
+load average 10 to 13, so the absolute figures carry contention noise and the ratios are
+the evidence; three runs each, range given. Table: 35,000 chunks of 1024 dimensions in
+one collection, about 1.6 KB of text each, all three HNSW indexes (m = 16,
+ef_construction = 64), both GIN indexes and the two btrees, the manifest with its foreign
+key to `nexus.chunks`, row level security forced on all three tables, statements run by a
+NOSUPERUSER NOBYPASSRLS role with the tenant GUC set, `shared_buffers` 128 MB, all 5000
+affected chunks last written 40 days before, statements rolled back. "Old" is the first
+version (UPDATE of `nexus.chunks`), "new" is this design, "off" is the triggers dropped.
+
+| Statement | off | old | new |
+| --- | --- | --- | --- |
+| DELETE of 5000 manifest rows, one statement | 1 to 2 ms | 11.1 to 13.9 s | 51 to 60 ms |
+| the same, the 5000 chunks refreshed in the same transaction (the guard path) | 3 ms | 39 to 41 ms | 43 to 48 ms |
+| 1000 documents x 5 chunks, 1000 statements (the FK cascade of a hard delete fires one per document) | 14 to 15 ms | 11.0 to 12.1 s | 77 to 84 ms |
+| batch 1 of a multi-batch re-index drops 5000 old tail chunks, then a later batch refreshes them, one transaction: the drop alone | 2.5 ms | 10.9 s | 44 ms |
+
+The refresh in the last row is the client's ordinary chunk upsert, 10.5 to 11.8 s for
+5000 rows on this table in every column; it is not a cost of this change, and the first
+version paid it twice. The critique measured the old figure independently on the same
+shape (17 to 19 s at heavier load; 5.3 s on a 7000-row table with smaller text). A
+10,000-chunk old tail dropped at batch 1 costs about 0.1 s inside the shared sweep gate
+and the index-run lock, not the tens of seconds the first version cost. Chunk-row
+locking accounts for about 12 ms of the new figure (51 to 60 ms against 39 to 48 ms for
+the upsert alone). Two plan facts the measurement found: the predicate reads the record
+with a scalar subquery on the primary key, not a LEFT JOIN, because the join form's plan
+depended on the side table's statistics and went quadratic (3.2 s against 80 ms) when a
+statement grew the table while it ran (`ChunkIsReapableIntegrationTest` pins the scalar form
+in the function definition, because the plan test's fixture analyzes an 8000-row side
+table, where the join plans well too); and the table carries
+`autovacuum_analyze_scale_factor = 0.02` so autoanalyze follows a burst. The plan under
+`nexus_svc` is in `ChunkIsReapablePlanIntegrationTest`: `chunks_pk` range, then
+`idx_catalog_chunks_chash`, the `catalog_collections` primary key and
+`chunk_orphaned_at_pk` as index probes, no sequential scan of the side table.
+
+**Why condition 3.** A quarantine sibling never has manifest rows and its rows take
+a fresh `last_written_at` on the move, so after 30 days every quarantined chunk would
+satisfy conditions 1 and 2, and a reaper that visits `quarantine-*` collections would
+move them out of quarantine past `gc_expire_quarantine`'s own clock and safety floor
+(the floor that exists because a manifest defect once deleted 6 live documents). The exclusion is
+by `lifecycle_state`, not by name: RDR-204 retired parsing names. The listing route
+also refuses a `quarantine-` name with 400.
+
+**Basis change: `indexed_at` to `last_written_at`.** `nx t3 gc` ages its
+candidates on the metadata field `indexed_at` today and skips any chunk that lacks
+one (`commands/t3.py:502`, `:524-531`, `:547-549`). The grace anchor is the engine
+column `nexus.chunks.last_written_at` (vectors-020, nexus-wbfpw.43; `NOT NULL
+DEFAULT now()`), which every chunk has, so moving predicate 8 onto `reapable(c)`
+closes that skip gap, but it changes the clock to the later of `last_written_at` and
+the orphaning record. It is not `created_at`: that is
+write-once, which `ChunkLastWrittenAtIntegrationTest` pins on both
+`PgVectorRepository` `ON CONFLICT ... DO UPDATE` paths (the content path and the
+reference-only path never list `created_at` in their `.set(...)`), so a chunk that a
+re-index re-writes would otherwise get no fresh grace and the reaper could take it
+between the client's chunk write and its manifest write. `last_written_at` is
+refreshed by the client paths that re-write an existing chunk (the content upsert,
+the reference-only upsert, `batchUpdateMetadata`, the existence-partition metadata
+refresh: the have-vector branch of `upsert-chunks` and the identical-text branch of
+the combined write, so **yes, the existence-partition refresh bumps it**, and the
+combined write's chunk upsert) and never by frecency, enrichment or rename
+maintenance, which would keep dead chunks alive. The orphaning record above is a
+separate table of facts and does not touch it. A move into or out of quarantine
+resets it (the quarantine INSERT takes the default), which only delays a reap. **At deploy**, existing rows take the migration
+time, so for 30 days after the engine carrying vectors-020 is deployed nothing that
+already exists is reapable: the cleanups after the upgrade move nothing, and a
+reaper MVV or census reads zero for that long. The refresh uses `now()`, the
+transaction's start, and the writers take the sweep gate SHARED first, so a wait on
+the gate eats into the grace; with a 30 day window that is immaterial. It is also why a
+destructive caller that accepts a user-supplied window must clamp it to a floor before
+it reaches the function (the grace paragraph above): a window of minutes would let that
+wait decide the race. (The one reset bug on record touching `created_at`,
+`catalog-037-1`'s bounded quarantine move, was a different mechanism: an INSERT of a
+NEW row into the quarantine collection that originally omitted `created_at`, fixed to
+carry it through.)
+
+**No index on `last_written_at`.** A btree on it would stop HOT updates for every
+client re-write. Measured on `nexus.chunks` with `fillfactor = 40` so each page has
+room (production keeps the default 100, where metadata-refresh updates are mostly
+non-HOT anyway, so this is the upper bound of what an index would cost): 100% of
+`last_written_at` refreshes HOT without the index, 0% with it. The candidate scan is
+already bounded by the `(tenant_id, collection, chash)` primary-key prefix, and each
+pass is O(collection) with an index probe per row (60,000 chunks about 0.4 s in the
+scratch harness). `ChunkIsReapablePlanIntegrationTest` asserts the schema has no such
+index and pins the plan under `nexus_svc`: a `chunks_pk` range scan,
+`idx_catalog_chunks_chash` for the manifest probe, the `catalog_collections` primary
+key for the quarantine probe, no function scan.
+
+**One predicate, and what stays separate.** `live(c)` and `reapable(c)` are each
+defined once, in vectors-018 and vectors-021, and reused by every consumer.
+`CatalogRepository.strandedChunkCount` (purge_trash Step 1) does not move onto
+`reapable(c)`, and `purge_trash` keeps its own `deleted_at` grace: it counts chunks
+that HAVE a manifest row whose owners are all aged tombstones, the complement of
+condition 1, so the two are disjoint by design and together make the dead set (R3
+and R9 in the S1a table are dead, not reapable). Folding them together would make
+`reapable(c)` delete a chunk whose only owner was soft-deleted a minute ago.
+Predicate 9 (`taxonomy_unassigned_chashes`) is unchanged, as above. When
+`nexus-z0o2p.24` makes the engine refuse ownerless writes, the client race the
+column was added for is gone; whether to drop it then is that bead's decision, and
+until it ships the column is the grace anchor.
 
 **State-derived reaper, not a persisted drop set.** The engine's post-commit
 sweep transaction (`runSweepTransaction`, `CatalogRepository.java:5725-5773`)
@@ -660,9 +898,11 @@ grown.
   pre-.31 imports and for the chunks a keep-existing import leaves unowned
   (Sam, 2026-09-29, `nexus-wbfpw.40`; see the Step 5 amendment).
 - Predicate 8's clock changes from the metadata field `indexed_at` (which
-  `nx t3 gc` skips a chunk for lacking) to the engine column `created_at`
-  (which every chunk has and which is confirmed write-once — see Technical
-  Design). This widens candidacy rather than narrowing it: a chunk `nx t3 gc`
+  `nx t3 gc` skips a chunk for lacking) to the later of the engine column
+  `last_written_at` (which every chunk has) and the orphaning record
+  (`nexus.chunk_orphaned_at`); it is not `created_at`, which is write-once, so a
+  re-write would get no fresh grace — see Technical Design. This widens
+  candidacy rather than narrowing it: a chunk `nx t3 gc`
   silently skips today for having no `indexed_at` becomes a `reapable(c)`
   candidate the moment it passes the grace window.
 - `nexus.live_chunks` becoming collection-scoped changes `collection_vector_stats`'s
@@ -796,8 +1036,10 @@ All four in scope; none deferred.
 Amended 2026-10-01 (nexus-wbfpw.39): (e) **Reaper between batches**. A
 multi-batch re-index of an existing document, with a reaper pass between
 batch 1 and the last batch: no chunk the run later writes or re-adds is
-deleted (Step 9, sweep gate exclusive per collection and the `indexing`
-skip).
+deleted (Step 9: the sweep gate exclusive per collection, and the orphaning
+record, which gives the old tail a fresh grace at batch 1; there is no `indexing`
+skip). The fixture seeds the old tail the way a real run leaves it, with
+`last_written_at` old and no metadata key, so it fails if the record is removed.
 
 ### Phase 1: Census and legacy-note backfill (non-destructive)
 
@@ -970,11 +1212,16 @@ nexus-wbfpw.39): the reaper covers ALL prefixes: `knowledge__`, `docs__`,
 multi-batch re-index: a client that dies after the first batch leaves the
 previous version's dropped chunks ownerless in `docs__`, `code__` or `rdr__`,
 and without the reaper they stay hidden until an operator runs `nx t3 gc`.
-Per-collection gate: the reaper visits a collection only when (a) the
-collection's `last_written_at` is older than the grace window and (b) an
-in-engine census of that collection reads `legacy-unmanifested == 0`. A
-collection that fails the gate is skipped with a visible refusal in the pass
-log, and nothing in it is deleted.
+Per-collection gate: the reaper visits a collection only when an in-engine
+census of that collection reads `legacy-unmanifested == 0`. A collection that
+fails the gate is skipped with a visible refusal in the pass log, and nothing in
+it is deleted. The grace window is per CHUNK, not per collection (orchestrator
+ruling, 2026-10-01, recorded here; the first wording read "the collection's
+`last_written_at` is older than the grace window"): a collection written to in the
+last 30 days, as every collection a crashed run just wrote to is, must still have
+its OLD ownerless chunks reaped, which is the premise of RDR-223's reliance on the
+reaper. `reapable(c)` already is that per-chunk test, so the gate has no
+collection-level recency arm.
 
 Reaper requirements from the RDR-223 Phase 2 gate critique (T2
 `nexus/rdr-223-phase2-gate-critique` S2, 2026-09-30). "Ownerless past grace is
@@ -986,15 +1233,50 @@ delete a chunk the run is about to reference. So:
 
 - the reaper takes the sweep gate EXCLUSIVE per collection, as
   `runSweepTransaction` does;
-- it skips a chunk whose owner document is in `index_state = 'indexing'`, with
-  a TTL so a document stuck `indexing` after a crash stops protecting its
-  chunks (this is the recency guard the Phase 2 gate also asked for in P3-3,
-  T2 `nexus/critique-rdr-192-phase2`, because `created_at` is write-once and
-  gives a re-upserted old chunk no fresh grace);
+- it needs no in-flight-document skip: the orphaning record (vectors-021-1 and -3,
+  see the Technical Design) gives an old tail chunk a fresh `orphaned_at` the
+  moment batch 1 drops it from the manifest, so a pass between batches finds it
+  inside the grace (a metadata-key pin on `index_state = 'indexing'` was tried and
+  removed: no writer stamps the key). A document stuck `indexing` after a crash
+  therefore stops protecting its chunks 30 days after the manifest change, with no
+  TTL to tune;
 - an MVV runs a reaper pass between batch 1 and batch k of a multi-batch
-  re-index and asserts that no chunk the run later references is deleted;
-- the bead states whether the existence-partition metadata refresh bumps
-  `last_written_at` (open when this note was written).
+  re-index, through the real combined writer, and asserts that no chunk the run
+  later references is deleted and the run completes
+  (`ReapableMidRunJourneyTest` does this for the gc pair and the listing today);
+- the existence-partition metadata refresh DOES bump `last_written_at`
+  (answered at nexus-wbfpw.15);
+- it never visits a `quarantine-*` collection (the predicate excludes it by
+  `lifecycle_state`, and the reaper's collection selection must too), and a
+  floor-refused quarantine chunk aged 40 days is left alone;
+- R8 (a live legacy note with no manifest row) reads `reapable = true`, so the
+  per-collection census-zero gate is mandatory and is re-run in the engine on every
+  pass, not trusted from a stored record.
+
+Amendment (Sam, 2026-10-01; T2 `nexus/rdr-192-reaper-quarantine-decision-2026-10-01`):
+the reaper QUARANTINES; it does not hard-delete. A reapable chunk moves to its
+quarantine sibling, restorable for 14 days and then expired by the existing
+`gc_expire_quarantine`, for every prefix. The reaper's statement carries
+`chunk_is_reapable(..., NULL)` in its own predicate (no list-then-delete-by-id) and
+writes the `gc_audit` rows. Two requirements follow, and neither exists yet.
+
+- A FLOOR ON THE MOVE. A pass that would take more than a configured fraction of a
+  collection is refused and reported, with `NX_GC_FLOOR_FRACTION` semantics (default
+  0.25, from 100 chunks up). Today that variable gates quarantine EXPIRY only: the client
+  passes it to `expire_quarantine_serverside` (`indexer.py`), which `gc_expire_quarantine`
+  enforces on the 14 day hard delete. The move (`gc_quarantine_orphans`, both forms, and
+  `nx index repo`'s call of it) has no fraction floor anywhere, so the reaper's is new
+  work, recorded as a requirement on `nexus-2x9xa`.
+- The collection selection: enumerate collections from `nexus.chunks`, refuse visibly any
+  collection with no `catalog_collections` row or a `lifecycle_state` other than live,
+  and skip `quarantine-` names (the predicate's `NOT EXISTS` passes for an unregistered
+  sibling); measure the predicate scan at `code__1-1` scale and put a statement timeout
+  on it before an hourly run; update the RDR-223 Day-2 baseline for the one-shot cliff at
+  deploy + 30 days. (`nexus-z0o2p.27` retired staging promote, the one write path that skipped the clock refresh, at `8a7831a3d`; the reaper has no dependency on it.)
+
+The post-commit-sweep-failure debris the reaper exists for is therefore reaped 30 days
+after the failure, not on the next pass, and the MVV (b) reaper test injects a grace of
+zero.
 
 #### Step 10: Ship `nx store list --reapable`, a read-only list of the chunks `reapable(c)` currently selects for a collection, so an operator can inspect what the reaper is about to remove before it runs
 
@@ -1016,7 +1298,7 @@ still return.
 
 | Resource | List | Info | Delete | Verify | Backup |
 | --- | --- | --- | --- | --- | --- |
-| Superseded/reapable chunks | `nx store list --reapable` (Phase 3, Step 10) | In scope | In scope (engine reaper; `nx t3 gc` for the client-driven path) | `catalog doctor` check (Phase 4, Step 14) | N/A — content lives in the current chunk |
+| Superseded/reapable chunks | `nx store list --reapable` (Phase 3, Step 10) | In scope | In scope: the engine reaper and `nx t3 gc` QUARANTINE (restorable 14 days, then expired by `gc_expire_quarantine`) under a fraction floor on the move (Sam, 2026-10-01; Step 9) | `catalog doctor` check (Phase 4, Step 14) | N/A — content lives in the current chunk |
 
 ### New Dependencies
 
@@ -1059,9 +1341,10 @@ None.
   agrees with `live(c)` for the collection that lacks the manifest row.
 - **Scenario** (added 2026-10-01): a reaper pass runs between batch 1 and the
   last batch of a multi-batch re-index in a `docs__`, `code__` or `rdr__`
-  collection — **Verify**: the pass skips chunks owned by a document in
-  `index_state = 'indexing'`, and a collection that fails the census gate is
-  refused visibly with nothing deleted.
+  collection — **Verify**: the old tail chunks the run has not yet re-added are
+  not reaped (the orphaning record gave them a fresh grace when batch 1 dropped them), the run completes,
+  and a collection that fails the census gate is refused visibly with nothing
+  deleted.
 
 ## Validation
 
@@ -1169,3 +1452,43 @@ To be completed at gate (Layer 3 AI critique).
   one paired client release shared with RDR-223 (Sam, 2026-09-30); the
   `live(c)` engine work had already been cut earlier, as v0.1.135 (never
   deployed), v0.1.136 and v0.1.137.
+- 2026-10-01: Phase 3 engine halves (nexus-wbfpw.15, .16, .17) reworked after
+  review (T2 `nexus/review-wbfpw15-17-code`, `-critique`). The in-flight-index pin
+  on chunk metadata is removed (no writer stamps the key); the grace now means time
+  since the chunk became ownerless, via an orphaning stamp in the database
+  (vectors-021-2); `reapable(c)` excludes quarantine siblings by `lifecycle_state`;
+  the listing route gains a keyset cursor; the unbounded gc chooses its candidate set
+  once. Step 9's gate (a) is per CHUNK, not per collection (orchestrator ruling,
+  2026-10-01). R8 and the 30 days of nothing-reapable after deploy are stated.
+- 2026-10-01: Phase 3 engine halves reworked again after the verification review
+  (T2 `nexus/review-wbfpw15-17-verify-code`, `-verify-critique`). (1) The orphaning
+  stamp no longer reads the manifest: the triggers stamp every dropped chunk key and
+  pre-lock the chunk rows in key order, which closes a race where two concurrent
+  writers dropping the last two owners of a shared chunk each stamped nothing; the
+  functions are SECURITY INVOKER. (2) The stamp is guarded by
+  `last_written_at < now() - 1 hour`; measured cost, before and after, is in the
+  Technical Design. (3) "Covers every path by construction" is withdrawn and the
+  blind spots are listed (TRUNCATE, `session_replication_role = replica`, manifest
+  DML with no tenant GUC). (4) MVV (e) no longer names an `indexing` skip. (5) Sam
+  ruled on 2026-10-01 (T2 `nexus/rdr-192-reaper-quarantine-decision-2026-10-01`) that
+  the reaper QUARANTINES, it does not hard-delete, with the `NX_GC_FLOOR_FRACTION`
+  floor, for every prefix; the periodic reaper (`nexus-2x9xa`) quarantines with
+  `chunk_is_reapable` in its own statement and takes no list-then-delete-by-id path.
+  (Corrected in the next row: `nexus-wbfpw.18` is the `nx t3 gc` client verb, the reaper is
+  `nexus-2x9xa`, and `NX_GC_FLOOR_FRACTION` gates quarantine expiry today, not the move.)
+- 2026-10-01: Phase 3 engine halves reworked a third time (T2
+  `nexus/review-wbfpw15-17-rework-code`, `-rework-critique`; Sam's option b). (1) The
+  orphaning record moved out of `nexus.chunks.last_written_at` into a side table,
+  `nexus.chunk_orphaned_at`, because the chunk-row UPDATE re-inserted the row into the
+  1024-d HNSW index (11 s for 5000 chunks; 50 ms for the side table, measured on a 35,000-row
+  table, Technical Design); `reapable(c)` counts the grace from
+  `GREATEST(last_written_at, orphaned_at)`; vectors-021 and -022 were unreleased and are
+  edited in place. (2) The ordered pre-lock is pinned in the live function bodies and the
+  no-deadlock claim is narrowed to trigger-versus-trigger. (3) Stale prose ("loses its last
+  manifest row") is corrected: every dropped key is recorded, whether or not another owner
+  remains. (4) Step 9 and the Day-2 table carry the quarantine ruling; the floor on the
+  MOVE is a new requirement (`NX_GC_FLOOR_FRACTION` gates expiry today); the Consequences
+  bullet's clock is `last_written_at` and the record, not `created_at`; the per-path
+  consequence table is added. (5) The listing route accepts an unclamped `grace_seconds`
+  and is advisory below the default; its equality with the gc functions holds only when
+  the grace is absent.

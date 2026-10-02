@@ -88,6 +88,16 @@ def test_promote_script_asserts_every_expected_asset_before_publishing() -> None
     assert text.index("exit 1") < text.index("--draft=false")
 
 
+def test_promote_script_gates_on_the_size_ceilings_before_publishing() -> None:
+    """nexus-ujbz8: the size check is blocking at the draft-to-published gate, and the job's
+    sparse checkout carries the script that owns the ceilings."""
+    text = (Path(__file__).parent.parent / "scripts" / "promote_engine_release.sh").read_text()
+    assert "check_engine_cut_riders.py" in text and " sizes " in text
+    assert text.index("check_engine_cut_riders.py") < text.index("--draft=false")
+    workflow = (Path(__file__).parent.parent / ".github" / "workflows" / "engine-service-release.yml").read_text()
+    assert "scripts/check_engine_cut_riders.py" in workflow.split("promote-release:")[1]
+
+
 def test_matrix_uploads_do_not_publish() -> None:
     """Uploads into a draft are fine; nothing in the matrices may flip it."""
     jobs = _jobs()

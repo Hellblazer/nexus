@@ -793,9 +793,12 @@ def _refusals() -> list[str]:
 def _clean_refusals():
     from nexus import mcp_infra
 
-    mcp_infra._COMPLETE_REFUSALS.clear()
+    # A CLI run's reset: clears the list AND arms recording (a disarmed process,
+    # the MCP server's state, records no refusals). The autouse
+    # _isolate_index_run_collectors fixture disarms again afterwards.
+    mcp_infra.reset_complete_refusals()
     yield
-    mcp_infra._COMPLETE_REFUSALS.clear()
+    mcp_infra.reset_complete_refusals()
 
 
 def test_a_refused_completion_stamp_is_recorded_and_the_fence_is_left_indexing(
