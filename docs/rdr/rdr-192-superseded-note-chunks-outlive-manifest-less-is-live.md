@@ -384,6 +384,14 @@ develop `135bb38a4` / engine `v0.1.132`, 2026-09-26.
   "legitimate" or defect) is superseded by a smaller, undecomposed
   population — see Phase 1 below, which replaces this assumption with a
   concrete census requirement.
+- [ ] A legacy note's chunk cannot enter a sweep's dropped set, so the notes-guard
+  arm is removable — **Status**: REFUTED — **Method**: Spike (amended 2026-10-02,
+  Step 11). A dropped set is a document's previous manifest minus its new rows, so an
+  unrelated document that shared the note's text and then dropped it puts the note's chash
+  there. `CatalogManifestSweepRepositoryTest` Order 12
+  (`writeManifestMany_sweepTrue_genuineManifestLessNote_notSwept`) builds that shape against
+  the real engine and reads the chunk kept by the notes arm alone. The arm is therefore
+  retained (Step 11); the cost is bounded over-retention, which the reaper collects.
 
 ## Proposed Solution
 
@@ -537,10 +545,11 @@ legacy note stored before nexus-b6enc that has no manifest row, reads
 `reapable = true` once aged: the predicate says nothing about whether `c` is a
 note. The guard is the census gate, not the predicate: a consumer that acts on the
 list must first see `legacy-unmanifested == 0` for the collection (and the reaper
-re-runs that census in the engine on every pass; see Step 9). The notes guard is
-removed entirely once the legacy-note backfill (Phase 1) reaches zero, because
+re-runs that census in the engine on every pass; see Step 9). The notes guard in
+the two sweeps is retained, not removed (Step 11, decision of Sam 2026-10-02):
 after backfill every current note has a manifest row and `reapable(c)` already
-excludes anything with one.
+excludes anything with one, but the sweeps hard-delete without a census, so the
+arm stays as defense in depth.
 
 **The grace is time since the chunk became ownerless (the orphaning record).** An
 earlier draft excluded chunks whose metadata `catalog_doc_id` named a document in
@@ -792,9 +801,12 @@ left open. Tracked day-to-day as `nexus-2x9xa`.
    topic-scoped search, which now uses `live(c)`. The confirmation this item
    asked for is replaced by that finding.
 4. Predicates 3, 4, 5, 6 keep their current shape (delete-time protection
-   and the sweep transaction itself); only their notes-guard arms (4's
-   union guard, 5) are deleted, in Phase 4, once the legacy-note backfill
-   reaches zero.
+   and the sweep transaction itself). Their notes-guard arms (4's union
+   guard, 5) were to be deleted in Phase 4 once the legacy-note backfill
+   reaches zero. Amended 2026-10-02 (Step 11, decision of Sam): they are
+   RETAINED. The engine sweep's arm and the client sweeps' `live_note_chashes`
+   guard stay as defense in depth; see Step 11 for why neither removal nor a
+   gate on the rung record is safe.
    Amended 2026-10-02 (Phase 3 gate, D4): `nx t3 gc` no longer reads `live_note_chashes`.
    Phase 3 (`nexus-wbfpw.18`) replaced its candidate logic with `reapable(c)` and a census
    gate that refuses the whole collection while any `legacy-unmanifested` or `unclassified`
@@ -802,15 +814,17 @@ left open. Tracked day-to-day as `nexus-2x9xa`.
    identities and safer. What still reads it is `mcp_infra`'s client-side sweeps
    (`mcp_infra.py:2785`, `:3247`).
 
-**Legacy-note backfill prerequisite.** Deleting the notes-guard arms is safe
-only once every currently-live note has a manifest row. Notes stored before
-`nexus-b6enc` and never backfilled are still manifest-less and still
-current; `reapable(c)` as defined above would treat them as garbage the
-instant the notes guard is removed. `manifest_backfill` must be run to
+**Legacy-note backfill prerequisite.** `reapable(c)` and the reaper's
+consumers (the reaper, `nx t3 gc`) must not act while a legacy note is
+manifest-less: notes stored before `nexus-b6enc` and never backfilled are
+still manifest-less and still current, and `reapable(c)` as defined above
+treats them as garbage once aged. `manifest_backfill` must be run to
 completion and its own census (a count of legacy-current notes with no
-manifest row) must read **zero** before Phase 4 removes the guard — this is
-a hard prerequisite, not a nice-to-have, and is the reason Phase 1 exists as
-its own phase below rather than folding into Phase 2.
+manifest row) must read **zero** before a consumer acts, which is the census
+gate Step 9 describes. This is a hard prerequisite, not a nice-to-have, and
+is the reason Phase 1 exists as its own phase below rather than folding into
+Phase 2. Amended 2026-10-02 (Step 11): the prerequisite no longer gates
+removing the sweeps' notes-guard arms, because they are not removed.
 
 ### Existing Infrastructure Audit
 
@@ -1112,7 +1126,10 @@ and an imported-with-manifest chunk all stay visible under `live(c)`.
 
 (d) **Fixture matrix**: manifest-less; own-collection live; own-collection
 tombstoned only; cross-collection-only manifest — every site using `live(c)`
-or `reapable(c)` gives the same answer for the same row.
+or `reapable(c)` gives the same answer for the same row. The one difference is
+by design (Step 11, 2026-10-02): for R8 (a manifest-less current note) the
+sweeps keep the chunk through their retained notes-guard arm, where `reapable(c)`
+selects it and the reaper's census gate is what protects it.
 
 All four in scope; none deferred.
 
@@ -1452,7 +1469,31 @@ other sweep routes is bead `nexus-wbfpw.50`.
 
 ### Phase 4: Cleanup (gated on Phase 1's backfill census reading zero)
 
-#### Step 11: Remove the notes-guard arms from predicate 4's union guard and from predicate 5 (`live_note_chashes`)
+#### Step 11: RETAINED BY DECISION: the notes-guard arms of predicate 4's union guard and of predicate 5 (`live_note_chashes`) stay in both sweeps
+
+Decision of Sam, 2026-10-02 (beads `nexus-wbfpw.21` engine, `nexus-wbfpw.22` client; T2
+`nexus/review-wbfpw21-22-critique`). This step was to remove the arms once the legacy-note
+backfill read zero. It does not, and nothing changes in behavior:
+
+- The engine sweep (`CatalogRepository.sweepChunksQuery`) keeps its `NOT EXISTS` over a
+  live note-shaped document whose identity chash matches, and the client sweeps
+  (`mcp_infra._sweep_superseded_vectors`, through `live_note_chashes`) keep their notes
+  guard. `restore_pre_call_stamp` and `pre_call_doc_id_out` stay with it.
+- **Removal is unsafe.** A legacy note's chunk CAN enter a sweep's dropped set: an
+  unrelated document that shared the note's text, then dropped it, puts the chash there.
+  `CatalogManifestSweepRepositoryTest` Order 12 builds exactly that against the real
+  engine and reads the chunk kept by the notes arm alone. The client delete
+  (`PgVectorRepository.delete`'s own-collection anti-join) has no notes guard of its own.
+- **Gating the arm on the `rdr192-manifest-backfill` rung record is rejected.** The record
+  is an attestation (it says a census read zero once, not that none has appeared since),
+  nothing revokes it, and a sweep is a hard `DELETE` with no grace, no quarantine and no
+  census, where the reaper re-runs the census per collection per pass. Trusting the record
+  would give the sweep more destructive reach than the reaper has.
+- **Cost:** bounded over-retention. A manifest-less note's chunk, or a chunk a dangling
+  `meta.doc_id` stamp names, is kept by the sweep until the reaper (30-day grace, 14-day
+  restorable quarantine, census gate) collects it. Over-retention is recoverable;
+  over-deletion is not.
+- The sweep and the reaper therefore differ on R8 by design (see MVV (d)).
 
 #### Step 12: Rewrite the stale documentation (Gap 6) — `catalog-003-soft-delete.xml`'s comment and `mcp/core.py:5322-5340`
 
@@ -1786,3 +1827,12 @@ To be completed at gate (Layer 3 AI critique).
   dropped `live_note_chashes` in Phase 3 for the census gate (Gap 1 item 8, Migration order
   item 4). The 2026-10-01 row above that says "skip documents `indexing` with a TTL" is
   superseded by the orphaning record in Step 9 and is left as history.
+- 2026-10-02: Step 11 retained by decision of Sam (beads `nexus-wbfpw.21`, `.22`; T2
+  `nexus/review-wbfpw21-22-critique`, `nexus/wbfpw21-22-r2`; text only, no status change). The
+  notes-guard arms of the engine sweep and the client sweeps stay as defense in depth, instead of
+  being removed once the legacy-note backfill reads zero (Migration order item 4, the Legacy-note
+  backfill prerequisite, Step 11). Removal is unsafe, because a legacy note's chunk can enter a
+  dropped set (Critical Assumptions, REFUTED, `CatalogManifestSweepRepositoryTest` Order 12), and
+  gating on the `rdr192-manifest-backfill` rung record is rejected, because the record is an
+  attestation and a sweep hard-deletes with no census. The cost is bounded over-retention, which
+  the reaper collects. MVV (d) notes that the sweeps and the reaper differ on R8 by design.
