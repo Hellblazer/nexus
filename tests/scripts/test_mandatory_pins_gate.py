@@ -167,6 +167,18 @@ def fake_uv(tmp_path: Path):
     gh = bindir / "gh"  # a fake gh whose login lives only in the REAL home: `gh auth token` answers rc 0 / a token
     gh.write_text('#!/bin/bash\n[ "$1 $2" = "auth token" ] || exit 1\n[ -z "${FAKE_GH_FAIL:-}" ] || exit 1\necho fake-gh-login-token\n')
     gh.chmod(0o755)
+    # The gate's EXIT trap deletes its scratch dir, the last moment that directory exists. A fake deleter
+    # on PATH greps the directory it is about to delete for every token the tests hand the gate, so a token
+    # written anywhere under the scratch dir (at any point of the run) is recorded before it disappears.
+    deleter = bindir / "rm"
+    deleter.write_text(textwrap.dedent("""\
+        #!/bin/bash
+        for a in "$@"; do
+          [ -d "$a" ] && grep -rlE "fake-gh-login-token|job-token|operator-token" "$a" >> "$FAKE_RM_HITS" 2>/dev/null
+        done
+        exec /bin/rm "$@"
+        """))
+    deleter.chmod(0o755)
 
     def run(junit: str, *, collected: int = 4, rc: int = 0, budget: str | None = None,
             extra_env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
@@ -174,7 +186,7 @@ def fake_uv(tmp_path: Path):
         env = {
             "PATH": f"{bindir}:{os.environ['PATH']}", "HOME": str(tmp_path), "TMPDIR": str(tmp_path),
             "FAKE_JUNIT": str(tmp_path / "pins.xml"), "FAKE_LOG": str(tmp_path / "uv.log"),
-            "FAKE_COLLECTED": str(collected), "FAKE_RC": str(rc),
+            "FAKE_COLLECTED": str(collected), "FAKE_RC": str(rc), "FAKE_RM_HITS": str(tmp_path / "rm-hits.txt"),
         }
         if budget is not None:
             env["NX_MANDATORY_PIN_SKIP_BUDGET"] = budget
@@ -182,6 +194,7 @@ def fake_uv(tmp_path: Path):
         return subprocess.run(["bash", str(GATE)], capture_output=True, text=True, timeout=120, env=env, cwd=tmp_path)
 
     run.log = tmp_path / "uv.log"  # type: ignore[attr-defined]
+    run.scratch_hits = tmp_path / "rm-hits.txt"  # type: ignore[attr-defined]
     return run
 
 
@@ -208,6 +221,27 @@ def test_the_pins_gate_hands_pytest_the_token_it_resolves_in_the_real_home(fake_
     assert token(extra_env={"GH_TOKEN": "operator-token"}) == "operator-token"
     fake_uv.log.unlink()
     assert token(extra_env={"FAKE_GH_FAIL": "1"}) == ""
+
+
+def test_the_pins_gate_never_prints_or_stores_the_token(fake_uv) -> None:
+    """"Never printed" was prose: the two leak mutants (echo the token to stdout; write it under the gate's
+    $SCRATCH) both survived round 4's suite (review L1). The token reaches pytest through the environment
+    and nowhere else, so it is in neither stream and in no file under the scratch directory, whichever of
+    the three sources supplied it. Mutations: ``echo "$GITHUB_TOKEN"`` in the gate (stdout assertion) and
+    ``echo "$GITHUB_TOKEN" > "$SCRATCH/t"`` (scratch assertion) each fail this test."""
+    for tok, env in (
+        ("fake-gh-login-token", {}),
+        ("job-token", {"GITHUB_TOKEN": "job-token"}),
+        ("operator-token", {"GH_TOKEN": "operator-token"}),
+    ):
+        r = fake_uv(_junit(ran=4), extra_env=env)
+        assert r.returncode == 0, (r.stdout, r.stderr)
+        assert tok not in r.stdout + r.stderr, f"the gate printed the {tok!r} token"
+        hits = fake_uv.scratch_hits.read_text() if fake_uv.scratch_hits.exists() else ""
+        assert hits == "", f"the gate wrote the {tok!r} token under its scratch dir: {hits}"
+        # Non-vacuity: the token really did reach pytest, so the assertions above looked at a run that had it.
+        assert f"TOKEN={tok}" in fake_uv.log.read_text()
+        fake_uv.log.unlink()
 
 
 def test_the_pins_gate_runs_at_a_zero_budget_unless_told_otherwise(fake_uv) -> None:
@@ -238,6 +272,11 @@ def test_the_pins_gate_fails_on_a_wrong_pin_count_before_and_after_the_run(fake_
     assert not fake_uv.log.exists(), "the run must not start after the count check failed"
     r = fake_uv(_junit(ran=3))
     assert r.returncode == 1 and "reported 3 pin test(s), expected exactly 4" in r.stdout + r.stderr
+    # The other direction (round 4 review L4): more reported than expected. The collect-time guard covers it
+    # earlier in practice, so this is the junit read's own boundary. Mutation (`!=` -> `<` in
+    # mandatory_pins_check.verdict): five reported pins, all passing, read PASSED.
+    r = fake_uv(_junit(ran=5))
+    assert r.returncode == 1 and "reported 5 pin test(s), expected exactly 4" in r.stdout + r.stderr
 
 
 def test_the_pins_gate_fails_when_pytest_fails_or_a_pin_fails(fake_uv) -> None:

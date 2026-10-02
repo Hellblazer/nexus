@@ -549,18 +549,15 @@ default, or `log-only`); the engine `lsg` provisions inherits it, so exporting
 it before `lsg` starts runs the whole gate against a log-only engine.
 A third variable, `NX_GATE_OWNERLESS_WRITE_MODE`, is an INPUT to
 `published-client-write-gate.sh` (Step 3c: the mode that gate starts the
-candidate in, so it can prove the refusal in both modes). It arrives with
-nexus-9a6io; whether `published-client-write-gate.sh` in your tree reads it
-depends on whether that bead has landed here, so grep the script for the name
-before relying on it. Nothing in this step depends on it.
+candidate in, so it can prove the refusal in both modes). It exists
+(nexus-9a6io, on develop) and Step 3c reads it. Nothing in this step depends on it.
 
 **Log-only has no cut-time leg on a real candidate except two.** Log-only
 (counts the write, allows it) is the first production posture, and the
 enforce run above proves nothing about it: the engine counts a would-refuse
 instead of a refusal and logs `ownerless_chunk_write_would_refuse`. The
 legs that exercise it on a real candidate are (1) one `lsg` run in log-only,
-below, and (2) the cut-prep published-client gate (Step 3c, per mode, when
-nexus-9a6io has landed). The Java tests cover the engine's own branches but
+below, and (2) the cut-prep published-client gate (Step 3c, once per mode). The Java tests cover the engine's own branches but
 not the built candidate. The other six legs read an engine in enforce and say
 nothing about log-only. Run the `lsg` step once per cut, after the enforce run:
 
@@ -600,13 +597,18 @@ as an unexplained failure, name it:
 tests/e2e/release-battery.sh --expected-engine-lag nexus-z0o2p.9@0.1.142 ...   # <bead>@<REQUIRED_ENGINE_VERSION>
 ```
 
-A red `mvv`/`smoke`/`shakedown`/`dtok` leg in which EVERY failing step carries the
+A red `mvv`/`smoke`/`shakedown`/`dtok` leg in which EVERY failing step (every step the
+verdict line counts, not only those that print `[FAIL]`) carries the
 `EngineOlderThanClientError` signature then reads `EXPECTED-LAG(<bead>)`, is
 counted, and ends the battery PARTIAL (never a release verdict). The sandbox legs
 print a `[FAIL]` marker per failed step; each marker's block (the stretch that ends at
 it and starts after the previous step boundary, at most 30 lines) must carry the
 signature, so a leg with one lag step and one unrelated `KeyError` step stays red.
-A log with no marker (`mvv`, `dtok`) has one failing step: the failed verdict line,
+A failure that prints no `[FAIL]` marker (a throughput step ending `-- FAIL: above Nx
+baseline`, the end-of-journey engine read) is caught by the verdict line's `N step(s)`
+count: the ack needs N to equal the number of marker blocks, so one lag block beside an
+unmarked failure stays red, and a log with markers but no countable verdict line is not
+acked. A log with no marker (`mvv`, `dtok`) has one failing step: the failed verdict line,
 the log files it names (and the `.stderr.log` beside a named `.log`), and the stretch
 of the leg log that ends at it. A tolerated mention of the error in an earlier step
 does not count, and neither does the newest log in some evidence directory. Any other

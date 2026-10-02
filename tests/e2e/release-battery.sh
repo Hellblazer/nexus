@@ -34,7 +34,9 @@
 # carries the EngineOlderThanClientError signature reads EXPECTED-LAG(<bead>) instead
 # of FAILED, the verdict is PARTIAL, and the ack REFUSES to run once the pin has
 # moved off the version it names. Any other red stays red, including one that follows
-# a tolerated mention of the error in a step that passed.
+# a tolerated mention of the error in a step that passed, and one that sits beside a
+# failing step printing no [FAIL] token (the verdict line's "N step(s)" count must equal
+# the number of [FAIL] blocks).
 #
 # Leg 0, serial: build every artifact ONCE (tests/e2e/migration-rehearsal/
 # build-artifacts.sh — wheel, stamped dev jar, linux native candidate, plus
@@ -403,7 +405,9 @@ cut_resolve_candidate() {
 # The pinned engine predates develop's client (nexus-0kmat): the named, acknowledged
 # lag. Prints the reason when EVERY failing step of a FAILED engine-bearing leg carries the
 # signature; empty = a real red (candidate_engine.py failed-step-lag). A failing step is each
-# [FAIL] marker's block (the sandbox legs print one per failed step), or, where the log has no
+# [FAIL] marker's block (the sandbox legs print one per failed step, and their verdict line's
+# "N step(s)" count must equal the number of blocks: a failure that prints no [FAIL] token, a
+# throughput step or the end-of-journey engine read, shows only in that count), or, where the log has no
 # marker, the FAILED verdict line's own evidence: the log files that line names
 # (data-token-cli-gate fails at "store put ... failed (see <dir>/store-put.log / .stderr.log)"
 # and the error text lives only in the stderr file) and the stretch of the leg log that ends

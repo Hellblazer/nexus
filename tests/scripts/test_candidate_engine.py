@@ -1173,6 +1173,48 @@ def test_expected_lag_needs_every_failing_step_to_be_the_lag(tmp_path: Path) -> 
     assert mixed[0] == "FAILED" and mixed[1] == "0", mixed
 
 
+def test_expected_lag_does_not_ack_a_failure_that_prints_no_fail_marker(tmp_path: Path) -> None:
+    """Round 4 review I1 (probe: one [FAIL] lag block + the throughput line + a 2-step verdict, ACKED).
+    release-sandbox.sh shakedown adds throughput failures to SHAKEDOWN_FAILED with a line that carries
+    no ``[FAIL]`` token (migration-rehearsal/lib/index_throughput.sh: ``-- FAIL: above Nx baseline``),
+    and the end-of-journey engine read appends one with no marker either. The verdict line's count is
+    the only place those steps show. Mutation (drop the count comparison from failed_step_lag): the
+    mixed leg reads EXPECTED-LAG."""
+    throughput = "  throughput[fresh]: 900 chunks in 40s = 0.044 s/chunk \u2014 FAIL: above 3x baseline 0.01 (ceiling 0.03)\n"
+    def sandbox(verdict: str, extra: str = "") -> str:
+        return (
+            "  nx plan reseed (seeds plan library):\n"
+            f"    {_LAG}\n    [FAIL] -- exit non-zero\n"
+            f"{extra}"
+            f"{verdict}\n"
+        )
+
+    # The probe: two failing steps, one of them unmarked and not the lag.
+    probe = _finish(
+        tmp_path, sandbox("SHAKEDOWN FAILED: 2 release-gate step(s) exited non-zero:", throughput),
+        cut=False, cand=None, rc=1, lag=True, leg="shakedown",
+    )
+    assert probe[0] == "FAILED" and probe[1] == "0", probe
+    # The same leg with only the lag step, and a verdict line that counts one, is the ack.
+    only = _finish(
+        tmp_path, sandbox("SHAKEDOWN FAILED: 1 release-gate step(s) exited non-zero:"),
+        cut=False, cand=None, rc=1, lag=True, leg="shakedown",
+    )
+    assert only[0] == "EXPECTED-LAG" and only[1] == "1", only
+    # A [FAIL] block with no countable verdict line cannot be reconciled with anything: red.
+    nocount = _finish(
+        tmp_path, sandbox("SHAKEDOWN FAILED"), cut=False, cand=None, rc=1, lag=True, leg="shakedown",
+    )
+    assert nocount[0] == "FAILED", nocount
+    # More markers than the verdict counts is a mismatch in the other direction: red.
+    over = _finish(
+        tmp_path,
+        sandbox("SMOKE FAILED: 1 step(s) exited non-zero:", f"  nx index repo:\n    {_LAG}\n    [FAIL] -- exit non-zero\n"),
+        cut=False, cand=None, rc=1, lag=True, leg="smoke",
+    )
+    assert over[0] == "FAILED", over
+
+
 def test_expected_lag_stops_at_a_passed_marker_and_at_a_step_header(tmp_path: Path) -> None:
     """Round 3 review L2: the ``[pass]`` boundary and the ``  nx ...:`` header each survived deletion because
     the other covered the one fixture. Here each is the ONLY boundary between a tolerated mention and the

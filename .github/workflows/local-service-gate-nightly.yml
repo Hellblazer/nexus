@@ -210,10 +210,17 @@ jobs:
           # exactly the carve-out size, no more: the same rule that says
           # additions bump it consciously says removals do too.
           #
-          # 452 -> 448 (nexus-z0o2p.41, 2026-10-01): the mandatory_regression_pin carve-out
-          # DESELECTS 4 tests (3 passed here, 1 skipped on the job token's 403) and they run in the
-          # next step instead. Lowered by exactly the carve-out size, same rule as above.
-          NX_GATE_FLOOR: "448"
+          # 452 -> 449 (nexus-z0o2p.41, 2026-10-01): the mandatory_regression_pin carve-out
+          # DESELECTS 4 tests and they run in the next step instead. The floor counts PASSED, so it
+          # drops by the PASSES the carve-out removes, not by its size: 3 of the 4 passed here and the
+          # 4th (the branch-protection pin) skipped on the job token's 403, and a skip was never in
+          # the count. 452 - 3 = 449, which keeps the same 4 tests of slack under the reachable
+          # maximum (456 - 3 = 453) that 452 had under 456. The first cut said 448 (the full
+          # carve-out size), which was 5 under and widened the slack by one; the review (round 4
+          # verify, L2) caught it. Derivation, not a recount: the selection cannot be collected
+          # here (it needs this runner's VOYAGE_API_KEY and bundle). The first nightly after this
+          # lands prints the real `passed=N`; N - 449 above 4 means re-derive.
+          NX_GATE_FLOOR: "449"
           NX_GATE_BUDGET: "25"
         run: |
           set -euo pipefail

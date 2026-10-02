@@ -114,7 +114,10 @@ python3 with a scrubbed environment):
     verdict), or, in a log with no marker, the verdict line's own block with the files it names
     (``fresh-install-mvv`` and ``data-token-cli-gate`` end on one ``_fail``). A leg with one step
     on the tolerated lag and another on an unrelated error is therefore NOT acknowledged: the
-    ack covers the lag, never a different red beside it.
+    ack covers the lag, never a different red beside it. A failure that prints no ``[FAIL]`` token
+    (a throughput step, the end-of-journey engine read) is caught by the verdict line's ``N
+    step(s)`` count: the ack needs N to equal the number of ``[FAIL]`` blocks, and a log with
+    markers but no countable verdict line is not acked.
 
 ``manifest-artifact <artifacts-dir> jar|native`` / ``candidate-in-manifest <artifacts-dir> <path>``
     Battery side. Print the manifest's path for an artifact; say which
@@ -610,6 +613,11 @@ def _step_block(lines: list[str], p: int) -> list[str]:
     return lines[lo:p + 1]
 
 
+#: The count the sandbox legs' verdict line states about itself: ``SMOKE FAILED: 2 step(s) exited
+#: non-zero`` and ``SHAKEDOWN FAILED: 2 release-gate step(s) ...``.
+_VERDICT_STEP_COUNT_RE = re.compile(r"\b(\d+) (?:release-gate )?step\(s\)")
+
+
 def failing_step_blocks(log_text: str, failed_line: str) -> list[str]:
     """One text block per FAILING STEP of the leg (see ``failed-step-lag``)."""
     lines = _ANSI_RE.sub("", log_text).splitlines()
@@ -621,7 +629,23 @@ def failing_step_blocks(log_text: str, failed_line: str) -> list[str]:
 
 
 def failed_step_lag(log_text: str, failed_line: str, signature: str) -> bool:
-    """True when the leg failed and EVERY failing step's block carries *signature*."""
+    """True when the leg failed, EVERY failing step's block carries *signature*, and the blocks
+    found ARE all the failing steps.
+
+    The second condition is the verdict line's own count. A sandbox leg adds failures to its summary
+    that print no ``[FAIL]`` token (a throughput step ends ``-- FAIL: above Nx baseline``; the
+    end-of-journey engine read appends a failure with no marker), so the marker blocks can all be
+    the lag while a different red sits beside them. The verdict line says ``N step(s)``; the ack
+    needs N to equal the number of ``[FAIL]`` blocks. A log with markers and no countable verdict
+    line cannot be reconciled and is not acked. A log with no marker and no count (``mvv``,
+    ``dtok``: one ``_fail``) has the verdict line as its one failing step."""
+    lines = _ANSI_RE.sub("", log_text).splitlines()
+    marked = sum(1 for ln in lines if "[FAIL]" in ln)
+    counted = _VERDICT_STEP_COUNT_RE.search(_ANSI_RE.sub("", failed_line))
+    if counted and int(counted.group(1)) != marked:
+        return False
+    if marked and not counted:
+        return False
     blocks = failing_step_blocks(log_text, failed_line)
     return bool(blocks) and all(re.search(signature, b) for b in blocks)
 
