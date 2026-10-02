@@ -1411,7 +1411,7 @@ def _backfill_rdrs(cat: "CatalogReader", t3: object, dry_run: bool, *, writer: o
                 # Skip only a path the catalog holds as a tombstone and nowhere
                 # live: a re-registered document has both, and is not deleted.
                 if tombstones.covers_path((path, fp), owner=str(owner)) and not has_live_document(
-                    cat, tombstones, (path, fp), owner=str(owner),
+                    cat, (path, fp), owner=str(owner),
                 ):
                     skipped_deleted += 1
                     continue
@@ -1729,7 +1729,7 @@ def _backfill_per_file_from_t3(
         # a gap. A path the catalog holds as a deleted document stays deleted.
         # Only when no LIVE document holds the path too (delete + re-register).
         if tombstones.covers_path((abs_path, rel), owner=str(owner)) and not has_live_document(
-            cat, tombstones, (abs_path, rel), owner=str(owner),
+            cat, (abs_path, rel), owner=str(owner),
         ):
             skipped_deleted += 1
             continue

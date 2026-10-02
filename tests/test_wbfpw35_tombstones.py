@@ -8,6 +8,7 @@ survived the round-2 suite. Each test below names the mutation it exists to kill
 """
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
@@ -159,14 +160,25 @@ class TestCoversPath:
 
 
 class _LiveCat:
-    """by_file_path over live rows keyed (owner, file_path); owner roots."""
+    """Live rows as ``(owner, file_path[, collection])``; owner roots.
 
-    def __init__(self, live: set[tuple[str, str]], roots: dict[str, str] | None = None) -> None:
-        self.live = live
+    ``by_file_path`` is owner-scoped and ``find_all_by_file_path`` owner-agnostic,
+    both over live rows only, as the real catalog client's are."""
+
+    def __init__(self, live: set[tuple[str, ...]], roots: dict[str, str] | None = None) -> None:
+        self.live = [(r[0], r[1], r[2] if len(r) > 2 else "docs__x") for r in live]
         self.roots = roots or {}
 
     def by_file_path(self, owner: str, file_path: str) -> Any:
-        return object() if (str(owner), file_path) in self.live else None
+        return object() if any(
+            o == str(owner) and p == file_path for o, p, _c in self.live
+        ) else None
+
+    def find_all_by_file_path(self, file_path: str) -> list[Any]:
+        return [
+            SimpleNamespace(owner=o, file_path=p, physical_collection=c)
+            for o, p, c in self.live if p == file_path
+        ]
 
     def get_owner_by_prefix(self, prefix: str) -> dict:
         return {"repo_root": self.roots.get(prefix, "")}
@@ -181,7 +193,7 @@ class TestDeletedOnlySources:
         tombs = Tombstones([_doc("1.2", "a.md")])
 
         assert deleted_only_sources(cat, tombs, {"a.md"}, collection="docs__x") == []
-        assert has_live_document(cat, tombs, ("a.md",))
+        assert has_live_document(cat, ("a.md",), owner="1.2")
 
     def test_a_tombstone_only_path_is_returned(self) -> None:
         cat = _LiveCat(live=set())
@@ -210,3 +222,60 @@ class TestDeletedOnlySources:
         tombs = Tombstones([_doc("1.2", "a.md", collection="docs__other")])
 
         assert deleted_only_sources(cat, tombs, {"a.md"}, collection="docs__x") == []
+
+    # nexus-wbfpw.34/.35/.37 round 4, H1: one file may live under two owners
+    # (nexus-z0lu4), so a live document anywhere in the collection keeps the path.
+
+    def test_a_live_document_under_another_owner_keeps_the_path(self) -> None:
+        # Tombstone at owner 1.1, live document at owner 1.9 with the ABSOLUTE
+        # path (curator-registered). Kills: a live check scoped to the
+        # tombstone's owner, which dropped the source and purged live chunks.
+        cat = _LiveCat(live={("1.9", "/repo/docs/a.md")}, roots={"1.1": "/repo"})
+        tombs = Tombstones([_doc("1.1", "docs/a.md")])
+
+        assert deleted_only_sources(
+            cat, tombs, {"/repo/docs/a.md"}, collection="docs__x",
+        ) == []
+
+    def test_a_live_document_in_another_collection_does_not_keep_the_path(self) -> None:
+        # Kills: dropping the collection filter from the live check (a live copy of
+        # the file in some other collection would then shield a deleted one).
+        cat = _LiveCat(
+            live={("1.9", "/repo/docs/a.md", "docs__other")}, roots={"1.1": "/repo"},
+        )
+        tombs = Tombstones([_doc("1.1", "docs/a.md")])
+
+        assert deleted_only_sources(
+            cat, tombs, {"/repo/docs/a.md"}, collection="docs__x",
+        ) == ["/repo/docs/a.md"]
+
+    def test_a_live_document_holding_the_relative_form_keeps_an_absolute_source(self) -> None:
+        # The other owner registered the file repo-relative, so only the relative
+        # form finds it. Kills: looking the live document up by the source's own
+        # (absolute) form alone.
+        cat = _LiveCat(live={("1.9", "docs/a.md")}, roots={"1.1": "/repo"})
+        tombs = Tombstones([_doc("1.1", "docs/a.md")])
+
+        assert deleted_only_sources(
+            cat, tombs, {"/repo/docs/a.md"}, collection="docs__x",
+        ) == []
+
+    def test_a_relative_source_with_a_live_document_under_another_owner_is_kept(self) -> None:
+        # A relative source_path names no owner, so it matches any tombstone with
+        # that file_path; the live document of another owner must still keep it.
+        # Kills: covers_path(owner="") with a tombstone-owner live check.
+        cat = _LiveCat(live={("1.9", "README.md")})
+        tombs = Tombstones([_doc("1.1", "README.md")])
+
+        assert deleted_only_sources(cat, tombs, {"README.md"}, collection="docs__x") == []
+
+    def test_a_relative_form_made_with_another_owners_root_does_not_match(self) -> None:
+        # The source is under repo A; the tombstone belongs to owner B whose
+        # file_path happens to equal the source's path relative to A's root.
+        # The relative form must be made with the TOMBSTONE owner's own root.
+        cat = _LiveCat(live=set(), roots={"1.1": "/repoA", "1.2": "/repoB"})
+        tombs = Tombstones([_doc("1.1", "docs/a.md"), _doc("1.2", "docs/b.md")])
+
+        assert deleted_only_sources(
+            cat, tombs, {"/repoA/docs/b.md", "/repoB/docs/a.md"}, collection="docs__x",
+        ) == []

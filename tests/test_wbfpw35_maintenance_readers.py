@@ -363,6 +363,39 @@ class TestReindexTombstoneGuardIsExactAndFailsClosed:
         assert indexed == [str(again)], (indexed, result.output)
         assert "deleted catalog document" not in result.output
 
+    def test_a_file_that_is_live_under_another_owner_is_kept(
+        self, catalog_env, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,  # noqa: F811
+    ) -> None:
+        # One file under two owners (nexus-z0lu4): the repo owner's document for it
+        # was deleted, and a curator holds a LIVE document for the same file under
+        # its absolute path, in the same collection. The stored chunk is one row
+        # the curator's live document owns. Dropping the path purged it and
+        # rebuilt nothing (round 3's live check looked only at the tombstone's
+        # owner).
+        from nexus.commands.catalog import _get_or_create_curator
+
+        cat, owner = self._seed(tmp_path)
+        shared = tmp_path / "shared.md"
+        shared.write_text("one file, two owners")
+        cat.delete_document(cat.register(
+            owner=owner, title="shared.md", content_type="prose",
+            physical_collection=self.NAME, file_path="shared.md",
+        ))
+        curator = _get_or_create_curator(cat, "curated-docs", writer=cat)
+        cat.register(
+            owner=curator, title="shared.md", content_type="prose",
+            physical_collection=self.NAME, file_path=str(shared),
+        )
+        assert cat.by_file_path(owner, "shared.md") is None
+        assert len(cat.find_all_by_file_path(str(shared))) == 1
+        assert len(cat.list_trash()) == 1
+        col = _LiveAwareCollection([("c0", {"source_path": str(shared)}, LIVE)])
+
+        result, indexed, _purged = _run_reindex(monkeypatch, self.NAME, col, cat)
+
+        assert indexed == [str(shared)], (indexed, result.output)
+        assert "deleted catalog document" not in result.output
+
     def test_a_deleted_root_file_does_not_claim_a_same_named_file_deeper_in(
         self, catalog_env, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,  # noqa: F811
     ) -> None:
@@ -570,6 +603,34 @@ class TestBackfillTombstoneGuardIsExactLiveAwareAndFailsClosed:
             cat, t3, "code__myrepo-abc12345", dry_run=True,
         ) == 1
         assert "deleted documents" not in capsys.readouterr().out
+
+    def test_from_t3_still_skips_a_deleted_path_another_owner_holds_live(
+        self, catalog_env, tmp_path: Path,  # noqa: F811
+    ) -> None:
+        # The backfill's question is "may I register (this owner, this path)?",
+        # and a live document under ANOTHER owner does not change that the repo
+        # owner's document was deleted on purpose; registering would mint a
+        # second live document for the file. (`reindex` asks the opposite
+        # question, whether a drop loses live chunks, and keeps such a path.)
+        from nexus.commands.catalog import _backfill_per_file_from_t3, _get_or_create_curator
+
+        cat, owner, repo_root = self._repo(tmp_path)
+        path = repo_root / "src" / "a.py"
+        cat.delete_document(cat.register(
+            owner=owner, title="a.py", content_type="code",
+            physical_collection="code__myrepo-abc12345", file_path="src/a.py",
+        ))
+        curator = _get_or_create_curator(cat, "curated-code", writer=cat)
+        cat.register(
+            owner=curator, title="a.py", content_type="code",
+            physical_collection="code__myrepo-abc12345", file_path=str(path),
+        )
+        col = _LiveAwareCollection([("c0", {"source_path": str(path)}, LIVE)])
+        t3 = _t3_over("code__myrepo-abc12345", col, count=1, stored=1)
+
+        assert _backfill_per_file_from_t3(
+            cat, t3, "code__myrepo-abc12345", dry_run=True,
+        ) == 0
 
     def test_from_t3_refuses_on_an_engine_without_file_path(
         self, catalog_env, tmp_path: Path,  # noqa: F811

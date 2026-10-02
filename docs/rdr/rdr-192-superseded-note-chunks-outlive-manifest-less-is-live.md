@@ -1554,10 +1554,9 @@ To be completed at gate (Layer 3 AI critique).
   `nexus/rdr-192-live-c-explain-evidence-2026-10-01`;
   `Rdr192LiveCExplainEvidenceIntegrationTest` pins that `chunk_live_owners`
   inlines on each and that the stats view probes once per chunk.
-- 2026-10-01: Phase 2 gate minors, fix rounds 2 and 3 (nexus-wbfpw.34, .35, .37; T2
-  `nexus/wbfpw34-35-37-fix-round-2`, `nexus/wbfpw34-35-37-fix-round-3`). Decisions.
-  (1) The maintenance verbs that WRITE, `nx collection backfill-hash` and
-  `nx collection re-embed`, stay on live rows. A client re-write refreshes
+- 2026-10-01: Phase 2 gate minors, fix rounds 2 to 4 (nexus-wbfpw.34, .35, .37; T2
+  `nexus/wbfpw34-35-37-fix-round-2`, `-round-3`, `-round-4`). Decisions.
+  (1) The maintenance verb that WRITES, `nx collection re-embed`, stays on live rows. A client re-write refreshes
   `chunks.last_written_at`, so for a chunk no document ever owned (R1) it would hand the
   reaper's grace window a fresh start. For a chunk owned only by a tombstoned document
   (R3) that argument does not hold under the final design of nexus-wbfpw.15 (side table
@@ -1570,14 +1569,24 @@ To be completed at gate (Layer 3 AI critique).
   a document that was deleted and not yet purged, so every verb that registers or
   re-indexes from stored chunks (`nx catalog backfill`, `nx collection reindex`,
   `nx catalog orphan-backfill`) checks the trash first. The match is exact on the
-  catalog's own identity, `(owner, file_path)` for a path and the title for an
-  orphan-backfill title group, never a suffix; a path the catalog also holds as a live
-  document is not skipped (the tombstone and the live row coexist after a delete and a
-  re-index); and the guard fails closed: a catalog that cannot be read, an engine whose
+  catalog's own path and title, never a suffix: a source path equals a tombstone's
+  `file_path`, made relative with that tombstone owner's own `repo_root`, and an
+  orphan-backfill title group matches on the title. Whether a matched path is dropped
+  depends on the verb. `reindex` drops it only when NO live catalog document in the same
+  collection names it, under any owner and in either path form, because one file can be
+  catalogued under two owners (nexus-z0lu4) and the stored chunk is then one row a live
+  document owns; the backfills skip it unless a live document holds it under the same
+  owner (a delete and a re-index leave a tombstone and a live row at one path). And the
+  guard fails closed: a catalog that cannot be read, an engine whose
   `GET /v1/catalog/trash` entries carry no `file_path`, or a `reindex` whose every source is
   a deleted document, refuses the verb. (3) `GET /v1/catalog/trash` entries carry
   `file_path` and order by `deleted_at` then tumbler, so an `OFFSET` page boundary inside a
-  batch delete cannot hide a tombstone from the client's guard. The guard therefore needs
+  batch delete cannot hide a tombstone from the client's guard. The paging is still
+  offset-based, so a restore or purge that lands between two pages can make the next page
+  skip a row; that shows the guard one tombstone fewer (a document may be revived, nothing
+  is dropped), the same effect as a delete that lands after the read, which no paging can
+  see. A keyset cursor would need a new engine parameter and a client loop guard against an
+  engine that ignores it, and is not done. The guard therefore needs
   an engine newer than `engine-service-v0.1.142`. `manifest_backfill` and `manifest_heal`
   write manifest rows for documents that already exist and are live, so they cannot revive
   a deleted one and are unchanged. The wire-ledger entry for the new `file_path` field

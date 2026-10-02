@@ -1024,10 +1024,13 @@ def reindex_cmd(name: str, force: bool) -> None:
     # be revived. Drop exactly those paths from the rebuild and say so.
     #
     # The guard fails CLOSED. A path is dropped only when a tombstone's file_path
-    # EQUALS it (after making it relative to the tombstone owner's repo_root) and
-    # the catalog holds NO live document at that (owner, file_path): a re-indexed
-    # file has a tombstone AND a live document at one path, and dropping it would
-    # purge the live chunks and rebuild none of them. A catalog that cannot be
+    # EQUALS it (after making it relative to that tombstone owner's repo_root) and
+    # the catalog holds NO live document in this collection that names it, under
+    # ANY owner and in either path form: a re-indexed file has a tombstone AND a live
+    # document at one path, and one file can be catalogued under two owners
+    # (nexus-z0lu4), so a deleted document's owner is not the only one to ask.
+    # Dropping a path a live document names would purge its chunks and rebuild
+    # none of them. A catalog that cannot be
     # read, or an engine whose trash listing carries no file_path, refuses the
     # verb instead of running it unguarded.
     deleted: list[str] = []

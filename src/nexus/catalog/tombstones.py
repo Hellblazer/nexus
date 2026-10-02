@@ -102,6 +102,13 @@ def read_tombstones(cat: Any) -> Tombstones:
     or an entry lacks the ``file_path`` KEY (an engine predating the field). A
     ``null`` ``file_path`` is a different thing and is accepted: a tombstoned
     paper or note never had one.
+
+    The listing is paged by offset over ``ORDER BY deleted_at DESC, tumbler``, so a
+    document restored or purged between two pages can make the next page skip a
+    row. The effect is one tombstone fewer in the guard (a deleted document may be
+    revived; nothing is dropped), the same as a delete that lands after this read,
+    which no paging could see. A keyset cursor would need an engine parameter and a
+    loop guard against an engine that ignores it; it is not done.
     """
     lister = getattr(cat, "list_trash", None)
     if lister is None:
@@ -144,26 +151,36 @@ def read_tombstones(cat: Any) -> Tombstones:
     return Tombstones(docs)
 
 
-def has_live_document(cat: Any, tombstones: Tombstones, paths: tuple[str, ...], *, owner: str = "", collection: str = "") -> bool:
-    """True when the catalog holds a LIVE document at the path a tombstone covers.
+def has_live_document(
+    cat: Any, paths: tuple[str, ...], *, owner: str = "", collection: str = "",
+) -> bool:
+    """True when the catalog holds a LIVE document at one of *paths*.
 
-    A deleted document and a re-registered one can share an owner and a path
-    (delete, then index the file again): the tombstone and the live row sit side by
-    side, and the stored chunks collapse to one row owned by both. The tombstone
-    must not stand in for the live document, so a verb skips a path only when
-    this is False. The lookup is exact on ``(owner, file_path)``, the catalog's
-    own identity for a file, and live rows only.
+    Two scopes, because the two kinds of caller need opposite things:
+
+    * ``owner`` given: the document must be live at exactly ``(owner, path)``,
+      the catalog's own identity for a file. The backfills use this. They skip a
+      path whose tombstone is under the owner they would register it under, unless
+      a live document already holds it there (delete, then index the file again:
+      the tombstone and the live row sit side by side). Skipping is the safe
+      direction for them, so another owner's live document is no reason to
+      register a second one.
+    * ``owner`` empty: ANY live document, whatever its owner, narrowed to
+      *collection* when given. ``nx collection reindex`` uses this. One file can
+      live under two owners (nexus-z0lu4, ``find_all_by_file_path``), so a
+      tombstone at one owner says nothing about a live document at another, and
+      dropping the path purges chunks that live document owns. Keeping is the safe
+      direction there.
+
+    Live rows only in both scopes: the catalog's lookups exclude tombstones.
     """
-    wanted = {p for p in paths if p}
-    for d in tombstones.docs:
-        if not d.file_path or d.file_path not in wanted:
-            continue
-        if owner and d.owner != owner:
-            continue
-        if collection and d.physical_collection != collection:
-            continue
-        if cat.by_file_path(d.owner, d.file_path) is not None:
-            return True
+    wanted = [p for p in dict.fromkeys(paths) if p]
+    if owner:
+        return any(cat.by_file_path(owner, p) is not None for p in wanted)
+    for p in wanted:
+        for e in cat.find_all_by_file_path(p):
+            if not collection or e.physical_collection == collection:
+                return True
     return False
 
 
@@ -173,28 +190,31 @@ def deleted_only_sources(
     """The *sources* (chunk ``source_path`` values, usually absolute) whose only
     catalog presence in *collection* is a tombstone.
 
-    A source matches a tombstone when it EQUALS its ``file_path`` or, once made
-    relative to the tombstone owner's ``repo_root``, equals it: the catalog's
-    normalised repo-relative form, compared exactly. A source with a live document
-    at the same ``(owner, file_path)`` is not returned.
+    A source matches one tombstone when it EQUALS its ``file_path`` or, once made
+    relative to THAT tombstone owner's ``repo_root``, equals it: the catalog's
+    normalised repo-relative form, compared exactly, and never through another
+    owner's root. A matched source is kept (not returned) when any live catalog
+    document in *collection* names it, under any owner and in either form: the
+    tombstone's owner is not the only owner a file can have.
     """
     from nexus.repo_identity import owner_repo_root_best_effort  # noqa: PLC0415 — deferred: keeps catalog import light
 
+    here = [d for d in tombstones.docs if d.physical_collection == collection and d.file_path]
     roots: dict[str, str] = {}
     out: list[str] = []
     for sp in sorted(sources):
         forms = {sp}
-        for d in tombstones.docs:
-            if d.physical_collection != collection or not d.file_path:
+        matched = False
+        for d in here:
+            if sp == d.file_path:
+                matched = True
                 continue
             if d.owner not in roots:
                 roots[d.owner] = owner_repo_root_best_effort(cat, d.owner).rstrip("/")
             root = roots[d.owner]
-            if root and sp.startswith(root + "/"):
-                forms.add(sp[len(root) + 1:])
-        paths = tuple(forms)
-        if tombstones.covers_path(paths, collection=collection) and not has_live_document(
-            cat, tombstones, paths, collection=collection,
-        ):
+            if root and sp.startswith(root + "/") and sp[len(root) + 1:] == d.file_path:
+                matched = True
+                forms.add(d.file_path)
+        if matched and not has_live_document(cat, tuple(forms), collection=collection):
             out.append(sp)
     return out
