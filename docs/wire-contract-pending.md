@@ -69,6 +69,8 @@ carries no method signature for a contract change to reconcile against) is a
 
 ## Unshipped
 
+- `851bbe503ecac8d71ff45a8e24de4d7b4aba71f5` -- bead nexus-wbfpw.58 -- engine half engine-service-v0.1.144 (not yet tagged) -- [additive] No wire shape change and no engine behaviour change. The engine half is a TEST only: `VectorHandlerQuarantineRestoreRouteTest.aDryRunOverAnEmptySelectionStillNamesEverySibling_andWritesNoAuditRowAndMovesNothing` pins behaviour engine-service-v0.1.143 already has: a `POST /v1/vectors/gc/quarantine-restore` dry run whose window selects no row still answers `quarantine_collections` (the wbfpw.55 key, shipped in v7.68.0), writes no gc_audit row and moves nothing. Client half: `chunk_quarantine.resolve_quarantine_siblings(probe_engine=True)`, used only by `nx t3 gc`, sends that dry run (`quarantined_since` epoch, `after_chash` ff..ff, `limit` 1) to learn every quarantine sibling holding the origin's chunks, and expires from each; `nx index repo` sends no probe. Direction safety: OLD client + NEW engine -- an old client never sends the probe, and nothing it calls changes. NEW client + OLD engine -- every engine at or above the client's floor (engine-service-v0.1.143) answers the probe; an engine that refuses it (400/404/422, 5xx) or a transport failure makes the client fall back to the two derived sibling names and log why, never a traceback. Ack condition: none; the engine carrying the test pin may deploy before or after any client tag. nexus-wbfpw.64 moves sibling resolution into the expire and restore-rereferenced routes and retires the probe.
+
 
 ## Shipped
 
