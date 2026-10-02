@@ -258,23 +258,29 @@ ran_from="$(date +%s)"
 # The suite runs as a background job in a process group of its own (set -m), so this
 # script can signal it as a unit and keep the box lock until the group is gone. tpid
 # is `timeout`'s pid and, with job control on, the group's id. Signals go to the whole
-# group; if the group cannot be addressed (it is already gone, or the job got none),
-# to the pid alone.
+# group only: the kernel does not reuse a group id while the group has members, so a
+# group kill cannot reach a stranger, where a bare pid could be recycled once `wait`
+# has reaped `timeout`. set -m also matters for ^C: without it a non-interactive shell
+# starts `&` children with SIGINT ignored, and the forwarded INT would never land.
 tpid=""
 cancelled=""
+forwarded=""
 signal_suite() {
   [ -n "$tpid" ] || return 0
-  kill -s "$1" -- "-$tpid" 2>/dev/null || kill -s "$1" "$tpid" 2>/dev/null
+  kill -s "$1" -- "-$tpid" 2>/dev/null
   return 0
 }
 # A hangup, ^C or TERM to this script: tell the suite to stop and carry on waiting,
 # so the box lock outlives the suite. ^C forwards INT (pytest stops cleanly on it);
 # the other two forward TERM. Exit status is 128 plus the signal, once it is gone.
 # shellcheck disable=SC2329  # called from the traps below
+# The signal goes out before the log line: if stderr is a dead pipe the line can fail,
+# and the suite must already be stopping by then.
 on_signal() {
   cancelled="$1"
-  say "signal received: stopping the suite ($2 sent to its group); the box lock is kept until it has gone"
+  forwarded="$2"
   signal_suite "$2"
+  say "signal received: stopping the suite ($2 sent to its group); the box lock is kept until it has gone"
 }
 trap 'on_signal 129 TERM' HUP
 trap 'on_signal 130 INT' INT
@@ -286,6 +292,14 @@ set -m
 timeout -k "$kill_s" "$hold_s" bash -c 'uv sync -q && scripts/build-gate-jar.sh && uv run pytest -n 8 -q "$@"' qwen-hand-run "$@" 9>&- </dev/null &
 tpid=$!
 set +m
+# A signal that landed between the launch and the line above found no tpid to signal:
+# send it now. Then ignore SIGPIPE in this script only (set after the launch, so the
+# suite does not inherit it): a log line to a dead stderr must not kill the wrapper
+# and free the box lock under a live suite.
+if [ -n "$forwarded" ]; then
+  signal_suite "$forwarded"
+fi
+trap '' PIPE
 
 # A trapped signal ends `wait` early (status above 128) while the suite still runs:
 # wait again until `timeout` itself has gone.

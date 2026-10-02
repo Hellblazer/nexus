@@ -1779,6 +1779,41 @@ def test_a_hangup_or_term_to_the_wrapper_stops_the_whole_suite_and_the_box_lock_
         _reap(proc)
 
 
+@_NEEDS_REAL_FLOCK_AND_TIMEOUT
+def test_a_term_with_stderr_a_dead_pipe_still_stops_the_suite_before_the_box_lock_goes(tmp_path: Path) -> None:
+    """Round 3 verify S-B: the trap logged before it signalled, so with stderr a pipe whose reader had gone the log
+    line raised SIGPIPE, the wrapper died inside its own trap, the box lock went free and the suite ran on. The
+    signal must go out first, and the wrapper must ignore SIGPIPE once the suite is launched."""
+    work, env = _hand_env(tmp_path, flock="real", timeout="real")
+    pids_file, lock = tmp_path / "pids", tmp_path / "lease" / "box.lock"
+    suite = _SUITE_PIDS + 'trap \'"$REAL_SLEEP" 1; exit 0\' TERM HUP; wait'
+    bash = shutil.which("bash")
+    assert bash
+    with _sigint_default(), open(tmp_path / "hand.out", "w") as out:
+        proc = subprocess.Popen([bash, str(work / "scripts" / "qwen-hand-run.sh")], cwd=work,
+                                env={**env, "FAKE_PIDS": str(pids_file), "FAKE_UV_EVAL": suite}, stdout=out,
+                                stderr=subprocess.PIPE, text=True, start_new_session=True)
+    pids: list[int] = []
+    try:
+        pids = _pids_from(pids_file, 2)
+        assert proc.stderr is not None
+        proc.stderr.close()  # the reader goes away after the launch: the next log line meets a dead pipe
+        os.kill(proc.pid, signal.SIGTERM)
+        violation = ""
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline and [p for p in pids if _pid_alive(p)]:
+            if _box_lock_is_free(lock) and (alive := [p for p in pids if _pid_alive(p)]):
+                violation = f"box.lock was free while suite processes {alive} were still running"
+                break
+            time.sleep(0.02)
+        assert not violation, violation
+        assert not [p for p in pids if _pid_alive(p)], "the TERM must have reached the suite's group"
+        assert proc.wait(timeout=20) == 143, "the wrapper must survive its own log line and exit 128+TERM"
+    finally:
+        _kill_all(pids)
+        _reap(proc)
+
+
 def test_ctrl_c_reaches_the_suite_and_the_wrapper_leaves_with_130(tmp_path: Path) -> None:
     """Round 3 (I1): the suite is in `timeout`'s process group, not the foreground one, so the terminal's ^C never
     reached it and bash did not leave until it ended. The wrapper's own SIGINT trap must forward it."""
