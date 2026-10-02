@@ -243,6 +243,19 @@ no way to learn that it just orphaned a chunk. Cheapest item in this RDR and
 still worth doing, but no longer load-bearing for correctness now that Gap 1
 covers the case where a caller never finds out.
 
+Amended 2026-10-02 (Step 13, `nexus-wbfpw.25`; Phase 4 critique S1, S2): built, and as a second
+line of text rather than a `superseded: [...]` field, because `store_put` returns a plain string
+(`structured_output=False`) and a new field would be a change of return type. The engine's
+`sweep_detail` entry gains `swept_chashes` (the chashes the sweep DELETED, not the manifest's drop
+list) and `swept_chashes_truncated`, capped at 300 per document, `[additive]`. `store_put` and
+`nx store put` print `Superseded: N chunk(s) removed: [<chash>, ...]` (three chashes, then
+`(and M more)`) only when the sweep removed something. A sweep that errors (`sweep_skipped`)
+prints `Superseded: the sweep did not finish; up to N replaced chunk(s) were not removed. ...`,
+because the purpose of this Gap, that the caller learns it left a chunk behind, is unmet exactly
+where something went wrong if the failure stays in a log. A put whose acknowledgement was lost
+and resent prints neither: the resend's sweep removes nothing and the first attempt's answer is
+gone, so the client cannot name what was removed and does not claim that nothing was.
+
 ## Context
 
 ### Background
@@ -436,8 +449,10 @@ lands last, behind a completed backfill:
    whose `log.info` fires only when `swept > 0` today even though its
    response map has always carried the `kept` count (`:5756`). The engine
    is not a model to match here; it has the identical gap.
-5. **Fix the stale documentation** (Gap 6) and **add `superseded: [...]`
-   to the `store_put` result** (Gap 7, cheapest, non-blocking).
+5. **Fix the stale documentation** (Gap 6) and **report supersession in the
+   `store_put` result** (Gap 7, cheapest, non-blocking). As built (Step 13): a
+   `Superseded:` line after `Stored:`, not a `superseded: [...]` field, naming the chunks the
+   sweep removed or saying that it did not finish.
 
 ### Technical Design
 
@@ -1529,7 +1544,27 @@ outside every changeset, so no checksum moved) and `nexus-wbfpw.24` the `store_p
 comment in `mcp/core.py`, both to the behavior as built (engine sweep, `live(c)`, the
 quarantining reaper with its floor and census refusals and its defaults).
 
-#### Step 13: Add `superseded: [...]` to the `store_put` result (Gap 7)
+#### Step 13: Report supersession in the `store_put` result (Gap 7)
+
+Done, 2026-10-02: `nexus-wbfpw.25`. Wire (engine, `[additive]`, in the wire-contract ledger):
+each `sweep_detail` entry of `POST /v1/catalog/manifest/write_many`, `/append` and
+`/append_many` gains `swept_chashes` (hex, ascending, at most 300, from the sweep DELETE's
+`RETURNING`, so a dropped chash another document owns, or a live note's identity, is not in it)
+and `swept_chashes_truncated`; `swept` stays the exact count. Errored entries carry `[]` and
+`false`. It is not the response's `dropped_chashes`, which is the manifest's drop list. Client
+(`note_write.superseded_line`, shared by MCP `store_put` and `nx store put`), one extra line
+after `Stored:`:
+
+- the sweep removed chunks: `Superseded: N chunk(s) removed: [<chash>, <chash>, <chash>] (and M
+  more)`; an engine without the field gives `Superseded: N chunks removed`;
+- the sweep did not finish (`sweep_skipped`, any reason: gate_timeout, statement_timeout,
+  sweep_failed, before_read_failed): `Superseded: the sweep did not finish; up to N replaced
+  chunk(s) were not removed. Those no other document owns are hidden from search; the engine
+  reaper collects them later.` `up to N` is the manifest's drop list, an upper bound, since the
+  sweep never ran; with no drop list (the previous manifest could not be read) the line names no
+  count;
+- nothing removed and nothing left behind (a first put, an identical re-put, a dropped chunk
+  another document owns), or a resend after a lost acknowledgement: no line.
 
 #### Step 14: Ship a `catalog doctor` check for census-superseded chunks the normal reader still returns — the divergence signature named under Failure Modes (as built: `nx catalog doctor --visible-outside-manifest`, `nexus-wbfpw.26`)
 
@@ -1623,6 +1658,24 @@ None.
   not reaped (the orphaning record gave them a fresh grace when batch 1 dropped them), the run completes,
   and a collection that fails the census gate is refused visibly with nothing
   deleted.
+- **Scenario** (Step 13, added 2026-10-02): re-put a titled note with changed content —
+  **Verify**: the result is `Stored: ...` and a second line `Superseded: 1 chunk removed:
+  [<old chash>]` (`tests/test_wbfpw25_superseded_report.py`, real engine, MCP and CLI); a first
+  put and an identical re-put print `Stored:` alone; a re-put whose dropped chunk another
+  document owns prints `Stored:` alone; engine half, `CatalogManifestSweepRepositoryTest`
+  Order 60-62: `swept_chashes` is exactly the deleted set, the 300 lowest at the cap with
+  `swept` exact, empty when nothing was deleted.
+- **Scenario** (Step 13, failed sweep): the sweep errors (gate timeout, statement timeout,
+  failed delete, unreadable previous manifest) — **Verify**: the engine entry is errored with
+  `swept_chashes` `[]` and `swept_chashes_truncated` false for every reason
+  (`CatalogManifestSweepRepositoryTest`, where each failure is forced on the real engine), and
+  the client prints `Superseded: the sweep did not finish; ...` and not `removed:` (the same
+  test file; the engine runs the write with the sweep off and the response is rewritten to the
+  errored shape, since a real sweep failure on the shared test substrate would leak into other
+  tests). A skipped sweep with a drop list known to be empty prints nothing.
+- **Scenario** (Step 13, lost acknowledgement): the first attempt commits and sweeps, its answer
+  is lost, the client resends — **Verify**: no `Superseded:` line is printed, since the resend
+  swept nothing and the first attempt's answer is unknown.
 
 ## Validation
 
@@ -1914,3 +1967,8 @@ To be completed at gate (Layer 3 AI critique).
   only, `get` reader only (no search probe, because the engine never returns text for a
   non-live chunk), bounded by a row and a time budget, operator-pull with one post-deploy run
   in `nexus-wbfpw.54`, and a vacuous run says so instead of passing.
+- 2026-10-02: Step 13 built (bead `nexus-wbfpw.25`; T2 `nexus/review-wbfpw25-code`,
+  `nexus/review-wbfpw25-critique`, `nexus/wbfpw25-r2`; text only, no status change). Gap 7 and
+  Approach item 5 say the result is a `Superseded:` line, not a `superseded: [...]` field, and
+  Step 13 and the Test Plan carry the wire shape, the three lines (removed, sweep did not
+  finish, none) and the lost-acknowledgement case.
