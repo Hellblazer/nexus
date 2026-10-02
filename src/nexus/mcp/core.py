@@ -5325,12 +5325,19 @@ def _annotation_line_for_entry(entry) -> str:
 # swept in the same request: put_note writes the chunks and the manifest as
 # ONE write_manifest_many with sweep=True (RDR-223), and the engine deletes
 # what the new manifest dropped in its own transaction after the manifest
-# commits. If that sweep errors (a gate or statement timeout), the old chunk
-# stays in T3 but raw search and get no longer return it: it has no live
-# own-collection manifest row, so live(c) hides it (RDR-192). The engine
-# reaper then moves it to a quarantine-* collection once it has been
-# ownerless for 30 days and deletes it 14 days after that (nexus-2x9xa;
-# docs/operations/engine-reaper.md). Placeholder
+# commits. The sweep keeps a dropped chunk that another manifest row (a
+# tombstoned owner's included) or a live note's own identity still names. If
+# the sweep errors (a gate or statement timeout), the old chunk stays in T3
+# but raw search and get no longer return it: it has no live own-collection
+# manifest row, so live(c) hides it (RDR-192). The engine reaper then moves
+# it to a quarantine-* collection and deletes it after the retention window
+# (nexus-2x9xa; docs/operations/engine-reaper.md). Those timings are
+# defaults: a chunk must have been ownerless for 30 days, the pass runs
+# hourly, and the retention is 14 days (NX_REAPER_QUARANTINE_RETENTION_DAYS).
+# The move is conditional: the pass refuses a collection that fails the
+# floor (a large reapable fraction) or the census (any legacy-unmanifested
+# chunk). `nx t3 quarantine restore` returns the bytes, but the chunk stays
+# hidden unless a live owner exists or reattach writes a manifest row. Placeholder
 # refusal is nexus-0fw11: there is no default subject, because "default"
 # is what minted `knowledge__knowledge`. `agent` attribution defaulting to
 # the "mcp" marker (never blank, never the indexer's own "nexus-indexer"
