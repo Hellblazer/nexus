@@ -5341,7 +5341,11 @@ def _annotation_line_for_entry(entry) -> str:
 # When the sweep did delete chunks the result carries a second line,
 # "Superseded: N chunk(s) removed: [...]", from the engine's sweep_detail
 # swept_chashes (RDR-192 Step 13, nexus-wbfpw.25); a first put, an identical
-# re-put and a swept-nothing re-put read exactly as before. Placeholder
+# re-put and a swept-nothing re-put read exactly as before. When the sweep
+# errored instead (sweep_skipped), the second line says it did not finish and
+# the replaced chunks were not removed (note_write.superseded_line); a resend
+# after a lost acknowledgement prints neither, since its own sweep removed
+# nothing and the first attempt's answer is gone. Placeholder
 # refusal is nexus-0fw11: there is no default subject, because "default"
 # is what minted `knowledge__knowledge`. `agent` attribution defaulting to
 # the "mcp" marker (never blank, never the indexer's own "nexus-indexer"
@@ -5591,7 +5595,7 @@ def store_put(
             if len(pieces) > 1 else ""
         )
         stored = f"Stored: {doc_id} -> {col_name}{split_note}"
-        # RDR-192 Step 13: a second line, only when the re-put's sweep removed chunks.
+        # RDR-192 Step 13: a second line, only when the re-put's sweep removed chunks or did not finish.
         superseded = superseded_line(outcome)
         return f"{stored}\n{superseded}" if superseded else stored
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)

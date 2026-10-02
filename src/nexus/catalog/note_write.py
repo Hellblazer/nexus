@@ -761,18 +761,32 @@ SUPERSEDED_CHASHES_SHOWN = 3
 
 
 def superseded_line(outcome: PutNoteOutcome) -> str | None:
-    """The line ``store_put`` and ``nx store put`` add when a re-put removed chunks (RDR-192 Step 13).
+    """The line ``store_put`` and ``nx store put`` add when a re-put superseded chunks (RDR-192 Step 13).
 
-    ``Superseded: N chunk(s) removed: [<chash>, ...]`` names the chunks the engine's sweep deleted in
-    the note's own write, at most :data:`SUPERSEDED_CHASHES_SHOWN` of them, then ``(and M more)``.
-    ``None`` when the sweep removed nothing (a first put, an identical re-put, a dropped chunk another
-    document still owns), so those read exactly as before. An engine that predates ``swept_chashes``
-    gives the count only. The count is the engine's own ``swept``, exact whatever its cap on the list.
-    A chunk the sweep could not remove (a gate timeout) is not reported: it is hidden by ``live(c)``
-    and the engine reaper collects it later, and this line says what was removed.
+    Two shapes, never both, and ``None`` when neither applies (a first put, an identical re-put, a
+    dropped chunk another document still owns), so those read exactly as before:
+
+    * the sweep removed chunks: ``Superseded: N chunk(s) removed: [<chash>, ...]`` names what the
+      engine's sweep DELETED in the note's own write, at most :data:`SUPERSEDED_CHASHES_SHOWN` of them,
+      then ``(and M more)``. An engine that predates ``swept_chashes`` gives the count only. The count
+      is the engine's own ``swept``, exact whatever its cap on the list.
+    * the sweep did not finish (``sweep_skipped``: a gate or statement timeout, or a failed delete):
+      ``Superseded: the sweep did not finish; ...`` says the replaced chunks were NOT removed. They stay
+      in T3, hidden by ``live(c)`` unless another document owns them, until the engine reaper collects
+      them later. ``up to N`` is the manifest's drop list, an upper bound: the sweep never ran, so which
+      of those another document owns is not known. When the engine could not read the previous manifest
+      there is no list and no count. A drop list KNOWN to be empty leaves nothing behind and no line.
     """
     write = outcome.write
-    if write is None or write.swept <= 0:
+    if write is None:
+        return None
+    if write.sweep_skipped > 0 and write.dropped_chashes != []:
+        n = len(write.dropped_chashes) if write.dropped_chashes else 0
+        what = (f"up to {n} replaced chunk{' was' if n == 1 else 's were'} not removed" if n
+                else "the replaced chunks were not removed")
+        return (f"Superseded: the sweep did not finish; {what}. Those no other document owns are "
+                "hidden from search; the engine reaper collects them later.")
+    if write.swept <= 0:
         return None
     count = write.swept
     head = f"Superseded: {count} chunk{'' if count == 1 else 's'} removed"

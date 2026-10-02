@@ -180,7 +180,8 @@ def put_cmd(
     pieces = outcome.pieces
     split_note = f"  ({len(pieces)} chunks, split to the embedding model's token window)" if len(pieces) > 1 else ""
     click.echo(f"Stored: {outcome.doc_id}  →  {col_name}{split_note}")
-    # RDR-192 Step 13: only when the re-put's sweep removed chunks, so a first put prints as before.
+    # RDR-192 Step 13: only when the re-put's sweep removed chunks (or did not finish), so a first put
+    # prints as before.
     if (superseded := superseded_line(outcome)) is not None:
         click.echo(superseded)
 
