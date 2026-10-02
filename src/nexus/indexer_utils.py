@@ -347,13 +347,14 @@ def live_note_chashes(documents) -> set[str]:
     engine read path uses live(c), which requires a live own-collection
     owner), but a legacy note stored before ``nexus-b6enc`` may still have
     no manifest row. The one remaining caller is the ``mcp_infra``
-    superseded-vector sweeps (via ``_legacy_notes_provider``), which keep
-    this guard for a tenant whose ``rdr192-manifest-backfill`` rung record is
-    not verified and drop it once the record is (RDR-192 Step 11,
-    nexus-wbfpw.22: the guard cannot go for every install at once, because a
-    legacy note's chash can reach a dropped set through an unrelated document
-    that shared its text, and the delete those sweeps issue has no notes
-    guard of its own). ``nx t3 gc`` and the prune sites no longer call it.
+    superseded-vector sweeps, which keep this guard permanently: RDR-192
+    Step 11 retains it by decision (Sam 2026-10-02) rather than removing it
+    or gating it on the ``rdr192-manifest-backfill`` rung record. A legacy
+    note's chash can reach a dropped set through an unrelated document that
+    shared its text, the delete those sweeps issue has no notes guard of its
+    own, and the rung record is an attestation, not a census. The cost is
+    bounded over-retention (a dangling stamp keeps one chunk until the
+    reaper collects it). ``nx t3 gc`` and the prune sites no longer call it.
     A manifest-diff sweep (``orphaned_chashes`` above, or
     the retired client alive-set diff) only ever sees the
     SECOND half of that OR: both ``docs_for_chashes`` and
@@ -469,7 +470,9 @@ def non_complete_documents(documents) -> list:
     out = []
     for e in documents or []:
         if is_note_shaped(e):
-            continue  # a note carries no index_state and has no index run to be mid-way through (its chunk is protected by its manifest row, or by gc's census gate when legacy)
+            # a note carries no index_state and has no index run to be mid-way through
+            # (its chunk is protected by its manifest row, or by gc's census gate when legacy)
+            continue
         if not getattr(e, "index_state_reported", True):
             continue  # pre-RUNFENCE engine: floor-tolerant, no signal to act on
         if getattr(e, "index_state", None) != "complete":

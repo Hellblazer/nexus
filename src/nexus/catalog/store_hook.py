@@ -1207,17 +1207,15 @@ def restore_pre_call_stamp(
     attempted. Left in place after a write that did not land, that stamp
     names a chunk that was never written.
 
-    This function exists only because the one remaining consumer of
+    This function exists because the one remaining consumer of
     :func:`nexus.indexer_utils.live_note_chashes`, the ``mcp_infra``
-    supersede sweeps (for a tenant whose ``rdr192-manifest-backfill`` rung
-    record is not verified; ``nx t3 gc`` and the prune sites no longer read
-    it), still reads a document's ``meta.doc_id`` as "a manifest-less note
-    owns this chash" and so protects a chash the stamp names from deletion,
-    forever. A dangling stamp therefore over-retains: a later note that owns
-    and then drops that chash has it kept. It is retired, together with
-    ``pre_call_doc_id_out`` and its test, when that unverified-tenant branch
-    goes (nexus-wbfpw.22 left it standing: the guard is gated per tenant, not
-    removed).
+    supersede sweeps (``nx t3 gc`` and the prune sites no longer read it),
+    reads a document's ``meta.doc_id`` as "a manifest-less note owns this
+    chash" and so protects a chash the stamp names from deletion. That guard
+    is permanent (RDR-192 Step 11 retains it by decision, Sam 2026-10-02), so
+    this function, ``pre_call_doc_id_out`` and their test stay with it. A
+    dangling stamp over-retains: a later note that owns and then drops that
+    chash has it kept until the reaper collects it.
 
     Restores *catalog_doc_id*'s ``meta.doc_id`` to *pre_call_doc_id*, the
     same document's identity as it stood before this call touched it, or

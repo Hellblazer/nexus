@@ -2777,9 +2777,12 @@ def sweep_deferred_superseded_vectors(doc_id: str) -> None:
                 doc_id=doc_id, collection=collection, error=str(exc))
             _record_superseded_sweep_skip(doc_id, collection, "before_read_failed")
             return
+        from nexus.indexer_utils import CollectionDocumentsCache, live_note_chashes  # noqa: PLC0415 — deferred: avoids a module-load-time cross-import
+
+        _cache = CollectionDocumentsCache(reader, collection)
         _sweep_superseded_vectors(
             None, doc_id, candidates, [{"chash": h} for h in final_chashes], collection,
-            reader=reader, notes_provider=_legacy_notes_provider(reader, collection))
+            reader=reader, notes_provider=lambda: live_note_chashes(_cache.get()))
     finally:
         _close = getattr(reader, "close", None)
         if callable(_close):
@@ -2819,54 +2822,6 @@ def discard_deferred_superseded_vectors(doc_id: str) -> int:
     return len(candidates)
 
 
-def _legacy_notes_provider(reader, collection: str | None, *, ledger=None):
-    """The ``notes_provider`` both production sweep sites hand to the sweeps
-    (RDR-192 Step 11, bead nexus-wbfpw.22).
-
-    The sweeps keep a chash that a live, manifest-less legacy note names as
-    its own identity (``indexer_utils.live_note_chashes``). That chash CAN be
-    in a dropped set: an unrelated document that shared the note's text and
-    then dropped it puts it there, and the T3 delete these sweeps issue
-    (``PgVectorRepository.delete``'s own-collection anti-join) has no notes
-    guard of its own. So the guard goes per tenant, not for everyone: it is
-    dropped only when this tenant's ``rdr192-manifest-backfill`` rung record is
-    verified (``rdr192_backfill_complete``, the client side of the engine's
-    ``Rdr192BackfillGate``, the same fact the reaper and the engine sweep
-    read). The rung records only after a census over the tenant read zero
-    legacy-unmanifested chunks, so for such a tenant a manifest-less note
-    chunk is not a note any more and the union guard is the only guard left.
-    No verified record, or a ledger that cannot be read: the guard stays.
-
-    The returned callable is what the sweeps already take, evaluated lazily
-    (a sweep whose union guard cleared every candidate never calls it) and
-    memoized, so one ``_manifest_write_loop`` call reads the ledger at most
-    once and fetches the collection's documents at most once, however many
-    documents trigger a sweep. ``ledger`` is a test seam; production passes
-    nothing and the gate opens the engine-backed ``HttpLadderStore``.
-    """
-    from nexus.indexer_utils import CollectionDocumentsCache, live_note_chashes  # noqa: PLC0415 — deferred: avoids a module-load-time cross-import
-
-    cache = CollectionDocumentsCache(reader, collection or "")
-    verified: list[bool] = []
-
-    def _provider() -> set[str]:
-        if not verified:
-            from nexus.upgrade_ladder.rungs.rdr192_manifest_backfill import (  # noqa: PLC0415 — deferred: the rung module pulls the backfill machinery in, and this runs only when a sweep has surviving candidates
-                rdr192_backfill_complete,
-            )
-
-            verified.append(rdr192_backfill_complete(ledger))
-            import structlog  # noqa: PLC0415 — structlog deferred to function scope (lazy logger init)
-            structlog.get_logger().info(
-                "superseded_sweep_legacy_note_guard", collection=collection,
-                guard_on=not verified[0])
-        if verified[0]:
-            return set()
-        return live_note_chashes(cache.get())
-
-    return _provider
-
-
 def _union_guard_reason(orphaned: object) -> str:
     """Why the union guard returned no orphan, for the ``superseded_sweep_kept``
     event (nexus-wbfpw.35): ``orphaned_chashes`` fails open to an empty result, so
@@ -2901,16 +2856,17 @@ def _sweep_superseded_vectors(cat, doc_id, before: set[str], chunks: list[dict],
     sees MANIFESTED references, so it cannot tell a chash that fell out of
     THIS document's manifest from a chash that never had one at all — a
     manifest-less legacy ``store_put`` / ``nx store put`` note (reads hide
-    it since RDR-192 Step 5, but this sweep keeps it for a tenant whose
-    ``rdr192-manifest-backfill`` rung is not verified, RDR-192 Step 11).
-    Surviving union-guard candidates are additionally checked against
-    ``notes_provider()`` (production: :func:`_legacy_notes_provider`, which
-    is ``nexus.indexer_utils.live_note_chashes`` over a
-    ``CollectionDocumentsCache``-memoized document list for such a tenant and
-    an empty set once the rung is verified — round 2 SIGNIFICANT 1: a batch
-    reindex calls this function once per orphan-triggering document, so the
-    caller shares ONE provider across the whole batch instead of this
-    function re-fetching per document) before anything is deleted.
+    it since RDR-192 Step 5, but deleting sweeps keep it, permanently: RDR-192
+    Step 11 retains this guard by decision, Sam 2026-10-02, because a legacy
+    note's chash can reach a dropped set through an unrelated document that
+    shared its text, and the delete has no notes guard of its own). Surviving
+    union-guard candidates are additionally checked against
+    ``notes_provider()`` (typically ``nexus.indexer_utils.live_note_chashes``
+    over a ``CollectionDocumentsCache``-memoized document list — round 2
+    SIGNIFICANT 1: a batch reindex calls this function once per
+    orphan-triggering document, so the caller shares ONE cache across the
+    whole batch instead of this function re-fetching per document) before
+    anything is deleted.
 
     Fail-open throughout: a sweep that cannot prove a row is orphaned leaves it
     alone. Over-retention is recoverable; over-deletion is not. Every skip that
@@ -3285,7 +3241,12 @@ def _manifest_write_loop(cat, by_doc, collection: str, *, reader,
     # construct even when nothing ever triggers a sweep — the underlying
     # fetch is fully lazy (CollectionDocumentsCache.get() is never called
     # unless something actually has surviving union-guard candidates).
-    _notes_provider = _legacy_notes_provider(reader, collection)
+    from nexus.indexer_utils import CollectionDocumentsCache, live_note_chashes  # noqa: PLC0415 — deferred: avoids a module-load-time cross-import
+
+    _notes_cache = CollectionDocumentsCache(reader, collection or "")
+
+    def _notes_provider() -> set[str]:
+        return live_note_chashes(_notes_cache.get())
 
     if callable(getattr(cat, "write_manifest_many", None)):
         # No len(by_doc) gate (critique Critical, nexus-u2kwq): write_many

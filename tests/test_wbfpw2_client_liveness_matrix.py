@@ -356,11 +356,6 @@ def test_client_liveness_matrix_pins_todays_verdict(t2_service_env):
     #    gate: the collection reads legacy-unmanifested = 1, so a real run
     #    refuses (``test_wbfpw18_t3_gc_substrate.py``). The column flipped
     #    False -> True with that move.
-    #    RDR-192 Step 11 (nexus-wbfpw.22): this column pins the PREDICATE, which
-    #    is unchanged. What changed is its one remaining consumer: the mcp_infra
-    #    sweeps (``_legacy_notes_provider``) apply it only for a tenant with no
-    #    verified ``rdr192-manifest-backfill`` record; with one they drop it and
-    #    R8 is swept like R1 (``tests/test_wbfpw22_legacy_note_guard_gate.py``).
     #
     # (The per-row ``rollback`` verdict this table once pinned went with
     # the client-side chunk rollback at nexus-z0o2p.32: no writer
