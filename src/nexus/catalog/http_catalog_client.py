@@ -1817,12 +1817,13 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
 
     def list_trash(self, *, limit: int = 200, offset: int = 0) -> list[dict[str, Any]]:
         """GET /v1/catalog/trash — this tenant's tombstoned documents,
-        newest-tombstoned first (nexus-dkymw). Read-only counterpart to
+        newest-tombstoned first, ties on ``deleted_at`` broken by tumbler
+        (nexus-dkymw). Read-only counterpart to
         :meth:`restore_document`: lets a caller see what is restorable
         before calling it. Each entry carries ``tumbler``, ``title``,
-        ``physical_collection``, ``corpus``, ``content_type``, and
-        ``deleted_at``, returned verbatim from the engine (this method does
-        not reshape it).
+        ``physical_collection``, ``corpus``, ``content_type``, ``file_path``
+        (an empty string when the document has none) and ``deleted_at``, returned
+        verbatim from the engine (this method does not reshape it).
 
         A pre-nexus-dkymw engine has no matching route and answers 404 —
         propagated raw, same discipline as :meth:`restore_document`.
