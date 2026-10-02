@@ -345,15 +345,28 @@ GRANT EXECUTE ON FUNCTION nexus.reaper_quarantine_chunks(text, text, text, text,
         origin read (through the generated jOOQ routine). It is a LANGUAGE sql function over the chunk's metadata,
         SECURITY INVOKER and IMMUTABLE, so the planner inlines it into the calling statement (a plan with the
         function is the plan without it: EngineOwnedPredicateIntegrationTest pins that, and that no site is
-        open-coded again). It is the open-coded AND verbatim, so it is NULL when a stamp is missing: a WHERE
-        reads that as not owned, and the negation is spelled IS NOT TRUE (never NOT), as vectors-026-1 does. It has
-        no COALESCE on purpose: a wrapper the planner cannot see through would replace the per-key selectivity
-        estimates with a flat default and change the plan the open-coded form got. Both vectors-024 and vectors-026 are in no engine tag, so they
-        are edited in place and no new changeset id carries the function (Sam, 2026-10-02): a database that ran an
-        earlier draft of either meets a checksum mismatch and must be re-walked.
+        open-coded again). It is TOTAL: the open-coded AND wrapped in IS TRUE, so it is true or false and never
+        NULL. The bare AND is NULL for every row that has no quarantined_by key, which is every client-moved
+        row, so a NOT f(...) written by a later caller (SQL, plpgsql IF NOT, CASE, jOOQ .not()) would be NULL
+        for exactly the rows gc_expire_quarantine exists to expire, and a WHERE would silently never expire
+        them. Total, every spelling of the negation agrees; vectors-026-1 still writes IS NOT TRUE, which is
+        correct either way. There is no COALESCE, which would hide the keys behind a flat default selectivity
+        estimate; IS TRUE keeps the AND visible to the planner and the access path of every caller is the one the
+        open-coded form got (EngineOwnedPredicateIntegrationTest compares the two plans).
+
+        RE-WALK (nexus-wbfpw.57). Both vectors-024 and vectors-026 are in no engine tag, so vectors-024-2 and
+        vectors-026-1 are edited in place and no new changeset id carries the function (Sam, 2026-10-02). A
+        database that ran an earlier develop build of EITHER fails Liquibase validation on the changed checksum,
+        and SchemaMigrator wraps that into a MigrationException: a boot crash loop. The remedy is to delete the
+        DATABASECHANGELOG rows for vectors-024-2 AND vectors-026-1 (both are CREATE OR REPLACE and GRANT, so
+        re-running them is idempotent; Liquibase runs 024-2 then 026-1 in include order) or to recreate the
+        database. Do NOT null the md5sum instead: that accepts the changeset as already run, keeps the old
+        open-coded bodies and creates no function, so nexus.reaper_owns_quarantined_row stays missing. A test
+        substrate and the local-service gate use throwaway databases and are not affected; a standing local dev
+        service, or a rehearsal database that walked an earlier develop build, is.
     -->
     <changeSet id="vectors-024-2" author="nexus-2x9xa">
-        <comment>nexus.reaper_owns_quarantined_row(metadata) and nexus.reaper_expire_quarantine: the one definition of the engine-owned-row predicate (quarantined_by=engine-reaper and reaper_quarantined_at equal to quarantined_at; NULL when a stamp is missing), then the engine's expiry of the chunks the reaper moved. The expiry deletes at most p_row_limit rows the predicate owns, past the cutoff, with no manifest row of the origin naming them, no fraction floor; returns expired and protected_count (manifest-named); one engine-reaper gc_audit row per call that deletes.</comment>
+        <comment>nexus.reaper_owns_quarantined_row(metadata) and nexus.reaper_expire_quarantine: the one definition of the engine-owned-row predicate (quarantined_by=engine-reaper and reaper_quarantined_at equal to quarantined_at; total, false when a stamp is missing), then the engine's expiry of the chunks the reaper moved. The expiry deletes at most p_row_limit rows the predicate owns, past the cutoff, with no manifest row of the origin naming them, no fraction floor; returns expired and protected_count (manifest-named); one engine-reaper gc_audit row per call that deletes.</comment>
         <sql splitStatements="false" stripComments="false"><![CDATA[
 CREATE OR REPLACE FUNCTION nexus.reaper_owns_quarantined_row(p_metadata jsonb)
 RETURNS boolean
@@ -362,14 +375,14 @@ IMMUTABLE
 PARALLEL SAFE
 SECURITY INVOKER
 AS $$
-    SELECT p_metadata->>'quarantined_by'            = 'engine-reaper'
-       AND p_metadata->>'reaper_quarantined_at'     = p_metadata->>'quarantined_at'
+    SELECT ((p_metadata->>'quarantined_by'          = 'engine-reaper')
+        AND (p_metadata->>'reaper_quarantined_at'   = p_metadata->>'quarantined_at')) IS TRUE
 $$;
 
 GRANT EXECUTE ON FUNCTION nexus.reaper_owns_quarantined_row(jsonb) TO nexus_svc;
 
 COMMENT ON FUNCTION nexus.reaper_owns_quarantined_row(jsonb) IS
-    'The one definition of "the engine reaper owns this quarantined chunk" (nexus-wbfpw.57): metadata quarantined_by = engine-reaper AND reaper_quarantined_at = quarantined_at. A row whose stamps disagree (a client moved it again with a new quarantined_at, a restore left the tag) is the client''s. NULL (not false) when a stamp is missing, exactly as the open-coded AND was: a WHERE treats it as not owned, and the negation is written IS NOT TRUE, never NOT. Inlinable (LANGUAGE sql, no SET, SECURITY INVOKER): call it, never open-code the three keys.';
+    'The one definition of "the engine reaper owns this quarantined chunk" (nexus-wbfpw.57): metadata quarantined_by = engine-reaper AND reaper_quarantined_at = quarantined_at. A row whose stamps disagree (a client moved it again with a new quarantined_at, a restore left the tag) is the client''s. Total: false (never NULL) when a stamp or the tag is missing, so NOT f(...) and f(...) IS NOT TRUE agree on every row. Inlinable (LANGUAGE sql, no SET, SECURITY INVOKER): call it, never open-code the three keys.';
 
 CREATE OR REPLACE FUNCTION nexus.reaper_expire_quarantine(
     p_tenant_id              text,

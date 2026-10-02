@@ -96,7 +96,9 @@ BEGIN
        AND COALESCE(c.metadata->>'origin_collection', p_origin_collection) = p_origin_collection
        -- Skip the rows tagged quarantined_by = 'engine-reaper' (nexus.reaper_owns_quarantined_row, vectors-024-2):
        -- the engine's own rows are expired by nexus.reaper_expire_quarantine, never here. This comment keeps the
-       -- literal in the function's stored body (prosrc), which conexus's deploy census matches on.
+       -- literal in the function's stored body (prosrc) as a TRANSITION SHIM for conexus's existing deploy census,
+       -- which matches on it; the census should read pg_proc for nexus.reaper_owns_quarantined_row instead, and the
+       -- comment can go once it does. It is not the contract: the contract is the call below.
        AND nexus.reaper_owns_quarantined_row(c.metadata) IS NOT TRUE;
 
     v_expired := COALESCE(array_length(v_chashes, 1), 0);

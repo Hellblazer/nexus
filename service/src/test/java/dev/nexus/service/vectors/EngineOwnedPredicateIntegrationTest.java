@@ -40,18 +40,25 @@ import static org.assertj.core.api.Assertions.assertThat;
  * nexus-wbfpw.57: the reaper's "engine-owned row" predicate has ONE definition,
  * {@code nexus.reaper_owns_quarantined_row(metadata)} (vectors-024-2), and every reader calls it.
  *
- * <p>Four things are pinned, each one a way the single definition could quietly stop being single or stop being cheap:
+ * <p>Five things are pinned, each one a way the single definition could quietly stop being single, stop being total,
+ * or stop being cheap:
  * <ul>
- *   <li>the truth table of the function itself (stamps agreeing, disagreeing, missing, another tagger), and that it
- *       NULL semantics, which the negated form {@code f(...) IS NOT TRUE} (what gc_expire_quarantine writes) depends on;</li>
- *   <li>its catalog properties: LANGUAGE sql, IMMUTABLE, SECURITY INVOKER, executable by {@code nexus_svc}, which are
- *       what make the planner inline it;</li>
+ *   <li>the truth table of the function itself (stamps agreeing, disagreeing, missing, another tagger): it is TOTAL,
+ *       true or false and never NULL, so {@code NOT f(...)} and {@code f(...) IS NOT TRUE} read a row with no tag, which
+ *       is most client rows, the same way, and a future {@code NOT} cannot silently stop client quarantine from
+ *       expiring;</li>
+ *   <li>its catalog properties: LANGUAGE sql, IMMUTABLE, PARALLEL SAFE, SECURITY INVOKER, executable by
+ *       {@code nexus_svc}, which are what make the planner inline it;</li>
  *   <li>that it inlines: planned under {@code nexus_svc}, a statement that calls it shows no function in the plan and
- *       the same plan, node for node, as the open-coded predicate it replaced, for the SELECT, the DELETE and the
- *       DISTINCT-origin read the three call shapes use;</li>
- *   <li>that nothing open-codes it again: no changelog outside the function's own body, and no Java main source, reads
- *       the {@code quarantined_by} or {@code reaper_quarantined_at} key. The Java half is behavioural too
- *       ({@code ReaperRepository#taggedOrigins} returns exactly the engine-owned origins).</li>
+ *       the same access path (nodes, index, index condition) as the open-coded predicate it replaced, for the SELECT,
+ *       the DELETE, the negated shapes and the DISTINCT-origin read the call shapes use;</li>
+ *   <li>that both expiry functions use it, by behaviour: seeded engine-tagged, client and stale-tagged rows are
+ *       expired by exactly one of {@code reaper_expire_quarantine} and {@code gc_expire_quarantine}, whichever runs
+ *       first;</li>
+ *   <li>that nothing open-codes it again: no changelog outside the function's own body reads the
+ *       {@code quarantined_by} or {@code reaper_quarantined_at} key by any operator, and no Java main source names
+ *       either key. The Java half is behavioural too ({@code ReaperRepository#taggedOrigins} returns exactly the
+ *       engine-owned origins).</li>
  * </ul>
  * Everything database-side is typed jOOQ, so this class adds nothing to the raw-SQL ratchet.
  */
@@ -91,6 +98,7 @@ class EngineOwnedPredicateIntegrationTest {
             DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
             PgContainerHelper.insertCollection(ctx, TENANT, QUAR);
             PgContainerHelper.insertCollection(ctx, TENANT, OTHER);
+            PgContainerHelper.insertCollection(ctx, TENANT, ORIGIN_P);
             for (int i = 0; i < 300; i++) {
                 PgContainerHelper.insertCollection(ctx, TENANT, "knowledge__engine-owned-pad" + i + "__minilm-l6-v2-384__v1");
             }
@@ -144,20 +152,28 @@ class EngineOwnedPredicateIntegrationTest {
             ctx.select(reaperOwnsQuarantinedRow(JSONB.valueOf(metadataJson))).fetchOne(0, Boolean.class));
     }
 
-    /** What gc_expire_quarantine asks of a row: is it NOT the engine's. */
+    /** What gc_expire_quarantine asks of a row, spelled the way vectors-026-1 spells it: is it NOT the engine's. */
     private Boolean clientsRow(String metadataJson) {
         return tenantScope.withTenant(TENANT, ctx ->
             ctx.select(DSL.field(reaperOwnsQuarantinedRow(JSONB.valueOf(metadataJson))).isDistinctFrom(true))
                .fetchOne(0, Boolean.class));
     }
 
+    /** The spelling the function must make safe: a bare NOT, which is NULL on a NULL operand. */
+    private Boolean notOwned(String metadataJson) {
+        return tenantScope.withTenant(TENANT, ctx ->
+            ctx.select(DSL.not(reaperOwnsQuarantinedRow(JSONB.valueOf(metadataJson)))).fetchOne(0, Boolean.class));
+    }
+
     @Test
-    void truthTable_ownedOnlyWhenTagAndBothStampsAgree() {
+    void truthTable_ownedOnlyWhenTagAndBothStampsAgree_andIsTotal() {
         assertThat(owns(tagged("o", STAMP, STAMP))).as("tag + equal stamps").isTrue();
         assertThat(clientsRow(tagged("o", STAMP, STAMP))).isFalse();
+        assertThat(notOwned(tagged("o", STAMP, STAMP))).isFalse();
 
-        // Every way to be not owned is non-TRUE (false, or NULL when a stamp is missing, exactly as the open-coded
-        // AND was) and reads as the client's row through IS NOT TRUE, the spelling vectors-026-1 uses.
+        // Every way to be not owned is a plain FALSE, never NULL (nexus-wbfpw.57 round 2): an untagged row, most
+        // client rows, has no quarantined_by at all, and a NULL there made NOT f(...) NULL, which a WHERE reads as
+        // "not the client's" and so never expired the row. Total, so every spelling of the negation agrees.
         List<String> notOwned = List.of(
             tagged("o", "2026-08-01T00:00:00Z", STAMP),
             "{\"quarantined_by\":\"engine-reaper\",\"quarantined_at\":\"" + STAMP + "\"}",
@@ -166,18 +182,19 @@ class EngineOwnedPredicateIntegrationTest {
             "{\"quarantined_by\":\"client\",\"reaper_quarantined_at\":\"" + STAMP + "\",\"quarantined_at\":\""
                 + STAMP + "\"}",
             "{\"reaper_quarantined_at\":\"" + STAMP + "\",\"quarantined_at\":\"" + STAMP + "\"}",
+            "{\"origin_collection\":\"origin-client\",\"quarantined_at\":\"" + STAMP + "\"}",
             "{}");
         for (String m : notOwned) {
-            assertThat(owns(m)).as("not owned: %s", m).isNotEqualTo(true);
-            assertThat(clientsRow(m)).as("IS NOT TRUE reads it as the client's: %s", m).isTrue();
+            assertThat(owns(m)).as("not owned, and not NULL: %s", m).isFalse();
+            assertThat(notOwned(m)).as("NOT f(...) reads it as the client's: %s", m).isTrue();
+            assertThat(clientsRow(m)).as("f(...) IS NOT TRUE reads it as the client's: %s", m).isTrue();
         }
-        assertThat(owns(notOwned.get(0))).as("stale reaper stamp is a plain false").isFalse();
     }
 
     // ---- 2. what makes it inlinable -----------------------------------------------------------------------------
 
     @Test
-    void functionIsSqlImmutableSecurityInvokerAndExecutableByTheServiceRole() throws Exception {
+    void functionIsSqlImmutableParallelSafeSecurityInvokerAndExecutableByTheServiceRole() throws Exception {
         var proc = DSL.table(DSL.name("pg_catalog", "pg_proc"));
         var lang = DSL.table(DSL.name("pg_catalog", "pg_language"));
         var nsp = DSL.table(DSL.name("pg_catalog", "pg_namespace"));
@@ -188,6 +205,7 @@ class EngineOwnedPredicateIntegrationTest {
                         DSL.field(DSL.name("p", "prosecdef"), Boolean.class),
                         DSL.cast(DSL.field(DSL.name("p", "proconfig")), SQLDataType.VARCHAR),
                         DSL.field(DSL.name("p", "proretset"), Boolean.class),
+                        DSL.field(DSL.name("p", "proparallel"), String.class),
                         DSL.function("has_function_privilege", Boolean.class, DSL.inline(SVC_ROLE),
                             DSL.field(DSL.name("p", "oid"), Object.class), DSL.inline("EXECUTE")))
                 .from(proc.as("p"))
@@ -203,25 +221,52 @@ class EngineOwnedPredicateIntegrationTest {
             assertThat(r.value3()).as("SECURITY INVOKER: a SECURITY DEFINER function is never inlined").isFalse();
             assertThat(r.value4()).as("no SET clause: a function with proconfig is never inlined").isNull();
             assertThat(r.value5()).as("scalar, not set-returning").isFalse();
-            assertThat(r.value6()).as("nexus_svc can execute it").isTrue();
+            assertThat(r.value6()).as("PARALLEL SAFE, as the DDL declares").isEqualTo("s");
+            assertThat(r.value7()).as("nexus_svc can execute it").isTrue();
+        }
+    }
+
+    /** A function's stored body with its SQL line comments removed: what the planner and the executor see. */
+    private String bodyWithoutComments(String proname) throws Exception {
+        var src = DSL.field(DSL.name("p", "prosrc"), String.class);
+        try (Connection su = pg.createConnection("")) {
+            List<String> bodies = DSL.using(su, SQLDialect.POSTGRES).select(src)
+                .from(DSL.table(DSL.name("pg_catalog", "pg_proc")).as("p"))
+                .where(DSL.field(DSL.name("p", "proname"), String.class).eq(proname))
+                .fetch(src);
+            assertThat(bodies).as("non-vacuity: exactly one %s", proname).hasSize(1);
+            return SQL_LINE_COMMENT.matcher(bodies.get(0)).replaceAll("");
         }
     }
 
     /**
-     * conexus's deploy census decides that vectors-026 landed by matching the stored body of
-     * {@code nexus.gc_expire_quarantine} on {@code engine-reaper}. The literal moved into the shared predicate, so
-     * the body keeps it in a comment; this fails if a later edit drops it and silently blinds that census.
+     * What a deploy census can read from the catalog: the function exists (the properties test above) and BOTH expiry
+     * functions call it in code, comments removed. A comment naming the function proves nothing, so this strips
+     * them; the behavioural probe below is the proof that the call does what it should.
      */
     @Test
-    void gcExpireQuarantineBodyStillNamesEngineReaper_forTheDeployCensus() throws Exception {
+    void bothExpiryFunctionsCallThePredicateInCode_notJustInAComment() throws Exception {
+        assertThat(bodyWithoutComments("reaper_expire_quarantine")).contains("reaper_owns_quarantined_row(");
+        assertThat(bodyWithoutComments("gc_expire_quarantine")).contains("reaper_owns_quarantined_row(");
+    }
+
+    /**
+     * TRANSITION SHIM, not a contract. conexus's existing deploy census decides that vectors-026 landed by matching
+     * the stored body of {@code nexus.gc_expire_quarantine} on {@code engine-reaper}. The literal moved into the
+     * shared predicate, so the body keeps it in a comment until that census reads the catalog instead (it can ask
+     * for {@code nexus.reaper_owns_quarantined_row} in pg_proc). This fails if a later edit drops the comment and
+     * blinds the old census; it says nothing about behaviour, which the probe below pins.
+     */
+    @Test
+    void gcExpireQuarantineBodyKeepsTheEngineReaperLiteral_asATransitionShimForTheOldCensus() throws Exception {
         var src = DSL.field(DSL.name("p", "prosrc"), String.class);
         try (Connection su = pg.createConnection("")) {
             List<String> bodies = DSL.using(su, SQLDialect.POSTGRES).select(src)
                 .from(DSL.table(DSL.name("pg_catalog", "pg_proc")).as("p"))
                 .where(DSL.field(DSL.name("p", "proname"), String.class).eq("gc_expire_quarantine"))
                 .fetch(src);
-            assertThat(bodies).as("non-vacuity: the function exists").isNotEmpty();
-            assertThat(bodies).allMatch(b -> b.contains("engine-reaper") && b.contains("reaper_owns_quarantined_row"));
+            assertThat(bodies).as("non-vacuity: the function exists").hasSize(1);
+            assertThat(bodies.get(0)).contains("engine-reaper");
         }
     }
 
@@ -248,13 +293,27 @@ class EngineOwnedPredicateIntegrationTest {
         return CHUNKS.TENANT_ID.eq(TENANT).and(CHUNKS.COLLECTION.eq(QUAR));
     }
 
+    private static final Pattern PLAN_NODE = Pattern.compile("^\\|\\s*(?:->\\s*)?(.*?)\\s+\\(cost=");
+    private static final Pattern PLAN_COND = Pattern.compile("^\\|\\s*((?:Index|Recheck|Join) Cond:.*?)\\s*\\|?\\s*$");
+
     /**
-     * A plan as the planner chose it: every node, index and condition, with the costs and row estimates left out of
-     * the comparison. The function's body is the open-coded text, so after inlining the two plans are the same string.
+     * The access path of a plan: every node (its type, the index it uses and the relation) and every index
+     * condition, in plan order, with costs, row estimates and the {@code Filter:} text left out. The filter text
+     * is where the predicate's own shape shows (the function's body, wrapped or not), so it is the one line that may
+     * differ between the function form and the open-coded form; the path the rows are found by must not.
      */
-    private static String shape(String plan) {
-        return plan.replaceAll("\\(cost=[^)]*\\)", "").replaceAll("Explain \\[[^\\]]*\\]", "")
-            .replaceAll("[ \\t]+", " ").replaceAll(" ?\\| ?\\n", "\n").trim();
+    private static List<String> accessPath(String plan) {
+        List<String> path = new ArrayList<>();
+        for (String line : plan.split("\n")) {
+            Matcher cond = PLAN_COND.matcher(line);
+            if (cond.find()) {
+                path.add(cond.group(1).replaceAll("\\s+", " ").trim());
+                continue;
+            }
+            Matcher node = PLAN_NODE.matcher(line);
+            if (node.find()) path.add(node.group(1).replaceAll("\\s+", " ").trim());
+        }
+        return path;
     }
 
     private void assertInlinedWithTheSameAccessPath(String what, String viaFn, String open) {
@@ -268,8 +327,21 @@ class EngineOwnedPredicateIntegrationTest {
             .contains("chunks_pk");
         assertThat(viaFn).as("%s: no sequential scan of nexus.chunks:%n%s", what, viaFn)
             .doesNotContain("Seq Scan on chunks");
-        assertThat(shape(viaFn)).as("%s: the same plan, node for node, as the open-coded predicate", what)
-            .isEqualTo(shape(open));
+        List<String> path = accessPath(viaFn);
+        assertThat(path).as("non-vacuity: the access path parser read the plan:%n%s", viaFn)
+            .anyMatch(n -> n.startsWith("Index Scan using chunks_pk on chunks"))
+            .anyMatch(n -> n.startsWith("Index Cond:"));
+        assertThat(path).as("%s: the same access path as the open-coded predicate", what).isEqualTo(accessPath(open));
+    }
+
+    @Test
+    void accessPathParser_readsNodesAndConditionsButNotFilters() {
+        String plan = "|Limit  (cost=0.41..10028.49 rows=1 width=33)  |\n"
+            + "|  ->  Index Scan using chunks_pk on chunks  (cost=0.41..9.49 rows=1 width=33)  |\n"
+            + "|        Index Cond: ((tenant_id = 't'::text) AND (collection = 'c'::text))  |\n"
+            + "|        Filter: ((metadata ->> 'quarantined_by'::text) = 'engine-reaper'::text)  |";
+        assertThat(accessPath(plan)).containsExactly("Limit", "Index Scan using chunks_pk on chunks",
+            "Index Cond: ((tenant_id = 't'::text) AND (collection = 'c'::text))");
     }
 
     @Test
@@ -300,12 +372,103 @@ class EngineOwnedPredicateIntegrationTest {
     }
 
     @Test
+    void negatedWithNot_inlines_andKeepsTheOpenCodedAccessPath() {
+        // The spelling a future caller reaches for first. Total function: safe, and it must cost the same.
+        assertInlinedWithTheSameAccessPath("NOT f(...)",
+            plan(ctx -> ctx.select(DSL.count()).from(CHUNKS)
+                .where(scope().and(DSL.not(reaperOwnsQuarantinedRow(CHUNKS.METADATA))))),
+            plan(ctx -> ctx.select(DSL.count()).from(CHUNKS)
+                .where(scope().and(DSL.not(DSL.field(openCoded()))))));
+    }
+
+    @Test
     void distinctOriginRead_inlines() {
         Field<String> origin = key("origin_collection");
         String viaFn = plan(ctx -> ctx.selectDistinct(origin).from(CHUNKS)
             .where(scope().and(viaFunction()).and(origin.isNotNull())));
         assertThat(viaFn).doesNotContain("reaper_owns_quarantined_row").doesNotContain("Function Scan")
             .contains("chunks_pk").contains("quarantined_by");
+    }
+
+    // ---- 3b. the two expiry functions split the rows by the predicate, by behaviour -------------------------------
+
+    private static final String ORIGIN_P = "knowledge__engine-owned-probe__minilm-l6-v2-384__v1";
+    private static final String OLD = "2026-01-01T00:00:00Z";
+    private static final String CUTOFF = "2026-02-01T00:00:00Z";
+
+    /**
+     * Six chunks in a fresh quarantine collection, all stamped before the cutoff and none named by a manifest row:
+     * two the reaper owns, two a client moved (no tag), one whose tag is stale (a client moved it again), one tagged
+     * with no reaper stamp at all (the NULL shape). Returns the collection.
+     */
+    private String seedProbe(String slug) throws Exception {
+        String quarantine = "quarantine-engine-owned-probe-" + slug;
+        try (Connection su = pg.createConnection("")) {
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCollection(ctx, TENANT, quarantine);
+            Vector zero = Vector.of(new float[384]);
+            OffsetDateTime old = OffsetDateTime.now().minusDays(40);
+            insertChunks(ctx, quarantine, "own", 2, old, zero, tagged(ORIGIN_P, OLD, OLD));
+            insertChunks(ctx, quarantine, "cli", 2, old, zero,
+                "{\"origin_collection\":\"" + ORIGIN_P + "\",\"quarantined_at\":\"" + OLD + "\"}");
+            insertChunks(ctx, quarantine, "stl", 1, old, zero, tagged(ORIGIN_P, "2025-12-01T00:00:00Z", OLD));
+            insertChunks(ctx, quarantine, "nul", 1, old, zero,
+                "{\"quarantined_by\":\"engine-reaper\",\"origin_collection\":\"" + ORIGIN_P
+                    + "\",\"quarantined_at\":\"" + OLD + "\"}");
+        }
+        return quarantine;
+    }
+
+    private long remaining(String quarantine) {
+        return tenantScope.withTenant(TENANT, ctx -> (long) ctx.fetchCount(CHUNKS,
+            CHUNKS.TENANT_ID.eq(TENANT).and(CHUNKS.COLLECTION.eq(quarantine))));
+    }
+
+    private long remainingOwned(String quarantine) {
+        return tenantScope.withTenant(TENANT, ctx -> (long) ctx.fetchCount(CHUNKS,
+            CHUNKS.TENANT_ID.eq(TENANT).and(CHUNKS.COLLECTION.eq(quarantine)).and(viaFunction())));
+    }
+
+    private PgVectorRepository vectorRepository() {
+        Embedder zero = new Embedder() {
+            @Override public List<float[]> embed(List<String> texts) {
+                return texts.stream().map(t -> new float[384]).toList();
+            }
+            @Override public void close() { }
+        };
+        return new PgVectorRepository(tenantScope, zero, zero);
+    }
+
+    @Test
+    void reaperExpiryTakesOnlyTheEngineOwnedRows_andGcExpiryTheRest() throws Exception {
+        String q = seedProbe("reaper-first");
+        assertThat(remaining(q)).isEqualTo(6);
+        assertThat(remainingOwned(q)).as("only the two tagged-and-stamped rows are owned").isEqualTo(2);
+
+        var expiry = new ReaperRepository(tenantScope).expire(TENANT, q, ORIGIN_P, CUTOFF, 1000, 60_000, 2_000);
+        assertThat(expiry.expired()).as("reaper_expire_quarantine: the two owned rows, no others").isEqualTo(2);
+        assertThat(remaining(q)).isEqualTo(4);
+        assertThat(remainingOwned(q)).isZero();
+
+        var gc = vectorRepository().expireQuarantine(TENANT, q, ORIGIN_P, CUTOFF, 1.0, 1_000_000, true);
+        assertThat(gc.expired()).as("gc_expire_quarantine: the client's two, the stale tag and the missing stamp")
+            .isEqualTo(4);
+        assertThat(remaining(q)).isZero();
+    }
+
+    @Test
+    void gcExpirySkipsTheEngineOwnedRows_andReaperExpiryTakesThemAfter() throws Exception {
+        String q = seedProbe("gc-first");
+        assertThat(remaining(q)).isEqualTo(6);
+
+        var gc = vectorRepository().expireQuarantine(TENANT, q, ORIGIN_P, CUTOFF, 1.0, 1_000_000, true);
+        assertThat(gc.expired()).as("gc_expire_quarantine skips the owned rows: the other four go").isEqualTo(4);
+        assertThat(remaining(q)).as("the two engine-owned rows stay").isEqualTo(2);
+        assertThat(remainingOwned(q)).isEqualTo(2);
+
+        var expiry = new ReaperRepository(tenantScope).expire(TENANT, q, ORIGIN_P, CUTOFF, 1000, 60_000, 2_000);
+        assertThat(expiry.expired()).as("reaper_expire_quarantine takes exactly what gc left").isEqualTo(2);
+        assertThat(remaining(q)).isZero();
     }
 
     // ---- 4. nothing open-codes it again --------------------------------------------------------------------------
@@ -318,71 +481,121 @@ class EngineOwnedPredicateIntegrationTest {
             .containsExactly("origin-owned");
     }
 
-    private static final Pattern KEY_READ = Pattern.compile("(?i)(quarantined_by|reaper_quarantined_at)");
     private static final Pattern XML_COMMENT = Pattern.compile("<!--.*?-->", Pattern.DOTALL);
     private static final Pattern SQL_BLOCK = Pattern.compile("<sql[^>]*>(.*?)</sql>", Pattern.DOTALL);
     private static final Pattern ROLLBACK = Pattern.compile("<rollback>.*?</rollback>", Pattern.DOTALL);
     private static final Pattern SQL_LINE_COMMENT = Pattern.compile("--[^\\n]*");
 
-    /** A read of the tag keys: {@code ->> 'key'} (any spacing), not a jsonb_build_object write or a {@code - 'key'} removal. */
-    private static final Pattern SQL_READ = Pattern.compile("->>\\s*'(quarantined_by|reaper_quarantined_at)'");
+    /**
+     * The tag keys as bare words, so every way to read them is caught: {@code ->>}, {@code ->}, {@code #>>},
+     * {@code #>}, {@code @>}, {@code ?}, jsonb_extract_path_text, jsonb_path_query. Any operator, any quoting.
+     */
+    private static final Pattern TAG_KEY = Pattern.compile("\\b(quarantined_by|reaper_quarantined_at)\\b");
+
+    /** The one write of the tag (vectors-024-1's jsonb_build_object pairs), the exact pairs and no others. */
+    private static final Pattern TAG_WRITE = Pattern.compile(
+        "'quarantined_by'\\s*,\\s*'engine-reaper'|'reaper_quarantined_at'\\s*,\\s*p_quarantined_at");
+
+    /** The removal of the tag by the restore functions (vectors-025): {@code - 'key'}. Not {@code ->> 'key'}. */
+    private static final Pattern TAG_REMOVAL = Pattern.compile("-\\s*'(?:quarantined_by|reaper_quarantined_at)'");
+
+    /** A {@code COMMENT ON FUNCTION ... IS '...'} statement is documentation, and names the keys in prose. */
+    private static final Pattern COMMENT_ON_FUNCTION = Pattern.compile(
+        "(?is)COMMENT\\s+ON\\s+FUNCTION\\b.*?\\bIS\\s+'(?:[^']|'')*'\\s*;");
 
     /** The body of the one definition, so a read inside it is not an offender. */
     private static final Pattern DEFINITION = Pattern.compile(
         "(?is)CREATE\\s+(?:OR\\s+REPLACE\\s+)?FUNCTION\\s+nexus\\.reaper_owns_quarantined_row\\b.*?\\$\\$.*?\\$\\$");
+
+    private static int count(Pattern p, String text) {
+        Matcher m = p.matcher(text);
+        int n = 0;
+        while (m.find()) n++;
+        return n;
+    }
+
+    /** Mentions of a tag key in {@code sql} that are neither the one write nor a removal: reads, by whatever operator. */
+    private static int readsOfTheTagKeys(String sql) {
+        return count(TAG_KEY, TAG_REMOVAL.matcher(TAG_WRITE.matcher(sql).replaceAll("")).replaceAll(""));
+    }
 
     @Test
     void noChangesetOutsideTheDefinitionReadsTheTagKeys() throws IOException {
         List<String> offenders = new ArrayList<>();
         int definitions = 0;
         int callSites = 0;
+        int writes = 0;
+        int removals = 0;
         try (Stream<Path> walk = Files.walk(Path.of("src", "main", "resources", "db", "changelog"))) {
             for (Path p : walk.filter(f -> f.toString().endsWith(".xml")).sorted().toList()) {
                 String forward = ROLLBACK.matcher(XML_COMMENT.matcher(Files.readString(p)).replaceAll("")).replaceAll("");
                 Matcher blocks = SQL_BLOCK.matcher(forward);
                 while (blocks.find()) {
-                    String sql = SQL_LINE_COMMENT.matcher(blocks.group(1)).replaceAll("");
-                    Matcher def = DEFINITION.matcher(sql);
-                    if (def.find()) definitions++;
+                    String sql = COMMENT_ON_FUNCTION.matcher(SQL_LINE_COMMENT.matcher(blocks.group(1)).replaceAll(""))
+                        .replaceAll("");
+                    if (DEFINITION.matcher(sql).find()) definitions++;
                     String outside = DEFINITION.matcher(sql).replaceAll("");
-                    if (SQL_READ.matcher(outside).find()) {
-                        offenders.add(p.getFileName() + ": reads quarantined_by / reaper_quarantined_at itself;"
-                            + " call nexus.reaper_owns_quarantined_row");
+                    writes += count(TAG_WRITE, outside);
+                    removals += count(TAG_REMOVAL, outside);
+                    if (readsOfTheTagKeys(outside) > 0) {
+                        offenders.add(p.getFileName() + ": names quarantined_by / reaper_quarantined_at outside the"
+                            + " tag write and the restore removal; call nexus.reaper_owns_quarantined_row");
                     }
-                    Matcher call = Pattern.compile("reaper_owns_quarantined_row\\s*\\(").matcher(outside);
-                    while (call.find()) callSites++;
+                    callSites += count(Pattern.compile("reaper_owns_quarantined_row\\s*\\("), outside);
                 }
             }
         }
         assertThat(definitions).as("non-vacuity: the definition was found, exactly once").isEqualTo(1);
         assertThat(callSites).as("non-vacuity: reaper_expire_quarantine (3) and gc_expire_quarantine (2) call it")
             .isGreaterThanOrEqualTo(5);
+        assertThat(writes).as("non-vacuity: vectors-024-1 writes both keys, and the scan saw it").isEqualTo(2);
+        assertThat(removals).as("non-vacuity: vectors-025 removes both keys, and the scan saw it").isGreaterThanOrEqualTo(2);
         assertThat(offenders).isEmpty();
     }
 
+    /** The scan is only as good as its pattern: prove it flags every way to read the keys and spares the write and removal. */
     @Test
-    void noJavaMainSourceReadsTheTagKeys() throws IOException {
+    void theTagKeyScan_flagsEveryReadOperator_andSparesTheWriteAndTheRemoval() {
+        List<String> reads = List.of(
+            "c.metadata->>'quarantined_by' = 'engine-reaper'",
+            "c.metadata ->> 'reaper_quarantined_at'",
+            "c.metadata -> 'quarantined_by'",
+            "c.metadata #>> '{quarantined_by}'",
+            "c.metadata #> '{reaper_quarantined_at}'",
+            "c.metadata @> '{\"quarantined_by\":\"engine-reaper\"}'",
+            "c.metadata ? 'quarantined_by'",
+            "jsonb_extract_path_text(c.metadata, 'quarantined_by')",
+            "jsonb_extract_path_text(c.metadata, 'reaper_quarantined_at', 'x')",
+            "jsonb_path_exists(c.metadata, '$.quarantined_by')");
+        for (String r : reads) assertThat(readsOfTheTagKeys(r)).as("flagged: %s", r).isPositive();
+        List<String> spared = List.of(
+            "jsonb_build_object('quarantined_by', 'engine-reaper', 'reaper_quarantined_at', p_quarantined_at)",
+            "c.metadata - 'quarantined_at' - 'origin_collection' - 'quarantined_by' - 'reaper_quarantined_at'",
+            "nexus.reaper_owns_quarantined_row(c.metadata) IS NOT TRUE");
+        for (String sp : spared) assertThat(readsOfTheTagKeys(sp)).as("not a read: %s", sp).isZero();
+    }
+
+    @Test
+    void noJavaMainSourceNamesTheTagKeys() throws IOException {
         List<String> offenders = new ArrayList<>();
         int scanned = 0;
         Pattern block = Pattern.compile("/\\*.*?\\*/", Pattern.DOTALL);
         Pattern line = Pattern.compile("//[^\\n]*");
-        Pattern literal = Pattern.compile("\"[^\"\\n]*(quarantined_by|reaper_quarantined_at)[^\"\\n]*\"");
         try (Stream<Path> walk = Files.walk(Path.of("src", "main", "java"))) {
             for (Path p : walk.filter(f -> f.toString().endsWith(".java")).sorted().toList()) {
                 String code = line.matcher(block.matcher(Files.readString(p)).replaceAll("")).replaceAll("");
                 scanned++;
-                if (literal.matcher(code).find()) {
-                    offenders.add(p + ": names the quarantined_by / reaper_quarantined_at key in a string;"
-                        + " call Routines.reaperOwnsQuarantinedRow");
+                if (TAG_KEY.matcher(code).find()) {
+                    offenders.add(p + ": names the quarantined_by / reaper_quarantined_at key outside a comment"
+                        + " (a string, a text block, a jOOQ path); call Routines.reaperOwnsQuarantinedRow");
                 }
             }
         }
         assertThat(scanned).as("non-vacuity: the scan walked the main sources").isGreaterThan(50);
         assertThat(offenders).isEmpty();
         // The scan's own blind spot would be a pattern that matches nothing; prove it matches what it exists to catch.
-        assertThat(KEY_READ.matcher("c.metadata->>'quarantined_by'").find()).isTrue();
-        assertThat(SQL_READ.matcher("c.metadata->>'reaper_quarantined_at'").find()).isTrue();
-        assertThat(SQL_READ.matcher("c.metadata ->> 'quarantined_by'").find()).isTrue();
-        assertThat(literal.matcher("DSL.jsonbGetAttributeAsText(CHUNKS.METADATA, \"quarantined_by\")").find()).isTrue();
+        assertThat(TAG_KEY.matcher("DSL.jsonbGetAttributeAsText(CHUNKS.METADATA, \"quarantined_by\")").find()).isTrue();
+        assertThat(TAG_KEY.matcher("  AND c.metadata #>> '{reaper_quarantined_at}' = x").find()).isTrue();
+        assertThat(TAG_KEY.matcher("c.metadata @> '{\"quarantined_by\":\"engine-reaper\"}'").find()).isTrue();
     }
 }
