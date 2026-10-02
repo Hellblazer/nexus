@@ -764,18 +764,26 @@ def superseded_line(outcome: PutNoteOutcome) -> str | None:
     """The line ``store_put`` and ``nx store put`` add when a re-put superseded chunks (RDR-192 Step 13).
 
     Two shapes, never both, and ``None`` when neither applies (a first put, an identical re-put, a
-    dropped chunk another document still owns), so those read exactly as before:
+    dropped chunk the engine's sweep kept because another document owns it or because a live
+    note's identity names it, the sweep's retained notes guard), so those read exactly as before:
 
     * the sweep removed chunks: ``Superseded: N chunk(s) removed: [<chash>, ...]`` names what the
       engine's sweep DELETED in the note's own write, at most :data:`SUPERSEDED_CHASHES_SHOWN` of them,
       then ``(and M more)``. An engine that predates ``swept_chashes`` gives the count only. The count
-      is the engine's own ``swept``, exact whatever its cap on the list.
+      is the engine's own ``swept``, exact whatever its cap on the list. A chunk either guard kept is
+      not in it.
     * the sweep did not finish (``sweep_skipped``: a gate or statement timeout, or a failed delete):
       ``Superseded: the sweep did not finish; ...`` says the replaced chunks were NOT removed. They stay
-      in T3, hidden by ``live(c)`` unless another document owns them, until the engine reaper collects
-      them later. ``up to N`` is the manifest's drop list, an upper bound: the sweep never ran, so which
-      of those another document owns is not known. When the engine could not read the previous manifest
-      there is no list and no count. A drop list KNOWN to be empty leaves nothing behind and no line.
+      in T3, hidden by ``live(c)`` unless another document owns them. The line promises that and no
+      more: the engine reaper collects them only once they have been ownerless for its grace and the
+      collection passes the reaper's census and floor, and a genuine legacy note in the collection
+      refuses the collection (RDR-192 Step 9, Step 11), so it says "later, once the collection
+      passes", never "later" alone. ``up to N`` is the manifest's drop list, an upper bound: the sweep
+      never ran, so which of those another document owns is not known. When the engine could not read
+      the previous manifest (``before_read_failed``) there is no list, and the line says which chunks
+      this put replaced is not known: an identical re-put replaced none, so "the replaced chunks were
+      not removed" would claim a removal that was never owed. A drop list KNOWN to be empty leaves
+      nothing behind and no line.
     """
     write = outcome.write
     if write is None:
@@ -783,9 +791,10 @@ def superseded_line(outcome: PutNoteOutcome) -> str | None:
     if write.sweep_skipped > 0 and write.dropped_chashes != []:
         n = len(write.dropped_chashes) if write.dropped_chashes else 0
         what = (f"up to {n} replaced chunk{' was' if n == 1 else 's were'} not removed" if n
-                else "the replaced chunks were not removed")
+                else "which chunks this put replaced is not known, and any that were replaced were not removed")
         return (f"Superseded: the sweep did not finish; {what}. Those no other document owns are "
-                "hidden from search; the engine reaper collects them later.")
+                "hidden from search; the engine reaper collects them later, once the collection "
+                "passes its census and floor.")
     if write.swept <= 0:
         return None
     count = write.swept

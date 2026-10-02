@@ -394,6 +394,15 @@ class CatalogManifestSweepRepositoryTest {
             .as("a genuine manifest-less note must survive its shared T3 row even though "
                 + "nothing currently manifests it -- the notes guard, not the union guard, "
                 + "is what protects it here").isEqualTo(0);
+        // RDR-192 Step 13 (Phase 4 gate, code review S-3): the chash the notes arm kept is in the
+        // sweep's dropped set but not in what it deleted, so the Superseded line must not name it.
+        // Order 60 pins that for the union guard; this pins it for the notes arm.
+        var detail = onlyDetail(result);
+        assertThat(detail).containsEntry("dropped", 1).containsEntry("swept", 0).containsEntry("kept", 1);
+        assertThat((List<?>) detail.get("swept_chashes"))
+            .as("the notes arm kept the note's chash, so the deleted-chash list is empty")
+            .isEmpty();
+        assertThat(detail).containsEntry("swept_chashes_truncated", false);
         assertThat(chunk384Exists(TENANT_A, col, noteChash))
             .as("note's T3 row must be untouched").isTrue();
     }

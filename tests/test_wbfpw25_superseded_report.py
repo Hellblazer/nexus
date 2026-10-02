@@ -179,6 +179,10 @@ def test_a_malformed_swept_chashes_is_treated_as_absent(bad):
 # engine answers with when the sweep errors.
 
 _NOT_FINISHED = "Superseded: the sweep did not finish"
+# The reaper moves a chunk only once it has been ownerless for its grace and the collection passes the
+# census and the floor, and a genuine legacy note in the collection refuses the collection, so the line
+# promises it conditionally (RDR-192 Phase 4 gate, code review S-1).
+_REAPER_PROMISE = "the engine reaper collects them later, once the collection passes its census and floor."
 
 
 class _SweepFails:
@@ -225,6 +229,18 @@ def test_a_failed_sweep_is_reported_not_left_to_the_log(t2_service_env):
     assert "not removed" in lines[1] and "engine reaper" in lines[1]
     assert "removed:" not in lines[1], "the line must not claim a removal that did not happen"
     assert len(lines) == 2
+
+    # The line says the replaced chunk stays and is hidden from search. Check the state it describes
+    # on the real engine (the writer ran the write with the sweep off): the old chunk is physically
+    # there, the normal reader no longer returns it, and the census files it as superseded
+    # (code review S-2; it is the state the doctor's --visible-outside-manifest check probes).
+    v1_chash = _chash(v1)
+    collection = client.get_or_create_collection(col)
+    assert collection.get(ids=[v1_chash], include_non_live=True)["ids"] == [v1_chash], (
+        "control: the replaced chunk was not removed")
+    assert collection.get(ids=[v1_chash])["ids"] == [], "hidden: the normal reader does not return it"
+    assert v1_chash in client.manifest_less_census(col, limit=300)["chashes"]["superseded"], (
+        "and the census classes it superseded")
 
 
 def test_cli_store_put_reports_a_failed_sweep_too(t2_service_env, tmp_path):
@@ -288,7 +304,7 @@ def test_the_failed_sweep_line_counts_what_the_manifest_dropped_as_an_upper_boun
     two = _put_through(_SweepCat(swept=0, sweep_skipped=1, dropped=["a" * 64, "b" * 64]), "two")
     assert superseded_line(two) == (
         f"{_NOT_FINISHED}; up to 2 replaced chunks were not removed. Those no other document owns "
-        "are hidden from search; the engine reaper collects them later.")
+        f"are hidden from search; {_REAPER_PROMISE}")
     one = _put_through(_SweepCat(swept=0, sweep_skipped=1, dropped=["a" * 64]), "one")
     assert "up to 1 replaced chunk was not removed" in superseded_line(one)
 
@@ -297,8 +313,11 @@ def test_a_failed_sweep_whose_drop_list_is_unknown_names_no_count(t2_service_env
     """before_read_failed: the engine could not read the previous manifest, so there is no drop list."""
     unknown = _put_through(_SweepCat(swept=0, sweep_skipped=1, dropped=None), "unknown")
     assert superseded_line(unknown) == (
-        f"{_NOT_FINISHED}; the replaced chunks were not removed. Those no other document owns "
-        "are hidden from search; the engine reaper collects them later.")
+        f"{_NOT_FINISHED}; which chunks this put replaced is not known, and any that were replaced "
+        f"were not removed. Those no other document owns are hidden from search; {_REAPER_PROMISE}")
+    assert "the replaced chunks were not removed" not in superseded_line(unknown), (
+        "with no drop list the put may have replaced nothing (an identical re-put), so the line must not "
+        "say the replaced chunks were not removed")
 
 
 def test_a_clean_sweep_and_a_nothing_dropped_put_say_nothing_about_failure(t2_service_env):
