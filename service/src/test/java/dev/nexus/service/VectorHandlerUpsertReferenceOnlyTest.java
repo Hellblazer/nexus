@@ -36,11 +36,12 @@ import static org.assertj.core.api.Assertions.assertThat;
  * 2026-10-01) was met on 2026-10-01.
  *
  * <p>This class used to drive the route over HTTP (malformed-embedding 400s, the full to
- * reference-only 422, tenant isolation). Those behaviours went with the handler; the repository
- * method {@code PgVectorRepository#upsertReferenceOnlyChunk} stays, with its own tests in
- * {@link ReferenceOnlyChunkUpsertTest}, as the fixture writer for reference-only rows. What is
- * pinned here is the route's absence: 410 Gone, as {@code ChashHandler} answers its retired
- * routes, naming the replacement routes, and nothing written.
+ * reference-only 422, tenant isolation). Those behaviours went with the handler, and the repository
+ * method under it was deleted too (nexus-z0o2p.36): the engine has no writer of reference-only
+ * rows, and tests build them with {@code PgContainerHelper#insertReferenceOnlyChunk} (read path:
+ * {@link ReferenceOnlyChunkReadPathTest}). What is pinned here is the route's absence: 410 Gone,
+ * as {@code ChashHandler} answers its retired routes, naming the replacement routes, and nothing
+ * written.
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class VectorHandlerUpsertReferenceOnlyTest {

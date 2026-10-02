@@ -847,6 +847,52 @@ public final class PgContainerHelper {
     }
 
     /**
+     * Seed one REFERENCE-ONLY {@code nexus.chunks} row ({@code chunk_text} NULL,
+     * {@code retention='reference-only'}, RDR-169 G4) with NO manifest row. This is the only
+     * writer of such a row in the tree: the engine's own writer
+     * ({@code PgVectorRepository#upsertReferenceOnlyChunk}, and the route over it) is gone
+     * (RDR-223 Phase 3, nexus-z0o2p.36), so a test that needs a reference-only row builds it
+     * here, the way {@link #insertChunks} builds a content row.
+     *
+     * <p>A repeat of the same {@code (tenant, collection, chash)} refreshes the embedding and
+     * REPLACES the metadata, and never touches {@code chunk_text} (so a row that was full stays
+     * full; the guard against a full to reference-only change belonged to the removed writer, not
+     * to the schema). It runs as whatever role {@code ctx} carries (the superuser, in the
+     * callers), sets no tenant GUC, and the collection must already be registered
+     * ({@link #insertCollection}).
+     *
+     * @param chashHex  the 64-lowercase-hex chash
+     * @param embedding the vector; its width (384, 768 or 1024) picks the embedding column
+     * @param metadata  chunk metadata, may be empty
+     */
+    public static void insertReferenceOnlyChunk(DSLContext ctx, String tenant, String collection,
+                                                String chashHex, float[] embedding,
+                                                Map<String, Object> metadata) {
+        org.jooq.JSONB meta;
+        try {
+            meta = org.jooq.JSONB.jsonb(CHUNK_METADATA_MAPPER.writeValueAsString(metadata));
+        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+            throw new IllegalArgumentException("insertReferenceOnlyChunk: metadata is not JSON-serialisable", e);
+        }
+        var col = switch (embedding.length) {
+            case 384 -> CHUNKS.EMBEDDING_384;
+            case 768 -> CHUNKS.EMBEDDING_768;
+            case 1024 -> CHUNKS.EMBEDDING_1024;
+            default -> throw new IllegalArgumentException(
+                "insertReferenceOnlyChunk: no embedding column of width " + embedding.length);
+        };
+        byte[] chash = dev.nexus.service.db.Chash.fromHex(chashHex).toBytes();
+        ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.CHUNK_TEXT,
+                       col, CHUNKS.METADATA, CHUNKS.RETENTION)
+           .values(tenant, collection, chash, null, Vector.of(embedding), meta, "reference-only")
+           .onConflict(CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH)
+           .doUpdate()
+           .set(col, org.jooq.impl.DSL.excluded(col))
+           .set(CHUNKS.METADATA, org.jooq.impl.DSL.excluded(CHUNKS.METADATA))
+           .execute();
+    }
+
+    /**
      * Allowlist of GUC names {@link #setTenant} may stamp — the same two names {@link
      * TenantScope#PERMITTED_GUCS} enforces (that field is package-private inside {@code
      * dev.nexus.service.db}, unreachable from this package, so this is a second copy of

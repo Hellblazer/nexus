@@ -65,8 +65,6 @@ class ChunksWriterLastWrittenAtScanTest {
     static final Map<String, Decision> EXPECTED = new TreeMap<>(Map.ofEntries(
         Map.entry("PgVectorRepository#upsertChunksInternal", new Decision(Kind.REFRESH, 1,
             "content upsert ON CONFLICT DO UPDATE: a client re-write of an existing chunk")),
-        Map.entry("PgVectorRepository#referenceOnlyInsertQuery", new Decision(Kind.REFRESH, 1,
-            "reference-only upsert ON CONFLICT DO UPDATE: a client re-write of an existing chunk")),
         Map.entry("PgVectorRepository#batchUpdateMetadata", new Decision(Kind.REFRESH, 1,
             "have-vector and identical-text branches: the client re-indexed the chunk, metadata only")),
         Map.entry("CatalogRepository#upsertManifestChunkVectors", new Decision(Kind.REFRESH, 1,
@@ -140,7 +138,8 @@ class ChunksWriterLastWrittenAtScanTest {
         assertThat(problems).as("last_written_at classification drift").isEmpty();
 
         assertThat(EXPECTED.values().stream().filter(d -> d.kind() == Kind.REFRESH).count())
-            .as("non-vacuity: the REFRESH side is populated").isGreaterThanOrEqualTo(4);
+            // 4 until the reference-only writer was removed (nexus-z0o2p.36): three client re-writes remain.
+            .as("non-vacuity: the REFRESH side is populated").isGreaterThanOrEqualTo(3);
         assertThat(EXPECTED.values().stream().filter(d -> d.kind() == Kind.EXEMPT).count())
             .as("non-vacuity: the EXEMPT side is populated").isGreaterThanOrEqualTo(4);
     }

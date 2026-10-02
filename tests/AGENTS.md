@@ -204,12 +204,16 @@ POSTs with `force_re_embed` when it needs the embedder reached (an owned chash w
 stored vector skips it otherwise). nexus-z0o2p.24 (P3.2) landed the refusal and settled the route-subject tests:
 `OwnerlessWriteRefusalTest` pins the refusal (both chunk-write routes, the `force_re_embed` and
 supplied-vector branches, the order of the three 4xx checks, log-only mode, the `/v1/status` counters);
-`VectorHandlerUpsertReferenceOnlyTest` now asserts the retired route answers 410;
+`VectorHandlerUpsertReferenceOnlyTest` now asserts the retired route answers 410, and the engine has no writer of
+reference-only rows at all (nexus-z0o2p.36 deleted `upsertReferenceOnlyChunk`; `ReferenceOnlyWriterAbsentScanTest` pins
+its absence from main): a test that needs one builds it with `PgContainerHelper.insertReferenceOnlyChunk`;
 the parity tests in `tests/test_chunk_seed.py` compare the route's CONFLICT write against the helper
 (the route refuses a first write); and `tests/test_z0o2p24_reembed_concurrent_supersede.py` pins the
 `nx collection re-embed` answer to a chunk that loses its owner mid-run. A test that needs the engine
 in log-only mode sets `NX_OWNERLESS_WRITE_MODE=log-only` in the engine's environment; the substrate
-pins `enforce` itself (an unset value is log-only on the engine) unless the caller's environment sets one.
+pins `enforce` itself (an unset or blank value is log-only on the engine) unless the caller's environment sets a non-blank
+one: a blank `NX_OWNERLESS_WRITE_MODE=` counts as unset there, as it does at the local launcher (the raw engine
+parses blank as log-only), so `tests/_engine_substrate.py` goes through `_pin_ownerless_write_mode`, not `setdefault`.
 
 ## A fresh test host: what it needs, and what the suite provisions itself
 

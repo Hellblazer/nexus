@@ -76,6 +76,43 @@ class OwnerlessLogLimiterTest {
         assertThat(limiter.size()).as("the stale keys were evicted").isEqualTo(1);
     }
 
+    /** The measured volume bound the javadoc states: MAX_KEYS + 1 lines per window under key churn, not 1. */
+    @Test
+    void underKeyChurn_aWindowCarriesUpToMaxKeysPlusOneLines_notOne() {
+        var now = new AtomicLong(5L);
+        var limiter = new OwnerlessLogLimiter(now::get);
+        for (int window = 0; window < 3; window++) {
+            int logged = 0;
+            for (int i = 0; i < 3 * OwnerlessLogLimiter.MAX_KEYS; i++) {
+                if (limiter.tryAcquire("w" + window + "-k" + i) >= 0) {
+                    logged++;
+                }
+            }
+            assertThat(logged)
+                .as("window %d: every slot logs once, the overflow bucket once more, and nothing else", window)
+                .isEqualTo(OwnerlessLogLimiter.MAX_KEYS + 1);
+            assertThat(limiter.size()).isEqualTo(OwnerlessLogLimiter.MAX_KEYS);
+            now.addAndGet(OwnerlessLogLimiter.WINDOW_MS);
+        }
+    }
+
+    /** The overflow line's suppressed_since_last is the pool's, not the named key's. */
+    @Test
+    void theOverflowBucketPoolsItsSuppressedCountAcrossKeys() {
+        var now = new AtomicLong(5L);
+        var limiter = new OwnerlessLogLimiter(now::get);
+        for (int i = 0; i < OwnerlessLogLimiter.MAX_KEYS; i++) {
+            limiter.tryAcquire("k" + i);
+        }
+        assertThat(limiter.tryAcquire("ov-a")).isEqualTo(0);
+        assertThat(limiter.tryAcquire("ov-b")).isEqualTo(-1);
+        assertThat(limiter.tryAcquire("ov-c")).isEqualTo(-1);
+        now.addAndGet(OwnerlessLogLimiter.WINDOW_MS - 1);        // the keys are still live, so the map is still full
+        assertThat(limiter.tryAcquire("ov-d")).isEqualTo(-1);
+        now.addAndGet(1);                                          // the overflow window elapsed, the sweep has not run yet (< 1 s)
+        assertThat(limiter.tryAcquire("ov-e")).as("a key that was never suppressed reports the pool's three").isEqualTo(3);
+    }
+
     @Test
     void atTheCap_keysWhoseWindowHasElapsedAreEvictedSoANewKeyGetsItsOwnBucket() {
         var now = new AtomicLong(5L);

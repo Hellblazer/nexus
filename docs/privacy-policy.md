@@ -39,6 +39,7 @@ All persistent data lives on the Postgres server backing your `nexus-service` �
 - **Session scratch (T1)** — ephemeral working notes shared across agents within a session. Served by `nexus-service` over Postgres, keyed to a session id (local mode: on the host disk; managed-cloud mode: the operator's server) — not in-memory ChromaDB, a substrate that is retired. Rows are cleared on session close and are swept automatically after 24 hours regardless, so scratch never accumulates as durable state.
 - **Plan library** — saved query execution plans. Stored alongside memory entries (same backend and locality).
 - **Logs** — structured operational logs at `~/.config/nexus/logs/` (rotating, 10 MB × 5). Always local to the host running the CLI/MCP process, in both local and managed-cloud mode.
+- **Engine logs** — the `nexus-service` writes its own operational log (local mode: on the host machine; managed-cloud mode: the operator's infrastructure). When a chunk write arrives whose chunks have no owning document, the engine logs one line per route, tenant and collection per minute (`ownerless_chunk_write_would_refuse` or `_refused`). For the first such chunk the line holds its `source_path`, `title` and `source_agent` metadata (tenant content; a URL value loses its credentials and query string), the collection name, and the request's `User-Agent` and client version. It holds no `source_uri` and no chunk text. That line is retained for as long as the deployment retains its engine logs; Conexus sets no separate period.
 
 ## 2. What Conexus sends to third parties
 

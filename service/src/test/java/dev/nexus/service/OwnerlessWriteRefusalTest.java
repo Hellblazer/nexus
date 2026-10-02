@@ -61,7 +61,13 @@ class OwnerlessWriteRefusalTest {
     /** Registered by BOTH tenants, so the limiter's tenant key can be told from its collection key. */
     private static final String COLLECTION_SHARED_NAME = "knowledge__owr-owner-shared__voyage-context-3__v1";
     private static final String COLLECTION_GATE = "knowledge__owr-owner-gate__voyage-context-3__v1";
-    private static final String COLLECTION_FORGE = "knowledge__owr-owner-forge__voyage-context-3__v1";
+    /**
+     * A tenant can register any text as a collection name (the engine does not validate it), so this one
+     * carries a space, a would-be field, a line separator and a terminal escape; the log line must hold it.
+     */
+    private static final String COLLECTION_FORGE =
+        "knowledge__owr-owner-forge__voyage-context-3__v1 tenant=evil4 suppressed_since_last=77"
+            + " event=forged\u001b[0m\n";
     private static final String COLLECTION_INTX = "knowledge__owr-owner-intx__voyage-context-3__v1";
     private static final String COLLECTION_INTX_PUT = "knowledge__owr-owner-intxput__voyage-context-3__v1";
     private static final String SVC_ROLE = "svc_owr";
@@ -669,11 +675,6 @@ class OwnerlessWriteRefusalTest {
         OwnershipGuardCoverageScan.assertEveryGuardedRepositoryCallPassesAGuard();
     }
 
-    @Test
-    void noMainSourceOutsideTheRepositoryNamesTheReferenceOnlyWriter() throws Exception {
-        OwnershipGuardCoverageScan.assertNoMainSourceOutsideTheRepositoryNamesTheReferenceOnlyWriter();
-    }
-
     // ── 7. the log line ──────────────────────────────────────────────────────
 
     private List<String> captureRepositoryWarnings(java.util.concurrent.Callable<Void> body) throws Exception {
@@ -705,7 +706,7 @@ class OwnerlessWriteRefusalTest {
         assertThat(lines).hasSize(1);
         String line = lines.get(0);
         assertThat(line).contains("event=ownerless_chunk_write_refused")
-            .contains("route=upsert-chunks").contains("collection=" + COLLECTION_LOG)
+            .contains("route=upsert-chunks").contains("collection=\"" + COLLECTION_LOG + "\"")
             .contains("phase=pre_embed").contains("unowned=1").contains("requested=1")
             .contains("user_agent=\"nx-test-agent/9\"").contains("client_version=\"7.99.0\"")
             .contains("suppressed_since_last=0")
@@ -799,26 +800,58 @@ class OwnerlessWriteRefusalTest {
         }
     }
 
+    /** The fields the engine's own line carries, in order: anything else after cleaning is a forged field. */
+    private static final List<String> LOG_LINE_FIELDS = List.of("event", "route", "tenant", "collection", "phase",
+        "unowned", "requested", "sample", "user_agent", "client_version", "suppressed_since_last", "first_chunk_meta");
+
+    /** The line with every quoted value and the metadata bracket blanked, split into its key names. */
+    private static List<String> fieldKeys(String line) {
+        String bare = line.replaceAll("\"[^\"]*\"", "\"\"").replaceAll("\\[[^\\]]*\\]", "[]");
+        return java.util.Arrays.stream(bare.split(" ")).filter(t -> !t.isEmpty())
+            .map(t -> t.contains("=") ? t.substring(0, t.indexOf('=')) : "?" + t).toList();
+    }
+
     @Test
     void aClientVersionHeaderOrMetadataValueCannotForgeFieldsInTheLogLine() throws Exception {
-        // client_version and user_agent are quoted, the metadata sits inside brackets; a value that
-        // carries spaces, quotes or a closing bracket must stay inside its own delimiters.
+        // client_version, user_agent and collection are quoted, the metadata sits inside brackets as
+        // key=value; pairs; a value that carries spaces, quotes, ';', '=', a closing bracket, a control
+        // character or a Unicode line separator must stay inside its own delimiters.
         String version = "1.0\" tenant=evil suppressed_since_last=99 x=\"";
         var lines = captureRepositoryWarnings(() -> {
             post(TOKEN, "/v1/vectors/upsert-chunks", Map.of("collection", COLLECTION_FORGE,
                 "ids", List.of(chash("owr-forge")), "documents", List.of("t"),
-                "metadatas", List.of(Map.of("title", "x] tenant=evil2 [y", "source_path", "/p q"))),
+                "metadatas", List.of(Map.of(
+                    "title", "x] tenant=evil2 [y;source_agent=evil5; event=forged2\u001b[31m",
+                    "source_path", "/p q\u0085r=s\r\nevent=forged3",
+                    "source_agent", "idx"))),
                 Map.of("User-Agent", "ua\" tenant=evil3 \"", "X-Nexus-Client-Version", version));
             return null;
         });
         assertThat(lines).hasSize(1);
         String line = lines.get(0);
         assertThat(line).contains("client_version=\"1.0' tenant=evil suppressed_since_last=99 x='\"");
-        String unquoted = line.replaceAll("\"[^\"]*\"", "\"\"").replaceAll("\\[[^\\]]*\\]", "[]");
-        assertThat(unquoted.split("tenant=", -1).length - 1)
-            .as("the only tenant= field is the engine's own: %s", unquoted).isEqualTo(1);
-        assertThat(unquoted.split("suppressed_since_last=", -1).length - 1).isEqualTo(1);
-        assertThat(unquoted).contains("suppressed_since_last=0");
+
+        // 1. one record: no control, format or separator character survived anywhere in the line
+        java.util.Set<Integer> forbidden = java.util.Set.of((int) Character.CONTROL, (int) Character.FORMAT,
+            (int) Character.LINE_SEPARATOR, (int) Character.PARAGRAPH_SEPARATOR);
+        line.codePoints().forEach(cp -> assertThat(forbidden.contains(Character.getType(cp)))
+            .as("code point U+%04X in: %s", cp, line).isFalse());
+        // 2. exactly the engine's own fields, once each, in order
+        assertThat(fieldKeys(line)).as("fields of: %s", line).isEqualTo(LOG_LINE_FIELDS);
+        assertThat(line).contains("suppressed_since_last=0");
+        // 3. the collection stays inside its quotes
+        assertThat(line).contains("collection=\"knowledge__owr-owner-forge__voyage-context-3__v1 tenant=evil4 "
+            + "suppressed_since_last=77 event=forged [0m\" phase=");
+        // 4. the metadata bracket holds exactly the allowed pairs: one key=value; per key, none forged
+        assertThat(line).endsWith("]");
+        String meta = line.substring(line.indexOf("first_chunk_meta=[") + "first_chunk_meta=[".length(), line.length() - 1);
+        var pairs = java.util.Arrays.stream(meta.split(";")).filter(t -> !t.isEmpty()).toList();
+        assertThat(pairs).as("pairs of: %s", meta).hasSize(3);
+        assertThat(pairs).allSatisfy(pair -> {
+            assertThat(pair.chars().filter(c -> c == '=').count()).as("one '=' in %s", pair).isEqualTo(1);
+            assertThat(List.of("source_path", "title", "source_agent")).contains(pair.substring(0, pair.indexOf('=')));
+        });
+        assertThat(meta.split("source_agent=", -1).length - 1).as("one source_agent pair: %s", meta).isEqualTo(1);
     }
 
     // ── 8. log-only on the paths the enforce tests already pin ───────────────
@@ -941,8 +974,14 @@ class OwnerlessWriteRefusalTest {
             var resp = http.send(req, HttpResponse.BodyHandlers.ofString());
             assertThat(resp.statusCode()).as("%s %s -> %s", route.getKey(), route.getValue(), resp.body()).isEqualTo(404);
         }
-        // Non-vacuity: a live route on the same client, token and service answers.
-        assertThat(get("/v1/status").statusCode()).isEqualTo(200);
+        // Non-vacuity: an AUTHENTICATED live /v1 route answers 200 with this token, and refuses the
+        // same call without one. (/v1/status would not prove it: it is registered outside the auth
+        // filter, so a bad token could not fail it, and "a valid token is sent" would be unproven.)
+        String live = "/v1/catalog/collections/list";
+        assertThat(get(live).statusCode()).as("authenticated /v1 route answers with the token used above").isEqualTo(200);
+        var anonymous = http.send(TestHttp.request("http://127.0.0.1:" + service.getPort() + live)
+            .GET().build(), HttpResponse.BodyHandlers.ofString());
+        assertThat(anonymous.statusCode()).as("the same /v1 route without a token is refused: auth is on").isEqualTo(401);
     }
 
     // ── fixtures ─────────────────────────────────────────────────────────────

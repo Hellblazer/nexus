@@ -1360,7 +1360,7 @@ class RawSqlGateTest {
      * the INSERT — never set to a literal SQL NULL — when the argument is
      * {@code null}) where the site needs those columns.
      * {@code ServiceTokenScopeBackfillTest}/{@code
-     * ServiceTokenSchemaLiquibaseTest}/{@code ReferenceOnlyChunkUpsertTest}
+     * ServiceTokenSchemaLiquibaseTest}/{@code ReferenceOnlyChunkUpsertTest} (now {@code ReferenceOnlyChunkReadPathTest})
      * insert LITERAL (fake) hashes to assert on later, not a real token's
      * sha256 -- these convert onto the typed jOOQ {@code SERVICE_TOKENS} DSL
      * DIRECTLY instead, since {@code seedServiceToken} always hashes its

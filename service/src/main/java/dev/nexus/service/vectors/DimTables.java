@@ -73,7 +73,7 @@ public final class DimTables {
         // ChunkTable column uses (chunkText/embedding/metadata) -- not a
         // static reference into codegen's Tables.CHUNKS.RETENTION. It
         // replaces the ad-hoc DSL.field(DSL.name("retention"), ...)
-        // placeholder PgVectorRepository#referenceOnlyInsertQuery carried
+        // placeholder the (since removed) reference-only INSERT builder carried
         // before the column existed in the migrated schema jOOQ codegen
         // ran against -- a misspelled column name here still fails only
         // at runtime, exactly like every other field in this record.

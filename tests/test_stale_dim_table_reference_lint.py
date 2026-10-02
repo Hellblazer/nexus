@@ -627,13 +627,6 @@ _COUNT_PINNED_FILE_ALLOWLIST: dict[str, tuple[int, str]] = {
     ),
     # ── negative-assertion completeness proof (mirrors "
     #    test_diag_conformance_view.py's pin) ────────────────────────────
-    "service/src/test/java/dev/nexus/service/vectors/ReferenceOnlySqlShapeTest.java": (
-        1,
-        "doesNotContain(\"chunks_1024\") — a positive proof the SQL shape "
-        "under test does NOT reference the retired per-dim table, not a "
-        "live reference to one. Mirrors test_diag_conformance_view.py's "
-        "allowlist reason."
-    ),
     # ── synthetic fixture: an arbitrary example key, unrelated to real
     #    table/column content (mirrors the tests/ synthetic-fixture group) ──
     # WAS service/src/test/java/dev/nexus/service/http/RekeyJobsTest.java

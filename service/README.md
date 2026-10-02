@@ -84,7 +84,17 @@ route, tenant and collection per minute, with the request's `User-Agent` and
 `X-Nexus-Client-Version`, `absent` for a client older than the cut that sends
 it) and counts it. Any other value fails the service AT BOOT. `GET /v1/status`
 carries `ownerless_write_mode`, `ownerless_writes_refused_total` and
-`ownerless_writes_would_refuse_total`. The local engine launch sets `enforce`.
+`ownerless_writes_would_refuse_total`. The local engine launch sets `enforce`, and **a blank value at the
+local launcher counts as unset (enforce), while the raw engine parses blank as `log-only`**. The would-refuse
+log line is a SAMPLE of writers, not a complete list: one line per route, tenant and collection per
+minute for the first unowned chunk only; past 10,000 live keys new keys share ONE overflow bucket (one
+line a minute, `suppressed_since_last` pooled across keys), and under key churn a minute can carry up to
+10,001 lines. The counter delta, not the log, is the criterion for the flip to `enforce`
+(nexus-z0o2p.40). In `log-only`, a request the pre-embed check already reported counts once and its
+in-transaction recheck is skipped, so a chash that loses its owner during the embed is not counted again.
+The line holds tenant content: the first unowned chunk's `source_path`, `title` and `source_agent` (a URL
+value loses its userinfo, query and fragment), the collection name, `User-Agent` and
+`X-Nexus-Client-Version`; never `source_uri` or chunk text. Its retention is the deployment's log retention.
 `NX_TAXONOMY_ASSIGN_STATEMENT_TIMEOUT_MS` (default 30000) and
 `NX_TAXONOMY_ASSIGN_LOCK_TIMEOUT_MS` (default 5000), both range 1..600000,
 bound the taxonomy assign transaction (`assign_from_chashes_<dim>`) the

@@ -780,6 +780,21 @@ def throwaway_pg_cluster(
         shutil.rmtree(pgdata, ignore_errors=True)
 
 
+def _pin_ownerless_write_mode(env: dict[str, str]) -> None:
+    """RDR-223 Phase 3 Step 2 (nexus-z0o2p.24): an UNSET NX_OWNERLESS_WRITE_MODE is log-only on
+    the engine, but the suite pins the posture the local launch ships (enforce) so every
+    substrate-backed test sees the refusal. An explicit value in the caller's environment (a
+    log-only census run) wins.
+
+    An EMPTY or blank value counts as unset, the same rule the local launcher applies
+    (``storage_service_daemon._spawn_service``): the engine parses blank as log-only, so
+    ``env.setdefault``, which keeps an empty string, would hand the suite a silently log-only
+    engine and every refusal test would pass vacuously or fail for the wrong reason.
+    """
+    if not env.get("NX_OWNERLESS_WRITE_MODE", "").strip():
+        env["NX_OWNERLESS_WRITE_MODE"] = "enforce"
+
+
 def _jar_ready_reason(jar: Path) -> str | None:
     """The boot-time jar verdict, waiting for a build first (nexus-wwaqm).
 
@@ -967,10 +982,7 @@ def _boot() -> dict:
         "NX_DB_ADMIN_PASS": "",
     }
     env.pop("NX_STORAGE_BACKEND", None)
-    # RDR-223 Phase 3 Step 2 (nexus-z0o2p.24): an UNSET NX_OWNERLESS_WRITE_MODE is log-only on the
-    # engine, but the suite pins the posture the local launch ships (enforce) so every substrate-backed
-    # test sees the refusal. An explicit value in the caller's environment (a log-only census run) wins.
-    env.setdefault("NX_OWNERLESS_WRITE_MODE", "enforce")
+    _pin_ownerless_write_mode(env)
     if onnx_root is not None:
         env["NX_ONNX_MODEL_DIR"] = str(onnx_root)
     # Engine output goes to a FILE, never a PIPE (nexus-j0nec root cause):

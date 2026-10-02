@@ -2,7 +2,8 @@
 """RDR-169 Phase B fix round 1, CRITICAL (T2 review-nexus-zw2em-rdr169-
 phase-b-2026-09-11): a reference-only chunk (RDR-169 G1, chunk_text=NULL)
 is genuinely reachable through ``POST /v1/vectors/search`` once
-``REFERENCE_ONLY_WRITES_ENABLED=true`` landed (bead nexus-zw2em). Plain
+reference-only writes landed (bead nexus-zw2em; the engine's writer was removed
+later, nexus-z0o2p.36, and rows are now seeded by a test fixture). Plain
 vector search does NOT exclude such a row -- only ``hybrid_search``'s
 FTS/trigram gate does -- so its ``content: null`` reaches
 ``search_engine.py``'s ``SearchResult`` construction and, from there,

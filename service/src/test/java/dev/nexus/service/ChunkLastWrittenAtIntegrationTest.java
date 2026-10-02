@@ -53,7 +53,6 @@ class ChunkLastWrittenAtIntegrationTest {
     private static final String COL_UPSERT_FORCE = "code__lwa-force__minilm-l6-v2-384__v1";
     private static final String COL_UPSERT_DIVERGENT = "code__lwa-divergent__minilm-l6-v2-384__v1";
     private static final String COL_UPSERT_HAVE_VECTOR = "code__lwa-havevec__minilm-l6-v2-384__v1";
-    private static final String COL_REF_ONLY = "code__lwa-refonly__minilm-l6-v2-384__v1";
     private static final String COL_CW_IDENTICAL = "code__lwa-cwident__minilm-l6-v2-384__v1";
     private static final String COL_CW_DIVERGENT = "code__lwa-cwdiverge__minilm-l6-v2-384__v1";
     private static final String COL_MAINTENANCE = "code__lwa-maint__minilm-l6-v2-384__v1";
@@ -103,7 +102,7 @@ class ChunkLastWrittenAtIntegrationTest {
         vectors = new PgVectorRepository(tenantScope, embedder, embedder);
 
         for (String col : List.of(COL_UPSERT_FORCE, COL_UPSERT_DIVERGENT, COL_UPSERT_HAVE_VECTOR,
-                COL_REF_ONLY, COL_CW_IDENTICAL, COL_CW_DIVERGENT, COL_MAINTENANCE, COL_FRESH,
+                COL_CW_IDENTICAL, COL_CW_DIVERGENT, COL_MAINTENANCE, COL_FRESH,
                 COL_REHOME_OLD, COL_REHOME_NEW, COL_RENAME_OLD, COL_QUARANTINE_ORIGIN)) {
             tenantScope.withTenant(TENANT, ctx -> {
                 PgContainerHelper.insertCollection(ctx, TENANT, col);
@@ -185,19 +184,6 @@ class ChunkLastWrittenAtIntegrationTest {
             List.of(Map.of("v", "2")));
 
         assertRefreshed(aged, stamps(COL_UPSERT_HAVE_VECTOR, chash));
-    }
-
-    @Test
-    void upsertReferenceOnlyChunk_onConflict_refreshesLastWrittenAt() throws Exception {
-        String chash = ch("refonly");
-        float[] vec = new float[384];
-        vec[3] = 1.0f;
-        vectors.upsertReferenceOnlyChunk(TENANT, COL_REF_ONLY, chash, vec, Map.of("v", "1"));
-        Stamps aged = age(COL_REF_ONLY, chash);
-
-        vectors.upsertReferenceOnlyChunk(TENANT, COL_REF_ONLY, chash, vec, Map.of("v", "2"));
-
-        assertRefreshed(aged, stamps(COL_REF_ONLY, chash));
     }
 
     @Test

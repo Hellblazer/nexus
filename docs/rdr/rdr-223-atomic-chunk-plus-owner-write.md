@@ -505,8 +505,9 @@ nexus-b50zw closes.
   without an owner". Not covered: (a) `log-only` mode, the default when
   `NX_OWNERLESS_WRITE_MODE` is unset, which writes as before and only logs and
   counts; (b) repository methods called without a guard (the contract and
-  fixture tests, the migration ingest, and `upsertReferenceOnlyChunk`, which no
-  handler calls since the route was retired); (c) the time after the write:
+  fixture tests and the migration ingest; the reference-only writer
+  `upsertReferenceOnlyChunk` was removed outright, so the engine has no writer
+  of reference-only rows at all, nexus-z0o2p.36); (c) the time after the write:
   the check says the chash is owned when the write commits, not that it stays
   owned (the next two sentences). Chunks a supersede drops still lose their owner; they are swept at the
   document's last batch. After a crash they stay ownerless until the RDR-192

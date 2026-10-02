@@ -20,8 +20,14 @@ import java.util.Locale;
  * {@link #LOG_ONLY}; only an explicit {@code enforce} enforces (conexus's condition for the first
  * production deploy: the engine's first run against real traffic must not refuse anything until the
  * would-refuse log has been read). Local installs enforce regardless, because the local engine
- * launch path sets {@code enforce} explicitly ({@code nexus.daemon.storage_service_daemon}). An
- * unrecognised value fails the boot rather than silently choosing a mode.
+ * launch path sets {@code enforce} explicitly ({@code nexus.daemon.storage_service_daemon}), and
+ * there a BLANK value counts as unset (so it enforces), where this raw parse reads blank as
+ * {@link #LOG_ONLY}. An unrecognised value fails the boot rather than silently choosing a mode.
+ *
+ * <p>Under {@link #LOG_ONLY} a request is counted ONCE: when the pre-embed check already reported
+ * unowned chashes, the in-transaction recheck is skipped for that request, so a chash in the same
+ * request that loses its owner during the embed is not counted again. The log line is a sample
+ * (see {@link OwnerlessLogLimiter}); the counters on {@code /v1/status} are the complete signal.
  */
 public enum OwnerlessWriteMode {
     LOG_ONLY("log-only"),

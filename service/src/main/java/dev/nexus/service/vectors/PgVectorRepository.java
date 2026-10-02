@@ -665,12 +665,17 @@ public final class PgVectorRepository {
      * the question the line exists to answer and the operator reading the engine log is the party
      * that already holds the tenant's data (RDR-223 names them as the line's content). What is left
      * out is what that question does not need and what is most sensitive: no {@code source_uri} (a
-     * full URL that can carry credentials or query strings) and no chunk text.
+     * full URL that can carry credentials or query strings) and no chunk text. A value that is itself
+     * a URL loses its userinfo, query and fragment ({@link OwnerlessLogText#redactUrl}). The line's
+     * retention is the deployment's log retention (docs/privacy-policy.md, "Engine logs").
      */
     private static final List<String> OWNERSHIP_LOG_META_KEYS = List.of("source_path", "title", "source_agent");
 
     /** Longest {@code User-Agent} / {@code X-Nexus-Client-Version} the log line carries (same bound as the metadata fields). */
     static final int OWNERSHIP_LOG_FIELD_MAX = 120;
+
+    /** Longest collection name the log line carries; the collection is quoted and cleaned like a header. */
+    static final int OWNERSHIP_LOG_COLLECTION_MAX = 256;
 
     /** Rate limit for the refusal / would-refuse WARN line: one per (route, tenant, collection) per minute. */
     private final OwnerlessLogLimiter ownerlessLogLimiter = OwnerlessLogLimiter.system();
@@ -776,17 +781,14 @@ public final class PgVectorRepository {
     }
 
     /**
-     * A request header for the log line: "absent" when null or blank, else whitespace-collapsed, cut to
-     * {@link #OWNERSHIP_LOG_FIELD_MAX}, and with {@code "} turned into {@code '}. The caller wraps the
-     * result in double quotes, so a header value cannot close the quote and append {@code key=value}
-     * pairs of its own.
+     * A request header for the log line: "absent" when null or blank, else cleaned by {@link
+     * OwnerlessLogText#quoted}: control characters and Unicode line separators collapsed to a space,
+     * cut to {@link #OWNERSHIP_LOG_FIELD_MAX}, with {@code "} and a backslash neutralised. The caller
+     * wraps the result in double quotes, so a header value cannot close the quote and append
+     * {@code key=value} pairs of its own, or end the line.
      */
     private static String clipLogField(String value) {
-        if (value == null || value.isBlank()) {
-            return "absent";
-        }
-        String text = value.strip().replaceAll("\\s+", " ");
-        return text.substring(0, Math.min(OWNERSHIP_LOG_FIELD_MAX, text.length())).replace('"', '\'');
+        return OwnerlessLogText.quoted(value, OWNERSHIP_LOG_FIELD_MAX);
     }
 
     /**
@@ -817,19 +819,20 @@ public final class PgVectorRepository {
                 for (String key : OWNERSHIP_LOG_META_KEYS) {
                     Object v = meta.get(key);
                     if (v != null && !String.valueOf(v).isBlank()) {
-                        // the bracket pair delimits first_chunk_meta, so a value must not close it
-                        String text = String.valueOf(v).replaceAll("\\s+", " ").replace('[', '(').replace(']', ')');
-                        sb.append(key).append('=').append(text, 0, Math.min(OWNERSHIP_LOG_FIELD_MAX, text.length())).append(';');
+                        // the bracket pair, ';' and '=' delimit first_chunk_meta: a value carries none of them
+                        sb.append(key).append('=')
+                          .append(OwnerlessLogText.metaValue(String.valueOf(v), OWNERSHIP_LOG_FIELD_MAX)).append(';');
                     }
                 }
                 writer = sb.toString();
             }
             String clientVersion = clipLogField(guard.clientVersion());
             String userAgent = clipLogField(guard.userAgent());
-            log.warn("event={} route={} tenant={} collection={} phase={} unowned={} requested={} sample={} "
+            log.warn("event={} route={} tenant={} collection=\"{}\" phase={} unowned={} requested={} sample={} "
                             + "user_agent=\"{}\" client_version=\"{}\" suppressed_since_last={} first_chunk_meta=[{}]",
                     enforce ? "ownerless_chunk_write_refused" : "ownerless_chunk_write_would_refuse",
-                    guard.route(), tenant, collection, phase, unowned.size(), requested,
+                    guard.route(), tenant, OwnerlessLogText.quoted(collection, OWNERSHIP_LOG_COLLECTION_MAX),
+                    phase, unowned.size(), requested,
                     String.join(",", sample), userAgent, clientVersion, suppressed, writer);
         }
         if (enforce) {
@@ -1208,168 +1211,15 @@ public final class PgVectorRepository {
     }
 
     // -------------------------------------------------------------------------
-    // RDR-169 G4: embed-without-store / reference-only upsert
-    //
-    // RDR-223 Phase 3 Step 2 (nexus-z0o2p.24): POST /v1/vectors/upsert-reference-only is RETIRED
-    // (410). This repository method has no HTTP route and no production caller; it stays as the
-    // writer of reference-only rows for tests (and for a future RDR-169 G4 writer, which would
-    // write through the combined routes). Do not add a route over it without a manifest row.
+    // RDR-169 G4 reference-only rows: the engine has NO writer for them (RDR-223 Phase 3,
+    // nexus-z0o2p.36). POST /v1/vectors/upsert-reference-only is RETIRED (410) and the
+    // repository method behind it, with its SQL builder and write gate, was deleted: a
+    // chunk with no manifest row is the ownerless write this phase refuses, and nothing in
+    // production called it. The read path still serves rows that already carry
+    // retention='reference-only' (NULL chunk_text); tests build such rows with
+    // PgContainerHelper#insertReferenceOnlyChunk. A future writer must go through the
+    // combined routes, so the row gets its manifest row in the same transaction.
     // -------------------------------------------------------------------------
-
-    /**
-     * Write gate (RDR-169 G4, nexus-xvb6b) for {@link #upsertReferenceOnlyChunk}. Phase A
-     * (nexus-xvb6b) shipped this {@code false}: the {@code retention} column did not exist
-     * yet, so the method ran all pre-SQL validation but short-circuited before the
-     * retention-binding INSERT. Phase B (bead nexus-zw2em, changeset
-     * {@code vectors-014-retention.xml}) landed the column, so this now stays {@code true} —
-     * every code path below the guard reaches the real INSERT.
-     */
-    static final boolean REFERENCE_ONLY_WRITES_ENABLED = true;
-
-    /**
-     * Build the reference-only upsert as a jOOQ query (nexus-xtmtf: DSL form of the retired
-     * {@code referenceOnlyInsertSql} string). {@code retention} is now the GENERATED
-     * {@link DimTables.ChunkTable#retention()} field (RDR-169 Phase B, nexus-zw2em) — the
-     * Phase-A ad-hoc {@code DSL.field(DSL.name("retention"), ...)} placeholder is retired now
-     * that the column and its jOOQ codegen both exist. {@code chunk_text} is intentionally
-     * EXCLUDED from the DO UPDATE — reference-only rewrites refresh embedding+metadata but
-     * must never overwrite a non-NULL {@code chunk_text} (the caller's guard catches
-     * full→ref before SQL; this omission is defense-in-depth). Package-private so the
-     * SQL-shape test renders it.
-     */
-    static org.jooq.Query referenceOnlyInsertQuery(
-            org.jooq.DSLContext ctx, int dim, String tenant, String collection,
-            String chash, float[] embedding, String metadataJson) {
-        DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
-        return ctx.insertInto(ch.table())
-                  .columns(ch.tenantId(), ch.collection(), ch.chash(), ch.chunkText(),
-                           ch.embedding(), ch.metadata(), ch.retention())
-                  .values(tenant, collection, chash, null,
-                          Vector.of(embedding),
-                          JSONB.jsonb(metadataJson), "reference-only")
-                  .onConflict(ch.tenantId(), ch.collection(), ch.chash())
-                  .doUpdate()
-                  .set(ch.embedding(), DSL.excluded(ch.embedding()))
-                  // nexus-w94eo: merge, not replace — see the sibling ON CONFLICT above
-                  // in upsertChunksInternal for the full rationale. No delete keys: the
-                  // upsert-reference-only route carries no delete_keys field, and no
-                  // client in src/nexus calls that route today.
-                  .set(ch.metadata(),  mergeMetadata(ch.metadata(), DSL.excluded(ch.metadata()), null))
-                  .set(ch.retention(), DSL.excluded(ch.retention()))
-                  // nexus-wbfpw.43: a reference-only re-write is a client write of an
-                  // existing chunk, so it restarts the reapable(c) grace window like
-                  // the content upsert above.
-                  .set(ch.lastWrittenAt(), DimTables.lastWrittenNow());
-    }
-
-    /**
-     * Upserts a reference-only chunk: stores a pre-computed embedding + metadata with
-     * {@code chunk_text=NULL} and {@code retention='reference-only'} (RDR-169 G4,
-     * embed-without-store).
-     *
-     * <h3>Phase B status (live)</h3>
-     * The {@code retention} column landed in {@code vectors-014-retention.xml} (bead
-     * nexus-zw2em) and {@link #REFERENCE_ONLY_WRITES_ENABLED} is {@code true} — every
-     * validation path below reaches the real retention-binding INSERT. The
-     * {@code POST /v1/vectors/upsert-reference-only} route ({@link
-     * dev.nexus.service.http.VectorHandler}) dispatches here.
-     *
-     * <h3>Null and dim validation (pre-SQL)</h3>
-     * {@code embedding} must be non-null, non-empty, and its length must equal the dimension
-     * implied by {@code collection}.  Mismatch fails loud — no silent truncation.
-     *
-     * <h3>full → reference-only transition guard (pre-INSERT SELECT)</h3>
-     * If a chunk with the same {@code (tenant, collection, chash)} already exists and has a
-     * non-NULL {@code chunk_text}, this method throws {@link IllegalStateException}.  The
-     * caller must explicitly delete + re-insert to change retention (RDR-169 §Re-index).
-     * {@code reference-only → reference-only} rewrites (embedding/metadata refresh) are
-     * permitted; the INSERT's DO UPDATE clause omits {@code chunk_text} as defense-in-depth.
-     *
-     * <h3>Known residual seam</h3>
-     * There remains a TOCTOU window between the guard SELECT (step 3) and the INSERT (step
-     * 6): two concurrent full→reference-only attempts against the same, previously-absent
-     * chash can both pass the guard before either INSERTs, and the second INSERT's
-     * {@code ON CONFLICT DO UPDATE} would win with whichever payload lands last. Guarding
-     * against a genuinely full row is unaffected (the guard SELECT sees committed data),
-     * but a race between two concurrent reference-only writers to a brand-new chash is not
-     * serialized at the DB layer here (no unique constraint or trigger closes it — RDR-169's
-     * Technical Design leaves the transition prohibition to the application-layer guard).
-     * Tracked as a residual, not blocking Phase B (which targets the correctness invariant
-     * RDR-169 names: full content is never silently NULLed).
-     *
-     * @param tenant     tenant principal for RLS scoping
-     * @param collection four-segment conformant collection name
-     * @param chash      64-hex content-addressed chunk ID (the full sha256, RDR-180)
-     * @param embedding  precomputed vector (non-null, non-empty) — dim must match collection
-     * @param metadata   chunk metadata (may be empty, not null)
-     * @throws IllegalArgumentException if {@code embedding} is null/empty or dim mismatches
-     * @throws IllegalStateException    if a full-content chunk already occupies this chash
-     */
-    public void upsertReferenceOnlyChunk(String tenant, String collection,
-                                         String chash,
-                                         float[] embedding,
-                                         Map<String, Object> metadata) {
-        // (1) Null / empty guard — pre-SQL, mirrors upsertChunksWithVectors null check.
-        if (embedding == null || embedding.length == 0) {
-            throw new IllegalArgumentException(
-                "upsertReferenceOnlyChunk: embedding must be non-null and non-empty for chash '"
-                + chash + "' in collection '" + collection + "'");
-        }
-
-        // (2) Dim validation — pre-SQL, fail loud, no silent truncation.
-        int dim = dimForCollection(tenant, collection);
-        if (embedding.length != dim) {
-            throw new IllegalArgumentException(
-                "upsertReferenceOnlyChunk: " + embedding.length + "-dim vector for collection '"
-                + collection + "' which dispatches to embedding_" + dim
-                + " (dim mismatch — no silent truncation)");
-        }
-
-        tenantScope.withTenant(tenant, ctx -> {
-            // (3) full → reference-only guard: SELECT before INSERT.
-            // Reads only chunk_text (not retention) — correctness relies on the schema
-            // invariant chunk_text NOT NULL ⇒ retention='full', which the CHECK constraint
-            // does not itself enforce (see the method javadoc's "Known residual seam").
-            // A previously-full chunk must never be silently NULLed (RDR-169 §Re-index PROHIBITS).
-            DimTables.ChunkTable existingCh = DimTables.CHUNKS.get(dim);
-            var existing = ctx.select(existingCh.chunkText()).from(existingCh.table())
-                              .where(existingCh.tenantId().eq(tenant)
-                                  .and(existingCh.collection().eq(collection))
-                                  .and(existingCh.chash().eq(chash)))
-                              .fetchOne();
-            if (existing != null && existing.value1() != null) {
-                throw new IllegalStateException(
-                    "upsertReferenceOnlyChunk: chash '" + chash + "' in collection '"
-                    + collection + "' already has full content (chunk_text IS NOT NULL). "
-                    + "A full→reference-only transition is prohibited by RDR-169 §Re-index. "
-                    + "Delete + re-insert to change retention.");
-            }
-
-            // (4) Write gate — kept as a kill switch (Phase A shipped it false, before the
-            // retention column existed; Phase B, nexus-zw2em, flips it true permanently
-            // now that vectors-014-retention.xml has landed).
-            if (!REFERENCE_ONLY_WRITES_ENABLED) {
-                throw new IllegalStateException(
-                    "upsertReferenceOnlyChunk: reference-only writes are disabled "
-                    + "(REFERENCE_ONLY_WRITES_ENABLED=false)");
-            }
-
-            // (5) RDR-204 Phase 1 (bead nexus-ft04v.7): require catalog_collections to
-            // already carry a row for `collection` before any chunk write. Replaces the
-            // RDR-70r3c-era stub INSERT ... ON CONFLICT DO NOTHING (mirrored
-            // upsertChunksInternal's, deriving content_type/owner_id/embedding_model from
-            // the name) with a fail-loud check.
-            CollectionRegistry.requireRegistered(ctx, tenant, collection);
-
-            // (6) Reference-only chunk INSERT (Phase B, live — retention column present;
-            // see referenceOnlyInsertQuery).
-            referenceOnlyInsertQuery(ctx, dimForCollection(tenant, collection), tenant,
-                    collection, chash, embedding,
-                    toJson(sanitizeNulDeep(metadata))).execute();
-            return null;
-        });
-        log.debug("event=upsert_reference_only_done collection={} chash={}", collection, chash);
-    }
 
     /**
      * Semantic search: embed the query server-side, then

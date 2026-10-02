@@ -16,9 +16,21 @@ import java.util.function.LongSupplier;
  * leaks nor floods. A new key that arrives at the cap first evicts every key whose window has
  * elapsed (such a key remembers only a suppressed count, which a quiet key no longer needs; the sweep
  * runs at most once per {@link #SWEEP_INTERVAL_MS}). If the map is still full, every new key shares ONE
- * overflow bucket with the same one-line-per-window rule, its suppressed count included. So past the
- * cap the engine logs at most one extra line a minute, however many distinct (tenant, collection)
- * pairs a client registers and writes to, and a line it does log still names the real key.
+ * overflow bucket with the same one-line-per-window rule, its suppressed count included.
+ *
+ * <p>What that bounds, measured against the code and not the intent. Memory: {@link #MAX_KEYS} keys plus
+ * the overflow bucket, however many distinct (tenant, collection) pairs a client writes to. Volume: a
+ * key frees its slot only after its own window elapsed, so each of the {@link #MAX_KEYS} slots logs at
+ * most once per window, and the overflow bucket once more; a flood of distinct keys can therefore
+ * produce up to {@code MAX_KEYS + 1} lines in one window (about 10,000 a minute) when the keys churn,
+ * not "one extra line a minute". The overflow bucket is shared by every key that finds the map full,
+ * legitimate ones included: its single line per window names whichever key arrived first, so a quiet
+ * legitimate writer can go unlogged for a window while a flood fills the map. A line that is logged for
+ * a key still names the real key, and {@code suppressed_since_last} on an overflow line counts the pooled
+ * suppressions of all overflowing keys, not of the key named. So the log is a SAMPLE of writers, never a
+ * complete list; the complete signal is the counters on {@code /v1/status}, which this class never limits.
+ * One race is accepted: a key evicted between its map lookup and its state lock can log once more in
+ * the same window.
  */
 public final class OwnerlessLogLimiter {
 

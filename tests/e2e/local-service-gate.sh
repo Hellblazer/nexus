@@ -810,13 +810,21 @@ if [ -z "${NEXUS_GATE_NO_VECTOR_SMOKE:-}" ]; then
   # write is accepted and /v1/status counts it, so the pytest legs after this one can run and list
   # every ownerless writer in the engine log.
   SMOKE_ORPHAN="$(python3 -c "import hashlib;print(hashlib.sha256(b'gate-smoke-orphan-$SMOKE_UID').hexdigest())")"
+  # The log-only check is a counter DELTA around this one write, never ">=1": the counter is a
+  # since-boot total, so any earlier would-refuse (another leg, a retry) would satisfy ">=1" with
+  # the write under test counted by nothing. -1 (unreadable before-value) fails the check below.
+  SMOKE_WR_BEFORE=-1
+  if [ "${NX_OWNERLESS_WRITE_MODE:-enforce}" = "log-only" ]; then
+    smoke_request GET /v1/status
+    SMOKE_WR_BEFORE="$(python3 -c "import json;print(int(json.load(open('$SMOKE_DIR/resp.json')).get('ownerless_writes_would_refuse_total',-1)))" 2>/dev/null)" || SMOKE_WR_BEFORE=-1
+  fi
   smoke_request POST /v1/vectors/upsert-chunks \
     "$(python3 -c "import json;print(json.dumps({'collection':'$SMOKE_VEC_COLLECTION','ids':['$SMOKE_ORPHAN'],'documents':['gate smoke orphan chunk $SMOKE_UID'],'metadatas':[{}]}))")"
   if [ "${NX_OWNERLESS_WRITE_MODE:-enforce}" = "log-only" ]; then
     [ "$SMOKE_CODE" = "200" ] || smoke_fail "POST /v1/vectors/upsert-chunks (ownerless chash, log-only) want 200"
     smoke_request GET /v1/status
-    smoke_check "GET /v1/status -> log-only counted the ownerless write" \
-      "d.get('ownerless_write_mode')=='log-only' and d.get('ownerless_writes_would_refuse_total',0)>=1"
+    smoke_check "GET /v1/status -> log-only counted the ownerless write (counter +1 over the write)" \
+      "d.get('ownerless_write_mode')=='log-only' and $SMOKE_WR_BEFORE>=0 and d.get('ownerless_writes_would_refuse_total',-1)==$SMOKE_WR_BEFORE+1"
   else
     [ "$SMOKE_CODE" = "422" ] || smoke_fail "POST /v1/vectors/upsert-chunks (ownerless chash) want 422"
     smoke_check "POST /v1/vectors/upsert-chunks (ownerless chash) -> 422 ownerless_chunk_write naming write_many and append" \

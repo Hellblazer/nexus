@@ -41,7 +41,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  *
  * <p>Real PG via {@link PgContainerHelper#applyProductSchema} (a full Liquibase walk
  * through {@code vectors-016-combined-query-retention.xml}), style of {@link
- * ReferenceOnlyChunkUpsertTest}. One FULL-content chunk and one reference-only chunk are
+ * ReferenceOnlyChunkReadPathTest}. One FULL-content chunk and one reference-only chunk are
  * each registered in the catalog manifest, reached by a catalog link from a common seed
  * (graph-hop), assigned to a shared topic (topic-scoped), and carry a document_aspects row
  * (aspect-scoped) — so all four combined-query paths return BOTH rows in one call, and each
@@ -124,12 +124,13 @@ class CombinedQueryRetentionTest {
 
         // Full-content chunk via the ordinary write path (retention='full' implicitly).
         repo.upsertChunks(TENANT, COL, List.of(FULL_CHASH), List.of(FULL_TEXT), List.of(Map.of()));
-        // Reference-only chunk: no content, a caller-supplied embedding (RDR-169 G4).
-        repo.upsertReferenceOnlyChunk(TENANT, COL, REFONLY_CHASH, REFONLY_VEC, Map.of());
-
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             var ctx = DSL.using(su, SQLDialect.POSTGRES);
+
+            // Reference-only chunk: no content, a caller-supplied embedding (RDR-169 G4),
+            // through the test fixture (the engine has no writer for one, nexus-z0o2p.36).
+            PgContainerHelper.insertReferenceOnlyChunk(ctx, TENANT, COL, REFONLY_CHASH, REFONLY_VEC, Map.of());
 
             // Catalog documents: the seed (no chunks of its own) plus the two content docs.
             for (String tumbler : List.of(SEED_TUMBLER, FULL_TUMBLER, REFONLY_TUMBLER)) {
