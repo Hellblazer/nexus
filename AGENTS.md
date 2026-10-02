@@ -261,8 +261,8 @@ group is root-equivalent: a closed home does not stop `docker run -v /:/h`.
 The job and a hand-run suite by the host's `nxtest` user serialize on one lease,
 not by agreement: `test-qwen` points `NX_BUILD_LEASE_ROOT` at a host directory
 (`QWEN_SUITE_LEASE_ROOT`, default `/var/lib/nx-suite-lease`, group-writable,
-not sticky) and sets `NX_SUITE_LEASE_WAIT=1`, and a hand run passes the same two
-variables explicitly (`nxtest`'s `.bashrc` no longer exports them: bash reads
+not sticky) and sets `NX_SUITE_LEASE_WAIT=1`, and the hand-run wrapper passes the same two
+variables itself (`nxtest`'s `.bashrc` no longer exports them: bash reads
 `~/.bashrc` in non-interactive ssh shells, and the export leaked into tests that
 scrub the variable); the job's lease step fails loud, with the host setup text, when
 the directory is missing or unusable (the suite lease itself would otherwise run
@@ -295,11 +295,21 @@ lock logs a waiting line; a wait that outruns `QWEN_BOX_LOCK_WAIT_SECONDS`
 (1800, under the job's 75-minute timeout) fails the job naming the lock; a host
 without `flock` fails the job closed. The suite lease stays, for pytest-only
 hand runs. Worker count is `-n 8`, not 12: each xdist worker boots its own
-Postgres at about 2.5 GB and 12 left the VM too little headroom. **Hand runs on
-qwentescence follow the same convention**, as `nxtest` in a worktree under
-`~/src/nexus-wt/`:
-`flock /var/lib/nx-suite-lease/box.lock env NX_BUILD_LEASE_ROOT=/var/lib/nx-suite-lease NX_SUITE_LEASE_WAIT=1 bash -c 'uv sync -q && scripts/build-gate-jar.sh && uv run pytest -n 8 -q'`.
-No Maven or engine suites on qwentescence at all (`scripts/mvnw-leased.sh`,
+Postgres at about 2.5 GB and 12 left the VM too little headroom. **CI has strict priority
+on that lock** (nexus-0wp30, Sam 2026-10-02). `flock` does not order its waiters,
+`test-qwen` gives up after 1800 s and a hand run takes about 11 minutes, so
+queued hand runs starved CI for about 24 minutes. `test-qwen` therefore posts
+`ci-waiting.<run>.<attempt>` in the lease root before it waits for the lock and
+drops it when it holds the lock or leaves the step any other way. **Hand runs go
+ONLY through `scripts/qwen-hand-run.sh`**, as `nxtest` in a worktree under
+`~/src/nexus-wt/`: it refuses to start (exit 76, retry later) while a marker is
+fresh, yields the lock and backs off if CI queued while it waited, treats a
+marker older than 2100 s (CI's wait plus a margin) as the leftover of a killed
+job, and passes `NX_BUILD_LEASE_ROOT` and `NX_SUITE_LEASE_WAIT=1` itself. A hand run already
+holding the lock is not interrupted, so CI still waits up to one run (about 11
+minutes warm). **Interim policy (Sam, 2026-10-02): agents' full suites use
+hellmini; qwentescence is primarily CI's.** A hand run there is for a case that
+needs Linux. No Maven or engine suites on qwentescence at all (`scripts/mvnw-leased.sh`,
 `service/` test runs, `-Pnative`): the Java engine suites run on hellmini. The
 stamped-jar build that tests need is the only Maven the box runs, and only
 inside the lock. The T2 how-to `nexus/qwentescence-test-host-howto` carries the

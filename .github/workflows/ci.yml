@@ -897,6 +897,22 @@ jobs:
     # build or a suite. Maven and engine suites do NOT run on this box at all
     # (hellmini takes them).
     #
+    # CI PRIORITY (nexus-0wp30, Sam 2026-10-02). flock does not order its
+    # waiters, this job gives up after QWEN_BOX_LOCK_WAIT_SECONDS (1800) and a
+    # hand run takes about 11 minutes, so a queue of hand runs starved CI for
+    # about 24 minutes. The lock alone cannot express "CI first", so the job
+    # posts a marker, `$QWEN_SUITE_LEASE_ROOT/ci-waiting.<run>.<attempt>`, in the
+    # lease root before it waits, and removes it when it holds the lock or leaves
+    # the step any other way (see the step). scripts/qwen-hand-run.sh, the only
+    # documented hand-run entry, refuses to start while a fresh marker exists and
+    # yields the lock if CI arrived while it waited; it treats a marker older than
+    # 2100 s (this wait plus 300 s) as the leftover of a killed job. Keep that
+    # bound above QWEN_BOX_LOCK_WAIT_SECONDS: tests/test_pytest_gate_qwen_route.py
+    # pins it. The worst case CI still waits is one hand run already holding the
+    # lock when CI arrives (about 11 minutes warm, about 20 cold), which is inside
+    # the wait. A hand run that starts during this job's setup steps, before the
+    # marker is posted, can also take the lock first; that is the same bounded wait.
+    #
     # LABELS. `[self-hosted, Linux, X64, qwen-linux]` is the full label set the
     # runner carries (read from the repository's runner list on 2026-10-01):
     # `qwen-linux` is its own custom label and no other runner has it, so the job
@@ -1181,6 +1197,24 @@ jobs:
           fi
           lock="$QWEN_SUITE_LEASE_ROOT/box.lock"
           wait_s="$QWEN_BOX_LOCK_WAIT_SECONDS"
+          # CI PRIORITY (nexus-0wp30; see CI PRIORITY in the job comment). Post
+          # ci-waiting.<run>.<attempt> in the lease root BEFORE waiting on the
+          # lock, so a hand run (scripts/qwen-hand-run.sh) refuses to start, and
+          # yields the lock if it already holds it. It is dropped the moment this
+          # step holds the lock (inside the bash -c below) and by the EXIT trap on
+          # every other way out; TERM and INT reach that trap by exiting. A
+          # marker the trap could not remove (SIGKILL) goes stale by itself: the
+          # wrapper ignores one older than 2100 s.
+          marker="$QWEN_SUITE_LEASE_ROOT/ci-waiting.${GITHUB_RUN_ID:-norun}.${GITHUB_RUN_ATTEMPT:-0}"
+          trap 'rm -f "$marker"' EXIT
+          trap 'exit 143' TERM
+          trap 'exit 130' INT
+          if printf 'run=%s attempt=%s\n' "${GITHUB_RUN_ID:-norun}" "${GITHUB_RUN_ATTEMPT:-0}" 2>/dev/null > "$marker"; then
+            echo "CI priority marker $marker posted: hand runs started through scripts/qwen-hand-run.sh now yield to this job"
+          else
+            echo "::warning::could not post the CI priority marker $marker (is the lease root writable?): a hand run will not yield to this job, so the lock wait may run long"
+          fi
+          export CI_WAIT_MARKER="$marker"
           # A plain probe, only to say in the log whether this run will queue.
           if flock -n "$lock" true 2>/dev/null; then
             echo "box lock $lock is free; taking it for the jar build and the suite"
@@ -1195,7 +1229,8 @@ jobs:
           # `|| rc=$?` keeps the runner's `bash -e` from exiting on the 200 before
           # the message below can name the lock.
           rc=0
-          flock -w "$wait_s" -E 200 "$lock" bash -c 'set -euo pipefail; scripts/build-gate-jar.sh; uv run pytest tests/ -q -rs -n 8 --durations=25 | tee suite-output.txt' || rc=$?
+          # shellcheck disable=SC2016  # $CI_WAIT_MARKER is meant to expand in the inner shell, from the exported variable
+          flock -w "$wait_s" -E 200 "$lock" bash -c 'set -euo pipefail; rm -f "$CI_WAIT_MARKER"; scripts/build-gate-jar.sh; uv run pytest tests/ -q -rs -n 8 --durations=25 | tee suite-output.txt' || rc=$?
           if [ "$rc" -eq 200 ]; then
             echo "::error::could not take the box lock $lock within ${wait_s}s: a hand run or another job still holds it. Nothing was built or run. Re-run once the box is free (the lock is released when its holder's command ends)."
             exit 1

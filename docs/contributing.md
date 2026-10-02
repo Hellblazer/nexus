@@ -231,10 +231,9 @@ The enable sequence, in order; stop at the first red:
    `/var/lib/nx-suite-lease`: `sudo groupadd -f nx-suite`,
    `sudo usermod -aG nx-suite ghci`, `sudo usermod -aG nx-suite nxtest`,
    `sudo install -d -o root -g nx-suite -m 2775 /var/lib/nx-suite-lease`),
-   restart the runner service so `ghci` has the group, and take the box lock for
-   every hand run, passing `NX_BUILD_LEASE_ROOT=/var/lib/nx-suite-lease
-   NX_SUITE_LEASE_WAIT=1` explicitly (`flock /var/lib/nx-suite-lease/box.lock env
-   NX_BUILD_LEASE_ROOT=... NX_SUITE_LEASE_WAIT=1 bash -c '...'`, below). Do not
+   restart the runner service so `ghci` has the group, and run every hand run
+   through `scripts/qwen-hand-run.sh` (below), which takes the box lock and
+   passes `NX_BUILD_LEASE_ROOT` and `NX_SUITE_LEASE_WAIT=1` itself. Do not
    export them from `nxtest`'s `.bashrc`: bash reads it in non-interactive ssh
    shells, and the export leaked into tests that scrub the variable.
    The host needs `flock` (util-linux); the job's toolchain preflight and its
@@ -296,11 +295,16 @@ Then, before the route is called settled:
    mid-suite, then check on the host for orphan Postgres and `nexus-service`
    processes, containers on the shared docker daemon, and shared-memory
    segments (`ipcs -m`). The next run's orphan sweep should clear what it left.
-10. One overlap with a hand run: start a hand run as `nxtest` under the box lock
-    (`flock /var/lib/nx-suite-lease/box.lock env NX_BUILD_LEASE_ROOT=/var/lib/nx-suite-lease NX_SUITE_LEASE_WAIT=1 bash -c 'uv sync -q && scripts/build-gate-jar.sh && uv run pytest -n 8 -q'`),
-    push, and see the CI job log that the box lock is held, wait, and start when the hand
-    run ends, with no OOM on the distro. Then the reverse: a hand run started while the CI job
-    holds the lock queues behind it.
+10. Two overlaps with a hand run, both through `scripts/qwen-hand-run.sh` as `nxtest`.
+    (a) Start a hand run, push, and see the CI job log that the box lock is held and
+    that it posted its marker (`CI priority marker .../ci-waiting.<run>.<attempt>
+    posted`); the CI job waits for the hand run to finish and starts when it ends,
+    with no OOM on the distro. (b) The reverse, which is the case the marker exists
+    for: with a CI job queued behind a running hand run, start a second hand run;
+    it must exit 76 ("CI has strict priority") without taking the lock, and
+    once the first hand run ends CI must take the lock next. Then check that the
+    marker is gone from `/var/lib/nx-suite-lease` after the CI job ends, cancelled
+    ones included.
 11. The skip-reason diff (the `TODO(qwen-floor)` in `ci.yml`): diff the `-rs`
     skip reasons in `suite-output.txt` against a hosted run of the same tree. The
     measured gap is about 2k tests (25,705 passed here against about 27.7k from
@@ -321,17 +325,43 @@ disarms them, so only their fail-loud twins run).
 A hand run as `nxtest` takes the same box lock the CI job does, across the jar
 build and the suite, so a hand run and CI cannot overlap at any stage (the WSL VM
 wedged twice on 2026-10-01 when a suite overlapped a Maven gate-jar build; the
-suite lease alone does not cover the build):
+suite lease alone does not cover the build).
+
+**CI has strict priority on that lock** (nexus-0wp30). `flock` does not order its
+waiters, the `test-qwen` job gives up after 1800 s, and a hand run takes about 11
+minutes, so on 2026-10-02 a queue of hand runs starved CI for about 24 minutes.
+The job therefore posts a marker, `ci-waiting.<run>.<attempt>`, in the lease
+directory before it waits for the lock, and removes it the moment it holds the
+lock and on every other way out of the step (success, timeout, failure,
+cancellation). **A hand run goes ONLY through `scripts/qwen-hand-run.sh`**, as
+`nxtest` in a worktree under `~/src/nexus-wt/`:
 
 ```bash
-flock /var/lib/nx-suite-lease/box.lock env NX_BUILD_LEASE_ROOT=/var/lib/nx-suite-lease NX_SUITE_LEASE_WAIT=1 bash -c 'uv sync -q && scripts/build-gate-jar.sh && uv run pytest -n 8 -q'
+scripts/qwen-hand-run.sh [pytest args]     # uv sync -q && scripts/build-gate-jar.sh && uv run pytest -n 8 -q [args]
 ```
+
+It passes `NX_BUILD_LEASE_ROOT` and `NX_SUITE_LEASE_WAIT=1` itself, so nothing is
+exported from a profile. While a fresh marker exists it refuses to start (exit
+76, "retry later"). If CI queues after it took the lock, it releases the lock and
+backs off with jitter, and gives up with 76 after `QWEN_HAND_RUN_MAX_WAIT_SECONDS`
+(3600). A marker older than `QWEN_CI_MARKER_STALE_SECONDS` (2100: the job's
+1800 s wait plus a margin) is the leftover of a killed job and is ignored. Exit
+69 means a host prerequisite is missing (`flock`, or the lease directory). 75 is
+not used: the suite lease already exits 75. A hand run that already holds the
+lock when CI arrives is not interrupted; CI waits for it, about 11 minutes with a
+warm jar and about 20 cold, inside its 1800 s. A raw `flock ... box.lock` is not
+a supported hand-run form: it takes the lock with no regard for a queued CI job.
+
+**Interim policy (Sam, 2026-10-02): agents' full suites use hellmini;
+qwentescence is primarily CI's.** A hand run on qwentescence is for a case that
+needs Linux.
 
 `-n 8`, not 12 (about 2.5 GB per worker on a 40 GB VM shared with a production
 llama-server). No Maven or engine suites on qwentescence: the Java engine suites
 (`scripts/mvnw-leased.sh`, `service/` tests) run on hellmini. The CI job waits up
-to 30 minutes for the lock and then fails naming it; a hand run that must not
-wait forever can add `flock -w <seconds>`.
+to 30 minutes for the lock and then fails naming it. Host side nothing changes
+for this: the marker is an ordinary file in the existing lease directory
+(`root:nx-suite` 2775), which `ghci` already writes and `nxtest` already reads.
 
 ## License
 
