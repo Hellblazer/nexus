@@ -145,13 +145,18 @@ def test_a_visible_superseded_chunk_is_a_finding_naming_collection_tumbler_and_c
 
 
 def test_the_reader_never_asks_for_non_live_rows(monkeypatch):
-    """_FakeCollection.get has no include_non_live parameter: passing it is a
-    TypeError, so completing the run IS the assertion. Also pins that the
-    reader reads by id, never by a physical listing."""
+    """_FakeCollection.get has no include_non_live parameter: a reader that
+    passed it would hit a TypeError at argument binding, before the body
+    records the call. Production swallows that into ``check_errors`` rather
+    than raising, so the run still completes; the assertion is that
+    ``get_calls`` holds the one plain by-id call (a binding failure leaves it
+    empty) and that the run reports no check error. Also pins that the reader
+    reads by id, never by a physical listing."""
     _no_titles(monkeypatch)
     t3 = _FakeT3({KNOWLEDGE: {"superseded": [_ch(1)]}})
-    _run_visible_outside_manifest(t3=t3)
+    report = _run_visible_outside_manifest(t3=t3)
     assert t3.get_calls == [{"collection": KNOWLEDGE, "ids": [_ch(1)]}]
+    assert report["check_errors"] == []
 
 
 def test_only_the_superseded_bucket_is_probed(monkeypatch):
@@ -246,6 +251,135 @@ def test_time_budget_stops_and_names_the_unreached_collections(monkeypatch):
     assert (report["checked"], report["total"]) == (1, 2)
 
 
+class _Clock:
+    """A fake clock that advances only when a census call is made."""
+
+    def __init__(self, t3: "_FakeT3", step: float) -> None:
+        self.now = 0.0
+        real = t3.manifest_less_census
+
+        def slow(*a, **k):
+            self.now += step
+            return real(*a, **k)
+
+        t3.manifest_less_census = slow
+
+    def __call__(self) -> float:
+        return self.now
+
+
+def _spread_superseded(n_pages: int = 3):
+    """A collection whose superseded chunks sit on every census page: census
+    order is ascending chash and the other chunks fill the pages between."""
+    chashes = sorted(_ch(i) for i in range(300 * n_pages))
+    superseded = chashes[::150]   # two per 300-chunk census page
+    other = [c for c in chashes if c not in superseded]
+    return superseded, other
+
+
+def test_a_time_stop_inside_census_paging_still_probes_what_was_collected(monkeypatch):
+    """nexus-wbfpw.26 I1: each census page is probed as it lands. A time stop
+    that falls between census pages must not discard the pages already read.
+    The budget is 10 s and each census call costs 6 s, so page 1 lands inside
+    the budget (and is probed), page 2 lands past it (the stop), page 3 is
+    never asked for."""
+    _no_titles(monkeypatch)
+    superseded, other = _spread_superseded(3)
+    t3 = _FakeT3({KNOWLEDGE: {"superseded": superseded, "no-owner": other}},
+                 visible={KNOWLEDGE: {superseded[0]}})
+    clock = _Clock(t3, 6.0)
+    report = _run_visible_outside_manifest(t3=t3, time_budget_s=10.0, clock=clock)
+
+    assert len(t3.census_calls) == 2, "page 3 is never requested past the budget"
+    assert report["truncated"] is True and "time budget" in report["truncated_reason"]
+    assert report["checked"] > 0, "what page 1 listed was probed before the stop"
+    assert report["checked"] < report["total"]
+    assert t3.get_calls and t3.get_calls[0]["ids"][0] == superseded[0]
+    assert [f["chash"] for f in report["findings"]] == [superseded[0]], \
+        "a visible chunk on a probed page is still found when the run is cut"
+    assert report["pass"] is False
+    assert report["inconclusive"] is False
+
+
+def test_a_truncated_run_that_probed_nothing_does_not_pass(monkeypatch):
+    """nexus-wbfpw.26 I1: a time stop before any probe with superseded chunks
+    listed examined nothing. That is INCONCLUSIVE and exits 1, not a pass."""
+    _no_titles(monkeypatch)
+    superseded, other = _spread_superseded(3)
+    t3 = _FakeT3({KNOWLEDGE: {"superseded": superseded, "no-owner": other}})
+    clock = _Clock(t3, 6.0)
+    report = _run_visible_outside_manifest(t3=t3, time_budget_s=5.0, clock=clock)
+
+    assert report["checked"] == 0 and report["total"] > 0 and report["truncated"] is True
+    assert report["pass"] is False and report["inconclusive"] is True
+    assert t3.get_calls == []
+    lines: list[str] = []
+    with patch("click.echo", lambda m="", **k: lines.append(str(m))):
+        _print_visible_outside_manifest_text(report)
+    text = "\n".join(lines)
+    assert "INCONCLUSIVE" in text and "PASS" not in text and "FAIL" not in text
+    assert "Nothing was probed" in text
+
+
+def test_an_inconclusive_run_exits_one_through_the_command(monkeypatch):
+    _no_titles(monkeypatch)
+    t3 = _FakeT3({KNOWLEDGE: {"superseded": [_ch(1)]}})
+    import functools
+
+    from nexus.commands.catalog_cmds import doctor as doctor_mod
+
+    monkeypatch.setattr(
+        doctor_mod, "_run_visible_outside_manifest",
+        functools.partial(doctor_mod._run_visible_outside_manifest, time_budget_s=-1.0),
+    )
+    with patch("nexus.db.make_t3", return_value=t3):
+        res = CliRunner().invoke(doctor_cmd, ["--visible-outside-manifest", "--json"])
+    assert res.exit_code == 1, res.output
+    payload = json.loads(res.stdout)["visible_outside_manifest"]
+    assert payload["inconclusive"] is True and payload["pass"] is False
+
+
+def test_a_time_stop_before_any_collection_is_inconclusive_not_a_pass(monkeypatch):
+    _no_titles(monkeypatch)
+    t3 = _FakeT3({KNOWLEDGE: {"superseded": [_ch(1)]}})
+    report = _run_visible_outside_manifest(t3=t3, time_budget_s=-1.0)
+    assert report["checked"] == 0 and report["truncated"] is True
+    assert report["collections_unreached"] == 1
+    assert report["pass"] is False and report["inconclusive"] is True
+
+
+def test_nothing_to_probe_is_vacuous_not_a_pass(monkeypatch):
+    """nexus-wbfpw.26 critique S1: with an empty superseded bucket everywhere
+    the run could not have detected a regression. No PASS word, vacuous in the
+    JSON, still exit 0."""
+    _no_titles(monkeypatch)
+    t3 = _FakeT3({KNOWLEDGE: {"legacy-unmanifested": [_ch(1)]}})
+    report = _run_visible_outside_manifest(t3=t3)
+    assert report["vacuous"] is True and report["pass"] is True
+    assert report["checked"] == 0 and report["total"] == 0
+    lines: list[str] = []
+    with patch("click.echo", lambda m="", **k: lines.append(str(m))):
+        _print_visible_outside_manifest_text(report)
+    text = "\n".join(lines)
+    assert "nothing to probe" in text and "could not detect a regression" in text
+    assert "PASS" not in text and "FAIL" not in text
+
+    with patch("nexus.db.make_t3", return_value=t3):
+        res = CliRunner().invoke(doctor_cmd, ["--visible-outside-manifest"])
+        assert res.exit_code == 0, res.output
+        assert "PASS" not in res.output and "nothing to probe" in res.output
+        res = CliRunner().invoke(doctor_cmd, ["--visible-outside-manifest", "--json"])
+    assert res.exit_code == 0, res.output
+    assert json.loads(res.stdout)["visible_outside_manifest"]["vacuous"] is True
+
+
+def test_a_probed_run_is_not_vacuous(monkeypatch):
+    _no_titles(monkeypatch)
+    t3 = _FakeT3({KNOWLEDGE: {"superseded": [_ch(1)]}})
+    report = _run_visible_outside_manifest(t3=t3)
+    assert report["vacuous"] is False and report["inconclusive"] is False
+
+
 def test_an_engine_without_the_census_route_is_not_applicable():
     t3 = _FakeT3({KNOWLEDGE: {"superseded": [_ch(1)]}})
     t3.census_error = VectorServiceError("not found", code=404)
@@ -280,6 +414,7 @@ def test_the_flag_exits_one_on_a_finding_and_zero_when_clean(monkeypatch):
         res = CliRunner().invoke(doctor_cmd, ["--visible-outside-manifest"])
     assert res.exit_code == 1, res.output
     assert _ch(1) in res.output and "FAIL" in res.output
+    assert "re-run to confirm" in res.output, "census and probe are separate reads"
 
     clean = _FakeT3({KNOWLEDGE: {"superseded": [_ch(1)]}})
     with patch("nexus.db.make_t3", return_value=clean):
@@ -394,6 +529,22 @@ def test_a_live_c_regression_is_flagged_through_the_real_census(t2_service_env):
         res = CliRunner().invoke(doctor_cmd, ["--visible-outside-manifest"])
     assert res.exit_code == 1, res.output
     assert v1_chash in res.output and tumbler in res.output
+
+
+def test_the_engine_returns_no_text_for_a_non_live_chunk(t2_service_env):
+    """Why the doctor has no search probe (nexus-wbfpw.26 critique S3): a
+    search probe needs the superseded chunk's TEXT as the query, and the only
+    way to read a non-live chunk is include_non_live, which by engine design
+    answers ids and metadata and never content. Pinned here so the RDR's
+    statement of that limit is a checked fact."""
+    client = HttpVectorClient(tenant=t2_service_env)
+    collection, _tumbler, v1_chash = _strand_a_superseded_chunk(
+        client, "wbfpw26-notext", "wbfpw26 notext note")
+    col = client.get_or_create_collection(collection)
+    physical = col.get(ids=[v1_chash], include_non_live=True)
+    assert physical["ids"] == [v1_chash], "control: the chunk is physically stored"
+    assert not physical["documents"], "include_non_live never returns content"
+    assert col.get(ids=[v1_chash])["ids"] == [], "and live(c) hides it from the normal reader"
 
 
 def test_a_virgin_tenant_is_not_applicable(t2_service_env):

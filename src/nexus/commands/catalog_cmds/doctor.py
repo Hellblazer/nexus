@@ -134,9 +134,14 @@ _log = structlog.get_logger(__name__)
         "knowledge__ collection, takes the census 'superseded' bucket (chunks "
         "with no own-collection manifest row whose owning note is live) and "
         "asks the NORMAL reader, never the physical one, whether each is "
-        "visible. FAIL on any visible chunk (collection, note, chash). "
-        "Bounded by a row and a time budget and reports 'checked N of M'; "
-        "not applicable on a box with no knowledge__ collection."
+        "visible (get only, not search). FAIL on any visible chunk "
+        "(collection, note, chash); the census and probe are separate "
+        "reads, so re-run to confirm. Bounded by a row budget and a time "
+        "budget checked between calls (a call can run to the 120s HTTP "
+        "timeout) and reports 'checked N of M'. INCONCLUSIVE (exit 1) when "
+        "cut short before probing anything; 'nothing to probe' (exit 0, no "
+        "PASS) when no chunk is census-superseded; not applicable on a box "
+        "with no knowledge__ collection."
     ),
 )
 @click.option(
@@ -1358,8 +1363,11 @@ def _print_store_put_integrity_text(report: dict) -> None:
 #: until it shrinks.
 VISIBLE_CHECK_ROW_BUDGET: int = 5000
 
-#: Wall-clock seconds for one run, checked between collections, census pages
-#: and probe batches.
+#: Wall-clock seconds for one run. Checked BETWEEN calls (before a collection,
+#: a census page, a probe batch), never inside one: a single census or get call
+#: can run to the HTTP timeout (120 s), so a run can finish about 120 s past
+#: this budget on a call that was in flight when it expired, and ~240 s in the
+#: worst case of a slow census page followed by a slow probe batch.
 VISIBLE_CHECK_TIME_BUDGET_S: float = 120.0
 
 _VISIBLE_CHECK_PREFIX = "knowledge__"
@@ -1395,29 +1403,48 @@ def _run_visible_outside_manifest(
     For each ``knowledge__*`` collection: page the census route (<= 300 per
     call), keep the ``superseded`` bucket, and ask the normal reader
     (``get(ids=batch)``, no ``include_non_live``) which of those chashes it can
-    see. Each visible one is a finding naming collection, owner tumbler, title
-    and chash, and fails the check.
+    see. Each census page is probed as it lands, so a stop partway through the
+    paging still probes everything the earlier pages listed. Each visible chunk
+    is a finding naming collection, owner tumbler, title and chash, and fails
+    the check.
+
+    The reader is the ``get`` family only. There is no search probe: querying
+    search with a superseded chunk's text needs that text, and the only read of
+    a non-live chunk (``include_non_live``) returns ids and metadata, never
+    content, by engine design (RDR-192 Step 14, as built).
 
     Bounds: at most ``row_budget`` superseded chunks are probed and at most
-    ``time_budget_s`` seconds are spent. Either stops the run with
-    ``truncated=True`` and a reason; the report always carries ``checked``
-    (chunks probed) and ``total`` (superseded chunks reported by the
-    collections reached), so a clean result states what it covered.
-    ``collections_unreached`` counts collections the run never opened. A
-    truncated run with no finding still passes: the report line carries the
-    caveat, and the next run starts from the same chashes.
+    ``time_budget_s`` seconds are spent, checked between calls (one call can
+    run to the 120 s HTTP timeout, so wall time can reach ~240 s). Either
+    stops the run with ``truncated=True`` and a reason; the report always
+    carries ``checked`` (chunks probed) and ``total`` (superseded chunks
+    reported by the collections reached), so a clean result states what it
+    covered. ``collections_unreached`` counts collections the run never opened.
+    A re-run re-lists from the head of each collection, so a backlog larger
+    than a budget is always probed from the same head slice.
 
-    Not applicable, and passing, when there is no ``knowledge__`` collection or
-    the connected engine predates the census route (it predates live(c) too, so
-    there is nothing to regress). Any other failure fails the check.
+    Verdicts, in order:
+
+    * ``not_applicable`` (pass): no ``knowledge__`` collection, or the engine
+      has no census route.
+    * ``pass`` False: a finding, or any census/open/get error.
+    * ``inconclusive`` (pass False, exit 1): the run was cut short before it
+      probed a single chunk, so it proved nothing. Not a pass: a gate that
+      examined nothing is not green (nexus-moht0).
+    * ``vacuous`` (pass True, exit 0): every collection was read, none holds a
+      census-superseded chunk, so nothing was probed and this run could not
+      have detected a regression. The text carries no PASS word.
+    * otherwise a pass; a truncated run that probed something passes with the
+      PARTIAL caveat.
     """
     from nexus.db.limits import QUOTAS  # noqa: PLC0415 — command-local import (nexus.db.limits)
 
     started = clock()
     report: dict = {
-        "pass": True, "not_applicable": False, "reason": "",
-        "checked": 0, "total": 0, "findings": [], "collections": [],
-        "collections_unreached": 0, "truncated": False, "truncated_reason": "",
+        "pass": True, "not_applicable": False, "vacuous": False, "inconclusive": False,
+        "reason": "", "checked": 0, "total": 0, "findings": [], "collections": [],
+        "collections_total": 0, "collections_unreached": 0,
+        "truncated": False, "truncated_reason": "",
         "check_errors": [], "elapsed_s": 0.0,
         "row_budget": row_budget, "time_budget_s": time_budget_s,
     }
@@ -1440,6 +1467,7 @@ def _run_visible_outside_manifest(
         report["not_applicable"] = True
         report["reason"] = "no knowledge__ collection on this box; nothing to check"
         return report
+    report["collections_total"] = len(names)
 
     page_limit = QUOTAS.MAX_QUERY_RESULTS  # 300
 
@@ -1460,85 +1488,103 @@ def _run_visible_outside_manifest(
             report["collections_unreached"] = len(names) - index
             break
 
-        # 1. The superseded chashes, page by page. totals are collection-wide
-        # and identical on every page, so a collection with no superseded chunk
-        # costs exactly one call.
-        superseded: list[str] = []
+        coll_row = {"collection": name, "superseded": 0, "checked": 0}
         owners: dict[str, dict] = {}
-        superseded_total = 0
-        offset = 0
-        try:
-            while True:
-                page = t3.manifest_less_census(name, limit=page_limit, offset=offset)
-                if offset == 0:
-                    superseded_total = int((page.get("totals") or {}).get("superseded", 0))
-                superseded.extend((page.get("chashes") or {}).get("superseded", []))
-                owners.update(page.get("owners") or {})
-                if (
-                    superseded_total == 0
-                    or len(superseded) >= superseded_total
-                    or int(page.get("returned", 0)) < page_limit
-                ):
-                    break
-                if over_time():
-                    stop(time_reason)
-                    break
-                offset += page_limit
-        except Exception as exc:  # noqa: BLE001 — classified here, never a silent skip
-            if getattr(exc, "code", None) == 404:
-                report.update(
-                    not_applicable=True, findings=[], checked=0, total=0, collections=[],
-                    reason=(
-                        "the connected engine does not carry the manifest-less census route "
-                        "(and so predates live(c)); nothing to check"
-                    ),
-                    elapsed_s=round(clock() - started, 3),
-                )
-                return report
-            report["check_errors"].append({"collection": name, "error": f"census: {exc}"})
-            report["pass"] = False
-            continue
-
-        report["total"] += superseded_total
-        coll_row = {"collection": name, "superseded": superseded_total, "checked": 0}
-        report["collections"].append(coll_row)
-        if len(superseded) < superseded_total:
-            stop("census paging stopped early; not every superseded chunk was listed")
-        if not superseded:
-            continue
-
-        # 2. The normal reader: a plain get(ids=...), filtered by live(c). No
-        # include_non_live and no physical read.
-        try:
-            col = t3.get_or_create_collection(name)
-        except Exception as exc:  # noqa: BLE001 — classified here, never a silent skip
-            report["check_errors"].append({"collection": name, "error": f"open: {exc}"})
-            report["pass"] = False
-            continue
         visible_here: list[str] = []
+        listed = 0          # superseded chashes the census has listed so far
+        superseded_total = 0
+        col = None
         errored = False
-        for start in range(0, len(superseded), page_limit):
-            remaining = row_budget - report["checked"]
-            if remaining <= 0:
+        offset = 0
+        while True:
+            # 1. One census page. totals are collection-wide and identical on
+            # every page, so a collection with no superseded chunk costs one call.
+            try:
+                page = t3.manifest_less_census(name, limit=page_limit, offset=offset)
+            except Exception as exc:  # noqa: BLE001 — classified here, never a silent skip
+                # A 404 means the engine has no census route. Safe to treat as
+                # not-applicable only because REQUIRED_ENGINE_VERSION makes the
+                # client refuse any engine below the pinned identity: v0.1.133
+                # and v0.1.134 carry the route WITHOUT live(c) (live(c) arrives
+                # at v0.1.135) and against them every superseded chunk would
+                # read visible, but the floor keeps the client off them. The
+                # check itself does not know the floor; nothing here goes red if
+                # the floor is lowered.
+                if getattr(exc, "code", None) == 404:
+                    report.update(
+                        not_applicable=True, findings=[], checked=0, total=0, collections=[],
+                        reason="the connected engine does not carry the manifest-less census route; nothing to check",
+                        elapsed_s=round(clock() - started, 3),
+                    )
+                    return report
+                report["check_errors"].append({"collection": name, "error": f"census: {exc}"})
+                report["pass"] = False
+                errored = True
+                break
+            if offset == 0:
+                superseded_total = int((page.get("totals") or {}).get("superseded", 0))
+                report["total"] += superseded_total
+                coll_row["superseded"] = superseded_total
+                report["collections"].append(coll_row)
+            page_chashes = list((page.get("chashes") or {}).get("superseded", []))
+            listed += len(page_chashes)
+            owners.update(page.get("owners") or {})
+
+            # 2. Probe this page's superseded chashes now, with the normal
+            # reader: a plain get(ids=...), filtered by live(c). No
+            # include_non_live and no physical read. A page that lands past the
+            # time budget is not probed (the stop below records it).
+            if page_chashes and not over_time():
+                if col is None:
+                    try:
+                        col = t3.get_or_create_collection(name)
+                    except Exception as exc:  # noqa: BLE001 — classified here, never a silent skip
+                        report["check_errors"].append({"collection": name, "error": f"open: {exc}"})
+                        report["pass"] = False
+                        errored = True
+                        break
+                for start in range(0, len(page_chashes), page_limit):
+                    remaining = row_budget - report["checked"]
+                    if remaining <= 0:
+                        stop(row_reason)
+                        break
+                    if over_time():
+                        stop(time_reason)
+                        break
+                    batch = page_chashes[start: start + page_limit][:remaining]
+                    try:
+                        got = col.get(ids=batch, include=["metadatas"])
+                    except Exception as exc:  # noqa: BLE001 — classified here, never a silent skip
+                        report["check_errors"].append({"collection": name, "error": f"get: {exc}"})
+                        report["pass"] = False
+                        errored = True
+                        break
+                    asked = set(batch)
+                    visible_here.extend(i for i in (got.get("ids") or []) if i in asked)
+                    report["checked"] += len(batch)
+                    coll_row["checked"] += len(batch)
+                if errored:
+                    break
+
+            # 3. Next page, unless the collection is done or a budget says stop.
+            if (
+                superseded_total == 0
+                or listed >= superseded_total
+                or int(page.get("returned", 0)) < page_limit
+            ):
+                break
+            if report["checked"] >= row_budget:
                 stop(row_reason)
                 break
             if over_time():
                 stop(time_reason)
                 break
-            batch = superseded[start: start + page_limit][:remaining]
-            try:
-                got = col.get(ids=batch, include=["metadatas"])
-            except Exception as exc:  # noqa: BLE001 — classified here, never a silent skip
-                report["check_errors"].append({"collection": name, "error": f"get: {exc}"})
-                report["pass"] = False
-                errored = True
-                break
-            asked = set(batch)
-            visible_here.extend(i for i in (got.get("ids") or []) if i in asked)
-            report["checked"] += len(batch)
-            coll_row["checked"] += len(batch)
-        if not errored and coll_row["checked"] < len(superseded):
-            stop(row_reason)  # the last batch was cut to the remaining row budget
+            offset += page_limit
+
+        if not errored and coll_row["checked"] < superseded_total:
+            # Some superseded chunk went unprobed. Name the budget that
+            # stopped it if no stop was recorded yet.
+            stop(time_reason if over_time() else row_reason)
         for chash in sorted(visible_here):
             owner = owners.get(chash) or {}
             report["findings"].append({
@@ -1551,6 +1597,12 @@ def _run_visible_outside_manifest(
         titles = _titles_for_tumblers([f["tumbler"] for f in report["findings"] if f["tumbler"]])
         for f in report["findings"]:
             f["title"] = titles.get(f["tumbler"], "")
+    elif report["pass"]:
+        if report["truncated"] and report["checked"] == 0:
+            report["pass"] = False
+            report["inconclusive"] = True
+        elif not report["truncated"] and report["total"] == 0 and report["checked"] == 0:
+            report["vacuous"] = True
     report["elapsed_s"] = round(clock() - started, 3)
     return report
 
@@ -1562,21 +1614,41 @@ def _print_visible_outside_manifest_text(report: dict) -> None:
     if report.get("not_applicable"):
         click.echo(f"visible-outside-manifest: not applicable - {report['reason']}")
         return
-    status = "PASS" if report["pass"] else "FAIL"
+    examined = len(report["collections"])
+    of_total = (
+        f" (of {report['collections_total']} on the box)"
+        if report.get("collections_total") and report["collections_total"] != examined else ""
+    )
+    scope = f"{examined} knowledge__ collections{of_total}"
+    if report.get("vacuous"):
+        click.echo(
+            f"visible-outside-manifest: nothing to probe - no census-superseded chunk in "
+            f"{scope}, so this run could not detect a regression "
+            f"({report['elapsed_s']}s). It proves something only when the census "
+            "superseded bucket is not empty."
+        )
+        return
+    if report.get("inconclusive"):
+        status = "INCONCLUSIVE"
+    else:
+        status = "PASS" if report["pass"] else "FAIL"
     click.echo(
         f"visible-outside-manifest: {status} "
         f"(checked {report['checked']} of {report['total']} census-superseded chunks "
-        f"in {len(report['collections'])} knowledge__ collections, "
-        f"{report['elapsed_s']}s)"
+        f"in {scope}, {report['elapsed_s']}s)"
     )
     if report["truncated"]:
-        unreached = (
-            f", {report['collections_unreached']} collections not reached"
-            if report["collections_unreached"] else ""
-        )
+        parts = [report["truncated_reason"]]
+        unchecked = report["total"] - report["checked"]
+        if unchecked > 0:
+            parts.append(f"{unchecked} listed superseded chunks unchecked")
+        if report["collections_unreached"]:
+            parts.append(f"{report['collections_unreached']} collections not examined")
+        click.echo(f"  PARTIAL: {'; '.join(parts)}.")
+    if report.get("inconclusive"):
         click.echo(
-            f"  PARTIAL: {report['truncated_reason']}; "
-            f"{report['total'] - report['checked']} listed superseded chunks unchecked{unreached}."
+            "  Nothing was probed, so this run proves nothing about live(c) and exits 1. "
+            "Re-run; if it stops at the same place the census is the slow part."
         )
     if report["findings"]:
         click.echo(
@@ -1590,7 +1662,9 @@ def _print_visible_outside_manifest_text(report: dict) -> None:
             )
         click.echo(
             "  A healthy engine returns none of these from search or get. Treat this as a "
-            "live(c) regression (or a predicate that drifted from it), not as data loss."
+            "live(c) regression (or a predicate that drifted from it), not as data loss. "
+            "The census and the probe are separate reads, so a chunk re-attached to its "
+            "note in between reads as visible: re-run to confirm before acting."
         )
     if report.get("check_errors"):
         click.echo(f"  Collections that could not be checked ({len(report['check_errors'])}):")
