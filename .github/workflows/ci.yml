@@ -1238,7 +1238,9 @@ jobs:
           # common cancel (a newer push) arrives while this step is queued. The
           # trap stops the waiting flock and exits; the EXIT trap then removes
           # the marker. The runner's process-tree kill is the backstop for a
-          # suite that is already running.
+          # suite that is already running. pkill is procps, which the runner
+          # image has; on an image without it the `kill "$fpid"` below still
+          # stops the waiting flock itself.
           # shellcheck disable=SC2329  # called from the TERM and INT traps below
           on_signal() {
             if [ -n "$fpid" ]; then

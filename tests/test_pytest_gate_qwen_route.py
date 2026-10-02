@@ -23,12 +23,16 @@ cases the qwen job does not).
 """
 from __future__ import annotations
 
+import contextlib
 import itertools
 import os
 import re
 import shutil
+import signal
 import subprocess
 import tempfile
+import time
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -1242,6 +1246,22 @@ def test_the_ci_marker_is_dropped_when_the_suite_or_the_jar_build_fails(tmp_path
     assert _left_in_lease(tmp_path) == []
 
 
+@contextlib.contextmanager
+def _sigint_default() -> Iterator[None]:
+    """Spawn children with SIGINT at its default action. A pytest launched from a backgrounded non-interactive shell
+    (nohup, `cmd &`, some harnesses) has SIGINT IGNORED, a child inherits that, and bash cannot trap a signal that was
+    ignored on entry, so a SIGINT test would read a harness difference as a trap regression (round 2 verify, S1)."""
+    try:
+        previous = signal.signal(signal.SIGINT, signal.SIG_DFL)
+    except ValueError:  # not the main thread: nothing to reset
+        yield
+        return
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGINT, previous)
+
+
 def _start_blocked_step(tmp_path: Path, *, flock: str, umask: int | None = None) -> tuple[subprocess.Popen[str], Path]:
     """The CI step, blocked in its lock wait (fake flock sleeps; or real flock against a lock the test holds)."""
     work, env = _prio_env(tmp_path, flock=flock)
@@ -1252,8 +1272,9 @@ def _start_blocked_step(tmp_path: Path, *, flock: str, umask: int | None = None)
     # umask is inherited, so set it around the spawn (no preexec_fn: that forces a fork instead of posix_spawn)
     previous = os.umask(umask) if umask is not None else None
     try:
-        proc = subprocess.Popen([bash, "-eo", "pipefail", "-c", _box_run()], cwd=work, env=env, stdout=out, stderr=out,
-                                text=True, start_new_session=True)
+        with _sigint_default():
+            proc = subprocess.Popen([bash, "-eo", "pipefail", "-c", _box_run()], cwd=work, env=env, stdout=out, stderr=out,
+                                    text=True, start_new_session=True)
     finally:
         if previous is not None:
             os.umask(previous)
@@ -1262,7 +1283,6 @@ def _start_blocked_step(tmp_path: Path, *, flock: str, umask: int | None = None)
 
 
 def _wait_for(pred, what: str, seconds: float = 15.0) -> None:  # type: ignore[no-untyped-def]
-    import time
 
     deadline = time.monotonic() + seconds
     while not pred() and time.monotonic() < deadline:
@@ -1279,8 +1299,6 @@ def _group_alive(pgid: int) -> bool:
 
 
 def _reap(proc: subprocess.Popen[str]) -> None:
-    import signal
-
     try:
         os.killpg(proc.pid, signal.SIGKILL)
     except ProcessLookupError:
@@ -1293,7 +1311,6 @@ def test_a_cancelled_ci_step_drops_its_marker_when_only_the_step_shell_is_signal
     """Round 2 (both reviews): a trapped signal is deferred while bash waits on a FOREGROUND child, and the step sat in
     `flock -w 1800` in the foreground. The old test signalled the whole process group, which kills that child too and
     so could not see it. Signal ONLY the shell: the cleanup must run at once, not when the lock wait ends."""
-    import signal
 
     proc, marker = _start_blocked_step(tmp_path, flock="fake")
     try:
@@ -1332,7 +1349,6 @@ def test_the_real_flock_the_marker_is_locked_while_queued_and_unlocked_the_momen
     """The kernel lock IS the liveness signal: held while CI is queued, gone when the process dies (SIGKILL
     included, which no trap survives), and not inherited by the flock child that is still waiting."""
     import fcntl
-    import signal
 
     proc, marker = _start_blocked_step(tmp_path, flock="real")
     lease = tmp_path / "lease"
@@ -1351,7 +1367,6 @@ def test_the_real_flock_the_marker_is_locked_while_queued_and_unlocked_the_momen
 @pytest.mark.skipif(shutil.which("flock") is None, reason="util-linux flock is not installed here (macOS)")
 def test_the_real_flock_a_cancelled_queued_step_is_gone_at_once_and_leaves_no_waiter_holding_the_marker(tmp_path: Path) -> None:
     import fcntl
-    import signal
 
     proc, marker = _start_blocked_step(tmp_path, flock="real")
     try:
@@ -1430,6 +1445,7 @@ if [ "$1" = "run" ]; then
   if {{ : >&9; }} 2>/dev/null; then echo "fd9=open" >> "$FAKE_LOG"; else echo "fd9=closed" >> "$FAKE_LOG"; fi
   if [ -n "${{FAKE_LOCK_PROBE:-}}" ]; then flock -n "$FAKE_LOCK_PROBE" true; echo "lock-probe rc=$?" >> "$FAKE_LOG"; fi
   if [ -n "${{FAKE_ORPHAN:-}}" ]; then {real_sleep} "$FAKE_ORPHAN" >/dev/null 2>&1 & fi
+  if [ -n "${{FAKE_UV_EVAL:-}}" ]; then eval "$FAKE_UV_EVAL"; fi
   if [ -n "${{FAKE_UV_SLEEP:-}}" ]; then sleep "$FAKE_UV_SLEEP"; fi
   exit {uv_rc}
 fi
@@ -1493,9 +1509,9 @@ exec "$@"
         (bin_dir / "timeout").symlink_to(real_t)
     if lease:
         lease_dir.mkdir()
-    env = {"PATH": str(bin_dir), "FAKE_LOG": str(log), "FAKE_FLOCK_CNT": str(tmp_path / "flock.cnt"),
+    env = {"PATH": str(bin_dir), "REAL_SLEEP": real_sleep, "FAKE_LOG": str(log), "FAKE_FLOCK_CNT": str(tmp_path / "flock.cnt"),
            "FAKE_SLEEP_CNT": str(tmp_path / "sleep.cnt"), "QWEN_SUITE_LEASE_ROOT": str(lease_dir),
-           "QWEN_HAND_RUN_SLICE_SECONDS": "1", "QWEN_HAND_RUN_BACKOFF_SECONDS": "1",
+           "QWEN_HAND_RUN_SLICE_SECONDS": "1", "QWEN_HAND_RUN_BACKOFF_SECONDS": "1", "QWEN_HAND_RUN_KILL_SECONDS": "2",
            "QWEN_HAND_RUN_MAX_WAIT_SECONDS": "3"}
     return work, env
 
@@ -1503,7 +1519,6 @@ exec "$@"
 def _post_marker(tmp_path: Path, name: str = "ci-waiting.7.1", age: float = 0.0, live: bool = True) -> Path:
     """A marker file. With the fake flock a marker is LIVE when its first line says `locked` (the stand-in for CI
     holding the kernel lock); the real-flock tests hold a genuine lock instead."""
-    import time
 
     p = tmp_path / "lease" / name
     p.write_text("locked\n" if live else "free\n")
@@ -1633,7 +1648,7 @@ def test_a_hand_run_with_no_marker_runs_the_documented_command_under_the_lease_v
     assert proc.returncode == 0, (proc.stdout, proc.stderr)
     lease = env["QWEN_SUITE_LEASE_ROOT"]
     assert _hand_calls(env) == [
-        "flock -w 1 -E 200 9", "timeout -k 20 1500", "uv sync -q", "jar", "uv run pytest -n 8 -q tests/test_x.py -k foo",
+        "flock -w 1 -E 200 9", "timeout -k 2 1500", "uv sync -q", "jar", "uv run pytest -n 8 -q tests/test_x.py -k foo",
         f"env NX_BUILD_LEASE_ROOT={lease} NX_SUITE_LEASE_WAIT=1", "fd9=closed"]
 
 
@@ -1657,9 +1672,9 @@ def test_the_real_flock_an_orphan_the_suite_leaves_behind_does_not_keep_the_box_
 
 def test_the_hold_cap_defaults_to_less_than_ci_waits_even_with_the_kill_grace() -> None:
     hold, wait = _script_default("QWEN_HAND_RUN_HOLD_SECONDS"), int(_doc()["jobs"]["test-qwen"]["env"]["QWEN_BOX_LOCK_WAIT_SECONDS"])
-    grace = re.search(r"\bkill_s=(\d+)", _WRAPPER.read_text())
-    assert grace, "the SIGKILL grace after the cap must be a named constant"
-    assert 0 < hold and hold + int(grace.group(1)) < wait, (hold, grace.group(1), wait)
+    grace = _script_default("QWEN_HAND_RUN_KILL_SECONDS")
+    # timeout's own -k grace, then the wrapper's group sweep waits the same grace again before its SIGKILL
+    assert 0 < hold and hold + 2 * grace < wait, (hold, grace, wait)
 
 
 def test_a_hand_run_that_hits_its_hold_cap_exits_with_its_own_code_and_says_so(tmp_path: Path) -> None:
@@ -1668,14 +1683,12 @@ def test_a_hand_run_that_hits_its_hold_cap_exits_with_its_own_code_and_says_so(t
     out = proc.stdout + proc.stderr
     assert proc.returncode == 77, (proc.returncode, out)
     assert "77s" in out and "QWEN_HAND_RUN_HOLD_SECONDS" in out and "CI" in out
-    assert "timeout -k 20 77" in _calls(env)
+    assert "timeout -k 2 77" in _calls(env)
 
 
 @pytest.mark.skipif(shutil.which("flock") is None or shutil.which("timeout") is None,
                     reason="needs util-linux flock and GNU timeout (not on macOS by default)")
 def test_the_real_timeout_stops_a_suite_that_outlives_the_cap_and_releases_the_lock(tmp_path: Path) -> None:
-    import time
-
     work, env = _hand_env(tmp_path, flock="real", timeout="real")
     t0 = time.monotonic()
     proc = _hand(work, {**env, "FAKE_UV_SLEEP": "40", "QWEN_HAND_RUN_HOLD_SECONDS": "2"})
@@ -1683,6 +1696,146 @@ def test_the_real_timeout_stops_a_suite_that_outlives_the_cap_and_releases_the_l
     assert time.monotonic() - t0 < 30, "the cap must cut the run, not wait for the suite"
     after = subprocess.run([shutil.which("flock") or "flock", "-n", str(tmp_path / "lease" / "box.lock"), "true"])
     assert after.returncode == 0
+
+
+def _pid_alive(pid: int) -> bool:
+    """Alive means running: a zombie nobody has reaped yet (a container whose PID 1 does not reap) is already dead."""
+    try:
+        return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] != "Z"
+    except (FileNotFoundError, IndexError, OSError):
+        pass
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+def _box_lock_is_free(lock: Path) -> bool:
+    return subprocess.run([shutil.which("flock") or "flock", "-n", str(lock), "true"]).returncode == 0
+
+
+def _spawn_hand(tmp_path: Path, work: Path, env: dict[str, str]) -> subprocess.Popen[str]:
+    """The wrapper as a user's shell would run it: its own session, so a signal sent to it is the ONLY one it gets."""
+    bash = shutil.which("bash")
+    assert bash
+    with _sigint_default(), open(tmp_path / "hand.out", "w") as out:
+        return subprocess.Popen([bash, str(work / "scripts" / "qwen-hand-run.sh")], cwd=work, env=env, stdout=out,
+                                stderr=out, text=True, start_new_session=True)
+
+
+def _pids_from(path: Path, count: int) -> list[int]:
+    _wait_for(lambda: path.exists() and len(path.read_text().split()) >= count, f"the fake suite must record {count} pids")
+    return [int(x) for x in path.read_text().split()]
+
+
+def _kill_all(pids: list[int]) -> None:
+    for pid in pids:
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(pid, signal.SIGKILL)
+
+
+# the fake suite records its own pid and a child's, then (see each test) waits; a trapped signal interrupts `wait`
+_SUITE_PIDS = 'echo $$ >> "$FAKE_PIDS"; "$REAL_SLEEP" 60 & echo $! >> "$FAKE_PIDS"; '
+
+_NEEDS_REAL_FLOCK_AND_TIMEOUT = pytest.mark.skipif(
+    shutil.which("flock") is None or shutil.which("timeout") is None,
+    reason="needs util-linux flock and GNU timeout (not on macOS by default)")
+
+
+@_NEEDS_REAL_FLOCK_AND_TIMEOUT
+@pytest.mark.parametrize("sig,rc", [(signal.SIGHUP, 129), (signal.SIGTERM, 143)])
+def test_a_hangup_or_term_to_the_wrapper_stops_the_whole_suite_and_the_box_lock_outlives_it(tmp_path: Path, sig: signal.Signals, rc: int) -> None:
+    """Round 3 (round 2 verify I1): `timeout` gives the suite its own process group and the suite does not hold the
+    lock, so a hangup (an ssh drop) that killed only the wrapper released the box lock under a LIVE suite, and CI
+    could take it and overlap. The wrapper must stop the suite's whole group, and release the lock only after."""
+    work, env = _hand_env(tmp_path, flock="real", timeout="real")
+    pids_file, lock = tmp_path / "pids", tmp_path / "lease" / "box.lock"
+    # a slow, orderly exit on the signal, so there is a window in which the lock could be wrongly free
+    suite = _SUITE_PIDS + 'trap \'"$REAL_SLEEP" 1; exit 0\' TERM HUP; wait'
+    proc = _spawn_hand(tmp_path, work, {**env, "FAKE_PIDS": str(pids_file), "FAKE_UV_EVAL": suite})
+    pids: list[int] = []
+    try:
+        pids = _pids_from(pids_file, 2)
+        assert not _box_lock_is_free(lock), "the wrapper must hold the box lock while the suite runs"
+        os.kill(proc.pid, sig)  # the wrapper only, as an ssh drop does
+        held_with_suite_alive, violation = 0, ""
+        deadline = time.monotonic() + 30
+        while proc.poll() is None and time.monotonic() < deadline:
+            free = _box_lock_is_free(lock)  # sample the lock BEFORE the suite: a pid alive now was alive then
+            alive = [p for p in pids if _pid_alive(p)]
+            if free and alive:
+                violation = f"box.lock was free while suite processes {alive} were still running"
+            if not free and alive:
+                held_with_suite_alive += 1
+            time.sleep(0.02)
+        assert not violation, violation
+        assert proc.poll() == rc, ("the wrapper must exit 128+signal", proc.poll(), (tmp_path / "hand.out").read_text())
+        assert held_with_suite_alive > 0, "non-vacuity: the window with the suite still stopping was never observed"
+        assert not [p for p in pids if _pid_alive(p)], "the suite and its child must be gone"
+        assert _box_lock_is_free(lock)
+    finally:
+        _kill_all(pids)
+        _reap(proc)
+
+
+def test_ctrl_c_reaches_the_suite_and_the_wrapper_leaves_with_130(tmp_path: Path) -> None:
+    """Round 3 (I1): the suite is in `timeout`'s process group, not the foreground one, so the terminal's ^C never
+    reached it and bash did not leave until it ended. The wrapper's own SIGINT trap must forward it."""
+    work, env = _hand_env(tmp_path, flock="fake", timeout="real" if shutil.which("timeout") else "fake")
+    pids_file, mark = tmp_path / "pids", tmp_path / "int.mark"
+    suite = _SUITE_PIDS + 'trap \'echo int >> "$FAKE_MARK"; exit 0\' INT; wait'
+    proc = _spawn_hand(tmp_path, work, {**env, "FAKE_PIDS": str(pids_file), "FAKE_MARK": str(mark), "FAKE_UV_EVAL": suite})
+    pids: list[int] = []
+    try:
+        pids = _pids_from(pids_file, 2)
+        os.kill(proc.pid, signal.SIGINT)  # the wrapper only: the terminal would not signal the suite's group
+        try:
+            rc: int | None = proc.wait(timeout=20)
+        except subprocess.TimeoutExpired:
+            rc = None
+        assert rc == 130, ("^C must end the run at once, not when the suite does", rc)
+        assert mark.exists() and "int" in mark.read_text(), "the suite must have received the SIGINT"
+        assert not [p for p in pids if _pid_alive(p)]
+    finally:
+        _kill_all(pids)
+        _reap(proc)
+
+
+@_NEEDS_REAL_FLOCK_AND_TIMEOUT
+def test_a_descendant_that_ignores_term_is_killed_at_the_cap_plus_the_grace(tmp_path: Path) -> None:
+    """Round 3 (round 2 verify S2): `timeout` leaves once its direct child is gone, so its -k grace never reaches a
+    descendant that ignores SIGTERM; the run ended 77 with that process still running and the lock released."""
+    work, env = _hand_env(tmp_path, flock="real", timeout="real")
+    pids_file, lock = tmp_path / "pids", tmp_path / "lease" / "box.lock"
+    suite = 'echo $$ >> "$FAKE_PIDS"; ( trap \'\' TERM; echo $BASHPID >> "$FAKE_PIDS"; exec "$REAL_SLEEP" 60 ) & wait'
+    pids: list[int] = []
+    try:
+        t0 = time.monotonic()
+        proc = _hand(work, {**env, "FAKE_PIDS": str(pids_file), "FAKE_UV_EVAL": suite,
+                            "QWEN_HAND_RUN_HOLD_SECONDS": "2", "QWEN_HAND_RUN_KILL_SECONDS": "2"})
+        elapsed = time.monotonic() - t0
+        pids = [int(x) for x in pids_file.read_text().split()]
+        assert len(pids) == 2
+        assert proc.returncode == 77, (proc.returncode, proc.stdout, proc.stderr)
+        assert not [p for p in pids if _pid_alive(p)], "a descendant that ignores TERM must be killed, not left running"
+        assert elapsed < 20, f"the run must end at cap + grace, not when the ignorer does ({elapsed:.1f}s)"
+        assert _box_lock_is_free(lock)
+    finally:
+        _kill_all(pids)
+
+
+def test_a_clean_run_leaves_nothing_of_the_suite_running_in_its_group(tmp_path: Path) -> None:
+    work, env = _hand_env(tmp_path, flock="fake", timeout="real" if shutil.which("timeout") else "fake")
+    pids_file = tmp_path / "pids"
+    pids: list[int] = []
+    try:
+        proc = _hand(work, {**env, "FAKE_PIDS": str(pids_file), "FAKE_UV_EVAL": _SUITE_PIDS + "exit 0"})
+        pids = [int(x) for x in pids_file.read_text().split()]
+        assert proc.returncode == 0, (proc.stdout, proc.stderr)
+        assert not [p for p in pids if _pid_alive(p)], "a straggler of the suite must be gone before the lock is released"
+    finally:
+        _kill_all(pids)
 
 
 def test_a_hand_run_yields_the_lock_when_ci_arrives_while_it_waited(tmp_path: Path) -> None:
@@ -1772,7 +1925,6 @@ def test_the_real_flock_a_marker_is_live_only_while_its_holder_has_it_locked(tmp
 @pytest.mark.parametrize("ci_arrives", [False, True])
 def test_the_real_flock_a_hand_run_waits_for_a_holder_and_yields_if_ci_queued_meanwhile(tmp_path: Path, ci_arrives: bool) -> None:
     import fcntl
-    import time
 
     work, env = _hand_env(tmp_path, flock="real")
     lock = tmp_path / "lease" / "box.lock"

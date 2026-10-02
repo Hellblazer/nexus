@@ -41,6 +41,20 @@
 # live, and one whose age cannot be read does not count at all (otherwise it would
 # hold hand runs off until the whole wait ran out).
 #
+# SIGNALS (nexus-0wp30 round 3). The suite runs in a process group of its own (as a
+# background job under job control), so this script forwards what it is sent: a
+# hangup (an ssh drop), ^C or TERM to the script goes to the suite's WHOLE group
+# (INT for ^C, TERM for the others), and the script keeps the box lock until the
+# group is gone, then exits 129, 130 or 143. Without that, the suite outlived the
+# script with the lock already released, which is the overlap the lock exists to
+# prevent. After the suite (or `timeout`) has gone, anything left in its group is
+# stopped too: SIGTERM, then SIGKILL after kill_s, so a descendant that ignores
+# TERM cannot outlive the cap. NOT covered: a SIGKILLed script (or its host going
+# down) cannot clean up; the lock is released and the suite is left running, to
+# be stopped by hand (find it with `pgrep -f 'pytest -n 8'` as nxtest). A suite
+# process that starts its own session or group (a daemonized Postgres) is outside
+# the group and is not signalled. The suite also gets /dev/null as its stdin.
+#
 # The suite runs with fd 9 (the box lock) CLOSED for it, on purpose: this script
 # holds the lock for exactly as long as it runs, and a daemonized Postgres or JVM
 # that outlived the run would otherwise keep the lock until it died, starving CI
@@ -60,9 +74,10 @@
 # QWEN_CI_MARKER_STALE_SECONDS (2100), QWEN_HAND_RUN_SLICE_SECONDS (20, one
 # bounded wait on the lock before the marker is looked at again),
 # QWEN_HAND_RUN_BACKOFF_SECONDS (30, plus up to half again of jitter),
-# QWEN_HAND_RUN_MAX_WAIT_SECONDS (3600), QWEN_HAND_RUN_HOLD_SECONDS (1500, plus
-# kill_s below before SIGKILL). The default hold plus the grace must stay under
-# CI's wait (QWEN_BOX_LOCK_WAIT_SECONDS, 1800); a test pins it. A cold run, with
+# QWEN_HAND_RUN_MAX_WAIT_SECONDS (3600), QWEN_HAND_RUN_HOLD_SECONDS (1500),
+# QWEN_HAND_RUN_KILL_SECONDS (20, the grace before SIGKILL, spent at most twice:
+# timeout's own, then the group sweep's). The default hold plus both graces must
+# stay under CI's wait (QWEN_BOX_LOCK_WAIT_SECONDS, 1800); a test pins it. A cold run, with
 # the jar build, may not fit: raise the variable for that run knowing CI then
 # waits that much longer.
 set -uo pipefail
@@ -73,7 +88,7 @@ slice_s="${QWEN_HAND_RUN_SLICE_SECONDS:-20}"
 backoff_s="${QWEN_HAND_RUN_BACKOFF_SECONDS:-30}"
 max_wait_s="${QWEN_HAND_RUN_MAX_WAIT_SECONDS:-3600}"
 hold_s="${QWEN_HAND_RUN_HOLD_SECONDS:-1500}"
-kill_s=20
+kill_s="${QWEN_HAND_RUN_KILL_SECONDS:-20}"
 grace_s=120
 
 say() { printf 'qwen-hand-run: %s\n' "$*" >&2; }
@@ -86,7 +101,7 @@ refuse() {
 
 for pair in "QWEN_CI_MARKER_STALE_SECONDS=$stale_s" "QWEN_HAND_RUN_SLICE_SECONDS=$slice_s" \
             "QWEN_HAND_RUN_BACKOFF_SECONDS=$backoff_s" "QWEN_HAND_RUN_MAX_WAIT_SECONDS=$max_wait_s" \
-            "QWEN_HAND_RUN_HOLD_SECONDS=$hold_s"; do
+            "QWEN_HAND_RUN_HOLD_SECONDS=$hold_s" "QWEN_HAND_RUN_KILL_SECONDS=$kill_s"; do
   case "${pair#*=}" in
     '' | *[!0-9]*) refuse 69 "${pair%%=*} must be a whole number of seconds, got '${pair#*=}'" ;;
   esac
@@ -239,12 +254,76 @@ say "holding the box lock $lock; running the suite at -n 8 (stopped after ${hold
 export NX_BUILD_LEASE_ROOT="$root"
 export NX_SUITE_LEASE_WAIT=1
 ran_from="$(date +%s)"
-# 9>&-: see the header, the suite does not inherit the box lock.
-timeout -k "$kill_s" "$hold_s" bash -c 'uv sync -q && scripts/build-gate-jar.sh && uv run pytest -n 8 -q "$@"' qwen-hand-run "$@" 9>&-
-rc=$?
+
+# The suite runs as a background job in a process group of its own (set -m), so this
+# script can signal it as a unit and keep the box lock until the group is gone. tpid
+# is `timeout`'s pid and, with job control on, the group's id. Signals go to the whole
+# group; if the group cannot be addressed (it is already gone, or the job got none),
+# to the pid alone.
+tpid=""
+cancelled=""
+signal_suite() {
+  [ -n "$tpid" ] || return 0
+  kill -s "$1" -- "-$tpid" 2>/dev/null || kill -s "$1" "$tpid" 2>/dev/null
+  return 0
+}
+# A hangup, ^C or TERM to this script: tell the suite to stop and carry on waiting,
+# so the box lock outlives the suite. ^C forwards INT (pytest stops cleanly on it);
+# the other two forward TERM. Exit status is 128 plus the signal, once it is gone.
+# shellcheck disable=SC2329  # called from the traps below
+on_signal() {
+  cancelled="$1"
+  say "signal received: stopping the suite ($2 sent to its group); the box lock is kept until it has gone"
+  signal_suite "$2"
+}
+trap 'on_signal 129 TERM' HUP
+trap 'on_signal 130 INT' INT
+trap 'on_signal 143 TERM' TERM
+
+# 9>&-: see the header, the suite does not inherit the box lock. </dev/null: a
+# background job in its own group would be stopped by the terminal if it read it.
+set -m
+timeout -k "$kill_s" "$hold_s" bash -c 'uv sync -q && scripts/build-gate-jar.sh && uv run pytest -n 8 -q "$@"' qwen-hand-run "$@" 9>&- </dev/null &
+tpid=$!
+set +m
+
+# A trapped signal ends `wait` early (status above 128) while the suite still runs:
+# wait again until `timeout` itself has gone.
+while :; do
+  wait "$tpid"
+  rc=$?
+  if [ "$rc" -gt 128 ] && kill -0 "$tpid" 2>/dev/null; then
+    continue
+  fi
+  break
+done
+ended="$(date +%s)"
+
+# `timeout` leaves as soon as its direct child has, so its own SIGKILL grace never
+# reaches a descendant that ignored the SIGTERM (or a straggler the suite left): sweep
+# the group, TERM first, then KILL after the grace. Only then is the box lock let go.
+if kill -0 -- "-$tpid" 2>/dev/null; then
+  say "the suite left processes running in its group; stopping them before the box lock is released"
+  signal_suite TERM
+  waited=0
+  while kill -0 -- "-$tpid" 2>/dev/null; do
+    if [ "$waited" -ge "$kill_s" ]; then
+      signal_suite KILL
+      sleep 1
+      break
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+fi
+
+if [ -n "$cancelled" ]; then
+  say "cancelled by signal; the suite was stopped (exit $cancelled; nothing was run to completion, not a test failure)"
+  exit "$cancelled"
+fi
 # 124 is timeout's own code; 137 is its SIGKILL after the grace. A 137 that came
 # sooner than the cap is something else killing the suite (the OOM killer), not us.
-if [ "$rc" -eq 124 ] || { [ "$rc" -eq 137 ] && [ $(($(date +%s) - ran_from)) -ge "$hold_s" ]; }; then
+if [ "$rc" -eq 124 ] || { [ "$rc" -eq 137 ] && [ $((ended - ran_from)) -ge "$hold_s" ]; }; then
   refuse 77 "the run hit its ${hold_s}s hold cap (QWEN_HAND_RUN_HOLD_SECONDS) and was stopped, so that CI is never kept waiting past its own wait; run a narrower selection, or raise the variable knowing CI then waits that much longer"
 fi
 exit "$rc"

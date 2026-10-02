@@ -378,8 +378,12 @@ descriptor closed, so a Postgres or JVM left behind by a run does not keep the
 lock. Exit 69 means a host prerequisite is missing (`flock`, `timeout`, or the
 lease directory); 69, 76 and 77 each print that nothing ran to completion and
 that it is not a test failure. 75 is not used: the suite lease already exits 75.
-A hand run that already holds the lock when CI arrives is not interrupted; CI
-waits for it, for at most the hold cap. How long a run takes at `-n 8`, warm or
+A hangup, `^C` or `TERM` sent to the wrapper stops the suite's whole process
+group first and releases the lock only once that group is gone (exit 129, 130 or
+143); a descendant that ignores `TERM` is killed after `QWEN_HAND_RUN_KILL_SECONDS`
+(20). A `SIGKILL` of the wrapper itself is not covered: the lock is released and the
+suite keeps running until someone stops it. A hand run that already holds the lock
+when CI arrives is not interrupted; CI waits for it, for at most the hold cap. How long a run takes at `-n 8`, warm or
 cold, has not been measured (item 10e). A raw `flock ... box.lock` or a bare
 `pytest` is not a supported hand-run form: it takes the lock, or the suite lease
 CI's own pytest needs, with no regard for a queued CI job.
