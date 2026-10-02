@@ -58,7 +58,8 @@ import java.util.function.Supplier;
  * not folded into {@code local_embed_activity}/{@code embedder_activity}: unlike
  * every field in those two shapes, it has no embedder dimension — it is a
  * DB-write-layer count, identical across every embedder, so nesting it per
- * embedder would misrepresent it as per-embedder data.
+ * embedder would misrepresent it as per-embedder data. It counts the raced embeds of
+ * COMMITTED writes only (see {@link RacedEmbedActivity}'s "When it counts").
  *
  * <p>{@code process_start_time} (RDR-222 Phase 0 fix round, bead nexus-ulrjq,
  * critic #2, ADDITIVE) is the SAME value {@code /version}'s field of the same
@@ -256,7 +257,10 @@ public final class StatusHandler implements HttpHandler {
         body.append('}');
 
         // RDR-222 Phase 0 (bead nexus-ulrjq), [additive]: process-wide lifetime
-        // counter, not per-embedder — see this class's own javadoc.
+        // counter, not per-embedder — see this class's own javadoc. Counts raced embeds of
+        // COMMITTED writes only, from both feeders (RacedEmbedActivity): a rolled-back or
+        // deadlock-retried attempt adds nothing, and the combined-write feeder has done so
+        // only since nexus-wbfpw.66.
         body.append(",\"raced_embeds_total\":").append(RacedEmbedActivity.total());
 
         // RDR-223 P1.5 (bead nexus-z0o2p.6), [additive]: same shape and lifetime as the

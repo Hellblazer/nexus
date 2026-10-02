@@ -19,6 +19,14 @@ import java.util.concurrent.atomic.AtomicLong;
  * same shape as {@code DeadlockRetry#RETRY_ATTEMPTS} — there is no per-tenant or
  * per-collection dimension on the wire for this counter at Phase 0.
  *
+ * <p><b>When it counts.</b> A race is counted only AFTER the writing transaction has committed,
+ * by BOTH feeders: a transaction killed as a deadlock victim (40P01) and re-run, or rolled back for
+ * any other reason, counts nothing, and a retried write counts once. The count is "raced embeds that
+ * were paid for and written", not "raced embeds detected inside an attempt". The upsert-chunks feeder
+ * has always worked this way; the combined-write feeder counted inside its transaction until
+ * nexus-wbfpw.66 (engine tag carrying that bead), so a reading that falls across that cut includes a
+ * definition change, not only a change in the underlying rate.
+ *
  * <p>Deliberately NOT a field on {@link EmbedActivitySnapshot}: that record is
  * inherently PER-EMBEDDER (one snapshot per {@code Embedder#modelToken()} in
  * {@code GET /v1/status}'s {@code embedder_activity} map), and a raced embed is

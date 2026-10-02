@@ -216,7 +216,11 @@ public final class ChashRepository {
                 || newCollection == null || newCollection.isBlank()) {
             throw new IllegalArgumentException("old and new collection must not be empty");
         }
-        int updated = tenantScope.withTenant(tenant, ctx -> {
+        // nexus-wbfpw.66: the manifest re-home below UPDATEs catalog_document_chunks.collection, which
+        // fires vectors-021-3's chunk-locking trigger, so this whole transaction is retried on a 40P01
+        // (the same wrap CatalogRepository.renameCollectionTxn carries). Everything it produces is the
+        // `total` it returns; the registry cache update runs after the committed attempt returns.
+        int updated = DeadlockRetry.run("chash.renameCollection " + oldCollection, () -> tenantScope.withTenant(tenant, ctx -> {
             // nexus-11gh6 (post-review, T2 nexus/review-11gh6-gate-2026-08-08
             // [21797] Important finding): this method is a SECOND,
             // independently-reachable (via /v1/chash/*) implementation of the
@@ -275,7 +279,7 @@ public final class ChashRepository {
                    .and(CATALOG_DOCUMENT_CHUNKS.COLLECTION.eq(oldCollection)))
                .execute();
             return total;
-        });
+        }));
         // Post-commit (nexus-h8rf6.2): see CollectionRegistry class doc. newCollection's
         // row already existed before this transaction (ensureCollectionRegistered
         // verified it above), so lookup() below is a cache hit in the common case —

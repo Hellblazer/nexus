@@ -647,9 +647,11 @@ sees the first record with or without the lock (removing it leaves
 `aConcurrentDropOfASharedChunkLeavesItStamped` green). An earlier version of this section
 said the lock prevented a lost record; that was wrong. It does not claim to order against
 other writers. The content upserts sort their chunk writes by chash, so those passes are
-monotone in chash too, but nothing pins that, and the manifest write is not under
-`DeadlockRetry`; a 40P01 against another writer would be loud and retryable, not a lost
-record. `ChunkIsReapableIntegrationTest` pins the `ORDER BY` and the lock clause in both
+monotone in chash too, but nothing pins that. Every transaction that writes manifest rows
+is under `DeadlockRetry` (nexus-wbfpw.66, 2026-10-02; `CatalogRepository.manifestWriteTxn`),
+so a 40P01 against another writer is retried as a whole transaction, bounded at 4 attempts,
+and surfaces as before only on exhaustion; it was never a lost record.
+`ChunkIsReapableIntegrationTest` pins the `ORDER BY` and the lock clause in both
 function bodies with `pg_get_functiondef` (no behavioural test can fail on their removal,
 so the definition is the only place to hold them), pins that the bodies never UPDATE
 `nexus.chunks`, and pins the concurrent drop.

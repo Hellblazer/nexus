@@ -550,6 +550,13 @@ Every piece is `[additive]` in `docs/wire-contract-pending.md`'s sense.
   carries `process_start_time` beside it (the value `/version` serves), so a
   window whose start time changes between polls is discarded, not summed.
   One instance per poll: Open Question 7 bounds any fleet-wide reading.
+- Definition change, 2026-10-02 (nexus-wbfpw.66). From the engine tag carrying that
+  bead, `raced_embeds_total` counts committed writes only, from both feeders. The
+  `upsert-chunks` feeder always did; the combined-write feeder counted inside its
+  transaction, so a write that was rolled back (a deadlock victim, a failed
+  document) still added to it. A reading that drops across that cut is a change
+  of definition, not necessarily a change of rate: compare windows on one side of
+  it.
 - Engine write-path change: the standing throughput A/B (one extra
   RETURNING on the hot INSERT) runs at the `engine-service-v0.1.137` cut,
   in `--shakeout`'s index-throughput gate; no local harness runs it earlier
@@ -660,7 +667,8 @@ fixed by catalog-043, nexus-brxnp).
 
 1. **nexus-wvek6 (Phase 2) deferred** at P4: revisit after two weeks of
    `raced_embeds_total` readings from `engine-service-v0.1.137` (live
-   2026-09-28); build only if the retry share is material.
+   2026-09-28); build only if the retry share is material. (From the engine tag
+   carrying nexus-wbfpw.66 the counter counts committed writes only; see Phase 0.)
 2. **nexus-mfw6c (Phase 3) closed**, no evidence. This section stays the
    design of record if the class ever appears.
 3. **nexus-ll31n (Phase 1)** stays open; nothing measured argues for or
@@ -690,6 +698,8 @@ Questions 3, 4 and 6 are answered above. Still open: 1, 2, 5 and 7.
    retention arm should run once per database, not once per instance.
 
 ## Revision History
+
+- 2026-10-02: `raced_embeds_total` now counts committed writes only, from both feeders (nexus-wbfpw.66, engine tag carrying it); text note under Phase 0.
 
 - 2026-09-28: post-Phase-0 decisions recorded (wvek6 deferred, mfw6c closed).
 
