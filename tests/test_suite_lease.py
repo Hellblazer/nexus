@@ -515,6 +515,30 @@ def test_a_new_lease_is_readable_by_peers_whatever_the_umask(lease_root: Path) -
         release()
 
 
+def test_a_failing_chmod_still_leaves_the_pid_written(
+        lease_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Round-5 review I1: chmod raising must not skip the pid write, or the live holder reads pid-less and is stolen."""
+    def boom(self: Path, *_a: object, **_k: object) -> None:
+        raise PermissionError("chmod refused")
+
+    monkeypatch.setattr(Path, "chmod", boom)
+    release = _suite_lease.acquire("chmod-fails", lease_root=lease_root)
+    assert release is not None
+    try:
+        pid_file = lease_root / _suite_lease.RESOURCE / "pid"
+        assert pid_file.read_text().strip() == str(os.getpid())
+    finally:
+        monkeypatch.undo()
+        release()
+
+
+def test_the_recovery_hint_offers_a_cross_user_mv_not_only_rm(lease_root: Path) -> None:
+    """Round-5 review I2: rm -rf of another user's 0755 lease fails; mv in a group-writable, non-sticky root works."""
+    hint = _suite_lease.recovery_hint(lease_root)
+    path = str(lease_root / _suite_lease.RESOURCE)
+    assert f"mv {path} {path}.stale-" in hint
+
+
 def test_a_waiting_acquire_succeeds_once_a_pidless_lease_ages_past_the_grace(
         lease_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """With a wait, the caller no longer waits out the whole timeout on a pid-less corpse."""

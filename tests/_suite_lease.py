@@ -95,7 +95,9 @@ def recovery_hint(lease_root: Path | None = None) -> str:
     """The sentence a refused run ends with: where the lease is, and how to clear one that has no live holder."""
     path = lease_path(lease_root)
     return (
-        f"The lease is the directory {path}. If no pytest run is live on this box, clear it with: rm -rf {path} "
+        f"The lease is the directory {path}. If no pytest run is live on this box, set it aside with: "
+        f"mv {path} {path}.stale-$(date +%s) (works across users because the lease root is group-writable "
+        f"and not sticky; rm -rf {path} works only for the user who owns it) "
         f"(a lease with a missing, empty or garbage pid is reclaimed automatically once it is {int(PIDLESS_GRACE_SECONDS)} s old; "
         f"one whose files this user cannot read is never reclaimed, so check who owns {path} before clearing it)."
     )
@@ -187,7 +189,8 @@ def _reclaim_if_dead(lease: Path, now: Callable[[], float] = time.time) -> None:
     not "no such file") is neither: it is treated as HELD and never reclaimed,
     at any age. We cannot see whose it is, and a live holder with umask 077
     looks exactly like this to a peer. Failing closed costs a person one
-    ``rm -rf`` after the exit-75 message names the path (round-4 review M1).
+    ``mv`` of the lease aside after the exit-75 message names the path
+    (round-4 review M1; ``rm -rf`` fails across users, ``mv`` does not).
 
     Known gaps, both needing extreme conditions (round-4 review L4): (a) if the
     pid write fails after ``mkdir`` (ENOSPC, say) the live holder's lease is
@@ -196,10 +199,14 @@ def _reclaim_if_dead(lease: Path, now: Callable[[], float] = time.time) -> None:
     overwrite the reclaimer's. Neither is guarded; the lease is a convention
     between cooperating suites, not a security boundary.
 
-    Safe to race: the reclaim is a rename to a unique name, which is atomic,
-    so of two processes reclaiming the same stale lease exactly one succeeds
-    and the other's rename fails harmlessly. Removing the pid file in place
-    would let both proceed to believe they had reclaimed it.
+    The reclaim is a rename to a unique name, which is atomic, so of two
+    processes reclaiming the same stale lease one rename succeeds and the
+    other fails harmlessly. It is NOT a compare-and-swap: between reading a
+    dead pid and renaming, a peer can reclaim, take a fresh lease at the same
+    path, and have that fresh lease renamed aside, leaving two holders. The
+    window is the few microseconds between the read and the rename, and the
+    lease is a convention between cooperating suites; accepted, not guarded
+    (round-5 review L1). Removing the pid file in place would widen it.
     """
     try:
         pid_file = lease / "pid"
@@ -265,11 +272,21 @@ def acquire(label: str, *, wait_seconds: int = 0, lease_root: Path | None = None
         except Exception:  # noqa: BLE001 — an unwritable lease root must not block the suite
             return lambda: None
 
+        # The pid first, each step on its own: a lease whose pid write is
+        # skipped because an earlier step raised reads as pid-less and is
+        # reclaimed after the grace while its holder is live (round-5 review I1).
         try:
-            lease.chmod(LEASE_DIR_MODE)  # umask 077 would hide a live holder from the next run
-            _write_shared(lease / "pid", f"{os.getpid()}\n")
-            _write_shared(lease / "label", f"{label}\n")
+            (lease / "pid").write_text(f"{os.getpid()}\n")
         except Exception:  # noqa: BLE001 — a half-written lease reads as free, which is correct
+            pass
+        for target, mode in ((lease / "pid", LEASE_FILE_MODE), (lease, LEASE_DIR_MODE)):
+            try:
+                target.chmod(mode)  # umask 077 would hide a live holder from the next run
+            except Exception:  # noqa: BLE001 — unreadable to peers reads as HELD, which is safe
+                pass
+        try:
+            _write_shared(lease / "label", f"{label}\n")
+        except Exception:  # noqa: BLE001
             pass
 
         # Descendants inherit this and skip the lease entirely.
