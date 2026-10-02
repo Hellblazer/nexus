@@ -3783,7 +3783,10 @@ predates the field, or runs with the reaper off (`NX_REAPER_ENABLED=false`). A p
 tenants did, so the object also carries `last_pass` (`tenants_visited`, `tenants_errored`, `tenants_refused`
 for the last completed pass, null before the first): when a recent pass visited tenants and every one was
 refused (the RDR-192 backfill rung not run: `nx upgrade`) or errored (read the engine log for
-`reaper_tenant_failed`), the row warns "alive but doing nothing". An engine that sends no `last_pass` is
+`reaper_tenant_failed`), the row warns "alive but doing nothing". The counts are per tenant: one collection that threw marks its tenant
+errored, so the warning means no tenant finished a clean pass, not that no chunk was examined. A reaper
+that refuses every collection (legacy chunks, `CENSUS_SCOPE_MISMATCH`, a statement bound) but not the tenant
+still reads green here; the per-collection refusals are in `gc_audit` (`reaper_refused`). An engine that sends no `last_pass` is
 judged on the time alone.
 
 **Restart after the ownerless-write release.** The engine in this release refuses a chunk

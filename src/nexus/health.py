@@ -4069,7 +4069,8 @@ def _check_engine_reaper(
                 label=label, ok=False, warn=True,
                 detail=(f"alive but doing nothing: the last completed pass, {_span(age)} ago, visited "
                         f"{visited} tenant{'s' if visited != 1 else ''} and every tenant was refused or errored "
-                        f"({', '.join(parts)}), so no chunk was examined{failed_note}"),
+                        f"({', '.join(parts)}); counts are per tenant, and one errored collection marks its tenant errored, "
+                        f"so no tenant finished a clean pass{failed_note}"),
                 fix_suggestions=[
                     *(["A refused tenant has no verified RDR-192 backfill record (BACKFILL_INCOMPLETE): run "
                        "`nx upgrade` against the tenant"] if refused else []),
