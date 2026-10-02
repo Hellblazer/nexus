@@ -40,8 +40,9 @@ import java.util.function.Supplier;
  *
  * <p>{@code reaper} (RDR-192 Phase 3 gate S5, bead nexus-wbfpw.56, ADDITIVE) is the engine reaper's liveness:
  * {@code {"enabled":true,"interval_seconds":3600,"wall_clock_budget_seconds":600,"last_completed_pass_at":"2026-10-02T07:00:00Z"|null,
- * "failed_passes_total":0}}, or {@code {"enabled":false}} when no reaper is scheduled in this process. See
- * {@link ReaperStatus}.
+ * "failed_passes_total":0,"last_pass":{"tenants_visited":3,"tenants_errored":0,"tenants_refused":0}|null}}, or
+ * {@code {"enabled":false}} when no reaper is scheduled in this process. {@code last_pass} says what the last completed
+ * pass did with its tenants, because a pass completes whatever they did. See {@link ReaperStatus}.
  *
  * <p>{@code supplied_vector_mismatches_total} (RDR-223 P1.5, bead nexus-z0o2p.6, ADDITIVE) is
  * a process-wide, lifetime counter (see {@link SuppliedVectorMismatchActivity}) of client-supplied
@@ -184,9 +185,25 @@ public final class StatusHandler implements HttpHandler {
      *                             pass from a dead reaper: completions are at most interval plus this far apart
      * @param lastCompletedPassAt  when the last pass that ran to the end finished; null before the first
      * @param failedPassesTotal    passes since boot that died or could not list their tenants
+     * @param lastPass             what the last COMPLETED pass did with its tenants (nexus-wbfpw.55 round 2); null
+     *                             before the first. A pass completes whatever its tenants did, so this is what tells
+     *                             a reaper that works from one whose every tenant was refused or errored
      */
     public record ReaperStatus(boolean enabled, long intervalSeconds, long wallClockBudgetSeconds,
-                               java.time.Instant lastCompletedPassAt, long failedPassesTotal) {}
+                               java.time.Instant lastCompletedPassAt, long failedPassesTotal, LastPass lastPass) {
+        /** A reaper that reports no pass summary (what an engine wired without one answers in). */
+        public ReaperStatus(boolean enabled, long intervalSeconds, long wallClockBudgetSeconds,
+                            java.time.Instant lastCompletedPassAt, long failedPassesTotal) {
+            this(enabled, intervalSeconds, wallClockBudgetSeconds, lastCompletedPassAt, failedPassesTotal, null);
+        }
+
+        /**
+         * @param tenantsVisited tenants the pass reached (a wall-clock cut leaves the rest for the next pass)
+         * @param tenantsErrored tenants where the tenant, a collection or a quarantine sibling threw
+         * @param tenantsRefused tenants the RDR-192 backfill gate kept out whole
+         */
+        public record LastPass(int tenantsVisited, int tenantsErrored, int tenantsRefused) {}
+    }
 
     /**
      * @param reaperStatus RDR-192 Phase 3 gate S5 (nexus-wbfpw.56): the reaper's liveness. Null omits the
@@ -274,7 +291,16 @@ public final class StatusHandler implements HttpHandler {
                     body.append(HttpUtil.jsonString(
                         r.lastCompletedPassAt().truncatedTo(java.time.temporal.ChronoUnit.SECONDS).toString()));
                 }
-                body.append(",\"failed_passes_total\":").append(r.failedPassesTotal()).append('}');
+                body.append(",\"failed_passes_total\":").append(r.failedPassesTotal());
+                body.append(",\"last_pass\":");
+                if (r.lastPass() == null) {
+                    body.append("null");
+                } else {
+                    body.append("{\"tenants_visited\":").append(r.lastPass().tenantsVisited())
+                        .append(",\"tenants_errored\":").append(r.lastPass().tenantsErrored())
+                        .append(",\"tenants_refused\":").append(r.lastPass().tenantsRefused()).append('}');
+                }
+                body.append('}');
             }
         }
 

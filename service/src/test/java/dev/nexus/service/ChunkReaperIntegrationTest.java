@@ -872,6 +872,127 @@ class ChunkReaperIntegrationTest extends AtomicWriteTestBase {
         assertThat(r.lastCompletedPassAt()).isEqualTo(CLOCK.instant());
     }
 
+    // ── a pass that ran to the end but did nothing useful (nexus-wbfpw.55 round 2, critique S4a) ──────────────
+
+    @Test
+    void aPassThatRefusedItsOnlyTenantIsStillACompletedPass_andSaysEveryTenantWasRefused() throws Exception {
+        // lastCompletedPassAt moves for any pass that reaches the end, so a reaper whose every tenant is refused
+        // (BACKFILL_INCOMPLETE until the rung runs) read as healthy. The pass summary tells them apart.
+        String t = newTenant();   // gate NOT opened: the tenant is refused
+        orphan(t, col("knowledge"), "x");
+        ChunkReaper r = reaper(t);
+        assertThat(r.lastPass()).as("before the first pass").isNull();
+
+        r.runOnce(Duration.ZERO);
+
+        assertThat(r.lastCompletedPassAt()).isEqualTo(CLOCK.instant());
+        assertThat(r.lastPass()).isNotNull();
+        assertThat(r.lastPass().tenantsVisited()).isEqualTo(1);
+        assertThat(r.lastPass().tenantsRefused()).isEqualTo(1);
+        assertThat(r.lastPass().tenantsErrored()).isZero();
+    }
+
+    @Test
+    void aPassWhoseEveryCollectionErroredCountsTheTenantAsErrored() throws Exception {
+        // The v0.1.78 shape (a grants regression): each collection's statement throws, the pass still completes.
+        String t = newTenant();
+        openGate(t);
+        orphan(t, col("knowledge"), "x");
+        ChunkReaper.Census broken = (tenant, collection, limit, timeout) -> {
+            throw new IllegalStateException("simulated: permission denied for table chunks");
+        };
+        ChunkReaper r = reaper(Settings.defaults(), broken, System::nanoTime, t);
+
+        r.runOnce(Duration.ZERO);
+
+        assertThat(r.lastCompletedPassAt()).as("it completed").isEqualTo(CLOCK.instant());
+        assertThat(r.lastPass().tenantsVisited()).isEqualTo(1);
+        assertThat(r.lastPass().tenantsErrored()).isEqualTo(1);
+        assertThat(r.lastPass().tenantsRefused()).isZero();
+    }
+
+    @Test
+    void aHealthyTenantBesideARefusedOneIsCountedOnItsOwn() throws Exception {
+        String healthy = newTenant();
+        openGate(healthy);
+        orphan(healthy, col("knowledge"), "x");
+        String refused = newTenant();   // gate not opened
+        orphan(refused, col("knowledge"), "y");
+        ChunkReaper r = reaper(healthy, refused);
+
+        r.runOnce(Duration.ZERO);
+
+        assertThat(r.lastPass().tenantsVisited()).isEqualTo(2);
+        assertThat(r.lastPass().tenantsRefused()).isEqualTo(1);
+        assertThat(r.lastPass().tenantsErrored()).isZero();
+    }
+
+    @Test
+    void aFailedPassLeavesTheLastCompletedPassSummaryAlone() throws Exception {
+        String t = newTenant();
+        openGate(t);
+        String c = col("knowledge");
+        orphan(t, c, "x");
+        var armed = new java.util.concurrent.atomic.AtomicBoolean(false);
+        ChunkReaper.Census dies = (tenant, collection, limit, timeout) -> {
+            if (armed.get()) throw new NoClassDefFoundError("simulated");
+            return censusOf(1, Map.of());
+        };
+        ChunkReaper r = reaper(Settings.defaults(), dies, System::nanoTime, t);
+        r.runOnce(Duration.ZERO);
+        var summary = r.lastPass();
+        assertThat(summary.tenantsVisited()).isEqualTo(1);
+
+        armed.set(true);
+        r.runOnce(Duration.ZERO);
+
+        assertThat(r.lastPass()).as("a pass that died is not a completed pass").isEqualTo(summary);
+    }
+
+    @Test
+    void aCensusThatReadFarMoreThanTheDryRun_proceeds_butWarns() throws Exception {
+        // M6 is shrink-only, so growth no longer refuses; but a census that read a different, much larger set is
+        // the shape of a wrong scope that happens to be bigger, and must not pass in silence.
+        String t = newTenant();
+        openGate(t);
+        String c = col("knowledge");
+        String h = orphan(t, c, "x");
+        ChunkReaper.Census muchLarger = (tenant, collection, limit, timeout) -> censusOf(500, Map.of());
+
+        var run = new RunResult[1];
+        List<String> logs = captureLogsQuietly(() ->
+            run[0] = reaper(Settings.defaults(), muchLarger, System::nanoTime, t).runOnce(Duration.ZERO));
+
+        assertThat(run[0].tenant(t).collection(c).moved()).as("growth still proceeds").isEqualTo(1);
+        assertThat(inCollection(t, quarantineOf(c), h)).isTrue();
+        assertThat(logs).anySatisfy(l -> assertThat(l).startsWith("WARN event=reaper_census_scope_much_larger")
+            .contains("dry_run_total=1").contains("census_total=500"));
+    }
+
+    @Test
+    void aCensusThatGrewByALittle_doesNotWarn() throws Exception {
+        String t = newTenant();
+        openGate(t);
+        String c = col("knowledge");
+        orphan(t, c, "x");
+        ChunkReaper.Census slightlyLarger = (tenant, collection, limit, timeout) -> censusOf(2, Map.of());
+
+        List<String> logs = captureLogsQuietly(() ->
+            reaper(Settings.defaults(), slightlyLarger, System::nanoTime, t).runOnce(Duration.ZERO));
+
+        assertThat(logs).noneSatisfy(l -> assertThat(l).contains("reaper_census_scope_much_larger"));
+    }
+
+    private List<String> captureLogsQuietly(Runnable body) throws Exception {
+        try {
+            return captureLogs(body::run);
+        } catch (Exception | Error e) {
+            throw e;
+        } catch (Throwable t) {
+            throw new IllegalStateException(t);
+        }
+    }
+
     @Test
     void aCensusCancelledByItsStatementBoundIsARefusal_notAZero() throws Exception {
         String t = newTenant();

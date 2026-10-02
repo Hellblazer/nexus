@@ -261,6 +261,29 @@ class StatusHandlerTest {
     }
 
     @Test
+    void reaper_reportsWhatTheLastCompletedPassDidWithItsTenants() throws Exception {
+        // nexus-wbfpw.55 round 2: a pass completes whatever its tenants did, so the status carries the counts.
+        var status = new StatusHandler.ReaperStatus(true, 3600L, 600L, java.time.Instant.parse("2026-10-02T07:00:00Z"),
+            0L, new StatusHandler.ReaperStatus.LastPass(3, 1, 2));
+        start(new StatusHandler(null, null, 0L, null, () -> status));
+
+        JsonNode lastPass = get().get("reaper").get("last_pass");
+        assertThat(lastPass.get("tenants_visited").asInt()).isEqualTo(3);
+        assertThat(lastPass.get("tenants_errored").asInt()).isEqualTo(1);
+        assertThat(lastPass.get("tenants_refused").asInt()).isEqualTo(2);
+    }
+
+    @Test
+    void reaper_lastPassIsNullBeforeTheFirstPassAndForAStatusWithNoSummary() throws Exception {
+        var status = new StatusHandler.ReaperStatus(true, 3600L, 600L, null, 0L);
+        start(new StatusHandler(null, null, 0L, null, () -> status));
+
+        JsonNode reaper = get().get("reaper");
+        assertThat(reaper.has("last_pass")).as("the key is always there for an enabled reaper").isTrue();
+        assertThat(reaper.get("last_pass").isNull()).isTrue();
+    }
+
+    @Test
     void reaper_aSupplierThatReturnsNullSaysTheReaperIsNotRunning() throws Exception {
         start(new StatusHandler(null, null, 0L, null, () -> null));
 

@@ -766,8 +766,11 @@ public final class NexusService {
     dev.nexus.service.http.StatusHandler.ReaperStatus reaperStatus() {
         ChunkReaper r = chunkReaper;
         if (r == null) return null;
+        ChunkReaper.LastPass last = r.lastPass();
         return new dev.nexus.service.http.StatusHandler.ReaperStatus(true, r.settings().interval().toSeconds(),
-            r.settings().wallClockBudget().toSeconds(), r.lastCompletedPassAt(), r.failedPassesTotal());
+            r.settings().wallClockBudget().toSeconds(), r.lastCompletedPassAt(), r.failedPassesTotal(),
+            last == null ? null : new dev.nexus.service.http.StatusHandler.ReaperStatus.LastPass(
+                last.tenantsVisited(), last.tenantsErrored(), last.tenantsRefused()));
     }
 
     /**

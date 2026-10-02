@@ -368,10 +368,16 @@ class NexusServiceReaperWiringTest {
             assertThat(before.get("wall_clock_budget_seconds").asLong()).as("the default 10 minute budget")
                 .isEqualTo(600L);
             assertThat(before.get("last_completed_pass_at").isNull()).as("no pass yet").isTrue();
+            assertThat(before.get("last_pass").isNull()).as("no pass summary yet").isTrue();
 
             service.reaperScheduledTask().run();
 
             var after = status.get();
+            var lastPass = after.get("last_pass");
+            assertThat(lastPass.get("tenants_visited").asInt()).as("the pass visited the default tenant")
+                .isGreaterThanOrEqualTo(1);
+            assertThat(lastPass.get("tenants_errored").isInt()).isTrue();
+            assertThat(lastPass.get("tenants_refused").isInt()).isTrue();
             assertThat(after.get("last_completed_pass_at").isTextual()).isTrue();
             assertThat(java.time.Instant.parse(after.get("last_completed_pass_at").asText()))
                 .isBetween(java.time.Instant.now().minusSeconds(120), java.time.Instant.now().plusSeconds(5));

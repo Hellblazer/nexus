@@ -136,6 +136,9 @@ final class ChunkReaper {
     static final int SAMPLE_SIZE = 5;
     /** The census page asked for: items beyond this are not itemised (the totals are collection-wide). */
     private static final int CENSUS_PAGE = 300;
+    /** A census that read this many TIMES the dry run's total, and at least {@link #CENSUS_GROWTH_WARN_MIN_EXTRA} more, is warned about. */
+    private static final int CENSUS_GROWTH_WARN_FACTOR = 2;
+    private static final long CENSUS_GROWTH_WARN_MIN_EXTRA = 100;
     private static final String QUARANTINE_PREFIX = "quarantine-";
     private static final String LIVE = "live";
     /** Per-statement bound for the enumeration, the dry run, the move and the expiry. */
@@ -394,6 +397,16 @@ final class ChunkReaper {
             return expiries.stream().mapToLong(ExpiryResult::protectedCount).sum();
         }
 
+        /**
+         * The tenant, one of its collections or one of its siblings threw. A wall-clock cut sets {@code error} to
+         * explain itself and is not a failure; a tenant the gate refused has no error at all.
+         */
+        boolean failed() {
+            return (error != null && !wallClockCut)
+                || collections.stream().anyMatch(c -> c.error() != null)
+                || expiries.stream().anyMatch(e -> e.error() != null);
+        }
+
         int errors() {
             return (int) collections.stream().filter(c -> c.error() != null).count()
                 + (int) expiries.stream().filter(e -> e.error() != null).count() + (error != null ? 1 : 0);
@@ -423,6 +436,8 @@ final class ChunkReaper {
     private final LongSupplier nanos;
     /** When the last pass that ran to the end finished; null before the first. Read by the status route's thread. */
     private volatile Instant lastCompletedPassAt;
+    /** That pass's tenant counts, set with {@link #lastCompletedPassAt} (the status route reads the two together). */
+    private volatile LastPass lastPass;
     /** Passes since boot that died, or that could not list their tenants. */
     private final AtomicLong failedPassesTotal = new AtomicLong();
     /** Refusals since boot: a counter a log reader can alert on, where a one-off line would scroll past. */
@@ -567,6 +582,26 @@ final class ChunkReaper {
         return lastCompletedPassAt;
     }
 
+    /**
+     * What the last pass that ran to the end did with the tenants it visited (nexus-wbfpw.55 round 2, critique S4a):
+     * {@code lastCompletedPassAt} moves for ANY pass that reaches the end, so a reaper whose every tenant is refused
+     * (the RDR-192 backfill rung not run) or whose every collection errors (a grants regression) still reads alive.
+     * These counts tell a working pass from one that did nothing useful. A tenant is refused when the backfill gate
+     * kept the whole tenant out, and errored when it, one of its collections or one of its quarantine siblings threw
+     * (a wall-clock cut is neither). A tenant that is neither is one the pass worked on, even if it found nothing to
+     * move. Served as {@code reaper.last_pass} on {@code GET /v1/status}.
+     */
+    record LastPass(int tenantsVisited, int tenantsErrored, int tenantsRefused) {
+        int tenantsOk() {
+            return tenantsVisited - tenantsErrored - tenantsRefused;
+        }
+    }
+
+    /** The last pass that ran to the end, summarised; null before the first. */
+    LastPass lastPass() {
+        return lastPass;
+    }
+
     /** Passes since boot that died or could not list their tenants; a pass whose collections failed one by one is not one. */
     long failedPassesTotal() {
         return failedPassesTotal.get();
@@ -653,6 +688,8 @@ final class ChunkReaper {
             refusedTotal.get(), censusTimedOutTotal.get(), statementTimedOutTotal.get());
         RunResult out = new RunResult(results, cut);
         lastRun.set(out);
+        lastPass = new LastPass(results.size(), (int) results.stream().filter(TenantResult::failed).count(),
+            (int) results.stream().filter(r -> r.tenantRefusal() != null).count());
         lastCompletedPassAt = clock.instant().truncatedTo(ChronoUnit.SECONDS);
         return out;
     }
@@ -823,8 +860,21 @@ final class ChunkReaper {
                         + "Retried next pass", List.of());
             }
             if (c.scopeChunkTotal() > probe.total()) {
-                log.info("event=reaper_census_scope_grew tenant={} collection={} dry_run_total={} census_total={}",
-                    tenant, name, probe.total(), c.scopeChunkTotal());
+                // Growth proceeds, but a census that read MANY times what the dry run counted is the shape of a
+                // different, larger set (a wrong scope that happens to be bigger), which this shrink-only check
+                // cannot tell from a busy collection. So it is said out loud, not silently accepted.
+                boolean muchLarger = c.scopeChunkTotal() >= CENSUS_GROWTH_WARN_FACTOR * probe.total()
+                    && c.scopeChunkTotal() - probe.total() >= CENSUS_GROWTH_WARN_MIN_EXTRA;
+                if (muchLarger) {
+                    log.warn("event=reaper_census_scope_much_larger tenant={} collection={} dry_run_total={} "
+                            + "census_total={} (the census read at least {}x the chunks the dry run counted and {} "
+                            + "more; the move proceeds, but check the census is reading this collection)",
+                        tenant, name, probe.total(), c.scopeChunkTotal(), CENSUS_GROWTH_WARN_FACTOR,
+                        CENSUS_GROWTH_WARN_MIN_EXTRA);
+                } else {
+                    log.info("event=reaper_census_scope_grew tenant={} collection={} dry_run_total={} census_total={}",
+                        tenant, name, probe.total(), c.scopeChunkTotal());
+                }
             }
             long legacy = c.totals().getOrDefault("legacy-unmanifested", 0L);
             long unclassified = c.totals().getOrDefault("unclassified", 0L);
