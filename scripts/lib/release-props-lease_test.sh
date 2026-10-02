@@ -9,6 +9,15 @@
 # Mirrors scripts/lib/build-lease_test.sh's ok/bad/PASS/FAIL convention.
 set -u -o pipefail
 
+# The suite builds its own fake repo and assumes the lease root is that repo's
+# own. An inherited NX_BUILD_LEASE_ROOT (CI's lease step exports it, and so does
+# the documented hand-run setup on a shared host) would point the lease at the
+# shared root, where a live peer run may hold it: every acquire below then queues
+# behind that holder and refuses (nexus-mntbl). Scrubbed here, like the three
+# suites that already do, and pinned by test_shell_suite_wiring.py's
+# TestSuitesIgnoreAnInheritedLeaseRoot.
+unset NX_BUILD_LEASE_ROOT NX_SUITE_LEASE_WAIT NX_SUITE_LEASE_HELD_BY
+
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/release_props_lease_test.XXXXXX")"

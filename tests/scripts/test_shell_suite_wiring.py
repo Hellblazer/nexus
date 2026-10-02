@@ -188,17 +188,19 @@ SUITES = [
 
 #: The lease variables a suite must never inherit. CI's lease step exports
 #: NX_BUILD_LEASE_ROOT to every later step, and an nxtest hand run sets it by
-#: design; three suites below assume the lease root is their own fake repo's.
+#: design; each suite assumes the lease root is its own fake repo's.
 _LEASE_ENV_PREFIXES = ("NX_BUILD_LEASE_ROOT", "NX_SUITE_LEASE_")
 
-#: The suites that build a fake repo around a lease and so are sensitive to an
-#: inherited lease root (measured: with NX_BUILD_LEASE_ROOT set, these three
-#: fail and the other eight pass).
-_LEASE_SENSITIVE = (
-    "scripts/lib/build-lease_test.sh",
-    "scripts/mvnw-leased_test.sh",
-    "tests/e2e/migration-rehearsal/run_sh_guard_test.sh",
-)
+#: EVERY suite, not a hand-kept list of the ones known to be sensitive. Measured on
+#: the qwentescence host (nxtest exports NX_BUILD_LEASE_ROOT=/var/lib/nx-suite-lease,
+#: where another run holds the leases): six suites fail or hang there and the other
+#: five pass. Three of them (build-lease, mvnw-leased, run_sh_guard) failed against
+#: an EMPTY inherited root; the other three (release-props-lease,
+#: local_service_gate_guard, build-gate-jar; nexus-mntbl) only fail when the shared
+#: root carries a live holder, which the test below pre-holds. A list of "the
+#: sensitive ones" went stale exactly this way, so a new suite is covered by being
+#: in SUITES.
+_LEASE_SENSITIVE = tuple(str(s.path.relative_to(REPO_ROOT)) for s in SUITES)
 
 
 def _env_without_lease_vars() -> dict[str, str]:
@@ -267,11 +269,22 @@ class TestSuitesIgnoreAnInheritedLeaseRoot:
     """
 
     @pytest.mark.parametrize("relpath", _LEASE_SENSITIVE, ids=lambda p: Path(p).name)
-    def test_suite_passes_with_the_lease_root_exported_and_leaves_it_empty(
+    def test_suite_passes_with_the_lease_root_exported_and_leaves_it_untouched(
         self, relpath: str, tmp_path: Path
     ) -> None:
         shared = tmp_path / "shared-lease-root"
         shared.mkdir()
+        # A live peer holds both leases in the shared root, as another run does on
+        # the shared qwentescence host. A suite that inherits the root queues behind
+        # this holder and fails; a suite that unsets it never sees it. This process
+        # is alive for the whole test, so its pid is a live holder.
+        held = {}
+        for resource in ("service", "suite"):
+            lease = shared / resource
+            lease.mkdir()
+            (lease / "pid").write_text(f"{os.getpid()}\n")
+            (lease / "label").write_text("a peer run holding the shared lease\n")
+            held[resource] = sorted(p.name for p in lease.iterdir())
         env = _env_without_lease_vars()
         env["NX_BUILD_LEASE_ROOT"] = str(shared)
         env["NX_SUITE_LEASE_WAIT"] = "1"
@@ -283,7 +296,11 @@ class TestSuitesIgnoreAnInheritedLeaseRoot:
             f"{path.name} failed with NX_BUILD_LEASE_ROOT exported\n"
             f"--- stdout ---\n{result.stdout}\n--- stderr ---\n{result.stderr}"
         )
-        assert list(shared.iterdir()) == [], (
+        assert sorted(p.name for p in shared.iterdir()) == ["service", "suite"], (
             f"{path.name} wrote into the inherited lease root: "
             f"{sorted(p.name for p in shared.iterdir())}"
         )
+        for resource, files in held.items():
+            lease = shared / resource
+            assert sorted(p.name for p in lease.iterdir()) == files, f"{path.name} touched the peer's {resource} lease"
+            assert (lease / "pid").read_text().strip() == str(os.getpid()), f"{path.name} took over the peer's {resource} lease"
