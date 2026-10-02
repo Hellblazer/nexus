@@ -4,6 +4,8 @@ package dev.nexus.service;
 
 import dev.nexus.service.db.CatalogRepository;
 import dev.nexus.service.db.Chash;
+import dev.nexus.service.db.LadderRepository;
+import dev.nexus.service.db.Rdr192BackfillGate;
 import dev.nexus.service.db.TenantScope;
 import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterAll;
@@ -1259,5 +1261,183 @@ class CatalogManifestSweepRepositoryTest {
         assertThat(fieldValue(line, "swept")).isEqualTo("1");
         assertThat(fieldValue(line, "kept")).isEqualTo("0");
         assertThat(chunk384Exists(TENANT_A, col, x)).as("the sweep this event reports actually ran").isFalse();
+    }
+
+    // ── RDR-192 Step 11 (nexus-wbfpw.21): the legacy-note arm of the union guard ──
+    //
+    // A legacy note (a live note-shaped catalog document, no manifest row anywhere) can
+    // enter a dropped set when an unrelated document shared its chunk text and then
+    // dropped it (Order 12 builds exactly that). So the arm's removal is not safe on
+    // every install: it is gated, per tenant, on the verified rdr192-manifest-backfill
+    // rung record, the same fact the reaper reads (Rdr192BackfillGate). No verified
+    // record, the arm stays. Order 12 is the no-record branch; these are the rest.
+
+    /**
+     * Builds Order 12's shape in {@code tenant}: a manifest-less note whose chash an
+     * unrelated document manifests and then drops with {@code sweep=true}. Returns the
+     * sweep response; the note's chash is {@code ch(tag + "-note")}.
+     */
+    private Map<String, Object> dropSharedLegacyNoteChash(String tenant, String col, String tag) throws Exception {
+        String noteChash = ch(tag + "-note");
+        seedChunk384(tenant, col, noteChash);
+        repo.upsertDocument(tenant, Map.of(
+            "tumbler", tag + ".note", "title", "legacy manifest-less note " + tag,
+            "content_type", "knowledge", "corpus", "knowledge",
+            "physical_collection", col, "chunk_count", 0,
+            "metadata", Map.of("doc_id", noteChash)));
+        assertThat(repo.getManifest(tenant, tag + ".note"))
+            .as("sanity: the note itself carries no manifest row").isEmpty();
+        registerDoc(tenant, tag + ".doc", col);
+        writeManifestManySeeded(tenant, List.of(
+            Map.<String, Object>of("doc_id", tag + ".doc", "rows", List.<Map<String, Object>>of(
+                Map.<String, Object>of("position", 0, "chash", noteChash, "chunk_index", 0)))), col);
+        return writeManifestManySeeded(tenant, List.of(
+            Map.<String, Object>of("doc_id", tag + ".doc", "rows", List.<Map<String, Object>>of(
+                Map.<String, Object>of("position", 0, "chash", ch(tag + "-doc-new"), "chunk_index", 0)))), col,
+            null, true);
+    }
+
+    private void recordBackfill(String tenant) {
+        new LadderRepository(tenantScope).record(tenant, Rdr192BackfillGate.RUNG_NAME, "7.99.0", "");
+    }
+
+    /** Grants or revokes the service role's SELECT on the ladder ledger, through the jOOQ DDL API
+     *  (no raw SQL). The role is this class's own, so no other test class sees the change. */
+    private void setLadderSelectGrant(boolean granted) throws Exception {
+        var ledger = DSL.table(DSL.name("nexus", "ladder_completions"));
+        var role = DSL.role(DSL.name(SVC_ROLE));
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            var ctx = DSL.using(su, org.jooq.SQLDialect.POSTGRES);
+            if (granted) {
+                ctx.grant(DSL.privilege("select")).on(ledger).to(role).execute();
+            } else {
+                ctx.revoke(DSL.privilege("select")).on(ledger).from(role).execute();
+            }
+        }
+    }
+
+    @Test @Order(60)
+    void sweep_verifiedBackfill_legacyNoteChunkIsSwept_andTheLogSaysTheArmIsOff() throws Exception {
+        String tenant = "sweep-verified";
+        String col = "code__swp60__minilm-l6-v2-384__v1";
+        recordBackfill(tenant);
+
+        var lines = captureSweptLogLines(() -> {
+            try {
+                var result = dropSharedLegacyNoteChash(tenant, col, "swp60");
+                assertThat(result.get("swept"))
+                    .as("verified backfill: a manifest-less note is swept like any other unreferenced chunk")
+                    .isEqualTo(1);
+            } catch (Exception e) {
+                throw new AssertionError(e);
+            }
+        });
+
+        assertThat(chunk384Exists(tenant, col, ch("swp60-note"))).as("the legacy note's T3 row is gone").isFalse();
+        assertThat(lines).as("one swept line per sweep run; the seed write ran with sweep off").hasSize(1);
+        assertThat(fieldValue(lines.getFirst(), "legacy_notes_guard")).isEqualTo("false");
+    }
+
+    @Test @Order(61)
+    void sweep_noBackfillRecord_legacyNoteChunkIsKept_evenWhenAnotherTenantIsVerified() throws Exception {
+        String tenant = "sweep-unrecorded";
+        String col = "code__swp61__minilm-l6-v2-384__v1";
+        // Order 60's tenant has a verified record; this tenant has none. Tenant isolation:
+        // the record must unlock the arm for its own tenant only.
+        assertThat(new LadderRepository(tenantScope).isRungVerified("sweep-verified", Rdr192BackfillGate.RUNG_NAME))
+            .as("precondition: the other tenant's record exists").isTrue();
+
+        var lines = captureSweptLogLines(() -> {
+            try {
+                var result = dropSharedLegacyNoteChash(tenant, col, "swp61");
+                assertThat(result.get("swept")).isEqualTo(0);
+            } catch (Exception e) {
+                throw new AssertionError(e);
+            }
+        });
+
+        assertThat(chunk384Exists(tenant, col, ch("swp61-note")))
+            .as("no verified record for this tenant: the legacy note's chunk survives").isTrue();
+        assertThat(fieldValue(lines.getFirst(), "legacy_notes_guard")).isEqualTo("true");
+    }
+
+    @Test @Order(62)
+    void sweep_aDifferentRungsRecord_doesNotUnlockTheArm() throws Exception {
+        String tenant = "sweep-other-rung";
+        String col = "code__swp62__minilm-l6-v2-384__v1";
+        new LadderRepository(tenantScope).record(tenant, "some-other-rung", "7.99.0", "");
+
+        var result = dropSharedLegacyNoteChash(tenant, col, "swp62");
+
+        assertThat(result.get("swept")).isEqualTo(0);
+        assertThat(chunk384Exists(tenant, col, ch("swp62-note"))).isTrue();
+    }
+
+    @Test @Order(63)
+    void sweep_verifiedBackfill_manifestRowsStillProtectTheChunk() throws Exception {
+        // The union guard proper is untouched: a verified tenant's current note (its own
+        // manifest row) and a chunk another document still references both survive.
+        String tenant = "sweep-verified-union";
+        String col = "code__swp63__minilm-l6-v2-384__v1";
+        recordBackfill(tenant);
+        String noteChash = ch("swp63-note");
+        String sharedChash = ch("swp63-shared");
+        seedChunk384(tenant, col, noteChash);
+        seedChunk384(tenant, col, sharedChash);
+        repo.upsertDocument(tenant, Map.of(
+            "tumbler", "swp63.note", "title", "current note with a manifest row",
+            "content_type", "knowledge", "corpus", "knowledge",
+            "physical_collection", col, "chunk_count", 0,
+            "metadata", Map.of("doc_id", noteChash)));
+        registerDoc(tenant, "swp63.keeper", col);
+        registerDoc(tenant, "swp63.dropper", col);
+        writeManifestManySeeded(tenant, List.of(
+            Map.<String, Object>of("doc_id", "swp63.note", "rows", List.<Map<String, Object>>of(
+                Map.<String, Object>of("position", 0, "chash", noteChash, "chunk_index", 0))),
+            Map.<String, Object>of("doc_id", "swp63.keeper", "rows", List.<Map<String, Object>>of(
+                Map.<String, Object>of("position", 0, "chash", sharedChash, "chunk_index", 0))),
+            Map.<String, Object>of("doc_id", "swp63.dropper", "rows", List.<Map<String, Object>>of(
+                Map.<String, Object>of("position", 0, "chash", noteChash, "chunk_index", 0),
+                Map.<String, Object>of("position", 1, "chash", sharedChash, "chunk_index", 1)))), col);
+
+        var result = writeManifestManySeeded(tenant, List.of(
+            Map.<String, Object>of("doc_id", "swp63.dropper", "rows", List.<Map<String, Object>>of())), col,
+            null, true);
+
+        assertThat(result.get("swept")).as("both dropped chashes still have a manifest row").isEqualTo(0);
+        assertThat(chunk384Exists(tenant, col, noteChash)).isTrue();
+        assertThat(chunk384Exists(tenant, col, sharedChash)).isTrue();
+    }
+
+    @Test @Order(64)
+    void sweep_unreadableLedger_fallsBackToTheOldGuard_andTheSweepStillRuns() throws Exception {
+        // The ledger read fails closed: with the table unreadable the arm stays ON, and the
+        // sweep itself (the savepoint contains the failed read) still removes an ordinary
+        // unreferenced chunk instead of erroring the whole run.
+        String tenant = "sweep-ledger-unreadable";
+        String col = "code__swp64__minilm-l6-v2-384__v1";
+        recordBackfill(tenant);
+        String ordinary = ch("swp64-ordinary");
+        seedChunk384(tenant, col, ordinary);
+        registerDoc(tenant, "swp64.ord", col);
+        writeManifestManySeeded(tenant, List.of(
+            Map.<String, Object>of("doc_id", "swp64.ord", "rows", List.<Map<String, Object>>of(
+                Map.<String, Object>of("position", 0, "chash", ordinary, "chunk_index", 0)))), col);
+        setLadderSelectGrant(false);
+        try {
+            Map<String, Object> noteResult = dropSharedLegacyNoteChash(tenant, col, "swp64");
+            assertThat(noteResult.get("swept")).as("old guard stays on when the ledger cannot be read").isEqualTo(0);
+            assertThat(chunk384Exists(tenant, col, ch("swp64-note"))).isTrue();
+
+            var result = writeManifestManySeeded(tenant, List.of(
+                Map.<String, Object>of("doc_id", "swp64.ord", "rows", List.<Map<String, Object>>of())), col,
+                null, true);
+            assertThat(result.get("swept")).as("an ordinary chunk is still swept").isEqualTo(1);
+            assertThat(result.get("sweep_skipped")).isEqualTo(0);
+            assertThat(chunk384Exists(tenant, col, ordinary)).isFalse();
+        } finally {
+            setLadderSelectGrant(true);
+        }
     }
 }

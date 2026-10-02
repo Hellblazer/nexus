@@ -8,6 +8,8 @@ import dev.nexus.service.PgContainerHelper;
 import dev.nexus.service.db.CatalogRepository;
 import dev.nexus.service.db.Chash;
 import dev.nexus.service.db.ChashHex;
+import dev.nexus.service.db.LadderRepository;
+import dev.nexus.service.db.Rdr192BackfillGate;
 import dev.nexus.service.db.TaxonomyRepository;
 import dev.nexus.service.db.TenantScope;
 import org.jooq.SQLDialect;
@@ -691,6 +693,52 @@ class Rdr192EngineLivenessMatrixIntegrationTest {
         assertExistencePredicate(tenant, fx, "P4");
     }
 
+    /**
+     * RDR-192 Step 11 (nexus-wbfpw.21): P4V is P4 for a tenant whose {@code
+     * rdr192-manifest-backfill} rung record is verified. The legacy-note arm of the
+     * union guard is gone for that tenant, so R8 (a manifest-less current note whose
+     * chash a dropped set names) is swept; R7 (a current note with its own manifest
+     * row) is still kept by the manifest-row arm. P4 above is the same sweep for a
+     * tenant with NO record, where R8 stays kept.
+     */
+    @Test
+    void p4v_engineSweepChunksQuery_backfillVerified_legacyNoteIsSwept() throws Exception {
+        String tenant = "wbfpw1-p4v";
+        Fixture fx = seedLivenessFixture(tenant);
+        new LadderRepository(tenantScope).record(tenant, Rdr192BackfillGate.RUNG_NAME, "7.99.0", "");
+
+        String dx = "wbfpw1-dx";
+        registerDoc(tenant, dx, COLLECTION_A);
+        catalogRepo.writeManifestMany(tenant, List.of(
+            Map.<String, Object>of("doc_id", dx, "rows", List.of(
+                Map.<String, Object>of("position", 0, "chash", fx.r1(), "chunk_index", 0),
+                Map.<String, Object>of("position", 1, "chash", fx.r2(), "chunk_index", 1),
+                Map.<String, Object>of("position", 2, "chash", fx.r3(), "chunk_index", 2),
+                Map.<String, Object>of("position", 3, "chash", fx.r4(), "chunk_index", 3),
+                Map.<String, Object>of("position", 4, "chash", fx.r5(), "chunk_index", 4),
+                Map.<String, Object>of("position", 5, "chash", fx.r6(), "chunk_index", 5),
+                Map.<String, Object>of("position", 6, "chash", fx.r7(), "chunk_index", 6),
+                Map.<String, Object>of("position", 7, "chash", fx.r8(), "chunk_index", 7),
+                Map.<String, Object>of("position", 8, "chash", fx.r9(), "chunk_index", 8)))),
+            COLLECTION_A, null, false);
+
+        var result = catalogRepo.writeManifestMany(tenant, List.of(
+            Map.<String, Object>of("doc_id", dx, "rows", List.<Map<String, Object>>of())),
+            COLLECTION_A, null, true);
+
+        assertThat(result.get("swept")).as("R1 (no owner) and R8 (a legacy note, no longer guarded)")
+            .isEqualTo(2);
+        @SuppressWarnings("unchecked")
+        var detail = (List<Map<String, Object>>) result.get("sweep_detail");
+        assertThat(detail).singleElement().satisfies(d -> {
+            assertThat(d.get("dropped")).isEqualTo(9);
+            assertThat(d.get("swept")).isEqualTo(2);
+            assertThat(d.get("kept")).isEqualTo(7);
+        });
+
+        assertExistencePredicate(tenant, fx, "P4V");
+    }
+
     // ── P6: PgVectorRepository.delete's anti-join ───────────────────────────
 
     @Test
@@ -935,7 +983,7 @@ class Rdr192EngineLivenessMatrixIntegrationTest {
     private static final List<String> ROWS =
         List.of("R1", "R2", "R3", "R4", "R5", "R6", "R7", "R8", "R9");
     private static final List<String> PREDICATES =
-        List.of("P1g", "P1s", "P1h", "P1p", "P1t", "P2", "P3", "P4", "P6", "P7", "P9", "LIVE", "REAP");
+        List.of("P1g", "P1s", "P1h", "P1p", "P1t", "P2", "P3", "P4", "P4V", "P6", "P7", "P9", "LIVE", "REAP");
 
     /**
      * The verdict for every (row, predicate) pair. This table is the SOURCE the
@@ -960,7 +1008,9 @@ class Rdr192EngineLivenessMatrixIntegrationTest {
      * <p>P9 ({@code taxonomy_unassigned_chashes}) keeps its own shape (RDR-192
      * Migration order, item 3): it asks only whether an own-collection manifest
      * row exists, with no tombstone check, so it differs from LIVE on R3 and R9.
-     * The destructive columns P3, P4 and P6 are Phase 4 work.
+     * The destructive columns P3 and P6 are Phase 4 work. P4 is the engine sweep for a tenant
+     * with no {@code rdr192-manifest-backfill} record (the legacy-note arm still guards R8);
+     * P4V is the same sweep once that record is verified (nexus-wbfpw.21), where R8 is swept.
      *
      * <p>REAP is reapable(c) (RDR-192 Step 7, nexus-wbfpw.15): no own-collection
      * manifest row in ANY owner state, last_written_at older than the grace window
@@ -974,15 +1024,15 @@ class Rdr192EngineLivenessMatrixIntegrationTest {
      * (nexus-wbfpw.16), so a row created now separates them.
      */
     private static final Map<String, Map<String, Boolean>> EXPECTED_VALUE_TABLE = Map.ofEntries(
-        Map.entry("R1", Map.ofEntries(Map.entry("P1g", false), Map.entry("P1s", false), Map.entry("P1h", false), Map.entry("P1p", false), Map.entry("P1t", false), Map.entry("P2", false), Map.entry("P3", false), Map.entry("P4", true), Map.entry("P6", true), Map.entry("P7", true), Map.entry("P9", false), Map.entry("LIVE", false), Map.entry("REAP", true))),
-        Map.entry("R2", Map.ofEntries(Map.entry("P1g", true), Map.entry("P1s", true), Map.entry("P1h", true), Map.entry("P1p", true), Map.entry("P1t", true), Map.entry("P2", true), Map.entry("P3", false), Map.entry("P4", false), Map.entry("P6", false), Map.entry("P7", false), Map.entry("P9", true), Map.entry("LIVE", true), Map.entry("REAP", false))),
-        Map.entry("R3", Map.ofEntries(Map.entry("P1g", false), Map.entry("P1s", false), Map.entry("P1h", false), Map.entry("P1p", false), Map.entry("P1t", false), Map.entry("P2", false), Map.entry("P3", true), Map.entry("P4", false), Map.entry("P6", false), Map.entry("P7", false), Map.entry("P9", true), Map.entry("LIVE", false), Map.entry("REAP", false))),
-        Map.entry("R4", Map.ofEntries(Map.entry("P1g", false), Map.entry("P1s", false), Map.entry("P1h", false), Map.entry("P1p", false), Map.entry("P1t", false), Map.entry("P2", false), Map.entry("P3", false), Map.entry("P4", false), Map.entry("P6", true), Map.entry("P7", true), Map.entry("P9", false), Map.entry("LIVE", false), Map.entry("REAP", true))),
-        Map.entry("R5", Map.ofEntries(Map.entry("P1g", true), Map.entry("P1s", true), Map.entry("P1h", true), Map.entry("P1p", true), Map.entry("P1t", true), Map.entry("P2", true), Map.entry("P3", false), Map.entry("P4", false), Map.entry("P6", false), Map.entry("P7", false), Map.entry("P9", true), Map.entry("LIVE", true), Map.entry("REAP", false))),
-        Map.entry("R6", Map.ofEntries(Map.entry("P1g", false), Map.entry("P1s", false), Map.entry("P1h", false), Map.entry("P1p", false), Map.entry("P1t", false), Map.entry("P2", false), Map.entry("P3", false), Map.entry("P4", false), Map.entry("P6", true), Map.entry("P7", true), Map.entry("P9", false), Map.entry("LIVE", false), Map.entry("REAP", true))),
-        Map.entry("R7", Map.ofEntries(Map.entry("P1g", true), Map.entry("P1s", true), Map.entry("P1h", true), Map.entry("P1p", true), Map.entry("P1t", true), Map.entry("P2", true), Map.entry("P3", false), Map.entry("P4", false), Map.entry("P6", false), Map.entry("P7", false), Map.entry("P9", true), Map.entry("LIVE", true), Map.entry("REAP", false))),
-        Map.entry("R8", Map.ofEntries(Map.entry("P1g", false), Map.entry("P1s", false), Map.entry("P1h", false), Map.entry("P1p", false), Map.entry("P1t", false), Map.entry("P2", false), Map.entry("P3", false), Map.entry("P4", false), Map.entry("P6", true), Map.entry("P7", true), Map.entry("P9", false), Map.entry("LIVE", false), Map.entry("REAP", true))),
-        Map.entry("R9", Map.ofEntries(Map.entry("P1g", false), Map.entry("P1s", false), Map.entry("P1h", false), Map.entry("P1p", false), Map.entry("P1t", false), Map.entry("P2", false), Map.entry("P3", true), Map.entry("P4", false), Map.entry("P6", false), Map.entry("P7", false), Map.entry("P9", true), Map.entry("LIVE", false), Map.entry("REAP", false)))
+        Map.entry("R1", Map.ofEntries(Map.entry("P1g", false), Map.entry("P1s", false), Map.entry("P1h", false), Map.entry("P1p", false), Map.entry("P1t", false), Map.entry("P2", false), Map.entry("P3", false), Map.entry("P4", true), Map.entry("P4V", true), Map.entry("P6", true), Map.entry("P7", true), Map.entry("P9", false), Map.entry("LIVE", false), Map.entry("REAP", true))),
+        Map.entry("R2", Map.ofEntries(Map.entry("P1g", true), Map.entry("P1s", true), Map.entry("P1h", true), Map.entry("P1p", true), Map.entry("P1t", true), Map.entry("P2", true), Map.entry("P3", false), Map.entry("P4", false), Map.entry("P4V", false), Map.entry("P6", false), Map.entry("P7", false), Map.entry("P9", true), Map.entry("LIVE", true), Map.entry("REAP", false))),
+        Map.entry("R3", Map.ofEntries(Map.entry("P1g", false), Map.entry("P1s", false), Map.entry("P1h", false), Map.entry("P1p", false), Map.entry("P1t", false), Map.entry("P2", false), Map.entry("P3", true), Map.entry("P4", false), Map.entry("P4V", false), Map.entry("P6", false), Map.entry("P7", false), Map.entry("P9", true), Map.entry("LIVE", false), Map.entry("REAP", false))),
+        Map.entry("R4", Map.ofEntries(Map.entry("P1g", false), Map.entry("P1s", false), Map.entry("P1h", false), Map.entry("P1p", false), Map.entry("P1t", false), Map.entry("P2", false), Map.entry("P3", false), Map.entry("P4", false), Map.entry("P4V", false), Map.entry("P6", true), Map.entry("P7", true), Map.entry("P9", false), Map.entry("LIVE", false), Map.entry("REAP", true))),
+        Map.entry("R5", Map.ofEntries(Map.entry("P1g", true), Map.entry("P1s", true), Map.entry("P1h", true), Map.entry("P1p", true), Map.entry("P1t", true), Map.entry("P2", true), Map.entry("P3", false), Map.entry("P4", false), Map.entry("P4V", false), Map.entry("P6", false), Map.entry("P7", false), Map.entry("P9", true), Map.entry("LIVE", true), Map.entry("REAP", false))),
+        Map.entry("R6", Map.ofEntries(Map.entry("P1g", false), Map.entry("P1s", false), Map.entry("P1h", false), Map.entry("P1p", false), Map.entry("P1t", false), Map.entry("P2", false), Map.entry("P3", false), Map.entry("P4", false), Map.entry("P4V", false), Map.entry("P6", true), Map.entry("P7", true), Map.entry("P9", false), Map.entry("LIVE", false), Map.entry("REAP", true))),
+        Map.entry("R7", Map.ofEntries(Map.entry("P1g", true), Map.entry("P1s", true), Map.entry("P1h", true), Map.entry("P1p", true), Map.entry("P1t", true), Map.entry("P2", true), Map.entry("P3", false), Map.entry("P4", false), Map.entry("P4V", false), Map.entry("P6", false), Map.entry("P7", false), Map.entry("P9", true), Map.entry("LIVE", true), Map.entry("REAP", false))),
+        Map.entry("R8", Map.ofEntries(Map.entry("P1g", false), Map.entry("P1s", false), Map.entry("P1h", false), Map.entry("P1p", false), Map.entry("P1t", false), Map.entry("P2", false), Map.entry("P3", false), Map.entry("P4", false), Map.entry("P4V", true), Map.entry("P6", true), Map.entry("P7", true), Map.entry("P9", false), Map.entry("LIVE", false), Map.entry("REAP", true))),
+        Map.entry("R9", Map.ofEntries(Map.entry("P1g", false), Map.entry("P1s", false), Map.entry("P1h", false), Map.entry("P1p", false), Map.entry("P1t", false), Map.entry("P2", false), Map.entry("P3", true), Map.entry("P4", false), Map.entry("P4V", false), Map.entry("P6", false), Map.entry("P7", false), Map.entry("P9", true), Map.entry("LIVE", false), Map.entry("REAP", false)))
     );
 
     /**

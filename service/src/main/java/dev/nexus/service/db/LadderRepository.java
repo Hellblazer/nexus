@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.db;
 
+import org.jooq.DSLContext;
 import org.jooq.impl.DSL;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -92,10 +93,19 @@ public final class LadderRepository {
      */
     public boolean isRungVerified(String tenant, String rungName) {
         requireNonBlank(rungName, "rung_name");
-        return tenantScope.withTenant(tenant, ctx ->
-            ctx.fetchExists(LADDER_COMPLETIONS,
-                LADDER_COMPLETIONS.TENANT_ID.eq(tenant)
-                    .and(LADDER_COMPLETIONS.RUNG_NAME.eq(rungName))));
+        return tenantScope.withTenant(tenant, ctx -> isRungVerifiedIn(ctx, tenant, rungName));
+    }
+
+    /**
+     * {@link #isRungVerified} inside a transaction the caller already holds, for a caller
+     * (the sweep, {@code CatalogRepository#runSweepTransaction}) that must read the fact in
+     * the same transaction it acts in. One definition of the fact: the instance method above
+     * calls this. Throws on a database failure, like the instance method.
+     */
+    static boolean isRungVerifiedIn(DSLContext ctx, String tenant, String rungName) {
+        return ctx.fetchExists(LADDER_COMPLETIONS,
+            LADDER_COMPLETIONS.TENANT_ID.eq(tenant)
+                .and(LADDER_COMPLETIONS.RUNG_NAME.eq(rungName)));
     }
 
     private static void requireNonBlank(String value, String field) {
