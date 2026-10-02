@@ -241,10 +241,15 @@ The enable sequence, in order; stop at the first red:
    there until a release promotes it. Until then push a throwaway branch named
    `runner-probe/qwen-<date>` from the commit under test (`git push origin
    HEAD:refs/heads/runner-probe/qwen-<date>`): the probe's second trigger is a
-   push to that pattern, owner only, and `ci.yml` does not trigger on it. Read the
-   run (every step green: identity as `ghci`, no `sudo`, no readable file under the
-   nexus config directory, the Windows side passing with its positive control),
-   then delete the branch (`git push origin :refs/heads/runner-probe/qwen-<date>`).
+   push to that pattern, owner only, and neither `ci.yml` nor `hellmini-probe.yml`
+   (which excludes `runner-probe/qwen-*`) triggers on it. Read the run (every
+   step green: identity as `ghci`, no `sudo`, no readable file under the nexus
+   config directory, the Windows side passing with its positive control). **Read
+   the credential line, not just the colour: `NOT CHECKED` is not a pass.** It
+   means the nexus config directory was absent or closed to `ghci`, so the
+   credential check never ran; the run is still green, and carries a warning
+   annotation on its summary. Do not record a run with that warning as the
+   isolation evidence; fix the host (or the path) and run again. Then delete the branch (`git push origin :refs/heads/runner-probe/qwen-<date>`).
    The same push works after the file is on `main`; a dispatch works then too.
 4. **Record the green run id** in `AGENTS.md` (the "Probe run record" line under
    the routing section), in the change that does step 5.

@@ -943,7 +943,7 @@ jobs:
       # exports NX_BUILD_LEASE_ROOT and NX_SUITE_LEASE_WAIT for the later steps.
       QWEN_SUITE_LEASE_ROOT: ${{ vars.QWEN_SUITE_LEASE_ROOT || '/var/lib/nx-suite-lease' }}
     steps:
-      - name: Windows-side preflight (fails closed before any repo code runs)
+      - name: Windows-side preflight (fails closed on every run, before the checkout)
         shell: bash
         run: |
           set -uo pipefail
@@ -954,8 +954,12 @@ jobs:
           # admin). The fix is host-side (/etc/wsl.conf) and the probe checks it
           # once; but `ghci` is in the docker group, which is root on the
           # distro, so a job can rewrite wsl.conf for the next restart. This
-          # step is the per-run check that catches that, and it runs BEFORE
-          # actions/checkout, so no repo code has executed yet.
+          # step is the per-run check that catches that. It guards against HOST
+          # DRIFT (a wsl.conf change, a handler or drive that came back), not
+          # against a hostile commit: this workflow file is itself part of the
+          # pushed commit, so a commit that edits this step out runs without it.
+          # It runs before actions/checkout only so that it reads the host as the
+          # previous job left it.
           # The paths are plain assignments so the tests can point them at a
           # fake tree; nothing in the environment can move them. Output is
           # pass or fail and counts only: no path, name or drive content.
@@ -1029,6 +1033,15 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # The suite lease's opt-out is for a hand run; CI never sets it, and the
+          # lint test pins that no workflow does. A host-side runner .env or a
+          # profile on the runner account could still put it in this job's
+          # environment, where it would turn the guard off silently, so refuse here
+          # (round-4 review L5). Only the fact is printed, never a value.
+          if [ -n "${NX_SUITE_LEASE_UNGUARDED:-}" ]; then
+            echo "::error::the suite lease opt-out is set in this job's environment (a runner .env or the runner account's profile?): the guard against a hand-run suite would be off. Unset it on the host."
+            exit 1
+          fi
           root="$QWEN_SUITE_LEASE_ROOT"
           fix="Host admin, once: sudo groupadd -f nx-suite; sudo usermod -aG nx-suite ghci; sudo usermod -aG nx-suite nxtest; sudo install -d -o root -g nx-suite -m 2775 $root; then restart the runner service (new group) and have nxtest export NX_BUILD_LEASE_ROOT=$root NX_SUITE_LEASE_WAIT=1 in its .bashrc."
           if [ ! -d "$root" ] || [ -L "$root" ]; then

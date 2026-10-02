@@ -428,6 +428,92 @@ def test_a_missing_config_dir_is_reported_as_not_checked_never_as_a_pass(tmp_pat
     assert "holds no file" not in closed.stdout
     nohome = _run(_homes_probe(tmp_path / "nohome" / ".config" / "nexus"))
     assert nohome.returncode == 0 and "NOT CHECKED: there is no /home/nexus on this host" in nohome.stdout
+    # Round-4 review M2: a REPORT line in the log is not enough; the run summary must carry a WARNING annotation,
+    # or a probe that never read the credential directory shows as plain green.
+    for out in (closed.stdout, nohome.stdout):
+        assert re.search(r"^::warning::NOT CHECKED: .*not a pass", out, re.M), out
+
+
+@pytest.mark.skipif(sys.platform != "linux" or os.geteuid() == 0,
+                    reason="root lists every directory, so a searchable-but-unlistable one cannot be built")
+def test_a_config_file_readable_by_name_in_an_unlistable_directory_still_fails_the_homes_step(tmp_path: Path) -> None:
+    """Round-4 review L1: `find -readable` needs read on the DIRECTORY, so mode 0711 + a 0644 config file counted 0 and passed."""
+    cfg = tmp_path / "home" / ".config" / "nexus"
+    cfg.mkdir(parents=True)
+    (cfg / "config.yml").write_text("SECRET-VALUE\n")
+    (cfg / "config.yml").chmod(0o644)
+    cfg.chmod(0o311)  # the test user owns the directory: 0711 would still let it list, so drop the owner's read bit (0711 is what a PEER sees)
+    try:
+        bad = _run(_homes_probe(cfg))
+    finally:
+        cfg.chmod(0o755)
+    assert bad.returncode == 1, (bad.stdout, bad.stderr)
+    assert "1 file(s) under" in bad.stdout
+    out = bad.stdout + bad.stderr
+    assert "config.yml" not in out and "SECRET-VALUE" not in out
+
+
+@pytest.mark.skipif(sys.platform != "linux" or os.geteuid() == 0,
+                    reason="root lists every directory, so a searchable-but-unlistable one cannot be built")
+def test_an_unlistable_config_directory_with_no_readable_file_still_passes_the_homes_step(tmp_path: Path) -> None:
+    """The control for the test above: the by-name check must not turn every 0711 directory into a failure."""
+    cfg = tmp_path / "home" / ".config" / "nexus"
+    cfg.mkdir(parents=True)
+    (cfg / "config.yml").write_text("x")
+    (cfg / "config.yml").chmod(0o000)  # the test user OWNS the file, so only mode 000 makes it unreadable to itself
+    cfg.chmod(0o311)  # the test user owns the directory: 0711 would still let it list, so drop the owner's read bit (0711 is what a PEER sees)
+    try:
+        ok = _run(_homes_probe(cfg))
+    finally:
+        cfg.chmod(0o755)
+        (cfg / "config.yml").chmod(0o600)
+    assert ok.returncode == 0, (ok.stdout, ok.stderr)
+    assert "holds no file readable by the runner user (expected)" in ok.stdout
+
+
+def _branch_globs_match(patterns: list[str], branch: str) -> bool:
+    """GitHub's `on.push.branches` semantics: patterns in order, a later `!` pattern removes an earlier match.
+
+    `*` matches within one path segment, `**` across segments.
+    """
+    def rx(pat: str) -> re.Pattern[str]:
+        out, i = "", 0
+        while i < len(pat):
+            if pat.startswith("**", i):
+                out, i = out + ".*", i + 2
+            elif pat[i] == "*":
+                out, i = out + "[^/]*", i + 1
+            else:
+                out, i = out + re.escape(pat[i]), i + 1
+        return re.compile(out + r"\Z")
+
+    matched = False
+    for pat in patterns:
+        negate = pat.startswith("!")
+        if rx(pat[1:] if negate else pat).match(branch):
+            matched = not negate
+    return matched
+
+
+def test_a_runner_probe_qwen_branch_fires_this_probe_and_no_other_workflow() -> None:
+    """Round-4 review L2: hellmini-probe's `runner-probe/**` also matched `runner-probe/qwen-*`, so the documented
+    throwaway-branch recipe started a 20-minute job on the hellmini RELEASE runner too. The header claims it routes
+    nothing else; this is that claim, evaluated against every workflow's push filter."""
+    branch = "runner-probe/qwen-2026-10-02"
+    fired = []
+    for wf in sorted(PROBE.parent.glob("*.y*ml")):
+        doc = yaml.safe_load(wf.read_text())
+        on = doc.get("on", doc.get(True))
+        push = on.get("push") if isinstance(on, dict) else None
+        if push is None and isinstance(on, list) and "push" in on:
+            fired.append(wf.name)  # a bare `push` trigger has no branch filter
+        elif isinstance(push, dict) and "branches" in push and _branch_globs_match(push["branches"], branch):
+            fired.append(wf.name)
+    assert fired == [PROBE.name], fired
+    # non-vacuity: the evaluator does see the old over-match, and still matches the other probe branches
+    assert _branch_globs_match(["runner-probe/**"], branch)
+    assert not _branch_globs_match(["runner-probe/**", "!runner-probe/qwen-*"], branch)
+    assert _branch_globs_match(["runner-probe/**", "!runner-probe/qwen-*"], "runner-probe/hellmini-2026-10-02")
 
 
 def test_the_homes_step_with_no_nexus_config_reports_and_passes() -> None:

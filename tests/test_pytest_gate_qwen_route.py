@@ -541,6 +541,34 @@ def test_a_usable_lease_root_is_exported_for_the_build_and_suite_leases(tmp_path
     assert list(root.iterdir()) == [], "the write probe must clean up after itself"
 
 
+@pytest.mark.parametrize("value", ["1", "true", "0", " ", "off"])
+def test_a_job_whose_environment_carries_the_suite_lease_opt_out_is_refused_before_anything_is_exported(
+        tmp_path: Path, value: str) -> None:
+    """Round-4 review L5: a host-side runner .env could set it, and no lint of the repo can see that.
+
+    ANY non-empty value refuses (the opt-out itself means exactly "1", but a typo here is still a sign the
+    host sets it), and only the fact is printed, never the value.
+    """
+    root = tmp_path / "lease"
+    root.mkdir()
+    os.chmod(root, 0o2775)
+    proc, genv = _lease(tmp_path, root, NX_SUITE_LEASE_UNGUARDED=value)
+    out = proc.stdout + proc.stderr
+    assert proc.returncode == 1, out
+    assert "opt-out is set" in out and "::error::" in out
+    assert genv.read_text() == "", "a refused job must not export a lease root"
+    assert f"={value}" not in out and "NX_SUITE_LEASE_UNGUARDED" not in out, "the log names the fact, not the variable's value"
+
+
+def test_an_empty_suite_lease_opt_out_in_the_environment_is_not_a_refusal(tmp_path: Path) -> None:
+    root = tmp_path / "lease"
+    root.mkdir()
+    os.chmod(root, 0o2775)
+    proc, genv = _lease(tmp_path, root, NX_SUITE_LEASE_UNGUARDED="")
+    assert proc.returncode == 0, (proc.stdout, proc.stderr)
+    assert genv.read_text().splitlines() == [f"NX_BUILD_LEASE_ROOT={root}", "NX_SUITE_LEASE_WAIT=1"]
+
+
 def test_a_missing_lease_root_fails_loud_with_the_host_setup_and_exports_nothing(tmp_path: Path) -> None:
     proc, genv = _lease(tmp_path, tmp_path / "does-not-exist")
     out = proc.stdout + proc.stderr

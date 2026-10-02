@@ -224,7 +224,10 @@ To turn it off: `gh variable delete QWEN_CI_PUSH_RUNNER`; the next push (or a
 
 **Probe run record: none yet.** No `qwen-linux-isolation-probe` run has been
 read green. Until this line carries a run id, read the qwen runner's isolation
-as "intended" and leave the variable unset.
+as "intended" and leave the variable unset. A run id recorded here must be a run
+that checked the credentials: **`NOT CHECKED` on the credential line is not a
+pass** (the run is green and carries a `::warning::` annotation, because an
+absent or closed nexus config directory cannot fail the probe).
 
 The job and a hand-run suite by the host's `nxtest` user serialize on one lease,
 not by agreement: `test-qwen` points `NX_BUILD_LEASE_ROOT` at a host directory
@@ -296,7 +299,9 @@ can mount; the WSL data and `.wslconfig` belong to the Windows user.
 Two controls, and they are different in kind:
 
 - **The per-run Windows-side preflight** (first step of `test-qwen`, before
-  `actions/checkout`, so no repo code has run) fails the job closed on every run
+  `actions/checkout`, so it reads the host as the last job left it; it guards
+  host drift, not a hostile commit, since this file is part of the pushed commit
+  and a commit can edit the step out) fails the job closed on every run
   unless the kernel is WSL with binfmt_misc mounted (a positive control: every
   check below is true on a machine that is not WSL), and there is no
   `WSLInterop` handler, no `cmd.exe` under `/mnt/*/Windows/System32`, no
@@ -309,8 +314,11 @@ Two controls, and they are different in kind:
   runs from develop-era code), checks the unprivileged route once. It FAILS on:
   a job that is not running as exactly `ghci`; passwordless `sudo`; ANY file
   under `/home/nexus/.config/nexus` readable by `ghci` (a count, never a name;
-  an absent or unreachable directory is reported as NOT CHECKED, which is also
-  what a closed `/home/nexus` looks like, so it cannot fail); and the Windows
+  `config.yml` is also tested by name, since `find -readable` is blind in a
+  directory `ghci` may search but not list; an absent or unreachable directory is
+  reported as NOT CHECKED, which is also what a closed `/home/nexus` looks like,
+  so it cannot fail, and so it is emitted as a `::warning::` annotation: NOT
+  CHECKED is not a pass); and the Windows
   side (the preflight's checks plus an attempt to run `cmd.exe`). It REPORTS
   docker-group membership and whether the daemon is reachable. It runs no
   container (an image is third-party code on the runner; an earlier draft pulled
@@ -428,7 +436,7 @@ The Java **engine-service** binary is a separate release artifact with its own c
 
 Build or test the engine through `scripts/mvnw-leased.sh` (never a bare `./mvnw`/`mvn`) — one builder at a time; a concurrent `./mvnw` invocation against the same `service/target` corrupts jOOQ codegen mid-build (nexus-c00dw, see `scripts/lib/build-lease.sh`). The lease lives in the git common dir, so every worktree shares it, and a live holder is waited for rather than refused (`NX_BUILD_LEASE_WAIT`, nexus-g6xpa): one engine build or suite per box. `scripts/build-gate-jar.sh` caches the stamped jar on the exact `service/` content, so a fresh worktree with an unchanged tree gets a copy instead of a nine-minute rebuild. The Python suite reads the same lease at session start (nexus-pv93h): while a build holds it, `pytest` refuses the whole run with one line and exit 75 naming the holder, and `NX_BUILD_LEASE_WAIT=<seconds>` makes it wait instead; `NX_TEST_T2_SUBSTRATE=none` runs are never gated.
 
-  The suite takes a lease of its own, `suite`, under the same root (`tests/_suite_lease.py`), so two full runs on one box see each other. **It fails closed on contention**: a run that finds the lease held (or loses the race for it) exits 75, naming the holder, the lease directory and the recovery command (`rm -rf <lease dir>`, valid only when no pytest run is live). `NX_SUITE_LEASE_WAIT=<any non-zero>` queues behind a live holder for up to 30 minutes instead of refusing, and a lease directory with no readable pid (a run killed between its `mkdir` and its pid write) is reclaimed automatically once it is 60 seconds old, so a corpse cannot wedge the queue. **Fails closed is a claim about contention only**: an unwritable lease root still runs UNGUARDED, silently (`acquire` swallows it and hands back a no-op release), which is why CI's qwen job validates its lease root in a step of its own. `NX_SUITE_LEASE_UNGUARDED=1` (exactly `1`; `true`, `off` or a typo do not count) is the explicit opt-out for a HAND run; no workflow may set it, pinned by `tests/test_suite_lease_unguarded_lint.py`.
+  The suite takes a lease of its own, `suite`, under the same root (`tests/_suite_lease.py`), so two full runs on one box see each other. **It fails closed on contention**: a run that finds the lease held (or loses the race for it) exits 75, naming the holder, the lease directory and the recovery command (`rm -rf <lease dir>`, valid only when no pytest run is live). `NX_SUITE_LEASE_WAIT=<any non-zero>` queues behind a live holder for up to 30 minutes instead of refusing, and a lease directory whose pid file is missing, empty or garbage (a run killed between its `mkdir` and its pid write) is reclaimed automatically once it is 60 seconds old, so a corpse cannot wedge the queue. **A lease this user cannot READ (EACCES on the directory or the pid file) is HELD, never reclaimed**: it may be a live peer's, so the run exits 75 naming the path (`acquire` creates the directory and its files group/world-readable explicitly, whatever the umask, so peers can read each other's). Two gaps stay open: a pid write that fails after `mkdir`, and a maker stalled over 60 s between the two (`_reclaim_if_dead`'s docstring). **Fails closed is a claim about contention only**: an unwritable lease root still runs UNGUARDED, silently (`acquire` swallows it and hands back a no-op release), which is why CI's qwen job validates its lease root in a step of its own. `NX_SUITE_LEASE_UNGUARDED=1` (exactly `1`; `true`, `off` or a typo do not count) is the explicit opt-out for a HAND run; no workflow may set it, pinned by `tests/test_suite_lease_unguarded_lint.py`.
 
 - **hellmini is inside the release trust boundary (Sam, 2026-09-28, nexus-yd9po).** The mac-arm64 release legs (native build + PG bundle, in both `engine-service-release.yml` and `pg-bundle-cache-seed.yml`) build on hellmini, a self-hosted Mac mini runner — accepted as trusted infrastructure for release jobs, not merely "another CI box." That means: physical and network access to it are release-security-relevant (same footing as the GH-hosted runners' isolation, minus the ephemerality); and it PERSISTS STATE BETWEEN JOBS — the Maven `~/.m2` cache, `RUNNER_TOOL_CACHE` (GraalVM/uv installs via `actions/setup-*`), and the Homebrew install (flex/bison) all survive across runs, unlike a GH-hosted runner's throwaway VM. `workflow_dispatch`'s `mac_runner` input falls back to `macos-14` when hellmini is down (FileVault reboot waiting on KVM unlock). Since 2026-09-30 a second runner on the same box, `hellmini-ci` (user `ghci`), takes the Service CI Java job on owner pushes so that test code stays off the release runner's caches; the routing, the isolation evidence, the offline toggle and the fork-PR rules are in § Self-hosted runners and fork PRs, and `service-ci.yml`'s comments carry the mechanics.
 - **Artifact + trigger:** an `engine-service-vX.Y.Z` git tag fires `engine-service-release.yml`, which builds + cosign-signs the 3 native binaries (linux-amd64, linux-arm64, mac-arm64 — mac-arm64 now SMOKED, built on the hellmini self-hosted runner which has Docker via colima; nexus-yd9po closed the nexus-4xf5m no-Docker-on-GH-macOS gap for the default tag-push path, a `workflow_dispatch` run that falls back to `macos-14` when hellmini is offline is still unsmoked there; mac-amd64/Intel is not a supported target). It publishes **nothing to PyPI** and is **NOT gated by the luxe6 / RDR-155-P4a develop release boundary** (the workflow header says so explicitly). **The release is a DRAFT until every asset is attached** (nexus-cl14i, after v0.1.95 published PG bundles with no binary): a final `promote-release` job flips it only when both matrices succeeded and all 21 assets are present, so a tag is consumable roughly 35 to 65 minutes (v0.1.118 took 36, a single measurement) after push, never partially; a failed leg, mac-arm64 included, leaves a draft that `gh run rerun --failed` completes and promotes. So the engine can be refreshed in the cloud at any time, independent of the unreleasable-develop state.

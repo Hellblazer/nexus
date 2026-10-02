@@ -400,22 +400,119 @@ def test_a_live_holder_is_never_reclaimed_however_old_the_lease(lease_root: Path
     assert (lease / "pid").read_text().strip() == str(os.getpid())
 
 
-@pytest.mark.skipif(os.geteuid() == 0, reason="root reads every file, so an unreadable pid file cannot be built")
-def test_an_unreadable_pid_file_older_than_the_grace_is_reclaimed(lease_root: Path) -> None:
+# -- an UNREADABLE lease is HELD, never reclaimed (round-4 review M1) ---------------
+#
+# Round 4 reclaimed an unreadable pid file after the grace, as if it were a corpse.
+# A live holder whose lease a peer cannot read (a peer with umask 077: dir 0700, pid
+# 0600) lost its lease after 60 s while its suite kept running: two -n 12 suites on
+# one box, silently. Only a MISSING, EMPTY or GARBAGE pid file is a corpse.
+
+
+@pytest.fixture
+def live_holder_with_unreadable_pid(lease_root: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A lease whose pid names THIS (live) process, but whose pid file raises EACCES for the reader.
+
+    Built by making ``Path.read_text`` raise on that one file, so it runs as root too (root reads
+    through a chmod 000, which is why the real-chmod tests below skip there).
+    """
     lease = lease_root / _suite_lease.RESOURCE
     lease.mkdir(parents=True)
     pid = lease / "pid"
-    pid.write_text(f"{os.getpid()}\n")  # a LIVE pid we may not read: no holder is knowable from it
+    pid.write_text(f"{os.getpid()}\n")
+    os.utime(pid, (_T0, _T0))
+    os.utime(lease, (_T0, _T0))
+    real = Path.read_text
+
+    def read_text(self: Path, *a, **k):
+        if self == pid:
+            raise PermissionError(13, "Permission denied", str(self))
+        return real(self, *a, **k)
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+    return lease
+
+
+def test_a_live_holder_with_an_unreadable_pid_file_is_not_reclaimed_two_minutes_on(
+        lease_root: Path, live_holder_with_unreadable_pid: Path) -> None:
+    lease = live_holder_with_unreadable_pid
+    assert _suite_lease.acquire("thief", lease_root=lease_root, now=_clock(_T0 + 120)) is None
+    assert not [p for p in lease_root.iterdir() if ".stale." in p.name], "the lease was set aside"
+    assert lease.is_dir()
+
+
+def test_an_unreadable_pid_file_is_not_reclaimed_however_old_the_lease(
+        lease_root: Path, live_holder_with_unreadable_pid: Path) -> None:
+    assert _suite_lease.acquire("thief", lease_root=lease_root, now=_clock(_T0 + 30 * 86400)) is None
+
+
+def test_holder_reports_an_unreadable_lease_as_held_not_free(
+        lease_root: Path, live_holder_with_unreadable_pid: Path) -> None:
+    """The pre-check in conftest uses holder(): None there means "free", which would skip the 75 message."""
+    held = _suite_lease.holder(lease_root)
+    assert held is not None and "permission denied" in held
+
+
+def test_a_lease_that_cannot_be_taken_because_it_is_unreadable_exits_75_naming_the_path_and_remedy(
+        conftest_gate, monkeypatch: pytest.MonkeyPatch, lease_root: Path,
+        live_holder_with_unreadable_pid: Path) -> None:
+    monkeypatch.setattr(_suite_lease, "_lease_root", lambda: lease_root)
+    monkeypatch.setattr(_suite_lease, "acquire", _real_acquire)
+    with pytest.raises(pytest.exit.Exception) as err:
+        conftest_gate._take_suite_lease()
+    assert err.value.returncode == 75
+    path = str(lease_root / _suite_lease.RESOURCE)
+    assert path in err.value.msg and f"rm -rf {path}" in err.value.msg and "permission denied" in err.value.msg
+
+
+_real_acquire = _suite_lease.acquire
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads every file, so an unreadable pid file cannot be built")
+def test_a_pid_file_chmod_000_is_held_not_reclaimed_with_the_real_filesystem(lease_root: Path) -> None:
+    lease = lease_root / _suite_lease.RESOURCE
+    lease.mkdir(parents=True)
+    pid = lease / "pid"
+    pid.write_text(f"{os.getpid()}\n")
     os.utime(pid, (_T0, _T0))
     os.utime(lease, (_T0, _T0))
     pid.chmod(0o000)
     try:
-        release = _suite_lease.acquire("x", lease_root=lease_root, now=_clock(_T0 + 120))
-        assert release is not None
-        release()
+        assert _suite_lease.acquire("x", lease_root=lease_root, now=_clock(_T0 + 120)) is None
+        assert _suite_lease.holder(lease_root) is not None
     finally:
-        for stale in lease_root.glob(f"{_suite_lease.RESOURCE}.stale.*/pid"):
-            stale.chmod(0o600)
+        pid.chmod(0o600)
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root searches every directory, so an unreadable lease dir cannot be built")
+def test_a_lease_dir_chmod_000_is_held_not_reclaimed_with_the_real_filesystem(lease_root: Path) -> None:
+    lease = lease_root / _suite_lease.RESOURCE
+    lease.mkdir(parents=True)
+    (lease / "pid").write_text(f"{os.getpid()}\n")
+    os.utime(lease / "pid", (_T0, _T0))
+    os.utime(lease, (_T0, _T0))
+    lease.chmod(0o000)
+    try:
+        assert _suite_lease.acquire("x", lease_root=lease_root, now=_clock(_T0 + 120)) is None
+        assert _suite_lease.holder(lease_root) is not None
+    finally:
+        lease.chmod(0o700)
+
+
+def test_a_new_lease_is_readable_by_peers_whatever_the_umask(lease_root: Path) -> None:
+    """chmod after create, not umask: a umask-077 holder must stay readable so the next run sees it as live."""
+    old = os.umask(0o077)
+    try:
+        release = _suite_lease.acquire("private-umask", lease_root=lease_root)
+    finally:
+        os.umask(old)
+    assert release is not None
+    try:
+        lease = lease_root / _suite_lease.RESOURCE
+        assert (lease.stat().st_mode & 0o755) == 0o755, oct(lease.stat().st_mode)
+        for name in ("pid", "label"):
+            assert (lease / name).stat().st_mode & 0o644 == 0o644, (name, oct((lease / name).stat().st_mode))
+    finally:
+        release()
 
 
 def test_a_waiting_acquire_succeeds_once_a_pidless_lease_ages_past_the_grace(
