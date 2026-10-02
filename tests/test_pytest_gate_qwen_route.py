@@ -26,6 +26,7 @@ from __future__ import annotations
 import itertools
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 from pathlib import Path
@@ -268,9 +269,10 @@ def test_the_qwen_job_is_armed_the_way_the_shards_are() -> None:
     jar = next(i for i, r in runs if "scripts/build-gate-jar.sh" in r)
     suite = next(i for i, r in runs if "pytest tests/" in r)
     floor = next(i for i, r in runs if "check_lint_leg_non_vacuity.py" in r)
-    assert jar < suite < floor, "build the jar, run the suite, then the executed-count floor"
+    # the jar build and the suite share ONE step (the box lock cannot span steps, see the box-lock tests below)
+    assert jar == suite < floor, "build the jar and run the suite in one locked step, then the executed-count floor"
     suite_run = runs[suite][1]
-    assert "-n 12" in suite_run and "--splits" not in suite_run
+    assert "-n 8" in suite_run and "-n 12" not in suite_run and "--splits" not in suite_run
     assert "set -euo pipefail" in suite_run and "| tee suite-output.txt" in suite_run
     assert "suite-output.txt" in runs[floor][1] and re.search(r"--floor\s+\d{5}", runs[floor][1])
 
@@ -867,3 +869,195 @@ def test_every_route_by_result_combination_has_exactly_the_documented_outcome() 
         else:
             expected = test in ("success", "skipped") and qwen in ("success", "skipped")
         assert (proc.returncode == 0) == expected, (code, ci_runner, test, qwen, proc.stdout)
+
+
+# ── the box lock: ONE flock across the jar build and the suite (host owner, 2026-10-01) ─────────────
+#
+# The WSL VM wedged twice when a suite overlapped a Maven gate-jar build, which holds a different lease.
+# The host convention is `flock <lease root>/box.lock bash -c '<jar build> && <pytest -n 8>'`; the job
+# does the same in ONE step, because a lock cannot span steps.
+
+_BOX_STEP = "Build the stamped service jar and run the full suite"
+_HEAVY = re.compile(r"build-gate-jar\.sh|\bpytest\b|\bmvnw?\b|mvnw-leased")
+_FLOCK_CALL = re.compile(
+    r"""^\s*flock\s+(?P<opts>.*?)\s+"\$lock"\s+bash -c '(?P<inner>[^']*)'(?:\s*\|\|\s*rc=\$\?)?\s*$""", re.MULTILINE)
+
+
+def _code(run: str) -> str:
+    """The commands of a step: comment lines and echoed messages (which may NAME a script) are dropped."""
+    return "\n".join(ln for ln in str(run).splitlines() if not ln.strip().startswith(("#", "echo ")))
+
+
+def _box_run() -> str:
+    return str(_qwen_step(_BOX_STEP)["run"])
+
+
+def _flock_call(run: str) -> re.Match[str]:
+    found = list(_FLOCK_CALL.finditer(run))
+    assert len(found) == 1, "the step must take the box lock with exactly one flock invocation"
+    return found[0]
+
+
+def test_the_box_lock_is_one_bounded_flock_on_box_lock_under_the_lease_root() -> None:
+    run, job = _box_run(), _doc()["jobs"]["test-qwen"]
+    assert 'lock="$QWEN_SUITE_LEASE_ROOT/box.lock"' in run, "derived from the same root the suite lease uses"
+    opts = _flock_call(run).group("opts")
+    assert re.search(r'(^|\s)-w\s+"\$wait_s"', opts), f"a bounded wait (flock -w), got {opts!r}"
+    assert 'wait_s="$QWEN_BOX_LOCK_WAIT_SECONDS"' in run
+    wait = int(job["env"]["QWEN_BOX_LOCK_WAIT_SECONDS"])
+    # the loud failure must come before GitHub's silent timeout, with room left for a cold run
+    assert 0 < wait and wait + 20 * 60 <= job["timeout-minutes"] * 60, (wait, job["timeout-minutes"])
+
+
+def test_the_jar_build_and_the_suite_run_inside_that_one_lock_in_that_order_at_n8() -> None:
+    run = _box_run()
+    m = _flock_call(run)
+    inner = m.group("inner")
+    assert inner.index("scripts/build-gate-jar.sh") < inner.index("uv run pytest tests/")
+    assert "set -euo pipefail" in inner and "| tee suite-output.txt" in inner
+    assert "-n 8" in inner and "-n 12" not in inner
+    outside = _code(run[:m.start("inner")] + run[m.end("inner"):])
+    assert not _HEAVY.search(outside), "nothing heavy may sit in the step outside the locked bash -c"
+
+
+def test_no_heavy_step_runs_outside_the_locked_step() -> None:
+    steps = _doc()["jobs"]["test-qwen"]["steps"]
+    box = _qwen_step(_BOX_STEP)
+    for step in steps:
+        if step.get("name") == box["name"]:
+            continue
+        assert not _HEAVY.search(_code(step.get("run", ""))), (step.get("name"), "heavy work outside the box lock")
+    assert sum(1 for s in steps if "scripts/build-gate-jar.sh" in _code(s.get("run", ""))) == 1
+
+
+def test_no_qwen_step_pins_twelve_workers() -> None:
+    for step in _doc()["jobs"]["test-qwen"]["steps"]:
+        assert not re.search(r"-n\s*12\b", str(step.get("run", ""))), step.get("name")
+        assert "-n 12" not in str(step.get("name", "")), step.get("name")
+
+
+def test_the_toolchain_preflight_requires_flock() -> None:
+    run = str(_qwen_step("Toolchain preflight")["run"])
+    assert re.search(r"for tool in [^;]*\bflock\b", run)
+
+
+def _box_env(tmp_path: Path, *, flock: str | None, uv_rc: int = 0, jar_rc: int = 0) -> tuple[Path, dict[str, str]]:
+    """A work dir with a fake jar script and a PATH holding only bash, tee, a fake uv and (optionally) a flock."""
+    work, bin_dir = tmp_path / "work", tmp_path / "bin"
+    (work / "scripts").mkdir(parents=True)
+    bin_dir.mkdir()
+    bash = shutil.which("bash")
+    assert bash
+    for tool in ("bash", "tee"):
+        real = shutil.which(tool)
+        assert real
+        (bin_dir / tool).symlink_to(real)
+    log = tmp_path / "calls.log"
+    jar = work / "scripts" / "build-gate-jar.sh"
+    jar.write_text(f'#!{bash}\necho jar >> "$FAKE_LOG"\nexit {jar_rc}\n')
+    uv = bin_dir / "uv"
+    uv.write_text(f'#!{bash}\necho "uv $*" >> "$FAKE_LOG"\necho "1 passed"\nexit {uv_rc}\n')
+    jar.chmod(0o755)
+    uv.chmod(0o755)
+    if flock == "fake":
+        # mirrors util-linux: `flock -n LOCK CMD` probes, `flock -w N -E C LOCK CMD` waits and exits C on timeout
+        fake = bin_dir / "flock"
+        fake.write_text(f'''#!{bash}
+echo "flock $*" >> "$FAKE_LOG"
+if [ "$1" = "-n" ]; then [ -z "${{FAKE_HELD:-}}" ]; exit; fi
+ecode="$4"; shift 5
+if [ -n "${{FAKE_TIMEOUT:-}}" ]; then exit "$ecode"; fi
+exec "$@"
+''')
+        fake.chmod(0o755)
+    elif flock == "real":
+        real = shutil.which("flock")
+        assert real
+        (bin_dir / "flock").symlink_to(real)
+    env = {"PATH": str(bin_dir), "FAKE_LOG": str(log), "QWEN_SUITE_LEASE_ROOT": str(tmp_path / "lease"),
+           "QWEN_BOX_LOCK_WAIT_SECONDS": _doc()["jobs"]["test-qwen"]["env"]["QWEN_BOX_LOCK_WAIT_SECONDS"]}
+    return work, env
+
+
+def _run_box(work: Path, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    bash = shutil.which("bash")
+    assert bash
+    return subprocess.run([bash, "-eo", "pipefail", "-c", _box_run()], cwd=work, env=env, capture_output=True, text=True)
+
+
+def _calls(env: dict[str, str]) -> list[str]:
+    log = Path(env["FAKE_LOG"])
+    return log.read_text().splitlines() if log.exists() else []
+
+
+def test_a_free_box_lock_runs_the_jar_build_then_the_suite_at_n8_inside_one_flock(tmp_path: Path) -> None:
+    work, env = _box_env(tmp_path, flock="fake")
+    proc = _run_box(work, env)
+    lock = f"{tmp_path / 'lease'}/box.lock"
+    assert proc.returncode == 0, (proc.stdout, proc.stderr)
+    assert f"box lock {lock} is free" in proc.stdout
+    calls = _calls(env)
+    wait = env["QWEN_BOX_LOCK_WAIT_SECONDS"]
+    assert calls[0] == f"flock -n {lock} true"
+    assert calls[1].startswith(f"flock -w {wait} -E 200 {lock} bash -c ")
+    assert calls[2:] == ["jar", "uv run pytest tests/ -q -rs -n 8 --durations=25"], calls
+    assert (work / "suite-output.txt").read_text() == "1 passed\n"
+
+
+def test_a_held_box_lock_says_it_is_waiting_and_for_how_long(tmp_path: Path) -> None:
+    work, env = _box_env(tmp_path, flock="fake")
+    proc = _run_box(work, {**env, "FAKE_HELD": "1"})
+    wait = env["QWEN_BOX_LOCK_WAIT_SECONDS"]
+    assert proc.returncode == 0
+    assert f"box lock {tmp_path / 'lease'}/box.lock is held" in proc.stdout and f"waiting up to {wait}s" in proc.stdout
+
+
+def test_a_box_lock_wait_that_runs_out_fails_loud_naming_the_lock_and_runs_nothing(tmp_path: Path) -> None:
+    work, env = _box_env(tmp_path, flock="fake")
+    proc = _run_box(work, {**env, "FAKE_HELD": "1", "FAKE_TIMEOUT": "1"})
+    out = proc.stdout + proc.stderr
+    wait = env["QWEN_BOX_LOCK_WAIT_SECONDS"]
+    assert proc.returncode == 1 and "::error::" in out
+    assert f"{tmp_path / 'lease'}/box.lock" in out.split("::error::", 1)[1] and f"within {wait}s" in out
+    assert not any(c == "jar" or c.startswith("uv ") for c in _calls(env)), "nothing may run without the lock"
+
+
+def test_a_missing_flock_fails_closed_before_anything_runs(tmp_path: Path) -> None:
+    work, env = _box_env(tmp_path, flock=None)
+    proc = _run_box(work, env)
+    assert proc.returncode == 1 and "flock is not installed" in proc.stdout
+    assert _calls(env) == []
+
+
+def test_a_red_suite_or_a_failed_jar_build_inside_the_lock_fails_the_step(tmp_path: Path) -> None:
+    work, env = _box_env(tmp_path / "suite", flock="fake", uv_rc=3)
+    assert _run_box(work, env).returncode == 3, "tee must not mask the suite's status"
+    work, env = _box_env(tmp_path / "jar", flock="fake", jar_rc=1)
+    proc = _run_box(work, env)
+    assert proc.returncode == 1 and not any(c.startswith("uv ") for c in _calls(env)), "no suite after a failed jar build"
+
+
+@pytest.mark.skipif(shutil.which("flock") is None,
+                    reason="util-linux flock is not installed here (macOS); the runner and Linux CI have it")
+def test_the_real_flock_times_out_with_exit_200_on_a_lock_another_process_holds(tmp_path: Path) -> None:
+    import fcntl
+
+    work, env = _box_env(tmp_path, flock="real")
+    lease = tmp_path / "lease"
+    lease.mkdir()
+    with open(lease / "box.lock", "w") as held:
+        fcntl.flock(held, fcntl.LOCK_EX)
+        proc = _run_box(work, {**env, "QWEN_BOX_LOCK_WAIT_SECONDS": "1"})
+    out = proc.stdout + proc.stderr
+    assert proc.returncode == 1 and "::error::" in out and "within 1s" in out and "is held" in out
+    assert _calls(env) == [], "the jar build and the suite must not start without the lock"
+
+
+def test_the_docs_state_n8_and_the_box_lock_hand_run_convention_and_no_stale_n12() -> None:
+    hand_run = "flock /var/lib/nx-suite-lease/box.lock bash -c 'uv sync -q && scripts/build-gate-jar.sh && uv run pytest -n 8 -q'"
+    for name in ("AGENTS.md", "docs/contributing.md"):
+        text = (_ROOT / name).read_text()
+        assert hand_run in text, name
+        assert "box.lock" in text and "hellmini" in text and "-n 8" in text, name
+        for stale in ("one `-n 12` job", "xdist -n 12", "pytest tests/ -n 12", "under `-n 12`"):
+            assert stale not in text, (name, stale)

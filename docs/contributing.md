@@ -233,7 +233,10 @@ The enable sequence, in order; stop at the first red:
    `sudo install -d -o root -g nx-suite -m 2775 /var/lib/nx-suite-lease`),
    restart the runner service so `ghci` has the group, and have `nxtest` export
    `NX_BUILD_LEASE_ROOT=/var/lib/nx-suite-lease NX_SUITE_LEASE_WAIT=1` (its
-   `.bashrc`, which non-interactive ssh reads too). Apply the `/etc/wsl.conf` fix
+   `.bashrc`, which non-interactive ssh reads too), and take the box lock for
+   every hand run (`flock /var/lib/nx-suite-lease/box.lock bash -c '...'`, below).
+   The host needs `flock` (util-linux); the job's toolchain preflight and its
+   suite step both fail closed without it. Apply the `/etc/wsl.conf` fix
    (WSL interop and the `/mnt` automount off, `AGENTS.md` § Self-hosted runners
    and fork PRs).
 3. **Run the probe as `ghci` and read it green.** A `workflow_dispatch` is offered
@@ -269,9 +272,11 @@ First cold run:
 1. The job lands on `qwen-linux` (runner name in the log header); the consistency,
    lease and toolchain steps are green as `ghci`.
 2. bge and docling prime and `ci_warm_docling.py` pass.
-3. `build-gate-jar.sh` is a cache hit or a roughly 9 minute build; the jar is stamped.
-4. The suite step reports 20000 or more passed and none failed, in 10 to 15 minutes;
-   the floor step is green.
+3. The box lock is taken (the log says `box lock .../box.lock is free` or `is held ... waiting`), and
+   `build-gate-jar.sh` inside it is a cache hit or a roughly 9 minute build; the jar is stamped.
+4. The suite, in the same step and under the same lock at `-n 8`, reports 20000 or more passed and none
+   failed (the `-n 12` figure of 10 minutes is not yet measured at 8, expect somewhat longer); the floor
+   step is green.
 5. The six hosted shards and `service-jar` show skipped, and `pytest-gate` passes.
 6. The board has `queued`, `in_progress` and `completed` posts for
    `pytest (qwen-linux full suite)` with an unmangled name, and
@@ -285,9 +290,11 @@ Then, before the route is called settled:
    mid-suite, then check on the host for orphan Postgres and `nexus-service`
    processes, containers on the shared docker daemon, and shared-memory
    segments (`ipcs -m`). The next run's orphan sweep should clear what it left.
-10. One overlap with a hand run: start a full suite as `nxtest` (with the two
-    exported variables), push, and see the CI job queue behind the lease and
-    start when the hand run ends, with no OOM on the distro.
+10. One overlap with a hand run: start a hand run as `nxtest` under the box lock
+    (`flock /var/lib/nx-suite-lease/box.lock bash -c 'uv sync -q && scripts/build-gate-jar.sh && uv run pytest -n 8 -q'`),
+    push, and see the CI job log that the box lock is held, wait, and start when the hand
+    run ends, with no OOM on the distro. Then the reverse: a hand run started while the CI job
+    holds the lock queues behind it.
 11. The skip-reason diff (the `TODO(qwen-floor)` in `ci.yml`): diff the `-rs`
     skip reasons in `suite-output.txt` against a hosted run of the same tree. The
     measured gap is about 2k tests (25,705 passed here against about 27.7k from
@@ -299,9 +306,26 @@ Then, before the route is called settled:
     jobs".
 
 A green run does not show the overlap or flake behaviour (that takes about ten
-runs), signal-timing tests under `-n 12` while the host's inference is loaded,
+runs), signal-timing tests under `-n 8` while the host's inference is loaded,
 or the `GITHUB_ACTIONS` CI-only skip branches (`NX_T2_SUBSTRATE_EXPECTED=1`
 disarms them, so only their fail-loud twins run).
+
+#### Hand runs on qwentescence
+
+A hand run as `nxtest` takes the same box lock the CI job does, across the jar
+build and the suite, so a hand run and CI cannot overlap at any stage (the WSL VM
+wedged twice on 2026-10-01 when a suite overlapped a Maven gate-jar build; the
+suite lease alone does not cover the build):
+
+```bash
+flock /var/lib/nx-suite-lease/box.lock bash -c 'uv sync -q && scripts/build-gate-jar.sh && uv run pytest -n 8 -q'
+```
+
+`-n 8`, not 12 (about 2.5 GB per worker on a 40 GB VM shared with a production
+llama-server). No Maven or engine suites on qwentescence: the Java engine suites
+(`scripts/mvnw-leased.sh`, `service/` tests) run on hellmini. The CI job waits up
+to 30 minutes for the lock and then fails naming it; a hand run that must not
+wait forever can add `flock -w <seconds>`.
 
 ## License
 

@@ -221,7 +221,7 @@ jobs:
         # WHERE THE PYTEST SUITE RUNS (Sam, 2026-10-01, session nexus_654).
         # THE DEFAULT IS THE HOSTED SHARDS. The qwen route is OPT-IN (Sam,
         # 2026-10-01): an OWNER PUSH to develop runs the whole suite as ONE
-        # `-n 12` job on the self-hosted `qwen-linux` runner (job `test-qwen`
+        # `-n 8` job on the self-hosted `qwen-linux` runner (job `test-qwen`
         # below), and the six hosted shards (`test`, with `service-jar`) are
         # skipped, ONLY when the repository variable QWEN_CI_PUSH_RUNNER is
         # exactly `qwen-linux`. Unset, empty, a typo, a different case, a
@@ -860,8 +860,8 @@ jobs:
     # prevented. The probe does not bound docker.
     #
     # THE SHARED SUITE LEASE. A hand-run suite by the `nxtest` user overlapping
-    # this job would put two `-n 12` runs (about 60 GB) on a 40 GB WSL VM that
-    # hosts the live service, so the two serialize on ONE lease. The suite lease
+    # this job would put two full suites on a 40 GB WSL VM that hosts the live
+    # service, so the two serialize on ONE lease. The suite lease
     # (tests/_suite_lease.py) and the build lease (scripts/lib/build-lease.sh)
     # both live under NX_BUILD_LEASE_ROOT, which defaults to the checkout's git
     # dir, and a CI checkout and nxtest's clone have different ones. The job
@@ -877,6 +877,26 @@ jobs:
     # variables (its .bashrc). Both ends are host state this file cannot
     # enforce; the lease step proves ghci's end every run.
     #
+    # THE BOX LOCK (host owner's request, 2026-10-01). The suite lease covers
+    # pytest only. The WSL VM wedged twice on 2026-10-01 when one `-n 12` suite
+    # overlapped a Maven gate-jar build (which holds the separate `service`
+    # build lease, so the two never queued on each other). The host convention
+    # is ONE box-wide lock held across the whole heavy stretch of a run:
+    # `flock /var/lib/nx-suite-lease/box.lock bash -c '<jar build> && <pytest>'`.
+    # The job's last two heavy steps are therefore ONE step that takes
+    # `$QWEN_SUITE_LEASE_ROOT/box.lock` with `flock -w` (a bounded wait, a log
+    # line when it has to wait, a loud failure naming the lock when the wait runs
+    # out) from before scripts/build-gate-jar.sh through the end of pytest, so CI
+    # and a hand run cannot overlap at any stage. The lock file is cross-user
+    # because the directory is group nx-suite 2775 and flock opens it read-only.
+    # The suite lease stays: it still serializes a pytest-only hand run that
+    # does not take the box lock. No flock on the host is a host defect and
+    # fails closed (the toolchain preflight and the step both refuse). Nothing
+    # else heavy runs outside the lock: the setup steps before it (uv sync, the
+    # model primes, the docling warm-up) are downloads and a venv, not a jar
+    # build or a suite. Maven and engine suites do NOT run on this box at all
+    # (hellmini takes them).
+    #
     # LABELS. `[self-hosted, Linux, X64, qwen-linux]` is the full label set the
     # runner carries (read from the repository's runner list on 2026-10-01):
     # `qwen-linux` is its own custom label and no other runner has it, so the job
@@ -884,15 +904,17 @@ jobs:
     # `qwen-linux`; `hellmini` and `hellmini-ci` carry neither label. runs-on is a
     # LITERAL, never an expression over a variable.
     #
-    # WHAT IT RUNS. `uv run pytest tests/ -n 12`: the same default selection the
+    # WHAT IT RUNS. `uv run pytest tests/ -n 8`: the same default selection the
     # hosted shards run (addopts deselect integration, slow and lint), without
     # pytest-split, so `.test_durations.json` and the shard balance are untouched
-    # on the hosted path. -n 12 because each xdist worker boots its own Postgres
-    # substrate and needs about 2.5 GB on Linux: 16 CPUs and 40 GB fit 12.
-    # Measured 2026-10-01 by hand as the `nxtest` user on develop d572ba7b0:
+    # on the hosted path. -n 8, not 12, at the host owner's request (2026-10-01):
+    # each xdist worker boots its own Postgres substrate and needs about 2.5 GB
+    # on Linux, and the 40 GB WSL VM is shared with a production llama-server, so
+    # 12 workers left too little headroom (two wedges that day). Measured
+    # 2026-10-01 by hand as the `nxtest` user on develop d572ba7b0 at -n 12:
     # 25,705 passed and 2 failed (the /tmp/nexus-e2e-locks directory, since fixed
     # host-side) in 9m50s; the hosted shards take 10.9 to 13.5 min each in
-    # parallel.
+    # parallel. -n 8 is not yet measured on this job and will run longer.
     #
     # TOOLCHAIN. The runner's own, no setup-* action: uv at /usr/local/bin/uv
     # (UV_PYTHON pins 3.12, which uv fetches once and keeps in ghci's home),
@@ -907,7 +929,7 @@ jobs:
     # No ripgrep: nothing in tests/, src/ or scripts/ calls rg since nexus-06aei,
     # so the hosted `Install ripgrep` step is vestigial.
     #
-    # THE JAR. scripts/build-gate-jar.sh builds the stamped shaded jar, or copies
+    # THE JAR. (Runs inside the box lock, see above.) scripts/build-gate-jar.sh builds the stamped shaded jar, or copies
     # it from the content-keyed cache kept in this checkout's common git dir (the
     # runner's checkout persists, its .git included), then NX_T2_SUBSTRATE_EXPECTED
     # arms the fail-loud backstop exactly as on the shards: an absent or stale jar
@@ -922,14 +944,17 @@ jobs:
     # qwen route and to have been skipped on the hosted route; a skipped,
     # cancelled or absent result on the qwen route fails the gate.
     #
-    # TIMEOUT. 45 minutes. A warm run is about 12 to 15 min (suite 10 min, setup
-    # a few); a cold one adds the 9-minute jar build, the Maven and uv downloads
-    # and the model primes. Revisit after about 10 develop runs.
+    # TIMEOUT. 75 minutes: the box-lock wait (QWEN_BOX_LOCK_WAIT_SECONDS, 30
+    # minutes, so the job fails loudly naming the lock before GitHub cancels it
+    # silently) plus a run that, at -n 8, is estimated at 12 to 18 min warm (the
+    # -n 12 suite took 10; -n 8 is unmeasured) and adds the 9-minute jar build,
+    # the Maven and uv downloads and the model primes cold. Revisit after about
+    # 10 develop runs.
     name: pytest (qwen-linux full suite)
     needs: [changes]
     if: success() && needs.changes.outputs.code == 'true' && needs.changes.outputs.ci_runner == 'qwen-linux'
     runs-on: [self-hosted, Linux, X64, qwen-linux]
-    timeout-minutes: 45
+    timeout-minutes: 75
     permissions:
       contents: read
     env:
@@ -942,6 +967,11 @@ jobs:
       # THE SHARED SUITE LEASE above). The lease step validates it and then
       # exports NX_BUILD_LEASE_ROOT and NX_SUITE_LEASE_WAIT for the later steps.
       QWEN_SUITE_LEASE_ROOT: ${{ vars.QWEN_SUITE_LEASE_ROOT || '/var/lib/nx-suite-lease' }}
+      # How long the jar-build-plus-suite step waits for the box lock
+      # ($QWEN_SUITE_LEASE_ROOT/box.lock, see THE BOX LOCK above) before it
+      # fails naming the lock. Kept well under timeout-minutes so the failure is
+      # ours and loud, not GitHub's silent cancel.
+      QWEN_BOX_LOCK_WAIT_SECONDS: "1800"
     steps:
       - name: Windows-side preflight (fails closed on every run, before the checkout)
         shell: bash
@@ -1088,7 +1118,7 @@ jobs:
           esac
           mkdir -p "$TMPDIR"
           missing=""
-          for tool in uv java git curl tar shasum docker; do
+          for tool in uv java git curl tar shasum docker flock; do
             command -v "$tool" >/dev/null 2>&1 || missing="$missing $tool"
           done
           if [ -n "$missing" ]; then
@@ -1134,19 +1164,43 @@ jobs:
       - name: Verify docling extracts from the mirrored models
         run: uv run python scripts/ci_warm_docling.py
 
-      - name: Build (or restore) the stamped service jar
-        # Cached on the exact service/ content, so a run whose service/ tree is
-        # unchanged since a previous build copies the jar instead of rebuilding.
-        run: scripts/build-gate-jar.sh
-
-      - name: Run the full suite (-n 12)
-        # `set -euo pipefail` is load-bearing: without it the step exits with
-        # tee's status and a red suite reports green.
+      - name: Build the stamped service jar and run the full suite under the box lock (-n 8)
+        # ONE step, ONE flock, on purpose (see THE BOX LOCK in the job comment):
+        # the jar build and pytest both run inside a single `flock -w ... box.lock
+        # bash -c '...'`, so nothing heavy runs outside the lock and a hand run
+        # that takes the same lock cannot overlap either stage. Do not split this
+        # back into two steps: a lock cannot span steps.
+        shell: bash
         run: |
-          set -euo pipefail
-          # -rs puts every skip reason in the log, so the first runs can be
-          # diffed against a hosted run of the same tree (see the floor step).
-          uv run pytest tests/ -q -rs -n 12 --durations=25 | tee suite-output.txt
+          set -uo pipefail
+          # Fail closed: without flock the run would be unserialized, which is
+          # the overlap that wedged the VM twice on 2026-10-01.
+          if ! command -v flock >/dev/null 2>&1; then
+            echo "::error::flock is not installed on this runner: the box lock cannot be taken, so the jar build and the suite would run unserialized against a hand run. Host prerequisite (util-linux)."
+            exit 1
+          fi
+          lock="$QWEN_SUITE_LEASE_ROOT/box.lock"
+          wait_s="$QWEN_BOX_LOCK_WAIT_SECONDS"
+          # A plain probe, only to say in the log whether this run will queue.
+          if flock -n "$lock" true 2>/dev/null; then
+            echo "box lock $lock is free; taking it for the jar build and the suite"
+          else
+            echo "box lock $lock is held (a hand run or another job); waiting up to ${wait_s}s for it"
+          fi
+          # Exit 200 is flock's own timeout code here (-E), chosen because neither
+          # pytest (0 to 5) nor the jar build uses it. `set -euo pipefail` inside
+          # the bash -c is load-bearing: without it the suite's status is tee's
+          # and a red suite reports green. -rs puts every skip reason in the log
+          # (see the floor step). The jar is cached on the exact service/ content.
+          # `|| rc=$?` keeps the runner's `bash -e` from exiting on the 200 before
+          # the message below can name the lock.
+          rc=0
+          flock -w "$wait_s" -E 200 "$lock" bash -c 'set -euo pipefail; scripts/build-gate-jar.sh; uv run pytest tests/ -q -rs -n 8 --durations=25 | tee suite-output.txt' || rc=$?
+          if [ "$rc" -eq 200 ]; then
+            echo "::error::could not take the box lock $lock within ${wait_s}s: a hand run or another job still holds it. Nothing was built or run. Re-run once the box is free (the lock is released when its holder's command ends)."
+            exit 1
+          fi
+          exit "$rc"
 
       - name: Executed-count floor (a run that skipped its corpus must not report green)
         # TODO(qwen-floor): 20000 is deliberately loose. Measured by hand on
