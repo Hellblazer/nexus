@@ -26,6 +26,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
+import java.time.temporal.ChronoUnit;
 import java.util.List;
 import java.util.Map;
 
@@ -322,8 +323,11 @@ class QuarantineRestoreIntegrationTest extends AtomicWriteTestBase {
         String t = newTenant();
         String c = col("docs");
         String h = quarantined(t, c, "stamps").get(0);
-        // Make the chunk look old: written, quarantined and left there for a long time.
-        OffsetDateTime old = OffsetDateTime.now().minusDays(90);
+        // Make the chunk look old: written, quarantined and left there for a long time. Truncated to microseconds,
+        // the precision timestamptz stores: Linux's clock carries nanoseconds, so an untruncated value comes back
+        // rounded and the exact created_at comparison below fails on every Linux run (never on macOS, whose clock
+        // ticks in microseconds).
+        OffsetDateTime old = OffsetDateTime.now().minusDays(90).truncatedTo(ChronoUnit.MICROS);
         OffsetDateTime movedAt = OffsetDateTime.now().minusDays(10);
         try (Connection su = pg.createConnection("")) {
             DSL.using(su, SQLDialect.POSTGRES).update(CHUNKS)
