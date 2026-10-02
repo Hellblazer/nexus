@@ -1056,8 +1056,11 @@ grown.
   `docs/operations/engine-reaper.md` § Known limits states it for operators.
 - **Diagnosis**: `nx catalog show` reports a clean manifest while raw search
   returns two versions of one title — same signature as the original
-  filing. A `catalog doctor` check for "title with more than one live
-  chunk" is Phase 4 Step 14, below.
+  filing. The `catalog doctor` check for it is Phase 4 Step 14, below: as
+  built it is `nx catalog doctor --visible-outside-manifest`, which probes
+  census-superseded chunks (not "title with more than one live chunk", which a
+  split note satisfies legitimately), for `knowledge__` collections, through
+  `get` only.
 - **Recovery**: over-retention is recoverable by a later reaper pass.
   Over-deletion by the reaper is now recoverable for the 14 day quarantine, because the reaper
   moves and does not delete (Step 9): `nx t3 quarantine restore` (`nexus-wbfpw.49`) moves the chunk
@@ -1528,11 +1531,42 @@ quarantining reaper with its floor and census refusals and its defaults).
 
 #### Step 13: Add `superseded: [...]` to the `store_put` result (Gap 7)
 
-#### Step 14: Ship a `catalog doctor` check for "title with more than one live chunk" — the divergence signature named under Failure Modes, and the one thing that currently detects nothing
+#### Step 14: Ship a `catalog doctor` check for census-superseded chunks the normal reader still returns — the divergence signature named under Failure Modes (as built: `nx catalog doctor --visible-outside-manifest`, `nexus-wbfpw.26`)
 
 Read narrowly: a split note legitimately has several live chunks, so the
-check flags a chunk the census classes as superseded that raw `get()` can
-still return.
+check flags a chunk the census classes as superseded that the normal reader
+can still return. As built (`nexus-wbfpw.26`):
+
+- **Scope: `knowledge__` collections only.** The signature was filed against
+  re-put notes, which live in `knowledge__`. `docs__`, `code__` and `rdr__`
+  chunks sit under the same `live(c)` predicate and the same census bucket, so
+  widening is a prefix-list change plus its tests (the census costs p50 23 ms).
+  It was not widened: those censuses were not measured as a set, and a large
+  no-owner bucket makes a collection's census cost total/300 calls.
+- **Reader: `get` only, never the physical one.** The probe is a plain
+  `get(ids=...)` of at most 300 chashes per call, filtered by `live(c)`; it never
+  passes `include_non_live`. There is no search probe. A search probe would query
+  with the superseded chunk's text, and the only read of a non-live chunk,
+  `include_non_live`, returns ids and metadata and never content, by engine design
+  (`VectorHandler` refuses `documents` with it; a substrate test pins that
+  `get(include_non_live=True)` returns no documents for a stranded chunk). So a
+  drift in the search-path functions alone, which also call `chunk_live_owners`
+  (`vectors-019`), is not caught here; the engine's own tests cover that path.
+- **Budgets and verdicts.** At most 5,000 chunks and a 120 s budget checked
+  between calls (one call can run to the 120 s HTTP timeout, so a run can take
+  about 240 s); each census page is probed as it lands, so a stop mid-paging still
+  probes what was listed. A run that probes nothing before a budget stop is
+  INCONCLUSIVE and exits 1. With the superseded bucket empty everywhere it reads
+  "nothing to probe", exits 0, prints no PASS word and carries `vacuous: true` in
+  `--json`: the steady state once the reaper has drained the bucket, and a run
+  that could not have detected a regression. Not applicable (exit 0) with no
+  `knowledge__` collection or an engine without the census route.
+- **Operator-pull canary.** Not wired into `nx doctor`, health, CI or the release
+  sandbox: it is heavy and near-vacuous on a healthy box. The one non-vacuous use
+  is a single post-deploy run at D+0 or D+1 (`nexus-wbfpw.54`), from a
+  cloud-mode box, asserting `checked >= 1`: production holds census-superseded
+  `knowledge__` chunks until the reaper moves them at D+30, so that run is the only
+  proof on real data that `live(c)` hides them through the public edge.
 
 ### Day 2 Operations
 
@@ -1874,3 +1908,9 @@ To be completed at gate (Layer 3 AI critique).
   `mcp_infra.py` pointers in Gap 3, Gap 4 and Migration order item 4 are re-pointed to the
   current lines, MVV (b) names the test that asserts the reaper's tag, and the Problem
   Statement gains an as-built note that the `bb6n2` store_hook reap is gone.
+- 2026-10-02: Step 14 and the Failure Modes Diagnosis bullet amended to the check as built
+  (bead `nexus-wbfpw.26`, round 2; text only, no status change). The check is
+  `nx catalog doctor --visible-outside-manifest`: census-superseded chunks, `knowledge__`
+  only, `get` reader only (no search probe, because the engine never returns text for a
+  non-live chunk), bounded by a row and a time budget, operator-pull with one post-deploy run
+  in `nexus-wbfpw.54`, and a vacuous run says so instead of passing.
