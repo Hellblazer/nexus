@@ -1447,6 +1447,9 @@ class QuarantineRestoreIntegrationTest extends AtomicWriteTestBase {
                 DSL.function("hashtext", SQLDataType.INTEGER, DSL.val("indexrun:" + t + ":" + doc)))).execute();
             var call = pool.submit(() -> vectors.quarantineRestore(t, c, quarantineOf(c), List.of(h), ACTOR, false));
             awaitAdvisoryLockWaiter();
+            // The detector aborts whichever waiter's 1 s deadlock timer fires first. Let the restore be the clear
+            // first waiter (0.3 s ahead, far outside scheduler jitter) before the other session starts waiting.
+            Thread.sleep(300);
             var rowWanted = pool.submit(() -> hctx.deleteFrom(CHUNKS)
                 .where(CHUNKS.TENANT_ID.eq(t).and(CHUNKS.COLLECTION.eq(quarantineOf(c)))
                        .and(CHUNKS.CHASH.eq(Chash.fromHex(h).toBytes()))).execute());
