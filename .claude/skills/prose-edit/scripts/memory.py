@@ -13,7 +13,7 @@ Usage (all commands run inside the repo, from any subdirectory or worktree):
   memory.py genre-for TARGET [--site-layer FILE]
   memory.py add-entry --level user|repo|doc [--path P]
                       (--key K --value V [--list] | --from-stdin)
-  memory.py reject TARGET (--old S --new S | --from-stdin)
+  memory.py reject TARGET (--old S --new S [--reason R] | --from-stdin)
   memory.py entries --level user|repo|doc [--path P]
                     [--remove KEY | --remove-item KEY=VALUE]
   memory.py rejections TARGET [--remove N]
@@ -56,7 +56,7 @@ PROSE_EDIT_PROJECT_PREFIX (tests use it so they never touch the live projects):
 style sheet. All record bodies are JSON:
 
   stylesheet, doc/<path>:  {"scalars": {k: v}, "lists": {k: [v, ...]},
-                            "rejections": [{"old", "new", "at"}]}   (doc only)
+                            "rejections": [{"old", "new", "at", "reason"?}]}   (doc only)
   not-a-defect:            {"entries": [{"old", "new", "from", "at"}]}
   genre/<name>:            {"exemplars": [{"text", "path", "start", "end", "rev"?}],
                             "notes": [str]}
@@ -115,19 +115,44 @@ or an anchor is an exact substring of the document (occurring once within a line
 range) is checked by the copy writer of the review loop (nexus-ger02.4), which
 holds the document text; this script never reads it.
 
-`filter TARGET` drops every edit whose "old" equals the old string of a
-rejection stored for that document (exact match; not-a-defect entries are NOT
-applied here). Every other key passes through unchanged. Edit numbers "n" are
-kept, so dropped edits leave GAPS in the numbering: the marks in the marked-up
-copy keep their meaning. The output gains "dropped": [{"n", "old", "cause"}]
-(cause is always "rejected"; any "dropped" in the input is overwritten). The skill
-runs `brief.py filter`, which calls this and returns each dropped edit as
-{"n", "old", "new", "cause"}: it adds "new" (the proposed text, so the review copy can
-show what was dropped) and drops further edits with its own causes.
+The minimal change. A rejection matches a later proposal by what the edit CHANGES,
+not by the span the editor happened to pick. `minimal_change(old, new)` splits both
+strings into words and whitespace, drops the words they share at the start, then the
+words they share at the end (so "The worker really quite simply retries" ->
+"The worker simply retries" is the change "really quite " -> ""), and returns what is
+left of each. Words are the unit: "retries" and "retried" share no word. A shared word is
+compared loosely: any whitespace is one space, and case and apostrophe style (curly or straight)
+are ignored, because the editor retypes those inside a span it otherwise leaves alone; a change
+that is ONLY one of those keeps its own key, and the replacement text is never compared loosely.
+A trailing mark is NOT ignored: "paged;" is not "paged", because a dash replaced by a semicolon
+is a mark moved onto the neighbouring word and must stay a change of its own. The match key,
+`change_key`, is that pair with its whitespace collapsed and its ends stripped (so
+"really quite" and " really quite " are one change); when collapsing would leave the two
+sides empty (a change of whitespace only) the raw pair is the key. Overlap alone is NOT
+a match: the same words with another replacement, or a cut of part of them, have another
+key. Three limits, all deliberate: the key has no position, so a stored cut of "really
+quite " also drops that cut in another sentence; a pure insertion (no old text) matches
+the same insertion anywhere in the document; and a case or apostrophe difference inside a
+shared word is not part of the change, so a fix that also re-capitalises a word next to the
+stored words is taken for the stored fix. Dropped edits stay visible: the review copy
+lists them with their cause. The key is computed from "old" and "new" every time it is
+needed, never stored, so records written before the key existed are read the same way.
 
-Rejections are one per old string: rejecting an old string that is already
-stored REPLACES that rejection in place (its number and position are kept, its
-"new" is overwritten). `entries` lists a level's style-sheet scalars and lists (doc level: that document's
+`filter TARGET` drops every edit whose change key equals the key of a rejection stored
+for that document (not-a-defect entries are NOT applied here). Every other key passes
+through unchanged. Edit numbers "n" are kept, so dropped edits leave GAPS in the numbering:
+the marks in the marked-up copy keep their meaning. The output gains "dropped":
+[{"n", "old", "cause"}] (cause is always "rejected"; any "dropped" in the input is
+overwritten). The skill runs `brief.py filter`, which calls this and returns each dropped
+edit as {"n", "old", "new", "cause"}: it adds "new" (the proposed text, so the review copy
+can show what was dropped) and drops further edits with its own causes.
+
+Rejections are one per change key: rejecting a change that is already stored REPLACES that
+rejection in place (its number and position are kept; its old, new and time are
+overwritten, and so is its reason when the new rejection gives one: a re-rejection with no
+reason keeps the earlier reason). `reject --reason R` (or "reason" in the --from-stdin object) keeps the
+author's one line on why, to tell a wrong edit from a right one the author does not want;
+a reason that is not a string is refused. `entries` lists a level's style-sheet scalars and lists (doc level: that document's
 record; it needs --path). `--remove KEY` deletes the scalar KEY, or the whole list KEY;
 `--remove-item KEY=VALUE` deletes one value from the list KEY (VALUE is everything after
 the first "=", so a genre_map entry "notes/=how-to" is KEY=genre_map, VALUE=notes/=how-to).
@@ -284,6 +309,59 @@ def merge_named(layers: dict[str, Obj | None]) -> Obj:
     return merge_layers([_merge_input(layers.get(name)) for name in PRECEDENCE])
 
 
+_WORDS = re.compile(r"\s+|\S+")
+_APOSTROPHES = str.maketrans({"\u2018": "'", "\u2019": "'", "\u201b": "'", "\u02bc": "'"})
+
+
+def _loose(token: str) -> str:
+    """A token as the trim loops compare it: any whitespace is one space, and case and apostrophe style are
+    ignored. A trailing mark is NOT ignored ("paged;" and "paged" are different words here): the editor's
+    replacement for a dash is exactly a mark moved onto the neighbouring word, so ignoring it would turn every
+    "word — x" -> "word; x" into a cut of the dash (measured on the 360 replayed storage pairs: 138 matches
+    became 334, all of them false)."""
+    return " " if token.isspace() else token.translate(_APOSTROPHES).casefold()
+
+
+def _strict(token: str) -> str:
+    return token
+
+
+def _trim(a: list[str], b: list[str], same: Callable[[str], str]) -> tuple[str, str]:
+    head = 0
+    while head < len(a) and head < len(b) and same(a[head]) == same(b[head]):
+        head += 1
+    tail = 0
+    while tail < len(a) - head and tail < len(b) - head and same(a[-1 - tail]) == same(b[-1 - tail]):
+        tail += 1
+    return "".join(a[head:len(a) - tail]), "".join(b[head:len(b) - tail])
+
+
+def minimal_change(old: str, new: str) -> tuple[str, str]:
+    """`old` and `new` with the words they share at the start, then at the end, trimmed (see the docstring).
+
+    The leading words are trimmed first, so when the shared words repeat ("a b a" -> "a") the change is
+    the later text ("b a"); both the stored rejection and the proposal go through the same rule. A shared
+    word is compared loosely (`_loose`): the editor retypes a curly apostrophe as a straight one, re-capitalises
+    a word, or flows a newline into a space inside a span it otherwise left alone, and none of that is a
+    different change. The replacement text left after the trim is never compared loosely. When the loose trim
+    would leave nothing of two strings that differ (a change of case, of an apostrophe or of whitespace only),
+    the strict trim is used, so that change keeps its own key and cannot be taken for a no-op or for another
+    change.
+    """
+    a, b = _WORDS.findall(old), _WORDS.findall(new)
+    gone, put = _trim(a, b, _loose)
+    if not gone and not put and old != new:
+        gone, put = _trim(a, b, _strict)
+    return gone, put
+
+
+def change_key(old: str, new: str) -> tuple[str, str]:
+    """The key a rejection and a proposal are matched on: the minimal change, whitespace collapsed."""
+    gone, put = minimal_change(old, new)
+    key = (" ".join(gone.split()), " ".join(put.split()))
+    return key if key[0] != key[1] else (gone, put)
+
+
 def _now() -> datetime:
     fixed = os.environ.get("PROSE_EDIT_NOW")
     if fixed and os.environ.get("PROSE_EDIT_TEST") == "1":
@@ -356,6 +434,10 @@ def check_record(kind: str, rec: Any, what: str) -> Obj:
             raise _bad(what, '"lists" is not an object of lists')
     if kind == "doc" and not _is_str_dicts(body.get("rejections", []), ("old", "new")):
         raise _bad(what, '"rejections" is not a list of {old, new} strings')
+    if kind == "doc" and not all(
+        isinstance((_obj(r) or {}).get("reason", ""), str) for r in cast(list[Any], body.get("rejections", []))
+    ):
+        raise _bad(what, 'a rejection\'s "reason" is not a string')
     if kind == "nad" and not _is_str_dicts(body.get("entries", []), ("old", "new")):
         raise _bad(what, '"entries" is not a list of {old, new} strings')
     if kind == "genre":
@@ -851,13 +933,15 @@ def _rejection_items(a: argparse.Namespace) -> list[Obj]:
         body: Any = _read_stdin_json("reject")
         raw: list[Any] = _list(body) or [body]
     else:
-        raw = [{"old": a.old, "new": a.new}]
+        raw = [{"old": a.old, "new": a.new, **({"reason": a.reason} if a.reason is not None else {})}]
     out: list[Obj] = []
     for item in raw:
         obj = _obj(item)
         if obj is None or not (isinstance(obj.get("old"), str) and isinstance(obj.get("new"), str)
                                and obj["old"]):
             raise UserError('reject: expected {"old": str, "new": str} with a non-empty old')
+        if "reason" in obj and not isinstance(obj["reason"], str):
+            raise UserError('reject: "reason" must be a string')
         out.append(obj)
     return out
 
@@ -872,8 +956,11 @@ def cmd_reject(ctx: Ctx, a: argparse.Namespace) -> None:
             entry: Obj = {"old": item["old"], "new": item["new"], "at": _iso(ctx.now)}
             if isinstance(item.get("reason"), str):
                 entry["reason"] = item["reason"]
+            key = change_key(entry["old"], entry["new"])
             for i, seen in enumerate(rejections):
-                if seen["old"] == entry["old"]:  # one rejection per old string: replace in place
+                if change_key(seen["old"], seen["new"]) == key:  # one rejection per change: replace in place
+                    if "reason" not in entry and isinstance(seen.get("reason"), str):
+                        entry["reason"] = seen["reason"]  # a re-rejection that gives none keeps the earlier one
                     rejections[i] = entry
                     break
             else:
@@ -959,17 +1046,15 @@ def cmd_rejections(ctx: Ctx, a: argparse.Namespace) -> None:
 def cmd_filter(ctx: Ctx, a: argparse.Namespace) -> None:
     proposal = validate_proposal(_read_stdin_json("proposal"))
     tgt = ctx.target(a.path)
-    stored: dict[str, str] = {}
+    stored: set[tuple[str, str]] = set()
     if tgt.rel is not None:
         rec = ctx.t2.get_json(ctx.repo_project, f"doc/{tgt.rel}", "doc")
-        for rej in _items(rec, "rejections"):
-            stored[rej["old"]] = "rejected"
+        stored = {change_key(rej["old"], rej["new"]) for rej in _items(rec, "rejections")}
     kept: list[Obj] = []
     dropped: list[Obj] = []
     for edit in proposal["edits"]:
-        cause = stored.get(edit["old"])
-        if cause:
-            dropped.append({"n": edit["n"], "old": edit["old"], "cause": cause})
+        if change_key(edit["old"], edit["new"]) in stored:
+            dropped.append({"n": edit["n"], "old": edit["old"], "cause": "rejected"})
         else:
             kept.append(edit)
     _emit({**proposal, "edits": kept, "dropped": dropped})
@@ -1163,6 +1248,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("path")
     sp.add_argument("--old")
     sp.add_argument("--new")
+    sp.add_argument("--reason", help="the author's one line on why (optional)")
     sp.add_argument("--from-stdin", action="store_true")
     sp = add("entries", cmd_entries)
     sp.add_argument("--level", choices=["user", "repo", "doc"], required=True)

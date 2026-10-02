@@ -565,7 +565,7 @@ def test_a_twice_occurring_old_string_and_two_overlapping_edits_are_all_skipped_
 
 def test_unaccepted_edits_are_stored_as_rejections_and_the_session_is_logged(prose: Prose, repo: Path) -> None:
     work, _ = start(prose, repo, [E1, E2])
-    out = review_ok(prose, "apply", "--work", str(work), "--accept", "1")
+    out = review_ok(prose, "apply", "--work", str(work), "--accept", "1", "--reject", "2")
     assert out["rejected"] == [2] and out["held"] == []
     rec = t2_json(REPO_PROJECT, "doc/docs/s.md")
     assert [(r["old"], r["new"]) for r in rec["rejections"]] == [(E2["old"], E2["new"])]
@@ -598,7 +598,7 @@ def test_a_skipped_accepted_edit_is_not_stored_as_a_rejection(prose: Prose, repo
 
 def test_reject_an_edit_and_run_again_the_same_edit_is_not_proposed_again(prose: Prose, repo: Path) -> None:
     work, _ = start(prose, repo, [E1, E2])
-    review_ok(prose, "apply", "--work", str(work), "--accept", "1")
+    review_ok(prose, "apply", "--work", str(work), "--accept", "1", "--reject", "2")
     (repo / "docs" / "s.md").write_text(DOC, encoding="utf-8")  # the author reverts; same document again
     again = json.loads(brief_ok(prose, "filter", "docs/s.md", stdin=fenced(proposal([E1, E2]))))
     assert [e["n"] for e in again["edits"]] == [1]
@@ -607,7 +607,7 @@ def test_reject_an_edit_and_run_again_the_same_edit_is_not_proposed_again(prose:
 
 def test_list_and_remove_a_rejection_and_the_removed_edit_is_proposed_again(prose: Prose, repo: Path) -> None:
     work, _ = start(prose, repo, [E1, E2])
-    review_ok(prose, "apply", "--work", str(work), "--accept", "none")
+    review_ok(prose, "apply", "--work", str(work), "--accept", "none", "--reject", "all")
     listed = prose.ok("rejections", "docs/s.md")["rejections"]
     assert [r["old"] for r in listed] == [E1["old"], E2["old"]]
     prose.ok("rejections", "docs/s.md", "--remove", "2")
@@ -631,7 +631,7 @@ def test_a_stdin_run_keeps_no_document_record_applies_nothing_prints_the_text_an
     out = review_ok(prose, "render", "-", "--work", str(work), "--file", str(work / "input.txt"),
                     "--genre", "commit-message")
     assert "Nothing is applied to a file" in Path(out["copy"]).read_text(encoding="utf-8")
-    done = review_ok(prose, "apply", "--work", str(work), "--accept", "1")
+    done = review_ok(prose, "apply", "--work", str(work), "--accept", "1", "--reject", "2")
     assert done["applied"] == [] and [a["n"] for a in done["accepted"]] == [1]
     assert done["text"] == "fix: make the queue drain in order\n\nThe loop is in fact ordered.\n"
     assert done["rejected"] == [2] and done["rejections_stored"] is False
@@ -649,7 +649,7 @@ def test_a_range_run_applies_inside_the_range_and_stores_the_rejection_under_the
     text = "Same words here.\n\nMiddle line.\n\nSame words here. Basically fine.\n"
     edits = [edit(1, "Same words here.", "S"), edit(2, "Basically fine.", "Fine.")]
     work, _ = start(prose, repo, edits, text=text, target="docs/s.md:5-5")
-    out = review_ok(prose, "apply", "--work", str(work), "--accept", "1")
+    out = review_ok(prose, "apply", "--work", str(work), "--accept", "1", "--reject", "2")
     assert [a["n"] for a in out["applied"]] == [1] and out["rejected"] == [2]
     assert (repo / "docs" / "s.md").read_text(encoding="utf-8") == (
         "Same words here.\n\nMiddle line.\n\nS Basically fine.\n")

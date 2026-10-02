@@ -14,11 +14,18 @@ OUT_DIR holds what run-review.sh writes: NAME.jsonl for each turn of the three s
 An answer turn must end at `apply --dry-run` (no real apply in it); the real apply is the confirmation turn's.
 
 Each verdict reads the tool results the skill's own scripts printed, so it checks what the author would have
-seen, not what the model claims. A scenario whose condition never arose (the editor did not propose the edit
-the check needs) is VACUOUS and counts as a failure. The editor chooses the span of an edit afresh each run, so a
-rejected edit often comes back with a different old string, which the exact-match filter rightly lets through;
-run-review.sh therefore repeats a3 and b3 (up to four times) until the editor proposes the edit again, asking
-`review_verdicts.py --probe NAME OUT_DIR` (exit 3 = vacuous, run again). Exit 1 on any FAIL or VACUOUS.
+seen, not what the model claims.
+
+a3 scores each edit the author rejected in turn 2 against what the fresh run of turn 3 showed. A rejected fix
+shown again is a FAIL, whatever span the editor picked for it; a fresh run that proposed no edit at all is
+NOT-MEASURABLE (an editor with nothing left to say shows no rejected fix either), never a PASS: `recurrence` counts an edit with the same
+minimal change, or a cut that overlaps the rejected words, as that fix again (the definition is in README.md,
+"The rejection-memory gate"). A fix the filter dropped, or the editor never proposed, is not shown: both PASS,
+and the note says how many of each, plus how many edits the fresh run showed. A3 is never VACUOUS, and no
+scenario is run again until it passes: a retry that keeps the run in which the editor happened to behave selects
+the pass. b3 is the one check that can still be VACUOUS (the editor did not propose the removed fix again, so
+removal was not exercised); it matches the fix as a3 does, not the exact old string, and it is reported as it
+is. Exit 1 on anything but PASS.
 """
 from __future__ import annotations
 
@@ -43,6 +50,52 @@ def _verdicts() -> ModuleType:
 
 
 V = _verdicts()
+
+
+def _memory() -> ModuleType:
+    path = HERE.parents[2] / ".claude" / "skills" / "prose-edit" / "scripts" / "memory.py"
+    spec = importlib.util.spec_from_file_location("prose_edit_memory_for_verdicts", path)
+    assert spec and spec.loader
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules.setdefault(spec.name, mod)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+M = _memory()
+
+
+def same_fix(rejected: Obj, other: Obj) -> str | None:
+    """How `other` is the fix `rejected` again: "same-change" (the same minimal change, which is what the
+    filter matches), "overlap" (the same replacement text over changed words that contain, or are contained
+    in, the rejected ones: a cut of words the author wanted kept is that fix again), or None."""
+    gone_r, put_r = M.change_key(str(rejected["old"]), str(rejected.get("new", "")))
+    gone_o, put_o = M.change_key(str(other["old"]), str(other.get("new", "")))
+    if (gone_r, put_r) == (gone_o, put_o):
+        return "same-change"
+    if put_r == put_o and gone_r.strip() and gone_o.strip():
+        words_r, words_o = f" {' '.join(gone_r.split())} ", f" {' '.join(gone_o.split())} "
+        if words_r in words_o or words_o in words_r:
+            return "overlap"
+    return None
+
+
+def recurrence(rejected: list[Obj], shown: list[Obj], dropped: list[Obj]) -> list[Obj]:
+    """One row per rejected edit: "shown-again" when an edit in `shown` is that fix again (with how, and which
+    edit numbers), "dropped" when the filter dropped it (cause rejected), else "absent" (never proposed)."""
+    rows: list[Obj] = []
+    for rej in rejected:
+        hits = [(same_fix(rej, e), e.get("n")) for e in shown]
+        hits = [(how, n) for how, n in hits if how]
+        row: Obj = {"old": rej["old"], "new": rej.get("new", "")}
+        if hits:
+            row.update(status="shown-again", how=hits[0][0], by=[n for _, n in hits])
+        elif any(d.get("cause") == "rejected" and same_fix(rej, d) == "same-change" for d in dropped):
+            row.update(status="dropped", how="same-change", by=[])
+        else:
+            row.update(status="absent", how="", by=[])
+        rows.append(row)
+    return rows
 
 
 def first_json(text: str) -> Obj | None:
@@ -120,16 +173,26 @@ def check_a(runs: dict[str, list[Obj]]) -> list[tuple[str, str, str]]:
     ok, note = clean(a3)
     if not filt3:
         out.append(("a3", "FAIL", f"no filter result {note}"))
+    elif not rejected_old:
+        out.append(("a3", "FAIL", f"nothing was rejected in turn 2, so turn 3 proves nothing; {note}"))
     else:
-        dropped = [d for d in filt3.get("dropped", []) if d.get("cause") == "rejected"]
-        proposed = [e["old"] for e in filt3.get("edits", [])]
-        again = [o for o in rejected_old if o in proposed]
-        if again:
-            out.append(("a3", "FAIL", f"a rejected edit was shown again: {again}"))
-        elif not dropped:
-            out.append(("a3", "VACUOUS", f"the editor did not propose a rejected edit again; {note}"))
+        by_n1 = {e["n"]: e for e in (filt1 or {}).get("edits", [])}
+        rejected = [by_n1[n] for n in (apply2 or {}).get("rejected", []) if n in by_n1]
+        rows = recurrence(rejected, filt3.get("edits", []), filt3.get("dropped", []))
+        again = [r for r in rows if r["status"] == "shown-again"]
+        counts = {s: sum(1 for r in rows if r["status"] == s) for s in ("shown-again", "dropped", "absent")}
+        shown_n, dropped_n = len(filt3.get("edits", [])), len(filt3.get("dropped", []))
+        detail = (f"rejected={len(rows)} shown-again={counts['shown-again']} dropped-by-filter={counts['dropped']} "
+                  f"not proposed again={counts['absent']}; fresh-run edits shown={shown_n} dropped={dropped_n}; {note}")
+        if shown_n + dropped_n == 0:
+            # a fresh session with nothing to say shows no rejected fix because it shows no fix: the run
+            # measured an editor with nothing left to propose, not memory
+            out.append(("a3", "NOT-MEASURABLE", f"the fresh run proposed no edits, so it proves nothing about memory; {detail}"))
+        elif again:
+            out.append(("a3", "FAIL", "a rejected fix was shown again: "
+                        + "; ".join(f"{r['how']} {r['old']!r}->{r['new']!r} by edit {r['by']}" for r in again) + f"; {detail}"))
         else:
-            out.append(("a3", "PASS" if ok else "FAIL", f"{len(dropped)} rejected edit(s) dropped before display; {note}"))
+            out.append(("a3", "PASS" if ok else "FAIL", detail))
     apply4 = real_apply(runs.get("a4c", []))
     ok, note = clean(a4)
     held_back, echo_note = answer_turn(a4)
@@ -147,23 +210,27 @@ def check_b(runs: dict[str, list[Obj]]) -> list[tuple[str, str, str]]:
                 f"listed={len((listed or {}).get('rejections', []))} {note}"))
     removed = last(b2, "memory", "rejections")
     ok, note = clean(b2)
-    gone = ""
+    gone: Obj | None = None
     if listed and removed:
-        before = [r["old"] for r in listed.get("rejections", [])]
-        after = [r["old"] for r in removed.get("rejections", [])]
-        missing = [o for o in before if o not in after]
-        gone = missing[0] if len(missing) == 1 and len(after) == len(before) - 1 else ""
-    out.append(("b2", "PASS" if ok and gone else "FAIL", f"removed={gone!r} {note}"))
+        after = [(r["old"], r.get("new", "")) for r in removed.get("rejections", [])]
+        before = [r for r in listed.get("rejections", [])]
+        missing = [r for r in before if (r["old"], r.get("new", "")) not in after]
+        gone = missing[0] if len(missing) == 1 and len(after) == len(before) - 1 else None
+    out.append(("b2", "PASS" if ok and gone else "FAIL", f"removed={(gone or {}).get('old')!r} {note}"))
     filt3 = last(b3, "brief", "filter")
     ok, note = clean(b3)
     if not filt3 or not gone:
         out.append(("b3", "FAIL", f"no filter result or nothing removed {note}"))
     else:
-        proposed = [e["old"] for e in filt3.get("edits", [])]
-        dropped = [d["old"] for d in filt3.get("dropped", []) if d.get("cause") == "rejected"]
-        if gone in dropped:
+        # the fix, not the string: the editor picks its span afresh, so the removed edit is "back" when an
+        # edit with the same minimal change (or the same cut over the same words) is shown, and "still held"
+        # when the filter dropped such an edit
+        gone_fix = {"old": gone["old"], "new": gone.get("new", "")}
+        proposed = [e for e in filt3.get("edits", []) if same_fix(gone_fix, e)]
+        dropped = [d for d in filt3.get("dropped", []) if d.get("cause") == "rejected" and same_fix(gone_fix, d) == "same-change"]
+        if dropped:
             out.append(("b3", "FAIL", "the removed rejection still dropped the edit"))
-        elif gone not in proposed:
+        elif not proposed:
             out.append(("b3", "VACUOUS", f"the editor did not propose the removed edit again; {note}"))
         else:
             out.append(("b3", "PASS" if ok else "FAIL", f"the removed edit is proposed again; {note}"))
@@ -197,12 +264,6 @@ def main(argv: list[str]) -> int:
     if not argv:
         sys.stdout.write((__doc__ or "") + "\n")
         return 2
-    if argv[0] == "--probe":
-        # run-review.sh asks after each rerun whether it proved anything: exit 3 when it is VACUOUS.
-        name, probe_dir = argv[1], Path(argv[2])
-        loaded = {p.stem: V.load_events(p) for p in sorted(probe_dir.glob("*.jsonl"))}
-        rows = {n: v for n, v, _ in (check_a(loaded) if name.startswith("a") else check_b(loaded))}
-        return 3 if rows.get(name) == "VACUOUS" else 0
     out_dir = Path(argv[0])
     runs = {p.stem: V.load_events(p) for p in sorted(out_dir.glob("*.jsonl"))}
     rows = check_a(runs) + check_b(runs) + check_c(runs)

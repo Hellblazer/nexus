@@ -7,7 +7,7 @@ runner), and the project prefix override (PROSE_EDIT_PROJECT_PREFIX) passes thro
 to stderr with exit 1; memory.py's exit code 3 (T2 unavailable) passes through.
 
   review.py render TARGET --work WORK [--file F] [--genre G]
-  review.py apply --work WORK --accept SPEC [--hold SPEC] [--dry-run]
+  review.py apply --work WORK --accept SPEC [--hold SPEC] [--reject SPEC] [--reason N=TEXT]... [--dry-run]
   review.py log-retry --work WORK
 
 `render` and `apply` take the filtered proposal that `brief.py filter TARGET --save WORK/filtered.json` wrote:
@@ -44,14 +44,20 @@ not opened and its path is the answer. PROSE_EDIT_OPEN replaces `open -a` with a
 viewer name and the path are appended); like PROSE_EDIT_NOW it needs PROSE_EDIT_TEST=1 and is
 ignored without it. `render` also writes WORK/session.json; `apply` needs it.
 
-`apply` takes the author's answer. --accept is the numbers to apply and --hold the numbers
-left undecided: a comma or space separated list of numbers and ranges ("1, 3-5"), or "all" or
-"none". An edit that is neither accepted nor held is rejected, except an edit the copy could not
-show inline, which is left alone. An unknown number stops the run before anything is written.
---dry-run prints the interpreted sets (accept, hold, reject, left alone, would apply, would skip)
-and does nothing else: no file, no T2, WORK kept, apart from WORK/dryrun.json, which holds hashes
-of the answer (as sets: "1,2" and "2 1" are one answer), of filtered.json and of the document's
-bytes. A real apply refuses (exit 1, nothing written, nothing stored, WORK kept) unless that file
+`apply` takes the author's answer. --accept is the numbers to apply, --reject the numbers to store
+as rejections for the document, and --hold the numbers left undecided: a comma or space separated
+list of numbers and ranges ("1, 3-5"), or "all" or "none"; --reject also takes "rest", which is
+every edit not accepted, held or named otherwise (the author's "reject the rest"). An edit the
+author does not name is HELD: neither applied nor stored. Only --reject stores a rejection, so
+silence, or "accept 1", never does. An edit the copy could not show inline is left alone by "rest"
+and by being unnamed; the author may still name it in --reject. --reason N=TEXT (repeatable) keeps
+the author's one line on why edit N is rejected; N must be a rejected edit and TEXT not empty.
+An unknown number, an edit named by two of the three flags, or a reason that names no rejected edit
+stops the run before anything is written.
+--dry-run prints the interpreted sets (accept, hold, reject with its reasons, left alone, would
+apply, would skip) and does nothing else: no file, no T2, WORK kept, apart from WORK/dryrun.json,
+which holds hashes of the answer (the accepted, held and rejected sets and the reasons; "1,2" and
+"2 1" are one answer), of filtered.json and of the document's bytes. A real apply refuses (exit 1, nothing written, nothing stored, WORK kept) unless that file
 exists and all three still match: the dry run is how the author sees what will happen, so the
 script will not run without it. A different answer, a changed proposal or a document saved since
 the dry run each need the dry run again. Otherwise, in order:
@@ -64,10 +70,10 @@ the dry run each need the dry run again. Otherwise, in order:
      that it and its directory are writable, then writes the new text to a temp file and fsyncs
      it. A failure here stops the run with a message ending "run apply again": nothing was
      changed and nothing was stored.
-  3. A path run stores every rejected edit verbatim in the document's record (memory.py reject).
-     With none to store it still asks T2 one question, so a service that is down stops the run
-     here, before the file changes. The rejections are the author's decisions and stay stored if
-     step 4 then stops the run.
+  3. A path run stores every rejected edit verbatim in the document's record (memory.py reject),
+     with its reason when the author gave one. With none to store it still asks T2 one question,
+     so a service that is down stops the run here, before the file changes. The rejections are the
+     author's decisions and stay stored if step 4 then stops the run.
   4. The document is read again and compared byte for byte with what the plan was made against;
      a difference stops the run (the author saved in the meantime) with nothing written. If it
      is the same, the temp file is renamed over it. The placed edits are written in one pass, in
@@ -153,11 +159,12 @@ def _test_mode() -> bool:
 _NUMBER = re.compile(r"([0-9]+)(?:-([0-9]+))?")
 
 
-def parse_numbers(spec: str, valid: set[int], flag: str) -> set[int]:
-    """The edit numbers a --accept or --hold value names: numbers and ranges, "all" or "none".
+def parse_numbers(spec: str, valid: set[int], flag: str, rest: set[int] | None = None) -> set[int]:
+    """The edit numbers a --accept, --hold or --reject value names: numbers and ranges, "all" or "none".
 
     A range's two ends must be edits; a number between them that is not one (the filter
-    dropped it) is passed over.
+    dropped it) is passed over. "rest" is accepted only where the caller passes `rest` (the set it
+    stands for): --reject, whose "reject the rest" is every edit nobody else named.
     """
     text = spec.strip().lower()
     have = ", ".join(str(n) for n in sorted(valid)) or "none"
@@ -165,11 +172,14 @@ def parse_numbers(spec: str, valid: set[int], flag: str) -> set[int]:
         return set(valid)
     if text == "none":
         return set()
+    if text == "rest" and rest is not None:
+        return set(rest)
     found: set[int] = set()
     for token in re.split(r"\s*,\s*|\s+", text):
         m = _NUMBER.fullmatch(token)
         if m is None:
-            raise _user(f"{flag} {spec!r}: expected edit numbers like '1, 3-5', 'all' or 'none'")
+            raise _user(f"{flag} {spec!r}: expected edit numbers like '1, 3-5', 'all' or 'none'"
+                        + (", or 'rest'" if rest is not None else ""))
         low = int(m.group(1))
         high = int(m.group(2)) if m.group(2) else low
         if low > high:
@@ -492,9 +502,10 @@ def build_copy(text: str, prop: Obj, *, label: str, genre: str, rng: Obj | None,
         head_lines.append(f"Nothing is applied to a file; the accepted text is printed. {answer} "
                           "Edits you do not accept are not stored: a stdin run keeps no rejections.")
     else:
-        head_lines.append(f"{answer} An edit you do not accept is stored as a rejection for this document; "
-                          "to leave one undecided instead, say `hold` and its number. An edit listed below as "
-                          "cannot be placed is not stored either way.")
+        head_lines.append(f"{answer} An edit you do not name stays undecided and nothing is stored for it. "
+                          "To store a rejection for this document say `reject 2` or `reject the rest`, and give a "
+                          "reason if you like (`reject 2 because it changes my meaning`). An edit listed below as "
+                          "cannot be placed is left alone by `reject the rest`; name it to reject it.")
     for w in cast("list[str]", prop.get("warnings") or []):
         head_lines += ["", f"Warning: {w}"]
     for key, title in (("note", "Editor's note"), ("voice_card", "Voice card")):
@@ -780,8 +791,11 @@ def cmd_render(a: argparse.Namespace) -> Obj:
     }
 
 
-def _shown(plan: Obj) -> Obj:
-    return {"n": plan["n"], "old": plan["old"], "new": plan["new"]}
+def _shown(plan: Obj, reasons: dict[int, str] | None = None) -> Obj:
+    out: Obj = {"n": plan["n"], "old": plan["old"], "new": plan["new"]}
+    if reasons and int(plan["n"]) in reasons:
+        out["reason"] = reasons[int(plan["n"])]
+    return out
 
 
 def _skipped(plans: list[Obj]) -> list[Obj]:
@@ -792,10 +806,12 @@ def _sha(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def _dry_run_record(accept: set[int], hold: set[int], proposal: bytes, document: bytes) -> Obj:
-    """What a dry run vouches for: the answer (as sets, so "1,2" and "2 1" are one answer), the filtered
-    proposal and the document, as hashes."""
-    answer = json.dumps({"accept": sorted(accept), "hold": sorted(hold)}).encode("utf-8")
+def _dry_run_record(accept: set[int], hold: set[int], reject: set[int], reasons: dict[int, str],
+                    proposal: bytes, document: bytes) -> Obj:
+    """What a dry run vouches for: the answer (as sets and the reasons, so "1,2" and "2 1" are one answer),
+    the filtered proposal and the document, as hashes."""
+    answer = json.dumps({"accept": sorted(accept), "hold": sorted(hold), "reject": sorted(reject),
+                         "reasons": {str(n): reasons[n] for n in sorted(reasons)}}).encode("utf-8")
     return {"answer": _sha(answer), "proposal": _sha(proposal), "document": _sha(document)}
 
 
@@ -816,6 +832,34 @@ def _require_dry_run(work: Path, record: Obj, source: Path) -> None:
                     f"Nothing was written. {run_it}.")
 
 
+_REASON = re.compile(r"\s*([0-9]+)\s*=(.*)", re.DOTALL)
+
+
+def parse_reasons(raw: list[str], rejected: set[int]) -> dict[int, str]:
+    """The author's reasons, `N=TEXT` each: N must be a rejected edit, TEXT not empty, one per edit."""
+    out: dict[int, str] = {}
+    for item in raw:
+        m = _REASON.fullmatch(item)
+        if m is None or not m.group(2).strip():
+            raise _user(f"--reason {item!r}: expected N=TEXT with a reason after the equals sign")
+        n = int(m.group(1))
+        if n not in rejected:
+            have = ", ".join(str(r) for r in sorted(rejected)) or "none"
+            raise _user(f"--reason {item!r}: edit {n} is not rejected (the rejected edits are {have})")
+        if n in out:
+            raise _user(f"--reason: two reasons for edit {n}")
+        out[n] = m.group(2).strip()
+    return out
+
+
+def _both(flags: list[tuple[str, set[int]]]) -> None:
+    """An edit can be named by one of --accept, --hold and --reject only."""
+    for i, (first, a) in enumerate(flags):
+        for second, b in flags[i + 1:]:
+            if a & b:
+                raise _user(f"{first} and {second} both name edit {min(a & b)}")
+
+
 def cmd_apply(a: argparse.Namespace) -> Obj:
     work = cast(Path, _BRIEF.work_dir(a.work))
     if (work / "log-pending.json").is_file():
@@ -832,8 +876,12 @@ def cmd_apply(a: argparse.Namespace) -> Obj:
     valid = set(by_n)
     accept = parse_numbers(a.accept, valid, "--accept")
     hold: set[int] = parse_numbers(a.hold, valid, "--hold") if a.hold else set()
-    if accept & hold:
-        raise _user(f"--accept and --hold both name edit {min(accept & hold)}")
+    # an edit the copy could not show inline: `reject the rest` leaves it alone, naming it rejects it
+    unshown = {int(u["n"]): u for u in cast("list[Obj]", session.get("unplaced") or [])}
+    rest = valid - set(unshown) - accept - hold
+    reject: set[int] = parse_numbers(a.reject, valid, "--reject", rest=rest) if a.reject else set()
+    _both([("--accept", accept), ("--hold", hold), ("--reject", reject)])
+    reasons = parse_reasons(list(a.reason or []), reject)
     stdin = bool(session["stdin"])
     target = str(session["target"])
     rel, rng, source, html, root = _source_of(target, cast("str | None", session.get("file")), work)
@@ -841,17 +889,17 @@ def cmd_apply(a: argparse.Namespace) -> Obj:
     text, eol = decode_source(raw, source)
     if eol == "mixed" and not stdin:
         raise _user(f"{source}: mixed line endings (CRLF and LF); the file is not touched")
-    record = _dry_run_record(accept, hold, proposal_bytes, raw)
+    record = _dry_run_record(accept, hold, reject, reasons, proposal_bytes, raw)
     if not a.dry_run:
         _require_dry_run(work, record, source)
     plans = plan_edits(text, [e for e in edits if int(e["n"]) in accept], rng, html)
     placed = [p for p in plans if p["span"] is not None]
     skipped = _skipped(plans)
-    # an edit the copy could not show inline was never the author's to decide: it is not a rejection
-    unshown = {int(u["n"]): u for u in cast("list[Obj]", session.get("unplaced") or [])}
     left_alone = [{**_shown(by_n[n]), "cause": unshown[n].get("cause"), "detail": unshown[n].get("detail")}
-                  for n in sorted(unshown) if n in by_n and n not in accept and n not in hold]
-    rejected = sorted(valid - accept - hold - set(unshown))
+                  for n in sorted(unshown) if n in by_n and n not in accept | hold | reject]
+    rejected = sorted(reject)
+    # an edit nobody named is held: neither applied nor stored (unshown ones are `unplaced`, not held)
+    held = sorted(((valid - set(unshown)) | hold) - accept - reject)
     store = not stdin and bool(rejected)
     writes = bool(placed) and not stdin
     if writes:
@@ -860,8 +908,8 @@ def cmd_apply(a: argparse.Namespace) -> Obj:
         (work / "dryrun.json").write_text(json.dumps(record), encoding="utf-8")
         return {
             "dry_run": True, "mode": "stdin" if stdin else "edit", "path": rel,
-            "accept": [_shown(by_n[n]) for n in sorted(accept)], "hold": [_shown(by_n[n]) for n in sorted(hold)],
-            "reject": [_shown(by_n[n]) for n in rejected], "unplaced": left_alone,
+            "accept": [_shown(by_n[n]) for n in sorted(accept)], "hold": [_shown(by_n[n]) for n in held],
+            "reject": [_shown(by_n[n], reasons) for n in rejected], "unplaced": left_alone,
             "would_apply": [] if stdin else [_shown(p) for p in sorted(placed, key=lambda p: p["span"][0])],
             "would_skip": skipped, "stores_rejections": store,
         }
@@ -872,8 +920,9 @@ def cmd_apply(a: argparse.Namespace) -> Obj:
             data = (new_text.replace("\n", "\r\n") if eol == "crlf" else new_text).encode("utf-8")
             staged = stage_write(source, cast(Path, root), data)
         if store:
-            _BRIEF.memory(["reject", target, "--from-stdin"],
-                          json.dumps([{"old": by_n[n]["old"], "new": by_n[n]["new"]} for n in rejected]))
+            _BRIEF.memory(["reject", target, "--from-stdin"], json.dumps([
+                {"old": by_n[n]["old"], "new": by_n[n]["new"], **({"reason": reasons[n]} if n in reasons else {})}
+                for n in rejected]))
         elif staged is not None:
             _BRIEF.memory_json(["viewer"])  # nothing to store: ask T2 anyway, so a service that is down stops us before the write
         if staged is not None:
@@ -892,7 +941,7 @@ def cmd_apply(a: argparse.Namespace) -> Obj:
         "note": prop.get("note"), "voice_card": prop.get("voice_card"),
         "accepted": sorted(accept), "applied": [] if stdin else applied_n, "skipped": [
             {"n": s["n"], "cause": s["cause"], "detail": s["detail"]} for s in skipped],
-        "rejected": rejected, "held": sorted(hold),
+        "rejected": rejected, "held": held, "reasons": {str(n): reasons[n] for n in sorted(reasons)},
         "unplaced": [{"n": u["n"], "cause": u["cause"]} for u in left_alone],
     }
     try:
@@ -916,7 +965,7 @@ def cmd_apply(a: argparse.Namespace) -> Obj:
     out: Obj = {
         "mode": "stdin" if stdin else "edit", "path": rel,
         "accepted": [_shown(p) for p in ordered], "applied": [] if stdin else [_shown(p) for p in ordered],
-        "skipped": skipped, "rejected": rejected, "held": sorted(hold), "unplaced": left_alone,
+        "skipped": skipped, "rejected": rejected, "held": held, "unplaced": left_alone,
         "rejections_stored": store, "log": entry,
     }
     if staged is not None and staged.beside_document:
@@ -966,7 +1015,10 @@ def _parser() -> argparse.ArgumentParser:
     ap = sub.add_parser("apply", help="take the author's answer: apply, store rejections, log, clean up")
     ap.add_argument("--work", required=True)
     ap.add_argument("--accept", required=True)
-    ap.add_argument("--hold")
+    ap.add_argument("--hold", help="numbers left undecided (an edit nobody names is held anyway)")
+    ap.add_argument("--reject", help="numbers to store as rejections, or `rest`: every edit nobody else names")
+    ap.add_argument("--reason", action="append", metavar="N=TEXT",
+                    help="the author's reason for rejecting edit N (repeatable)")
     ap.add_argument("--dry-run", action="store_true",
                     help="print the interpreted sets and change nothing; a real apply needs one first")
     lr = sub.add_parser("log-retry", help="send the session log of an apply whose log failed, then delete WORK")

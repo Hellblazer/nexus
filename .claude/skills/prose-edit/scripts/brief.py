@@ -373,6 +373,58 @@ def _bullets(items: list[Any]) -> str:
     return "\n".join(f"- {_shown(i)}" for i in items)
 
 
+REJECTION_LIMIT = 20
+REJECTION_CLIP = 100
+
+
+def _clip(text: str, limit: int = REJECTION_CLIP) -> str:
+    return text if len(text) <= limit else text[:limit].rstrip() + "…"
+
+
+def _change_line(old: str, new: str, reason: object) -> str:
+    """One stored rejection as the editor reads it: the minimal change, the author's reason, the span it was in."""
+    gone, put = cast("tuple[str, str]", _MEM.change_key(old, new))
+    if not gone.strip() and not put.strip():
+        what = "change spacing only"
+    elif not put:
+        what = f'cut {json.dumps(_clip(gone), ensure_ascii=False)}'
+    elif not gone:
+        what = f'insert {json.dumps(_clip(put), ensure_ascii=False)}'
+    else:
+        what = (f'replace {json.dumps(_clip(gone), ensure_ascii=False)} with '
+                f'{json.dumps(_clip(put), ensure_ascii=False)}')
+    why = (f" (reason: {json.dumps(_clip(reason, 120), ensure_ascii=False)})"
+           if isinstance(reason, str) and reason.strip() else "")  # quoted like old and new: no line breaks get in
+    context = "" if old.strip() == gone.strip() else f" (in: {json.dumps(_clip(old), ensure_ascii=False)})"
+    return f"- {what}{why}{context}"
+
+
+def _document_rejections(read: Obj) -> list[str]:
+    """The brief lines for this document's stored rejections: the newest REJECTION_LIMIT, each clipped,
+    with a count of the older ones left out. Empty when there are none (or on a stdin run, which has no document)."""
+    doc = cast("Obj | None", cast(Obj, read.get("layers") or {}).get("document"))
+    stored = cast("list[Obj]", (doc or {}).get("rejections") or [])
+    if not stored:
+        return []
+    newest_first = sorted(enumerate(stored), key=lambda p: (str(p[1].get("at", "")), p[0]), reverse=True)
+    seen: set[tuple[str, str]] = set()
+    unique: list[Obj] = []
+    for _, r in newest_first:  # one line per change, the newest entry for it, BEFORE the bound is applied
+        key = cast("tuple[str, str]", _MEM.change_key(str(r["old"]), str(r["new"])))
+        if key not in seen:
+            seen.add(key)
+            unique.append(r)
+    shown = unique[:REJECTION_LIMIT]
+    out = ["The author rejected these edits for THIS document. Do not propose them. Do not propose any edit "
+           "that makes the same change, wherever it sits and however much text around the words it spans: "
+           "a longer or a shorter old string around the same words is the same change."]
+    out += [_change_line(str(r["old"]), str(r["new"]), r.get("reason")) for r in shown]
+    left = len(unique) - len(shown)
+    if left > 0:
+        out.append(f"{left} older rejections are not listed here; the same rule holds for them.")
+    return out
+
+
 def render_brief(read: Obj, budget: int, input_file: str | None, input_text: str | None = None,
                  header: list[str] | None = None) -> str:
     """The editor's brief, in the RDR order, from a memory.py `read` result."""
@@ -430,14 +482,17 @@ def render_brief(read: Obj, budget: int, input_file: str | None, input_text: str
                 _bullets(lists["site_page_editors_note"])]
     out += ["", "## 4. Not a defect", ""]
     nad = cast("list[Obj]", lists.get("not-a-defect") or [])
+    rejected = _document_rejections(read)
     if nad:
-        out.append("The author rejected these edits before. Never propose one, or any edit of "
-                   "the same old string:")
+        out.append("The author rejected these edits before. Never propose one, or any edit that makes "
+                   "the same change:")
         for e in nad:
             src = f" (from {e['from']})" if e.get("from") else ""
             out.append(f"- {json.dumps(e['old'], ensure_ascii=False)} -> "
                        f"{json.dumps(e['new'], ensure_ascii=False)}{src}")
-    else:
+    if rejected:
+        out += ([""] if nad else []) + rejected
+    if not nad and not rejected:
         out.append("None stored.")
     out += ["", "## 5. Budget", "",
             f"Propose at most {budget} sentence edits. Fewer is right when fewer are earned. "

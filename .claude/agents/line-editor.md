@@ -63,7 +63,7 @@ Inside any edit, keep inline code, URLs, link targets, identifiers and contract 
 - Keep the author's terms, code, links and quoted text unchanged.
 - Propose at most the brief's budget of sentence edits. Paragraph proposals and queries are not counted.
 - For a range run, edit only inside the range.
-- Never propose an edit the brief lists as not a defect.
+- Never propose an edit the brief lists as not a defect, nor any edit that makes the same change as one it lists: a longer or shorter old string around the same words is the same change.
 - A rule the brief marks query-only becomes a query. A rule marked editor's-note-only goes in the note.
 - Ask the author for anything only the author knows (a source, a figure, intent) as a query. Never supply it.
 - A query never carries replacement wording. It asks; the author writes.

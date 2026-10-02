@@ -374,7 +374,7 @@ def test_a_dry_run_names_what_would_be_rejected_and_what_would_be_skipped_and_re
 ) -> None:
     tracked(repo)
     work, _ = start(prose, repo, [E1, E2, edit(3, "is quite simple", "x")])
-    out = review_ok(prose, "apply", "--work", str(work), "--accept", "1, 3", "--dry-run")
+    out = review_ok(prose, "apply", "--work", str(work), "--accept", "1, 3", "--reject", "2", "--dry-run")
     assert [e["n"] for e in out["reject"]] == [2] and out["stores_rejections"] is True
     assert {s["n"]: s["cause"] for s in out["would_skip"]} == {1: "overlap", 3: "overlap"}
     assert out["would_apply"] == []
@@ -401,7 +401,7 @@ def test_edits_that_were_never_shown_inline_are_not_stored_as_rejections_when_no
         edit(5, "the queue drains in order and", "Q"),
     ]
     work, _ = start(prose, repo, edits, text=text)
-    out = review_ok(prose, "apply", "--work", str(work), "--accept", "1, 4")
+    out = review_ok(prose, "apply", "--work", str(work), "--accept", "1, 4", "--reject", "rest")
     assert out["rejected"] == [2]
     assert [u["n"] for u in out["unplaced"]] == [3, 5]  # not accepted, never shown inline: neither applied nor stored
     assert [a["n"] for a in out["applied"]] == [1, 4]  # accepted alone, one of an overlapping pair applies
@@ -544,7 +544,7 @@ def test_a_failed_log_keeps_work_and_log_retry_sends_it_so_the_session_is_not_lo
     f = tracked(repo)
     work, _ = start(prose, repo, [E1, E2])
     env = {**prose.env, **_flaky_nx(tmp_path, fail_when="log/")}
-    proc = run_review(prose, "apply", "--work", str(work), "--accept", "1", env=env)
+    proc = run_review(prose, "apply", "--work", str(work), "--accept", "1", "--reject", "2", env=env)
     assert proc.returncode == 0, proc.stderr
     out = json.loads(proc.stdout)
     assert out["log"] is None and out["log_error"] and "log-retry" in out["log_retry"] and str(work) in out["log_retry"]

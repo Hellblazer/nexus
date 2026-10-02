@@ -209,7 +209,7 @@ def test_a_range_suffix_is_parsed_and_every_record_keys_on_the_bare_path(prose: 
     out = prose.ok("reject", "docs/x.md:2-3", "--old", OLD_C, "--new", "z")
     assert out["range"] == {"start": 2, "end": 3}
     assert t2_titles(REPO_PROJECT) == ["doc/docs/x.md"]
-    whole = prose.ok("filter", "docs/x.md", stdin=_proposal(OLD_C, "kept"))
+    whole = prose.ok("filter", "docs/x.md", stdin=_proposal((OLD_C, "z"), "kept"))
     assert [e["old"] for e in whole["edits"]] == ["kept"]
     assert [e["old"] for e in prose.ok("rejections", "docs/x.md:1-1")["rejections"]] == [OLD_C]
 
@@ -492,12 +492,15 @@ NEW_A = "  The cache matters.  "
 OLD_C = "A different sentence entirely."
 
 
-def _proposal(*olds: str) -> dict:
+def _proposal(*edits: str | tuple[str, str]) -> dict:
+    """A proposal; an item is an old string (its new string is "new<i>") or an (old, new) pair. A stored
+    rejection drops an edit only when the change is the same, so a test that expects a drop names the new text."""
+    pairs = [e if isinstance(e, tuple) else (e, f"new{i}") for i, e in enumerate(edits)]
     return {
         "voice_card": "vc",
         "note": "n",
         "paragraphs": [{"n": 1, "action": "keep", "paragraphs": "P1", "advice": ""}],
-        "edits": [{"n": i + 1, "old": o, "new": f"new{i}", "reason": "r"} for i, o in enumerate(olds)],
+        "edits": [{"n": i + 1, "old": o, "new": n, "reason": "r"} for i, (o, n) in enumerate(pairs)],
         "queries": [{"n": 1, "anchor": "a", "text": "q"}],
     }
 
@@ -512,7 +515,7 @@ def test_reject_filter_list_remove_journey(prose: Prose) -> None:
 
     # The filter drops the stored old string and passes a different one; the rest of
     # the proposal is untouched and edit numbers keep their meaning (a gap remains).
-    out = prose.ok("filter", doc, stdin=_proposal(OLD_A, OLD_C))
+    out = prose.ok("filter", doc, stdin=_proposal((OLD_A, NEW_A), OLD_C))
     assert [e["old"] for e in out["edits"]] == [OLD_C]
     assert out["edits"][0]["n"] == 2
     assert out["dropped"] == [{"n": 1, "old": OLD_A, "cause": "rejected"}]
@@ -528,7 +531,7 @@ def test_reject_filter_list_remove_journey(prose: Prose) -> None:
     assert [(r["n"], r["old"]) for r in listed] == [(1, OLD_A), (2, OLD_C)]
     after = prose.ok("rejections", doc, "--remove", "1")["rejections"]
     assert [(r["n"], r["old"]) for r in after] == [(1, OLD_C)]
-    restored = prose.ok("filter", doc, stdin=_proposal(OLD_A, OLD_C))
+    restored = prose.ok("filter", doc, stdin=_proposal((OLD_A, NEW_A), (OLD_C, "z")))
     assert [e["old"] for e in restored["edits"]] == [OLD_A]
     assert [d["old"] for d in restored["dropped"]] == [OLD_C]
 
@@ -543,20 +546,21 @@ def test_reject_filter_list_remove_journey(prose: Prose) -> None:
     assert bad.returncode != 0 and "7" in bad.stderr
 
 
-def test_rejecting_the_same_old_string_again_replaces_it_in_place(prose: Prose) -> None:
+def test_rejecting_the_same_change_again_replaces_it_in_place(prose: Prose) -> None:
     doc = "docs/x.md"
     prose.ok("reject", doc, "--old", "X", "--new", "first")
     prose.ok("reject", doc, "--old", "Y", "--new", "y")
-    prose.ok("reject", doc, "--old", "X", "--new", "second")
+    prose.ok("reject", doc, "--old", "X", "--new", "first")  # the same change: the entry is replaced, not repeated
+    prose.ok("reject", doc, "--old", "X", "--new", "second")  # another replacement of X is another change
     listed = prose.ok("rejections", doc)["rejections"]
-    assert [(r["n"], r["old"], r["new"]) for r in listed] == [(1, "X", "second"), (2, "Y", "y")]
+    assert [(r["n"], r["old"], r["new"]) for r in listed] == [(1, "X", "first"), (2, "Y", "y"), (3, "X", "second")]
 
 
 def test_a_pure_cut_is_a_valid_rejection_with_an_empty_new_string(prose: Prose) -> None:
     doc = "docs/x.md"
     prose.ok("reject", doc, "--old", OLD_C, "--new", "")
     assert t2_json(REPO_PROJECT, "doc/docs/x.md")["rejections"][0]["new"] == ""
-    out = prose.ok("filter", doc, stdin=_proposal(OLD_C))
+    out = prose.ok("filter", doc, stdin=_proposal((OLD_C, "")))
     assert out["edits"] == [] and out["dropped"][0]["old"] == OLD_C
     empty_old = prose.run("reject", doc, "--old", "", "--new", "x")
     assert empty_old.returncode == 1
@@ -876,7 +880,7 @@ def test_non_ascii_survives_a_non_utf8_locale(prose: Prose) -> None:
     assert reject.returncode == 0, reject.stderr
     assert t2_json(REPO_PROJECT, "doc/docs/x.md")["rejections"][0]["old"] == old
     filt = prose.run("filter", "docs/x.md", env=env,
-                     stdin=json.dumps(_proposal(old), ensure_ascii=False))
+                     stdin=json.dumps(_proposal((old, "It works.")), ensure_ascii=False))
     assert filt.returncode == 0, filt.stderr
     assert json.loads(filt.stdout)["dropped"][0]["old"] == old
 
