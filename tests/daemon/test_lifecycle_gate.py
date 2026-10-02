@@ -146,6 +146,12 @@ _FLOCK_ALLOWED_MODULES = frozenset({
     # --auto` runs do not stack backfills on one tenant. A holder that loses
     # the race defers; no lease, no heartbeat, no daemon-scope election.
     "upgrade_ladder/rungs/rdr192_manifest_backfill.py",
+    # MiniLM ONNX first-use provisioning lock (nexus-ccre5): a blocking
+    # critical section on <cache>/.ensure.lock so concurrent cold-cache callers
+    # (eight xdist workers, several nx processes) download and publish the
+    # model once. Waiters re-check and take the holder's result; no lease, no
+    # heartbeat, no daemon-scope election.
+    "db/minilm_direct.py",
 })
 
 
