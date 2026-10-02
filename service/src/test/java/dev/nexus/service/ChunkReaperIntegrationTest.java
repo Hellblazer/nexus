@@ -36,6 +36,8 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.GC_AUDIT;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -967,6 +969,50 @@ class ChunkReaperIntegrationTest extends AtomicWriteTestBase {
         assertThat(inCollection(t, quarantineOf(c), h)).isTrue();
         assertThat(logs).anySatisfy(l -> assertThat(l).startsWith("WARN event=reaper_census_scope_much_larger")
             .contains("dry_run_total=1").contains("census_total=500"));
+    }
+
+    /**
+     * nexus-wbfpw.60: the REAL census must read the same chunk count the dry run does when one chash is named by many
+     * own-collection manifest rows (identical text shared by many documents, by design). It once counted join rows,
+     * so a collection of 2 chunks read 151: a false "much larger" warning on every pass, and, worse, a surplus that
+     * could cancel a genuine shortfall against the scope-below-dry-run refusal.
+     */
+    @Test
+    void aChashNamedByManyManifestRows_isOneChunkToTheCensus_noFalseMuchLargerWarning() throws Exception {
+        String t = newTenant();
+        openGate(t);
+        String c = col("knowledge");
+        String h = orphan(t, c, "x");
+        String shared = orphan(t, c, "shared-by-many");
+        int owners = 150;
+        try (Connection su = pg.createConnection("")) {
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            byte[] chash = Chash.fromHex(shared).toBytes();
+            for (int i = 0; i < owners; i++) {
+                String doc = "wbfpw60-owner-" + i;
+                ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
+                        CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
+                    .values(t, doc, "Owner " + doc, c).execute();
+                ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID,
+                        CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION,
+                        CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION)
+                    .values(t, doc, 0, chash, c).execute();
+            }
+        }
+        assertThat(countIn(t, c)).as("two chunks, however many manifest rows name one of them").isEqualTo(2);
+        assertThat(vectors.manifestLessCensusBounded(t, c, 1, 0, Duration.ofSeconds(60)).scopeChunkTotal())
+            .as("scope counts chunks, not chunk x own-manifest-row join rows").isEqualTo(2L);
+        assertThat(store.probe(t, c, Duration.ZERO, 60_000).total())
+            .as("and it agrees with the dry run's own count").isEqualTo(2L);
+
+        var run = new RunResult[1];
+        List<String> logs = captureLogsQuietly(() ->
+            run[0] = reaper(Settings.defaults(), t).runOnce(Duration.ZERO));
+
+        assertThat(run[0].tenant(t).collection(c).moved()).isEqualTo(1);
+        assertThat(inCollection(t, quarantineOf(c), h)).isTrue();
+        assertThat(logs).noneSatisfy(l -> assertThat(l)
+            .containsAnyOf("reaper_census_scope_much_larger", "reaper_census_scope_grew"));
     }
 
     @Test

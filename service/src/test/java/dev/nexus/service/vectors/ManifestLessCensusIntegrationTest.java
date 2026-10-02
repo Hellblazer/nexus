@@ -545,6 +545,53 @@ class ManifestLessCensusIntegrationTest {
     }
 
     /**
+     * nexus-wbfpw.60: identical chunk text shared by several documents collapses to ONE chunk row that is named
+     * by one own-collection manifest row PER document, by design. {@code scope_chunk_total} counts chunks, so that
+     * chash counts once however many manifest rows name it. The census once built its base by LEFT JOINing the
+     * own-collection manifest, so the chash contributed one base row per naming manifest row and scope counted
+     * join rows (production, 2026-10-02: code__1-15 held 5,641 chunks and read 8,913). An inflated scope hides a
+     * genuine shortfall from the reaper's scope-below-dry-run refusal, so the pin is exactness, not "close".
+     * The bucket totals count chunks too: a manifest-less chunk is by definition named by no own-collection row.
+     */
+    @Test
+    void aChashNamedByManyOwnCollectionManifestRows_countsOnceInScope_andLeavesTheBucketsUnchanged() throws Exception {
+        String shared = "knowledge__wbfpw60-shared__minilm-l6-v2-384__v1";
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, shared);
+        }
+        String sharedChash = ch("wbfpw60-shared-by-three");
+        String soloChash = ch("wbfpw60-solo");
+        String leftover = ch("wbfpw60-leftover");
+        for (String d : List.of("wbfpw60-doc-a", "wbfpw60-doc-b", "wbfpw60-doc-c")) registerDoc(d, shared);
+        vecRepo.upsertChunks(TENANT, shared, List.of(sharedChash, soloChash), List.of("shared text", "solo text"),
+            List.of(Map.of(), Map.of()));
+        // Three documents name the SAME chash; doc-a also names a second chunk. Four own-collection manifest rows,
+        // two chunks.
+        catalogRepo.writeManifest(TENANT, "wbfpw60-doc-a", shared, List.of(
+            Map.<String, Object>of("position", 0, "chash", sharedChash, "chunk_index", 0),
+            Map.<String, Object>of("position", 1, "chash", soloChash, "chunk_index", 1)));
+        catalogRepo.writeManifest(TENANT, "wbfpw60-doc-b", shared, List.of(
+            Map.<String, Object>of("position", 0, "chash", sharedChash, "chunk_index", 0)));
+        catalogRepo.writeManifest(TENANT, "wbfpw60-doc-c", shared, List.of(
+            Map.<String, Object>of("position", 0, "chash", sharedChash, "chunk_index", 0)));
+        // One genuine lost-reap leftover of doc-a, written AFTER its manifest so no sweep can take it.
+        vecRepo.upsertChunks(TENANT, shared, List.of(leftover), List.of("leftover text"),
+            List.of(Map.of("catalog_doc_id", "wbfpw60-doc-a")));
+
+        var result = vecRepo.manifestLessCensus(TENANT, shared, 300, 0);
+
+        assertThat(result.scopeChunkTotal())
+            .as("three chunks live in this collection; four manifest rows name two of them")
+            .isEqualTo(3L);
+        assertThat(result.returned()).isEqualTo(1);
+        assertThat(result.chashes().get("superseded")).containsExactly(leftover);
+        assertThat(result.totals().get("superseded")).isEqualTo(1L);
+        for (String bucket : List.of("legacy-unmanifested", "dead-owner", "no-owner", "unclassified")) {
+            assertThat(result.totals().get(bucket)).as(bucket).isEqualTo(0L);
+        }
+    }
+
+    /**
      * Round-1 fix (critic + code-review Significant): a wrong tenant, or an
      * unknown/typo'd collection, must be distinguishable from a genuinely clean
      * census. {@code scope_chunk_total=0} is that signal -- an operator seeing
