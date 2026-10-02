@@ -1686,18 +1686,19 @@
         a fraction floor on the move, quarantine (never a hard delete), an
         actor 'engine-reaper' gc_audit row, and a quarantined_by tag on every moved
         chunk; and nexus.reaper_expire_quarantine, the engine's expiry of ONLY the
-        chunks that carry that tag, with no fraction floor (Sam, 2026-10-01). vectors-023 is reserved for the
-        nexus-wbfpw.35 text-gate probe (unlanded). Placed after
+        chunks that carry that tag, with no fraction floor (Sam, 2026-10-01). vectors-023 is the
+        nexus-wbfpw.35 text-gate probe: it landed later and is included below, after fk-006. Placed after
         vectors-022, before the grants blocks.
     -->
     <include file="db/changelog/vectors-024-reaper-quarantine-chunks.xml"/>
 
     <!--
-        nexus-2x9xa (RDR-192 Step 9 Day-2): nexus.quarantine_restore_chunks, the quarantine RESTORE verb's
-        move: the named chashes go from the quarantine sibling back to the origin with no manifest row
-        required, under the exclusive sweep gate, in one statement, with a fresh last_written_at so the
-        restored chunk is not immediately reapable and a quarantine_restore gc_audit row. Placed after
-        vectors-024 (vectors-023 belongs to another branch), before the grants blocks.
+        nexus-wbfpw.49 (RDR-192 Step 9 Day-2, first landed under nexus-2x9xa): nexus.quarantine_restore_chunks,
+        the quarantine RESTORE verb's move: the named chashes go from the quarantine sibling back to the origin
+        with no manifest row required, under the exclusive sweep gate, in one statement, with a fresh
+        last_written_at so the restored chunk is not immediately reapable and a quarantine_restore gc_audit row,
+        plus the reattach classifier. Placed after vectors-024 (vectors-023 landed later, below), before the
+        grants blocks.
     -->
     <include file="db/changelog/vectors-025-quarantine-restore-chunks.xml"/>
 
@@ -1706,7 +1707,8 @@
         (a released function, catalog-033-3) skips the rows the reaper tagged, so the
         client expires only what the client moved and the engine only what it moved.
         New changeset, never an edit of the released one. vectors-025 is the restore
-        verb's (nexus-wbfpw.49) and vectors-023 is reserved; this is 026. Placed after
+        verb's (nexus-wbfpw.49) and vectors-023 (the text-gate probe) is included below, after fk-006; this is
+        026. Placed after
         vectors-024, before the grants blocks.
     -->
     <include file="db/changelog/vectors-026-gc-expire-quarantine-skips-engine-rows.xml"/>

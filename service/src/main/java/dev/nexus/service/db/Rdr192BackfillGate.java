@@ -30,9 +30,9 @@ import org.slf4j.LoggerFactory;
  * the intended safe outcome, not a defect to route around.
  *
  * <p>The reaper (nexus-2x9xa) calls {@link #requireComplete} at the top of each
- * pass, per tenant, and skips the tenant on {@link BackfillIncompleteException}.
- * Nothing calls it yet: the reaper is a later bead and this one deliberately
- * does not wire or implement it.
+ * pass, per tenant, and skips the tenant on {@link BackfillIncompleteException}
+ * ({@code ChunkReaper.passTenant}). This class only reads the fact; it neither
+ * wires nor implements the reaper.
  */
 public final class Rdr192BackfillGate {
 
