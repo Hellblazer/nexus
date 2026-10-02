@@ -82,6 +82,17 @@ def _quarantine_name(origin: str) -> str:
     return quarantine_collection_name(origin)
 
 
+def _content_type(origin: str) -> str:
+    """The origin's content type (``knowledge``, ``docs``, ``code``, ``rdr``) from its catalog row, never from
+    its name (RDR-204). ``""`` when the row cannot be read, which the guidance treats as unknown. Patched in tests."""
+    from nexus.corpus import CollectionNotRegisteredError, collection_content_type  # noqa: PLC0415 — command-local import deferred to avoid CLI startup cost (nexus.corpus)
+
+    try:
+        return collection_content_type(origin)
+    except CollectionNotRegisteredError:
+        return ""
+
+
 def _instant(option: str, raw: str | None) -> str | None:
     """*raw* as the ``YYYY-MM-DDTHH:MM:SSZ`` the engine parses. A date or a datetime; a naive
     value is UTC."""
@@ -179,11 +190,12 @@ def _hidden(rows: list[dict], reattach: bool) -> list[dict]:
 _AMBIGUOUS = frozenset({"rival", "race"})
 
 
-def _hidden_kind(row: dict, origin: str) -> str:
+def _hidden_kind(row: dict, content_type: str) -> str:
     """The guidance class of a hidden chunk: one of ``not_attached`` (reattach was off), ``moved_on``,
-    ``indexing``, ``other_collection``, ``ambiguous``, ``no_key_note`` (a ``knowledge__`` chunk no document
-    names: a re-put can bring it back) or ``no_key_file`` (a chunk of an indexed file, which carries no key
-    at all: the file is what to re-index)."""
+    ``indexing``, ``other_collection``, ``ambiguous``, ``no_key_note`` (a ``knowledge`` chunk no document
+    names: a re-put can bring it back), ``no_key_file`` (a chunk of an indexed file, which carries no key
+    at all: the file is what to re-index) or ``no_key_unknown`` (the collection's content type could not be
+    read, so the guidance names both remedies)."""
     verdict = row.get("reattach")
     why = row.get("reason")
     if verdict == "attach":
@@ -196,10 +208,12 @@ def _hidden_kind(row: dict, origin: str) -> str:
         if why in _AMBIGUOUS:
             return "ambiguous"
         return "moved_on"
-    return "no_key_note" if origin.startswith("knowledge__") else "no_key_file"
+    if content_type == "knowledge":
+        return "no_key_note"
+    return "no_key_file" if content_type else "no_key_unknown"
 
 
-def _row_note(row: dict, dry_run: bool, origin: str = "") -> str:
+def _row_note(row: dict, dry_run: bool, content_type: str = "") -> str:
     """The NOTE column: what happened to the chunk's visibility, in words."""
     outcome = row["outcome"]
     verdict = row.get("reattach")
@@ -222,7 +236,7 @@ def _row_note(row: dict, dry_run: bool, origin: str = "") -> str:
     elif verdict == "owned":
         parts.append("already has a manifest row")
     elif verdict == "superseded":
-        kind = _hidden_kind(row, origin)
+        kind = _hidden_kind(row, content_type)
         if kind == "indexing":
             parts.append(f"{who} is mid index run: bytes only, hidden; run again when it finishes")
         elif kind == "other_collection":
@@ -243,7 +257,7 @@ def _row_note(row: dict, dry_run: bool, origin: str = "") -> str:
 
 def _recipes(collection: str, hidden: list[dict]) -> list[str]:
     """One re-put command per distinct owner document (or, with none named, per chunk title). Only for a
-    ``knowledge__`` collection, where a note is a document of its own and ``nx store put`` under its title is
+    ``knowledge`` collection, where a note is a document of its own and ``nx store put`` under its title is
     the way to give the text an owner; a file collection's chunks are re-made by indexing the file."""
     seen: dict[tuple[str | None, str | None], int] = {}
     for r in hidden:
@@ -288,7 +302,8 @@ def _partial(owners: list[dict]) -> list[dict]:
 
 
 def _render_text(origin: str, sibling: str, dry_run: bool, reattach: bool, rows: list[dict],
-                 totals: dict[str, int], audit_ids: list[int], source: dict | None, earliest: str | None) -> None:
+                 totals: dict[str, int], audit_ids: list[int], source: dict | None, earliest: str | None,
+                 content_type: str = "") -> None:
     if dry_run:
         click.echo(f"Dry run: nothing moved. Would restore from {sibling} into {origin}.")
     else:
@@ -300,7 +315,7 @@ def _render_text(origin: str, sibling: str, dry_run: bool, reattach: bool, rows:
         click.echo("")
         click.echo(f"{'CHASH':<64}  {'OUTCOME':<13}  NOTE")
         for row in rows[:_TABLE_ROWS]:
-            click.echo(f"{row['chash']}  {row['outcome']:<13}  {_row_note(row, dry_run, origin)}".rstrip())
+            click.echo(f"{row['chash']}  {row['outcome']:<13}  {_row_note(row, dry_run, content_type)}".rstrip())
         if len(rows) > _TABLE_ROWS:
             click.echo(f"... {len(rows) - _TABLE_ROWS} more rows (use --json for every row).")
         click.echo("")
@@ -334,7 +349,7 @@ def _render_text(origin: str, sibling: str, dry_run: bool, reattach: bool, rows:
             "collection.")
         groups: dict[str, list[dict]] = {}
         for r in hidden:
-            groups.setdefault(_hidden_kind(r, origin), []).append(r)
+            groups.setdefault(_hidden_kind(r, content_type), []).append(r)
         for kind, members in groups.items():
             n = len(members)
             what = f"{n} chunk{'s' if n != 1 else ''}"
@@ -358,6 +373,10 @@ def _render_text(origin: str, sibling: str, dry_run: bool, reattach: bool, rows:
                            "note under the same title:")
                 for line in _recipes(origin, members):
                     click.echo(line)
+            elif kind == "no_key_unknown":
+                click.echo(f"\n{what}: no live document names them. If this collection holds notes, re-put your own "
+                           "copy of each under the same title (`nx store put - --collection C --title 'T'`); if it "
+                           "holds indexed files, re-index the owning file (`nx index repo --force`).")
             else:
                 click.echo(f"\n{what}: the chunks of an indexed file carry no key naming their document, so the "
                            "engine cannot tell which one they belong to. The owning file is probably still indexed "
@@ -549,7 +568,8 @@ def restore_cmd(collection: str, chashes: tuple[str, ...], audit_id: int | None,
         click.echo(json.dumps(doc, indent=2))
     else:
         if rows or not failure:
-            _render_text(collection, sibling, dry_run, reattach, rows, totals, audit_ids, source, earliest)
+            _render_text(collection, sibling, dry_run, reattach, rows, totals, audit_ids, source, earliest,
+                         _content_type(collection) if hidden_rows else "")
     if failure:
         click.echo(failure[0], err=True)
         sys.exit(failure[1])

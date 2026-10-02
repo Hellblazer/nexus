@@ -134,8 +134,10 @@ def _page(rows, *, audit_id=None, dry_run=False, source=None, next_after=None) -
 
 class _Stub:
     def __init__(self, pages=None, error: Exception | None = None, error_after: int | None = None,
-                 origin: str = ORIGIN):
+                 origin: str = ORIGIN, content_type: str = "knowledge"):
         self.origin = origin
+        #: what the origin's catalog row says (the verb reads it from the row, never from the name)
+        self.content_type = content_type
         self.pages = list(pages or [])
         self.error = error
         #: raise *error* on the call after this many pages were served (None: on the first call)
@@ -152,7 +154,8 @@ class _Stub:
 
 def _run(runner: CliRunner, stub: _Stub, *args: str):
     with patch.object(t3_quarantine, "_make_t3", return_value=stub), \
-         patch.object(t3_quarantine, "_quarantine_name", return_value=SIBLING):
+         patch.object(t3_quarantine, "_quarantine_name", return_value=SIBLING), \
+         patch.object(t3_quarantine, "_content_type", return_value=stub.content_type):
         return runner.invoke(t3, ["quarantine", "restore", "--collection", stub.origin, *args])
 
 
@@ -215,12 +218,12 @@ class TestCli:
         assert "backfill-manifest" not in out, "backfill does nothing for this class, so the output never suggests it"
 
     def test_a_file_collections_keyless_chunks_get_the_reindex_advice_never_a_store_put(self, runner) -> None:
-        origin = "docs__qrestore__voyage-context-3__v1"
+        origin = "docs__qrestore__bge-base-en-v15-768__v1"
         a, b = _chash("a"), _chash("b")
         stub = _Stub([_page([
             _hidden_row(a, verdict="no_live_owner", chunk_title="README.md chunk"),
             _hidden_row(b, verdict="no_position", owner="1.2.4", owner_title="Big doc"),
-        ])], origin=origin)
+        ])], origin=origin, content_type="docs")
 
         result = _run(runner, stub, "--chash", a, "--chash", b)
 
@@ -229,6 +232,16 @@ class TestCli:
         assert "nx store put" not in out, "a store put mints a stray note in a file collection and fixes nothing"
         assert "probably still indexed but its chunks carry no key" in out
         assert "nx index repo --force" in out
+
+    def test_an_unreadable_content_type_names_both_remedies_never_guesses_one(self, runner) -> None:
+        a = _chash("a")
+        stub = _Stub([_page([_hidden_row(a, verdict="no_live_owner", chunk_title="x")])], content_type="")
+
+        result = _run(runner, stub, "--chash", a)
+
+        assert result.exit_code == 3, result.output
+        assert "If this collection holds notes" in result.output and "re-index the owning file" in result.output
+        assert "# owner" not in result.output and "no live owner named" not in result.output, "no per-chunk recipe"
 
     def test_each_superseded_reason_gets_its_own_words(self, runner) -> None:
         hs = [_chash(str(i)) for i in range(5)]
