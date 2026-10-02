@@ -273,7 +273,7 @@ def test_the_client_expiry_runs_over_every_sibling_the_engine_resolves(runner, r
     """nexus-wbfpw.58: chunks a client moved under an earlier name of the origin (the catalog row's owner_id
     was rewritten since, catalog-044-3) sit in a sibling the row no longer derives, and carry no
     quarantined_by tag for the reaper to expire. The verb expires from that sibling too."""
-    legacy = "quarantine-knowledge__legacy-owner__voyage-context-3__v1"
+    legacy = _QUARANTINE.replace("__nexus-1-1__", "__legacy-owner__")
     engine = _Engine(total=10, reapable=[], expire={"expired": 2, "refused": 0}, siblings=[_QUARANTINE, legacy])
     result = _invoke(runner, real_client, engine, ["--no-dry-run", "--yes"])
     assert result.exit_code == 0, result.output
@@ -291,9 +291,9 @@ def test_an_index_path_prune_sends_no_sibling_probe(real_client):
     is an unindexed scan engine-side. nexus-wbfpw.64 retires the probe; ``nx t3 gc`` is the one caller of it."""
     from nexus.indexer import _prune_collection_serverside
 
-    row_derived = "quarantine-knowledge__rewritten-1-9__voyage-context-3__v1"
+    row_derived = _QUARANTINE.replace("__nexus-1-1__", "__rewritten-1-9__")
     engine = _Engine(total=10, reapable=[], expire={"expired": 1, "refused": 0},
-                     siblings=["quarantine-knowledge__legacy__voyage-context-3__v1"])
+                     siblings=[_QUARANTINE.replace("__nexus-1-1__", "__legacy__")])
     with patch("nexus.db.http_vector_client._post", engine.post):
         assert _prune_collection_serverside(real_client, _COLL, row_derived, "2026-01-01T00:00:00Z") is True
     assert _PROBE not in engine.paths(), engine.paths()

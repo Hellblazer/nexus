@@ -189,6 +189,12 @@ def test_t3_gc_service_mode_real_client(tmp_path, runner, real_client, monkeypat
         if path == "/v1/vectors/gc/quarantine-orphans":
             return {"moved": 1, "sample": [{"chash": chash, "title": "t"}], "remaining": 0,
                     "row_limit": body.get("row_limit")}
+        if path == "/v1/vectors/gc/quarantine-restore":
+            # The sibling probe (nexus-wbfpw.58): a dry run that selects nothing and answers the
+            # engine's sibling set. Here it names only the sibling the row already derives.
+            return {"origin_collection": _KNOWLEDGE, "dry_run": True, "audit_id": None, "audit_ids": [],
+                    "quarantine_collection": f"quarantine-{_KNOWLEDGE}",
+                    "quarantine_collections": [f"quarantine-{_KNOWLEDGE}"], "chashes": {}}
         if path == "/v1/vectors/gc/expire-quarantine":
             return {"expired": 0, "refused": 0}
         raise AssertionError(f"unexpected path {path}")
@@ -219,9 +225,12 @@ def test_t3_gc_service_mode_real_client(tmp_path, runner, real_client, monkeypat
         "/v1/vectors/reapable",
         "/v1/vectors/manifest-less-census",  # re-read immediately before the move
         "/v1/vectors/gc/quarantine-orphans",
+        "/v1/vectors/gc/quarantine-restore",  # the sibling probe (nexus-wbfpw.58), a dry run
         "/v1/vectors/gc/expire-quarantine",  # the client expiry of the sibling it just filled
     ]
-    move = posted[-2][1]
+    probe = posted[-2][1]
+    assert probe["dry_run"] is True and probe["limit"] == 1 and probe["after_chash"] == "f" * 64
+    move = posted[-3][1]
     assert move["collection"] == _KNOWLEDGE
     assert move["quarantine_collection"].startswith("quarantine-")
 
