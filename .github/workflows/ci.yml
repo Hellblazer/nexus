@@ -889,29 +889,48 @@ jobs:
     # out) from before scripts/build-gate-jar.sh through the end of pytest, so CI
     # and a hand run cannot overlap at any stage. The lock file is cross-user
     # because the directory is group nx-suite 2775 and flock opens it read-only.
-    # The suite lease stays: it still serializes a pytest-only hand run that
-    # does not take the box lock. No flock on the host is a host defect and
-    # fails closed (the toolchain preflight and the step both refuse). Nothing
+    # The suite lease stays: this job's own pytest takes it inside the box
+    # lock. A hand run that took only the suite lease (a bare pytest) would skip
+    # the box lock and the priority marker, and would hold the lease this job's
+    # pytest needs after it took the box lock, so it is not a supported hand-run
+    # form; hand runs go through scripts/qwen-hand-run.sh. No flock on the host
+    # is a host defect and fails closed (the toolchain preflight and the step
+    # both refuse). Nothing
     # else heavy runs outside the lock: the setup steps before it (uv sync, the
     # model primes, the docling warm-up) are downloads and a venv, not a jar
     # build or a suite. Maven and engine suites do NOT run on this box at all
     # (hellmini takes them).
     #
     # CI PRIORITY (nexus-0wp30, Sam 2026-10-02). flock does not order its
-    # waiters, this job gives up after QWEN_BOX_LOCK_WAIT_SECONDS (1800) and a
-    # hand run takes about 11 minutes, so a queue of hand runs starved CI for
-    # about 24 minutes. The lock alone cannot express "CI first", so the job
-    # posts a marker, `$QWEN_SUITE_LEASE_ROOT/ci-waiting.<run>.<attempt>`, in the
-    # lease root before it waits, and removes it when it holds the lock or leaves
-    # the step any other way (see the step). scripts/qwen-hand-run.sh, the only
-    # documented hand-run entry, refuses to start while a fresh marker exists and
-    # yields the lock if CI arrived while it waited; it treats a marker older than
-    # 2100 s (this wait plus 300 s) as the leftover of a killed job. Keep that
-    # bound above QWEN_BOX_LOCK_WAIT_SECONDS: tests/test_pytest_gate_qwen_route.py
-    # pins it. The worst case CI still waits is one hand run already holding the
-    # lock when CI arrives (about 11 minutes warm, about 20 cold), which is inside
-    # the wait. A hand run that starts during this job's setup steps, before the
-    # marker is posted, can also take the lock first; that is the same bounded wait.
+    # waiters and this job gives up after QWEN_BOX_LOCK_WAIT_SECONDS (1800), so
+    # a queue of hand runs starved CI for about 24 minutes. The lock alone cannot
+    # express "CI first". So the job posts a marker, $CI_WAIT_MARKER
+    # (`$QWEN_SUITE_LEASE_ROOT/ci-waiting.<run>.<attempt>`, named once in the env
+    # below), in the lease root before it waits, and HOLDS A KERNEL LOCK ON IT
+    # for as long as it is queued. The lock is the liveness signal, not the
+    # file's age: scripts/qwen-hand-run.sh, the only supported hand-run entry,
+    # treats a marker as live only while it cannot take a shared lock on it, and
+    # the kernel drops the lock when this process dies, SIGKILL included, so a
+    # killed job stops blocking hand runs at once. The wrapper falls back to the
+    # file's mtime (2100 s, this wait plus 300 s) only where it cannot test the
+    # lock; keep that bound above QWEN_BOX_LOCK_WAIT_SECONDS, which
+    # tests/test_pytest_gate_qwen_route.py pins. The file is removed the moment
+    # the step holds the box lock (CI queued becomes CI running), by the step's
+    # EXIT trap on every other way out, and by the always() step after it. A
+    # cancel is handled in the step: the lock wait is a background job the step
+    # `wait`s on, because bash defers a trapped signal until a foreground child
+    # ends, and a cancel while queued is the common one. fd 8, the marker lock,
+    # is closed for that job so a waiting flock, the jar build or an orphan never
+    # keeps the marker looking live. What CI can still wait on is a hand run
+    # already HOLDING the lock when CI arrives, or one that started during this
+    # job's setup steps, before the marker exists: both are capped by the
+    # wrapper's own hold limit (QWEN_HAND_RUN_HOLD_SECONDS, 1500 s, below this
+    # wait), so neither can outrun it. Posting the marker earlier, in a first
+    # step, was considered and not done: a lock cannot outlive the step that
+    # holds it, so it would need a background holder whose fate under the
+    # runner's step and job cleanup is unmeasured, and an orphaned holder would
+    # block hand runs until its own timeout. How long a run takes at -n 8 is
+    # not yet measured, so no duration is stated here.
     #
     # LABELS. `[self-hosted, Linux, X64, qwen-linux]` is the full label set the
     # runner carries (read from the repository's runner list on 2026-10-01):
@@ -983,6 +1002,10 @@ jobs:
       # THE SHARED SUITE LEASE above). The lease step validates it and then
       # exports NX_BUILD_LEASE_ROOT and NX_SUITE_LEASE_WAIT for the later steps.
       QWEN_SUITE_LEASE_ROOT: ${{ vars.QWEN_SUITE_LEASE_ROOT || '/var/lib/nx-suite-lease' }}
+      # The CI-priority marker (CI PRIORITY in the comment above), named ONCE here
+      # so the locked step and the always() cleanup step cannot disagree about it.
+      # The root expression is repeated because an env value cannot read a sibling.
+      CI_WAIT_MARKER: ${{ vars.QWEN_SUITE_LEASE_ROOT || '/var/lib/nx-suite-lease' }}/ci-waiting.${{ github.run_id }}.${{ github.run_attempt }}
       # How long the jar-build-plus-suite step waits for the box lock
       # ($QWEN_SUITE_LEASE_ROOT/box.lock, see THE BOX LOCK above) before it
       # fails naming the lock. Kept well under timeout-minutes so the failure is
@@ -1197,24 +1220,51 @@ jobs:
           fi
           lock="$QWEN_SUITE_LEASE_ROOT/box.lock"
           wait_s="$QWEN_BOX_LOCK_WAIT_SECONDS"
-          # CI PRIORITY (nexus-0wp30; see CI PRIORITY in the job comment). Post
-          # ci-waiting.<run>.<attempt> in the lease root BEFORE waiting on the
-          # lock, so a hand run (scripts/qwen-hand-run.sh) refuses to start, and
-          # yields the lock if it already holds it. It is dropped the moment this
-          # step holds the lock (inside the bash -c below) and by the EXIT trap on
-          # every other way out; TERM and INT reach that trap by exiting. A
-          # marker the trap could not remove (SIGKILL) goes stale by itself: the
-          # wrapper ignores one older than 2100 s.
-          marker="$QWEN_SUITE_LEASE_ROOT/ci-waiting.${GITHUB_RUN_ID:-norun}.${GITHUB_RUN_ATTEMPT:-0}"
+          # CI PRIORITY (nexus-0wp30; see CI PRIORITY in the job comment). The
+          # marker is $CI_WAIT_MARKER (ci-waiting.<run>.<attempt> in the lease
+          # root, named once in the job env), posted BEFORE waiting on the lock.
+          # Its liveness is a KERNEL LOCK this shell holds on fd 8 for as long as
+          # it is queued: scripts/qwen-hand-run.sh treats the marker as live only
+          # while it cannot take a shared lock on it, and the kernel drops the
+          # lock when this process dies, SIGKILL included, so no clock decides it.
+          # The file is dropped the moment this step holds the box lock (inside
+          # the bash -c below), by the EXIT trap on every other way out, and by the
+          # always() step after this one.
+          marker="$CI_WAIT_MARKER"
+          fpid=""
+          # TERM and INT (the runner's cancel) must end the wait AT ONCE. The
+          # lock wait below is a background job this shell `wait`s on, because
+          # bash defers a trapped signal until a FOREGROUND child ends, and the
+          # common cancel (a newer push) arrives while this step is queued. The
+          # trap stops the waiting flock and exits; the EXIT trap then removes
+          # the marker. The runner's process-tree kill is the backstop for a
+          # suite that is already running.
+          # shellcheck disable=SC2329  # called from the TERM and INT traps below
+          on_signal() {
+            if [ -n "$fpid" ]; then
+              pkill -TERM -P "$fpid" 2>/dev/null || true
+              kill "$fpid" 2>/dev/null || true
+            fi
+            exit "$1"
+          }
           trap 'rm -f "$marker"' EXIT
-          trap 'exit 143' TERM
-          trap 'exit 130' INT
-          if printf 'run=%s attempt=%s\n' "${GITHUB_RUN_ID:-norun}" "${GITHUB_RUN_ATTEMPT:-0}" 2>/dev/null > "$marker"; then
-            echo "CI priority marker $marker posted: hand runs started through scripts/qwen-hand-run.sh now yield to this job"
+          trap 'on_signal 143' TERM
+          trap 'on_signal 130' INT
+          # The other user (nxtest) tests the lock read-only, so the file must be
+          # readable by it whatever this account's umask is.
+          old_umask="$(umask)"
+          umask 022
+          # A blocking lock with a short wait, not -n: a hand run's own probe holds
+          # a shared lock for an instant, and a non-blocking take would lose to it.
+          if { exec 8>"$marker"; } 2>/dev/null && flock -w 10 -x 8; then
+            printf 'run=%s attempt=%s\n' "${GITHUB_RUN_ID:-norun}" "${GITHUB_RUN_ATTEMPT:-0}" >&8
+            echo "CI priority marker $marker posted and locked: hand runs started through scripts/qwen-hand-run.sh now yield to this job"
           else
-            echo "::warning::could not post the CI priority marker $marker (is the lease root writable?): a hand run will not yield to this job, so the lock wait may run long"
+            exec 8>&-
+            rm -f "$marker"
+            echo "::warning::could not post and lock the CI priority marker $marker (is the lease root writable?): a hand run will not yield to this job, so the lock wait may run long"
           fi
-          export CI_WAIT_MARKER="$marker"
+          umask "$old_umask"
           # A plain probe, only to say in the log whether this run will queue.
           if flock -n "$lock" true 2>/dev/null; then
             echo "box lock $lock is free; taking it for the jar build and the suite"
@@ -1227,10 +1277,16 @@ jobs:
           # and a red suite reports green. -rs puts every skip reason in the log
           # (see the floor step). The jar is cached on the exact service/ content.
           # `|| rc=$?` keeps the runner's `bash -e` from exiting on the 200 before
-          # the message below can name the lock.
+          # the message below can name the lock. The flock runs as a background
+          # job (see on_signal above) with fd 8 CLOSED for it, so the marker's
+          # lock is held by this shell alone: a waiting flock, the jar build or
+          # an orphan from the suite must never keep the marker looking live.
           rc=0
-          # shellcheck disable=SC2016  # $CI_WAIT_MARKER is meant to expand in the inner shell, from the exported variable
-          flock -w "$wait_s" -E 200 "$lock" bash -c 'set -euo pipefail; rm -f "$CI_WAIT_MARKER"; scripts/build-gate-jar.sh; uv run pytest tests/ -q -rs -n 8 --durations=25 | tee suite-output.txt' || rc=$?
+          # shellcheck disable=SC2016  # $CI_WAIT_MARKER is meant to expand in the inner shell, from the job env
+          flock -w "$wait_s" -E 200 "$lock" bash -c 'set -euo pipefail; rm -f "$CI_WAIT_MARKER"; scripts/build-gate-jar.sh; uv run pytest tests/ -q -rs -n 8 --durations=25 | tee suite-output.txt' 8>&- &
+          fpid=$!
+          wait "$fpid" || rc=$?
+          fpid=""
           if [ "$rc" -eq 200 ]; then
             echo "::error::could not take the box lock $lock within ${wait_s}s: a hand run or another job still holds it. Nothing was built or run. Re-run once the box is free (the lock is released when its holder's command ends)."
             exit 1
@@ -1250,6 +1306,17 @@ jobs:
         # 2% (a measured 25,700 means about 25,200). Until then do not read a
         # green floor as parity with the hosted shards.
         run: uv run python scripts/check_lint_leg_non_vacuity.py suite-output.txt --floor 20000 --label "qwen-linux full suite"
+
+      - name: Drop the CI priority marker (always)
+        if: always()
+        shell: bash
+        run: |
+          # A second path to the same end as the locked step's own EXIT trap, for
+          # the case that trap cannot cover: the step shell killed outright. (Even
+          # then the marker's kernel lock is gone with the process, so a hand run
+          # already treats it as dead; this removes the file.) Nothing there is
+          # fine; the marker is also removed inside the box lock.
+          rm -f -- "$CI_WAIT_MARKER"
 
       - name: Report substrate processes left behind (report only)
         if: always()

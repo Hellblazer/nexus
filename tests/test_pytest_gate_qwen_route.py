@@ -900,7 +900,7 @@ def test_every_route_by_result_combination_has_exactly_the_documented_outcome() 
 _BOX_STEP = "Build the stamped service jar and run the full suite"
 _HEAVY = re.compile(r"build-gate-jar\.sh|\bpytest\b|\bmvnw?\b|mvnw-leased")
 _FLOCK_CALL = re.compile(
-    r"""^\s*flock\s+(?P<opts>.*?)\s+"\$lock"\s+bash -c '(?P<inner>[^']*)'(?:\s*\|\|\s*rc=\$\?)?\s*$""", re.MULTILINE)
+    r"""^\s*flock\s+(?P<opts>.*?)\s+"\$lock"\s+bash -c '(?P<inner>[^']*)'\s+8>&-\s*&\s*$""", re.MULTILINE)
 
 
 def _code(run: str) -> str:
@@ -984,7 +984,11 @@ echo "$1:$m" >> "$FAKE_MARKERS"
     logmarkers.chmod(0o755)
     log = tmp_path / "calls.log"
     jar = work / "scripts" / "build-gate-jar.sh"
-    jar.write_text(f'#!{bash}\necho jar >> "$FAKE_LOG"\nlogmarkers jar\nexit {jar_rc}\n')
+    # fd 8 is the CI step's marker lock; it must not reach the jar build or the suite (nexus-0wp30 round 2).
+    # `{ : >&8; }` succeeds only when fd 8 is open, in any bash.
+    jar.write_text(f'#!{bash}\necho jar >> "$FAKE_LOG"\nlogmarkers jar\n'
+                   f'if {{ : >&8; }} 2>/dev/null; then echo open >> "$FAKE_FD8"; else echo closed >> "$FAKE_FD8"; fi\n'
+                   f'exit {jar_rc}\n')
     uv = bin_dir / "uv"
     uv.write_text(f'#!{bash}\necho "uv $*" >> "$FAKE_LOG"\necho "1 passed"\nexit {uv_rc}\n')
     jar.chmod(0o755)
@@ -995,8 +999,9 @@ echo "$1:$m" >> "$FAKE_MARKERS"
         fake.write_text(f'''#!{bash}
 echo "flock $*" >> "$FAKE_LOG"
 if [ "$1" = "-n" ]; then [ -z "${{FAKE_HELD:-}}" ]; exit; fi
+if [ "$1" = "-w" ] && [ "$3" = "-x" ]; then exit "${{FAKE_MARKER_LOCK_RC:-0}}"; fi   # the marker's own kernel lock
 logmarkers flock
-if [ -n "${{FAKE_BLOCK:-}}" ]; then sleep 60; fi
+if [ -n "${{FAKE_BLOCK:-}}" ]; then exec sleep 60; fi
 ecode="$4"; shift 5
 if [ -n "${{FAKE_TIMEOUT:-}}" ]; then exit "$ecode"; fi
 exec "$@"
@@ -1006,7 +1011,10 @@ exec "$@"
         real = shutil.which("flock")
         assert real
         (bin_dir / "flock").symlink_to(real)
-    env = {"PATH": str(bin_dir), "FAKE_LOG": str(log), "QWEN_SUITE_LEASE_ROOT": str(tmp_path / "lease"),
+    env = {"PATH": str(bin_dir), "FAKE_LOG": str(log), "FAKE_FD8": str(tmp_path / "fd8.log"),
+           "QWEN_SUITE_LEASE_ROOT": str(tmp_path / "lease"),
+           # the job env derives it from the run id and attempt (see the marker-name test below)
+           "CI_WAIT_MARKER": str(tmp_path / "lease" / _MARKER),
            "QWEN_BOX_LOCK_WAIT_SECONDS": _doc()["jobs"]["test-qwen"]["env"]["QWEN_BOX_LOCK_WAIT_SECONDS"]}
     return work, env
 
@@ -1085,6 +1093,12 @@ def test_the_real_flock_times_out_with_exit_200_on_a_lock_another_process_holds(
     assert _calls(env) == [], "the jar build and the suite must not start without the lock"
 
 
+_POLICY = ("Policy (Sam, 2026-10-02): agents' full suites use hellmini. qwentescence is CI's until item 10 of "
+           "`docs/contributing.md` § First run of the qwen-linux route (the overlap check) has been run green on "
+           "the host; after that a hand run there is supported only through `scripts/qwen-hand-run.sh`, and only "
+           "for a case that needs Linux.")
+
+
 def test_the_docs_state_n8_and_the_box_lock_hand_run_convention_and_no_stale_n12() -> None:
     # nexus-0wp30: a hand run goes ONLY through the wrapper, which yields to CI; the raw flock form is retired
     # from the docs because it takes the lock with no regard for a queued CI job.
@@ -1098,32 +1112,58 @@ def test_the_docs_state_n8_and_the_box_lock_hand_run_convention_and_no_stale_n12
         assert "box.lock" in text and "hellmini" in text and "-n 8" in text, name
         assert "agents' full suites" in flat, (name, "the interim policy: agents use hellmini")
         # the hand run PASSES the two variables; nxtest's .bashrc must not export them (the export leaked into tests)
-        flat = " ".join(text.split())
         assert "no longer exports them" in flat or "Do not export them from `nxtest`'s `.bashrc`" in flat, name
         for stale in ("one `-n 12` job", "xdist -n 12", "pytest tests/ -n 12", "under `-n 12`"):
             assert stale not in text, (name, stale)
+
+
+def test_one_policy_statement_for_who_may_run_what_on_qwentescence_in_both_docs() -> None:
+    """Round 2 (critique S4): the policy was worded three ways. One sentence, verbatim, in both files."""
+    for name in ("AGENTS.md", "docs/contributing.md"):
+        flat = " ".join((_ROOT / name).read_text().split())
+        assert _POLICY in flat, (name, "the one policy statement is missing or reworded")
+
+
+def test_no_doc_blesses_a_hand_run_that_skips_the_box_lock() -> None:
+    """Round 2 (critique S3): a pytest-only hand run on the suite lease skips the box lock and the marker AND holds
+    the suite lease CI's pytest needs after it takes the box lock, a second starvation channel."""
+    for name in ("AGENTS.md", "docs/contributing.md", ".github/workflows/ci.yml"):
+        flat = " ".join((_ROOT / name).read_text().split())
+        assert "for pytest-only hand runs" not in flat and "serializes a pytest-only hand run" not in flat, name
+    for name in ("AGENTS.md", "docs/contributing.md"):
+        flat = " ".join((_ROOT / name).read_text().split())
+        assert "is not a supported hand-run form" in flat, (name, "say what is NOT supported: a raw flock, a bare pytest")
+
+
+def test_no_unmeasured_duration_is_stated_as_a_fact() -> None:
+    """Round 2 (critique S2): '11 minutes warm, 20 cold' was never measured at -n 8 (T2 howto: not yet timed)."""
+    for name in ("AGENTS.md", "docs/contributing.md", ".github/workflows/ci.yml", "scripts/qwen-hand-run.sh"):
+        flat = " ".join((_ROOT / name).read_text().split())
+        assert not re.search(r"about (11|20) min|11 minutes|20 cold|11 min warm", flat), name
 
 
 # ── CI priority on the box lock (nexus-0wp30, Sam 2026-10-02) ───────────────────────────────────────
 #
 # flock does not order its waiters, test-qwen gives up after 1800 s and a hand run takes about 11 minutes, so a
 # queue of hand runs starved CI for about 24 minutes. The remedy has two halves that these tests pin together:
-#   * test-qwen posts `ci-waiting.<run>.<attempt>` in the lease root BEFORE it waits on the box lock, drops it the
-#     moment it holds the lock, and drops it on every other way out of the step (success, timeout, failure, signal);
-#   * scripts/qwen-hand-run.sh, the only documented hand-run entry, refuses to start while a fresh marker exists,
-#     re-checks after it takes the lock and yields if CI arrived meanwhile, and treats a marker older than the CI
-#     wait bound plus a margin as the corpse of a cancelled job.
+#   * test-qwen posts `ci-waiting.<run>.<attempt>` in the lease root BEFORE it waits on the box lock, HOLDS A KERNEL
+#     LOCK ON IT for as long as it is queued (liveness is the lock, not a clock: the kernel drops it when the
+#     process dies, SIGKILL included), drops the marker the moment it holds the box lock, and on every other way out
+#     of the step (success, timeout, failure, signal, an always() cleanup step);
+#   * scripts/qwen-hand-run.sh, the only documented hand-run entry, treats a marker as live only while it cannot take
+#     a shared lock on it, re-checks after it takes the box lock and yields if CI arrived meanwhile, and caps its own
+#     hold time below CI's wait. mtime is the fallback only where the lock cannot be tested.
 
 _WRAPPER = Path(__file__).parent.parent / "scripts" / "qwen-hand-run.sh"
 _RUN_ID, _ATTEMPT = "4242", "2"
 _MARKER = f"ci-waiting.{_RUN_ID}.{_ATTEMPT}"
 
 
-def _prio_env(tmp_path: Path, **kw: int) -> tuple[Path, dict[str, str]]:
-    """_box_env plus an existing lease directory, a marker log and the run identity the marker is named from."""
-    work, env = _box_env(tmp_path, flock="fake", **kw)
+def _prio_env(tmp_path: Path, flock: str = "fake", **kw: int) -> tuple[Path, dict[str, str]]:
+    """_box_env plus an existing lease directory and a marker log."""
+    work, env = _box_env(tmp_path, flock=flock, **kw)
     (tmp_path / "lease").mkdir()
-    env.update(FAKE_MARKERS=str(tmp_path / "markers.log"), GITHUB_RUN_ID=_RUN_ID, GITHUB_RUN_ATTEMPT=_ATTEMPT)
+    env.update(FAKE_MARKERS=str(tmp_path / "markers.log"))
     return work, env
 
 
@@ -1136,6 +1176,29 @@ def _left_in_lease(tmp_path: Path) -> list[str]:
     return sorted(p.name for p in (tmp_path / "lease").iterdir())
 
 
+def test_the_marker_name_is_defined_once_in_the_job_env_from_the_run_and_attempt() -> None:
+    """The step and the always() cleanup both read $CI_WAIT_MARKER, so they cannot disagree about the name."""
+    env = _doc()["jobs"]["test-qwen"]["env"]
+    expr = env["CI_WAIT_MARKER"]
+    assert "github.run_id" in expr and "github.run_attempt" in expr and "/ci-waiting." in expr, expr
+    assert env["QWEN_SUITE_LEASE_ROOT"].strip() in expr, "the marker lives in the same lease root as the box lock"
+
+
+def test_the_step_locks_its_marker_before_waiting_closes_it_for_the_subtree_and_waits_on_the_flock_as_a_job() -> None:
+    run = _box_run()
+    assert 'marker="$CI_WAIT_MARKER"' in run
+    assert re.search(r"umask\s+022", run), "the marker must be readable by the other user: its lock is tested read-only"
+    assert re.search(r"exec 8>", run) and re.search(r'flock\s+-w\s+\d+\s+-x\s+8\b', run), "a kernel lock on fd 8"
+    assert run.index("exec 8>") < run.index('flock -w "$wait_s"'), "locked before the wait"
+    assert run.index("umask 022") < run.index("exec 8>"), "created under the explicit umask"
+    m = _flock_call(run)  # a background job with the marker fd closed: `... 8>&- &`
+    assert re.search(r'\bwait\b\s+"\$', run[m.end():]), "waited on, so a trapped signal is not deferred behind a foreground child"
+    assert re.search(r"trap\s+\S+.*\bEXIT\b", run), "an EXIT trap removes the marker on every way out"
+    assert re.search(r"trap\s+.*\bTERM\b", run) and re.search(r"trap\s+.*\bINT\b", run), "cancellation reaches the trap"
+    inner = m.group("inner")
+    assert inner.index('rm -f "$CI_WAIT_MARKER"') < inner.index("scripts/build-gate-jar.sh"), "dropped the moment the lock is held"
+
+
 def test_the_ci_step_posts_its_marker_before_waiting_and_drops_it_once_it_holds_the_lock(tmp_path: Path) -> None:
     work, env = _prio_env(tmp_path)
     proc = _run_box(work, env)
@@ -1143,6 +1206,24 @@ def test_the_ci_step_posts_its_marker_before_waiting_and_drops_it_once_it_holds_
     # present when flock is called (CI is QUEUED), gone when the jar build starts (CI is RUNNING)
     assert _seen_markers(env) == [f"flock: {_MARKER}", "jar:"]
     assert _left_in_lease(tmp_path) == []
+    assert "flock -w 10 -x 8" in _calls(env), "non-vacuity: the marker's kernel lock was taken (a blocking, short wait)"
+
+
+def test_the_marker_lock_does_not_reach_the_jar_build_or_the_suite(tmp_path: Path) -> None:
+    """fd 8 must be closed in the locked subtree, or an orphan there would keep the marker 'live' after CI left."""
+    work, env = _prio_env(tmp_path)
+    assert _run_box(work, env).returncode == 0
+    assert "flock -w 10 -x 8" in _calls(env), "non-vacuity: fd 8 existed to leak"
+    assert Path(env["FAKE_FD8"]).read_text().split() == ["closed"]
+
+
+def test_a_marker_that_cannot_be_locked_is_removed_and_warned_about_and_the_run_goes_on(tmp_path: Path) -> None:
+    """An unlocked marker is dead to the wrapper, so leaving it would only look like priority. Say so instead."""
+    work, env = _prio_env(tmp_path)
+    proc = _run_box(work, {**env, "FAKE_MARKER_LOCK_RC": "1"})
+    assert proc.returncode == 0, (proc.stdout, proc.stderr)
+    assert "::warning::" in proc.stdout and "ci-waiting" in proc.stdout
+    assert _seen_markers(env) == ["flock:", "jar:"], "no marker may be left for the wait"
 
 
 def test_the_ci_marker_is_dropped_when_the_lock_wait_times_out(tmp_path: Path) -> None:
@@ -1161,24 +1242,128 @@ def test_the_ci_marker_is_dropped_when_the_suite_or_the_jar_build_fails(tmp_path
     assert _left_in_lease(tmp_path) == []
 
 
-def test_a_cancelled_ci_step_drops_its_marker(tmp_path: Path) -> None:
-    """The runner cancels a step with SIGTERM (after SIGINT) to its process tree; the trap must clean up."""
-    import signal
-    import time
-
-    work, env = _prio_env(tmp_path)
+def _start_blocked_step(tmp_path: Path, *, flock: str, umask: int | None = None) -> tuple[subprocess.Popen[str], Path]:
+    """The CI step, blocked in its lock wait (fake flock sleeps; or real flock against a lock the test holds)."""
+    work, env = _prio_env(tmp_path, flock=flock)
     bash = shutil.which("bash")
     assert bash
-    proc = subprocess.Popen([bash, "-eo", "pipefail", "-c", _box_run()], cwd=work, env={**env, "FAKE_BLOCK": "1"},
-                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
+    env = {**env, "FAKE_BLOCK": "1"}
+    out = open(tmp_path / "step.out", "w")
+    # umask is inherited, so set it around the spawn (no preexec_fn: that forces a fork instead of posix_spawn)
+    previous = os.umask(umask) if umask is not None else None
+    try:
+        proc = subprocess.Popen([bash, "-eo", "pipefail", "-c", _box_run()], cwd=work, env=env, stdout=out, stderr=out,
+                                text=True, start_new_session=True)
+    finally:
+        if previous is not None:
+            os.umask(previous)
     marker = tmp_path / "lease" / _MARKER
-    deadline = time.monotonic() + 15
-    while not marker.exists() and time.monotonic() < deadline:
+    return proc, marker
+
+
+def _wait_for(pred, what: str, seconds: float = 15.0) -> None:  # type: ignore[no-untyped-def]
+    import time
+
+    deadline = time.monotonic() + seconds
+    while not pred() and time.monotonic() < deadline:
         time.sleep(0.05)
-    assert marker.exists(), "the marker must be posted while the step waits for the lock"
-    os.killpg(proc.pid, signal.SIGTERM)
-    proc.communicate(timeout=20)
-    assert not marker.exists(), "a cancelled job must not leave CI looking queued"
+    assert pred(), what
+
+
+def _group_alive(pgid: int) -> bool:
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+def _reap(proc: subprocess.Popen[str]) -> None:
+    import signal
+
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    proc.wait(timeout=20)
+
+
+@pytest.mark.parametrize("sig_name,rc", [("SIGTERM", 143), ("SIGINT", 130)])
+def test_a_cancelled_ci_step_drops_its_marker_when_only_the_step_shell_is_signalled(tmp_path: Path, sig_name: str, rc: int) -> None:
+    """Round 2 (both reviews): a trapped signal is deferred while bash waits on a FOREGROUND child, and the step sat in
+    `flock -w 1800` in the foreground. The old test signalled the whole process group, which kills that child too and
+    so could not see it. Signal ONLY the shell: the cleanup must run at once, not when the lock wait ends."""
+    import signal
+
+    proc, marker = _start_blocked_step(tmp_path, flock="fake")
+    try:
+        _wait_for(marker.exists, "the marker must be posted while the step waits for the lock")
+        os.kill(proc.pid, getattr(signal, sig_name))  # the shell only, not the group
+        assert proc.wait(timeout=10) == rc, "the step must leave at once on a cancel, not when the 60 s wait ends"
+        assert not marker.exists(), "a cancelled job must not leave CI looking queued"
+    finally:
+        _reap(proc)
+
+
+def test_the_marker_is_readable_by_the_other_user_whatever_the_runner_umask(tmp_path: Path) -> None:
+    """nxtest tests the marker's lock read-only, so it needs read permission; ghci's umask is not ours to assume."""
+    proc, marker = _start_blocked_step(tmp_path, flock="fake", umask=0o077)
+    try:
+        _wait_for(marker.exists, "the marker must be posted")
+        assert marker.stat().st_mode & 0o044 == 0o044, oct(marker.stat().st_mode)
+    finally:
+        _reap(proc)
+
+
+def _marker_is_locked(path: Path) -> bool:
+    """True when a shared lock on the file cannot be taken: what the hand-run wrapper's test amounts to."""
+    import fcntl
+
+    with open(path) as f:
+        try:
+            fcntl.flock(f, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        return False
+
+
+@pytest.mark.skipif(shutil.which("flock") is None, reason="util-linux flock is not installed here (macOS)")
+def test_the_real_flock_the_marker_is_locked_while_queued_and_unlocked_the_moment_the_step_is_killed(tmp_path: Path) -> None:
+    """The kernel lock IS the liveness signal: held while CI is queued, gone when the process dies (SIGKILL
+    included, which no trap survives), and not inherited by the flock child that is still waiting."""
+    import fcntl
+    import signal
+
+    proc, marker = _start_blocked_step(tmp_path, flock="real")
+    lease = tmp_path / "lease"
+    try:
+        with open(lease / "box.lock", "w") as held:
+            fcntl.flock(held, fcntl.LOCK_EX)
+            _wait_for(lambda: marker.exists() and _marker_is_locked(marker), "the queued step must hold a lock on its marker")
+            os.kill(proc.pid, signal.SIGKILL)
+            proc.wait(timeout=20)
+            assert marker.exists(), "SIGKILL runs no trap, so the file stays; its LOCK must not"
+            assert not _marker_is_locked(marker), "a killed CI step must not look queued: the waiting flock child must not hold it"
+    finally:
+        _reap(proc)
+
+
+@pytest.mark.skipif(shutil.which("flock") is None, reason="util-linux flock is not installed here (macOS)")
+def test_the_real_flock_a_cancelled_queued_step_is_gone_at_once_and_leaves_no_waiter_holding_the_marker(tmp_path: Path) -> None:
+    import fcntl
+    import signal
+
+    proc, marker = _start_blocked_step(tmp_path, flock="real")
+    try:
+        with open(tmp_path / "lease" / "box.lock", "w") as held:
+            fcntl.flock(held, fcntl.LOCK_EX)
+            _wait_for(lambda: marker.exists() and _marker_is_locked(marker), "queued")
+            os.kill(proc.pid, signal.SIGTERM)
+            assert proc.wait(timeout=10) == 143
+            assert not marker.exists()
+            _wait_for(lambda: not _group_alive(proc.pid), "the waiting flock child must be killed with the step")
+    finally:
+        _reap(proc)
 
 
 def test_an_unwritable_lease_root_warns_loudly_but_does_not_fail_the_step(tmp_path: Path) -> None:
@@ -1189,31 +1374,48 @@ def test_an_unwritable_lease_root_warns_loudly_but_does_not_fail_the_step(tmp_pa
     assert "::warning::" in proc.stdout and "ci-waiting" in proc.stdout
 
 
-def test_the_marker_is_posted_before_the_flock_and_removed_inside_it_and_by_a_trap() -> None:
-    run = _box_run()
-    assert re.search(r"ci-waiting\.\$\{GITHUB_RUN_ID[^}]*\}\.\$\{GITHUB_RUN_ATTEMPT[^}]*\}", run), "named per run and attempt"
-    assert run.index("ci-waiting") < run.index("flock -w"), "posted before the wait"
-    assert re.search(r"trap\s+\S+.*\bEXIT\b", run), "an EXIT trap removes it on every way out"
-    assert re.search(r"trap\s+.*\bTERM\b", run) and re.search(r"trap\s+.*\bINT\b", run), "cancellation reaches the trap"
-    inner = _flock_call(run).group("inner")
-    assert inner.index("rm -f") < inner.index("scripts/build-gate-jar.sh"), "dropped the moment the lock is held"
+def _always_step() -> dict:
+    steps = [s for s in _doc()["jobs"]["test-qwen"]["steps"] if str(s.get("if", "")).strip() == "always()"
+             and "CI_WAIT_MARKER" in str(s.get("run", ""))]
+    assert len(steps) == 1, "exactly one always() step must drop the CI priority marker"
+    return steps[0]
+
+
+def test_an_always_step_after_the_locked_step_drops_the_marker_even_if_the_step_shell_was_killed(tmp_path: Path) -> None:
+    """Round 2: a second cleanup path. The step's own trap cannot run on SIGKILL; this step is the runner's."""
+    steps = _doc()["jobs"]["test-qwen"]["steps"]
+    names = [s.get("name", "") for s in steps]
+    always = _always_step()
+    assert names.index(always["name"]) > names.index(_qwen_step(_BOX_STEP)["name"])
+    (tmp_path / "lease").mkdir()
+    marker = tmp_path / "lease" / _MARKER
+    marker.write_text("run=1\n")
+    bash = shutil.which("bash")
+    assert bash
+    proc = subprocess.run([bash, "-eo", "pipefail", "-c", str(always["run"])], env={"PATH": os.environ["PATH"], "CI_WAIT_MARKER": str(marker)},
+                          capture_output=True, text=True)
+    assert proc.returncode == 0, (proc.stdout, proc.stderr)
+    assert not marker.exists()
+    proc = subprocess.run([bash, "-eo", "pipefail", "-c", str(always["run"])], env={"PATH": os.environ["PATH"], "CI_WAIT_MARKER": str(marker)},
+                          capture_output=True, text=True)
+    assert proc.returncode == 0, "removing an already-removed marker must not fail the step"
 
 
 # ── scripts/qwen-hand-run.sh ─────────────────────────────────────────────────────────────────────────
 
 
-def _hand_env(tmp_path: Path, *, flock: str | None = "fake", uv_rc: int = 0, jar_rc: int = 0,
+def _hand_env(tmp_path: Path, *, flock: str | None = "fake", timeout: str | None = "fake", uv_rc: int = 0, jar_rc: int = 0,
               lease: bool = True) -> tuple[Path, dict[str, str]]:
     """A work tree holding the real wrapper, stubs for uv and the jar build, and a PATH of only what it may use."""
     work, bin_dir, lease_dir = tmp_path / "work", tmp_path / "bin", tmp_path / "lease"
     (work / "scripts").mkdir(parents=True)
     bin_dir.mkdir()
-    for tool in ("bash", "date", "stat", "dirname", "rm"):
+    for tool in ("bash", "date", "dirname", "rm"):
         real = shutil.which(tool)
         assert real, tool
         (bin_dir / tool).symlink_to(real)
-    bash, real_sleep = shutil.which("bash"), shutil.which("sleep")
-    assert bash and real_sleep
+    bash, real_sleep, real_stat = shutil.which("bash"), shutil.which("sleep"), shutil.which("stat")
+    assert bash and real_sleep and real_stat
     log = tmp_path / "calls.log"
     shutil.copy(_WRAPPER, work / "scripts" / "qwen-hand-run.sh")
     (work / "scripts" / "qwen-hand-run.sh").chmod(0o755)
@@ -1225,7 +1427,10 @@ def _hand_env(tmp_path: Path, *, flock: str | None = "fake", uv_rc: int = 0, jar
 echo "uv $*" >> "$FAKE_LOG"
 if [ "$1" = "run" ]; then
   echo "env NX_BUILD_LEASE_ROOT=${{NX_BUILD_LEASE_ROOT:-}} NX_SUITE_LEASE_WAIT=${{NX_SUITE_LEASE_WAIT:-}}" >> "$FAKE_LOG"
+  if {{ : >&9; }} 2>/dev/null; then echo "fd9=open" >> "$FAKE_LOG"; else echo "fd9=closed" >> "$FAKE_LOG"; fi
   if [ -n "${{FAKE_LOCK_PROBE:-}}" ]; then flock -n "$FAKE_LOCK_PROBE" true; echo "lock-probe rc=$?" >> "$FAKE_LOG"; fi
+  if [ -n "${{FAKE_ORPHAN:-}}" ]; then {real_sleep} "$FAKE_ORPHAN" >/dev/null 2>&1 & fi
+  if [ -n "${{FAKE_UV_SLEEP:-}}" ]; then sleep "$FAKE_UV_SLEEP"; fi
   exit {uv_rc}
 fi
 exit 0
@@ -1240,14 +1445,31 @@ if [ "$n" = "${{FAKE_CLEAR_ON_SLEEP:-0}}" ]; then rm -f "$QWEN_SUITE_LEASE_ROOT"
 exec {real_sleep} "$1"
 ''')
     sleep.chmod(0o755)
+    # stat that can fail or make the file vanish mid-call (CI removes its marker the moment it takes the lock)
+    stat = bin_dir / "stat"
+    stat.write_text(f'''#!{bash}
+case "${{FAKE_STAT:-}}" in
+  vanish) for last; do :; done; rm -f "$last"; exit 1 ;;
+  fail) exit 1 ;;
+esac
+exec {real_stat} "$@"
+''')
+    stat.chmod(0o755)
     if flock == "fake":
-        # `flock -w SLICE -E CODE FD`: succeeds, or exits CODE when the lock is held; call N can make CI arrive
+        # `flock -w SLICE -E CODE 9`: succeeds, or exits CODE when held; call N can make CI arrive.
+        # `flock -n -s -E 200 7`: the marker probe; it reads the marker through fd 7, "locked" = CI still holds it.
         fake = bin_dir / "flock"
         fake.write_text(f'''#!{bash}
 echo "flock $*" >> "$FAKE_LOG"
+if [ "$1" = "-n" ]; then
+  [ -n "${{FAKE_MARKER_FLOCK_FAIL:-}}" ] && exit 1
+  IFS= read -r first <&7
+  [ "$first" = locked ] && exit 200
+  exit 0
+fi
 n=0; [ -f "$FAKE_FLOCK_CNT" ] && read -r n < "$FAKE_FLOCK_CNT"; n=$((n+1)); echo "$n" > "$FAKE_FLOCK_CNT"
 if [ -n "${{FAKE_HELD:-}}" ]; then exit "$4"; fi
-if [ "$n" = "${{FAKE_MARKER_ON_CALL:-0}}" ]; then : > "$QWEN_SUITE_LEASE_ROOT/ci-waiting.9.1"; fi
+if [ "$n" = "${{FAKE_MARKER_ON_CALL:-0}}" ]; then echo locked > "$QWEN_SUITE_LEASE_ROOT/ci-waiting.9.1"; fi
 exit 0
 ''')
         fake.chmod(0o755)
@@ -1255,6 +1477,20 @@ exit 0
         real = shutil.which("flock")
         assert real
         (bin_dir / "flock").symlink_to(real)
+    if timeout == "fake":
+        # `timeout -k GRACE SECONDS cmd...`: runs cmd, or reports an expiry (124) when FAKE_TIMEOUT_EXPIRE is set
+        fake_t = bin_dir / "timeout"
+        fake_t.write_text(f'''#!{bash}
+echo "timeout $1 $2 $3" >> "$FAKE_LOG"
+if [ -n "${{FAKE_TIMEOUT_EXPIRE:-}}" ]; then exit "$FAKE_TIMEOUT_EXPIRE"; fi
+shift 3
+exec "$@"
+''')
+        fake_t.chmod(0o755)
+    elif timeout == "real":
+        real_t = shutil.which("timeout")
+        assert real_t
+        (bin_dir / "timeout").symlink_to(real_t)
     if lease:
         lease_dir.mkdir()
     env = {"PATH": str(bin_dir), "FAKE_LOG": str(log), "FAKE_FLOCK_CNT": str(tmp_path / "flock.cnt"),
@@ -1264,24 +1500,37 @@ exit 0
     return work, env
 
 
-def _post_marker(tmp_path: Path, name: str = "ci-waiting.7.1", age: float = 0.0) -> Path:
+def _post_marker(tmp_path: Path, name: str = "ci-waiting.7.1", age: float = 0.0, live: bool = True) -> Path:
+    """A marker file. With the fake flock a marker is LIVE when its first line says `locked` (the stand-in for CI
+    holding the kernel lock); the real-flock tests hold a genuine lock instead."""
     import time
 
     p = tmp_path / "lease" / name
-    p.write_text("run=7\n")
+    p.write_text("locked\n" if live else "free\n")
     os.utime(p, (time.time() - age, time.time() - age))
     return p
 
 
-def _hand(work: Path, env: dict[str, str], *args: str) -> subprocess.CompletedProcess[str]:
+def _hand(work: Path, env: dict[str, str], *args: str, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
     bash = shutil.which("bash")
     assert bash
-    return subprocess.run([bash, str(work / "scripts" / "qwen-hand-run.sh"), *args], cwd=work, env=env,
+    return subprocess.run([bash, str(work / "scripts" / "qwen-hand-run.sh"), *args], cwd=cwd or work, env=env,
                           capture_output=True, text=True, timeout=60)
 
 
 def _hand_calls(env: dict[str, str]) -> list[str]:
     return [c for c in _calls(env) if not c.startswith("sleep ")]
+
+
+def _acquires(env: dict[str, str]) -> list[str]:
+    """The wrapper's attempts to take the box lock (not the marker probes)."""
+    return [c for c in _calls(env) if c.startswith("flock -w")]
+
+
+def _script_default(name: str) -> int:
+    m = re.search(rf"{name}:-(\d+)", _WRAPPER.read_text())
+    assert m, name
+    return int(m.group(1))
 
 
 def test_a_hand_run_refuses_to_start_while_ci_is_queued(tmp_path: Path) -> None:
@@ -1291,26 +1540,149 @@ def test_a_hand_run_refuses_to_start_while_ci_is_queued(tmp_path: Path) -> None:
     out = proc.stdout + proc.stderr
     assert proc.returncode == 76, (proc.returncode, out)
     assert "ci-waiting.7.1" in out and "strict priority" in out and "retry later" in out
-    assert _calls(env) == [], "a refused hand run takes no lock and builds nothing"
+    assert "not a test failure" in out, "an agent reading only the exit code must be able to tell this from a red suite"
+    assert _acquires(env) == [] and "uv sync -q" not in _calls(env), "a refused hand run takes no lock and builds nothing"
 
 
-@pytest.mark.parametrize("age,rc", [(2000, 76), (2160, 0)])
-def test_a_marker_counts_as_stale_only_past_the_ci_wait_bound_plus_a_margin(tmp_path: Path, age: int, rc: int) -> None:
-    """CI waits 1800 s; 2100 s is the bound. Younger is a queued job, older is the corpse of a cancelled one."""
-    assert int(_doc()["jobs"]["test-qwen"]["env"]["QWEN_BOX_LOCK_WAIT_SECONDS"]) < 2100
+def test_a_marker_nobody_holds_locked_is_dead_whatever_its_age_and_is_not_removed_while_young(tmp_path: Path) -> None:
+    """Liveness is the kernel lock. A fresh file nobody locks is the corpse of a killed job (or the instant between
+    its create and its lock, hence the grace before anyone deletes it)."""
     work, env = _hand_env(tmp_path)
-    _post_marker(tmp_path, age=age)
-    assert _hand(work, env).returncode == rc
+    marker = _post_marker(tmp_path, live=False)  # mtime: now
+    proc = _hand(work, env)
+    assert proc.returncode == 0, (proc.returncode, proc.stdout, proc.stderr)
+    assert marker.exists(), "within the grace window an unlocked marker may be one CI is about to lock: leave it"
 
 
-def test_a_hand_run_with_no_marker_runs_the_documented_command_under_the_lease_variables(tmp_path: Path) -> None:
+def test_a_dead_marker_past_the_grace_window_is_removed_by_the_wrapper(tmp_path: Path) -> None:
+    work, env = _hand_env(tmp_path)
+    marker = _post_marker(tmp_path, live=False, age=600)
+    proc = _hand(work, env)
+    assert proc.returncode == 0, (proc.returncode, proc.stdout, proc.stderr)
+    assert not marker.exists(), "SIGKILL leaves the file; the next hand run clears it"
+
+
+def test_a_live_marker_is_never_removed_however_old(tmp_path: Path) -> None:
+    """CI waits at most 1800 s, but the clock is not the signal: while the lock is held CI is queued."""
+    work, env = _hand_env(tmp_path)
+    marker = _post_marker(tmp_path, age=5000)
+    assert _hand(work, env).returncode == 76
+    assert marker.exists()
+
+
+@pytest.mark.parametrize("delta,rc", [(-2, 76), (1, 0)])
+def test_where_the_lock_cannot_be_tested_the_mtime_bound_is_the_fallback_and_is_pinned_tight(tmp_path: Path, delta: int, rc: int) -> None:
+    """Secondary signal only. The bound is read from the script, and the pins sit within 2 s of it (the old pin
+    ages 2000 and 2160 admitted any bound in between)."""
+    stale = _script_default("QWEN_CI_MARKER_STALE_SECONDS")
+    assert int(_doc()["jobs"]["test-qwen"]["env"]["QWEN_BOX_LOCK_WAIT_SECONDS"]) < stale
+    work, env = _hand_env(tmp_path)
+    _post_marker(tmp_path, age=stale + delta)
+    assert _hand(work, {**env, "FAKE_MARKER_FLOCK_FAIL": "1"}).returncode == rc
+
+
+def test_a_marker_that_vanishes_during_the_age_check_is_not_read_as_fresh(tmp_path: Path) -> None:
+    """Round 2 (code S1): CI removes its marker the instant it takes the lock, which is when this check matters."""
+    work, env = _hand_env(tmp_path)
+    marker = _post_marker(tmp_path)
+    proc = _hand(work, {**env, "FAKE_MARKER_FLOCK_FAIL": "1", "FAKE_STAT": "vanish"})
+    assert proc.returncode == 0, (proc.returncode, proc.stdout, proc.stderr)
+    assert not marker.exists()
+
+
+def test_a_marker_whose_age_cannot_be_read_does_not_count_as_fresh_forever(tmp_path: Path) -> None:
+    """Round 2 (critique O4): lock untestable AND mtime unreadable: ignore it rather than wait out the whole bound."""
+    work, env = _hand_env(tmp_path)
+    _post_marker(tmp_path)
+    proc = _hand(work, {**env, "FAKE_MARKER_FLOCK_FAIL": "1", "FAKE_STAT": "fail"})
+    assert proc.returncode == 0, (proc.returncode, proc.stdout, proc.stderr)
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads a mode-000 file")
+def test_a_marker_the_wrapper_cannot_open_falls_back_to_its_mtime(tmp_path: Path) -> None:
+    work, env = _hand_env(tmp_path)
+    marker = _post_marker(tmp_path)
+    marker.chmod(0)
+    try:
+        assert _hand(work, env).returncode == 76, "unreadable but young: err toward CI"
+    finally:
+        marker.chmod(0o644)
+
+
+def test_a_relative_lease_root_still_finds_the_marker_after_the_wrapper_changes_directory(tmp_path: Path) -> None:
+    """Round 2 (critique O4): the wrapper cd's to the checkout, so a relative root silently pointed somewhere else."""
+    work, env = _hand_env(tmp_path)
+    _post_marker(tmp_path)
+    proc = _hand(work, {**env, "QWEN_SUITE_LEASE_ROOT": "lease"}, cwd=tmp_path)
+    assert proc.returncode == 76, (proc.returncode, proc.stdout, proc.stderr)
+
+
+def test_a_marker_name_with_control_characters_is_not_echoed_raw(tmp_path: Path) -> None:
+    """Round 2 (code S3): the lease root is writable by ghci; its file names reach nxtest's terminal."""
+    work, env = _hand_env(tmp_path)
+    _post_marker(tmp_path, "ci-waiting.\x1b[31mred")
+    proc = _hand(work, env)
+    out = proc.stdout + proc.stderr
+    assert proc.returncode == 76 and "ci-waiting." in out
+    assert "\x1b" not in out
+
+
+def test_a_hand_run_with_no_marker_runs_the_documented_command_under_the_lease_variables_and_a_hold_cap(tmp_path: Path) -> None:
     work, env = _hand_env(tmp_path)
     proc = _hand(work, env, "tests/test_x.py", "-k", "foo")
     assert proc.returncode == 0, (proc.stdout, proc.stderr)
     lease = env["QWEN_SUITE_LEASE_ROOT"]
     assert _hand_calls(env) == [
-        "flock -w 1 -E 200 9", "uv sync -q", "jar", "uv run pytest -n 8 -q tests/test_x.py -k foo",
-        f"env NX_BUILD_LEASE_ROOT={lease} NX_SUITE_LEASE_WAIT=1"]
+        "flock -w 1 -E 200 9", "timeout -k 20 1500", "uv sync -q", "jar", "uv run pytest -n 8 -q tests/test_x.py -k foo",
+        f"env NX_BUILD_LEASE_ROOT={lease} NX_SUITE_LEASE_WAIT=1", "fd9=closed"]
+
+
+def test_the_suite_does_not_inherit_the_box_lock_fd_so_a_leaked_orphan_cannot_hold_it(tmp_path: Path) -> None:
+    """Round 2 (code S2, critique O5): decided. The wrapper holds fd 9 for its own lifetime, which covers the run; the
+    suite gets it closed, because a daemonized Postgres or JVM that outlives the run would otherwise hold the box lock
+    until it dies, and CI (which has priority) would fail its wait naming a hand run that ended long ago."""
+    work, env = _hand_env(tmp_path)
+    assert _hand(work, env).returncode == 0
+    assert "fd9=closed" in _calls(env)
+
+
+@pytest.mark.skipif(shutil.which("flock") is None, reason="util-linux flock is not installed here (macOS)")
+def test_the_real_flock_an_orphan_the_suite_leaves_behind_does_not_keep_the_box_lock(tmp_path: Path) -> None:
+    work, env = _hand_env(tmp_path, flock="real")
+    proc = _hand(work, {**env, "FAKE_ORPHAN": "5"})
+    assert proc.returncode == 0, (proc.stdout, proc.stderr)
+    after = subprocess.run([shutil.which("flock") or "flock", "-n", str(tmp_path / "lease" / "box.lock"), "true"])
+    assert after.returncode == 0, "the orphan is still alive, and must not be holding the lock"
+
+
+def test_the_hold_cap_defaults_to_less_than_ci_waits_even_with_the_kill_grace() -> None:
+    hold, wait = _script_default("QWEN_HAND_RUN_HOLD_SECONDS"), int(_doc()["jobs"]["test-qwen"]["env"]["QWEN_BOX_LOCK_WAIT_SECONDS"])
+    grace = re.search(r"\bkill_s=(\d+)", _WRAPPER.read_text())
+    assert grace, "the SIGKILL grace after the cap must be a named constant"
+    assert 0 < hold and hold + int(grace.group(1)) < wait, (hold, grace.group(1), wait)
+
+
+def test_a_hand_run_that_hits_its_hold_cap_exits_with_its_own_code_and_says_so(tmp_path: Path) -> None:
+    work, env = _hand_env(tmp_path)
+    proc = _hand(work, {**env, "FAKE_TIMEOUT_EXPIRE": "124", "QWEN_HAND_RUN_HOLD_SECONDS": "77"})
+    out = proc.stdout + proc.stderr
+    assert proc.returncode == 77, (proc.returncode, out)
+    assert "77s" in out and "QWEN_HAND_RUN_HOLD_SECONDS" in out and "CI" in out
+    assert "timeout -k 20 77" in _calls(env)
+
+
+@pytest.mark.skipif(shutil.which("flock") is None or shutil.which("timeout") is None,
+                    reason="needs util-linux flock and GNU timeout (not on macOS by default)")
+def test_the_real_timeout_stops_a_suite_that_outlives_the_cap_and_releases_the_lock(tmp_path: Path) -> None:
+    import time
+
+    work, env = _hand_env(tmp_path, flock="real", timeout="real")
+    t0 = time.monotonic()
+    proc = _hand(work, {**env, "FAKE_UV_SLEEP": "40", "QWEN_HAND_RUN_HOLD_SECONDS": "2"})
+    assert proc.returncode == 77, (proc.returncode, proc.stdout, proc.stderr)
+    assert time.monotonic() - t0 < 30, "the cap must cut the run, not wait for the suite"
+    after = subprocess.run([shutil.which("flock") or "flock", "-n", str(tmp_path / "lease" / "box.lock"), "true"])
+    assert after.returncode == 0
 
 
 def test_a_hand_run_yields_the_lock_when_ci_arrives_while_it_waited(tmp_path: Path) -> None:
@@ -1326,9 +1698,8 @@ def test_a_hand_run_that_yielded_goes_ahead_once_ci_has_taken_its_turn(tmp_path:
     work, env = _hand_env(tmp_path)
     proc = _hand(work, {**env, "FAKE_MARKER_ON_CALL": "1", "FAKE_CLEAR_ON_SLEEP": "1"})
     assert proc.returncode == 0, (proc.stdout, proc.stderr)
-    calls = _hand_calls(env)
-    assert calls[:2] == ["flock -w 1 -E 200 9", "flock -w 1 -E 200 9"], "yield, back off, take the lock again"
-    assert calls[2:5] == ["uv sync -q", "jar", "uv run pytest -n 8 -q"]
+    assert _acquires(env) == ["flock -w 1 -E 200 9", "flock -w 1 -E 200 9"], "yield, back off, take the lock again"
+    assert "uv run pytest -n 8 -q" in _calls(env)
 
 
 def test_a_lock_that_stays_held_ends_in_the_retry_later_code_after_the_bounded_wait(tmp_path: Path) -> None:
@@ -1348,10 +1719,14 @@ def test_a_hand_run_exits_with_the_suites_or_the_jar_builds_status(tmp_path: Pat
         assert not any(c.startswith("uv run") for c in _calls(env)), "no suite after a failed jar build"
 
 
-def test_a_host_without_flock_or_without_the_lease_directory_fails_closed_with_its_own_code(tmp_path: Path) -> None:
+def test_a_host_without_flock_timeout_or_the_lease_directory_fails_closed_with_its_own_code(tmp_path: Path) -> None:
     work, env = _hand_env(tmp_path / "noflock", flock=None)
     proc = _hand(work, env)
-    assert proc.returncode == 69 and "flock" in proc.stdout + proc.stderr
+    assert proc.returncode == 69 and "flock" in proc.stdout + proc.stderr and "not a test failure" in proc.stdout + proc.stderr
+    assert _calls(env) == []
+    work, env = _hand_env(tmp_path / "notimeout", timeout=None)
+    proc = _hand(work, env)
+    assert proc.returncode == 69 and "timeout" in proc.stdout + proc.stderr
     assert _calls(env) == []
     work, env = _hand_env(tmp_path / "nolease", lease=False)
     proc = _hand(work, env)
@@ -1362,7 +1737,7 @@ def test_a_host_without_flock_or_without_the_lease_directory_fails_closed_with_i
 def test_the_hand_run_exit_codes_do_not_collide_with_the_suites_own_75() -> None:
     """tests/_suite_lease.py exits 75 on a held suite lease; 'CI has priority' must be tellable apart from it."""
     code = re.sub(r"(?m)^\s*#.*$", "", _WRAPPER.read_text())
-    assert "exit 76" in code or "return 76" in code
+    assert "exit 76" in code or "return 76" in code or "refuse 76" in code
     assert not re.search(r"\b75\b", code), "75 is the suite lease's code, not this wrapper's"
 
 
@@ -1378,6 +1753,22 @@ def test_the_real_flock_the_box_lock_is_held_while_the_suite_runs_and_released_a
 
 
 @pytest.mark.skipif(shutil.which("flock") is None, reason="util-linux flock is not installed here (macOS)")
+def test_the_real_flock_a_marker_is_live_only_while_its_holder_has_it_locked(tmp_path: Path) -> None:
+    """The point of round 2: with a genuine kernel lock, a held marker blocks a start and an abandoned one does not."""
+    import fcntl
+
+    work, env = _hand_env(tmp_path, flock="real")
+    marker = tmp_path / "lease" / "ci-waiting.8.1"
+    marker.write_text("run=8\n")
+    with open(marker) as holder:
+        fcntl.flock(holder, fcntl.LOCK_EX)
+        assert _hand(work, env).returncode == 76, "CI holds its marker: queued"
+        assert _calls(env) == [], "and nothing was taken or built"
+    proc = _hand(work, env)  # the holder is gone (a killed CI step), the file is fresh and unlocked
+    assert proc.returncode == 0, (proc.returncode, proc.stdout, proc.stderr)
+
+
+@pytest.mark.skipif(shutil.which("flock") is None, reason="util-linux flock is not installed here (macOS)")
 @pytest.mark.parametrize("ci_arrives", [False, True])
 def test_the_real_flock_a_hand_run_waits_for_a_holder_and_yields_if_ci_queued_meanwhile(tmp_path: Path, ci_arrives: bool) -> None:
     import fcntl
@@ -1385,6 +1776,7 @@ def test_the_real_flock_a_hand_run_waits_for_a_holder_and_yields_if_ci_queued_me
 
     work, env = _hand_env(tmp_path, flock="real")
     lock = tmp_path / "lease" / "box.lock"
+    marker = tmp_path / "lease" / "ci-waiting.8.1"
     bash = shutil.which("bash")
     assert bash
     with open(lock, "w") as held:
@@ -1394,10 +1786,17 @@ def test_the_real_flock_a_hand_run_waits_for_a_holder_and_yields_if_ci_queued_me
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         time.sleep(1.5)
         assert proc.poll() is None, "the hand run waits for the holder"
+        marker_fd = None
         if ci_arrives:
-            _post_marker(tmp_path, "ci-waiting.8.1")
+            marker.write_text("run=8\n")
+            marker_fd = open(marker)
+            fcntl.flock(marker_fd, fcntl.LOCK_EX)
         fcntl.flock(held, fcntl.LOCK_UN)
-    out, err = proc.communicate(timeout=60)
+        try:
+            out, err = proc.communicate(timeout=60)
+        finally:
+            if marker_fd is not None:
+                marker_fd.close()
     if ci_arrives:
         assert proc.returncode == 76, (out, err)
         assert not any(c == "jar" or c.startswith("uv ") for c in _calls(env))
