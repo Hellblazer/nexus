@@ -192,7 +192,7 @@ _AMBIGUOUS = frozenset({"rival", "race"})
 
 def _hidden_kind(row: dict, content_type: str) -> str:
     """The guidance class of a hidden chunk: one of ``not_attached`` (reattach was off), ``moved_on``,
-    ``indexing``, ``other_collection``, ``ambiguous``, ``no_key_note`` (a ``knowledge`` chunk no document
+    ``indexing``, ``failed``, ``other_collection``, ``ambiguous``, ``no_key_note`` (a ``knowledge`` chunk no document
     names: a re-put can bring it back), ``no_key_file`` (a chunk of an indexed file, which carries no key
     at all: the file is what to re-index) or ``no_key_unknown`` (the collection's content type could not be
     read, so the guidance names both remedies)."""
@@ -203,6 +203,8 @@ def _hidden_kind(row: dict, content_type: str) -> str:
     if verdict == "superseded":
         if why == "indexing":
             return "indexing"
+        if why == "failed":
+            return "failed"
         if why == "other_collection":
             return "other_collection"
         if why in _AMBIGUOUS:
@@ -239,6 +241,9 @@ def _row_note(row: dict, dry_run: bool, content_type: str = "") -> str:
         kind = _hidden_kind(row, content_type)
         if kind == "indexing":
             parts.append(f"{who} is mid index run: bytes only, hidden; run again when it finishes")
+        elif kind == "failed":
+            parts.append(f"{who}'s last index run failed, so its manifest is partial: bytes only, hidden; "
+                         "re-index it")
         elif kind == "other_collection":
             parts.append(f"{who}'s manifest rows sit under another collection: bytes only, hidden")
         elif kind == "ambiguous":
@@ -358,6 +363,11 @@ def _render_text(origin: str, sibling: str, dry_run: bool, reattach: bool, rows:
             elif kind == "indexing":
                 click.echo(f"\n{what}: the document is in the middle of an index run. Run the same command again "
                            "when it has finished, if you still want the chunk back.")
+            elif kind == "failed":
+                click.echo(f"\n{what}: the document's last index run failed, so its manifest is partial and nothing "
+                           "was attached to it. Re-index the document (`nx index repo --force`, or the matching "
+                           "verb: `nx index pdf`, `nx index md`, `nx index rdr`), then run the same command again "
+                           "if you still want the chunk back.")
             elif kind == "other_collection":
                 click.echo(f"\n{what}: the document's manifest rows sit under another collection, where its current "
                            "text is live. Nothing to do unless you need the old text here.")

@@ -3925,7 +3925,7 @@ class HttpVectorClient:
         str|None, "reason": str|None, "owner_rows": int|None,
         "owner_chunks": int|None}], "source": {...}|None, "next_after":
         str|None}``. ``reason`` says why a ``superseded`` verdict was reached
-        (``indexing``, ``complete``, ``version``, ``position_taken``,
+        (``indexing``, ``complete``, ``failed``, ``version``, ``position_taken``,
         ``rival``, ``other_collection``, ``has_rows``, ``past_end``, ``race``);
         ``owner_rows`` / ``owner_chunks`` are the owner's manifest rows in the
         origin after the call against its registered chunk count. See the

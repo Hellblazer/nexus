@@ -244,8 +244,8 @@ class TestCli:
         assert "# owner" not in result.output and "no live owner named" not in result.output, "no per-chunk recipe"
 
     def test_each_superseded_reason_gets_its_own_words(self, runner) -> None:
-        hs = [_chash(str(i)) for i in range(5)]
-        reasons = ["complete", "indexing", "other_collection", "rival", "race"]
+        hs = [_chash(str(i)) for i in range(6)]
+        reasons = ["complete", "indexing", "other_collection", "rival", "race", "failed"]
         stub = _Stub([_page([
             _hidden_row(h, verdict="superseded", reason=why, owner="1.2.3", owner_title="Doc", position=0)
             for h, why in zip(hs, reasons, strict=True)])])
@@ -258,8 +258,11 @@ class TestCli:
         assert "in the middle of an index run" in out and "Run the same command again" in out  # indexing
         assert "sit under another collection" in out                                           # other_collection
         assert "claims the same position" in out and "nx store get CHASH" in out               # rival, race
+        assert "last index run failed, so its manifest is partial" in out and "Re-index the document" in out  # failed
         assert "nx store put" not in out
         assert "mid index run" in out and "version ambiguous" in out, "the NOTE column says it too"
+        assert "last index run failed, so its manifest is partial: bytes only, hidden; re-index it" in out, \
+            "the NOTE column says it too"
 
     def test_no_reattach_is_passed_through_and_the_output_says_what_it_would_have_done(self, runner) -> None:
         a = _chash("a")
