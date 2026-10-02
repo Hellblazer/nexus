@@ -285,8 +285,17 @@ def flagged_commits(
     """Commits in ``rev_range`` that touch both the engine and client wire
     surfaces. Raises :class:`RuntimeError` on unreadable git state -- callers
     that want a soft failure should catch it (the CLI does, turning it into
-    exit code 2)."""
-    proc = _git("log", "--format=%H\x01%s", rev_range, repo_root=repo_root)
+    exit code 2).
+
+    Merge (two-parent) commits are skipped: ``git show --name-only`` of a merge
+    prints the COMBINED diff, the files that differ from EVERY parent, so a
+    merge of ``develop`` that auto-merges ``service/`` on one side of history
+    and an ``http_*`` client on the other lists both without any commit having
+    changed both halves together (a ``wbfpw.18`` round-2 merge was flagged
+    exactly that way, T2 ``nexus/review-wbfpw18-19-round2-code`` M3). Every
+    constituent commit of the merged lines is still in the range and still
+    scanned, so a real both-halves commit is not hidden by merging it."""
+    proc = _git("log", "--no-merges", "--format=%H\x01%s", rev_range, repo_root=repo_root)
     if proc.returncode != 0:
         raise RuntimeError(f"git log {rev_range}: {proc.stderr.strip()}")
     out: list[FlaggedCommit] = []

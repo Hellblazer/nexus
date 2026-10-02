@@ -224,6 +224,116 @@ def test_kill_control_covered_module_does_not_false_positive(tmp_path: pathlib.P
 
 
 # ---------------------------------------------------------------------------
+# Merge commits: ``git show --name-only`` of a merge is the COMBINED diff, so a
+# merge of two lines of history that each touched one half (in different hunks
+# of the same files) used to be flagged although no commit changed both. A
+# real two-parent fixture repo, never a mock of git's output.
+# ---------------------------------------------------------------------------
+
+
+def _git_in(repo: pathlib.Path, *args: str) -> str:
+    import os
+    import subprocess
+
+    env = {
+        "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.invalid",
+        "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.invalid",
+        "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null",
+        "PATH": os.environ["PATH"],
+    }
+    proc = subprocess.run(
+        ["git", *args], cwd=repo, capture_output=True, text=True, check=True, env=env
+    )
+    return proc.stdout.strip()
+
+
+def _edit_line(repo: pathlib.Path, rel: str, line_no: int, text: str, message: str) -> str:
+    path = repo / rel
+    lines = path.read_text().splitlines()
+    lines[line_no - 1] = text
+    path.write_text("\n".join(lines) + "\n")
+    _git_in(repo, "add", rel)
+    _git_in(repo, "commit", "-q", "-m", message)
+    return _git_in(repo, "rev-parse", "HEAD")
+
+
+_ENGINE_FILE = "service/Engine.java"
+_CLIENT_FILE = "src/nexus/db/http_fake_client.py"
+
+
+def _both_halves_merge_repo(tmp_path: pathlib.Path) -> tuple[pathlib.Path, str, list[str]]:
+    """A repo whose ONLY engine+client pairing is a merge: one line of history edits the engine file
+    then the client file in two commits, the other does the same in different hunks, and the second
+    merges into the first with no conflict. Returns (repo, merge sha, the four constituent shas)."""
+    repo = tmp_path / "repo"
+    (repo / "service").mkdir(parents=True)
+    (repo / "src" / "nexus" / "db").mkdir(parents=True)
+    body = "".join(f"line {i}\n" for i in range(1, 41))
+    (repo / _ENGINE_FILE).write_text(body)
+    (repo / _CLIENT_FILE).write_text(body)
+    _git_in(repo, "init", "-q", "-b", "main")
+    # One commit per half: a single base commit adding both would itself be a both-halves commit.
+    _git_in(repo, "add", _ENGINE_FILE)
+    _git_in(repo, "commit", "-q", "-m", "base: engine")
+    _git_in(repo, "add", _CLIENT_FILE)
+    _git_in(repo, "commit", "-q", "-m", "base: client")
+    _git_in(repo, "checkout", "-q", "-b", "side")
+    side = [
+        _edit_line(repo, _ENGINE_FILE, 40, "side engine", "side: engine only"),
+        _edit_line(repo, _CLIENT_FILE, 40, "side client", "side: client only"),
+    ]
+    _git_in(repo, "checkout", "-q", "main")
+    main = [
+        _edit_line(repo, _ENGINE_FILE, 1, "main engine", "main: engine only"),
+        _edit_line(repo, _CLIENT_FILE, 1, "main client", "main: client only"),
+    ]
+    _git_in(repo, "merge", "-q", "--no-ff", "-m", "merge side", "side")
+    return repo, _git_in(repo, "rev-parse", "HEAD"), main + side
+
+
+def _is_both_halves(paths: list[str]) -> bool:
+    return any(wctp._is_engine_path(p) for p in paths) and any(
+        wctp._is_client_module_path(p) for p in paths
+    )
+
+
+def test_a_clean_merge_of_two_half_only_lines_is_not_flagged(tmp_path: pathlib.Path) -> None:
+    repo, merge, constituents = _both_halves_merge_repo(tmp_path)
+
+    # Non-vacuity: the fixture really is a two-parent commit whose combined-diff name list holds both
+    # halves, i.e. exactly what a `git log` that kept merges read as a both-halves commit.
+    assert len(_git_in(repo, "rev-list", "--parents", "-n1", merge).split()) == 3
+    assert _is_both_halves(wctp._touched_paths(merge, repo_root=repo))
+    for sha in constituents:
+        assert not _is_both_halves(wctp._touched_paths(sha, repo_root=repo)), (
+            f"{sha} must change only one half"
+        )
+
+    assert wctp.flagged_commits("main", repo_root=repo) == []
+
+
+def test_a_real_both_halves_commit_is_still_flagged_when_a_merge_brings_it_in(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Skipping merges must not hide a genuine pairing: a commit that changes engine and client
+    together is flagged by its own sha, and the merge that brings it in is not."""
+    repo, _merge, _ = _both_halves_merge_repo(tmp_path)
+    _git_in(repo, "checkout", "-q", "-b", "paired")
+    for rel in (_ENGINE_FILE, _CLIENT_FILE):
+        path = repo / rel
+        lines = path.read_text().splitlines()
+        lines[19] = "paired edit"
+        path.write_text("\n".join(lines) + "\n")
+    _git_in(repo, "add", "-A")
+    _git_in(repo, "commit", "-q", "-m", "paired: both halves")
+    paired = _git_in(repo, "rev-parse", "HEAD")
+    _git_in(repo, "checkout", "-q", "main")
+    _git_in(repo, "merge", "-q", "--no-ff", "-m", "merge paired", "paired")
+
+    assert [f.sha for f in wctp.flagged_commits("main", repo_root=repo)] == [paired]
+
+
+# ---------------------------------------------------------------------------
 # Kill control: a synthetic both-halves commit absent from the ledger must
 # fail. Purely in-memory -- evaluate() only needs (sha, subject) tuples for
 # the undeclared check, no real git commit required.
