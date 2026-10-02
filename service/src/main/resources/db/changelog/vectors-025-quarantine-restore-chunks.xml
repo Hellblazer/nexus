@@ -104,17 +104,39 @@
     the document look complete.
 
     WHEN IT WRITES NOTHING (r_reattach, per chunk; the chunk is still restored, bytes only, still hidden):
-      superseded     the owner is live but the chunk is not the document's to take back. The document's manifest
-                     already holds another row at that position (it was re-indexed since); or the position is
-                     past the end of the document's registered chunk_count (a longer older version); or the
-                     document holds manifest rows under another collection, or is in the middle of an index run
-                     (index_state indexing); or two chunks of this call claim one (document, position), in which
-                     case neither is written. The manifest is never changed to make room.
+      superseded     the owner is live but the chunk is not the document's to take back. r_reason says which:
+                       indexing        the document is in the middle of an index run (index_state indexing)
+                       complete        the document is stamped complete: its manifest is verified and authoritative
+                                       for its text, so a manifest-less chunk of it is stale by definition. This
+                                       includes a document emptied on purpose (chunk_count 0, complete), which a
+                                       position check alone would have read as "unknown" and attached into.
+                                       Legacy documents are unstamped (index_state NULL), so the R8 case is unaffected
+                       version         the chunk's metadata content_hash differs from the document's
+                                       index_content_hash (both present): the chunk was cut from another version
+                       position_taken  the document's manifest already holds another row at that position
+                       rival           another chunk, in the origin or in this origin's quarantine sibling, names
+                                       the same document at the same position. Judged against what is STORED, not
+                                       against what this call names, so two versions of one position are caught
+                                       when they land on different 1000-row pages or in different calls; every one
+                                       of them is refused and the operator decides by reading the text
+                       other_collection  the document holds manifest rows under another collection
+                       has_rows        a reverse-path note that already has manifest rows
+                       past_end        the position is past the document's registered chunk_count
+                       race            (call level) the plan said attach and the insert lost a race
       no_live_owner  no live owner as above (none named, tombstoned, registered elsewhere, ambiguous reverse).
+                     The common case for a chunk of an indexed file: modern chunks carry no catalog_doc_id, so the
+                     owning file's document may well be live while the chunk names nothing.
       no_position    a live owner, and no way to say where the chunk goes (multi-chunk document, no chunk_index).
       owned          the chunk already has a manifest row in the origin (reported for a present chunk; nothing to do).
     attach / r_attached is the written case. A dry run reports the same classification and writes nothing; a call
     with reattach off reports it too (r_reattach says what a call with it on would do, r_attached is false).
+    r_owner_rows and r_owner_chunks report, per owner, the manifest rows the owner holds in the origin AFTER the call
+    (before it, on a dry run) against its registered chunk_count, so a partial attach (M of N) is stated, not silent.
+
+    WHAT REACH THIS HAS. A chunk is attachable only when its own metadata names its document: catalog_doc_id or
+    doc_id (a pre-RDR-108 legacy chunk, or an MCP store_put chunk) or, for a single-chunk legacy note, the note's own
+    metadata.doc_id equal to the chunk. Chunks cut from files by the indexer carry neither, so they read no_live_owner
+    and come back as bytes, hidden: the remedy is to re-index the owning file.
 
     LOCKS FOR THE WRITE. After the move, for each document the plan would attach to, in tumbler order, the
     per-document index-run advisory lock manifest writers take (acquireIndexRunLock) is taken, then the plan is
@@ -170,13 +192,14 @@
         http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
 
     <changeSet id="vectors-025-1" author="nexus-2x9xa">
-        <comment>nexus.quarantine_reattach_plan: the read-only classifier behind the restore verb's reattach step. For each named chash it resolves the live owning document (forward by metadata catalog_doc_id/doc_id, else reverse by a single live note's own doc_id, the census's two paths) and the manifest position, and returns a jsonb array of {chash, verdict, doc, title, pos, chunk_title, ls, le, cs, ce} with verdict attach, superseded, no_live_owner, no_position or owned. Never writes.</comment>
+        <comment>nexus.quarantine_reattach_plan: the read-only classifier behind the restore verb's reattach step. For each named chash it resolves the live owning document (forward by metadata catalog_doc_id/doc_id, else reverse by a single live note's own doc_id, the census's two paths) and the manifest position, and returns a jsonb array of {chash, verdict, why, doc, title, pos, chunk_title, ls, le, cs, ce} with verdict attach, superseded (why says which of nine reasons), no_live_owner, no_position or owned. A complete or mid-run owner, a content hash that differs from the document's, another chunk of the same document at the same position (in the collection or its quarantine sibling), and a taken or out-of-range position all refuse. Never writes.</comment>
         <sql splitStatements="false" stripComments="false"><![CDATA[
 CREATE OR REPLACE FUNCTION nexus.quarantine_reattach_plan(
     p_tenant_id              text,
     p_origin_collection      text,
     p_quarantine_collection  text,
-    p_chashes                text[]
+    p_chashes                text[],
+    p_from_quarantine        boolean
 )
 RETURNS jsonb
 LANGUAGE sql
@@ -184,8 +207,8 @@ STABLE
 SECURITY INVOKER
 AS $plan$
 WITH cand AS (
-    -- One row per named chash that exists in the origin or (dry run: p_quarantine_collection not null) in this
-    -- origin's quarantine sibling. The origin row's metadata wins: a present chunk is judged by what the origin holds.
+    -- One row per named chash that exists in the origin or (p_from_quarantine, the dry run) in this origin's
+    -- quarantine sibling. The origin row's metadata wins: a present chunk is judged by what the origin holds.
     SELECT r.h AS chash,
            decode(r.h, 'hex') AS chash_b,
            COALESCE(o.metadata, q.metadata, '{}'::jsonb) AS meta
@@ -193,7 +216,7 @@ WITH cand AS (
       LEFT JOIN nexus.chunks o
         ON o.tenant_id = p_tenant_id AND o.collection = p_origin_collection AND o.chash = decode(r.h, 'hex')
       LEFT JOIN nexus.chunks q
-        ON p_quarantine_collection IS NOT NULL
+        ON p_from_quarantine
        AND q.tenant_id = p_tenant_id AND q.collection = p_quarantine_collection AND q.chash = decode(r.h, 'hex')
        AND COALESCE(q.metadata->>'origin_collection', p_origin_collection) = p_origin_collection
      WHERE o.chash IS NOT NULL OR q.chash IS NOT NULL
@@ -209,13 +232,14 @@ keyed AS (
 fwd AS (
     -- The forward owner: a LIVE document anywhere in the tenant (the census's precedence: a live forward owner
     -- wins even when it is registered under another collection, in which case the chunk is not ours to attach).
-    SELECT k.chash, d.tumbler, d.title, d.physical_collection, d.chunk_count, d.index_state
+    SELECT k.chash, d.tumbler, d.title, d.physical_collection, d.chunk_count, d.index_state,
+           d.index_content_hash AS doc_hash
       FROM keyed k
       JOIN nexus.catalog_documents d
         ON d.tenant_id = p_tenant_id AND d.tumbler = k.fwd_key AND d.deleted_at IS NULL
 ),
 rev_all AS (
-    SELECT k.chash, d.tumbler, d.title, d.chunk_count, d.index_state
+    SELECT k.chash, d.tumbler, d.title, d.chunk_count, d.index_state, d.index_content_hash AS doc_hash
       FROM keyed k
       JOIN nexus.catalog_documents d
         ON d.tenant_id = p_tenant_id AND d.physical_collection = p_origin_collection
@@ -224,22 +248,22 @@ rev_all AS (
      WHERE NOT EXISTS (SELECT 1 FROM fwd f WHERE f.chash = k.chash)
 ),
 rev AS (
-    SELECT DISTINCT ON (a.chash) a.chash, a.tumbler, a.title, a.chunk_count, a.index_state,
+    SELECT DISTINCT ON (a.chash) a.chash, a.tumbler, a.title, a.chunk_count, a.index_state, a.doc_hash,
            count(*) OVER (PARTITION BY a.chash) AS n
       FROM rev_all a
      ORDER BY a.chash, a.tumbler
 ),
 own AS (
-    SELECT f.chash, f.tumbler, f.title, f.chunk_count, f.index_state, 'forward'::text AS path,
+    SELECT f.chash, f.tumbler, f.title, f.chunk_count, f.index_state, f.doc_hash, 'forward'::text AS path,
            (f.physical_collection IS NOT DISTINCT FROM p_origin_collection) AS in_origin, 1::bigint AS n
       FROM fwd f
     UNION ALL
-    SELECT v.chash, v.tumbler, v.title, v.chunk_count, v.index_state, 'reverse'::text, true, v.n
+    SELECT v.chash, v.tumbler, v.title, v.chunk_count, v.index_state, v.doc_hash, 'reverse'::text, true, v.n
       FROM rev v
 ),
 placed AS (
-    SELECT k.chash, k.meta, k.owned,
-           o.tumbler, o.title, o.chunk_count, o.index_state, o.path, o.in_origin, o.n,
+    SELECT k.chash, k.chash_b, k.meta, k.owned,
+           o.tumbler, o.title, o.chunk_count, o.index_state, o.doc_hash, o.path, o.in_origin, o.n,
            CASE
                WHEN o.tumbler IS NULL THEN NULL
                WHEN o.path = 'forward' AND k.meta->>'chunk_index' ~ '^[0-9]{1,9}$' THEN (k.meta->>'chunk_index')::integer
@@ -249,39 +273,63 @@ placed AS (
       FROM keyed k
       LEFT JOIN own o ON o.chash = k.chash
 ),
-claimed AS (
-    SELECT p.*,
-           count(*) FILTER (WHERE p.pos IS NOT NULL AND p.tumbler IS NOT NULL AND p.n = 1)
-               OVER (PARTITION BY p.tumbler, p.pos) AS claims
-      FROM placed p
+rival_rows AS MATERIALIZED (
+    -- Every OTHER chunk, in the origin or in this origin's quarantine sibling, whose forward key names one of the
+    -- documents being judged: the stored versions of the document, not only the chashes this call names. Two
+    -- chunks that claim one (document, position) are two versions of it, and a call that took only one of them
+    -- (a 1000-row page boundary, a second call) must still see the other. One scan of the two collections.
+    SELECT x.chash AS x_chash,
+           COALESCE(NULLIF(x.metadata->>'catalog_doc_id', ''), NULLIF(x.metadata->>'doc_id', '')) AS x_key,
+           x.metadata->>'chunk_index' AS x_ci
+      FROM nexus.chunks x
+     WHERE x.tenant_id = p_tenant_id
+       AND x.collection IN (p_origin_collection, p_quarantine_collection)
+       AND COALESCE(x.metadata->>'origin_collection', p_origin_collection) = p_origin_collection
+       AND COALESCE(NULLIF(x.metadata->>'catalog_doc_id', ''), NULLIF(x.metadata->>'doc_id', ''))
+           IN (SELECT pp.tumbler FROM placed pp WHERE pp.path = 'forward' AND pp.tumbler IS NOT NULL)
 ),
 judged AS (
-    SELECT c.*,
+    SELECT p.*,
            CASE
-               WHEN c.owned THEN 'owned'
-               WHEN c.tumbler IS NULL OR c.n <> 1 OR NOT c.in_origin THEN 'no_live_owner'
-               WHEN c.pos IS NULL THEN 'no_position'
-               WHEN c.index_state = 'indexing' THEN 'superseded'
-               WHEN c.claims > 1 THEN 'superseded'
+               WHEN p.owned THEN 'owned'
+               WHEN p.tumbler IS NULL OR p.n <> 1 OR NOT p.in_origin THEN 'no_live_owner'
+               -- The document's own state decides before its position does: a document that is mid index run, or
+               -- stamped complete, has a manifest that is authoritative for its text (a complete stamp is verified
+               -- against the manifest, so a manifest-less chunk of it is stale by definition, and a document
+               -- emptied on purpose reads chunk_count 0 and complete). Legacy documents are unstamped.
+               WHEN p.index_state = 'indexing' THEN 'superseded:indexing'
+               WHEN p.index_state = 'complete' THEN 'superseded:complete'
+               WHEN p.pos IS NULL THEN 'no_position'
+               -- The chunk records the content hash of the file version it was cut from; a document that has
+               -- since been indexed from other content records a different one.
+               WHEN NULLIF(p.meta->>'content_hash', '') IS NOT NULL AND NULLIF(p.doc_hash, '') IS NOT NULL
+                    AND p.meta->>'content_hash' <> p.doc_hash THEN 'superseded:version'
                WHEN EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m
-                             WHERE m.tenant_id = p_tenant_id AND m.doc_id = c.tumbler AND m.position = c.pos)
-                    THEN 'superseded'
+                             WHERE m.tenant_id = p_tenant_id AND m.doc_id = p.tumbler AND m.position = p.pos)
+                    THEN 'superseded:position_taken'
+               WHEN p.path = 'forward' AND EXISTS (
+                        SELECT 1 FROM rival_rows r
+                         WHERE r.x_key = p.tumbler AND r.x_chash <> p.chash_b
+                           AND (CASE WHEN r.x_ci ~ '^[0-9]{1,9}$' THEN r.x_ci::integer
+                                     WHEN COALESCE(p.chunk_count, 0) <= 1 THEN 0 END) = p.pos)
+                    THEN 'superseded:rival'
                WHEN EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m
-                             WHERE m.tenant_id = p_tenant_id AND m.doc_id = c.tumbler
+                             WHERE m.tenant_id = p_tenant_id AND m.doc_id = p.tumbler
                                AND m.collection IS DISTINCT FROM p_origin_collection)
-                    THEN 'superseded'
-               WHEN c.path = 'reverse'
+                    THEN 'superseded:other_collection'
+               WHEN p.path = 'reverse'
                     AND EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m
-                                 WHERE m.tenant_id = p_tenant_id AND m.doc_id = c.tumbler)
-                    THEN 'superseded'
-               WHEN COALESCE(c.chunk_count, 0) > 0 AND c.pos >= c.chunk_count THEN 'superseded'
+                                 WHERE m.tenant_id = p_tenant_id AND m.doc_id = p.tumbler)
+                    THEN 'superseded:has_rows'
+               WHEN COALESCE(p.chunk_count, 0) > 0 AND p.pos >= p.chunk_count THEN 'superseded:past_end'
                ELSE 'attach'
-           END AS verdict
-      FROM claimed c
+           END AS v
+      FROM placed p
 )
 SELECT COALESCE(jsonb_agg(jsonb_build_object(
            'chash', j.chash,
-           'verdict', j.verdict,
+           'verdict', split_part(j.v, ':', 1),
+           'why', NULLIF(split_part(j.v, ':', 2), ''),
            'doc', CASE WHEN j.n = 1 THEN j.tumbler END,
            'title', CASE WHEN j.n = 1 THEN j.title END,
            'pos', j.pos,
@@ -294,11 +342,11 @@ SELECT COALESCE(jsonb_agg(jsonb_build_object(
   FROM judged j;
 $plan$;
 
-GRANT EXECUTE ON FUNCTION nexus.quarantine_reattach_plan(text, text, text, text[]) TO nexus_svc;
+GRANT EXECUTE ON FUNCTION nexus.quarantine_reattach_plan(text, text, text, text[], boolean) TO nexus_svc;
 ]]>
         </sql>
         <rollback>
-            <sql splitStatements="false" stripComments="false">DROP FUNCTION IF EXISTS nexus.quarantine_reattach_plan(text, text, text, text[]);</sql>
+            <sql splitStatements="false" stripComments="false">DROP FUNCTION IF EXISTS nexus.quarantine_reattach_plan(text, text, text, text[], boolean);</sql>
         </rollback>
     </changeSet>
 
@@ -317,7 +365,7 @@ CREATE OR REPLACE FUNCTION nexus.quarantine_restore_chunks(
 )
 RETURNS TABLE(r_chash text, r_outcome text, r_audit_id bigint, r_no_manifest boolean, r_reapable_after timestamptz,
               r_reattach text, r_attached boolean, r_owner text, r_owner_title text, r_position integer,
-              r_chunk_title text)
+              r_chunk_title text, r_reason text, r_owner_rows integer, r_owner_chunks integer)
 LANGUAGE plpgsql
 SECURITY INVOKER
 AS $$
@@ -410,14 +458,21 @@ BEGIN
           ) x;
         v_plan := nexus.quarantine_reattach_plan(p_tenant_id, p_origin_collection, p_quarantine_collection,
             ARRAY(SELECT t.j->>'h' FROM jsonb_array_elements(v_class) AS t(j)
-                   WHERE t.j->>'outcome' IN ('would_restore', 'present')));
+                   WHERE t.j->>'outcome' IN ('would_restore', 'present')), true);
         RETURN QUERY
         SELECT t.j->>'h', t.j->>'outcome', NULL::bigint, NULL::boolean, NULL::timestamptz,
-               pl.verdict, false, pl.doc, pl.title, pl.pos, pl.chunk_title
+               pl.verdict, false, pl.doc, pl.title, pl.pos, pl.chunk_title, pl.why, oc.n_rows, oc.n_chunks
           FROM jsonb_array_elements(v_class) WITH ORDINALITY AS t(j, ord)
           LEFT JOIN jsonb_to_recordset(v_plan)
-                    AS pl(chash text, verdict text, doc text, title text, pos integer, chunk_title text)
+                    AS pl(chash text, verdict text, why text, doc text, title text, pos integer, chunk_title text)
             ON pl.chash = t.j->>'h'
+          LEFT JOIN LATERAL (
+                SELECT (SELECT count(*) FROM nexus.catalog_document_chunks m
+                         WHERE m.tenant_id = p_tenant_id AND m.doc_id = pl.doc
+                           AND m.collection = p_origin_collection)::integer AS n_rows,
+                       (SELECT d.chunk_count FROM nexus.catalog_documents d
+                         WHERE d.tenant_id = p_tenant_id AND d.tumbler = pl.doc) AS n_chunks) oc
+            ON pl.doc IS NOT NULL
          ORDER BY t.ord;
         RETURN;
     END IF;
@@ -500,7 +555,7 @@ BEGIN
     -- conflict: the ones it restored and the ones that were already there.
     v_cand := v_restored || v_present;
     IF cardinality(v_cand) > 0 THEN
-        v_plan := nexus.quarantine_reattach_plan(p_tenant_id, p_origin_collection, NULL, v_cand);
+        v_plan := nexus.quarantine_reattach_plan(p_tenant_id, p_origin_collection, p_quarantine_collection, v_cand, false);
         IF p_reattach THEN
             -- The per-document index-run lock manifest writers take, in tumbler order so two restores cannot
             -- deadlock, then the plan again under it: what is written is what was judged under the lock.
@@ -512,7 +567,7 @@ BEGIN
             LOOP
                 PERFORM pg_advisory_xact_lock(hashtext('indexrun:' || p_tenant_id || ':' || v_doc));
             END LOOP;
-            v_plan := nexus.quarantine_reattach_plan(p_tenant_id, p_origin_collection, NULL, v_cand);
+            v_plan := nexus.quarantine_reattach_plan(p_tenant_id, p_origin_collection, p_quarantine_collection, v_cand, false);
 
             WITH ins AS (
                 INSERT INTO nexus.catalog_document_chunks
@@ -601,11 +656,21 @@ BEGIN
            CASE WHEN pl.verdict = 'attach' AND p_reattach AND NOT (r.h = ANY (v_attached)) THEN 'superseded'
                 ELSE pl.verdict END,
            (r.h = ANY (v_attached)),
-           pl.doc, pl.title, pl.pos, pl.chunk_title
+           pl.doc, pl.title, pl.pos, pl.chunk_title,
+           CASE WHEN pl.verdict = 'attach' AND p_reattach AND NOT (r.h = ANY (v_attached)) THEN 'race'
+                ELSE pl.why END,
+           oc.n_rows, oc.n_chunks
       FROM unnest(v_requested) WITH ORDINALITY AS r(h, ord)
       LEFT JOIN jsonb_to_recordset(v_plan)
-                AS pl(chash text, verdict text, doc text, title text, pos integer, chunk_title text)
+                AS pl(chash text, verdict text, why text, doc text, title text, pos integer, chunk_title text)
         ON pl.chash = r.h
+      LEFT JOIN LATERAL (
+            SELECT (SELECT count(*) FROM nexus.catalog_document_chunks m
+                     WHERE m.tenant_id = p_tenant_id AND m.doc_id = pl.doc
+                       AND m.collection = p_origin_collection)::integer AS n_rows,
+                   (SELECT d.chunk_count FROM nexus.catalog_documents d
+                     WHERE d.tenant_id = p_tenant_id AND d.tumbler = pl.doc) AS n_chunks) oc
+        ON pl.doc IS NOT NULL
      ORDER BY r.ord;
 END;
 $$;

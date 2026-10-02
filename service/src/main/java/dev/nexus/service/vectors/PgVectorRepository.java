@@ -3883,7 +3883,13 @@ FROM scope s
      * manifest row), or null for a chunk that is missing or a {@code dim_conflict}. {@code attached} is true
      * only when this call wrote the manifest row. {@code owner} and {@code ownerTitle} name the document the
      * metadata resolved to (null when none), {@code position} the manifest position it takes, and
-     * {@code chunkTitle} the chunk's own metadata title, for the operator's re-put recipe.
+     * {@code chunkTitle} the chunk's own metadata title, for the operator's re-put recipe. {@code reason} says
+     * why a {@code superseded} verdict was reached ({@code indexing}, {@code complete}, {@code version},
+     * {@code position_taken}, {@code rival}, {@code other_collection}, {@code has_rows}, {@code past_end}, or
+     * {@code race} for an attach that lost a race) and is null for every other verdict. {@code ownerRows} and
+     * {@code ownerChunks} are the owner's manifest rows in the origin after the call (before it, on a dry run)
+     * and its registered chunk count, so a partial attach reads as M of N; null when no owner resolved
+     * ({@code ownerChunks} also when the owner registers no count).
      *
      * <p>{@code auditId} is the {@code quarantine_restore} gc_audit row, null for a dry run or a call that
      * restored and attached nothing. {@code source} is set when the chashes came from a gc_audit row
@@ -3895,7 +3901,7 @@ FROM scope s
                                            String nextAfter) {
         public record Row(String chash, String outcome, Boolean noManifest, String reapableAfter,
                           String reattach, boolean attached, String owner, String ownerTitle, Integer position,
-                          String chunkTitle) {}
+                          String chunkTitle, String reason, Integer ownerRows, Integer ownerChunks) {}
 
         /**
          * The gc_audit row a restore was sourced from. {@code chashCount} is the row's full count and
@@ -4175,7 +4181,9 @@ FROM scope s
                 r.get(QUARANTINE_RESTORE_CHUNKS.R_REATTACH),
                 Boolean.TRUE.equals(r.get(QUARANTINE_RESTORE_CHUNKS.R_ATTACHED)),
                 r.get(QUARANTINE_RESTORE_CHUNKS.R_OWNER), r.get(QUARANTINE_RESTORE_CHUNKS.R_OWNER_TITLE),
-                r.get(QUARANTINE_RESTORE_CHUNKS.R_POSITION), r.get(QUARANTINE_RESTORE_CHUNKS.R_CHUNK_TITLE)));
+                r.get(QUARANTINE_RESTORE_CHUNKS.R_POSITION), r.get(QUARANTINE_RESTORE_CHUNKS.R_CHUNK_TITLE),
+                r.get(QUARANTINE_RESTORE_CHUNKS.R_REASON), r.get(QUARANTINE_RESTORE_CHUNKS.R_OWNER_ROWS),
+                r.get(QUARANTINE_RESTORE_CHUNKS.R_OWNER_CHUNKS)));
             if (auditId == null) auditId = r.get(QUARANTINE_RESTORE_CHUNKS.R_AUDIT_ID);
         }
         return new QuarantineRestoreOutcome(out, auditId, dryRun, source, nextAfter);
@@ -4200,11 +4208,15 @@ FROM scope s
             });
         } catch (RuntimeException e) {
             String state = sqlState(e);
-            if (LOCK_NOT_AVAILABLE.equals(state) || QUERY_CANCELED.equals(state)) {
+            if (LOCK_NOT_AVAILABLE.equals(state) || QUERY_CANCELED.equals(state)
+                    || DEADLOCK_DETECTED.equals(state)) {
                 throw new QuarantineRestoreBusyException(
                     (LOCK_NOT_AVAILABLE.equals(state)
                         ? "a manifest writer or an index run holds the collection's lock"
-                        : "the restore ran past its statement time bound")
+                        : DEADLOCK_DETECTED.equals(state)
+                            ? "the restore deadlocked with another writer of the same rows (the reaper's expiry, "
+                              + "for one) and was chosen as the victim"
+                            : "the restore ran past its statement time bound")
                     + "; nothing was moved, attached or audited", e);
             }
             throw e;
@@ -4213,6 +4225,7 @@ FROM scope s
 
     private static final String LOCK_NOT_AVAILABLE = "55P03";
     private static final String QUERY_CANCELED = "57014";
+    private static final String DEADLOCK_DETECTED = "40P01";
 
     /** The SQLSTATE of the first {@link java.sql.SQLException} in {@code t}'s cause chain, or null. */
     private static String sqlState(Throwable t) {

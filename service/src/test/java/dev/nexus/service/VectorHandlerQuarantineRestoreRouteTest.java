@@ -360,6 +360,28 @@ class VectorHandlerQuarantineRestoreRouteTest {
         assertThat(row.get("no_manifest")).isEqualTo(false);
         assertThat(row.get("reapable_after")).isNull();
         assertThat(manifestRows(TENANT_A, "9.1.1")).isEqualTo(1);
+        // The per-owner count the client reads for "M of N attached", and the superseded reason (null here).
+        assertThat(row).containsKeys("reason", "owner_rows", "owner_chunks");
+        assertThat(row.get("reason")).isNull();
+        assertThat(row.get("owner_rows")).isEqualTo(1);
+        assertThat(row.get("owner_chunks")).isEqualTo(1);
+    }
+
+    @Test
+    void aSupersededChunkSaysWhy_onTheWire() throws Exception {
+        String o = col();
+        String h = quarantinedForLiveDoc(TENANT_A, o, "9.3.1", "stale");
+        su(ctx -> ctx.update(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.INDEX_STATE, "complete")
+            .where(CATALOG_DOCUMENTS.TENANT_ID.eq(TENANT_A).and(CATALOG_DOCUMENTS.TUMBLER.eq("9.3.1"))).execute());
+
+        var body = json(post(TOKEN_A, req(o, "chashes", List.of(h))));
+
+        var row = rows(body).get(0);
+        assertThat(row.get("reattach")).isEqualTo("superseded");
+        assertThat(row.get("reason")).as("a complete document's manifest is authoritative").isEqualTo("complete");
+        assertThat(row.get("attached")).isEqualTo(false);
+        assertThat(body.get("superseded")).isEqualTo(1);
+        assertThat(manifestRows(TENANT_A, "9.3.1")).isZero();
     }
 
     @Test

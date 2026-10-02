@@ -1340,7 +1340,8 @@ public final class VectorHandler implements HttpHandler {
      * "restored": n, "would_restore": n, "present": n, "dim_conflict": n, "missing": n, "reattach": bool,
      * "attached": n, "superseded": n, "no_live_owner": n, "no_position": n, "rows": [{"chash", "outcome",
      * "no_manifest": bool|null, "reapable_after": ISO-8601|null, "reattach": str|null, "attached": bool,
-     * "owner": tumbler|null, "owner_title": str|null, "position": int|null, "chunk_title": str|null}, ...],
+     * "owner": tumbler|null, "owner_title": str|null, "position": int|null, "chunk_title": str|null,
+     * "reason": str|null, "owner_rows": int|null, "owner_chunks": int|null}, ...],
      * "source": {...}|null, "next_after": "64-hex"|null}}. {@code rows} has one entry per distinct requested chash,
      * in request order. {@code outcome} is {@code restored}, {@code would_restore} (dry run), {@code present} (the
      * origin has it), {@code dim_conflict} (as present, with a different embedding width in the quarantine copy) or
@@ -1349,6 +1350,10 @@ public final class VectorHandler implements HttpHandler {
      * repaired first; such a chunk is hidden from search and get until it has one. {@code row.reattach} is what the
      * reattach step judged ({@code attach}, {@code superseded}, {@code no_live_owner}, {@code no_position},
      * {@code owned}, or null) whether or not it ran, and {@code attached} says this call wrote the manifest row.
+     * {@code reason} says why {@code superseded} was reached ({@code indexing}, {@code complete}, {@code version},
+     * {@code position_taken}, {@code rival}, {@code other_collection}, {@code has_rows}, {@code past_end}, {@code race}),
+     * and {@code owner_rows} / {@code owner_chunks} are the owner's manifest rows in the origin after the call
+     * against its registered chunk count (a partial attach reads M of N).
      * Page by sending {@code next_after} back as {@code after_chash} (window source) or {@code source.next_offset}
      * back as {@code offset} (audit source) while it is not null.
      *
@@ -1416,6 +1421,9 @@ public final class VectorHandler implements HttpHandler {
             item.put("owner_title", r.ownerTitle());
             item.put("position", r.position());
             item.put("chunk_title", r.chunkTitle());
+            item.put("reason", r.reason());
+            item.put("owner_rows", r.ownerRows());
+            item.put("owner_chunks", r.ownerChunks());
             rows.add(item);
         }
         Map<String, Object> source = null;

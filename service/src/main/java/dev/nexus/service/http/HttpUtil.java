@@ -195,7 +195,7 @@ public final class HttpUtil {
      *       (a sample), and {@code error} names the combined write routes that replace it.</li>
      *   <li>{@code quarantine_restore_busy} (503): {@code POST /gc/quarantine-restore} could not take the
      *       collection's sweep gate (or an owning document's index-run lock) inside its 2 s bound, or ran past
-     *       its statement bound, and rolled back whole ({@link #QUARANTINE_RESTORE_BUSY_REASON}); the body also
+     *       its statement bound, or was the victim of a deadlock, and rolled back whole ({@link #QUARANTINE_RESTORE_BUSY_REASON}); the body also
      *       carries {@code retry_after_seconds} and {@code nothing_moved: true}. Retryable.</li>
      * </ul>
      * The typed 409 bodies predate the rule and discriminate on {@code status}

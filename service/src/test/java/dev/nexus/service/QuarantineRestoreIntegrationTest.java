@@ -222,6 +222,18 @@ class QuarantineRestoreIntegrationTest extends AtomicWriteTestBase {
         return out.rows().stream().filter(r -> r.chash().equals(hex)).findFirst().orElseThrow().reattach();
     }
 
+    private static String reasonOf(QuarantineRestoreOutcome out, String hex) {
+        return out.rows().stream().filter(r -> r.chash().equals(hex)).findFirst().orElseThrow().reason();
+    }
+
+    private void setContentHash(String tenant, String tumbler, String hash) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            DSL.using(su, SQLDialect.POSTGRES).update(CATALOG_DOCUMENTS)
+                .set(CATALOG_DOCUMENTS.INDEX_CONTENT_HASH, hash)
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant).and(CATALOG_DOCUMENTS.TUMBLER.eq(tumbler))).execute();
+        }
+    }
+
     /** Makes the quarantined copies look long-lived: written 90 days ago, moved 10 days ago. */
     private void ageQuarantined(String tenant, String collection) throws Exception {
         try (Connection su = pg.createConnection("")) {
@@ -863,9 +875,14 @@ class QuarantineRestoreIntegrationTest extends AtomicWriteTestBase {
 
         assertThat(out.restored()).as("the bytes always come back").containsExactlyInAnyOrderElementsOf(hs);
         assertThat(verdictOf(out, hs.get(0))).as("position 0 holds another chunk").isEqualTo("superseded");
+        assertThat(reasonOf(out, hs.get(0))).isEqualTo("position_taken");
         assertThat(verdictOf(out, hs.get(1))).as("past the document's registered chunk_count").isEqualTo("superseded");
+        assertThat(reasonOf(out, hs.get(1))).isEqualTo("past_end");
         assertThat(verdictOf(out, hs.get(2))).as("two claimants of one position: neither is written").isEqualTo("superseded");
         assertThat(verdictOf(out, hs.get(3))).isEqualTo("superseded");
+        assertThat(reasonOf(out, hs.get(2))).isEqualTo("rival");
+        assertThat(reasonOf(out, hs.get(3))).isEqualTo("rival");
+        assertThat(reasonOf(out, hs.get(4))).as("an attach has no reason").isNull();
         assertThat(verdictOf(out, hs.get(4))).as("the control: a free position inside the count attaches").isEqualTo("attach");
         assertThat(out.attached()).containsExactly(hs.get(4));
         assertThat(manifest(t, doc)).as("the existing row is untouched and only the free position was added")
@@ -967,7 +984,10 @@ class QuarantineRestoreIntegrationTest extends AtomicWriteTestBase {
         QuarantineRestoreOutcome out = vectors.quarantineRestore(t, c, quarantineOf(c), hs, ACTOR, false);
 
         assertThat(verdictOf(out, hs.get(0))).as("an index run is rewriting this manifest").isEqualTo("superseded");
+        assertThat(reasonOf(out, hs.get(0))).isEqualTo("indexing");
         assertThat(verdictOf(out, hs.get(1))).as("its manifest lives under another collection").isEqualTo("superseded");
+        assertThat(reasonOf(out, hs.get(1))).isEqualTo("other_collection");
+        assertThat(reasonOf(out, hs.get(3))).isEqualTo("has_rows");
         assertThat(verdictOf(out, hs.get(2))).as("the control: the same shape without either problem attaches")
             .isEqualTo("attach");
         assertThat(verdictOf(out, hs.get(3))).as("a note that already has a manifest row is not the census's candidate")
@@ -1221,5 +1241,245 @@ class QuarantineRestoreIntegrationTest extends AtomicWriteTestBase {
         assertThat(said).as("labelled Z, so it must BE UTC").isBetween(
             written.plus(Duration.ofDays(30)).minus(Duration.ofMinutes(5)),
             written.plus(Duration.ofDays(30)).plus(Duration.ofMinutes(5)));
+    }
+
+    // ── round 3 (nexus-wbfpw.49): complete documents, version ambiguity, reasons, partial attach ─────────
+
+    @Test
+    void anEmptiedCompleteDocumentIsNotAReattachTarget_butAnUnstampedLegacyOneOfTheSameShapeIs() throws Exception {
+        // The reviewer's probe: chunk_count 0 reads as "unknown" to the position checks, but a document stamped
+        // complete with no manifest rows was emptied on purpose, and its manifest is authoritative: a chunk of it
+        // that no row names is stale by definition.
+        String t = newTenant();
+        String c = col("knowledge");
+        Map<String, Map<String, Object>> meta = new java.util.LinkedHashMap<>();
+        meta.put("stale", Map.of("catalog_doc_id", "1.20.1", "chunk_index", 3));
+        meta.put("legacy", Map.of("catalog_doc_id", "1.20.2", "chunk_index", 3));
+        List<String> hs = quarantinedWith(t, c, meta);
+        liveDoc(t, c, "1.20.1", "Emptied", 0, "e.md", Map.of());
+        setIndexState(t, "1.20.1", "complete");
+        liveDoc(t, c, "1.20.2", "Legacy, unstamped", 0, "l.md", Map.of());
+
+        QuarantineRestoreOutcome out = vectors.quarantineRestore(t, c, quarantineOf(c), hs, ACTOR, false);
+
+        assertThat(verdictOf(out, hs.get(0))).isEqualTo("superseded");
+        assertThat(reasonOf(out, hs.get(0))).isEqualTo("complete");
+        assertThat(manifest(t, "1.20.1")).as("a stale chunk is not written into an emptied document").isEmpty();
+        assertThat(visibleToGet(t, c, hs.get(0))).isFalse();
+        assertThat(verdictOf(out, hs.get(1))).as("the control: an unstamped legacy document (the R8 case) attaches")
+            .isEqualTo("attach");
+        assertThat(manifest(t, "1.20.2")).containsExactly(new ManifestRow(3, hs.get(1), c));
+    }
+
+    @Test
+    void aChunkCutFromAnotherVersionOfTheFileIsSupersededByItsContentHash() throws Exception {
+        String t = newTenant();
+        String c = col("knowledge");
+        Map<String, Map<String, Object>> meta = new java.util.LinkedHashMap<>();
+        meta.put("other-version", Map.of("catalog_doc_id", "1.21.1", "chunk_index", 0, "content_hash", "bbb"));
+        meta.put("same-version", Map.of("catalog_doc_id", "1.21.1", "chunk_index", 1, "content_hash", "aaa"));
+        meta.put("no-hash", Map.of("catalog_doc_id", "1.21.1", "chunk_index", 2));
+        List<String> hs = quarantinedWith(t, c, meta);
+        liveDoc(t, c, "1.21.1", "Versioned", 3, "v.md", Map.of());
+        setContentHash(t, "1.21.1", "aaa");
+
+        QuarantineRestoreOutcome out = vectors.quarantineRestore(t, c, quarantineOf(c), hs, ACTOR, false);
+
+        assertThat(verdictOf(out, hs.get(0))).isEqualTo("superseded");
+        assertThat(reasonOf(out, hs.get(0))).isEqualTo("version");
+        assertThat(verdictOf(out, hs.get(1))).as("the same content hash attaches").isEqualTo("attach");
+        assertThat(verdictOf(out, hs.get(2))).as("a chunk that records no hash is not refused for it").isEqualTo("attach");
+        assertThat(manifest(t, "1.21.1")).extracting(ManifestRow::position).containsExactly(1, 2);
+    }
+
+    @Test
+    void twoVersionsOfOnePositionAreRefusedWhenTheyLandInSeparateCalls() throws Exception {
+        // The page-split case: each call names only one of the two, so a per-call check sees no claim at all.
+        String t = newTenant();
+        String c = col("knowledge");
+        Map<String, Map<String, Object>> meta = new java.util.LinkedHashMap<>();
+        meta.put("v1", Map.of("catalog_doc_id", "1.22.1", "chunk_index", 0, "title", "v1"));
+        meta.put("v2", Map.of("catalog_doc_id", "1.22.1", "chunk_index", 0, "title", "v2"));
+        meta.put("alone", Map.of("catalog_doc_id", "1.22.1", "chunk_index", 1));
+        List<String> hs = quarantinedWith(t, c, meta);
+        liveDoc(t, c, "1.22.1", "Two versions", 2, "p.md", Map.of());
+
+        QuarantineRestoreOutcome first = vectors.quarantineRestore(t, c, quarantineOf(c), List.of(hs.get(0)), ACTOR, false);
+        assertThat(verdictOf(first, hs.get(0))).as("v2 still sits in quarantine, naming the same position")
+            .isEqualTo("superseded");
+        assertThat(reasonOf(first, hs.get(0))).isEqualTo("rival");
+        QuarantineRestoreOutcome second = vectors.quarantineRestore(t, c, quarantineOf(c), List.of(hs.get(1)), ACTOR, false);
+        assertThat(verdictOf(second, hs.get(1))).as("v1 is in the collection now, naming the same position")
+            .isEqualTo("superseded");
+        assertThat(reasonOf(second, hs.get(1))).isEqualTo("rival");
+        assertThat(manifest(t, "1.22.1")).as("neither version was chosen for the operator").isEmpty();
+        assertThat(visibleToGet(t, c, hs.get(0))).isFalse();
+        assertThat(visibleToGet(t, c, hs.get(1))).isFalse();
+
+        QuarantineRestoreOutcome control = vectors.quarantineRestore(t, c, quarantineOf(c), List.of(hs.get(2)), ACTOR, false);
+        assertThat(verdictOf(control, hs.get(2))).as("the control: a position with one chunk attaches").isEqualTo("attach");
+    }
+
+    @Test
+    void twoVersionsOfOnePositionAreRefusedWhenTheyLandOnDifferentPagesOfOneSelection() throws Exception {
+        String t = newTenant();
+        String c = col("knowledge");
+        Map<String, Map<String, Object>> meta = new java.util.LinkedHashMap<>();
+        meta.put("pv1", Map.of("catalog_doc_id", "1.23.1", "chunk_index", 0));
+        meta.put("pv2", Map.of("catalog_doc_id", "1.23.1", "chunk_index", 0));
+        List<String> hs = quarantinedWith(t, c, meta);
+        liveDoc(t, c, "1.23.1", "Paged", 1, "pg.md", Map.of());
+        Instant since = Instant.parse("2026-01-01T00:00:00Z");
+
+        var page1 = vectors.quarantineRestoreSelected(t, c, quarantineOf(c), since, null, null, 1, ACTOR, false);
+        assertThat(page1.nextAfter()).as("a full page of one: the other chunk is on the next page").isNotNull();
+        var page2 = vectors.quarantineRestoreSelected(t, c, quarantineOf(c), since, null, page1.nextAfter(), 1, ACTOR, false);
+
+        assertThat(page1.rows()).singleElement().satisfies(r -> {
+            assertThat(r.reattach()).isEqualTo("superseded");
+            assertThat(r.reason()).isEqualTo("rival");
+        });
+        assertThat(page2.rows()).singleElement().satisfies(r -> {
+            assertThat(r.reattach()).isEqualTo("superseded");
+            assertThat(r.reason()).isEqualTo("rival");
+        });
+        assertThat(manifest(t, "1.23.1")).isEmpty();
+        for (String h : hs) assertThat(inCollection(t, c, h)).isTrue();
+    }
+
+    @Test
+    void aStoredOriginChunkNamingTheSamePositionIsARivalEvenWhenTheCallDoesNotNameIt() throws Exception {
+        String t = newTenant();
+        String c = col("knowledge");
+        String h = quarantinedWith(t, c, Map.of("wrongly-moved", Map.<String, Object>of(
+            "catalog_doc_id", "1.23.2", "chunk_index", 0))).get(0);
+        liveDoc(t, c, "1.23.2", "Has a sibling", 1, "s.md", Map.of());
+        orphan(t, c, "lingering-version", Map.<String, Object>of("catalog_doc_id", "1.23.2", "chunk_index", 0));
+
+        QuarantineRestoreOutcome out = vectors.quarantineRestore(t, c, quarantineOf(c), List.of(h), ACTOR, false);
+
+        assertThat(verdictOf(out, h)).isEqualTo("superseded");
+        assertThat(reasonOf(out, h)).isEqualTo("rival");
+        assertThat(manifest(t, "1.23.2")).isEmpty();
+    }
+
+    @Test
+    void aPartialAttachSaysHowManyOfTheDocumentsChunksNowHaveARow() throws Exception {
+        String t = newTenant();
+        String c = col("knowledge");
+        Map<String, Map<String, Object>> meta = new java.util.LinkedHashMap<>();
+        meta.put("p0", Map.of("catalog_doc_id", "1.24.1", "chunk_index", 0));
+        meta.put("p1", Map.of("catalog_doc_id", "1.24.1", "chunk_index", 1));
+        meta.put("p2", Map.of("catalog_doc_id", "1.24.1", "chunk_index", 2));
+        List<String> hs = quarantinedWith(t, c, meta);
+        liveDoc(t, c, "1.24.1", "Three parts", 3, "three.md", Map.of());
+
+        var dry = vectors.quarantineRestore(t, c, quarantineOf(c), List.of(hs.get(0), hs.get(1)), ACTOR, true);
+        assertThat(dry.rows()).allSatisfy(r -> {
+            assertThat(r.ownerRows()).as("before anything is written").isZero();
+            assertThat(r.ownerChunks()).isEqualTo(3);
+        });
+
+        var two = vectors.quarantineRestore(t, c, quarantineOf(c), List.of(hs.get(0), hs.get(1)), ACTOR, false);
+        assertThat(two.attached()).containsExactlyInAnyOrder(hs.get(0), hs.get(1));
+        assertThat(two.rows()).allSatisfy(r -> {
+            assertThat(r.ownerRows()).as("2 of 3 now have a row").isEqualTo(2);
+            assertThat(r.ownerChunks()).isEqualTo(3);
+            assertThat(r.owner()).isEqualTo("1.24.1");
+        });
+
+        var last = vectors.quarantineRestore(t, c, quarantineOf(c), List.of(hs.get(2)), ACTOR, false);
+        assertThat(last.rows().get(0).ownerRows()).isEqualTo(3);
+        assertThat(last.rows().get(0).ownerChunks()).isEqualTo(3);
+    }
+
+    @Test
+    void theOwnersStateIsJudgedAgainUnderTheIndexRunLock_soADocumentDeletedWhileTheRestoreWaitedIsNotAttachedTo()
+            throws Exception {
+        String t = newTenant();
+        String c = col("knowledge");
+        String doc = "1.26.1";
+        String h = quarantinedWith(t, c, Map.of("waits", Map.<String, Object>of(
+            "catalog_doc_id", doc, "chunk_index", 0))).get(0);
+        liveDoc(t, c, doc, "Deleted mid-call", 1, "w.md", Map.of());
+
+        var pool = java.util.concurrent.Executors.newSingleThreadExecutor();
+        try (Connection holder = pg.createConnection("")) {
+            holder.setAutoCommit(false);
+            DSL.using(holder, SQLDialect.POSTGRES).select(DSL.function("pg_advisory_xact_lock",
+                SQLDataType.OTHER, DSL.function("hashtext", SQLDataType.INTEGER,
+                    DSL.val("indexrun:" + t + ":" + doc)))).execute();
+            // The restore plans (the document is live: attach), then waits for this lock.
+            var call = pool.submit(() -> vectors.quarantineRestore(t, c, quarantineOf(c), List.of(h), ACTOR, false));
+            awaitAdvisoryLockWaiter();
+            DSL.using(holder, SQLDialect.POSTGRES).update(CATALOG_DOCUMENTS)
+                .set(CATALOG_DOCUMENTS.DELETED_AT, OffsetDateTime.now())
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(t).and(CATALOG_DOCUMENTS.TUMBLER.eq(doc))).execute();
+            holder.commit();
+
+            QuarantineRestoreOutcome out = call.get(15, java.util.concurrent.TimeUnit.SECONDS);
+            assertThat(verdictOf(out, h)).as("judged again under the lock: the owner is gone").isEqualTo("no_live_owner");
+            assertThat(out.attached()).isEmpty();
+        } finally {
+            pool.shutdownNow();
+        }
+        assertThat(manifest(t, doc)).as("no row was written into a deleted document").isEmpty();
+        assertThat(inCollection(t, c, h)).as("the bytes still came back").isTrue();
+    }
+
+    @Test
+    void aDeadlockWithAnotherWriterOfTheSameRowsIsTheTypedRetryableBusy_notAnOpaqueError() throws Exception {
+        // The restore holds the quarantine row it deleted and waits for the document's index-run lock; the other
+        // session holds that lock and then wants the same row. The restore waited first, so the deadlock detector
+        // picks it as the victim (40P01).
+        String t = newTenant();
+        String c = col("knowledge");
+        String doc = "1.27.1";
+        String h = quarantinedWith(t, c, Map.of("deadlocks", Map.<String, Object>of(
+            "catalog_doc_id", doc, "chunk_index", 0))).get(0);
+        liveDoc(t, c, doc, "Deadlock", 1, "d.md", Map.of());
+
+        var pool = java.util.concurrent.Executors.newFixedThreadPool(2);
+        try (Connection holder = pg.createConnection("")) {
+            holder.setAutoCommit(false);
+            DSLContext hctx = DSL.using(holder, SQLDialect.POSTGRES);
+            hctx.select(DSL.function("pg_advisory_xact_lock", SQLDataType.OTHER,
+                DSL.function("hashtext", SQLDataType.INTEGER, DSL.val("indexrun:" + t + ":" + doc)))).execute();
+            var call = pool.submit(() -> vectors.quarantineRestore(t, c, quarantineOf(c), List.of(h), ACTOR, false));
+            awaitAdvisoryLockWaiter();
+            var rowWanted = pool.submit(() -> hctx.deleteFrom(CHUNKS)
+                .where(CHUNKS.TENANT_ID.eq(t).and(CHUNKS.COLLECTION.eq(quarantineOf(c)))
+                       .and(CHUNKS.CHASH.eq(Chash.fromHex(h).toBytes()))).execute());
+
+            assertThatThrownBy(() -> call.get(15, java.util.concurrent.TimeUnit.SECONDS))
+                .hasCauseInstanceOf(PgVectorRepository.QuarantineRestoreBusyException.class)
+                .hasStackTraceContaining("deadlock");
+            rowWanted.get(15, java.util.concurrent.TimeUnit.SECONDS);   // the survivor's delete goes through
+            holder.rollback();
+        } finally {
+            pool.shutdownNow();
+        }
+        assertThat(inCollection(t, quarantineOf(c), h)).as("the victim rolled back whole: still in quarantine").isTrue();
+        assertThat(inCollection(t, c, h)).isFalse();
+        assertThat(manifest(t, doc)).isEmpty();
+    }
+
+    /** Blocks until a backend is waiting on an advisory lock inside a quarantine_restore_chunks call. */
+    private void awaitAdvisoryLockWaiter() throws Exception {
+        var activity = DSL.table(DSL.name("pg_catalog", "pg_stat_activity"));
+        var waitType = DSL.field(DSL.name("pg_catalog", "pg_stat_activity", "wait_event_type"), String.class);
+        var waitEvent = DSL.field(DSL.name("pg_catalog", "pg_stat_activity", "wait_event"), String.class);
+        var query = DSL.field(DSL.name("pg_catalog", "pg_stat_activity", "query"), String.class);
+        long deadline = System.nanoTime() + Duration.ofSeconds(10).toNanos();
+        try (Connection su = pg.createConnection("")) {
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            while (System.nanoTime() < deadline) {
+                int waiting = ctx.fetchCount(activity,
+                    waitType.eq("Lock").and(waitEvent.eq("advisory")).and(query.like("%quarantine_restore_chunks%")));
+                if (waiting > 0) return;
+                Thread.sleep(20);
+            }
+        }
+        throw new AssertionError("the restore never reached its advisory lock wait");
     }
 }
