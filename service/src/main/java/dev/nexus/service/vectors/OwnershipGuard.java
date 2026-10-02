@@ -18,12 +18,14 @@ import java.util.Objects;
  * guard. It matches direct calls and method references as text, so it also reads comments: name a
  * guarded method in prose without the call or the double-colon syntax. It does not see a chunk
  * write that goes through another method or through direct SQL. Known writers outside the guard are
- * the four SQL functions that insert into {@code nexus.chunks}, at their live definitions:
- * {@code gc_quarantine_orphans} (hygiene-005), {@code gc_quarantine_orphans_bounded} (hygiene-008),
- * {@code gc_restore_rereferenced} and {@code gc_restore_rereferenced_bounded} (catalog-043). Earlier
- * definitions of the same four (catalog-023, 024, 028, 033, 037, 039, 042; hygiene-002; vectors-005)
- * were replaced in place and are not live. The quarantine restore verb planned under nexus-wbfpw.49
- * is the other, and restores ownerless chunks by design.
+ * the SQL functions whose live definition inserts into {@code nexus.chunks} (the last definition of
+ * each function in the changelog's include order, rollback blocks excluded). The source of truth is
+ * {@code _CHUNK_INSERTER_ALLOWLIST} in {@code tests/test_changelog_chunk_inserter_lint.py}, each entry
+ * with its reason: that lint fails when a function that is not on the list inserts into
+ * {@code nexus.chunks}, and when an entry no longer does, so a change that adds such a function (the
+ * reaper's and the quarantine restore's) extends the list there and this paragraph needs no edit. It
+ * deliberately names none of them here, nor the changeset that defines them, because that goes stale
+ * the moment a function is redefined.
  *
  * @param mode          enforce or log-only
  * @param route         the route name for the error and the log, e.g. {@code upsert-chunks}
