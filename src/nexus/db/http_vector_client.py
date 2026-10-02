@@ -3887,7 +3887,6 @@ class HttpVectorClient:
     def gc_quarantine_restore(
         self,
         origin_collection: str,
-        quarantine_collection: str,
         *,
         chashes: list[str] | None = None,
         audit_id: int | None = None,
@@ -3903,9 +3902,14 @@ class HttpVectorClient:
         """POST /v1/vectors/gc/quarantine-restore (RDR-192 Step 9 Day-2, bead
         nexus-2x9xa; serves ``nx t3 quarantine restore``).
 
-        Moves chunks from ``quarantine_collection`` back to ``origin_collection``
-        with no manifest row required, in one engine statement under the
-        exclusive sweep gate. Name EXACTLY ONE source: ``chashes`` (at most
+        Moves chunks from the origin's quarantine collection(s) back to
+        ``origin_collection`` with no manifest row required, in one engine
+        statement under the exclusive sweep gate. The engine finds the quarantine
+        collection itself (the reaper's own name for the origin, and every
+        quarantine collection holding chunks tagged with the origin), so this
+        method names none: a sibling derived from the origin's catalog row
+        disagrees with where the reaper put the chunks once the row disagrees
+        with the name (catalog-044, nexus-wbfpw.55). Name EXACTLY ONE source: ``chashes`` (at most
         1000), ``audit_id`` (the chash list of a gc_audit row, paged by
         ``offset``/``limit``), or a ``quarantined_since`` / ``quarantined_before``
         window over the sibling (paged by ``after_chash``/``limit``). Only the
@@ -3915,8 +3919,10 @@ class HttpVectorClient:
         document, so the chunk is visible to search and get again; ``False`` moves
         bytes only (nexus-wbfpw.49).
 
-        Returns ``{"origin_collection", "quarantine_collection", "dry_run",
-        "audit_id": int|None, "restored": n, "would_restore": n, "present": n,
+        Returns ``{"origin_collection", "quarantine_collection": str|None (the
+        first quarantine collection found), "quarantine_collections": [str]
+        (all of them), "dry_run", "audit_id": int|None, "audit_ids": [int] (one
+        per quarantine collection that wrote an audit row), "restored": n, "would_restore": n, "present": n,
         "dim_conflict": n, "missing": n, "reattach": bool, "attached": n,
         "superseded": n, "no_live_owner": n, "no_position": n, "rows": [{"chash",
         "outcome", "no_manifest": bool|None, "reapable_after": str|None,
@@ -3940,10 +3946,7 @@ class HttpVectorClient:
         ``reason == "quarantine_restore_busy"`` when a manifest writer held the
         collection's lock: that call rolled back whole and may be sent again).
         """
-        body: dict = {
-            "origin_collection": origin_collection,
-            "quarantine_collection": quarantine_collection,
-        }
+        body: dict = {"origin_collection": origin_collection}
         for key, value in (
             ("chashes", chashes), ("audit_id", audit_id), ("offset", offset),
             ("quarantined_since", quarantined_since), ("quarantined_before", quarantined_before),

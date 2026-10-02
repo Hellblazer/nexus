@@ -1598,6 +1598,190 @@ class QuarantineRestoreIntegrationTest extends AtomicWriteTestBase {
         assertThat(visibleToGet(t, c, h)).isTrue();
     }
 
+    // ── the engine names the sibling itself (nexus-wbfpw.55, RDR-192 Phase 3 gate I-1) ──────────────────────
+
+    /** catalog-044 rewrote {@code owner_id} on repo collections after the fact: the row now disagrees with the name. */
+    private void setOwner(String tenant, String collection, String owner) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            int n = DSL.using(su, SQLDialect.POSTGRES).update(CATALOG_COLLECTIONS)
+                .set(CATALOG_COLLECTIONS.OWNER_ID, owner)
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant).and(CATALOG_COLLECTIONS.NAME.eq(collection))).execute();
+            assertThat(n).as("fixture: the origin has a catalog row to rewrite").isEqualTo(1);
+        }
+    }
+
+    /** What the Python client derived for the origin: {@code quarantine-<content_type>__<row owner>__<model>__<v>}. */
+    private static String rowDerivedSibling(String collection, String owner) {
+        String[] seg = collection.split("__");
+        return "quarantine-" + seg[0] + "__" + owner + "__" + seg[2] + "__" + seg[3];
+    }
+
+    @Test
+    void aReaperMovedChunkIsRestoredWhenTheOriginsCatalogRowDisagreesWithItsName() throws Exception {
+        String t = newTenant();
+        String c = col("knowledge");
+        String h = quarantined(t, c, "catalog-044").get(0);
+        setOwner(t, c, "curator-9");
+        String rowSibling = rowDerivedSibling(c, "curator-9");
+        assertThat(rowSibling).as("fixture: the row-derived sibling is not where the reaper put it")
+            .isNotEqualTo(quarantineOf(c));
+
+        // The engine finds the sibling from the origin's name and the chunks' own origin tag, so a caller that
+        // does not name one (or names the row-derived one) reaches the chunk.
+        QuarantineRestoreOutcome out = vectors.quarantineRestore(t, c, null, List.of(h), ACTOR, false);
+
+        assertThat(out.restored()).containsExactly(h);
+        assertThat(inCollection(t, c, h)).as("back in the origin").isTrue();
+        assertThat(inCollection(t, quarantineOf(c), h)).as("and gone from where the reaper put it").isFalse();
+    }
+
+    @Test
+    void aSlugCollectionAndItsConformantTwinRestoreOnlyTheirOwnChunks() throws Exception {
+        String t = newTenant();
+        String slug = col("knowledge");
+        String twin = col("knowledge");
+        // Same chash text in both would be one chunk each in their own siblings, as the reaper names them by name.
+        String hSlug = quarantined(t, slug, "slug").get(0);
+        String hTwin = quarantined(t, twin, "twin").get(0);
+        // After catalog-044 both rows read the same owner, so the row-derived sibling of the two is ONE name.
+        setOwner(t, slug, "curator-9");
+        setOwner(t, twin, "curator-9");
+
+        QuarantineRestoreOutcome dry = vectors.quarantineRestore(t, slug, null, List.of(hSlug, hTwin), ACTOR, true);
+        assertThat(dry.wouldRestore()).containsExactly(hSlug);
+        assertThat(dry.missing()).as("the twin's chunk is not the slug's to take").containsExactly(hTwin);
+
+        assertThat(vectors.quarantineRestore(t, slug, null, List.of(hSlug, hTwin), ACTOR, false).restored())
+            .containsExactly(hSlug);
+        assertThat(inCollection(t, twin, hTwin)).as("never restored into the other origin").isFalse();
+        assertThat(inCollection(t, quarantineOf(twin), hTwin)).as("still in the twin's own sibling").isTrue();
+        assertThat(vectors.quarantineRestore(t, twin, null, List.of(hTwin), ACTOR, false).restored())
+            .containsExactly(hTwin);
+    }
+
+    @Test
+    void aSharedSiblingIsFoundByTheOriginTagNotByItsName() throws Exception {
+        String t = newTenant();
+        String a = col("knowledge");
+        String b = col("knowledge");
+        String shared = "quarantine-knowledge__curator-9__minilm-l6-v2-384__v1";   // what the client's row rule gave both
+        String forA = Chash.ofText("shared-for-a").toHex();
+        String forB = Chash.ofText("shared-for-b").toHex();
+        try (Connection su = pg.createConnection("")) {
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCollection(ctx, t, a);
+            PgContainerHelper.insertCollection(ctx, t, b);
+            PgContainerHelper.insertCollection(ctx, t, shared);
+            PgContainerHelper.insertChunks(ctx, t, shared, List.of(forA), List.of("a text"),
+                embedder.embed(List.of("a text")), List.of(Map.<String, Object>of("origin_collection", a)));
+            PgContainerHelper.insertChunks(ctx, t, shared, List.of(forB), List.of("b text"),
+                embedder.embed(List.of("b text")), List.of(Map.<String, Object>of("origin_collection", b)));
+        }
+
+        QuarantineRestoreOutcome out = vectors.quarantineRestore(t, a, null, List.of(forA, forB), ACTOR, false);
+
+        assertThat(out.restored()).containsExactly(forA);
+        assertThat(out.missing()).containsExactly(forB);
+        assertThat(inCollection(t, shared, forB)).as("B's chunk stays where it is").isTrue();
+    }
+
+    @Test
+    void anOriginWithNoQuarantineSiblingAtAllReadsEveryChashMissing_notAnError() throws Exception {
+        String t = newTenant();
+        String c = col("knowledge");
+        String h = orphan(t, c, "never-moved");
+
+        QuarantineRestoreOutcome out = vectors.quarantineRestore(t, c, null, List.of(h), ACTOR, false);
+
+        assertThat(out.missing()).containsExactly(h);
+        assertThat(inCollection(t, c, h)).as("untouched").isTrue();
+    }
+
+    @Test
+    void aWindowAndAnAuditIdAreResolvedByTheEngineToo() throws Exception {
+        String t = newTenant();
+        String c = col("knowledge");
+        List<String> hs = quarantined(t, c, "win-a", "win-b");
+        long id = audit(t, "reaper_quarantine").get(0).id();
+        setOwner(t, c, "curator-9");
+
+        QuarantineRestoreOutcome fromAudit = vectors.quarantineRestoreFromAudit(t, c, null, id, 0, 1, ACTOR, false);
+        assertThat(fromAudit.restored()).hasSize(1);
+        assertThat(fromAudit.source().nextOffset()).isEqualTo(1);
+
+        QuarantineRestoreOutcome fromWindow = vectors.quarantineRestoreSelected(
+            t, c, null, Instant.parse("2000-01-01T00:00:00Z"), null, null, 1000, ACTOR, false);
+        assertThat(fromWindow.restored()).hasSize(1);
+        assertThat(fromAudit.restored().get(0)).isNotEqualTo(fromWindow.restored().get(0));
+        assertThat(hs).allSatisfy(h -> assertThat(inCollection(t, c, h)).isTrue());
+    }
+
+    @Test
+    void chunksInTheReapersSiblingAndInAClientNamedSiblingAreBothReached_oneAuditRowEach() throws Exception {
+        String t = newTenant();
+        String c = col("knowledge");
+        String byReaper = quarantined(t, c, "reaper-side").get(0);
+        // nx index repo moved a chunk of the same origin before catalog-044, into the name its row gave then.
+        String clientSibling = rowDerivedSibling(c, "old-owner");
+        String byClient = Chash.ofText("client-side").toHex();
+        try (Connection su = pg.createConnection("")) {
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCollection(ctx, t, clientSibling);
+            PgContainerHelper.insertChunks(ctx, t, clientSibling, List.of(byClient), List.of("client text"),
+                embedder.embed(List.of("client text")), List.of(Map.<String, Object>of(
+                    "origin_collection", c, "quarantined_at", "2026-09-01T00:00:00Z")));
+        }
+        String nowhere = Chash.ofText("nowhere").toHex();
+        setOwner(t, c, "curator-9");
+
+        assertThat(vectors.resolveQuarantineSiblings(t, c)).as("the reaper's name first, then the tagged one")
+            .containsExactly(quarantineOf(c), clientSibling);
+        QuarantineRestoreOutcome dry =
+            vectors.quarantineRestore(t, c, null, List.of(byClient, nowhere, byReaper), ACTOR, true);
+        assertThat(dry.wouldRestore()).containsExactlyInAnyOrder(byClient, byReaper);
+        assertThat(dry.missing()).containsExactly(nowhere);
+        assertThat(dry.rows()).extracting(QuarantineRestoreOutcome.Row::chash)
+            .as("one row per chash, in request order").containsExactly(byClient, nowhere, byReaper);
+        assertThat(dry.auditIds()).as("a dry run writes no audit row").isEmpty();
+
+        QuarantineRestoreOutcome out =
+            vectors.quarantineRestore(t, c, null, List.of(byClient, nowhere, byReaper), ACTOR, false);
+
+        assertThat(out.restored()).containsExactlyInAnyOrder(byClient, byReaper);
+        assertThat(out.missing()).containsExactly(nowhere);
+        assertThat(out.quarantineCollections()).containsExactly(quarantineOf(c), clientSibling);
+        assertThat(out.auditIds()).as("one quarantine_restore row per sibling that moved something").hasSize(2);
+        assertThat(out.auditId()).isEqualTo(out.auditIds().get(0));
+        assertThat(audit(t, "quarantine_restore")).extracting(AuditRow::collection).containsExactly(c, c);
+        assertThat(inCollection(t, c, byClient)).isTrue();
+        assertThat(inCollection(t, clientSibling, byClient)).isFalse();
+        assertThat(inCollection(t, c, byReaper)).isTrue();
+    }
+
+    @Test
+    void aWindowSelectsAChashOnceEvenWhenTwoSiblingsHoldIt() throws Exception {
+        String t = newTenant();
+        String c = col("knowledge");
+        String h = quarantined(t, c, "both").get(0);
+        String clientSibling = rowDerivedSibling(c, "old-owner");
+        ChunkState reaperCopy = chunk(t, quarantineOf(c), h);
+        try (Connection su = pg.createConnection("")) {
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCollection(ctx, t, clientSibling);
+            PgContainerHelper.insertChunks(ctx, t, clientSibling, List.of(h), List.of(reaperCopy.text()),
+                embedder.embed(List.of(reaperCopy.text())), List.of(Map.<String, Object>of(
+                    "origin_collection", c, "quarantined_at", "2026-09-01T00:00:00Z")));
+        }
+
+        QuarantineRestoreOutcome out = vectors.quarantineRestoreSelected(
+            t, c, null, Instant.parse("2000-01-01T00:00:00Z"), null, null, 1000, ACTOR, false);
+
+        assertThat(out.rows()).as("one row for the chash, not one per sibling").hasSize(1);
+        assertThat(out.restored()).containsExactly(h);
+        assertThat(inCollection(t, clientSibling, h)).as("the second copy is left for expiry, as a present chash's is")
+            .isTrue();
+    }
+
     /** Blocks until a backend is waiting on an advisory lock inside a quarantine_restore_chunks call. */
     private void awaitAdvisoryLockWaiter() throws Exception {
         var activity = DSL.table(DSL.name("pg_catalog", "pg_stat_activity"));

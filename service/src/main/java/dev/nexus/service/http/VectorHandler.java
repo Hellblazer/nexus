@@ -1312,14 +1312,18 @@ public final class VectorHandler implements HttpHandler {
      * POST /v1/vectors/gc/quarantine-restore (RDR-192 Step 9 Day-2, bead nexus-2x9xa; serves
      * {@code nx t3 quarantine restore})
      *
-     * <p>Moves chunks from {@code quarantine_collection} (the origin's {@code quarantine-} sibling) back to
-     * {@code origin_collection}, with no manifest row required, in one statement under the exclusive sweep gate
+     * <p>Moves chunks from the origin's quarantine sibling(s) back to
+     * {@code origin_collection}, finding the sibling itself (nexus-wbfpw.55: the reaper's own name for the origin and
+     * every quarantine collection holding chunks tagged {@code origin_collection} = the origin; see
+     * {@link PgVectorRepository#resolveQuarantineSiblings}), with no manifest row required, in one statement under the exclusive sweep gate
      * ({@code nexus.quarantine_restore_chunks}, vectors-025). A chash the origin already has is skipped, never
      * overwritten; the restored row takes a fresh {@code last_written_at}, so the reaper does not take it at its
      * next pass; one {@code quarantine_restore} gc_audit row records the full list of restored chashes.
      * Tenant-scoped under RLS.
      *
-     * <p>Request: {@code origin_collection} and {@code quarantine_collection}, and EXACTLY ONE source:
+     * <p>Request: {@code origin_collection} (a {@code quarantine_collection} is accepted and ignored: clients before
+     * nexus-wbfpw.55 derived one from the catalog row, which disagrees with the reaper's for a row that disagrees with
+     * its name), and EXACTLY ONE source:
      * <pre>
      * { "chashes": ["64-hex", ...] }                                 // 1 to 1000 named chashes
      * { "audit_id": 123, "offset": 0, "limit": 1000 }                // the chash list of a gc_audit row
@@ -1332,11 +1336,13 @@ public final class VectorHandler implements HttpHandler {
      * chunk whose metadata names a document that is still live in the origin also gets that document's manifest row
      * at its position, so it is visible to search and get again (a position the document's manifest already holds
      * another chunk at reports {@code superseded} and writes nothing; see {@code vectors-025}). An {@code audit_id}
-     * row must be this tenant's, name the origin, be an operation that quarantined chunks, name this quarantine
-     * collection when it records one, and list every chash it moved: a {@code gc_quarantine_orphans} row lists only
+     * row must be this tenant's, name the origin, be an operation that quarantined chunks and list every chash it
+     * moved (the sibling it records, when it records one, is the one restored from): a {@code gc_quarantine_orphans} row lists only
      * a sample and is refused with 400, the way back for those is the {@code quarantined_since} window.
      *
-     * <p>Response 200: {@code {"origin_collection", "quarantine_collection", "dry_run", "audit_id": N|null,
+     * <p>Response 200: {@code {"origin_collection", "quarantine_collection" (the first sibling found, null when none),
+     * "quarantine_collections" (every sibling found), "dry_run", "audit_id": N|null, "audit_ids" (one per sibling that
+     * wrote an audit row),
      * "restored": n, "would_restore": n, "present": n, "dim_conflict": n, "missing": n, "reattach": bool,
      * "attached": n, "superseded": n, "no_live_owner": n, "no_position": n, "rows": [{"chash", "outcome",
      * "no_manifest": bool|null, "reapable_after": ISO-8601|null, "reattach": str|null, "attached": bool,
@@ -1367,7 +1373,10 @@ public final class VectorHandler implements HttpHandler {
         var tenant = requireTenant(ex);
         Map<String, Object> body = readBody(ex);
         String origin     = requireString(body, "origin_collection");
-        String quarantine = requireString(body, "quarantine_collection");
+        // nexus-wbfpw.55: a "quarantine_collection" in the body is accepted and IGNORED. The engine finds the
+        // sibling itself (origin name + the chunks' origin_collection tag): a client-derived name disagrees with
+        // the reaper's for any origin whose catalog row disagrees with its name (catalog-044), and a restore that
+        // trusted it read every chash missing or answered 422. Clients before the fix still send one.
         boolean dryRun = optBool(body, "dry_run", false);
         boolean reattach = optBool(body, "reattach", true);
         String actor = java.util.Objects.requireNonNullElse(optString(body, "actor"), "operator");
@@ -1391,7 +1400,7 @@ public final class VectorHandler implements HttpHandler {
                 throw new IllegalArgumentException("at most " + MAX_QUARANTINE_RESTORE_PER_CALL
                     + " chashes per call, got " + chashes.size());
             }
-            result = repo.quarantineRestore(tenant, origin, quarantine, chashes, actor, dryRun, reattach);
+            result = repo.quarantineRestore(tenant, origin, null, chashes, actor, dryRun, reattach);
         } else if (auditRaw != null) {
             long auditId;
             try {
@@ -1400,10 +1409,10 @@ public final class VectorHandler implements HttpHandler {
                 throw new IllegalArgumentException("field 'audit_id' must be an integer");
             }
             int offset = Math.max(0, optInt(body, "offset", 0));
-            result = repo.quarantineRestoreFromAudit(tenant, origin, quarantine, auditId, offset, limit, actor, dryRun,
+            result = repo.quarantineRestoreFromAudit(tenant, origin, null, auditId, offset, limit, actor, dryRun,
                                                      reattach);
         } else {
-            result = repo.quarantineRestoreSelected(tenant, origin, quarantine,
+            result = repo.quarantineRestoreSelected(tenant, origin, null,
                 parseInstant("quarantined_since", sinceRaw), parseInstant("quarantined_before", beforeRaw),
                 parseAfterChash(body.get("after_chash")), limit, actor, dryRun, reattach);
         }
@@ -1438,9 +1447,13 @@ public final class VectorHandler implements HttpHandler {
         }
         var out = new LinkedHashMap<String, Object>();
         out.put("origin_collection", origin);
-        out.put("quarantine_collection", quarantine);
+        // The sibling the engine found (the first when several hold chunks of the origin), null when none does.
+        out.put("quarantine_collection", result.quarantineCollections().isEmpty()
+            ? null : result.quarantineCollections().get(0));
+        out.put("quarantine_collections", result.quarantineCollections());
         out.put("dry_run", dryRun);
         out.put("audit_id", result.auditId());
+        out.put("audit_ids", result.auditIds());
         out.put("restored", result.restored().size());
         out.put("would_restore", result.wouldRestore().size());
         out.put("present", result.present().size());

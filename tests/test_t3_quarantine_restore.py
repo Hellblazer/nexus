@@ -60,22 +60,23 @@ class TestWire:
         client = HttpVectorClient.__new__(HttpVectorClient)
         client._tenant = "tenant-x"
         with patch.object(hv, "_post", return_value={"rows": []}) as post:
-            client.gc_quarantine_restore(ORIGIN, SIBLING, chashes=[_chash("a")], dry_run=True, actor="me")
+            client.gc_quarantine_restore(ORIGIN, chashes=[_chash("a")], dry_run=True, actor="me")
         path, body = post.call_args.args
         assert path == "/v1/vectors/gc/quarantine-restore"
         assert body == {
-            "origin_collection": ORIGIN, "quarantine_collection": SIBLING,
+            "origin_collection": ORIGIN,
             "chashes": [_chash("a")], "dry_run": True, "actor": "me",
         }
+        assert "quarantine_collection" not in body, "the engine finds the sibling (nexus-wbfpw.55); none is named"
         assert post.call_args.kwargs == {"tenant": "tenant-x"}
 
     def test_reattach_is_sent_only_when_given(self) -> None:
         client = HttpVectorClient.__new__(HttpVectorClient)
         client._tenant = "t"
         with patch.object(hv, "_post", return_value={"rows": []}) as post:
-            client.gc_quarantine_restore(ORIGIN, SIBLING, chashes=[_chash("a")])
-            client.gc_quarantine_restore(ORIGIN, SIBLING, chashes=[_chash("a")], reattach=False)
-            client.gc_quarantine_restore(ORIGIN, SIBLING, chashes=[_chash("a")], reattach=True)
+            client.gc_quarantine_restore(ORIGIN, chashes=[_chash("a")])
+            client.gc_quarantine_restore(ORIGIN, chashes=[_chash("a")], reattach=False)
+            client.gc_quarantine_restore(ORIGIN, chashes=[_chash("a")], reattach=True)
         none, off, on = (c.args[1] for c in post.call_args_list)
         assert "reattach" not in none, "unsent means the engine's default (reattach on)"
         assert off["reattach"] is False and on["reattach"] is True
@@ -84,14 +85,13 @@ class TestWire:
         client = HttpVectorClient.__new__(HttpVectorClient)
         client._tenant = "t"
         with patch.object(hv, "_post", return_value={"rows": []}) as post:
-            client.gc_quarantine_restore(ORIGIN, SIBLING, audit_id=7, offset=1000, limit=500)
+            client.gc_quarantine_restore(ORIGIN, audit_id=7, offset=1000, limit=500)
             client.gc_quarantine_restore(
-                ORIGIN, SIBLING, quarantined_since="2026-09-01T00:00:00Z",
+                ORIGIN, quarantined_since="2026-09-01T00:00:00Z",
                 quarantined_before="2026-09-08T00:00:00Z", after_chash=_chash("z"))
         first, second = (c.args[1] for c in post.call_args_list)
-        assert first == {"origin_collection": ORIGIN, "quarantine_collection": SIBLING,
-                         "audit_id": 7, "offset": 1000, "limit": 500}
-        assert second == {"origin_collection": ORIGIN, "quarantine_collection": SIBLING,
+        assert first == {"origin_collection": ORIGIN, "audit_id": 7, "offset": 1000, "limit": 500}
+        assert second == {"origin_collection": ORIGIN,
                           "quarantined_since": "2026-09-01T00:00:00Z",
                           "quarantined_before": "2026-09-08T00:00:00Z", "after_chash": _chash("z")}
 
@@ -125,11 +125,14 @@ def _attached_row(chash: str, owner="1.2.3", title="Legacy Note", position=0, **
                 owner=owner, owner_title=title, position=position, **kw)
 
 
-def _page(rows, *, audit_id=None, dry_run=False, source=None, next_after=None) -> dict:
+def _page(rows, *, audit_id=None, dry_run=False, source=None, next_after=None, siblings=(SIBLING,),
+          audit_ids=None) -> dict:
     counts = {k: sum(1 for r in rows if r["outcome"] == k)
               for k in ("restored", "would_restore", "present", "dim_conflict", "missing")}
-    return {"origin_collection": ORIGIN, "quarantine_collection": SIBLING, "dry_run": dry_run,
-            "audit_id": audit_id, **counts, "rows": rows, "source": source, "next_after": next_after}
+    return {"origin_collection": ORIGIN, "quarantine_collection": siblings[0] if siblings else None,
+            "quarantine_collections": list(siblings), "dry_run": dry_run,
+            "audit_id": audit_id, "audit_ids": ([audit_id] if audit_id is not None else []) if audit_ids is None
+            else list(audit_ids), **counts, "rows": rows, "source": source, "next_after": next_after}
 
 
 class _Stub:
@@ -144,8 +147,10 @@ class _Stub:
         self.error_after = error_after
         self.calls: list[dict] = []
 
-    def gc_quarantine_restore(self, origin, quarantine, **kw):
-        assert origin == self.origin and quarantine == SIBLING
+    def gc_quarantine_restore(self, origin, **kw):
+        assert origin == self.origin
+        # No quarantine collection is named: the engine finds it (nexus-wbfpw.55).
+        assert "quarantine_collection" not in kw and "sibling" not in kw
         self.calls.append(kw)
         if self.error is not None and (self.error_after is None or len(self.calls) > self.error_after):
             raise self.error
@@ -154,7 +159,6 @@ class _Stub:
 
 def _run(runner: CliRunner, stub: _Stub, *args: str):
     with patch.object(t3_quarantine, "_make_t3", return_value=stub), \
-         patch.object(t3_quarantine, "_quarantine_name", return_value=SIBLING), \
          patch.object(t3_quarantine, "_content_type", return_value=stub.content_type):
         return runner.invoke(t3, ["quarantine", "restore", "--collection", stub.origin, *args])
 
@@ -378,6 +382,7 @@ class TestCli:
         doc = _doc(result.stdout)
         assert doc["hidden"] == 1, "the one superseded chunk stays hidden"
         assert doc["origin_collection"] == ORIGIN and doc["quarantine_collection"] == SIBLING
+        assert doc["quarantine_collections"] == [SIBLING]
         assert doc["reattach"] is True
         assert doc["totals"] == {"restored": 2, "would_restore": 0, "present": 1, "dim_conflict": 0, "missing": 0}
         assert doc["reattach_totals"] == {"attached": 1, "would_attach": 0, "superseded": 1,
@@ -386,6 +391,39 @@ class TestCli:
         assert [r["outcome"] for r in doc["rows"]] == ["restored", "present", "restored"]
         assert doc["reapable_again_after"] == "2026-10-31T12:00:00Z"
         assert "error" not in doc
+
+    def test_the_report_names_every_quarantine_collection_the_engine_found_and_every_audit_row(self, runner) -> None:
+        # nexus-wbfpw.55: the reaper's sibling and a client-named one can both hold chunks of one origin.
+        a, b = _chash("a"), _chash("b")
+        other = "quarantine-knowledge__old-owner__bge-base-en-v15-768__v1"
+        stub = _Stub([_page([_hidden_row(a), _hidden_row(b)], siblings=(SIBLING, other), audit_ids=[41, 42],
+                            audit_id=41)])
+        result = _run(runner, stub, "--chash", a, "--chash", b, "--json")
+        doc = _doc(result.stdout)
+        assert doc["quarantine_collections"] == [SIBLING, other] and doc["quarantine_collection"] == SIBLING
+        assert doc["audit_ids"] == [41, 42]
+        text = _run(runner, _Stub([_page([_hidden_row(a)], siblings=(SIBLING, other), audit_ids=[41, 42],
+                                         audit_id=41)]), "--chash", a)
+        assert f"Restore from {SIBLING}, {other} into {ORIGIN}." in text.output
+        assert "gc_audit 41, 42" in text.output
+
+    def test_an_origin_nothing_is_quarantined_from_says_so_instead_of_naming_a_collection(self, runner) -> None:
+        a = _chash("a")
+        stub = _Stub([_page([_row(a, "missing")], siblings=())])
+        text = _run(runner, stub, "--chash", a)
+        assert text.exit_code == 1, text.output
+        assert "no quarantine collection (none holds chunks of this collection)" in text.output
+        doc = _doc(_run(runner, _Stub([_page([_row(a, "missing")], siblings=())]), "--chash", a, "--json").stdout)
+        assert doc["quarantine_collection"] is None and doc["quarantine_collections"] == []
+
+    def test_a_page_from_an_engine_without_the_lists_still_reports_its_single_collection_and_audit_id(
+        self, runner,
+    ) -> None:
+        a = _chash("a")
+        page = _page([_hidden_row(a)], audit_id=9)
+        del page["quarantine_collections"], page["audit_ids"]
+        doc = _doc(_run(runner, _Stub([page]), "--chash", a, "--json").stdout)
+        assert doc["quarantine_collections"] == [SIBLING] and doc["audit_ids"] == [9]
 
     def test_the_earliest_reapable_date_is_the_earliest_in_time_not_in_string_order(self, runner) -> None:
         a, b = _chash("a"), _chash("b")
@@ -589,6 +627,54 @@ def test_restore_by_quarantined_at_window_and_the_sample_audit_row_is_refused(
     assert doc["totals"]["restored"] == 3 and doc["hidden"] == 3
     assert sorted(r["chash"] for r in doc["rows"]) == sorted(hs)
     assert len(doc["audit_ids"]) == 1
+
+
+def test_restore_reaches_what_the_reaper_moved_when_the_origins_catalog_row_disagrees_with_its_name(
+    runner: CliRunner, t2_service_env,
+) -> None:
+    """nexus-wbfpw.55 (RDR-192 Phase 3 gate I-1), the real path end to end. The reaper names its sibling
+    ``quarantine-<collection name>``; catalog-044 then rewrote the collection's row owner, so the sibling the
+    client's own rule derives from the ROW is another name, unregistered, and a verb that sent it read every chash
+    missing (or was answered 422). The engine finds the sibling itself now."""
+    from nexus.catalog.chunk_quarantine import now_stamp, quarantine_collection_name
+    from nexus.mcp_infra import invalidate_collections_cache
+    from tests._chunk_seed import _lit, _pg_state, _psql_superuser, seed_chunks_direct
+    from tests._reapable_age import age_chunks_past_grace
+
+    origin = "knowledge__qrestore-044__bge-base-en-v15-768__v1"
+    reaper_sibling = "quarantine-" + origin     # ChunkReaper: QUARANTINE_PREFIX + the collection's name
+    moved = [_chash(f"{origin}/m1"), _chash(f"{origin}/m2")]
+    seed_chunks_direct(origin, moved, ["m1 text", "m2 text"], [{"title": "m1"}, {"title": "m2"}],
+                       tenant=t2_service_env)
+    age_chunks_past_grace(origin, tenant=t2_service_env)
+    # A chunk that stays, so the origin still holds a stored chunk and still has a row to derive a sibling from.
+    seed_chunks_direct(origin, [_chash(f"{origin}/keeper")], ["keeper text"], [{"title": "keeper"}],
+                       tenant=t2_service_env)
+    assert HttpVectorClient().gc_quarantine_orphans_bounded(
+        origin, reaper_sibling, now_stamp(), 20, 1000)["moved"] == 2
+    # catalog-044-3: the row's owner no longer says what the name says.
+    _psql_superuser(_pg_state(), "UPDATE nexus.catalog_collections SET owner_id = 'curator-044' "
+                                 f"WHERE tenant_id = {_lit(t2_service_env)} AND name = {_lit(origin)}")
+    invalidate_collections_cache()
+    assert quarantine_collection_name(origin) != reaper_sibling, (
+        "fixture non-vacuity: the client's row-derived sibling must differ from the reaper's, "
+        "or this test cannot tell the engine-resolved restore from the old client-derived one")
+
+    by_chash = runner.invoke(t3, ["quarantine", "restore", "--collection", origin, "--chash", moved[0], "--json"])
+    assert by_chash.exit_code == t3_quarantine.EXIT_HIDDEN, "restored, keyless so hidden: exit 3\n" + by_chash.output
+    doc = _doc(by_chash.stdout)
+    assert doc["totals"]["restored"] == 1 and doc["totals"]["missing"] == 0, doc
+    assert doc["quarantine_collections"] == [reaper_sibling], "the report says where the engine found it"
+
+    by_window = runner.invoke(t3, ["quarantine", "restore", "--collection", origin,
+                                   "--quarantined-since", "2020-01-01", "--json"])
+    assert by_window.exit_code == t3_quarantine.EXIT_HIDDEN, by_window.output
+    window = _doc(by_window.stdout)
+    assert [r["chash"] for r in window["rows"]] == [moved[1]], "the window found the chunk the first call left"
+    assert window["quarantine_collections"] == [reaper_sibling]
+    again = runner.invoke(t3, ["quarantine", "restore", "--collection", origin, "--chash", moved[0],
+                               "--chash", moved[1], "--json"])
+    assert _doc(again.stdout)["totals"]["present"] == 2, "both are in the collection now"
 
 
 def _visible(origin: str, chash: str) -> bool:

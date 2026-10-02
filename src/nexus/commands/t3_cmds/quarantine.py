@@ -7,6 +7,12 @@ rulings 2026-10-01) moves chunks from a collection's ``quarantine-`` sibling bac
 collection, through the engine route ``POST /v1/vectors/gc/quarantine-restore``
 (``nexus.quarantine_restore_chunks``, changeset ``vectors-025``).
 
+The engine finds the quarantine collection itself (nexus-wbfpw.55): the verb names none. The reaper
+names its sibling from the collection's NAME while the client's own move names one from the catalog ROW,
+and catalog-044 rewrote the row's owner on repo collections, so a name derived here reaches nothing the
+reaper moved. The engine looks at the reaper's name and at every quarantine collection holding chunks
+tagged with this origin.
+
 Why a verb of its own: until now the only way out of quarantine was
 ``gc_restore_rereferenced``, which restores a chunk only when the origin's manifest
 names it again. A chunk the reaper moved WRONGLY has no manifest row by definition, so
@@ -74,14 +80,6 @@ def _make_t3():
     return make_t3()
 
 
-def _quarantine_name(origin: str) -> str:
-    """The origin's quarantine sibling, from its registered catalog row, never a name parse
-    (RDR-204; ``chunk_quarantine.quarantine_collection_name``). Patched in tests."""
-    from nexus.catalog.chunk_quarantine import quarantine_collection_name  # noqa: PLC0415 — command-local import deferred to avoid CLI startup cost (nexus.catalog.chunk_quarantine)
-
-    return quarantine_collection_name(origin)
-
-
 def _content_type(origin: str) -> str:
     """The origin's content type (``knowledge``, ``docs``, ``code``, ``rdr``) from its catalog row, never from
     its name (RDR-204). ``""`` when the row cannot be read, which the guidance treats as unknown. Patched in tests."""
@@ -130,18 +128,22 @@ def _fail(message: str, code: int) -> NoReturn:
     sys.exit(code)
 
 
-def _pages(client: Any, origin: str, sibling: str, *, chashes: list[str], audit_id: int | None,
+def _pages(client: Any, origin: str, *, chashes: list[str], audit_id: int | None,
            since: str | None, before: str | None, dry_run: bool, reattach: bool, actor: str):
-    """Yield the engine's answer page by page for whichever source was named."""
+    """Yield the engine's answer page by page for whichever source was named.
+
+    No quarantine collection is named: the engine finds it (nexus-wbfpw.55). One derived here from the
+    origin's catalog row is not where the reaper put the chunks once catalog-044 rewrote the row's owner.
+    """
     common = {"dry_run": dry_run, "reattach": reattach, "actor": actor}
     if chashes:
         for start in range(0, len(chashes), _BATCH):
-            yield client.gc_quarantine_restore(origin, sibling, chashes=chashes[start:start + _BATCH], **common)
+            yield client.gc_quarantine_restore(origin, chashes=chashes[start:start + _BATCH], **common)
     elif audit_id is not None:
         offset = 0
         while True:
             page = client.gc_quarantine_restore(
-                origin, sibling, audit_id=audit_id, offset=offset, limit=_BATCH, **common)
+                origin, audit_id=audit_id, offset=offset, limit=_BATCH, **common)
             yield page
             nxt = (page.get("source") or {}).get("next_offset")
             if nxt is None:
@@ -151,7 +153,7 @@ def _pages(client: Any, origin: str, sibling: str, *, chashes: list[str], audit_
         after: str | None = None
         while True:
             page = client.gc_quarantine_restore(
-                origin, sibling, quarantined_since=since, quarantined_before=before,
+                origin, quarantined_since=since, quarantined_before=before,
                 after_chash=after, limit=_BATCH, **common)
             yield page
             after = page.get("next_after")
@@ -306,13 +308,15 @@ def _partial(owners: list[dict]) -> list[dict]:
             if o["manifest_rows"] is not None and o["chunk_count"] and o["manifest_rows"] < o["chunk_count"]]
 
 
-def _render_text(origin: str, sibling: str, dry_run: bool, reattach: bool, rows: list[dict],
+def _render_text(origin: str, siblings: list[str], dry_run: bool, reattach: bool, rows: list[dict],
                  totals: dict[str, int], audit_ids: list[int], source: dict | None, earliest: str | None,
                  content_type: str = "") -> None:
+    # The engine says where it looked; when no quarantine collection holds anything of this origin it says none.
+    where = ", ".join(siblings) if siblings else "no quarantine collection (none holds chunks of this collection)"
     if dry_run:
-        click.echo(f"Dry run: nothing moved. Would restore from {sibling} into {origin}.")
+        click.echo(f"Dry run: nothing moved. Would restore from {where} into {origin}.")
     else:
-        click.echo(f"Restore from {sibling} into {origin}.")
+        click.echo(f"Restore from {where} into {origin}.")
     if source:
         click.echo(f"Source: gc_audit {source.get('audit_id')} ({source.get('operation')}, "
                    f"{source.get('chash_count')} chashes).")
@@ -526,23 +530,31 @@ def restore_cmd(collection: str, chashes: tuple[str, ...], audit_id: int | None,
     if since_iso and before_iso and since_iso >= before_iso:
         raise click.UsageError("--quarantined-since must be earlier than --quarantined-before.")
 
-    sibling = _quarantine_name(collection)
     client = _make_t3()
     rows: list[dict] = []
     totals = dict.fromkeys(_OUTCOMES, 0)
     audit_ids: list[int] = []
+    siblings: list[str] = []
     source: dict | None = None
     pages_done = 0
     failure: tuple[str, int] | None = None
     try:
-        for page in _pages(client, collection, sibling, chashes=normalised, audit_id=audit_id,
+        for page in _pages(client, collection, chashes=normalised, audit_id=audit_id,
                            since=since_iso, before=before_iso, dry_run=dry_run, reattach=reattach,
                            actor=_actor()):
             rows.extend(page.get("rows") or [])
             for outcome in _OUTCOMES:
                 totals[outcome] += int(page.get(outcome) or 0)
-            if page.get("audit_id") is not None:
-                audit_ids.append(int(page["audit_id"]))
+            # One audit row per quarantine collection that moved something; an engine that predates the list
+            # reports the single ``audit_id``.
+            page_audits = page.get("audit_ids")
+            if page_audits is None:
+                page_audits = [page["audit_id"]] if page.get("audit_id") is not None else []
+            audit_ids.extend(int(a) for a in page_audits)
+            for name in page.get("quarantine_collections") or ([page["quarantine_collection"]]
+                                                               if page.get("quarantine_collection") else []):
+                if name not in siblings:
+                    siblings.append(name)
             if page.get("source"):
                 source = {**(source or {}), **page["source"]}
             pages_done += 1
@@ -560,7 +572,8 @@ def restore_cmd(collection: str, chashes: tuple[str, ...], audit_id: int | None,
     if as_json:
         doc: dict[str, Any] = {
             "origin_collection": collection,
-            "quarantine_collection": sibling,
+            "quarantine_collection": siblings[0] if siblings else None,
+            "quarantine_collections": siblings,
             "dry_run": dry_run,
             "reattach": reattach,
             "source": source,
@@ -578,7 +591,7 @@ def restore_cmd(collection: str, chashes: tuple[str, ...], audit_id: int | None,
         click.echo(json.dumps(doc, indent=2))
     else:
         if rows or not failure:
-            _render_text(collection, sibling, dry_run, reattach, rows, totals, audit_ids, source, earliest,
+            _render_text(collection, siblings, dry_run, reattach, rows, totals, audit_ids, source, earliest,
                          _content_type(collection) if hidden_rows else "")
     if failure:
         click.echo(failure[0], err=True)

@@ -3896,9 +3896,22 @@ FROM scope s
      * ({@link #quarantineRestoreFromAudit}); {@code nextAfter} when they were selected from the sibling by
      * {@code quarantined_at} ({@link #quarantineRestoreSelected}), the chash to pass as {@code afterChash} for the
      * next page, null when the selection is exhausted.
+     *
+     * <p>{@code quarantineCollections} is the quarantine siblings that hold chunks of the origin, in the order the
+     * restore tries them (nexus-wbfpw.55): the engine finds them itself, from the origin's name and from the chunks' own
+     * {@code origin_collection} tag, never from what a client derived from the catalog row. Empty when no
+     * quarantine collection holds anything of this origin. {@code auditIds} is the {@code quarantine_restore} row of
+     * each sibling that moved or attached something, in the same order; {@code auditId} is the first of them (the
+     * one a caller that knew of a single sibling reads).
      */
     public record QuarantineRestoreOutcome(List<Row> rows, Long auditId, boolean dryRun, Source source,
-                                           String nextAfter) {
+                                           String nextAfter, List<Long> auditIds, List<String> quarantineCollections) {
+        /** The shape a single-sibling call reports: at most one audit row, no sibling list. */
+        public QuarantineRestoreOutcome(List<Row> rows, Long auditId, boolean dryRun, Source source,
+                                        String nextAfter) {
+            this(rows, auditId, dryRun, source, nextAfter, auditId == null ? List.of() : List.of(auditId), List.of());
+        }
+
         public record Row(String chash, String outcome, Boolean noManifest, String reapableAfter,
                           String reattach, boolean attached, String owner, String ownerTitle, Integer position,
                           String chunkTitle, String reason, Integer ownerRows, Integer ownerChunks) {}
@@ -3941,6 +3954,11 @@ FROM scope s
      * a fresh {@code last_written_at}, so it is not immediately reapable. {@code dryRun} classifies only: no gate,
      * no move, no audit row. The statement bound is set here, as its own statement before the call, for the
      * reason {@link #restoreRereferencedBounded} gives.
+     *
+     * <p><strong>The sibling.</strong> {@code quarantineCollection} null (what {@code POST /gc/quarantine-restore}
+     * always passes) means the engine finds the sibling or siblings itself ({@link #resolveQuarantineSiblings}), so
+     * the verb reaches a chunk wherever it was put, whatever the origin's catalog row says (nexus-wbfpw.55). A
+     * non-null name restricts the call to exactly that registered quarantine collection.
      *
      * @throws IllegalArgumentException an empty or oversized list, a malformed chash, an origin that is itself a
      *         quarantine collection, or a sibling that is not a registered quarantine collection
@@ -4032,11 +4050,10 @@ FROM scope s
                 + "select them from the quarantine collection by quarantined_at instead "
                 + "(quarantined_since / quarantined_before)");
         }
-        // The sibling the caller names comes from the catalog row of the origin; the audit row records where THIS
-        // move actually put the chunks. They agree for a conformant name. When they do not, restoring from the
-        // caller's sibling would read every chash of the row as missing (or, worse, find another origin's chunks
-        // there), so the mismatch is refused by name rather than discovered by a wall of "missing".
-        if (movedInto != null && !movedInto.equals(quarantineCollection)) {
+        // The audit row records where THIS move actually put the chunks, so it is the sibling of an audit restore:
+        // a caller that names another one (the explicit form; the route names none) is refused by name rather than
+        // discovered by a wall of "missing". A row that records no sibling falls back to the engine's own lookup.
+        if (movedInto != null && quarantineCollection != null && !movedInto.equals(quarantineCollection)) {
             throw new IllegalArgumentException("gc_audit row " + auditId + " moved its chunks into " + movedInto
                 + ", not " + quarantineCollection + "; the quarantine collection of an audit restore is the one the "
                 + "row names");
@@ -4049,8 +4066,10 @@ FROM scope s
         if (slice.isEmpty()) {
             return new QuarantineRestoreOutcome(List.of(), null, dryRun, source, null);
         }
-        return quarantineRestore(tenant, originCollection, quarantineCollection, slice, actor, dryRun, reattach,
-                                 auditId, source, null);
+        String[] hex = canonicalChashes(slice);
+        List<String> siblings = resolveRestoreSiblings(tenant, originCollection,
+            quarantineCollection != null ? quarantineCollection : movedInto);
+        return restoreAcross(tenant, originCollection, siblings, hex, actor, dryRun, reattach, auditId, source, null);
     }
 
     /**
@@ -4091,7 +4110,7 @@ FROM scope s
         if (limit <= 0 || limit > MAX_QUARANTINE_RESTORE_CHASHES) {
             throw new IllegalArgumentException("limit must be 1 to " + MAX_QUARANTINE_RESTORE_CHASHES + ", got " + limit);
         }
-        checkQuarantineRestoreCollections(tenant, originCollection, quarantineCollection);
+        List<String> siblings = resolveRestoreSiblings(tenant, originCollection, quarantineCollection);
         String after = afterChash == null ? null
             : dev.nexus.service.db.Chash.requireCanonical(afterChash, "after_chash");
 
@@ -4110,32 +4129,35 @@ FROM scope s
         org.jooq.Condition fromThisOrigin = originStamp.isNull().or(originStamp.eq(originCollection));
         org.jooq.Condition past = after == null
             ? DSL.noCondition() : CHUNKS.CHASH.gt(dev.nexus.service.db.Chash.fromHex(after).toBytes());
+        if (siblings.isEmpty()) {
+            return new QuarantineRestoreOutcome(List.of(), null, dryRun, null, null, List.of(), siblings);
+        }
+        // Distinct chashes in order: the same chunk can sit in two siblings (the reaper's and a client's), and the
+        // cursor pages by chash, so a chash is selected once however many siblings hold it.
         List<String> selected = tenantScope.withTenant(tenant, ctx ->
             ctx.select(ChashHex.hex(CHUNKS.CHASH))
                .from(CHUNKS)
-               .where(CHUNKS.TENANT_ID.eq(tenant).and(CHUNKS.COLLECTION.eq(quarantineCollection)))
+               .where(CHUNKS.TENANT_ID.eq(tenant).and(CHUNKS.COLLECTION.in(siblings)))
                .and(fromThisOrigin).and(window).and(past)
+               .groupBy(CHUNKS.CHASH)
                .orderBy(CHUNKS.CHASH)
                .limit(limit)
                .fetch(r -> r.value1()));
         if (selected.isEmpty()) {
-            return new QuarantineRestoreOutcome(List.of(), null, dryRun, null, null);
+            return new QuarantineRestoreOutcome(List.of(), null, dryRun, null, null, List.of(), siblings);
         }
         String next = selected.size() == limit ? selected.get(selected.size() - 1) : null;
-        var out = quarantineRestore(tenant, originCollection, quarantineCollection, selected, actor, dryRun,
-                                    reattach, null, null, null);
-        return new QuarantineRestoreOutcome(out.rows(), out.auditId(), dryRun, null, next);
+        var out = restoreAcross(tenant, originCollection, siblings, canonicalChashes(selected), actor, dryRun,
+                                reattach, null, null, null);
+        return new QuarantineRestoreOutcome(out.rows(), out.auditId(), dryRun, null, next, out.auditIds(),
+                                            out.quarantineCollections());
     }
 
-    private void checkQuarantineRestoreCollections(String tenant, String originCollection,
-                                                    String quarantineCollection) {
+    /** The origin of a restore: a registered, live, non-quarantine collection, never a bare name. */
+    private void checkRestoreOrigin(String tenant, String originCollection) {
         if (originCollection == null || originCollection.isBlank() || originCollection.startsWith("quarantine-")) {
             throw new IllegalArgumentException("the origin collection must be a non-quarantine collection, got: "
                 + originCollection + " (name the collection the chunks came from, not its quarantine- sibling)");
-        }
-        if (quarantineCollection == null || !quarantineCollection.startsWith("quarantine-")) {
-            throw new IllegalArgumentException("the quarantine collection must be a quarantine- sibling, got: "
-                + quarantineCollection);
         }
         // The origin is the registered catalog row, never a name: an origin that is gone fails loud here. It must
         // be live, the only state the reaper visits; restoring into a dormant or disputed collection would put
@@ -4145,6 +4167,14 @@ FROM scope s
             throw new IllegalArgumentException(originCollection + " is not a live collection (lifecycle_state="
                 + origin.lifecycleState() + "); a restore goes into a live collection");
         }
+    }
+
+    /** A sibling a caller named: a registered quarantine collection. */
+    private void checkRestoreSibling(String tenant, String quarantineCollection) {
+        if (quarantineCollection == null || !quarantineCollection.startsWith("quarantine-")) {
+            throw new IllegalArgumentException("the quarantine collection must be a quarantine- sibling, got: "
+                + quarantineCollection);
+        }
         var sibling = CollectionRegistry.lookup(tenantScope, tenant, quarantineCollection);
         if (!"quarantine".equals(sibling.lifecycleState())) {
             throw new IllegalArgumentException(quarantineCollection + " is not a quarantine collection (lifecycle_state="
@@ -4152,11 +4182,59 @@ FROM scope s
         }
     }
 
-    private QuarantineRestoreOutcome quarantineRestore(String tenant, String originCollection,
-                                                        String quarantineCollection, List<String> chashes,
-                                                        String actor, boolean dryRun, boolean reattach,
-                                                        Long sourceAuditId,
-                                                        QuarantineRestoreOutcome.Source source, String nextAfter) {
+    /**
+     * The quarantine siblings a restore into {@code originCollection} looks in. {@code named} is the sibling a
+     * caller (or an audit row) names, restricting the call to exactly that one; null means the engine finds them
+     * itself, via {@link #resolveQuarantineSiblings}. Either way the origin is checked first, so an origin that is
+     * gone or not live is refused before anything is looked up.
+     */
+    private List<String> resolveRestoreSiblings(String tenant, String originCollection, String named) {
+        checkRestoreOrigin(tenant, originCollection);
+        if (named != null) {
+            checkRestoreSibling(tenant, named);
+            return List.of(named);
+        }
+        return resolveQuarantineSiblings(tenant, originCollection);
+    }
+
+    /**
+     * Where chunks of {@code originCollection} may be quarantined, found by the engine and not by what a client
+     * derived (nexus-wbfpw.55, RDR-192 Phase 3 gate I-1). The reaper names its sibling from the collection's NAME
+     * ({@code quarantine-<name>}); the client's {@code nx index repo} names its from the catalog ROW; catalog-044
+     * rewrote {@code owner_id} on repo collections after chunks had been moved, so the two disagree in production
+     * and a client-derived name reaches nothing. So a sibling here is either
+     * <ul>
+     *   <li>the reaper's own name for the origin ({@code quarantine-} + the origin's name), when registered, or
+     *   <li>any registered quarantine collection of the tenant that holds at least one chunk whose
+     *       {@code origin_collection} tag names the origin (the tag the move writes into every chunk it takes,
+     *       never parsed out of the sibling's name).
+     * </ul>
+     * Two origins that share one sibling (what the row rule gave a slug collection and its conformant twin) both
+     * find it, and each restores only its own chunks, because the restore function matches the tag too. The
+     * reaper's own name comes first, the rest by name. Probed per registered quarantine collection, so the cost is
+     * the quarantined rows themselves, never the tenant's whole chunk table. Empty when nothing is quarantined from
+     * the origin.
+     */
+    public List<String> resolveQuarantineSiblings(String tenant, String originCollection) {
+        String reaperName = "quarantine-" + originCollection;
+        Field<String> originTag = DSL.jsonbGetAttributeAsText(CHUNKS.METADATA, "origin_collection");
+        List<String> found = tenantScope.withTenant(tenant, ctx ->
+            ctx.select(CATALOG_COLLECTIONS.NAME).from(CATALOG_COLLECTIONS)
+               .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)
+                   .and(CATALOG_COLLECTIONS.LIFECYCLE_STATE.eq("quarantine"))
+                   .and(CATALOG_COLLECTIONS.NAME.eq(reaperName).or(DSL.exists(
+                       DSL.selectOne().from(CHUNKS)
+                          .where(CHUNKS.TENANT_ID.eq(CATALOG_COLLECTIONS.TENANT_ID)
+                              .and(CHUNKS.COLLECTION.eq(CATALOG_COLLECTIONS.NAME))
+                              .and(originTag.eq(originCollection)))))))
+               .fetch(CATALOG_COLLECTIONS.NAME));
+        var ordered = new ArrayList<String>(found.size());
+        if (found.contains(reaperName)) ordered.add(reaperName);
+        found.stream().filter(n -> !n.equals(reaperName)).sorted().forEach(ordered::add);
+        return List.copyOf(ordered);
+    }
+
+    private static String[] canonicalChashes(List<String> chashes) {
         if (chashes == null || chashes.isEmpty()) {
             throw new IllegalArgumentException("at least one chash is required");
         }
@@ -4168,25 +4246,65 @@ FROM scope s
         for (int i = 0; i < hex.length; i++) {
             hex[i] = dev.nexus.service.db.Chash.requireCanonical(chashes.get(i), "chashes[" + i + "]");
         }
-        checkQuarantineRestoreCollections(tenant, originCollection, quarantineCollection);
-        var rows = restoreRows(tenant, originCollection, quarantineCollection, hex, actor, dryRun, reattach,
-                               sourceAuditId);
-        Long auditId = null;
-        var out = new ArrayList<QuarantineRestoreOutcome.Row>(rows.size());
-        for (var r : rows) {
-            var reapable = r.get(QUARANTINE_RESTORE_CHUNKS.R_REAPABLE_AFTER);
-            out.add(new QuarantineRestoreOutcome.Row(r.get(QUARANTINE_RESTORE_CHUNKS.R_CHASH),
-                r.get(QUARANTINE_RESTORE_CHUNKS.R_OUTCOME), r.get(QUARANTINE_RESTORE_CHUNKS.R_NO_MANIFEST),
-                reapable == null ? null : reapable.toInstant().toString(),
-                r.get(QUARANTINE_RESTORE_CHUNKS.R_REATTACH),
-                Boolean.TRUE.equals(r.get(QUARANTINE_RESTORE_CHUNKS.R_ATTACHED)),
-                r.get(QUARANTINE_RESTORE_CHUNKS.R_OWNER), r.get(QUARANTINE_RESTORE_CHUNKS.R_OWNER_TITLE),
-                r.get(QUARANTINE_RESTORE_CHUNKS.R_POSITION), r.get(QUARANTINE_RESTORE_CHUNKS.R_CHUNK_TITLE),
-                r.get(QUARANTINE_RESTORE_CHUNKS.R_REASON), r.get(QUARANTINE_RESTORE_CHUNKS.R_OWNER_ROWS),
-                r.get(QUARANTINE_RESTORE_CHUNKS.R_OWNER_CHUNKS)));
-            if (auditId == null) auditId = r.get(QUARANTINE_RESTORE_CHUNKS.R_AUDIT_ID);
+        return hex;
+    }
+
+    private QuarantineRestoreOutcome quarantineRestore(String tenant, String originCollection,
+                                                        String quarantineCollection, List<String> chashes,
+                                                        String actor, boolean dryRun, boolean reattach,
+                                                        Long sourceAuditId,
+                                                        QuarantineRestoreOutcome.Source source, String nextAfter) {
+        String[] hex = canonicalChashes(chashes);
+        List<String> siblings = resolveRestoreSiblings(tenant, originCollection, quarantineCollection);
+        return restoreAcross(tenant, originCollection, siblings, hex, actor, dryRun, reattach, sourceAuditId, source,
+                             nextAfter);
+    }
+
+    /**
+     * Runs the restore statement against each sibling in turn for the chashes still unresolved. A chash another
+     * sibling had already restored, or that the origin already holds, is final and is not asked about again; one
+     * that reads {@code missing} goes on to the next sibling. Each sibling that moved or attached something writes
+     * its own {@code quarantine_restore} gc_audit row (the statement is per sibling, and so is the row). With no
+     * sibling every chash reads missing.
+     */
+    private QuarantineRestoreOutcome restoreAcross(String tenant, String originCollection, List<String> siblings,
+                                                    String[] hex, String actor, boolean dryRun, boolean reattach,
+                                                    Long sourceAuditId, QuarantineRestoreOutcome.Source source,
+                                                    String nextAfter) {
+        var byChash = new java.util.LinkedHashMap<String, QuarantineRestoreOutcome.Row>();
+        for (String h : hex) byChash.putIfAbsent(h, missingRow(h));
+        var auditIds = new ArrayList<Long>();
+        List<String> pending = new ArrayList<>(byChash.keySet());
+        for (String sibling : siblings) {
+            if (pending.isEmpty()) break;
+            var rows = restoreRows(tenant, originCollection, sibling, pending.toArray(String[]::new), actor, dryRun,
+                                   reattach, sourceAuditId);
+            Long auditId = null;
+            for (var r : rows) {
+                var reapable = r.get(QUARANTINE_RESTORE_CHUNKS.R_REAPABLE_AFTER);
+                byChash.put(r.get(QUARANTINE_RESTORE_CHUNKS.R_CHASH), new QuarantineRestoreOutcome.Row(
+                    r.get(QUARANTINE_RESTORE_CHUNKS.R_CHASH),
+                    r.get(QUARANTINE_RESTORE_CHUNKS.R_OUTCOME), r.get(QUARANTINE_RESTORE_CHUNKS.R_NO_MANIFEST),
+                    reapable == null ? null : reapable.toInstant().toString(),
+                    r.get(QUARANTINE_RESTORE_CHUNKS.R_REATTACH),
+                    Boolean.TRUE.equals(r.get(QUARANTINE_RESTORE_CHUNKS.R_ATTACHED)),
+                    r.get(QUARANTINE_RESTORE_CHUNKS.R_OWNER), r.get(QUARANTINE_RESTORE_CHUNKS.R_OWNER_TITLE),
+                    r.get(QUARANTINE_RESTORE_CHUNKS.R_POSITION), r.get(QUARANTINE_RESTORE_CHUNKS.R_CHUNK_TITLE),
+                    r.get(QUARANTINE_RESTORE_CHUNKS.R_REASON), r.get(QUARANTINE_RESTORE_CHUNKS.R_OWNER_ROWS),
+                    r.get(QUARANTINE_RESTORE_CHUNKS.R_OWNER_CHUNKS)));
+                if (auditId == null) auditId = r.get(QUARANTINE_RESTORE_CHUNKS.R_AUDIT_ID);
+            }
+            if (auditId != null) auditIds.add(auditId);
+            pending = byChash.values().stream().filter(row -> "missing".equals(row.outcome()))
+                .map(QuarantineRestoreOutcome.Row::chash).toList();
         }
-        return new QuarantineRestoreOutcome(out, auditId, dryRun, source, nextAfter);
+        return new QuarantineRestoreOutcome(List.copyOf(byChash.values()), auditIds.isEmpty() ? null : auditIds.get(0),
+                                            dryRun, source, nextAfter, List.copyOf(auditIds), List.copyOf(siblings));
+    }
+
+    private static QuarantineRestoreOutcome.Row missingRow(String chash) {
+        return new QuarantineRestoreOutcome.Row(chash, "missing", null, null, null, false, null, null, null, null,
+                                                null, null, null);
     }
 
     /**

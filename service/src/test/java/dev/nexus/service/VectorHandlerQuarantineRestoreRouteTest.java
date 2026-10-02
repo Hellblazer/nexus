@@ -28,6 +28,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
@@ -272,15 +273,58 @@ class VectorHandlerQuarantineRestoreRouteTest {
         var asQuarantine = req(o, "chashes", hs);
         asQuarantine.put("origin_collection", "quarantine-" + o);
         assertThat(post(TOKEN_A, asQuarantine).statusCode()).as("origin may not be a quarantine collection").isEqualTo(400);
-        var notSibling = req(o, "chashes", hs);
-        notSibling.put("quarantine_collection", o);
-        assertThat(post(TOKEN_A, notSibling).statusCode()).as("sibling must be quarantine-").isEqualTo(400);
-        var unregistered = req(o, "chashes", hs);
-        unregistered.put("quarantine_collection", "quarantine-" + col());
-        assertThat(post(TOKEN_A, unregistered).statusCode()).as("unregistered sibling").isEqualTo(422);
+        // A "quarantine_collection" in the body is no longer read (nexus-wbfpw.55: the engine finds the sibling), so
+        // there is no malformed or unregistered sibling to refuse; theEngineFindsTheSiblingItself pins that.
         assertThat(post(TOKEN_A, req(o, "chashes", java.util.Collections.nCopies(1001, hs.get(0)))).statusCode())
             .as("over the per-call cap").isEqualTo(400);
         assertThat(in(TENANT_A, "quarantine-" + o, hs.get(0))).as("every refusal moved nothing").isTrue();
+    }
+
+    @Test
+    void theEngineFindsTheSiblingItself_whateverTheCallerNamesOrOmits() throws Exception {
+        // nexus-wbfpw.55 (RDR-192 Phase 3 gate I-1): catalog-044 rewrote owner_id, so the sibling the client derives
+        // from the catalog row is NOT where the reaper (which names it from the collection's name) put the chunks.
+        String o = col();
+        List<String> hs = quarantined(TENANT_A, o, "2026-09-01T00:00:00Z", "r1", "r2");
+        su(ctx -> assertThat(ctx.update(CATALOG_COLLECTIONS).set(CATALOG_COLLECTIONS.OWNER_ID, "curator-9")
+            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT_A).and(CATALOG_COLLECTIONS.NAME.eq(o))).execute()).isEqualTo(1));
+        String[] seg = o.split("__");
+        String rowDerived = "quarantine-" + seg[0] + "__curator-9__" + seg[2] + "__" + seg[3];
+
+        var named = req(o, "chashes", List.of(hs.get(0)));
+        named.put("quarantine_collection", rowDerived);          // what the old client sends: unregistered
+        var viaRow = post(TOKEN_A, named);
+        assertThat(viaRow.statusCode()).as(viaRow.body()).isEqualTo(200);
+        assertThat(json(viaRow).get("restored")).isEqualTo(1);
+        assertThat(json(viaRow).get("quarantine_collection")).as("the response names where it really was")
+            .isEqualTo("quarantine-" + o);
+        assertThat(json(viaRow).get("quarantine_collections")).isEqualTo(List.of("quarantine-" + o));
+        assertThat(json(viaRow).get("audit_ids")).isEqualTo(List.of(json(viaRow).get("audit_id")));
+
+        var omitted = req(o, "chashes", List.of(hs.get(1)));
+        omitted.remove("quarantine_collection");                 // the new client sends none
+        var viaName = post(TOKEN_A, omitted);
+        assertThat(viaName.statusCode()).as(viaName.body()).isEqualTo(200);
+        assertThat(json(viaName).get("restored")).isEqualTo(1);
+        assertThat(in(TENANT_A, o, hs.get(0))).isTrue();
+        assertThat(in(TENANT_A, o, hs.get(1))).isTrue();
+    }
+
+    @Test
+    void anOriginNoQuarantineHoldsAnythingOfReadsMissing_withNoSiblingNamed() throws Exception {
+        String o = col();
+        su(ctx -> PgContainerHelper.insertCollection(ctx, TENANT_A, o));
+        String nowhere = Chash.ofText("route-no-sibling").toHex();
+        var body = req(o, "chashes", List.of(nowhere));
+        body.remove("quarantine_collection");
+
+        var r = post(TOKEN_A, body);
+
+        assertThat(r.statusCode()).as(r.body()).isEqualTo(200);
+        assertThat(json(r).get("missing")).isEqualTo(1);
+        assertThat(json(r).get("quarantine_collection")).isNull();
+        assertThat(json(r).get("quarantine_collections")).isEqualTo(List.of());
+        assertThat(json(r).get("audit_ids")).isEqualTo(List.of());
     }
 
     @Test
