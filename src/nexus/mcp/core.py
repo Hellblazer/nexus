@@ -5337,7 +5337,11 @@ def _annotation_line_for_entry(entry) -> str:
 # The move is conditional: the pass refuses a collection that fails the
 # floor (a large reapable fraction) or the census (any legacy-unmanifested
 # chunk). `nx t3 quarantine restore` returns the bytes, but the chunk stays
-# hidden unless a live owner exists or reattach writes a manifest row. Placeholder
+# hidden unless a live owner exists or reattach writes a manifest row.
+# When the sweep did delete chunks the result carries a second line,
+# "Superseded: N chunk(s) removed: [...]", from the engine's sweep_detail
+# swept_chashes (RDR-192 Step 13, nexus-wbfpw.25); a first put, an identical
+# re-put and a swept-nothing re-put read exactly as before. Placeholder
 # refusal is nexus-0fw11: there is no default subject, because "default"
 # is what minted `knowledge__knowledge`. `agent` attribution defaulting to
 # the "mcp" marker (never blank, never the indexer's own "nexus-indexer"
@@ -5401,8 +5405,10 @@ def store_put(
 
     Returns "Stored: <id> -> <collection>" (for a split note, the first
     chunk's id, plus "(N chunks, split to the embedding model's token
-    window)"), or an explicit error — a failed catalog/manifest write
-    rolls the chunk back, never a partial "Stored:".
+    window)"); a re-put whose sweep removed chunks adds a second line,
+    "Superseded: N chunk(s) removed: [<chash>, ...]"; or an explicit
+    error — a failed catalog/manifest write rolls the chunk back, never a
+    partial "Stored:".
 
     Constraints:
     - `content` is capped at 16,384 UTF-8 bytes (~3,000-4,000 words).
@@ -5471,6 +5477,7 @@ def store_put(
             fire_note_chains,
             put_note,
             stamp_note,
+            superseded_line,
         )
 
         # RDR-223 P2.2 (nexus-z0o2p.12): a note's pieces and its manifest
@@ -5585,7 +5592,10 @@ def store_put(
             f" ({len(pieces)} chunks, split to the embedding model's token window)"
             if len(pieces) > 1 else ""
         )
-        return f"Stored: {doc_id} -> {col_name}{split_note}"
+        stored = f"Stored: {doc_id} -> {col_name}{split_note}"
+        # RDR-192 Step 13: a second line, only when the re-put's sweep removed chunks.
+        superseded = superseded_line(outcome)
+        return f"{stored}\n{superseded}" if superseded else stored
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
         return _mcp_tool_error("store_put", e)
 

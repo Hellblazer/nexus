@@ -125,7 +125,7 @@ def put_cmd(
     # changed). A chunk of the note
     # can therefore never land without its owner, and a failed request leaves the
     # previous manifest as it was. This command only words the result.
-    from nexus.catalog.note_write import failure_message, fire_note_chains, put_note, stamp_note  # noqa: PLC0415 — deferred: heavy catalog import, rare/branch-local for CLI startup cost
+    from nexus.catalog.note_write import failure_message, fire_note_chains, put_note, stamp_note, superseded_line  # noqa: PLC0415 — deferred: heavy catalog import, rare/branch-local for CLI startup cost
 
     # nexus-s71lr, deliverable 3 (named literally: "nx store put"): a single
     # document is still ONE embed call, and a large document's embed can run
@@ -180,6 +180,9 @@ def put_cmd(
     pieces = outcome.pieces
     split_note = f"  ({len(pieces)} chunks, split to the embedding model's token window)" if len(pieces) > 1 else ""
     click.echo(f"Stored: {outcome.doc_id}  →  {col_name}{split_note}")
+    # RDR-192 Step 13: only when the re-put's sweep removed chunks, so a first put prints as before.
+    if (superseded := superseded_line(outcome)) is not None:
+        click.echo(superseded)
 
 
 # nexus-8g79.10 (V1): catalog_store_hook moved to

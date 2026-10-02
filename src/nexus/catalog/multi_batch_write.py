@@ -219,6 +219,26 @@ class OneRequestResult:
     dropped_count: int | None = None
     dropped_unknown: bool = False
     completed: bool = False
+    swept_chashes: list[str] | None = None
+    swept_chashes_truncated: bool = False
+
+
+def _swept_chashes_of(resp: dict, doc_id: str) -> tuple[list[str] | None, bool]:
+    """``(swept_chashes, truncated)`` from *doc_id*'s ``sweep_detail`` entry (RDR-192 Step 13).
+
+    The chashes the engine's sweep DELETED for the document, capped by the engine, with a flag for a
+    capped list. ``None`` when the entry is missing or carries no well-formed list: an engine that
+    predates the field, a write that swept nothing (no entry at all), or a sweep that did not run.
+    The caller then has the count (``swept``) and nothing more.
+    """
+    for entry in resp.get("sweep_detail") or ():
+        if not isinstance(entry, dict) or entry.get("doc_id") != doc_id:
+            continue
+        listed = entry.get("swept_chashes")
+        if isinstance(listed, list) and all(isinstance(c, str) for c in listed):
+            return list(listed), bool(entry.get("swept_chashes_truncated"))
+        return None, False
+    return None, False
 
 
 def write_one_request(
@@ -272,6 +292,7 @@ def write_one_request(
         swept=int(resp.get("swept") or 0),
         sweep_skipped=int(resp.get("sweep_skipped") or 0),
     )
+    out.swept_chashes, out.swept_chashes_truncated = _swept_chashes_of(resp, doc_id)
     check_unreferenced(resp, doc_id=doc_id, batch=batch, required=False)
     for refused in resp.get("complete_refused") or ():
         if refused.get("doc_id") == doc_id:

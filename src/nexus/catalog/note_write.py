@@ -199,7 +199,10 @@ class NoteWriteResult:
     ``dropped_chashes`` are the chashes the write dropped from the document's previous manifest,
     which the engine swept after the commit when nothing else owns them; ``None`` when unknown (the
     engine could not read the previous manifest, or ``recovered`` is True and the response was lost).
-    ``swept`` / ``sweep_skipped`` are the engine's counts for that sweep.
+    ``swept`` / ``sweep_skipped`` are the engine's counts for that sweep. ``swept_chashes`` are the
+    chashes the sweep actually DELETED (a dropped chash another document owns is kept and not
+    listed), capped by the engine (``swept_chashes_truncated`` says it was); ``None`` when the engine
+    does not name them (one that predates the field) or the first attempt's answer was lost.
     """
 
     catalog_doc_id: str
@@ -213,6 +216,8 @@ class NoteWriteResult:
     swept: int = 0
     sweep_skipped: int = 0
     dropped_chashes: list[str] | None = None
+    swept_chashes: list[str] | None = None
+    swept_chashes_truncated: bool = False
     completed: bool = False
     recovered: bool = False
 
@@ -407,6 +412,8 @@ def _absorb(result: NoteWriteResult, out: OneRequestResult) -> None:
     result.swept = out.swept
     result.sweep_skipped = out.sweep_skipped
     result.dropped_chashes = out.dropped
+    result.swept_chashes = out.swept_chashes
+    result.swept_chashes_truncated = out.swept_chashes_truncated
     result.completed = out.completed
 
 
@@ -549,6 +556,7 @@ def _settle_after_error(
     _absorb(result, out)
     result.recovered = True
     result.dropped_chashes = None      # the first attempt's drop list is lost; a resend reads an empty diff
+    result.swept_chashes = None        # so is its sweep: the resend swept nothing, which is not "nothing was removed"
     return result
 
 
@@ -746,6 +754,33 @@ def put_note(
     out.stamp_pending, out.content_hash = True, content_hash
     _warn_if_sweep_skipped(out, write)
     return out
+
+
+#: How many removed chashes the one-line report spells out; the count says the rest.
+SUPERSEDED_CHASHES_SHOWN = 3
+
+
+def superseded_line(outcome: PutNoteOutcome) -> str | None:
+    """The line ``store_put`` and ``nx store put`` add when a re-put removed chunks (RDR-192 Step 13).
+
+    ``Superseded: N chunk(s) removed: [<chash>, ...]`` names the chunks the engine's sweep deleted in
+    the note's own write, at most :data:`SUPERSEDED_CHASHES_SHOWN` of them, then ``(and M more)``.
+    ``None`` when the sweep removed nothing (a first put, an identical re-put, a dropped chunk another
+    document still owns), so those read exactly as before. An engine that predates ``swept_chashes``
+    gives the count only. The count is the engine's own ``swept``, exact whatever its cap on the list.
+    A chunk the sweep could not remove (a gate timeout) is not reported: it is hidden by ``live(c)``
+    and the engine reaper collects it later, and this line says what was removed.
+    """
+    write = outcome.write
+    if write is None or write.swept <= 0:
+        return None
+    count = write.swept
+    head = f"Superseded: {count} chunk{'' if count == 1 else 's'} removed"
+    if not write.swept_chashes:
+        return head
+    shown = write.swept_chashes[:SUPERSEDED_CHASHES_SHOWN]
+    more = count - len(shown)
+    return f"{head}: [{', '.join(shown)}]" + (f" (and {more} more)" if more > 0 else "")
 
 
 def stamp_note(outcome: PutNoteOutcome, *, cat: Any = None) -> PutNoteOutcome:
