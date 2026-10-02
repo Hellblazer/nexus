@@ -14,11 +14,10 @@ so the list cannot rot in the other direction.
 
 WHO MUST EXTEND THE ALLOWLIST. A change that adds (or re-defines into) such a function. That is the point of
 the lint, not a nuisance: ownerless chunks are what RDR-223 exists to stop, and a function that writes them
-must say why it is allowed to. Two unlanded branches will trip it when they land, by design: the reaper
-(``vectors-024`` ``reaper_quarantine_chunks``, a NEW inserter; ``vectors-022`` re-defines
-``gc_quarantine_orphans`` and ``gc_quarantine_orphans_bounded``, which moves their live definition) and the
-quarantine restore verb (``vectors-025`` ``quarantine_restore_chunks``). Whoever lands them adds those entries
-here (and nothing else needs hand-editing: the prose points here).
+must say why it is allowed to. The reaper (``vectors-024`` ``reaper_quarantine_chunks``) tripped it on
+landing and is listed below. The quarantine restore verb (``vectors-025`` ``quarantine_restore_chunks``,
+unlanded) will trip it too, by design; whoever lands it adds that entry here (and nothing else needs
+hand-editing: the prose points here).
 
 WHAT IT DOES NOT SEE. Dynamic SQL (``EXECUTE format('INSERT INTO ...')``), an insert through a view or
 a differently named table, and a function defined outside the Liquibase changelog. A body it cannot
@@ -52,6 +51,11 @@ _CHUNK_INSERTER_ALLOWLIST: dict[str, str] = {
     "gc_quarantine_orphans_bounded": _QUARANTINES + "; bounded variant",
     "gc_restore_rereferenced": _RESTORES,
     "gc_restore_rereferenced_bounded": _RESTORES + "; bounded variant",
+    "reaper_quarantine_chunks": (
+        "the engine reaper's move (vectors-024, nexus-2x9xa): copies chunks reapable(c) already selects "
+        "(no owner row anywhere, past the grace) into the quarantine sibling under the exclusive sweep gate; "
+        "nothing owned becomes ownerless"
+    ),
 }
 
 _DEFINITION = re.compile(
