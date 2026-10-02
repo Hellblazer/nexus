@@ -103,6 +103,58 @@
 # or any other floor, and must be hand-updated (or the ack retired outright)
 # if a FUTURE regression of the same shape earns a new bead.
 #
+# OWNERLESS-WRITE REFUSAL (RDR-223 Phase 3 Step 2, nexus-z0o2p.24; this
+# bead's decision record is nexus-9a6io). The engine's final cut refuses a
+# chunk write whose chash no live manifest row owns (422, reason
+# ownerless_chunk_write) -- the legacy path EVERY published client before the
+# RDR-223 Phase 2 client migration still takes (`nx store put` through
+# /v1/vectors/store-put, `nx index md` through /v1/vectors/upsert-chunks). So
+# against that candidate the published client is incompatible BY DESIGN, and
+# the outcome depends on the engine's NX_OWNERLESS_WRITE_MODE:
+#
+#   log-only (the engine's own default when the variable is unset: the first
+#   production deploy, where conexus passes no value)
+#       the write succeeds and the engine counts it. EXPECTED: the gate PASSES
+#       (exit 0) AND /v1/status shows ownerless_writes_would_refuse_total >= 1
+#       (non-vacuity: the published client's legacy path really reached the
+#       ownerless route, so the soak the census depends on is observable) and
+#       ownerless_writes_refused_total == 0.
+#   enforce (set explicitly, OR what `nx daemon service start` gives a P3.2
+#   candidate when the variable is unset: the local launcher setdefaults it)
+#       the write is refused. EXPECTED: both journeys fail, each with the
+#       refusal reason in the client's own output, /v1/status shows
+#       ownerless_writes_refused_total >= 2 (one per journey), and the verdict
+#       is EXPECTED-INCOMPATIBLE (exit 2) under NX_EXPECTED_CLIENT_LAG=
+#       $EXPECTED_LAG_BEAD. The ack is accepted ONLY when BOTH journeys failed
+#       and BOTH name the refusal, so a failure that is not the ownerless
+#       refusal (one journey refused, the other broken for another reason)
+#       cannot ride the ack.
+#       MEASURED 2026-10-01 against published conexus 7.67.0 (the classifier's
+#       match was a static prediction until this run): exit 2, the engine
+#       counted refused_total=2, and each journey's own output carries the
+#       engine's prose "refusing an ownerless chunk write on <route>": `nx store
+#       put` prints it inside a store_put_ghost_register_compensated warning's
+#       original_error, `nx index md` prints "Error: the nexus service returned an
+#       error: POST /v1/vectors/upsert-chunks -> HTTP 422: refusing an ownerless
+#       chunk write on upsert-chunks: ...". The match is that sentence or the
+#       reason token ownerless_chunk_write, never a bare "ownerless", and the gate
+#       prints each journey's deciding line ("refusal line:"). Both captured lines
+#       are fixtures in tests/e2e/published_client_write_gate_verdict_test.sh.
+#       Re-measure when the client's error rendering changes.
+#
+# NX_GATE_OWNERLESS_WRITE_MODE=log-only|enforce starts the candidate engine
+# with that value and turns the status oracle on; the engine-release skill
+# step 3c runs the gate once in each mode for the single RDR-223 + RDR-192
+# cut. Unset, the gate asserts no mode: the candidate starts through the
+# local launcher, so a P3.2 candidate runs ENFORCE (the launcher setdefaults
+# it; the status oracle is still off) and a candidate that predates P3.2 has
+# no such mode at all. A candidate that does not report ownerless_write_mode
+# FAILS an explicit mode.
+# A published client at or above FIXED_IN_VERSION (the Phase 2 clients) must
+# see neither counter move in either mode, and an older client that moves
+# neither means FIXED_IN_VERSION is stale. Both counters are read from
+# /v1/status after the journeys (since-boot, and this engine is fresh).
+#
 # Usage:
 #   tests/e2e/published-client-write-gate.sh
 #       Candidate engine = working-tree dev jar (build-gate-jar.sh). Published
@@ -115,9 +167,14 @@
 #   NX_PUBLISHED_CLIENT_VERSION=7.6.1 tests/e2e/published-client-write-gate.sh
 #       Pin the published client under test instead of resolving latest.
 #
-#   NX_EXPECTED_CLIENT_LAG=nexus-f5wwx tests/e2e/published-client-write-gate.sh
+#   NX_EXPECTED_CLIENT_LAG=nexus-z0o2p.24 NX_GATE_OWNERLESS_WRITE_MODE=enforce \
+#       tests/e2e/published-client-write-gate.sh
 #       Acknowledge the known incompatible window (see above; the bead and
 #       its fix version are EXPECTED_LAG_BEAD / FIXED_IN_VERSION below).
+#
+#   NX_GATE_OWNERLESS_WRITE_MODE=log-only tests/e2e/published-client-write-gate.sh
+#       The first-production-deploy posture: expect exit 0 and a non-zero
+#       would-refuse count (see OWNERLESS-WRITE REFUSAL above).
 #
 # Exit codes (the verdict line is always the last line of output):
 #   0  PUBLISHED-CLIENT WRITE GATE PASSED
@@ -167,12 +224,35 @@ export NX_ALLOW_PROD_WRITE="published-client-write-gate: step 1 provisions the c
 # Fixed on develop by 31cc9923a (register before the read); ships in the
 # client release paired with that engine. Retire this ack when the published
 # client resolves >= FIXED_IN_VERSION (the script refuses it then anyway).
-EXPECTED_LAG_BEAD="nexus-ft04v.16"
-FIXED_IN_VERSION="7.38.0"
+# nexus-z0o2p.24 / nexus-9a6io, 2026-10-01: the ack moved to the RDR-223
+# ownerless-write refusal (see OWNERLESS-WRITE REFUSAL above). nexus-ft04v.16's
+# fix shipped in 7.38.0 and every published client since carries it, so it
+# stopped being a lag the day 7.38.0 published. FIXED_IN_VERSION is the
+# release that carries the Phase 2 client migration, the single final cut's
+# paired client (published: 7.67.0, which still writes ownerless chunks). It
+# is a PREDICTION until that release is cut: if the paired client ships under
+# a different version, change this line in the release PR, and a client below
+# the constant that never reaches the ownerless route fails the status oracle
+# (FIXED_IN_VERSION stale) rather than passing quietly.
+EXPECTED_LAG_BEAD="nexus-z0o2p.24"
+FIXED_IN_VERSION="7.68.0"
 
 NEXUS_SERVICE_TAG="${NEXUS_SERVICE_TAG:-}"
 NX_PUBLISHED_CLIENT_VERSION="${NX_PUBLISHED_CLIENT_VERSION:-}"
 NX_EXPECTED_CLIENT_LAG="${NX_EXPECTED_CLIENT_LAG:-}"
+# RDR-223 P3.2: unset = no mode assertion (the local launcher then gives a
+# P3.2 candidate enforce);
+# log-only | enforce = start the candidate with that NX_OWNERLESS_WRITE_MODE and
+# assert the matching /v1/status counters after the journeys.
+NX_GATE_OWNERLESS_WRITE_MODE="${NX_GATE_OWNERLESS_WRITE_MODE:-}"
+
+case "$NX_GATE_OWNERLESS_WRITE_MODE" in
+  ""|log-only|enforce) ;;
+  *)
+    echo "FATAL: NX_GATE_OWNERLESS_WRITE_MODE=$NX_GATE_OWNERLESS_WRITE_MODE is not one of: (unset), log-only, enforce." >&2
+    exit 2
+    ;;
+esac
 
 if [ -n "$NX_EXPECTED_CLIENT_LAG" ] && [ "$NX_EXPECTED_CLIENT_LAG" != "$EXPECTED_LAG_BEAD" ]; then
   echo "FATAL: NX_EXPECTED_CLIENT_LAG=$NX_EXPECTED_CLIENT_LAG does not match the only acknowledgment this script knows ($EXPECTED_LAG_BEAD) — either fix the env var, or this is a NEW regression that needs its own bead + its own threshold in this script's FIXED_IN_VERSION, not a reused ack." >&2
@@ -184,6 +264,7 @@ echo " PUBLISHED-CLIENT WRITE GATE (nexus-86mx2)"
 echo "   candidate engine : $( [ -n "$NEXUS_SERVICE_TAG" ] && echo "$NEXUS_SERVICE_TAG (tag-mode)" || echo "working-tree dev jar (default)" )"
 echo "   published client : $( [ -n "$NX_PUBLISHED_CLIENT_VERSION" ] && echo "$NX_PUBLISHED_CLIENT_VERSION (pinned)" || echo "latest (unpinned)" )"
 echo "   expected lag ack : $( [ -n "$NX_EXPECTED_CLIENT_LAG" ] && echo "$NX_EXPECTED_CLIENT_LAG" || echo "(none)" )"
+echo "   ownerless mode   : $( [ -n "$NX_GATE_OWNERLESS_WRITE_MODE" ] && echo "$NX_GATE_OWNERLESS_WRITE_MODE" || echo "(unset: local launcher default, no mode assertion)" )"
 echo "================================================================"
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/nx-pcwg.XXXXXX")"
@@ -247,6 +328,9 @@ NX_LOCAL=1 NEXUS_CONFIG_DIR="$ENGINE_HOME" uv run nx daemon service stop \
   || _fail "could not stop the auto-started service"
 
 START_ENV=(NX_LOCAL=1 "NEXUS_CONFIG_DIR=$ENGINE_HOME")
+if [ -n "$NX_GATE_OWNERLESS_WRITE_MODE" ]; then
+  START_ENV+=("NX_OWNERLESS_WRITE_MODE=$NX_GATE_OWNERLESS_WRITE_MODE")
+fi
 if [ -n "$NEXUS_SERVICE_TAG" ]; then
   BIN="$ENGINE_HOME/service/nexus-service"
   [ -x "$BIN" ] || _fail "install-binary reported success but $BIN is not executable"
@@ -368,7 +452,71 @@ _manifest_get_count() {
 RUN_ID="$$-$(date +%s)"
 STORE_OK=0
 MD_OK=0
+# 1 when the journey's own client output names the ownerless refusal (reason
+# ownerless_chunk_write, or the 422 text). The EXPECTED-INCOMPATIBLE ack needs
+# BOTH, so a journey that failed for an unrelated reason cannot ride it.
+STORE_REFUSED=0
+MD_REFUSED=0
 FAIL_REASONS=()
+
+# The engine's 422 carries two strings: the prose in `error` ("refusing an
+# ownerless chunk write on <route>: ...", OwnerlessChunkWriteException) and the
+# `reason` ownerless_chunk_write. A 7.67.0 client copies the `error` prose into
+# its exception message (http_vector_client.py), so a refused journey's output
+# carries it; the reason token alone is accepted too. Deliberately NOT a bare
+# "ownerless": a Phase 2+ client's own messages and docs use the word without a
+# refusal behind it. The function is sourced by the real test
+# (tests/e2e/published_client_write_gate_verdict_test.sh), not copied.
+_names_ownerless_refusal() {
+  case "$1" in
+    *"refusing an ownerless chunk write"*|*ownerless_chunk_write*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# One line of a journey's own client output, made safe for the console: control
+# characters dropped, credential-shaped text redacted (Bearer/Basic/Token values,
+# key=value and key: value for token/secret/password/api_key/authorization, any
+# unbroken run of 48 or more key characters), and 300 characters at most. The
+# journey's output is whatever a client prints, and an error can echo a header.
+_scrub_console_line() {
+  python3 - "$1" <<'PY'
+import re, sys
+
+text = sys.argv[1]
+text = "".join(" " if ch == "\t" else ch for ch in text if ch == "\t" or (ord(ch) >= 32 and ord(ch) != 127))
+text = re.sub(r"(?i)\b(bearer|basic|token)\s+[^\s'\"]+", r"\1 [redacted]", text)
+text = re.sub(
+    r"(?i)((?:api[_-]?key|token|secret|passw(?:or)?d|authorization)['\"]?\s*[=:]\s*)[^\s,;'\"]+",
+    r"\1[redacted]", text,
+)
+text = re.sub(r"[A-Za-z0-9+/_=-]{48,}", "[long-token-redacted]", text)
+print(text[:300])
+PY
+}
+
+# The line of a journey's own output that decided its classification, printed to
+# the console so a run's evidence survives the scratch directory (removed on an
+# acknowledged pass): the line that names the refusal when there is one, else the
+# last non-empty line. Prints nothing for an empty output.
+#
+# NOTE (nexus-9a6io round 4, code L3): this prints CLIENT output to the console on
+# BOTH paths, not only the refusal path; before round 3 a journey's output went to
+# the log files alone. The line is scrubbed and capped by _scrub_console_line, and
+# the full output stays in $LOGS (the scratch config holds no real credential, so
+# this is defence in depth, not a claim that the line is safe to publish).
+_journey_evidence() {
+  local label="$1" out="$2" line="" hits=""
+  if _names_ownerless_refusal "$out"; then
+    hits="$(printf '%s\n' "$out" | { grep -E 'refusing an ownerless chunk write|ownerless_chunk_write' || true; })"
+    line="${hits%%$'\n'*}"
+    [ -n "$line" ] && echo "[gate] $label: refusal line: $(_scrub_console_line "$line")"
+  else
+    line="$(printf '%s\n' "$out" | { grep -v '^[[:space:]]*$' || true; } | tail -n 1)"
+    [ -n "$line" ] && echo "[gate] $label: no refusal named; last output line: $(_scrub_console_line "$line")"
+  fi
+  return 0
+}
 
 # -- a. store put: one tiny fixture, deterministically ONE chunk. -----------
 STORE_TITLE="pcwg-store-$RUN_ID"
@@ -376,6 +524,8 @@ echo "[gate] store put: title=$STORE_TITLE"
 STORE_PUT_OUT="$(printf 'published-client-write-gate probe %s\n' "$RUN_ID" \
   | _client_nx store put - --title "$STORE_TITLE" --collection pcwg 2>&1)" || true
 printf '%s\n' "$STORE_PUT_OUT" | sed 's/^/       /' | tee "$LOGS/store-put.log" >/dev/null
+if _names_ownerless_refusal "$STORE_PUT_OUT"; then STORE_REFUSED=1; fi
+_journey_evidence "store put" "$STORE_PUT_OUT"
 STORE_SHOW_JSON="$(_provisioner_nx catalog show "$STORE_TITLE" --json 2>/dev/null)" || STORE_SHOW_JSON=""
 if [ -n "$STORE_SHOW_JSON" ]; then
   STORE_TUMBLER="$(printf '%s' "$STORE_SHOW_JSON" | python3 -c "import sys,json;print(json.load(sys.stdin).get('tumbler',''))" 2>/dev/null)"
@@ -408,6 +558,8 @@ EOF
 echo "[gate] index md: title=$MD_TITLE path=$MD_FIXTURE"
 MD_OUT="$(_client_nx index md "$MD_FIXTURE" --corpus pcwg-gate 2>&1)" || true
 printf '%s\n' "$MD_OUT" | sed 's/^/       /' | tee "$LOGS/index-md.log" >/dev/null
+if _names_ownerless_refusal "$MD_OUT"; then MD_REFUSED=1; fi
+_journey_evidence "index md" "$MD_OUT"
 MD_SHOW_JSON="$(_provisioner_nx catalog show "$MD_TITLE" --json 2>/dev/null)" || MD_SHOW_JSON=""
 if [ -n "$MD_SHOW_JSON" ]; then
   MD_TUMBLER="$(printf '%s' "$MD_SHOW_JSON" | python3 -c "import sys,json;print(json.load(sys.stdin).get('tumbler',''))" 2>/dev/null)"
@@ -430,9 +582,88 @@ fi
 # ── 4. Verdict ───────────────────────────────────────────────────────────────
 echo "── 4/4 Verdict ──"
 
+# numeric tuple compare, not lexical: "7.10.0" >= "7.7.0" must hold.
+_version_ge() {
+  python3 -c "
+import sys
+a = tuple(int(x) for x in sys.argv[1].split('.'))
+b = tuple(int(x) for x in sys.argv[2].split('.'))
+print('1' if a >= b else '0')
+" "$1" "$2"
+}
+
+CLIENT_IS_FIXED="$(_version_ge "$CLIENT_VERSION" "$FIXED_IN_VERSION")"
+
+# RDR-223 P3.2 oracle (see the header's OWNERLESS-WRITE REFUSAL section): the
+# engine's own counters, read after the journeys. An engine that does not
+# report them (a candidate that predates P3.2) leaves the three fields empty.
+STATUS_JSON="$(curl -sS -H "Authorization: Bearer $SERVICE_TOKEN" \
+  "http://127.0.0.1:$SERVICE_PORT/v1/status" 2>/dev/null)" || STATUS_JSON=""
+OW_FIELDS="$(printf '%s' "$STATUS_JSON" | python3 -c "
+import sys, json
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    d = {}
+def f(k):
+    v = d.get(k)
+    return '' if v is None else str(v)
+print('|'.join([f('ownerless_write_mode'), f('ownerless_writes_refused_total'), f('ownerless_writes_would_refuse_total')]))
+" 2>/dev/null)" || OW_FIELDS="||"
+IFS='|' read -r OW_MODE OW_REFUSED OW_WOULD <<<"$OW_FIELDS"
+echo "[gate] engine ownerless-write status: mode=${OW_MODE:-(not reported)} refused_total=${OW_REFUSED:-(n/a)} would_refuse_total=${OW_WOULD:-(n/a)}"
+
+# A counter is a non-negative integer or absent. `[ "$x" -lt 2 ]` on anything else
+# errors INSIDE an `if`, evaluates false, and adds no gap: the ack would pass on a
+# counter nobody could read (reproduced with 2.0). Refuse it loudly instead, and
+# not acknowledgeable: the oracle cannot say what the engine counted.
+for _ow in "$OW_REFUSED" "$OW_WOULD"; do
+  case "$_ow" in
+    ""|*[!0-9]*)
+      if [ -n "$_ow" ]; then
+        echo "PUBLISHED-CLIENT WRITE GATE FAILED — the engine reported an ownerless-write counter that is not a non-negative integer ('$_ow'): refused_total='${OW_REFUSED}' would_refuse_total='${OW_WOULD}'; the oracle cannot read it, not acknowledgeable" >&2
+        echo "PUBLISHED-CLIENT WRITE GATE FAILED — non-integer ownerless-write counter from /v1/status (refused_total='${OW_REFUSED}' would_refuse_total='${OW_WOULD}')"
+        exit 1
+      fi
+      ;;
+  esac
+done
+
+ORACLE_FAILS=()
+if [ -n "$NX_GATE_OWNERLESS_WRITE_MODE" ]; then
+  if [ "$OW_MODE" != "$NX_GATE_OWNERLESS_WRITE_MODE" ]; then
+    ORACLE_FAILS+=("engine reports ownerless_write_mode='${OW_MODE}' but this run asked for '$NX_GATE_OWNERLESS_WRITE_MODE' — the candidate engine lacks the RDR-223 P3.2 refusal, or did not take the mode")
+  else
+    if [ "$CLIENT_IS_FIXED" = "1" ]; then
+      if [ "${OW_REFUSED:-0}" != "0" ] || [ "${OW_WOULD:-0}" != "0" ]; then
+        ORACLE_FAILS+=("published client $CLIENT_VERSION (>= $FIXED_IN_VERSION, a Phase 2 client) wrote an ownerless chunk: refused=$OW_REFUSED would_refuse=$OW_WOULD, both must be 0")
+      fi
+    elif [ "$NX_GATE_OWNERLESS_WRITE_MODE" = "log-only" ]; then
+      if [ "${OW_REFUSED:-0}" != "0" ]; then
+        ORACLE_FAILS+=("log-only engine REFUSED $OW_REFUSED ownerless write(s); log-only must never refuse")
+      fi
+      if [ "${OW_WOULD:-0}" -lt 1 ]; then
+        ORACLE_FAILS+=("log-only engine counted no would-refuse write from published client $CLIENT_VERSION (< $FIXED_IN_VERSION): either the legacy path never reached the ownerless route (FIXED_IN_VERSION=$FIXED_IN_VERSION is stale) or the counter is dead — the soak could not be observed")
+      fi
+    else
+      if [ "${OW_REFUSED:-0}" -lt 1 ]; then
+        ORACLE_FAILS+=("enforce engine refused no ownerless write from published client $CLIENT_VERSION (< $FIXED_IN_VERSION): either the legacy path never reached the ownerless route (FIXED_IN_VERSION=$FIXED_IN_VERSION is stale) or enforcement is dead")
+      fi
+    fi
+  fi
+fi
+
+if [ "${#ORACLE_FAILS[@]}" -gt 0 ]; then
+  for r in "${ORACLE_FAILS[@]}"; do
+    echo "  - $r" >&2
+  done
+  echo "PUBLISHED-CLIENT WRITE GATE FAILED — the ownerless-write oracle for mode '$NX_GATE_OWNERLESS_WRITE_MODE' did not hold (${#ORACLE_FAILS[@]} check(s)); not acknowledgeable"
+  exit 1
+fi
+
 if [ "$STORE_OK" = 1 ] && [ "$MD_OK" = 1 ]; then
   GATE_OK=1
-  echo "PUBLISHED-CLIENT WRITE GATE PASSED — published conexus $CLIENT_VERSION registers real manifest rows against the candidate engine (store put + index md, exact expected counts, non-vacuous)"
+  echo "PUBLISHED-CLIENT WRITE GATE PASSED — published conexus $CLIENT_VERSION registers real manifest rows against the candidate engine (store put + index md, exact expected counts, non-vacuous)${NX_GATE_OWNERLESS_WRITE_MODE:+; ownerless mode $NX_GATE_OWNERLESS_WRITE_MODE: refused=${OW_REFUSED:-0} would_refuse=${OW_WOULD:-0}}"
   exit 0
 fi
 
@@ -441,20 +672,41 @@ for r in "${FAIL_REASONS[@]}"; do
 done
 
 if [ -n "$NX_EXPECTED_CLIENT_LAG" ]; then
-  # Stale-ack refusal: compare tuples numerically, not lexicographically —
-  # "7.10.0" >= "7.7.0" must hold even though it is not the lexical case.
-  IS_STALE="$(python3 -c "
-cv = tuple(int(x) for x in '$CLIENT_VERSION'.split('.'))
-fv = tuple(int(x) for x in '$FIXED_IN_VERSION'.split('.'))
-print('1' if cv >= fv else '0')
-")"
-  if [ "$IS_STALE" = "1" ]; then
+  # Stale-ack refusal: compare tuples numerically, not lexicographically.
+  if [ "$CLIENT_IS_FIXED" = "1" ]; then
     echo "ACKNOWLEDGMENT REFUSED (stale): published client resolved to $CLIENT_VERSION >= $FIXED_IN_VERSION, the version $EXPECTED_LAG_BEAD's fix is recorded as shipping in — this is a REAL regression, not the known window. Investigate; do not re-arm the ack." >&2
     echo "PUBLISHED-CLIENT WRITE GATE FAILED — acknowledgment for $EXPECTED_LAG_BEAD refused as stale (published $CLIENT_VERSION >= $FIXED_IN_VERSION)"
     exit 1
   fi
+  # The ack names the ownerless-write refusal, so it covers ONLY a failure the
+  # engine and the client both attribute to it (nexus-9a6io fix round): BOTH
+  # journeys must have failed (STORE_OK=0 and MD_OK=0), each journey's own
+  # output must name the refusal, and the engine must have counted at least
+  # one refusal per journey (>= 2). With any weaker condition one refused
+  # journey plus an unrelated failure in the other still acked.
+  ACK_GAPS=()
+  if [ "$STORE_OK" != 0 ] || [ "$MD_OK" != 0 ]; then
+    ACK_GAPS+=("a journey succeeded (store put ok=$STORE_OK, index md ok=$MD_OK), so the failure is partial and is not the ownerless refusal alone")
+  fi
+  if [ "$STORE_REFUSED" != 1 ]; then
+    ACK_GAPS+=("the store put journey's output does not name the ownerless refusal")
+  fi
+  if [ "$MD_REFUSED" != 1 ]; then
+    ACK_GAPS+=("the index md journey's output does not name the ownerless refusal")
+  fi
+  if [ "${OW_REFUSED:-0}" -lt 2 ]; then
+    ACK_GAPS+=("the engine reports ownerless_writes_refused_total=${OW_REFUSED:-(not reported)}, fewer than the 2 refusals (one per journey) the ack covers")
+  fi
+  if [ "${#ACK_GAPS[@]}" -gt 0 ]; then
+    for g in "${ACK_GAPS[@]}"; do
+      echo "  - ack gap: $g" >&2
+    done
+    echo "ACKNOWLEDGMENT REFUSED (no evidence): $EXPECTED_LAG_BEAD covers the ownerless-write refusal of BOTH journeys only, so this failure includes something else. Re-run with NX_GATE_OWNERLESS_WRITE_MODE=enforce against a P3.2 candidate, or investigate." >&2
+    echo "PUBLISHED-CLIENT WRITE GATE FAILED — acknowledgment for $EXPECTED_LAG_BEAD refused: ${#ACK_GAPS[@]} evidence check(s) did not hold"
+    exit 1
+  fi
   GATE_OK=1
-  echo "PUBLISHED-CLIENT WRITE GATE EXPECTED-INCOMPATIBLE (ack $EXPECTED_LAG_BEAD) — published conexus $CLIENT_VERSION (< $FIXED_IN_VERSION) cannot register manifests against the candidate engine; KNOWN, TRACKED, COUNTED — not a silent pass"
+  echo "PUBLISHED-CLIENT WRITE GATE EXPECTED-INCOMPATIBLE (ack $EXPECTED_LAG_BEAD) — published conexus $CLIENT_VERSION (< $FIXED_IN_VERSION) cannot write against the candidate engine: both journeys failed with the ownerless refusal and the engine counted $OW_REFUSED refusal(s) (reason ownerless_chunk_write); KNOWN, TRACKED, COUNTED — not a silent pass"
   exit 2
 fi
 

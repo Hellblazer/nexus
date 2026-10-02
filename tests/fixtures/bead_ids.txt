@@ -2184,6 +2184,7 @@ nexus-b43y
 nexus-b47fz
 nexus-b4nq1
 nexus-b50zw
+nexus-b50zw.1
 nexus-b563
 nexus-b5ezj
 nexus-b5mh
@@ -3868,6 +3869,7 @@ nexus-ir2g.1
 nexus-ir68m
 nexus-ir6eh
 nexus-ir6eh.1
+nexus-ir9zf
 nexus-irndi
 nexus-irszw
 nexus-irszw.1
@@ -5446,6 +5448,8 @@ nexus-qc4p1
 nexus-qce2e
 nexus-qci5b
 nexus-qd1yp
+nexus-qdin4
+nexus-qdin4.2
 nexus-qdj
 nexus-qdqng
 nexus-qdqng.1
@@ -6774,6 +6778,7 @@ nexus-wbfpw.44
 nexus-wbfpw.45
 nexus-wbfpw.46
 nexus-wbfpw.47
+nexus-wbfpw.48
 nexus-wbfpw.5
 nexus-wbfpw.6
 nexus-wbfpw.7
@@ -7365,7 +7370,9 @@ nexus-z0o2p.24
 nexus-z0o2p.25
 nexus-z0o2p.25.1
 nexus-z0o2p.26
+nexus-z0o2p.26.1
 nexus-z0o2p.27
+nexus-z0o2p.27.1
 nexus-z0o2p.28
 nexus-z0o2p.29
 nexus-z0o2p.3
@@ -7380,6 +7387,10 @@ nexus-z0o2p.34
 nexus-z0o2p.34.1
 nexus-z0o2p.35
 nexus-z0o2p.35.1
+nexus-z0o2p.36
+nexus-z0o2p.37
+nexus-z0o2p.38
+nexus-z0o2p.39
 nexus-z0o2p.4
 nexus-z0o2p.5
 nexus-z0o2p.6
