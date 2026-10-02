@@ -416,6 +416,174 @@ def quarantine_orphans_bounded_serverside(
     return total_moved, sample
 
 
+#: The probe that asks the engine which quarantine siblings hold an origin's
+#: chunks (:func:`resolve_quarantine_siblings` with ``probe_engine=True``). A
+#: restore DRY-RUN over a ``quarantined_at`` window whose ``after_chash`` is the
+#: largest possible chash selects no row, so the engine resolves the sibling set
+#: (the reaper's own name for the origin plus every quarantine collection
+#: holding a chunk tagged ``origin_collection`` = the origin,
+#: ``PgVectorRepository.resolveQuarantineSiblings``) and answers it without
+#: moving, attaching or auditing anything. The client relies on exactly that
+#: (an empty-window dry-run still answers ``quarantine_collections`` and writes
+#: no ``gc_audit`` row), pinned by ``VectorHandlerQuarantineRestoreRouteTest``,
+#: until nexus-wbfpw.64 moves the resolution into the engine's own expire and
+#: restore-rereferenced routes and this probe is retired.
+_SIBLING_PROBE_SINCE = "1970-01-01T00:00:00Z"
+_SIBLING_PROBE_AFTER_CHASH = "f" * 64
+
+#: Codes of a :class:`VectorServiceError` that mean the probe route cannot
+#: answer for this origin or engine (an engine that predates the sibling
+#: resolution, an origin the catalog does not register or does not hold live):
+#: expected, logged at info. Any other failure is logged as a warning. Either
+#: way the caller still has the name candidates and so never does nothing.
+_SIBLING_PROBE_EXPECTED_CODES = frozenset({400, 404, 422})
+
+
+def resolve_quarantine_siblings(
+    db: Any, origin_name: str, *, primary: str | None = None, probe_engine: bool = False,
+) -> list[str]:
+    """Every quarantine collection that may hold chunks of *origin_name*
+    (nexus-wbfpw.58, RDR-192 Phase 3 critique S3).
+
+    The client's move names its sibling from the origin's catalog ROW
+    (:func:`quarantine_collection_name`), and the row is mutable: catalog-044-3
+    rewrote ``owner_id`` on repo collections after chunks had been moved, so the
+    name derived today is not the name a chunk was moved into yesterday. A
+    chunk the client moved carries no ``quarantined_by`` tag either, so the
+    engine's own expiry (vectors-026) skips it and nothing but the client
+    expires it. Expiry and re-reference that look only in the row-derived
+    sibling therefore skip every such chunk, for good.
+
+    The set is the union of (in this order, deduplicated):
+
+    1. *primary*: the row-derived sibling (or the name the caller moves into),
+       so nothing the caller did before this change stops being reached;
+    2. ``quarantine-<origin name>``, the reaper's own name for the origin;
+    3. only with ``probe_engine=True``: what the ENGINE resolves, the set
+       ``nx t3 quarantine restore`` reaches, by asking the restore route for a
+       dry-run over an empty selection (see :data:`_SIBLING_PROBE_SINCE`). That
+       finds a sibling by the ``origin_collection`` tag the move wrote into the
+       chunks, which no rename of the origin or of its owner can disturb.
+
+    ``probe_engine`` defaults to ``False`` on purpose: the probe costs the
+    engine an unindexed EXISTS scan of every quarantine collection of the
+    tenant that is not named for the origin, plus one POST, so it does not
+    belong on ``nx index repo``'s hot path (per collection, every run). A new
+    caller must ask for it. ``nx t3 gc`` does; the indexer does not, and a chunk
+    stranded under a name neither derived name reaches waits for ``nx t3 gc``.
+    nexus-wbfpw.64 resolves siblings inside the engine's own expire and
+    restore-rereferenced routes and retires this probe.
+
+    Where the engine cannot answer (a ``db`` with no restore route, an engine
+    that predates sibling resolution, an origin the restore refuses) steps 1 and
+    2 stand alone, which covers the catalog-044 shape (the origin's name is the
+    pre-rewrite name the chunks were moved under). The reason is logged; this
+    never returns an empty list and never raises for an engine answer or a
+    transport failure (a local-mode timeout arrives as a bare ``OSError``).
+    """
+    names: list[str] = [primary if primary is not None else quarantine_collection_name(origin_name),
+                        f"{QUARANTINE_PREFIX}-{origin_name}"]
+    probe = getattr(db, "gc_quarantine_restore", None) if probe_engine else None
+    if probe is not None:
+        from nexus.db.http_vector_client import VectorServiceError  # noqa: PLC0415 — deferred: keeps this module import-light
+
+        try:
+            page = probe(
+                origin_name, quarantined_since=_SIBLING_PROBE_SINCE,
+                after_chash=_SIBLING_PROBE_AFTER_CHASH, limit=1, dry_run=True, reattach=False,
+            )
+        # OSError too: without a managed endpoint the client re-raises a bare
+        # URLError / ConnectionError / TimeoutError (all OSError), and a timeout
+        # is the probe's likeliest failure (it is an unbounded scan).
+        except (VectorServiceError, OSError) as exc:
+            code = getattr(exc, "code", None)
+            emit = _log.info if code in _SIBLING_PROBE_EXPECTED_CODES else _log.warning
+            emit(
+                "quarantine_sibling_probe_unavailable",
+                collection=origin_name, code=code, error=str(exc),
+                using="row-derived and reaper names only",
+            )
+        else:
+            found = page.get("quarantine_collections") if isinstance(page, dict) else None
+            if isinstance(found, list):
+                names.extend(n for n in found if isinstance(n, str))
+    return list(dict.fromkeys(names))
+
+
+def restore_rereferenced_across_serverside(
+    db: Any, siblings: list[str], origin_name: str, *, best_effort: bool = False,
+) -> int | None:
+    """:func:`restore_rereferenced_bounded_serverside` (then the unbounded call,
+    as the indexer always has) over every sibling in *siblings*, total restored.
+    ``None`` when the client object has no restore capability at all (the same
+    signal the single-sibling wrappers give, and it cannot differ per sibling).
+
+    With ``best_effort`` a :class:`VectorServiceError` or ``OSError`` (a
+    local-mode transport failure) on any sibling after the
+    first is logged (``quarantine_sibling_restore_failed``, naming the sibling)
+    and skipped, so an extra sibling never costs the caller the first one or
+    what follows; a failure on the first still raises."""
+    from nexus.db.http_vector_client import VectorServiceError  # noqa: PLC0415 — deferred: keeps this module import-light
+
+    total = 0
+    for i, sibling in enumerate(siblings):
+        try:
+            restored = restore_rereferenced_bounded_serverside(db, sibling, origin_name)
+            if restored is None:
+                restored = restore_rereferenced_serverside(db, sibling, origin_name)
+        except (VectorServiceError, OSError) as exc:  # OSError: local-mode transport failures arrive bare
+            if not (best_effort and i):
+                raise
+            _log.warning(
+                "quarantine_sibling_restore_failed",
+                collection=origin_name, sibling=sibling, code=getattr(exc, "code", None), error=str(exc),
+            )
+            continue
+        if restored is None:
+            return None
+        total += restored
+    return total
+
+
+def expire_quarantine_across_serverside(
+    db: Any, siblings: list[str], origin_name: str, cutoff: str,
+    *, floor_fraction: float, floor_min_chunks: int, force: bool = False, best_effort: bool = False,
+) -> tuple[int, int] | None:
+    """:func:`expire_quarantine_serverside` over every sibling in *siblings*,
+    summed ``(expired, refused)``. ``None`` when the client object has no expiry
+    capability. The mr89x floor is judged by the engine per sibling, on that
+    sibling's own eligible rows, exactly as it was when one sibling was assumed.
+
+    With ``best_effort`` a :class:`VectorServiceError` or ``OSError`` (a
+    local-mode transport failure) on any sibling after the
+    first is logged (``quarantine_sibling_expire_failed``, naming the sibling)
+    and skipped; a failure on the first still raises. A caller that must report
+    each sibling's own outcome (``nx t3 gc``) loops over
+    :func:`expire_quarantine_serverside` itself."""
+    from nexus.db.http_vector_client import VectorServiceError  # noqa: PLC0415 — deferred: keeps this module import-light
+
+    expired = refused = 0
+    for i, sibling in enumerate(siblings):
+        try:
+            result = expire_quarantine_serverside(
+                db, sibling, origin_name, cutoff,
+                floor_fraction=floor_fraction, floor_min_chunks=floor_min_chunks, force=force,
+            )
+        except (VectorServiceError, OSError) as exc:  # OSError: local-mode transport failures arrive bare
+            if not (best_effort and i):
+                raise
+            _log.warning(
+                "quarantine_sibling_expire_failed",
+                collection=origin_name, sibling=sibling, code=getattr(exc, "code", None), error=str(exc),
+            )
+            continue
+        if result is None:
+            return None
+        expired += result[0]
+        refused += result[1]
+    return expired, refused
+
+
 def expire_quarantine_serverside(
     db: Any, quarantine_name: str, origin_name: str, cutoff: str,
     *, floor_fraction: float, floor_min_chunks: int, force: bool = False,

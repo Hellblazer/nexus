@@ -302,34 +302,63 @@ def _expire_client_quarantine(t3_db, collection: str, qname: str, *, moved: int)
     client cutoff (``NX_GC_QUARANTINE_DAYS``) that the engine's reaper did not tag, behind the same
     ``NX_GC_FLOOR_FRACTION`` floor (``NX_GC_FORCE=1`` overrides). The verb runs it so a collection no
     repo index sweeps (every ``knowledge__*``) still expires its own quarantine; without it nothing
-    would ever expire what this verb moved. A failure is exit 1 after saying the move stands."""
+    would ever expire what this verb moved. A failure is exit 1 after saying the move stands.
+
+    *qname* is the sibling the verb moves into (the origin's catalog-row-derived name), not the only one
+    it expires from (nexus-wbfpw.58): rows a client moved under an earlier name of the same origin, one
+    the catalog row no longer derives (catalog-044-3 rewrote ``owner_id``), carry no ``quarantined_by`` tag
+    for the engine's reaper to expire. So this is the one caller that asks the engine which siblings hold
+    the origin's chunks (``resolve_quarantine_siblings(..., probe_engine=True)``; ``nx index repo`` uses the
+    two derived names only, because the probe is an unindexed scan engine-side; nexus-wbfpw.64 moves the
+    resolution into the engine and retires the probe). Each sibling is expired and reported on its own
+    line: the engine judges the floor per sibling, so one sibling's refusal and another's expiry are
+    both stated as what they are, never summed."""
     from nexus.catalog.chunk_quarantine import (  # noqa: PLC0415 — command-local import (nexus.catalog.chunk_quarantine)
         expire_quarantine_serverside,
         quarantine_days,
+        resolve_quarantine_siblings,
     )
     from nexus.db.http_vector_client import VectorServiceError  # noqa: PLC0415 — command-local import (nexus.db.http_vector_client)
     from nexus.indexer import _GC_FLOOR_MIN_CHUNKS, _gc_floor_fraction  # noqa: PLC0415 — command-local import (nexus.indexer is heavy)
 
     force = os.environ.get("NX_GC_FORCE", "") == "1"
     cutoff = (datetime.now(UTC) - timedelta(days=quarantine_days())).strftime("%Y-%m-%dT%H:%M:%SZ")
-    try:
-        expiry = expire_quarantine_serverside(
-            t3_db, qname, collection, cutoff,
-            floor_fraction=_gc_floor_fraction(), floor_min_chunks=_GC_FLOOR_MIN_CHUNKS, force=force,
-        )
-    except VectorServiceError as exc:
+    if getattr(t3_db, "gc_expire_quarantine", None) is None:
         click.echo(
-            f"\nSummary: {f'the move succeeded ({moved} chunk(s) quarantined) but' if moved else 'nothing needed moving, but'}"
-            f" the client expiry of {qname} FAILED: {exc}. Nothing was expired; re-run this verb to retry it.",
+            f"  Client expiry of {qname} did NOT run: this T3 handle carries no gc_expire_quarantine route.",
             err=True,
         )
-        raise click.exceptions.Exit(1) from exc
-    if expiry is not None:
+        return
+    siblings = resolve_quarantine_siblings(t3_db, collection, primary=qname, probe_engine=True)
+    done: list[tuple[str, int]] = []  # (sibling, expired) for every sibling whose expiry completed
+    for sibling in siblings:
+        try:
+            expiry = expire_quarantine_serverside(
+                t3_db, sibling, collection, cutoff,
+                floor_fraction=_gc_floor_fraction(), floor_min_chunks=_GC_FLOOR_MIN_CHUNKS, force=force,
+            )
+        except VectorServiceError as exc:
+            earlier = (
+                " Already expired before it: " + ", ".join(f"{n} from {s}" for s, n in done) + "."
+                if done else ""
+            )
+            click.echo(
+                f"\nSummary: {f'the move succeeded ({moved} chunk(s) quarantined) but' if moved else 'nothing needed moving, but'}"
+                f" the client expiry of {sibling} FAILED: {exc}. Siblings are expired in this order: "
+                f"{', '.join(siblings)}; that one and any after it were not.{earlier} Re-run this verb to retry it.",
+                err=True,
+            )
+            raise click.exceptions.Exit(1) from exc
+        if expiry is None:  # cannot happen past the route check above; never read as "nothing to expire"
+            click.echo(f"  Client expiry of {sibling} did NOT run: the T3 handle lost its expire route.", err=True)
+            continue
         expired, refused = expiry
+        done.append((sibling, expired))
         # The engine's `refused` is two things: chunks the origin collection's manifest references
         # again (kept always; FORCE does not reach them) plus, when the floor fires, the whole eligible
-        # set (the engine then reports expired = 0). So expired > 0 means the floor did not fire and
-        # every refusal is a manifest keep; expired == 0 cannot tell the two apart.
+        # set (the engine then reports expired = 0). The floor is judged per sibling on that sibling's
+        # own rows, so for ONE sibling expired > 0 means its floor did not fire and every refusal is a
+        # manifest keep; expired == 0 cannot tell the two apart.
         if not refused:
             why = ""
         elif expired:
@@ -340,7 +369,7 @@ def _expire_client_quarantine(t3_db, collection: str, qname: str, *, moved: int)
                 "whole expiry; NX_GC_FORCE=1 overrides only the floor)"
             )
         click.echo(
-            f"  Client expiry of {qname} (older than {quarantine_days()} day(s), rows the engine's "
+            f"  Client expiry of {sibling} (older than {quarantine_days()} day(s), rows the engine's "
             f"reaper tagged excluded): {expired} expired, {refused} refused{why}."
         )
 

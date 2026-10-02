@@ -4048,12 +4048,12 @@ def _prune_collection_serverside(
 
     from nexus.catalog.chunk_quarantine import (  # noqa: PLC0415 — deferred import
         GC_AUDIT_MAX_CHASHES,
-        expire_quarantine_serverside,
+        expire_quarantine_across_serverside,
         quarantine_days,
         quarantine_orphans_bounded_serverside,
         quarantine_orphans_serverside,
-        restore_rereferenced_bounded_serverside,
-        restore_rereferenced_serverside,
+        resolve_quarantine_siblings,
+        restore_rereferenced_across_serverside,
     )
 
     # The quarantine sibling is never registered from here. Its only writes
@@ -4078,9 +4078,30 @@ def _prune_collection_serverside(
     # restore" -- fall back to the unbounded call before giving up; a real
     # engine has both routes together (they ship in the same changeset),
     # so this fallback is defensive, not expected to fire in practice.
-    restored = restore_rereferenced_bounded_serverside(db, quarantine_name, collection_name)
-    if restored is None:
-        restored = restore_rereferenced_serverside(db, quarantine_name, collection_name)
+    #
+    # nexus-wbfpw.58 (RDR-192 Phase 3 critique S3): restore and expiry also run
+    # over the reaper's own name for this collection (quarantine-<name>), not
+    # only ``quarantine_name`` (the name the CURRENT catalog row derives). That
+    # row is mutable (catalog-044-3 rewrote owner_id after chunks had been
+    # moved), and the client's move leaves no ``quarantined_by`` tag for the
+    # engine's own expiry to find, so a chunk moved under yesterday's name was
+    # neither re-referenced nor expired by a pass that looked only under today's.
+    # Those two names are ALL this path uses: no engine probe runs here
+    # (``resolve_quarantine_siblings`` defaults ``probe_engine=False``), because
+    # this runs per collection on every ``nx index repo`` and the probe is an
+    # unindexed scan engine-side. A chunk stranded under a third name waits for
+    # ``nx t3 gc``, which probes. nexus-wbfpw.64 moves the resolution into the
+    # engine's expire and restore-rereferenced routes and removes that gap.
+    # The extra sibling is best-effort: a failure there is logged and skipped,
+    # never the move, the primary sibling or the rest of the pass. The move below
+    # still goes to ``quarantine_name`` alone: that one is a destination, not a search.
+    # ``siblings[0]`` is ``quarantine_name`` (a failure there raises, as it always
+    # has); the rest is the reaper's name when it differs. Names only, so
+    # resolving them crosses no wire (a db with no routes still returns False below
+    # before anything is sent). The bounded call falls back to the unbounded one
+    # per sibling inside the helper, as the single-name code did.
+    siblings = resolve_quarantine_siblings(db, collection_name, primary=quarantine_name)
+    restored = restore_rereferenced_across_serverside(db, siblings, collection_name, best_effort=True)
     if restored is None:
         return False  # route unavailable — client-side path handles restore too
 
@@ -4137,10 +4158,10 @@ def _prune_collection_serverside(
     # past their window, and nothing before it: the move into quarantine above
     # (gc_quarantine_orphans) has no fraction floor. The engine reaper's own move
     # carries one (RDR-192 / nexus-2x9xa, NX_REAPER_FLOOR_FRACTION); this path does not.
-    expired = expire_quarantine_serverside(
-        db, quarantine_name, collection_name, cutoff,
+    expired = expire_quarantine_across_serverside(
+        db, siblings, collection_name, cutoff,
         floor_fraction=_gc_floor_fraction(), floor_min_chunks=_GC_FLOOR_MIN_CHUNKS,
-        force=force,
+        force=force, best_effort=True,
     )
     if expired is None:
         _log.warning(

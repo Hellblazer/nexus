@@ -1479,12 +1479,19 @@ change). Where this step says the reaper's quarantine is "expired by the existin
 - **The split is symmetric** (`vectors-026`): the client's expiry, `gc_expire_quarantine`
   (what `nx index repo` calls, and the `gc/expire-quarantine` route with or without
   `force`), skips tagged rows and deletes only untagged, client-moved rows, with its floor
-  judged on those rows alone. Each side expires only what it moved. One exception, a known gap
-  (`nexus-wbfpw.58`, open): the client derives the sibling's name from the catalog row, and
+  judged on those rows alone. Each side expires only what it moved. One exception, closed on the client
+  side (`nexus-wbfpw.58`): the client derives the sibling's name from the catalog row, and
   `catalog-044` rewrote that row's owner, so a client-moved chunk (untagged, which the engine's
-  expiry skips) whose origin was renamed that way has no expirer on either side. The cost is
-  storage: the chunk stays hidden, and `nx t3 quarantine restore` still reaches it through the
-  engine-resolved sibling set.
+  expiry skips) whose origin was renamed that way sat where neither expirer looked. `nx t3 gc`
+  now asks the engine which siblings hold the origin's chunks (a dry-run of the restore route
+  over an empty selection) and expires from each, reporting each on its own line. The index
+  path uses only the two derived names, the row-derived name and `quarantine-<origin name>`,
+  and sends no probe, because the probe is an unindexed scan engine-side and that path runs on
+  every `nx index repo`; a chunk stranded under a third name waits for `nx t3 gc`. The
+  re-reference restore is indexer-only and uses the same two names. `nexus-wbfpw.64` moves the
+  resolution into the engine's expire and restore-rereferenced routes and retires the probe.
+  Until a chunk is reached the cost is storage only: it stays hidden, and
+  `nx t3 quarantine restore` still reaches it through the engine-resolved sibling set.
 - The engine's settings are in `docs/operations/engine-reaper.md` § Settings
   (`NX_REAPER_ENABLED`, `_INTERVAL_SECONDS`, `_BATCH_SIZE`, `_FLOOR_FRACTION`,
   `_FLOOR_MIN_CHUNKS`, `_FLOOR_EXEMPT_COLLECTIONS`, `_QUARANTINE_RETENTION_DAYS`,
@@ -2051,7 +2058,7 @@ the doctor check narrowed to `knowledge__` (Step 14).
   minted. (2) CA3 is marked verified (`nexus-wbfpw.3`), the two Prerequisite boxes are checked
   (`.1`, `.2`, `.3`), and the Finalization Gate sections are filled in. (3) Statements the build
   overtook: the reaper's move has a floor and only the `gc_quarantine_orphans` route has none
-  (`nexus-wbfpw.52`); "each side expires only what it moved" gains the `nexus-wbfpw.58` exception;
+  (`nexus-wbfpw.52`); "each side expires only what it moved" gains the `nexus-wbfpw.58` exception (closed client-side for `nx t3 gc`; the index path uses two names; `nexus-wbfpw.64` is the engine-side resolution);
   Day-2 "none on expiry" is the engine's expiry only; Test Plan scenario 3 names each consumer's
   gate as the protection; the `reaper_quarantine_chunks` waiver in `ReapableConsumersScanTest` is
   stated. (4) Drifted file and line pointers are replaced by test and method names, and a pointer

@@ -451,6 +451,54 @@ class VectorHandlerQuarantineRestoreRouteTest {
     }
 
     @Test
+    void aDryRunOverAnEmptySelectionStillNamesEverySibling_andWritesNoAuditRowAndMovesNothing() throws Exception {
+        // The Python client's sibling probe (nexus-wbfpw.58, chunk_quarantine.resolve_quarantine_siblings with
+        // probe_engine=True, run by nx t3 gc) relies on exactly this until nexus-wbfpw.64 moves sibling
+        // resolution into the expire and restore-rereferenced routes: a dry-run whose window selects no row
+        // still answers quarantine_collections (found by the reaper's name AND by the origin_collection tag),
+        // writes no gc_audit row, and moves nothing. Change this behaviour and that client stops finding the
+        // siblings the engine's own expiry does not reach.
+        String o = col();
+        String[] seg = o.split("__");
+        String clientSibling = "quarantine-" + seg[0] + "__old-owner__" + seg[2] + "__" + seg[3];
+        List<String> hs = quarantined(TENANT_A, o, "2026-09-01T00:00:00Z", "probe1");
+        String tagged = Chash.ofText(o + "/probe-tagged").toHex();
+        su(ctx -> {
+            PgContainerHelper.insertCollection(ctx, TENANT_A, clientSibling);
+            PgContainerHelper.insertChunks(ctx, TENANT_A, clientSibling, List.of(tagged), List.of("tagged text"),
+                List.of(new float[384]), List.of(Map.<String, Object>of("title", "tagged",
+                    "quarantined_at", "2026-09-01T00:00:00Z", "origin_collection", o)));
+        });
+        long auditsBefore = auditRows(TENANT_A);
+
+        var body = req(o, "quarantined_since", "1970-01-01T00:00:00Z", "after_chash", "f".repeat(64),
+            "limit", 1, "dry_run", true, "reattach", false);
+        body.remove("quarantine_collection");
+        var r = post(TOKEN_A, body);
+
+        assertThat(r.statusCode()).as(r.body()).isEqualTo(200);
+        var j = json(r);
+        assertThat(rows(j)).as("the empty window selects nothing").isEmpty();
+        assertThat(j.get("quarantine_collections")).as("the reaper's own name first, then the tagged sibling")
+            .isEqualTo(List.of("quarantine-" + o, clientSibling));
+        assertThat(j.get("quarantine_collection")).isEqualTo("quarantine-" + o);
+        assertThat(j.get("dry_run")).isEqualTo(true);
+        assertThat(j.get("audit_id")).isNull();
+        assertThat((List<?>) j.get("audit_ids")).isEmpty();
+        assertThat(j.get("would_restore")).isEqualTo(0);
+        assertThat(j.get("restored")).isEqualTo(0);
+        assertThat(auditRows(TENANT_A)).as("a dry-run writes no gc_audit row").isEqualTo(auditsBefore);
+        assertThat(in(TENANT_A, "quarantine-" + o, hs.get(0))).isTrue();
+        assertThat(in(TENANT_A, clientSibling, tagged)).isTrue();
+    }
+
+    private long auditRows(String tenant) throws Exception {
+        long[] n = new long[1];
+        su(ctx -> n[0] = ctx.fetchCount(GC_AUDIT, GC_AUDIT.TENANT_ID.eq(tenant)));
+        return n[0];
+    }
+
+    @Test
     void aBusyTripOnALaterSiblingIs503WithNothingMovedFalseAndTheAuditIdsAlreadyWritten() throws Exception {
         // nexus-wbfpw.55 round 2: each sibling restores in its own transaction. Sibling one commits; sibling two
         // trips the index-run lock of its chunk's document. "nothing_moved: true" would be false of the call.
