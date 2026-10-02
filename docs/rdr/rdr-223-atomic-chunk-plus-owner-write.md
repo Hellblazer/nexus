@@ -193,13 +193,15 @@ written in the same transaction as at least one owner row, so a client never
 needs two requests to make a chunk owned. The rule is enforced for those
 routes (the combined write routes, and the refusal on `upsert-chunks` and
 `store-put`), not for every insert the engine can perform. Known exceptions:
-the four SQL functions that insert into `nexus.chunks`, at their live
-definitions: `gc_quarantine_orphans` (hygiene-005), `gc_quarantine_orphans_bounded`
-(hygiene-008), `gc_restore_rereferenced` and `gc_restore_rereferenced_bounded`
-(catalog-043); the earlier definitions of the same four (catalog-023, 024, 028,
-033, 037, 039, 042; hygiene-002; vectors-005) were replaced in place and are not
-live. The quarantine restore verb planned under nexus-wbfpw.49 (RDR-192) is the
-other, and restores ownerless chunks by design.
+the SQL functions whose live definition inserts into `nexus.chunks` (the last
+definition of each function in the changelog's include order, rollback blocks
+excluded). The list is `_CHUNK_INSERTER_ALLOWLIST` in
+`tests/test_changelog_chunk_inserter_lint.py`, each entry with its reason, and
+that lint is the source of truth: it fails when a function that is not on the
+list inserts into `nexus.chunks` and when an entry no longer does. A change that
+adds such a function (the reaper's, the quarantine restore verb planned under
+nexus-wbfpw.49 under RDR-192) extends the list there, so this paragraph names
+none of them and cannot go stale when one is redefined.
 
 ### Technical Design
 

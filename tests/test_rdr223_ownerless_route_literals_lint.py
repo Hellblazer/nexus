@@ -100,13 +100,21 @@ def _fold(node: ast.AST) -> str | None:
     the expression is not string-shaped. Folds ``"a" + "b"``, which a lint that looks only at
     ``ast.Constant`` nodes misses (a split literal reaches the route unseen).
 
-    There is deliberately NO f-string branch. A route inside an f-string sits in one of the f-string's
-    literal parts, and those are ``ast.Constant`` nodes the walk already visits; a route cannot span a
-    ``{...}`` hole. A ``JoinedStr`` fold therefore never flagged a file the child Constants did not
-    (round 2 mutation check: with it dropped every fixture below still flags the same files) and only
-    raised the hit count of a file it flagged anyway."""
+    An f-string is folded too (its literal parts joined, each ``{...}`` hole an ``_UNKNOWN``). A route
+    inside a bare f-string is also visible through the f-string's own ``Constant`` parts, so that case
+    does not need the fold; an f-string that is an OPERAND of ``+`` does: ``"/v1/vectors/" +
+    f"upsert-chunks"`` has no Constant that is the route, and only the ``JoinedStr`` branch below
+    assembles it (round 3 mutation check: with the branch removed that file and the ``h + ... +
+    f"..."`` form go unflagged). Round 2 deleted this branch as dead and its commit message said every
+    fixture still flagged the same files; that was wrong, because no fixture combined ``+`` with an
+    f-string."""
     if isinstance(node, ast.Constant):
         return node.value if isinstance(node.value, str) else None
+    if isinstance(node, ast.JoinedStr):
+        return "".join(
+            v.value if isinstance(v, ast.Constant) and isinstance(v.value, str) else _UNKNOWN
+            for v in node.values
+        )
     if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
         left, right = _fold(node.left), _fold(node.right)
         if left is None and right is None:
@@ -192,7 +200,7 @@ def test_the_scan_is_not_vacuous() -> None:
 
 def test_a_split_or_formatted_route_literal_is_seen(tmp_path: Path) -> None:
     """A route built by ``+`` (a Constant-only walk misses it), a route in an f-string (seen through its
-    literal part), and a relative route after a part the fold cannot resolve (the ``\\x00`` alternative)."""
+    literal part), an f-string operand of ``+`` (the ``JoinedStr`` fold), and a relative route after a part the fold cannot resolve (the ``\\x00`` alternative)."""
     tests = tmp_path / "tests"
     tests.mkdir()
     (tests / "test_split.py").write_text('URL = "/v1/vectors/" + "upsert-chunks"\n')
@@ -202,11 +210,14 @@ def test_a_split_or_formatted_route_literal_is_seen(tmp_path: Path) -> None:
     # Reachable ONLY through the ``\x00`` alternative of ``_ROUTE``: no Constant is the route, and the
     # fold is ``<unknown>/upsert-chunks``, a relative route after a part the fold could not resolve.
     (tests / "test_relative_split.py").write_text('def u(p):\n    return p + "/upsert-" + "chunks"\n')
+    # An f-string that is an OPERAND of ``+`` is reachable only through the ``JoinedStr`` fold.
+    (tests / "test_fstring_operand.py").write_text('URL = "/v1/vectors/" + f"upsert-chunks"\n')
+    (tests / "test_fstring_operand3.py").write_text('def u(h):\n    return h + "/v1/vectors/up" + f"sert-chunks"\n')
     (tests / "test_clean.py").write_text('URL = "/v1/vectors/" + "search"\nDOC = f"{1}/v1/catalog/x"\n')
     found = _scan(repo=tmp_path.resolve(), me=Path("/nonexistent/me.py"))
     assert set(found) == {
         "tests/test_split.py", "tests/test_split3.py", "tests/test_fstring.py", "tests/test_handler_relative.py",
-        "tests/test_relative_split.py",
+        "tests/test_relative_split.py", "tests/test_fstring_operand.py", "tests/test_fstring_operand3.py",
     }
 
 
