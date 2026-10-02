@@ -1349,7 +1349,7 @@ when its file's document is live, and comes back as bytes: the remedy for a `doc
 `rdr__` chunk is re-indexing the owning file, not a re-put. It writes nothing, and reports
 `superseded` with a reason, when the document is stamped complete (its manifest is verified and
 authoritative, so a manifest-less chunk of it is stale, a document emptied on purpose included), is
-in the middle of an index run, was cut from another content hash, already holds a chunk at that
+in the middle of an index run or its last index run failed (a partial manifest), was cut from another content hash, already holds a chunk at that
 position, has the position past its registered chunk count or manifest rows under another
 collection, or when another stored chunk, in the collection or in the quarantine sibling, names the
 same document and position (judged against what is stored, so two versions split across pages or
