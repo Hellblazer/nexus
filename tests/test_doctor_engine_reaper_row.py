@@ -151,6 +151,70 @@ def test_the_clock_the_row_reads_is_the_one_it_was_given() -> None:
     assert r.ok is True and not r.warn
 
 
+# ── alive but doing nothing (nexus-wbfpw.55 round 2, critique S4a) ─────────────────────────────────────────
+
+
+def _with_pass(visited: int, errored: int, refused: int, *, last: timedelta = timedelta(minutes=10)) -> dict:
+    body = _status(last=last)
+    body["reaper"]["last_pass"] = {"tenants_visited": visited, "tenants_errored": errored,
+                                   "tenants_refused": refused}
+    return body
+
+
+def test_a_recent_pass_where_every_tenant_was_refused_warns_that_the_reaper_is_alive_but_doing_nothing() -> None:
+    r = _row(_with_pass(2, 0, 2))
+    assert r.ok is False and r.warn is True and not r.fatal
+    assert "alive" in r.detail and "every tenant" in r.detail and "2 refused" in r.detail
+    assert "10 minutes ago" in r.detail
+    fixes = " ".join(r.fix_suggestions)
+    assert "nx upgrade" in fixes, "a refused tenant has no verified backfill record: the remedy is named"
+    assert "docs/operations/engine-reaper.md" in fixes
+
+
+def test_a_recent_pass_where_every_tenant_errored_warns_and_points_at_the_engine_log() -> None:
+    r = _row(_with_pass(1, 1, 0))
+    assert r.ok is False and r.warn is True
+    assert "1 errored" in r.detail
+    assert "reaper_tenant_failed" in " ".join(r.fix_suggestions)
+    assert "reaper_collection_failed" in " ".join(r.fix_suggestions)
+
+
+def test_a_mix_of_refused_and_errored_tenants_with_no_success_warns_and_counts_both() -> None:
+    r = _row(_with_pass(3, 1, 2))
+    assert r.warn is True and "1 errored" in r.detail and "2 refused" in r.detail
+
+
+def test_one_tenant_that_worked_keeps_the_row_green_even_beside_refused_ones() -> None:
+    r = _row(_with_pass(3, 1, 1))
+    assert r.ok is True and not r.warn
+    assert "last completed pass" in r.detail
+
+
+def test_a_pass_that_visited_no_tenant_is_not_alive_but_refusing_because_there_was_nothing_to_refuse() -> None:
+    r = _row(_with_pass(0, 0, 0))
+    assert r.ok is True and not r.warn
+
+
+def test_an_engine_that_sends_no_pass_summary_is_judged_on_the_time_alone() -> None:
+    r = _row(_status(last=timedelta(minutes=10)))
+    assert r.ok is True and not r.warn
+
+
+def test_a_pass_summary_the_row_cannot_read_is_ignored_rather_than_a_crash() -> None:
+    for summary in (None, "refused", [], {"tenants_visited": "many"}, {"tenants_visited": 2},
+                    {"tenants_visited": True, "tenants_errored": 1, "tenants_refused": 1}):
+        body = _status(last=timedelta(minutes=10))
+        body["reaper"]["last_pass"] = summary
+        r = _row(body)
+        assert r.ok is True and not r.warn, summary
+
+
+def test_a_stale_pass_is_reported_as_stale_before_any_summary_is_read() -> None:
+    body = _with_pass(2, 0, 2, last=timedelta(hours=9))
+    r = _row(body)
+    assert r.warn is True and "9 hours ago" in r.detail and "may be dead" in r.detail
+
+
 # ── wiring ───────────────────────────────────────────────────────────────────
 
 

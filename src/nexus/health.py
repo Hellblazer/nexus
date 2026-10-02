@@ -3956,6 +3956,22 @@ def _instant(value: object) -> datetime | None:
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
 
 
+def _reaper_did_nothing(last_pass: object) -> tuple[int, int, int] | None:
+    """``(visited, errored, refused)`` when the engine's last completed pass visited tenants and none of them
+    succeeded, else None (including every body the row cannot read: no summary, a non-dict, a missing or non-int
+    count, a bool). The engine counts a tenant refused when the backfill gate kept it out whole and errored when the
+    tenant, one of its collections or one of its quarantine siblings threw; a tenant that is neither was worked on."""
+    if not isinstance(last_pass, dict):
+        return None
+    counts = [last_pass.get(k) for k in ("tenants_visited", "tenants_errored", "tenants_refused")]
+    if any(not isinstance(n, int) or isinstance(n, bool) or n < 0 for n in counts):
+        return None
+    visited, errored, refused = counts
+    if visited > 0 and errored + refused >= visited:
+        return visited, errored, refused
+    return None
+
+
 def _check_engine_reaper(
     engine_status: object = _ENGINE_STATUS_UNSET, *, now: datetime | None = None,
 ) -> list[HealthResult]:
@@ -3966,6 +3982,11 @@ def _check_engine_reaper(
     has no engine log, so the engine reports the time of its last COMPLETED pass under ``reaper`` in
     ``GET /v1/status`` (a pass that died does not move it). This row warns when that time is older than
     three of the engine's own intervals plus the length a pass may take.
+
+    A pass completes whatever its tenants did, so a recent time alone does not prove the reaper is working: the
+    engine also reports ``reaper.last_pass`` (``tenants_visited`` / ``tenants_errored`` / ``tenants_refused``), and
+    a recent pass that visited tenants where every one was refused or errored warns "alive but doing nothing"
+    (nexus-wbfpw.55 round 2). An engine that sends no summary is judged on the time alone.
 
     Not applicable (ok, no warning) when the engine cannot be reached (a virgin box), when it predates the
     field, when its reaper is not running, and when the body cannot be read, so nothing on a box with no
@@ -4040,6 +4061,24 @@ def _check_engine_reaper(
         return _na("the engine's last-pass time could not be read")
     age = max(0.0, (now - last).total_seconds())
     if age <= limit:
+        idle = _reaper_did_nothing(reaper.get("last_pass"))
+        if idle is not None:
+            visited, errored, refused = idle
+            parts = [f"{n} {what}" for n, what in ((errored, "errored"), (refused, "refused")) if n]
+            return [HealthResult(
+                label=label, ok=False, warn=True,
+                detail=(f"alive but doing nothing: the last completed pass, {_span(age)} ago, visited "
+                        f"{visited} tenant{'s' if visited != 1 else ''} and every tenant was refused or errored "
+                        f"({', '.join(parts)}), so no chunk was examined{failed_note}"),
+                fix_suggestions=[
+                    *(["A refused tenant has no verified RDR-192 backfill record (BACKFILL_INCOMPLETE): run "
+                       "`nx upgrade` against the tenant"] if refused else []),
+                    *(["An errored tenant: read the engine log for event=reaper_tenant_failed and "
+                       "event=reaper_collection_failed (a permission or grants regression errors every "
+                       "collection and the pass still completes)"] if errored else []),
+                    "docs/operations/engine-reaper.md: the refusal table, the settings and what a pass does",
+                ],
+            )]
         return [HealthResult(
             label=label, ok=True,
             detail=f"last completed pass {_span(age)} ago (interval {_span(interval)}){failed_note}",

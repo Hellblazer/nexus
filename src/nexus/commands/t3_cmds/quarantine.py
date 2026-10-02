@@ -54,8 +54,10 @@ _BATCH = 1000
 #: reattach refused or was switched off): the bytes are in the collection and nothing shows them,
 #: which is the round-1 defect a script must be able to see. 1 wins when both hold. 4 and 5
 #: mirror ``nx t3 census-manifest-less``: the engine predates the route, or answered with an
-#: error. 6 is the engine's typed retryable ``quarantine_restore_busy``: that call rolled back
-#: whole and the same command may be run again.
+#: error. 6 is the engine's typed retryable ``quarantine_restore_busy``: a lock or statement bound
+#: tripped and the same command may be run again. Each quarantine sibling restores in its own
+#: transaction, so "nothing moved" holds only when the trip was on the first one: the engine says
+#: so (``nothing_moved``) and names the audit rows an earlier sibling had already written.
 EXIT_UNRESTORED = 1
 EXIT_HIDDEN = 3
 EXIT_NO_ROUTE = 4
@@ -402,6 +404,13 @@ def _render_text(origin: str, siblings: list[str], dry_run: bool, reattach: bool
                 "(30 days after the restore); an owner row by then keeps them.")
 
 
+def _audit_ids_of(exc: Exception) -> list[int]:
+    """The ``quarantine_restore`` audit rows the engine's busy 503 says an earlier sibling had already written."""
+    body = getattr(exc, "engine_body", None)
+    ids = body.get("audit_ids") if isinstance(body, dict) else None
+    return [int(a) for a in ids if isinstance(a, int) and not isinstance(a, bool)] if isinstance(ids, list) else []
+
+
 def _error_for(exc: Exception, pages_done: int) -> tuple[str, int]:
     """The operator's message and exit code for a failure of the engine call, never a traceback."""
     from nexus.db.http_vector_client import VectorServiceError  # noqa: PLC0415 — command-local import deferred to avoid CLI startup cost (nexus.db.http_vector_client)
@@ -418,8 +427,21 @@ def _error_for(exc: Exception, pages_done: int) -> tuple[str, int]:
                 "nexus-2x9xa): the connected engine predates it. Upgrade the engine (compare its "
                 "version against REQUIRED_ENGINE_VERSION in src/nexus/engine_version.py)."), EXIT_NO_ROUTE
     if exc.code == 503 and exc.reason == QUARANTINE_RESTORE_BUSY_REASON:
-        return (f"quarantine restore: the engine was busy ({exc}). That call rolled back whole: nothing moved, "
-                f"was attached or audited. Wait a few seconds and run the same command again.{after}"), EXIT_BUSY
+        engine = exc.engine_body if isinstance(exc.engine_body, dict) else {}
+        committed = engine.get("nothing_moved") is False
+        if committed:
+            audit = _audit_ids_of(exc)
+            moved = engine.get("moved_chashes")
+            n = len(moved) if isinstance(moved, list) else 0
+            rows = f" (gc_audit {', '.join(str(a) for a in audit)})" if audit else ""
+            return (f"quarantine restore: the engine was busy ({exc}). Part of this call was already committed: "
+                    f"{n} chunk{'s' if n != 1 else ''} restored or attached by an earlier quarantine sibling{rows}; "
+                    "the sibling that was busy and any after it were not touched. Wait a few seconds and run the "
+                    "same command again: what is done reads present, the rest is restored."
+                    f"{after}"), EXIT_BUSY
+        return (f"quarantine restore: the engine was busy ({exc}). That call rolled back: nothing moved, was attached "
+                f"or audited (no earlier quarantine sibling had committed). Wait a few seconds and run the same "
+                f"command again.{after}"), EXIT_BUSY
     # The engine names its request fields; the operator types flags.
     said = str(exc).replace("quarantined_since / quarantined_before", "--quarantined-since / --quarantined-before")
     return f"quarantine restore refused by the engine: {said}{after}", EXIT_ENGINE_ERROR
@@ -504,8 +526,11 @@ def restore_cmd(collection: str, chashes: tuple[str, ...], audit_id: int | None,
          JSON document carries the count as "hidden".
       4  the connected engine predates the restore route; upgrade it.
       5  the engine refused the request or failed (the message says why).
-      6  the engine was busy (a manifest writer held the collection's lock): that
-         call rolled back whole, nothing moved; run the same command again.
+      6  the engine was busy (a manifest writer held a lock): the statement that
+         was busy rolled back; run the same command again. Each quarantine
+         collection is restored in its own transaction, so the message says whether
+         an earlier one had already committed (and its gc_audit ids); a chunk that
+         was restored reads present on the rerun.
       A failure after the first page still prints the report of the pages already
       committed, with their audit ids, before exiting 4, 5 or 6.
 
@@ -538,6 +563,7 @@ def restore_cmd(collection: str, chashes: tuple[str, ...], audit_id: int | None,
     source: dict | None = None
     pages_done = 0
     failure: tuple[str, int] | None = None
+    busy_detail: dict[str, Any] = {}
     try:
         for page in _pages(client, collection, chashes=normalised, audit_id=audit_id,
                            since=since_iso, before=before_iso, dry_run=dry_run, reattach=reattach,
@@ -560,6 +586,13 @@ def restore_cmd(collection: str, chashes: tuple[str, ...], audit_id: int | None,
             pages_done += 1
     except Exception as exc:  # noqa: BLE001 — every engine failure is reported with what was committed before it
         failure = _error_for(exc, pages_done)
+        # A busy trip on a later quarantine sibling leaves the earlier ones committed: their audit rows are part of
+        # what this run did, so the report carries them beside the pages that completed.
+        audit_ids.extend(a for a in _audit_ids_of(exc) if a not in audit_ids)
+        busy_body = getattr(exc, "engine_body", None)
+        if isinstance(busy_body, dict) and getattr(exc, "reason", None) == QUARANTINE_RESTORE_BUSY_REASON:
+            busy_detail = {"nothing_moved": busy_body.get("nothing_moved"),
+                           "moved_chashes": busy_body.get("moved_chashes") or []}
 
     reapable = sorted(((_parse_instant(r["reapable_after"]), r["reapable_after"]) for r in rows
                        if r.get("outcome") == "restored" and r.get("no_manifest") and r.get("reapable_after")),
@@ -587,7 +620,8 @@ def restore_cmd(collection: str, chashes: tuple[str, ...], audit_id: int | None,
             "rows": rows,
         }
         if failure:
-            doc["error"] = {"message": failure[0], "exit_code": failure[1], "pages_committed": pages_done}
+            doc["error"] = {"message": failure[0], "exit_code": failure[1], "pages_committed": pages_done,
+                            **busy_detail}
         click.echo(json.dumps(doc, indent=2))
     else:
         if rows or not failure:

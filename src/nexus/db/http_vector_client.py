@@ -1716,6 +1716,7 @@ def _post(path: str, body: dict, *, tenant: str = "default", timeout: int = 120)
             msg += f"\n{remedy}"
         raise VectorServiceError(
             msg, code=e.code, edge_refusal=bool(edge_server), reason=error_reason(err),
+            engine_body=err if isinstance(err, dict) else None,
         ) from e
     except (urllib.error.URLError, ConnectionError, TimeoutError) as e:
         # Connection-level failure (bad/unreachable endpoint). Reframe with a
@@ -1811,6 +1812,7 @@ def _get(path: str, *, tenant: str = "default") -> Any:
             msg += f"\n{remedy}"
         raise VectorServiceError(
             msg, code=e.code, edge_refusal=bool(edge_server), reason=error_reason(err),
+            engine_body=err if isinstance(err, dict) else None,
         ) from e
     except (urllib.error.URLError, ConnectionError, TimeoutError) as e:
         remedy = _managed_remedy()
@@ -1963,9 +1965,16 @@ class VectorServiceError(RuntimeError):
         code: int | None = None,
         edge_refusal: bool = False,
         reason: str | None = None,
+        engine_body: dict | None = None,
     ) -> None:
         super().__init__(message)
         self.code = code
+        #: The engine's decoded error body when it sent a JSON object, else
+        #: ``None``. A typed error carries fields beyond ``reason`` that a caller
+        #: acts on (``nothing_moved`` / ``audit_ids`` on the restore verb's
+        #: ``quarantine_restore_busy`` 503, nexus-wbfpw.55); a caller reads them
+        #: with ``.get`` since an older engine sends none of them.
+        self.engine_body = engine_body
         #: nexus-bgvnx: the engine's stable machine-readable ``reason`` from a
         #: typed error body (``unregistered_collection`` on the 422 for a
         #: collection with no catalog row); ``None`` when the body carried
@@ -3943,8 +3952,11 @@ class HttpVectorClient:
         Raises :class:`VectorServiceError` (``code=404`` on an engine that
         predates the route, ``400`` for a refused request such as a sample-only
         audit row, ``422`` for an unregistered collection, ``503`` with
-        ``reason == "quarantine_restore_busy"`` when a manifest writer held the
-        collection's lock: that call rolled back whole and may be sent again).
+        ``reason == "quarantine_restore_busy"`` when a manifest writer held a lock:
+        the busy statement rolled back and the call may be sent again. Each
+        quarantine sibling is its own transaction, so ``engine_body["nothing_moved"]``
+        is False, with ``audit_ids`` and ``moved_chashes``, when an earlier sibling
+        had already committed).
         """
         body: dict = {"origin_collection": origin_collection}
         for key, value in (

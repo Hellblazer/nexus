@@ -95,6 +95,25 @@ class TestWire:
                           "quarantined_since": "2026-09-01T00:00:00Z",
                           "quarantined_before": "2026-09-08T00:00:00Z", "after_chash": _chash("z")}
 
+    def test_a_busy_503_carries_the_engines_body_so_the_cli_can_say_what_an_earlier_sibling_committed(self) -> None:
+        import io
+        import urllib.error
+
+        body = {"error": "held; an earlier quarantine sibling of this call had already committed",
+                "reason": "quarantine_restore_busy", "retry_after_seconds": 5, "nothing_moved": False,
+                "audit_ids": [91], "moved_chashes": [_chash("a")]}
+        err = urllib.error.HTTPError("http://engine/x", 503, "busy", {}, io.BytesIO(_json.dumps(body).encode()))
+        client = HttpVectorClient.__new__(HttpVectorClient)
+        client._tenant = "t"
+        with patch("nexus.db.service_endpoint.guard_production_write"), \
+             patch.object(hv, "_resolve_endpoint", return_value=("http://engine", None)), \
+             patch.object(hv, "_request", side_effect=err), \
+             pytest.raises(VectorServiceError) as raised:
+            client.gc_quarantine_restore(ORIGIN, chashes=[_chash("a")])
+        assert raised.value.code == 503 and raised.value.reason == "quarantine_restore_busy"
+        assert raised.value.engine_body["nothing_moved"] is False
+        assert raised.value.engine_body["audit_ids"] == [91]
+
     def test_the_route_is_a_write_and_is_never_auto_retried(self) -> None:
         path = "/v1/vectors/gc/quarantine-restore"
         assert any(path.endswith(s) for s in hv._T3_WRITE_PATH_SUFFIXES), \
@@ -461,6 +480,43 @@ class TestCli:
         # A 503 that is NOT the typed busy answer is still an engine failure.
         other = _run(runner, _Stub(error=VectorServiceError("bad gateway", code=503)), "--chash", _chash("a"))
         assert other.exit_code == t3_quarantine.EXIT_ENGINE_ERROR, other.output
+
+    def test_a_busy_trip_after_an_earlier_sibling_committed_does_not_say_nothing_moved(self, runner) -> None:
+        # nexus-wbfpw.55 round 2: each quarantine sibling is its own transaction on the engine, so the busy answer
+        # is "nothing moved" only when no earlier sibling had committed.
+        busy = VectorServiceError(
+            "a manifest writer holds the lock; an earlier quarantine sibling of this call had already committed",
+            code=503, reason="quarantine_restore_busy",
+            engine_body={"nothing_moved": False, "audit_ids": [91, 92], "moved_chashes": [_chash("a")]})
+        result = _run(runner, _Stub(error=busy), "--chash", _chash("a"), "--chash", _chash("b"))
+
+        assert result.exit_code == t3_quarantine.EXIT_BUSY, result.output
+        assert "busy" in result.output and "again" in result.output
+        assert "nothing moved" not in result.output and "rolled back whole" not in result.output
+        assert "Part of this call was already committed" in result.output
+        assert "gc_audit 91, 92" in result.output and "1 chunk" in result.output
+        assert "reads present" in result.output, "the operator is told the rerun is safe and what it will show"
+
+    def test_a_busy_trip_with_nothing_committed_still_says_nothing_moved_even_with_an_empty_audit_list(
+            self, runner) -> None:
+        busy = VectorServiceError("held; nothing was moved, attached or audited", code=503,
+                                  reason="quarantine_restore_busy",
+                                  engine_body={"nothing_moved": True, "audit_ids": [], "moved_chashes": []})
+        result = _run(runner, _Stub(error=busy), "--chash", _chash("a"))
+        assert result.exit_code == t3_quarantine.EXIT_BUSY
+        assert "nothing moved" in result.output and "Part of this call" not in result.output
+
+    def test_the_json_error_carries_the_audit_ids_an_earlier_sibling_wrote(self, runner) -> None:
+        busy = VectorServiceError("held", code=503, reason="quarantine_restore_busy",
+                                  engine_body={"nothing_moved": False, "audit_ids": [91],
+                                               "moved_chashes": [_chash("a")]})
+        result = _run(runner, _Stub(error=busy), "--chash", _chash("a"), "--chash", _chash("b"), "--json")
+
+        assert result.exit_code == t3_quarantine.EXIT_BUSY, result.output[-500:]
+        doc = _doc(result.stdout)
+        assert doc["audit_ids"] == [91], "the audit rows an earlier sibling wrote are in the document"
+        assert doc["error"]["nothing_moved"] is False
+        assert doc["error"]["moved_chashes"] == [_chash("a")]
 
     def test_a_failure_on_a_later_page_still_reports_what_the_earlier_pages_committed(self, runner) -> None:
         hs = [_chash(str(i)) for i in range(1500)]
