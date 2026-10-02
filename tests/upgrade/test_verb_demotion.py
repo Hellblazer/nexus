@@ -107,8 +107,8 @@ def test_collection_backfill_hash_is_deleted_not_demoted(runner: CliRunner) -> N
     """RDR-223 P3 follow-up: ``nx collection backfill-hash`` called ``col.upsert`` on a
     collection handle, and the service-backed handle (``_ServiceCollectionStub``) has no
     ``upsert`` (the same defect class that deleted ``nx t3 reidentify``). In the PG era the chunk
-    id IS the chash, so there is no ``chunk_text_hash`` metadata to repair, and an upsert there
-    would be an ownerless write the engine refuses. Invoking it must fail as an unknown command."""
+    id IS the chash, so there is no ``chunk_text_hash`` metadata to repair; the verb raised
+    ``AttributeError`` on every real install. Invoking it must fail as an unknown command."""
     assert "backfill-hash" not in _help(runner, "collection")
     result = runner.invoke(main, ["collection", "backfill-hash", "--help"])
     assert result.exit_code != 0

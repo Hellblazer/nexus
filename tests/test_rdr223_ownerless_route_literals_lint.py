@@ -96,8 +96,14 @@ def _docstring_ids(tree: ast.AST) -> set[int]:
 
 def _fold(node: ast.AST) -> str | None:
     """The string an expression builds, with ``_UNKNOWN`` for parts it cannot resolve, or None when
-    the expression is not string-shaped. Folds ``"a" + "b"`` and f-strings, which a lint that looks
-    only at ``ast.Constant`` nodes misses (a split literal reaches the route unseen)."""
+    the expression is not string-shaped. Folds ``"a" + "b"``, which a lint that looks only at
+    ``ast.Constant`` nodes misses (a split literal reaches the route unseen).
+
+    There is deliberately NO f-string branch. A route inside an f-string sits in one of the f-string's
+    literal parts, and those are ``ast.Constant`` nodes the walk already visits; a route cannot span a
+    ``{...}`` hole. A ``JoinedStr`` fold therefore never flagged a file the child Constants did not
+    (round 2 mutation check: with it dropped every fixture below still flags the same files) and only
+    raised the hit count of a file it flagged anyway."""
     if isinstance(node, ast.Constant):
         return node.value if isinstance(node.value, str) else None
     if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
@@ -105,10 +111,6 @@ def _fold(node: ast.AST) -> str | None:
         if left is None and right is None:
             return None
         return (left if left is not None else _UNKNOWN) + (right if right is not None else _UNKNOWN)
-    if isinstance(node, ast.JoinedStr):
-        return "".join(
-            v.value if isinstance(v, ast.Constant) and isinstance(v.value, str) else _UNKNOWN for v in node.values
-        )
     return None
 
 
@@ -122,7 +124,7 @@ def _python_hits(path: Path) -> int:
     for n in ast.walk(tree):
         if id(n) in doc:
             continue
-        folded = _fold(n) if isinstance(n, (ast.Constant, ast.BinOp, ast.JoinedStr)) else None
+        folded = _fold(n) if isinstance(n, (ast.Constant, ast.BinOp)) else None
         if folded is not None and _ROUTE.search(folded):
             hits += 1
         elif isinstance(n, ast.Call):
@@ -188,17 +190,22 @@ def test_the_scan_is_not_vacuous() -> None:
 
 
 def test_a_split_or_formatted_route_literal_is_seen(tmp_path: Path) -> None:
-    """The mutants a Constant-only walk let through: a route built by ``+`` or in an f-string."""
+    """A route built by ``+`` (a Constant-only walk misses it), a route in an f-string (seen through its
+    literal part), and a relative route after a part the fold cannot resolve (the ``\\x00`` alternative)."""
     tests = tmp_path / "tests"
     tests.mkdir()
     (tests / "test_split.py").write_text('URL = "/v1/vectors/" + "upsert-chunks"\n')
     (tests / "test_split3.py").write_text('def u(base):\n    return base + "/v1/vectors/upsert-" + "chunks"\n')
     (tests / "test_fstring.py").write_text('def u(h):\n    return f"{h}/v1/vectors/store-put"\n')
     (tests / "test_handler_relative.py").write_text('def u(p):\n    return p + "/upsert-chunks"\n')
+    # Reachable ONLY through the ``\x00`` alternative of ``_ROUTE``: no Constant is the route, and the
+    # fold is ``<unknown>/upsert-chunks``, a relative route after a part the fold could not resolve.
+    (tests / "test_relative_split.py").write_text('def u(p):\n    return p + "/upsert-" + "chunks"\n')
     (tests / "test_clean.py").write_text('URL = "/v1/vectors/" + "search"\nDOC = f"{1}/v1/catalog/x"\n')
     found = _scan(repo=tmp_path.resolve(), me=Path("/nonexistent/me.py"))
     assert set(found) == {
         "tests/test_split.py", "tests/test_split3.py", "tests/test_fstring.py", "tests/test_handler_relative.py",
+        "tests/test_relative_split.py",
     }
 
 

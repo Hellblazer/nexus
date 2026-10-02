@@ -193,10 +193,13 @@ written in the same transaction as at least one owner row, so a client never
 needs two requests to make a chunk owned. The rule is enforced for those
 routes (the combined write routes, and the refusal on `upsert-chunks` and
 `store-put`), not for every insert the engine can perform. Known exceptions:
-the SQL chunk inserters in the gc restore and quarantine changesets
-(catalog-023, 028, 033, 037, 039, 042, 043; hygiene-002, 005, 008), and the
-quarantine restore verb planned under nexus-wbfpw.49 (RDR-192), which restores
-ownerless chunks by design.
+the four SQL functions that insert into `nexus.chunks`, at their live
+definitions: `gc_quarantine_orphans` (hygiene-005), `gc_quarantine_orphans_bounded`
+(hygiene-008), `gc_restore_rereferenced` and `gc_restore_rereferenced_bounded`
+(catalog-043); the earlier definitions of the same four (catalog-023, 024, 028,
+033, 037, 039, 042; hygiene-002; vectors-005) were replaced in place and are not
+live. The quarantine restore verb planned under nexus-wbfpw.49 (RDR-192) is the
+other, and restores ownerless chunks by design.
 
 ### Technical Design
 
@@ -356,7 +359,7 @@ ownerless chunks by design.
      `source_path`, `title` and `source_agent`, 120 characters each). The line is
      rate limited to one per route, tenant and collection per minute, with the number
      suppressed since the last; the counters are not limited. The client names
-     itself in `X-Nexus-Client-Version` on every vector-client, T2, catalog and scratch request (not the hook calls or the status probe); the log records
+     itself in `X-Nexus-Client-Version` through the shared client classes (the vector client, the T2 stores, the catalog client, the token store and the scratch store; not the hook calls or the status, version and health probes); the log records
      `absent` when it is missing, which marks a client older than the release that
      sends it. The `User-Agent` cannot do that job (`Python-urllib/3.12` or
      `python-httpx/0.28`: the transport, not the product).
