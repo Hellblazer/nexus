@@ -576,8 +576,8 @@ def gc_cmd(
         click.echo(
             f"  {len(incomplete_docs)} document(s) in {collection!r} are "
             f"not index_state='complete' ({_states}). That blocks a move until they "
-            f"resolve or --allow-incomplete-index-state is passed (nexus-g6k6b); it does "
-            f"not block the quarantine expiry."
+            f"resolve or --allow-incomplete-index-state is passed (nexus-g6k6b); a run "
+            f"with nothing to move is not blocked and goes straight to the quarantine expiry."
         )
 
     # RDR-192 R8 (nexus-wbfpw.18): the census is read on EVERY run, immediately before acting. A
