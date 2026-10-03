@@ -3876,9 +3876,13 @@ class HttpVectorClient:
     ) -> dict:
         """POST /v1/vectors/gc/expire-quarantine.
 
-        Returns ``{"expired": N, "refused": M}`` — the nexus-mr89x safety
-        floor (see catalog-023 changelog): ``refused > 0`` means the floor
-        fired and nothing was deleted this call.
+        Returns ``{"expired": N, "refused": M}``. ``refused`` counts the chunks
+        the origin's manifest still references (kept always, ``force`` does not
+        reach them); when the floor fires (``expired`` rows >= ``floor_min_chunks``
+        and their fraction of the sibling's client rows > ``floor_fraction``, no
+        ``force``) the whole eligible set is refused and ``expired`` is 0. The
+        client's own callers send ``floor_fraction=1.0`` (nexus-wbfpw.74), which
+        can never fire it.
         """
         return _post(
             "/v1/vectors/gc/expire-quarantine",

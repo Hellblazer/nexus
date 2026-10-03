@@ -19,9 +19,14 @@ Lifecycle per GC pass (wired in ``indexer._prune_deleted_files``):
    churn from a big ``git pull`` proceeds silently instead of warning
    forever (the nexus-mr89x refusal nag this module retires).
 3. **Expire** — quarantine rows older than ``NX_GC_QUARANTINE_DAYS``
-   (default 14) hard-delete. The mr89x safety floor applies HERE only: a
-   mass hard-delete surviving a full grace window means a manifest defect
-   persisted for weeks — the one case that should still be loud.
+   (default 14) hard-delete. NO fraction floor here either (nexus-wbfpw.74,
+   Sam 2026-10-03), matching the engine's own expiry: the engine function
+   (``nexus.gc_expire_quarantine``) already keeps every chash the origin's
+   manifest still references, so the one case a floor guarded (a manifest
+   loss persisting for the whole grace window) is covered row by row, while
+   a floor wedged every bulk quarantine, because one burst ages out as ~100%
+   of the sibling's client rows. ``NX_GC_FLOOR_FRACTION`` / ``NX_GC_FORCE``
+   govern ``nx t3 gc``'s own move into quarantine and nothing on this path.
 
 First concrete piece of the RDR-156 soft-delete theme (nexus-70r3c).
 """
@@ -547,12 +552,12 @@ def restore_rereferenced_across_serverside(
 
 def expire_quarantine_across_serverside(
     db: Any, siblings: list[str], origin_name: str, cutoff: str,
-    *, floor_fraction: float, floor_min_chunks: int, force: bool = False, best_effort: bool = False,
+    *, best_effort: bool = False,
 ) -> tuple[int, int] | None:
     """:func:`expire_quarantine_serverside` over every sibling in *siblings*,
-    summed ``(expired, refused)``. ``None`` when the client object has no expiry
-    capability. The mr89x floor is judged by the engine per sibling, on that
-    sibling's own eligible rows, exactly as it was when one sibling was assumed.
+    summed ``(expired, refused)``; ``refused`` is the chunks the origin's
+    manifest still references, kept. ``None`` when the client object has no
+    expiry capability.
 
     With ``best_effort`` a :class:`VectorServiceError` or ``OSError`` (a
     local-mode transport failure) on any sibling after the
@@ -567,7 +572,6 @@ def expire_quarantine_across_serverside(
         try:
             result = expire_quarantine_serverside(
                 db, sibling, origin_name, cutoff,
-                floor_fraction=floor_fraction, floor_min_chunks=floor_min_chunks, force=force,
             )
         except (VectorServiceError, OSError) as exc:  # OSError: local-mode transport failures arrive bare
             if not (best_effort and i):
@@ -584,17 +588,30 @@ def expire_quarantine_across_serverside(
     return expired, refused
 
 
+#: The request the client's expiry sends in place of a floor (nexus-wbfpw.74). The engine's own test is
+#: ``v_expired >= p_floor_min_chunks AND v_frac > p_floor_fraction AND NOT p_force`` with ``v_frac`` in
+#: (0, 1], so a fraction of 1.0 can never trip it. Chosen over ``force=True``: the engine records no
+#: ``force`` in its ``gc_audit`` row either way, but ``force`` reads as an override of a floor that is not
+#: there, and would also stay an operator-visible knob on a path that has no gate to override. The route
+#: still takes both fields, so they are sent, pinned to values that make the floor inert.
+_NO_EXPIRY_FLOOR_FRACTION = 1.0
+_NO_EXPIRY_FLOOR_MIN_CHUNKS = 100
+
+
 def expire_quarantine_serverside(
     db: Any, quarantine_name: str, origin_name: str, cutoff: str,
-    *, floor_fraction: float, floor_min_chunks: int, force: bool = False,
 ) -> tuple[int, int] | None:
-    """Try the server-side grace-window expiry. ``(expired, refused)`` or
-    ``None`` if the route is unavailable (caller falls back to
-    :func:`expire_quarantine`)."""
+    """The server-side grace-window expiry, with no fraction floor (see the
+    module docstring, step 3). ``(expired, refused)`` — ``refused`` is the chunks
+    the origin's manifest still references, kept — or ``None`` if the client has
+    no expiry route."""
     fn = getattr(db, "gc_expire_quarantine", None)
     if fn is None:
         return None
-    result = fn(quarantine_name, origin_name, cutoff, floor_fraction, floor_min_chunks, force)
+    result = fn(
+        quarantine_name, origin_name, cutoff,
+        _NO_EXPIRY_FLOOR_FRACTION, _NO_EXPIRY_FLOOR_MIN_CHUNKS, False,
+    )
     return int(result.get("expired", 0)), int(result.get("refused", 0))
 
 # _fetch_full, _upsert_full, quarantine_orphans, restore_rereferenced,

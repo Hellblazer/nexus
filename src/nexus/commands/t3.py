@@ -299,8 +299,9 @@ def _census_blocker_reasons(collection: str, blockers: dict[str, int], *, prior:
 def _expire_client_quarantine(t3_db, collection: str, qname: str, *, moved: int) -> None:
     """The client expiry ``nx t3 gc`` runs after its own move (and on a run with nothing to move), as
     ``nx index repo`` runs it (``indexer._gc_serverside``): rows in the quarantine sibling past the
-    client cutoff (``NX_GC_QUARANTINE_DAYS``) that the engine's reaper did not tag, behind the same
-    ``NX_GC_FLOOR_FRACTION`` floor (``NX_GC_FORCE=1`` overrides). The verb runs it so a collection no
+    client cutoff (``NX_GC_QUARANTINE_DAYS``) that the engine's reaper did not tag, with no fraction floor
+    (nexus-wbfpw.74; the engine keeps every chunk the manifest still references, so ``NX_GC_FLOOR_FRACTION``
+    and ``NX_GC_FORCE`` govern this verb's move and not this expiry). The verb runs it so a collection no
     repo index sweeps (every ``knowledge__*``) still expires its own quarantine; without it nothing
     would ever expire what this verb moved. A failure is exit 1 after saying the move stands.
 
@@ -311,17 +312,14 @@ def _expire_client_quarantine(t3_db, collection: str, qname: str, *, moved: int)
     the origin's chunks (``resolve_quarantine_siblings(..., probe_engine=True)``; ``nx index repo`` uses the
     two derived names only, because the probe is an unindexed scan engine-side; nexus-wbfpw.64 moves the
     resolution into the engine and retires the probe). Each sibling is expired and reported on its own
-    line: the engine judges the floor per sibling, so one sibling's refusal and another's expiry are
-    both stated as what they are, never summed."""
+    line, so one sibling's kept chunks and another's expiry are each stated as what they are, never summed."""
     from nexus.catalog.chunk_quarantine import (  # noqa: PLC0415 — command-local import (nexus.catalog.chunk_quarantine)
         expire_quarantine_serverside,
         quarantine_days,
         resolve_quarantine_siblings,
     )
     from nexus.db.http_vector_client import VectorServiceError  # noqa: PLC0415 — command-local import (nexus.db.http_vector_client)
-    from nexus.indexer import _GC_FLOOR_MIN_CHUNKS, _gc_floor_fraction  # noqa: PLC0415 — command-local import (nexus.indexer is heavy)
 
-    force = os.environ.get("NX_GC_FORCE", "") == "1"
     cutoff = (datetime.now(UTC) - timedelta(days=quarantine_days())).strftime("%Y-%m-%dT%H:%M:%SZ")
     if getattr(t3_db, "gc_expire_quarantine", None) is None:
         click.echo(
@@ -335,7 +333,6 @@ def _expire_client_quarantine(t3_db, collection: str, qname: str, *, moved: int)
         try:
             expiry = expire_quarantine_serverside(
                 t3_db, sibling, collection, cutoff,
-                floor_fraction=_gc_floor_fraction(), floor_min_chunks=_GC_FLOOR_MIN_CHUNKS, force=force,
             )
         except VectorServiceError as exc:
             earlier = (
@@ -354,20 +351,9 @@ def _expire_client_quarantine(t3_db, collection: str, qname: str, *, moved: int)
             continue
         expired, refused = expiry
         done.append((sibling, expired))
-        # The engine's `refused` is two things: chunks the origin collection's manifest references
-        # again (kept always; FORCE does not reach them) plus, when the floor fires, the whole eligible
-        # set (the engine then reports expired = 0). The floor is judged per sibling on that sibling's
-        # own rows, so for ONE sibling expired > 0 means its floor did not fire and every refusal is a
-        # manifest keep; expired == 0 cannot tell the two apart.
-        if not refused:
-            why = ""
-        elif expired:
-            why = " (kept: the manifest references them again; NX_GC_FORCE=1 does not change that)"
-        else:
-            why = (
-                " (kept: the manifest references them again, or the NX_GC_FLOOR_FRACTION floor held the "
-                "whole expiry; NX_GC_FORCE=1 overrides only the floor)"
-            )
+        # The engine's `refused` is the chunks the origin collection's manifest references again, kept
+        # always. The client sends no floor (nexus-wbfpw.74), so a refusal on this path is never the floor.
+        why = " (kept: the manifest references them again)" if refused else ""
         click.echo(
             f"  Client expiry of {sibling} (older than {quarantine_days()} day(s), rows the engine's "
             f"reaper tagged excluded): {expired} expired, {refused} refused{why}."
@@ -460,8 +446,9 @@ def gc_cmd(
     moved. After its own move this verb runs the client expiry (as
     ``nx index repo`` does for a repo's code, docs and rdr collections): rows in
     the quarantine sibling older than ``NX_GC_QUARANTINE_DAYS`` (default 14) that
-    the engine's reaper did not tag are hard-deleted, behind the same
-    ``NX_GC_FLOOR_FRACTION`` floor (``NX_GC_FORCE=1`` overrides). That is how a
+    the engine's reaper did not tag are hard-deleted, except the chunks the
+    manifest references again. That expiry carries no fraction floor
+    (nexus-wbfpw.74). That is how a
     ``knowledge__*`` quarantine ever expires, since no repo index sweeps it. A
     chunk the engine's reaper moved (tagged ``quarantined_by``) is expired by the
     engine alone, on its own retention. A chunk whose document is re-registered
@@ -670,10 +657,10 @@ def gc_cmd(
     # moves with) carries no fraction floor; the reaper's floor lives inside reaper_quarantine_chunks,
     # which has no HTTP route, so no engine-side floor reaches this verb (and
     # indexer._prune_deleted_files moves through the same route with none at all). The variable is
-    # NX_GC_FLOOR_FRACTION (with NX_GC_FORCE), the name the indexer's quarantine-expiry floor already
-    # reads through the same fail-safe parser, the same default (0.25) and the same 100-chunk minimum:
-    # one name for the operator across the client GC floors. NX_REAPER_FLOOR_FRACTION is NOT reused:
-    # it configures the engine-side reaper, a different process whose environment a CLI invocation
+    # NX_GC_FLOOR_FRACTION (with NX_GC_FORCE), parsed by the indexer's fail-safe parser with the 0.25
+    # default and the 100-chunk minimum. It governs this move and nothing else: the client's expiry of
+    # quarantined rows has no floor (nexus-wbfpw.74), the engine keeps what the manifest references.
+    # NX_REAPER_FLOOR_FRACTION is NOT reused: it configures the engine-side reaper, a different process whose environment a CLI invocation
     # does not set, so honouring it here would make the floor follow a variable nobody exports.
     floor_fraction = _gc_floor_fraction()
     force = os.environ.get("NX_GC_FORCE", "") == "1"

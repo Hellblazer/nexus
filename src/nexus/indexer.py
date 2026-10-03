@@ -347,12 +347,13 @@ _LOCK_STALE_SECONDS = 5  # lock files older than this with no live PID are stale
 #: multi-page behaviour without a 1000+ file corpus.
 _CATALOG_REGISTER_PAGE = 1000
 
-#: nexus-mr89x: minimum orphan count before the GC safety floor can refuse a
-#: sweep. Below this, even a 100%-orphan verdict is small enough to be a
-#: plausible real cleanup (tiny collections, test corpora) and refusing
-#: would just nag; at/above it, a >floor-fraction verdict is the
+#: nexus-mr89x: minimum orphan count before `nx t3 gc`'s safety floor on the
+#: MOVE into quarantine can refuse a pass. Below this, even a 100%-orphan verdict
+#: is small enough to be a plausible real cleanup (tiny collections, test corpora)
+#: and refusing would just nag; at/above it, a >floor-fraction verdict is the
 #: manifest-gap misclassification shape. Pairs with NX_GC_FLOOR_FRACTION
 #: (default 0.25) and the NX_GC_FORCE=1 operator override at the check site.
+#: The client's EXPIRY of already-quarantined rows has no floor (nexus-wbfpw.74).
 _GC_FLOOR_MIN_CHUNKS = 100
 
 #: Default orphan-fraction floor. 0.25, NOT 0.5 (review e2423e3b Critical-2):
@@ -4149,19 +4150,17 @@ def _prune_collection_serverside(
             sample=sample, mode="quarantine-serverside",
         )
 
-    import os  # noqa: PLC0415 — deferred: branch-local, matches chunk_quarantine.py's own NX_GC_FORCE read
-    force = os.environ.get("NX_GC_FORCE", "") == "1"
     cutoff = (
         datetime.now(UTC) - timedelta(days=quarantine_days())
     ).strftime("%Y-%m-%dT%H:%M:%SZ")
-    # NX_GC_FLOOR_FRACTION gates THIS step, the hard delete of quarantined chunks
-    # past their window, and nothing before it: the move into quarantine above
-    # (gc_quarantine_orphans) has no fraction floor. The engine reaper's own move
-    # carries one (RDR-192 / nexus-2x9xa, NX_REAPER_FLOOR_FRACTION); this path does not.
+    # No fraction floor on the move above (gc_quarantine_orphans) and none on this
+    # expiry either (nexus-wbfpw.74): the engine function keeps every chunk the
+    # manifest still references, so the rows it deletes are the ones past the
+    # restore window that nothing owns. NX_GC_FLOOR_FRACTION / NX_GC_FORCE govern
+    # `nx t3 gc`'s own move only; the engine reaper's move carries
+    # NX_REAPER_FLOOR_FRACTION (RDR-192 / nexus-2x9xa).
     expired = expire_quarantine_across_serverside(
-        db, siblings, collection_name, cutoff,
-        floor_fraction=_gc_floor_fraction(), floor_min_chunks=_GC_FLOOR_MIN_CHUNKS,
-        force=force, best_effort=True,
+        db, siblings, collection_name, cutoff, best_effort=True,
     )
     if expired is None:
         _log.warning(

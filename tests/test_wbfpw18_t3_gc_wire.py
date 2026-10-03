@@ -788,7 +788,9 @@ def test_the_floor_compares_by_division_not_by_a_float_product(
 
 def test_the_act_runs_the_client_expiry_on_the_sibling_it_filled(runner, real_client, monkeypatch):
     """A knowledge__ collection is swept by no repo index, so without this call nothing would ever
-    expire what this verb moved. Same call, same cutoff rule, same floor parameters as the indexer's."""
+    expire what this verb moved. Same call and cutoff rule as the indexer's, and the same no-floor
+    request: nexus-wbfpw.74, the client's expiry carries no fraction floor (floor_fraction 1.0 can
+    never trip the engine's `v_frac > floor`), and never sends force."""
     monkeypatch.delenv("NX_GC_QUARANTINE_DAYS", raising=False)
     monkeypatch.delenv("NX_GC_FLOOR_FRACTION", raising=False)
     monkeypatch.delenv("NX_GC_FORCE", raising=False)
@@ -797,14 +799,18 @@ def test_the_act_runs_the_client_expiry_on_the_sibling_it_filled(runner, real_cl
     assert result.exit_code == 0, result.output
     (call,) = engine.expiries()
     assert call["quarantine_collection"] == _QUARANTINE and call["origin_collection"] == _COLL
-    assert call["floor_fraction"] == 0.25 and call["floor_min_chunks"] == 100 and call["force"] is False
+    assert call["floor_fraction"] == 1.0 and call["force"] is False
     from datetime import UTC, datetime, timedelta
     cutoff = datetime.strptime(call["cutoff"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
     assert abs((datetime.now(UTC) - timedelta(days=14)) - cutoff) < timedelta(minutes=5)
     assert "3 expired, 0 refused" in result.output
 
 
-def test_the_client_expiry_honours_the_gc_environment(runner, real_client, monkeypatch):
+def test_the_client_expiry_honours_the_retention_window_but_not_the_gc_floor_variables(
+    runner, real_client, monkeypatch,
+):
+    """NX_GC_QUARANTINE_DAYS still sets the cutoff. NX_GC_FLOOR_FRACTION and NX_GC_FORCE still govern the
+    verb's own move floor, but never reach the expiry request: it carries floor_fraction 1.0, force false."""
     monkeypatch.setenv("NX_GC_QUARANTINE_DAYS", "3")
     monkeypatch.setenv("NX_GC_FLOOR_FRACTION", "0.6")
     monkeypatch.setenv("NX_GC_FORCE", "1")
@@ -812,35 +818,23 @@ def test_the_client_expiry_honours_the_gc_environment(runner, real_client, monke
     result = _invoke(runner, real_client, engine, ["--no-dry-run", "--yes"])
     assert result.exit_code == 0, result.output
     (call,) = engine.expiries()
-    assert call["floor_fraction"] == 0.6 and call["force"] is True
+    assert call["floor_fraction"] == 1.0 and call["force"] is False
     from datetime import UTC, datetime, timedelta
     cutoff = datetime.strptime(call["cutoff"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
     assert abs((datetime.now(UTC) - timedelta(days=3)) - cutoff) < timedelta(minutes=5)
 
 
-def test_an_expiry_that_expired_nothing_names_both_things_that_can_refuse(runner, real_client, monkeypatch):
-    """expired = 0 with refused > 0 cannot tell a floor refusal from manifest keeps, so the line names
-    both and says FORCE overrides only the floor."""
+def test_a_refusal_is_a_manifest_keep_and_the_line_never_names_the_floor(runner, real_client, monkeypatch):
+    """On this path the engine's `refused` is only chunks the origin's manifest references again (kept
+    always). With expired = 0 or > 0 alike, the line says so and names neither the floor nor NX_GC_FORCE."""
     monkeypatch.delenv("NX_GC_FORCE", raising=False)
-    engine = _Engine(total=10, reapable=[1], expire={"expired": 0, "refused": 120})
-    result = _invoke(runner, real_client, engine, ["--no-dry-run", "--yes"])
-    assert result.exit_code == 0, result.output
-    assert "0 expired, 120 refused" in result.output
-    assert "the manifest references them again, or the NX_GC_FLOOR_FRACTION floor" in result.output
-    assert "NX_GC_FORCE=1 overrides only the floor" in result.output
-
-
-def test_a_refusal_next_to_an_expiry_is_a_manifest_keep_not_the_floor(runner, real_client, monkeypatch):
-    """The engine reports expired = 0 when the floor fires, so expired > 0 with refused > 0 means the
-    floor did not fire: those chunks were kept because the manifest references them again, which
-    NX_GC_FORCE does not change. The line must not blame the floor or offer FORCE for them."""
-    monkeypatch.delenv("NX_GC_FORCE", raising=False)
-    engine = _Engine(total=10, reapable=[1], expire={"expired": 4, "refused": 2})
-    result = _invoke(runner, real_client, engine, ["--no-dry-run", "--yes"])
-    assert result.exit_code == 0, result.output
-    assert "4 expired, 2 refused (kept: the manifest references them again" in result.output
-    assert "NX_GC_FORCE=1 does not change that" in result.output
-    assert "FLOOR_FRACTION floor" not in result.output.split("Client expiry of", 1)[1].split("\n", 1)[0]
+    for reply in ({"expired": 0, "refused": 120}, {"expired": 4, "refused": 2}):
+        engine = _Engine(total=10, reapable=[1], expire=reply)
+        result = _invoke(runner, real_client, engine, ["--no-dry-run", "--yes"])
+        assert result.exit_code == 0, result.output
+        line = result.output.split("Client expiry of", 1)[1].split("\n", 1)[0]
+        assert f"{reply['expired']} expired, {reply['refused']} refused (kept: the manifest references them again)" in line
+        assert "FLOOR" not in line and "FORCE" not in line
 
 
 def test_a_failed_expiry_after_a_good_move_exits_one_and_says_the_move_stands(runner, real_client):
