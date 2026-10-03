@@ -1228,6 +1228,26 @@ def cmd_promote(ctx: Ctx, a: argparse.Namespace) -> None:
     _emit(out)
 
 
+def _read_card_stdin() -> str:
+    """The card text from stdin: {"voice_card": "<text>"}, a JSON string, or the plain text itself.
+
+    A card is one string, so plain text is unambiguous; the live check at 858d959df saw a model write it that way
+    first (nexus-ger02.7). Anything that parses as JSON but is not a string or that one-key object is refused.
+    """
+    if sys.stdin.isatty():
+        raise UserError("voice-card: expected the card on stdin but stdin is a terminal; pipe it in")
+    raw = sys.stdin.read()
+    try:
+        body: Any = json.loads(_unfence(raw))
+    except ValueError:
+        body = raw
+    if isinstance(body, dict) and set(body) == {"voice_card"}:
+        body = body["voice_card"]
+    if not isinstance(body, str) or not body.strip():
+        raise UserError('voice-card: expected the card text, or {"voice_card": "<text>"}: one non-empty string')
+    return body.strip()
+
+
 def cmd_voice_card(ctx: Ctx, a: argparse.Namespace) -> None:
     if a.path == "-":
         raise UserError("voice-card: a stdin run has no document record and stores no voice card")
@@ -1239,11 +1259,7 @@ def cmd_voice_card(ctx: Ctx, a: argparse.Namespace) -> None:
         return
     text = ""
     if a.from_stdin:
-        body = _obj(_read_stdin_json("voice-card"))
-        card = (body or {}).get("voice_card")
-        if body is None or set(body) != {"voice_card"} or not isinstance(card, str) or not card.strip():
-            raise UserError('voice-card: expected {"voice_card": "<text>"}: one non-empty string and nothing else')
-        text = card.strip()
+        text = _read_card_stdin()
         if len(text) > VOICE_CARD_MAX:
             raise UserError(f"voice-card: the card is {len(text)} characters; the limit is {VOICE_CARD_MAX}")
     with ctx.locked(ctx.repo_project, title):
