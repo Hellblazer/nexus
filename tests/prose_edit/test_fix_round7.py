@@ -100,9 +100,10 @@ def test_simultaneous_starts_over_a_dead_holder_never_both_hold_the_lock(tmp_pat
             script = (f'set -u\nWT={ROOT}\n. {GUARD}\nwhile [ ! -e {go} ]; do :; done\n'
                       f'runner_lock run-{t}-{i}.sh\n: > {held}\n'
                       f'while [ ! -e {release} ]; do sleep 0.05; done\n')
-            running.append((t, i, subprocess.Popen(
-                ["bash", "-c", script], env={**os.environ, "PROSE_EDIT_RUNNER_LOCK": str(lock)},
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)))
+            with (tmp_path / f"err-{t}-{i}").open("w", encoding="utf-8") as err:
+                running.append((t, i, subprocess.Popen(
+                    ["bash", "-c", script], env={**os.environ, "PROSE_EDIT_RUNNER_LOCK": str(lock)},
+                    stdout=subprocess.DEVNULL, stderr=err)))
     time.sleep(0.5)
     go.touch()
     deadline = time.monotonic() + 60
@@ -116,7 +117,11 @@ def test_simultaneous_starts_over_a_dead_holder_never_both_hold_the_lock(tmp_pat
     release.touch()
     for _, _, p in running:
         p.wait(timeout=60)
-    assert all(n == 1 for n in holders.values()), holders  # exactly one runner holds each lock at once
+    # On a failure, show what each runner of a bad trial said: three CI reds once left nothing to diagnose.
+    bad = [t for t, n in holders.items() if n != 1]
+    said = {f"{t}-{i}": (tmp_path / f"err-{t}-{i}").read_text(encoding="utf-8")[-400:]
+            for t in bad[:2] for i in range(procs)}
+    assert not bad, (holders, said)  # exactly one runner holds each lock at once
     assert refused and set(refused) == {75}, refused  # every other runner gave up, none crashed
 
 

@@ -8,9 +8,10 @@
 #
 #   runner_lock NAME      take the box-wide runner lock for the whole run, or exit 75 naming the holder. The lock is
 #                         a directory with a holder record "<pid> <name>". Every runner decides under a second lock
-#                         (the gate, which records its own owner's pid): a lock whose holder is dead, or with no
-#                         record, is reclaimed, and the lock is taken and its record written before the gate is
-#                         released. No file time is read. A holder that answers EPERM is live. Installs the exit, INT, TERM and HUP traps; the exit trap
+#                         (the gate): a lock whose holder is dead, or with no record, is reclaimed, and the lock is
+#                         taken and its record written before the gate is released. The gate is never reclaimed;
+#                         a runner refuses after PROSE_EDIT_RUNNER_GATE_WAIT seconds (default 30) and names it. No
+#                         file time is read. A holder that answers EPERM is live. Installs the exit, INT, TERM and HUP traps; the exit trap
 #                         stops the runner's background jobs and their children before it removes copies and the lock.
 #   runner_sweep_stale    remove untracked docs/zz-* left by an older runner (it holds the lock, so none is live)
 #   runner_track REL...   paths relative to WT that the exit trap removes
@@ -101,35 +102,24 @@ runner_cleanup() {
 # released. A first version serialized only the reclaimers, so a runner taking a free lock could slip in beside one:
 # qwen-linux saw two simultaneous holders at 589c6fe8a. With every decision under the gate, the lock directory
 # changes only while the gate is held, so a lock with no holder record means its maker died inside the gate.
-# Nothing here reads a file time: the gate holds its owner's pid and is reclaimed only when that pid is dead (or
-# its record stays missing for 5 s), so a clock or timestamp quirk cannot make a fresh gate look stale. Known
-# limit: reclaiming a dead gate reads its pid and then removes it, so two runners reclaiming the same dead gate
-# while a third makes a fresh one can still collide. That needs a runner killed inside the gate's few-millisecond
-# critical section first; the normal path never reclaims a gate.
+#
+# The gate itself is never reclaimed, by pid or by a missing record (nexus-w2j8c). Reclaim is check-then-remove: a
+# waiter that read the owner's pid, saw it dead (an owner that had just released the gate and exited, as every
+# refused runner does at once) and then removed "the" gate removed a fresh gate a third runner had made meanwhile,
+# and two runners were inside; a live maker stalled between mkdir and its pid write was evicted the same way. The
+# critical section takes milliseconds, so a gate that outlives the wait (PROSE_EDIT_RUNNER_GATE_WAIT seconds,
+# default 30) belongs to a runner killed inside it: the runner refuses and names it, and a human removes it. The
+# pid in the gate is a record for that human, read by nothing here.
 _runner_gate_take() {
-  local gate="$1" waits=0 empty=0 gpid
+  local gate="$1" limit polls=0
+  limit=$(( ${PROSE_EDIT_RUNNER_GATE_WAIT:-30} * 20 ))
+  [ -d "$(dirname "$gate")" ] && [ -w "$(dirname "$gate")" ] || return 2
   until mkdir "$gate" 2>/dev/null; do
-    gpid=""
-    [ -s "$gate/pid" ] && gpid="$(cat "$gate/pid" 2>/dev/null)"
-    if [ -n "$gpid" ]; then
-      empty=0
-      if ! _runner_pid_alive "$gpid"; then
-        rm -rf "$gate"
-        continue
-      fi
-    else
-      empty=$((empty + 1))
-      if [ "$empty" -gt 100 ]; then   # 5 s with no record: its maker died between mkdir and the write
-        rm -rf "$gate"
-        empty=0
-        continue
-      fi
-    fi
-    waits=$((waits + 1))
-    [ "$waits" -gt 600 ] && return 1   # 30 s behind a live gate holder: refuse rather than spin
+    polls=$((polls + 1))
+    [ "$polls" -ge "$limit" ] && return 1
     sleep 0.05
   done
-  printf '%s\n' "$$" > "$gate/pid"
+  printf '%s\n' "$$" > "$gate/pid" 2>/dev/null
   return 0
 }
 
@@ -141,10 +131,14 @@ runner_lock() {
   local name="${1:?runner name}" lock gate pid="" holder_name="a runner that wrote no record"
   lock="$(_runner_lock_path)" || { echo "$name: cannot find the git common directory for the runner lock" >&2; exit 1; }
   gate="$lock.gate"
-  if ! _runner_gate_take "$gate"; then
-    echo "$name: could not take the runner lock's gate $gate within 30 s. If no runner is live, remove that directory." >&2
-    exit 75
-  fi
+  _runner_gate_take "$gate"
+  case $? in
+    0) ;;
+    2) echo "$name: the runner lock's directory $(dirname "$gate") is missing or not writable." >&2
+       exit 75 ;;
+    *) echo "$name: could not take the runner lock's gate $gate within ${PROSE_EDIT_RUNNER_GATE_WAIT:-30} s: another runner is inside it, or one was killed there (its pid is in $gate/pid). If no runner is live, remove that directory." >&2
+       exit 75 ;;
+  esac
   if [ -d "$lock" ]; then
     if [ -s "$lock/holder" ]; then
       pid="$(cut -d' ' -f1 "$lock/holder")"

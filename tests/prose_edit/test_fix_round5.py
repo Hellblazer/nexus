@@ -228,24 +228,50 @@ def test_a_lock_with_no_holder_record_is_reclaimed_and_a_live_gate_blocks_until_
     repo, lock = box
     lock.mkdir()
     assert _bash('runner_lock run-test.sh\n', repo, lock).returncode == 0
-    # A gate whose owner is alive keeps everyone out; once its owner is gone the gate is reclaimed.
+    # A gate keeps everyone out until its owner releases it (removes it); then the waiter goes on.
     gate = Path(f"{lock}.gate")
-    owner = subprocess.Popen(["sleep", "30"])
-    try:
-        shutil.rmtree(lock, ignore_errors=True)
-        gate.mkdir()
-        (gate / "pid").write_text(f"{owner.pid}\n", encoding="utf-8")
-        blocked = subprocess.Popen(
-            ["bash", "-c", f'set -u\nWT={repo}\n. {GUARD}\nrunner_lock run-test.sh\n'],
-            env={**os.environ, "PROSE_EDIT_RUNNER_LOCK": str(lock)},
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        time.sleep(1.0)
-        assert blocked.poll() is None and not lock.exists()  # waiting behind the live gate
-    finally:
-        owner.kill()
-        owner.wait()
-    assert blocked.wait(timeout=30) == 0  # the dead owner's gate is reclaimed and the lock taken
+    shutil.rmtree(lock, ignore_errors=True)
+    gate.mkdir()
+    (gate / "pid").write_text("1\n", encoding="utf-8")
+    blocked = subprocess.Popen(
+        ["bash", "-c", f'set -u\nWT={repo}\n. {GUARD}\nrunner_lock run-test.sh\n'],
+        env={**os.environ, "PROSE_EDIT_RUNNER_LOCK": str(lock)},
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    time.sleep(1.0)
+    assert blocked.poll() is None and not lock.exists()  # waiting behind the gate
+    shutil.rmtree(gate)  # the owner releases it
+    assert blocked.wait(timeout=30) == 0  # it took the lock (its exit trap has since released it)
     assert not gate.exists()
+
+
+def test_a_gate_whose_owner_is_dead_is_never_reclaimed_the_runner_refuses_and_names_it(
+        box: tuple[Path, Path]) -> None:
+    # nexus-w2j8c: reclaiming a gate is check-then-remove. A waiter that read a pid, saw it dead (an owner that
+    # had just released and exited, as every refused runner does) and then removed "the" gate removed a fresh
+    # gate a third runner had made meanwhile, and two runners were inside. So no gate is reclaimed, by pid or by
+    # a missing record: one that outlives the wait is a runner killed inside it, and a human removes it.
+    repo, lock = box
+    gate = Path(f"{lock}.gate")
+    gate.mkdir()
+    done = subprocess.Popen(["true"])
+    done.wait()
+    (gate / "pid").write_text(f"{done.pid}\n", encoding="utf-8")
+    proc = _bash('runner_lock run-test.sh\n', repo, lock, PROSE_EDIT_RUNNER_GATE_WAIT="1")
+    assert proc.returncode == 75, proc.stderr
+    assert str(gate) in proc.stderr and "remove" in proc.stderr
+    assert gate.is_dir() and (gate / "pid").read_text(encoding="utf-8") == f"{done.pid}\n"  # untouched
+    assert not lock.exists()
+    (gate / "pid").unlink()  # and a gate with no record is not taken for dead either
+    proc = _bash('runner_lock run-test.sh\n', repo, lock, PROSE_EDIT_RUNNER_GATE_WAIT="1")
+    assert proc.returncode == 75 and gate.is_dir() and not lock.exists(), proc.stderr
+
+
+def test_a_missing_lock_directory_parent_fails_fast(box: tuple[Path, Path], tmp_path: Path) -> None:
+    repo, _ = box
+    lock = tmp_path / "no-such-dir" / "lock"
+    started = time.monotonic()
+    proc = _bash('runner_lock run-test.sh\n', repo, lock)
+    assert proc.returncode == 75 and time.monotonic() - started < 5, proc.stderr
 
 
 def test_two_runners_cannot_run_at_once_and_a_killed_runner_still_cleans_up(
