@@ -8,14 +8,14 @@ For **when to use which retrieval interface**, see [Querying Guide](querying-gui
 
 | Server | Entry point | Tools | Purpose |
 |---|---|---|---|
-| `nexus` | `nx-mcp` | 59 | Storage tiers, retrieval, operators, orchestration, diagnostics |
+| `nexus` | `nx-mcp` | 54 | Storage tiers, retrieval, operators, orchestration, diagnostics |
 | `nexus-catalog` | `nx-mcp-catalog` | 10 | Document catalog, link graph, tumbler resolution |
 
 The `nexus` and `nexus-catalog` servers register automatically when you install the plugin (`/plugin install conexus@nexus-plugins`). No separate install. The `.mcpb` extension registers only `nexus` — catalog tools (`catalog_search`, `catalog_link`, etc.) are unavailable in Claude Desktop until the plugin also ships a second `.mcpb` entry.
 
 **Substrate dependency**: since RDR-155, every persistent tier (T2 + T3 storage/retrieval tools) routes through the native nexus-service (`nx daemon service`, Postgres 17 + pgvector), not a ChromaDB daemon. A single `nx init` provisions and starts it and offers to register the OS autostart unit so it survives reboots (RDR-174 collapsed flow). See [Getting Started § Install](getting-started.md#install) for the install walkthrough and [Container Integration](container-integration.md) for the multi-process / multi-host model.
 
-## `nexus` — retrieval + storage (59 tools)
+## `nexus` — retrieval + storage (54 tools)
 
 Full tool names follow `mcp__plugin_conexus_nexus__<tool>`.
 
@@ -127,37 +127,29 @@ engine-service + Postgres stack; destructive, `confirm=true` gated).
 
 ### Hook-tier tools (internal plumbing, RDR-215)
 
-The remaining 7 of the 59 registered tools are `hook_*` entries
+The remaining 2 of the 54 registered tools are `hook_*` entries
 (`src/nexus/mcp/hooks.py`, `nexus.mcp.hooks.HOOK_TOOLS`). Each ports a
-conexus plugin `hooks.json` entry — `PreToolUse`, `PermissionRequest`,
-`SubagentStart`, `Stop`, `PreCompact` — to a `hook_*` MCP
-tool. Most of the seven are also what `hooks.json` WIRES that event
-through (an `mcp_tool` call instead of a bash script); two are not.
-`hook_auto_approve` and `hook_pre_close_verification` moved to the
-command tier at bead nexus-17i1n — an `mcp_tool` hook cannot return a
-permission/stop decision, so both shipped inert as `mcp_tool` entries in
-conexus 7.55.0. Both stay registered here for diagnosis — hooks.json
-instead runs the equivalent `nx-hook` verb (through `nx_hook_shim.py`) on
-the command tier. The RDR-184 ledger and RDR-205 projector hook tools
-(`hook_agent_dispatch_expect`, `hook_subagent_start_stamp`,
-`hook_subagent_stop`, `hook_subagent_start_tuple`, `hook_subagent_stop_tuple`)
-were deleted at cleanup step A1; the wire snapshot moved with
-them.
-The table's "Fires on" column still names the real event either way;
-there is no reason to call any of these seven by hand, and their own
-tool descriptions say so ("not meant to be invoked directly"). Listed
-here only so the 59-tool count reconciles with the tables above, which
-cover the 52 tools an agent calls directly:
+conexus plugin `hooks.json` entry to a `hook_*` MCP tool.
+`hook_subagent_start` is what `hooks.json` WIRES for `SubagentStart` (an
+`mcp_tool` call). `hook_auto_approve` is not: it moved to the command tier at
+bead nexus-17i1n, because an `mcp_tool` hook cannot return a permission
+decision and it shipped inert as an `mcp_tool` entry in conexus 7.55.0. It
+stays registered here for diagnosis, and `hooks.json` instead runs the
+equivalent `nx-hook` verb (through `nx_hook_shim.py`) on the command tier.
+The RDR-184 ledger and RDR-205 projector hook tools were deleted at cleanup
+step A1, and the bd-close gate, Stop verification, StopFailure, PostCompact
+and divergence-language hook tools (`hook_pre_close_verification`,
+`hook_stop_verification`, `hook_stop_failure`, `hook_post_compact`,
+`hook_divergence_language_guard`) at cleanup steps A2 and A3; the wire
+snapshot moved with them. There is no reason to call either remaining tool by
+hand, and their own tool descriptions say so ("not meant to be invoked
+directly"). Listed here only so the 54-tool count reconciles with the tables
+above, which cover the 52 tools an agent calls directly:
 
 | Tool | Fires on |
 |---|---|
 | `hook_auto_approve` | PreToolUse / PermissionRequest — auto-approves an allowlisted `mcp__plugin_conexus_*` tool |
 | `hook_subagent_start` | SubagentStart — assembles a starting subagent's context (RDRs, T2, T1, tool guidance) |
-| `hook_stop_verification` | Stop — warns on uncommitted changes, in-progress beads, beads closed without a review marker |
-| `hook_stop_failure` | StopFailure — observes a transient API failure; debug trace only |
-| `hook_pre_close_verification` | Bash (bd close/create) — refuses a close with no review-completed marker |
-| `hook_post_compact` | PreCompact — re-injects active beads and session scratch after compaction |
-| `hook_divergence_language_guard` | Write/Edit under `docs/rdr/post-mortem/` — flags divergence language (advisory) |
 
 ## `nexus-catalog` — document catalog (10 tools)
 

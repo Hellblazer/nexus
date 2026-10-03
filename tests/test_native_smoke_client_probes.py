@@ -76,8 +76,7 @@ def _run_probe(probe: Path, *, extra_env: dict[str, str]) -> subprocess.Complete
     subprocess spawned via ``env=os.environ.copy()`` — this probe
     subprocess is exactly such a spawn, so it needs the REAL
     ``NX_ALLOW_PROD_WRITE`` set explicitly here, same as
-    ``tests/hooks/test_pre_close_verification_hook.py``'s write-subprocess
-    round-trip and ``tests/test_mcp_concurrency.py``'s spawned T2 writer.
+    ``tests/test_mcp_concurrency.py``'s spawned T2 writer.
     """
     env = os.environ.copy()
     env["NX_ALLOW_PROD_WRITE"] = (

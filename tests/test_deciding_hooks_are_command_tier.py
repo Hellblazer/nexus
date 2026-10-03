@@ -13,8 +13,9 @@ two tiers and moved three verdict-returning hooks to ``mcp_tool`` with
 everything else. conexus 7.55.0 shipped with all three inert. Measured
 2026-09-20 on CLI 2.1.278 against that pin: a ``bd close`` naming a bead
 with NO review-completed marker reached ``bd`` and closed it, while the
-identical payload handed to ``pre_close_verification.run()`` returned a
-correct, fully-worded deny. Every part was individually right -- the
+identical payload handed to the hook's ``run()`` returned a
+correct, fully-worded deny. (That bd-close gate was deleted at cleanup step
+A2, nexus-0r1uz; ``auto_approve`` is the deciding hook left.) Every part was individually right -- the
 logic, the T1 marker store, the matcher, the registration -- and the gate
 still did nothing, because the tier it was wired on discards verdicts.
 
@@ -63,7 +64,7 @@ def test_the_wiring_file_is_where_we_think_it_is() -> None:
     """
     assert _HOOKS_JSON.is_file(), f"hooks.json not found at {_HOOKS_JSON}"
     entries = _entries()
-    assert len(entries) > 20, f"only {len(entries)} hook entries parsed; the shape changed"
+    assert len(entries) > 10, f"only {len(entries)} hook entries parsed; the shape changed"
     assert any(h.get("type") == "mcp_tool" for _, _, h in entries), (
         "no mcp_tool entries at all — either the tier was retired (delete this "
         "module and say so) or the parse is wrong"
@@ -124,26 +125,24 @@ def test_a_deciding_hook_is_actually_wired_somewhere(hook_name: str) -> None:
 
 
 #: Events on which a hook's verdict can change what happens next. A
-#: PostToolUse verdict cannot: the tool has already run, so the ``allow``
-#: ``divergence_language_guard`` emits is decorative and losing it costs
-#: nothing. Stop and SubagentStop are here because a ``block`` there is
-#: real, even though the only hook currently wired on Stop can just
-#: approve.
+#: PostToolUse verdict cannot: the tool has already run, so an ``allow``
+#: there is decorative and losing it costs nothing. Stop and SubagentStop
+#: are here because a ``block`` there is real.
 _EVENTS_WHERE_A_VERDICT_MATTERS = frozenset(
     {"PreToolUse", "PermissionRequest", "Stop", "SubagentStop", "UserPromptSubmit"}
 )
 
-#: The three ``_io`` helpers that write a verdict, plus the two envelope
+#: The ``_io`` helpers that write a verdict, plus the two envelope
 #: keys a module can build by hand. :func:`_verdicts_emitted` reads only
 #: these, via ``ast``, so a verdict word appearing in a docstring or as
 #: some other vocabulary's value is not mistaken for one.
 #:
 #: That mistake is the reason this is parsed rather than grepped. A
 #: first cut searched each module's whole text for ``"block"`` and
-#: flagged ``stop_verification``, whose ``"block"`` is a
-#: ``stop_guard_mode`` value. It would have been "fixed" by adding it to
-#: DECIDING_HOOKS, which would have made the list mean nothing.
-_EMITTER_CALLS = frozenset({"permission_decision", "permission_request", "stop_decision"})
+#: flagged a hook whose ``"block"`` was a guard-mode value. It would have
+#: been "fixed" by adding it to DECIDING_HOOKS, which would have made the
+#: list mean nothing.
+_EMITTER_CALLS = frozenset({"permission_decision", "permission_request"})
 _VERDICT_KEYS = frozenset({"permissionDecision", "decision", "behavior"})
 
 #: Stands in for a verdict this reader cannot evaluate statically — a
@@ -167,8 +166,7 @@ _VERIFIED_AGAINST_CLI = "2.1.278"  # 2026-09-20
 
 #: ``allow`` is neutral on most events and NOT neutral on these two,
 #: where it skips a permission prompt the user would otherwise see. That
-#: is why ``auto_approve`` counts and ``divergence_language_guard`` does
-#: not, though both emit nothing but ``allow``.
+#: is why ``auto_approve`` counts: it emits nothing but ``allow``.
 _ALLOW_IS_A_DECISION_ON = frozenset({"PreToolUse", "PermissionRequest"})
 
 
@@ -185,10 +183,10 @@ def test_every_registered_hook_whose_verdict_matters_is_declared_deciding() -> N
     test had only the first. A hook must emit a non-neutral verdict
     (``deny``/``ask``/``block``, or an ``allow`` on an event where allow
     skips a prompt), AND be wired on an event where verdicts are read at
-    all. With only the first half it flagged
-    ``divergence_language_guard``, which emits ``permissionDecision:
-    allow`` on PostToolUse — after the tool has run, against nothing.
-    Adding it to DECIDING_HOOKS to quiet the test would have been the
+    all. With only the first half it flagged a PostToolUse hook that
+    emitted ``permissionDecision: allow`` — after the tool had run,
+    against nothing (the divergence-language guard, deleted at cleanup
+    step A3). Adding it to DECIDING_HOOKS to quiet the test would have been the
     wrong fix: the list would then mean "emits a verdict token" and stop
     meaning "must be wired on the command tier".
 
@@ -233,26 +231,6 @@ def test_every_registered_hook_whose_verdict_matters_is_declared_deciding() -> N
     )
 
 
-def test_the_verdict_criterion_excludes_a_decorative_allow() -> None:
-    """Non-vacuity for the test above, from the case that taught it.
-
-    ``divergence_language_guard`` emits ``permissionDecision: allow`` and
-    is registered, so a criterion of "emits a verdict token" sweeps it
-    in. If this stops holding, either that hook moved to an event where
-    its verdict matters — in which case it belongs in DECIDING_HOOKS —
-    or the criterion above quietly widened back out.
-    """
-    events = _events_by_registered_hook().get("divergence_language_guard", set())
-    assert events, "divergence_language_guard is not wired at all; this guard is now vacuous"
-    assert not (events & _EVENTS_WHERE_A_VERDICT_MATTERS), (
-        f"divergence_language_guard is now wired on {sorted(events)}, where a "
-        f"verdict is read — add it to DECIDING_HOOKS and rewrite this test"
-    )
-    text = (_REPO_ROOT / "src" / "nexus" / "hooks" / "divergence_language_guard.py").read_text()
-    assert '"allow"' in text, "it no longer emits allow; this guard no longer guards anything"
-    assert "divergence_language_guard" not in DECIDING_HOOKS
-
-
 def _verdicts_emitted(path: Path) -> set[str]:
     """Every verdict value *path*'s module can put on the wire.
 
@@ -274,7 +252,7 @@ def _verdicts_emitted(path: Path) -> set[str]:
                 # Positional AND keyword. Every call site today passes
                 # the verdict positionally, so reading only node.args
                 # happened to work — and a future
-                # stop_decision(decision="block") would have been
+                # permission_decision(decision="deny") would have been
                 # invisible to a test whose entire job is catching a
                 # silently-missing verdict. Found in review, not by a
                 # failure, which is the same way this whole class hides.
@@ -311,11 +289,10 @@ def test_the_verdict_reader_finds_the_verdicts_we_know_are_there() -> None:
     known emitters by value.
     """
     hooks_dir = _REPO_ROOT / "src" / "nexus" / "hooks"
-    assert "deny" in _verdicts_emitted(hooks_dir / "pre_close_verification.py")
     assert "allow" in _verdicts_emitted(hooks_dir / "auto_approve.py")
-    # And the discrimination that matters: a mode value named "block" is
-    # not a verdict.
-    assert "block" not in _verdicts_emitted(hooks_dir / "stop_verification.py")
+    # And the discrimination that matters: a context-injecting hook says
+    # nothing that reads as a verdict.
+    assert not _verdicts_emitted(hooks_dir / "subagent_start.py")
 
 
 def _events_by_registered_hook() -> dict[str, set[str]]:

@@ -35,9 +35,8 @@ is closed. The declaration is INERT until the next plugin cut, because
 ``conexus/PENDING_RELEASE.md``. The ``nx hook session-start`` CLI verb
 itself is untouched and still works.
 
-No caller branches on this verb's exit code (RDR-215 Contracts), so
-:class:`~nexus._hook_runtime._io.HookResult`'s default ``exit_code=0`` is
-exactly right, and ``entry.main`` forces 0 for every verb regardless.
+No caller branches on this verb's exit code (RDR-215 Contracts);
+``entry.main`` forces 0 for every verb.
 """
 from __future__ import annotations
 

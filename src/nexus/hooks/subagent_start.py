@@ -268,9 +268,8 @@ def _nx_env(session_id: str) -> dict[str, str]:
     which command sits next to it in the file.
 
     **Deliberately does NOT set ``NX_T1_ALLOW_SHARED_FALLBACK``.**
-    ``pre_close_verification.py``'s own ``_nx_env`` sets that flag, but its
-    bash source (``pre_close_verification_hook.sh:86``) already exports it
-    too -- that fix landed there, not here. ``subagent-start.sh`` forces
+    The bd-close gate (deleted at cleanup step A2, nexus-0r1uz) set that flag
+    for its own T1 reads; this hook does not. ``subagent-start.sh`` forced
     ``NX_SESSION_ID`` (line 71) with no such flag, so an explicit session id
     with no live T1 lease under it can fail loud (``T1ServerNotFoundError``,
     nexus-f7xyq) exactly as it does in the bash today. That is a real,

@@ -25,8 +25,7 @@ unavoidable, and they are the same two every verb in this port has made:
 2. **The emitters return instead of exiting.** ``_lib.allow()`` /
    ``_lib.deny()`` printed an envelope and ``sys.exit(0)``; this body
    returns ``_lib.pass_result()`` / ``_lib.deny_result()`` and
-   ``run_hook_result`` hands it back, exactly as
-   ``phase_review_close_gate`` does. The control flow is unchanged because
+   ``run_hook_result`` hands it back. The control flow is unchanged because
    the original relied on ``allow()`` never returning: every call site was
    already terminal, so every one becomes a ``return``.
 
@@ -1474,8 +1473,7 @@ def run(payload: dict | None) -> HookResult:
 
     ``fail_closed=False`` is the whole posture and is carried unchanged: a
     crash in this guard allows, because a broken guard must not brick every
-    agent's Bash. Its sibling ``phase_review_close_gate`` is the opposite,
-    for its own stated reason; the two are not a pair to be made uniform.
+    agent's Bash.
     """
     return _lib.run_hook_result(
         body, payload, fail_closed=False, rule_name=RULE_NAME

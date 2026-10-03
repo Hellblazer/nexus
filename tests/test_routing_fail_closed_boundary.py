@@ -2,10 +2,12 @@
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 """The fail-closed BOUNDARY, not the hook bodies (RDR-215 bead nexus-q02nx.21).
 
-``tests/test_routing_phase_review_close.py`` drives the hook script through
-its nineteen scenarios, and every one of them reaches a decision. None makes
-``body()`` RAISE, so nothing there exercises ``_lib.run_hook``'s except
-branch — the one place the fail-closed contract actually lives. Bead
+The phase-review close gate's test module drove its hook script through
+nineteen scenarios, and every one of them reached a decision. None made
+``body()`` RAISE, so nothing there exercised ``_lib.run_hook``'s except
+branch — the one place the fail-closed contract actually lives. (That hook
+was deleted at cleanup step A2, nexus-0r1uz; no rule is ``fail_closed`` now,
+and these tests keep the mechanism pinned.) Bead
 nexus-q02nx.21's round-2 audit note names that gap exactly: "the current
 tests exercise ``body()``, not the ``run_hook`` wrapper, so nothing today
 would catch the inversion."
@@ -178,7 +180,7 @@ class TestTheTwoSurfacesAgree:
         # nexus-wauo1.22 (RDR-219 plan-audit residual 2): "`routing/` holds
         # no Python at all" was already stale when this comment was
         # written — `subagent_git_write_requires_orchestrator.py` and
-        # `phase_review_close_requires_gate.py` stayed plugin-resident
+        # the (since deleted) phase-review close gate stayed plugin-resident
         # through nexus-t9klx's port (7.58.0 kept hooks.json on the
         # scripts, not the verbs; see test_hooks_json_shape_lint.py's
         # docstring), and RDR-219 deliberately adds a THIRD plugin-
@@ -223,12 +225,6 @@ class TestTheTwoSurfacesAgree:
             f"(rule: registry, call-site): {disagree}. README item 5 states "
             "the contract as both together."
         )
-
-    def test_phase_review_close_is_still_the_fail_closed_one(self):
-        """Named rather than counted. If this rule ever goes fail-open the
-        change should have to delete this line and say why."""
-        assert self._registry_flags()["phase_review_close_requires_gate"] is True
-        assert self._call_site_flags()["phase_review_close_requires_gate"] is True
 
     @pytest.mark.parametrize(
         "rule",

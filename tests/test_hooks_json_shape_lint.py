@@ -80,12 +80,15 @@ SN_HOOKS = REPO_ROOT / "sn" / "hooks" / "hooks.json"
 #: 27 -> 28 at nexus-wauo1.22 (RDR-219): a sixth PreToolUse:Bash
 #: plugin-resident script, `credential_print_guard`, alongside
 #: `subagent_git_write_requires_orchestrator` and
-#: `phase_review_close_requires_gate`.
+#: `phase_review_close_requires_gate` (that one deleted at step A2).
 #: 28 -> 27 at nexus-qxyqz: the `mcp-connect-check` UserPromptSubmit entry
 #: is removed (the verb stays registered as a silent no-op for old plugins).
 #: 27 -> 21 at cleanup step A1 (nexus-0r1uz): the behaviour_census SessionStart
 #: entry and the five RDR-184 ledger / RDR-205 projector entries are deleted.
-EXPECTED_CONEXUS_ENTRIES = 21
+#: 21 -> 15 at cleanup steps A2 and A3 (nexus-0r1uz): the bd-close gate, the
+#: phase-review close gate, and the Stop, StopFailure, PostCompact and
+#: divergence-language `mcp_tool` entries are deleted.
+EXPECTED_CONEXUS_ENTRIES = 15
 EXPECTED_SN_ENTRIES = 4
 
 MCP_SERVER = "plugin:conexus:nexus"
@@ -108,7 +111,6 @@ PLUGIN_RESIDENT_SCRIPTS = frozenset(
     {
         "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/mailbox_drain.py",
         "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/version_lockstep_hook.py",
-        "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/routing/phase_review_close_requires_gate.py",
         "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/routing/subagent_git_write_requires_orchestrator.py",
         "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/routing/credential_print_guard.py",
     }
@@ -352,7 +354,7 @@ CONEXUS_REJECTS = [
     ),
     pytest.param(
         "SessionStart",
-        {"type": "mcp_tool", "server": MCP_SERVER, "tool": "hook_post_compact"},
+        {"type": "mcp_tool", "server": MCP_SERVER, "tool": "hook_subagent_start"},
         id="mcp-tool-on-session-start",
     ),
     pytest.param(
@@ -362,12 +364,12 @@ CONEXUS_REJECTS = [
     ),
     pytest.param(
         "Stop",
-        {"type": "mcp_tool", "server": "plugin:other:server", "tool": "hook_post_compact"},
+        {"type": "mcp_tool", "server": "plugin:other:server", "tool": "hook_subagent_start"},
         id="wrong-server",
     ),
     pytest.param(
         "Stop",
-        {"type": "mcp_tool", "server": MCP_SERVER, "tool": "post_compact"},
+        {"type": "mcp_tool", "server": MCP_SERVER, "tool": "subagent_start"},
         id="tool-without-hook-prefix",
     ),
     pytest.param(
@@ -375,7 +377,7 @@ CONEXUS_REJECTS = [
         {
             "type": "mcp_tool",
             "server": MCP_SERVER,
-            "tool": "hook_post_compact",
+            "tool": "hook_subagent_start",
             "async": True,
         },
         id="async-key",

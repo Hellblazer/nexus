@@ -278,13 +278,12 @@ _FILE_VERB_ALLOWLIST: dict[tuple[str, str], str] = {
     # It exempted extractor noise — the close gate's capability-gap warning
     # says "the nx binary is absent, or 'nx scratch list' failed", and the
     # extractor read the prose after "nx" as a verb. That script is deleted;
-    # the gate is `nexus.hooks.pre_close_verification`, which this sweep does
-    # not scan (its surfaces are .sh / skill md / workflow yml / hooks.json /
-    # the plugin README — never Python in the wheel). The warning text still
-    # exists there, so the exemption did not become unnecessary, it became
-    # unreachable — and `test_allowlist_entries_are_not_stale` asserts every
-    # key resolves to a real file, so leaving it would fail on the path, not
-    # on the verb.
+    # the gate (`nexus.hooks.pre_close_verification`, since deleted at cleanup
+    # step A2) was Python in the wheel, which this sweep does not scan (its
+    # surfaces are .sh / skill md / workflow yml / hooks.json / the plugin
+    # README). `test_allowlist_entries_are_not_stale` asserts every key
+    # resolves to a real file, so leaving it would fail on the path, not on
+    # the verb.
 }
 
 

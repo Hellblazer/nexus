@@ -27,7 +27,7 @@ def _stdin(tmp_path: pathlib.Path, names: list[str]) -> pathlib.Path:
     return p
 
 
-def test_probe_passes_only_when_all_six_hooks_reached_the_server(tmp_path) -> None:
+def test_probe_passes_only_when_every_probed_hook_reached_the_server(tmp_path) -> None:
     h = _census()
     assert h.probe_main(_stdin(tmp_path, list(h.PROBE_HOOKS))) == 0
     assert h.probe_main(_stdin(tmp_path, list(h.PROBE_HOOKS[:-1]))) == 1

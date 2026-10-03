@@ -58,6 +58,19 @@ ONE PATH PER BULLET, on the bullet's FIRST line.
 - cleanup step 12 (nexus-0r1uz): `conexus/commands/rdr-audit.md` drops the `schedule` / `unschedule` text; the management subcommands are `list`, `status` and `history`, all read-only.
 - cleanup step 7 (nexus-0r1uz): `conexus/skills/orchestration/SKILL.md` drops its text about the agent-verify-claims checker script (the script is deleted); the orchestrator still re-runs each reported COMMAND itself.
 - cleanup step 7 (nexus-0r1uz): `conexus/skills/mailbox/SKILL.md` drops the unacked-request sweep bullet and its success criterion, since the inbound-relay-acks sweep script is deleted.
+- cleanup steps A2 and A3 (nexus-0r1uz): `conexus/hooks/hooks.json` drops the PreToolUse Bash entries for the bd-close gate (`nx_hook_shim.py pre-close-verification`) and the phase-review close gate (`routing/phase_review_close_requires_gate.py`), and the `mcp_tool` entries for Stop (`hook_stop_verification`), StopFailure (`hook_stop_failure`), PostCompact (`hook_post_compact`) and PostToolUse Write|Edit (`hook_divergence_language_guard`).
+- cleanup step A2 (nexus-0r1uz): `conexus/hooks/scripts/routing/phase_review_close_requires_gate.py` is deleted; a phase-review `bd close` is no longer gated on the PASSED sentinel.
+- cleanup step A2 (nexus-0r1uz): `conexus/hooks/scripts/routing/registry.yaml` drops the `phase_review_close_requires_gate` rule; no rule is `fail_closed` now.
+- cleanup step A2 (nexus-0r1uz): `conexus/hooks/scripts/routing/README.md` drops the phase-review rule and the bd-close gate from the cumulative-cap table (2 of 4).
+- cleanup step A3 (nexus-0r1uz): `conexus/hooks/scripts/divergence-language-scan.py` is deleted along with the divergence-language guard that ran it.
+- cleanup step A2 (nexus-0r1uz): `conexus/hooks/scripts/_hook_logging.py` has comment-only edits dropping references to the deleted phase-review close gate script; no behaviour change.
+- cleanup step A2 (nexus-0r1uz): `conexus/hooks/scripts/_interpreter.py` has comment-only edits dropping references to the deleted phase-review close gate; no behaviour change.
+- cleanup step A2 (nexus-0r1uz): `conexus/agents/code-review-expert.md` drops the "NEVER write a `review-completed` marker" section; the bd-close gate that read the marker is deleted.
+- cleanup step A2 (nexus-0r1uz): `conexus/agents/substantive-critic.md` drops the "NEVER write a `review-completed` marker" section; the bd-close gate that read the marker is deleted.
+- cleanup step A2 (nexus-0r1uz): `conexus/skills/code-review/SKILL.md` drops the "On Completion (Mandatory)" section about the `review-completed` marker.
+- cleanup step A2 (nexus-0r1uz): `conexus/resources/agent-shared/CONTEXT_PROTOCOL.md` drops the reserved `review-completed` token section and keeps the note on handing findings to a sibling reviewer through T2.
+- cleanup step A2 (nexus-0r1uz): `conexus/skills/phase-review-gate/SKILL.md` says no hook reads the PASSED sentinel now; the gate's own steps stay.
+- cleanup steps A2 and A3 (nexus-0r1uz): `conexus/README.md` drops the hook table rows for the bd-close gate, the phase-review close gate, Stop verification, StopFailure, PostCompact and the divergence-language guard, and the divergence scan script from the file tree.
 
 ## Deferred to the next client release
 

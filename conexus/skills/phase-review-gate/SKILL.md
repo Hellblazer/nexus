@@ -48,7 +48,7 @@ The preamble validates that every enumerated item has a non-empty evidence point
 
 **BLOCKED**: any item missing from --evidence, or with an empty value, causes the gate to emit BLOCKED and exit. The missing items are named explicitly.
 
-**PASSED**: all items covered. The gate emits the evidence table, a T1 scratch marker tagged `phase-review-passed,rdr-NNN,phase-N`, and a sentinel file at `${TMPDIR:-/tmp}/nx-phase-gate-sentinel/<claude_pid>-<rdr-id>-<phase>.json`. The sentinel is consumed by the `phase_review_close_requires_gate` PreToolUse routing hook (RDR-121) which fail-closed-denies a phase-review `bd close` when the sentinel is absent, stale, or non-PASSED. Dead-pid sentinels are swept on every PASSED write.
+**PASSED**: all items covered. The gate emits the evidence table, a T1 scratch marker tagged `phase-review-passed,rdr-NNN,phase-N`, and a sentinel file at `${TMPDIR:-/tmp}/nx-phase-gate-sentinel/<claude_pid>-<rdr-id>-<phase>.json`. No hook reads the sentinel now: the `phase_review_close_requires_gate` PreToolUse routing hook (RDR-121) that fail-closed-denied a phase-review `bd close` was deleted at cleanup step A2 (nexus-0r1uz), so the gate is advisory. Dead-pid sentinels are swept on every PASSED write.
 
 ## Evidence Format
 

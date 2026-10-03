@@ -40,7 +40,6 @@ class TestRunFieldExtraction:
         ) as mock_start:
             result = run({"session_id": "s1", "source": "clear"})
         assert result.stdout == "Nexus ready (session: s1)."
-        assert result.exit_code == 0
         mock_start.assert_called_once_with(claude_session_id="s1", source="clear")
 
     def test_missing_payload_passes_none_for_both_fields(self) -> None:
@@ -137,7 +136,6 @@ class TestInProcessDispatchParity:
             result = CliRunner().invoke(
                 hook_group, ["session-start"], input=stdin_text,
             )
-        assert result.exit_code == 0
         assert result.output == nx_hook_out
 
     def test_no_stdin_produces_the_same_bytes_as_the_click_verb(

@@ -121,8 +121,8 @@ _DEFAULT_STALE_DAYS = 14
 _DEFAULT_HTTP_TIMEOUT_S = 3.0
 
 #: Floor for a single HTTP call's clamped timeout once the scan budget
-#: is nearly exhausted -- mirrors ``_STAMP_TIMEOUT_FLOOR`` in
-#: ``pre_close_verification.py``: never zero (a 0.0 timeout is not "try
+#: is nearly exhausted -- mirrors the floor the (since deleted)
+#: ``pre_close_verification.py`` used: never zero (a 0.0 timeout is not "try
 #: briefly", it is "don't try"), small enough that a near-exhausted
 #: budget still fails fast rather than eating what little is left.
 _HTTP_TIMEOUT_FLOOR = 0.5

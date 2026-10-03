@@ -70,7 +70,7 @@ def test_a_fail_closed_unknown_verb_becomes_exit_0_with_a_notice(tmp_path: Path)
 
 
 def test_a_real_deny_still_denies(tmp_path: Path) -> None:
-    r = _run(tmp_path, "deny", verb="pre-close-verification")
+    r = _run(tmp_path, "deny", verb="auto-approve")
     assert r.returncode == 2
     assert b"blocked: not in an orchestrated session" in r.stderr
 

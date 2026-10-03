@@ -58,9 +58,8 @@ second SessionStart entry, and ``preflight.py`` and the
 declaration is INERT until the next plugin cut, because ``marketplace.json``
 pins ``source.ref`` to a release tag -- see ``conexus/PENDING_RELEASE.md``.
 
-No caller branches on this verb's exit code, so ``HookResult``'s default
-``exit_code=0`` is exactly right, and ``entry.main`` forces 0 for every
-verb regardless.
+No caller branches on this verb's exit code; ``entry.main`` forces 0 for
+every verb.
 """
 from __future__ import annotations
 

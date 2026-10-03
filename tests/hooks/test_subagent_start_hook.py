@@ -60,7 +60,7 @@ finally:
     sys.stdout = real_stdout
 if result.stdout is not None:
     sys.stdout.write(result.stdout + "\\n")
-sys.exit(result.exit_code)
+sys.exit(0)
 """
 
 

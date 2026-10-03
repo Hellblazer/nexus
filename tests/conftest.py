@@ -2738,7 +2738,7 @@ def _exempt_pytest_from_production_write_guard() -> Iterator[None]:
     round-2 review: the env-var form DOES mutate the real process
     ``os.environ`` for the test's duration, so any subprocess a test
     spawns via ``env=os.environ.copy()`` (e.g.
-    ``tests/hooks/test_pre_close_verification_hook.py::TestF5RemedyRoundTripReal``)
+    a test spawning a subprocess)
     would silently inherit the exemption regardless of whether that
     subprocess's OWN substrate was correctly pinned. The in-process
     override cannot leak into a subprocess's environment at all — a test

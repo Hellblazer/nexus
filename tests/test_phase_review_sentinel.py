@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """RDR-121 P2: phase-review-gate sentinel writer + sweep.
 
-Coupled with the phase_review_close_requires_gate routing hook (nexus-mzvwa.4).
-The writer ships in this bead (mzvwa.2); the reader ships in mzvwa.4
-on the same PR.
+The phase_review_close_requires_gate routing hook that read the sentinel
+(nexus-mzvwa.4) was deleted at cleanup step A2 (nexus-0r1uz); the writer and
+the sweep stay as product code.
 """
 from __future__ import annotations
 

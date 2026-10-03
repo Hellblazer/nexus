@@ -69,7 +69,7 @@ zero-or-more directories), so nothing already swept is dropped. NOT swept:
 skill markdown, workflow YAML, ``conexus/hooks/scripts/*.sh``,
 ``conexus/README.md`` -- the sibling module's remaining surfaces prescribe
 *commands* to run, not log-output assertions; the one hooks-script hit found
-during reconnaissance (``stop_verification_hook.sh`` grepping ``bd``'s own
+during reconnaissance (a Stop-hook script grepping ``bd``'s own
 ``in_progress`` status word) is a third-party CLI's status text, not
 something ``src/`` or ``service/`` ever produces, and does not belong in a
 producer search scoped to this repo's own log/API surfaces.

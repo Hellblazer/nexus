@@ -865,8 +865,8 @@ def run_hook(
 # back rather than printed.
 #
 # The control-flow change — a body that RETURNS its envelope instead of
-# exiting through an emitter — is the one `pre_close_verification` already
-# made when it was ported ("an early return everywhere the script had an
+# exiting through an emitter — is the one the (since deleted) `pre_close_verification` made
+# when it was ported ("an early return everywhere the script had an
 # early exit 0"), for the same reason: `sys.exit` inside a verb would be
 # caught by `never_fail`'s SystemExit passthrough and terminate the hook
 # process mid-dispatch, which on the command tier is exactly the shape a

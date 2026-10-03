@@ -187,9 +187,11 @@ ok "session launched"
 # server.
 if [ -n "${SHAKEOUT_RACE_DELAY:-}" ]; then
     say "race: submitting immediately, server delayed ${SHAKEOUT_RACE_DELAY}s"
-    # A Bash turn, because PreToolUse:Bash carries hook_pre_close_verification,
-    # a TOOL-TIER entry -- the thing that cannot run before its server.
-    printf 'Run exactly this bash command and nothing else: echo RACEPROBE' | T load-buffer -
+    # A subagent dispatch, because SubagentStart carries hook_subagent_start,
+    # a TOOL-TIER entry -- the thing that cannot run before its server. (The
+    # Bash turn this used to be carried hook_pre_close_verification, deleted at
+    # cleanup step A2, nexus-0r1uz.)
+    printf 'Use the Agent tool to dispatch one general-purpose subagent whose entire task is to reply with the word RACEPROBE. Then tell me what it said.' | T load-buffer -
     T paste-buffer -t S
     T send-keys -t S Enter
     wait_for 240 turn_ended_since "$(turn_stamp)" || true
@@ -206,8 +208,7 @@ fi
 # HOOK PROBE MODE (nexus-wauo1.37): one turn, chosen because it is the
 # cheapest single turn that provokes the largest slice of the mcp_tool
 # roster -- dispatching a subagent fires SubagentStart's hook_subagent_start,
-# and the turn's own Stop fires hook_stop_verification -- two of the five
-# mcp_tool handlers in one billed turn.
+# the one mcp_tool handler left in hooks.json.
 # No warmup turn: the Agent tool is a Claude Code built-in, not a deferred
 # MCP tool, so nothing here needs ToolSearch discovery first. Evidence is
 # read from $RUN/mcp-stdin.jsonl (the tee'd JSON-RPC stream into nx-mcp,
@@ -258,35 +259,14 @@ if [ -n "${SHAKEOUT_PROBE:-}" ]; then
     exit 0
 fi
 
-say "PreToolUse (Bash): the close gate and the two routing rules"
+say "PreToolUse (Bash): the two routing rules"
 prompt "Run this exact bash command and show me its output: echo shakeout-bash-ok" "Bash turn"
-
-say "PostToolUse (Write): the divergence-language guard"
-# NAME THE TOOL. "Create a file containing ..." let the model reach for Bash
-# (`cat >`), which is a perfectly good way to create a file and does not match
-# the PostToolUse matcher `Write|Edit`, so the guard correctly did not fire and
-# the census reported it NEVER FIRED. Measured: the session used Bash x2,
-# mcp__plugin_conexus_nexus__scratch and Agent, and no Write at all. A prompt
-# that leaves the tool to the model cannot test a tool-matched hook.
-prompt "Use the Write tool (not Bash) to create /home/nexus/repo/shakeout_note.md with the single line: shakeout wrote this. Then say WROTE." "Write turn"
 
 say "PreToolUse (mcp tool): auto-approve, and a real tool round-trip"
 prompt "Call mcp__plugin_conexus_nexus__scratch with action=put, content='shakeout scratch', tags='shakeout'. Then say DONE." "MCP tool turn"
 
-say "SubagentStart/SubagentStop + the RDR-184 EXPECT writer"
+say "SubagentStart"
 prompt "Use the Agent tool to dispatch one general-purpose subagent whose entire task is to reply with the word PONG. Then tell me what it said." "subagent turn"
-
-say "PostCompact"
-before_compact="$(turn_stamp)"
-T send-keys -t S "/compact" Enter
-# /compact is a full model round-trip, not a UI action; 45 s was a guess and
-# hook_post_compact did not appear. Wait for the turn sentinel like any other
-# turn, and say so out loud when it does not arrive rather than moving on.
-if wait_for 240 turn_ended_since "$before_compact"; then
-    ok "/compact completed"
-else
-    bad "/compact did not complete within 240 s (PostCompact cannot have fired)"
-fi
 
 say "SessionEnd"
 T send-keys -t S "/exit" Enter
@@ -312,11 +292,9 @@ if [ -n "${SHAKEOUT_CLI_VERSION:-}" ]; then
         done
         return 1
     }
-    for tok in shakeout-bash-ok WROTE DONE PONG; do
+    for tok in shakeout-bash-ok DONE PONG; do
         if said "$tok"; then ok "the session answered $tok"; else bad "no assistant message carries $tok: that turn was blocked or failed"; fi
     done
-    if [ -f "$HOME_DIR/repo/shakeout_note.md" ]; then ok "the Write turn wrote its file"
-    else bad "the Write turn left no file"; fi
     EXITS="$RUN/hook-exits.tsv"
     ROWS="$(awk 'END{print NR}' "$EXITS" 2>/dev/null || echo 0)"
     BLOCKED="$(awk -F'\t' '$3 == 2' "$EXITS" 2>/dev/null)"

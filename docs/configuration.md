@@ -355,52 +355,6 @@ Highly-accessed entries survive longer than their nominal TTL. Unaccessed entrie
 
 Expiry quarantines; it does not delete (RDR-207). `T2Database.expire(relevance_log_days=90)`, which the session-end hook and `nx memory expire` run, hides every entry past its effective TTL from get, search and list, and keeps the row. `nx memory reap` deletes a quarantined entry only once a rollup summary covers it, and `nx memory restore ID` brings one back as permanent; see [nx memory](cli-reference.md#nx-memory). The same call also purges the `relevance_log` telemetry table (RDR-061 E2) of entries older than 90 days, and those rows are deleted.
 
-## Verification
-
-Opt-in mechanical enforcement hooks that catch common agent failure modes: premature session closure and premature bead closure.
-
-```yaml
-# .nexus.yml
-verification:
-  on_stop: false          # Enable Stop hook — checks on session end (default: false)
-  on_close: false         # Enable bd-close gate — checks before closing a bead (default: false)
-  test_command: ""        # Auto-detected if omitted (see table below)
-  lint_command: ""        # Optional linter (currently advisory only)
-  test_timeout: 120       # Seconds; 0 = no timeout (default: 120)
-```
-
-### Activation
-
-**Both `on_stop` and `on_close` default to `false`.** A `verification:` section without either flag set does nothing. Projects opt in explicitly:
-
-```yaml
-verification:
-  on_stop: true    # Enable session-end checks
-  on_close: true   # Enable bead-close gate
-```
-
-### Auto-Detection
-
-If `test_command` is omitted but `on_stop` or `on_close` is `true`, the hook auto-detects from project marker files (first match wins):
-
-| Marker file | Test command |
-|---|---|
-| `pom.xml` | `mvn test` |
-| `build.gradle` / `build.gradle.kts` | `./gradlew test` |
-| `pyproject.toml` | `uv run pytest` |
-| `package.json` | `npm test` |
-| `Cargo.toml` | `cargo test` |
-| `Makefile` | `make test` |
-| `go.mod` | `go test ./...` |
-
-If no marker file is found and no command is configured, the test check is skipped with an advisory: "No test command configured or detected."
-
-### Behavior Reference
-
-**Stop hook** (`on_stop: true`): Fires when the agent ends a session. Advisory only — warns about uncommitted git changes and open beads (`bd list --status=in_progress`) but never blocks. The agent sees the warnings and can choose to address them.
-
-**bd-close gate** (`on_close: true`): Fires before `bd close` or `bd done` commands. Advisory only — warns when no review marker found in T1 scratch (from `/conexus:review-code`). Never blocks.
-
 ## File Locations
 
 | File | Purpose |

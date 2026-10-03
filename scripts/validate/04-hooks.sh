@@ -24,24 +24,10 @@ _session_event() {
 JSON
 }
 
-# Fake UserPromptSubmit event
-_prompt_event() {
-    cat <<'JSON'
-{"session_id": "validate-session-001", "prompt": "hello world"}
-JSON
-}
-
 # Fake PreToolUse event (for verification hooks)
 _pre_tool_event() {
     cat <<'JSON'
 {"session_id":"s","tool_name":"Write","tool_input":{"file_path":"/tmp/x","content":"y"}}
-JSON
-}
-
-# Fake SessionEnd / Stop event
-_stop_event() {
-    cat <<'JSON'
-{"session_id":"s","reason":"normal"}
 JSON
 }
 
@@ -53,27 +39,21 @@ JSON
 #
 # THE `|| true` IS GONE, AND THAT IS THE POINT. With it, this step was
 # vacuous: `run` treats a zero exit as a pass, and `|| true` made every
-# line exit zero whatever happened. It had been passing `stop_failure_
-# hook.sh` for some time against a file that does not exist under that
-# name (the real one is stop_failure_hook.py) — 127, swallowed, reported
-# green. Every module below returns exit 0 by contract (HookResult.
-# exit_code is 0 for every hook verb), so a non-zero now means an import error or a
+# line exit zero whatever happened. It had been passing a hook script
+# for some time against a file that does not exist under that name — 127,
+# swallowed, reported green. Every module below exits 0 by contract
+# (nx-hook forces 0 for every hook verb), so a non-zero now means an import error or a
 # crash in run(), which is exactly what a smoke step should catch.
 DRIVE="$REPO/tests/e2e/lib/drive_hook.sh"
 
 step "Hook modules (ported from bash at RDR-215)"
 run "auto_approve"                  bash -c "echo '$(_pre_tool_event)' | '$DRIVE' auto_approve"
-run "divergence_language_guard"     bash -c "echo '$(_prompt_event)' | '$DRIVE' divergence_language_guard"
-run "post_compact"                  bash -c "echo '$(_session_event)' | '$DRIVE' post_compact"
 # The three plugin Python scripts this file used to run directly
 # (session_start_hook.py, rdr_hook.py, t2_prefix_scan.py) were deleted at
 # nexus-z9cz2; these are their ports. t2_prefix_scan runs inside
 # subagent_start below.
 run "session_context"               bash -c "echo '$(_session_event)' | '$DRIVE' session_context"
 run "rdr_verb"                      bash -c "echo '$(_session_event)' | '$DRIVE' rdr_verb"
-run "pre_close_verification"        bash -c "echo '$(_stop_event)' | '$DRIVE' pre_close_verification"
-run "stop_failure"                  bash -c "echo '$(_stop_event)' | '$DRIVE' stop_failure"
-run "stop_verification"             bash -c "echo '$(_stop_event)' | '$DRIVE' stop_verification"
 run "subagent_start"                bash -c "echo '{\"subagent_type\":\"developer\"}' | '$DRIVE' subagent_start"
 
 step "hooks.json manifest"

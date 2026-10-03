@@ -17,13 +17,6 @@ equivalent is a contract break.
 several say so in a comment: a hook must never fail. Bash gets that by default;
 Python does not, so a ported hook is wrapped in :func:`never_fail`, which turns
 a crash into the same thing a hook that decided to stay silent produces.
-
-**One hook must not use this.** ``phase_review_close_requires_gate`` is the
-routing framework's only ``fail_closed: true`` rule
-(``conexus/hooks/scripts/routing/registry.yaml``), and failing open is exactly
-the wrong answer there — a crash would let a phase close without its gate. It
-needs a deny-emitting counterpart, not this boundary. Bead nexus-q02nx.21 owns
-that decision; do not reach for :func:`never_fail` on that hook by habit.
 """
 from __future__ import annotations
 
@@ -168,7 +161,6 @@ __all__ = [
     "permission_decision",
     "permission_request",
     "read_payload",
-    "stop_decision",
     "stream",
 ]
 
@@ -178,21 +170,18 @@ class HookResult:
     """What a hook decided.
 
     ``stdout`` is the rendered envelope line, or ``None`` for the many hooks
-    that are stdout-silent by contract. ``exit_code`` is 0 for every hook verb.
+    that are stdout-silent by contract. Every hook verb exits 0
+    (:func:`nexus._hook_runtime.entry.main` forces it), so there is no exit
+    code to carry.
 
-    ``crashed`` marks a result produced by :func:`never_fail`'s swallow rather
-    than by the verb returning. It exists because a ledger verb's exit code IS
-    its contract, so "the verb crashed" and "the verb legitimately returned 0"
-    must not be the same answer. Measured before the fix (bead nexus-q02nx.9):
-    a ledger verb that raised exited 0, indistinguishable from a clean
-    ``reconcile``, which bead ``.13`` would read as "nothing stranded" -- a
-    silent miss in the subsystem built to catch silent misses. Non-ledger verbs
-    ignore it and still exit 0, because for them a crash IS a hook choosing to
-    say nothing, which is what failing open means.
+    ``crashed`` marks a result produced by :func:`never_fail`'s swallow (or by
+    the tool tier's timeout bound) rather than by the verb returning, so a
+    caller can tell "the verb crashed" from "the verb legitimately said
+    nothing". Verbs ignore it and still exit 0, because a crash IS a hook
+    choosing to say nothing, which is what failing open means.
     """
 
     stdout: str | None = None
-    exit_code: int = 0
     crashed: bool = False
 
 
@@ -228,58 +217,6 @@ def read_payload(stream: IO[str]) -> dict | None:
     return data
 
 
-def structured_field(data: dict, name: str) -> dict:
-    """Read a payload field that is contractually an OBJECT, whatever shape it arrives in.
-
-    Returns the field as a dict, or ``{}`` when it is absent, null, or
-    something that is not an object and cannot be read as one.
-
-    This exists because the same field reaches a hook by two routes with
-    two shapes, and getting it wrong is SILENT. On the command tier the
-    payload is the harness's own stdin JSON, so ``tool_input`` is a real
-    dict. On the tool tier it arrives through a ``hooks.json`` ``input``
-    map (``"tool_input": "${tool_input}"``) whose substitution was measured
-    at bead nexus-q02nx.6 to deliver a structure -- but the tool's
-    parameter is typed ``Any``, so a caller that hands it the JSON *text*
-    is accepted just as readily, and the port's own ``isinstance(x, dict)``
-    checks then fell through to a default.
-
-    The damage was not a crash in any of the three affected hooks; it was
-    a plausible wrong answer. ``pre_close_verification`` read the whole
-    JSON blob as the command string, found no ``bd`` verb inside the JSON
-    quoting and allowed the close. (A third hook, the RDR-184 dispatch recorder, was
-    deleted at cleanup step A1, nexus-0r1uz.)
-    ``divergence_language_guard`` read an empty ``file_path`` and scanned
-    nothing. Three hooks, one boundary, and in every case the failure
-    looked exactly like the hook having nothing to say.
-
-    So: parse a string that holds an object, and be loud about anything
-    else. A field that arrives as a non-empty string which is NOT JSON, or
-    is JSON but not an object, is a shape this code does not understand,
-    and it logs at warning rather than returning ``{}`` quietly -- the
-    caller still gets ``{}`` and still fails open, because a hook must
-    never take down the event it observes, but the log line names the
-    field and the hook.
-    """
-    value = data.get(name)
-    if isinstance(value, dict):
-        return value
-    if value is None or value == "":
-        return {}
-    if isinstance(value, str):
-        try:
-            parsed = json.loads(value)
-        except Exception:  # noqa: BLE001 — a hook never fails on its own payload
-            _emit("warning", "hook_structured_field_not_json", field=name)
-            return {}
-        if isinstance(parsed, dict):
-            return parsed
-        _emit("warning", "hook_structured_field_not_an_object", field=name, kind=type(parsed).__name__)
-        return {}
-    _emit("warning", "hook_structured_field_unexpected_type", field=name, kind=type(value).__name__)
-    return {}
-
-
 def _render(obj: dict) -> str:
     """Render one envelope as a single line, in the bash layer's spacing.
 
@@ -301,8 +238,8 @@ def permission_decision(
 ) -> str:
     """The ``hookSpecificOutput``/``permissionDecision`` envelope.
 
-    Field order follows ``pre_close_verification_hook.sh``'s shared ``deny()``
-    helper (line 38), which is the widest form: reason fields before
+    Field order follows the widest form the bash layer's shared ``deny()``
+    helper used: reason fields before
     ``additionalContext``, and ``systemMessage`` at the top level beside
     ``hookSpecificOutput`` rather than inside it.
     """
@@ -343,19 +280,6 @@ def permission_request(behavior: str) -> str:
             }
         }
     )
-
-
-def stop_decision(decision: str, *, reason: str | None = None) -> str:
-    """The top-level ``decision`` envelope the Stop and SubagentStop hooks use.
-
-    Note this is deliberately *not* a ``hookSpecificOutput`` shape — those two
-    events take the older top-level form, and mixing them silently drops the
-    decision.
-    """
-    envelope: dict[str, object] = {"decision": decision}
-    if reason is not None:
-        envelope["reason"] = reason
-    return _render(envelope)
 
 
 def never_fail(body: Callable[[], HookResult], hook: str) -> HookResult:

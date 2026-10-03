@@ -195,28 +195,6 @@ def test_a_raising_verb_still_logs_diagnosably_to_stderr(tmp_path: Path) -> None
     assert "boom" in proc.stderr
 
 
-# -- every verb forces exit 0 ----------------------------------------------
-
-_EXIT_CODE_VERB = textwrap.dedent(
-    """
-    def run(payload):
-        from nexus._hook_runtime._io import HookResult
-        return HookResult(exit_code=3)
-    """
-)
-
-
-def test_a_verb_always_exits_zero_even_with_a_nonzero_result(tmp_path: Path) -> None:
-    fixtures = _write_fixture_verb(tmp_path, "exit_code_verb", _EXIT_CODE_VERB)
-    env = _env(
-        tmp_path,
-        PYTHONPATH=str(fixtures),
-        _NX_HOOK_TEST_VERB_OVERRIDE=json.dumps({"nonzero-probe": "exit_code_verb"}),
-    )
-    proc = _run(["nonzero-probe"], env, stdin="{}")
-    assert proc.returncode == 0, proc.stderr
-
-
 # -- lazy resolution: the verb's own module loads before _io/logging setup -
 
 _PROBE_VERB = textwrap.dedent(

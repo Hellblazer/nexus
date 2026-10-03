@@ -98,7 +98,6 @@ _ROUTING_ALLOW_OWNERSHIP_PHRASE = "not yours to reach for"
 #: place precisely because each site was looked at on its own.
 _LIVE_HOOKS_WITH_ROUTING_ALLOW_ESCAPE = (
     PROJECT_ROOT / "src" / "nexus" / "hooks" / "subagent_git_write_gate.py",
-    PROJECT_ROOT / "src" / "nexus" / "hooks" / "phase_review_close_gate.py",
 )
 
 
@@ -123,10 +122,10 @@ def test_the_escape_offering_guards_are_still_enumerated() -> None:
 
     The list names files by path, and a path that stops resolving makes
     the check below pass by examining nothing — which is exactly what a
-    port does to a list of filenames. Both guards moved once already.
+    port does to a list of filenames. The guards moved once already.
     """
-    assert len(_LIVE_HOOKS_WITH_ROUTING_ALLOW_ESCAPE) == 2, (
-        "the routing framework has two guards offering the escape; if one "
+    assert len(_LIVE_HOOKS_WITH_ROUTING_ALLOW_ESCAPE) == 1, (
+        "the routing framework has one guard offering the escape; if one "
         "was added or removed, say so here rather than letting the parity "
         "check below quietly cover less"
     )
@@ -470,7 +469,7 @@ def _isolate_endpoint_discovery(tmp_path, monkeypatch):
     resolve against whatever is REALLY configured on the box running
     them (a live lease, a real service_url) instead of the scenario
     each test constructs -- the identical class of leak the routing-log/
-    dropped-writes/pre-close-verification isolation fixes in this same
+    dropped-writes isolation fixes in this same
     bead already closed for their own env surfaces."""
     cfg_dir = tmp_path / "isolated-nexus-config"
     cfg_dir.mkdir(exist_ok=True)
@@ -521,14 +520,14 @@ def test_log_routing_event_drop_record_preserves_rule_outcome_and_escape_reason(
     lib = _load_lib()
 
     lib.log_routing_event(
-        rule="phase_review_close_requires_gate",
+        rule="subagent_git_write_requires_orchestrator",
         outcome="escape",
         escape_reason="orchestrator sanctioned",
     )
 
     drops = _drop_records(drop_path)
     assert len(drops) == 1
-    assert drops[0]["rule"] == "phase_review_close_requires_gate"
+    assert drops[0]["rule"] == "subagent_git_write_requires_orchestrator"
     assert drops[0]["outcome"] == "escape"
     assert drops[0]["escape_reason"] == "orchestrator sanctioned"
 

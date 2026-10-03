@@ -58,7 +58,6 @@ class TestSilentNoOp:
         result = run({"session_id": sid})
 
         assert not result.stdout
-        assert result.exit_code == 0
         assert {p.name: p.read_text() for p in tmp_path.iterdir()} == before, (
             "the verb must neither create nor rewrite any state file"
         )

@@ -2,29 +2,14 @@
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 """Tool-tier hook registration on ``nx-mcp`` (RDR-215 Approach items 1 and 4).
 
-Every conexus ``hooks.json`` entry other than ``SessionStart`` and
-``phase_review_close_requires_gate`` becomes an ``mcp_tool`` call against a
-``hook_<name>`` tool registered here. This module was the registration
-*mechanism* only (bead nexus-q02nx.3); bead nexus-q02nx.4 lands the first
-real port, ``hook_auto_approve`` (``nexus.hooks.auto_approve``), still
-registered here with the ``hooks.json`` re-declaration deferred to beads
-nexus-q02nx.21/.22 -- the tool answers live on ``nx-mcp`` today, but the
-bash script it ports (``conexus/hooks/scripts/auto-approve-nx-mcp.sh``) is
-still what ``hooks.json`` actually wires. Every port after this one plugs
-in with one line: a new :class:`HookToolSpec` appended to :data:`HOOK_TOOLS`,
-naming the ported module's ``run(payload) -> HookResult``
+Every conexus ``hooks.json`` ``mcp_tool`` entry calls a ``hook_<name>`` tool
+registered here. This module was the registration *mechanism* only (bead
+nexus-q02nx.3); today it carries ``hook_auto_approve``
+(``nexus.hooks.auto_approve``) and ``hook_subagent_start``
+(``nexus.hooks.subagent_start``). Every port plugs in with one line: a new
+:class:`HookToolSpec` appended to :data:`HOOK_TOOLS`, naming the ported
+module's ``run(payload) -> HookResult``
 (``src/nexus/_hook_runtime/_io.py``).
-
-**Never registers ``phase_review_close_requires_gate`` here.** That hook is
-the routing framework's one ``fail_closed: true`` rule
-(``conexus/hooks/scripts/routing/registry.yaml``; see ``_io.py``'s module
-docstring). On this tier a crash reads as ``isError=False``/allow (below),
-which is exactly the wrong answer for a hook whose contract is "a crash
-still emits a deny envelope" -- it belongs on the command tier (``nx-hook``)
-instead, where the process can still write that envelope before it exits.
-:func:`register_hook_tools` refuses that name outright (see
-``_NEVER_TOOL_TIER``) rather than relying on nobody ever adding it by habit
-or via a future "walk every hook module" sweep.
 
 **The tool boundary.** Each registered tool calls the module's ``run()``
 through :func:`nexus._hook_runtime._io.never_fail` -- the shared swallow
@@ -80,11 +65,6 @@ from pydantic import Field as _PydanticField
 from nexus._hook_runtime._io import HookResult, never_fail
 from nexus.hooks.auto_approve import run as _run_auto_approve
 from nexus.hooks.subagent_start import run as _run_subagent_start
-from nexus.hooks.post_compact import run as _run_post_compact
-from nexus.hooks.divergence_language_guard import run as _run_divergence_language_guard
-from nexus.hooks.stop_failure import run as _run_stop_failure
-from nexus.hooks.pre_close_verification import run as _run_pre_close_verification
-from nexus.hooks.stop_verification import run as _run_stop_verification
 
 __all__ = [
     "DECIDING_HOOKS",
@@ -108,19 +88,14 @@ __all__ = [
 #: ``agent``, ``command`` and ``http`` -- and ``mcp_tool`` is not one of
 #: them; the only posture the guide states for it is "non-blocking error",
 #: and its output is read as context. Measured 2026-09-20 on CLI 2.1.278
-#: against the conexus 7.55.0 pin, which wired all three of these as
+#: against the conexus 7.55.0 pin, which wired the deciding hooks as
 #: ``mcp_tool``: a ``bd close`` naming a bead with NO review-completed
 #: marker was allowed through to ``bd`` and closed it, while the same
-#: payload handed straight to ``pre_close_verification.run()`` returned a
-#: correct, fully-worded deny. The gate was inert for the life of that
-#: release and nothing said so, because a hook that declines to speak and
-#: a hook whose verdict is discarded look identical from outside.
-#:
-#: This is the same hazard ``_NEVER_TOOL_TIER`` already guards for
-#: ``phase_review_close_requires_gate``, one step weaker: that hook must
-#: not REGISTER here at all, because a crash at this boundary reads as
-#: allow and its contract is that a crash still denies. These may
-#: register; they must not be wired.
+#: payload handed straight to the hook's ``run()`` returned a correct,
+#: fully-worded deny. The gate was inert for the life of that release and
+#: nothing said so, because a hook that declines to speak and a hook whose
+#: verdict is discarded look identical from outside. (That bd-close gate was
+#: deleted at cleanup step A2, nexus-0r1uz; the hazard it measured stays.)
 #:
 #: ``tests/test_deciding_hooks_are_command_tier.py`` walks the real
 #: ``hooks.json`` and fails if any name here is wired as an ``mcp_tool``,
@@ -128,7 +103,6 @@ __all__ = [
 #: verdict-returning hook is added here in the same change that writes it.
 DECIDING_HOOKS: frozenset[str] = frozenset(
     {
-        "pre_close_verification",
         "auto_approve",
     }
 )
@@ -141,11 +115,12 @@ DECIDING_HOOKS: frozenset[str] = frozenset(
 #: refuses — the first storage-touching MCP tool call in a server process
 #: never returned. Measured 2026-09-22 on qwentescence: `tuple_registry` and
 #: `hook_stop_verification` both blocked past 300s, while `hook_auto_approve`
-#: and `hook_stop_failure`, which touch no storage, returned in 0.0s. The
+#: and `hook_stop_failure`, which touch no storage, returned in 0.0s (the
+#: two stop hooks were deleted at cleanup step A3, nexus-0r1uz). The
 #: blocked thread sat in `T2Database.__init__` importing numpy's C extension;
 #: the same import outside that process takes 0.08s, including from a worker
 #: thread under an asyncio loop, and the same tool on Linux returns its
-#: endpoint error in 0.5s. `hooks.json` wires `hook_stop_verification` on
+#: endpoint error in 0.5s. `hooks.json` wired `hook_stop_verification` on
 #: Stop, so `claude -p` answered and then sat there — the reported symptom.
 #:
 #: WHY A BOUND RATHER THAN A CURE FOR THAT IMPORT. The import pathology is
@@ -175,25 +150,6 @@ DECIDING_HOOKS: frozenset[str] = frozenset(
 #: harness kills the process outright and nothing here is reachable. It
 #: exists so an unwired spec still has a bound, not because 30s means
 #: anything in particular.
-#:
-#: `stop_verification` is the one spec below its event's number: Stop allows
-#: 180s and this is 90. Read that 90 honestly, because two earlier drafts of
-#: this comment did not.
-#:
-#: Its worst legitimate case is 60s — `_git_is_dirty` and
-#: `_beads_in_progress`, 30s of subprocess timeout each. But both sit behind
-#: an early return in `stop_verification.run()`: they are reached only when
-#: the config read succeeds AND `on_stop` is true. The call that actually
-#: blocks, `_read_config`, runs BEFORE either. So on the hanging path the
-#: subprocess budget justifies nothing at all, and 90 is simply how long a
-#: Windows user waits at session end. It is half of what Stop allows, which
-#: is the whole of its defence.
-#:
-#: The subprocess arithmetic carries a second hole worth naming: it assumes
-#: `subprocess.run(timeout=N)` caps execution, and the measurement above —
-#: a 5s timeout still running at 25s — disproves that for this exact shape.
-#: What makes the blocked path finite is `Thread.join(timeout)` here, which
-#: does not depend on any of it. The number only decides how long finite is.
 #:
 #: WHAT A TIMEOUT LEAVES BEHIND. Python cannot kill a thread, so the blocked
 #: `run()` keeps running, and on Windows it stays blocked for the life of the
@@ -270,11 +226,6 @@ class HookToolSpec:
 # One entry per ported hook module (RDR-215 Approach item 4). The first real
 # port is bead nexus-q02nx.4 (auto-approve-nx-mcp.sh -> hook_auto_approve).
 # Adding a hook after that is one line: append a HookToolSpec here.
-#
-# `phase_review_close_requires_gate` NEVER belongs in this tuple -- see the
-# module docstring and `_NEVER_TOOL_TIER` below, which refuses it even if a
-# future edit adds it by habit or via an automated "every hook module"
-# sweep. Do not build such a sweep without carrying that exclusion with it.
 HOOK_TOOLS: tuple[HookToolSpec, ...] = (
     HookToolSpec(
         name="auto_approve",
@@ -294,55 +245,6 @@ HOOK_TOOLS: tuple[HookToolSpec, ...] = (
         summary=(
             "auto-approves an explicit allowlist of conexus MCP tools "
             "(plus any hook_ tool) on PreToolUse and PermissionRequest"
-        ),
-    ),
-    HookToolSpec(
-        name="stop_verification",
-        run=_run_stop_verification,
-        fields=("session_id",),
-        field_docs={
-            "session_id": (
-                "The session whose closed beads are checked for a "
-                "review-completed marker."
-            ),
-        },
-        summary=(
-            "warns at session close about uncommitted changes, beads still "
-            "in progress, and beads closed without a review marker — "
-            "advisory only, it can never block a stop"
-        ),
-        # Above the default because this one shells out twice — `git status`
-        # and `bd`, each with its own 30s subprocess timeout in
-        # nexus.hooks.stop_verification — so 60s of legitimate work is
-        # reachable. Still well under the 180s `hooks.json` gives its Stop
-        # entry, which is the ceiling that matters: past that the harness has
-        # stopped waiting and finishing buys nothing.
-        timeout_s=90.0,
-    ),
-    HookToolSpec(
-        name="pre_close_verification",
-        run=_run_pre_close_verification,
-        fields=("session_id", "tool_name", "tool_input"),
-        structured_fields=frozenset({"tool_input"}),
-        field_docs={
-            "session_id": (
-                "Forced onto every nx subprocess this hook spawns. It runs "
-                "detached from any live server, so without it the marker "
-                "lookup resolves a sibling session's machine-wide pointer."
-            ),
-            "tool_name": (
-                "Only Bash is gated. Everything else allows immediately."
-            ),
-            "tool_input": (
-                "The Bash call. Its command is inspected for a bd "
-                "create/close/done; a close requires a review-completed "
-                "marker in T1 scratch naming BOTH standing reviewers."
-            ),
-        },
-        summary=(
-            "the close gate: refuses a bd close whose beads have no "
-            "review-completed marker, and warns on a bd create that omits "
-            "commitment metadata while an RDR close is active"
         ),
     ),
     HookToolSpec(
@@ -369,77 +271,7 @@ HOOK_TOOLS: tuple[HookToolSpec, ...] = (
             "assembles the context a starting subagent needs — linked RDRs, T2 memory, T1 scratch and the tool guidance its agent type calls for — under a measured byte budget"
         ),
     ),
-    HookToolSpec(
-        name="post_compact",
-        # PostCompact wires this at 10s in hooks.json; the bound sits a
-        # second under that — see DEFAULT_HOOK_TOOL_TIMEOUT_S for why the
-        # margin exists (nexus-dgvsz: a late answer tears down the transport).
-        timeout_s=9.0,
-        run=_run_post_compact,
-        fields=('session_id',),
-        field_docs={
-            "session_id": (
-                "Forced onto the bd and nx subprocesses. The machine-wide session pointer is clobbered by any second top-level session, so an unforced read returns a sibling's scratch."
-            ),
-        },
-        summary=(
-            "re-injects active work after a compaction — in-progress beads and session scratch, the part SessionStart(compact) does not cover"
-        ),
-    ),
-    HookToolSpec(
-        name="divergence_language_guard",
-        # PostToolUse wires this at 10s in hooks.json; the bound sits a
-        # second under that — see DEFAULT_HOOK_TOOL_TIMEOUT_S for why the
-        # margin exists (nexus-dgvsz: a late answer tears down the transport).
-        timeout_s=9.0,
-        run=_run_divergence_language_guard,
-        fields=('session_id', 'tool_name', 'tool_input'),
-        structured_fields=frozenset({"tool_input"}),
-        field_docs={
-            "session_id": "Forced onto the T1 write this hook makes when it fires.",
-            "tool_name": "Only Write and Edit are watched.",
-            "tool_input": (
-                "Its file_path decides everything: only a file under docs/rdr/post-mortem/ is scanned, because the pattern bank is tuned for that genre."
-            ),
-        },
-        summary=(
-            "flags divergence language in a post-mortem just written — advisory only, since acknowledged deferral and silent scope reduction look alike and only a reader can tell them apart"
-        ),
-    ),
-    HookToolSpec(
-        name="stop_failure",
-        # StopFailure wires this at 5s in hooks.json; the bound sits a
-        # second under that — see DEFAULT_HOOK_TOOL_TIMEOUT_S for why the
-        # margin exists (nexus-dgvsz: a late answer tears down the transport).
-        timeout_s=4.0,
-        run=_run_stop_failure,
-        fields=("error", "error_details"),
-        field_docs={
-            "error": (
-                "The failure class. Anything outside the seven known types "
-                "is normalised to \"unknown\" rather than passed through."
-            ),
-            "error_details": (
-                "Free text, truncated at 200 characters. May be null, which "
-                "is why the port coerces before slicing."
-            ),
-        },
-        # The "files no issue, remembers nothing" posture is nexus-0dj7e's
-        # ruling: a transient API failure is an infra event, not a finding.
-        # The bead id lives here rather than in the summary, which is a tool
-        # description the model reads (test_mcp_tool_description_lint).
-        summary=(
-            "observes a StopFailure event and does nothing else — transient "
-            "API failures are infra events, so it files no issue and "
-            "remembers nothing; debug trace only"
-        ),
-    ),
 )
-
-
-#: Names that must never reach this tier. See the module docstring's
-#: "Never registers phase_review_close_requires_gate here" paragraph.
-_NEVER_TOOL_TIER = frozenset({"phase_review_close_requires_gate"})
 
 
 def flatten_field_name(dotted: str) -> str:
@@ -632,15 +464,6 @@ def _make_tool_function(spec: HookToolSpec) -> Callable[..., CallToolResult]:
 
 
 def _register_one(mcp: FastMCP, spec: HookToolSpec) -> None:
-    if spec.name in _NEVER_TOOL_TIER:
-        raise ValueError(
-            f"{spec.name!r} is the routing framework's one fail_closed hook "
-            "(RDR-215 Approach item 1) and must never register as a "
-            "tool-tier hook_<name> -- a tool-boundary crash reads as "
-            "isError=False/allow here, which is exactly wrong for it. It "
-            "takes the command tier (nx-hook) instead, where a crash can "
-            "still emit a deny envelope before the process exits."
-        )
     mcp.tool(
         name=f"hook_{spec.name}",
         title=f"Hook: {spec.name}",

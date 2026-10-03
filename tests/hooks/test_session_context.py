@@ -170,7 +170,6 @@ class TestRunHookResultContract:
     def test_minimal_output_is_just_the_capabilities_block(self, monkeypatch, tmp_path: Path) -> None:
         self._isolate(monkeypatch, tmp_path)
         result = session_context.run(None)
-        assert result.exit_code == 0
         assert result.stdout is not None
         assert result.stdout.startswith("## nx Capabilities")
         assert "## T2 Memory" not in result.stdout
@@ -184,7 +183,6 @@ class TestRunHookResultContract:
         result_none = session_context.run(None)
         result_payload = session_context.run({"session_id": "irrelevant", "source": "startup"})
         assert result_none.stdout == result_payload.stdout
-        assert result_none.exit_code == result_payload.exit_code == 0
 
     def test_hook_result_is_the_dataclass_from_hook_runtime_io(self, monkeypatch, tmp_path: Path) -> None:
         self._isolate(monkeypatch, tmp_path)

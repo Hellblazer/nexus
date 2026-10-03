@@ -58,7 +58,12 @@ HOOKS_JSON = REPO_ROOT / "conexus" / "hooks" / "hooks.json"
 #: depends on this session's MCP connection, and the SubagentStart/
 #: SubagentStop event it observes fires whether or not that connection
 #: exists. Third deliberate migration off the tier.
-_MIN_MCP_TOOL_ENTRIES = 5
+#:
+#: 5 -> 1 at cleanup steps A2 and A3 (nexus-0r1uz): the Stop, StopFailure,
+#: PostCompact and divergence-language `mcp_tool` entries are deleted outright
+#: (not migrated); `hook_subagent_start` is the one left. Deliberate deletion,
+#: not the extractor going blind.
+_MIN_MCP_TOOL_ENTRIES = 1
 #: 3 -> 6 at bead nexus-q02nx.22, which converted the last four shell-form
 #: entries (`nx upgrade --auto ... || echo ...`, `nx self gc ... || true`,
 #: `nx hook session-start`, `nx-session-end-launcher`) to exec form. Three of
@@ -78,7 +83,8 @@ _MIN_MCP_TOOL_ENTRIES = 5
 #: deleted (the verb stays registered as a silent no-op for older plugins).
 #: 15 -> 10 at cleanup step A1 (nexus-0r1uz): the RDR-184 ledger and RDR-205
 #: projector entries and the behaviour census entry are deleted.
-_MIN_NX_HOOK_ENTRIES = 10
+#: 10 -> 9 at cleanup step A2: the bd-close gate's shim entry is deleted.
+_MIN_NX_HOOK_ENTRIES = 9
 
 
 def _declared() -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:

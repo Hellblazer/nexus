@@ -151,7 +151,8 @@ def _collect_plugin_root_refs() -> list[tuple[str, str]]:
     return results
 
 
-_MIN_HOOKS_JSON_ENTRIES_EXAMINED = 20
+#: 20 -> 15 at cleanup steps A2 and A3: six entries deleted outright (21 -> 15).
+_MIN_HOOKS_JSON_ENTRIES_EXAMINED = 15
 """Non-vacuity floor for the sub-entry walk in
 :func:`TestHooks.test_hooks_json_names_no_deleted_runner_helper`.
 

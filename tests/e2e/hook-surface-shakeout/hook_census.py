@@ -54,17 +54,11 @@ SILENT_BY_DESIGN = {"nx-hook preflight"}
 EXCLUDED_BY_HARNESS = {"nx-hook upgrade-auto", "nx-hook self-gc"}
 
 #: Real, documented events (code.claude.com/docs/en/hooks.md) that this
-#: harness cannot provoke. Verified with claude-code-guide rather than
-#: guessed, because "the event name is wrong" and "the event did not occur"
-#: are the same observation and only one of them is a defect:
-#:   PostCompact fires only when compaction ACTUALLY occurs -- `/compact` on
-#:     a short session has nothing to compact, so the turn completes and no
-#:     hook runs.
-#:   StopFailure fires only on an API error, which this run does not induce.
-NOT_PROVOKED = {
-    "hook_post_compact": "PostCompact fires only when compaction actually occurs",
-    "hook_stop_failure": "StopFailure fires only on an API error",
-}
+#: harness cannot provoke, verified rather than guessed, because "the event
+#: name is wrong" and "the event did not occur" are the same observation and
+#: only one of them is a defect. Empty since cleanup step A3 (nexus-0r1uz)
+#: deleted the PostCompact and StopFailure hooks that were the two entries.
+NOT_PROVOKED: dict[str, str] = {}
 
 
 def label(entry: dict) -> str:
@@ -182,12 +176,9 @@ def transcript_trouble(paths: list[pathlib.Path]) -> list[str]:
 #: The mcp_tool handlers one subagent-dispatch turn provokes (SHAKEOUT_HOOK_PROBE,
 #: nexus-wauo1.37). The RDR-184 ledger writers and RDR-205 projectors that
 #: used to be among them were deleted at cleanup step A1 (nexus-0r1uz).
-#: What remains: ``hook_subagent_start`` (mcp_tool) and the turn's own
-#: ``hook_stop_verification``.
-PROBE_HOOKS: tuple[str, ...] = (
-    "hook_subagent_start",
-    "hook_stop_verification",
-)
+#: What remains: ``hook_subagent_start`` (mcp_tool). The Stop hook
+#: ``hook_stop_verification`` was deleted at cleanup step A3.
+PROBE_HOOKS: tuple[str, ...] = ("hook_subagent_start",)
 
 
 def probe_main(jsonl: pathlib.Path) -> int:

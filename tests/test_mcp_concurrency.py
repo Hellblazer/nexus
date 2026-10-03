@@ -66,9 +66,7 @@ def _t2_writer(db_path_str: str, project: str, n: int):
     which is deliberately never an env var precisely so it cannot leak into
     a subprocess. T2Database's ``put`` is an HTTP write through
     ``guard_production_write``, so this child must carry the real opt-in
-    in its own environment, exactly as
-    ``tests/hooks/test_pre_close_verification_hook.py``'s subprocess
-    round-trip does for its own write subprocess.
+    in its own environment.
     """
     import os as _os
     import time as _time

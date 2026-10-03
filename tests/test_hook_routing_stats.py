@@ -325,7 +325,7 @@ def test_registered_rules_sees_the_REAL_shipped_manifest(tmp_path):  # noqa: ARG
     )
     # Named, not just counted: a count floor would survive a rename.
     assert "subagent_git_write_requires_orchestrator" in rules
-    assert "phase_review_close_requires_gate" in rules
+    assert "credential_print_guard" in rules
 
 
 def test_registered_rules_none_when_absent(tmp_path):

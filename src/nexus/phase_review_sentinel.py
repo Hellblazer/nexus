@@ -2,9 +2,10 @@
 """RDR-121 phase-review-gate sentinel.
 
 The /conexus:phase-review-gate command writes a sentinel file on a PASSED
-outcome. The phase_review_close_requires_gate routing hook reads the
-sentinel before allowing a phase-review bead close. Sentinel + reader
-must ship together (RDR-121 P2 hard coupling).
+outcome. The phase_review_close_requires_gate routing hook that read the
+sentinel before allowing a phase-review bead close was deleted at cleanup
+step A2 (nexus-0r1uz); nothing reads the sentinel any more, and the writer
+is kept as product code.
 
 Sentinel path: ``${TMPDIR:-/tmp}/nx-phase-gate-sentinel/<claude_pid>-<rdr-id>-<phase>.json``
 

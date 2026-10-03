@@ -74,12 +74,7 @@ def test_core_registered_tools():
         # ones a hooks-only test run cannot see: measured on 7c7eebbd4,
         # which was green locally and red on both CI shards.
         "hook_auto_approve",              # bead .4
-        "hook_stop_verification",         # bead .13
-        "hook_pre_close_verification",   # bead .17
         "hook_subagent_start",            # bead .18
-        "hook_post_compact",              # bead .19
-        "hook_divergence_language_guard", # bead .19
-        "hook_stop_failure",              # bead .21
     }
     assert expected == tool_names, f"Missing: {expected - tool_names}, Extra: {tool_names - expected}"
 

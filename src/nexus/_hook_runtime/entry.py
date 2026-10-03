@@ -42,7 +42,7 @@ docstring and nothing else. The cheap path is now cheap all the way
 through.
 
 That margin is the whole point, and it is only visible on the cheap
-hooks. ``phase_review_close_requires_gate`` is stdlib-only and costs
+hooks. The phase-review close gate (deleted at cleanup step A2) was stdlib-only and cost
 0.03 s end to end as bash on this box -- 0.04 s in bead .2's harness --
 so a port paying 0.06 s to reach
 ``never_fail`` would have been a hot-path regression rather than the
@@ -51,15 +51,12 @@ deliberately not optimised here: it genuinely needs ``nexus.session``,
 pays for it legitimately, and its own 187-221 ms is mostly real I/O --
 a bounded tuple-surface probe and a stale-MCP-host scan -- against the
 ~904 ms ``nx hook session-start`` Click path it replaces (bead
-nexus-q02nx.5, median of 10). Judge this module by the close gate, not
+nexus-q02nx.5, median of 10). Judge this module by the cheap verbs, not
 by ``session-start`` -- but on the right number.
 
 What 0.02 s measures is the dispatch FLOOR -- a synthetic stdlib-only
-verb through the real entry point. That is the figure the close gate's
-COMMON path will pay, the one that runs on every Bash call and exits
-early via ``_lib.allow()``. Its narrow phase-review branch additionally
-imports ``nexus.session`` and shells out to ``bd show``; that cost is
-real, is its own, and stays unmeasured until the port lands.
+verb through the real entry point. That is the figure the common path of
+a hook that runs on every Bash call pays when it exits early.
 
 ``tests/hooks/test_hook_runtime_thin.py`` keeps it that way: it asserts
 this package's ``__init__`` imports nothing and that the modules beside
@@ -105,29 +102,18 @@ at the 7.58.0 release blocker (nexus-t9klx): seven such entries reached
 version-lockstep hook that upgrades the CLI was one of the seven, so
 nothing could recover on its own.
 
-**Be plain about what fail-open COSTS for a DECIDING gate.** Two of the
-seven verbs nexus-t9klx measured are deciding gates --
-``pre-close-verification`` and ``phase-review-close-gate`` -- registered
-in ``nexus.mcp.hooks._NEVER_TOOL_TIER`` precisely because a crash at the
-tool boundary renders as allow and these two rules must still deny. This
-exit-0 path is a THIRD way for that same failure shape to occur, at the
-command-tier boundary instead: on a CLI older than the plugin, an unknown
-deciding-gate verb means the gate LITERALLY DOES NOT RUN and the action it
-would have gated -- a ``bd close`` with no review marker, a phase boundary
-closed without its cross-walk -- is ALLOWED, exactly as if the gate had
-been deleted. This is NOT "the same contract every real verb gets" (an
-earlier draft of this docstring claimed that, and it was wrong): a real
-verb's ``never_fail`` failure is a crash inside code that ran; this is code
-that never ran at all, and calling the two the same thing hides the
-difference between "the gate tried and gave up" and "the gate was never
-invoked." The trade actually being made is: a session blocked outright
-with no self-heal path (exit 2, the 7.58.0 incident) against a gate that
-is silently absent for the minutes-to-hours between the plugin update
-landing and the session's own version-lockstep hook finishing its
-detached upgrade. That window is bounded and self-closing; a blocked
-session is not. Nothing here narrows the window further than that -- it is
-the accepted cost of choosing recoverable over safe for this one case, not
-a claim that the gate is somehow still enforced.
+**Be plain about what fail-open COSTS for a DECIDING hook.** A deciding
+hook (``auto-approve``, a PreToolUse permission) is exactly the shape for
+which this exit-0 path is a way for a failure to read as allow: on a CLI
+older than the plugin, an unknown deciding verb means the hook LITERALLY DOES
+NOT RUN, and what it would have decided is left to Claude Code's own
+permission flow, exactly as if the hook had been deleted. That is code that
+never ran, which is not the same thing as a crash inside code that did. The
+trade made is a session blocked outright with no self-heal path (exit 2, the
+7.58.0 incident) against a hook that is silently absent for the minutes to
+hours between the plugin update landing and the session's own
+version-lockstep hook finishing its detached upgrade. That window is bounded
+and self-closing; a blocked session is not.
 
 """
 from __future__ import annotations
@@ -169,14 +155,8 @@ VERB_TABLE: dict[str, str] = {
     # conexus/hooks/scripts/version_lockstep_hook.py for good (pinned by
     # tests/hooks/test_lockstep_survives_cli_skew.py); the unwired verb was
     # deleted at nexus-rcoze.
-    # The routing framework's one fail_closed rule (nexus-t9klx). It was
-    # already command-tier-only by ruling -- nexus.mcp.hooks._NEVER_TOOL_TIER
-    # refuses to register it as an mcp_tool, because a tool-boundary crash
-    # renders as allow and this rule must still deny. The port keeps it here.
-    "phase-review-close-gate": "nexus.hooks.phase_review_close_gate",
-    # The routing framework's other guard, and the deliberately FAIL-OPEN
-    # one (nexus-t9klx). Its posture is the opposite of the line above and
-    # stays that way: registry.yaml carries Sam's 2026-07-25 reasoning that
+    # A routing framework guard, deliberately FAIL-OPEN
+    # one (nexus-t9klx). registry.yaml carries Sam's 2026-07-25 reasoning that
     # a crash in a broken guard must not brick every agent's Bash. Porting
     # it emptied `routing/` of code -- `routing/_lib.py` had no plugin
     # importer left and went with it.
@@ -196,27 +176,17 @@ VERB_TABLE: dict[str, str] = {
     # to do inside the hook interpreter that is running out of one.
     "upgrade-auto": "nexus.hooks.upgrade_auto",
     "self-gc": "nexus.hooks.self_gc",
-    # The DECIDING hooks (bead nexus-17i1n). Each of these was wired
-    # as an `mcp_tool` entry at bead nexus-q02nx.21 and shipped inert in
-    # conexus 7.55.0: an `mcp_tool` hook CANNOT return a permission or stop
+    # The DECIDING hook (bead nexus-17i1n). `auto-approve` was wired as an
+    # `mcp_tool` entry at bead nexus-q02nx.21 and shipped inert in conexus
+    # 7.55.0: an `mcp_tool` hook CANNOT return a permission or stop
     # decision. Claude Code's own hooks guide lists the four hook types
     # that can decide -- prompt, agent, command, http -- and `mcp_tool` is
     # not among them; its documented failure posture is "non-blocking
     # error", and its output is read for context, never for a verdict.
-    # Measured 2026-09-20 against CLI 2.1.278 with the 7.55.0 pin: a
-    # `bd close` naming a bead with no review marker reached `bd` itself
-    # and closed it, while the same payload through `run()` returns a
-    # correct deny. So these take the command tier, for the same
-    # reason `phase_review_close_requires_gate` was never allowed on the
-    # tool tier at all (see nexus.mcp.hooks' `_NEVER_TOOL_TIER`).
-    #
-    # They keep their tool-tier registrations, which stay useful for
-    # diagnosis and for a caller that wants the verdict as data; what
-    # changed is which tier `hooks.json` WIRES. `_DECIDING_HOOKS` in
-    # nexus.mcp.hooks names the set, and
+    # So it takes the command tier. Its tool-tier registration stays useful
+    # for diagnosis. `DECIDING_HOOKS` in nexus.mcp.hooks names the set, and
     # tests/test_deciding_hooks_are_command_tier.py refuses a hooks.json
-    # that wires any of them as an mcp_tool again.
-    "pre-close-verification": "nexus.hooks.pre_close_verification",
+    # that wires any of them as an mcp_tool.
     "auto-approve": "nexus.hooks.auto_approve",
     # The interactive MCP connection barrier (bead nexus-veh77, Sam's
     # 2026-09-23 ruling). SessionStart, `startup` matcher only: waits,

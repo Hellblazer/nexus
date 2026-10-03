@@ -9,8 +9,8 @@ hook event, forever. A wrong import here makes hooks slower; it never makes
 them wrong, so the whole test suite stays green while the margin the port
 was for disappears.
 
-The margin is real and small. ``phase_review_close_requires_gate`` runs
-stdlib-only and costs 0.03 s end to end as bash on this box (0.04 s in bead
+The margin is real and small. The phase-review close gate (deleted at cleanup
+step A2) ran stdlib-only and cost 0.03 s end to end as bash on this box (0.04 s in bead
 .2's harness). Before nexus-br31l
 these modules lived in ``nexus.hooks``, whose ``__init__`` imports
 ``structlog`` and ``nexus.session``, and Python runs a package's
@@ -84,7 +84,7 @@ def test_package_init_imports_nothing() -> None:
 
     Not even a convenience re-export belongs here: ``from ._io import
     never_fail`` would import ``_io`` for a caller who only wanted
-    ``_config``, which is the exact mistake ``nexus.hooks`` makes with
+    ``entry``, which is the exact mistake ``nexus.hooks`` makes with
     ``nexus.session``.
     """
     init = _PKG / "__init__.py"

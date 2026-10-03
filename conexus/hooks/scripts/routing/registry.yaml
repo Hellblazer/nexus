@@ -19,7 +19,7 @@
 #                     discoverability
 #   fail_closed:      bool; default false. true means hook crashes deny
 #                     the call rather than allow it. Reserve for safety-
-#                     critical invariants (phase-review close gate).
+#                     critical invariants (no rule uses it today).
 #
 # Example shape (commented; not yet active):
 #
@@ -55,17 +55,6 @@ rules:
     # an UNDETERMINABLE worktree state fails OPEN for commit/add (hygiene)
     # and CLOSED for the working-tree destroyers (silent data loss).
     fail_closed: false
-  phase_review_close_requires_gate:
-    hook_script: phase_review_close_requires_gate.py
-    matcher: Bash
-    mode: block
-    rationale: >-
-      bd close on a phase-review bead requires a fresh PASSED
-      /conexus:phase-review-gate sentinel; the cross-walk catches silent
-      scope reduction that test-validator and code-review-expert miss
-      by construction (see feedback_phase_closeout_scope_audit).
-    escape_token: "# routing-allow:"
-    fail_closed: true
   credential_print_guard:
     hook_script: credential_print_guard.py
     matcher: Bash

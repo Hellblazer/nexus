@@ -53,8 +53,8 @@
 # dispatch turn in each of two container runs against the identical image)
 # every one of the six `mcp_tool` hooks that turn provoked then (four of
 # them, the RDR-184 ledger and RDR-205 projector hooks, were deleted at
-# cleanup step A1, nexus-0r1uz; hook_subagent_start and hook_stop_
-# verification remain) -- fired identically with and without the override, per
+# cleanup step A1, nexus-0r1uz, and hook_stop_verification at step A3;
+# hook_subagent_start remains) -- fired identically with and without the override, per
 # `hook_census.py` itself reading the tee'd JSON-RPC stream into nx-mcp
 # (the hook's own effect, not the absence of a "not connected" error).
 # T2 `nexus_rdr/219-plugin-override-proof` carries the artifact paths.

@@ -103,8 +103,7 @@ conexus/
 │       ├── _endpoint_resolve.py       # Shared helper: stdlib endpoint precedence
 │       ├── _tuple_size_limits.py      # Shared helper: stdlib tuple size caps
 │       ├── _hook_logging.py           # Shared helper: configure logging before nexus imports
-│       ├── nx_hook_shim.py            # Runs `nx-hook <verb>` so an older CLI cannot block a session
-│       └── divergence-language-scan.py # Run by the wheel's divergence-language guard
+│       └── nx_hook_shim.py            # Runs `nx-hook <verb>` so an older CLI cannot block a session
 ├── .mcp.json                # Bundled MCP servers (nexus storage + sequential-thinking)
 ├── registry.yaml            # Single source of truth: agents, pipelines, aliases
 ├── CHANGELOG.md             # Version history (Keep a Changelog format)
@@ -289,14 +288,8 @@ is wired through the shim, which skips it with a notice instead.
 | `SessionStart` (matcher `startup`) | `hooks/scripts/nx_hook_shim.py mcp-connect-wait` | Wait, bounded (15s) and fail-open, for this session's `nx-mcp` to publish its connect marker before turn 1 can outrun the connection; on timeout, says tool-tier hooks will be skipped (RDR-215, nexus-veh77) |
 | `SessionEnd` | `nx-session-end-launcher` | Flush session-end bookkeeping (memory, beads, scratch) via a detached grandchild |
 | `UserPromptSubmit` | `hooks/scripts/mailbox_drain.py` | Claim, ack and render this session's RDR-205 mailbox rows; the unconditional delivery floor beneath the channel |
-| `PostCompact` | `hook_post_compact` | Re-prime context (memory, beads, scratch) after `/compact` |
-| `Stop` | `hook_stop_verification` | Opt-in session-end verification: tests + git state (see [Configuration § Verification](../docs/configuration.md#verification)) |
-| `StopFailure` | `hook_stop_failure` | Advisory on abnormal session termination |
-| `PreToolUse` (`Bash`) | `hooks/scripts/nx_hook_shim.py pre-close-verification` | Opt-in bd-close gate: verifies before `bd close` / `bd done` |
 | `PreToolUse` (`Bash`) | `hooks/scripts/routing/subagent_git_write_requires_orchestrator.py` | Deny index-writing / working-tree-destroying git verbs from subagents in the shared tree (RDR-184 Gap-4) |
 | `PreToolUse` (`Bash`) | `hooks/scripts/routing/credential_print_guard.py` | Deny commands that would reveal a Claude credential: a keychain read, a `.credentials.json` read, naming a protected token variable, or reading another process's environment (RDR-219 Gap 2, no escape) |
-| `PreToolUse` (`Bash`) | `hooks/scripts/routing/phase_review_close_requires_gate.py` | Deny `bd close` on a phase-review bead without a fresh PASSED gate sentinel (RDR-121 P2) |
-| `PostToolUse` | `hook_divergence_language_guard` | Advisory scan of RDR post-mortem writes for divergence-language patterns (RDR-065 Gap 2) |
 | `SubagentStart` | `hook_subagent_start` | Inject inherited context (active bead, session, MCP priority) into spawned subagents |
 | `PreToolUse` (`mcp__plugin_conexus_.*`) | `hooks/scripts/nx_hook_shim.py auto-approve` | Auto-approve nexus and nexus-catalog MCP tool calls; paired with the PermissionRequest entry below because the two events fire in different permission modes |
 | `PermissionRequest` (`mcp__plugin_conexus_.*`) | `hooks/scripts/nx_hook_shim.py auto-approve` | Auto-approve nexus and nexus-catalog MCP tool calls |
@@ -306,13 +299,12 @@ hook that returns a VERDICT — a `permissionDecision`, a `behavior`, a
 stop `decision` — belongs on the command tier, because an `mcp_tool`
 hook cannot return one. Claude Code names four hook types that carry a
 decision (`prompt`, `agent`, `command`, `http`) and `mcp_tool` is not
-among them; its output is read for context. The deciding hooks
-(`pre-close-verification`, `auto-approve`) were wired as
-`mcp_tool` in conexus 7.55.0 and were inert for that release —
-the close gate let an unreviewed `bd close` through while returning a
-correct deny to anything that called it directly. Each is still
-registered on both tiers, because the verdict is useful as data; only the
-command tier is wired. `nexus.mcp.hooks.DECIDING_HOOKS` is the list, and
+among them; its output is read for context. The deciding hook
+(`auto-approve`) was wired as `mcp_tool` in conexus 7.55.0 and was inert
+for that release (so was the bd-close gate, since deleted, which let an
+unreviewed `bd close` through while returning a correct deny to anything
+that called it directly). It is still registered on both tiers, because
+the verdict is useful as data; only the command tier is wired. `nexus.mcp.hooks.DECIDING_HOOKS` is the list, and
 `tests/test_deciding_hooks_are_command_tier.py` refuses a `hooks.json`
 that moves any of them back.
 

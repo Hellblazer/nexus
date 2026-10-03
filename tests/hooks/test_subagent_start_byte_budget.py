@@ -42,7 +42,7 @@ if not isinstance(payload, dict):
 result = never_fail(lambda: subagent_start.run(payload), "subagent_start")
 if result.stdout is not None:
     sys.stdout.write(result.stdout + "\\n")
-sys.exit(result.exit_code)
+sys.exit(0)
 """
 
 #: Shaped like a real dispatch: agent_id/agent_type/session_id/prompt_id,

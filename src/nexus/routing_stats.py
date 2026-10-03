@@ -259,7 +259,6 @@ def aggregate_from_store(
 #: perfectly -- which is exactly the symptom this function's own history
 #: records, one declaration-form change earlier.
 _VERB_RULE_NAMES: dict[str, str] = {
-    "phase-review-close-gate": "phase_review_close_requires_gate",
     "subagent-git-write-gate": "subagent_git_write_requires_orchestrator",
 }
 

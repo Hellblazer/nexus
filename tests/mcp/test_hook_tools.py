@@ -15,11 +15,10 @@ import pytest
 from mcp.server.fastmcp import FastMCP
 from mcp.types import CallToolResult
 
-from nexus._hook_runtime._io import HookResult, permission_decision, stop_decision
+from nexus._hook_runtime._io import HookResult, permission_decision
 from nexus.mcp.hooks import (
     HOOK_TOOLS,
     HookToolSpec,
-    _NEVER_TOOL_TIER,
     flatten_field_name,
     nest_payload,
     register_hook_tools,
@@ -244,22 +243,6 @@ class TestRegisterHookTools:
         assert [t.name for t in tools] == ["hook_probe"]
 
 
-# ── phase_review_close_requires_gate carve-out ────────────────────────────
-
-class TestPhaseReviewCloseNeverOnThisTier:
-    def test_the_name_is_in_the_forbidden_set(self):
-        assert "phase_review_close_requires_gate" in _NEVER_TOOL_TIER
-
-    def test_registering_it_raises(self):
-        mcp = _fresh_mcp()
-        spec = HookToolSpec(name="phase_review_close_requires_gate", run=lambda p: HookResult())
-        with pytest.raises(ValueError, match="fail_closed"):
-            register_hook_tools(mcp, (spec,))
-
-    def test_it_is_absent_from_the_live_registration_table(self):
-        assert "phase_review_close_requires_gate" not in {spec.name for spec in HOOK_TOOLS}
-
-
 # ── the live server registers exactly the ported hooks, no more ──────────
 
 def test_the_live_nx_mcp_server_registers_exactly_the_ported_hook_tools():
@@ -287,11 +270,10 @@ class TestToolTierCarriesADeny:
     that exist prove the allow and silent paths and the fail-open-on-crash
     path — and nothing about a hook that deliberately refuses.
 
-    That gap matters because bead nexus-q02nx.17 ports
-    ``pre_close_verification_hook.sh``, an active allow|deny gate whose refusal
-    text 19 files quote, onto this same mechanism. It would be the first hook
-    to find out whether a deny survives the tool boundary intact. These tests
-    establish it now, on the mechanism, rather than discovering it there.
+    That gap matters because a hook that deliberately refuses (the bd-close
+    gate, deleted at cleanup step A2) was the first to find out whether a deny
+    survives the tool boundary intact. These tests establish it on the
+    mechanism.
     """
 
     def test_a_deny_envelope_reaches_the_caller_byte_for_byte(self):
@@ -314,22 +296,8 @@ class TestToolTierCarriesADeny:
         assert result.isError is False
         assert result.content[0].text == deny
 
-    def test_a_stop_tier_block_reaches_the_caller_byte_for_byte(self):
-        """The other refusal shape: the top-level ``decision`` form the Stop
-        and SubagentStop hooks use, which is not a hookSpecificOutput envelope.
-        """
-        block = stop_decision("block", reason="owes a report")
-
-        mcp = _fresh_mcp()
-        register_hook_tools(mcp, (HookToolSpec(name="stopper", run=lambda p: HookResult(stdout=block)),))
-
-        result = _run(mcp.call_tool("hook_stopper", {}))
-
-        assert result.isError is False
-        assert result.content[0].text == block
-
     def test_a_deny_is_distinguishable_from_a_crash(self):
-        """The property bead .17 actually depends on.
+        """The property a deciding hook depends on.
 
         A crash returns empty text, which the event reads as "no opinion" and
         therefore proceeds — the deliberate fail-open this tier is built on. A

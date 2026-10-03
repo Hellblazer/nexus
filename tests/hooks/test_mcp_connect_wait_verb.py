@@ -140,7 +140,6 @@ class TestRunMatcherSourceGate:
         for source in ("resume", "clear", "compact", "fork", "", None):
             result = run({"session_id": "sess-F", "source": source})
             assert result.stdout is None
-            assert result.exit_code == 0
         # Nothing was ever published, and the fast no-op path never reads
         # nexus.config or nexus.mcp.connect_marker -- the config dir stays empty.
         assert list(tmp_path.iterdir()) == []
@@ -151,7 +150,6 @@ class TestRunMatcherSourceGate:
                         {"source": "startup", "session_id": 12345}, None, {}):
             result = run(payload)
             assert result.stdout is None
-            assert result.exit_code == 0
         assert list(tmp_path.iterdir()) == []
 
 
@@ -163,7 +161,6 @@ class TestRunWaitsOnStartup:
         publish_mcp_connect_marker("sess-G", tmp_path, ttl_seconds=3600)
         result = run({"session_id": "sess-G", "source": "startup"})
         assert result.stdout is None
-        assert result.exit_code == 0
         assert result.crashed is False
 
     def test_never_ready_still_returns_exit_zero_but_a_visible_note(
@@ -187,7 +184,6 @@ class TestRunWaitsOnStartup:
         assert "did not connect" in result.stdout
         assert "0.2" in result.stdout
         assert "skipped" in result.stdout
-        assert result.exit_code == 0
         assert result.crashed is False
 
     def test_ready_case_stays_silent(self, tmp_path, monkeypatch) -> None:

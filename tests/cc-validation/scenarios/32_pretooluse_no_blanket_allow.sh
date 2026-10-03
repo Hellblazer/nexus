@@ -4,8 +4,8 @@
 # consulted?
 #
 # Pre-fix, conexus's PreToolUse routing guards
-# (subagent_git_write_requires_orchestrator.py, phase_review_close_requires_
-# gate.py, credential_print_guard.py) emitted an explicit
+# (subagent_git_write_requires_orchestrator.py, credential_print_guard.py;
+# phase_review_close_requires_gate.py until its deletion at cleanup step A2) emitted an explicit
 # `permissionDecision: allow` on every pass-through path -- "nothing to
 # deny here" -- and scenario 28 already proved live that a PreToolUse
 # `allow` GOVERNS in `defaultMode: auto`: it lands before the auto-mode
@@ -155,7 +155,6 @@ BASH_EOF
     chmod +x "$TEST_HOME/.claude/shadow_${name}.sh"
 }
 _write_shadow_hook GIT_WRITE "hooks/scripts/routing/subagent_git_write_requires_orchestrator.py"
-_write_shadow_hook PHASE_REVIEW "hooks/scripts/routing/phase_review_close_requires_gate.py"
 _write_shadow_hook CRED_GUARD "hooks/scripts/routing/credential_print_guard.py"
 
 cat > "$TEST_HOME/.claude/settings.json" <<EOF
@@ -168,7 +167,6 @@ cat > "$TEST_HOME/.claude/settings.json" <<EOF
       { "matcher": "Bash",
         "hooks": [
           { "type": "command", "command": "bash $TEST_HOME/.claude/shadow_GIT_WRITE.sh" },
-          { "type": "command", "command": "bash $TEST_HOME/.claude/shadow_PHASE_REVIEW.sh" },
           { "type": "command", "command": "bash $TEST_HOME/.claude/shadow_CRED_GUARD.sh" }
         ]
       }

@@ -16,7 +16,7 @@ running first, and no ordering discipline inside ``_io`` or
 :mod:`nexus._hook_runtime.entry` could have avoided it.
 
 That mattered because the saving is the whole margin on the cheap hooks.
-``phase_review_close_requires_gate`` runs stdlib-only and costs 0.03 s end
+The phase-review close gate (deleted at cleanup step A2) ran stdlib-only and cost 0.03 s end
 to end as bash on this box (the bead records 0.04 s from bead .2's harness;
 both are the same order and either makes the point); a port that paid 0.06 s just to reach ``never_fail``
 would be a hot-path regression, not the speedup RDR-215 promises. The
@@ -25,11 +25,8 @@ needs ``nexus.session`` and pays for it legitimately, against a ~0.8 s CLI
 baseline it is already replacing.
 
 What 0.02 s measures is the dispatch FLOOR -- a synthetic stdlib-only
-verb through the real entry point. That is the figure the close gate's
-COMMON path will pay, the one that runs on every Bash call and exits
-early via ``_lib.allow()``. Its narrow phase-review branch additionally
-imports ``nexus.session`` and shells out to ``bd show``; that cost is
-real, is its own, and stays unmeasured until the port lands.
+verb through the real entry point. That is the figure the common path of
+a hook that runs on every Bash call pays when it exits early.
 
 So: no imports here, not even a convenience re-export, since a re-export
 would import the module it re-exports. Import the submodule you want
