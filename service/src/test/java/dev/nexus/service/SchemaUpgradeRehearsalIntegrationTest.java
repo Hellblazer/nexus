@@ -95,8 +95,8 @@ import static org.assertj.core.api.Assertions.assertThatCode;
  * additions). The subset that genuinely carries migration-time row-DML
  * against FORCE-RLS tables is NOT restated here as a count (a stale number
  * is worse than none) — the data leg's own SEED-COVERAGE contract block is
- * the mechanically-enforced source of truth (nexus-gm38i,
- * {@code tests/test_rehearsal_seed_coverage_lint.py}). (taxonomy-004's
+ * the source of truth (the Python seed-coverage lint that once enforced it
+ * was deleted at cleanup step 10b). (taxonomy-004's
  * root-topic dedup is already IN the v0.1.17 tree — the old leg applies it
  * and its unique root-topic index, so duplicate-root seeding is neither
  * possible nor a real fleet exposure.)
@@ -194,10 +194,9 @@ class SchemaUpgradeRehearsalIntegrationTest {
      * changeset being exercised (currently catalog-013 / catalog-014) — a tag
      * that already contains them turns that leg's assertions vacuous (the
      * in-test changesetApplied gates fail loudly if that happens). Rotation
-     * also requires regenerating the OLD_TAG changeset snapshot
-     * ({@code uv run python scripts/gen_rehearsal_hop_manifest.py}) and
-     * re-deriving the data leg's seed coverage — the Python seed-coverage
-     * lint (nexus-gm38i) fails loudly until both are done.
+     * also requires re-deriving the data leg's seed coverage by hand (the
+     * snapshot generator and the Python seed-coverage lint were deleted at
+     * cleanup step 10b).
      *
      * <p><strong>2026-09-13 rotation check (nexus-t1qbs): NOT rotated, and
      * cannot be until the divergence point moves.</strong> The deployed
@@ -225,8 +224,7 @@ class SchemaUpgradeRehearsalIntegrationTest {
      * rehearsal (at which point OLD_TAG would move forward to whatever tag
      * predates THAT changeset, not necessarily v0.1.17). No manifest/seed-
      * coverage regeneration was needed for this check (OLD_TAG did not
-     * change); {@code uv run pytest tests/test_rehearsal_seed_coverage_lint.py}
-     * and this class both stayed green throughout.
+     * change); this class stayed green throughout.
      *
      * <p><strong>2026-09-14 rotation check (engine-service-v0.1.119 downstream
      * bump, RDR-208 Phase 1 R1): STILL NOT rotated, same reason.</strong>
@@ -247,8 +245,7 @@ class SchemaUpgradeRehearsalIntegrationTest {
      * scripts/data_effect_lint.py}'s own contract is that this class of edit
      * is checksum-neutral, so the divergence-injection point still reaches
      * the same constraint-bearing state on the old leg. No manifest/seed-
-     * coverage regeneration needed (OLD_TAG did not change); {@code uv run
-     * pytest tests/test_rehearsal_seed_coverage_lint.py} and this class both
+     * coverage regeneration needed (OLD_TAG did not change); this class
      * stayed green throughout.
      *
      * <p><strong>2026-09-18 rotation check (engine-service-v0.1.128, conexus
@@ -428,12 +425,9 @@ class SchemaUpgradeRehearsalIntegrationTest {
      * dynamic proof that the discipline actually WORKS on the real hop, and
      * the template to extend when a future hop gains a new row-DML changeset
      * (seed its input shape, assert its effect). That extension is
-     * mechanically enforced, not conventional (nexus-gm38i):
-     * {@code tests/test_rehearsal_seed_coverage_lint.py} derives the hop's
-     * FORCE-RLS row-DML changeset set from the HEAD changelog minus the
-     * OLD_TAG snapshot ({@code tests/data/rehearsal_old_tag_changesets.json})
-     * and fails Python CI whenever this leg's declared seed coverage drifts
-     * from it.
+     * now by convention only: the Python lint that derived the hop's
+     * FORCE-RLS row-DML changeset set from an OLD_TAG snapshot was deleted at
+     * cleanup step 10b.
      */
     @Test
     void oldEngineChangelogTree_withLegacySeededRows_dataChangesetsActuallyExecute() throws Exception {
@@ -478,12 +472,10 @@ class SchemaUpgradeRehearsalIntegrationTest {
                 // by old clients through the service role WITH a tenant GUC set —
                 // exactly the population a real aged box carries into an upgrade.
                 //
-                // SEED-COVERAGE-BEGIN (nexus-gm38i contract — parsed by
-                // tests/test_rehearsal_seed_coverage_lint.py; every hop
+                // SEED-COVERAGE-BEGIN (every hop
                 // changeset whose row-DML this leg seeds inputs for and
-                // effect-asserts, as "<id> <author>" lines; the lint fails if
-                // this block, its Python declaration, and the derived hop set
-                // ever disagree):
+                // effect-asserts, as "<id> <author>" lines; the Python lint
+                // that once parsed this block was deleted at cleanup step 10b):
                 //   catalog-013-0 nexus-e0hd2
                 //   catalog-013-1b nexus-1wjmq
                 //   catalog-014-0 nexus-x6kdz
@@ -581,9 +573,7 @@ class SchemaUpgradeRehearsalIntegrationTest {
                     seedChunk384LegacyContent(su, "t1", "code__x", "1".repeat(32), "legacy chunk 1 text");
                     seedChunk384LegacyContent(su, "t1", "code__x", "2".repeat(32), "legacy chunk 2 text");
 
-                    // nexus-j862l (RDR-191 GATE-2, seed-coverage lint follow-up,
-                    // tests/test_rehearsal_seed_coverage_lint.py::
-                    // test_hop_row_dml_changesets_equal_declared_rehearsal_seed_coverage):
+                    // nexus-j862l (RDR-191 GATE-2, seed-coverage follow-up):
                     // catalog-025-0 is FORCE-RLS row-DML (its own NO FORCE/FORCE
                     // toggle around the DELETE+resync+SET NOT NULL body) and was
                     // previously undercovered by this leg -- the two rows above only
@@ -1924,8 +1914,8 @@ class SchemaUpgradeRehearsalIntegrationTest {
                     // coverage lint follow-up). This changeset carries NO INSERT/UPDATE/
                     // DELETE -- its own guard is a read-only SELECT COUNT(*) wrapped in
                     // the SAME NO FORCE/FORCE toggle shape as fk-004-0-reconcile-precount
-                    // (nexus-iq0qr, see that entry's own comment in the Python
-                    // DECLARED_SEED_COVERAGE for the identical structural reasoning),
+                    // (nexus-iq0qr, see that entry's own comment in the former Python
+                    // DECLARED_SEED_COVERAGE (deleted at cleanup step 10b) for the identical structural reasoning),
                     // which trips this lint's rule (b) regardless of carrying no literal
                     // DML. No NEW seed data is needed: taxonomy-010-1's own seeded rows
                     // (asserted immediately above) are EXACTLY the population the guard
@@ -1963,7 +1953,7 @@ class SchemaUpgradeRehearsalIntegrationTest {
                     // both shape-invalid rows are all isEqualTo(0)), so
                     // nexus.topic_assignments for tenant t1 is already empty. This
                     // mirrors catalog-029-1's own reasoning verbatim (its own entry in
-                    // the Python DECLARED_SEED_COVERAGE): "any row that would exercise
+                    // the former Python DECLARED_SEED_COVERAGE): "any row that would exercise
                     // the DELETE arm is, by construction, ALREADY dangling under a
                     // structurally identical anti-join earlier in this same hop" --
                     // here that earlier anti-join is taxonomy-010-1's own

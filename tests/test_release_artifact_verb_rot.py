@@ -471,7 +471,10 @@ def _all_invocations() -> list[Invocation]:
 #: so incidental doc trimming does not make this flaky, while a regex
 #: regression (which drops counts to zero, not by a few) is still caught.
 _ANCHOR_MIN_COUNTS: dict[str, int] = {
-    ".claude/skills/engine-release/SKILL.md": 1,
+    # .claude/skills/engine-release/SKILL.md was an anchor here (1 invocation:
+    # `nx service record-deploy`) until cleanup step 10b deleted that verb and
+    # the skill's Step 8 with it. The file now names no nx verb invocation, so
+    # there is nowhere to retarget the anchor; removed rather than lowered to 0.
     ".github/workflows/engine-service-release.yml": 2,
     "service/native-smoke.sh": 1,
     # nexus-zmfan widening (hand-verified 2026-08-07):

@@ -145,8 +145,7 @@ class VectorsUnifyChunksIntegrationTest {
     private static final String SVC_ROLE = "nexus_svc";
     private static final String SVC_PASS = "nexus_svc_pass";
     // Staged OUTSIDE db/changelog/ (round 3, coordinator directive): the
-    // changelog-parity lints (test_rehearsal_seed_coverage_lint.py,
-    // test_changelog_rls_lint.py, test_changelog_validate_precondition_lint.py)
+    // changelog-parity lints (test_changelog_rls_lint.py, test_changelog_validate_precondition_lint.py)
     // assert the master include list matches CHANGELOG_DIR.glob("*.xml")
     // exactly -- a file present on disk but not <include>d is correctly
     // treated as drift and fails the whole Python suite. db/changelog/

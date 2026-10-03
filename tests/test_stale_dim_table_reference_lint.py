@@ -472,22 +472,6 @@ _COUNT_PINNED_FILE_ALLOWLIST: dict[str, tuple[int, str]] = {
         "Comment narrating that a test's chosen collection segment used to "
         "route to chunks_768 pre-unify; historical only."
     ),
-    "tests/test_rehearsal_seed_coverage_lint.py": (
-        0,
-        "Comments narrating which straddle-era per-dim content "
-        "(chunks_384/768/1024, taxonomy_centroids_384/768/1024) the "
-        "rehearsal seed must cover; historical/explanatory. +1 (7->8, nexus-o8dil.49, "
-        "RDR-191 Phase 5 batch 2026-08-15): the DECLARED_SEED_COVERAGE "
-        "fk-004-1-reconcile entry's comment narrates the same fk-002-"
-        "already-enforces-registration fact as the Java SEED-COVERAGE "
-        "block's sibling comment — historical narration, not a live "
-        "reference. +1 (8->9, nexus-tk070.p3b, RDR-194 P3b 2026-08-16): the "
-        "taxonomy-010-1 DECLARED_SEED_COVERAGE entry's comment explains why "
-        "its rehearsal fixture uses legacy-width (chunks_384/768) content "
-        "for the ambiguous/unresolvable arms rather than canonical 64-hex — "
-        "historical narration of the same OLD-schema length(chash)=32 "
-        "constraint, not a live reference."
-    ),
     "tests/test_o8dil7_prune_misclassified_manifest_antijoin_engine.py": (
         1,
         "Comment explaining why a correlation pin intentionally stays on "

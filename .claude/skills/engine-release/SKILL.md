@@ -263,41 +263,9 @@ Client version to run it from: the working tree (`HEAD`) — this script has no 
 
 - When the NEXT PyPI release bumps `REQUIRED_ENGINE_VERSION` to this tag, also rotate `run.sh`'s `NEXUS_PREV_RELEASE`/`NEXUS_PREV_ENGINE_TAG` defaults (the `--package-upgrade` convergence leg's starting point — must stay one release BEHIND the new dependency or its staleness guard fails loud; nexus-cfgo9). The `--package-upgrade` leg itself runs in the PyPI `release` skill's Step 1, not here — this skill only keeps its inputs fresh.
   **The unit is RELEASES, not engine tags — a SKIPPED engine tag does NOT rotate them** (2026-08-11). `PREV_ENGINE_TAG` is the engine the PREVIOUS RELEASE PINNED. An engine tag that is cut, published, and gated but never pinned by any release (v0.1.70: a defect was found after the cut, so 7.6.0 shipped v0.1.71) is a skipped version — rotating `PREV_ENGINE_TAG` onto it would point the rehearsal's "previous install" at a hop no user ever made. At the 7.6.0 bump the correct values stayed `7.5.0` / `engine-service-v0.1.69` while the newest published engine tag moved to v0.1.71. The staleness guard only fires when PREV collapses to EQUAL the floor; it does NOT catch "rotated onto a tag no release shipped", so check this by hand at every bump.
-- `SchemaUpgradeRehearsalIntegrationTest.OLD_TAG` (`service/src/test/java/dev/nexus/service/`) → the PREVIOUSLY-deployed tag (nexus-7z6s7 rotation policy: the old→HEAD rehearsal's "real aged box" realism rots as the fleet moves on; re-verify the two structural preconditions documented on the constant when bumping) OLD_TAG rotation is a THREE-part edit (nexus-gm38i): regenerate the changeset snapshot (`uv run python scripts/gen_rehearsal_hop_manifest.py`), re-derive the new hop's row-DML seed coverage, and re-point the data leg's seeding + its SEED-COVERAGE block + the lint's `DECLARED_SEED_COVERAGE` together — `tests/test_rehearsal_seed_coverage_lint.py` fails loudly until all three agree.
+- `SchemaUpgradeRehearsalIntegrationTest.OLD_TAG` (`service/src/test/java/dev/nexus/service/`) → the PREVIOUSLY-deployed tag (nexus-7z6s7 rotation policy: the old→HEAD rehearsal's "real aged box" realism rots as the fleet moves on; re-verify the two structural preconditions documented on the constant when bumping) OLD_TAG rotation re-points the data leg's seeding and its SEED-COVERAGE block together; the snapshot generator and the seed-coverage lint were deleted (cleanup step 10b).
 - **`REQUIRED_ENGINE_VERSION` (`src/nexus/engine_version.py`) MUST move to this tag** — unconditionally, not "only if the release needs the features". There is ONE engine identity per release: the engine it was built and gated with, on EVERY install path (Hal directive 2026-07-15, after the 14h GH #1402 incident). It is NOT a compatibility minimum. For local-mode installs this constant is the ONLY delivery vehicle — an engine tag that is cut, gated, and never pinned reaches nobody. `PINNED_SERVICE_TAG` is DERIVED from it, so the one edit moves both.
   Sequencing — PAIRED release (Hal directive 2026-08-02, supersedes "bump lands with the NEXT release AFTER deploy"): the bump rides the client release PAIRED with this engine's deploy — same release, not the next one (floor-lag ships a client whose pinned engine lacks the engine halves of its own features: the 7.1.0/v0.1.62 inversion). The deploy relay fires at client-tag push, parallel with the PyPI publish (Step 6), so the engine is live before any user can install the floor-bumped client — UNLESS every wire-ledger `## Unshipped` entry leads with `[additive]`, in which case deploy BEFORE the client tag instead (nexus-1emxn, Step 6's refinement: the preferred branch whenever the ledger allows it — no window can open at all). GH #1402's lesson stands as: never publish a floor-bumped client with NO deploy armed — the deploy fires at tag push (or already fired, on the additive branch), not "eventually". `scripts/check_engine_release_floor.py` fails the release if a gated tag was never pinned. The client-side `release` skill's Step 0 runs this gate with `--paired-deploy engine-service-vX.Y.Z` (nexus-k1c08) to distinguish the expected pre-deploy cloud-behind state from real drift — this skill only needs to ensure the tag it just cut is what that flag names.
-
-### 8. Record state (T2) — from conexus's STEP-6 report
-
-```
-nx service record-deploy engine-service-vX.Y.Z --commit <sha> --gate-report-dir <conexus checkout>/deploy
-```
-
-`nx service record-deploy` writes the `deployed-engine-version` tracker. With
-`--gate-report-dir` it reads conexus's STEP-6 gate reports from that directory
-(the conexus checkout's `deploy/`; gitignored there, so operator-local),
-selects the LATEST report (by `run_timestamp`) that gated the live
-`release_version`, requires it green, and records the report's basename as the
-`gate` provenance. Nothing is written when no report gated the live version,
-the latest is red, or the report schema moved. A green report's advisories are
-printed, never inferred empty. The command verifies against the LIVE `/version`,
-not the pinned floor, so it works whenever the floor legitimately trails the
-newest published tag.
-
-Why this shape: `--gate PASSED` used to be typed. On 2026-08-28 it was typed at
-02:41:10Z with ~10 min of Step 6's gate still running; run 1 came back RED 17 s
-later (T2 `release-7.22.0-ship-2026-08-28`). The report IS the verdict, so the
-write cannot precede it. Step 7's ordering still holds: there is no green report
-until conexus's STEP-6 has actually reported. The verbatim `--gate PASSED` form
-still exists and is exactly what it says: a hand-typed claim recorded verbatim
--- use it only when there is genuinely no report, and say so in the ship record.
-
-To read what the cloud is running WITHOUT trusting the tracker, use the live
-handshake directly: `nx service probe` (prints `release_version`). The tracker is
-a cache; `/version` is truth. Nothing automated re-checks the tracker, and the
-bare `check_engine_release_floor.py` verify no longer writes it.
-
-So the next session (and the engine-freshness gate in the `release` skill) can see what the cloud is actually running without re-deriving it.
 
 ## Relationship to the PyPI release
 
