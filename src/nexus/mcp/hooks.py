@@ -78,18 +78,13 @@ from mcp.types import CallToolResult, TextContent
 from pydantic import Field as _PydanticField
 
 from nexus._hook_runtime._io import HookResult, never_fail
-from nexus.hooks.agent_dispatch_expect import run as _run_agent_dispatch_expect
 from nexus.hooks.auto_approve import run as _run_auto_approve
 from nexus.hooks.subagent_start import run as _run_subagent_start
 from nexus.hooks.post_compact import run as _run_post_compact
 from nexus.hooks.divergence_language_guard import run as _run_divergence_language_guard
-from nexus.hooks.tuple_projection import run_start as _run_subagent_start_tuple
-from nexus.hooks.tuple_projection import run_stop as _run_subagent_stop_tuple
 from nexus.hooks.stop_failure import run as _run_stop_failure
 from nexus.hooks.pre_close_verification import run as _run_pre_close_verification
 from nexus.hooks.stop_verification import run as _run_stop_verification
-from nexus.hooks.subagent_start_stamp import run as _run_subagent_start_stamp
-from nexus.hooks.subagent_stop import run as _run_subagent_stop
 
 __all__ = [
     "DECIDING_HOOKS",
@@ -124,7 +119,7 @@ __all__ = [
 #: This is the same hazard ``_NEVER_TOOL_TIER`` already guards for
 #: ``phase_review_close_requires_gate``, one step weaker: that hook must
 #: not REGISTER here at all, because a crash at this boundary reads as
-#: allow and its contract is that a crash still denies. These three may
+#: allow and its contract is that a crash still denies. These may
 #: register; they must not be wired.
 #:
 #: ``tests/test_deciding_hooks_are_command_tier.py`` walks the real
@@ -134,7 +129,6 @@ __all__ = [
 DECIDING_HOOKS: frozenset[str] = frozenset(
     {
         "pre_close_verification",
-        "subagent_stop",
         "auto_approve",
     }
 )
@@ -283,39 +277,6 @@ class HookToolSpec:
 # sweep. Do not build such a sweep without carrying that exclusion with it.
 HOOK_TOOLS: tuple[HookToolSpec, ...] = (
     HookToolSpec(
-        name="agent_dispatch_expect",
-        # No timeout_s override (nexus-5l8i8): hooks.json no longer wires
-        # this as an mcp_tool, so the DEFAULT_HOOK_TOOL_TIMEOUT_S-derived
-        # bound below is what a direct tool call gets, and there is no
-        # wired hooks.json budget left to sit a second under.
-        run=_run_agent_dispatch_expect,
-        fields=("session_id", "tool_name", "tool_use_id", "tool_input"),
-        structured_fields=frozenset({"tool_input"}),
-        field_docs={
-            "session_id": "The session whose RDR-184 ledger this dispatch is recorded in.",
-            "tool_name": (
-                "The dispatching tool. Only Agent and Task write a row; "
-                "anything else is skipped with a named diagnostic."
-            ),
-            "tool_use_id": (
-                "The dispatch's own id, written as the row's dispatch_id and "
-                "used to refuse a duplicate EXPECT — a duplicate inflates the "
-                "credit pool and masks an undeclared start."
-            ),
-            "tool_input": (
-                "The dispatch arguments. subagent_type keys the row (verbatim, "
-                "colon included; absent means general-purpose, which is what "
-                "the harness actually starts) and run_in_background chooses "
-                "background or sync."
-            ),
-        },
-        summary=(
-            "records one RDR-184 EXPECT row per agent dispatch, before the "
-            "dispatch, so a background agent that stops without reporting can "
-            "be caught"
-        ),
-    ),
-    HookToolSpec(
         name="auto_approve",
         run=_run_auto_approve,
         fields=("tool_name", "hook_event_name"),
@@ -336,82 +297,19 @@ HOOK_TOOLS: tuple[HookToolSpec, ...] = (
         ),
     ),
     HookToolSpec(
-        name="subagent_start_stamp",
-        # No timeout_s override (nexus-5l8i8): hooks.json no longer wires
-        # this as an mcp_tool, so the DEFAULT_HOOK_TOOL_TIMEOUT_S-derived
-        # bound below is what a direct tool call gets, and there is no
-        # wired hooks.json budget left to sit a second under.
-        run=_run_subagent_start_stamp,
-        fields=("session_id", "agent_id", "agent_type"),
-        field_docs={
-            "session_id": "The session whose RDR-184 ledger this START row joins.",
-            "agent_id": (
-                "The framework-assigned id for this subagent. It keys the "
-                "stamp-at-most-once check, and it is what a later CONSUMED or "
-                "REPORTED row matches against."
-            ),
-            "agent_type": (
-                "The subagent type, verbatim and colon-qualified. This is the "
-                "key an EXPECT row's credit is claimed under, so an invented "
-                "or normalised name reads later as an undeclared dispatch."
-            ),
-        },
-        summary=(
-            "records one RDR-184 START row when a subagent begins, so an "
-            "agent that started without a matching EXPECT can be caught"
-        ),
-    ),
-    HookToolSpec(
-        name="subagent_stop",
-        run=_run_subagent_stop,
-        fields=(
-            "session_id",
-            "agent_id",
-            "agent_type",
-            "agent_transcript_path",
-            "stop_hook_active",
-        ),
-        field_docs={
-            "session_id": "The session whose RDR-184 ledger decides whether this agent owes a report.",
-            "agent_id": (
-                "The stopping subagent. Keys the once-guard: an agent with a "
-                "BLOCKED row is never blocked twice."
-            ),
-            "agent_type": (
-                "The subagent type, verbatim. Credit is keyed on type, because "
-                "the type is the only key both sides of the ledger can know."
-            ),
-            "agent_transcript_path": (
-                "The agent's own transcript. Scanned for a SendMessage or "
-                "SubagentHandback report, and for storage writes that came "
-                "back as errors. Missing or unreadable fails open."
-            ),
-            "stop_hook_active": (
-                "True on the re-stop that follows a block. Never blocks again; "
-                "records whether the report has since arrived."
-            ),
-        },
-        summary=(
-            "blocks a named background teammate's stop exactly once when its "
-            "transcript shows no completion report, or when it reported but "
-            "its storage writes failed"
-        ),
-    ),
-    HookToolSpec(
         name="stop_verification",
         run=_run_stop_verification,
         fields=("session_id",),
         field_docs={
             "session_id": (
-                "The session whose RDR-184 ledger is reconciled against the "
-                "harness's own task list. Its only other use is naming the "
-                "session in the warning."
+                "The session whose closed beads are checked for a "
+                "review-completed marker."
             ),
         },
         summary=(
             "warns at session close about uncommitted changes, beads still "
-            "in progress, and background agents the ledger lists as "
-            "outstanding — advisory only, it can never block a stop"
+            "in progress, and beads closed without a review marker — "
+            "advisory only, it can never block a stop"
         ),
         # Above the default because this one shells out twice — `git status`
         # and `bd`, each with its own 30s subprocess timeout in
@@ -506,67 +404,6 @@ HOOK_TOOLS: tuple[HookToolSpec, ...] = (
         },
         summary=(
             "flags divergence language in a post-mortem just written — advisory only, since acknowledged deferral and silent scope reduction look alike and only a reader can tell them apart"
-        ),
-    ),
-    HookToolSpec(
-        name="subagent_start_tuple",
-        # No timeout_s override (nexus-egm7p): hooks.json no longer wires
-        # this as an mcp_tool, so the DEFAULT_HOOK_TOOL_TIMEOUT_S-derived
-        # bound below is what a direct tool call gets, and there is no
-        # wired hooks.json budget left to sit a second under.
-        run=_run_subagent_start_tuple,
-        fields=("session_id", "agent_id", "agent_type", "task"),
-        field_docs={
-            "session_id": (
-                "Names the ledger the projection writes beside. The "
-                "projector resolves it itself; this carries the hook's "
-                "own view so a detached run cannot pick up a sibling "
-                "session's machine-wide pointer."
-            ),
-            "agent_id": (
-                "The tuple's identity. Its id derives from (agent_id, "
-                "kind), so a wrong value lands on a different tuple "
-                "rather than colliding visibly."
-            ),
-            "agent_type": "Recorded on the tuple as the dispatch's declared type.",
-            "task": "The dispatch's task text, carried onto the tuple.",
-        },
-        summary=(
-            "projects the RDR-205 ledger START tuple for a subagent that "
-            "just began — a sibling of hook_subagent_start, never a child, "
-            "so the projection still runs when that hook fails"
-        ),
-    ),
-    HookToolSpec(
-        name="subagent_stop_tuple",
-        # No timeout_s override (nexus-egm7p): hooks.json no longer wires
-        # this as an mcp_tool, so the DEFAULT_HOOK_TOOL_TIMEOUT_S-derived
-        # bound below is what a direct tool call gets, and there is no
-        # wired hooks.json budget left to sit a second under.
-        run=_run_subagent_stop_tuple,
-        fields=("session_id", "agent_id", "agent_type", "agent_transcript_path"),
-        field_docs={
-            "session_id": "Names the ledger the projection writes beside.",
-            "agent_id": (
-                "The same harness-issued id the SubagentStart payload "
-                "carried, which subagent-start already injected into that "
-                "agent's context as its claimant id — so the REPORT tuple "
-                "needs no cooperation from the stopping agent."
-            ),
-            "agent_type": "Recorded on the tuple as the dispatch's declared type.",
-            # nexus-egm7p: added so a direct diagnostic call through this
-            # tool no longer reproduces the fixed transport bug — the
-            # retired hooks.json mcp_tool wiring never forwarded this
-            # field, so every REPORT row it ever produced read
-            # verify=absent regardless of the real transcript.
-            "agent_transcript_path": (
-                "Feeds the VERIFY-line extraction that fills the report's "
-                "commit/t2_ref/verify dims."
-            ),
-        },
-        summary=(
-            "projects the RDR-205 ledger REPORT tuple for a subagent that "
-            "just stopped — a sibling of hook_subagent_stop, never a child"
         ),
     ),
     HookToolSpec(

@@ -25,8 +25,7 @@ because the *hosting* mechanism changed, not because anything the script
 computed was wrong:
 
 * The ``sys.version_info < (3, 12)`` guard and its ``sys.exit(1)`` are
-  dropped, matching every other ported verb (:mod:`session_start_verb`,
-  :mod:`ledger_verbs`). That guard existed because ``_run_python_hook.sh``
+  dropped, matching every other ported verb (:mod:`session_start_verb`). That guard existed because ``_run_python_hook.sh``
   could fall through to an arbitrary system ``python3``; a verb reached
   only via ``importlib.import_module`` from inside the installed ``nexus``
   package has no such path -- the interpreter is whatever conexus itself

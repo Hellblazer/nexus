@@ -51,10 +51,10 @@
 # copy is suppressed as a duplicate), and separately (nexus-wauo1.37,
 # tests/e2e/hook-surface-shakeout, real Claude Code 2.1.277, one subagent-
 # dispatch turn in each of two container runs against the identical image)
-# every one of the six `mcp_tool` hooks that turn provokes --
-# hook_agent_dispatch_expect, hook_subagent_start, hook_subagent_start_
-# stamp, hook_subagent_start_tuple, hook_subagent_stop_tuple, hook_stop_
-# verification -- fired identically with and without the override, per
+# every one of the six `mcp_tool` hooks that turn provoked then (four of
+# them, the RDR-184 ledger and RDR-205 projector hooks, were deleted at
+# cleanup step A1, nexus-0r1uz; hook_subagent_start and hook_stop_
+# verification remain) -- fired identically with and without the override, per
 # `hook_census.py` itself reading the tee'd JSON-RPC stream into nx-mcp
 # (the hook's own effect, not the absence of a "not connected" error).
 # T2 `nexus_rdr/219-plugin-override-proof` carries the artifact paths.

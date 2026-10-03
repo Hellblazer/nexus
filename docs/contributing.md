@@ -352,12 +352,7 @@ Every step below is **required**. Missing any one of them has caused problems in
    gates (rehearsal, era-hop, guided) which all start from a populated
    install — the 2026-07-21 fresh-box defect class was invisible to every
    one of them. Must end `FRESH-INSTALL MVV PASSED — ... (LOCAL WHEEL,
-   release-battery layer)`. Leg 8d/10 (nexus-cbo4a) additionally drives the
-   real SubagentStart/SubagentStop tuple-ledger-projector hook wrappers
-   against this virgin install, and `tests/e2e/cloud-client-path-gate.sh`'s
-   leg G does the same against a live cloud config — together the only
-   pre-tag proof that the wheel's `nexus.hooks.tuple_ledger_project`
-   actually lands a tuple on both install classes (nexus-g2lln / nexus-0zsmg).
+   release-battery layer)`.
 
    This is the LOCAL WHEEL layer: it builds and installs the tree under
    test, so it proves the release candidate works, but it resolves
@@ -587,7 +582,6 @@ Every step below is **required**. Missing any one of them has caused problems in
     plain `-> working tree` here means `NEXUS_TARGET_RELEASE` was not set
     and the loop was not actually closed.
 
-11d. **Post-publish: real-dispatch check** (nexus-0zsmg, T2 `nexus/shakedown-playbook` §2 S18) — dispatch one trivial agent in a live Claude Code session on each box class (managed cloud, local supervisor), then run `tests/e2e/post-publish-dispatch-check.sh` against that session; must end `POST-PUBLISH DISPATCH CHECK PASSED` on both. Run it with NO argument first — it auto-discovers the session id from ledgers with recent agent-dispatch activity and uses it when exactly one exists, refusing (naming every candidate) rather than guess when more than one does. Do not reach for the harness's own session id: JDR-001 names three distinct T1 scopes on this box, and the ledger is written under the id leased at MCP-server spawn, not the harness's task/output-path id (nexus-7m6uc). A named session id that turns up no ledger gets its own diagnostic listing every ledger that does exist.
 
 12. **Reinstall local tool and verify**
     ```bash

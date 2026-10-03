@@ -67,9 +67,7 @@ CLOSE_GATE_STATE_SUBDIR: str = "close-gate-backstop"
 #: has no live T1 lease -- see the two-part guard below) is reaped. The
 #: file's mtime is refreshed on literally every Stop turn, so "old" here
 #: means "no Stop activity for this many days" -- a session quiet that
-#: long is abandoned, never one still running. Matches
-#: ``expectations_sweep()``'s own 7-day floor for the closely related
-#: RDR-184 ledger family.
+#: long is abandoned, never one still running.
 CLOSE_GATE_STATE_MAX_AGE_DAYS: int = 7
 #: An ``mcp_connect_marker.<session>`` file (nx-mcp's connect-readiness
 #: marker, ``nexus.mcp.connect_marker``) older than this whose recorded pid

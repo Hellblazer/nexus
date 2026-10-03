@@ -359,9 +359,8 @@ def test_hooks_json_nx_hook_verbs_resolve_in_the_previous_released_wheel() -> No
         f"everywhere nx CLI):\n"
         + "\n".join(f"  {verb!r}: {line}" for verb, line in offenders)
         + f"\n\nA session on the {tag} CLI with this plugin pinned would see "
-        "nx-hook SILENTLY NO-OP on every one of these hook events (exit 0 -- or "
-        "exit 70, a diagnosable non-zero, for a ledger-shaped verb whose name "
-        "starts with 'expectations_') until it self-upgrades via the "
+        "nx-hook SILENTLY NO-OP on every one of these hook events (exit 0) "
+        "until it self-upgrades via the "
         "version-lockstep hook, which cannot happen if the lockstep hook itself "
         "is one of the offenders. For a DECIDING gate among them "
         "(pre-close-verification, phase-review-close-gate), 'silently no-op' "

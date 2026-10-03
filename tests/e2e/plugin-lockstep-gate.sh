@@ -86,8 +86,7 @@ echo "gate: previous client tag $PREV_TAG -> newest $NEW_TAG"
 # a blind `stat -f ... || stat -c ...` leaks GNU's filesystem-status dump
 # into the captured value on Linux, which can make the REAL_MTIME ==
 # NOW_MTIME isolation check below compare garbage against garbage rather
-# than a real epoch (see tests/e2e/post-publish-dispatch-check.sh's fix
-# for the full writeup).
+# than a real epoch.
 _real_mtime() {
     [ -f "$1" ] || { echo none; return; }
     if stat --version >/dev/null 2>&1; then

@@ -238,8 +238,7 @@ def aggregate_from_store(
     for a successful read; a read failure (service down, old engine)
     RAISES here rather than degrading silently to an empty result — the
     caller (``nx hook routing-stats --from-store``) is expected to catch
-    it and report the honest reason, the same discipline
-    ``nx census capability --from-store`` uses.
+    it and report the honest reason.
     """
     from nexus.db.t2.http_telemetry_store import HttpTelemetryStore  # noqa: PLC0415 — deferred; only needed here
 

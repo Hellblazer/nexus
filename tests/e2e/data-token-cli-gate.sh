@@ -315,8 +315,7 @@ LEASE_FILES=("$HOME_DIR"/.config/nexus/data_token_lease.*)
 LEASE_FILE="${LEASE_FILES[0]}"
 # nexus-7m6uc: dialect detected ONCE, wrong-dialect stat never invoked --
 # a blind `stat -f ... || stat -c ...` leaks GNU's filesystem-status dump
-# into the captured value on Linux (see
-# tests/e2e/post-publish-dispatch-check.sh's fix for the full writeup).
+# into the captured value on Linux.
 if stat --version >/dev/null 2>&1; then
     LEASE_PERMS="$(stat -c '%a' "$LEASE_FILE" 2>/dev/null)"
 else

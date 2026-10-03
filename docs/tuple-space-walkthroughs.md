@@ -6,40 +6,7 @@ Scenario walkthroughs for the [Tuple Space reference](tuple-space.md). Each sect
 
 ## Ledger: dispatch start and report
 
-Consumer one. Today the RDR-184 dispatch ledger is a tab-separated (TSV) file that three blocking hooks append to. The space does not replace that file; two new asynchronous hook entries project the same payload into `ledger/<session_id>`, and the orchestrator can wait on a report instead of hand-counting. The agent itself never touches the space. See [Operations](tuple-space.md#operations) and [Blocking reads](tuple-space.md#blocking-reads).
-
-```mermaid
-sequenceDiagram
-    autonumber
-    participant O as Orchestrator session
-    participant H as Claude Code hooks
-    participant T as TSV ledger (write-ahead)
-    participant E as Engine /v1/tuples
-    participant A as Sub-agent
-
-    O->>H: Agent tool dispatch
-    H->>T: PreToolUse EXPECT row (blocking)
-    Note over H,T: No agent id exists yet, so no tuple
-    H->>A: SubagentStart
-    H->>T: stamp START row (blocking)
-    H-->>E: async out ledger/[session] keys agent_id kind start dims agent_type
-    Note over H,E: reads the lease file, POSTs with curl, never blocks the dispatch
-    H->>A: additionalContext your claimant id and mailbox address
-    par Agent works
-        A->>A: implement, test, commit
-    and Orchestrator waits
-        O->>E: rd ledger/[session] keys agent_id kind report timeout_s=25
-        E-->>O: no row yet, parks, wakes on commit or 1 s timer
-    end
-    A-->>H: SubagentStop
-    H->>T: REPORT row (blocking)
-    H-->>E: async out ledger/[session] keys agent_id kind report
-    E-->>O: report tuple
-    O->>E: rd ledger/[session] empty pattern, the census, whole subspace
-    E-->>O: every start and report row for this session
-```
-
-Waiting for a report is a parked read on the ledger. The report tuple needs no cooperation from the agent: the stop hook writes it from the harness payload. `expectations_census`'s space-backed read (`nexus.hooks.expectations`, RDR-205 Phase 4.1) compares the space against the TSV only inside the 90-day retention window: `SPACE_PRESENT`/`SPACE_AGE` when the subspace exists, `SPACE_NEVER_RAN` when it is absent and the session is younger than the retention window, `SPACE_OUTSIDE_WINDOW` when absent and older, `SPACE_BLINDSPOT` when the walk examined no ledger subspace at all (never read as every session being outside the window), and `SPACE_FALLBACK` with a named reason when the engine cannot be consulted (no `nx` on PATH, unreachable, unparseable output). These lines never change the census function's own exit code — they are additional report lines on top of the TSV verdict, not a new one.
+Consumer one. The `ledger/<session_id>` template (start and report rows keyed on the harness's per-instance agent id) exists engine-side. No client writes it: the RDR-184 and RDR-205 hooks that recorded dispatches and projected them into it were deleted at cleanup step A1, so there is no walkthrough to draw. See [Templates and subspaces](tuple-space.md#templates-and-subspaces).
 
 ## Mailbox: send, contend, drain
 

@@ -1048,8 +1048,8 @@ for a different reason (there is no `_get`/`_post` split at all —
 everything goes over POST), so it keys on the endpoint PATH's suffix
 instead (`_T3_WRITE_PATH_SUFFIXES`) rather than a per-call flag.
 
-**Residual, not in this guard's scope**: `HttpTelemetryStore.record_capability_census`/
-`record_routing_event` bypass the guarded transport entirely (a raw
+**Residual, not in this guard's scope**: `HttpTelemetryStore.record_routing_event`
+bypasses the guarded transport entirely (a raw
 `self._client.request(...)` call, modeled on the single-attempt shape
 `query_tier_writes_once` — a GET — uses for an unrelated reason). Tracked
 and being fixed under nexus-gjv9b, not this bead.

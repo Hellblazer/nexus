@@ -13,8 +13,7 @@ stdlib-only, no-``nexus``-import MIRROR of
 :mod:`nexus.db.service_endpoint`'s precedence that existed only because a
 plugin script cannot import ``nexus``. Code in the wheel has no such
 constraint, so each wrapper now calls the real primitive, exactly as
-``nexus.hooks.tuple_ledger_project`` did when it was ported for the same
-reason:
+the other hooks ported for the same reason did:
 
 * ``_ep.default_config_dir()`` -> :func:`nexus.config.nexus_config_dir`
 * ``_ep.read_storage_service_lease()`` ->
@@ -586,13 +585,12 @@ _DEFAULT_TENANT = "default"
 #: Mirrors ``nexus.dropped_writes.NAMED_DROP_CAUSES`` verbatim (nexus-gjv9b
 #: review fold-in round 5, code-review non-blocking item 1) -- the FULL
 #: shared cause vocabulary every drop-meter producer and reader (this
-#: hook, ``_session_end_census.py``'s capability_census producer,
-#: ``health._check_t2_dropped_writes``) recognizes as one closed set,
+#: hook, ``health._check_t2_dropped_writes``) recognizes as one closed set,
 #: not merely the subset :func:`_post_routing_event_http` itself can
 #: literally return -- this function alone never produces
 #: ``"guard_refused"`` (that is specific to the production-write-guard
-#: refusal path, which only ``_session_end_census.py`` can hit), but the
-#: VOCABULARY is shared across both producers, so it belongs here too.
+#: refusal path, which a deleted producer was the one to hit), but the
+#: VOCABULARY is a shared closed set, so it belongs here too.
 #: Hardcoded, not imported (this script has no ``nexus`` import,
 #: RDR-121 § Contract), so ``tests/test_routing_hooks.py::
 #: test_parity_cause_vocabulary_matches_dropped_writes`` is what keeps
@@ -632,8 +630,7 @@ def _post_routing_event_http(record: dict, *, timeout: float = 0.25) -> str:
     for anything unrecognized. Classifying HERE, at the transport layer
     that actually knows the failure mode, is strictly more reliable than
     :func:`nexus.dropped_writes.classify_drop_cause`'s text-matching
-    fallback (which exists for producers, like
-    ``_session_end_census._post_capability_census``, that only have an
+    fallback (which exists for producers that only have an
     exception's ``str()`` to work with) — this is why the cause travels
     through to :func:`_record_dropped_routing_event` explicitly rather
     than being re-derived from the error string on the far side.
@@ -708,7 +705,7 @@ def _record_dropped_routing_event(
     ``outcome``/``escape_reason`` fields from :func:`log_routing_event`'s
     own record, when given. The canonical ``nexus.dropped_writes.
     record_drop`` shape has no room for them (shared across every
-    producer, capability_census included), but THIS hook's own
+    producer), but THIS hook's own
     independent on-disk record is schemaless JSON -- adding them here
     costs nothing to any reader (``count_drops`` only ever ``.get()``s
     the fields it knows about) and closes a real audit-fidelity gap the
@@ -772,10 +769,8 @@ def log_routing_event(
     config.yml credentials, no NX_SERVICE_* env, per
     :func:`_engine_endpoint` -- timeout, non-2xx), degrades to
     :func:`_record_dropped_routing_event`
-    rather than a JSONL fallback (same design decision as
-    ``nexus._session_end_census.write_session_capability_census`` for
-    PART 1 — the routing hooks' own timeout budget has no room for a
-    filesystem retry story either). The JSONL append and rotation
+    rather than a JSONL fallback (the routing hooks' own timeout budget has no room for a
+    filesystem retry story). The JSONL append and rotation
     machinery was deleted at PART 3 (2026-09-05).
     """
     try:

@@ -35,11 +35,9 @@ is closed. The declaration is INERT until the next plugin cut, because
 ``conexus/PENDING_RELEASE.md``. The ``nx hook session-start`` CLI verb
 itself is untouched and still works.
 
-**Not a ledger verb.** ``session-start`` never appears in
-:data:`nexus._hook_runtime.entry.LEDGER_VERBS`: it has no caller that branches on
-an exit code (RDR-215 Contracts), so :class:`~nexus._hook_runtime._io.HookResult`'s
-default ``exit_code=0`` is exactly right, and ``entry.main`` forces 0 for
-every non-ledger verb regardless.
+No caller branches on this verb's exit code (RDR-215 Contracts), so
+:class:`~nexus._hook_runtime._io.HookResult`'s default ``exit_code=0`` is
+exactly right, and ``entry.main`` forces 0 for every verb regardless.
 """
 from __future__ import annotations
 

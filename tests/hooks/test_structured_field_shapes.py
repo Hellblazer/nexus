@@ -8,27 +8,24 @@ tier it comes through a ``hooks.json`` ``input`` map, and the tool's
 parameter is typed ``Any``, so a caller can hand it the JSON *text* just
 as readily as the object.
 
-Three ported hooks read it with a bare ``isinstance(x, dict)`` and fell
-through to a default when it was not one. None crashed. Each produced a
+Two ported hooks read it with a bare ``isinstance(x, dict)`` and fell
+through to a default when it was not one. Neither crashed. Each produced a
 plausible wrong answer instead: the close gate read the whole JSON blob
 as the command and found no ``bd`` verb in it, so it allowed the close;
-``agent_dispatch_expect`` recorded every dispatch as ``general-purpose``,
-which the RDR-184 ledger reads as a phantom credit plus an undeclared
-start; ``divergence_language_guard`` scanned nothing.
+``divergence_language_guard`` scanned nothing. (A third, the RDR-184
+dispatch recorder, was deleted at cleanup step A1, nexus-0r1uz.)
 
-These tests pin the coercion and, for each of the three hooks, pin that
+These tests pin the coercion and, for each of the two hooks, pin that
 the two shapes now produce the SAME decision — which is the property
 that was actually missing, not the coercion itself.
 """
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 import pytest
 
 from nexus._hook_runtime._io import structured_field
-from nexus.hooks import agent_dispatch_expect as dispatch_mod
 from nexus.hooks import pre_close_verification as mod
 from nexus.hooks import stop_verification as stop_mod
 from nexus.hooks.pre_close_verification import _bd_verbs, run
@@ -102,14 +99,13 @@ class TestStructuredField:
         assert structured_field({"tool_input": value}, "tool_input") == {}
 
 
-class TestTheThreeHooksAgreeAcrossShapes:
+class TestTheHooksAgreeAcrossShapes:
     """The property the original code lacked: same payload, same answer.
 
     Each hook gets its own test rather than a shared parametrization,
     because what counts as "the same answer" differs per hook — a
-    verdict for the close gate, a ledger row for the dispatch recorder,
-    a resolved path for the divergence guard — and collapsing them onto
-    one comparison is what would make the check generic enough to stop
+    verdict for the close gate, a resolved path for the divergence guard —
+    and collapsing them onto one comparison is what would make the check generic enough to stop
     meaning anything.
     """
 
@@ -197,31 +193,6 @@ class TestTheThreeHooksAgreeAcrossShapes:
             == "ask"
         )
 
-    def test_dispatch_expect_records_the_same_subagent_type_either_way(self, tmp_path, monkeypatch) -> None:
-        monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
-        monkeypatch.setenv("NX_ORCH_STOP_GUARD", "observe")
-
-        inner = {"subagent_type": "conexus:code-review-expert", "run_in_background": True}
-
-        dispatch_mod.run({"session_id": "shape-a", "tool_name": "Agent", "tool_use_id": "toolu_u1", "tool_input": inner})
-        dispatch_mod.run(
-            {
-                "session_id": "shape-b",
-                "tool_name": "Agent",
-                "tool_use_id": "toolu_u1",
-                "tool_input": json.dumps(inner),
-            }
-        )
-
-        rows_a = _ledger_rows(tmp_path, "shape-a")
-        rows_b = _ledger_rows(tmp_path, "shape-b")
-        assert rows_a and rows_b, f"no ledger rows written: a={rows_a!r} b={rows_b!r}"
-        assert "conexus:code-review-expert" in rows_a
-        assert "conexus:code-review-expert" in rows_b, (
-            "the JSON-text shape recorded a different subagent type — this is the "
-            "phantom-credit defect: a wrong type is worse than a missing row"
-        )
-
     def test_divergence_guard_resolves_the_same_file_path_either_way(self) -> None:
         path = "/x/docs/rdr/post-mortem/pm-001.md"
         inner = {"file_path": path}
@@ -243,9 +214,3 @@ def _decision(result) -> str:
         return str(json.loads(result.stdout)["hookSpecificOutput"]["permissionDecision"])
     except Exception:  # noqa: BLE001 — any unparseable stdout means "said nothing"
         return ""
-
-
-def _ledger_rows(state_home, session_id: str) -> str:
-    d = Path(state_home) / "nexus" / "orchestration"
-    hits = list(d.glob(f"{session_id}*"))
-    return "\n".join(p.read_text() for p in hits if p.is_file())

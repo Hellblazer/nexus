@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
-"""The three deciding verbs, driven as Claude Code drives them (nexus-17i1n).
+"""The deciding verbs, driven as Claude Code drives them (nexus-17i1n).
 
 Every other test of these hooks proves a PART: that ``run()`` returns the
 right envelope, that ``hooks.json`` names the right verb, that
@@ -202,29 +202,6 @@ def test_a_non_bash_call_is_no_decision_immediately() -> None:
     )
     assert proc.returncode == 0, proc.stderr
     assert proc.stdout == "", f"expected empty (no-decision) stdout, got: {proc.stdout!r}"
-
-
-def test_subagent_stop_runs_and_stays_silent_with_no_ledger(tmp_path) -> None:
-    """It can only block an agent the ledger says owes a report.
-
-    With a throwaway XDG_STATE_HOME there is no ledger, so silence is
-    correct — and silence still proves the verb resolved and exited
-    cleanly rather than being not-found.
-    """
-    proc = _run_verb(
-        "subagent-stop",
-        {
-            "session_id": "e2e-no-such-session",
-            "agent_id": "e2e-agent",
-            "agent_type": "Explore",
-            "agent_transcript_path": str(tmp_path / "nope.jsonl"),
-            "stop_hook_active": "false",
-        },
-        extra_env={"XDG_STATE_HOME": str(tmp_path / "state")},
-    )
-    assert proc.returncode == 0, proc.stderr
-    if proc.stdout.strip():
-        json.loads(proc.stdout)  # whatever it says must at least be JSON
 
 
 def test_an_unknown_verb_is_refused_rather_than_silently_passing() -> None:

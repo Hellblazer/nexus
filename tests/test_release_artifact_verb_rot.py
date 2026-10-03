@@ -192,8 +192,7 @@ _VERB_RE = re.compile(r"\bnx\s+([a-z][a-z0-9-]*)(?:\s+([a-z][a-z0-9-]*))?")
 #: claims, one about the code and one about the instrument (T2
 #: ``nexus_rdr/215-gates-that-lost-their-domain``).
 #:
-#: Underscores are in the character class, unlike ``_VERB_RE``: the RDR-184
-#: ledger verbs are spelled ``expectations_census`` and friends.
+#: Underscores are in the character class, unlike ``_VERB_RE``.
 #: Depth is ONE token — ``nx-hook`` has a flat verb table, no subcommands.
 _HOOK_VERB_RE = re.compile(r"\bnx-hook\s+([a-z][a-z0-9_-]*)")
 
@@ -223,12 +222,6 @@ _GLOBAL_NOISE_ALLOWLIST: dict[str, str] = {
     "thought": "historical note: 'nx thought' was removed 2026-02-26; the citing scenario is itself skip()-ped",
     "invocation": "prose, e.g. \"every top-level nx invocation is recorded\" — names the audit mechanism, not a verb",
     "is": "prose, e.g. \"the installed nx is ${INSTALLED_VERSION}\" (scripts/reinstall-tool.sh) — a copula, not a verb",
-    "console": (
-        "prose, e.g. \"this generation predates the nx-hook console script\" "
-        "(tests/e2e/post-publish-dispatch-check.sh's _prereq_fail message) — "
-        "the English noun, and the same line's \"nx-hook is not on PATH\" is "
-        "already covered by the \"is\" entry above"
-    ),
 }
 
 #: relative-path -> reason. EVERY nx-verb invocation in the file is exempted.

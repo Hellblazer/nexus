@@ -178,10 +178,7 @@ class HookResult:
     """What a hook decided.
 
     ``stdout`` is the rendered envelope line, or ``None`` for the many hooks
-    that are stdout-silent by contract (``subagent-start-stamp.sh`` and
-    ``agent-dispatch-expect.sh`` never write to real stdout at all).
-    ``exit_code`` is 0 for every hook verb; the ledger verbs propagate their own
-    codes, which callers branch on.
+    that are stdout-silent by contract. ``exit_code`` is 0 for every hook verb.
 
     ``crashed`` marks a result produced by :func:`never_fail`'s swallow rather
     than by the verb returning. It exists because a ledger verb's exit code IS
@@ -250,11 +247,8 @@ def structured_field(data: dict, name: str) -> dict:
     The damage was not a crash in any of the three affected hooks; it was
     a plausible wrong answer. ``pre_close_verification`` read the whole
     JSON blob as the command string, found no ``bd`` verb inside the JSON
-    quoting and allowed the close. ``agent_dispatch_expect`` recorded the
-    dispatch as ``general-purpose`` rather than its real subagent type,
-    which is worse than recording nothing: the RDR-184 ledger matches N
-    EXPECT rows of a type against N STARTs of that type, so a wrong type
-    both grants a phantom credit and manufactures an undeclared start.
+    quoting and allowed the close. (A third hook, the RDR-184 dispatch recorder, was
+    deleted at cleanup step A1, nexus-0r1uz.)
     ``divergence_language_guard`` read an empty ``file_path`` and scanned
     nothing. Three hooks, one boundary, and in every case the failure
     looked exactly like the hook having nothing to say.

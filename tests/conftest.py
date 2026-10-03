@@ -710,8 +710,7 @@ def pytest_sessionfinish(session, exitstatus):
 #: ``dropped_writes.jsonl``: the best-effort drop meter. Its live writers are
 #: the conexus routing hook (``_record_dropped_routing_event``, which records
 #: every subagent git write on this box and appends here when its engine POST
-#: fails) and the session-end capability census (``record_drop``). Both open
-#: it O_APPEND and nothing rotates it. A peer session's worktree commit during
+#: fails). It opens the file O_APPEND and nothing rotates it. A peer session's worktree commit during
 #: a run therefore grows it with no test involved: a 19,372-pass run exited 1
 #: over one such line (nexus-ume6q batch, peer commit ca8d314b0).
 _APPEND_ONLY_REAL_CONFIG_LOGS = frozenset({
@@ -1175,14 +1174,6 @@ _REAL_CONFIG_DIR_ALLOWLIST_PREFIXES: tuple[str, ...] = (
     # this checkout's index run -- during a sibling's pytest run that
     # coincided with an orchestrator commit.
     "locks/",
-    # SessionEnd capability census (src/nexus/_session_end_census.py:82,
-    # launched by _session_end_launcher.py when a Claude Code session or
-    # subagent ends); appends one line per ending session. On a box running
-    # orchestration, subagents end continuously, so this appends during
-    # any multi-minute pytest run. Observed 2026-08-21 as ``MODIFIED
-    # capability_census.jsonl`` during the .p1f battery's lint stage. No
-    # test writes it (grep tests/ for the name: none).
-    "capability_census.jsonl",
     # T1 handoff markers written by the conexus SessionStart hook on
     # /clear and /resume (nexus-d76vc; src/nexus/daemon/t1_handoff.py),
     # consumed and removed by the MCP lifespan's handoff watcher within a

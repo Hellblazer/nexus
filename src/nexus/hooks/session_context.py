@@ -65,8 +65,7 @@ avoid that cost while this module lives inside the ``nexus.hooks`` package.
 Measured: ``python -c "import nexus.hooks.session_context"`` puts
 ``structlog`` in ``sys.modules`` regardless of what this file itself
 imports. That is a property of every verb module already living in
-``nexus.hooks`` (``session_start_verb``, ``ledger_verbs``,
-``subagent_start_stamp``, ...), not something this port introduces or
+``nexus.hooks`` (``session_start_verb``, ``subagent_start``, ...), not something this port introduces or
 could fix by itself -- fixing it means deferring ``nexus.hooks``'s own
 package-level imports, a change shared by every hook this epic is
 concurrently porting, and out of scope for a "move, do not rewrite" bead.

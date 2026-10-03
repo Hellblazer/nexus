@@ -12,11 +12,8 @@ REPO=$(git rev-parse --show-toplevel)
 # Fake Claude Code hook env
 export CLAUDE_PLUGIN_ROOT="$REPO/conexus"
 export CLAUDE_PROJECT_DIR="$SANDBOX"
-# The ported hooks below reach the RDR-184 ledger through
-# nexus.hooks.expectations, which resolves its state dir off XDG_STATE_HOME
-# and falls back to $HOME/.local/state. Pin it into the sandbox: a
-# validation run must not append rows to the operator's live ledger, and
-# the stop/verification hooks read that same ledger to decide.
+# Pin XDG_STATE_HOME into the sandbox: a validation run must not write
+# per-session state under the operator's home.
 export XDG_STATE_HOME="$SANDBOX/.local/state"
 mkdir -p "$XDG_STATE_HOME"
 
@@ -60,8 +57,7 @@ JSON
 # hook.sh` for some time against a file that does not exist under that
 # name (the real one is stop_failure_hook.py) — 127, swallowed, reported
 # green. Every module below returns exit 0 by contract (HookResult.
-# exit_code is 0 for every hook verb; only the ledger verbs, which are not
-# here, propagate their own), so a non-zero now means an import error or a
+# exit_code is 0 for every hook verb), so a non-zero now means an import error or a
 # crash in run(), which is exactly what a smoke step should catch.
 DRIVE="$REPO/tests/e2e/lib/drive_hook.sh"
 

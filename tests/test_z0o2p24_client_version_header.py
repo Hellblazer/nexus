@@ -12,7 +12,7 @@ transport the client uses has its own test:
 * httpx: the T2 stores and the catalog client (``RefreshableHttpStoreMixin``), the token store (its own
   client) and the T1 scratch store.
 
-The hook paths (``mailbox_drain``, ``tuple_ledger_project``) and ``db/http_engine_status`` send no
+The hook path (``mailbox_drain``) and ``db/http_engine_status`` send no
 version header; none of them writes a chunk.
 
 The only writers of ``upsert-chunks`` and ``store-put`` in this repository are on the urllib transport.
@@ -186,7 +186,6 @@ _NOT_SENDERS: dict[str, str] = {
     # hooks: latency on every prompt / tool call
     "nexus/hooks/_routing_lib.py": "hook",
     "nexus/hooks/mailbox_drain.py": "hook",
-    "nexus/hooks/tuple_ledger_project.py": "hook",
     # probes and admin calls of the engine; none writes a chunk
     "nexus/commands/daemon.py": "engine probe: GET /health",
     "nexus/commands/doctor.py": "probes: health and the MinerU server",

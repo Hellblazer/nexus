@@ -3272,22 +3272,17 @@ without the plugin or without a registry.
 own result, `nx doctor` additionally runs the cheap, read-only subset of the
 `--check-*` diagnostics inline: `resources`, `plan-library`, `taxonomy`,
 `aspect-queue`, `t1`, `engine-activity`, `index-failures`, `fanout-floor`,
-`tuple-projection`, `ghost-sweep`, `harness-grant`, `docs-aspects-config`
-(the last five have no `--check-fanout-floor` / `--check-tuple-projection`
-/ `--check-ghost-sweep` / `--check-harness-grant` / `--check-docs-aspects-config`
-flag; they only run as part of this supplementary set).
+`ghost-sweep`, `harness-grant`, `docs-aspects-config`
+(the last four have no `--check-ghost-sweep` / `--check-harness-grant` /
+`--check-docs-aspects-config` flag; they only run as part of this
+supplementary set).
 `docs-aspects-config` (nexus-l46pu round 2) warns when a local
 `aspects.docs_collections` glob matches a registered `docs__` collection
 whose engine `aspects_enabled` is not yet `True` — the engine is
 authoritative once it has an opinion (see [Aspects](configuration.md#aspects)),
 so an unsynced local match is silent cross-machine drift. N/A on a machine
 with an empty `docs_collections` list.
-`tuple-projection` (nexus-08cfl) reports whether
-this session's RDR-205 ledger tuple projector
-(`nexus.hooks.tuple_ledger_project`) has logged any SKIP lines to its
-per-session log — that projector never raises on failure, so a
-persistent SKIP was otherwise invisible outside the e2e
-`post-publish-dispatch-check.sh` gate. `ghost-sweep` (nexus-29drn) reports the
+`ghost-sweep` (nexus-29drn) reports the
 current RDR-204 ghost-collection count via a dry-run call to the same engine
 route [`nx catalog sweep-ghosts`](#nx-catalog-sweep-ghosts) uses, and names
 that verb when the count is nonzero — see that section for why this row
@@ -3327,8 +3322,6 @@ Then, corpus-integrity checks (both modes, all read-only, all degrade to a skip 
 Then: Voyage AI key, git binary, git hooks status for registered repos, the MinerU server (as of 6.16.0 probed only when actually provisioned — an explicit non-default `pdf.mineru_server_url` or a live `nx mineru start` pid; unprovisioned fresh boxes render the not-configured skip instead of a red ✗), index log last-write time, orphaned PDF checkpoints, orphaned pipeline buffer entries, T2 integrity, T2 best-effort writes (the meter's only producer — the RDR-129 chash dual-write hook — is retired by RDR-187, so a nonzero count is reported as a frozen HISTORICAL count, never a warning), and — in service mode — a stray T2 autostart unit left over from a pre-service-mode install (GH #1405: soft warning naming the unit path and the removal command). (The RDR-129 T2 daemon-singleton check is retired along with the T2 daemon it guarded — nexus-i711w Stage 2 sub-stage B; the single-writer invariant it enforced now belongs to Postgres, not to a pid count.) The T2 integrity check reports a transient FTS5 write-lock during active indexing as a soft warning, not a hard failure (RDR-129 B4). The Voyage credential line (`VOYAGE_API_KEY`) is informational only: it describes enrichment/engine-bootstrap config, never a serving requirement, and is never fatal — the live T3 health surface is the vector-service probe above and `nx daemon service status`. (The `CHROMA_*` credential rows retired with the migration machinery at RDR-155 P4b.)
 
 Migration-report checks retired (RDR-155 P4b): the RDR-178 migration-report / write-divergence doctor rows died with the migration machinery; `<config>/migration-reports/*.json` files on disk remain as inert audit artifacts.
-
-Orchestration-hook plugin floor (nexus-3xg21): a soft-warn row checks Claude Code's `installed_plugins.json` for the conexus plugin version — a plugin older than v6.14.0 carries no RDR-184 orchestration hooks (no subagent stop-guard, no expectations ledger) and doctor says so with `/plugin update conexus` as the fix. A box with no plugin install shows a not-applicable pass.
 
 Stranded-install check (nexus-gynt2): a doctor row (`Stranded pre-PG install`) guards the post-Chroma-deletion era. On a release that no longer ships the migration tool (RDR-155 P4b — this one), a box still carrying unmigrated pre-PG data (`chroma.sqlite3`, `t2.db`, `memory.db`, or `catalog/.catalog.db` present with no verified migration report) fails doctor fatally with the two-hop instruction: install the pinned last migration-capable release, run `nx upgrade` there against a local engine (stop any running local service, clear `NX_SERVICE_URL` and the `service_url` key in `config.yml`, `export NX_LOCAL=1` (needed in addition; it does not by itself override `service_url`), never a managed endpoint; the ladder converges the data migration), then upgrade back. Reaching the managed cloud is a later hop with the current client: see [Migration Runbook § Getting that data into the managed cloud](migration-runbook.md#getting-that-data-into-the-managed-cloud). The same detection also refuses `nx init`, banners every CLI invocation on such a box, and surfaces through both MCP servers' `instructions` channel at startup.
 
@@ -5118,46 +5111,6 @@ never a fabricated zero. `--json` keeps every key present regardless;
 only the value's shape (number/dict vs. string) changes on failure. The
 text form is one line per figure, diffable against a previous run's
 output — "SAME QUERIES, SAME BUCKETS, EVERY TIME" (playbook §4.5).
-
----
-
-## nx census
-
-```
-nx census capability [--session SESSION_ID] [--since ISO_DATE] [--project-dir PATH] [--json] [--from-store]
-```
-
-Counts tool calls per capability across Claude Code session transcripts, split **orchestrator vs subagent** (nexus-h33x8.1). Buckets are `skill`, `agent`, `serena`, `nx_answer`, `search_query`, `other_nx_mcp`, `baseline` (Bash/Read/Edit/Write), `other`.
-
-Reads the transcript JSONL Claude Code already writes under `~/.claude/projects/<slug>/` — no hook, no daemon, no new log — so it is retroactive over every transcript on disk. `--project-dir` (or `NX_CENSUS_PROJECT_DIR`) overrides the directory; the default is derived from the current working directory.
-
-**Roll-up rule, stated because leaving it unstated is what made the prior hand-derived baseline irreproducible:** a subagent's calls attribute to its **parent session**. `<sid>/subagents/**/agent-*.jsonl` rolls up to `<sid>`; orchestrator-vs-subagent is a *dimension* of a session, not a session boundary. Call totals are scope-independent, session counts are not — so counting sidechain files as their own sessions moves Serena from 13 sessions to 31 while leaving its 464 lifetime calls untouched. Every session count in the output names its scope: `sess` is either-scope, `orch sess` and `sub sess` split it.
-
-The split is the point, not a detail: the same instruction delivered at SubagentStart draws far more use than at SessionStart (`plan_search`: 12 orchestrator calls against 282 subagent calls), and a census that summed the two would hide it.
-
-**Two denominators, always.** `ALL MEASURABLE SESSIONS` and `SUBSTANTIAL SESSIONS` (at least 50 calls). Downstream work pre-registers predictions against the substantial subset, so emitting only one would leave those unfalsifiable against this command's own output.
-
-**Exits non-zero when the run measured *nothing*.** An empty, unreadable, unparseable, or tool-call-free scope reports `UNMEASURABLE` with a reason rather than a clean zero; a zero row inside a measurable run is a real zero. Sessions that legitimately carry no tool call are the majority of transcripts — they are counted, listed by reason, and reported as a share, but they do not fail the run. The exit code answers "did this measure anything at all", **not** "is this corpus healthy"; a caller needing a health threshold must read `unmeasurable_share`, not `$?`.
-
-**It reports counts and refuses a verdict.** Non-use of a capability may be a forgotten affordance or a correct rejection, and nothing in the transcript distinguishes them; `--json` carries a `verdict: null` field and per-tool counts so narrower slices stay derivable. The refusal governs what this command renders — it is not, and cannot be, an enforcement boundary against verdicts computed downstream from these numbers.
-
-**`--from-store`** (nexus-gjv9b PART 1) reads the durable `capability_census` engine table instead of re-parsing transcripts — the table every SessionEnd hook upserts to now, replacing the retired `capability_census.jsonl` writer. Reuses `--session`/`--since`/`--json`; `--project-dir` is ignored (there is no transcript walk on this path). A row's `blindspot`/`unmeasurable_reason` are surfaced verbatim from whatever the writing session recorded — this flag reads an already-measured artifact, so it carries no UNMEASURABLE-vs-zero distinction of its own; a session absent from the table is reported as absent, and a service-unreachable read exits non-zero with `UNAVAILABLE: <reason>`.
-
-```
-nx census dispatches [--session SESSION_ID] [--project-dir PATH] [--json]
-```
-
-Recognizes every `Agent` tool_use block in a transcript — `(subagent_type, ordinal, description)` — as `(subagent_type, ordinal)` (nexus-h33x8.2). This is the transcript-based recognizer nexus-nu7fo's RDR-184 Gap-1 ledger could never build for itself: the guard keyed dispatches on a `a<name>-<hash>` name-morphology, but the `Agent` tool has no `name` parameter, so `recognized` was structurally pinned at 0 across four consecutive sessions (0/6, 0/10, 0/7, 0/2). Every `Agent` block already carries `input.subagent_type` and `input.description` — this command reads exactly that, reusing `nx census capability`'s transcript walk and roll-up rule rather than re-deriving them.
-
-Each row carries **two ordinals**: `session_ordinal` numbers every dispatch in the session in transcript order; `type_ordinal` numbers only the occurrences of that row's own `subagent_type` (so the second `conexus:code-review-expert` dispatch in a session is `type_ordinal=2`). **Neither ordinal is a ledger pairing key** — `nexus.hooks.expectations` documents why an ordinal invented on the recognizer's side can never be paired against what the `SubagentStart` hook writes (no per-instance identifier survives that far). The ledger's own credit matching is N-of-type (N `EXPECT` rows of a type against N `START`s of that type); this command's `type_counts` is that same N, and the ordinals exist as a human "which one was #2" display aid, not a join key.
-
-`subagent_type` in each row is the **sanitized, ledger-consumable form** — pass it straight to `nx-hook expectations_expect`. For a plugin-namespaced type like `conexus:substantive-critic` this is the value UNCHANGED, colon included: per AGENTS.md's hot-rule convention ("keyed on the subagent type verbatim, colon included — never an invented name"), the ledger's charset already accepts the colon, and sanitizing it away would recreate the exact pairing failure nexus-nu7fo spent four sessions diagnosing. Sanitization only transforms a value the ledger's charset would otherwise reject outright (a leading non-alphanumeric character, an interior character outside `[A-Za-z0-9_:-]`, an empty string, or over 64 characters); a row whose value changed is marked with `subagent_type_sanitized_changed: true` (`*` in the text table). If two *distinct* raw values sanitize to the same key, that is reported under `sanitize_collisions` rather than silently merged — a downstream consumer must not double-credit two different agent types as one. An `Agent` block with no `input.subagent_type` at all is still enumerated (dropping it would break the recognized-count-equals-raw-count property), flagged `subagent_type_missing: true` (with `subagent_type_raw: null`), and keyed as `general-purpose` — **not** an invented placeholder: `nexus.hooks.agent_dispatch_expect` (nexus-a795d) computes its own EXPECT-row name identically for the same omitted field (`str(ti.get("subagent_type") or "general-purpose")`), because the harness genuinely starts a `general-purpose` agent when the field is absent. Keying these rows any other way would make "pass `subagent_type` straight to `nx-hook expectations_expect`" false for exactly the rows that most need it (28 of 1304 dispatches in the live corpus at last count).
-
-A non-`Agent` tool_use block that nonetheless carries `input.subagent_type` is flagged as a **suspect block** (`suspect_blocks` per session, `suspect_blocks_total` at the top level) — the signature of an Agent-block-specific rename or restructure that would otherwise silently zero out recognition while every other tool_use in the same transcript keeps parsing normally, so nothing would go `UNMEASURABLE`. This is warn-only and never affects `exit_code`; the precedent is `nexus.hooks.agent_dispatch_expect` itself still special-casing `"Task"` as "the pre-rename spelling of the same tool" alongside `"Agent"`.
-
-A session that dispatched nothing is a **measured zero**, not unmeasurable — dispatch non-use is not the defect class this command exists to catch. The UNMEASURABLE-vs-zero contract is otherwise identical to `nx census capability`: an empty, unreadable, unparseable, or genuinely tool-call-free transcript reports `UNMEASURABLE` and a nonzero exit; a session with tool calls but zero `Agent` blocks reports zero dispatches and a zero exit. A session with unparseable trailing lines is still measurable but reported `PARTIAL` (text and JSON both) — the dispatch count above it may be an undercount, never a silently clean total.
-
-**Scope fence (binding):** this command supplies the recognizer only. It does not read or write the RDR-184 ledger, does not compute `undeclared`/`BLINDSPOT`, and does not decide how (or whether) the ledger adopts its output — that is nexus-nu7fo's resolution, already closed via the dispatch-expect hook + the AGENTS.md convention above.
 
 ---
 

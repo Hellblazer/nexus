@@ -586,8 +586,7 @@ if [ -n "${NEXUS_SERVICE_BIN:-}" ]; then
   # apply) — log what is being pinned so a stale artifact is at least visible.
   # nexus-7m6uc: dialect detected ONCE, wrong-dialect stat never invoked --
   # a blind `stat -f ... || stat -c ...` leaks GNU's filesystem-status dump
-  # into this log line on Linux (see
-  # tests/e2e/post-publish-dispatch-check.sh's fix for the full writeup).
+  # into this log line on Linux.
   if stat --version >/dev/null 2>&1; then
     _bin_mtime="$(stat -c '%y' "$NEXUS_SERVICE_BIN" 2>/dev/null)"
   else

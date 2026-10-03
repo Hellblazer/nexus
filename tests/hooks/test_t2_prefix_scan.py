@@ -559,10 +559,12 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 #: in it is the vacuous half this lint used to have. ``conexus/hooks/scripts``
 #: dropped 12 -> 1 at nexus-z9cz2, which deleted the eleven plugin copies
 #: nothing shipped executed; ``divergence-language-scan.py`` remains.
+#: ``src/nexus/hooks`` dropped 32 -> 23 at cleanup step A1 (nexus-0r1uz),
+#: which deleted the nine ledger, projector and census modules.
 _HOOK_CODE_ROOTS: dict[str, int] = {
     "conexus/hooks/scripts": 1,
     "sn/hooks/scripts": 5,
-    "src/nexus/hooks": 32,
+    "src/nexus/hooks": 23,
     "src/nexus/_hook_runtime": 4,
 }
 

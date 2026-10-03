@@ -92,8 +92,6 @@ conexus/
 │   └── scripts/                       # Plugin-resident hooks and shared helpers.
 │       │                              # Most hooks now live in the conexus WHEEL
 │       │                              # (nexus.hooks.*) — see the table below.
-│       ├── behaviour_census.py        # SessionStart: the previous session's delegation
-│       │                              # and deliberation rates
 │       ├── version_lockstep_hook.py   # SessionStart(startup): plugin↔CLI version skew
 │       ├── mailbox_drain.py           # UserPromptSubmit: render mail addressed to this session
 │       ├── version_lockstep_action.py # Detached, extras-preserving reinstall the lockstep
@@ -273,8 +271,8 @@ See `hooks/hooks.json` for exact wiring. A `hooks/scripts/...` path below uses
 `$CLAUDE_PLUGIN_ROOT` as the plugin root. A bare `hook_*` name is an MCP tool served
 by the nexus MCP server out of the conexus wheel (`nexus.hooks.*`), not a file in this
 plugin — RDR-215 moved those hooks into the wheel so their logic ships and is tested as
-Python. They have no command line to run by hand; `nx-hook <verb>` is the command tier,
-and only the ledger verbs have one. A `hooks/scripts/nx_hook_shim.py <verb>` handler runs
+Python. They have no command line to run by hand; `nx-hook <verb>` is the command tier.
+A `hooks/scripts/nx_hook_shim.py <verb>` handler runs
 `nx-hook <verb>` through a stdlib wrapper: `nx-hook` from conexus 7.55.0 to 7.57.x exits 2
 on a verb it does not know, which blocks the session, so any verb one of those CLIs lacks
 is wired through the shim, which skips it with a notice instead.
@@ -287,13 +285,10 @@ is wired through the shim, which skips it with a notice instead.
 | `SessionStart` | `nx-hook session-start` | Resolve/propagate session id; emit the skill-invocation guidance imperative (nexus-h33x8.4 — moved here from the pinned `cat .../using-nx-skills/SKILL.md` entry so guidance edits ship at PyPI-release/reinstall cadence instead of plugin-release cadence; see `nexus.session_start_guidance`) |
 | `SessionStart` | `nx-hook session-context` | Surface T2 memory, ready beads, and scratch context at session start |
 | `SessionStart` | `nx-hook rdr` | Reconcile RDR file frontmatter ↔ T2 metadata (self-healing on divergence) |
-| `SessionStart` | `hooks/scripts/behaviour_census.py` | Report the PREVIOUS session's delegation and deliberation rates against baselines from the user's own trailing sessions (nexus-4lnn1) |
 | `SessionStart` (matcher `startup`) | `hooks/scripts/version_lockstep_hook.py` | Detect plugin↔CLI version skew (RDR-143); nudge and dispatch a detached, extras-preserving upgrade that takes effect next session |
 | `SessionStart` (matcher `startup`) | `hooks/scripts/nx_hook_shim.py mcp-connect-wait` | Wait, bounded (15s) and fail-open, for this session's `nx-mcp` to publish its connect marker before turn 1 can outrun the connection; on timeout, says tool-tier hooks will be skipped (RDR-215, nexus-veh77) |
 | `SessionEnd` | `nx-session-end-launcher` | Flush session-end bookkeeping (memory, beads, scratch) via a detached grandchild |
 | `UserPromptSubmit` | `hooks/scripts/mailbox_drain.py` | Claim, ack and render this session's RDR-205 mailbox rows; the unconditional delivery floor beneath the channel |
-| `SubagentStart` | `hooks/scripts/nx_hook_shim.py subagent-start-tuple` | Project the RDR-205 ledger START tuple, as a sibling of the main hook so its failure does not take the projection with it; command tier since nexus-egm7p, for the same MCP-disconnect hazard nexus-5l8i8 fixed for the RDR-184 writers |
-| `SubagentStop` | `hooks/scripts/nx_hook_shim.py subagent-stop-tuple` | Project the RDR-205 ledger REPORT tuple, same sibling shape; command tier since nexus-egm7p |
 | `PostCompact` | `hook_post_compact` | Re-prime context (memory, beads, scratch) after `/compact` |
 | `Stop` | `hook_stop_verification` | Opt-in session-end verification: tests + git state (see [Configuration § Verification](../docs/configuration.md#verification)) |
 | `StopFailure` | `hook_stop_failure` | Advisory on abnormal session termination |
@@ -301,11 +296,8 @@ is wired through the shim, which skips it with a notice instead.
 | `PreToolUse` (`Bash`) | `hooks/scripts/routing/subagent_git_write_requires_orchestrator.py` | Deny index-writing / working-tree-destroying git verbs from subagents in the shared tree (RDR-184 Gap-4) |
 | `PreToolUse` (`Bash`) | `hooks/scripts/routing/credential_print_guard.py` | Deny commands that would reveal a Claude credential: a keychain read, a `.credentials.json` read, naming a protected token variable, or reading another process's environment (RDR-219 Gap 2, no escape) |
 | `PreToolUse` (`Bash`) | `hooks/scripts/routing/phase_review_close_requires_gate.py` | Deny `bd close` on a phase-review bead without a fresh PASSED gate sentinel (RDR-121 P2) |
-| `PreToolUse` (`Agent\|Task`) | `hooks/scripts/nx_hook_shim.py agent-dispatch-expect` | Write the RDR-184 EXPECT ledger row from the dispatch's own `subagent_type` + `run_in_background`, so orchestration doesn't have to hand-write it (nexus-qc4p1) |
 | `PostToolUse` | `hook_divergence_language_guard` | Advisory scan of RDR post-mortem writes for divergence-language patterns (RDR-065 Gap 2) |
 | `SubagentStart` | `hook_subagent_start` | Inject inherited context (active bead, session, MCP priority) into spawned subagents |
-| `SubagentStart` | `hooks/scripts/nx_hook_shim.py subagent-start-stamp` | Record the RDR-184 EXPECT-ledger START row (agent id + type) at dispatch time (nexus-ccs9v.16) |
-| `SubagentStop` | `hooks/scripts/nx_hook_shim.py subagent-stop` | Block a named background teammate's idle once if it never sent a completion report (RDR-184 Gap 1) |
 | `PreToolUse` (`mcp__plugin_conexus_.*`) | `hooks/scripts/nx_hook_shim.py auto-approve` | Auto-approve nexus and nexus-catalog MCP tool calls; paired with the PermissionRequest entry below because the two events fire in different permission modes |
 | `PermissionRequest` (`mcp__plugin_conexus_.*`) | `hooks/scripts/nx_hook_shim.py auto-approve` | Auto-approve nexus and nexus-catalog MCP tool calls |
 
@@ -314,28 +306,15 @@ hook that returns a VERDICT — a `permissionDecision`, a `behavior`, a
 stop `decision` — belongs on the command tier, because an `mcp_tool`
 hook cannot return one. Claude Code names four hook types that carry a
 decision (`prompt`, `agent`, `command`, `http`) and `mcp_tool` is not
-among them; its output is read for context. The three deciding hooks
-(`pre-close-verification`, `subagent-stop`, `auto-approve`) were wired as
-`mcp_tool` in conexus 7.55.0 and all three were inert for that release —
+among them; its output is read for context. The deciding hooks
+(`pre-close-verification`, `auto-approve`) were wired as
+`mcp_tool` in conexus 7.55.0 and were inert for that release —
 the close gate let an unreviewed `bd close` through while returning a
 correct deny to anything that called it directly. Each is still
 registered on both tiers, because the verdict is useful as data; only the
 command tier is wired. `nexus.mcp.hooks.DECIDING_HOOKS` is the list, and
 `tests/test_deciding_hooks_are_command_tier.py` refuses a `hooks.json`
 that moves any of them back.
-
-Two more rows moved to the command tier for a DIFFERENT reason
-(`agent-dispatch-expect`, `subagent-start-stamp`; nexus-5l8i8): neither
-returns a verdict, so they are not in `DECIDING_HOOKS`. An `mcp_tool` hook
-instead depends on this session's own `plugin:conexus:nexus` MCP server
-being connected, and the event it observes fires whether or not that
-server answers. Root-caused 2026-09-27 from a session whose MCP server
-dropped for about three minutes: two Agent dispatches inside that window
-logged a non-blocking "MCP server not connected" error and proceeded with
-no EXPECT row written, while their SubagentStart fired after reconnect
-and did write a START row — EXPECT lost, START kept, which the RDR-184
-retro audit reads as an undeclared dispatch. The command tier has no such
-dependency, so both moved there too.
 
 ## Slash Commands
 

@@ -100,8 +100,7 @@ verb's own, or Claude Code kills the process before it can fail open on its
 own terms).
 
 **Fail-open, always -- but a timeout is now VISIBLE (round 3, Sam's
-review).** This verb is not in :data:`nexus._hook_runtime.entry.LEDGER_VERBS`,
-so ``entry.main`` forces exit 0 regardless of what :func:`run` returns --
+review).** ``entry.main`` forces exit 0 for every verb regardless of what :func:`run` returns --
 there is no pass/fail verdict here, only a wait, and the session always
 starts either way. A timeout logs one line (``mcp_connect_wait_timed_out``,
 via the hook log ``configure_hook_logging`` points at) naming the session id

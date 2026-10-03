@@ -4,8 +4,7 @@
 
 Port of ``conexus/hooks/scripts/stop_verification_hook.sh`` (contract map
 row 16). Advisory only: it warns about uncommitted changes, open beads, an
-RDR-184 ledger that still lists background agents the harness no longer
-tracks, and (nexus-dgl8g) a close-gate reconciliation backstop -- beads
+and (nexus-dgl8g) a close-gate reconciliation backstop -- beads
 that moved to ``closed`` this session with no ``review-completed`` marker
 naming both reviewers in this session's T1 scratch. **It can never emit
 deny or block** -- "warns only" is the script's own stated contract, hard
@@ -42,16 +41,34 @@ file that stopped being written, not data that stops being saved.
 """
 from __future__ import annotations
 
+import datetime
 import hashlib
 import json
 import os
+import re
 import shutil
 from pathlib import Path
 
 from nexus._hook_runtime._config import stop_guard_mode
 from nexus._hook_runtime._io import HookResult, _emit
 from nexus.hooks.verification_config import read_verification_config
-from nexus.hooks import expectations as _exp
+
+#: Charset the session id must match before it names a filesystem path.
+_SESSION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
+
+
+def _parse_iso(ts: str) -> datetime.datetime | None:
+    """``datetime.fromisoformat`` with a ``Z`` suffix normalised to ``+00:00``."""
+    if not ts:
+        return None
+    s = ts.strip()
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    try:
+        return datetime.datetime.fromisoformat(s)
+    except ValueError:
+        return None
+
 
 __all__ = ["run"]
 
@@ -77,11 +94,6 @@ _TRANSCRIPT_SCAN_BYTES = 65536
 #: without reading meaningfully more than :func:`_session_start_dt`
 #: already does on every call.
 _FINGERPRINT_HEAD_BYTES = 256
-
-#: The reconcile exit code that means "the ledger lists background agents
-#: the harness no longer tracks". Every other code, and every failure path,
-#: leaves the warning empty and never touches the decision.
-_RECONCILE_STRANDED = 4
 
 _UNCOMMITTED_WARNING = (
     "WARNING: Uncommitted changes detected — consider committing before "
@@ -148,10 +160,7 @@ _STOP_COVERAGE_DEADLINE_SECONDS = 5.0
 #: ``nexus_config_dir()`` (``NEXUS_CONFIG_DIR``-aware), NOT
 #: ``XDG_STATE_HOME``. Checked, not assumed: ``XDG_STATE_HOME`` in this
 #: codebase is used narrowly for the RDR-184 ledger family alone
-#: (``expectations._state_dir()``, and ``tuple_ledger_project.py``'s own
-#: beside-log, which its comment says "mirrors nexus.hooks.expectations'
-#: own layout" -- that module reaches for ``nexus_config_dir()``
-#: separately, for a DIFFERENT purpose, resolving the T1/engine endpoint).
+#: (the retired ledger's ``_state_dir()``).
 #: Every other per-session/per-install hook state this repo has --
 #: ``t1_session_lease.<session_id>``, ``t1_mint_<session_id>.lock``,
 #: ``mailbox_drain``/``mcp_connect_wait``'s own
@@ -217,35 +226,6 @@ def _read_config() -> dict:
         return {}
 
 
-def _reconcile_warning(payload: dict) -> str:
-    """The RDR-184 stranded-agent warning, or "".
-
-    WARN-ONLY unconditionally, and gated on the same guard as the rest of
-    the ledger machinery so a session that opted the whole guard off does
-    not pay for this either. It runs independent of the ``on_stop``
-    verification toggle: it is a distinct RDR-184 concern, not part of that
-    feature.
-    """
-    if stop_guard_mode() not in ("observe", "block"):
-        return ""
-    session_id = str(payload.get("session_id") or "")
-    if not session_id:
-        return ""
-    try:
-        report = _exp.expectations_reconcile(session_id, json.dumps(payload))
-    except Exception:  # noqa: BLE001 — every reconcile failure leaves the warning empty
-        return ""
-    if report.code != _RECONCILE_STRANDED:
-        return ""
-    joined = " | ".join(report.lines)
-    return (
-        "WARNING: expectations ledger reconciliation found background "
-        "agent(s) the ledger still lists as outstanding but the harness no "
-        "longer tracks (nexus-2v0v7) -- possible silent death, verify: "
-        f"{joined}\n"
-    )
-
-
 def _session_start_dt(transcript_path: str):
     """The Stop payload's own session, anchored on its transcript's first
     timestamped line -- or ``None`` if it cannot be determined.
@@ -256,8 +236,7 @@ def _session_start_dt(transcript_path: str):
     an EXPECT/START row, so a session that closes beads without ever
     dispatching a subagent has no ledger at all. The Stop/SubagentStop
     payload's own ``transcript_path`` (confirmed present on every hook
-    event this repo has a fixture for -- see
-    ``nexus.hooks.expectations._payload_transcript_path``'s docstring)
+    event this repo has a fixture for)
     names a JSONL transcript the harness itself writes, and Claude Code
     timestamps its own rows there; the first row carrying one is the
     session's actual start, independent of the ledger and of the
@@ -292,7 +271,7 @@ def _session_start_dt(transcript_path: str):
                     continue
                 ts = row.get("timestamp")
                 if isinstance(ts, str) and ts:
-                    return _exp._parse_iso(ts)
+                    return _parse_iso(ts)
     except OSError:
         return None
     return None
@@ -365,7 +344,7 @@ def _bd_closed_since(session_start) -> list[str] | None:
             continue
         if not isinstance(closed_at, str):
             continue
-        closed_dt = _exp._parse_iso(closed_at)
+        closed_dt = _parse_iso(closed_at)
         if closed_dt is None:
             continue
         if closed_dt >= session_start:
@@ -378,7 +357,7 @@ def _close_gate_state_dir() -> Path:
     constant's own comment above for why this is ``nexus_config_dir()``
     and not ``XDG_STATE_HOME``.
 
-    Same private-by-construction posture as ``expectations._state_dir()``
+    Private by construction
     (``chmod`` reapplied on every call: the dir may predate a version
     that created it 0700, and this file names live bead ids).
 
@@ -414,11 +393,9 @@ def _close_gate_state_dir() -> Path:
 def _close_gate_state_path(session_id: str) -> Path | None:
     """The per-session memoization file, or ``None`` for a path-unsafe id.
 
-    Reuses ``expectations._SESSION_ID_RE`` -- the same charset the RDR-184
-    ledger's own per-session filename already trusts -- rather than a
-    second regex that could drift from it.
+    Uses :data:`_SESSION_ID_RE`, a path-safe charset.
     """
-    if not session_id or not _exp._SESSION_ID_RE.match(session_id):
+    if not session_id or not _SESSION_ID_RE.match(session_id):
         return None
     return _close_gate_state_dir() / f"{session_id}.json"
 
@@ -751,11 +728,11 @@ def _undeclared_close_warning(payload: dict) -> str:
     Lists beads that moved to ``closed`` during THIS session with no
     ``review-completed`` marker in THIS session's T1 scratch naming both
     standing reviewers -- the same detective-not-preventive posture as
-    :func:`_reconcile_warning`, for the class of close the PreToolUse
+    the retired ledger reconcile warning, for the class of close the PreToolUse
     gate structurally cannot see (bead nexus-dgl8g's own motivation:
     ``bd batch -f``, ``bd import <file>``, a dynamically-built ``bd sql``
     -- content off the command line the gate tokenizes). Gated on the
-    same :func:`stop_guard_mode` as :func:`_reconcile_warning`, and for
+    same :func:`stop_guard_mode` as the retired reconcile warning, and for
     the same reason: both are RDR-184-orchestration-family checks, opted
     out of together, independent of the ``on_stop`` toggle that governs
     the git/beads UX nags below.
@@ -956,7 +933,7 @@ def _beads_in_progress() -> bool:
 def run(payload: dict | None) -> HookResult:
     """Approve the stop, with any advisory warnings attached."""
     data = payload if isinstance(payload, dict) else {}
-    reconcile = _reconcile_warning(data) + _undeclared_close_warning(data)
+    reconcile = _undeclared_close_warning(data)
 
     config = _read_config()
     if config.get("on_stop") is not True:

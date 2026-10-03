@@ -32,9 +32,8 @@ change is the exit boundary -- the original script's ``main()`` called
 ``sys.exit(0)`` directly from two places (silent-success and the FAILED
 marker); this module's :func:`run` returns a
 :class:`~nexus._hook_runtime._io.HookResult` instead, since
-``nexus._hook_runtime.entry.main`` forces exit 0 for every non-ledger verb
-regardless of what ``run`` returns (this verb is not in
-``LEDGER_VERBS``).
+``nexus._hook_runtime.entry.main`` forces exit 0 for every verb
+regardless of what ``run`` returns.
 
 **STDLIB ONLY.** This module must not import ``structlog``, must not import
 ``nexus.hooks`` (whose package ``__init__`` imports ``structlog`` and
@@ -59,11 +58,9 @@ second SessionStart entry, and ``preflight.py`` and the
 declaration is INERT until the next plugin cut, because ``marketplace.json``
 pins ``source.ref`` to a release tag -- see ``conexus/PENDING_RELEASE.md``.
 
-**Not a ledger verb.** ``preflight`` never appears in
-``nexus._hook_runtime.entry.VERB_TABLE`` or ``LEDGER_VERBS``: it has no
-caller that branches on an exit code, so ``HookResult``'s default
+No caller branches on this verb's exit code, so ``HookResult``'s default
 ``exit_code=0`` is exactly right, and ``entry.main`` forces 0 for every
-non-ledger verb regardless.
+verb regardless.
 """
 from __future__ import annotations
 

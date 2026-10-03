@@ -8,8 +8,8 @@ importing the ``nexus`` package.
 
 Factored out under nexus-aginu, after nexus-0zsmg: ``t2_prefix_scan.py``
 carried the first stdlib mirror of this precedence, ``routing/_lib.py``
-ported it "verbatim" (nexus-gjv9b), and ``tuple_ledger_project.py``
-(nexus-0zsmg/nexus-g2lln) was a THIRD independent copy -- and the one that
+ported it "verbatim" (nexus-gjv9b), and a third plugin script (since
+deleted) was a THIRD independent copy -- and the one that
 fell behind: its mirror lacked the persisted ``config.yml`` ``service_url``
 leg the other two already had. A drift between hand-maintained copies is
 exactly how that happened. This module is the single source for the parts
@@ -34,16 +34,9 @@ base URL is known. Callers differ here BY DESIGN, not by drift:
 ``t2_prefix_scan.py``/``routing/_lib.py`` are synchronous GET/POST callers
 that accept a persisted-config or env static ``service_token`` as a last
 resort -- a real, documented managed-onboarding path (``nx config set
-service_token``). ``tuple_ledger_project.py`` is a fire-and-forget async
-write with no reader and no retry, so it deliberately refuses any
-credential but a fresh tenant-scoped data-token lease on a MANAGED
-endpoint, falling back to a LOCAL supervisor lease's own token only when
-the base URL itself came from that same local lease (nexus-g2lln).
-:func:`resolve_base_url` reports which leg won (``is_local_supervisor``) so
-a caller can implement either policy without re-deriving the lease/config
-reads; :func:`resolve_endpoint_and_token` is the tuple_ledger_project.py
-policy, factored here so its precedence + reads are the single-sourced
-part even though the policy stays specific to that one caller.
+service_token``). :func:`resolve_base_url` reports which leg won
+(``is_local_supervisor``) so a caller can implement either credential
+policy without re-deriving the lease/config reads.
 """
 from __future__ import annotations
 
@@ -279,8 +272,7 @@ def read_data_token_lease(
     ``near_expiry_threshold=0.0`` (the default) means "not yet expired" --
     the historical behaviour for a synchronous GET/POST caller that can
     retry on a 401 (``t2_prefix_scan.py`` / ``routing/_lib.py``). A
-    fire-and-forget caller with no retry and no reader
-    (``tuple_ledger_project.py``) passes ``0.20``, the same margin
+    fire-and-forget caller with no retry and no reader may pass ``0.20``, the same margin
     ``nexus.db.data_token._REFRESH_THRESHOLD`` uses, so a lease that is
     about to expire is never presented on a write nothing will retry.
 
@@ -408,42 +400,3 @@ def resolve_base_url(config_dir: Path) -> tuple[str, bool]:
         f"config.yml service_url, no NX_SERVICE_PORT, and no live local "
         f"supervisor lease at {lease_path}"
     )
-
-
-def resolve_endpoint_and_token(
-    config_dir: Path,
-    *,
-    tenant: str = DEFAULT_TENANT,
-    near_expiry_threshold: float = 0.20,
-) -> tuple[str, str, bool]:
-    """``(base_url, token, is_local_supervisor)`` using nexus-g2lln's
-    policy -- or raise :class:`EndpointUnresolvable`.
-
-    A fresh tenant-scoped data-token lease always wins. On a LOCAL
-    SUPERVISOR endpoint (:func:`resolve_base_url`'s last leg) only, a
-    missing/near-expiry data-token lease falls back to that SAME lease
-    record's own owner-only-gated token (:func:`read_local_supervisor_token`)
-    -- the credential the real local client already presents on this box
-    when no ``mint_token`` is configured. A MANAGED endpoint never gets
-    that fallback: a wrong-scoped static token would 401 silently on a
-    fire-and-forget write with no reader.
-    """
-    base_url, is_local_supervisor = resolve_base_url(config_dir)
-    token = read_data_token_lease(
-        config_dir, base_url, tenant=tenant, near_expiry_threshold=near_expiry_threshold,
-    )
-    if token:
-        return base_url, token, is_local_supervisor
-    host = urllib.parse.urlsplit(base_url).netloc or base_url
-    no_lease_msg = (
-        f"no fresh data-token lease for {host} tenant={tenant!r} under "
-        f"{config_dir}/{DATA_TOKEN_LEASE_PREFIX}* (missing, wrong host/tenant "
-        f"digest, or within {int(near_expiry_threshold * 100)}% of expiry)"
-    )
-    if not is_local_supervisor:
-        raise EndpointUnresolvable(no_lease_msg)
-    try:
-        token = read_local_supervisor_token(config_dir)
-    except EndpointUnresolvable as local_exc:
-        raise EndpointUnresolvable(f"{no_lease_msg}; {local_exc}") from local_exc
-    return base_url, token, is_local_supervisor

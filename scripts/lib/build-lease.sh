@@ -186,8 +186,7 @@ _BUILD_LEASE_POPULATE_GRACE_S="${_BUILD_LEASE_POPULATE_GRACE_S:-10}"
 # regardless of which one ultimately failed. Confirmed by direct repro
 # on GNU coreutils 9.7. Detecting the dialect once and calling ONLY the
 # matching form closes this for good. Deliberately NO python3 fallback
-# here (unlike tests/e2e/post-publish-dispatch-check.sh's fix for the
-# same bug): this file gates a bare Java/Maven build box on purpose --
+# here: this file gates a bare Java/Maven build box on purpose --
 # see "NO T1 DEPENDENCY, BY DESIGN" above -- so it must not gain a
 # dependency a lean box might lack.
 _build_lease_stat_mtime() {

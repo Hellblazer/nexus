@@ -90,11 +90,6 @@ class TestRegisteredInTheRealVerbTable:
     def test_session_start_resolves_to_the_new_module(self) -> None:
         assert entry.VERB_TABLE["session-start"] == "nexus.hooks.session_start_verb"
 
-    def test_session_start_is_not_a_ledger_verb(self) -> None:
-        """No caller branches on this verb's exit code (RDR-215 Contracts);
-        entry.main forces exit 0 for any verb not in LEDGER_VERBS."""
-        assert "session-start" not in entry.LEDGER_VERBS
-
 
 # -- real dispatch, in-process: entry.main() vs the Click verb --------------
 #

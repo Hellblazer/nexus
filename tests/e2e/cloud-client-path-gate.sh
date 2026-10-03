@@ -40,7 +40,7 @@ export NX_ALLOW_PROD_WRITE="cloud-client-path-gate: deliberate post-deploy MVV w
 # is exactly what the old header would now license, which is why the header
 # was changed rather than left as history.
 #
-# Legs (no config mutation; E, G and H write probe rows to the live store,
+# Legs (no config mutation; E and H write probe rows to the live store,
 # which is why NX_ALLOW_PROD_WRITE is set above):
 #   A  /version contract through the edge: 200, release_version parseable
 #      and >= REQUIRED_ENGINE_VERSION, embedding_mode present and known,
@@ -69,19 +69,6 @@ export NX_ALLOW_PROD_WRITE="cloud-client-path-gate: deliberate post-deploy MVV w
 #      registry() reports sources == ["resources"] exactly, so a stray
 #      NX_TUPLE_TEMPLATE_DIR in production is a red gate, not a silent
 #      second template source.
-#   G  RDR-205 ledger tuple projector hook drive (nexus-g2lln pre-tag
-#      proof, bead nexus-cbo4a): drives nexus.hooks.tuple_projection
-#      (run_start/run_stop, the port of the two deleted
-#      subagent-{start,stop}-tuple-async.sh wrappers) against THIS
-#      CHECKOUT's real projector with a synthetic payload against
-#      this box's live cloud config, then polls ledger/<sid> for the two
-#      tuples they are supposed to write. Closes the blind spot every
-#      tuple_ledger_project.py unit test hides (each one hand-writes the
-#      data-token lease the projector reads) -- no prior gate drove the
-#      wrapper scripts against a real install at all. WRITES two tuples
-#      to a fresh ledger/<random-uuid> subspace (like leg E's T2 write,
-#      not read-only); they are not cleaned up (ledger take is disabled
-#      by design -- they age out at the subspace's normal retention).
 #   H  RDR-206 renew and ack-with-reply through the edge (nexus-zjzt1):
 #      claim a request, renew it and assert lease_until moved forward on
 #      the engine's clock; ack with a reply and assert a 64-hex reply id,
@@ -148,18 +135,18 @@ _fail() { echo "CLOUD CLIENT-PATH GATE FAILED: $*" >&2; exit 1; }
 # side — a heredoc that dies mid-leg still counts as a leg that failed to
 # complete, never a leg that quietly did not run.
 #
-# EXPECTED_LEGS=8 (dated 2026-09-13; [B] redefined 2026-09-28; [I] added 2026-09-29): [A] /version,
+# EXPECTED_LEGS=7 (dated 2026-09-13; [B] redefined 2026-09-28; [I] added 2026-09-29;
+# [G] deleted at cleanup step A1, nexus-0r1uz): [A] /version,
 # [B] edge auth contract (unauthenticated /health refused, data token
 # accepted on /v1), [C+D] client probe heredoc (one shell-side entry for the
 # combined python leg), [E] T2 write body carrying shell-substitution text
 # (nexus-cmzib WAF passthrough), [F] RDR-205 tuple-space CA 3 through the
-# edge (nexus-em75s.15), [G] ledger tuple projector hook drive (nexus-g2lln
-# pre-tag proof, nexus-cbo4a), [H] RDR-206 renew and ack-with-reply through
+# edge (nexus-em75s.15), [H] RDR-206 renew and ack-with-reply through
 # the edge (nexus-zjzt1, 2026-09-13), [I] descending tuple read echo through
 # the edge (nexus-kp5q3, 2026-09-29). Editing the battery means updating this
 # constant in the same diff.
 LEGS_RAN=0
-EXPECTED_LEGS=8
+EXPECTED_LEGS=7
 _leg_enter() { LEGS_RAN=$((LEGS_RAN + 1)); echo "[$1] $2"; }
 
 # Leg B3's compare logic (nexus-20onx; nexus-i1oh4 doctrine applied to it in the
@@ -557,153 +544,8 @@ except Exception as exc:
 sys.exit(1 if bad else 0)
 PY
 
-# ── Leg G: RDR-205 ledger tuple projector hook drive (nexus-g2lln pre-tag
-#    proof, bead nexus-cbo4a) ──────────────────────────────────────────────
-# No prior gate drove the SubagentStart/SubagentStop ledger-projection hook
-# wrappers against a REAL install: every case in
-# tests/hooks/test_tuple_ledger_project.py hand-writes the data-token lease
-# the projector reads, which is exactly why nexus-0zsmg (the projector dead
-# on every cloud-mode box -- no endpoint resolution for the managed
-# service_url leg) shipped through 7.41.0 unnoticed. This drives the
-# wheel's nexus.hooks.tuple_projection (which replaced the two
-# subagent-{start,stop}-tuple-async.sh wrappers at RDR-215 bead
-# nexus-q02nx.21), which runs the wheel's own
-# nexus.hooks.tuple_ledger_project in-process (the plugin copy of the
-# projector was deleted at nexus-z9cz2; nothing ran it) -- against THIS
-# BOX's real cloud
-# config and live engine, with a synthetic payload for a fresh
-# ledger/<random-uuid> subspace, then polls for the two tuples they are
-# supposed to write. The nexus-0zsmg endpoint fix is already on this tree
-# (b24eb57c0), so this leg is expected GREEN here; it would have FAILED on
-# v7.41.0 (see the counter-proof this bead's hand-back runs separately
-# with the v7.41.0 projector swapped in via a temp dir).
-# Read the subspace through the client library, never the `nx` binary: an
-# `nx` invocation stamps last_seen_version into the operator's real
-# ~/.config/nexus (tests/test_e2e_gates_isolate_home.py), and this gate has
-# no sandbox HOME by design (leg G must use the box's real cloud config).
-# Prints total=N, start=0|1, report=0|1 for the given session and agent.
-_hook_read() {
-    HOOK_READ_SID="$1" HOOK_READ_AGENT="$2" uv run python - <<'PY' 2>/dev/null || printf 'total=0\nstart=0\nreport=0\n'
-import os
-from nexus.logging_setup import configure_logging
-configure_logging("cli")  # stdout is parsed by the caller; logs go to stderr
-from nexus.db.t2.http_tuple_store import HttpTupleStore
-sid = os.environ["HOOK_READ_SID"]; agent = os.environ["HOOK_READ_AGENT"]
-store = HttpTupleStore()
-sub = f"ledger/{sid}"
-print(f"total={store.subspace_stats(sub).total}")
-for kind in ("start", "report"):
-    rows = store.rd(sub, keys_pattern={"agent_id": agent, "kind": kind}, n=5)
-    print(f"{kind}={1 if rows else 0}")
-PY
-}
-_leg_enter G "ledger tuple projector hook drive (SubagentStart/SubagentStop, nexus-g2lln)"
-HOOK_SID="$("$E2E_PYTHON" -c 'import uuid; print(uuid.uuid4().hex)')"
-HOOK_AGENT="cloudgate-hook-probe"
-HOOK_LOG="$HOME/.local/state/nexus/orchestration/$HOOK_SID.tuple-projection.log"
-
-# Drives nexus.hooks.tuple_projection, the port of the two
-# subagent-{start,stop}-tuple-async.sh wrappers (RDR-215 bead
-# nexus-q02nx.20; the bash was deleted at bead nexus-q02nx.21). The
-# projector now runs in-process from the wheel; CLAUDE_PLUGIN_ROOT is
-# still exported, harmlessly, from when _projector() resolved a plugin
-# script by it.
-#
-# THE JOIN IS LOAD-BEARING, and is the one shape change the port forces.
-# The bash detached a disowned subshell that outlived the hook; the port
-# uses a DAEMON thread, which dies at interpreter exit (tuple_projection's
-# own docstring records this as a real durability regression). So a drive
-# that just calls run_start() and exits starts the POST and then kills it
-# -- the poll below would wait 30s for something that was never sent and
-# this leg would report a false FAIL. Joining the tuple-projection-*
-# thread is what makes the drive equivalent to the bash's detachment.
-_drive_projection() {
-    # $1 = "start"|"stop"; stdin = the JSON payload. Read it HERE: the
-    # heredoc below is python's stdin (its program), so a sys.stdin.read()
-    # inside it returns '' and json.loads('') throws before anything runs.
-    HOOK_PAYLOAD="$(cat)" HOOK_VERB="$1" CLAUDE_PLUGIN_ROOT="$REPO_ROOT/conexus" \
-    uv run python - <<'PY'
-import json, os, sys, threading
-from nexus.hooks.tuple_projection import run_start, run_stop
-payload = json.loads(os.environ["HOOK_PAYLOAD"])
-(run_start if os.environ["HOOK_VERB"] == "start" else run_stop)(payload)
-# _TIMEOUT_S on the projector subprocess is 120s; join past it so a
-# wedged projector is reported as wedged rather than silently truncated.
-for t in threading.enumerate():
-    if t.name.startswith("tuple-projection-"):
-        t.join(timeout=150)
-        if t.is_alive():
-            print(f"  WARNING: {t.name} still running after 150s", file=sys.stderr)
-PY
-}
-
-# The stop carries what a real dispatch's SubagentStop carries: its agent_type
-# and a transcript file on disk. The projector drops a stop with neither as a
-# harness-internal event (nexus-uzntx: 1468 of 1530 report rows on one ledger
-# were that shape, and every real one had both), so a bare stop here would
-# project nothing and fail this leg for the right reason.
-HOOK_TRANSCRIPT="$(mktemp "${TMPDIR:-/tmp}/cloudgate-hook-transcript.XXXXXX")"
-printf '{"session_id":"%s","agent_id":"%s","agent_type":"Explore","hook_event_name":"SubagentStart"}' \
-    "$HOOK_SID" "$HOOK_AGENT" | _drive_projection start
-printf '{"session_id":"%s","agent_id":"%s","agent_type":"Explore","agent_transcript_path":"%s","hook_event_name":"SubagentStop"}' \
-    "$HOOK_SID" "$HOOK_AGENT" "$HOOK_TRANSCRIPT" | _drive_projection stop
-rm -f "$HOOK_TRANSCRIPT"
-
-# The join above means the POST has normally already completed by here --
-# but poll anyway rather than assume: the join has its own timeout, and a
-# projector that gave up early writes its reason to the log this loop
-# also watches.
-HOOK_DEADLINE=$(( $(date +%s) + 30 ))
-HOOK_TOTAL=0
-HOOK_STATS=""
-while :; do
-    HOOK_STATS="$(_hook_read "$HOOK_SID" "$HOOK_AGENT")"
-    HOOK_TOTAL="$(printf '%s\n' "$HOOK_STATS" | sed -n 's/^total=//p')"
-    [ -n "$HOOK_TOTAL" ] || HOOK_TOTAL=0
-    if [ "$HOOK_TOTAL" -ge 2 ] 2>/dev/null; then
-        break
-    fi
-    HOOK_SKIP_LINES=0
-    if [ -f "$HOOK_LOG" ]; then
-        HOOK_SKIP_LINES="$(grep -c 'SKIP' "$HOOK_LOG" 2>/dev/null || echo 0)"
-    fi
-    # Both kinds have already given up -- no further wait will change that.
-    if [ "$HOOK_SKIP_LINES" -ge 2 ] 2>/dev/null; then
-        break
-    fi
-    [ "$(date +%s)" -lt "$HOOK_DEADLINE" ] || break
-    sleep 1
-done
-
-HOOK_STATS="$(_hook_read "$HOOK_SID" "$HOOK_AGENT")"
-HOOK_START_ROWS="$(printf '%s\n' "$HOOK_STATS" | sed -n 's/^start=//p')"
-HOOK_REPORT_ROWS="$(printf '%s\n' "$HOOK_STATS" | sed -n 's/^report=//p')"
-HOOK_LOG_CONTENT=""
-[ -f "$HOOK_LOG" ] && HOOK_LOG_CONTENT="$(cat "$HOOK_LOG")"
-
-HOOK_FAIL=""
-if ! [ "$HOOK_TOTAL" -ge 2 ] 2>/dev/null; then
-    HOOK_FAIL="ledger/$HOOK_SID total=$HOOK_TOTAL (want >=2) after 30s"
-fi
-[ "$HOOK_START_ROWS" = "1" ] || HOOK_FAIL="${HOOK_FAIL:+$HOOK_FAIL; }no kind=start row for agent_id=$HOOK_AGENT"
-[ "$HOOK_REPORT_ROWS" = "1" ] || HOOK_FAIL="${HOOK_FAIL:+$HOOK_FAIL; }no kind=report row for agent_id=$HOOK_AGENT"
-case "$HOOK_LOG_CONTENT" in
-    *SKIP*) HOOK_FAIL="${HOOK_FAIL:+$HOOK_FAIL; }projection log carries a SKIP line" ;;
-esac
-
-if [ -n "$HOOK_FAIL" ]; then
-    echo "  tuple stats: $HOOK_STATS" >&2
-    echo "  kind=start rows: $HOOK_START_ROWS" >&2
-    echo "  kind=report rows: $HOOK_REPORT_ROWS" >&2
-    echo "  projection log ($HOOK_LOG):" >&2
-    printf '%s\n' "$HOOK_LOG_CONTENT" >&2
-    _leg_fail "G: tuple ledger projector hook drive: $HOOK_FAIL"
-else
-    echo "  ok [G]: ledger/$HOOK_SID total=$HOOK_TOTAL, kind=start and kind=report rows present for $HOOK_AGENT, no SKIP in the projection log"
-fi
-
 # ── Leg H: RDR-206 renew and ack-with-reply through the edge (nexus-zjzt1) ─
-# conexus's STEP-6 gate reaches none of /v1/tuples, and legs F and G cover
+# conexus's STEP-6 gate reaches none of /v1/tuples, and leg F covers
 # RDR-205 only, so without this leg the two RDR-206 routes are live in
 # production with no proof they work through the public edge (the
 # nexus-bwulw class). WRITES: a request and its reply into two fresh

@@ -46,8 +46,7 @@ PROD_CATALOG_DIR="${PROD_CONFIG}/catalog"
 # becomes a bogus second positional FILE argument, and GNU stat prints
 # its full dump for the real path before erroring on the bogus one;
 # `||` reacts only to the exit code, so the dump leaks into the captured
-# value. See tests/e2e/post-publish-dispatch-check.sh's fix for the full
-# writeup).
+# value.
 _mtime() {
     if stat --version >/dev/null 2>&1; then
         stat -c "%Y" "$1" 2>/dev/null || echo ""

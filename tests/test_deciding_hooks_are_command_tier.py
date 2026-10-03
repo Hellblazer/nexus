@@ -140,10 +140,9 @@ _EVENTS_WHERE_A_VERDICT_MATTERS = frozenset(
 #:
 #: That mistake is the reason this is parsed rather than grepped. A
 #: first cut searched each module's whole text for ``"block"`` and
-#: flagged ``agent_dispatch_expect``, whose ``"block"`` is a
-#: ``stop_guard_mode`` value, and ``stop_verification``, whose is prose.
-#: Both would have been "fixed" by adding them to DECIDING_HOOKS, which
-#: would have made the list mean nothing.
+#: flagged ``stop_verification``, whose ``"block"`` is a
+#: ``stop_guard_mode`` value. It would have been "fixed" by adding it to
+#: DECIDING_HOOKS, which would have made the list mean nothing.
 _EMITTER_CALLS = frozenset({"permission_decision", "permission_request", "stop_decision"})
 _VERDICT_KEYS = frozenset({"permissionDecision", "decision", "behavior"})
 
@@ -309,15 +308,14 @@ def test_the_verdict_reader_finds_the_verdicts_we_know_are_there() -> None:
     It reads literal arguments and literal dict values only, so a module
     that computed its verdict would read as emitting none — and a silent
     empty result is exactly how this whole class of gate fails. Pin the
-    three known emitters by value.
+    known emitters by value.
     """
     hooks_dir = _REPO_ROOT / "src" / "nexus" / "hooks"
     assert "deny" in _verdicts_emitted(hooks_dir / "pre_close_verification.py")
-    assert "block" in _verdicts_emitted(hooks_dir / "subagent_stop.py")
     assert "allow" in _verdicts_emitted(hooks_dir / "auto_approve.py")
     # And the discrimination that matters: a mode value named "block" is
     # not a verdict.
-    assert "block" not in _verdicts_emitted(hooks_dir / "agent_dispatch_expect.py")
+    assert "block" not in _verdicts_emitted(hooks_dir / "stop_verification.py")
 
 
 def _events_by_registered_hook() -> dict[str, set[str]]:

@@ -93,10 +93,6 @@ _WHOLE_FILE = {
     "migration-rehearsal/lib/assert_build_ref.sh": "sourced inside a rehearsal container",
     "lib/python_test.sh": "the resolver's own test: python3 is a stub's name there",
     "lib/python.sh": "the resolver: it names python3 as a candidate",
-    "post-publish-dispatch-check.sh": (
-        "runs against an INSTALLED box with no checkout (its own header), so it cannot source a "
-        "repo lib; its two inline snippets are stdlib-only and run on 3.9"
-    ),
 }
 _REHEARSE_PREFIX = "migration-rehearsal/rehearse_"  # every rehearse_*.sh runs inside its container image
 

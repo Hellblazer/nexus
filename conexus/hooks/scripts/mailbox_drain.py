@@ -57,9 +57,8 @@ two HTTP calls where no transaction can close it -- so the fix is to
 trust only what ``ack`` confirmed.
 
 Stdlib only, no ``nexus`` import, endpoint through the shared
-``_endpoint_resolve`` sibling (nexus-aginu): the same constraints the
-``tuple_ledger_project.py`` hook runs under, for the same reason -- a
-hook runs on boxes where the client package may be mid-upgrade.
+``_endpoint_resolve`` sibling (nexus-aginu): a hook runs on boxes where the
+client package may be mid-upgrade.
 """
 from __future__ import annotations
 
@@ -620,10 +619,6 @@ def _post(base_url: str, token: str, route: str, body: dict[str, Any],
     500), so treating it as a clean negative drops the only trace of a row that
     is already consumed, and the message is gone with nobody having seen it.
     Raising ``_Skip`` instead keeps the record and lets the next prompt recover.
-
-    This also restores the pattern the sibling hook ``tuple_ledger_project.py``
-    already follows -- it captures ``exc.code`` and refuses anything outside
-    2xx -- which this hook's own docstring claims to share.
     """
     payload = json.dumps(body, separators=(",", ":")).encode("utf-8")
     url = f"{base_url}{route}"
@@ -997,12 +992,9 @@ def _drain_address(base_url: str, token: str, address: str, *, is_local: bool,
 def _resolve_endpoint(config_dir: Path) -> tuple[str, str, bool]:
     """Resolve ``(base_url, token, is_local_supervisor)``.
 
-    CREDENTIAL POLICY, and why it is not the sibling ledger hook's. That hook
-    (``tuple_ledger_project.py``) is a fire-and-forget write with no reader and
-    no retry, so it deliberately refuses anything but a fresh tenant-scoped
-    data-token lease. This hook is a SYNCHRONOUS call with a prompt waiting on
+    CREDENTIAL POLICY. This hook is a SYNCHRONOUS call with a prompt waiting on
     it, the same shape as ``t2_prefix_scan.py`` and ``routing/_lib.py``, so it
-    takes the same looser last resort those two take: a static ``service_token``
+    takes the same last resort those two take: a static ``service_token``
     from env or the persisted ``config.yml``. Refusing that would make the drain
     silently inert on a managed box onboarded with ``nx config set
     service_token`` and nothing else, which is a real, documented path -- the

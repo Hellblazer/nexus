@@ -234,23 +234,23 @@ class TestBdClosedSince:
             _bd_row("nexus-after", "2026-09-24T10:30:00Z"),
         ])
         isolated_path(_fake_bd(tmp_path, rows))
-        session_start = hook._exp._parse_iso("2026-09-24T10:00:00Z")
+        session_start = hook._parse_iso("2026-09-24T10:00:00Z")
         ids = hook._bd_closed_since(session_start)
         assert ids == ["nexus-after"]
 
     def test_none_when_bd_absent(self, tmp_path, isolated_path):
         isolated_path(_fake_bd_absent(tmp_path))
-        session_start = hook._exp._parse_iso("2026-09-24T10:00:00Z")
+        session_start = hook._parse_iso("2026-09-24T10:00:00Z")
         assert hook._bd_closed_since(session_start) is None
 
     def test_none_on_unparseable_output(self, tmp_path, isolated_path):
         isolated_path(_fake_bd(tmp_path, "not json"))
-        session_start = hook._exp._parse_iso("2026-09-24T10:00:00Z")
+        session_start = hook._parse_iso("2026-09-24T10:00:00Z")
         assert hook._bd_closed_since(session_start) is None
 
     def test_empty_list_when_bd_answers_with_nothing_closed(self, tmp_path, isolated_path):
         isolated_path(_fake_bd(tmp_path, "[]"))
-        session_start = hook._exp._parse_iso("2026-09-24T10:00:00Z")
+        session_start = hook._parse_iso("2026-09-24T10:00:00Z")
         assert hook._bd_closed_since(session_start) == []
 
 
@@ -693,7 +693,7 @@ class TestUndeclaredCloseWarning:
         )
         monkeypatch.setattr(
             hook, "_session_start_dt",
-            lambda transcript_path: hook._exp._parse_iso("2026-09-24T10:00:00Z"),
+            lambda transcript_path: hook._parse_iso("2026-09-24T10:00:00Z"),
         )
         payload = {"session_id": "s1", "transcript_path": str(tmp_path / "does-not-exist.jsonl")}
         warning = hook._undeclared_close_warning(payload)

@@ -136,16 +136,11 @@ _ALLOWED_TOOLS: frozenset[str] = frozenset(
 _ALLOWED_HOOK_TOOLS: frozenset[str] = frozenset(
     {
         "mcp__plugin_conexus_nexus__hook_auto_approve",
-        "mcp__plugin_conexus_nexus__hook_agent_dispatch_expect",
-        "mcp__plugin_conexus_nexus__hook_subagent_start_stamp",
-        "mcp__plugin_conexus_nexus__hook_subagent_stop",
         "mcp__plugin_conexus_nexus__hook_stop_verification",
         "mcp__plugin_conexus_nexus__hook_pre_close_verification",
         "mcp__plugin_conexus_nexus__hook_subagent_start",
         "mcp__plugin_conexus_nexus__hook_post_compact",
         "mcp__plugin_conexus_nexus__hook_divergence_language_guard",
-        "mcp__plugin_conexus_nexus__hook_subagent_start_tuple",
-        "mcp__plugin_conexus_nexus__hook_subagent_stop_tuple",
         "mcp__plugin_conexus_nexus__hook_stop_failure",
     }
 )

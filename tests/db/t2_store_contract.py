@@ -457,12 +457,6 @@ T2_SUPPLEMENTAL_CONTRACT: dict[str, dict[str, list[str]]] = {
         # timeout kwarg — legitimate re-signaturing per this file's own
         # docstring, not the reorder-the-prefix drift the parity check
         # guards against (the first eight names are unchanged, in order).
-        'record_capability_census': [
-            'session_id', 'ts', 'blindspot', 'unmeasurable_reason',
-            'capabilities', 'dispatches', 'total_calls',
-            'capabilities_orchestrator', 'capabilities_subagent', 'timeout',
-        ],
-        'query_capability_census': ['session_id', 'since', 'limit'],
         # nexus-gjv9b review fold-in, critique Significant 4: retention,
         # same age-only trim_hook_failures shape (days positional,
         # dry_run keyword-only) rather than trim_index_failures's

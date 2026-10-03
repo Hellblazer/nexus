@@ -10,9 +10,7 @@
 # so RDR-215 bead nexus-q02nx.21 changed what it exercises without changing a
 # line of it: the SubagentStart entry is now `type: mcp_tool` ->
 # hook_subagent_start rather than `bash subagent-start.sh`. That makes this
-# the one scenario covering the mcp_tool transport for this hook end to end —
-# scenarios 21 and 27 deliberately displace that transport with their own
-# wrappers, so this is where it is actually proven.
+# the one scenario covering the mcp_tool transport for this hook end to end.
 
 scenario "12 real_nx_subagent: does the real SubagentStart hook inject specific markdown content?"
 

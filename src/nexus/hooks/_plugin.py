@@ -4,10 +4,9 @@
 
 RDR-215 moves hooks from the plugin into the wheel, but one of them still
 reaches a plugin-resident sibling: ``divergence_language_guard`` runs
-``divergence-language-scan.py``. (Three others once did too --
-``t2_prefix_scan.py``, ``read_verification_config.py``,
-``tuple_ledger_project.py`` -- until their callers moved in-process; the
-copies were deleted at nexus-z9cz2.) That is a NEW dependency direction: previously plugin reached plugin, and a
+``divergence-language-scan.py``. (Others once did too --
+``t2_prefix_scan.py``, ``read_verification_config.py`` -- until their callers
+moved in-process; the copies were deleted at nexus-z9cz2.) That is a NEW dependency direction: previously plugin reached plugin, and a
 ``dirname "${BASH_SOURCE[0]}"`` was always right.
 
 It is no longer always right, and the failure is silent. A ported module
@@ -46,7 +45,7 @@ def checkout_plugin_root() -> Path:
 
     The one place that knows the ``parents[N]`` walk. Callers that want
     the ordinary resolution want :func:`plugin_root`; this exists for
-    ``tuple_projection``, which tries the env path and the checkout path
+    a caller that tries the env path and the checkout path
     as two CANDIDATES and takes whichever exists, so it needs the second
     one spelled separately.
     """

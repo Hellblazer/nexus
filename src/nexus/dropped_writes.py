@@ -10,10 +10,10 @@ before this module its failures were swallowed at debug in
 ``mcp_infra.py``, so the completeness gap was invisible without log
 spelunking (RDR-129 Gap 4). The meter turns each drop into an appended
 record that ``nx doctor`` aggregates into a number; historical records
-naming the retired hook remain readable data. LIVE PRODUCERS as of
-nexus-gjv9b: the ``capability_census``/``routing_events`` engine-table
-writer swaps both degrade to this meter on service-down, so the meter
-is no longer historical-only (see :func:`record_drop`'s docstring).
+naming the retired hook remain readable data. LIVE PRODUCER: the
+``routing_events`` engine-table writer swap degrades to this meter on
+service-down, so the meter is not historical-only (see :func:`record_drop`'s
+docstring). The ``capability_census`` producer was deleted (nexus-0r1uz).
 
 Design mirrors :mod:`nexus.routing_stats`: a JSONL append log under
 ``~/.config/nexus`` (env-overridable), aggregated for CLI reporting.
@@ -156,9 +156,8 @@ class DropSummary:
     last_ts: str | None = None
     last_collection: str = ""
     #: The ``hook`` field of the MOST RECENT record (nexus-gjv9b: this
-    #: meter is no longer historical-only — capability_census and
-    #: routing_events both adopted ``record_drop``/the equivalent inline
-    #: format for their own service-down degradation). ``_check_t2_
+    #: meter is not historical-only — routing_events adopted the equivalent
+    #: inline format for its own service-down degradation). ``_check_t2_
     #: dropped_writes`` keys its soft-WARN-vs-historical framing on this
     #: rather than assuming every drop is from the retired chash
     #: dual-write hook.
@@ -220,9 +219,7 @@ def record_drop(*, hook: str, collection: str, rows: int, error: str, cause: str
 
     RETIRED FOUNDING PRODUCER (RDR-187 / nexus-piwya.4): the chash
     dual-write hook that originally justified this meter is gone. LIVE
-    PRODUCERS as of nexus-gjv9b PART 1/2: ``capability_census``
-    (``nexus._session_end_census._post_capability_census``, this
-    function called directly) and ``routing_events``
+    PRODUCER as of nexus-gjv9b PART 2: ``routing_events``
     (``conexus/hooks/scripts/routing/_lib.py``'s
     ``_record_dropped_routing_event``, which hand-replicates this
     function's exact on-disk record shape rather than importing it — that

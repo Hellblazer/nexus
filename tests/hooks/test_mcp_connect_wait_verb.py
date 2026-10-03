@@ -23,8 +23,8 @@ Two layers, per the bead's own proof requirement:
    gate (only ``startup`` waits), the missing-session-id no-op, and that a
    timeout still returns a silent, exit-0-shaped ``HookResult`` (fail-open
    is a property of the RETURN VALUE here, since ``nexus._hook_runtime.
-   entry.main`` forces exit 0 for every non-ledger verb regardless of what
-   ``run`` returns -- ``mcp-connect-wait`` is not in ``LEDGER_VERBS``).
+   entry.main`` forces exit 0 for every verb regardless of what
+   ``run`` returns).
 """
 from __future__ import annotations
 

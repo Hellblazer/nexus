@@ -271,7 +271,7 @@ def test_a_virgin_box_logs_no_warning_and_the_plugin_rows_are_not_applicable(mon
     import structlog  # noqa: PLC0415 — test-local import
 
     import nexus.plugin_registry as reg  # noqa: PLC0415 — test-local import
-    from nexus.health import _check_orchestration_hook_floor, _check_retired_plugin_installed  # noqa: PLC0415 — test-local import
+    from nexus.health import _check_retired_plugin_installed  # noqa: PLC0415 — test-local import
     from nexus.plugin_lockstep import registry_entries  # noqa: PLC0415 — test-local import
 
     monkeypatch.delenv(reg.MARKETPLACE_JSON_ENV, raising=False)
@@ -282,7 +282,6 @@ def test_a_virgin_box_logs_no_warning_and_the_plugin_rows_are_not_applicable(mon
     with structlog.testing.capture_logs() as logs:
         assert registry_entries(absent) is None
         retired = _check_retired_plugin_installed(absent)
-        floor = _check_orchestration_hook_floor(absent)
     loud = [e for e in logs if e.get("log_level") not in ("debug",)]
     assert not loud, loud
-    assert all(r.ok for r in retired + floor), [(r.label, r.detail) for r in retired + floor]
+    assert all(r.ok for r in retired), [(r.label, r.detail) for r in retired]

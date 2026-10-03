@@ -127,8 +127,7 @@ sourced anywhere in this corpus (``scripts/validate/lib.sh``,
 ``tests/e2e/lib.sh``, ``tests/e2e/lib/lock.sh``) itself sources a further
 file, so there is no live 2-hop chain today.
 (``conexus/hooks/scripts/expectations.sh`` was a fourth entry in this list
-until RDR-215 bead nexus-q02nx.21 ported it to ``nexus.hooks.expectations``
-and deleted it; it sourced nothing either, so the one-hop conclusion is
+until RDR-215 bead nexus-q02nx.21 deleted it; it sourced nothing either, so the one-hop conclusion is
 unchanged.) If a future lib begins sourcing another lib,
 that second hop is invisible to this precondition filter until this scope
 is revisited — a disclosed limitation, not a silent gap.

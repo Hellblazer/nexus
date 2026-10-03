@@ -45,6 +45,14 @@ stale -- and stays exactly where it is until moved back deliberately.
 
 ONE PATH PER BULLET, on the bullet's FIRST line.
 
+- cleanup step A1 (nexus-0r1uz): `conexus/hooks/hooks.json` drops the six entries for the RDR-184 ledger and RDR-205 projector hooks and the behaviour census (SessionStart `behaviour_census.py`, PreToolUse `agent-dispatch-expect`, SubagentStart `subagent-start-stamp` and `subagent-start-tuple`, SubagentStop `subagent-stop` and `subagent-stop-tuple`); the SubagentStop event is no longer wired.
+- cleanup step A1 (nexus-0r1uz): `conexus/hooks/scripts/behaviour_census.py` is deleted; its SessionStart entry is gone and the module it fed (`nx census`) no longer exists.
+- cleanup step A1 (nexus-0r1uz): `conexus/hooks/scripts/mailbox_drain.py` has comment-only edits dropping references to the deleted `tuple_ledger_project.py` hook; no behaviour change.
+- cleanup step A1 (nexus-0r1uz): `conexus/hooks/scripts/_endpoint_resolve.py` drops `resolve_endpoint_and_token`, the credential policy only the deleted ledger projector used; `resolve_base_url` and the readers are unchanged.
+- cleanup step A1 (nexus-0r1uz): `conexus/hooks/scripts/routing/_lib.py` has comment-only edits dropping references to the deleted census producer and projector; no behaviour change.
+- cleanup step A1 (nexus-0r1uz): `conexus/skills/orchestration/SKILL.md` deletes the Background-Teammate Ledger section, the ledger-reading wait-for-a-report section and the ledger-credit bullet of the resume section, because the hooks that wrote the ledger are deleted.
+- cleanup step A1 (nexus-0r1uz): `conexus/commands/continuation.md` drops Step 0 audits 3 and 4 (declaration-completeness and the scenario-27 payload tripwire), which read the deleted ledger.
+- cleanup step A1 (nexus-0r1uz): `conexus/README.md` drops the hook table rows and the command-tier explanation for the deleted ledger, projector and census hooks.
 - cleanup step 15 (nexus-0r1uz): `conexus/skills/writing-nx-skills/SKILL.md` points at the renamed frontmatter test (`test_every_skill_frontmatter_is_valid`); text pointer only.
 - cleanup step 12 (nexus-0r1uz): `conexus/skills/rdr-audit-checklist/SKILL.md` drops the `schedule` and `unschedule` subcommands and their plist and crontab templates; `list`, `status` and `history` stay. The template files under `scripts/` they pointed at are deleted.
 - cleanup step 12 (nexus-0r1uz): `conexus/commands/rdr-audit.md` drops the `schedule` / `unschedule` text; the management subcommands are `list`, `status` and `history`, all read-only.

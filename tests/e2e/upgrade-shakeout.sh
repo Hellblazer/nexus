@@ -640,9 +640,7 @@ if [ -f "$REPO_ROOT/mcpb/manifest.json" ]; then
         || _die "mcpb pack failed in $REPO_ROOT/mcpb"
     # nexus-7m6uc: dialect detected ONCE, wrong-dialect stat never invoked
     # -- a blind `stat -f ... || stat -c ...` leaks GNU's filesystem-status
-    # dump into BUNDLE_SIZE on Linux, corrupting the size-bound check below
-    # (see tests/e2e/post-publish-dispatch-check.sh's fix for the full
-    # writeup).
+    # dump into BUNDLE_SIZE on Linux, corrupting the size-bound check below.
     if stat --version >/dev/null 2>&1; then
         BUNDLE_SIZE=$(stat -c%s conexus.mcpb 2>/dev/null)
     else

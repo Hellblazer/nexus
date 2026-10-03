@@ -83,7 +83,9 @@ SN_HOOKS = REPO_ROOT / "sn" / "hooks" / "hooks.json"
 #: `phase_review_close_requires_gate`.
 #: 28 -> 27 at nexus-qxyqz: the `mcp-connect-check` UserPromptSubmit entry
 #: is removed (the verb stays registered as a silent no-op for old plugins).
-EXPECTED_CONEXUS_ENTRIES = 27
+#: 27 -> 21 at cleanup step A1 (nexus-0r1uz): the behaviour_census SessionStart
+#: entry and the five RDR-184 ledger / RDR-205 projector entries are deleted.
+EXPECTED_CONEXUS_ENTRIES = 21
 EXPECTED_SN_ENTRIES = 4
 
 MCP_SERVER = "plugin:conexus:nexus"
@@ -98,13 +100,12 @@ CONEXUS_COMMANDS = frozenset({"nx-hook", "nx-session-end-launcher", "python3"})
 #: tests/test_hooks_json_verb_release_floor.py decides which entries must use it.
 NX_HOOK_SHIM = "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/nx_hook_shim.py"
 
-#: The five handlers bead .21 resolved as plugin-resident, plus the sixth
-#: RDR-219 adds deliberately (nexus-wauo1.22) -- see the docstring for why
-#: 7.58.0 still wires the first five, and why the sixth is not a skew
-#: accommodation at all.
+#: The handlers bead .21 resolved as plugin-resident (behaviour_census.py
+#: was deleted at cleanup step A1, nexus-0r1uz), plus the one RDR-219 adds
+#: deliberately (nexus-wauo1.22) -- see the docstring for why 7.58.0 still
+#: wires the first ones, and why the last is not a skew accommodation at all.
 PLUGIN_RESIDENT_SCRIPTS = frozenset(
     {
-        "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/behaviour_census.py",
         "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/mailbox_drain.py",
         "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/version_lockstep_hook.py",
         "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/routing/phase_review_close_requires_gate.py",

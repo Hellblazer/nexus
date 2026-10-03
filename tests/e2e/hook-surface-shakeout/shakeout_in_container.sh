@@ -69,7 +69,6 @@ nx init --service --yes > "$RUN/init.log" 2>&1 \
     || { echo "nx init failed"; tail -30 "$RUN/init.log"; exit 1; }
 ok "nx init completed"
 
-SID_OF=""
 # The sentinel is found by GLOB, not by session id. turn_end.py names its file
 # after the session in its own stdin payload, so asking for a specific id
 # means resolving that id FIRST -- and the first cut of this script resolved
@@ -178,19 +177,6 @@ ok "session launched"
 # the wrong place. An assertion that can only be read one way when it fails
 # is worse than no assertion, and the census already covers this claim with a
 # denominator it derives from the shipped manifest.
-#
-# The session id is taken from the sentinel turn_end.py writes, once a turn
-# has actually ended, because that file is named by the id the HOOK saw --
-# no second source to disagree with.
-sid_from_sentinel() {
-    local f
-    for f in "$RUN"/turn-end.*; do
-        [ -e "$f" ] || continue
-        basename "$f" | sed 's/^turn-end\.//'
-        return 0
-    done
-    return 1
-}
 
 # RACE MODE (nexus-veh77): the interactive half of bead .6's M1. That bead
 # measured the connection race under headless `claude -p` ONLY and the RDR says
@@ -219,14 +205,9 @@ fi
 
 # HOOK PROBE MODE (nexus-wauo1.37): one turn, chosen because it is the
 # cheapest single turn that provokes the largest slice of the mcp_tool
-# roster -- dispatching a subagent fires two of three SubagentStart entries
-# (hook_subagent_start, hook_subagent_start_tuple), SubagentStop's
-# hook_subagent_stop_tuple, and the turn's own Stop fires hook_stop_
-# verification -- four of the seven mcp_tool handlers in one billed turn.
-# (Bead nexus-5l8i8 moved PreToolUse's hook_agent_dispatch_expect and
-# SubagentStart's hook_subagent_start_stamp off the mcp_tool tier onto the
-# command tier, so this turn no longer provokes either as an MCP call; the
-# nine/six figures this comment used to carry are nine/six no longer.)
+# roster -- dispatching a subagent fires SubagentStart's hook_subagent_start,
+# and the turn's own Stop fires hook_stop_verification -- two of the five
+# mcp_tool handlers in one billed turn.
 # No warmup turn: the Agent tool is a Claude Code built-in, not a deferred
 # MCP tool, so nothing here needs ToolSearch discovery first. Evidence is
 # read from $RUN/mcp-stdin.jsonl (the tee'd JSON-RPC stream into nx-mcp,
@@ -241,35 +222,6 @@ if [ -n "${SHAKEOUT_HOOK_PROBE:-}" ]; then
     # The verdict is asserted here, not compared by hand across runs.
     python3 "$HOME_DIR/hook_census.py" --probe "$RUN/mcp-stdin.jsonl"
     PROBE_RC=$?
-
-    # LEDGER CHECK (nexus-5l8i8 review, code-review-expert suggestion): the
-    # mcp_tool roster above cannot see agent-dispatch-expect /
-    # subagent-start-stamp any more -- both moved to the command tier
-    # (nx-hook, via nx_hook_shim.py), so mcp-stdin.jsonl carries no trace of
-    # them by construction, not by regression. This is this fast path's own
-    # replacement signal: the same subagent-dispatch turn that provokes the
-    # mcp_tool roster also fires both command-tier writers, so the
-    # session's real ledger file should carry one EXPECT row and one START
-    # row the instant the turn ends. Resolved the same way the full run's
-    # own expectations_census check resolves it below (sid_from_sentinel,
-    # HOME_DIR's default XDG_STATE_HOME) -- no per-hook env override exists
-    # in a real hooks.json invocation for this to depend on instead.
-    SID_OF="$(sid_from_sentinel || true)"
-    LEDGER_RC=0
-    if [ -n "$SID_OF" ]; then
-        LEDGER="$HOME_DIR/.local/state/nexus/orchestration/$SID_OF.expectations"
-        if [ -f "$LEDGER" ] && grep -q "$(printf '\t')EXPECT$(printf '\t')" "$LEDGER" \
-            && grep -q "$(printf '\t')START$(printf '\t')" "$LEDGER"; then
-            ok "command-tier ledger writers (agent-dispatch-expect, subagent-start-stamp) both fired: $LEDGER"
-        else
-            bad "command-tier ledger is missing an EXPECT or a START row: $LEDGER"
-            LEDGER_RC=1
-        fi
-    else
-        bad "no turn-end sentinel found -- cannot resolve the session id for the ledger check"
-        LEDGER_RC=1
-    fi
-    [ "$LEDGER_RC" -ne 0 ] && PROBE_RC=1
 
     echo "HOOK PROBE COMPLETE (override=${SHAKEOUT_MCP_OVERRIDE:-0}, rc=$PROBE_RC)"
     exit "$PROBE_RC"
@@ -402,19 +354,6 @@ TRANSCRIPTS="$(find "$HOME_DIR/.claude/projects" -name '*.jsonl' 2>/dev/null | t
 python3 "$HOME_DIR/hook_census.py" "$HOME_DIR/hooks.json.original" \
     "$RUN/hook-census.tsv" "$RUN/mcp-stdin.jsonl" $TRANSCRIPTS
 CENSUS=$?
-
-say "RDR-184 ledger (the subagent family's own record)"
-SID_OF="$(sid_from_sentinel || true)"
-if [ -z "$SID_OF" ]; then
-    printf '  note  no turn-end sentinel, so no session id: the ledger check\n'
-    printf '        below is UNRUN, not clean.\n'
-fi
-if [ -n "$SID_OF" ] && nx-hook expectations_census "$SID_OF" > "$RUN/census.txt" 2>&1; then
-    ok "expectations_census ran"
-else
-    printf '  note  expectations_census exit %s\n' "$?"
-fi
-sed -n '1,12p' "$RUN/census.txt" 2>/dev/null | sed 's/^/    /'
 
 say "summary: $PASS passed, $FAIL failed"
 # In old-CLI mode the census is advisory: a shim-skipped verb never runs its

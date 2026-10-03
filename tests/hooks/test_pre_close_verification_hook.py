@@ -2153,8 +2153,7 @@ class TestF5RemedyRoundTripReal:
         # get_credential("mint_token") resolves to nothing, so the T1
         # lookup falls back to the NX_SERVICE_TOKEN this test's
         # t2_service_env fixture already provides -- the same isolation
-        # discipline test_session_end_capability_census.py and
-        # test_routing_hooks.py already apply for their own env leaks.
+        # discipline test_routing_hooks.py already applies for their own env leaks.
         run_suffix = uuid.uuid4().hex[:8]
         bead_id = f"nexus-r5a01{run_suffix}"  # single remedy form post-fgekf; dead t2 branch removed
         session_id = f"cr4lp-close-f5-{remedy_kind}-{run_suffix}"
