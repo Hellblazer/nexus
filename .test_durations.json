@@ -20818,7 +20818,6 @@
     "tests/upgrade/test_verb_demotion.py::test_everyday_surfaces_never_advertise_a_demoted_verb[health.py]": 0.09251745801884681,
     "tests/upgrade/test_verb_demotion.py::test_everyday_surfaces_never_advertise_a_demoted_verb[hooks.py]": 0.021049624017905444,
     "tests/upgrade/test_verb_demotion.py::test_everyday_surfaces_never_advertise_a_demoted_verb[hooks/__init__.py]": 0.04717450001044199,
-    "tests/upgrade/test_verb_demotion.py::test_everyday_surfaces_never_advertise_a_demoted_verb[hooks/_routing_lib.py]": 0.044252292020246387,
     "tests/upgrade/test_verb_demotion.py::test_everyday_surfaces_never_advertise_a_demoted_verb[hooks/agent_dispatch_expect.py]": 0.04116604197770357,
     "tests/upgrade/test_verb_demotion.py::test_everyday_surfaces_never_advertise_a_demoted_verb[hooks/auto_approve.py]": 0.03976108302595094,
     "tests/upgrade/test_verb_demotion.py::test_everyday_surfaces_never_advertise_a_demoted_verb[hooks/behaviour_census.py]": 0.0421883329981938,
