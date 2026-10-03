@@ -25,7 +25,7 @@ from tests.prose_edit.test_acceptance_tools import (
 
 BRIEF = "python3 .claude/skills/prose-edit/scripts/brief.py"
 MEMORY = "python3 .claude/skills/prose-edit/scripts/memory.py"
-DOC = "docs/zz-teach-scenario.md"
+DOC = "docs/zz-teach/scenario.md"
 CARD = "First person, plain register. Refrain: the closing sentence of each paragraph."
 
 
@@ -296,7 +296,7 @@ def test_the_teach_runner_is_one_pass_with_a_test_prefix_a_direct_refused_promot
     assert sh.index('run t3') < direct < sh.index('run t4 ')
     promote_line = next(ln for ln in sh.splitlines() if "promote" in ln and "promote-nodry" in ln and "memory.py" in ln)
     assert "--dry-run" not in promote_line
-    assert "trap" in sh and DOC in sh  # the scenario copy is removed on exit
+    assert "runner_track" in sh and DOC.rsplit("/", 1)[0] in sh  # the scenario copy is removed on exit (the guard's trap)
     assert "delete the zzprose0206_" in sh.lower() or "zzprose0206_*" in sh
 
 

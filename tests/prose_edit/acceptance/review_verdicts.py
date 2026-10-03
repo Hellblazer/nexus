@@ -26,7 +26,12 @@ and the note says how many of each, plus how many edits the fresh run showed. A3
 scenario is run again until it passes: a retry that keeps the run in which the editor happened to behave selects
 the pass. b3 is the one check that can still be VACUOUS (the editor did not propose the removed fix again, so
 removal was not exercised); it matches the fix as a3 does, not the exact old string, and it is reported as it
-is. Exit 1 on anything but PASS.
+is.
+
+run-review.sh records the groups it was asked to run (SCENARIOS, default a b c) in OUT_DIR/scenarios.txt. A group
+that is not listed there and left no transcript is NOT-RUN, never FAIL; a listed group with no transcript, or a
+directory with no scenarios.txt, keeps failing, and a group that ran is scored whether or not it was listed. Exit 0
+when every row is PASS, 3 when every row is PASS or NOT-RUN (part of the matrix was not asked for), 1 otherwise.
 """
 from __future__ import annotations
 
@@ -261,16 +266,48 @@ def check_c(runs: dict[str, list[Obj]]) -> list[tuple[str, str, str]]:
     ]
 
 
+# What each scenario group writes: the rows it scores and the transcripts it leaves.
+GROUPS: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
+    "a": (("a1", "a2", "a3", "a4"), ("a1", "a2", "a2c", "a3", "a4", "a4c")),
+    "b": (("b1", "b2", "b3", "b4"), ("b1", "b2", "b3", "b4", "b4c")),
+    "c": (("c1", "c2"), ("c1", "c2", "c2c")),
+}
+CHECKS = {"a": check_a, "b": check_b, "c": check_c}
+
+
+def requested(out_dir: Path) -> set[str] | None:
+    """The scenario groups run-review.sh was asked to run (scenarios.txt), or None when the run left no record."""
+    path = out_dir / "scenarios.txt"
+    if not path.is_file():
+        return None
+    return set(path.read_text(encoding="utf-8").split())
+
+
+def group_rows(group: str, runs: dict[str, list[Obj]], asked: set[str] | None) -> list[tuple[str, str, str]]:
+    """The rows of one group. A group the runner was not asked for, with no transcript, is NOT-RUN: it never
+    started, so it did not fail. With no record of what was asked, an absent group is not known to be unrequested
+    and keeps failing; a group that was asked for and left nothing fails; a group that ran is always scored."""
+    rows, transcripts = GROUPS[group]
+    if asked is not None and group not in asked and not any(t in runs for t in transcripts):
+        return [(r, "NOT-RUN", f"scenario group {group} was not requested (scenarios.txt lists "
+                 f"{' '.join(sorted(asked)) or 'none'}) and left no transcript") for r in rows]
+    return CHECKS[group](runs)
+
+
 def main(argv: list[str]) -> int:
     if not argv:
         sys.stdout.write((__doc__ or "") + "\n")
         return 2
     out_dir = Path(argv[0])
     runs = {p.stem: V.load_events(p) for p in sorted(out_dir.glob("*.jsonl"))}
-    rows = check_a(runs) + check_b(runs) + check_c(runs)
+    asked = requested(out_dir)
+    rows = [row for group in GROUPS for row in group_rows(group, runs, asked)]
     for name, verdict, note in rows:
         sys.stdout.write(f"{name:3} {verdict:8} {note}\n")
-    return 0 if all(v == "PASS" for _, v, _ in rows) else 1
+    verdicts = {v for _, v, _ in rows}
+    if verdicts == {"PASS"}:
+        return 0
+    return 3 if verdicts <= {"PASS", "NOT-RUN"} else 1
 
 
 if __name__ == "__main__":

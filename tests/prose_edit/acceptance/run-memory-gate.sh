@@ -19,6 +19,10 @@
 # ANSWER is the author's answer in turn 2; it must name edits by their content, because the numbers differ
 # from run to run (e.g. "Reject the edit that cuts basically and the edit that cuts It should be noted that.
 # Hold every other edit; accept none."). The verdicts count what the skill stored, not what the answer said.
+# runner_guard.bash takes an exclusive lock for the whole run (one runner at a time, so no other runner's copy
+# is a sibling document of these; exit 75 when another holds it), sweeps the leftovers of an older runner and
+# removes $DIR on exit. The copies sit in a nested directory no built-in genre maps, so they are in no "Genre
+# paths:" list and the editor's Grep never meets them.
 # Stop and report if a run shows a T2 failure; never repair it from here.
 set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -29,6 +33,8 @@ N="${3:-10}"
 JOBS="${GATE_JOBS:-4}"
 ANSWER="${ANSWER:-Accept none. Reject all the edits.}"
 OUT="${OUT_DIR:?set OUT_DIR}"
+. "$HERE/runner_guard.bash"
+runner_lock run-memory-gate.sh
 export TMPDIR="${TMPDIR:?set TMPDIR to a directory outside the repository}"
 export PROSE_EDIT_PROJECT_PREFIX="${PROSE_EDIT_PROJECT_PREFIX:-zzprose216_}"
 export PROSE_EDIT_TEST=1  # PROSE_EDIT_OPEN is ignored without it
@@ -37,8 +43,8 @@ DIR=docs/zz-memgate  # nested, so no built-in genre maps it: --genre is passed
 mkdir -p "$OUT"
 cd "$WT" || exit 1
 [ -f "$SOURCE" ] || { echo "no such source: $SOURCE" >&2; exit 1; }
-mkdir -p "$DIR"
-trap 'rm -rf "$WT/$DIR"' EXIT
+runner_sweep_stale
+mkdir -p "$DIR" && runner_track "$DIR"
 git status --short > "$OUT/$LABEL-repo-status-before.txt"
 python3 .claude/skills/prose-edit/scripts/memory.py viewer --set Typora > "$OUT/$LABEL-seed-viewer.json" || exit 1
 wc -l < "$SOURCE" > "$OUT/$LABEL-source-lines.txt"

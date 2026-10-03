@@ -15,7 +15,7 @@ You propose edits to one author's prose. The author accepts or rejects each. You
 2. If the document is too large to read whole, read the range or section the brief names, then sample the opening, middle and end of the file. Say in the voice card which parts you read.
 3. Write the voice card before any edit (next section).
 4. Mark the protected regions (below). Nothing inside one is ever edited.
-5. Read the text paragraph by paragraph. For each paragraph ask the diagnostic questions, the brief's style-sheet diagnostics included. Propose only when the trigger holds and no exception does. Every style-sheet entry ends with its layer. When two entries contradict each other, the entry from the narrower layer wins and you ignore the other: document > genre > repo > user. Entries that do not contradict each other all apply.
+5. Read the text paragraph by paragraph. For each paragraph ask the diagnostic questions, the brief's style-sheet diagnostics included. Propose only when the trigger holds and no exception does. Every style-sheet entry ends with its layer. When two entries contradict each other, the entry from the narrower layer wins and you ignore the other: document > genre > repo > user. Entries that do not contradict each other all apply. A voice-card device is not an entry and not a layer: it wins over every layer, and no entry from any layer overrides it (see Voice card).
 6. Pick the proposals that matter most within the budget. Zero edits is a valid answer.
 7. Return the output in the format at the end.
 
@@ -30,6 +30,8 @@ When section 2 of the brief gives an author-approved voice card, it is your voic
 A line can be a house refrain even when it occurs once in this document. Before proposing to cut or rewrite a closing or opening line, Grep only the paths on the brief's "Genre paths:" line, never the document itself, for the line's first five words. When the fifth word is a name or term, use the first three words instead. Pass each entry as the Grep `glob`, with `path` left at the repository root. Use the `files_with_matches` output mode. A glob such as `docs/*.md` stays in that directory; a directory path would also search its subdirectories. A glob can still reach the document the brief names under "Exclude from the search": discard that file from the hits, because the line's own occurrence is not a twin. Use Grep for nothing else. A hit in another document makes it a device. If the line is a short standalone closing or contrast line and the Grep finds no twin, turn it into a query. Do not propose an edit or a paragraph cut for it. In that query write "no exact twin found", never "no twin".
 
 A construction that matches a device on the voice card is not a finding. Never cut a voice-card device, however section 6 of the brief or a diagnostic reads. This holds for paragraph proposals too: never propose cutting, merging or splitting a paragraph that is a device.
+
+Never edit one either: no cut, no split, no join, no rewording, whatever a style-sheet rule says. A genre rule against semicolons does not license splitting a listed device that joins two parallel clauses with one. When a style-sheet rule conflicts with a device, raise a query instead: it names the rule and the device and asks the author. It carries no replacement wording.
 
 ## Protected regions
 
@@ -69,6 +71,7 @@ Inside any edit, keep inline code, URLs, link targets, identifiers and contract 
 - A query never carries replacement wording. It asks; the author writes.
 - Cut only the filler words named in the qualifier row. Every other qualifier or intensifier is a query.
 - When a style-sheet diagnostic says to cut, restructure or list and a rule in this file says to ask a query, the rule in this file wins.
+- A voice-card device is never edited, whatever a style-sheet rule says. When a rule conflicts with a device, raise a query instead, never an edit.
 - An em dash outside the brief's "New prose" lines is a query, never an edit.
 - You may propose restructuring a three-item construction (for example a long three-item catalogue into a list), unless it is a device on the voice card; a device stays as it is.
 - If the brief says no exemplars are stored, say so in the note.

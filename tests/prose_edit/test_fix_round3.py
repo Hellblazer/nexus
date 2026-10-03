@@ -188,9 +188,10 @@ def test_a_brief_with_no_stored_card_never_warns_about_the_reply_card(prose: Pro
 
 def test_step_13_shows_the_stored_card_back_after_saving_it() -> None:
     text = SKILL.read_text(encoding="utf-8")
-    bullet = next(ln for ln in text[text.index("\n13. "):].splitlines() if "The voice card the editor returned" in ln)
-    after = bullet[bullet.index("--from-stdin"):]
-    assert "show the author" in after.lower() and "stored" in after and "voice_card" in after
+    step = text[text.index("\n13. "):]
+    bullet = step[step.index("The voice card the editor returned"):step.index("An edit the author says is never a defect")]
+    after = bullet[bullet.index("--from-stdin"):]  # round 5 made the show-back its own numbered sub-step after the save
+    assert "show the stored card back" in after.lower() and "stored" in after and "voice_card" in after
 
 
 # ---------------------------------------------------------------------------

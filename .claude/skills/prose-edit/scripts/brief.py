@@ -553,7 +553,10 @@ def render_brief(read: Obj, budget: int, input_file: str | None, input_text: str
             "When two entries contradict each other, the entry from the narrower layer wins and you ignore "
             "the other (document > genre > repo > user).",
             "Entries that do not contradict each other all apply. A setting shows the value of the "
-            "narrowest layer that gives it."]
+            "narrowest layer that gives it.",
+            "A voice-card device is not an entry and not a layer: it wins over every layer. A device is "
+            "never edited, whatever an entry below says. When an entry conflicts with a device, raise a "
+            "query instead, never an edit."]
     if scalars:
         out += ["", "### Settings", "", "\n".join(
             f"- {k}: {_shown(v)}" + (f" (layer: {own})" if (own := _scalar_owner(layers, k)) else "")

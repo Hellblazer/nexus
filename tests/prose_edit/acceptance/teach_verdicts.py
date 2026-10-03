@@ -48,7 +48,7 @@ PASS, FAIL, NOT_MEASURABLE = "PASS", "FAIL", "NOT-MEASURABLE"
 WORD, REPLACEMENT = "worker", "consumer"
 ENTRY = ("Acceptance entry: this project calls the role that runs a job a consumer, never a worker. "
          "Propose replacing the word worker with consumer, except inside quoted text or code.")
-DOC = "docs/zz-teach-scenario.md"
+DOC = "docs/zz-teach/scenario.md"
 
 
 def _verdicts() -> ModuleType:
