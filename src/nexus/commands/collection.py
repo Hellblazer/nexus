@@ -503,7 +503,13 @@ def _aspects_from_config(*, dry_run: bool, yes: bool = False) -> None:
 @click.argument("name")
 @click.option("--yes", "-y", "--confirm", is_flag=True, help="Skip interactive confirmation prompt")
 def delete_cmd(name: str, yes: bool) -> None:
-    """Delete a T3 collection + cascade-purge taxonomy state (irreversible)."""
+    """Delete a T3 collection + cascade-purge taxonomy state (irreversible).
+
+    Deleting an origin also deletes its rows in its ``quarantine-`` siblings
+    (one gc_audit row per sibling). Deleting a ``quarantine-*`` collection
+    itself is the audited manual route for quarantined rows whose origin is
+    gone (gc_audit: quarantine_collection_delete).
+    """
     if not yes:
         click.confirm(f"Delete collection '{name}'? This cannot be undone.", abort=True)
 
@@ -530,6 +536,7 @@ def delete_cmd(name: str, yes: bool) -> None:
     pipeline_rows_deleted = cascade.pipeline_rows_deleted
     catalog_docs_deleted = cascade.catalog_docs_deleted
     catalog_projection_deleted = cascade.catalog_projection_deleted
+    quarantine_chunks_deleted = cascade.quarantine_chunks_deleted
 
     parts: list[str] = []
     if taxonomy_counts and any(taxonomy_counts.values()):
@@ -547,6 +554,9 @@ def delete_cmd(name: str, yes: bool) -> None:
         parts.append(f"{catalog_docs_deleted} catalog docs")
     if catalog_projection_deleted:
         parts.append(f"{catalog_projection_deleted} catalog projection row")
+    if quarantine_chunks_deleted:
+        # nexus-wbfpw.68/.71: the origin's quarantine rows go with it, audited per sibling.
+        parts.append(f"{quarantine_chunks_deleted} quarantined chunks (gc_audit: collection_delete_quarantine)")
     if parts:
         click.echo(f"Deleted: {name} ({'; '.join(parts)})")
     else:

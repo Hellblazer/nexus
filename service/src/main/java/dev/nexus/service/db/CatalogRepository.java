@@ -8219,17 +8219,30 @@ public final class CatalogRepository {
      * <p>Out of scope (stays client-side, RDR-164 CA-4/CA-5): the {@code pipeline.db}
      * streaming buffer and the entire local-mode (sqlite/Chroma) cascade.
      *
-     * <p>OUT OF {@code gc_audit}'s SCOPE too (nexus-sybbh reap-path enumeration),
-     * deliberately: {@code gc_audit} exists to attribute background reaps the caller
-     * does NOT directly observe (the ~233 lost {@code store_put} chunks it was built
-     * for went through the manifest-write sweep with zero forensic trace). This method
-     * is the opposite shape — a synchronous, explicit, caller-named destructive action
-     * whose FULL per-table row counts are already returned to the caller (see {@code
-     * counts} above) and logged, not a background sweep the caller has to reconstruct
-     * after the fact. Auditing it too would not add attribution the caller lacks.
+     * <p><b>gc_audit (nexus-wbfpw.68/.71, Sam 2026-10-03).</b> The delete of the collection's OWN rows is
+     * still out of {@code gc_audit}'s scope (nexus-sybbh reap-path enumeration), deliberately: {@code gc_audit}
+     * exists to attribute background reaps the caller does NOT directly observe, and this is a synchronous,
+     * explicit, caller-named action whose full per-table counts are returned to the caller. What the counts do
+     * not cover is the QUARANTINE copy of the data, and that is audited:
+     * <ul>
+     *   <li>deleting an ORIGIN {@code X} also deletes {@code X}'s rows from every registered quarantine
+     *       collection (tagged {@code origin_collection = X}, or untagged and sitting in {@code quarantine-X} or
+     *       in the sibling derived from {@code X}'s catalog row), one {@code collection_delete_quarantine}
+     *       {@code gc_audit} row per sibling that lost rows, and unregisters a sibling that this leaves empty.
+     *       The count is returned under {@code quarantine_chunks}. Before this the sibling was stranded with
+     *       rows nothing could expire;</li>
+     *   <li>deleting a {@code quarantine-*} collection is allowed (it is the audited manual route for rows whose
+     *       origin is gone) and writes one {@code quarantine_collection_delete} row carrying the chashes,
+     *       truncated at {@link #GC_AUDIT_MAX_CHASHES} with the count exact.</li>
+     * </ul>
      */
     public Map<String, Integer> deleteCollection(String tenant, String name) {
-        Map<String, Integer> counts = deleteCollectionTxn(tenant, name);
+        DeleteOutcome outcome = deleteCollectionTxn(tenant, name);
+        Map<String, Integer> counts = outcome.counts();
+        // A quarantine sibling this delete emptied and unregistered: same post-commit eviction as the name itself.
+        for (String sibling : outcome.unregisteredSiblings()) {
+            CollectionRegistry.evict(tenant, sibling);
+        }
         // Post-commit (nexus-h8rf6 wave review): the registry row is gone; a stale
         // CollectionRegistry entry would make later writers silently skip
         // re-registration if the name is reused. Same post-commit discipline as
@@ -8269,7 +8282,10 @@ public final class CatalogRepository {
         ctx.execute("SET CONSTRAINTS nexus.fk_catalog_chunks_chunk DEFERRED");
     }
 
-    private Map<String, Integer> deleteCollectionTxn(String tenant, String name) {
+    /** What {@link #deleteCollectionTxn} committed: the per-table counts, and the quarantine siblings it unregistered. */
+    private record DeleteOutcome(Map<String, Integer> counts, List<String> unregisteredSiblings) {}
+
+    private DeleteOutcome deleteCollectionTxn(String tenant, String name) {
         // nexus-wbfpw.66: DELETEs catalog_document_chunks rows (step 1b, and the fk-001 cascade of
         // step 6), which fires vectors-021-3's chunk-locking trigger; whole transaction retried on 40P01.
         // `counts` is built inside the lambda, so each attempt starts from an empty map.
@@ -8277,6 +8293,7 @@ public final class CatalogRepository {
             deferManifestChunkFk(ctx);
 
             Map<String, Integer> counts = new LinkedHashMap<>();
+            List<String> unregisteredSiblings = new ArrayList<>();
             // 0. RDR-194 P3d (nexus-tk070.p3d): topic_assignments_chunk_fk
             //    (tenant_id, source_collection, doc_id) -> chunks(tenant_id,
             //    collection, chash), ON DELETE CASCADE, NOT deferrable -- deleting
@@ -8302,7 +8319,24 @@ public final class CatalogRepository {
             //    not three against chunks_384/768/1024 -- the cascade-count key
             //    collapses from three to one along with the table (was
             //    "chunks_384"/"chunks_768"/"chunks_1024").
-            counts.put("chunks", ctx.deleteFrom(CHUNKS).where(CHUNKS.COLLECTION.eq(name)).execute());
+            if (QuarantineOrigin.isQuarantineName(name)) {
+                // nexus-wbfpw.71: a deliberate delete of a quarantine collection is the audited manual route
+                // for rows whose origin is gone; the audit row carries the chashes the delete removed.
+                counts.put("chunks", QuarantineOrigin.deleteQuarantineCollectionRows(ctx, tenant, name));
+            } else {
+                counts.put("chunks", ctx.deleteFrom(CHUNKS).where(CHUNKS.COLLECTION.eq(name)).execute());
+                // 1a. nexus-wbfpw.68/.71: the origin's rows in its quarantine siblings go with it, one audit row
+                //     per sibling, and a sibling this empties is unregistered the way the ghost sweep would.
+                //     Without this the sibling was stranded: nothing expires rows whose origin is gone.
+                Map<String, Integer> fromSiblings = QuarantineOrigin.deleteRowsOf(ctx, tenant, name);
+                counts.put("quarantine_chunks", fromSiblings.values().stream().mapToInt(Integer::intValue).sum());
+                for (String sibling : fromSiblings.keySet()) {
+                    if (!collectionHoldsContent(ctx, sibling)) {
+                        ctx.deleteFrom(CATALOG_COLLECTIONS).where(CATALOG_COLLECTIONS.NAME.eq(sibling)).execute();
+                        unregisteredSiblings.add(sibling);
+                    }
+                }
+            }
             // 1b. nexus-o8dil.40 (RDR-191 F8d fix): the manifest cascade below
             //     (step 6) reaches catalog_document_chunks ONLY via fk-001's
             //     CASCADE off catalog_documents, scoped by the OWNING
@@ -8372,7 +8406,7 @@ public final class CatalogRepository {
             counts.put("catalog_documents", ctx.deleteFrom(CATALOG_DOCUMENTS).where(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION.eq(name)).execute());
             // 7. registry row LAST (RESTRICT children are now gone).
             counts.put("catalog_collections", ctx.deleteFrom(CATALOG_COLLECTIONS).where(CATALOG_COLLECTIONS.NAME.eq(name)).execute());
-            return counts;
+            return new DeleteOutcome(counts, unregisteredSiblings);
         });
     }
 
@@ -8622,6 +8656,10 @@ public final class CatalogRepository {
     public Map<String, Integer> renameCollection(String tenant, String oldName, String newName,
                                                    String expectedTargetSupersededBy,
                                                    String newContentType, String newOwnerId) {
+        // nexus-wbfpw.71: a rename re-homes chunks and registry rows with no audit row, so it is refused on a
+        // quarantine collection, as source or as target (the sanctioned verbs are restore and expiry).
+        QuarantineOrigin.requireNotQuarantine("rename", oldName);
+        QuarantineOrigin.requireNotQuarantine("rename", newName);
         Map<String, Integer> counts = renameCollectionTxn(tenant, oldName, newName, expectedTargetSupersededBy,
             newContentType, newOwnerId);
         // Post-commit (nexus-h8rf6 wave review): the canonical branch RETIRES the old
@@ -9042,6 +9080,9 @@ public final class CatalogRepository {
                 counts.put("catalog_document_chunks",
                     ctx.update(CATALOG_DOCUMENT_CHUNKS).set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, newName)
                        .where(CATALOG_DOCUMENT_CHUNKS.COLLECTION.eq(oldName)).execute());
+                // nexus-wbfpw.68: oldName's quarantine rows retag to newName on this branch too. Not
+                // counted in the returned map, whose key set this branch pins.
+                QuarantineOrigin.retagRowsOf(ctx, tenant, oldName, newName);
                 return counts;
             }
 
@@ -9205,6 +9246,10 @@ public final class CatalogRepository {
             }
             // Override with the pre-count captured above -- see the comment there.
             counts.put("topic_assignments", topicAssignmentsPreCount);
+            // 2b. nexus-wbfpw.68: the quarantine rows tagged for oldName now name a collection that is gone.
+            //     Retag them to newName (an untagged row in oldName's siblings is tagged too), one audit row
+            //     per sibling. Sibling NAMES are not renamed: the engine finds a sibling by this tag.
+            QuarantineOrigin.retagRowsOf(ctx, tenant, oldName, newName);
 
             // 3. RETIRE the old registry row X as a superseded tombstone (nexus-cecqy).
             //
@@ -9412,6 +9457,9 @@ public final class CatalogRepository {
      *                       registered live collection
      */
     public RehomeResult rehomeCollection(String tenant, String source, String target) {
+        // nexus-wbfpw.71: a re-home UPDATEs chunks.collection with no audit row; refused on a quarantine name.
+        QuarantineOrigin.requireNotQuarantine("rehome", source);
+        QuarantineOrigin.requireNotQuarantine("rehome", target);
         if (source.equals(target)) {
             throw new RehomeRefused("source and target are the same collection: " + source);
         }
@@ -11605,7 +11653,7 @@ public final class CatalogRepository {
         return v instanceof Number n ? n.longValue() : def;
     }
 
-    private String jsonOrNull(Object v) {
+    private static String jsonOrNull(Object v) {
         if (v == null) return null;
         if (v instanceof String sv) return sv.isBlank() ? null : sv;
         try { return MAPPER.writeValueAsString(v); } catch (Exception e) { return null; }
@@ -11669,8 +11717,11 @@ public final class CatalogRepository {
      * the delete it records is not an audit. {@link #recordGcAudit} (the CLIENT-facing
      * {@code POST /gc_audit/record} path) opens its own transaction via {@link
      * TenantScope#withTenant} and calls this with that transaction's {@code ctx}. Of the
-     * engine-side producers, only {@link #runSweepTransaction}'s sweep path actually calls
-     * this method — it wires an already-open {@code ctx} straight through. {@link
+     * engine-side producers, only {@link #runSweepTransaction}'s sweep path and {@link
+     * QuarantineOrigin} (collection delete and rename's quarantine rows, nexus-wbfpw.68/.71;
+     * package-private and static for that reason, so {@code ChashRepository} can write the same
+     * rows) actually call this method — each wires an already-open {@code ctx} straight
+     * through. {@link
      * #purgeTrash}'s {@code nexus.purge_trash} routine, {@code nexus.gc_quarantine_orphans},
      * and {@code nexus.gc_expire_quarantine} never cross the JVM boundary before writing
      * their own {@code gc_audit} row: each is audited SQL-side, INSERTing directly as the
@@ -11685,9 +11736,9 @@ public final class CatalogRepository {
      *
      * @return the new audit row's id
      */
-    private long insertGcAuditRow(DSLContext ctx, String tenant, String operation, String collection,
-                                   String actor, boolean dryRun, List<String> chashesHex,
-                                   Map<String, Object> extraDetails) {
+    static long insertGcAuditRow(DSLContext ctx, String tenant, String operation, String collection,
+                                  String actor, boolean dryRun, List<String> chashesHex,
+                                  Map<String, Object> extraDetails) {
         int fullCount = chashesHex.size();
         boolean truncated = fullCount > GC_AUDIT_MAX_CHASHES;
         List<String> stored = truncated ? chashesHex.subList(0, GC_AUDIT_MAX_CHASHES) : chashesHex;

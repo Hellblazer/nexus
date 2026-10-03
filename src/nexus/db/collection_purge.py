@@ -41,6 +41,10 @@ class CascadeCounts:
     pipeline_rows_deleted: int = 0
     catalog_docs_deleted: int = 0
     catalog_projection_deleted: int = 0
+    #: Rows the engine took from the origin's ``quarantine-`` siblings in the same
+    #: transaction (nexus-wbfpw.68/.71; one ``collection_delete_quarantine``
+    #: gc_audit row per sibling). 0 from an engine that predates the key.
+    quarantine_chunks_deleted: int = 0
     failures: list[str] = field(default_factory=list)
 
 
@@ -109,6 +113,7 @@ def purge_collection_cascade(db: object, name: str) -> CascadeCounts:
         counts.chash_deleted = deleted.get("chash_index", 0)
         counts.catalog_docs_deleted = deleted.get("catalog_documents", 0)
         counts.catalog_projection_deleted = deleted.get("catalog_collections", 0)
+        counts.quarantine_chunks_deleted = deleted.get("quarantine_chunks", 0)
     except Exception as exc:  # noqa: BLE001 — best-effort, atomic on the service side
         _log.warning("purge_cascade_service_failed", collection=name, error=str(exc))
         counts.failures.append(f"service deleteCollection failed: {exc}")

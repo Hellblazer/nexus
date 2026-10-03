@@ -374,6 +374,30 @@ def test_delete_surfaces_cascade_failures(runner, env_creds, mock_db) -> None:
     assert "catalog cascade failed: boom" in result.output
 
 
+def test_delete_reports_the_quarantine_rows_the_engine_took_with_the_origin(runner, env_creds, mock_db) -> None:
+    """nexus-wbfpw.68/.71: deleting an origin takes its quarantine rows in the same engine
+    transaction, one gc_audit row per sibling. The user must see that they went."""
+    from nexus.db.collection_purge import CascadeCounts
+
+    fake = CascadeCounts(quarantine_chunks_deleted=7)
+    with patch("nexus.db.collection_purge.purge_collection_cascade", return_value=fake):
+        result = _invoke(runner, mock_db, ["delete", "old", "--yes"])
+
+    assert result.exit_code == 0, result.output
+    assert "7 quarantined chunks" in result.output
+    assert "collection_delete_quarantine" in result.output
+
+
+def test_delete_says_nothing_about_quarantine_when_none_went(runner, env_creds, mock_db) -> None:
+    from nexus.db.collection_purge import CascadeCounts
+
+    with patch("nexus.db.collection_purge.purge_collection_cascade", return_value=CascadeCounts()):
+        result = _invoke(runner, mock_db, ["delete", "old", "--yes"])
+
+    assert result.exit_code == 0, result.output
+    assert "quarantine" not in result.output
+
+
 # ── prune (nexus-9tsdf / GH #1113) ──────────────────────────────────────────
 
 

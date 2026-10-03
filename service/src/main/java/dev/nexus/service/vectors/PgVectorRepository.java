@@ -3628,6 +3628,10 @@ FROM scope s
      *         be less than {@code ids.size()} even with no cross-tenant ids present)
      */
     public int delete(String tenant, String collection, List<String> ids) {
+        // nexus-wbfpw.71: store-delete would remove quarantined rows with no audit row, and a quarantined
+        // chunk has no manifest row to make the guard below protect it. Refused; the sanctioned paths are
+        // restore, expiry, and the audited collection delete.
+        dev.nexus.service.db.QuarantineOrigin.requireNotQuarantine("store-delete", collection);
         int dim = dimForCollection(tenant, collection);
         if (ids == null || ids.isEmpty()) return 0;
         DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);

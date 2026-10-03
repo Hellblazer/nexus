@@ -216,6 +216,9 @@ public final class ChashRepository {
                 || newCollection == null || newCollection.isBlank()) {
             throw new IllegalArgumentException("old and new collection must not be empty");
         }
+        // nexus-wbfpw.71: a re-home with no audit row; refused on a quarantine collection, source or target.
+        QuarantineOrigin.requireNotQuarantine("rename", oldCollection);
+        QuarantineOrigin.requireNotQuarantine("rename", newCollection);
         // nexus-wbfpw.66: the manifest re-home below UPDATEs catalog_document_chunks.collection, which
         // fires vectors-021-3's chunk-locking trigger, so this whole transaction is retried on a 40P01
         // (the same wrap CatalogRepository.renameCollectionTxn carries). Everything it produces is the
@@ -278,6 +281,10 @@ public final class ChashRepository {
                .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(tenant)
                    .and(CATALOG_DOCUMENT_CHUNKS.COLLECTION.eq(oldCollection)))
                .execute();
+            // nexus-wbfpw.68: quarantine rows tagged for oldCollection now name a collection that is gone;
+            // retag them to newCollection (an audit row per sibling). The chunk count returned stays the
+            // origin's own rows.
+            QuarantineOrigin.retagRowsOf(ctx, tenant, oldCollection, newCollection);
             return total;
         }));
         // Post-commit (nexus-h8rf6.2): see CollectionRegistry class doc. newCollection's

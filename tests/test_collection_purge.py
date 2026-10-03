@@ -66,6 +66,36 @@ def test_service_mode_uses_single_endpoint_and_maps_counts(
     assert counts.failures == []
 
 
+def test_service_mode_maps_the_quarantine_rows_taken_with_the_origin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """nexus-wbfpw.68/.71: the engine reports the origin's quarantine rows it deleted under
+    ``quarantine_chunks``; an engine that predates the key reads 0, not a KeyError."""
+
+    class _FakeClient:
+        def __init__(self, deleted: dict[str, int]) -> None:
+            self._deleted = deleted
+
+        def delete_collection(self, name: str) -> dict[str, int]:
+            return self._deleted
+
+    from tests.pipeline_fake_engine import make_fake_engine_db
+
+    pipeline_db, _engine = make_fake_engine_db()
+    monkeypatch.setattr("nexus.db.http_pipeline_client.HttpPipelineDB", lambda: pipeline_db)
+
+    monkeypatch.setattr(
+        "nexus.catalog.factory.make_catalog_reader",
+        lambda: _FakeClient({"taxonomy_centroids": 0, "quarantine_chunks": 294}),
+    )
+    assert purge_collection_cascade(object(), "knowledge__q__minilm-l6-v2-384__v1").quarantine_chunks_deleted == 294
+
+    monkeypatch.setattr(
+        "nexus.catalog.factory.make_catalog_reader", lambda: _FakeClient({"taxonomy_centroids": 0}),
+    )
+    assert purge_collection_cascade(object(), "knowledge__q__minilm-l6-v2-384__v1").quarantine_chunks_deleted == 0
+
+
 def test_service_mode_maps_legacy_per_dim_centroid_keys_as_fallback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

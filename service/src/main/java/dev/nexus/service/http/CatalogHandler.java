@@ -11,6 +11,7 @@ import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 import dev.nexus.service.db.CatalogRepository;
+import dev.nexus.service.db.QuarantineOrigin;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -2349,6 +2350,10 @@ public final class CatalogHandler implements HttpHandler {
         // clientCutMidRequest_transactionStillCommits); the caller then polls
         // /collections/rehome/status. This body is the fast-path courtesy for a
         // small collection, never the contract.
+        // nexus-wbfpw.71: refused on a quarantine collection (CatalogRepository.rehomeCollection holds the
+        // same guard; here it answers 400 ahead of the rehome verb's own 409s).
+        QuarantineOrigin.requireNotQuarantine("rehome", source);
+        QuarantineOrigin.requireNotQuarantine("rehome", target);
         var r = repo.rehomeCollection(tenant, source, target);
         Map<String, Object> out = new java.util.LinkedHashMap<>();
         out.put("moved_chunks", r.movedChunks());
@@ -2422,6 +2427,10 @@ public final class CatalogHandler implements HttpHandler {
         if (oldName == null || newName == null) {
             HttpUtil.send(exchange, 400, "{\"error\":\"old_name/new_name (or old/new) required\"}"); return;
         }
+        // nexus-wbfpw.71: refused on a quarantine collection, source or target, before any other check can
+        // answer with a different status. CatalogRepository.renameCollection carries the same guard.
+        QuarantineOrigin.requireNotQuarantine("rename", oldName);
+        QuarantineOrigin.requireNotQuarantine("rename", newName);
         // nexus-sis0m.3: optional attributes for the new row, derived by the client from the
         // new name (the engine does not parse names, RDR-204). Absent keeps the source's;
         // present must be a non-blank string.
