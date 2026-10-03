@@ -54,8 +54,9 @@ unset NX_BUILD_LEASE_ROOT NX_SUITE_LEASE_WAIT NX_SUITE_LEASE_HELD_BY
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$HERE/../../.." && pwd)"
-# run.sh resolves a python >= 3.11 and refuses without one. The fixture's PATH (a stub `uv` ahead of
-# /usr/bin) is not the box's real one, so resolve here and hand the result in (nexus-u67ow).
+# run.sh resolves a python >= 3.10 (3.11 on the --stranded leg, which reads tomllib) and refuses
+# without one. The fixture's PATH (a stub `uv` ahead of /usr/bin) is not the box's real one, so
+# resolve here, at the stricter 3.11, and hand the result in through fixture_env (nexus-u67ow).
 # shellcheck source=../lib/python.sh disable=SC1091
 source "$REPO_ROOT/tests/e2e/lib/python.sh"
 e2e_python_resolve 11 || exit 2
@@ -155,11 +156,15 @@ exit 17
 STUB
 chmod +x "$WORKDIR/bin/docker"
 
-run_a() {
-  # NEXUS_PREV_RELEASE/NEXUS_PREV_ENGINE_TAG: short-circuits run.sh's
-  # git-tag-derivation helpers (${VAR:-$(...)} never calls the command
-  # substitution when VAR is already non-empty) — this fixture has no
-  # release-tag history for them to walk.
+# Every run.sh launch goes through fixture_env, so the env -i allowlist has one
+# site. E2E_PYTHON must cross it: the fixture PATH's /usr/bin/python3 is 3.9 on
+# some hosts (macOS, hellmini), where run.sh would refuse, while on Ubuntu CI
+# it qualifies and a dropped E2E_PYTHON passes silently (nexus-u67ow).
+# NEXUS_PREV_RELEASE/NEXUS_PREV_ENGINE_TAG: short-circuits run.sh's
+# git-tag-derivation helpers (${VAR:-$(...)} never calls the command
+# substitution when VAR is already non-empty) — this fixture has no
+# release-tag history for them to walk.
+fixture_env() {  # [VAR=value ...] command [args...]
   env -i \
     NX_NO_TELEMETRY=1 \
     E2E_PYTHON="$E2E_PYTHON" \
@@ -168,14 +173,16 @@ run_a() {
     TMPDIR="${TMPDIR:-/tmp}" \
     NEXUS_PREV_RELEASE=1.0.0 \
     NEXUS_PREV_ENGINE_TAG=engine-service-v0.0.1 \
-    NX_BUILD_LEASE_WAIT="${1:-10}" \
+    "$@"
+}
+
+run_a() {
+  fixture_env NX_BUILD_LEASE_WAIT="${1:-10}" \
     bash "$repo/tests/e2e/migration-rehearsal/run.sh" --candidate-migration
 }
 
 echo "Test 0 (nexus-z0o2p.42): an override naming a release with no readable tag refuses before any build, naming git fetch --tags"
-out0="$(env -i NX_NO_TELEMETRY=1 E2E_PYTHON="$E2E_PYTHON" PATH="$WORKDIR/bin:/usr/bin:/bin:/usr/local/bin" HOME="$HOME" \
-    TMPDIR="${TMPDIR:-/tmp}" NEXUS_PREV_RELEASE=1.0.0 NEXUS_PREV_ENGINE_TAG=engine-service-v0.0.1 \
-    NEXUS_SEED_RELEASE=9.9.9 NX_BUILD_LEASE_WAIT=5 \
+out0="$(fixture_env NEXUS_SEED_RELEASE=9.9.9 NX_BUILD_LEASE_WAIT=5 \
     bash "$repo/tests/e2e/migration-rehearsal/run.sh" --candidate-migration 2>&1)"; rc0=$?
 [[ $rc0 -eq 2 ]] && ok "refused with rc 2" || bad "expected rc 2, got $rc0: $out0"
 [[ "$out0" == *"NEXUS_SEED_RELEASE=9.9.9 refused: v9.9.9 has no readable REQUIRED_ENGINE_VERSION"* && "$out0" == *"git fetch --tags"* ]] && ok "refusal names the release and git fetch --tags" || bad "no unreadable-tag refusal text: $out0"
@@ -248,9 +255,7 @@ lease_dir_common="$(git -C "$repo" rev-parse --path-format=absolute --git-common
 # ── Tests 3-7: the seed derivation on tagged history ────────────────────────
 run_cm() {
   local r="$1"; shift
-  env -i NX_NO_TELEMETRY=1 E2E_PYTHON="$E2E_PYTHON" PATH="$WORKDIR/bin:/usr/bin:/bin:/usr/local/bin" HOME="$HOME" \
-    TMPDIR="${TMPDIR:-/tmp}" NEXUS_PREV_RELEASE=1.0.0 NEXUS_PREV_ENGINE_TAG=engine-service-v0.0.1 \
-    NX_BUILD_LEASE_WAIT=10 "$@" \
+  fixture_env NX_BUILD_LEASE_WAIT=10 "$@" \
     bash "$r/tests/e2e/migration-rehearsal/run.sh" --candidate-migration 2>&1
 }
 
