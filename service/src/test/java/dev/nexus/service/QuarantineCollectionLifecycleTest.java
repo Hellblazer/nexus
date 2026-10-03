@@ -6,6 +6,7 @@ import dev.nexus.service.db.ChashRepository;
 import dev.nexus.service.db.Chash;
 import dev.nexus.service.vectors.PgVectorRepository;
 import org.jooq.DSLContext;
+import org.jooq.Field;
 import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
 import org.junit.jupiter.api.BeforeAll;
@@ -319,10 +320,16 @@ class QuarantineCollectionLifecycleTest extends AtomicWriteTestBase {
         var pidField = DSL.field(DSL.name("pid"), Integer.class);
         var queryField = DSL.field(DSL.name("query"), String.class);
         var waitField = DSL.field(DSL.name("wait_event_type"), String.class);
+        // The backends blocking this row's statement, as a typed array: typed DSL only (RawSqlGateTest).
+        Field<Integer[]> blockers = DSL.function("pg_blocking_pids", Integer[].class, pidField);
 
         java.util.concurrent.CompletableFuture<Throwable> deleter;
         try (Connection lock = pg.createConnection("")) {
             lock.setAutoCommit(false);
+            // This connection's own backend pid: the probe below matches only a statement that THIS lock
+            // is blocking, so a concurrent test's lock-waiting delete in the shared container cannot match.
+            int lockPid = DSL.using(lock, SQLDialect.POSTGRES)
+                .select(DSL.function("pg_backend_pid", Integer.class)).fetchOne(0, Integer.class);
             // NO KEY UPDATE: conflicts with the DELETE of the row, but not with the FOR KEY SHARE locks the
             // delete's earlier statements may take on it.
             DSL.using(lock, SQLDialect.POSTGRES).selectFrom(CATALOG_COLLECTIONS)
@@ -339,9 +346,11 @@ class QuarantineCollectionLifecycleTest extends AtomicWriteTestBase {
             Integer blockedPid = null;
             try (Connection su = pg.createConnection("")) {
                 DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
-                for (int i = 0; i < 200 && blockedPid == null; i++) {
+                // 600 x 50 ms = 30 s: a slow hosted runner must not read as a missing statement.
+                for (int i = 0; i < 600 && blockedPid == null; i++) {
                     blockedPid = ctx.select(pidField).from(activity)
                         .where(waitField.eq("Lock")
+                            .and(DSL.val(lockPid).eq(DSL.any(blockers)))
                             .and(queryField.likeIgnoreCase("delete from \"nexus\".\"catalog_collections\"%")))
                         .limit(1).fetchOne(pidField);
                     if (blockedPid == null) Thread.sleep(50);

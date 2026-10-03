@@ -9977,7 +9977,14 @@ public final class CatalogRepository {
                     }
                 }
                 // Both holds report under quarantine_held (the wire key set is pinned); nothing changed either way.
-                case HELD_QUARANTINE, HELD_QUARANTINED_ORIGIN -> held++;
+                case HELD_QUARANTINE -> held++;
+                case HELD_QUARANTINED_ORIGIN -> {
+                    held++;
+                    // The response carries a count only, so the names go to the log: an operator asking why a
+                    // ghost was not reclaimed finds the origin here (nexus-wbfpw.71).
+                    log.info("event=ghost_sweep_held_quarantined_origin tenant={} origin={} dry_run={}",
+                             tenant, r.name(), dryRun);
+                }
                 case UNCHANGED -> { }
             }
         }

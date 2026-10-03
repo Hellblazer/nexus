@@ -2603,8 +2603,14 @@ public final class CatalogHandler implements HttpHandler {
         }
         // keep_quarantine (nexus-wbfpw.71, additive): true leaves the origin's rows in its quarantine siblings,
         // for a caller that re-registers the same name at once (reindex). Absent or any non-true value is the
-        // default, so an older client gets today's behaviour.
-        boolean keepQuarantine = Boolean.TRUE.equals(body.get("keep_quarantine"));
+        // default, so an older client gets today's behaviour. A PRESENT value that is not a JSON boolean (the
+        // string "true", a number) is refused: silently taking the destructive default would delete rows the
+        // caller meant to keep.
+        Object keepRaw = body.get("keep_quarantine");
+        if (keepRaw != null && !(keepRaw instanceof Boolean)) {
+            HttpUtil.send(exchange, 400, "{\"error\":\"keep_quarantine must be a JSON boolean\"}"); return;
+        }
+        boolean keepQuarantine = Boolean.TRUE.equals(keepRaw);
         Map<String, Integer> counts = repo.deleteCollection(tenant, name, keepQuarantine);
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(Map.of("deleted", counts)));
     }

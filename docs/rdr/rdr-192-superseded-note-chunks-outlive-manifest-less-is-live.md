@@ -1504,7 +1504,9 @@ change). Where this step says the reaper's quarantine is "expired by the existin
   holds only while the origin itself is live: restore refuses a non-live origin
   (`checkRestoreOrigin`), and `nx t3 gc` refuses a name neither the catalog nor T3 knows, so a
   chunk whose origin collection is gone has no expirer and no restore. Production held 294 such
-  rows on 2026-10-03 (`nexus-wbfpw.65`). Sam ruled on 2026-10-03 (`nexus-wbfpw.68`, option (b)):
+  rows on 2026-10-03 (`nexus-wbfpw.65`); they were removed by hand the same day (`gc_audit` rows
+  10590 and 10591, operation `manual_expire_dead_origin_quarantine`), and the collection delete
+  below is the audited route for any later case. Sam ruled on 2026-10-03 (`nexus-wbfpw.68`, option (b)):
   no engine expiry keyed on a missing origin (a missing origin correlates with a collection
   wrongly mass-quarantined, and engine expiry has no floor). Dead-origin rows are removed by a
   deliberate, audited collection delete, and the delete and canonical-rename producers no longer
@@ -1529,8 +1531,13 @@ change). Where this step says the reaper's quarantine is "expired by the existin
     the source's (a restore into it works; its own later delete takes them, audited).
   - The ghost sweep (`nx catalog sweep-ghosts`, the once-per-boot sweep) holds an origin whose
     chunks all sit in quarantine instead of deleting its registry row, reported under
-    `quarantine_held`, so those rows keep a live origin. Once they expire or are restored the
-    next sweep reclaims the row.
+    `quarantine_held`, so those rows keep a live origin; the engine logs the held names at INFO
+    (`event=ghost_sweep_held_quarantined_origin`). A held origin is a registered origin, so the
+    engine's rows in its siblings go on the ordinary 14 day engine expiry (before this, a
+    ghost-swept origin's rows were skipped for ever as `origin_not_registered`); once they expire
+    or are restored the next sweep reclaims the row. Client-moved rows wait for `nx t3 gc`, which
+    the floor still blocks (`nexus-wbfpw.74`, `nexus-wbfpw.75`), so the origin can stay registered
+    and empty; `nx collection delete <origin>` clears the hold and takes the rows, audited.
   - Store-delete, rename and rehome refuse a `quarantine-*` name with a 400 that names
     `nx t3 quarantine restore` and `nx t3 gc`.
   - Not closed: `store-put` and `update-metadata` on a `quarantine-*` name are not guarded (they

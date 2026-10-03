@@ -224,6 +224,26 @@ class QuarantineCollectionRouteTest {
     }
 
     @Test
+    void collectionDeleteRefusesAPresentNonBooleanKeepQuarantine_andLeavesEverythingInPlace() throws Exception {
+        String origin = "knowledge__qroute-keepbad__minilm-l6-v2-384__v1";
+        String sibling = "quarantine-" + origin;
+        seedOriginWithQuarantineRow(origin, sibling, Chash.ofText(sibling + "/bad").toHex());
+
+        for (String bad : new String[] {"\"true\"", "1", "\"\"", "[true]"}) {
+            var resp = post("/v1/catalog/collections/delete",
+                "{\"name\":\"" + origin + "\",\"keep_quarantine\":" + bad + "}");
+            assertThat(resp.statusCode()).as("keep_quarantine=" + bad).isEqualTo(400);
+            assertThat(resp.body()).contains("keep_quarantine");
+        }
+        assertThat(chunksIn(sibling)).as("a refused request deleted nothing").isEqualTo(1);
+
+        // JSON null reads as absent: the default.
+        var nul = post("/v1/catalog/collections/delete", "{\"name\":\"" + origin + "\",\"keep_quarantine\":null}");
+        assertThat(nul.statusCode()).isEqualTo(200);
+        assertThat(quarantineChunks(nul)).isEqualTo(1);
+    }
+
+    @Test
     void collectionDeleteOfAQuarantineName_reportsTheRowsItRemoved() throws Exception {
         String origin = "knowledge__qroute-qname__minilm-l6-v2-384__v1";
         String sibling = "quarantine-" + origin;

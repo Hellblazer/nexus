@@ -1816,8 +1816,16 @@ same `quarantine_held` figure: it has no content of its own, but deleting its
 registry row would leave those rows with no live origin (restore refuses a
 non-live origin and `nx t3 gc` refuses an unknown name), so it stays, and is
 neither deleted nor marked dormant, for as long as a registered quarantine
-collection holds a row that is its own (nexus-wbfpw.71). Once those rows are
-restored or deleted the next sweep reclaims it.
+collection holds a row that is its own (nexus-wbfpw.71). A held origin is still a
+registered origin, so the engine's rows in its quarantine siblings go on the
+ordinary 14 day engine expiry (before this, a ghost-swept origin's rows were
+skipped for ever as `origin_not_registered`); once they expire or are restored
+the next sweep reclaims the origin. Rows the client moved (`nx index repo`,
+`nx t3 gc`) wait for `nx t3 gc`, which the floor still blocks for such a
+collection (nexus-wbfpw.74, nexus-wbfpw.75), so the origin can stay registered
+and empty; `nx collection delete <origin>` clears the hold and takes the rows
+(audited). The held origin names are logged by the engine at INFO
+(`event=ghost_sweep_held_quarantined_origin`); the response carries the count only.
 
 Default is dry-run: reports what the sweep WOULD do without writing. Pass
 `--apply` to actually reclaim/mark; `--json` emits the engine's response
