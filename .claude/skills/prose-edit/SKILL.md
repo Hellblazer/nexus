@@ -45,14 +45,14 @@ Run every command from the repository root, the directory this session started i
    | false | Use `target` from step 1. |
    | true | Take the text after the first newline of the message. If there is none, ask the author to paste it and end your turn: no WORK exists yet. Otherwise run `BRIEF tmpdir` and call its output WORK. Write the text with the Write tool to `WORK/input.txt`. Use `-` as the target and `--file WORK/input.txt`. |
 
-4. Build the brief. A path run prints a header and then the brief; a stdin run prints the brief alone.
+4. Build the brief. Both runs print a header, a blank line, and then the brief.
 
    | `stdin` | Run |
    | --- | --- |
-   | false | `BRIEF build <target> --budget <budget> [--genre <genre>] --work`. The first line of the output is `WORK=<dir>`, then a blank line. The brief is everything after that blank line. |
-   | true | `BRIEF build - --budget <budget> --genre <genre> --file WORK/input.txt`. The output is the brief. |
+   | false | `BRIEF build <target> --budget <budget> [--genre <genre>] --work`. The header is two lines: `WORK=<dir>` and `DISPATCH=<prompt>`. The brief is everything after the blank line. |
+   | true | `BRIEF build - --budget <budget> --genre <genre> --file WORK/input.txt`. The header is one line, `DISPATCH=<prompt>`. The brief is everything after the blank line. |
 
-   Either way `build` has written the brief to `WORK/brief.md`, which ends with the line `Brief id: <id>`. The line-editor reads that file and echoes the id. The id is in the file and nowhere else: never put one in the prompt. The text printed here is for you to check step 6.
+   Either way `build` has written the brief to `WORK/brief.md`, which ends with the line `Brief id: <id>`. The line-editor reads that file and echoes the id. The id is in the file and nowhere else: never put one in the prompt. The `DISPATCH=` line is the whole prompt for step 7, with the full path of that file already in it. The brief printed here is for you to check step 6.
 
    | Result | Do |
    | --- | --- |
@@ -62,7 +62,7 @@ Run every command from the repository root, the directory this session started i
 
 5. Call the directory named in step 3 or 4 WORK. WORK holds the marked-up copy and the saved proposal until step 12 deletes it. On every stop after WORK exists and before step 12, delete WORK first with `BRIEF rmtmp WORK`. Step 11, a retry in step 12, and a retry of step 9 or step 10 after exit 3 are the exceptions: the turn ends there with WORK in place.
 6. If the brief contains `No exemplars are stored`, tell the author the genre has no exemplars yet and the editor runs without them.
-7. Dispatch the `line-editor` agent with the Agent tool (`subagent_type` `line-editor`, `run_in_background` false). The prompt is these two lines and nothing else, with WORK as its full path: `Read WORK/brief.md in full with Read and follow it.` and `Its last line is "Brief id: <id>": put that id in your reply as brief_sha.` Write `<id>` as shown: you do not know it. Do not paste the brief into the prompt. Wait for its reply.
+7. Dispatch the `line-editor` agent with the Agent tool (`subagent_type` `line-editor`, `run_in_background` false). The prompt is the text after `DISPATCH=` on the header line of step 4, exactly as printed: copy it whole, change nothing, add nothing, and never type a path yourself. It already holds the full path of the brief and the instruction for the id; `<id>` stays as shown, because you do not know it. Do not paste the brief into the prompt. If the line-editor says it cannot read the brief, stop and show the author its error: do not create a directory or a link in the repository and do not list the work directory. Wait for its reply.
 8. Write the agent's whole reply, once, with the Write tool to `WORK/reply.txt`.
 9. Run `BRIEF filter <target> --budget <budget> --save WORK/filtered.json [--file WORK/input.txt] < 'WORK/reply.txt'`. Its output is the filtered proposal and the saved file holds the same text. A `warnings` entry about `brief_sha` means the editor's reply does not carry the id on the last line of `WORK/brief.md`, so it did not read the file to its end. A `warnings` entry about `voice_card` means the editor's card is not the author-approved card the brief gave it. Show each to the author with the others in step 10. On exit 3 (a T2 outage; `WORK/reply.txt` holds the editor's work): show stderr, keep WORK, tell the author, end your turn, and run this step again when the author says to retry. On any failure, show stderr and stop.
 10. Run `REVIEW render <target> --work WORK [--file WORK/input.txt] [--genre <genre>]`. A stdin run passes `--file WORK/input.txt` and the genre it was given. A path run passes `--genre` only when the author gave one. If `REVIEW render` fails with exit 3 (T2 became unavailable after the editor ran), keep WORK: show stderr, tell the author, end your turn, and run the same command again when the author says to retry. Any other failure: show stderr and stop. Tell the author where the marked-up copy is (`copy`) and whether it opened in the viewer (`opened`; when false, `reason` says why and the path is how to read it). Show each filter `warnings` entry and each `unplaced` edit with its cause. If `opened` is false, also show the filtered proposal:

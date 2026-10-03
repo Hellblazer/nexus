@@ -39,8 +39,9 @@ def _build(prose: Prose, *args: str) -> tuple[Path, str]:
     """A path-run build with --work: (the work directory, the brief as printed)."""
     out = brief_ok(prose, "build", *args, "--work")
     head, brief = out.split("\n\n", 1)
-    assert head.startswith("WORK=") and "\n" not in head, head
-    return Path(head[len("WORK="):]), brief
+    first, dispatch = head.split("\n")  # WORK=<dir>, then DISPATCH=<prompt> (fix round 6)
+    assert first.startswith("WORK=") and dispatch.startswith("DISPATCH="), head
+    return Path(first[len("WORK="):]), brief
 
 
 def _file_id(work: Path) -> str:
@@ -56,7 +57,7 @@ def _file_id(work: Path) -> str:
 
 def test_build_prints_no_id_and_brief_md_ends_with_the_id_of_the_text_above_it(prose: Prose) -> None:
     out = brief_ok(prose, "build", "docs/x.md", "--work")
-    assert "Brief id" not in out and "BRIEF_SHA" not in out
+    assert not re.search(r"Brief id: [0-9a-f]{12}", out) and "BRIEF_SHA" not in out  # the prompt shows `<id>`, not an id
     work, brief = _build(prose, "docs/x.md")
     try:
         data = (work / "brief.md").read_text(encoding="utf-8")
@@ -67,14 +68,16 @@ def test_build_prints_no_id_and_brief_md_ends_with_the_id_of_the_text_above_it(p
         brief_ok(prose, "rmtmp", str(work))
 
 
-def test_a_stdin_build_in_a_work_directory_prints_the_brief_alone_and_writes_the_id_inside_the_file(
+def test_a_stdin_build_in_a_work_directory_prints_the_dispatch_line_and_the_brief_and_writes_the_id_inside_the_file(
     prose: Prose,
 ) -> None:
     work = Path(brief_ok(prose, "tmpdir").strip())
     try:
         (work / "input.txt").write_text("fix: a thing\n", encoding="utf-8")
-        out = brief_ok(prose, "build", "-", "--genre", "commit-message", "--file", str(work / "input.txt"))
-        assert out.startswith("# Editing brief") and "Brief id" not in out and "BRIEF_SHA" not in out
+        printed = brief_ok(prose, "build", "-", "--genre", "commit-message", "--file", str(work / "input.txt"))
+        dispatch, out = printed.split("\n\n", 1)
+        assert dispatch.startswith("DISPATCH=") and "\n" not in dispatch
+        assert out.startswith("# Editing brief") and "Brief id: " not in out and "BRIEF_SHA" not in printed
         data = (work / "brief.md").read_text(encoding="utf-8")
         m = ID_LINE.search(data)
         assert m and data[:m.start()] == out
@@ -130,8 +133,7 @@ def test_the_dispatch_prompt_names_only_the_path_and_the_editor_reads_the_id_fro
     skill = SKILL.read_text(encoding="utf-8")
     assert "BRIEF_SHA" not in skill  # step 4 prints no id and step 7 passes none
     step7 = _step(skill, 7)
-    assert "WORK/brief.md" in step7 and "brief_sha" in step7 and "Brief id" in step7
-    assert "last line" in step7
+    assert "DISPATCH=" in step7 and "never type a path" in step7
     step4 = _step(skill, 4)
     assert "BRIEF_SHA" not in step4 and "Brief id" in step4  # says the id is inside the file, not printed
     step9 = _step(skill, 9)

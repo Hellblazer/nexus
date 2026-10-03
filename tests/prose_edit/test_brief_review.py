@@ -632,8 +632,8 @@ def test_build_work_makes_the_directory_only_after_the_brief_exists(prose: Prose
     failed = run_brief(prose, "build", "notes.txt", "--work")  # no genre: nothing may be created
     assert failed.returncode == 1 and _work_dirs(prose) == before
     out = brief_ok(prose, "build", "docs/x.md", "--work")
-    first, blank, rest = out.split("\n", 2)
-    assert first.startswith("WORK=") and blank == ""
+    first, dispatch, blank, rest = out.split("\n", 3)
+    assert first.startswith("WORK=") and dispatch.startswith("DISPATCH=") and blank == ""
     assert rest.startswith("# Editing brief") and "BRIEF_SHA" not in out
     work = Path(first[len("WORK="):])
     try:

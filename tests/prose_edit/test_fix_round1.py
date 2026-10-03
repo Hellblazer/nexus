@@ -380,12 +380,12 @@ def _brief_id(work: Path) -> str:
     return m.group(1)
 
 
-def test_build_work_writes_brief_md_and_prints_only_the_work_directory(prose: Prose, repo: Path) -> None:
+def test_build_work_writes_brief_md_and_prints_the_work_directory_and_the_dispatch_prompt(prose: Prose, repo: Path) -> None:
     out = brief_ok(prose, "build", "docs/x.md", "--work")
     fields, brief = _split_build(out)
     work = Path(fields["WORK"])
     try:
-        assert list(fields) == ["WORK"]
+        assert list(fields) == ["WORK", "DISPATCH"]
         data = (work / "brief.md").read_bytes()
         assert data.decode("utf-8").startswith(brief)
         assert re.fullmatch(r"[0-9a-f]{12}", _brief_id(work))
@@ -401,9 +401,10 @@ def test_a_stdin_build_inside_a_work_directory_writes_brief_md_too_and_one_outsi
     try:
         (work / "input.txt").write_text("fix: a thing\n", encoding="utf-8")
         out = brief_ok(prose, "build", "-", "--genre", "commit-message", "--file", str(work / "input.txt"))
-        assert out.startswith("# Editing brief") and "Brief id" not in out
-        assert (work / "brief.md").read_text(encoding="utf-8").startswith(out) and "fix: a thing" in out
-        assert hashlib.sha256(out.encode("utf-8")).hexdigest().startswith(_brief_id(work))
+        fields, brief = _split_build(out)
+        assert list(fields) == ["DISPATCH"] and brief.startswith("# Editing brief") and "Brief id" not in brief
+        assert (work / "brief.md").read_text(encoding="utf-8").startswith(brief) and "fix: a thing" in brief
+        assert hashlib.sha256(brief.encode("utf-8")).hexdigest().startswith(_brief_id(work))
     finally:
         brief_ok(prose, "rmtmp", str(work))
     loose = tmp_path / "m.txt"
@@ -452,7 +453,7 @@ def test_the_skill_and_the_agent_pass_the_brief_by_file_and_the_id_is_read_from_
     skill = SKILL.read_text(encoding="utf-8")
     assert "The prompt is the brief, unchanged." not in skill
     step7 = _step(skill, 7)
-    assert "WORK/brief.md" in step7 and "brief_sha" in step7
+    assert "DISPATCH=" in step7
     agent = AGENT.read_text(encoding="utf-8")
     assert "Read the brief in the prompt in full" not in agent
     assert "brief file" in agent and "brief_sha" in agent

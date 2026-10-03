@@ -20,8 +20,9 @@ TARGET is PATH, PATH:START-END or "-" (a stdin run; --file names the saved text)
 
 The brief travels to the editor as a file, not as text the orchestrating model retypes. `build --work`
 (a path run) makes the work directory; a stdin run's --file already sits in one. In both cases `build`
-writes the brief to WORK/brief.md and prints the brief on stdout, preceded for a path run by `WORK=<dir>` and a blank
-line. The file ends with a blank line and `Brief id: <the first 12 hex digits of the sha256 of the brief above it>`.
+writes the brief to WORK/brief.md and prints the brief on stdout, preceded by a header and a blank line: for a path
+run `WORK=<dir>` then `DISPATCH=<the line-editor's whole prompt>`, for a stdin run the `DISPATCH=` line alone. The
+prompt names the absolute path of WORK/brief.md; the skill passes it as printed, so no model types a path. The file ends with a blank line and `Brief id: <the first 12 hex digits of the sha256 of the brief above it>`.
 The id is in the file and nowhere else (not on stdout, not in the dispatch prompt): the editor is told to read the file
 and to echo that last line's id as `brief_sha` in its reply, so a reply that names it came from reading to the end of
 the file. `filter` compares the reply with the file's id and, when the reply names none or another, or the file's id
@@ -730,14 +731,15 @@ def cmd_build(a: argparse.Namespace) -> str:
     head = ""
     if a.work:
         work = Path(cmd_tmpdir())
-        head = f"WORK={work}\n\n"
+        head = f"WORK={work}\n"
     elif stdin and _is_work_dir(Path(a.file).parent.resolve(), Path(tempfile.gettempdir()).resolve()):
         work = work_file(a.file).parent
     if work is None:
         return brief
     # the id goes into the file only: stdout and the dispatch prompt never carry it, so a reply that names it read it
-    (work / BRIEF_FILE).write_text(f"{brief}\n{ID_LABEL}{brief_sha(brief.encode('utf-8'))}\n", encoding="utf-8")
-    return head + brief
+    brief_file = work / BRIEF_FILE
+    brief_file.write_text(f"{brief}\n{ID_LABEL}{brief_sha(brief.encode('utf-8'))}\n", encoding="utf-8")
+    return f"{head}{DISPATCH_LABEL}{dispatch_prompt(brief_file)}\n\n{brief}"
 
 
 # ---------------------------------------------------------------------------
@@ -1149,6 +1151,15 @@ def _norm_card(text: str) -> str:
 
 BRIEF_FILE = "brief.md"
 ID_LABEL = "Brief id: "
+DISPATCH_LABEL = "DISPATCH="
+
+
+def dispatch_prompt(brief_file: Path) -> str:
+    """The whole prompt the line-editor is dispatched with, one line, the absolute path already in it. The
+    orchestrating model passes this text as printed and never types a path itself (nexus-ger02.7: two of ten
+    sessions typed the literal `WORK/brief.md`). `<id>` stays as shown: the id is in the file, not in the prompt."""
+    return (f"Read {os.path.abspath(brief_file)} in full with Read and follow it. "
+            f'Its last line is "{ID_LABEL}<id>": put that id in your reply as brief_sha.')
 SHA_LENGTH = 12
 
 
