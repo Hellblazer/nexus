@@ -24,7 +24,7 @@
 # record in the repository's common directory (a record under two hours old would let the direct promote through).
 # The script ABORTS before any session when it does not (exit 1; it is not a FAIL, nothing was measured).
 # Not covered here, by hand: whether the editor recognises a device with and without the card, and the correction
-# flow of step 13 through the skill (README, "What stays by hand").
+# flow of step 13 through the skill (README, "What stays by hand": not performed in Phase 1).
 #
 # The copy sits in a nested directory no built-in genre maps (docs/zz-teach/), so it is in no "Genre paths:" list
 # and the editor's Grep never meets it; --genre reference-doc is passed on every edit run. runner_guard.bash takes

@@ -39,8 +39,9 @@ def _build(prose: Prose, *args: str) -> tuple[Path, str]:
     """A path-run build with --work: (the work directory, the brief as printed)."""
     out = brief_ok(prose, "build", *args, "--work")
     head, brief = out.split("\n\n", 1)
-    first, dispatch = head.split("\n")  # WORK=<dir>, then DISPATCH=<prompt> (fix round 6)
+    first, dispatch, *ready = head.split("\n")  # WORK=<dir>, DISPATCH=<prompt> (round 6), REPLY/FILTERED/REASONS (round 7)
     assert first.startswith("WORK=") and dispatch.startswith("DISPATCH="), head
+    assert [r.split("=", 1)[0] for r in ready] == ["REPLY", "FILTERED", "REASONS"], head
     return Path(first[len("WORK="):]), brief
 
 

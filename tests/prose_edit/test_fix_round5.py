@@ -50,11 +50,11 @@ def _section(text: str, head: str, nxt: str) -> str:
 def test_the_line_editor_never_edits_a_device_whatever_a_style_sheet_rule_says_and_queries_the_conflict() -> None:
     rules = _section(AGENT_TEXT, "## Rules", "## Output")
     rule = next(ln for ln in rules.splitlines() if ln.startswith("- A voice-card device is never edited"))
-    assert "whatever a style-sheet rule says" in rule
+    assert "whatever a genre, repo or user style-sheet rule says" in rule
     assert "query" in rule and "never an edit" in rule
     # the voice-card section carries the same rule, with the case that went wrong in the exit batch
     card = _section(AGENT_TEXT, "## Voice card", "## Protected regions")
-    assert "Never edit one either" in card and "whatever a style-sheet rule says" in card
+    assert "Never edit one either" in card and "whatever a genre, repo or user style-sheet rule says" in card
     assert "semicolon" in card  # the genre rule against semicolons does not license splitting a listed device
     assert "raise a query" in card.lower() or "ask a query" in card.lower()
 
@@ -63,14 +63,14 @@ def test_the_line_editor_says_a_device_is_not_a_style_sheet_layer_and_wins_over_
     procedure = _section(AGENT_TEXT, "## Procedure", "## Voice card")
     step5 = next(ln for ln in procedure.splitlines() if ln.startswith("5. "))
     assert "document > genre > repo > user" in step5  # the layer order itself is unchanged
-    assert "not a layer" in step5 and "device" in step5 and "wins" in step5
+    assert "not a layer" in step5 and "device" in step5 and "beats" in step5
 
 
 def test_the_brief_tells_the_editor_a_device_beats_every_style_sheet_entry(prose: Prose) -> None:
     brief = brief_ok(prose, "build", "docs/x.md", "--genre", "reference-doc")
     sheet = _section(brief, "## 3. Style sheet", "## 4. Not a defect")
     assert "never edited" in sheet and "device" in sheet and "query" in sheet
-    assert "whatever an entry below says" in sheet or "whatever a style-sheet entry says" in sheet
+    assert "whatever such an entry below says" in sheet
     assert "document > genre > repo > user" in sheet  # the layer order is still the one stated
 
 

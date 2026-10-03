@@ -12,7 +12,8 @@ Errors go to stderr with exit 1; memory.py's own exit codes (3: T2 unavailable) 
                                  the brief text for the editor agent, on stdout
   brief.py filter TARGET [--budget N] [--file F] [--save F | --work DIR]
                                  the agent's reply on stdin -> filtered proposal JSON
-  brief.py tmpdir                a fresh temporary directory outside the repository
+  brief.py tmpdir [--ready]      a fresh temporary directory outside the repository; --ready prints WORK= and the
+                                 absolute path of INPUT, REPLY, FILTERED, REASONS, ENTRY and CARD inside it
   brief.py site-layer [--site-page FILE]
                                  the site-page section 3 layer memory.py `read` takes
 
@@ -21,7 +22,8 @@ TARGET is PATH, PATH:START-END or "-" (a stdin run; --file names the saved text)
 The brief travels to the editor as a file, not as text the orchestrating model retypes. `build --work`
 (a path run) makes the work directory; a stdin run's --file already sits in one. In both cases `build`
 writes the brief to WORK/brief.md and prints the brief on stdout, preceded by a header and a blank line: for a path
-run `WORK=<dir>` then `DISPATCH=<the line-editor's whole prompt>`, for a stdin run the `DISPATCH=` line alone. The
+run `WORK=<dir>`, `DISPATCH=<the line-editor's whole prompt>`, then `REPLY=`, `FILTERED=` and `REASONS=` (the absolute
+paths of the files the skill writes next), for a stdin run the `DISPATCH=` line alone (`tmpdir --ready` printed the paths). The
 prompt names the absolute path of WORK/brief.md; the skill passes it as printed, so no model types a path. The file ends with a blank line and `Brief id: <the first 12 hex digits of the sha256 of the brief above it>`.
 The id is in the file and nowhere else (not on stdout, not in the dispatch prompt): the editor is told to read the file
 and to echo that last line's id as `brief_sha` in its reply, so a reply that names it came from reading to the end of
@@ -313,30 +315,40 @@ def treatments_from_lists(lists: Obj) -> dict[str, list[str]]:
     return out
 
 
+MEMORY_CMD = "python3 .claude/skills/prose-edit/scripts/memory.py"  # the allowlisted prefix, as the skill writes it
+
+
+def _remove_cmd(where: str, kind: str, entry: str) -> str:
+    """The whole command that removes one treatment entry, in the form the permission rule allows."""
+    return f"{MEMORY_CMD} entries {where} --remove-item {shlex.quote(f'{TREATMENT_KEYS[kind]}={entry}')}"
+
+
 def _treatment_kinds(normalized: list[str], treatments: dict[str, list[str]], layer: str,
                      where: str = "--level repo") -> dict[int, str]:
     """The treatment each bullet gets from one layer's lists, by bullet index. Each listed rule is matched to
-    exactly one bullet by its opening words; a stale or doubled entry stops the build, naming the layer and the
-    command that removes the entry (`where` is that command's --level and --path)."""
+    exactly one bullet by its opening words; a stale, malformed or doubled entry stops the build, naming the layer
+    and the full command that removes the entry (`where` is that command's --level and --path)."""
     kind_of: dict[int, str] = {}
     for kind in ("ignored", "query_only", "note_only"):
         for entry in treatments.get(kind, []):
+            remove = _remove_cmd(where, kind, entry)
             m = _OPENING.match(entry)
             if not m:
-                raise _user(f'malformed treatment entry {entry!r}: expected "opening words..." first')
+                raise _user(f'malformed treatment entry {entry!r} ({kind} in the {layer} style sheet): '
+                            f'expected "opening words..." first. Remove the entry with: {remove}')
             opening = _norm(m.group("open"))
             hits = [i for i, b in enumerate(normalized) if b.startswith(opening)]
             if not hits:
-                remove = shlex.quote(f"{TREATMENT_KEYS[kind]}={entry}")
                 raise _user(
                     f'site-page section 3 has no bullet opening "{opening}..." ({kind} in the {layer} '
-                    "style sheet): the skill changed or the entry is stale. Remove the entry with: "
-                    f"memory.py entries {where} --remove-item {remove}"
+                    f"style sheet): the skill changed or the entry is stale. Remove the entry with: {remove}"
                 )
             if len(hits) > 1:
-                raise _user(f'"{opening}..." matches more than one section 3 bullet')
+                raise _user(f'"{opening}..." matches more than one section 3 bullet ({kind} in the {layer} '
+                            f"style sheet): its opening words are too short. Remove the entry with: {remove}")
             if hits[0] in kind_of:
-                raise _user(f'section 3 bullet "{opening}..." matches more than one treatment')
+                raise _user(f'section 3 bullet "{opening}..." matches more than one treatment ({layer} style '
+                            f"sheet). Remove this entry with: {remove}")
             kind_of[hits[0]] = kind
     return kind_of
 
@@ -555,9 +567,10 @@ def render_brief(read: Obj, budget: int, input_file: str | None, input_text: str
             "the other (document > genre > repo > user).",
             "Entries that do not contradict each other all apply. A setting shows the value of the "
             "narrowest layer that gives it.",
-            "A voice-card device is not an entry and not a layer: it wins over every layer. A device is "
-            "never edited, whatever an entry below says. When an entry conflicts with a device, raise a "
-            "query instead, never an edit."]
+            "A voice-card device is not an entry and not a layer: it beats genre, repo and user entries. A "
+            "device is never edited, whatever such an entry below says. When one conflicts with a device, raise "
+            "a query instead, never an edit. Only an entry from the document layer, which the author wrote "
+            "for this document, beats a device."]
     if scalars:
         out += ["", "### Settings", "", "\n".join(
             f"- {k}: {_shown(v)}" + (f" (layer: {own})" if (own := _scalar_owner(layers, k)) else "")
@@ -739,7 +752,8 @@ def cmd_build(a: argparse.Namespace) -> str:
     # the id goes into the file only: stdout and the dispatch prompt never carry it, so a reply that names it read it
     brief_file = work / BRIEF_FILE
     brief_file.write_text(f"{brief}\n{ID_LABEL}{brief_sha(brief.encode('utf-8'))}\n", encoding="utf-8")
-    return f"{head}{DISPATCH_LABEL}{dispatch_prompt(brief_file)}\n\n{brief}"
+    ready = ready_paths(work, READY_BUILD) if a.work else ""
+    return f"{head}{DISPATCH_LABEL}{dispatch_prompt(brief_file)}\n{ready}\n{brief}"
 
 
 # ---------------------------------------------------------------------------
@@ -1154,6 +1168,20 @@ ID_LABEL = "Brief id: "
 DISPATCH_LABEL = "DISPATCH="
 
 
+# The files the skill writes into a work directory, by the header label that prints each one's absolute path. The
+# skill copies those lines and never composes a path (nexus-ger02.7: a literal `WORK/...` was typed, and Write
+# creates a missing directory without a word, so a stray WORK/ appeared in the repository).
+READY_FILES = {"INPUT": "input.txt", "REPLY": "reply.txt", "FILTERED": "filtered.json", "REASONS": "reasons.json",
+               "ENTRY": "entry.json", "CARD": "card.json"}
+READY_BUILD = ("REPLY", "FILTERED", "REASONS")  # what a path run's header adds after DISPATCH=
+
+
+def ready_paths(work: Path | str, labels: tuple[str, ...] | list[str]) -> str:
+    """`LABEL=<absolute path>` lines, one per label, each ending in a newline."""
+    root = os.path.abspath(work)
+    return "".join(f"{label}={os.path.join(root, READY_FILES[label])}\n" for label in labels)
+
+
 def dispatch_prompt(brief_file: Path) -> str:
     """The whole prompt the line-editor is dispatched with, one line, the absolute path already in it. The
     orchestrating model passes this text as printed and never types a path itself (nexus-ger02.7: two of ten
@@ -1310,7 +1338,9 @@ def _parser() -> argparse.ArgumentParser:
     f.add_argument("--file")
     f.add_argument("--work", help="delete this work directory after a successful filter")
     f.add_argument("--save", help="also write the filtered JSON to this file inside a work directory")
-    sub.add_parser("tmpdir", help="a fresh work directory outside the repository")
+    t = sub.add_parser("tmpdir", help="a fresh work directory outside the repository")
+    t.add_argument("--ready", action="store_true",
+                   help="print WORK=<dir> and the absolute path of each file the skill writes into it")
     r = sub.add_parser("rmtmp", help="delete a work directory made by tmpdir")
     r.add_argument("path")
     s = sub.add_parser("site-layer", help="the site-page section 3 layer")
@@ -1344,7 +1374,8 @@ def main(argv: list[str] | None = None) -> int:
                 save.write_text(text_out, encoding="utf-8")
             sys.stdout.write(text_out)
         elif args.cmd == "tmpdir":
-            sys.stdout.write(cmd_tmpdir() + "\n")
+            made = cmd_tmpdir()
+            sys.stdout.write(f"WORK={made}\n" + ready_paths(made, list(READY_FILES)) if args.ready else made + "\n")
         elif args.cmd == "rmtmp":
             cmd_rmtmp(args.path)
         else:

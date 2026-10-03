@@ -11,7 +11,7 @@
 # directory no built-in genre maps: it is not in any "Genre paths:" list, so the editor's Grep never meets it
 # (--genre reference-doc is passed instead). It is removed on exit. runner_guard.bash takes an exclusive lock
 # for the whole run (one runner at a time; exit 75 when another holds it) and sweeps the leftovers of an older
-# runner. SCENARIOS names the groups to run (default all three); it is recorded in $OUT/scenarios.txt, and
+# runner. SCENARIOS names the groups to run (default all three; b needs a, because b1 lists the rejections a2 stored, and the runner refuses b without a); it is recorded in $OUT/scenarios.txt, and
 # review_verdicts.py scores a group that was not asked for and left no transcript as NOT-RUN, not FAIL.
 # Every scenario runs ONCE: there is no retry loop, because a retry that keeps the run in which the editor
 # behaved selects the pass (nexus-ger02.16). Afterwards: python3 review_verdicts.py $OUT_DIR, then delete the
@@ -33,6 +33,13 @@ for g in $SCENARIOS; do
     *) echo "run-review.sh: unknown scenario '$g' in SCENARIOS (a, b and c exist)" >&2; exit 2 ;;
   esac
 done
+case " $SCENARIOS " in
+  *" b "*)
+    case " $SCENARIOS " in
+      *" a "*) ;;
+      *) echo "run-review.sh: scenario b needs scenario a: b1 lists the rejections a2 stored, so b alone has none to list and scores FAIL. Name a with b (SCENARIOS=\"a b\")." >&2; exit 2 ;;
+    esac ;;
+esac
 . "$HERE/runner_guard.bash"
 runner_lock run-review.sh
 export TMPDIR="${TMPDIR:?set TMPDIR to a directory outside the repository}"

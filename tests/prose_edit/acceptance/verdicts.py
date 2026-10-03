@@ -55,7 +55,8 @@ Runs with an editor reply add:
   inserted_words   words in an edit's new string that its old string lacks (total and edits affected)
   no_twin_queries  queries that say "no twin" instead of "no exact twin found"
 Each run also leaves NAME.head (the checkout's HEAD sha) and NAME.sha256 (the transcript's hash), written by
-record-run.sh; the last line of the output, HEADS, lists the distinct shas of the batch.
+record-run.sh, and NAME.model (the session's model) and NAME.status (the tree's `git status --porcelain`); the last
+lines of the output, HEADS and MODELS, list the distinct shas and models of the batch.
 New work directories (prose-edit-*) left behind are counted for canary batches. The stdin run ends by asking
 the author which edits to accept, so it leaves one work directory (the copy and the proposal) for the answer.
 """
@@ -692,6 +693,9 @@ def main(argv: list[str]) -> int:
     heads = sorted({h.read_text(encoding="utf-8").strip() for h in out_dir.glob("*.head")} - {""})
     if heads:  # record-run.sh wrote one per run: a batch at more than one sha says so here
         sys.stdout.write(f"HEADS {' '.join(heads)}\n")
+    models = sorted({m.read_text(encoding="utf-8").strip() for m in out_dir.glob("*.model")} - {""})
+    if models:  # the session model each run recorded (the orchestrator's; the editor's is the agent file's)
+        sys.stdout.write(f"MODELS {' '.join(models)}\n")
     return 1 if fails else (3 if unmeasured else 0)
 
 

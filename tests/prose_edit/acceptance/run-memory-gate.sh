@@ -14,7 +14,7 @@
 # No run is repeated and none is replaced: a run that errors stays in OUT_DIR for memory_gate_verdicts.py
 # to list. Every run has its own copy of SOURCE (docs/zz-memgate/LABEL-<k>.md, removed on exit), so its own
 # T2 document record; SOURCE itself is never edited. T2 writes go to projects named with
-# PROSE_EDIT_PROJECT_PREFIX (default zzprose216_); delete them afterwards. GATE_JOBS runs at once (default 4).
+# PROSE_EDIT_PROJECT_PREFIX (default zzprose216_); delete them afterwards. GATE_JOBS runs at once (default 1: the preregistered runs were one at a time, and N identical copies at once sit as siblings in docs/zz-memgate/, within reach of the editor's Glob and Grep).
 # A copy of SOURCE is kept as $OUT/LABEL-source.txt: memory_gate_verdicts.py reads it for the same-spot column.
 # ANSWER is the author's answer in turn 2; it must name edits by their content, because the numbers differ
 # from run to run (e.g. "Reject the edit that cuts basically and the edit that cuts It should be noted that.
@@ -30,7 +30,7 @@ WT="$(cd "$HERE/../../.." && pwd)"
 LABEL="${1:?label}"
 SOURCE="${2:?source document}"
 N="${3:-10}"
-JOBS="${GATE_JOBS:-4}"
+JOBS="${GATE_JOBS:-1}"
 ANSWER="${ANSWER:-Accept none. Reject all the edits.}"
 OUT="${OUT_DIR:?set OUT_DIR}"
 . "$HERE/runner_guard.bash"

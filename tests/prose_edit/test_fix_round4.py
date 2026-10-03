@@ -495,7 +495,7 @@ def test_skill_step_4_says_both_runs_print_a_header_with_the_dispatch_line_and_t
     step = _step(SKILL_TEXT, 4)
     assert "a stdin run prints the brief alone" not in step
     assert "Both runs print a header, a blank line, and then the brief" in step
-    assert "`WORK=<dir>` and `DISPATCH=<prompt>`" in step and "one line, `DISPATCH=<prompt>`" in step
+    assert "`WORK=<dir>`, `DISPATCH=<prompt>`" in step and "one line, `DISPATCH=<prompt>`" in step
 
 
 def test_skill_step_12_says_what_apply_did_not_change_in_the_words_of_the_script() -> None:

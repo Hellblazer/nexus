@@ -357,7 +357,7 @@ def test_a_reasons_file_must_sit_directly_inside_the_work_directory_and_not_clas
 def test_the_skill_passes_reasons_in_a_file_and_never_in_a_shell_string() -> None:
     skill = SKILL.read_text(encoding="utf-8")
     step12 = _step(skill, 12)
-    assert "--reasons-file" in step12 and "WORK/reasons.json" in step12 and "Write tool" in step12
+    assert "--reasons-file '<reasons>'" in step12 and "`REASONS=` path" in step12 and "Write tool" in step12
     assert '--reason "' not in skill and "--reason <n>" not in skill
     assert "Never pass the author's text in a shell string." in skill[skill.index("## Rules"):]
 
@@ -385,7 +385,7 @@ def test_build_work_writes_brief_md_and_prints_the_work_directory_and_the_dispat
     fields, brief = _split_build(out)
     work = Path(fields["WORK"])
     try:
-        assert list(fields) == ["WORK", "DISPATCH"]
+        assert list(fields) == ["WORK", "DISPATCH", "REPLY", "FILTERED", "REASONS"]
         data = (work / "brief.md").read_bytes()
         assert data.decode("utf-8").startswith(brief)
         assert re.fullmatch(r"[0-9a-f]{12}", _brief_id(work))
@@ -498,7 +498,7 @@ def test_the_agent_discards_the_target_document_from_the_genre_path_grep() -> No
 def test_the_skill_quotes_paths_and_tokens_on_the_bash_line() -> None:
     skill = SKILL.read_text(encoding="utf-8")
     assert "single quotes" in skill and "author input" in skill
-    assert "< 'WORK/reply.txt'" in skill
+    assert "< '<reply>'" in skill
 
 
 def test_the_skill_asks_for_pasted_text_before_it_makes_a_work_directory() -> None:
