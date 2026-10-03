@@ -365,7 +365,7 @@ ALLOWED_SHAPES = [
     pytest.param(
         'python3 "$CRED_TOOL" run -- docker run --rm -v "$ART:/home/nexus/artifacts" '
         '-e MVV_ARTIFACTS=/home/nexus/artifacts -e CLAUDE_CODE_OAUTH_TOKEN "$IMAGE"',
-        id="cred-tool-run-docker-dash-e-bare-name-rdr208-mvv",
+        id="cred-tool-run-docker-dash-e-bare-name",
     ),
     pytest.param(
         """python3 "$CRED_TOOL" run -- bash -c 'exec docker run --name "$0" -e CLAUDE_CODE_OAUTH_TOKEN "$@"' """

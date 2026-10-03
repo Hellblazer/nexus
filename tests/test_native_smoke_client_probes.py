@@ -7,8 +7,8 @@ The two probe files under ``service/smoke-probes/`` (``t1_real_client.py``,
 ``uv run python -c '...'`` heredocs in ``service/native-smoke.sh``. Before
 this extraction, the ONLY execution of that Python ever happened either
 (a) against a real GraalVM native binary during a release build, or
-(b) inside the pre-tag ``--shakeout`` rehearsal image, where both blocks
-self-skip (no ``pyproject.toml`` there — ``rehearse_shakeout.sh:400-420``)
+(b) inside a since-deleted pre-tag shakeout rehearsal image, where both blocks
+self-skip (no ``pyproject.toml`` there)
 because ``uv``/the repo checkout aren't present. So a plain Python bug in
 either block — like ``HttpPlanLibrary.save_plan`` losing its required
 ``verb=`` kwarg after hygiene-001 (b9ab65606) — had NO pre-tag gate at all:
@@ -148,7 +148,7 @@ def test_native_smoke_script_opts_into_the_prod_write_guard() -> None:
     checkout, which the nexus-a2qhz guard classifies as a dev checkout; without
     the reason-bearing opt-in every probe write is refused. engine-service-
     v0.1.101 burned all three native legs this way (2026-09-05) while the
-    wheel-driven --shakeout stayed green, so the export is pinned here."""
+    wheel-driven shakeout stayed green, so the export is pinned here."""
     from pathlib import Path
 
     script = Path(__file__).resolve().parents[1] / "service" / "native-smoke.sh"

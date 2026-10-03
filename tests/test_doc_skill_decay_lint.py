@@ -999,8 +999,10 @@ def test_glob_scan_examines_something():
     # Glob-shaped tokens are genuinely rare in skill/agent prose (the whole
     # point of the rdr-create incident is that this pattern is unusual
     # enough to go unnoticed) -- a floor of 3 proves the extractor is
-    # live without demanding a volume this corpus does not have.
-    assert result.candidates_examined > 3, (
+    # live without demanding a volume this corpus does not have. (3 until
+    # cleanup step 11 deleted two release-skill steps that carried glob-shaped
+    # tokens; 1 still proves the extractor sees something.)
+    assert result.candidates_examined >= 1, (
         f"only {result.candidates_examined} glob candidate(s) found -- the "
         "glob extractor may be broken rather than the corpus genuinely "
         "having almost none"

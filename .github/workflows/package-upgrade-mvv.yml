@@ -32,7 +32,7 @@ name: Package-upgrade convergence MVV (weekly)
 
 on:
   schedule:
-    - cron: "47 10 * * 1"   # 10:47 UTC Mondays — staggered off stranded-redirect-rehearsal.yml's 10:17 slot on the same day
+    - cron: "47 10 * * 1"   # 10:47 UTC Mondays
   workflow_dispatch:
 
 permissions:

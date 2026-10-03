@@ -10,7 +10,6 @@ nexus-cp9b8 shape). Every one of these lines was measured absent on
 """
 from __future__ import annotations
 
-import re
 import tomllib
 from pathlib import Path
 
@@ -21,33 +20,6 @@ _REPO = Path(__file__).resolve().parents[1]
 
 def _text(rel: str) -> str:
     return (_REPO / rel).read_text()
-
-
-def test_release_sandbox_names_repo_root_as_the_install_source() -> None:
-    """The sandbox once installed the CALLER's cwd while printing $REPO_ROOT and
-    ended "SMOKE PASSED" about a tree it never installed."""
-    text = _text("tests/e2e/release-sandbox.sh")
-    calls = re.findall(r'^\s*"\$REPO_ROOT/scripts/reinstall-tool\.sh"([^\n]*)$', text, re.M)
-    assert calls, "release-sandbox.sh no longer invokes reinstall-tool.sh at all"
-    for args in calls:
-        assert '"$REPO_ROOT"' in args, (
-            f"reinstall-tool.sh invoked without an explicit source ({args.strip()!r}); "
-            "it defaults to the caller's cwd"
-        )
-
-
-def test_release_sandbox_asserts_the_installed_version_matches_repo_root() -> None:
-    text = _text("tests/e2e/release-sandbox.sh")
-    assert '"$NX_VER_OUT" == *"$_expected_ver"*' in text, (
-        "the post-install version assert is gone; the sandbox can smoke the wrong tree again"
-    )
-
-
-def test_upgrade_shakeout_defaults_to_a_release_below_the_tree_under_test() -> None:
-    """PyPI-latest as the baseline cannot pass after a release: baseline == target."""
-    text = _text("tests/e2e/upgrade-shakeout.sh")
-    assert "key(v) < target" in text, "FROM_VERSION no longer resolves strictly below REPO_PKG_VERSION"
-    assert "NX_TARGET" in text
 
 
 def test_reinstall_tool_registers_the_legacy_tree() -> None:

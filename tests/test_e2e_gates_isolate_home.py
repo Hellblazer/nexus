@@ -8,7 +8,7 @@ writes the operator's `~/.config/nexus` — and because `nexus_config_dir()` fal
 back to `Path.home()/".config"/"nexus"`, pinning NEXUS_CONFIG_DIR does not stop
 it either.
 
-MEASURED, 2026-08-24. `upgrade-shakeout.sh` exported PATH to its sandbox tool
+MEASURED, 2026-08-24. A since-deleted sandbox gate exported PATH to its sandbox tool
 dir but never exported HOME, and four `nx --version` calls carried no
 `HOME="$SANDBOX"` prefix. They ran the SANDBOX's nx (FROM_VERSION = latest
 stable = 7.16.3) against the REAL home, stamping

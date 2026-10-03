@@ -771,7 +771,7 @@ def _resolve_onnx_local_upsert_chunk_cap(raw: str | None) -> int:
     "no silent fallbacks for data-correctness/safety problems" directive:
     this constant directly defeats the nexus-33hpq 77.4GB-RSS memory-
     safety cap when misconfigured, and this is a low-traffic, test-harness-
-    only knob (``tests/e2e/local-index-memory-gate.sh``) — real users
+    only knob (a since-deleted local-index memory gate) — real users
     essentially never set it, so failing loud on a typo costs nothing in
     practice and surfaces a misconfiguration immediately instead of
     silently running with an unintended cap. A non-positive value (<=0)
@@ -830,7 +830,7 @@ def _resolve_onnx_local_upsert_chunk_cap(raw: str | None) -> int:
         note=(
             "NX_ONNX_LOCAL_UPSERT_CHUNK_CAP overrides the nexus-33hpq "
             "memory-safety cap — expected only from "
-            "tests/e2e/local-index-memory-gate.sh; an unintended override "
+            "a memory-gate harness; an unintended override "
             "in a real install can reproduce the 77.4GB-RSS incident this "
             "cap exists to prevent."
         ),
@@ -846,7 +846,7 @@ def _resolve_onnx_local_upsert_chunk_cap(raw: str | None) -> int:
 #: time, deliberately — every caller (ChunkBatcher's flush cap AND this
 #: client's oversize paging) reads the SAME module-level constant, so a
 #: per-request re-read would let the two choke points disagree mid-run.
-#: This exists so tests/e2e/local-index-memory-gate.sh can deliberately
+#: This exists so a memory-gate harness can deliberately
 #: raise the cap toward the pre-nexus-33hpq 300 (or beyond) to prove the
 #: gate's corpus actually binds a HIGHER ceiling too, without editing this
 #: file — a real mechanism, not a runtime sed. Unset (the default) leaves
@@ -4859,8 +4859,8 @@ class HttpVectorClient:
 
         nexus-wbfpw.18: ``nx t3 gc`` no longer calls this (it takes its
         candidates from the engine's reapable route). No verb does; the one
-        remaining consumer is the era-hop rehearsal's chunk-id conformance
-        probe (tests/e2e/migration-rehearsal/rehearse_era_hop.sh).
+        remaining consumer was the era-hop rehearsal's chunk-id conformance
+        probe (deleted in cleanup step 11).
         """
         from nexus.db.limits import QUOTAS  # noqa: PLC0415 — command-local import (db.limits)
 

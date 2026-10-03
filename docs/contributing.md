@@ -350,7 +350,7 @@ Every step below is **required**. Missing any one of them has caused problems in
    built WHEEL actually ships `nexus/_install/*.sh` — every other test of
    `packaged_install_dir()` runs against an editable checkout, where that
    path exists because the repo does). Complements the upgrade-axis
-   gates (rehearsal, era-hop, guided) which all start from a populated
+   gate (package-upgrade) which starts from a populated
    install — the 2026-07-21 fresh-box defect class was invisible to every
    one of them. Must end `FRESH-INSTALL MVV PASSED — ... (LOCAL WHEEL,
    release-battery layer)`.
@@ -375,110 +375,15 @@ Every step below is **required**. Missing any one of them has caused problems in
    Run it manually after a tag publishes to verify what PyPI is actually
    serving; see the shakedown playbook for the standing T1 trigger.
 
-7b. **Run the sandbox smoke** (~2 min)
-   ```bash
-   ./tests/e2e/release-sandbox.sh smoke
-   ```
-   Required for any change touching `pyproject.toml`, `uv.lock`,
-   `src/nexus/mcp/**`, `conexus/**`,
-   `.claude-plugin/**`, or `src/nexus/commands/{doctor,upgrade}.py` — which
-   a release always does (the version bumps alone qualify). The reinstall it
-   drives is genuinely isolated and runs cleanly with live Claude Code
-   sessions/MCP servers active. There is no live-holder refusal to get past:
-   an install builds a new `<tools>/gen-<stamp>` and flips `current`, so
-   holders keep running from the tree they resolved at spawn and converge on
-   their next one (nexus-utpuw.8). What still matters here is ISOLATION —
-   the sandbox `HOME` must be activated *before* the reinstall runs, because
-   the generation root resolves off `$HOME`; get that wrong and the sandbox
-   writes into the live install (the `release` skill, step 6 — AGENTS.md
-   § Cutting a release is a pointer to it as of 2026-09-20).
-
-7c. **Run the sandbox shakedown** (~5-10 min warm cache, +10-15 min cold)
-   ```bash
-   ./tests/e2e/release-sandbox.sh shakedown
-   ```
-   Required on every release. Smoke (7b) only reinstalls and runs `nx
-   doctor` checks; it never calls `nx index pdf`, so it cannot catch an
-   indexing regression. The shakedown does — including MinerU end-to-end
-   through the production `nx index pdf` path (step 3b of 11, the
-   `bft-to-smr.pdf` formula fixture) — and it is the ONLY gate that does:
-   the slow-marked `test_mineru_path_preserves_formulas` pytest test is
-   not part of any default or scheduled run (nexus-6xkdu). Cold cache
-   pays MinerU's ~2-3 GB model download once. All four indexing steps
-   (2, 3a, 3b, 4) can fail the run — the `|| true` that previously made
-   them theatre was removed at nexus-6xkdu — and the run ends with an
-   explicit `SHAKEDOWN PASSED`/`SHAKEDOWN FAILED` verdict line. Halt on
-   any failure.
-
-7d. **Data-token CLI gate** (optional, ~5-15 min; not part of the
-   standard battery above — run it once before flipping `mint_token` on
-   for real, or after touching `src/nexus/db/data_token.py`,
-   `commands/config_cmd.py`, `commands/service_cmd.py`'s token group, or
-   `health.py`'s `_check_mint_token`)
-   ```bash
-   ./tests/e2e/data-token-cli-gate.sh
-   ```
-   RDR-005 2a self-minting (nexus-rftfs / nexus-wrwb7 / nexus-ssqk9): the
-   sandboxed-HOME, real-`nx`-subprocess journey for client-side
-   data-token self-minting — issues a `scope=mint-locked` credential
-   against a throwaway local engine, `nx config set mint_token`/
-   `mint_tenant`, a `store put`/`search` round trip that can only
-   succeed via the self-minted token, `nx doctor`'s mint check, and a
-   wrong-`mint_tenant` negative arm. Complements
-   `tests/db/test_data_token_manager_e2e.py` (which proves the
-   `DataTokenManager` seam in-process) by proving the CLI/config.yml/
-   doctor wiring only a real subprocess exercises. Must end
-   `DATA-TOKEN CLI GATE PASSED`.
-
-7e. **Run the upgrade-shakeout** (~3-5 min; EVERY RELEASE)
-   ```bash
-   ./tests/e2e/upgrade-shakeout.sh run                       # latest stable -> this branch
-   ./tests/e2e/upgrade-shakeout.sh run --from-version 4.34.6 # exercises drift -> reconcile
-   ```
-   **Unconditional as of 7.16.1.** This step previously read "conditional",
-   qualified by a trigger list ending in "plugin name / marketplace.json
-   `source.ref` pinning" — a condition true of EVERY release, since advancing
-   `source.ref` to the new tag IS the release (step 7 above). A gate whose
-   condition never fails is unconditional wearing a qualifier, and the
-   qualifier is what invites the skip. It got skipped on 7.16.1, caught only
-   because a human asked what testing remained.
-
-   The gate's own step 9/12 is `plugin marketplace.json reflects rename + tag
-   pinning`, so it checks precisely what every release changes, for 3-5
-   minutes. Sandbox smoke (7b) tests one version in isolation; this is the only
-   gate that tests `FROM_VERSION` → this branch, the path an installed user
-   actually traverses. Runnable from any baseline — it detects stanza drift at
-   runtime and cross-checks `nx doctor`'s drift claim against the actual stanza
-   byte-diff, so a doctor false-positive/negative fails the run. Must end
-   `UPGRADE-SHAKEOUT PASSED — steps=12 skipped=0`; a non-zero `skipped` is a
-   finding, not a pass. `./tests/e2e/upgrade-shakeout.sh reset` cleans the
-   sandbox.
-
-7f. **Run the generation-flip live-holder gate** (~30s; conditional)
-   ```bash
-   bash tests/e2e/gen-flip-live-holder.sh
-   ```
-   Required for any change touching `src/nexus/_install/**`,
-   `src/nexus/install_layout.py`, `src/nexus/install_census.py`, or anything
-   else in the shim / flip / GC machinery (nexus-utpuw.17). It builds TWO real
-   conexus generations from this checkout, spawns an actual `nx-mcp` holder
-   THROUGH the shim, flips `current` underneath it, and then asserts all three
-   parts of the side-by-side promise: the running holder still answers a real
-   MCP tools/call out of its ORIGINAL generation, a fresh spawn lands in the
-   NEW one, and GC refuses to reap the held tree. Hermetic (`env -i`, virgin
-   HOME, its own `NEXUS_CONFIG_DIR`), and it asserts its own seal: the sandbox
-   has no backend, so a green run REQUIRES that tool call to fail for want of
-   a BACKEND — a call that SUCCEEDS means the holder reached the operator's
-   real collections and fails the gate, and an import-shaped failure after the
-   flip is nexus-q3xrx itself. Must end `GEN-FLIP LIVE-HOLDER PASSED`.
-
-   The fast-loop half of the pair (`tests/scripts/test_generation_flip_live_holder.py`,
-   nexus-utpuw.16) runs on every `pytest -n auto`, but against a fixture
-   package. This one is the only thing that guards the ARTIFACT — real console
-   scripts, the real dependency graph, the real certifi path whose failure was
-   the concrete nexus-q3xrx symptom (95 cacert tracebacks). Nothing in the fast
-   gates exercises shim/current/GC at all. Kept in sync with AGENTS.md
-   § Cutting a release, step 1c.
+7b-7f. **Removed** (cleanup step 11). The sandbox smoke, the sandbox
+   shakedown, the data-token CLI gate, the upgrade shakeout and the
+   generation-flip live-holder gate were deleted with their scripts; the release
+   battery is now exactly the fresh-install MVV (7a), the package-upgrade
+   convergence MVV (`tests/e2e/migration-rehearsal/run.sh --package-upgrade`)
+   and the local-service gate, behind one preflight
+   (`tests/e2e/release-preflight.sh`). The fast-loop generation-flip test
+   (`tests/scripts/test_generation_flip_live_holder.py`) still runs on every
+   `pytest -n auto`.
 
 8. **Commit on a release branch and PR to `main`** (branch protection requires a PR; do NOT direct-push).
    Base the release branch on **develop**, not main — a release PROMOTES develop's accumulated
@@ -643,19 +548,16 @@ Minimal battery, two layers that deliberately differ:
 
 - **The cut script runs locally**, against the cut branch's mixed state:
   the FULL `-m lint` bucket, `tests/test_plugin_release_drift_ledger.py`,
-  `tests/hooks/`, and `./tests/e2e/release-sandbox.sh smoke`.
+  and `tests/hooks/`.
 - **The tag workflow** (`plugin-release.yml`, verify-only, depth-1
   two-tag checkout) runs: the wheel-surface proof + drift-ledger contract,
   `tests/test_plugin_structure.py` under `-m lint` (the module is
   lint-marked; without the marker pytest collects nothing and exits 5),
   `tests/hooks/`, the `-m lint` bucket minus BOTH
-  `test_wire_contract_pairing_lint.py` and
-  `test_rehearsal_native_legs_refuse_no_build.py` (each walks `v*` tag
-  history the single-tag fetch cannot resolve; ci.yml's full-history lint
-  job still runs them), and `scripts/check_cut_ledger_clean.py` against
-  the cut's own range. It does NOT re-run release-sandbox smoke — that
-  runs only in the cut script's local battery today (CI wiring is
-  non-gating follow-on nexus-98gpl).
+  `test_wire_contract_pairing_lint.py` and `test_docs_reference_rot.py`
+  (each walks `v*` tag history or `origin/develop` the single-tag fetch
+  cannot resolve; ci.yml's full-history lint job still runs them), and
+  `scripts/check_cut_ledger_clean.py` against the cut's own range.
 
 Deliberately skipped everywhere, because none of them executes
 plugin-loader content: substrate gates, migration rehearsal,
@@ -670,7 +572,7 @@ cut derives its number from the new version's (empty) tag list.
 
 Trigger: this release's tag (client `vX.Y.Z` or engine `engine-service-vX.Y.Z`) carries a schema or data migration — a new Liquibase changeset, a new `upgrade_ladder` rung, or any change to a shape data already has to conform to. Four requirements, none of which the checklist above enforced before this section existed (T2 [22511] gap 9 — no schema-migration protocol existed in any release document; every prior trigger for "is this release safe" reduced to version identity and the standard functional gates, none of which speak to migration risk specifically). Operational checklist form: `.claude/skills/release/SKILL.md` Step 6d (client-side data migrations) and `.claude/skills/engine-release/SKILL.md` Step 5b (engine-side schema DDL). This section is their shared rationale and evidence citations.
 
-1. **Populated-store upgrade rehearsal at a stated, representative scale.** The mechanism is `NEXUS_TARGET_RELEASE=X.Y.Z tests/e2e/migration-rehearsal/run.sh --package-upgrade` (published-bytes mode; see Step 11c above) run against a corpus seeded above a named floor, not the harness's default toy seed (10-30 documents across `rehearse_cold.sh`, `rehearse_acquire.sh`, `rehearse_shakeout.sh`, `rehearse_hole_punch.sh`). State the floor and the actual seed count used in the release relay. If the seed cannot be brought to a genuinely representative scale before deploy, say so explicitly — do not let a toy-scale pass stand in for an at-scale one. RDR-191 is the standing evidence for why this matters: the cloud 385,484-row unify-chunks migration (T2 [22485]) is the only at-scale proof this project has produced for a chunk-table DDL change, and it ran in PRODUCTION — no pre-production rehearsal at that scale has ever happened. Treat that as a named, accepted gap until a representative-scale pre-production rehearsal exists, not a silently inherited one.
+1. **Populated-store upgrade rehearsal at a stated, representative scale.** The mechanism is `NEXUS_TARGET_RELEASE=X.Y.Z tests/e2e/migration-rehearsal/run.sh --package-upgrade` (published-bytes mode; see Step 11c above) run against a corpus seeded above a named floor, not the harness's default toy seed (10-30 documents in `rehearse_package_upgrade.sh` and `rehearse_acquire.sh`). State the floor and the actual seed count used in the release relay. If the seed cannot be brought to a genuinely representative scale before deploy, say so explicitly — do not let a toy-scale pass stand in for an at-scale one. RDR-191 is the standing evidence for why this matters: the cloud 385,484-row unify-chunks migration (T2 [22485]) is the only at-scale proof this project has produced for a chunk-table DDL change, and it ran in PRODUCTION — no pre-production rehearsal at that scale has ever happened. Treat that as a named, accepted gap until a representative-scale pre-production rehearsal exists, not a silently inherited one.
 
 2. **A rollback decision point, settled before the deploy relay fires.** Determine explicitly whether the migration can be rolled back after it commits. Non-transactional DDL (`CREATE INDEX CONCURRENTLY`, any Liquibase changeset that cannot run inside a transaction) forfeits the free atomic rollback a transactional migration gets — RDR-191's `nexus-o8dil.22` names this exactly: "CIC, non-blocking, +11%, cannot run in a transaction, and therefore forfeits the free atomic rollback that the local path gets." When the answer is no, write **IRREVERSIBLE** in the relay verbatim, and attach its substitute: a written rollback/abort runbook (exact statements, abort criteria) that exists and is in the operator's hand before the window opens, not improvised mid-window.
 

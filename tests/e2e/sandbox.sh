@@ -24,33 +24,22 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 SANDBOX="${NEXUS_SANDBOX_HOME:-$HOME/nexus-sandbox}"
 
 # RDR-184 P0 guard-surface gap (nexus-ccs9v.4/.5 review): this script
-# mutates the IDENTICAL fixed resource ($HOME/nexus-sandbox, unconditional
-# rm -rf below) as release-sandbox.sh — SAME lockdir name as
-# release-sandbox.sh, not a new lock, because it is the same underlying
-# resource: running this while release-sandbox.sh holds its lock (e.g.
-# mid smoke/shakedown/tmux run) would otherwise rm -rf the sandbox HOME
-# out from under it with zero contention signal. Acquired here, before
-# the first mutation, same pattern as the other guarded harnesses.
+# mutates a fixed shared resource ($HOME/nexus-sandbox, unconditional
+# rm -rf below), so a second run (e.g. mid tmux session) would rm -rf the
+# sandbox HOME out from under the first with zero contention signal.
+# Acquired here, before the first mutation, same pattern as the other
+# guarded harnesses.
 # shellcheck source=./lib/lock.sh disable=SC1091
 source "$SCRIPT_DIR/lib/lock.sh"
 # Per-USER root (nexus-c6lsu): the uid is in the name, because /tmp is shared across Unix users and a
 # root another user created is unwritable here (lock_acquire fails). $(id -u) is context-independent,
 # so the cross-context contention above is unchanged for one user.
-LOCKDIR="/tmp/nexus-e2e-locks-$(id -u)/release-sandbox.lock"
-[[ -n "${NEXUS_SANDBOX_HOME:-}" ]] && LOCKDIR="/tmp/nexus-e2e-locks-$(id -u)/release-sandbox-$(printf '%s' "$SANDBOX" | shasum -a 256 | cut -c1-12).lock"
+LOCKDIR="/tmp/nexus-e2e-locks-$(id -u)/sandbox.lock"
+[[ -n "${NEXUS_SANDBOX_HOME:-}" ]] && LOCKDIR="/tmp/nexus-e2e-locks-$(id -u)/sandbox-$(printf '%s' "$SANDBOX" | shasum -a 256 | cut -c1-12).lock"
 mkdir -p "$(dirname "$LOCKDIR")"
-# Held-by-parent seam: release-sandbox.sh already holds this exact lock when
-# it invokes us on its fresh-sandbox path — the lock is non-reentrant, so a
-# second acquire here self-deadlocks (found cutting 6.13.0: the fresh path
-# had never run under the hardened lock). The parent sets the env ONLY when
-# it holds the lock; standalone invocations still acquire + release.
-if [[ -z "${NX_E2E_LOCK_HELD_BY_PARENT:-}" ]]; then
-    lock_acquire "$LOCKDIR" || exit 1
-    trap 'lock_release "$LOCKDIR" 2>/dev/null || true' EXIT
-    echo "[rdr-184] lock acquired: $LOCKDIR (pid $$)" >&2
-else
-    echo "[rdr-184] lock held by parent (pid $PPID) — not re-acquiring" >&2
-fi
+lock_acquire "$LOCKDIR" || exit 1
+trap 'lock_release "$LOCKDIR" 2>/dev/null || true' EXIT
+echo "[rdr-184] lock acquired: $LOCKDIR (pid $$)" >&2
 # Test seam (RDR-184 P0.2/.4, nexus-ccs9v.2/.4): tests/e2e/lib/harness_lock_test.sh
 # sets this to prove a concurrent invocation gets PAST the lock without ever
 # running this harness's real body (rm -rf $SANDBOX etc). No-op in normal use.
@@ -75,8 +64,8 @@ echo '{"hasCompletedOnboarding":true}' > "$SANDBOX/.claude.json"
     printf 'export PATH="%s/.local/bin:$PATH"\n' "$SANDBOX"
     # ANTHROPIC_API_KEY (RDR-219 Phase 2 Step 2, mechanism 2): never written
     # here. It is needed only when the sandbox will spawn Claude Code
-    # (interactive / tmux modes) -- pure CLI smoke (release-sandbox.sh smoke)
-    # and the `shell` mode that just exercises `nx` do not need it at all.
+    # (interactive / tmux modes) -- the `shell` mode that just exercises `nx`
+    # does not need it at all.
     # When it IS needed, the operator's own shell (the one that sources this
     # activate file) already carries it if they exported it before running
     # sandbox.sh or ./tests/e2e/lib/claude_credentials.py `run --` wraps the
@@ -108,7 +97,7 @@ echo '{"hasCompletedOnboarding":true}' > "$SANDBOX/.claude.json"
     # while every command still looked correctly fenced by $HOME. Clearing
     # them restores the single source of truth this harness already documents
     # -- "$SANDBOX/.local/{share/nexus/tools,bin}", recomputed per call so the
-    # $HOME redirection cannot be outrun (release-sandbox.sh, step 1). Pinning
+    # $HOME redirection cannot be outrun. Pinning
     # them to sandbox paths would work too and would be worse: a second place
     # for the sandbox root to be defined, able to disagree with $HOME.
     printf '%s\n' 'unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT CLAUDE_CODE_SESSION_ID NX_SESSION_ID NX_TOOLS_DIR NX_BIN_DIR'

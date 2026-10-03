@@ -20,15 +20,21 @@ neither file.)
 
 ## Steps
 
+**Removed in cleanup step 11 (nexus-0r1uz), numbering left as it was:** Step 1c
+(the generation-flip live-holder gate), Step 6 (sandbox smoke), Step 6b
+(the upgrade shakeout) and Step 6c (sandbox shakedown) went with the scripts they
+ran. The battery is now the fresh-install MVV, the package-upgrade convergence
+MVV and the local-service gate, behind one preflight. Steps that remain:
+0, 0c, 1, 2, 3, 4, 4a, 5, 6d, 7, 8, 8a, 9, 10, 11, 11b, 11c, 12.
+
 ### Where to run the battery
 
 In the release worktree, on the release branch — never in the shared primary
 checkout. AGENTS.md § "Worktrees: one session, one worktree" rule 4 carries the
 reason and the incident; the short version is that rule 9 fast-forwards the
-primary on every push to `develop`, and a tree that moves mid-battery makes the
-artifact-identity guard (nexus-mbeke) refuse every remaining leg. Cut the
-worktree before Step 1's expensive legs, so the artifacts are built once and in
-the tree that actually ships.
+primary on every push to `develop`, and a tree that moves mid-battery changes
+what the remaining legs build and gate. Cut the worktree before Step 1's
+expensive legs, so they build and gate the tree that actually ships.
 
 ### Freeze develop (nexus-eusu6)
 
@@ -98,62 +104,55 @@ This gate exists because the engine silently drifted 22 `service/` commits / 4 d
 
 ### 0c. PREFLIGHT — run the cheap blockers FIRST, all of them
 
-> Budget MINUTES, not the "32s" this heading claimed until 2026-08-27 — measured well past a 2-minute
-> cap on a fresh worktree that had no gate jar built (two of its checks need the T2 engine substrate).
-> Build the gate jar first (`scripts/build-gate-jar.sh`) or two checks fail for that reason alone.
+> Budget MINUTES (the lint bucket alone is ~2 minutes). Build the gate jar first
+> (`scripts/build-gate-jar.sh`) or the lint bucket's substrate-backed tests fail
+> for that reason alone.
 
 ```bash
 ./tests/e2e/release-preflight.sh
-# paired release: name the engine tag so its floor step runs the paired
-# acceptance instead of the bare form (red by construction pre-deploy)
-NX_PAIRED_DEPLOY=engine-service-vX.Y.Z ./tests/e2e/release-preflight.sh
 ```
 
-Run this BEFORE step 1 and before any expensive leg. It evaluates every
-seconds-scale, deterministic, release-BLOCKING check in one pass and does NOT
-abort on the first red -- it reports every failure it finds, so one cycle
-surfaces the whole fix list.
+Run this BEFORE step 1 and before any expensive leg. It is the ONE preflight
+(the former pin-sweep script is folded into it) and it evaluates every
+seconds-scale, deterministic, release-BLOCKING check in one pass without
+aborting on the first red -- it reports every failure it finds, so one cycle
+surfaces the whole fix list. The checks:
+
+- `wire-contract-ledger` -- `check_engine_release_floor.py --ledger-only`, which
+  is MERGE-BLOCKING on every PR to main, not just at tag time;
+- `ci-evidence-contexts` -- the required-context drift tests, run with `-m ""` so
+  the integration-marked live branch-protection check actually executes;
+- `mandatory-pins` -- the GitHub-backed `mandatory_regression_pin` tests under
+  the operator's REAL HOME (they need `gh` auth, so they cannot run inside the
+  local-service gate's fenced HOME), exact count asserted, zero skip budget;
+- the pin sweep -- the `-m lint` bucket with its non-vacuity floor, the pin tests
+  that are not lint-marked, `check_wire_contract_pairing.py`, and `ruff check src`.
 
 WHY (the 7.15.0 cut, 2026-08-22). The battery was ordered expensive-first and
-abort-on-first-red. Two blockers that day were each sub-second assertions:
-`REQUIRED_CHECK_CONTEXTS` drift against main's live branch protection (found
-13.5 minutes into `local-service-gate.sh`, at the very end of its run) and the
-`--package-upgrade` `PREV_ENGINE_TAG` staleness guard (a guard clause in the
-first seconds of `run.sh`, but only reached after ~20 minutes of smoke +
-shakeout + LSG + fresh-install-mvv). Each was a one-line fix behind an hour of
-waiting, and each masked the other. Sequential abort-on-red turns N cheap
-blockers into N hours.
+abort-on-first-red, so each blocker cost a full replay and hid every other one.
+`REQUIRED_CHECK_CONTEXTS` drift against main's live branch protection was a
+sub-second assertion found 13.5 minutes into `local-service-gate.sh`. Sequential
+abort-on-red turns N cheap blockers into N hours.
 
 Exit codes: `0` PREFLIGHT PASSED, `1` PREFLIGHT FAILED (fix everything listed,
-then re-run -- it is 32 seconds, so re-running costs nothing), `2` PREFLIGHT
-UNVERIFIED (a dependency such as Docker was absent; "could not check" is never
-"fine").
+then re-run), `2` PREFLIGHT UNVERIFIED (a dependency was absent; "could not
+check" is never "fine").
 
-Covered: engine-release-floor, wire-contract ledger (`--ledger-only`, which is
-MERGE-BLOCKING on every PR to main, not just at tag time),
-surfaces + both `source.ref` fields + the emptied ledger, the ci-evidence
-required-context drift tests run with `-m ""` so the integration-marked live
-check actually executes, the `--package-upgrade` staleness predicate evaluated
-without provisioning anything, and Docker availability.
+The engine-identity check (`check_engine_release_floor.py` bare form) is NOT in
+the preflight; Step 0 above runs it by hand.
 
-Do not let this file grow into a second battery. Admission requires all three:
-seconds-scale, deterministic (no Docker/service/sandbox/network install), and
-genuinely release-blocking. Its whole value is that it finishes before you look
-away.
+Do not let this file grow into a second battery. Admission requires: genuinely
+release-blocking and deterministic (no service, no sandbox HOME).
 
 ### 1. Run unit + integration suite
 
 ```bash
-tests/e2e/release-battery.sh         # nexus-mfage: every E2E gate below (and 1b, 6, 6b, 6c) in ONE parallel run — artifacts built once, per-leg logs, verdict table, exit 1 on any red; the unit suite still runs SERIAL to it
-scripts/pins-preflight.sh            # step 0: every cheap pin at once
+tests/e2e/release-battery.sh         # preflight, then the three legs below in ONE parallel run: per-leg logs, verdict table, exit 1 on any red; the unit suite still runs SERIAL to it
 uv run pytest -n auto && uv run pytest -m lint   # unit suite and the lint bucket (two runs)
-tests/e2e/local-service-gate.sh      # integration incl. the local-service functional gate
-tests/e2e/mandatory-pins-gate.sh     # the GitHub-backed mandatory_regression_pin tests, real HOME with gh auth, zero skip budget (nexus-z0o2p.41: moved out of the gate above, whose fenced HOME has no gh); a battery leg (pins)
-tests/e2e/migration-rehearsal/run.sh --package-upgrade   # ONE-engine convergence MVV (nexus-cfgo9)
-tests/e2e/migration-rehearsal/run.sh --candidate-migration   # REQUIRED when the tree carries a changeset (nexus-z0ylb)
-tests/e2e/fresh-install-mvv.sh       # VIRGIN-journey gate (nexus-nolqs) — see below
-bash tests/e2e/gen-flip-live-holder.sh   # ~30s — REQUIRED for shim/flip/GC changes, see 1c below
-tests/e2e/hook-cli-skew/run.sh       # every hooks.json entry vs every published CLI from 7.55.0 (nexus-rcoze); a battery leg
+tests/e2e/local-service-gate.sh      # leg lsg: integration incl. the local-service functional gate
+tests/e2e/migration-rehearsal/run.sh --package-upgrade   # leg pkgup: ONE-engine convergence MVV (nexus-cfgo9)
+tests/e2e/fresh-install-mvv.sh       # leg mvv: VIRGIN-journey gate (nexus-nolqs) — see below
+tests/e2e/hook-cli-skew/run.sh       # every hooks.json entry vs every published CLI from 7.55.0 (nexus-rcoze); standalone since cleanup step 11, no longer a battery leg
 ```
 
 All must pass. Integration is excluded from CI and is the last line of defense before tag-push.
@@ -161,34 +160,10 @@ All must pass. Integration is excluded from CI and is the last line of defense b
 **Reading the battery's table, which is where a vacuous pass hides.** The
 driver runs about 30 minutes on this box. Reds never stop it and it prints one
 table at the end, so the verdict you act on is the table, not the exit. **A leg
-with no verdict line is MISSING, never passed** — implemented at
-`release-battery.sh:162` (`LEG_STATUS[$leg]="MISSING"`), and it is the rule
-that stops a silently-empty leg reading as green. Consumers also refuse
-artifacts whose manifest tree identity is not this checkout's, so a dirtied
-tree rebuilds rather than reusing a stale wheel or jar (nexus-mbeke) — if a leg
-seems to rebuild when you expected reuse, that is why, and it is correct.
-
-**1c. The generation-flip live-holder gate.** `bash
-tests/e2e/gen-flip-live-holder.sh` (~30s, nexus-utpuw.17). REQUIRED for any
-change touching `src/nexus/_install/**`, `src/nexus/install_layout.py`,
-`src/nexus/install_census.py`, or anything else in the shim / flip / GC
-machinery — that trigger list is the reason to run it standalone, outside a
-full battery, when a change lands in those paths. It builds TWO real conexus
-generations from this checkout, spawns an actual `nx-mcp` holder THROUGH the
-shim, flips `current` underneath it, and asserts the live process still answers
-a real MCP tools/call from its ORIGINAL generation while a fresh spawn lands in
-the new one and GC refuses to reap the held tree. Hermetic by construction
-(`env -i`, virgin HOME, its own `NEXUS_CONFIG_DIR`) and it ASSERTS ITS OWN SEAL:
-an unscrubbed `nx-mcp` was measured answering a real `search` out of the
-OPERATOR'S live collections, so a call that SUCCEEDS there fails the gate. Must
-end `GEN-FLIP LIVE-HOLDER PASSED`. The fast-loop half of the pair is
-`tests/scripts/test_generation_flip_live_holder.py` (nexus-utpuw.16), which runs
-on every `pytest -n auto` against a fixture package; this one guards the
-ARTIFACT — real console scripts, real dependency graph, the real certifi path
-whose failure was the concrete nexus-q3xrx symptom (95 cacert tracebacks).
-Nothing else in the fast gates exercises shim/current/GC at all. It is wired
-into `release-battery.sh:127`, so a full battery covers it; the standalone run
-is for the trigger list above.
+with no verdict line is MISSING, never passed** — implemented in
+`release-battery.sh` (`LEG_STATUS[$leg]="MISSING"`), and it is the rule that
+stops a silently-empty leg reading as green. Each leg builds its own wheel or
+jar (the gate jar is cached on `service/` content), so a dirtied tree rebuilds.
 
 Count the advisories too. A gate that passed on a fallback prints one
 `GATE PASSED-BY-DEFAULT: <gate> <reason>` line and still exits 0
@@ -354,70 +329,11 @@ uv sync
 
 The lock file MUST be committed. CI also checks this.
 
-### 6. Run sandbox smoke (~2 min)
-
-Required for any change touching `pyproject.toml`, `uv.lock`, `src/nexus/mcp/**`, `conexus/**`, `.claude-plugin/**`, `src/nexus/commands/{doctor,upgrade}.py`.
-
-```bash
-./tests/e2e/release-sandbox.sh smoke
-```
-
-Must end with `[done]` and confirm the new schema version. Halt on any failure.
-
-This reinstall is genuinely isolated (fixed 2026-07-01, `137d2688`) — safe to run with live Claude Code sessions/MCP servers active. A live-holder refusal is no longer possible: installs land in a fresh generation and holders keep running from their own tree (nexus-utpuw.8), and `--force` / `--cycle-daemons` no longer exist. The step ordering still matters for ISOLATION — sandbox `HOME` must activate *before* the reinstall, because the generation root resolves off `$HOME` (`nx_tools_dir`), not because of anything `uv` does.
-
-### 6b. Run upgrade-shakeout (~3-5 min, EVERY RELEASE)
-
-**Unconditional as of 7.16.1.** This step used to read "conditional",
-qualified by a trigger list ending in "plugin name / marketplace.json
-`source.ref` pinning" -- a condition that is TRUE OF EVERY RELEASE, because
-advancing `source.ref` to the new tag IS the release (Step 3). A gate whose
-condition never fails is not conditional; it is unconditional wearing a
-qualifier that invites a skip. It got one on 7.16.1, caught only because
-Sam asked what testing remained.
-
-Run it every time. The gate's own step 9/12 is `plugin marketplace.json
-reflects rename + tag pinning`, so it verifies the very thing every release
-changes, and it costs 3-5 minutes.
-
-`release-sandbox.sh smoke` (6) tests ONE version in isolation. This is the
-only gate that tests `FROM_VERSION` -> this branch, which is the path an
-installed user actually traverses.
-
-Must end `UPGRADE-SHAKEOUT PASSED — steps=12 skipped=0`. A non-zero
-`skipped` is a finding, not a pass.
-
-```bash
-./tests/e2e/upgrade-shakeout.sh run                       # latest stable -> this branch (clean-upgrade path)
-./tests/e2e/upgrade-shakeout.sh run --from-version 4.34.6 # pre-pgrep-guard baseline -> exercises drift -> reconcile
-```
-
-Runnable from any baseline (nexus-a3nqp): it detects stanza drift at runtime and cross-checks `nx doctor`'s drift claim against the actual stanza byte-diff, so a doctor false-positive/negative fails the run. Must end with `12/12 PASS`. `./tests/e2e/upgrade-shakeout.sh reset` cleans the sandbox.
-
-### 6c. Run sandbox shakedown (~5-10 min warm / +10-15 min cold)
-
-Required on every release (nexus-6xkdu: a diff-based trigger list was rejected — MinerU/docling version drift lands via `uv.lock` alone with no matching pyproject.toml pin to diff, so any trigger list is under-inclusive by construction; see nexus-7g40u).
-
-```bash
-./tests/e2e/release-sandbox.sh shakedown
-```
-
-Smoke (step 6) never calls `nx index pdf`; this is the only pre-tag gate that exercises MinerU end-to-end through the production indexing path (step 3b of 11, the `bft-to-smr.pdf` formula fixture) — the slow-marked `test_mineru_path_preserves_formulas` pytest test runs in no default or scheduled suite (nexus-6xkdu). Must end `SHAKEDOWN PASSED`; a `SHAKEDOWN FAILED` verdict or non-zero exit halts the release. All four indexing steps (2, 3a, 3b, 4) can now fail the run — the `|| true` that previously made them unable to redden the run was removed at nexus-6xkdu.
-
-**Throughput is timed here, and a missing baseline is not a pass.** Steps 2/11
-and 4/11, and the shakeout's Phase C, are timed against a committed per-corpus
-baseline (`tests/e2e/migration-rehearsal/lib/index-throughput-baselines.tsv`,
-2x ceiling, nexus-98zsp). A MISSING baseline is recorded and reported as SOFT,
-never as a pass, so commit the row it prints rather than moving on — an absent
-row is the state in which this gate measures nothing. A red here is an
-embed-throughput regression in the engine or the client, which is the class
-`engine-service-v0.1.99` shipped through every other gate.
-
 ### 6d. Migration-release branch (CONDITIONAL — this release ships a data migration)
 
 Trigger: this release carries a schema or data migration — a new `upgrade_ladder` rung (`src/nexus/upgrade_ladder/registry.py`), or any client-side change to a shape data already has to conform to (T2 [22511] gap 9). Skip this step entirely when the release carries no such change.
 
-1. **Representative-scale rehearsal.** Run the populated-store upgrade rehearsal against a corpus seeded ABOVE a stated floor, not the harness's default toy seed (10-30 docs across `rehearse_cold.sh` / `rehearse_acquire.sh` / `rehearse_shakeout.sh` / `rehearse_hole_punch.sh`). Pre-tag, that is the worktree `--package-upgrade` run in Step 1; post-publish, close the loop with Step 11c's published-bytes run:
+1. **Representative-scale rehearsal.** Run the populated-store upgrade rehearsal against a corpus seeded ABOVE a stated floor, not the harness's default toy seed (10-30 docs in `rehearse_package_upgrade.sh` / `rehearse_acquire.sh`). Pre-tag, that is the worktree `--package-upgrade` run in Step 1; post-publish, close the loop with Step 11c's published-bytes run:
    ```bash
    NEXUS_TARGET_RELEASE=X.Y.Z tests/e2e/migration-rehearsal/run.sh --package-upgrade
    ```
@@ -638,12 +554,6 @@ a real user would actually install. Must end
 `-> working tree` here on a post-publish run means `NEXUS_TARGET_RELEASE`
 was not set and the loop was NOT actually closed.
 
-Coordinate with (do not duplicate) `tests/e2e/published-client-write-gate.sh`
-(nexus-86mx2, wired into the `engine-release` skill's pre-tag battery): that
-gate owns the FRESH-WRITE axis against a CANDIDATE engine, pre-deploy; this
-step owns the UPGRADE axis against the REAL published engine identity,
-post-publish. See either script's header for the full ownership split.
-
 **Formula-PDF / MinerU coverage (opt-in; nexus-gqrg0, GH #1533).** The
 pre-tag battery's resolver-bound lint (`tests/test_install_source_wiring_pins.py`)
 covers the LOCAL wheel's dependency resolution only. To also prove the
@@ -658,10 +568,9 @@ NX_MVV_FORMULA_PDF_CHECK=1 tests/e2e/fresh-install-mvv.sh --published X.Y.Z
 Off by default (including in the plain command above) because it pays a
 MinerU pipeline model download (~2-3 GB) that would dominate every default
 MVV run. Run it whenever a release touches `mineru`/`pdftext`/`pypdfium2`
-pins, or on a cadence alongside the shakedown's own MinerU leg (Step
-6c/release checklist `release-sandbox.sh shakedown` step 3b/11) — that leg
-already exercises MinerU end-to-end against the LOCAL wheel; this one is
-the published-bytes counterpart.
+pins, or on a cadence of your choosing. The sandbox shakedown that used to
+exercise MinerU end-to-end against the LOCAL wheel was deleted in cleanup
+step 11, so this opt-in run is now the only MinerU formula-PDF coverage.
 
 ### 12. Reinstall local tool and verify
 
@@ -695,7 +604,6 @@ nx --version                 # must print X.Y.Z
 - **Bumping only `pyproject.toml` and missing the four plugin manifests.** CI parity check catches this late. Run the Step 8 pre-push check.
 - **Skipping the integration suite.** Unit-only is what CI runs; integration is your last gate against keyed-API regressions before tag-push.
 - **Running the full unit suite CONCURRENTLY with the E2E gates.** (2026-08-17, 7.9.0 battery.) The E2E gates parallelize safely among THEMSELVES, but their teardown phases (`nx daemon service stop --with-pg`, gate cleanup, the engine-substrate orphan sweep) share a machine-wide blast radius with the unit suite's self-provisioned engine substrates — the suite ran clean to ~75% then block-failed the moment a sandbox teardown fired. Sequence: E2E gates in parallel, the unit suite SERIAL (before or after). A block-shaped mass failure under concurrency is contention-shaped, but the quiet re-run of the failed set is mandatory evidence either way.
-- **Skipping sandbox smoke when `conexus/**` or `pyproject.toml` changed.** The smoke catches plugin-load + db-migration regressions that unit tests miss.
 - **Using `gh release create` after `git push origin vX.Y.Z`.** Duplicate release. The Release workflow already creates one.
 - **Forgetting `uv sync`.** `uv.lock` not updated; CI fails or local install resolves differently.
 - **Forgetting `scripts/reinstall-tool.sh` after tag-push.** Local `nx` stays on old version; the post-merge "verify locally" step lies.

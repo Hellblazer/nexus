@@ -11,6 +11,11 @@ Follow in order. Releaser is **human**: AI preps + validates; the human pushes t
 
 ## Steps
 
+**Removed in cleanup step 11 (nexus-0r1uz), numbering left as it was:** Step 3
+(the local-candidate `--shakeout` gate and the `--candidate-migration` populated-store
+rehearsal) and Step 3c (the published-client write leg) went with the scripts and
+harness modes they ran. Steps that remain: 1, 2, 3b, 3e, 4, 5, 5b, 5c, 6, 6.1, 7, 8.
+
 ### 1. Decide whether a cut is needed (drift check)
 
 ```bash
@@ -34,222 +39,6 @@ scripts/mvnw-leased.sh -q test
 ```
 
 The Java CI (`service-ci.yml`) is a required check on `main`, but nothing gates a push to `develop` on it, and a develop run can be cancelled or time out — so verify it actually passed on this tree rather than assuming.
-
-### 3. PRE-TAG gate: `--shakeout` (the leg that builds the candidate)
-
-> **`--guided` IS RETIRED — do not use it.** RDR-155 P4b (commit `7e47c285`,
-> 2026-07-24) deleted `nx guided-upgrade` / `migrate-to-service` / `storage
-> migrate all`, so `--guided`, `--cold` and `--hole-punch` now refuse at the
-> arg loop with a RETIRED message and exit 2. This step named `--guided` for
-> one cut after the retirement and would have failed the next engine cut at the
-> gate. `--chash-window` is ALSO RETIRED (nexus-lgdel.l2, 2026-08-16): its
-> entire subject was the pre-cutover legacy 32-hex chash window (RDR-180),
-> a capability deleted along with `nexus.chash_alias`; the leg, its
-> Dockerfile, and its rehearsal script are gone. Surviving journeys:
-> `--era-hop`, `--package-upgrade`, `--shakeout`, `--fullstack`, `--stranded`
-> (nexus-8nlj4: two-hop
-> stranded-redirect — armed-detector refusal + pin-side migration; weekly
-> heartbeat via stranded-redirect-rehearsal.yml, dispatch it on demand when a
-> cut touches stranded_install.py or the migration-rehearsal harness),
-> `--candidate-migration` (nexus-z0ylb: the locally-built CANDIDATE
-> engine's full Liquibase walk over a POPULATED store — provisions the
-> PUBLISHED FLOOR engine for real, populates through it with the RELEASED
-> conexus that pins the floor, installed from PyPI (content + catalog
-> manifests + a real taxonomy-discovery pass; a working-tree client newer than
-> the floor refuses it, nexus-z0o2p.42), upgrades the client to the working-tree
-> wheel at the swap, hand-swaps the candidate
-> binary in with the provenance sidecar's tag/version kept pinned at the
-> floor (HARNESS bookkeeping, not a production technique — a real release
-> `install-binary`'s an honest sidecar at download time; this rewrite only
-> keeps a LATER assert in the SAME test run from silently re-acquiring the
-> floor over the candidate mid-rehearsal, and a `nx daemon restart-stale
-> --dry-run` no-op check inside the leg proves exactly that, nothing
-> broader), then boots and asserts the changeset delta plus EXACT row
-> invariants — see the leg's own coverage statement below for what it does
-> and does NOT prove), and the default `rehearse.sh` (Phases A/D/E).
-
-> **Ordering, still load-bearing.** `--shakeout` BUILDS the candidate locally
-> (`run.sh` does the GraalVM `-Ob` native build; only the retired `--cold` path
-> skipped it and acquired a PUBLISHED binary instead). `--candidate-migration`
-> ALSO builds the candidate locally (same `-Ob` build, stamped with the floor
-> version) — the two legs are complementary, not redundant: `--shakeout` proves
-> the candidate's CLI-verb/concurrency surface on a fresh install; `--candidate-
-> migration` proves its Liquibase walk over populated data. `--with-cloud`
-> exercises the conexus-DEPLOYED service, so it cannot run pre-tag either — it
-> is part of the post-deploy cloud gate (Step 6).
-
-```bash
-tests/e2e/migration-rehearsal/run.sh --shakeout
-```
-
-Must end `CANDIDATE SHAKEOUT PASSED`.
-
-**Phase F now runs `service/native-smoke.sh`'s own probe set too (nexus-l8xnz,
-2026-08-17).** The raw-curl probe set (taxonomy/assignments/details' 64-hex
-`doc_id` width validation, T1's separate-jOOQ-schema reflection check, the
-memory/plans/taxonomy/chash routes, the bge-768 embed path, the fused-rerank
-stage) used to run ONLY inside `engine-service-release.yml` — a stale probe
-fixture (the pre-fix 16-char `doc_id` literal) burned the `v0.1.77` tag on
-both linux release legs while the binary itself was fine, and `--shakeout`
-stayed green because nothing local ever exercised the script. `--shakeout`
-now drives the IDENTICAL script (byte-for-byte; only the caller is adapted)
-against the candidate over the already-provisioned Postgres — a stale probe
-now fails `--shakeout` locally, before a tag is ever cut. This does **not**
-replace `--acquire` below (which drives the SIGNED, PUBLISHED bytes) — it
-closes the "release-workflow-only procedures rot silently" gap for the
-*script's own assertions*, not for signing/codesign/cosign/PG-bundle
-packaging defects, which remain `--acquire`-only by construction (see below).
-
-**`--candidate-migration` — MANDATORY whenever this cut's `service/` delta
-touches `db/changelog/**` (a new or modified Liquibase changeset); optional
-otherwise** (a cut that only touches Java handler/repository code with no
-schema change has nothing new for this leg to prove beyond what
-`--candidate-migration` already proved on a prior cut of the same schema
-generation — run it anyway when in doubt, it is not expensive relative to
-`--shakeout`). MANDATORY here means "this class of change gets no other
-pre-tag rehearsal against populated data," not "this leg proves the
-changeset is safe in every dimension" — read the coverage statement below
-before treating a green run as exhaustive:
-
-```bash
-tests/e2e/migration-rehearsal/run.sh --candidate-migration
-# a cut whose changeset count is known ahead of time pins it instead of
-# merely reporting it, e.g. a cut adding exactly 3 new changesets:
-EXPECT_NEW_CHANGESETS=3 tests/e2e/migration-rehearsal/run.sh --candidate-migration
-```
-
-Must end `CANDIDATE-MIGRATION REHEARSAL PASSED`. Reports (never asserts to
-an exact value unless `EXPECT_NEW_CHANGESETS` is set) the changeset delta
-between the floor's post-init `DATABASECHANGELOG` count and the candidate's
-post-boot count — `delta=0` is a legitimate, explicitly-stated outcome (it
-still proves boot-over-populated-store + checksum stability + grants
-idempotence), not a silent skip.
-
-**Coverage — what this leg DOES and does NOT prove** (substantive-critic
-finding, 2026-08-14, T2
-`nexus/critique-nexus-z0ylb-candidate-migration-rehearsal-2026-08-14`
-[22547] — the leg's own script header carries the identical statement,
-kept in lockstep). It exercises: boot succeeding over populated data (a
-changeset that silently assumes an empty table fails here, not at a
-customer's box); RLS not going DML-blind mid-migration; a changeset's own
-GRANT/ownership statements not bricking boot; CASCADE fallout on a DROP
-TABLE; and checksum/row-count integrity (Liquibase's own checksum
-re-validation plus this leg's EXACT row-invariant asserts, now spanning
-chunks, catalog manifest/documents, taxonomy centroids AND
-`topic_assignments`).
-
-**Tuple space (bead nexus-58vc9, added for the v0.1.118 cut that carries
-tuples-003 + nexus-8zoyp).** Stage 3h seeds `nexus.tuples` through the
-FLOOR engine before the swap: mailbox rows in every claim state
-(unclaimed, claimed-and-left, consumed with and without a reply,
-dead-lettered via 3 claim/nack cycles), an over-4096-byte body (written
-past the seeding (released) client's own mirrored 4096-byte pre-check, when
-the floor enforces no size limit; a floor from v0.1.118 on refuses it with
-TooLarge, which the leg asserts in place of the over-cap checks), an
-exactly-4096-byte body, and
-ledger rows — under a second tenant too when the floor's `nx tenant
-create` supports minting one. Post-walk it asserts: the over-cap row is
-gone with its claim-log history surviving at `tuple_id=NULL`
-(`tuple_claim_log_tuple_fk`'s `ON DELETE SET NULL`); the at-cap row is
-untouched; unconsumed and dead-lettered bodies are untouched;
-`chk_tuples_body_size` is VALIDATED; RLS is ENABLE+FORCE on both
-tuple-space tables; and the candidate can still claim and ack a surviving
-row. The consumed-body assert counts the row together with its NULL body
-(`1:1`), so a changeset that deleted consumed rows instead of clearing
-their bodies fails rather than reading as an empty body. The PASSED and
-FAILED lines name how many tenants the tuple population covered
-(`tuple_tenants=1|2`). The scheduled sweep itself (6h interval,
-6h initial delay) cannot fire inside this leg's wall-clock budget, so
-"the candidate can run the sweep" is asserted structurally (the
-dead-lettered row's `claim_state`/`attempts` shape matches what the
-sweep's own release/purge arms key their `WHERE` clauses on), not by
-observing a scheduled pass execute.
-
-**Seed generation and what runs after the walk (bead nexus-z0o2p.42).**
-Stages 1-3 run a RELEASED client from real PyPI, the way production was
-seeded: `run.sh` picks the newest release tag whose pinned engine is at or
-below the floor and whose version is at or below the tree's own
-(`NEXUS_SEED_RELEASE` overrides it under the same two rules; the leg refuses
-loudly otherwise, naming `git fetch --tags` when no tag is visible). A pin
-below the floor (a paired client release, whose new engine no published
-release pins yet) is selected with a notice, and the leg installs the floor
-engine explicitly and re-reads the sidecar and `/version` after population.
-Stage 4 reinstalls the working-tree wheel, byte-compared against the installed
-package. Stage 5 reads the pending upgrade rungs BEFORE `nx upgrade` and
-asserts they are only rungs the seed release did not know (an upgrade repairs
-rung state, so a candidate boot that regressed state a rung probes would
-otherwise be repaired unseen), then runs `nx upgrade` and asserts the
-`rdr192-manifest-backfill` completion record in `nexus.ladder_completions`
-and that `nx t3 census-manifest-less` reports `scope_chunk_total` equal to the
-SQL chunk count of a collection that holds one chunk named by two documents'
-manifests (the nexus-wbfpw.60 shape).
-
-It structurally CANNOT catch five classes, by construction of what this leg
-seeds:
-- **Cross-shard PK collision** (the "cross-shard collision" `DO $$` guards
-  that vectors-004/taxonomy-007-style changesets carry) — this leg seeds
-  ONE embedding dimension (bge-768) only; reproducing a genuine collision
-  needs a second populated dimension sharing a colliding key.
-- **Planner-statistics flips** from a stats-absent post-migration table
-  picking a different query plan under real data volume — this leg's
-  corpus tops out around ~190 rows, far too small to exhibit one. That
-  class is pinned at the JAVA layer instead:
-  `SchemaMigratorIntegrationTest::rdr180Rewrite_leavesPlannerStatsFresh`
-  (`service/src/test/java/dev/nexus/service/SchemaMigratorIntegrationTest.java`).
-- **Scheduled tuple-sweep execution** (6h interval, 6h initial delay): the
-  sweep never fires inside this leg, so its per-arm isolation and per-row
-  savepoint recovery are not exercised here. Covered by
-  `NexusServiceTupleSweepTest` and `NexusServiceTupleSweepIsolationTest` in
-  the Java suite.
-- **Tuple-table scan duration at live volume**: Stage 3h seeds about 20
-  tuple rows, against about 2150 live ledger rows across 37 subspaces
-  (2026-09-13). tuples-003's DELETE and VALIDATE and tuples-004's
-  consumed-body UPDATE scan the whole table; their lock duration at real
-  volume is the PITR-fork walk's to measure, not this leg's.
-- **State older than, or shaped by generations other than, the seed
-  release**: the store is one client generation's output through one engine
-  generation, about 190 rows, not the cumulative, many-times-rewritten state
-  of production. Earlier-era chunk metadata and duplicate
-  `databasechangelog` rows are absent; the PITR-fork walk finds those.
-
-This is strictly stronger than the `--guided` gate it replaces. It performs the
-same native-image build — the `-Ob` quick build has the SAME reachability
-requirements as the full release build, so it catches a broken native build
-before the tag burns a release-workflow run — and then adds the full CLI-verb
-matrix, incremental index, and (nexus-xm0cp) a CLIENT-SIDE census over the
-concurrent load phase against that binary — the candidate has no request
-logger (`com.sun.net.httpserver`, no access-log appender), so there is no
-service-side 5xx signal to scan. The census has TWO parts, not one: (1) none
-of the concurrent `nx store put` / `nx index repo` calls exit non-zero, and
-(2) none of them logs an absorbed `vector_gateway_retry` either — coverage
-gap (1) alone would miss it: `HttpVectorClient` retries a 502/503/504 within
-a bounded budget BEFORE ever raising (`_GATEWAY_RETRY_CODES`,
-`src/nexus/db/http_vector_client.py`), so a gateway blip that resolves in
-time never reaches a client exit code at all, exactly the shape a lock
-convoy is most likely to take. Part (2) closes that gap by scanning each
-call's log for the retry's own structlog line. A FAIL here is a product
-finding, not a harness formality: its maiden runs caught two production bugs
-the unit suites missed (nexus-h8rf6).
-
-Notes:
-- The host JVM suite (`scripts/mvnw-leased.sh -q test`, Step 2) validates the Java
-  on the JVM; `--shakeout` adds the native-image build + serve + drive.
-- **Prefer the container rehearsal over `release-sandbox.sh`** for engine work —
-  it is the isolated harness for a NATIVE build, and it owns its own image.
-  (The old reason given here — that release-sandbox.sh "swaps the uv tool venv
-  and can break the live install" — is no longer true and was contradicted by
-  this repo's own release skill. Installs are side-by-side generations: the
-  sandbox activates its `HOME` before reinstalling, so generations land in
-  `$SANDBOX/.local/{share/nexus/tools,bin}`, nothing is swapped under a live
-  holder, and `--force`/`--cycle-daemons` no longer exist — nexus-utpuw.8.
-  Recommendation unchanged, mechanism corrected: nexus-utpuw.20.)
-- When the two-hop stranded-redirect rehearsal lands (nexus-8nlj4) it becomes
-  the acceptance journey that replaced the retired guided legs; add it here
-  then, alongside `--shakeout` rather than instead of it.
-- `--candidate-migration` requires a native build the same way `--shakeout`
-  does and refuses `--no-build`; it does NOT combine with any other leg
-  (standalone entrypoint, same discipline as every other journey in this
-  harness).
 
 ### 3b. Client-release preconditions — a DEPLOY gate, NOT a tag gate
 
@@ -285,89 +74,6 @@ release) closes the gap: the client release bumps the floor to this tag IN
 the same release, and the deploy fires at client-tag push, in parallel with
 the PyPI publish — satisfied the instant the client tag exists, live before
 any user can install the client that requires it.
-
-### 3c. PRE-TAG gate: published-client write leg (`published-client-write-gate.sh`, nexus-86mx2)
-
-```bash
-tests/e2e/published-client-write-gate.sh
-```
-
-Must end `PUBLISHED-CLIENT WRITE GATE PASSED`. Runs the CURRENTLY-PUBLISHED
-conexus client (real PyPI, scrubbed-HOME sandbox — same isolation idiom as
-`fresh-install-mvv.sh --published`) against THIS candidate engine (working-
-tree dev jar by default via `scripts/build-gate-jar.sh`;
-`NEXUS_SERVICE_TAG=engine-service-vX.Y.Z` points it at a specific published
-tag instead) and asserts REAL catalog registration — manifest ROW COUNT via
-`GET /v1/catalog/manifest/verify`, exact expected count, never a 200 alone —
-for a `store put` and an `index md` write.
-
-**Why the other legs do not cover this.** Every other gate in this checklist
-tests a CONSISTENT client/engine pair: the host JVM suite and `--shakeout`
-are develop×develop; `--acquire` is the WORKING-TREE client against a
-published engine; `--package-upgrade` proves an EXISTING install's engine
-converges, never a fresh client's WRITE path against a stricter successor.
-None of them is "the client every user currently has, writing against the
-engine about to ship." That gap is exactly how `engine-service-v0.1.73`'s
-RDR-191 GATE-2 constraint (manifest writes must name their collection)
-400'd every released-7.6.1 manifest write in PRODUCTION while every gate
-above stayed green (T2 22488/22489, nexus-sh9v2 — 910 live documents
-accumulated invisible to catalog-aware retrieval before anyone noticed).
-This leg would have caught it here, before deploy, instead of in production.
-
-A published client KNOWN to be incompatible with the current engine (the
-exact window before a client release ships the fix) is not a tag-cut
-blocker — acknowledge it explicitly and by name:
-
-```bash
-NX_EXPECTED_CLIENT_LAG=nexus-z0o2p.24 tests/e2e/published-client-write-gate.sh   # the bead named in the script header (EXPECTED_LAG_BEAD)
-```
-
-The bead is typed literally because the variable `EXPECTED_LAG_BEAD` lives inside the script, not in your shell: `"$EXPECTED_LAG_BEAD"` expands to nothing here and the script exits 1 on the mismatch. `tests/scripts/test_engine_release_skill_commands.py` pins this literal to the script's own constant, so a hand-update of one fails until the other follows.
-
-Exits 2 (`PUBLISHED-CLIENT WRITE GATE EXPECTED-INCOMPATIBLE`) — a named,
-counted state, never a silent pass. The script refuses the acknowledgment
-(hard-fails instead, exit 1) once the published client it actually resolves
-is >= the version its own header names as the fix — an ack held past its
-expiry is exactly the drift this gate exists to catch. See the script's own
-header for the full contract; do not re-derive it here.
-
-**The RDR-223 + RDR-192 cut: run this gate TWICE, once per ownerless-write mode
-(nexus-9a6io).** The final cut's engine refuses a chunk write no document owns
-(422, `reason: ownerless_chunk_write`), and every published client before the
-Phase 2 client migration writes that way for `nx store put` and `nx index md`. So
-against this candidate the published client is incompatible by design, and the
-expected result depends on the engine's `NX_OWNERLESS_WRITE_MODE`:
-
-```bash
-# first production deploy posture (cloud, variable unset: the engine's own default is log-only): expect exit 0
-NX_GATE_OWNERLESS_WRITE_MODE=log-only tests/e2e/published-client-write-gate.sh
-# the final posture: expect exit 2, EXPECTED-INCOMPATIBLE
-NX_EXPECTED_CLIENT_LAG=nexus-z0o2p.24 NX_GATE_OWNERLESS_WRITE_MODE=enforce \
-  tests/e2e/published-client-write-gate.sh
-```
-
-Exit 0 in `log-only` requires the engine's `ownerless_writes_would_refuse_total` to be
-above zero afterwards, which proves the legacy path reached the ownerless route. Exit 2 in
-`enforce` is accepted only when BOTH journeys failed, each journey's own client output names
-the refusal, and `ownerless_writes_refused_total` is at least 2 (one per journey), so the
-ack cannot hide a failure that is not the refusal: one journey refused plus the other
-broken for another reason is exit 1. The refusal match was MEASURED on 2026-10-01 against
-published conexus 7.67.0 and the working-tree candidate (`NX_PUBLISHED_CLIENT_VERSION=7.67.0
-NX_GATE_OWNERLESS_WRITE_MODE=enforce NX_EXPECTED_CLIENT_LAG=nexus-z0o2p.24`: exit 2,
-`refused_total=2`): each journey's own output carries the engine's sentence "refusing an
-ownerless chunk write on <route>" (`nx store put` inside a `store_put_ghost_register_compensated`
-warning, `nx index md` in its one-line `Error:`), and the gate prints each journey's deciding
-line as `refusal line:`. Re-measure when the client's error rendering changes; if a journey's
-output stops naming the refusal the cut stops here, and the fix is the classifier, decided
-from the engine's wire text, never loosened to any failure. An UNSET gate mode against a candidate that carries
-the refusal runs the engine through the local launcher, which sets `enforce` by default, so
-unset is not log-only here; set the mode explicitly in both runs. A red verdict from either run is a stop. If the
-published client is already at or above `FIXED_IN_VERSION` (the paired release), both
-runs must pass with both counters at zero, and a published client below it that moves no
-counter means `FIXED_IN_VERSION` in the script is stale: set it to the paired release in
-the release PR. The cutover order that follows this gate is
-`docs/operations/ownerless-write-cutover.md`; the verdict logic is pinned by
-`tests/e2e/published_client_write_gate_verdict_test.sh`.
 
 ### 3e. PRE-TAG check: new `/version` fields need a PAIRED conexus edge-allowlist change (nexus-04sff)
 
@@ -424,11 +130,10 @@ native binary + PG bundle, cosign-verified -> `init --service` -> `/version`
 asserts `release_version` equals the acquired tag -> store / index / search drive
 it -> `doctor` with no ✗.
 
-**Why `--shakeout` does not cover this.** Step 3 drives the LOCALLY BUILT `-Ob`
-candidate. The published artifact is different bytes from a different builder:
-full native build (not quick-build), codesign, cosign, PG-bundle packaging. A
-defect introduced by the release workflow is invisible to the local shakeout BY
-CONSTRUCTION — `nexus-2oh5q` is exactly that hazard (signing breaking JNI dlopen
+**Why no local gate covers this.** The published artifact is different bytes from a
+different builder than any locally built candidate: full native build (not
+quick-build), codesign, cosign, PG-bundle packaging. A defect introduced by the
+release workflow is invisible to a local gate BY CONSTRUCTION — `nexus-2oh5q` is exactly that hazard (signing breaking JNI dlopen
 of the bundled onnxruntime/DJL), dormant only while the Apple secrets are
 unprovisioned. Historically this gate caught `nexus-pi3s3` + `nexus-qeoxf`
 (2026-06-26), defects every local suite missed.
@@ -473,17 +178,11 @@ acquire half as `--acquire` and it gated `engine-service-v0.1.55` in production
 (11 PASS / 0 FAIL). Hal REFUSED "accept the gap" on 2026-07-24 — do not
 re-propose it. Instance of `nexus-1e2eh` (release-only procedures rot silently).
 
-> **`--with-cloud` does NOT belong here.** It is NOT a local/acquire leg — it
-> exercises the **conexus-DEPLOYED** cloud service, so it can only run AFTER the
-> engine is deployed to `api.conexus-nexus.com` (Step 6). Running it pre-deploy
-> tests the *previously*-deployed cloud engine, not the candidate. It is part of
-> the post-deploy cloud-gate, below.
-
 ### 5b. Migration-release branch (CONDITIONAL — this tag carries schema or data DDL)
 
 Trigger: `service/` since the last engine tag includes a new Liquibase changeset, or any change to a data shape existing rows already have to conform to (T2 [22511] gap 9). Skip this step entirely when the cut carries no such change.
 
-1. **Representative-scale rehearsal.** Run the populated-store rehearsal in PUBLISHED-bytes mode against a corpus seeded ABOVE a stated floor, not the harness's default toy seed (10-30 docs across `rehearse_cold.sh` / `rehearse_acquire.sh` / `rehearse_shakeout.sh` / `rehearse_hole_punch.sh`):
+1. **Representative-scale rehearsal.** Run the populated-store rehearsal in PUBLISHED-bytes mode against a corpus seeded ABOVE a stated floor, not the harness's default toy seed (10-30 docs in `rehearse_package_upgrade.sh` / `rehearse_acquire.sh`):
    ```bash
    NEXUS_TARGET_RELEASE=<published-conexus-version> tests/e2e/migration-rehearsal/run.sh --package-upgrade
    ```
@@ -539,7 +238,7 @@ both directions). Say the deploy is theirs; do not say it is happening:
 
 **nexus-1emxn refinement — prefer deploying BEFORE the client tag when the ledger allows it.** When every wire-ledger `## Unshipped` entry carries the `[additive]` direction-safety token (old client + new engine safe), `check_engine_release_floor.py --client-precondition` accepts the unpaired deploy by name — surface the relay and get the engine LIVE ahead of the client tag, so the tag can never open a refusal window (the v7.23.0 window sat open 48+ minutes because "fires at tag push" was an unsent human relay). When any entry is not additive, the client release's Step 9 does not tag until conexus has the redeploy staged (image built, a named tag trigger) and has confirmed it back.
 
-The post-deploy `--with-cloud` rehearsal (`run.sh --with-cloud`, the cloud → cloud Voyage journey) requires the candidate to be **deployed on conexus** first — it runs as part of this cloud-gate, once the deploy lands, not in Step 5. For cross-repo gate / deploy status, **read the authoritative bead + the conexus bus, not memory** — cross-repo state goes stale fast (2026-06-26: a `luxe6` condition had been cleared a week earlier than memory implied).
+For cross-repo gate / deploy status, **read the authoritative bead + the conexus bus, not memory** — cross-repo state goes stale fast (2026-06-26: a `luxe6` condition had been cleared a week earlier than memory implied).
 
 ### 6.1. Post-deploy client-visibility gate (MANDATORY, run from a cloud-mode box)
 
@@ -554,18 +253,16 @@ tests/e2e/cloud-client-path-gate.sh                                             
 
 The mode assertion (leg B3) reads `ownerless_write_mode` from `/v1/status` through the public edge. Nothing else in this repo reads the live mode, and conexus wires the knob, so without it a mis-wired parameter enforces on the first deploy and refuses every legacy write from the hosts before anyone looks. Unset, an engine that reports a mode FAILS the gate (a live mode nobody asserted), and so does an unreadable `/v1/status` body (a curl failure, an edge 401/403/502 or a WAF page: a body without `embedding_mode` is not a status body), whether or not the variable is set; an engine that reports none prints `NOT RUN [B3]` and the final sentinel then reads `... violations=0 (ownerless-write mode NOT asserted: B3 not run)`: that is a skipped check, not a passed one, so a cut that carries the refusal always sets the variable.
 
-Run this AFTER Step 6's deploy relay confirms the tag is live, and BEFORE Step 7's downstream-ref bump or signing off any release shakeout that depends on this engine (T2 [22511] gap 7 — this gate existed only as one prose line in AGENTS.md, in no numbered step of this checklist, since it was born from the nexus-bwulw incident). The gates above prove the ENGINE works, direct; they do not prove the PUBLIC edge (`api.conexus-nexus.com`) exposes the same contracts — 2026-07-23 (nexus-bwulw): the edge stubbed `/version` and auth-gated `/health`, silently disabling voyage threshold gating and dimension-orphan tooling and blocking guided migrations to cloud, while three client features shipped green through every engine-direct gate above. This asserts the engine's pinned contracts (`/version` fields, the `ez5.1` `/health` contract, the client `embedding_mode` probe, the `/v1` read path) survive the public edge.
+Run this AFTER Step 6's deploy relay confirms the tag is live, and BEFORE Step 7's downstream-ref bump or signing off any release that depends on this engine (T2 [22511] gap 7 — this gate existed only as one prose line in AGENTS.md, in no numbered step of this checklist, since it was born from the nexus-bwulw incident). The gates above prove the ENGINE works, direct; they do not prove the PUBLIC edge (`api.conexus-nexus.com`) exposes the same contracts — 2026-07-23 (nexus-bwulw): the edge stubbed `/version` and auth-gated `/health`, silently disabling voyage threshold gating and dimension-orphan tooling and blocking guided migrations to cloud, while three client features shipped green through every engine-direct gate above. This asserts the engine's pinned contracts (`/version` fields, the `ez5.1` `/health` contract, the client `embedding_mode` probe, the `/v1` read path) survive the public edge.
 
-Client version to run it from: the working tree (`HEAD`), the same dev-client × new-engine pairing every other gate in this checklist uses — this script has no separate published-client mode. It is NOT a substitute for Step 3c's `published-client-write-gate.sh`, which is the leg that pairs the CURRENTLY-PUBLISHED client against the candidate; this step's job is edge-contract visibility, not client-write compatibility.
+Client version to run it from: the working tree (`HEAD`) — this script has no separate published-client mode. This step's job is edge-contract visibility, not client-write compatibility.
 
 ### 7. After conexus confirms deployed + cloud-gated green, bump downstream refs
 
 (For the RDR-223 cut, "cloud-gated green" means Step 6.1 against `log-only`; the enforce flip, nexus-z0o2p.40, follows the cut and is not waited on here.)
 
-- `tests/e2e/migration-rehearsal/run.sh` `COLD_TAG` default → the new published tag (or override via `NEXUS_SERVICE_TAG`).
 - When the NEXT PyPI release bumps `REQUIRED_ENGINE_VERSION` to this tag, also rotate `run.sh`'s `NEXUS_PREV_RELEASE`/`NEXUS_PREV_ENGINE_TAG` defaults (the `--package-upgrade` convergence leg's starting point — must stay one release BEHIND the new dependency or its staleness guard fails loud; nexus-cfgo9). The `--package-upgrade` leg itself runs in the PyPI `release` skill's Step 1, not here — this skill only keeps its inputs fresh.
-  **The unit is RELEASES, not engine tags — a SKIPPED engine tag does NOT rotate them** (2026-08-11). `PREV_ENGINE_TAG` is the engine the PREVIOUS RELEASE PINNED. An engine tag that is cut, published, and gated but never pinned by any release (v0.1.70: a defect was found after the cut, so 7.6.0 shipped v0.1.71) is a skipped version — rotating `PREV_ENGINE_TAG` onto it would point the rehearsal's "previous install" at a hop no user ever made. At the 7.6.0 bump the correct values stayed `7.5.0` / `engine-service-v0.1.69` while `COLD_TAG` moved to v0.1.71. The staleness guard only fires when PREV collapses to EQUAL the floor; it does NOT catch "rotated onto a tag no release shipped", so check this by hand at every bump.
-- `COLD_TAG` moves at EVERY floor bump, unconditionally — `TestDownstreamConsumersTrackTheFloor::test_cold_rehearsal_tag_is_at_least_the_floor` requires `COLD_TAG >= REQUIRED_ENGINE_VERSION`. A comment in `run.sh` once said not to bump it (true about runtime effect, since `--cold` is retired; false as an instruction) and following it blocked the 7.6.0 battery. A prose comment that contradicts a mechanical test loses to the test.
+  **The unit is RELEASES, not engine tags — a SKIPPED engine tag does NOT rotate them** (2026-08-11). `PREV_ENGINE_TAG` is the engine the PREVIOUS RELEASE PINNED. An engine tag that is cut, published, and gated but never pinned by any release (v0.1.70: a defect was found after the cut, so 7.6.0 shipped v0.1.71) is a skipped version — rotating `PREV_ENGINE_TAG` onto it would point the rehearsal's "previous install" at a hop no user ever made. At the 7.6.0 bump the correct values stayed `7.5.0` / `engine-service-v0.1.69` while the newest published engine tag moved to v0.1.71. The staleness guard only fires when PREV collapses to EQUAL the floor; it does NOT catch "rotated onto a tag no release shipped", so check this by hand at every bump.
 - `SchemaUpgradeRehearsalIntegrationTest.OLD_TAG` (`service/src/test/java/dev/nexus/service/`) → the PREVIOUSLY-deployed tag (nexus-7z6s7 rotation policy: the old→HEAD rehearsal's "real aged box" realism rots as the fleet moves on; re-verify the two structural preconditions documented on the constant when bumping) OLD_TAG rotation is a THREE-part edit (nexus-gm38i): regenerate the changeset snapshot (`uv run python scripts/gen_rehearsal_hop_manifest.py`), re-derive the new hop's row-DML seed coverage, and re-point the data leg's seeding + its SEED-COVERAGE block + the lint's `DECLARED_SEED_COVERAGE` together — `tests/test_rehearsal_seed_coverage_lint.py` fails loudly until all three agree.
 - **`REQUIRED_ENGINE_VERSION` (`src/nexus/engine_version.py`) MUST move to this tag** — unconditionally, not "only if the release needs the features". There is ONE engine identity per release: the engine it was built and gated with, on EVERY install path (Hal directive 2026-07-15, after the 14h GH #1402 incident). It is NOT a compatibility minimum. For local-mode installs this constant is the ONLY delivery vehicle — an engine tag that is cut, gated, and never pinned reaches nobody. `PINNED_SERVICE_TAG` is DERIVED from it, so the one edit moves both.
   Sequencing — PAIRED release (Hal directive 2026-08-02, supersedes "bump lands with the NEXT release AFTER deploy"): the bump rides the client release PAIRED with this engine's deploy — same release, not the next one (floor-lag ships a client whose pinned engine lacks the engine halves of its own features: the 7.1.0/v0.1.62 inversion). The deploy relay fires at client-tag push, parallel with the PyPI publish (Step 6), so the engine is live before any user can install the floor-bumped client — UNLESS every wire-ledger `## Unshipped` entry leads with `[additive]`, in which case deploy BEFORE the client tag instead (nexus-1emxn, Step 6's refinement: the preferred branch whenever the ledger allows it — no window can open at all). GH #1402's lesson stands as: never publish a floor-bumped client with NO deploy armed — the deploy fires at tag push (or already fired, on the additive branch), not "eventually". `scripts/check_engine_release_floor.py` fails the release if a gated tag was never pinned. The client-side `release` skill's Step 0 runs this gate with `--paired-deploy engine-service-vX.Y.Z` (nexus-k1c08) to distinguish the expected pre-deploy cloud-behind state from real drift — this skill only needs to ensure the tag it just cut is what that flag names.

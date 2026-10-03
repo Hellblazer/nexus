@@ -1927,7 +1927,7 @@ class TestSpawnServiceVoyageKeyPlumbing:
 class TestSpawnServiceOnnxModelRoot:
     """The engine's own fallback is ``user.home`` (the passwd entry), which
     diverges from the ``$HOME``-derived path the provisioner writes under
-    whenever HOME is overridden (containers, release-sandbox, CI): green
+    whenever HOME is overridden (containers, sandbox harnesses, CI): green
     'model ready', then an engine crash at boot. The spawn env must pin
     ``NX_ONNX_MODEL_DIR`` to the provisioner's resolved root so supervisor
     and engine agree by construction."""

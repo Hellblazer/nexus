@@ -10,7 +10,7 @@ phase changing the layout has to change a test that says why.
 Three of these are tripwires rather than coverage, and are named as such:
 
 ``test_defaults_are_recomputed_when_home_moves``
-    ``release-sandbox.sh`` and ``tests/e2e/run.sh`` isolate ONLY by
+    Sandbox harnesses such as ``tests/e2e/run.sh`` isolate ONLY by
     redirecting ``$HOME``. A module-level ``DEFAULT = Path.home() / ...``
     constant would satisfy every other test in this file and would silently
     make the sandbox clobber the live install.

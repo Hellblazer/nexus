@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """The engine-release skill's cut-prep commands must expand and agree with the scripts they run.
 
-nexus-9a6io fix round: the skill once told the operator to run
-``NX_EXPECTED_CLIENT_LAG="$EXPECTED_LAG_BEAD" ...``, a variable that lives inside the
-script and expands to the empty string in the operator's shell, so the command as
-written never acknowledged anything.
+nexus-9a6io fix round: the skill once told the operator to run a command carrying a variable
+that lives inside a script and expands to the empty string in the operator's shell, so the
+command as written never acknowledged anything. (The published-client gate that case was about
+was deleted in cleanup step 11, nexus-0r1uz; the cases that still apply to the cloud gate and
+the relay text remain.)
 """
 from __future__ import annotations
 
@@ -13,20 +14,6 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SKILL = (REPO_ROOT / ".claude" / "skills" / "engine-release" / "SKILL.md").read_text()
-GATE = (REPO_ROOT / "tests" / "e2e" / "published-client-write-gate.sh").read_text()
-
-
-def _script_const(name: str) -> str:
-    m = re.search(rf'^{name}="([^"]*)"$', GATE, re.MULTILINE)
-    assert m, f"{name} not found in published-client-write-gate.sh"
-    return m.group(1)
-
-
-def test_the_ack_command_names_the_scripts_bead_literally() -> None:
-    bead = _script_const("EXPECTED_LAG_BEAD")
-    assert f"NX_EXPECTED_CLIENT_LAG={bead} " in SKILL
-    # The unexpanded form must not be in a command line (prose may name the variable).
-    assert 'NX_EXPECTED_CLIENT_LAG="$EXPECTED_LAG_BEAD"' not in SKILL
 
 
 def test_step_6_1_asserts_the_live_ownerless_mode_in_both_postures() -> None:
@@ -65,15 +52,6 @@ def test_unverified_conexus_side_facts_are_marked_unverified_in_the_runbook() ->
     assert "the CloudWatch log group\n   is unverified" in runbook or "CloudWatch log group\n   is unverified" in runbook
     assert "share one egress" not in runbook
     assert "is **unverified**" in runbook
-
-
-def test_the_refusal_match_is_recorded_as_measured_against_a_real_client() -> None:
-    """The classifier's match was a static prediction until it was run against published 7.67.0
-    (2026-10-01); the script header and the skill say which, so nobody re-reads it as a guess."""
-    section = SKILL.split("### 3c.")[1].split("### 3e.")[0]
-    assert "MEASURED on 2026-10-01" in section and "7.67.0" in section
-    assert "MEASURED 2026-10-01 against published conexus 7.67.0" in GATE
-    assert "*[Oo]wnerless*" not in GATE, "the bare-word pattern (broader than the engine's sentence) is gone"
 
 
 def test_the_enforce_flip_is_a_named_bead_that_follows_the_cut() -> None:

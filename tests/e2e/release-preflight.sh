@@ -1,29 +1,29 @@
 #!/usr/bin/env bash
 # Release PREFLIGHT: every seconds-scale, deterministic release blocker, run
-# FIRST and run ALL — never abort on the first red.
+# FIRST and run ALL — never abort on the first red. The ONE preflight (cleanup
+# step 11, nexus-0r1uz): the former pin-sweep script is folded in here.
 #
 # WHY THIS EXISTS (2026-08-22, the 7.15.0 cut). The battery was ordered
 # expensive-legs-first and abort-on-first-red, so each blocker cost a full
-# replay of everything before it and hid every other blocker behind it. Two
-# blockers that day were pure assertions costing well under a second:
+# replay of everything before it and hid every other blocker behind it. One
+# blocker that day was a pure assertion costing well under a second:
+# REQUIRED_CHECK_CONTEXTS drift vs main's live branch protection, found 13.5
+# minutes into local-service-gate, at the very end of its run. Cheap checks
+# first, all of them, collecting every failure, before a single expensive leg
+# starts. A red here costs seconds; the same red found downstream costs an hour
+# and masks its siblings.
 #
-#   * REQUIRED_CHECK_CONTEXTS drift vs main's live branch protection -- found
-#     13.5 minutes into local-service-gate, at the very end of its run.
-#   * The --package-upgrade PREV_ENGINE_TAG staleness guard -- found 20
-#     minutes in, after smoke + shakeout + LSG + fresh-install-mvv had all
-#     re-run, because it is a guard clause in the first seconds of run.sh.
+# THE CHECKS:
+#   wire-contract-ledger   check_engine_release_floor.py --ledger-only (merge-blocking on every PR to main)
+#   ci-evidence-contexts   the required-context drift tests, run with `-m ""` so the live check executes
+#   mandatory-pins         the GitHub-backed mandatory_regression_pin tests, under the operator's real HOME
+#   pin sweep              lint bucket (+ non-vacuity floor), the non-lint pin tests, wire-contract
+#                          pairing, ruff over src (the CI lint job scope)
 #
-# Each was a one-line fix behind an hour of waiting, discovered one at a time.
-# So: cheap checks first, all of them, collecting every failure, before a
-# single expensive leg starts. A red here costs seconds; the same red found
-# downstream costs an hour and masks its siblings.
-#
-# ADMISSION CRITERIA -- a check belongs here only if it is:
-#   1. seconds-scale (no Docker, no suite, no network install),
-#   2. deterministic (no ambient service, no sandbox HOME), and
-#   3. genuinely release-BLOCKING (its red stops the cut).
-# Anything slower stays in the battery proper. This file must never grow into
-# a second battery: its whole value is that it finishes before you look away.
+# ADMISSION CRITERIA -- a check belongs here only if it is genuinely release-
+# BLOCKING and deterministic (no ambient service, no sandbox HOME). Anything
+# slower stays in the battery proper. This file must never grow into a second
+# battery.
 #
 # NON-VACUITY: a check whose dependency is absent reports SKIP and the run
 # ends UNVERIFIED (exit 2), never PASSED. "Could not check" is not "fine".
@@ -67,10 +67,8 @@ check () { # name, command...
       | grep -aE '^(FAILED|E  +|FATAL)|GATE (FAILED|UNVERIFIABLE|BLOCKED)|assert' \
       | sed -e 's/^E  *//' | cut -c1-160)"
     # A red whose reason matched no pattern above used to record an EMPTY
-    # detail -- the reader gets "[FAIL] engine-release-floor" and nothing
-    # else, and has to re-run the leg by hand to learn why. Measured at the
-    # 7.27.0 cut: a gate's one-line refusal named its own remedy and matched
-    # nothing. Second tier: this repo's loud-verdict shape -- a line opening
+    # detail -- the reader gets "[FAIL] wire-contract-ledger" and nothing
+    # else, and has to re-run the leg by hand to learn why. Second tier: this repo's loud-verdict shape -- a line opening
     # with an ALL-CAPS label followed by "(" or ":". Deliberately NOT a
     # last-non-empty-line fallback: these gates interleave PASSING lines
     # after the failing one, so last-line attributed the red to a green
@@ -85,140 +83,68 @@ check () { # name, command...
   fi
 }
 
-# Step 0: refresh remote refs. check_engine_release_floor's pin-currency and
-# source-ancestry arms read LOCAL `git tag -l`, and the snapshot replay below
-# reads origin/main. release.yml checks out with fetch-depth:0, so CI sees
-# origin's refs. An engine tag published since your last fetch therefore
-# GREENS locally and REDS AT PUBLISH -- where the tree is frozen at the tag
-# and a same-tag re-run reads the identical tree, so the remedy is a whole new
-# tag rather than a retry. Cheap insurance against an expensive, un-retryable
-# class.
+# Step 0: refresh remote refs. ci-evidence reads origin/main's live branch
+# protection and the ledger check reads tags; release.yml checks out with
+# fetch-depth:0, so CI sees origin's refs. A tag published since your last
+# fetch therefore GREENS locally and REDS AT PUBLISH -- where the tree is
+# frozen at the tag and a same-tag re-run reads the identical tree, so the
+# remedy is a whole new tag rather than a retry.
 git fetch --tags --force --quiet origin 2>/dev/null || echo "  [warn] could not fetch remote refs -- tag/branch checks may be stale"
 
 echo "== release preflight =="
 
-# 1. Engine identity: pin vs newest published tag vs live cloud vs source drift.
-#    A PAIRED release (release skill Step 0) has the cloud BEHIND the floor by
-#    construction until the deploy fires at client-tag push, so the bare form
-#    is red on every paired cut (measured: 7.23.0, 2026-08-29). With
-#    NX_PAIRED_DEPLOY=engine-service-vX.Y.Z set, this runs the SAME mechanized
-#    paired acceptance the human Step 0 invocation uses (--paired-deploy: the
-#    named tag must verify published, pinned, newest) -- stricter, never looser,
-#    and the flag names the pairing out loud in the transcript.
-if [ -n "${NX_PAIRED_DEPLOY:-}" ]; then
-    check "engine-release-floor"  uv run python scripts/check_engine_release_floor.py --paired-deploy "$NX_PAIRED_DEPLOY"
-else
-    check "engine-release-floor"  uv run python scripts/check_engine_release_floor.py
-fi
-# 2. Merge-blocking on EVERY PR to main -- a blocking ## Unshipped entry
+# 1. Merge-blocking on EVERY PR to main -- an unacknowledged ## Unshipped entry
 #    blocks the release PR itself, not just the tag.
 check "wire-contract-ledger"      uv run python scripts/check_engine_release_floor.py --ledger-only
-# (3 and 4, the remediation-commit gate and its snapshot replay, were RETIRED
-#  with nexus-2zmfw -- see that bead. Numbering below is left as-is.)
-# 5. Seven version surfaces + both source.ref fields + the emptied ledger.
-# plugin-drift-ledger.yml runs this with NX_REQUIRE_PLUGIN_DRIFT_CHECK=1 and
-# NX_TEST_T2_SUBSTRATE=none, which turns a SKIP into a failure. Running it bare
-# here would let a skip pass locally and differ from CI.
-check "version-parity+ledger"     env NX_REQUIRE_PLUGIN_DRIFT_CHECK=1 NX_TEST_T2_SUBSTRATE=none \
-                                    uv run pytest tests/test_plugin_structure.py tests/test_plugin_release_drift_ledger.py -q
-# 6. THE 13.5-MINUTE ONE. Markers disabled so the integration-marked live
+# 2. THE 13.5-MINUTE ONE. Markers disabled so the integration-marked live
 #    branch-protection drift test actually RUNS -- under default selection it
 #    is deselected and this proves nothing.
 check "ci-evidence-contexts"      uv run pytest tests/scripts/test_check_release_ci_evidence.py -q -m ""
 
-# 7. THE 20-MINUTE ONE. Source run.sh's derivation and apply the same staleness
-#    predicate its guard uses, without provisioning anything.
-prev_stale_check () {
-  eval "$(sed -n '/^_engine_tuple_at_release()/,/^}/p;/^_derive_prev_release()/,/^}/p;/^_derive_prev_engine_tag()/,/^}/p' \
-          tests/e2e/migration-rehearsal/run.sh)"
-  local rel tag cur
-  rel="$(_derive_prev_release)" || return 1
-  tag="$(_derive_prev_engine_tag "$rel")" || return 1
-  cur="$(first_line "$(sed -n 's/^REQUIRED_ENGINE_VERSION[^(]*(\([0-9]*\), *\([0-9]*\), *\([0-9]*\)).*/\1.\2.\3/p' src/nexus/engine_version.py)")"
-  [ -n "$cur" ] || { echo "FATAL: cannot read REQUIRED_ENGINE_VERSION"; return 1; }
-  if [ "$tag" = "engine-service-v$cur" ]; then
-    echo "FATAL: PREV_ENGINE_TAG ($tag) equals REQUIRED_ENGINE_VERSION ($cur) -- --package-upgrade would refuse as vacuous"
-    return 1
+# 3. The GitHub-backed `mandatory_regression_pin` tests (nexus-z0o2p.41), run
+#    here under the operator's REAL HOME where gh auth exists. They need `gh`
+#    authenticated, so they cannot run under the local-service gate's fenced
+#    HOME (which never mirrors ~/.config/gh; see tests/e2e/lib/mandatory_pins.sh
+#    for the decision and the reason). They are `integration` marked, so the
+#    default selection excludes them too. NX_MANDATORY_PIN_SKIP_BUDGET defaults
+#    to 0, so a skipped pin fails the run in conftest's session guard. The count
+#    is asserted EXACT before the run: a new pin bumps MANDATORY_PIN_EXPECTED.
+#    The suite runs every test under a throwaway HOME, so a `gh` login that
+#    lives in the real HOME's config is invisible to `gh auth token` inside
+#    pytest; the token is resolved here and handed over in the environment
+#    variable the pins read first. It is never printed.
+mandatory_pins_run () {
+  # shellcheck source=lib/mandatory_pins.sh disable=SC1091
+  . tests/e2e/lib/mandatory_pins.sh
+  local collected
+  if [ -z "${GITHUB_TOKEN:-}" ]; then
+    if [ -n "${GH_TOKEN:-}" ]; then
+      GITHUB_TOKEN="$GH_TOKEN"
+    elif command -v gh >/dev/null 2>&1; then
+      GITHUB_TOKEN="$(gh auth token 2>/dev/null || true)"
+    fi
+    [ -z "${GITHUB_TOKEN:-}" ] || export GITHUB_TOKEN
   fi
-  echo "prev=$rel engine=$tag current=$cur"
+  export NX_TEST_T2_SUBSTRATE=none NX_MANDATORY_PIN_SKIP_BUDGET="${NX_MANDATORY_PIN_SKIP_BUDGET:-0}"
+  collected="$(uv run pytest -o addopts="" -m "$MANDATORY_PIN_MARK_EXPR" --collect-only -q 2>/dev/null | grep -cE '::' || true)"
+  [ "$collected" -eq "$MANDATORY_PIN_EXPECTED" ] \
+    || { echo "FATAL: collected $collected mandatory_regression_pin test(s), expected exactly $MANDATORY_PIN_EXPECTED (a new pin must bump MANDATORY_PIN_EXPECTED in tests/e2e/lib/mandatory_pins.sh)"; return 1; }
+  uv run pytest -o addopts="" -m "$MANDATORY_PIN_MARK_EXPR" -q -rs --color=no
 }
-check "pkg-upgrade-staleness"     prev_stale_check
+check "mandatory-pins"            mandatory_pins_run
 
-# 9-12 are RELOCATIONS, not new lints: each is an existing gate predicate that
-# already fails the battery, just far too late. Sourced/derived from the gate
-# scripts themselves so the two cannot drift apart.
-
-# 9. release-sandbox.sh:851 FIXTURE_FILES staleness -- 36 hard-coded repo paths
-#    `test -f`-ed at shakedown step 2/11, roughly 40 minutes into the battery
-#    and inside its LAST leg, so a trip re-runs the whole shakedown. Extracting
-#    the array from the script keeps one source of truth.
-fixture_files_check () {
-  local arr n missing=0 f
-  arr="$(sed -n '/^        FIXTURE_FILES=(/,/^        )/p' tests/e2e/release-sandbox.sh)"
-  [ -n "$arr" ] || { echo "FATAL: could not extract FIXTURE_FILES from release-sandbox.sh"; return 1; }
-  eval "$arr"
-  n=${#FIXTURE_FILES[@]}
-  [ "$n" -gt 0 ] || { echo "FATAL: FIXTURE_FILES extracted empty -- parser drift"; return 1; }
-  for f in "${FIXTURE_FILES[@]}" tests/fixtures/tc-sql.pdf tests/fixtures/bft-to-smr.pdf; do
-    [ -f "$f" ] || { echo "FATAL: shakedown fixture missing from repo: $f"; missing=1; }
-  done
-  [ "$missing" -eq 0 ] || return 1
-  echo "$n fixture files + 2 pdfs present"
-}
-check "shakedown-fixtures"        fixture_files_check
-
-# 10. release-sandbox.sh:1040 pins a pytest node id by hand; a rename makes
-#     pytest exit 4/5 and the branch hard-exits at shakedown step 5/11 --
-#     past the repo index, BOTH pdf indexes (incl. the cold MinerU download)
-#     and the RDR index.
-nodeid_check () {
-  local nid
-  nid="$(first_line "$(grep -oE 'tests/[A-Za-z0-9_/]+\.py::[A-Za-z0-9_]+' tests/e2e/release-sandbox.sh)")"
-  [ -n "$nid" ] || { echo "FATAL: could not extract the pinned node id from release-sandbox.sh"; return 1; }
-  uv run pytest --collect-only -q -m "" "$nid" >/dev/null 2>&1 \
-    || { echo "FATAL: pinned node id does not collect: $nid"; return 1; }
-  echo "$nid collects"
-}
-check "shakedown-nodeid"          nodeid_check
-
-# 11. local-service-gate.sh:599/:634 marker carve-out EXACT counts. Highest
-#     likelihood on the list -- LIVED_IN_EXPECTED moved 39 -> 41 -> 42 inside
-#     one month, and test_lived_in_marker_registration.py explicitly disclaims
-#     enforcing it ("the behavioral bound lives in the gate script itself").
-#     Currently aborts ~3-6 min in, but before LSG's 13.5-minute pytest leg.
-#     COST: ~16s of this preflight's runtime, the largest single item. Kept
-#     deliberately -- it is still 16 seconds against a 6-minute rediscovery.
-marker_counts_check () {
-  local m exp act
-  for m in lived_in cloud_mode; do
-    case "$m" in
-      lived_in)   exp="$(first_line "$(sed -n 's/^LIVED_IN_EXPECTED=\([0-9]*\).*/\1/p'   tests/e2e/local-service-gate.sh)")" ;;
-      cloud_mode) exp="$(first_line "$(sed -n 's/^CLOUD_MODE_EXPECTED=\([0-9]*\).*/\1/p' tests/e2e/local-service-gate.sh)")" ;;
-    esac
-    [ -n "$exp" ] || { echo "FATAL: could not read the expected count for $m"; return 1; }
-    act="$(uv run pytest -m "integration and $m" --collect-only -q 2>/dev/null | grep -cE '::' || true)"
-    [ "$act" -eq "$exp" ] || { echo "FATAL: $m carve-out is $act tests, gate expects exactly $exp"; return 1; }
-  done
-  echo "lived_in + cloud_mode counts match the gate"
-}
-check "marker-carveout-counts"    marker_counts_check
-
-# 12. uv.lock freshness -- `uv lock --check` is run.sh:639's `uv export
-#     --locked` predicate at 0.02s. Mostly shadowed by item 5, which pins
-#     uv.lock's conexus version; this covers an unlocked NEW dependency.
-check "uv-lock-fresh"             uv lock --check
-
-# 13. THE ONE THAT WOULD HAVE BLOCKED THE 7.15.0 PR. `-m lint` is deselected
-#     by the default addopts, so NO local battery step runs it -- but ci.yml's
-#     test-lint feeds pytest-gate, which is main's required check. A line-pinned
-#     exemption list in test_pipefail_early_exit_consumer_lint.py restale-izes
-#     on ANY edit that shifts lines in a covered script, so this reds from
-#     ordinary edits, not just from new violations. ~2 min: by far the most
-#     expensive item here, and admitted anyway because the alternative is
-#     discovering it as a failed required check on the release PR.
-#     NO_COLOR is load-bearing: the floor parser anchors its summary regex at
-#     end-of-line, and an ANSI reset after the duration makes it read 0
-#     executed and trip on a perfectly good run.
+# 4. The pin sweep: every cheap ratchet, ledger, parity and reference-rot check
+#    this repo carries. `-m lint` is deselected by the default addopts, so NO
+#    local battery step runs it -- but ci.yml's test-lint feeds pytest-gate,
+#    which is main's required check. A line-pinned exemption list in
+#    test_pipefail_early_exit_consumer_lint.py restale-izes on ANY edit that
+#    shifts lines in a covered script, so this reds from ordinary edits, not
+#    just from new violations. ~2 min: by far the most expensive item here,
+#    and admitted anyway because the alternative is discovering it as a failed
+#    required check on the release PR.
+#    NO_COLOR is load-bearing: the floor parser anchors its summary regex at
+#    end-of-line, and an ANSI reset after the duration makes it read 0
+#    executed and trip on a perfectly good run.
 lint_leg_check () {
   local out plain
   out="$(NO_COLOR=1 uv run pytest -m lint -q 2>&1)"
@@ -232,21 +158,14 @@ lint_leg_check () {
   [ "${BASH_REMATCH[1]}" -ge 400 ] || { echo "lint leg passed only ${BASH_REMATCH[1]} tests (floor 400) -- a mass-skip"; return 1; }
 }
 check "lint-leg+floor"            lint_leg_check
-
-# 14. ci.yml's test-mode-census job, also merge-blocking via pytest-gate. The
-#     session-items census skips under `-n auto` (each xdist worker sees a
-#     partial view), so the fast local loop cannot fire it -- exactly how a
-#     mode-lint violation reached this branch in the first place. 20s.
-check "mode-census"               env NX_CENSUS_ONLY_JOB=1 NX_SCENARIO_SKIP_BUDGET=999 NX_TEST_T2_SUBSTRATE=none \
-                                    uv run pytest tests/ -q
-
-# 8. Docker is a hard dependency of the migration-rehearsal legs. Absent Docker
-#    is a SKIP that makes the whole preflight UNVERIFIED, never a pass.
-if docker info >/dev/null 2>&1; then
-  record PASS "docker-available" ""
-else
-  record SKIP "docker-available" "migration-rehearsal legs cannot run"
-fi
+#    The pin tests that are NOT lint-marked (engine version, release ledgers,
+#    PG bundle parity, deadline ordering).
+check "pin-tests"                 uv run pytest -q -p no:cacheprovider \
+                                    tests/test_engine_version.py tests/test_plugin_release_drift_ledger.py \
+                                    tests/test_ci_release_ledger_gate.py tests/test_pg_bundle_version_parity.py \
+                                    tests/test_embed_deadline_default_ordering.py
+check "wire-contract-pairing"     uv run python scripts/check_wire_contract_pairing.py
+check "ruff-src"                  uv run ruff check src
 
 echo
 echo "== preflight summary: $PASS passed, $FAIL failed, $SKIP skipped =="

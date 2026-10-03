@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """nexus-u67ow: the e2e harness must not run on a bare ``python3`` of unknown age.
 
-On hellmini ``/usr/bin/python3`` is 3.9.6. ``tests/e2e/lib/artifact_manifest.py`` uses
-``match`` (3.10+), so the 2026-10-02 cut battery aborted with "artifacts manifest does not
-verify against this tree (SyntaxError ...)": a harness defect that read as a manifest
-mismatch, and no engine leg ran. ``tests/e2e/lib/python.sh`` now resolves one interpreter,
+On hellmini ``/usr/bin/python3`` is 3.9.6. A harness module that used ``match`` (3.10+) made
+the 2026-10-02 cut battery abort with "artifacts manifest does not verify against this tree
+(SyntaxError ...)": a harness defect that read as a manifest mismatch, and no engine leg ran.
+``tests/e2e/lib/python.sh`` now resolves one interpreter,
 checks its version and refuses by name when none qualifies; ``release-battery.sh`` and the
 gates source it. The resolver's own cases are ``tests/e2e/lib/python_test.sh`` (wired in
 ``test_shell_suite_wiring.py``). This file pins the two things that suite cannot:
@@ -32,7 +32,7 @@ RESOLVER = E2E / "lib" / "python.sh"
 # Tools the battery runs before it reaches the resolver. A PATH made only of these (as
 # symlinks) plus a stub python3 cannot find any other interpreter, so the test does not
 # depend on what the box happens to have installed.
-_EARLY_TOOLS = ("git", "dirname", "grep", "cat", "sed", "tr", "date", "mkdir", "wc", "head", "uname", "basename")
+_EARLY_TOOLS = ("git", "dirname", "grep", "cat", "sed", "tr", "date", "mkdir", "rm", "wc", "head", "uname", "basename")
 
 
 def _curated_path(tmp_path: Path, **interpreters: str) -> Path:
@@ -61,8 +61,8 @@ def _run_battery(bindir: Path, *args: str) -> subprocess.CompletedProcess[str]:
 
 def test_battery_with_a_3_9_python3_stops_at_once_naming_the_version(tmp_path: Path) -> None:
     """The hellmini case. Mutation: delete the ``e2e_python_resolve || exit 2`` line from
-    release-battery.sh and this goes red (the battery then dies later, on a SyntaxError or a
-    missing REQUIRED_ENGINE, with no mention of the interpreter)."""
+    release-battery.sh and this goes red (the battery then dies later, on a SyntaxError,
+    with no mention of the interpreter)."""
     bindir = _curated_path(tmp_path, python3="3.9.6")
     r = _run_battery(bindir, "--plan")
     assert r.returncode == 2, (r.returncode, r.stdout, r.stderr)
@@ -75,13 +75,14 @@ def test_battery_with_a_3_9_python3_stops_at_once_naming_the_version(tmp_path: P
 
 def test_battery_with_a_qualifying_python_gets_past_the_resolver(tmp_path: Path) -> None:
     """Non-vacuity for the test above: the same PATH with a 3.12 python3.12 beside the 3.9
-    python3 must NOT stop at the resolver. The stub cannot run the REQUIRED_ENGINE parse, so
-    the battery dies there, which is the proof it was past the resolver: it names
-    REQUIRED_ENGINE_VERSION, not an interpreter."""
+    python3 must NOT stop at the resolver: ``--plan`` makes its work directory (which the refusal
+    above never does) and prints the leg plan."""
     bindir = _curated_path(tmp_path, python3="3.9.6", python3_12="3.12.4")
     r = _run_battery(bindir, "--plan")
     assert "no Python 3.10 or newer found" not in r.stderr, r.stderr
-    assert "could not parse REQUIRED_ENGINE_VERSION" in r.stderr, (r.returncode, r.stdout, r.stderr)
+    assert r.returncode == 0, (r.returncode, r.stdout, r.stderr)
+    assert "RELEASE BATTERY: work=" in r.stdout, r.stdout
+    assert "PLAN lsg group" in r.stdout, r.stdout
 
 
 # ── no bare python3 on the host side ─────────────────────────────────────────────────────────
@@ -90,33 +91,18 @@ def test_battery_with_a_qualifying_python_gets_past_the_resolver(tmp_path: Path)
 #: a uv-linked python3.12), or that is the resolver's own test. Whole-file, with the reason.
 _WHOLE_FILE = {
     "hook-surface-shakeout/shakeout_in_container.sh": "runs inside the shakeout image (Dockerfile apt python3)",
-    "migration-rehearsal/lib/assert_build_ref.sh": "sourced inside a rehearsal container",
     "lib/python_test.sh": "the resolver's own test: python3 is a stub's name there",
     "lib/python.sh": "the resolver: it names python3 as a candidate",
 }
 _REHEARSE_PREFIX = "migration-rehearsal/rehearse_"  # every rehearse_*.sh runs inside its container image
 
 #: (file, line text fragment) -> why a bare python3 stays on that line. (The hooks.json text the
-#: rdr208-mvv and hook-surface-shakeout drivers write for their containers quotes the name, so the
-#: pattern never sees it; they need no entry.)
+#: hook-surface-shakeout driver writes for its container quotes the name, so the pattern never
+#: sees it; it needs no entry.)
 _LINES = {
-    ("release-sandbox.sh", "(run: python3 tests/e2e/lib/claude_credentials.py status)"): "operator-facing message text",
     ("local-service-gate.sh", "uv run python3 -c"): "runs in the repo's uv environment, not the host python",
-    ("rdr208-mvv/run.sh", '"command": "python3",'): "hooks.json text written for the container image, which has its own python3",
     ("hook-surface-shakeout/run.sh", '"command": "python3 /home/nexus/turn_end.py"'): (
         "hooks.json text written for the shakeout container image"
-    ),
-    # The lockstep gate launches the plugin hook the way production does: exec form, bare python3,
-    # resolved through PATH="$VENV/bin:..." to the generation venv's interpreter (the hook refuses
-    # < 3.12; the host's resolved floor-10 python is not that one). _assert_venv_python3 proves the
-    # PATH resolution before each launch.
-    ("plugin-lockstep-gate.sh", "command -v python3"): "the resolution proof for the two launches below",
-    ("plugin-lockstep-gate.sh", "bare python3 under PATH="): "the failure message of that proof",
-    ("plugin-lockstep-gate.sh", 'python3 "$NEW_PLUGIN_ROOT/hooks/scripts/version_lockstep_hook.py"'): (
-        "production exec form: the generation venv's python3 via PATH"
-    ),
-    ("plugin-lockstep-gate.sh", 'python3 "$REPO_ROOT/conexus/hooks/scripts/version_lockstep_hook.py"'): (
-        "production exec form: the generation venv's python3 via PATH"
     ),
 }
 
@@ -124,8 +110,8 @@ _LINES = {
 _NO_OWN_SOURCE = {"scenarios/00_debug_load.sh": "sourced by run.sh, which resolves first"}
 
 # Quote and hyphen are NOT in the lookbehind: `bash -c "python3 ..."`, `eval "python3 ..."` and
-# `"${X:-python3}"` are all host-side calls (the last is the pre-change shape at
-# local-index-memory-gate.sh). Text that merely names python3 goes in _LINES with the reason.
+# `"${X:-python3}"` are all host-side calls (the last is a pre-change shape in a
+# since-deleted gate). Text that merely names python3 goes in _LINES with the reason.
 _BARE = re.compile(r"(?<![\w./$])python3(?![\w.=-])")
 
 
@@ -173,7 +159,7 @@ def test_no_host_side_e2e_script_calls_a_bare_python3() -> None:
     )
     # Non-vacuity: the scan looked at the harness, and every allowance still matches a line, so a
     # stale entry cannot go on excusing a line that was deleted or moved.
-    assert scanned >= 40, f"only {scanned} host scripts scanned: the glob or the allowlist swallowed the tree"
+    assert scanned >= 37, f"only {scanned} host scripts scanned: the glob or the allowlist swallowed the tree"
     stale = sorted(set(_LINES) - used)
     assert not stale, f"allowlist entries that match no line any more: {stale}"
 
@@ -240,7 +226,7 @@ def test_the_sweep_actually_routed_the_calls_through_the_resolver() -> None:
             problems.append(f"{rel}: uses $E2E_PYTHON but never sources lib/python.sh and calls e2e_python_resolve")
         elif not (src < res <= use):
             problems.append(f"{rel}: first use at line {use} precedes source (line {src}) / resolve (line {res})")
-    assert routed >= 100, f"only {routed} routed call sites; the sweep was undone"
+    assert routed >= 47, f"only {routed} routed call sites; the sweep was undone"
     assert not problems, "\n".join(problems)
 
 
@@ -270,11 +256,3 @@ def test_the_scripts_that_do_not_resolve_themselves_are_sourced_by_one_that_does
     assert sourcing is not None, f'run.sh no longer does `source "$file"`, so {rel} would never be sourced'
     assert resolve < loop, "run.sh sources the scenarios before it resolves an interpreter"
     assert (E2E / rel).is_file()
-
-
-def test_the_resolver_floor_matches_the_one_module_that_needs_it() -> None:
-    """artifact_manifest.py is the file whose ``match`` broke hellmini; the resolver's default floor
-    must not fall below what that module needs."""
-    assert re.search(r"^\s*match ", (E2E / "lib" / "artifact_manifest.py").read_text(), re.M)
-    assert 'local min="${1:-10}"' in RESOLVER.read_text()
-    assert os.access(RESOLVER, os.R_OK)

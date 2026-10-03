@@ -51,8 +51,7 @@
 # above is held, release.properties is checked against git HEAD before this
 # script backs anything up. A dirty file at that point means a PRIOR
 # process left the tree stamped without going through this same lease
-# discipline (the migration-rehearsal --guided/--shakeout-e2e/--candidate-
-# migration legs, before their own nexus-iexvl fix) — refuse loudly rather
+# discipline (the migration-rehearsal stamping legs, before their own nexus-iexvl fix) — refuse loudly rather
 # than `cp`-backing-up whatever happens to be on disk, stamping over it,
 # and restoring THAT (someone else's) stamp on exit. The restore-then-
 # release trap below (release_props_restore_and_release) closes the other

@@ -14,8 +14,7 @@ tools`` only when it is not. The env var WINS. So an operator with
 completely: every generation the gate builds lands in their REAL tool root
 while every command in the transcript still looks correctly fenced. The gate
 reports success and the developer's live install has been written to — the
-exact outcome ``release-sandbox.sh``'s own step-1 comment says must never
-happen.
+exact outcome a sandbox gate must never produce.
 
 This is the same reasoning ``fresh-install-mvv.sh`` already applies to ambient
 ``UV_TOOL_DIR``/``XDG_*``, which is why it reaches for ``env -i``. The
@@ -27,18 +26,14 @@ TWO SANCTIONED CURES, and which one is right depends on how the gate isolates:
   where the sandbox lives. This is what ``sandbox.sh``'s generated ``activate``
   does.
 * PIN them to sandbox paths when the gate does NOT globally redirect ``$HOME``
-  — ``upgrade-shakeout.sh`` runs the sandbox ``nx`` off ``PATH`` and carries
-  ``HOME`` per call, so it has no ``$HOME`` to inherit from.
+  and instead carries ``HOME`` per call, so it has no ``$HOME`` to inherit from.
 
 KNOWN LIMIT, stated because a false NEGATIVE is the direction that hurts here:
 ``_INSTALLS`` reads each ``.sh`` only. A gate whose install call lives in a
-sibling driver — ``gen-flip-live-holder.sh`` delegates to
-``lib/gen_flip_holder.py`` — is not classified as installing and is therefore
-not checked. That gate happens to run under ``env -i`` AND pin both variables,
-so it is neutralised either way; the point is that the sweep would not have
-told us. Following one level of sibling reference would close it, at the cost
-of a classifier that has to parse shell. If a second delegating gate appears,
-close it then.
+sibling driver is not classified as installing and is therefore not checked.
+Following one level of sibling reference would close it, at the cost of a
+classifier that has to parse shell. If a delegating gate appears, close it
+then.
 """
 from __future__ import annotations
 
@@ -72,7 +67,7 @@ def _code_only(body: str) -> str:
 
     EVERY pattern in this module is matched against this, not against the raw
     file, and that is load-bearing rather than tidy. Found by RG-E's
-    test-validator (nexus-utpuw.25): removing upgrade-shakeout.sh's
+    test-validator (nexus-utpuw.25): removing a gate's
     NX_TOOLS_DIR/NX_BIN_DIR pin left this suite GREEN, because that file
     contains the substring ``env -i`` in a PROSE COMMENT — one written by
     nexus-utpuw.18 itself, explaining why a SIBLING gate reaches for `env -i`.
@@ -110,7 +105,7 @@ def test_the_sweep_finds_installing_gates() -> None:
     The floor is deliberately low: this asserts the instrument works, not how
     many gates happen to exist."""
     found = _installing_gates()
-    assert len(found) >= 3, (
+    assert len(found) >= 1, (
         f"only {len(found)} installing e2e gate(s) found ({[p.name for p in found]}) "
         "— the sweep has stopped seeing its subjects, so the checks below prove "
         "nothing"
@@ -136,8 +131,8 @@ def test_an_installing_gate_neutralises_the_ambient_generation_root(gate: Path) 
 
 @pytest.mark.lint
 def test_the_generated_activate_clears_the_generation_root() -> None:
-    """``sandbox.sh`` writes the ``activate`` that ``release-sandbox.sh``
-    sources, so the sourced-activate exemption above is only honest while that
+    """``sandbox.sh`` writes the ``activate`` that sandbox gates
+    source, so the sourced-activate exemption above is only honest while that
     file actually clears the pair. This is what makes it honest."""
     # Through _code_only like everything else in this module. It was NOT, and
     # the docstring above claimed it was — the same comment-vulnerability class
@@ -151,7 +146,7 @@ def test_the_generated_activate_clears_the_generation_root() -> None:
     for name in ("NX_TOOLS_DIR", "NX_BIN_DIR"):
         assert name in joined, (
             f"sandbox.sh's generated activate no longer unsets {name}. "
-            "release-sandbox.sh isolates by $HOME alone and every gate that "
+            "a sandbox isolates by $HOME alone and every gate that "
             "sources this activate inherits the gap: an exported "
             f"{name} would redirect the sandbox's generations into the "
             "developer's live install."

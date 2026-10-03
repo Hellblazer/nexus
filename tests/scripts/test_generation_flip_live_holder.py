@@ -20,8 +20,8 @@ and neither half can show it alone.
 COST CONTROL (bead .16). The property is package-INDEPENDENT, so this runs
 against a three-line fixture distribution rather than two real conexus builds:
 seconds instead of 60-90s, which is what lets it sit in the fast tier and guard
-the shim form on EVERY run. ``tests/e2e`` (.17) does the same ladder on the
-real artifact.
+the shim form on EVERY run. (A real-artifact twin under ``tests/e2e`` did the
+same ladder on the built wheel; it was deleted in cleanup step 11.)
 
 WHY THE FIXTURE PACKAGE IS BUILT, NOT FABRICATED. ``_generation_harness``'s
 ``fabricate_generation`` writes a plausible-looking tree, which is right for

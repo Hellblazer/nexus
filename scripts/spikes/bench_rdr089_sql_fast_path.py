@@ -20,8 +20,7 @@ Output:
   scripts/spikes/bench_rdr089_run.log        — per-trial log
 
 The benchmark is deterministic — fixed corpus, fixed mock
-latency, no network. Run as part of the release-sandbox
-shakedown if you want signal that the SQL fast path has not
+latency, no network. Run it by hand if you want signal that the SQL fast path has not
 regressed; not in the standard pytest cycle (it would slow it
 without adding correctness coverage).
 

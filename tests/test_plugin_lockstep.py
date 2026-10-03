@@ -388,7 +388,7 @@ def test_same_version_ref_move_is_picked_up_and_reinstalled(
 
 def test_behind_plugin_at_newest_published_still_gets_the_ref_drift_check(
         registry, fake_claude: Path, wheel, marketplace, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The release-window case (plugin-lockstep-gate.sh step 9 on the
+    """The release-window case (step 9 of the since-deleted plugin-lockstep gate on the
     7.42.0 battery): the wheel is 7.35.0, the installed plugin is the newest
     PUBLISHED plugin at 7.34.1, so ``claude plugin update`` reports "already
     at the latest version (7.34.1)". That plugin's ref can still have moved

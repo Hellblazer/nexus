@@ -883,7 +883,7 @@ class TestDoctorStanzaDrift:
 
 
 class TestDoctorGitHooksScope:
-    """nexus-jds59: an automation harness (the release-sandbox shakedown)
+    """nexus-jds59: an automation harness (a sandbox shakedown)
     can restrict the stanza-drift walk to repos registered under a given
     root via ``repo_scope``, so an ambient repo elsewhere on the machine
     — registered through the SAME shared catalog/registry the sandbox's

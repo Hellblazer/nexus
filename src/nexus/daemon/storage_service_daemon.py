@@ -1192,7 +1192,7 @@ class StorageServiceSupervisor:
         # explicitly so supervisor and engine agree by construction. The
         # engine's own fallback is user.home (the passwd entry), which
         # diverges from the $HOME-derived path the provisioner writes under
-        # whenever HOME is overridden (containers, release-sandbox, CI) —
+        # whenever HOME is overridden (containers, sandbox harnesses, CI) —
         # green "model ready" then an engine crash at boot. Idempotent when
         # the caller already set it: service_onnx_models_root() returns that
         # same value.

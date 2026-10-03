@@ -1,20 +1,21 @@
 #!/usr/bin/env bash
 # Release battery driver (nexus-mfage fix B item 4, nexus-fp7ez item d).
 #
-#   tests/e2e/release-battery.sh [--artifacts DIR] [--max-parallel N] [--only a,b,c] [--skip-preflight] [--plan]
+#   tests/e2e/release-battery.sh [--max-parallel N] [--only a,b,c] [--skip-preflight] [--plan]
 #
-# Leg 0, serial: build every artifact ONCE (tests/e2e/migration-rehearsal/
-# build-artifacts.sh — wheel, stamped dev jar, linux native candidate, plus
-# the manifest every consuming leg verifies against this tree), then the pin
-# sweep (scripts/pins-preflight.sh; its lint bucket runs on the jar leg 0
-# just built, so scripts/build-gate-jar.sh is not a separate step).
-# Then every gate in ONE parallel group, MAX_PARALLEL wide (default 4), each
+# Three legs and a preflight (cleanup step 11, nexus-0r1uz):
+#   mvv    tests/e2e/fresh-install-mvv.sh                              the core install invariant
+#   pkgup  tests/e2e/migration-rehearsal/run.sh --package-upgrade    package-upgrade convergence
+#   lsg    tests/e2e/local-service-gate.sh                            the local-service gate
+#
+# Serial first: tests/e2e/release-preflight.sh (the ci-evidence required-context
+# drift tests, the wire-contract ledger, the mandatory pins and the pin sweep).
+# Then the three legs in ONE parallel group, MAX_PARALLEL wide (default 4), each
 # leg in its own log, each verdict line captured verbatim with wall-clock
-# seconds; then the throughput-baselined leg (run.sh --shakeout, Phase C,
-# nexus-98zsp) ALONE so contention cannot misread its 2x ceiling. Reds never
-# stop the battery; one table at the end; exit 1 on any red. A leg that
-# exits 0 without its verdict line is MISSING, never passed (nexus-f2g8u:
-# a gate that fails with no text is the class a parallel group makes worse).
+# seconds. Reds never stop the battery; one table at the end; exit 1 on any
+# red. A leg that exits 0 without its verdict line is MISSING, never passed
+# (nexus-f2g8u: a gate that fails with no text is the class a parallel group
+# makes worse).
 #
 # Concurrency is asserted, not assumed (nexus-mfage AC5): the group's
 # start/end stamps must overlap, or the run is red with CONCURRENCY NOT PROVEN.
@@ -25,20 +26,14 @@ unset FORCE_COLOR CLICOLOR_FORCE
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel)"
-# Relative paths on the command line mean relative to
-# where the operator ran this, not to the repo root the next line moves into.
-INVOKE_DIR="$PWD"
 cd "$REPO_ROOT" || exit 2
 
 MAX_PARALLEL="${MAX_PARALLEL:-4}"
-ARTIFACTS=""
 ONLY=""
 SKIP_PREFLIGHT=0
 PLAN_ONLY=0
 while [ $# -gt 0 ]; do
   case "$1" in
-    --artifacts) ARTIFACTS="$2"; shift 2 ;;
-    --artifacts=*) ARTIFACTS="${1#--artifacts=}"; shift ;;
     --max-parallel) MAX_PARALLEL="$2"; shift 2 ;;
     --max-parallel=*) MAX_PARALLEL="${1#--max-parallel=}"; shift ;;
     --only) ONLY="$2"; shift 2 ;;
@@ -50,8 +45,6 @@ while [ $# -gt 0 ]; do
   esac
 done
 [[ "$MAX_PARALLEL" =~ ^[1-9][0-9]*$ ]] || { echo "--max-parallel must be a positive integer" >&2; exit 2; }
-_abs() { case "$1" in /*) printf '%s' "$1" ;; *) printf '%s/%s' "$INVOKE_DIR" "$1" ;; esac; }
-[ -z "$ARTIFACTS" ] || ARTIFACTS="$(_abs "$ARTIFACTS")"
 # >>> BEGIN moving-tree guard (nexus-57cvk) -- extracted verbatim by
 # tests/test_release_battery_refuses_moving_tree.py; keep both markers.
 #
@@ -107,26 +100,18 @@ fi
 # <<< END moving-tree guard (nexus-57cvk)
 
 # One interpreter, resolved once and exported to every leg (nexus-u67ow). Bare python3
-# is /usr/bin/python3 3.9.6 on hellmini, and artifact_manifest.py uses `match`: the
-# 2026-10-02 cut aborted with a SyntaxError reported as a manifest mismatch. Refuses
-# here, by name and version, before anything is created.
+# is /usr/bin/python3 3.9.6 on hellmini, and a leg that uses `match` aborts with a
+# SyntaxError on it. Refuses here, by name and version, before anything is created.
 # shellcheck source=lib/python.sh disable=SC1091
 source "$REPO_ROOT/tests/e2e/lib/python.sh"
 e2e_python_resolve || exit 2
 
-# The pinned engine: decides below whether the tree carries a changeset since it.
-REQUIRED_ENGINE="$("$E2E_PYTHON" -c '
-import re, pathlib
-m = re.search(r"REQUIRED_ENGINE_VERSION[^=]*=\s*\((\d+),\s*(\d+),\s*(\d+)\)", pathlib.Path("src/nexus/engine_version.py").read_text())
-print(".".join(m.groups()) if m else "")')"
-[ -n "$REQUIRED_ENGINE" ] || { echo "could not parse REQUIRED_ENGINE_VERSION" >&2; exit 2; }
-# Short root on purpose: sandbox HOMEs nest .config/nexus/postgres under it
+# Short root on purpose: leg HOMEs nest .config/nexus/postgres under it
 # and a long ${TMPDIR} would push a PG socket path past the platform limit.
 STAMP="$(date +%Y%m%d-%H%M%S)"
 WORK="/tmp/nxb-$STAMP-$$"
 LOGS="$WORK/logs"
 mkdir -p "$LOGS"
-[ -n "$ARTIFACTS" ] || ARTIFACTS="$WORK/artifacts"
 BATTERY_T0=$(date +%s)
 
 # Reap our own Postgres clusters on ANY exit, including SIGINT/SIGTERM
@@ -160,7 +145,7 @@ _reap_our_clusters() {
 }
 trap _reap_our_clusters EXIT INT TERM
 
-echo "RELEASE BATTERY: work=$WORK artifacts=$ARTIFACTS max-parallel=$MAX_PARALLEL tree=$(git rev-parse --short HEAD)$(git diff --quiet && git diff --cached --quiet || printf ' (dirty)')"
+echo "RELEASE BATTERY: work=$WORK max-parallel=$MAX_PARALLEL tree=$(git rev-parse --short HEAD)$(git diff --quiet && git diff --cached --quiet || printf ' (dirty)')"
 
 # ── leg table ────────────────────────────────────────────────────────────────
 declare -A LEG_CMD LEG_VERDICT LEG_STATUS LEG_START LEG_END LEG_RC LEG_LINE LEG_PHASE
@@ -172,46 +157,13 @@ define_leg() {  # define_leg <name> <phase> <verdict-regex> <command...>
   LEG_CMD[$name]="$(printf '%q ' "$@")"; LEG_STATUS[$name]="PENDING"; LEG_START[$name]=""; LEG_END[$name]=""; LEG_RC[$name]=""; LEG_LINE[$name]=""
 }
 
-CHANGESET_DELTA=0
-if git rev-parse -q --verify "engine-service-v$REQUIRED_ENGINE" >/dev/null 2>&1; then
-  git diff --quiet "engine-service-v$REQUIRED_ENGINE" HEAD -- service/src/main/resources/db/changelog || CHANGESET_DELTA=1
-else
-  echo "  (engine-service-v$REQUIRED_ENGINE is not a local tag; cannot tell whether the tree carries a changeset — running --candidate-migration to be safe)"
-  CHANGESET_DELTA=1
-fi
-
-define_leg artifacts  serial "ARTIFACTS BUILT"                          tests/e2e/migration-rehearsal/build-artifacts.sh "$ARTIFACTS"
 [ "$SKIP_PREFLIGHT" = 1 ] || \
-define_leg preflight  serial "PINS PREFLIGHT (PASSED|FAILED)"           scripts/pins-preflight.sh
-# Group, longest first so the slots pack: shakedown is max(leg) on this box.
-define_leg shakedown  group  "SHAKEDOWN (PASSED|FAILED)"                env "NEXUS_SANDBOX_HOME=$WORK/sb-shakedown" tests/e2e/release-sandbox.sh shakedown
-define_leg lsg        group  "LOCAL-SERVICE GATE (PASSED|FAILED)"       env "NX_GATE_ARTIFACTS=$ARTIFACTS" tests/e2e/local-service-gate.sh
-define_leg pkgup      group  "PACKAGE-UPGRADE CONVERGENCE MVV (PASSED|FAILED)"   tests/e2e/migration-rehearsal/run.sh --artifacts "$ARTIFACTS" --package-upgrade
-if [ "$CHANGESET_DELTA" = 1 ]; then
-define_leg candmig    group  "CANDIDATE-MIGRATION REHEARSAL (PASSED|FAILED)"     tests/e2e/migration-rehearsal/run.sh --artifacts "$ARTIFACTS" --candidate-migration
-fi
+define_leg preflight  serial "PREFLIGHT (PASSED|FAILED)"                 tests/e2e/release-preflight.sh
+# Group, longest first so the slots pack.
+define_leg lsg        group  "LOCAL-SERVICE GATE (PASSED|FAILED)"       tests/e2e/local-service-gate.sh
+define_leg pkgup      group  "PACKAGE-UPGRADE CONVERGENCE MVV (PASSED|FAILED)"   tests/e2e/migration-rehearsal/run.sh --package-upgrade
 define_leg mvv        group  "FRESH-INSTALL MVV (PASSED|FAILED)"        tests/e2e/fresh-install-mvv.sh
-# nexus-0kmat: the data-token CLI gate drives the real CLI through a full
-# local-engine journey. It runs only when named in --only; an ordinary client
-# release does not pay its ~10 min.
-define_leg dtok       group  "DATA-TOKEN CLI GATE (PASSED|FAILED)"      tests/e2e/data-token-cli-gate.sh
-define_leg smoke      group  "SMOKE (PASSED|FAILED)"                    env "NEXUS_SANDBOX_HOME=$WORK/sb-smoke" tests/e2e/release-sandbox.sh smoke
-define_leg upshakeout group  "UPGRADE-SHAKEOUT PASSED"                  tests/e2e/upgrade-shakeout.sh run
-define_leg genflip    group  "GEN-FLIP LIVE-HOLDER (PASSED|FAILED)"     tests/e2e/gen-flip-live-holder.sh
-define_leg pluginls   group  "PLUGIN-LOCKSTEP GATE (PASSED|FAILED|UNVERIFIED)"  tests/e2e/plugin-lockstep-gate.sh
-# nexus-rcoze: this checkout's hooks.json fired against every published CLI a
-# user may still have (7.55.0 on), this wheel, and none -- no entry may block.
-define_leg hookskew   group  "HOOK-CLI SKEW GATE (PASSED|FAILED|UNVERIFIED)"   tests/e2e/hook-cli-skew/run.sh
-# RDR-219 Phase 3 Step 2b (nexus-wauo1.24): no credential-shaped file left
-# under a harness-owned root. Fails on any find; the token/expiry status
-# check it also runs only ever warns, never fails this leg.
-define_leg janitor    group  "CREDENTIAL JANITOR (PASSED|FAILED)"        "$E2E_PYTHON" scripts/credential_janitor.py
-# nexus-z0o2p.41: the GitHub-backed mandatory_regression_pin tests, moved out of lsg (whose fenced HOME
-# has no gh auth) to run here under the operator's real HOME at a zero skip budget. Not an engine leg.
-define_leg pins       group  "MANDATORY PINS GATE (PASSED|FAILED)"     tests/e2e/mandatory-pins-gate.sh
-define_leg shakeout   alone  "CANDIDATE SHAKEOUT (PASSED|FAILED)"                tests/e2e/migration-rehearsal/run.sh --artifacts "$ARTIFACTS" --shakeout
 
-if [[ ",$ONLY," != *",dtok,"* ]]; then LEG_STATUS[dtok]="SKIPPED(only when named in --only)"; fi
 ONLY_SKIPPED=0
 if [ -n "$ONLY" ]; then
   # Every name must be a real leg: a typo would otherwise skip the whole
@@ -227,7 +179,7 @@ if [ -n "$ONLY" ]; then
 fi
 
 # --plan: print the legs this invocation would run (phase, status) and stop. The
-# selection logic above (--only, dtok) is real code; this is how a test
+# selection logic above (--only) is real code; this is how a test
 # or an operator reads its outcome without paying for a leg.
 if [ "$PLAN_ONLY" = 1 ]; then
   for leg in "${ORDER[@]}"; do printf 'PLAN %s %s %s\n' "$leg" "${LEG_PHASE[$leg]}" "${LEG_STATUS[$leg]}"; done
@@ -266,7 +218,7 @@ finish_leg() {  # finish_leg <leg> <rc>
   # verbatim verdict line: last match after stripping ANSI colour
   line="$(printf '%s\n' "$clean" | grep -E "${LEG_VERDICT[$leg]}" | tail -1 || true)"
   LEG_LINE[$leg]="$line"
-  if [ "$rc" -eq 0 ] && [ -n "$line" ] && [[ "$line" =~ PASSED|BUILT ]]; then LEG_STATUS[$leg]="PASSED"
+  if [ "$rc" -eq 0 ] && [ -n "$line" ] && [[ "$line" =~ PASSED ]]; then LEG_STATUS[$leg]="PASSED"
   elif [ "$rc" -eq 0 ] && [ -n "$line" ]; then LEG_STATUS[$leg]="FAILED"; line="(exit 0 but the verdict line says otherwise) $line"
   elif [ "$rc" -eq 0 ]; then LEG_STATUS[$leg]="MISSING"; line="(exit 0 but no verdict line matching /${LEG_VERDICT[$leg]}/ — not a pass)"
   else LEG_STATUS[$leg]="FAILED"; [ -n "$line" ] || line="(exit $rc, no verdict line; tail: $(tail -3 "$LOGS/$leg.log" | tr '\n' ' ' | cut -c1-200))"
@@ -311,36 +263,25 @@ run_group() {  # run_group <leg...>: MAX_PARALLEL wide, reds do not stop the res
   done
 }
 
-SERIAL_LEGS=(); GROUP_LEGS=(); ALONE_LEGS=()
+SERIAL_LEGS=(); GROUP_LEGS=()
 for leg in "${ORDER[@]}"; do
   [ "${LEG_STATUS[$leg]}" = PENDING ] || continue
   case "${LEG_PHASE[$leg]}" in
     serial) SERIAL_LEGS+=("$leg") ;;
     group)  GROUP_LEGS+=("$leg") ;;
-    alone)  ALONE_LEGS+=("$leg") ;;
   esac
 done
 
-echo "== leg 0 (serial): ${SERIAL_LEGS[*]}"
-LEG0_ABORT=0
-for leg in "${SERIAL_LEGS[@]}"; do
+echo "== preflight (serial): ${SERIAL_LEGS[*]-}"
+# A preflight red is reported and the battery continues: every red reports.
+for leg in "${SERIAL_LEGS[@]+"${SERIAL_LEGS[@]}"}"; do
   run_serial "$leg"
-  # An artifacts red aborts: every group leg consumes them. A preflight red
-  # is reported and the battery continues (item e: sandbox reds all report).
-  if [ "$leg" = artifacts ] && [ "${LEG_STATUS[$leg]}" != PASSED ]; then LEG0_ABORT=1; break; fi
 done
 
-GROUP_T0=""; GROUP_T1=""
-if [ "$LEG0_ABORT" = 0 ]; then
-  echo "== gate group (parallel, ${MAX_PARALLEL} wide): ${GROUP_LEGS[*]}"
-  GROUP_T0=$(date +%s)
-  run_group "${GROUP_LEGS[@]+"${GROUP_LEGS[@]}"}"
-  GROUP_T1=$(date +%s)
-  echo "== alone: ${ALONE_LEGS[*]}"
-  for leg in "${ALONE_LEGS[@]+"${ALONE_LEGS[@]}"}"; do run_serial "$leg"; done
-else
-  for leg in "${GROUP_LEGS[@]}" "${ALONE_LEGS[@]}"; do LEG_STATUS[$leg]="NOT RUN (artifacts red)"; done
-fi
+echo "== gate group (parallel, ${MAX_PARALLEL} wide): ${GROUP_LEGS[*]}"
+GROUP_T0=$(date +%s)
+run_group "${GROUP_LEGS[@]+"${GROUP_LEGS[@]}"}"
+GROUP_T1=$(date +%s)
 
 # ── report ───────────────────────────────────────────────────────────────────
 BATTERY_T1=$(date +%s)
@@ -357,7 +298,6 @@ for leg in "${ORDER[@]}"; do
   printf '%-11s %-22s %8s  %s\n' "$leg" "${LEG_STATUS[$leg]}" "$wall" "${LEG_LINE[$leg]}"
   case "${LEG_STATUS[$leg]}" in PASSED|SKIPPED*|"NOT RUN"*) ;; *) RED=$((RED+1)) ;; esac
 done
-[ "$CHANGESET_DELTA" = 1 ] || echo "candmig     NOT RUN (no changeset in service/src/main/resources/db/changelog since engine-service-v$REQUIRED_ENGINE)"
 # max overlap of the group's [start,end] intervals: the AC5 proof
 if [ -n "$GROUP_T0" ]; then
   MAX_OVERLAP="$(for leg in "${GROUP_LEGS[@]}"; do [ -n "${LEG_START[$leg]}" ] && printf '%s S\n%s E\n' "${LEG_START[$leg]}" "${LEG_END[$leg]}"; done \

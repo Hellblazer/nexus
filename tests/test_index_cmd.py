@@ -1580,7 +1580,7 @@ def test_phase_heartbeat_emits_at_interval_nontty_no_cr():
 def test_phase_heartbeat_never_emits_bracket_nm_form():
     """Constraint: heartbeat lines must never match ``^\\s*\\[N/M\\]`` —
     that shape is reserved for the per-file progress lines counted by
-    tests/e2e/migration-rehearsal/rehearse_shakeout.sh."""
+    release rehearsal harnesses."""
     import re
     from nexus.commands.index import _PhaseHeartbeat
     calls: list[str] = []

@@ -16,7 +16,7 @@ over a dev install wiped 31 unreleased modules while keeping the version string.
 
 nexus-zfutt is the property that makes the downgrade guard trustworthy: resolve
 the installed version from the TARGET tree, never from a bare `nx` lookup on the
-ambient $PATH. tests/e2e/release-sandbox.sh activates an isolated sandbox $HOME
+ambient $PATH. A sandbox gate (since deleted) activated an isolated sandbox $HOME
 and prepends its own bin dir; on a fresh sandbox no `nx` exists there yet, so a
 PATH lookup falls through to the REAL global install and a develop checkout's
 lagging pyproject version reads as a false downgrade of an install the run has

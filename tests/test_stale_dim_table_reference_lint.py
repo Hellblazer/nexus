@@ -414,14 +414,6 @@ _COUNT_PINNED_FILE_ALLOWLIST: dict[str, tuple[int, str]] = {
     # WAS tests/upgrade/test_chash_rekey_verification_non_vacuous.py (3 hits)
     # — deleted at nexus-lgdel.l1 alongside chash_rekey.py itself (its
     # SUBJECT was that rung's verify() correctness, the deleted capability).
-    "tests/e2e/migration-rehearsal/seed_legacy.py": (
-        1,
-        "A LEGACY store-state seeding script by name and purpose: seeds a "
-        "pre-unify per-dim database for upgrade-ladder rehearsal, so it "
-        "must dispatch rows to chunks_384/768/1024 by construction. 3->2 at "
-        "nexus-ifgxr: the docstring quoting the retired 'dispatches to "
-        "chunks_1024' exception text now quotes the embedding_ wording."
-    ),
     # WAS rehearse_chash_window.sh (11 hits, the nexus-azx14 file itself) —
     # deleted at nexus-lgdel.l2 along with its whole leg (Dockerfile.chash-
     # window, run.sh's --chash-window flag path and stage copy): the leg's
@@ -484,8 +476,7 @@ _COUNT_PINNED_FILE_ALLOWLIST: dict[str, tuple[int, str]] = {
         0,
         "Comments narrating which straddle-era per-dim content "
         "(chunks_384/768/1024, taxonomy_centroids_384/768/1024) the "
-        "rehearsal seed must cover; historical/explanatory, matches "
-        "seed_legacy.py's own allowlist reason. +1 (7->8, nexus-o8dil.49, "
+        "rehearsal seed must cover; historical/explanatory. +1 (7->8, nexus-o8dil.49, "
         "RDR-191 Phase 5 batch 2026-08-15): the DECLARED_SEED_COVERAGE "
         "fk-004-1-reconcile entry's comment narrates the same fk-002-"
         "already-enforces-registration fact as the Java SEED-COVERAGE "

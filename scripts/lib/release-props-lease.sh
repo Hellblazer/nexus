@@ -4,26 +4,25 @@
 # never executed.
 #
 # WHY THIS EXISTS. Observed 2026-09-13 in the v0.1.118 prep worktree:
-# tests/e2e/migration-rehearsal/run.sh stamps release.properties for a
-# --guided/--shakeout-e2e/--candidate-migration leg and restores its own
-# snapshot at the script's EXIT, but only acquired scripts/lib/build-lease.sh's
-# "service" lease around the actual native-image build step — leaving a
-# window, between the stamp write and that acquire, where the tracked file
-# sat stamped in the tree with the lease completely free. scripts/build-
-# gate-jar.sh (invoked by tests/e2e/published-client-write-gate.sh) acquired
+# a since-deleted migration-rehearsal leg stamped release.properties and
+# restored its own snapshot at the script's EXIT, but only acquired
+# scripts/lib/build-lease.sh's "service" lease around the actual native-image
+# build step — leaving a window, between the stamp write and that acquire,
+# where the tracked file sat stamped in the tree with the lease completely
+# free. scripts/build-gate-jar.sh (invoked by a since-deleted gate) acquired
 # the free lease in that window, `cp`'d the ALREADY-STAMPED file as its own
 # "pre-stamp" backup, stamped its own value, built, and restored that backup
-# on exit — reapplying the run.sh leg's stale stamp to the tracked file
-# after run.sh had already restored the true clean bytes. The next leg
-# (--shakeout) then started on a dirty tree.
+# on exit — reapplying the first leg's stale stamp to the tracked file
+# after that leg had already restored the true clean bytes. The next leg
+# then started on a dirty tree.
 #
 # A second, independent ordering bug compounded this: scripts/build-gate-
 # jar.sh's own EXIT trap released the lease BEFORE restoring the file
 # (`build_lease_release service; cp "$backup" "$props"`), so even a build-
 # gate-jar.sh-only interleaving had a window — after the lease was freed,
 # before the restore landed — where a second acquirer could snapshot a
-# still-stamped file. tests/e2e/migration-rehearsal/build-artifacts.sh and
-# tests/e2e/local-service-gate.sh (nexus-56qvf) already got this right:
+# still-stamped file. tests/e2e/local-service-gate.sh (nexus-56qvf) already
+# got this right:
 # restore the bytes, THEN release the lease. This file makes that the ONE
 # implementation every stamper shares, instead of five hand-rolled copies
 # that can individually regress.

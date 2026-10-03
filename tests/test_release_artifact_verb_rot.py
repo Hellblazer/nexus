@@ -9,7 +9,7 @@ inside one of these artifacts for a long time before anything notices. Three
 concrete incidents landed in a single day (2026-07-24): RDR-155 P4b deleted
 ``nx guided-upgrade`` / ``migrate-to-service`` / ``storage migrate all``, and
 left the ``engine-release`` skill prescribing ``--guided`` for one full cut,
-plus two CI workflows (``guided-upgrade-mvv.yml``, and the ``run.sh --guided``
+plus two since-deleted CI workflows (the guided-upgrade MVV, and the ``run.sh --guided``
 leg they drive) dead by construction.
 
 ``tests/test_engine_release_skill_parity.py`` mechanizes ONE instance of this
@@ -120,15 +120,11 @@ Two tables, both requiring a REASON string per entry, both checked for
 staleness by ``test_allowlists_are_not_stale``:
 
   * ``_RETIRED_SCRIPT_ALLOWLIST`` (whole-file): for a file where EVERY
-    invocation of a since-deleted verb is providably unreachable — the
-    script self-guards on that verb's ``--help`` exit code before ever
-    calling it (``rehearse_cold.sh`` / ``rehearse_hole_punch.sh``), or the
-    one live rehearsal (``rehearse.sh``)
-    wraps its dead Phase B in exactly that guard, or the harness dispatcher
-    (``run.sh``) only NAMES the deleted verb while explaining why its flag
-    now refuses. These are RDR-155 P4b's own historical debris — real,
-    currently-still-true rot that nexus-8nlj4 owns deleting or repointing —
-    not a false positive of this sweep.
+    invocation of a since-deleted verb is providably unreachable (a script
+    that self-guards on the verb's ``--help`` exit code before ever calling
+    it, or a tombstone that only NAMES the deleted verb). Empty since cleanup
+    step 11 (nexus-0r1uz) deleted the last such scripts; kept wired and
+    tested so the next maintainer has a mechanism.
   * ``_FILE_VERB_ALLOWLIST`` (single verb within one file): the general
     escape valve for a future single-line exemption that does not warrant
     silencing an entire file. Empty today; kept wired and tested so the next
@@ -227,31 +223,7 @@ _GLOBAL_NOISE_ALLOWLIST: dict[str, str] = {
 #: relative-path -> reason. EVERY nx-verb invocation in the file is exempted.
 #: Reserved for files where the ENTIRE set of findings stems from the same
 #: self-guard or historical-notice property — see module docstring.
-_RETIRED_SCRIPT_ALLOWLIST: dict[str, str] = {
-    "tests/e2e/migration-rehearsal/rehearse_cold.sh": (
-        "Self-guarded: 'if ! nx guided-upgrade --help ...; then echo RETIRED; exit 2; fi' "
-        "at the top of the file exits before any real use of guided-upgrade below can run "
-        "(including its own guided-upgrade calls). guided-upgrade was deleted by RDR-155 P4b "
-        "(7e47c285); nexus-8nlj4 owns deleting or repointing this file."
-    ),
-    "tests/e2e/migration-rehearsal/rehearse_hole_punch.sh": (
-        "Same top-of-file self-guard as rehearse_cold.sh; also unreachably invokes "
-        "'nx storage migrate all' (the storage group was deleted the same RDR-155 P4b "
-        "commit). Both are dead code behind the guided-upgrade preflight. nexus-8nlj4."
-    ),
-    "tests/e2e/migration-rehearsal/rehearse.sh": (
-        "Phase B is internally guarded ('if nx migrate-to-service --help ...; then <use it> "
-        "else echo RETIRED fi', ~line 270); migrate-to-service was deleted by RDR-155 P4b, so "
-        "Phase B is a dead branch. Phases A/D/E (the daily-driver gate) are unaffected. "
-        "nexus-8nlj4 tracks removing dead Phase B."
-    ),
-    "tests/e2e/migration-rehearsal/run.sh": (
-        "Two lines only NAME the deleted CLI verb 'nx guided-upgrade' while documenting why "
-        "its own --guided flag now refuses (an inline comment + the RETIRED echo message "
-        "itself). run.sh's own flag retirement is independently verified by "
-        "test_engine_release_skill_parity.py's forward/retired-flag checks."
-    ),
-}
+_RETIRED_SCRIPT_ALLOWLIST: dict[str, str] = {}
 
 #: (relative-path, verb-as-captured) -> reason. General-purpose single-verb
 #: exemption for a file that is NOT otherwise a wholesale historical
@@ -260,18 +232,6 @@ _FILE_VERB_ALLOWLIST: dict[tuple[str, str], str] = {
     ("tests/e2e/hook-cli-skew/run.sh", "no-such-verb-skew-gate"): (
         "deliberate: the gate's positive control calls an unregistered verb to "
         "prove 7.57.0's nx-hook still exits 2 on one (nexus-rcoze)"
-    ),
-    # nexus-x8fuq: upgrade-shakeout's demoted-verb detector
-    # (_check_no_demoted_verb) exists to FAIL when doctor output names a
-    # retired verb, and its self-test plants exactly that string as the RED
-    # fixture. These are detector test-fixtures quoting the dead verb on
-    # purpose — the opposite of rot: deleting them would blind the detector
-    # test to the very class this sweep protects against.
-    ("tests/e2e/upgrade-shakeout.sh", "guided-upgrade"): (
-        "planted RED fixture for the demoted-verb detector's self-test"
-    ),
-    ("tests/e2e/upgrade-shakeout.sh", "guided-upgrade to"): (
-        "planted RED fixture text for _check_no_demoted_verb's self-test"
     ),
     # REMOVED at RDR-215 bead nexus-q02nx.21: the nexus-fgekf entry keyed on
     # ("conexus/hooks/scripts/pre_close_verification_hook.sh", "binary is").
@@ -514,13 +474,6 @@ _ANCHOR_MIN_COUNTS: dict[str, int] = {
     ".claude/skills/engine-release/SKILL.md": 1,
     ".github/workflows/engine-service-release.yml": 2,
     "service/native-smoke.sh": 1,
-    "tests/e2e/release-sandbox.sh": 25,
-    "tests/e2e/upgrade-shakeout.sh": 15,
-    "tests/e2e/migration-rehearsal/rehearse_era_hop.sh": 15,
-    # Anchors INSIDE the whole-file allowlist too: proves the extractor
-    # still sees real content in these files, not just that the allowlist
-    # is silencing an empty scan.
-    "tests/e2e/migration-rehearsal/rehearse.sh": 20,
     # nexus-zmfan widening (hand-verified 2026-08-07):
     # scripts/reinstall-tool.sh was an anchor here (2 invocations) until
     # nexus-utpuw.8. Its `nx daemon service start` / `nx mineru start` /
@@ -586,11 +539,11 @@ def test_click_tree_is_not_vacuous() -> None:
 
 def test_extraction_is_not_vacuous_in_aggregate() -> None:
     total = len(_all_invocations())
-    assert total >= 330, (
+    assert total >= 100, (
         f"only {total} nx-invocations extracted across every swept surface — "
         "the extraction regex likely broke (measured 611 at RDR-215 bead "
-        "nexus-q02nx.22, of which 10 are `nx-hook`; the 376 recorded at the "
-        "nexus-zmfan widening was against a smaller tree, not a drop since)"
+        "nexus-q02nx.22, then 112 after cleanup step 11 deleted the sandbox, "
+        "shakeout and rehearsal scripts that carried about 500 of them)"
     )
 
 
@@ -646,18 +599,7 @@ def test_verb_resolution_correctly_accepts_known_live_verbs() -> None:
 #: keeps silencing every invocation in that file forever, with no test noticing
 #: -- an allowlist entry outliving its justification, which is precisely how
 #: the /links/orphaned census exclusion went stale the same day.
-_REASON_CLAIMS: dict[str, str] = {
-    # Each reason asserts the script self-guards on the deleted verb's --help
-    # exit code, making every later invocation unreachable. Assert the guard.
-    "tests/e2e/migration-rehearsal/rehearse_cold.sh": "nx guided-upgrade --help",
-    "tests/e2e/migration-rehearsal/rehearse_hole_punch.sh": "--help",
-    # "Phase B is internally guarded ('if nx migrate-to-service --help ...')".
-    "tests/e2e/migration-rehearsal/rehearse.sh": "nx migrate-to-service --help",
-    # "Two lines only NAME the deleted verb ... the RETIRED echo message
-    # itself". The claim is that the mention is a retirement NOTICE, not a use,
-    # so assert the notice is still what is there.
-    "tests/e2e/migration-rehearsal/run.sh": "RETIRED",
-}
+_REASON_CLAIMS: dict[str, str] = {}
 
 
 def test_allowlist_reasons_are_still_TRUE_not_merely_present() -> None:

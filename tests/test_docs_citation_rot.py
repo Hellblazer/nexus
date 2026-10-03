@@ -46,7 +46,7 @@ _SCAN_GLOBS = ("*.yml", "*.yaml", "*.sh")
 #: checked against root AGENTS.md — the lookbehind skips it (out of scope
 #: rather than mis-checked). KNOWN LIMITATION (disclosed, same review): a
 #: citation whose ``§ heading`` text wraps across comment lines is invisible
-#: to this line-oriented scan — e.g. warm-reindex-skip-gate.sh's wrapped
+#: to this line-oriented scan — e.g. a since-deleted warm-reindex gate's wrapped
 #: "Engine-service\nrelease" cite gets zero protection; a future multi-line
 #: joiner is the fix if that class ever rots in practice.
 _SECTION_CITE_RE = re.compile(

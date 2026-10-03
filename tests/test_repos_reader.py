@@ -475,7 +475,7 @@ RegistryHelper = RepoRegistry
 
 
 def test_list_repos_dual_survives_raising_catalog_leg(tmp_path):
-    """upgrade-shakeout drift cross-check (2026-07-08): the service-mode lazy
+    """Upgrade-shakeout drift cross-check (2026-07-08): the service-mode lazy
     catalog proxy raises at first real call when no endpoint is resolvable —
     the registry leg must survive, or doctor's git-hook drift check goes
     blind on every install without a reachable service."""

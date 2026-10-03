@@ -14,7 +14,7 @@ through, never writes it to a file.
 Structural check: the source no longer contains the printf line that
 interpolates `${ANTHROPIC_API_KEY...}` into an `export` statement (kill
 control on a synthetic reproduction of the pre-fix shape, same convention
-as test_release_sandbox_automation_token.py in this directory).
+as the since-deleted sandbox-gate automation-token test in this directory).
 
 Behavioral check: sandbox.sh is cheap to run standalone (filesystem-only --
 no tmux, no docker, no `uv tool install`), so this also runs it for real

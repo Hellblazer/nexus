@@ -234,9 +234,9 @@ jobs:
         # The GitHub-backed `mandatory_regression_pin` tests used to run inside the gate above. The
         # gate's fenced HOME never mirrors ~/.config/gh (tests/e2e/lib/fence_home.sh), so on a box that
         # authenticates through `gh` they skipped and the zero skip budget reddened the gate; Sam
-        # moved them out (nexus-z0o2p.41). Here they run with the job token, outside the fence, in
-        # their own script, which also asserts they ran (exactly the declared count, at most the
-        # budget skipped, at least one run).
+        # moved them out (nexus-z0o2p.41). Here they run with the job token, outside the fence, as
+        # their own pytest selection (the exact-count assertion lives in tests/e2e/release-preflight.sh
+        # and tests/e2e/local-service-gate.sh; conftest's session guard enforces the skip budget).
         env:
           # nexus-f6qzj (Sam, 2026-08-20: "grant it the read token"): the pins authenticate via
           # GITHUB_TOKEN / `gh auth token`
@@ -249,11 +249,11 @@ jobs:
           # job token cannot carry. Budget sized to EXACTLY that pin; any
           # second skip still reds the run. Lifting it needs a PAT secret
           # (Sam-provisioned), not a permissions line. An operator box with
-          # real gh auth runs the same script at the default budget of 0.
+          # real gh auth runs the same selection at the default budget of 0.
           GITHUB_TOKEN: ${{ github.token }}
           GH_TOKEN: ${{ github.token }}
           NX_MANDATORY_PIN_SKIP_BUDGET: "1"
-        run: tests/e2e/mandatory-pins-gate.sh
+        run: NX_TEST_T2_SUBSTRATE=none uv run pytest -o addopts="" -m "integration and mandatory_regression_pin" -q -rs --color=no
 
       - name: Ungated integration files (nexus-5opzu)
         # The tests/db files with NO other automated gate anywhere —

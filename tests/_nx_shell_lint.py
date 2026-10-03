@@ -49,7 +49,7 @@ import shlex
 #: and `nx` without moving it out of command position: ``env``, an inline
 #: assignment (``NX_LOCAL=1``, ``TOKEN="$t"``), or an expanded shell array
 #: (``"${NXTOK[@]}"``). Substantive review (nexus-egei6) found the array form
-#: live 20 times in ``rehearse_candidate_migration.sh``
+#: live 20 times in a since-deleted rehearsal script
 #: (``NXTOK=(env "NX_SERVICE_TOKEN=$tok")`` then ``"${NXTOK[@]}" nx tuple
 #: ack ...``), invisible to both lints for exactly the ``--claimant`` /
 #: ``--lease-s`` commands they guard; a bare ``NAME=value nx ...`` was

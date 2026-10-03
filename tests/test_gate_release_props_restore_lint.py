@@ -38,8 +38,8 @@ _LEASE_LIB = REPO_ROOT / "scripts" / "lib" / "release-props-lease.sh"
 #: A ``git checkout`` COMMAND (leading whitespace, then the verb) that touches
 #: ``release.properties`` — not a comment that names it, and not a checkout of
 #: some other ref. On first run this pin found the same defect in two more
-#: scripts the bead had not named (run.sh's _guided_restore and
-#: published-client-write-gate.sh's cleanup); all three now snapshot bytes.
+#: scripts the bead had not named (since-deleted migration-rehearsal and
+#: published-client gate cleanups); all of them snapshotted bytes.
 _CHECKOUT_CMD = re.compile(r"^\s*git checkout\b[^\n]*(release\.properties|RELEASE_PROPS)", re.M)
 
 
@@ -74,8 +74,8 @@ def test_no_script_restores_release_props_via_git_checkout() -> None:
 
 def test_local_service_gate_snapshots_and_restores_bytes() -> None:
     """Since nexus-iexvl the gate takes its byte snapshot and restores it
-    through scripts/lib/release-props-lease.sh, the helper run.sh and
-    build-gate-jar.sh share, instead of its own ``cp`` lines. Pin both halves:
+    through scripts/lib/release-props-lease.sh, the helper
+    build-gate-jar.sh shares, instead of its own ``cp`` lines. Pin both halves:
     the gate routes through the helper, and the helper copies bytes."""
     text = _GATE.read_text(encoding="utf-8")
     lib = _LEASE_LIB.read_text(encoding="utf-8")

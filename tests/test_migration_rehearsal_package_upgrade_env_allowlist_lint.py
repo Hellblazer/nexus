@@ -57,13 +57,18 @@ _PACKAGE_UPGRADE_BLOCK_RE = re.compile(
 
 def _package_upgrade_run_env_block() -> str:
     text = RUN_SH.read_text()
-    match = _PACKAGE_UPGRADE_BLOCK_RE.search(text)
-    assert match is not None, (
-        "the `$PACKAGE_UPGRADE` run_env block was not found in run.sh by "
-        "this lint's extraction regex -- the block was reshaped and this "
-        "test needs updating, NOT silently skipped"
+    # run.sh has several line-start ``if [ "$PACKAGE_UPGRADE" = 1 ]`` blocks
+    # (the PREV derivation, the staging, the run_env assembly); the one this
+    # lint is about is the one that appends to ``run_env``.
+    matches = [
+        m for m in _PACKAGE_UPGRADE_BLOCK_RE.finditer(text) if "run_env+=" in m.group(1)
+    ]
+    assert len(matches) == 1, (
+        "the `$PACKAGE_UPGRADE` run_env block was not found (exactly once) in "
+        "run.sh by this lint's extraction regex -- the block was reshaped and "
+        "this test needs updating, NOT silently skipped"
     )
-    return match.group(1)
+    return matches[0].group(1)
 
 
 def test_the_harness_exists() -> None:

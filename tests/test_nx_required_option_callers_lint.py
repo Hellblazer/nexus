@@ -635,7 +635,7 @@ def test_the_evaluator_tells_present_from_missing_from_opaque() -> None:
         )
         assert violation.status == "violation"
         assert "collection" in violation.detail
-        # Regression pin (kill-control finding, rehearse_shakeout.sh:252): a
+        # Regression pin (kill-control finding, a since-deleted rehearsal script): a
         # QUOTED single-value variable occupies exactly one argv slot and
         # cannot spell out a whole separate flag+value pair -- a genuinely
         # missing flag next to one must still be reported as a VIOLATION,
@@ -682,7 +682,7 @@ def test_uv_run_is_recognized_as_a_command_position_lead_in() -> None:
 @pytest.mark.lint
 def test_prefix_words_before_nx_keep_it_in_command_position() -> None:
     """Substantive review (nexus-egei6): ``"${NXTOK[@]}" nx tuple ack ...``
-    (20 live sites in rehearse_candidate_migration.sh) and a bare
+    (20 live sites in a since-deleted rehearsal script) and a bare
     ``NAME=value nx ...`` were invisible, compliant or not. Each shape must
     be SEEN, and a missing required flag behind it must be a violation."""
     required = _leaf_required_options()
@@ -702,15 +702,6 @@ def test_prefix_words_before_nx_keep_it_in_command_position() -> None:
     # Naming is not invoking: a prefix word only counts in command position.
     mention = 'echo "run FOO=1 nx tuple ack by hand"\n'
     assert not _shell_file_hits(mention, required, file_label="s.sh"), mention
-
-
-@pytest.mark.lint
-def test_the_array_prefix_call_sites_in_the_real_corpus_are_scanned() -> None:
-    """Real-corpus pin for the same finding: the NXTOK-prefixed ``nx tuple``
-    calls must reach the evaluator, not merely the synthetic shapes above."""
-    rel = "tests/e2e/migration-rehearsal/rehearse_candidate_migration.sh"
-    seen = {h.invocation for h in _all_hits() if h.file.startswith(rel)}
-    assert {"nx tuple ack", "nx tuple in"} <= seen, sorted(seen)
 
 
 @pytest.mark.lint
@@ -757,7 +748,7 @@ def test_discover_nx_wrapper_names_recognizes_every_real_shape() -> None:
         '}\n'
     )
     assert discover_nx_wrapper_names(uv_run_with_env_prefix) == {"_provisioner_nx"}, (
-        "published-client-write-gate.sh shape"
+        "a since-deleted gate's wrapper shape"
     )
 
     chained_wrapper = (
@@ -770,7 +761,7 @@ def test_discover_nx_wrapper_names_recognizes_every_real_shape() -> None:
     )
     assert discover_nx_wrapper_names(chained_wrapper) == {"_nx", "_nx_poisoned"}, (
         "synthetic: a wrapper calling a previously-discovered wrapper (fixed point); "
-        "the real data-token-cli-gate.sh _nx_poisoned re-implements the body instead"
+        "a since-deleted gate's _nx_poisoned re-implemented the body instead"
     )
 
     keyword_form = 'function _kw_nx {\n    "$BIN_DIR/nx" "$@"\n}\n'

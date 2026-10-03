@@ -49,11 +49,8 @@ CC_VALIDATION_EXPORTING_HARNESSES = ("runner.sh",)
 #: Sandbox scripts that build their environment without ``env -i`` and must
 #: export the opt-out instead.
 EXPORTING_SANDBOXES = (
-    "release-sandbox.sh",
-    "upgrade-shakeout.sh",
     "local-service-gate.sh",
     "sandbox.sh",
-    "local-index-memory-gate.sh",
 )
 
 _ENV_I = re.compile(r"^\s*env -i \\\n((?:.*\\\n)*)", re.M)
@@ -73,7 +70,7 @@ def test_every_env_i_allowlist_under_e2e_opts_out() -> None:
             seen += 1
             if "NX_NO_TELEMETRY=1" not in block:
                 bad.append(f"{path.relative_to(REPO)}: env -i block without NX_NO_TELEMETRY=1")
-    assert seen >= 9, f"only {seen} env -i blocks found; the scan is broken"
+    assert seen >= 2, f"only {seen} env -i blocks found; the scan is broken"
     assert not bad, "\n".join(bad)
 
 
@@ -113,7 +110,7 @@ def test_every_e2e_container_forwards_the_opt_out() -> None:
 
     GENERALISED from a test that named ``migration-rehearsal/run.sh`` and only
     it, so every other container launcher sat outside the lint's domain — and
-    two of them, hook-surface-shakeout and rdr208-mvv, shipped pinging
+    two of them, hook-surface-shakeout and a since-deleted RDR-208 harness, shipped pinging
     production for exactly that reason. conexus counted 18 fresh install_ids
     across two release nights, then two more overnight: throwaway installs the
     active-install metric read as users.
@@ -199,7 +196,7 @@ def test_harness_entry_point_sweep_is_non_vacuous() -> None:
     )
     e2e_total = e2e_env_i + len(EXPORTING_SANDBOXES) + e2e_docker_runs
     cc_validation_total = len(CC_VALIDATION_EXPORTING_HARNESSES)
-    assert e2e_total >= 30, (
+    assert e2e_total >= 9, (
         f"only {e2e_total} harness entry points found under tests/e2e "
         "(env -i blocks + exporting sandboxes + docker runs); the sweep "
         "is undercounting that root"

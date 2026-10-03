@@ -1408,8 +1408,7 @@ _KNOWN_COMMAND_SKILL_COLLISIONS: frozenset[str] = frozenset()
 # flagged) but "this exact string names nothing real any more." Verified
 # empirically: an earlier, broader draft of this set that also listed every
 # deleted command name (including "upgrade" and "rdr-create") false-positived
-# on tests/e2e/migration-rehearsal/rehearse_era_hop.sh's and
-# upgrade-shakeout.sh's unrelated `nx upgrade` CLI-verb checks and
+# on the since-deleted era-hop rehearsal and shakeout scripts' unrelated `nx upgrade` CLI-verb checks and
 # 00_debug_load.sh's own (correct, unrelated) skills/rdr-create/SKILL.md
 # packaging check. The three verb skills renamed off "debug"/"research"/
 # "review" are excluded for the same reason — those remain valid words as

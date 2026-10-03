@@ -25,8 +25,8 @@
 
   **Memory.** Measured on an Apple Silicon Mac, sampling the local-stack
   processes' own RSS (never a whole-machine reading, which a shared box's
-  other work would contaminate — see `tests/e2e/local-index-memory-gate.sh`'s
-  path-keyed sampler): idle, right after `nx init` starts the service, the
+  other work would contaminate — a path-keyed sampler, as the since-deleted
+  local-index memory gate used): idle, right after `nx init` starts the service, the
   three local processes (bundled PostgreSQL, the daemon supervisor, the
   engine) together hold about **1.2 GB**. Running `nx index repo` against
   this repository (~2,500 files) rises to and plateaus around **4.2-4.5 GB**,

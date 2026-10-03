@@ -4,16 +4,17 @@
 #
 # One interpreter for the host side of the e2e harness. Bare `python3` is
 # whatever the box ships first on PATH, and on a macOS host with no Homebrew
-# python that is /usr/bin/python3, which is 3.9.6. tests/e2e/lib/
-# artifact_manifest.py uses `match` (3.10+), so on that box the 2026-10-02 cut
-# battery aborted with "artifacts manifest does not verify against this tree
-# (SyntaxError ...)" and no engine leg ran: a harness defect that read as a
-# manifest mismatch. The harness now resolves an interpreter ONCE, checks its
+# python that is /usr/bin/python3, which is 3.9.6. A harness module that used
+# `match` (3.10+) made
+# the 2026-10-02 cut battery abort with "artifacts manifest does not verify
+# against this tree (SyntaxError ...)" and no engine leg ran: a harness
+# defect that read as a manifest mismatch. The harness now resolves an
+# interpreter ONCE, checks its
 # version, and refuses by name when none qualifies.
 #
 #     source "$REPO_ROOT/tests/e2e/lib/python.sh"
 #     e2e_python_resolve || exit 2        # sets and exports E2E_PYTHON
-#     "$E2E_PYTHON" "$REPO_ROOT/tests/e2e/lib/artifact_manifest.py" verify ...
+#     "$E2E_PYTHON" "$REPO_ROOT/tests/e2e/lib/some_module.py" ...
 #
 # e2e_python_resolve [min-minor]   (default 10: Python 3.<min-minor> or newer;
 #                                   pass 11 for a caller that reads tomllib)
@@ -116,7 +117,7 @@ e2e_python_resolve() {  # [min-minor]
     fi
 
     {
-        echo "e2e python: no Python 3.$min or newer found; the e2e harness needs one (artifact_manifest.py uses match, 3.10+; a script that reads tomllib asks for 3.11)."
+        echo "e2e python: no Python 3.$min or newer found; the e2e harness needs one (3.10+; a script that reads tomllib asks for 3.11)."
         printf '%s' "$notes"
         echo "  Install one (brew install python@3.12, or uv python install 3.12) or point NX_E2E_PYTHON at it."
     } >&2

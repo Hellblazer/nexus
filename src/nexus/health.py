@@ -1784,7 +1784,7 @@ def _check_git_hooks(repo_scope: str | Path | None = None) -> list[HealthResult]
     ``repo_scope`` (nexus-jds59): the catalog + legacy registry this walk
     reads from are a SHARED, machine-wide store — not scoped to the
     caller's ``$HOME``/``NEXUS_CONFIG_DIR``. An automation harness that
-    provisions its own throwaway repo (the release-sandbox shakedown's
+    provisions its own throwaway repo (a sandbox shakedown's
     fixture checkout) still sees every OTHER repo ever registered on the
     same machine, including the live dev checkout the harness reinstalls
     from — so a deliberate hold on that repo's hook stanza (e.g. pinned
@@ -9462,7 +9462,7 @@ def run_health_checks(
     try:
         _cat = make_catalog_reader()
     except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash `nx doctor`
-        # Discovered via upgrade-shakeout.sh (10/12 FAIL) during the 6.1.0
+        # Discovered via the upgrade shakeout (10/12 FAIL) during the 6.1.0
         # release gate: unlike every sibling check in this function (chroma
         # pagination, storage-service health, migration state, RLS — all
         # explicitly "gated internally... always safe to run"), this call was

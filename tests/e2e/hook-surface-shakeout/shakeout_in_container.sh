@@ -5,8 +5,8 @@
 # plugin under test, captures the pane, and censuses what actually fired
 # against what hooks.json declares.
 #
-# The tmux/launch/prompt helpers below are taken from
-# tests/e2e/rdr208-mvv/mvv_in_container.sh rather than re-derived: the private
+# The tmux/launch/prompt helpers below were taken from the retired RDR-208
+# MVV driver rather than re-derived: the private
 # socket, the dialog walk, the `exec` so the pane process IS claude, the
 # explicit PATH (tmux opens a login shell and drops the image's ENV PATH), and
 # the Stop-hook turn sentinel instead of pane scraping. Each of those cost a
@@ -73,7 +73,7 @@ ok "nx init completed"
 # after the session in its own stdin payload, so asking for a specific id
 # means resolving that id FIRST -- and the first cut of this script resolved
 # it from the wrong directory (`~/.config/nexus/status`; the record actually
-# lives under the transcript workspace, as rdr208-mvv's STATUS_D shows). The
+# lives under the transcript workspace). The
 # id came back empty, every check then looked for a file literally named
 # "turn-end.", and five turns timed out at 240 s each while the session was
 # doing the work perfectly well. Only one session runs here, so the newest
@@ -112,8 +112,8 @@ say "launch: real Claude Code, plugin from ${SHAKEOUT_SHA:-?}, ALL hooks live"
 # server called plain `nexus` and left the tool tier addressing a name that
 # did not exist -- measured as "Stop hook error: MCP server
 # 'plugin:conexus:nexus' not connected", with the session continuing anyway.
-# rdr208-mvv can use --mcp-config because the two hooks it tests are
-# command-tier and never name a server. This one cannot -- UNLESS the
+# A harness whose hooks are all command-tier can use --mcp-config because it
+# never names a server. This one cannot -- UNLESS the
 # override names the entry EXACTLY `plugin:conexus:nexus` (not `nexus`),
 # which is the shape RDR-219's "nx-mcp dispatch grant" needs for a
 # plugin-loaded harness (T3 analysis-deep-rdr219-devfd-mcp-config-2026-09-25

@@ -239,7 +239,7 @@ What the host itself must supply:
 - A Python 3.10 or newer for the host side of the e2e harness (nexus-u67ow). A
   bare `python3` is whatever the box ships first on PATH, and on a Mac with no
   Homebrew python that is `/usr/bin/python3`, 3.9.6, where
-  `tests/e2e/lib/artifact_manifest.py` fails on `match`. The harness does not
+  a harness module that used `match` failed there. The harness does not
   call `python3`: `tests/e2e/lib/python.sh` resolves one interpreter, checks its
   `sys.version_info`, exports it as `E2E_PYTHON`, and refuses with exit 2 naming
   every candidate it tried when none qualifies. `NX_E2E_PYTHON=<interpreter>`
@@ -272,8 +272,7 @@ Two things keep the harnesses safe today, neither of them HOME:
    a non-interactive run with no flag DECLINES; a unit is never written without
    an explicit `--yes`. This is why `local-service-gate.sh`'s bare
    `nx init --service` writes nothing.
-2. **Explicit `--no-autostart`** at the host-side sites (`fresh-install-mvv.sh`,
-   `release-sandbox.sh`).
+2. **Explicit `--no-autostart`** at the host-side sites (`fresh-install-mvv.sh`).
 
 **Rule when authoring or moving an E2E script:** any `nx init` carrying
 `-y`/`--yes` without `--no-autostart` must be **container-executed**. Every

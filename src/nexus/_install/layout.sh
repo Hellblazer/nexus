@@ -126,8 +126,8 @@ _nx_core() {
 # $1 source spec.
 nx_source_kind() { _nx_core source_kind "${1-}"; }
 
-# The generation root. Recomputed on every call, never cached: release-sandbox.sh
-# and tests/e2e/run.sh isolate themselves ONLY by redirecting $HOME, so a value
+# The generation root. Recomputed on every call, never cached: sandbox harnesses such as
+# tests/e2e/run.sh isolate themselves ONLY by redirecting $HOME, so a value
 # captured once would make those harnesses write into the live install.
 nx_tools_dir() { _nx_core tools_dir; }
 

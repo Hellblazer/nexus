@@ -85,7 +85,7 @@
 # GH #1533): additionally indexes tests/fixtures/bft-to-smr.pdf through the
 # real MinerU path against the PUBLISHED dependency resolution, BEFORE leg 9
 # replaces the uv-tool shim with a generation, and asserts the ADDED chunk's
-# extraction_method is literally mineru (release-sandbox.sh's nexus-jy4hd
+# extraction_method is literally mineru (the nexus-jy4hd
 # chunk-id-set-diff shape, not a LaTeX-content grep). Off by default — it
 # pays a MinerU pipeline model download (~2-3 GB) that would dominate every
 # default MVV run. The release skill's Step 11c post-publish invocation is
@@ -100,7 +100,7 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/python.sh"
 e2e_python_resolve || exit 2
 
 # ── pure helper functions (exercised directly by --self-test) ──────────────
-# House precedent: tests/e2e/local-index-memory-gate.sh extracts pure
+# House precedent: a since-deleted memory gate extracted pure
 # functions + a --self-test arm for exactly this reason (nexus-1ktd5
 # MANDATORY ACCEPTANCE CRITERION) — a full sandboxed run of THIS script
 # costs minutes (wheel build, engine download, PG bundle) and --published
@@ -176,12 +176,11 @@ _leg_log_is_substantive() {
 }
 
 # nexus-gqrg0 round 2 (GH #1533): the formula-PDF identity verdict helpers
-# below are DUPLICATED from tests/e2e/release-sandbox.sh's nexus-jy4hd
-# shape rather than sourced -- release-sandbox.sh is an executable script
+# below were DUPLICATED from a since-deleted sandbox gate's nexus-jy4hd
+# shape rather than sourced -- that gate was an executable script
 # with its own unconditional `case "$MODE" in ... esac` dispatch at the
-# bottom, not a library; `source`ing it here would run THAT dispatch
-# inside this script's own shell and abort the journey. Keep both copies
-# in the same shape if either changes.
+# bottom, not a library; `source`ing it here would have run THAT dispatch
+# inside this script's own shell and aborted the journey.
 _mineru_doctor_verdict() {
     # stdin: `nx doctor --check-mineru` output → "OK" or "FAIL|<cause>"
     "$E2E_PYTHON" -c '
@@ -312,7 +311,7 @@ _self_test() {
     printf 'Stored: %s\n' "$(printf 'a%.0s' $(seq 1 64))" > "$t/real-content.log"
     _assert_eq "GREEN: a real, traceback-free log -> OK" "$(_leg_log_is_substantive "$t/real-content.log")" "OK"
 
-    echo "== self-test: _mineru_doctor_verdict (nexus-gqrg0 round 2, duplicated from release-sandbox.sh) =="
+    echo "== self-test: _mineru_doctor_verdict (nexus-gqrg0 round 2, duplicated from a since-deleted sandbox gate) =="
     out=$(printf '✓ MinerU import\n✓ MinerU parse: parsed a synthesized one-page probe PDF\n' | _mineru_doctor_verdict)
     _assert_eq "passing doctor output -> OK" "$out" "OK"
     out=$(printf '✓ MinerU import\n✗ MinerU parse: TypeError: '"'"'PageChars'"'"' object is not iterable\n' | _mineru_doctor_verdict)
@@ -1079,7 +1078,7 @@ if [ "${NX_MVV_FORMULA_PDF_CHECK:-0}" = "1" ]; then
         FORMULA_COLLECTION="distributed-systems"
 
         # nexus-jy4hd's verdict parser (duplicated above, see that comment
-        # for why release-sandbox.sh is not sourced): `nx doctor
+        # for why that gate was not sourced): `nx doctor
         # --check-mineru`'s rc is not a reliable failure signal for this
         # one check, and a blind `grep -q '✗'` over the whole doctor
         # transcript is vacuous -- it says nothing about WHICH line
@@ -1093,7 +1092,7 @@ if [ "${NX_MVV_FORMULA_PDF_CHECK:-0}" = "1" ]; then
             _fail "nx doctor --check-mineru: ${MINERU_DOCTOR_VERDICT#FAIL|} — see $LOGS/mineru-doctor.log (nexus-gqrg0 class)"
         fi
 
-        # release-sandbox.sh's proven identity shape (its 3b/11 step):
+        # a since-deleted sandbox gate's proven identity shape (its 3b/11 step):
         # snapshot chunk ids before, index, set-diff to isolate ONLY the
         # chunk THIS step added (the collection is chash-ordered, so a
         # positional pick is the wrong document roughly half the time),
@@ -1101,7 +1100,7 @@ if [ "${NX_MVV_FORMULA_PDF_CHECK:-0}" = "1" ]; then
         # literally mineru -- belt-and-braces against a silent
         # in-extractor fallback to docling/pymupdf.
         FORMULA_IDS_DIR="$(mktemp -d "$WORK/formula-ids-XXXXXX")"
-        # `|| true` on both snapshots (release-sandbox.sh's own shape): an
+        # `|| true` on both snapshots (that gate's own shape): an
         # empty/first-use collection makes grep find zero matches (exit 1),
         # which is a legitimate "before" state, not a script-ending error
         # under this file's `set -e` -- the actual pass/fail signal is the

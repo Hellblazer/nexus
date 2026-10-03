@@ -384,8 +384,7 @@ fi
 # to close, reproduced via this code path). Declared empty here, never
 # left unset under `set -u`, so cleanup() is always safe to call, even
 # from an exit path that fires before the stamp step below ever runs (the
-# native-binary launch path, or NX_GATE_ARTIFACTS, never populate it at
-# all).
+# native-binary launch path never populates it at all).
 RELEASE_PROPS="$REPO_ROOT/service/src/main/resources/META-INF/nexus/release.properties"
 RELEASE_PROPS_SNAPSHOT=""
 
@@ -453,7 +452,7 @@ NX_LOCAL=1 NEXUS_CONFIG_DIR="$SCRATCH" uv run nx daemon service stop
 #    whatever stamped jar an earlier rehearsal happened to leave in
 #    service/target — ambient machine state, the exact gate defect the
 #    self-provisioning rule forbids. release_version is derived from the
-#    floor constant (same parse as migration-rehearsal/run.sh).
+#    floor constant.
 #
 #    nexus-308ph (2026-08-02): ALSO stamps build_ref, a per-run nonce
 #    (<git short sha>+<epoch seconds>-<pid>) — mirrors
@@ -477,23 +476,7 @@ print(".".join(m.groups()) if m else "")
 ')"
 [ -n "$GATE_STAMP" ] || { echo "[gate] FATAL: could not parse REQUIRED_ENGINE_VERSION" >&2; exit 2; }
 GATE_BUILD_REF=""
-if [ -n "${NX_GATE_ARTIFACTS:-}" ]; then
-  # nexus-mfage fix B item 3: consume the stamped dev jar
-  # tests/e2e/migration-rehearsal/build-artifacts.sh built ONCE for the
-  # whole battery. The manifest's tree identity must equal this checkout's
-  # (verified here, refuses on mismatch) — the same nexus-mbeke rule
-  # run.sh --artifacts applies. Nothing in this tree is built, stamped or
-  # restored by this gate: the jar is copied into the scratch dir and the
-  # manifest's per-BUILD build_ref is what the smoke leg's discriminator
-  # (nexus-308ph) asserts against /version, in place of the per-run nonce.
-  [ -z "${NEXUS_SERVICE_BIN:-}" ] || { echo "[gate] NX_GATE_ARTIFACTS and NEXUS_SERVICE_BIN are contradictory launch artifacts; set one" >&2; exit 2; }
-  GATE_MANIFEST="$("$E2E_PYTHON" "$REPO_ROOT/tests/e2e/lib/artifact_manifest.py" verify "$NX_GATE_ARTIFACTS" "$REPO_ROOT")" || exit 3
-  GATE_BUILD_REF="$("$E2E_PYTHON" -c 'import json,sys;print(json.loads(sys.argv[1])["build_ref"])' "$GATE_MANIFEST")"
-  GATE_JAR_REL="$("$E2E_PYTHON" -c 'import json,sys;print(json.loads(sys.argv[1])["artifacts"]["jar"]["path"])' "$GATE_MANIFEST")"
-  cp "$NX_GATE_ARTIFACTS/$GATE_JAR_REL" "$SCRATCH/gate-service.jar"
-  JAR="$SCRATCH/gate-service.jar"
-  echo "[gate] artifacts: jar from $NX_GATE_ARTIFACTS (build_ref=$GATE_BUILD_REF) — no jar rebuild, no stamp"
-elif [ -z "${NEXUS_SERVICE_BIN:-}" ]; then
+if [ -z "${NEXUS_SERVICE_BIN:-}" ]; then
   JAR_SKIP_REASON="$(uv run python3 -c '
 from tests.db._service_fixture import jar_freshness_skip_reason
 print(jar_freshness_skip_reason() or "")
@@ -520,8 +503,8 @@ print(jar_freshness_skip_reason() or "")
   # window) — it closes the CONCURRENT-CLOBBER hazard the bead names as
   # fixable, not that specific unreplicated occurrence.
   # nexus-iexvl round 3: routed through scripts/lib/release-props-lease.sh's
-  # release_props_stamp_under_lease -- the SAME shared helper run.sh and
-  # build-artifacts.sh use -- instead of a hand-rolled acquire+guard+
+  # release_props_stamp_under_lease -- the SAME shared helper
+  # build-gate-jar.sh uses -- instead of a hand-rolled acquire+guard+
   # snapshot+sed sequence with local _restore_props/_restore_props_and_
   # release_lease functions. Those hand-rolled restores never cleared
   # RELEASE_PROPS_SNAPSHOT or removed the snapshot file, so this script's
@@ -534,7 +517,7 @@ print(jar_freshness_skip_reason() or "")
   # release_props_restore_and_release (below) restores AND removes the
   # snapshot file before releasing, so cleanup()'s trailing restore is a
   # genuine no-op once RELEASE_PROPS_SNAPSHOT is cleared to "" after each
-  # restore call, exactly as run.sh does for its own guided-family stamp.
+  # restore call, exactly as build-gate-jar.sh does.
   RELEASE_PROPS_SNAPSHOT="$(release_props_stamp_under_lease "$RELEASE_PROPS" service "${NX_BUILD_LEASE_WAIT:-3600}" "release_version=$GATE_STAMP" "build_ref=$GATE_BUILD_REF")" || exit $?
   echo "[gate] rebuilding service jar (release_version=$GATE_STAMP build_ref=$GATE_BUILD_REF)..."
   # Bare mvnw, deliberately (see the lease comment above) — this process
@@ -933,16 +916,16 @@ fi
 
 # The mandatory_regression_pin carve-out (nexus-z0o2p.41). The GitHub-backed pins skip under this
 # gate's fenced HOME (the fence never mirrors ~/.config/gh), and conftest holds a skipped pin to a zero
-# budget, so they read this gate FAILED on every run. They run in tests/e2e/mandatory-pins-gate.sh,
+# budget, so they read this gate FAILED on every run. They run in tests/e2e/release-preflight.sh,
 # under a real HOME. Same exact-count discipline as the carve-outs above, same reason: the marker
 # must never become a place to park a red test, and a pin that left this selection must still exist.
-# The selection expression and the count live in tests/e2e/lib/mandatory_pins.sh, shared with that gate.
+# The selection expression and the count live in tests/e2e/lib/mandatory_pins.sh, shared with that preflight.
 # shellcheck source=lib/mandatory_pins.sh
 . "$REPO_ROOT/tests/e2e/lib/mandatory_pins.sh"
 MANDATORY_PIN_COUNT="$(NX_TEST_T2_SUBSTRATE=none uv run pytest -m "$MANDATORY_PIN_MARK_EXPR" --collect-only -q 2>/dev/null | grep -cE '::' || true)"
 if [ "$MANDATORY_PIN_COUNT" -ne "$MANDATORY_PIN_EXPECTED" ]; then
   echo "[gate] VACUITY GUARD TRIPPED: mandatory_regression_pin carve-out is $MANDATORY_PIN_COUNT tests, expected exactly $MANDATORY_PIN_EXPECTED" >&2
-  echo "[gate] (a new pin must bump MANDATORY_PIN_EXPECTED in tests/e2e/lib/mandatory_pins.sh; it runs in tests/e2e/mandatory-pins-gate.sh, not here)" >&2
+  echo "[gate] (a new pin must bump MANDATORY_PIN_EXPECTED in tests/e2e/lib/mandatory_pins.sh; it runs in tests/e2e/release-preflight.sh, not here)" >&2
   exit 1
 fi
 

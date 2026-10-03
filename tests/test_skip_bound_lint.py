@@ -110,7 +110,7 @@ introduced by this change): five ``pytest.importorskip("yaml")`` /
 ``shutil.which`` / filesystem-existence-conditioned ``skipif`` sites in
 genuinely gate-like files (``test_plan_template_inline_var_lint.py``,
 ``test_plugin_release_drift_ledger.py``, ``test_plugin_release_workflow.py``
-x2, ``test_plugin_structure.py``, ``test_plugin_surface_smoke_wiring.py``,
+x2, ``test_plugin_structure.py``,
 ``test_rehearsal_container_guard_lint.py``) that have no non-vacuity budget
 of their own. Each is allowlisted with its own reason at the entry, per the
 shrink-only rule below -- do not widen the allowlist for a NEW site; a new
@@ -178,9 +178,9 @@ _GATE_KEYWORDS: tuple[str, ...] = (
 #: 253d0bc4a: all three sat unenforced in the substrate bucket).
 _GATE_LIKE_BY_NAME: dict[str, str] = {
     "tests/scripts/test_generation_flip_live_holder.py":
-        "release skill step 1c: required for any change to the shim / flip / GC "
-        "machinery (moved out of AGENTS.md 2026-09-20, when that section became a "
-        "pointer and the skill became the authority)",
+        "its own header: the live-holder flip property on real generations "
+        "(nexus-utpuw.16), the only fast-loop guard on the shim / flip / GC "
+        "machinery",
     "tests/scripts/test_reinstall_tool_generations.py":
         "its own docstring: 'THIS MODULE IS THE ACCEPTANCE CRITERION' (nexus-utpuw.8)",
 }
@@ -267,8 +267,6 @@ GATE_LIKE_SKIP_ALLOWLIST: dict[str, int] = {
     # (bash is assumed present on every dev/CI box this suite runs on), plus
     # a sibling "no ```! bash block found" content skip in the same test
     # function that inherits the function-level bash-availability marker.
-    # pytest.importorskip("yaml") reading the plugin-surface-smoke workflow.
-    "tests/test_plugin_surface_smoke_wiring.py": 1,
     # skipif(os.path.exists("/.dockerenv") or .../.containerenv) -- this
     # test's own purpose is to assert the guard fires OUTSIDE a container;
     # it is a legitimate platform-shape condition, not a missing-dependency

@@ -148,8 +148,8 @@ def test_jar_is_rebuilt_on_every_package() -> None:
     next `package` without `clean` jar:jar treats that file as up to date and
     skips, so the native build would see the uber jar again and embed every
     library twice, silently. forceCreation makes jar:jar rewrite the thin jar
-    every time (code review of nexus-lhr6a; build-artifacts.sh runs a JVM
-    package and then -Pnative package on the same tree)."""
+    every time (code review of nexus-lhr6a; a JVM package and then a -Pnative package
+    can run on the same tree)."""
     root = ET.parse(POM_PATH).getroot()
     jars = [
         plugin

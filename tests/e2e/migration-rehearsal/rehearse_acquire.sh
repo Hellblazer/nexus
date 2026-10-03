@@ -11,16 +11,16 @@
 #   store/index/search    drive the binary: write, embed, read back
 #   doctor                no ✗
 #
-# WHY THIS EXISTS SEPARATELY FROM --shakeout. The shakeout drives the LOCALLY
-# BUILT -Ob candidate. The published artifact is a different set of bytes from a
-# different builder: full native build (not quick-build), codesign, cosign, and
+# WHY THIS EXISTS. Any locally built candidate differs from the published
+# artifact, which is a different set of bytes from a different builder: full
+# native build (not quick-build), codesign, cosign, and
 # the PG-bundle packaging. A defect introduced by the release workflow is
-# invisible to the local shakeout BY CONSTRUCTION — nexus-2oh5q is exactly that
+# invisible to every local gate BY CONSTRUCTION — nexus-2oh5q is exactly that
 # hazard (signing breaking JNI dlopen of the bundled onnxruntime/DJL libs),
 # dormant today only because the Apple secrets are unprovisioned. This leg is
 # what would catch it.
 #
-# LINEAGE. This is the acquire half of the retired `rehearse_cold.sh`
+# LINEAGE. This is the acquire half of the retired cold-install rehearsal
 # (nexus-4mm24), which RDR-155 P4b retired because its TAIL drove
 # `nx guided-upgrade`. The acquire half never depended on those verbs; retiring
 # the whole script took a published-artifact gate with it and left conexus's

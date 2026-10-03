@@ -178,12 +178,13 @@ it, and a stale local process is what `Process freshness` reports. That per-clie
 needs the engine to count would-refuse writes by `client_version` and report a
 `last_would_refuse_at` timestamp in `/v1/status` (an additive change, nexus-z0o2p.39).
 
-## What the published-client gate expects
+## What the published-client gate expected
 
-`tests/e2e/published-client-write-gate.sh` runs the published client against the candidate
-engine in both modes (`NX_GATE_OWNERLESS_WRITE_MODE=log-only` and `enforce`). With the
-published client older than the paired release it expects exit 0 under `log-only` (and a
-non-zero would-refuse count), and exit 2 under `enforce`
-(`NX_EXPECTED_CLIENT_LAG=nexus-z0o2p.24`, accepted only when both journeys failed with the
-refusal and the engine's refusal counter is at least 2 behind it). The `engine-release`
-skill, Step 3c, carries the invocations.
+A published-client write gate used to run the published client against the candidate
+engine in both modes (`log-only` and `enforce`); it was deleted in cleanup step 11,
+and the `engine-release` skill's Step 3c went with it. With a published
+client older than the paired release, the expectation it encoded still describes the
+behaviour: exit 0 under `log-only` (and a non-zero would-refuse count), and a refusal
+under `enforce`, when the engine's refusal counter is at least 2 behind it. The
+post-deploy cloud gate (`tests/e2e/cloud-client-path-gate.sh`, Step 6.1) is the check
+that remains.

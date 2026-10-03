@@ -783,7 +783,7 @@ def _run_check_plan_library() -> None:
     service-mode install stopped exiting non-zero on "T2 database not
     found". That stub ALWAYS printed N/A and ALWAYS exited 0 — a vacuous
     pass no different from the thing it replaced (nexus-vl8lk); the
-    dedicated release-sandbox smoke arm even ran the (now-retired)
+    dedicated sandbox smoke arm even ran the (now-retired)
     ``nx catalog setup`` purely to satisfy this check, its failure
     swallowed by ``|| true``, so neither half was ever exercised.
 

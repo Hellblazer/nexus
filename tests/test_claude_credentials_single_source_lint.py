@@ -92,12 +92,10 @@ a direct ``_violations()`` call returning empty hits). Accepted, not
 fixed here: a full data-flow analysis -- tracking a string literal
 through an arbitrary variable before it reaches a write call -- is out of
 proportion to what a cheap, line-based lint can do, and RDR-219's
-defense-in-depth does not rest on this one layer alone. The credential
-janitor (``tests/test_credential_janitor.py``, wired into the release
-battery per nexus-wauo1.24) finds the RESULTING ``.credentials.json``
-file on disk by walking the filesystem for its FILENAME, regardless of
-how the write that created it reached that name -- so an indirected write
-this lint misses is still caught the moment it actually lands a file.
+defense-in-depth does not rest on this one layer alone. (A credential
+janitor that walked the filesystem for the RESULTING credentials FILENAME
+used to back this up in the release battery; it was deleted in cleanup
+step 11, nexus-0r1uz.)
 
 THE EXEMPTION LIST (closed; see ``_EXEMPT_PATHS``/``_EXEMPT_PREFIXES``, and
 ``test_exempt_list_is_exactly_this`` which pins it): this lint's own file
@@ -181,7 +179,6 @@ FORBIDDEN_CREDENTIAL_NAMES: dict[str, frozenset[str]] = {
         _rel(_CLAUDE_CHILD_ENV),
         "tests/test_claude_mcp_grant_launcher.py",
         "tests/test_claude_child_env.py",
-        "tests/test_credential_janitor.py",
     }),
 }
 
@@ -401,8 +398,7 @@ def test_detector_flags_the_pre_fix_auth_login_shape() -> None:
 
 def test_detector_flags_the_pre_fix_run_sh_shape() -> None:
     """The single-quoted variant `tests/e2e/migration-rehearsal/run.sh`
-    carried in both the --fullstack and --shakeout-e2e legs before this
-    fix."""
+    carried in two since-deleted legs before this fix."""
     synthetic = (
         "FRESHCREDS=\"$(security find-generic-password -s 'Claude Code-credentials' -w 2>/dev/null || true)\"\n"
     )
