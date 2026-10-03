@@ -1,15 +1,23 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""RDR-184 Gap-4 mechanization (nexus-s88vq):
-subagent_git_write_requires_orchestrator.
+"""The subagent git-write guard, ``subagent_git_write_requires_orchestrator``.
 
-Subagents (PreToolUse payloads carrying ``agent_id`` — the documented
-subagent-origin marker) are denied ``git commit`` / ``git add`` in the
-PRIMARY checkout. The main conversation (no ``agent_id``), read-only git,
-linked-worktree agents, and ``# routing-allow:`` escapes all pass.
+One copy: ``conexus/hooks/scripts/routing/subagent_git_write_requires_orchestrator.py``,
+the script ``hooks.json`` runs on every PreToolUse Bash call (RDR-184 Gap-4,
+nexus-s88vq; widened by nexus-ays2l and hardened over nexus-3c92m rounds
+1-9 and nexus-0r5l8).
+
+A subagent (a PreToolUse payload carrying ``agent_id``) is denied any git
+write verb in the PRIMARY checkout. The main conversation, read-only git,
+linked-worktree agents and a ``# routing-allow:`` escape pass; a cwd whose
+worktree state cannot be determined fails CLOSED.
+
+Every case drives the real script as a subprocess, the way Claude Code
+does. The deny and allow tables are grouped by bypass family so a red names
+the family, and each assertion names the command that broke it.
 """
 from __future__ import annotations
 
-import importlib.util
+import base64
 import json
 import os
 import pathlib
@@ -17,95 +25,24 @@ import runpy
 import subprocess
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
 PROJECT_ROOT = pathlib.Path(__file__).parent.parent
-
-#: The verb ``hooks.json`` declares since nexus-t9klx. The guard moved into
-#: the wheel: a bare ``python3`` entry cannot run on Windows, a console
-#: script can.
-VERB = "subagent-git-write-gate"
-
-#: Drives that verb through the real entry point ``hooks.json`` spawns.
-#: ``-m`` rather than the installed ``nx-hook`` console script, so these
-#: cases exercise THIS checkout and not whichever generation the box has
-#: installed.
-_VERB_ARGV = [sys.executable, "-m", "nexus._hook_runtime.entry", VERB]
-
-#: The guard's own file, for the in-process cases below that load it fresh
-#: per case with ``spec_from_file_location``. Those keep loading by path
-#: deliberately: several of them mutate module globals, and a fresh module
-#: per case is the isolation they depend on, which a plain ``import`` would
-#: quietly remove.
-HOOK_SCRIPT = (
-    PROJECT_ROOT / "src" / "nexus" / "hooks" / "subagent_git_write_gate.py"
-)
+ROUTING = PROJECT_ROOT / "conexus" / "hooks" / "scripts" / "routing"
+SCRIPT = ROUTING / "subagent_git_write_requires_orchestrator.py"
 
 AGENT_ID = "aworker-x-6f59dab8bbb14864"
 
-#: nexus-3c92m perf-test constants (shared by the near-linear-scaling perf
-#: tests below). PR #1471 (7.14.0 release, run 32451880113, shard 4/4) hit
-#: two absolute-millisecond budgets on a loaded GitHub runner:
-#: `test_100kb_many_dollar_var_occurrences_scans_well_under_50ms` (52.567ms
-#: >= 50ms) and `test_100kb_and_1mb_perf`'s 1MB chained case (621ms >=
-#: 500ms) -- both well under 2x over, i.e. ordinary shared-runner
-#: contention, not a regression (tests/AGENTS.md's determinism rule: a test
-#: must not depend on machine speed). The replacement tests measure the
-#: SAME scan pipeline at two input sizes 10x apart, in-process, and assert
-#: near-linear scaling instead of a wall-clock number.
-#:
-#: _MAX_LINEAR_RATIO: a true O(n) algorithm costs ~10x for a 10x-larger
-#: input; this allows up to 2x that for per-call overhead and scheduler
-#: noise. The regression class these tests guard against (round 6/7's
-#: `_adjacent_letter_fragments` doing an O(start) slice on every match) is
-#: O(n^2), which costs ~100x for a 10x input -- five times past this
-#: threshold, so it still turns the tests red on any machine.
-_MAX_LINEAR_RATIO = 20
-#: Floor for the ratio's denominator so a sub-noise-floor small-size
-#: measurement can't produce a spuriously huge (or infinite) ratio.
-_RATIO_FLOOR_MS = 0.1
-#: Absolute ceiling on the larger measurement, SCALED to its input size so
-#: a uniform constant-factor slowdown is still caught (a pure ratio test is
-#: blind to one -- substantive-critic, T2 review-3c92m-perf-budget-redesign).
-#: 2000ms per MB is ~3.2x the worst LOADED-runner measurement on record
-#: (621ms for the 1MB chained shape, PR #1471 shard 4/4) and ~70x a quiet
-#: box (~25-29ms), so runner contention cannot reach it while a 3x+
-#: constant-factor regression or a hang does. The minimum keeps small
-#: inputs from getting a ceiling below scheduler noise.
-_CEILING_MS_PER_MB = 2_000
-_CEILING_MIN_MS = 250
+#: Characters a heredoc-free source file cannot spell inline without making
+#: the shapes below unreadable.
+D = chr(36)  # dollar
+BT = chr(96)  # backtick
+BS = chr(92)  # backslash
 
 
-def _abs_ceiling_ms(n_bytes: int) -> float:
-    return max(float(_CEILING_MIN_MS), _CEILING_MS_PER_MB * n_bytes / 1_000_000)
-
-
-def _run(payload: dict, env_extra: dict[str, str] | None = None):
-    env = os.environ.copy()
-    if env_extra:
-        env.update(env_extra)
-    return subprocess.run(
-        _VERB_ARGV,
-        input=json.dumps(payload),
-        capture_output=True, text=True, timeout=20, env=env,
-    )
-
-
-def _decision(proc):
-    """The envelope's ``hookSpecificOutput``, or ``{}`` for a no-decision
-    (empty stdout) verdict (nexus-452oy). A pass-through case now emits
-    NOTHING rather than an explicit allow, so ``"permissionDecision" not
-    in out`` is the "not blocked" assertion; ``out["permissionDecision"]
-    == "deny"`` is unaffected and still works.
-    """
-    assert proc.returncode == 0, proc.stderr
-    if proc.stdout == "":
-        return {}
-    return json.loads(proc.stdout)["hookSpecificOutput"]
-
-
-def _bash(cmd: str, *, agent: bool = True, cwd: str | None = None) -> dict:
+def _payload(cmd: str, *, agent: bool = True, cwd: str | None = None) -> dict:
     payload: dict = {"tool_name": "Bash", "tool_input": {"command": cmd}}
     if agent:
         payload["agent_id"] = AGENT_ID
@@ -115,22 +52,62 @@ def _bash(cmd: str, *, agent: bool = True, cwd: str | None = None) -> dict:
     return payload
 
 
+def _run_raw(stdin_text: str, env_extra: dict[str, str] | None = None):
+    """Spawn the script. ``NX_HOOK_PYTHON`` pins the interpreter its
+    preamble resolves to ``sys.executable``, so the re-exec is a no-op and
+    the case exercises THIS checkout rather than the box's installed
+    generation."""
+    env = os.environ.copy()
+    env["NX_HOOK_PYTHON"] = sys.executable
+    if env_extra:
+        env.update(env_extra)
+    return subprocess.run(
+        [sys.executable, str(SCRIPT)],
+        input=stdin_text, capture_output=True, text=True, timeout=20, env=env,
+    )
+
+
+def _run(payload: dict):
+    return _run_raw(json.dumps(payload))
+
+
+def _hso(proc) -> dict:
+    """The envelope's ``hookSpecificOutput``, or ``{}`` for a no-decision
+    (empty stdout) verdict. A pass-through emits NOTHING, so
+    ``"permissionDecision" not in out`` is the "not blocked" assertion."""
+    assert proc.returncode == 0, proc.stderr
+    if proc.stdout == "":
+        return {}
+    return json.loads(proc.stdout)["hookSpecificOutput"]
+
+
+def _verdict(cmd: str, cwd: pathlib.Path, *, agent: bool = True) -> dict:
+    return _hso(_run(_payload(cmd, agent=agent, cwd=str(cwd))))
+
+
+def _denied(cmd: str, cwd: pathlib.Path) -> bool:
+    return _verdict(cmd, cwd).get("permissionDecision") == "deny"
+
+
+def _deny_flags(cmds: list[str], cwd: pathlib.Path) -> list[bool]:
+    """One verdict per command, from parallel subprocesses."""
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        return list(pool.map(lambda c: _denied(c, cwd), cmds))
+
+
+def _not_denied(cmds: list[str], cwd: pathlib.Path) -> list[str]:
+    return [c for c, hit in zip(cmds, _deny_flags(cmds, cwd)) if not hit]
+
+
+def _denied_among(cmds: list[str], cwd: pathlib.Path) -> list[str]:
+    return [c for c, hit in zip(cmds, _deny_flags(cmds, cwd)) if hit]
+
+
 @pytest.fixture(autouse=True)
 def _isolate_log(tmp_path, monkeypatch):
+    """The script logs to the routing log / drop meter; keep every path
+    under tmp so a run never reaches a live engine or the real config."""
     monkeypatch.setenv("NX_ROUTING_LOG_PATH", str(tmp_path / "log.jsonl"))
-    # nexus-gjv9b review fold-in round 6, found via a full-suite red: this
-    # file's _run() invokes the real hook script as a subprocess with an
-    # UNMODIFIED os.environ, so without isolating NEXUS_CONFIG_DIR the
-    # writer-swapped log_routing_event's endpoint discovery
-    # (nexus.hooks._routing_lib's _engine_endpoint, once the plugin's
-    # routing/_lib.py) resolves against whatever is REALLY
-    # configured on the box running the suite -- a live lease, a real
-    # service_url/service_token -- and both attempts a real network call
-    # AND, on failure, would append to the REAL ~/.config/nexus/
-    # dropped_writes.jsonl instead of this test's own isolated path.
-    # Same isolation discipline test_routing_hooks.py's
-    # _isolate_endpoint_discovery already applies for this exact class
-    # of leak.
     monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path / "isolated-nexus-config"))
     monkeypatch.delenv("NX_SERVICE_URL", raising=False)
     monkeypatch.setenv("NX_DROPPED_WRITES_LOG_PATH", str(tmp_path / "dropped_writes.jsonl"))
@@ -161,2109 +138,433 @@ def linked_worktree(shared_repo: pathlib.Path, tmp_path: pathlib.Path) -> pathli
     return wt
 
 
-def test_the_verb_dispatches():
-    """Replaces the old "the script exists" case (nexus-t9klx).
-
-    That case was standing in for "the name hooks.json declares is one
-    something will actually run", which a file's existence only ever
-    approximated. Now the name is a verb, so ask the dispatcher.
-    """
-    from nexus._hook_runtime.entry import VERB_TABLE
-
-    assert VERB_TABLE.get(VERB) == "nexus.hooks.subagent_git_write_gate", (
-        f"nx-hook does not dispatch {VERB!r}; hooks.json declares it. "
-        f"Registered: {sorted(VERB_TABLE)}"
-    )
-    assert HOOK_SCRIPT.exists(), (
-        "the module that verb resolves to is missing; the in-process cases "
-        "below load it by path"
-    )
+# ---------------------------------------------------------------------------
+# Wiring: the script on disk is the one hooks.json and registry.yaml name.
+# ---------------------------------------------------------------------------
 
 
-def _declared_paths(hooks: dict, event: str) -> list[str]:
-    """Every script path the *event*'s entries name, from either form.
-
-    RDR-215 nexus-q02nx.21 moved the script out of the ``command`` string
-    and into ``args``, and left some entries as ``mcp_tool`` with no
-    ``command`` key at all. A reader that indexes ``h["command"]``
-    KeyErrors on those; one that uses ``.get`` sees only ``"python3"``.
-    Asserting on the full path is also strictly stronger than the
-    filename substring these tests used to match: the rewrite declared
-    this script at ``hooks/scripts/<name>.py`` when it lives in
-    ``hooks/scripts/routing/``, which a substring match cannot see and a
-    path match can.
-    """
-    out = []
-    for entry in hooks["hooks"].get(event, []):
+def test_the_one_copy_is_wired():
+    hooks = json.loads((PROJECT_ROOT / "conexus" / "hooks" / "hooks.json").read_text())
+    declared: list[str] = []
+    for entry in hooks["hooks"]["PreToolUse"]:
         for h in entry.get("hooks", []):
-            if not isinstance(h, dict):
-                continue
-            out.append(h.get("command", ""))
-            out.extend(a for a in h.get("args", []) if isinstance(a, str))
-    return out
-
-
-def test_registered_in_hooks_json():
-    hooks = json.loads(
-        (PROJECT_ROOT / "conexus" / "hooks" / "hooks.json").read_text()
-    )
-    declared = _declared_paths(hooks, "PreToolUse")
-    # 7.58.0 wires the plugin script, not the verb: an older nx-hook exits 2
-    # on a verb it does not know (plugin-ahead skew, nexus-t9klx). Either
-    # shape is accepted, and a script entry must name a file that exists.
-    script = "hooks/scripts/routing/subagent_git_write_requires_orchestrator.py"
-    scripts = [p for p in declared if p.endswith(script)]
-    if scripts:
-        assert (PROJECT_ROOT / "conexus" / script).is_file()
-        return
-    assert VERB in declared, (
-        f"hooks.json declares the git-write guard in neither shape on a "
-        f"PreToolUse entry. Declared: {declared}"
+            if isinstance(h, dict):
+                declared.extend(a for a in h.get("args", []) if isinstance(a, str))
+    wired = "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/routing/" + SCRIPT.name
+    assert wired in declared, f"hooks.json PreToolUse does not run {SCRIPT.name}: {declared}"
+    assert SCRIPT.is_file()
+    assert "subagent_git_write_requires_orchestrator:" in (ROUTING / "registry.yaml").read_text()
+    assert not (PROJECT_ROOT / "src" / "nexus" / "hooks" / "subagent_git_write_gate.py").exists(), (
+        "a second copy of the guard is back in the wheel"
     )
 
 
-def test_registered_in_registry_yaml():
-    text = (
-        PROJECT_ROOT / "conexus" / "hooks" / "scripts" / "routing" / "registry.yaml"
-    ).read_text()
-    assert "subagent_git_write_requires_orchestrator:" in text
+# ---------------------------------------------------------------------------
+# DENY tables. Each family is one collected case; each entry is a command a
+# subagent must not be able to run in the shared tree.
+# ---------------------------------------------------------------------------
 
-
-class TestDeny:
-    def test_subagent_commit_in_shared_tree_denied(self, shared_repo):
-        out = _decision(_run(_bash("git commit -m msg", cwd=str(shared_repo))))
-        assert out["permissionDecision"] == "deny"
-        assert "orchestrator" in out["permissionDecisionReason"].lower()
-
-    def test_subagent_add_in_shared_tree_denied(self, shared_repo):
-        out = _decision(_run(_bash("git add src/file.py", cwd=str(shared_repo))))
-        assert out["permissionDecision"] == "deny"
-
-    def test_compound_command_denied(self, shared_repo):
-        out = _decision(
-            _run(_bash("uv run pytest && git add x.py && git commit -m done", cwd=str(shared_repo)))
-        )
-        assert out["permissionDecision"] == "deny"
-
-    def test_global_flag_form_denied(self, shared_repo):
-        out = _decision(
-            _run(_bash(f"git -C {shared_repo} commit -m msg", cwd=str(shared_repo)))
-        )
-        assert out["permissionDecision"] == "deny"
-
-
-class TestAllow:
-    def test_main_conversation_commit_allowed(self, shared_repo):
-        out = _decision(_run(_bash("git commit -m msg", agent=False, cwd=str(shared_repo))))
-        assert "permissionDecision" not in out
-
-    def test_subagent_readonly_git_allowed(self, shared_repo):
-        for cmd in ("git status", "git diff", "git log --oneline", "git show HEAD"):
-            out = _decision(_run(_bash(cmd, cwd=str(shared_repo))))
-            assert "permissionDecision" not in out, cmd
-
-    def test_subagent_nongit_allowed(self, shared_repo):
-        out = _decision(_run(_bash("ls -la && echo commit", cwd=str(shared_repo))))
-        assert "permissionDecision" not in out
-
-    def test_commit_substring_not_subcommand_denied_since_round4(self, shared_repo):
-        """PRE-nexus-3c92m-round-4 this allowed (the structured parser saw
-        `--grep=commit` was an argument, not a subcommand). Round 4 replaced
-        that structured decision with a structure-agnostic proximity scan
-        (module docstring): `git` near the literal word `commit` -- ANYWHERE,
-        including inside a `--grep` pattern value -- now denies. Accepted
-        false positive per the round-4 design (false positives are cheap;
-        false negatives destroy data)."""
-        out = _decision(_run(_bash("git log --grep=commit", cwd=str(shared_repo))))
-        assert out["permissionDecision"] == "deny"
-
-    def test_linked_worktree_commit_allowed(self, linked_worktree):
-        """Worktree-isolated agents own their tree — their local commits are
-        the documented harvest choreography, never blocked. Still true under
-        round 4: a POSITIVELY PROVEN linked worktree is the one exemption
-        left in the primary rule."""
-        out = _decision(_run(_bash("git commit -m wt", cwd=str(linked_worktree))))
-        assert "permissionDecision" not in out
-
-    def test_non_repo_cwd_now_fails_CLOSED_since_round4(self, tmp_path):
-        """PRE-round-4 this allowed: the old design fail-OPENED hygiene verbs
-        (add/commit) when the worktree state was undeterminable (nexus-ays2l
-        item 3), reasoning that `add` mutates only the index and destroys
-        nothing. Round 4 retires that split entirely (module docstring): the
-        ONLY exemption from the primary rule left is a POSITIVELY PROVEN
-        linked worktree; "I could not prove this tree is safe" no longer
-        earns a pass for any write verb, hygiene or destructive."""
-        out = _decision(_run(_bash("git commit -m msg", cwd=str(tmp_path / "norepo"))))
-        assert out["permissionDecision"] == "deny"
-
-    def test_escape_token_allows_and_logs(self, shared_repo, tmp_path):
-        """nexus-gjv9b PART 2's writer swap (16fd7f074, before this
-        bead's own fold-in rounds) replaced the direct
-        ``routing_log.jsonl`` append with a best-effort engine POST that
-        degrades to the drop meter on failure -- this subprocess has no
-        engine to reach (NEXUS_CONFIG_DIR is isolated to an empty dir by
-        the fixture above), so the escape fire lands in the
-        NX_DROPPED_WRITES_LOG_PATH log instead of ``log.jsonl``, which
-        this function has not written to since that commit. The escape
-        audit trail (nexus-mzvwa.9's over-use-visibility concern) still
-        survives the engine-down window: _record_dropped_routing_event
-        carries the original event's ``rule``/``outcome``/
-        ``escape_reason`` fields alongside the generic drop metadata."""
-        out = _decision(
-            _run(_bash("git commit -m msg # routing-allow: orchestrator sanctioned", cwd=str(shared_repo)))
-        )
-        assert "permissionDecision" not in out
-        log = (tmp_path / "dropped_writes.jsonl").read_text()
-        assert '"outcome": "escape"' in log or '"escape"' in log
-
-    def test_junk_stdin_fails_open(self):
-        proc = subprocess.run(
-            _VERB_ARGV,
-            input="not json", capture_output=True, text=True, timeout=20,
-            env={**os.environ},
-        )
-        assert proc.returncode == 0
-
-
-# ── nexus-ays2l: the WORKING-TREE-DESTROYING verbs ──────────────────────────
-#
-# The original verb set was {"commit", "add"} — strictly narrower than the set
-# of git verbs that can destroy an orchestrator's uncommitted work. `git add`
-# mutates only the INDEX and destroys nothing; `git checkout -- <path>` and
-# `git restore <path>` and `git stash` mutate the WORKING TREE and delete
-# uncommitted edits outright. The guard blocked the harmless-but-untidy verbs
-# and permitted the destructive ones.
-#
-# Damage signature that produced the bead (2026-07-24): three silent reversions
-# of src/nexus/upgrade_finish.py over ~10 minutes with two subagents live,
-# sibling files edited in the same window untouched, NO stash entry and NO
-# reflog entry — the trace `git checkout -- <path>` leaves and `git stash`
-# does not. Attribution was never proven; what IS established is that the
-# guard would not have stopped any subagent that ran those verbs.
-
-
-_DESTRUCTIVE_INVOCATIONS = [
-    "git checkout -- src/nexus/upgrade_finish.py",
-    "git checkout HEAD -- src/nexus/upgrade_finish.py",
-    "git restore src/nexus/upgrade_finish.py",
-    "git stash",
-    "git stash push -m wip",
-    "git clean -fd",
-    "git reset --hard HEAD",
-    "git rm -f src/nexus/upgrade_finish.py",
-    # nexus-3c92m: `switch` moves HEAD exactly like `checkout <branch>`
-    # (already covered above) but was the one verb missing from the set.
-    "git switch main",
-    "git switch -c newbranch",
-    "git switch --detach HEAD",
-]
-
-
-@pytest.mark.parametrize("cmd", _DESTRUCTIVE_INVOCATIONS)
-def test_destructive_verbs_denied_in_shared_tree(cmd, shared_repo):
-    out = _decision(_run(_bash(cmd, cwd=str(shared_repo))))
-    assert out["permissionDecision"] == "deny", f"{cmd} was permitted: {out}"
-    assert "uncommitted" in out["permissionDecisionReason"].lower()
-
-
-@pytest.mark.parametrize("cmd", [
-    "git show HEAD:src/nexus/upgrade_finish.py",
-    "git status",
-    "git diff",
-    "git log --oneline -5",
-])
-def test_read_only_inspection_still_allowed(cmd, shared_repo):
-    """Reviewers must keep working. The bead's stated preference: allowlist the
-    read-only invocations rather than blanket-denying the verb."""
-    out = _decision(_run(_bash(cmd, cwd=str(shared_repo))))
-    assert "permissionDecision" not in out, f"{cmd} was blocked: {out}"
-
-
-@pytest.mark.parametrize("cmd", ["git stash list", "git stash show -p"])
-def test_stash_readonly_forms_now_denied_since_round4(cmd, shared_repo):
-    """PRE-round-4 these allowed via `_READ_ONLY_FORMS` (a read-only-spelling
-    allowlist consulted by the STRUCTURED parser that used to decide).
-    Round 4's primary rule has no such refinement -- `stash` is
-    unconditionally in the write-verb list and the primary rule does not
-    inspect what follows it. `_matched_write_subcommands` (secondary) still
-    knows `stash list`/`stash show` are reads, but per the module docstring
-    the secondary parser never overrides the primary verdict. Accepted
-    regression: false positives are cheap under this design (a reviewer who
-    needs `git stash list` hands it to the orchestrator)."""
-    out = _decision(_run(_bash(cmd, cwd=str(shared_repo))))
-    assert out["permissionDecision"] == "deny", f"{cmd} was permitted: {out}"
-
-
-@pytest.mark.parametrize("cmd", _DESTRUCTIVE_INVOCATIONS)
-def test_destructive_verbs_allowed_in_linked_worktree(cmd, linked_worktree):
-    """A worktree-isolated agent owns its tree — including destroying it."""
-    out = _decision(_run(_bash(cmd, cwd=str(linked_worktree))))
-    assert "permissionDecision" not in out, f"{cmd} was blocked: {out}"
-
-
-def test_main_conversation_unaffected_by_the_widening(shared_repo):
-    """The rule targets subagents. The orchestrator resets its own tree."""
-    out = _decision(_run(_bash("git checkout -- x.py", agent=False, cwd=str(shared_repo))))
-    assert "permissionDecision" not in out
-
-
-def test_routing_allow_escape_still_works(shared_repo):
-    out = _decision(_run(_bash(
-        "git checkout -- x.py  # routing-allow: orchestrator asked me to revert this",
-        cwd=str(shared_repo),
-    )))
-    assert "permissionDecision" not in out
-
-
-# ── Fail mode WAS split by what is at stake (Hal ruling 2026-07-25, item 3),
-# retired by nexus-3c92m round 4: the primary rule's ONLY exemption is a
-# POSITIVELY PROVEN linked worktree; an undeterminable worktree state now
-# fails closed UNIFORMLY, for hygiene verbs (add/commit) exactly the same as
-# destructive ones. See the module docstring's round-4 section. ──────────────
-
-
-def test_destructive_verb_fails_CLOSED_when_worktree_undeterminable(tmp_path):
-    """A non-repo cwd makes `git rev-parse` fail, so worktree state is
-    undeterminable. Destroyers deny anyway: 'I could not tell whether this tree
-    is shared' is not a licence to destroy one."""
-    not_a_repo = tmp_path / "bare"
-    not_a_repo.mkdir()
-    out = _decision(_run(_bash("git checkout -- x.py", cwd=str(not_a_repo))))
-    assert out["permissionDecision"] == "deny", out
-    reason = out["permissionDecisionReason"].lower()
-    assert "could not be determined" in reason and "fail closed" in reason
-
-
-def test_index_verbs_now_ALSO_fail_CLOSED_when_worktree_undeterminable_since_round4(tmp_path):
-    """PRE-round-4 this allowed: `add`/`commit` were a HYGIENE bucket that
-    fail-OPENED on an undeterminable worktree (a flaky `git rev-parse` must
-    never wedge agent work over mere tidiness, and `add` destroys nothing).
-    Round 4 retires that split (module docstring): the primary rule's only
-    exemption is a POSITIVELY PROVEN linked worktree, full stop -- an
-    undeterminable state no longer earns a pass for ANY write verb."""
-    not_a_repo = tmp_path / "bare2"
-    not_a_repo.mkdir()
-    for cmd in ("git add -A", "git commit -m x"):
-        out = _decision(_run(_bash(cmd, cwd=str(not_a_repo))))
-        assert out["permissionDecision"] == "deny", f"{cmd}: {out}"
-
-
-def test_bare_stash_and_stash_list_both_denied_since_round4(shared_repo):
-    """PRE-round-4: `git stash list` read (allowlisted read-only spelling);
-    `git stash` STASHED (denied). Round 4's primary rule has no read-only-
-    spelling refinement for `stash` -- both now deny. See
-    `test_stash_readonly_forms_now_denied_since_round4` for the dedicated
-    parametrized coverage of the `list`/`show` forms; this test keeps the
-    original two-command shape as a regression lock."""
-    assert _decision(_run(_bash("git stash", cwd=str(shared_repo))))["permissionDecision"] == "deny"
-    assert _decision(_run(_bash("git stash list", cwd=str(shared_repo))))["permissionDecision"] == "deny"
-
-
-def test_destructive_verb_hidden_in_a_compound_command_is_caught(shared_repo):
-    """Segment splitting must see past `&&` — the realistic shape is a cleanup
-    tail on an otherwise innocuous command."""
-    out = _decision(_run(_bash(
-        "pytest -q && git checkout -- src/nexus/upgrade_finish.py", cwd=str(shared_repo),
-    )))
-    assert out["permissionDecision"] == "deny", out
-
-
-def test_unbalanced_quote_commit_is_still_denied(shared_repo):
-    """nexus-2e874: a stray quote in any argument used to make shlex reject
-    the segment and the guard silently skipped it -- a subagent `git commit`
-    (or stash) became invisible. The degraded whitespace fallback keeps the
-    `git <subcommand>` anchor visible."""
-    out = _decision(_run(_bash('git commit -m "unterminated', cwd=str(shared_repo))))
-    assert out["permissionDecision"] == "deny", out
-
-
-def test_unbalanced_quote_nongit_segment_now_denied_since_round4(shared_repo):
-    """PRE-round-4 this allowed: the structured parser anchored on a
-    segment's FIRST token, and `echo`'s segment didn't start with `git`, so
-    a quoted-string mention of "git commit" never counted. Round 4's primary
-    rule doesn't care about segment position AT ALL -- it's a pure proximity
-    scan over the raw text (module docstring: "quoting... creates no
-    exemption"), so `git commit` appearing anywhere, including inside an
-    unterminated echo string, now denies. Accepted false positive."""
-    out = _decision(_run(_bash('echo "later run git commit -m x', cwd=str(shared_repo))))
-    assert out["permissionDecision"] == "deny", out
-
-
-def test_quote_inside_the_subcommand_is_still_denied(shared_repo):
-    """Review Important-1 (nexus-2e874): quote INSIDE the verb -- the
-    quote-removed degraded variant must still anchor `git commit`."""
-    out = _decision(_run(_bash('git com"mit -m msg', cwd=str(shared_repo))))
-    assert out["permissionDecision"] == "deny", out
-
-
-# ── nexus-3c92m: incident follow-up (2026-08-20) ─────────────────────────────
-#
-# A code-review-expert subagent falsified nexus-pfuns' fixes with
-# `git checkout -- <file>` on three uncommitted production files in the
-# shared tree (T2 nexus/lessons-coordination-2026-08-20). `switch` (tested
-# below) was a genuine minor gap -- `git switch` moves HEAD exactly like
-# `git checkout <branch>` (already denied) but was never added to the
-# destructive set -- but it was NOT what let the incident through.
-#
-# CORRECTED ROOT CAUSE (superseding an earlier, REFUTED hypothesis that the
-# live guard was simply an older pinned plugin release): the coordinator
-# confirmed from the live transcript that all three wiping Bash calls ran
-# against TODAY's plugin and got `permissionDecision=allow`. The actual bug:
-# `_matched_write_subcommands` split segments on `&&`/`||`/`;`/`|`/`then`/
-# `do` but never on a bare NEWLINE, and `_git_subcommand` only looks at a
-# segment's FIRST token. The real incident shape was a multi-line script
-# joined by nothing but newlines -- `cd dir` / `echo ...` / a `python3 -
-# <<'EOF' ... EOF` heredoc / then `git checkout -- <path>` on a LATER line --
-# so the entire multi-line blob was one segment whose first token was `cd`,
-# and the destructive verb many tokens later was never inspected. A second,
-# independent incident (`git add -N` / `git reset -- <pathspec>`, sibling
-# c00dw) traced to the SAME cause -- confirmed by replaying the pre-fix
-# splitter offline: the single-line forms of both were already denied
-# (add/reset match unconditionally, independent of arguments); only the
-# multi-line/heredoc-adjacent forms slipped through. Not a separate
-# verb-matching gap.
-#
-# These tests lock in: the exact incident shape; `$(...)`/backtick
-# substitution; a destructive verb after a bare `#` comment line
-# (newline-joined, no `;`); a heredoc body fed to a real shell (scanned) vs.
-# fed to `python3` and merely mentioning "git checkout" as text (must stay
-# ALLOWED -- the false-positive case); and the add -N/reset -- pathspec
-# forms, single-line and multi-line.
-
-
-class TestNexus3c92mNamedInvocations:
-    """The exact command shapes named in the bead, each as its own test."""
-
-    def test_checkout_pathspec_form_denied(self, shared_repo):
-        out = _decision(_run(_bash(
-            "git checkout -- src/nexus/upgrade_finish.py", cwd=str(shared_repo),
-        )))
-        assert out["permissionDecision"] == "deny"
-
-    def test_checkout_bare_branch_form_denied(self, shared_repo):
-        """`git checkout <branch>` (no `--`, no pathspec) moves HEAD in the
-        shared tree just as destructively as the pathspec form."""
-        out = _decision(_run(_bash("git checkout main", cwd=str(shared_repo))))
-        assert out["permissionDecision"] == "deny"
-
-    def test_global_C_flag_restore_denied(self, shared_repo):
-        out = _decision(_run(_bash(
-            f"git -C {shared_repo} restore .", cwd=str(shared_repo),
-        )))
-        assert out["permissionDecision"] == "deny"
-
-    def test_reset_hard_bare_denied(self, shared_repo):
-        out = _decision(_run(_bash("git reset --hard", cwd=str(shared_repo))))
-        assert out["permissionDecision"] == "deny"
-
-    def test_clean_fd_denied(self, shared_repo):
-        out = _decision(_run(_bash("git clean -fd", cwd=str(shared_repo))))
-        assert out["permissionDecision"] == "deny"
-
-    def test_bare_stash_denied(self, shared_repo):
-        out = _decision(_run(_bash("git stash", cwd=str(shared_repo))))
-        assert out["permissionDecision"] == "deny"
-
-    @pytest.mark.parametrize("cmd", [
+_DENY_FAMILIES: dict[str, list[str]] = {
+    # The index writers, the working-tree destroyers and the history movers.
+    "write_verbs": [
+        "git commit -m msg",
+        "git add src/file.py",
+        "git add -N t3.py",
+        "git add --intent-to-add t3.py",
+        "git checkout -- src/nexus/upgrade_finish.py",
+        "git checkout HEAD -- src/nexus/upgrade_finish.py",
+        "git checkout main",
+        "git restore src/nexus/upgrade_finish.py",
+        "git restore .",
+        "git reset --hard",
+        "git reset --hard HEAD",
+        "git reset -- t3.py",
+        "git reset t3.py",
+        "git clean -fd",
+        "git stash",
+        "git stash push -m wip",
+        "git rm -f src/nexus/upgrade_finish.py",
         "git switch main",
         "git switch -c newbranch",
         "git switch --detach HEAD",
-    ])
-    def test_switch_denied(self, cmd, shared_repo):
-        out = _decision(_run(_bash(cmd, cwd=str(shared_repo))))
-        assert out["permissionDecision"] == "deny", f"{cmd}: {out}"
-
-    def test_no_pager_global_flag_checkout_denied(self, shared_repo):
-        out = _decision(_run(_bash(
-            "git --no-pager checkout -- x.py", cwd=str(shared_repo),
-        )))
-        assert out["permissionDecision"] == "deny"
-
-    def test_compound_cd_then_checkout_denied(self, shared_repo):
-        """The realistic incident shape: a `cd` into the shared tree ahead of
-        the destructive verb, joined by `&&`."""
-        out = _decision(_run(_bash(
-            f"cd {shared_repo} && git checkout -- f.py", cwd=str(shared_repo),
-        )))
-        assert out["permissionDecision"] == "deny"
-
-    @pytest.mark.parametrize("cmd", [
-        "git status", "git diff", "git log --oneline", "git show HEAD",
-    ])
-    def test_read_only_git_allowed(self, cmd, shared_repo):
-        out = _decision(_run(_bash(cmd, cwd=str(shared_repo))))
-        assert "permissionDecision" not in out, f"{cmd}: {out}"
-
-    def test_stash_list_now_denied_since_round4(self, shared_repo):
-        """Was in the read-only-allowed set above pre-round-4; see
-        test_stash_readonly_forms_now_denied_since_round4 for the rationale."""
-        out = _decision(_run(_bash("git stash list", cwd=str(shared_repo))))
-        assert out["permissionDecision"] == "deny", out
-
-    def test_orchestrator_context_not_denied(self, shared_repo):
-        """The main conversation (no agent_id) is never subject to this
-        guard -- it resets its own tree."""
-        out = _decision(_run(_bash(
-            "git checkout -- f.py", agent=False, cwd=str(shared_repo),
-        )))
-        assert "permissionDecision" not in out
-
-    def test_deny_message_names_the_rule(self, shared_repo):
-        out = _decision(_run(_bash("git checkout -- f.py", cwd=str(shared_repo))))
-        reason = out["permissionDecisionReason"].lower()
-        assert "orchestrator commits" in reason
-
-    def test_deny_message_suggests_falsification_by_comparison(self, shared_repo):
-        out = _decision(_run(_bash("git checkout -- f.py", cwd=str(shared_repo))))
-        reason = out["permissionDecisionReason"].lower()
-        assert "falsify by comparison" in reason
-        assert "git show head:" in reason
-        assert "diff" in reason
-
-    def test_deny_message_does_not_hand_the_escape_to_the_gated_agent(self, shared_repo):
-        """nexus-cnzei.2 (S8): the `# routing-allow:` escape is named for
-        an operator reading the deny, but the message must not read as an
-        instruction TO THE SUBAGENT to just use it."""
-        out = _decision(_run(_bash("git checkout -- f.py", cwd=str(shared_repo))))
-        reason = out["permissionDecisionReason"]
-        assert "routing-allow" in reason
-        assert "not yours to reach for" in reason
-
-    def test_completion_wording_scopes_sendmessage_to_background(self, shared_repo):
-        """nexus-cnzei.2 (C4): the hand-back instruction in this deny
-        message must not tell a foreground agent to SendMessage before
-        idling -- its own final message already is the hand-back."""
-        out = _decision(_run(_bash("git checkout -- f.py", cwd=str(shared_repo))))
-        reason = out["permissionDecisionReason"]
-        assert "background" in reason.lower()
-        assert "foreground" in reason.lower()
-
-
-class TestNexus3c92mNewlineAndHeredocGap:
-    """The CORRECTED root cause (see the module comment above this class):
-    the segment splitter never split on bare newlines, so a multi-line Bash
-    tool command joined by nothing but newlines was ONE segment whose first
-    token decided everything. Each test here reproduces a shape that was
-    verified ALLOWED (wrongly) before this fix and DENIED after."""
-
-    def test_the_exact_incident_shape(self, shared_repo):
-        """cd / echo / a python3 heredoc / then `git checkout` on a LATER
-        line, joined by nothing but newlines -- the live-transcript shape."""
-        cmd = "\n".join([
-            f"cd {shared_repo}",
-            'echo "=== Falsify #1 ==="',
-            "python3 - <<'EOF'",
-            "with open('t3.py') as fh:",
-            "    content = fh.read()",
-            "print(len(content))",
-            "EOF",
-            'echo "checking output"',
-            "git checkout -- t3.py",
-        ])
-        out = _decision(_run(_bash(cmd, cwd=str(shared_repo))))
-        assert out["permissionDecision"] == "deny", out
-
-    def test_destructive_verb_inside_dollar_paren_subshell(self, shared_repo):
-        out = _decision(_run(_bash("x=$(git checkout -- t3.py)", cwd=str(shared_repo))))
-        assert out["permissionDecision"] == "deny", out
-
-    def test_destructive_verb_inside_backtick_substitution(self, shared_repo):
-        cmd = "x=" + chr(96) + "git checkout -- t3.py" + chr(96)
-        out = _decision(_run(_bash(cmd, cwd=str(shared_repo))))
-        assert out["permissionDecision"] == "deny", out
-
-    def test_destructive_verb_after_semicolon_single_line(self, shared_repo):
-        out = _decision(_run(_bash(
-            "echo hi; git checkout -- t3.py", cwd=str(shared_repo),
-        )))
-        assert out["permissionDecision"] == "deny", out
-
-    def test_destructive_verb_inside_a_for_do_block(self, shared_repo):
-        out = _decision(_run(_bash(
-            "for f in a b; do git checkout -- $f; done", cwd=str(shared_repo),
-        )))
-        assert out["permissionDecision"] == "deny", out
-
-    def test_destructive_verb_inside_a_multiline_if_then_block(self, shared_repo):
-        cmd = "\n".join(["if true; then", "  git checkout -- t3.py", "fi"])
-        out = _decision(_run(_bash(cmd, cwd=str(shared_repo))))
-        assert out["permissionDecision"] == "deny", out
-
-    def test_destructive_verb_after_a_bare_comment_line(self, shared_repo):
-        """A `#` comment line followed by the destructive verb on the next
-        line -- newline-joined, no `;` in sight."""
-        cmd = "\n".join(["# setup step", "git checkout -- t3.py"])
-        out = _decision(_run(_bash(cmd, cwd=str(shared_repo))))
-        assert out["permissionDecision"] == "deny", out
-
-    def test_heredoc_body_fed_to_a_real_shell_is_scanned(self, shared_repo):
-        """`bash <<'EOF' ... EOF` -- the heredoc body IS shell code that will
-        execute, so it must be scanned like any other segment."""
-        cmd = "\n".join(["bash <<'EOF'", "git checkout -- t3.py", "EOF"])
-        out = _decision(_run(_bash(cmd, cwd=str(shared_repo))))
-        assert out["permissionDecision"] == "deny", out
-
-    def test_heredoc_body_fed_to_python3_now_denied_since_round4(self, shared_repo):
-        """PRE-round-4 this allowed: the SECONDARY (structured) parser
-        classified a python3 heredoc body as opaque DATA, not shell code, so
-        a body that merely PRINTED the text "git checkout" stayed allowed.
-        Round 4's PRIMARY rule does no heredoc-consumer classification at
-        all -- it is a pure proximity scan over the raw command text, so
-        `git` near `checkout` anywhere, including inside this now-opaque
-        heredoc body, denies. This is the accepted false-positive the module
-        docstring names explicitly as the design's deliberate cost (a false
-        positive costs a rephrase; a false negative destroys data)."""
-        cmd = "\n".join([
-            "python3 - <<'EOF'",
-            "print('as text only: git checkout -- t3.py')",
-            "EOF",
-        ])
-        out = _decision(_run(_bash(cmd, cwd=str(shared_repo))))
-        assert out["permissionDecision"] == "deny", out
-
-    def test_multiline_with_no_git_at_all_stays_allowed(self, shared_repo):
-        cmd = "\n".join([f"cd {shared_repo}", "echo hi", "ls -la"])
-        out = _decision(_run(_bash(cmd, cwd=str(shared_repo))))
-        assert "permissionDecision" not in out, out
-
-
-class TestNexus3c92mAddDashNAndResetPathspec:
-    """Second live incident (sibling c00dw): `git add -N <path>` then
-    `git reset -- <path>` were both allowed. Investigation found these
-    single-line forms were ALREADY denied before this fix (add/reset match
-    unconditionally, independent of arguments) -- not a separate
-    verb-matching gap. Only the multi-line/heredoc-adjacent forms were
-    missed, and those are covered by the same newline-splitting fix as the
-    checkout incident. These tests lock in both shapes so the class stays
-    covered regardless of which explanation is correct in the future."""
-
-    def test_add_intent_to_add_short_flag_single_line_denied(self, shared_repo):
-        out = _decision(_run(_bash("git add -N t3.py", cwd=str(shared_repo))))
-        assert out["permissionDecision"] == "deny", out
-
-    def test_add_intent_to_add_long_flag_single_line_denied(self, shared_repo):
-        out = _decision(_run(_bash("git add --intent-to-add t3.py", cwd=str(shared_repo))))
-        assert out["permissionDecision"] == "deny", out
-
-    def test_reset_pathspec_single_line_denied(self, shared_repo):
-        out = _decision(_run(_bash("git reset -- t3.py", cwd=str(shared_repo))))
-        assert out["permissionDecision"] == "deny", out
-
-    def test_reset_pathspec_no_double_dash_single_line_denied(self, shared_repo):
-        out = _decision(_run(_bash("git reset t3.py", cwd=str(shared_repo))))
-        assert out["permissionDecision"] == "deny", out
-
-    def test_add_then_reset_newline_joined_no_ampersand_denied(self, shared_repo):
-        """Two statements on their own lines, no `&&` between them -- the
-        newline-splitting shape, not the already-covered `&&` shape."""
-        cmd = "\n".join(["git add -N t3.py", "git reset -- t3.py"])
-        out = _decision(_run(_bash(cmd, cwd=str(shared_repo))))
-        assert out["permissionDecision"] == "deny", out
-
-    def test_add_dash_n_on_a_later_line_after_cd_and_echo_denied(self, shared_repo):
-        cmd = "\n".join([f"cd {shared_repo}", 'echo "staging"', "git add -N t3.py"])
-        out = _decision(_run(_bash(cmd, cwd=str(shared_repo))))
-        assert out["permissionDecision"] == "deny", out
-
-    def test_reset_pathspec_on_a_later_line_after_cd_and_echo_denied(self, shared_repo):
-        cmd = "\n".join([f"cd {shared_repo}", 'echo "unstaging"', "git reset -- t3.py"])
-        out = _decision(_run(_bash(cmd, cwd=str(shared_repo))))
-        assert out["permissionDecision"] == "deny", out
-
-
-# ── nexus-3c92m review round 2 (2026-08-20): stacked review found 5 new
-# bypasses in the round-1 newline/heredoc fix -- both reviewers falsified by
-# calling `_matched_write_subcommands()` directly, no git mutation. Fixed:
-#
-# 1. (critic ship-blocker) `_HEREDOC_OPEN_RE` matched inside the bash
-#    HERE-STRING operator `<<<` whenever its RHS started with a letter or
-#    underscore -- `cat <<< "hello"` opened a false "heredoc" that swallowed
-#    every following line (including a destructive verb) as an unscanned
-#    body, since `cat` isn't a shell consumer. Fixed with a negative
-#    lookaround rejecting a `<<` that is part of a longer `<` run.
-# 2. (code-review CRITICAL) backslash line-continuation (`git \` + newline +
-#    `checkout`) split `git` from its own subcommand across two newline
-#    segments. Fixed by joining continued lines BEFORE any newline split.
-# 3. (code-review CRITICAL) heredoc-consumer classification was exact-string
-#    membership, so `/bin/bash <<EOF` (path-qualified) matched nothing.
-#    Fixed by matching each head token's basename, plus widening the
-#    consumer set to env/sudo/xargs/eval/source.
-# 4. (code-review CRITICAL) `<(...)`/`>(...)` process substitution was never
-#    extracted at all. Fixed with `_PROCESS_SUB_RE` alongside the existing
-#    `$(...)`/backtick extractors.
-# 5. (critic SIGNIFICANT) `$(...)`/backtick extraction ran against the RAW
-#    command, so substitution-shaped TEXT sitting inside an opaque (e.g.
-#    python) heredoc body was still extracted and matched -- contradicting
-#    the module's own stated invariant. Fixed by extracting from the
-#    heredoc-FILTERED text instead.
-
-
-class TestNexus3c92mReviewRound2Bypasses:
-    """One test per reviewer-confirmed bypass, matching each reviewer's own
-    reproduction command."""
-
-    def test_here_string_does_not_falsely_open_a_heredoc(self, shared_repo):
-        """`cat <<< "hello"` is a here-string, not a heredoc -- it must not
-        swallow the next line (the destructive verb) as an unscanned body."""
-        cmd = "\n".join(['cat <<< "hello"', "git checkout -- t3.py"])
-        out = _decision(_run(_bash(cmd, cwd=str(shared_repo))))
-        assert out["permissionDecision"] == "deny", out
-
-    def test_bare_here_string_alone_stays_allowed(self, shared_repo):
-        """Regression guard: a here-string with no destructive verb anywhere
-        must not become deny-by-default just because `<<<` is now excluded
-        from heredoc-open matching."""
-        out = _decision(_run(_bash('cat <<< "hello world"', cwd=str(shared_repo))))
-        assert "permissionDecision" not in out, out
-
-    def test_backslash_line_continuation_denied(self, shared_repo):
-        """`git \\` + newline + `checkout -- t3.py` is ONE logical shell
-        line (`git checkout -- t3.py`), not two newline-separated segments."""
-        cmd = "git \\\ncheckout -- t3.py"
-        out = _decision(_run(_bash(cmd, cwd=str(shared_repo))))
-        assert out["permissionDecision"] == "deny", out
-
-    @pytest.mark.parametrize("consumer_line", [
-        "/bin/bash <<EOF",
-        "env bash <<EOF",
-        "sudo bash <<EOF",
-        "bash -s <<EOF",
-        "xargs sh <<EOF",
-        "eval <<EOF",
-        "source <<EOF",
-    ])
-    def test_heredoc_consumer_denied(self, consumer_line, shared_repo):
-        cmd = "\n".join([consumer_line, "git checkout -- t3.py", "EOF"])
-        out = _decision(_run(_bash(cmd, cwd=str(shared_repo))))
-        assert out["permissionDecision"] == "deny", f"{consumer_line}: {out}"
-
-    def test_process_substitution_input_denied(self, shared_repo):
-        out = _decision(_run(_bash(
-            "diff <(git checkout -- t3.py) /dev/null", cwd=str(shared_repo),
-        )))
-        assert out["permissionDecision"] == "deny", out
-
-    def test_process_substitution_output_denied(self, shared_repo):
-        out = _decision(_run(_bash(
-            "echo hi > >(git checkout -- t3.py)", cwd=str(shared_repo),
-        )))
-        assert out["permissionDecision"] == "deny", out
-
-    def test_dollar_paren_text_inside_heredoc_now_denied_since_round4(self, shared_repo):
-        """PRE-round-4 this allowed: `$(...)`-shaped TEXT inside a python
-        (non-shell) heredoc body was data, not code, and the SECONDARY
-        parser's substitution extraction was scoped to skip dropped bodies.
-        Round 4's PRIMARY rule has no heredoc/substitution awareness at all
-        -- it is a pure proximity scan, so `git` near `checkout` inside this
-        text denies regardless of the surrounding `$(...)`/heredoc dressing.
-        Accepted false positive (module docstring)."""
-        cmd = "\n".join([
-            "python3 - <<'EOF'",
-            "print('as text only: $(git checkout -- t3.py)')",
-            "EOF",
-        ])
-        out = _decision(_run(_bash(cmd, cwd=str(shared_repo))))
-        assert out["permissionDecision"] == "deny", out
-
-    def test_backtick_text_inside_heredoc_now_denied_since_round4(self, shared_repo):
-        """Same round-4 rationale as the `$(...)` case above, for backticks."""
-        cmd = "\n".join([
-            "python3 - <<'EOF'",
-            "print('as text only: " + chr(96) + "git checkout -- t3.py" + chr(96) + "')",
-            "EOF",
-        ])
-        out = _decision(_run(_bash(cmd, cwd=str(shared_repo))))
-        assert out["permissionDecision"] == "deny", out
-
-    def test_dollar_paren_outside_any_heredoc_still_denies(self, shared_repo):
-        """Regression guard: moving substitution extraction onto the
-        heredoc-filtered text must not lose the plain (no-heredoc) case."""
-        out = _decision(_run(_bash("x=$(git checkout -- t3.py)", cwd=str(shared_repo))))
-        assert out["permissionDecision"] == "deny", out
-
-
-_INCIDENT_FIXTURES = runpy.run_path(
-    str(PROJECT_ROOT / "tests" / "fixtures" / "incident_3c92m_commands.py")
-)
-
-
-class TestNexus3c92mVerbatimIncidentCommands:
-    """The exact byte-for-byte Bash tool_input commands from the real
-    transcript (T2 nexus/lessons-coordination-2026-08-20), pinned per the
-    substantive-critic's recommendation rather than a prose reconstruction --
-    quoting/delimiter subtleties are this guard's repeat failure class."""
-
-    @pytest.mark.parametrize("fixture_name", [
-        "INCIDENT_CMD_1", "INCIDENT_CMD_2", "INCIDENT_CMD_3",
-    ])
-    def test_verbatim_incident_command_denied(self, fixture_name, shared_repo):
-        cmd = _INCIDENT_FIXTURES[fixture_name]
-        out = _decision(_run(_bash(cmd, cwd=str(shared_repo))))
-        assert out["permissionDecision"] == "deny", f"{fixture_name}: {out}"
-
-
-# ── nexus-3c92m round 4: structure-agnostic primary rule ─────────────────────
-#
-# Round 3's stacked re-review found THREE MORE bypasses in the round-1/2
-# structural-parsing approach (CRLF-after-continuation, a non-shell heredoc
-# whose corrupted terminator swallows a verb placed AFTER the heredoc, and
-# piping literal text into a shell) and ruled that three rounds of "add a
-# case" is the signal to change the design, not patch it again. Round 4
-# replaces the structural parser as the DECIDING mechanism with a
-# structure-agnostic proximity regex (`_PRIMARY_DENY_RE`, module docstring)
-# that is immune BY CONSTRUCTION to any bypass that merely relocates the
-# same literal text via a different shell construct -- these tests exercise
-# exactly that class of shape.
-
-
-class TestNexus3c92mRound4PrimaryRule:
-    """The three round-3 bypasses, plus the primary rule's other required
-    properties: an expanded read-only allowlist, and a performance bound."""
-
-    def test_crlf_after_continuation_backslash_denied(self, shared_repo):
-        """Round 3 finding #1: `\\r` sitting after the continuation
-        backslash (before the `\\n`) defeated round 2's trailing-backslash
-        counter, which required the backslash to be the literal last
-        character. The primary rule normalizes CRLF to LF BEFORE collapsing
-        continuations, so this has nowhere to hide."""
-        cmd = "git \\\r\ncheckout -- t3.py"
-        out = _decision(_run(_bash(cmd, cwd=str(shared_repo))))
-        assert out["permissionDecision"] == "deny", out
-
-    def test_heredoc_corrupted_terminator_with_verb_after_denied(self, shared_repo):
-        """Round 3 finding #2: a non-shell heredoc's LAST body line ending in
-        a single backslash used to corrupt the SECONDARY parser's terminator
-        detection (continuation-joining ran on raw text before heredoc-aware
-        segmentation), folding everything after -- including a destructive
-        verb placed AFTER the heredoc -- into the dropped body. The primary
-        rule does no heredoc segmentation at all, so this shape cannot hide
-        anything from it regardless of what the secondary parser does."""
-        cmd = "\n".join([
-            "python3 - <<'EOF'",
-            "x = 1 \\",
-            "EOF",
-            "git checkout -- t3.py",
-        ])
-        out = _decision(_run(_bash(cmd, cwd=str(shared_repo))))
-        assert out["permissionDecision"] == "deny", out
-
-    @pytest.mark.parametrize("cmd", [
+        "git merge topic",
+        "git rebase main",
+        "git cherry-pick abc123",
+        "git push origin develop",
+        "git mv a b",
+        "git branch -D topic",
+        "git tag -d v1",
+        "git worktree add ../w",
+        "git worktree remove w1",
+        "git update-ref -d refs/heads/x",
+        "git reflog expire --all",
+        "git gc",
+    ],
+    # nexus-3c92m round 4 retired the read-only-spelling refinement: a
+    # `git stash list` is denied like any other stash.
+    "stash_read_forms_since_round4": ["git stash list", "git stash show -p"],
+    # Options between `git` and the verb.
+    "global_flags": [
+        "git -C {repo} commit -m msg",
+        "git -C {repo} restore .",
+        "git --no-pager checkout -- x.py",
+        "git -c user.name=x commit -m m",
+        "git -c user.name=" + ("a" * 200) + " checkout -- t3.py",
+        "git " + " ".join(f"-c a.b{i}=v" for i in range(30)) + " checkout -- t3.py",
+        "git " + ("x" * 300) + " checkout -- t3.py",
+    ],
+    # A write verb hidden after something harmless, in every join shape.
+    "chained_and_nested": [
+        "uv run pytest && git add x.py && git commit -m done",
+        "pytest -q && git checkout -- src/nexus/upgrade_finish.py",
+        "cd {repo} && git checkout -- f.py",
+        "echo hi; git checkout -- t3.py",
+        "true || git add x",
+        "echo hi | git add x",
+        "(git add x)",
+        "{ git checkout -- f; }",
+        "x=$(git checkout -- t3.py)",
+        "x=" + BT + "git checkout -- t3.py" + BT,
+        "for f in a b; do git checkout -- $f; done",
+        "if true; then git add f; fi",
+        "\n".join(["if true; then", "  git checkout -- t3.py", "fi"]),
+        "\n".join(["# setup step", "git checkout -- t3.py"]),
+        "\n".join(["git add -N t3.py", "git reset -- t3.py"]),
+        "\n".join(["cd {repo}", 'echo "staging"', "git add -N t3.py"]),
+        "\n".join(["cd d", "git add f"]),
+        "ls .git; git add x",
+        "cd .github && git checkout -- f",
+        "ls nexus-git-policy.py .git && git reset --hard",
+    ],
+    # `git` spelled as a path, a wrapper, a dotted or hyphenated binary.
+    "git_spellings": [
+        "/usr/bin/git checkout f",
+        "./git add x",
+        "../bin/git commit -m x",
+        "FOO=1 git commit -m x",
+        "A=1 B=2 git reset --hard",
+        "env GIT_DIR=x git commit -m x",
+        "command git add x",
+        "exec git reset --hard",
+        "xargs git rm",
+        "nice git commit -m x",
+        "time git checkout f",
+        "sudo git add x",
+        "git-checkout -- f",
+        "/usr/lib/git-core/git-add x",
+        "git.exe checkout -- f",
+        "git.cmd checkout -- f",
+        "git.bat reset --hard",
+        "git.com add x",
+        "git.sh reset --hard",
+        "git-lfs.exe checkout -- f",
+        "git-add.exe x",
+        "git-{add,x}",
+        "$(command -v git) reset --hard",
+        "${GITBIN:-git} checkout -- f",
+        "g=git; $g checkout -- x",
+        "p=/usr/libexec/git-core/git-; ${p}reset --hard",
+        "p=/Library/Developer/CommandLineTools/usr/libexec/git-core/git-; ${p}add f",
+        "scripts/git-push-develop.sh abc123",
+        "NX_PUSH_SOURCE=HEAD scripts/git-push-develop.sh abc123",
+    ],
+    # Quoting, escaping and line-continuation inside or around the verb.
+    "quoting_and_escapes": [
+        'git com"mit" -m msg',
+        'git com"mit -m msg',
+        'git commit -m "unterminated',
+        "'git' checkout -- f",
+        '"git" "checkout" -- f',
+        "git che" + BS + "ckout -- t3.py",
+        "git ad" + BS + "d -N t3.py",
+        "git re" + BS + "set --hard",
+        "g" + BS + "it checkout -- t3.py",
+        BS + "git checkout -- x",
+        "git " + BS + "\ncheckout -- t3.py",
+        "git " + BS + "\r\ncheckout -- t3.py",
+        "git${IFS}checkout -- t3.py",
+    ],
+    # Text that becomes shell: -c, eval, heredocs, pipes, substitutions.
+    "shell_wrapped": [
+        "sh -c 'git checkout -- f'",
+        "eval 'git checkout -- f'",
+        "bash <<< 'git checkout -- f'",
+        "\n".join(['cat <<< "hello"', "git checkout -- t3.py"]),
         "printf 'git checkout -- t3.py' | sh",
         "echo 'git checkout -- t3.py' | bash",
-    ])
-    def test_pipe_into_shell_denied(self, cmd, shared_repo):
-        """Round 3 finding #3: piping literal text into `sh`/`bash` is the
-        same risk as a heredoc (untrusted text becomes executed shell code)
-        and the old design's heredoc-consumer classification was the ONLY
-        place that risk was reasoned about -- a pipe isn't a heredoc, so it
-        got zero handling. The primary rule doesn't reason about consumers
-        at all; the literal text is denied wherever it sits."""
-        out = _decision(_run(_bash(cmd, cwd=str(shared_repo))))
-        assert out["permissionDecision"] == "deny", f"{cmd}: {out}"
-
-    def test_dot_source_of_process_substitution_denied(self, shared_repo):
-        """Round 3 finding #4 (lower severity): `. <(echo '...')` dot-sources
-        a process substitution's STDOUT, not its literal argument text -- but
-        the literal text is still `git checkout` somewhere in the raw
-        command, so the primary rule denies regardless of the mechanism."""
-        out = _decision(_run(_bash(
-            ". <(echo 'git checkout -- t3.py')", cwd=str(shared_repo),
-        )))
-        assert out["permissionDecision"] == "deny", out
-
-    def test_quote_split_verb_denied(self, shared_repo):
-        """A gap found while re-verifying THIS round against the pre-existing
-        suite, not from a review: `git com"mit" -m msg` really executes as
-        `git commit -m msg` (a shell removes quote characters and fuses the
-        surrounding text into one token). `_normalize_for_primary_scan`
-        strips quote characters before scanning specifically to keep this
-        case caught by a substring-only design."""
-        out = _decision(_run(_bash('git com"mit" -m msg', cwd=str(shared_repo))))
-        assert out["permissionDecision"] == "deny", out
-
-    @pytest.mark.parametrize("cmd", [
-        "git blame t3.py", "git rev-parse HEAD", "git ls-files",
-    ])
-    def test_expanded_read_only_set_allowed(self, cmd, shared_repo):
-        out = _decision(_run(_bash(cmd, cwd=str(shared_repo))))
-        assert "permissionDecision" not in out, f"{cmd}: {out}"
-
-    def test_100kb_command_scans_well_under_50ms(self):
-        """Performance bound the round-4/5 design must meet. Round 5 removed
-        the bounded window (a measurable, exceedable structure -- see
-        TestNexus3c92mRound5PrimaryRuleFixes), so this now measures the
-        UNBOUNDED two-linear-search path (`_primary_match`) directly (no
-        subprocess/interpreter-startup overhead, which would dominate and
-        hide a real regression) against a 100KB command that is adversarial
-        for it: `git ` immediately followed by 100,000 non-matching
-        characters, forcing the second (verb) search to walk the entire
-        remainder with no early exit."""
-        spec = importlib.util.spec_from_file_location("_nx3c92m_guard", str(HOOK_SCRIPT))
-        guard = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(guard)
-        big = "git " + ("x" * 100_000)
-        # nexus-scc9t: CPU time (time.process_time), not wall time
-        # (time.perf_counter) -- this is a deliberate performance pin on
-        # the code's own work, and process_time excludes scheduler-delay
-        # time the process spent NOT running, which a loaded -n auto run
-        # can otherwise inflate past the budget with no regression
-        # present. A real regression still shows up here: it costs more
-        # actual CPU, which process_time counts in full.
-        t0 = time.process_time()
-        guard._primary_match(guard._normalize_for_primary_scan(big))
-        elapsed_ms = (time.process_time() - t0) * 1000
-        assert elapsed_ms < 50, f"{elapsed_ms:.3f}ms >= 50ms budget"
-
-    def test_100kb_many_git_occurrences_verb_at_end_scans_well_under_50ms(self):
-        """A second adversarial shape for the unbounded design: many `git`
-        occurrences scattered through ~100KB, with the actual verb only at
-        the very end -- stresses whether anchoring on the FIRST `git` (not
-        re-scanning from every occurrence) keeps this linear rather than
-        quadratic."""
-        spec = importlib.util.spec_from_file_location("_nx3c92m_guard2", str(HOOK_SCRIPT))
-        guard = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(guard)
-        big = ("git nonmatch " * 5000) + "checkout"
-        # nexus-scc9t: CPU time, not wall time -- see the comment on
-        # test_100kb_command_scans_well_under_50ms above.
-        t0 = time.process_time()
-        m = guard._primary_match(guard._normalize_for_primary_scan(big))
-        elapsed_ms = (time.process_time() - t0) * 1000
-        assert m is not None, "expected a match (checkout is present after the first git)"
-        assert elapsed_ms < 50, f"{elapsed_ms:.3f}ms >= 50ms budget"
-
-
-# ── nexus-3c92m round 5: two more Criticals in the PRIMARY rule itself ───────
-#
-# Round 4's re-review (5th review round in a row) found the redesign had
-# TWO of its own new bypasses: mid-word backslash escaping (the same
-# "shell removes a character and fuses adjacent text" class just closed for
-# quotes, left open for backslashes) and the bounded 160-char window itself
-# being a measurable, exceedable structure (ordinary git global flags padded
-# long enough exceed it). Both closed: `_collapse_escapes` in
-# `_normalize_for_primary_scan`, and removing the window entirely in favor
-# of `_primary_match`'s two unbounded linear searches.
-
-
-class TestNexus3c92mRound5PrimaryRuleFixes:
-    """The two round-5 gaps, plus the flag-padding shape named explicitly by
-    the review, plus a regression guard that escaped-backslash pairs still
-    collapse to one literal backslash rather than vanishing or double-firing
-    as an escape for the FOLLOWING character."""
-
-    @pytest.mark.parametrize("cmd", [
-        "git che" + chr(92) + "ckout -- t3.py",
-        "git ad" + chr(92) + "d -N t3.py",
-        "git com" + chr(92) + "mit -m msg",
-        "git re" + chr(92) + "set --hard",
-    ])
-    def test_mid_word_backslash_escape_denied(self, cmd, shared_repo):
-        out = _decision(_run(_bash(cmd, cwd=str(shared_repo))))
-        assert out["permissionDecision"] == "deny", f"{cmd!r}: {out}"
-
-    def test_g_backslash_it_mid_word_denied(self, shared_repo):
-        """`g\\it checkout -- f` -- the backslash splits `git` itself, not
-        just the verb. Kept as its own test (not parametrized with the
-        others above) since the shape is structurally different: the split
-        word is `git`, not the verb."""
-        cmd = "g" + chr(92) + "it checkout -- t3.py"
-        out = _decision(_run(_bash(cmd, cwd=str(shared_repo))))
-        assert out["permissionDecision"] == "deny", out
-
-    def test_escaped_backslash_pair_collapses_to_one_not_double_processed(self, shared_repo):
-        """`\\\\` (two literal backslashes) must collapse to ONE backslash,
-        not vanish entirely and not be treated as "backslash escapes the
-        NEXT backslash as though it were an ordinary escape target" in a way
-        that then mis-consumes a THIRD character. Regression guard for the
-        `_ESCAPE_RE` alternation ordering (`\\\\\\\\` tried before the
-        single-backslash-plus-ordinary-char case)."""
-        cmd = "echo " + (chr(92) * 2) + "n"
-        out = _decision(_run(_bash(cmd, cwd=str(shared_repo))))
-        assert "permissionDecision" not in out, out
-
-    def test_flag_padding_beyond_the_old_160_char_window_denied(self, shared_repo):
-        """The review's named exploit shape: an ordinary, syntactically
-        valid `-c key=value` padded well past the OLD bounded window. Round
-        5 removed the window entirely, so distance is no longer a variable
-        an attacker can tune."""
-        cmd = "git -c user.name=" + ("a" * 200) + " checkout -- t3.py"
-        out = _decision(_run(_bash(cmd, cwd=str(shared_repo))))
-        assert out["permissionDecision"] == "deny", out
-
-    def test_flag_padding_many_repeated_c_flags_denied(self, shared_repo):
-        cmd = "git " + " ".join(f"-c a.b{i}=v" for i in range(30)) + " checkout -- t3.py"
-        out = _decision(_run(_bash(cmd, cwd=str(shared_repo))))
-        assert out["permissionDecision"] == "deny", out
-
-    def test_verb_well_past_the_old_window_boundary_denied(self, shared_repo):
-        """300 filler characters between `git` and the verb -- comfortably
-        past the old ~160-char ceiling, which is exactly the point."""
-        cmd = "git " + ("x" * 300) + " checkout -- t3.py"
-        out = _decision(_run(_bash(cmd, cwd=str(shared_repo))))
-        assert out["permissionDecision"] == "deny", out
-
-    def test_ifs_split_checkout_denied_and_was_never_really_a_gap(self, shared_repo):
-        """`git${IFS}checkout` -- KNOWN LIMITS previously (incorrectly)
-        listed this as unclosed; corrected in round 5 (module docstring):
-        IFS-splitting only matters to a TOKENIZING parser, and this design
-        has never tokenized, so this always denied under the round-4+
-        substring-scan design. Locked in here as a regression test now that
-        the doc claim is fixed."""
-        out = _decision(_run(_bash(
-            "git${IFS}checkout -- t3.py", cwd=str(shared_repo),
-        )))
-        assert out["permissionDecision"] == "deny", out
-
-    def test_base64_decode_then_exec_still_allows_documented_residual(self, shared_repo):
-        """Verified (not assumed) per the round-5 instruction to check both
-        prior claims rather than trust either: base64-encoded payloads carry
-        no literal `git`/verb substring in the raw command text, so removing
-        the window changes nothing here -- this remains the genuine,
-        documented KNOWN LIMITS residual (runtime-assembled / encoded verb).
-        """
-        import base64
-        b64 = base64.b64encode(b"git checkout -- t3.py").decode()
-        out = _decision(_run(_bash(
-            f"echo {b64} | base64 -d | sh", cwd=str(shared_repo),
-        )))
-        assert "permissionDecision" not in out, out
-
-
-# ── nexus-3c92m round 6: expansions spliced INSIDE a token ───────────────────
-#
-# Round 5's re-review (6th review round in a row) found the round-4/5
-# PRIMARY rule had a further-out version of the SAME "shell removes/replaces
-# a marker and fuses adjacent text" class already closed for quotes and
-# backslash-escapes: real bash confirmed `g${x:-i}t`, `g$(echo i)t`,
-# `git st$(echo a)tus`, and `g$'\151't` all execute AS `git`, so
-# `git ch${x:-e}ckout -- f` allowed pre-fix. Closed in the normalizer with
-# four ordered steps (see `_normalize_for_primary_scan` and
-# `_find_spliced_expansion`): ANSI-C `$'...'` decode, parameter-expansion
-# default resolution, command-substitution literal resolution, then an
-# ADJACENCY RULE for whatever expansion syntax survives all three.
-#
-# Round 6's FIRST cut of that adjacency rule was itself wrong -- it denied
-# ANY subagent Bash command where a surviving expansion sat glued to a word
-# character on EITHER side, unconditionally, independent of `git` presence.
-# The coordinator caught this in round 7 (a 7th review round): that denied
-# completely ordinary, non-git subagent usage like `echo file${i}.txt`,
-# `cp "${dir}/a${n}.log" .`, `tar xf pkg${ver}.tgz`. Round 7 (see
-# `TestNexus3c92mRound7ScopedAdjacency` below) narrows the rule to check
-# WHAT the glued letters spell (an in-order, gap-allowed subsequence of
-# `git` or of a simple destructive verb, the latter only when a literal
-# `git` is ALSO present elsewhere), not merely THAT something is glued.
-
-
-class TestNexus3c92mRound6SplicedExpansions:
-    """The reviewer's exact reconstruction shapes (both as bare 'git'-only
-    proofs-of-mechanism, which correctly ALLOW since no verb is attached,
-    and as full exploits with a verb spliced in, which correctly DENY),
-    the required nested/opaque/bare-var shapes, and the whole-word
-    read-only regression guards."""
-
-    def test_param_default_reconstructs_bare_git_no_verb_allowed(self, shared_repo):
-        """`g${x:-i}t` alone reconstructs the bare word `git` with no verb
-        attached -- equivalent to running bare `git` (prints usage),
-        correctly ALLOWED. The mechanism this proves is validated by
-        `test_param_default_spliced_into_verb_denied` below, which DOES
-        attach a verb."""
-        cmd = "g" + chr(36) + "{x:-i}t"
-        out = _decision(_run(_bash(cmd, cwd=str(shared_repo))))
-        assert "permissionDecision" not in out, out
-
-    def test_command_sub_echo_reconstructs_bare_git_no_verb_allowed(self, shared_repo):
-        cmd = "g" + chr(36) + "(echo i)t"
-        out = _decision(_run(_bash(cmd, cwd=str(shared_repo))))
-        assert "permissionDecision" not in out, out
-
-    def test_ansi_c_octal_reconstructs_bare_git_no_verb_allowed(self, shared_repo):
-        cmd = "g" + chr(36) + "'" + chr(92) + "151't"
-        out = _decision(_run(_bash(cmd, cwd=str(shared_repo))))
-        assert "permissionDecision" not in out, out
-
-    def test_command_sub_echo_reconstructs_benign_status_allowed(self, shared_repo):
-        """`git st$(echo a)tus` reconstructs `git status` -- read-only,
-        correctly ALLOWED even though the splicing mechanism fires."""
-        cmd = "git st" + chr(36) + "(echo a)tus"
-        out = _decision(_run(_bash(cmd, cwd=str(shared_repo))))
-        assert "permissionDecision" not in out, out
-
-    def test_param_default_spliced_into_verb_denied(self, shared_repo):
-        """The actual exploit: `git ch${x:-e}ckout -- f`."""
-        cmd = "git ch" + chr(36) + "{x:-e}ckout -- t3.py"
-        out = _decision(_run(_bash(cmd, cwd=str(shared_repo))))
-        assert out["permissionDecision"] == "deny", out
-
-    def test_command_sub_echo_spliced_into_verb_denied(self, shared_repo):
-        cmd = "git ch" + chr(36) + "(echo e)ckout -- t3.py"
-        out = _decision(_run(_bash(cmd, cwd=str(shared_repo))))
-        assert out["permissionDecision"] == "deny", out
-
-    def test_backtick_echo_spliced_into_verb_denied(self, shared_repo):
-        cmd = "git ch" + chr(96) + "echo e" + chr(96) + "ckout -- t3.py"
-        out = _decision(_run(_bash(cmd, cwd=str(shared_repo))))
-        assert out["permissionDecision"] == "deny", out
-
-    def test_nested_command_sub_glued_denied(self, shared_repo):
-        """`$(echo $(echo e))` -- the inner substitution breaks the
-        echo-literal regex's no-parens argument class, so the OUTER
-        construct stays opaque/unresolved; the adjacency rule still catches
-        it since it's glued on both sides regardless of not knowing its
-        resolved value."""
-        cmd = "git ch" + chr(36) + "(echo " + chr(36) + "(echo e))ckout -- t3.py"
-        out = _decision(_run(_bash(cmd, cwd=str(shared_repo))))
-        assert out["permissionDecision"] == "deny", out
-
-    def test_glued_opaque_python_c_substitution_denied(self, shared_repo):
-        """`$(python -c ...)` is not an echo/printf form -- stays opaque;
-        glued to a word char on both sides, denied regardless of its
-        (unknowable to this guard) resolved value."""
-        cmd = "git ch" + chr(36) + "(python -c 'x')ckout -- t3.py"
-        out = _decision(_run(_bash(cmd, cwd=str(shared_repo))))
-        assert out["permissionDecision"] == "deny", out
-
-    def test_glued_bare_dollar_var_denied(self, shared_repo):
-        """A bare `$VAR` (no braces, no default) can never be resolved to a
-        literal by this guard -- glued to `ckout`, denied."""
-        cmd = "git ch" + chr(36) + "VARckout -- t3.py"
-        out = _decision(_run(_bash(cmd, cwd=str(shared_repo))))
-        assert out["permissionDecision"] == "deny", out
-
-    def test_ansi_c_whitespace_producing_still_denies_via_literal_text(self, shared_repo):
-        """`$'\\t'` decodes to an actual tab character -- `git` and
-        `checkout` remain literal substrings in the normalized text either
-        way (round 5's unbounded search doesn't require adjacency), so this
-        denies regardless; locks in that ANSI-C whitespace decode doesn't
-        error or misbehave."""
-        cmd = "git" + chr(36) + "'" + chr(92) + "t'checkout -- t3.py"
-        out = _decision(_run(_bash(cmd, cwd=str(shared_repo))))
-        assert out["permissionDecision"] == "deny", out
-
-    def test_whole_word_command_sub_in_quotes_readonly_allowed(self, shared_repo):
-        """`git diff -- "$(pwd)/f"` -- `$(pwd)` is bordered by a quote on
-        the left and `/` on the right, neither a word character, so it is
-        never glued; read-only verb, correctly ALLOWED."""
-        cmd = 'git diff -- "' + chr(36) + '(pwd)/f"'
-        out = _decision(_run(_bash(cmd, cwd=str(shared_repo))))
-        assert "permissionDecision" not in out, out
-
-    def test_whole_word_bare_var_readonly_allowed(self, shared_repo):
-        """`git log $REV` -- `$REV` is a standalone token, not glued;
-        read-only verb, correctly ALLOWED."""
-        cmd = "git log " + chr(36) + "REV"
-        out = _decision(_run(_bash(cmd, cwd=str(shared_repo))))
-        assert "permissionDecision" not in out, out
-
-    def test_whole_word_command_sub_unrelated_to_git_allowed(self, shared_repo):
-        """No `git` anywhere in the command at all -- the adjacency rule is
-        unconditional (fires independent of `git` presence), but `$(pwd)`
-        here is a standalone quoted token, not glued, so this stays
-        allowed."""
-        cmd = 'echo "' + chr(36) + '(pwd)"'
-        out = _decision(_run(_bash(cmd, cwd=str(shared_repo))))
-        assert "permissionDecision" not in out, out
-
-    def test_spliced_expansion_deny_message_names_the_rule(self, shared_repo):
-        cmd = "git ch" + chr(36) + "VARckout -- t3.py"
-        out = _decision(_run(_bash(cmd, cwd=str(shared_repo))))
-        reason = out["permissionDecisionReason"].lower()
-        assert "spliced inside a word" in reason
-        assert "orchestrator" in reason
-
-    def test_spliced_expansion_orchestrator_context_not_denied(self, shared_repo):
-        """The adjacency rule targets subagents only, same as every other
-        gate in this hook."""
-        cmd = "git ch" + chr(36) + "VARckout -- t3.py"
-        out = _decision(_run(_bash(cmd, agent=False, cwd=str(shared_repo))))
-        assert "permissionDecision" not in out, out
-
-    def test_spliced_expansion_routing_allow_escape_works(self, shared_repo):
-        cmd = (
-            "git ch" + chr(36) + "VARckout -- t3.py"
-            "  # routing-allow: orchestrator sanctioned this specific rephrase"
-        )
-        out = _decision(_run(_bash(cmd, cwd=str(shared_repo))))
-        assert "permissionDecision" not in out, out
-
-    def test_spliced_expansion_denied_in_linked_worktree_is_allowed(self, linked_worktree):
-        """The worktree exemption applies uniformly to both gates: a
-        positively-proven linked worktree is the agent's own tree."""
-        cmd = "git ch" + chr(36) + "VARckout -- t3.py"
-        out = _decision(_run(_bash(cmd, cwd=str(linked_worktree))))
-        assert "permissionDecision" not in out, out
-
-    def test_ansi_c_decode_function_correctness(self):
-        """Direct unit-level check of `_expand_ansi_c_strings`: octal, hex,
-        4-digit unicode, and the `\\n`/`\\t` whitespace escapes all decode to
-        their actual characters, not literal backslash-letter pairs."""
-        spec = importlib.util.spec_from_file_location("_nx3c92m_guard_ansi", str(HOOK_SCRIPT))
-        guard = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(guard)
-        assert guard._expand_ansi_c_strings("$'" + chr(92) + "151'") == "i"  # octal
-        assert guard._expand_ansi_c_strings("$'" + chr(92) + "x69'") == "i"  # hex
-        assert guard._expand_ansi_c_strings("$'" + chr(92) + "u0069'") == "i"  # unicode
-        assert guard._expand_ansi_c_strings("$'" + chr(92) + "n'") == "\n"
-        assert guard._expand_ansi_c_strings("$'" + chr(92) + "t'") == "\t"
-
-    def test_100kb_command_with_expansion_steps_scans_well_under_50ms(self):
-        """Performance bound including the round-6/7 expansion-processing
-        steps (ANSI-C decode, param-default resolve, command-sub resolve,
-        scoped adjacency check) ahead of the primary scan."""
-        spec = importlib.util.spec_from_file_location("_nx3c92m_guard3", str(HOOK_SCRIPT))
-        guard = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(guard)
-        big = "git " + ("x" * 100_000)
-        # nexus-scc9t: CPU time, not wall time -- see the comment on
-        # test_100kb_command_scans_well_under_50ms above.
-        t0 = time.process_time()
-        normalized = guard._normalize_for_primary_scan(big)
-        guard._find_spliced_expansion(normalized)
-        guard._primary_match(normalized)
-        elapsed_ms = (time.process_time() - t0) * 1000
-        assert elapsed_ms < 50, f"{elapsed_ms:.3f}ms >= 50ms budget"
-
-    def test_many_dollar_var_occurrences_scans_near_linearly(self):
-        """Adversarial for the adjacency check specifically: many bare
-        `$VAR`-shaped constructs scattered through the text.
-
-        Was an absolute-millisecond budget (`elapsed_ms < 50`); that flaked
-        on a loaded GitHub runner during the 7.14.0 release PR (#1471, run
-        32451880113, shard 4/4: 52.567ms >= 50ms on this exact, unmodified
-        input) -- a shared-runner contention shape, not a regression, per
-        the deterministic-tests rule in tests/AGENTS.md.
-
-        Redesigned to prove the COMPLEXITY property instead of a
-        machine-speed-dependent number: the same scan is timed at two input
-        sizes, back-to-back in this process, and the 10x-larger input must
-        cost no more than `_MAX_LINEAR_RATIO` times as long -- near-linear
-        with slack for scheduler noise. Each size is best-of-3 (the min
-        discards a transient GC/scheduler stall without needing the run to
-        be uniformly fast). What would still turn this red: a regression
-        that reintroduces the exact quadratic bug this guard already fixed
-        once (round 6/7 review: `_adjacent_letter_fragments` doing an
-        `O(start)` `text[:start]` slice on every match, measured at 2+
-        SECONDS on a ~45KB/6000-construct input) -- that class scales
-        ~O(n^2), so a 10x input inflates the ratio by ~100x, blowing past
-        `_MAX_LINEAR_RATIO` regardless of machine speed. The absolute
-        size-scaled `_abs_ceiling_ms` ceiling is deliberately loose -- it exists only
-        to catch an outright hang, not to re-litigate machine speed.
-        """
-        spec = importlib.util.spec_from_file_location("_nx3c92m_guard4", str(HOOK_SCRIPT))
-        guard = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(guard)
-
-        def scan_ms(text: str) -> float:
-            # nexus-scc9t round 2: CPU time, not wall time -- a peer's
-            # combined full run red'd this on scheduler contention, not a
-            # regression. process_time excludes time this process spent
-            # NOT running, so both the absolute ceiling and the ratio
-            # below measure actual work done, immune to a contention
-            # burst landing unevenly across the small/large measurements.
-            best = float("inf")
-            for _ in range(3):
-                t0 = time.process_time()
-                normalized = guard._normalize_for_primary_scan(text)
-                guard._find_spliced_expansion(normalized)
-                guard._primary_match(normalized)
-                best = min(best, time.process_time() - t0)
-            return best * 1000
-
-        small = "git " + (chr(36) + "VAR ") * 5_000 + "checkout"
-        large = "git " + (chr(36) + "VAR ") * 50_000 + "checkout"  # 10x small
-        ms_small = scan_ms(small)
-        ms_large = scan_ms(large)
-
-        ceiling = _abs_ceiling_ms(len(large))
-        assert ms_large < ceiling, (
-            f"10x input ({len(large)} bytes): {ms_large:.3f}ms >= "
-            f"{ceiling:.0f}ms size-scaled ceiling"
-        )
-        ratio = ms_large / max(ms_small, _RATIO_FLOOR_MS)
-        assert ratio < _MAX_LINEAR_RATIO, (
-            f"non-linear scaling: {ms_small:.3f}ms -> {ms_large:.3f}ms is "
-            f"{ratio:.1f}x for a 10x input (expected near-linear, "
-            f"< {_MAX_LINEAR_RATIO}x)"
-        )
-
-    #: Hang-catch ceiling for the MATCH-DENSE letter-expansion shape,
-    #: per MB. The generic `_CEILING_MS_PER_MB` (2000) is calibrated on
-    #: the sparse chained shape and is provably insufficient here: the
-    #: 2026-08-31 develop push fdcd35c0c red'd this test's predecessor
-    #: (a single-pass absolute 50ms budget) TWICE on shard 4/4 at 449ms
-    #: and 543ms per ~100KB (~5.4s/MB) — ordinary contention after the
-    #: push's new test files reshuffled the shard composition, not a
-    #: regression (the same tree measured <50ms locally three times).
-    #: 20s/MB is ~3.7x that worst-on-record; contention cannot reach it,
-    #: while an outright hang still does. The quadratic-regression class
-    #: is the RATIO leg's job (2+ SECONDS on ~45KB when it was live —
-    #: ~100x ratio for a 10x input, unmissable at any machine speed).
-    _DENSE_CEILING_MS_PER_MB = 20_000
-
-    def test_touching_letter_expansions_scale_near_linearly(self):
-        """Round-7-specific adversarial case: THIS is the shape that
-        actually exercises `_adjacent_letter_fragments` per-match (the
-        `$VAR`-only case above has no letters touching it, so it never
-        stressed fragment extraction at all). Found and fixed during this
-        round's own verification: a first-cut `_adjacent_letter_fragments`
-        using `text[:start]` (an O(start) slice) on EVERY match went
-        quadratic -- 2+ SECONDS on this exact shape -- before being
-        rewritten as a bounded character walk.
-
-        Redesigned 2026-08-31 from a single-pass absolute 50ms budget to
-        the file's ratio + best-of-3 + loose-ceiling doctrine (T2
-        review-3c92m-perf-budget-redesign) after the absolute budget
-        red'd twice on a contended shard — see `_DENSE_CEILING_MS_PER_MB`
-        for the measurements."""
-        spec = importlib.util.spec_from_file_location("_nx3c92m_guard5", str(HOOK_SCRIPT))
-        guard = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(guard)
-
-        def scan_ms(text: str) -> float:
-            # nexus-kx2s5: CPU time, not wall time -- same nexus-scc9t
-            # fix as the sibling tests above (lines 1310, 1356). This one
-            # was still on perf_counter and is the same defect class.
-            best = float("inf")
-            for _ in range(3):
-                t0 = time.process_time()
-                normalized = guard._normalize_for_primary_scan(text)
-                guard._find_spliced_expansion(normalized)
-                guard._primary_match(normalized)
-                best = min(best, time.process_time() - t0)
-            return best * 1000
-
-        unit = chr(36) + "{v}ar" + chr(36) + "{i}able "
-        # 3000/30000 units, not 300/3000: at 300 the small scan is ~0.2 ms of CPU, so one contended
-        # sample on a busy -n 8 box (CI qwen-linux, 2026-10-02: 4.9 ms where 2.5 is normal) pushed the
-        # ratio past 20x on a scan that measures linear (0.22 / 2.54 / 28.8 ms at 300 / 3000 / 30000).
-        small = "git " + unit * 3000 + "checkout"
-        large = "git " + unit * 30000 + "checkout"  # 10x small
-        ms_small = scan_ms(small)
-        ms_large = scan_ms(large)
-
-        ceiling = max(
-            float(_CEILING_MIN_MS),
-            self._DENSE_CEILING_MS_PER_MB * len(large) / 1_000_000,
-        )
-        assert ms_large < ceiling, (
-            f"10x dense input ({len(large)} bytes): {ms_large:.3f}ms >= "
-            f"{ceiling:.0f}ms dense-shape ceiling"
-        )
-        ratio = ms_large / max(ms_small, _RATIO_FLOOR_MS)
-        assert ratio < _MAX_LINEAR_RATIO, (
-            f"non-linear scaling: {ms_small:.3f}ms -> {ms_large:.3f}ms is "
-            f"{ratio:.1f}x for a 10x input (expected near-linear, "
-            f"< {_MAX_LINEAR_RATIO}x)"
-        )
-
-
-# ── nexus-3c92m round 7: the adjacency rule, SCOPED ───────────────────────────
-#
-# The coordinator's own correction of round 6: an unconditional "any glue
-# denies" rule was too broad, catching ordinary subagent interpolation with
-# no exploit potential. Round 7 checks WHAT the glued letters actually
-# spell -- see `_EXPANSION_CONSTRUCT_RE`'s module comment for the full
-# two-branch rule -- rather than merely THAT something is glued.
-
-
-class TestNexus3c92mRound7ScopedAdjacency:
-    """The must-ALLOW ordinary-interpolation examples the coordinator named
-    explicitly (round 6 would have wrongly denied every one of these), the
-    must-DENY exploit shapes, and the message/verdict-naming regression.
-
-    NOTE (round 8): these ALLOW/DENY verdicts are unchanged from round 7,
-    but the MECHANISM for the git-present DENY cases changed underneath
-    them -- round 7's simple-verb-subsequence-with-git-elsewhere branch was
-    DROPPED entirely in round 8 (it could never cover compound/hyphenated
-    verbs like `filter-branch`, a genuine regression round 7's own
-    re-review found; see TestNexus3c92mRound8CompoundVerbCoverage below).
-    Round 8's branch B denies on GLUE ALONE once `git` is present,
-    independent of what the glued text spells -- so these tests still pass
-    for a broader (not narrower) reason than their original docstrings
-    claimed; docstrings updated accordingly rather than left stale."""
-
-    def test_file_interpolation_allowed(self, shared_repo):
-        """`echo file${i}.txt` -- no `git` anywhere, so branch A applies:
-        joined fragment `file` is not an in-order subsequence of the
-        3-letter target `git` (no shared letters)."""
-        cmd = "echo file" + chr(36) + "{i}.txt"
-        out = _decision(_run(_bash(cmd, cwd=str(shared_repo))))
-        assert "permissionDecision" not in out, out
-
-    def test_path_interpolation_in_quotes_allowed(self, shared_repo):
-        """`cp "${dir}/a${n}.log" .` -- no `git` present (branch A); both
-        expansions' joined letter fragments are length 0 or 1 (below the
-        length-2 threshold branch A requires: `${dir}` touches no letters
-        on either side, `${n}` touches only `a` on the left)."""
-        cmd = 'cp "' + chr(36) + '{dir}/a' + chr(36) + '{n}.log" .'
-        out = _decision(_run(_bash(cmd, cwd=str(shared_repo))))
-        assert "permissionDecision" not in out, out
-
-    def test_package_filename_interpolation_allowed(self, shared_repo):
-        """`tar xf pkg${ver}.tgz` -- no `git` present (branch A); joined
-        fragment `pkg` is not a subsequence of `git` (no shared letters)."""
-        cmd = "tar xf pkg" + chr(36) + "{ver}.tgz"
-        out = _decision(_run(_bash(cmd, cwd=str(shared_repo))))
-        assert "permissionDecision" not in out, out
-
-    def test_command_sub_path_join_allowed(self, shared_repo):
-        """`x=$(pwd)/sub` -- no `git` present (branch A); `$(pwd)` touches
-        `=` on the left and `/` on the right, neither a letter, so the
-        joined fragment is empty."""
-        cmd = "x=" + chr(36) + "(pwd)/sub"
-        out = _decision(_run(_bash(cmd, cwd=str(shared_repo))))
-        assert "permissionDecision" not in out, out
-
-    def test_joined_fragment_not_a_verb_subsequence_allowed(self, shared_repo):
-        """`echo a${b}c` -- the coordinator's own worked example: no `git`
-        anywhere (branch A applies), and joined fragment `ac` is not an
-        in-order subsequence of `git` (no `a` in `git` at all)."""
-        cmd = "echo a" + chr(36) + "{b}c"
-        out = _decision(_run(_bash(cmd, cwd=str(shared_repo))))
-        assert "permissionDecision" not in out, out
-
-    def test_command_sub_reconstructs_verb_with_git_present_denied(self, shared_repo):
-        """`git ch$(cmd)ckout -- f` -- a literal `git` is present, so
-        branch B applies: `$(cmd)` sits glued to `ch` on the left and
-        `ckout` on the right -- glue alone denies, independent of the
-        fact that the glued text happens to spell something checkout-like."""
-        cmd = "git ch" + chr(36) + "(cmd)ckout -- t3.py"
-        out = _decision(_run(_bash(cmd, cwd=str(shared_repo))))
-        assert out["permissionDecision"] == "deny", out
-
-    def test_bare_brace_var_reconstructs_verb_with_git_present_denied(self, shared_repo):
-        """`git re${x}set --hard` -- a literal `git` is present, so branch
-        B applies: `${x}` sits glued to `re` and `set` -- glue alone
-        denies."""
-        cmd = "git re" + chr(36) + "{x}set --hard"
-        out = _decision(_run(_bash(cmd, cwd=str(shared_repo))))
-        assert out["permissionDecision"] == "deny", out
-
-    def test_bare_brace_var_reconstructs_git_itself_denied(self, shared_repo):
-        """`gi${X}t commit` -- NO literal `git` is present in the raw text
-        (`${X}` is unresolved, so the substring `git` never actually
-        appears) -- branch A applies: joined fragment `git` (from `gi` +
-        `t`) is trivially a subsequence of the literal word `git` itself,
-        denied UNCONDITIONALLY."""
-        cmd = "gi" + chr(36) + "{X}t commit"
-        out = _decision(_run(_bash(cmd, cwd=str(shared_repo))))
-        assert out["permissionDecision"] == "deny", out
-
-    def test_default_resolution_still_fully_resolves_before_adjacency_runs(self, shared_repo):
-        """`g${x:-i}t checkout` -- `${x:-i}` has a `:-` default, so it fully
-        resolves to the literal `i` in the normalizer BEFORE the adjacency
-        check ever runs, reconstructing `git checkout` directly.
-
-        Round-7 review falsification (T2 nexus/3c92m-code-review-round7):
-        disabling ONLY `_resolve_param_defaults` in a scratch copy still
-        denied this command -- via the adjacency rule's own `g`...`t`
-        bookend subsequence match on the UNRESOLVED text, not via the
-        mechanism this test's docstring claims. The old version of this
-        test asserted only the AGGREGATE `deny` verdict, which both
-        mechanisms produce, so it never actually isolated which one fired.
-        Fixed by asserting directly on `_normalize_for_primary_scan`'s
-        OUTPUT: it can only equal the literal string `git checkout` if
-        `_resolve_param_defaults` genuinely ran and substituted `${x:-i}`
-        with `i` -- if that step were disabled, the normalized text would
-        still contain `${x:-i}` verbatim and this assertion would fail
-        immediately, independent of what the aggregate hook verdict is."""
-        spec = importlib.util.spec_from_file_location(
-            "_nx3c92m_guard_default_resolution", str(HOOK_SCRIPT),
-        )
-        guard = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(guard)
-        cmd = "g" + chr(36) + "{x:-i}t checkout"
-        normalized = guard._normalize_for_primary_scan(cmd)
-        assert normalized == "git checkout", (
-            f"expected full literal resolution via _resolve_param_defaults, "
-            f"got {normalized!r} instead"
-        )
-        out = _decision(_run(_bash(cmd, cwd=str(shared_repo))))
-        assert out["permissionDecision"] == "deny", out
-
-    def test_verb_shaped_fragment_without_any_git_present_allowed(self, shared_repo):
-        """`a${x}dd` joins to `add` -- round 7 had a simple-verb-subsequence
-        branch this would have exercised (gated on git-elsewhere); round 8
-        DROPPED that branch entirely (subsumed by branch B). Under round 8
-        this allows for a simpler reason: no `git` anywhere means branch A
-        applies, and `add` is not an in-order subsequence of the 3-letter
-        target `git` (no shared letters at all)."""
-        cmd = "a" + chr(36) + "{x}dd bystander"
-        out = _decision(_run(_bash(cmd, cwd=str(shared_repo))))
-        assert "permissionDecision" not in out, out
-
-    def test_deny_message_names_the_reconstructed_fragment(self, shared_repo):
-        cmd = "git re" + chr(36) + "{x}set --hard"
-        out = _decision(_run(_bash(cmd, cwd=str(shared_repo))))
-        reason = out["permissionDecisionReason"]
-        assert "reset" in reason
-        assert "spliced inside a word" in reason.lower()
-
-    def test_verdict_summary_names_the_round(self, tmp_path, shared_repo):
-        """The `outcome=deny` routing-log entry (not just the model-facing
-        reason) should be attributable to this specific gate for audit."""
-        out = _decision(_run(_bash(
-            "gi" + chr(36) + "{X}t commit", cwd=str(shared_repo),
-        )))
-        assert out["permissionDecision"] == "deny"
-        reason = out["permissionDecisionReason"].lower()
-        assert "round 8" in reason
-
-
-# ── nexus-3c92m round 8: compound/hyphenated verbs, closed for real ─────────
-#
-# Round 7's re-review (an 8th review round) found a Critical: round 7's
-# `_SIMPLE_VERB_WORDS` scoping (deliberately excluding compound/hyphenated
-# verbs to avoid the file/filter-branch and ac/branch false positives) left
-# EVERY compound verb -- worktree add/remove/prune, branch -d/-D/-m, tag -d,
-# update-ref, symbolic-ref, filter-branch, reflog expire, cherry-pick --
-# completely UNPROTECTED against a splice, since no finite word list can
-# also cover them without reopening the same false-positive class, and the
-# primary contiguous-substring scan can never match a verb whose own
-# spelling is broken by an unresolved expansion either. A REGRESSION from
-# round 6, which caught all of these on glue alone. Round 8 resolves this
-# by splitting the rule on git-presence rather than trying to extend the
-# word list: branch A (no `git` anywhere) keeps the round-7 subsequence-of-
-# `git` check verbatim; branch B (`git` present anywhere) reinstates round
-# 6's unconditional glue check, now scoped to git-containing commands only
-# -- see `_find_spliced_expansion`'s module comment for the full rule.
-
-
-class TestNexus3c92mRound8CompoundVerbCoverage:
-    """The eight compound-verb splice shapes from the round-7 review's
-    Critical finding, each verified ALLOW pre-fix and required DENY here."""
-
-    @pytest.mark.parametrize("cmd", [
-        "git worktree re" + chr(36) + "{x}move w1",
-        "git fil" + chr(36) + "{x}ter-branch",
-        "git branch -" + chr(36) + "{x}d b",
-        "git tag -" + chr(36) + "{x}d t",
-        "git update-" + chr(36) + "{x}ref",
-        "git symbolic-" + chr(36) + "{x}ref",
-        "git reflog " + chr(36) + "{x}expire --all",
-        "git cherry-" + chr(36) + "{x}pick abc",
-    ])
-    def test_compound_verb_splice_denied(self, cmd, shared_repo):
-        out = _decision(_run(_bash(cmd, cwd=str(shared_repo))))
-        assert out["permissionDecision"] == "deny", f"{cmd}: {out}"
-
-    def test_git_log_with_spliced_filename_denied_documented_false_positive(self, shared_repo):
-        """`git log file${i}.txt` -- a read-only, harmless command that
-        happens to contain both a literal `git` and a glued expansion.
-        Denied by branch B (glue alone, once `git` is present) -- an
-        EXPLICITLY ACCEPTED false positive per the coordinator's round-8
-        instructions, not a bug."""
-        cmd = "git log file" + chr(36) + "{i}.txt"
-        out = _decision(_run(_bash(cmd, cwd=str(shared_repo))))
-        assert out["permissionDecision"] == "deny", out
-        reason = out["permissionDecisionReason"].lower()
-        assert "not allowed in git commands" in reason
-        assert "whole-word" in reason
-
-    @pytest.mark.parametrize("cmd", [
-        "echo file" + chr(36) + "{i}.txt",
-        'cp "' + chr(36) + '{dir}/a' + chr(36) + '{n}.log" .',
-    ])
-    def test_ordinary_interpolation_no_git_allowed(self, cmd, shared_repo):
-        out = _decision(_run(_bash(cmd, cwd=str(shared_repo))))
-        assert "permissionDecision" not in out, f"{cmd}: {out}"
-
-    def test_make_int_no_git_present_documents_the_coordinators_own_verified_edge_case(self, shared_repo):
-        """`make i${n}t` -- NO `git` anywhere, so branch A applies (kept
-        VERBATIM from round 7 per the round-8 instruction to not touch it).
-        The round-8 relay listed this as a must-ALLOW case, but the round-7
-        reviewer had ALREADY verified (and explicitly judged ACCEPTABLE,
-        recommending only a documentation addition, not a behavior change)
-        that this exact shape denies under branch A: joined fragment `it`
-        (from `i` + `t`) IS a genuine in-order subsequence of the 3-letter
-        target `git` (i@1, t@2) -- mathematically unavoidable for ANY
-        2-letter fragment drawn from the letters `g`/`i`/`t` in order, and
-        branch A is unchanged from round 7 here. Asserting the VERIFIED
-        behavior (deny) rather than the apparently-inconsistent relay text,
-        flagged explicitly in the round-8 handback for the coordinator to
-        correct if a real behavior change was intended -- not something to
-        invent unilaterally."""
-        cmd = "make i" + chr(36) + "{n}t"
-        out = _decision(_run(_bash(cmd, cwd=str(shared_repo))))
-        assert out["permissionDecision"] == "deny", out
-
-    def test_accepted_proximity_false_positive_documented_in_known_limits(self, shared_repo):
-        """Round-7 review's IMPORTANT finding: `_find_spliced_expansion`'s
-        branches have no proximity/segment requirement -- ANY literal `git`
-        anywhere in the whole raw text gates branch B, even a harmless,
-        unrelated `git status` far from the actual splice. Same accepted
-        trade-off as `git log --grep=commit` (rounds 4-5)."""
-        cmd = "git status && echo add" + chr(36) + "{item} to list"
-        out = _decision(_run(_bash(cmd, cwd=str(shared_repo))))
-        assert out["permissionDecision"] == "deny", out
-
-    def test_dropped_simple_verb_branch_no_longer_exists(self):
-        """`_SIMPLE_VERB_WORDS` was removed entirely in round 8 (subsumed
-        by branch B) -- regression-lock that it stays gone rather than
-        silently reappearing."""
-        spec = importlib.util.spec_from_file_location(
-            "_nx3c92m_guard_no_simple_verbs", str(HOOK_SCRIPT),
-        )
-        guard = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(guard)
-        assert not hasattr(guard, "_SIMPLE_VERB_WORDS")
-
-
-# ── nexus-3c92m round 9: chained expansions, closed for real ────────────────
-#
-# Round 8's re-review (a 9th review round) found a Critical: Branch A was
-# defeated by chaining two or more expansion constructs back-to-back with
-# NOTHING between them -- `g${a}${b}i${c}${d}t checkout -- t3.py` allowed,
-# and with all four variables unset, real bash genuinely executes this as
-# `git checkout`. `_adjacent_letter_fragments` computed the touching-letter
-# run per INDIVIDUAL construct match, so two directly-adjacent constructs
-# each only ever saw ONE neighboring letter (the sibling construct blocked
-# the run), never reaching the length->=2 threshold alone even though the
-# combined reconstruction spans the target. Closed two ways, kept together
-# as defense in depth: (1) `_expansion_construct_runs` groups directly-
-# touching constructs into one unit before computing the fragment; (2) the
-# ZERO-EXPANSION PASS deletes every remaining opaque construct outright and
-# re-runs the primary git+verb scan on that text too -- a literal
-# simulation of what real bash does with an unset variable, catching any
-# chain length or interleaving pattern with no fragment reasoning at all.
-
-
-class TestNexus3c92mRound9ChainedExpansions:
-    """The exact repro from the round-8 review, chain-length and
-    interleaving variants, the required must-ALLOW regression set, and a
-    perf check at 1MB (round 8's review noted the shipped perf tests
-    stopped at 100KB)."""
-
-    def test_exact_repro_four_construct_chain_denied(self, shared_repo):
-        """`g${a}${b}i${c}${d}t checkout -- t3.py` -- the reviewer's minimal
-        repro: 2 constructs in the g-i gap, 2 in the i-t gap. Verified
-        against real bash: with a/b/c/d all unset, this genuinely executes
-        as `git checkout`."""
-        cmd = (
-            "g" + chr(36) + "{a}" + chr(36) + "{b}i"
-            + chr(36) + "{c}" + chr(36) + "{d}t checkout -- t3.py"
-        )
-        out = _decision(_run(_bash(cmd, cwd=str(shared_repo))))
-        assert out["permissionDecision"] == "deny", out
-
-    def test_three_construct_chain_denied(self, shared_repo):
-        """`g${a}${b}${c}it checkout` -- three constructs grouped into one
-        run, confirming the run-grouping loop isn't hardcoded to exactly 2."""
-        cmd = "g" + chr(36) + "{a}" + chr(36) + "{b}" + chr(36) + "{c}it checkout -- t3.py"
-        out = _decision(_run(_bash(cmd, cwd=str(shared_repo))))
-        assert out["permissionDecision"] == "deny", out
-
-    def test_chain_inside_a_verb_denied(self, shared_repo):
-        """`git ch${a}${b}eckout -- f` -- the chain sits inside the VERB,
-        not the word `git` itself, with a literal `git` present (branch B
-        would also independently catch this on glue alone)."""
-        cmd = "git ch" + chr(36) + "{a}" + chr(36) + "{b}eckout -- t3.py"
-        out = _decision(_run(_bash(cmd, cwd=str(shared_repo))))
-        assert out["permissionDecision"] == "deny", out
-
-    def test_chained_command_substitution_forms_denied(self, shared_repo):
-        """`g$(true)$(true)it checkout` -- chained `$(...)` forms, not just
-        `${...}`; `true` is a portable always-succeeds command, no unset-var
-        trick needed for THIS specific construct type."""
-        cmd = "g" + chr(36) + "(true)" + chr(36) + "(true)it checkout -- t3.py"
-        out = _decision(_run(_bash(cmd, cwd=str(shared_repo))))
-        assert out["permissionDecision"] == "deny", out
-
-    def test_chained_backtick_forms_denied(self, shared_repo):
-        """`g\\`true\\`\\`true\\`it checkout` -- chained backtick forms."""
-        cmd = (
-            "g" + chr(96) + "true" + chr(96) + chr(96) + "true" + chr(96)
-            + "it checkout -- t3.py"
-        )
-        out = _decision(_run(_bash(cmd, cwd=str(shared_repo))))
-        assert out["permissionDecision"] == "deny", out
-
-    def test_separated_constructs_still_allowed(self, shared_repo):
-        """`${dir}/a${n}` -- separated by `/`, NOT a chain (a non-word
-        character breaks the run) -- must stay allowed, confirming the
-        run-grouping fix doesn't over-merge non-adjacent constructs."""
-        cmd = 'cp "' + chr(36) + '{dir}/a' + chr(36) + '{n}.log" .'
-        out = _decision(_run(_bash(cmd, cwd=str(shared_repo))))
-        assert "permissionDecision" not in out, out
-
-    def test_file_interpolation_still_allowed_zero_expansion_has_no_git(self, shared_repo):
-        """`echo file${i}.txt` -- the zero-expansion text is literally
-        `echo file.txt`, which contains no `git` at all."""
-        cmd = "echo file" + chr(36) + "{i}.txt"
-        out = _decision(_run(_bash(cmd, cwd=str(shared_repo))))
-        assert "permissionDecision" not in out, out
-
-    def test_command_sub_path_join_still_allowed(self, shared_repo):
-        cmd = "x=" + chr(36) + "(pwd)/sub"
-        out = _decision(_run(_bash(cmd, cwd=str(shared_repo))))
-        assert "permissionDecision" not in out, out
-
-    def test_zero_expansion_pass_directly(self):
-        """Unit-level: `_delete_all_expansions` on the exact repro produces
-        the literal, contiguous text `git checkout -- t3.py`."""
-        spec = importlib.util.spec_from_file_location(
-            "_nx3c92m_guard_zero_expansion", str(HOOK_SCRIPT),
-        )
-        guard = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(guard)
-        cmd = (
-            "g" + chr(36) + "{a}" + chr(36) + "{b}i"
-            + chr(36) + "{c}" + chr(36) + "{d}t checkout -- t3.py"
-        )
-        normalized = guard._normalize_for_primary_scan(cmd)
-        zero = guard._delete_all_expansions(normalized)
-        assert zero == "git checkout -- t3.py", repr(zero)
-
-    def test_expansion_construct_runs_groups_adjacent_matches(self):
-        """Unit-level: `_expansion_construct_runs` on the exact repro
-        produces exactly 2 runs (the g-i gap pair, the i-t gap pair), not
-        4 individual matches."""
-        spec = importlib.util.spec_from_file_location(
-            "_nx3c92m_guard_runs", str(HOOK_SCRIPT),
-        )
-        guard = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(guard)
-        cmd = (
-            "g" + chr(36) + "{a}" + chr(36) + "{b}i"
-            + chr(36) + "{c}" + chr(36) + "{d}t checkout -- t3.py"
-        )
-        runs = guard._expansion_construct_runs(cmd)
-        assert len(runs) == 2, runs
-
-    def test_100kb_and_1mb_scan_near_linearly(self):
-        """Round-8 review noted the shipped perf tests stopped at 100KB;
-        this covers the 1MB shape the reviewer spot-checked manually, for
-        both the plain-fill and chained-`${a}`-expansion adversarial inputs.
-
-        Was two absolute-millisecond budgets (`ms_1m < 500`,
-        `ms_1m_chain < 500`); the chained case flaked on a loaded GitHub
-        runner during the 7.14.0 release PR (#1471, run 32451880113, shard
-        4/4: 621ms >= 500ms on this exact, unmodified input) -- a
-        shared-runner contention shape, not a regression, per the
-        deterministic-tests rule in tests/AGENTS.md.
-
-        Redesigned the same way as
-        `test_many_dollar_var_occurrences_scans_near_linearly` above: for
-        each adversarial shape, the identical scan pipeline is timed
-        in-process at two sizes 10x apart, best-of-3 per size, and the
-        ratio must stay near-linear. A regression that reintroduces a
-        quadratic per-match cost (the exact bug class round 6/7 already
-        fixed once in `_adjacent_letter_fragments`) inflates a 10x input by
-        ~O(n^2) i.e. ~100x, which blows `_MAX_LINEAR_RATIO` regardless of
-        machine speed. `_abs_ceiling_ms` is a size-scaled absolute ceiling that
-        only catches an outright hang.
-        """
-        spec = importlib.util.spec_from_file_location(
-            "_nx3c92m_guard_perf_1mb", str(HOOK_SCRIPT),
-        )
-        guard = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(guard)
-
-        def timed(cmd: str) -> float:
-            # nexus-kx2s5: CPU time, not wall time (same nexus-scc9t fix as
-            # the other near-linear-scan tests in this file). Went red
-            # under full-suite -n auto load: 2.812ms -> 95.787ms (34.1x,
-            # over _MAX_LINEAR_RATIO), passing alone every time. Wall time
-            # includes scheduler-preemption gaps under 16-worker CPU
-            # contention, and a longer-running measurement (the 1MB side)
-            # has a proportionally larger window to get preempted in than
-            # the 100KB side, inflating the ratio in exactly the direction
-            # that looks like a regression. process_time() only counts
-            # CPU cycles this process actually consumed, so it is immune
-            # to that contention artifact while still measuring the same
-            # real work -- a genuine O(n^2) regression still burns CPU
-            # time proportionally and still blows the ratio.
-            best = float("inf")
-            for _ in range(3):
-                t0 = time.process_time()
-                normalized = guard._normalize_for_primary_scan(cmd)
-                zero = guard._delete_all_expansions(normalized)
-                guard._find_spliced_expansion(normalized)
-                guard._primary_match(normalized)
-                guard._primary_match(zero)
-                best = min(best, time.process_time() - t0)
-            return best * 1000
-
-        def assert_near_linear(
-            ms_small: float, ms_large: float, *, label: str, large_bytes: int
-        ) -> None:
-            ceiling = _abs_ceiling_ms(large_bytes)
-            assert ms_large < ceiling, (
-                f"{label}: {ms_large:.3f}ms >= {ceiling:.0f}ms size-scaled ceiling "
-                f"({large_bytes} bytes)"
-            )
-            ratio = ms_large / max(ms_small, _RATIO_FLOOR_MS)
-            assert ratio < _MAX_LINEAR_RATIO, (
-                f"{label}: non-linear scaling {ms_small:.3f}ms -> "
-                f"{ms_large:.3f}ms is {ratio:.1f}x for a 10x input "
-                f"(expected near-linear, < {_MAX_LINEAR_RATIO}x)"
-            )
-
-        fill_1m = "git " + ("x" * 1_000_000)
-        ms_100k = timed("git " + ("x" * 100_000))
-        ms_1m = timed(fill_1m)
-        assert_near_linear(
-            ms_100k, ms_1m, label="plain fill 100KB->1MB", large_bytes=len(fill_1m)
-        )
-
-        chain_1m = "git " + (chr(36) + "{a}") * 50_000 + "checkout"
-        ms_100k_chain = timed("git " + (chr(36) + "{a}") * 5_000 + "checkout")
-        ms_1m_chain = timed(chain_1m)
-        assert_near_linear(
-            ms_100k_chain,
-            ms_1m_chain,
-            label="chained ${a} 100KB->1MB",
-            large_bytes=len(chain_1m),
-        )
-
-
-# ── nexus-0r5l8: `git` counts only as the git COMMAND, not as a path/word ────
-#
-# Before this, ANY `\bgit\b` in the command text opened the primary rule's
-# verb scan: `nexus-git-policy.py`, `.git/`, `~/git/nexus`, `git-workflow.md`
-# and `git.py` each armed the guard, so `cat nexus-git-policy.py | grep reset`
-# denied. Sam ruled (2026-09-29, option A) that `git` must be the git command.
-# The shipped rule is a TOKEN rule, not a position analysis: `git` arms the
-# scan only when a whole path-ish token's basename is `git` (or `git-<word>`,
-# the dispatch spelling). A `git` anywhere as its own token still arms it, in
-# any position, because text like `printf 'git checkout f' | sh` puts the
-# command in argument position and only a shell parser could tell them apart.
-
-_GUARD_CACHE: dict[str, object] = {}
-
-
-def _guard_module(path: pathlib.Path = HOOK_SCRIPT, name: str = "_nx0r5l8_guard"):
-    if name not in _GUARD_CACHE:
-        spec = importlib.util.spec_from_file_location(name, str(path))
-        guard = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(guard)
-        _GUARD_CACHE[name] = guard
-    return _GUARD_CACHE[name]
-
-
-def _denies(cmd: str, cwd: pathlib.Path) -> bool:
-    result = _guard_module().body(_bash(cmd, cwd=str(cwd)))
-    return bool(result.stdout) and '"permissionDecision": "deny"' in result.stdout
-
-
-#: Path or word substrings that contain `git` but are not the git command.
-_GIT_SUBSTRING_NOT_THE_COMMAND = [
-    "grep -n add .github/workflows/ci.yml",
-    "ls .github && echo commit",
-    "grep -rn checkout ~/git/nexus/.github/workflows",
-    "cat conexus/hooks/nexus-git-policy.py | grep reset",
-    "ls /Users/x/git/nexus-git-policy.py && echo reset",
-    "ls .git && echo commit",
-    "ls -la ~/git/nexus/.git/hooks && echo commit",
-    "cd ~/git/nexus && grep -n add x",
-    "cat docs/git-workflow.md | grep commit",
-    "cat .gitignore | grep add",
-    "grep digit x | grep add",
-    "python git.py add",
-    "ls nexus-git-policy.py file${i}.txt",
-]
-
-#: `git` as a real command in every position the ruling names, plus the
-#: wrapper and path spellings.
-_REAL_GIT_COMMANDS = [
-    "git checkout -- f",
-    "cd .github && git checkout -- f",
-    "ls nexus-git-policy.py && git checkout -- f",
-    "ls .git; git add x",
-    "/usr/bin/git checkout f",
-    "./git add x",
-    "../bin/git commit -m x",
-    "FOO=1 git commit -m x",
-    "A=1 B=2 git reset --hard",
-    "env GIT_DIR=x git commit -m x",
-    "command git add x",
-    "exec git reset --hard",
-    "xargs git rm",
-    "nice git commit -m x",
-    "time git checkout f",
-    "sudo git add x",
-    "(git add x)",
-    "true || git add x",
-    "echo hi | git add x",
-    "echo $(git add x)",
-    "echo `git add x`",
-    "if true; then git add f; fi",
-    "for f in a; do git rm $f; done",
-    "cd d\ngit add f",
-    "{ git checkout -- f; }",
-    "git -C dir checkout f",
-    "git -c user.name=x commit -m m",
-    "git --no-pager stash",
-    "git-checkout -- f",
-    "/usr/lib/git-core/git-add x",
-    "git.exe checkout -- f",
-    "$(command -v git) reset --hard",
-    "${GITBIN:-git} checkout -- f",
-    # Windows/WSL and wrapper spellings, and the sanctioned push wrapper
-    # (a subagent must not run it in the shared tree).
-    "git.cmd checkout -- f",
-    "git.bat reset --hard",
-    "git.com add x",
-    "git.sh reset --hard",
-    "git-lfs.exe checkout -- f",
-    "git-add.exe x",
-    "git-{add,x}",
-    "scripts/git-push-develop.sh abc123",
-    "NX_PUSH_SOURCE=HEAD scripts/git-push-develop.sh abc123",
-    # Accepted false positive: a directory literally named git, trailing
-    # slash included.
-    "ls ~/git/ && echo add",
-    "cd ~/git && echo add",
-]
-
-#: Found by the nexus-0r5l8 fix-round reviews: the first cut let each of
-#: these execute git while allowing.
-_REVIEW_FOUND_BYPASSES = [
-    # F1: a bare `git-` must arm (git-core/git-add is a symlink to git).
-    "p=/Library/Developer/CommandLineTools/usr/libexec/git-core/git-; ${p}add f",
-    "p=/usr/libexec/git-core/git-; ${p}reset --hard",
-    # F2: `%`, `+`, `#` are not token characters, and a trailing `/` does
-    # not hide the basename.
-    "printf 'git%s checkout f\\n' '' | sh",
-    "echo x | sed 's/x/git/;s/$/ checkout f/' | sh",
-    "echo 'git+ checkout f' | sh",
-    # `~` is not a token character: text the shell builds can strip it.
-    "x=git~; ${x%~} checkout f",
-    "printf 'git~ checkout f' | tr -d '~' | sh",
-    "echo 'git# checkout f' | sh",
-    "echo 'git% checkout f' | sh",
-    "echo 's/x/git/ checkout f' | sh",
-]
-
-#: Every shape the module docstring catalogues as a bypass of an earlier
-#: round, restated with a real `git`. Each must still deny.
-_CATALOGUED_BYPASSES = [
-    'git com"mit" -m msg',                                # quote stripping
-    "git che\\ckout -- f",                                # backslash escape
-    "g\\it checkout -- f",
-    "git ch${x:-e}ckout -- f",                            # ${x} default splice
-    "g${x:-i}t checkout -- f",
-    "g$(echo i)t checkout -- f",                          # $(...) splice
-    "git ch$(cmd)ckout -- f",                             # subsequence rule
-    "g$'\\151't checkout -- f",                           # ANSI-C
-    "g${a}${b}i${c}${d}t checkout -- t3.py",              # chained expansions
-    "bash <<< 'git checkout -- f'",                       # here-string
-    "cat <<< hi\ngit checkout -- f",
-    "printf 'git checkout -- f' | sh",                    # piped literal text
-    "echo 'git checkout -- f' | bash",
-    "eval 'git checkout -- f'",
-    "sh -c 'git checkout -- f'",
-    ". <(echo 'git checkout -- f')",
-    "git \\\ncheckout -- f",                              # continuation
-    "git \\\r\ncheckout -- f",                            # CRLF continuation
-    "git -c user.name=" + ("x" * 300) + " checkout -- f",  # padded -c global
-    "g=git; $g checkout -- x",                            # indirection via literal
-    "\\git checkout -- x",
-    "git${IFS}checkout -- x",
-    "git fil${x}ter-branch",
-    "git worktree re${x}move w1",
-    "'git' checkout -- f",
-    '"git" "checkout" -- f',
-    "bash <<EOF\ngit checkout -- f\nEOF",
-]
-
-
-class TestNexus0r5l8GitMustBeTheCommand:
-    @pytest.mark.parametrize("cmd", _GIT_SUBSTRING_NOT_THE_COMMAND)
-    def test_git_inside_a_path_or_word_does_not_arm_the_guard(self, cmd, shared_repo):
-        assert not _denies(cmd, shared_repo), cmd
-
-    @pytest.mark.parametrize("cmd", _REAL_GIT_COMMANDS)
-    def test_a_real_git_command_still_denies(self, cmd, shared_repo):
-        assert _denies(cmd, shared_repo), cmd
-
-    @pytest.mark.parametrize("cmd", _CATALOGUED_BYPASSES)
-    def test_every_catalogued_bypass_still_denies(self, cmd, shared_repo):
-        assert _denies(cmd, shared_repo), cmd
-
-    @pytest.mark.parametrize("cmd", _REVIEW_FOUND_BYPASSES)
-    def test_every_review_found_bypass_denies(self, cmd, shared_repo):
-        assert _denies(cmd, shared_repo), cmd
-
-    def test_the_sanctioned_push_wrapper_arms_the_guard(self, shared_repo):
-        """`scripts/git-push-develop.sh` used to deny only by accident (a
-        `git-` word boundary). The basename rule keeps it denied on purpose:
-        a subagent must not push from the shared tree."""
-        assert _denies("scripts/git-push-develop.sh abc123", shared_repo)
-        assert _denies("NX_PUSH_SOURCE=HEAD scripts/git-push-develop.sh abc", shared_repo)
-
-    def test_a_path_hit_before_the_real_git_does_not_hide_the_verb(self, shared_repo):
-        """The scan starts at the first git COMMAND token, so a path hit ahead
-        of it must not consume or shift the verb search."""
-        assert _denies("ls nexus-git-policy.py .git && git reset --hard", shared_repo)
-
-    def test_a_verb_before_the_real_git_stays_allowed_as_before(self, shared_repo):
-        """Unchanged behaviour: the verb scan looks AFTER the first git."""
-        assert not _denies("echo add && git status", shared_repo)
-
-    def test_linked_worktree_exemption_is_untouched(self, linked_worktree):
-        assert not _denies("git checkout -- f.txt", linked_worktree)
-
-    def test_the_wheel_verb_denies_end_to_end(self, shared_repo):
-        out = _decision(_run(_bash("cd .github && git checkout -- f", cwd=str(shared_repo))))
-        assert out["permissionDecision"] == "deny"
-        out = _decision(_run(_bash(
-            "cat conexus/hooks/nexus-git-policy.py | grep reset", cwd=str(shared_repo),
-        )))
-        assert "permissionDecision" not in out
-
-    def test_token_scan_is_linear_on_a_hostile_many_token_command(self):
-        guard = _guard_module()
-        norm_small = guard._normalize_for_primary_scan("a-git-b " * 5_000 + "checkout")
-        norm_big = guard._normalize_for_primary_scan("a-git-b " * 50_000 + "checkout")
-
-        def cpu(text: str) -> float:
-            best = float("inf")
-            for _ in range(3):
-                t0 = time.process_time()
-                assert guard._primary_match(text) is None
-                best = min(best, time.process_time() - t0)
-            return best * 1000
-
-        small, big = cpu(norm_small), cpu(norm_big)
-        assert big < _abs_ceiling_ms(len(norm_big))
-        assert big / max(small, _RATIO_FLOOR_MS) < _MAX_LINEAR_RATIO
-
-
-def _load_plugin_scan():
-    """The plugin script's scan, loaded WITHOUT its interpreter preamble.
-
-    Importing the script as-is runs ``_interpreter.reexec_if_needed()``,
-    which can ``os.execv`` the test process. The preamble statements (the
-    ``sys.path`` inserts, ``import _interpreter``/``_lib``, the re-exec call
-    and the ``__main__`` block) are dropped from the AST; everything the
-    scan uses is kept verbatim, and none of it touches ``_lib`` at import.
-    """
-    import ast
-    import types
-
-    plugin = PROJECT_ROOT / "conexus" / "hooks" / "scripts" / "routing" / (
-        "subagent_git_write_requires_orchestrator.py"
-    )
-    tree = ast.parse(plugin.read_text())
-
-    def preamble(node: ast.stmt) -> bool:
-        if isinstance(node, ast.Import):
-            return any(a.name in {"_interpreter", "_lib"} for a in node.names)
-        if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call):
-            text = ast.unparse(node.value)
-            return "_interpreter" in text or "sys.path.insert" in text
-        return isinstance(node, ast.If)  # the __main__ block
-
-    tree.body = [n for n in tree.body if not preamble(n)]
-    module = types.ModuleType("_nx0r5l8_plugin_scan")
-    exec(compile(tree, str(plugin), "exec"), module.__dict__)  # noqa: S102
-    return module
-
-
-def _scan_guard(which: str):
-    if which == "wheel":
-        return _guard_module()
-    if "_plugin" not in _GUARD_CACHE:
-        _GUARD_CACHE["_plugin"] = _load_plugin_scan()
-    return _GUARD_CACHE["_plugin"]
-
-
-def _scan_denies(guard, cmd: str) -> bool:
-    """`body()`'s decision minus the escape token and worktree probe: the
-    adjacency gate, then the primary rule on the normalized text and on its
-    zero-expansion form."""
-    n = guard._normalize_for_primary_scan(cmd)
-    return bool(
-        guard._find_spliced_expansion(n)
-        or guard._primary_match(n)
-        or guard._primary_match(guard._delete_all_expansions(n))
-    )
-
-
-@pytest.mark.parametrize("which", ["wheel", "plugin"])
-class TestNexus0r5l8RuleOnBothCopies:
-    """`hooks.json` wires the PLUGIN script; the verb tests above drive the
-    wheel port. Every rule class runs against both, so the live copy has a
-    behavioural test of its own."""
-
-    @pytest.mark.parametrize("cmd", _GIT_SUBSTRING_NOT_THE_COMMAND)
-    def test_substring_is_not_the_command(self, which, cmd):
-        assert not _scan_denies(_scan_guard(which), cmd), cmd
-
-    @pytest.mark.parametrize(
-        "cmd", _REAL_GIT_COMMANDS + _CATALOGUED_BYPASSES + _REVIEW_FOUND_BYPASSES,
-    )
-    def test_real_git_and_every_bypass_deny(self, which, cmd):
-        assert _scan_denies(_scan_guard(which), cmd), cmd
-
-
-
-_PINNED_FUNCTIONS = {
-    "_first_git_command", "_primary_match", "_find_spliced_expansion",
+        ". <(echo 'git checkout -- t3.py')",
+        "diff <(git checkout -- t3.py) /dev/null",
+        "echo hi > >(git checkout -- t3.py)",
+        "\n".join(["bash <<'EOF'", "git checkout -- t3.py", "EOF"]),
+        "\n".join(["/bin/bash <<EOF", "git checkout -- t3.py", "EOF"]),
+        "\n".join(["env bash <<EOF", "git checkout -- t3.py", "EOF"]),
+        "\n".join(["sudo bash <<EOF", "git checkout -- t3.py", "EOF"]),
+        "\n".join(["xargs sh <<EOF", "git checkout -- t3.py", "EOF"]),
+        "\n".join(["source <<EOF", "git checkout -- t3.py", "EOF"]),
+        # A non-shell heredoc whose last body line ends in a backslash must
+        # not swallow the terminator and everything after it.
+        "\n".join(["python3 - <<'EOF'", "x = 1 " + BS, "EOF", "git checkout -- t3.py"]),
+        # The multi-line shape of the 2026-08-20 incident: cd, echo, a python
+        # heredoc, then the verb on a later line.
+        "\n".join([
+            "cd {repo}", 'echo "=== Falsify #1 ==="', "python3 - <<'EOF'",
+            "with open('t3.py') as fh:", "    content = fh.read()", "EOF",
+            'echo "checking output"', "git checkout -- t3.py",
+        ]),
+    ],
+    # An expansion glued into the verb or into `git`: whatever it resolves
+    # to at runtime, the text cannot be proven harmless.
+    "spliced_expansions": [
+        "git ch${x:-e}ckout -- f",
+        "g${x:-i}t checkout -- f",
+        "g$(echo i)t checkout -- f",
+        "git ch$(echo e)ckout -- f",
+        "git ch" + BT + "echo e" + BT + "ckout -- f",
+        "git ch$(echo $(echo e))ckout -- f",
+        "git ch$(python -c 'x')ckout -- f",
+        "git ch$(cmd)ckout -- f",
+        "git ch${VAR}ckout -- f",
+        "git re${x}set --hard",
+        "gi${X}t commit",
+        "g$'" + BS + "151't checkout -- f",
+        "git$'" + BS + "t'checkout -- f",
+        "g${a}${b}i${c}${d}t checkout -- t3.py",
+        "g${a}${b}${c}it checkout -- t3.py",
+        "git ch${a}${b}eckout -- t3.py",
+        "g$(true)$(true)it checkout -- t3.py",
+        "g" + BT + "true" + BT + BT + "true" + BT + "it checkout -- t3.py",
+        # compound verbs
+        "git worktree re${x}move w1",
+        "git fil${x}ter-branch",
+        "git branch -${x}d b",
+        "git tag -${x}d t",
+        "git update-${x}ref",
+        "git symbolic-${x}ref",
+        "git reflog ${x}expire --all",
+        "git cherry-${x}pick abc",
+    ],
+    # Text that happens to contain `git` plus a verb. Over-blocking is the
+    # design's stated price (a false positive costs a rephrase, a false
+    # negative destroys uncommitted work); pin it so a loosening is a
+    # visible decision.
+    "accepted_false_positives": [
+        "git log --grep=commit",
+        'echo "later run git commit -m x',
+        "\n".join(["python3 - <<'EOF'", "print('as text only: git checkout -- t3.py')", "EOF"]),
+        "git status && echo add${item} to list",
+        "git log file${i}.txt",
+        "make i${n}t",
+        "ls ~/git/ && echo add",
+        "cd ~/git && echo add",
+    ],
 }
-_PINNED_ASSIGNS = {"_PATHISH_TOKEN_RE", "_GIT_BASENAME_RE", "_VERB_RE"}
-#: Assignments inside ``body()`` that carry the git-present / primary-rule
-#: logic. ``body`` itself differs between the copies (HookResult returns vs
-#: ``pass_through``), so only these statements are compared.
-_PINNED_BODY_ASSIGNS = {"normalized", "spliced_fragment", "primary_match", "git_present"}
 
 
-def _scan_region_sources(path: pathlib.Path) -> dict[str, list[str]]:
-    """Canonical source of everything the git-command scan is made of: the
-    three functions, the three module-level regex assignments, and the
-    ``body()`` assignments that consume them."""
-    import ast
-
-    tree = ast.parse(path.read_text())
-    out: dict[str, list[str]] = {}
-    for node in tree.body:
-        if isinstance(node, ast.FunctionDef) and node.name in _PINNED_FUNCTIONS:
-            out.setdefault(node.name, []).append(ast.unparse(node))
-        elif isinstance(node, ast.Assign):
-            for target in node.targets:
-                if isinstance(target, ast.Name) and target.id in _PINNED_ASSIGNS:
-                    out.setdefault(target.id, []).append(ast.unparse(node))
-        elif isinstance(node, ast.FunctionDef) and node.name == "body":
-            for sub in ast.walk(node):
-                if isinstance(sub, ast.Assign):
-                    for target in sub.targets:
-                        if isinstance(target, ast.Name) and target.id in _PINNED_BODY_ASSIGNS:
-                            out.setdefault("body:" + target.id, []).append(ast.unparse(sub))
-    return out
+@pytest.mark.parametrize("family", sorted(_DENY_FAMILIES))
+def test_subagent_is_denied_in_the_shared_tree(family, shared_repo):
+    cmds = [c.replace("{repo}", str(shared_repo)) for c in _DENY_FAMILIES[family]]
+    leaked = _not_denied(cmds, shared_repo)
+    assert not leaked, f"[{family}] subagent command(s) were NOT denied in the shared tree: {leaked!r}"
 
 
-_PLUGIN_SCRIPT = PROJECT_ROOT / "conexus" / "hooks" / "scripts" / "routing" / (
-    "subagent_git_write_requires_orchestrator.py"
+def test_the_2026_08_20_incident_commands_are_denied(shared_repo):
+    """The three byte-for-byte Bash invocations from the incident that filed
+    nexus-3c92m: quoting and delimiter subtleties are this guard's repeat
+    failure class, so the literal bytes are pinned, not a paraphrase."""
+    fixtures = runpy.run_path(str(PROJECT_ROOT / "tests" / "fixtures" / "incident_3c92m_commands.py"))
+    names = ["INCIDENT_CMD_1", "INCIDENT_CMD_2", "INCIDENT_CMD_3"]
+    leaked = _not_denied([fixtures[n] for n in names], shared_repo)
+    assert not leaked, f"incident command(s) were allowed: {[names[[fixtures[n] for n in names].index(c)] for c in leaked]}"
+
+
+# ---------------------------------------------------------------------------
+# ALLOW tables.
+# ---------------------------------------------------------------------------
+
+_ALLOW_FAMILIES: dict[str, list[str]] = {
+    "read_only_git": [
+        "git status",
+        "git diff",
+        "git log --oneline -5",
+        "git show HEAD",
+        "git show HEAD:src/nexus/upgrade_finish.py",
+        "git blame t3.py",
+        "git rev-parse HEAD",
+        "git ls-files",
+        # The verb scan looks AFTER the first git command only.
+        "echo add && git status",
+        "git diff -- \"" + D + "(pwd)/f\"",
+        "git log " + D + "REV",
+        "git st" + D + "(echo a)tus",
+    ],
+    "not_git": [
+        "ls -la && echo commit",
+        "ls",
+        "\n".join(["cd {repo}", "echo hi", "ls -la"]),
+        'cat <<< "hello world"',
+        # `git` inside a path or a word is not the git command.
+        "grep -n add .github/workflows/ci.yml",
+        "ls .github && echo commit",
+        "grep -rn checkout ~/git/nexus/.github/workflows",
+        "cat conexus/hooks/nexus-git-policy.py | grep reset",
+        "ls /Users/x/git/nexus-git-policy.py && echo reset",
+        "ls .git && echo commit",
+        "ls -la ~/git/nexus/.git/hooks && echo commit",
+        "cd ~/git/nexus && grep -n add x",
+        "cat docs/git-workflow.md | grep commit",
+        "cat .gitignore | grep add",
+        "grep digit x | grep add",
+        "python git.py add",
+        "ls nexus-git-policy.py file${i}.txt",
+    ],
+    # Ordinary interpolation, nothing git-shaped for it to reconstruct.
+    "ordinary_expansions": [
+        "echo file${i}.txt",
+        'cp "${dir}/a${n}.log" .',
+        "tar xf pkg${ver}.tgz",
+        "x=$(pwd)/sub",
+        "echo a${b}c",
+        "a${x}dd bystander",
+        'echo "$(pwd)"',
+        # Reconstructs a bare `git` with no verb after it.
+        "g${x:-i}t",
+        "g$(echo i)t",
+        "g$'" + BS + "151't",
+    ],
+}
+
+
+@pytest.mark.parametrize("family", sorted(_ALLOW_FAMILIES))
+def test_subagent_is_allowed_in_the_shared_tree(family, shared_repo):
+    cmds = [c.replace("{repo}", str(shared_repo)) for c in _ALLOW_FAMILIES[family]]
+    blocked = _denied_among(cmds, shared_repo)
+    assert not blocked, f"[{family}] command(s) were wrongly denied: {blocked!r}"
+
+
+def test_documented_residual_decode_then_exec_is_not_caught(shared_repo):
+    """A write verb delivered as encoded data never puts `git` and a verb in
+    the raw text, so there is nothing to anchor on. Named in the script's
+    KNOWN LIMITS; pinned so closing it is a deliberate change."""
+    b64 = base64.b64encode(b"git checkout -- t3.py").decode()
+    cmd = f"echo {b64} | base64 -d | sh"
+    assert not _denied(cmd, shared_repo), cmd
+
+
+# ---------------------------------------------------------------------------
+# Who is exempt, and the boundary of the exemption.
+# ---------------------------------------------------------------------------
+
+_EXEMPTION_PROBES = [
+    "git commit -m msg",
+    "git add -A",
+    "git checkout -- x.py",
+    "git reset --hard HEAD",
+    "git stash",
+    "git clean -fd",
+    "git switch main",
+    "git ch$VARckout -- t3.py",
+]
+
+
+def test_main_conversation_is_never_denied(shared_repo):
+    """No ``agent_id``: the orchestrator commits and resets its own tree."""
+    for cmd in _EXEMPTION_PROBES:
+        out = _verdict(cmd, shared_repo, agent=False)
+        assert "permissionDecision" not in out, f"main conversation was gated on {cmd!r}: {out}"
+
+
+def test_a_linked_worktree_agent_owns_its_tree(linked_worktree):
+    """A worktree-isolated agent's local commits are the documented harvest
+    choreography; a POSITIVELY PROVEN linked worktree is the one exemption."""
+    for cmd in _EXEMPTION_PROBES:
+        out = _verdict(cmd, linked_worktree)
+        assert "permissionDecision" not in out, f"linked-worktree agent was gated on {cmd!r}: {out}"
+
+
+@pytest.mark.parametrize("cmd", ["git commit -m msg", "git add -A", "git checkout -- x.py"])
+def test_an_undeterminable_worktree_fails_closed(cmd, tmp_path):
+    """A non-repo cwd makes ``git rev-parse`` fail. Not being able to tell
+    whether the tree is shared earns no pass, for index writers and
+    destroyers alike."""
+    not_a_repo = tmp_path / "norepo"
+    not_a_repo.mkdir()
+    out = _verdict(cmd, not_a_repo)
+    assert out.get("permissionDecision") == "deny", f"{cmd!r} was permitted in a non-repo cwd: {out}"
+    reason = out["permissionDecisionReason"].lower()
+    assert "could not be determined" in reason and "fail closed" in reason, reason
+
+
+def test_the_routing_allow_escape_passes_and_is_logged(shared_repo, tmp_path):
+    """The escape is auditable: the fire lands in the drop meter (this
+    subprocess has no engine to reach) carrying rule and outcome."""
+    for cmd in (
+        "git commit -m msg # routing-allow: orchestrator sanctioned",
+        "git checkout -- x.py  # routing-allow: orchestrator asked me to revert this",
+        "git ch$VARckout -- t3.py  # routing-allow: orchestrator sanctioned this rephrase",
+    ):
+        out = _verdict(cmd, shared_repo)
+        assert "permissionDecision" not in out, f"escape did not pass {cmd!r}: {out}"
+    log = (tmp_path / "dropped_writes.jsonl").read_text()
+    assert '"escape"' in log and "subagent_git_write_requires_orchestrator" in log, log
+
+
+# ---------------------------------------------------------------------------
+# The deny message.
+# ---------------------------------------------------------------------------
+
+
+def test_the_deny_message_gives_the_hand_back_protocol(shared_repo):
+    out = _verdict("git checkout -- f.py", shared_repo)
+    assert out["permissionDecision"] == "deny"
+    reason = out["permissionDecisionReason"]
+    low = reason.lower()
+    for needle in ("orchestrator commits", "uncommitted", "falsify by comparison", "git show head:", "diff"):
+        assert needle in low, f"deny message lost {needle!r}: {reason}"
+    # The escape is named for an operator, never handed to the gated agent
+    # (nexus-cnzei.2 S8), and the completion wording scopes SendMessage to
+    # background agents (C4).
+    assert "routing-allow" in reason and "not yours to reach for" in reason, reason
+    assert "background" in low and "foreground" in low, reason
+
+
+def test_the_spliced_expansion_deny_names_the_reconstructed_fragment(shared_repo):
+    out = _verdict("git re${x}set --hard", shared_repo)
+    assert out["permissionDecision"] == "deny"
+    assert "reset" in out["permissionDecisionReason"], out["permissionDecisionReason"]
+
+
+# ---------------------------------------------------------------------------
+# Fail-open at the hook level, and scan cost.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "stdin_text",
+    ["not json", "", "[]", json.dumps({"agent_id": AGENT_ID, "tool_name": "Bash"})],
+    ids=["junk", "empty", "non-object", "no-command"],
 )
+def test_malformed_input_never_wedges_bash(stdin_text):
+    """A crash in the guard must not brick every agent's Bash (the rule's
+    ``fail_closed: false`` in registry.yaml): exit 0, no deny."""
+    proc = _run_raw(stdin_text)
+    assert proc.returncode == 0, proc.stderr
+    assert "deny" not in proc.stdout
 
 
-def test_plugin_script_and_wheel_verb_share_the_git_command_scan():
-    """`hooks.json` wires the plugin script while the verb tests drive the
-    wheel copy, so the two must carry the same scan (the port is 'move, do
-    not rewrite'). Pins the regexes and `body()`'s git-present logic too:
-    a function-only pin stayed equal when `_GIT_BASENAME_RE` was gutted."""
-    plugin = _scan_region_sources(_PLUGIN_SCRIPT)
-    wheel = _scan_region_sources(HOOK_SCRIPT)
-    expected = (
-        _PINNED_FUNCTIONS | _PINNED_ASSIGNS
-        | {"body:" + n for n in _PINNED_BODY_ASSIGNS}
-    )
-    assert set(plugin) == expected, f"plugin script lost: {expected - set(plugin)}"
-    assert set(wheel) == expected, f"wheel port lost: {expected - set(wheel)}"
-    assert plugin == wheel
+def test_a_non_bash_tool_is_not_gated(shared_repo):
+    payload = _payload("git commit -m x", cwd=str(shared_repo))
+    payload["tool_name"] = "Read"
+    assert "permissionDecision" not in _hso(_run(payload))
 
 
-def test_the_scan_pin_fails_when_a_regex_drifts_in_one_copy(tmp_path):
-    """Falsifiability: swap `_GIT_BASENAME_RE` for a never-matching pattern
-    in a scratch copy of the plugin script; the pin must see it. Same for
-    `body()`'s git-present line."""
-    src = _PLUGIN_SCRIPT.read_text()
-    marker = "_GIT_BASENAME_RE = re.compile("
-    assert src.count(marker) == 1
-    drifted = tmp_path / "drifted.py"
-    drifted.write_text(src.replace(marker, "_GIT_BASENAME_RE = re.compile(r'(?!)') or re.compile(", 1))
-    assert _scan_region_sources(drifted) != _scan_region_sources(HOOK_SCRIPT)
-    line = "git_present = _first_git_command(normalized) is not None"
-    assert src.count(line) == 1
-    drifted.write_text(src.replace(line, "git_present = True"))
-    assert _scan_region_sources(drifted) != _scan_region_sources(HOOK_SCRIPT)
+def test_a_hostile_300kb_command_is_scanned_in_linear_time(shared_repo):
+    """The regression class here is a per-match slice making the scan
+    quadratic: 50k `$VAR` matches then cost minutes, not milliseconds. The
+    ceiling is a wall-clock multiple of a quiet run, generous enough that
+    runner contention cannot reach it."""
+    big = "git " + (D + "VAR ") * 50_000 + "checkout"
+    t0 = time.monotonic()
+    out = _verdict(big, shared_repo)
+    elapsed = time.monotonic() - t0
+    assert out.get("permissionDecision") == "deny"
+    assert elapsed < 10, f"scan of a {len(big)}-byte command took {elapsed:.1f}s"

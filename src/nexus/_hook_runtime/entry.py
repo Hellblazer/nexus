@@ -155,12 +155,9 @@ VERB_TABLE: dict[str, str] = {
     # conexus/hooks/scripts/version_lockstep_hook.py for good (pinned by
     # tests/hooks/test_lockstep_survives_cli_skew.py); the unwired verb was
     # deleted at nexus-rcoze.
-    # A routing framework guard, deliberately FAIL-OPEN
-    # one (nexus-t9klx). registry.yaml carries Sam's 2026-07-25 reasoning that
-    # a crash in a broken guard must not brick every agent's Bash. Porting
-    # it emptied `routing/` of code -- `routing/_lib.py` had no plugin
-    # importer left and went with it.
-    "subagent-git-write-gate": "nexus.hooks.subagent_git_write_gate",
+    # No `subagent-git-write-gate` verb either: hooks.json never wired it, so
+    # the plugin script routing/subagent_git_write_requires_orchestrator.py is
+    # the one copy (cleanup step A4, nexus-0r1uz).
     # The last of the five (nexus-t9klx): the UserPromptSubmit mailbox floor.
     # The only verb that streams its stdout during run() (_io.stream), because
     # a row it has consumed at the engine must be shown before its recovery

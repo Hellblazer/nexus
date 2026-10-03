@@ -89,15 +89,15 @@ _ROUTING_ALLOW_OWNERSHIP_PHRASE = "not yours to reach for"
 
 #: Live guards whose deny message offers the `# routing-allow:` escape and
 #: must therefore carry the same ownership phrase as the authoring
-#: template. nexus-t9klx ported BOTH of them into the wheel, so these are
-#: wheel modules now rather than plugin script names.
+#: template.
 #:
 #: They stay in ONE list rather than being checked by each guard's own test
 #: file. The property is cross-file parity — the README template and every
 #: guard saying the same thing — and S8 shipped inconsistently in the first
 #: place precisely because each site was looked at on its own.
 _LIVE_HOOKS_WITH_ROUTING_ALLOW_ESCAPE = (
-    PROJECT_ROOT / "src" / "nexus" / "hooks" / "subagent_git_write_gate.py",
+    PROJECT_ROOT / "conexus" / "hooks" / "scripts" / "routing"
+    / "subagent_git_write_requires_orchestrator.py",
 )
 
 

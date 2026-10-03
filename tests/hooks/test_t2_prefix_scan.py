@@ -563,11 +563,12 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 #: cleanup steps A2 and A3, which deleted eight more (the bd-close gate, Stop
 #: verification, the phase-review close gate, the three small hooks, the
 #: verification config reader and ``_plugin``); ``_hook_runtime`` 4 -> 3 with
-#: ``_config``.
+#: ``_config``. ``src/nexus/hooks`` 15 -> 14 at cleanup step A4, which deleted the
+#: unwired subagent git-write verb.
 _HOOK_CODE_ROOTS: dict[str, int] = {
     "conexus/hooks/scripts": 1,
     "sn/hooks/scripts": 5,
-    "src/nexus/hooks": 15,
+    "src/nexus/hooks": 14,
     "src/nexus/_hook_runtime": 3,
 }
 
