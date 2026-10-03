@@ -29,6 +29,16 @@ Usage (all commands run inside the repo, from any subdirectory or worktree):
   memory.py exemplar-add GENRE PATH:START-END [--rev SHA]
   memory.py viewer [--set V]
 
+Site-page section 3 treatments (what a repo or one document does with a rule of the site-page style sheet):
+add-entry --level repo|doc (--path P for doc) takes a list under one of three keys, each entry the rule's opening
+words in double quotes, three dots inside the closing quote, then a reason in parentheses:
+  site_page_section3_ignored     the rule is dropped for that level
+  site_page_section3_query_only  the rule produces queries, never an edit
+  site_page_section3_note_only   the rule appears in the editor's note only
+For example {"scalars": {}, "lists": {"site_page_section3_ignored": ["\"Plain technical English...\" (this essay)"]}}
+on stdin with --from-stdin. The narrower layer wins; `brief.py build` stops, naming the `entries --remove-item`
+command, when an entry matches no rule. `entries --level L [--path P] --remove-item KEY=VALUE` removes one.
+
 TARGET is a path, optionally with a line range: PATH, PATH:START-END, or PATH:N
 (one line, the same as N-N). The path is repo-relative (an absolute path or one relative to the current
 directory is converted; a symlink is NOT followed, so CLAUDE.md stays
@@ -1422,6 +1432,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("path")
     sp.add_argument("--site-layer")
     sp = add("add-entry", cmd_add_entry)
+    sp.epilog = ("A rule of the site-page style sheet (section 3) is treated per level with a list under "
+                 "site_page_section3_ignored, site_page_section3_query_only or site_page_section3_note_only; each "
+                 "entry is the rule's opening words in double quotes, three dots inside the closing quote, then the "
+                 "reason in parentheses, for example \"Plain technical English...\" (this essay).")
     sp.add_argument("--level", choices=["user", "repo", "doc"], required=True)
     sp.add_argument("--path")
     sp.add_argument("--key")

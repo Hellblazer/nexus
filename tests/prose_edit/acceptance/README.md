@@ -4,15 +4,16 @@ Headless Claude Code runs of the real `prose-edit` skill and `line-editor` agent
 
 | File | Use |
 | --- | --- |
-| `run-scenario.sh NAME PROMPT` | One restricted session. Writes `NAME.jsonl`, `NAME.err`, `NAME.rc` under `$OUT_DIR`. |
+| `run-scenario.sh NAME PROMPT` | One restricted session. Writes `NAME.jsonl`, `NAME.err`, `NAME.rc` under `$OUT_DIR`, then calls `record-run.sh`. Every other runner goes through it, so its allowlist is the only one. |
+| `record-run.sh OUT_DIR NAME` | Writes `NAME.head` (the checkout's HEAD sha) and `NAME.sha256` (the transcript's hash, `<hex>  NAME.jsonl`). `verdicts.py` prints the distinct shas of a batch on its `HEADS` line; copy the hashes somewhere durable with the verdict output, not only `/tmp`. |
 | `run-canaries.sh` | The tool-restriction canary, the T2-failure canary, unmapped, stdin, stdin without genre. |
 | `verdicts.py OUT_DIR` | Verdict and compliance counts per run. Exit 1 on any failure, 3 when none failed but a run was `NOT-MEASURABLE`, 0 only when every run passed. |
 | `run-review.sh` | The review-loop scenarios (nexus-ger02.4): reject then run again, list and remove a rejection then run again, a stdin run. Several turns each, answers through `RESUME_FROM`; the skill echoes an answer (`apply --dry-run`) and waits, so each answer turn is followed by a confirmation turn (`a2c`, `a4c`, `b4c`, `c2c`). The script sets `PROSE_EDIT_TEST=1`, which `PROSE_EDIT_OPEN` needs. Writes to T2 under `PROSE_EDIT_PROJECT_PREFIX` (default `zzprose024_`). |
 | `review_verdicts.py OUT_DIR` | Verdicts for those runs from what the skill's scripts printed. A rejected fix shown again is a FAIL. `VACUOUS` (b3 only) means the editor did not propose the removed edit again, so the check proved nothing; it is reported as it is, never retried into a pass. |
 | `run-memory-gate.sh LABEL SOURCE [N]` | The rejection-memory gate (nexus-ger02.16): N fresh runs on a copy of SOURCE. Writes `LABEL-<k>-<turn>.jsonl`. |
 | `memory_gate_verdicts.py OUT_DIR` | Raw counts and the recurrence rate per document and pooled, against the threshold below. |
-| `run-teach.sh` | Scenario 6 and step 13 (the voice card, the promote dry-run gate): seven turns, answers through `RESUME_FROM`; the script itself runs the checks a turn cannot (`voice-card`, a promote with no dry run). T2 prefix `zzprose0206_`. |
-| `teach_verdicts.py OUT_DIR` | Verdicts for those runs, and `seed-json` (the user-level entry the runner stores). Exit 1 on a failure, 3 when a run is missing or `NOT-MEASURABLE`, 0 when all pass. |
+| `run-teach.sh` | Scenario 6 and step 13 (the voice card, the promote dry-run gate, the card reused): eight turns, answers through `RESUME_FROM`; the script itself runs the checks a turn cannot (`voice-card`, a promote with no dry run). It aborts before any session when the scenario document does not start clean. T2 prefix `zzprose0206_`. |
+| `teach_verdicts.py OUT_DIR` | Verdicts for those runs, `seed-json` (the user-level entry the runner stores) and `clean-start` (the starting-state check). Exit 1 on a failure, 3 when a run is missing or `NOT-MEASURABLE`, 0 when all pass. |
 | `fake_nx_unavailable.py` | `PROSE_EDIT_NX` stand-in that reports T2 unavailable. |
 
 ```bash
@@ -28,7 +29,7 @@ For a scenario, call `OUT_DIR=... run-scenario.sh NAME "/prose-edit <args>"` wit
 
 ## The restriction
 
-The runner uses `--permission-mode dontAsk`, allows `Bash` only for `brief.py`, `memory.py` and `review.py`, plus `Read`, `Write` and `Agent`, and denies `Bash(nx:*)`, `Bash(uv:*)`, `Bash(bd:*)` and `Bash(curl:*)`. `--allowedTools` only pre-approves and `--disallowedTools` refuses, so `dontAsk` is what turns everything else into a denial. The `canary-nx` run proves it: the model is told to run `nx --version` and the call must come back denied.
+The runner uses `--permission-mode dontAsk`, allows `Bash` only for `brief.py`, `memory.py` and `review.py`, plus `Read`, `Write` and `Agent`, and denies `Bash(nx:*)`, `Bash(uv:*)`, `Bash(bd:*)` and `Bash(curl:*)`. The allowed rule is a prefix match on the literal text `python3 .claude/skills/prose-edit/scripts/<script>.py`, so the model has to type that text, relative and unquoted, with no `cd` and no `./` before it (the exit batch of 2026-10-03 was denied at its first call because the skill had told the model to quote every path). `SKILL.md` says so, and `tests/prose_edit/test_fix_round4.py` extracts every command form the skill teaches and checks it against this allowlist and `verdicts.py`'s `ALLOWED_BASH`. `--allowedTools` only pre-approves and `--disallowedTools` refuses, so `dontAsk` is what turns everything else into a denial. The `canary-nx` run proves it: the model is told to run `nx --version` and the call must come back denied.
 
 A denied call in a scenario is a failure of the skill's instructions, not an incident. `verdicts.py` counts it under `denied`.
 
@@ -50,6 +51,8 @@ What each kind scores, and against what. Nothing in `verdicts.py` calls the filt
 
 Every doc-editing run, and the stdin run, also needs proof that the `line-editor` subagent read `WORK/brief.md`. The file's last line is `Brief id: <id>` and the dispatch prompt carries no id, so a reply that names it came from a Read. The verdict needs a Read of `.../prose-edit-XXXXXXXX/brief.md` by the subagent, before its reply, in the work directory the skill filtered in, whose result is not an error and carries that line, and a `brief_sha` in the reply equal to it. Without it the run fails.
 
+**Queried** means the word is in the query's `anchor`: a query attached to another sentence whose prose says "may" is not about the qualifier. An edit whose old string occurs more than once in the document breaks the editor's own once-only rule (the filter keeps it when any occurrence is editable, and apply refuses it), so it fails as its own problem, `old string occurs N times: apply refuses it`, and is not scored as a protected-region or range hit; only an edit with a unique old string is scored for those. A query anchor that occurs both inside and outside the range is reported the same way. The `xanadu` and `linda` notes also count the semicolon queries (an anchor with a `;`, or a query text that says "semicolon"), against the number of `;` in the document.
+
 Every kind also fails on the scope and denial counts below and on more edits than its budget. The qualifier rows are Sam's ruling of 2026-09-30 (only filler words are cut; every other qualifier or intensifier is queried, with no class that stays untouched), which deviates from the RDR Technical Design sentence and Test Plan scenario 4 as accepted; it is recorded in the post-mortem at close. `NOT-MEASURABLE` means the run proposed nothing where something is expected (the qualifier kinds excepted), or the document, the protected ranges or the `DEVICES` list no longer matches: it proves nothing and is never a pass.
 
 **What PASS means for the device kinds: none of the listed devices was touched.** `DEVICES` is read off the two documents by hand, with each phrase unique in the document (a phrase that is not there exactly once makes the run `NOT-MEASURABLE`). It lists the refrains, the tricolons, the repeated openings (the three "A ... had to" sentences, the "Nothing ..." pair, the "There is no way ..." triple and the parallel agent sentences) and the unexplained SQL that were found. A device that is not on the list is not checked: a human reads the rest of the edits.
@@ -64,9 +67,19 @@ The note of every run reports what the filter dropped, by cause (`dropped by the
 | --- | --- | --- |
 | `s6-1` | Scenario 6: seeds a user-level diagnostic (`teach_verdicts.py seed-json`), edits `fixtures/user-entry.md` as a `changelog` | the entry, with `(layer: user)`, is in the brief the editor read; the post-filter proposal holds an edit that replaces `worker` with `consumer`, or a query that names one of them |
 | `t1`, `t2`, `t2c`, `t3` | Step 13, voice card: edit a copy, answer, confirm, then the author's yes to keeping the card | the card was shown before the yes and not stored then; stored after it; shown back after saving; `memory.py voice-card` (run by the script, `voice-card-after.json`) returns the card |
-| `promote-nodry`, `t4`, `t4c` | Step 13, promote: the script runs a real promote with no dry run first, then the skill is asked to promote | the direct call exits 1 naming a dry run; the skill dry-runs before asking and promotes for real only after the confirm |
+| `promote-nodry`, `t4`, `t4c` | Step 13, promote: the script runs a real promote with no dry run first, then the skill is asked to promote | the direct call exits 1 naming a dry run; the skill dry-runs before asking, the entry's old text is in the reply that asks, and it promotes for real only after the confirm. `NOT-MEASURABLE` when `t1` showed fewer than two edits or `t2c` stored no rejection |
+| `t5` | A second edit run of the same document, a fresh session, after the card is stored | the brief the editor `Read` holds the stored card between the `voice_card` tags, the reply's `voice_card` equals it, and the filter printed no `voice_card` warning (`reuse` row) |
+
+The script aborts (exit 1, before any session) when the scenario document already holds a voice card or a rejection, or when a promote dry-run record under two hours old exists in the repository's common directory: each changes the flow, and a verdict read from the changed flow would look like a gate failure. Delete the `zzprose0206_*` T2 projects after each batch.
 
 What they cannot prove: one run per flow shows the skill can do it, not how often the model does. The card text is compared after whitespace is normalised, so a model that retypes it with another word fails the check, which is the point of the check.
+
+### What stays by hand
+
+Two parts of step 13 have no run here. Both are judged by reading a session, not by a verdict:
+
+- **Device recognition with and without the card.** Whether a stored card makes the editor leave a device alone that it would otherwise cut needs two sessions on the same document and a human reading the edits. `t5` proves the card reaches the editor and comes back unchanged, not that it changes what the editor proposes.
+- **The correction flow through the skill.** A correction in the author's answer, the question about the level, the `Write` of the entry, `memory.py add-entry` and `rmtmp`. The author's wording and level are free text, the run would store a record the scenario then has to remove, and the model's part is one question and one file write. The script side (`add-entry`, the document-layer section 3 treatments, the stale-entry message that names the remove command) is covered by unit tests in `tests/prose_edit`. Scenario 6 seeds its entry by script for the same reason.
 
 ## What the counts cover, and what they do not
 

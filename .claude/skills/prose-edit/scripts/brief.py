@@ -76,6 +76,7 @@ import json
 import os
 import re
 import secrets
+import shlex
 import shutil
 import subprocess
 import sys
@@ -311,9 +312,11 @@ def treatments_from_lists(lists: Obj) -> dict[str, list[str]]:
     return out
 
 
-def _treatment_kinds(normalized: list[str], treatments: dict[str, list[str]], layer: str) -> dict[int, str]:
+def _treatment_kinds(normalized: list[str], treatments: dict[str, list[str]], layer: str,
+                     where: str = "--level repo") -> dict[int, str]:
     """The treatment each bullet gets from one layer's lists, by bullet index. Each listed rule is matched to
-    exactly one bullet by its opening words; a stale or doubled entry stops the build, naming the layer."""
+    exactly one bullet by its opening words; a stale or doubled entry stops the build, naming the layer and the
+    command that removes the entry (`where` is that command's --level and --path)."""
     kind_of: dict[int, str] = {}
     for kind in ("ignored", "query_only", "note_only"):
         for entry in treatments.get(kind, []):
@@ -323,9 +326,11 @@ def _treatment_kinds(normalized: list[str], treatments: dict[str, list[str]], la
             opening = _norm(m.group("open"))
             hits = [i for i, b in enumerate(normalized) if b.startswith(opening)]
             if not hits:
+                remove = shlex.quote(f"{TREATMENT_KEYS[kind]}={entry}")
                 raise _user(
                     f'site-page section 3 has no bullet opening "{opening}..." ({kind} in the {layer} '
-                    "style sheet): the skill changed or the entry is stale"
+                    "style sheet): the skill changed or the entry is stale. Remove the entry with: "
+                    f"memory.py entries {where} --remove-item {remove}"
                 )
             if len(hits) > 1:
                 raise _user(f'"{opening}..." matches more than one section 3 bullet')
@@ -336,7 +341,7 @@ def _treatment_kinds(normalized: list[str], treatments: dict[str, list[str]], la
 
 
 def build_site_layer(bullets: list[str], treatments: dict[str, list[str]],
-                     *narrower: tuple[str, dict[str, list[str]]]) -> Obj:
+                     *narrower: tuple[str, dict[str, list[str]], str]) -> Obj:
     """memory.py's {"scalars", "lists"} layer for site-page section 3.
 
     Ignored rules are dropped; query-only and note-only rules are kept under their own
@@ -345,8 +350,8 @@ def build_site_layer(bullets: list[str], treatments: dict[str, list[str]],
     """
     normalized = [_norm(b) for b in bullets]
     kind_of = _treatment_kinds(normalized, treatments, "repo")
-    for name, extra in narrower:
-        kind_of.update(_treatment_kinds(normalized, extra, name))
+    for name, extra, where in narrower:
+        kind_of.update(_treatment_kinds(normalized, extra, name, where))
     rules: list[str] = []
     queries: list[str] = []
     notes: list[str] = []
@@ -392,10 +397,11 @@ def site_layer(site_page: Path, target: str | None = None) -> Obj:
     rule both treat the document's entry wins, so one essay can ignore or query a rule the genre applies."""
     repo_sheet = memory_json(["entries", "--level", "repo"])
     treatments = treatments_from_lists(cast(Obj, repo_sheet.get("lists") or {}))
-    narrower: list[tuple[str, dict[str, list[str]]]] = []
+    narrower: list[tuple[str, dict[str, list[str]], str]] = []
     if target and target != "-":
         doc_sheet = memory_json(["entries", "--level", "doc", "--path", target])
-        narrower.append(("document", treatments_from_lists(cast(Obj, doc_sheet.get("lists") or {}))))
+        narrower.append(("document", treatments_from_lists(cast(Obj, doc_sheet.get("lists") or {})),
+                         f"--level doc --path {shlex.quote(target)}"))
     return build_site_layer(section3_bullets(_site_page_text(site_page)), treatments, *narrower)
 
 

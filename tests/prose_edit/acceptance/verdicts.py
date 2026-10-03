@@ -28,11 +28,15 @@ NOT-MEASURABLE):
              no edit overlaps a refrain, a tricolon, a repeated opening or the unexplained SQL listed in DEVICES,
              and no paragraph proposal cuts, merges or splits a paragraph that holds one. PASS means none of the
              listed devices was touched; the rest of the document is for a human to read. The lists were read off
-             the documents; a listed phrase the document no longer holds exactly once makes the run NOT-MEASURABLE
+             the documents; a listed phrase the document no longer holds exactly once makes the run NOT-MEASURABLE.
+             xanadu and linda notes also count the semicolon queries (the site-page rule is a query on these essays)
 Every doc-editing kind and the stdin run also need proof that the line-editor subagent read WORK/brief.md: a Read
 of that file by the subagent, before its reply, with a non-error result that carries the file's last line
 (`Brief id: <id>`), and a reply whose brief_sha is that id. The id is in the file and nowhere in the dispatch prompt,
 so a reply that names it came from a Read. FAIL when there is no such Read.
+An edit whose old string occurs more than once is its own problem ("occurs N times: apply refuses it"): the editor
+broke its once-only rule, and only an edit with a unique old string is scored for a protected region or a range. A
+query anchor that straddles the range edge is reported the same way.
 Every kind also fails on scope or denial violations and on more edits than its budget. Where the run is
 expected to propose something and the post-filter proposal is empty, the verdict is NOT-MEASURABLE (except the
 qualifier kinds: there silence is a violation). The note also reports the filter's drops by cause (the number that
@@ -50,6 +54,8 @@ Runs with an editor reply add:
                    its paragraph): such a line without an exact twin should be a query, not an edit
   inserted_words   words in an edit's new string that its old string lacks (total and edits affected)
   no_twin_queries  queries that say "no twin" instead of "no exact twin found"
+Each run also leaves NAME.head (the checkout's HEAD sha) and NAME.sha256 (the transcript's hash), written by
+record-run.sh; the last line of the output, HEADS, lists the distinct shas of the batch.
 New work directories (prose-edit-*) left behind are counted for canary batches. The stdin run ends by asking
 the author which edits to accept, so it leaves one work directory (the copy and the proposal) for the answer.
 """
@@ -470,7 +476,7 @@ def _protected_problems(kind: str, doc_text: str, edits: list[Obj]) -> tuple[lis
         if len(lines) < last or not lines[first - 1].startswith(head) or not lines[last - 1].startswith(tail):
             return [], f"the fixture changed: lines {first}-{last} are no longer the {name} the oracle names"
     problems: list[str] = []
-    for e in edits:
+    for e in _unique_edits(doc_text, edits):
         for lo, hi in _line_spans(doc_text, str(e.get("old", ""))):
             for first, last, _, _, name in ranges:
                 if lo <= last and first <= hi:
@@ -478,8 +484,30 @@ def _protected_problems(kind: str, doc_text: str, edits: list[Obj]) -> tuple[lis
     return problems, None
 
 
-def _in_lines(text: str, needle: str, lo: int, hi: int) -> bool:
-    return any(lo <= a and b <= hi for a, b in _line_spans(text, needle))
+def _unique_edits(text: str, edits: list[Obj]) -> list[Obj]:
+    """The edits whose old string occurs exactly once: the only ones a line or a region can be scored for."""
+    return [e for e in edits if len(_spans(text, str(e.get("old", "")))) == 1]
+
+
+def _nonunique_problems(text: str, edits: list[Obj]) -> list[str]:
+    """An edit whose old string occurs more than once breaks the editor's own once-only rule: the filter keeps it
+    when any occurrence is editable, and apply refuses it. It is its own problem, not a protected-region or range hit."""
+    out: list[str] = []
+    for e in edits:
+        n = len(_spans(text, str(e.get("old", ""))))
+        if n > 1:
+            out.append(f"edit {e.get('n')}: old string occurs {n} times: apply refuses it")
+    return out
+
+
+def _range_status(text: str, needle: str, lo: int, hi: int) -> str:
+    """"inside" when every occurrence of `needle` lies in lines lo-hi, "outside" when none does (or it is absent),
+    "split" when some do and some do not."""
+    spans = _line_spans(text, needle)
+    inside = [lo <= a and b <= hi for a, b in spans]
+    if inside and all(inside):
+        return "inside"
+    return "split" if any(inside) else "outside"
 
 
 def _drops_note(proposal: Obj) -> str:
@@ -495,7 +523,14 @@ def _drops_note(proposal: Obj) -> str:
 
 
 def _asks_about(queries: list[Obj], word: str) -> bool:
-    return any(_word(str(q.get("anchor", "")), word) or _word(str(q.get("text", "")), word) for q in queries)
+    """A query is about the word when the word is in what the query attaches to: its anchor. Its prose may say
+    "may" or "likely" about anything."""
+    return any(_word(str(q.get("anchor", "")), word) for q in queries)
+
+
+def _semicolon_queries(queries: list[Obj]) -> int:
+    """Queries about a semicolon: the anchor holds one, or the text says the word."""
+    return sum(1 for q in queries if ";" in str(q.get("anchor", "")) or "semicolon" in str(q.get("text", "")).lower())
 
 
 def doc_verdict(kind: str, events: list[Obj], c: Obj, doc_text: str | None) -> tuple[str, str]:
@@ -535,6 +570,7 @@ def doc_verdict(kind: str, events: list[Obj], c: Obj, doc_text: str | None) -> t
         return NOT_MEASURABLE, f"edits {stale} are not in the document: it is not the one the run edited"
     reply_edits = [e for e in reply.get("edits") or [] if isinstance(e, dict)]
     extra = ""
+    problems += _nonunique_problems(doc_text, edits)
     found, stale_fixture = _protected_problems(kind, doc_text, edits)
     if stale_fixture:
         return NOT_MEASURABLE, stale_fixture
@@ -544,12 +580,17 @@ def doc_verdict(kind: str, events: list[Obj], c: Obj, doc_text: str | None) -> t
         extra = f"; editor's own edits in protected regions: {len({p.split(' ')[1] for p in raw})}"
     if rng is not None:
         lo, hi = rng["start"], rng["end"]
-        problems += [f"edit {e.get('n')} is outside lines {lo}-{hi}" for e in edits
-                     if not _in_lines(doc_text, str(e["old"]), lo, hi)]
-        problems += [f"query {q.get('n')} is outside lines {lo}-{hi}" for q in queries
-                     if not _in_lines(doc_text, str(q.get("anchor", "")), lo, hi)]
-        outside = sum(1 for e in reply_edits if str(e.get("old", "")) in doc_text
-                      and not _in_lines(doc_text, str(e["old"]), lo, hi))
+        problems += [f"edit {e.get('n')} is outside lines {lo}-{hi}" for e in _unique_edits(doc_text, edits)
+                     if _range_status(doc_text, str(e["old"]), lo, hi) != "inside"]
+        for q in queries:
+            status = _range_status(doc_text, str(q.get("anchor", "")), lo, hi)
+            if status == "outside":
+                problems.append(f"query {q.get('n')} is outside lines {lo}-{hi}")
+            elif status == "split":
+                problems.append(f"query {q.get('n')}: the anchor occurs both inside and outside lines {lo}-{hi} "
+                                "(some outside), so it does not say where it attaches")
+        outside = sum(1 for e in _unique_edits(doc_text, reply_edits)
+                      if _range_status(doc_text, str(e["old"]), lo, hi) != "inside")
         extra = f"; editor's own edits outside lines {lo}-{hi}: {outside}"
     proposed = len(edits) + len(queries) + len(paragraphs)
     for word in QUERIED_QUALIFIERS.get(kind, ()):
@@ -572,6 +613,8 @@ def doc_verdict(kind: str, events: list[Obj], c: Obj, doc_text: str | None) -> t
         return FAIL, "; ".join(problems) + f"; {drops}"
     note = (f"{len(edits)} edits, {len(queries)} queries, {len(paragraphs)} paragraph proposals after the filter; "
             f"{drops}{extra}")
+    if kind in ("xanadu", "linda"):
+        note += f"; semicolon queries: {_semicolon_queries(queries)} (the document holds {doc_text.count(';')} ';')"
     if kind in EDITS_EXPECTED and not edits:
         return NOT_MEASURABLE, f"no edit survived the filter, so there is nothing to check; {note}"
     if kind in ("xanadu", "linda", "refrain") and not proposed:
@@ -646,6 +689,9 @@ def main(argv: list[str]) -> int:
             totals[k] += int(val)
         sys.stdout.write(f"{name:14} {v:5} {note} | {json.dumps(counts)}\n")
     sys.stdout.write(f"TOTALS {json.dumps(dict(totals))} new-work-dirs {new_dirs}\n")
+    heads = sorted({h.read_text(encoding="utf-8").strip() for h in out_dir.glob("*.head")} - {""})
+    if heads:  # record-run.sh wrote one per run: a batch at more than one sha says so here
+        sys.stdout.write(f"HEADS {' '.join(heads)}\n")
     return 1 if fails else (3 if unmeasured else 0)
 
 

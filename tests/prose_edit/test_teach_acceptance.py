@@ -114,13 +114,21 @@ def test_scenario_6_needs_the_read_proof_like_every_editing_run() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _t1(card: str | None = CARD) -> list[dict]:
+def _t1(card: str | None = CARD, edits: int = 3) -> list[dict]:
+    shown = [{"n": i, "old": f"w{i}", "new": "", "reason": "r"} for i in range(1, edits + 1)]
     return _bash("f", f"{BRIEF} filter {DOC} --budget 5 --save {WORK_DIR}/filtered.json",
-                 {"edits": [], "queries": [], "dropped": [], "paragraphs": [], "voice_card": card})
+                 {"edits": shown, "queries": [], "dropped": [], "paragraphs": [], "voice_card": card})
 
 
-def _t2c(*, shows: bool = True, stores: bool = False) -> list[dict]:
-    ev = _bash("v", f"{MEMORY} voice-card {DOC}", {"path": DOC, "voice_card": None})
+REVIEW = "python3 .claude/skills/prose-edit/scripts/review.py"
+
+
+def _t2c(*, shows: bool = True, stores: bool = False, rejects: bool = True) -> list[dict]:
+    """The confirm turn: the skill's real apply (it stored the rejections unless `rejects` is False), then the offer."""
+    out = {"mode": "edit", "path": DOC, "applied": [], "rejected": [2, 3] if rejects else [], "held": [],
+           "rejections_stored": rejects}
+    ev = _bash("a", f"{REVIEW} apply --work {WORK_DIR} --accept 1 --reject rest", out)
+    ev += _bash("v", f"{MEMORY} voice-card {DOC}", {"path": DOC, "voice_card": None})
     if stores:
         ev += _bash("w", f"{MEMORY} voice-card {DOC} --from-stdin < /tmp/prose-edit-ab12cd34/card.json",
                     {"path": DOC, "voice_card": {"text": CARD, "at": "2026-10-03T12:00:00Z"}})
@@ -137,6 +145,20 @@ def _t3(*, stores: bool = True, shows: bool = True, error: bool = False) -> list
 
 
 AFTER = {"path": DOC, "range": None, "voice_card": {"text": CARD, "at": "2026-10-03T12:00:00Z"}}
+
+
+def _t5(*, in_brief: str | None = CARD, reply_card: str | None = CARD, warnings: tuple[str, ...] = (),
+        read: list[dict] | None = None) -> list[dict]:
+    """A second edit run after the card was stored: the brief the editor Read holds the card between the
+    voice_card tags (a Read result is line-numbered), the reply returns it, the filter says nothing about it."""
+    card = "" if in_brief is None else "".join(
+        f"    {20 + i}\t{ln}\n" for i, ln in enumerate(["<voice_card>", *in_brief.split("\n"), "</voice_card>"]))
+    body = f"     1\t# Editing brief\n{card}   311\tBrief id: {BRIEF_ID}\n"
+    reply = {"brief_sha": BRIEF_ID, "voice_card": reply_card, "edits": [], "queries": []}
+    return [_use("ag", "Agent", {}), *(_brief_read(text=body) if read is None else read),
+            _res("ag", "```json\n" + json.dumps(reply) + "\n```"),
+            *_bash("fl", f"{BRIEF} filter {DOC} --budget 5 --save {WORK_DIR}/filtered.json",
+                   {"edits": [], "queries": [], "dropped": [], "paragraphs": [], "warnings": list(warnings)})]
 
 
 def test_the_card_check_passes_when_it_is_shown_stored_only_after_the_yes_and_read_back_whole() -> None:
@@ -184,7 +206,7 @@ def _t4(*, dry: bool = True, early_real: bool = False) -> list[dict]:
         ev += _bash("d", f"{CMD} --dry-run", DRY)
     if early_real:
         ev += _bash("e", CMD, REAL)
-    return ev + [_final("Here is the entry. Confirm?")]
+    return ev + [_final(f"Here is the entry: {DRY['entry']['old']} -> (cut). Confirm?")]
 
 
 def _t4c(*, real: bool = True, error: bool = False, dry_again: bool = False) -> list[dict]:
@@ -232,7 +254,8 @@ def _write(out: Path, name: str, events: list[dict]) -> None:
 
 def _all_runs(out: Path, *, refused: bool = True) -> None:
     _write(out, "s6-1", _s6(edits=[WORKER]))
-    for name, events in (("t1", _t1()), ("t2", []), ("t2c", _t2c()), ("t3", _t3()), ("t4", _t4()), ("t4c", _t4c())):
+    for name, events in (("t1", _t1()), ("t2", []), ("t2c", _t2c()), ("t3", _t3()), ("t4", _t4()), ("t4c", _t4c()),
+                         ("t5", _t5())):
         _write(out, name, events)
     (out / "voice-card-after.json").write_text(json.dumps(AFTER), encoding="utf-8")
     (out / "promote-nodry.rc").write_text("rc=1\n" if refused else "rc=0\n", encoding="utf-8")

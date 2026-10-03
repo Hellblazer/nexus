@@ -654,9 +654,10 @@ def test_qa_cuts_the_filler_and_queries_the_may_and_fails_on_anything_else() -> 
     assert verdict == "FAIL" and "basically" in note  # edits exist, the filler was left in
     query_only = _qual([], [{"n": 1, "anchor": "basically ordered", "text": "Is it ordered?"}, QA_MAY_QUERY])
     assert _verdict("qa", query_only, QA)[0] == "FAIL"  # the filler is cut, not queried (Sam, 2026-09-30)
-    # the query may tie to the word through its text, not its anchor
+    # the word must be in the query's anchor: a query anchored elsewhere whose prose says "may" is not about it
     by_text = _qual([QA_FILLER], [{"n": 1, "anchor": "stale entries", "text": "Does 'may' mean sometimes or always?"}])
-    assert _verdict("qa", by_text, QA)[0] == "PASS"
+    verdict, note = _verdict("qa", by_text, QA)
+    assert verdict == "FAIL" and "may" in note and "queried" in note
 
 
 def test_qb_queries_may_and_an_empty_proposal_or_a_cut_fails() -> None:
