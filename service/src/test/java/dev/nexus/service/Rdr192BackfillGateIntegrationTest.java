@@ -6,6 +6,10 @@ import dev.nexus.service.db.LadderRepository;
 import dev.nexus.service.db.Rdr192BackfillGate;
 import dev.nexus.service.db.Rdr192BackfillGate.BackfillIncompleteException;
 import dev.nexus.service.db.TenantScope;
+import dev.nexus.service.vectors.ReaperRepository;
+import org.jooq.DSLContext;
+import org.jooq.SQLDialect;
+import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -13,6 +17,9 @@ import org.junit.jupiter.api.TestInstance;
 import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.sql.Connection;
+import java.time.Duration;
+import java.util.List;
+import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -44,6 +51,9 @@ class Rdr192BackfillGateIntegrationTest {
     com.zaxxer.hikari.HikariDataSource svcDs;
     LadderRepository ladder;
     Rdr192BackfillGate gate;
+    ReaperRepository reaperStore;
+    /** The production-shaped gate: the same empty-tenant test NexusService wires (nexus-wbfpw.73). */
+    Rdr192BackfillGate exemptingGate;
 
     @BeforeAll
     void startAll() throws Exception {
@@ -57,6 +67,19 @@ class Rdr192BackfillGateIntegrationTest {
         svcDs = pool(SVC_ROLE, SVC_PASS);
         ladder = new LadderRepository(new TenantScope(svcDs));
         gate = new Rdr192BackfillGate(ladder);
+        reaperStore = new ReaperRepository(new TenantScope(svcDs));
+        exemptingGate = new Rdr192BackfillGate(ladder, ChunkReaper.emptyTenantProbe(reaperStore));
+    }
+
+    /** One chunk with no manifest row, seeded as the superuser. */
+    private void seedChunk(String tenant, String collection, String seed) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCollection(ctx, tenant, collection);
+            PgContainerHelper.insertChunks(ctx, tenant, collection,
+                List.of(dev.nexus.service.db.Chash.ofText(collection + "/" + seed).toHex()),
+                List.of(seed + " text"), List.of(new float[384]), List.of(Map.<String, Object>of()));
+        }
     }
 
     @AfterAll
@@ -130,5 +153,92 @@ class Rdr192BackfillGateIntegrationTest {
         assertThatThrownBy(() -> deadGate.requireComplete("rdr192-gate-dead"))
                 .isInstanceOf(BackfillIncompleteException.class)
                 .hasMessageContaining("cannot read");
+    }
+
+    // ── nexus-wbfpw.73: an empty tenant passes without a completion record ────
+
+    private static final Duration BOUND = Duration.ofSeconds(25);
+
+    @Test
+    void anEmptyTenantWithNoRecordPasses_andNothingIsWritten() {
+        String tenant = "rdr192-gate-hollow";
+        assertThat(ladder.completions(tenant)).isEmpty();
+        assertThat(reaperStore.holdsNothing(tenant, BOUND)).isTrue();
+
+        exemptingGate.requireComplete(tenant); // does not throw
+
+        assertThat(ladder.completions(tenant))
+                .as("the gate reads; the client rung stays the one recorder of a completion")
+                .isEmpty();
+        assertThat(gate.isComplete(tenant)).as("isComplete still says what the ledger says").isFalse();
+    }
+
+    @Test
+    void theGateWithNoEmptinessTestNeverExempts() {
+        assertThatThrownBy(() -> gate.requireComplete("rdr192-gate-hollow-strict"))
+                .isInstanceOf(BackfillIncompleteException.class);
+    }
+
+    @Test
+    void aTenantHoldingAChunkWithNoRecordIsStillRefused() throws Exception {
+        String tenant = "rdr192-gate-holds-chunk";
+        seedChunk(tenant, "knowledge__" + tenant + "__minilm-l6-v2-384__v1", "a");
+        assertThat(reaperStore.holdsNothing(tenant, BOUND)).isFalse();
+
+        assertThatThrownBy(() -> exemptingGate.requireComplete(tenant))
+                .isInstanceOf(BackfillIncompleteException.class)
+                .hasMessageContaining(Rdr192BackfillGate.RUNG_NAME);
+    }
+
+    @Test
+    void aRegisteredCollectionWithNoChunksDoesNotMakeATenantNonEmpty() throws Exception {
+        // The client's listing is "every collection that physically holds chunks": a catalog row alone is not a chunk.
+        String tenant = "rdr192-gate-registered-only";
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), tenant,
+                    "knowledge__" + tenant + "__minilm-l6-v2-384__v1");
+        }
+        assertThat(reaperStore.holdsNothing(tenant, BOUND)).isTrue();
+        exemptingGate.requireComplete(tenant);
+    }
+
+    @Test
+    void aTenantHoldingOnlyQuarantineChunksIsNotEmpty() throws Exception {
+        // It holds chunks, and the expiry a pass would run on them is an irreversible delete. The client rung's
+        // empty branch does not apply to it either: its listing is non-empty, so it goes through the census.
+        String tenant = "rdr192-gate-quarantine-only";
+        seedChunk(tenant, "quarantine-knowledge__" + tenant + "__minilm-l6-v2-384__v1", "q");
+        assertThat(reaperStore.holdsNothing(tenant, BOUND)).isFalse();
+
+        assertThatThrownBy(() -> exemptingGate.requireComplete(tenant))
+                .isInstanceOf(BackfillIncompleteException.class);
+    }
+
+    @Test
+    void anotherTenantsChunksDoNotMakeATenantNonEmpty() throws Exception {
+        seedChunk("rdr192-gate-neighbour", "knowledge__rdr192-gate-neighbour__minilm-l6-v2-384__v1", "n");
+        assertThat(reaperStore.holdsNothing("rdr192-gate-neighbour", BOUND)).isFalse();
+        assertThat(reaperStore.holdsNothing("rdr192-gate-alone", BOUND))
+                .as("RLS scopes the read to the tenant it is asked about")
+                .isTrue();
+        exemptingGate.requireComplete("rdr192-gate-alone");
+    }
+
+    @Test
+    void aRecordedTenantPassesWhetherOrNotItIsEmpty() throws Exception {
+        String tenant = "rdr192-gate-recorded-full";
+        ladder.record(tenant, Rdr192BackfillGate.RUNG_NAME, "7.99.0", "");
+        seedChunk(tenant, "knowledge__" + tenant + "__minilm-l6-v2-384__v1", "r");
+        exemptingGate.requireComplete(tenant);
+    }
+
+    @Test
+    void anUnreadableEmptinessTestFailsClosed() {
+        var broken = new Rdr192BackfillGate(ladder, t -> {
+            throw new IllegalStateException("simulated: permission denied for table chunks");
+        });
+        assertThatThrownBy(() -> broken.requireComplete("rdr192-gate-hollow-unreadable"))
+                .isInstanceOf(BackfillIncompleteException.class)
+                .hasMessageContaining("cannot tell whether the tenant is empty");
     }
 }

@@ -48,11 +48,17 @@ A refusal is written once per collection each time its reason changes, not every
 
 Four outcomes are not refusals and are never audited: `GATE_BUSY` (a manifest writer holds the collection's sweep gate; the exclusive acquire times out after 2 s), `LOCK_TIMEOUT` (a row lock or the sibling registration timed out for 2 s; this includes the expiry's own deletes), `CENSUS_BACKOFF` (a collection whose census keeps timing out is resting) and `STATEMENT_BACKOFF` (the same for a dry run, move or expiry that keeps timing out). All clear on their own and have their own counters (`gate_busy_total`, `lock_timeout_total`, `census_backoff_total`, `statement_backoff_total`).
 
+## An empty tenant is not refused
+
+A tenant with no chunk row in any collection and no manifest row passes the backfill gate without a completion record. That is the same test the client's upgrade rung uses to call a tenant converged without a census: nothing to reap, nothing to backfill. A tenant that was only ever a credential holder, such as `conexus-edge`, no longer needs an `nx upgrade` run with its own credential just to record that it holds nothing. The pass counts it in `tenants_visited`, and counts it as neither refused nor errored. It logs `event=rdr192_backfill_gate_passed_empty_tenant tenant=<id>` at INFO, and nothing is written to `gc_audit` or to `nexus.ladder_completions`.
+
+Four things that are not empty: a tenant with a chunk in any collection (a `quarantine-*` collection counts, because its expiry deletes irreversibly), a tenant with a manifest row, a tenant whose ledger or emptiness read failed (both read as refused), and a tenant that gains content later with no record, which is refused from the next pass on. A catalog collection row with no chunks does not make a tenant non-empty.
+
 ## The refusals
 
 | Reason | Meaning | What to do |
 |---|---|---|
-| `BACKFILL_INCOMPLETE` | The tenant has no verified backfill record. | Run `nx upgrade` against the tenant. |
+| `BACKFILL_INCOMPLETE` | The tenant has no verified backfill record and is not empty. | Run `nx upgrade` against the tenant. |
 | `COLLECTION_NOT_LIVE` | The collection is registered in a state other than `live`. | Nothing; it is deliberately left alone. |
 | `FLOOR_EXCEEDED` | The reapable set is at least 100 chunks and more than a quarter of the collection. | Read the sample. If it is real garbage, see "The first big cleanup". |
 | `CENSUS_LEGACY_UNMANIFESTED` | The census found a live legacy note with no manifest row. | `nx t3 census-manifest-less --collection <c>`, then re-put the notes (`docs/migration-runbook.md`). |

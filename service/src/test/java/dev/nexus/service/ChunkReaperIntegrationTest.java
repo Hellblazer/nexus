@@ -69,7 +69,8 @@ class ChunkReaperIntegrationTest extends AtomicWriteTestBase {
         vectors = new PgVectorRepository(tenantScope, embedder, embedder);
         store = new ReaperRepository(tenantScope);
         ladder = new LadderRepository(tenantScope);
-        gate = new Rdr192BackfillGate(ladder);
+        // The production-shaped gate (NexusService wires the same probe): an empty tenant passes (nexus-wbfpw.73).
+        gate = new Rdr192BackfillGate(ladder, ChunkReaper.emptyTenantProbe(store));
     }
 
     // ── fixtures ─────────────────────────────────────────────────────────────
@@ -610,6 +611,97 @@ class ChunkReaperIntegrationTest extends AtomicWriteTestBase {
 
         assertThat(logs).anyMatch(l -> l.contains("event=reaper_pass") && l.contains("tenant=" + t)
             && l.contains("collections=0") && l.contains("candidates=0"));
+    }
+
+    // ── nexus-wbfpw.73: an empty tenant passes the backfill gate without a completion record ──────────────────
+
+    @Test
+    void anEmptyTenantWithNoBackfillRecord_passes_isNeitherRefusedNorFailed_andIsAudited_never() throws Throwable {
+        String t = newTenant();   // no openGate, no chunk, no collection, no manifest row
+        ChunkReaper r = reaper(t);
+        long refusedBefore = r.refusedTotal();
+
+        RunResult[] run = new RunResult[1];
+        List<String> logs = captureLogs(() -> run[0] = r.runOnce(Duration.ZERO));
+
+        assertThat(run[0].tenant(t).tenantRefusal()).isNull();
+        assertThat(run[0].tenant(t).error()).isNull();
+        assertThat(run[0].tenant(t).failed()).isFalse();
+        assertThat(r.refusedTotal()).as("refused_total never moves for an empty tenant").isEqualTo(refusedBefore);
+        assertThat(refusedRows(t)).as("no gc_audit refusal row").isEmpty();
+        assertThat(r.lastPass().tenantsVisited()).as("it was visited").isEqualTo(1);
+        assertThat(r.lastPass().tenantsRefused()).isZero();
+        assertThat(r.lastPass().tenantsErrored()).isZero();
+        assertThat(logs).anyMatch(l -> l.startsWith("INFO") && l.contains("event=rdr192_backfill_gate_passed_empty_tenant")
+            && l.contains("tenant=" + t));
+        assertThat(logs).noneMatch(l -> l.contains("event=reaper_tenant_refused") && l.contains("tenant=" + t));
+        assertThat(logs).anyMatch(l -> l.contains("event=reaper_pass") && l.contains("tenant=" + t)
+            && l.contains("collections=0"));
+        assertThat(ladder.completions(t)).as("the reaper writes no completion row").isEmpty();
+    }
+
+    @Test
+    void aTenantWithARegisteredButChunklessCollectionAndNoRecord_passes() throws Exception {
+        String t = newTenant();
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), t, col("knowledge"));
+        }
+        ChunkReaper r = reaper(t);
+
+        r.runOnce(Duration.ZERO);
+
+        assertThat(r.lastPass().tenantsRefused()).isZero();
+        assertThat(refusedRows(t)).isEmpty();
+    }
+
+    @Test
+    void aTenantHoldingOnlyQuarantineChunksAndNoRecord_isStillRefused_andNothingExpires() throws Throwable {
+        // Not empty: it holds chunks, and the expiry a pass would run is an irreversible delete.
+        String t = newTenant();
+        String origin = col("knowledge");
+        String q = quarantineOf(origin);
+        String h = orphan(t, q, "q1");
+
+        ChunkReaper r = reaper(t);
+        r.runOnce(Duration.ZERO);
+
+        assertThat(r.lastPass().tenantsRefused()).isEqualTo(1);
+        assertThat(inCollection(t, q, h)).isTrue();
+        assertThat(refusedRows(t)).hasSize(1);
+    }
+
+    @Test
+    void aTenantThatGainsContentAfterAnEmptyPassAndStillHasNoRecord_goesBackToRefused() throws Exception {
+        String t = newTenant();
+        ChunkReaper r = reaper(t);
+
+        r.runOnce(Duration.ZERO);
+        assertThat(r.lastPass().tenantsRefused()).as("empty: passes").isZero();
+
+        String c = col("knowledge");
+        String h = orphan(t, c, "late");   // content arrives, no record was ever written
+        RunResult second = r.runOnce(Duration.ZERO);
+
+        assertThat(second.tenant(t).tenantRefusal()).isEqualTo(Refusal.BACKFILL_INCOMPLETE);
+        assertThat(r.lastPass().tenantsRefused()).isEqualTo(1);
+        assertThat(inCollection(t, c, h)).as("the refused tenant's chunk is untouched").isTrue();
+        assertThat(refusedRows(t)).hasSize(1);
+    }
+
+    @Test
+    void aRecordedTenantStillPassesAsBefore_whetherOrNotItIsEmpty() throws Throwable {
+        String full = newTenant();
+        openGate(full);
+        orphan(full, col("knowledge"), "x");
+        String hollow = newTenant();
+        openGate(hollow);
+        ChunkReaper r = reaper(full, hollow);
+
+        List<String> logs = captureLogs(() -> r.runOnce(Duration.ZERO));
+
+        assertThat(r.lastPass().tenantsRefused()).isZero();
+        assertThat(logs).as("a recorded tenant is not logged as an empty pass")
+            .noneMatch(l -> l.contains("event=rdr192_backfill_gate_passed_empty_tenant"));
     }
 
     // ── a multi-batch re-index through the real manifest writers ─────────────
@@ -1273,6 +1365,7 @@ class ChunkReaperIntegrationTest extends AtomicWriteTestBase {
     @Test
     void aTenantRefusalIsAuditedOncePerStateToo() throws Exception {
         String t = newTenant();   // no backfill record
+        orphan(t, col("knowledge"), "x");   // content, so the tenant is not empty (nexus-wbfpw.73)
         ChunkReaper r = reaper(t);
 
         r.runOnce(Duration.ZERO);

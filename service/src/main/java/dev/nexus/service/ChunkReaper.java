@@ -60,7 +60,8 @@ import java.util.function.Supplier;
  * <p>The gates, in the order a pass meets them. A refusal is counted, logged at WARN, and written once to
  * {@code gc_audit} per state change (operation {@value #AUDIT_REFUSED}); a cloud operator has no engine log:
  * <ol>
- *   <li>per tenant, {@link Rdr192BackfillGate#requireComplete}: no verified backfill record, nothing is touched;</li>
+ *   <li>per tenant, {@link Rdr192BackfillGate#requireComplete}: no verified backfill record, nothing is touched
+ *       (unless the tenant holds no chunk and no manifest row at all: an empty tenant passes, nexus-wbfpw.73);</li>
  *   <li>per tenant, the quarantine siblings are expired first (before this pass adds to them), only the chunks
  *       this class tagged, never one a manifest row names, at most {@link #MAX_EXPIRY_ROWS} per sibling and pass;</li>
  *   <li>per collection: a {@code quarantine-} name is skipped (a quarantine sibling is expired, never reaped);
@@ -505,6 +506,14 @@ final class ChunkReaper {
 
     private static String streakDetail(long consecutive, long rest) {
         return " consecutive=" + consecutive + (rest > 0 ? " it rests for the next " + rest + " pass(es)" : "");
+    }
+
+    /**
+     * The empty-tenant test the production gate is built with (nexus-wbfpw.73): no chunk row and no manifest row,
+     * read under the tenant's RLS context with the same statement bound as the reaper's own enumeration.
+     */
+    static java.util.function.Predicate<String> emptyTenantProbe(ReaperRepository store) {
+        return tenant -> store.holdsNothing(tenant, Duration.ofMillis(STATEMENT_TIMEOUT_MS));
     }
 
     ChunkReaper(ReaperRepository store, PgVectorRepository vectors, CatalogRepository catalog,

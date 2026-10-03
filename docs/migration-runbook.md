@@ -49,6 +49,12 @@ reads zero legacy-unmanifested and zero unclassified chunks. It never deletes a
 chunk and leaves the `superseded`, `dead-owner` and `no-owner` buckets to the
 reaper.
 
+A tenant that holds nothing (no chunk row in any collection, no manifest row) is
+converged without a census, and the engine's reaper gate applies the same test:
+it passes such a tenant with no completion record, so a break-glass or
+credential-only tenant needs no `nx upgrade` of its own
+(`docs/operations/engine-reaper.md`, nexus-wbfpw.73).
+
 - A tenant with no collections records at once, provided the catalog agrees it
   is empty. An empty listing over a catalog that holds manifest rows is a
   listing failure and defers.

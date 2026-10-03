@@ -16,6 +16,7 @@ import java.util.List;
 import java.util.Map;
 
 import static dev.nexus.service.jooq.nexus.Routines.reaperOwnsQuarantinedRow;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.REAPER_EXPIRE_QUARANTINE;
@@ -66,6 +67,25 @@ public class ReaperRepository {   // not final: ChunkReaperIntegrationTest raise
                 .where(CHUNKS.TENANT_ID.eq(tenant))
                 .orderBy(CHUNKS.COLLECTION)
                 .fetch(CHUNKS.COLLECTION);
+        });
+    }
+
+    /**
+     * True when the tenant holds no chunk row in any collection (quarantine siblings included) and the catalog holds
+     * no manifest row: the engine's reading of the client rung's "no collections and no manifest rows" (nexus-wbfpw.73;
+     * {@code Rdr192BackfillGate}). Both reads run under the tenant's own RLS context, bounded by
+     * {@code statementTimeout}. Throws on a database failure, never answers true for "could not read".
+     *
+     * <p>The manifest read counts every manifest row, tombstoned documents' rows included, where the client's
+     * cross-check reads {@code catalog_stats.chunk_count} (live documents only). That makes this the stricter
+     * of the two; they agree whenever the manifest's foreign key to {@code nexus.chunks} holds, because a manifest row
+     * cannot then outlive its chunk and the first read already answers.
+     */
+    public boolean holdsNothing(String tenant, Duration statementTimeout) {
+        return tenantScope.withTenant(tenant, ctx -> {
+            PgSession.setStatementAndLockBounds(ctx, (int) statementTimeout.toMillis(), 2_000);
+            return !ctx.fetchExists(CHUNKS, CHUNKS.TENANT_ID.eq(tenant))
+                && !ctx.fetchExists(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(tenant));
         });
     }
 

@@ -704,10 +704,11 @@ public final class NexusService {
         // after boot, not a full interval: an engine that restarts more often than hourly must still reap.
         ChunkReaper.Settings reaperSettings = ChunkReaper.Settings.fromEnv(System::getenv);
         if (pgVectorRepository != null && reaperSettings.enabled()) {
+            var reaperStore = new dev.nexus.service.vectors.ReaperRepository(tenantScope);
             ChunkReaper reaper = new ChunkReaper(
-                new dev.nexus.service.vectors.ReaperRepository(tenantScope), pgVectorRepository, catalogRepo,
-                new dev.nexus.service.db.Rdr192BackfillGate(ladderRepo), this::reaperTenants, reaperSettings,
-                java.time.Clock.systemUTC());
+                reaperStore, pgVectorRepository, catalogRepo,
+                new dev.nexus.service.db.Rdr192BackfillGate(ladderRepo, ChunkReaper.emptyTenantProbe(reaperStore)),
+                this::reaperTenants, reaperSettings, java.time.Clock.systemUTC());
             this.chunkReaper = reaper;
             // The Runnable the scheduler runs, held in a field so a test runs THAT object and not a copy of its
             // body: a test that called reaper.run() directly stayed green with the schedule turned into a no-op.

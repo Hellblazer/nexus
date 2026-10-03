@@ -98,12 +98,27 @@ class NexusServiceReaperWiringTest {
     }
 
     @Test
-    void theScheduledEntryPointVisitsTheDefaultTenant_andRefusesItWithoutABackfillRecord() {
+    void theScheduledEntryPointVisitsTheDefaultTenant_andPassesItWhileItIsEmpty() {
+        // No test in this class writes to the default tenant, so it holds nothing: the production gate (wired with
+        // the empty-tenant probe, nexus-wbfpw.73) passes it with no backfill record, where it used to refuse it.
         RunResult run = withVectors.chunkReaper().run();
 
         assertThat(run.tenant("default")).as("the default tenant is always visited").isNotNull();
-        assertThat(run.tenant("default").tenantRefusal()).isEqualTo(Refusal.BACKFILL_INCOMPLETE);
-        assertThat(withVectors.chunkReaper().refusedTotal()).isGreaterThanOrEqualTo(1);
+        assertThat(run.tenant("default").tenantRefusal()).isNull();
+    }
+
+    @Test
+    void theScheduledEntryPointRefusesATenantThatHoldsAChunkAndHasNoBackfillRecord() throws Exception {
+        String tenant = "wire-norecord-" + seq.incrementAndGet();
+        new TokenStore(ds, Clock.systemUTC()).issueToken(tenant, "wiring", null);
+        insertChunk(tenant, col("knowledge"), "held", Map.of(), null);   // not empty, and no completion record
+        long refusedBefore = withVectors.chunkReaper().refusedTotal();
+
+        RunResult run = withVectors.chunkReaper().run();
+
+        assertThat(run.tenant(tenant)).as("a token-bearing tenant is visited").isNotNull();
+        assertThat(run.tenant(tenant).tenantRefusal()).isEqualTo(Refusal.BACKFILL_INCOMPLETE);
+        assertThat(withVectors.chunkReaper().refusedTotal()).isGreaterThan(refusedBefore);
     }
 
     // ── the SCHEDULED task body, not a copy of it ────────────────────────────

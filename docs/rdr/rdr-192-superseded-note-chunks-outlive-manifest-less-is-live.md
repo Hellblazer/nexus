@@ -870,6 +870,20 @@ gate Step 9 describes. This is a hard prerequisite, not a nice-to-have, and
 is the reason Phase 1 exists as its own phase below rather than folding into
 Phase 2. Amended 2026-10-02 (Step 11): the prerequisite no longer gates
 removing the sweeps' notes-guard arms, because they are not removed.
+Amended 2026-10-03 (`nexus-wbfpw.73`): the per-tenant gate in front of the reaper
+(`Rdr192BackfillGate`, which reads the `rdr192-manifest-backfill` completion record) passes a
+tenant that is empty without that record. Empty means the engine's reading of the client rung's
+own empty-listing branch (`_default_census` and `_cross_check_empty_listing` in
+`rdr192_manifest_backfill.py`, the branch that calls a tenant converged without a census): the
+tenant holds no chunk row in any collection, quarantine siblings included, and no manifest row.
+Such a tenant has nothing to reap and nothing to backfill, and recording that fact took an
+`nx upgrade` with the tenant's own credential (a break-glass tenant such as `conexus-edge` is the
+case). The gate still never writes a completion, so the client rung stays the one recorder; a
+tenant that later gains content and has no record is refused again from the next pass; a tenant
+holding only `quarantine-*` chunks is not empty (its expiry is an irreversible delete, and the
+client rung sends it through the census). An empty tenant counts as visited and as neither
+refused nor errored in `reaper.last_pass`, and logs `event=rdr192_backfill_gate_passed_empty_tenant`
+at INFO.
 
 ### Existing Infrastructure Audit
 
@@ -2121,3 +2135,6 @@ the doctor check narrowed to `knowledge__` (Step 14).
   promises the reaper collects the chunk unconditionally, and with no drop list it no longer claims
   replaced chunks were not removed (Step 13). The operator runbook gains the rename-then-restore
   limit.
+- 2026-10-03: The backfill gate passes an empty tenant (bead `nexus-wbfpw.73`; text only, no status
+  change). Legacy-note backfill prerequisite carries the amendment: no chunk row and no manifest
+  row means no completion record is needed, and the gate writes none.
