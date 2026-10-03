@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Deterministic half of the prose-edit skill (RDR-221 Step 1.4): grammar, brief, agent output.
 
 The skill hands every mechanical job to this script so the model's instructions carry
@@ -7,7 +8,7 @@ project prefix override (PROSE_EDIT_PROJECT_PREFIX) passes through to that child
 Errors go to stderr with exit 1; memory.py's own exit codes (3: T2 unavailable) pass through.
 
   brief.py parse TOKEN...        the invocation, one token per argv, printed as JSON
-  brief.py build TARGET [--genre G] [--budget N] [--file F] [--site-page FILE]
+  brief.py build TARGET [--genre G] [--budget N] [--file F] [--work] [--site-page FILE]
                                  the brief text for the editor agent, on stdout
   brief.py filter TARGET [--budget N] [--file F] [--save F | --work DIR]
                                  the agent's reply on stdin -> filtered proposal JSON
@@ -16,6 +17,14 @@ Errors go to stderr with exit 1; memory.py's own exit codes (3: T2 unavailable) 
                                  the site-page section 3 layer memory.py `read` takes
 
 TARGET is PATH, PATH:START-END or "-" (a stdin run; --file names the saved text).
+
+The brief travels to the editor as a file, not as text the orchestrating model retypes. `build --work`
+(a path run) makes the work directory; a stdin run's --file already sits in one. In both cases `build`
+writes the brief to WORK/brief.md and puts a header before it on stdout, then a blank line, then the brief
+itself: `WORK=<dir>` (a path run only), `BRIEF_SHA=<the first 12 hex digits of the sha256 of brief.md>`. The
+editor is told to read WORK/brief.md and to echo the sha as `brief_sha` in its reply; `filter` compares
+it with brief.md and, when the reply names none or another, warns on stderr and in `warnings` (never fatal).
+A build whose --file is not in a work directory writes no file and prints the brief alone.
 
 Grammar (`parse`; every token is one argv element, never a shell string):
 
@@ -48,6 +57,7 @@ model never retypes it. `--save` and `--work` are exclusive; the review loop del
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import io
 import json
@@ -631,11 +641,20 @@ def cmd_build(a: argparse.Namespace) -> str:
     if rel:
         header.append(f"Exclude from the search: {rel}")
     brief = render_brief(read, budget, a.file if stdin else None, text, header)
+    if a.work and stdin:
+        raise _user("--work is for a path run; a stdin run already has its work directory")
+    work: Path | None = None
+    head: list[str] = []
     if a.work:
-        if stdin:
-            raise _user("--work is for a path run; a stdin run already has its work directory")
-        return f"WORK={cmd_tmpdir()}\n\n{brief}"
-    return brief
+        work = Path(cmd_tmpdir())
+        head.append(f"WORK={work}")
+    elif stdin and _is_work_dir(Path(a.file).parent.resolve(), Path(tempfile.gettempdir()).resolve()):
+        work = work_file(a.file).parent
+    if work is None:
+        return brief
+    (work / BRIEF_FILE).write_text(brief, encoding="utf-8")
+    head.append(f"BRIEF_SHA={brief_sha(brief.encode('utf-8'))}")
+    return "\n".join(head) + "\n\n" + brief
 
 
 # ---------------------------------------------------------------------------
@@ -994,9 +1013,43 @@ def cmd_filter(a: argparse.Namespace, reply: str) -> Obj:
         if window is not None and "inside" not in places:
             warnings.append(f"paragraph proposal {pr['n']} could not be placed inside the range")
         paragraphs.append(pr)
+    sha_warning = _brief_sha_warning(a, proposal)
+    if sha_warning:
+        warnings.append(sha_warning)
+        sys.stderr.write(f"brief.py: {sha_warning}\n")
     return {**result, "edits": kept, "dropped": dropped, "queries": queries,
             "dropped_queries": dropped_queries, "paragraphs": paragraphs,
             "dropped_paragraphs": dropped_paragraphs, "warnings": warnings}
+
+
+def _brief_sha_warning(a: argparse.Namespace, proposal: Obj) -> str | None:
+    """Why the reply cannot be trusted to have read the brief file, or None. Only a work directory that holds a
+    brief.md is checked: the reply must echo the sha of those bytes (a longer prefix of the full hash is fine)."""
+    work: Path | None = None
+    if a.save:
+        work = work_file(a.save).parent
+    elif a.work:
+        work = work_dir(a.work)
+    if work is None or not (work / BRIEF_FILE).is_file():
+        return None
+    expected = brief_sha((work / BRIEF_FILE).read_bytes())
+    said = proposal.get("brief_sha")
+    if not isinstance(said, str) or not said.strip():
+        return (f"the editor's reply names no brief_sha; it may not have read {BRIEF_FILE} "
+                f"(the file's is {expected})")
+    if not said.strip().lower().startswith(expected):
+        return (f"the editor's reply names brief_sha {said.strip()[:64]} but {BRIEF_FILE} is {expected}: "
+                "it may have worked from another brief")
+    return None
+
+
+BRIEF_FILE = "brief.md"
+SHA_LENGTH = 12
+
+
+def brief_sha(data: bytes) -> str:
+    """The first SHA_LENGTH hex digits of the sha256 of the brief file's bytes."""
+    return hashlib.sha256(data).hexdigest()[:SHA_LENGTH]
 
 
 WORK_SENTINEL = ".prose-edit-work"
@@ -1015,7 +1068,7 @@ def work_dir(raw: str) -> Path:
 
     It must sit directly under the temp dir, carry the mkdtemp name shape and hold the sentinel
     file `tmpdir` wrote. memory.py's lock directory (prose-edit-locks-<uid>) has neither shape
-    nor sentinel.
+    nor sentinel. A name of the right shape with no directory is one the sweep took: the message says so.
     """
     path = Path(raw)
     if ".." in path.parts:
@@ -1025,8 +1078,20 @@ def work_dir(raw: str) -> Path:
         raise _user(f"{raw}: not a prose-edit work directory (it is a symbolic link)")
     real = path.resolve()
     if not _is_work_dir(real, base):
+        if real.parent == base and _WORK_NAME.fullmatch(real.name) and not real.exists():
+            raise _user(f"{raw}: the work directory has expired: one idle for more than two hours is swept, and "
+                        "this one was swept. The review in it is gone; run the edit again from the start")
         raise _user(f"{raw}: not a prose-edit work directory made by `tmpdir` directly under {base}")
     return real
+
+
+def touch_work(work: Path) -> None:
+    """Mark the work directory as in use now: the sweep takes a directory idle for two hours, so a review
+    the author is still reading must show activity. Best effort; a failure never stops the command."""
+    try:
+        os.utime(work / WORK_SENTINEL)
+    except OSError:
+        pass
 
 
 def work_file(raw: str) -> Path:
@@ -1054,7 +1119,8 @@ def cmd_rmtmp(raw: str) -> None:
 
 
 def sweep_stale_work(now: float | None = None) -> list[str]:
-    """Delete work directories older than two hours: the backstop for a run that stopped early."""
+    """Delete work directories idle for two hours (the sentinel's mtime, which `touch_work` renews): the
+    backstop for a run that stopped early, never for a review the author is still reading."""
     base = Path(tempfile.gettempdir()).resolve()
     cutoff = (time.time() if now is None else now) - WORK_MAX_AGE
     gone: list[str] = []

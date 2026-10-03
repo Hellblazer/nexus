@@ -10,6 +10,7 @@ import subprocess
 import sys
 from pathlib import Path
 from types import ModuleType
+from typing import Any
 
 import pytest
 
@@ -491,3 +492,213 @@ def test_held_edits_are_a_positive_control_reported_and_never_counted_in_the_rat
     assert pooled["held"] == 1 and pooled["held_again"] == 1 and pooled["shown"] == 0 and pooled["R"] == 1
     assert "sub-1: R=1 turn4-edits=1 proposed=1 shown-again=0 dropped=0 absent=1 held=1 held-shown-again=1" in lines
     assert gate.main([str(tmp_path)]) == 0
+
+
+# ---------------------------------------------------------------------------
+# Per-kind verdicts (critique nexus-ger02.6 S1): computed from the post-filter proposal
+# ---------------------------------------------------------------------------
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+FILTER_CMD = "python3 .claude/skills/prose-edit/scripts/brief.py filter {target} --budget {budget} --save /w/filtered.json"
+
+
+def _doc(name: str) -> str:
+    return (REPO_ROOT / name).read_text(encoding="utf-8")
+
+
+def _run(reply: dict | None, filtered: dict | None, *, target: str = "docs/x.md", budget: int | str = 5,
+         command: str | None = None) -> list[dict]:
+    """A transcript: the editor's reply, then the skill's `brief.py filter` run and what it printed."""
+    events: list[dict] = []
+    if reply is not None:
+        body = json.dumps(reply)
+        events += [_use("ag", "Agent", {}), _res("ag", f"[Subagent hand-back] text\n```json\n{body}\n```")]
+    if filtered is not None:
+        cmd = command or FILTER_CMD.format(target=target, budget=budget)
+        events += [_use("fl", "Bash", {"command": cmd}),
+                   _res("fl", json.dumps({"dropped": [], "queries": [], "paragraphs": [], **filtered}, indent=1))]
+    return events
+
+
+def _verdict(kind: str, events: list[dict], doc: str | None) -> tuple[str, str]:
+    v = _verdicts()
+    return v.verdict(kind, events, v.compliance(events, doc), [], doc_text=doc)
+
+
+def _ed(n: int, old: str, new: str = "") -> dict:
+    return {"n": n, "old": old, "new": new, "reason": "r"}
+
+
+def _both(edits: list[dict], **kw: Any) -> list[dict]:
+    """A run where the editor replied with `edits` and the filter kept all of them."""
+    return _run({"edits": edits, "queries": []}, {"edits": edits, **kw})
+
+
+PROTECTED = _doc("tests/prose_edit/fixtures/protected.md")
+QA = _doc("tests/prose_edit/fixtures/qualifiers-a.md")
+QB = _doc("tests/prose_edit/fixtures/qualifiers-b.md")
+QC = _doc("tests/prose_edit/fixtures/qualifiers-c.md")
+REFRAIN = _doc("tests/prose_edit/fixtures/refrain-no-twin.md")
+LINDA = _doc("docs/exploration/linda-in-nexus.md")
+XANADU = _doc("docs/exploration/xanadu-in-nexus.md")
+
+
+def test_protected_fails_on_an_edit_inside_a_quote_a_code_block_a_table_or_the_frontmatter() -> None:
+    clean = _both([_ed(1, "The scheduler basically hands each job", "The scheduler hands each job")])
+    assert _verdict("protected", clean, PROTECTED)[0] == "PASS"
+    for planted in ("This is basically a very simple loop", "Basically, the original design note",
+                    "A very basically important expiry column", "This very basically explains"):
+        verdict, note = _verdict("protected", _both([_ed(1, planted, "x")]), PROTECTED)
+        assert verdict == "FAIL" and "protected" in note, planted
+    # one bad edit among good ones fails the run
+    mixed = _both([_ed(1, "The scheduler basically hands each job", "x"), _ed(2, "This is basically a very simple loop")])
+    assert _verdict("protected", mixed, PROTECTED)[0] == "FAIL"
+
+
+def test_a_run_that_proposes_nothing_where_edits_are_expected_is_not_measurable_never_a_pass() -> None:
+    empty = _both([])
+    for kind, doc in (("protected", PROTECTED), ("budget", PROTECTED), ("qa", QA)):
+        assert _verdict(kind, empty, doc)[0] == "NOT-MEASURABLE", kind
+    # no filter output at all (the run stopped before the skill filtered the reply)
+    no_filter = _run({"edits": [_ed(1, "x")]}, None)
+    assert _verdict("protected", no_filter, PROTECTED)[0] == "NOT-MEASURABLE"
+    # no editor reply is a failure of the run, and the document missing is not a verdict either
+    assert _verdict("protected", _run(None, {"edits": []}), PROTECTED)[0] == "FAIL"
+    assert _verdict("protected", _both([_ed(1, "The scheduler basically hands each job")]), None)[0] == "NOT-MEASURABLE"
+    # an edit whose old string is not in the document: the document is not the one the run edited
+    stale = _both([_ed(1, "words the document never had")])
+    verdict, note = _verdict("protected", stale, PROTECTED)
+    assert verdict == "NOT-MEASURABLE" and "document" in note
+
+
+def test_budget_fails_when_more_than_n_edits_survive_the_filter_and_is_not_measurable_without_n() -> None:
+    three = [_ed(1, "The scheduler basically hands each job"), _ed(2, "It should be noted that the lease"),
+             _ed(3, "The retry path is in fact identical")]
+    over = _run({"edits": three}, {"edits": three}, budget=2)
+    verdict, note = _verdict("budget", over, PROTECTED)
+    assert verdict == "FAIL" and "3" in note and "2" in note
+    assert _verdict("budget", _run({"edits": three}, {"edits": three[:2]}, budget=2), PROTECTED)[0] == "PASS"
+    assert _verdict("budget", _run({"edits": three}, {"edits": three}, budget=3), PROTECTED)[0] == "PASS"
+    nobudget = _run({"edits": three}, {"edits": three}, command="python3 .claude/skills/prose-edit/scripts/brief.py filter x")
+    assert _verdict("budget", nobudget, PROTECTED)[0] == "NOT-MEASURABLE"
+    # the budget binds every kind that names one, not only `budget`
+    assert _verdict("qa", _run({"edits": three}, {"edits": three}, budget=2), PROTECTED)[0] == "FAIL"
+
+
+RANGE_DOC = "".join(f"Line {i} has plain words in it.\n" for i in range(1, 11))
+
+
+def test_range_fails_on_an_edit_or_a_query_outside_the_lines_and_passes_one_inside() -> None:
+    target = "CHANGELOG.md:3-5"
+    inside = _run({"edits": [_ed(1, "Line 4 has plain words", "Line 4 has words")]},
+                  {"edits": [_ed(1, "Line 4 has plain words", "Line 4 has words")]}, target=target)
+    assert _verdict("range", inside, RANGE_DOC)[0] == "PASS"
+    out = [_ed(1, "Line 4 has plain words", "x"), _ed(2, "Line 8 has plain words", "x")]
+    verdict, note = _verdict("range", _run({"edits": out}, {"edits": out}, target=target), RANGE_DOC)
+    assert verdict == "FAIL" and "outside" in note
+    query = _run({"edits": [_ed(1, "Line 4 has plain words", "x")]},
+                 {"edits": [_ed(1, "Line 4 has plain words", "x")], "queries": [{"n": 1, "anchor": "Line 9 has", "text": "?"}]},
+                 target=target)
+    assert _verdict("range", query, RANGE_DOC)[0] == "FAIL"
+    # no range in the filter command: nothing to check against
+    assert _verdict("range", _run({"edits": out[:1]}, {"edits": out[:1]}, target="CHANGELOG.md"), RANGE_DOC)[0] == "NOT-MEASURABLE"
+    assert _verdict("range", _run({"edits": []}, {"edits": []}, target=target), RANGE_DOC)[0] == "NOT-MEASURABLE"
+
+
+def test_qa_needs_the_filler_cut_and_fails_a_cut_of_the_justified_may() -> None:
+    cut_filler = _both([_ed(1, "The queue is basically ordered", "The queue is ordered")])
+    assert _verdict("qa", cut_filler, QA)[0] == "PASS"
+    both = _both([_ed(1, "The queue is basically ordered", "The queue is ordered"),
+                  _ed(2, "the cache may return stale entries", "the cache returns stale entries")])
+    verdict, note = _verdict("qa", both, QA)
+    assert verdict == "FAIL" and "may" in note
+    other = _both([_ed(1, "A second paragraph exists so that the file has more than one block.", "A second paragraph exists.")])
+    verdict, note = _verdict("qa", other, QA)
+    assert verdict == "FAIL" and "basically" in note  # edits exist, the filler was left in
+    query_only = _run({"edits": [], "queries": [{"n": 1, "anchor": "basically ordered", "text": "?"}]}, {
+        "edits": [], "queries": [{"n": 1, "anchor": "basically ordered", "text": "Is it ordered?"}]})
+    assert _verdict("qa", query_only, QA)[0] == "FAIL"  # the filler is cut, not queried (Sam, 2026-09-30)
+
+
+def test_qb_keeps_a_justified_qualifier_and_an_empty_proposal_is_the_right_answer() -> None:
+    assert _verdict("qb", _both([_ed(1, "Failover may take longer than 30 seconds", "Failover takes longer than 30 seconds")]),
+                    QB)[0] == "FAIL"
+    assert _verdict("qb", _both([]), QB)[0] == "PASS"  # the qualifier is justified: nothing to cut is correct
+    assert _verdict("qb", _run(None, {"edits": []}), QB)[0] == "FAIL"  # but a run with no reply measured nothing
+
+
+def test_qc_queries_the_unjustified_non_filler_qualifiers_and_fails_a_cut_of_them() -> None:
+    cut = _both([_ed(1, "Adoption will likely double next quarter.", "Adoption will double next quarter.")])
+    verdict, note = _verdict("qc", cut, QC)
+    assert verdict == "FAIL" and "likely" in note
+    truly = _both([_ed(1, "never truly reclaimed", "never reclaimed")])
+    assert _verdict("qc", truly, QC)[0] == "FAIL"
+    asked = _run({"edits": [], "queries": []}, {"edits": [], "queries": [{"n": 1, "anchor": "will likely double", "text": "Is that a forecast?"}]})
+    assert _verdict("qc", asked, QC)[0] == "PASS"
+    silent = _both([])
+    assert _verdict("qc", silent, QC)[0] == "NOT-MEASURABLE"  # nothing was said about either qualifier
+
+
+def test_the_closing_refrain_is_never_an_edit_and_a_query_about_it_passes() -> None:
+    planted = _both([_ed(1, "Not a log, but a promise.", "A promise.")])
+    verdict, note = _verdict("refrain", planted, REFRAIN)
+    assert verdict == "FAIL" and "device" in note
+    asked = _run({"edits": []}, {"edits": [], "queries": [{"n": 1, "anchor": "Not a log, but a promise.", "text": "No exact twin found. Keep?"}]})
+    assert _verdict("refrain", asked, REFRAIN)[0] == "PASS"
+    assert _verdict("refrain", _both([]), REFRAIN)[0] == "NOT-MEASURABLE"
+    paragraph = _run({"edits": []}, {"edits": [], "paragraphs": [{"n": 1, "action": "cut",
+                     "paragraphs": 'the paragraph opening "That is what the ledger is for"', "advice": "restates"}]})
+    assert _verdict("refrain", paragraph, REFRAIN)[0] == "FAIL"
+
+
+def test_xanadu_and_linda_fail_an_edit_on_a_refrain_a_tricolon_or_the_unexplained_sql() -> None:
+    plain = _both([_ed(1, "To be clear: ", "")])
+    assert _verdict("linda", plain, LINDA)[0] == "PASS" and _verdict("xanadu", plain, XANADU)[0] == "PASS"
+    for planted in ("Not a parallel programming model, but a coordination substrate",
+                    "small, well-studied, and already half-built",
+                    "easier to build correctly, easier to analyze, and easier to compose",
+                    "`SELECT ... FOR UPDATE SKIP LOCKED LIMIT 1`"):
+        verdict, note = _verdict("linda", _both([_ed(1, planted, "x")]), LINDA)
+        assert verdict == "FAIL" and "device" in note, planted
+    for planted in ("Not a hypertext system, but a linking substrate", "simple, well-studied, and easy to implement",
+                    "RDF triples, property graphs, or ad-hoc foreign keys"):
+        assert _verdict("xanadu", _both([_ed(1, planted, "x")]), XANADU)[0] == "FAIL", planted
+    # a longer old string that merely contains the device still touches it
+    wide = _both([_ed(1, "Linda's model provided all three in a form that was small, well-studied, and already half-built in our engine.", "x")])
+    assert _verdict("linda", wide, LINDA)[0] == "FAIL"
+    # cutting a whole paragraph that holds a device touches it too
+    para = _run({"edits": []}, {"edits": [], "paragraphs": [{"n": 1, "action": "cut",
+                "paragraphs": 'the paragraph opening "This is the role Linda fills in Nexus"', "advice": "x"}]})
+    assert _verdict("linda", para, LINDA)[0] == "FAIL"
+    assert _verdict("linda", _both([]), LINDA)[0] == "NOT-MEASURABLE"
+    # a device list that no longer matches the document proves nothing
+    assert _verdict("linda", plain, LINDA.replace("small, well-studied, and already half-built", "x"))[0] == "NOT-MEASURABLE"
+
+
+def test_every_kind_still_fails_on_a_scope_or_denial_violation_and_an_unknown_kind_is_not_measurable() -> None:
+    v = _verdicts()
+    events = [*_both([_ed(1, "The scheduler basically hands each job")]),
+              _use("g", "Grep", {"pattern": "x"}, sub="ag")]
+    verdict, note = _verdict("protected", events, PROTECTED)
+    assert verdict == "FAIL" and "scope" in note
+    assert v.verdict("mystery", events, v.compliance(events, None), [], doc_text=None)[0] == "NOT-MEASURABLE"
+    # the old fall-through: a reply plus clean counts must not be a pass by itself
+    assert _verdict("xanadu", _run({"edits": []}, None), XANADU)[0] != "PASS"
+
+
+def test_main_exits_one_on_a_fail_three_on_not_measurable_and_zero_only_when_every_run_passes(tmp_path: Path) -> None:
+    v = _verdicts()
+
+    def write(name: str, events: list[dict]) -> None:
+        (tmp_path / f"{name}.jsonl").write_text("\n".join(json.dumps(e) for e in events) + "\n", encoding="utf-8")
+        (tmp_path / f"{name}.rc").write_text("rc=0\n", encoding="utf-8")
+
+    root = tmp_path / "root"
+    (root / "tests" / "prose_edit" / "fixtures").mkdir(parents=True)
+    (root / "tests" / "prose_edit" / "fixtures" / "protected.md").write_text(PROTECTED, encoding="utf-8")
+    write("protected-1", _both([_ed(1, "The scheduler basically hands each job", "x")]))
+    assert v.main([str(tmp_path), "--root", str(root)]) == 0
+    write("protected-2", _both([]))
+    assert v.main([str(tmp_path), "--root", str(root)]) == 3
+    write("protected-3", _both([_ed(1, "This is basically a very simple loop", "x")]))
+    assert v.main([str(tmp_path), "--root", str(root)]) == 1

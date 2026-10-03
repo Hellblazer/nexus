@@ -776,7 +776,7 @@ def test_the_saved_filter_output_is_the_machine_format_filter_prints(prose: Pros
 def test_the_skill_runs_render_then_apply_and_deletes_work_only_after_the_answer() -> None:
     text = SKILL.read_text(encoding="utf-8")
     assert "scripts/review.py" in text and "| REVIEW |" in text
-    assert "`BRIEF filter <target> --budget <budget> --save WORK/filtered.json [--file WORK/input.txt] < WORK/reply.txt`" in text
+    assert "`BRIEF filter <target> --budget <budget> --save WORK/filtered.json [--file WORK/input.txt] < 'WORK/reply.txt'`" in text
     assert "REVIEW render <target> --work WORK" in text and "REVIEW apply --work WORK --accept" in text
     assert "A successful apply has already deleted WORK (unless it reports `log_error`, below); do not delete it again." in text
     assert "--work WORK < WORK/reply.txt" not in text  # filter no longer deletes the copy's directory

@@ -1,4 +1,5 @@
 #!/bin/bash
+# SPDX-License-Identifier: AGPL-3.0-or-later
 # usage: OUT_DIR=<dir> run-review.sh
 #
 # The review-loop scenarios (RDR-221 Steps 1.1 and 1.5): real headless runs of the prose-edit skill, each

@@ -1,11 +1,31 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Verdicts and compliance counts for prose-edit acceptance runs (RDR-221, nexus-ger02.3).
 
 usage: verdicts.py OUT_DIR [--root REPO_ROOT]
 
 OUT_DIR holds the files run-scenario.sh writes: NAME.jsonl (stream-json), NAME.rc, and for
 run-canaries.sh also work-dirs-before.txt and work-dirs-after.txt. A run's kind is its name
-without a trailing -N. Exit 1 when any run fails.
+without a trailing -N. Exit 1 when any run fails; exit 3 when none failed but a run was
+NOT-MEASURABLE (it proves nothing, so it is never a pass); 0 only when every run passed.
+
+The kinds that edit a document (xanadu, linda, refrain, qa, qb, qc, protected, budget, range) are scored on
+the post-filter proposal: the last `brief.py filter` output in the transcript, which is what the author sees.
+The Verify line of the RDR's Test Plan, computed per kind, with the document read from --root at the
+state the run edited (an edit whose old string is not in it makes the run NOT-MEASURABLE):
+  protected  no edit inside a quote, code block, table or frontmatter; at least one edit survived
+  budget     no more than the --budget N the filter ran with, N read from that command; at least one edit
+  range      every edit and query anchor inside the lines of PATH:START-END in the filter command
+  qa/qb/qc   Sam's ruling of 2026-09-30: only filler words (basically, really, quite, just) are cut, every
+             other qualifier is queried. qa: "basically" is cut and the justified "may" is not. qb: "may"
+             is not cut (no proposal at all is the right answer). qc: "will likely" and "truly" are not cut
+             and at least one is queried
+  xanadu, linda, refrain
+             no edit overlaps a refrain, a tricolon or the unexplained SQL listed in DEVICES, and no
+             paragraph proposal cuts, merges or splits a paragraph that holds one. The lists were read off the
+             documents; a listed phrase the document no longer holds makes the run NOT-MEASURABLE
+Every kind also fails on scope or denial violations and on more edits than its budget. Where the run is
+expected to propose something and the post-filter proposal is empty, the verdict is NOT-MEASURABLE.
 
 Every run gets these compliance counts (an instruction the model broke, not an incident):
   denied           tool calls the runner refused (permission denied)
@@ -23,11 +43,15 @@ the author which edits to accept, so it leaves one work directory (the copy and 
 """
 from __future__ import annotations
 
+import importlib.util
 import json
 import re
+import shlex
 import sys
 from collections import Counter
+from functools import lru_cache
 from pathlib import Path
+from types import ModuleType
 from typing import Any
 
 Obj = dict[str, Any]
@@ -44,6 +68,32 @@ DOCS: dict[str, str | None] = {
     "range": "CHANGELOG.md",
 }
 _JSON_BLOCK = re.compile(r"^[ \t]*```json[ \t]*\n(.*?)\n[ \t]*```[ \t]*$", re.DOTALL | re.MULTILINE)
+PASS, FAIL, NOT_MEASURABLE = "PASS", "FAIL", "NOT-MEASURABLE"
+# What the author deliberately did, read off each document: a refrain, a tricolon or the unexplained SQL.
+# An edit overlapping one fails the run (RDR-221 Test Plan 2). Verbatim, and unique in the document.
+DEVICES: dict[str, tuple[str, ...]] = {
+    "linda": (
+        "Not a parallel programming model, but a coordination substrate",
+        "small, well-studied, and already half-built",
+        "a work queue, a mailbox, a lock, a barrier, and a request with its reply",
+        "easier to build correctly, easier to analyze, and easier to compose",
+        "`SELECT ... FOR UPDATE SKIP LOCKED LIMIT 1`",
+        "A report is owed until a report tuple exists",
+    ),
+    "xanadu": (
+        "Not a hypertext system, but a linking substrate",
+        "simple, well-studied, and easy to implement",
+        "RDF triples, property graphs, or ad-hoc foreign keys",
+        "There is no way to express that a code chunk",
+        "The hash pins which chunk; the range pins where within it.",
+    ),
+    "refrain": ("Not a log, but a promise.",),
+}
+# The qualifier words each fixture's justified or unjustified qualifiers hang on (Sam's ruling, 2026-09-30:
+# filler words are cut, every other qualifier is a query).
+KEPT_QUALIFIERS: dict[str, tuple[str, ...]] = {"qa": ("may",), "qb": ("may",), "qc": ("likely", "truly")}
+FILLER_CUT = {"qa": "basically"}
+EDITS_EXPECTED = ("protected", "budget", "range")
 
 
 def load_events(path: Path) -> list[Obj]:
@@ -172,7 +222,194 @@ def compliance(events: list[Obj], doc_text: str | None) -> Obj:
     return out
 
 
-def verdict(kind: str, events: list[Obj], c: Obj, new_work_dirs: list[str]) -> tuple[str, str]:
+
+# ---------------------------------------------------------------------------
+# Verdicts for the runs that edit a document, from the post-filter proposal
+# ---------------------------------------------------------------------------
+
+
+@lru_cache(maxsize=1)
+def _brief() -> ModuleType:
+    """brief.py, the script the skill ran: its protected-region and range logic is the one the filter used."""
+    path = Path(__file__).resolve().parents[3] / ".claude" / "skills" / "prose-edit" / "scripts" / "brief.py"
+    spec = importlib.util.spec_from_file_location("prose_edit_verdict_brief", path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot load {path}")
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules.setdefault(spec.name, mod)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _json_object(text: str) -> Obj | None:
+    start = text.find("{")
+    if start < 0:
+        return None
+    try:
+        value, _ = json.JSONDecoder().raw_decode(text[start:])
+    except ValueError:
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def filter_runs(events: list[Obj]) -> list[tuple[str, Obj]]:
+    """(the command, what it printed) for every `brief.py filter` run in the transcript, in order."""
+    results = tool_results(events)
+    out: list[tuple[str, Obj]] = []
+    for tid, name, inp, _ in tool_uses(events):
+        command = str(inp.get("command", ""))
+        if name == "Bash" and "brief.py filter" in command and tid in results:
+            value = _json_object(results[tid])
+            if value is not None and isinstance(value.get("edits"), list):
+                out.append((command, value))
+    return out
+
+
+def filter_arguments(command: str) -> tuple[int | None, Obj | None]:
+    """(the --budget, the {"start", "end"} range of the target) the filter command ran with."""
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        return None, None
+    after = tokens[tokens.index("filter") + 1:] if "filter" in tokens else []
+    budget: int | None = None
+    for i, tok in enumerate(after):
+        if tok == "--budget" and i + 1 < len(after) and after[i + 1].isdigit():
+            budget = int(after[i + 1])
+        elif tok.startswith("--budget=") and tok[9:].isdigit():
+            budget = int(tok[9:])
+    target = next((t for t in after if not t.startswith("-")), "")
+    m = re.search(r":(\d+)-(\d+)$", target)
+    return budget, ({"start": int(m.group(1)), "end": int(m.group(2))} if m else None)
+
+
+def _word(text: str, word: str) -> bool:
+    return re.search(rf"\b{re.escape(word)}\b", text, re.IGNORECASE) is not None
+
+
+def _cuts(edit: Obj, word: str) -> bool:
+    return _word(str(edit.get("old", "")), word) and not _word(str(edit.get("new", "")), word)
+
+
+def _spans(text: str, needle: str) -> list[tuple[int, int]]:
+    out: list[tuple[int, int]] = []
+    i = text.find(needle)
+    while i != -1:
+        out.append((i, i + len(needle)))
+        i = text.find(needle, i + 1)
+    return out
+
+
+def _blocks(text: str) -> list[tuple[int, int]]:
+    """The blank-line separated paragraphs of `text` as (start, end) offsets."""
+    out: list[tuple[int, int]] = []
+    pos = 0
+    for part in re.split(r"\n\s*\n", text):
+        start = text.find(part, pos)
+        out.append((start, start + len(part)))
+        pos = start + len(part)
+    return out
+
+
+def _overlaps(a: tuple[int, int], b: tuple[int, int]) -> bool:
+    return a[0] < b[1] and b[0] < a[1]
+
+
+def _device_problems(kind: str, doc_text: str, edits: list[Obj], paragraphs: list[Obj]) -> tuple[list[str], str | None]:
+    """(what touches a device, a reason the device list cannot be applied to this document or None)."""
+    spans: dict[str, tuple[int, int]] = {}
+    for phrase in DEVICES[kind]:
+        found = _spans(doc_text, phrase)
+        if len(found) != 1:
+            return [], f"the device {phrase[:50]!r} is in the document {len(found)} times; the list no longer matches it"
+        spans[phrase] = found[0]
+    problems: list[str] = []
+    for e in edits:
+        for phrase, span in spans.items():
+            if any(_overlaps(o, span) for o in _spans(doc_text, str(e.get("old", "")))):
+                problems.append(f"edit {e.get('n')} touches a device ({phrase[:50]!r})")
+    blocks = _blocks(doc_text)
+    for pr in paragraphs:
+        if str(pr.get("action", "")).lower() not in ("cut", "merge", "split"):
+            continue
+        for ph in _brief()._quoted_phrases(str(pr.get("paragraphs", ""))):
+            for at in _spans(doc_text, ph)[:1]:
+                block = next((b for b in blocks if b[0] <= at[0] < b[1]), None)
+                for phrase, span in spans.items():
+                    if block is not None and _overlaps(block, span):
+                        problems.append(f"paragraph proposal {pr.get('n')} ({pr.get('action')}) "
+                                        f"would take a paragraph holding a device ({phrase[:50]!r})")
+    return problems, None
+
+
+def doc_verdict(kind: str, events: list[Obj], c: Obj, doc_text: str | None) -> tuple[str, str]:
+    """PASS, FAIL or NOT-MEASURABLE for a document-editing run, from the post-filter proposal."""
+    if editor_reply(events) is None:
+        return FAIL, "no editor reply"
+    problems: list[str] = []
+    if c["grep_scope"] or c["rdr_reads"] or c["off_list_bash"] or c["denied"]:
+        problems.append(f"scope or denial violations (grep_scope={len(c['grep_scope'])} rdr_reads={len(c['rdr_reads'])} "
+                        f"off_list_bash={len(c['off_list_bash'])} denied={c['denied']})")
+    runs = filter_runs(events)
+    if not runs:
+        return (FAIL, problems[0]) if problems else (
+            NOT_MEASURABLE, "no `brief.py filter` output in the transcript: the post-filter proposal cannot be read")
+    command, proposal = runs[-1]
+    edits = [e for e in proposal.get("edits") or [] if isinstance(e, dict)]
+    queries = [q for q in proposal.get("queries") or [] if isinstance(q, dict)]
+    paragraphs = [p for p in proposal.get("paragraphs") or [] if isinstance(p, dict)]
+    budget, rng = filter_arguments(command)
+    if budget is not None and len(edits) > budget:
+        problems.append(f"{len(edits)} edits survived the filter against a budget of {budget}")
+    if problems:
+        return FAIL, "; ".join(problems)
+    if kind == "budget" and budget is None:
+        return NOT_MEASURABLE, "the filter command names no --budget, so there is no N to check"
+    if kind == "range" and rng is None:
+        return NOT_MEASURABLE, "the filter command names no PATH:START-END range"
+    if doc_text is None:
+        return NOT_MEASURABLE, "the document is not readable under --root"
+    stale = [e.get("n") for e in edits if str(e.get("old", "")) not in doc_text]
+    if stale:
+        return NOT_MEASURABLE, f"edits {stale} are not in the document: it is not the one the run edited"
+    brief = _brief()
+    spans = brief.protected_spans(doc_text)
+    for e in edits:
+        if brief.edit_problem(doc_text, str(e["old"]), spans, None) == "protected-region":
+            problems.append(f"edit {e.get('n')} is inside a protected region (quote, code, table or frontmatter)")
+    if rng is not None:
+        window = brief._range_span(doc_text, rng)
+        for e in edits:
+            if not any(window[0] <= a and b <= window[1] for a, b in _spans(doc_text, str(e["old"]))):
+                problems.append(f"edit {e.get('n')} is outside lines {rng['start']}-{rng['end']}")
+        for q in queries:
+            if not any(window[0] <= a and b <= window[1] for a, b in _spans(doc_text, str(q.get("anchor", "")))):
+                problems.append(f"query {q.get('n')} is outside lines {rng['start']}-{rng['end']}")
+    for word in KEPT_QUALIFIERS.get(kind, ()):
+        problems += [f"edit {e.get('n')} cuts the justified qualifier {word!r}" for e in edits if _cuts(e, word)]
+    proposed = len(edits) + len(queries) + len(paragraphs)
+    filler = FILLER_CUT.get(kind)
+    if filler and proposed and not any(_cuts(e, filler) for e in edits):
+        problems.append(f"the filler word {filler!r} was not cut (a filler word is cut, not queried or left)")
+    if kind in DEVICES:
+        found, stale_list = _device_problems(kind, doc_text, edits, paragraphs)
+        if stale_list:
+            return NOT_MEASURABLE, stale_list
+        problems += found
+    if problems:
+        return FAIL, "; ".join(problems)
+    note = f"{len(edits)} edits, {len(queries)} queries, {len(paragraphs)} paragraph proposals after the filter"
+    if kind in EDITS_EXPECTED and not edits:
+        return NOT_MEASURABLE, f"no edit survived the filter, so there is nothing to check; {note}"
+    if kind in ("qa", "xanadu", "linda", "refrain") and not proposed:
+        return NOT_MEASURABLE, f"the editor proposed nothing where something is expected; {note}"
+    if kind == "qc" and not any(_word(str(q.get("anchor", "")), w) for q in queries for w in KEPT_QUALIFIERS["qc"]):
+        return NOT_MEASURABLE, f"nothing was asked about either qualifier, so the ruling is not exercised; {note}"
+    return PASS, note
+
+
+def verdict(kind: str, events: list[Obj], c: Obj, new_work_dirs: list[str],
+            doc_text: str | None = None) -> tuple[str, str]:
     dispatched = any(n == "Agent" for _, n, _, _ in tool_uses(events, sub=False))
     results = tool_results(events)
     if kind == "canary-nx":
@@ -202,11 +439,9 @@ def verdict(kind: str, events: list[Obj], c: Obj, new_work_dirs: list[str]) -> t
               and not c["off_list_bash"])
         return ("PASS" if ok else "FAIL"), (f"dispatched={dispatched} filtered={filtered} rendered={rendered} "
                                             f"new-work-dirs={len(new_work_dirs)} denied={c['denied']}")
-    reply = editor_reply(events)
-    if reply is None:
-        return "FAIL", "no editor reply"
-    bad = bool(c["grep_scope"] or c["rdr_reads"] or c["off_list_bash"] or c["denied"])
-    return ("FAIL" if bad else "PASS"), "scope/denial counts clean" if not bad else "scope or denial violations"
+    if kind in DOCS:
+        return doc_verdict(kind, events, c, doc_text)
+    return NOT_MEASURABLE, f"no verdict is defined for the kind {kind!r}"
 
 
 def main(argv: list[str]) -> int:
@@ -219,6 +454,7 @@ def main(argv: list[str]) -> int:
     after = set((out_dir / "work-dirs-after.txt").read_text().split()) if (out_dir / "work-dirs-after.txt").exists() else set()
     new_dirs = sorted(after - before)
     fails = 0
+    unmeasured = 0
     totals: Counter[str] = Counter()
     for rc in sorted(out_dir.glob("*.rc")):
         name = rc.stem
@@ -229,14 +465,15 @@ def main(argv: list[str]) -> int:
         c = compliance(events, doc_text)
         raw = (out_dir / f"{name}.jsonl").read_text(encoding="utf-8")
         own_dirs = [d for d in new_dirs if d in raw]  # a directory the stdin run is holding for its answer is not another run's
-        v, note = verdict(kind, events, c, own_dirs)
-        fails += v == "FAIL"
+        v, note = verdict(kind, events, c, own_dirs, doc_text=doc_text)
+        fails += v == FAIL
+        unmeasured += v == NOT_MEASURABLE
         counts = {k: (len(val) if isinstance(val, list) else val) for k, val in c.items()}
         for k, val in counts.items():
             totals[k] += int(val)
         sys.stdout.write(f"{name:14} {v:5} {note} | {json.dumps(counts)}\n")
     sys.stdout.write(f"TOTALS {json.dumps(dict(totals))} new-work-dirs {new_dirs}\n")
-    return 1 if fails else 0
+    return 1 if fails else (3 if unmeasured else 0)
 
 
 if __name__ == "__main__":

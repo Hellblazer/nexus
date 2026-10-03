@@ -231,8 +231,9 @@ example: "Does this nominalisation hide who acts? Leave it if it names a
 stable concept." Among the questions: does the paragraph open with its claim;
 is the actor the subject; does the sentence end on what matters; would a
 reader new to the project follow this step; is this qualifier justified by a
-real uncertainty. Unjustified qualifiers are proposed for cutting; justified
-ones stay; unclear ones become queries. A construction that matches a device
+real uncertainty. Filler qualifiers (basically, really, quite, just as filler)
+are proposed for cutting; justified ones stay; every other qualifier or
+intensifier becomes a query (Sam, 2026-09-30). A construction that matches a device
 on the voice card (a refrain, a tricolon, deliberate unexplained density) is
 not a finding.
 
@@ -532,7 +533,7 @@ None.
 - **Scenario**: A document with a quote, a code block, a table and frontmatter. — **Verify**: no proposal inside any of them.
 - **Scenario**: `xanadu-in-nexus.md` and `linda-in-nexus.md`. — **Verify**: no proposal touches the refrains, tricolons or unexplained SQL.
 - **Scenario**: Budget set to N. — **Verify**: at most N sentence edits.
-- **Scenario**: A sentence with one justified and one unjustified qualifier. — **Verify**: only the unjustified one is proposed for cutting.
+- **Scenario**: A sentence with one filler qualifier and one justified qualifier. — **Verify**: only the filler word (basically, really, quite, just as filler) is cut; every other qualifier or intensifier is queried, never cut (Sam, 2026-09-30).
 - **Scenario**: Reject an edit, run again on the same document. — **Verify**: not proposed again.
 - **Scenario**: Add a style-sheet entry at user level, edit a document in another genre. — **Verify**: the entry is applied.
 - **Scenario**: Accept edits after the file changed under one of them. — **Verify**: that edit is skipped and reported; the others apply.
@@ -610,3 +611,8 @@ Phase 2.
 
 - 2026-09-29: Gate round 1 — PASSED (0 Critical, 8 Significant, 0 ship-blocker(s)); commit `d31715dda`; critique `nexus_rdr/221-gate-critique-2026-09-29-r1`.
 - 2026-09-29: Accepted with fix-check residuals dispositioned by bead (epic nexus-ger02): R1 nexus-ger02.7, nexus-ger02.10; R2 nexus-ger02.10; R3 nexus-ger02.2; R4 nexus-ger02.1, nexus-ger02.3, nexus-ger02.4; R5 nexus-ger02.8; R6 nexus-ger02.10.
+- 2026-10-03: Phase 1 (Steps 1.2 to 1.5) changed these things relative to the text accepted on 2026-09-29, found in the Phase 1 review (nexus-ger02.5, nexus-ger02.6):
+  - Rejection memory (`1d94d2a28`, nexus-ger02.16) amended the body: a rejection matches a later proposal by its minimal change, the document's rejections go into the editor's brief, an edit the author does not name is held, and "Memory helps" is measured narrowly in Phase 1.
+  - Sam's ruling of 2026-09-30 on qualifiers: only filler words are cut and every other qualifier or intensifier is a query. The Technical Design sentence and Test Plan scenario 4's Verify line are amended to say so; the acceptance verdicts for scenario 4 score it.
+  - The genre map for a path lives in `memory.py`'s default map (`_default_genre`), not in the repo style sheet that Step 1.3 item 3 names. The repo style sheet can still carry `genre_map` entries.
+  - Additions the accepted text does not describe: the stdin channel (flags on the first line, the text after it, written to the work directory); `--hold` and `--reject` on apply, so only a named `--reject` stores a rejection; a mandatory dry run before a real apply, enforced by `dryrun.json` hashes; a flat-text marked-up copy for an HTML page; and the brief as a file (`WORK/brief.md` with a checksum the editor echoes as `brief_sha`).

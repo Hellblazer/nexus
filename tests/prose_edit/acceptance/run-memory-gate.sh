@@ -1,4 +1,5 @@
 #!/bin/bash
+# SPDX-License-Identifier: AGPL-3.0-or-later
 # usage: OUT_DIR=<dir> run-memory-gate.sh LABEL SOURCE [N]
 #
 # The rejection-memory gate (RDR-221, nexus-ger02.16). N fresh runs (default 10) on copies of SOURCE, each

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """T2 records for the prose editor (RDR-221, "Memory in T2").
 
 The records go through the `nx memory` CLI.
@@ -22,7 +23,7 @@ Usage (all commands run inside the repo, from any subdirectory or worktree):
   memory.py filter TARGET|-                    # proposal JSON on stdin
   memory.py promote TARGET N --level user|repo [--dry-run]
   memory.py not-a-defect --level user|repo [--remove N]
-  memory.py log TARGET|- [--genre G]           # session JSON on stdin
+  memory.py log TARGET|- [--genre G] [--stamp S] # session JSON on stdin; S fixes the record's name and time
   memory.py genre-put NAME [--replace]         # {"exemplars": [...], "notes": [...]} on stdin
   memory.py exemplar-add GENRE PATH:START-END [--rev SHA]
   memory.py viewer [--set V]
@@ -1120,7 +1121,8 @@ def cmd_promote(ctx: Ctx, a: argparse.Namespace) -> None:
     with ctx.locked(project, NAD):
         nad = ctx.t2.get_json(project, NAD, "nad") or {}
         entries: list[Obj] = nad.setdefault("entries", [])
-        entries[:] = [e for e in entries if e.get("old") != entry["old"]] + [entry]
+        key = change_key(str(entry["old"]), str(entry["new"]))
+        entries[:] = [e for e in entries if change_key(str(e.get("old", "")), str(e.get("new", ""))) != key] + [entry]
         ctx.t2.put(project, NAD, nad)
     _emit(out)
 
@@ -1142,16 +1144,31 @@ def cmd_nad(ctx: Ctx, a: argparse.Namespace) -> None:
     _emit({"level": a.level, "project": project, "entries": _numbered(entries)})
 
 
+_STAMP = re.compile(r"[0-9]{8}T[0-9]{6}\.[0-9]{6}Z")
+
+
+def _stamp_time(stamp: str) -> datetime:
+    if not _STAMP.fullmatch(stamp):
+        raise UserError(f"--stamp {stamp!r}: expected a UTC stamp like 20261003T101500.123456Z")
+    try:
+        return datetime.strptime(stamp, "%Y%m%dT%H%M%S.%fZ").replace(tzinfo=timezone.utc)
+    except ValueError as exc:
+        raise UserError(f"--stamp {stamp!r}: not a valid time ({exc})") from exc
+
+
 def cmd_log(ctx: Ctx, a: argparse.Namespace) -> None:
     if a.genre:
         _genre_name(a.genre)
     tgt = ctx.target(a.path)
-    stamp = ctx.now.strftime("%Y%m%dT%H%M%S.%fZ")
+    # --stamp fixes the record's name and time: a caller that retries a log whose first put may have landed
+    # passes the same stamp, so the retry writes over the record instead of adding a second
+    when = _stamp_time(a.stamp) if a.stamp else ctx.now
+    stamp = when.strftime("%Y%m%dT%H%M%S.%fZ")
     title = f"log/stdin/{stamp}" if tgt.rel is None else f"log/{tgt.rel}/{stamp}"
     session = _read_stdin_json("log", default={})
     record: Obj = {
         "path": tgt.rel, "range": tgt.range, "genre": a.genre,
-        "at": _iso(ctx.now), "session": session,
+        "at": _iso(when), "session": session,
     }
     ctx.t2.put(ctx.repo_project, title, record, ttl=LOG_TTL)
     _emit({"project": ctx.repo_project, "title": title, "ttl": LOG_TTL, "range": tgt.range})
@@ -1315,6 +1332,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp = add("log", cmd_log)
     sp.add_argument("path")
     sp.add_argument("--genre")
+    sp.add_argument("--stamp", help="UTC stamp of the record (20261003T101500.123456Z); default now")
     sp = add("genre-put", cmd_genre_put)
     sp.add_argument("name")
     sp.add_argument("--replace", action="store_true", help="replace the record instead of merging")

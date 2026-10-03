@@ -632,7 +632,7 @@ def test_the_agents_example_output_is_a_valid_proposal_in_memory_pys_format() ->
     blocks = re.findall(r"```json\n(.*?)\n```", AGENT.read_text(encoding="utf-8"), re.DOTALL)
     assert len(blocks) == 1, "the agent file shows the output format exactly once"
     prop = mem.validate_proposal(json.loads(blocks[0]))
-    assert set(prop) == {"voice_card", "note", "paragraphs", "edits", "queries"}
+    assert set(prop) == {"brief_sha", "voice_card", "note", "paragraphs", "edits", "queries"}
 
 
 def test_the_agent_body_carries_the_diagnostic_questions_and_the_protections() -> None:

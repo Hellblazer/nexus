@@ -1,4 +1,5 @@
 #!/bin/bash
+# SPDX-License-Identifier: AGPL-3.0-or-later
 # usage: OUT_DIR=<dir> [RESUME_FROM=<earlier name>] run-scenario.sh <name> <prompt>
 #
 # RESUME_FROM continues the session of an earlier run in OUT_DIR (claude --resume), which is how a

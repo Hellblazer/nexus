@@ -6,7 +6,7 @@ Headless Claude Code runs of the real `prose-edit` skill and `line-editor` agent
 | --- | --- |
 | `run-scenario.sh NAME PROMPT` | One restricted session. Writes `NAME.jsonl`, `NAME.err`, `NAME.rc` under `$OUT_DIR`. |
 | `run-canaries.sh` | The tool-restriction canary, the T2-failure canary, unmapped, stdin, stdin without genre. |
-| `verdicts.py OUT_DIR` | Verdict and compliance counts per run. Exit 1 on any failure. |
+| `verdicts.py OUT_DIR` | Verdict and compliance counts per run. Exit 1 on any failure, 3 when none failed but a run was `NOT-MEASURABLE`, 0 only when every run passed. |
 | `run-review.sh` | The review-loop scenarios (nexus-ger02.4): reject then run again, list and remove a rejection then run again, a stdin run. Several turns each, answers through `RESUME_FROM`; the skill echoes an answer (`apply --dry-run`) and waits, so each answer turn is followed by a confirmation turn (`a2c`, `a4c`, `b4c`, `c2c`). The script sets `PROSE_EDIT_TEST=1`, which `PROSE_EDIT_OPEN` needs. Writes to T2 under `PROSE_EDIT_PROJECT_PREFIX` (default `zzprose024_`). |
 | `review_verdicts.py OUT_DIR` | Verdicts for those runs from what the skill's scripts printed. A rejected fix shown again is a FAIL. `VACUOUS` (b3 only) means the editor did not propose the removed edit again, so the check proved nothing; it is reported as it is, never retried into a pass. |
 | `run-memory-gate.sh LABEL SOURCE [N]` | The rejection-memory gate (nexus-ger02.16): N fresh runs on a copy of SOURCE. Writes `LABEL-<k>-<turn>.jsonl`. |
@@ -29,6 +29,22 @@ For a scenario, call `OUT_DIR=... run-scenario.sh NAME "/prose-edit <args>"` wit
 The runner uses `--permission-mode dontAsk`, allows `Bash` only for `brief.py`, `memory.py` and `review.py`, plus `Read`, `Write` and `Agent`, and denies `Bash(nx:*)`, `Bash(uv:*)`, `Bash(bd:*)` and `Bash(curl:*)`. `--allowedTools` only pre-approves and `--disallowedTools` refuses, so `dontAsk` is what turns everything else into a denial. The `canary-nx` run proves it: the model is told to run `nx --version` and the call must come back denied.
 
 A denied call in a scenario is a failure of the skill's instructions, not an incident. `verdicts.py` counts it under `denied`.
+
+## The per-kind verdicts (nexus-ger02.6, S1)
+
+A run named `xanadu-N`, `linda-N`, `refrain-N`, `qa-N`, `qb-N`, `qc-N`, `protected-N`, `budget-N` or `range-N` is scored on the post-filter proposal, the last `brief.py filter` output in its transcript (what the author sees), against the Verify line of the RDR's Test Plan. The document is read from `--root` as it is now: an edit whose old string is not in it makes the run `NOT-MEASURABLE`, so rerun the verdicts against the checkout the run edited.
+
+| Kind | PASS needs | FAIL on |
+| --- | --- | --- |
+| `protected` | one or more edits survived the filter | an edit inside a quote, code block, table or frontmatter |
+| `budget` | one or more edits, at most the `--budget N` in the filter command | more than N edits |
+| `range` | one or more edits, all inside the `PATH:START-END` of the filter command | an edit or a query anchor outside the lines |
+| `qa` | `basically` cut, `may` kept | the filler left in, or `may` cut |
+| `qb` | `may` kept (a run with no proposal at all passes: the qualifier is justified) | `may` cut |
+| `qc` | `will likely` or `truly` queried | either cut |
+| `xanadu`, `linda`, `refrain` | at least one proposal, none on a device | an edit overlapping a refrain, tricolon or the unexplained SQL listed in `DEVICES`, or a paragraph proposal that cuts, merges or splits a paragraph holding one |
+
+Every kind also fails on the scope and denial counts below and on more edits than its budget. The qualifier rows are Sam's ruling of 2026-09-30 (filler words are cut, every other qualifier is queried), which replaces Test Plan scenario 4's "only the unjustified one is proposed for cutting". `NOT-MEASURABLE` means the run proposed nothing where something is expected, or the document or the `DEVICES` list no longer matches: it proves nothing and is never a pass. `DEVICES` is read off the two documents by hand; a listed phrase that is not in the document exactly once makes the run `NOT-MEASURABLE`.
 
 ## What the counts cover, and what they do not
 

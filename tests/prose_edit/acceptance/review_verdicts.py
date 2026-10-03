@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Verdicts for the review-loop scenarios (RDR-221 Steps 1.1 and 1.5, nexus-ger02.4).
 
 usage: review_verdicts.py OUT_DIR

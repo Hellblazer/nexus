@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """A stand-in for `nx` that reports the T2 service as unavailable (PROSE_EDIT_NX points at it).
 
 It prints what a real nx prints when no service endpoint is published, remedy sentence
