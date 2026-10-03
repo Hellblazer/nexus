@@ -89,14 +89,11 @@ def test_the_enforce_flip_is_a_named_bead_that_follows_the_cut() -> None:
 
 def test_the_pre_push_mode_assertion_is_named_as_conexus_owned_in_every_place_that_states_it() -> None:
     """Critique S1: no nexus code reads the mode before the push, so every document that states the
-    assertion must say it is conexus's hold-the-push line and why it is not an attestation field."""
+    assertion must say it is conexus's hold-the-push line."""
     runbook = (REPO_ROOT / "docs" / "operations" / "ownerless-write-cutover.md").read_text()
-    readme = (REPO_ROOT / "docs" / "release-arming" / "README.md").read_text()
     for name, text in (("skill", SKILL), ("runbook", " ".join(runbook.split()))):
         assert "hold-the-push line" in text, name
         assert "nothing in this repo checks it" in text, name
-        assert "attestation" in text, name
-    assert "hold-the-push line" in readme and "not an attestation field" in readme
     # the gate's own reader really does not know the field: the claim above is checkable
     floor = (REPO_ROOT / "scripts" / "check_engine_release_floor.py").read_text()
     assert "ownerless_write_mode" not in floor

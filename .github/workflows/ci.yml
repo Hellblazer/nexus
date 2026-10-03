@@ -57,14 +57,13 @@ jobs:
     # nexus-55r6o: pre-tag wire-contract-ledger check.
     #
     # release.yml's "Verify cloud engine meets required floor" step runs
-    # check_client_lag_ledger via --paired-deploy-auto with no
-    # --ack-client-lag -- there is no human present at tag-push time to name
-    # a bead. An unacknowledged docs/wire-contract-pending.md ## Unshipped
+    # check_client_lag_ledger via --paired-deploy-auto, which has no bypass
+    # flag. A non-additive docs/wire-contract-pending.md ## Unshipped
     # entry fails that step CLOSED on the tagged commit's FROZEN tree, and
     # the workflow_dispatch retry path cannot fix it: it checks out the SAME
     # immutable tag (actions/checkout `ref: inputs.tag`), so a ledger fix
     # landed after the tag exists is invisible to a retry -- it re-reads the
-    # identical unacknowledged entry and fails identically (see release.yml's
+    # identical blocking entry and fails identically (see release.yml's
     # "REMEDY, CORRECTED (nexus-55r6o...)" comment on that step). The two
     # real remedies are (a) cut a fresh tag whose tree carries the ledger
     # fix, or (b) THIS job: run the identical ledger-only check earlier, on
@@ -116,11 +115,10 @@ jobs:
     #
     # DELIBERATE FRICTION, STATED EXPLICITLY: the ledger this job reads
     # (docs/wire-contract-pending.md) is repo-GLOBAL, not per-PR, and this
-    # job's own CI invocation carries no `--ack-client-lag` (no interactive
-    # human at CI time to name a bead). So a single unacknowledged
+    # job has no bypass flag. So a single non-additive
     # `## Unshipped` entry blocks EVERY PR targeting main -- not just the
-    # release PR that will eventually tag -- until someone acknowledges it
-    # (lands the client half, moving the entry to `## Shipped`) or a human
+    # release PR that will eventually tag -- until its client half lands
+    # (moving the entry to `## Shipped`) or a human
     # deliberately edits the ledger. This is intended, not a bug: it mirrors
     # the ledger's own philosophy (see docs/wire-contract-pending.md's
     # header) that an unshipped both-halves commit is a standing release
@@ -742,12 +740,12 @@ jobs:
             --durations-path=.test_durations.json | tee shard-output.txt
 
       # nexus-lemv5: per-shard executed-count floor — the same backstop the
-      # lint leg carries (check_lint_leg_non_vacuity.py, nexus-wixar), aimed
-      # at the shard matrix pytest-gate trusts blindly via needs.test. The
-      # marker-scoped conftest guards (scenario / mandatory-pin) cannot see
-      # a mass-skip of the GENERAL corpus; pytest exits 0 on all-skipped.
-      # The floor reads the EXECUTED count (passed + failed + errored, skipped
-      # excluded; check_lint_leg_non_vacuity.py), not the collected count.
+      # lint leg carries (nexus-wixar), aimed at the shard matrix pytest-gate
+      # trusts blindly via needs.test. The marker-scoped conftest guards
+      # (scenario / mandatory-pin) cannot see a mass-skip of the GENERAL
+      # corpus; pytest exits 0 on all-skipped. The floor reads the PASSED
+      # count off pytest's own final summary line (skipped excluded; a
+      # failure already failed the run step above), not the collected count.
       # Measured on the 6-shard runs of 2026-09-30 (nexus-qzxzh, runs 36782096550,
       # 36784801648, 36785966097): 3406 to 5946 executed per shard, about 27.7k
       # default-selected tests in all. 1500 is 44% of the smallest shard: it
@@ -755,7 +753,10 @@ jobs:
       # shard vanishing, and not a dropped group (a shard that never ran has no
       # count to read; tests/scripts/test_ci_shard_count_lint.py covers that).
       - name: Executed-count floor (nexus-lemv5 — a shard that skipped its corpus must not report green)
-        run: uv run python scripts/check_lint_leg_non_vacuity.py shard-output.txt --floor 1500 --label "test shard ${{ matrix.shard }}"
+        run: |
+          summary="$(grep -aE ' in [0-9.]+s( \([0-9:]+\))?$' shard-output.txt | tail -1)"
+          [[ "$summary" =~ ([0-9]+)\ passed ]] && [ "${BASH_REMATCH[1]}" -ge 1500 ] \
+            || { echo "::error::test shard ${{ matrix.shard }} passed fewer than 1500 tests (summary: ${summary:-none}) — a mass-skip that still exits 0"; exit 1; }
 
   test-lint:
     # test-suite-compression P0 (nexus-test-cleanup, 2026-08-05): the `lint`
@@ -852,9 +853,8 @@ jobs:
         # leg, this job is the sole enforcement point for the whole bucket,
         # feeding the required `pytest-gate` check. The shard-matrix step
         # above already does this correctly; this one did not.
-        # The non-vacuity floor below does not cover it: that gate counts
-        # failures TOWARD its executed floor, by design -- it asks whether
-        # enough tests ran, not whether they passed.
+        # The non-vacuity floor below does not cover it: it asks whether
+        # enough tests PASSED, which a pipefail-less tee would not make fatal.
         run: |
           set -euo pipefail
           uv run pytest -m lint -q | tee lint-output.txt
@@ -863,10 +863,13 @@ jobs:
         # nexus-wixar: a 938-skipped/0-executed run exits 0 (skip is not a
         # pytest failure) and reported SUCCESS on real CI -- the exact
         # vacuous-gate class this step exists to make structurally
-        # impossible, not just less likely. scripts/check_lint_leg_non_
-        # vacuity.py has its own unit tests (tests/test_check_lint_leg_non_
-        # vacuity.py) covering both the floor-trip and floor-clear paths.
-        run: uv run python scripts/check_lint_leg_non_vacuity.py lint-output.txt
+        # impossible, not just less likely. Reads the PASSED count off
+        # pytest's own final summary line; the corpus is ~830 tests, so 400
+        # leaves headroom for shrinkage and still fails the bug's signature.
+        run: |
+          summary="$(grep -aE ' in [0-9.]+s( \([0-9:]+\))?$' lint-output.txt | tail -1)"
+          [[ "$summary" =~ ([0-9]+)\ passed ]] && [ "${BASH_REMATCH[1]}" -ge 400 ] \
+            || { echo "::error::lint leg passed fewer than 400 tests (summary: ${summary:-none}) — a mass-skip that still exits 0"; exit 1; }
 
   test-mode-census:
     # nexus-vdti6 (candidate 1, chosen over: candidate 2 — an out-of-band

@@ -251,15 +251,16 @@ Every step below is **required**. Missing any one of them has caused problems in
    uv run python scripts/check_engine_release_floor.py --paired-deploy engine-service-vX.Y.Z
    ```
    The flag accepts a below-floor cloud only when the named tag independently
-   verifies as a published (non-draft, with assets) GH release, exactly equal
-   to `REQUIRED_ENGINE_VERSION`, and the newest published engine tag — any
-   single miss stays red with a named reason. On acceptance it prints a
+   verifies as a published (non-draft, with the `nexus-service-linux-amd64`
+   asset) GH release, exactly equal to `REQUIRED_ENGINE_VERSION`, the newest
+   published engine tag, and recent (72h) — any single miss stays red with a named reason. On acceptance it prints a
    "PAIRED MODE" acknowledgment and a POST-TAG VERIFY obligation: once the
    deploy lands, re-run the same command WITHOUT `--paired-deploy` to confirm
    convergence; escalate loudly if it is still behind at that point.
 
    The reverse direction — an engine deploying ahead of the client commits
-   it requires — is a separate gate, `scripts/check_client_release_precondition.py`,
+   it requires — is a separate mode of the same script,
+   `check_engine_release_floor.py --client-precondition <engine-tag>`,
    run from the `engine-release` skill before a new `engine-service-v*` tag
    deploys (nexus-9ssih deploy order); it is not part of this PyPI checklist.
 
@@ -693,7 +694,7 @@ This is exactly the v7.7.0 sequence (2026-08-14, commit `62da4273b`): the first 
 - There is no button here to press; surface an explicit relay naming the target tag to redeploy (normally the previous `engine-service-v*` identity), never frame it as autonomous.
 - For a migration-carrying tag, redeploying an older BINARY does not undo an already-committed schema change — the schema and the binary are two different things to revert, and a `CREATE INDEX CONCURRENTLY`-style migration (see "Schema/data-migration releases" above) has no free rollback once committed. "Revert the engine" without "revert the schema" can leave an old binary talking to a new schema shape.
 - Local-mode installs are unaffected by any cloud revert — they pull whatever `REQUIRED_ENGINE_VERSION` (`src/nexus/engine_version.py`) pins on the client side. Walking local installs back to a prior engine identity requires a NEW client release that moves the pin backward, not a cloud-side action.
-- There is no automated post-revert verification today (T2 [22511] gap 2): confirm the revert landed with `nx service probe` (reads `/version` live) rather than trusting the `deployed-engine-version` T2 tracker, which is written by the post-tag verify (`scripts/check_engine_release_floor.py --record-deploy-from-gate-report`, from conexus's STEP-6 report; `nx service record-deploy --gate-report-dir` is the manual fallback) and is not consumed or re-checked by anything automatically.
+- There is no automated post-revert verification today (T2 [22511] gap 2): confirm the revert landed with `nx service probe` (reads `/version` live) rather than trusting the `deployed-engine-version` T2 tracker, which is written by `nx service record-deploy --gate-report-dir` (from conexus's STEP-6 report) and is not consumed or re-checked by anything automatically.
 
 **Tag-retraction policy.** Moving, deleting, or force-pushing a published `vX.Y.Z` or `engine-service-vX.Y.Z` tag is **forbidden** except as an explicit, admin-only (Hal) decision — never a default remedy for a failed publish. Why: `.claude-plugin/marketplace.json`'s `source.ref` pins installed Claude Code plugin users to a specific, named tag as an IMMUTABLE identity; moving what a tag name resolves to after the fact is a supply-chain integrity violation, not a convenience — a user (or CI cache) that already resolved the old tag can silently diverge from one that resolves it after the move, with no way to tell from the tag name alone that this happened. `v7.6.0` is the standing lesson (2026-08-11): before the `workflow_dispatch` retry path existed, a publish failure (the twine/metadata mismatch above) was "fixed" by moving the tag, twice — `.github/workflows/release.yml`'s own header comment records it verbatim ("7.6.0 moved twice for exactly that reason") as the incident that justified building the retry path in the first place. If a tag genuinely must be retracted (e.g. a published artifact is actively harmful), it requires Hal's explicit authorization and: (a) a NEW tag carries the fix — never a reused or re-pointed old identity; (b) the bad PyPI release is yanked per the procedure above; (c) if `main`'s `source.ref` already points at the bad tag, a new release supersedes it — retracting the old tag alone does not move already-tagged users off it.
 

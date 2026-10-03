@@ -70,16 +70,16 @@ If it exits non-zero, STOP — do not proceed with the PyPI release. The gate fa
   ```bash
   uv run python scripts/check_engine_release_floor.py --paired-deploy engine-service-vX.Y.Z
   ```
-  Name the EXACT tag this release pairs with — never a guess. The flag accepts a below-floor cloud solely where that tag independently verifies as (a) a published, non-draft GH release with assets (`gh release view` — a missing/failing `gh` fails the gate, it does not pass it), (b) exactly equal to `REQUIRED_ENGINE_VERSION`, and (c) the newest published `engine-service-v*` tag. Any single miss stays red with a named reason — this is a stricter, mechanized check, not a looser one. On acceptance it prints an explicit "PAIRED MODE" acknowledgment naming both versions and the POST-TAG VERIFY obligation. Do that verify: once the deploy lands, re-run the SAME command WITHOUT `--paired-deploy` and WITH `--record-deploy-from-gate-report <conexus checkout>/deploy` (or `NX_GATE_REPORT_DIR` set) — that leg writes the `deployed-engine-version` tracker from conexus's STEP-6 report and exits 3 until that gate has reported green for the live version (nexus-nx3l5). A still-behind cloud at that point is real drift, escalate loudly, do not re-arm the flag to silence it.
+  Name the EXACT tag this release pairs with — never a guess. The flag accepts a below-floor cloud solely where that tag independently verifies as (a) a published, non-draft GH release carrying the `nexus-service-linux-amd64` asset (`gh release view` — a missing/failing `gh` fails the gate, it does not pass it), (b) exactly equal to `REQUIRED_ENGINE_VERSION`, (c) the newest published `engine-service-v*` tag, and (d) authored within 72h (`--paired-tag-max-age-hours` to override); the wire-contract ledger and the DATA EFFECT relay must also pass. Any single miss stays red with a named reason — this is a stricter, mechanized check, not a looser one. On acceptance it prints an explicit "PAIRED MODE" acknowledgment naming both versions and the POST-TAG VERIFY obligation. Do that verify: once the deploy lands, re-run the SAME command WITHOUT `--paired-deploy`. A still-behind cloud at that point is real drift, escalate loudly, do not re-arm the flag to silence it.
 - **a gated engine tag was never pinned** (`REQUIRED_ENGINE_VERSION` behind the newest published tag) → bump `REQUIRED_ENGINE_VERSION` to that tag (this alone also moves `PINNED_SERVICE_TAG`). This is the local-install delivery failure: cloud users get the deployed engine regardless, local-mode users get ONLY what this constant names, so an unpinned tag reaches nobody. When the unpinned tag carries engine halves of features whose CLIENT halves ship in THIS release, the bump into this release is mandatory, not optional — floor-lag ships a client whose pinned engine lacks the engine halves of its own features (the 7.1.0/v0.1.62 inversion).
 
 Re-run (without `--paired-deploy`) until it exits 0 — including the post-tag verify for a paired release.
 
 `release.yml`'s own copy of this gate runs `--paired-deploy-auto` (nexus-gc9ir) instead of bare — it derives the candidate tag from `REQUIRED_ENGINE_VERSION` itself and only engages the paired-acceptance path when the cloud is actually below floor, so the workflow no longer red's during a paired release's expected parallel-deploy window. This pre-tag human invocation still uses the explicit `--paired-deploy <tag>` form above — name the tag deliberately here, where you already know it.
 
-**The core tradeoff:** paired acceptance (either flag) proves the engine TAG is legitimate — it does not prove the deploy has actually landed. That's an accepted gap, and no automation backstops it: the daily `engine-floor-verify` scheduled job that used to re-probe the real endpoint bare was deleted with its workflow (cleanup step 8), so the only check that the deploy landed is the human POST-TAG VERIFY (re-run `check_engine_release_floor.py` bare once the deploy lands, as the acceptance message directs). See `check_engine_release_floor.py`'s module docstring for the full statement.
+**The core tradeoff:** paired acceptance (either flag) proves the engine TAG is legitimate — it does not prove the deploy has actually landed. That's an accepted gap, and no automation backstops it: the only check that the deploy landed is the human POST-TAG VERIFY (re-run `check_engine_release_floor.py` bare once the deploy lands, as the acceptance message directs). See `check_engine_release_floor.py`'s module docstring for the full statement.
 
-**Known CI-side failure mode, no bypass by design:** the workflow's `--paired-deploy-auto` invocation has no `--ack-client-lag` flag (no human present at tag-push to name a bead), so an unacknowledged `docs/wire-contract-pending.md` `## Unshipped` entry fails that step CLOSED during a paired release, before the tag/cloud checks even run — correctly, do not ask for a CI-side bypass. **Re-running the SAME tag via `workflow_dispatch` does NOT fix this** (nexus-55r6o) — the checkout pins the tag's immutable tree, and the ledger check reads the ledger off that same frozen tree, so a same-tag retry re-reads the identical unacknowledged entry and fails identically. Real remedy: (a) cut a FRESH client tag whose tree carries the ledger fix (a new release, not a retry of the failed one), or (b) implemented (nexus-55r6o): ci.yml's `release-ledger-gate` job runs the identical ledger-only check (`check_engine_release_floor.py --ledger-only`) on EVERY PR targeting main, before any tag exists — not narrowed to `release/*`-named branches, so a hand-named branch promoting to main is covered too. **This is mechanically MERGE-BLOCKING, not advisory:** the job is wired into `pytest-gate`'s `needs:`, and `pytest-gate` is main's actual required branch-protection check — a release PR with an unacknowledged entry fails CI on Step 7 and cannot merge, no separate GitHub repo-settings change needed. Because the ledger this job reads is repo-GLOBAL and the CI invocation carries no `--ack-client-lag` path, this is deliberately broad friction: a single unacknowledged `## Unshipped` entry blocks EVERY PR to main, not just the eventual release PR, until it is acknowledged (client half shipped) or a human edits the ledger — intended, matching the ledger's own philosophy of surfacing an unshipped both-halves commit as a standing risk, not a tag-time surprise.
+**Known CI-side failure mode, no bypass by design:** the workflow's `--paired-deploy-auto` invocation has no bypass flag, so a non-additive `docs/wire-contract-pending.md` `## Unshipped` entry fails that step CLOSED during a paired release, before the tag/cloud checks even run — correctly, do not ask for a CI-side bypass. **Re-running the SAME tag via `workflow_dispatch` does NOT fix this** (nexus-55r6o) — the checkout pins the tag's immutable tree, and the ledger check reads the ledger off that same frozen tree, so a same-tag retry re-reads the identical blocking entry and fails identically. Real remedy: (a) cut a FRESH client tag whose tree carries the ledger fix (a new release, not a retry of the failed one), or (b) implemented (nexus-55r6o): ci.yml's `release-ledger-gate` job runs the identical ledger-only check (`check_engine_release_floor.py --ledger-only`) on EVERY PR targeting main, before any tag exists — not narrowed to `release/*`-named branches, so a hand-named branch promoting to main is covered too. **This is mechanically MERGE-BLOCKING, not advisory:** the job is wired into `pytest-gate`'s `needs:`, and `pytest-gate` is main's actual required branch-protection check — a release PR with a blocking entry fails CI on Step 7 and cannot merge, no separate GitHub repo-settings change needed. Because the ledger this job reads is repo-GLOBAL, this is deliberately broad friction: a single non-additive `## Unshipped` entry blocks EVERY PR to main, not just the eventual release PR, until its client half ships or a human edits the ledger — intended, matching the ledger's own philosophy of surfacing an unshipped both-halves commit as a standing risk, not a tag-time surprise.
 
 Supplementary context (useful when deciding whether recent `service/` work is cloud-relevant, but the script above is the actual gate):
 
@@ -108,27 +108,6 @@ This gate exists because the engine silently drifted 22 `service/` commits / 4 d
 # acceptance instead of the bare form (red by construction pre-deploy)
 NX_PAIRED_DEPLOY=engine-service-vX.Y.Z ./tests/e2e/release-preflight.sh
 ```
-
-**CLOUD-MODE BOX, TWO REQUIRED ENV VARS (nexus-jzyt3).** The
-`engine-release-floor` leg's bare form is a POST-TAG VERIFY by design
-(nexus-nx3l5) and needs both of these set on a cloud-mode box, or it reds
-for a reason that is not a release problem:
-
-- `NX_GATE_REPORT_DIR=<conexus checkout>/deploy` — where conexus's STEP-6
-  gate reports live, so the verify can select the report that gated the
-  live version.
-- `NX_ALLOW_PROD_WRITE="<why this write is deliberate>"` — the tracker
-  write this leg performs is an HTTP T2 write, so on a dev checkout it also
-  needs a reasoned opt-in past the production-write guard (nexus-a2qhz), or
-  the leg reds with `TRACKER NOT RECORDED ... refused by the
-  production-write guard`, which names both requirements again in the
-  refusal itself.
-
-Without either, `tests/e2e/release-preflight.sh` used to print
-`[FAIL] engine-release-floor -- (no verdict line matched)` for the
-production-write-guard case specifically — fixed to print the actual
-refusal (see `check_engine_release_floor.py`'s
-`record_deploy_from_gate_report_leg`).
 
 Run this BEFORE step 1 and before any expensive leg. It evaluates every
 seconds-scale, deterministic, release-BLOCKING check in one pass and does NOT
@@ -541,41 +520,23 @@ Tradeoff: extra commit on main, but guards against the case where someone could 
 
 ### 9. Tag and push IMMEDIATELY after merge (triggers Release workflow + PyPI publish via OIDC)
 
-**PAIRED-RELEASE ARMING GATE (nexus-1emxn — measured twice 2026-08-29: the
+**PAIRED-RELEASE DEPLOY ORDER (nexus-1emxn — measured twice 2026-08-29: the
 "deploy fires at tag push" relay is human-mediated, PyPI publishes in ~90 s,
 and the v7.23.0 refusal window sat open 48+ minutes on the releaser's own
 box).** Before pushing the client tag of a PAIRED release, settle which
 branch applies:
 
 - **All wire-ledger `## Unshipped` entries carry `[additive]`** (old client +
-  new engine safe — `check_client_release_precondition.py` accepts this
-  shape by name): have the engine DEPLOYED before this step. The client tag
-  then cannot open a window at all. This is the preferred branch whenever
-  the ledger allows it.
-- **Any entry is not additive**: do NOT push the tag until the relay is
-  ARMED with conexus — image built, redeploy staged on a named trigger
-  ("fires when vX.Y.Z appears on origin") — and that arming is CONFIRMED
-  back. An unarmed non-additive pairing does not tag; "I'll send the relay
-  right after" is the exact shape that opened both measured windows.
-  PARTLY MECHANIZED (nexus-h0fo3), and read the limits before relying on
-  it. `check_release_arming` is the last step of the paired battery in
-  `check_engine_release_floor.py`, so an explicit `--paired-deploy <tag>`
-  run — the attended pre-tag gate at Step 0 — does check arming. The
-  `--paired-deploy-auto` that `release.yml` runs at tag push does NOT
-  always reach it: that mode probes the cloud first and takes a
-  pin-currency-only path when the cloud already meets the floor, skipping
-  the ledger and arming checks entirely. Treat the attended Step 0 run as
-  the arming check; the tag-push run is not a second one. The gate
-  derives from the wire ledger whether arming is required and reads
-  conexus's attestation at
-  `docs/release-arming/engine-service-vX.Y.Z.json`. Wherever it runs it
-  prints `ARMED`, `NOT-ARMED` or `NOT-REQUIRED`, and refuses on a missing,
-  wrong-tag, undated, future-dated or >72h-old attestation.
-  conexus writes it; nexus only reads it, so this is not the releaser-side
-  self-attestation the project deleted once. The live image digest and SSM
-  parameter version are conexus's to check AT THE FLIP — at tag time they
-  are claims about a deploy that has not happened. Contract:
-  `docs/release-arming/README.md`.
+  new engine safe — `check_engine_release_floor.py --client-precondition`
+  accepts this shape by name): have the engine DEPLOYED before this step. The
+  client tag then cannot open a window at all. This is the preferred branch
+  whenever the ledger allows it.
+- **Any entry is not additive**: do NOT push the tag until the redeploy is
+  staged with conexus — image built, a named trigger ("fires when vX.Y.Z
+  appears on origin") — and that is CONFIRMED back. An unstaged non-additive
+  pairing does not tag; "I'll send the relay right after" is the exact shape
+  that opened both measured windows. This is a human confirmation; no script
+  checks it.
 
 Authority for the protocol: AGENTS.md § Engine-service release
 (nexus-1emxn refinement paragraph) — this step carries the operational
@@ -705,25 +666,19 @@ the published-bytes counterpart.
 ### 12. Reinstall local tool and verify
 
 **CLOUD-MODE BOX GATE (nexus-1emxn (c)):** on a cloud-mode box, run the
-post-tag floor verify FIRST, in the recording form Step 0 names:
+post-tag floor verify FIRST (the bare form):
 
 ```bash
-uv run python scripts/check_engine_release_floor.py \
-  --record-deploy-from-gate-report <conexus checkout>/deploy   # or NX_GATE_REPORT_DIR
+uv run python scripts/check_engine_release_floor.py
 ```
 
-Exit codes, precisely (the 7.24.1 first preflight red'd on exactly the
-bare-form confusion — T2 [23807]):
+Exit codes, precisely:
 - **0** — cloud current; reinstall now.
 - **1** — cloud still BEHIND the new floor: new spawns after this
   reinstall would REFUSE the managed service (the GH #1402 class, on your
   own box). Wait for the deploy to land, re-verify, then reinstall.
 - **2** — cannot verify (network/API): fix connectivity and re-run; not
   evidence either way.
-- **3** — you ran the BARE form with neither `--record-deploy-from-gate-report`
-  nor `--no-record-deploy "<reason>"`: BY DESIGN, not a deploy problem —
-  re-run in the recording form (or the explicit opt-out on a box without
-  the conexus reports).
 
 Local-mode boxes skip this gate — their engine converges from
 `PINNED_SERVICE_TAG` at reinstall.

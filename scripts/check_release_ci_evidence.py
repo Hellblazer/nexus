@@ -138,7 +138,7 @@ constant, not a live query: reading branch protection needs
 ``release.yml`` is not granted (and should not be, to keep the publish job's
 permission surface minimal). Update this constant if ``main``'s required
 contexts ever change -- the same maintenance obligation
-``check_client_release_precondition.py``'s ``ENGINE_CLIENT_PRECONDITIONS``
+``check_engine_release_floor.py``'s ``ENGINE_CLIENT_PRECONDITIONS``
 already carries for a comparable hand-maintained table.
 
 KNOWN GAP, noted rather than fixed at review (nexus-moht0 follow-up, flagged

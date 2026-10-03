@@ -486,7 +486,7 @@ from __future__ import annotations
 #: engine now refuses a tuple body over 4096 bytes and oversized keys, dims,
 #: subspaces and identifiers with the new TooLarge (413), so the deploy relay
 #: was ARMED with conexus before this client tag
-#: (docs/release-arming/engine-service-v0.1.118.json, nexus-1emxn choreography
+#: (nexus-1emxn choreography
 #: (b)). Five new changesets (tuples-003-1..4, tuples-004-1); the PITR fork
 #: walk ran those 5 plus the 12 runAlways changesets. The engine logs
 #: reexecuted_changesets=25 on that walk because production carries 13

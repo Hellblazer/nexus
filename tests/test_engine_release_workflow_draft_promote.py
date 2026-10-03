@@ -37,16 +37,11 @@ def _step_text(job: dict) -> str:
     return "\n".join(step.get("run", "") for step in job["steps"])
 
 
-def test_release_is_created_as_a_draft() -> None:
-    create = _step_text(_jobs()["create-release"])
-    assert re.search(r"gh release create .*--draft", create), (
-        "create-release must create a DRAFT so an upstream failure leaves no "
-        "consumable release (nexus-cl14i)"
-    )
-
-
-def test_only_promote_release_publishes() -> None:
+def test_release_is_a_draft_until_only_promote_release_publishes() -> None:
+    """Created as a DRAFT so an upstream failure leaves no consumable release; nothing but
+    promote-release flips it, and matrix uploads into the draft never do."""
     jobs = _jobs()
+    assert re.search(r"gh release create .*--draft", _step_text(jobs["create-release"]))
     publishers = [
         name for name, job in jobs.items()
         if "--draft=false" in _step_text(job) or "promote_engine_release.sh" in _step_text(job)
@@ -55,28 +50,27 @@ def test_only_promote_release_publishes() -> None:
     for name, job in jobs.items():
         if name != "create-release":
             assert "gh release create" not in _step_text(job), name
-
-
-def test_promote_release_needs_both_matrices_and_requires_their_success() -> None:
-    promote = _jobs()["promote-release"]
-    needs = promote["needs"]
     for matrix in _MATRICES:
-        assert matrix in needs, f"promote-release must need {matrix}"
-        assert f"needs.{matrix}.result == 'success'" in promote["if"], (
-            f"promote-release must require {matrix} to have SUCCEEDED, not "
-            "merely not-failed: fail-fast is false, so a skipped or failed leg "
-            "still reports through the matrix result"
-        )
+        text = _step_text(jobs[matrix])
+        assert "gh release upload" in text
+        assert "--draft=false" not in text and "gh release edit" not in text
+
+
+def test_promote_release_needs_both_matrices_to_have_succeeded() -> None:
+    """fail-fast is false, so a skipped or failed leg still reports through the matrix result:
+    require success, not merely not-failed."""
+    promote = _jobs()["promote-release"]
+    for matrix in _MATRICES:
+        assert matrix in promote["needs"], f"promote-release must need {matrix}"
+        assert f"needs.{matrix}.result == 'success'" in promote["if"]
     assert "startsWith(github.ref, 'refs/tags/engine-service-v')" in promote["if"]
-
-
-def test_promote_release_runs_the_promote_script_and_nothing_else_publishes() -> None:
-    text = _step_text(_jobs()["promote-release"])
+    text = _step_text(promote)
     assert "scripts/promote_engine_release.sh" in text
     assert "--draft=false" not in text, "the flip lives in the script, driven by its own test"
 
 
-def test_promote_script_asserts_every_expected_asset_before_publishing() -> None:
+def test_promote_script_asserts_every_asset_and_the_size_ceilings_before_publishing() -> None:
+    """Both checks come BEFORE the publish, and a miss exits non-zero (nexus-cl14i, nexus-ujbz8)."""
     text = (Path(__file__).parent.parent / "scripts" / "promote_engine_release.sh").read_text()
     for name in (
         "nexus-service-$arch", "$b.sha256", "$b.cosign.bundle", "$b.sigstore.json",
@@ -84,25 +78,7 @@ def test_promote_script_asserts_every_expected_asset_before_publishing() -> None
     ):
         assert name in text, f"asset {name} not asserted"
     assert "linux-amd64 linux-arm64 mac-arm64" in text
-    # The assertion must come BEFORE the publish, and a miss must exit non-zero.
     assert text.index("exit 1") < text.index("--draft=false")
-
-
-def test_promote_script_gates_on_the_size_ceilings_before_publishing() -> None:
-    """nexus-ujbz8: the size check is blocking at the draft-to-published gate, and the job's
-    sparse checkout carries the script that owns the ceilings."""
-    text = (Path(__file__).parent.parent / "scripts" / "promote_engine_release.sh").read_text()
     assert "check_engine_cut_riders.py" in text and " sizes " in text
     assert text.index("check_engine_cut_riders.py") < text.index("--draft=false")
-    workflow = (Path(__file__).parent.parent / ".github" / "workflows" / "engine-service-release.yml").read_text()
-    assert "scripts/check_engine_cut_riders.py" in workflow.split("promote-release:")[1]
-
-
-def test_matrix_uploads_do_not_publish() -> None:
-    """Uploads into a draft are fine; nothing in the matrices may flip it."""
-    jobs = _jobs()
-    for matrix in _MATRICES:
-        text = _step_text(jobs[matrix])
-        assert "gh release upload" in text
-        assert "--draft=false" not in text
-        assert "gh release edit" not in text
+    assert "scripts/check_engine_cut_riders.py" in WORKFLOW.read_text().split("promote-release:")[1]

@@ -254,7 +254,7 @@ Notes:
 ### 3b. Client-release preconditions — a DEPLOY gate, NOT a tag gate
 
 ```bash
-uv run python scripts/check_client_release_precondition.py --engine-tag engine-service-vX.Y.Z
+uv run python scripts/check_engine_release_floor.py --client-precondition engine-service-vX.Y.Z
 ```
 
 Some engine changes BREAK clients that predate a specific client commit (the
@@ -262,7 +262,7 @@ nexus-9ssih dangling-endpoint 400 is the canonical case — its first landing
 was REMOVED by 6714e70e to wait for the client half). This script refuses
 (exit 1) until every client commit the tag requires is an ancestor of the
 latest RELEASED `v*` tag. Register new preconditions in the script's
-`ENGINE_CLIENT_PRECONDITIONS` whenever an engine change ships a wire behavior
+`ENGINE_CLIENT_PRECONDITIONS` (in `check_engine_release_floor.py`) whenever an engine change ships a wire behavior
 old clients mishandle. Prose deploy-gates get skipped; this one does not.
 
 This is also where the mechanized both-halves wire-contract ledger
@@ -270,11 +270,9 @@ This is also where the mechanized both-halves wire-contract ledger
 gets consulted on the **unpaired** deploy path (protocol-audit [22511] Gap 1,
 2026-08-14) — an ordinary "refresh the cloud engine" run with no paired
 client release in flight. A non-empty `## Unshipped` section blocks (exit 1)
-regardless of `--engine-tag` unless every entry's bead is acknowledged:
-
-```bash
-uv run python scripts/check_client_release_precondition.py --ack-client-lag nexus-1234
-```
+regardless of the tag unless every entry carries the `[additive]` token.
+There is no acknowledgment flag: ship the client half, or mark the entry
+additive when it truly is.
 
 **A red exit blocks the DEPLOY, never the tag cut** (Hal directive
 2026-08-02; the pre-tag wiring of this check is what forced conexus 7.1.0 to
@@ -527,19 +525,19 @@ both directions). Say the deploy is theirs; do not say it is happening:
 
 > **Before the relay, when this tag carries a changeset: ask conexus to run the PITR-fork walk rehearsal.** conexus can restore a Crunchy fork of production to a point in time (~6 min, `deploy/RESTORE.md`) and replay the Liquibase walk against the real row set before it runs live. That is the pre-deploy gate for a schema-carrying tag, and it is the one this skill used to omit. It caught `v0.1.78`'s zero-grant `nexus_diag` regression. The walk is CUMULATIVE — it replays everything the target cluster is behind on — so confirm the cloud's live `release_version` from the engine and size the walk from THAT, not from how many changesets you added.
 >
-> **Cutover posture for the ownerless-write refusal (nexus-20onx).** Tell conexus the first deploy runs `NX_OWNERLESS_WRITE_MODE` unset or `log-only` (never `enforce`), that the flip is a Terraform parameter plus a same-tag redeploy, and where the soak is read; the full order of operations, including the restart step, is `docs/operations/ownerless-write-cutover.md`. Include the doc in the relay. Three more items for the same relay: (1) `deploy/engine/image-smoke.sh` (conexus repo) must boot the built image with the production `NX_OWNERLESS_WRITE_MODE` value, not its own default; that catches only an INVALID value (the engine refuses to boot), which is a smaller claim than "a mis-wired parameter fails before the push": a valid `enforce` on the first deploy boots fine and refuses every legacy write; (2) so the first deploy's arming checklist also carries an assertion run BEFORE the push, against the booted image or the staged parameter: `/v1/status` `ownerless_write_mode` must equal `log-only`. **This is a conexus-owned hold-the-push line, not a nexus gate, and nothing in this repo checks it (nexus-20onx round 4, deliberately).** Owner: conexus; step: image built and redeploy staged, before the paired client tag is pushed; evidence: the value they read, in their arming reply. Why not an `ownerless_write_mode` field on the `docs/release-arming/` attestation: the attestation records deploy facts conexus itself re-checks at ITS flip (image digest, parameter version), and the mode is another property of a deploy that has not happened at tag push, so a nexus reader would only echo conexus's own claim; a required field no writer emits yet would fail every paired tag until conexus's writer changes (a repo this side cannot see or test), an optional one asserts nothing; and `--paired-deploy-auto` can skip the battery that would read it. The nexus-side backstop runs after the harm window, not before it: Step 6.1 leg B3 after the first deploy; (3) after the first deploy, `/v1/status` must report `ownerless_write_mode` = `log-only` again, and after the flip redeploy `enforce`: Step 6.1 asserts both (`NX_EXPECTED_OWNERLESS_WRITE_MODE`). The code default itself (unset is `log-only`) is pinned by the engine's own test, `OwnerlessWriteRefusalTest.anUnsetModeBootsLogOnly_andAnExplicitEnforceBootsEnforce`; no direct-binary battery leg repeats it (nexus-20onx comment: the launcher always sets the variable, so a leg that boots the binary with it absent needs its own PG and env wiring, for a property the unit test already pins).
+> **Cutover posture for the ownerless-write refusal (nexus-20onx).** Tell conexus the first deploy runs `NX_OWNERLESS_WRITE_MODE` unset or `log-only` (never `enforce`), that the flip is a Terraform parameter plus a same-tag redeploy, and where the soak is read; the full order of operations, including the restart step, is `docs/operations/ownerless-write-cutover.md`. Include the doc in the relay. Three more items for the same relay: (1) `deploy/engine/image-smoke.sh` (conexus repo) must boot the built image with the production `NX_OWNERLESS_WRITE_MODE` value, not its own default; that catches only an INVALID value (the engine refuses to boot), which is a smaller claim than "a mis-wired parameter fails before the push": a valid `enforce` on the first deploy boots fine and refuses every legacy write; (2) so the first deploy's relay checklist also carries an assertion run BEFORE the push, against the booted image or the staged parameter: `/v1/status` `ownerless_write_mode` must equal `log-only`. **This is a conexus-owned hold-the-push line, not a nexus gate, and nothing in this repo checks it (nexus-20onx round 4, deliberately).** Owner: conexus; step: image built and redeploy staged, before the paired client tag is pushed; evidence: the value they read, in their staging reply. The nexus-side backstop runs after the harm window, not before it: Step 6.1 leg B3 after the first deploy; (3) after the first deploy, `/v1/status` must report `ownerless_write_mode` = `log-only` again, and after the flip redeploy `enforce`: Step 6.1 asserts both (`NX_EXPECTED_OWNERLESS_WRITE_MODE`). The code default itself (unset is `log-only`) is pinned by the engine's own test, `OwnerlessWriteRefusalTest.anUnsetModeBootsLogOnly_andAnExplicitEnforceBootsEnforce`; no direct-binary battery leg repeats it (nexus-20onx comment: the launcher always sets the variable, so a leg that boots the binary with it absent needs its own PG and env wiring, for a property the unit test already pins).
 >
 > Also confirm with conexus before the window opens: (a) the per-release PRE-DEPLOY prerequisites table — some changesets need a Crunchy-superuser grant to EXIST before boot migration, and its absence is a loud failure on the live engine; (b) the per-release DATA EFFECTS table — anything the walk deletes is acknowledged in advance, never discovered mid-deploy; (c) the image is cosign-signed, since under `enable_image_verification=true` an unsigned image BRICKS BOOT; (d) the current image tag is captured FIRST as the rollback target, and the rollback floor is `nexus-service-0.1.84`.
 >
-> **The DATA EFFECTS table in (b) is produced mechanically, not written by hand** (nexus-f7dwp — before this, a destructive changeset's effect reached conexus only because someone typed it into the handoff, and tuples-003-2 / tuples-004-1 shipped in v0.1.118 that way). Run `uv run python scripts/list_data_effects.py <previous-engine-tag> <this-tag>` and paste its markdown table verbatim into the relay — it lists every changeset added in this range that modifies or removes existing rows, each carrying its `DATA EFFECT:` line and a CENSUS PREDICATE column (the exact matched SQL statement). For each row, ask conexus to turn that predicate into a `SELECT count(*) FROM ... WHERE ...` probe against the PITR fork BEFORE the walk. **Only when the changeset's own comment or a paired changeset documents a RAISE NOTICE'd count** (e.g. tuples-003-2, paired with tuples-003-1's logged count) compare the probe to that RAISE NOTICE count — the two must agree, or the row's disposition needs a second look before the window closes. Most data-effecting changesets carry no such count at all (22 of the 38 files nexus-f7dwp backfilled emit zero RAISE NOTICE — single-changeset ALTER COLUMN TYPE rewrites, backfills, and drops, tuples-004-1 itself included): for those, there is nothing to compare the probe against, so just confirm the probe's count is plausible against the DATA EFFECT prose's own stated scope (e.g. "every existing row", "the N rows measured at census time") before the walk runs. A non-zero exit from the script (a row shown `MISSING`) means a changeset in this range modifies rows with no disclosure at all — fix it (add the `DATA EFFECT:` line to the changeset's `<comment>`, checksum-neutral per `scripts/data_effect_lint.py`'s own docstring) before cutting the tag, not after. **After pasting the table into the relay, machine-check that it actually landed there rather than trusting the paste** (nexus-iu43o — before this, the paste itself was a prose step with nothing checking it happened): `uv run python scripts/list_data_effects.py <previous-engine-tag> <this-tag> --record-relay-attestation` writes `docs/data-effect-relay/<this-tag>.json`; a release battery's `--verify-relay-attestation` (same two refs) then refuses if that attestation is missing or stale, and passes as not-applicable when the range carries no data-effecting changesets at all — mirrors `docs/release-arming/`'s reader/writer shape, both halves nexus-side this time since the relay's sender and its own record live in one repo.
+> **The DATA EFFECTS table in (b) is produced mechanically, not written by hand** (nexus-f7dwp — before this, a destructive changeset's effect reached conexus only because someone typed it into the handoff, and tuples-003-2 / tuples-004-1 shipped in v0.1.118 that way). Run `uv run python scripts/list_data_effects.py <previous-engine-tag> <this-tag>` and paste its markdown table verbatim into the relay — it lists every changeset added in this range that modifies or removes existing rows, each carrying its `DATA EFFECT:` line and a CENSUS PREDICATE column (the exact matched SQL statement). For each row, ask conexus to turn that predicate into a `SELECT count(*) FROM ... WHERE ...` probe against the PITR fork BEFORE the walk. **Only when the changeset's own comment or a paired changeset documents a RAISE NOTICE'd count** (e.g. tuples-003-2, paired with tuples-003-1's logged count) compare the probe to that RAISE NOTICE count — the two must agree, or the row's disposition needs a second look before the window closes. Most data-effecting changesets carry no such count at all (22 of the 38 files nexus-f7dwp backfilled emit zero RAISE NOTICE — single-changeset ALTER COLUMN TYPE rewrites, backfills, and drops, tuples-004-1 itself included): for those, there is nothing to compare the probe against, so just confirm the probe's count is plausible against the DATA EFFECT prose's own stated scope (e.g. "every existing row", "the N rows measured at census time") before the walk runs. A non-zero exit from the script (a row shown `MISSING`) means a changeset in this range modifies rows with no disclosure at all — fix it (add the `DATA EFFECT:` line to the changeset's `<comment>`, checksum-neutral per `scripts/data_effect_lint.py`'s own docstring) before cutting the tag, not after. **After pasting the table into the relay, machine-check that it actually landed there rather than trusting the paste** (nexus-iu43o — before this, the paste itself was a prose step with nothing checking it happened): `uv run python scripts/list_data_effects.py <previous-engine-tag> <this-tag> --record-relay-attestation` writes `docs/data-effect-relay/<this-tag>.json`; a release battery's `--verify-relay-attestation` (same two refs) then refuses if that attestation is missing or stale, and passes as not-applicable when the range carries no data-effecting changesets at all — both halves nexus-side, since the relay's sender and its own record live in one repo.
 >
 > What conexus does NOT have is a staged/shadow deploy of the BINARY — one environment, and it is the live estate (conexus-vbti). State that narrowly. On 2026-08-27 this checklist's post-deploy-only gate list was read as "the cutover is unvalidated by construction" and reported to Hal; the binary half was right and the WALK half was wrong.
 
 > relay: deploy `engine-service-vX.Y.Z` to `api.conexus-nexus.com` + re-run the cloud gate (recall + hybrid parity, xr7.8.9-style).
 
-**THIS is where 3b's precondition check blocks.** Re-run `check_client_release_precondition.py --engine-tag <tag>` before surfacing the relay: a red exit means the deploy waits for the client tag carrying the listed commits. In the paired-release choreography that is not a long wait — the deploy relay fires at client-tag push, in parallel with the client's PyPI publish, so the precondition is satisfied the instant the client tag exists and the engine is live before any user can install the client that requires it.
+**THIS is where 3b's precondition check blocks.** Re-run `check_engine_release_floor.py --client-precondition <tag>` before surfacing the relay: a red exit means the deploy waits for the client tag carrying the listed commits. In the paired-release choreography that is not a long wait — the deploy relay fires at client-tag push, in parallel with the client's PyPI publish, so the precondition is satisfied the instant the client tag exists and the engine is live before any user can install the client that requires it.
 
-**nexus-1emxn refinement — prefer deploying BEFORE the client tag when the ledger allows it.** When every wire-ledger `## Unshipped` entry carries the `[additive]` direction-safety token (old client + new engine safe), `check_client_release_precondition.py` accepts the unpaired deploy by name — surface the relay and get the engine LIVE ahead of the client tag, so the tag can never open a refusal window (the v7.23.0 window sat open 48+ minutes because "fires at tag push" was an unsent human relay). When any entry is not additive, the client release's Step 9 refuses to tag until this relay is ARMED with conexus (image built, redeploy staged on the named tag trigger) and confirmed.
+**nexus-1emxn refinement — prefer deploying BEFORE the client tag when the ledger allows it.** When every wire-ledger `## Unshipped` entry carries the `[additive]` direction-safety token (old client + new engine safe), `check_engine_release_floor.py --client-precondition` accepts the unpaired deploy by name — surface the relay and get the engine LIVE ahead of the client tag, so the tag can never open a refusal window (the v7.23.0 window sat open 48+ minutes because "fires at tag push" was an unsent human relay). When any entry is not additive, the client release's Step 9 does not tag until conexus has the redeploy staged (image built, a named tag trigger) and has confirmed it back.
 
 The post-deploy `--with-cloud` rehearsal (`run.sh --with-cloud`, the cloud → cloud Voyage journey) requires the candidate to be **deployed on conexus** first — it runs as part of this cloud-gate, once the deploy lands, not in Step 5. For cross-repo gate / deploy status, **read the authoritative bead + the conexus bus, not memory** — cross-repo state goes stale fast (2026-06-26: a `luxe6` condition had been cleared a week earlier than memory implied).
 
@@ -572,67 +570,35 @@ Client version to run it from: the working tree (`HEAD`), the same dev-client ×
 - **`REQUIRED_ENGINE_VERSION` (`src/nexus/engine_version.py`) MUST move to this tag** — unconditionally, not "only if the release needs the features". There is ONE engine identity per release: the engine it was built and gated with, on EVERY install path (Hal directive 2026-07-15, after the 14h GH #1402 incident). It is NOT a compatibility minimum. For local-mode installs this constant is the ONLY delivery vehicle — an engine tag that is cut, gated, and never pinned reaches nobody. `PINNED_SERVICE_TAG` is DERIVED from it, so the one edit moves both.
   Sequencing — PAIRED release (Hal directive 2026-08-02, supersedes "bump lands with the NEXT release AFTER deploy"): the bump rides the client release PAIRED with this engine's deploy — same release, not the next one (floor-lag ships a client whose pinned engine lacks the engine halves of its own features: the 7.1.0/v0.1.62 inversion). The deploy relay fires at client-tag push, parallel with the PyPI publish (Step 6), so the engine is live before any user can install the floor-bumped client — UNLESS every wire-ledger `## Unshipped` entry leads with `[additive]`, in which case deploy BEFORE the client tag instead (nexus-1emxn, Step 6's refinement: the preferred branch whenever the ledger allows it — no window can open at all). GH #1402's lesson stands as: never publish a floor-bumped client with NO deploy armed — the deploy fires at tag push (or already fired, on the additive branch), not "eventually". `scripts/check_engine_release_floor.py` fails the release if a gated tag was never pinned. The client-side `release` skill's Step 0 runs this gate with `--paired-deploy engine-service-vX.Y.Z` (nexus-k1c08) to distinguish the expected pre-deploy cloud-behind state from real drift — this skill only needs to ensure the tag it just cut is what that flag names.
 
-### 8. Record state (T2) — written by the post-tag VERIFY from conexus's STEP-6 report
-
-```bash
-uv run python scripts/check_engine_release_floor.py --record-deploy-from-gate-report <conexus checkout>/deploy
-```
-
-The bare post-tag VERIFY (the same command the `release` skill's Step 0 tells
-you to re-run WITHOUT `--paired-deploy` once the deploy lands) is where the
-`deployed-engine-version` tracker gets written (nexus-nx3l5, shape c, adopted
-2026-08-28). After the cloud engine verifies current and source ancestry passes,
-it reads conexus's STEP-6 gate reports from that directory (the conexus
-checkout's `deploy/`; gitignored there, so operator-local — set
-`NX_GATE_REPORT_DIR` once on the box and the flag becomes optional; a bare verify
-with NEITHER refuses, exit 3, and the only way to run it without recording is the
-explicit, transcript-visible `--no-record-deploy "<reason>"` opt-out for a box that
-does not hold the reports — the reason is required and printed), selects the
-LATEST report (by `run_timestamp`) that gated the live `release_version`, requires
-it green, and writes the tracker with the report's basename as the `gate`
-provenance. Nothing is written — exit `3`, named reason — when no report gated the
-live version, the latest is red, or the report schema moved. A green report's
-advisories are printed, never inferred empty.
-
-Why this shape: `--gate PASSED` used to be typed. On 2026-08-28 it was typed at
-02:41:10Z with ~10 min of Step 6's gate still running; run 1 came back RED 17 s
-later (T2 `release-7.22.0-ship-2026-08-28`). Before that the step was simply
-skipped (v0.1.17 stale across three deploys; nexus-6igii). The report IS the
-verdict, so the write cannot precede it, and it rides the verify you already run,
-so it cannot be skipped by a verify that ran, and cannot be skipped SILENTLY at
-all: the opt-out is a flag you type. Step 7's ordering still holds: the verify
-finds no green report until conexus's STEP-6 has actually reported. The `commit`
-provenance is resolved from the LIVE version's tag after the probe, never from
-the floor tag (the floor is only a lower bound on what is running).
-
-**The direct form is REQUIRED, not a fallback, whenever the floor legitimately
-trails the newest published tag** — which is every engine cut after the first
-since the last client release, because the pinned engine version moves only with
-a client release (its pin derives from CHANGELOG's newest released section; the
-bump itself is unconditional, one engine identity per release) while engine tags
-keep shipping. `check_engine_release_floor.py`'s wrapper runs the
-ENGINE PIN CHECK before the tracker write and fails closed on that state, so it
-cannot record the deploy at all. Measured 2026-09-16: the v0.1.122 write went
-through only because the floor had been bumped and not yet reverted; the v0.1.123
-write was refused (`published v0.1.123 but this release pins v0.1.121`) and
-recorded via the command below instead, which verifies against the LIVE
-`/version` rather than the pin and has no pin check by construction. Use it
-whenever the wrapper refuses on the pin; do not bump the floor to get past the
-wrapper. Also the form for a verify you cannot run from the box that holds the
-reports:
+### 8. Record state (T2) — from conexus's STEP-6 report
 
 ```
 nx service record-deploy engine-service-vX.Y.Z --commit <sha> --gate-report-dir <conexus checkout>/deploy
 ```
 
-Same selection, same refusals, same single writer. The verbatim
-`--gate PASSED` form still exists and is exactly what it says: a hand-typed
-claim recorded verbatim — use it only when there is genuinely no report, and
-say so in the ship record.
+`nx service record-deploy` writes the `deployed-engine-version` tracker. With
+`--gate-report-dir` it reads conexus's STEP-6 gate reports from that directory
+(the conexus checkout's `deploy/`; gitignored there, so operator-local),
+selects the LATEST report (by `run_timestamp`) that gated the live
+`release_version`, requires it green, and records the report's basename as the
+`gate` provenance. Nothing is written when no report gated the live version,
+the latest is red, or the report schema moved. A green report's advisories are
+printed, never inferred empty. The command verifies against the LIVE `/version`,
+not the pinned floor, so it works whenever the floor legitimately trails the
+newest published tag.
+
+Why this shape: `--gate PASSED` used to be typed. On 2026-08-28 it was typed at
+02:41:10Z with ~10 min of Step 6's gate still running; run 1 came back RED 17 s
+later (T2 `release-7.22.0-ship-2026-08-28`). The report IS the verdict, so the
+write cannot precede it. Step 7's ordering still holds: there is no green report
+until conexus's STEP-6 has actually reported. The verbatim `--gate PASSED` form
+still exists and is exactly what it says: a hand-typed claim recorded verbatim
+-- use it only when there is genuinely no report, and say so in the ship record.
 
 To read what the cloud is running WITHOUT trusting the tracker, use the live
 handshake directly: `nx service probe` (prints `release_version`). The tracker is
-a cache; `/version` is truth.
+a cache; `/version` is truth. Nothing automated re-checks the tracker, and the
+bare `check_engine_release_floor.py` verify no longer writes it.
 
 So the next session (and the engine-freshness gate in the `release` skill) can see what the cloud is actually running without re-deriving it.
 

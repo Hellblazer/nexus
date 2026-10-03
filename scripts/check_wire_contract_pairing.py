@@ -353,40 +353,33 @@ class UnshippedVerdict:
     """One classification of a ledger's ``## Unshipped`` section, shared by
     every gate that reads it (nexus-hcdk3).
 
-    ``blocking`` — unacknowledged AND not ``[additive]``: the engine must
-    not deploy ahead of the client half. ``additive`` — unacknowledged but
-    ``[additive]``: old client + new engine is safe, deploy authorized
-    (nexus-1emxn choreography (a)). ``acked`` — named via
-    ``--ack-client-lag``. The three lists partition ``ledger.unshipped``.
+    ``blocking`` -- not ``[additive]``: the engine must not deploy ahead of
+    the client half. ``additive`` -- ``[additive]``: old client + new engine
+    is safe, deploy authorized (nexus-1emxn choreography (a)). The two lists
+    partition ``ledger.unshipped``.
     """
 
     blocking: tuple[LedgerEntry, ...]
     additive: tuple[LedgerEntry, ...]
-    acked: tuple[LedgerEntry, ...]
 
 
-def classify_unshipped(ledger: Ledger, ack_beads: list[str] | None = None) -> UnshippedVerdict:
+def classify_unshipped(ledger: Ledger) -> UnshippedVerdict:
     """The ONE place the ``[additive]`` token is interpreted for deploy gates.
 
     Before nexus-hcdk3 the precondition gate honored the token and the floor
-    gate did not, so the same checked-in ledger got exit 0 from one script
-    and exit 1 from the other, and the floor's ``--ledger-only`` leg red-gated
-    every PR to ``main`` on entries its sibling certified safe. Both scripts
-    now call this and cannot disagree. ``additive is None`` is fail-safe
-    not-additive, exactly as :class:`LedgerEntry` documents.
+    gate did not, so the same checked-in ledger got exit 0 from one mode and
+    exit 1 from the other. Every mode now calls this and cannot disagree.
+    ``additive is None`` is fail-safe not-additive, exactly as
+    :class:`LedgerEntry` documents.
     """
-    acked_set = set(ack_beads or [])
     blocking: list[LedgerEntry] = []
     additive: list[LedgerEntry] = []
-    acked: list[LedgerEntry] = []
     for entry in ledger.unshipped.values():
-        if entry.bead in acked_set:
-            acked.append(entry)
-        elif entry.additive is True:
+        if entry.additive is True:
             additive.append(entry)
         else:
             blocking.append(entry)
-    return UnshippedVerdict(tuple(blocking), tuple(additive), tuple(acked))
+    return UnshippedVerdict(tuple(blocking), tuple(additive))
 
 
 #: Bullet shape mirrors tests/test_plugin_release_drift_ledger.py's
@@ -542,7 +535,7 @@ def _sha_declared(sha: str, ledger: Ledger) -> bool:
     a release PR that carries a both-halves commit's client half moves its
     entry Unshipped -> Shipped BEFORE the tag exists -- the exact remedy
     ci.yml's release-ledger-gate comment prescribes, since that gate blocks
-    on any Unshipped entry with no --ack-client-lag possible in CI. Until
+    on any non-additive Unshipped entry. Until
     the tag publishes, the commit stays inside the scanned
     ``<newest published tag>..HEAD`` range, so counting only Unshipped here
     made the two checks contradictory for every release-PR window. Counting

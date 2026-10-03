@@ -1,45 +1,41 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
-"""Tests for ``scripts/check_engine_release_floor.py`` (nexus-i5c2u, Phase 4).
+"""Tests for ``scripts/check_engine_release_floor.py`` (nexus-i5c2u): the floor
+check in both directions, source ancestry, the paired and auto-paired modes, the
+wire-contract ledger, ``--ledger-only`` and ``--client-precondition`` (the
+nexus-9ssih deploy-order gate, once its own script).
 
-Root cause this closes: AGENTS.md's release-checklist "Engine-freshness gate"
-step was pure prose -- a human had to manually run
-``git log <pinned-engine-tag>..HEAD -- service/`` and eyeball whether the drift
-was "non-trivial AND cloud-relevant". That eyeball check was skipped in
-practice: the cloud engine sat at v0.1.17 for 9+ days across multiple client
-releases while develop's ``REQUIRED_ENGINE_VERSION`` floor moved to v0.1.34.
-This script makes the check mechanical and blocking: probe the live managed
-service, compare against the floor, exit non-zero (with a remedy) if stale.
-
-``scripts/`` is on ``pythonpath`` via ``[tool.pytest.ini_options]`` in
-``pyproject.toml``, so ``check_engine_release_floor`` imports directly with no
-``sys.path`` hack.
+One test per verdict path, table-driven where inputs differ only in data.
+``scripts/`` is on ``pythonpath`` via ``[tool.pytest.ini_options]``.
 """
 from __future__ import annotations
 
 import json
+import re
 import subprocess
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 import check_engine_release_floor as gate
-from nexus.db.managed_endpoint import ManagedCapabilities, ManagedServiceUnreachable
+from nexus.db.managed_endpoint import (
+    ManagedCapabilities,
+    ManagedServiceError,
+    ManagedServiceIncompatible,
+    ManagedServiceUnreachable,
+)
 from nexus.engine_version import REQUIRED_ENGINE_VERSION
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
 _TEST_URL = "https://example.test"
 
 
 @pytest.fixture(autouse=True)
 def _data_effect_relay_passes_by_default():
-    """nexus-iu43o wired check_data_effect_relay into the real battery,
-    where it performs REAL git-tag + filesystem I/O against the actual
-    checkout -- the ~150 other tests in this module were never written to
-    expect that dependency and are not testing it. Default it to a clean
-    pass everywhere; TestCheckDataEffectRelay overrides this fixture (same
-    name, class scope) to exercise the real function, and any test that
-    patches its own return value inside its own `with` block wins there
-    regardless (an inner patch overrides an outer one)."""
+    """check_data_effect_relay does real git-tag + filesystem I/O against the
+    checkout; only TestCheckDataEffectRelay (which shadows this fixture) and the
+    battery test that sets its own return value exercise it."""
     with patch.object(gate, "check_data_effect_relay", return_value=0):
         yield
 
@@ -56,1054 +52,449 @@ def _caps(release_version: str) -> ManagedCapabilities:
     )
 
 
-def _floor_str() -> str:
-    return ".".join(str(p) for p in REQUIRED_ENGINE_VERSION)
-
-
-#: The pin-currency half is exercised by its own tests below. The pre-existing
-#: tests below target the CLOUD half, so they pass an explicitly-current pin —
-#: otherwise every one of them would fail on the real repo (which legitimately
-#: has engine tags ahead of the pin) and stop testing what they were written for.
-_PIN_CURRENT = REQUIRED_ENGINE_VERSION
-
-
-def test_engine_at_or_above_floor_passes(capsys: pytest.CaptureFixture[str]) -> None:
-    above = (REQUIRED_ENGINE_VERSION[0], REQUIRED_ENGINE_VERSION[1], REQUIRED_ENGINE_VERSION[2] + 1)
-    with patch.object(gate, "probe_managed_service", return_value=_caps(".".join(str(p) for p in above))):
-        rc = gate.check_floor(url=_TEST_URL, newest=_PIN_CURRENT)
-    assert rc == 0
-    out = capsys.readouterr().out
-    assert "current" in out.lower()
-
-
-def test_engine_exactly_at_floor_passes(capsys: pytest.CaptureFixture[str]) -> None:
-    with patch.object(gate, "probe_managed_service", return_value=_caps(_floor_str())):
-        rc = gate.check_floor(url=_TEST_URL, newest=_PIN_CURRENT)
-    assert rc == 0
-
-
-def test_stale_engine_fails_and_names_both_versions(capsys: pytest.CaptureFixture[str]) -> None:
-    stale = "0.1.1"
-    assert (0, 1, 1) < REQUIRED_ENGINE_VERSION
-    with patch.object(gate, "probe_managed_service", return_value=_caps(stale)):
-        rc = gate.check_floor(url=_TEST_URL, newest=_PIN_CURRENT)
-    # Exact code, not just non-zero: a regression that swapped the
-    # documented stale(1)/unreachable(2) exit codes must be caught here.
-    assert rc == 1
-    err = capsys.readouterr().err
-    assert stale in err
-    assert _floor_str() in err
-    assert "engine-release" in err  # points at the remedy skill
-
-
-def test_unreachable_service_fails_loud_without_traceback(capsys: pytest.CaptureFixture[str]) -> None:
-    with patch.object(
-        gate,
-        "probe_managed_service",
-        side_effect=ManagedServiceUnreachable("connect timed out"),
-    ):
-        rc = gate.check_floor(url=_TEST_URL, newest=_PIN_CURRENT)
-    # Exact code: unreachable must be distinguishable from stale/incompatible.
-    assert rc == 2
-    err = capsys.readouterr().err
-    assert "unreachable" in err.lower()
-    assert "connect timed out" in err
-
-
-def test_main_returns_nonzero_on_stale_engine(capsys: pytest.CaptureFixture[str]) -> None:
-    # newest_published_engine is patched to a current pin so this asserts the
-    # CLOUD direction. Without it, main() would exit 1 on the real repo's
-    # pin-currency failure and pass for the wrong reason — a vacuous green.
-    with patch.object(gate, "probe_managed_service", return_value=_caps("0.0.1")), \
-         patch.object(gate, "newest_published_engine", return_value=REQUIRED_ENGINE_VERSION):
-        rc = gate.main(["--url", _TEST_URL])
-    assert rc == 1
-    assert "FLOOR CHECK FAILED" in capsys.readouterr().err
-
-
-def test_help_exits_cleanly_without_network_call() -> None:
-    with patch.object(gate, "probe_managed_service") as mock_probe:
-        with pytest.raises(SystemExit) as exc_info:
-            gate.main(["--help"])
-    assert exc_info.value.code == 0
-    mock_probe.assert_not_called()
-
-
-# ── Pin currency: the OTHER direction (nexus-6igii / Hal directive 2026-07-15) ──
-#
-# The cloud half above answers "is the deployed engine behind what we pin?".
-# Nothing answered "is what we pin behind what we cut?" until 2026-07-25 — and
-# that is the LOCAL-install delivery path. Cloud users get whatever conexus
-# deployed regardless of this constant; local-mode installs get ONLY the pinned
-# identity. So an engine tag cut, gated, published, and never pinned reaches
-# nobody, while the cloud check reports "current" and exits 0. That is exactly
-# how the pin sat at v0.1.52 across engine tags .53 .54 .55 .56.
+def _ver(v: tuple[int, int, int]) -> str:
+    return ".".join(str(p) for p in v)
 
 
 def _bump(v: tuple[int, int, int], n: int = 1) -> tuple[int, int, int]:
     return (v[0], v[1], v[2] + n)
 
 
-def test_unpinned_gated_tag_fails_and_names_both_versions(
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """The headline case: a published tag ahead of the pin blocks the release."""
-    newer = _bump(REQUIRED_ENGINE_VERSION, 4)
-    rc = gate.check_pin_currency(newer)
-    assert rc == 1
-    err = capsys.readouterr().err
-    assert _floor_str() in err
-    assert ".".join(str(p) for p in newer) in err
-    # The message must state WHY it matters, not just that numbers differ.
-    assert "local" in err.lower()
-    assert "REQUIRED_ENGINE_VERSION" in err
-
-
-def test_unpinned_failure_warns_about_bumping_before_deploy(
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """Naive remediation (bump immediately) breaks every cloud client, because
-    probe_managed_service fails closed below the pinned identity. The remedy
-    text must carry that ordering constraint or the fix causes GH #1402
-    inverted."""
-    gate.check_pin_currency(_bump(REQUIRED_ENGINE_VERSION, 1))
-    err = capsys.readouterr().err
-    assert "deploy it FIRST" in err
-    assert "1402" in err
-
-
-def test_pin_equal_to_newest_tag_passes(capsys: pytest.CaptureFixture[str]) -> None:
-    assert gate.check_pin_currency(REQUIRED_ENGINE_VERSION) == 0
-    assert "current" in capsys.readouterr().out.lower()
-
-
-def test_pin_ahead_of_newest_tag_passes() -> None:
-    """The pin may legitimately lead during a cut (constant bumped, tag not yet
-    pushed). Only the pin FALLING BEHIND is the defect."""
-    older = (REQUIRED_ENGINE_VERSION[0], REQUIRED_ENGINE_VERSION[1], REQUIRED_ENGINE_VERSION[2] - 1)
-    assert gate.check_pin_currency(older) == 0
-
-
-def test_no_tags_visible_fails_closed(capsys: pytest.CaptureFixture[str]) -> None:
-    """CI's actions/checkout fetches no tags by default. A gate that sees an
-    empty list must FAIL, never report success — the vacuous-green mode."""
-    rc = gate.check_pin_currency(None)
-    assert rc == 2
-    assert "fetch-tags" in capsys.readouterr().err
-
-
-def test_git_unavailable_fails_closed(capsys: pytest.CaptureFixture[str]) -> None:
-    rc = gate.check_pin_currency(gate._TAGS_UNAVAILABLE)
-    assert rc == 2
-    err = capsys.readouterr().err
-    assert "failed gate" in err.lower()
-
-
-def test_pin_check_runs_before_the_network_probe() -> None:
-    """Ordering is deliberate: the pin half is local and cheap, so a release
-    blocked on an unpinned tag says so without contacting anything."""
-    with patch.object(gate, "probe_managed_service") as mock_probe, \
-         patch.object(gate, "newest_published_engine",
-                      return_value=_bump(REQUIRED_ENGINE_VERSION, 1)):
-        rc = gate.check_floor(url=_TEST_URL)
-    assert rc == 1
-    mock_probe.assert_not_called()
-
-
-def test_newest_published_engine_parses_the_tag_namespace(tmp_path) -> None:
-    """HERMETIC parser check — the important half, decoupled from the checkout.
-
-    The sibling test below reads THIS repo's tags, which conflated two things:
-    "the parser works" and "this checkout has tags". A shallow CI checkout
-    fetches no tags, so the sibling failed on every push from a797dbd4 onward
-    and four commits landed on red CI (nexus-dhs30). This one builds its own
-    repo, so the parse bug it exists to catch — parse_engine_version takes
-    "0.1.56", NOT "engine-service-v0.1.56", which silently made every tag
-    unparseable on this code's first run — is caught in ANY environment.
-    """
-    import subprocess
-
-    repo = tmp_path / "r"
-    repo.mkdir()
-    run = lambda *a: subprocess.run(a, cwd=repo, check=True, capture_output=True)  # noqa: E731
-    run("git", "init", "-q")
-    (repo / "f").write_text("x")
-    run("git", "add", "f")
-    run("git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "i")
-    for tag in ("engine-service-v0.1.9", "engine-service-v0.1.56", "engine-service-v0.1.7",
-                "v9.9.9", "not-an-engine-tag"):
-        run("git", "tag", tag)
-
-    newest = gate.newest_published_engine(repo_root=repo)
-
-    assert newest == (0, 1, 56), newest  # numeric max, not lexicographic
-    # The non-engine tags must be ignored, not crash the parse.
-
-
-def test_newest_published_engine_reads_real_tags() -> None:
-    """Reads THIS repo's tags — and tolerates a checkout that has none.
-
-    nexus-dhs30, and the reason this is a skip rather than an assertion: what it
-    can prove depends on the CHECKOUT, not on the code. CI clones shallow with
-    no tags, so the strict version failed on every push for four commits while
-    the local full-clone run was green — the mechanization's own test broken by
-    the environment it runs in. `fetch-tags: true` does NOT fix that: the tags
-    point at commits outside a depth-1 history, so the refs never materialise.
-
-    The PARSE bug this was written to catch (parse_engine_version takes
-    "0.1.56", not "engine-service-v0.1.56", which silently made every tag
-    unparseable on this code's first run) is now caught HERMETICALLY by
-    test_newest_published_engine_parses_the_tag_namespace, which builds its own
-    repo. So nothing is lost by skipping here — and a skip states the
-    environment fact out loud instead of asserting something the environment
-    controls.
-
-    NOT made unconditional-skip: where tags DO exist (every developer clone, and
-    release.yml, which uses fetch-depth: 0 precisely so the gate can see them),
-    this still checks the real repo end to end.
-    """
-    newest = gate.newest_published_engine()
-    if newest is gate._TAGS_UNAVAILABLE or newest is None:
-        pytest.skip(
-            "checkout has no engine-service-v* tags (shallow CI clone). The "
-            "parse path is covered hermetically by "
-            "test_newest_published_engine_parses_the_tag_namespace; the release "
-            "GATE gets real tags via release.yml's fetch-depth: 0."
-        )
-    assert isinstance(newest, tuple) and len(newest) == 3
-    assert newest >= (0, 1, 52)
-
-
-def test_incompatible_service_error_fails_loud(capsys: pytest.CaptureFixture[str]) -> None:
-    """The generic ManagedServiceError branch had ZERO coverage.
-
-    Demonstrated by the test-validator: replacing that branch's body with
-    `return 0` left all 14 tests green. It is reachable in production —
-    probe_managed_service raises ManagedServiceIncompatible (a
-    ManagedServiceError, NOT a ManagedServiceUnreachable) for a below-floor,
-    missing, or unparseable release_version. An uncovered branch that returns
-    the SUCCESS code would report a stale cloud engine as current, which is the
-    exact failure this gate exists to prevent.
-    """
-    from nexus.db.managed_endpoint import ManagedServiceError
-
-    with patch.object(gate, "probe_managed_service",
-                      side_effect=ManagedServiceError("release_version 0.0.1 below floor")), \
-         patch.object(gate, "newest_published_engine", return_value=REQUIRED_ENGINE_VERSION):
-        rc = gate.check_floor(url=_TEST_URL)
-
-    assert rc == 1, "an incompatible managed service must FAIL the gate, not pass it"
-    err = capsys.readouterr().err
-    assert "FLOOR CHECK FAILED" in err
-    assert _floor_str() in err, "the message must name the required floor"
-
-
-# ── Paired-release mode (nexus-k1c08) ───────────────────────────────────────
-#
-# Under the paired-release choreography (Hal directive 2026-08-02, AGENTS.md
-# § Cutting a release step 0), a client release bumps REQUIRED_ENGINE_VERSION
-# to an engine tag whose deploy fires AT client-tag push. Pre-tag, "cloud
-# reports behind floor" is the EXPECTED state under that choreography, not the
-# i5c2u/b6qlf 9-day-drift red this gate exists to catch. --paired-deploy TAG
-# lets a caller assert "this specific tag is armed" -- but only when TAG
-# independently verifies as published (with the SPECIFIC deploy asset),
-# exactly pinned, newest, AND fresh (round-1 critique CRITICAL 1: (a)-(c)
-# alone are stable facts that never expire, so a reused --paired-deploy on a
-# LATER release would pass forever without a freshness bound). Any single
-# miss keeps the gate red. These tests patch the git/gh wrapper helpers
-# directly (_tag_exists_in_git / _paired_tag_published / _tag_age_hours)
-# rather than subprocess.run itself, mirroring how the pre-existing tests
-# patch probe_managed_service / newest_published_engine at the same seam;
-# the wrapper helpers themselves get dedicated hermetic/subprocess-mocked
-# tests further down.
-
-_PAIRED_TAG = f"engine-service-v{_floor_str()}"
-
-#: Round-1 fix: every test that needs to reach the cloud probe past all four
-#: preconditions must now also stub the freshness check -- a real (unmocked)
-#: call would run `git log` against this checkout's actual history for a tag
-#: that likely doesn't exist, which fails closed (rc 2) rather than reaching
-#: the probe. 1.0h is comfortably inside the default 72h window.
+_FLOOR = _ver(REQUIRED_ENGINE_VERSION)
+_PAIRED_TAG = f"engine-service-v{_FLOOR}"
 _FRESH_AGE_HOURS = 1.0
 _STALE_AGE_HOURS = 200.0
 
 
-def test_paired_mode_accepts_cloud_behind_when_all_conditions_hold(
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    with patch.object(gate, "_tag_exists_in_git", return_value=True), \
-         patch.object(gate, "_paired_tag_published", return_value=(True, "")), \
-         patch.object(gate, "_tag_age_hours", return_value=_FRESH_AGE_HOURS), \
-         patch.object(gate, "probe_managed_service", return_value=_caps("0.0.1")):
-        rc = gate.check_floor(
-            url=_TEST_URL, newest=REQUIRED_ENGINE_VERSION, paired_deploy=_PAIRED_TAG
-        )
-    assert rc == 0
-    out = capsys.readouterr().out
-    assert "PAIRED MODE" in out
-    assert "0.0.1" in out
-    assert _floor_str() in out
-
-
-def test_paired_mode_tag_missing_from_git_fails(capsys: pytest.CaptureFixture[str]) -> None:
-    with patch.object(gate, "_tag_exists_in_git", return_value=False):
-        rc = gate.check_floor(
-            url=_TEST_URL, newest=REQUIRED_ENGINE_VERSION, paired_deploy=_PAIRED_TAG
-        )
-    assert rc == 1
-    assert "does not exist in git" in capsys.readouterr().err
-
-
-def test_paired_mode_git_unavailable_fails_closed(capsys: pytest.CaptureFixture[str]) -> None:
-    with patch.object(gate, "_tag_exists_in_git", return_value=gate._TAGS_UNAVAILABLE):
-        rc = gate.check_floor(
-            url=_TEST_URL, newest=REQUIRED_ENGINE_VERSION, paired_deploy=_PAIRED_TAG
-        )
-    assert rc == 2
-    assert "UNVERIFIABLE" in capsys.readouterr().err
-
-
-def test_paired_mode_gh_unavailable_fails_closed(capsys: pytest.CaptureFixture[str]) -> None:
-    with patch.object(gate, "_tag_exists_in_git", return_value=True), \
-         patch.object(
-             gate, "_paired_tag_published",
-             return_value=(gate._TAGS_UNAVAILABLE, "could not invoke `gh`"),
-         ):
-        rc = gate.check_floor(
-            url=_TEST_URL, newest=REQUIRED_ENGINE_VERSION, paired_deploy=_PAIRED_TAG
-        )
-    assert rc == 2
-    assert "UNVERIFIABLE" in capsys.readouterr().err
-
-
-def test_paired_mode_draft_release_fails(capsys: pytest.CaptureFixture[str]) -> None:
-    with patch.object(gate, "_tag_exists_in_git", return_value=True), \
-         patch.object(
-             gate, "_paired_tag_published",
-             return_value=(False, f"release {_PAIRED_TAG} is still a DRAFT -- not published"),
-         ):
-        rc = gate.check_floor(
-            url=_TEST_URL, newest=REQUIRED_ENGINE_VERSION, paired_deploy=_PAIRED_TAG
-        )
-    assert rc == 1
-    assert "DRAFT" in capsys.readouterr().err
-
-
-def test_paired_mode_missing_deploy_asset_fails(capsys: pytest.CaptureFixture[str]) -> None:
-    with patch.object(gate, "_tag_exists_in_git", return_value=True), \
-         patch.object(
-             gate, "_paired_tag_published",
-             return_value=(
-                 False,
-                 f"release {_PAIRED_TAG} has no `{gate._REQUIRED_ASSET_NAME}` asset -- "
-                 "the binary conexus deploy actually consumes has not landed "
-                 "(assets present: nexus-pg-linux-amd64.txz)",
-             ),
-         ):
-        rc = gate.check_floor(
-            url=_TEST_URL, newest=REQUIRED_ENGINE_VERSION, paired_deploy=_PAIRED_TAG
-        )
-    assert rc == 1
-    err = capsys.readouterr().err
-    assert gate._REQUIRED_ASSET_NAME in err
-
-
-def test_paired_mode_wrong_pairing_floor_mismatch_fails(
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    other_tag = f"engine-service-v{'.'.join(str(p) for p in _bump(REQUIRED_ENGINE_VERSION, 1))}"
-    with patch.object(gate, "_tag_exists_in_git", return_value=True), \
-         patch.object(gate, "_paired_tag_published", return_value=(True, "")):
-        rc = gate.check_floor(
-            url=_TEST_URL, newest=REQUIRED_ENGINE_VERSION, paired_deploy=other_tag
-        )
-    assert rc == 1
-    err = capsys.readouterr().err
-    assert "wrong pairing" in err.lower()
-
-
-def test_paired_mode_newer_tag_exists_fails(capsys: pytest.CaptureFixture[str]) -> None:
-    newer = _bump(REQUIRED_ENGINE_VERSION, 1)
-    with patch.object(gate, "_tag_exists_in_git", return_value=True), \
-         patch.object(gate, "_paired_tag_published", return_value=(True, "")):
-        rc = gate.check_floor(url=_TEST_URL, newest=newer, paired_deploy=_PAIRED_TAG)
-    assert rc == 1
-    err = capsys.readouterr().err
-    assert "newer engine tag" in err.lower()
-
-
-def test_paired_mode_unreachable_stays_rc2(capsys: pytest.CaptureFixture[str]) -> None:
-    with patch.object(gate, "_tag_exists_in_git", return_value=True), \
-         patch.object(gate, "_paired_tag_published", return_value=(True, "")), \
-         patch.object(gate, "_tag_age_hours", return_value=_FRESH_AGE_HOURS), \
-         patch.object(
-             gate, "probe_managed_service",
-             side_effect=ManagedServiceUnreachable("connect timed out"),
-         ):
-        rc = gate.check_floor(
-            url=_TEST_URL, newest=REQUIRED_ENGINE_VERSION, paired_deploy=_PAIRED_TAG
-        )
-    assert rc == 2
-    err = capsys.readouterr().err
-    assert "unreachable" in err.lower()
-    assert "PAIRED MODE" not in err
-
-
-def test_paired_mode_at_floor_passes_with_normal_message(
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    with patch.object(gate, "_tag_exists_in_git", return_value=True), \
-         patch.object(gate, "_paired_tag_published", return_value=(True, "")), \
-         patch.object(gate, "_tag_age_hours", return_value=_FRESH_AGE_HOURS), \
-         patch.object(gate, "probe_managed_service", return_value=_caps(_floor_str())):
-        rc = gate.check_floor(
-            url=_TEST_URL, newest=REQUIRED_ENGINE_VERSION, paired_deploy=_PAIRED_TAG
-        )
-    assert rc == 0
-    out = capsys.readouterr().out
-    assert "PAIRED MODE" not in out
-    assert "current" in out.lower()
-
-
-def test_paired_mode_above_floor_passes_with_normal_message(
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    above = (REQUIRED_ENGINE_VERSION[0], REQUIRED_ENGINE_VERSION[1], REQUIRED_ENGINE_VERSION[2] + 1)
-    with patch.object(gate, "_tag_exists_in_git", return_value=True), \
-         patch.object(gate, "_paired_tag_published", return_value=(True, "")), \
-         patch.object(gate, "_tag_age_hours", return_value=_FRESH_AGE_HOURS), \
-         patch.object(
-             gate, "probe_managed_service",
-             return_value=_caps(".".join(str(p) for p in above)),
-         ):
-        rc = gate.check_floor(
-            url=_TEST_URL, newest=REQUIRED_ENGINE_VERSION, paired_deploy=_PAIRED_TAG
-        )
-    assert rc == 0
-    assert "PAIRED MODE" not in capsys.readouterr().out
-
-
-def test_paired_mode_generic_managed_service_error_stays_unverifiable(
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """Review-round fix (SIGNIFICANT finding 3): a plain ManagedServiceError
-    with NO structured deployed_version (non-200, malformed JSON, etc.) is
-    NOT a genuine below-floor reading and must NOT be folded into paired
-    acceptance, even in explicit --paired-deploy mode. This test used to
-    assert the opposite (rc == 0, accepted) -- that assertion pinned the bug
-    this fix closes; see _classify_probe_failure."""
-    from nexus.db.managed_endpoint import ManagedServiceError
-
-    with patch.object(gate, "_tag_exists_in_git", return_value=True), \
-         patch.object(gate, "_paired_tag_published", return_value=(True, "")), \
-         patch.object(gate, "_tag_age_hours", return_value=_FRESH_AGE_HOURS), \
-         patch.object(
-             gate, "probe_managed_service",
-             side_effect=ManagedServiceError("service returned HTTP 503"),
-         ):
-        rc = gate.check_floor(
-            url=_TEST_URL, newest=REQUIRED_ENGINE_VERSION, paired_deploy=_PAIRED_TAG
-        )
-    assert rc == 2
-    out_err = capsys.readouterr()
-    assert "PAIRED MODE" not in out_err.out
-    assert "UNVERIFIABLE" in out_err.err
-    assert "genuine below-floor" in out_err.err.lower()
-
-
-def test_paired_mode_ack_uses_structured_deployed_version_not_full_sentence(
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """Round-1 critique SIGNIFICANT: probe_managed_service raises
-    ManagedServiceIncompatible (a ManagedServiceError) BEFORE check_floor's
-    own explicit comparison ever runs on the real path -- so the acceptance
-    ack must be built from that exception's structured deployed_version
-    field, not str(exc), or the ack embeds the whole remedy sentence via
-    !r."""
-    from nexus.db.managed_endpoint import ManagedServiceIncompatible
-
-    full_sentence = (
-        f"managed nexus service at {_TEST_URL} is release_version '0.1.17', "
-        f"below the minimum required v{_floor_str()}. Upgrade the managed "
-        "service, or upgrade/downgrade the nx client to match."
-    )
-    exc = ManagedServiceIncompatible(
-        full_sentence, deployed_version="0.1.17", required_version=_floor_str()
-    )
-    with patch.object(gate, "_tag_exists_in_git", return_value=True), \
-         patch.object(gate, "_paired_tag_published", return_value=(True, "")), \
-         patch.object(gate, "_tag_age_hours", return_value=_FRESH_AGE_HOURS), \
-         patch.object(gate, "probe_managed_service", side_effect=exc):
-        rc = gate.check_floor(
-            url=_TEST_URL, newest=REQUIRED_ENGINE_VERSION, paired_deploy=_PAIRED_TAG
-        )
-    assert rc == 0
-    out = capsys.readouterr().out
-    assert "PAIRED MODE" in out
-    assert "'0.1.17'" in out  # the clean structured version, via repr
-    # The full remedy sentence must NOT leak into the acknowledgment.
-    assert "Upgrade the managed service" not in out
-    assert "below the minimum required" not in out
-
-
-def test_paired_mode_acknowledgment_names_post_tag_verify(
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    with patch.object(gate, "_tag_exists_in_git", return_value=True), \
-         patch.object(gate, "_paired_tag_published", return_value=(True, "")), \
-         patch.object(gate, "_tag_age_hours", return_value=_FRESH_AGE_HOURS), \
-         patch.object(gate, "probe_managed_service", return_value=_caps("0.0.1")):
-        gate.check_floor(
-            url=_TEST_URL, newest=REQUIRED_ENGINE_VERSION, paired_deploy=_PAIRED_TAG
-        )
-    out = capsys.readouterr().out
-    assert "post-tag verify" in out.lower()
-    assert "--paired-deploy" in out
-    assert "re-run this script" in out.lower()
-
-
-def test_paired_mode_rejects_non_engine_tag(capsys: pytest.CaptureFixture[str]) -> None:
-    rc = gate.check_floor(
-        url=_TEST_URL, newest=REQUIRED_ENGINE_VERSION, paired_deploy="v9.9.9"
-    )
-    assert rc == 1
-    assert "engine-service-v" in capsys.readouterr().err
-
-
-def test_paired_mode_rejects_unparseable_tag(capsys: pytest.CaptureFixture[str]) -> None:
-    rc = gate.check_floor(
-        url=_TEST_URL, newest=REQUIRED_ENGINE_VERSION,
-        paired_deploy="engine-service-vSNAPSHOT",
-    )
-    assert rc == 1
-    assert "does not parse" in capsys.readouterr().err.lower()
-
-
-def test_default_mode_unaffected_by_paired_deploy_absence(
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """Regression pin: paired_deploy=None (the implicit default) must take the
-    exact pre-k1c08 code path -- no PAIRED MODE text anywhere, same rc as
-    test_main_returns_nonzero_on_stale_engine."""
-    with patch.object(gate, "probe_managed_service", return_value=_caps("0.0.1")), \
-         patch.object(gate, "newest_published_engine", return_value=REQUIRED_ENGINE_VERSION):
-        rc = gate.check_floor(url=_TEST_URL)
-    assert rc == 1
-    err = capsys.readouterr().err
-    assert "PAIRED MODE" not in err
-    assert "FLOOR CHECK FAILED" in err
-
-
-def test_main_accepts_paired_deploy_flag(capsys: pytest.CaptureFixture[str]) -> None:
-    # check_source_ancestry stubbed: this test targets the paired-deploy
-    # FLAG plumbing (nexus-k1c08), not the nexus-hs4xl ancestry arm, which
-    # has its own dedicated tests below and would otherwise run real `git
-    # diff` against this checkout's actual (possibly source-stale, see
-    # nexus-ajlz5) history.
-    with patch.object(gate, "_tag_exists_in_git", return_value=True), \
-         patch.object(gate, "_paired_tag_published", return_value=(True, "")), \
-         patch.object(gate, "_tag_age_hours", return_value=_FRESH_AGE_HOURS), \
-         patch.object(gate, "probe_managed_service", return_value=_caps("0.0.1")), \
-         patch.object(gate, "newest_published_engine", return_value=REQUIRED_ENGINE_VERSION), \
-         patch.object(gate, "check_source_ancestry", return_value=0) as mock_ancestry:
-        rc = gate.main(["--url", _TEST_URL, "--paired-deploy", _PAIRED_TAG])
-    assert rc == 0
-    assert "PAIRED MODE" in capsys.readouterr().out
-    # And the wiring itself: the paired tag, not the (unbumped) floor tag,
-    # must be what gets ancestry-checked -- see the dedicated wiring tests
-    # below for the reasoning.
-    mock_ancestry.assert_called_once_with(_PAIRED_TAG)
-
-
-def test_main_accepts_paired_tag_max_age_hours_flag(capsys: pytest.CaptureFixture[str]) -> None:
-    """The override flag must actually reach check_paired_preconditions --
-    verified by making it the ONLY thing that turns a stale-tag rejection
-    into an acceptance."""
-    with patch.object(gate, "_tag_exists_in_git", return_value=True), \
-         patch.object(gate, "_paired_tag_published", return_value=(True, "")), \
-         patch.object(gate, "_tag_age_hours", return_value=_STALE_AGE_HOURS), \
-         patch.object(gate, "probe_managed_service", return_value=_caps("0.0.1")), \
-         patch.object(gate, "newest_published_engine", return_value=REQUIRED_ENGINE_VERSION), \
-         patch.object(gate, "check_source_ancestry", return_value=0):
-        rc_default_window = gate.main(["--url", _TEST_URL, "--paired-deploy", _PAIRED_TAG])
-        capsys.readouterr()
-        rc_overridden = gate.main([
-            "--url", _TEST_URL, "--paired-deploy", _PAIRED_TAG,
-            "--paired-tag-max-age-hours", "500",
-        ])
-    assert rc_default_window == 1
-    assert rc_overridden == 0
-
-
-# ── Paired-tag freshness window (nexus-k1c08 fix round, critique CRITICAL 1) ─
-#
-# (a)-(c) are otherwise STABLE facts once armed: they stay true indefinitely
-# if no further engine tag is cut, so a reused --paired-deploy on a LATER
-# release (the promised post-tag VERIFY skipped, or the deploy silently
-# failed) would get the IDENTICAL acceptance forever without this bound --
-# reopening the i5c2u multi-release drift class, now mechanically approved.
-
-
-def test_paired_mode_fresh_tag_passes(capsys: pytest.CaptureFixture[str]) -> None:
-    with patch.object(gate, "_tag_exists_in_git", return_value=True), \
-         patch.object(gate, "_paired_tag_published", return_value=(True, "")), \
-         patch.object(gate, "_tag_age_hours", return_value=_FRESH_AGE_HOURS), \
-         patch.object(gate, "probe_managed_service", return_value=_caps("0.0.1")):
-        rc = gate.check_floor(
-            url=_TEST_URL, newest=REQUIRED_ENGINE_VERSION, paired_deploy=_PAIRED_TAG
-        )
-    assert rc == 0
-
-
-def test_paired_mode_stale_tag_fails_with_named_age(capsys: pytest.CaptureFixture[str]) -> None:
-    with patch.object(gate, "_tag_exists_in_git", return_value=True), \
-         patch.object(gate, "_paired_tag_published", return_value=(True, "")), \
-         patch.object(gate, "_tag_age_hours", return_value=_STALE_AGE_HOURS):
-        rc = gate.check_floor(
-            url=_TEST_URL, newest=REQUIRED_ENGINE_VERSION, paired_deploy=_PAIRED_TAG
-        )
-    assert rc == 1
-    err = capsys.readouterr().err
-    assert f"{_STALE_AGE_HOURS:.1f}h" in err
-    assert f"{gate._DEFAULT_PAIRED_TAG_MAX_AGE_HOURS:.1f}h" in err
-    assert "i5c2u" in err
-
-
-def test_paired_mode_age_unavailable_fails_closed(capsys: pytest.CaptureFixture[str]) -> None:
-    with patch.object(gate, "_tag_exists_in_git", return_value=True), \
-         patch.object(gate, "_paired_tag_published", return_value=(True, "")), \
-         patch.object(gate, "_tag_age_hours", return_value=gate._TAGS_UNAVAILABLE):
-        rc = gate.check_floor(
-            url=_TEST_URL, newest=REQUIRED_ENGINE_VERSION, paired_deploy=_PAIRED_TAG
-        )
-    assert rc == 2
-    assert "UNVERIFIABLE" in capsys.readouterr().err
-
-
-def test_paired_mode_stale_tag_override_flag_honored(capsys: pytest.CaptureFixture[str]) -> None:
-    with patch.object(gate, "_tag_exists_in_git", return_value=True), \
-         patch.object(gate, "_paired_tag_published", return_value=(True, "")), \
-         patch.object(gate, "_tag_age_hours", return_value=_STALE_AGE_HOURS), \
-         patch.object(gate, "probe_managed_service", return_value=_caps("0.0.1")):
-        rc = gate.check_floor(
-            url=_TEST_URL, newest=REQUIRED_ENGINE_VERSION, paired_deploy=_PAIRED_TAG,
-            paired_tag_max_age_hours=_STALE_AGE_HOURS + 1,
-        )
-    assert rc == 0
-
-
-def test_paired_mode_default_window_unchanged_at_72h() -> None:
-    """Pins the default so a future edit can't silently loosen/tighten it."""
-    assert gate._DEFAULT_PAIRED_TAG_MAX_AGE_HOURS == 72.0
-
-
-# ── Paired-mode git/gh wrapper helpers, hermetic ────────────────────────────
-
-
-def test_tag_exists_in_git_hermetic(tmp_path) -> None:
-    """Same hermetic-tmp-repo pattern as test_newest_published_engine_parses_
-    the_tag_namespace -- decoupled from whatever tags this checkout has."""
-    import subprocess
-
-    repo = tmp_path / "r"
+def _git_repo(tmp_path: Path) -> tuple[Path, object]:
+    repo = tmp_path / "repo"
     repo.mkdir()
-    run = lambda *a: subprocess.run(a, cwd=repo, check=True, capture_output=True)  # noqa: E731
-    run("git", "init", "-q")
-    (repo / "f").write_text("x")
-    run("git", "add", "f")
-    run("git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "i")
-    run("git", "tag", "engine-service-v0.1.9")
 
-    assert gate._tag_exists_in_git("engine-service-v0.1.9", repo_root=repo) is True
-    assert gate._tag_exists_in_git("engine-service-v9.9.9", repo_root=repo) is False
-
-
-def test_tag_exists_in_git_unavailable_when_git_missing(tmp_path) -> None:
-    with patch.object(gate.subprocess, "run", side_effect=FileNotFoundError("no git")):
-        result = gate._tag_exists_in_git("engine-service-v0.1.9", repo_root=tmp_path)
-    assert result is gate._TAGS_UNAVAILABLE
-
-
-def test_tag_age_hours_hermetic(tmp_path) -> None:
-    """A commit tagged ~now must report an age near zero and well under 72h."""
-    import subprocess
-
-    repo = tmp_path / "r"
-    repo.mkdir()
-    run = lambda *a: subprocess.run(a, cwd=repo, check=True, capture_output=True)  # noqa: E731
-    run("git", "init", "-q")
-    (repo / "f").write_text("x")
-    run("git", "add", "f")
-    run("git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "i")
-    run("git", "tag", "engine-service-v0.1.9")
-
-    age = gate._tag_age_hours("engine-service-v0.1.9", repo_root=repo)
-    assert isinstance(age, float)
-    assert 0.0 <= age < 1.0
-
-
-def test_tag_age_hours_unavailable_for_unknown_tag(tmp_path) -> None:
-    import subprocess
-
-    repo = tmp_path / "r"
-    repo.mkdir()
-    subprocess.run(["git", "init", "-q"], cwd=repo, check=True, capture_output=True)
-
-    assert gate._tag_age_hours("engine-service-v9.9.9", repo_root=repo) is gate._TAGS_UNAVAILABLE
-
-
-def test_tag_age_hours_unavailable_when_git_missing(tmp_path) -> None:
-    with patch.object(gate.subprocess, "run", side_effect=FileNotFoundError("no git")):
-        result = gate._tag_age_hours("engine-service-v0.1.9", repo_root=tmp_path)
-    assert result is gate._TAGS_UNAVAILABLE
-
-
-def test_paired_tag_published_parses_gh_json() -> None:
-    fake = MagicMock(
-        returncode=0,
-        stdout=json.dumps({"isDraft": False, "assets": [{"name": gate._REQUIRED_ASSET_NAME}]}),
-        stderr="",
-    )
-    with patch.object(gate.subprocess, "run", return_value=fake):
-        ok, reason = gate._paired_tag_published(_PAIRED_TAG)
-    assert ok is True
-    assert reason == ""
-
-
-def test_paired_tag_published_detects_draft() -> None:
-    fake = MagicMock(
-        returncode=0,
-        stdout=json.dumps({"isDraft": True, "assets": [{"name": gate._REQUIRED_ASSET_NAME}]}),
-        stderr="",
-    )
-    with patch.object(gate.subprocess, "run", return_value=fake):
-        ok, reason = gate._paired_tag_published(_PAIRED_TAG)
-    assert ok is False
-    assert "DRAFT" in reason
-
-
-def test_paired_tag_published_detects_zero_assets() -> None:
-    fake = MagicMock(returncode=0, stdout=json.dumps({"isDraft": False, "assets": []}), stderr="")
-    with patch.object(gate.subprocess, "run", return_value=fake):
-        ok, reason = gate._paired_tag_published(_PAIRED_TAG)
-    assert ok is False
-    assert gate._REQUIRED_ASSET_NAME in reason
-    assert "none" in reason.lower()
-
-
-def test_paired_tag_published_requires_specific_binary_asset() -> None:
-    """Round-1 critique CRITICAL 2: engine-service-release.yml's own comments
-    document that both its asset-producing matrices run fail-fast: false, so
-    a non-draft release can carry real assets (a PG bundle, sha256/cosign
-    sidecars) while shipping ZERO native binaries. Bare non-empty is too
-    weak -- only the specific asset conexus deploy consumes proves the
-    pairing is real."""
-    fake = MagicMock(
-        returncode=0,
-        stdout=json.dumps({
-            "isDraft": False,
-            "assets": [
-                {"name": "nexus-pg-linux-amd64.txz"},
-                {"name": "nexus-pg-linux-amd64.txz.sha256"},
-            ],
-        }),
-        stderr="",
-    )
-    with patch.object(gate.subprocess, "run", return_value=fake):
-        ok, reason = gate._paired_tag_published(_PAIRED_TAG)
-    assert ok is False
-    assert gate._REQUIRED_ASSET_NAME in reason
-    assert "nexus-pg-linux-amd64.txz" in reason  # names what WAS present
-
-
-def test_paired_tag_published_binary_asset_present_passes() -> None:
-    fake = MagicMock(
-        returncode=0,
-        stdout=json.dumps({
-            "isDraft": False,
-            "assets": [
-                {"name": "nexus-pg-linux-amd64.txz"},
-                {"name": gate._REQUIRED_ASSET_NAME},
-                {"name": f"{gate._REQUIRED_ASSET_NAME}.sha256"},
-            ],
-        }),
-        stderr="",
-    )
-    with patch.object(gate.subprocess, "run", return_value=fake):
-        ok, reason = gate._paired_tag_published(_PAIRED_TAG)
-    assert ok is True
-    assert reason == ""
-
-
-def test_paired_tag_published_missing_isdraft_key_fails_closed() -> None:
-    """Round-1 code-review IMPORTANT: `payload.get("isDraft")` defaulting
-    falsy on a missing key would silently treat 'gh's response shape
-    changed' as not-draft (a pass) -- must be unverifiable instead."""
-    fake = MagicMock(
-        returncode=0,
-        stdout=json.dumps({"assets": [{"name": gate._REQUIRED_ASSET_NAME}]}),
-        stderr="",
-    )
-    with patch.object(gate.subprocess, "run", return_value=fake):
-        ok, reason = gate._paired_tag_published(_PAIRED_TAG)
-    assert ok is gate._TAGS_UNAVAILABLE
-    assert "isDraft" in reason
-
-
-def test_paired_tag_published_gh_missing_fails_closed_with_remedy() -> None:
-    """Round-1 code-review IMPORTANT: the FileNotFoundError message must
-    state the remedy (install/auth gh), not just 'could not invoke'."""
-    with patch.object(gate.subprocess, "run", side_effect=FileNotFoundError("gh not found")):
-        ok, reason = gate._paired_tag_published(_PAIRED_TAG)
-    assert ok is gate._TAGS_UNAVAILABLE
-    assert "could not invoke" in reason
-    assert "gh auth login" in reason or "install" in reason.lower()
-
-
-def test_paired_tag_published_gh_nonzero_exit_fails_closed() -> None:
-    fake = MagicMock(returncode=1, stdout="", stderr="release not found")
-    with patch.object(gate.subprocess, "run", return_value=fake):
-        ok, reason = gate._paired_tag_published(_PAIRED_TAG)
-    assert ok is gate._TAGS_UNAVAILABLE
-    assert "release not found" in reason
-
-
-def test_paired_tag_published_unparseable_json_fails_closed() -> None:
-    fake = MagicMock(returncode=0, stdout="not json", stderr="")
-    with patch.object(gate.subprocess, "run", return_value=fake):
-        ok, reason = gate._paired_tag_published(_PAIRED_TAG)
-    assert ok is gate._TAGS_UNAVAILABLE
-    assert "unparseable" in reason.lower()
-
-
-def test_paired_tag_published_anchors_gh_call_to_repo_root(tmp_path) -> None:
-    """Round-1 code-review IMPORTANT: unlike its git siblings
-    (_tag_exists_in_git, newest_published_engine), _paired_tag_published's
-    gh call previously omitted cwd= anchoring -- gh would silently resolve
-    whatever repo it auto-detects from the process's real cwd instead of
-    failing closed the way the git helpers do."""
-    fake = MagicMock(
-        returncode=0,
-        stdout=json.dumps({"isDraft": False, "assets": [{"name": gate._REQUIRED_ASSET_NAME}]}),
-        stderr="",
-    )
-    with patch.object(gate.subprocess, "run", return_value=fake) as mock_run:
-        gate._paired_tag_published(_PAIRED_TAG, repo_root=tmp_path)
-    _, kwargs = mock_run.call_args
-    assert kwargs.get("cwd") == tmp_path
-
-
-def test_paired_tag_published_defaults_repo_root_to_module_parent() -> None:
-    fake = MagicMock(
-        returncode=0,
-        stdout=json.dumps({"isDraft": False, "assets": [{"name": gate._REQUIRED_ASSET_NAME}]}),
-        stderr="",
-    )
-    expected_root = gate.pathlib.Path(gate.__file__).resolve().parent.parent
-    with patch.object(gate.subprocess, "run", return_value=fake) as mock_run:
-        gate._paired_tag_published(_PAIRED_TAG)
-    _, kwargs = mock_run.call_args
-    assert kwargs.get("cwd") == expected_root
-
-
-# ── Source-ancestry arm (nexus-hs4xl) ───────────────────────────────────────
-#
-# check_pin_currency and the cloud probe both compare VERSION NUMBERS. v7.6.1
-# proved that insufficient: it pinned engine-service-v0.1.71 -- current by
-# every number the gate compared -- while shipping 156 insertions of
-# service/src/main Java (the RDR-191 F10c producer fixes) that v0.1.71's tag
-# does not contain. check_source_ancestry closes that gap by diffing the
-# ACTUAL source tree between the pinned tag and HEAD.
-
-
-def _git_repo_with_scoped_history(tmp_path):
-    """A scratch repo with a tagged commit, a fixture for building either a
-    clean or a drifted history on top of it. Returns (repo_path, run)."""
-    repo = tmp_path / "r"
-    (repo / "service" / "src" / "main" / "java").mkdir(parents=True)
-    (repo / "service" / "src" / "test" / "java").mkdir(parents=True)
-
-    def run(*args):
+    def run(*args: str):
         return subprocess.run(
             ["git", "-C", str(repo), "-c", "user.email=t@t.invalid", "-c", "user.name=t", *args],
             capture_output=True, text=True, check=True,
         )
 
-    (repo / "service" / "src" / "main" / "java" / "A.java").write_text("class A {}\n")
-    (repo / "service" / "src" / "test" / "java" / "ATest.java").write_text("class ATest {}\n")
     run("init", "-q")
-    run("add", ".")
-    run("commit", "-q", "-m", "base")
-    run("tag", "engine-service-v9.9.9")
     return repo, run
 
 
-def test_source_ancestry_clean_at_the_tag_passes(
-    tmp_path, capsys: pytest.CaptureFixture[str],
-) -> None:
-    repo, _run = _git_repo_with_scoped_history(tmp_path)
-    rc = gate.check_source_ancestry("engine-service-v9.9.9", repo_root=repo)
-    assert rc == 0
-    assert "current" in capsys.readouterr().out.lower()
+# ── The floor: cloud direction and pin direction ────────────────────────────
 
 
-def test_source_ancestry_in_scope_drift_fails_and_names_the_file(
-    tmp_path, capsys: pytest.CaptureFixture[str],
-) -> None:
-    repo, run = _git_repo_with_scoped_history(tmp_path)
-    (repo / "service" / "src" / "main" / "java" / "A.java").write_text("class A { int x; }\n")
-    run("commit", "-aq", "-m", "drift main")
-
-    rc = gate.check_source_ancestry("engine-service-v9.9.9", repo_root=repo)
-
-    assert rc == 1
-    err = capsys.readouterr().err
-    assert "SOURCE-ANCESTRY CHECK FAILED" in err
-    assert "A.java" in err
-    assert "engine-service-v9.9.9" in err
-
-
-def test_source_ancestry_out_of_scope_drift_is_not_flagged(
-    tmp_path, capsys: pytest.CaptureFixture[str],
-) -> None:
-    """Test-only churn must NOT redden this gate (bead design question 1) --
-    only service/src/main/java/A.java's PRODUCTION scope counts."""
-    repo, run = _git_repo_with_scoped_history(tmp_path)
-    (repo / "service" / "src" / "test" / "java" / "ATest.java").write_text(
-        "class ATest { void t() {} }\n"
-    )
-    run("commit", "-aq", "-m", "drift test-only")
-
-    rc = gate.check_source_ancestry("engine-service-v9.9.9", repo_root=repo)
-
-    assert rc == 0
-    assert "SOURCE-ANCESTRY CHECK FAILED" not in capsys.readouterr().err
+@pytest.mark.parametrize(
+    ("probe", "rc", "stream", "needles"),
+    [
+        pytest.param({"return_value": _caps(_FLOOR)}, 0, "out", ["current"], id="at-floor"),
+        pytest.param({"return_value": _caps(_ver(_bump(REQUIRED_ENGINE_VERSION)))}, 0, "out", ["current"], id="above-floor"),
+        pytest.param({"return_value": _caps("0.1.1")}, 1, "err", ["0.1.1", _FLOOR, "engine-release"], id="stale-names-both-versions"),
+        pytest.param(
+            {"side_effect": ManagedServiceError("release_version 0.0.1 below floor")},
+            1, "err", ["FLOOR CHECK FAILED", _FLOOR], id="incompatible-service-fails-not-passes",
+        ),
+        pytest.param(
+            {"side_effect": ManagedServiceUnreachable("connect timed out")},
+            2, "err", ["unreachable", "connect timed out"], id="unreachable-is-exit-2",
+        ),
+    ],
+)
+def test_cloud_floor_verdicts(probe, rc, stream, needles, capsys) -> None:
+    with patch.object(gate, "probe_managed_service", **probe):
+        got = gate.check_floor(url=_TEST_URL, newest=REQUIRED_ENGINE_VERSION)
+    assert got == rc
+    text = getattr(capsys.readouterr(), stream).lower()
+    for needle in needles:
+        assert needle.lower() in text
 
 
-def test_source_ancestry_missing_tag_fails_closed(tmp_path, capsys: pytest.CaptureFixture[str]) -> None:
-    repo, _run = _git_repo_with_scoped_history(tmp_path)
-    rc = gate.check_source_ancestry("engine-service-v0.0.0-nonexistent", repo_root=repo)
-    assert rc == 2
-    err = capsys.readouterr().err
-    assert "UNVERIFIABLE" in err
-    assert "does not exist" in err
+@pytest.mark.parametrize(
+    ("newest", "rc", "stream", "needles"),
+    [
+        pytest.param(_bump(REQUIRED_ENGINE_VERSION, 4), 1, "err",
+                     [_FLOOR, _ver(_bump(REQUIRED_ENGINE_VERSION, 4)), "local", "REQUIRED_ENGINE_VERSION",
+                      "deploy it FIRST", "1402"], id="unpinned-tag-fails-and-warns-bump-after-deploy"),
+        pytest.param(REQUIRED_ENGINE_VERSION, 0, "out", ["current"], id="pin-equals-newest"),
+        pytest.param(_bump(REQUIRED_ENGINE_VERSION, -1), 0, "out", ["ahead of publication"], id="pin-ahead-during-a-cut"),
+        pytest.param(None, 2, "err", ["fetch-tags"], id="no-tags-visible-fails-closed"),
+        pytest.param(gate._TAGS_UNAVAILABLE, 2, "err", ["failed gate"], id="git-unavailable-fails-closed"),
+    ],
+)
+def test_pin_currency_verdicts(newest, rc, stream, needles, capsys) -> None:
+    assert gate.check_pin_currency(newest) == rc
+    text = getattr(capsys.readouterr(), stream)
+    for needle in needles:
+        assert needle.lower() in text.lower()
 
 
-def test_source_ancestry_git_unavailable_fails_closed(capsys: pytest.CaptureFixture[str]) -> None:
-    with patch.object(gate, "_tag_exists_in_git", return_value=gate._TAGS_UNAVAILABLE):
-        rc = gate.check_source_ancestry("engine-service-v9.9.9")
-    assert rc == 2
-    assert "UNVERIFIABLE" in capsys.readouterr().err
+def test_pin_check_runs_before_the_network_probe() -> None:
+    with patch.object(gate, "probe_managed_service") as probe, \
+         patch.object(gate, "newest_published_engine", return_value=_bump(REQUIRED_ENGINE_VERSION)):
+        assert gate.check_floor(url=_TEST_URL) == 1
+    probe.assert_not_called()
+
+
+def test_newest_published_engine_parses_the_tag_namespace(tmp_path) -> None:
+    """Hermetic: the parser takes "0.1.56", not "engine-service-v0.1.56"; a shallow
+    CI clone has no tags, so this builds its own repo (nexus-dhs30)."""
+    repo, run = _git_repo(tmp_path)
+    run("commit", "--allow-empty", "-q", "-m", "i")
+    for tag in ("engine-service-v0.1.9", "engine-service-v0.1.56", "engine-service-v0.1.7",
+                "v9.9.9", "not-an-engine-tag"):
+        run("tag", tag)
+    assert gate.newest_published_engine(repo_root=repo) == (0, 1, 56)  # numeric max, non-engine tags ignored
+
+
+def test_newest_published_engine_reads_real_tags() -> None:
+    """Reads THIS repo's tags, and tolerates a checkout that has none (nexus-dhs30)."""
+    newest = gate.newest_published_engine()
+    if newest is gate._TAGS_UNAVAILABLE or newest is None:
+        pytest.skip(
+            "checkout has no engine-service-v* tags (shallow CI clone). The parse "
+            "path is covered hermetically above; release.yml uses fetch-depth: 0."
+        )
+    assert isinstance(newest, tuple) and len(newest) == 3
+    assert newest >= (0, 1, 52)
 
 
 def test_pinned_engine_tag_derives_from_the_floor_constant() -> None:
-    expected = "engine-service-v" + ".".join(str(p) for p in REQUIRED_ENGINE_VERSION)
-    assert gate._pinned_engine_tag() == expected
+    assert gate._pinned_engine_tag() == "engine-service-v" + _FLOOR
 
 
-# ── MANDATORY REGRESSION PIN: v7.6.1 + v0.1.71 must be RED (nexus-hs4xl) ───
-#
-# "Whatever ships must be proven to FAIL against the v7.6.1 tree. A gate for
-# this class that passes on the tree that motivated it is vacuous." This
-# targets THIS repository's real, already-pushed tags directly -- skipped
-# (never xfailed) when a shallow/tagless checkout cannot see them, same
-# doctrine as test_newest_published_engine_reads_real_tags above.
-#
-# `integration` + `mandatory_regression_pin` (nexus-93j33, review follow-up
-# 2026-08-12): unlike the sibling `test_newest_published_engine_reads_real_
-# tags` above -- whose own docstring justifies an unconditional skip because
-# hermetic coverage exists elsewhere for the LOGIC it would otherwise check
-# -- this test pins a SPECIFIC historical regression with no hermetic
-# equivalent, so a silent skip here is a real coverage loss, not a
-# documented redundancy. ci.yml's `test` job deliberately does NOT fetch
-# tags (nexus-dhs30 -- `fetch-tags: true` was tried there and rejected: the
-# engine-service-v* tags point at commits outside a depth-1 history and
-# never materialise), so this test structurally cannot resolve
-# `engine-service-v0.1.71` in that job and must live in `integration`
-# instead, same as the sibling live-API pins in
-# test_check_release_ci_evidence.py. `mandatory_regression_pin` is what
-# turns "silently skipped every time `-m integration` runs without tags"
-# into a failed run instead of a green one -- see tests/conftest.py's
-# `_check_mandatory_pin_non_vacuity`.
+# ── Source ancestry (nexus-hs4xl) ───────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("touch", "tag", "rc", "stream", "needles"),
+    [
+        pytest.param(None, "engine-service-v9.9.9", 0, "out", ["current"], id="clean-at-the-tag"),
+        pytest.param("service/src/main/java/A.java", "engine-service-v9.9.9", 1, "err",
+                     ["SOURCE-ANCESTRY CHECK FAILED", "A.java", "engine-service-v9.9.9"], id="in-scope-drift-names-the-file"),
+        pytest.param("service/src/test/java/ATest.java", "engine-service-v9.9.9", 0, "err", [], id="test-only-churn-not-flagged"),
+        pytest.param(None, "engine-service-v0.0.0-nonexistent", 2, "err", ["UNVERIFIABLE", "does not exist"], id="missing-tag-fails-closed"),
+    ],
+)
+def test_source_ancestry_verdicts(tmp_path, touch, tag, rc, stream, needles, capsys) -> None:
+    repo, run = _git_repo(tmp_path)
+    for rel in ("service/src/main/java/A.java", "service/src/test/java/ATest.java"):
+        (repo / rel).parent.mkdir(parents=True, exist_ok=True)
+        (repo / rel).write_text("class X {}\n")
+    run("add", ".")
+    run("commit", "-q", "-m", "base")
+    run("tag", "engine-service-v9.9.9")
+    if touch:
+        (repo / touch).write_text("class X { int drift; }\n")
+        run("commit", "-aq", "-m", "drift")
+    assert gate.check_source_ancestry(tag, repo_root=repo) == rc
+    text = getattr(capsys.readouterr(), stream)
+    for needle in needles:
+        assert needle in text
+    if rc == 0:
+        assert "SOURCE-ANCESTRY CHECK FAILED" not in text
+
+
+def test_source_ancestry_git_unavailable_fails_closed(capsys) -> None:
+    with patch.object(gate, "_tag_exists_in_git", return_value=gate._TAGS_UNAVAILABLE):
+        assert gate.check_source_ancestry("engine-service-v9.9.9") == 2
+    assert "UNVERIFIABLE" in capsys.readouterr().err
+
+
 @pytest.mark.integration
 @pytest.mark.mandatory_regression_pin
 def test_v7_6_1_source_ancestry_regression_is_red() -> None:
+    """v7.6.1 pinned engine-service-v0.1.71 (current by version number) while shipping
+    service/src/main source that tag lacks (nexus-ajlz5). Needs real tags, so it lives
+    in `integration` and a silent skip is a failed run (nexus-93j33)."""
     check = subprocess.run(
         ["git", "tag", "-l", "v7.6.1", "engine-service-v0.1.71"],
         capture_output=True, text=True,
     )
-    seen = set(check.stdout.split())
-    if not {"v7.6.1", "engine-service-v0.1.71"} <= seen:
-        pytest.skip(
-            "checkout is missing v7.6.1 and/or engine-service-v0.1.71 "
-            "(shallow CI clone) -- the scoping/logic behavior is covered "
-            "hermetically above; this pins the SPECIFIC historical "
-            "regression where it is observable."
-        )
+    if not {"v7.6.1", "engine-service-v0.1.71"} <= set(check.stdout.split()):
+        pytest.skip("checkout is missing v7.6.1 and/or engine-service-v0.1.71 (shallow CI clone)")
     diff = subprocess.run(
-        ["git", "diff", "--stat", "engine-service-v0.1.71", "v7.6.1", "--",
-         gate._ANCESTRY_SCOPE],
+        ["git", "diff", "--stat", "engine-service-v0.1.71", "v7.6.1", "--", gate._ANCESTRY_SCOPE],
         capture_output=True, text=True, check=True,
     )
     assert diff.stdout.strip(), (
-        "expected v7.6.1 to carry service/src/main source that "
-        "engine-service-v0.1.71 lacks (nexus-ajlz5) -- if this is empty the "
-        "historical fixture this regression pins no longer holds and the "
-        "test should be re-evaluated, not silently passed"
+        "expected v7.6.1 to carry service/src/main source that engine-service-v0.1.71 lacks "
+        "(nexus-ajlz5); if this is empty the historical fixture no longer holds"
     )
-    rc = gate.check_source_ancestry("engine-service-v0.1.71")
-    assert rc == 1, (
-        "the source-ancestry gate must flag v7.6.1 as RED against its own "
-        "pinned engine tag -- this is the exact drift nexus-ajlz5 shipped "
-        "and nexus-hs4xl exists to catch"
-    )
+    assert gate.check_source_ancestry("engine-service-v0.1.71") == 1
 
 
-# ── main() wiring: the ancestry arm must actually run, on the right tag ────
+# ── main(): ancestry wiring, paired flags, mode conflicts ───────────────────
 
 
-def test_main_runs_ancestry_check_after_a_clean_floor_default_mode() -> None:
-    # --no-record-deploy: this test targets the ancestry arm, not the
-    # nexus-nx3l5 tracker leg, which REFUSES a bare verify with no report dir.
-    with patch.object(gate, "probe_managed_service", return_value=_caps(_floor_str())), \
+@pytest.mark.parametrize(
+    ("cloud", "ancestry_rc", "rc", "ancestry_called"),
+    [
+        pytest.param(_FLOOR, 0, 0, True, id="clean-floor-then-ancestry"),
+        pytest.param(_FLOOR, 1, 1, True, id="version-current-must-not-mask-source-stale"),
+        pytest.param("0.0.1", 0, 1, False, id="failed-floor-skips-ancestry"),
+    ],
+)
+def test_main_runs_ancestry_after_the_floor(cloud, ancestry_rc, rc, ancestry_called) -> None:
+    with patch.object(gate, "probe_managed_service", return_value=_caps(cloud)), \
          patch.object(gate, "newest_published_engine", return_value=REQUIRED_ENGINE_VERSION), \
-         patch.object(gate, "check_source_ancestry", return_value=0) as mock_ancestry:
-        rc = gate.main(["--url", _TEST_URL, "--no-record-deploy", "ancestry-arm test"])
-    assert rc == 0
-    mock_ancestry.assert_called_once_with(gate._pinned_engine_tag())
+         patch.object(gate, "check_source_ancestry", return_value=ancestry_rc) as ancestry:
+        assert gate.main(["--url", _TEST_URL]) == rc
+    assert ancestry.called is ancestry_called
+    if ancestry_called:
+        ancestry.assert_called_once_with(gate._pinned_engine_tag())
 
 
-def test_main_propagates_ancestry_failure_even_when_floor_is_clean() -> None:
-    """A version-current floor must NOT mask a source-stale one -- the whole
-    point of nexus-hs4xl."""
-    with patch.object(gate, "probe_managed_service", return_value=_caps(_floor_str())), \
+def test_main_threads_the_paired_flags(capsys) -> None:
+    """--paired-deploy names the tag that gets ancestry-checked, and
+    --paired-tag-max-age-hours is the only thing that turns a stale tag into an accept."""
+    assert gate._DEFAULT_PAIRED_TAG_MAX_AGE_HOURS == 72.0
+    with patch.object(gate, "_tag_exists_in_git", return_value=True), \
+         patch.object(gate, "_paired_tag_published", return_value=(True, "")), \
+         patch.object(gate, "_tag_age_hours", return_value=_STALE_AGE_HOURS), \
+         patch.object(gate, "probe_managed_service", return_value=_caps("0.0.1")), \
          patch.object(gate, "newest_published_engine", return_value=REQUIRED_ENGINE_VERSION), \
-         patch.object(gate, "check_source_ancestry", return_value=1):
-        rc = gate.main(["--url", _TEST_URL])
-    assert rc == 1
+         patch.object(gate, "check_source_ancestry", return_value=0) as ancestry:
+        base = ["--url", _TEST_URL, "--paired-deploy", _PAIRED_TAG]
+        assert gate.main(base) == 1
+        assert gate.main([*base, "--paired-tag-max-age-hours", "500"]) == 0
+    assert "PAIRED MODE" in capsys.readouterr().out
+    ancestry.assert_called_once_with(_PAIRED_TAG)
 
 
-def test_main_skips_ancestry_check_when_floor_already_failed() -> None:
-    """CI cost discipline / ordering: don't shell out to git diff when the
-    cheap, already-failing check settled the verdict."""
+def test_help_exits_cleanly_without_network_call() -> None:
+    with patch.object(gate, "probe_managed_service") as probe, pytest.raises(SystemExit) as exc:
+        gate.main(["--help"])
+    assert exc.value.code == 0
+    probe.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["--paired-deploy", _PAIRED_TAG, "--paired-deploy-auto"],
+        ["--ledger-only", "--url", _TEST_URL],
+        ["--ledger-only", "--paired-deploy", _PAIRED_TAG],
+        ["--ledger-only", "--paired-deploy-auto"],
+        ["--client-precondition", "--ledger-only"],
+        ["--client-precondition", "--url", _TEST_URL],
+        ["--client-precondition", "--paired-deploy", _PAIRED_TAG],
+        ["--client-precondition", "--paired-deploy-auto"],
+    ],
+)
+def test_conflicting_modes_are_refused(argv) -> None:
+    with pytest.raises(SystemExit) as exc:
+        gate.main(argv)
+    assert exc.value.code == 2
+
+
+# ── Paired-release mode (nexus-k1c08) ───────────────────────────────────────
+
+
+def _precond(*, tag=_PAIRED_TAG, newest=REQUIRED_ENGINE_VERSION, exists=True,
+             published=(True, ""), age=_FRESH_AGE_HOURS, max_age=72.0) -> int:
+    with patch.object(gate, "_tag_exists_in_git", return_value=exists), \
+         patch.object(gate, "_paired_tag_published", return_value=published), \
+         patch.object(gate, "_tag_age_hours", return_value=age):
+        return gate.check_paired_preconditions(tag, newest, max_age_hours=max_age)
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "rc", "needle"),
+    [
+        pytest.param({"tag": "v9.9.9"}, 1, "engine-service-v", id="non-engine-tag"),
+        pytest.param({"tag": "engine-service-vSNAPSHOT"}, 1, "does not parse", id="unparseable-tag"),
+        pytest.param({"exists": False}, 1, "does not exist", id="tag-missing-from-git"),
+        pytest.param({"exists": gate._TAGS_UNAVAILABLE}, 2, "UNVERIFIABLE", id="git-unavailable-fails-closed"),
+        pytest.param({"published": (gate._TAGS_UNAVAILABLE, "gh down")}, 2, "UNVERIFIABLE", id="gh-unavailable-fails-closed"),
+        pytest.param({"published": (False, "release is still a DRAFT")}, 1, "DRAFT", id="draft-release"),
+        pytest.param({"tag": f"engine-service-v{_ver(_bump(REQUIRED_ENGINE_VERSION))}"}, 1, "wrong pairing", id="tag-is-not-the-floor"),
+        pytest.param({"newest": _bump(REQUIRED_ENGINE_VERSION)}, 1, "newer engine tag", id="newer-tag-exists"),
+        pytest.param({"newest": gate._TAGS_UNAVAILABLE}, 2, "UNVERIFIABLE", id="newest-unreadable"),
+        pytest.param({"age": _STALE_AGE_HOURS}, 1, f"{_STALE_AGE_HOURS:.1f}h", id="stale-tag-names-its-age"),
+        pytest.param({"age": gate._TAGS_UNAVAILABLE}, 2, "UNVERIFIABLE", id="age-unavailable-fails-closed"),
+        pytest.param({"age": -5.0}, 1, "FUTURE", id="future-dated-tag-refused"),
+        pytest.param({"age": -0.1}, 0, "ARMED", id="future-within-skew-tolerance-passes"),
+        pytest.param({}, 0, "ARMED", id="all-conditions-hold"),
+        pytest.param({"age": _STALE_AGE_HOURS, "max_age": _STALE_AGE_HOURS + 1}, 0, "ARMED", id="stale-tag-with-explicit-override"),
+    ],
+)
+def test_paired_preconditions(kwargs, rc, needle, capsys) -> None:
+    assert _precond(**kwargs) == rc
+    captured = capsys.readouterr()
+    assert needle.lower() in (captured.out + captured.err).lower()
+
+
+def _paired_patches(mode: str, *, probe: dict, newest=REQUIRED_ENGINE_VERSION):
+    kw = {"paired_deploy": _PAIRED_TAG} if mode == "explicit" else {"paired_deploy_auto": True}
+    with patch.object(gate, "_tag_exists_in_git", return_value=True), \
+         patch.object(gate, "_paired_tag_published", return_value=(True, "")), \
+         patch.object(gate, "_tag_age_hours", return_value=_FRESH_AGE_HOURS), \
+         patch.object(gate, "probe_managed_service", **probe):
+        return gate.check_floor(url=_TEST_URL, newest=newest, **kw)
+
+
+_REMEDY_SENTENCE = (
+    f"managed nexus service at {_TEST_URL} is release_version '0.1.17', below the minimum "
+    f"required v{_FLOOR}. Upgrade the managed service, or upgrade/downgrade the nx client."
+)
+
+
+@pytest.mark.parametrize("mode", ["explicit", "auto"])
+@pytest.mark.parametrize(
+    ("probe", "rc", "out_has", "out_lacks", "err_has"),
+    [
+        pytest.param({"return_value": _caps("0.0.1")}, 0,
+                     ["PAIRED MODE", "0.0.1", _FLOOR, "post-tag verify", "re-run this script"], [], [],
+                     id="below-floor-accepted-on-tag-legitimacy-alone"),
+        pytest.param(
+            {"side_effect": ManagedServiceIncompatible(_REMEDY_SENTENCE, deployed_version="0.1.17", required_version=_FLOOR)},
+            0, ["PAIRED MODE", "'0.1.17'"], ["Upgrade the managed service", "below the minimum required"], [],
+            id="below-floor-ack-uses-the-structured-version",
+        ),
+        pytest.param({"return_value": _caps(_FLOOR)}, 0, ["current"], ["PAIRED MODE"], [], id="at-floor-is-a-normal-pass"),
+        pytest.param({"return_value": _caps(_ver(_bump(REQUIRED_ENGINE_VERSION)))}, 0, [], ["PAIRED MODE"], [], id="above-floor-is-a-normal-pass"),
+        pytest.param({"side_effect": ManagedServiceError("service returned HTTP 503")}, 2, [], ["PAIRED MODE"],
+                     ["UNVERIFIABLE", "genuine below-floor"], id="generic-service-error-is-not-deploy-pending"),
+        pytest.param({"return_value": _caps("not-a-version")}, 2, [], ["PAIRED MODE"],
+                     ["UNVERIFIABLE", "unparseable"], id="unparseable-release-version-is-not-deploy-pending"),
+        pytest.param({"side_effect": ManagedServiceUnreachable("connect timed out")}, 2, [], [],
+                     ["unreachable"], id="unreachable-stays-exit-2"),
+    ],
+)
+def test_paired_modes_cloud_outcomes(mode, probe, rc, out_has, out_lacks, err_has, capsys) -> None:
+    assert _paired_patches(mode, probe=probe) == rc
+    captured = capsys.readouterr()
+    for needle in out_has:
+        assert needle.lower() in captured.out.lower()
+    for needle in out_lacks:
+        assert needle not in captured.out
+    for needle in err_has:
+        assert needle.lower() in captured.err.lower()
+    if rc == 2:
+        assert "PAIRED MODE" not in captured.err
+
+
+def test_auto_paired_derives_its_tag_and_says_so(capsys) -> None:
     with patch.object(gate, "probe_managed_service", return_value=_caps("0.0.1")), \
-         patch.object(gate, "newest_published_engine", return_value=REQUIRED_ENGINE_VERSION), \
-         patch.object(gate, "check_source_ancestry") as mock_ancestry:
-        rc = gate.main(["--url", _TEST_URL])
-    assert rc == 1
-    mock_ancestry.assert_not_called()
+         patch.object(gate, "check_paired_preconditions", return_value=0) as precond:
+        assert gate.check_floor(url=_TEST_URL, newest=REQUIRED_ENGINE_VERSION, paired_deploy_auto=True) == 0
+    assert precond.call_args[0][0] == gate._pinned_engine_tag()
+    out = capsys.readouterr().out
+    assert "AUTO-derived" in out and "--paired-deploy-auto" in out
 
 
-# ── nexus-1vogq: both-halves wire-contract client-lag ledger gate ─────────
-# The paired-deploy path's complement to scripts/check_wire_contract_pairing.py's
-# static tripwire: a non-empty ## Unshipped section must block the deploy by
-# NAME unless every entry is explicitly acknowledged via --ack-client-lag.
+def test_auto_paired_with_a_current_cloud_is_the_bare_path(capsys) -> None:
+    """The paired machinery never runs, and pin currency is still enforced."""
+    with patch.object(gate, "probe_managed_service", return_value=_caps(_FLOOR)), \
+         patch.object(gate, "check_client_lag_ledger") as ledger, \
+         patch.object(gate, "check_paired_preconditions") as precond:
+        assert gate.check_floor(url=_TEST_URL, newest=REQUIRED_ENGINE_VERSION, paired_deploy_auto=True) == 0
+        assert "PAIRED MODE" not in capsys.readouterr().out
+        assert gate.check_floor(url=_TEST_URL, newest=_bump(REQUIRED_ENGINE_VERSION, 3), paired_deploy_auto=True) == 1
+    assert "ENGINE PIN CHECK FAILED" in capsys.readouterr().err
+    ledger.assert_not_called()
+    precond.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("published", "newest", "age", "rc"),
+    [
+        pytest.param((False, "release is still a DRAFT"), REQUIRED_ENGINE_VERSION, _FRESH_AGE_HOURS, 1, id="draft"),
+        pytest.param((True, ""), _bump(REQUIRED_ENGINE_VERSION), _FRESH_AGE_HOURS, 1, id="newer-tag"),
+        pytest.param((True, ""), REQUIRED_ENGINE_VERSION, _STALE_AGE_HOURS, 1, id="stale-tag"),
+        pytest.param((gate._TAGS_UNAVAILABLE, "gh down"), REQUIRED_ENGINE_VERSION, _FRESH_AGE_HOURS, 2, id="gh-unavailable"),
+    ],
+)
+def test_auto_paired_below_floor_refusals(published, newest, age, rc) -> None:
+    with patch.object(gate, "probe_managed_service", return_value=_caps("0.0.1")), \
+         patch.object(gate, "_tag_exists_in_git", return_value=True), \
+         patch.object(gate, "_paired_tag_published", return_value=published), \
+         patch.object(gate, "_tag_age_hours", return_value=age):
+        assert gate.check_floor(url=_TEST_URL, newest=newest, paired_deploy_auto=True) == rc
+
+
+def test_default_and_explicit_modes_take_their_own_paths() -> None:
+    """The default path never consults the ledger or the paired battery; an explicit
+    --paired-deploy wins over --paired-deploy-auto at the library level."""
+    with patch.object(gate, "check_client_lag_ledger") as ledger, \
+         patch.object(gate, "probe_managed_service", return_value=_caps(_FLOOR)), \
+         patch.object(gate, "check_source_ancestry", return_value=0), \
+         patch.object(gate, "newest_published_engine", return_value=REQUIRED_ENGINE_VERSION):
+        assert gate.main(["--url", _TEST_URL]) == 0
+    ledger.assert_not_called()
+    with patch.object(gate, "_run_paired_precondition_battery", return_value=1) as battery, \
+         patch.object(gate, "_check_floor_auto_paired") as auto:
+        assert gate.check_floor(paired_deploy=_PAIRED_TAG, paired_deploy_auto=True) == 1
+    battery.assert_called_once()
+    auto.assert_not_called()
+
+
+# ── Paired-mode git/gh helpers ──────────────────────────────────────────────
+
+
+def _gh(payload=None, *, returncode=0, stdout=None, stderr=""):
+    out = stdout if stdout is not None else json.dumps(payload)
+    return MagicMock(returncode=returncode, stdout=out, stderr=stderr)
+
+
+_BINARY = gate._REQUIRED_ASSET_NAME
+
+
+@pytest.mark.parametrize(
+    ("fake", "ok", "needles"),
+    [
+        pytest.param(_gh({"isDraft": False, "assets": [{"name": _BINARY}]}), True, [], id="published-with-the-binary"),
+        pytest.param(_gh({"isDraft": False, "assets": [{"name": "nexus-pg-linux-amd64.txz"}, {"name": _BINARY}]}), True, [], id="binary-among-others"),
+        pytest.param(_gh({"isDraft": True, "assets": [{"name": _BINARY}]}), False, ["DRAFT"], id="draft"),
+        pytest.param(_gh({"isDraft": False, "assets": []}), False, [_BINARY, "none"], id="zero-assets"),
+        pytest.param(_gh({"isDraft": False, "assets": [{"name": "nexus-pg-linux-amd64.txz"}]}), False,
+                     [_BINARY, "nexus-pg-linux-amd64.txz"], id="bundle-without-the-binary-names-what-was-present"),
+        pytest.param(_gh({"assets": [{"name": _BINARY}]}), gate._TAGS_UNAVAILABLE, ["isDraft"], id="missing-isdraft-key-fails-closed"),
+        pytest.param(_gh(returncode=1, stdout="", stderr="release not found"), gate._TAGS_UNAVAILABLE, ["release not found"], id="gh-nonzero-exit"),
+        pytest.param(_gh(stdout="not json"), gate._TAGS_UNAVAILABLE, ["unparseable"], id="unparseable-json"),
+    ],
+)
+def test_paired_tag_published(fake, ok, needles) -> None:
+    with patch.object(gate.subprocess, "run", return_value=fake):
+        got, reason = gate._paired_tag_published(_PAIRED_TAG)
+    assert got is ok
+    for needle in needles:
+        assert needle.lower() in reason.lower()
+    if ok is True:
+        assert reason == ""
+
+
+def test_paired_tag_published_gh_missing_and_cwd_anchoring(tmp_path) -> None:
+    with patch.object(gate.subprocess, "run", side_effect=FileNotFoundError("gh not found")):
+        got, reason = gate._paired_tag_published(_PAIRED_TAG)
+    assert got is gate._TAGS_UNAVAILABLE and "could not invoke" in reason and "gh auth login" in reason
+    ok = _gh({"isDraft": False, "assets": [{"name": _BINARY}]})
+    with patch.object(gate.subprocess, "run", return_value=ok) as run:
+        gate._paired_tag_published(_PAIRED_TAG, repo_root=tmp_path)
+        assert run.call_args[1]["cwd"] == tmp_path
+        gate._paired_tag_published(_PAIRED_TAG)
+        assert run.call_args[1]["cwd"] == gate.pathlib.Path(gate.__file__).resolve().parent.parent
+
+
+def test_tag_existence_and_age_helpers(tmp_path) -> None:
+    repo, run = _git_repo(tmp_path)
+    run("commit", "--allow-empty", "-q", "-m", "i")
+    run("tag", "engine-service-v0.1.9")
+    assert gate._tag_exists_in_git("engine-service-v0.1.9", repo_root=repo) is True
+    assert gate._tag_exists_in_git("engine-service-v9.9.9", repo_root=repo) is False
+    age = gate._tag_age_hours("engine-service-v0.1.9", repo_root=repo)
+    assert isinstance(age, float) and 0.0 <= age < 1.0
+    assert gate._tag_age_hours("engine-service-v9.9.9", repo_root=repo) is gate._TAGS_UNAVAILABLE
+    with patch.object(gate.subprocess, "run", side_effect=FileNotFoundError("no git")):
+        assert gate._tag_exists_in_git("engine-service-v0.1.9", repo_root=repo) is gate._TAGS_UNAVAILABLE
+        assert gate._tag_age_hours("engine-service-v0.1.9", repo_root=repo) is gate._TAGS_UNAVAILABLE
+
+
+# ── The wire-contract ledger (nexus-1vogq, nexus-1emxn) ─────────────────────
 
 
 def _write_ledger(tmp_path, entry: str | None = None):
     ledger = tmp_path / "wire-contract-pending.md"
-    body = entry or "(none)\n"
-    ledger.write_text(f"## Unshipped\n\n{body}\n## Shipped\n")
+    ledger.write_text(f"## Unshipped\n\n{entry or '(none)' + chr(10)}\n## Shipped\n")
     return ledger
 
 
@@ -1111,1303 +502,202 @@ _FAKE_ENTRY = (
     "- `deadbeefdeadbeefdeadbeefdeadbeefdeadbeef` -- bead nexus-fake -- "
     "engine tag `engine-service-v9.9.9` -- test fixture\n"
 )
-
-
-def test_client_lag_ledger_empty_passes(capsys: pytest.CaptureFixture[str], tmp_path) -> None:
-    ledger = _write_ledger(tmp_path)
-    with patch.object(gate._wire_ledger, "DEFAULT_LEDGER_PATH", ledger):
-        rc = gate.check_client_lag_ledger()
-    assert rc == 0
-    assert "client-lag ledger clean" in capsys.readouterr().out
-
-
-def test_client_lag_ledger_blocks_unacknowledged_entry(
-    capsys: pytest.CaptureFixture[str], tmp_path
-) -> None:
-    ledger = _write_ledger(tmp_path, _FAKE_ENTRY)
-    with patch.object(gate._wire_ledger, "DEFAULT_LEDGER_PATH", ledger):
-        rc = gate.check_client_lag_ledger()
-    assert rc == 1
-    err = capsys.readouterr().err
-    assert "nexus-fake" in err
-    assert "PAIRED DEPLOY BLOCKED" in err
-    assert "deadbeef" in err
-
-
-def test_client_lag_ledger_ack_by_bead_id_passes(tmp_path) -> None:
-    ledger = _write_ledger(tmp_path, _FAKE_ENTRY)
-    with patch.object(gate._wire_ledger, "DEFAULT_LEDGER_PATH", ledger):
-        rc = gate.check_client_lag_ledger(["nexus-fake"])
-    assert rc == 0
-
-
-def test_client_lag_ledger_wrong_ack_still_blocks(tmp_path) -> None:
-    ledger = _write_ledger(tmp_path, _FAKE_ENTRY)
-    with patch.object(gate._wire_ledger, "DEFAULT_LEDGER_PATH", ledger):
-        rc = gate.check_client_lag_ledger(["nexus-other"])
-    assert rc == 1
-
-
-def test_client_lag_ledger_partial_ack_still_blocks(tmp_path) -> None:
-    """Two entries, only one acknowledged -- must still block, naming the
-    unacknowledged one."""
-    two_entries = _FAKE_ENTRY + (
-        "- `cafef00dcafef00dcafef00dcafef00dcafef00d` -- bead nexus-other -- "
-        "engine tag `engine-service-v9.9.9` -- second fixture\n"
-    )
-    ledger = _write_ledger(tmp_path, two_entries)
-    with patch.object(gate._wire_ledger, "DEFAULT_LEDGER_PATH", ledger):
-        rc = gate.check_client_lag_ledger(["nexus-fake"])
-    assert rc == 1
-
-
-def test_check_floor_paired_mode_blocked_by_ledger_before_precondition_check(
-    tmp_path,
-) -> None:
-    """Ledger gate runs FIRST -- check_paired_preconditions must not even be
-    reached when the ledger blocks (cheap local check before anything else,
-    same ordering discipline as pin-currency in default mode)."""
-    ledger = _write_ledger(tmp_path, _FAKE_ENTRY)
-    with patch.object(gate._wire_ledger, "DEFAULT_LEDGER_PATH", ledger), \
-         patch.object(gate, "check_paired_preconditions") as mock_precond:
-        rc = gate.check_floor(paired_deploy="engine-service-v9.9.9")
-    assert rc == 1
-    mock_precond.assert_not_called()
-
-
-def test_check_floor_paired_mode_proceeds_when_ledger_clean(tmp_path) -> None:
-    ledger = _write_ledger(tmp_path)
-    with patch.object(gate._wire_ledger, "DEFAULT_LEDGER_PATH", ledger), \
-         patch.object(gate, "check_paired_preconditions", return_value=1) as mock_precond:
-        rc = gate.check_floor(paired_deploy="engine-service-v9.9.9")
-    assert rc == 1
-    mock_precond.assert_called_once()
-
-
-def test_check_floor_paired_mode_proceeds_when_ledger_acknowledged(tmp_path) -> None:
-    ledger = _write_ledger(tmp_path, _FAKE_ENTRY)
-    with patch.object(gate._wire_ledger, "DEFAULT_LEDGER_PATH", ledger), \
-         patch.object(gate, "check_paired_preconditions", return_value=1) as mock_precond:
-        rc = gate.check_floor(
-            paired_deploy="engine-service-v9.9.9", ack_client_lag=["nexus-fake"]
-        )
-    assert rc == 1
-    mock_precond.assert_called_once()
-
-
-def test_default_mode_never_consults_client_lag_ledger(tmp_path) -> None:
-    """Non-paired mode is unaffected -- the ledger gate is a paired-deploy-only
-    precondition, not a general floor-check requirement."""
-    ledger = _write_ledger(tmp_path, _FAKE_ENTRY)
-    with patch.object(gate._wire_ledger, "DEFAULT_LEDGER_PATH", ledger), \
-         patch.object(gate, "check_client_lag_ledger") as mock_ledger, \
-         patch.object(gate, "probe_managed_service", return_value=_caps(_floor_str())), \
-         patch.object(gate, "newest_published_engine", return_value=REQUIRED_ENGINE_VERSION), \
-         patch.object(gate, "check_source_ancestry", return_value=0):
-        gate.main(["--url", _TEST_URL])
-    mock_ledger.assert_not_called()
-
-
-def test_main_accepts_ack_client_lag_flag() -> None:
-    with patch.object(gate, "check_client_lag_ledger", return_value=0) as mock_ledger, \
-         patch.object(gate, "check_paired_preconditions", return_value=1):
-        gate.main(
-            [
-                "--paired-deploy", "engine-service-v0.1.1",
-                "--ack-client-lag", "nexus-fake",
-                "--ack-client-lag", "nexus-other",
-            ]
-        )
-    mock_ledger.assert_called_once_with(["nexus-fake", "nexus-other"])
-
-
-# ── Auto-paired mode (--paired-deploy-auto, nexus-gc9ir) ──────────────────
-#
-# v7.10.0 (2026-08-18): release.yml runs check_engine_release_floor.py BARE,
-# with no human to type --paired-deploy <tag>, so a routine paired release's
-# EXPECTED pre-deploy cloud-behind state red'd the publish. --paired-deploy-
-# auto derives the candidate tag from REQUIRED_ENGINE_VERSION and, ONLY when
-# the cloud is confirmed below that floor, runs the IDENTICAL verification
-# battery --paired-deploy already applies. These tests patch the same seams
-# as the --paired-deploy tests above (_tag_exists_in_git /
-# _paired_tag_published / _tag_age_hours / probe_managed_service) plus
-# check_paired_preconditions / check_client_lag_ledger directly where the
-# wiring itself (not the underlying logic, already covered above) is what's
-# under test.
-
-
-def test_auto_paired_derives_tag_from_required_engine_version() -> None:
-    """The candidate tag must be _pinned_engine_tag() -- derived, never a
-    separately hand-typed literal (same discipline as PINNED_SERVICE_TAG)."""
-    with patch.object(gate, "probe_managed_service", return_value=_caps("0.0.1")), \
-         patch.object(gate, "check_client_lag_ledger", return_value=0), \
-         patch.object(gate, "check_paired_preconditions", return_value=0) as mock_precond:
-        rc = gate.check_floor(
-            url=_TEST_URL, newest=_PIN_CURRENT, paired_deploy_auto=True,
-        )
-    assert rc == 0
-    mock_precond.assert_called_once()
-    called_tag = mock_precond.call_args[0][0]
-    assert called_tag == gate._pinned_engine_tag()
-
-
-def test_auto_paired_cloud_meets_floor_is_normal_pass(
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """The headline 'must not weaken anything' contract: when the cloud
-    already meets the floor, auto mode is a byte-for-byte bare-invocation
-    pass -- the paired machinery (ledger, git/gh tag verification) is never
-    even invoked."""
-    with patch.object(gate, "probe_managed_service", return_value=_caps(_floor_str())), \
-         patch.object(gate, "check_client_lag_ledger") as mock_ledger, \
-         patch.object(gate, "check_paired_preconditions") as mock_precond:
-        rc = gate.check_floor(
-            url=_TEST_URL, newest=_PIN_CURRENT, paired_deploy_auto=True,
-        )
-    assert rc == 0
-    out = capsys.readouterr().out
-    assert "PAIRED MODE" not in out
-    assert "current" in out.lower()
-    mock_ledger.assert_not_called()
-    mock_precond.assert_not_called()
-
-
-def test_auto_paired_cloud_meets_floor_still_enforces_pin_currency(
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """Auto mode must not skip the pin-currency direction either -- an
-    unpinned newer tag still fails the gate even when the cloud is current."""
-    newer = _bump(REQUIRED_ENGINE_VERSION, 3)
-    with patch.object(gate, "probe_managed_service", return_value=_caps(_floor_str())):
-        rc = gate.check_floor(
-            url=_TEST_URL, newest=newer, paired_deploy_auto=True,
-        )
-    assert rc == 1
-    err = capsys.readouterr().err
-    assert "ENGINE PIN CHECK FAILED" in err
-
-
-def test_auto_paired_below_floor_all_conditions_met_passes_with_auto_ack(
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    with patch.object(gate, "probe_managed_service", return_value=_caps("0.0.1")), \
-         patch.object(gate, "_tag_exists_in_git", return_value=True), \
-         patch.object(gate, "_paired_tag_published", return_value=(True, "")), \
-         patch.object(gate, "_tag_age_hours", return_value=_FRESH_AGE_HOURS):
-        rc = gate.check_floor(
-            url=_TEST_URL, newest=REQUIRED_ENGINE_VERSION, paired_deploy_auto=True,
-        )
-    assert rc == 0
-    out = capsys.readouterr().out
-    assert "PAIRED MODE" in out
-    assert "0.0.1" in out
-    assert _floor_str() in out
-    assert "AUTO-derived" in out
-    assert "--paired-deploy-auto" in out
-
-
-def test_auto_paired_below_floor_managed_service_error_uses_structured_version(
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """probe_managed_service fails closed (raises ManagedServiceIncompatible)
-    on a below-floor release_version on the real path -- auto mode must
-    accept via that exception branch too, same as the explicit flag."""
-    from nexus.db.managed_endpoint import ManagedServiceIncompatible
-
-    exc = ManagedServiceIncompatible(
-        "full remedy sentence not for the ack", deployed_version="0.1.5",
-        required_version=_floor_str(),
-    )
-    with patch.object(gate, "probe_managed_service", side_effect=exc), \
-         patch.object(gate, "_tag_exists_in_git", return_value=True), \
-         patch.object(gate, "_paired_tag_published", return_value=(True, "")), \
-         patch.object(gate, "_tag_age_hours", return_value=_FRESH_AGE_HOURS):
-        rc = gate.check_floor(
-            url=_TEST_URL, newest=REQUIRED_ENGINE_VERSION, paired_deploy_auto=True,
-        )
-    assert rc == 0
-    out = capsys.readouterr().out
-    assert "'0.1.5'" in out
-    assert "full remedy sentence" not in out
-
-
-def test_auto_paired_generic_managed_service_error_stays_unverifiable(
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """Review-round fix (SIGNIFICANT finding 3), auto-mode side: a plain
-    ManagedServiceError with no structured deployed_version (endpoint
-    error, malformed response) must NOT be folded into paired acceptance --
-    same rule as the explicit --paired-deploy path
-    (test_paired_mode_generic_managed_service_error_stays_unverifiable)."""
-    from nexus.db.managed_endpoint import ManagedServiceError
-
-    with patch.object(
-        gate, "probe_managed_service",
-        side_effect=ManagedServiceError("managed service returned HTTP 503"),
-    ):
-        rc = gate.check_floor(
-            url=_TEST_URL, newest=REQUIRED_ENGINE_VERSION, paired_deploy_auto=True,
-        )
-    assert rc == 2
-    out_err = capsys.readouterr()
-    assert "PAIRED MODE" not in out_err.out
-    assert "UNVERIFIABLE" in out_err.err
-    assert "genuine below-floor" in out_err.err.lower()
-
-
-def test_auto_paired_unparseable_release_version_stays_unverifiable(
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """Defense-in-depth: the REAL probe never returns a caps with an
-    unparseable release_version (it raises first), but the post-probe
-    comparison branch must not silently accept one either if reached."""
-    with patch.object(gate, "probe_managed_service", return_value=_caps("not-a-version")):
-        rc = gate.check_floor(
-            url=_TEST_URL, newest=REQUIRED_ENGINE_VERSION, paired_deploy_auto=True,
-        )
-    assert rc == 2
-    out_err = capsys.readouterr()
-    assert "PAIRED MODE" not in out_err.out
-    assert "UNVERIFIABLE" in out_err.err
-    assert "unparseable" in out_err.err.lower()
-
-
-def test_paired_mode_unparseable_release_version_stays_unverifiable(
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """Explicit-mode mirror of the auto-mode test above."""
-    with patch.object(gate, "_tag_exists_in_git", return_value=True), \
-         patch.object(gate, "_paired_tag_published", return_value=(True, "")), \
-         patch.object(gate, "_tag_age_hours", return_value=_FRESH_AGE_HOURS), \
-         patch.object(gate, "probe_managed_service", return_value=_caps("not-a-version")):
-        rc = gate.check_floor(
-            url=_TEST_URL, newest=REQUIRED_ENGINE_VERSION, paired_deploy=_PAIRED_TAG,
-        )
-    assert rc == 2
-    out_err = capsys.readouterr()
-    assert "PAIRED MODE" not in out_err.out
-    assert "UNVERIFIABLE" in out_err.err
-    assert "unparseable" in out_err.err.lower()
-
-
-def test_auto_paired_below_floor_accepts_without_deploy_liveness_signal_by_design(
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """DELIBERATE-BEHAVIOR PIN (review round finding 2) -- do not "fix" this
-    without a conscious decision: auto mode accepts a below-floor cloud on
-    TAG legitimacy alone (published, exactly pinned, newest, fresh). It has
-    NO way to observe whether the deploy relay actually fired or converged
-    -- that is a real, accepted gap, not an oversight, and no automation
-    backstops it: the daily engine-floor-verify job that used to re-run the
-    bare gate was deleted (cleanup step 8), leaving only the human
-    POST-TAG VERIFY. If a future change adds a
-    deploy-liveness signal to THIS gate, this test must be updated
-    deliberately -- its failure is the tripwire for that decision, not a
-    bug to silence."""
-    with patch.object(gate, "probe_managed_service", return_value=_caps("0.0.1")), \
-         patch.object(gate, "_tag_exists_in_git", return_value=True), \
-         patch.object(gate, "_paired_tag_published", return_value=(True, "")), \
-         patch.object(gate, "_tag_age_hours", return_value=_FRESH_AGE_HOURS):
-        rc = gate.check_floor(
-            url=_TEST_URL, newest=REQUIRED_ENGINE_VERSION, paired_deploy_auto=True,
-        )
-    assert rc == 0
-    assert "PAIRED MODE" in capsys.readouterr().out
-
-
-def test_auto_paired_below_floor_draft_release_fails(capsys: pytest.CaptureFixture[str]) -> None:
-    with patch.object(gate, "probe_managed_service", return_value=_caps("0.0.1")), \
-         patch.object(gate, "_tag_exists_in_git", return_value=True), \
-         patch.object(
-             gate, "_paired_tag_published",
-             return_value=(False, f"release {gate._pinned_engine_tag()} is still a DRAFT -- not published"),
-         ):
-        rc = gate.check_floor(
-            url=_TEST_URL, newest=REQUIRED_ENGINE_VERSION, paired_deploy_auto=True,
-        )
-    assert rc == 1
-    assert "DRAFT" in capsys.readouterr().err
-
-
-def test_auto_paired_below_floor_newer_tag_exists_fails(capsys: pytest.CaptureFixture[str]) -> None:
-    newer = _bump(REQUIRED_ENGINE_VERSION, 1)
-    with patch.object(gate, "probe_managed_service", return_value=_caps("0.0.1")), \
-         patch.object(gate, "_tag_exists_in_git", return_value=True), \
-         patch.object(gate, "_paired_tag_published", return_value=(True, "")):
-        rc = gate.check_floor(url=_TEST_URL, newest=newer, paired_deploy_auto=True)
-    assert rc == 1
-    assert "newer engine tag" in capsys.readouterr().err.lower()
-
-
-def test_auto_paired_below_floor_stale_tag_fails(capsys: pytest.CaptureFixture[str]) -> None:
-    with patch.object(gate, "probe_managed_service", return_value=_caps("0.0.1")), \
-         patch.object(gate, "_tag_exists_in_git", return_value=True), \
-         patch.object(gate, "_paired_tag_published", return_value=(True, "")), \
-         patch.object(gate, "_tag_age_hours", return_value=_STALE_AGE_HOURS):
-        rc = gate.check_floor(
-            url=_TEST_URL, newest=REQUIRED_ENGINE_VERSION, paired_deploy_auto=True,
-        )
-    assert rc == 1
-    err = capsys.readouterr().err
-    assert f"{_STALE_AGE_HOURS:.1f}h" in err
-
-
-def test_auto_paired_below_floor_gh_unavailable_fails_closed(
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    with patch.object(gate, "probe_managed_service", return_value=_caps("0.0.1")), \
-         patch.object(gate, "_tag_exists_in_git", return_value=True), \
-         patch.object(
-             gate, "_paired_tag_published",
-             return_value=(gate._TAGS_UNAVAILABLE, "could not invoke `gh`"),
-         ):
-        rc = gate.check_floor(
-            url=_TEST_URL, newest=REQUIRED_ENGINE_VERSION, paired_deploy_auto=True,
-        )
-    assert rc == 2
-    assert "UNVERIFIABLE" in capsys.readouterr().err
-
-
-def test_auto_paired_below_floor_ledger_blocks_before_preconditions(tmp_path) -> None:
-    ledger = _write_ledger(tmp_path, _FAKE_ENTRY)
-    with patch.object(gate, "probe_managed_service", return_value=_caps("0.0.1")), \
-         patch.object(gate._wire_ledger, "DEFAULT_LEDGER_PATH", ledger), \
-         patch.object(gate, "check_paired_preconditions") as mock_precond:
-        rc = gate.check_floor(
-            url=_TEST_URL, newest=REQUIRED_ENGINE_VERSION, paired_deploy_auto=True,
-        )
-    assert rc == 1
-    mock_precond.assert_not_called()
-
-
-def test_auto_paired_unreachable_fails_rc2_no_paired_text(
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    with patch.object(
-        gate, "probe_managed_service",
-        side_effect=ManagedServiceUnreachable("connect timed out"),
-    ):
-        rc = gate.check_floor(
-            url=_TEST_URL, newest=REQUIRED_ENGINE_VERSION, paired_deploy_auto=True,
-        )
-    assert rc == 2
-    err = capsys.readouterr().err
-    assert "unreachable" in err.lower()
-    assert "PAIRED MODE" not in err
-
-
-def test_default_mode_unaffected_by_paired_deploy_auto_absence(
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """paired_deploy_auto=False (the implicit default) must take the exact
-    pre-gc9ir code path."""
-    with patch.object(gate, "probe_managed_service", return_value=_caps("0.0.1")), \
-         patch.object(gate, "newest_published_engine", return_value=REQUIRED_ENGINE_VERSION):
-        rc = gate.check_floor(url=_TEST_URL)
-    assert rc == 1
-    err = capsys.readouterr().err
-    assert "PAIRED MODE" not in err
-    assert "FLOOR CHECK FAILED" in err
-
-
-def test_explicit_paired_deploy_takes_priority_over_auto_flag(
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """When (in Python-API use, not CLI, which enforces mutual exclusion)
-    both are set, the explicit tag wins -- library-level tiebreak documented
-    on check_floor."""
-    other_tag = f"engine-service-v{'.'.join(str(p) for p in _bump(REQUIRED_ENGINE_VERSION, 2))}"
-    with patch.object(gate, "_tag_exists_in_git", return_value=True), \
-         patch.object(gate, "_paired_tag_published", return_value=(True, "")):
-        rc = gate.check_floor(
-            url=_TEST_URL, newest=REQUIRED_ENGINE_VERSION,
-            paired_deploy=other_tag, paired_deploy_auto=True,
-        )
-    # other_tag != REQUIRED_ENGINE_VERSION -> explicit-mode "wrong pairing"
-    # rejection, proving the explicit tag (not the auto-derived one) drove
-    # the check.
-    assert rc == 1
-    assert "wrong pairing" in capsys.readouterr().err.lower()
-
-
-def test_main_accepts_paired_deploy_auto_flag(capsys: pytest.CaptureFixture[str]) -> None:
-    with patch.object(gate, "probe_managed_service", return_value=_caps("0.0.1")), \
-         patch.object(gate, "_tag_exists_in_git", return_value=True), \
-         patch.object(gate, "_paired_tag_published", return_value=(True, "")), \
-         patch.object(gate, "_tag_age_hours", return_value=_FRESH_AGE_HOURS), \
-         patch.object(gate, "newest_published_engine", return_value=REQUIRED_ENGINE_VERSION), \
-         patch.object(gate, "check_source_ancestry", return_value=0) as mock_ancestry:
-        rc = gate.main(["--url", _TEST_URL, "--paired-deploy-auto"])
-    assert rc == 0
-    assert "PAIRED MODE" in capsys.readouterr().out
-    # Ancestry must run against the pinned tag -- args.paired_deploy is None
-    # for auto mode, so main()'s `args.paired_deploy or _pinned_engine_tag()`
-    # already resolves correctly with no auto-specific wiring needed.
-    mock_ancestry.assert_called_once_with(gate._pinned_engine_tag())
-
-
-def test_main_rejects_paired_deploy_and_paired_deploy_auto_together() -> None:
-    with pytest.raises(SystemExit) as exc_info:
-        gate.main([
-            "--paired-deploy", "engine-service-v0.1.1",
-            "--paired-deploy-auto",
-        ])
-    assert exc_info.value.code == 2
-
-
-# ── nexus-55r6o: --ledger-only pre-tag CLI entry point ────────────────────
-#
-# The publish-time gate (release.yml's --paired-deploy-auto invocation) has
-# no --ack-client-lag path (no human present) -- an unacknowledged
-# docs/wire-contract-pending.md ## Unshipped entry fails CLOSED on a FROZEN
-# tag tree with no CI-side remedy (a workflow_dispatch retry re-checks out
-# the same immutable tag; a ledger fix landed after the tag exists is
-# invisible to it). --ledger-only moves the identical check_client_lag_ledger
-# semantics into PR-gated release-branch CI, where the tree is still
-# mutable, WITHOUT the network probe (check_floor) or the git-only ancestry
-# check (check_source_ancestry) -- purely the tree-static ledger read.
-
-
-def test_ledger_only_runs_check_client_lag_ledger_and_nothing_else(tmp_path) -> None:
-    ledger = _write_ledger(tmp_path)
-    with patch.object(gate._wire_ledger, "DEFAULT_LEDGER_PATH", ledger), \
-         patch.object(gate, "check_floor") as mock_floor, \
-         patch.object(gate, "check_source_ancestry") as mock_ancestry, \
-         patch.object(gate, "probe_managed_service") as mock_probe:
-        rc = gate.main(["--ledger-only"])
-    assert rc == 0
-    mock_floor.assert_not_called()
-    mock_ancestry.assert_not_called()
-    mock_probe.assert_not_called()
-
-
-def test_ledger_only_blocks_on_unacknowledged_entry(
-    capsys: pytest.CaptureFixture[str], tmp_path
-) -> None:
-    ledger = _write_ledger(tmp_path, _FAKE_ENTRY)
-    with patch.object(gate._wire_ledger, "DEFAULT_LEDGER_PATH", ledger):
-        rc = gate.main(["--ledger-only"])
-    assert rc == 1
-    assert "nexus-fake" in capsys.readouterr().err
-
-
-def test_ledger_only_accepts_ack_client_lag(tmp_path) -> None:
-    ledger = _write_ledger(tmp_path, _FAKE_ENTRY)
-    with patch.object(gate._wire_ledger, "DEFAULT_LEDGER_PATH", ledger):
-        rc = gate.main(["--ledger-only", "--ack-client-lag", "nexus-fake"])
-    assert rc == 0
-
-
-def test_ledger_only_rejects_url_together() -> None:
-    with pytest.raises(SystemExit) as exc_info:
-        gate.main(["--ledger-only", "--url", _TEST_URL])
-    assert exc_info.value.code == 2
-
-
-def test_ledger_only_rejects_paired_deploy_together() -> None:
-    with pytest.raises(SystemExit) as exc_info:
-        gate.main(["--ledger-only", "--paired-deploy", "engine-service-v0.1.1"])
-    assert exc_info.value.code == 2
-
-
-def test_ledger_only_rejects_paired_deploy_auto_together() -> None:
-    with pytest.raises(SystemExit) as exc_info:
-        gate.main(["--ledger-only", "--paired-deploy-auto"])
-    assert exc_info.value.code == 2
-
-
-# ── nexus-nx3l5 (shape c): the post-tag VERIFY writes the tracker from the
-# STEP-6 report. The write cannot precede the verdict (the report IS the
-# verdict) and cannot be skipped by a verify that ran with the directory.
-
-
-from contextlib import ExitStack, contextmanager
-from datetime import UTC, datetime, timedelta
-from pathlib import Path
-from typing import Any
-
-_T0 = datetime(2026, 8, 29, 2, 44, 44, tzinfo=UTC)
-
-
-def _step6_report(
-    directory: Path, *, version: str, stamp: datetime, passed: bool = True,
-    advisories: tuple[Any, ...] = (), schema: Any = 3,
-) -> Path:
-    doc = {
-        "schema_version": schema,
-        "run_timestamp": stamp.isoformat(),
-        "base_url": _TEST_URL,
-        "tenant": "gate-xr789",
-        "identity": {"jar_version": "1.0-SNAPSHOT", "jar_sha256": "f" * 64},
-        "sections": {
-            "preconditions": {
-                "version_visibility": {
-                    "observed": {"app_version": "1.0-SNAPSHOT", "release_version": version},
-                    "pass": True, "violations": [],
-                }
-            },
-            "parity": {}, "latency": {}, "recall_ac3": {},
-        },
-        "overall": {
-            "pass": passed,
-            "failures": [] if passed else ["latency /v1/vectors/search: median_p95 over bound"],
-            "exit_code": 0 if passed else 1,
-            "advisories": list(advisories),
-        },
-    }
-    directory.mkdir(parents=True, exist_ok=True)
-    path = directory / f"gate-report-{stamp.strftime('%Y%m%dT%H%M%SZ')}-v011.json"
-    path.write_text(json.dumps(doc), encoding="utf-8")
-    return path
-
-
-class _TrackerMemory:
-    puts: list[dict[str, Any]] = []
-
-    def put(self, **kwargs: Any) -> int:
-        _TrackerMemory.puts.append(kwargs)
-        return 1
-
-
-class _TrackerHandle:
-    memory = _TrackerMemory()
-
-    def __enter__(self) -> "_TrackerHandle":
-        return self
-
-    def __exit__(self, *exc: object) -> None:
-        pass
-
-
-@pytest.fixture
-def _tracker_t2(monkeypatch: pytest.MonkeyPatch) -> type[_TrackerMemory]:
-    from nexus.commands import _helpers
-
-    _TrackerMemory.puts = []
-    monkeypatch.setattr(_helpers, "t2_handle", lambda: _TrackerHandle())
-    return _TrackerMemory
-
-
-@contextmanager
-def _clean_post_tag_verify(release_version: str | None = None):
-    """Floor current, ancestry clean, git commit resolvable -- the state in
-    which the tracker leg is reached. Patches BOTH probe entry points: the
-    script's own (check_floor) and the library's re-read (deploy_tracker)."""
-    from nexus.db import managed_endpoint as me
-
-    caps = _caps(release_version or _floor_str())
-    with ExitStack() as stack:
-        stack.enter_context(patch.object(gate, "probe_managed_service", return_value=caps))
-        stack.enter_context(patch.object(me, "probe_managed_service", return_value=caps))
-        stack.enter_context(patch.object(gate, "newest_published_engine", return_value=REQUIRED_ENGINE_VERSION))
-        stack.enter_context(patch.object(gate, "check_source_ancestry", return_value=0))
-        stack.enter_context(patch.object(gate, "_tag_commit", return_value="2ca52773f"))
-        yield
-
-
-def test_post_tag_verify_records_the_tracker_from_the_latest_green_report(
-    tmp_path: Path, _tracker_t2: type[_TrackerMemory], capsys: pytest.CaptureFixture[str]
-) -> None:
-    """The real 2026-08-29 shape: a red report, then a green one, same version."""
-    _step6_report(tmp_path, version=_floor_str(), stamp=_T0, passed=False)
-    green = _step6_report(tmp_path, version=_floor_str(), stamp=_T0 + timedelta(minutes=20))
-
-    with _clean_post_tag_verify():
-        rc = gate.main(["--url", _TEST_URL, "--record-deploy-from-gate-report", str(tmp_path)])
-
-    assert rc == 0
-    assert len(_tracker_t2.puts) == 1
-    put = _tracker_t2.puts[0]
-    assert put["title"] == "deployed-engine-version" and put["ttl"] is None
-    assert put["content"].startswith(f"engine-service-v{_floor_str()} @ 2ca52773f; recorded ")
-    assert f"gate PASSED {green.name} (advisories: 0)" in put["content"]
-    out = capsys.readouterr()
-    assert f"recorded from {green.name}" in out.out
-    assert "NOT recorded" not in out.err
-
-
-def test_post_tag_verify_exits_3_and_writes_nothing_when_the_latest_report_is_red(
-    tmp_path: Path, _tracker_t2: type[_TrackerMemory], capsys: pytest.CaptureFixture[str]
-) -> None:
-    _step6_report(tmp_path, version=_floor_str(), stamp=_T0, passed=True)
-    red = _step6_report(tmp_path, version=_floor_str(), stamp=_T0 + timedelta(minutes=20), passed=False)
-
-    with _clean_post_tag_verify():
-        rc = gate.main(["--url", _TEST_URL, "--record-deploy-from-gate-report", str(tmp_path)])
-
-    assert rc == 3
-    assert _tracker_t2.puts == []
-    err = capsys.readouterr().err
-    assert "TRACKER NOT RECORDED (exit 3)" in err
-    assert red.name in err
-
-
-def test_post_tag_verify_exits_3_when_no_report_gated_the_live_version(
-    tmp_path: Path, _tracker_t2: type[_TrackerMemory], capsys: pytest.CaptureFixture[str]
-) -> None:
-    _step6_report(tmp_path, version="0.0.1", stamp=_T0)
-
-    with _clean_post_tag_verify():
-        rc = gate.main(["--url", _TEST_URL, "--record-deploy-from-gate-report", str(tmp_path)])
-
-    assert rc == 3
-    assert _tracker_t2.puts == []
-    assert "no STEP-6 report gated release_version" in capsys.readouterr().err
-
-
-def test_post_tag_verify_exits_3_on_report_schema_drift(
-    tmp_path: Path, _tracker_t2: type[_TrackerMemory], capsys: pytest.CaptureFixture[str]
-) -> None:
-    _step6_report(tmp_path, version=_floor_str(), stamp=_T0)
-    _step6_report(tmp_path, version=_floor_str(), stamp=_T0 + timedelta(minutes=5), schema=4)
-
-    with _clean_post_tag_verify():
-        rc = gate.main(["--url", _TEST_URL, "--record-deploy-from-gate-report", str(tmp_path)])
-
-    assert rc == 3
-    assert _tracker_t2.puts == []
-    assert "schema_version 4" in capsys.readouterr().err
-
-
-def test_post_tag_verify_exits_3_when_the_report_directory_is_missing(
-    tmp_path: Path, _tracker_t2: type[_TrackerMemory], capsys: pytest.CaptureFixture[str]
-) -> None:
-    with _clean_post_tag_verify():
-        rc = gate.main(["--url", _TEST_URL, "--record-deploy-from-gate-report", str(tmp_path / "absent")])
-
-    assert rc == 3
-    assert _tracker_t2.puts == []
-    assert "gitignored" in capsys.readouterr().err
-
-
-def test_bare_verify_without_a_directory_refuses_with_exit_3(
-    _tracker_t2: type[_TrackerMemory], capsys: pytest.CaptureFixture[str]
-) -> None:
-    """A verify that passes while silently skipping the record is the omission
-    vector in a new place (substantive-critic on 0f2657c03). Fail loud."""
-    with _clean_post_tag_verify():
-        rc = gate.main(["--url", _TEST_URL])
-
-    assert rc == 3
-    assert _tracker_t2.puts == []
-    err = capsys.readouterr().err
-    assert "TRACKER NOT RECORDED (exit 3)" in err
-    assert "--record-deploy-from-gate-report" in err
-    assert "--no-record-deploy" in err
-
-
-def test_no_record_deploy_is_the_explicit_visible_opt_out(
-    _tracker_t2: type[_TrackerMemory], capsys: pytest.CaptureFixture[str]
-) -> None:
-    with _clean_post_tag_verify():
-        rc = gate.main(["--url", _TEST_URL, "--no-record-deploy", "laptop, no conexus checkout"])
-
-    assert rc == 0
-    assert _tracker_t2.puts == []
-    err = capsys.readouterr().err
-    assert "NOTE (--no-record-deploy)" in err
-    assert "NOT recorded" in err
-    assert "Reason given: laptop, no conexus checkout" in err
-
-
-def test_no_record_deploy_requires_a_reason() -> None:
-    with pytest.raises(SystemExit) as excinfo:
-        gate.main(["--url", _TEST_URL, "--no-record-deploy", "   "])
-    assert excinfo.value.code == 2
-
-
-def test_no_record_deploy_conflicts_with_the_report_flag(tmp_path: Path) -> None:
-    with pytest.raises(SystemExit) as excinfo:
-        gate.main(["--url", _TEST_URL, "--no-record-deploy", "why", "--record-deploy-from-gate-report", str(tmp_path)])
-    assert excinfo.value.code == 2
-
-
-@pytest.mark.parametrize(
-    "mode_args",
-    [["--paired-deploy", "engine-service-v9.9.9"], ["--paired-deploy-auto"], ["--ledger-only"]],
-)
-def test_no_record_deploy_is_refused_in_pre_deploy_modes(mode_args: list[str]) -> None:
-    with pytest.raises(SystemExit) as excinfo:
-        gate.main([*mode_args, "--no-record-deploy", "why"])
-    assert excinfo.value.code == 2
-
-
-def test_commit_provenance_names_the_live_versions_tag_not_the_floor(
-    tmp_path: Path, _tracker_t2: type[_TrackerMemory]
-) -> None:
-    """check_floor proves live >= floor, not equality: an above-floor live
-    engine must be attributed to ITS tag's commit, never the floor tag's."""
-    live = ".".join(str(p) for p in _bump(REQUIRED_ENGINE_VERSION))
-    _step6_report(tmp_path, version=live, stamp=_T0)
-    seen: list[str] = []
-
-    def _resolve(tag: str, repo_root=None) -> str:
-        seen.append(tag)
-        return "live-sha" if tag == f"engine-service-v{live}" else "WRONG-sha"
-
-    with _clean_post_tag_verify(live), patch.object(gate, "_tag_commit", side_effect=_resolve):
-        rc = gate.main(["--url", _TEST_URL, "--record-deploy-from-gate-report", str(tmp_path)])
-
-    assert rc == 0
-    assert seen == [f"engine-service-v{live}"]
-    assert _tracker_t2.puts[0]["content"].startswith(f"engine-service-v{live} @ live-sha; recorded ")
-
-
-def test_env_directory_drives_the_bare_verify(
-    tmp_path: Path, _tracker_t2: type[_TrackerMemory], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    green = _step6_report(tmp_path, version=_floor_str(), stamp=_T0)
-    monkeypatch.setenv("NX_GATE_REPORT_DIR", str(tmp_path))
-
-    with _clean_post_tag_verify():
-        rc = gate.main(["--url", _TEST_URL])
-
-    assert rc == 0
-    assert len(_tracker_t2.puts) == 1
-    assert green.name in _tracker_t2.puts[0]["content"]
-
-
-@pytest.mark.parametrize(
-    "mode_args",
-    [["--paired-deploy", "engine-service-v9.9.9"], ["--paired-deploy-auto"], ["--ledger-only"]],
-)
-def test_report_flag_is_refused_in_every_pre_deploy_mode(tmp_path: Path, mode_args: list[str]) -> None:
-    with pytest.raises(SystemExit) as excinfo:
-        gate.main([*mode_args, "--record-deploy-from-gate-report", str(tmp_path)])
-    assert excinfo.value.code == 2
-
-
-def test_env_directory_does_not_override_no_record_deploy(
-    tmp_path: Path, _tracker_t2: type[_TrackerMemory], monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """A globally-set NX_GATE_REPORT_DIR must not turn an explicit
-    --no-record-deploy REASON into a tracker write (2026-09-09: the 7.38.0
-    shakeout's read-only verify reached the production-write guard this way)."""
-    _step6_report(tmp_path, version=_floor_str(), stamp=_T0)
-    monkeypatch.setenv("NX_GATE_REPORT_DIR", str(tmp_path))
-
-    with _clean_post_tag_verify():
-        rc = gate.main(["--url", _TEST_URL, "--no-record-deploy", "shakeout read-only verify"])
-
-    assert rc == 0
-    assert _tracker_t2.puts == []
-    assert "NOTE (--no-record-deploy)" in capsys.readouterr().err
-
-
-def test_env_directory_is_ignored_in_pre_deploy_modes(
-    tmp_path: Path, _tracker_t2: type[_TrackerMemory], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A globally-set NX_GATE_REPORT_DIR must not turn --ledger-only (release-
-    branch PR CI) into a recorder."""
-    _step6_report(tmp_path, version=_floor_str(), stamp=_T0)
-    monkeypatch.setenv("NX_GATE_REPORT_DIR", str(tmp_path))
-
-    rc = gate.main(["--ledger-only"])
-
-    assert rc == 0
-    assert _tracker_t2.puts == []
-
-
-def test_tracker_leg_runs_only_after_ancestry_passes(
-    tmp_path: Path, _tracker_t2: type[_TrackerMemory]
-) -> None:
-    _step6_report(tmp_path, version=_floor_str(), stamp=_T0)
-
-    with _clean_post_tag_verify(), patch.object(gate, "check_source_ancestry", return_value=1):
-        rc = gate.main(["--url", _TEST_URL, "--record-deploy-from-gate-report", str(tmp_path)])
-
-    assert rc == 1
-    assert _tracker_t2.puts == []
-
-
-def test_advisories_on_a_green_report_are_printed_never_inferred_empty(
-    tmp_path: Path, _tracker_t2: type[_TrackerMemory], capsys: pytest.CaptureFixture[str]
-) -> None:
-    green = _step6_report(
-        tmp_path, version=_floor_str(), stamp=_T0,
-        advisories=("latency /v1/vectors/search drifting toward bound",),
-    )
-
-    with _clean_post_tag_verify():
-        rc = gate.main(["--url", _TEST_URL, "--record-deploy-from-gate-report", str(tmp_path)])
-
-    assert rc == 0
-    assert f"gate PASSED {green.name} (advisories: 1)" in _tracker_t2.puts[0]["content"]
-    assert "STEP-6 advisory" in capsys.readouterr().out
-
-
-def test_tag_commit_resolves_via_git_and_degrades_to_unrecorded(
-    capsys: pytest.CaptureFixture[str]
-) -> None:
-    ok = subprocess.CompletedProcess(args=[], returncode=0, stdout="2ca52773f\n", stderr="")
-    with patch.object(gate.subprocess, "run", return_value=ok):
-        assert gate._tag_commit("engine-service-v0.1.88") == "2ca52773f"
-
-    with patch.object(gate.subprocess, "run", side_effect=subprocess.CalledProcessError(128, "git")):
-        assert gate._tag_commit("engine-service-v0.1.88") == ""
-    assert "<commit unrecorded>" in capsys.readouterr().err
-
-
-# ── nexus-hcdk3: the [additive] token is interpreted in ONE shared place ──
-# Before the fix this gate ignored the token the precondition gate honored,
-# so the checked-in ledger got opposite verdicts and --ledger-only red-gated
-# every PR to main. These mirror the precondition suite's trio one-for-one.
-
 _ADDITIVE_ENTRY = (
     "- `cafebabecafebabecafebabecafebabecafebabe` -- bead nexus-addv -- "
-    "engine tag `engine-service-v9.9.9` -- [additive] env-var contract, "
-    "old client + new engine safe\n"
+    "engine tag `engine-service-v9.9.9` -- [additive] old client + new engine safe\n"
 )
 _NOT_ADDITIVE_ENTRY = (
     "- `feedfacefeedfacefeedfacefeedfacefeedface` -- bead nexus-notad -- "
-    "engine tag `engine-service-v9.9.9` -- [not-additive] NOT NULL at "
-    "the store, deploy must be armed\n"
+    "engine tag `engine-service-v9.9.9` -- [not-additive] the engine must wait\n"
+)
+_BOTH_TOKENS_ENTRY = (
+    "- `beadbeadbeadbeadbeadbeadbeadbeadbeadbead` -- bead nexus-both -- "
+    "engine tag `engine-service-v9.9.9` -- [additive] but also [not-additive]\n"
 )
 
 
-def test_client_lag_ledger_all_additive_authorizes(
-    capsys: pytest.CaptureFixture[str], tmp_path
-) -> None:
-    ledger = _write_ledger(tmp_path, _ADDITIVE_ENTRY)
-    with patch.object(gate._wire_ledger, "DEFAULT_LEDGER_PATH", ledger):
-        rc = gate.check_client_lag_ledger()
-    assert rc == 0
-    out = capsys.readouterr().out
-    assert "[additive]" in out
-    assert "nexus-addv" in out
-    assert "nexus-1emxn" in out
-
-
-def test_client_lag_ledger_mixed_blocks_and_names_only_non_additive(
-    capsys: pytest.CaptureFixture[str], tmp_path
-) -> None:
-    ledger = _write_ledger(tmp_path, _ADDITIVE_ENTRY + _NOT_ADDITIVE_ENTRY)
-    with patch.object(gate._wire_ledger, "DEFAULT_LEDGER_PATH", ledger):
-        rc = gate.check_client_lag_ledger()
-    assert rc == 1
-    err = capsys.readouterr().err
-    assert "nexus-notad" in err
-    assert "nexus-addv" not in err
-
-
-def test_client_lag_ledger_tokenless_entry_stays_blocking(tmp_path) -> None:
-    ledger = _write_ledger(tmp_path, _FAKE_ENTRY)
-    with patch.object(gate._wire_ledger, "DEFAULT_LEDGER_PATH", ledger):
-        assert gate.check_client_lag_ledger() == 1
-
-
-# ---------------------------------------------------------------------------
-# The decision path: a representative branch of each of this script's
-# verdict-producing functions, with its dynamic values filled in.
-
-import pathlib as _pathlib
-
-
-def test_choreography_check_pin_currency_stale_pin_fills_dynamic_values(capsys: pytest.CaptureFixture[str]) -> None:
-    above = (REQUIRED_ENGINE_VERSION[0], REQUIRED_ENGINE_VERSION[1], REQUIRED_ENGINE_VERSION[2] + 1)
-    rc = gate.check_pin_currency(above)
-    assert rc == 1
-    err = capsys.readouterr().err
-    assert ".".join(str(p) for p in above) in err
-    assert "[newest]" not in err and "[floor]" not in err
-
-
-def test_choreography_check_source_ancestry_clean(capsys: pytest.CaptureFixture[str]) -> None:
-    with patch.object(gate, "_tag_exists_in_git", return_value=True), \
-         patch.object(gate.subprocess, "run", return_value=MagicMock(returncode=0, stdout="", stderr="")):
-        rc = gate.check_source_ancestry("engine-service-vTEST")
-    assert rc == 0
-    out = capsys.readouterr().out
-    assert "engine source is current" in out
-
-
-def test_choreography_check_client_lag_ledger_blocking(tmp_path) -> None:
-    ledger = _write_ledger(tmp_path, _FAKE_ENTRY)
-    with patch.object(gate._wire_ledger, "DEFAULT_LEDGER_PATH", ledger):
-        rc = gate.check_client_lag_ledger()
-    assert rc == 1
-
-
-def test_choreography_check_client_lag_ledger_additive_keeps_the_acked_suffix(
-    tmp_path, capsys: pytest.CaptureFixture[str],
-) -> None:
-    """A mixed ledger -- one [additive] entry, one acknowledged entry --
-    prints the acknowledged count as a suffix; dropping it silently loses a
-    fact the operator reads."""
-    additive = (
-        "- `cafebabecafebabecafebabecafebabecafebabe` -- bead nexus-addv -- "
-        "engine tag `engine-service-v9.9.9` -- [additive] env-var contract\n"
-    )
-    ledger = _write_ledger(tmp_path, additive + _FAKE_ENTRY)
-    with patch.object(gate._wire_ledger, "DEFAULT_LEDGER_PATH", ledger):
-        rc = gate.check_client_lag_ledger(["nexus-fake"])
-    assert rc == 0
-    out = capsys.readouterr().out
-    assert "(1 further entry acknowledged via --ack-client-lag)" in out
-    assert "[acked_suffix]" not in out
-
-
-def test_choreography_check_paired_preconditions_not_published_fills_real_reason(capsys: pytest.CaptureFixture[str]) -> None:
-    """The not-published refusal carries the REAL reason string."""
-    tag = gate._pinned_engine_tag()
-    with patch.object(gate, "_tag_exists_in_git", return_value=True), \
-         patch.object(gate, "_paired_tag_published", return_value=(False, "not published")):
-        rc = gate.check_paired_preconditions(tag, None)
-    assert rc == 1
-    err = capsys.readouterr().err
-    assert "not published" in err
-    assert "[reason]" not in err
-
-
-def test_choreography_check_floor_bare_current(capsys: pytest.CaptureFixture[str]) -> None:
-    with patch.object(gate, "probe_managed_service", return_value=_caps(_floor_str())):
-        rc = gate.check_floor(url=_TEST_URL, newest=_PIN_CURRENT)
-    assert rc == 0
-    out = capsys.readouterr().out
-    assert out == (
-        f"engine pin is current: REQUIRED_ENGINE_VERSION v{_floor_str()} == newest published tag\n"
-        f"cloud engine is current: {_TEST_URL} release_version="
-        f"{_floor_str()} (floor v{_floor_str()})\n"
-    )
-
-
-def test_choreography_check_floor_auto_paired_current_is_byte_for_byte_bare(capsys: pytest.CaptureFixture[str]) -> None:
-    """RDR-201 P2.4 fix round (critique T2 nexus/critique-nexus-j9z30-14
-    -2026-09-02 [24073] finding (e); code-review T2 nexus/code-review-nexus
-    -j9z30-14-2026-09-02 [24074]): this test's NAME claims byte-for-byte
-    equality with the ordinary bare invocation -- auto mode's own contract
-    (check_floor's module docstring: "when the cloud already meets the
-    floor this MUST be a byte-for-byte bare-invocation pass"). The original
-    version only asserted ``rc == 0``, which does not distinguish "byte-for
-    -byte identical" from merely "also exits 0" -- fixed to actually
-    compare the two invocations' captured stdout/stderr."""
-    with patch.object(gate, "probe_managed_service", return_value=_caps(_floor_str())):
-        bare_rc = gate.check_floor(url=_TEST_URL, newest=_PIN_CURRENT)
-        bare_captured = capsys.readouterr()
-        auto_rc = gate.check_floor(url=_TEST_URL, newest=_PIN_CURRENT, paired_deploy_auto=True)
-        auto_captured = capsys.readouterr()
-    assert bare_rc == auto_rc == 0
-    assert bare_captured.out == auto_captured.out
-    assert bare_captured.err == auto_captured.err
-
-
-def test_choreography_record_deploy_classifies_exception_subclass(capsys: pytest.CaptureFixture[str]) -> None:
-    """A ``DeployTrackerError`` subclass is caught and exits 3."""
-    with patch.object(
-        gate.deploy_tracker, "record_deploy_from_gate_report",
-        side_effect=gate.deploy_tracker.GateReportRed("simulated"),
-    ):
-        rc = gate.record_deploy_from_gate_report_leg(_pathlib.Path("/fake/dir"), url=None)
-    assert rc == 3
-    err = capsys.readouterr().err
-    assert "TRACKER NOT RECORDED" in err
-
-
-def test_choreography_record_deploy_names_production_write_guard(
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """nexus-jzyt3: the tracker WRITE itself (``deploy_tracker.
-    write_deployed_engine_tracker`` -> a T2 HTTP write) can hit
-    ``guard_production_write`` on a dev-checkout box. Before this fix that
-    exception was uncaught here, propagating as a bare traceback whose last
-    line does not start with an ALL-CAPS verdict token --
-    ``tests/e2e/release-preflight.sh``'s ``check()`` then printed "(no
-    verdict line matched)" instead of the actual refusal (observed cutting
-    conexus 7.44.0). Assert it is caught, exits
-    (rc == 3, an ALL-CAPS ``TRACKER NOT RECORDED`` verdict), and that the
-    printed text names BOTH inputs required to record from a box like this
-    one: NX_GATE_REPORT_DIR and a reasoned NX_ALLOW_PROD_WRITE."""
-    with patch.object(
-        gate.deploy_tracker, "record_deploy_from_gate_report",
-        side_effect=gate.ProductionWriteGuardError(
-            "STOP: refusing a WRITE to 'https://api.conexus-nexus.com'"
-        ),
-    ):
-        rc = gate.record_deploy_from_gate_report_leg(_pathlib.Path("/fake/dir"), url=None)
-    assert rc == 3
-    err = capsys.readouterr().err
-    assert "TRACKER NOT RECORDED" in err
-    assert "NX_GATE_REPORT_DIR" in err
-    assert gate.PROD_WRITE_OPT_IN_ENV in err
-    assert "STOP: refusing a WRITE" in err
-
-
-def test_choreography_main_tracker_opt_out(capsys: pytest.CaptureFixture[str]) -> None:
-    with patch.object(gate, "check_floor", return_value=0), \
-         patch.object(gate, "check_source_ancestry", return_value=0):
-        rc = gate.main(["--url", _TEST_URL, "--no-record-deploy", "a representative reason"])
-    assert rc == 0
-    captured = capsys.readouterr()
-    combined = captured.out + captured.err
-    assert "a representative reason" in combined
-    assert "NOTE (--no-record-deploy)" in combined
-
-
-def test_choreography_main_tracker_refusal(capsys: pytest.CaptureFixture[str]) -> None:
-    with patch.object(gate, "check_floor", return_value=0), \
-         patch.object(gate, "check_source_ancestry", return_value=0):
-        rc = gate.main(["--url", _TEST_URL])
-    assert rc == 3
-    err = capsys.readouterr().err
-    assert "TRACKER NOT RECORDED" in err
-
-
-# ---------------------------------------------------------------------------
-# nexus-h0fo3: the paired-release arming gate (the READER half of
-# docs/release-arming/; conexus writes the attestation)
-# ---------------------------------------------------------------------------
-#
-# The two negative controls the contract mandates, driven against a REAL
-# file on disk through the real path construction; the
-# ack-does-not-lift-arming claim; and the "a paired battery that returns 0
-# has emitted an arming verdict" invariant, which is a property of the
-# BATTERY's composition rather than of any one verdict.
-
-from datetime import datetime as _datetime, timedelta as _timedelta, timezone as _timezone
-
-_ARMING_PINNED_TAG = gate._pinned_engine_tag()
-
-
-def _armed_at(hours_ago: float) -> str:
-    return (
-        _datetime.now(_timezone.utc) - _timedelta(hours=hours_ago)
-    ).isoformat().replace("+00:00", "Z")
-
-
-def _write_attestation(root, tag: str, body: dict) -> None:
-    """Write an attestation where PRODUCTION says it goes -- the directory
-    name and filename shape come from ``gate._ARMING_DIR`` and
-    ``gate._arming_attestation_path``, never retyped here, so a change to
-    either is a test failure rather than a silently-diverged copy."""
-    path = gate._arming_attestation_path(tag, root)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(body), encoding="utf-8")
-
-
-def _rooted_at(monkeypatch, root):
-    """Relocate the attestation ROOT while keeping the real path builder:
-    ``docs/release-arming/<tag>.json`` is still constructed by production
-    code, just under ``root``."""
-    real = gate._arming_attestation_path
-    monkeypatch.setattr(
-        gate, "_arming_attestation_path",
-        lambda tag, repo_root=None: real(tag, root),
-    )
-
-
-def test_arming_not_required_when_every_unshipped_entry_is_additive(tmp_path) -> None:
-    ledger = _write_ledger(tmp_path, _ADDITIVE_ENTRY)
-    with patch.object(gate._wire_ledger, "DEFAULT_LEDGER_PATH", ledger):
-        assert gate.arming_required(
-            gate._wire_ledger.parse_ledger(ledger), _ARMING_PINNED_TAG
-        ) is False
-
-
-def test_arming_required_for_a_tokenless_entry(tmp_path) -> None:
-    """``additive is None`` is fail-safe not-additive -- the same reading
-    ``LedgerEntry.additive`` documents and ``check_client_lag_ledger``
-    already applies. An entry nobody classified must not buy a free pass."""
-    ledger = _write_ledger(tmp_path, _FAKE_ENTRY)
-    with patch.object(gate._wire_ledger, "DEFAULT_LEDGER_PATH", ledger):
-        assert gate.arming_required(
-            gate._wire_ledger.parse_ledger(ledger), _ARMING_PINNED_TAG
-        ) is True
-
-
-def test_ack_client_lag_does_not_lift_the_arming_requirement(tmp_path) -> None:
-    """The reason ``arming_required`` reads the entries directly instead of
-    reusing ``classify_unshipped``'s buckets: that function tests
-    acknowledgment FIRST, so an ``--ack-client-lag`` moves a non-additive
-    entry out of ``blocking`` and into ``acked``. An ack says "I know the
-    client half is lagging, proceed"; it does not make the change additive,
-    and it is exactly the case where the relay must be armed. Reading the
-    buckets here would have excused it silently."""
-    ledger_path = _write_ledger(tmp_path, _NOT_ADDITIVE_ENTRY)
-    ledger = gate._wire_ledger.parse_ledger(ledger_path)
-    with patch.object(gate._wire_ledger, "DEFAULT_LEDGER_PATH", ledger_path):
-        assert gate.check_client_lag_ledger(["nexus-notad"]) == 0
-    verdict = gate._wire_ledger.classify_unshipped(ledger, ["nexus-notad"])
-    assert not verdict.blocking, "precondition: the ack must clear the ledger gate"
-    assert gate.arming_required(ledger, _ARMING_PINNED_TAG) is True
-
-
-def test_missing_attestation_refuses(
-    capsys: pytest.CaptureFixture[str], tmp_path, monkeypatch
-) -> None:
-    """Negative control 1 of the two the contract mandates. Real filesystem,
-    real path construction, no file written."""
-    ledger = _write_ledger(tmp_path, _NOT_ADDITIVE_ENTRY)
-    _rooted_at(monkeypatch, tmp_path / "repo")
-    with patch.object(gate._wire_ledger, "DEFAULT_LEDGER_PATH", ledger):
-        rc = gate.check_release_arming(_ARMING_PINNED_TAG)
-    assert rc == 1
-    err = capsys.readouterr().err
-    assert "NOT-ARMED" in err
-    assert _ARMING_PINNED_TAG in err
-
-
-def test_attestation_for_a_different_tag_refuses(
-    capsys: pytest.CaptureFixture[str], tmp_path, monkeypatch
-) -> None:
-    """Negative control 2. It exists because an ``engine_tag`` comparison
-    can quietly decay into a presence check -- a well-formed, fresh
-    attestation that names ANOTHER tag must still refuse."""
-    ledger = _write_ledger(tmp_path, _NOT_ADDITIVE_ENTRY)
-    root = tmp_path / "repo"
-    _write_attestation(root, _ARMING_PINNED_TAG, {
-        "engine_tag": "engine-service-v9.9.9",
-        "armed_at": _armed_at(1.0),
-        "armed_by": "conexus",
-    })
-    _rooted_at(monkeypatch, root)
-    with patch.object(gate._wire_ledger, "DEFAULT_LEDGER_PATH", ledger):
-        rc = gate.check_release_arming(_ARMING_PINNED_TAG)
-    assert rc == 1
-    err = capsys.readouterr().err
-    assert "NOT-ARMED" in err
-    assert "engine-service-v9.9.9" in err
-
-
-def test_fresh_attestation_on_disk_arms(
-    capsys: pytest.CaptureFixture[str], tmp_path, monkeypatch
-) -> None:
-    """The positive control the two negatives are only meaningful against:
-    the same code path, the same real file layout, returns 0 when the
-    attestation is right. Without this, both refusals above would still
-    pass if the reader refused unconditionally."""
-    ledger = _write_ledger(tmp_path, _NOT_ADDITIVE_ENTRY)
-    root = tmp_path / "repo"
-    _write_attestation(root, _ARMING_PINNED_TAG, {
-        "engine_tag": _ARMING_PINNED_TAG,
-        "armed_at": _armed_at(1.0),
-        "armed_by": "conexus",
-    })
-    _rooted_at(monkeypatch, root)
-    with patch.object(gate._wire_ledger, "DEFAULT_LEDGER_PATH", ledger):
-        rc = gate.check_release_arming(_ARMING_PINNED_TAG)
-    assert rc == 0
-    out = capsys.readouterr().out
-    assert "release ARMED" in out
-    assert "conexus" in out
-
-
-def test_stale_attestation_refuses(tmp_path, monkeypatch) -> None:
-    ledger = _write_ledger(tmp_path, _NOT_ADDITIVE_ENTRY)
-    root = tmp_path / "repo"
-    _write_attestation(root, _ARMING_PINNED_TAG, {
-        "engine_tag": _ARMING_PINNED_TAG,
-        "armed_at": _armed_at(gate._DEFAULT_PAIRED_TAG_MAX_AGE_HOURS + 1.0),
-        "armed_by": "conexus",
-    })
-    _rooted_at(monkeypatch, root)
-    with patch.object(gate._wire_ledger, "DEFAULT_LEDGER_PATH", ledger):
-        assert gate.check_release_arming(_ARMING_PINNED_TAG) == 1
-
-
-def test_future_dated_attestation_refuses_rather_than_reading_as_fresh(
-    capsys: pytest.CaptureFixture[str], tmp_path, monkeypatch
-) -> None:
-    """``armed_at`` is wall clock from ANOTHER machine, so unlike the tag
-    age (a commit date out of this repo) its reference point is a foreign
-    clock. A date ahead of now would otherwise satisfy the freshness bound
-    forever, which is that bound's own failure mode inverted."""
-    ledger = _write_ledger(tmp_path, _NOT_ADDITIVE_ENTRY)
-    root = tmp_path / "repo"
-    _write_attestation(root, _ARMING_PINNED_TAG, {
-        "engine_tag": _ARMING_PINNED_TAG,
-        "armed_at": _armed_at(-24.0),
-        "armed_by": "conexus",
-    })
-    _rooted_at(monkeypatch, root)
-    with patch.object(gate._wire_ledger, "DEFAULT_LEDGER_PATH", ledger):
-        rc = gate.check_release_arming(_ARMING_PINNED_TAG)
-    assert rc == 1
-    assert "FUTURE" in capsys.readouterr().err
-
-
-def test_unreadable_attestation_is_unverifiable_not_a_pass(tmp_path, monkeypatch) -> None:
-    ledger = _write_ledger(tmp_path, _NOT_ADDITIVE_ENTRY)
-    root = tmp_path / "repo"
-    path = gate._arming_attestation_path(_ARMING_PINNED_TAG, root)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("{ truncated", encoding="utf-8")
-    _rooted_at(monkeypatch, root)
-    with patch.object(gate._wire_ledger, "DEFAULT_LEDGER_PATH", ledger):
-        assert gate.check_release_arming(_ARMING_PINNED_TAG) == 2
-
-
-def _paired_battery(ledger_path, ack=None):
-    """Drive the real ``_run_paired_precondition_battery`` with everything
-    ahead of the arming step passing, so the arming step is what the
-    verdict turns on."""
-    with patch.object(gate._wire_ledger, "DEFAULT_LEDGER_PATH", ledger_path), \
-         patch.object(gate, "_tag_exists_in_git", return_value=True), \
-         patch.object(gate, "_paired_tag_published", return_value=(True, "")), \
-         patch.object(gate, "_tag_age_hours", return_value=1.0), \
-         patch.object(gate, "check_data_effect_relay", return_value=0):
-        return gate._run_paired_precondition_battery(
-            _ARMING_PINNED_TAG, REQUIRED_ENGINE_VERSION,
-            gate._DEFAULT_PAIRED_TAG_MAX_AGE_HOURS, ack,
-        )
-
-
-_ARMING_VERDICTS = ("release ARMED", "arming NOT-ARMED", "arming NOT-REQUIRED")
-
-
-def test_paired_battery_emits_an_arming_verdict_on_an_additive_pairing(
-    capsys: pytest.CaptureFixture[str], tmp_path
-) -> None:
-    ledger = _write_ledger(tmp_path, _ADDITIVE_ENTRY)
-    rc = _paired_battery(ledger)
-    captured = capsys.readouterr()
-    assert rc == 0
-    assert any(v in captured.out + captured.err for v in _ARMING_VERDICTS)
-    assert "arming NOT-REQUIRED" in captured.out
-
-
-def test_paired_battery_emits_an_arming_verdict_on_an_armed_pairing(
-    capsys: pytest.CaptureFixture[str], tmp_path, monkeypatch
-) -> None:
-    ledger = _write_ledger(tmp_path, _NOT_ADDITIVE_ENTRY)
-    root = tmp_path / "repo"
-    _write_attestation(root, _ARMING_PINNED_TAG, {
-        "engine_tag": _ARMING_PINNED_TAG,
-        "armed_at": _armed_at(1.0),
-        "armed_by": "conexus",
-    })
-    _rooted_at(monkeypatch, root)
-    rc = _paired_battery(ledger, ack=["nexus-notad"])
-    captured = capsys.readouterr()
-    assert rc == 0
-    assert "release ARMED" in captured.out
-
-
-def test_paired_battery_refuses_on_a_missing_data_effect_relay_attestation(
-    capsys: pytest.CaptureFixture[str], tmp_path
-) -> None:
-    """nexus-iu43o wired into the actual gate: a refusal from
-    check_data_effect_relay fails the WHOLE battery, before arming is even
-    reached -- and never merely stays prose in a skill."""
-    ledger = _write_ledger(tmp_path, _ADDITIVE_ENTRY)  # arming not required, so THIS is what turns the verdict
-    # NOT _paired_battery(): its own helper patches check_data_effect_relay
-    # to 0 (pass-by-default, for every OTHER test in this file), and an
-    # inner patch would win over an outer one wrapped around it -- this
-    # drives _run_paired_precondition_battery directly instead, with the
-    # same supporting mocks _paired_battery uses.
-    with patch.object(gate._wire_ledger, "DEFAULT_LEDGER_PATH", ledger), \
-         patch.object(gate, "_tag_exists_in_git", return_value=True), \
-         patch.object(gate, "_paired_tag_published", return_value=(True, "")), \
-         patch.object(gate, "_tag_age_hours", return_value=1.0), \
+@pytest.mark.parametrize(
+    ("entry", "rc", "stream", "has", "lacks"),
+    [
+        pytest.param(None, 0, "out", ["client-lag ledger clean"], [], id="empty"),
+        pytest.param(_FAKE_ENTRY, 1, "err", ["nexus-fake", "PAIRED DEPLOY BLOCKED", "deadbeef"], [], id="tokenless-entry-blocks"),
+        pytest.param(_NOT_ADDITIVE_ENTRY, 1, "err", ["nexus-notad"], [], id="not-additive-blocks"),
+        pytest.param(_BOTH_TOKENS_ENTRY, 1, "err", ["nexus-both"], [], id="both-tokens-is-not-additive"),
+        pytest.param(_ADDITIVE_ENTRY, 0, "out", ["[additive]", "nexus-addv", "nexus-1emxn"], [], id="all-additive-authorizes"),
+        pytest.param(_ADDITIVE_ENTRY + _NOT_ADDITIVE_ENTRY, 1, "err", ["nexus-notad"], ["nexus-addv"], id="mixed-names-only-the-blocking-entry"),
+    ],
+)
+def test_client_lag_ledger_verdicts(tmp_path, entry, rc, stream, has, lacks, capsys) -> None:
+    with patch.object(gate._wire_ledger, "DEFAULT_LEDGER_PATH", _write_ledger(tmp_path, entry)):
+        assert gate.check_client_lag_ledger() == rc
+    text = getattr(capsys.readouterr(), stream)
+    for needle in has:
+        assert needle in text
+    for needle in lacks:
+        assert needle not in text
+
+
+def test_the_paired_battery_runs_the_ledger_first_then_tag_then_relay(tmp_path) -> None:
+    """Cheap local check first: a blocking ledger means the tag preconditions are never
+    reached; a clean ledger reaches them; a refusing DATA EFFECT relay fails the whole
+    battery (nexus-iu43o)."""
+    battery = (_PAIRED_TAG, REQUIRED_ENGINE_VERSION, gate._DEFAULT_PAIRED_TAG_MAX_AGE_HOURS)
+    with patch.object(gate._wire_ledger, "DEFAULT_LEDGER_PATH", _write_ledger(tmp_path, _FAKE_ENTRY)), \
+         patch.object(gate, "check_paired_preconditions") as precond:
+        assert gate._run_paired_precondition_battery(*battery) == 1
+    precond.assert_not_called()
+    clean = _write_ledger(tmp_path)
+    with patch.object(gate._wire_ledger, "DEFAULT_LEDGER_PATH", clean), \
+         patch.object(gate, "check_paired_preconditions", return_value=1) as precond:
+        assert gate._run_paired_precondition_battery(*battery) == 1
+    precond.assert_called_once()
+    with patch.object(gate._wire_ledger, "DEFAULT_LEDGER_PATH", clean), \
+         patch.object(gate, "check_paired_preconditions", return_value=0), \
          patch.object(gate, "check_data_effect_relay", return_value=1):
-        rc = gate._run_paired_precondition_battery(
-            _ARMING_PINNED_TAG, REQUIRED_ENGINE_VERSION,
-            gate._DEFAULT_PAIRED_TAG_MAX_AGE_HOURS, None,
-        )
-    assert rc == 1
-    # The battery never reached arming -- no arming verdict was printed.
-    captured = capsys.readouterr()
-    assert not any(v in captured.out + captured.err for v in _ARMING_VERDICTS)
+        assert gate._run_paired_precondition_battery(*battery) == 1
+
+
+def test_ledger_only_runs_the_ledger_and_nothing_else(tmp_path) -> None:
+    for entry, rc in ((_FAKE_ENTRY, 1), (None, 0)):
+        with patch.object(gate._wire_ledger, "DEFAULT_LEDGER_PATH", _write_ledger(tmp_path, entry)), \
+             patch.object(gate, "probe_managed_service") as probe, \
+             patch.object(gate, "check_source_ancestry") as ancestry:
+            assert gate.main(["--ledger-only"]) == rc
+        probe.assert_not_called()
+        ancestry.assert_not_called()
+
+
+# ── --client-precondition (nexus-9ssih deploy-order gate) ───────────────────
+
+_TEST_ENGINE = "engine-service-vTEST"
+
+
+@pytest.fixture
+def table(monkeypatch):
+    """A one-row ENGINE_CLIENT_PRECONDITIONS for _TEST_ENGINE with an injectable verdict."""
+    monkeypatch.setitem(gate.ENGINE_CLIENT_PRECONDITIONS, _TEST_ENGINE, {"deadbeef": "test precondition"})
+
+    def set_git(*, release="v0.0.1", ancestor=True):
+        monkeypatch.setattr(gate, "latest_release_tag", lambda: release)
+
+        def is_ancestor(commit, tag):
+            if isinstance(ancestor, Exception):
+                raise ancestor
+            return ancestor
+
+        monkeypatch.setattr(gate, "is_ancestor", is_ancestor)
+
+    return set_git
+
+
+@pytest.mark.parametrize(
+    ("ancestor", "rc", "stream", "needle"),
+    [
+        pytest.param(False, 1, "err", "BLOCKED", id="required-commit-unreleased-blocks"),
+        pytest.param(True, 0, "out", "OK: all client preconditions", id="required-commit-released-passes"),
+        pytest.param(RuntimeError("git exploded"), 2, "err", "CANNOT VERIFY", id="unverifiable-git-state-is-exit-2-not-a-pass"),
+    ],
+)
+def test_client_precondition_hand_table(table, ancestor, rc, stream, needle, capsys) -> None:
+    table(ancestor=ancestor)
+    assert gate.check_client_precondition(_TEST_ENGINE) == rc
+    assert needle in getattr(capsys.readouterr(), stream)
+
+
+def test_client_precondition_runs_the_relay_check_first(monkeypatch) -> None:
+    """A refused DATA EFFECT relay returns before the hand table is consulted, so an
+    empty or populated table can never mask it."""
+    monkeypatch.setattr(gate, "latest_release_tag", lambda: pytest.fail("hand table reached"))
+    monkeypatch.setitem(gate.ENGINE_CLIENT_PRECONDITIONS, _TEST_ENGINE, {"deadbeef": "x"})
+    with patch.object(gate, "check_data_effect_relay", return_value=1):
+        assert gate.check_client_precondition(_TEST_ENGINE) == 1
+
+
+def test_client_precondition_vacuity_message_names_both_sources(table, tmp_path, monkeypatch, capsys) -> None:
+    """Both sources empty -> an unmistakable "verified NOTHING"; a populated hand table
+    that verified something must not print it (nexus-f9z84)."""
+    ledger = _write_ledger(tmp_path)
+    monkeypatch.setattr(gate._wire_ledger, "DEFAULT_LEDGER_PATH", ledger)
+    assert gate.check_client_precondition("engine-service-v0.0.0-nonexistent") == 0
+    out = capsys.readouterr().out
+    for needle in ("VACUOUS", "0 preconditions registered", "0 entries", str(ledger), "verified NOTHING from EITHER source"):
+        assert needle in out
+    table(ancestor=True)
+    assert gate.check_client_precondition(_TEST_ENGINE) == 0
+    assert "VACUOUS" not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ("entry", "rc"),
+    [(_FAKE_ENTRY, 1), (_NOT_ADDITIVE_ENTRY, 1), (_ADDITIVE_ENTRY, 0), (None, 0)],
+    ids=["tokenless-blocks", "not-additive-blocks", "additive-authorizes", "empty"],
+)
+def test_client_precondition_consults_the_ledger_for_any_tag(tmp_path, entry, rc) -> None:
+    """Not tag-scoped: an unpaired deploy of ANY engine tag risks carrying an unshipped
+    client half live (protocol-audit [22511] Gap 1)."""
+    with patch.object(gate._wire_ledger, "DEFAULT_LEDGER_PATH", _write_ledger(tmp_path, entry)):
+        assert gate.main(["--client-precondition", "engine-service-v0.0.0-nonexistent"]) == rc
+
+
+def test_client_precondition_defaults_to_the_pinned_tag() -> None:
+    with patch.object(gate, "check_client_precondition", return_value=0) as check:
+        assert gate.main(["--client-precondition"]) == 0
+        assert gate.main(["--client-precondition", "engine-service-vX"]) == 0
+    assert [c.args[0] for c in check.call_args_list] == [gate._pinned_engine_tag(), "engine-service-vX"]
+
+
+def test_client_precondition_git_helpers(tmp_path, monkeypatch) -> None:
+    """CI checkouts are shallow and tagless, so carry git state (found on 7.0.0)."""
+    repo, run = _git_repo(tmp_path)
+    run("commit", "--allow-empty", "-q", "-m", "one")
+    run("commit", "--allow-empty", "-q", "-m", "two")
+    run("tag", "v1.2.3")
+    run("tag", "engine-service-v9.9.9")
+    monkeypatch.chdir(repo)  # the helpers run in cwd by design
+    tag = gate.latest_release_tag()
+    assert tag == "v1.2.3" and re.fullmatch(r"v\d+\.\d+\.\d+", tag)  # never an engine tag
+    assert gate.is_ancestor(run("rev-parse", "HEAD~1").stdout.strip(), "HEAD")
+
+
+def test_stale_precondition_rows_do_not_outlive_the_floor() -> None:
+    """Non-vacuity: the live table is almost always empty, so also plant rows (nexus-f9z84)."""
+    assert gate.stale_precondition_rows() == []
+    planted = {
+        "engine-service-v0.1.70": {"deadbeef": "floor minus one"},
+        "engine-service-v0.1.71": {"beadfeed": "exactly the floor"},
+        "engine-service-v0.1.99": {"c0ffee00": "ahead"},
+        "next": {"f00dface": "always-ahead sentinel"},
+    }
+    assert set(gate.stale_precondition_rows(table=planted, floor=(0, 1, 71))) == {
+        "engine-service-v0.1.70", "engine-service-v0.1.71",
+    }
+    assert gate.stale_precondition_rows(table={"engine-service-v0.1.72": {"d": "ahead"}}, floor=(0, 1, 71)) == []
+    assert gate.stale_precondition_rows() == gate.stale_precondition_rows(
+        table=gate.ENGINE_CLIENT_PRECONDITIONS, floor=REQUIRED_ENGINE_VERSION,
+    )
+
+
+@pytest.mark.real_ledger
+def test_the_ledger_import_reaches_the_real_checked_in_file() -> None:
+    """tests/scripts/conftest.py isolates every other test onto an empty ledger; this one
+    proves the production import is live, not stubbed."""
+    path = gate._wire_ledger.DEFAULT_LEDGER_PATH
+    assert path.is_file() and path.name == "wire-contract-pending.md"
+    blocking = gate._wire_ledger.classify_unshipped(gate._wire_ledger.parse_ledger(path)).blocking
+    assert gate.check_client_lag_ledger() == (1 if blocking else 0)
+
+
+def test_the_engine_release_skill_invokes_the_precondition_before_the_tag_push() -> None:
+    """An unwired gate is a prose gate with extra steps (nexus-qc4p1). It surfaces early,
+    but gates the DEPLOY, never the tag cut (7.1.0/v0.1.62 inversion)."""
+    skill = (REPO_ROOT / ".claude" / "skills" / "engine-release" / "SKILL.md").read_text()
+    call = "check_engine_release_floor.py --client-precondition"
+    assert call in skill
+    assert skill.index(call) < skill.index("git push origin engine-service-v")
+    assert "never the tag cut" in skill
+
+
+# ── DATA EFFECT relay (nexus-iu43o) ─────────────────────────────────────────
 
 
 class TestCheckDataEffectRelay:
@@ -2507,393 +797,3 @@ class TestCheckDataEffectRelay:
         rc = gate.check_data_effect_relay("engine-service-v0.1.1", two_tag_repo)
         assert rc == 0
         assert "NOT-APPLICABLE" in capsys.readouterr().out
-
-
-def test_paired_battery_refuses_a_non_additive_pairing_with_no_attestation(
-    capsys: pytest.CaptureFixture[str], tmp_path, monkeypatch
-) -> None:
-    """The whole point, end to end: an acknowledged non-additive pairing
-    clears the ledger gate and the tag battery, and is still refused
-    because nothing attests the relay was armed."""
-    ledger = _write_ledger(tmp_path, _NOT_ADDITIVE_ENTRY)
-    _rooted_at(monkeypatch, tmp_path / "repo")
-    rc = _paired_battery(ledger, ack=["nexus-notad"])
-    assert rc == 1
-    assert "arming NOT-ARMED" in capsys.readouterr().err
-
-
-def test_battery_returning_zero_always_emitted_an_arming_verdict(
-    capsys: pytest.CaptureFixture[str], tmp_path, monkeypatch
-) -> None:
-    """"Emitting nothing is itself a failure" (the settled contract), for
-    every release that RUNS the battery: arming is last, so an accepting
-    battery has always printed one of the three verdicts. A future edit that
-    moves the arming step above a check that can short-circuit past it, or
-    drops it, fails here.
-
-    Scope, so this test is not read as proving more than it does: it says
-    nothing about whether the battery is CALLED. The auto-paired meets-floor
-    branch skips it entirely -- see
-    test_auto_paired_meets_floor_emits_no_arming_verdict_by_design."""
-    for entry, ack, armed in (
-        (_ADDITIVE_ENTRY, None, False),
-        (_NOT_ADDITIVE_ENTRY, ["nexus-notad"], True),
-    ):
-        root = tmp_path / f"repo-{armed}"
-        ledger = _write_ledger(tmp_path, entry)
-        if armed:
-            _write_attestation(root, _ARMING_PINNED_TAG, {
-                "engine_tag": _ARMING_PINNED_TAG,
-                "armed_at": _armed_at(1.0),
-                "armed_by": "conexus",
-            })
-        _rooted_at(monkeypatch, root)
-        capsys.readouterr()
-        rc = _paired_battery(ledger, ack=ack)
-        captured = capsys.readouterr()
-        assert rc == 0, (entry, captured)
-        assert any(v in captured.out for v in _ARMING_VERDICTS), captured
-
-
-# --- the CROSS-REPO contract: conexus's actually-shipped writer -------------
-#
-# conexus shipped the writer on their own main at their PR #336, with three
-# fields richer than the keys first settled: signature_verified is an object
-# (a bool cannot carry the KMS alias), walk_rehearsed is a POINTER to a T2
-# record (a bool would be unfalsifiable), and armed_by is
-# "<principal>@sha256:<8>" rather than an AWS caller ARN (an ARN carries a
-# 12-digit account id, and this repo is public). None of that was knowable
-# when the reader was written. This fixture is the shipped body verbatim, so
-# a reader change that stops parsing it — or a writer change that stops
-# producing it — fails HERE rather than at a release.
-
-_CONEXUS_SHIPPED_BODY = {
-    "engine_tag": None,  # filled with the pinned tag by the test
-    "image_digest": "sha256:" + "ab" * 32,
-    "signature_verified": {
-        "verified": True,
-        "kms_key": "awskms:///alias/conexus-dev-image-signing",
-        "image_ref": "conexus/engine:nexus-service-0.1.117@sha256:" + "ab" * 32,
-    },
-    "ssm_param": "/conexus/dev/engine/image-tag",
-    "ssm_param_version": 7,
-    "redeploy_doc": "conexus-dev-engine-redeploy",
-    "walk_rehearsed": "conexus/pitr-walk-rehearsal-2026-09-12",
-    "armed_at": None,  # filled per-case
-    "armed_by": "sam@sha256:deadbeef",
-}
-
-
-#: The two `armed_at` spellings conexus emits / asked us to accept, as
-#: FORMATTERS rather than literal instants. A literal date would be either
-#: stale or (as the first draft of this test was) in the FUTURE and correctly
-#: refused by the clock-ahead guard — pinning the SHAPE is the point.
-_ARMED_AT_SPELLINGS = {
-    "z-suffix": lambda dt: dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
-    "offset-suffix": lambda dt: dt.isoformat(timespec="seconds"),
-}
-
-
-@pytest.mark.parametrize(
-    "spelling, walk_rehearsed",
-    [
-        ("z-suffix", "conexus/pitr-walk-rehearsal-2026-09-12"),
-        ("offset-suffix", "conexus/pitr-walk-rehearsal-2026-09-12"),
-        ("z-suffix", "not-required: no changeset in this cut"),
-    ],
-    ids=["z-suffix", "offset-suffix", "walk-not-required"],
-)
-def test_reader_arms_on_the_body_conexus_actually_writes(
-    capsys: pytest.CaptureFixture[str], tmp_path, monkeypatch, spelling, walk_rehearsed
-) -> None:
-    """conexus writes `armed_at` with a Z suffix; they asked us to accept the
-    `+00:00` form too. `walk_rehearsed` is a free-text pointer in either of
-    its two documented forms. The reader must arm on all of them."""
-    ledger = _write_ledger(tmp_path, _NOT_ADDITIVE_ENTRY)
-    root = tmp_path / "repo"
-    one_hour_ago = _datetime.now(_timezone.utc) - _timedelta(hours=1)
-    body = dict(_CONEXUS_SHIPPED_BODY)
-    body["engine_tag"] = _ARMING_PINNED_TAG
-    body["armed_at"] = _ARMED_AT_SPELLINGS[spelling](one_hour_ago)
-    body["walk_rehearsed"] = walk_rehearsed
-    _write_attestation(root, _ARMING_PINNED_TAG, body)
-    _rooted_at(monkeypatch, root)
-    with patch.object(gate._wire_ledger, "DEFAULT_LEDGER_PATH", ledger):
-        rc = gate.check_release_arming(_ARMING_PINNED_TAG)
-    out = capsys.readouterr().out
-    assert rc == 0, out
-    assert "release ARMED" in out
-
-
-def test_reader_reads_only_fields_conexus_guarantees(tmp_path, monkeypatch) -> None:
-    """The split gives nexus `engine_tag` and `armed_at`. `armed_by` is read
-    for the message only. Nothing else in the body may become load-bearing
-    without a cross-instance conversation, so dropping every other key must
-    still arm — this is what keeps a writer-side field rename from red-gating
-    a release."""
-    ledger = _write_ledger(tmp_path, _NOT_ADDITIVE_ENTRY)
-    root = tmp_path / "repo"
-    _write_attestation(root, _ARMING_PINNED_TAG, {
-        "engine_tag": _ARMING_PINNED_TAG,
-        "armed_at": _armed_at(1.0),
-        "armed_by": "sam@sha256:deadbeef",
-    })
-    _rooted_at(monkeypatch, root)
-    with patch.object(gate._wire_ledger, "DEFAULT_LEDGER_PATH", ledger):
-        assert gate.check_release_arming(_ARMING_PINNED_TAG) == 0
-
-
-# --- the read sensor's own branches (both reviewers: untested) --------------
-
-
-def test_read_sensor_reports_missing_for_an_absent_file(tmp_path) -> None:
-    kind, value = gate._read_arming_attestation(tmp_path / "nope.json")
-    assert (kind, value) == ("missing", "")
-
-
-def test_read_sensor_reports_unreadable_for_a_json_non_object(tmp_path) -> None:
-    """A JSON array or scalar parses fine and is not an attestation. Flagged
-    by both reviewers as the one branch nothing exercised: the enumerator
-    patches this sensor's OUTPUT, so only a direct call reaches it."""
-    path = tmp_path / "a.json"
-    path.write_text("[1, 2, 3]", encoding="utf-8")
-    kind, value = gate._read_arming_attestation(path)
-    assert kind == "unreadable"
-    assert "list" in str(value)
-
-
-def test_read_sensor_reports_unreadable_for_an_unopenable_path(tmp_path) -> None:
-    """OSError that is not FileNotFoundError — here, a directory where a file
-    belongs. Distinct from `missing`: something IS there and cannot be read,
-    which is exit 2 (unverifiable), not exit 1."""
-    path = tmp_path / "a.json"
-    path.mkdir()
-    kind, value = gate._read_arming_attestation(path)
-    assert kind == "unreadable"
-    assert str(value)
-
-
-def test_read_sensor_reports_unreadable_for_non_utf8_bytes(tmp_path) -> None:
-    path = tmp_path / "a.json"
-    path.write_bytes(b"\xff\xfe\x00not utf-8")
-    kind, _value = gate._read_arming_attestation(path)
-    assert kind == "unreadable"
-
-
-def test_read_sensor_returns_the_parsed_object(tmp_path) -> None:
-    path = tmp_path / "a.json"
-    path.write_text('{"engine_tag": "x"}', encoding="utf-8")
-    assert gate._read_arming_attestation(path) == ("present", {"engine_tag": "x"})
-
-
-def test_paired_tag_dated_in_the_future_is_refused(
-    capsys: pytest.CaptureFixture[str]
-) -> None:
-    """Sibling of the arming gate's clock-ahead guard, in the check that
-    already existed. The paired-tag freshness bound is one-sided — it refuses
-    what is too OLD and says nothing about what is too NEW — and a git commit
-    author date is settable to anything, so before this a future-dated tag
-    satisfied (d) forever. Found by sweeping for siblings after adding the
-    armed_at guard, not by it firing."""
-    with patch.object(gate, "_tag_exists_in_git", return_value=True), \
-         patch.object(gate, "_paired_tag_published", return_value=(True, "")), \
-         patch.object(gate, "_tag_age_hours", return_value=-48.0):
-        rc = gate.check_paired_preconditions(
-            _ARMING_PINNED_TAG, REQUIRED_ENGINE_VERSION
-        )
-    assert rc == 1
-    err = capsys.readouterr().err
-    assert "FUTURE" in err
-    assert "48.0" in err
-
-
-def test_paired_tag_within_the_skew_tolerance_still_passes() -> None:
-    """The tolerance is not a second freshness rule: a few minutes of
-    ordinary NTP skew must not red-gate a legitimate pairing."""
-    ahead = -(gate._FUTURE_CLOCK_TOLERANCE_HOURS / 2)
-    with patch.object(gate, "_tag_exists_in_git", return_value=True), \
-         patch.object(gate, "_paired_tag_published", return_value=(True, "")), \
-         patch.object(gate, "_tag_age_hours", return_value=ahead):
-        rc = gate.check_paired_preconditions(
-            _ARMING_PINNED_TAG, REQUIRED_ENGINE_VERSION
-        )
-    assert rc == 0
-
-
-# --- the POST-RELEASE ledger shape (nexus-h0fo3, the inertness that every
-# --- other test in this file missed) ---------------------------------------
-#
-# The original arming gate read only `## Unshipped`, and every test built
-# that state directly. It passed, and five source mutations each failed a
-# named test, and the gate was still inert at tag push: a non-additive entry
-# blocks every PR to main (ci.yml's release-ledger-gate runs --ledger-only
-# with no --ack-client-lag), so the release PR must move it to `## Shipped`
-# before the tag exists. By the time the gate ran, the section it read was
-# empty. These tests drive the ledger in the shape it ACTUALLY has when the
-# gate runs, which is the thing no constructed "required" state can show.
-
-
-def _write_release_shaped_ledger(tmp_path, engine_tag: str, token: str, *, sha="fee1dead1"):
-    """A ledger as it looks AFTER the release PR: nothing unshipped, the
-    pairing's entry moved to `## Shipped` with a concrete engine tag."""
-    ledger = tmp_path / "wire-contract-pending.md"
-    ledger.write_text(
-        "## Unshipped\n\n(none)\n\n## Shipped\n\n"
-        f"- `{sha}` -- bead nexus-rel -- shipped in `v9.9.9` -- engine half "
-        f"{engine_tag} (deployed and cloud-gated before the client tag) -- "
-        f"{token} test fixture entry\n",
-        encoding="utf-8",
-    )
-    return ledger
-
-
-def test_post_release_non_additive_pairing_still_requires_arming(tmp_path) -> None:
-    """THE regression test for the original defect. Unshipped is empty — the
-    release PR moved the entry — and the gate must still demand arming,
-    because the Shipped entry names this pairing and is not additive."""
-    ledger = _write_release_shaped_ledger(
-        tmp_path, _ARMING_PINNED_TAG, "[not-additive]"
-    )
-    parsed = gate._wire_ledger.parse_ledger(ledger)
-    assert not parsed.unshipped, "precondition: the release PR emptied Unshipped"
-    assert gate.arming_required(parsed, _ARMING_PINNED_TAG) is True
-
-
-def test_post_release_additive_pairing_does_not_require_arming(tmp_path) -> None:
-    """The positive control. Without it the test above would pass against a
-    gate that demanded arming unconditionally."""
-    ledger = _write_release_shaped_ledger(
-        tmp_path, _ARMING_PINNED_TAG, "[additive]"
-    )
-    parsed = gate._wire_ledger.parse_ledger(ledger)
-    assert gate.arming_required(parsed, _ARMING_PINNED_TAG) is False
-
-
-def test_post_release_non_additive_entry_for_another_tag_is_not_ours(tmp_path) -> None:
-    """Scoped by pairing tag on purpose: another engine's lagging client half
-    is the ledger gate's business, not this pairing's deploy relay."""
-    ledger = _write_release_shaped_ledger(
-        tmp_path, "engine-service-v0.0.1", "[not-additive]"
-    )
-    parsed = gate._wire_ledger.parse_ledger(ledger)
-    assert gate.arming_required(parsed, _ARMING_PINNED_TAG) is False
-
-
-def test_post_release_untokened_entry_requires_arming(tmp_path) -> None:
-    """Below the convention floor there is no token to read. `additive is
-    None` counts as not additive — the documented fail-safe — so the answer
-    is "arming required", never a silent pass. Unreachable in practice
-    (engine tags are monotonic and the floor is far behind), which is why it
-    is pinned rather than relied upon."""
-    ledger = tmp_path / "wire-contract-pending.md"
-    ledger.write_text(
-        "## Unshipped\n\n(none)\n\n## Shipped\n\n"
-        f"- `fee1dead2` -- bead nexus-old -- shipped in `v7.0.0` -- engine half "
-        f"{_ARMING_PINNED_TAG} (no direction-safety token, pre-convention)\n",
-        encoding="utf-8",
-    )
-    parsed = gate._wire_ledger.parse_ledger(ledger)
-    assert parsed.shipped["fee1dead2"].additive is None
-    assert gate.arming_required(parsed, _ARMING_PINNED_TAG) is True
-
-
-def test_post_release_battery_refuses_without_an_attestation(
-    capsys: pytest.CaptureFixture[str], tmp_path, monkeypatch
-) -> None:
-    """End to end in the release-time shape: empty Unshipped, a non-additive
-    Shipped entry for this pairing, no attestation. The battery must refuse.
-    Before nexus-h0fo3's union rule this returned 0 and printed NOT-REQUIRED."""
-    ledger = _write_release_shaped_ledger(
-        tmp_path, _ARMING_PINNED_TAG, "[not-additive]"
-    )
-    _rooted_at(monkeypatch, tmp_path / "repo")
-    rc = _paired_battery(ledger)
-    assert rc == 1
-    assert "arming NOT-ARMED" in capsys.readouterr().err
-
-
-def test_post_release_battery_arms_with_an_attestation(
-    capsys: pytest.CaptureFixture[str], tmp_path, monkeypatch
-) -> None:
-    ledger = _write_release_shaped_ledger(
-        tmp_path, _ARMING_PINNED_TAG, "[not-additive]"
-    )
-    root = tmp_path / "repo"
-    _write_attestation(root, _ARMING_PINNED_TAG, {
-        "engine_tag": _ARMING_PINNED_TAG,
-        "armed_at": _armed_at(1.0),
-        "armed_by": "conexus",
-    })
-    _rooted_at(monkeypatch, root)
-    rc = _paired_battery(ledger)
-    assert rc == 0
-    assert "release ARMED" in capsys.readouterr().out
-
-
-def test_unshipped_half_still_fires_when_the_tag_is_not_yet_known(tmp_path) -> None:
-    """The attended pre-bump run: the entry is still unshipped and its engine
-    tag reads `TBD (next engine-service cut)`, as the live ledger's does. The
-    unshipped half of the union must not be scoped by pairing tag, or this
-    path — the one that worked before nexus-h0fo3 — would go inert instead."""
-    ledger = tmp_path / "wire-contract-pending.md"
-    ledger.write_text(
-        "## Unshipped\n\n"
-        "- `feedface1` -- bead nexus-tbd -- engine tag `TBD (next engine-service cut)` "
-        "-- [not-additive] store-side NOT NULL, old client breaks\n\n"
-        "## Shipped\n",
-        encoding="utf-8",
-    )
-    parsed = gate._wire_ledger.parse_ledger(ledger)
-    assert parsed.unshipped["feedface1"].engine_tag == "TBD (next engine-service cut)"
-    assert gate.arming_required(parsed, _ARMING_PINNED_TAG) is True
-
-
-def test_auto_paired_meets_floor_emits_no_arming_verdict_by_design(
-    capsys: pytest.CaptureFixture[str], tmp_path
-) -> None:
-    """DELIBERATE-BEHAVIOR PIN (nexus-jv9h3, ruled 2026-09-12) -- do not
-    "fix" this without a conscious decision.
-
-    `--paired-deploy-auto` probes the cloud FIRST and, when the cloud already
-    meets the floor, takes the bare pin-currency path without calling
-    `_run_paired_precondition_battery` at all. So neither the wire-contract
-    ledger check nor `check_release_arming` runs, and the tag-push invocation
-    `release.yml` actually uses prints NONE of ARMED / NOT-ARMED /
-    NOT-REQUIRED. That is narrower than the arming contract's own words.
-
-    It is accepted rather than closed, for two reasons recorded here so the
-    next reader does not re-derive them. The two-mode asymmetry is deliberate
-    and documented (the unattended path trusts the cloud probe because no
-    human is present to interpret a dirty ledger, and the release
-    decision table, since deleted, said in terms not to unify the modes). And
-    the safety property survives NECESSARILY, not probably: the predicate
-    selecting this branch IS ``parsed >= REQUIRED_ENGINE_VERSION``, the live
-    cloud already running the engine this release pins -- the one carrying
-    the non-additive change. So whenever the skip happens the deploy has
-    landed, and arming is a claim about a deploy that has not. What is lost
-    is the audit trail, not the protection.
-
-    The ledger here carries a NON-ADDITIVE unshipped entry -- the state that
-    would make arming REQUIRED and refuse, had the battery run at all. That
-    is what makes this a pin on the skip rather than on an empty ledger.
-    """
-    ledger = _write_ledger(tmp_path, _NOT_ADDITIVE_ENTRY)
-    with patch.object(gate._wire_ledger, "DEFAULT_LEDGER_PATH", ledger), \
-         patch.object(gate, "newest_published_engine", return_value=REQUIRED_ENGINE_VERSION), \
-         patch.object(gate, "probe_managed_service", return_value=_caps(_floor_str())), \
-         patch.object(gate, "resolve_managed_endpoint", return_value=(_TEST_URL, None)):
-        rc = gate.check_floor(url=_TEST_URL, paired_deploy_auto=True,
-                              newest=REQUIRED_ENGINE_VERSION)
-    out = capsys.readouterr()
-    text = out.out + out.err
-    assert rc == 0, text
-    for verdict in _ARMING_VERDICTS:
-        assert verdict not in text, (
-            f"{verdict!r} appeared on the auto-paired meets-floor branch; if the "
-            "battery now runs there, nexus-jv9h3 was decided the other way and "
-            "this pin plus the prose in docs/release-arming/README.md, the "
-            "release skill and AGENTS.md must all move together"
-        )
-    assert "PAIRED DEPLOY BLOCKED" not in text, (
-        "the ledger check did not run either; that is the same skip"
-    )

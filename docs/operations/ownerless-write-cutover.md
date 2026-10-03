@@ -32,18 +32,13 @@ emergency lever is one of the two accepted values, never a third. `deploy/engine
 (conexus repo) booting the image with the production value catches only an INVALID value,
 which fails before the push instead of at the redeploy. It does not catch a valid but wrong
 one: `enforce` on the first deploy boots fine and refuses every legacy write. For that, the
-conexus relay and arming checklist for the first deploy carries an assertion, run against the
+conexus relay checklist for the first deploy carries an assertion, run against the
 booted image or the staged parameter before the push: `/v1/status` `ownerless_write_mode`
 must equal `log-only`. **That assertion is a conexus-owned hold-the-push line, and nothing in
 this repo checks it.** Owner: conexus. Step: image built and redeploy staged, before the paired
-client tag is pushed. Evidence: the value they read, in their arming reply. It is not a field on
-the `docs/release-arming/` attestation because that file records deploy facts conexus re-checks
-at its own flip (image digest, parameter version): the mode is one more property of a deploy
-that has not happened at tag push, so a nexus reader would only echo conexus's claim; a
-required field no writer emits yet fails every paired tag until conexus's writer changes (a
-repo this side cannot see or test), and an optional field asserts nothing; and
-`--paired-deploy-auto` can skip the battery that would read it. The nexus-side backstop comes
-after the harm window, not before it: the gate leg below, run after the first deploy. The code default (unset or blank is `log-only`) is pinned by the
+client tag is pushed. Evidence: the value they read, in their staging reply. The nexus-side
+backstop comes after the harm window, not before it: the gate leg below, run after the first
+deploy. The code default (unset or blank is `log-only`) is pinned by the
 engine's own test (`OwnerlessWriteRefusalTest`, `anUnsetModeBootsLogOnly_andAnExplicitEnforceBootsEnforce`);
 what only the deployment can show is what conexus wired, so the check belongs on the
 deployment's own `/v1/status`.
@@ -88,7 +83,7 @@ never sends it: the census has `curl` (6 `store-put`) and `python-httpx/0.28.1` 
    defaulting to `log-only`, next to the `NX_HNSW_MAX_SCAN_TUPLES` rollback lever. The
    engine's environment file is rendered at boot, so a hand edit on the host is lost.
    Assert the mode BEFORE the push (the `/v1/status` check in the previous section, in
-   conexus's relay and arming checklist) and again after the deploy with the gate:
+   conexus's relay checklist) and again after the deploy with the gate:
    `ownerless_write_mode` must read `log-only`, because a mis-wired parameter that reads
    `enforce` refuses every legacy write from every host at the first deploy, and only
    the pre-push check can stop that before it happens (a conexus-owned line, see "The knob":
@@ -105,7 +100,7 @@ never sends it: the census has `curl` (6 `store-put`) and `python-httpx/0.28.1` 
 3. **Soak, and disposition every caller.** Read `ownerless_writes_would_refuse_total` and the
    engine log (filter `event=ownerless_chunk_write_would_refuse`; **the CloudWatch log group
    is unverified**, confirm its name with conexus: `/conexus/dev/engine` appears in this repo
-   only as an SSM parameter prefix, `docs/release-arming/README.md`, not as a log group. A
+   only as an SSM parameter prefix (conexus's deploy configuration), not as a log group. A
    wrong group errors loudly, but a wrong filter returns nothing and reads as "soak
    drained", which is why step 4 requires a positive control). Each line names the route, the tenant, the
    collection, the `user_agent` and `client_version`. The count stops moving once every

@@ -27,18 +27,15 @@ carries no method signature for a contract change to reconcile against) is a
   commit is already an ancestor of the newest published `v*` tag is STALE and
   fails the lint -- the ledger cannot quietly claim something is still pending
   once it has shipped.
-- `scripts/check_engine_release_floor.py --paired-deploy` reads this ledger:
-  a non-empty `## Unshipped` section blocks the paired-deploy path unless
-  every entry's bead is named via `--ack-client-lag <bead-id>` (explicit
-  paired-client acknowledgment, not a silent pass).
-- `scripts/check_client_release_precondition.py` (protocol-audit [22511]
-  Gap 1, 2026-08-14) reads this ledger too, unconditionally, on the
-  UNPAIRED deploy path -- the ordinary "refresh the cloud engine" run that
-  the paired-deploy branch above does not cover. Same `--ack-client-lag
-  <bead-id>` escape shape.
+- `scripts/check_engine_release_floor.py` reads this ledger in every mode
+  that gates a deploy (`--paired-deploy`, `--paired-deploy-auto`,
+  `--ledger-only`, and `--client-precondition`, the UNPAIRED "refresh the
+  cloud engine" run, protocol-audit [22511] Gap 1, 2026-08-14): a non-empty
+  `## Unshipped` section blocks unless every entry is `[additive]`. There is
+  no acknowledgment flag; the way past a block is to ship the client half.
 - **Shipped entries keep both facts in a fixed position** (bead nexus-h0fo3),
-  because the arming gate reads a pairing's additivity out of this file AFTER
-  the release PR has moved its entry here. A Shipped entry at or above
+  because a gate reading a pairing's additivity out of this file must still
+  find it AFTER the release PR has moved its entry here. A Shipped entry at or above
   `SHIPPED_CONVENTION_FLOOR` (`engine-service-v0.1.92`) must name its engine
   tag exactly once as `engine half <tag>`, and must carry `[additive]` or
   `[not-additive]` LEADING a ` -- ` segment -- a token mid-sentence is a
@@ -51,11 +48,11 @@ carries no method signature for a contract change to reconcile against) is a
 - **Direction-safety token** (nexus-1emxn choreography (a)): an Unshipped
   entry whose note BEGINS with the literal `[additive]` asserts OLD client
   + NEW engine is safe -- the engine half may deploy BEFORE the client
-  tag, so BOTH gates above treat an all-`[additive]` Unshipped section as
+  tag, so every gate above treats an all-`[additive]` Unshipped section as
   authorization instead of a block (no refusal window can open for such
   entries). One shared classifier,
   `check_wire_contract_pairing.classify_unshipped`, interprets the token
-  for both; before nexus-hcdk3 (2026-09-01) only the precondition gate
+  for every mode; before nexus-hcdk3 (2026-09-01) only the precondition gate
   honored it, and the floor gate's `--ledger-only` leg red-gated every PR
   to `main` on entries the precondition gate certified safe. `[not-additive]`
   (or NO leading token -- the fail-safe default for every pre-token entry)

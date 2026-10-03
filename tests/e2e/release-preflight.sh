@@ -69,8 +69,7 @@ check () { # name, command...
     # A red whose reason matched no pattern above used to record an EMPTY
     # detail -- the reader gets "[FAIL] engine-release-floor" and nothing
     # else, and has to re-run the leg by hand to learn why. Measured at the
-    # 7.27.0 cut: check_engine_release_floor.py's exit 3 ("TRACKER NOT
-    # RECORDED (exit 3): ...") names its own remedy in one line and matched
+    # 7.27.0 cut: a gate's one-line refusal named its own remedy and matched
     # nothing. Second tier: this repo's loud-verdict shape -- a line opening
     # with an ALL-CAPS label followed by "(" or ":". Deliberately NOT a
     # last-non-empty-line fallback: these gates interleave PASSING lines
@@ -106,21 +105,12 @@ echo "== release preflight =="
 #    paired acceptance the human Step 0 invocation uses (--paired-deploy: the
 #    named tag must verify published, pinned, newest) -- stricter, never looser,
 #    and the flag names the pairing out loud in the transcript.
-# CLOUD-MODE BOX: check_engine_release_floor.py's bare form exits 3 ("TRACKER
-# NOT RECORDED") by design (nexus-nx3l5) until it is told where conexus's
-# STEP-6 gate reports live. Export NX_GATE_REPORT_DIR=<conexus checkout>/deploy
-# before running this script, or the floor leg reds for a reason that is not a
-# release problem. On a DEV CHECKOUT this leg's tracker write is also an HTTP
-# T2 write, so it additionally needs a reasoned NX_ALLOW_PROD_WRITE="<why>"
-# opt-in past the production-write guard (nexus-a2qhz) -- without it the leg
-# reds with "TRACKER NOT RECORDED ... refused by the production-write guard"
-# naming both required env vars (nexus-jzyt3). Local-mode boxes need neither.
 if [ -n "${NX_PAIRED_DEPLOY:-}" ]; then
     check "engine-release-floor"  uv run python scripts/check_engine_release_floor.py --paired-deploy "$NX_PAIRED_DEPLOY"
 else
     check "engine-release-floor"  uv run python scripts/check_engine_release_floor.py
 fi
-# 2. Merge-blocking on EVERY PR to main -- an unacknowledged ## Unshipped entry
+# 2. Merge-blocking on EVERY PR to main -- a blocking ## Unshipped entry
 #    blocks the release PR itself, not just the tag.
 check "wire-contract-ledger"      uv run python scripts/check_engine_release_floor.py --ledger-only
 # (3 and 4, the remediation-commit gate and its snapshot replay, were RETIRED
@@ -237,8 +227,9 @@ lint_leg_check () {
   # against the captured variable instead, exactly as the lint's own remedy
   # text prescribes.
   [[ "$plain" =~ ([0-9]+)\ passed ]] || { printf '%s\n' "$plain" | tail -3; return 1; }
-  printf '%s' "$plain" > "${TMPDIR:-/tmp}/nx-preflight-lint.txt"
-  uv run python scripts/check_lint_leg_non_vacuity.py "${TMPDIR:-/tmp}/nx-preflight-lint.txt" || return 1
+  # Non-vacuity floor (nexus-wixar): a mass-skip exits 0, so read the PASSED
+  # count off the summary and fail below 400 (ci.yml's test-lint step, same floor).
+  [ "${BASH_REMATCH[1]}" -ge 400 ] || { echo "lint leg passed only ${BASH_REMATCH[1]} tests (floor 400) -- a mass-skip"; return 1; }
 }
 check "lint-leg+floor"            lint_leg_check
 

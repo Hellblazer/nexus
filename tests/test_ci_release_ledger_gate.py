@@ -1,11 +1,10 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""nexus-55r6o: ci.yml must catch an unacknowledged wire-contract-ledger
+"""nexus-55r6o: ci.yml must catch a blocking wire-contract-ledger
 entry on any PR targeting main, before any tag exists, not just at publish
 time.
 
 Root cause this closes: release.yml's `--paired-deploy-auto` invocation of
-`check_client_lag_ledger` has no CI-side bypass by design (no human present
-to type `--ack-client-lag`) -- an unacknowledged
+`check_client_lag_ledger` has no CI-side bypass by design -- a non-additive
 `docs/wire-contract-pending.md` `## Unshipped` entry fails that step CLOSED
 on the tagged commit's FROZEN tree. A `workflow_dispatch` retry of the SAME
 tag cannot pick up a ledger fix (`actions/checkout` pins `ref: inputs.tag`,

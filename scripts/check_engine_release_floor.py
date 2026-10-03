@@ -1,173 +1,71 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
-"""Blocking release-gate: is the LIVE deployed cloud engine current? (nexus-i5c2u)
+"""Blocking release-gate: is the engine this release pins current, both ways? (nexus-i5c2u)
 
-Phase 4 of the engine-version-floor unification (parent bug nexus-b6qlf).
-Root cause this closes: the release checklist's "Engine-freshness gate" step
-was pure prose -- a human had to manually run
-``git log <pinned-engine-tag>..HEAD -- service/`` and judge whether the drift
-was "non-trivial AND cloud-relevant". That judgment call was skipped in
-practice: the cloud engine sat at ``engine-service-v0.1.17`` for 9+ days
-across multiple client releases while develop's
-:data:`nexus.engine_version.REQUIRED_ENGINE_VERSION` floor moved to
-``(0, 1, 34)``. This script replaces the eyeball check with a mechanical one:
-probe the live managed service's ``/version`` handshake and compare its
-``release_version`` against the floor. Exit non-zero (with the deployed
-version, the required floor, and the remedy) when it is stale -- a release
-runbook can then treat this as a hard prerequisite instead of an optional
-step to skim past.
+Root cause this closes: the release checklist's "Engine-freshness gate" was
+prose -- a human had to run ``git log <pinned-engine-tag>..HEAD -- service/``
+and judge whether the drift was "non-trivial AND cloud-relevant". That was
+skipped in practice: the cloud engine sat at ``engine-service-v0.1.17`` for 9+
+days while :data:`nexus.engine_version.REQUIRED_ENGINE_VERSION` moved to
+``(0, 1, 34)``. This script is the mechanical check. It fails in BOTH
+directions:
 
-Reuses :func:`nexus.db.managed_endpoint.resolve_managed_endpoint` and
-:func:`nexus.db.managed_endpoint.probe_managed_service` for all HTTP /
-endpoint-resolution logic, and :func:`nexus.engine_version.parse_engine_version`
-for all version-string parsing -- this module owns none of that, only the
-floor comparison and CLI/exit-code wiring. Note that ``probe_managed_service``
-itself already fails closed (raises :class:`ManagedServiceIncompatible`) on a
-below-floor ``release_version``; the explicit comparison here is a second,
-independently-testable layer so this gate does not silently pass if that
-internal behavior ever changes, and so a caller sees the SAME "named versions"
-message regardless of which layer caught the drift.
+* the LIVE cloud engine is behind the pinned floor (probe of the managed
+  service's ``/version``, via :func:`nexus.db.managed_endpoint.probe_managed_service`;
+  the explicit comparison here is a second, independently testable layer so
+  the gate does not silently pass if the probe's own fail-closed behaviour
+  ever changes);
+* a gated engine tag exists that this release never pinned (local-mode
+  installs get ONLY the pinned identity, so an unpinned tag reaches nobody).
 
-**Paired-release mode** (``--paired-deploy engine-service-vX.Y.Z``, nexus-k1c08,
-2026-08-03): under the paired-release choreography (Hal directive 2026-08-02,
-AGENTS.md § Cutting a release step 0), a client release bumps
-``REQUIRED_ENGINE_VERSION`` to an engine tag whose deploy fires AT client-tag
-push -- so PRE-tag, "cloud ``/version`` reports behind floor" is the EXPECTED
-state, not the i5c2u/b6qlf 9-day-drift red this gate exists to catch. Before
-this flag existed, a paired release's cloud-behind red had no way to
-distinguish itself from real drift except a human writing "acknowledged
-paired" prose into the release PR body -- exactly the eyeball-check failure
-mode this whole module replaced. The flag is NEVER a default: it demands the
-caller name the specific tag being paired against, and accepts a below-floor
-cloud only when ALL of the following independently verify:
+After the floor passes, :func:`check_source_ancestry` (nexus-hs4xl) diffs
+``service/src/main`` between the pinned tag and HEAD: version numbers can
+agree while source disagrees. Exit codes: ``0`` current, ``1`` stale /
+incompatible / drift, ``2`` unverifiable (network, git or gh could not
+answer -- "could not verify" is never treated as "must be fine").
 
-(a) the named tag exists in git AND is a PUBLISHED GitHub release --
-    ``gh release view <tag> --json isDraft,assets`` reports non-draft with a
-    ``nexus-service-linux-amd64`` asset present. That specific asset, not a
-    bare non-empty check, because ``engine-service-release.yml`` documents
-    (and its own comments accept) that both its asset-producing matrices run
-    ``fail-fast: false``, so a release can be non-draft with real assets
-    attached -- a PG bundle, sha256/cosign sidecars -- while carrying ZERO
-    native binaries; ``nexus-service-linux-amd64`` is the specific artifact
-    conexus deploy consumes (per the workflow's own release-notes comment), so
-    its presence is what "published" needs to mean here. ``gh`` missing,
-    failing to answer, or answering without a readable ``isDraft`` field is
-    fail-closed -- same doctrine as :data:`_TAGS_UNAVAILABLE`: "cannot verify"
-    is never "assume fine".
-(b) ``REQUIRED_ENGINE_VERSION`` equals the tag's parsed version EXACTLY --
-    the flag must name the tag THIS release actually pairs with, not any
-    published engine tag.
-(c) the named tag is the newest published ``engine-service-v*`` tag -- a
-    newer tag than the pairing means unaccounted engine work, and the
-    ordinary pin-currency red stays in force.
-(d) the named tag's commit was authored within a bounded freshness window
-    (default 72h, ``--paired-tag-max-age-hours`` to override) of "now". (a)-
-    (c) are otherwise STABLE facts: once a pairing is armed they stay true
-    indefinitely if no further engine tag is cut, so without a freshness
-    bound an operator who reuses ``--paired-deploy`` on a LATER release (the
-    promised post-tag VERIFY skipped, or the deploy silently failed) gets the
-    identical acceptance forever -- reopening the exact i5c2u multi-release
-    drift class this gate exists to close, now with a mechanically-approved
-    green instead of a human eyeball. "Deploy fires AT client-tag push" is
-    the choreography's own claim; a pairing that is weeks old is not this
-    release's partner.
+**Paired-release mode** (``--paired-deploy engine-service-vX.Y.Z``,
+nexus-k1c08): under the paired-release choreography (AGENTS.md § Engine-service
+release) a client release bumps ``REQUIRED_ENGINE_VERSION`` to an engine tag
+whose deploy fires AT client-tag push, so PRE-tag a cloud behind the floor is
+the EXPECTED state. The flag is never a default: it names the tag, and
+accepts a below-floor cloud only when ALL of these verify independently:
+(a) the tag exists in git and is a PUBLISHED GitHub release (non-draft, with
+the ``nexus-service-linux-amd64`` asset -- both release matrices run
+``fail-fast: false``, so a non-draft release can carry zero native binaries);
+(b) ``REQUIRED_ENGINE_VERSION`` equals the tag exactly; (c) it is the newest
+published engine tag; (d) its commit was authored within a freshness window
+(default 72h, ``--paired-tag-max-age-hours``), so a stable pairing cannot be
+reused on a later release. Before those, the wire-contract ledger
+(:func:`check_client_lag_ledger`) and the DATA EFFECT relay
+(:func:`check_data_effect_relay`) must pass. Any miss keeps the gate red with
+a named reason. An unreachable cloud is still exit 2, paired or not, and
+only a genuine, parseable below-floor reading counts as "deploy pending"
+(:func:`_classify_probe_failure`).
 
-Any single miss keeps the gate red with a named reason -- paired mode makes
-the acceptance MORE explicit than the default path, not looser. On an armed
-pairing, a below-floor (or unparseable) cloud ``release_version`` is accepted
-with an explicit "PAIRED MODE" acknowledgment naming the deployed and floor
-versions and instructing the POST-TAG VERIFY: re-run this script WITHOUT
-``--paired-deploy`` once the deploy lands, to confirm the cloud engine
-actually converged rather than silently trusting the pairing forever. An
-at-or-above-floor cloud still prints the ordinary current message (nothing to
-acknowledge), and an unreachable cloud is still exit 2 regardless of pairing
--- unverifiable is never a pass, paired or not. The default (no flag) path is
-byte-for-byte unchanged.
+**Auto-paired mode** (``--paired-deploy-auto``, nexus-gc9ir): the unattended
+counterpart for ``release.yml``. It derives the tag from
+``REQUIRED_ENGINE_VERSION`` and, ONLY when the cloud actually reports below
+that floor, runs the identical battery. When the cloud already meets the floor
+it is a bare-invocation pass; the paired machinery never runs.
 
-**Auto-paired mode** (``--paired-deploy-auto``, nexus-gc9ir, 2026-08-18): the
-UNATTENDED counterpart of ``--paired-deploy`` for ``release.yml``'s own copy
-of this gate. v7.10.0 tag push showed the gap: the workflow ran this script
-bare, with no way to name ``--paired-deploy <tag>`` (there is no human at the
-keyboard to type it), so a routine paired-release's EXPECTED pre-deploy
-cloud-behind state red'd the publish and forced a deploy-first-then-
-``gh run rerun`` dance that defeats the whole point of the parallel window.
-``--paired-deploy-auto`` DERIVES the candidate tag from
-``REQUIRED_ENGINE_VERSION`` (``engine-service-v{major}.{minor}.{patch}`` --
-the same string :func:`_pinned_engine_tag` computes) and, ONLY when the cloud
-actually reports below that floor, runs the IDENTICAL verification battery
-:func:`check_paired_preconditions` already applies to the explicit flag --
-one shared function, two entry points, so a miss in auto mode fails for the
-exact same named reason an explicit ``--paired-deploy`` miss would. Auto mode
-is NOT a weaker check: when the cloud already meets the floor it takes the
-untouched bare-invocation path (pin-currency, then the ordinary "current"
-message) -- the paired machinery (ledger, git/gh tag verification) never
-runs, because the workflow probes the cloud FIRST to decide, rather than
-demanding an explicit human-named tag up front the way ``--paired-deploy``
-does. An unreachable cloud stays exit 2 regardless -- same fail-closed
-doctrine as everywhere else in this module. On acceptance the printed
-acknowledgment states the pairing was AUTO-derived (not human-named) in
-addition to the usual deployed/floor versions and the POST-TAG VERIFY
-obligation.
+**The core tradeoff:** both paired modes accept on TAG legitimacy, never on
+proof the deploy landed. Nothing automated backstops a deploy that never
+fired; the post-tag bare re-run of this script is the human VERIFY, and it is
+required.
 
-**The core tradeoff, stated plainly (review round, 2026-08-18):** BOTH paired
-modes accept on TAG legitimacy (published, exactly pinned, newest, fresh),
-never on proof that the deploy has actually landed. Passing this gate no
-longer means "the deployed cloud engine meets the floor" for a paired
-release -- it means "a genuinely fresh, correctly-cut engine tag exists, and
-the deploy is presumed armed for the choreography's parallel window". A
-CI-side check has no way to observe the deploy relay's actual completion
-(it runs on a different system, on Hal's side of the AGENTS.md bus), so this
-is an accepted gap, not an oversight, and no automation backstops it: the
-DAILY ``engine-floor-verify`` job that used to re-run the BARE gate against
-the real public endpoint was deleted with its workflow (cleanup step 8), so a
-deploy that never fired, or silently failed, is caught only by the human
-POST-TAG VERIFY above. This gate accepting a paired tag is therefore a
-DELIBERATE bet, not a claim that the deploy is verified live;
-see ``test_auto_paired_below_floor_accepts_without_deploy_liveness_signal_by_design``
-in the test file for the behavior pin.
+**Ledger-only mode** (``--ledger-only``, nexus-55r6o): just the tree-static
+ledger read, for release-branch PR CI.
 
-Relatedly: paired acceptance (both modes) requires a GENUINE, parseable
-below-floor ``release_version`` reading -- never merely "the probe raised
-some ``ManagedServiceError``". ``probe_managed_service`` raises
-:class:`ManagedServiceIncompatible` for five distinct reasons (non-200,
-non-JSON body, missing/unparseable ``release_version``, AND the one that
-matters here, a parseable version below the floor) and only the last one
-populates the exception's structured ``deployed_version`` field. An endpoint
-that is simply broken or misconfigured is NOT "deploy pending" and must
-never be folded into paired acceptance -- see :func:`_classify_probe_failure`.
-
-**Post-tag tracker write** (``--record-deploy-from-gate-report DIR``,
-nexus-nx3l5 shape c, 2026-08-28): the bare post-tag VERIFY is where the
-``deployed-engine-version`` T2 tracker gets written, from conexus's own STEP-6
-gate report rather than from a typed ``--gate PASSED``. After the cloud engine
-verifies current AND source ancestry passes, the leg reads the reports in
-``DIR`` (the conexus checkout's ``deploy/``; gitignored there, so operator-local
--- a clone or CI cannot see them), selects the LATEST report (by
-``run_timestamp``) that gated the live ``release_version``, requires it green,
-and writes the tracker through :func:`nexus.deploy_tracker.write_deployed_engine_tracker`
-with the report's basename as the ``gate`` provenance. Nothing is written --
-and the verify exits ``3`` with a named reason -- when no report gated the live
-version, the latest one is red, or the report schema moved. This is what the
-premature write of 2026-08-28 (``gate PASSED`` recorded 17 s before a RED
-report) and the standing omission vector (v0.1.17 stale across three deploys)
-both needed: the write cannot precede the verdict and cannot be skipped by a
-verify that ran. ``$NX_GATE_REPORT_DIR`` supplies ``DIR`` when the flag is
-absent (set it once on the operator's box). A bare verify with NEITHER
-REFUSES -- exit ``3``, tracker not recorded, the flag named -- because a
-verify that passes while silently skipping the record is the omission vector
-in a new place (substantive-critic on 0f2657c03). The only way to run the bare
-verify without recording is the explicit ``--no-record-deploy REASON`` opt-out,
-for a box that does not hold the reports; it prints the note with the reason
-and exits ``0``, and it is visible in the transcript the way a skipped step
-never was (a bare boolean would invite habit; the reason is required). The
-pre-deploy modes (``--paired-deploy``, ``--paired-deploy-auto``,
-``--ledger-only``) never record and refuse both flags: there is no post-deploy
-report to read yet, and ``release.yml``'s auto invocation runs where the
-reports do not exist. The tracker's ``commit`` provenance is resolved AFTER the
-live probe from the LIVE version's tag (``git rev-list -n1
-engine-service-v<live>``), never from the floor tag -- the floor is only a lower
-bound on what is running.
+**Client-precondition mode** (``--client-precondition [TAG]``, nexus-9ssih):
+the mirror image, gating an engine DEPLOY rather than a PyPI release -- are
+the client commits that ``TAG`` REQUIRES already in a released conexus
+version? Checks :data:`ENGINE_CLIENT_PRECONDITIONS` (a hand-filled table,
+currently empty), the DATA EFFECT relay, and the same wire-contract ledger.
+Exit ``1`` when a required client commit is missing from the latest ``v*``
+tag or the ledger has a blocking entry; ``2`` when git cannot be interrogated.
+It gates the DEPLOY, never the tag cut.
 
 Usage::
 
@@ -175,20 +73,13 @@ Usage::
     uv run python scripts/check_engine_release_floor.py --url https://staging.example.com
     uv run python scripts/check_engine_release_floor.py --paired-deploy engine-service-v0.1.63
     uv run python scripts/check_engine_release_floor.py --paired-deploy-auto
-    uv run python scripts/check_engine_release_floor.py --record-deploy-from-gate-report ../conexus/deploy
-    uv run python scripts/check_engine_release_floor.py --no-record-deploy "laptop, no conexus checkout"   # explicit opt-out
-
-Exit codes: ``0`` current, ``1`` stale / incompatible, ``2`` unreachable
-(network/DNS/TLS/timeout -- "could not verify" is never treated as "must be
-fine"), ``3`` deploy verified but the tracker was NOT recorded (no report
-directory given and no ``--no-record-deploy`` opt-out; no green STEP-6 report
-for the live version; or the report schema moved).
+    uv run python scripts/check_engine_release_floor.py --ledger-only
+    uv run python scripts/check_engine_release_floor.py --client-precondition engine-service-v0.1.61
 """
 from __future__ import annotations
 
 import argparse
 import json
-import os
 import pathlib
 import subprocess
 import sys
@@ -196,7 +87,6 @@ from datetime import datetime, timezone
 
 import check_wire_contract_pairing as _wire_ledger
 import list_data_effects as _data_effects
-from nexus import deploy_tracker
 from nexus.gate_advisory import passed_by_default
 from nexus.db.managed_endpoint import (
     ManagedServiceError,
@@ -204,7 +94,6 @@ from nexus.db.managed_endpoint import (
     probe_managed_service,
     resolve_managed_endpoint,
 )
-from nexus.db.service_endpoint import PROD_WRITE_OPT_IN_ENV, ProductionWriteGuardError
 from nexus.engine_version import REQUIRED_ENGINE_VERSION, parse_engine_version
 
 _REMEDY = (
@@ -431,21 +320,13 @@ def _paired_tag_published(tag: str, repo_root: pathlib.Path | None = None) -> tu
 #: to close.
 _DEFAULT_PAIRED_TAG_MAX_AGE_HOURS = 72.0
 
-#: How far into the future a timestamp may sit before it is refused, shared
-#: by BOTH age checks in this module.
-#:
-#: A freshness bound compares a timestamp against "now" and refuses what is
-#: too OLD. It says nothing about what is too NEW, so a timestamp dated
-#: ahead of now satisfies it forever -- the bound's own failure mode
-#: inverted, and an absence rather than a statement, which is why it
-#: survived review. Both timestamps this module bounds come from clocks it
-#: does not own: ``armed_at`` is conexus's wall clock, and a tag's commit
-#: author date is whatever machine authored it (git accepts an arbitrary
-#: author date). Neither is trustworthy in the forward direction.
-#:
-#: Fifteen minutes is generous for NTP-synced hosts and far too short to buy
-#: a meaningful window. This is NOT a second freshness constant -- the
-#: window itself stays :data:`_DEFAULT_PAIRED_TAG_MAX_AGE_HOURS`.
+#: How far into the future the paired tag's commit date may sit before it is
+#: refused. A freshness bound refuses what is too OLD and says nothing about
+#: what is too NEW, so a date ahead of now would satisfy it forever; a commit
+#: author date is whatever machine authored it. Fifteen minutes is generous
+#: for NTP-synced hosts and too short to buy a meaningful window. This is NOT
+#: a second freshness constant -- the window itself stays
+#: :data:`_DEFAULT_PAIRED_TAG_MAX_AGE_HOURS`.
 _FUTURE_CLOCK_TOLERANCE_HOURS = 0.25
 
 
@@ -587,25 +468,21 @@ def check_source_ancestry(pinned_tag: str, repo_root: pathlib.Path | None = None
     return 0
 
 
-def check_client_lag_ledger(ack_beads: list[str] | None = None) -> int:
-    """The both-halves wire-contract ledger gate for the paired-deploy path
-    (nexus-1vogq). The engine-side complement to
-    ``scripts/check_wire_contract_pairing.py``'s static tripwire: this is
-    where the DEPLOY relay itself surfaces an unshipped client half BY NAME,
-    rather than relying on someone having read the ledger prose.
+def check_client_lag_ledger() -> int:
+    """The both-halves wire-contract ledger gate (nexus-1vogq). The engine-side
+    complement to ``scripts/check_wire_contract_pairing.py``'s static tripwire:
+    this is where the DEPLOY relay itself surfaces an unshipped client half BY
+    NAME, rather than relying on someone having read the ledger prose.
 
-    A non-empty ``## Unshipped`` section blocks paired-deploy UNLESS every
-    entry is either named via ``--ack-client-lag <bead-id>`` -- an explicit
-    "yes, I know this client half is not out yet, deploy anyway" rather than
-    a silent pass -- or carries the leading ``[additive]`` direction-safety
-    token (nexus-1emxn choreography (a): old client + new engine is safe, so
-    the engine may deploy ahead of the client tag). The token is interpreted
-    by ``check_wire_contract_pairing.classify_unshipped``, shared with
-    ``check_client_release_precondition.py`` (nexus-hcdk3). ``ack_beads=None``
-    behaves like an empty list: no acknowledgment offered.
+    A non-empty ``## Unshipped`` section blocks unless every entry carries the
+    leading ``[additive]`` direction-safety token (nexus-1emxn choreography
+    (a): old client + new engine is safe, so the engine may deploy ahead of the
+    client tag). The token is interpreted in ONE place,
+    ``check_wire_contract_pairing.classify_unshipped`` (nexus-hcdk3), shared
+    by every mode of this script.
 
-    Returns ``0`` (ledger empty, or every entry acknowledged or additive)
-    or ``1`` (blocking entries present -- named in the message).
+    Returns ``0`` (ledger empty, or every entry additive) or ``1`` (blocking
+    entries present -- named in the message).
     """
     ledger = _wire_ledger.parse_ledger(_wire_ledger.DEFAULT_LEDGER_PATH)
     if not ledger.unshipped:
@@ -615,12 +492,7 @@ def check_client_lag_ledger(ack_beads: list[str] | None = None) -> int:
         )
         return 0
 
-    # nexus-hcdk3: the [additive] token is interpreted in ONE place shared
-    # with check_client_release_precondition.py. Before this, that gate
-    # honored the token and this one did not, so the checked-in ledger got
-    # exit 0 there and exit 1 here, and --ledger-only red-gated every PR to
-    # main on entries the sibling gate certified safe.
-    verdict = _wire_ledger.classify_unshipped(ledger, ack_beads)
+    verdict = _wire_ledger.classify_unshipped(ledger)
     if verdict.blocking:
         entries = "\n".join(
             f"  {e.sha}  bead {e.bead}  engine tag {e.engine_tag}  ({e.note})"
@@ -628,48 +500,32 @@ def check_client_lag_ledger(ack_beads: list[str] | None = None) -> int:
         )
         print(
             f"PAIRED DEPLOY BLOCKED: {len(verdict.blocking)} both-halves commit(s) in "
-            f"{_wire_ledger.DEFAULT_LEDGER_PATH} have an unshipped client half, no "
-            "[additive] direction-safety token, and no acknowledgment:\n"
+            f"{_wire_ledger.DEFAULT_LEDGER_PATH} have an unshipped client half and no "
+            "[additive] direction-safety token:\n"
             f"{entries}\n"
             "\n"
-            "This engine tag cannot deploy without an explicit paired-client "
-            "acknowledgment (nexus-1vogq). Either pair this deploy with the client "
-            "release carrying the listed commit(s), or pass --ack-client-lag "
-            "<bead-id> for each entry above to deploy anyway.",
+            "This engine tag cannot deploy ahead of the client release carrying "
+            "the listed commit(s) (nexus-1vogq). Pair this deploy with that "
+            "client release.",
             file=sys.stderr,
         )
         return 1
 
-    acked_beads = sorted(e.bead for e in verdict.acked)
-    if verdict.additive:
-        acked_suffix = (
-            f" ({len(acked_beads)} further entr"
-            f"{'y' if len(acked_beads) == 1 else 'ies'} acknowledged via "
-            "--ack-client-lag)"
-            if acked_beads else ""
-        )
-        beads = ", ".join(sorted(e.bead for e in verdict.additive))
-        print(
-            f"client-lag ledger: {len(verdict.additive)} unacknowledged unshipped "
-            "both-halves commit(s), all marked [additive] (old client + new engine "
-            "safe) — deploy authorized ahead of the client tag (nexus-1emxn "
-            "choreography (a)); pairing completes when the client release carrying "
-            f"{beads} bumps the floor.{acked_suffix}",
-        )
-        print(
-            passed_by_default(
-                "check_client_lag_ledger",
-                "every unshipped both-halves commit carries the [additive] token; the "
-                "deploy is authorized on that token alone, with no paired client tag "
-                "verified",
-            ),
-        )
-        return 0
-
-    _beads = ", ".join(acked_beads)
+    beads = ", ".join(sorted(e.bead for e in verdict.additive))
     print(
-        f"client-lag ledger: {len(ledger.unshipped)} unshipped both-halves "
-        f"commit(s), all explicitly acknowledged via --ack-client-lag: {_beads}",
+        f"client-lag ledger: {len(verdict.additive)} unshipped both-halves "
+        "commit(s), all marked [additive] (old client + new engine safe) -- "
+        "deploy authorized ahead of the client tag (nexus-1emxn choreography "
+        f"(a)); pairing completes when the client release carrying {beads} "
+        "bumps the floor.",
+    )
+    print(
+        passed_by_default(
+            "check_client_lag_ledger",
+            "every unshipped both-halves commit carries the [additive] token; the "
+            "deploy is authorized on that token alone, with no paired client tag "
+            "verified",
+        ),
     )
     return 0
 
@@ -786,10 +642,8 @@ def check_paired_preconditions(
         )
         return 2
     if age_hours < -_FUTURE_CLOCK_TOLERANCE_HOURS:
-        # Sibling of the armed_at clock-ahead guard below (found in review of
-        # nexus-h0fo3, which added that one and did not sweep for this): the
-        # freshness bound is one-sided, and a commit author date is settable
-        # to anything, so a future-dated tag would satisfy (d) forever.
+        # The freshness bound is one-sided, and a commit author date is
+        # settable to anything, so a future-dated tag would satisfy (d) forever.
         print(
             f"PAIRED MODE REJECTED: {tag}'s commit date is {-age_hours:.1f}h in the "
             f"FUTURE, past the {_FUTURE_CLOCK_TOLERANCE_HOURS:.2f}h skew tolerance. A "
@@ -815,250 +669,6 @@ def check_paired_preconditions(
         f"paired mode ARMED: {tag} verified published, pinned to "
         "REQUIRED_ENGINE_VERSION, newest published engine tag, and "
         f"{age_hours:.1f}h old (within the {max_age_hours:.1f}h window).",
-    )
-    return 0
-
-
-#: Where conexus writes a staged-redeploy arming attestation, one file per
-#: engine tag (bead nexus-h0fo3; see ``docs/release-arming/README.md`` for the
-#: full contract and the key list). In the tagged tree rather than T2 or a
-#: live API because the gate that actually refuses -- ``release.yml`` at
-#: client-tag push -- has no cloud reach beyond an unauthenticated
-#: ``GET /version``, and because a file cannot fail open on a transport error.
-_ARMING_DIR = "docs/release-arming"
-
-
-def arming_required(ledger: "_wire_ledger.Ledger", pairing_tag: str) -> bool:
-    """Does this pairing need an arming attestation? Derived from the wire
-    ledger, never entered by hand (bead nexus-h0fo3's contract).
-
-    A UNION of two rules, because the fact lives in a different section
-    depending on when the gate runs:
-
-    * any ``## Unshipped`` entry that is not ``[additive]``, whatever tag it
-      names. An unshipped entry often names no concrete tag at all -- the
-      live one reads ``engine tag `TBD (next engine-service cut)``` -- so
-      scoping this half by ``pairing_tag`` would match nothing on the
-      ATTENDED pre-bump run, which is the path that works today.
-    * any ``## Shipped`` entry whose ``engine_tag`` equals ``pairing_tag``
-      and is not ``[additive]``. This is the half that survives the release
-      PR moving the entry out of ``## Unshipped``, and without it the gate
-      is inert exactly at tag push.
-
-    Scoping the shipped half by tag is narrower than "any non-additive
-    entry" on purpose: another engine's lagging client half is the ledger
-    gate's business, not this pairing's deploy relay.
-
-    Both halves use :class:`check_wire_contract_pairing.LedgerEntry`'s own
-    documented fail-safe -- ``additive is None`` counts as not additive --
-    so the token has one interpretation in this codebase. For a shipped
-    entry that means anything below
-    :data:`check_wire_contract_pairing.SHIPPED_CONVENTION_FLOOR` demands
-    arming rather than silently passing: a conservative answer on an input
-    no monotonic tag sequence can reach.
-
-    Deliberately NOT built on :func:`check_wire_contract_pairing.classify_unshipped`'s
-    buckets. That function tests acknowledgment FIRST, so an operator
-    passing ``--ack-client-lag`` moves a non-additive entry into ``acked``
-    and out of ``blocking``. An ack says "I know the client half is lagging,
-    proceed anyway"; it does not make the change additive, and it is
-    PRECISELY the case where the relay must be armed.
-
-    What this ADMITS by default, stated so it is a choice and not an
-    absence: an empty or all-``[additive]`` ledger with no matching shipped
-    entry returns False, which is the nexus-1emxn choreography (a) fast path
-    and is correct. It also returns False when a non-additive engine change
-    was never filed in the ledger at all -- that hole belongs to
-    ``check_wire_contract_pairing``'s undeclared-commit lint, which fails on
-    a flagged both-halves commit missing from ``## Unshipped``.
-    """
-    if any(e.additive is not True for e in ledger.unshipped.values()):
-        return True
-    return any(
-        e.additive is not True
-        for e in ledger.shipped.values()
-        if e.engine_tag == pairing_tag
-    )
-
-
-def _arming_attestation_path(tag: str, repo_root: pathlib.Path | None = None) -> pathlib.Path:
-    root = repo_root or pathlib.Path(__file__).resolve().parent.parent
-    return root / _ARMING_DIR / f"{tag}.json"
-
-
-def _read_arming_attestation(path: pathlib.Path) -> tuple[str, object]:
-    """The attestation SENSOR, kept separate from the decision the way every
-    other sensor in this module is (the git/gh subprocesses, the HTTP probe,
-    the ledger parse). Returns ``(kind, value)`` where ``kind`` is exactly
-    one of :func:`check_release_arming`'s ``attestation`` guard values:
-
-    ``("missing", "")`` -- no file. ``("unreadable", reason)`` -- present but
-    unopenable, not UTF-8, not JSON, or JSON that is not an object.
-    ``("present", body)`` -- a parsed dict.
-
-    One sensor with three outcomes, 1:1 with the guard dimension, so the
-    enumerator drives it by patching this single name and the decision path
-    below stays free of filesystem calls.
-    """
-    try:
-        raw = path.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        return ("missing", "")
-    except (OSError, UnicodeDecodeError) as exc:
-        return ("unreadable", str(exc))
-    try:
-        body = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        return ("unreadable", str(exc))
-    if not isinstance(body, dict):
-        return ("unreadable", f"top level is {type(body).__name__}, expected an object")
-    return ("present", body)
-
-
-def check_release_arming(
-    tag: str,
-    max_age_hours: float = _DEFAULT_PAIRED_TAG_MAX_AGE_HOURS,
-    repo_root: pathlib.Path | None = None,
-) -> int:
-    """Is the deploy relay ARMED for this non-additive pairing? (nexus-h0fo3)
-
-    The reader half of ``docs/release-arming/``. conexus writes the
-    attestation when it stages a redeploy; this reads it at client-tag push.
-    Ownership is split so neither side reviews its own half: nexus builds the
-    reader, conexus builds the writer.
-
-    Runs LAST in :func:`_run_paired_precondition_battery`, after
-    :func:`check_paired_preconditions` has established that ``tag`` is
-    well-formed, exists, is published, equals the floor exactly, is the
-    newest, and is itself fresh. Checking an attestation against an
-    unvalidated tag string would report NOT-ARMED for what is really a bad
-    tag. Last position also gives the invariant the contract actually wants:
-    a paired release that returns 0 has ALWAYS emitted an arming verdict.
-
-    Checks exactly the two conditions this side can observe -- ``engine_tag``
-    exact match and ``armed_at`` freshness. ``image_digest`` and
-    ``ssm_param_version`` are conexus's, checked AT THE FLIP: for a
-    non-additive pairing the deploy is armed and held until the client tag
-    lands, so at tag time they are claims about a deploy that has not
-    happened and nobody can verify them.
-
-    Exit codes follow this module's convention: ``1`` for a verifiable
-    refusal (no attestation, wrong tag, missing/stale/future ``armed_at``),
-    ``2`` when the attestation exists but cannot be read or parsed -- "could
-    not verify" is never "must be fine". ``0`` when armed, and ``0`` with a
-    passed-by-default advisory when the ledger says no arming is required.
-    """
-    ledger = _wire_ledger.parse_ledger(_wire_ledger.DEFAULT_LEDGER_PATH)
-    if not arming_required(ledger, tag):
-        print(
-            f"release arming NOT-REQUIRED for {tag}: in "
-            f"{_wire_ledger.DEFAULT_LEDGER_PATH}, no unshipped entry and no shipped "
-            "entry naming this pairing is non-additive, so old client + new engine is "
-            "safe and the deploy may land either side of the client tag (nexus-1emxn "
-            "choreography (a)). BOTH sections are read: the release PR moves an entry "
-            "from Unshipped to Shipped before the tag exists, so reading Unshipped "
-            "alone would answer NOT-REQUIRED for every release.",
-        )
-        print(
-            passed_by_default(
-                "check_release_arming",
-                "no arming attestation was verified; the pass rests entirely on the wire "
-                "ledger's direction-safety tokens -- across BOTH the Unshipped section "
-                "and the Shipped entries naming this pairing -- asserting old client + "
-                "new engine is safe",
-            ),
-        )
-        return 0
-    path = _arming_attestation_path(tag, repo_root)
-    kind, value = _read_arming_attestation(path)
-    if kind == "missing":
-        print(
-            "release arming NOT-ARMED: this pairing carries a NON-ADDITIVE wire "
-            f"change, and no arming attestation exists at {path}. conexus must stage "
-            f"the redeploy for {tag} and write the attestation BEFORE this client tag "
-            "pushes -- a client published against an engine that never deployed makes "
-            "cloud clients refuse the managed service as below-identity (GH #1402). "
-            "See docs/release-arming/README.md.",
-            file=sys.stderr,
-        )
-        return 1
-    if kind == "unreadable":
-        print(
-            f"release arming UNVERIFIABLE: {path} exists but could not be read as a "
-            f"JSON object ({value}). Cannot verify the relay is armed -- treat as a "
-            "failed gate, not a pass.",
-            file=sys.stderr,
-        )
-        return 2
-    body: dict[str, object] = value  # type: ignore[assignment]
-
-    declared = body.get("engine_tag")
-    if declared is None:
-        print(
-            f"release arming NOT-ARMED: {path} carries no `engine_tag` field, so there "
-            "is nothing to match the pairing against. The tag belongs in BOTH the "
-            "filename and the body precisely so the two can disagree detectably "
-            "(docs/release-arming/README.md).",
-            file=sys.stderr,
-        )
-        return 1
-    if declared != tag:
-        print(
-            f"release arming NOT-ARMED: {path} declares engine_tag {declared!r}, but "
-            f"this release pairs with {tag}. An attestation for a different tag is not "
-            "arming for this one.",
-            file=sys.stderr,
-        )
-        return 1
-
-    raw = body.get("armed_at")
-    if raw is None:
-        print(
-            f"release arming NOT-ARMED: {path} carries no `armed_at` field, so the "
-            "arming cannot be dated. An undated attestation is accepted forever, "
-            "which is the freshness bound's whole failure mode.",
-            file=sys.stderr,
-        )
-        return 1
-    try:
-        armed_at = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
-    except ValueError:
-        print(
-            f"release arming NOT-ARMED: {path}'s armed_at is {raw!r}, which does not "
-            "parse as an ISO-8601 instant.",
-            file=sys.stderr,
-        )
-        return 1
-    if armed_at.tzinfo is None:
-        armed_at = armed_at.replace(tzinfo=timezone.utc)
-    age_hours = (datetime.now(timezone.utc) - armed_at).total_seconds() / 3600.0
-    if age_hours < -_FUTURE_CLOCK_TOLERANCE_HOURS:
-        print(
-            f"release arming NOT-ARMED: {path}'s armed_at is {-age_hours:.1f}h in the "
-            f"FUTURE, past the {_FUTURE_CLOCK_TOLERANCE_HOURS:.2f}h skew tolerance. "
-            "armed_at is wall clock from another machine; a future date is a broken "
-            "or forged clock, not a very fresh arming, and would read as fresh "
-            "forever.",
-            file=sys.stderr,
-        )
-        return 1
-    if age_hours > max_age_hours:
-        print(
-            f"release arming NOT-ARMED: {path} was armed {age_hours:.1f}h ago, past "
-            f"the {max_age_hours:.1f}h window. The deploy relay is armed and HELD "
-            "until the client tag lands, so an arming this old is not THIS release's "
-            "-- re-arm immediately before the tag, or override explicitly with "
-            "--paired-tag-max-age-hours.",
-            file=sys.stderr,
-        )
-        return 1
-    armed_by = body.get("armed_by", "unspecified")
-    print(
-        f"release ARMED: {path} attests the redeploy of {tag} was staged by "
-        f"{armed_by} {age_hours:.1f}h ago (within the {max_age_hours:.1f}h "
-        "window). conexus verifies the live image digest and SSM parameter "
-        "version AT THE FLIP -- those are claims about a deploy that has not "
-        "happened yet, so they are not checkable here.",
     )
     return 0
 
@@ -1147,48 +757,20 @@ def _run_paired_precondition_battery(
     tag: str,
     newest: object,
     paired_tag_max_age_hours: float,
-    ack_client_lag: list[str] | None,
 ) -> int:
     """The local, no-network battery an ARMED pairing must clear -- shared by
     BOTH explicit ``--paired-deploy`` and auto-derived ``--paired-deploy-auto``
-    (nexus-gc9ir review round: this sequence was duplicated between
-    :func:`check_floor`'s explicit branch and the auto-mode tail, which is
-    exactly the drift-prone-release-machinery class this bead exists to
-    close -- one function, two call sites, so a future change to the
-    battery cannot land in only one mode by accident).
+    (nexus-gc9ir): one function, two call sites, so a change to the battery
+    cannot land in only one mode by accident.
 
     Order: the both-halves wire-contract ledger (nexus-1vogq) FIRST -- local,
-    no network, actionable without ever looking at ``tag``'s git/gh state --
-    THEN :func:`check_paired_preconditions` (nexus-k1c08), THEN
-    :func:`check_data_effect_relay` (nexus-iu43o), THEN
-    :func:`check_release_arming` (nexus-h0fo3).
+    no network -- THEN :func:`check_paired_preconditions` (nexus-k1c08), THEN
+    :func:`check_data_effect_relay` (nexus-iu43o).
 
-    Arming runs LAST on purpose: it looks up an attestation BY the pairing
-    tag, so it wants a tag the preceding step has already proven well-formed,
-    published, exactly at the floor, newest and fresh -- otherwise a bad tag
-    reports as NOT-ARMED. Last position also means a battery that returns 0
-    has always emitted an arming row.
-
-    That is NOT the same as the contract's "a verdict on EVERY paired
-    release", and the difference is recorded rather than papered over
-    (bead nexus-jv9h3, ruled 2026-09-12: leave the behaviour, keep the prose
-    honest). :func:`_check_floor_auto_paired` probes the cloud FIRST and
-    takes a pin-currency-only path when the cloud already meets the floor --
-    it never calls this battery at all, so no arming row is emitted on that
-    branch. ``release.yml``'s tag-push step runs exactly that mode. The
-    safety property survives, and NECESSARILY rather than probably: the
-    predicate that selects that branch IS
-    ``parsed >= REQUIRED_ENGINE_VERSION`` -- the live cloud already running
-    the engine this release pins, which is the engine carrying the
-    non-additive change. So whenever the skip happens, the deploy has landed,
-    and arming is a claim about a deploy that has not. It is the branch
-    condition, not an observation about typical behaviour. What does not
-    survive is the audit guarantee.
-
-    Returns 0 when all three pass; the first failing check's own named-reason
-    exit code otherwise.
+    Returns 0 when all pass; the first failing check's own named-reason exit
+    code otherwise.
     """
-    ledger_rc = check_client_lag_ledger(ack_client_lag)
+    ledger_rc = check_client_lag_ledger()
     if ledger_rc != 0:
         return ledger_rc
     paired_rc = check_paired_preconditions(
@@ -1196,17 +778,13 @@ def _run_paired_precondition_battery(
     )
     if paired_rc != 0:
         return paired_rc
-    relay_rc = check_data_effect_relay(tag)
-    if relay_rc != 0:
-        return relay_rc
-    return check_release_arming(tag, max_age_hours=paired_tag_max_age_hours)
+    return check_data_effect_relay(tag)
 
 
 def _paired_below_floor_path(
     deployed_version: str,
     newest: object,
     paired_tag_max_age_hours: float,
-    ack_client_lag: list[str] | None,
     *,
     probe: str,
 ) -> int:
@@ -1226,7 +804,7 @@ def _paired_below_floor_path(
     """
     tag = _pinned_engine_tag()
     paired_rc = _run_paired_precondition_battery(
-        tag, newest, paired_tag_max_age_hours, ack_client_lag
+        tag, newest, paired_tag_max_age_hours
     )
     if paired_rc != 0:
         return paired_rc
@@ -1258,7 +836,6 @@ def _check_floor_auto_paired(
     url: str | None,
     newest: object,
     paired_tag_max_age_hours: float,
-    ack_client_lag: list[str] | None,
 ) -> int:
     """``--paired-deploy-auto`` (nexus-gc9ir): probe the cloud FIRST to decide
     which path to take.
@@ -1308,7 +885,7 @@ def _check_floor_auto_paired(
             )
             return 2
         return _paired_below_floor_path(
-            deployed, newest, paired_tag_max_age_hours, ack_client_lag, probe="ms_error_below_floor",
+            deployed, newest, paired_tag_max_age_hours, probe="ms_error_below_floor",
         )
 
     parsed = parse_engine_version(caps.release_version)
@@ -1343,7 +920,7 @@ def _check_floor_auto_paired(
 
     # Reachable, with a genuine parseable release_version below the floor.
     return _paired_below_floor_path(
-        caps.release_version, newest, paired_tag_max_age_hours, ack_client_lag, probe="success_below_floor",
+        caps.release_version, newest, paired_tag_max_age_hours, probe="success_below_floor",
     )
 
 
@@ -1353,7 +930,6 @@ def check_floor(
     paired_deploy: str | None = None,
     paired_deploy_auto: bool = False,
     paired_tag_max_age_hours: float = _DEFAULT_PAIRED_TAG_MAX_AGE_HOURS,
-    ack_client_lag: list[str] | None = None,
 ) -> int:
     """Probe the live managed service and compare against the version floor.
 
@@ -1390,7 +966,6 @@ def check_floor(
             url=url,
             newest=resolved_newest,
             paired_tag_max_age_hours=paired_tag_max_age_hours,
-            ack_client_lag=ack_client_lag,
         )
 
     if paired_deploy is not None:
@@ -1400,7 +975,7 @@ def check_floor(
         # Shared with auto mode's tail (nexus-gc9ir) so the two entry points
         # can never drift on what "armed" means.
         paired_rc = _run_paired_precondition_battery(
-            paired_deploy, resolved_newest, paired_tag_max_age_hours, ack_client_lag
+            paired_deploy, resolved_newest, paired_tag_max_age_hours
         )
         if paired_rc != 0:
             return paired_rc
@@ -1531,104 +1106,138 @@ def check_floor(
     return 0
 
 
-_TRACKER_NOT_RECORDED_NOTE = (
-    "deployed-engine-version tracker NOT recorded by this verify. Pass "
-    "--record-deploy-from-gate-report <conexus checkout>/deploy (or set "
-    f"{deploy_tracker.GATE_REPORT_DIR_ENV}) so the post-tag VERIFY writes the tracker "
-    "from conexus's STEP-6 report (nexus-nx3l5)."
+#: engine tag (or the literal "next" for the tag about to be cut) -> the
+#: client commits that must be in a RELEASED conexus version before that
+#: engine may DEPLOY. Commits, not branches: a branch can move, a commit
+#: either is or is not an ancestor of the release tag.
+#:
+#: Rows exist only for engines AHEAD of ``REQUIRED_ENGINE_VERSION`` -- once the
+#: floor reaches a row's engine, the deploy it gated has happened and the row
+#: is dead weight (:func:`stale_precondition_rows`). Pruned rows, for the record:
+#:   engine-service-v0.1.61 / a62649ef (nexus-9ssih dangling-endpoint 400)
+#:   engine-service-v0.1.62 / 9ba82a3b (nexus-lcmbp 409 conflict_running)
+ENGINE_CLIENT_PRECONDITIONS: dict[str, dict[str, str]] = {}
+
+_PRECONDITION_REMEDY = (
+    "Remedy: this blocks the DEPLOY only -- the engine tag cuts whenever the "
+    "tree is green (a tag gates delivery, not work). Pair the deploy with the "
+    "conexus release that carries the listed commit(s) AND bumps the floor to "
+    "this tag: deploy fires at client-tag push, in parallel with the PyPI "
+    "publish (AGENTS.md § Engine-service release, paired-release "
+    "choreography). Then re-run this check."
 )
-_TRACKER_REFUSAL = (
-    f"TRACKER NOT RECORDED (exit 3): {_TRACKER_NOT_RECORDED_NOTE} A verify that "
-    "passes while silently skipping the record is the omission vector in a new "
-    "place; the explicit opt-out for a box that does not hold the reports is "
-    "--no-record-deploy."
-)
-_TRACKER_OPT_OUT_NOTE = (
-    f"NOTE (--no-record-deploy): {_TRACKER_NOT_RECORDED_NOTE} Record it from a box "
-    "that holds the reports, or with `nx service record-deploy --gate-report-dir`."
-)
 
 
-def _tag_commit(tag: str, repo_root: pathlib.Path | None = None) -> str:
-    """The commit *tag* points at, for the tracker's provenance field.
-
-    Provenance only -- the guarded value is the live-probed version -- so a
-    git failure degrades to ``<commit unrecorded>`` with a stderr note rather
-    than blocking the write.
-    """
-    try:
-        out = subprocess.run(
-            ["git", "rev-list", "-n1", tag],
-            cwd=repo_root, capture_output=True, text=True, check=True, timeout=30,
-        )
-    except (subprocess.SubprocessError, OSError) as exc:
-        print(
-            f"note: commit for {tag} not resolvable from git ({exc}); recording <commit unrecorded>",
-            file=sys.stderr,
-        )
-        return ""
-    return out.stdout.strip()
+def _git(*args: str) -> str:
+    proc = subprocess.run(["git", *args], capture_output=True, text=True, timeout=60)
+    if proc.returncode != 0:
+        raise RuntimeError(f"git {' '.join(args)}: {proc.stderr.strip()}")
+    return proc.stdout.strip()
 
 
-def record_deploy_from_gate_report_leg(
-    report_dir: pathlib.Path, *, url: str | None, repo_root: pathlib.Path | None = None
-) -> int:
-    """The post-tag tracker write (nexus-nx3l5). Returns ``0`` or ``3``.
+def latest_release_tag() -> str:
+    """The most recent conexus release tag (vX.Y.Z, not engine-service-*)."""
+    tags = _git("tag", "-l", "v[0-9]*", "--sort=-v:refname").splitlines()
+    if not tags:
+        raise RuntimeError("no v* release tags found")
+    return tags[0]
 
-    Runs ONLY after the floor and ancestry checks passed. Re-reads the live
-    ``/version`` through the same path ``nx service record-deploy`` uses, so
-    the tracker keeps exactly one writer and one live-assert. The commit
-    provenance is resolved from the LIVE version's tag after that probe --
-    ``check_floor`` only proves ``live >= floor``, so the floor tag may not be
-    what is running.
 
-    nexus-jzyt3: the tracker write itself
-    (``deploy_tracker.write_deployed_engine_tracker``) is an HTTP T2 write,
-    so on a dev-checkout box it can hit ``guard_production_write`` and raise
-    :class:`ProductionWriteGuardError` -- distinct from every
-    ``DeployTrackerError`` subclass above (those are refusals BEFORE any
-    write is attempted) and from ``ManagedServiceError`` (the live re-read).
-    Uncaught, this propagated as a bare Python traceback whose last line
-    (``nexus.db.service_endpoint.ProductionWriteGuardError: STOP: ...``)
-    does not start with an ALL-CAPS verdict token, so
-    ``tests/e2e/release-preflight.sh``'s ``check()`` detail-extraction
-    matched nothing and printed "(no verdict line matched)" instead of the
-    actual refusal -- observed cutting conexus 7.44.0. Caught here so it
-    carries the same ALL-CAPS ``TRACKER NOT RECORDED`` verdict shape as
-    every other tracker refusal.
-    """
-    try:
-        result = deploy_tracker.record_deploy_from_gate_report(
-            report_dir=report_dir, url=url,
-            commit_resolver=lambda live: _tag_commit(f"engine-service-v{live}", repo_root),
-        )
-    except deploy_tracker.DeployTrackerError as exc:
-        print(f"TRACKER NOT RECORDED (exit 3): {exc}", file=sys.stderr)
-        return 3
-    except ManagedServiceError as exc:
-        print(
-            f"TRACKER NOT RECORDED (exit 3): the live /version re-read failed ({exc})",
-            file=sys.stderr,
-        )
-        return 3
-    except ProductionWriteGuardError as exc:
-        print(
-            "TRACKER NOT RECORDED (exit 3): production-write guard refused the "
-            f"tracker write. Set {deploy_tracker.GATE_REPORT_DIR_ENV} + a reasoned "
-            f"{PROD_WRITE_OPT_IN_ENV} ({exc}). This box's nexus resolves from a dev "
-            "checkout, so the tracker write (an HTTP T2 write) is presumed to target "
-            f"the operator's real, live store -- see {PROD_WRITE_OPT_IN_ENV}=\"<why "
-            "this write is deliberate>\".",
-            file=sys.stderr,
-        )
-        return 3
-    for advisory in result.report.advisories:
-        print(f"  STEP-6 advisory ({result.report.basename}): {deploy_tracker.format_advisory(advisory)}")
-    print(
-        f"deployed-engine-version recorded from {result.report.basename}: "
-        f"{result.content}",
+def is_ancestor(commit: str, tag: str) -> bool:
+    proc = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", commit, tag],
+        capture_output=True, text=True, timeout=60,
     )
+    if proc.returncode in (0, 1):
+        return proc.returncode == 0
+    raise RuntimeError(
+        f"git merge-base --is-ancestor {commit} {tag}: {proc.stderr.strip()}"
+    )
+
+
+def check_client_precondition(engine_tag: str) -> int:
+    """Are the client commits ``engine_tag`` requires already released?
+
+    Gates the DEPLOY, never the tag cut. The DATA EFFECT relay is checked
+    first, so a missing or stale attestation is never masked by an empty hand
+    table (nexus-iu43o); then the hand table; then the wire-contract ledger,
+    which is NOT tag-scoped -- a blocking ``## Unshipped`` entry means some
+    client half is missing from every released version, so an unpaired deploy
+    of ANY engine tag risks carrying that gap live.
+    """
+    relay_rc = check_data_effect_relay(engine_tag)
+    if relay_rc != 0:
+        return relay_rc
+
+    required = ENGINE_CLIENT_PRECONDITIONS.get(engine_tag, {})
+    if required:
+        try:
+            release = latest_release_tag()
+        except RuntimeError as e:
+            print(f"CANNOT VERIFY: {e}", file=sys.stderr)
+            return 2
+        missing = []
+        for commit, why in required.items():
+            try:
+                ok = is_ancestor(commit, release)
+            except RuntimeError as e:
+                print(f"CANNOT VERIFY {commit}: {e}", file=sys.stderr)
+                return 2
+            status = "in" if ok else "MISSING FROM"
+            print(f"  {commit}  {status} {release}  ({why.splitlines()[0]}...)")
+            if not ok:
+                missing.append((commit, why))
+        if missing:
+            commits = "\n".join(f"  {commit}: {why}" for commit, why in missing)
+            print(
+                "\n"
+                f"BLOCKED: {engine_tag} must not deploy -- {len(missing)} required client "
+                f"commit(s) absent from the latest release {release}:\n"
+                f"{commits}\n"
+                "\n"
+                f"{_PRECONDITION_REMEDY}",
+                file=sys.stderr,
+            )
+            return 1
+        print(f"OK: all client preconditions for {engine_tag} are in {release}")
+
+    ledger_vacuous = not _wire_ledger.parse_ledger(_wire_ledger.DEFAULT_LEDGER_PATH).unshipped
+    ledger_rc = check_client_lag_ledger()
+    if ledger_rc != 0:
+        return ledger_rc
+    if not required and ledger_vacuous:
+        # An empty table is a LEGITIMATE state but indistinguishable from
+        # "nobody filled the row in", so say out loud that nothing was verified
+        # (nexus-f9z84).
+        print(
+            f"OK (VACUOUS -- 0 preconditions registered for {engine_tag} AND 0 entries "
+            f"in {_wire_ledger.DEFAULT_LEDGER_PATH}'s ## Unshipped section): this run "
+            "verified NOTHING from EITHER source, so it is not evidence the deploy "
+            "is safe.",
+        )
     return 0
+
+
+def stale_precondition_rows(
+    table: dict[str, dict[str, str]] | None = None,
+    floor: tuple[int, ...] | None = None,
+) -> list[str]:
+    """Rows at or behind the floor -- dead weight per the table's contract.
+
+    Takes an injectable table and floor so a test can plant a stale row and
+    watch it come back; looping the real (empty) table proves nothing
+    (nexus-f9z84).
+    """
+    rows = ENGINE_CLIENT_PRECONDITIONS if table is None else table
+    active_floor = REQUIRED_ENGINE_VERSION if floor is None else floor
+    stale: list[str] = []
+    for tag in rows:
+        if tag == "next":  # the about-to-be-cut sentinel is always ahead
+            continue
+        version = tuple(int(n) for n in tag.removeprefix("engine-service-v").split("."))
+        if version <= active_floor:
+            stale.append(tag)
+    return stale
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1658,13 +1267,11 @@ def main(argv: list[str] | None = None) -> int:
         "--paired-deploy-auto",
         action="store_true",
         help="Auto-paired mode (nexus-gc9ir). The unattended counterpart of "
-        "--paired-deploy for release.yml's own copy of this gate, where "
-        "there is no human to name a tag. Derives the candidate tag from "
+        "--paired-deploy for release.yml: derives the tag from "
         "REQUIRED_ENGINE_VERSION and, ONLY when the cloud is confirmed "
         "below that floor, applies the IDENTICAL --paired-deploy "
         "verification battery to it. When the cloud already meets the "
-        "floor this is a byte-for-byte bare-invocation pass -- never "
-        "weaker than the default path. Mutually exclusive with "
+        "floor this is a bare-invocation pass. Mutually exclusive with "
         "--paired-deploy.",
     )
     parser.add_argument(
@@ -1672,32 +1279,11 @@ def main(argv: list[str] | None = None) -> int:
         type=float,
         default=_DEFAULT_PAIRED_TAG_MAX_AGE_HOURS,
         metavar="HOURS",
-        help="Only with --paired-deploy or --paired-deploy-auto (nexus-gc9ir: "
-        "the auto-derived tag goes through the IDENTICAL freshness check): "
-        "override the paired-tag freshness window (default "
-        f"{_DEFAULT_PAIRED_TAG_MAX_AGE_HOURS:g}h). NOTE: this one value bounds "
-        "TWO clocks -- the paired tag's commit age and, on a non-additive "
-        "pairing, the age of conexus's arming attestation -- so loosening it "
-        "for a lagging tag also loosens how old an arming may be. Use only "
-        "when this release "
-        "genuinely lagged its engine tag -- the default exists to stop a "
-        "reused pairing from silently accepting a stale tag across multiple "
-        "releases (nexus-k1c08 fix round).",
-    )
-    parser.add_argument(
-        "--ack-client-lag",
-        action="append",
-        default=None,
-        metavar="BEAD-ID",
-        help="With --paired-deploy, --paired-deploy-auto, or --ledger-only "
-        "(nexus-1vogq; auto mode's below-floor path runs the identical "
-        "ledger check, nexus-gc9ir). Explicit acknowledgment that a "
-        "both-halves commit's client half is not yet in a published "
-        "release -- names the OWNING BEAD of a docs/wire-contract-pending.md "
-        "## Unshipped entry. Repeat for each entry. Without this, a "
-        "non-empty ledger blocks -- release.yml's own auto invocation has "
-        "no way to supply this flag (see its step comment for the operator "
-        "remedy).",
+        help="Only with --paired-deploy or --paired-deploy-auto: override the "
+        f"paired-tag freshness window (default {_DEFAULT_PAIRED_TAG_MAX_AGE_HOURS:g}h). "
+        "Use only when this release genuinely lagged its engine tag -- the "
+        "default stops a reused pairing from accepting a stale tag across "
+        "multiple releases.",
     )
     parser.add_argument(
         "--ledger-only",
@@ -1705,84 +1291,50 @@ def main(argv: list[str] | None = None) -> int:
         help="Pre-tag mode (nexus-55r6o). Runs ONLY check_client_lag_ledger "
         "-- the tree-static docs/wire-contract-pending.md read, no network "
         "probe, no git-ancestry check -- and exits with its result. For "
-        "release-branch PR CI: catches an unacknowledged ## Unshipped "
-        "entry while the tree is still mutable, mirroring the exact check "
-        "that would otherwise fail closed at tag-push time (release.yml's "
-        "--paired-deploy-auto step) with no CI-side remedy once the tag is "
-        "immutable. Mutually exclusive with --url, --paired-deploy, and "
-        "--paired-deploy-auto; combine with --ack-client-lag exactly like "
-        "those modes.",
+        "release-branch PR CI. Mutually exclusive with --url, "
+        "--paired-deploy, --paired-deploy-auto and --client-precondition.",
     )
     parser.add_argument(
-        "--record-deploy-from-gate-report",
+        "--client-precondition",
+        nargs="?",
+        const="",
         default=None,
-        metavar="DIR",
-        help="Post-tag VERIFY only (nexus-nx3l5). After the cloud engine verifies "
-        "current and source ancestry passes, read conexus's STEP-6 gate reports "
-        "from DIR (the conexus checkout's deploy/; gitignored there, so "
-        "operator-local), select the LATEST report that gated the live "
-        "release_version, require it green, and write the deployed-engine-version "
-        "tracker with that report as the gate provenance. Exit 3 and write "
-        "nothing when no report gated the live version, the latest is red, or "
-        f"the schema moved. Defaults to ${deploy_tracker.GATE_REPORT_DIR_ENV} when "
-        "set. Mutually exclusive with --paired-deploy, --paired-deploy-auto, and "
-        "--ledger-only (pre-deploy modes have no report to read).",
-    )
-    parser.add_argument(
-        "--no-record-deploy",
-        default=None,
-        metavar="REASON",
-        help="Explicit opt-out (nexus-nx3l5): run the bare post-tag VERIFY on a box "
-        "that does not hold conexus's STEP-6 reports, without recording the "
-        "tracker. REASON is required and is printed with the note, so the "
-        "transcript says why (the way --ack-client-lag names a bead). Exits 0. "
-        "Without this, a bare verify that has no report directory (flag or "
-        "$NX_GATE_REPORT_DIR) exits 3 -- a passing verify that silently skipped "
-        "the record is the omission vector this leg exists to close. Mutually "
-        "exclusive with --record-deploy-from-gate-report and with the pre-deploy "
-        "modes.",
+        metavar="TAG",
+        help="Deploy-order mode (nexus-9ssih). Verify that the client commits "
+        "engine tag TAG requires are in the latest released conexus version, "
+        "and that the wire-contract ledger has no blocking entry. TAG "
+        "defaults to the pinned REQUIRED_ENGINE_VERSION tag. Gates the "
+        "DEPLOY, never the tag cut. Mutually exclusive with every other mode.",
     )
     args = parser.parse_args(argv)
     if args.paired_deploy is not None and args.paired_deploy_auto:
         parser.error("--paired-deploy and --paired-deploy-auto are mutually exclusive")
-    non_bare = args.paired_deploy is not None or args.paired_deploy_auto or args.ledger_only
-    if args.record_deploy_from_gate_report is not None and non_bare:
+    if args.ledger_only and (
+        args.paired_deploy is not None or args.paired_deploy_auto or args.url is not None
+    ):
         parser.error(
-            "--record-deploy-from-gate-report is the post-tag VERIFY's flag; it is "
-            "mutually exclusive with --paired-deploy, --paired-deploy-auto, and --ledger-only"
+            "--ledger-only is mutually exclusive with --url, "
+            "--paired-deploy, and --paired-deploy-auto"
         )
-    if args.no_record_deploy is not None and not args.no_record_deploy.strip():
-        parser.error("--no-record-deploy needs a REASON (why this box is not recording the tracker)")
-    if args.no_record_deploy is not None and args.record_deploy_from_gate_report is not None:
-        parser.error("--no-record-deploy and --record-deploy-from-gate-report are mutually exclusive")
-    if args.no_record_deploy is not None and non_bare:
-        parser.error(
-            "--no-record-deploy applies to the bare post-tag VERIFY only; the pre-deploy "
-            "modes never record"
-        )
-    # The env default applies to the bare verify only -- a globally-set
-    # NX_GATE_REPORT_DIR must not turn a pre-deploy mode into a recorder, and
-    # it must not override an explicit --no-record-deploy REASON either: the
-    # opt-out is the operator saying "verify only, write nothing" on THIS
-    # invocation, and a globally exported directory (a box that also runs the
-    # recording form) turned it into a tracker write on 2026-09-09 -- refused
-    # by the production-write guard, but only because that guard was there.
-    report_dir: str | None = args.record_deploy_from_gate_report
-    if report_dir is None and not non_bare and args.no_record_deploy is None:
-        report_dir = os.environ.get(deploy_tracker.GATE_REPORT_DIR_ENV, "").strip() or None
-    if args.ledger_only:
-        if args.paired_deploy is not None or args.paired_deploy_auto or args.url is not None:
+    if args.client_precondition is not None:
+        if (
+            args.ledger_only
+            or args.paired_deploy is not None
+            or args.paired_deploy_auto
+            or args.url is not None
+        ):
             parser.error(
-                "--ledger-only is mutually exclusive with --url, "
-                "--paired-deploy, and --paired-deploy-auto"
+                "--client-precondition is mutually exclusive with --url, "
+                "--paired-deploy, --paired-deploy-auto and --ledger-only"
             )
-        return check_client_lag_ledger(args.ack_client_lag)
+        return check_client_precondition(args.client_precondition or _pinned_engine_tag())
+    if args.ledger_only:
+        return check_client_lag_ledger()
     rc = check_floor(
         url=args.url,
         paired_deploy=args.paired_deploy,
         paired_deploy_auto=args.paired_deploy_auto,
         paired_tag_max_age_hours=args.paired_tag_max_age_hours,
-        ack_client_lag=args.ack_client_lag,
     )
     if rc != 0:
         return rc
@@ -1791,24 +1343,7 @@ def main(argv: list[str] | None = None) -> int:
     # validated -- the paired tag when armed (which legitimately carries
     # service source destined for the parallel cut), the pinned floor's tag
     # otherwise.
-    ancestry_tag = args.paired_deploy or _pinned_engine_tag()
-    ancestry_rc = check_source_ancestry(ancestry_tag)
-    if ancestry_rc != 0:
-        return ancestry_rc
-    if non_bare:
-        # Pre-deploy modes verify preconditions; there is no post-deploy
-        # report to record from yet. Byte-for-byte the pre-nx3l5 outcome.
-        return 0
-    if report_dir is None:
-        if args.no_record_deploy is not None:
-            print(
-                f"{_TRACKER_OPT_OUT_NOTE} Reason given: {args.no_record_deploy.strip()}",
-                file=sys.stderr,
-            )
-            return 0
-        print(_TRACKER_REFUSAL, file=sys.stderr)
-        return 3
-    return record_deploy_from_gate_report_leg(pathlib.Path(report_dir), url=args.url)
+    return check_source_ancestry(args.paired_deploy or _pinned_engine_tag())
 
 
 if __name__ == "__main__":

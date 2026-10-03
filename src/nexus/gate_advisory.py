@@ -9,8 +9,8 @@ something else. The gate prints ONE line in a fixed shape and keeps its
 exit code, so a summary can count the lines and a reader can see what the
 green rested on.
 
-Producers: the two release gates (``scripts/check_engine_release_floor.py``
-and ``scripts/check_client_release_precondition.py``), the second-parent
+Producers: the release gate (``scripts/check_engine_release_floor.py``, every
+mode), the second-parent
 evidence path in ``scripts/check_release_ci_evidence.py``, and
 ``tests/e2e/lib/gate_advisory.sh``'s ``passed_by_default`` for the shell
 gates. Consumers count with :func:`count_passed_by_default` or a grep on

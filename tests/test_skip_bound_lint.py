@@ -125,7 +125,7 @@ This lint does not re-implement or shadow:
 * ``tests/conftest.py:1436-1544`` -- the ``mandatory_regression_pin`` /
   ``scenario`` marker-budget guards (this lint READS their existence as a
   bound signal; it does not re-count their skips).
-* ``scripts/check_lint_leg_non_vacuity.py`` -- the CI-leg executed-count
+* the inline passed-count floor in ci.yml's ``test-lint`` job -- the CI-leg
   floor (that guards the whole ``-m lint`` invocation not going vacuous;
   this lint is itself one of the tests that invocation runs).
 * ``tests/containers/fanout.sh:149`` -- the container-fanout shard verdict
