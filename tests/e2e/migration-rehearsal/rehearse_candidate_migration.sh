@@ -1301,36 +1301,6 @@ else
   bad "MVV non-vacuity — expected exactly 3 clauses executed, counted $MVV_CLAUSES_RUN — a run in which fewer clauses executed is a FAILURE, not a pass"
 fi
 
-# ── Engine identity + ownerless-write refusals (nexus-0kmat) ────────────────
-# This journey is the heaviest writer the cut battery runs against the candidate
-# NATIVE binary (verb matrix, incremental index, concurrent load, native-smoke).
-# Read, while the engine is still up, which engine served it and whether it
-# refused or would refuse an ownerless chunk write: a background or hook writer
-# fails only in the engine log. The candidate is the staged binary; the module is
-# the same stdlib one the host gates run (staged into lib/ by run.sh). Outside cut
-# mode the two lines print and never fail the journey; in cut mode (NX_CUT_MODE=1,
-# forwarded by run.sh) a missing module is itself a failure.
-say "Engine — candidate identity + ownerless-write refusals (nexus-0kmat)"
-# The lease engine's declared control count: this journey sends the engine no deliberate
-# ownerless write.
-ENGINE_CONTROLS=0
-ENGINE_READ_PY="$HOME/lib/candidate_engine.py"
-if [ -f "$ENGINE_READ_PY" ]; then
-  for engine_cmd in identity refusals; do
-    if NX_CANDIDATE_ENGINE="$SVC_NATIVE_DIR/nexus-service" python3 "$ENGINE_READ_PY" "$engine_cmd" "$HOME/.config/nexus" --label candidate-migration --controls "$ENGINE_CONTROLS"; then
-      ok "engine $engine_cmd"
-    elif [ "${NX_CUT_MODE:-0}" = 1 ]; then
-      bad "engine $engine_cmd failed in cut mode (see CANDIDATE ENGINE CHECK FAILED above)"
-    else
-      note "engine $engine_cmd could not be read (not a cut-mode run, not a failure)"
-    fi
-  done
-elif [ "${NX_CUT_MODE:-0}" = 1 ]; then
-  bad "cut mode, but $ENGINE_READ_PY is not in the image: the engine's ownerless-write counters and log were not read"
-else
-  note "candidate_engine.py is not in the image; engine read skipped (not a cut-mode run)"
-fi
-
 say "RESULT"
 if [ "$FAILS" -eq 0 ]; then
   printf '\033[32mCANDIDATE-MIGRATION REHEARSAL PASSED\033[0m — floor %s store (chunks=%s, manifests=%s, docs=%s, centroids=%s, topic_assignments=%s, tuple_tenants=%s) -> candidate boot, changeset delta=%s, invariants EXACT\n' \

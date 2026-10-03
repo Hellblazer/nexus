@@ -203,9 +203,7 @@ def test_this_very_process_is_recognised_as_a_dev_checkout() -> None:
     somewhere real -- a guard wired to a predicate that is never true in
     practice is untested code that reads as protection. The test suite runs
     out of the checkout, so the process making this assertion is itself the
-    case the guard exists to catch. Same shape as
-    scripts/check_release_workflow_shape.py phase (a), which asserts
-    is_dev_checkout_process() is True for the process doing the asserting.
+    case the guard exists to catch.
 
     If this fails, the guard has stopped recognising a checkout and every
     other test in this section has gone vacuous without going red.

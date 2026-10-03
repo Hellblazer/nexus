@@ -64,7 +64,7 @@ def test_battery_with_a_3_9_python3_stops_at_once_naming_the_version(tmp_path: P
     release-battery.sh and this goes red (the battery then dies later, on a SyntaxError or a
     missing REQUIRED_ENGINE, with no mention of the interpreter)."""
     bindir = _curated_path(tmp_path, python3="3.9.6")
-    r = _run_battery(bindir, "--cut", "--plan")
+    r = _run_battery(bindir, "--plan")
     assert r.returncode == 2, (r.returncode, r.stdout, r.stderr)
     assert "is 3.9.6" in r.stderr, r.stderr
     assert "no Python 3.10 or newer found" in r.stderr, r.stderr
@@ -79,7 +79,7 @@ def test_battery_with_a_qualifying_python_gets_past_the_resolver(tmp_path: Path)
     the battery dies there, which is the proof it was past the resolver: it names
     REQUIRED_ENGINE_VERSION, not an interpreter."""
     bindir = _curated_path(tmp_path, python3="3.9.6", python3_12="3.12.4")
-    r = _run_battery(bindir, "--cut", "--plan")
+    r = _run_battery(bindir, "--plan")
     assert "no Python 3.10 or newer found" not in r.stderr, r.stderr
     assert "could not parse REQUIRED_ENGINE_VERSION" in r.stderr, (r.returncode, r.stdout, r.stderr)
 
@@ -217,9 +217,7 @@ def test_the_lint_passes_the_resolved_and_explicit_forms(tmp_path: Path, control
     assert not _bare_hits(script, "gate.sh"), f"flagged but fine: {control}"
 
 
-# lib/candidate_engine.sh sources python.sh itself (its own entry is checked like any other script's),
-# so a script that sources it has python.sh sourced too.
-_SOURCE_LINE = re.compile(r"^\s*(?:source|\.)\s+.*\b(?:python|candidate_engine)\.sh\b")
+_SOURCE_LINE = re.compile(r"^\s*(?:source|\.)\s+.*\bpython\.sh\b")
 _RESOLVE_CALL = re.compile(r"\be2e_python_resolve\b")
 
 

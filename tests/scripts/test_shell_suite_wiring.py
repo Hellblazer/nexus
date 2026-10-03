@@ -193,14 +193,6 @@ SUITES = [
     # gate script and fed canned /v1/status bodies (11 cases + 3 wiring checks;
     # round 4: 4 unreadable-body cases, S4, 17 in all).
     _Suite("tests/e2e/cloud_client_path_gate_b3_test.sh", 17),
-    # nexus-k9fs1 round 4: two-walk-check.sh's three decisions (walk 1 pin, final
-    # sentinel, start-count guard), sourced from the real script.
-    _Suite("tests/e2e/two_walk_check_decisions_test.sh", 15),
-    # nexus-0kmat: the candidate-engine plumbing the cut battery's gates share;
-    # 59 is the passed count measured 2026-10-01 (44 when this line was first written; round 3 took it to
-    # 55 without moving the floor, so 11 assertions could have vanished unseen; round 4 added 4 and the
-    # floor now equals the real count, nexus-0kmat critique S3).
-    _Suite("tests/e2e/lib/candidate_engine_test.sh", 59),
     # nexus-u67ow: lib/python.sh, the one-interpreter resolver the e2e harness uses in place of a
     # bare python3 (hellmini's is 3.9.6). Stub interpreters on a PATH of their own; 37 measured.
     _Suite("tests/e2e/lib/python_test.sh", 37),

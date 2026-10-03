@@ -169,9 +169,8 @@ def test_native_smoke_t1_block_scrubs_ambient_session_identity() -> None:
     ambient CLAUDE_CODE_SESSION_ID -- set in every subprocess Claude Code
     spawns, a routine way this script gets run on this project -- passes
     through unisolated exactly like the NX_SERVICE_URL leak nexus-rxqqd
-    already fixed. Found live: the checkout-shape pre-tag check
-    (scripts/check_release_workflow_shape.py, nexus-xihsm) failed its very
-    first real run this way, off this session's own worktree, with
+    already fixed. Found live: a pre-tag checkout-shape check
+    (nexus-xihsm) failed its very first real run this way, off this session's own worktree, with
     T1ServerNotFoundError against a lease that pointed at nothing this
     freshly-booted engine ever published."""
     from pathlib import Path

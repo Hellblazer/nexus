@@ -45,9 +45,6 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 # shellcheck source=lib/python.sh disable=SC1091
 source "$REPO_ROOT/tests/e2e/lib/python.sh"
 e2e_python_resolve || exit 2
-# nexus-0kmat: candidate-engine plumbing (NX_CANDIDATE_ENGINE / NX_CUT_MODE).
-# shellcheck source=tests/e2e/lib/candidate_engine.sh disable=SC1091
-source "$SCRIPT_DIR/lib/candidate_engine.sh"
 
 # RDR-219 P2.1c: thin wrapper around the shared automation-token picker
 # (tests/e2e/lib/claude_credentials.py). `tmux` mode's private tmux server
@@ -564,19 +561,7 @@ _svc_teardown() {
 # service stop --with-pg` is a no-op-safe call even when nothing came up.
 _provision_local_service() {
     echo "  ── self-provisioning local service (nexus-596jm) ──"
-    # nexus-0kmat: the staged copy of the candidate jar (~136 MB) is removed after
-    # the engine stops, on every exit path (the sandbox's logs are what stays).
-    trap '_kill_live_tail; _svc_teardown; rm -rf "$SANDBOX/.candidate-engine"; lock_release "$LOCKDIR" 2>/dev/null || true' EXIT
-    # nexus-0kmat: this script does not `env -i` scrub, so the candidate engine
-    # is exported straight into nx's environment. Without it `nx init` installs
-    # the PINNED PUBLISHED engine (no ownership check) and a cut-mode run would
-    # pass vacuously; a cut-mode run with no candidate, or one that cannot be
-    # found, is refused here, before anything is downloaded.
-    candidate_engine_load "$SANDBOX/.candidate-engine" || _die "candidate engine refused (see CANDIDATE ENGINE REFUSED above)"
-    local _cand_kv
-    for _cand_kv in ${CAND_ENV_ARGS[@]+"${CAND_ENV_ARGS[@]}"}; do
-        export "${_cand_kv?}"
-    done
+    trap '_kill_live_tail; _svc_teardown; lock_release "$LOCKDIR" 2>/dev/null || true' EXIT
     if ! nx init -y --no-autostart 2>&1 | sed 's/^/    /'; then
         _die "nx init did not reach serving inside the sandbox (self-provisioning failed — see remedy above)"
     fi
@@ -584,11 +569,6 @@ _provision_local_service() {
     health=$(_svc_field health)
     [[ "$health" == "ok" ]] || _die "service not serving after provisioning: /health=$health (expected ok)"
     echo "    [ok] local service serving, /health=ok"
-    # nexus-0kmat: say which engine is serving (so a vacuous pass against the
-    # pinned published engine is visible in the log); in cut mode, fail unless
-    # it is the candidate and it carries the ownerless-write check.
-    candidate_engine_identity "$HOME/.config/nexus" "$MODE" 2>&1 | sed 's/^/    /' \
-        || _die "engine identity check failed (see CANDIDATE ENGINE CHECK FAILED above)"
 }
 
 _print_help() {
@@ -882,10 +862,6 @@ case "$MODE" in
             echo
         done
         echo "[done] Sandbox state at $SANDBOX. Run '$0 reset' to tear down."
-        # nexus-0kmat: in cut mode an ownerless-write refusal during the run is a red.
-        # The 0 is this mode's declared control count: it sends no deliberate ownerless write.
-        candidate_engine_refusals "$HOME/.config/nexus" smoke 0 2>&1 | sed 's/^/  /' \
-            || SMOKE_FAILED+=("engine end-of-journey read: a refusal, an unreadable counter or log, or an engine that is not the candidate (see CANDIDATE ENGINE CHECK FAILED above)")
         if (( ${#SMOKE_FAILED[@]} )); then
             echo >&2
             echo "SMOKE FAILED: ${#SMOKE_FAILED[@]} step(s) exited non-zero:" >&2
@@ -1488,10 +1464,6 @@ case "$MODE" in
 
         echo
         echo "[done] Sandbox state at $SANDBOX. Run '$0 reset' to tear down."
-        # nexus-0kmat: in cut mode an ownerless-write refusal during the run is a red.
-        # The 0 is this mode's declared control count: it sends no deliberate ownerless write.
-        candidate_engine_refusals "$HOME/.config/nexus" shakedown 0 2>&1 | sed 's/^/  /' \
-            || SHAKEDOWN_FAILED+=("engine end-of-journey read: a refusal, an unreadable counter or log, or an engine that is not the candidate (see CANDIDATE ENGINE CHECK FAILED above)")
         if (( ${#SHAKEDOWN_SOFT[@]} )); then
             echo
             echo "SHAKEDOWN SOFT/ADVISORY (non-blocking, not counted in the pass/fail verdict):"

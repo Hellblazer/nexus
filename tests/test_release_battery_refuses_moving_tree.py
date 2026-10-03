@@ -15,9 +15,7 @@ first is enforceable and the second is advice, and this rule set's own
 history says advice decays". This tests the enforceable half.
 
 THE GUARD IS EXTRACTED FROM THE REAL SCRIPT, never retyped here. That is
-this repo's existing pattern for shape checks over shell
-(``extract_release_native_build_argv`` in
-``scripts/check_release_workflow_shape.py``, pinned by its own test) and it
+this repo's existing pattern for shape checks over shell, and it
 exists because a retyped copy passes happily while the original drifts. If
 either marker comment disappears, :func:`_extract_guard` fails loudly
 rather than silently testing nothing.

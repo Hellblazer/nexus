@@ -258,8 +258,7 @@ def test_ground_truth_topics_tenant_scoped_unique_present(census_state):
     "pin only the UNIQUE if cc5 held the repoint back" branch did NOT
     fire — p5a shipped all five changesets (the UNIQUE plus all four
     repoints) unconditionally on develop, guarded instead by a runtime
-    fail-loud cross-tenant check and the pre-tag
-    ``check_rdr194_cc5_delivery_gate.py`` script. This test pins the
+    fail-loud cross-tenant check. This test pins the
     UNIQUE alone; the four FK ground truths follow below."""
     sql = """
     SELECT con.conname

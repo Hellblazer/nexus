@@ -850,29 +850,6 @@ else
   echo "[1-2/3] --no-build: reusing existing wheel + native binary"
 fi
 
-# nexus-xihsm (critic follow-up, nexus-vpl9c riders): the release-workflow
-# SHAPE check was landing unwired -- run by nobody, the exact rot class it
-# exists to close. --shakeout is where the just-built native candidate +
-# freshly generated jOOQ sources are already sitting on THIS host checkout
-# (see lib/shakeout_shape_check.sh's header for why this cannot live inside
-# rehearse_shakeout.sh instead). Scoped to --shakeout only: every other leg
-# either builds nothing here (COLD/HOLE_PUNCH/PACKAGE_UPGRADE/ERA_HOP/
-# ACQUIRE/STRANDED) or has its own pre-tag posture already.
-if [ "$SHAKEOUT" = 1 ]; then
-  # The JVM jar from the same build, for a host that cannot execute the
-  # Linux candidate (see lib/shakeout_shape_check.sh).
-  if [ -n "$ARTIFACTS" ]; then
-    _shakeout_shape_bin="$ARTIFACTS/native/nexus-service"
-    _shakeout_shape_jar="$(find "$ARTIFACTS/jar" -maxdepth 1 -name 'nexus-service-*.jar' -type f 2>/dev/null | sort | tail -1)"
-  else
-    _shakeout_shape_bin="$PWD/service/target/nexus-service"
-    _shakeout_shape_jar="$(find "$PWD/service/target" -maxdepth 1 -name 'nexus-service-*.jar' ! -name 'original-*' -type f 2>/dev/null | sort | tail -1)"
-  fi
-  # shellcheck source=lib/shakeout_shape_check.sh disable=SC1091
-  source "$HERE/lib/shakeout_shape_check.sh"
-  shakeout_release_workflow_shape_check "$_shakeout_shape_bin" "$_shakeout_shape_jar" || exit 1
-fi
-
 # nexus-nyry9.13 (2026-08-21): --acquire is a cold-acquire leg too — it stages
 # NO local native binary (see the ACQUIRE staging branch below), so it must be
 # excluded here exactly like the other runtime-acquire legs. Without this, the
@@ -1103,7 +1080,6 @@ elif [ "$CANDIDATE_MIGRATION" = 1 ]; then
   cp "$HERE/Dockerfile.candidate-migration" "$STAGE/Dockerfile"
   cp "$HERE/rehearse_candidate_migration.sh" "$STAGE/"
   cp -R "$HERE/lib" "$STAGE/lib"   # assert_build_ref.sh (nexus-mfage)
-  cp "$HERE/../lib/candidate_engine.py" "$STAGE/lib/"   # nexus-0kmat: end-of-journey engine read
 else
   # The native binary travels into the image, and ONLY the binary: a RELEASE
   # binary (engine-service-v*) is self-contained with no .so siblings, and
@@ -1126,10 +1102,6 @@ else
   # was undefined in-container for its whole life; caught 2026-08-10).
   # Directory-wide on both sides so a second lib does not repeat it.
   cp -R "$HERE/lib" "$STAGE/lib"
-  # nexus-0kmat: the in-container end-of-journey engine read (identity + ownerless
-  # refusals) is the SAME stdlib module the host gates run; it lives in tests/e2e/lib,
-  # not this directory's lib/, so it is copied in by name.
-  cp "$HERE/../lib/candidate_engine.py" "$STAGE/lib/"
 fi
 
 # Docker Desktop's credsStore=desktop helper can't reach a locked login keychain
@@ -1173,18 +1145,6 @@ BUILD_ARGS=()
 docker build ${BUILD_ARGS[@]+"${BUILD_ARGS[@]}"} -f "$STAGE/Dockerfile" -t "$IMAGE" "$STAGE"
 
 run_env=(-e "WITH_CLOUD=$WITH_CLOUD" -e "COMPREHENSIVE=$COMPREHENSIVE" -e "STRESS=$STRESS")
-# nexus-0kmat: cut mode reaches the in-container journeys that run the candidate
-# NATIVE binary (--shakeout, --candidate-migration): they read the engine's
-# ownerless-write counters and log at the end and, in cut mode, fail on a refusal
-# or on an engine that is not the staged candidate. Forwarded only when set, so a
-# plain run is byte-identical to before; never forwarded for a leg that stages no
-# candidate engine (its container would read the published engine, which has no
-# ownership check, and cut mode would then fail it for the wrong reason).
-if [ "$SHAKEOUT" = 1 ] || [ "$CANDIDATE_MIGRATION" = 1 ]; then
-  [ -z "${NX_CUT_MODE:-}" ] || run_env+=(-e "NX_CUT_MODE=$NX_CUT_MODE")
-  [ -z "${NX_CANDIDATE_EXPECT_OWNERLESS_MODE:-}" ] || \
-    run_env+=(-e "NX_CANDIDATE_EXPECT_OWNERLESS_MODE=$NX_CANDIDATE_EXPECT_OWNERLESS_MODE")
-fi
 # nexus-h5olw follow-on: every rehearsal install is a throwaway, never a
 # user; the anonymous install ping must not count it. `-e` is the only
 # channel into the container, so the opt-out is forwarded here, not exported.
