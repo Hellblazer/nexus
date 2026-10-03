@@ -270,7 +270,6 @@ GATE_LIKE_SKIP_ALLOWLIST: dict[str, int] = {
     # (bash is assumed present on every dev/CI box this suite runs on), plus
     # a sibling "no ```! bash block found" content skip in the same test
     # function that inherits the function-level bash-availability marker.
-    "tests/test_plugin_structure.py": 2,
     # pytest.importorskip("yaml") reading the plugin-surface-smoke workflow.
     "tests/test_plugin_surface_smoke_wiring.py": 1,
     # skipif(os.path.exists("/.dockerenv") or .../.containerenv) -- this
