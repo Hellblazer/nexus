@@ -45,6 +45,7 @@ stale -- and stays exactly where it is until moved back deliberately.
 
 ONE PATH PER BULLET, on the bullet's FIRST line.
 
+- cleanup step 15 (nexus-0r1uz): `conexus/skills/writing-nx-skills/SKILL.md` points at the renamed frontmatter test (`test_every_skill_frontmatter_is_valid`); text pointer only.
 - cleanup step 12 (nexus-0r1uz): `conexus/skills/rdr-audit-checklist/SKILL.md` drops the `schedule` and `unschedule` subcommands and their plist and crontab templates; `list`, `status` and `history` stay. The template files under `scripts/` they pointed at are deleted.
 - cleanup step 12 (nexus-0r1uz): `conexus/commands/rdr-audit.md` drops the `schedule` / `unschedule` text; the management subcommands are `list`, `status` and `history`, all read-only.
 - cleanup step 7 (nexus-0r1uz): `conexus/skills/orchestration/SKILL.md` drops its text about the agent-verify-claims checker script (the script is deleted); the orchestrator still re-runs each reported COMMAND itself.
