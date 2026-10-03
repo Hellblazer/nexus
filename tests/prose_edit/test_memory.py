@@ -1033,8 +1033,11 @@ def test_a_t2_failure_is_reported_in_the_scripts_words_not_nxs_remedy(
          "T2 request failed (exit 1): Error: this install predates the current storage layout."),
         ("Error: run nx doctor", "T2 request failed (exit 1)"),
         ("Usage: NX memory get\nError: no such option: --bogus", "T2 request failed (exit 1): Error: no such option: --bogus"),
+        ("Error: the engine is older than this client. Upgrade it, or restart the\n"
+         "supervisor: daemon service restart", "T2 request failed (exit 1): Error: the engine is older than "
+         "this client. Upgrade it, or restart the"),
     ],
-    ids=["remedy-line-dropped", "only-a-remedy", "case-blind"],
+    ids=["remedy-line-dropped", "only-a-remedy", "case-blind", "wrapped-remedy"],
 )
 def test_any_other_nx_failure_keeps_its_cause_and_drops_the_lines_that_name_nx(
     prose: Prose, tmp_path: Path, nx_stderr: str, says: str,

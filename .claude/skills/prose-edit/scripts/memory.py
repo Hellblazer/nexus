@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""T2 records for the prose editor (RDR-221, "Memory in T2"), through `nx memory`.
+"""T2 records for the prose editor (RDR-221, "Memory in T2").
+
+The records go through the `nx memory` CLI.
 
 Every other part of the editor reads and writes these records through this
 script, never through `nx memory put` directly. It is stdlib only and never
@@ -620,11 +622,13 @@ def neutral_cause(detail: str) -> str:
     return "the storage service could not be reached"
 
 
-_NAMES_NX = re.compile(r"\bnx\b", re.IGNORECASE)
+# The words a remedy line carries. "daemon" and "doctor" also catch the continuation of a
+# remedy that nx wrapped onto a second line ("... or restart the\nsupervisor: nx daemon ...").
+_NAMES_NX = re.compile(r"\bnx\b|daemon|doctor|repair|start a service", re.IGNORECASE)
 
 
 def without_nx(detail: str) -> str:
-    """The last 20 lines of nx's error text, minus every line that names nx, as ": ..." or "".
+    """The last 20 lines of nx's error text, minus every line that names nx or a repair, as ": ..." or "".
 
     The lines that name nx are its remedies ("run 'nx upgrade'"), addressed to an operator;
     a model that reads one runs it (nexus-ger02.15). The rest (a refusal, a cause) is kept.
