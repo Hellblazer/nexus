@@ -312,7 +312,7 @@ rdr_skills:
 
   phase-review-gate:
     slash_command: /phase-review-gate
-    description: "Cross-walk RDR §Approach against closing beads at a phase boundary; blocks silent scope reduction"
+    description: "Manual checklist: cross-walk RDR §Approach against closing beads at a phase boundary to catch silent scope reduction"
     triggers:
       - "phase review gate"
       - "cross-walk approach"

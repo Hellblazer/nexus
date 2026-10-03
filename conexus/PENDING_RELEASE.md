@@ -69,8 +69,14 @@ ONE PATH PER BULLET, on the bullet's FIRST line.
 - cleanup step A2 (nexus-0r1uz): `conexus/agents/substantive-critic.md` drops the "NEVER write a `review-completed` marker" section; the bd-close gate that read the marker is deleted.
 - cleanup step A2 (nexus-0r1uz): `conexus/skills/code-review/SKILL.md` drops the "On Completion (Mandatory)" section about the `review-completed` marker.
 - cleanup step A2 (nexus-0r1uz): `conexus/resources/agent-shared/CONTEXT_PROTOCOL.md` drops the reserved `review-completed` token section and keeps the note on handing findings to a sibling reviewer through T2.
-- cleanup step A2 (nexus-0r1uz): `conexus/skills/phase-review-gate/SKILL.md` says no hook reads the PASSED sentinel now; the gate's own steps stay.
 - cleanup steps A2 and A3 (nexus-0r1uz): `conexus/README.md` drops the hook table rows for the bd-close gate, the phase-review close gate, Stop verification, StopFailure, PostCompact and the divergence-language guard, and the divergence scan script from the file tree.
+- cleanup step 13 (nexus-0r1uz): `conexus/skills/phase-review-gate/SKILL.md` is rewritten as a short manual checklist: the Pass 1 / Pass 2 contract, the `--evidence` format, the sentinel and the T1 marker are gone, because the `nx rdr preamble phase-review-gate` verb that produced them is deleted. The cross-walk of §Approach against closing beads, the RDR-112 root cause and the limits stay.
+- cleanup step 13 (nexus-0r1uz): `conexus/skills/rdr-close/SKILL.md` drops Step 1.5 (Problem Statement Replay, branches A to D), the `Force Implemented (audit)` short-circuit, the `rdr-close-active` T1 marker and every `--reason` / `--pointers` / `--force-implemented` / `--force` flag that only the deleted `nx rdr preamble rdr-close` verb parsed; the critic step takes an override reason from the user instead of a flag. The status flip via `nx rdr set-status`, the post-mortem and the T3 archival stay.
+- cleanup step 13 (nexus-0r1uz): `conexus/skills/rdr-create/SKILL.md` stops saying `/conexus:rdr-close` enforces the Gap headings; only `/conexus:rdr-gate` Layer 1 does.
+- cleanup step 13 (nexus-0r1uz): `conexus/resources/rdr/TEMPLATE.md` stops saying `/conexus:rdr-close` enforces the Gap headings; only `/conexus:rdr-gate` Layer 1 does.
+- cleanup step 13 (nexus-0r1uz): `conexus/skills/using-nx-skills/SKILL.md` describes the phase-review-gate checklist without the Pass 1 / Pass 2 and BLOCKED wording of the deleted verb.
+- cleanup step 13 (nexus-0r1uz): `conexus/registry.yaml` calls phase-review-gate a manual checklist that catches, not blocks, silent scope reduction.
+- cleanup step 13 (nexus-0r1uz): `conexus/README.md` calls phase-review-gate a manual checklist that catches, not blocks, silent scope reduction.
 
 ## Deferred to the next client release
 

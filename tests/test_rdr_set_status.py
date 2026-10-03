@@ -624,7 +624,7 @@ to = { status = "a" }
 
 
 # ---------------------------------------------------------------------------
-# RDR-201 P1.5: the rdr-accept / rdr-close preambles' eligible-status
+# RDR-201 P1.5: the rdr-accept preamble's eligible-status
 # guards derive from these helpers against the LOADED table, not an
 # independently hand-typed literal (nexus-j9z30.5). A table swapped in via
 # monkeypatch with a DIFFERENT accept/close source status proves the
@@ -714,7 +714,7 @@ def _write_preamble_rdr(rdr_dir: Path, num: int, status: str, title: str) -> Pat
 
 
 class TestAcceptCloseGuardsDeriveFromTable:
-    """Proves the accept/close preamble guards and listings are bound to
+    """Proves the accept preamble guard and listing are bound to
     the loaded table's rows, not an independently hand-typed literal."""
 
     def test_accept_listing_follows_table_accept_source(self, tmp_path, monkeypatch):
@@ -779,45 +779,6 @@ class TestAcceptCloseGuardsDeriveFromTable:
         result = _runner().invoke(rdr, ["preamble", "rdr-accept", "--", "1"])
         assert result.exit_code == 0, result.output
         assert "BLOCKED" not in result.output
-
-    def test_close_guard_follows_table_close_source(self, tmp_path, monkeypatch):
-        rdr_dir = _preamble_rdr_dir_for(tmp_path)
-        fake_table = _write_fake_lifecycle_table(tmp_path)
-        monkeypatch.setattr(rdr_mod, "load_packaged_table", lambda *a, **k: fake_table)
-        monkeypatch.chdir(tmp_path)
-        _write_preamble_rdr(rdr_dir, 1, "greenlit", "Greenlit")
-
-        result = _runner().invoke(rdr, ["preamble", "rdr-close", "--", "1"])
-        assert result.exit_code == 0, result.output
-        assert "BLOCKED" not in result.output
-
-    def test_close_guard_blocks_real_table_accepted_when_table_differs(
-        self, tmp_path, monkeypatch
-    ):
-        rdr_dir = _preamble_rdr_dir_for(tmp_path)
-        fake_table = _write_fake_lifecycle_table(tmp_path)
-        monkeypatch.setattr(rdr_mod, "load_packaged_table", lambda *a, **k: fake_table)
-        monkeypatch.chdir(tmp_path)
-        _write_preamble_rdr(rdr_dir, 1, "accepted", "Accepted")
-
-        result = _runner().invoke(rdr, ["preamble", "rdr-close", "--", "1"])
-        assert result.exit_code == 0, result.output
-        assert "BLOCKED" in result.output
-
-    def test_close_message_no_longer_names_retired_final_status(
-        self, tmp_path, monkeypatch
-    ):
-        """``final`` is retired from the table's domain (RDR-201 Revision
-        History); the close-preamble BLOCKED message must not advertise it
-        as an acceptable close-source status any more."""
-        rdr_dir = _preamble_rdr_dir_for(tmp_path)
-        monkeypatch.chdir(tmp_path)
-        _write_preamble_rdr(rdr_dir, 1, "draft", "Hello World")
-
-        result = _runner().invoke(rdr, ["preamble", "rdr-close", "--", "1"])
-        assert result.exit_code == 0, result.output
-        assert "BLOCKED" in result.output
-        assert "final" not in result.output.lower()
 
 
 # ---------------------------------------------------------------------------

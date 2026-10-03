@@ -1,133 +1,38 @@
 ---
 name: phase-review-gate
-description: Use when a phase boundary is being closed — cross-walk RDR §Approach against closing beads to block silent scope reduction before it is discovered mid-implementation
+description: Use when a phase boundary is being closed — cross-walk RDR §Approach against closing beads to catch silent scope reduction before it is discovered mid-implementation
 effort: low
 ---
 
 # Phase Review Gate Skill
 
-Enforces the §Approach cross-walk at every phase-review boundary. Before a phase can be declared closed, every numbered item in the RDR's §Approach section must have an evidence pointer (closing bead ID or explicit deferral acknowledgement).
+A manual checklist for the phase boundary. Before a phase is declared closed, every numbered item in the RDR's phase structure (§Approach, or the `### Phase N` / `#### Step N` headings under §Implementation Plan) has an evidence pointer: a closing bead ID, or an explicit deferral.
 
-This is the phase-level analogue of the RDR-065 Problem Statement Replay gate: the RDR-065 gate verifies problem gaps are addressed at close time; this gate verifies approach items are addressed at each phase boundary.
+**Root cause it prevents**: silent scope reduction found mid-implementation. RDR-112 Phase 1 (nexus-52lb, 2026-05-15) shipped T2-only work and §Approach item 2 (T3 daemon) was dropped without a word. A bead acceptance criterion (`mcp_infra.get_t3() -> T3Client`) could not compile three closed phases later. Cost: 2-3 days of replanning. The cross-walk takes about 15 minutes.
 
-**Root cause it prevents**: silent scope reduction discovered mid-implementation. RDR-112 Phase 1 (nexus-52lb, 2026-05-15) shipped T2-only work; §Approach item 2 (T3 daemon) was silently dropped. Discovered three closed phases later when a bead acceptance criterion (`mcp_infra.get_t3() -> T3Client`) could not compile. Cost: 2-3 days of replanning. The gate would have blocked the close in 15 minutes.
+## When to Use
 
-## When This Skill Activates
+- A phase-review bead (title contains "P{N}.review" or "Phase {N} gate") is about to close.
+- The implementation plan changed during the phase, or a phase was paused and resumed weeks later.
 
-- User says "phase review gate", "cross-walk the approach", "close phase N"
-- User invokes `/conexus:phase-review-gate`
-- A phase-review bead (title contains "P{N}.review" or "Phase {N} gate") is about to close
-- Any time phases are being closed and the closer wants to verify no work was silently dropped
+## Steps
 
-## Input
+1. Read the RDR's phase structure and list every numbered item for the phase being closed.
+2. For each item, find the closing bead (`bd show <id>`) whose acceptance criteria cover it. Write `Item N = <bead-id>`.
+3. An item with no closing bead is either unfinished or deferred. Finish it, or write `Item N = none` with a one-line reason (for example "T1 stays put, no work needed").
+4. Do not close the phase while an item has no pointer and no stated deferral.
 
-- **RDR ID** (required) — e.g., `112`
-- **Phase number** (required) — `--phase 1`
-- **Evidence** (Pass 2 only) — `--evidence 'Item1=nexus-abc1,Item2=nexus-xyz2,Item3=none'`
+Nothing enforces this. No command checks the list and nothing blocks the close. The reviewer is accountable for every `none`.
 
-## Two-Pass Contract
+## Limits
 
-### Pass 1 — Enumerate (no --evidence supplied)
-
-The preamble script reads §Approach from the RDR file, parses all numbered items, and prints them as a table. It instructs the reviewer to provide an evidence pointer per item and re-invoke with `--evidence`.
-
-Output format:
-```
-| # | Label | Evidence needed |
-|---|-------|-----------------|
-| Item1 | T2 service | (provide bead-id or `none`) |
-| Item2 | T3 service | (provide bead-id or `none`) |
-...
-```
-
-### Pass 2 — Validate (--evidence supplied)
-
-The preamble validates that every enumerated item has a non-empty evidence pointer. Evidence values:
-- **Bead ID** (`nexus-abc1`): the closing bead whose acceptance criteria cover this approach item.
-- **`none`**: explicit deferral — the reviewer acknowledges this item is not in scope for this phase. Use this for items like "T1 stays put" (no work needed) or genuinely deferred sub-work.
-
-**BLOCKED**: any item missing from --evidence, or with an empty value, causes the gate to emit BLOCKED and exit. The missing items are named explicitly.
-
-**PASSED**: all items covered. The gate emits the evidence table, a T1 scratch marker tagged `phase-review-passed,rdr-NNN,phase-N`, and a sentinel file at `${TMPDIR:-/tmp}/nx-phase-gate-sentinel/<claude_pid>-<rdr-id>-<phase>.json`. No hook reads the sentinel now: the `phase_review_close_requires_gate` PreToolUse routing hook (RDR-121) that fail-closed-denied a phase-review `bd close` was deleted at cleanup step A2 (nexus-0r1uz), so the gate is advisory. Dead-pid sentinels are swept on every PASSED write.
-
-## Evidence Format
-
-```
-Item1=nexus-61x6,Item2=nexus-t3xx,Item3=nexus-7ejx,Item4=none,Item5=nexus-lint1
-```
-
-- Keys are `ItemN` (case-insensitive, numeric suffix required). `N` is the number Pass 1 printed, which is the RDR's own item number except when §Approach holds two lists that each restart at 1 (two tracks under `####` sub-headings): then Pass 1 gives the colliding items fresh numbers above every number in use and prefixes each such label with its list's heading, so four items need four pointers; an item whose number is unique in the section keeps it. Always copy the keys from the Pass 1 table.
-- Values are bead IDs or `none`
-- Comma-separated, no spaces required around `=` or `,`
-
-## Worked Example — RDR-112 Phase 1
-
-RDR-112 has 9 §Approach items. Phase 1 closed beads covered items 1, 3, 6, 7, 8, 9. Items 2 (T3 service) and 5 (storage boundary lint) had no closing beads.
-
-**Pass 1 invocation:**
-```
-/conexus:phase-review-gate 112 --phase 1
-```
-
-**Pass 1 output** (abridged):
-```
-| Item1 | T2 service | (provide bead-id or `none`) |
-| Item2 | T3 service | (provide bead-id or `none`) |
-...
-```
-
-**Pass 2 invocation (with the nexus-52lb gap — would BLOCK):**
-```
-/conexus:phase-review-gate 112 --phase 1 --evidence 'Item1=nexus-61x6,Item3=nexus-7ejx,...'
-```
-
-Output:
-```
-> BLOCKED — Phase 1 cross-walk incomplete.
-> 2 of 9 approach items have no evidence pointer.
-
-### Missing Evidence
-- Item2 (T3 service): no evidence pointer supplied
-- Item5 (Any future persistent store): no evidence pointer supplied
-```
-
-**Pass 2 invocation (complete — would PASS):**
-```
-/conexus:phase-review-gate 112 --phase 1 --evidence 'Item1=nexus-61x6,Item2=nexus-t3xx,...,Item9=nexus-w0et'
-```
+- It checks coverage, not correctness: a bead pointer passes even when that bead's acceptance criteria are weak. Open the evidence and read it.
+- It does not check that code paths between accounted-for items work together. RDR-112 Phase 3 (2026-05-18) covered every item and still shipped a production regression, caught only by a second code review that named boundary-spanning suspect categories. Where the phase ships integration-seam code (process spawning, supervisor interaction, RPC wiring, env-var resolution), also dispatch `code-review-expert` with the suspect categories from `/conexus:code-review` § Prompt rigour.
 
 ## Relationship to Other Gates
 
 | Gate | Scope | When |
 |------|-------|------|
-| `/conexus:rdr-gate` | Whole RDR structure + assumptions + AI critique | Before RDR acceptance |
-| `/conexus:rdr-close --reason implemented` | Problem Statement gaps (file:line pointers) | At RDR close time |
-| `/conexus:phase-review-gate` | §Approach items (bead pointers) | At each phase boundary |
-
-Phase review gate is NOT a substitute for rdr-close's Problem Statement Replay. Both gates run at their respective lifecycle points.
-
-## When to Invoke
-
-Invoke before closing any phase-review bead — especially when:
-- A phase spans multiple beads and the review gate bead has a title like "Phase N review gate" or "P{N}.review"
-- The implementation plan changed during the phase (the most common time for silent drops)
-- A phase was paused and resumed weeks later
-
-## Limitations
-
-- The gate validates **coverage**, not **correctness**: `Item2=nexus-t3xx` passes even if nexus-t3xx's acceptance criteria are weak. The reviewer must verify the evidence manually.
-- The gate recognises three phase-structure layouts, tried in order: (1) `N. **Label**: ...` numbered bold items directly under §Approach; (2) `**Phase N: title**` bold blocks with `- bullet` sub-items (RDR-120 style); (3) `### Phase N: title` / `#### Step N: title` headings under `## Implementation Plan` — the RDR template's own placement (`conexus/resources/rdr/TEMPLATE.md`), used when §Approach is prose (RDR-205, RDR-204). Within layout 3, a phase with no sub-headings falls back to a plain numbered list (`1. text`, no bold label required), and a phase with neither still enumerates as exactly one item — never silently zero. §Approach sections with non-standard numbering (e.g. roman numerals, lettered items) are not parsed by any layout.
-- `none` is a valid evidence value. Over-use of `none` (e.g. `none` for every item) defeats the purpose; the reviewer is accountable for each `none` they supply.
-- The gate verifies §Approach items are accounted for; it does NOT verify the boundary-spanning code paths between accounted-for items work end-to-end. RDR-112 Phase 3 (2026-05-18) demonstrated this: the cross-walk PASSED on items (Item1 T2 service / Item2 T3 service / Item6 Discovery all evidence-pointed to nexus-hpxl), and a first-pass code review of the same nexus-hpxl diff returned PASS-WITH-FOLLOWUPS. A second-pass code review with explicit boundary-spanning prompt categories (see `/conexus:code-review` § Prompt rigour) caught two Significant defects the first pass missed — including a production regression where `taxonomy_cmd._t2_ctx()` raised on every invocation under the new daemon default. The gate is a coverage check, not a code review; pair it with a boundary-spanning code-review-expert dispatch when the diff spans CLI ↔ daemon, daemon ↔ OS supervisor, or any process-boundary surface.
-
-## Recommended companion: boundary-spanning code review
-
-At a phase boundary that ships integration-seam code (process-spawning, supervisor interaction, RPC wiring, env-var resolution), the cross-walk alone is insufficient. After Pass 2 of this gate passes, dispatch `code-review-expert` with explicit suspect categories from `/conexus:code-review` § Prompt rigour — process-group safety, race windows, security boundary, integration-boundary defects, lifecycle. The lesson the RDR-112 spine paid for is: friendly relays return friendly reviews; the suspect categories must be named in the prompt for the agent to probe them.
-
-## Success Criteria
-
-- [ ] Pass 1: all §Approach items enumerated, re-invoke instruction emitted
-- [ ] Pass 2: BLOCKED when any item has no evidence pointer; PASSED when all covered
-- [ ] BLOCKED output names the specific missing items
-- [ ] PASSED output shows evidence table and T1 scratch marker
-- [ ] Regression: RDR-112 Phase 1 with nexus-52lb evidence set returns BLOCKED
+| `/conexus:rdr-gate` | Whole RDR structure, assumptions, AI critique | Before RDR acceptance |
+| `/conexus:rdr-close` | Status flip, post-mortem, T3 archival | At RDR close |
+| this checklist | Phase items against closing beads | At each phase boundary |

@@ -2,8 +2,8 @@
 """Tests for the ``nx rdr preamble <name>`` subcommands.
 
 Covers: rdr-create, rdr-list, rdr-gate (including the re-gate block, round
-number and fix check), rdr-accept, rdr-close, rdr-research, rdr-audit,
-rdr-fix, rdr-verdict and phase-review-gate.
+number and fix check), rdr-accept, rdr-research, rdr-audit,
+rdr-fix and rdr-verdict.
 
 One test per behaviour: cases that differ only in their input are rows of a
 parametrized table (the row name is the pytest id, and every assertion message
@@ -263,7 +263,6 @@ FIXTURES = Path(__file__).parent / "fixtures" / "rdr_gate_critiques"
 
 _HELLO = {"title": "Hello World", "status": "draft", "type": "decision", "priority": "P1"}
 _BOARD = "| File | Title | Status | Type |"
-_ITEM_TABLE = "| # | Label | Evidence needed |"
 
 
 class _Boom:
@@ -539,9 +538,7 @@ _USAGE_CASES = [
     ("rdr-gate", ["Usage", "Available RDRs", _BOARD]),
     # The eligibility table includes `open` RDRs too (GH #1409).
     ("rdr-accept", ["Usage", "Draft RDRs (eligible for acceptance)", "Hello World", "Open One"]),
-    ("rdr-close", ["Usage", "Open/Draft RDRs", "Hello World"]),
     ("rdr-research", ["Available RDRs", _BOARD, "Usage"]),
-    ("phase-review-gate", ["Usage", "What this gate does", "Pass 1", "Pass 2"]),
 ]
 
 
@@ -680,34 +677,6 @@ def test_gate_layer1_plan_grammar_conformant(case, text, expected):
     assert _gate_layer1_plan_grammar_conformant(text) is expected, case
 
 
-def _find_gaps(problem_stmt: str) -> list[tuple[str, str, str]]:
-    """Replica of the gap-extraction regex in the rdr-close preamble (nexus-2fnet)."""
-    return re.findall(r"^#{3,5} Gap (\d+)([^\n:]*):\s*(.*)$", problem_stmt, re.MULTILINE)
-
-
-#: (case, section text, expected [(number, title)]) -- the CONTRACT of which
-#: heading shapes the rdr-close preamble's gap regex matches.
-_GAP_REGEX_CASES = [
-    ("h4_gaps", "#### Gap 1: First gap\nContent.\n\n#### Gap 2: Second gap\nContent.",
-     [("1", "First gap"), ("2", "Second gap")]),
-    ("h3_gap", "### Gap 1: Three-hash gap\nContent.", [("1", "Three-hash gap")]),
-    ("h5_gap", "##### Gap 1: Five-hash gap\nContent.", [("1", "Five-hash gap")]),
-    ("h2_not_matched", "## Gap 1: Too few hashes\nContent.", []),
-    ("h6_not_matched", "###### Gap 1: Too many hashes\nContent.", []),
-    ("no_colon_not_matched", "#### Gap 1 Missing the colon\nContent.", []),
-    ("parenthetical_gap", "#### Gap 4 (prerequisite for Gap 1): Complex title\nContent.",
-     [("4", "Complex title")]),
-    ("multi_digit_number", "#### Gap 12: Twelfth gap\nContent.", [("12", "Twelfth gap")]),
-    ("no_gaps", "Some section with no gap headings.\n### Not a gap heading", []),
-]
-
-
-@pytest.mark.parametrize("case, section, expected", _GAP_REGEX_CASES, ids=[c[0] for c in _GAP_REGEX_CASES])
-def test_gap_heading_regex_contract(case, section, expected):
-    got = [(num, title) for num, _, title in _find_gaps(section)]
-    assert got == expected, f"[{case}] {got!r} != {expected!r}"
-
-
 # ---------------------------------------------------------------------------
 # rdr-accept
 # ---------------------------------------------------------------------------
@@ -815,196 +784,12 @@ def test_rdr_accept_preamble_opens_no_t2_client(rdr_env, monkeypatch) -> None:
     assert "Planning Handoff" in result.output
 
 
-# ---------------------------------------------------------------------------
-# rdr-close
-# ---------------------------------------------------------------------------
-
-_ACCEPTED_FM = {"title": "Hello World", "status": "accepted", "type": "decision", "priority": "P1"}
-_DEFERRED_FM = {"title": "X", "status": "deferred", "type": "feature"}
-_DRAFT_FM = {"title": "Y", "status": "draft", "type": "feature"}
-
-_CLOSE_STATUS_CASES = [
-    {"name": "draft_is_blocked", "files": [("rdr-001-hello-world.md", _HELLO, "")],
-     "argv": ["--", "1"], "has": ["BLOCKED"], "has_ci": ["draft", "accepted"], "lacks": [], "fake_t2": False},
-    # Pre-65 with no gaps: warns and proceeds to the T2 Metadata section.
-    {"name": "accepted_pre65_no_gaps_proceeds_to_t2",
-     "files": [("rdr-001-hello-world.md", _ACCEPTED_FM,
-                "## Problem Statement\n\nProblem without structured gaps.\n\n## Approach\n\nStuff.")],
-     "argv": ["--", "1", "--reason", "implemented"], "has": ["T2 Metadata"], "has_ci": [], "lacks": [],
-     "fake_t2": False},
-    {"name": "force_overrides_the_draft_block", "files": [("rdr-001-hello-world.md", _HELLO, "")],
-     "argv": ["--", "1", "--force"], "has": ["Override"], "has_ci": [], "lacks": ["BLOCKED"], "fake_t2": False},
-    # S1 regression: --force-implemented with an empty reason must error.
-    {"name": "force_implemented_with_empty_reason_errors",
-     "files": [("rdr-001-hello-world.md", _ACCEPTED_FM, "")],
-     "argv": ["--", "1", "--reason", "implemented", "--force-implemented", ""],
-     "has": ["ERROR", "non-empty reason"], "has_ci": [], "lacks": ["T2 Metadata"], "fake_t2": False},
-    # nexus-u1jxt.10: `--force` on a non-accepted RDR printed `set-status N
-    # closed`, which the lifecycle table always refuses. A deferred RDR has no
-    # close edge (resume first); a draft closes only with `--reason`.
-    {"name": "force_on_a_deferred_rdr_prints_the_tables_own_command",
-     "files": [("rdr-400-x.md", _DEFERRED_FM, "")], "argv": ["--", "400", "--force"],
-     "has": ["set-status 400 draft", "no close edge"], "has_ci": [], "lacks": ["set-status 400 closed"],
-     "fake_t2": True},
-    {"name": "force_on_a_draft_rdr_prints_close_with_reason",
-     "files": [("rdr-401-y.md", _DRAFT_FM, "")], "argv": ["--", "401", "--force"],
-     "has": ["set-status 401 closed --reason"], "has_ci": [], "lacks": [], "fake_t2": True},
-]
-
-
-@pytest.mark.parametrize("case", _table(_CLOSE_STATUS_CASES))
-def test_rdr_close_by_status(rdr_env, monkeypatch, case):
-    _write_files(rdr_env, case["files"])
-    if case["fake_t2"]:
-        _use_t2(monkeypatch, {})
-    result = _preamble("rdr-close", *case["argv"])
-    assert result.exit_code == 0, f"[{case['name']}] {result.output}"
-    _assert_output(case["name"], result.output, has=case["has"], lacks=case["lacks"], has_ci=case["has_ci"])
-
-
-@pytest.mark.parametrize("bd_output, warns", [
-    ("nexus-abc: some open bead (open)", True),
-    ("No issues found.", False),
-], ids=["open_beads_warn", "no_open_beads_no_warning"])
-def test_rdr_close_open_beads_warning(rdr_env, monkeypatch, bd_output, warns):
-    """S3: the WARNING block is conditional on `bd list` returning open beads."""
-    _write_rdr(rdr_env["rdr_dir"], "rdr-001-hello-world.md", _ACCEPTED_FM)
-
-    def _fake_run(cmd, **kwargs):
-        if cmd and cmd[0] == "git":
-            return subprocess.run(cmd, **kwargs)
-        r = subprocess.CompletedProcess(cmd, 0)
-        r.stdout = bd_output
-        r.stderr = ""
-        return r
-
-    monkeypatch.setattr("nexus.commands.rdr.run_bounded", _fake_run)
-    result = _preamble("rdr-close", "--", "1")
-    assert result.exit_code == 0, result.output
-    if warns:
-        _assert_output("open_beads_warn", result.output, has=["WARNING", "Open beads exist", "explicit"])
-    else:
-        _assert_output("no_open_beads_no_warning", result.output, lacks=["WARNING", "Open beads exist"])
-
-
-def test_rdr_close_pass2_success_attempts_scratch_put(rdr_env, monkeypatch):
-    """S2: after gap-pointer validation passes, the best-effort `nx scratch put`
-    marker (rdr-close-active tag) is attempted."""
-    impl_file = rdr_env["repo_root"] / "src" / "impl.py"
-    impl_file.parent.mkdir(parents=True, exist_ok=True)
-    impl_file.write_text("# implementation\n")
-    _write_rdr(
-        rdr_env["rdr_dir"], "rdr-130-cmd.md",
-        {"title": "Command Preambles", "status": "accepted", "type": "decision", "priority": "P0"},
-        body=("## Problem Statement\n\n#### Gap 1: Missing feature\nThe feature is missing.\n\n"
-              "## Approach\n\nImplement it."),
-    )
-    scratch_calls = []
-
-    def _capture_run(cmd, **kwargs):
-        if cmd and cmd[0] == "git":
-            return subprocess.run(cmd, **kwargs)
-        scratch_calls.append(list(cmd))
-        r = subprocess.CompletedProcess(cmd, 0)
-        r.stdout = "No issues found."
-        r.stderr = ""
-        return r
-
-    monkeypatch.setattr("nexus.commands.rdr.run_bounded", _capture_run)
-    result = _preamble("rdr-close", "--", "130", "--reason", "implemented", "--pointers", "Gap1=src/impl.py:1")
-    assert result.exit_code == 0, result.output
-    assert "validation passed" in result.output
-    scratch_cmds = [c for c in scratch_calls if "scratch" in c and "put" in c]
-    assert scratch_cmds, f"expected an 'nx scratch put' call; got calls: {scratch_calls}"
-    assert any("rdr-close-active" in str(c) for c in scratch_cmds), (
-        f"expected the rdr-close-active tag in the scratch put call; got: {scratch_cmds}"
-    )
-
-
-_GAP_BODY = "## Problem Statement\n\n#### Gap 1: g\n\n## X\n"
-_TWO_RDRS = [
-    ("rdr-042-x.md", {"title": "X", "status": "accepted"}, _GAP_BODY),
-    ("rdr-069-c.md", {"title": "C", "status": "accepted"}, _GAP_BODY),
-]
-_LONG_REASON = "critic false positive - gap addressed at src/foo.py:42"
-
-#: nexus-my04w (intrastate [26115] #7 HIGH, #11): the preamble joined its argv
-#: into one string and re-scanned it with regexes, so a multi-word
-#: ``--force-implemented`` reason kept one word and the rest fell where the
-#: first digits won the RDR lookup: the skill's own example reason
-#: (``... src/foo.py:42``) closed rdr-042.
-_CLOSE_REASON_CASES = [
-    {"name": "multi_word_reason_is_kept_whole",
-     "argv": ["--", "069", "--reason", "implemented", "--force-implemented", _LONG_REASON],
-     "has": [f"**Force Implemented (audit):** {_LONG_REASON}", "rdr-069-c.md"], "lacks": [], "exit0": True},
-    # Flag before the id: ``:42`` in the reason must not close rdr-042.
-    {"name": "digits_inside_the_reason_never_select_the_rdr",
-     "argv": ["--", "--force-implemented", _LONG_REASON, "--reason", "reverted", "069"],
-     "has": ["rdr-069-c.md"], "lacks": ["rdr-042-x.md"], "exit0": True},
-    # The skill may hand the whole line over as one argv element.
-    {"name": "one_shell_string_is_split_with_its_quotes",
-     "argv": ["--", "069 --reason implemented --force-implemented 'gap addressed at src/foo.py:42'"],
-     "has": ["**Force Implemented (audit):** gap addressed at src/foo.py:42", "rdr-069-c.md"],
-     "lacks": [], "exit0": True},
-    {"name": "unquoted_reason_words_run_to_the_next_flag",
-     "argv": ["--", "069", "--force-implemented", "critic", "false", "positive", "--reason", "implemented"],
-     "has": ["**Force Implemented (audit):** critic false positive"], "lacks": [], "exit0": False},
-    {"name": "an_id_swallowed_by_an_unquoted_reason_is_named",
-     "argv": ["--", "--force-implemented", "critic", "false", "positive", "069"],
-     "has": ["reason ends in `069`"], "lacks": ["rdr-069-c.md", "rdr-042-x.md"], "exit0": False},
-    {"name": "a_flag_is_never_taken_as_another_flags_value",
-     "argv": ["--", "069", "--reason"], "has": ["--reason needs a value"], "lacks": [], "exit0": False},
-]
-
-
-@pytest.mark.parametrize("case", _table(_CLOSE_REASON_CASES))
-def test_rdr_close_reason_and_id_parsing(rdr_env, case):
-    _write_files(rdr_env, _TWO_RDRS)
-    res = _preamble("rdr-close", *case["argv"])
-    if case["exit0"]:
-        assert res.exit_code == 0, f"[{case['name']}] {res.output}"
-    _assert_output(case["name"], res.output, has=case["has"], lacks=case["lacks"])
-
-
-def test_rdr_close_parse_args_never_takes_a_flag_as_another_flags_value():
-    from nexus.commands.rdr import _rdr_close_parse_args  # noqa: PLC0415 — deferred, matches the file's other in-test imports
-
-    parsed = _rdr_close_parse_args(("069", "--reason", "--pointers", "Gap1=src/foo.py:42"))
-    assert parsed.reason is None and parsed.pointers == "Gap1=src/foo.py:42"
-    assert parsed.missing_value == ("--reason",)
-    parsed = _rdr_close_parse_args(("069", "--pointers", "--force"))
-    assert parsed.pointers is None and parsed.force is True
-
-
-#: (case, --pointers value, create src/foo.py first, validation passes, output names Gap1)
-_CLOSE_POINTER_CASES = [
-    ("empty_file_part_is_refused", "Gap1=:12", False, False, True),
-    ("a_directory_is_refused", "Gap1=docs:1", False, False, True),
-    ("absolute_path_outside_the_repo_is_refused", "Gap1=/etc/hosts:1", False, False, False),
-    ("relative_path_escaping_the_repo_is_refused", "Gap1=../../../../../../etc/hosts:1", False, False, False),
-    ("a_real_file_still_passes", "Gap1=src/foo.py:1", True, True, False),
-]
-
-
-@pytest.mark.parametrize("case, pointer, make_file, passes, names_gap", _CLOSE_POINTER_CASES,
-                         ids=[c[0] for c in _CLOSE_POINTER_CASES])
-def test_rdr_close_pointer_validation(rdr_env, case, pointer, make_file, passes, names_gap):
-    _write_files(rdr_env, _TWO_RDRS)
-    if make_file:
-        (rdr_env["repo_root"] / "src").mkdir()
-        (rdr_env["repo_root"] / "src" / "foo.py").write_text("x = 1\n")
-    res = _preamble("rdr-close", "--", "069", "--reason", "implemented", "--pointers", pointer)
-    assert ("validation passed" in res.output) is passes, f"[{case}] {res.output}"
-    if names_gap:
-        assert "Gap1" in res.output, f"[{case}] {res.output}"
-
-
 def test_blank_status_key_is_an_empty_status_not_a_crash(rdr_env, monkeypatch):
-    """nexus-u1jxt.10: ``status:`` with no value made rdr-accept (no id) and
-    rdr-close die with AttributeError on ``None.lower()``."""
+    """nexus-u1jxt.10: ``status:`` with no value made rdr-accept (no id)
+    die with AttributeError on ``None.lower()``."""
     _write_rdr(rdr_env["rdr_dir"], "rdr-300-x.md", {"title": "X", "status": "", "type": "feature"})
     _use_t2(monkeypatch, {})
-    for argv in (["rdr-accept"], ["rdr-close", "--", "300"]):
+    for argv in (["rdr-accept"],):
         result = _preamble(*argv)
         assert result.exit_code == 0, (argv, result.output, result.exception)
 
@@ -1871,378 +1656,14 @@ def test_rdr_fix_round_three_splits_ship_blockers_from_residuals(rdr_env, monkey
 
 
 # ---------------------------------------------------------------------------
-# phase-review-gate
+# Implementation Plan section extraction (shared by rdr-gate's plan-grammar check)
 # ---------------------------------------------------------------------------
 
-_ACCEPTED_P0 = {"title": "Command Preambles", "status": "accepted", "type": "decision", "priority": "P0"}
-_ACCEPTED_ARCH = {"title": "Storage Substrate Split", "status": "accepted", "type": "architecture", "priority": "P1"}
-
-
-def _approach_body(*items: str, heading: str = "### Approach") -> str:
-    return ("## Problem Statement\n\nProblem.\n\n" + f"{heading}\n\n" + "".join(items)
-            + "\n## Tradeoffs\n\nSome tradeoffs.")
-
-
-_TWO_ITEMS = ("1. **T2 read**: Read from T2 database.\n"
-              "2. **File fallback**: Fall back to .md files.\n")
-_THREE_ITEMS = _TWO_ITEMS + "3. **CLI output**: Print markdown table.\n"
-_PHASE_BLOCK_BODY = (  # nexus-4u6mt: RDR-120-style phase blocks with sub-bullets
-    "## Problem Statement\n\nProblem.\n\n"
-    "### Approach\n\n"
-    "**Phase 0: Lint + cutover flag scaffolding**\n\n"
-    "- Implement nx doctor --check-storage-boundary\n"
-    "- Add NX_STORAGE_MODE env-var\n\n"
-    "**Phase 1: T3 daemon**\n\n"
-    "- Stand up the T3 daemon process\n"
-    "- Route T3 reads through T3Client\n"
-    "- Add storage_boundary_lint T3 enforcement\n\n"
-    "## Tradeoffs\n\nSome tradeoffs."
-)
-_IMPLEMENTATION_PLAN_BODY = (  # nexus-2pw1x: conexus RDR-001's layout
-    "## Problem Statement\n\nProblem.\n\n"
-    "## Implementation Plan\n\n"
-    "1. **Schema slice**: Add the retention column.\n"
-    "2. **ETL passthrough**: Relax the null-doc skip.\n\n"
-    "## Tradeoffs\n\nSome tradeoffs."
-)
-_GATE_1 = ["phase-review-gate", "--"]
-
-_PRG_CASES = [
-    {"name": "no_approach_section_errors", "file": "rdr-001-hello-world.md",
-     "fm": {**_HELLO, "status": "accepted"},
-     "body": "## Problem Statement\n\nProblem.\n\n## Proposed Solution\n\nSolution.",
-     "argv": ["1", "--phase", "1"], "has": ["ERROR", "Approach"], "lacks": []},
-    {"name": "pass1_enumerates_items", "file": "rdr-130-command-preambles.md", "fm": _ACCEPTED_P0,
-     "body": _approach_body(_THREE_ITEMS), "argv": ["130", "--phase", "1"],
-     "has": ["§Approach Cross-Walk", _ITEM_TABLE, "Item1", "T2 read", "Item2", "File fallback", "Item3"],
-     "lacks": []},
-    # GH #1443: a `1a.` item used to be absorbed into item 1 and the gate
-    # enumerated 2 of 3 items; now it refuses with the offending line.
-    {"name": "refuses_a_subset_when_an_item_start_fails_to_parse", "file": "rdr-130-command-preambles.md",
-     "fm": _ACCEPTED_P0,
-     "body": _approach_body("1. **T2 read**: Read from T2 database.\n",
-                            "1a. **T2 lease**: added after drafting.\n",
-                            "2. **File fallback**: Fall back to .md files.\n"),
-     "argv": ["130", "--phase", "1", "--evidence", "Item1=nexus-aaaa,Item2=nexus-bbbb"],
-     "has": ["ERROR", "GH #1443", "1a. **T2 lease**"], "lacks": ["CROSS-WALK PASSED", _ITEM_TABLE]},
-    {"name": "pass2_all_covered_passes", "file": "rdr-130-command-preambles.md", "fm": _ACCEPTED_P0,
-     "body": _approach_body(_TWO_ITEMS),
-     "argv": ["130", "--phase", "1", "--evidence", "Item1=nexus-abc1,Item2=nexus-xyz2"],
-     "has": ["APPROACH CROSS-WALK PASSED", "nexus-abc1", "nexus-xyz2"], "lacks": []},
-    {"name": "pass2_missing_evidence_is_blocked", "file": "rdr-130-command-preambles.md", "fm": _ACCEPTED_P0,
-     "body": _approach_body(_TWO_ITEMS),
-     "argv": ["130", "--phase", "1", "--evidence", "Item1=nexus-abc1"],
-     "has": ["BLOCKED", "Item2"], "lacks": []},
-    # nexus-2fnet: an empty evidence value (`Item2=`) blocks too.
-    {"name": "pass2_empty_evidence_value_is_blocked", "file": "rdr-130-command-preambles.md",
-     "fm": _ACCEPTED_P0, "body": _approach_body(_TWO_ITEMS),
-     "argv": ["130", "--phase", "1", "--evidence", "Item1=nexus-abc1,Item2="],
-     "has": ["BLOCKED"], "lacks": []},
-    {"name": "phase_block_enumerates_the_requested_phase_bullets",
-     "file": "rdr-120-storage-substrate-split.md", "fm": _ACCEPTED_ARCH, "body": _PHASE_BLOCK_BODY,
-     "argv": ["120", "--phase", "1"],
-     "has": ["§Approach Cross-Walk", "Item1", "Item2", "Item3", "Phase 1: Stand up the T3 daemon process"],
-     "lacks": ["Item4", "check-storage-boundary"]},  # Phase 0 bullets must not leak in
-    {"name": "phase_block_phase0_enumerates_phase0_bullets",
-     "file": "rdr-120-storage-substrate-split.md", "fm": _ACCEPTED_ARCH, "body": _PHASE_BLOCK_BODY,
-     "argv": ["120", "--phase", "0"],
-     "has": ["Item1", "Item2", "check-storage-boundary"], "lacks": ["Item3"]},
-    # RDR-121/125-style numbered items keep enumerating phase-agnostically.
-    {"name": "numbered_items_still_work_unchanged", "file": "rdr-125-routing-hook-plugin-ownership.md",
-     "fm": {"title": "Routing Hook Ownership", "status": "accepted", "type": "architecture", "priority": "P1"},
-     "body": ("## Problem Statement\n\nProblem.\n\n### Approach\n\n"
-              "1. **Vendor the hook**: Copy _lib.py into sn.\n"
-              "2. **Byte-equality CI guard**: Assert identical bytes.\n\n## Tradeoffs\n\nT."),
-     "argv": ["125", "--phase", "1"],
-     "has": ["Item1", "Vendor the hook", "Item2", "Byte-equality CI guard"], "lacks": []},
-    # nexus-2pw1x: RDRs that structure phased work under '## Implementation Plan'.
-    {"name": "implementation_plan_heading_pass1_enumerates", "file": "rdr-001-multitenant-cloud.md",
-     "fm": {"title": "Multitenant Cloud", "status": "accepted", "type": "architecture", "priority": "P1"},
-     "body": _IMPLEMENTATION_PLAN_BODY, "argv": ["1", "--phase", "1"],
-     "has": ["§Approach Cross-Walk", "Item1", "Schema slice", "Item2", "ETL passthrough"], "lacks": ["ERROR"]},
-    {"name": "implementation_plan_heading_pass2_validates_evidence", "file": "rdr-001-multitenant-cloud.md",
-     "fm": {"title": "Multitenant Cloud", "status": "accepted", "type": "architecture", "priority": "P1"},
-     "body": _IMPLEMENTATION_PLAN_BODY,
-     "argv": ["1", "--phase", "1", "--evidence", "Item1=nexus-abc1,Item2=nexus-xyz2"],
-     "has": ["APPROACH CROSS-WALK PASSED", "nexus-abc1", "nexus-xyz2"], "lacks": []},
-    # nexus-moht0 non-vacuity: prose in both sections still refuses loudly
-    # rather than silently reporting zero items as a pass.
-    {"name": "neither_layout_reports_no_items_parsed", "file": "rdr-140-neither-layout.md",
-     "fm": {"title": "Neither Layout", "status": "accepted", "type": "architecture", "priority": "P2"},
-     "body": ("## Proposed Solution\n\n### Approach\n\n"
-              "Just prose, no numbered items, no bold phase blocks.\n\n"
-              "## Implementation Plan\n\nAlso just prose here. No Phase headings at all.\n"),
-     "argv": ["140", "--phase", "1"], "has": ["no items parsed", "Implementation Plan"], "lacks": []},
-    # The unparsed-item guard used to run only when numbered items parsed, so a
-    # phase-block §Approach with a stray column-0 numbered line fell through
-    # unguarded.
-    {"name": "phase_block_structure_is_guarded_too", "file": "rdr-120-storage-substrate-split.md",
-     "fm": {"title": "Storage substrate split", "status": "accepted", "type": "decision", "priority": "P1"},
-     "body": ("## Problem Statement\n\nProblem.\n\n### Approach\n\n**Phase 1: Core**\n\n"
-              "- **Daemon**: stand it up\n2. a numbered line the fallback would drop\n\n"
-              "## Tradeoffs\n\nSome tradeoffs."),
-     "argv": ["120", "--phase", "1"], "has": ["GH #1443"], "lacks": [_ITEM_TABLE]},
-]
-
-
-@pytest.mark.parametrize("case", _table(_PRG_CASES))
-def test_phase_review_gate_passes(rdr_env, case):
-    _write_rdr(rdr_env["rdr_dir"], case["file"], case["fm"], body=case["body"])
-    result = _preamble(*_GATE_1, *case["argv"])
-    assert result.exit_code == 0, f"[{case['name']}] {result.output}"
-    _assert_output(case["name"], result.output, has=case["has"], lacks=case["lacks"])
-
-
-_REAL_RDR_DIR = Path(__file__).parent.parent / "docs" / "rdr"
-_RDR_205 = "rdr-205-linda-tuple-space-over-postgres.md"
-_ITEMS_1_TO_6 = [f"Item{i}" for i in range(1, 7)]
-
-#: nexus-w5gma: the gate against REAL RDR files, not synthetic fixtures, so the
-#: fix is proven against the exact documents that surfaced the bug.
-_PRG_REAL_RDR_CASES = [
-    # RDR-205: §Approach is prose, phases live under §Implementation Plan as
-    # `### Phase N` / `#### Step N` headings; Phase 1 has six Step headings,
-    # matching Sam's by-hand cross-walk (T2 nexus/phase1-close-nexus-em75s-2026-09-10).
-    {"name": "rdr_205_phase_headings_pass1", "src": _RDR_205, "evidence": None,
-     "has": ["§Approach Cross-Walk", *_ITEMS_1_TO_6, "Settle the pooler fact", "Changesets", "Registry",
-             "Repository and handler", "Sweep", "Local spike"], "lacks": ["ERROR"]},
-    {"name": "rdr_205_phase_headings_pass2", "src": _RDR_205,
-     "evidence": ",".join(f"Item{i}=nexus-em75s.{i}" for i in range(1, 7)),
-     "has": ["APPROACH CROSS-WALK PASSED", "nexus-em75s.1", "nexus-em75s.6"], "lacks": []},
-    # RDR-204: §Approach is prose and Phase 1 is a plain numbered list directly
-    # under `### Phase 1`: the other real-world shape this bug covered.
-    {"name": "rdr_204_plain_numbered_phase", "src": "rdr-204-embedding-profile-and-collection-authority.md",
-     "evidence": None, "has": ["§Approach Cross-Walk", *_ITEMS_1_TO_6], "lacks": ["ERROR"]},
-]
-
-
-@pytest.mark.parametrize("case", _table(_PRG_REAL_RDR_CASES))
-def test_phase_review_gate_on_real_rdr_files(rdr_env, case):
-    src = _REAL_RDR_DIR / case["src"]
-    shutil.copy(src, rdr_env["rdr_dir"] / src.name)
-    number = re.search(r"rdr-(\d+)-", src.name).group(1)
-    argv = [number, "--phase", "1"] + (["--evidence", case["evidence"]] if case["evidence"] else [])
-    result = _preamble(*_GATE_1, *argv)
-    assert result.exit_code == 0, f"[{case['name']}] {result.output}"
-    _assert_output(case["name"], result.output, has=case["has"], lacks=case["lacks"])
-
-
-def _approach_text(heading: str) -> str:
-    return f"## Intro\n\nx.\n\n{heading}\n\nbody line.\n\n## Next\n\ny."
-
-
-#: _prg_extract_approach_section synonym recognition (nexus-2pw1x). (case, text, expected body)
-_APPROACH_EXTRACTOR_CASES = [
-    ("implementation_plan_heading", _approach_text("## Implementation Plan"), "body line."),
-    ("phases_heading", _approach_text("### Phases"), "body line."),
-    ("plain_plan_heading_is_case_insensitive", _approach_text("## plan"), "body line."),
-    ("approach_heading", _approach_text("### Approach"), "body line."),
-    ("no_recognised_heading_returns_empty", "## Intro\n\nx.\n\n## Tradeoffs\n\ny.", ""),
-    # Bare 'Plan' must not match 'Planned'/'Planning'/'Planner' (prefix).
-    ("planned_work_does_not_match", _approach_text("## Planned Work").replace("body line.", "body."), ""),
-    ("planning_notes_does_not_match", _approach_text("## Planning Notes").replace("body line.", "body."), ""),
-    ("planner_design_does_not_match", _approach_text("### Planner Design").replace("body line.", "body."), ""),
-    # '## Plan Optimization' is a differently-scoped section: bare 'Plan' matches
-    # only as the whole heading name.
-    ("plan_with_extra_words_does_not_match", _approach_text("## Plan Optimization").replace("body line.", "body."), ""),
-    # Suffix tolerance preserved for Approach/Implementation Plan/Phases.
-    ("approach_with_trailing_text_still_matches", _approach_text("### Approach (two tracks)"), "body line."),
-    # '## Proposed Approach' is the most common phrasing (RDR-176); the
-    # 'Proposed' prefix previously defeated the matcher.
-    ("proposed_approach_heading", _approach_text("## Proposed Approach (pillars)"), "body line."),
-    ("proposed_plan_heading", _approach_text("### Proposed Plan"), "body line."),
-    # 'Proposed' only licenses Approach/Plan synonyms, never 'Proposed Solution'.
-    ("proposed_solution_does_not_match", _approach_text("## Proposed Solution").replace("body line.", "body."), ""),
-]
-
-
-@pytest.mark.parametrize("case, text, expected", _APPROACH_EXTRACTOR_CASES,
-                         ids=[c[0] for c in _APPROACH_EXTRACTOR_CASES])
-def test_prg_extract_approach_section(case, text, expected):
-    from nexus.commands.rdr import _prg_extract_approach_section
-
-    assert _prg_extract_approach_section(text).strip() == expected, case
-
-
-#: GH #1443: the §Approach shapes the item regex misses must be reported,
-#: never absorbed into the previous item. (case, text, expected unparsed lines,
-#: expected parsed item numbers or None)
-_UNPARSED_ITEM_CASES = [
-    ("clean_numbered_list_has_none",
-     ("1. **T2 read**: read from T2.\n   continuation prose of item one\n"
-      "2. **File fallback**: fall back to files.\n- a sub bullet\n"), [], None),
-    ("non_integer_item_number",
-     ("5. **Daemon**: stand it up.\n5a. **Daemon lease**: added after drafting.\n"
-      "6. **Routes**: wire reads.\n"),
-     ["5a. **Daemon lease**: added after drafting."], [5, 6]),
-    ("wrapped_bold_label",
-     ("1. **Short**: fine.\n2. **A label long enough that the author wrapped it\n"
-      "   onto the next line**: description.\n"),
-     ["2. **A label long enough that the author wrapped it"], None),
-    ("label_on_the_following_line",
-     "1. **First**: fine.\n2.\n**Second**: label below its number.\n", ["2."], None),
-    # `5.1.` and `2)` reproduce the GH #1443 symptom and the first detector
-    # missed both (critique of ad158133b).
-    ("decimal_and_paren_numbering_and_a_plain_item",
-     ("5. **Daemon**: stand it up.\n5.1. **Lease**: a decimal sub-item.\n"
-      "6) **Routes**: paren numbering.\n7. plain numbered item with no bold label\n"),
-     ["5.1. **Lease**: a decimal sub-item.", "6) **Routes**: paren numbering.",
-      "7. plain numbered item with no bold label"], None),
-    # The extracted section can run through several `###` subsections
-    # (rdr-195): only the item list's own block is scanned.
-    ("numbered_aside_under_a_later_subheading_is_out_of_scope",
-     ("1. **Engine**: cap the batch.\n2. **Client**: size the byte budget.\n\n"
-      "Two consequences follow.\n1. Skewed users can still hit the ceiling.\n"
-      "2. The budget must be sized with headroom.\n\n"
-      "### Technical Design\n1. an aside under a later heading\n"), [], None),
-    # rdr-089's wrapped label is item 1 and the first PARSED item is 2: the
-    # scan begins at the block's heading, not at the first parse.
-    ("dropped_item_before_the_first_parsed_one",
-     ("### Approach\n1. **A label that wraps onto\n   the next line**: description.\n"
-      "2. **Second**: fine.\n"), ["1. **A label that wraps onto"], None),
-    ("plain_line_inside_the_item_block",
-     ("1. **Engine**: cap the batch.\n2. plain step between two items\n"
-      "3. **Client**: size the byte budget.\n\n### Technical Design\n1. an aside that is out of scope\n"),
-     ["2. plain step between two items"], None),
-    ("phase_block_headers_are_not_item_starts",
-     "**Phase 0: Scaffolding**\n- bullet\n**Phase 1: Core**\n- bullet\n", [], None),
-    # rdr-037 (numbered shell recipe in a code fence) and rdr-063 (nested
-    # checklists): column 0 is the item grammar; nothing indented or fenced is.
-    ("indented_numbered_lines_and_fenced_code_are_not_item_starts",
-     ("1. **Consolidate**: one database.\n   1. nested step one\n   2. nested step two\n"
-      "```bash\n1. not an item, a recipe line\n2a. also not an item\n```\n2. **Cut over**: flip.\n"),
-     [], None),
-    # rdr-146: bold emphasis that wraps across two lines inside an item's prose.
-    ("wrapped_bold_prose_is_not_an_item_start",
-     ("1. **Daemon**: stand it up.\n   **This matters because the store is behind the\n"
-      "   daemon** and nothing else reaches it.\n2. **Routes**: wire reads.\n"), [], None),
-]
-
-
-@pytest.mark.parametrize("case, text, unparsed, parsed", _UNPARSED_ITEM_CASES,
-                         ids=[c[0] for c in _UNPARSED_ITEM_CASES])
-def test_prg_find_unparsed_item_starts(case, text, unparsed, parsed):
-    from nexus.commands.rdr import _prg_find_unparsed_item_starts, _prg_parse_approach_items  # noqa: PLC0415 — deferred, matches the file's other in-test imports
-
-    assert _prg_find_unparsed_item_starts(text) == unparsed, case
-    if parsed is not None:
-        assert [n for n, _, _ in _prg_parse_approach_items(text)] == parsed, case
-
-
-_PHASE_APPROACH = (
-    "**Phase 0: Scaffolding**\n\n- bullet zero a\n- bullet zero b\n\n"
-    "**Phase 1: Core**\n\n- **Daemon**: stand it up\n- route reads\n"
-)
-_P1_ITEMS = [(1, "Phase 1: Daemon", "stand it up"), (2, "Phase 1: route reads", "route reads")]
-_P0_ITEMS = [(1, "Phase 0: bullet zero a", "bullet zero a"), (2, "Phase 0: bullet zero b", "bullet zero b")]
-
-#: _prg_parse_phase_block_items (nexus-4u6mt). (case, text, phase, expected items)
-_PHASE_BLOCK_CASES = [
-    ("selects_only_the_requested_phase", _PHASE_APPROACH, "1", _P1_ITEMS),
-    ("phase0_selects_phase0", _PHASE_APPROACH, "0", _P0_ITEMS),
-    # GH #1443 critique residual: a non-bulleted line after a bullet was
-    # dropped; it is that bullet's continuation.
-    ("a_bullet_continuation_line_is_kept",
-     ("**Phase 1: Core**\n- **Daemon**: stand it up\n  and keep it up across restarts\n- route reads\n"), "1",
-     [(1, "Phase 1: Daemon", "stand it up and keep it up across restarts"),
-      (2, "Phase 1: route reads", "route reads")]),
-    ("no_phase_enumerates_all_blocks", _PHASE_APPROACH, None,
-     [(1, *_P0_ITEMS[0][1:]), (2, *_P0_ITEMS[1][1:]), (3, *_P1_ITEMS[0][1:]), (4, *_P1_ITEMS[1][1:])]),
-    ("numbered_approach_has_no_phase_header", "1. **Foo**: bar\n2. **Baz**: qux\n", "1", []),
-    ("phase_arg_accepts_phase_n_prose", _PHASE_APPROACH, "Phase 1", _P1_ITEMS),
-    # P5a: `--phase 1.5` enumerates Phase 1.5, not Phase 1.
-    ("decimal_phase_selects_its_own_block",
-     "**Phase 1: alpha**\n\n- do A\n- do B\n\n**Phase 1.5: beta**\n\n- do C\n", "1.5",
-     [(1, "Phase 1.5: do C", "do C")]),
-    ("integer_phase_is_not_the_decimal_one",
-     "**Phase 1: alpha**\n\n- do A\n- do B\n\n**Phase 1.5: beta**\n\n- do C\n", "1",
-     [(1, "Phase 1: do A", "do A"), (2, "Phase 1: do B", "do B")]),
-]
-
-
-@pytest.mark.parametrize("case, text, phase, expected", _PHASE_BLOCK_CASES,
-                         ids=[c[0] for c in _PHASE_BLOCK_CASES])
-def test_prg_parse_phase_block_items(case, text, phase, expected):
-    from nexus.commands.rdr import _prg_parse_phase_block_items
-
-    assert _prg_parse_phase_block_items(text, phase=phase) == expected, case
-
-
-# nexus-w5gma: the RDR template's own §Implementation Plan placement --
-# ``### Phase N: title`` headings, which neither the numbered-bold-item parser
-# nor the ``**Phase N:**`` bold-block parser recognises.
-_HEADING_STEPS = (  # RDR-205 shape: a step is its own heading, one level under Phase
-    "### Phase 1: Engine\n\n#### Step 1: Settle the pooler fact\n\nSome prose about the pooler.\n\n"
-    "#### Step 2: Changesets\n\nSome prose about changesets.\n\n"
-    "### Phase 2: Client\n\n#### Step 1: `HttpTupleStore`\n\nClient prose.\n"
-)
-_PLAIN_NUMBERED = (  # RDR-204 shape: a plain numbered list directly under the Phase heading
-    "### Phase 1: Schema and backfill\n\n"
-    "1. One Liquibase changeset on the hygiene shape.\n2. Engine boot writes the profile.\n"
-    "3. Delete the seven stub inserts.\n\n"
-    "### Phase 2: Engine reads the row\n\n1. CollectionRegistry caches the row.\n"
-)
-_PROSE_ONLY = (  # a phase with no internal structure at all
-    "### Phase 4: Consumer one, the ledger\n\n"
-    "Prose describing the whole phase with no sub-list and no\nsub-headings whatsoever.\n\n"
-    "### Phase 5: Consumer two\n\nMore prose.\n"
-)
-_STEP_1 = (1, "Phase 1: Step 1: Settle the pooler fact", "Some prose about the pooler.")
-_STEP_2 = (2, "Phase 1: Step 2: Changesets", "Some prose about changesets.")
-_STEP_3 = (3, "Phase 2: Step 1: `HttpTupleStore`", "Client prose.")
-_PROSE_4 = (1, "Phase 4: Consumer one, the ledger",
-            "Prose describing the whole phase with no sub-list and no sub-headings whatsoever.")
-
-_PLAN_PHASE_CASES = [
-    ("heading_steps_enumerate_the_requested_phase", _HEADING_STEPS, "1", [_STEP_1, _STEP_2]),
-    ("heading_steps_second_phase_restarts_numbering", _HEADING_STEPS, "2",
-     [(1, "Phase 2: Step 1: `HttpTupleStore`", "Client prose.")]),
-    ("heading_steps_no_phase_enumerates_all_sequentially", _HEADING_STEPS, None, [_STEP_1, _STEP_2, _STEP_3]),
-    ("plain_numbered_list_under_a_phase_heading", _PLAIN_NUMBERED, "1",
-     [(1, "Phase 1: One Liquibase changeset on the hygiene shape", "One Liquibase changeset on the hygiene shape."),
-      (2, "Phase 1: Engine boot writes the profile", "Engine boot writes the profile."),
-      (3, "Phase 1: Delete the seven stub inserts", "Delete the seven stub inserts.")]),
-    ("plain_numbered_list_second_phase", _PLAIN_NUMBERED, "2",
-     [(1, "Phase 2: CollectionRegistry caches the row", "CollectionRegistry caches the row.")]),
-    # nexus-moht0 non-vacuity: real content but no internal structure is one
-    # cross-walkable item, never silently zero.
-    ("prose_only_phase_is_one_item_not_zero", _PROSE_ONLY, "4", [_PROSE_4]),
-    ("prose_only_no_phase_is_one_item_per_phase", _PROSE_ONLY, None,
-     [_PROSE_4, (2, "Phase 5: Consumer two", "More prose.")]),
-    ("no_phase_heading_present", "Just prose, no phases.\n", "1", []),
-    ("requested_phase_does_not_exist", _HEADING_STEPS, "99", []),
-]
-
-
-@pytest.mark.parametrize("case, text, phase, expected", _PLAN_PHASE_CASES,
-                         ids=[c[0] for c in _PLAN_PHASE_CASES])
-def test_prg_parse_plan_phase_items(case, text, phase, expected):
-    from nexus.commands.rdr import _prg_parse_plan_phase_items
-
-    assert _prg_parse_plan_phase_items(text, phase=phase) == expected, case
-
-
 def _fenced_impl_plan(text: str):
-    from nexus.commands.rdr import _prg_extract_implementation_plan_section, _prg_parse_plan_phase_items
+    from nexus.commands.rdr import _prg_extract_implementation_plan_section
 
     sec = _prg_extract_implementation_plan_section(text)
-    return ("Step 3: third" in sec, "## Consequences" not in sec,
-            [lbl for _, lbl, _ in _prg_parse_plan_phase_items(sec)])
-
-
-def _fenced_approach(text: str):
-    from nexus.commands.rdr import (
-        _prg_extract_approach_section, _prg_find_unparsed_item_starts, _prg_parse_approach_items,
-    )
-
-    sec = _prg_extract_approach_section(text)
-    return [n for n, _, _ in _prg_parse_approach_items(sec)], _prg_find_unparsed_item_starts(sec)
-
-
-def _renumbered(text: str):
-    from nexus.commands.rdr import _prg_parse_approach_items
-
-    return [(n, lbl) for n, lbl, _ in _prg_parse_approach_items(text)]
+    return ("Step 3: third" in sec, "## Consequences" not in sec)
 
 
 def _impl_plan_section_shape(text: str):
@@ -2250,8 +1671,7 @@ def _impl_plan_section_shape(text: str):
 
     section = _prg_extract_implementation_plan_section(text)
     return ("### Phase 1: Foo" in section, "body line." in section, "Test Plan" not in section,
-            # Independent of the earliest-match Approach extraction: the
-            # Approach prose itself must not leak into this section.
+            # The Approach prose itself must not leak into this section.
             "no items" not in section)
 
 
@@ -2261,28 +1681,14 @@ def _impl_plan_section(text: str):
     return _prg_extract_implementation_plan_section(text)
 
 
-#: The gate must never cross-walk a subset of the section it was handed
-#: (intrastate review T2 intrastate/[26115] #1, #8, #9; plan N1). Probes P5a-c
-#: from nexus-redo-probes-2026-09-17/review-nexus-rdr/probe_rdr.py.
-_SUBSET_PARSE_CASES = [
-    # P5b: a column-0 ``# comment`` inside a code fence is not a heading.
+_PLAN_SECTION_CASES = [
+    # A column-0 ``# comment`` inside a code fence is not a heading.
     ("fenced_comment_does_not_end_the_implementation_plan_section", _fenced_impl_plan,
      ("\n## Implementation Plan\n\n### Phase 1: one\n\n#### Step 1: first\ntext\n\n"
       "```bash\n# install\nmake\n```\n\n#### Step 2: second\ntext\n\n"
       "### Phase 2: two\n\n#### Step 3: third\ntext\n\n## Consequences\n"),
-     (True, True, ["Phase 1: Step 1: first", "Phase 1: Step 2: second", "Phase 2: Step 3: third"])),
-    # P5b, §Approach shape: items after a fenced ``# comment`` are kept.
-    ("fenced_comment_does_not_end_the_approach_section", _fenced_approach,
-     ("\n## Approach\n\n1. **A**: first\n\n```bash\n# build\nmake\n```\n\n"
-      "2. **B**: second\n3. **C**: third\n\n## Consequences\n"),
-     ([1, 2, 3], [])),
-    # Review of 55b38cd25: only colliding lists are renumbered, above every
-    # number in use; a third list with unique numbers keeps its keys.
-    ("only_colliding_lists_are_renumbered", _renumbered,
-     ("#### Track A\n\n1. **A1**: a\n2. **A2**: b\n\n#### Track B\n\n1. **B1**: c\n2. **B2**: d\n\n"
-      "#### Track C\n\n3. **C1**: e\n4. **C2**: f\n"),
-     [(5, "Track A: A1"), (6, "Track A: A2"), (7, "Track B: B1"), (8, "Track B: B2"), (3, "C1"), (4, "C2")]),
-    # nexus-w5gma: the Implementation Plan extractor is independent of the Approach.
+     (True, True)),
+    # nexus-w5gma: the extractor reaches an Implementation Plan that follows a separate prose Approach.
     ("implementation_plan_section_after_a_separate_approach", _impl_plan_section_shape,
      ("## Proposed Solution\n\n### Approach\n\nProse, no items.\n\n"
       "### Technical Design\n\nMore prose.\n\n"
@@ -2293,94 +1699,10 @@ _SUBSET_PARSE_CASES = [
 ]
 
 
-@pytest.mark.parametrize("case, run, text, expected", _SUBSET_PARSE_CASES,
-                         ids=[c[0] for c in _SUBSET_PARSE_CASES])
-def test_phase_review_gate_never_crosswalks_a_subset(case, run, text, expected):
+@pytest.mark.parametrize("case, run, text, expected", _PLAN_SECTION_CASES,
+                         ids=[c[0] for c in _PLAN_SECTION_CASES])
+def test_implementation_plan_section_extraction(case, run, text, expected):
     assert run(text) == expected, case
-
-
-def test_two_lists_restarting_at_one_get_distinct_evidence_keys(rdr_env):
-    """P5c: two tracks numbered 1..2 each are four items needing four pointers;
-    ``Item1=..,Item2=..`` must not cover all four."""
-    _write_rdr(
-        rdr_env["rdr_dir"], "rdr-050-tracks.md", {"title": "Tracks", "status": "accepted"},
-        "# Tracks\n\n### Approach (two tracks)\n\n#### Track A\n\n"
-        "1. **A1**: a one\n2. **A2**: a two\n\n#### Track B\n\n"
-        "1. **B1**: b one\n2. **B2**: b two\n\n## Consequences\n",
-    )
-    res = _preamble(*_GATE_1, "50", "--phase", "1")
-    assert res.exit_code == 0, res.output
-    keys = re.findall(r"^\| (Item\d+) \|", res.output, re.MULTILINE)
-    assert len(keys) == 4 and len(set(keys)) == 4, res.output
-    res = _preamble(*_GATE_1, "50", "--phase", "1", "--evidence", "Item1=nexus-a,Item2=nexus-b")
-    # All four collide, so all four take fresh keys (Item3..Item6); the RDR's
-    # own Item1/Item2 name nothing and cover nothing.
-    assert "BLOCKED" in res.output, res.output
-    assert "4 of 4" in res.output, res.output
-
-
-@pytest.mark.parametrize("passed", [True, False], ids=["passed_writes_a_sentinel", "blocked_writes_none"])
-def test_phase_review_gate_sentinel(rdr_env, monkeypatch, tmp_path, passed):
-    """RDR-121 P2 co-requirement: the PASSED path writes a sentinel JSON under
-    $TMPDIR/nx-phase-gate-sentinel/; BLOCKED must not."""
-    import json
-
-    _write_rdr(rdr_env["rdr_dir"], "rdr-130-test.md",
-               {"title": "Test RDR", "status": "accepted", "type": "decision", "priority": "P0"},
-               body=_approach_body(_TWO_ITEMS))
-    sentinel_base = tmp_path / "sentinels"
-    sentinel_base.mkdir()
-    monkeypatch.setenv("TMPDIR", str(sentinel_base))
-    evidence = "Item1=nexus-abc1,Item2=nexus-def2" if passed else "Item1=nexus-abc1"  # Item2 missing
-    result = _preamble(*_GATE_1, "130", "--phase", "1", "--evidence", evidence)
-    assert result.exit_code == 0, result.output
-    sentinel_dir = sentinel_base / "nx-phase-gate-sentinel"
-    files = list(sentinel_dir.glob("*-130-1.json")) if sentinel_dir.exists() else []
-    if passed:
-        assert "APPROACH CROSS-WALK PASSED" in result.output
-        assert len(files) == 1, f"expected one sentinel for RDR-130 phase 1, got {files}"
-        payload = json.loads(files[0].read_text())
-        assert (payload["outcome"], payload["rdr_id"], payload["phase"]) == ("PASSED", "130", "1")
-    else:
-        assert "BLOCKED" in result.output
-        assert files == [], f"BLOCKED outcome must not write a sentinel; found {files}"
-
-
-_ONE_ITEM_BODY = "### Approach\n\n1. **A**: one\n\n## Consequences\n"
-_OTHER = ("rdr-002-other.md", {"title": "Other", "status": "accepted"})
-
-#: Sweep for the nexus-my04w class: every preamble joined argv to one string and
-#: took the RDR id from the first digits anywhere in it.
-_ARGV_SIBLING_CASES = [
-    # One properly quoted argv element ``Item1=a, Item2=b`` was stripped by a
-    # no-spaces pattern, leaving ``Item2=b`` behind, and ``2`` won the lookup.
-    {"name": "evidence_with_a_space_does_not_pick_the_rdr",
-     "files": [(*_OTHER, "### Approach\n\n1. **A**: one\n2. **B**: two\n\n## Consequences\n"),
-               ("rdr-112-real.md", {"title": "Real", "status": "accepted"},
-                "### Approach\n\n1. **A**: one\n2. **B**: two\n\n## Consequences\n")],
-     "argv": ["--phase", "1", "--evidence", "Item1=nexus-a, Item2=nexus-b", "112"],
-     "has": ["rdr-112-real.md", "APPROACH CROSS-WALK PASSED"], "lacks": [], "exit0": True},
-    # nexus-u1jxt.5: a one-pair evidence value equals its own token, so
-    # filtering "evidence tokens" also removed the flag's VALUE and the phase
-    # number became the RDR id.
-    {"name": "single_evidence_pair_with_the_id_last_does_not_pick_the_phase",
-     "files": [(*_OTHER, _ONE_ITEM_BODY), ("rdr-205-real.md", {"title": "Real", "status": "accepted"}, _ONE_ITEM_BODY)],
-     "argv": ["--evidence", "Item1=nexus-a", "--phase", "2", "205"],
-     "has": ["rdr-205-real.md"], "lacks": ["rdr-002-other.md"], "exit0": False},
-    {"name": "phase_number_never_selects_the_rdr",
-     "files": [("rdr-003-other.md", {"title": "Other", "status": "accepted"}, _ONE_ITEM_BODY),
-               ("rdr-112-real.md", {"title": "Real", "status": "accepted"}, _ONE_ITEM_BODY)],
-     "argv": ["--phase", "3", "112"], "has": ["rdr-112-real.md"], "lacks": [], "exit0": False},
-]
-
-
-@pytest.mark.parametrize("case", _table(_ARGV_SIBLING_CASES))
-def test_preamble_argv_siblings(rdr_env, case):
-    _write_files(rdr_env, case["files"])
-    res = _preamble(*_GATE_1, *case["argv"])
-    if case["exit0"]:
-        assert res.exit_code == 0, f"[{case['name']}] {res.output}"
-    _assert_output(case["name"], res.output, has=case["has"], lacks=case["lacks"])
 
 
 _ID_TOKEN_CASES = [

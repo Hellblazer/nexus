@@ -203,7 +203,7 @@ This includes RDR-078 verb skills, RDR-080 MCP-tool pointers, and infrastructure
 | nexus | Nexus CLI reference for all tiers (T1/T2/T3) |
 | peer-messaging | Messaging other sessions and dispatched agents: channel choice, acknowledgement, trust boundary, sharing one machine |
 | orchestration | Agent routing reference — routing tables, pipeline templates |
-| phase-review-gate | Phase-boundary gate — cross-walks RDR §Approach against closing beads to block silent scope reduction |
+| phase-review-gate | Phase-boundary checklist — cross-walk RDR §Approach against closing beads to catch silent scope reduction |
 | receiving-review | Technical evaluation of code review feedback |
 | serena-code-nav | Navigate code by symbol — definitions, callers, type hierarchies |
 | upgrade | Shows what `nx upgrade` would converge, then runs it |

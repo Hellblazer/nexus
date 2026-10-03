@@ -203,7 +203,7 @@ If T2 and the file disagree on status, `/conexus:rdr-accept` self-heals by repai
 
 ## Close (`/conexus:rdr-close`)
 
-Finalizes an Accepted RDR. Requires status Accepted (use `--force` to override).
+Finalizes an Accepted RDR. Requires status Accepted; a draft that shipped without acceptance closes only through `nx rdr set-status NNN closed --reason "..."`.
 
 Close reasons: `implemented` · `reverted` · `abandoned` · `superseded`
 

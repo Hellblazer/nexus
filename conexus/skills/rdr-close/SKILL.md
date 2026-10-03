@@ -28,7 +28,7 @@ Resolve RDR directory from `.nexus.yml` `indexing.rdr_paths[0]`; default `docs/r
 1. Read T2 record: mcp__plugin_conexus_nexus__memory_get(project="{repo}_rdr", title="NNN"
 2. If status is not "accepted" (or "final") and reason is "Implemented":
    - Warn: "RDR NNN status is '{current_status}' — expected 'accepted'. Close anyway?"
-   - Require `--force` or explicit user confirmation to proceed
+   - Require explicit user confirmation to proceed
 3. If T2 record not found, check filesystem for the markdown file
 
 ## Flow: Implemented
@@ -37,39 +37,7 @@ Resolve RDR directory from `.nexus.yml` `indexing.rdr_paths[0]`; default `docs/r
 
 Ask: "Did implementation diverge from the plan? If so, describe the divergences."
 
-If diverged:
-
-### Step 1.5: Problem Statement Replay
-
-Branch on what the preamble emitted:
-
-**A. If the preamble emitted `PROBLEM STATEMENT REPLAY: validation passed` (Pass 2 success)**:
-- Surface this to the user in the conversation
-- Show the per-gap → file:line summary the preamble printed
-- Continue to Step 2
-
-**B. If the preamble emitted a Pass 1 gap enumeration** (no `--pointers` was supplied):
-- Show the gap list to the user
-- Conversationally collect closure pointers from the user, one gap at a time
-- Format as: `Gap1=file.py:123,Gap2=other.py:45`
-- Re-invoke: `/conexus:rdr-close NNN --reason implemented --pointers 'Gap1=...,Gap2=...'`
-- The re-invocation will run Pass 2 of the preamble
-- On Pass 2 success, surface the validation-passed message and jump to branch A
-
-**C. If the preamble emitted a legacy WARN** (`This RDR predates structured gaps; no action required`):
-- Surface the warn to the user explicitly
-- Note that grandfathering applied because RDR ID < 065
-- Continue to Step 2
-
-**D. If the preamble blocked** (`sys.exit(0)` with error — malformed new RDR or pointer failure):
-- The skill body will not have run; the user sees the preamble error directly
-- This case requires no SKILL.md guidance — the preamble error message is self-explanatory
-- Resolve the error (fix gaps or fix pointers) then re-invoke
-
-**Mandatory user-facing framing** (say this verbatim before continuing to Step 2):
-> "The replay gate verifies you have committed to a specific file:line pointer per gap. It does NOT verify the pointer is semantically correct. Correctness is your responsibility — review each pointer manually before allowing the close to proceed."
-
-Also clear the T1 scratch `rdr-close-active` marker after Step 4 (Update State) completes — add a note at Step 4 to run: `nx scratch delete <entry-id>` where the entry was set by the preamble.
+If diverged, carry the notes into the post-mortem (Step 2).
 
 ### Step 1.75: Automatic Critique
 
@@ -82,8 +50,6 @@ Dispatch `/conexus:substantive-critique <rdr-id>` via the Agent tool and parse t
 3. **Fallback path**: if neither canonical nor code-block form is present, count `### Issue:` headers under `## Critical Issues` and `## Significant Issues`. Derive outcome mechanically: Critical > 0 → `not-justified`; Critical == 0 AND Significant > 0 → `partial`; all clear → `justified`. Surface the fallback path to the user explicitly: "The critic did not emit a canonical Verdict block. Falling back to section counting: <counts>."
 
 All three paths map to the same 3-valued enum (`justified` / `partial` / `not-justified`) which is the gate signal branched on below.
-
-**Short-circuit**: if the preamble surfaced a `Force Implemented (audit)` line, skip the dispatch entirely — the user has taken explicit responsibility. Write a T2 override audit entry with `critic_verdict: skipped` (see branch E below) and continue to Step 2.
 
 **Relay framing** (load-bearing, do not vary): the dispatch relay MUST be fixed-shape and minimal. Pass only `{rdr_id}` and the standard input artifacts (T2 RDR record, catalog entry, RDR markdown file). NEVER pass session-generated summaries of what was built, what diverged, or what the user intends. Rationalization bias is the exact failure mode RDR-069 addresses — see RDR-069 §Risks "Dispatch isolation risk".
 
@@ -111,19 +77,19 @@ Branch on `Verdict.outcome`:
 
 **A. `justified`** → surface the one-line summary to the user and continue to Step 2. No constraint on `close_reason`.
 
-**B. `partial`** → surface all Critical and Significant findings to the user verbatim. Block `close_reason: implemented` unless `--force-implemented "<reason>"` was supplied. If no override, prompt the user: "The critic found significant issues. Address them and re-run, or pass `--force-implemented '<reason>'` to override with audit trail." Do not proceed until the user either resolves findings (recursive loop) or passes the override.
+**B. `partial`** → surface all Critical and Significant findings to the user verbatim. Block closing as Implemented unless the user states an explicit override reason. If there is none, prompt the user: "The critic found significant issues. Address them and re-run, or give an override reason to close anyway with an audit trail." Do not proceed until the user either resolves findings (recursive loop) or gives the override.
 
-**C. `not-justified`** → surface ALL Critical findings verbatim. Block `close_reason: implemented` unless `--force-implemented "<reason>"` was supplied. Per RDR-069 §Proposed Solution (line 282) and §Technical Design (line 307), `close_reason: reverted` and `close_reason: partial` are legitimate non-override paths on `not-justified` — a user who genuinely wants to acknowledge failure with `reverted` should be able to do so without the override flag. User's options: (1) address findings and re-run with `--reason implemented` (recursive refinement loop), (2) re-run with `--reason reverted` or `--reason partial` (honest failure-acknowledgment, no override needed), or (3) pass `--force-implemented "<reason>"` with a substantive reason to force `implemented` despite the Critical findings. A one-word reason (e.g., `--force-implemented "wontfix"`) is insufficient — prompt the user to expand it before accepting. Only `close_reason: implemented` requires the override.
+**C. `not-justified`** → surface ALL Critical findings verbatim. Block closing as Implemented unless the user states an explicit override reason. Per RDR-069 §Proposed Solution (line 282) and §Technical Design (line 307), `close_reason: reverted` and `close_reason: partial` are legitimate non-override paths on `not-justified` — a user who genuinely wants to acknowledge failure with `reverted` should be able to do so without an override. User's options: (1) address findings and re-run with reason Implemented (recursive refinement loop), (2) re-run with reason Reverted or Partial (honest failure-acknowledgment, no override needed), or (3) give a substantive override reason to close as Implemented despite the Critical findings. A one-word reason (e.g., "wontfix") is insufficient — prompt the user to expand it before accepting. Only `close_reason: implemented` requires the override.
 
 **D. Verdict extraction failure** → this case should be rare now that the verdict extractor above tries canonical bullet form, code-block key-value form, AND section-counting fallback. Only reach this branch if all three extraction paths fail (e.g. critic response is completely empty or wholly unparseable). Surface explicitly to the user: "Critic response could not be parsed at all. Proceed without critique? (y/N)". Do not silently block; do not silently proceed.
 
-**E. Override audit entry** (runs for every `--force-implemented` invocation, regardless of critic outcome):
+**E. Override audit entry** (runs whenever the user overrides the critic to close as Implemented):
 
 ```
 mcp__plugin_conexus_nexus__memory_put(
     project="{repo}_rdr",
     title="{rdr_id}-close-override-{YYYY-MM-DD}",
-    content="critic_verdict: {outcome|skipped}\nuser_reason: {force_implemented_reason}\nfinal_close_reason: {close_reason}\ntimestamp: {ISO8601}\nrdr_id: {rdr_id}",
+    content="critic_verdict: {outcome}\nuser_reason: {override_reason}\nfinal_close_reason: {close_reason}\ntimestamp: {ISO8601}\nrdr_id: {rdr_id}",
     tags="rdr,close-override,rdr-{rdr_id}"
     # omit ttl (memory_put's ttl is int|None; permanent by omission, not the string "permanent")
 )
@@ -165,7 +131,7 @@ If T2 record has an `epic_bead` field (set during accept-time planning):
 4. Do NOT automatically mark beads complete — the human decides which beads to close.
 
 If T2 record has no `epic_bead` field (user skipped planning at accept time):
-- Check the command output for open beads listed by the pre-check script.
+- Run `bd list --status=open` and `bd list --status=in_progress` and check the output for beads that name this RDR.
 
 **HARD GATE — if ANY open or in-progress beads exist:**
 - Display the open beads to the user
