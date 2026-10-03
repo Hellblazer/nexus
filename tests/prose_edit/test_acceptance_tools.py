@@ -308,8 +308,10 @@ def test_a_work_directory_held_for_the_stdin_answer_is_not_blamed_on_the_other_r
     brief = "python3 .claude/skills/prose-edit/scripts/brief.py"
     review = "python3 .claude/skills/prose-edit/scripts/review.py"
     stdin = [_use("t", "Bash", {"command": f"{brief} tmpdir"}), _res("t", held),
-             _use("a", "Agent", {}), _res("a", "ok"),
-             _use("f", "Bash", {"command": f"{brief} filter -"}), _res("f", '{"edits": [], "dropped": []}'),
+             _use("a", "Agent", {}), *_brief_read(path=f"{held}/brief.md"),
+             _res("a", '```json\n{"brief_sha": "' + BRIEF_ID + '", "edits": []}\n```'),
+             _use("f", "Bash", {"command": f"{brief} filter - --file {held}/input.txt"}),
+             _res("f", '{"edits": [], "dropped": []}'),
              _use("r", "Bash", {"command": f"{review} render -"}), _res("r", '{"copy": "x", "opened": false}')]
     unmapped = [_use("p", "Bash", {"command": f"{brief} parse notes.txt"}), _res("p", "{}"),
                 {"type": "result", "result": "Which genre applies?"}]
@@ -499,20 +501,39 @@ def test_held_edits_are_a_positive_control_reported_and_never_counted_in_the_rat
 # ---------------------------------------------------------------------------
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-FILTER_CMD = "python3 .claude/skills/prose-edit/scripts/brief.py filter {target} --budget {budget} --save /w/filtered.json"
+WORK_DIR = "/tmp/prose-edit-abcd1234"
+BRIEF_ID = "a1b2c3d4e5f6"
+FILTER_CMD = ("python3 .claude/skills/prose-edit/scripts/brief.py filter {target} --budget {budget} "
+              f"--save {WORK_DIR}/filtered.json")
 
 
 def _doc(name: str) -> str:
     return (REPO_ROOT / name).read_text(encoding="utf-8")
 
 
+def _res_err(tid: str, text: str) -> dict:
+    return {"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": tid, "content": text,
+                                                     "is_error": True}]}}
+
+
+def _brief_read(*, brief_id: str = BRIEF_ID, path: str = f"{WORK_DIR}/brief.md", error: bool = False,
+                text: str | None = None, sub: str | None = "ag") -> list[dict]:
+    """The line-editor subagent's Read of WORK/brief.md and what came back: the file's last line is the id."""
+    body = text if text is not None else f"     1\t# Editing brief\n   310\t\n   311\tBrief id: {brief_id}\n"
+    return [_use("rd", "Read", {"file_path": path}, sub=sub), (_res_err if error else _res)("rd", body)]
+
+
 def _run(reply: dict | None, filtered: dict | None, *, target: str = "docs/x.md", budget: int | str = 5,
-         command: str | None = None) -> list[dict]:
-    """A transcript: the editor's reply, then the skill's `brief.py filter` run and what it printed."""
+         command: str | None = None, read: list[dict] | None = None, echo: str | None = BRIEF_ID) -> list[dict]:
+    """A transcript: the editor reads WORK/brief.md and replies, then the skill's `brief.py filter` run and what
+    it printed. `read` replaces the editor's Read (an empty list: it never read the file); `echo` is the id the
+    reply names as brief_sha (None: it names none)."""
     events: list[dict] = []
     if reply is not None:
+        reply = {**reply} if echo is None else {"brief_sha": echo, **reply}
         body = json.dumps(reply)
-        events += [_use("ag", "Agent", {}), _res("ag", f"[Subagent hand-back] text\n```json\n{body}\n```")]
+        events += [_use("ag", "Agent", {}), *(_brief_read() if read is None else read),
+                   _res("ag", f"[Subagent hand-back] text\n```json\n{body}\n```")]
     if filtered is not None:
         cmd = command or FILTER_CMD.format(target=target, budget=budget)
         events += [_use("fl", "Bash", {"command": cmd}),
@@ -557,8 +578,12 @@ def test_protected_fails_on_an_edit_inside_a_quote_a_code_block_a_table_or_the_f
 
 def test_a_run_that_proposes_nothing_where_edits_are_expected_is_not_measurable_never_a_pass() -> None:
     empty = _both([])
-    for kind, doc in (("protected", PROTECTED), ("budget", PROTECTED), ("qa", QA)):
+    for kind, doc in (("protected", PROTECTED), ("budget", PROTECTED)):
         assert _verdict(kind, empty, doc)[0] == "NOT-MEASURABLE", kind
+    # a qualifier fixture is different: Sam's ruling makes silence a violation (the filler is cut, every
+    # other qualifier is queried), so an editor that proposed nothing failed, it did not go unmeasured
+    verdict, note = _verdict("qa", empty, QA)
+    assert verdict == "FAIL" and "basically" in note
     # no filter output at all (the run stopped before the skill filtered the reply)
     no_filter = _run({"edits": [_ed(1, "x")]}, None)
     assert _verdict("protected", no_filter, PROTECTED)[0] == "NOT-MEASURABLE"
@@ -605,38 +630,62 @@ def test_range_fails_on_an_edit_or_a_query_outside_the_lines_and_passes_one_insi
     assert _verdict("range", _run({"edits": []}, {"edits": []}, target=target), RANGE_DOC)[0] == "NOT-MEASURABLE"
 
 
-def test_qa_needs_the_filler_cut_and_fails_a_cut_of_the_justified_may() -> None:
-    cut_filler = _both([_ed(1, "The queue is basically ordered", "The queue is ordered")])
-    assert _verdict("qa", cut_filler, QA)[0] == "PASS"
-    both = _both([_ed(1, "The queue is basically ordered", "The queue is ordered"),
-                  _ed(2, "the cache may return stale entries", "the cache returns stale entries")])
+QA_FILLER = _ed(1, "The queue is basically ordered", "The queue is ordered")
+QA_MAY_QUERY = {"n": 1, "anchor": "the cache may return stale entries", "text": "Is that a measured bound?"}
+
+
+def _qual(edits: list[dict], queries: list[dict]) -> list[dict]:
+    """A run whose editor replied with `edits` and `queries` and whose filter kept all of them."""
+    return _run({"edits": edits, "queries": queries}, {"edits": edits, "queries": queries})
+
+
+def test_qa_cuts_the_filler_and_queries_the_may_and_fails_on_anything_else() -> None:
+    assert _verdict("qa", _qual([QA_FILLER], [QA_MAY_QUERY]), QA)[0] == "PASS"
+    # the filler is cut but may is neither cut nor queried: the ruling makes every other qualifier a query
+    verdict, note = _verdict("qa", _qual([QA_FILLER], []), QA)
+    assert verdict == "FAIL" and "may" in note and "queried" in note
+    both = _qual([QA_FILLER, _ed(2, "the cache may return stale entries", "the cache returns stale entries")],
+                 [QA_MAY_QUERY])
     verdict, note = _verdict("qa", both, QA)
-    assert verdict == "FAIL" and "may" in note
-    other = _both([_ed(1, "A second paragraph exists so that the file has more than one block.", "A second paragraph exists.")])
+    assert verdict == "FAIL" and "may" in note and "cuts" in note  # a cut of it fails even beside a query
+    other = _qual([_ed(1, "A second paragraph exists so that the file has more than one block.", "A second paragraph exists.")],
+                  [QA_MAY_QUERY])
     verdict, note = _verdict("qa", other, QA)
     assert verdict == "FAIL" and "basically" in note  # edits exist, the filler was left in
-    query_only = _run({"edits": [], "queries": [{"n": 1, "anchor": "basically ordered", "text": "?"}]}, {
-        "edits": [], "queries": [{"n": 1, "anchor": "basically ordered", "text": "Is it ordered?"}]})
+    query_only = _qual([], [{"n": 1, "anchor": "basically ordered", "text": "Is it ordered?"}, QA_MAY_QUERY])
     assert _verdict("qa", query_only, QA)[0] == "FAIL"  # the filler is cut, not queried (Sam, 2026-09-30)
+    # the query may tie to the word through its text, not its anchor
+    by_text = _qual([QA_FILLER], [{"n": 1, "anchor": "stale entries", "text": "Does 'may' mean sometimes or always?"}])
+    assert _verdict("qa", by_text, QA)[0] == "PASS"
 
 
-def test_qb_keeps_a_justified_qualifier_and_an_empty_proposal_is_the_right_answer() -> None:
-    assert _verdict("qb", _both([_ed(1, "Failover may take longer than 30 seconds", "Failover takes longer than 30 seconds")]),
-                    QB)[0] == "FAIL"
-    assert _verdict("qb", _both([]), QB)[0] == "PASS"  # the qualifier is justified: nothing to cut is correct
-    assert _verdict("qb", _run(None, {"edits": []}), QB)[0] == "FAIL"  # but a run with no reply measured nothing
+def test_qb_queries_may_and_an_empty_proposal_or_a_cut_fails() -> None:
+    ask = {"n": 1, "anchor": "Failover may take longer than 30 seconds", "text": "How much longer?"}
+    assert _verdict("qb", _qual([], [ask]), QB)[0] == "PASS"
+    cut = _both([_ed(1, "Failover may take longer than 30 seconds", "Failover takes longer than 30 seconds")])
+    assert _verdict("qb", cut, QB)[0] == "FAIL"
+    assert _verdict("qb", _qual([_ed(1, "Failover may take longer than 30 seconds", "x")], [ask]), QB)[0] == "FAIL"
+    verdict, note = _verdict("qb", _both([]), QB)  # the old "nothing to cut is correct" class is gone
+    assert verdict == "FAIL" and "may" in note and "queried" in note
+    assert _verdict("qb", _run(None, {"edits": []}), QB)[0] == "FAIL"  # a run with no reply measured nothing
+    other = _qual([_ed(1, "The lease TTL is 30 seconds.", "")], [])
+    assert _verdict("qb", other, QB)[0] == "FAIL"  # edits elsewhere do not stand in for the query
 
 
-def test_qc_queries_the_unjustified_non_filler_qualifiers_and_fails_a_cut_of_them() -> None:
+def test_qc_queries_every_non_filler_qualifier_and_fails_a_cut_or_a_silence() -> None:
+    likely = {"n": 1, "anchor": "will likely double", "text": "Is that a forecast?"}
+    truly = {"n": 2, "anchor": "never truly reclaimed", "text": "What does truly add?"}
+    assert _verdict("qc", _qual([], [likely, truly]), QC)[0] == "PASS"
     cut = _both([_ed(1, "Adoption will likely double next quarter.", "Adoption will double next quarter.")])
     verdict, note = _verdict("qc", cut, QC)
     assert verdict == "FAIL" and "likely" in note
-    truly = _both([_ed(1, "never truly reclaimed", "never reclaimed")])
-    assert _verdict("qc", truly, QC)[0] == "FAIL"
-    asked = _run({"edits": [], "queries": []}, {"edits": [], "queries": [{"n": 1, "anchor": "will likely double", "text": "Is that a forecast?"}]})
-    assert _verdict("qc", asked, QC)[0] == "PASS"
+    assert _verdict("qc", _both([_ed(1, "never truly reclaimed", "never reclaimed")]), QC)[0] == "FAIL"
+    # one of the two queried, the other neither cut nor queried: still a failure
+    verdict, note = _verdict("qc", _qual([], [likely]), QC)
+    assert verdict == "FAIL" and "truly" in note and "queried" in note
     silent = _both([])
-    assert _verdict("qc", silent, QC)[0] == "NOT-MEASURABLE"  # nothing was said about either qualifier
+    verdict, note = _verdict("qc", silent, QC)
+    assert verdict == "FAIL" and "queried" in note  # nothing was said about either qualifier: not "unmeasured"
 
 
 def test_the_closing_refrain_is_never_an_edit_and_a_query_about_it_passes() -> None:
@@ -702,3 +751,158 @@ def test_main_exits_one_on_a_fail_three_on_not_measurable_and_zero_only_when_eve
     assert v.main([str(tmp_path), "--root", str(root)]) == 3
     write("protected-3", _both([_ed(1, "This is basically a very simple loop", "x")]))
     assert v.main([str(tmp_path), "--root", str(root)]) == 1
+
+
+# ---------------------------------------------------------------------------
+# Round 3: the editor read WORK/brief.md; the oracles are the fixtures', not the filter's; drops by cause
+# ---------------------------------------------------------------------------
+
+
+def test_a_run_whose_editor_never_read_brief_md_fails_and_so_does_every_way_the_read_can_be_empty() -> None:
+    edits = [_ed(1, "The scheduler basically hands each job", "x")]
+    assert _verdict("protected", _both(edits), PROTECTED)[0] == "PASS"
+    cases: dict[str, list[dict]] = {
+        "no Read at all": _run({"edits": edits}, {"edits": edits}, read=[]),
+        "the Read errored": _run({"edits": edits}, {"edits": edits}, read=_brief_read(error=True, text="no such file")),
+        "the Read was denied": _run({"edits": edits}, {"edits": edits},
+                                    read=_brief_read(text="Permission to use Read has been denied.")),
+        "a result with no id line": _run({"edits": edits}, {"edits": edits}, read=_brief_read(text="1\t# Editing brief\n")),
+        "another file": _run({"edits": edits}, {"edits": edits}, read=_brief_read(path=f"{WORK_DIR}/input.txt")),
+        "the parent read it, not the editor": _run({"edits": edits}, {"edits": edits}, read=_brief_read(sub=None)),
+        "another work directory": _run({"edits": edits}, {"edits": edits},
+                                       read=_brief_read(path="/tmp/prose-edit-ffffffff/brief.md")),
+    }
+    for why, events in cases.items():
+        verdict, note = _verdict("protected", events, PROTECTED)
+        assert verdict == "FAIL" and "brief.md" in note, (why, verdict, note)
+
+
+def test_the_id_the_reply_names_must_be_the_one_the_read_returned_and_the_read_must_come_before_the_reply() -> None:
+    edits = [_ed(1, "The scheduler basically hands each job", "x")]
+    copied = _run({"edits": edits}, {"edits": edits}, echo="0" * 12)  # an id the file never showed
+    verdict, note = _verdict("protected", copied, PROTECTED)
+    assert verdict == "FAIL" and "brief_sha" in note
+    none = _run({"edits": edits}, {"edits": edits}, echo=None)
+    verdict, note = _verdict("protected", none, PROTECTED)
+    assert verdict == "FAIL" and "brief_sha" in note
+    longer = _run({"edits": edits}, {"edits": edits}, echo=BRIEF_ID + "0123456789")  # the full hash starts with it
+    assert _verdict("protected", longer, PROTECTED)[0] == "PASS"
+    # a Read that comes after the reply cannot have produced it
+    late = _run({"edits": edits}, {"edits": edits}, read=[])
+    reply_at = next(i for i, ev in enumerate(late) if ev.get("type") == "user")
+    late[reply_at + 1:reply_at + 1] = _brief_read()
+    verdict, note = _verdict("protected", late, PROTECTED)
+    assert verdict == "FAIL" and "before" in note
+
+
+def test_the_stdin_run_needs_the_same_read_proof() -> None:
+    v = _verdicts()
+    brief = "python3 .claude/skills/prose-edit/scripts/brief.py"
+    review = "python3 .claude/skills/prose-edit/scripts/review.py"
+    reply = json.dumps({"brief_sha": BRIEF_ID, "edits": []})
+
+    def stdin(read: list[dict]) -> list[dict]:
+        return [_use("a", "Agent", {}), *read, _res("a", f"```json\n{reply}\n```"),
+                _use("f", "Bash", {"command": f"{brief} filter - --file {WORK_DIR}/input.txt"}),
+                _res("f", '{"edits": [], "dropped": []}'),
+                _use("r", "Bash", {"command": f"{review} render -"}), _res("r", '{"copy": "x", "opened": false}')]
+
+    for read, expected in ((_brief_read(), "PASS"), ([], "FAIL")):
+        events = stdin(read)
+        got = v.verdict("stdin", events, v.compliance(events, None), [f"{WORK_DIR}"])[0]
+        assert got == expected, (read, got)
+
+
+def test_the_verdicts_do_not_borrow_the_filters_protected_or_range_code() -> None:
+    src = (ACC / "verdicts.py").read_text(encoding="utf-8")
+    for name in ("protected_spans", "edit_problem", "_range_span", "_quoted_phrases", "spec_from_file_location"):
+        assert name not in src, f"verdicts.py uses brief.py's {name}: the oracle would fail with the filter"
+
+
+def test_protected_is_checked_against_the_fixtures_own_line_ranges_and_a_changed_fixture_is_not_measurable() -> None:
+    row = _both([_ed(1, "The worker that basically holds the row.", "x")])  # a table row, line 22
+    verdict, note = _verdict("protected", row, PROTECTED)
+    assert verdict == "FAIL" and "line 22" in note and "table" in note
+    changed = PROTECTED.replace("| Column | Meaning |", "| Col | Meaning |")
+    verdict, note = _verdict("protected", _both([_ed(1, "The scheduler basically hands each job", "x")]), changed)
+    assert verdict == "NOT-MEASURABLE" and "fixture" in note
+
+
+def test_the_note_reports_the_filters_drops_by_cause_and_the_editors_own_violations() -> None:
+    kept = _ed(1, "The scheduler basically hands each job", "x")
+    dropped = [{"n": 2, "old": "This is basically a very simple loop", "new": "x", "cause": "protected-region"},
+               {"n": 3, "old": "words the document never had", "new": "y", "cause": "over-budget"},
+               {"n": 4, "old": "nor these either", "new": "", "cause": "protected-region"}]
+    events = _run({"edits": [kept, *dropped]}, {"edits": [kept], "dropped": dropped,
+                  "dropped_queries": [{"n": 1, "anchor": "a", "cause": "outside-range"}]})
+    verdict, note = _verdict("protected", events, PROTECTED)
+    assert verdict == "PASS"
+    assert "dropped by the filter: outside-range=1, over-budget=1, protected-region=2" in note
+    # the editor's own reply, scored against the same fixture ranges (the filter had nothing to do with it)
+    assert "editor's own edits in protected regions: 1" in note
+    clean = _verdict("protected", _both([kept]), PROTECTED)[1]
+    assert "dropped by the filter: none" in clean and "editor's own edits in protected regions: 0" in clean
+
+
+CHANGELOG_FIXTURE = _doc("tests/prose_edit/fixtures/range-notes.md")
+
+
+def test_the_range_run_scores_against_a_committed_fixture_not_the_live_changelog() -> None:
+    v = _verdicts()
+    assert v.DOCS["range"] == "tests/prose_edit/fixtures/range-notes.md"
+    assert (REPO_ROOT / v.DOCS["range"]).is_file()
+    target = "tests/prose_edit/fixtures/range-notes.md:10-20"
+    inside = [_ed(1, "The compactor just runs once a day", "The compactor runs once a day")]
+    assert _verdict("range", _run({"edits": inside}, {"edits": inside}, target=target), CHANGELOG_FIXTURE)[0] == "PASS"
+    outside = [*inside, _ed(2, "The scheduler now basically hands each job to one worker", "x")]  # line 7
+    verdict, note = _verdict("range", _run({"edits": outside}, {"edits": outside}, target=target), CHANGELOG_FIXTURE)
+    assert verdict == "FAIL" and "outside lines 10-20" in note and "edit 2" in note
+    query = {"n": 1, "anchor": "The queue is really quite ordered", "text": "?"}  # line 26
+    events = _run({"edits": inside}, {"edits": inside, "queries": [query]}, target=target)
+    assert _verdict("range", events, CHANGELOG_FIXTURE)[0] == "FAIL"
+    # the boundary lines are inside: an edit on line 10 and one on line 20
+    edge = [_ed(1, "## [2.3.0] - 2026-02-10", "x"), _ed(2, "A worker that basically dies mid-job", "x")]
+    assert _verdict("range", _run({"edits": edge}, {"edits": edge}, target=target), CHANGELOG_FIXTURE)[0] == "PASS"
+    assert _verdict("range", _run({"edits": edge}, {"edits": edge}, target="x.md:11-19"), CHANGELOG_FIXTURE)[0] == "FAIL"
+
+
+NEW_XANADU = (
+    "tracing where a decision came from, what code implements a design, and which findings have been superseded",
+    "following citation chains, crossing collection boundaries, and scoping each step",
+    "There is no way to say that a research finding",
+    "There is no way to follow a chain of citations",
+    "A debugger agent creates `relates` links between a root cause analysis and prior findings.",
+    "A developer agent creates `implements` links between code and the design document it realizes.",
+)
+NEW_LINDA = (
+    "the oldest unclaimed tuple per subspace, the health of the table, and the age of the last sweep",
+    "A message reaches exactly one reader, whether or not two raced for it.",
+    "A request stays open, with an age you can see, until its ack exists, whether or not anyone is watching.",
+    "An agent's report had to be something an orchestrator could wait for and something a later session could count.",
+    "A message to an agent working mid-turn had to reach it before it composed its next reply.",
+    "A request from one Claude Code session to another on the same machine had to be delivered without a person relaying it.",
+    "Nothing records that a report was owed, so an agent that finishes without reporting leaves no trace.",
+    "Nothing wakes a reader when a record arrives, so a correction sent mid-turn lands after the turn.",
+)
+
+
+def test_the_device_lists_hold_the_tricolons_and_repeated_openings_the_critique_named_each_once() -> None:
+    v = _verdicts()
+    for kind, doc, phrases in (("xanadu", XANADU, NEW_XANADU), ("linda", LINDA, NEW_LINDA)):
+        for phrase in phrases:
+            assert phrase in v.DEVICES[kind], (kind, phrase)
+            assert doc.count(phrase) == 1, (kind, phrase, doc.count(phrase))  # the list is applicable to the document
+            verdict, note = _verdict(kind, _both([_ed(1, phrase, "x")]), doc)
+            assert verdict == "FAIL" and "device" in note, (kind, phrase)
+    assert _verdict("xanadu", _both([_ed(1, "To be clear: ", "")]), XANADU)[0] == "PASS"  # still passes on a plain cut
+
+
+def test_the_readme_says_what_a_pass_means_for_devices_and_what_each_kind_scores() -> None:
+    text = (ACC / "README.md").read_text(encoding="utf-8")
+    assert "none of the listed devices was touched" in text
+    assert "a human reads the rest" in text or "for a human to read" in text
+    for kind in ("`protected`", "`budget`", "`range`", "`qa`", "`qb`", "`qc`"):
+        assert any(ln.startswith(f"| {kind} |") for ln in text.splitlines()), kind
+    assert "dropped by the filter" in text and "fixture" in text
+    row = next(ln for ln in text.splitlines() if ln.startswith("| `qb` |"))
+    assert "queried" in row and "passes" not in row  # the no-proposal-passes class is gone

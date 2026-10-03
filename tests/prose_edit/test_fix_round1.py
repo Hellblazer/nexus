@@ -180,7 +180,7 @@ def test_nothing_was_written_is_never_claimed_when_rejections_were_already_store
     proc = run_review(prose, "apply", "--work", str(work), "--accept", "1", "--reject", "2", env=env)
     assert proc.returncode == 1 and "run apply again" in proc.stderr
     assert "nothing was written" not in proc.stderr  # the rejection IS stored: say what is true instead
-    assert "rejections already stored" in proc.stderr and "file was not changed" in proc.stderr
+    assert "rejections already stored" in proc.stderr and "apply did not change the file" in proc.stderr
     assert [r["old"] for r in t2_json(REPO_PROJECT, "doc/docs/s.md")["rejections"]] == [E2["old"]]
     assert f.read_text(encoding="utf-8") == DOC + "AUTHOR SAVE\n" and work.is_dir()
 
@@ -373,16 +373,23 @@ def _split_build(out: str) -> tuple[dict[str, str], str]:
     return fields, brief
 
 
-def test_build_work_writes_brief_md_and_prints_the_sha256_prefix(prose: Prose, repo: Path) -> None:
+def _brief_id(work: Path) -> str:
+    """The id on the last line of WORK/brief.md (fix round 3: the id is in the file and nowhere else)."""
+    m = re.search(r"\nBrief id: ([0-9a-f]{12})\n\Z", (work / "brief.md").read_text(encoding="utf-8"))
+    assert m
+    return m.group(1)
+
+
+def test_build_work_writes_brief_md_and_prints_only_the_work_directory(prose: Prose, repo: Path) -> None:
     out = brief_ok(prose, "build", "docs/x.md", "--work")
     fields, brief = _split_build(out)
     work = Path(fields["WORK"])
     try:
-        assert list(fields) == ["WORK", "BRIEF_SHA"]
+        assert list(fields) == ["WORK"]
         data = (work / "brief.md").read_bytes()
-        assert data.decode("utf-8") == brief
-        assert re.fullmatch(r"[0-9a-f]{12}", fields["BRIEF_SHA"])
-        assert hashlib.sha256(data).hexdigest().startswith(fields["BRIEF_SHA"])
+        assert data.decode("utf-8").startswith(brief)
+        assert re.fullmatch(r"[0-9a-f]{12}", _brief_id(work))
+        assert hashlib.sha256(brief.encode("utf-8")).hexdigest().startswith(_brief_id(work))
     finally:
         brief_ok(prose, "rmtmp", str(work))
 
@@ -394,10 +401,9 @@ def test_a_stdin_build_inside_a_work_directory_writes_brief_md_too_and_one_outsi
     try:
         (work / "input.txt").write_text("fix: a thing\n", encoding="utf-8")
         out = brief_ok(prose, "build", "-", "--genre", "commit-message", "--file", str(work / "input.txt"))
-        head, brief = out.split("\n\n", 1)
-        assert re.fullmatch(r"BRIEF_SHA=[0-9a-f]{12}", head)
-        assert (work / "brief.md").read_text(encoding="utf-8") == brief and "fix: a thing" in brief
-        assert hashlib.sha256((work / "brief.md").read_bytes()).hexdigest().startswith(head.split("=")[1])
+        assert out.startswith("# Editing brief") and "Brief id" not in out
+        assert (work / "brief.md").read_text(encoding="utf-8").startswith(out) and "fix: a thing" in out
+        assert hashlib.sha256(out.encode("utf-8")).hexdigest().startswith(_brief_id(work))
     finally:
         brief_ok(prose, "rmtmp", str(work))
     loose = tmp_path / "m.txt"
@@ -408,7 +414,7 @@ def test_a_stdin_build_inside_a_work_directory_writes_brief_md_too_and_one_outsi
 
 def _built(prose: Prose) -> tuple[Path, str]:
     fields, _ = _split_build(brief_ok(prose, "build", "docs/x.md", "--work"))
-    return Path(fields["WORK"]), fields["BRIEF_SHA"]
+    return Path(fields["WORK"]), _brief_id(Path(fields["WORK"]))
 
 
 def test_filter_warns_on_a_missing_or_mismatched_brief_sha_and_stays_quiet_on_a_match(prose: Prose) -> None:
@@ -417,7 +423,8 @@ def test_filter_warns_on_a_missing_or_mismatched_brief_sha_and_stays_quiet_on_a_
         save = str(work / "filtered.json")
         ok = run_brief(prose, "filter", "docs/x.md", "--save", save, stdin=fenced(proposal([], brief_sha=sha)))
         assert ok.returncode == 0 and "brief_sha" not in ok.stderr and json.loads(ok.stdout)["warnings"] == []
-        full = hashlib.sha256((work / "brief.md").read_bytes()).hexdigest()
+        body = (work / "brief.md").read_text(encoding="utf-8").rsplit("\nBrief id: ", 1)[0]
+        full = hashlib.sha256(body.encode("utf-8")).hexdigest()
         longer = run_brief(prose, "filter", "docs/x.md", "--save", save, stdin=fenced(proposal([], brief_sha=full)))
         assert longer.returncode == 0 and "brief_sha" not in longer.stderr
         missing = run_brief(prose, "filter", "docs/x.md", "--save", save, stdin=fenced(proposal([])))
@@ -441,11 +448,11 @@ def test_filter_checks_nothing_when_the_work_directory_holds_no_brief_file(prose
         brief_ok(prose, "rmtmp", str(work))
 
 
-def test_the_skill_and_the_agent_pass_the_brief_by_file_and_echo_its_sha() -> None:
+def test_the_skill_and_the_agent_pass_the_brief_by_file_and_the_id_is_read_from_it() -> None:
     skill = SKILL.read_text(encoding="utf-8")
     assert "The prompt is the brief, unchanged." not in skill
     step7 = _step(skill, 7)
-    assert "WORK/brief.md" in step7 and "BRIEF_SHA" in step7 and "brief_sha" in step7
+    assert "WORK/brief.md" in step7 and "brief_sha" in step7
     agent = AGENT.read_text(encoding="utf-8")
     assert "Read the brief in the prompt in full" not in agent
     assert "brief file" in agent and "brief_sha" in agent
@@ -548,4 +555,4 @@ def test_the_prose_edit_scripts_and_the_acceptance_helpers_carry_the_spdx_header
 def test_brief_py_names_its_own_filter_flags_in_the_module_docstring() -> None:
     # the docstring is the contract the skill reads: the build output and the sha check are in it
     text = BRIEF.read_text(encoding="utf-8")
-    assert "BRIEF_SHA" in text and "brief.md" in text
+    assert "Brief id" in text and "brief.md" in text

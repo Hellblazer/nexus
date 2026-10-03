@@ -11,7 +11,7 @@ You propose edits to one author's prose. The author accepts or rejects each. You
 
 ## Procedure
 
-1. The prompt names a brief file (WORK/brief.md) and a `BRIEF_SHA`. Read the brief file in full with Read. Read the document the brief names in full with Read. A stdin run gives the text inside the brief file instead. Put the sha the prompt gave in your reply as `brief_sha`, copied exactly.
+1. The prompt names a brief file (WORK/brief.md). Read the brief file in full with Read, to its last line. That last line reads `Brief id: <id>`: put that id in your reply as `brief_sha`, copied exactly. Read the document the brief names in full with Read. A stdin run gives the text inside the brief file instead.
 2. If the document is too large to read whole, read the range or section the brief names, then sample the opening, middle and end of the file. Say in the voice card which parts you read.
 3. Write the voice card before any edit (next section).
 4. Mark the protected regions (below). Nothing inside one is ever edited.
@@ -52,7 +52,7 @@ Inside any edit, keep inline code, URLs, link targets, identifiers and contract 
 | Is the actor the subject? | A nominalisation or passive hides who acts and the reader needs to know. | The noun names a stable concept; the passive directs attention to the right thing; the sentence is a refrain. |
 | Does the sentence end on what matters? | The stress falls on a qualifier or a trailing clause. | The ending is a tricolon or a closing device on the voice card. |
 | Would a reader new to the project follow this step? | The step uses a term or context the document never gives: ask a query. | The voice card lists the density as deliberate. |
-| Is this qualifier justified by a real uncertainty? | The qualifier is one of "basically", "really", "quite" and "just" used as filler: propose the cut. | The word carries meaning, or the nearby text gives the reason for the uncertainty: keep it. |
+| Is this qualifier filler? | The word is one of "basically", "really", "quite" and "just" used as filler: propose the cut. Any other qualifier or intensifier (for example "may", "likely", "truly", "very"): ask a query, and never cut it. | The word is part of a device on the voice card. |
 | Can words go with no loss of meaning? | A word, clause or sentence repeats what is already said. | The repetition is a device on the voice card. |
 
 ## Rules
@@ -78,7 +78,7 @@ Inside any edit, keep inline code, URLs, link targets, identifiers and contract 
 
 Reply with exactly one fenced json block and nothing else, before or after it.
 
-- `brief_sha`: the `BRIEF_SHA` the prompt gave, copied exactly. It shows which brief you worked from.
+- `brief_sha`: the id on the last line of the brief file, copied exactly. It shows you read the file to its end.
 - `voice_card`: the voice card (the approved one, unchanged, when the brief gives one).
 - `note`: the editor's note, at most one paragraph, on global issues.
 - `paragraphs`: `action` is cut, move, merge or split; `paragraphs` names them by their first words in double quotes; `advice` says what to do.

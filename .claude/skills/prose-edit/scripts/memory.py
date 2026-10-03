@@ -1162,7 +1162,7 @@ def _write_promote_dry_run(ctx: Ctx, digest: str) -> None:
     try:
         directory.mkdir(mode=0o700, exist_ok=True)
         cutoff = datetime.now(timezone.utc).timestamp() - PROMOTE_DRYRUN_MAX_AGE
-        for old in directory.glob("*.json"):
+        for old in (*directory.glob("*.json"), *directory.glob("*.tmp")):  # a .tmp is a write that died before its rename
             try:
                 if old.stat().st_mtime < cutoff:
                     old.unlink()

@@ -77,8 +77,9 @@ the dry run each need the dry run again. Otherwise, in order:
      changed and nothing was stored. So does every failure before the file is written (T2 down
      or refusing, the file saved meanwhile, mixed line endings): the message says "nothing was
      written; run apply again" (exit code kept, 3 for T2 down), or, when rejections were already
-     stored, "the file was not changed, and the rejections already stored are kept; run apply
-     again". The skill keys on the lower-case phrase `run apply again`.
+     stored, "apply did not change the file, and the rejections already stored are kept; run apply
+     again" (not "the file was not changed": the author's own save may have changed it). The skill
+     keys on the lower-case phrase `run apply again`.
   3. A path run stores every rejected edit verbatim in the document's record (memory.py reject),
      with its reason when the author gave one. With none to store it still asks T2 one question,
      so a service that is down stops the run here, before the file changes. The rejections are the
@@ -167,7 +168,7 @@ def _aborted(exc: BaseException, *, stored: bool) -> BaseException:
     """`exc` with an ending that says what is true of the file and to run apply again, same type and exit code.
 
     Called for a failure after the plan was made and before the file was written. Nothing is claimed that
-    a stored rejection would make false: with rejections already stored the file was not changed but the
+    a stored rejection would make false: with rejections already stored apply did not change the file but the
     store is kept. A message that already says the retry words and that nothing was changed is left as it is.
     """
     if isinstance(exc, OSError):
@@ -176,13 +177,16 @@ def _aborted(exc: BaseException, *, stored: bool) -> BaseException:
         return exc
     msg = str(exc).rstrip()
     low = msg.lower()
-    parts = [msg.rstrip(".")]
+    state: str | None = None
     if stored:
-        parts.append("the file was not changed, and the rejections already stored are kept")
+        # "the file was not changed" would be false when the author's own save changed it: say what apply did
+        state = "apply did not change the file, and the rejections already stored are kept"
     elif "nothing was written" not in low and "nothing was changed" not in low:
-        parts.append("nothing was written")
-    if RETRY not in msg:
-        parts.append(RETRY)
+        state = "nothing was written"
+    if RETRY in msg:  # the message already ends with the retry words: the state goes before it, not after
+        parts = ([state] if state else []) + [msg.rstrip(".")]
+    else:
+        parts = [msg.rstrip("."), *([state] if state else []), RETRY]
     new = "; ".join(parts)
     if isinstance(exc, Passthrough):
         return Passthrough(int(getattr(exc, "code", 1)), new)
@@ -858,7 +862,9 @@ def _dry_run_record(accept: set[int], hold: set[int], reject: set[int], reasons:
 
 def _require_dry_run(work: Path, record: Obj, source: Path) -> None:
     """Refuse a real apply that no matching dry run, shown to the author, came before."""
-    run_it = ("Run `review.py apply --work WORK --accept ... --dry-run` for the answer, show its output to the "
+    # No flag name in this text: the skill keys on `--accept` and the others to mean "ask the author for numbers
+    # again", and on `dry run` to mean "run the dry run", so a refusal about a missing dry run must hold only the latter.
+    run_it = ("Run `review.py apply --work WORK <the answer's flags> --dry-run` for the answer, show its output to the "
               "author, and run the real apply only after the author confirms it")
     path = work / "dryrun.json"
     if not path.is_file():
@@ -922,7 +928,10 @@ def load_reasons_file(raw: str | None, work: Path) -> dict[int, str]:
             raise _user(f"--reasons-file {raw!r}: key {key!r} is not an edit number")
         if not isinstance(text, str) or not text.strip():
             raise _user(f"--reasons-file {raw!r}: the reason for edit {key} must be a non-empty string")
-        out[int(key)] = text.strip()
+        n = int(key)  # "2" and "02" are the same edit: two keys for it are two reasons, not one that wins
+        if n in out:
+            raise _user(f"--reasons-file {raw!r}: two reasons for edit {n} (more than one key names that number)")
+        out[n] = text.strip()
     return out
 
 

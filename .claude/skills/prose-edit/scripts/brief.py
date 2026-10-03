@@ -20,10 +20,14 @@ TARGET is PATH, PATH:START-END or "-" (a stdin run; --file names the saved text)
 
 The brief travels to the editor as a file, not as text the orchestrating model retypes. `build --work`
 (a path run) makes the work directory; a stdin run's --file already sits in one. In both cases `build`
-writes the brief to WORK/brief.md and puts a header before it on stdout, then a blank line, then the brief
-itself: `WORK=<dir>` (a path run only), `BRIEF_SHA=<the first 12 hex digits of the sha256 of brief.md>`. The
-editor is told to read WORK/brief.md and to echo the sha as `brief_sha` in its reply; `filter` compares
-it with brief.md and, when the reply names none or another, warns on stderr and in `warnings` (never fatal).
+writes the brief to WORK/brief.md and prints the brief on stdout, preceded for a path run by `WORK=<dir>` and a blank
+line. The file ends with a blank line and `Brief id: <the first 12 hex digits of the sha256 of the brief above it>`.
+The id is in the file and nowhere else (not on stdout, not in the dispatch prompt): the editor is told to read the file
+and to echo that last line's id as `brief_sha` in its reply, so a reply that names it came from reading to the end of
+the file. `filter` compares the reply with the file's id and, when the reply names none or another, or the file's id
+line is missing or no longer matches its text, warns on stderr and in `warnings` (never fatal). A copied id proves
+nothing and a missing one proves the file was not read to its last line. When the brief carries a stored voice card
+(section 2, between <voice_card> tags) and the reply's voice_card is not that card, `filter` warns the same way.
 A build whose --file is not in a work directory writes no file and prints the brief alone.
 
 Grammar (`parse`; every token is one argv element, never a shell string):
@@ -47,8 +51,10 @@ Section 2 (the voice card) holds the document's saved author-approved card, when
 `build` reads site-page section 3 from the sibling skill at run time for how-to and
 exploration-essay. Which section 3 rules are ignored, query-only or note-only comes from
 the repo style sheet lists site_page_section3_ignored, _query_only and _note_only, each
-entry starting with the rule's opening words in quotes; a listed rule that matches no
-bullet stops the build, so a skill edit cannot silently change what the editor applies.
+entry starting with the rule's opening words in quotes; a document's own record (`memory.py add-entry --level
+doc`) can carry the same three lists, and for a rule both treat the document's wins, so one essay can ignore or
+query a rule the genre applies. A listed rule that matches no bullet stops the build, so a skill edit cannot
+silently change what the editor applies.
 
 `filter` takes the agent's reply (one ```json block, a verbatim repeat of it, or bare JSON), keeps the first
 --budget edits, runs memory.py filter (validation and stored rejections), then drops any
@@ -305,13 +311,9 @@ def treatments_from_lists(lists: Obj) -> dict[str, list[str]]:
     return out
 
 
-def build_site_layer(bullets: list[str], treatments: dict[str, list[str]]) -> Obj:
-    """memory.py's {"scalars", "lists"} layer for site-page section 3.
-
-    Ignored rules are dropped; query-only and note-only rules are kept under their own
-    list. Each listed rule is matched to exactly one bullet by its opening words.
-    """
-    normalized = [_norm(b) for b in bullets]
+def _treatment_kinds(normalized: list[str], treatments: dict[str, list[str]], layer: str) -> dict[int, str]:
+    """The treatment each bullet gets from one layer's lists, by bullet index. Each listed rule is matched to
+    exactly one bullet by its opening words; a stale or doubled entry stops the build, naming the layer."""
     kind_of: dict[int, str] = {}
     for kind in ("ignored", "query_only", "note_only"):
         for entry in treatments.get(kind, []):
@@ -322,7 +324,7 @@ def build_site_layer(bullets: list[str], treatments: dict[str, list[str]]) -> Ob
             hits = [i for i, b in enumerate(normalized) if b.startswith(opening)]
             if not hits:
                 raise _user(
-                    f'site-page section 3 has no bullet opening "{opening}..." ({kind} in the repo '
+                    f'site-page section 3 has no bullet opening "{opening}..." ({kind} in the {layer} '
                     "style sheet): the skill changed or the entry is stale"
                 )
             if len(hits) > 1:
@@ -330,6 +332,21 @@ def build_site_layer(bullets: list[str], treatments: dict[str, list[str]]) -> Ob
             if hits[0] in kind_of:
                 raise _user(f'section 3 bullet "{opening}..." matches more than one treatment')
             kind_of[hits[0]] = kind
+    return kind_of
+
+
+def build_site_layer(bullets: list[str], treatments: dict[str, list[str]],
+                     *narrower: tuple[str, dict[str, list[str]]]) -> Obj:
+    """memory.py's {"scalars", "lists"} layer for site-page section 3.
+
+    Ignored rules are dropped; query-only and note-only rules are kept under their own
+    list. `treatments` is the repo style sheet's; each (layer name, treatments) after it is a narrower layer
+    (the document's), and for a bullet that two layers treat, the narrower layer's treatment wins.
+    """
+    normalized = [_norm(b) for b in bullets]
+    kind_of = _treatment_kinds(normalized, treatments, "repo")
+    for name, extra in narrower:
+        kind_of.update(_treatment_kinds(normalized, extra, name))
     rules: list[str] = []
     queries: list[str] = []
     notes: list[str] = []
@@ -369,10 +386,17 @@ def _site_page_text(path: Path) -> str:
         raise _user(f"site-page skill unreadable at {path}: {exc}") from exc
 
 
-def site_layer(site_page: Path) -> Obj:
+def site_layer(site_page: Path, target: str | None = None) -> Obj:
+    """Section 3 of the site-page skill as the genre layer. The repo style sheet lists which rules are ignored,
+    query-only or note-only; a document's own record can list them too (`target` names the document), and for a
+    rule both treat the document's entry wins, so one essay can ignore or query a rule the genre applies."""
     repo_sheet = memory_json(["entries", "--level", "repo"])
     treatments = treatments_from_lists(cast(Obj, repo_sheet.get("lists") or {}))
-    return build_site_layer(section3_bullets(_site_page_text(site_page)), treatments)
+    narrower: list[tuple[str, dict[str, list[str]]]] = []
+    if target and target != "-":
+        doc_sheet = memory_json(["entries", "--level", "doc", "--path", target])
+        narrower.append(("document", treatments_from_lists(cast(Obj, doc_sheet.get("lists") or {}))))
+    return build_site_layer(section3_bullets(_site_page_text(site_page)), treatments, *narrower)
 
 
 # ---------------------------------------------------------------------------
@@ -532,7 +556,7 @@ def render_brief(read: Obj, budget: int, input_file: str | None, input_text: str
     for key in sorted(keys, key=lambda k: (k != "diagnostics", k)):
         out += ["", f"### {key}", "", _bullets(lists[key], _list_owner(layers, key))]
     if lists.get("site_page_rules"):
-        out += ["", "### site-page section 3 rules (apply as written)", "",
+        out += ["", "### site-page section 3 rules (genre layer)", "",
                 _bullets(lists["site_page_rules"], _list_owner(layers, "site_page_rules"))]
     if lists.get("site_page_queries"):
         out += ["", "### site-page section 3 rules that produce QUERY ONLY (never an edit)", "",
@@ -669,7 +693,7 @@ def cmd_build(a: argparse.Namespace) -> str:
         if genre in SITE_GENRES:
             with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8") as fh:
                 layer_file = Path(fh.name)
-                json.dump(site_layer(Path(a.site_page)), fh)
+                json.dump(site_layer(Path(a.site_page), a.target), fh)
             read_args += ["--site-layer", str(layer_file)]
         read = memory_json(read_args)
     finally:
@@ -694,17 +718,17 @@ def cmd_build(a: argparse.Namespace) -> str:
     if a.work and stdin:
         raise _user("--work is for a path run; a stdin run already has its work directory")
     work: Path | None = None
-    head: list[str] = []
+    head = ""
     if a.work:
         work = Path(cmd_tmpdir())
-        head.append(f"WORK={work}")
+        head = f"WORK={work}\n\n"
     elif stdin and _is_work_dir(Path(a.file).parent.resolve(), Path(tempfile.gettempdir()).resolve()):
         work = work_file(a.file).parent
     if work is None:
         return brief
-    (work / BRIEF_FILE).write_text(brief, encoding="utf-8")
-    head.append(f"BRIEF_SHA={brief_sha(brief.encode('utf-8'))}")
-    return "\n".join(head) + "\n\n" + brief
+    # the id goes into the file only: stdout and the dispatch prompt never carry it, so a reply that names it read it
+    (work / BRIEF_FILE).write_text(f"{brief}\n{ID_LABEL}{brief_sha(brief.encode('utf-8'))}\n", encoding="utf-8")
+    return head + brief
 
 
 # ---------------------------------------------------------------------------
@@ -1063,37 +1087,59 @@ def cmd_filter(a: argparse.Namespace, reply: str) -> Obj:
         if window is not None and "inside" not in places:
             warnings.append(f"paragraph proposal {pr['n']} could not be placed inside the range")
         paragraphs.append(pr)
-    sha_warning = _brief_sha_warning(a, proposal)
-    if sha_warning:
-        warnings.append(sha_warning)
-        sys.stderr.write(f"brief.py: {sha_warning}\n")
+    for brief_warning in _brief_warnings(a, proposal):
+        warnings.append(brief_warning)
+        sys.stderr.write(f"brief.py: {brief_warning}\n")
     return {**result, "edits": kept, "dropped": dropped, "queries": queries,
             "dropped_queries": dropped_queries, "paragraphs": paragraphs,
             "dropped_paragraphs": dropped_paragraphs, "warnings": warnings}
 
 
-def _brief_sha_warning(a: argparse.Namespace, proposal: Obj) -> str | None:
-    """Why the reply cannot be trusted to have read the brief file, or None. Only a work directory that holds a
-    brief.md is checked: the reply must echo the sha of those bytes (a longer prefix of the full hash is fine)."""
+_BRIEF_FILE_ID = re.compile(r"(?s)(.*\n)\nBrief id: ([0-9a-f]{12})\n")
+_CARD_IN_BRIEF = re.compile(r"\n<voice_card>\n(.*?)\n</voice_card>\n", re.DOTALL)
+
+
+def _brief_warnings(a: argparse.Namespace, proposal: Obj) -> list[str]:
+    """What the reply shows about the brief file, as warnings. Only a work directory that holds a brief.md is
+    checked. The id is the file's last line and is in no prompt: a reply that names it read to the end of the
+    file, and one that does not did not. A stored voice card in the brief (the author-approved anchor) must come
+    back unchanged."""
     work: Path | None = None
     if a.save:
         work = work_file(a.save).parent
     elif a.work:
         work = work_dir(a.work)
     if work is None or not (work / BRIEF_FILE).is_file():
-        return None
-    expected = brief_sha((work / BRIEF_FILE).read_bytes())
+        return []
+    text = (work / BRIEF_FILE).read_text(encoding="utf-8")
+    found = _BRIEF_FILE_ID.fullmatch(text)
+    if found is None:
+        return [f"{BRIEF_FILE} has no id line (`Brief id: <id>` as its last line), so the reply cannot be checked "
+                "against it"]
+    body, expected = found.group(1), found.group(2)
+    out: list[str] = []
+    if brief_sha(body.encode("utf-8")) != expected:
+        out.append(f"{BRIEF_FILE} changed after it was built: its text no longer matches the id on its last line")
     said = proposal.get("brief_sha")
     if not isinstance(said, str) or not said.strip():
-        return (f"the editor's reply names no brief_sha; it may not have read {BRIEF_FILE} "
-                f"(the file's is {expected})")
-    if not said.strip().lower().startswith(expected):
-        return (f"the editor's reply names brief_sha {said.strip()[:64]} but {BRIEF_FILE} is {expected}: "
-                "it may have worked from another brief")
-    return None
+        out.append(f"the editor's reply names no brief_sha: the id is the last line of {BRIEF_FILE} "
+                   f"({expected}), so the editor did not read the file to its last line")
+    elif not said.strip().lower().startswith(expected):
+        out.append(f"the editor's reply names brief_sha {said.strip()[:64]} but the last line of {BRIEF_FILE} "
+                   f"is {expected}: it did not read this file to its last line")
+    card = _CARD_IN_BRIEF.search(body)
+    if card is not None and _norm_card(str(proposal.get("voice_card") or "")) != _norm_card(card.group(1)):
+        out.append("the editor's voice_card is not the author-approved card the brief gave it (section 2); the "
+                   "stored card is unchanged and this run's card is the editor's")
+    return out
+
+
+def _norm_card(text: str) -> str:
+    return " ".join(text.split())
 
 
 BRIEF_FILE = "brief.md"
+ID_LABEL = "Brief id: "
 SHA_LENGTH = 12
 
 
@@ -1152,6 +1198,9 @@ def work_file(raw: str) -> Path:
     base = Path(tempfile.gettempdir()).resolve()
     parent = path.parent.resolve()
     if not _is_work_dir(parent, base):
+        if parent.parent == base and _WORK_NAME.fullmatch(parent.name) and not parent.exists():
+            raise _user(f"{raw}: the work directory has expired: one idle for more than two hours is swept, and "
+                        "this one was swept. The review in it is gone; run the edit again from the start")
         if any(_is_work_dir(up, base) for up in parent.parents):
             raise _user(f"{raw}: must sit directly inside the work directory")
         raise _user(f"{raw}: not inside a prose-edit work directory made by `tmpdir` directly under {base}")
@@ -1265,6 +1314,8 @@ def main(argv: list[str] | None = None) -> int:
             if args.save and args.work:
                 raise _user("--save and --work do not go together: --work deletes the directory --save writes into")
             save = work_file(args.save) if args.save else None  # a bad path stops before any work
+            if save is not None:
+                touch_work(save.parent)  # a filter after a long outage is the author still here
             out = cmd_filter(args, sys.stdin.read())
             if args.work:
                 remove_work(args.work)  # a bad path stops here, before any output

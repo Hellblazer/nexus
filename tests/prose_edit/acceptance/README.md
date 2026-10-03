@@ -11,6 +11,8 @@ Headless Claude Code runs of the real `prose-edit` skill and `line-editor` agent
 | `review_verdicts.py OUT_DIR` | Verdicts for those runs from what the skill's scripts printed. A rejected fix shown again is a FAIL. `VACUOUS` (b3 only) means the editor did not propose the removed edit again, so the check proved nothing; it is reported as it is, never retried into a pass. |
 | `run-memory-gate.sh LABEL SOURCE [N]` | The rejection-memory gate (nexus-ger02.16): N fresh runs on a copy of SOURCE. Writes `LABEL-<k>-<turn>.jsonl`. |
 | `memory_gate_verdicts.py OUT_DIR` | Raw counts and the recurrence rate per document and pooled, against the threshold below. |
+| `run-teach.sh` | Scenario 6 and step 13 (the voice card, the promote dry-run gate): seven turns, answers through `RESUME_FROM`; the script itself runs the checks a turn cannot (`voice-card`, a promote with no dry run). T2 prefix `zzprose0206_`. |
+| `teach_verdicts.py OUT_DIR` | Verdicts for those runs, and `seed-json` (the user-level entry the runner stores). Exit 1 on a failure, 3 when a run is missing or `NOT-MEASURABLE`, 0 when all pass. |
 | `fake_nx_unavailable.py` | `PROSE_EDIT_NX` stand-in that reports T2 unavailable. |
 
 ```bash
@@ -34,17 +36,37 @@ A denied call in a scenario is a failure of the skill's instructions, not an inc
 
 A run named `xanadu-N`, `linda-N`, `refrain-N`, `qa-N`, `qb-N`, `qc-N`, `protected-N`, `budget-N` or `range-N` is scored on the post-filter proposal, the last `brief.py filter` output in its transcript (what the author sees), against the Verify line of the RDR's Test Plan. The document is read from `--root` as it is now: an edit whose old string is not in it makes the run `NOT-MEASURABLE`, so rerun the verdicts against the checkout the run edited.
 
+What each kind scores, and against what. Nothing in `verdicts.py` calls the filter's code (`brief.py`): a verdict that reused it could not fail when the filter was wrong, and the filter's output cannot show an edit it already dropped. The oracles are the fixtures' own.
+
 | Kind | PASS needs | FAIL on |
 | --- | --- | --- |
-| `protected` | one or more edits survived the filter | an edit inside a quote, code block, table or frontmatter |
+| `protected` | one or more edits survived the filter | an edit on a line of the fixture's frontmatter (1-5), quote (11), code block (13-17) or table (19-22); these ranges are listed in `verdicts.py` (`FIXTURE_PROTECTED`) and checked against the fixture first, so a changed fixture is `NOT-MEASURABLE` |
 | `budget` | one or more edits, at most the `--budget N` in the filter command | more than N edits |
-| `range` | one or more edits, all inside the `PATH:START-END` of the filter command | an edit or a query anchor outside the lines |
-| `qa` | `basically` cut, `may` kept | the filler left in, or `may` cut |
-| `qb` | `may` kept (a run with no proposal at all passes: the qualifier is justified) | `may` cut |
-| `qc` | `will likely` or `truly` queried | either cut |
-| `xanadu`, `linda`, `refrain` | at least one proposal, none on a device | an edit overlapping a refrain, tricolon or the unexplained SQL listed in `DEVICES`, or a paragraph proposal that cuts, merges or splits a paragraph holding one |
+| `range` | one or more edits, all inside the `PATH:START-END` of the filter command, by plain line arithmetic over `fixtures/range-notes.md` (run it as `.../range-notes.md:10-20 --genre changelog`) | an edit or a query anchor outside the lines |
+| `qa` | `basically` cut; `may` queried and not cut | the filler left in, or queried; `may` cut, or neither cut nor queried |
+| `qb` | `may` queried and not cut | `may` cut, or neither cut nor queried (a run with no proposal at all fails) |
+| `qc` | `likely` and `truly` each queried and neither cut | either cut, or neither cut nor queried (silence fails) |
+| `xanadu`, `linda`, `refrain` | at least one proposal, none on a device | an edit overlapping a refrain, tricolon, repeated opening or the unexplained SQL listed in `DEVICES`, or a paragraph proposal that cuts, merges or splits a paragraph holding one |
 
-Every kind also fails on the scope and denial counts below and on more edits than its budget. The qualifier rows are Sam's ruling of 2026-09-30 (filler words are cut, every other qualifier is queried), which replaces Test Plan scenario 4's "only the unjustified one is proposed for cutting". `NOT-MEASURABLE` means the run proposed nothing where something is expected, or the document or the `DEVICES` list no longer matches: it proves nothing and is never a pass. `DEVICES` is read off the two documents by hand; a listed phrase that is not in the document exactly once makes the run `NOT-MEASURABLE`.
+Every doc-editing run, and the stdin run, also needs proof that the `line-editor` subagent read `WORK/brief.md`. The file's last line is `Brief id: <id>` and the dispatch prompt carries no id, so a reply that names it came from a Read. The verdict needs a Read of `.../prose-edit-XXXXXXXX/brief.md` by the subagent, before its reply, in the work directory the skill filtered in, whose result is not an error and carries that line, and a `brief_sha` in the reply equal to it. Without it the run fails.
+
+Every kind also fails on the scope and denial counts below and on more edits than its budget. The qualifier rows are Sam's ruling of 2026-09-30 (only filler words are cut; every other qualifier or intensifier is queried, with no class that stays untouched), which deviates from the RDR Technical Design sentence and Test Plan scenario 4 as accepted; it is recorded in the post-mortem at close. `NOT-MEASURABLE` means the run proposed nothing where something is expected (the qualifier kinds excepted), or the document, the protected ranges or the `DEVICES` list no longer matches: it proves nothing and is never a pass.
+
+**What PASS means for the device kinds: none of the listed devices was touched.** `DEVICES` is read off the two documents by hand, with each phrase unique in the document (a phrase that is not there exactly once makes the run `NOT-MEASURABLE`). It lists the refrains, the tricolons, the repeated openings (the three "A ... had to" sentences, the "Nothing ..." pair, the "There is no way ..." triple and the parallel agent sentences) and the unexplained SQL that were found. A device that is not on the list is not checked: a human reads the rest of the edits.
+
+The note of every run reports what the filter dropped, by cause (`dropped by the filter: over-budget=1, protected-region=2`), taken from the proposal's `dropped` lists. That is the only place the editor's own discipline shows, because an edit in a protected region or outside the range is dropped before the author sees it; for `protected` and `range` the note also counts the editor's own reply edits that broke the fixture. These counts are reported, not scored.
+
+## Scenario 6 and step 13 (nexus-ger02.6, critique E)
+
+`run-teach.sh` runs the flows `run-scenario.sh` cannot score on a single document, and `teach_verdicts.py OUT_DIR` scores them. Run once, T2 prefix `zzprose0206_`; delete the `zzprose0206_*` T2 projects afterwards. Not run by the test suite: every verdict has unit tests on planted transcripts.
+
+| Run | What it does | Verdict |
+| --- | --- | --- |
+| `s6-1` | Scenario 6: seeds a user-level diagnostic (`teach_verdicts.py seed-json`), edits `fixtures/user-entry.md` as a `changelog` | the entry, with `(layer: user)`, is in the brief the editor read; the post-filter proposal holds an edit that replaces `worker` with `consumer`, or a query that names one of them |
+| `t1`, `t2`, `t2c`, `t3` | Step 13, voice card: edit a copy, answer, confirm, then the author's yes to keeping the card | the card was shown before the yes and not stored then; stored after it; shown back after saving; `memory.py voice-card` (run by the script, `voice-card-after.json`) returns the card |
+| `promote-nodry`, `t4`, `t4c` | Step 13, promote: the script runs a real promote with no dry run first, then the skill is asked to promote | the direct call exits 1 naming a dry run; the skill dry-runs before asking and promotes for real only after the confirm |
+
+What they cannot prove: one run per flow shows the skill can do it, not how often the model does. The card text is compared after whitespace is normalised, so a model that retypes it with another word fails the check, which is the point of the check.
 
 ## What the counts cover, and what they do not
 

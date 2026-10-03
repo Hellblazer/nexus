@@ -11,21 +11,33 @@ NOT-MEASURABLE (it proves nothing, so it is never a pass); 0 only when every run
 
 The kinds that edit a document (xanadu, linda, refrain, qa, qb, qc, protected, budget, range) are scored on
 the post-filter proposal: the last `brief.py filter` output in the transcript, which is what the author sees.
-The Verify line of the RDR's Test Plan, computed per kind, with the document read from --root at the
-state the run edited (an edit whose old string is not in it makes the run NOT-MEASURABLE):
-  protected  no edit inside a quote, code block, table or frontmatter; at least one edit survived
+Nothing here borrows the filter's own code (a verdict that reused it could not fail when it is wrong): the
+oracles are stated in this file, from the fixtures. The Verify line of the RDR's Test Plan, per kind, with the
+document read from --root at the state the run edited (an edit whose old string is not in it makes the run
+NOT-MEASURABLE):
+  protected  no edit on a line of the fixture's frontmatter, quote, code block or table (the line ranges are
+             listed in FIXTURE_PROTECTED and checked against the fixture first); at least one edit survived
   budget     no more than the --budget N the filter ran with, N read from that command; at least one edit
-  range      every edit and query anchor inside the lines of PATH:START-END in the filter command
+  range      every edit and query anchor inside the lines of PATH:START-END in the filter command, by plain
+             line arithmetic over the document's lines (the fixture fixtures/range-notes.md)
   qa/qb/qc   Sam's ruling of 2026-09-30: only filler words (basically, really, quite, just) are cut, every
-             other qualifier is queried. qa: "basically" is cut and the justified "may" is not. qb: "may"
-             is not cut (no proposal at all is the right answer). qc: "will likely" and "truly" are not cut
-             and at least one is queried
+             other qualifier or intensifier is a query. qa: "basically" is cut; "may" is not cut and is queried.
+             qb: "may" is not cut and is queried. qc: "likely" and "truly" are not cut and each is queried. A word
+             that is neither cut nor queried fails the run (nothing proposed fails too)
   xanadu, linda, refrain
-             no edit overlaps a refrain, a tricolon or the unexplained SQL listed in DEVICES, and no
-             paragraph proposal cuts, merges or splits a paragraph that holds one. The lists were read off the
-             documents; a listed phrase the document no longer holds makes the run NOT-MEASURABLE
+             no edit overlaps a refrain, a tricolon, a repeated opening or the unexplained SQL listed in DEVICES,
+             and no paragraph proposal cuts, merges or splits a paragraph that holds one. PASS means none of the
+             listed devices was touched; the rest of the document is for a human to read. The lists were read off
+             the documents; a listed phrase the document no longer holds exactly once makes the run NOT-MEASURABLE
+Every doc-editing kind and the stdin run also need proof that the line-editor subagent read WORK/brief.md: a Read
+of that file by the subagent, before its reply, with a non-error result that carries the file's last line
+(`Brief id: <id>`), and a reply whose brief_sha is that id. The id is in the file and nowhere in the dispatch prompt,
+so a reply that names it came from a Read. FAIL when there is no such Read.
 Every kind also fails on scope or denial violations and on more edits than its budget. Where the run is
-expected to propose something and the post-filter proposal is empty, the verdict is NOT-MEASURABLE.
+expected to propose something and the post-filter proposal is empty, the verdict is NOT-MEASURABLE (except the
+qualifier kinds: there silence is a violation). The note also reports the filter's drops by cause (the number that
+shows the editor's own discipline: an edit in a protected region or outside the range is dropped, so it is not on
+the author's screen) and, for protected and range, how many of the editor's own reply edits broke the fixture.
 
 Every run gets these compliance counts (an instruction the model broke, not an incident):
   denied           tool calls the runner refused (permission denied)
@@ -43,15 +55,12 @@ the author which edits to accept, so it leaves one work directory (the copy and 
 """
 from __future__ import annotations
 
-import importlib.util
 import json
 import re
 import shlex
 import sys
 from collections import Counter
-from functools import lru_cache
 from pathlib import Path
-from types import ModuleType
 from typing import Any
 
 Obj = dict[str, Any]
@@ -65,7 +74,7 @@ DOCS: dict[str, str | None] = {
     "xanadu": "docs/exploration/xanadu-in-nexus.md", "linda": "docs/exploration/linda-in-nexus.md",
     "refrain": FX + "refrain-no-twin.md", "qa": FX + "qualifiers-a.md", "qb": FX + "qualifiers-b.md",
     "qc": FX + "qualifiers-c.md", "protected": FX + "protected.md", "budget": FX + "protected.md",
-    "range": "CHANGELOG.md",
+    "range": FX + "range-notes.md",
 }
 _JSON_BLOCK = re.compile(r"^[ \t]*```json[ \t]*\n(.*?)\n[ \t]*```[ \t]*$", re.DOTALL | re.MULTILINE)
 PASS, FAIL, NOT_MEASURABLE = "PASS", "FAIL", "NOT-MEASURABLE"
@@ -79,6 +88,14 @@ DEVICES: dict[str, tuple[str, ...]] = {
         "easier to build correctly, easier to analyze, and easier to compose",
         "`SELECT ... FOR UPDATE SKIP LOCKED LIMIT 1`",
         "A report is owed until a report tuple exists",
+        "the oldest unclaimed tuple per subspace, the health of the table, and the age of the last sweep",
+        "A message reaches exactly one reader, whether or not two raced for it.",
+        "A request stays open, with an age you can see, until its ack exists, whether or not anyone is watching.",
+        "An agent's report had to be something an orchestrator could wait for and something a later session could count.",
+        "A message to an agent working mid-turn had to reach it before it composed its next reply.",
+        "A request from one Claude Code session to another on the same machine had to be delivered without a person relaying it.",
+        "Nothing records that a report was owed, so an agent that finishes without reporting leaves no trace.",
+        "Nothing wakes a reader when a record arrives, so a correction sent mid-turn lands after the turn.",
     ),
     "xanadu": (
         "Not a hypertext system, but a linking substrate",
@@ -86,14 +103,29 @@ DEVICES: dict[str, tuple[str, ...]] = {
         "RDF triples, property graphs, or ad-hoc foreign keys",
         "There is no way to express that a code chunk",
         "The hash pins which chunk; the range pins where within it.",
+        "tracing where a decision came from, what code implements a design, and which findings have been superseded",
+        "following citation chains, crossing collection boundaries, and scoping each step",
+        "There is no way to say that a research finding",
+        "There is no way to follow a chain of citations",
+        "A debugger agent creates `relates` links between a root cause analysis and prior findings.",
+        "A developer agent creates `implements` links between code and the design document it realizes.",
     ),
     "refrain": ("Not a log, but a promise.",),
 }
-# The qualifier words each fixture's justified or unjustified qualifiers hang on (Sam's ruling, 2026-09-30:
-# filler words are cut, every other qualifier is a query).
-KEPT_QUALIFIERS: dict[str, tuple[str, ...]] = {"qa": ("may",), "qb": ("may",), "qc": ("likely", "truly")}
+# The qualifier words each fixture hangs on. Sam's ruling, 2026-09-30: only filler words are cut by default;
+# every other qualifier or intensifier is a query. So these words are never cut AND each is queried: a word that
+# is neither cut nor queried fails, because there is no third class that stays untouched.
+QUERIED_QUALIFIERS: dict[str, tuple[str, ...]] = {"qa": ("may",), "qb": ("may",), "qc": ("likely", "truly")}
 FILLER_CUT = {"qa": "basically"}
 EDITS_EXPECTED = ("protected", "budget", "range")
+# The protected regions of the one fixture that has them, by 1-based line: (first, last, the first line's start,
+# the last line's start, what it is). Read off tests/prose_edit/fixtures/protected.md by hand and checked against
+# the document before every use, so a changed fixture is NOT-MEASURABLE rather than silently mis-scored.
+_PROTECTED_FIXTURE = (
+    (1, 5, "---", "---", "frontmatter"), (11, 11, "> Basically", "> Basically", "quote"),
+    (13, 17, "```python", "```", "code block"), (19, 22, "| Column", "| owner", "table"),
+)
+FIXTURE_PROTECTED = {"protected": _PROTECTED_FIXTURE, "budget": _PROTECTED_FIXTURE}
 
 
 def load_events(path: Path) -> list[Obj]:
@@ -141,6 +173,17 @@ def tool_results(events: list[Obj]) -> dict[str, str]:
             if isinstance(body, list):
                 body = "\n".join(str(x.get("text", "")) for x in body if isinstance(x, dict))
             out[str(c.get("tool_use_id"))] = str(body)
+    return out
+
+
+def tool_errors(events: list[Obj]) -> set[str]:
+    """The ids of tool calls whose result the runner flagged as an error."""
+    out: set[str] = set()
+    for ev in events:
+        if ev.get("type") != "user":
+            continue
+        out |= {str(c.get("tool_use_id")) for c in _content(ev)
+                if c.get("type") == "tool_result" and c.get("is_error")}
     return out
 
 
@@ -228,19 +271,6 @@ def compliance(events: list[Obj], doc_text: str | None) -> Obj:
 # ---------------------------------------------------------------------------
 
 
-@lru_cache(maxsize=1)
-def _brief() -> ModuleType:
-    """brief.py, the script the skill ran: its protected-region and range logic is the one the filter used."""
-    path = Path(__file__).resolve().parents[3] / ".claude" / "skills" / "prose-edit" / "scripts" / "brief.py"
-    spec = importlib.util.spec_from_file_location("prose_edit_verdict_brief", path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"cannot load {path}")
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules.setdefault(spec.name, mod)
-    spec.loader.exec_module(mod)
-    return mod
-
-
 def _json_object(text: str) -> Obj | None:
     start = text.find("{")
     if start < 0:
@@ -281,6 +311,83 @@ def filter_arguments(command: str) -> tuple[int | None, Obj | None]:
     target = next((t for t in after if not t.startswith("-")), "")
     m = re.search(r":(\d+)-(\d+)$", target)
     return budget, ({"start": int(m.group(1)), "end": int(m.group(2))} if m else None)
+
+
+_WORK_BRIEF = re.compile(r"(?:^|/)(prose-edit-[a-z0-9_]{8})/brief\.md$")
+
+
+def _positions(events: list[Obj]) -> tuple[dict[str, int], dict[str, int]]:
+    """Where in the transcript each tool call (by id) was made and where its result came back."""
+    made: dict[str, int] = {}
+    came: dict[str, int] = {}
+    for i, ev in enumerate(events):
+        for c in _content(ev):
+            if c.get("type") == "tool_use":
+                made[str(c.get("id"))] = i
+            elif c.get("type") == "tool_result":
+                came[str(c.get("tool_use_id"))] = i
+    return made, came
+
+
+def _filter_work_dirs(events: list[Obj]) -> set[str]:
+    """The work directory names the skill's `brief.py filter` commands pointed at (--save or --file)."""
+    out: set[str] = set()
+    for _, name, inp, _ in tool_uses(events):
+        command = str(inp.get("command", ""))
+        if name != "Bash" or "brief.py filter" not in command:
+            continue
+        try:
+            tokens = shlex.split(command)
+        except ValueError:
+            continue
+        for flag, value in zip(tokens, tokens[1:]):
+            if flag in ("--save", "--file"):
+                out.add(Path(value).parent.name)
+    return out
+
+
+def brief_read_problem(events: list[Obj]) -> str | None:
+    """Why the transcript does not show the line-editor reading WORK/brief.md, or None when it does.
+
+    The id is on the file's last line and in no prompt, so a reply that names it came from a Read: the subagent's
+    Read of WORK/brief.md must come back (not an error, not denied) with that line, before the reply, from the work
+    directory the skill filtered in, and the reply's brief_sha must be that id."""
+    results, errors = tool_results(events), tool_errors(events)
+    made, came = _positions(events)
+    agents = [tid for tid, name, _, _ in tool_uses(events, sub=False) if name == "Agent" and tid in came]
+    reply_at = min((came[t] for t in agents), default=None)
+    works = _filter_work_dirs(events)
+    why = "the line-editor never Read WORK/brief.md (no subagent Read of a work directory's brief.md)"
+    found: str | None = None
+    for tid, name, inp, _ in tool_uses(events, sub=True):
+        m = _WORK_BRIEF.search(str(inp.get("file_path", ""))) if name == "Read" else None
+        if m is None:
+            continue
+        text = results.get(tid)
+        if text is None or tid in errors or is_denied(text):
+            why = "the line-editor's Read of WORK/brief.md was denied or came back as an error"
+            continue
+        ids = re.findall(r"Brief id: ([0-9a-f]{12,64})", text)
+        if not ids:
+            why = "the line-editor's Read of WORK/brief.md returned no `Brief id:` last line"
+            continue
+        if works and m.group(1) not in works:
+            why = f"the line-editor read brief.md of {m.group(1)}, not the work directory the skill filtered in"
+            continue
+        if reply_at is not None and made[tid] > reply_at:
+            why = "the line-editor's Read of WORK/brief.md came after its reply (it must come before)"
+            continue
+        found = ids[-1]
+        break
+    if found is None:
+        return why
+    reply = editor_reply(events)
+    said = str((reply or {}).get("brief_sha") or "").strip().lower()
+    if not said:
+        return "the editor's reply names no brief_sha although brief.md was read"
+    if len(said) < 12 or not (said.startswith(found) or found.startswith(said)):
+        return f"the editor's reply names brief_sha {said[:64]}, not the id its Read of brief.md returned ({found})"
+    return None
 
 
 def _word(text: str, word: str) -> bool:
@@ -332,7 +439,7 @@ def _device_problems(kind: str, doc_text: str, edits: list[Obj], paragraphs: lis
     for pr in paragraphs:
         if str(pr.get("action", "")).lower() not in ("cut", "merge", "split"):
             continue
-        for ph in _brief()._quoted_phrases(str(pr.get("paragraphs", ""))):
+        for ph in re.findall(r'"([^"]+)"', str(pr.get("paragraphs", ""))):
             for at in _spans(doc_text, ph)[:1]:
                 block = next((b for b in blocks if b[0] <= at[0] < b[1]), None)
                 for phrase, span in spans.items():
@@ -342,27 +449,81 @@ def _device_problems(kind: str, doc_text: str, edits: list[Obj], paragraphs: lis
     return problems, None
 
 
+def _line_spans(text: str, needle: str) -> list[tuple[int, int]]:
+    """The (first line, last line), 1-based, of every occurrence of `needle` in `text`: plain arithmetic on
+    newline counts, nothing from the filter."""
+    out: list[tuple[int, int]] = []
+    if not needle:
+        return out
+    for i, j in _spans(text, needle):
+        out.append((text.count("\n", 0, i) + 1, text.count("\n", 0, max(i, j - 1)) + 1))
+    return out
+
+
+def _protected_problems(kind: str, doc_text: str, edits: list[Obj]) -> tuple[list[str], str | None]:
+    """(edits on a protected line of the fixture, a reason the fixture's ranges no longer fit the document)."""
+    ranges = FIXTURE_PROTECTED.get(kind)
+    if ranges is None:
+        return [], None
+    lines = doc_text.split("\n")
+    for first, last, head, tail, name in ranges:
+        if len(lines) < last or not lines[first - 1].startswith(head) or not lines[last - 1].startswith(tail):
+            return [], f"the fixture changed: lines {first}-{last} are no longer the {name} the oracle names"
+    problems: list[str] = []
+    for e in edits:
+        for lo, hi in _line_spans(doc_text, str(e.get("old", ""))):
+            for first, last, _, _, name in ranges:
+                if lo <= last and first <= hi:
+                    problems.append(f"edit {e.get('n')} sits on line {lo} inside the protected {name} (lines {first}-{last})")
+    return problems, None
+
+
+def _in_lines(text: str, needle: str, lo: int, hi: int) -> bool:
+    return any(lo <= a and b <= hi for a, b in _line_spans(text, needle))
+
+
+def _drops_note(proposal: Obj) -> str:
+    """What the filter dropped, by cause, from the proposal's own dropped lists: the editor-discipline number."""
+    causes: Counter[str] = Counter()
+    for key in ("dropped", "dropped_queries", "dropped_paragraphs"):
+        for d in proposal.get(key) or []:
+            if isinstance(d, dict):
+                causes[str(d.get("cause") or "unknown")] += 1
+    if not causes:
+        return "dropped by the filter: none"
+    return "dropped by the filter: " + ", ".join(f"{c}={n}" for c, n in sorted(causes.items()))
+
+
+def _asks_about(queries: list[Obj], word: str) -> bool:
+    return any(_word(str(q.get("anchor", "")), word) or _word(str(q.get("text", "")), word) for q in queries)
+
+
 def doc_verdict(kind: str, events: list[Obj], c: Obj, doc_text: str | None) -> tuple[str, str]:
     """PASS, FAIL or NOT-MEASURABLE for a document-editing run, from the post-filter proposal."""
-    if editor_reply(events) is None:
+    reply = editor_reply(events)
+    if reply is None:
         return FAIL, "no editor reply"
     problems: list[str] = []
     if c["grep_scope"] or c["rdr_reads"] or c["off_list_bash"] or c["denied"]:
         problems.append(f"scope or denial violations (grep_scope={len(c['grep_scope'])} rdr_reads={len(c['rdr_reads'])} "
                         f"off_list_bash={len(c['off_list_bash'])} denied={c['denied']})")
+    unread = brief_read_problem(events)
+    if unread:
+        problems.append(unread)
     runs = filter_runs(events)
     if not runs:
-        return (FAIL, problems[0]) if problems else (
+        return (FAIL, "; ".join(problems)) if problems else (
             NOT_MEASURABLE, "no `brief.py filter` output in the transcript: the post-filter proposal cannot be read")
     command, proposal = runs[-1]
     edits = [e for e in proposal.get("edits") or [] if isinstance(e, dict)]
     queries = [q for q in proposal.get("queries") or [] if isinstance(q, dict)]
     paragraphs = [p for p in proposal.get("paragraphs") or [] if isinstance(p, dict)]
+    drops = _drops_note(proposal)
     budget, rng = filter_arguments(command)
     if budget is not None and len(edits) > budget:
         problems.append(f"{len(edits)} edits survived the filter against a budget of {budget}")
     if problems:
-        return FAIL, "; ".join(problems)
+        return FAIL, "; ".join(problems) + f"; {drops}"
     if kind == "budget" and budget is None:
         return NOT_MEASURABLE, "the filter command names no --budget, so there is no N to check"
     if kind == "range" and rng is None:
@@ -372,24 +533,35 @@ def doc_verdict(kind: str, events: list[Obj], c: Obj, doc_text: str | None) -> t
     stale = [e.get("n") for e in edits if str(e.get("old", "")) not in doc_text]
     if stale:
         return NOT_MEASURABLE, f"edits {stale} are not in the document: it is not the one the run edited"
-    brief = _brief()
-    spans = brief.protected_spans(doc_text)
-    for e in edits:
-        if brief.edit_problem(doc_text, str(e["old"]), spans, None) == "protected-region":
-            problems.append(f"edit {e.get('n')} is inside a protected region (quote, code, table or frontmatter)")
+    reply_edits = [e for e in reply.get("edits") or [] if isinstance(e, dict)]
+    extra = ""
+    found, stale_fixture = _protected_problems(kind, doc_text, edits)
+    if stale_fixture:
+        return NOT_MEASURABLE, stale_fixture
+    problems += found
+    if kind in FIXTURE_PROTECTED:
+        raw, _ = _protected_problems(kind, doc_text, reply_edits)
+        extra = f"; editor's own edits in protected regions: {len({p.split(' ')[1] for p in raw})}"
     if rng is not None:
-        window = brief._range_span(doc_text, rng)
-        for e in edits:
-            if not any(window[0] <= a and b <= window[1] for a, b in _spans(doc_text, str(e["old"]))):
-                problems.append(f"edit {e.get('n')} is outside lines {rng['start']}-{rng['end']}")
-        for q in queries:
-            if not any(window[0] <= a and b <= window[1] for a, b in _spans(doc_text, str(q.get("anchor", "")))):
-                problems.append(f"query {q.get('n')} is outside lines {rng['start']}-{rng['end']}")
-    for word in KEPT_QUALIFIERS.get(kind, ()):
-        problems += [f"edit {e.get('n')} cuts the justified qualifier {word!r}" for e in edits if _cuts(e, word)]
+        lo, hi = rng["start"], rng["end"]
+        problems += [f"edit {e.get('n')} is outside lines {lo}-{hi}" for e in edits
+                     if not _in_lines(doc_text, str(e["old"]), lo, hi)]
+        problems += [f"query {q.get('n')} is outside lines {lo}-{hi}" for q in queries
+                     if not _in_lines(doc_text, str(q.get("anchor", "")), lo, hi)]
+        outside = sum(1 for e in reply_edits if str(e.get("old", "")) in doc_text
+                      and not _in_lines(doc_text, str(e["old"]), lo, hi))
+        extra = f"; editor's own edits outside lines {lo}-{hi}: {outside}"
     proposed = len(edits) + len(queries) + len(paragraphs)
+    for word in QUERIED_QUALIFIERS.get(kind, ()):
+        cut = [e for e in edits if _cuts(e, word)]
+        if cut:
+            problems += [f"edit {e.get('n')} cuts the qualifier {word!r}: only filler words are cut, "
+                         "every other qualifier is queried" for e in cut]
+        elif not _asks_about(queries, word):
+            problems.append(f"the qualifier {word!r} was neither cut nor queried: every qualifier but a filler word "
+                            "must be queried")
     filler = FILLER_CUT.get(kind)
-    if filler and proposed and not any(_cuts(e, filler) for e in edits):
+    if filler and not any(_cuts(e, filler) for e in edits):
         problems.append(f"the filler word {filler!r} was not cut (a filler word is cut, not queried or left)")
     if kind in DEVICES:
         found, stale_list = _device_problems(kind, doc_text, edits, paragraphs)
@@ -397,14 +569,13 @@ def doc_verdict(kind: str, events: list[Obj], c: Obj, doc_text: str | None) -> t
             return NOT_MEASURABLE, stale_list
         problems += found
     if problems:
-        return FAIL, "; ".join(problems)
-    note = f"{len(edits)} edits, {len(queries)} queries, {len(paragraphs)} paragraph proposals after the filter"
+        return FAIL, "; ".join(problems) + f"; {drops}"
+    note = (f"{len(edits)} edits, {len(queries)} queries, {len(paragraphs)} paragraph proposals after the filter; "
+            f"{drops}{extra}")
     if kind in EDITS_EXPECTED and not edits:
         return NOT_MEASURABLE, f"no edit survived the filter, so there is nothing to check; {note}"
-    if kind in ("qa", "xanadu", "linda", "refrain") and not proposed:
+    if kind in ("xanadu", "linda", "refrain") and not proposed:
         return NOT_MEASURABLE, f"the editor proposed nothing where something is expected; {note}"
-    if kind == "qc" and not any(_word(str(q.get("anchor", "")), w) for q in queries for w in KEPT_QUALIFIERS["qc"]):
-        return NOT_MEASURABLE, f"nothing was asked about either qualifier, so the ruling is not exercised; {note}"
     return PASS, note
 
 
@@ -435,10 +606,12 @@ def verdict(kind: str, events: list[Obj], c: Obj, new_work_dirs: list[str],
         # The turn ends with the question to the author, so one work directory is waiting for the answer.
         filtered = any('"edits"' in v and '"dropped"' in v for v in results.values())
         rendered = any('"copy"' in v and '"opened"' in v for v in results.values())
+        unread = brief_read_problem(events) if dispatched else None
         ok = (dispatched and filtered and rendered and len(new_work_dirs) <= 1 and c["denied"] == 0
-              and not c["off_list_bash"])
+              and not c["off_list_bash"] and unread is None)
         return ("PASS" if ok else "FAIL"), (f"dispatched={dispatched} filtered={filtered} rendered={rendered} "
-                                            f"new-work-dirs={len(new_work_dirs)} denied={c['denied']}")
+                                            f"new-work-dirs={len(new_work_dirs)} denied={c['denied']} "
+                                            f"brief-read={unread or 'ok'}")
     if kind in DOCS:
         return doc_verdict(kind, events, c, doc_text)
     return NOT_MEASURABLE, f"no verdict is defined for the kind {kind!r}"
