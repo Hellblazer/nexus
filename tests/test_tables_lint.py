@@ -2,10 +2,10 @@
 
 Runs :func:`nexus.tables.check.check_table` over every ``*.toml`` file
 under BOTH ``src/nexus/tables/`` (the packaged tables) and
-``docs/tables/`` (repo-only tables, e.g. the later release-choreography
-table), asserting zero BLOCKING findings per table. This is the "-m lint"
-leg (see ``tests/AGENTS.md``): O(repo) meta-tests, excluded from default
-``addopts``, run in the dedicated CI lint job.
+``docs/tables/`` (repo-only tables; none today), asserting zero BLOCKING
+findings per table. This is the "-m lint" leg (see ``tests/AGENTS.md``):
+O(repo) meta-tests, excluded from default ``addopts``, run in the dedicated
+CI lint job.
 
 Non-vacuity (the nexus-moht0 vacuous-gate doctrine): a fixture copy of the
 lifecycle table with a planted second ``accept`` row must be reported as
@@ -90,19 +90,6 @@ def test_lifecycle_table_is_discovered_by_the_sweep():
     either directory would otherwise satisfy the assert above alone)."""
     tables = {p.name for p in _discover_tables()}
     assert "rdr-lifecycle.toml" in tables
-
-
-def test_release_choreography_table_is_discovered_by_the_sweep():
-    """RDR-201 P2.3 (nexus-j9z30.13): the release-choreography table is
-    repo-only (``docs/tables/``, not ``src/nexus/tables/``) -- both its
-    consumers (``scripts/check_engine_release_floor.py``,
-    ``scripts/check_client_release_precondition.py``) live under
-    ``scripts/`` and never ship in the wheel, so there is no packaging
-    test to pair with this one (contrast
-    ``test_lifecycle_table_present_in_built_wheel`` above). Written FIRST
-    per the bead's TDD instruction -- red until the table exists."""
-    tables = {p.name for p in _discover_tables()}
-    assert "release-choreography.toml" in tables
 
 
 # --------------------------------------------------------------------------

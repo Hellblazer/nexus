@@ -1,17 +1,8 @@
 # docs/tables/
 
-Repo-only RDR-201 closed-vocabulary tables: consumed by scripts that never
-ship (e.g. the release-choreography table, RDR-201 Phase 2), as opposed to
-the tables under `src/nexus/tables/` that ship inside the package because
-their consumers are installed CLIs.
-
-`release-choreography.toml` has exactly one reader: `scripts/
-release_choreography.py`, which both `scripts/check_engine_release_floor.py`
-and `scripts/check_client_release_precondition.py` route their release
-decisions through (one table, one cache). Its message text
-lives in `scripts/release_messages.py`, keyed by row id; the parity harness
-`tests/scripts/test_release_table_parity.py` pins table, catalog, and both
-scripts to each other cell by cell.
+Home for repo-only RDR-201 closed-vocabulary tables, consumed by scripts that
+never ship. It holds none today. The tables under `src/nexus/tables/` ship
+inside the package because their consumers are installed CLIs.
 
 `tests/test_tables_lint.py` globs `*.toml` here (in addition to
 `src/nexus/tables/`) and lints every table it finds.
@@ -22,8 +13,8 @@ The checker proves coverage and overlap over the full cross-product of a
 group's guard domains, which assumes the dimensions are independent. When
 two values cannot co-occur (a probe result is never examined on the branch
 where the pin check blocks), an author used to have two outs: write a row
-for the phantom cell, or keep the value out of the domain (the release
-table's short-circuit-by-omission). The third is to name the dependence:
+for the phantom cell, or keep the value out of the domain (short-circuit-by-omission). The third is to
+name the dependence:
 
 ```toml
 [[impossible]]

@@ -61,16 +61,7 @@ import sys
 
 import check_engine_release_floor as _engine_floor
 import check_wire_contract_pairing as _wire_ledger
-import release_choreography as _choreo
-
-# RDR-201 P2.5/P2.6 (nexus-j9z30.15/.16): the decision path. The sensors
-# (git, the ledger parse) stay imperative; every branch below that decides
-# an exit code resolves docs/tables/release-choreography.toml through the
-# SAME scripts/release_choreography.py module check_engine_release_floor.py
-# uses -- one table, one cache -- so the two gates cannot disagree about a
-# ledger entry again (the O1 class). A DELEGATING branch (check() returning
-# check_wire_contract_ledger's own verdict; main() returning check()'s)
-# emits nothing itself: the sub-call's row is the decision.
+from nexus.gate_advisory import passed_by_default
 
 #: engine tag (or the literal "next" for the tag about to be cut) -> the
 #: client commits that must be in a RELEASED conexus version before that
@@ -128,10 +119,11 @@ def check_wire_contract_ledger(ack_beads: list[str] | None = None) -> tuple[int,
     """
     ledger = _wire_ledger.parse_ledger(_wire_ledger.DEFAULT_LEDGER_PATH)
     if not ledger.unshipped:
-        return _choreo.emit_choreography(
-            "check_wire_contract_ledger", {"ledger": "empty"},
-            {"ledger_path": str(_wire_ledger.DEFAULT_LEDGER_PATH)},
-        ), True
+        print(
+            "wire-contract ledger: 0 unshipped entries in "
+            f"{_wire_ledger.DEFAULT_LEDGER_PATH}",
+        )
+        return 0, True
 
     # nexus-1emxn choreography (a), classified by the ONE shared interpreter
     # of the [additive] token (nexus-hcdk3) so this gate and the floor gate
@@ -145,13 +137,16 @@ def check_wire_contract_ledger(ack_beads: list[str] | None = None) -> tuple[int,
             f"  {e.sha}  bead {e.bead}  engine tag {e.engine_tag}  ({e.note})"
             for e in blocking
         )
-        return _choreo.emit_choreography(
-            "check_wire_contract_ledger", {"ledger": "blocking"},
-            {
-                "n": str(len(blocking)), "entries": entries,
-                "ledger_path": str(_wire_ledger.DEFAULT_LEDGER_PATH),
-            },
-        ), False
+        print(
+            f"BLOCKED: {len(blocking)} both-halves commit(s) in "
+            f"{_wire_ledger.DEFAULT_LEDGER_PATH} have an unshipped client half, no "
+            "[additive] direction-safety token, and no acknowledgment:\n"
+            f"{entries}\n"
+            "\n"
+            f"{_LEDGER_REMEDY}",
+            file=sys.stderr,
+        )
+        return 1, False
     if missing:
         acked_count = len(ledger.unshipped) - len(missing)
         acked_suffix = (
@@ -159,20 +154,31 @@ def check_wire_contract_ledger(ack_beads: list[str] | None = None) -> tuple[int,
             "acknowledged via --ack-client-lag)"
             if acked_count else ""
         )
-        return _choreo.emit_choreography(
-            "check_wire_contract_ledger", {"ledger": "additive"},
-            {
-                "n": str(len(missing)),
-                "beads": ", ".join(sorted({e.bead for e in missing})),
-                "acked_suffix": acked_suffix,
-            },
-        ), False
+        beads = ", ".join(sorted({e.bead for e in missing}))
+        print(
+            f"wire-contract ledger: {len(missing)} unacknowledged unshipped "
+            "both-halves commit(s), all marked [additive] (old client + new engine "
+            "safe) — unpaired deploy authorized ahead of the client tag (nexus-1emxn "
+            "choreography (a)); pairing completes when the client release carrying "
+            f"{beads} bumps the floor.{acked_suffix}",
+        )
+        print(
+            passed_by_default(
+                "check_wire_contract_ledger",
+                "every unshipped both-halves commit carries the [additive] token; the "
+                "deploy is authorized on that token alone, with no paired client tag "
+                "verified",
+            ),
+        )
+        return 0, False
 
     acked_beads = ", ".join(sorted(acked & {e.bead for e in ledger.unshipped.values()}))
-    return _choreo.emit_choreography(
-        "check_wire_contract_ledger", {"ledger": "acked_only"},
-        {"n": str(len(ledger.unshipped)), "beads": acked_beads},
-    ), False
+    print(
+        f"wire-contract ledger: {len(ledger.unshipped)} unshipped both-halves "
+        "commit(s), all explicitly acknowledged via --ack-client-lag: "
+        f"{acked_beads}",
+    )
+    return 0, False
 
 
 def _git(*args: str) -> str:
@@ -245,30 +251,31 @@ def check(engine_tag: str, ack_client_lag: list[str] | None = None) -> int:
         try:
             release = latest_release_tag()
         except RuntimeError as e:
-            return _choreo.emit_choreography(
-                "check_composite", {"hand_table": "latest_release_tag_error"}, {"exc": str(e)},
-            )
+            print(f"CANNOT VERIFY: {e}", file=sys.stderr)
+            return 2
         missing = []
         for commit, why in required.items():
             try:
                 ok = is_ancestor(commit, release)
             except RuntimeError as e:
-                return _choreo.emit_choreography(
-                    "check_composite", {"hand_table": "is_ancestor_error"},
-                    {"commit": commit, "exc": str(e)},
-                )
+                print(f"CANNOT VERIFY {commit}: {e}", file=sys.stderr)
+                return 2
             status = "in" if ok else "MISSING FROM"
             print(f"  {commit}  {status} {release}  ({why.splitlines()[0]}...)")
             if not ok:
                 missing.append((commit, why))
         if missing:
-            return _choreo.emit_choreography(
-                "check_composite", {"hand_table": "missing_commit"},
-                {
-                    "engine_tag": engine_tag, "n": str(len(missing)), "release": release,
-                    "commits": "\n".join(f"  {commit}: {why}" for commit, why in missing),
-                },
+            commits = "\n".join(f"  {commit}: {why}" for commit, why in missing)
+            print(
+                "\n"
+                f"BLOCKED: {engine_tag} must not deploy — {len(missing)} required client "
+                f"commit(s) absent from the latest release {release}:\n"
+                f"{commits}\n"
+                "\n"
+                f"{_REMEDY}",
+                file=sys.stderr,
             )
+            return 1
         print(f"OK: all client preconditions for {engine_tag} are in {release}")
 
     ledger_rc, ledger_vacuous = check_wire_contract_ledger(ack_client_lag)
@@ -276,10 +283,16 @@ def check(engine_tag: str, ack_client_lag: list[str] | None = None) -> int:
         return ledger_rc
 
     if hand_table_vacuous and ledger_vacuous:
-        return _choreo.emit_choreography(
-            "check_composite", {"hand_table": "vacuous", "ledger": "empty"},
-            {"engine_tag": engine_tag, "ledger_path": str(_wire_ledger.DEFAULT_LEDGER_PATH)},
+        print(
+            f"OK (VACUOUS -- 0 preconditions registered for {engine_tag} AND 0 entries "
+            f"in {_wire_ledger.DEFAULT_LEDGER_PATH}'s ## Unshipped section): this run "
+            "verified NOTHING from EITHER source. An empty hand table plus an empty "
+            "ledger means either 'no known client coupling for this engine tag' or "
+            "'nobody added rows to either source' -- this script cannot tell the two "
+            "apart. See ENGINE_CLIENT_PRECONDITIONS's module docstring before "
+            "treating this as evidence the deploy is safe.",
         )
+        return 0
     return 0
 
 
@@ -345,4 +358,4 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(_choreo.run_gate(main))
+    sys.exit(main())

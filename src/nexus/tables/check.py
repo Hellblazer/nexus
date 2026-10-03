@@ -207,8 +207,8 @@ def full_product(
     false-positive gap, never a false negative, so the safety direction
     holds. Before nexus-q9u2n an author's only outs were a row for the
     impossible cell or keeping the value out of the domain
-    (docs/tables/release-choreography.toml did the second; its header
-    called it short-circuit-by-omission). ``[[impossible]]`` is the third:
+    (an earlier release-decision table did the second and called it
+    short-circuit-by-omission). ``[[impossible]]`` is the third:
     name the dependence, keep the value, and the checker subtracts the
     cell. The limit was inherited from the design this borrows from and
     went undocumented on both sides until the 2026-09-04 reanalysis.

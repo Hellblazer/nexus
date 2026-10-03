@@ -24,7 +24,6 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 import check_engine_release_floor as gate
-import release_choreography as _choreo
 from nexus.db.managed_endpoint import ManagedCapabilities, ManagedServiceUnreachable
 from nexus.engine_version import REQUIRED_ENGINE_VERSION
 
@@ -2001,28 +2000,10 @@ def test_client_lag_ledger_tokenless_entry_stays_blocking(tmp_path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# RDR-201 P2.4 (nexus-j9z30.14): the routed decision path
-# ---------------------------------------------------------------------------
-#
-# Exhaustive per-cell coverage lives in
-# tests/scripts/test_release_table_parity.py (every enumerated cell of both
-# scripts, via the enumerator's own drivers). These are the FOCUSED proof
-# for a representative branch of each of this script's nine cell-producing
-# functions resolving nexus.tables.resolve() + release_messages.py's catalog
-# with its dynamic values filled in.
+# The decision path: a representative branch of each of this script's
+# verdict-producing functions, with its dynamic values filled in.
 
 import pathlib as _pathlib
-
-import release_messages as _release_messages
-
-
-def test_choreography_check_pin_currency_unavailable_matches_table(capsys: pytest.CaptureFixture[str]) -> None:
-    rc = gate.check_pin_currency(gate._TAGS_UNAVAILABLE)
-    assert rc == 2
-    err = capsys.readouterr().err
-    assert err.strip() == _release_messages.get(
-        "check_pin_currency::pin_currency_tags_unavailable"
-    ).strip()
 
 
 def test_choreography_check_pin_currency_stale_pin_fills_dynamic_values(capsys: pytest.CaptureFixture[str]) -> None:
@@ -2053,12 +2034,9 @@ def test_choreography_check_client_lag_ledger_blocking(tmp_path) -> None:
 def test_choreography_check_client_lag_ledger_additive_keeps_the_acked_suffix(
     tmp_path, capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """RDR-201 P2.5 (nexus-j9z30.15): a mixed ledger -- one [additive]
-    entry, one acknowledged entry -- prints the acknowledged count as a
-    suffix on the old path. The catalog entry must carry it too
-    (``[acked_suffix]``) or the table path silently drops a fact the
-    operator reads; the fixture's own "additive" ledger state has zero
-    acked entries, so Role 2's full-text parity cannot see this."""
+    """A mixed ledger -- one [additive] entry, one acknowledged entry --
+    prints the acknowledged count as a suffix; dropping it silently loses a
+    fact the operator reads."""
     additive = (
         "- `cafebabecafebabecafebabecafebabecafebabe` -- bead nexus-addv -- "
         "engine tag `engine-service-v9.9.9` -- [additive] env-var contract\n"
@@ -2073,9 +2051,7 @@ def test_choreography_check_client_lag_ledger_additive_keeps_the_acked_suffix(
 
 
 def test_choreography_check_paired_preconditions_not_published_fills_real_reason(capsys: pytest.CaptureFixture[str]) -> None:
-    """The one row (``battery_not_published``) whose catalog template's
-    ``[reason]`` placeholder must be filled with the REAL reason string for
-    correctness -- see the module's ``_emit_choreography`` call site."""
+    """The not-published refusal carries the REAL reason string."""
     tag = gate._pinned_engine_tag()
     with patch.object(gate, "_tag_exists_in_git", return_value=True), \
          patch.object(gate, "_paired_tag_published", return_value=(False, "not published")):
@@ -2119,9 +2095,7 @@ def test_choreography_check_floor_auto_paired_current_is_byte_for_byte_bare(caps
 
 
 def test_choreography_record_deploy_classifies_exception_subclass(capsys: pytest.CaptureFixture[str]) -> None:
-    """The OLD code's single ``except DeployTrackerError`` never
-    discriminates subclasses -- the table path must, to route to the
-    right one of six distinct rows."""
+    """A ``DeployTrackerError`` subclass is caught and exits 3."""
     with patch.object(
         gate.deploy_tracker, "record_deploy_from_gate_report",
         side_effect=gate.deploy_tracker.GateReportRed("simulated"),
@@ -2142,7 +2116,7 @@ def test_choreography_record_deploy_names_production_write_guard(
     line does not start with an ALL-CAPS verdict token --
     ``tests/e2e/release-preflight.sh``'s ``check()`` then printed "(no
     verdict line matched)" instead of the actual refusal (observed cutting
-    conexus 7.44.0). Assert it is caught, routed through the choreography
+    conexus 7.44.0). Assert it is caught, exits
     (rc == 3, an ALL-CAPS ``TRACKER NOT RECORDED`` verdict), and that the
     printed text names BOTH inputs required to record from a box like this
     one: NX_GATE_REPORT_DIR and a reasoned NX_ALLOW_PROD_WRITE."""
@@ -2159,40 +2133,6 @@ def test_choreography_record_deploy_names_production_write_guard(
     assert "NX_GATE_REPORT_DIR" in err
     assert gate.PROD_WRITE_OPT_IN_ENV in err
     assert "STOP: refusing a WRITE" in err
-
-
-def test_choreography_record_deploy_refuses_an_unmapped_tracker_subclass() -> None:
-    """RDR-201 P2.6 (nexus-j9z30.16): the table's six tracker rows partition
-    DeployTrackerError's subclasses exactly. A subclass with no row is a
-    TableDefect -- exit 2 through release_choreography.run_gate, distinct
-    from BLOCKED (1) and tracker-not-recorded (3) -- never folded into
-    another row's verdict; the generic "TRACKER NOT RECORDED" fallback that
-    used to catch it went with the old path."""
-
-    class _Unmapped(gate.deploy_tracker.DeployTrackerError):
-        pass
-
-    with patch.object(
-        gate.deploy_tracker, "record_deploy_from_gate_report", side_effect=_Unmapped("simulated"),
-    ), pytest.raises(_choreo.TableDefect, match="_Unmapped has no outcome"):
-        gate.record_deploy_from_gate_report_leg(_pathlib.Path("/fake/dir"), url=None)
-
-
-def test_tracker_error_outcomes_cover_every_deploy_tracker_subclass() -> None:
-    """The unmapped-subclass branch above is dead today and must stay dead
-    by construction: a seventh DeployTrackerError subclass added to
-    deploy_tracker.py reds HERE, in the unit suite, not as an exit-2
-    refusal from a live release gate."""
-    # Only the subclasses deploy_tracker itself declares: a test-local
-    # subclass (the _Unmapped above) is also a live __subclasses__() entry
-    # until collected, and must not turn this census into an ordering race.
-    declared = {
-        c for c in gate.deploy_tracker.DeployTrackerError.__subclasses__()
-        if c.__module__ == gate.deploy_tracker.__name__
-    }
-    assert declared == set(gate._TRACKER_ERROR_OUTCOMES), (
-        sorted(c.__name__ for c in declared ^ set(gate._TRACKER_ERROR_OUTCOMES))
-    )
 
 
 def test_choreography_main_tracker_opt_out(capsys: pytest.CaptureFixture[str]) -> None:
@@ -2215,26 +2155,16 @@ def test_choreography_main_tracker_refusal(capsys: pytest.CaptureFixture[str]) -
     assert "TRACKER NOT RECORDED" in err
 
 
-def test_resolve_choreography_row_refuses_out_of_domain_value() -> None:
-    """A table-authoring / classification defect (a guard value outside
-    the declared domain) must fail loudly, not silently misroute."""
-    with pytest.raises(RuntimeError):
-        _choreo.resolve_choreography_row("check_pin_currency", {"newest": "not-a-real-value"})
-
-
 # ---------------------------------------------------------------------------
 # nexus-h0fo3: the paired-release arming gate (the READER half of
 # docs/release-arming/; conexus writes the attestation)
 # ---------------------------------------------------------------------------
 #
-# Per-cell coverage of all ten leaves lives in
-# tests/scripts/test_release_table_parity.py, driven through the enumerator
-# with the read sensor patched. What is here instead is what the fixture
-# CANNOT express: the two negative controls the contract mandates, driven
-# against a REAL file on disk through the real path construction; the
+# The two negative controls the contract mandates, driven against a REAL
+# file on disk through the real path construction; the
 # ack-does-not-lift-arming claim; and the "a paired battery that returns 0
 # has emitted an arming verdict" invariant, which is a property of the
-# BATTERY's composition rather than of any one cell.
+# BATTERY's composition rather than of any one verdict.
 
 from datetime import datetime as _datetime, timedelta as _timedelta, timezone as _timezone
 
@@ -2935,9 +2865,9 @@ def test_auto_paired_meets_floor_emits_no_arming_verdict_by_design(
 
     It is accepted rather than closed, for two reasons recorded here so the
     next reader does not re-derive them. The two-mode asymmetry is deliberate
-    and documented (docs/tables/release-choreography.toml: the unattended
-    path trusts the cloud probe because no human is present to interpret a
-    dirty ledger, and the table says in terms not to unify the modes). And
+    and documented (the unattended path trusts the cloud probe because no
+    human is present to interpret a dirty ledger, and the release
+    decision table, since deleted, said in terms not to unify the modes). And
     the safety property survives NECESSARILY, not probably: the predicate
     selecting this branch IS ``parsed >= REQUIRED_ENGINE_VERSION``, the live
     cloud already running the engine this release pins -- the one carrying

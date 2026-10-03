@@ -194,7 +194,8 @@ is not a second one.
 
 That is a ruling, not an oversight (`nexus-jv9h3`, 2026-09-12). The two-mode
 asymmetry is deliberate and documented in
-`docs/tables/release-choreography.toml`, and the safety property survives it
+`scripts/check_engine_release_floor.py`'s module docstring (the
+`--paired-deploy-auto` section), and the safety property survives it
 necessarily rather than probably. The predicate that selects the branch IS
 `parsed >= REQUIRED_ENGINE_VERSION`: the live cloud already running the engine
 this release pins, which is the engine carrying the non-additive change. So
