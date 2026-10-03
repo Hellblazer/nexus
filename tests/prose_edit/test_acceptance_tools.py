@@ -701,28 +701,72 @@ def test_the_closing_refrain_is_never_an_edit_and_a_query_about_it_passes() -> N
     assert _verdict("refrain", paragraph, REFRAIN)[0] == "FAIL"
 
 
-def test_xanadu_and_linda_fail_an_edit_on_a_refrain_a_tricolon_or_the_unexplained_sql() -> None:
+ALWAYS_LINDA = ("Not a parallel programming model, but a coordination substrate",
+                "`SELECT ... FOR UPDATE SKIP LOCKED LIMIT 1`", "A report is owed until a report tuple exists")
+ALWAYS_XANADU = ("Not a hypertext system, but a linking substrate", "There is no way to say that a research finding")
+CARD_LINDA = "Devices: the tricolon 'easier to build correctly, easier to analyze, and easier to compose'; 'small, well-studied, and already half-built'."
+CARD_XANADU = "Devices: 'simple, well-studied, and easy to implement'; the list 'RDF triples, property graphs, or ad-hoc foreign keys'."
+
+
+def _carded(edits: list[dict], card: str | None) -> list[dict]:
+    """A run where the editor replied with `edits` and a voice card, and the filter kept all of them."""
+    reply: dict = {"edits": edits, "queries": []}
+    if card is not None:
+        reply["voice_card"] = card
+    return _run(reply, {"edits": edits})
+
+
+def test_xanadu_and_linda_fail_an_edit_on_a_refrain_a_closing_line_or_the_unexplained_sql_card_or_no_card() -> None:
     plain = _both([_ed(1, "To be clear: ", "")])
     assert _verdict("linda", plain, LINDA)[0] == "PASS" and _verdict("xanadu", plain, XANADU)[0] == "PASS"
-    for planted in ("Not a parallel programming model, but a coordination substrate",
-                    "small, well-studied, and already half-built",
-                    "easier to build correctly, easier to analyze, and easier to compose",
-                    "`SELECT ... FOR UPDATE SKIP LOCKED LIMIT 1`"):
-        verdict, note = _verdict("linda", _both([_ed(1, planted, "x")]), LINDA)
-        assert verdict == "FAIL" and "device" in note, planted
-    for planted in ("Not a hypertext system, but a linking substrate", "simple, well-studied, and easy to implement",
-                    "RDF triples, property graphs, or ad-hoc foreign keys"):
-        assert _verdict("xanadu", _both([_ed(1, planted, "x")]), XANADU)[0] == "FAIL", planted
-    # a longer old string that merely contains the device still touches it
-    wide = _both([_ed(1, "Linda's model provided all three in a form that was small, well-studied, and already half-built in our engine.", "x")])
-    assert _verdict("linda", wide, LINDA)[0] == "FAIL"
-    # cutting a whole paragraph that holds a device touches it too
+    for card in (None, "", CARD_LINDA):
+        for planted in ALWAYS_LINDA:
+            verdict, note = _verdict("linda", _carded([_ed(1, planted, "x")], card), LINDA)
+            assert verdict == "FAIL" and "device" in note, (planted, card)
+    for card in (None, CARD_XANADU):
+        for planted in ALWAYS_XANADU:
+            assert _verdict("xanadu", _carded([_ed(1, planted, "x")], card), XANADU)[0] == "FAIL", (planted, card)
+    # cutting a whole paragraph that holds an always-protected device touches it too
     para = _run({"edits": []}, {"edits": [], "paragraphs": [{"n": 1, "action": "cut",
                 "paragraphs": 'the paragraph opening "This is the role Linda fills in Nexus"', "advice": "x"}]})
     assert _verdict("linda", para, LINDA)[0] == "FAIL"
     assert _verdict("linda", _both([]), LINDA)[0] == "NOT-MEASURABLE"
-    # a device list that no longer matches the document proves nothing
+    # a device list that no longer matches the document proves nothing, a card-conditional phrase included
     assert _verdict("linda", plain, LINDA.replace("small, well-studied, and already half-built", "x"))[0] == "NOT-MEASURABLE"
+    assert _verdict("linda", plain, LINDA.replace("Not a parallel programming model, but a coordination substrate", "x"))[0] == "NOT-MEASURABLE"
+
+
+def test_a_tricolon_edit_passes_when_the_voice_card_does_not_name_it_and_fails_when_it_does() -> None:
+    cases = (
+        ("linda", LINDA, CARD_LINDA, "easier to build correctly, easier to analyze, and easier to compose",
+         "small, well-studied, and already half-built"),
+        ("xanadu", XANADU, CARD_XANADU, "simple, well-studied, and easy to implement",
+         "tracing where a decision came from, what code implements a design, and which findings have been superseded"),
+    )
+    for kind, doc, card, on_card, off_card in cases:
+        verdict, note = _verdict(kind, _carded([_ed(1, off_card if kind == "xanadu" else "the oldest unclaimed tuple per subspace, the health of the table, and the age of the last sweep", "x")], card), doc)
+        assert verdict == "PASS" and "card-conditional devices scored" in note, (kind, note)
+        for no_card in (None, "", "First person plural. Refrain: the closing line of each section."):
+            assert _verdict(kind, _carded([_ed(1, on_card, "x")], no_card), doc)[0] == "PASS", (kind, no_card)
+        verdict, note = _verdict(kind, _carded([_ed(1, on_card, "x")], card), doc)
+        assert verdict == "FAIL" and "device" in note and on_card[:20] in note, (kind, note)
+    # a longer old string that merely contains a carded tricolon still touches it
+    wide = _carded([_ed(1, "Linda's model provided all three in a form that was small, well-studied, and already half-built in our engine.", "x")], CARD_LINDA)
+    assert _verdict("linda", wide, LINDA)[0] == "FAIL"
+    # a curly-quoted, re-cased card still names it
+    assert _verdict("linda", _carded([_ed(1, "small, well-studied, and already half-built", "x")], "DEVICE: \u2018Small, Well-Studied\u2019"), LINDA)[0] == "FAIL"
+    # a paragraph proposal is scored against a carded tricolon only
+    para = {"n": 1, "action": "split", "paragraphs": 'the paragraph opening "Three operations with exact meanings"', "advice": "x"}
+    assert _verdict("linda", _run({"edits": [], "voice_card": CARD_LINDA}, {"edits": [], "paragraphs": [para]}), LINDA)[0] == "FAIL"
+    assert _verdict("linda", _run({"edits": [], "voice_card": "none"}, {"edits": [], "paragraphs": [para]}), LINDA)[0] == "PASS"
+
+
+def test_the_hash_pins_sentence_is_not_a_device() -> None:
+    v = _verdicts()
+    sentence = "The hash pins which chunk; the range pins where within it."
+    assert XANADU.count(sentence) == 1
+    assert sentence not in v.DEVICES["xanadu"] and sentence not in [p for p, _ in v.CARD_DEVICES["xanadu"]]
+    assert _verdict("xanadu", _carded([_ed(1, sentence, "The hash pins which chunk, and the range pins where within it.")], CARD_XANADU), XANADU)[0] == "PASS"
 
 
 def test_every_kind_still_fails_on_a_scope_or_denial_violation_and_an_unknown_kind_is_not_measurable() -> None:
@@ -867,16 +911,17 @@ def test_the_range_run_scores_against_a_committed_fixture_not_the_live_changelog
     assert _verdict("range", _run({"edits": edge}, {"edits": edge}, target="x.md:11-19"), CHANGELOG_FIXTURE)[0] == "FAIL"
 
 
-NEW_XANADU = (
-    "tracing where a decision came from, what code implements a design, and which findings have been superseded",
-    "following citation chains, crossing collection boundaries, and scoping each step",
+NEW_XANADU_ALWAYS = (
     "There is no way to say that a research finding",
     "There is no way to follow a chain of citations",
     "A debugger agent creates `relates` links between a root cause analysis and prior findings.",
     "A developer agent creates `implements` links between code and the design document it realizes.",
 )
-NEW_LINDA = (
-    "the oldest unclaimed tuple per subspace, the health of the table, and the age of the last sweep",
+NEW_XANADU_CARD = (
+    "tracing where a decision came from, what code implements a design, and which findings have been superseded",
+    "following citation chains, crossing collection boundaries, and scoping each step",
+)
+NEW_LINDA_ALWAYS = (
     "A message reaches exactly one reader, whether or not two raced for it.",
     "A request stays open, with an age you can see, until its ack exists, whether or not anyone is watching.",
     "An agent's report had to be something an orchestrator could wait for and something a later session could count.",
@@ -885,22 +930,36 @@ NEW_LINDA = (
     "Nothing records that a report was owed, so an agent that finishes without reporting leaves no trace.",
     "Nothing wakes a reader when a record arrives, so a correction sent mid-turn lands after the turn.",
 )
+NEW_LINDA_CARD = (
+    "the oldest unclaimed tuple per subspace, the health of the table, and the age of the last sweep",
+)
 
 
-def test_the_device_lists_hold_the_tricolons_and_repeated_openings_the_critique_named_each_once() -> None:
+def test_the_device_lists_hold_the_repeated_openings_and_the_card_conditional_tricolons_each_once() -> None:
     v = _verdicts()
-    for kind, doc, phrases in (("xanadu", XANADU, NEW_XANADU), ("linda", LINDA, NEW_LINDA)):
-        for phrase in phrases:
-            assert phrase in v.DEVICES[kind], (kind, phrase)
-            assert doc.count(phrase) == 1, (kind, phrase, doc.count(phrase))  # the list is applicable to the document
+    for kind, doc, always, conditional in (("xanadu", XANADU, NEW_XANADU_ALWAYS, NEW_XANADU_CARD),
+                                           ("linda", LINDA, NEW_LINDA_ALWAYS, NEW_LINDA_CARD)):
+        carded = {p: m for p, m in v.CARD_DEVICES[kind]}
+        for phrase in always:
+            assert phrase in v.DEVICES[kind] and phrase not in carded, (kind, phrase)
             verdict, note = _verdict(kind, _both([_ed(1, phrase, "x")]), doc)
             assert verdict == "FAIL" and "device" in note, (kind, phrase)
+        for phrase in conditional:
+            assert phrase in carded and phrase not in v.DEVICES[kind], (kind, phrase)
+            assert any(m.lower() in phrase.lower() for m in carded[phrase]), (kind, phrase)  # a marker is in the phrase
+            reply_card = " ".join(carded[phrase])
+            verdict, note = _verdict(kind, _carded([_ed(1, phrase, "x")], reply_card), doc)
+            assert verdict == "FAIL" and "device" in note, (kind, phrase)
+        for phrase in (*v.DEVICES[kind], *carded):
+            assert doc.count(phrase) == 1, (kind, phrase, doc.count(phrase))  # the lists apply to the document
     assert _verdict("xanadu", _both([_ed(1, "To be clear: ", "")]), XANADU)[0] == "PASS"  # still passes on a plain cut
 
 
 def test_the_readme_says_what_a_pass_means_for_devices_and_what_each_kind_scores() -> None:
     text = (ACC / "README.md").read_text(encoding="utf-8")
-    assert "none of the listed devices was touched" in text
+    assert "none of the scored devices was touched" in text
+    assert "`CARD_DEVICES`" in text and "voice_card" in text and "scored only when" in text  # the two groups
+    assert "hash pins which chunk" in text and "not a device" in text
     assert "a human reads the rest" in text or "for a human to read" in text
     for kind in ("`protected`", "`budget`", "`range`", "`qa`", "`qb`", "`qc`"):
         assert any(ln.startswith(f"| {kind} |") for ln in text.splitlines()), kind

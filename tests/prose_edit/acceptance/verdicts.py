@@ -25,10 +25,13 @@ NOT-MEASURABLE):
              qb: "may" is not cut and is queried. qc: "likely" and "truly" are not cut and each is queried. A word
              that is neither cut nor queried fails the run (nothing proposed fails too)
   xanadu, linda, refrain
-             no edit overlaps a refrain, a tricolon, a repeated opening or the unexplained SQL listed in DEVICES,
-             and no paragraph proposal cuts, merges or splits a paragraph that holds one. PASS means none of the
-             listed devices was touched; the rest of the document is for a human to read. The lists were read off
-             the documents; a listed phrase the document no longer holds exactly once makes the run NOT-MEASURABLE.
+             no edit overlaps a device, and no paragraph proposal cuts, merges or splits a paragraph that holds one.
+             Two groups. DEVICES (always scored): refrains, repeated openings, closing lines, the unexplained SQL.
+             CARD_DEVICES (scored only when the editor's reply voice_card names it, matched by a distinctive phrase):
+             the three-item constructions, which Sam's ruling of 2026-09-30 lets the editor restructure unless the
+             card lists them. PASS means none of the scored devices was touched; the rest of the document is for a
+             human to read. The lists were read off the documents; a listed phrase the document no longer holds
+             exactly once makes the run NOT-MEASURABLE.
              xanadu and linda notes also count the semicolon queries (the site-page rule is a query on these essays)
 Every doc-editing kind and the stdin run also need proof that the line-editor subagent read WORK/brief.md: a Read
 of that file by the subagent, before its reply, with a non-error result that carries the file's last line
@@ -85,17 +88,19 @@ DOCS: dict[str, str | None] = {
 }
 _JSON_BLOCK = re.compile(r"^[ \t]*```json[ \t]*\n(.*?)\n[ \t]*```[ \t]*$", re.DOTALL | re.MULTILINE)
 PASS, FAIL, NOT_MEASURABLE = "PASS", "FAIL", "NOT-MEASURABLE"
-# What the author deliberately did, read off each document: a refrain, a tricolon or the unexplained SQL.
-# An edit overlapping one fails the run (RDR-221 Test Plan 2). Verbatim, and unique in the document.
+# What the author deliberately did, read off each document, in two groups. ALWAYS-PROTECTED (DEVICES): refrains,
+# repeated openings, closing lines and the unexplained SQL: an edit overlapping one fails the run (RDR-221 Test
+# Plan 2). CARD-CONDITIONAL (CARD_DEVICES): the three-item constructions. Sam's ruling of 2026-09-30: a three-item
+# construction may be restructured (a catalogue into a list) unless it is a device on the voice card, so one of
+# these is scored only when the editor's reply voice_card names it (any of its markers, a distinctive phrase,
+# case and quote-style ignored). Every phrase is verbatim and unique in the document. Sam's decision of 2026-10-03:
+# "The hash pins which chunk; the range pins where within it." is not a device and is on neither list.
 DEVICES: dict[str, tuple[str, ...]] = {
     "linda": (
         "Not a parallel programming model, but a coordination substrate",
-        "small, well-studied, and already half-built",
         "a work queue, a mailbox, a lock, a barrier, and a request with its reply",
-        "easier to build correctly, easier to analyze, and easier to compose",
         "`SELECT ... FOR UPDATE SKIP LOCKED LIMIT 1`",
         "A report is owed until a report tuple exists",
-        "the oldest unclaimed tuple per subspace, the health of the table, and the age of the last sweep",
         "A message reaches exactly one reader, whether or not two raced for it.",
         "A request stays open, with an age you can see, until its ack exists, whether or not anyone is watching.",
         "An agent's report had to be something an orchestrator could wait for and something a later session could count.",
@@ -106,12 +111,7 @@ DEVICES: dict[str, tuple[str, ...]] = {
     ),
     "xanadu": (
         "Not a hypertext system, but a linking substrate",
-        "simple, well-studied, and easy to implement",
-        "RDF triples, property graphs, or ad-hoc foreign keys",
         "There is no way to express that a code chunk",
-        "The hash pins which chunk; the range pins where within it.",
-        "tracing where a decision came from, what code implements a design, and which findings have been superseded",
-        "following citation chains, crossing collection boundaries, and scoping each step",
         "There is no way to say that a research finding",
         "There is no way to follow a chain of citations",
         "A debugger agent creates `relates` links between a root cause analysis and prior findings.",
@@ -119,6 +119,24 @@ DEVICES: dict[str, tuple[str, ...]] = {
     ),
     "refrain": ("Not a log, but a promise.",),
 }
+CARD_DEVICES: dict[str, tuple[tuple[str, tuple[str, ...]], ...]] = {
+    "linda": (
+        ("small, well-studied, and already half-built", ("well-studied", "half-built")),
+        ("easier to build correctly, easier to analyze, and easier to compose",
+         ("easier to build correctly", "easier to analyze", "easier to compose")),
+        ("the oldest unclaimed tuple per subspace, the health of the table, and the age of the last sweep",
+         ("oldest unclaimed tuple", "health of the table", "age of the last sweep")),
+    ),
+    "xanadu": (
+        ("simple, well-studied, and easy to implement", ("well-studied", "easy to implement")),
+        ("RDF triples, property graphs, or ad-hoc foreign keys", ("rdf triples", "property graphs", "foreign keys")),
+        ("tracing where a decision came from, what code implements a design, and which findings have been superseded",
+         ("tracing where a decision", "what code implements a design", "findings have been superseded")),
+        ("following citation chains, crossing collection boundaries, and scoping each step",
+         ("following citation chains", "crossing collection boundaries", "scoping each step")),
+    ),
+}
+DEVICE_KINDS = frozenset(DEVICES) | frozenset(CARD_DEVICES)
 # The qualifier words each fixture hangs on. Sam's ruling, 2026-09-30: only filler words are cut by default;
 # every other qualifier or intensifier is a query. So these words are never cut AND each is queried: a word that
 # is neither cut nor queried fails, because there is no third class that stays untouched.
@@ -429,14 +447,33 @@ def _overlaps(a: tuple[int, int], b: tuple[int, int]) -> bool:
     return a[0] < b[1] and b[0] < a[1]
 
 
-def _device_problems(kind: str, doc_text: str, edits: list[Obj], paragraphs: list[Obj]) -> tuple[list[str], str | None]:
-    """(what touches a device, a reason the device list cannot be applied to this document or None)."""
+def _norm(text: str) -> str:
+    """Lower case, straight quotes, single spaces: how a voice card and a marker are compared."""
+    text = text.replace("\u2018", "'").replace("\u2019", "'").replace("\u201c", '"').replace("\u201d", '"')
+    return " ".join(text.lower().split())
+
+
+def _on_card(card: str, markers: tuple[str, ...]) -> bool:
+    return any(_norm(m) in _norm(card) for m in markers)
+
+
+def _device_problems(kind: str, doc_text: str, edits: list[Obj], paragraphs: list[Obj],
+                     card: str = "") -> tuple[list[str], str | None, str]:
+    """(what touches a device, a reason the device lists cannot be applied to this document or None, a note on the
+    card-conditional devices). The always-protected devices are scored whatever the card says; a card-conditional
+    one only when `card` (the editor's reply voice_card) names it."""
     spans: dict[str, tuple[int, int]] = {}
-    for phrase in DEVICES[kind]:
+    conditional = CARD_DEVICES.get(kind, ())
+    for phrase in (*DEVICES.get(kind, ()), *(p for p, _ in conditional)):
         found = _spans(doc_text, phrase)
         if len(found) != 1:
-            return [], f"the device {phrase[:50]!r} is in the document {len(found)} times; the list no longer matches it"
+            return [], f"the device {phrase[:50]!r} is in the document {len(found)} times; the list no longer matches it", ""
         spans[phrase] = found[0]
+    scored = [p for p, markers in conditional if _on_card(card, markers)]
+    for phrase, _ in conditional:
+        if phrase not in scored:
+            del spans[phrase]  # not on the card: the editor may restructure it
+    note = f"card-conditional devices scored: {len(scored)} of {len(conditional)}" if conditional else ""
     problems: list[str] = []
     for e in edits:
         for phrase, span in spans.items():
@@ -453,7 +490,7 @@ def _device_problems(kind: str, doc_text: str, edits: list[Obj], paragraphs: lis
                     if block is not None and _overlaps(block, span):
                         problems.append(f"paragraph proposal {pr.get('n')} ({pr.get('action')}) "
                                         f"would take a paragraph holding a device ({phrase[:50]!r})")
-    return problems, None
+    return problems, None, note
 
 
 def _line_spans(text: str, needle: str) -> list[tuple[int, int]]:
@@ -605,15 +642,19 @@ def doc_verdict(kind: str, events: list[Obj], c: Obj, doc_text: str | None) -> t
     filler = FILLER_CUT.get(kind)
     if filler and not any(_cuts(e, filler) for e in edits):
         problems.append(f"the filler word {filler!r} was not cut (a filler word is cut, not queried or left)")
-    if kind in DEVICES:
-        found, stale_list = _device_problems(kind, doc_text, edits, paragraphs)
+    card_note = ""
+    if kind in DEVICE_KINDS:
+        card = str(reply.get("voice_card") or proposal.get("voice_card") or "")
+        found, stale_list, card_note = _device_problems(kind, doc_text, edits, paragraphs, card)
         if stale_list:
             return NOT_MEASURABLE, stale_list
         problems += found
     if problems:
-        return FAIL, "; ".join(problems) + f"; {drops}"
+        return FAIL, "; ".join(problems) + f"; {drops}" + (f"; {card_note}" if card_note else "")
     note = (f"{len(edits)} edits, {len(queries)} queries, {len(paragraphs)} paragraph proposals after the filter; "
             f"{drops}{extra}")
+    if card_note:
+        note += f"; {card_note}"
     if kind in ("xanadu", "linda"):
         note += f"; semicolon queries: {_semicolon_queries(queries)} (the document holds {doc_text.count(';')} ';')"
     if kind in EDITS_EXPECTED and not edits:
