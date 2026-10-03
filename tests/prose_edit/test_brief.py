@@ -307,7 +307,7 @@ def test_the_brief_carries_each_layer_in_the_rdr_order_with_the_later_layer_winn
     seed(prose, "doc", {"tone": "doc-tone"}, {"banned": ["doc-banned"]}, path="docs/x.md")
     seed_genre(prose, "reference-doc", "EXEMPLAR-PASSAGE-TEXT", ["genre-note-one"])
     prose.ok("reject", "docs/x.md", "--old", "OLD-REJECTED", "--new", "NEW-REJECTED")
-    prose.ok("promote", "docs/x.md", "1", "--level", "repo")
+    prose.promote("docs/x.md", 1, "repo")
 
     text = brief_ok(prose, "build", "docs/x.md", "--budget", "7")
     positions = [text.index(h) for h in ORDER]

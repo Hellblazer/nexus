@@ -626,12 +626,12 @@ def test_promote_dry_run_then_write_and_list_and_remove(prose: Prose) -> None:
     assert dry["dry_run"] is True and dry["entry"]["old"] == OLD_A and dry["entry"]["new"] == NEW_A
     assert "not-a-defect" not in t2_titles(REPO_PROJECT) + t2_titles(USER_PROJECT)
 
-    out = prose.ok("promote", doc, "1", "--level", "repo")
+    out = prose.ok("promote", doc, "1", "--level", "repo")  # the dry run above is the matching one
     assert out["level"] == "repo" and out["entry"]["old"] == OLD_A
     entries = t2_json(REPO_PROJECT, "not-a-defect")["entries"]
     assert [(e["old"], e["new"]) for e in entries] == [(OLD_A, NEW_A)]
     assert "not-a-defect" not in t2_titles(USER_PROJECT)
-    prose.ok("promote", doc, "2", "--level", "user")
+    prose.promote(doc, 2, "user")
     assert [e["old"] for e in t2_json(USER_PROJECT, "not-a-defect")["entries"]] == [OLD_C]
 
     # The rejections stay where they were, and a promoted entry reaches the editor through
@@ -644,7 +644,7 @@ def test_promote_dry_run_then_write_and_list_and_remove(prose: Prose) -> None:
     assert {e["old"] for e in read["merged"]["lists"]["not-a-defect"]} == {OLD_A, OLD_C}
 
     # Listing is numbered per level; removing one by number deletes just it.
-    prose.ok("promote", doc, "2", "--level", "repo")
+    prose.promote(doc, 2, "repo")
     listed = prose.ok("not-a-defect", "--level", "repo")["entries"]
     assert [(e["n"], e["old"]) for e in listed] == [(1, OLD_A), (2, OLD_C)]
     left = prose.ok("not-a-defect", "--level", "repo", "--remove", "1")["entries"]

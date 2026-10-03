@@ -88,6 +88,12 @@ class Prose:
         assert proc.returncode == 0, f"{args}: rc={proc.returncode}\n{proc.stderr}"
         return json.loads(proc.stdout)
 
+    def promote(self, doc: str, n: int, level: str) -> dict:
+        """The author's route: a dry run (shown to the author), then the real promote. The script refuses the
+        real one without a matching dry run, so a test that is not about that gate goes through here."""
+        self.ok("promote", doc, str(n), "--level", level, "--dry-run")
+        return self.ok("promote", doc, str(n), "--level", level)
+
     def calls(self) -> list[list[str]]:
         if not self.calls_file.exists():
             return []

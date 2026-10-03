@@ -38,6 +38,12 @@ A file named `rejections` or `exemplar` is reached as `-- rejections` or `./reje
 `parse` prints {"mode": "edit", path, range, stdin, genre, budget, target} or
 {"mode": "rejections"|"exemplar", ..., "memory_argv": [...]}.
 
+Section 3 of the brief (the style sheet) ends every bullet with its layer, "(layer: document|genre|repo|user)",
+and states the rule: an entry from a narrower layer that contradicts a broader one wins (document > genre > repo >
+user). The site-page section 3 rules are the genre layer; an entry two layers hold is labelled with the narrower.
+Section 2 (the voice card) holds the document's saved author-approved card, when memory.py has one stored for it
+(`voice-card`), as the anchor the editor uses and returns unchanged; without one it asks the editor to write the card.
+
 `build` reads site-page section 3 from the sibling skill at run time for how-to and
 exploration-essay. Which section 3 rules are ignored, query-only or note-only comes from
 the repo style sheet lists site_page_section3_ignored, _query_only and _note_only, each
@@ -70,6 +76,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+from collections.abc import Callable
 from typing import Any, cast
 
 Obj = dict[str, Any]
@@ -379,8 +386,35 @@ def _shown(item: object) -> str:
     return item if isinstance(item, str) else json.dumps(item, ensure_ascii=False)
 
 
-def _bullets(items: list[Any]) -> str:
-    return "\n".join(f"- {_shown(i)}" for i in items)
+def _bullets(items: list[Any], label: Callable[[Any], str | None] | None = None) -> str:
+    """Bullets; with `label`, each ends in " (layer: <name>)" when the label function names one."""
+    out: list[str] = []
+    for i in items:
+        name = label(i) if label else None
+        out.append(f"- {_shown(i)}" + (f" (layer: {name})" if name else ""))
+    return "\n".join(out)
+
+
+# The brief's layer names. The site-page section 3 rules are the genre layer's (how-to, exploration-essay).
+LAYER_LABEL = {"user": "user", "repo": "repo", "site-page": "genre", "document": "document"}
+
+
+def _list_owner(layers: Obj, key: str) -> Callable[[Any], str | None]:
+    """The layer label of a merged list entry: the narrowest layer that holds the same entry under `key`."""
+    def owner(item: Any) -> str | None:
+        for name in reversed(list(_MEM.PRECEDENCE)):  # narrowest first
+            held = cast("list[Any]", cast(Obj, (layers.get(name) or {}).get("lists") or {}).get(key) or [])
+            if any(_MEM._same(item, h) for h in held):
+                return LAYER_LABEL.get(str(name))
+        return None
+    return owner
+
+
+def _scalar_owner(layers: Obj, key: str) -> str | None:
+    for name in reversed(list(_MEM.PRECEDENCE)):
+        if key in cast(Obj, (layers.get(name) or {}).get("scalars") or {}):
+            return LAYER_LABEL.get(str(name))
+    return None
 
 
 REJECTION_LIMIT = 20
@@ -444,6 +478,9 @@ def render_brief(read: Obj, budget: int, input_file: str | None, input_text: str
     lists = cast("dict[str, list[Any]]", merged.get("lists") or {})
     record = cast("Obj | None", read.get("genre_record"))
     rng = cast("Obj | None", read.get("range"))
+    layers = cast(Obj, read.get("layers") or {})
+    doc_layer = cast("Obj | None", layers.get("document"))
+    card = cast("Obj | None", (doc_layer or {}).get("voice_card"))
     out: list[str] = ["# Editing brief", "", f"Genre: {genre}"]
     if input_file:
         out.append(f"Input: the text under \"Text to edit\" below (a stdin run, saved at {input_file}; "
@@ -452,7 +489,7 @@ def render_brief(read: Obj, budget: int, input_file: str | None, input_text: str
         out.append(f"Document: {read['path']}")
     if rng:
         out.append(f"Propose edits only inside lines {rng['start']}-{rng['end']}. "
-                   "Build the voice card from the whole file.")
+                   + ("The voice card is the whole file's." if card else "Build the voice card from the whole file."))
     out += header or []
     out += ["", "## 1. Exemplars", ""]
     exemplars = cast("list[Obj]", (record or {}).get("exemplars") or [])
@@ -463,33 +500,46 @@ def render_brief(read: Obj, budget: int, input_file: str | None, input_text: str
                     str(ex["text"]), "</exemplar>"]
         notes = cast("list[Any]", (record or {}).get("notes") or [])
         if notes:
-            out += ["", "Genre notes:", _bullets(notes)]
+            out += ["", "Genre notes:", _bullets(notes, lambda _n: "genre")]
     else:
         out.append(
             f"No exemplars are stored for genre {genre}. Run without exemplars, build the voice "
             "card from the document alone, and say in the editor's note that no exemplars were used."
         )
-    out += ["", "## 2. Voice card", "",
-            "Before proposing any edit, write the voice card for this document from the whole "
-            "document and the exemplars above. Return it in the \"voice_card\" field."]
+    out += ["", "## 2. Voice card", ""]
+    if card:
+        out += ["The author approved this voice card for this document on "
+                f"{str(card.get('at', ''))[:10]}. It is author-approved: it is your anchor. Do not rebuild it "
+                "from the document, which has been edited since it was written. Use it as written to tell a "
+                "device from a defect. Return it unchanged in the \"voice_card\" field. If the document shows "
+                "a device the card does not list, say so in the note, never in the card.",
+                "", "<voice_card>", str(card["text"]), "</voice_card>"]
+    else:
+        out.append("Before proposing any edit, write the voice card for this document from the whole "
+                   "document and the exemplars above. Return it in the \"voice_card\" field.")
     out += ["", "## 3. Style sheet", "",
-            "Layers, least to most specific: user, repo, site-page section 3 (how-to and "
-            "exploration-essay), document. On a scalar setting the later layer wins; lists add. "
-            "This is the merge."]
+            "Every entry below ends with the layer it comes from: document, genre (site-page section 3, "
+            "for how-to and exploration-essay), repo or user.",
+            "When two entries contradict each other, the entry from the narrower layer wins and you ignore "
+            "the other (document > genre > repo > user).",
+            "Entries that do not contradict each other all apply. A setting shows the value of the "
+            "narrowest layer that gives it."]
     if scalars:
-        out += ["", "### Settings", "", "\n".join(f"- {k}: {_shown(v)}" for k, v in scalars.items())]
+        out += ["", "### Settings", "", "\n".join(
+            f"- {k}: {_shown(v)}" + (f" (layer: {own})" if (own := _scalar_owner(layers, k)) else "")
+            for k, v in scalars.items())]
     keys = [k for k in lists if k not in _HIDDEN_LISTS and not k.startswith("site_page_") and lists[k]]
     for key in sorted(keys, key=lambda k: (k != "diagnostics", k)):
-        out += ["", f"### {key}", "", _bullets(lists[key])]
+        out += ["", f"### {key}", "", _bullets(lists[key], _list_owner(layers, key))]
     if lists.get("site_page_rules"):
         out += ["", "### site-page section 3 rules (apply as written)", "",
-                _bullets(lists["site_page_rules"])]
+                _bullets(lists["site_page_rules"], _list_owner(layers, "site_page_rules"))]
     if lists.get("site_page_queries"):
         out += ["", "### site-page section 3 rules that produce QUERY ONLY (never an edit)", "",
-                _bullets(lists["site_page_queries"])]
+                _bullets(lists["site_page_queries"], _list_owner(layers, "site_page_queries"))]
     if lists.get("site_page_editors_note"):
         out += ["", "### site-page section 3 rule for the editor's note only (never an edit)", "",
-                _bullets(lists["site_page_editors_note"])]
+                _bullets(lists["site_page_editors_note"], _list_owner(layers, "site_page_editors_note"))]
     out += ["", "## 4. Not a defect", ""]
     nad = cast("list[Obj]", lists.get("not-a-defect") or [])
     rejected = _document_rejections(read)

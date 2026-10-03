@@ -469,13 +469,13 @@ def test_promote_dedupes_the_not_a_defect_list_by_the_change_not_by_the_old_stri
     prose.ok("reject", doc, "--old", "just", "--new", "")
     prose.ok("reject", doc, "--old", "just", "--new", "simply")
     prose.ok("reject", doc, "--old", "very  good", "--new", "good")
-    prose.ok("promote", doc, "1", "--level", "repo")
-    prose.ok("promote", doc, "2", "--level", "repo")
+    prose.promote(doc, 1, "repo")
+    prose.promote(doc, 2, "repo")
     entries = t2_json(REPO_PROJECT, "not-a-defect")["entries"]
     assert [(e["old"], e["new"]) for e in entries] == [("just", ""), ("just", "simply")]
-    prose.ok("promote", doc, "1", "--level", "repo")  # the same change again: still one entry for it
+    prose.promote(doc, 1, "repo")  # the same change again: still one entry for it
     assert len(t2_json(REPO_PROJECT, "not-a-defect")["entries"]) == 2
-    prose.ok("promote", doc, "3", "--level", "user")
+    prose.promote(doc, 3, "user")
     prose.ok("reject", doc, "--old", "very good", "--new", "good")  # whitespace variant of the same change
     assert [e["old"] for e in t2_json(USER_PROJECT, "not-a-defect")["entries"]] == ["very  good"]
 
