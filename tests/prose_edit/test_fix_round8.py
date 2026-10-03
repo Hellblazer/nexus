@@ -8,7 +8,7 @@ else (an object of any other shape is still refused).
 """
 from __future__ import annotations
 
-from tests.prose_edit.conftest import REPO_PROJECT, Prose, t2_json
+from tests.prose_edit.conftest import REPO_PROJECT, Prose, t2_get, t2_json
 
 DOC = "docs/x.md"
 TITLE = "doc/docs/x.md"
@@ -23,6 +23,20 @@ def test_a_plain_text_card_on_stdin_is_stored_as_written(prose: Prose) -> None:
 
 def test_a_json_string_card_is_stored_like_the_object_form(prose: Prose) -> None:
     out = prose.ok("voice-card", DOC, "--from-stdin", stdin='"' + CARD + '"')
+    assert out["voice_card"]["text"] == CARD
+
+
+def test_input_that_looks_like_json_but_does_not_parse_is_refused_not_stored(prose: Prose) -> None:
+    # Test validation (nexus-ger02.7 F1): plain text is accepted, so broken JSON must not fall through as a card.
+    for broken in ('{"voice_card": "First person. Devices: x', '{"voice_card": "abc",}',
+                   '{"voice_card":"a"} trailing', '["x"', '"unterminated'):
+        proc = prose.run("voice-card", DOC, "--from-stdin", stdin=broken)
+        assert proc.returncode == 1, (broken, proc.stderr)
+        assert proc.stdout == "" and t2_get(REPO_PROJECT, TITLE) is None
+
+
+def test_a_fenced_plain_card_is_stored_without_the_fence(prose: Prose) -> None:
+    out = prose.ok("voice-card", DOC, "--from-stdin", stdin=f"```\n{CARD}\n```\n")
     assert out["voice_card"]["text"] == CARD
 
 

@@ -1232,14 +1232,19 @@ def _read_card_stdin() -> str:
     """The card text from stdin: {"voice_card": "<text>"}, a JSON string, or the plain text itself.
 
     A card is one string, so plain text is unambiguous; the live check at 858d959df saw a model write it that way
-    first (nexus-ger02.7). Anything that parses as JSON but is not a string or that one-key object is refused.
+    first (nexus-ger02.7). A fenced block is unfenced first. Anything that parses as JSON but is not a string or
+    that one-key object is refused, and so is text that opens with {, [ or " and does not parse.
     """
     if sys.stdin.isatty():
         raise UserError("voice-card: expected the card on stdin but stdin is a terminal; pipe it in")
-    raw = sys.stdin.read()
+    raw = _unfence(sys.stdin.read())
     try:
-        body: Any = json.loads(_unfence(raw))
-    except ValueError:
+        body: Any = json.loads(raw)
+    except ValueError as exc:
+        # Plain text is a card; text that opens like JSON and does not parse is broken JSON, never a card
+        # (test validation of nexus-ger02.7, F1).
+        if raw.lstrip()[:1] in ('{', '[', '"'):
+            raise UserError(f"voice-card: stdin opens like JSON but is not valid JSON: {exc}") from exc
         body = raw
     if isinstance(body, dict) and set(body) == {"voice_card"}:
         body = body["voice_card"]
