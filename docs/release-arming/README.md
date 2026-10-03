@@ -114,11 +114,11 @@ The reader accepts on an attestation written *before* the flip. It does not
 observe the deploy landing. A conexus flip that refuses after the nexus tag has
 pushed still publishes a client pinned to an engine that never deployed — the
 gate narrows that window to the arming freshness bound, it does not close it.
-The backstop is the same one the module's tag-legitimacy bet already relies on:
-the daily `engine-floor-verify` job in
-`.github/workflows/scheduled-failure-watch.yml` (09:23 UTC, bare gate against
-the real public endpoint) surfaces a still-stale cloud within 24 hours through
-the tracked "scheduled workflows are failing silently" issue.
+The only check after that is the human POST-TAG VERIFY the module's tag-legitimacy
+bet already relies on: re-run the bare gate against the real public endpoint
+once the deploy lands. The daily `engine-floor-verify` job that used to do it
+automatically was deleted (cleanup step 8), so nothing surfaces a still-stale
+cloud on its own.
 
 The flip-time half of the split **is built** as of 2026-09-12 — conexus
 `conexus-9xny`, reported merged as their `gate.flip_engine_tag`, which wraps

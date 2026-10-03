@@ -285,9 +285,9 @@ First cold run:
    failed (the `-n 12` figure of 10 minutes is not yet measured at 8, expect somewhat longer); the floor
    step is green.
 5. The six hosted shards and `service-jar` show skipped, and `pytest-gate` passes.
-6. The board has `queued`, `in_progress` and `completed` posts for
-   `pytest (qwen-linux full suite)` with an unmangled name, and
-   `scripts/ci_status.py <sha>` exits 0.
+6. `gh api repos/Hellblazer/nexus/commits/<sha>/check-runs` (one call) shows
+   `pytest (qwen-linux full suite)` with an unmangled name and a `success`
+   conclusion.
 7. The leftover-process report says no substrate processes were left behind.
 
 Then, before the route is called settled:

@@ -199,9 +199,8 @@ the variable is on there is no automatic fallback when the runner is offline:
 the qwen job queues, `pytest-gate` pends until the 24 hour limit, and someone
 deletes the variable. `pytest-gate` reads `ci_runner` and requires the chosen
 path `success` and the other `skipped`, so a qwen job that was skipped,
-cancelled, timed out or never reported fails the required check, and
-`scripts/ci_status.py` expects the job on the develop topic. The lint, census
-and Service CI legs are unchanged.
+cancelled, timed out or never reported fails the required check. The lint,
+census and Service CI legs are unchanged.
 
 **Enabling the route is a sequence, not a flip.** Once the route is on, it fires
 on EVERY owner push to develop whose diff is not doc-only (the `code` predicate:
@@ -694,113 +693,19 @@ things to avoid carefully; they are impossible.
    are clear, it is the jar. Measured 2026-09-19: 20673 setup errors in a
    fresh worktree, zero shared-memory segments, missing jar.
 
-7. **Before pushing, check the `board/ci/nexus-develop` topic, not GitHub.**
-   Ask whether a run someone is waiting on is in flight — not whether the
-   slot is free. Worktrees split the tree; CI remains one shared resource
-   with one queue, and a push cancels the run in progress. GitHub's
-   `workflow_run` and `workflow_job` webhooks reach the conexus-hosted
-   adapter (RDR-220; `infra/terraform/ci-board-adapter` in the conexus
-   repo), which posts one tuple per state change — `queued`,
-   `in_progress`, `completed` with GitHub's conclusion — for every run and
-   every job of every workflow, about 70 posts per develop push; nothing in
-   this repo's workflows posts anything. Read the board for one commit with
-   `uv run python scripts/ci_status.py <full 40-char sha>` (exit 0 green,
-   1 failed, 2 pending, 3 no posts for that sha, 4 cancelled). Its fold:
-   within one attempt the most advanced state wins, so a late `queued`
-   copy cannot hide a finished job; across reruns the newest attempt wins;
-   and when GitHub starts two runs of one workflow for one commit, only
-   the newest run that was not cancelled counts (the newest outright
-   when every run was), and the other run's jobs, failures included,
-   are ignored (nexus-wqvv9).
-   A commit whose run has no `completed` post and no newer commit posting
-   behind it is live. A superseded run (the concurrency group cancelled it
-   when a newer commit pushed) posts `cancelled` for the run and its jobs,
-   with `pytest-gate` alone reading `failure` because its shards never
-   reported; every row of a run whose own run post is `cancelled` reads
-   `cancelled`, the aggregator included, and the exit is 4, not 1
-   (nexus-lgx93), so read the newer commit's run instead. That covers a
-   job that failed on its merits before the supersede too: an audit of a
-   superseded commit reads the `conclusion` column, not the verdict. A
-   `cancelled` job inside a run GitHub did not cancel was not superseded
-   (a job past its time limit, for one) and reads `failed`, so rerun it.
-   But GitHub also cancels the RUN when the timed-out job was its only real
-   job (Service CI's Java job, twice on 2026-09-30, nexus-rjk2a), so the
-   run post cannot tell a timeout from a supersede. The fold decides per
-   workflow, on the develop topic only (any other topic keeps the run-post
-   rule above). Service CI's `cancel-in-progress` is true for
-   `pull_request` only, so a newer push never cancels a started Service CI
-   run (it cancels a PENDING one, which has no job posts): a cancelled job
-   in a Service CI run that started reads `failed`, with its run, and no
-   clock is involved. A workflow whose push runs DO cancel in progress
-   (`PUSH_CANCELS_IN_PROGRESS` in `scripts/ci_status.py`: CI, CI commit
-   coverage audit, mac-signing-rehearsal,
-   pg-bundle-cache-seed, plugin drift ledger, plugin release; the lint test
-   `tests/scripts/test_ci_status_policy_lint.py` derives the set from the
-   workflow YAMLs and fails on disagreement) reads `cancelled` when a newer
-   run of that workflow exists (higher run id, other commit, first retained
-   post no later than the run's EARLIEST cancel post plus 30 s), and
-   `failed` when none does. No lower bound: a newer push cancels the old
-   run when it arrives, however long the runner then takes (0 to 92 s
-   measured, about 300 s allowed). "Started" means persistent evidence:
-   a cancelled job with an `in_progress` post, or another job of the same
-   run and attempt that completed with a conclusion other than `cancelled`
-   (Service CI's `service change detection`). Completed posts last three
-   days; `queued` and `in_progress` posts last six hours, so the reading
-   does not depend on them for Service CI. A run whose only cancelled row
-   is the RUN row, or whose cancelled jobs show no sign of having started,
-   was cancelled while pending and reads `cancelled`. Known misreadings,
-   all of them: (1) an in-set timeout within 30 s before an unrelated newer
-   push reads `cancelled`; (2) a run cancelled by hand after it started
-   reads `failed`, unless an in-set newer run began before the cancel;
-   (3) in-set, a newer run whose earliest retained post is `completed`
-   (its `queued` post expired) has an unknown start and counts as
-   excusing the cancel, so an in-set timeout older than six hours can read
-   `cancelled`; (4) a newer run dated by an `in_progress` post because its
-   `queued` post expired is dated later than it began; (5) a rerun attempt
-   cancelled when a newer run already exists reads `cancelled`, in-set;
-   (6) an in-set run cancelled while its jobs were still queued, with one
-   sibling job already complete, reads `failed` when no newer run is found,
-   because a sibling's completion shows the run started, not that the
-   cancelled job did; (7) a cancelled job with no run post and no sign it
-   started reads `cancelled` and exits 4, because the run post is a
-   separate delivery and can be missing.
-   A job that never posted is not green either (nexus-vyg07). On the develop
-   topic `ci_status.py` expects Service CI's Java job once `service change
-   detection` has completed green (`EXPECTED_JOBS`); with no row it adds a
-   `missing` one, `pending` for 30 minutes after the detector finished and
-   `failed` after that. Without it, a Java job left queued for an offline
-   `hellmini-ci` read green once its `queued` post expired at six hours. CI's
-   `pytest (qwen-linux full suite)` job is expected the same way, anchored on
-   `doc-only fast lane predicate`: it posts `queued` or `completed skipped` on
-   every develop push. No row is added for a run in which a hosted shard
-   (`pytest (Python ...`) completed with anything but `skipped`
-   (`EXPECTED_UNLESS_PEER_RAN`): that run either predates the job, so a sha
-   pushed before the job landed does not read as a red suite, or was routed to
-   the shards, where the qwen job is skipped and nothing hides. A doc-only sha
-   that predates the job still reads `failed` once, because every shard skipped,
-   until its posts expire.
-   Subscribe once per session with
-   `mcp__plugin_conexus_nexus__tuple_subscribe("board/ci/nexus-develop")`;
-   delivery starts at the subscribe time, and the posts of one wait
-   arrive as one ping naming the count, the first and last tuple id and
-   the `tuple_rd` call that reads them (nexus-zxthy; before it, a fresh
-   subscription replayed the topic's whole backlog one ping per post).
-   The engine itself now owns that start position (nexus-n36sw,
-   follow-up): a per-subscriber `announce` spec carries `since`, and the
-   engine excludes a backlog row before it is ever selected or stamped,
-   not just before it is pushed; an engine predating that bead falls
-   back to the client-side drop the parenthetical above describes,
-   automatically, for the life of the session's waiter. Either way,
-   wait for the state you care about or read the board for your sha
-   rather than acting on every ping. From a shell, `nx tuple rd board/ci/nexus-develop --newest -n 300 --json`
-   (rows come back oldest first, so without `--newest` a plain read shows
-   the 300 oldest posts; nexus-sh1ea).
-   Never `gh run watch`: several concurrent watch loops on one token
-   tripped GitHub's secondary rate limit on 2026-09-26 and every Actions
-   call 403'd (T2 `nexus/github-api-usage-research-2026-09-26`). If the
-   board has no post for your sha, fall back to ONE
-   `gh api repos/Hellblazer/nexus/commits/<sha>/check-runs` call at a time,
-   90s apart.
+7. **Before pushing, ask whether a run someone is waiting on is in flight.**
+   Worktrees split the tree; CI remains one shared resource with one queue,
+   and a push cancels the run in progress. Read one commit's checks with a
+   single call: `gh api repos/Hellblazer/nexus/commits/<sha>/check-runs`. Never
+   `gh run watch` and never a polling loop: several concurrent watch loops on
+   one token tripped GitHub's secondary rate limit on 2026-09-26 and every
+   Actions call 403'd (T2 `nexus/github-api-usage-research-2026-09-26`). The
+   conexus-hosted adapter still posts one tuple per run and job state change
+   to `board/ci/nexus-develop`; subscribe once per session with
+   `mcp__plugin_conexus_nexus__tuple_subscribe("board/ci/nexus-develop")` if
+   you want pings instead of polling. Nothing in this repo folds those posts
+   into a verdict any more, so read the `conclusion` of the check runs, not
+   the board.
 
 8. **Push unchanged**: `NX_PUSH_SOURCE=HEAD scripts/git-push-develop.sh <sha>...`
    from INSIDE the worktree. It reads HEAD from the shell's cwd, so `cd`

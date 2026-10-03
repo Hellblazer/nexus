@@ -10,9 +10,8 @@ name: Dependency drift watch (weekly)
 # the shape-sensitive set. Leading-component drift in the transitive graph
 # is routine (20 packages on 2026-09-03) and is rendered in the log and the
 # step summary, never as a failure, so this weekly cannot sit permanently
-# red and bury other workflows' signal in the shared scheduled-failure
-# tracking issue. A refused version is acknowledged in the script's
-# SHAPE_SENSITIVE_ACKNOWLEDGED map, which is what clears a red.
+# red and bury other workflows' signal. A refused version is acknowledged in
+# the script's SHAPE_SENSITIVE_ACKNOWLEDGED map, which is what clears a red.
 #
 # CI-cost discipline (CLAUDE.md DIRECTIVES): one ubuntu job, no build, no
 # tests, seconds of runtime. Weekly + manual dispatch only.

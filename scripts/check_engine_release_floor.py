@@ -118,15 +118,12 @@ release -- it means "a genuinely fresh, correctly-cut engine tag exists, and
 the deploy is presumed armed for the choreography's parallel window". A
 CI-side check has no way to observe the deploy relay's actual completion
 (it runs on a different system, on Hal's side of the AGENTS.md bus), so this
-is an accepted, bounded gap, not an oversight: the pre-existing DAILY
-``engine-floor-verify`` job (``.github/workflows/scheduled-failure-watch.yml``,
-09:23 UTC, BARE gate against the real public endpoint, protocol-audit
-[22511] Gap 2) is the backstop that would catch a still-stale cloud -- a
-deploy that never fired, or silently failed -- within at most 24h of the
-paired tag, surfaced as the SAME "Scheduled workflows are failing silently"
-tracked GH issue every other rotted scheduled gate reports through (see that
-workflow's header comment). This gate accepting a paired tag is therefore a
-DELIBERATE, backstopped bet, not a claim that the deploy is verified live;
+is an accepted gap, not an oversight, and no automation backstops it: the
+DAILY ``engine-floor-verify`` job that used to re-run the BARE gate against
+the real public endpoint was deleted with its workflow (cleanup step 8), so a
+deploy that never fired, or silently failed, is caught only by the human
+POST-TAG VERIFY above. This gate accepting a paired tag is therefore a
+DELIBERATE bet, not a claim that the deploy is verified live;
 see ``test_auto_paired_below_floor_accepts_without_deploy_liveness_signal_by_design``
 in the test file for the behavior pin.
 

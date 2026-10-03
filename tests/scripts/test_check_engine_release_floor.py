@@ -1397,12 +1397,10 @@ def test_auto_paired_below_floor_accepts_without_deploy_liveness_signal_by_desig
     without a conscious decision: auto mode accepts a below-floor cloud on
     TAG legitimacy alone (published, exactly pinned, newest, fresh). It has
     NO way to observe whether the deploy relay actually fired or converged
-    -- that is a real, accepted gap, not an oversight. The backstop is the
-    pre-existing DAILY engine-floor-verify job
-    (.github/workflows/scheduled-failure-watch.yml, bare gate against the
-    real public endpoint, protocol-audit [22511] Gap 2), which would catch
-    a still-stale cloud within at most 24h via the "Scheduled workflows are
-    failing silently" tracked GH issue. If a future change adds a
+    -- that is a real, accepted gap, not an oversight, and no automation
+    backstops it: the daily engine-floor-verify job that used to re-run the
+    bare gate was deleted (cleanup step 8), leaving only the human
+    POST-TAG VERIFY. If a future change adds a
     deploy-liveness signal to THIS gate, this test must be updated
     deliberately -- its failure is the tripwire for that decision, not a
     bug to silence."""

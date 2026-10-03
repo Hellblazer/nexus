@@ -57,7 +57,7 @@ History, earlier attempts, and design rationale belong in the essay, once. A how
 
 ## 5. Review gate before publish
 
-The gate applies to every commit that changes prose under `web/**`, including a code commit that updates a page to match. A code change that edits page text runs at least the voice pass (3 below) on the changed section. On 2026-09-27 a `ci_status.py` change pasted its docstring's precedence rules into the ci-board page as three paragraphs with no review; each sentence was true, and the reader needed one table row and one sentence.
+The gate applies to every commit that changes prose under `web/**`, including a code commit that updates a page to match. A code change that edits page text runs at least the voice pass (3 below) on the changed section. On 2026-09-27 a CI status-script change pasted its docstring's precedence rules into the ci-board page as three paragraphs with no review; each sentence was true, and the reader needed one table row and one sentence.
 
 Dispatch three passes in parallel, each with its own brief, then read the findings files yourself:
 

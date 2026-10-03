@@ -253,8 +253,7 @@ def test_the_qwen_job_is_gated_on_the_route_and_needs_only_changes() -> None:
 def test_the_qwen_job_name_survives_the_board_adapter_unmangled() -> None:
     """The CI board adapter replaces odd characters in job names with '?' (seen: a comma, `$`, braces).
 
-    The name is also the key scripts/ci_status.py EXPECTED_JOBS looks for, so it must stay
-    in the plain set the board keeps.
+    The name must stay in the plain set the board keeps.
     """
     name = _doc()["jobs"]["test-qwen"]["name"]
     assert re.fullmatch(r"[A-Za-z0-9 ()/_.+-]+", name), name

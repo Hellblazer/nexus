@@ -224,13 +224,11 @@ jobs:
         # pinned, newest, fresh) -- it does NOT prove the deploy relay has
         # actually landed; this job has no way to observe that (it runs on
         # a different system, on Hal's side of the AGENTS.md bus). That is
-        # an accepted, bounded gap: the DAILY `engine-floor-verify` job
-        # (.github/workflows/scheduled-failure-watch.yml, 09:23 UTC, bare
-        # gate against the real public endpoint) is the backstop -- a
-        # deploy that never fired, or silently failed, surfaces within at
-        # most 24h via the same "Scheduled workflows are failing silently"
-        # tracked GH issue every other rotted scheduled gate reports
-        # through. See check_engine_release_floor.py's module docstring
+        # an accepted gap with no automated backstop: the daily
+        # `engine-floor-verify` job that used to re-probe the real public
+        # endpoint bare was deleted (cleanup step 8), so a deploy that never
+        # fired, or silently failed, is caught only by the human POST-TAG
+        # VERIFY. See check_engine_release_floor.py's module docstring
         # for the full statement and its behavior-pinning test.
         #
         # KNOWN FAILURE MODE, NO CI-SIDE BYPASS BY DESIGN: this invocation
