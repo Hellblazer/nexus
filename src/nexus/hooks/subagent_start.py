@@ -203,12 +203,13 @@ _NX_AUTOLINK = (
 
 _PHASE_GATE = (
     "\n## Phase Boundary Gate (mandatory)\n\n"
-    "If your task closes a phase-review bead, run `/conexus:phase-review-gate "
-    "<rdr-id> --phase N` BEFORE close. Pass 1 enumerates §Approach items; Pass 2 "
-    "validates each has a closing-bead pointer (`ItemN=nexus-xxxx`) or explicit "
-    "`none`. BLOCKED on any unaccounted item; phase close is gated on PASSED. "
-    "Skipping the gate is the silent-scope-reduction failure mode: RDR-112 Phase 1 "
-    "(nexus-52lb) lost days when the T3 daemon drop surfaced three phases later.\n"
+    "If your task closes a phase-review bead, walk the `phase-review-gate` "
+    "skill's checklist BEFORE close: list every numbered item of the phase in "
+    "the RDR, and for each write `Item N = <closing bead id>` or `Item N = none` "
+    "with a one-line reason. Do not close while an item has neither. Nothing "
+    "enforces this; skipping it is the silent-scope-reduction failure mode: "
+    "RDR-112 Phase 1 (nexus-52lb) lost days when the T3 daemon drop surfaced "
+    "three phases later.\n"
 )
 
 _SEQTHINK = (
