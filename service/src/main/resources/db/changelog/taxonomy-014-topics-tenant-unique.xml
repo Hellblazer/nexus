@@ -158,6 +158,16 @@
     the backstop that keeps a corrupt cloud store from silently accepting
     the repoint — this file does not depend on cc5 being measured in
     advance to be correct, only the DEPLOY decision does.
+
+    MECHANIZED (2026-08-20, code-review round, T2 [22964]/[22965]):
+    `scripts/check_rdr194_cc5_delivery_gate.py`, wired into the
+    `engine-release` skill's pre-tag battery (Step 3d), makes the P7
+    checklist item above a scripted pre-tag gate rather than a
+    memory/checklist-only step — mirrors `check_engine_release_floor.py`'s
+    mold. It exits 0 only when this file is absent from the ref being
+    tagged, or a T2 record at (`nexus`, `cloud-count-5-measured`) carries
+    an explicit MEASURED-zero reading for all three sub-populations; see
+    that script's own header for the exact record contract.
 -->
 <databaseChangeLog
     xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
