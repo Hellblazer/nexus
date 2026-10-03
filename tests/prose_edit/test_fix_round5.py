@@ -262,8 +262,18 @@ def test_a_gate_whose_owner_is_dead_is_never_reclaimed_the_runner_refuses_and_na
     assert gate.is_dir() and (gate / "pid").read_text(encoding="utf-8") == f"{done.pid}\n"  # untouched
     assert not lock.exists()
     (gate / "pid").unlink()  # and a gate with no record is not taken for dead either
-    proc = _bash('runner_lock run-test.sh\n', repo, lock, PROSE_EDIT_RUNNER_GATE_WAIT="1")
+    # 7 s: longer than the 5 s record-less reclaim that 158e2cfe6 had, so bringing it back fails this.
+    proc = _bash('runner_lock run-test.sh\n', repo, lock, PROSE_EDIT_RUNNER_GATE_WAIT="7")
     assert proc.returncode == 75 and gate.is_dir() and not lock.exists(), proc.stderr
+
+
+@pytest.mark.parametrize("wait", ["0.5", "08x", "30s", "abc", "-3", " 5"])
+def test_an_invalid_gate_wait_refuses_instead_of_running_unlocked(box: tuple[Path, Path], wait: str) -> None:
+    # Review of 4f467c0da: a non-integer wait aborted runner_lock inside $(( )) and the caller went on with no lock.
+    repo, lock = box
+    proc = _bash('runner_lock run-test.sh\necho UNLOCKED-RUN\n', repo, lock, PROSE_EDIT_RUNNER_GATE_WAIT=wait)
+    assert "UNLOCKED-RUN" not in proc.stdout, (wait, proc.stderr)
+    assert proc.returncode == 75 and "PROSE_EDIT_RUNNER_GATE_WAIT" in proc.stderr, (wait, proc.stderr)
 
 
 def test_a_missing_lock_directory_parent_fails_fast(box: tuple[Path, Path], tmp_path: Path) -> None:

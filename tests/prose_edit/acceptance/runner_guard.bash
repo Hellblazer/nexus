@@ -92,7 +92,9 @@ runner_cleanup() {
   done
   if [ -n "$RUNNER_OWNS_LOCK" ] && [ -n "$RUNNER_LOCK_PATH" ] \
      && [ "$(cut -d' ' -f1 "$RUNNER_LOCK_PATH/holder" 2>/dev/null)" = "$$" ]; then
-    rm -rf "$RUNNER_LOCK_PATH"
+    # Move it out of the way first: a waiter that saw a half-removed lock (holder file gone, directory not yet)
+    # would take it for record-less, and this rm's last rmdir could remove the waiter's fresh lock.
+    mv "$RUNNER_LOCK_PATH" "$RUNNER_LOCK_PATH.done.$$" 2>/dev/null && rm -rf "$RUNNER_LOCK_PATH.done.$$"
   fi
   return "$rc"
 }
@@ -108,11 +110,13 @@ runner_cleanup() {
 # refused runner does at once) and then removed "the" gate removed a fresh gate a third runner had made meanwhile,
 # and two runners were inside; a live maker stalled between mkdir and its pid write was evicted the same way. The
 # critical section takes milliseconds, so a gate that outlives the wait (PROSE_EDIT_RUNNER_GATE_WAIT seconds,
-# default 30) belongs to a runner killed inside it: the runner refuses and names it, and a human removes it. The
-# pid in the gate is a record for that human, read by nothing here.
+# default 30) belongs to a runner killed inside it (or one stalled past the wait): the runner refuses and names it,
+# and a human removes it. INT, TERM and HUP inside the gate release it; SIGKILL leaves it. The pid in the gate is a
+# record for that human, read by nothing here. A dead lock holder's pid reused by a live process also refuses until
+# a human removes the lock; the message says so.
 _runner_gate_take() {
   local gate="$1" limit polls=0
-  limit=$(( ${PROSE_EDIT_RUNNER_GATE_WAIT:-30} * 20 ))
+  limit=$(( 10#$2 * 20 ))
   [ -d "$(dirname "$gate")" ] && [ -w "$(dirname "$gate")" ] || return 2
   until mkdir "$gate" 2>/dev/null; do
     polls=$((polls + 1))
@@ -124,16 +128,27 @@ _runner_gate_take() {
 }
 
 _runner_gate_release() {
+  trap - INT TERM HUP
   rm -rf "$1"
 }
 
 runner_lock() {
-  local name="${1:?runner name}" lock gate pid="" holder_name="a runner that wrote no record"
+  local name="${1:?runner name}" lock gate wait_s pid="" holder_name="a runner that wrote no record"
   lock="$(_runner_lock_path)" || { echo "$name: cannot find the git common directory for the runner lock" >&2; exit 1; }
   gate="$lock.gate"
-  _runner_gate_take "$gate"
+  wait_s="${PROSE_EDIT_RUNNER_GATE_WAIT:-30}"
+  case "$wait_s" in
+    *[!0-9]*)   # anything but digits; checked before $(( )) sees it, which would abort this function mid-way
+      echo "$name: PROSE_EDIT_RUNNER_GATE_WAIT must be a whole number of seconds, got '$wait_s'." >&2
+      exit 75 ;;
+  esac
+  _runner_gate_take "$gate" "$wait_s"
   case $? in
-    0) ;;
+    0) # The gate is ours now: INT/TERM/HUP inside it release it rather than leave it for a human (SIGKILL still
+       # can). Set only after taking it and cleared before releasing it, so no trap ever removes another's gate.
+       trap '_runner_gate_release "$gate"; exit 130' INT
+       trap '_runner_gate_release "$gate"; exit 143' TERM
+       trap '_runner_gate_release "$gate"; exit 129' HUP ;;
     2) echo "$name: the runner lock's directory $(dirname "$gate") is missing or not writable." >&2
        exit 75 ;;
     *) echo "$name: could not take the runner lock's gate $gate within ${PROSE_EDIT_RUNNER_GATE_WAIT:-30} s: another runner is inside it, or one was killed there (its pid is in $gate/pid). If no runner is live, remove that directory." >&2
