@@ -1811,6 +1811,13 @@ Two dispositions, per row:
 
 A quarantine row still referenced by something is held unconditionally
 (reported as a count only, never a name, since nothing about it changed).
+An ORIGIN whose chunks all sit in quarantine is held too, and counts in the
+same `quarantine_held` figure: it has no content of its own, but deleting its
+registry row would leave those rows with no live origin (restore refuses a
+non-live origin and `nx t3 gc` refuses an unknown name), so it stays, and is
+neither deleted nor marked dormant, for as long as a registered quarantine
+collection holds a row that is its own (nexus-wbfpw.71). Once those rows are
+restored or deleted the next sweep reclaims it.
 
 Default is dry-run: reports what the sweep WOULD do without writing. Pass
 `--apply` to actually reclaim/mark; `--json` emits the engine's response
@@ -2677,7 +2684,7 @@ nx collection list
 |------|-------------|
 | `--force` | Skip the pre-delete safety check (which verifies the source documents are still present before wiping the collection) |
 
-The `reindex` command performs a pre-delete safety check before wiping the collection: it confirms the original source documents are still accessible. If the check fails, the command aborts unless `--force` is given. After re-indexing, a `verify --deep` probe runs automatically to confirm retrieval health. The command dispatches per collection type (`docs__`, `rdr__`, `knowledge__`) to the appropriate indexer; a `code__` collection is refused up front, before any scan or delete, because this verb has no re-index driver for code (use `nx index repo <path>`, which re-indexes in place).
+The `reindex` command performs a pre-delete safety check before wiping the collection: it confirms the original source documents are still accessible. If the check fails, the command aborts unless `--force` is given. The delete step keeps the collection's rows in its `quarantine-` siblings (it sends `keep_quarantine` to the engine), because the same name is registered again straight away and the rows stay restorable with `nx t3 quarantine restore`; `nx collection delete` takes them. After re-indexing, a `verify --deep` probe runs automatically to confirm retrieval health. The command dispatches per collection type (`docs__`, `rdr__`, `knowledge__`) to the appropriate indexer; a `code__` collection is refused up front, before any scan or delete, because this verb has no re-index driver for code (use `nx index repo <path>`, which re-indexes in place).
 
 
 **Chash resolution (RDR-086 Phase 1.3, table retired at RDR-187).** The
@@ -2755,6 +2762,8 @@ Chunk counts come from T3's live `coll.count()` (same source as `nx collection l
 | `-y` / `--yes` / `--confirm` | Skip interactive confirmation prompt |
 
 Delete cascade (engine-side, RDR-164 P2) covers the collection's chunks, taxonomy assignments + topics + centroids, aspects, highlights, aspect-queue rows, and catalog documents + manifest + collection registration; the streaming pipeline buffer is swept by its own engine endpoint (RDR-186). `chash_index` is retired (RDR-187).
+
+The command prints what went, for example `Deleted: <name> (41 chunks; 3 topics, ...; 7 quarantined chunks (gc_audit: collection_delete_quarantine))`. Deleting an origin also deletes its rows in its `quarantine-` siblings in the same transaction (nexus-wbfpw.71): one `gc_audit` row per sibling, and a sibling this empties is unregistered. An untagged quarantine row in a sibling shared with another live collection of the same owner, model, version and content type is not attributable and stays. `nx collection delete quarantine-<name>` is the audited manual route for quarantined rows whose origin is gone: it removes the whole quarantine collection, prints `N quarantined chunks (gc_audit: quarantine_collection_delete)`, and writes one audit row carrying the chashes (truncated at 5,000, count exact). Read the audit rows with `nx catalog gc-audit list --operation collection_delete_quarantine` (or `quarantine_collection_delete`). An engine that predates the change prints no quarantine count. Collection `rename` and `rehome`, and `nx store delete`, refuse a `quarantine-*` collection with a 400 that names `nx t3 quarantine restore` and `nx t3 gc`; a rename of an origin retags its quarantine rows to the new name (`quarantine_retag`, one row per sibling), except the cross-model copy (RDR-162), which leaves them with the live source. `store-put` and `update-metadata` on a `quarantine-*` name are not guarded.
 
 ---
 

@@ -39,3 +39,24 @@ def test_delete_collection_is_a_whitelisted_service_write_op() -> None:
     }
     with pytest.raises(AttributeError):
         _ServiceCatalogWriter(_Backend()).some_unwhitelisted_name
+
+
+def test_delete_collection_sends_keep_quarantine_only_when_true() -> None:
+    """nexus-wbfpw.71: the engine's ``keep_quarantine`` field is additive, so the client omits it
+    unless asked (an older engine would ignore it anyway; an older client never sends it)."""
+    from nexus.catalog.http_catalog_client import HttpCatalogClient
+
+    posted: list[tuple[str, dict]] = []
+
+    class _Stub:
+        def _post(self, path, body):
+            posted.append((path, body))
+            return {"deleted": {"chunks": 1}}
+
+    assert HttpCatalogClient.delete_collection(_Stub(), "code__x") == {"chunks": 1}
+    HttpCatalogClient.delete_collection(_Stub(), "code__x", keep_quarantine=True)
+
+    assert posted == [
+        ("/collections/delete", {"name": "code__x"}),
+        ("/collections/delete", {"name": "code__x", "keep_quarantine": True}),
+    ]

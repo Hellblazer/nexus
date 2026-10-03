@@ -29,12 +29,19 @@ import java.util.Map;
  *
  * <p><strong>Which rows are an origin's.</strong> A quarantine row belongs to {@code X} when it sits in a
  * registered quarantine collection and either carries {@code metadata.origin_collection = X} (what the engine's
- * move and the client's move both write), or carries no tag at all and sits in a sibling {@code X} could have
- * been moved into: {@code quarantine-X} (the reaper's name) or the name derived from {@code X}'s catalog ROW
- * ({@code quarantine-<content_type>__<owner_id>__<embedding_model>__<model_version>}, the client's name). A row
- * tagged for another origin is never {@code X}'s, whichever sibling it sits in, so two origins that share a
- * sibling each take only their own rows. The set is the one {@link PgVectorRepository#resolveQuarantineSiblings}
- * and the restore function already use, plus the untagged case they treat as "any origin that asks".
+ * move and the client's move both write), or carries no tag at all and can be attributed to {@code X} alone:
+ * it sits in {@code quarantine-X} (the reaper's name, which embeds the origin exactly, so this arm is
+ * unconditional), or it sits in the sibling derived from {@code X}'s catalog ROW
+ * ({@code quarantine-<content_type>__<owner_id>__<embedding_model>__<model_version>}, the client's name) AND
+ * {@code X} is the only registered live collection ({@code superseded_by = ''}, not a quarantine collection)
+ * with those row attributes. When another live collection shares them (a slug twin and a conformant twin, say)
+ * an untagged row in the shared sibling could be either's, so neither claims it: it stays where it is instead
+ * of being deleted with, or retagged for, the wrong origin. A rename tombstone does not count as a twin (it is
+ * retired), and a rename leaves its own target out of the count, because the target is registered with
+ * {@code X}'s attributes by the time the retag runs. A row tagged for another origin is never {@code X}'s,
+ * whichever sibling it sits in, so two origins that share a sibling each take only their own tagged rows. The
+ * set is the one {@link PgVectorRepository#resolveQuarantineSiblings} and the restore function already use,
+ * plus the untagged case they treat as "any origin that asks".
  *
  * <p>Statements are typed jOOQ, no SQL template ({@code RawSqlGateTest}). Nothing here writes a manifest table,
  * so none of it needs {@code DeadlockRetry} of its own; the two callers that matter are already inside
@@ -54,6 +61,8 @@ public final class QuarantineOrigin {
 
     /** The actor of an engine-side audit row, as the SQL-side producers write it. */
     private static final String ACTOR = "engine";
+
+    private static final JSONB EMPTY_OBJECT = JSONB.jsonb("{}");
 
     private static final Field<String> ORIGIN_TAG = DSL.jsonbGetAttributeAsText(CHUNKS.METADATA, "origin_collection");
 
@@ -92,16 +101,30 @@ public final class QuarantineOrigin {
      * {@code content_type} is the origin's or {@code quarantine-} + the origin's (the two shapes the engine's
      * registration has written: the older functions split the sibling name, the later ones copy the origin's
      * row). The engine never parses or renders collection names ({@code CollectionParseGateTest}), and this is
-     * the same relation, read from the registry. An origin with no catalog row (the production dead-origin
-     * shape) has only the reaper's name.
+     * the same relation, read from the registry. That arm applies only when the origin is the sole live
+     * collection with those row attributes (see the class doc). An origin with no catalog row (the production
+     * dead-origin shape) has only the reaper's name.
+     *
+     * @param exceptName a live collection to leave out of the sole-claimant count (a rename's target, which
+     *                   shares the origin's attributes once its row is written), or {@code null}
      */
-    private static Condition rowsOf(String tenant, String origin) {
+    private static Condition rowsOf(String tenant, String origin, String exceptName) {
         var sib = CATALOG_COLLECTIONS.as("quarantine_sibling");
         var org = CATALOG_COLLECTIONS.as("quarantine_origin");
+        var twin = CATALOG_COLLECTIONS.as("quarantine_twin");
         Condition inQuarantine = CHUNKS.COLLECTION.in(
             DSL.select(CATALOG_COLLECTIONS.NAME).from(CATALOG_COLLECTIONS)
                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)
                    .and(CATALOG_COLLECTIONS.LIFECYCLE_STATE.eq("quarantine"))));
+        Condition anotherLiveTwin = twin.TENANT_ID.eq(tenant)
+            .and(twin.NAME.ne(origin))
+            .and(exceptName == null ? DSL.noCondition() : twin.NAME.ne(exceptName))
+            .and(twin.LIFECYCLE_STATE.ne("quarantine"))
+            .and(twin.SUPERSEDED_BY.eq(""))
+            .and(twin.OWNER_ID.eq(org.OWNER_ID))
+            .and(twin.EMBEDDING_MODEL.eq(org.EMBEDDING_MODEL))
+            .and(twin.MODEL_VERSION.eq(org.MODEL_VERSION))
+            .and(twin.CONTENT_TYPE.eq(org.CONTENT_TYPE));
         Condition inRowDerivedSibling = CHUNKS.COLLECTION.in(
             DSL.select(sib.NAME).from(sib).join(org).on(org.TENANT_ID.eq(sib.TENANT_ID))
                .where(sib.TENANT_ID.eq(tenant)
@@ -111,10 +134,33 @@ public final class QuarantineOrigin {
                    .and(sib.EMBEDDING_MODEL.eq(org.EMBEDDING_MODEL))
                    .and(sib.MODEL_VERSION.eq(org.MODEL_VERSION))
                    .and(sib.CONTENT_TYPE.eq(org.CONTENT_TYPE)
-                       .or(sib.CONTENT_TYPE.eq(DSL.val(PREFIX).concat(org.CONTENT_TYPE))))));
+                       .or(sib.CONTENT_TYPE.eq(DSL.val(PREFIX).concat(org.CONTENT_TYPE))))
+                   .and(DSL.notExists(DSL.selectOne().from(twin).where(anotherLiveTwin)))));
         Condition untaggedHere = ORIGIN_TAG.isNull()
             .and(CHUNKS.COLLECTION.eq(PREFIX + origin).or(inRowDerivedSibling));
         return CHUNKS.TENANT_ID.eq(tenant).and(inQuarantine).and(ORIGIN_TAG.eq(origin).or(untaggedHere));
+    }
+
+    /**
+     * True when {@code name} is a registered, live ({@code superseded_by = ''}) collection of {@code tenant}.
+     * A live origin keeps its quarantine rows: it is still the place a restore returns them to.
+     */
+    static boolean isLiveRegistered(DSLContext ctx, String tenant, String name) {
+        return ctx.fetchExists(ctx.selectOne().from(CATALOG_COLLECTIONS)
+            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)
+                .and(CATALOG_COLLECTIONS.NAME.eq(name))
+                .and(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq(""))));
+    }
+
+    /**
+     * True when any registered quarantine collection of {@code tenant} still holds a row that is {@code origin}'s
+     * by the rule in the class doc. The ghost sweep's hold: an origin whose chunks all sit in quarantine has no
+     * content of its own, but deleting its registry row would leave those rows with no live origin (restore
+     * refuses a non-live origin, the engine's expiry skips it, and {@code nx t3 gc} refuses its name).
+     */
+    static boolean holdsRowsOf(DSLContext ctx, String tenant, String origin) {
+        return !isQuarantineName(origin)
+            && ctx.fetchExists(ctx.selectOne().from(CHUNKS).where(rowsOf(tenant, origin, null)));
     }
 
     /** The quarantine collections that hold at least one row of {@code origin}, by name. */
@@ -136,7 +182,7 @@ public final class QuarantineOrigin {
      * @return sibling name to rows deleted, for the siblings that lost rows, in name order
      */
     static Map<String, Integer> deleteRowsOf(DSLContext ctx, String tenant, String origin) {
-        Condition rows = rowsOf(tenant, origin);
+        Condition rows = rowsOf(tenant, origin, null);
         Map<String, Integer> out = new LinkedHashMap<>();
         List<String> siblings = siblingsHolding(ctx, rows);
         for (String sibling : siblings) {
@@ -162,16 +208,19 @@ public final class QuarantineOrigin {
      * @return rows retagged
      */
     static int retagRowsOf(DSLContext ctx, String tenant, String from, String to) {
-        Condition rows = rowsOf(tenant, from);
+        Condition rows = rowsOf(tenant, from, to);
         JSONB incoming = JSONB.jsonb(CatalogRepository.MAPPER.createObjectNode().put("origin_collection", to).toString());
         int total = 0;
         List<String> siblings = siblingsHolding(ctx, rows);
         for (String sibling : siblings) {
             // Shallow merge, so every other key the move wrote (quarantined_at, quarantined_by, ...) survives.
+            // COALESCE: jsonb_concat(NULL, x) is NULL, which would leave a NULL-metadata row untagged while
+            // counting and auditing it as retagged. Only rows whose tag actually changes are returned.
             // Does not touch last_written_at: a retag is maintenance, never a client re-write.
             List<String> hex = sorted(ctx.update(CHUNKS)
-                .set(CHUNKS.METADATA, PgVectorRepository.mergeMetadata(CHUNKS.METADATA, DSL.val(incoming), null))
-                .where(rows.and(CHUNKS.COLLECTION.eq(sibling)))
+                .set(CHUNKS.METADATA, PgVectorRepository.mergeMetadata(
+                    DSL.coalesce(CHUNKS.METADATA, DSL.val(EMPTY_OBJECT)), DSL.val(incoming), null))
+                .where(rows.and(CHUNKS.COLLECTION.eq(sibling)).and(ORIGIN_TAG.isDistinctFrom(to)))
                 .returningResult(ChashHex.hex(CHUNKS.CHASH)).fetch(ChashHex.hex(CHUNKS.CHASH)));
             if (hex.isEmpty()) {
                 continue;

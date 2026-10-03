@@ -96,6 +96,38 @@ def test_service_mode_maps_the_quarantine_rows_taken_with_the_origin(
     assert purge_collection_cascade(object(), "knowledge__q__minilm-l6-v2-384__v1").quarantine_chunks_deleted == 0
 
 
+def test_keep_quarantine_is_sent_only_when_asked_and_chunks_are_mapped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """nexus-wbfpw.71: ``nx collection reindex`` re-registers the same name, so it asks the engine
+    to leave the origin's quarantine rows. The field is additive: omitted when false, so an engine
+    or client that predates it sees today's call."""
+    calls: list[tuple[str, dict]] = []
+
+    class _FakeClient:
+        def delete_collection(self, name: str, **kwargs) -> dict[str, int]:
+            calls.append((name, kwargs))
+            return {"taxonomy_centroids": 0, "chunks": 12, "quarantine_chunks": 0}
+
+    from tests.pipeline_fake_engine import make_fake_engine_db
+
+    pipeline_db, _engine = make_fake_engine_db()
+    monkeypatch.setattr("nexus.db.http_pipeline_client.HttpPipelineDB", lambda: pipeline_db)
+    monkeypatch.setattr("nexus.catalog.factory.make_catalog_reader", lambda: _FakeClient())
+
+    default = purge_collection_cascade(object(), "knowledge__k__minilm-l6-v2-384__v1")
+    kept = purge_collection_cascade(
+        object(), "knowledge__k__minilm-l6-v2-384__v1", keep_quarantine=True,
+    )
+
+    assert calls == [
+        ("knowledge__k__minilm-l6-v2-384__v1", {}),
+        ("knowledge__k__minilm-l6-v2-384__v1", {"keep_quarantine": True}),
+    ]
+    assert default.chunks_deleted == 12
+    assert kept.quarantine_chunks_deleted == 0
+
+
 def test_service_mode_maps_legacy_per_dim_centroid_keys_as_fallback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

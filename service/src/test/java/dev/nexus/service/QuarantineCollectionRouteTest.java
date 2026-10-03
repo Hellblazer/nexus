@@ -171,6 +171,71 @@ class QuarantineCollectionRouteTest {
         assertThat(audit.body()).contains("collection_delete_quarantine").contains(hex);
     }
 
+    private void seedOriginWithQuarantineRow(String origin, String sibling, String hex) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            var dsl = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCollection(dsl, TENANT, origin);
+            PgContainerHelper.insertCollection(dsl, TENANT, sibling);
+            PgContainerHelper.insertChunks(dsl, TENANT, sibling, List.of(hex), List.of("seed text"),
+                List.of(new float[384]), List.of(Map.<String, Object>of("origin_collection", origin)));
+        }
+    }
+
+    private int quarantineChunks(HttpResponse<String> resp) throws Exception {
+        assertThat(resp.statusCode()).as(resp.body()).isEqualTo(200);
+        @SuppressWarnings("unchecked")
+        var deleted = (Map<String, Object>) mapper.readValue(resp.body(), MAP_T).get("deleted");
+        return ((Number) deleted.get("quarantine_chunks")).intValue();
+    }
+
+    private int chunksIn(String collection) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            return DSL.using(su, SQLDialect.POSTGRES).fetchCount(dev.nexus.service.jooq.nexus.Tables.CHUNKS,
+                dev.nexus.service.jooq.nexus.Tables.CHUNKS.COLLECTION.eq(collection));
+        }
+    }
+
+    @Test
+    void collectionDeleteWithKeepQuarantine_leavesTheRows_andWithoutItTakesThem() throws Exception {
+        String origin = "knowledge__qroute-keep__minilm-l6-v2-384__v1";
+        String sibling = "quarantine-" + origin;
+        String hex = Chash.ofText(sibling + "/keep").toHex();
+        seedOriginWithQuarantineRow(origin, sibling, hex);
+
+        var kept = post("/v1/catalog/collections/delete", "{\"name\":\"" + origin + "\",\"keep_quarantine\":true}");
+
+        assertThat(quarantineChunks(kept)).isZero();
+        assertThat(chunksIn(sibling)).as("keep_quarantine:true leaves the row").isEqualTo(1);
+
+        // Same name again with the field omitted (an older client) or false: today's behaviour.
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, origin);
+        }
+        var omitted = post("/v1/catalog/collections/delete", "{\"name\":\"" + origin + "\"}");
+        assertThat(quarantineChunks(omitted)).isEqualTo(1);
+        assertThat(chunksIn(sibling)).isZero();
+
+        String origin2 = "knowledge__qroute-keep2__minilm-l6-v2-384__v1";
+        String sibling2 = "quarantine-" + origin2;
+        seedOriginWithQuarantineRow(origin2, sibling2, Chash.ofText(sibling2 + "/keep").toHex());
+        var explicitFalse = post("/v1/catalog/collections/delete",
+            "{\"name\":\"" + origin2 + "\",\"keep_quarantine\":false}");
+        assertThat(quarantineChunks(explicitFalse)).isEqualTo(1);
+    }
+
+    @Test
+    void collectionDeleteOfAQuarantineName_reportsTheRowsItRemoved() throws Exception {
+        String origin = "knowledge__qroute-qname__minilm-l6-v2-384__v1";
+        String sibling = "quarantine-" + origin;
+        seedOriginWithQuarantineRow(origin, sibling, Chash.ofText(sibling + "/q").toHex());
+
+        // keep_quarantine means nothing for a quarantine name: it is ignored, the collection's own rows go.
+        var resp = post("/v1/catalog/collections/delete", "{\"name\":\"" + sibling + "\",\"keep_quarantine\":true}");
+
+        assertThat(quarantineChunks(resp)).isEqualTo(1);
+        assertThat(chunksIn(sibling)).isZero();
+    }
+
     private HttpResponse<String> get(String path) throws Exception {
         var req = TestHttp.request("http://127.0.0.1:" + service.getPort() + path)
             .header("Authorization", "Bearer " + TOKEN).GET().build();

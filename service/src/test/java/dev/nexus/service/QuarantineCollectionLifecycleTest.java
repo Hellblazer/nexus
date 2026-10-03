@@ -279,6 +279,11 @@ class QuarantineCollectionLifecycleTest extends AtomicWriteTestBase {
         qrow(t, reaper, "theirs", other);
         qrow(t, derived, "mine-too", x);
         assertThat(registered(t, derived)).isTrue();
+        // The fixture inserts by SQL, so nothing has cached the sibling. Cache it, or the eviction assertion
+        // below is false before and after and cannot fail (the review's S3).
+        dev.nexus.service.db.CollectionRegistry.lookup(tenantScope, t, derived);
+        assertThat(dev.nexus.service.db.CollectionRegistry.isKnown(t, derived))
+            .as("fixture: the registry cache vouches for the sibling before the delete").isTrue();
 
         repo.deleteCollection(t, x);
 
@@ -286,6 +291,113 @@ class QuarantineCollectionLifecycleTest extends AtomicWriteTestBase {
         assertThat(registered(t, reaper)).as("a sibling that still holds another origin's rows stays").isTrue();
         assertThat(dev.nexus.service.db.CollectionRegistry.isKnown(t, derived))
             .as("and the registry cache no longer vouches for the unregistered name").isFalse();
+    }
+
+    @Test
+    void theOriginDelete_theSiblingDelete_andTheAuditRowAreOneTransaction() throws Exception {
+        // Park the delete AFTER the sibling delete and its audit row, on its LAST statement (the origin's own
+        // registry row), with a row lock held from a second connection. While it is parked, nothing it did may
+        // be visible; then kill its backend, and everything it did must be gone. A sibling delete or an audit
+        // row committed on its own would show as missing rows (or a present audit row) in one of the two reads.
+        String t = newTenant();
+        String x = col("a8x");
+        String other = col("a8other");
+        register(t, x);
+        register(t, other);
+        setOwner(t, x, "curator-atomic");
+        String reaper = reaperSibling(x);
+        String derived = rowDerivedSibling(t, x);
+        qrow(t, reaper, "tagged", x);
+        qrow(t, reaper, "kept", other);
+        qrow(t, derived, "only-mine", x);
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.insertChunks(DSL.using(su, SQLDialect.POSTGRES), t, x,
+                List.of(Chash.ofText(x + "/own").toHex()), List.of("own text"), List.of(new float[384]),
+                List.of(Map.<String, Object>of("title", "own")));
+        }
+        var activity = DSL.table(DSL.name("pg_catalog", "pg_stat_activity"));
+        var pidField = DSL.field(DSL.name("pid"), Integer.class);
+        var queryField = DSL.field(DSL.name("query"), String.class);
+        var waitField = DSL.field(DSL.name("wait_event_type"), String.class);
+
+        java.util.concurrent.CompletableFuture<Throwable> deleter;
+        try (Connection lock = pg.createConnection("")) {
+            lock.setAutoCommit(false);
+            // NO KEY UPDATE: conflicts with the DELETE of the row, but not with the FOR KEY SHARE locks the
+            // delete's earlier statements may take on it.
+            DSL.using(lock, SQLDialect.POSTGRES).selectFrom(CATALOG_COLLECTIONS)
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(t).and(CATALOG_COLLECTIONS.NAME.eq(x)))
+                .forNoKeyUpdate().fetch();
+            deleter = java.util.concurrent.CompletableFuture.supplyAsync(() -> {
+                try {
+                    repo.deleteCollection(t, x);
+                    return null;
+                } catch (Throwable e) {
+                    return e;
+                }
+            });
+            Integer blockedPid = null;
+            try (Connection su = pg.createConnection("")) {
+                DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+                for (int i = 0; i < 200 && blockedPid == null; i++) {
+                    blockedPid = ctx.select(pidField).from(activity)
+                        .where(waitField.eq("Lock")
+                            .and(queryField.likeIgnoreCase("delete from \"nexus\".\"catalog_collections\"%")))
+                        .limit(1).fetchOne(pidField);
+                    if (blockedPid == null) Thread.sleep(50);
+                }
+                assertThat(blockedPid).as("the delete reached its last statement and is waiting on the row lock")
+                    .isNotNull();
+                assertThat(deleter.isDone()).isFalse();
+
+                assertThat(count(t, reaper)).as("mid-transaction: the sibling delete is not visible").isEqualTo(2);
+                assertThat(count(t, derived)).isEqualTo(1);
+                assertThat(count(t, x)).isEqualTo(1);
+                assertThat(audit(t, DELETE_OP)).as("mid-transaction: no audit row is visible").isEmpty();
+
+                ctx.select(DSL.function("pg_terminate_backend", Boolean.class, DSL.val(blockedPid)))
+                    .fetch();
+            }
+            Throwable failure = deleter.get(30, java.util.concurrent.TimeUnit.SECONDS);
+            assertThat(failure).as("the killed delete failed").isNotNull();
+            lock.rollback();
+        }
+
+        assertThat(count(t, reaper)).as("the sibling delete rolled back").isEqualTo(2);
+        assertThat(count(t, derived)).as("including the emptied sibling").isEqualTo(1);
+        assertThat(registered(t, derived)).as("and its unregistration").isTrue();
+        assertThat(count(t, x)).as("the origin's own rows rolled back too").isEqualTo(1);
+        assertThat(audit(t, DELETE_OP)).as("and so did the audit rows").isEmpty();
+
+        Map<String, Integer> counts = repo.deleteCollection(t, x);
+
+        assertThat(counts.get("quarantine_chunks")).as("with the lock gone the same delete commits").isEqualTo(2);
+        assertThat(audit(t, DELETE_OP)).hasSize(2);
+    }
+
+    @Test
+    void keepQuarantineLeavesTheOriginsQuarantineRows_noDelete_noAudit_noUnregistration() throws Exception {
+        // nx collection reindex deletes and re-registers the SAME name: the rows stay restorable.
+        String t = newTenant();
+        String x = col("a9x");
+        register(t, x);
+        String reaper = reaperSibling(x);
+        String hex = qrow(t, reaper, "kept", x);
+
+        Map<String, Integer> counts = repo.deleteCollection(t, x, true);
+
+        assertThat(counts.get("quarantine_chunks")).isZero();
+        assertThat(count(t, reaper)).isEqualTo(1);
+        assertThat(tag(t, reaper, hex)).isEqualTo(x);
+        assertThat(registered(t, reaper)).isTrue();
+        assertThat(registered(t, x)).as("the origin itself is deleted as before").isFalse();
+        assertThat(audit(t, DELETE_OP)).isEmpty();
+
+        // And the default (false) still takes them: the keep is an explicit opt-out.
+        register(t, x);
+        Map<String, Integer> second = repo.deleteCollection(t, x, false);
+        assertThat(second.get("quarantine_chunks")).isEqualTo(1);
+        assertThat(count(t, reaper)).isZero();
     }
 
     @Test
@@ -380,6 +492,7 @@ class QuarantineCollectionLifecycleTest extends AtomicWriteTestBase {
         Map<String, Integer> counts = repo.deleteCollection(t, sibling);
 
         assertThat(counts.get("chunks")).isEqualTo(2);
+        assertThat(counts.get("quarantine_chunks")).as("reported for the CLI to print").isEqualTo(2);
         assertThat(count(t, sibling)).isZero();
         assertThat(registered(t, sibling)).isFalse();
         var rows = audit(t, SIBLING_DELETE_OP);
@@ -489,26 +602,39 @@ class QuarantineCollectionLifecycleTest extends AtomicWriteTestBase {
     }
 
     @Test
-    void theCrossModelCopyBranchRetagsToo() throws Exception {
+    void theCrossModelCopyBranchDoesNotRetag_theRowsStayWithTheLiveSource_andItsLaterDeleteTakesThem()
+            throws Exception {
+        // RDR-162 COPY: the source X stays registered and live; Y is a different model and width. X's quarantine
+        // rows carry X-model vectors, so they stay X's. Retagged to Y they would restore only into Y as a
+        // dim_conflict (or wrong-model vectors), and outlive X's delete.
         String t = newTenant();
         String x = col("c3x");
-        String y = col("c3y");
+        String y = "knowledge__c3y" + seq.incrementAndGet() + "__bge-base-en-v15-768__v1";
         register(t, x);
         register(t, y);
         String hex = qrow(t, reaperSibling(x), "copy-branch", x);
+        String untagged = qrow(t, reaperSibling(x), "copy-branch-untagged", null);
 
         repo.renameCollection(t, x, y);
 
-        assertThat(tag(t, reaperSibling(x), hex)).isEqualTo(y);
-        assertThat(only(audit(t, RETAG_OP), reaperSibling(x)).get("chash_count")).isEqualTo(1);
+        assertThat(registered(t, x)).as("the COPY branch leaves the source registered").isTrue();
+        assertThat(tag(t, reaperSibling(x), hex)).as("still X's").isEqualTo(x);
+        assertThat(tag(t, reaperSibling(x), untagged)).as("an untagged row is not given to the target").isNull();
+        assertThat(audit(t, RETAG_OP)).as("no retag audit row").isEmpty();
+        assertThat(vectors.resolveQuarantineSiblings(t, x)).containsExactly(reaperSibling(x));
+
+        Map<String, Integer> counts = repo.deleteCollection(t, x);
+
+        assertThat(counts.get("quarantine_chunks")).as("X's own delete takes them, audited").isEqualTo(2);
+        assertThat(only(audit(t, DELETE_OP), reaperSibling(x)).get("chash_count")).isEqualTo(2);
     }
 
     @Test
-    void theChashRenameRetagsToo() throws Exception {
+    void theChashRenameRetagsWhenTheSourceIsNotALiveRegisteredCollection() throws Exception {
         String t = newTenant();
         String x = col("c4x");
         String y = col("c4y");
-        register(t, x);
+        // x has no registry row (the dead-origin shape); the quarantine rows are all that is left of it.
         register(t, y);
         String tagged = qrow(t, reaperSibling(x), "chash-tagged", x);
         String untagged = qrow(t, reaperSibling(x), "chash-untagged", null);
@@ -518,6 +644,197 @@ class QuarantineCollectionLifecycleTest extends AtomicWriteTestBase {
         assertThat(tag(t, reaperSibling(x), tagged)).isEqualTo(y);
         assertThat(tag(t, reaperSibling(x), untagged)).isEqualTo(y);
         assertThat(only(audit(t, RETAG_OP), reaperSibling(x)).get("chash_count")).isEqualTo(2);
+    }
+
+    @Test
+    void theChashRenameDoesNotRetagWhenTheSourceIsStillALiveRegisteredCollection() throws Exception {
+        // The same route serves the RDR-162 cross-model cascade, where the source stays live (see the COPY test).
+        String t = newTenant();
+        String x = col("c4lx");
+        String y = col("c4ly");
+        register(t, x);
+        register(t, y);
+        String tagged = qrow(t, reaperSibling(x), "live-tagged", x);
+
+        chashRepo.renameCollection(t, x, y);
+
+        assertThat(tag(t, reaperSibling(x), tagged)).as("still X's: X is live").isEqualTo(x);
+        assertThat(audit(t, RETAG_OP)).isEmpty();
+    }
+
+    @Test
+    void aRetagGivesAnEmptyMetadataRowItsTag_andCountsOnlyRowsActuallyChanged() throws Exception {
+        // chunks.metadata is NOT NULL, so the NULL-metadata case the review feared cannot arise; the COALESCE
+        // is belt and braces and this pins the nearest real shape, an empty object.
+        String t = newTenant();
+        String x = col("c7x");
+        String y = col("c7y");
+        register(t, x);
+        String empty = qrow(t, reaperSibling(x), "empty-meta", null);
+        String tagged = qrow(t, reaperSibling(x), "tagged", x);
+        String alreadyY = qrow(t, reaperSibling(x), "already-y", y);
+        try (Connection su = pg.createConnection("")) {
+            int n = DSL.using(su, SQLDialect.POSTGRES).update(CHUNKS)
+                .set(CHUNKS.METADATA, org.jooq.JSONB.jsonb("{}"))
+                .where(CHUNKS.TENANT_ID.eq(t).and(CHUNKS.COLLECTION.eq(reaperSibling(x)))
+                    .and(CHUNKS.CHASH.eq(Chash.fromHex(empty).toBytes()))).execute();
+            assertThat(n).as("fixture: the row has empty metadata").isEqualTo(1);
+        }
+
+        repo.renameCollection(t, x, y);
+
+        assertThat(tag(t, reaperSibling(x), empty)).isEqualTo(y);
+        assertThat(tag(t, reaperSibling(x), tagged)).isEqualTo(y);
+        assertThat(tag(t, reaperSibling(x), alreadyY)).isEqualTo(y);
+        var row = only(audit(t, RETAG_OP), reaperSibling(x));
+        assertThat(row.get("chash_count")).as("the row already tagged for Y is not counted").isEqualTo(2);
+        assertThat(chashes(row)).containsExactlyInAnyOrder(empty, tagged);
+    }
+
+    // ── twins: two live collections with the same row attributes ──────────────
+
+    /** Registers {@code twin} as a live collection with {@code of}'s owner, so the two share every attribute. */
+    private void makeTwin(String tenant, String of, String twin) throws Exception {
+        register(tenant, twin);
+        String owner;
+        try (Connection su = pg.createConnection("")) {
+            owner = DSL.using(su, SQLDialect.POSTGRES).select(CATALOG_COLLECTIONS.OWNER_ID).from(CATALOG_COLLECTIONS)
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant).and(CATALOG_COLLECTIONS.NAME.eq(of)))
+                .fetchOne(0, String.class);
+        }
+        setOwner(tenant, twin, owner);
+    }
+
+    @Test
+    void twinOrigins_deleteOfOneLeavesTheOthersUntaggedRows_untilItIsTheSoleClaimant() throws Exception {
+        String t = newTenant();
+        String x = col("t1x");
+        String twin = col("t1twin");
+        register(t, x);
+        setOwner(t, x, "shared-owner-" + seq.incrementAndGet());
+        makeTwin(t, x, twin);
+        String derived = rowDerivedSibling(t, x);
+        assertThat(rowDerivedSibling(t, twin)).as("fixture: the twins derive one sibling").isEqualTo(derived);
+        String mine = qrow(t, derived, "x-tagged", x);
+        String theirs = qrow(t, derived, "twin-tagged", twin);
+        String ambiguous = qrow(t, derived, "untagged", null);
+        String byName = qrow(t, reaperSibling(x), "untagged-by-name", null);
+
+        Map<String, Integer> counts = repo.deleteCollection(t, x);
+
+        assertThat(counts.get("quarantine_chunks")).as("x's tagged row and its own-named untagged row").isEqualTo(2);
+        assertThat(count(t, reaperSibling(x))).as("the quarantine-X name arm stays unconditional").isZero();
+        assertThat(count(t, derived)).as("the twin's tagged row and the ambiguous untagged row stay").isEqualTo(2);
+        assertThat(tag(t, derived, theirs)).isEqualTo(twin);
+        assertThat(tag(t, derived, ambiguous)).isNull();
+        assertThat(mine).isNotNull();
+        assertThat(byName).isNotNull();
+
+        // The twin is now the only live claimant, so its delete takes the untagged row too.
+        Map<String, Integer> second = repo.deleteCollection(t, twin);
+
+        assertThat(second.get("quarantine_chunks")).isEqualTo(2);
+        assertThat(count(t, derived)).isZero();
+    }
+
+    @Test
+    void twinOrigins_renameOfOneDoesNotTagTheOthersUntaggedRows() throws Exception {
+        String t = newTenant();
+        String x = col("t2x");
+        String twin = col("t2twin");
+        String z = col("t2z");
+        register(t, x);
+        setOwner(t, x, "shared-owner-" + seq.incrementAndGet());
+        makeTwin(t, x, twin);
+        String derived = rowDerivedSibling(t, x);
+        String mine = qrow(t, derived, "x-tagged", x);
+        String ambiguous = qrow(t, derived, "untagged", null);
+
+        repo.renameCollection(t, x, z);
+
+        assertThat(tag(t, derived, mine)).as("tagged rows follow the rename").isEqualTo(z);
+        assertThat(tag(t, derived, ambiguous)).as("an untagged row the twin may own is not given to z").isNull();
+    }
+
+    @Test
+    void aRenameTombstoneIsNotATwin_soASoleOriginStillClaimsItsUntaggedRows() throws Exception {
+        // After x -> y, x is a superseded tombstone sharing y's attributes. Renaming y on to z must still tag
+        // y's untagged rows: the tombstone is retired, not a second claimant.
+        String t = newTenant();
+        String x = col("t3x");
+        String y = col("t3y");
+        String z = col("t3z");
+        register(t, x);
+        setOwner(t, x, "tomb-owner-" + seq.incrementAndGet());
+        repo.renameCollection(t, x, y);
+        assertThat(registered(t, x)).as("fixture: x is left behind as a tombstone").isTrue();
+        String derived = rowDerivedSibling(t, y);
+        String untagged = qrow(t, derived, "untagged", null);
+
+        repo.renameCollection(t, y, z);
+
+        assertThat(tag(t, derived, untagged)).isEqualTo(z);
+    }
+
+    // ── E: the ghost sweep holds an origin whose rows all sit in quarantine ──
+
+    @Test
+    void theGhostSweepHoldsAnOriginWhoseChunksAllSitInQuarantine_andReclaimsItOnceTheyAreGone() throws Exception {
+        String t = newTenant();
+        String x = col("e1x");
+        String plain = col("e1plain");
+        register(t, x);
+        register(t, plain);
+        String sibling = reaperSibling(x);
+        qrow(t, sibling, "tagged", x);
+        qrow(t, sibling, "untagged", null);
+
+        var held = repo.sweepGhostsAndMarkDormant(t);
+
+        assertThat(registered(t, x)).as("an origin with quarantine rows is held, not deleted").isTrue();
+        assertThat(held.ghostNames()).doesNotContain(x);
+        assertThat(held.dormantNames()).as("and not marked dormant").doesNotContain(x);
+        assertThat(registered(t, plain)).as("an empty collection with no quarantine rows is still a ghost").isFalse();
+        assertThat(held.ghostNames()).contains(plain);
+        assertThat(held.quarantineHeld()).as("the origin hold and the sibling hold both report").isEqualTo(2);
+        assertThat(vectors.resolveQuarantineSiblings(t, x)).as("so a restore still has a live origin")
+            .containsExactly(sibling);
+
+        repo.deleteCollection(t, sibling);
+        var after = repo.sweepGhostsAndMarkDormant(t);
+
+        assertThat(registered(t, x)).as("with the rows gone the origin is a ghost again").isFalse();
+        assertThat(after.ghostNames()).contains(x);
+    }
+
+    @Test
+    void theGhostSweepDryRunReportsTheHoldAndChangesNothing() throws Exception {
+        String t = newTenant();
+        String x = col("e2x");
+        register(t, x);
+        qrow(t, reaperSibling(x), "tagged", x);
+
+        var dry = repo.sweepGhostsAndMarkDormant(t, true);
+
+        assertThat(dry.ghostNames()).doesNotContain(x);
+        assertThat(dry.quarantineHeld()).isEqualTo(2);
+        assertThat(registered(t, x)).isTrue();
+    }
+
+    @Test
+    void theGhostSweepDoesNotHoldAnOriginForAnotherOriginsRows() throws Exception {
+        String t = newTenant();
+        String x = col("e3x");
+        String other = col("e3other");
+        register(t, x);
+        register(t, other);
+        qrow(t, reaperSibling(other), "others", other);
+
+        var result = repo.sweepGhostsAndMarkDormant(t);
+
+        assertThat(registered(t, x)).as("x has nothing in quarantine: a ghost").isFalse();
+        assertThat(result.ghostNames()).contains(x).doesNotContain(other);
+        assertThat(registered(t, other)).isTrue();
     }
 
     @Test

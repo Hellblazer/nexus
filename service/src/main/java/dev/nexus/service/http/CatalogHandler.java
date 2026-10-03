@@ -2588,6 +2588,10 @@ public final class CatalogHandler implements HttpHandler {
      * RDR-164 P2: atomically delete a collection and all its in-Postgres derived state.
      * Returns per-table deleted-row counts so the client can preserve its CascadeCounts
      * contract. {@code pipeline.db} and local-mode cascades remain client-side.
+     *
+     * <p>Body: {@code name} (or {@code collection}), optional {@code keep_quarantine} (boolean, default false).
+     * The response's {@code deleted} map carries {@code quarantine_chunks}: the origin's rows taken from its
+     * quarantine siblings, or, for a {@code quarantine-*} name, the rows that collection held.
      */
     private void handleCollectionDelete(HttpExchange exchange, String tenant, String method) throws IOException {
         if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
@@ -2597,7 +2601,11 @@ public final class CatalogHandler implements HttpHandler {
         if (name == null || name.isBlank()) {
             HttpUtil.send(exchange, 400, "{\"error\":\"name (or collection) required\"}"); return;
         }
-        Map<String, Integer> counts = repo.deleteCollection(tenant, name);
+        // keep_quarantine (nexus-wbfpw.71, additive): true leaves the origin's rows in its quarantine siblings,
+        // for a caller that re-registers the same name at once (reindex). Absent or any non-true value is the
+        // default, so an older client gets today's behaviour.
+        boolean keepQuarantine = Boolean.TRUE.equals(body.get("keep_quarantine"));
+        Map<String, Integer> counts = repo.deleteCollection(tenant, name, keepQuarantine);
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(Map.of("deleted", counts)));
     }
 

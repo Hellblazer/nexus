@@ -8233,11 +8233,26 @@ public final class CatalogRepository {
      *       rows nothing could expire;</li>
      *   <li>deleting a {@code quarantine-*} collection is allowed (it is the audited manual route for rows whose
      *       origin is gone) and writes one {@code quarantine_collection_delete} row carrying the chashes,
-     *       truncated at {@link #GC_AUDIT_MAX_CHASHES} with the count exact.</li>
+     *       truncated at {@link #GC_AUDIT_MAX_CHASHES} with the count exact. The rows removed are reported under
+     *       both {@code chunks} and {@code quarantine_chunks}.</li>
      * </ul>
+     * Not closed here: store-put and update-metadata on a {@code quarantine-*} name are not guarded, and the
+     * RDR-162 cross-model COPY keeps the source's quarantine rows with the source.
      */
     public Map<String, Integer> deleteCollection(String tenant, String name) {
-        DeleteOutcome outcome = deleteCollectionTxn(tenant, name);
+        return deleteCollection(tenant, name, false);
+    }
+
+    /**
+     * {@link #deleteCollection(String, String)} with an explicit choice about the origin's quarantine rows.
+     *
+     * @param keepQuarantine {@code true} leaves the origin's rows in its {@code quarantine-} siblings (no delete,
+     *                       no audit row, no sibling unregistered), for a caller that re-registers the SAME name
+     *                       straight away ({@code nx collection reindex}) and so keeps the rows restorable.
+     *                       Ignored for a {@code quarantine-*} name: deleting that collection removes its own rows.
+     */
+    public Map<String, Integer> deleteCollection(String tenant, String name, boolean keepQuarantine) {
+        DeleteOutcome outcome = deleteCollectionTxn(tenant, name, keepQuarantine);
         Map<String, Integer> counts = outcome.counts();
         // A quarantine sibling this delete emptied and unregistered: same post-commit eviction as the name itself.
         for (String sibling : outcome.unregisteredSiblings()) {
@@ -8285,7 +8300,7 @@ public final class CatalogRepository {
     /** What {@link #deleteCollectionTxn} committed: the per-table counts, and the quarantine siblings it unregistered. */
     private record DeleteOutcome(Map<String, Integer> counts, List<String> unregisteredSiblings) {}
 
-    private DeleteOutcome deleteCollectionTxn(String tenant, String name) {
+    private DeleteOutcome deleteCollectionTxn(String tenant, String name, boolean keepQuarantine) {
         // nexus-wbfpw.66: DELETEs catalog_document_chunks rows (step 1b, and the fk-001 cascade of
         // step 6), which fires vectors-021-3's chunk-locking trigger; whole transaction retried on 40P01.
         // `counts` is built inside the lambda, so each attempt starts from an empty map.
@@ -8322,17 +8337,23 @@ public final class CatalogRepository {
             if (QuarantineOrigin.isQuarantineName(name)) {
                 // nexus-wbfpw.71: a deliberate delete of a quarantine collection is the audited manual route
                 // for rows whose origin is gone; the audit row carries the chashes the delete removed.
-                counts.put("chunks", QuarantineOrigin.deleteQuarantineCollectionRows(ctx, tenant, name));
+                int removed = QuarantineOrigin.deleteQuarantineCollectionRows(ctx, tenant, name);
+                counts.put("chunks", removed);
+                // The rows removed ARE the quarantined chunks; the CLI reads this key to say how many went.
+                counts.put("quarantine_chunks", removed);
             } else {
                 counts.put("chunks", ctx.deleteFrom(CHUNKS).where(CHUNKS.COLLECTION.eq(name)).execute());
                 // 1a. nexus-wbfpw.68/.71: the origin's rows in its quarantine siblings go with it, one audit row
                 //     per sibling, and a sibling this empties is unregistered the way the ghost sweep would.
                 //     Without this the sibling was stranded: nothing expires rows whose origin is gone.
-                Map<String, Integer> fromSiblings = QuarantineOrigin.deleteRowsOf(ctx, tenant, name);
+                //     keepQuarantine: a caller that re-registers the same name at once (reindex) keeps them.
+                Map<String, Integer> fromSiblings = keepQuarantine
+                    ? Map.of() : QuarantineOrigin.deleteRowsOf(ctx, tenant, name);
                 counts.put("quarantine_chunks", fromSiblings.values().stream().mapToInt(Integer::intValue).sum());
                 for (String sibling : fromSiblings.keySet()) {
                     if (!collectionHoldsContent(ctx, sibling)) {
-                        ctx.deleteFrom(CATALOG_COLLECTIONS).where(CATALOG_COLLECTIONS.NAME.eq(sibling)).execute();
+                        ctx.deleteFrom(CATALOG_COLLECTIONS).where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)
+                            .and(CATALOG_COLLECTIONS.NAME.eq(sibling))).execute();
                         unregisteredSiblings.add(sibling);
                     }
                 }
@@ -9080,9 +9101,12 @@ public final class CatalogRepository {
                 counts.put("catalog_document_chunks",
                     ctx.update(CATALOG_DOCUMENT_CHUNKS).set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, newName)
                        .where(CATALOG_DOCUMENT_CHUNKS.COLLECTION.eq(oldName)).execute());
-                // nexus-wbfpw.68: oldName's quarantine rows retag to newName on this branch too. Not
-                // counted in the returned map, whose key set this branch pins.
-                QuarantineOrigin.retagRowsOf(ctx, tenant, oldName, newName);
+                // nexus-wbfpw.68/.71: NO quarantine retag here, deliberately. This branch is the RDR-162
+                // cross-model COPY: oldName stays registered and live, and its quarantine rows carry
+                // oldName-model vectors. They stay oldName's (a restore into oldName works, and oldName's own
+                // later delete takes them with an audit row). Retagging them to newName would make them
+                // restorable only into a different model's collection (a dim_conflict, or wrong-model vectors
+                // at equal width) and strand them past oldName's delete.
                 return counts;
             }
 
@@ -9747,7 +9771,7 @@ public final class CatalogRepository {
                                     List<String> ghostNames, List<String> dormantNames) {}
 
     /** Per-row disposition {@link #sweepGhostsAndMarkDormant} assigns during its walk. */
-    private enum SweepDisposition { DELETED, MARKED_DORMANT, HELD_QUARANTINE, UNCHANGED }
+    private enum SweepDisposition { DELETED, MARKED_DORMANT, HELD_QUARANTINE, HELD_QUARANTINED_ORIGIN, UNCHANGED }
 
     private record SweptRow(String name, SweepDisposition disposition) {}
 
@@ -9757,6 +9781,12 @@ public final class CatalogRepository {
      * nexus-snm4y, refined by nexus-n060e). Walks every {@code
      * catalog_collections} row for {@code tenant} and, for each:
      * <ul>
+     *   <li>HOLDS it, untouched (reported under {@code quarantine_held}), when {@link #collectionHoldsContent}
+     *       is false but a registered quarantine collection still holds a row that is its own
+     *       ({@link QuarantineOrigin#holdsRowsOf}; nexus-wbfpw.71): an origin whose chunks all sit in
+     *       quarantine has no content of its own, and deleting its row would leave those rows with no live
+     *       origin. Checked first. Once those rows expire or are restored, the next sweep treats it as the
+     *       ghost it then is;</li>
      *   <li>DELETEs it when {@link #collectionHoldsContent} is false — a ghost:
      *       no row in any NON-audit {@link #COLLECTION_SCOPED_TABLES} entry names
      *       it — REGARDLESS of {@code lifecycle_state}, quarantine included. A
@@ -9879,7 +9909,16 @@ public final class CatalogRepository {
             for (var r : nameAndState) {
                 String name = r.value1();
                 String lifecycleState = r.value2();
-                if (!collectionHoldsContent(ctx, name)) {
+                boolean holdsContent = collectionHoldsContent(ctx, name);
+                if (!holdsContent && QuarantineOrigin.holdsRowsOf(ctx, tenant, name)) {
+                    // nexus-wbfpw.71: an ORIGIN whose chunks all sit in quarantine holds no content of its own,
+                    // so the ghost branch below would delete its registry row and leave those rows with no live
+                    // origin: restore refuses a non-live origin, the engine's expiry skips it, nx t3 gc refuses
+                    // its name. Held, neither deleted nor marked dormant, for as long as any registered
+                    // quarantine collection still holds a row that is its own (tagged for it, or untagged and
+                    // attributable to it alone). The sweep after those rows expire or are restored reclaims it.
+                    out.add(new SweptRow(name, SweepDisposition.HELD_QUARANTINED_ORIGIN));
+                } else if (!holdsContent) {
                     // nexus-n060e: a true ghost is reclaimed regardless of lifecycle_state --
                     // a drained quarantine sibling included. Checked BEFORE the quarantine
                     // branch below so a quarantine row never reaches that branch once it has
@@ -9937,7 +9976,8 @@ public final class CatalogRepository {
                         CollectionRegistry.evict(tenant, r.name());
                     }
                 }
-                case HELD_QUARANTINE -> held++; // nothing changed; no eviction needed
+                // Both holds report under quarantine_held (the wire key set is pinned); nothing changed either way.
+                case HELD_QUARANTINE, HELD_QUARANTINED_ORIGIN -> held++;
                 case UNCHANGED -> { }
             }
         }

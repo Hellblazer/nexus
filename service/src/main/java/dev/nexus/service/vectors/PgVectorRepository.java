@@ -4192,7 +4192,8 @@ FROM scope s
 
     /** The origin of a restore: a registered, live, non-quarantine collection, never a bare name. */
     private void checkRestoreOrigin(String tenant, String originCollection) {
-        if (originCollection == null || originCollection.isBlank() || originCollection.startsWith("quarantine-")) {
+        if (originCollection == null || originCollection.isBlank()
+                || dev.nexus.service.db.QuarantineOrigin.isQuarantineName(originCollection)) {
             throw new IllegalArgumentException("the origin collection must be a non-quarantine collection, got: "
                 + originCollection + " (name the collection the chunks came from, not its quarantine- sibling)");
         }
@@ -4208,7 +4209,7 @@ FROM scope s
 
     /** A sibling a caller named: a registered quarantine collection. */
     private void checkRestoreSibling(String tenant, String quarantineCollection) {
-        if (quarantineCollection == null || !quarantineCollection.startsWith("quarantine-")) {
+        if (!dev.nexus.service.db.QuarantineOrigin.isQuarantineName(quarantineCollection)) {
             throw new IllegalArgumentException("the quarantine collection must be a quarantine- sibling, got: "
                 + quarantineCollection);
         }

@@ -43,8 +43,13 @@ class CascadeCounts:
     catalog_projection_deleted: int = 0
     #: Rows the engine took from the origin's ``quarantine-`` siblings in the same
     #: transaction (nexus-wbfpw.68/.71; one ``collection_delete_quarantine``
-    #: gc_audit row per sibling). 0 from an engine that predates the key.
+    #: gc_audit row per sibling), or, when the deleted name is itself a
+    #: ``quarantine-*`` collection, the rows that collection held (one
+    #: ``quarantine_collection_delete`` gc_audit row). 0 from an engine that
+    #: predates the key, and 0 under ``keep_quarantine``.
     quarantine_chunks_deleted: int = 0
+    #: T3 chunk rows the engine deleted from the collection itself (its ``chunks`` count).
+    chunks_deleted: int = 0
     failures: list[str] = field(default_factory=list)
 
 
@@ -66,13 +71,21 @@ def _purge_pipeline_db(name: str, counts: CascadeCounts) -> CascadeCounts:
     return counts
 
 
-def purge_collection_cascade(db: object, name: str) -> CascadeCounts:
+def purge_collection_cascade(
+    db: object, name: str, *, keep_quarantine: bool = False,
+) -> CascadeCounts:
     """Delete T3 collection *name* and cascade-purge all derived state.
 
     ``db`` is a ``T3Database`` (or any object exposing
     ``delete_collection(name)``). The T3 delete tolerates an already-absent
     collection (``t3_absent=True``) and still runs the cascade so a prior
     half-delete is cleaned up.
+
+    The engine deletes the origin's rows in its ``quarantine-`` siblings with
+    it (audited, nexus-wbfpw.71). ``keep_quarantine=True`` asks it not to: for
+    a caller that re-registers the SAME name straight away
+    (``nx collection reindex``), where taking the rows would destroy
+    restorable data for nothing.
     """
     counts = CascadeCounts()
 
@@ -88,7 +101,11 @@ def purge_collection_cascade(db: object, name: str) -> CascadeCounts:
         client = make_catalog_reader()
         if client is None:  # service mode always returns a client; guard for a clear error
             raise RuntimeError("catalog service client unavailable")
-        deleted = client.delete_collection(name)  # type: ignore[attr-defined]
+        # The field is sent only when true (additive: an engine or client that predates it is unchanged).
+        if keep_quarantine:
+            deleted = client.delete_collection(name, keep_quarantine=True)  # type: ignore[attr-defined]
+        else:
+            deleted = client.delete_collection(name)  # type: ignore[attr-defined]
         # Preserve the local fan-out's taxonomy dict shape ({topics, assignments,
         # links, meta}) so the CLI render (commands/collection.py) does not KeyError;
         # add centroids (purged here, absent from the local path).
@@ -114,6 +131,7 @@ def purge_collection_cascade(db: object, name: str) -> CascadeCounts:
         counts.catalog_docs_deleted = deleted.get("catalog_documents", 0)
         counts.catalog_projection_deleted = deleted.get("catalog_collections", 0)
         counts.quarantine_chunks_deleted = deleted.get("quarantine_chunks", 0)
+        counts.chunks_deleted = deleted.get("chunks", 0)
     except Exception as exc:  # noqa: BLE001 — best-effort, atomic on the service side
         _log.warning("purge_cascade_service_failed", collection=name, error=str(exc))
         counts.failures.append(f"service deleteCollection failed: {exc}")

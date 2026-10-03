@@ -1507,20 +1507,38 @@ change). Where this step says the reaper's quarantine is "expired by the existin
   rows on 2026-10-03 (`nexus-wbfpw.65`). Sam ruled on 2026-10-03 (`nexus-wbfpw.68`, option (b)):
   no engine expiry keyed on a missing origin (a missing origin correlates with a collection
   wrongly mass-quarantined, and engine expiry has no floor). Dead-origin rows are removed by a
-  deliberate, audited collection delete, and the delete and rename producers no longer create
-  them (`nexus-wbfpw.71`): deleting an origin `X` takes `X`'s rows from every registered
-  quarantine collection in the same transaction (rows tagged `origin_collection = X`, plus
-  untagged rows in `quarantine-X` or in the sibling derived from `X`'s catalog row), writes one
-  `collection_delete_quarantine` `gc_audit` row per sibling (chashes truncated at 5,000, count
-  exact, `details` `origin_collection` and `count`) and unregisters a sibling that this leaves
-  empty. Deleting a `quarantine-*` collection is allowed and writes one
-  `quarantine_collection_delete` row. Renaming `X` to `Y` retags `X`'s quarantine rows to
-  `origin_collection = Y` (untagged rows in `X`'s siblings get tagged `Y`; sibling names do not
-  change, because the engine finds a sibling by the tag) and writes one `quarantine_retag` row
-  per sibling (`details` `from`, `to`, `count`), on the canonical branch, the RDR-162 copy
-  branch and `/v1/chash/rename_collection` alike. Store-delete, rename and rehome refuse a
-  `quarantine-*` name with a 400 that names `nx t3 quarantine restore` and `nx t3 gc`. None of
-  the three new operations is in `QUARANTINING_OPERATIONS`: they do not move chunks into
+  deliberate, audited collection delete, and the delete and canonical-rename producers no longer
+  create them (`nexus-wbfpw.71`):
+  - Deleting an origin `X` takes `X`'s rows from every registered quarantine collection in the
+    same transaction: rows tagged `origin_collection = X`, untagged rows in `quarantine-X` (the
+    reaper's name), and untagged rows in the sibling derived from `X`'s catalog row, but only
+    when `X` is the sole live collection with that row's owner, model, model version and content
+    type (when a twin shares them an untagged row could be either's, so neither claims it). It
+    writes one `collection_delete_quarantine` `gc_audit` row per sibling (chashes truncated at
+    5,000, count exact, `details` `origin_collection` and `count`) and unregisters a sibling that
+    this leaves empty. The count is `quarantine_chunks` in the response. A caller that
+    re-registers the same name at once (`nx collection reindex`) sends `keep_quarantine: true`
+    and the rows stay. Deleting a `quarantine-*` collection is allowed, writes one
+    `quarantine_collection_delete` row, and reports the rows as `quarantine_chunks`.
+  - Renaming `X` to `Y` on the canonical branch (and `/v1/chash/rename_collection` when `X` is no
+    longer a live registered collection) retags `X`'s quarantine rows to `origin_collection = Y`
+    (untagged rows follow the same attribution rule; sibling names do not change, because the
+    engine finds a sibling by the tag) and writes one `quarantine_retag` row per sibling
+    (`details` `from`, `to`, `count`). The RDR-162 cross-model COPY branch does NOT retag: the
+    source stays registered and live, its quarantine rows carry source-model vectors and stay
+    the source's (a restore into it works; its own later delete takes them, audited).
+  - The ghost sweep (`nx catalog sweep-ghosts`, the once-per-boot sweep) holds an origin whose
+    chunks all sit in quarantine instead of deleting its registry row, reported under
+    `quarantine_held`, so those rows keep a live origin. Once they expire or are restored the
+    next sweep reclaims the row.
+  - Store-delete, rename and rehome refuse a `quarantine-*` name with a 400 that names
+    `nx t3 quarantine restore` and `nx t3 gc`.
+  - Not closed: `store-put` and `update-metadata` on a `quarantine-*` name are not guarded (they
+    can still write `origin_collection`), and a `rehome` of an origin does not carry its tags
+    (the source persists, so the rows stay with it). The twin-ambiguous untagged rows above stay
+    where they are.
+
+  None of the three new operations is in `QUARANTINING_OPERATIONS`: they do not move chunks into
   quarantine, so `--audit-id` restore refuses them.
 - The engine's settings are in `docs/operations/engine-reaper.md` § Settings
   (`NX_REAPER_ENABLED`, `_INTERVAL_SECONDS`, `_BATCH_SIZE`, `_FLOOR_FRACTION`,
@@ -1692,7 +1710,7 @@ can still return. As built (`nexus-wbfpw.26`):
 
 | Resource | List | Info | Delete | Verify | Backup |
 | --- | --- | --- | --- | --- | --- |
-| Superseded/reapable chunks | `nx store list --reapable` (Phase 3, Step 10) | In scope | In scope: the engine reaper and `nx t3 gc` QUARANTINE (restorable 14 days, then expired by the engine's `reaper_expire_quarantine` for chunks the reaper moved and by the client's `gc_expire_quarantine` for chunks the client moved) under a fraction floor on the move, and no floor on the engine's expiry (Sam, 2026-10-01; Step 9; the client keeps its floor on the untagged rows it expires itself). Rows whose origin is gone have no expirer by ruling (Sam, 2026-10-03): `nx collection delete` of the origin takes its quarantine rows with a `collection_delete_quarantine` audit row per sibling, `nx collection delete quarantine-<x>` is the audited manual route (`quarantine_collection_delete`), a rename retags them (`quarantine_retag`), and store-delete, rename and rehome refuse a `quarantine-*` name (`nexus-wbfpw.68`, `.71`) | `catalog doctor` check (Phase 4, Step 14) | N/A — content lives in the current chunk. Restore: `nx t3 quarantine restore` (`nexus-wbfpw.49`, Step 9), with `--reattach` so the chunk is visible again; a chunk with no live owner comes back hidden |
+| Superseded/reapable chunks | `nx store list --reapable` (Phase 3, Step 10) | In scope | In scope: the engine reaper and `nx t3 gc` QUARANTINE (restorable 14 days, then expired by the engine's `reaper_expire_quarantine` for chunks the reaper moved and by the client's `gc_expire_quarantine` for chunks the client moved) under a fraction floor on the move, and no floor on the engine's expiry (Sam, 2026-10-01; Step 9; the client keeps its floor on the untagged rows it expires itself). Rows whose origin is gone have no expirer by ruling (Sam, 2026-10-03): `nx collection delete` of the origin takes its quarantine rows with a `collection_delete_quarantine` audit row per sibling (`nx collection reindex` keeps them), `nx collection delete quarantine-<x>` is the audited manual route (`quarantine_collection_delete`), a canonical rename retags them (`quarantine_retag`; the cross-model COPY keeps them with the live source), the ghost sweep holds an origin whose rows sit in quarantine, and store-delete, rename and rehome refuse a `quarantine-*` name (`nexus-wbfpw.68`, `.71`); store-put and update-metadata on a `quarantine-*` name stay unguarded | `catalog doctor` check (Phase 4, Step 14) | N/A — content lives in the current chunk. Restore: `nx t3 quarantine restore` (`nexus-wbfpw.49`, Step 9), with `--reattach` so the chunk is visible again; a chunk with no live owner comes back hidden |
 
 ### New Dependencies
 
