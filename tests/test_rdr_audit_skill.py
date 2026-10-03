@@ -195,11 +195,11 @@ class TestPersistenceOwnership:
 
 
 class TestManagementSubcommands:
-    """Phase 2b: skill must document all 5 management subcommands.
+    """Phase 2b: skill must document the 3 management subcommands.
     Structural test — verifies the skill file documents the behavior; runtime
     safety is enforced by the skill body being followed and validated at Phase 5a."""
 
-    SUBCOMMANDS = ("list", "status", "history", "schedule", "unschedule")
+    SUBCOMMANDS = ("list", "status", "history")
 
     def test_management_section_present(self) -> None:
         text = _load_skill_text()
@@ -252,36 +252,13 @@ class TestManagementSubcommands:
             "history subcommand should document default N"
         )
 
-    def test_schedule_documents_project_substitution(self) -> None:
-        """The `schedule` subcommand must have a {project} or <PROJECT> substitution point
-        in the template text it prints."""
-        section = self._subsection(_load_skill_text(), "schedule")
-        assert section, "schedule subcommand must have its own ### section"
-        assert re.search(r"<PROJECT>|{project}|\$PROJECT", section), (
-            "schedule subcommand must document a project-name substitution point"
-        )
-
-    def test_schedule_documents_both_platforms(self) -> None:
-        """schedule must document both macOS (launchd/plist) and Linux (cron) templates."""
-        section = self._subsection(_load_skill_text(), "schedule").lower()
-        assert section
-        assert "launchd" in section or "plist" in section
-        assert "cron" in section
-
-    def test_unschedule_documents_both_platforms(self) -> None:
-        section = self._subsection(_load_skill_text(), "unschedule").lower()
-        assert section
-        assert "launchctl unload" in section or "plist" in section
-        assert "crontab" in section
-
 
 class TestManagementSafetySplit:
-    """The read-only vs print-only safety split is the core user-protection invariant.
-    Tests enforce that the skill body documents both halves of the split clearly enough
-    that a following agent will implement them correctly."""
+    """The management subcommands are read-only; that is the core user-protection invariant.
+    Tests enforce that the skill body documents it clearly enough that a following agent
+    will implement it correctly."""
 
     READONLY_SUBCOMMANDS = ("list", "status", "history")
-    PRINTONLY_SUBCOMMANDS = ("schedule", "unschedule")
 
     def test_readonly_invariant_explicit(self) -> None:
         """The skill body must explicitly name the read-only subcommands and forbid mutation."""
@@ -312,46 +289,6 @@ class TestManagementSafetySplit:
             text,
         ), "Read-only subcommands must explicitly document no T2 state mutation"
 
-    def test_printonly_invariant_explicit(self) -> None:
-        """The skill body must explicitly name the print-only subcommands and forbid execution."""
-        text = _load_skill_text().lower()
-        for sc in self.PRINTONLY_SUBCOMMANDS:
-            assert sc in text
-        assert "print-only" in text or "print only" in text
-
-    def test_printonly_forbids_launchctl_execution(self) -> None:
-        """Print-only subcommands must be documented as NOT running launchctl load/unload."""
-        text = _load_skill_text()
-        assert re.search(
-            r"(?i)(must not|do(es)? not|never).{0,80}(execute|run|invoke).{0,40}launchctl",
-            text,
-        ), "Print-only subcommands must explicitly forbid launchctl execution"
-
-    def test_printonly_forbids_crontab_write(self) -> None:
-        """Print-only subcommands must be documented as NOT editing crontab."""
-        text = _load_skill_text()
-        assert re.search(
-            r"(?i)(must not|do(es)? not|never).{0,80}(execute|run|invoke|edit|write).{0,40}crontab",
-            text,
-        ), "Print-only subcommands must explicitly forbid crontab execution/edit"
-
-    def test_printonly_forbids_plist_write(self) -> None:
-        """Print-only subcommands must be documented as NOT writing plist files."""
-        text = _load_skill_text()
-        assert re.search(
-            r"(?i)(must not|do(es)? not|never).{0,80}(write|create|install).{0,40}\.?plist",
-            text,
-        ), "Print-only subcommands must explicitly forbid plist file write"
-
-    def test_user_retains_explicit_install_authority(self) -> None:
-        """The skill must explicitly document that system-level installs are the user's step."""
-        text = _load_skill_text().lower()
-        assert re.search(
-            r"(user|human).{0,100}(explicit|manual|authoriz|review).{0,100}(install|run|execute)|"
-            r"(install|run|execute).{0,60}(user|human).{0,60}(explicit|manual|authoriz|review)",
-            text,
-        ), "Skill must document that install execution is explicitly the user's step"
-
 
 class TestCommandFileSubcommandRouting:
     """The slash command preamble must route subcommand first-tokens to the skill body,
@@ -366,7 +303,7 @@ class TestCommandFileSubcommandRouting:
 
     def test_command_file_lists_all_subcommands(self) -> None:
         text = COMMAND_PATH.read_text().lower()
-        for sc in ("list", "status", "history", "schedule", "unschedule"):
+        for sc in ("list", "status", "history"):
             assert sc in text, f"Command file does not reference subcommand `{sc}`"
 
 

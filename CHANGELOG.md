@@ -6,6 +6,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Removed
+
+- **Four pieces of RDR tooling that nothing called are deleted, each with its tests and docs** (cleanup step 12, no bead). `nx rdr lint` (no invoker in CI, pre-commit, skills or hooks). `nx rdr repeat` and `src/nexus/rdr_repeat.py` (never wired). The `nx rdr preamble rdr-show` verb (the `rdr-show` skill does its own reads and never called it). The rdr-audit scheduling templates: `scripts/cron-rdr-audit.sh`, `scripts/launchd/` and `scripts/cron/` with their READMEs, and the `/conexus:rdr-audit schedule` and `unschedule` subcommands that printed them (`list`, `status` and `history` stay). `nx rdr` now has `set-status` and `preamble`.
+
 ## [7.69.0] - 2026-10-03
 
 Pairs with engine-service-v0.1.145, which also carries v0.1.144. Neither engine adds a changeset. The engine now deletes an origin collection's quarantine rows with it and retags them on rename (nexus-wbfpw.71), lets the reaper pass a tenant that holds nothing and reports `tenants_empty` on its last pass (nexus-wbfpw.73), retries a manifest write that loses a deadlock (nexus-wbfpw.66) and logs `reaper_pass_failed` when a pass cannot list its tenants (nexus-wbfpw.67). All three wire changes are additive, so the engine can deploy before this client. One direction is not neutral: an older client's `nx collection reindex` against the new engine deletes the collection's quarantine rows, audited, as `nx collection delete` does (see the first collection-delete entry below). Local installs get the new engine with this release.

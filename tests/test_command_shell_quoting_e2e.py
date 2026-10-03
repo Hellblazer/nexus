@@ -3,7 +3,7 @@
 
 The unit tests in ``test_command_context_command.py`` and
 ``test_rdr_preamble.py`` invoke the CLI with *pre-split* argv
-(``["rdr-show", "--", "1"]``). That is NOT the path that broke: Claude Code
+(``["rdr-gate", "--", "1"]``). That is NOT the path that broke: Claude Code
 substitutes ``$ARGUMENTS`` **textually** into the ``!`…`` backtick line and
 then a shell ``eval``s it. The original ``(eval):1: unmatched "`` failure lived
 entirely in that substitution+eval step, which pre-split argv never exercises.

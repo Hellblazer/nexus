@@ -8,14 +8,14 @@ effort: high
 
 Wraps the canonical audit pattern proven in Phase 1b (RDR-067) as a one-command skill. Delegates the classification work to the **deep-research-synthesizer** agent (sonnet). See [registry.yaml](../../registry.yaml).
 
-**Phase 2a scope**: default-mode audit dispatch only. The `list` / `status` / `history` / `schedule` / `unschedule` management subcommands are added in Phase 2b (`nexus-dqp.4`) and are not implemented here.
+**Phase 2a scope**: default-mode audit dispatch only. The `list` / `status` / `history` management subcommands are added in Phase 2b (`nexus-dqp.4`) and are not implemented here.
 
 ## When This Skill Activates
 
 - User invokes `/conexus:rdr-audit` (no argument → current project) or `/conexus:rdr-audit <project>` — runs the audit
 - User says "audit this project", "run the silent-scope-reduction audit", "check the base rate on `<project>`"
-- Periodic audit trigger fires headlessly: external cron or launchd invokes `claude -p '/conexus:rdr-audit <project>'` on the user's local machine (see Phase 4 scheduling templates)
-- User invokes a management subcommand: `list` / `status <project>` / `history <project>` / `schedule <project>` / `unschedule <project>` (Phase 2b)
+- Periodic audit trigger fires headlessly: external cron or launchd invokes `claude -p '/conexus:rdr-audit <project>'` on the user's local machine
+- User invokes a management subcommand: `list` / `status <project>` / `history <project>` (Phase 2b)
 
 ## Inputs
 
@@ -25,8 +25,6 @@ Wraps the canonical audit pattern proven in Phase 1b (RDR-067) as a one-command 
   - `list` → list scheduled audits (Phase 2b, read-only)
   - `status <project>` → show next-fire timestamp + last-run outcome (Phase 2b, read-only)
   - `history <project>` → list last N audit findings for a project (Phase 2b, read-only)
-  - `schedule <project>` → print platform-specific install commands (Phase 2b, print-only)
-  - `unschedule <project>` → print uninstall commands (Phase 2b, print-only)
 - **Optional audit mode flags** (Phase 2a):
   - Time window (default: last 90 days)
   - Pinpoint incident (specific RDR ID to compare against §Problem Statement)
@@ -121,32 +119,22 @@ Do NOT inline the canonical prompt text into this skill file — the prompt is t
 
 ## Management Subcommands
 
-Five management subcommands let users and agents inspect and manage scheduled audits from inside Claude Code without shelling out to OS primitives manually. Invoked as the first positional argument: `/conexus:rdr-audit list`, `/conexus:rdr-audit status <project>`, etc. If the first token is not one of the reserved subcommand words, the argument is treated as a project name and the skill routes to the default audit-dispatch flow instead.
+Three management subcommands let users and agents inspect scheduled audits from inside Claude Code without shelling out to OS primitives manually. Invoked as the first positional argument: `/conexus:rdr-audit list`, `/conexus:rdr-audit status <project>`, etc. If the first token is not one of the reserved subcommand words, the argument is treated as a project name and the skill routes to the default audit-dispatch flow instead.
 
 ### Safety Split (core user-protection invariant)
 
-The five subcommands split into two disjoint safety classes:
-
-**Read-only**: `list`, `status`, `history`
+All three subcommands are **read-only**: `list`, `status`, `history`
 - Safe to invoke from any session — interactive, headless `claude -p`, CCR remote agent
 - The skill body **must not modify OS state** — no file writes, no process spawns, no `launchctl load`, no `crontab -e`
 - The skill body **must not modify T2 state** — no `memory_put`, no `memory_delete`, no mutation of any T2 record
 - Invariant verification approach: a session snapshot of OS state (`launchctl list` + `crontab -l`) and T2 state (`memory_get(project="rdr_process", title="")`, which lists all entries) taken before and after a read-only invocation should be byte-identical
-
-**Print-only**: `schedule`, `unschedule`
-- Safe to invoke from any session; the output is platform-specific install/uninstall instructions printed to stdout for user review
-- The skill body **must not execute any privileged OS command** — specifically must not run `launchctl load`, must not run `launchctl unload`, must not write `.plist` files to `~/Library/LaunchAgents/`, must not edit crontab via `crontab -e`, must not spawn any process that installs or modifies scheduled triggers
-- The output is a printed template the user reviews and runs themselves manually
-- Invariant verification approach: a dry-run harness that captures stdout and inspects `~/Library/LaunchAgents/`, the user's crontab, and running-process list before and after — confirms no files written, no processes spawned, no scheduled triggers modified
-
-**System-level installs are explicitly the user's step.** The skill never runs them automatically. This split protects users from unauthorized privileged OS changes while still making the management surface inspectable from any session.
 
 ### `list` (read-only)
 
 Enumerate all scheduled rdr-audit triggers on the local machine across both macOS launchd and Linux cron.
 
 Behavior:
-1. Shell out: `launchctl list | grep rdr-audit` (macOS) — capture lines matching `com.nexus.rdr-audit.*`
+1. Shell out: `launchctl list | grep rdr-audit` (macOS) — capture the matching lines
 2. Shell out: `crontab -l 2>/dev/null | grep rdr-audit` (Linux) — capture matching lines
 3. Parse both outputs, aggregate into a single table
 4. Format as markdown table with columns: `project`, `platform` (launchd/cron), `schedule expression`, `next-fire timestamp` (when available)
@@ -185,105 +173,9 @@ Behavior:
 
 Read-only: exclusively T2 `memory_search` + `memory_get`. No OS interaction. No T2 writes.
 
-### `schedule <project>` (print-only)
-
-Print the platform-specific install commands for the user to review and run themselves manually. **Does not execute the install.**
-
-Behavior:
-1. Detect platform via `uname -s` (Darwin → macOS, Linux → Linux)
-2. On macOS: render the plist body (see template below) with `<PROJECT>` substituted, and print together with the `launchctl load` instruction the user will run
-3. On Linux: render the crontab line (see template below) with `<PROJECT>` substituted, and print together with the `crontab -e` instruction the user will run
-4. Print to stdout only
-
-**Cadence note (macOS vs Linux)**: launchd's `StartCalendarInterval` does not support exact 90-day intervals natively. The macOS plist template below fires on the 1st of each month at 03:00 local time — **approximately 30-day cadence**, not the RDR-067 target 90-day cadence. This is the closest practical approximation launchd supports without manual month-list scheduling. The Linux crontab template (shown after the plist) uses `0 3 1 */3 *` which IS a true 90-day cadence (1st of every 3rd month). macOS users who want true quarterly cadence have three options: (a) accept the monthly approximation (the failure mode occurs ~1-2× per month, so monthly sampling is strictly finer-grained than the target, not coarser), (b) add a month-list `StartCalendarInterval` with explicit Jan/Apr/Jul/Oct entries, or (c) switch to a user-level cron daemon (`pcron`, `gcron`) and use the Linux crontab template instead. When the skill prints this plist via `/conexus:rdr-audit schedule <project>`, it prints this cadence note alongside the template so the user is not surprised.
-
-**macOS plist template** (substitute `<PROJECT>` with the target project name; coordinate with `scripts/launchd/com.nexus.rdr-audit.PROJECT.plist` from Phase 4):
-
-```xml
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTD/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key>
-  <string>com.nexus.rdr-audit.<PROJECT>.90d</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>/usr/local/bin/claude</string>
-    <string>-p</string>
-    <string>/conexus:rdr-audit <PROJECT></string>
-  </array>
-  <key>StartCalendarInterval</key>
-  <dict>
-    <key>Day</key><integer>1</integer>
-    <key>Hour</key><integer>3</integer>
-    <key>Minute</key><integer>0</integer>
-  </dict>
-  <key>StandardOutPath</key>
-  <string>/tmp/rdr-audit-<PROJECT>.log</string>
-  <key>StandardErrorPath</key>
-  <string>/tmp/rdr-audit-<PROJECT>.err</string>
-</dict>
-</plist>
-```
-
-**Linux crontab template** (substitute `<PROJECT>`; coordinate with `scripts/cron/rdr-audit.crontab` from Phase 4):
-
-```cron
-0 3 1 */3 * /usr/local/bin/claude -p '/conexus:rdr-audit <PROJECT>' >> ~/.local/state/rdr-audit-<PROJECT>.log 2>&1
-```
-
-**Printed installation instructions** (what the user then runs themselves):
-
-- macOS:
-  ```
-  1. Save the plist above to ~/Library/LaunchAgents/com.nexus.rdr-audit.<PROJECT>.90d.plist
-  2. Run: launchctl load ~/Library/LaunchAgents/com.nexus.rdr-audit.<PROJECT>.90d.plist
-  3. Verify: launchctl list | grep rdr-audit
-  ```
-
-- Linux:
-  ```
-  1. Run: crontab -e
-  2. Append the line above
-  3. Save and exit the editor; cron picks up the change automatically
-  4. Verify: crontab -l | grep rdr-audit
-  ```
-
-The skill body itself **must not write** the plist file, **must not execute** `launchctl load`, **must not edit** the crontab via `crontab -e`, and **must not spawn** any privileged OS process. The templates are printed text; all state changes are the user's explicit step.
-
-### `unschedule <project>` (print-only)
-
-Print the platform-specific uninstall commands for the user to review and run themselves manually. **Does not execute the uninstall.**
-
-Behavior:
-1. Detect platform via `uname -s`
-2. On macOS: print the `launchctl unload` + `rm` commands the user will run
-3. On Linux: print `crontab -e` instructions and the line to remove
-4. Print to stdout only
-
-**macOS uninstall commands** (printed for user to run):
-```
-launchctl unload ~/Library/LaunchAgents/com.nexus.rdr-audit.<PROJECT>.90d.plist
-rm ~/Library/LaunchAgents/com.nexus.rdr-audit.<PROJECT>.90d.plist
-```
-
-**Linux uninstall instructions** (printed for user to run):
-```
-1. Run: crontab -e
-2. Remove the line matching: /conexus:rdr-audit <PROJECT>
-3. Save and exit
-4. Verify: crontab -l | grep rdr-audit   # should show nothing
-```
-
-The skill body itself **must not execute** `launchctl unload`, **must not write** or delete plist files, **must not edit** crontab via `crontab -e`, and **must not spawn** any privileged OS process. The commands are printed text the user runs manually.
-
 ### Subcommand-to-project-name disambiguation
 
-The first positional argument may be either a reserved subcommand word or a project name. Rule: check the reserved subcommand set first (`list`, `status`, `history`, `schedule`, `unschedule`) — if the first token matches any of these exactly, route to the named subcommand. Otherwise treat the first token as a project-name argument and route to the default audit-dispatch flow. This prevents a project literally named `list` from being hijacked to the listing subcommand (the user can use `/conexus:rdr-audit <full-qualified-name>` or rename the project).
-
-### Format coordination with Phase 4 scheduling templates
-
-The plist and crontab templates above are the canonical shape. Phase 4 (`nexus-dqp.7`) ships the same templates as sibling files under `scripts/launchd/` and `scripts/cron/`. Both bead paths converge on the same format: the file is the source of truth at install time; the skill's `schedule` subcommand renders the equivalent text from the skill body for immediate user review. Updating the template means updating both locations — the sibling script file and this skill section — in one PR.
+The first positional argument may be either a reserved subcommand word or a project name. Rule: check the reserved subcommand set first (`list`, `status`, `history`) — if the first token matches any of these exactly, route to the named subcommand. Otherwise treat the first token as a project-name argument and route to the default audit-dispatch flow. This prevents a project literally named `list` from being hijacked to the listing subcommand (the user can use `/conexus:rdr-audit <full-qualified-name>` or rename the project).
 
 ## Persistence Ownership (Phase 1b finding)
 

@@ -2,8 +2,8 @@
 """``nx rdr`` — RDR authoring helpers.
 
 Exposes:
-  - ``lint``    : scan RDR markdown files for frontmatter parse hazards
-  - ``preamble``: 9 lifecycle subcommands (RDR-130 P1.2)
+  - ``set-status``: code-enforced frontmatter status flip
+  - ``preamble``  : lifecycle subcommands (RDR-130 P1.2)
 """
 from __future__ import annotations
 
@@ -33,72 +33,6 @@ from nexus.plans.audit_rounds import (
 from nexus.tables.load import Table, TableLoadError, load_packaged_table
 from nexus.tables.resolve import resolve
 from nexus.tables.review_rounds import blocking_rounds, rule_for
-
-
-# ---------------------------------------------------------------------------
-# lint helpers (unchanged)
-# ---------------------------------------------------------------------------
-
-# Matches a flow-sequence opener followed (eventually) by an unquoted
-# ``#`` before the closing ``]``. ``[^\]"']*?`` lets us span multiple
-# lines (PyYAML's multi-line flow sequences parse silently into empty
-# lists when ``#`` introduces comments mid-sequence — a true false
-# negative for the single-line regex). The ``"'`` exclusion keeps quoted
-# strings from being mis-flagged as the hazard.
-_HASH_REF_IN_FLOW_SEQ = re.compile(r":\s*\[[^\]\"']*?#", re.DOTALL)
-
-
-def _frontmatter_block(text: str) -> str | None:
-    """Return the frontmatter block (without delimiters) or None."""
-    if not text.startswith("---"):
-        return None
-    idx = text.find("\n---", 3)
-    if idx == -1:
-        return None
-    return text[3:idx]
-
-
-def _lint_one(path: Path) -> list[str]:
-    """Return a list of human-readable findings for *path* (empty if clean)."""
-    findings: list[str] = []
-    try:
-        text = path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError) as exc:
-        return [f"{path}: read failed ({type(exc).__name__}: {exc})"]
-
-    fm = _frontmatter_block(text)
-    if fm is None:
-        return findings
-
-    # _frontmatter_block returns text starting at index 3 (right after the
-    # opening ``---``), which is typically the trailing ``\n`` of that line.
-    # Strip the leading newline so the first content line maps cleanly to
-    # file line 2 (file line 1 is the opening ``---``).
-    fm_body = fm.lstrip("\n")
-
-    for m in _HASH_REF_IN_FLOW_SEQ.finditer(fm_body):
-        # If the opener line is itself a YAML comment (``# note: [#381]``),
-        # the ``: [`` is inside a comment and the whole thing is benign.
-        # Find the start of the line containing the match opener and
-        # check the first non-whitespace char.
-        line_start = fm_body.rfind("\n", 0, m.start()) + 1
-        if fm_body[line_start:m.start()].lstrip().startswith("#"):
-            continue
-        # Line number within fm_body. +2 for the opening ``---`` line.
-        line_no = fm_body.count("\n", 0, m.start()) + 2
-        snippet = fm_body[m.start():m.end()].replace("\n", " ").strip()
-        findings.append(
-            f"{path}:{line_no}: unquoted #-ref in YAML flow sequence "
-            f"({snippet!r}); quote the refs: "
-            f'prs: ["#381", "#382"]'
-        )
-
-    try:
-        yaml.safe_load(fm)
-    except yaml.YAMLError as exc:
-        findings.append(f"{path}: frontmatter YAML parse error: {exc}")
-
-    return findings
 
 
 # ---------------------------------------------------------------------------
@@ -360,69 +294,12 @@ def _preamble_get_rdrs_from_t2(repo_name: str, rdr_dir: str) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
-# rdr group + lint command
+# rdr group
 # ---------------------------------------------------------------------------
 
 @click.group()
 def rdr() -> None:
     """RDR authoring helpers."""
-
-
-@rdr.command("lint")
-@click.argument(
-    "paths",
-    nargs=-1,
-    type=click.Path(exists=True, path_type=Path),
-)
-@click.option(
-    "--root",
-    type=click.Path(exists=True, file_okay=False, path_type=Path),
-    default=None,
-    help="Scan this directory recursively for *.md (default: docs/rdr/ if it exists).",
-)
-def lint(paths: tuple[Path, ...], root: Path | None) -> None:
-    """Lint RDR frontmatter for parse hazards.
-
-    Checks each *.md for frontmatter that would fail downstream YAML
-    parsing — primarily the ``prs: [#NNN]`` flow-sequence hazard
-    (nexus-u7ek). Exits non-zero when any finding is reported.
-    """
-    targets: list[Path] = []
-    if paths:
-        for p in paths:
-            if p.is_dir():
-                targets.extend(sorted(p.rglob("*.md")))
-            else:
-                targets.append(p)
-    else:
-        scan_root = root or Path("docs/rdr")
-        if not scan_root.exists():
-            click.echo(
-                f"no paths given and {scan_root} not found; nothing to lint",
-                err=True,
-            )
-            sys.exit(2)
-        targets = sorted(scan_root.rglob("*.md"))
-
-    all_findings: list[str] = []
-    files_with_findings = 0
-    for path in targets:
-        per_file = _lint_one(path)
-        if per_file:
-            files_with_findings += 1
-            all_findings.extend(per_file)
-
-    if all_findings:
-        for f in all_findings:
-            click.echo(f, err=True)
-        click.echo(
-            f"\n{len(all_findings)} finding(s) in {files_with_findings} of "
-            f"{len(targets)} file(s)",
-            err=True,
-        )
-        sys.exit(1)
-
-    click.echo(f"clean: {len(targets)} file(s) scanned")
 
 
 # ---------------------------------------------------------------------------
@@ -1173,162 +1050,6 @@ def _gate_repo_name(repo_root: str) -> str:
     return _resolve_main_repo(Path(repo_root)).name
 
 
-#: Injectable dispatch seam for ``nx rdr repeat``, same shape as
-#: ``_t2_client_factory``: production resolves ``claude_dispatch`` lazily,
-#: tests set this to an async fake and never spawn a child.
-_repeat_dispatch = None
-
-
-def _resolve_repeat_dispatch():
-    if _repeat_dispatch is not None:
-        return _repeat_dispatch
-    from nexus.operators.dispatch import claude_dispatch  # noqa: PLC0415 — heavy operator dep deferred to call time
-
-    return claude_dispatch
-
-
-@rdr.command("repeat")
-@click.argument("rdr", type=str)
-@click.option(
-    "--root",
-    type=click.Path(exists=True, file_okay=False, path_type=Path),
-    default=None,
-    help="RDR directory used to resolve a numeric id (default: docs/rdr/).",
-)
-@click.option(
-    "--models",
-    default="haiku,sonnet",
-    show_default=True,
-    help="Two claude -p model aliases to dispatch, comma-separated; they must differ.",
-)
-@click.option("--timeout", type=float, default=300.0, show_default=True, help="Seconds per dispatch.")
-@click.option(
-    "--max-budget-usd",
-    type=float,
-    default=0.50,
-    show_default=True,
-    help="Budget cap per dispatch.",
-)
-@click.option("--json", "as_json", is_flag=True, help="Emit the two plans and the divergence as JSON.")
-def repeat(
-    rdr: str,
-    root: Path | None,
-    models: str,
-    timeout: float,
-    max_budget_usd: float,
-    as_json: bool,
-) -> None:
-    """Multi-model repeatability diff of RDR's design text (nexus-axwpn).
-
-    Sends the Technical Design section to two models, asks each for an
-    implementation plan, and reports where the plans diverge: steps,
-    files, decisions. A divergence is a place the text left open. Exits
-    0 with a report; exits 2 when there is nothing to repeat.
-
-    Models are named as claude -p aliases, never resolved through the
-    operator tier table: that table's consumers are the two dispatch
-    sites RDR-196 allowlists, and this verb is an explicit, hand-run
-    comparison outside them.
-    """
-    import asyncio  # noqa: PLC0415 — only this verb runs an event loop
-    import json as _json  # noqa: PLC0415
-
-    from nexus.rdr_repeat import (  # noqa: PLC0415
-        PLAN_SCHEMA,
-        RepeatError,
-        build_prompt,
-        diff_plans,
-        extract_design_section,
-        parse_plan,
-        render_report,
-    )
-
-    path = Path(rdr)
-    if not path.is_file():
-        scan_root = root or Path("docs/rdr")
-        found = _preamble_find_rdr_file(scan_root, rdr) if scan_root.exists() else None
-        if found is None:
-            click.echo(f"nx rdr repeat: no RDR file for {rdr!r} under {scan_root}", err=True)
-            sys.exit(2)
-        path = found
-    rdr_id = path.stem
-
-    design = extract_design_section(path.read_text())
-    if not design:
-        click.echo(
-            f"nx rdr repeat: {path} has no Technical Design / Proposed Design / Design section; "
-            "nothing to repeat",
-            err=True,
-        )
-        sys.exit(2)
-
-    model_names = [m.strip() for m in models.split(",") if m.strip()]
-    if len(model_names) != 2:
-        click.echo("nx rdr repeat: --models needs exactly two model aliases", err=True)
-        sys.exit(2)
-    if model_names[0] == model_names[1]:
-        click.echo(
-            f"nx rdr repeat: both models are {model_names[0]!r}; a repeatability diff needs two readers",
-            err=True,
-        )
-        sys.exit(2)
-    models_resolved = model_names
-
-    dispatch = _resolve_repeat_dispatch()
-    prompt = build_prompt(rdr_id, design)
-
-    async def _run():
-        return await asyncio.gather(
-            *(
-                dispatch(
-                    prompt,
-                    PLAN_SCHEMA,
-                    timeout=timeout,
-                    model=m,
-                    max_budget_usd=max_budget_usd,
-                    operator="rdr_repeat",
-                    isolated=True,
-                )
-                for m in models_resolved
-            )
-        )
-
-    try:
-        payloads = asyncio.run(_run())
-        plans = [parse_plan(m, p) for m, p in zip(models_resolved, payloads, strict=True)]
-    except (RepeatError, Exception) as exc:  # noqa: BLE001 - report, never traceback
-        click.echo(f"nx rdr repeat: dispatch failed ({exc})", err=True)
-        sys.exit(1)
-
-    divergence = diff_plans(plans[0], plans[1])
-    if as_json:
-        click.echo(
-            _json.dumps(
-                {
-                    "rdr": rdr_id,
-                    "plans": [
-                        {
-                            "model": pl.model,
-                            "steps": [
-                                {"title": st.title, "files": list(st.files), "decisions": list(st.decisions)}
-                                for st in pl.steps
-                            ],
-                        }
-                        for pl in plans
-                    ],
-                    "divergence": {
-                        k: v for k, v in divergence.__dict__.items()
-                    }
-                    | {"count": divergence.count},
-                },
-                indent=2,
-            )
-        )
-        return
-    click.echo(render_report(rdr_id, plans[0], plans[1], divergence))
-
-
-
 def _resolve_transition_or_exit(
     table: Table, rdr_file: Path, repo_root: str, current_status: str, new_status: str,
     *, superseded_by: str, reason: str | None,
@@ -1770,171 +1491,6 @@ def preamble_rdr_create(args: tuple[str, ...]) -> None:
     except Exception as exc:  # noqa: BLE001 — optional beads integration; absence reported, command continues
         print(f"Beads not available: {exc}")
     print()
-
-
-# ---------------------------------------------------------------------------
-# preamble rdr-show
-# ---------------------------------------------------------------------------
-
-def _preamble_get_excerpt(text: str) -> str:
-    """Strip frontmatter and return a 250-char content excerpt."""
-    if text.startswith("---"):
-        parts = text.split("---", 2)
-        text = parts[2] if len(parts) >= 3 else text
-    else:
-        m = re.search(r"^## Metadata\s*\n.*?(?=^##)", text, re.MULTILINE | re.DOTALL)
-        if m:
-            text = text[m.end():]
-    lines = [ln.strip() for ln in text.splitlines() if ln.strip() and not ln.startswith("#")]
-    return " ".join(lines)[:250]
-
-
-@preamble.command("rdr-show")
-@click.argument("args", nargs=-1)
-def preamble_rdr_show(args: tuple[str, ...]) -> None:
-    """Show RDR list or details for a specific RDR."""
-    repo_root, repo_name = _preamble_resolve_repo()
-    rdr_dir = _preamble_rdr_dir(repo_root)
-    rdr_path = Path(repo_root) / rdr_dir
-    args_str = " ".join(args).strip()
-
-    print(f"**Repo:** `{repo_name}`  **RDR directory:** `{rdr_dir}`")
-    print()
-
-    if not rdr_path.exists():
-        print(f"> No RDRs found — `{rdr_dir}` does not exist in this repo.")
-        return
-
-    if args_str:
-        # Show specific RDR
-        rdr_file = _preamble_find_rdr_file(rdr_path, args_str)
-        if rdr_file:
-            fm, text = _preamble_parse_frontmatter(rdr_file)
-            print(f"### RDR: {rdr_file.name}")
-            print()
-
-            # Metadata table
-            print("#### Metadata")
-            print()
-            print("| Field | Value |")
-            print("|-------|-------|")
-            for key in ("status", "type", "priority", "title", "author", "date",
-                        "supersedes", "superseded-by"):
-                val = fm.get(key)
-                if val:
-                    print(f"| {key.title()} | {val} |")
-            print()
-
-            # Full content
-            print("#### Content")
-            print()
-            print(text)
-            print()
-
-            # T2 metadata (printed as instruction; no direct T2 read needed here)
-            rdr_num = re.search(r"\d+", rdr_file.stem)
-            t2_key = rdr_num.group(0) if rdr_num else rdr_file.stem
-            print("### T2 Metadata")
-            try:
-                t2_result = run_bounded(
-                    ["nx", "memory", "get", "--project", f"{repo_name}_rdr",
-                     "--title", t2_key],
-                    timeout=10,
-                )
-                t2_out = (t2_result.stdout or "").strip()
-                print(t2_out if t2_out else f"No T2 record for RDR {t2_key}")
-            except Exception as exc:  # noqa: BLE001 — optional T2 lookup; absence reported, command continues
-                print(f"T2 not available: {exc}")
-            print()
-
-            # T2 research findings
-            print("### T2 Research Findings")
-            try:
-                list_result = run_bounded(
-                    ["nx", "memory", "list", "--project", f"{repo_name}_rdr"],
-                    timeout=10,
-                )
-                list_out = (list_result.stdout or "").strip()
-                # `nx memory list` rows are "[id] <project>/<title>  (…)" —
-                # match the title after the project slash, not line start
-                # (the ^-anchored form matched nothing, so every preamble
-                # reported "No research findings recorded" while T2 held
-                # them; caught on RDR-188, 2026-07-22).
-                research_lines = [
-                    ln for ln in list_out.splitlines()
-                    if _RDR_RESEARCH_LIST_RE(t2_key).search(ln)
-                ]
-                print("\n".join(research_lines) if research_lines
-                      else "No research findings recorded")
-            except Exception as exc:  # noqa: BLE001 — optional T2 lookup; absence reported, command continues
-                print(f"T2 not available: {exc}")
-            print()
-
-            # Linked beads
-            print("### Linked Beads")
-            try:
-                bd_result = run_bounded(
-                    ["bd", "list", "--status=open", "--limit=20"],
-                    timeout=10,
-                )
-                bd_out = (bd_result.stdout or "").strip()
-                matching = [
-                    ln for ln in bd_out.splitlines()
-                    if re.search(rf"rdr.*{t2_key}|{t2_key}.*rdr", ln, re.IGNORECASE)
-                ]
-                print("\n".join(matching) if matching
-                      else "No beads linked (check epic_bead in T2)")
-            except Exception as exc:  # noqa: BLE001 — optional beads integration; absence reported, command continues
-                print(f"Beads not available: {exc}")
-        else:
-            print(f"> RDR not found for: `{args_str}`")
-            print()
-            print("Available RDRs:")
-            rdrs = _preamble_get_all_rdrs(rdr_path)
-            if rdrs:
-                print()
-                print("| File | Title | Status | Type | Priority |")
-                print("|------|-------|--------|------|----------|")
-                for r in rdrs:
-                    print(f"| {r['file']} | {r['title']} | {r['status']} | {r['rtype']} | {r['priority']} |")
-    else:
-        # No ID — show list (most recently modified first)
-        all_md = [f for f in rdr_path.glob("*.md")
-                  if f.name.lower() not in _PREAMBLE_EXCLUDED]
-        all_md_sorted = sorted(all_md, key=lambda f: f.stat().st_mtime, reverse=True)
-
-        rdrs = []
-        for f in all_md_sorted:
-            fm, text = _preamble_parse_frontmatter(f)
-            rtype = fm.get("type", "?")
-            doc_status = fm.get("status", "?")
-            if doc_status == "?" and rtype == "?":
-                continue
-            rdrs.append({
-                "file": f.name,
-                "path": f,
-                "text": text,
-                "title": fm.get("title", fm.get("name", f.stem)),
-                "status": doc_status,
-                "rtype": rtype,
-                "priority": fm.get("priority", "?"),
-            })
-
-        print(f"### RDR Files ({len(rdrs)} found, most recently modified first)")
-        print()
-        if rdrs:
-            print("| File | Title | Status | Type | Priority |")
-            print("|------|-------|--------|------|----------|")
-            for r in rdrs:
-                print(f"| {r['file']} | {r['title']} | {r['status']} | {r['rtype']} | {r['priority']} |")
-            print()
-            print("### Content Index (for keyword and topic filtering)")
-            print()
-            for r in rdrs:
-                excerpt = _preamble_get_excerpt(r["text"])
-                print(f"**{r['file']}**: {excerpt}")
-        else:
-            print(f"No RDR files found in `{rdr_dir}`")
 
 
 # ---------------------------------------------------------------------------
@@ -5258,9 +4814,7 @@ def preamble_rdr_audit(args: tuple[str, ...]) -> None:
 
     current_project = _derive_project_name()
 
-    _READONLY_SUBCOMMANDS = {"list", "status", "history"}
-    _PRINTONLY_SUBCOMMANDS = {"schedule", "unschedule"}
-    _SUBCOMMANDS = _READONLY_SUBCOMMANDS | _PRINTONLY_SUBCOMMANDS
+    _SUBCOMMANDS = {"list", "status", "history"}
 
     first_token = args_str.split()[0] if args_str else ""
     if first_token in _SUBCOMMANDS:
@@ -5268,25 +4822,16 @@ def preamble_rdr_audit(args: tuple[str, ...]) -> None:
         target = args_str[len(first_token):].strip() or (
             current_project if subcommand != "list" else ""
         )
-        safety_class = (
-            "read-only" if subcommand in _READONLY_SUBCOMMANDS else "print-only"
-        )
-        print(f"**Mode:** management subcommand `{subcommand}` ({safety_class})")
+        print(f"**Mode:** management subcommand `{subcommand}` (read-only)")
         if target:
             print(f"**Target project:** `{target}`")
         else:
             print("**Scope:** all scheduled audits on this machine")
         print()
-        if safety_class == "read-only":
-            print(
-                f"> `{subcommand}` is read-only — no OS state mutation, "
-                "no T2 state mutation."
-            )
-        else:
-            print(
-                f"> `{subcommand}` is print-only — prints install/uninstall instructions "
-                "for user review."
-            )
+        print(
+            f"> `{subcommand}` is read-only — no OS state mutation, "
+            "no T2 state mutation."
+        )
         print()
     else:
         target = first_token or current_project

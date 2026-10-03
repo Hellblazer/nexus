@@ -236,8 +236,8 @@ class TestSetStatusWritesTheReason:
     def test_reason_with_a_colon_still_parses_as_yaml(self, rdr_env, monkeypatch):
         """RDR-214's abandonment (2026-09-18) wrote `close_reason: Sam's decision
         2026-09-18: the batch tier ...` verbatim; the bare `: ` inside a plain
-        scalar broke the whole frontmatter, `nx rdr lint` went red and the
-        indexer would skip the file. A reason that cannot stand as a plain
+        scalar broke the whole frontmatter and the indexer would skip the
+        file. A reason that cannot stand as a plain
         scalar is written quoted, on the file and on the T2 record; one that
         can stays plain (the sibling test pins that)."""
         d = rdr_env["rdr_dir"]

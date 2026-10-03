@@ -45,6 +45,9 @@ stale -- and stays exactly where it is until moved back deliberately.
 
 ONE PATH PER BULLET, on the bullet's FIRST line.
 
+- cleanup step 12 (no bead id exists): `conexus/skills/rdr-audit-checklist/SKILL.md` drops the `schedule` and `unschedule` subcommands and their plist and crontab templates; `list`, `status` and `history` stay. The template files under `scripts/` they pointed at are deleted.
+- cleanup step 12 (no bead id exists): `conexus/commands/rdr-audit.md` drops the `schedule` / `unschedule` text; the management subcommands are `list`, `status` and `history`, all read-only.
+
 ## Deferred to the next client release
 
 _Empty. The entry deferred here (nexus-wbfpw.41, the `skills/upgrade/SKILL.md` text for the `rdr192-manifest-backfill` rung) shipped with the 7.68.0 client release._

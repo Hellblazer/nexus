@@ -5,8 +5,8 @@ Bead nexus-8nz1y (RDR-130 P1.1): these tests MUST FAIL (TDD red) because
 ``nx rdr preamble`` does not yet exist.  The subgroup will be implemented
 in nexus-vb9r3 (P1.2).
 
-Covers all 9 subcommands:
-  rdr-create, rdr-list, rdr-show, rdr-gate, rdr-accept,
+Covers these subcommands:
+  rdr-create, rdr-list, rdr-gate, rdr-accept,
   rdr-close, rdr-research, rdr-audit, phase-review-gate
 
 For each applicable subcommand, both data paths are covered:
@@ -15,7 +15,7 @@ For each applicable subcommand, both data paths are covered:
 
 The ``$ARGUMENTS`` passthrough via ``--`` terminator is covered explicitly.
 
-Invocation convention mirrors test_rdr_lint.py:
+Invocation convention:
   CliRunner().invoke(rdr, ["preamble", "<name>", ...])
 """
 from __future__ import annotations
@@ -64,7 +64,7 @@ def _disposition_clause(text: str) -> str:
 # ---------------------------------------------------------------------------
 
 def _runner() -> CliRunner:
-    """CliRunner — matches the convention in test_rdr_lint.py."""
+    """CliRunner."""
     return CliRunner()
 
 
@@ -280,71 +280,6 @@ class TestRdrCreate:
         assert "bootstrap required" in result.output
         assert "RDR-001" in result.output
         assert "this will be the first RDR" in result.output
-
-
-# ---------------------------------------------------------------------------
-# rdr-show  (file-fallback; no-arg and with-id paths)
-# ---------------------------------------------------------------------------
-
-
-class TestRdrShow:
-    """Tests for ``nx rdr preamble rdr-show``."""
-
-    def test_rdr_show_no_arg_lists_all(self, rdr_env):
-        """No ID arg: prints file listing table (most recently modified first)."""
-        _write_rdr(
-            rdr_env["rdr_dir"],
-            "rdr-001-hello-world.md",
-            {"title": "Hello World", "status": "draft", "type": "decision", "priority": "P1"},
-        )
-        result = _runner().invoke(rdr, ["preamble", "rdr-show"])
-        assert result.exit_code == 0, result.output
-        assert "RDR Files" in result.output
-        assert "| File | Title | Status | Type | Priority |" in result.output
-        assert "Hello World" in result.output
-
-    def test_rdr_show_with_id_via_double_dash(self, rdr_env):
-        """ID via ``--`` terminator: prints specific RDR metadata table."""
-        _write_rdr(
-            rdr_env["rdr_dir"],
-            "rdr-001-hello-world.md",
-            {
-                "title": "Hello World",
-                "status": "draft",
-                "type": "decision",
-                "priority": "P1",
-                "author": "hal",
-            },
-            body="## Problem Statement\n\nSomething is wrong.",
-        )
-        result = _runner().invoke(rdr, ["preamble", "rdr-show", "--", "1"])
-        assert result.exit_code == 0, result.output
-        assert "### RDR:" in result.output
-        assert "rdr-001-hello-world.md" in result.output
-        assert "#### Metadata" in result.output
-        assert "Hello World" in result.output
-
-    def test_rdr_show_unknown_id(self, rdr_env):
-        """Unknown ID: prints 'RDR not found' and available list."""
-        _write_rdr(
-            rdr_env["rdr_dir"],
-            "rdr-001-hello-world.md",
-            {"title": "Hello World", "status": "draft", "type": "decision", "priority": "P1"},
-        )
-        result = _runner().invoke(rdr, ["preamble", "rdr-show", "--", "999"])
-        assert result.exit_code == 0, result.output
-        assert "RDR not found for" in result.output
-
-    def test_rdr_show_double_dash_passthrough(self, rdr_env):
-        """Explicit regression: ``--`` must pass a numeric arg, not swallow it."""
-        _write_rdr(
-            rdr_env["rdr_dir"],
-            "rdr-042-another.md",
-            {"title": "Another RDR", "status": "accepted", "type": "decision", "priority": "P0"},
-        )
-        result = _runner().invoke(rdr, ["preamble", "rdr-show", "--", "42"])
-        assert result.exit_code == 0, result.output
-        assert "rdr-042-another.md" in result.output
 
 
 # ---------------------------------------------------------------------------
@@ -4258,7 +4193,7 @@ class TestRdrResearchKeyShapes:
                    body="## Research Findings\n\nx\n")
         self._fake_list(monkeypatch, "[1] fakerepo_rdr/097-research-1  (rdr,research)\n"
                                      "[2] fakerepo_rdr/197-research-1  (rdr,research)\n")
-        for verb in ("rdr-research", "rdr-show"):
+        for verb in ("rdr-research",):
             result = _runner().invoke(rdr, ["preamble", verb, "--", "97"])
             assert result.exit_code == 0, result.output
             assert "097-research-1" in result.output, (verb, result.output)
