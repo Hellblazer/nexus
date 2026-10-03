@@ -862,6 +862,31 @@ class ChunkReaperIntegrationTest extends AtomicWriteTestBase {
     }
 
     @Test
+    void aTenantListThatFailsLogsReaperPassFailedOnce_atError_andNoReaperRunLine() throws Throwable {
+        // nexus-wbfpw.67 (conexus-lv6t): this path logged a WARN event=reaper_run with errors=1 and never
+        // event=reaper_pass_failed, so an alert keyed on the documented event missed it and a heartbeat keyed on
+        // reaper_run read a failed pass as alive.
+        ChunkReaper r = new ChunkReaper(store, vectors, repo, gate,
+            () -> { throw new IllegalStateException("simulated: tenant list query failed"); }, Settings.defaults(), CLOCK);
+
+        RunResult[] run = new RunResult[1];
+        List<String> logs = captureLogs(() -> run[0] = r.runOnce(null));
+
+        assertThat(run[0].tenants()).isEmpty();
+        assertThat(r.failedPassesTotal()).isEqualTo(1);
+        assertThat(r.lastCompletedPassAt()).isNull();
+        assertThat(logs.stream().filter(l -> l.contains("event=reaper_pass_failed")).toList())
+            .singleElement().satisfies(l -> {
+                assertThat(l).startsWith("ERROR ");
+                assertThat(l).contains("stage=tenant_list")
+                    .contains("error_class=java.lang.IllegalStateException")
+                    .contains("simulated: tenant list query failed")
+                    .contains("failed_passes_total=1");
+            });
+        assertThat(logs).as("a pass that never listed its tenants is not a run").noneMatch(l -> l.contains("event=reaper_run"));
+    }
+
+    @Test
     void aPassThatCompletesStampsItsTime_evenWhenItMovedNothing() throws Exception {
         // A candidates=0 pass writes no gc_audit row; this stamp is the only trace that the reaper is alive.
         String t = newTenant();
