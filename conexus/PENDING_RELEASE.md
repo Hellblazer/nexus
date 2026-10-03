@@ -77,6 +77,7 @@ ONE PATH PER BULLET, on the bullet's FIRST line.
 - cleanup step 13 (nexus-0r1uz): `conexus/skills/using-nx-skills/SKILL.md` describes the phase-review-gate checklist without the Pass 1 / Pass 2 and BLOCKED wording of the deleted verb.
 - cleanup step 13 (nexus-0r1uz): `conexus/registry.yaml` calls phase-review-gate a manual checklist that catches, not blocks, silent scope reduction.
 - cleanup step 13 (nexus-0r1uz): `conexus/README.md` calls phase-review-gate a manual checklist that catches, not blocks, silent scope reduction.
+- cleanup step A5 (nexus-0r1uz): `conexus/README.md` says the core server registers 2 internal `hook_*` tools, not 12; text only.
 
 ## Deferred to the next client release
 

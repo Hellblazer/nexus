@@ -564,11 +564,14 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 #: verification, the phase-review close gate, the three small hooks, the
 #: verification config reader and ``_plugin``); ``_hook_runtime`` 4 -> 3 with
 #: ``_config``. ``src/nexus/hooks`` 15 -> 14 at cleanup step A4, which deleted the
-#: unwired subagent git-write verb.
+#: unwired subagent git-write verb, and 14 -> 13 at cleanup step A5, which deleted
+#: ``_routing_lib``. ``conexus/hooks/scripts`` is re-measured at 11 (its
+#: ``routing/`` subdirectory counts, and the mailbox and version-lockstep
+#: scripts live there); the earlier floor of 1 was loose.
 _HOOK_CODE_ROOTS: dict[str, int] = {
-    "conexus/hooks/scripts": 1,
+    "conexus/hooks/scripts": 11,
     "sn/hooks/scripts": 5,
-    "src/nexus/hooks": 14,
+    "src/nexus/hooks": 13,
     "src/nexus/_hook_runtime": 3,
 }
 

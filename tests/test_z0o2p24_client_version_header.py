@@ -184,7 +184,6 @@ def test_the_httpx_scratch_store_sends_the_version() -> None:
 #: ``client_identity``'s docstring).
 _NOT_SENDERS: dict[str, str] = {
     # hooks: latency on every prompt / tool call
-    "nexus/hooks/_routing_lib.py": "hook",
     "nexus/hooks/mailbox_drain.py": "hook",
     # probes and admin calls of the engine; none writes a chunk
     "nexus/commands/daemon.py": "engine probe: GET /health",

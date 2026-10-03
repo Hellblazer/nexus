@@ -6417,8 +6417,9 @@ def _verify_t2_write_landed(
     nexus-zra63 (nexus-piqm5 Layer 2). ``db.put`` returning a row id proves
     the call returned, not that a row exists: a store that silently no-ops
     hands back the same success shape as one that wrote. Layer 1
-    (``subagent-stop-writes-scan.py``) catches writes that REPORTED failure by
-    reading the agent's transcript; it structurally cannot see this case,
+    (the SubagentStop transcript scan, since deleted) caught writes
+    that REPORTED failure by reading the agent's transcript; it structurally
+    could not see this case,
     because the transcript records the success string. So the only way to tell
     them apart is to read the value back.
 
