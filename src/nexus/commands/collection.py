@@ -503,7 +503,13 @@ def _aspects_from_config(*, dry_run: bool, yes: bool = False) -> None:
 @click.argument("name")
 @click.option("--yes", "-y", "--confirm", is_flag=True, help="Skip interactive confirmation prompt")
 def delete_cmd(name: str, yes: bool) -> None:
-    """Delete a T3 collection + cascade-purge taxonomy state (irreversible)."""
+    """Delete a T3 collection + cascade-purge taxonomy state (irreversible).
+
+    Deleting an origin also deletes its rows in its ``quarantine-`` siblings
+    (one gc_audit row per sibling). Deleting a ``quarantine-*`` collection
+    itself is the audited manual route for quarantined rows whose origin is
+    gone (gc_audit: quarantine_collection_delete).
+    """
     if not yes:
         click.confirm(f"Delete collection '{name}'? This cannot be undone.", abort=True)
 
@@ -530,8 +536,16 @@ def delete_cmd(name: str, yes: bool) -> None:
     pipeline_rows_deleted = cascade.pipeline_rows_deleted
     catalog_docs_deleted = cascade.catalog_docs_deleted
     catalog_projection_deleted = cascade.catalog_projection_deleted
+    quarantine_chunks_deleted = cascade.quarantine_chunks_deleted
 
+    from nexus.catalog.chunk_quarantine import is_quarantine_sibling_name  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+
+    # The one sanctioned name parser for the quarantine flag (no new raw parse sites, RDR-204).
+    is_quarantine_name = is_quarantine_sibling_name(name)
     parts: list[str] = []
+    # For a quarantine-* name the engine reports the rows it held under both keys; say them once, below.
+    if cascade.chunks_deleted and not is_quarantine_name:
+        parts.append(f"{cascade.chunks_deleted} chunks")
     if taxonomy_counts and any(taxonomy_counts.values()):
         parts.append(
             f"{taxonomy_counts['topics']} topics, "
@@ -547,6 +561,10 @@ def delete_cmd(name: str, yes: bool) -> None:
         parts.append(f"{catalog_docs_deleted} catalog docs")
     if catalog_projection_deleted:
         parts.append(f"{catalog_projection_deleted} catalog projection row")
+    if quarantine_chunks_deleted:
+        # nexus-wbfpw.68/.71: the origin's quarantine rows go with it, audited per sibling.
+        audit_op = "quarantine_collection_delete" if is_quarantine_name else "collection_delete_quarantine"
+        parts.append(f"{quarantine_chunks_deleted} quarantined chunks (gc_audit: {audit_op})")
     if parts:
         click.echo(f"Deleted: {name} ({'; '.join(parts)})")
     else:
@@ -1106,7 +1124,10 @@ def reindex_cmd(name: str, force: bool) -> None:
     from nexus.db.collection_purge import purge_collection_cascade  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
     click.echo(f"Deleting collection '{name}' ({before_count} chunks)...")
-    purge_collection_cascade(db, name)
+    # keep_quarantine: this verb re-registers the SAME name below, so the origin's rows in its
+    # quarantine- siblings stay restorable instead of being deleted with the old registration
+    # (nexus-wbfpw.71; `nx collection delete` takes them, this does not).
+    purge_collection_cascade(db, name, keep_quarantine=True)
 
     # 3b. Re-register the catalog_collections registry row the cascade just
     # deleted (nexus-ync6s): no re-index path calls register_collection, so

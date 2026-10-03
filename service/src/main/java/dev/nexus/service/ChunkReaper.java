@@ -60,7 +60,8 @@ import java.util.function.Supplier;
  * <p>The gates, in the order a pass meets them. A refusal is counted, logged at WARN, and written once to
  * {@code gc_audit} per state change (operation {@value #AUDIT_REFUSED}); a cloud operator has no engine log:
  * <ol>
- *   <li>per tenant, {@link Rdr192BackfillGate#requireComplete}: no verified backfill record, nothing is touched;</li>
+ *   <li>per tenant, {@link Rdr192BackfillGate#requireComplete}: no verified backfill record, nothing is touched
+ *       (unless the tenant holds no chunk and no manifest row at all: an empty tenant passes, nexus-wbfpw.73);</li>
  *   <li>per tenant, the quarantine siblings are expired first (before this pass adds to them), only the chunks
  *       this class tagged, never one a manifest row names, at most {@link #MAX_EXPIRY_ROWS} per sibling and pass;</li>
  *   <li>per collection: a {@code quarantine-} name is skipped (a quarantine sibling is expired, never reaped);
@@ -346,7 +347,8 @@ final class ChunkReaper {
      * row of the origin still names (benign, labelled {@code expiry_protected}, never a refusal). {@code refusal}
      * and {@code error} are null when absent; {@code refusal} is a skip (a lock wait timed out, or the sibling is
      * resting after repeated timeouts) or {@link Refusal#STATEMENT_TIMED_OUT}. Expiry has no floor, so it has no
-     * floor refusal.
+     * floor refusal. {@code expired} and {@code protectedCount} are what the sibling's earlier origins already
+     * deleted or protected, kept when a later origin ends the pass with a refusal or an error (nexus-wbfpw.53).
      */
     record ExpiryResult(String quarantineCollection, long expired, long protectedCount,
                         Refusal refusal, String error) {}
@@ -405,6 +407,14 @@ final class ChunkReaper {
             return (error != null && !wallClockCut)
                 || collections.stream().anyMatch(c -> c.error() != null)
                 || expiries.stream().anyMatch(e -> e.error() != null);
+        }
+
+        /**
+         * The tenant passed the gate cleanly and held nothing to look at: no collection and no quarantine sibling
+         * with chunks (nexus-wbfpw.73). Refused, errored and wall-clock-cut tenants are never empty.
+         */
+        boolean empty() {
+            return tenantRefusal == null && error == null && collections.isEmpty() && expiries.isEmpty();
         }
 
         int errors() {
@@ -506,6 +516,14 @@ final class ChunkReaper {
         return " consecutive=" + consecutive + (rest > 0 ? " it rests for the next " + rest + " pass(es)" : "");
     }
 
+    /**
+     * The empty-tenant test the production gate is built with (nexus-wbfpw.73): no chunk row and no manifest row,
+     * read under the tenant's RLS context with the same statement bound as the reaper's own enumeration.
+     */
+    static java.util.function.Predicate<String> emptyTenantProbe(ReaperRepository store) {
+        return tenant -> store.holdsNothing(tenant, Duration.ofMillis(STATEMENT_TIMEOUT_MS));
+    }
+
     ChunkReaper(ReaperRepository store, PgVectorRepository vectors, CatalogRepository catalog,
                 Rdr192BackfillGate gate, Supplier<? extends Collection<String>> tenants, Settings settings,
                 Clock clock) {
@@ -589,9 +607,12 @@ final class ChunkReaper {
      * These counts tell a working pass from one that did nothing useful. A tenant is refused when the backfill gate
      * kept the whole tenant out, and errored when it, one of its collections or one of its quarantine siblings threw
      * (a wall-clock cut is neither). A tenant that is neither is one the pass worked on, even if it found nothing to
-     * move. Served as {@code reaper.last_pass} on {@code GET /v1/status}.
+     * move. {@code tenantsEmpty} (nexus-wbfpw.73, appended) counts the visited tenants that were neither refused nor
+     * errored and held no chunk in any collection or quarantine sibling: the default tenant is always visited and is
+     * empty in cloud, so a client judging "did this pass work on anything" subtracts it from the visited count.
+     * Served as {@code reaper.last_pass} on {@code GET /v1/status}.
      */
-    record LastPass(int tenantsVisited, int tenantsErrored, int tenantsRefused) {
+    record LastPass(int tenantsVisited, int tenantsErrored, int tenantsRefused, int tenantsEmpty) {
         int tenantsOk() {
             return tenantsVisited - tenantsErrored - tenantsRefused;
         }
@@ -645,9 +666,13 @@ final class ChunkReaper {
             List<String> ordered = new ArrayList<>(new TreeSet<>(tenants.get()));
             tenantIds = rotated(ordered, resumeTenant);
         } catch (RuntimeException e) {
-            log.warn("event=reaper_run tenants=0 candidates=0 moved=0 audit_rows=0 expired=0 expiry_protected=0 "
-                + "refused=0 skipped=0 errors=1 wall_clock_cut=false error={}", e.getMessage(), e);
-            failedPassesTotal.incrementAndGet();
+            // A pass that could not list its tenants is a failed pass, logged as one (nexus-wbfpw.67, conexus-lv6t):
+            // it used to log a WARN event=reaper_run with errors=1, which an alert on reaper_pass_failed missed and a
+            // heartbeat on reaper_run read as alive. Same fields as runOnce's line for an escaped Throwable, in the same order,
+            // with stage= appended last so a filter written against that line matches this one too.
+            long n = failedPassesTotal.incrementAndGet();
+            log.error("event=reaper_pass_failed error_class={} error={} failed_passes_total={} stage=tenant_list",
+                e.getClass().getName(), e.getMessage(), n, e);
             RunResult failed = new RunResult(List.of(), false);
             lastRun.set(failed);
             return failed;
@@ -689,7 +714,8 @@ final class ChunkReaper {
         RunResult out = new RunResult(results, cut);
         lastRun.set(out);
         lastPass = new LastPass(results.size(), (int) results.stream().filter(TenantResult::failed).count(),
-            (int) results.stream().filter(r -> r.tenantRefusal() != null).count());
+            (int) results.stream().filter(r -> r.tenantRefusal() != null).count(),
+            (int) results.stream().filter(TenantResult::empty).count());
         lastCompletedPassAt = clock.instant().truncatedTo(ChronoUnit.SECONDS);
         return out;
     }
@@ -989,9 +1015,12 @@ final class ChunkReaper {
             return new ExpiryResult(quarantine, 0, 0, Refusal.STATEMENT_BACKOFF, null);
         }
         String cutoff = clock.instant().minus(settings.quarantineRetention()).truncatedTo(ChronoUnit.SECONDS).toString();
+        // Kept outside the try: a refusal or a failure on a LATER origin must report what the earlier origins of the
+        // same sibling already deleted (their rows are gone and audited; nexus-wbfpw.53 fixed the result and the log
+        // dropping them).
+        long expired = 0;
+        long protectedCount = 0;
         try {
-            long expired = 0;
-            long protectedCount = 0;
             for (String origin : store.taggedOrigins(tenant, quarantine, STATEMENT_TIMEOUT_MS)) {
                 if (!states.containsKey(origin)) {
                     // An origin with no catalog row is a catalog anomaly or a retired collection; nothing is expired
@@ -1019,9 +1048,10 @@ final class ChunkReaper {
                 // clears itself, counted with the other lock skips, never an error and never a refusal.
                 long n = lockTimeoutTotal.incrementAndGet();
                 log.info("event=reaper_expire_skipped tenant={} quarantine={} reason={} lock_timeout_total={} "
-                        + "detail={}", tenant, quarantine, Refusal.LOCK_TIMEOUT, n,
+                        + "expired_before_refusal={} expiry_protected_before_refusal={} detail={}", tenant, quarantine,
+                    Refusal.LOCK_TIMEOUT, n, expired, protectedCount,
                     "a lock wait timed out during expiry; retried next pass");
-                return new ExpiryResult(quarantine, 0, 0, Refusal.LOCK_TIMEOUT, null);
+                return new ExpiryResult(quarantine, expired, protectedCount, Refusal.LOCK_TIMEOUT, null);
             }
             if ("57014".equals(sqlState(e))) {
                 // The expiry (or the listing of the sibling's origins) hit its bound: a counted refusal, audited
@@ -1029,17 +1059,21 @@ final class ChunkReaper {
                 long timedOut = statementTimedOutTotal.incrementAndGet();
                 long rest = noteTimeout(key, pass);
                 long n = refusedTotal.incrementAndGet();
-                String detail = "the expiry statement exceeded its " + (STATEMENT_TIMEOUT_MS / 1000)
-                    + "s bound and deleted nothing; statement_timed_out_total=" + timedOut
+                String detail = "the expiry statement exceeded its " + (STATEMENT_TIMEOUT_MS / 1000) + "s bound and "
+                    + (expired > 0 ? "deleted " + expired + " chunk(s) of the origins it reached first, none after"
+                        : "deleted nothing")
+                    + "; statement_timed_out_total=" + timedOut
                     + streakDetail(timeoutStreaks.get(key).consecutive, rest);
-                log.warn("event=reaper_expire_refused tenant={} quarantine={} reason={} refused_total={} detail={}",
-                    tenant, quarantine, Refusal.STATEMENT_TIMED_OUT, n, detail);
+                log.warn("event=reaper_expire_refused tenant={} quarantine={} reason={} refused_total={} "
+                        + "expired_before_refusal={} expiry_protected_before_refusal={} detail={}", tenant, quarantine,
+                    Refusal.STATEMENT_TIMED_OUT, n, expired, protectedCount, detail);
                 recordRefusal(tenant, quarantine, Refusal.STATEMENT_TIMED_OUT, 0, 0, detail, List.of());
-                return new ExpiryResult(quarantine, 0, 0, Refusal.STATEMENT_TIMED_OUT, null);
+                return new ExpiryResult(quarantine, expired, protectedCount, Refusal.STATEMENT_TIMED_OUT, null);
             }
-            log.warn("event=reaper_expire_failed tenant={} quarantine={} error={}", tenant, quarantine,
+            log.warn("event=reaper_expire_failed tenant={} quarantine={} expired_before_refusal={} "
+                    + "expiry_protected_before_refusal={} error={}", tenant, quarantine, expired, protectedCount,
                 e.getMessage(), e);
-            return new ExpiryResult(quarantine, 0, 0, null, String.valueOf(e.getMessage()));
+            return new ExpiryResult(quarantine, expired, protectedCount, null, String.valueOf(e.getMessage()));
         }
     }
 

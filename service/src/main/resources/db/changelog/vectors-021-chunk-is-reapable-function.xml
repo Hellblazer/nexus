@@ -116,9 +116,34 @@
     It does not claim to order against other writers. The content upserts
     (PgVectorRepository.upsertChunks, CatalogRepository.upsertManifestChunkVectors)
     sort their chunk writes by chash within one (tenant, collection), which
-    makes every pass monotone in chash, but no test pins that, and the manifest
-    write itself is not under DeadlockRetry. A 40P01 against another writer
-    would be loud (an error, not a lost record) and retryable.
+    makes every pass monotone in chash, but no test pins that, and the trigger
+    locks chunk rows after the statement that fired it has locked its manifest
+    rows (in a combined write, after that transaction's own chunk upsert as
+    well), so key order cannot rule out a cycle across those two phases. The
+    manifest write is therefore under DeadlockRetry (nexus-wbfpw.66): every
+    transaction that writes catalog_document_chunks rows is opened through
+    CatalogRepository's manifestWriteTxn (ChashRepository.renameCollection wraps
+    the same way), so a 40P01 against another writer is retried as a whole
+    transaction, with per-attempt state discarded, rather than surfaced. Retry is
+    bounded at 4 attempts; when they are exhausted the 40P01 surfaces as it did
+    before. Retry is the whole defence, not an ordering guarantee.
+    What the evidence is, stated at its real strength. No production writer that
+    takes these locks in the opposite order has been observed. The one
+    counterpart identified by reading is two combined writes of two documents
+    that share chunks (CatalogRepository.writeManifestRows upserts the chunks a
+    document keeps BEFORE it deletes the document's old manifest rows): document
+    A keeps X and drops Y while document B keeps Y and drops X, and each
+    trigger then waits on a chunk row the other has locked. That is a reading of
+    the code, not an observation and not a test. ManifestWriteDeadlockRetryTest
+    builds its cycle with a superuser connection that holds a chunk row and then
+    asks for the document's manifest rows, and provokes a real 40P01 through
+    seven writers (writeManifest, writeManifestMany, appendManifestChunks,
+    appendManifestMany, purgeManifest, importChunksBatch, importChunk), asserting
+    the write then lands exactly once. The other writers (deleteCollectionTxn,
+    renameCollectionTxn, purgeTrash, rehomeCollection and
+    ChashRepository.renameCollection) have no provoked 40P01; they are covered
+    structurally by ManifestWriteRetryGateTest, which fails when a transaction
+    that writes the manifest is opened outside the retry.
     ChunkIsReapableIntegrationTest pins the ORDER BY and the lock clause in both
     function bodies (pg_get_functiondef), the concurrent shared-chunk drop, and
     the record's one-hour guard; the header's no-deadlock claim stops at the

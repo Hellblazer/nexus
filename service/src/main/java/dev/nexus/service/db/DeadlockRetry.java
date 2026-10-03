@@ -11,8 +11,13 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Supplier;
 
 /**
- * Shared deadlock-retry belt for the service's multi-row
- * {@code INSERT ... ON CONFLICT (...) DO UPDATE} write paths (bead nexus-ps9wb).
+ * Shared deadlock-retry belt for the service's write transactions: the multi-row
+ * {@code INSERT ... ON CONFLICT (...) DO UPDATE} paths it was written for (bead nexus-ps9wb),
+ * and, since nexus-wbfpw.66, every transaction that writes {@code catalog_document_chunks} rows
+ * (the manifest INSERT, UPSERT, DELETE and UPDATE paths, opened through
+ * {@code CatalogRepository.manifestWriteTxn}, plus {@code ChashRepository.renameCollection}).
+ * Those can deadlock against a chunk writer through vectors-021-3's statement triggers, not through
+ * the ON CONFLICT ordering the primary fix below addresses.
  *
  * <p><strong>Background.</strong> Two concurrent multi-row upsert batches into the
  * same table that touch an overlapping set of conflict keys in DIFFERENT arrival

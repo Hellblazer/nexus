@@ -154,10 +154,14 @@ def test_the_clock_the_row_reads_is_the_one_it_was_given() -> None:
 # ── alive but doing nothing (nexus-wbfpw.55 round 2, critique S4a) ─────────────────────────────────────────
 
 
-def _with_pass(visited: int, errored: int, refused: int, *, last: timedelta = timedelta(minutes=10)) -> dict:
+def _with_pass(visited: int, errored: int, refused: int, *, empty: int | None = None,
+               last: timedelta = timedelta(minutes=10)) -> dict:
+    """``empty=None`` leaves ``tenants_empty`` out, which is what an engine that predates nexus-wbfpw.73 sends."""
     body = _status(last=last)
     body["reaper"]["last_pass"] = {"tenants_visited": visited, "tenants_errored": errored,
                                    "tenants_refused": refused}
+    if empty is not None:
+        body["reaper"]["last_pass"]["tenants_empty"] = empty
     return body
 
 
@@ -188,6 +192,47 @@ def test_one_tenant_that_worked_keeps_the_row_green_even_beside_refused_ones() -
     r = _row(_with_pass(3, 1, 1))
     assert r.ok is True and not r.warn
     assert "last completed pass" in r.detail
+
+
+# ── tenants_empty (nexus-wbfpw.73): the default tenant is always visited and empty in cloud ──────────────────
+
+
+def test_every_visited_tenant_empty_reads_healthy_so_a_fresh_install_stays_green() -> None:
+    r = _row(_with_pass(1, 0, 0, empty=1))
+    assert r.ok is True and not r.warn
+    assert "last completed pass" in r.detail
+
+
+def test_the_empty_default_tenant_does_not_hide_every_real_tenant_being_refused() -> None:
+    # visited = default (empty) + two real tenants, both refused: errored + refused == nonempty, so it warns,
+    # where comparing against visited (3) would stay green forever.
+    r = _row(_with_pass(3, 0, 2, empty=1))
+    assert r.ok is False and r.warn is True
+    assert "2 refused" in r.detail and "visited 2 tenants" in r.detail
+
+
+def test_the_empty_default_tenant_does_not_hide_every_real_tenant_erroring() -> None:
+    r = _row(_with_pass(2, 1, 0, empty=1))
+    assert r.warn is True and "1 errored" in r.detail and "visited 1 tenant " in r.detail
+
+
+def test_one_real_tenant_that_worked_beside_an_empty_one_and_a_refused_one_stays_green() -> None:
+    r = _row(_with_pass(3, 0, 1, empty=1))
+    assert r.ok is True and not r.warn
+
+
+def test_an_old_engine_with_no_tenants_empty_reads_exactly_as_before() -> None:
+    assert _row(_with_pass(2, 0, 2)).warn is True          # every tenant refused: warns, as it always did
+    assert _row(_with_pass(3, 1, 1)).warn is False          # one worked: green
+    assert _row(_with_pass(1, 0, 1)).warn is True
+
+
+def test_an_unreadable_tenants_empty_is_read_as_zero_not_as_a_crash_or_a_free_pass() -> None:
+    for bad in ("1", True, -1, 5, None, 1.0):
+        body = _with_pass(2, 0, 2)
+        body["reaper"]["last_pass"]["tenants_empty"] = bad
+        r = _row(body)
+        assert r.warn is True and "2 refused" in r.detail, bad
 
 
 def test_a_pass_that_visited_no_tenant_is_not_alive_but_refusing_because_there_was_nothing_to_refuse() -> None:

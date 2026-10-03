@@ -317,7 +317,7 @@ def _run_reindex(monkeypatch: pytest.MonkeyPatch, name: str, col, cat, *, force:
     with patch("nexus.commands.collection._t3", return_value=db), \
          patch("nexus.catalog.factory.make_catalog_reader", side_effect=factory), \
          patch("nexus.db.collection_purge.purge_collection_cascade",
-               side_effect=lambda _db, n: purged.append(n)), \
+               side_effect=lambda _db, n, **_kw: purged.append(n)), \
          patch("nexus.doc_indexer.index_markdown", side_effect=_record):
         result = CliRunner().invoke(main, argv)
     return result, indexed, purged

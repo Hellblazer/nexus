@@ -76,6 +76,9 @@ class ChunksWriterLastWrittenAtScanTest {
             "collection re-home is maintenance: refreshing would keep an unowned chunk alive by moving it")),
         Map.entry("CatalogRepository#renameCollectionTxn", new Decision(Kind.EXEMPT, 1,
             "collection rename over COLLECTION_SCOPED_TABLES (chunks is one): maintenance, not a client re-write")),
+        Map.entry("QuarantineOrigin#retagRowsOf", new Decision(Kind.EXEMPT, 1,
+            "quarantine retag (nexus-wbfpw.68) merges only the origin_collection tag when an origin is renamed:"
+                + " maintenance, not a client re-write, and refreshing would extend a quarantined chunk's life")),
         Map.entry("CatalogRepository#moveScopedTable", new Decision(Kind.EXEMPT, 1,
             "collection move over COLLECTION_SCOPED_TABLES (chunks is one): maintenance, not a client re-write"))
     ));

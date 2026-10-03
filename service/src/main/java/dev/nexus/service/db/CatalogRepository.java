@@ -63,6 +63,7 @@ import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Function;
 
 /**
  * RDR-152 bead nexus-gmiaf.18 — Catalog store repository.
@@ -2638,7 +2639,11 @@ public final class CatalogRepository {
      */
     public Map<String, Object> purgeTrash(String tenant, int olderThanDays) {
         long[] totalRowsAffectedHolder = new long[1];
-        Map<String, Object> out = tenantScope.withTenant(tenant, ctx -> {
+        // nexus-wbfpw.66: nexus.purge_trash hard-deletes documents, and the fk-001 cascade deletes
+        // their catalog_document_chunks rows, which fires vectors-021-3's chunk-locking trigger; whole
+        // transaction retried on 40P01. The holder is assigned once per attempt, at the end of the
+        // lambda, and the VACUUM below runs only after the committed attempt returns.
+        Map<String, Object> out = manifestWriteTxn(tenant, "catalog.purgeTrash", ctx -> {
             long chunks384  = strandedChunkCount(ctx, tenant, DimTables.CHUNKS.get(384), olderThanDays);
             long chunks768  = strandedChunkCount(ctx, tenant, DimTables.CHUNKS.get(768), olderThanDays);
             long chunks1024 = strandedChunkCount(ctx, tenant, DimTables.CHUNKS.get(1024), olderThanDays);
@@ -4510,6 +4515,71 @@ public final class CatalogRepository {
     }
 
     /**
+     * The ONE way a transaction that writes {@code catalog_document_chunks} rows is opened
+     * (nexus-wbfpw.66): {@link TenantScope#withTenant} under {@link DeadlockRetry}, so a 40P01
+     * against a concurrent chunk writer is retried instead of surfacing.
+     *
+     * <p><b>Why these writers can deadlock.</b> A statement that drops an owner row fires
+     * vectors-021-3's statement triggers, which lock the dropped chunk rows
+     * ({@code FOR NO KEY UPDATE}, in key order) AFTER the statement has locked the manifest rows. A
+     * writer that already holds one of those chunk rows (the content upsert, a metadata refresh, the
+     * sweep) and then asks for one of the manifest rows closes a cycle. Key-ordering cannot rule
+     * that out, because the two locks sit on two tables taken in opposite order, so the whole
+     * transaction is retried.
+     *
+     * <p><b>Contract for {@code work}</b>, which runs once per attempt and is re-run from scratch
+     * after Postgres has already rolled the victim back:
+     * <ul>
+     *   <li>it must be only the database transaction; nothing it does outside the database may
+     *       happen inside it, because a retry would repeat it. A process-wide counter, a log line
+     *       that means "this happened", or a result handed to the caller are collected into
+     *       per-attempt holders that are ZEROED AT THE TOP of {@code work}, and acted on only after
+     *       this method returns (the same discipline as {@code PgVectorRepository}'s raced-embed
+     *       tally);</li>
+     *   <li>it must not itself be reached from inside another {@link DeadlockRetry}: a nested retry
+     *       multiplies attempts ({@code MAX_ATTEMPTS} squared) and re-runs the outer attempt's
+     *       earlier work. None of the callers of this repository is under one.</li>
+     * </ul>
+     * {@link DeadlockRetry} retries SQLSTATE 40P01 only. Any other error, 55P03 ({@code lock_timeout})
+     * included, propagates on the first attempt, and so does a 40P01 that is still there after
+     * {@code MAX_ATTEMPTS}. The post-commit sweep transaction ({@link #runSweepTransaction}) is NOT
+     * routed through here: it deletes chunk rows rather than writing the manifest, and it already
+     * fails open (a deadlock there is reported as {@code sweep_failed}, never an error).
+     */
+    private <T> T manifestWriteTxn(String tenant, String context, Function<DSLContext, T> work) {
+        return DeadlockRetry.run(context, () -> tenantScope.withTenant(tenant, work));
+    }
+
+    /**
+     * Per-attempt tally of the raced embeds {@link #upsertManifestChunkVectors} detects (RDR-222
+     * Phase 0): a chash the caller found ABSENT and paid to embed, already committed by another
+     * writer when this write's insert ran. The process-wide counter and the log line are acted on by
+     * {@link #flush} only after the transaction has COMMITTED, so a deadlock-retried attempt cannot
+     * count the same race twice.
+     */
+    private static final class RacedEmbeds {
+        long raced;
+        int embedded;
+        final List<String> sample = new ArrayList<>();
+
+        /** Zero at the top of every attempt. */
+        void reset() {
+            raced = 0;
+            embedded = 0;
+            sample.clear();
+        }
+
+        /** Call once, after the writing transaction has committed. */
+        void flush(String collection) {
+            if (raced > 0) {
+                log.info("event=upsert_embed_raced collection={} raced={} embedded={} raced_chashes={}",
+                        collection, raced, embedded, String.join(",", sample));
+                RacedEmbedActivity.record(raced);
+            }
+        }
+    }
+
+    /**
      * Replace manifest for docId with the provided rows (atomic delete +
      * insert), stamping {@code collection} on every row.
      *
@@ -4519,7 +4589,7 @@ public final class CatalogRepository {
      */
     public void writeManifest(String tenant, String docId, String collection, List<Map<String, Object>> rows) {
         requireNonBlank(collection, "collection");
-        tenantScope.withTenant(tenant, ctx -> {
+        manifestWriteTxn(tenant, "catalog.writeManifest " + collection, ctx -> {
             writeManifestRows(ctx, tenant, docId, collection, rows);
             return null;
         });
@@ -5021,7 +5091,7 @@ public final class CatalogRepository {
 
     private static String writeManifestRows(DSLContext ctx, String tenant, String docId,
                                           String collection, List<Map<String, Object>> rows) {
-        return writeManifestRows(ctx, tenant, docId, collection, rows, null, null, null, null);
+        return writeManifestRows(ctx, tenant, docId, collection, rows, null, null, null, null, null);
     }
 
     /**
@@ -5066,6 +5136,11 @@ public final class CatalogRepository {
      *        request-scoped set ONLY after this doc's transaction commits,
      *        never from inside it. Untouched when {@code resolvedChunks} is
      *        null.
+     * @param racedOut per-attempt tally of the raced embeds this doc's chunk
+     *        upsert detected (nexus-wbfpw.66): filled inside the transaction,
+     *        flushed by the caller only after the transaction commits, so a
+     *        deadlock-retried attempt cannot count a race twice. Ignored
+     *        (may be {@code null}) when {@code resolvedChunks} is null.
      * @return {@code collection}, unchanged — kept as the return type so the
      *         post-commit sweep step ({@link #runSweepTransaction},
      *         {@link #writeManifestMany}) has the collection to sweep
@@ -5076,7 +5151,8 @@ public final class CatalogRepository {
                                           Map<String, ResolvedChunk> resolvedChunks,
                                           int[] chunksWrittenOut,
                                           Set<String> writtenThisRequest,
-                                          List<String>[] writtenChashesOut) {
+                                          List<String>[] writtenChashesOut,
+                                          RacedEmbeds racedOut) {
         requireNonBlank(collection, "collection");
         // Case-1 duty only (RDR-191): does docId exist at all? A ghost
         // document (exists, no physical_collection) is no longer a special
@@ -5105,7 +5181,7 @@ public final class CatalogRepository {
         // the other.
         if (resolvedChunks != null) {
             int written = upsertManifestChunkVectors(ctx, tenant, collection, rows, resolvedChunks,
-                    writtenThisRequest == null ? Set.of() : writtenThisRequest, writtenChashesOut);
+                    writtenThisRequest == null ? Set.of() : writtenThisRequest, writtenChashesOut, racedOut);
             if (chunksWrittenOut != null) {
                 chunksWrittenOut[0] = written;
             }
@@ -5234,6 +5310,9 @@ public final class CatalogRepository {
      *        return path — {@code null} entries are never left unset so a
      *        caller reading it after a zero-row call sees an empty list, not
      *        a stale value from a previous call.
+     * @param racedOut per-attempt raced-embed tally (nexus-wbfpw.66), reset
+     *        here and filled when this insert hits a chash another writer
+     *        already committed; the caller flushes it after the commit.
      * @return count of chash rows actually written (INSERT ... ON CONFLICT)
      *         — this doc's contribution to the {@code chunks_written}
      *         response echo.
@@ -5242,10 +5321,14 @@ public final class CatalogRepository {
                                                    List<Map<String, Object>> rows,
                                                    Map<String, ResolvedChunk> resolved,
                                                    Set<String> writtenThisRequest,
-                                                   List<String>[] writtenChashesOut) {
+                                                   List<String>[] writtenChashesOut,
+                                                   RacedEmbeds racedOut) {
         if (writtenChashesOut != null) {
             writtenChashesOut[0] = List.of();
         }
+        // nexus-wbfpw.66: a retried attempt re-runs this from scratch, so the tally starts at zero here
+        // too (the caller zeroes it at the top of its attempt; this keeps a zero-row call honest).
+        racedOut.reset();
         if (rows == null || rows.isEmpty()) return 0;
         // (1.4.1) dedupe — first occurrence wins, matches
         // PgVectorRepository.upsertChunksInternal's `Set<String> seen` discipline.
@@ -5381,10 +5464,12 @@ public final class CatalogRepository {
             // RDR-222 Phase 0: another writer committed one of this combined write's
             // originally-absent chashes between CombinedWriteService's existence
             // partition and this per-doc INSERT — this write paid a duplicate embed
-            // for it.
-            log.info("event=upsert_embed_raced collection={} raced={} embedded={} raced_chashes={}",
-                    collection, raced, toWrite.size(), String.join(",", racedChashSample));
-            RacedEmbedActivity.record(raced);
+            // for it. Tallied here, counted and logged by the caller after the commit
+            // (nexus-wbfpw.66): this transaction can still be killed as a deadlock
+            // victim and re-run, and a count taken now would repeat.
+            racedOut.raced = raced;
+            racedOut.embedded = toWrite.size();
+            racedOut.sample.addAll(racedChashSample);
         }
         if (writtenChashesOut != null) {
             writtenChashesOut[0] = toWrite;
@@ -5579,9 +5664,10 @@ public final class CatalogRepository {
         // chash sees it as absent identically). Populated ONLY after a doc's
         // tenantScope.withTenant call returns (i.e. after that doc's transaction
         // COMMITS, see the writtenChashesHolder merge below) — a doc whose write
-        // throws and lands in `failed` never contributes, and a hypothetical future
-        // retry-wrapped attempt could not double-contribute either, since only a
-        // call that actually returns normally merges into this set.
+        // throws and lands in `failed` never contributes, and a DeadlockRetry-ed
+        // attempt (the per-doc transaction is retried since nexus-wbfpw.66) cannot
+        // double-contribute either, since only a call that actually returns normally
+        // merges into this set.
         Set<String> requestWrittenChashes = new HashSet<>();
         if (docs != null) {
             for (Map<String, Object> d : docs) {
@@ -5602,13 +5688,28 @@ public final class CatalogRepository {
                 Set<String>[] beforeHolder = new Set[1];
                 int[] chunksWrittenHolder = new int[1];
                 List<String>[] newlyWrittenChashesHolder = new List[1];
+                // nexus-wbfpw.66: everything the per-doc transaction below produces for the
+                // caller lives in these holders, ZEROED AT THE TOP of each attempt (the
+                // transaction runs under DeadlockRetry and is re-run from scratch after a
+                // 40P01), and is merged into the request-wide accumulators ONLY after the
+                // commit. docRefused used to be the request-wide completeRefused list itself,
+                // appended to from inside the transaction, so a retried attempt listed the same
+                // refusal twice.
+                List<Map<String, Object>> docRefused = new ArrayList<>();
+                RacedEmbeds docRaced = new RacedEmbeds();
                 try {
                     if (docId == null || docId.isBlank()) {
                         throw new IllegalArgumentException("'doc_id' required");
                     }
                     // (chunk_count folds inside writeManifestRows — nexus-b6enc
                     // F5 unified the fold for the single-doc and batch paths.)
-                    tenantScope.withTenant(tenant, ctx -> {
+                    manifestWriteTxn(tenant, "catalog.writeManifestMany " + collection, ctx -> {
+                        sweepOutcome[0] = null;
+                        beforeHolder[0] = null;
+                        chunksWrittenHolder[0] = 0;
+                        newlyWrittenChashesHolder[0] = null;
+                        docRefused.clear();
+                        docRaced.reset();
                         // RDR-223 P2.2 fix round (nexus-z0o2p.12): take the document's write
                         // locks BEFORE reading its previous manifest, in writeManifestRows's own
                         // order (document exists, sweep gate SHARED, index-run lock). Both locks
@@ -5659,38 +5760,46 @@ public final class CatalogRepository {
                                       return currentManifestChashes(ctx, tenant, docId);
                                   }, null);
                         long tBeforeReadEnd = System.nanoTime();
+                        // nexus-wbfpw.66: the two time accumulators (this one and writeNanosTotal) are NOT
+                        // zeroed per attempt, on purpose. They measure time spent, so EVERY attempt adds
+                        // to them, a deadlock-killed one included (the write phase adds in a finally
+                        // below). Backoff sleeps and the rollback fall in neither, so
+                        // write_manifest_many_timing still sums to <= total_ms.
                         beforeReadNanosTotal[0] += (tBeforeReadEnd - tBeforeReadStart);
                         boolean beforeReadFailed = sweep && beforeRead == null;
                         long tWriteStart = tBeforeReadEnd;
-                        writeManifestRows(ctx, tenant, docId, collection, rows,
-                                resolvedChunks, chunksWrittenHolder,
-                                requestWrittenChashes, newlyWrittenChashesHolder);
-                        if (beforeReadFailed) {
-                            // Nothing to compute — the before-read itself is what
-                            // failed, so `dropped` was never determined. Reported
-                            // as an honest errored=true outcome, never silently
-                            // absorbed into "nothing to sweep".
-                            Map<String, Object> failedRead = new LinkedHashMap<>();
-                            failedRead.put("doc_id", docId);
-                            failedRead.put("dropped", 0);
-                            failedRead.put("swept", 0);
-                            failedRead.put("kept", 0);
-                            failedRead.put("errored", true);
-                            failedRead.put("reason", "before_read_failed");
-                            putSweptChashes(failedRead, List.of());
-                            sweepOutcome[0] = failedRead;
-                        } else if (beforeRead != null) {
-                            // nexus-11gh6 rev 2 §2.3: capture `before` for the
-                            // POST-COMMIT dropped-chash computation below — this
-                            // lambda is the only place that has it. The actual
-                            // sweep DELETE no longer runs in this transaction.
-                            // RDR-223 P1.2: captured with sweep off too.
-                            beforeHolder[0] = beforeRead;
+                        try {
+                            writeManifestRows(ctx, tenant, docId, collection, rows,
+                                    resolvedChunks, chunksWrittenHolder,
+                                    requestWrittenChashes, newlyWrittenChashesHolder, docRaced);
+                            if (beforeReadFailed) {
+                                // Nothing to compute — the before-read itself is what
+                                // failed, so `dropped` was never determined. Reported
+                                // as an honest errored=true outcome, never silently
+                                // absorbed into "nothing to sweep".
+                                Map<String, Object> failedRead = new LinkedHashMap<>();
+                                failedRead.put("doc_id", docId);
+                                failedRead.put("dropped", 0);
+                                failedRead.put("swept", 0);
+                                failedRead.put("kept", 0);
+                                failedRead.put("errored", true);
+                                failedRead.put("reason", "before_read_failed");
+                                putSweptChashes(failedRead, List.of());
+                                sweepOutcome[0] = failedRead;
+                            } else if (beforeRead != null) {
+                                // nexus-11gh6 rev 2 §2.3: capture `before` for the
+                                // POST-COMMIT dropped-chash computation below — this
+                                // lambda is the only place that has it. The actual
+                                // sweep DELETE no longer runs in this transaction.
+                                // RDR-223 P1.2: captured with sweep off too.
+                                beforeHolder[0] = beforeRead;
+                            }
+                            if (completeHash != null) {
+                                stampCompleteIfVerified(ctx, tenant, docId, completeHash, rows.size(), docRefused);
+                            }
+                        } finally {
+                            writeNanosTotal[0] += (System.nanoTime() - tWriteStart);
                         }
-                        if (completeHash != null) {
-                            stampCompleteIfVerified(ctx, tenant, docId, completeHash, rows.size(), completeRefused);
-                        }
-                        writeNanosTotal[0] += (System.nanoTime() - tWriteStart);
                         return null;
                     });
                     // RDR-222 Phase 0 fix round (bead nexus-ulrjq): merge THIS doc's
@@ -5701,6 +5810,9 @@ public final class CatalogRepository {
                     if (newlyWrittenChashesHolder[0] != null) {
                         requestWrittenChashes.addAll(newlyWrittenChashesHolder[0]);
                     }
+                    // nexus-wbfpw.66: the committed attempt's refusals and raced embeds, once.
+                    completeRefused.addAll(docRefused);
+                    docRaced.flush(collection);
                     okDocs++;
                     totalRows += rows.size();
                     totalChunksWritten += chunksWrittenHolder[0];
@@ -5740,6 +5852,9 @@ public final class CatalogRepository {
                               tenant, docId, detail.get("reason"), detail.get("sqlstate"));
                     failed.add(docId);
                     failedDetail.add(detail);
+                    // nexus-wbfpw.66: the attempt that finally failed may have stamped a before_read_failed
+                    // outcome inside its rolled-back transaction; a failed doc reports no sweep outcome.
+                    sweepOutcome[0] = null;
                 }
                 if (sweep) {
                     Map<String, Object> outcome = sweepOutcome[0];
@@ -6411,7 +6526,18 @@ public final class CatalogRepository {
                                     List<Map<String, Object>> completeRefusedOut) {
         requireNonBlank(collection, "collection");
         int[] chunksWritten = new int[1];
-        tenantScope.withTenant(tenant, ctx -> {
+        // nexus-wbfpw.66: this transaction runs under DeadlockRetry and is re-run from scratch
+        // after a 40P01, so what it produces for the caller is held per attempt (zeroed at the
+        // top of the lambda) and handed over only after the commit: the refusals collected by the
+        // completion stamp and the raced-embed tally. `writtenChashesOut` is reassigned by
+        // upsertManifestChunkVectors on every attempt that reaches it, which every successful
+        // attempt does.
+        List<Map<String, Object>> attemptRefused = new ArrayList<>();
+        RacedEmbeds raced = new RacedEmbeds();
+        manifestWriteTxn(tenant, "catalog.appendManifestChunks " + collection, ctx -> {
+            chunksWritten[0] = 0;
+            attemptRefused.clear();
+            raced.reset();
             // Case-1 duty only (RDR-191): does docId exist at all? A ghost
             // document is no longer a special case -- its rows are stamped
             // with `collection` exactly like any other document's.
@@ -6442,7 +6568,7 @@ public final class CatalogRepository {
             // shared between two documents of one request is not counted as a race.
             if (resolvedChunks != null) {
                 chunksWritten[0] = upsertManifestChunkVectors(ctx, tenant, collection, rows,
-                        resolvedChunks, writtenThisRequest, writtenChashesOut);
+                        resolvedChunks, writtenThisRequest, writtenChashesOut, raced);
                 java.util.function.Consumer<DSLContext> hook = afterChunkUpsertHookForTests;
                 if (hook != null) hook.accept(ctx);
             }
@@ -6487,10 +6613,14 @@ public final class CatalogRepository {
             // collected, not thrown: the rows just written are correct.
             if (complete != null) {
                 stampCompleteIfVerified(ctx, tenant, docId, (String) complete.get("content_hash"),
-                        ((Number) complete.get("chunk_count")).intValue(), completeRefusedOut);
+                        ((Number) complete.get("chunk_count")).intValue(), attemptRefused);
             }
             return null;
         });
+        if (completeRefusedOut != null) {
+            completeRefusedOut.addAll(attemptRefused);
+        }
+        raced.flush(collection);
         return chunksWritten[0];
     }
 
@@ -6728,7 +6858,7 @@ public final class CatalogRepository {
      * loss under two different {@code gc_audit} rows.
      */
     public int purgeManifest(String tenant, String docId) {
-        return tenantScope.withTenant(tenant, ctx -> {
+        return manifestWriteTxn(tenant, "catalog.purgeManifest", ctx -> {
             int deleted = ctx.deleteFrom(CATALOG_DOCUMENT_CHUNKS)
                              .where(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(docId)).execute();
             // nexus-eldyi: guarded, fail loud. *deleted* counts
@@ -8089,17 +8219,45 @@ public final class CatalogRepository {
      * <p>Out of scope (stays client-side, RDR-164 CA-4/CA-5): the {@code pipeline.db}
      * streaming buffer and the entire local-mode (sqlite/Chroma) cascade.
      *
-     * <p>OUT OF {@code gc_audit}'s SCOPE too (nexus-sybbh reap-path enumeration),
-     * deliberately: {@code gc_audit} exists to attribute background reaps the caller
-     * does NOT directly observe (the ~233 lost {@code store_put} chunks it was built
-     * for went through the manifest-write sweep with zero forensic trace). This method
-     * is the opposite shape — a synchronous, explicit, caller-named destructive action
-     * whose FULL per-table row counts are already returned to the caller (see {@code
-     * counts} above) and logged, not a background sweep the caller has to reconstruct
-     * after the fact. Auditing it too would not add attribution the caller lacks.
+     * <p><b>gc_audit (nexus-wbfpw.68/.71, Sam 2026-10-03).</b> The delete of the collection's OWN rows is
+     * still out of {@code gc_audit}'s scope (nexus-sybbh reap-path enumeration), deliberately: {@code gc_audit}
+     * exists to attribute background reaps the caller does NOT directly observe, and this is a synchronous,
+     * explicit, caller-named action whose full per-table counts are returned to the caller. What the counts do
+     * not cover is the QUARANTINE copy of the data, and that is audited:
+     * <ul>
+     *   <li>deleting an ORIGIN {@code X} also deletes {@code X}'s rows from every registered quarantine
+     *       collection (tagged {@code origin_collection = X}, or untagged and sitting in {@code quarantine-X} or
+     *       in the sibling derived from {@code X}'s catalog row), one {@code collection_delete_quarantine}
+     *       {@code gc_audit} row per sibling that lost rows, and unregisters a sibling that this leaves empty.
+     *       The count is returned under {@code quarantine_chunks}. Before this the sibling was stranded with
+     *       rows nothing could expire;</li>
+     *   <li>deleting a {@code quarantine-*} collection is allowed (it is the audited manual route for rows whose
+     *       origin is gone) and writes one {@code quarantine_collection_delete} row carrying the chashes,
+     *       truncated at {@link #GC_AUDIT_MAX_CHASHES} with the count exact. The rows removed are reported under
+     *       both {@code chunks} and {@code quarantine_chunks}.</li>
+     * </ul>
+     * Not closed here: store-put and update-metadata on a {@code quarantine-*} name are not guarded, and the
+     * RDR-162 cross-model COPY keeps the source's quarantine rows with the source.
      */
     public Map<String, Integer> deleteCollection(String tenant, String name) {
-        Map<String, Integer> counts = deleteCollectionTxn(tenant, name);
+        return deleteCollection(tenant, name, false);
+    }
+
+    /**
+     * {@link #deleteCollection(String, String)} with an explicit choice about the origin's quarantine rows.
+     *
+     * @param keepQuarantine {@code true} leaves the origin's rows in its {@code quarantine-} siblings (no delete,
+     *                       no audit row, no sibling unregistered), for a caller that re-registers the SAME name
+     *                       straight away ({@code nx collection reindex}) and so keeps the rows restorable.
+     *                       Ignored for a {@code quarantine-*} name: deleting that collection removes its own rows.
+     */
+    public Map<String, Integer> deleteCollection(String tenant, String name, boolean keepQuarantine) {
+        DeleteOutcome outcome = deleteCollectionTxn(tenant, name, keepQuarantine);
+        Map<String, Integer> counts = outcome.counts();
+        // A quarantine sibling this delete emptied and unregistered: same post-commit eviction as the name itself.
+        for (String sibling : outcome.unregisteredSiblings()) {
+            CollectionRegistry.evict(tenant, sibling);
+        }
         // Post-commit (nexus-h8rf6 wave review): the registry row is gone; a stale
         // CollectionRegistry entry would make later writers silently skip
         // re-registration if the name is reused. Same post-commit discipline as
@@ -8139,11 +8297,18 @@ public final class CatalogRepository {
         ctx.execute("SET CONSTRAINTS nexus.fk_catalog_chunks_chunk DEFERRED");
     }
 
-    private Map<String, Integer> deleteCollectionTxn(String tenant, String name) {
-        return tenantScope.withTenant(tenant, ctx -> {
+    /** What {@link #deleteCollectionTxn} committed: the per-table counts, and the quarantine siblings it unregistered. */
+    private record DeleteOutcome(Map<String, Integer> counts, List<String> unregisteredSiblings) {}
+
+    private DeleteOutcome deleteCollectionTxn(String tenant, String name, boolean keepQuarantine) {
+        // nexus-wbfpw.66: DELETEs catalog_document_chunks rows (step 1b, and the fk-001 cascade of
+        // step 6), which fires vectors-021-3's chunk-locking trigger; whole transaction retried on 40P01.
+        // `counts` is built inside the lambda, so each attempt starts from an empty map.
+        return manifestWriteTxn(tenant, "catalog.deleteCollection " + name, ctx -> {
             deferManifestChunkFk(ctx);
 
             Map<String, Integer> counts = new LinkedHashMap<>();
+            List<String> unregisteredSiblings = new ArrayList<>();
             // 0. RDR-194 P3d (nexus-tk070.p3d): topic_assignments_chunk_fk
             //    (tenant_id, source_collection, doc_id) -> chunks(tenant_id,
             //    collection, chash), ON DELETE CASCADE, NOT deferrable -- deleting
@@ -8169,7 +8334,30 @@ public final class CatalogRepository {
             //    not three against chunks_384/768/1024 -- the cascade-count key
             //    collapses from three to one along with the table (was
             //    "chunks_384"/"chunks_768"/"chunks_1024").
-            counts.put("chunks", ctx.deleteFrom(CHUNKS).where(CHUNKS.COLLECTION.eq(name)).execute());
+            if (QuarantineOrigin.isQuarantineName(name)) {
+                // nexus-wbfpw.71: a deliberate delete of a quarantine collection is the audited manual route
+                // for rows whose origin is gone; the audit row carries the chashes the delete removed.
+                int removed = QuarantineOrigin.deleteQuarantineCollectionRows(ctx, tenant, name);
+                counts.put("chunks", removed);
+                // The rows removed ARE the quarantined chunks; the CLI reads this key to say how many went.
+                counts.put("quarantine_chunks", removed);
+            } else {
+                counts.put("chunks", ctx.deleteFrom(CHUNKS).where(CHUNKS.COLLECTION.eq(name)).execute());
+                // 1a. nexus-wbfpw.68/.71: the origin's rows in its quarantine siblings go with it, one audit row
+                //     per sibling, and a sibling this empties is unregistered the way the ghost sweep would.
+                //     Without this the sibling was stranded: nothing expires rows whose origin is gone.
+                //     keepQuarantine: a caller that re-registers the same name at once (reindex) keeps them.
+                Map<String, Integer> fromSiblings = keepQuarantine
+                    ? Map.of() : QuarantineOrigin.deleteRowsOf(ctx, tenant, name);
+                counts.put("quarantine_chunks", fromSiblings.values().stream().mapToInt(Integer::intValue).sum());
+                for (String sibling : fromSiblings.keySet()) {
+                    if (!collectionHoldsContent(ctx, sibling)) {
+                        ctx.deleteFrom(CATALOG_COLLECTIONS).where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)
+                            .and(CATALOG_COLLECTIONS.NAME.eq(sibling))).execute();
+                        unregisteredSiblings.add(sibling);
+                    }
+                }
+            }
             // 1b. nexus-o8dil.40 (RDR-191 F8d fix): the manifest cascade below
             //     (step 6) reaches catalog_document_chunks ONLY via fk-001's
             //     CASCADE off catalog_documents, scoped by the OWNING
@@ -8239,7 +8427,7 @@ public final class CatalogRepository {
             counts.put("catalog_documents", ctx.deleteFrom(CATALOG_DOCUMENTS).where(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION.eq(name)).execute());
             // 7. registry row LAST (RESTRICT children are now gone).
             counts.put("catalog_collections", ctx.deleteFrom(CATALOG_COLLECTIONS).where(CATALOG_COLLECTIONS.NAME.eq(name)).execute());
-            return counts;
+            return new DeleteOutcome(counts, unregisteredSiblings);
         });
     }
 
@@ -8489,6 +8677,10 @@ public final class CatalogRepository {
     public Map<String, Integer> renameCollection(String tenant, String oldName, String newName,
                                                    String expectedTargetSupersededBy,
                                                    String newContentType, String newOwnerId) {
+        // nexus-wbfpw.71: a rename re-homes chunks and registry rows with no audit row, so it is refused on a
+        // quarantine collection, as source or as target (the sanctioned verbs are restore and expiry).
+        QuarantineOrigin.requireNotQuarantine("rename", oldName);
+        QuarantineOrigin.requireNotQuarantine("rename", newName);
         Map<String, Integer> counts = renameCollectionTxn(tenant, oldName, newName, expectedTargetSupersededBy,
             newContentType, newOwnerId);
         // Post-commit (nexus-h8rf6 wave review): the canonical branch RETIRES the old
@@ -8782,7 +8974,10 @@ public final class CatalogRepository {
     private Map<String, Integer> renameCollectionTxn(String tenant, String oldName, String newName,
                                                         String expectedTargetSupersededBy,
                                                         String newContentTypeOrNull, String newOwnerIdOrNull) {
-        return tenantScope.withTenant(tenant, ctx -> {
+        // nexus-wbfpw.66: UPDATEs catalog_document_chunks.collection (both branches), which fires
+        // vectors-021-3's chunk-locking trigger; whole transaction retried on 40P01. `counts` is
+        // built inside the lambda, so each attempt starts from an empty map.
+        return manifestWriteTxn(tenant, "catalog.renameCollection " + oldName, ctx -> {
             Map<String, Integer> counts = new LinkedHashMap<>();
             // nexus-11gh6 rev 2 §3.2 (Hal Q1: gate the Java collection-move
             // paths in this bead). Both branches below bulk-repoint
@@ -8906,6 +9101,12 @@ public final class CatalogRepository {
                 counts.put("catalog_document_chunks",
                     ctx.update(CATALOG_DOCUMENT_CHUNKS).set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, newName)
                        .where(CATALOG_DOCUMENT_CHUNKS.COLLECTION.eq(oldName)).execute());
+                // nexus-wbfpw.68/.71: NO quarantine retag here, deliberately. This branch is the RDR-162
+                // cross-model COPY: oldName stays registered and live, and its quarantine rows carry
+                // oldName-model vectors. They stay oldName's (a restore into oldName works, and oldName's own
+                // later delete takes them with an audit row). Retagging them to newName would make them
+                // restorable only into a different model's collection (a dim_conflict, or wrong-model vectors
+                // at equal width) and strand them past oldName's delete.
                 return counts;
             }
 
@@ -9069,6 +9270,10 @@ public final class CatalogRepository {
             }
             // Override with the pre-count captured above -- see the comment there.
             counts.put("topic_assignments", topicAssignmentsPreCount);
+            // 2b. nexus-wbfpw.68: the quarantine rows tagged for oldName now name a collection that is gone.
+            //     Retag them to newName (an untagged row in oldName's siblings is tagged too), one audit row
+            //     per sibling. Sibling NAMES are not renamed: the engine finds a sibling by this tag.
+            QuarantineOrigin.retagRowsOf(ctx, tenant, oldName, newName);
 
             // 3. RETIRE the old registry row X as a superseded tombstone (nexus-cecqy).
             //
@@ -9276,10 +9481,17 @@ public final class CatalogRepository {
      *                       registered live collection
      */
     public RehomeResult rehomeCollection(String tenant, String source, String target) {
+        // nexus-wbfpw.71: a re-home UPDATEs chunks.collection with no audit row; refused on a quarantine name.
+        QuarantineOrigin.requireNotQuarantine("rehome", source);
+        QuarantineOrigin.requireNotQuarantine("rehome", target);
         if (source.equals(target)) {
             throw new RehomeRefused("source and target are the same collection: " + source);
         }
-        return tenantScope.withTenant(tenant, ctx -> {
+        // nexus-wbfpw.66: the chunks UPDATE below carries catalog_document_chunks.collection through the
+        // fk_catalog_chunks_chunk ON UPDATE CASCADE, so this transaction writes manifest rows (and fires
+        // vectors-021-3's chunk-locking trigger) without naming the table; whole transaction retried on
+        // 40P01. `moved` and `leftBehind` are built inside the lambda, so each attempt starts empty.
+        return manifestWriteTxn(tenant, "catalog.rehomeCollection " + source, ctx -> {
             // Same gate, same order, same reason as renameCollectionTxn: this
             // bulk-repoints the manifest's collection (via the cascade) and so shares
             // the manifest-INSERT hazard class against a concurrent sweep of either
@@ -9559,7 +9771,7 @@ public final class CatalogRepository {
                                     List<String> ghostNames, List<String> dormantNames) {}
 
     /** Per-row disposition {@link #sweepGhostsAndMarkDormant} assigns during its walk. */
-    private enum SweepDisposition { DELETED, MARKED_DORMANT, HELD_QUARANTINE, UNCHANGED }
+    private enum SweepDisposition { DELETED, MARKED_DORMANT, HELD_QUARANTINE, HELD_QUARANTINED_ORIGIN, UNCHANGED }
 
     private record SweptRow(String name, SweepDisposition disposition) {}
 
@@ -9569,6 +9781,12 @@ public final class CatalogRepository {
      * nexus-snm4y, refined by nexus-n060e). Walks every {@code
      * catalog_collections} row for {@code tenant} and, for each:
      * <ul>
+     *   <li>HOLDS it, untouched (reported under {@code quarantine_held}), when {@link #collectionHoldsContent}
+     *       is false but a registered quarantine collection still holds a row that is its own
+     *       ({@link QuarantineOrigin#holdsRowsOf}; nexus-wbfpw.71): an origin whose chunks all sit in
+     *       quarantine has no content of its own, and deleting its row would leave those rows with no live
+     *       origin. Checked first. Once those rows expire or are restored, the next sweep treats it as the
+     *       ghost it then is;</li>
      *   <li>DELETEs it when {@link #collectionHoldsContent} is false — a ghost:
      *       no row in any NON-audit {@link #COLLECTION_SCOPED_TABLES} entry names
      *       it — REGARDLESS of {@code lifecycle_state}, quarantine included. A
@@ -9691,7 +9909,16 @@ public final class CatalogRepository {
             for (var r : nameAndState) {
                 String name = r.value1();
                 String lifecycleState = r.value2();
-                if (!collectionHoldsContent(ctx, name)) {
+                boolean holdsContent = collectionHoldsContent(ctx, name);
+                if (!holdsContent && QuarantineOrigin.holdsRowsOf(ctx, tenant, name)) {
+                    // nexus-wbfpw.71: an ORIGIN whose chunks all sit in quarantine holds no content of its own,
+                    // so the ghost branch below would delete its registry row and leave those rows with no live
+                    // origin: restore refuses a non-live origin, the engine's expiry skips it, nx t3 gc refuses
+                    // its name. Held, neither deleted nor marked dormant, for as long as any registered
+                    // quarantine collection still holds a row that is its own (tagged for it, or untagged and
+                    // attributable to it alone). The sweep after those rows expire or are restored reclaims it.
+                    out.add(new SweptRow(name, SweepDisposition.HELD_QUARANTINED_ORIGIN));
+                } else if (!holdsContent) {
                     // nexus-n060e: a true ghost is reclaimed regardless of lifecycle_state --
                     // a drained quarantine sibling included. Checked BEFORE the quarantine
                     // branch below so a quarantine row never reaches that branch once it has
@@ -9749,7 +9976,15 @@ public final class CatalogRepository {
                         CollectionRegistry.evict(tenant, r.name());
                     }
                 }
-                case HELD_QUARANTINE -> held++; // nothing changed; no eviction needed
+                // Both holds report under quarantine_held (the wire key set is pinned); nothing changed either way.
+                case HELD_QUARANTINE -> held++;
+                case HELD_QUARANTINED_ORIGIN -> {
+                    held++;
+                    // The response carries a count only, so the names go to the log: an operator asking why a
+                    // ghost was not reclaimed finds the origin here (nexus-wbfpw.71).
+                    log.info("event=ghost_sweep_held_quarantined_origin tenant={} origin={} dry_run={}",
+                             tenant, r.name(), dryRun);
+                }
                 case UNCHANGED -> { }
             }
         }
@@ -10780,7 +11015,7 @@ public final class CatalogRepository {
      */
     public void importChunk(String tenant, String docId, String collection, Map<String, Object> row) {
         requireNonBlank(collection, "collection");
-        tenantScope.withTenant(tenant, ctx -> {
+        manifestWriteTxn(tenant, "catalog.importChunk " + collection, ctx -> {
             doImportChunk(ctx, tenant, docId, collection, row);
             return null;
         });
@@ -10798,7 +11033,7 @@ public final class CatalogRepository {
     public int importChunksBatch(String tenant, String docId, String collection, List<Map<String, Object>> rows) {
         requireNonBlank(collection, "collection");
         if (rows == null || rows.isEmpty()) return 0;
-        return tenantScope.withTenant(tenant, ctx -> {
+        return manifestWriteTxn(tenant, "catalog.importChunksBatch " + collection, ctx -> {
             // Conflict key: (tenant_id, doc_id, position). doc_id is constant for
             // this call (the {doc_id, rows} import envelope is per-document).
             var unique = new java.util.LinkedHashMap<Integer, Map<String, Object>>(rows.size());
@@ -11465,7 +11700,7 @@ public final class CatalogRepository {
         return v instanceof Number n ? n.longValue() : def;
     }
 
-    private String jsonOrNull(Object v) {
+    private static String jsonOrNull(Object v) {
         if (v == null) return null;
         if (v instanceof String sv) return sv.isBlank() ? null : sv;
         try { return MAPPER.writeValueAsString(v); } catch (Exception e) { return null; }
@@ -11529,8 +11764,11 @@ public final class CatalogRepository {
      * the delete it records is not an audit. {@link #recordGcAudit} (the CLIENT-facing
      * {@code POST /gc_audit/record} path) opens its own transaction via {@link
      * TenantScope#withTenant} and calls this with that transaction's {@code ctx}. Of the
-     * engine-side producers, only {@link #runSweepTransaction}'s sweep path actually calls
-     * this method — it wires an already-open {@code ctx} straight through. {@link
+     * engine-side producers, only {@link #runSweepTransaction}'s sweep path and {@link
+     * QuarantineOrigin} (collection delete and rename's quarantine rows, nexus-wbfpw.68/.71;
+     * package-private and static for that reason, so {@code ChashRepository} can write the same
+     * rows) actually call this method — each wires an already-open {@code ctx} straight
+     * through. {@link
      * #purgeTrash}'s {@code nexus.purge_trash} routine, {@code nexus.gc_quarantine_orphans},
      * and {@code nexus.gc_expire_quarantine} never cross the JVM boundary before writing
      * their own {@code gc_audit} row: each is audited SQL-side, INSERTing directly as the
@@ -11545,9 +11783,9 @@ public final class CatalogRepository {
      *
      * @return the new audit row's id
      */
-    private long insertGcAuditRow(DSLContext ctx, String tenant, String operation, String collection,
-                                   String actor, boolean dryRun, List<String> chashesHex,
-                                   Map<String, Object> extraDetails) {
+    static long insertGcAuditRow(DSLContext ctx, String tenant, String operation, String collection,
+                                  String actor, boolean dryRun, List<String> chashesHex,
+                                  Map<String, Object> extraDetails) {
         int fullCount = chashesHex.size();
         boolean truncated = fullCount > GC_AUDIT_MAX_CHASHES;
         List<String> stored = truncated ? chashesHex.subList(0, GC_AUDIT_MAX_CHASHES) : chashesHex;

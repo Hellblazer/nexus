@@ -40,9 +40,11 @@ import java.util.function.Supplier;
  *
  * <p>{@code reaper} (RDR-192 Phase 3 gate S5, bead nexus-wbfpw.56, ADDITIVE) is the engine reaper's liveness:
  * {@code {"enabled":true,"interval_seconds":3600,"wall_clock_budget_seconds":600,"last_completed_pass_at":"2026-10-02T07:00:00Z"|null,
- * "failed_passes_total":0,"last_pass":{"tenants_visited":3,"tenants_errored":0,"tenants_refused":0}|null}}, or
+ * "failed_passes_total":0,"last_pass":{"tenants_visited":3,"tenants_errored":0,"tenants_refused":0,"tenants_empty":1}|null}}, or
  * {@code {"enabled":false}} when no reaper is scheduled in this process. {@code last_pass} says what the last completed
- * pass did with its tenants, because a pass completes whatever they did. See {@link ReaperStatus}.
+ * pass did with its tenants, because a pass completes whatever they did; {@code tenants_empty} (nexus-wbfpw.73,
+ * ADDITIVE, last key) counts the visited tenants that held no chunk, which a client subtracts from {@code tenants_visited}
+ * before judging whether the pass worked on anything. See {@link ReaperStatus}.
  *
  * <p>{@code supplied_vector_mismatches_total} (RDR-223 P1.5, bead nexus-z0o2p.6, ADDITIVE) is
  * a process-wide, lifetime counter (see {@link SuppliedVectorMismatchActivity}) of client-supplied
@@ -58,7 +60,8 @@ import java.util.function.Supplier;
  * not folded into {@code local_embed_activity}/{@code embedder_activity}: unlike
  * every field in those two shapes, it has no embedder dimension — it is a
  * DB-write-layer count, identical across every embedder, so nesting it per
- * embedder would misrepresent it as per-embedder data.
+ * embedder would misrepresent it as per-embedder data. It counts the raced embeds of
+ * COMMITTED writes only (see {@link RacedEmbedActivity}'s "When it counts").
  *
  * <p>{@code process_start_time} (RDR-222 Phase 0 fix round, bead nexus-ulrjq,
  * critic #2, ADDITIVE) is the SAME value {@code /version}'s field of the same
@@ -201,8 +204,10 @@ public final class StatusHandler implements HttpHandler {
          * @param tenantsVisited tenants the pass reached (a wall-clock cut leaves the rest for the next pass)
          * @param tenantsErrored tenants where the tenant, a collection or a quarantine sibling threw
          * @param tenantsRefused tenants the RDR-192 backfill gate kept out whole
+         * @param tenantsEmpty   visited tenants that were neither refused nor errored and held no chunk anywhere
+         *                       (nexus-wbfpw.73, appended last; an engine without it omits the key)
          */
-        public record LastPass(int tenantsVisited, int tenantsErrored, int tenantsRefused) {}
+        public record LastPass(int tenantsVisited, int tenantsErrored, int tenantsRefused, int tenantsEmpty) {}
     }
 
     /**
@@ -256,7 +261,10 @@ public final class StatusHandler implements HttpHandler {
         body.append('}');
 
         // RDR-222 Phase 0 (bead nexus-ulrjq), [additive]: process-wide lifetime
-        // counter, not per-embedder — see this class's own javadoc.
+        // counter, not per-embedder — see this class's own javadoc. Counts raced embeds of
+        // COMMITTED writes only, from both feeders (RacedEmbedActivity): a rolled-back or
+        // deadlock-retried attempt adds nothing, and the combined-write feeder has done so
+        // only since nexus-wbfpw.66.
         body.append(",\"raced_embeds_total\":").append(RacedEmbedActivity.total());
 
         // RDR-223 P1.5 (bead nexus-z0o2p.6), [additive]: same shape and lifetime as the
@@ -298,7 +306,8 @@ public final class StatusHandler implements HttpHandler {
                 } else {
                     body.append("{\"tenants_visited\":").append(r.lastPass().tenantsVisited())
                         .append(",\"tenants_errored\":").append(r.lastPass().tenantsErrored())
-                        .append(",\"tenants_refused\":").append(r.lastPass().tenantsRefused()).append('}');
+                        .append(",\"tenants_refused\":").append(r.lastPass().tenantsRefused())
+                        .append(",\"tenants_empty\":").append(r.lastPass().tenantsEmpty()).append('}');
                 }
                 body.append('}');
             }

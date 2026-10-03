@@ -92,6 +92,8 @@ class _Battery:
         (e2e / "lib").mkdir(parents=True)
         shutil.copy(E2E / "release-battery.sh", e2e / "release-battery.sh")
         shutil.copy(E2E / "lib" / "candidate_engine.py", e2e / "lib" / "candidate_engine.py")
+        # The battery sources this at start and refuses without a python >= 3.10 (nexus-u67ow).
+        shutil.copy(E2E / "lib" / "python.sh", e2e / "lib" / "python.sh")
         # The real artifact_manifest.py recomputes this checkout's tree identity; a stub verifies or refuses.
         (e2e / "lib" / "artifact_manifest.py").write_text(
             "import sys\n" + ("print('{}')\n" if manifest_rc == 0 else

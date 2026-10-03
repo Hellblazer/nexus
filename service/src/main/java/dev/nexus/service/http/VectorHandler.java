@@ -1565,7 +1565,7 @@ public final class VectorHandler implements HttpHandler {
      * VectorHandlerManifestLessCensusRoutingTest}.
      */
     static void requireNotQuarantineCollection(String collection) {
-        if (collection != null && collection.startsWith("quarantine-")) {
+        if (dev.nexus.service.db.QuarantineOrigin.isQuarantineName(collection)) {
             throw new IllegalArgumentException(
                 "collection " + collection + " is a quarantine collection; quarantine rows "
                 + "are out of the manifest-less census and the reapable listing by construction (RDR-192 MVV (a))");

@@ -647,9 +647,11 @@ sees the first record with or without the lock (removing it leaves
 `aConcurrentDropOfASharedChunkLeavesItStamped` green). An earlier version of this section
 said the lock prevented a lost record; that was wrong. It does not claim to order against
 other writers. The content upserts sort their chunk writes by chash, so those passes are
-monotone in chash too, but nothing pins that, and the manifest write is not under
-`DeadlockRetry`; a 40P01 against another writer would be loud and retryable, not a lost
-record. `ChunkIsReapableIntegrationTest` pins the `ORDER BY` and the lock clause in both
+monotone in chash too, but nothing pins that. Every transaction that writes manifest rows
+is under `DeadlockRetry` (nexus-wbfpw.66, 2026-10-02; `CatalogRepository.manifestWriteTxn`),
+so a 40P01 against another writer is retried as a whole transaction, bounded at 4 attempts,
+and surfaces as before only on exhaustion; it was never a lost record.
+`ChunkIsReapableIntegrationTest` pins the `ORDER BY` and the lock clause in both
 function bodies with `pg_get_functiondef` (no behavioural test can fail on their removal,
 so the definition is the only place to hold them), pins that the bodies never UPDATE
 `nexus.chunks`, and pins the concurrent drop.
@@ -868,6 +870,23 @@ gate Step 9 describes. This is a hard prerequisite, not a nice-to-have, and
 is the reason Phase 1 exists as its own phase below rather than folding into
 Phase 2. Amended 2026-10-02 (Step 11): the prerequisite no longer gates
 removing the sweeps' notes-guard arms, because they are not removed.
+Amended 2026-10-03 (`nexus-wbfpw.73`): the per-tenant gate in front of the reaper
+(`Rdr192BackfillGate`, which reads the `rdr192-manifest-backfill` completion record) passes a
+tenant that is empty without that record. Empty reads at least as strictly as the client rung's
+own empty-listing branch (`_default_census` and `_cross_check_empty_listing` in
+`rdr192_manifest_backfill.py`, the branch that calls a tenant converged without a census): the
+tenant holds no chunk row in any collection, quarantine siblings included (the client's census
+skips quarantine), and, because the manifest's foreign key to `nexus.chunks` forbids a manifest row
+without its chunk, no manifest row either.
+Such a tenant has nothing to reap and nothing to backfill, and recording that fact took an
+`nx upgrade` with the tenant's own credential (a break-glass tenant such as `conexus-edge` is the
+case). The gate still never writes a completion, so the client rung stays the one recorder; a
+tenant that later gains content and has no record is refused again from the next pass; a tenant
+holding only `quarantine-*` chunks is not empty (its expiry is an irreversible delete, and the
+client rung sends it through the census). An empty tenant counts as visited and as neither
+refused nor errored in `reaper.last_pass`, which also gains an additive `tenants_empty` count that
+`nx doctor` subtracts from `tenants_visited` before judging "alive but doing nothing"; the gate logs
+`event=rdr192_backfill_gate_passed_empty_tenant` at DEBUG.
 
 ### Existing Infrastructure Audit
 
@@ -1079,6 +1098,13 @@ grown.
   recent pass visited tenants and none worked. Not yet closed: nothing automated runs
   `nx doctor` against a cloud engine, and the cloud gate has no leg that asserts the
   `reaper` key survives the edge (`nexus-wbfpw.50`).
+  Amended 2026-10-02 (`nexus-wbfpw.67`, conexus-lv6t): "logs its run on every pass, success or
+  failure" is now two lines, not one. A pass that runs to the end logs `event=reaper_run`; a pass
+  that fails as a whole logs `event=reaper_pass_failed` at ERROR instead, with no `reaper_run`
+  line, adds one to `failed_passes_total` and leaves `last_completed_pass_at` alone (`stage=tenant_list`
+  when it could not list its tenants; until this bead that path logged a zero-filled WARN
+  `reaper_run` with `errors=1`, which read as a completed pass to anything not filtering on its
+  `error=` text).
 - **The census reads a live document as `no-owner`** (Phase 3 gate O2). The census
   resolves a chunk's owner from its metadata (`catalog_doc_id`, then `doc_id`) or a
   note-shaped reverse match. A `docs__` or `code__` chunk written after RDR-108 carries no
@@ -1479,12 +1505,65 @@ change). Where this step says the reaper's quarantine is "expired by the existin
 - **The split is symmetric** (`vectors-026`): the client's expiry, `gc_expire_quarantine`
   (what `nx index repo` calls, and the `gc/expire-quarantine` route with or without
   `force`), skips tagged rows and deletes only untagged, client-moved rows, with its floor
-  judged on those rows alone. Each side expires only what it moved. One exception, a known gap
-  (`nexus-wbfpw.58`, open): the client derives the sibling's name from the catalog row, and
+  judged on those rows alone. Each side expires only what it moved. One exception, closed on the client
+  side (`nexus-wbfpw.58`): the client derives the sibling's name from the catalog row, and
   `catalog-044` rewrote that row's owner, so a client-moved chunk (untagged, which the engine's
-  expiry skips) whose origin was renamed that way has no expirer on either side. The cost is
-  storage: the chunk stays hidden, and `nx t3 quarantine restore` still reaches it through the
-  engine-resolved sibling set.
+  expiry skips) whose origin was renamed that way sat where neither expirer looked. `nx t3 gc`
+  now asks the engine which siblings hold the origin's chunks (a dry-run of the restore route
+  over an empty selection) and expires from each, reporting each on its own line. The index
+  path uses only the two derived names, the row-derived name and `quarantine-<origin name>`,
+  and sends no probe, because the probe is an unindexed scan engine-side and that path runs on
+  every `nx index repo`; a chunk stranded under a third name waits for `nx t3 gc`. The
+  re-reference restore is indexer-only and uses the same two names. `nexus-wbfpw.64` moves the
+  resolution into the engine's expire and restore-rereferenced routes and retires the probe.
+  Until a chunk is reached the cost is storage only: it stays hidden, and
+  `nx t3 quarantine restore` still reaches it through the engine-resolved sibling set. That
+  holds only while the origin itself is live: restore refuses a non-live origin
+  (`checkRestoreOrigin`), and `nx t3 gc` refuses a name neither the catalog nor T3 knows, so a
+  chunk whose origin collection is gone has no expirer and no restore. Production held 294 such
+  rows on 2026-10-03 (`nexus-wbfpw.65`); they were removed by hand the same day (`gc_audit` rows
+  10590 and 10591, operation `manual_expire_dead_origin_quarantine`), and the collection delete
+  below is the audited route for any later case. Sam ruled on 2026-10-03 (`nexus-wbfpw.68`, option (b)):
+  no engine expiry keyed on a missing origin (a missing origin correlates with a collection
+  wrongly mass-quarantined, and engine expiry has no floor). Dead-origin rows are removed by a
+  deliberate, audited collection delete, and the delete and canonical-rename producers no longer
+  create them (`nexus-wbfpw.71`):
+  - Deleting an origin `X` takes `X`'s rows from every registered quarantine collection in the
+    same transaction: rows tagged `origin_collection = X`, untagged rows in `quarantine-X` (the
+    reaper's name), and untagged rows in the sibling derived from `X`'s catalog row, but only
+    when `X` is the sole live collection with that row's owner, model, model version and content
+    type (when a twin shares them an untagged row could be either's, so neither claims it). It
+    writes one `collection_delete_quarantine` `gc_audit` row per sibling (chashes truncated at
+    5,000, count exact, `details` `origin_collection` and `count`) and unregisters a sibling that
+    this leaves empty. The count is `quarantine_chunks` in the response. A caller that
+    re-registers the same name at once (`nx collection reindex`) sends `keep_quarantine: true`
+    and the rows stay. Deleting a `quarantine-*` collection is allowed, writes one
+    `quarantine_collection_delete` row, and reports the rows as `quarantine_chunks`.
+  - Renaming `X` to `Y` on the canonical branch (and `/v1/chash/rename_collection` when `X` is no
+    longer a live registered collection) retags `X`'s quarantine rows to `origin_collection = Y`
+    (untagged rows follow the same attribution rule; sibling names do not change, because the
+    engine finds a sibling by the tag) and writes one `quarantine_retag` row per sibling
+    (`details` `from`, `to`, `count`). The RDR-162 cross-model COPY branch does NOT retag: the
+    source stays registered and live, its quarantine rows carry source-model vectors and stay
+    the source's (a restore into it works; its own later delete takes them, audited).
+  - The ghost sweep (`nx catalog sweep-ghosts`, the once-per-boot sweep) holds an origin whose
+    chunks all sit in quarantine instead of deleting its registry row, reported under
+    `quarantine_held`, so those rows keep a live origin; the engine logs the held names at INFO
+    (`event=ghost_sweep_held_quarantined_origin`). A held origin is a registered origin, so the
+    engine's rows in its siblings go on the ordinary 14 day engine expiry (before this, a
+    ghost-swept origin's rows were skipped for ever as `origin_not_registered`); once they expire
+    or are restored the next sweep reclaims the row. Client-moved rows wait for `nx t3 gc`, which
+    the floor still blocks (`nexus-wbfpw.74`, `nexus-wbfpw.75`), so the origin can stay registered
+    and empty; `nx collection delete <origin>` clears the hold and takes the rows, audited.
+  - Store-delete, rename and rehome refuse a `quarantine-*` name with a 400 that names
+    `nx t3 quarantine restore` and `nx t3 gc`.
+  - Not closed: `store-put` and `update-metadata` on a `quarantine-*` name are not guarded (they
+    can still write `origin_collection`), and a `rehome` of an origin does not carry its tags
+    (the source persists, so the rows stay with it). The twin-ambiguous untagged rows above stay
+    where they are.
+
+  None of the three new operations is in `QUARANTINING_OPERATIONS`: they do not move chunks into
+  quarantine, so `--audit-id` restore refuses them.
 - The engine's settings are in `docs/operations/engine-reaper.md` § Settings
   (`NX_REAPER_ENABLED`, `_INTERVAL_SECONDS`, `_BATCH_SIZE`, `_FLOOR_FRACTION`,
   `_FLOOR_MIN_CHUNKS`, `_FLOOR_EXEMPT_COLLECTIONS`, `_QUARANTINE_RETENTION_DAYS`,
@@ -1655,7 +1734,7 @@ can still return. As built (`nexus-wbfpw.26`):
 
 | Resource | List | Info | Delete | Verify | Backup |
 | --- | --- | --- | --- | --- | --- |
-| Superseded/reapable chunks | `nx store list --reapable` (Phase 3, Step 10) | In scope | In scope: the engine reaper and `nx t3 gc` QUARANTINE (restorable 14 days, then expired by the engine's `reaper_expire_quarantine` for chunks the reaper moved and by the client's `gc_expire_quarantine` for chunks the client moved) under a fraction floor on the move, and no floor on the engine's expiry (Sam, 2026-10-01; Step 9; the client keeps its floor on the untagged rows it expires itself) | `catalog doctor` check (Phase 4, Step 14) | N/A — content lives in the current chunk. Restore: `nx t3 quarantine restore` (`nexus-wbfpw.49`, Step 9), with `--reattach` so the chunk is visible again; a chunk with no live owner comes back hidden |
+| Superseded/reapable chunks | `nx store list --reapable` (Phase 3, Step 10) | In scope | In scope: the engine reaper and `nx t3 gc` QUARANTINE (restorable 14 days, then expired by the engine's `reaper_expire_quarantine` for chunks the reaper moved and by the client's `gc_expire_quarantine` for chunks the client moved) under a fraction floor on the move, and no floor on the engine's expiry (Sam, 2026-10-01; Step 9; the client keeps its floor on the untagged rows it expires itself). Rows whose origin is gone have no expirer by ruling (Sam, 2026-10-03): `nx collection delete` of the origin takes its quarantine rows with a `collection_delete_quarantine` audit row per sibling (`nx collection reindex` keeps them), `nx collection delete quarantine-<x>` is the audited manual route (`quarantine_collection_delete`), a canonical rename retags them (`quarantine_retag`; the cross-model COPY keeps them with the live source), the ghost sweep holds an origin whose rows sit in quarantine, and store-delete, rename and rehome refuse a `quarantine-*` name (`nexus-wbfpw.68`, `.71`); store-put and update-metadata on a `quarantine-*` name stay unguarded | `catalog doctor` check (Phase 4, Step 14) | N/A — content lives in the current chunk. Restore: `nx t3 quarantine restore` (`nexus-wbfpw.49`, Step 9), with `--reattach` so the chunk is visible again; a chunk with no live owner comes back hidden |
 
 ### New Dependencies
 
@@ -2051,7 +2130,7 @@ the doctor check narrowed to `knowledge__` (Step 14).
   minted. (2) CA3 is marked verified (`nexus-wbfpw.3`), the two Prerequisite boxes are checked
   (`.1`, `.2`, `.3`), and the Finalization Gate sections are filled in. (3) Statements the build
   overtook: the reaper's move has a floor and only the `gc_quarantine_orphans` route has none
-  (`nexus-wbfpw.52`); "each side expires only what it moved" gains the `nexus-wbfpw.58` exception;
+  (`nexus-wbfpw.52`); "each side expires only what it moved" gains the `nexus-wbfpw.58` exception (closed client-side for `nx t3 gc`; the index path uses two names; `nexus-wbfpw.64` is the engine-side resolution);
   Day-2 "none on expiry" is the engine's expiry only; Test Plan scenario 3 names each consumer's
   gate as the protection; the `reaper_quarantine_chunks` waiver in `ReapableConsumersScanTest` is
   stated. (4) Drifted file and line pointers are replaced by test and method names, and a pointer
@@ -2059,3 +2138,6 @@ the doctor check narrowed to `knowledge__` (Step 14).
   promises the reaper collects the chunk unconditionally, and with no drop list it no longer claims
   replaced chunks were not removed (Step 13). The operator runbook gains the rename-then-restore
   limit.
+- 2026-10-03: The backfill gate passes an empty tenant (bead `nexus-wbfpw.73`; text only, no status
+  change). Legacy-note backfill prerequisite carries the amendment: no chunk row
+  means no completion record is needed, and the gate writes none.

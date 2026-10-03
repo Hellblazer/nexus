@@ -41,6 +41,10 @@ export NX_NO_TELEMETRY=1
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+# One interpreter >= 3.10, resolved once; never a bare python3 (nexus-u67ow).
+# shellcheck source=lib/python.sh disable=SC1091
+source "$REPO_ROOT/tests/e2e/lib/python.sh"
+e2e_python_resolve || exit 2
 # nexus-0kmat: candidate-engine plumbing (NX_CANDIDATE_ENGINE / NX_CUT_MODE).
 # shellcheck source=tests/e2e/lib/candidate_engine.sh disable=SC1091
 source "$SCRIPT_DIR/lib/candidate_engine.sh"
@@ -51,7 +55,7 @@ source "$SCRIPT_DIR/lib/candidate_engine.sh"
 # it — the harness's own automation identity, never the operator's
 # interactive login.
 _cred_tool() {
-    python3 "$REPO_ROOT/tests/e2e/lib/claude_credentials.py" "$@"
+    "$E2E_PYTHON" "$REPO_ROOT/tests/e2e/lib/claude_credentials.py" "$@"
 }
 # nexus-mfage fix B item 3: NEXUS_SANDBOX_HOME overrides the fixed
 # $HOME/nexus-sandbox so two sandbox gates (smoke and shakedown in one
@@ -86,7 +90,7 @@ _die() { echo "ERROR: $*" >&2; exit 1; }
 # by smoke/shakedown). Factored out rather than duplicated per-mode.
 _svc_field() {  # $1 = json key
     nx daemon service status --json 2>/dev/null \
-        | python3 -c "import sys,json;print(json.load(sys.stdin).get('$1',''))" \
+        | "$E2E_PYTHON" -c "import sys,json;print(json.load(sys.stdin).get('$1',''))" \
         2>/dev/null || true
 }
 
@@ -99,7 +103,7 @@ _svc_field() {  # $1 = json key
 # on any parse failure so a caller's arithmetic never sees a bare newline.
 _catalog_counts() {
     nx catalog stats --json 2>/dev/null \
-        | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('documents',0), d.get('chunks',0))" \
+        | "$E2E_PYTHON" -c "import sys,json; d=json.load(sys.stdin); print(d.get('documents',0), d.get('chunks',0))" \
         2>/dev/null || echo "0 0"
 }
 
@@ -243,7 +247,7 @@ _DOCTOR_CORPUS_INTEGRITY_LABELS=(
 # explicitly rather than silently read as "all clean" -- the same
 # fail-loud-never-fail-open discipline health.py itself uses.
 _doctor_corpus_integrity_regressions() {
-    python3 -c '
+    "$E2E_PYTHON" -c '
 import json, sys
 named = set(sys.argv[1:])
 try:
@@ -275,7 +279,7 @@ for c in data.get("checks", []):
 # fallback quietly substituting a different engine.
 _mineru_doctor_verdict() {
     # stdin: `nx doctor --check-mineru` output → "OK" or "FAIL|<cause>"
-    python3 -c '
+    "$E2E_PYTHON" -c '
 import sys
 out = sys.stdin.read()
 lines = [l for l in out.splitlines() if "MinerU" in l]
@@ -303,7 +307,7 @@ _new_chunk_ids() {
 
 _extractor_identity_verdict() {
     # stdin: `nx store get <chunk-id>` output → "OK" or "FAIL|<cause>"
-    python3 -c '
+    "$E2E_PYTHON" -c '
 import sys
 out = sys.stdin.read()
 for line in out.splitlines():

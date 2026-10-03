@@ -39,6 +39,10 @@ diag_arm_err_trap
 trap 'diag_exit_guard' EXIT
 REPO_ROOT="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
+# One interpreter >= 3.10, resolved once; never a bare python3 (nexus-u67ow).
+# shellcheck source=lib/python.sh disable=SC1091
+source "$SCRIPT_DIR/../lib/python.sh"
+e2e_python_resolve || exit 2
 
 OUT="${1:-}"
 [ -n "$OUT" ] || { echo "usage: $0 <artifacts-dir> [--no-native]" >&2; exit 2; }
@@ -55,7 +59,7 @@ OUT="$(cd "$OUT" && pwd)"
 
 RELEASE_PROPS="service/src/main/resources/META-INF/nexus/release.properties"
 [ -f "$RELEASE_PROPS" ] || { echo "FATAL: $RELEASE_PROPS missing" >&2; exit 2; }
-RELEASE_VERSION="$(python3 -c '
+RELEASE_VERSION="$("$E2E_PYTHON" -c '
 import re, pathlib
 src = pathlib.Path("src/nexus/engine_version.py").read_text()
 m = re.search(r"REQUIRED_ENGINE_VERSION[^=]*=\s*\((\d+),\s*(\d+),\s*(\d+)\)", src)
@@ -64,8 +68,8 @@ print(".".join(m.groups()) if m else "")
 [ -n "$RELEASE_VERSION" ] || { echo "FATAL: could not parse REQUIRED_ENGINE_VERSION" >&2; exit 2; }
 
 # Identity is taken BEFORE the stamp (the stamp file is excluded anyway).
-IDENTITY_JSON="$(python3 "$SCRIPT_DIR/../lib/tree_identity.py" "$REPO_ROOT")"
-echo "[artifacts] tree $(python3 -c 'import json,sys;d=json.loads(sys.argv[1]);print(d["tree_hash"][:12], "HEAD", d["head_sha"][:12], "dirty" if d["dirty"] else "clean", d["file_count"], "files")' "$IDENTITY_JSON")"
+IDENTITY_JSON="$("$E2E_PYTHON" "$SCRIPT_DIR/../lib/tree_identity.py" "$REPO_ROOT")"
+echo "[artifacts] tree $("$E2E_PYTHON" -c 'import json,sys;d=json.loads(sys.argv[1]);print(d["tree_hash"][:12], "HEAD", d["head_sha"][:12], "dirty" if d["dirty"] else "clean", d["file_count"], "files")' "$IDENTITY_JSON")"
 
 # shellcheck source=../../../scripts/lib/release-props-lease.sh disable=SC1091
 source "$REPO_ROOT/scripts/lib/release-props-lease.sh"
@@ -137,7 +141,7 @@ else
   echo "[artifacts] 3/3 native candidate SKIPPED (--no-native)"
 fi
 
-python3 - "$OUT" "$IDENTITY_JSON" "$RELEASE_VERSION" "$BUILD_REF" "$WITH_NATIVE" <<'PY'
+"$E2E_PYTHON" - "$OUT" "$IDENTITY_JSON" "$RELEASE_VERSION" "$BUILD_REF" "$WITH_NATIVE" <<'PY'
 import hashlib, json, os, sys, time
 out, identity, release_version, build_ref, with_native = sys.argv[1:6]
 def sha(p):

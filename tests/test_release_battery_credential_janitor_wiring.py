@@ -23,7 +23,9 @@ JANITOR = REPO_ROOT / "scripts" / "credential_janitor.py"
 _DEFINE_LEG_RE = re.compile(
     r"define_leg\s+janitor\s+group\s+"
     r'"CREDENTIAL JANITOR \(PASSED\|FAILED\)"\s+'
-    r"python3 scripts/credential_janitor\.py\b"
+    # The battery resolves one interpreter and every leg runs it (nexus-u67ow): a bare python3 is
+    # whatever the box ships first, 3.9.6 on hellmini.
+    r'"\$E2E_PYTHON" scripts/credential_janitor\.py\b'
 )
 
 
@@ -35,7 +37,7 @@ def test_janitor_leg_is_defined_in_the_group_phase() -> None:
     text = BATTERY.read_text()
     assert _DEFINE_LEG_RE.search(text), (
         "expected a `define_leg janitor group \"CREDENTIAL JANITOR "
-        "(PASSED|FAILED)\" python3 scripts/credential_janitor.py` line in "
+        "(PASSED|FAILED)\" \"$E2E_PYTHON\" scripts/credential_janitor.py` line in "
         f"{BATTERY} -- a leg missing from define_leg never runs and never "
         "appears in the battery report"
     )

@@ -20,6 +20,10 @@
 set -euo pipefail
 
 BENCH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# One interpreter >= 3.10, resolved once; never a bare python3 (nexus-u67ow).
+# shellcheck source=lib/python.sh disable=SC1091
+source "$BENCH_DIR/../lib/python.sh"
+e2e_python_resolve || exit 2
 OUT_DIR="${1:-$BENCH_DIR/results-$(date +%Y%m%d-%H%M%S)}"
 REPO_URL="${REPO_URL:-https://github.com/fastapi/fastapi.git}"
 REPO_REF="${REPO_REF:-0.115.0}"
@@ -54,11 +58,11 @@ for w in $WORKER_COUNTS; do
     rm -rf "$run_dir/.git" && git -C "$run_dir" init -q && git -C "$run_dir" add -A -f >/dev/null 2>&1 || true
 
     echo "=== workers=$w corpus=$run_dir ==="
-    start=$(python3 -c 'import time; print(time.time())')
+    start=$("$E2E_PYTHON" -c 'import time; print(time.time())')
     NX_INDEX_CONCURRENCY="$w" uv run nx index repo "$run_dir" --force --debug-timing \
         > "$OUT_DIR/w$w.log" 2>&1
-    end=$(python3 -c 'import time; print(time.time())')
-    python3 -c "print($end - $start)" > "$OUT_DIR/w$w.wall"
+    end=$("$E2E_PYTHON" -c 'import time; print(time.time())')
+    "$E2E_PYTHON" -c "print($end - $start)" > "$OUT_DIR/w$w.wall"
     echo "workers=$w wall=$(cat "$OUT_DIR/w$w.wall")s"
 done
 

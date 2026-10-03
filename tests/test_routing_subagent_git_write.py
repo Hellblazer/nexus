@@ -1432,8 +1432,11 @@ class TestNexus3c92mRound6SplicedExpansions:
             return best * 1000
 
         unit = chr(36) + "{v}ar" + chr(36) + "{i}able "
-        small = "git " + unit * 300 + "checkout"
-        large = "git " + unit * 3000 + "checkout"  # 10x small
+        # 3000/30000 units, not 300/3000: at 300 the small scan is ~0.2 ms of CPU, so one contended
+        # sample on a busy -n 8 box (CI qwen-linux, 2026-10-02: 4.9 ms where 2.5 is normal) pushed the
+        # ratio past 20x on a scan that measures linear (0.22 / 2.54 / 28.8 ms at 300 / 3000 / 30000).
+        small = "git " + unit * 3000 + "checkout"
+        large = "git " + unit * 30000 + "checkout"  # 10x small
         ms_small = scan_ms(small)
         ms_large = scan_ms(large)
 

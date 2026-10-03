@@ -216,7 +216,14 @@ public final class ChashRepository {
                 || newCollection == null || newCollection.isBlank()) {
             throw new IllegalArgumentException("old and new collection must not be empty");
         }
-        int updated = tenantScope.withTenant(tenant, ctx -> {
+        // nexus-wbfpw.71: a re-home with no audit row; refused on a quarantine collection, source or target.
+        QuarantineOrigin.requireNotQuarantine("rename", oldCollection);
+        QuarantineOrigin.requireNotQuarantine("rename", newCollection);
+        // nexus-wbfpw.66: the manifest re-home below UPDATEs catalog_document_chunks.collection, which
+        // fires vectors-021-3's chunk-locking trigger, so this whole transaction is retried on a 40P01
+        // (the same wrap CatalogRepository.renameCollectionTxn carries). Everything it produces is the
+        // `total` it returns; the registry cache update runs after the committed attempt returns.
+        int updated = DeadlockRetry.run("chash.renameCollection " + oldCollection, () -> tenantScope.withTenant(tenant, ctx -> {
             // nexus-11gh6 (post-review, T2 nexus/review-11gh6-gate-2026-08-08
             // [21797] Important finding): this method is a SECOND,
             // independently-reachable (via /v1/chash/*) implementation of the
@@ -274,8 +281,17 @@ public final class ChashRepository {
                .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(tenant)
                    .and(CATALOG_DOCUMENT_CHUNKS.COLLECTION.eq(oldCollection)))
                .execute();
+            // nexus-wbfpw.68: quarantine rows tagged for oldCollection now name a collection that is gone;
+            // retag them to newCollection (an audit row per sibling). The chunk count returned stays the
+            // origin's own rows. NOT when oldCollection is still a live registered collection: this route
+            // also serves the RDR-162 cross-model cascade, where the source stays registered and live and its
+            // quarantine rows (source-model vectors) stay with it, exactly as the catalog's COPY branch
+            // leaves them. A canonical rename retires the source row first, so this call is then a no-op.
+            if (!QuarantineOrigin.isLiveRegistered(ctx, tenant, oldCollection)) {
+                QuarantineOrigin.retagRowsOf(ctx, tenant, oldCollection, newCollection);
+            }
             return total;
-        });
+        }));
         // Post-commit (nexus-h8rf6.2): see CollectionRegistry class doc. newCollection's
         // row already existed before this transaction (ensureCollectionRegistered
         // verified it above), so lookup() below is a cache hit in the common case —

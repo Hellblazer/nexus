@@ -374,6 +374,72 @@ def test_delete_surfaces_cascade_failures(runner, env_creds, mock_db) -> None:
     assert "catalog cascade failed: boom" in result.output
 
 
+def test_delete_reports_the_quarantine_rows_the_engine_took_with_the_origin(runner, env_creds, mock_db) -> None:
+    """nexus-wbfpw.68/.71: deleting an origin takes its quarantine rows in the same engine
+    transaction, one gc_audit row per sibling. The user must see that they went."""
+    from nexus.db.collection_purge import CascadeCounts
+
+    fake = CascadeCounts(quarantine_chunks_deleted=7)
+    with patch("nexus.db.collection_purge.purge_collection_cascade", return_value=fake):
+        result = _invoke(runner, mock_db, ["delete", "old", "--yes"])
+
+    assert result.exit_code == 0, result.output
+    assert "7 quarantined chunks" in result.output
+    assert "collection_delete_quarantine" in result.output
+
+
+def test_delete_prints_the_chunk_count_it_removed(runner, env_creds, mock_db) -> None:
+    from nexus.db.collection_purge import CascadeCounts
+
+    with patch(
+        "nexus.db.collection_purge.purge_collection_cascade",
+        return_value=CascadeCounts(chunks_deleted=41),
+    ):
+        result = _invoke(runner, mock_db, ["delete", "old", "--yes"])
+
+    assert result.exit_code == 0, result.output
+    assert "41 chunks" in result.output
+
+
+def test_delete_does_not_ask_to_keep_quarantine_rows(runner, env_creds, mock_db) -> None:
+    """nexus-wbfpw.71: `nx collection delete` takes the origin's quarantine rows (audited); only
+    reindex, which re-registers the same name, opts out."""
+    from nexus.db.collection_purge import CascadeCounts
+
+    with patch(
+        "nexus.db.collection_purge.purge_collection_cascade", return_value=CascadeCounts(),
+    ) as cascade:
+        result = _invoke(runner, mock_db, ["delete", "old", "--yes"])
+
+    assert result.exit_code == 0, result.output
+    assert "keep_quarantine" not in str(cascade.call_args)
+
+
+def test_delete_of_a_quarantine_collection_prints_the_rows_it_removed_once(runner, env_creds, mock_db) -> None:
+    """nexus-wbfpw.71: the audited manual route for rows whose origin is gone must tell the operator
+    how many went and which gc_audit operation recorded it (the engine reports the rows under both
+    ``chunks`` and ``quarantine_chunks``; they are the same rows)."""
+    from nexus.db.collection_purge import CascadeCounts
+
+    fake = CascadeCounts(chunks_deleted=294, quarantine_chunks_deleted=294)
+    with patch("nexus.db.collection_purge.purge_collection_cascade", return_value=fake):
+        result = _invoke(runner, mock_db, ["delete", "quarantine-code__x__minilm-l6-v2-384__v1", "--yes"])
+
+    assert result.exit_code == 0, result.output
+    assert "294 quarantined chunks (gc_audit: quarantine_collection_delete)" in result.output
+    assert result.output.count("294") == 1
+
+
+def test_delete_says_nothing_about_quarantine_when_none_went(runner, env_creds, mock_db) -> None:
+    from nexus.db.collection_purge import CascadeCounts
+
+    with patch("nexus.db.collection_purge.purge_collection_cascade", return_value=CascadeCounts()):
+        result = _invoke(runner, mock_db, ["delete", "old", "--yes"])
+
+    assert result.exit_code == 0, result.output
+    assert "quarantine" not in result.output
+
+
 # ── prune (nexus-9tsdf / GH #1113) ──────────────────────────────────────────
 
 
@@ -646,7 +712,7 @@ def test_reindex_routes_delete_through_cascade_not_client_delete(
          patch("nexus.db.t3.verify_collection_deep", return_value=vr):
         result = runner.invoke(main, ["collection", "reindex", "knowledge__test"])
     assert result.exit_code == 0, result.output
-    mock_purge.assert_called_once_with(mock_db, "knowledge__test")
+    mock_purge.assert_called_once_with(mock_db, "knowledge__test", keep_quarantine=True)
     mock_db.delete_collection.assert_not_called()
 
 
@@ -823,7 +889,7 @@ def test_reindex_treats_doc_id_only_chunk_as_reindexable(
     assert "refusing to reindex" not in result.output.lower()
     # nexus-sjb52: the delete hop routes through the cascade, not the T3
     # client's own (unimplemented) delete_collection.
-    mock_purge.assert_called_once_with(mock_db, "docs__test")
+    mock_purge.assert_called_once_with(mock_db, "docs__test", keep_quarantine=True)
     mock_db.delete_collection.assert_not_called()
 
 
@@ -881,7 +947,7 @@ def test_reindex_treats_phase3_chunk_with_chash_only_as_reindexable(
     assert "refusing to reindex" not in result.output.lower(), result.output
     # nexus-sjb52: the delete hop routes through the cascade, not the T3
     # client's own (unimplemented) delete_collection.
-    mock_purge.assert_called_once_with(mock_db, "docs__test")
+    mock_purge.assert_called_once_with(mock_db, "docs__test", keep_quarantine=True)
     mock_db.delete_collection.assert_not_called()
     # Verify the manifest path actually fired.
     fake_cat.docs_for_chashes.assert_called_once()
@@ -933,7 +999,7 @@ def test_reindex_force_proceeds(runner, env_creds, mock_db, tmp_path) -> None:
     assert result.exit_code == 0, result.output
     # nexus-sjb52: the delete hop routes through the cascade, not the T3
     # client's own (unimplemented) delete_collection.
-    mock_purge.assert_called_once_with(mock_db, "knowledge__test")
+    mock_purge.assert_called_once_with(mock_db, "knowledge__test", keep_quarantine=True)
     mock_db.delete_collection.assert_not_called()
 
 

@@ -93,6 +93,12 @@
 # Exit 0 == FRESH-INSTALL MVV PASSED (the literal sentinel on the last line).
 set -euo pipefail
 
+# One interpreter >= 3.10, resolved once, before anything (the --self-test arm below calls
+# helpers that run it); never a bare python3 (nexus-u67ow).
+# shellcheck source=lib/python.sh disable=SC1091
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/python.sh"
+e2e_python_resolve || exit 2
+
 # ── pure helper functions (exercised directly by --self-test) ──────────────
 # House precedent: tests/e2e/local-index-memory-gate.sh extracts pure
 # functions + a --self-test arm for exactly this reason (nexus-1ktd5
@@ -178,7 +184,7 @@ _leg_log_is_substantive() {
 # in the same shape if either changes.
 _mineru_doctor_verdict() {
     # stdin: `nx doctor --check-mineru` output → "OK" or "FAIL|<cause>"
-    python3 -c '
+    "$E2E_PYTHON" -c '
 import sys
 out = sys.stdin.read()
 lines = [l for l in out.splitlines() if "MinerU" in l]
@@ -200,7 +206,7 @@ _new_chunk_ids() {
 
 _extractor_identity_verdict() {
     # stdin: `nx store get <chunk-id>` output → "OK" or "FAIL|<cause>"
-    python3 -c '
+    "$E2E_PYTHON" -c '
 import sys
 out = sys.stdin.read()
 for line in out.splitlines():
@@ -579,7 +585,7 @@ if [ "$PUBLISHED_MODE" = 1 ]; then
         # this call is exactly as sandboxed as every other network call
         # this script makes.
         local version="$1"
-        python3 -c '
+        "$E2E_PYTHON" -c '
 import os
 import subprocess
 import sys
@@ -681,7 +687,7 @@ else:
                 PROPAGATION_ATTEMPT=$((PROPAGATION_ATTEMPT + 1))
                 echo "  uv still does not resolve $PKG_SPEC (attempt $PROPAGATION_ATTEMPT, $(( NOW - PROPAGATION_WAIT_START ))s elapsed, next retry in ${PROPAGATION_BACKOFF_SECONDS}s)"
                 sleep "$PROPAGATION_BACKOFF_SECONDS"
-                PROPAGATION_BACKOFF_SECONDS="$(python3 -c "print(min(float(\"$PROPAGATION_BACKOFF_SECONDS\") * 2, float(\"$PROPAGATION_MAX_BACKOFF_SECONDS\")))")"
+                PROPAGATION_BACKOFF_SECONDS="$("$E2E_PYTHON" -c "print(min(float(\"$PROPAGATION_BACKOFF_SECONDS\") * 2, float(\"$PROPAGATION_MAX_BACKOFF_SECONDS\")))")"
             done
             PROPAGATION_WAIT_S=$(( $(date +%s) - PROPAGATION_WAIT_START ))
             echo "  PROPAGATION_WAIT_S=$PROPAGATION_WAIT_S  (uv now resolves conexus==$PUBLISHED_VERSION; probe attempts=$PROPAGATION_ATTEMPT)"

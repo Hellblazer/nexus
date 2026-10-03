@@ -120,6 +120,10 @@ export NX_ALLOW_PROD_WRITE="cloud-client-path-gate: deliberate post-deploy MVV w
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# One interpreter >= 3.10, resolved once; never a bare python3 (nexus-u67ow).
+# shellcheck source=lib/python.sh disable=SC1091
+source "$REPO_ROOT/tests/e2e/lib/python.sh"
+e2e_python_resolve || exit 2
 cd "$REPO_ROOT"
 
 # nexus-20onx fix round: the optional live-mode assertion (leg B3).
@@ -182,7 +186,7 @@ _ownerless_mode_verdict() {
     # a status body: a curl failure, an edge 401/403/502 page, a WAF block.
     # That reads as UNREADABLE, never as "an engine with no mode" (nexus-20onx
     # round 4, critic S4).
-    observed="$(printf '%s' "$body" | python3 -c "
+    observed="$(printf '%s' "$body" | "$E2E_PYTHON" -c "
 import json, sys
 try:
     doc = json.load(sys.stdin)
@@ -594,7 +598,7 @@ for kind in ("start", "report"):
 PY
 }
 _leg_enter G "ledger tuple projector hook drive (SubagentStart/SubagentStop, nexus-g2lln)"
-HOOK_SID="$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
+HOOK_SID="$("$E2E_PYTHON" -c 'import uuid; print(uuid.uuid4().hex)')"
 HOOK_AGENT="cloudgate-hook-probe"
 HOOK_LOG="$HOME/.local/state/nexus/orchestration/$HOOK_SID.tuple-projection.log"
 

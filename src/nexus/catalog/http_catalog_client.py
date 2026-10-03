@@ -684,9 +684,17 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
             return []
         return [_to_entry(d) for d in result.get("documents", []) if d.get("tumbler")]
 
-    def delete_collection(self, name: str) -> dict[str, int]:
+    def delete_collection(self, name: str, *, keep_quarantine: bool = False) -> dict[str, int]:
         """RDR-164 P2: atomically delete a collection + all its in-Postgres
         derived state via the service's single transactional deleteCollection.
+
+        Deleting an origin also deletes its rows in its ``quarantine-`` siblings
+        (``quarantine_chunks`` in the result; one gc_audit row per sibling).
+        ``keep_quarantine=True`` (nexus-wbfpw.71) leaves them, for a caller that
+        re-registers the SAME name straight away (``nx collection reindex``); the
+        field is only sent when true, so an older engine and an older client see
+        no change. For a ``quarantine-*`` name the field is ignored and
+        ``quarantine_chunks`` is the rows that collection held.
 
         Returns the per-table deleted-row count map (``chunks`` — the
         RDR-191 unified relation, was ``chunks_384/768/1024`` —
@@ -700,7 +708,10 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         .16); the local-mode cascade stays client-side (see
         ``purge_collection_cascade``).
         """
-        result = self._post("/collections/delete", {"name": name})
+        body: dict[str, Any] = {"name": name}
+        if keep_quarantine:
+            body["keep_quarantine"] = True
+        result = self._post("/collections/delete", body)
         return (result or {}).get("deleted", {}) or {}
 
     # ══════════════════════════════════════════════════════════════════════════

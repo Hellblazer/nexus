@@ -264,13 +264,17 @@ class StatusHandlerTest {
     void reaper_reportsWhatTheLastCompletedPassDidWithItsTenants() throws Exception {
         // nexus-wbfpw.55 round 2: a pass completes whatever its tenants did, so the status carries the counts.
         var status = new StatusHandler.ReaperStatus(true, 3600L, 600L, java.time.Instant.parse("2026-10-02T07:00:00Z"),
-            0L, new StatusHandler.ReaperStatus.LastPass(3, 1, 2));
+            0L, new StatusHandler.ReaperStatus.LastPass(3, 1, 2, 1));
         start(new StatusHandler(null, null, 0L, null, () -> status));
 
         JsonNode lastPass = get().get("reaper").get("last_pass");
         assertThat(lastPass.get("tenants_visited").asInt()).isEqualTo(3);
         assertThat(lastPass.get("tenants_errored").asInt()).isEqualTo(1);
         assertThat(lastPass.get("tenants_refused").asInt()).isEqualTo(2);
+        assertThat(lastPass.get("tenants_empty").asInt()).as("appended after the existing three").isEqualTo(1);
+        var names = new java.util.ArrayList<String>();
+        lastPass.fieldNames().forEachRemaining(names::add);
+        assertThat(names).containsExactly("tenants_visited", "tenants_errored", "tenants_refused", "tenants_empty");
     }
 
     @Test

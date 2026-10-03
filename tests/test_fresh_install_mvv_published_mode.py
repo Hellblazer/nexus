@@ -722,6 +722,10 @@ def test_propagation_probe_argv_loses_no_cache_would_fail_this_test(tmp_path) ->
     repo_root_line = 'REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"'
     assert repo_root_line in text, "REPO_ROOT derivation changed; update this control"
     text = text.replace(repo_root_line, f'REPO_ROOT="{REPO_ROOT}"', 1)
+    # Same for the interpreter resolver the script sources from beside itself (nexus-u67ow).
+    py_line = 'source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/python.sh"'
+    assert py_line in text, "python.sh sourcing changed; update this control"
+    text = text.replace(py_line, f'source "{REPO_ROOT}/tests/e2e/lib/python.sh"', 1)
     patched.write_text(text)
     patched.chmod(0o755)
 

@@ -349,7 +349,14 @@ review Sam set on 2026-09-30 (21 runs on `hellmini-ci` by then):
 `hellmini-ci` green Java jobs had a median of 20.6 min against 25.2 min hosted,
 a gain of about 4.6 min on a check nothing blocks on for develop pushes, and
 hosted jobs showed no queueing (started 2 to 4 s after change detection). Against
-that, three false reds on 2026-10-02 came from colima port leaks.
+that, three false reds on 2026-10-02 came from colima port leaks. The cause is
+closed on the host (nexus-c7lqs, verified 2026-10-03): Lima forwards every
+published container port through one shared host port namespace, so each
+colima VM now allocates from its own guest `ip_local_port_range`, set by a
+provision script in its `colima.yaml` (`hhildebrand` 32768-39999, `ghrunner`
+40600-44999, `ghci` 45000-49151). A leaked forward can still pin a port, but
+only inside the VM that leaked it, until that VM's colima restarts. T2
+`nexus/hellmini-colima-port-ranges-verified-2026-10-03` has the recipe.
 `hellmini-ci` stays registered as the opt-in route. When it is in use the Java
 job tests macOS arm64 on push while PRs test linux amd64, so a platform-specific
 red on push has no PR-side twin. The `ghci` runner carries a host-side guard

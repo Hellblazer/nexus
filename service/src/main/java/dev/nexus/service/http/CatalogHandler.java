@@ -11,6 +11,7 @@ import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 import dev.nexus.service.db.CatalogRepository;
+import dev.nexus.service.db.QuarantineOrigin;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -2349,6 +2350,10 @@ public final class CatalogHandler implements HttpHandler {
         // clientCutMidRequest_transactionStillCommits); the caller then polls
         // /collections/rehome/status. This body is the fast-path courtesy for a
         // small collection, never the contract.
+        // nexus-wbfpw.71: refused on a quarantine collection (CatalogRepository.rehomeCollection holds the
+        // same guard; here it answers 400 ahead of the rehome verb's own 409s).
+        QuarantineOrigin.requireNotQuarantine("rehome", source);
+        QuarantineOrigin.requireNotQuarantine("rehome", target);
         var r = repo.rehomeCollection(tenant, source, target);
         Map<String, Object> out = new java.util.LinkedHashMap<>();
         out.put("moved_chunks", r.movedChunks());
@@ -2422,6 +2427,10 @@ public final class CatalogHandler implements HttpHandler {
         if (oldName == null || newName == null) {
             HttpUtil.send(exchange, 400, "{\"error\":\"old_name/new_name (or old/new) required\"}"); return;
         }
+        // nexus-wbfpw.71: refused on a quarantine collection, source or target, before any other check can
+        // answer with a different status. CatalogRepository.renameCollection carries the same guard.
+        QuarantineOrigin.requireNotQuarantine("rename", oldName);
+        QuarantineOrigin.requireNotQuarantine("rename", newName);
         // nexus-sis0m.3: optional attributes for the new row, derived by the client from the
         // new name (the engine does not parse names, RDR-204). Absent keeps the source's;
         // present must be a non-blank string.
@@ -2579,6 +2588,10 @@ public final class CatalogHandler implements HttpHandler {
      * RDR-164 P2: atomically delete a collection and all its in-Postgres derived state.
      * Returns per-table deleted-row counts so the client can preserve its CascadeCounts
      * contract. {@code pipeline.db} and local-mode cascades remain client-side.
+     *
+     * <p>Body: {@code name} (or {@code collection}), optional {@code keep_quarantine} (boolean, default false).
+     * The response's {@code deleted} map carries {@code quarantine_chunks}: the origin's rows taken from its
+     * quarantine siblings, or, for a {@code quarantine-*} name, the rows that collection held.
      */
     private void handleCollectionDelete(HttpExchange exchange, String tenant, String method) throws IOException {
         if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
@@ -2588,7 +2601,17 @@ public final class CatalogHandler implements HttpHandler {
         if (name == null || name.isBlank()) {
             HttpUtil.send(exchange, 400, "{\"error\":\"name (or collection) required\"}"); return;
         }
-        Map<String, Integer> counts = repo.deleteCollection(tenant, name);
+        // keep_quarantine (nexus-wbfpw.71, additive): true leaves the origin's rows in its quarantine siblings,
+        // for a caller that re-registers the same name at once (reindex). Absent or any non-true value is the
+        // default, so an older client gets today's behaviour. A PRESENT value that is not a JSON boolean (the
+        // string "true", a number) is refused: silently taking the destructive default would delete rows the
+        // caller meant to keep.
+        Object keepRaw = body.get("keep_quarantine");
+        if (keepRaw != null && !(keepRaw instanceof Boolean)) {
+            HttpUtil.send(exchange, 400, "{\"error\":\"keep_quarantine must be a JSON boolean\"}"); return;
+        }
+        boolean keepQuarantine = Boolean.TRUE.equals(keepRaw);
+        Map<String, Integer> counts = repo.deleteCollection(tenant, name, keepQuarantine);
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(Map.of("deleted", counts)));
     }
 

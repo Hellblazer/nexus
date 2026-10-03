@@ -262,9 +262,7 @@ def test_tmpdir_refuses_a_location_inside_the_repository_and_leaves_nothing(
 
 
 def test_a_service_that_is_down_exits_three_from_build_and_filter(prose: Prose, tmp_path: Path) -> None:
-    fake = tmp_path / "fakenx.py"
-    fake.write_text("import sys\nsys.stderr.write('T2 storage service unavailable: connection refused\\n')\n"
-                    "sys.exit(1)\n")
+    fake = Path(__file__).parent / "acceptance" / "fake_nx_unavailable.py"  # real nx wording, remedy included
     prose.env["PROSE_EDIT_NX"] = f"{sys.executable} {fake}"
     built = run_brief(prose, "build", "docs/x.md")
     assert built.returncode == 3 and "unavailable" in built.stderr and built.stdout == ""

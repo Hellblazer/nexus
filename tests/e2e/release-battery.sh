@@ -189,9 +189,17 @@ REFUSED
 fi
 # <<< END moving-tree guard (nexus-57cvk)
 
+# One interpreter, resolved once and exported to every leg (nexus-u67ow). Bare python3
+# is /usr/bin/python3 3.9.6 on hellmini, and artifact_manifest.py uses `match`: the
+# 2026-10-02 cut aborted with a SyntaxError reported as a manifest mismatch. Refuses
+# here, by name and version, before anything is created.
+# shellcheck source=lib/python.sh disable=SC1091
+source "$REPO_ROOT/tests/e2e/lib/python.sh"
+e2e_python_resolve || exit 2
+
 # The pinned engine, parsed before anything is created so a bad --expected-engine-lag
 # leaves no work dir behind.
-REQUIRED_ENGINE="$(python3 -c '
+REQUIRED_ENGINE="$("$E2E_PYTHON" -c '
 import re, pathlib
 m = re.search(r"REQUIRED_ENGINE_VERSION[^=]*=\s*\((\d+),\s*(\d+),\s*(\d+)\)", pathlib.Path("src/nexus/engine_version.py").read_text())
 print(".".join(m.groups()) if m else "")')"
@@ -291,7 +299,7 @@ define_leg hookskew   group  "HOOK-CLI SKEW GATE (PASSED|FAILED|UNVERIFIED)"   t
 # RDR-219 Phase 3 Step 2b (nexus-wauo1.24): no credential-shaped file left
 # under a harness-owned root. Fails on any find; the token/expiry status
 # check it also runs only ever warns, never fails this leg.
-define_leg janitor    group  "CREDENTIAL JANITOR (PASSED|FAILED)"        python3 scripts/credential_janitor.py
+define_leg janitor    group  "CREDENTIAL JANITOR (PASSED|FAILED)"        "$E2E_PYTHON" scripts/credential_janitor.py
 # nexus-z0o2p.41: the GitHub-backed mandatory_regression_pin tests, moved out of lsg (whose fenced HOME
 # has no gh auth) to run here under the operator's real HOME at a zero skip budget. Not an engine leg.
 define_leg pins       group  "MANDATORY PINS GATE (PASSED|FAILED)"     tests/e2e/mandatory-pins-gate.sh
@@ -368,7 +376,7 @@ cut_mode_vacuity() {  # cut_mode_vacuity <leg>
   cand="$(cut_leg_candidate "$1")"
   cargs="$(cut_leg_controls_args "$1")"
   [ -n "$cand" ] || { printf '%s: cut mode, but no candidate engine file is known for this leg' "$1"; return 0; }
-  out="$(python3 "$REPO_ROOT/tests/e2e/lib/candidate_engine.py" cut-assert-log "$LOGS/$1.log" "$1" --candidate "$cand" $cargs 2>&1)"; rc=$?
+  out="$("$E2E_PYTHON" "$REPO_ROOT/tests/e2e/lib/candidate_engine.py" cut-assert-log "$LOGS/$1.log" "$1" --candidate "$cand" $cargs 2>&1)"; rc=$?
   [ "$rc" -ne 0 ] || return 0
   [ -n "$out" ] || out="$1: cut-assert-log exited $rc with no output"
   printf '%s' "${out%%$'\n'*}"
@@ -380,17 +388,17 @@ cut_mode_vacuity() {  # cut_mode_vacuity <leg>
 # one green battery. Returns 1 with CUT_ABORT_REASON set when it cannot proceed.
 cut_resolve_candidate() {
   local which
-  python3 "$REPO_ROOT/tests/e2e/lib/artifact_manifest.py" verify "$ARTIFACTS" "$REPO_ROOT" >/dev/null 2>"$LOGS/candidate-manifest.err" \
+  "$E2E_PYTHON" "$REPO_ROOT/tests/e2e/lib/artifact_manifest.py" verify "$ARTIFACTS" "$REPO_ROOT" >/dev/null 2>"$LOGS/candidate-manifest.err" \
     || { CUT_ABORT_REASON="no candidate engine: the artifacts manifest does not verify against this tree ($(tr '\n' ' ' <"$LOGS/candidate-manifest.err" | cut -c1-200))"; return 1; }
-  CUT_JAR="$(python3 "$REPO_ROOT/tests/e2e/lib/candidate_engine.py" manifest-artifact "$ARTIFACTS" jar 2>"$LOGS/candidate-manifest.err")" \
+  CUT_JAR="$("$E2E_PYTHON" "$REPO_ROOT/tests/e2e/lib/candidate_engine.py" manifest-artifact "$ARTIFACTS" jar 2>"$LOGS/candidate-manifest.err")" \
     || { CUT_ABORT_REASON="no candidate engine: the artifacts manifest names no jar ($(tr '\n' ' ' <"$LOGS/candidate-manifest.err" | cut -c1-200))"; return 1; }
-  CUT_NATIVE="$(python3 "$REPO_ROOT/tests/e2e/lib/candidate_engine.py" manifest-artifact "$ARTIFACTS" native 2>"$LOGS/candidate-manifest.err")" \
+  CUT_NATIVE="$("$E2E_PYTHON" "$REPO_ROOT/tests/e2e/lib/candidate_engine.py" manifest-artifact "$ARTIFACTS" native 2>"$LOGS/candidate-manifest.err")" \
     || { CUT_ABORT_REASON="no candidate engine: the artifacts manifest names no native binary ($(tr '\n' ' ' <"$LOGS/candidate-manifest.err" | cut -c1-200))"; return 1; }
   if [ -z "${NX_CANDIDATE_ENGINE:-}" ]; then
     export NX_CANDIDATE_ENGINE="$CUT_JAR"
     return 0
   fi
-  which="$(python3 "$REPO_ROOT/tests/e2e/lib/candidate_engine.py" candidate-in-manifest "$ARTIFACTS" "$NX_CANDIDATE_ENGINE" 2>/dev/null)" || which=none
+  which="$("$E2E_PYTHON" "$REPO_ROOT/tests/e2e/lib/candidate_engine.py" candidate-in-manifest "$ARTIFACTS" "$NX_CANDIDATE_ENGINE" 2>/dev/null)" || which=none
   if [ "$which" = none ]; then
     if [ "$ACCEPT_CANDIDATE_MISMATCH" = 1 ]; then
       CUT_MISMATCH_ACCEPTED=1
@@ -421,7 +429,7 @@ engine_lag_verdict() {  # engine_lag_verdict <leg> <failed-verdict-line>
   [[ "${ENGINE_LAG_LEGS}" == *" $1 "* ]] || return 0
   # Every failing step must carry the signature, so one lag step beside an unrelated red stays red
   # (round 3 review M2); the reader's own exit status decides, a crash is no ack.
-  python3 "$REPO_ROOT/tests/e2e/lib/candidate_engine.py" failed-step-lag "$LOGS/$1.log" "${2:-}" "$ENGINE_LAG_SIGNATURE" >/dev/null 2>&1 || return 0
+  "$E2E_PYTHON" "$REPO_ROOT/tests/e2e/lib/candidate_engine.py" failed-step-lag "$LOGS/$1.log" "${2:-}" "$ENGINE_LAG_SIGNATURE" >/dev/null 2>&1 || return 0
   printf 'EXPECTED-LAG(%s): the pinned engine %s predates this client'"'"'s metadata_merge write mode (EngineOlderThanClientError)' "$LAG_BEAD" "${LAG_ENGINE:-?}"
 }
 # The closing lines, and the battery's exit status. Reads RED, ONLY_SKIPPED,

@@ -236,6 +236,21 @@ What the host itself must supply:
   scripts (macOS ships bash 3.2 and BSD coreutils).
 - A git identity (`user.name`, `user.email`): tests that commit in a temp repo
   fail without one.
+- A Python 3.10 or newer for the host side of the e2e harness (nexus-u67ow). A
+  bare `python3` is whatever the box ships first on PATH, and on a Mac with no
+  Homebrew python that is `/usr/bin/python3`, 3.9.6, where
+  `tests/e2e/lib/artifact_manifest.py` fails on `match`. The harness does not
+  call `python3`: `tests/e2e/lib/python.sh` resolves one interpreter, checks its
+  `sys.version_info`, exports it as `E2E_PYTHON`, and refuses with exit 2 naming
+  every candidate it tried when none qualifies. `NX_E2E_PYTHON=<interpreter>`
+  picks one explicitly (it binds: if that interpreter is too old the run
+  refuses rather than falling back to another); otherwise the resolver tries an
+  inherited `E2E_PYTHON`, `python3`, `python3.14` down to `python3.10`, then
+  `uv python find`. A script that reads `tomllib` asks for 3.11 at the point it
+  reads. New host-side e2e scripts source `tests/e2e/lib/python.sh`, call
+  `e2e_python_resolve`, and use `"$E2E_PYTHON"`;
+  `tests/scripts/test_e2e_python_resolver.py` fails on a bare `python3` call.
+  Scripts that run inside a container image keep the image's own python3.
 
 ## E2E isolation: a sandboxed HOME does NOT isolate a service install
 

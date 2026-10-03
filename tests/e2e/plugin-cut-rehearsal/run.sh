@@ -76,6 +76,14 @@ KEEP=0
 PROMOTE=0
 BASE_TAG=""
 SOURCE_REPO="$DEFAULT_REPO"
+# One interpreter >= 3.10, resolved once; never a bare python3 (nexus-u67ow). The one tomllib read
+# (BASE_TAG from pyproject.toml, below) asks for 3.11 where it reads, so --help and a run given
+# --base-tag need only 3.10. Container mode runs this same script a second time INSIDE the image
+# (`bash /src/.../run.sh --host`), so lib/python.sh must exist in the /src mount (a worktree source
+# is staged by clone, i.e. committed files only) and the image's python must be >= 3.10.
+# shellcheck source=lib/python.sh disable=SC1091
+source "$SCRIPT_DIR/../lib/python.sh"
+e2e_python_resolve || exit 2
 IMAGE="nexus-plugin-cut-rehearsal:latest"
 
 usage() { sed -n '2,45p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
@@ -96,7 +104,8 @@ done
 
 SOURCE_REPO="$(cd "$SOURCE_REPO" && pwd)"
 if [ -z "$BASE_TAG" ]; then
-    BASE_TAG="v$(python3 -c "import tomllib,sys;print(tomllib.load(open(sys.argv[1],'rb'))['project']['version'])" "$SOURCE_REPO/pyproject.toml")"
+    e2e_python_resolve 11 || exit 2   # tomllib (3.11+)
+    BASE_TAG="v$("$E2E_PYTHON" -c "import tomllib,sys;print(tomllib.load(open(sys.argv[1],'rb'))['project']['version'])" "$SOURCE_REPO/pyproject.toml")"
 fi
 
 # ── container mode: build the image, re-enter this script inside it ─────────
@@ -151,7 +160,7 @@ if [ "$MODE" = container ]; then
     if [ -f "$DCFG" ] && grep -q '"credsStore"' "$DCFG"; then
         DCFG_BAK="$(mktemp "${TMPDIR:-/tmp}/docker-config.XXXXXX")"
         cp "$DCFG" "$DCFG_BAK"
-        python3 -c "import json,sys;p=sys.argv[1];d=json.load(open(p));d.pop('credsStore',None);json.dump(d,open(p,'w'),indent=2)" "$DCFG"
+        "$E2E_PYTHON" -c "import json,sys;p=sys.argv[1];d=json.load(open(p));d.pop('credsStore',None);json.dump(d,open(p,'w'),indent=2)" "$DCFG"
         echo "   (temporarily stripped credsStore from $DCFG for the build; restored on exit)"
     fi
     echo "== building $IMAGE"
@@ -335,7 +344,7 @@ printf 'rehearsal deferral probe -- channel half\n' > "$CLONE/$PROBE_CHANNEL_PAT
 printf '# rehearsal deferral probe -- wheel half, must never ship on a plugin cut\n' > "$CLONE/$PROBE_WHEEL_PATH"
 g add -- "$PROBE_CHANNEL_PATH" "$PROBE_WHEEL_PATH"
 g commit -q -m "feat: rehearsal deferral probe, channel+wheel straddle (nexus-rhrsl1)"
-python3 - "$CLONE/conexus/PENDING_RELEASE.md" "$PROBE_CHANNEL_PATH" <<'PY'
+"$E2E_PYTHON" - "$CLONE/conexus/PENDING_RELEASE.md" "$PROBE_CHANNEL_PATH" <<'PY'
 import sys
 path, probe = sys.argv[1], sys.argv[2]
 text = open(path, encoding="utf-8").read()
@@ -399,7 +408,7 @@ git -C "$PRCI" checkout -q --detach FETCH_HEAD
 # release-window shapes tolerated and anything else a hard failure.
 git -C "$PRCI" fetch -q --depth=1 --tags --force origin
 git -C "$PRCI" fetch -q --depth=1 origin "$CUT_HEAD"
-pinned="$(python3 -c "
+pinned="$("$E2E_PYTHON" -c "
 import json,sys
 d = json.load(open(sys.argv[1]))
 print(' '.join(sorted({p['source']['ref'] for p in d.get('plugins', []) if isinstance(p.get('source'), dict) and p['source'].get('ref')})))
@@ -417,7 +426,7 @@ for ref in $pinned; do
     fi
 done
 EVENT="$SANDBOX/pull_request_event.json"
-python3 - "$EVENT" "$CUT_HEAD" "$BRANCH" <<'PY'
+"$E2E_PYTHON" - "$EVENT" "$CUT_HEAD" "$BRANCH" <<'PY'
 import json, sys
 path, head, branch = sys.argv[1:4]
 json.dump({"action": "synchronize", "pull_request": {"head": {"sha": head, "ref": branch}, "base": {"ref": "main"}}}, open(path, "w"))

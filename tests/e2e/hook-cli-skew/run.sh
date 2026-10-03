@@ -24,6 +24,10 @@
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/../../.." && pwd)"
+# One interpreter >= 3.10, resolved once; never a bare python3 (nexus-u67ow).
+# shellcheck source=lib/python.sh disable=SC1091
+source "$ROOT/tests/e2e/lib/python.sh"
+e2e_python_resolve || exit 2
 CACHE="${NX_SKEW_CACHE:-${TMPDIR:-/tmp}/nx-hook-cli-skew-cache}"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/nx-hook-cli-skew.XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
@@ -69,7 +73,7 @@ cat > "$WORK/negctl/hooks.json" <<'JSON'
   {"type": "command", "command": "nx-hook", "args": ["mcp-connect-check"], "timeout": 5}]}]}}
 JSON
 set +e
-python3 "$HERE/drive.py" "$WORK/negctl/hooks.json" "$ROOT/conexus" "$BIN57" negctl "$WORK/negctl" > "$WORK/negctl.out" 2>&1
+"$E2E_PYTHON" "$HERE/drive.py" "$WORK/negctl/hooks.json" "$ROOT/conexus" "$BIN57" negctl "$WORK/negctl" > "$WORK/negctl.out" 2>&1
 NRC=$?
 set -e
 [ "$NRC" = 1 ] && grep -q 'FAIL  \[UserPromptSubmit\] nx-hook mcp-connect-check: exit 2' "$WORK/negctl.out" \
@@ -87,7 +91,7 @@ _drive() {  # $1 = label, $2 = bin dir or "none"
     local s="$WORK/scratch-$1"
     mkdir -p "$s"
     echo "── plugin from this checkout x CLI $1 ──"
-    python3 "$HERE/drive.py" "$ROOT/conexus/hooks/hooks.json" "$ROOT/conexus" "$2" "$1" "$s" || FAILED=$((FAILED+1))
+    "$E2E_PYTHON" "$HERE/drive.py" "$ROOT/conexus/hooks/hooks.json" "$ROOT/conexus" "$2" "$1" "$s" || FAILED=$((FAILED+1))
 }
 for v in "${VERSIONS[@]}"; do _drive "$v" "$(_cli "$v")"; done
 _drive head "$HEADV/bin"

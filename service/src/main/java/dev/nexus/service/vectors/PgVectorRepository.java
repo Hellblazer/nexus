@@ -766,9 +766,9 @@ public final class PgVectorRepository {
      * same transaction). Covers only the rows the insert will write: the chashes the existence
      * partition already settled were updated in place and create nothing.
      */
-    private void recheckOwnershipInWriteTransaction(DSLContext ctx, String tenant, String collection,
-                                                    List<String> insertChashes, List<String> allIds,
-                                                    List<Map<String, Object>> metadatas, OwnershipGuard guard) {
+    private List<String> recheckOwnershipInWriteTransaction(DSLContext ctx, String tenant, String collection,
+                                                            List<String> insertChashes, List<String> allIds,
+                                                            List<Map<String, Object>> metadatas, OwnershipGuard guard) {
         CatalogRepository.acquireSweepGateShared(ctx, tenant, collection);
         List<String> distinct = new ArrayList<>(new java.util.LinkedHashSet<>(insertChashes));
         Set<String> owned = liveOwnedChashes(ctx, tenant, collection, distinct);
@@ -778,9 +778,16 @@ public final class PgVectorRepository {
                 unowned.add(hex);
             }
         }
-        if (!unowned.isEmpty()) {
+        if (!unowned.isEmpty() && guard.mode() == OwnerlessWriteMode.ENFORCE) {
+            // Counted and thrown here: the write must stop before the insert, and the refusal is not a
+            // 40P01, so DeadlockRetry does not re-run it. One count per refused request.
             reportUnowned(tenant, collection, allIds, metadatas, distinct.size(), unowned, guard, "in_tx");
         }
+        // Log-only: the caller reports, ONCE per request (nexus-wbfpw.66 round 2). This recheck runs
+        // inside the write's DeadlockRetry lambda, so a 40P01 on the insert after it re-runs it, and
+        // counting here counted a retried request once per attempt. RDR-223's soak reads the
+        // would_refuse counter to decide the enforce flip.
+        return unowned;
     }
 
     /**
@@ -1103,101 +1110,119 @@ public final class PgVectorRepository {
             // discipline as racedThisWrite: a fresh list every attempt, read only
             // after DeadlockRetry.run returns.
             final List<String>[] racedChashSampleHolder = new List[]{List.of()};
-            DeadlockRetry.run(collection, () -> tenantScope.withTenant(tenant, ctx -> {
-                racedThisWrite.set(0);
-                racedChashSampleHolder[0] = new ArrayList<>();
-                // RDR-223 Phase 3 Step 2 (nexus-z0o2p.24): the second ownership check, in the
-                // write's own transaction, under the shared sweep gate, ahead of the insert.
-                if (recheckInTransaction) {
-                    List<String> insertChashes = new ArrayList<>(finalInsertIdx.size());
-                    for (int idx : finalInsertIdx) insertChashes.add(dedupIds.get(idx));
-                    recheckOwnershipInWriteTransaction(ctx, tenant, collection, insertChashes, ids, metadatas, guard);
-                }
-                // Bead nexus-h8rf6.2 (reduce per-request connection hold time): ONE
-                // multi-row INSERT ... ON CONFLICT instead of dedupIds.size() sequential
-                // round trips. The old per-row loop held this transaction's connection
-                // (and, transitively, the catalog_collections row lock any concurrent
-                // registration attempt for this collection was blocked on) open for N
-                // round trips — cheap on a near-zero-RTT localhost DB, but on a real
-                // network hop to Postgres every extra round trip is directly extra
-                // lock-hold time for every OTHER concurrent writer to this collection.
-                // Mirrors ChashRepository.upsertMany / doImportBatch, which already
-                // batch this way. Same ON CONFLICT semantics, same bound values, just
-                // one statement.
-                // nexus-xtmtf: chained .values() keeps this ONE multi-row
-                // statement (the h8rf6.2 lock-hold rationale); float[] (VectorBinding) +
-                // JSONB typed binds retire the ?::vector / ?::jsonb casts.
-                // RDR-181 (bead nexus-f0r8p.2): only insertIdx rows land here — chashes
-                // whose have-vector branch already succeeded via a metadata-only UPDATE
-                // are excluded (see insertIdx construction above); embeddings is aligned
-                // to insertIdx (position k), NOT to dedupIds (position idx) — the two
-                // lists diverge whenever the existence-partition skipped any embeds, so
-                // embeddings.get(idx) would silently pair the wrong vector with a chash.
-                DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
-                var insert = ctx.insertInto(ch.table())
-                    .columns(ch.tenantId(), ch.collection(), ch.chash(),
-                             ch.chunkText(), ch.embedding(), ch.metadata());
-                for (int k = 0; k < finalInsertIdx.size(); k++) {
-                    int idx = finalInsertIdx.get(k);
-                    insert = insert.values(tenant, collection, dedupIds.get(idx),
-                            dedupDocs.get(idx),
-                            Vector.of(embeddings.get(k)),
-                            JSONB.jsonb(toJson(dedupMetas.get(idx))));
-                }
-                insert.onConflict(ch.tenantId(), ch.collection(), ch.chash())
-                      .doUpdate()
-                      .set(ch.chunkText(), DSL.excluded(ch.chunkText()))
-                      .set(ch.embedding(), DSL.excluded(ch.embedding()))
-                      // nexus-w94eo: MERGES metadata (mergeMetadata: current || incoming)
-                      // rather than replacing it wholesale. This is the fix for the
-                      // diagnosed late-commit revert — a 504'd upsert-chunks attempt the
-                      // client had already given up on used to be able to land AFTER a
-                      // later write (e.g. the streaming post-pass's enrichment) and wipe
-                      // its keys back to this (older) attempt's payload. The request's
-                      // delete_keys (nexus-y8xjh) strips named keys from the stored row
-                      // first: a full-rewrite writer whose normalize step drops a sparse
-                      // key as empty (quality_gate_overridden=False) names it there, or a
-                      // stale True from an earlier write would outlive the rewrite.
-                      .set(ch.metadata(),  mergeMetadata(ch.metadata(), DSL.excluded(ch.metadata()),
-                              deleteKeys))
-                      // RDR-169 Phase B (bead nexus-zw2em): this ordinary content path
-                      // always writes real chunk_text, so any pre-existing row it
-                      // conflicts on ends up with retention='full' regardless of what it
-                      // held before — closes the "reference-only row silently promoted to
-                      // full content while retention stays stale" gap (retention is
-                      // otherwise untouched by this DO UPDATE). Fresh INSERTs already get
-                      // 'full' for free (the column DEFAULT, since retention is absent
-                      // from this statement's column list); this only needs stating for
-                      // the conflict branch.
-                      .set(ch.retention(), "full")
-                      // nexus-wbfpw.43: a client re-write of an existing chunk restarts
-                      // reapable(c)'s grace window. created_at is write-once, so without
-                      // this a re-indexed old chunk looks old to the reaper, which can
-                      // delete it between this write and the manifest write. A fresh
-                      // INSERT takes the column DEFAULT now(), so only the conflict
-                      // branch needs stating.
-                      .set(ch.lastWrittenAt(), DimTables.lastWrittenNow())
-                      // RDR-222 Phase 0 (bead nexus-ulrjq, M-a): (xmax = 0) is the
-                      // standard Postgres RETURNING idiom for "this row was genuinely
-                      // INSERTed, not reached via the ON CONFLICT DO UPDATE branch" —
-                      // same DSL.field(DSL.name("xmax"), SQLDataType.INTEGER).eq(0)
-                      // form CatalogRepository#upsertLink already uses (RawSqlGateTest:
-                      // a typed dynamic-column reference, not a raw SQL string, so it
-                      // needs no SANCTIONED_STATEMENTS entry).
-                      .returningResult(ch.chash(), DSL.field(
-                          DSL.field(DSL.name("xmax"), SQLDataType.INTEGER).eq(0)))
-                      .fetch()
-                      .forEach(r -> {
-                          if (!Boolean.TRUE.equals(r.value2())
-                                  && finalOriginalAbsentChashes.contains(r.value1())) {
-                              racedThisWrite.incrementAndGet();
-                              if (racedChashSampleHolder[0].size() < 8) {
-                                  racedChashSampleHolder[0].add(r.value1());
+            final List<String> insertChashes = new ArrayList<>(finalInsertIdx.size());
+            for (int idx : finalInsertIdx) insertChashes.add(dedupIds.get(idx));
+            // Log-only in-transaction recheck result (nexus-wbfpw.66 round 2): the chashes the LAST
+            // attempt found unowned, zeroed at the top of each attempt and reported once, below,
+            // whether the write commits or finally fails. The recheck runs inside the retry lambda,
+            // so reporting from inside it counted a 40P01-retried request once per attempt.
+            final List<String>[] inTxUnownedHolder = new List[]{List.of()};
+            try {
+                DeadlockRetry.run(collection, () -> tenantScope.withTenant(tenant, ctx -> {
+                    racedThisWrite.set(0);
+                    racedChashSampleHolder[0] = new ArrayList<>();
+                    inTxUnownedHolder[0] = List.of();
+                    // RDR-223 Phase 3 Step 2 (nexus-z0o2p.24): the second ownership check, in the
+                    // write's own transaction, under the shared sweep gate, ahead of the insert.
+                    if (recheckInTransaction) {
+                        inTxUnownedHolder[0] = recheckOwnershipInWriteTransaction(
+                                ctx, tenant, collection, insertChashes, ids, metadatas, guard);
+                    }
+                    // Bead nexus-h8rf6.2 (reduce per-request connection hold time): ONE
+                    // multi-row INSERT ... ON CONFLICT instead of dedupIds.size() sequential
+                    // round trips. The old per-row loop held this transaction's connection
+                    // (and, transitively, the catalog_collections row lock any concurrent
+                    // registration attempt for this collection was blocked on) open for N
+                    // round trips — cheap on a near-zero-RTT localhost DB, but on a real
+                    // network hop to Postgres every extra round trip is directly extra
+                    // lock-hold time for every OTHER concurrent writer to this collection.
+                    // Mirrors ChashRepository.upsertMany / doImportBatch, which already
+                    // batch this way. Same ON CONFLICT semantics, same bound values, just
+                    // one statement.
+                    // nexus-xtmtf: chained .values() keeps this ONE multi-row
+                    // statement (the h8rf6.2 lock-hold rationale); float[] (VectorBinding) +
+                    // JSONB typed binds retire the ?::vector / ?::jsonb casts.
+                    // RDR-181 (bead nexus-f0r8p.2): only insertIdx rows land here — chashes
+                    // whose have-vector branch already succeeded via a metadata-only UPDATE
+                    // are excluded (see insertIdx construction above); embeddings is aligned
+                    // to insertIdx (position k), NOT to dedupIds (position idx) — the two
+                    // lists diverge whenever the existence-partition skipped any embeds, so
+                    // embeddings.get(idx) would silently pair the wrong vector with a chash.
+                    DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
+                    var insert = ctx.insertInto(ch.table())
+                        .columns(ch.tenantId(), ch.collection(), ch.chash(),
+                                 ch.chunkText(), ch.embedding(), ch.metadata());
+                    for (int k = 0; k < finalInsertIdx.size(); k++) {
+                        int idx = finalInsertIdx.get(k);
+                        insert = insert.values(tenant, collection, dedupIds.get(idx),
+                                dedupDocs.get(idx),
+                                Vector.of(embeddings.get(k)),
+                                JSONB.jsonb(toJson(dedupMetas.get(idx))));
+                    }
+                    insert.onConflict(ch.tenantId(), ch.collection(), ch.chash())
+                          .doUpdate()
+                          .set(ch.chunkText(), DSL.excluded(ch.chunkText()))
+                          .set(ch.embedding(), DSL.excluded(ch.embedding()))
+                          // nexus-w94eo: MERGES metadata (mergeMetadata: current || incoming)
+                          // rather than replacing it wholesale. This is the fix for the
+                          // diagnosed late-commit revert — a 504'd upsert-chunks attempt the
+                          // client had already given up on used to be able to land AFTER a
+                          // later write (e.g. the streaming post-pass's enrichment) and wipe
+                          // its keys back to this (older) attempt's payload. The request's
+                          // delete_keys (nexus-y8xjh) strips named keys from the stored row
+                          // first: a full-rewrite writer whose normalize step drops a sparse
+                          // key as empty (quality_gate_overridden=False) names it there, or a
+                          // stale True from an earlier write would outlive the rewrite.
+                          .set(ch.metadata(),  mergeMetadata(ch.metadata(), DSL.excluded(ch.metadata()),
+                                  deleteKeys))
+                          // RDR-169 Phase B (bead nexus-zw2em): this ordinary content path
+                          // always writes real chunk_text, so any pre-existing row it
+                          // conflicts on ends up with retention='full' regardless of what it
+                          // held before — closes the "reference-only row silently promoted to
+                          // full content while retention stays stale" gap (retention is
+                          // otherwise untouched by this DO UPDATE). Fresh INSERTs already get
+                          // 'full' for free (the column DEFAULT, since retention is absent
+                          // from this statement's column list); this only needs stating for
+                          // the conflict branch.
+                          .set(ch.retention(), "full")
+                          // nexus-wbfpw.43: a client re-write of an existing chunk restarts
+                          // reapable(c)'s grace window. created_at is write-once, so without
+                          // this a re-indexed old chunk looks old to the reaper, which can
+                          // delete it between this write and the manifest write. A fresh
+                          // INSERT takes the column DEFAULT now(), so only the conflict
+                          // branch needs stating.
+                          .set(ch.lastWrittenAt(), DimTables.lastWrittenNow())
+                          // RDR-222 Phase 0 (bead nexus-ulrjq, M-a): (xmax = 0) is the
+                          // standard Postgres RETURNING idiom for "this row was genuinely
+                          // INSERTed, not reached via the ON CONFLICT DO UPDATE branch" —
+                          // same DSL.field(DSL.name("xmax"), SQLDataType.INTEGER).eq(0)
+                          // form CatalogRepository#upsertLink already uses (RawSqlGateTest:
+                          // a typed dynamic-column reference, not a raw SQL string, so it
+                          // needs no SANCTIONED_STATEMENTS entry).
+                          .returningResult(ch.chash(), DSL.field(
+                              DSL.field(DSL.name("xmax"), SQLDataType.INTEGER).eq(0)))
+                          .fetch()
+                          .forEach(r -> {
+                              if (!Boolean.TRUE.equals(r.value2())
+                                      && finalOriginalAbsentChashes.contains(r.value1())) {
+                                  racedThisWrite.incrementAndGet();
+                                  if (racedChashSampleHolder[0].size() < 8) {
+                                      racedChashSampleHolder[0].add(r.value1());
+                                  }
                               }
-                          }
-                      });
-                return null;
-            }));
+                          });
+                    return null;
+                }));
+            } finally {
+                // Log-only would_refuse, once per request: after the commit, or after the last attempt
+                // failed. Enforce never gets here with a list (it threw inside the attempt and counted
+                // there). An attempt that died before its recheck finished leaves the zeroed holder.
+                if (recheckInTransaction && !inTxUnownedHolder[0].isEmpty()) {
+                    reportUnowned(tenant, collection, ids, metadatas,
+                            new java.util.LinkedHashSet<>(insertChashes).size(), inTxUnownedHolder[0],
+                            guard, "in_tx");
+                }
+            }
             long raced = racedThisWrite.get();
             if (raced > 0) {
                 // RDR-222 Phase 0: another writer committed one of THIS request's
@@ -3603,6 +3628,10 @@ FROM scope s
      *         be less than {@code ids.size()} even with no cross-tenant ids present)
      */
     public int delete(String tenant, String collection, List<String> ids) {
+        // nexus-wbfpw.71: store-delete would remove quarantined rows with no audit row, and a quarantined
+        // chunk has no manifest row to make the guard below protect it. Refused; the sanctioned paths are
+        // restore, expiry, and the audited collection delete.
+        dev.nexus.service.db.QuarantineOrigin.requireNotQuarantine("store-delete", collection);
         int dim = dimForCollection(tenant, collection);
         if (ids == null || ids.isEmpty()) return 0;
         DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
@@ -4163,7 +4192,8 @@ FROM scope s
 
     /** The origin of a restore: a registered, live, non-quarantine collection, never a bare name. */
     private void checkRestoreOrigin(String tenant, String originCollection) {
-        if (originCollection == null || originCollection.isBlank() || originCollection.startsWith("quarantine-")) {
+        if (originCollection == null || originCollection.isBlank()
+                || dev.nexus.service.db.QuarantineOrigin.isQuarantineName(originCollection)) {
             throw new IllegalArgumentException("the origin collection must be a non-quarantine collection, got: "
                 + originCollection + " (name the collection the chunks came from, not its quarantine- sibling)");
         }
@@ -4179,7 +4209,7 @@ FROM scope s
 
     /** A sibling a caller named: a registered quarantine collection. */
     private void checkRestoreSibling(String tenant, String quarantineCollection) {
-        if (quarantineCollection == null || !quarantineCollection.startsWith("quarantine-")) {
+        if (!dev.nexus.service.db.QuarantineOrigin.isQuarantineName(quarantineCollection)) {
             throw new IllegalArgumentException("the quarantine collection must be a quarantine- sibling, got: "
                 + quarantineCollection);
         }

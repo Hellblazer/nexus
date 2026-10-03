@@ -466,7 +466,9 @@ Every step below is **required**. Missing any one of them has caused problems in
 1. **Verify the full release test battery passes.** See `AGENTS.md` §
    Cutting a release, step 1, for the authoritative command list (the
    release skill's Step 1 restates it) — it changes independently
-   of this pointer and a copy here would drift.
+   of this pointer and a copy here would drift. The battery's host-side
+   scripts need a Python 3.10 or newer and resolve it themselves
+   (`NX_E2E_PYTHON` overrides; `tests/AGENTS.md` § host requirements).
 
 2. **Audit docs against changes since last release**
    Run `git log --oneline v<prev>..HEAD` and check each feature/fix against the docs:

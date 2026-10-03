@@ -70,6 +70,25 @@ public class ReaperRepository {   // not final: ChunkReaperIntegrationTest raise
     }
 
     /**
+     * True when the tenant holds no chunk row in any collection, quarantine siblings included (nexus-wbfpw.73;
+     * {@code Rdr192BackfillGate}). Read under the tenant's own RLS context, bounded by {@code statementTimeout}.
+     * Throws on a database failure, never answers true for "could not read".
+     *
+     * <p>One read is enough, and the catalog's manifest is deliberately not consulted. Every manifest row references
+     * its chunk through {@code fk_catalog_chunks_chunk} (catalog-029, validated), so a manifest row cannot outlive
+     * the chunk it names: a tenant with no chunk has no manifest row either, and a second existence read could
+     * never answer differently. It was written once and no test could reach it, because the same FK refuses the
+     * seed. The client rung's own empty-listing branch also cross-checks the catalog, but that guards a listing
+     * that failed silently; this read is the table itself and fails loudly.
+     */
+    public boolean holdsNothing(String tenant, Duration statementTimeout) {
+        return tenantScope.withTenant(tenant, ctx -> {
+            PgSession.setStatementAndLockBounds(ctx, (int) statementTimeout.toMillis(), 2_000);
+            return !ctx.fetchExists(CHUNKS, CHUNKS.TENANT_ID.eq(tenant));
+        });
+    }
+
+    /**
      * {@code name -> lifecycle_state} for every registered collection of the tenant. A name that is absent is not
      * registered; a registered collection with no state maps to the empty string, which is not {@code live}.
      */
