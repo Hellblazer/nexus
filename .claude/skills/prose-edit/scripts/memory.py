@@ -35,10 +35,14 @@ file too. "-" means a stdin run: no document record, no stored rejections; its
 session is logged under log/stdin/<utc timestamp>.
 
 Exit codes: 0 ok, 1 bad input, malformed stored data, or an nx failure that is
-not a connection failure (nx's own stderr is passed on), 2 usage (argparse),
-3 T2 unavailable (nx cannot reach the service, or an edge in front of it answers
-502, 503 or 504). On 3 the script says "T2
-unavailable: ..." and prints nothing on stdout. A record that is absent
+not a connection failure ("T2 request failed (exit N): <nx's stderr without the lines
+that name nx>"; a status error from the storage service is reported as "T2 refused the
+request: the storage service answered HTTP <code>"),
+2 usage (argparse), 3 T2 unavailable (nx cannot reach the service, or an edge in
+front of it answers 502, 503 or 504). On 3 the script says "T2 unavailable:
+<cause>" and prints nothing on stdout. No message relays a line of nx's that
+names nx: nx's remedies are addressed to an operator, and the model reading this
+stderr is not one. A record that is absent
 (confirmed by `nx memory list`) is a normal answer and reads as null; it is
 never confused with T2 being down, and an unreachable T2 is never answered
 with an empty style sheet.
@@ -586,14 +590,47 @@ class Repo:
 
 _LIST_LINE = re.compile(r"^\[(\d+)\] (.*)  \([^()]*\)$")
 # nx wraps a transport failure as "T2 storage service error: [Errno 61] ..." and a missing
-# endpoint as "T2 storage service unavailable: ..."; an HTTP status error carries a status
-# line ("Client error '401 ...'") and is a rejection by a reachable service, not a connection failure.
-# A 502, 503 or 504 comes from an edge or gateway with no engine behind it, so it counts as
-# unavailable too; any other status is a rejection by a reachable service.
+# endpoint as "T2 storage service unavailable: ..."; an HTTP status error carries httpx's status
+# line ("Client error '401 ...'", "Redirect response '307 ...'") and is a rejection by a reachable
+# service, not a connection failure. A 502, 503 or 504 comes from an edge or gateway with no engine
+# behind it, so it counts as unavailable too. nx's top-level handler (cli.py) reports the same two
+# conditions without the "T2 storage service" prefix when they surface mid-command, as "nexus-service
+# endpoint is not resolvable" and "a service this command needs did not answer".
+_HTTPX_STATUS = r"(?:(?:Client|Server) error|Redirect response|Informational response) '"
 _CONNECTION = re.compile(
     r"T2 storage service (?:unavailable|error: "
-    r"(?:(?!(?:Client|Server|Redirect) error)|Server error '50[234]\b))"
+    rf"(?:(?!{_HTTPX_STATUS})|Server error '50[234]\b))"
+    r"|nexus-service endpoint is not resolvable"
+    r"|a service this command needs did not answer"
 )
+_STATUS = re.compile(_HTTPX_STATUS + r"(\d{3})\b")
+_SERVICE_ERROR = "T2 storage service error:"
+
+
+def neutral_cause(detail: str) -> str:
+    """The cause of a T2 failure in this script's own words, never nx's.
+
+    nx ends these failures with a remedy addressed to an operator ("nx daemon service
+    start", "nx doctor"); a model that reads it runs it (nexus-ger02.15). Only the status
+    code is carried over, never a reason phrase or any other text from the response.
+    """
+    status = _STATUS.search(detail)
+    if status:
+        return f"the storage service answered HTTP {status.group(1)}"
+    return "the storage service could not be reached"
+
+
+_NAMES_NX = re.compile(r"\bnx\b", re.IGNORECASE)
+
+
+def without_nx(detail: str) -> str:
+    """The last 20 lines of nx's error text, minus every line that names nx, as ": ..." or "".
+
+    The lines that name nx are its remedies ("run 'nx upgrade'"), addressed to an operator;
+    a model that reads one runs it (nexus-ger02.15). The rest (a refusal, a cause) is kept.
+    """
+    kept = [line for line in detail.splitlines()[-20:] if not _NAMES_NX.search(line)]
+    return ": " + "\n".join(kept) if any(line.strip() for line in kept) else ""
 
 
 def nx_unavailable(detail: str) -> bool:
@@ -623,14 +660,17 @@ class T2:
                 [*self.nx, *args], input=stdin, capture_output=True, text=True,
                 encoding="utf-8", timeout=NX_TIMEOUT, env=env,
             )
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            raise T2Unavailable(f"cannot run nx: {exc}") from exc
+        except subprocess.TimeoutExpired as exc:
+            raise T2Unavailable(f"the storage client did not finish within {NX_TIMEOUT} seconds") from exc
+        except OSError as exc:
+            raise T2Unavailable(f"the storage client could not be started ({exc.strerror or type(exc).__name__})") from exc
         if proc.returncode != 0:
             detail = (proc.stderr.strip() or proc.stdout.strip())
             if nx_unavailable(detail):
-                raise T2Unavailable(detail.splitlines()[-1] if detail else "nx failed")
-            tail = "\n".join(detail.splitlines()[-20:])
-            raise UserError(f"`nx {' '.join(args[:2])}` failed (exit {proc.returncode}): {tail}")
+                raise T2Unavailable(neutral_cause(detail))
+            if _SERVICE_ERROR in detail:
+                raise UserError(f"T2 refused the request: {neutral_cause(detail)}")
+            raise UserError(f"T2 request failed (exit {proc.returncode}){without_nx(detail)}")
         return proc.stdout
 
     def index(self, project: str) -> dict[str, int]:
@@ -643,7 +683,7 @@ class T2:
                     continue
                 m = _LIST_LINE.match(line)
                 if not m or not m.group(2).startswith(project + "/"):
-                    raise UserError(f"unparseable `nx memory list` line: {line!r}")
+                    raise UserError(f"unparseable T2 list line: {line!r}")
                 found[m.group(2)[len(project) + 1:]] = int(m.group(1))
             self._index[project] = found
         return self._index[project]

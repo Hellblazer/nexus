@@ -34,6 +34,7 @@ from tests.prose_edit.conftest import (
     t2_put,
     t2_titles,
 )
+from tests.prose_edit.test_brief import NAMES_A_REPAIR
 
 TS = "20260929T171503.482913Z"  # PROSE_EDIT_NOW in the fixture, in title form
 
@@ -965,6 +966,85 @@ def test_t2_down_exits_3_but_other_nx_failures_exit_1_with_nxs_message(prose: Pr
 )
 def test_which_nx_failures_count_as_t2_unavailable(detail: str, unavailable: bool) -> None:
     assert _module().nx_unavailable(detail) is unavailable
+
+
+_ACC_FAKE = Path(__file__).parent / "acceptance" / "fake_nx_unavailable.py"
+_DOCTOR = ". Check the storage service: nx doctor"
+
+
+_UNREACHABLE = "T2 unavailable: the storage service could not be reached"
+
+
+@pytest.mark.parametrize(
+    ("nx_stderr", "code", "says"),
+    [
+        (None, 3, _UNREACHABLE),
+        ("Error: T2 storage service error: [Errno 61] Connection refused" + _DOCTOR, 3, _UNREACHABLE),
+        # httpx's real status error is several lines; nx appends its remedy to the last one.
+        ("Error: T2 storage service error: Server error '503 Service Unavailable' for url 'http://e/x'\n"
+         "For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/503" + _DOCTOR,
+         3, "T2 unavailable: the storage service answered HTTP 503"),
+        ("Error: T2 storage service error: Server error '500 Internal Server Error' for url 'http://e/x'\n"
+         "For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500" + _DOCTOR,
+         1, "T2 refused the request: the storage service answered HTTP 500"),
+        ("Error: T2 storage service error: Client error '401 Unauthorized' for url 'http://e/x'" + _DOCTOR,
+         1, "T2 refused the request: the storage service answered HTTP 401"),
+        ("Error: T2 storage service error: Redirect response '307 Temporary Redirect' for url 'http://e/x'" + _DOCTOR,
+         1, "T2 refused the request: the storage service answered HTTP 307"),
+        # nx's top-level handler (src/nexus/cli.py) when the endpoint vanishes mid-command.
+        ("Error: nexus-service endpoint is not resolvable (NX_STORAGE_BACKEND=service): start the "
+         "supervisor with 'nx daemon service start' (publishes the endpoint lease this client "
+         "auto-discovers), or export NX_SERVICE_PORT / NX_SERVICE_TOKEN (and optionally "
+         "NX_SERVICE_HOST) explicitly.", 3, _UNREACHABLE),
+        ("Error: a service this command needs did not answer (<urlopen error [Errno 61] Connection "
+         "refused>). If it is the local nexus service, start it with 'nx daemon service start'; "
+         "'nx doctor' checks every endpoint.", 3, _UNREACHABLE),
+        ("", 3, "T2 unavailable: the storage client could not be started (No such file or directory)"),
+    ],
+    ids=["endpoint-unresolvable", "connection-refused", "edge-503", "engine-500", "client-401",
+         "redirect-307", "cli-endpoint-unresolvable", "cli-did-not-answer", "nx-missing"],
+)
+def test_a_t2_failure_is_reported_in_the_scripts_words_not_nxs_remedy(
+    prose: Prose, tmp_path: Path, nx_stderr: str | None, code: int, says: str,
+) -> None:
+    # nx ends these failures with a remedy for an operator ('nx daemon service start', 'nx doctor');
+    # a model that reads it runs it (nexus-ger02.15). None = the acceptance fake, real nx wording.
+    if nx_stderr is None:
+        nx = f"{sys.executable} {_ACC_FAKE}"
+    elif not nx_stderr:
+        nx = str(tmp_path / "no-such-nx")
+    else:
+        fake = tmp_path / "fakenx.py"
+        fake.write_text(f"import sys\nsys.stderr.write({nx_stderr + chr(10)!r})\nsys.exit(1)\n")
+        nx = f"{sys.executable} {fake}"
+    env = dict(prose.env, PROSE_EDIT_NX=nx)
+    proc = prose.run("read", "docs/x.md", env=env)
+    assert proc.returncode == code, proc.stderr
+    assert proc.stderr == f"memory.py: {says}\n"
+    assert not NAMES_A_REPAIR.search(proc.stderr)
+    assert proc.stdout == ""
+
+
+@pytest.mark.parametrize(
+    ("nx_stderr", "says"),
+    [
+        ("Error: this install predates the current storage layout.\n"
+         "Run 'nx upgrade', then 'nx daemon service stop' and 'nx doctor'.",
+         "T2 request failed (exit 1): Error: this install predates the current storage layout."),
+        ("Error: run nx doctor", "T2 request failed (exit 1)"),
+        ("Usage: NX memory get\nError: no such option: --bogus", "T2 request failed (exit 1): Error: no such option: --bogus"),
+    ],
+    ids=["remedy-line-dropped", "only-a-remedy", "case-blind"],
+)
+def test_any_other_nx_failure_keeps_its_cause_and_drops_the_lines_that_name_nx(
+    prose: Prose, tmp_path: Path, nx_stderr: str, says: str,
+) -> None:
+    fake = tmp_path / "fakenx.py"
+    fake.write_text(f"import sys\nsys.stderr.write({nx_stderr + chr(10)!r})\nsys.exit(1)\n")
+    proc = prose.run("read", "docs/x.md", env=dict(prose.env, PROSE_EDIT_NX=f"{sys.executable} {fake}"))
+    assert proc.returncode == 1, proc.stderr
+    assert proc.stderr == f"memory.py: {says}\n"
+    assert not NAMES_A_REPAIR.search(proc.stderr)
 
 
 def test_prefix_flag_overrides_the_environment(prose: Prose) -> None:

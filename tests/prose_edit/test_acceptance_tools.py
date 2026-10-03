@@ -2,6 +2,7 @@
 """The acceptance runner and its verdict script (tests/prose_edit/acceptance), without a live session."""
 from __future__ import annotations
 
+import ast
 import importlib.util
 import json
 import os
@@ -59,6 +60,22 @@ def test_the_fake_nx_reports_an_unavailable_service_the_way_memory_py_reads_it()
     sys.modules[mem_spec.name] = mem
     mem_spec.loader.exec_module(mem)
     assert mem.nx_unavailable(proc.stderr.strip())
+
+
+def test_the_fake_nx_prints_the_real_nx_wording_remedy_included() -> None:
+    # The canary tests the skill only if it hands the model what a real failure does:
+    # click's "Error: " + _helpers.py's "T2 storage service unavailable: " + the endpoint error.
+    src = (ACC.parents[2] / "src" / "nexus" / "db" / "service_endpoint.py").read_text()
+    raised = [
+        node.args[0].value for node in ast.walk(ast.parse(src))
+        if isinstance(node, ast.Call) and getattr(node.func, "id", "") == "ServiceEndpointUnresolvableError"
+        and node.args and isinstance(node.args[0], ast.Constant) and "nx daemon service start" in node.args[0].value
+    ]
+    assert len(raised) == 1
+    helpers = (ACC.parents[2] / "src" / "nexus" / "commands" / "_helpers.py").read_text()
+    assert 'f"T2 storage service unavailable: {exc}"' in helpers
+    proc = subprocess.run([sys.executable, str(ACC / "fake_nx_unavailable.py")], capture_output=True, text=True)
+    assert proc.stderr == f"Error: T2 storage service unavailable: {raised[0]}\n"
 
 
 def test_inserted_words_and_contrast_lines_are_counted() -> None:

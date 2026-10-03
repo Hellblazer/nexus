@@ -683,9 +683,7 @@ def test_a_service_that_is_down_stops_the_apply_with_exit_three_and_leaves_file_
     prose: Prose, repo: Path, tmp_path: Path
 ) -> None:
     work, _ = start(prose, repo, [E1, E2])
-    fake = tmp_path / "fakenx.py"
-    fake.write_text("import sys\nsys.stderr.write('T2 storage service unavailable: connection refused\\n')\n"
-                    "sys.exit(1)\n")
+    fake = Path(__file__).parent / "acceptance" / "fake_nx_unavailable.py"  # real nx wording, remedy included
     env = {**prose.env, "PROSE_EDIT_NX": f"{sys.executable} {fake}"}
     proc = run_review(prose, "apply", "--work", str(work), "--accept", "1", env=env)
     assert proc.returncode == 3 and "unavailable" in proc.stderr and proc.stdout == ""
