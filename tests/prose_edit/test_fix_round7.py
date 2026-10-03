@@ -83,8 +83,12 @@ def _dead_pid() -> int:
 
 
 def test_simultaneous_starts_over_a_dead_holder_never_both_hold_the_lock(tmp_path: Path) -> None:
+    # A winner holds the lock until every other runner of its trial has given up (exit 75), so what is counted is
+    # runners holding at the same moment. Counting exit 0 instead counted a later runner that legitimately took
+    # the lock after the first one released it, which a loaded box (CI's -n 8) makes likely: qwen-linux at
+    # e7a10089f saw {2: 3} that way.
     trials, procs = 12, 4
-    go = tmp_path / "go"
+    go, release = tmp_path / "go", tmp_path / "release"
     dead = _dead_pid()
     running = []
     for t in range(trials):
@@ -92,18 +96,28 @@ def test_simultaneous_starts_over_a_dead_holder_never_both_hold_the_lock(tmp_pat
         lock.mkdir()
         (lock / "holder").write_text(f"{dead} run-dead.sh\n", encoding="utf-8")
         for i in range(procs):
+            held = tmp_path / f"held-{t}-{i}"
             script = (f'set -u\nWT={ROOT}\n. {GUARD}\nwhile [ ! -e {go} ]; do :; done\n'
-                      f'runner_lock run-{t}-{i}.sh\nsleep 1.5\n')
-            running.append((t, subprocess.Popen(
+                      f'runner_lock run-{t}-{i}.sh\n: > {held}\n'
+                      f'while [ ! -e {release} ]; do sleep 0.05; done\n')
+            running.append((t, i, subprocess.Popen(
                 ["bash", "-c", script], env={**os.environ, "PROSE_EDIT_RUNNER_LOCK": str(lock)},
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)))
     time.sleep(0.5)
     go.touch()
-    holders = {t: 0 for t in range(trials)}
-    for t, p in running:
-        if p.wait(timeout=60) == 0:
-            holders[t] += 1
-    assert all(n == 1 for n in holders.values()), holders  # exactly one runner per lock, in every trial
+    deadline = time.monotonic() + 60
+    while time.monotonic() < deadline:
+        settled = sum(1 for t, i, p in running if p.poll() is not None or (tmp_path / f"held-{t}-{i}").exists())
+        if settled == len(running):
+            break
+        time.sleep(0.05)
+    holders = {t: sum((tmp_path / f"held-{t}-{i}").exists() for i in range(procs)) for t in range(trials)}
+    refused = [p.returncode for _, _, p in running if p.poll() is not None]
+    release.touch()
+    for _, _, p in running:
+        p.wait(timeout=60)
+    assert all(n == 1 for n in holders.values()), holders  # exactly one runner holds each lock at once
+    assert refused and set(refused) == {75}, refused  # every other runner gave up, none crashed
 
 
 def test_a_runner_that_is_killed_leaves_no_live_background_job_or_its_child(
