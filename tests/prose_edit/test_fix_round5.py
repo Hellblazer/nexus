@@ -13,6 +13,7 @@ from __future__ import annotations
 import importlib.util
 import os
 import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -220,14 +221,31 @@ def test_the_guard_reclaims_a_lock_whose_holder_is_dead(box: tuple[Path, Path]) 
     assert not lock.exists()
 
 
-def test_a_lock_with_no_holder_record_is_held_until_it_is_a_minute_old(box: tuple[Path, Path]) -> None:
+def test_a_lock_with_no_holder_record_is_reclaimed_and_a_live_gate_blocks_until_it_is_freed(
+        box: tuple[Path, Path]) -> None:
+    # The lock is made and its record written under the gate, so a lock with no record outside the gate means its
+    # maker died between the two: it is reclaimed at once, whatever its age (no file time is read).
     repo, lock = box
-    lock.mkdir()  # a maker between mkdir and its pid write
-    young = _bash('runner_lock run-test.sh\n', repo, lock)
-    assert young.returncode == 75, young.stderr
-    old = time.time() - 120
-    os.utime(lock, (old, old))
+    lock.mkdir()
     assert _bash('runner_lock run-test.sh\n', repo, lock).returncode == 0
+    # A gate whose owner is alive keeps everyone out; once its owner is gone the gate is reclaimed.
+    gate = Path(f"{lock}.gate")
+    owner = subprocess.Popen(["sleep", "30"])
+    try:
+        shutil.rmtree(lock, ignore_errors=True)
+        gate.mkdir()
+        (gate / "pid").write_text(f"{owner.pid}\n", encoding="utf-8")
+        blocked = subprocess.Popen(
+            ["bash", "-c", f'set -u\nWT={repo}\n. {GUARD}\nrunner_lock run-test.sh\n'],
+            env={**os.environ, "PROSE_EDIT_RUNNER_LOCK": str(lock)},
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        time.sleep(1.0)
+        assert blocked.poll() is None and not lock.exists()  # waiting behind the live gate
+    finally:
+        owner.kill()
+        owner.wait()
+    assert blocked.wait(timeout=30) == 0  # the dead owner's gate is reclaimed and the lock taken
+    assert not gate.exists()
 
 
 def test_two_runners_cannot_run_at_once_and_a_killed_runner_still_cleans_up(

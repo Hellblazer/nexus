@@ -7,10 +7,10 @@
 # filler lines house refrains, and a copy left behind by a killed runner did the same to the next batch.
 #
 #   runner_lock NAME      take the box-wide runner lock for the whole run, or exit 75 naming the holder. The lock is
-#                         a directory with a holder record "<pid> <name>"; a lock whose holder is dead is reclaimed
-#                         under a second lock (one reclaimer at a time, deciding again under it), one with no record
-#                         is held until it is a minute old (its maker may be between mkdir and the write), and a
-#                         holder that answers EPERM is live. Installs the exit, INT, TERM and HUP traps; the exit trap
+#                         a directory with a holder record "<pid> <name>". Every runner decides under a second lock
+#                         (the gate, which records its own owner's pid): a lock whose holder is dead, or with no
+#                         record, is reclaimed, and the lock is taken and its record written before the gate is
+#                         released. No file time is read. A holder that answers EPERM is live. Installs the exit, INT, TERM and HUP traps; the exit trap
 #                         stops the runner's background jobs and their children before it removes copies and the lock.
 #   runner_sweep_stale    remove untracked docs/zz-* left by an older runner (it holds the lock, so none is live)
 #   runner_track REL...   paths relative to WT that the exit trap removes
@@ -96,64 +96,73 @@ runner_cleanup() {
   return "$rc"
 }
 
-# Reclaim a stale lock under a second lock, "$lock.reclaim", and decide again under it. A bare "read the holder,
-# then rm -rf, then mkdir" lets two runners both read the dead pid: the second rm removes the first one's fresh
-# lock and both hold it (measured, 37 of 60 simultaneous starts). Under the gate only one runner at a time looks,
-# and it looks at the lock as it is NOW. Returns 0 when it removed a stale lock, 1 when the lock is not stale
-# (a live holder, a young record-less lock, a fresh lock taken meanwhile), 2 when another runner holds the gate.
-_runner_reclaim() {
-  local lock="$1" gate="$1.reclaim" pid=""
-  if ! mkdir "$gate" 2>/dev/null; then
-    # a gate older than a minute belongs to a reclaimer that died
-    [ -n "$(find "$gate" -maxdepth 0 -mmin +1 2>/dev/null)" ] && rmdir "$gate" 2>/dev/null
-    return 2
-  fi
-  [ -s "$lock/holder" ] && pid="$(cut -d' ' -f1 "$lock/holder")"
-  if [ -n "$pid" ]; then
-    if ! _runner_pid_alive "$pid"; then
-      rm -rf "$lock"
-      rmdir "$gate"
-      return 0
+# Every acquisition decision is made under a second lock, the gate "$lock.gate": look at the lock as it is now,
+# reclaim it when its holder is dead, take it with mkdir, and write the holder record, all before the gate is
+# released. A first version serialized only the reclaimers, so a runner taking a free lock could slip in beside one:
+# qwen-linux saw two simultaneous holders at 589c6fe8a. With every decision under the gate, the lock directory
+# changes only while the gate is held, so a lock with no holder record means its maker died inside the gate.
+# Nothing here reads a file time: the gate holds its owner's pid and is reclaimed only when that pid is dead (or
+# its record stays missing for 5 s), so a clock or timestamp quirk cannot make a fresh gate look stale. Known
+# limit: reclaiming a dead gate reads its pid and then removes it, so two runners reclaiming the same dead gate
+# while a third makes a fresh one can still collide. That needs a runner killed inside the gate's few-millisecond
+# critical section first; the normal path never reclaims a gate.
+_runner_gate_take() {
+  local gate="$1" waits=0 empty=0 gpid
+  until mkdir "$gate" 2>/dev/null; do
+    gpid=""
+    [ -s "$gate/pid" ] && gpid="$(cat "$gate/pid" 2>/dev/null)"
+    if [ -n "$gpid" ]; then
+      empty=0
+      if ! _runner_pid_alive "$gpid"; then
+        rm -rf "$gate"
+        continue
+      fi
+    else
+      empty=$((empty + 1))
+      if [ "$empty" -gt 100 ]; then   # 5 s with no record: its maker died between mkdir and the write
+        rm -rf "$gate"
+        empty=0
+        continue
+      fi
     fi
-  elif [ -d "$lock" ] && [ -n "$(find "$lock" -maxdepth 0 -mmin +1 2>/dev/null)" ]; then
-    rm -rf "$lock"   # a record that never came, and the directory is over a minute old
-    rmdir "$gate"
-    return 0
-  fi
-  rmdir "$gate"
-  return 1
+    waits=$((waits + 1))
+    [ "$waits" -gt 600 ] && return 1   # 30 s behind a live gate holder: refuse rather than spin
+    sleep 0.05
+  done
+  printf '%s\n' "$$" > "$gate/pid"
+  return 0
+}
+
+_runner_gate_release() {
+  rm -rf "$1"
 }
 
 runner_lock() {
-  local name="${1:?runner name}" lock pid holder_name tries=0 waits=0 rc
+  local name="${1:?runner name}" lock gate pid="" holder_name="a runner that wrote no record"
   lock="$(_runner_lock_path)" || { echo "$name: cannot find the git common directory for the runner lock" >&2; exit 1; }
-  while ! mkdir "$lock" 2>/dev/null; do
-    tries=$((tries + 1))
-    pid=""
-    holder_name="a runner that wrote no record"
+  gate="$lock.gate"
+  if ! _runner_gate_take "$gate"; then
+    echo "$name: could not take the runner lock's gate $gate within 30 s. If no runner is live, remove that directory." >&2
+    exit 75
+  fi
+  if [ -d "$lock" ]; then
     if [ -s "$lock/holder" ]; then
       pid="$(cut -d' ' -f1 "$lock/holder")"
       holder_name="$(cut -s -d' ' -f2- "$lock/holder")"
     fi
-    if { [ -n "$pid" ] && ! _runner_pid_alive "$pid"; } \
-       || { [ -z "$pid" ] && [ -n "$(find "$lock" -maxdepth 0 -mmin +1 2>/dev/null)" ]; }; then
-      _runner_reclaim "$lock"
-      rc=$?
-      if [ "$rc" -eq 2 ] && [ "$waits" -lt 100 ]; then
-        waits=$((waits + 1))
-        sleep 0.05   # another runner is reclaiming: look again once it is done
-        continue
-      fi
-      if [ "$rc" -le 1 ] && [ "$tries" -le 20 ]; then
-        continue
-      fi
+    if [ -z "$pid" ] || ! _runner_pid_alive "$pid"; then
+      rm -rf "$lock"   # a dead holder, or no record: its maker died inside the gate (nobody else is in it now)
     fi
+  fi
+  if ! mkdir "$lock" 2>/dev/null; then
+    _runner_gate_release "$gate"
     echo "$name: another prose-edit runner holds the lock ${holder_name:-unnamed} (pid ${pid:-unknown}) in $lock. Run one runner at a time: wait for it, or ask its owner. If no runner is live, remove that directory." >&2
     exit 75
-  done
+  fi
+  printf '%s %s\n' "$$" "$name" > "$lock/holder"
+  _runner_gate_release "$gate"
   RUNNER_LOCK_PATH="$lock"
   RUNNER_OWNS_LOCK=1
-  printf '%s %s\n' "$$" "$name" > "$lock/holder"
   trap runner_cleanup EXIT
   trap 'exit 130' INT
   trap 'exit 143' TERM
