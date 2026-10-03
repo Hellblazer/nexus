@@ -581,7 +581,21 @@ from __future__ import annotations
 #: only by lacking that pin and was never published: its mac leg linked minos
 #: 27.0 on hellmini and the ABI gate refused it. No changeset; all three wire
 #: entries are additive, so the engine deploys BEFORE this client tag.
-REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 143)
+#:
+#: 7.69.0 pairs with engine-service-v0.1.145 (tagged 2026-10-03 on adfd8386d):
+#: collection delete takes the origin's quarantine rows with it and rename
+#: retags them, keep_quarantine on reindex, audited quarantine-* delete
+#: (nexus-wbfpw.71, producer half of nexus-wbfpw.68), the reaper's backfill
+#: gate passes an empty tenant and reaper.last_pass gains tenants_empty
+#: (nexus-wbfpw.73). It also carries v0.1.144 (tagged 2026-10-02 on
+#: 0b577b989, deployed to the cloud on its own): manifest-write deadlock
+#: retry (nexus-wbfpw.66), reaper_pass_failed on a tenant-list failure
+#: (nexus-wbfpw.67), the reaper's per-origin count (nexus-wbfpw.53) and the
+#: test-only engine half of nexus-wbfpw.58. No changeset; all three wire
+#: entries are [additive], so the engine deploys BEFORE this client tag
+#: (nexus-1emxn choreography (a)). 7.67.0 and 7.68.0 paired with
+#: v0.1.142 and v0.1.143 and added no line here.
+REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 145)
 
 #: nexus-5uoxu: the first engine version whose telemetry trim honors the
 #: ``dry_run`` field (the 3-arg ``trimSearchTelemetry`` overload, re-landed
