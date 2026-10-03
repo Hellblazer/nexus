@@ -4030,7 +4030,8 @@ def _check_engine_reaper(
                    if failed else "")
     fixes = [
         "Read the engine log for event=reaper_pass_failed and event=reaper_scheduled_run_failed (and "
-        "event=reaper_run, one line per pass): a thrown Error is caught and logged, and the schedule stays alive",
+        "event=reaper_run, one line per completed pass; a failed pass logs reaper_pass_failed instead): a thrown "
+        "Error is caught and logged, and the schedule stays alive",
         "A reaper that stopped making passes is restarted by restarting the engine "
         "(`nx daemon service stop && nx daemon service start` for a local engine); NX_REAPER_ENABLED=false "
         "switches it off on purpose, and then this row reads not applicable",

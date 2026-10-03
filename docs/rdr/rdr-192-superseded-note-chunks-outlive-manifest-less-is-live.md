@@ -1081,6 +1081,13 @@ grown.
   recent pass visited tenants and none worked. Not yet closed: nothing automated runs
   `nx doctor` against a cloud engine, and the cloud gate has no leg that asserts the
   `reaper` key survives the edge (`nexus-wbfpw.50`).
+  Amended 2026-10-02 (`nexus-wbfpw.67`, conexus-lv6t): "logs its run on every pass, success or
+  failure" is now two lines, not one. A pass that runs to the end logs `event=reaper_run`; a pass
+  that fails as a whole logs `event=reaper_pass_failed` at ERROR instead, with no `reaper_run`
+  line, adds one to `failed_passes_total` and leaves `last_completed_pass_at` alone (`stage=tenant_list`
+  when it could not list its tenants; until this bead that path logged a zero-filled WARN
+  `reaper_run` with `errors=1`, which read as a completed pass to anything not filtering on its
+  `error=` text).
 - **The census reads a live document as `no-owner`** (Phase 3 gate O2). The census
   resolves a chunk's owner from its metadata (`catalog_doc_id`, then `doc_id`) or a
   note-shaped reverse match. A `docs__` or `code__` chunk written after RDR-108 carries no

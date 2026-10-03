@@ -850,12 +850,17 @@ class ChunkReaperIntegrationTest extends AtomicWriteTestBase {
     }
 
     @Test
-    void anErrorFromTheTenantListIsAFailedPassToo() {
+    void anErrorFromTheTenantListIsAFailedPassToo() throws Throwable {
         ChunkReaper r = new ChunkReaper(store, vectors, repo, gate,
             () -> { throw new StackOverflowError("simulated"); }, Settings.defaults(), CLOCK);
 
-        RunResult failed = r.runOnce(null);
+        RunResult[] run = new RunResult[1];
+        List<String> logs = captureLogs(() -> run[0] = r.runOnce(null));
+        RunResult failed = run[0];
 
+        // An Error escapes runPass's RuntimeException catch, so runOnce logs it: same event, no stage= (nexus-wbfpw.67).
+        assertThat(logs.stream().filter(l -> l.contains("event=reaper_pass_failed")).toList())
+            .singleElement().satisfies(l -> assertThat(l).startsWith("ERROR ").doesNotContain("stage="));
         assertThat(failed.tenants()).isEmpty();
         assertThat(r.failedPassesTotal()).isEqualTo(1);
         assertThat(r.lastCompletedPassAt()).isNull();
@@ -878,8 +883,8 @@ class ChunkReaperIntegrationTest extends AtomicWriteTestBase {
         assertThat(logs.stream().filter(l -> l.contains("event=reaper_pass_failed")).toList())
             .singleElement().satisfies(l -> {
                 assertThat(l).startsWith("ERROR ");
-                assertThat(l).contains("stage=tenant_list")
-                    .contains("error_class=java.lang.IllegalStateException")
+                assertThat(l).contains("event=reaper_pass_failed error_class=java.lang.IllegalStateException")
+                    .endsWith("stage=tenant_list")
                     .contains("simulated: tenant list query failed")
                     .contains("failed_passes_total=1");
             });

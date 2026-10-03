@@ -648,9 +648,10 @@ final class ChunkReaper {
         } catch (RuntimeException e) {
             // A pass that could not list its tenants is a failed pass, logged as one (nexus-wbfpw.67, conexus-lv6t):
             // it used to log a WARN event=reaper_run with errors=1, which an alert on reaper_pass_failed missed and a
-            // heartbeat on reaper_run read as alive. stage= tells it apart from runOnce's line for an escaped Throwable.
+            // heartbeat on reaper_run read as alive. Same fields as runOnce's line for an escaped Throwable, in the same order,
+            // with stage= appended last so a filter written against that line matches this one too.
             long n = failedPassesTotal.incrementAndGet();
-            log.error("event=reaper_pass_failed stage=tenant_list error_class={} error={} failed_passes_total={}",
+            log.error("event=reaper_pass_failed error_class={} error={} failed_passes_total={} stage=tenant_list",
                 e.getClass().getName(), e.getMessage(), n, e);
             RunResult failed = new RunResult(List.of(), false);
             lastRun.set(failed);
