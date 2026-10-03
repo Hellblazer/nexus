@@ -118,7 +118,7 @@ This applies to `--description`, `--notes`, `--design`, and any flag that accept
 **CI-enforced (tests will break):**
 - [ ] Frontmatter has `name`, `description`, and `effort` — only these three fields
 - [ ] Description starts with "Use when"
-- [ ] Description has none of the CI-checked keywords: `Triggers:`, `user says`, `workflow`, `process:` (the literal `BAD_KEYWORDS` list in `test_frontmatter_valid` — narrower than it once was; don't over-scrub prose that merely mentions a step count)
+- [ ] Description has none of the CI-checked keywords: `Triggers:`, `user says`, `workflow`, `process:` (the literal `BAD_KEYWORDS` list in `test_every_skill_frontmatter_is_valid` — narrower than it once was; don't over-scrub prose that merely mentions a step count)
 - [ ] No YAML comments in frontmatter
 - [ ] Agent-delegating: has **Agent Invocation** heading (or Relay Template heading)
 - [ ] Agent-delegating: has `## Agent-Specific PRODUCE` section

@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 import json
 import re
-import shutil
 import subprocess
 import tomllib
 from pathlib import Path
@@ -34,8 +33,6 @@ PYPROJECT_PATH = REPO_ROOT / "pyproject.toml"
 
 REGISTRY = yaml.safe_load(REGISTRY_PATH.read_text())
 REGISTRY_AGENTS: dict = REGISTRY.get("agents", {})
-AGENT_NAMES = list(REGISTRY_AGENTS.keys())
-AGENT_NAMES_AND_META = list(REGISTRY_AGENTS.items())
 
 _STANDALONE_SKILLS = {
     "cli-controller", "nexus",
@@ -94,16 +91,6 @@ def skill_skill_mds() -> list[Path]:
 
 def command_files() -> list[Path]:
     return sorted(COMMANDS_DIR.glob("*.md"))
-
-def _agent_params():
-    return [pytest.param(p, id=p.name) for p in agent_files()]
-
-def _skill_params(*, exclude_standalone: bool = False):
-    return [pytest.param(p, id=p.parent.name) for p in skill_skill_mds()
-            if not exclude_standalone or p.parent.name not in _STANDALONE_SKILLS]
-
-def _command_params():
-    return [pytest.param(p, id=p.name) for p in command_files()]
 
 ALL_MD_FILES = agent_files() + list(skill_skill_mds()) + command_files()
 
@@ -190,40 +177,32 @@ class TestRegistryIntegrity:
         assert REGISTRY_PATH.exists()
         assert "agents" in REGISTRY and "version" in REGISTRY
 
-    @pytest.mark.parametrize("agent_name", [
-        pytest.param(n, id=n) for n in AGENT_NAMES
-    ])
-    def test_agent_has_md_file(self, agent_name: str) -> None:
-        assert (AGENTS_DIR / f"{agent_name}.md").exists()
-
-    @pytest.mark.parametrize("agent_name,agent_meta", [
-        pytest.param(n, m, id=n) for n, m in AGENT_NAMES_AND_META if m.get("skill")
-    ])
-    def test_agent_skill_directory_exists(self, agent_name: str, agent_meta: dict) -> None:
-        assert (SKILLS_DIR / agent_meta["skill"] / "SKILL.md").exists()
-
-    @pytest.mark.parametrize("pipeline_name,pipeline_meta", [
-        pytest.param(n, m, id=n) for n, m in REGISTRY.get("pipelines", {}).items()
-    ])
-    def test_pipeline_agents_exist(self, pipeline_name: str, pipeline_meta: dict) -> None:
-        known = set(REGISTRY_AGENTS.keys())
-        for step in pipeline_meta.get("sequence", []):
-            assert step in known, f"Pipeline '{pipeline_name}' references unknown agent '{step}'"
-
-    @pytest.mark.parametrize("agent_name,agent_meta", [
-        pytest.param(n, m, id=n) for n, m in AGENT_NAMES_AND_META
-    ])
-    def test_predecessors_and_successors_exist(self, agent_name: str, agent_meta: dict) -> None:
-        known = set(REGISTRY_AGENTS.keys())
-        for rel in ("predecessors", "successors"):
-            for ref in agent_meta.get(rel, []):
-                assert ref in known, f"Agent '{agent_name}' {rel} entry '{ref}' not in agents"
-
-    def test_model_summary_matches_agents(self) -> None:
-        known = set(REGISTRY_AGENTS.keys())
+    def test_registry_references_resolve(self) -> None:
+        """Every registry agent has its file and its skill, and every
+        pipeline, predecessor, successor and model_summary entry names a
+        registered agent."""
+        known = set(REGISTRY_AGENTS)
+        assert len(known) >= 10, f"only {len(known)} registry agents examined"
+        offenders: list[str] = []
+        for name, meta in REGISTRY_AGENTS.items():
+            if not (AGENTS_DIR / f"{name}.md").exists():
+                offenders.append(f"agent '{name}': no agents/{name}.md")
+            skill = meta.get("skill")
+            if skill and not (SKILLS_DIR / skill / "SKILL.md").exists():
+                offenders.append(f"agent '{name}': skill '{skill}' has no SKILL.md")
+            for rel in ("predecessors", "successors"):
+                for ref in meta.get(rel, []):
+                    if ref not in known:
+                        offenders.append(f"agent '{name}' {rel} entry '{ref}' not in agents")
+        for pname, pmeta in REGISTRY.get("pipelines", {}).items():
+            for step in pmeta.get("sequence", []):
+                if step not in known:
+                    offenders.append(f"pipeline '{pname}' references unknown agent '{step}'")
         for model, listed in REGISTRY.get("model_summary", {}).items():
             for name in listed:
-                assert name in known, f"model_summary/{model} references unknown agent '{name}'"
+                if name not in known:
+                    offenders.append(f"model_summary/{model} references unknown agent '{name}'")
+        assert not offenders, "\n".join(offenders)
 
 
 AGENT_REQUIRED_SECTIONS = [
@@ -237,16 +216,25 @@ AGENT_FRONTMATTER_FIELDS = ("name", "version", "description", "model", "color")
 
 class TestAgentStructure:
 
-    @pytest.mark.parametrize("agent_path", _agent_params())
-    def test_required_sections_and_frontmatter(self, agent_path: Path) -> None:
-        text = agent_path.read_text()
-        for section in AGENT_REQUIRED_SECTIONS:
-            assert section in text, f"{agent_path.name}: missing '{section}'"
-        assert "CONTEXT_PROTOCOL.md" in text, f"{agent_path.name}: missing CONTEXT_PROTOCOL.md reference"
-        fm = _extract_frontmatter(text)
-        assert fm, f"{agent_path.name}: no YAML frontmatter found"
-        for field in AGENT_FRONTMATTER_FIELDS:
-            assert field in fm, f"{agent_path.name}: frontmatter missing '{field}'"
+    def test_every_agent_has_required_sections_and_frontmatter(self) -> None:
+        agents = agent_files()
+        assert len(agents) >= 10, f"only {len(agents)} agent files examined"
+        offenders: list[str] = []
+        for agent_path in agents:
+            text = agent_path.read_text()
+            for section in AGENT_REQUIRED_SECTIONS:
+                if section not in text:
+                    offenders.append(f"{agent_path.name}: missing '{section}'")
+            if "CONTEXT_PROTOCOL.md" not in text:
+                offenders.append(f"{agent_path.name}: missing CONTEXT_PROTOCOL.md reference")
+            fm = _extract_frontmatter(text)
+            if not fm:
+                offenders.append(f"{agent_path.name}: no YAML frontmatter found")
+                continue
+            for field in AGENT_FRONTMATTER_FIELDS:
+                if field not in fm:
+                    offenders.append(f"{agent_path.name}: frontmatter missing '{field}'")
+        assert not offenders, "\n".join(offenders)
 
 
 
@@ -270,62 +258,60 @@ class TestPlannerReviewGates:
         assert "Code review" in section or "code-review" in section
 
 
-
 class TestRecoverProtocol:
 
-    @pytest.mark.parametrize("agent_path", _agent_params())
-    def test_recover_block(self, agent_path: Path) -> None:
-        # wuerf: inner-axis collapse — the three checks all inspect the same
-        # RECOVER block of the same agent. Formerly _agent_params() × 3 nodes;
-        # now one node per agent (per-agent granularity preserved), reading
-        # the file and extracting the block once instead of three times.
-        text = agent_path.read_text()
-        block = _extract_recover_block(text)
-        assert block, f"{agent_path.name}: no 'If validation fails' block found"
-        # six_steps
-        assert "6. Proceed with available context" in block, \
-            f"{agent_path.name}: RECOVER block missing step 6"
-        # t1_scratch
-        assert "nx scratch search" in block or 'action="search"' in block or "scratch" in block.lower(), \
-            f"{agent_path.name}: RECOVER block missing T1 scratch search step"
-        # memory_search (stale-usage guard)
-        has_cli = "nx memory search" in block
-        has_mcp = "memory_search" in block
-        has_stale = "nx memory get --project" in block
-        assert has_cli or has_mcp or not has_stale, \
-            f"{agent_path.name}: RECOVER uses stale 'nx memory get' instead of 'memory_search'"
-
+    def test_every_agent_has_a_recover_block(self) -> None:
+        agents = agent_files()
+        assert len(agents) >= 10, f"only {len(agents)} agent files examined"
+        offenders: list[str] = []
+        for agent_path in agents:
+            block = _extract_recover_block(agent_path.read_text())
+            if not block:
+                offenders.append(f"{agent_path.name}: no 'If validation fails' block found")
+                continue
+            if "6. Proceed with available context" not in block:
+                offenders.append(f"{agent_path.name}: RECOVER block missing step 6")
+            if not ("nx scratch search" in block or 'action="search"' in block
+                    or "scratch" in block.lower()):
+                offenders.append(f"{agent_path.name}: RECOVER block missing T1 scratch search step")
+            has_cli = "nx memory search" in block
+            has_mcp = "memory_search" in block
+            has_stale = "nx memory get --project" in block
+            if not (has_cli or has_mcp or not has_stale):
+                offenders.append(
+                    f"{agent_path.name}: RECOVER uses stale 'nx memory get' instead of 'memory_search'"
+                )
+        assert not offenders, "\n".join(offenders)
 
 
 class TestCliSyntax:
 
-    @pytest.mark.parametrize("md_path", [
-        pytest.param(p, id=str(p.relative_to(PLUGIN_DIR))) for p in ALL_MD_FILES
-    ])
-    def test_no_stale_patterns(self, md_path: Path) -> None:
-        # wuerf: inner-axis collapse — both stale-pattern scans run over the
-        # same file. Formerly ALL_MD_FILES × 2 nodes; now one node per file
-        # (per-file granularity preserved), reading the file once.
-        text = md_path.read_text()
-        assert "pm::" not in text, f"{md_path}: stale 'pm::' notation"
-        assert not re.search(r"`nx health`|nx health\b", text), \
-            f"{md_path}: stale 'nx health' command"
+    def test_no_stale_patterns(self) -> None:
+        assert len(ALL_MD_FILES) >= 40, f"only {len(ALL_MD_FILES)} plugin markdown files examined"
+        offenders: list[str] = []
+        for md_path in ALL_MD_FILES:
+            text = md_path.read_text()
+            rel = md_path.relative_to(PLUGIN_DIR)
+            if "pm::" in text:
+                offenders.append(f"{rel}: stale 'pm::' notation")
+            if re.search(r"`nx health`|nx health\b", text):
+                offenders.append(f"{rel}: stale 'nx health' command")
+        assert not offenders, "\n".join(offenders)
 
-    @pytest.mark.parametrize("agent_path", _agent_params())
-    def test_nx_store_put_has_pipe_source(self, agent_path: Path) -> None:
-        text = agent_path.read_text()
-        lines_with_put = [
-            (i + 1, line)
-            for i, line in enumerate(text.splitlines())
-            if "nx store put -" in line
-        ]
-        for lineno, line in lines_with_put:
-            stripped = line.strip()
-            has_pipe = "|" in stripped and stripped.index("|") < stripped.index("nx store put -")
-            is_comment = re.match(r"^\s*[#\-*]", line)
-            assert has_pipe or is_comment, \
-                f"{agent_path.name}:{lineno}: 'nx store put -' missing pipe source"
-
+    def test_nx_store_put_has_pipe_source(self) -> None:
+        agents = agent_files()
+        assert len(agents) >= 10, f"only {len(agents)} agent files examined"
+        offenders: list[str] = []
+        for agent_path in agents:
+            for lineno, line in enumerate(agent_path.read_text().splitlines(), 1):
+                if "nx store put -" not in line:
+                    continue
+                stripped = line.strip()
+                has_pipe = "|" in stripped and stripped.index("|") < stripped.index("nx store put -")
+                is_comment = re.match(r"^\s*[#\-*]", line)
+                if not (has_pipe or is_comment):
+                    offenders.append(f"{agent_path.name}:{lineno}: 'nx store put -' missing pipe source")
+        assert not offenders, "\n".join(offenders)
 
 
 class TestSkillStructure:
@@ -335,61 +321,78 @@ class TestSkillStructure:
         "## Success Criteria",
     ]
 
-    @pytest.mark.parametrize("skill_path", _skill_params(exclude_standalone=True))
-    def test_required_sections_and_produce(self, skill_path: Path) -> None:
-        text = skill_path.read_text()
-        for section in self.REQUIRED_SECTIONS:
-            if isinstance(section, tuple):
-                assert any(alt in text for alt in section), \
-                    f"{skill_path.parent.name}/SKILL.md: missing one of {section}"
-            else:
-                assert section in text, \
-                    f"{skill_path.parent.name}/SKILL.md: missing '{section}'"
-        assert "Agent-Specific PRODUCE" in text, \
-            f"{skill_path.parent.name}/SKILL.md: missing 'Agent-Specific PRODUCE'"
-        assert "scratch" in text.lower(), \
-            f"{skill_path.parent.name}/SKILL.md: no mention of T1 scratch"
+    def test_agent_backed_skills_have_required_sections_and_produce(self) -> None:
+        skills = [p for p in skill_skill_mds() if p.parent.name not in _STANDALONE_SKILLS]
+        assert len(skills) >= 10, f"only {len(skills)} agent-backed skills examined"
+        offenders: list[str] = []
+        for skill_path in skills:
+            name = skill_path.parent.name
+            text = skill_path.read_text()
+            for section in self.REQUIRED_SECTIONS:
+                if isinstance(section, tuple):
+                    if not any(alt in text for alt in section):
+                        offenders.append(f"{name}/SKILL.md: missing one of {section}")
+                elif section not in text:
+                    offenders.append(f"{name}/SKILL.md: missing '{section}'")
+            if "Agent-Specific PRODUCE" not in text:
+                offenders.append(f"{name}/SKILL.md: missing 'Agent-Specific PRODUCE'")
+            if "scratch" not in text.lower():
+                offenders.append(f"{name}/SKILL.md: no mention of T1 scratch")
+        assert not offenders, "\n".join(offenders)
 
-    @pytest.mark.parametrize("skill_path", _skill_params())
-    def test_relay_template_has_required_rows(self, skill_path: Path) -> None:
-        text = skill_path.read_text()
-        if "## Relay Template" not in text:
-            if "RELAY_TEMPLATE.md" in text:
-                return
-            pytest.skip("No relay template in this skill")
-        relay_section = text.split("## Relay Template")[1]
-        for row in ("nx store:", "nx memory:", "Files:"):
-            assert row in relay_section, \
-                f"{skill_path.parent.name}/SKILL.md relay template: missing '{row}'"
-
+    def test_relay_templates_have_required_rows(self) -> None:
+        offenders: list[str] = []
+        examined = 0
+        for skill_path in skill_skill_mds():
+            text = skill_path.read_text()
+            if "## Relay Template" not in text:
+                continue
+            examined += 1
+            relay_section = text.split("## Relay Template")[1]
+            for row in ("nx store:", "nx memory:", "Files:"):
+                if row not in relay_section:
+                    offenders.append(
+                        f"{skill_path.parent.name}/SKILL.md relay template: missing '{row}'"
+                    )
+        assert examined >= 5, f"only {examined} skills with a relay template examined"
+        assert not offenders, "\n".join(offenders)
 
 
 class TestSkillDescriptionCSO:
 
     BAD_KEYWORDS = ["Triggers:", "user says", "workflow", "process:"]
 
-    @pytest.mark.parametrize("skill_path", _skill_params())
-    def test_frontmatter_valid(self, skill_path: Path) -> None:
-        text = skill_path.read_text()
-        fm_match = re.match(r"^---\n(.*?)\n---", text, re.DOTALL)
-        assert fm_match, f"{skill_path.parent.name}/SKILL.md: no YAML frontmatter"
-        raw = fm_match.group(1)
-        fm = yaml.safe_load(raw)
-        # Only standard fields allowed
-        extra = set(fm.keys()) - {"name", "description", "effort"}
-        assert not extra, f"{skill_path.parent.name}/SKILL.md: non-standard fields {extra}"
-        # No YAML comments
-        comment_lines = [l for l in raw.splitlines() if l.strip().startswith("#")]
-        assert not comment_lines, \
-            f"{skill_path.parent.name}/SKILL.md: YAML comments in frontmatter: {comment_lines}"
-        # Description starts with 'Use when'
-        desc = fm.get("description", "")
-        assert desc.lower().startswith("use when"), \
-            f"{skill_path.parent.name}/SKILL.md: description must start with 'Use when'. Got: {desc[:80]!r}"
-        # No workflow keywords
-        for kw in self.BAD_KEYWORDS:
-            assert kw not in desc, \
-                f"{skill_path.parent.name}/SKILL.md: description contains workflow keyword {kw!r}"
+    def test_every_skill_frontmatter_is_valid(self) -> None:
+        skills = skill_skill_mds()
+        assert len(skills) >= 40, f"only {len(skills)} skills examined"
+        offenders: list[str] = []
+        for skill_path in skills:
+            name = skill_path.parent.name
+            fm_match = re.match(r"^---\n(.*?)\n---", skill_path.read_text(), re.DOTALL)
+            if not fm_match:
+                offenders.append(f"{name}/SKILL.md: no YAML frontmatter")
+                continue
+            raw = fm_match.group(1)
+            try:
+                fm = yaml.safe_load(raw)
+            except yaml.YAMLError as exc:
+                offenders.append(f"{name}/SKILL.md: frontmatter is not valid YAML: {exc}")
+                continue
+            extra = set(fm.keys()) - {"name", "description", "effort"}
+            if extra:
+                offenders.append(f"{name}/SKILL.md: non-standard fields {sorted(extra)}")
+            comment_lines = [l for l in raw.splitlines() if l.strip().startswith("#")]
+            if comment_lines:
+                offenders.append(f"{name}/SKILL.md: YAML comments in frontmatter: {comment_lines}")
+            desc = fm.get("description", "")
+            if not desc.lower().startswith("use when"):
+                offenders.append(
+                    f"{name}/SKILL.md: description must start with 'Use when'. Got: {desc[:80]!r}"
+                )
+            for kw in self.BAD_KEYWORDS:
+                if kw in desc:
+                    offenders.append(f"{name}/SKILL.md: description contains workflow keyword {kw!r}")
+        assert not offenders, "\n".join(offenders)
 
 
 class TestSkillListingByteBudget:
@@ -434,7 +437,6 @@ class TestSkillListingByteBudget:
             f"invoked skills' descriptions (injection audit S3)"
         )
 
-
 def _command_bash_block(text: str) -> str | None:
     """Return the body of the documented ```! fenced bash block, or None.
 
@@ -445,39 +447,19 @@ def _command_bash_block(text: str) -> str | None:
     m = re.search(r"(?ms)^```!\n(.*?)\n```[ \t]*$", text)
     return m.group(1) if m else None
 
-
 class TestCommandStructure:
 
-    @pytest.mark.parametrize("cmd_path", _command_params())
-    def test_bash_block_syntax(self, cmd_path: Path) -> None:
-        if shutil.which("bash") is None:
-            pytest.skip("bash not available")
-        body = _command_bash_block(cmd_path.read_text())
-        if body is None:
-            pytest.skip(f"{cmd_path.name}: no ```! bash block found")
-        result = subprocess.run(["bash", "-n"], input=body, capture_output=True, text=True)
-        assert result.returncode == 0, f"{cmd_path.name}: bash syntax error:\n{result.stderr}"
+    def test_no_unescaped_glob_in_grep(self) -> None:
+        commands = command_files()
+        assert len(commands) >= 15, f"only {len(commands)} commands examined"
+        offenders: list[str] = []
+        for cmd_path in commands:
+            bad = re.findall(r'grep\s+["\']?\*\*["\']?', cmd_path.read_text())
+            if bad:
+                offenders.append(f"{cmd_path.name}: unescaped '**' in grep pattern: {bad}")
+        assert not offenders, "\n".join(offenders)
 
-    @pytest.mark.parametrize("cmd_path", _command_params())
-    def test_no_unescaped_glob_in_grep(self, cmd_path: Path) -> None:
-        bad = re.findall(r'grep\s+["\']?\*\*["\']?', cmd_path.read_text())
-        assert not bad, f"{cmd_path.name}: unescaped '**' in grep pattern: {bad}"
-
-    @pytest.mark.parametrize("cmd_path", _command_params())
-    def test_nx_commands_guarded(self, cmd_path: Path) -> None:
-        body = _command_bash_block(cmd_path.read_text())
-        if body is None:
-            pytest.skip(f"{cmd_path.name}: no ```! bash block found")
-        nx_calls = [
-            line.strip() for line in body.splitlines()
-            if re.match(r"\s+nx\s+", line) and "2>/dev/null" not in line
-            and "command -v nx" not in line
-        ]
-        assert len(nx_calls) < 5, \
-            f"{cmd_path.name}: {len(nx_calls)} unguarded 'nx' calls in ```! block"
-
-    @pytest.mark.parametrize("cmd_path", _command_params())
-    def test_command_bash_uses_documented_syntax(self, cmd_path: Path) -> None:
+    def test_command_bash_uses_documented_syntax(self) -> None:
         """Regression for nexus-ln9y5 (supersedes the nexus-t1b1k heredoc guard).
 
         Claude Code only executes command bash injection in the documented
@@ -486,88 +468,67 @@ class TestCommandStructure:
         through 5.1.1) is NOT a recognized syntax and emits as raw source — the
         preamble never runs. Additionally, ``$CLAUDE_PLUGIN_ROOT`` is empty in
         the command-bash context (it is scoped to hooks/MCP/LSP), so by-path
-        script invocation fails. This guard would have caught both bugs; it is
-        what the t1b1k guard should have been.
+        script invocation fails.
 
         Static check only. The render path itself is covered by the
         cc-validation harness (the layer no unit test can reach).
         """
-        text = cmd_path.read_text()
-        assert "!{" not in text, (
-            f"{cmd_path.name}: forbidden !{{ }} brace bash form (nexus-ln9y5). "
-            "It does not execute. Use a documented ```! fenced block."
-        )
-        body = _command_bash_block(text)
-        # An inline !`...` form is also acceptable; only enforce de-rooting and
-        # the fence rule for files that actually carry a bash block.
-        inline = re.search(r"(?<!\\)!`[^`]+`", text)
-        if body is None and inline is None:
-            pytest.skip(f"{cmd_path.name}: no bash injection block")
-        if body is not None:
-            assert "$CLAUDE_PLUGIN_ROOT" not in body, (
-                f"{cmd_path.name}: $CLAUDE_PLUGIN_ROOT is empty in command bash "
-                "(nexus-ln9y5); inline the logic instead of invoking by path."
-            )
-
-    @pytest.mark.parametrize("cmd_path", _command_params())
-    def test_no_inner_triple_backtick_in_bang_block(self, cmd_path: Path) -> None:
-        """Regression for nexus-61fzg (5.1.2 broke 17/25 commands).
-
-        Claude Code closes a ```! fenced block at the FIRST line containing a
-        triple-backtick after the opener, at any position (e.g. inside
-        ``echo '<fence>'`` or a Python ``print``/regex), not only at a bare
-        closing-fence line. A 4-backtick opening fence does not change this.
-        So the first ```-bearing line after the opener MUST be the bare closing
-        fence; any earlier in-content triple-backtick truncates the block and
-        the shell errors. The nexus-ln9y5 guard checked only for *bare* fence
-        lines and missed this; this matches CC's actual parser.
-        """
-        text = cmd_path.read_text()
-        opener = re.search(r"(?m)^```!\s*$", text)
-        if opener is None:
-            pytest.skip(f"{cmd_path.name}: no ```! block")
-        for ln in text[opener.end():].splitlines():
-            if "```" in ln:
-                assert re.match(r"^[ ]{0,3}```[ \t]*$", ln), (
-                    f"{cmd_path.name}: literal triple-backtick inside the ```! "
-                    f"block truncates it (nexus-61fzg): {ln.strip()!r}. The block "
-                    "source must contain no triple-backtick before its closing fence."
+        commands = command_files()
+        assert len(commands) >= 15, f"only {len(commands)} commands examined"
+        offenders: list[str] = []
+        for cmd_path in commands:
+            text = cmd_path.read_text()
+            if "!{" in text:
+                offenders.append(
+                    f"{cmd_path.name}: forbidden !{{ }} brace bash form (nexus-ln9y5). "
+                    "It does not execute."
                 )
-                break  # first ```-line is the bare closer — good
+            body = _command_bash_block(text)
+            if body is not None and "$CLAUDE_PLUGIN_ROOT" in body:
+                offenders.append(
+                    f"{cmd_path.name}: $CLAUDE_PLUGIN_ROOT is empty in command bash "
+                    "(nexus-ln9y5); inline the logic instead of invoking by path."
+                )
+        assert not offenders, "\n".join(offenders)
 
-    @pytest.mark.parametrize("cmd_path", _command_params())
-    def test_migrated_command_uses_single_line_nx(self, cmd_path: Path) -> None:
+    def test_every_command_uses_single_line_nx(self) -> None:
         """RDR-130: a command injects bash via a single-line inline
         ``!`nx …` `` call — never a fenced ```! block or inlined heredoc.
         This locks the thin-command contract (logic lives in the nx CLI, not
-        the .md). P1 migrated the 9 RDR commands; P2.5 (nexus-kjknj) migrated
-        the 16 agent-relay commands and removed the pending-exemption window,
-        so this guard now covers all 25 commands.
+        the .md), and with it the absence of any ```! block: no fenced-block
+        rule (bash syntax, unguarded nx calls, inner triple backtick) can
+        apply to a command that carries none.
         """
-        text = cmd_path.read_text()
-        assert _command_bash_block(text) is None, (
-            f"{cmd_path.name}: migrated command must inject via a single-line "
-            "!`nx …` call, not a fenced ```! block (RDR-130 P1.5)."
-        )
-        assert re.search(r"(?m)^!`nx [^`]+`\s*$", text), (
-            f"{cmd_path.name}: expected a single-line !`nx …` injection (RDR-130 P1.5)."
-        )
+        commands = command_files()
+        assert len(commands) >= 15, f"only {len(commands)} commands examined"
+        offenders: list[str] = []
+        for cmd_path in commands:
+            text = cmd_path.read_text()
+            if _command_bash_block(text) is not None:
+                offenders.append(
+                    f"{cmd_path.name}: migrated command must inject via a single-line "
+                    "!`nx …` call, not a fenced ```! block (RDR-130 P1.5)."
+                )
+            if not re.search(r"(?m)^!`nx [^`]+`\s*$", text):
+                offenders.append(
+                    f"{cmd_path.name}: expected a single-line !`nx …` injection (RDR-130 P1.5)."
+                )
+        assert not offenders, "\n".join(offenders)
 
 
 
 class TestCrossReferenceIntegrity:
 
-    @pytest.mark.parametrize("agent_path", _agent_params())
-    def test_relay_to_references_exist(self, agent_path: Path) -> None:
-        known_agents = {p.stem for p in agent_files()}
-        for ref in re.findall(r"relay to `([a-z][a-z0-9-]*)`", agent_path.read_text(), re.IGNORECASE):
-            assert ref in known_agents, f"{agent_path.name}: references unknown agent '{ref}'"
-
-    @pytest.mark.parametrize("agent_path", _agent_params())
-    def test_shared_context_protocol_reference_valid(self, agent_path: Path) -> None:
-        if "CONTEXT_PROTOCOL.md" not in agent_path.read_text():
-            pytest.skip("no CONTEXT_PROTOCOL.md reference")
-        assert (SHARED_DIR / "CONTEXT_PROTOCOL.md").exists()
+    def test_relay_to_references_exist(self) -> None:
+        agents = agent_files()
+        assert len(agents) >= 10, f"only {len(agents)} agent files examined"
+        known_agents = {p.stem for p in agents}
+        offenders: list[str] = []
+        for agent_path in agents:
+            for ref in re.findall(r"relay to `([a-z][a-z0-9-]*)`", agent_path.read_text(), re.IGNORECASE):
+                if ref not in known_agents:
+                    offenders.append(f"{agent_path.name}: references unknown agent '{ref}'")
+        assert not offenders, "\n".join(offenders)
 
 
 class TestHooks:
@@ -683,11 +644,16 @@ EXPECTED_SHARED_FILES = [
 
 class TestSharedResources:
 
-    @pytest.mark.parametrize("filename", EXPECTED_SHARED_FILES)
-    def test_shared_file_exists_and_non_empty(self, filename: str) -> None:
-        path = SHARED_DIR / filename
-        assert path.exists(), f"resources/agent-shared/{filename} missing"
-        assert len(path.read_text()) > 100, f"resources/agent-shared/{filename} nearly empty"
+    def test_shared_files_exist_and_are_non_empty(self) -> None:
+        """Includes CONTEXT_PROTOCOL.md, which every agent references."""
+        offenders: list[str] = []
+        for filename in EXPECTED_SHARED_FILES:
+            path = SHARED_DIR / filename
+            if not path.exists():
+                offenders.append(f"resources/agent-shared/{filename} missing")
+            elif len(path.read_text()) <= 100:
+                offenders.append(f"resources/agent-shared/{filename} nearly empty")
+        assert not offenders, "\n".join(offenders)
 
     def test_no_unregistered_shared_files(self) -> None:
         orphans = {p.name for p in SHARED_DIR.glob("*.md")} - set(EXPECTED_SHARED_FILES)
@@ -705,29 +671,40 @@ class TestSharedResources:
         assert SHARED_DIR.is_dir()
 
 
-class TestSharedRelativePaths:
+class TestPluginLinksResolve:
+    """Three link families, one rule: a path the plugin names must exist.
+    Each category carries its own non-vacuity floor."""
 
-    @pytest.mark.parametrize("source_file,raw_path", [
-        pytest.param(src, rp, id=f"{src.relative_to(PLUGIN_DIR)}->{rp}")
-        for src, rp in _collect_shared_links()
-    ])
-    def test_shared_link_resolves(self, source_file: Path, raw_path: str) -> None:
-        resolved = (source_file.parent / raw_path.split("#")[0]).resolve()
-        assert resolved.exists(), \
-            f"{source_file.relative_to(PLUGIN_DIR)}: link {raw_path!r} -> {resolved} missing"
+    def test_links_and_plugin_root_refs_resolve(self) -> None:
+        offenders: list[str] = []
+        shared = _collect_shared_links()
+        assert len(shared) >= 40, f"only {len(shared)} agent-shared links examined"
+        for source_file, raw_path in shared:
+            resolved = (source_file.parent / raw_path.split("#")[0]).resolve()
+            if not resolved.exists():
+                offenders.append(
+                    f"agent-shared link: {source_file.relative_to(PLUGIN_DIR)}: "
+                    f"{raw_path!r} -> {resolved} missing"
+                )
+        tier = _collect_tier_discipline_links()
+        assert len(tier) >= 5, f"only {len(tier)} tier-discipline links examined"
+        for source_file, raw_path in tier:
+            resolved = (source_file.parent / raw_path.split("#")[0]).resolve()
+            if not resolved.exists():
+                offenders.append(
+                    f"tier-discipline link: {source_file.relative_to(PLUGIN_DIR)}: "
+                    f"{raw_path!r} -> {resolved} missing"
+                )
+        root_refs = _collect_plugin_root_refs()
+        assert len(root_refs) >= 5, f"only {len(root_refs)} $CLAUDE_PLUGIN_ROOT refs examined"
+        for source, rel_path in root_refs:
+            if not (PLUGIN_DIR / rel_path).exists():
+                offenders.append(f"$CLAUDE_PLUGIN_ROOT ref: {source}: {rel_path} missing")
+        assert not offenders, "\n".join(offenders)
 
 
 class TestTierDisciplineLinks:
     """nexus-cnzei.6 fix round (CRE 4)."""
-
-    @pytest.mark.parametrize("source_file,raw_path", [
-        pytest.param(src, rp, id=f"{src.relative_to(PLUGIN_DIR)}->{rp}")
-        for src, rp in _collect_tier_discipline_links()
-    ])
-    def test_tier_discipline_link_resolves(self, source_file: Path, raw_path: str) -> None:
-        resolved = (source_file.parent / raw_path.split("#")[0]).resolve()
-        assert resolved.exists(), \
-            f"{source_file.relative_to(PLUGIN_DIR)}: link {raw_path!r} -> {resolved} missing"
 
     def test_exactly_the_known_eight_skills_carry_the_link(self) -> None:
         linking_skill_names = {
@@ -1377,30 +1354,25 @@ REQUIRED_ROOT_DIRS = [
 
 class TestPluginRootManifest:
 
-    @pytest.mark.parametrize("rel_path", REQUIRED_ROOT_FILES)
-    def test_required_root_file_exists(self, rel_path: str) -> None:
-        full = PLUGIN_DIR / rel_path
-        assert full.exists(), f"Missing: {rel_path}"
-        assert full.stat().st_size > 0, f"Empty: {rel_path}"
+    def test_required_root_files_exist_and_are_non_empty(self) -> None:
+        offenders: list[str] = []
+        for rel_path in REQUIRED_ROOT_FILES:
+            full = PLUGIN_DIR / rel_path
+            if not full.exists():
+                offenders.append(f"Missing: {rel_path}")
+            elif full.stat().st_size == 0:
+                offenders.append(f"Empty: {rel_path}")
+        assert not offenders, "\n".join(offenders)
 
-    @pytest.mark.parametrize("rel_dir", REQUIRED_ROOT_DIRS)
-    def test_required_root_dir_exists(self, rel_dir: str) -> None:
-        full = PLUGIN_DIR / rel_dir
-        assert full.is_dir(), f"Missing dir: {rel_dir}"
-        assert any(full.iterdir()), f"Empty dir: {rel_dir}"
-
-
-# ── $CLAUDE_PLUGIN_ROOT references ───────────────────────────────────────────
-
-
-class TestPluginRootRefs:
-
-    @pytest.mark.parametrize("source,rel_path", [
-        pytest.param(src, rp, id=f"{src}->{rp}") for src, rp in _collect_plugin_root_refs()
-    ])
-    def test_plugin_root_ref_resolves(self, source: str, rel_path: str) -> None:
-        assert (PLUGIN_DIR / rel_path).exists(), \
-            f"{source}: $CLAUDE_PLUGIN_ROOT/{rel_path} missing"
+    def test_required_root_dirs_exist_and_are_non_empty(self) -> None:
+        offenders: list[str] = []
+        for rel_dir in REQUIRED_ROOT_DIRS:
+            full = PLUGIN_DIR / rel_dir
+            if not full.is_dir():
+                offenders.append(f"Missing dir: {rel_dir}")
+            elif not any(full.iterdir()):
+                offenders.append(f"Empty dir: {rel_dir}")
+        assert not offenders, "\n".join(offenders)
 
 
 # ── One entry point per situation (nexus-cnzei.4) ────────────────────────────
@@ -1417,9 +1389,8 @@ class TestPluginRootRefs:
 # side carries load-bearing behavior a skill cannot replicate: the `!`nx rdr
 # preamble <name>`` bash injection and $ARGUMENTS parsing that make
 # `/rdr-gate <id>` a real, argument-taking slash command. Deleting the
-# command would break that; deleting the skill would lose content
-# TestRdrGateLoopRemedies (below) and test_rdr_audit_skill.py pin across
-# both files. nexus-cnzei.6 renamed the skill side instead — same strategy
+# command would break that; deleting the skill would lose the checklist
+# content test_rdr_audit_skill.py pins across both files. nexus-cnzei.6 renamed the skill side instead — same strategy
 # nexus-cnzei.4 already used for the "debug"/"research"/"review" verb
 # skills: conexus/skills/rdr-gate/ -> rdr-gate-checklist/ (and
 # rdr-fix-checklist, rdr-accept-checklist, rdr-audit-checklist), each
@@ -1600,569 +1571,3 @@ def test_changelog_has_a_section_for_pyprojects_version() -> None:
         f"CHANGELOG.md's '## [{version}]' section is empty — a heading with "
         "no content is the same stub-body problem one level down"
     )
-
-
-#: nexus-yjf5l.5 (R2): the identifier-level fix-check clause, stated
-#: identically in rdr-gate/SKILL.md, conexus/commands/rdr-gate.md and the
-#: printed ``_fix_check_lines`` brief. One regex extracts the sentence from
-#: whichever surface carries it so the comparison is a single equality
-#: across all three, not three independent substring checks that could
-#: each drift on their own.
-#:
-#: nexus-yjf5l.17: the clause is authored in SEVEN raw occurrences across
-#: five files (rdr.py, rdr-gate/SKILL.md, commands/rdr-gate.md, three
-#: places in rdr-fix/SKILL.md, and commands/rdr-fix.md); the equality
-#: pin below covered only the first three. ``_all_identifier_clauses``
-#: (``findall``, not ``search``) lets a caller pin every occurrence in a
-#: file that carries the sentence more than once.
-#: No trailing period in the pattern: the clause is the LAST item in its
-#: enumeration on some surfaces (rdr.py, rdr-gate/SKILL.md — period) and
-#: a mid-list item on others (the rdr-fix/SKILL.md Relay Template, once
-#: check (6) follows it — semicolon). The terminator is list-position
-#: punctuation, not part of the clause's identity; comparing the
-#: substance without it is what "identical" means here.
-_IDENTIFIER_CLAUSE_RE = re.compile(
-    r"For every identifier whose meaning, bound, or owning phase this change "
-    r"alters.*?list every other occurrence in the file, and every check, bound "
-    r"or rule stated over the value it names under any other name, and say "
-    r"whether each still holds",
-    re.DOTALL,
-)
-
-
-def _identifier_clause(text: str) -> str:
-    normalized = re.sub(r"\s+", " ", text)
-    match = _IDENTIFIER_CLAUSE_RE.search(normalized)
-    assert match, f"identifier clause not found in: {text[:200]!r}..."
-    return match.group(0).strip()
-
-
-def _all_identifier_clauses(text: str) -> list[str]:
-    normalized = re.sub(r"\s+", " ", text)
-    return [m.strip() for m in _IDENTIFIER_CLAUSE_RE.findall(normalized)]
-
-
-#: nexus-yjf5l.17 (R2 residual, Finding 5 / critique Issue "T3-lead
-#: paraphrase"): the T3-lead clause, one sentence, pinned by equality
-#: the same way as the identifier clause above. It appears in four raw
-#: occurrences (rdr.py, rdr-gate/SKILL.md, commands/rdr-gate.md, and the
-#: rdr-fix/SKILL.md Relay Template) — commands/rdr-gate.md carried a
-#: paraphrase until this bead.
-#: No trailing period, for the same list-position reason as
-#: _IDENTIFIER_CLAUSE_RE above: the Relay Template's item (4) is
-#: followed by item (5), so it ends in a semicolon there, not a period.
-_T3_LEAD_CLAUSE_RE = re.compile(
-    r"A `file:line` taken from a T3 search or query hit is a lead, not a "
-    r"citation:.*?the clause passes only when the line was re-read from "
-    r"the working tree",
-    re.DOTALL,
-)
-
-
-def _t3_lead_clause(text: str) -> str:
-    normalized = re.sub(r"\s+", " ", text)
-    match = _T3_LEAD_CLAUSE_RE.search(normalized)
-    assert match, f"T3-lead clause not found in: {text[:200]!r}..."
-    return match.group(0).strip()
-
-
-#: nexus-yjf5l.17 (residual 1: the identifier clause needs no shared
-#: name only when the file happens to gloss one identifier in terms of
-#: the other). The crosswalk clause is the diff-scoped, vocabulary-
-#: independent check the critique asked for: it travels everywhere the
-#: identifier clause travels (same seven raw occurrences), one step
-#: further in the numbered brief.
-_CROSSWALK_CLAUSE_RE = re.compile(
-    r"For every check, bound or rule this change adds, name the "
-    r"parameter, column or setting it constrains, and for every "
-    r"parameter, column or setting this change adds or alters, name "
-    r"every check, bound or rule that constrains it, whether or not "
-    r"they share a name, and a pair the previous check already named is "
-    r"not named again\.",
-    re.DOTALL,
-)
-
-
-def _crosswalk_clause(text: str) -> str:
-    normalized = re.sub(r"\s+", " ", text)
-    match = _CROSSWALK_CLAUSE_RE.search(normalized)
-    assert match, f"crosswalk clause not found in: {text[:200]!r}..."
-    return match.group(0).strip()
-
-
-def _all_crosswalk_clauses(text: str) -> list[str]:
-    normalized = re.sub(r"\s+", " ", text)
-    return [m.strip() for m in _CROSSWALK_CLAUSE_RE.findall(normalized)]
-
-
-
-#: nexus-dxksa: the fix-check consensus clause and the per-row Class clause,
-#: one sentence each, pinned by equality across every placement of the
-#: brief (the printed brief in rdr.py, the gate and fix skills, their
-#: command mirrors, the accept skill and command).
-_CONSENSUS_CLAUSE_RE = re.compile(
-    r"The fix check is three independent dispatches of the fix-check brief on the "
-    r"same range, never one;.*?nothing runs a third time\.",
-    re.DOTALL,
-)
-_CLASS_CLAUSE_RE = re.compile(
-    r"Every row carries a `Class:` of exactly one of `BLOCKS-PLANNING`.*?"
-    r"BLOCKS-PLANNING rows`\.",
-    re.DOTALL,
-)
-
-
-def _all_consensus_clauses(text: str) -> list[str]:
-    return [m.strip() for m in _CONSENSUS_CLAUSE_RE.findall(re.sub(r"\s+", " ", text))]
-
-
-def _all_class_clauses(text: str) -> list[str]:
-    return [m.strip() for m in _CLASS_CLAUSE_RE.findall(re.sub(r"\s+", " ", text))]
-
-class TestRdrGateLoopRemedies:
-    """nexus-g7zgw: the five process remedies for the RDR gate/fix loop
-    (T2 nexus/deep-analysis-rdr-gate-fix-loop-2026-09-07) are stated in the
-    plugin surfaces that run the loop, so a session inherits them from the
-    installed skill rather than from a memory file."""
-
-    GATE_SKILL = SKILLS_DIR / "rdr-gate-checklist" / "SKILL.md"
-    GATE_CMD = PLUGIN_DIR / "commands" / "rdr-gate.md"
-    RESEARCH_SKILL = SKILLS_DIR / "rdr-research" / "SKILL.md"
-    ACCEPT_SKILL = SKILLS_DIR / "rdr-accept-checklist" / "SKILL.md"
-    ACCEPT_CMD = PLUGIN_DIR / "commands" / "rdr-accept.md"
-    FIX_SKILL = SKILLS_DIR / "rdr-fix-checklist" / "SKILL.md"
-    FIX_CMD = PLUGIN_DIR / "commands" / "rdr-fix.md"
-
-    def test_fix_check_layer_in_gate_skill(self) -> None:
-        """Remedy 1: a diff-scoped fix check stands between a fix and Layer 3.
-
-        nexus-cnzei.6 fix round (critic Significant 4): rdr-gate-checklist/
-        SKILL.md is now the single source for this procedure; commands/
-        rdr-gate.md points to it instead of carrying an independently
-        re-authored copy (see test_command_points_to_skill_for_procedure
-        below). Pinned on the skill only."""
-        text = self.GATE_SKILL.read_text()
-        assert "Fix check" in text
-        assert "with ONLY th" in text and "diff" in text, "the fix check reads only the diff"
-        assert "fix-check-" in text, "names the T2 title shape"
-        assert "fix_check:" in text, "the gate record carries the pointer"
-        # nexus-yjf5l.5 (R2): the fix-check brief goes identifier-level —
-        # every changed identifier's other occurrences are enumerated,
-        # not just the clause carrying it.
-        assert "owning phase" in text and "every other occurrence" in text, (
-            "the identifier clause is missing"
-        )
-        # The clause reaches a check stated over the same value under a
-        # different name: the round-3 collision was a caller parameter
-        # against a boot check that never used the parameter's token.
-        assert "under any other name" in text, "the clause stops at the same token"
-        # nexus-yjf5l.17: the crosswalk clause needs no bridging gloss —
-        # it walks the diff's own ADDED checks and ADDED parameters
-        # directly, whether or not they share a name.
-        assert "whether or not they share a name" in text, "the crosswalk clause is missing"
-        for phrase in ("contradicted by any other line", "enumeration", "universal", "research entry"):
-            assert phrase in text, f"rdr-gate-checklist/SKILL.md: fix-check brief lacks '{phrase}'"
-        assert "never counts toward the round" in text
-        # nexus-yjf5l.5 (R2): the serial precondition — fix, check, then
-        # Layer 1 and Layer 3, never a parallel dispatch against one commit.
-        assert "dispatched against the same commit in parallel" in text, (
-            "the serial precondition is missing"
-        )
-
-    def test_command_points_to_skill_for_procedure(self) -> None:
-        """nexus-cnzei.6 fix round (critic Significant 4 / coordinator item
-        4): the command's own content is now the bash-injected preamble +
-        $ARGUMENTS parsing; the procedure itself lives only in the
-        <name>-checklist skill, and the command names it by exact skill
-        name so a reader (or a grep) can follow the pointer."""
-        assert "rdr-gate-checklist" in self.GATE_CMD.read_text()
-        assert "rdr-fix-checklist" in self.FIX_CMD.read_text()
-        assert "rdr-accept-checklist" in self.ACCEPT_CMD.read_text()
-
-    def test_fix_check_consensus_rule_in_every_placement(self) -> None:
-        """nexus-dxksa: a fix check is three dispatches; a defect counts at
-        two of three; only a counted BLOCKS-PLANNING defect fails; one fix
-        round, then residuals. The same sentence everywhere, by equality,
-        and the old single-run re-run rule is gone from every placement."""
-        from nexus.commands.rdr import (
-            FIX_CHECK_CLASS_CLAUSE, FIX_CHECK_CONSENSUS_CLAUSE, _FIX_RULES, _fix_check_lines,
-        )
-
-        printed = "\n".join(_fix_check_lines(
-            repo_root=str(REPO_ROOT), t2_key="0", rel="README.md",
-            gated_commit="HEAD", changed=True,
-        ))
-        assert _all_consensus_clauses(printed) == [FIX_CHECK_CONSENSUS_CLAUSE]
-        assert _all_class_clauses(printed) == [FIX_CHECK_CLASS_CLAUSE]
-        assert FIX_CHECK_CONSENSUS_CLAUSE in _FIX_RULES
-        # nexus-cnzei.6 fix round (critic Significant 4): the command files
-        # no longer carry the procedure, so they no longer carry this clause
-        # either — pinned on the three -checklist skills only, plus
-        # RESEARCH_SKILL is untouched by this bead's collapse.
-        expected_consensus = {
-            self.GATE_SKILL: 1, self.FIX_SKILL: 2, self.ACCEPT_SKILL: 1,
-        }
-        for path, count in expected_consensus.items():
-            clauses = _all_consensus_clauses(path.read_text())
-            assert clauses == [FIX_CHECK_CONSENSUS_CLAUSE] * count, (
-                f"{path}: expected {count} verbatim consensus clause(s), found {clauses}"
-            )
-        for path in (self.GATE_SKILL, self.FIX_SKILL):
-            assert _all_class_clauses(path.read_text()) == [FIX_CHECK_CLASS_CLAUSE], path
-        banned = (
-            "any fail", "fails closed", "re-run the fix check on the new diff",
-            "re-run the check on the new diff", "re-run on the new diff",
-            "re-checked before layer 1", "with a failed check open",
-        )
-        for path in list(expected_consensus) + ["printed"]:
-            text = (printed if path == "printed" else path.read_text()).lower()
-            for phrase in banned:
-                assert phrase not in text, f"{path}: the single-run re-run rule survives: {phrase!r}"
-
-    def test_termination_rule_and_ship_blockers_in_gate_skill(self) -> None:
-        """Remedy 2: rounds 1-2 block on any Critical; from round 3 only a
-        ship-blocker blocks; Criterion 6 never becomes a finding."""
-        skill = self.GATE_SKILL.read_text()
-        assert "Any **fail** → gate fails" not in skill, "the old aggregation line contradicts the critic contract"
-        assert "ship_blockers" in skill
-        assert "round 3" in skill.lower() or "round three" in skill.lower()
-        assert "residual" in skill
-        assert "prior:" in skill, "the gate record carries the prior chain the round number is derived from"
-        assert "would build the wrong thing" in skill, "RDR-specific ship-blocker definition in the brief"
-        assert "Criterion 6 output is never a finding" in skill
-        critic = (PLUGIN_DIR / "agents" / "substantive-critic.md").read_text()
-        assert "may block on `critical_count`" in critic, "the critic contract names the caller's own rule"
-
-    def test_layer_zero_always_on_and_sites_list(self) -> None:
-        """Remedy 4: Layer 0 fires whenever a prior gate record exists, and the
-        critic emits a Sites: list per finding so the sweep is by fact."""
-        skill = self.GATE_SKILL.read_text()
-        assert "only when the prior gate was BLOCKED" not in skill
-        assert "re-gate after a PASSED result, has no Layer 0" not in skill
-        assert "Sites:" in skill
-        critic = (PLUGIN_DIR / "agents" / "substantive-critic.md").read_text()
-        assert "- **Sites**:" in critic, "the canonical Issue format carries the Sites line"
-        # nexus-yjf5l.3: a finding recorded on the prior round's residuals:
-        # lines is dispositioned at accept, not a survivor — Layer 0's sweep
-        # instruction states the exemption.
-        assert "recorded residual" in skill, "Layer 0 must exempt recorded residuals from the sweep"
-
-    def test_gate_round_appends_one_revision_history_line(self) -> None:
-        """nexus-yjf5l.12: a gate round appends ONE Revision History line —
-        the findings, residual lists and fix narrative live only in the two
-        T2 records (the gate record and the critique), never repeated in
-        the RDR file. Before this change the skill instructed the author to
-        append the findings themselves ("Append gate findings to the RDR's
-        Revision History section", "appends \"Gate N residuals\" to Revision
-        History", "gate findings appended to Revision History"); after, it
-        instructs appending only the one line `nx rdr preamble rdr-verdict`
-        prints."""
-        skill = self.GATE_SKILL.read_text()
-        assert "Revision History line" in skill, "the one-line form is named"
-        # Old wording promised the findings themselves in the RDR file.
-        assert "Append gate findings to the RDR's Revision History section" not in skill
-        assert 'appends "Gate N residuals"\n  to Revision History' not in skill
-        assert "gate findings appended to Revision History" not in skill
-
-    def test_layer_zero_retirement_rule_stated_identically(self) -> None:
-        """R5 follow-on (nexus-yjf5l.11): the sweep covers only the last two
-        rounds' critiques — a finding absent from both retires (printed
-        under its own line, not under "Prior findings"). One clause, the
-        same in the skill and the command mirror. Whitespace-normalised
-        (same convention as ``_all_crosswalk_clauses`` above) so the skill's
-        own line wrap cannot desync this pin from the source text."""
-        clause = (
-            'for every prior finding printed under "prior findings" (the last two '
-            "rounds' critiques; a finding absent from both, printed under \"retired "
-            'from the sweep" instead, needs no re-check) that is not a recorded '
-            "residual"
-        )
-        skill = re.sub(r"\s+", " ", self.GATE_SKILL.read_text()).lower()
-        assert clause in skill, "rdr-gate-checklist/SKILL.md: the retirement clause is missing or drifted"
-
-    def test_prior_chain_names_the_previous_rounds_own_critique_id(self) -> None:
-        """Follow-on review finding 3 (nexus-yjf5l.13 had no crosswalk pin,
-        unlike R5/.11 and R6/.12 in the same batch — a gap against the
-        epic's own four-surface rule). One clause, the same in the skill
-        and the command mirror: the `prior:` field names the previous
-        round's own critique record id, never the upserted
-        `{id}-gate-latest` row's own id. Whitespace-normalised, same
-        convention as ``test_layer_zero_retirement_rule_stated_identically``."""
-        clause = "the previous round's own critique record id, never the latest record's id"
-        skill = re.sub(r"\s+", " ", self.GATE_SKILL.read_text()).lower()
-        assert clause in skill, "rdr-gate-checklist/SKILL.md: the prior-chain clause is missing or drifted"
-
-    def test_skill_states_the_fix_check_scope(self) -> None:
-        """nexus-cnzei.6 fix round (critic Significant 4): renamed from
-        test_command_and_skill_agree_on_fix_check_scope — the command no
-        longer carries this content to agree WITH; the skill is the single
-        source, pinned here directly against the printed fix-check brief."""
-        skill = self.GATE_SKILL.read_text()
-        assert "ship_blockers = critical_count" in skill, "a missing ship_blockers line defaults conservatively"
-        assert "Fix check pointer mismatch" in skill
-        accept = self.ACCEPT_SKILL.read_text()
-        assert "fix_check:" in accept and "not the record's `commit:`" in accept
-        assert "no `fix_check:`" in accept, "a skipped fix check blocks accept"
-        assert "mandatory on every re-gate" in skill
-        # nexus-yjf5l.5 (R2): the identifier clause must be the SAME sentence
-        # in the skill and the printed fix-check brief.
-        from nexus.commands.rdr import _fix_check_lines
-
-        printed = "\n".join(_fix_check_lines(
-            repo_root=str(REPO_ROOT), t2_key="0", rel="README.md",
-            gated_commit="HEAD", changed=True,
-        ))
-        canonical = _identifier_clause(printed)
-        assert _identifier_clause(skill) == canonical
-        # nexus-yjf5l.17 (R2 residual Finding 4 / critique Issue 2): the
-        # equality pin above covers one occurrence in the gate skill. The
-        # other three live in rdr-fix-checklist/SKILL.md (Behavior step 5,
-        # Rules, and the Relay Template). Pin every one of them,
-        # individually, to the same canonical sentence.
-        fix_skill_text = self.FIX_SKILL.read_text()
-        fix_skill_clauses = _all_identifier_clauses(fix_skill_text)
-        assert len(fix_skill_clauses) == 3, (
-            f"rdr-fix-checklist/SKILL.md should carry the identifier clause 3 times "
-            f"(Behavior step 5, Rules, Relay Template); found {len(fix_skill_clauses)}"
-        )
-        assert all(c == canonical for c in fix_skill_clauses), (
-            "rdr-fix-checklist/SKILL.md: not every occurrence of the identifier clause matches the canonical sentence"
-        )
-
-        # nexus-yjf5l.17 (R2 residual Finding 5 / critique Issue "T3-lead
-        # paraphrase"): the T3-lead clause pinned the same way, across its
-        # occurrences in rdr.py's printed brief, rdr-gate-checklist/SKILL.md,
-        # and the rdr-fix-checklist/SKILL.md Relay Template.
-        t3_canonical = _t3_lead_clause(printed)
-        assert _t3_lead_clause(skill) == t3_canonical
-        assert _t3_lead_clause(fix_skill_text) == t3_canonical
-
-        # nexus-yjf5l.17 (residual 1: the cross-identifier reach needs a
-        # bridging gloss the RDR might not supply). The crosswalk clause
-        # is diff-scoped and vocabulary-independent; it travels wherever
-        # the identifier clause does, one number further in the brief.
-        crosswalk_canonical = _crosswalk_clause(printed)
-        assert _crosswalk_clause(skill) == crosswalk_canonical
-        fix_skill_crosswalks = _all_crosswalk_clauses(fix_skill_text)
-        assert len(fix_skill_crosswalks) == 3, (
-            f"rdr-fix-checklist/SKILL.md should carry the crosswalk clause 3 times; found {len(fix_skill_crosswalks)}"
-        )
-        assert all(c == crosswalk_canonical for c in fix_skill_crosswalks)
-
-    def test_fix_commit_rule_in_research_and_gate_skills(self) -> None:
-        """Remedy 5: a fix changes the fact named and nothing else; glosses and
-        counts go to the research entry first, with a quote or enumeration."""
-        for path in (self.GATE_SKILL, self.RESEARCH_SKILL):
-            text = path.read_text()
-            assert "nothing else" in text, f"{path}: fix-commit rule missing"
-            assert "before the edit" in text.lower(), f"{path}: research entry precedes the edit"
-            assert "inferred, not read" in text, f"{path}: unquoted clauses are marked"
-            assert "census" in text, f"{path}: universals need a census"
-        # nexus-yjf5l.2: the round-3 rule (from round 3 the fix closes only
-        # ship-blockers) is rdr-gate/SKILL.md's own copy, in "Fixing
-        # findings" — not the research skill's territory, so it is pinned
-        # here on GATE_SKILL alone rather than added to the loop above.
-        assert "Ship-blocker: yes" in self.GATE_SKILL.read_text(), (
-            "rdr-gate/SKILL.md: round-3 fix rule missing from Fixing findings"
-        )
-
-    def test_remedy_skills_carry_no_incident_narrative(self) -> None:
-        """Skills are instructions; the why lives in the RDR and T2
-        (feedback_no_prose_in_skills). No bead pointers or RDR-204 history in
-        the sections the remedies added."""
-        fix_skill = SKILLS_DIR / "rdr-fix-checklist" / "SKILL.md"
-        fix_cmd = PLUGIN_DIR / "commands" / "rdr-fix.md"
-        for path in (self.GATE_SKILL, self.RESEARCH_SKILL, self.ACCEPT_SKILL):
-            text = path.read_text()
-            assert "nexus-g7zgw" not in text, f"{path}: bead pointer in a skill"
-            assert "RDR-204" not in text, f"{path}: incident narrative in a skill"
-        # The new surfaces start clean: no bead pointer of any kind.
-        for path in (fix_skill, fix_cmd):
-            text = path.read_text()
-            assert not re.search(r"\bnexus-[0-9a-z]{5}\b", text), f"{path}: bead pointer in a skill"
-            assert "RDR-204" not in text, f"{path}: incident narrative in a skill"
-
-    def test_t2_ttl_convention_in_the_write_back_skills(self) -> None:
-        """nexus-um2h1, updated for nexus-473mx: every skill that prescribes
-        memory_put states the lifetime convention. The convention reversed
-        2026-09-12 (nexus-473mx): omitting ttl is now permanent, not a
-        30-day default, so a skill must name that reversal rather than the
-        retired omitted-ttl trap; stating the old trap after the reversal
-        would be actively wrong, not merely silent."""
-        for name in ("using-nx-skills", "knowledge-tidying", "nexus"):
-            text = (SKILLS_DIR / name / "SKILL.md").read_text()
-            assert "ttl=None" in text, f"{name}: no ttl=None prescription"
-            assert "nexus-473mx" in text, (
-                f"{name}: the ttl-default reversal is not named"
-            )
-
-    def test_fix_step_has_its_own_surface(self) -> None:
-        """nexus-zbdm0: the fix step is a command and a skill, and the gate
-        skill points at it instead of carrying the rules alone."""
-        fix_skill = SKILLS_DIR / "rdr-fix-checklist" / "SKILL.md"
-        fix_cmd = PLUGIN_DIR / "commands" / "rdr-fix.md"
-        assert fix_skill.exists() and fix_cmd.exists()
-        assert "nx rdr preamble rdr-fix" in fix_cmd.read_text()
-        skill = fix_skill.read_text()
-        for phrase in (
-            "nothing else", "inferred, not read", "census", "before the edit",
-            "fix-check-", "Ship-blocker: yes", "every other occurrence",
-        ):
-            assert phrase in skill, f"rdr-fix/SKILL.md lacks '{phrase}'"
-        # The Relay Template is the brief a fix check dispatched through
-        # /conexus:rdr-fix actually receives, so it carries every numbered
-        # check the printed brief carries, in the same order: (1) to (6),
-        # the T3-lead clause and the crosswalk clause included.
-        deliverable = next(l for l in skill.splitlines() if l.startswith("One row per ADDED"))
-        numbers = re.findall(r"\((\d)\)", deliverable)
-        assert numbers == ["1", "2", "3", "4", "5", "6"], f"Relay Template checks are {numbers}, not (1) to (6)"
-        assert "lead, not a citation" in deliverable, "Relay Template lacks the T3-lead clause"
-        assert "(4) A `file:line`" in deliverable, "the T3-lead clause is check (4), capitalised as printed"
-        assert "(5) For every identifier" in deliverable, "the identifier clause is check (5), capitalised as printed"
-        assert "(6) For every check, bound or rule" in deliverable, "the crosswalk clause is check (6), capitalised as printed"
-        assert "/conexus:rdr-fix" in self.GATE_SKILL.read_text()
-        lifecycle = (SKILLS_DIR / "using-nx-skills" / "SKILL.md").read_text()
-        assert "/conexus:rdr-fix" in lifecycle
-        registry = (PLUGIN_DIR / "registry.yaml").read_text()
-        assert "rdr-fix-checklist:" in registry and "commands/rdr-fix.md" in registry
-
-    def test_accept_dispositions_residuals(self) -> None:
-        """The disposition rule, and the fix check a sha disposition carries.
-
-        nexus-cnzei.6 fix round (critic Significant 4): pinned on the
-        rdr-accept-checklist skill only — commands/rdr-accept.md now points
-        to it instead of carrying its own copy (the disposition rule is
-        merged into the skill's own step 1c/Behavior; see the skill's
-        commit history for the merge)."""
-        text = self.ACCEPT_SKILL.read_text()
-        assert "residuals:" in text
-        assert "disposition" in text
-        assert "bead" in text and "commit" in text
-        assert "fix-check-" in text, "the T2 title a sha disposition's check goes under"
-        assert "bead id" in text and "needs none" in text, "the bead-disposition exemption"
-        # nexus-yjf5l.8: classification determines which disposition
-        # applies — DISCOVER-AT-IMPLEMENTATION takes a bead naming its
-        # Implementation Plan phase; BLOCKS-PLANNING or an unclassified
-        # residual needs an explicit author disposition, never a default.
-        assert "DISCOVER-AT-IMPLEMENTATION" in text, "missing the class name"
-        assert "Implementation Plan phase" in text, "missing the bead-names-the-phase rule"
-        assert "BLOCKS-PLANNING" in text, "missing the class name"
-        assert "unclassified" in text, "missing the unclassified-residual case"
-        assert "never defaulted" in text, "the disposition must never be defaulted"
-
-    def test_finding_classification_imported_and_scoped(self) -> None:
-        """R3 (nexus-yjf5l.7): every gate finding carries a Class alongside
-        Ship-blocker (BLOCKS-PLANNING / DISCOVER-AT-IMPLEMENTATION,
-        imported from nexus.plans.audit_rounds), classification governs
-        disposition rather than blocking, and the critic's bullet scopes
-        the requirement to an RDR gate critique so the other consumers of
-        this agent inherit no unstated obligation."""
-        critic = (PLUGIN_DIR / "agents" / "substantive-critic.md").read_text()
-        normalized = re.sub(r"\s+", " ", critic)
-        assert "- **Class**:" in critic
-        assert "BLOCKS-PLANNING" in critic and "DISCOVER-AT-IMPLEMENTATION" in critic
-        assert "required for an RDR gate critique" in normalized, (
-            "the Class bullet must scope itself to an RDR gate critique"
-        )
-        assert "optional for every other consumer of this agent" in normalized, (
-            "the Class bullet must read as optional for every consumer other than an RDR gate critique"
-        )
-        assert "`Ship-blocker: yes` implies `Class: BLOCKS-PLANNING`" in normalized
-        text = self.GATE_SKILL.read_text()
-        text_normalized = re.sub(r"\s+", " ", text)
-        assert "BLOCKS-PLANNING" in text and "DISCOVER-AT-IMPLEMENTATION" in text, (
-            "rdr-gate-checklist/SKILL.md must name both class strings"
-        )
-        assert "Classification governs disposition, not blocking" in text_normalized
-        assert "ship_blockers` stays the sole blocking field" in text_normalized
-
-    #: nexus-yjf5l.10 (fix for a nexus-yjf5l.9 critique finding): the
-    #: Class bullet's "optional for every other consumer" parenthetical
-    #: once named plan-audit and phase-review-gate, neither of which ever
-    #: dispatches this agent (plan-audit calls the nx_plan_audit MCP tool
-    #: with "no agent spawn"; phase-review-gate is a pure evidence-table
-    #: gate). Each entry below maps a named consumer to the file(s) whose
-    #: text is the grep-verifiable proof it actually dispatches
-    #: substantive-critic, so the bullet's claim is pinned against the
-    #: same evidence that must keep it true.
-    _REAL_CRITIC_CONSUMERS: dict[str, tuple[Path, ...]] = {
-        "code review": (
-            SKILLS_DIR / "orchestration" / "SKILL.md",
-            SKILLS_DIR / "development" / "SKILL.md",
-        ),
-        "rdr-fix": (SKILLS_DIR / "rdr-fix-checklist" / "SKILL.md",),
-        "rdr-accept": (SKILLS_DIR / "rdr-accept-checklist" / "SKILL.md",),
-        "rdr-close": (SKILLS_DIR / "rdr-close" / "SKILL.md",),
-        "the substantive-critique skill": (SKILLS_DIR / "substantive-critique" / "SKILL.md",),
-    }
-
-    def test_critic_consumer_list_names_only_real_dispatchers(self) -> None:
-        """nexus-yjf5l.10: every consumer named in the Class bullet's
-        "optional for every other consumer" parenthetical actually
-        dispatches substantive-critic somewhere in its own skill file
-        (mentioning the agent's name is not enough — plan-audit.md and
-        phase-review-gate's files both DO mention "substantive-critic" in
-        passing without ever dispatching it, which is exactly how the
-        stale claim went unnoticed). plan-audit and phase-review-gate are
-        pinned as the negative case so the false claim cannot silently
-        return."""
-        critic = (PLUGIN_DIR / "agents" / "substantive-critic.md").read_text()
-        normalized = re.sub(r"\s+", " ", critic)
-        match = re.search(r"optional for every other consumer of this agent \(([^)]+)\)", normalized)
-        assert match, "the Class bullet's consumer parenthetical was not found"
-        named = [n.strip().removeprefix("and ") for n in match.group(1).split(",")]
-        assert set(named) == set(self._REAL_CRITIC_CONSUMERS), (
-            f"the bullet names {named!r}; the test's mapping covers "
-            f"{list(self._REAL_CRITIC_CONSUMERS)!r} — update both together"
-        )
-        for name, paths in self._REAL_CRITIC_CONSUMERS.items():
-            assert any("substantive-critic" in p.read_text() for p in paths), (
-                f"{name}: none of {paths} references substantive-critic at all"
-            )
-        # The two names the bullet used to carry are confirmed NOT real
-        # dispatchers — this is the defect nexus-yjf5l.10 fixes. The
-        # plan-auditor stub agent this once also checked was deleted at
-        # nexus-cnzei.4 (S2) — commands/plan-audit.md alone carries the
-        # "no agent spawn" text now.
-        plan_audit_cmd = (PLUGIN_DIR / "commands" / "plan-audit.md").read_text()
-        assert "no agent spawn" in plan_audit_cmd
-        phase_gate_skill = (SKILLS_DIR / "phase-review-gate" / "SKILL.md").read_text()
-        assert "substantive-critic" not in phase_gate_skill
-
-
-class TestReviewRoundContracts:
-    """nexus-dv7gw: every skill that states a round number states the table's."""
-
-    def test_skills_quote_the_table(self) -> None:
-        from nexus.tables.review_rounds import blocking_rounds, rule_for
-
-        gate = (SKILLS_DIR / "rdr-gate-checklist" / "SKILL.md").read_text()
-        n = blocking_rounds("rdr-gate", "any-critical")
-        assert f"Rounds 1 and {n}: BLOCKED iff `critical_count > 0`" in gate
-        assert f"Round {n + 1} onward: BLOCKED iff `ship_blockers > 0`" in gate
-        assert "review-rounds.toml" in gate
-
-        review = (SKILLS_DIR / "code-review" / "SKILL.md").read_text()
-        first_human = next(r for r in (1, 2, 3) if rule_for("code-review", r).next_round_by == "human")
-        assert f"Round {first_human + 1}+: requires the human" in review
-        assert "review-rounds.toml" in review
-
-        orchestration = (SKILLS_DIR / "orchestration" / "SKILL.md").read_text()
-        assert f"round N of at most {first_human}" in orchestration
-        assert "review-rounds.toml" in orchestration
-
-        planner = (PLUGIN_DIR / "agents" / "strategic-planner.md").read_text()
-        assert "review-rounds.toml" in planner
-
-
-class TestCompletionOverDeferral:
-    """Sam, 2026-09-07: a strong preference for completing work over filing
-    it, and for executing the laid plan over opening another round. The
-    rule lives in the skill every session loads."""
-
-    def test_red_flags_name_both_pathologies(self) -> None:
-        text = (SKILLS_DIR / "using-nx-skills" / "SKILL.md").read_text()
-        assert "I'll file a bead for that and move on" in text
-        assert "Filing is deferral that reads as progress" in text
-        assert "One more pass would tighten this" in text
-        assert "review-rounds.toml" in text

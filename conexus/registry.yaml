@@ -227,8 +227,7 @@ rdr_skills:
   # nexus-cnzei.6: rdr-gate/rdr-fix/rdr-accept/rdr-audit are a deliberately-
   # kept dual surface — a command (real bash-injected preamble + $ARGUMENTS
   # parsing, invoked as `/rdr-gate <id>`) and a skill carrying the same
-  # checklist content (TestRdrGateLoopRemedies pins verbatim clauses across
-  # both files; rdr-audit has its own dedicated test_rdr_audit_skill.py
+  # checklist content (rdr-audit has its own dedicated test_rdr_audit_skill.py
   # requiring the command to exist). Same name for both used to shadow the
   # skill in the Skill-tool listing (nexus-cnzei.4's C1); the dict key below
   # and the skill directory are now the `-checklist` suffixed name
