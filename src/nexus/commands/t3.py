@@ -406,7 +406,8 @@ def _expire_client_quarantine(t3_db, collection: str, qname: str, *, moved: int)
     is_flag=True,
     default=False,
     help="Override the empty-manifest-set (nexus-jqrtp) and unknown-collection "
-    "(nexus-v1zdu) refusals. DANGEROUS: only pass this once you've confirmed "
+    "(nexus-v1zdu) refusals; a name with no chunks and no catalog entry is "
+    "refused regardless. DANGEROUS: only pass this once you've confirmed "
     "the collection really is fully orphaned, not a fresh/mis-scoped tenant, an "
     "unbackfilled manifest or a mistyped name.",
 )
@@ -504,8 +505,10 @@ def gc_cmd(
         has a manifest row in it (read off the census: stored chunks minus the
         manifest-less buckets is 0), the shape of a fresh or mis-scoped tenant
         or an unbackfilled manifest. Override: ``--allow-empty-manifest-set``.
-      - Unknown collection (nexus-v1zdu): a name the catalog does not know.
-        Override: ``--allow-empty-manifest-set``.
+      - Unknown collection (nexus-v1zdu): a name the catalog does not know
+        that still holds chunks. Override: ``--allow-empty-manifest-set``. A
+        name neither the catalog nor T3 knows is refused up front
+        (nexus-sis0m.3), with no override.
 
     \b
     Needs an engine that carries the reapable routes (RDR-192 Step 8); against

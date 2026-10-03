@@ -1500,7 +1500,11 @@ change). Where this step says the reaper's quarantine is "expired by the existin
   re-reference restore is indexer-only and uses the same two names. `nexus-wbfpw.64` moves the
   resolution into the engine's expire and restore-rereferenced routes and retires the probe.
   Until a chunk is reached the cost is storage only: it stays hidden, and
-  `nx t3 quarantine restore` still reaches it through the engine-resolved sibling set.
+  `nx t3 quarantine restore` still reaches it through the engine-resolved sibling set. That
+  holds only while the origin itself is live: restore refuses a non-live origin
+  (`checkRestoreOrigin`), and `nx t3 gc` refuses a name neither the catalog nor T3 knows, so a
+  chunk whose origin collection is gone has no expirer and no restore. Production held 294 such
+  rows on 2026-10-03 (`nexus-wbfpw.65`); the policy for that class is `nexus-wbfpw.68`.
 - The engine's settings are in `docs/operations/engine-reaper.md` § Settings
   (`NX_REAPER_ENABLED`, `_INTERVAL_SECONDS`, `_BATCH_SIZE`, `_FLOOR_FRACTION`,
   `_FLOOR_MIN_CHUNKS`, `_FLOOR_EXEMPT_COLLECTIONS`, `_QUARANTINE_RETENTION_DAYS`,
