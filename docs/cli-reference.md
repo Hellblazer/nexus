@@ -3801,8 +3801,9 @@ died does not move the time, and a pass with nothing to move writes no `gc_audit
 is the one durable sign that the reaper is alive (a cloud operator has no engine log). The row
 is green and says "not applicable" when the engine cannot be reached (a box with no engine),
 predates the field, or runs with the reaper off (`NX_REAPER_ENABLED=false`). A pass completes whatever its
-tenants did, so the object also carries `last_pass` (`tenants_visited`, `tenants_errored`, `tenants_refused`
-for the last completed pass, null before the first): when a recent pass visited tenants and every one was
+tenants did, so the object also carries `last_pass` (`tenants_visited`, `tenants_errored`, `tenants_refused`,
+`tenants_empty` for the last completed pass, null before the first): when a recent pass visited tenants that hold chunks
+(`tenants_visited - tenants_empty`; the default tenant is always visited and empty in cloud) and every one of them was
 refused (the RDR-192 backfill rung not run: `nx upgrade`) or errored (read the engine log for
 `reaper_tenant_failed`), the row warns "alive but doing nothing". The counts are per tenant: one collection that threw marks its tenant
 errored, so the warning means no tenant finished a clean pass, not that no chunk was examined. A reaper

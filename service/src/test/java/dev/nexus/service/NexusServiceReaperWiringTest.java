@@ -105,6 +105,8 @@ class NexusServiceReaperWiringTest {
 
         assertThat(run.tenant("default")).as("the default tenant is always visited").isNotNull();
         assertThat(run.tenant("default").tenantRefusal()).isNull();
+        assertThat(withVectors.reaperStatus().lastPass().tenantsEmpty())
+            .as("the status route carries the empty count, and the default tenant is in it").isGreaterThanOrEqualTo(1);
     }
 
     @Test

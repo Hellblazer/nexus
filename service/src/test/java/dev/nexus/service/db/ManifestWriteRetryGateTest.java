@@ -94,7 +94,6 @@ class ManifestWriteRetryGateTest {
     private static final Map<String, String> READ_ONLY_REFERENCES = new TreeMap<>(Map.of(
         "PgVectorRepository", "ownership, manifest and source_uri lookups (SELECT ... FROM catalog_document_chunks) and prose;"
             + " it writes chunks, never manifest rows",
-        "ReaperRepository", "holdsNothing: an existence read of the tenant's manifest rows (nexus-wbfpw.73); no DML",
         "SchemaMigrator", "names the table in the chash-length constraint map: DDL bookkeeping, no DML",
         "TaxonomyRepository", "a comment naming the idiom; no code reference",
         "TenantScope", "a table-name list for the VACUUM allowlist; VACUUM ANALYZE is not manifest DML",

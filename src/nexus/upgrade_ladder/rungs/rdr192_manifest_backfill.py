@@ -54,9 +54,10 @@ The completion record carries a census summary in its ``detail``.
 A tenant with no collections is converged when the catalog also holds no
 manifest rows; an empty listing over a non-empty catalog is a listing failure
 and defers.
-The engine's reaper gate (``Rdr192BackfillGate``) applies the same test, so
-a tenant that is empty by it passes the gate with no completion record
-(nexus-wbfpw.73). The gate writes none: this rung stays the one recorder.
+The engine's reaper gate (``Rdr192BackfillGate``) reads at least as strictly as
+this branch (it counts quarantine chunks, which the census skips; no chunk
+means no manifest row, because of the manifest's foreign key), so a tenant
+that is empty by it passes the gate with no completion record (nexus-wbfpw.73). The gate writes none: this rung stays the one recorder.
 
 WHAT IT DOES NOT DO. It does not touch the ``superseded``, ``dead-owner`` or
 ``no-owner`` buckets: those are the reaper's input by design, not a backfill

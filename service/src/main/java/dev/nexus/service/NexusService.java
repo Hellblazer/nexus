@@ -771,7 +771,7 @@ public final class NexusService {
         return new dev.nexus.service.http.StatusHandler.ReaperStatus(true, r.settings().interval().toSeconds(),
             r.settings().wallClockBudget().toSeconds(), r.lastCompletedPassAt(), r.failedPassesTotal(),
             last == null ? null : new dev.nexus.service.http.StatusHandler.ReaperStatus.LastPass(
-                last.tenantsVisited(), last.tenantsErrored(), last.tenantsRefused()));
+                last.tenantsVisited(), last.tenantsErrored(), last.tenantsRefused(), last.tenantsEmpty()));
     }
 
     /**

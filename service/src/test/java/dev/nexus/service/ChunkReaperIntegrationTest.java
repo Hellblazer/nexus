@@ -632,8 +632,10 @@ class ChunkReaperIntegrationTest extends AtomicWriteTestBase {
         assertThat(r.lastPass().tenantsVisited()).as("it was visited").isEqualTo(1);
         assertThat(r.lastPass().tenantsRefused()).isZero();
         assertThat(r.lastPass().tenantsErrored()).isZero();
-        assertThat(logs).anyMatch(l -> l.startsWith("INFO") && l.contains("event=rdr192_backfill_gate_passed_empty_tenant")
-            && l.contains("tenant=" + t));
+        assertThat(r.lastPass().tenantsEmpty()).as("counted in the pass summary, where the per-tenant line no longer is")
+            .isEqualTo(1);
+        assertThat(logs).as("once per empty tenant per hourly pass: DEBUG, never INFO")
+            .noneMatch(l -> l.startsWith("INFO") && l.contains("event=rdr192_backfill_gate_passed_empty_tenant"));
         assertThat(logs).noneMatch(l -> l.contains("event=reaper_tenant_refused") && l.contains("tenant=" + t));
         assertThat(logs).anyMatch(l -> l.contains("event=reaper_pass") && l.contains("tenant=" + t)
             && l.contains("collections=0"));
@@ -651,7 +653,26 @@ class ChunkReaperIntegrationTest extends AtomicWriteTestBase {
         r.runOnce(Duration.ZERO);
 
         assertThat(r.lastPass().tenantsRefused()).isZero();
+        assertThat(r.lastPass().tenantsEmpty()).as("no chunk in any collection: empty").isEqualTo(1);
         assertThat(refusedRows(t)).isEmpty();
+    }
+
+    @Test
+    void tenantsEmptyCountsOnlyTheTenantsThatHeldNothing_notTheRefusedOnesNorTheWorkedOnes() throws Exception {
+        String empty = newTenant();
+        String refused = newTenant();
+        orphan(refused, col("knowledge"), "r1");          // chunks, no record: refused
+        String worked = newTenant();
+        openGate(worked);
+        orphan(worked, col("knowledge"), "w1");           // chunks, record: worked on
+        ChunkReaper r = reaper(empty, refused, worked);
+
+        r.runOnce(Duration.ZERO);
+
+        assertThat(r.lastPass().tenantsVisited()).isEqualTo(3);
+        assertThat(r.lastPass().tenantsRefused()).isEqualTo(1);
+        assertThat(r.lastPass().tenantsEmpty()).isEqualTo(1);
+        assertThat(r.lastPass().tenantsOk()).as("empty and worked-on both finished clean").isEqualTo(2);
     }
 
     @Test
@@ -666,6 +687,7 @@ class ChunkReaperIntegrationTest extends AtomicWriteTestBase {
         r.runOnce(Duration.ZERO);
 
         assertThat(r.lastPass().tenantsRefused()).isEqualTo(1);
+        assertThat(r.lastPass().tenantsEmpty()).isZero();
         assertThat(inCollection(t, q, h)).isTrue();
         assertThat(refusedRows(t)).hasSize(1);
     }
@@ -700,6 +722,7 @@ class ChunkReaperIntegrationTest extends AtomicWriteTestBase {
         List<String> logs = captureLogs(() -> r.runOnce(Duration.ZERO));
 
         assertThat(r.lastPass().tenantsRefused()).isZero();
+        assertThat(r.lastPass().tenantsEmpty()).as("the hollow recorded tenant held nothing; the full one did").isEqualTo(1);
         assertThat(logs).as("a recorded tenant is not logged as an empty pass")
             .noneMatch(l -> l.contains("event=rdr192_backfill_gate_passed_empty_tenant"));
     }

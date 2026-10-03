@@ -33,20 +33,24 @@ import java.util.function.Predicate;
  *
  * <p><b>The one exemption: an empty tenant (nexus-wbfpw.73).</b> A tenant that
  * holds nothing has nothing for the reaper to delete and nothing for a backfill
- * to heal, so the gate passes it without a completion record. "Empty" is the
- * client rung's own test for calling a tenant converged without a census (the
- * empty-listing branch of {@code _default_census} in the Python rung): the
- * tenant holds no chunk row in any collection (the client's collection listing
- * is "every collection that physically holds chunks", quarantine siblings
- * included) AND the catalog holds no manifest row. The second half is the
- * client's cross-check against an empty listing that is really a listing failure.
- * The gate takes the test as a {@link Predicate} so the database read stays in
- * the vectors package; {@link #Rdr192BackfillGate(LadderRepository)} has none,
- * and a gate built that way never exempts anything. The gate never writes a
- * completion for an empty tenant: the client rung stays the one recorder, and a
- * tenant that later gains content and has no record is refused again from that
- * pass on. A tenant holding only quarantine-* chunks is NOT empty: it holds
- * chunks, and the quarantine expiry that would follow is an irreversible delete.
+ * to heal, so the gate passes it without a completion record. "Empty" here reads
+ * at least as strictly as the client rung's empty-listing branch of {@code
+ * _default_census} (the Python rung), which calls a tenant converged without a
+ * census when the collection listing is empty and the catalog's live document
+ * chunk count is zero. The engine's test is that the tenant holds no row in {@code
+ * nexus.chunks} at all, quarantine siblings included, which the client's census
+ * skips; and because every manifest row references its chunk through the
+ * validated catalog-029 foreign key, a tenant with no chunk has no manifest row
+ * either, so the catalog cross-check the client needs against a listing that
+ * failed silently has nothing left to add here. The two are not the same test and
+ * the engine's is the stricter. The gate takes the test as a {@link Predicate}
+ * so the database read stays in the vectors package; {@link
+ * #Rdr192BackfillGate(LadderRepository)} has none, and a gate built that way
+ * never exempts anything. The gate never writes a completion for an empty
+ * tenant: the client rung stays the one recorder, and a tenant that later gains
+ * content and has no record is refused again from that pass on. A tenant holding
+ * only quarantine-* chunks is NOT empty: it holds chunks, and the quarantine
+ * expiry that would follow is an irreversible delete.
  *
  * <p>The reaper (nexus-2x9xa) calls {@link #requireComplete} at the top of each
  * pass, per tenant, and skips the tenant on {@link BackfillIncompleteException}
@@ -73,7 +77,7 @@ public final class Rdr192BackfillGate {
     }
 
     /**
-     * @param emptyTenant true when the tenant holds no chunk row and no manifest row (read under the tenant's own
+     * @param emptyTenant true when the tenant holds no chunk row (read under the tenant's own
      *        RLS context). It may throw; a throw is a refusal, never a pass.
      */
     public Rdr192BackfillGate(LadderRepository ladder, Predicate<String> emptyTenant) {
@@ -119,7 +123,8 @@ public final class Rdr192BackfillGate {
                             + "); refusing to reap manifest-less chunks", e);
         }
         if (empty) {
-            log.info("event=rdr192_backfill_gate_passed_empty_tenant tenant={} rung={}", tenant, RUNG_NAME);
+            // DEBUG, not INFO: one line per empty tenant per hourly pass; the pass summary carries the count (tenants_empty).
+            log.debug("event=rdr192_backfill_gate_passed_empty_tenant tenant={} rung={}", tenant, RUNG_NAME);
             return;
         }
         log.info("event=rdr192_backfill_gate_refused tenant={} rung={}", tenant, RUNG_NAME);

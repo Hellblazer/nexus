@@ -409,6 +409,14 @@ final class ChunkReaper {
                 || expiries.stream().anyMatch(e -> e.error() != null);
         }
 
+        /**
+         * The tenant passed the gate cleanly and held nothing to look at: no collection and no quarantine sibling
+         * with chunks (nexus-wbfpw.73). Refused, errored and wall-clock-cut tenants are never empty.
+         */
+        boolean empty() {
+            return tenantRefusal == null && error == null && collections.isEmpty() && expiries.isEmpty();
+        }
+
         int errors() {
             return (int) collections.stream().filter(c -> c.error() != null).count()
                 + (int) expiries.stream().filter(e -> e.error() != null).count() + (error != null ? 1 : 0);
@@ -599,9 +607,12 @@ final class ChunkReaper {
      * These counts tell a working pass from one that did nothing useful. A tenant is refused when the backfill gate
      * kept the whole tenant out, and errored when it, one of its collections or one of its quarantine siblings threw
      * (a wall-clock cut is neither). A tenant that is neither is one the pass worked on, even if it found nothing to
-     * move. Served as {@code reaper.last_pass} on {@code GET /v1/status}.
+     * move. {@code tenantsEmpty} (nexus-wbfpw.73, appended) counts the visited tenants that were neither refused nor
+     * errored and held no chunk in any collection or quarantine sibling: the default tenant is always visited and is
+     * empty in cloud, so a client judging "did this pass work on anything" subtracts it from the visited count.
+     * Served as {@code reaper.last_pass} on {@code GET /v1/status}.
      */
-    record LastPass(int tenantsVisited, int tenantsErrored, int tenantsRefused) {
+    record LastPass(int tenantsVisited, int tenantsErrored, int tenantsRefused, int tenantsEmpty) {
         int tenantsOk() {
             return tenantsVisited - tenantsErrored - tenantsRefused;
         }
@@ -703,7 +714,8 @@ final class ChunkReaper {
         RunResult out = new RunResult(results, cut);
         lastRun.set(out);
         lastPass = new LastPass(results.size(), (int) results.stream().filter(TenantResult::failed).count(),
-            (int) results.stream().filter(r -> r.tenantRefusal() != null).count());
+            (int) results.stream().filter(r -> r.tenantRefusal() != null).count(),
+            (int) results.stream().filter(TenantResult::empty).count());
         lastCompletedPassAt = clock.instant().truncatedTo(ChronoUnit.SECONDS);
         return out;
     }

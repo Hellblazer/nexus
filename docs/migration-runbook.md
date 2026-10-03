@@ -49,9 +49,11 @@ reads zero legacy-unmanifested and zero unclassified chunks. It never deletes a
 chunk and leaves the `superseded`, `dead-owner` and `no-owner` buckets to the
 reaper.
 
-A tenant that holds nothing (no chunk row in any collection, no manifest row) is
-converged without a census, and the engine's reaper gate applies the same test:
-it passes such a tenant with no completion record, so a break-glass or
+A tenant that holds nothing is converged without a census, and the engine's
+reaper gate reads at least as strictly as that branch (it counts quarantine
+chunks, which the client's census skips, and a tenant with no chunk has no
+manifest row because of the manifest's foreign key to `nexus.chunks`): it
+passes such a tenant with no completion record, so a break-glass or
 credential-only tenant needs no `nx upgrade` of its own
 (`docs/operations/engine-reaper.md`, nexus-wbfpw.73).
 

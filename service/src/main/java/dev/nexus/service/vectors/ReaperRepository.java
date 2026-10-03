@@ -16,7 +16,6 @@ import java.util.List;
 import java.util.Map;
 
 import static dev.nexus.service.jooq.nexus.Routines.reaperOwnsQuarantinedRow;
-import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.REAPER_EXPIRE_QUARANTINE;
@@ -71,21 +70,21 @@ public class ReaperRepository {   // not final: ChunkReaperIntegrationTest raise
     }
 
     /**
-     * True when the tenant holds no chunk row in any collection (quarantine siblings included) and the catalog holds
-     * no manifest row: the engine's reading of the client rung's "no collections and no manifest rows" (nexus-wbfpw.73;
-     * {@code Rdr192BackfillGate}). Both reads run under the tenant's own RLS context, bounded by
-     * {@code statementTimeout}. Throws on a database failure, never answers true for "could not read".
+     * True when the tenant holds no chunk row in any collection, quarantine siblings included (nexus-wbfpw.73;
+     * {@code Rdr192BackfillGate}). Read under the tenant's own RLS context, bounded by {@code statementTimeout}.
+     * Throws on a database failure, never answers true for "could not read".
      *
-     * <p>The manifest read counts every manifest row, tombstoned documents' rows included, where the client's
-     * cross-check reads {@code catalog_stats.chunk_count} (live documents only). That makes this the stricter
-     * of the two; they agree whenever the manifest's foreign key to {@code nexus.chunks} holds, because a manifest row
-     * cannot then outlive its chunk and the first read already answers.
+     * <p>One read is enough, and the catalog's manifest is deliberately not consulted. Every manifest row references
+     * its chunk through {@code fk_catalog_chunks_chunk} (catalog-029, validated), so a manifest row cannot outlive
+     * the chunk it names: a tenant with no chunk has no manifest row either, and a second existence read could
+     * never answer differently. It was written once and no test could reach it, because the same FK refuses the
+     * seed. The client rung's own empty-listing branch also cross-checks the catalog, but that guards a listing
+     * that failed silently; this read is the table itself and fails loudly.
      */
     public boolean holdsNothing(String tenant, Duration statementTimeout) {
         return tenantScope.withTenant(tenant, ctx -> {
             PgSession.setStatementAndLockBounds(ctx, (int) statementTimeout.toMillis(), 2_000);
-            return !ctx.fetchExists(CHUNKS, CHUNKS.TENANT_ID.eq(tenant))
-                && !ctx.fetchExists(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(tenant));
+            return !ctx.fetchExists(CHUNKS, CHUNKS.TENANT_ID.eq(tenant));
         });
     }
 
