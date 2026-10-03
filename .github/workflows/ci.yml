@@ -754,7 +754,8 @@ jobs:
       # count to read; tests/scripts/test_ci_shard_count_lint.py covers that).
       - name: Executed-count floor (nexus-lemv5 — a shard that skipped its corpus must not report green)
         run: |
-          summary="$(grep -aE ' in [0-9.]+s( \([0-9:]+\))?$' shard-output.txt | tail -1)"
+          set -euo pipefail
+          summary="$(grep -aE ' in [0-9.]+s( \([0-9:]+\))?$' shard-output.txt | tail -1)" || summary=""
           [[ "$summary" =~ ([0-9]+)\ passed ]] && [ "${BASH_REMATCH[1]}" -ge 1500 ] \
             || { echo "::error::test shard ${{ matrix.shard }} passed fewer than 1500 tests (summary: ${summary:-none}) — a mass-skip that still exits 0"; exit 1; }
 
@@ -867,7 +868,8 @@ jobs:
         # pytest's own final summary line; the corpus is ~830 tests, so 400
         # leaves headroom for shrinkage and still fails the bug's signature.
         run: |
-          summary="$(grep -aE ' in [0-9.]+s( \([0-9:]+\))?$' lint-output.txt | tail -1)"
+          set -euo pipefail
+          summary="$(grep -aE ' in [0-9.]+s( \([0-9:]+\))?$' lint-output.txt | tail -1)" || summary=""
           [[ "$summary" =~ ([0-9]+)\ passed ]] && [ "${BASH_REMATCH[1]}" -ge 400 ] \
             || { echo "::error::lint leg passed fewer than 400 tests (summary: ${summary:-none}) — a mass-skip that still exits 0"; exit 1; }
 
