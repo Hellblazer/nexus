@@ -173,7 +173,7 @@ run_a() {
 }
 
 echo "Test 0 (nexus-z0o2p.42): an override naming a release with no readable tag refuses before any build, naming git fetch --tags"
-out0="$(env -i NX_NO_TELEMETRY=1 PATH="$WORKDIR/bin:/usr/bin:/bin:/usr/local/bin" HOME="$HOME" \
+out0="$(env -i NX_NO_TELEMETRY=1 E2E_PYTHON="$E2E_PYTHON" PATH="$WORKDIR/bin:/usr/bin:/bin:/usr/local/bin" HOME="$HOME" \
     TMPDIR="${TMPDIR:-/tmp}" NEXUS_PREV_RELEASE=1.0.0 NEXUS_PREV_ENGINE_TAG=engine-service-v0.0.1 \
     NEXUS_SEED_RELEASE=9.9.9 NX_BUILD_LEASE_WAIT=5 \
     bash "$repo/tests/e2e/migration-rehearsal/run.sh" --candidate-migration 2>&1)"; rc0=$?
@@ -248,7 +248,7 @@ lease_dir_common="$(git -C "$repo" rev-parse --path-format=absolute --git-common
 # ── Tests 3-7: the seed derivation on tagged history ────────────────────────
 run_cm() {
   local r="$1"; shift
-  env -i NX_NO_TELEMETRY=1 PATH="$WORKDIR/bin:/usr/bin:/bin:/usr/local/bin" HOME="$HOME" \
+  env -i NX_NO_TELEMETRY=1 E2E_PYTHON="$E2E_PYTHON" PATH="$WORKDIR/bin:/usr/bin:/bin:/usr/local/bin" HOME="$HOME" \
     TMPDIR="${TMPDIR:-/tmp}" NEXUS_PREV_RELEASE=1.0.0 NEXUS_PREV_ENGINE_TAG=engine-service-v0.0.1 \
     NX_BUILD_LEASE_WAIT=10 "$@" \
     bash "$r/tests/e2e/migration-rehearsal/run.sh" --candidate-migration 2>&1
