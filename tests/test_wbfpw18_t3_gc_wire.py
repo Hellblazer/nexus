@@ -450,6 +450,25 @@ def test_a_non_complete_document_still_refuses(runner, real_client):
     assert "/v1/vectors/gc/quarantine-orphans" not in engine.paths()
 
 
+def test_a_non_complete_document_with_nothing_reapable_does_not_claim_a_refusal(runner, real_client):
+    """RUNFENCE guards the MOVE. With nothing reapable a real run never moves, so it goes straight to
+    quarantine expiry; a dry run must not say a real run "will REFUSE" (it printed that on production
+    rdr__1-20 on 2026-10-03 while exiting 0, which read as a broken exit code)."""
+    engine = _Engine(total=10, reapable=[])
+    result = _invoke(runner, real_client, engine, ["--dry-run"], documents=[_indexing_doc()])
+    assert result.exit_code == 0, result.output
+    assert "REFUSE" not in result.output
+    assert "not index_state='complete'" in result.output
+
+
+def test_a_non_complete_document_with_nothing_reapable_still_expires(runner, real_client):
+    engine = _Engine(total=10, reapable=[])
+    result = _invoke(runner, real_client, engine, ["--no-dry-run", "--yes"], documents=[_indexing_doc()])
+    assert result.exit_code == 0, result.output
+    assert _MOVE not in engine.paths()
+    assert _EXPIRE in engine.paths()
+
+
 def test_the_incomplete_state_override_lets_the_move_run(runner, real_client):
     engine = _Engine(total=10, reapable=[1])
     result = _invoke(runner, real_client, engine,

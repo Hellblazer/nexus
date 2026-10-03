@@ -571,11 +571,13 @@ def gc_cmd(
         _states = ", ".join(sorted({
             f"{d.title!r}={d.index_state!r}" for d in incomplete_docs
         }))
+        # RUNFENCE guards the MOVE only: with nothing reapable a real run goes straight to quarantine
+        # expiry, so this line must not claim a refusal; the refusal list below names it when it applies.
         click.echo(
             f"  {len(incomplete_docs)} document(s) in {collection!r} are "
-            f"not index_state='complete' ({_states}) — a --no-dry-run "
-            f"--yes run will REFUSE until they resolve, or pass "
-            f"--allow-incomplete-index-state (nexus-g6k6b)"
+            f"not index_state='complete' ({_states}). That blocks a move until they "
+            f"resolve or --allow-incomplete-index-state is passed (nexus-g6k6b); it does "
+            f"not block the quarantine expiry."
         )
 
     # RDR-192 R8 (nexus-wbfpw.18): the census is read on EVERY run, immediately before acting. A
