@@ -278,7 +278,7 @@ def validate_measured_record(text: str) -> tuple[bool, list[str]]:
 
 # ---------------------------------------------------------------------------
 # IO boundary (subprocess wrappers) -- monkeypatched in tests, not
-# unit-tested directly (mirrors check_inbound_relay_acks.py's split)
+# unit-tested directly
 # ---------------------------------------------------------------------------
 
 

@@ -63,8 +63,7 @@ the transcript's size. The ``hooks.json`` ``"timeout": 20`` covers two
 bounded POSTs, two interpreter starts and that read; a timeout here lets the
 subagent stop normally and costs only the row. The RDR-184 ``.expectations`` TSV ledger, written by
 :mod:`nexus.hooks.subagent_stop` on the same event, stays the authoritative
-record of whether an agent reported, including for
-``scripts/check_agent_verify_claims.py``.
+record of whether an agent reported.
 
 **What a harness-internal stop costs, and why it still spawns (nexus-zfxo3,
 measured 2026-09-29, dev Mac, median of 10, Claude Code 2.1.284).** The

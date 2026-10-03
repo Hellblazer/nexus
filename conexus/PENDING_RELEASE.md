@@ -45,8 +45,10 @@ stale -- and stays exactly where it is until moved back deliberately.
 
 ONE PATH PER BULLET, on the bullet's FIRST line.
 
-- cleanup step 12 (no bead id exists): `conexus/skills/rdr-audit-checklist/SKILL.md` drops the `schedule` and `unschedule` subcommands and their plist and crontab templates; `list`, `status` and `history` stay. The template files under `scripts/` they pointed at are deleted.
-- cleanup step 12 (no bead id exists): `conexus/commands/rdr-audit.md` drops the `schedule` / `unschedule` text; the management subcommands are `list`, `status` and `history`, all read-only.
+- cleanup step 12 (nexus-0r1uz): `conexus/skills/rdr-audit-checklist/SKILL.md` drops the `schedule` and `unschedule` subcommands and their plist and crontab templates; `list`, `status` and `history` stay. The template files under `scripts/` they pointed at are deleted.
+- cleanup step 12 (nexus-0r1uz): `conexus/commands/rdr-audit.md` drops the `schedule` / `unschedule` text; the management subcommands are `list`, `status` and `history`, all read-only.
+- cleanup step 7 (nexus-0r1uz): `conexus/skills/orchestration/SKILL.md` drops its text about the agent-verify-claims checker script (the script is deleted); the orchestrator still re-runs each reported COMMAND itself.
+- cleanup step 7 (nexus-0r1uz): `conexus/skills/mailbox/SKILL.md` drops the unacked-request sweep bullet and its success criterion, since the inbound-relay-acks sweep script is deleted.
 
 ## Deferred to the next client release
 

@@ -7,7 +7,7 @@ substantive-critic CRITICAL, T2 [22965]).
 ``check_remediation_commits_ride_release`` tests), so the gate module
 imports directly with no ``sys.path`` hack.
 
-Layout mirrors ``tests/scripts/test_check_inbound_relay_acks.py``: pure
+Layout: pure
 logic (record validation) is tested directly with injected strings; the IO
 boundary (``file_present_at_ref`` / ``fetch_cc5_record``) is exercised via
 a throwaway git repo (same idiom as

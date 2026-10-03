@@ -173,9 +173,7 @@ _GH_EXPR_RE = re.compile(r"\$\{\{\s*(.+?)\s*\}\}")
 _BASE_VALUES = {
     "needs.changes.result": "success",
     "needs.changes.outputs.code": "true",
-    "needs.changes.outputs.ci_runner": "ubuntu-latest",
     "needs.test.result": "success",
-    "needs.test-qwen.result": "skipped",
     "needs.test-lint.result": "success",
     "needs.test-mode-census.result": "success",
     "needs.release-ledger-gate.result": "skipped",

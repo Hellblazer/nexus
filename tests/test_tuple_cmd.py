@@ -180,13 +180,13 @@ class TestTupleRdPaging:
 
 
 def test_every_reader_of_the_truncation_marker_spells_it_as_the_cli_does() -> None:
-    """The census and the relay-ack sweep key on the marker text to refuse a
-    partial read; a rewording in the CLI alone would silently reopen the
-    undercount (critique of 195b1bb1b)."""
+    """The census keys on the marker text to refuse a partial read; a
+    rewording in the CLI alone would silently reopen the undercount
+    (critique of 195b1bb1b)."""
     from nexus.commands.tuple_cmd import TRUNCATION_MARKER  # noqa: PLC0415 — test-local import
 
     repo = Path(__file__).resolve().parents[1]
-    for rel in ("src/nexus/hooks/expectations.py", "scripts/check_inbound_relay_acks.py"):
+    for rel in ("src/nexus/hooks/expectations.py",):
         assert f'"{TRUNCATION_MARKER}' in (repo / rel).read_text(), rel
 
 

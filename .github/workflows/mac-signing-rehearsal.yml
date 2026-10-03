@@ -48,7 +48,7 @@ concurrency:
 jobs:
   rehearse:
     name: Sign + notarize a throwaway binary (hellmini)
-    # Same guard as hellmini-probe.yml: public repo, self-hosted runner.
+    # Guard: public repo, self-hosted runner.
     if: github.actor == 'Hellblazer'
     runs-on: hellmini
     # The APPLE_* secrets are scoped to this environment; its deployment

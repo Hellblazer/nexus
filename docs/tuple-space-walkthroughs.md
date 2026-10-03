@@ -199,12 +199,9 @@ sequenceDiagram
     E->>E: signal waiters on mailbox/nexus-a6
     E-->>N: the ack tuple, claim c10
     N->>E: ack c10
-    Note over N,C: the unacked-request sweep is rd over every mailbox for kind request with no matching ack
 ```
 
 A wait of minutes is a loop of parked calls, never one long park. Each call parks for at most 25 s because the public edge times out a response that has not started within 30 s; at the cap the engine returns the probe result and the client loops. The `correlation_id` dim is what pairs an ack with its request. Before RDR-206 the peer's ack was `out` followed by a separate `ack c9`; a crash between the two left the reply delivered and the request unconsumed, so it was redelivered and the requester could see a second reply carrying the same `correlation_id`. Writing the reply inside `ack`'s own transaction closes that window: both commit or neither does.
-
-`scripts/check_inbound_relay_acks.py`'s mailbox arm is that unacked-request sweep, addressed by `--mailbox-prefix`/`--tuple-read-max`: it scans every `mailbox/*` subspace for `kind=request` rows with no matching `kind=ack` row at `mailbox/<from>`, distinguished in its findings by a `MAILBOX-UNACKED-REQUEST:` tag, and reports into the same finding list as the older T2-memory ack check (the pre-tuple-space relay convention between the nexus and conexus repos). An empty mailbox tuple space is a legitimate clean state for this arm, not a blindspot; a request younger than `--max-age-days` is a legitimate in-flight handshake and is not reported even unacked.
 
 ## Push delivery: the channel
 
