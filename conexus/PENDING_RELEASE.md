@@ -45,6 +45,7 @@ stale -- and stays exactly where it is until moved back deliberately.
 
 ONE PATH PER BULLET, on the bullet's FIRST line.
 
+- nexus-catalog schemas deferred (nexus-ivi4s): `conexus/.mcp.json` sets `alwaysLoad: false` on `nexus-catalog` (10 tools, about 3.4k tokens of schema), so Claude Code loads its schemas through tool search on first use instead of in every session. `nexus` and `sequential-thinking` keep `alwaysLoad: true`, which conexus 4.34.4 set because deferred tools stopped being invoked (3cd9e7d12); the catalog tools are the least-used of the three servers. Sam, 2026-10-04.
 - outside-critique reply (nexus-0cq5m): `conexus/commands/nx-preflight.md` no longer assumes its preflight output is present; when the `!` preamble's output is missing it runs `nx command-context nx-preflight` instead of summarizing nothing. Text only.
 
 
