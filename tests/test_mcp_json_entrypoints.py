@@ -187,3 +187,29 @@ def test_the_placeholder_check_would_have_caught_the_original() -> None:
     assert not any(
         "${" in value for _, _, _, value in _declared_env()
     ), "a placeholder is present again; see the test above"
+
+
+# --------------------------------------------------------------------------
+# alwaysLoad contract (nexus-rf87b; commits 3cd9e7d12, bf134131a)
+# --------------------------------------------------------------------------
+
+#: conexus 4.34.4 (3cd9e7d12) set alwaysLoad on every server because sessions
+#: stopped invoking tools whose schemas Claude Code defers behind tool search;
+#: bf134131a (nexus-ivi4s) turned it off for nexus-catalog only, whose ten
+#: tools load on first use. nexus and sequential-thinking carry the tools
+#: sessions use most, so flipping either off stops those tools being invoked.
+_EXPECTED_ALWAYS_LOAD = {
+    "nexus": True,
+    "sequential-thinking": True,
+    "nexus-catalog": False,
+}
+
+
+def test_always_load_values_are_pinned() -> None:
+    mcp_json = _load_mcp_json()
+    actual = {name: cfg.get("alwaysLoad") for name, cfg in mcp_json.items()}
+    assert actual == _EXPECTED_ALWAYS_LOAD, (
+        "conexus/.mcp.json alwaysLoad drifted: deferred schemas are not "
+        "invoked, so nexus and sequential-thinking must stay true and "
+        f"nexus-catalog false; got {actual!r}"
+    )

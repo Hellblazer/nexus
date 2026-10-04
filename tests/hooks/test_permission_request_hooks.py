@@ -171,6 +171,34 @@ class TestNxPermissionHook:
         assert data["hookSpecificOutput"]["hookEventName"] == "PermissionRequest"
 
 
+class TestDemotedOperatorsAreNotAutoApproved:
+    """nexus-rf87b: the ten ``operator_*`` functions were demoted off the MCP
+    surface at nexus-ivi4s (each spawns ``claude -p``). Nothing registers them,
+    so the drift guard above can never notice an allowlist entry for one; this
+    pins the other direction -- a grant for a tool the server no longer
+    exposes must not creep back in."""
+
+    def test_no_operator_name_is_in_the_allowlists(self) -> None:
+        from nexus.hooks import auto_approve
+
+        granted = auto_approve._ALLOWED_TOOLS | auto_approve._ALLOWED_HOOK_TOOLS
+        assert granted, "non-vacuity: the allowlists must name tools"
+        offenders = sorted(n for n in granted if "__operator_" in n)
+        assert not offenders, f"demoted operator tool(s) auto-approved: {offenders}"
+
+    @pytest.mark.parametrize("event", [None, "PreToolUse"])
+    @pytest.mark.parametrize(
+        "verb", ["extract", "summarize", "filter", "groupby", "aggregate"]
+    )
+    def test_operator_tool_names_are_not_approved(
+        self, verb: str, event: str | None
+    ) -> None:
+        output = _run_nx_hook(
+            f"mcp__plugin_conexus_nexus__operator_{verb}", hook_event_name=event
+        )
+        assert output == ""
+
+
 class TestDestructiveToolsRequireManualApproval:
     """nexus-cnzei.5: a destructive tool with a trivial self-gate (confirm=true
     satisfied by the calling agent itself, not a human) must stay behind the

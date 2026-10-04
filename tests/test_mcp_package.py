@@ -7,6 +7,8 @@ but unregistered.
 """
 from __future__ import annotations
 
+import pytest
+
 
 def test_core_module_importable():
     """core.py exists and has a FastMCP instance."""
@@ -231,6 +233,35 @@ def test_operators_are_demoted_but_resolve_for_plans():
     for verb in _OPERATOR_VERBS:
         fn = getattr(core, _resolved(verb), None)
         assert fn is not None and inspect.iscoroutinefunction(fn), verb
+
+
+@pytest.mark.parametrize("verb", _OPERATOR_VERBS)
+def test_runner_dispatcher_resolves_bare_operator_verb_to_core_function(
+    verb, monkeypatch
+):
+    """nexus-rf87b: the check above stops at ``getattr(core, ...)``. This one
+    drives ``plans.runner._default_dispatcher`` itself: a bare plan verb
+    (``summarize``) must reach ``nexus.mcp.core.operator_<verb>`` even though
+    no ``operator_*`` tool is registered on the MCP surface. The operator is
+    swapped for a stub so no ``claude -p`` call happens."""
+    import asyncio
+
+    import nexus.mcp.core as core
+    from nexus.plans.runner import _default_dispatcher
+
+    calls: list[str] = []
+
+    async def _stub(**_kw):
+        calls.append(verb)
+        return {"stub_for": f"operator_{verb}"}
+
+    monkeypatch.setenv("NX_OPERATOR_MODEL_TIERING", "0")
+    monkeypatch.setattr(core, f"operator_{verb}", _stub)
+
+    out = asyncio.run(_default_dispatcher(verb, {}))
+
+    assert calls == [verb]
+    assert out == {"stub_for": f"operator_{verb}"}
 
 
 def test_init_reexports_all():
