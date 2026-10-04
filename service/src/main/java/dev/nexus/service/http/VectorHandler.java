@@ -1134,7 +1134,7 @@ public final class VectorHandler implements HttpHandler {
      * is at least {@code floor_min_chunks} and strictly more than {@code floor_fraction} of every stored
      * chunk, nothing moves and the response is {@code {"moved": 0, "sample": [], "refused": true,
      * "reapable_count": R, "total_count": T, ...}} (with {@code "remaining": R} and {@code "row_limit"} on
-     * the bounded form), plus one {@code gc_quarantine_orphans_refused} gc_audit row. {@code force} skips the
+     * the bounded form), plus one {@code gc_quarantine_orphans_refused} gc_audit row (skipped when the newest such row of the collection has identical counts and floor values and is under an hour old). {@code force} skips the
      * judgement. EVERY response, floor or not, carries {@code "floor"}: {@code {"given": false}} when the
      * request had no floor, else {@code {"given": true, "fraction": f, "min_chunks": n, "force": b}}. An
      * older engine ignores the fields and its response has no {@code floor} key, which is how a client
@@ -1254,6 +1254,13 @@ public final class VectorHandler implements HttpHandler {
         if (minRaw != null) {
             if (!(minRaw instanceof Number mn) || mn.doubleValue() != Math.rint(mn.doubleValue())) {
                 throw new IllegalArgumentException("floor_min_chunks must be an integer >= 0, got: " + minRaw);
+            }
+            // intValue() wraps a Long past the int range (4294967396 would become 100): a 400, never a wrapped floor.
+            if (mn.doubleValue() > Integer.MAX_VALUE) {
+                throw new IllegalArgumentException("floor_min_chunks must be <= " + Integer.MAX_VALUE + ", got: " + minRaw);
+            }
+            if (mn.doubleValue() < 0) {
+                throw new IllegalArgumentException("floor_min_chunks must be >= 0, got: " + minRaw);
             }
             minChunks = mn.intValue();
             if (minChunks < 0) {

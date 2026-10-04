@@ -34,8 +34,11 @@
     that were judged. It writes ONE gc_audit row in the same transaction, operation
     'gc_quarantine_orphans_refused', actor 'engine' (the move's own rows are 'gc_quarantine_orphans' and
     'gc_quarantine_orphans_bounded'; a distinct name keeps the reaper's 'reaper_refused' stream and the
-    move stream unmixed). Every refused call writes a row; there is no once-per-state-change dedupe, because
-    an explicit caller (an `nx index repo` walk, an operator) wants its own refusal on record.
+    move stream unmixed). The row is written once per STATE, not once per call: when the newest refused row
+    of the same (tenant, collection) has identical reapable and total counts and floor values and is under
+    an hour old, the INSERT is skipped and the call still answers refused = true. Without that, a collection
+    that stays over the floor (old orphans past the 30 day grace) wrote one row per `nx index repo` walk
+    forever, and gc_audit has no retention.
 
     NO FLOOR, NO CHANGE. p_floor_fraction NULL means no floor was given: the wrapper takes no gate of its
     own, counts nothing and calls the move, so a request without the new fields behaves exactly as before.
@@ -83,6 +86,7 @@ DECLARE
     v_moved      bigint;
     v_sample     jsonb;
     v_remaining  bigint;
+    v_repeat     boolean;
 BEGIN
     IF p_row_limit IS NOT NULL AND p_row_limit <= 0 THEN
         RAISE EXCEPTION
@@ -124,18 +128,38 @@ BEGIN
 
         IF v_reapable >= p_floor_min_chunks AND v_total > 0
            AND v_reapable::float8 / v_total::float8 > p_floor_fraction THEN
-            INSERT INTO nexus.gc_audit
-                (tenant_id, operation, collection, actor, dry_run, chash_count, chashes, details)
-            VALUES (
-                p_tenant_id, 'gc_quarantine_orphans_refused', p_collection, 'engine', false, 0, '[]'::jsonb,
-                jsonb_build_object(
-                    'reason', 'FLOOR',
-                    'form', CASE WHEN p_row_limit IS NULL THEN 'unbounded' ELSE 'bounded' END,
-                    'quarantine_collection', p_quarantine_collection,
-                    'reapable_count', v_reapable,
-                    'total_count', v_total,
-                    'floor_fraction', p_floor_fraction,
-                    'floor_min_chunks', p_floor_min_chunks));
+            -- One row per STATE, not per call: skip the INSERT when the newest refusal row of this
+            -- (tenant, collection) carries identical counts and floor values and is under an hour old.
+            -- Every `nx index repo` walk repeats the same refusal for a collection that stays over the
+            -- floor, and gc_audit has no retention. The refusal is still returned either way.
+            SELECT EXISTS (
+                SELECT 1 FROM (
+                    SELECT a.details, a.created_at
+                      FROM nexus.gc_audit a
+                     WHERE a.tenant_id = p_tenant_id AND a.collection = p_collection
+                       AND a.operation = 'gc_quarantine_orphans_refused'
+                     ORDER BY a.id DESC
+                     LIMIT 1) last
+                 WHERE last.created_at > now() - interval '1 hour'
+                   AND (last.details->>'reapable_count')::bigint = v_reapable
+                   AND (last.details->>'total_count')::bigint = v_total
+                   AND (last.details->>'floor_fraction')::float8 = p_floor_fraction
+                   AND (last.details->>'floor_min_chunks')::int = p_floor_min_chunks)
+              INTO v_repeat;
+            IF NOT v_repeat THEN
+                INSERT INTO nexus.gc_audit
+                    (tenant_id, operation, collection, actor, dry_run, chash_count, chashes, details)
+                VALUES (
+                    p_tenant_id, 'gc_quarantine_orphans_refused', p_collection, 'engine', false, 0, '[]'::jsonb,
+                    jsonb_build_object(
+                        'reason', 'FLOOR',
+                        'form', CASE WHEN p_row_limit IS NULL THEN 'unbounded' ELSE 'bounded' END,
+                        'quarantine_collection', p_quarantine_collection,
+                        'reapable_count', v_reapable,
+                        'total_count', v_total,
+                        'floor_fraction', p_floor_fraction,
+                        'floor_min_chunks', p_floor_min_chunks));
+            END IF;
             RETURN QUERY SELECT 0::bigint, NULL::jsonb, v_reapable, true, v_reapable, v_total;
             RETURN;
         END IF;

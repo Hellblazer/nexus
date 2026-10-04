@@ -54,10 +54,22 @@ class VectorHandlerFloorRoutingTest {
                 Map.<String, Object>of("floor_fraction", 0.5, "floor_min_chunks", -1),
                 Map.<String, Object>of("floor_fraction", 0.5, "floor_min_chunks", 1.5),
                 Map.<String, Object>of("floor_fraction", 0.5, "floor_min_chunks", "ten"),
+                // A Long past the int range must not wrap through intValue(): 4294967396 would become 100,
+                // -4294967196 would become 100 too, and 2147483648 would become Integer.MIN_VALUE.
+                Map.<String, Object>of("floor_fraction", 0.5, "floor_min_chunks", 4294967396L),
+                Map.<String, Object>of("floor_fraction", 0.5, "floor_min_chunks", -4294967196L),
+                Map.<String, Object>of("floor_fraction", 0.5, "floor_min_chunks", 2147483648L),
+                Map.<String, Object>of("floor_fraction", 0.5, "floor_min_chunks", 1.0e10),
                 Map.<String, Object>of("floor_min_chunks", 10),
                 Map.<String, Object>of("force", "true"))) {
             assertThatThrownBy(() -> VectorHandler.resolveFloor(bad))
                 .as("%s", bad).isInstanceOf(IllegalArgumentException.class);
         }
+    }
+
+    @Test
+    void theIntRangeEdgeItself_isAccepted() {
+        assertThat(VectorHandler.resolveFloor(Map.of("floor_fraction", 0.5, "floor_min_chunks", (long) Integer.MAX_VALUE))
+            .minChunks()).isEqualTo(Integer.MAX_VALUE);
     }
 }

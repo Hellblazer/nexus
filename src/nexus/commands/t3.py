@@ -485,7 +485,7 @@ def gc_cmd(
         chunk). Override: ``NX_GC_FORCE=1``. The route this verb moves with
         carries the same floor (nexus-wbfpw.52; ``indexer._prune_deleted_files``
         sends it too): the verb passes ``NX_GC_FLOOR_FRACTION``, the 100-chunk
-        minimum and ``NX_GC_FORCE`` on every batch, and the ENGINE judges it
+        minimum and ``NX_GC_FORCE`` on the first batch, and the ENGINE judges it
         under its sweep gate on the whole reapable set, so a pass that grew past
         the floor after the listing is refused by the engine (exit 1, the same
         message shape, nothing moved, a ``gc_quarantine_orphans_refused``
@@ -661,7 +661,7 @@ def gc_cmd(
             f"the collection really is fully orphaned, re-run with --allow-empty-manifest-set."
         )
     # THE FLOOR, in two places (nexus-wbfpw.52). The engine's move route judges it under its sweep gate
-    # on the whole reapable set when the request carries it (the move below sends it on every batch,
+    # on the whole reapable set when the request carries it (the move below sends it on its first batch,
     # as indexer._prune_deleted_files does). This block is the ADVISORY copy, judged on the listing
     # BEFORE the move: the engine's answer arrives only with the move, and an engine that predates the
     # fields ignores them and moves unguarded, so the verb cannot hand a would-be refusal to an engine
@@ -761,7 +761,7 @@ def gc_cmd(
     qname = quarantine_collection_name(collection)
     stamp = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     # nexus-wbfpw.52: the same floor and override the advisory check above used, handed to the engine
-    # on every batch; the engine judges it under its sweep gate on the whole reapable set.
+    # on the first batch; the engine judges it under its sweep gate on the whole reapable set.
     engine_floor = GcFloor(fraction=floor_fraction, min_chunks=_GC_FLOOR_MIN_CHUNKS, force=force)
     try:
         moved_result = quarantine_orphans_bounded_serverside(

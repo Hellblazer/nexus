@@ -4174,7 +4174,7 @@ def _prune_collection_serverside(
     if quarantined is None:
         return False  # route unavailable
     moved, sample = quarantined
-    if floor.engine_applied is False:
+    if floor.engine_applied is False and moved:
         _log.warning(
             "gc_prune_floor_not_applied_by_engine",
             collection=collection_name, floor_fraction=floor.fraction, floor_min_chunks=floor.min_chunks,
@@ -4269,9 +4269,13 @@ def _prune_deleted_files(
     Note (operator runbook): the ``nx t3 gc`` CLI verb takes its candidates
     from the same engine predicate and moves them through the same route
     (``gc_quarantine_orphans``, RDR-192 Step 8, nexus-wbfpw.18), so the two
-    agree on what is garbage. They differ in guards: the verb adds a
-    permanent client-side fraction floor, the census gate and the
-    index-state breaker; this function calls the route with no floor.
+    agree on what is garbage. Both send the GC family's fraction floor
+    (``NX_GC_FLOOR_FRACTION``, 100-chunk minimum, ``NX_GC_FORCE`` override) on
+    the route's first batch, and the engine judges it (nexus-wbfpw.52). They
+    differ in the rest of the guards: the verb also checks the floor against
+    its advisory listing before the move, and adds the census gate and the
+    index-state breaker. ``NX_GC_FORCE=1`` in the environment disables the
+    floor here too.
 
     ``on_phase`` (RDR-191 Phase 6, nexus-o8dil.33, 2026-08-15: now UNUSED —
     kept in the signature so this function's ONE caller needs no edit).

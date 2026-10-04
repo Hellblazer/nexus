@@ -69,12 +69,17 @@ def test_without_a_floor_the_request_is_the_unchanged_one() -> None:
     assert unbounded.calls == [{}]
 
 
-def test_the_floor_rides_every_batch_and_an_echo_marks_the_engine_as_applying_it() -> None:
+def test_the_floor_rides_the_first_batch_only_and_an_echo_marks_the_engine_as_applying_it() -> None:
+    """The engine judges the floor on a whole-collection count inside the bounded statement's 25 s bound and
+    the exclusive gate; a later batch cannot be refused (each batch lowers both counts equally), so it carries
+    no floor fields and its ``{"given": false}`` answer is not read."""
     floor = GcFloor(0.25, 100)
-    db = _Db(_batch(2, 1, **_echo()), _batch(1, 0, **_echo()))
-    assert cq.quarantine_orphans_bounded_serverside(db, _COLL, _QUAR, _STAMP, floor=floor) == (3, [])
-    assert db.calls == [{"floor_fraction": 0.25, "floor_min_chunks": 100, "force": False}] * 2
-    assert floor.engine_applied is True
+    db = _Db(_batch(2, 2, **_echo()), _batch(1, 1, **_echo(given=False)), _batch(1, 0, **_echo(given=False)))
+    assert cq.quarantine_orphans_bounded_serverside(db, _COLL, _QUAR, _STAMP, floor=floor) == (4, [])
+    assert db.calls == [{"floor_fraction": 0.25, "floor_min_chunks": 100, "force": False}, {}, {}], (
+        "batch 2 and later must carry no floor fields"
+    )
+    assert floor.engine_applied is True, "the later batches' {given: false} must not turn the first batch's echo off"
 
 
 def test_a_response_with_no_echo_is_an_engine_that_ignored_the_floor() -> None:
@@ -92,21 +97,27 @@ def test_a_given_false_echo_is_not_support_for_this_requests_floor() -> None:
     assert floor.engine_applied is False
 
 
-def test_one_unechoed_batch_makes_the_whole_drain_unguarded() -> None:
-    floor = GcFloor(0.25, 100)
-    db = _Db(_batch(2, 1, **_echo()), _batch(1, 0))
-    cq.quarantine_orphans_bounded_serverside(db, _COLL, _QUAR, _STAMP, floor=floor)
-    assert floor.engine_applied is False
+def test_the_echo_is_read_from_the_floor_bearing_first_batch_alone() -> None:
+    unguarded = GcFloor(0.25, 100)
+    cq.quarantine_orphans_bounded_serverside(
+        _Db(_batch(2, 1), _batch(1, 0, **_echo())), _COLL, _QUAR, _STAMP, floor=unguarded)
+    assert unguarded.engine_applied is False, "an unechoed first batch is an unguarded drain, whatever follows"
+
+    guarded = GcFloor(0.25, 100)
+    cq.quarantine_orphans_bounded_serverside(
+        _Db(_batch(2, 1, **_echo()), _batch(1, 0)), _COLL, _QUAR, _STAMP, floor=guarded)
+    assert guarded.engine_applied is True, "a later batch carries no floor, so its missing echo says nothing"
 
 
-def test_an_engine_refusal_raises_with_the_engines_counts_and_what_earlier_batches_moved() -> None:
+def test_an_engine_refusal_raises_with_the_engines_counts_and_nothing_moved() -> None:
     floor = GcFloor(0.25, 100)
     refused = _batch(0, 130, refused=True, reapable_count=130, total_count=400, **_echo())
-    db = _Db(_batch(2, 1, **_echo()), refused)
+    db = _Db(refused)
     with pytest.raises(GcFloorRefused) as caught:
         cq.quarantine_orphans_bounded_serverside(db, _COLL, _QUAR, _STAMP, floor=floor)
-    assert (caught.value.reapable, caught.value.total, caught.value.moved) == (130, 400, 2)
+    assert (caught.value.reapable, caught.value.total, caught.value.moved) == (130, 400, 0)
     assert caught.value.floor is floor and floor.engine_applied is True
+    assert len(db.calls) == 1, "a refused first batch ends the drain"
 
 
 def test_a_refusal_is_the_engines_decision_not_a_stalled_strict_drain() -> None:
@@ -208,6 +219,16 @@ def test_the_prune_sends_the_gc_familys_floor_and_override(monkeypatch) -> None:
     with patch("nexus.indexer._log"):
         _prune(db)
     assert db.floor == {"floor_fraction": 0.4, "floor_min_chunks": 100, "force": True}
+
+
+def test_the_prune_stays_quiet_about_an_unguarded_engine_when_nothing_moved(monkeypatch) -> None:
+    """The warning says the engine "moved without applying" the floor: with nothing moved it is false, and
+    it would fire for every collection of every index run against an old engine."""
+    monkeypatch.delenv("NX_GC_FORCE", raising=False)
+    db = _PruneDb(_batch(0, 0))  # an older engine: no echo, and nothing to move
+    with patch("nexus.indexer._log") as log:
+        assert _prune(db) is True
+    assert "gc_prune_floor_not_applied_by_engine" not in _events(log)
 
 
 def test_the_prune_warns_when_the_engine_did_not_apply_the_floor(monkeypatch) -> None:

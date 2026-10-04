@@ -136,21 +136,25 @@ class GcQuarantineOrphansFloorRouteTest {
 
     /** {@code total} chunks, the first {@code reapable} of them aged past the grace with no manifest row. */
     private Fixture seed(int total, int reapable) throws Exception {
-        String origin = "knowledge__gcf" + seq.incrementAndGet() + "__minilm-l6-v2-384__v1";
+        return seedIn(TENANT, "knowledge__gcf" + seq.incrementAndGet() + "__minilm-l6-v2-384__v1", total, reapable);
+    }
+
+    /** As {@link #seed}, for a named tenant and collection (the cross-tenant case seeds the same name twice). */
+    private Fixture seedIn(String tenant, String origin, int total, int reapable) throws Exception {
         String sibling = "quarantine-" + origin;
         List<String> aged = new ArrayList<>();
         su(ctx -> {
-            PgContainerHelper.insertCollection(ctx, TENANT, origin);
+            PgContainerHelper.insertCollection(ctx, tenant, origin);
             for (int i = 0; i < total; i++) {
                 String hex = Chash.ofText(origin + "/" + i).toHex();
                 if (i < reapable) aged.add(hex);
-                PgContainerHelper.insertChunks(ctx, TENANT, origin, List.of(hex), List.of("chunk " + i),
+                PgContainerHelper.insertChunks(ctx, tenant, origin, List.of(hex), List.of("chunk " + i),
                     List.of(new float[384]), List.of(Map.<String, Object>of("title", "t" + i)));
             }
             OffsetDateTime then = OffsetDateTime.now().minus(ReapableFixtures.PAST_GRACE);
             for (String hex : aged) {
                 ctx.update(CHUNKS).set(CHUNKS.LAST_WRITTEN_AT, then)
-                   .where(CHUNKS.TENANT_ID.eq(TENANT).and(CHUNKS.COLLECTION.eq(origin))
+                   .where(CHUNKS.TENANT_ID.eq(tenant).and(CHUNKS.COLLECTION.eq(origin))
                        .and(CHUNKS.CHASH.eq(Chash.fromHex(hex).toBytes()))).execute();
             }
         });
@@ -206,20 +210,95 @@ class GcQuarantineOrphansFloorRouteTest {
     }
 
     @Test
-    void aRefusalIsAuditedWithItsCounts_oneRowPerRefusedCall() throws Exception {
+    void aRefusalIsAuditedWithItsCounts() throws Exception {
         Fixture f = seed(10, 6);
 
-        post(req(f, "floor_fraction", 0.5, "floor_min_chunks", 3));
-        post(req(f, "floor_fraction", 0.5, "floor_min_chunks", 3, "row_limit", 2));
+        post(req(f, "row_limit", 2, "floor_fraction", 0.5, "floor_min_chunks", 3));
 
         var rows = audit(f.origin(), "gc_quarantine_orphans_refused");
-        assertThat(rows).as("one row per refused call").hasSize(2);
-        assertThat(rows.get(0)).containsEntry("reason", "FLOOR").containsEntry("form", "unbounded")
+        assertThat(rows).as("the first refusal of a state writes its row").hasSize(1);
+        assertThat(rows.get(0)).containsEntry("reason", "FLOOR").containsEntry("form", "bounded")
             .containsEntry("reapable_count", 6).containsEntry("total_count", 10)
             .containsEntry("floor_fraction", 0.5).containsEntry("floor_min_chunks", 3)
             .containsEntry("quarantine_collection", f.sibling())
             .containsEntry("_actor", "engine").containsEntry("_chash_count", 0);
-        assertThat(rows.get(1)).containsEntry("form", "bounded");
+    }
+
+    @Test
+    void aRepeatOfTheSameRefusalWithinTheHourIsStillRefused_butWritesNoSecondRow() throws Exception {
+        Fixture f = seed(10, 6);
+
+        var first = json(post(req(f, "floor_fraction", 0.5, "floor_min_chunks", 3)));
+        var repeat = json(post(req(f, "floor_fraction", 0.5, "floor_min_chunks", 3)));
+        var repeatBounded = json(post(req(f, "row_limit", 2, "floor_fraction", 0.5, "floor_min_chunks", 3)));
+
+        assertThat(first.get("refused")).isEqualTo(true);
+        assertThat(repeat.get("refused")).as("a deduped repeat is still a refusal").isEqualTo(true);
+        assertThat(repeat.get("reapable_count")).isEqualTo(6);
+        assertThat(repeat.get("total_count")).isEqualTo(10);
+        assertThat(repeatBounded.get("refused")).isEqualTo(true);
+        assertThat(count(f.origin())).as("and it still moves nothing").isEqualTo(10);
+        assertThat(audit(f.origin(), "gc_quarantine_orphans_refused"))
+            .as("one row for the state, not one per call (a walk per `nx index repo`)").hasSize(1);
+    }
+
+    @Test
+    void aRefusalWritesANewRowWhenTheStateChanged_orTheLastRowIsOlderThanAnHour() throws Exception {
+        Fixture f = seed(10, 6);
+        post(req(f, "floor_fraction", 0.5, "floor_min_chunks", 3));
+
+        post(req(f, "floor_fraction", 0.4, "floor_min_chunks", 3));
+        assertThat(audit(f.origin(), "gc_quarantine_orphans_refused")).as("a different floor is a different state").hasSize(2);
+
+        post(req(f, "floor_fraction", 0.4, "floor_min_chunks", 4));
+        assertThat(audit(f.origin(), "gc_quarantine_orphans_refused")).as("a different minimum too").hasSize(3);
+
+        // Counts changed: another chunk goes stale, so 7 of 11 would be judged (a fresh chunk is added first).
+        su(ctx -> {
+            String hex = Chash.ofText(f.origin() + "/extra").toHex();
+            PgContainerHelper.insertChunks(ctx, TENANT, f.origin(), List.of(hex), List.of("extra"),
+                List.of(new float[384]), List.of(Map.<String, Object>of("title", "extra")));
+        });
+        post(req(f, "floor_fraction", 0.4, "floor_min_chunks", 4));
+        assertThat(audit(f.origin(), "gc_quarantine_orphans_refused")).as("different counts (6 of 11) too").hasSize(4);
+
+        // Same state again is deduped; once the newest row is over an hour old it is written again.
+        post(req(f, "floor_fraction", 0.4, "floor_min_chunks", 4));
+        assertThat(audit(f.origin(), "gc_quarantine_orphans_refused")).hasSize(4);
+        su(ctx -> ctx.update(GC_AUDIT).set(GC_AUDIT.CREATED_AT, OffsetDateTime.now().minusMinutes(61))
+            .where(GC_AUDIT.TENANT_ID.eq(TENANT).and(GC_AUDIT.COLLECTION.eq(f.origin()))
+                .and(GC_AUDIT.OPERATION.eq("gc_quarantine_orphans_refused"))).execute());
+        post(req(f, "floor_fraction", 0.4, "floor_min_chunks", 4));
+        assertThat(audit(f.origin(), "gc_quarantine_orphans_refused")).as("an hour on, the same state is recorded again").hasSize(5);
+    }
+
+    @Test
+    void theRefusalDedupeIsPerCollection() throws Exception {
+        Fixture a = seed(10, 6);
+        Fixture b = seed(10, 6);
+
+        post(req(a, "floor_fraction", 0.5, "floor_min_chunks", 3));
+        post(req(b, "floor_fraction", 0.5, "floor_min_chunks", 3));
+
+        assertThat(audit(a.origin(), "gc_quarantine_orphans_refused")).hasSize(1);
+        assertThat(audit(b.origin(), "gc_quarantine_orphans_refused")).as("another collection's row is not this one's").hasSize(1);
+    }
+
+    @Test
+    void anotherTenantsChunksNeverCountTowardTheFloor() throws Exception {
+        // Tenant B holds the SAME collection name, 100 chunks all reapable. Counted tenant-unfiltered, A's 10-chunk
+        // collection (2 reapable) would read 102 of 110 and be refused; counted for A alone it is 2 of 10 and moves.
+        String name = "knowledge__gcfx" + seq.incrementAndGet() + "__minilm-l6-v2-384__v1";
+        Fixture mine = seedIn(TENANT, name, 10, 2);
+        seedIn("gcfloor-other-tenant", name, 100, 100);
+
+        var body = json(post(req(mine, "floor_fraction", 0.5, "floor_min_chunks", 3)));
+
+        assertThat(body.get("refused")).as("the other tenant's chunks are not A's").isEqualTo(false);
+        assertThat(body.get("moved")).isEqualTo(2);
+        assertThat(body.get("total_count")).as("A's own chunks only").isEqualTo(10);
+        assertThat(body.get("reapable_count")).isEqualTo(2);
+        assertThat(count(mine.sibling())).isEqualTo(2);
     }
 
     @Test

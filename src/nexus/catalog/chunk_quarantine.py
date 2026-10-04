@@ -264,7 +264,7 @@ def _read_floor(result: dict, floor: GcFloor | None, moved_before: int) -> None:
     if floor is None:
         return
     echoed = _floor_echoed(result)
-    # One response without the echo makes the whole drain unguarded: AND across responses.
+    # Called on floor-bearing responses only; the AND keeps the flag false if a caller ever reads more than one.
     floor.engine_applied = echoed if floor.engine_applied is None else (floor.engine_applied and echoed)
     if echoed and result.get("refused") is True:
         reapable, total = result.get("reapable_count"), result.get("total_count")
@@ -474,13 +474,14 @@ def quarantine_orphans_bounded_serverside(
     own failure is re-raised as is, nothing having moved). Without it (the
     indexer's end-of-run prune) the behaviour is unchanged: a warning, never a raise.
 
-    ``floor`` (nexus-wbfpw.52) rides every batch's request. The engine judges it under its
-    sweep gate on the whole reapable set, so the FIRST batch of a drain over the floor is
-    the one refused (nothing moved) and later batches, which only lower the ratio, are not.
-    A refusal raises :class:`GcFloorRefused` (``moved`` carries what earlier batches moved,
-    normally 0), strict mode included: it is the engine's decision, not a stalled drain. The
-    echo is recorded on ``floor.engine_applied`` from every response; an engine that ignores
-    the fields (no echo) moves as it always did, and the caller reads the flag to say so.
+    ``floor`` (nexus-wbfpw.52) rides the FIRST batch's request only. The engine judges it
+    under its sweep gate on the whole reapable set, at the cost of a whole-collection count
+    inside the bounded statement, and only the first batch of a drain can be refused: each
+    later batch lowers the reapable count and the total equally, so the ratio only falls.
+    A refusal raises :class:`GcFloorRefused` (``moved`` is 0), strict mode included: it is
+    the engine's decision, not a stalled drain. The echo is read from the first response
+    alone and recorded on ``floor.engine_applied``; an engine that ignores the fields (no
+    echo) moves as it always did, and the caller reads the flag to say so.
     """
     fn = getattr(db, "gc_quarantine_orphans_bounded", None)
     if fn is None:
@@ -490,8 +491,14 @@ def quarantine_orphans_bounded_serverside(
     max_iterations = _gc_loop_max_iterations(row_limit)
     remaining = None
     batches = 0
-    extra = floor.request_fields() if floor is not None else {}
     for _ in range(max_iterations):
+        # The floor rides the FIRST batch only (nexus-wbfpw.52): the engine judges it on a
+        # whole-collection count, which is real work inside the 25 s statement bound and the
+        # exclusive gate, and a later batch cannot be refused (each batch lowers the reapable
+        # count and the total equally, so the ratio only falls). Only a floor-bearing response
+        # is read: a later batch's ``{"given": false}`` is not an echo of this request.
+        floor_bearing = floor is not None and batches == 0
+        extra = floor.request_fields() if floor_bearing else {}
         try:
             result = fn(collection_name, quarantine_name, quarantined_at, sample_limit, row_limit, **extra)
         except Exception as exc:  # noqa: BLE001 — strict mode re-labels a mid-drain failure; otherwise re-raised unchanged
@@ -499,7 +506,8 @@ def quarantine_orphans_bounded_serverside(
                 raise BoundedDrainIncomplete("batch failed", total_moved, None, batches) from exc
             raise
         batches += 1
-        _read_floor(result, floor, total_moved)
+        if floor_bearing:
+            _read_floor(result, floor, total_moved)
         batch_moved = int(result.get("moved", 0))
         total_moved += batch_moved
         if len(sample) < sample_limit:
