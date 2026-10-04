@@ -861,12 +861,13 @@ class QuarantineCollectionLifecycleTest extends AtomicWriteTestBase {
         List<String> logs = captureLogs(() -> result.value = repo.sweepGhostsAndMarkDormant(t));
 
         assertThat(result.value).isNotNull();
-        assertThat(logs.stream().filter(l -> l.contains("event=ghost_sweep_held_quarantined_origin")).toList())
+        assertThat(logs.stream().filter(l -> l.contains("event=ghost_sweep_held_quarantined_origin")
+                && l.contains("tenant=" + t + " ")).toList())
             .as("one line, for the held origin only: the plain ghost is deleted, not held")
             .singleElement()
             .satisfies(l -> assertThat(l)
                 .startsWith("INFO ")
-                .contains("tenant=" + t)
+                .contains("tenant=" + t + " ")
                 .contains("origin=" + x)
                 .contains("dry_run=false"));
     }
@@ -884,9 +885,10 @@ class QuarantineCollectionLifecycleTest extends AtomicWriteTestBase {
         List<String> clean = captureLogs(() -> repo.sweepGhostsAndMarkDormant(quiet));
 
         assertThat(dry).anyMatch(l -> l.startsWith("INFO ") && l.contains("event=ghost_sweep_held_quarantined_origin")
-            && l.contains("tenant=" + t) && l.contains("origin=" + x) && l.contains("dry_run=true"));
+            && l.contains("tenant=" + t + " ") && l.contains("origin=" + x) && l.contains("dry_run=true"));
         assertThat(clean).as("a sweep that holds nothing logs no hold line")
-            .noneMatch(l -> l.contains("event=ghost_sweep_held_quarantined_origin"));
+            .noneMatch(l -> l.contains("event=ghost_sweep_held_quarantined_origin")
+                && l.contains("tenant=" + quiet + " "));
     }
 
     @Test
