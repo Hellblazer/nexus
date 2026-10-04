@@ -52,10 +52,10 @@ logic, on every session since it was written. That killed both halves.
 The writer half is DELETED rather than switched on: a never-watched
 two-way writer whose first live run would have resolved nine known file/T2
 disagreements by a ranking rule nobody had seen work was the risky thing
-here, not the missing feature. (The ruling's other ground -- that ``nx rdr
-set-status`` now writes file and T2 together -- is not so: set-status
-writes the file and README, the lifecycle skills write T2. The drift class
-therefore still exists and is DETECTED, not reconciled: ``nx rdr preamble
+here, not the missing feature. (``nx rdr set-status`` mirrors a file flip
+onto T2 best-effort since 2026-09-02 (``_write_t2_status``); a failed or
+missing mirror prints a note and the file flip stands, so the drift class
+still exists and is DETECTED, not reconciled: ``nx rdr preamble
 rdr-audit`` prints a ``DRIFT:`` line per disagreement for a human to
 settle.) The read-only summary is kept and the filter fixed so it finally
 prints. The nine known drift rows are bead nexus-nxn5g.

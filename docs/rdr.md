@@ -223,7 +223,7 @@ Both commands read from T2; no markdown parsing required.
 
 ## T2 synchronization
 
-T2 is the process authority for RDR status; the markdown file is the human-readable persistence layer. Nothing reconciles the two automatically: a session-start reconciler was specified, never ran, and was deleted (nexus-e19sa; `src/nexus/tables/rdr-lifecycle.toml` carries the record). `nx rdr set-status` writes both in one step, which is why lifecycle transitions go through it rather than through a hand edit of the frontmatter.
+T2 is the process authority for RDR status; the markdown file is the human-readable persistence layer. Nothing reconciles the two automatically: a session-start reconciler was specified, never ran, and was deleted (nexus-e19sa; `src/nexus/tables/rdr-lifecycle.toml` carries the record). `nx rdr set-status` flips the file and then mirrors the flip onto the T2 entry on a best-effort basis, printing a note when the mirror fails or the entry is missing; `nx rdr preamble rdr-audit` prints a `DRIFT:` line per remaining disagreement for a human to settle. That is why lifecycle transitions go through the verb rather than a hand edit of the frontmatter.
 
 ---
 
