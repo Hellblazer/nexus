@@ -2,7 +2,8 @@
 title: "Superseded store_put note chunks are permanently live: the manifest-less-is-live contract outlived its transition"
 id: RDR-192
 type: Bug Fix
-status: accepted
+status: closed
+closed_date: 2026-10-04
 priority: high
 author: Hal Hildebrand
 reviewed-by: self (solo)
