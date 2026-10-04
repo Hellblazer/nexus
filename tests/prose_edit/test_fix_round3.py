@@ -41,7 +41,7 @@ def _build(prose: Prose, *args: str) -> tuple[Path, str]:
     head, brief = out.split("\n\n", 1)
     first, dispatch, *ready = head.split("\n")  # WORK=<dir>, DISPATCH=<prompt> (round 6), REPLY/FILTERED/REASONS (round 7)
     assert first.startswith("WORK=") and dispatch.startswith("DISPATCH="), head
-    assert [r.split("=", 1)[0] for r in ready] == ["REPLY", "FILTERED", "REASONS"], head
+    assert [r.split("=", 1)[0] for r in ready] == ["REPLY", "FILTERED", "REASONS", "ANSWERS"], head
     return Path(first[len("WORK="):]), brief
 
 

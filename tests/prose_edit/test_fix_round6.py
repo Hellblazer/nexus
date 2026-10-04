@@ -32,7 +32,7 @@ def test_a_path_run_build_prints_the_dispatch_prompt_with_the_absolute_brief_pat
     work = Path(lines[0].removeprefix("WORK="))
     try:
         assert lines[0].startswith("WORK=") and lines[1].startswith("DISPATCH="), lines
-        assert [ln.split("=", 1)[0] for ln in lines] == ["WORK", "DISPATCH", "REPLY", "FILTERED", "REASONS"], lines
+        assert [ln.split("=", 1)[0] for ln in lines] == ["WORK", "DISPATCH", "REPLY", "FILTERED", "REASONS", "ANSWERS"], lines
         assert brief.startswith("# Editing brief")
         m = PROMPT.fullmatch(DISPATCH.search(out).group("prompt"))  # type: ignore[union-attr]
         assert m, lines[1]

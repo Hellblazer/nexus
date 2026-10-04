@@ -966,11 +966,9 @@ _ABBREVIATIONS = frozenset({"e.g", "i.e", "etc", "vs", "cf", "approx", "fig", "n
 _BREAK = re.compile(r"(?P<term>[.!?])(?P<close>[\"')\]]*)(?P<gap>\s+)(?=[\"'(\[]*[A-Z])")
 
 
-def sentence_span(old: str) -> str | None:
-    """"multi" when `old` clearly holds more than one sentence, "maybe" when a period might end one."""
-    if "\n\n" in old:
-        return "multi"
-    verdict: str | None = None
+def _breaks(old: str) -> list[tuple[re.Match[str], bool]]:
+    """Each candidate sentence break in `old`, with True when it clearly ends a sentence."""
+    out: list[tuple[re.Match[str], bool]] = []
     for m in _BREAK.finditer(old):
         before = old[:m.start()]
         if before.count("`") % 2 == 1:
@@ -979,10 +977,50 @@ def sentence_span(old: str) -> str | None:
         token = word.group(1) if word else ""
         if token.lower() in _ABBREVIATIONS:
             continue
-        if re.fullmatch(r"[A-Za-z]{3,}", token):
-            return "multi"
-        verdict = "maybe"
-    return verdict
+        out.append((m, bool(re.fullmatch(r"[A-Za-z]{3,}", token))))
+    return out
+
+
+def sentence_span(old: str) -> str | None:
+    """"multi" when `old` clearly holds more than one sentence, "maybe" when a period might end one."""
+    if "\n\n" in old:
+        return "multi"
+    found = _breaks(old)
+    if any(clear for _, clear in found):
+        return "multi"
+    return "maybe" if found else None
+
+
+def narrow_edit(old: str, new: str) -> tuple[str, str] | None:
+    """A multi-sentence edit cut down to the sentence(s) its change touches (nexus-ger02.22), or None.
+
+    The editor often quotes a neighbouring sentence as context: "A ends. B." -> "A ends." is a cut of B.
+    The common prefix and suffix are context; the edit keeps whole sentences around the changed part,
+    and a change that starts in the gap before a sentence keeps that gap, so the cut leaves no double space.
+    """
+    if "\n\n" in old:
+        return None
+    p = 0
+    while p < min(len(old), len(new)) and old[p] == new[p]:
+        p += 1
+    s = 0
+    while s < min(len(old), len(new)) - p and old[-1 - s] == new[-1 - s]:
+        s += 1
+    lo, hi = p, len(old) - s
+    if lo >= hi and p == len(new) - s:
+        return None  # no change at all
+    clear = [m for m, ok in _breaks(old) if ok]
+    starts = [0] + [m.end() for m in clear]
+    ends = [m.start("gap") for m in clear] + [len(old)]
+    begin = max(b for b in starts if b <= lo + (len(old[lo:hi]) - len(old[lo:hi].lstrip())))
+    begin = min(begin, lo)
+    finish = min(e for e in ends if e >= hi - (len(old[lo:hi]) - len(old[lo:hi].rstrip())))
+    finish = max(finish, hi)
+    old2 = old[begin:finish]
+    new2 = old[begin:lo] + new[p:len(new) - s] + old[hi:finish]
+    if old2 == old or not old2.strip() or sentence_span(old2) == "multi":
+        return None
+    return old2, new2
 
 
 def _quoted_phrases(text: str) -> list[str]:
@@ -1092,7 +1130,14 @@ def cmd_filter(a: argparse.Namespace, reply: str) -> Obj:
             cause = "markup"
         sentences = sentence_span(str(e["old"])) if cause is None else None
         if cause is None and sentences == "multi":
-            cause = "multi-sentence"
+            narrowed = narrow_edit(str(e["old"]), str(e.get("new") or ""))
+            if narrowed is not None and edit_problem(text, narrowed[0], spans, window) is None \
+                    and len(_occurrences(text, narrowed[0])) == 1:
+                warnings.append(f"edit {e['n']} spanned more than one sentence; narrowed to the sentence it changes")
+                e = {**e, "old": narrowed[0], "new": narrowed[1]}
+                sentences = sentence_span(narrowed[0])
+            else:
+                cause = "multi-sentence"
         if cause:
             dropped.append({"n": e["n"], "old": e["old"], "new": e.get("new"), "cause": cause})
             continue
@@ -1190,8 +1235,8 @@ DISPATCH_LABEL = "DISPATCH="
 # skill copies those lines and never composes a path (nexus-ger02.7: a literal `WORK/...` was typed, and Write
 # creates a missing directory without a word, so a stray WORK/ appeared in the repository).
 READY_FILES = {"INPUT": "input.txt", "REPLY": "reply.txt", "FILTERED": "filtered.json", "REASONS": "reasons.json",
-               "ENTRY": "entry.json", "CARD": "card.json"}
-READY_BUILD = ("REPLY", "FILTERED", "REASONS")  # what a path run's header adds after DISPATCH=
+               "ANSWERS": "answers.json", "ENTRY": "entry.json", "CARD": "card.json"}
+READY_BUILD = ("REPLY", "FILTERED", "REASONS", "ANSWERS")  # what a path run's header adds after DISPATCH=
 
 
 def ready_paths(work: Path | str, labels: tuple[str, ...] | list[str]) -> str:

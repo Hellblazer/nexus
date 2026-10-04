@@ -935,6 +935,98 @@ def load_reasons_file(raw: str | None, work: Path) -> dict[int, str]:
     return out
 
 
+_ANSWERS = re.compile(r"[QP][0-9]+")
+
+
+def _load_answers(raw: str, work: Path) -> list[Obj]:
+    """The author's answers as edits: a JSON list of {"answers": "Q4" or "P1", "old": ..., "new": ...} inside WORK."""
+    try:
+        path = cast(Path, _BRIEF.work_file(raw))
+    except UserError as exc:
+        raise _user(f"--from-file {raw!r}: {exc}") from exc
+    if path.parent != work:
+        raise _user(f"--from-file {raw!r}: must sit directly inside this work directory")
+    try:
+        value: Any = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise _user(f"--from-file {raw!r}: cannot read it as JSON ({exc})") from exc
+    if not isinstance(value, list) or not value:
+        raise _user(f'--from-file {raw!r}: expected a JSON list like [{{"answers": "Q4", "old": "...", "new": "..."}}]')
+    out: list[Obj] = []
+    for i, item in enumerate(cast("list[Any]", value), 1):
+        if not isinstance(item, dict) or set(cast(Obj, item)) != {"answers", "old", "new"}:
+            raise _user(f"--from-file {raw!r}: entry {i} needs exactly the keys answers, old and new")
+        e = cast(Obj, item)
+        if not isinstance(e["answers"], str) or not _ANSWERS.fullmatch(e["answers"]):
+            raise _user(f"--from-file {raw!r}: entry {i}: answers must name a query or paragraph proposal, like Q4 or P1")
+        if not isinstance(e["old"], str) or not e["old"] or not isinstance(e["new"], str) or e["old"] == e["new"]:
+            raise _user(f"--from-file {raw!r}: entry {i}: old must be non-empty text from the document and new must differ")
+        out.append(e)
+    return out
+
+
+def cmd_answer(a: argparse.Namespace) -> Obj:
+    """Add the author's answers to queries and paragraph proposals as numbered edits (nexus-ger02.21).
+
+    They are the author's own changes, so they go through the same copy, dry run and apply as the editor's
+    edits: the document changes only through apply. They are marked `by: author`, and apply never stores one
+    as a rejection. Nothing is written when any answer cannot be placed.
+    """
+    work = cast(Path, _BRIEF.work_dir(a.work))
+    _BRIEF.touch_work(work)
+    sess_file = work / "session.json"
+    if not sess_file.is_file():
+        raise _user("no session in the work directory: run `review.py render` first")
+    session = _load_json(sess_file, "WORK/session.json")
+    prop = _load_json(work / "filtered.json", "WORK/filtered.json")
+    answers = _load_answers(a.from_file, work)
+    named = {f"Q{q['n']}" for q in cast("list[Obj]", prop.get("queries") or [])} | {
+        f"P{pr['n']}" for pr in cast("list[Obj]", prop.get("paragraphs") or [])}
+    _, rng, source, html, _ = _source_of(str(session["target"]), cast("str | None", session.get("file")), work)
+    text, _eol = read_source(source)
+    spans = cast("list[Span]", _BRIEF.protected_spans(text, html=html))
+    window = cast("Span | None", _BRIEF._range_span(text, rng))
+    edits = cast("list[Obj]", prop.get("edits") or [])
+    problems: list[str] = []
+    # an earlier answer's span counts too: two edits over the same text are both skipped at apply
+    placed: list[tuple[str, Span]] = []
+    for e in edits:
+        if e.get("by") == "author":
+            hits = [i for i in _occurrences(text, str(e["old"])) if _within(window, i, i + len(str(e["old"])))]
+            if len(hits) == 1:
+                placed.append((f"edit {e['n']} ({e.get('answers')})", (hits[0], hits[0] + len(str(e["old"])))))
+    for i, e in enumerate(answers, 1):
+        if e["answers"] not in named:
+            problems.append(f"entry {i}: {e['answers']} is not a query or paragraph proposal of this review")
+            continue
+        cause = cast("str | None", _BRIEF.edit_problem(text, e["old"], spans, window))
+        hits = [j for j in _occurrences(text, e["old"]) if _within(window, j, j + len(e["old"]))]
+        if cause is None and len(hits) > 1:
+            cause = f"ambiguous ({len(hits)} occurrences): quote more of the text"
+        if cause:
+            problems.append(f"entry {i} ({e['answers']}): old text {cause}")
+            continue
+        span = (hits[0], hits[0] + len(e["old"]))
+        clash = next((who for who, (lo, hi) in placed if lo < span[1] and span[0] < hi), None)
+        if clash:
+            problems.append(f"entry {i} ({e['answers']}): old text overlaps {clash}; hold or replace that one")
+            continue
+        placed.append((f"entry {i} ({e['answers']})", span))
+    if problems:
+        raise _user("nothing was added: " + "; ".join(problems))
+    taken = [int(x["n"]) for key in ("edits", "dropped") for x in cast("list[Obj]", prop.get(key) or [])
+             if isinstance(x.get("n"), int)]
+    n = max(taken, default=0)
+    added: list[Obj] = []
+    for e in answers:
+        n += 1
+        added.append({"n": n, "old": e["old"], "new": e["new"], "reason": f"the author's answer to {e['answers']}",
+                      "by": "author", "answers": e["answers"]})
+    prop["edits"] = edits + added
+    (work / "filtered.json").write_text(json.dumps(prop, indent=1, ensure_ascii=False), encoding="utf-8")
+    return {"added": [{"n": x["n"], "answers": x["answers"], "old": x["old"], "new": x["new"]} for x in added]}
+
+
 def _both(flags: list[tuple[str, set[int]]]) -> None:
     """An edit can be named by one of --accept, --hold and --reject only."""
     for i, (first, a) in enumerate(flags):
@@ -962,8 +1054,12 @@ def cmd_apply(a: argparse.Namespace) -> Obj:
     hold: set[int] = parse_numbers(a.hold, valid, "--hold") if a.hold else set()
     # an edit the copy could not show inline: `reject the rest` leaves it alone, naming it rejects it
     unshown = {int(u["n"]): u for u in cast("list[Obj]", session.get("unplaced") or [])}
-    rest = valid - set(unshown) - accept - hold
+    mine = {n for n, e in by_n.items() if e.get("by") == "author"}  # the author's own answers: never a rejection
+    rest = valid - set(unshown) - accept - hold - mine
     reject: set[int] = parse_numbers(a.reject, valid, "--reject", rest=rest) if a.reject else set()
+    if reject & mine:
+        raise _user(f"--reject: edit {min(reject & mine)} is the author's own answer, not the editor's; "
+                    "hold it instead (nothing is stored for it)")
     _both([("--accept", accept), ("--hold", hold), ("--reject", reject)])
     reasons = parse_reasons(list(a.reason or []), reject, load_reasons_file(a.reasons_file, work))
     stdin = bool(session["stdin"])
@@ -1031,13 +1127,16 @@ def cmd_apply(a: argparse.Namespace) -> Obj:
     # landed with its reply lost is then written over, not logged a second time
     stamp = cast(Any, _BRIEF._MEM)._now().strftime("%Y%m%dT%H%M%S.%fZ")
     log_args = ["log", target, "--genre", str(session["genre"]), "--stamp", stamp]
+    # the author's own answers are not the editor's work: kept apart so the editor's accept rate counts only its edits
     log_payload: Obj = {
-        "stdin": stdin, "edits": edits, "paragraphs": prop.get("paragraphs") or [],
+        "stdin": stdin, "edits": [e for e in edits if int(e["n"]) not in mine],
+        "author_edits": [e for e in edits if int(e["n"]) in mine],
+        "author_accepted": sorted(accept & mine), "paragraphs": prop.get("paragraphs") or [],
         "queries": prop.get("queries") or [], "dropped": prop.get("dropped") or [],
         "note": prop.get("note"), "voice_card": prop.get("voice_card"),
-        "accepted": sorted(accept), "applied": [] if stdin else applied_n, "skipped": [
+        "accepted": sorted(accept - mine), "applied": [] if stdin else applied_n, "skipped": [
             {"n": s["n"], "cause": s["cause"], "detail": s["detail"]} for s in skipped],
-        "rejected": rejected, "held": held, "reasons": {str(n): reasons[n] for n in sorted(reasons)},
+        "rejected": rejected, "held": sorted(set(held) - mine), "reasons": {str(n): reasons[n] for n in sorted(reasons)},
         "unplaced": [{"n": u["n"], "cause": u["cause"]} for u in left_alone],
     }
     try:
@@ -1121,6 +1220,10 @@ def _parser() -> argparse.ArgumentParser:
                     help="the reasons as a JSON object {\"2\": \"why\"} in a file inside WORK (written with the Write tool)")
     ap.add_argument("--dry-run", action="store_true",
                     help="print the interpreted sets and change nothing; a real apply needs one first")
+    an = sub.add_parser("answer", help="add the author's answers to queries and paragraph proposals as edits")
+    an.add_argument("--work", required=True)
+    an.add_argument("--from-file", required=True, metavar="FILE",
+                    help='a JSON list [{"answers": "Q4", "old": "...", "new": "..."}] inside WORK (written with Write)')
     lr = sub.add_parser("log-retry", help="send the session log of an apply whose log failed, then delete WORK")
     lr.add_argument("--work", required=True)
     return p
@@ -1132,7 +1235,7 @@ def main(argv: list[str] | None = None) -> int:
             stream.reconfigure(encoding="utf-8")
     args = _parser().parse_args(sys.argv[1:] if argv is None else argv)
     try:
-        commands = {"render": cmd_render, "apply": cmd_apply, "log-retry": cmd_log_retry}
+        commands = {"render": cmd_render, "apply": cmd_apply, "answer": cmd_answer, "log-retry": cmd_log_retry}
         _emit(commands[args.cmd](args))
     except Passthrough as exc:
         sys.stderr.write(f"{exc}\n")

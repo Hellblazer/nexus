@@ -781,7 +781,7 @@ def test_the_skill_runs_render_then_apply_and_deletes_work_only_after_the_answer
     assert "A successful apply has already deleted WORK (unless it reports `log_error`, below); do not delete it again." in text
     assert "--work WORK < WORK/reply.txt" not in text  # filter no longer deletes the copy's directory
     for verb in re.findall(r"REVIEW ([\w-]+)", text):
-        assert verb in {"render", "apply", "log-retry"}
+        assert verb in {"render", "apply", "answer", "log-retry"}
     # a failed log keeps WORK and the skill says what the author does: log-retry, never a second apply
     assert "REVIEW log-retry --work '<work>'" in text and "Never run apply again for it" in text
     # the script refuses an apply with no matching dry run; the skill says so and never skips it
