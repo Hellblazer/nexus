@@ -1,0 +1,47 @@
+{
+  "comment": "nexus-wbfpw.76. One shape table read by TWO tests that each exercise a real implementation: the engine's empty-tenant probe (ReaperRepository.holdsNothing, behind Rdr192BackfillGate; Rdr192EmptyTenantParityIntegrationTest) and the client rung's census (rdr192_manifest_backfill._default_census plus _cross_check_empty_listing; tests/upgrade/test_rdr192_empty_tenant_parity.py). The probe cannot be reached per tenant from Python (reaper.last_pass.tenants_empty is a machine-wide count over every tenant a pass visits), so the two sides are pinned to this table instead. The invariant is engine_empty implies client_census_clean: the engine may read stricter, never looser. A shape that changes either verdict fails the side that moved, and the Python test also checks the invariant over the table itself.",
+  "shapes": [
+    {
+      "name": "empty",
+      "collections": [],
+      "documents": "none",
+      "engine_empty": true,
+      "client_census_clean": true
+    },
+    {
+      "name": "chunk-only",
+      "collections": [{"state": "live", "chunks": 1}],
+      "documents": "none",
+      "engine_empty": false,
+      "client_census_clean": true
+    },
+    {
+      "name": "quarantine-only",
+      "collections": [{"state": "quarantine", "chunks": 1}],
+      "documents": "none",
+      "engine_empty": false,
+      "client_census_clean": true
+    },
+    {
+      "name": "registered-collection-no-chunks",
+      "collections": [{"state": "live", "chunks": 0}],
+      "documents": "none",
+      "engine_empty": true,
+      "client_census_clean": true
+    },
+    {
+      "name": "content-owned-with-manifest",
+      "collections": [{"state": "live", "chunks": 1}],
+      "documents": "owned-with-manifest",
+      "engine_empty": false,
+      "client_census_clean": true
+    },
+    {
+      "name": "legacy-unmanifested-note",
+      "collections": [{"state": "live", "chunks": 1}],
+      "documents": "owned-no-manifest",
+      "engine_empty": false,
+      "client_census_clean": false
+    }
+  ]
+}
