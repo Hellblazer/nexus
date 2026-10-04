@@ -176,6 +176,9 @@ _BASE_VALUES = {
     "needs.test-lint.result": "success",
     "needs.test-mode-census.result": "success",
     "needs.release-ledger-gate.result": "skipped",
+    # nexus-rpaat: no integration tests affected, so that job skipped.
+    "needs.changes.outputs.integration_any": "false",
+    "needs.test-integration-affected.result": "skipped",
     "github.event_name": "push",
     "github.base_ref": "",
 }
