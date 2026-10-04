@@ -80,7 +80,7 @@ def seed(prose: Prose, level: str, scalars: dict | None = None, lists: dict | No
 
 def seed_genre(prose: Prose, name: str, text: str, notes: list[str] | None = None) -> None:
     prose.ok("genre-put", name, stdin={
-        "exemplars": [{"text": text, "path": "docs/x.md", "start": 2, "end": 3}],
+        "exemplars": [{"text": text, "path": "docs/y.md", "start": 2, "end": 3}],  # not the docs/x.md under edit
         "notes": notes or [],
     })
 
@@ -313,7 +313,7 @@ def test_the_brief_carries_each_layer_in_the_rdr_order_with_the_later_layer_winn
     positions = [text.index(h) for h in ORDER]
     assert positions == sorted(positions)
     exemplars = text[positions[0]:positions[1]]
-    assert "EXEMPLAR-PASSAGE-TEXT" in exemplars and "docs/x.md" in exemplars
+    assert "EXEMPLAR-PASSAGE-TEXT" in exemplars and "docs/y.md" in exemplars
     assert "genre-note-one" in exemplars
     sheet = text[positions[2]:positions[3]]
     assert "tone: doc-tone" in sheet and "user-tone" not in sheet and "repo-tone" not in sheet

@@ -197,6 +197,12 @@ def _scan(tokens: list[str], value_flags: tuple[str, ...]) -> tuple[list[tuple[s
     return positionals, flags
 
 
+def _unmention(token: str, literal: bool) -> str:
+    """A path the author typed with Claude Code's @ file mention arrives with the @ (nexus-ger02.17): drop it.
+    After a bare `--` the token is literal, so a file whose name starts with @ is reached that way."""
+    return token[1:] if not literal and len(token) > 1 and token.startswith("@") else token
+
+
 def _genre_arg(raw: str) -> str:
     if raw not in GENRES:
         raise _user(f"genre {raw!r}: not one of {', '.join(GENRES)}")
@@ -213,6 +219,7 @@ def _parse_edit(tokens: list[str]) -> Obj:
         raise _user(f"an edit run takes one path, got {len(positionals)}: "
                     f"{' '.join(t for t, _ in positionals)}")
     given, literal_path = positionals[0]
+    given = _unmention(given, literal_path)
     genre = _genre_arg(flags["--genre"]) if "--genre" in flags else None
     budget = _positive("--budget", flags["--budget"]) if "--budget" in flags else DEFAULT_BUDGET
     if given == "-" and not literal_path:
@@ -235,6 +242,7 @@ def _parse_rejections(tokens: list[str]) -> Obj:
     if len(positionals) > 1:
         raise _user(f"rejections takes one path, got {len(positionals)}")
     path, literal_path = positionals[0]
+    path = _unmention(path, literal_path)
     if path == "-" and not literal_path:
         raise _user("a stdin run keeps no rejections")
     if not literal_path and _range_of(path)[1] is not None:
@@ -252,7 +260,7 @@ def _parse_exemplar(tokens: list[str]) -> Obj:
     if len(positionals) != 2:
         raise _user("exemplar needs <genre> <path>:<start>-<end>; " + _USAGE)
     genre = _genre_arg(positionals[0][0])
-    where = positionals[1][0]
+    where = _unmention(*positionals[1])
     rng = _range_of(where)[1]
     if rng is None or not re.search(r":[0-9]+-[0-9]+$", where):
         raise _user(f"exemplar {where!r}: expected <path>:<start>-<end> (a line range)")
@@ -535,20 +543,30 @@ def render_brief(read: Obj, budget: int, input_file: str | None, input_text: str
                    + ("The voice card is the whole file's." if card else "Build the voice card from the whole file."))
     out += header or []
     out += ["", "## 1. Exemplars", ""]
-    exemplars = cast("list[Obj]", (record or {}).get("exemplars") or [])
+    stored = cast("list[Obj]", (record or {}).get("exemplars") or [])
+    # an exemplar taken from the document under edit would show the editor its own target as the model voice;
+    # a stdin run has no path, so it keeps every exemplar
+    doc = read.get("path")
+    exemplars = [ex for ex in stored if doc is None or ex.get("path") != doc]
     if exemplars:
         out.append(f"Passages in the voice this genre wants ({genre}):")
         for ex in exemplars:
             out += ["", f'<exemplar path="{ex["path"]}" lines="{ex["start"]}-{ex["end"]}">',
                     str(ex["text"]), "</exemplar>"]
-        notes = cast("list[Any]", (record or {}).get("notes") or [])
-        if notes:
-            out += ["", "Genre notes:", _bullets(notes, lambda _n: "genre")]
+    elif stored:
+        out.append(
+            f"The exemplars stored for genre {genre} all come from this document, so none is shown. Run "
+            "without exemplars, build the voice card from the document alone, and say in the editor's note "
+            "that no exemplars were used."
+        )
     else:
         out.append(
             f"No exemplars are stored for genre {genre}. Run without exemplars, build the voice "
             "card from the document alone, and say in the editor's note that no exemplars were used."
         )
+    notes = cast("list[Any]", (record or {}).get("notes") or [])
+    if notes:  # the genre's notes hold whether or not an exemplar is shown
+        out += ["", "Genre notes:", _bullets(notes, lambda _n: "genre")]
     out += ["", "## 2. Voice card", ""]
     if card:
         out += ["The author approved this voice card for this document on "
