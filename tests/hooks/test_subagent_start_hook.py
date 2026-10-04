@@ -488,6 +488,9 @@ class TestAgentTypeClassification:
         ctx = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
         assert "## nx storage" in ctx
         assert "## Analytical operators" in ctx
+        # nexus-ivi4s: the operators are not MCP tools, so no injected
+        # guidance may name an operator_* tool for a subagent to call.
+        assert "operator_" not in ctx
 
     def test_task_text_fallback_still_classifies_when_present(self) -> None:
         """The old TASK_TEXT path stays live as a fallback: a payload that

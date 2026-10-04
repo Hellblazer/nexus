@@ -46,13 +46,13 @@
     <g transform="translate(490, 62)">
       <rect width="430" height="52" rx="8" fill="#ffffff" stroke="#1e3a8a" stroke-width="1.5"/>
       <text x="215" y="22" text-anchor="middle" class="box-title">🔽  Extraction &amp; Synthesis Queries</text>
-      <text x="215" y="40" text-anchor="middle" class="box-sub">query MCP · operator_extract / summarize / compare</text>
+      <text x="215" y="40" text-anchor="middle" class="box-sub">query MCP · extract / summarize / compare steps</text>
     </g>
 
     <g transform="translate(950, 62)">
       <rect width="400" height="52" rx="8" fill="#ffffff" stroke="#1e3a8a" stroke-width="1.5"/>
       <text x="200" y="22" text-anchor="middle" class="box-title">🧠  Knowledge Discovery &amp; Generation</text>
-      <text x="200" y="40" text-anchor="middle" class="box-sub">nx_answer · operator_generate · /nx:analyze</text>
+      <text x="200" y="40" text-anchor="middle" class="box-sub">nx_answer · generate step · /nx:analyze</text>
     </g>
   </g>
 

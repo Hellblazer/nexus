@@ -117,7 +117,7 @@ structured calls in disguise.
 ## How the MCP tools run under the hood
 
 The RDR-080 tools (`nx_tidy`, `nx_enrich_beads`, `nx_plan_audit`) and the
-ten operator tools (`operator_extract`, `operator_rank`, `operator_compare`,
+ten operator functions, plan steps rather than MCP tools since nexus-ivi4s (`operator_extract`, `operator_rank`, `operator_compare`,
 `operator_summarize`, `operator_generate`, `operator_filter`,
 `operator_groupby`, `operator_aggregate`, `operator_check`,
 `operator_verify`) use a single primitive:

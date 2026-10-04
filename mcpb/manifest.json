@@ -5,7 +5,7 @@
   "display_name": "Conexus",
   "version": "7.70.0",
   "description": "Three-tier semantic memory + knowledge management for Claude Desktop chat. Persistent code/docs/RDR indexing, plan-centric retrieval via nx_answer, and a Postgres-backed storage substrate that interoperates with the Claude Code plugin and the nx CLI on the same host.",
-  "long_description": "Conexus is the Claude Desktop Extension form of Nexus. Same MCP tools and storage tiers as the Claude Code plugin and the nx CLI, packaged as a .mcpb bundle that uv resolves on first install. Persistent state is served by the storage service (Postgres), which `nx init` provisions \u2014 there is no separate daemon to install or talk to. State is shared with any other consumer on the same host (Claude Code plugin, nx CLI, Cowork via SDK bridge).",
+  "long_description": "Conexus is the Claude Desktop Extension form of Nexus. Same MCP tools and storage tiers as the Claude Code plugin and the nx CLI, packaged as a .mcpb bundle that uv resolves on first install. Persistent state is served by the storage service (Postgres), which `nx init` provisions — there is no separate daemon to install or talk to. State is shared with any other consumer on the same host (Claude Code plugin, nx CLI, Cowork via SDK bridge).",
   "author": {
     "name": "Hal Hildebrand",
     "url": "https://github.com/Hellblazer"
@@ -102,46 +102,6 @@
     {
       "name": "plan_search",
       "description": "Search the T2 plan library for similar query plans."
-    },
-    {
-      "name": "operator_extract",
-      "description": "Extract structured fields from each input item via claude -p."
-    },
-    {
-      "name": "operator_rank",
-      "description": "Rank items by a natural-language criterion."
-    },
-    {
-      "name": "operator_compare",
-      "description": "Compare items and return a structured comparison. Supports one-sided and two-sided modes."
-    },
-    {
-      "name": "operator_summarize",
-      "description": "Summarize content, optionally with citations."
-    },
-    {
-      "name": "operator_generate",
-      "description": "Generate output from a template and context, optionally with citations."
-    },
-    {
-      "name": "operator_filter",
-      "description": "Filter items by a natural-language criterion, returning a subset with per-item rationale."
-    },
-    {
-      "name": "operator_check",
-      "description": "Check a claim's consistency across peer items. Returns structured {ok, evidence} payload."
-    },
-    {
-      "name": "operator_verify",
-      "description": "Verify a single claim against a single evidence source. Returns {verified, reason, citations}."
-    },
-    {
-      "name": "operator_groupby",
-      "description": "Partition items by a natural-language key. Pairs with operator_aggregate."
-    },
-    {
-      "name": "operator_aggregate",
-      "description": "Reduce each group of items to a per-group summary. Pairs with operator_groupby."
     },
     {
       "name": "traverse",
