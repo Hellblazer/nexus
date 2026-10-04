@@ -1081,9 +1081,9 @@ final class ChunkReaper {
      * lock and timeout classification, the resume and the registered-origin check are the same code. {@code stage}
      * keys the timeout streak ({@link #EXPIRE_STAGE} or {@link #EXPIRE_CLIENT_STAGE}), {@code variant} is spliced
      * into the log event names ("" keeps the reaper's own, {@code client_} names the client-moved population),
-     * and {@code retention} is that population's own setting.
+     * and {@code keepFor} is that population's own setting.
      */
-    private record Population(String stage, String variant, Duration retention,
+    private record Population(String stage, String variant, Duration keepFor,
                               OriginLister origins, OriginExpirer expirer) {
         /** The client-moved population is looked for in every sibling and reported only where it has an origin. */
         boolean quietWhenNoOrigins() {
@@ -1148,7 +1148,7 @@ final class ChunkReaper {
                 "its expiry timed out " + TIMEOUT_BACKOFF_AFTER + " or more passes running; it rests, then is retried");
             return new ExpiryResult(quarantine, 0, 0, Refusal.STATEMENT_BACKOFF, null);
         }
-        String cutoff = clock.instant().minus(pop.retention()).truncatedTo(ChronoUnit.SECONDS).toString();
+        String cutoff = clock.instant().minus(pop.keepFor()).truncatedTo(ChronoUnit.SECONDS).toString();
         // Kept outside the try: a refusal or a failure on a LATER origin must report what the earlier origins of the
         // same sibling already deleted (their rows are gone and audited; nexus-wbfpw.53 fixed the result and the log
         // dropping them).
