@@ -13,13 +13,17 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 SCRIPT = REPO_ROOT / "scripts" / "assert_integration_affected_ran.py"
 
 
-def _junit(tmp: pathlib.Path, cases: list[tuple[str, str, bool]]) -> pathlib.Path:
-    """cases: (classname, name, skipped)."""
+def _junit(tmp: pathlib.Path, cases: list[tuple[str, str, bool | str]]) -> pathlib.Path:
+    """cases: (classname, name, skipped). skipped may be a pytest skip type."""
+
+    def tag(s: bool | str) -> str:
+        if s is False:
+            return ""
+        kind = "pytest.skip" if s is True else s
+        return f'<skipped type="{kind}" message="x"/>'
+
     body = "".join(
-        f'<testcase classname="{c}" name="{n}">'
-        + ('<skipped message="x"/>' if s else "")
-        + "</testcase>"
-        for c, n, s in cases
+        f'<testcase classname="{c}" name="{n}">{tag(s)}</testcase>' for c, n, s in cases
     )
     p = tmp / "j.xml"
     p.write_text(f'<testsuites><testsuite name="pytest">{body}</testsuite></testsuites>')
@@ -102,3 +106,41 @@ def test_cli_exit_codes(tmp_path: pathlib.Path) -> None:
         text=True,
     )
     assert good.returncode == 0, good.stdout + good.stderr
+
+
+def test_xfail_counts_as_executed(tmp_path: pathlib.Path) -> None:
+    # pytest writes an xfail as <skipped type="pytest.xfail">; a file of
+    # strict xfail pins (tests/db/test_i711w_gap_xfails.py) ran its tests.
+    j = _junit(tmp_path, [("tests.db.test_x", "t1", "pytest.xfail")])
+    assert chk.check(j, ["tests/db/test_x.py"], collected=1) == []
+
+
+def _with_module_skip(tmp: pathlib.Path, mod: str, cases: list[tuple[str, str, bool | str]]) -> pathlib.Path:
+    j = _junit(tmp, cases)
+    text = j.read_text().replace(
+        "</testsuite>",
+        f'<testcase classname="" name="{mod}"><skipped type="pytest.skip" message="absent"/></testcase></testsuite>',
+    )
+    j.write_text(text)
+    return j
+
+
+def test_module_level_skip_is_named_not_miscounted(tmp_path: pathlib.Path, capsys) -> None:
+    j = _with_module_skip(tmp_path, "tests.db.test_m", [("tests.test_a", "t1", False)])
+    problems = chk.check(j, ["tests/test_a.py", "tests/db/test_m.py"], collected=1)
+    assert len(problems) == 1 and "tests/db/test_m.py" in problems[0]
+    assert "skipped at module level" in capsys.readouterr().out
+
+
+def test_module_level_skip_of_allowlisted_file_passes(tmp_path: pathlib.Path) -> None:
+    rel = next(iter(chk.ALL_SKIP_ALLOWED))
+    j = _with_module_skip(tmp_path, rel[:-3].replace("/", "."), [])
+    assert chk.check(j, [rel], collected=0) == []
+
+
+def test_testcase_outside_the_selection_fails(tmp_path: pathlib.Path) -> None:
+    # A classname the per-file loop cannot attribute would otherwise pass
+    # silently as "nothing collected" for its real file.
+    j = _junit(tmp_path, [("tests.test_a", "t1", False), ("weird.module", "t2", False)])
+    problems = chk.check(j, ["tests/test_a.py"], collected=2)
+    assert any("belong to no selected file" in p for p in problems)

@@ -1053,8 +1053,9 @@ jobs:
     # next nightly (the 7.67.0 evidence table found four in one range).
     #
     # scripts/select_affected_integration_tests.py picks the integration files
-    # the push changed, plus the ones that import a src/nexus module it
-    # changed. Measured over 200 develop commits (2026-10-04): 146 selected
+    # the push changed, plus the ones that DIRECTLY import a src/nexus module
+    # it changed (a transitive closure would run the whole family on about a
+    # quarter of pushes; see the selector's docstring). Measured over 200 develop commits (2026-10-04): 146 selected
     # nothing, so this job skips on most pushes; the large selections come
     # from edits to the engine-facing client modules (http_vector_client,
     # catalog factory and client, corpus), which is where a broad run belongs.
@@ -1076,8 +1077,9 @@ jobs:
     runs-on: ubuntu-latest
     needs: [changes, service-jar]
     if: success() && needs.changes.outputs.integration_any == 'true'
-    # Worst case is the whole family: the nightly runs it serially in about
-    # 38 minutes on this runner class.
+    # Worst case is the whole family. The nightly's pytest step for it took
+    # 38 minutes on this runner class (run 37197448487, 2026-10-04: 789 passed
+    # in 2301 s), so 60 leaves room for setup and a cold cache.
     timeout-minutes: 60
     env:
       NX_T2_SUBSTRATE_EXPECTED: "1"
@@ -1085,10 +1087,6 @@ jobs:
       # (pinned by tests/scripts/test_select_affected_integration_tests.py).
       INTEGRATION_MARK_EXPR: "integration and not lived_in and not cloud_mode and not mandatory_regression_pin"
       INTEGRATION_FILES: ${{ needs.changes.outputs.integration_files }}
-      # Same reason as the nightly's ungated-integration step: these files
-      # self-provision a throwaway engine substrate and write to it.
-      NX_ALLOW_PROD_WRITE: "per-push affected-integration job: self-provisioned throwaway engine substrate on the CI runner (nexus-rpaat)"
-      VOYAGE_API_KEY: ${{ secrets.VOYAGE_API_KEY }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
 
@@ -1139,6 +1137,28 @@ jobs:
           java-version: '25.0.3'
           distribution: 'graalvm'
 
+      - name: Stamp release_version into this job's copy of the jar
+        # The service-jar artifact is a plain `mvn package`, so its
+        # release.properties carries a BLANK release_version. Tests marked
+        # needs_stamped_jar construct a vector client, whose version probe
+        # fail-closes on a blank version, and tests/db/conftest.py FAILS them
+        # in CI (nexus-ao29z). The shard matrix runs none of them; this job
+        # selects four. Same remedy as the write-seam job's stamp step and
+        # scripts/build-gate-jar.sh: stamp REQUIRED_ENGINE_VERSION, so the
+        # probe sees a conformant engine and stays armed. Only this job's
+        # downloaded copy changes; the shared artifact does not.
+        run: |
+          set -euo pipefail
+          jar_path="$PWD/service/target/nexus-service-1.0-SNAPSHOT.jar"
+          ver=$(python3 -c "import re,pathlib; s=pathlib.Path('src/nexus/engine_version.py').read_text(); m=re.search(r'REQUIRED_ENGINE_VERSION[^=]*=\s*\((\d+),\s*(\d+),\s*(\d+)\)', s); assert m, 'REQUIRED_ENGINE_VERSION not parseable'; print('.'.join(m.groups()))")
+          work="$(mktemp -d)"
+          mkdir -p "$work/META-INF/nexus"
+          unzip -p "$jar_path" META-INF/nexus/release.properties | grep -v '^release_version=' > "$work/META-INF/nexus/release.properties"
+          printf 'release_version=%s\n' "$ver" >> "$work/META-INF/nexus/release.properties"
+          (cd "$work" && jar uf "$jar_path" META-INF/nexus/release.properties)
+          touch "$jar_path"
+          unzip -p "$jar_path" META-INF/nexus/release.properties | grep '^release_version='
+
       - name: Cache the pinned PG bundle
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v5
         with:
@@ -1154,6 +1174,11 @@ jobs:
       - name: Install project + dev deps
         run: uv sync --group dev
 
+      - name: Verify the jar passes the fixtures' own stamp check
+        # Asks the exact function tests/db/conftest.py consults, so a stamp
+        # the fixtures would reject fails here, by name, before the run.
+        run: uv run python -c "import sys; from tests.db._service_fixture import unstamped_jar_skip_reason as r; reason = r(); sys.exit(reason) if reason else print('jar stamped')"
+
       - name: Prime docling artifacts (cache or self-hosted asset)
         uses: ./.github/actions/prime-docling
 
@@ -1167,7 +1192,7 @@ jobs:
           tr ' ' '\n' <<< "$INTEGRATION_FILES" | sed '/^$/d' > integration-selected.txt
           echo "selected files:"
           cat integration-selected.txt
-          mapfile -t files < integration-selected.txt
+          files=(); while IFS= read -r f; do files+=("$f"); done < integration-selected.txt
           [ "${#files[@]}" -gt 0 ] || { echo "::error::integration_any=true but the selection is empty"; exit 1; }
           set +e
           NX_TEST_T2_SUBSTRATE=none uv run pytest -o addopts="" -m "$INTEGRATION_MARK_EXPR" \
@@ -1181,14 +1206,19 @@ jobs:
             echo "::error::pytest --collect-only exited $rc on the affected selection"
             exit 1
           fi
-          collected="$(grep -c '::' integration-collect.txt || true)"
+          collected="$(grep -cE '^[^ ]+\.py::' integration-collect.txt || true)"
           echo "collected=$collected" >> "$GITHUB_OUTPUT"
           echo "collected $collected integration tests"
 
       - name: Run the affected integration tests
+        env:
+          # Same reason as the nightly's ungated-integration step: these files
+          # self-provision a throwaway engine substrate and write to it.
+          NX_ALLOW_PROD_WRITE: "per-push affected-integration job: self-provisioned throwaway engine substrate on the CI runner (nexus-rpaat)"
+          VOYAGE_API_KEY: ${{ secrets.VOYAGE_API_KEY }}
         run: |
           set -euo pipefail
-          mapfile -t files < integration-selected.txt
+          files=(); while IFS= read -r f; do files+=("$f"); done < integration-selected.txt
           set +e
           uv run pytest -o addopts="" -m "$INTEGRATION_MARK_EXPR" -q -rs --color=no \
             --junit-xml=integration-affected.xml "${files[@]}"
@@ -2071,6 +2101,10 @@ jobs:
               - 'service/src/main/java/dev/nexus/service/http/CatalogHandler.java'
               - 'service/src/main/resources/db/changelog/**'
               - 'src/nexus/catalog/http_catalog_client.py'
+              # nexus-rpaat: both test files import these, and the affected-
+              # integration job leaves the files to this job.
+              - 'src/nexus/corpus.py'
+              - 'src/nexus/chunk_identity.py'
               - 'tests/db/test_write_seam_gate_integration.py'
               - 'tests/db/test_http_combined_query_integration.py'
               - 'scripts/assert_write_seam_ran.py'
