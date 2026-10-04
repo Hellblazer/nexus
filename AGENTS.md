@@ -158,11 +158,10 @@ agents' full suites go to hellmini (Sam, 2026-10-02). The T2 how-tos
 carry the recipes.
 
 `hellmini` is a bare custom label (registered with `--no-default-labels`), so a
-job has to name it. Older registrations on those hosts (`hellmini-ci`,
-`qwen-linux`, `gtr-windows`) may still be online until the host owner removes
-them, and some carry the generic `self-hosted`, `Linux`, `X64` or `Windows`
-labels, so a job that says `runs-on: self-hosted` (or an array with one of those
-labels) can land on one of them. A `runs-on` label is a routing rule, not a
+job has to name it. It is the only self-hosted registration: `qwen-linux` and
+`gtr-windows` were removed on 2026-10-03 and `hellmini-ci` on 2026-10-04, so a
+job that says `runs-on: self-hosted` (or names any other self-hosted label) waits
+with no runner rather than landing somewhere unexpected. A `runs-on` label is a routing rule, not a
 security boundary: whoever can push a branch controls the workflow files. The
 controls are the collaborator list (owner only), the fork-PR approval policy and
 branch protection.
