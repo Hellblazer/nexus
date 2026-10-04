@@ -1,0 +1,311 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-wbfpw.48: nexus.text_gate_probe_384/768/1024 reach the GIN text indexes under nexus_svc.
+
+    THE PROBLEM. Under nexus_svc (NOSUPERUSER NOBYPASSRLS, FORCE RLS) the hybrid dispatch's gate
+    probe was a sequential scan of the tenant's chunks: 77 ms against 2 ms with RLS out of the way,
+    24,000 chunks, one fixture. The RLS policy's qual is a security qual on nexus.chunks, and
+    PostgreSQL will not make a user qual an index condition on such a relation unless its operator
+    is leakproof (restriction_is_securely_promotable). ts_match_vq (tsvector @@ tsquery) and
+    word_similarity_op / word_similarity_commutator_op (text <% text) are all proleakproof = f
+    (PostgreSQL 17.11), and marking them leakproof needs superuser. So idx_chunks_tsv and
+    idx_chunks_trgm were never candidates. Not caused by live(c); identical before and after vectors-023.
+
+    THE FIX, in two parts that only work together.
+
+    1. The probe becomes SECURITY DEFINER and applies the tenant predicate itself:
+           c.tenant_id = NULLIF(current_setting('nexus.tenant', true), '')
+       the same GUC the RLS policy reads, so the function sees exactly the rows the policy would
+       show nexus_svc. It FAILS CLOSED: an unset GUC reads NULL, a reset one reads '', and NULLIF
+       turns '' into NULL, so tenant_id = NULL matches nothing. SET search_path = pg_catalog, pg_temp
+       pins name resolution (every nexus object is schema-qualified, the pg_trgm operator already was);
+       pg_temp last keeps a caller's temp objects out of a definer function. The liveness predicate is
+       unchanged (live(c) through nexus.chunk_live_owners, still inlined into this body). The
+       collection filter, the where filters, the text gate and LIMIT p_cap are untouched, so the probe
+       returns the same chashes it did. EXECUTE is revoked from PUBLIC and granted to nexus_svc, because
+       a definer function is an access path that must not be open to every role. A definer function is
+       not inlined into its caller; the probe is called as a plain SELECT ... FROM probe(..) with its own
+       LIMIT, and nothing depended on the inlining.
+
+    2. SECURITY DEFINER alone does NOT do it, and this is the part to read before touching this file.
+       A definer function runs as its OWNER, and the owner is the migration role. In production that
+       is nexus_admin: the table owner, NOSUPERUSER, NO BYPASSRLS (pg_provision.py creates it that
+       way; taxonomy-017's header records the same finding for topics). FORCE ROW LEVEL SECURITY applies
+       to a table owner, so a definer function owned by nexus_admin still carries the policy's security
+       qual and still scans sequentially. A superuser owner would bypass RLS, which is why every test
+       container that migrates as the superuser (PgContainerHelper#applyProductSchema) would show the
+       index scan and prove nothing about production; Rdr192LiveCExplainEvidenceIntegrationTest migrates as
+       a non-superuser owner for that reason. What makes the function's body see no security qual is
+       a second, permissive policy for the owner alone:
+           CREATE POLICY chunks_gate_probe_owner_read ON nexus.chunks FOR SELECT TO CURRENT_USER USING (true)
+       Permissive policies are OR-ed, so for the owner the SELECT qual is constant true and the planner
+       drops it; for every other role (nexus_svc included) the policy does not apply and
+       tenant_isolation is the only qual, unchanged. FORCE stays on.
+
+    WHAT THE POLICY COSTS, stated plainly. The migration role can now READ every tenant's chunks
+    without setting a tenant (it could already switch FORCE off, it owns the table). It gains no write
+    access: UPDATE and DELETE need tenant_isolation's qual, which a FOR SELECT policy does not
+    touch, so a DML changeset run as the owner without a GUC still silently no-ops exactly as
+    test_changelog_rls_lint documents (Rdr192LiveCExplainEvidenceIntegrationTest pins this). The
+    policy names no role: TO CURRENT_USER binds it to whoever runs this changeset, which is the owner
+    of the functions it creates in the same breath. If a later migration run is by a different role the
+    policy and the function owner are no longer the same role and the probe silently degrades to the old
+    sequential scan with correct results; the evidence class's plan pin is what would notice.
+
+    THE GUARD (the one thing in this file that must never be removed). TO CURRENT_USER is only safe while
+    NO role that is subject to row-level security has the migrating role's privileges. In the documented
+    single-role dev posture (Main.buildMigrationDataSource falls back to NX_DB_* when NX_DB_ADMIN_* is
+    unset) the migrator IS nexus_svc, the policy would read TO nexus_svc USING (true), and the service role
+    would read every tenant's chunks on every path, with no error anywhere. The same holds when ANY login
+    role is a member of the migrating role and inherits its privileges (an RLS policy TO role R applies to
+    every role that has R's privileges, has_privs_of_role): nexus_svc, or whatever role the service
+    actually connects as. So the whole changeset is gated on a precondition, onFail=MARK_RAN: it is skipped,
+    probes and all, when nexus_svc is, or has the privileges of, the migrating role, or when any other
+    login role that is neither SUPERUSER nor BYPASSRLS (RLS does not bind those, so the policy gives them
+    nothing) has the migrating role's privileges. Skipping the whole changeset rather than only the policy
+    keeps the definer bodies from ever existing without the policy that makes them useful, and leaves the
+    probes SECURITY INVOKER, which is correct and slower (the sequential scan).
+    pg_has_role(r.oid, current_user, 'USAGE') is exactly the has_privs_of_role test the policy engine
+    applies: it honours a grant's INHERIT option (PostgreSQL 16+), so a membership granted WITH INHERIT
+    FALSE does not skip the changeset, and rightly, since that role does not have the owner's privileges
+    until it SET ROLEs, which is owner-equivalent already. pg_has_role(x, x, 'USAGE') is true, so the
+    migrating-role-is-nexus_svc case would be covered by the membership clause too; it stays written out
+    explicitly because it is the case the guard exists for. MARK_RAN is a one-time decision: a box
+    migrated once in the single-role posture and later moved to a two-role one keeps the invoker probes
+    until someone re-runs the changeset by hand (clear its DATABASECHANGELOG row). The reverse transition
+    (a membership granted AFTER the changeset ran) is not something a changeset can see; the service
+    checks it at every boot (ChunksIsolationCheck, run on the service pool, which refuses to start when
+    any policy on nexus.chunks other than tenant_isolation applies to the role that serves tenant traffic)
+    and reports it on GET /v1/status for nx doctor. The changeset also ENDS with a post-condition DO block
+    that RAISEs unless every probe is a definer function owned by the migrating role, the policy's role
+    list is exactly that role, and none of the roles the precondition guards against exists. It is the
+    same predicate as the precondition, so it fires only when the precondition was removed or drifted (or
+    a grant landed between the two statements of one walk); it exists so that case fails the migration
+    loudly, and rolls every part of this changeset back, instead of shipping a silent widening.
+
+    ISOLATION ARGUMENT. nexus_svc cannot reach another tenant's chunks through the function:
+    the only tenant it ever matches is the session's own nexus.tenant, which nexus_svc sets through
+    TenantScope.withTenant (no role can be coaxed into reading a tenant it did not set, and one that
+    can set the GUC to any tenant can already read that tenant's rows through the table directly).
+    The live(c) subquery reads catalog_document_chunks and catalog_documents, which carry their own
+    tenant_isolation policies the owner is still subject to, under the same GUC.
+
+    No DATA EFFECT: a policy and function definitions only; no row changes. Not changed: the
+    gate inside text_gated_search_hnsw_first_<dim> and hybrid_search_<dim>; see the bead for why
+    (the first runs as a filter on an HNSW-ordered scan, the second has no production caller).
+
+    Placed after vectors-023 (the probe's previous definition) and before the grants blocks.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="vectors-029-1" author="nexus-wbfpw.48">
+        <preConditions onFail="MARK_RAN">
+            <sqlCheck expectedResult="0">SELECT COUNT(*) FROM pg_catalog.pg_roles r WHERE (r.rolname = 'nexus_svc' AND (r.rolname = current_user OR pg_catalog.pg_has_role(r.oid, current_user, 'USAGE'))) OR (r.rolname &lt;&gt; current_user AND pg_catalog.pg_has_role(r.oid, current_user, 'USAGE') AND NOT r.rolsuper AND NOT r.rolbypassrls AND r.rolcanlogin)</sqlCheck>
+        </preConditions>
+        <comment>nexus.text_gate_probe_384/768/1024 become SECURITY DEFINER with an explicit, fail-closed tenant predicate and a fixed search_path, so the GIN text indexes can be index conditions; nexus.chunks gains a SELECT-only permissive policy for the migration role (the function owner) so the definer body carries no security qual; EXECUTE moves from PUBLIC to nexus_svc. Skipped whole (MARK_RAN) when nexus_svc is, or has the privileges of, the migrating role, or when any other RLS-subject login role has them: the owner policy would then bind to that role. Ends with a post-condition that RAISEs unless owners and policy roles are exactly as intended. Same chashes returned (live(c), collection filter, where filters, LIMIT unchanged). RDR-192 / nexus-wbfpw.48.</comment>
+        <sql splitStatements="false" stripComments="false">
+DROP POLICY IF EXISTS chunks_gate_probe_owner_read ON nexus.chunks;
+CREATE POLICY chunks_gate_probe_owner_read ON nexus.chunks
+    FOR SELECT TO CURRENT_USER
+    USING (true);
+
+CREATE OR REPLACE FUNCTION nexus.text_gate_probe_384(
+    p_text         text,
+    p_collections  text[],
+    p_where        jsonb,
+    p_where_path   text,
+    p_cap          int
+) RETURNS SETOF bytea
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+    SELECT c.chash
+      FROM nexus.chunks c
+     WHERE c.tenant_id = NULLIF(pg_catalog.current_setting('nexus.tenant', true), '')
+       AND c.collection = ANY(p_collections)
+       AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))
+       AND (p_where IS NULL OR c.metadata @&gt; p_where)
+       AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
+       AND (c.chunk_tsv @@ pg_catalog.plainto_tsquery('english', p_text) OR p_text OPERATOR(nexus.&lt;%) c.chunk_text)
+     LIMIT p_cap
+$$;
+
+CREATE OR REPLACE FUNCTION nexus.text_gate_probe_768(
+    p_text         text,
+    p_collections  text[],
+    p_where        jsonb,
+    p_where_path   text,
+    p_cap          int
+) RETURNS SETOF bytea
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+    SELECT c.chash
+      FROM nexus.chunks c
+     WHERE c.tenant_id = NULLIF(pg_catalog.current_setting('nexus.tenant', true), '')
+       AND c.collection = ANY(p_collections)
+       AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))
+       AND (p_where IS NULL OR c.metadata @&gt; p_where)
+       AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
+       AND (c.chunk_tsv @@ pg_catalog.plainto_tsquery('english', p_text) OR p_text OPERATOR(nexus.&lt;%) c.chunk_text)
+     LIMIT p_cap
+$$;
+
+CREATE OR REPLACE FUNCTION nexus.text_gate_probe_1024(
+    p_text         text,
+    p_collections  text[],
+    p_where        jsonb,
+    p_where_path   text,
+    p_cap          int
+) RETURNS SETOF bytea
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+    SELECT c.chash
+      FROM nexus.chunks c
+     WHERE c.tenant_id = NULLIF(pg_catalog.current_setting('nexus.tenant', true), '')
+       AND c.collection = ANY(p_collections)
+       AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))
+       AND (p_where IS NULL OR c.metadata @&gt; p_where)
+       AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
+       AND (c.chunk_tsv @@ pg_catalog.plainto_tsquery('english', p_text) OR p_text OPERATOR(nexus.&lt;%) c.chunk_text)
+     LIMIT p_cap
+$$;
+
+
+REVOKE EXECUTE ON FUNCTION nexus.text_gate_probe_384(text, text[], jsonb, text, int) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION nexus.text_gate_probe_384(text, text[], jsonb, text, int) TO nexus_svc;
+REVOKE EXECUTE ON FUNCTION nexus.text_gate_probe_768(text, text[], jsonb, text, int) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION nexus.text_gate_probe_768(text, text[], jsonb, text, int) TO nexus_svc;
+REVOKE EXECUTE ON FUNCTION nexus.text_gate_probe_1024(text, text[], jsonb, text, int) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION nexus.text_gate_probe_1024(text, text[], jsonb, text, int) TO nexus_svc;
+
+-- POST-CONDITION (see THE GUARD in this file's header). Fails the migration, and so rolls this changeset
+-- back, unless the three probes are SECURITY DEFINER functions owned by the migrating role, the owner policy
+-- names exactly that role, and no role the precondition guards against (nexus_svc, or any other login role
+-- that is subject to RLS and has the migrating role's privileges) exists, re-checked here so a drifted
+-- precondition cannot ship the widening.
+DO $post$
+DECLARE
+    me         oid := (SELECT r.oid FROM pg_catalog.pg_roles r WHERE r.rolname = current_user);
+    n_probes   int;
+    bad_probes text;
+    pol_roles  oid[];
+    exposed_roles text;
+BEGIN
+    SELECT count(*), string_agg(p.proname, ', ') FILTER (WHERE p.proowner &lt;&gt; me OR NOT p.prosecdef)
+      INTO n_probes, bad_probes
+      FROM pg_catalog.pg_proc p
+     WHERE p.pronamespace = 'nexus'::regnamespace
+       AND p.proname IN ('text_gate_probe_384', 'text_gate_probe_768', 'text_gate_probe_1024');
+    IF n_probes &lt;&gt; 3 THEN
+        RAISE EXCEPTION 'vectors-029: expected 3 text_gate_probe functions, found %', n_probes;
+    END IF;
+    IF bad_probes IS NOT NULL THEN
+        RAISE EXCEPTION 'vectors-029: probe(s) % are not SECURITY DEFINER owned by the migrating role %', bad_probes, current_user;
+    END IF;
+    SELECT pol.polroles INTO pol_roles
+      FROM pg_catalog.pg_policy pol
+     WHERE pol.polrelid = 'nexus.chunks'::regclass AND pol.polname = 'chunks_gate_probe_owner_read';
+    IF pol_roles IS DISTINCT FROM ARRAY[me] THEN
+        RAISE EXCEPTION 'vectors-029: policy chunks_gate_probe_owner_read must name exactly the migrating role % and nothing else, found %', current_user, pol_roles;
+    END IF;
+    SELECT string_agg(r.rolname, ', ' ORDER BY r.rolname) INTO exposed_roles
+      FROM pg_catalog.pg_roles r
+     WHERE (r.rolname = 'nexus_svc' AND (r.rolname = current_user OR pg_catalog.pg_has_role(r.oid, current_user, 'USAGE')))
+        OR (r.rolname &lt;&gt; current_user AND pg_catalog.pg_has_role(r.oid, current_user, 'USAGE')
+            AND NOT r.rolsuper AND NOT r.rolbypassrls AND r.rolcanlogin);
+    IF exposed_roles IS NOT NULL THEN
+        RAISE EXCEPTION 'vectors-029: role(s) % have the privileges of the migrating role %; the owner policy would apply to them and let them read every tenant''s chunks', exposed_roles, current_user;
+    END IF;
+END
+$post$;
+        </sql>
+        <rollback>
+            <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.text_gate_probe_384(
+    p_text         text,
+    p_collections  text[],
+    p_where        jsonb,
+    p_where_path   text,
+    p_cap          int
+) RETURNS SETOF bytea
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT c.chash
+      FROM nexus.chunks c
+     WHERE c.collection = ANY(p_collections)
+       AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))
+       AND (p_where IS NULL OR c.metadata @&gt; p_where)
+       AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
+       AND (c.chunk_tsv @@ plainto_tsquery('english', p_text) OR p_text OPERATOR(nexus.&lt;%) c.chunk_text)
+     LIMIT p_cap
+$$;
+
+CREATE OR REPLACE FUNCTION nexus.text_gate_probe_768(
+    p_text         text,
+    p_collections  text[],
+    p_where        jsonb,
+    p_where_path   text,
+    p_cap          int
+) RETURNS SETOF bytea
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT c.chash
+      FROM nexus.chunks c
+     WHERE c.collection = ANY(p_collections)
+       AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))
+       AND (p_where IS NULL OR c.metadata @&gt; p_where)
+       AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
+       AND (c.chunk_tsv @@ plainto_tsquery('english', p_text) OR p_text OPERATOR(nexus.&lt;%) c.chunk_text)
+     LIMIT p_cap
+$$;
+
+CREATE OR REPLACE FUNCTION nexus.text_gate_probe_1024(
+    p_text         text,
+    p_collections  text[],
+    p_where        jsonb,
+    p_where_path   text,
+    p_cap          int
+) RETURNS SETOF bytea
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT c.chash
+      FROM nexus.chunks c
+     WHERE c.collection = ANY(p_collections)
+       AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))
+       AND (p_where IS NULL OR c.metadata @&gt; p_where)
+       AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
+       AND (c.chunk_tsv @@ plainto_tsquery('english', p_text) OR p_text OPERATOR(nexus.&lt;%) c.chunk_text)
+     LIMIT p_cap
+$$;
+
+
+REVOKE EXECUTE ON FUNCTION nexus.text_gate_probe_384(text, text[], jsonb, text, int) FROM nexus_svc;
+REVOKE EXECUTE ON FUNCTION nexus.text_gate_probe_768(text, text[], jsonb, text, int) FROM nexus_svc;
+REVOKE EXECUTE ON FUNCTION nexus.text_gate_probe_1024(text, text[], jsonb, text, int) FROM nexus_svc;
+GRANT EXECUTE ON FUNCTION nexus.text_gate_probe_384(text, text[], jsonb, text, int) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION nexus.text_gate_probe_768(text, text[], jsonb, text, int) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION nexus.text_gate_probe_1024(text, text[], jsonb, text, int) TO PUBLIC;
+DROP POLICY IF EXISTS chunks_gate_probe_owner_read ON nexus.chunks;
+            </sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

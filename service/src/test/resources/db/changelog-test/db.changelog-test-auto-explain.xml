@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-wbfpw.48 — make ${svcRole}'s NEW sessions log the plan of every statement, including the
+    statements nested inside a function, to the server log.
+
+    WHY: a SECURITY DEFINER function (nexus.text_gate_probe_<dim>, vectors-029) is never inlined, so
+    EXPLAIN of a call shows only "Function Scan on text_gate_probe_384" and says nothing about the plan of
+    its body. auto_explain with log_nested_statements writes the body's own plan, as ${svcRole} (the role
+    the production service connects as, so the owner policy and the row-level-security qual are exactly
+    the ones production has), to the server log, which the test reads back through the container's log.
+
+    Per-role and session_preload_libraries, not shared_preload_libraries and not a server-wide minimum
+    duration of zero: only sessions opened AFTER this runs, as ${svcRole}, are affected, so a test seeds
+    first, runs this, then opens a fresh pool for the measured statements, and neither the migration
+    nor the seed floods the log. ALTER ROLE ... SET needs a superuser, hence a changelog the test runs
+    on its superuser connection. Run through its own databasechangelog table (see
+    PgContainerHelper#enableAutoExplainFor). runAlways, idempotent.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="test-auto-explain-1" author="nexus-wbfpw.48" runAlways="true">
+        <comment>Per-role auto_explain for ${svcRole}: log every statement's plan, nested ones included, with actual rows and timings.</comment>
+        <sql splitStatements="false" stripComments="false">
+ALTER ROLE ${svcRole} SET session_preload_libraries = 'auto_explain';
+ALTER ROLE ${svcRole} SET auto_explain.log_min_duration = '0';
+ALTER ROLE ${svcRole} SET auto_explain.log_nested_statements = 'on';
+ALTER ROLE ${svcRole} SET auto_explain.log_analyze = 'on';
+ALTER ROLE ${svcRole} SET auto_explain.log_format = 'text';
+        </sql>
+        <rollback>
+            <!-- Test-only; the container is thrown away. -->
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

@@ -3924,6 +3924,74 @@ def _check_ownerless_writes(engine_status: object = _ENGINE_STATUS_UNSET) -> lis
     )]
 
 
+_CHUNKS_ISOLATION_LABEL = "Chunk tenant isolation"
+
+
+def _check_chunks_tenant_isolation(engine_status: object = _ENGINE_STATUS_UNSET) -> list[HealthResult]:
+    """nexus-wbfpw.48: does a row-level-security policy other than the tenant one apply to the engine's role?
+
+    vectors-029 gives ``nexus.chunks`` a permissive ``SELECT USING (true)`` policy for the role that ran the
+    migration. Permissive policies are OR-ed, so if the role the engine serves tenant traffic as has that
+    role's privileges (it is the migrator, or was granted membership with INHERIT), it reads every tenant's
+    chunks and nothing errors. The engine checks this at every boot and refuses to start; this row reads the
+    same question asked live on ``GET /v1/status`` (``chunks_tenant_isolation_intact``), which also catches a
+    membership granted after the boot. A boolean only: the unauthenticated route names no policy or role, so
+    the engine log line ``chunks_isolation_check_failed`` (at boot) or the catalog is where they are named.
+
+    Not applicable (ok) when the engine cannot be reached or does not report the field (an engine that
+    predates it, or a probe that could not run), so a virgin box stays green.
+    """
+    label = _CHUNKS_ISOLATION_LABEL
+    status: dict | None
+    if engine_status is _ENGINE_STATUS_UNSET:
+        try:
+            from nexus.db.http_engine_status import fetch_engine_status  # noqa: PLC0415 — deferred to keep CLI startup fast
+            status = fetch_engine_status()
+        except Exception as exc:  # noqa: BLE001 — best-effort: must not crash `nx doctor`
+            _log.debug("doctor_chunks_isolation_probe_failed", error=str(exc))
+            status = None
+    else:
+        status = engine_status if isinstance(engine_status, dict) else None
+    if status is None:
+        return [HealthResult(
+            label=label, ok=True,
+            detail="not applicable: the engine's status endpoint could not be read",
+        )]
+    intact = status.get("chunks_tenant_isolation_intact")
+    if not isinstance(intact, bool):
+        return [HealthResult(
+            label=label, ok=True,
+            detail="not applicable: this engine does not report it (older engine, or the probe could not run)",
+        )]
+    if intact:
+        return [HealthResult(
+            label=label, ok=True,
+            detail="no policy on nexus.chunks other than tenant_isolation applies to the engine's role",
+        )]
+    return [HealthResult(
+        label=label, ok=False, fatal=True,
+        detail=(
+            "a row-level-security policy on nexus.chunks other than tenant_isolation applies to the role the "
+            "engine serves tenant traffic as, so that role can read or write every tenant's chunks. Almost "
+            "always chunks_gate_probe_owner_read (engine changeset vectors-029, created for the migrating "
+            "role) reaching the service role through the migrating role being the service role or through a "
+            "role membership with INHERIT. The field is also false when row-level security on nexus.chunks "
+            "is no longer enabled and forced, or the tenant_isolation policy is gone."
+        ),
+        fix_suggestions=[
+            "Run the engine's migrations as a role the service role does not inherit (NX_DB_ADMIN_URL, "
+            "NX_DB_ADMIN_USER, NX_DB_ADMIN_PASS), not the service role itself",
+            "As the table owner: DROP POLICY chunks_gate_probe_owner_read ON nexus.chunks; or stop the service "
+            "role inheriting the migrating role (REVOKE the membership, or GRANT ... WITH INHERIT FALSE)",
+            "If row-level security itself is off (no policy applies, the table is unprotected): as the table "
+            "owner, ENABLE ROW LEVEL SECURITY and FORCE ROW LEVEL SECURITY on nexus.chunks, and "
+            "restore the tenant_isolation policy",
+            "A restarted engine refuses to boot while a policy applies to its role; its log line "
+            "`chunks_isolation_check_failed` names the policy and the role",
+        ],
+    )]
+
+
 _ENGINE_REAPER_LABEL = "Engine reaper"
 
 #: A pass is stale when older than this many of the engine's own intervals, plus the pass's own wall-clock budget
@@ -9487,6 +9555,7 @@ def run_health_checks(
     results.extend(_check_engine_convergence())
     results.extend(_check_ownerless_writes(engine_status))  # nexus-20onx
     results.extend(_check_engine_reaper(engine_status))  # nexus-wbfpw.56
+    results.extend(_check_chunks_tenant_isolation(engine_status))  # nexus-wbfpw.48
     results.extend(_check_t2_launchagent_stray())
     results.extend(_check_service_launchagent_stray())
     results.extend(_check_service_autostart_drift())

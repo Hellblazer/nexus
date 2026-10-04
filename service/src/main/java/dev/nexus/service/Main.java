@@ -122,6 +122,19 @@ public final class Main {
         }
         migrationDs.close();
 
+        // nexus-wbfpw.48: identity-based tenant-isolation backstop for nexus.chunks, on the SERVICE pool so
+        // current_user is the role that actually serves tenant traffic, whatever NX_DB_USER names. Refuses to
+        // boot when a permissive policy other than tenant_isolation applies to it (vectors-029's owner
+        // policy bound to the wrong role, or a later membership grant): such a role reads every tenant's
+        // chunks with no error anywhere. See ChunksIsolationCheck.
+        try {
+            dev.nexus.service.db.ChunksIsolationCheck.verifyAtStartup(ds);
+        } catch (dev.nexus.service.db.ChunksIsolationCheck.IsolationException e) {
+            ds.close();
+            log.error("event=chunks_isolation_check_failed error=\"{}\"", e.getMessage());
+            System.exit(1);
+        }
+
         // Root-token provisioning (RDR-152 bead nexus-gmiaf.32.5): seed NX_SERVICE_TOKEN
         // as a BOUND default-tenant row. The transitional wildcard (tenant_id="*") is
         // retired — every token, including the root, is strictly tenant-bound and the

@@ -3810,6 +3810,23 @@ that refuses every collection (legacy chunks, `CENSUS_SCOPE_MISMATCH`, a stateme
 still reads green here; the per-collection refusals are in `gc_audit` (`reaper_refused`). An engine that sends no `last_pass` is
 judged on the time alone.
 
+**Chunk tenant isolation (nexus-wbfpw.48).** `nx doctor`'s "Chunk tenant isolation" row reads
+`chunks_tenant_isolation_intact` from `GET /v1/status`: true when no permissive row-level-security
+policy on `nexus.chunks` other than `tenant_isolation` applies to the role the engine serves
+tenant traffic as, and row-level security on the table is still enabled, forced and carrying
+`tenant_isolation`. `false` is a hard failure: either that role can read or write every tenant's
+chunks (usually the owner policy `chunks_gate_probe_owner_read` from engine changeset vectors-029 reaching the
+service role through the migrating role being the service role, or through a role membership
+with INHERIT), or the table lost its row-level security. A restarted engine refuses to boot while
+a policy applies to its role (a table that lost its row security does not stop the boot) and logs
+`chunks_isolation_check_failed` naming the policy and the role; the field is a boolean because the
+route is unauthenticated. The field is refreshed in the background, never on the status request,
+so a saturated connection pool cannot stall `/v1/status`. The row is green and says "not applicable" when the engine cannot be
+reached, predates the field, or could not run the probe. The remedy is to run the engine's
+migrations as a role the service role does not inherit (`NX_DB_ADMIN_URL`, `NX_DB_ADMIN_USER`,
+`NX_DB_ADMIN_PASS`) and, as the table owner, `DROP POLICY chunks_gate_probe_owner_read ON
+nexus.chunks` or revoke the inheriting membership.
+
 **Restart after the ownerless-write release.** The engine in this release refuses a chunk
 write that no document owns, and a local install enforces from the first boot of the
 upgraded engine, with no soak. After `nx upgrade`, restart every long-lived `nx-mcp`

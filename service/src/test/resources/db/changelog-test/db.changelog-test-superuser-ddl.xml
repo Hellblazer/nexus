@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-wbfpw.48: run ONE superuser DDL statement (${ddl}) in a dedicated test container, for the
+    statements jOOQ has no typed form for: row-level-security policies, ALTER TABLE ... ROW LEVEL SECURITY,
+    CREATE ROLE with attributes. Used by TextGateProbeSingleRoleGuardIntegrationTest to build the shapes
+    ChunksIsolationCheck must (and must not) flag.
+
+    Run on a superuser connection through its own databasechangelog table (see
+    PgContainerHelper#runSuperuserDdl), the same mechanism as db.changelog-test-role-membership.xml.
+    runAlways, so every call runs again.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="test-superuser-ddl-1" author="nexus-wbfpw.48" runAlways="true">
+        <comment>Run the one DDL statement passed as the ddl parameter.</comment>
+        <sql splitStatements="false" stripComments="false">${ddl}</sql>
+        <rollback>
+            <!-- Test-only; the container is thrown away. -->
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

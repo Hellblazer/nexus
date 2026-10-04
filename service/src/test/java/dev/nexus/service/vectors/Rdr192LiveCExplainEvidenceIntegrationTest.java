@@ -4,9 +4,11 @@ package dev.nexus.service.vectors;
 
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
+import dev.nexus.service.PgCatalogProbes;
 import dev.nexus.service.PgContainerHelper;
 import dev.nexus.service.db.Chash;
 import dev.nexus.service.db.PgSession;
+import dev.nexus.service.db.SchemaMigrator;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.jooq.binding.Vector;
 import org.jooq.DSLContext;
@@ -14,6 +16,7 @@ import org.jooq.Field;
 import org.jooq.Query;
 import org.jooq.ResultQuery;
 import org.jooq.SQLDialect;
+import org.jooq.impl.SQLDataType;
 import org.jooq.Table;
 import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterAll;
@@ -27,8 +30,12 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.sql.Connection;
+import java.sql.DriverManager;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -45,7 +52,9 @@ import static dev.nexus.service.jooq.nexus.Tables.PLAIN_SEARCH_384;
 import static dev.nexus.service.jooq.nexus.Tables.SEARCH_TOPIC_SCOPED_384;
 import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATED_SEARCH_BY_CHASH_384;
 import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATED_SEARCH_HNSW_FIRST_384;
+import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATE_PROBE_1024;
 import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATE_PROBE_384;
+import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATE_PROBE_768;
 import static dev.nexus.service.jooq.nexus.Tables.TOPICS;
 import static dev.nexus.service.jooq.nexus.Tables.TOPIC_ASSIGNMENTS;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -65,6 +74,16 @@ import static org.assertj.core.api.Assertions.assertThat;
  * what the planner does with the inlined predicate, and each function is measured as a plain
  * {@code SELECT .. FROM fn(..)} so the plan is the one the repository's own call produces.
  *
+ * <p><b>Ownership (nexus-wbfpw.48).</b> The container is DEDICATED and migrated as a non-superuser owner
+ * ({@code PgContainerHelper#bootstrapNonSuperuserOwner}, then {@code SchemaMigrator.migrate}), which is
+ * production's shape: {@code nexus_admin} owns every relation, is NOSUPERUSER and not BYPASSRLS, and FORCE
+ * RLS applies to it. That is required since vectors-029 made the gate probe SECURITY DEFINER: a definer
+ * function runs as its owner, so a superuser-migrated container (the shared template) would run the body
+ * past RLS and make the probe's plan say nothing about production. The probe is no longer inlined, so
+ * EXPLAIN of a call is one Function Scan; its body's plan, as {@code nexus_svc}, is read from auto_explain's
+ * nested-statement log ({@code db.changelog-test-auto-explain.xml}). The class also carries the probe's
+ * tenant-isolation tests (a second tenant is seeded for them) and the pin of vectors-029's owner policy.
+ *
  * <p><b>Fixture.</b> {@value #NUM_CHUNKS} 384-dim chunks (override {@code -Dnx.rdr192Explain.chunks}),
  * 90% manifested across {@value #NUM_DOCS} documents of which every third is tombstoned, 10%
  * manifest-less; so 63% of the chunks are live(c) and 37% are hidden by one of the two reasons live(c)
@@ -78,8 +97,12 @@ import static org.assertj.core.api.Assertions.assertThat;
  * {@code chunk_live_owners} stays inlinable. What fails without vectors-023 is
  * {@code Rdr192EngineLivenessMatrix#p1p_textGateProbeVisibility} (the probe must not count a hidden
  * chunk), and, for the fixture shape, {@code HnswScanBudgetOnEverySearchPathIntegrationTest}'s gate chunks,
- * which need a live owner for the probe to see them. The gate-probe tests here record what the new probe
- * costs and which plan it takes; they are evidence, not a guard on the changeset.
+ * which need a live owner for the probe to see them. (That paragraph is about vectors-023 and the probe's
+ * old, inlined form. Since vectors-029 the probe's body plan is read from auto_explain, and the pins on it
+ * are real: the selective gate must reach idx_chunks_tsv or idx_chunks_trgm. Checked by dropping the
+ * changeset's owner policy in this fixture (recorded on the bead): the body then plans a Bitmap Heap Scan
+ * over chunks_pk with the text predicates as a Filter, "Rows Removed by Filter: 23856", and this class's pin
+ * fails.)
  *
  * <p><b>What is pinned and why.</b> The one regression these queries share is the liveness
  * predicate stopping inlining: {@code nexus.chunk_live_owners} is a set-returning SQL function that
@@ -98,6 +121,33 @@ import static org.assertj.core.api.Assertions.assertThat;
 class Rdr192LiveCExplainEvidenceIntegrationTest {
 
     private static final String TENANT = "rdr192-explain";
+    private static final String OTHER_TENANT = "rdr192-other";
+    private static final String ADMIN_ROLE = "nexus_admin_rdr192";
+    private static final String ADMIN_PASS = "nexus_admin_rdr192_pass";
+    private static final String OTHER_COLL = "knowledge__rdr192-other__minilm-l6-v2-384__v1";
+    static final int OTHER_CHUNKS = 50;
+    /** Tenant A's second collection: live chunks carrying numeric metadata, for the where_path tests. */
+    private static final String META_COLL = "knowledge__rdr192-meta__minilm-l6-v2-384__v1";
+    /** Chunks of META_COLL whose "v" is > 1 (the jsonpath below matches them) and chunks whose "v" is 0. */
+    static final int META_MATCH = 5;
+    static final int META_NOMATCH = 2;
+    /** A tenant whose id is the EMPTY string: only a superuser can write one (TenantScope refuses a blank id). */
+    private static final String EMPTY_TENANT = "";
+    private static final String EMPTY_COLL = "knowledge__rdr192-empty__minilm-l6-v2-384__v1";
+    /**
+     * Tenant B's hostile metadata: values under which {@code $.v.double() > 1} ERRORS (a non-numeric string,
+     * an out-of-range number string, an object, a null) next to ones it matches (a large number, an array).
+     * They sit in tenant B's collection, live, carrying the rare token, so a probe that ever evaluated a
+     * where_path on B's rows from tenant A's session would be handed every one of them.
+     */
+    private static final List<Map<String, Object>> HOSTILE_METADATA = List.of(
+        Map.of("v", "not-a-number"),
+        Map.of("v", "1e999"),
+        Map.of("v", Map.of("x", 1)),
+        Collections.singletonMap("v", null),
+        Map.of("v", 9999),
+        Map.of("v", List.of(1, 2, 3)));
+    private static final String V_GT_1 = "$.v.double() > 1";
     private static final String COLL = "knowledge__rdr192-explain__minilm-l6-v2-384__v1";
     private static final int DIM = 384;
     static final int NUM_CHUNKS = Integer.getInteger("nx.rdr192Explain.chunks", 24_000);
@@ -115,30 +165,67 @@ class Rdr192LiveCExplainEvidenceIntegrationTest {
     PostgreSQLContainer<?> pg;
     HikariDataSource svcDs;
     TenantScope tenantScope;
+    /** nexus_svc sessions opened after auto_explain was switched on for the role; see {@link #probeBodyPlan}. */
+    HikariDataSource explainDs;
+    TenantScope explainScope;
     final List<String> chashHex = new ArrayList<>();
+    final List<String> otherChashHex = new ArrayList<>();
+    final List<String> metaMatchChashHex = new ArrayList<>();
     final List<float[]> vectors = new ArrayList<>();
     final Map<String, String> evidence = new LinkedHashMap<>();
+    /** The median wall-clock of each {@link #explain}ed statement, by label, for the few tests that bound one. */
+    final Map<String, Long> p50Ms = new LinkedHashMap<>();
 
     @BeforeAll
     void startAll() throws Exception {
-        pg = PgContainerHelper.start();
+        // A DEDICATED container migrated as a NON-SUPERUSER owner, which is production's shape
+        // (nexus_admin owns every relation, NOSUPERUSER NOBYPASSRLS), not the shared superuser-migrated
+        // template. It matters since vectors-029: the gate probe is SECURITY DEFINER, a definer function
+        // runs as its owner, and a superuser owner would read past RLS and make every plan below say nothing
+        // about production. See db.changelog-test-nonsuper-owner.xml.
+        pg = PgContainerHelper.startDedicated();
         try (Connection su = pg.createConnection("")) {
-            PgContainerHelper.applyProductSchema(su);
+            PgContainerHelper.bootstrapNonSuperuserOwner(su, ADMIN_ROLE, ADMIN_PASS);
         }
+        var adminCfg = new HikariConfig();
+        adminCfg.setJdbcUrl(pg.getJdbcUrl());
+        adminCfg.setUsername(ADMIN_ROLE);
+        adminCfg.setPassword(ADMIN_PASS);
+        adminCfg.setMaximumPoolSize(2);
+        try (var adminDs = new HikariDataSource(adminCfg)) {
+            SchemaMigrator.migrate(adminDs);
+            // Through the migrating role's own connection (PgContainerHelper#installTestObjects' ownership
+            // contract): the nexus_test helpers the fixture uses (analyze_table).
+            try (Connection c = adminDs.getConnection()) {
+                PgContainerHelper.installTestObjects(c);
+            }
+        }
+        svcDs = svcPool("rdr192-svc");
+        tenantScope = new TenantScope(svcDs);
+        seed();
+        // After the seed: from here nexus_svc's NEW sessions log every plan, nested ones included.
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.enableAutoExplainForService(su);
+        }
+        explainDs = svcPool("rdr192-explain");
+        explainScope = new TenantScope(explainDs);
+    }
+
+    private HikariDataSource svcPool(String name) {
         var cfg = new HikariConfig();
         cfg.setJdbcUrl(pg.getJdbcUrl());
         cfg.setUsername(PgContainerHelper.SVC_USERNAME);
         cfg.setPassword(PgContainerHelper.SVC_PASSWORD);
         cfg.setMaximumPoolSize(4);
+        cfg.setPoolName(name);
         cfg.setAutoCommit(true);
-        svcDs = new HikariDataSource(cfg);
-        tenantScope = new TenantScope(svcDs);
-        seed();
+        return new HikariDataSource(cfg);
     }
 
     @AfterAll
     void stopAll() throws IOException {
         writeEvidence();
+        if (explainDs != null) explainDs.close();
         if (svcDs != null) svcDs.close();
         if (pg != null) pg.stop();
     }
@@ -228,12 +315,102 @@ class Rdr192LiveCExplainEvidenceIntegrationTest {
                 su.commit();
             }
         }
+        seedOtherTenant(repo);
+        seedHostileAndMetadataRows();
         try (Connection su = pg.createConnection("")) {
             PgContainerHelper.analyzeTable(su, CHUNKS);
             PgContainerHelper.analyzeTable(su, CATALOG_DOCUMENTS);
             PgContainerHelper.analyzeTable(su, CATALOG_DOCUMENT_CHUNKS);
             PgContainerHelper.analyzeTable(su, TOPIC_ASSIGNMENTS);
             PgContainerHelper.analyzeTable(su, TOPICS);
+        }
+    }
+
+    /**
+     * A second tenant, for the isolation tests: {@value #OTHER_CHUNKS} LIVE chunks (manifested under a live
+     * document) in a collection of its own, every one carrying the SAME rare token the first tenant's
+     * selective gate matches. A probe that leaked across tenants would return them.
+     */
+    private void seedOtherTenant(PgVectorRepository repo) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), OTHER_TENANT, OTHER_COLL);
+        }
+        Random rnd = new Random(20261004048L);
+        List<String> ids = new ArrayList<>();
+        List<String> texts = new ArrayList<>();
+        List<float[]> vecs = new ArrayList<>();
+        List<Map<String, Object>> metas = new ArrayList<>();
+        for (int i = 0; i < OTHER_CHUNKS; i++) {
+            ids.add(Chash.ofText("rdr192-other-chunk-" + i).toHex());
+            texts.add(RARE_TOKEN + " rdr192 other tenant chunk " + i);
+            vecs.add(unitVector(rnd));
+            metas.add(Map.of());
+        }
+        repo.upsertChunksWithVectors(OTHER_TENANT, OTHER_COLL, ids, texts, vecs, metas);
+        otherChashHex.addAll(ids);
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
+                    CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.CONTENT_TYPE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
+               .values(OTHER_TENANT, "rdr192-other-doc-0000", "Other doc", "prose", OTHER_COLL).execute();
+            List<Query> rows = new ArrayList<>();
+            for (int i = 0; i < OTHER_CHUNKS; i++) {
+                rows.add(ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID,
+                        CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION,
+                        CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION)
+                    .values(OTHER_TENANT, "rdr192-other-doc-0000", i, HexFormat.of().parseHex(ids.get(i)), OTHER_COLL));
+            }
+            ctx.batch(rows).execute();
+        }
+    }
+
+    /**
+     * Rows written by the superuser (RLS bypassed, so any tenant id is writable): tenant B's hostile-metadata
+     * chunks (see {@link #HOSTILE_METADATA}), tenant A's metadata collection (live, numeric {@code v}), and one
+     * chunk of the tenant whose id is the empty string. Every one carries the rare token and a live owner, so
+     * a probe that reached it would return it.
+     */
+    private void seedHostileAndMetadataRows() throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            Random rnd = new Random(20261004049L);
+
+            List<String> hostile = new ArrayList<>();
+            List<String> texts = new ArrayList<>();
+            List<float[]> vecs = new ArrayList<>();
+            for (int i = 0; i < HOSTILE_METADATA.size(); i++) {
+                hostile.add(Chash.ofText("rdr192-other-hostile-" + i).toHex());
+                texts.add(RARE_TOKEN + " rdr192 other tenant hostile metadata " + i);
+                vecs.add(unitVector(rnd));
+            }
+            PgContainerHelper.insertChunks(ctx, OTHER_TENANT, OTHER_COLL, hostile, texts, vecs, HOSTILE_METADATA);
+            PgContainerHelper.ownChunks(ctx, OTHER_TENANT, OTHER_COLL, hostile.toArray(String[]::new));
+            otherChashHex.addAll(hostile);
+
+            PgContainerHelper.insertCollection(ctx, TENANT, META_COLL);
+            List<String> ids = new ArrayList<>();
+            List<String> mtexts = new ArrayList<>();
+            List<float[]> mvecs = new ArrayList<>();
+            List<Map<String, Object>> metas = new ArrayList<>();
+            for (int i = 0; i < META_MATCH + META_NOMATCH; i++) {
+                ids.add(Chash.ofText("rdr192-meta-chunk-" + i).toHex());
+                mtexts.add(RARE_TOKEN + " rdr192 metadata chunk " + i);
+                mvecs.add(unitVector(rnd));
+                metas.add(Map.of("v", i < META_MATCH ? i + 2 : 0));
+                if (i < META_MATCH) metaMatchChashHex.add(ids.get(i));
+            }
+            PgContainerHelper.insertChunks(ctx, TENANT, META_COLL, ids, mtexts, mvecs, metas);
+            PgContainerHelper.ownChunks(ctx, TENANT, META_COLL, ids.toArray(String[]::new));
+
+            PgContainerHelper.insertCollection(ctx, EMPTY_TENANT, EMPTY_COLL);
+            String emptyId = Chash.ofText("rdr192-empty-tenant-chunk").toHex();
+            PgContainerHelper.insertChunks(ctx, EMPTY_TENANT, EMPTY_COLL, List.of(emptyId),
+                List.of(RARE_TOKEN + " rdr192 empty tenant chunk"), List.of(unitVector(rnd)),
+                List.of(Map.of()));
+            PgContainerHelper.ownChunks(ctx, EMPTY_TENANT, EMPTY_COLL, emptyId);
         }
     }
 
@@ -337,69 +514,336 @@ class Rdr192LiveCExplainEvidenceIntegrationTest {
         assertInlinedLiveC(plan, "hybrid_search_384");
     }
 
-    @Test
-    void gateProbe_selective_inlinesLiveC() {
-        Table<?> fn = TEXT_GATE_PROBE_384.call(RARE_TOKEN, new String[] {COLL}, null, null,
-            PgVectorRepository.SELECTIVE_GATE_MAX + 1);
-        String plan = explain("text_gate_probe_384 (selective gate)", ctx -> ctx.selectFrom(fn));
-        assertInlinedLiveC(plan, "text_gate_probe_384");
+    // ── the gate probe (vectors-029, nexus-wbfpw.48) ────────────────────────
+    //
+    // nexus.text_gate_probe_<dim> is SECURITY DEFINER since vectors-029, so it is never inlined: EXPLAIN of a
+    // call is one "Function Scan" line and says nothing about the body. The body's own plan, as nexus_svc,
+    // is read from auto_explain's nested-statement log (probeBodyPlan). The container was migrated as a
+    // non-superuser owner (startAll), which is what makes those plans production's: a superuser owner would
+    // run the definer body past RLS.
+
+    private static Table<?> probe384(String token, String... collections) {
+        return TEXT_GATE_PROBE_384.call(token, collections, null, null, PgVectorRepository.SELECTIVE_GATE_MAX + 1);
     }
 
-    @Test
-    void gateProbe_dense_inlinesLiveC() {
-        Table<?> fn = TEXT_GATE_PROBE_384.call(COMMON_TOKEN, new String[] {COLL}, null, null,
-            PgVectorRepository.SELECTIVE_GATE_MAX + 1);
-        String plan = explain("text_gate_probe_384 (dense gate)", ctx -> ctx.selectFrom(fn));
-        assertInlinedLiveC(plan, "text_gate_probe_384");
-    }
-
-    /**
-     * Evidence only (nothing here asserts a plan shape): the selective gate's plan with sequential scans
-     * penalised, to record whether the GIN text indexes offer an indexed alternative and what it costs
-     * and returns. The planner's own choice above is a sequential scan for this gate.
-     */
-    @Test
-    void gateProbe_selective_withSeqscanOff_recordsTheIndexedAlternative() {
-        Table<?> fn = TEXT_GATE_PROBE_384.call(RARE_TOKEN, new String[] {COLL}, null, null,
-            PgVectorRepository.SELECTIVE_GATE_MAX + 1);
-        String plan = explainWith("text_gate_probe_384 (selective gate, enable_seqscan=off)",
-            List.of("enable_seqscan"), ctx -> ctx.selectFrom(fn));
-        assertInlinedLiveC(plan, "text_gate_probe_384");
+    /** Chunks the selective token matches that live(c) shows, from the fixture's own arithmetic. */
+    private static int expectedSelectiveLive() {
+        int manifested = NUM_CHUNKS * 9 / 10;
+        int perDoc = Math.max(1, manifested / NUM_DOCS);
+        int live = 0;
+        for (int i = 0; i < NUM_CHUNKS; i += 100) {
+            if (i < manifested && Math.min(NUM_DOCS - 1, i / perDoc) % 3 != 0) live++;
+        }
+        return live;
     }
 
     /**
-     * Evidence only: the same selective-gate probe taken as the container superuser, which bypasses
-     * RLS. The planner's choice under {@code nexus_svc} is a sequential scan, and a sequential scan stays
-     * the choice with scans penalised (the test above), so the text gate's GIN indexes are unused. This
-     * records the plan with the RLS qual out of the way, to attribute that to RLS: a user qual whose
-     * operator is not leakproof ({@code @@}, {@code <%}) cannot be an index condition on a relation with
-     * a security qual (PostgreSQL's {@code restriction_is_securely_promotable}). This run is outside
-     * {@link TenantScope} and as a different role, so on its own it confounds RLS with the role and the
-     * GUC; the single-variable control (a BYPASSRLS clone of nexus_svc under the same tenant GUC, 2 ms,
-     * BitmapOr) is recorded on nexus-wbfpw.48.
+     * Timing, as nexus_svc, of the selective-gate probe: the number the bead measured (77 ms before
+     * vectors-029, 24,000 chunks). Evidence only, never asserted; the row count is.
      */
     @Test
-    void gateProbe_selective_asSuperuser_recordsThePlanWithoutRls() throws Exception {
-        Table<?> fn = TEXT_GATE_PROBE_384.call(RARE_TOKEN, new String[] {COLL}, null, null,
-            PgVectorRepository.SELECTIVE_GATE_MAX + 1);
+    void gateProbe_selective_asNexusSvc_returnsTheLiveMatchesAndIsTimed() {
+        Table<?> fn = probe384(RARE_TOKEN, COLL);
+        explain("text_gate_probe_384 (selective gate), call as nexus_svc", ctx -> ctx.selectFrom(fn));
+        int rows = tenantScope.withTenant(TENANT, ctx -> ctx.selectFrom(fn).fetch().size());
+        assertThat(rows).as("the selective gate returns exactly the live rare chunks").isEqualTo(expectedSelectiveLive());
+    }
+
+    /**
+     * THE PIN (acceptance of nexus-wbfpw.48): the probe's body, run as nexus_svc under FORCE RLS in a
+     * container whose owner is a non-superuser, reaches a GIN text index and does not scan the table.
+     * Without vectors-029's owner policy (checked, recorded on the bead) the same function, still SECURITY
+     * DEFINER, does not reach the text indexes: the definer is the table owner and FORCE applies to it, so the
+     * body carries the row-level-security qual again and the text predicates stay a Filter over chunks_pk.
+     */
+    @Test
+    void gateProbe_selective_underNexusSvcRls_reachesAGinTextIndex() throws Exception {
+        String plan = probeBodyPlan("text_gate_probe_384 (selective gate), body plan as nexus_svc", RARE_TOKEN);
+        assertThat(plan)
+            .as("the selective gate must be driven by idx_chunks_tsv or idx_chunks_trgm. Plan was:%n%s", plan)
+            .containsPattern("Bitmap Index Scan on idx_chunks_(tsv|trgm)")
+            .doesNotContain("Seq Scan on chunks");
+        assertThat(plan).as("live(c) stays inlined in the body. Plan was:%n%s", plan)
+            .doesNotContain("chunk_live_owners")
+            .contains("catalog_document_chunks");
+    }
+
+    /**
+     * The upper bound on the DENSE gate's median wall-clock as nexus_svc at the default fixture size, a
+     * catastrophe guard and not a benchmark (it is the one place a timing is asserted). Why it exists: the
+     * definer body is planned without the call's parameter values, so it cannot choose a sequential scan with
+     * an early LIMIT for a common token the way the inlined invoker form could (nexus-6nkn3 documents the
+     * generic-plan failure class). The recorded numbers, 24,000 chunks, 70% of rows match the token: see the
+     * bead (nexus-wbfpw.48) for this probe's median against the pre-change inlined plan on the same fixture.
+     */
+    private static final long DENSE_GATE_P50_BOUND_MS = 500;
+
+    /**
+     * The dense gate (70% of rows carry the token, far above the selective-gate cap): the body's plan under
+     * nexus_svc, and its measured wall-clock. Pins that live(c) stays inlined in the body, that the body's
+     * plan is the indexed one rather than a table scan, and that the median stays under a generous bound.
+     * The body is planned parameter-blind, so this plan is the same one the rare token gets, by construction.
+     */
+    @Test
+    void gateProbe_dense_underNexusSvc_inlinesLiveC_usesTheIndexedPlan_andStaysUnderTheBound() throws Exception {
+        String plan = probeBodyPlan("text_gate_probe_384 (dense gate), body plan as nexus_svc", COMMON_TOKEN);
+        assertThat(plan).as("live(c) stays inlined in the body. Plan was:%n%s", plan)
+            .doesNotContain("chunk_live_owners")
+            .contains("catalog_document_chunks");
+        assertThat(plan).as("the dense gate's body is planned as the indexed plan. Plan was:%n%s", plan)
+            .containsPattern("Bitmap Index Scan on idx_chunks_(tsv|trgm)")
+            .doesNotContain("Seq Scan on chunks");
+        String label = "text_gate_probe_384 (dense gate), call as nexus_svc";
+        Table<?> fn = probe384(COMMON_TOKEN, COLL);
+        explain(label, ctx -> ctx.selectFrom(fn));
+        long p50 = p50Ms.get(label);
+        assertThat(p50).as("the dense gate's median wall-clock as nexus_svc, %d chunks, 70%% matching",
+            NUM_CHUNKS).isLessThan(DENSE_GATE_P50_BOUND_MS);
+    }
+
+    /**
+     * The three functions vectors-029 changed are definer functions with a pinned search_path and no
+     * EXECUTE for PUBLIC; nexus_svc keeps EXECUTE (the calls above would fail otherwise).
+     */
+    @Test
+    void gateProbes_areDefinerFunctionsWithAPinnedSearchPath_andNotCallableByPublic() throws Exception {
+        Table<?> procs = DSL.table(DSL.name("pg_catalog", "pg_proc"));
+        Field<String> name = DSL.field(DSL.name("proname"), String.class);
+        Field<Boolean> definer = DSL.field(DSL.name("prosecdef"), Boolean.class);
+        Field<String> config = DSL.field(DSL.name("proconfig")).cast(SQLDataType.VARCHAR);
+        Field<String> acl = DSL.field(DSL.name("proacl")).cast(SQLDataType.VARCHAR);
+        try (Connection su = pg.createConnection("")) {
+            var rows = DSL.using(su, SQLDialect.POSTGRES).select(name, definer, config, acl).from(procs)
+                .where(name.in("text_gate_probe_384", "text_gate_probe_768", "text_gate_probe_1024")).fetch();
+            assertThat(rows).hasSize(3);
+            for (var row : rows) {
+                String fn = row.value1();
+                assertThat(row.value2()).as("%s is SECURITY DEFINER", fn).isTrue();
+                assertThat(row.value3()).as("%s pins its search_path", fn).contains("search_path=pg_catalog, pg_temp");
+                assertThat(row.value4()).as("%s grants EXECUTE to nexus_svc", fn).contains("nexus_svc=X/");
+                assertThat(row.value4()).as("%s grants EXECUTE to nobody else but its owner", fn)
+                    .doesNotContain("{=X/").doesNotContain(",=X/");
+            }
+        }
+    }
+
+    private List<String> probeAs(String tenant, Table<?> fn) {
+        return tenantScope.withTenant(tenant, ctx -> ctx.selectFrom(fn).fetch().getValues(0, byte[].class).stream()
+            .map(b -> HexFormat.of().formatHex(b)).toList());
+    }
+
+    /**
+     * Tenant isolation through every changed function. The definer function bypasses RLS, so isolation
+     * rests on its own predicate; this is the test of that predicate. A tenant that names ANOTHER tenant's
+     * collection gets nothing, a tenant that names both gets only its own rows, and each tenant sees its own
+     * rows (so the empty results are not vacuous).
+     */
+    @Test
+    void gateProbes_neverReturnAnotherTenantsChunks_throughAnyDimension() {
+        List<java.util.function.Function<Object[], Table<?>>> dims = List.of(
+            a -> TEXT_GATE_PROBE_384.call(RARE_TOKEN, (String[]) a[0], null, null, 10_000),
+            a -> TEXT_GATE_PROBE_768.call(RARE_TOKEN, (String[]) a[0], null, null, 10_000),
+            a -> TEXT_GATE_PROBE_1024.call(RARE_TOKEN, (String[]) a[0], null, null, 10_000));
+        for (var dim : dims) {
+            String[] mine = {COLL}, theirs = {OTHER_COLL}, both = {COLL, OTHER_COLL};
+            assertThat(probeAs(TENANT, dim.apply(new Object[] {theirs})))
+                .as("tenant A naming tenant B's collection").isEmpty();
+            List<String> aBoth = probeAs(TENANT, dim.apply(new Object[] {both}));
+            assertThat(aBoth).as("tenant A naming both collections: its own live rows only")
+                .hasSize(expectedSelectiveLive()).doesNotContainAnyElementsOf(otherChashHex);
+            assertThat(probeAs(TENANT, dim.apply(new Object[] {mine})))
+                .as("tenant A's own collection").hasSize(expectedSelectiveLive());
+            assertThat(probeAs(OTHER_TENANT, dim.apply(new Object[] {mine})))
+                .as("tenant B naming tenant A's collection").isEmpty();
+            assertThat(probeAs(OTHER_TENANT, dim.apply(new Object[] {both})))
+                .as("tenant B naming both collections: its own rows only")
+                .containsExactlyInAnyOrderElementsOf(otherChashHex);
+        }
+    }
+
+    /**
+     * Fail closed: with no tenant stamped (a fresh session, where the setting reads NULL) and with the
+     * setting empty (what a pooled session reads once a transaction-local stamp has ended), every changed
+     * function returns nothing, while the same call with a tenant stamped returns rows.
+     */
+    @Test
+    void gateProbes_returnNothing_whenNoTenantIsStamped_orTheStampIsEmpty() throws Exception {
+        List<Table<?>> fns = List.of(
+            probe384(RARE_TOKEN, COLL, OTHER_COLL),
+            TEXT_GATE_PROBE_768.call(RARE_TOKEN, new String[] {COLL, OTHER_COLL}, null, null, 10_000),
+            TEXT_GATE_PROBE_1024.call(RARE_TOKEN, new String[] {COLL, OTHER_COLL}, null, null, 10_000));
+        Field<String> setting = DSL.function("current_setting", SQLDataType.VARCHAR,
+            DSL.inline("nexus.tenant"), DSL.inline(true));
+        try (Connection c = DriverManager.getConnection(pg.getJdbcUrl(), PgContainerHelper.SVC_USERNAME,
+                PgContainerHelper.SVC_PASSWORD)) {
+            DSLContext ctx = DSL.using(c, SQLDialect.POSTGRES);
+            assertThat(ctx.select(setting).fetchOne(0)).as("a fresh session has no tenant stamped").isNull();
+            for (Table<?> fn : fns) assertThat(ctx.selectFrom(fn).fetch()).as("NULL tenant: %s", fn).isEmpty();
+        }
+        try (Connection c = DriverManager.getConnection(pg.getJdbcUrl(), PgContainerHelper.SVC_USERNAME,
+                PgContainerHelper.SVC_PASSWORD)) {
+            c.setAutoCommit(false);
+            DSLContext ctx = DSL.using(c, SQLDialect.POSTGRES);
+            ctx.select(DSL.function("set_config", SQLDataType.VARCHAR,
+                DSL.inline("nexus.tenant"), DSL.inline(""), DSL.inline(true))).fetch();
+            assertThat(ctx.select(setting).fetchOne(0)).as("the stamp is the empty string").isEqualTo("");
+            for (Table<?> fn : fns) assertThat(ctx.selectFrom(fn).fetch()).as("empty tenant: %s", fn).isEmpty();
+            c.rollback();
+        }
+        assertThat(probeAs(TENANT, fns.get(0))).as("the same call with a tenant stamped returns rows").isNotEmpty();
+    }
+
+    /**
+     * The empty-string tenant (what a pooled session reads once a transaction-local stamp has ended) must
+     * fail closed even when a tenant whose id IS the empty string owns live matching chunks. Only a superuser
+     * can write such a chunk (TenantScope refuses a blank id), and the row-level-security policy, which
+     * compares tenant_id to the bare setting, WOULD show it to a session stamped ''; the probe's
+     * {@code NULLIF(.., '')} is what keeps it from returning it. The control asserts the policy does show
+     * it, so this test fails if the NULLIF is removed (checked by hand: with it removed the probes return the
+     * empty tenant's chunk).
+     */
+    @Test
+    void gateProbes_failClosedOnAnEmptyStamp_evenWhenAnEmptyIdTenantOwnsLiveMatches() throws Exception {
+        List<Table<?>> fns = List.of(
+            probe384(RARE_TOKEN, EMPTY_COLL, COLL),
+            TEXT_GATE_PROBE_768.call(RARE_TOKEN, new String[] {EMPTY_COLL, COLL}, null, null, 10_000),
+            TEXT_GATE_PROBE_1024.call(RARE_TOKEN, new String[] {EMPTY_COLL, COLL}, null, null, 10_000));
+        try (Connection c = DriverManager.getConnection(pg.getJdbcUrl(), PgContainerHelper.SVC_USERNAME,
+                PgContainerHelper.SVC_PASSWORD)) {
+            c.setAutoCommit(false);
+            DSLContext ctx = DSL.using(c, SQLDialect.POSTGRES);
+            ctx.select(DSL.function("set_config", SQLDataType.VARCHAR,
+                DSL.inline("nexus.tenant"), DSL.inline(""), DSL.inline(true))).fetch();
+            assertThat(ctx.fetchCount(CHUNKS))
+                .as("CONTROL: the row-level-security policy shows the empty-id tenant's chunk to a session stamped ''")
+                .isEqualTo(1);
+            for (Table<?> fn : fns) {
+                assertThat(ctx.selectFrom(fn).fetch())
+                    .as("a probe stamped '' must not return the empty-id tenant's chunk: %s", fn).isEmpty();
+            }
+            c.rollback();
+        }
+    }
+
+
+    private static final String[] DIM_NAMES = {"384", "768", "1024"};
+
+    private static Table<?> probeByDim(int dimIndex, String token, String[] collections, String wherePath) {
+        return switch (dimIndex) {
+            case 0 -> TEXT_GATE_PROBE_384.call(token, collections, null, wherePath, 10_000);
+            case 1 -> TEXT_GATE_PROBE_768.call(token, collections, null, wherePath, 10_000);
+            default -> TEXT_GATE_PROBE_1024.call(token, collections, null, wherePath, 10_000);
+        };
+    }
+
+    /**
+     * Since vectors-029 the probe is no longer behind a row-level-security barrier, so the planner may
+     * evaluate its other quals (the where_path jsonpath, the text operators) on rows before the tenant
+     * predicate rejects them. This is the test of the visible consequences: tenant B holds metadata that makes
+     * {@code .double()} ERROR where an error surfaces (the control below), next to metadata the probe's path
+     * {@code $.v.double() > 1} matches, all live and carrying the rare token. (The probe's {@code @@} is
+     * silent, so on this evidence an error cannot escape it; the test pins that and the isolation together.) Tenant A's probe over A's collection alone and over
+     * A's plus B's must return the same rows, with no error, and B's rows must never appear.
+     */
+    @Test
+    void gateProbes_whereJsonpath_isUnaffectedByAnotherTenantsHostileMetadata() throws Exception {
+        // Non-vacuity: the hostile metadata really makes .double() ERROR when the item method is evaluated where
+        // an error surfaces (a STRICT, non-predicate path through jsonb_path_query). The probe's @@ is silent and
+        // a comparison predicate turns an error into "unknown", so the probe itself never raises on these rows
+        // (observed: V_GT_1 through the non-silent jsonb_path_match does not raise on them either); this proves
+        // the values are the kind that would raise if the evaluation were not silent.
         try (Connection su = pg.createConnection("")) {
             DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
-            ResultQuery<?> q = ctx.selectFrom(fn);
-            String plan = ctx.explain(q).plan();
-            int rows = q.fetch().size();
-            long[] ms = new long[TIMED_RUNS];
-            for (int i = 0; i < TIMED_RUNS; i++) {
-                long t0 = System.nanoTime();
-                q.fetch();
-                ms[i] = (System.nanoTime() - t0) / 1_000_000;
+            for (String hostile : List.of("rdr192-other-hostile-0", "rdr192-other-hostile-1", "rdr192-other-hostile-2")) {
+                byte[] chash = Chash.ofText(hostile).toBytes();
+                var evaluate = DSL.function("jsonb_path_query", org.jooq.JSONB.class, CHUNKS.METADATA,
+                    DSL.inline("strict $.v.double()"));
+                org.assertj.core.api.Assertions.assertThatThrownBy(() -> ctx.select(evaluate).from(CHUNKS)
+                        .where(CHUNKS.TENANT_ID.eq(OTHER_TENANT)).and(CHUNKS.CHASH.eq(chash)).fetch())
+                    .as("%s: the path must ERROR on this metadata when evaluated non-silently", hostile)
+                    .hasMessageContaining("double");
             }
-            java.util.Arrays.sort(ms);
-            synchronized (evidence) {
-                evidence.put("text_gate_probe_384 (selective gate, superuser, RLS bypassed)",
-                    "rows=" + rows + "  p50=" + ms[TIMED_RUNS / 2] + " ms  (runs "
-                        + java.util.Arrays.toString(ms) + ")\n" + plan);
-            }
-            assertInlinedLiveC(plan, "text_gate_probe_384");
+        }
+        for (int dim = 0; dim < DIM_NAMES.length; dim++) {
+            String label = "dim " + DIM_NAMES[dim];
+            List<String> alone = probeAs(TENANT, probeByDim(dim, RARE_TOKEN, new String[] {META_COLL}, V_GT_1));
+            assertThat(alone).as("%s: tenant A's own matches (non-vacuity)", label)
+                .containsExactlyInAnyOrderElementsOf(metaMatchChashHex);
+            List<String> withB = probeAs(TENANT,
+                probeByDim(dim, RARE_TOKEN, new String[] {META_COLL, OTHER_COLL}, V_GT_1));
+            assertThat(withB).as("%s: naming tenant B's hostile collection changes nothing for tenant A", label)
+                .containsExactlyInAnyOrderElementsOf(alone);
+            List<String> b = probeAs(OTHER_TENANT,
+                probeByDim(dim, RARE_TOKEN, new String[] {META_COLL, OTHER_COLL}, V_GT_1));
+            assertThat(b).as("%s: tenant B's own session evaluates its hostile metadata without error", label)
+                .isNotEmpty().isSubsetOf(otherChashHex).doesNotContainAnyElementsOf(metaMatchChashHex);
+        }
+    }
+
+    /**
+     * The policies on nexus.chunks, exactly: the tenant policy, and vectors-029's owner SELECT policy bound to
+     * the migrating role alone, never to PUBLIC and never to nexus_svc. (The single-role posture, where the
+     * changeset must not create the policy at all, is TextGateProbeSingleRoleGuardIntegrationTest.)
+     */
+    @Test
+    void chunksPolicies_areExactlyTheTenantPolicyAndTheOwnerSelectPolicy() throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            var policies = PgCatalogProbes.policyRoles(DSL.using(su, SQLDialect.POSTGRES), "nexus", "chunks");
+            assertThat(policies.stream().map(PgCatalogProbes.PolicyRoles::toString).toList())
+                .containsExactly(
+                    "chunks_gate_probe_owner_read roles={" + ADMIN_ROLE + "} cmd=SELECT",
+                    "tenant_isolation roles={public} cmd=ALL");
+        }
+    }
+
+    /**
+     * Every SECURITY DEFINER function in schema nexus, pinned as a list. A definer function in this schema
+     * runs as the migration role, which owns the tables and, since vectors-029, holds a read-everything policy
+     * on nexus.chunks, so a new one is an access path that needs a reviewer. The two ensure_vector_extensions_*
+     * helpers are the DBA-side relocation helpers (installed by the test's owner bootstrap exactly as
+     * nexus.db.pg_provision installs them); the others are the three gate probes.
+     */
+    @Test
+    void securityDefinerFunctionsInSchemaNexus_areExactlyTheAllowlist() throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            var definers = PgCatalogProbes.functionShapesIn(DSL.using(su, SQLDialect.POSTGRES), List.of("nexus")).stream()
+                .filter(PgCatalogProbes.FunctionShape::securityDefiner)
+                .map(f -> f.identity().substring(0, f.identity().indexOf('(')))
+                .sorted().toList();
+            assertThat(definers).containsExactly(
+                "ensure_vector_extensions_relocated", "ensure_vector_extensions_unrelocated",
+                "text_gate_probe_1024", "text_gate_probe_384", "text_gate_probe_768");
+        }
+    }
+
+    /**
+     * What vectors-029's owner policy does and does not do, pinned. It applies to the owner only: nexus_svc
+     * still sees exactly its own tenant's chunks through the table (and none with no tenant stamped). The
+     * owner can now READ every tenant's chunks, the stated cost, and gains no write access: UPDATE and DELETE
+     * as the owner without a tenant stamped still affect nothing, the silent no-op that
+     * test_changelog_rls_lint documents for migration DML.
+     */
+    @Test
+    void ownerReadPolicy_doesNotWidenTheServiceRole_andDoesNotWidenTheOwnersWrites() throws Exception {
+        int seenByB = tenantScope.withTenant(OTHER_TENANT, ctx -> ctx.fetchCount(CHUNKS));
+        int seenByA = tenantScope.withTenant(TENANT, ctx -> ctx.fetchCount(CHUNKS));
+        assertThat(seenByB).as("nexus_svc, tenant B: only B's chunks").isEqualTo(OTHER_CHUNKS + HOSTILE_METADATA.size());
+        assertThat(seenByA).as("nexus_svc, tenant A: only A's chunks").isEqualTo(NUM_CHUNKS + META_MATCH + META_NOMATCH);
+        try (Connection c = DriverManager.getConnection(pg.getJdbcUrl(), PgContainerHelper.SVC_USERNAME,
+                PgContainerHelper.SVC_PASSWORD)) {
+            assertThat(DSL.using(c, SQLDialect.POSTGRES).fetchCount(CHUNKS))
+                .as("nexus_svc with no tenant stamped sees nothing").isZero();
+        }
+        try (Connection c = DriverManager.getConnection(pg.getJdbcUrl(), ADMIN_ROLE, ADMIN_PASS)) {
+            c.setAutoCommit(false);
+            DSLContext ctx = DSL.using(c, SQLDialect.POSTGRES);
+            assertThat(ctx.fetchCount(CHUNKS)).as("the owner reads every tenant's chunks (the policy's stated cost)")
+                .isEqualTo(NUM_CHUNKS + META_MATCH + META_NOMATCH + OTHER_CHUNKS + HOSTILE_METADATA.size() + 1);
+            assertThat(ctx.update(CHUNKS).set(CHUNKS.CHUNK_TEXT, CHUNKS.CHUNK_TEXT).execute())
+                .as("the owner's UPDATE with no tenant stamped still affects nothing").isZero();
+            assertThat(ctx.deleteFrom(CHUNKS).execute())
+                .as("the owner's DELETE with no tenant stamped still affects nothing").isZero();
+            c.rollback();
         }
     }
 
@@ -498,6 +942,43 @@ class Rdr192LiveCExplainEvidenceIntegrationTest {
             .doesNotContain("SubPlan 2");
     }
 
+    private static final String BODY_MARKER = "NULLIF(pg_catalog.current_setting('nexus.tenant', true)";
+    private static final Pattern NEXT_LOG_LINE = Pattern.compile("\n\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:");
+
+    /**
+     * Run the probe as a fresh nexus_svc session that has auto_explain on (explainDs, opened after the role
+     * was configured) and return the plan auto_explain logged for the probe's BODY, the nested statement.
+     * Taken from the container's server log; the log line is written asynchronously, so this polls for it.
+     * The whole entry lands in the evidence file; the return value is the plan alone.
+     */
+    private String probeBodyPlan(String label, String token) throws Exception {
+        int from = pg.getLogs().length();
+        Table<?> fn = probe384(token, COLL);
+        int rows = explainScope.withTenant(TENANT, ctx -> ctx.selectFrom(fn).fetch().size());
+        String block = null;
+        for (int attempt = 0; attempt < 100 && block == null; attempt++) {
+            String logs = pg.getLogs();
+            int mark = logs.indexOf(BODY_MARKER, from);
+            if (mark >= 0) {
+                int begin = logs.lastIndexOf("LOG:  duration:", mark);
+                Matcher next = NEXT_LOG_LINE.matcher(logs);
+                int end = next.find(mark) ? next.start() : logs.length();
+                block = logs.substring(Math.max(begin, from), end);
+            } else {
+                Thread.sleep(100);
+            }
+        }
+        assertThat(block).as("auto_explain logged no plan for the probe's body (token %s)", token).isNotNull();
+        synchronized (evidence) {
+            evidence.put(label, "rows=" + rows + "\n" + block);
+        }
+        // The log entry leads with the statement's own text, which names chunk_live_owners as written; the
+        // plan is what follows the parameters line, and that is what a caller may assert on.
+        int params = block.indexOf("Query Parameters:");
+        assertThat(params).as("auto_explain's entry carries the parameters line. Entry was:%n%s", block).isNotNegative();
+        return block.substring(block.indexOf('\n', params) + 1);
+    }
+
     private Vector queryVec() {
         return Vector.of(vectors.get(7));
     }
@@ -530,6 +1011,7 @@ class Rdr192LiveCExplainEvidenceIntegrationTest {
             }
             java.util.Arrays.sort(ms);
             synchronized (evidence) {
+                p50Ms.put(label, ms[TIMED_RUNS / 2]);
                 evidence.put(label, "rows=" + rows + "  p50=" + ms[TIMED_RUNS / 2] + " ms  (runs "
                     + java.util.Arrays.toString(ms) + ")\n" + plan);
             }

@@ -513,7 +513,9 @@ public final class NexusService {
         // moment) -- the "no second clock source" requirement in one place.
         server.createContext("/v1/status",
                 new dev.nexus.service.http.StatusHandler(docEmbedderRouter, localEmbedActivitySupplier,
-                        versionHandler.processStartMillis(), ownerlessWritePolicy, this::reaperStatus));
+                        versionHandler.processStartMillis(), ownerlessWritePolicy, this::reaperStatus,
+                        dev.nexus.service.db.ChunksIsolationCheck.statusSupplier(
+                                dataSource, java.time.Clock.systemUTC())));
 
         // /v1/install-ping — unauthenticated anonymous daily client beacon
         // (nexus-h5olw). Local-mode installs have no tenant or token, and they

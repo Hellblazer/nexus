@@ -1,0 +1,93 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-wbfpw.48 — the DBA-side provisioning a NON-SUPERUSER schema owner needs before the product
+    changelog can be walked as that owner, as a Liquibase artifact instead of per-class JDBC strings.
+
+    WHY: production migrates as nexus_admin, a NOSUPERUSER NOBYPASSRLS role that owns every relation it
+    creates. FORCE ROW LEVEL SECURITY applies to such an owner, and a SECURITY DEFINER function runs as
+    its owner, so a definer function bypasses RLS only when the owner is a superuser or BYPASSRLS. A
+    test container that migrates as the superuser (PgContainerHelper#applyProductSchema) therefore shows a
+    definer function reading past RLS and proves nothing about production. vectors-029's text-gate probe
+    depends on exactly this, so its tests migrate through PgContainerHelper#bootstrapNonSuperuserOwner and
+    SchemaMigrator.migrate as the owner, the shape SchemaMigratorIntegrationTest#bootstrap hand-rolls.
+
+    WHAT IT MIRRORS (SchemaMigratorIntegrationTest#bootstrap, same statements): ${adminRole} (LOGIN,
+    NOSUPERUSER NOCREATEDB NOCREATEROLE), nexus_svc (LOGIN, NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS),
+    CREATE on the database and on public, pg_monitor WITH ADMIN OPTION (grants-004 passes it on to nexus_svc),
+    both extensions, the nexus schema owned by ${adminRole}, and the SECURITY DEFINER relocation helpers
+    search-path-001 calls mid-walk (nexus.db.pg_provision.relocate_vector_extensions_to_nexus_schema's
+    shape). Run it against a DEDICATED, virgin container only (PgContainerHelper#startDedicated): schema
+    ownership is global state.
+
+    Run through its own databasechangelog table (PgContainerHelper#bootstrapNonSuperuserOwner sets the
+    names): whichever role's Liquibase run creates databasechangelog first OWNS it, and the owner's later
+    product walk must not find a superuser-owned one in public.
+
+    runAlways so a repeat call is harmless; every statement is idempotent.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="test-nonsuper-owner-1" author="nexus-wbfpw.48" runAlways="true">
+        <comment>Create ${adminRole} and nexus_svc, the database/public grants, the extensions, the nexus schema owned by ${adminRole} and the relocation helpers.</comment>
+        <sql splitStatements="false" stripComments="false">
+DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${adminRole}') THEN
+        CREATE ROLE ${adminRole} LOGIN PASSWORD '${adminPass}' NOSUPERUSER NOCREATEDB NOCREATEROLE;
+    END IF;
+END $$;
+
+DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nexus_svc') THEN
+        CREATE ROLE nexus_svc LOGIN PASSWORD '${svcPass}' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;
+    END IF;
+END $$;
+
+DO $$ BEGIN
+    EXECUTE format('GRANT CREATE ON DATABASE %I TO ${adminRole}', current_database());
+END $$;
+
+GRANT CREATE ON SCHEMA public TO ${adminRole};
+GRANT pg_monitor TO ${adminRole} WITH ADMIN OPTION;
+
+CREATE EXTENSION IF NOT EXISTS vector;
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
+CREATE SCHEMA IF NOT EXISTS nexus AUTHORIZATION ${adminRole};
+
+CREATE OR REPLACE FUNCTION nexus.ensure_vector_extensions_relocated()
+RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $relofunc$
+BEGIN
+    IF (SELECT extnamespace::regnamespace::text FROM pg_extension WHERE extname = 'vector') &lt;&gt; 'nexus' THEN
+        EXECUTE 'ALTER EXTENSION vector SET SCHEMA nexus';
+    END IF;
+    IF (SELECT extnamespace::regnamespace::text FROM pg_extension WHERE extname = 'pg_trgm') &lt;&gt; 'nexus' THEN
+        EXECUTE 'ALTER EXTENSION pg_trgm SET SCHEMA nexus';
+    END IF;
+END;
+$relofunc$;
+REVOKE EXECUTE ON FUNCTION nexus.ensure_vector_extensions_relocated() FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION nexus.ensure_vector_extensions_relocated() TO ${adminRole};
+
+CREATE OR REPLACE FUNCTION nexus.ensure_vector_extensions_unrelocated()
+RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $unrelofunc$
+BEGIN
+    IF (SELECT extnamespace::regnamespace::text FROM pg_extension WHERE extname = 'vector') &lt;&gt; 'public' THEN
+        EXECUTE 'ALTER EXTENSION vector SET SCHEMA public';
+    END IF;
+    IF (SELECT extnamespace::regnamespace::text FROM pg_extension WHERE extname = 'pg_trgm') &lt;&gt; 'public' THEN
+        EXECUTE 'ALTER EXTENSION pg_trgm SET SCHEMA public';
+    END IF;
+END;
+$unrelofunc$;
+REVOKE EXECUTE ON FUNCTION nexus.ensure_vector_extensions_unrelocated() FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION nexus.ensure_vector_extensions_unrelocated() TO ${adminRole};
+        </sql>
+        <rollback>
+            <!-- Test-only provisioning; not automated, same stance as db.changelog-test-role.xml. -->
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

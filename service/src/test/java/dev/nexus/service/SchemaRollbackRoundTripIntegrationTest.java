@@ -777,6 +777,64 @@ class SchemaRollbackRoundTripIntegrationTest {
         }
     }
 
+    // ── vectors-029 targeted rollback (nexus-wbfpw.48) ───────────────────────
+
+    private static final List<String> TEXT_GATE_PROBES =
+        List.of("text_gate_probe_384", "text_gate_probe_768", "text_gate_probe_1024");
+
+    /**
+     * The full round trip above rolls EVERYTHING back, which drops schema nexus with its functions, so a
+     * rollback of vectors-029-1 that left a function SECURITY DEFINER, kept its search_path pin, left an
+     * explicit nexus_svc EXECUTE grant or left the owner policy behind is invisible to it. This one rolls
+     * back through vectors-029-1 ALONE (and the runAlways tail after it) and reads the probes' shape.
+     */
+    @Test
+    void textGateProbeRollback_restoresInvokerProbes_dropsThePolicy_andRevokesTheServiceGrant() throws Exception {
+        PostgreSQLContainer<?> pg = PgContainerHelper.startDedicated();
+        try {
+            try (Connection su = pg.createConnection("")) {
+                dbaBootstrap(su);
+            }
+            try (HikariDataSource ds = newAdminPool(pg, "nexus-admin-rollback-vectors029")) {
+                SchemaMigrator.migrate(ds);
+                try (Connection c = ds.getConnection()) {
+                    var before = probeShapes(c);
+                    assertThat(before).as("the three probes exist after the forward walk").hasSize(3);
+                    for (var f : before) {
+                        assertThat(f.securityDefiner()).as("forward: %s is SECURITY DEFINER (non-vacuity)", f).isTrue();
+                        assertThat(f.acl()).as("forward: %s has an explicit nexus_svc EXECUTE grant", f)
+                            .contains("nexus_svc=X/");
+                    }
+                    assertThat(PgCatalogProbes.policyExists(dsl(c), "nexus", "chunks", "chunks_gate_probe_owner_read"))
+                        .as("forward: the owner policy exists (non-vacuity)").isTrue();
+                    int depth = rollbackDepthThrough(c, "vectors-029-1");
+                    assertThat(depth).as("vectors-029-1 must have executed, or the rollback below is a no-op")
+                        .isGreaterThan(0);
+                    assertThatCode(() -> rollbackEverything(ds, depth)).doesNotThrowAnyException();
+                }
+                try (Connection c = ds.getConnection()) {
+                    for (var f : probeShapes(c)) {
+                        assertThat(f.securityDefiner()).as("rolled back: %s is SECURITY INVOKER again", f).isFalse();
+                        assertThat(f.config()).as("rolled back: %s carries no SET clause", f).isNull();
+                        assertThat(f.acl()).as("rolled back: %s keeps no explicit nexus_svc grant", f)
+                            .doesNotContain("nexus_svc=");
+                        assertThat(f.acl()).as("rolled back: %s is executable by PUBLIC again", f).contains(",=X/");
+                    }
+                    assertThat(PgCatalogProbes.policyExists(dsl(c), "nexus", "chunks", "chunks_gate_probe_owner_read"))
+                        .as("rolled back: the owner policy is gone").isFalse();
+                }
+            }
+        } finally {
+            pg.stop();
+        }
+    }
+
+    private static List<PgCatalogProbes.FunctionShape> probeShapes(Connection c) {
+        return PgCatalogProbes.functionShapesIn(dsl(c), List.of("nexus")).stream()
+            .filter(f -> TEXT_GATE_PROBES.stream().anyMatch(n -> f.identity().startsWith(n + "(")))
+            .toList();
+    }
+
     // ── Data-fidelity round trip (nexus-cck6z) ───────────────────────────────
     //
     // The round trip above proves the rollback SQL RUNS; it seeds no rows, so
@@ -1826,6 +1884,19 @@ class SchemaRollbackRoundTripIntegrationTest {
             .map(p -> p.schema() + "." + p.table() + "." + p.policyname() + " = "
                 + (p.qual() == null ? "" : p.qual()) + " | " + (p.withCheck() == null ? "" : p.withCheck()))
             .toList()));
+        // Policy ROLE lists: pg_policies.qual says nothing about who a policy applies to, and a policy that
+        // binds to the wrong role (vectors-029's TO CURRENT_USER owner policy is the case on record) reads
+        // identically in the category above.
+        shape.put("policyRoles", sorted(schemas.stream()
+            .flatMap(sc -> PgCatalogProbes.tablesInSchema(ctx, sc).stream()
+                .flatMap(t -> PgCatalogProbes.policyRoles(ctx, sc, t).stream()
+                    .map(p -> sc + "." + t + "." + p)))
+            .toList()));
+        // Function security shape: SECURITY DEFINER flag, SET clauses (search_path pin) and ACL. A rollback
+        // that restores a function body but leaves it DEFINER, or leaves an explicit nexus_svc EXECUTE
+        // grant behind (vectors-029's I1), changes none of the table-shaped categories.
+        shape.put("functions", sorted(PgCatalogProbes.functionShapesIn(ctx, schemas).stream()
+            .map(PgCatalogProbes.FunctionShape::toString).toList()));
         shape.put("rlsFlags", sorted(PgCatalogProbes.rowSecurityIn(ctx, schemas).stream()
             .map(r -> r.schema() + "." + r.table() + " rls=" + r.enabled() + " force=" + r.forced()).toList()));
         // rdr180-3..7 are ALTER COLUMN ... TYPE bytea conversions carrying empty

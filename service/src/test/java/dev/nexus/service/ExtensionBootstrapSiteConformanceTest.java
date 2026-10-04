@@ -86,6 +86,21 @@ class ExtensionBootstrapSiteConformanceTest {
     private static final Set<String> SANCTIONED_FILES = Set.of("vectors-001-baseline.xml");
 
     /**
+     * (filename) TEST-resource changelogs ({@code src/test/resources/db/changelog-test}) sanctioned to carry
+     * a real {@code CREATE EXTENSION}: the XML form of the superuser-connection DBA pre-step that {@link
+     * #SANCTIONED_JAVA_FILES} sanctions as Java strings. Never a product changeset, never run by a
+     * production walk, and kept separate from {@link #SANCTIONED_FILES} so the product allowlist stays at
+     * its one entry.
+     *
+     * <p><b>db.changelog-test-nonsuper-owner.xml</b> (nexus-wbfpw.48): provisions a NOSUPERUSER schema owner
+     * for a dedicated container and so must install {@code vector}/{@code pg_trgm} as the superuser first,
+     * exactly as {@code SchemaMigratorIntegrationTest#bootstrap} does by hand (that class is in
+     * {@link #SANCTIONED_JAVA_FILES}). It is run only through {@code
+     * PgContainerHelper#bootstrapNonSuperuserOwner}.
+     */
+    private static final Set<String> SANCTIONED_TEST_CHANGELOGS = Set.of("db.changelog-test-nonsuper-owner.xml");
+
+    /**
      * (filename) Java test fixtures sanctioned to carry a literal {@code
      * CREATE EXTENSION IF NOT EXISTS vector}/{@code pg_trgm} string. Two
      * shapes:
@@ -135,7 +150,7 @@ class ExtensionBootstrapSiteConformanceTest {
             try (var walk = Files.walk(root)) {
                 for (Path file : walk.filter(p -> p.toString().endsWith(".xml")).toList()) {
                     String filename = file.getFileName().toString();
-                    if (SANCTIONED_FILES.contains(filename)) {
+                    if (SANCTIONED_FILES.contains(filename) || SANCTIONED_TEST_CHANGELOGS.contains(filename)) {
                         continue;
                     }
                     violations.addAll(
