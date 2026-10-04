@@ -42,7 +42,7 @@ docstring and nothing else. The cheap path is now cheap all the way
 through.
 
 That margin is the whole point, and it is only visible on the cheap
-hooks. ``phase_review_close_requires_gate`` is stdlib-only and costs
+hooks. The phase-review close gate (deleted at cleanup step A2) was stdlib-only and cost
 0.03 s end to end as bash on this box -- 0.04 s in bead .2's harness --
 so a port paying 0.06 s to reach
 ``never_fail`` would have been a hot-path regression rather than the
@@ -51,15 +51,12 @@ deliberately not optimised here: it genuinely needs ``nexus.session``,
 pays for it legitimately, and its own 187-221 ms is mostly real I/O --
 a bounded tuple-surface probe and a stale-MCP-host scan -- against the
 ~904 ms ``nx hook session-start`` Click path it replaces (bead
-nexus-q02nx.5, median of 10). Judge this module by the close gate, not
+nexus-q02nx.5, median of 10). Judge this module by the cheap verbs, not
 by ``session-start`` -- but on the right number.
 
 What 0.02 s measures is the dispatch FLOOR -- a synthetic stdlib-only
-verb through the real entry point. That is the figure the close gate's
-COMMON path will pay, the one that runs on every Bash call and exits
-early via ``_lib.allow()``. Its narrow phase-review branch additionally
-imports ``nexus.session`` and shells out to ``bd show``; that cost is
-real, is its own, and stays unmeasured until the port lands.
+verb through the real entry point. That is the figure the common path of
+a hook that runs on every Bash call pays when it exits early.
 
 ``tests/hooks/test_hook_runtime_thin.py`` keeps it that way: it asserts
 this package's ``__init__`` imports nothing and that the modules beside
@@ -76,27 +73,21 @@ one function, ``run(payload: dict | None) -> HookResult``
 two entries"). The first real verb, ``session-start`` (nexus-q02nx.5), is
 registered below; it never reaches the tool tier at all, since
 ``SessionStart`` fires before any MCP server is guaranteed connected
-(Approach item 1). The ledger verbs
-(``expect``/``start``/``census``/``undeclared``/``reconcile``) are Phase 2.
+(Approach item 1).
 Resolution happens once, per invocation, via ``importlib`` -- there is no
 eager import of every registered verb's module merely because one of them
 is being dispatched.
 
 **Exit codes.** Every hook verb exits 0, matching the bash layer, where a
 block or deny is encoded in the JSON body on stdout and never in the exit
-status (RDR-215 Contracts). The ledger verbs are the one exception: their
-callers branch on the code ``run()`` returns (``undeclared``: 0/1/2/3;
-``reconcile``: 0/2/4; ``census``: 0/1; ``expect``/``start``: 2 on invalid
-input), so :data:`LEDGER_VERBS` names which verbs propagate their
-``HookResult.exit_code`` instead of having it forced to 0.
+status (RDR-215 Contracts).
 
 A MISSING verb argument (``hooks.json`` invoking ``nx-hook`` with no verb
 at all) is a genuine invocation error and stays exit 2 with a one-line
 diagnostic -- that shape is always this CLI's own misconfiguration to fix.
 
 An UNKNOWN verb -- one this CLI's :data:`VERB_TABLE` has never heard of --
-exits 0 instead of 2 for a NON-ledger verb (2 for a ledger-SHAPED one --
-see below), still with a named stderr diagnostic AND, for the exit-0 case,
+exits 0 instead of 2, still with a named stderr diagnostic AND
 a ``systemMessage`` written to the real stdout envelope so the diagnostic
 actually reaches the person running the session (stderr from a hook does
 not; see the ``main`` dispatch code). The plugin marketplace updates
@@ -111,40 +102,19 @@ at the 7.58.0 release blocker (nexus-t9klx): seven such entries reached
 version-lockstep hook that upgrades the CLI was one of the seven, so
 nothing could recover on its own.
 
-**Be plain about what fail-open COSTS for a DECIDING gate.** Two of the
-seven verbs nexus-t9klx measured are deciding gates --
-``pre-close-verification`` and ``phase-review-close-gate`` -- registered
-in ``nexus.mcp.hooks._NEVER_TOOL_TIER`` precisely because a crash at the
-tool boundary renders as allow and these two rules must still deny. This
-exit-0 path is a THIRD way for that same failure shape to occur, at the
-command-tier boundary instead: on a CLI older than the plugin, an unknown
-deciding-gate verb means the gate LITERALLY DOES NOT RUN and the action it
-would have gated -- a ``bd close`` with no review marker, a phase boundary
-closed without its cross-walk -- is ALLOWED, exactly as if the gate had
-been deleted. This is NOT "the same contract every real verb gets" (an
-earlier draft of this docstring claimed that, and it was wrong): a real
-verb's ``never_fail`` failure is a crash inside code that ran; this is code
-that never ran at all, and calling the two the same thing hides the
-difference between "the gate tried and gave up" and "the gate was never
-invoked." The trade actually being made is: a session blocked outright
-with no self-heal path (exit 2, the 7.58.0 incident) against a gate that
-is silently absent for the minutes-to-hours between the plugin update
-landing and the session's own version-lockstep hook finishing its
-detached upgrade. That window is bounded and self-closing; a blocked
-session is not. Nothing here narrows the window further than that -- it is
-the accepted cost of choosing recoverable over safe for this one case, not
-a claim that the gate is somehow still enforced.
+**Be plain about what fail-open COSTS for a DECIDING hook.** A deciding
+hook (``auto-approve``, a PreToolUse permission) is exactly the shape for
+which this exit-0 path is a way for a failure to read as allow: on a CLI
+older than the plugin, an unknown deciding verb means the hook LITERALLY DOES
+NOT RUN, and what it would have decided is left to Claude Code's own
+permission flow, exactly as if the hook had been deleted. That is code that
+never ran, which is not the same thing as a crash inside code that did. The
+trade made is a session blocked outright with no self-heal path (exit 2, the
+7.58.0 incident) against a hook that is silently absent for the minutes to
+hours between the plugin update landing and the session's own
+version-lockstep hook finishing its detached upgrade. That window is bounded
+and self-closing; a blocked session is not.
 
-A ledger-SHAPED unknown verb (its name starts with
-:data:`_LEDGER_VERB_PREFIX`, ``"expectations_"``) is the one case that
-still exits nonzero: :data:`_LEDGER_CRASH_EXIT` (70), never 0. A real
-ledger verb's exit code IS its contract (see :data:`LEDGER_VERBS` above),
-and 0 means "clean" in that vocabulary -- so an UNKNOWN ledger verb failing
-open at exit 0 would read as a clean audit that examined nothing, the
-exact silent miss RDR-184 exists to catch. This cannot be checked against
-:data:`LEDGER_VERBS` membership, because that table only names verbs that
-already resolve; the prefix is the only signal available for a verb this
-CLI has never registered.
 """
 from __future__ import annotations
 
@@ -178,11 +148,6 @@ VERB_TABLE: dict[str, str] = {
     # port of the `nx hook session-start` Click verb.
     "preflight": "nexus.hooks.preflight_verb",
     "session-context": "nexus.hooks.session_context",
-    # The first of the five bare-`python3` entries ported at nexus-t9klx.
-    # Stock Windows has no python3 on PATH; a console-script verb gets a
-    # real .exe shim from the installer. Stdlib-only and storage-free, so
-    # the port is the script's body with print() replaced by HookResult.
-    "behaviour-census": "nexus.hooks.behaviour_census",
     # No `version-lockstep` verb. nexus-t9klx ported it here, and the port
     # was the 7.58.0 release blocker: the hook that repairs plugin-ahead CLI
     # skew cannot depend on the CLI it repairs, and an older nx-hook exits 2
@@ -190,18 +155,9 @@ VERB_TABLE: dict[str, str] = {
     # conexus/hooks/scripts/version_lockstep_hook.py for good (pinned by
     # tests/hooks/test_lockstep_survives_cli_skew.py); the unwired verb was
     # deleted at nexus-rcoze.
-    # The routing framework's one fail_closed rule (nexus-t9klx). It was
-    # already command-tier-only by ruling -- nexus.mcp.hooks._NEVER_TOOL_TIER
-    # refuses to register it as an mcp_tool, because a tool-boundary crash
-    # renders as allow and this rule must still deny. The port keeps it here.
-    "phase-review-close-gate": "nexus.hooks.phase_review_close_gate",
-    # The routing framework's other guard, and the deliberately FAIL-OPEN
-    # one (nexus-t9klx). Its posture is the opposite of the line above and
-    # stays that way: registry.yaml carries Sam's 2026-07-25 reasoning that
-    # a crash in a broken guard must not brick every agent's Bash. Porting
-    # it emptied `routing/` of code -- `routing/_lib.py` had no plugin
-    # importer left and went with it.
-    "subagent-git-write-gate": "nexus.hooks.subagent_git_write_gate",
+    # No `subagent-git-write-gate` verb either: hooks.json never wired it, so
+    # the plugin script routing/subagent_git_write_requires_orchestrator.py is
+    # the one copy (cleanup step A4, nexus-0r1uz).
     # The last of the five (nexus-t9klx): the UserPromptSubmit mailbox floor.
     # The only verb that streams its stdout during run() (_io.stream), because
     # a row it has consumed at the engine must be shown before its recovery
@@ -217,65 +173,18 @@ VERB_TABLE: dict[str, str] = {
     # to do inside the hook interpreter that is running out of one.
     "upgrade-auto": "nexus.hooks.upgrade_auto",
     "self-gc": "nexus.hooks.self_gc",
-    # The RDR-184 ledger's operator verbs (bead nexus-q02nx.14). All four
-    # resolve to ONE module, which re-reads sys.argv[1] to tell them apart
-    # -- they take arguments rather than a hook payload, so they are the
-    # only entries here that are not fired by an event. Command tier only:
-    # the answer IS the exit code, and an MCP tool has none.
-    "expectations_census": "nexus.hooks.ledger_verbs",
-    "expectations_undeclared": "nexus.hooks.ledger_verbs",
-    "expectations_reconcile": "nexus.hooks.ledger_verbs",
-    "expectations_expect": "nexus.hooks.ledger_verbs",
-    # The three DECIDING hooks (bead nexus-17i1n). Each of these was wired
-    # as an `mcp_tool` entry at bead nexus-q02nx.21 and shipped inert in
-    # conexus 7.55.0: an `mcp_tool` hook CANNOT return a permission or stop
+    # The DECIDING hook (bead nexus-17i1n). `auto-approve` was wired as an
+    # `mcp_tool` entry at bead nexus-q02nx.21 and shipped inert in conexus
+    # 7.55.0: an `mcp_tool` hook CANNOT return a permission or stop
     # decision. Claude Code's own hooks guide lists the four hook types
     # that can decide -- prompt, agent, command, http -- and `mcp_tool` is
     # not among them; its documented failure posture is "non-blocking
     # error", and its output is read for context, never for a verdict.
-    # Measured 2026-09-20 against CLI 2.1.278 with the 7.55.0 pin: a
-    # `bd close` naming a bead with no review marker reached `bd` itself
-    # and closed it, while the same payload through `run()` returns a
-    # correct deny. So these three take the command tier, for the same
-    # reason `phase_review_close_requires_gate` was never allowed on the
-    # tool tier at all (see nexus.mcp.hooks' `_NEVER_TOOL_TIER`).
-    #
-    # They keep their tool-tier registrations, which stay useful for
-    # diagnosis and for a caller that wants the verdict as data; what
-    # changed is which tier `hooks.json` WIRES. `_DECIDING_HOOKS` in
-    # nexus.mcp.hooks names the set, and
+    # So it takes the command tier. Its tool-tier registration stays useful
+    # for diagnosis. `DECIDING_HOOKS` in nexus.mcp.hooks names the set, and
     # tests/test_deciding_hooks_are_command_tier.py refuses a hooks.json
-    # that wires any of them as an mcp_tool again.
-    "pre-close-verification": "nexus.hooks.pre_close_verification",
-    "subagent-stop": "nexus.hooks.subagent_stop",
+    # that wires any of them as an mcp_tool.
     "auto-approve": "nexus.hooks.auto_approve",
-    # The RDR-184 ledger's two WRITERS (bead nexus-5l8i8), moved for a
-    # DIFFERENT reason than the three above: neither returns a verdict, so
-    # `mcp_tool`'s inability to decide anything was never the hazard here.
-    # The hazard is that an `mcp_tool` hook depends on this session's own
-    # `plugin:conexus:nexus` MCP server being connected, and the dispatch
-    # or subagent start it observes proceeds regardless of whether that
-    # server answers. Root-caused 2026-09-27 (nexus-5l8i8, from session
-    # 81d1d28b's transcript): the server disconnected for about three
-    # minutes; two Agent dispatches during that window each logged
-    # `hook_non_blocking_error PreToolUse:Agent "MCP server ... not
-    # connected"`, the dispatch proceeded, and no EXPECT row was written --
-    # while the matching SubagentStart fired after reconnect and DID write
-    # a START row. EXPECT lost, START kept: the retro audit reads the gap
-    # as an undeclared dispatch, which is the exact silent miss RDR-184
-    # exists to catch. The command tier has no such dependency: it is a
-    # plain subprocess the harness spawns directly, whether or not any MCP
-    # server is up.
-    #
-    # They keep their tool-tier registrations (`nexus.mcp.hooks.HOOK_TOOLS`),
-    # useful for diagnosis; only which tier `hooks.json` WIRES moved. They
-    # are NOT added to `nexus.mcp.hooks.DECIDING_HOOKS` -- neither emits a
-    # verdict, so that set's own rule (never wire on `mcp_tool`, because a
-    # verdict is discarded there) does not apply to them; this is a
-    # resilience move, not a decision-tier one, and the two rules are
-    # independent even though both land on the command tier.
-    "agent-dispatch-expect": "nexus.hooks.agent_dispatch_expect",
-    "subagent-start-stamp": "nexus.hooks.subagent_start_stamp",
     # The interactive MCP connection barrier (bead nexus-veh77, Sam's
     # 2026-09-23 ruling). SessionStart, `startup` matcher only: waits,
     # bounded and fail-open, for THIS session's nx-mcp to publish its
@@ -295,52 +204,7 @@ VERB_TABLE: dict[str, str] = {
     # tests/hooks/test_mcp_connect_check_verb.py pins it; hook-cli-skew fires
     # only the current hooks.json and does not.
     "mcp-connect-check": "nexus.hooks.mcp_connect_check",
-    # The RDR-205 ledger's two PROJECTORS (bead nexus-egm7p), moved for the
-    # SAME reason as the RDR-184 writers above: an mcp_tool hook's
-    # invocation depends on this session's plugin:conexus:nexus MCP
-    # connection, and the SubagentStart/SubagentStop event it observes
-    # fires whether or not that connection exists. See
-    # nexus.hooks.subagent_start_tuple's own docstring for the full
-    # analysis, including why this calls tuple_ledger_project.project()
-    # directly rather than reusing tuple_projection.run_start/run_stop's
-    # daemon-thread detachment (that trick is for a long-lived nx-mcp
-    # server process; a command-tier verb's process IS the unit of work,
-    # and "async": true in hooks.json is what makes it non-blocking here).
-    #
-    # They keep their tool-tier registrations (nexus.mcp.hooks.HOOK_TOOLS),
-    # useful for diagnosis; only which tier hooks.json WIRES moved. Not
-    # added to DECIDING_HOOKS: neither emits a verdict.
-    "subagent-start-tuple": "nexus.hooks.subagent_start_tuple",
-    "subagent-stop-tuple": "nexus.hooks.subagent_stop_tuple",
 }
-
-#: Verbs whose exit code nx-hook must propagate from ``run()`` instead of
-#: forcing 0 -- the ledger's callers branch on it (RDR-215 Contracts).
-#: Populated alongside VERB_TABLE as those verbs are ported (Phase 2).
-#: sysexits EX_SOFTWARE. A ledger verb that CRASHED exits this instead of a
-#: vocabulary value, so a caller branching on 0/1/2/3/4 can tell "the audit
-#: could not run" from any real verdict.
-_LEDGER_CRASH_EXIT = 70
-
-LEDGER_VERBS: frozenset[str] = frozenset(
-    {
-        "expectations_census",
-        "expectations_undeclared",
-        "expectations_reconcile",
-        "expectations_expect",
-    }
-)
-
-#: Every real ledger verb starts with this prefix (see :data:`LEDGER_VERBS`
-#: above), so it also identifies a ledger-SHAPED verb this CLI has never
-#: registered -- an UNKNOWN verb nx-hook cannot look up in ``LEDGER_VERBS``,
-#: because that table only names verbs that resolve. The unknown-verb branch
-#: in :func:`main` uses this prefix check, not membership, precisely because
-#: membership is unavailable for a verb with no resolved module (code review
-#: on 69b6cac76): a plugin naming a NEW ledger verb the installed CLI
-#: predates must not read as 0 ("clean"), which is what plain fail-open
-#: would do.
-_LEDGER_VERB_PREFIX = "expectations_"
 
 #: Test-only dispatch override, read solely by
 #: ``tests/hooks/test_nx_hook_entry.py``. A JSON object string mapping verb
@@ -351,14 +215,6 @@ _LEDGER_VERB_PREFIX = "expectations_"
 #: that raises, a verb that inspects its own import environment) without
 #: editing VERB_TABLE. Never set outside a test process.
 _TEST_VERB_OVERRIDE_ENV = "_NX_HOOK_TEST_VERB_OVERRIDE"
-
-#: Test-only ledger-membership override, same rationale as
-#: :data:`_TEST_VERB_OVERRIDE_ENV`: a comma-separated list of verb names to
-#: treat as ledger verbs for :data:`LEDGER_VERBS` purposes, so the
-#: exit-code-propagation contract is provable before a real ledger verb
-#: exists (Phase 2).
-_TEST_LEDGER_OVERRIDE_ENV = "_NX_HOOK_TEST_LEDGER_VERBS"
-
 
 def _resolve_verb_module(verb: str) -> str | None:
     """Return the dotted module path for *verb*, or ``None`` if unknown.
@@ -381,13 +237,6 @@ def _resolve_verb_module(verb: str) -> str | None:
         return None
     module = overrides.get(verb)
     return module if isinstance(module, str) else None
-
-
-def _is_ledger_verb(verb: str) -> bool:
-    if verb in LEDGER_VERBS:
-        return True
-    raw = os.environ.get(_TEST_LEDGER_OVERRIDE_ENV, "")
-    return verb in {name for name in raw.split(",") if name}
 
 
 def main() -> None:
@@ -418,29 +267,15 @@ def main() -> None:
         # A plugin ahead of this installed CLI is expected to name a verb
         # this VERB_TABLE has never heard of (see the module docstring's
         # "Exit codes" section, nexus-t9klx). Exiting nonzero here for a
-        # NON-ledger verb would fail every UserPromptSubmit/PreToolUse for
+        # verb would fail every UserPromptSubmit/PreToolUse for
         # the whole session with no self-heal path -- exactly the 7.58.0
-        # release blocker this guards against. The stderr line is the same
-        # in both branches below; only the exit code (and, for a non-ledger
-        # verb, a stdout signal) differs.
+        # release blocker this guards against.
         sys.stderr.write(
             f"nx-hook: unknown verb {verb!r} -- no hook is registered under that name "
             "in this installed nx CLI. The conexus plugin may be ahead of the "
             "installed nx CLI; it upgrades via the version-lockstep hook.\n"
         )
-        if verb.startswith(_LEDGER_VERB_PREFIX):
-            # LEDGER SAFETY (code review on 69b6cac76): a ledger verb's exit
-            # code IS its contract (undeclared 0/1/2/3, reconcile 0/2/4,
-            # census 0/1), and 0 there means "clean". Fail-open's plain
-            # exit 0 would make a plugin/CLI skew on THIS surface read as a
-            # clean audit that examined nothing -- the exact silent miss
-            # RDR-184 exists to catch. Reserved code instead, the same one
-            # a CRASHED known ledger verb gets: "I could not run this" is
-            # not "there was nothing to report", for the same reason in
-            # both cases. No stdout write here -- an unknown ledger verb
-            # produces no JSON body, same as a crashed one.
-            sys.exit(_LEDGER_CRASH_EXIT)
-        # Non-ledger unknown verb: fail open (exit 0), but say so on the
+        # Unknown verb: fail open (exit 0), but say so on the
         # REAL envelope channel too -- stderr from a hook never reaches the
         # person running the session (Claude Code does not surface it), so
         # exit 0 plus a stderr line alone is silent to the one audience that
@@ -483,9 +318,8 @@ def main() -> None:
     # which inherits the real OS fd 1 and never consults this interpreter's
     # ``sys`` module -- so a verb shelling out lands straight in the pipe Claude
     # Code is parsing. No verb does that today (``session-start``'s one
-    # ``subprocess.run`` captures its output), but the Phase 2 ledger verbs
-    # named above are ports of bash scripts that shell out to ``bd`` and
-    # ``git``, which is exactly the shape that would hit it. So fd 1 is
+    # ``subprocess.run`` captures its output), but a verb that shells out to
+    # ``bd`` or ``git`` is exactly the shape that would hit it. So fd 1 is
     # redirected too, and restored in the ``finally``.
     #
     # ``fileno()`` raises when stdout is not a real file -- pytest's capture, an
@@ -529,10 +363,6 @@ def main() -> None:
         # same way it logs a crash inside run(). `except Exception` and not
         # BaseException deliberately mirrors never_fail's own posture, so a
         # KeyboardInterrupt during import still propagates.
-        #
-        # Phase 2 meets this first: the ledger verbs are new modules that
-        # shell out to bd and git, so an import-time failure in one of them
-        # is a likely early defect rather than a hypothetical.
         module = None
         failed_import: Exception | None = None
         try:
@@ -563,19 +393,7 @@ def main() -> None:
         def _dispatch():
             if failed_import is not None:
                 raise failed_import
-            # A LEDGER VERB IS NOT FIRED BY AN EVENT, so it must not read
-            # stdin. Every other verb is a hook and its payload arrives
-            # there; these four are invoked with arguments by an operator
-            # or an audit script, which does not redirect stdin at all.
-            # read_payload guards a TTY, but a script's inherited pipe is
-            # not a TTY and has no writer, so read() blocks until an EOF
-            # that never comes -- measured: `nx-hook
-            # expectations_undeclared <sid>` from a shell hung until
-            # killed, and every class-1 consumer bead nexus-q02nx.14
-            # repoints would have hung the same way. They take no payload
-            # (reconcile takes its own as an argument), so None is not a
-            # degraded input here, it is the correct one.
-            payload = None if _is_ledger_verb(verb) else read_payload(sys.stdin)
+            payload = read_payload(sys.stdin)
             return module.run(payload)
 
         result = never_fail(_dispatch, verb)
@@ -595,23 +413,8 @@ def main() -> None:
         real_stdout.write(result.stdout + "\n")
         real_stdout.flush()
 
-    # A LEDGER VERB'S EXIT CODE IS ITS CONTRACT, so a crash must not wear a
-    # vocabulary value. undeclared uses 0/1/2/3, reconcile 0/2/4, census 0/1,
-    # and every one of those means something a caller branches on; a crashed
-    # verb exiting 0 reads as "clean", which is the silent miss this whole
-    # subsystem exists to prevent (measured, bead nexus-q02nx.9). It exits
-    # EX_SOFTWARE instead -- reserved, colliding with no ledger vocabulary.
-    #
-    # Reserved rather than folded into undeclared's 3 ("no ledger file,
-    # nothing checkable"): "I could not tell you" is not "there was nothing
-    # to tell", and folding them loses the distinction exactly when someone
-    # is diagnosing a flapping audit. Sam's ruling, 2026-09-19; RDR-215
-    # Contracts amended to name this third case.
-    #
-    # Non-ledger verbs are unchanged and still forced to 0: for them a crash
-    # IS the hook choosing to say nothing, which is failing open.
-    if _is_ledger_verb(verb):
-        sys.exit(_LEDGER_CRASH_EXIT if result.crashed else result.exit_code)
+    # Every verb is forced to 0: a crash IS the hook choosing to say nothing,
+    # which is failing open.
     sys.exit(0)
 
 

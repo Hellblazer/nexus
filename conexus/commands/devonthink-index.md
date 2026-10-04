@@ -15,7 +15,7 @@ $ARGUMENTS
 
 ## Action
 
-All data is pre-loaded above — no additional tool calls needed.
+The sections above are the command's own gathered data when the `!` preamble ran; if a section is missing or empty, run `nx command-context devonthink-index` via the Bash tool rather than proceeding on nothing.
 
 - Run the printed `nx dt index ...` line via the Bash tool, with `--collection knowledge__<subject>` naming an existing subject from the list above (a subject area, never a source app or a session). Omit `--collection` only to take the default `knowledge__dt-papers`.
 - Read the summary line. `Indexed N record(s)` with no `failed` is done. `page-coverage failed` names the records and their missing pages: re-run those with `--extractor mineru`, or accept with `--allow-page-gap` when the pages are blank by design (cover, figures). `page coverage unverified` means the DEVONthink MCP was unreachable; report it as unverified, never as covered.

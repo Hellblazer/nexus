@@ -17,6 +17,6 @@ raw `$ARGUMENTS` into a shell-quoted line.
 
 ## Action
 
-All data is pre-loaded above. Follow the `rdr-fix-checklist` skill body for the full procedure — the stop conditions, the pre-edit research entry, the identifier/crosswalk clauses, the fix check dispatch, and the commit rules. This command's own job is the preamble injection above and the argument parsing below; the skill is the single source for the procedure itself.
+The data above is the command's own gathered data when the `!` preamble ran; if it is missing, run `nx rdr preamble rdr-fix -- <ID>` via the Bash tool rather than proceeding on nothing. Follow the `rdr-fix-checklist` skill body for the full procedure — the stop conditions, the pre-edit research entry, the identifier/crosswalk clauses, the fix check dispatch, and the commit rules. This command's own job is the preamble injection above and the argument parsing below; the skill is the single source for the procedure itself.
 
 Do not run the gate; the user drives lifecycle transitions.

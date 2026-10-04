@@ -4,7 +4,7 @@ mechanism (RDR-215 Phase 1, bead nexus-q02nx.2).
 
 These tests exercise the dispatch mechanism itself against the REAL entry
 point, using the module's own test-only override env vars
-(``_NX_HOOK_TEST_VERB_OVERRIDE`` / ``_NX_HOOK_TEST_LEDGER_VERBS``,
+(``_NX_HOOK_TEST_VERB_OVERRIDE``,
 documented on the module) to register throwaway fixture verbs for the
 duration of one subprocess call, rather than the one real verb
 :data:`VERB_TABLE` carries (``session-start``, nexus-q02nx.5 -- its own
@@ -23,7 +23,6 @@ import subprocess
 import sys
 import textwrap
 
-from nexus._hook_runtime.entry import _LEDGER_CRASH_EXIT
 from pathlib import Path
 
 from nexus._hook_runtime import entry
@@ -58,18 +57,12 @@ def _run(argv: list[str], env: dict[str, str], stdin: str = "") -> subprocess.Co
 # -- unknown / missing verb ---------------------------------------------
 #
 # A MISSING verb argument is this CLI's own invocation error and stays a
-# hard failure (exit 2). An UNKNOWN NON-LEDGER verb fails OPEN (exit 0)
+# hard failure (exit 2). An UNKNOWN verb fails OPEN (exit 0)
 # instead: a plugin bump can name a verb this installed CLI has not
 # registered yet (nexus-t9klx, the 7.58.0 release blocker -- see the module
 # docstring's "Exit codes" section), and exiting nonzero there blocks every
 # UserPromptSubmit/PreToolUse for the whole session with no self-heal path.
 #
-# An UNKNOWN LEDGER-SHAPED verb (name starts with "expectations_") does NOT
-# fail open: it exits _LEDGER_CRASH_EXIT (70), because 0 means "clean" in
-# the ledger's own exit-code vocabulary and a plugin/CLI skew on that
-# surface must not read as a clean audit that examined nothing (code
-# review on 69b6cac76).
-
 def test_unknown_verb_exits_zero_with_a_named_diagnostic(tmp_path: Path) -> None:
     proc = _run(["frobnicate"], _env(tmp_path))
     assert proc.returncode == 0, proc.stderr
@@ -79,7 +72,7 @@ def test_unknown_verb_exits_zero_with_a_named_diagnostic(tmp_path: Path) -> None
     assert "cli" in proc.stderr.lower()
 
 
-def test_unknown_non_ledger_verb_writes_a_systemMessage_to_real_stdout(tmp_path: Path) -> None:
+def test_unknown_verb_writes_a_systemMessage_to_real_stdout(tmp_path: Path) -> None:
     """Exit 0 plus a stderr line alone is invisible to the person running
     the session -- Claude Code does not surface a hook's stderr to them.
     ``systemMessage`` is a top-level field accepted on every hook event
@@ -94,18 +87,7 @@ def test_unknown_non_ledger_verb_writes_a_systemMessage_to_real_stdout(tmp_path:
     assert set(envelope) == {"systemMessage"}
 
 
-def test_unknown_ledger_shaped_verb_exits_the_reserved_code_not_zero(tmp_path: Path) -> None:
-    proc = _run(["expectations_nonsense"], _env(tmp_path))
-    assert proc.returncode == 70, proc.stderr
-    assert proc.stdout == "", "a ledger verb's body must stay empty on a crash-shaped exit"
-    assert "expectations_nonsense" in proc.stderr
-    assert "unknown verb" in proc.stderr
-
-
-def test_unknown_non_ledger_verb_with_a_hyphenated_name_still_exits_zero(tmp_path: Path) -> None:
-    """Negative control for the ledger-prefix check: a verb that merely
-    LOOKS unusual, but does not start with "expectations_", stays on the
-    fail-open path."""
+def test_unknown_verb_with_a_hyphenated_name_still_exits_zero(tmp_path: Path) -> None:
     proc = _run(["foo-bar"], _env(tmp_path))
     assert proc.returncode == 0, proc.stderr
 
@@ -213,40 +195,6 @@ def test_a_raising_verb_still_logs_diagnosably_to_stderr(tmp_path: Path) -> None
     assert "boom" in proc.stderr
 
 
-# -- ledger verbs propagate their exit code; everything else forces 0 ------
-
-_EXIT_CODE_VERB = textwrap.dedent(
-    """
-    def run(payload):
-        from nexus._hook_runtime._io import HookResult
-        return HookResult(exit_code=3)
-    """
-)
-
-
-def test_a_ledger_verb_propagates_its_exit_code(tmp_path: Path) -> None:
-    fixtures = _write_fixture_verb(tmp_path, "exit_code_verb", _EXIT_CODE_VERB)
-    env = _env(
-        tmp_path,
-        PYTHONPATH=str(fixtures),
-        _NX_HOOK_TEST_VERB_OVERRIDE=json.dumps({"reconcile-probe": "exit_code_verb"}),
-        _NX_HOOK_TEST_LEDGER_VERBS="reconcile-probe",
-    )
-    proc = _run(["reconcile-probe"], env, stdin="{}")
-    assert proc.returncode == 3, proc.stderr
-
-
-def test_a_non_ledger_verb_always_exits_zero_even_with_a_nonzero_result(tmp_path: Path) -> None:
-    fixtures = _write_fixture_verb(tmp_path, "exit_code_verb", _EXIT_CODE_VERB)
-    env = _env(
-        tmp_path,
-        PYTHONPATH=str(fixtures),
-        _NX_HOOK_TEST_VERB_OVERRIDE=json.dumps({"not-a-ledger-verb": "exit_code_verb"}),
-    )
-    proc = _run(["not-a-ledger-verb"], env, stdin="{}")
-    assert proc.returncode == 0, proc.stderr
-
-
 # -- lazy resolution: the verb's own module loads before _io/logging setup -
 
 _PROBE_VERB = textwrap.dedent(
@@ -350,9 +298,7 @@ def test_a_verb_whose_module_cannot_import_still_exits_zero(tmp_path: Path) -> N
     layer's deliberately absent `set -e` guaranteed.
 
     test_a_raising_verb_exits_zero... covers a verb that imports fine and
-    then raises; this covers one that never imports at all. Phase 2's
-    ledger verbs are new modules that shell out to bd and git, so this is
-    the likelier of the two failures there.
+    then raises; this covers one that never imports at all.
     """
     fixtures = _write_fixture_verb(tmp_path, "unimportable_verb", _UNIMPORTABLE_VERB)
     env = _env(
@@ -384,58 +330,12 @@ def test_an_unimportable_verb_is_still_diagnosable_on_stderr(tmp_path: Path) -> 
     )
 
 
-# -- a crashed LEDGER verb is distinguishable from a clean one (Sam, 2026-09-19) --
-
-_CLEAN_LEDGER_VERB = textwrap.dedent(
-    """
-    from nexus._hook_runtime._io import HookResult
-
-    def run(payload):
-        return HookResult(exit_code=0)
-    """
-)
+# -- a crashed verb still exits zero ----------------------------------------
 
 
-def test_a_crashed_ledger_verb_exits_the_reserved_code(tmp_path: Path) -> None:
-    """A ledger verb's exit code IS its contract, so a crash must not wear a
-    vocabulary value.
-
-    undeclared uses 0/1/2/3, reconcile 0/2/4, census 0/1, and a caller
-    branches on every one. Before this, a crashed verb exited 0 —
-    indistinguishable from a clean reconcile, which bead .13 reads as
-    "nothing stranded". That is a silent miss in the subsystem built to
-    catch silent misses. 70 is sysexits EX_SOFTWARE and collides with no
-    ledger vocabulary.
-    """
-    fixtures = _write_fixture_verb(tmp_path, "boom_verb", _BOOM_VERB)
-    env = _env(
-        tmp_path,
-        PYTHONPATH=str(fixtures),
-        _NX_HOOK_TEST_VERB_OVERRIDE=json.dumps({"reconcile": "boom_verb"}),
-        _NX_HOOK_TEST_LEDGER_VERBS="reconcile",
-    )
-    proc = _run(["reconcile"], env, stdin="{}")
-    assert proc.returncode == 70, (
-        f"a crashed ledger verb must not exit a vocabulary value: {proc.returncode}"
-    )
-
-
-def test_a_clean_ledger_verb_still_exits_its_own_code(tmp_path: Path) -> None:
-    """The reserved code must not swallow the contract it protects."""
-    fixtures = _write_fixture_verb(tmp_path, "clean_verb", _CLEAN_LEDGER_VERB)
-    env = _env(
-        tmp_path,
-        PYTHONPATH=str(fixtures),
-        _NX_HOOK_TEST_VERB_OVERRIDE=json.dumps({"reconcile": "clean_verb"}),
-        _NX_HOOK_TEST_LEDGER_VERBS="reconcile",
-    )
-    assert _run(["reconcile"], env, stdin="{}").returncode == 0
-
-
-def test_a_crashed_NON_ledger_verb_still_exits_zero(tmp_path: Path) -> None:
-    """Unchanged, and deliberately: for a non-ledger hook a crash IS the
-    hook choosing to say nothing, which is what failing open means. The
-    reserved code applies only where an exit code is a contract."""
+def test_a_crashed_verb_still_exits_zero(tmp_path: Path) -> None:
+    """A crash IS the hook choosing to say nothing, which is what failing
+    open means."""
     fixtures = _write_fixture_verb(tmp_path, "boom_verb", _BOOM_VERB)
     env = _env(
         tmp_path,
@@ -443,10 +343,3 @@ def test_a_crashed_NON_ledger_verb_still_exits_zero(tmp_path: Path) -> None:
         _NX_HOOK_TEST_VERB_OVERRIDE=json.dumps({"plain": "boom_verb"}),
     )
     assert _run(["plain"], env, stdin="{}").returncode == 0
-
-
-def test_the_reserved_code_is_outside_every_ledger_vocabulary(tmp_path: Path) -> None:
-    """A reserved code that collided with a real verdict would be worse than
-    none: it would silently become that verdict."""
-    vocabularies = {0, 1, 2, 3, 4}  # undeclared 0/1/2/3, reconcile 0/2/4, census 0/1
-    assert _LEDGER_CRASH_EXIT not in vocabularies

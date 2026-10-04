@@ -34,7 +34,7 @@ from nexus.hooks import preflight_verb as _hook
 result = never_fail(lambda: _hook.run(None), "preflight")
 if result.stdout is not None:
     sys.stdout.write(result.stdout + "\\n")
-sys.exit(result.exit_code)
+sys.exit(0)
 """
 
 
@@ -137,7 +137,4 @@ class TestPreflightVerbDirect:
         result_without = preflight_verb.run(None)
         assert result_with_payload.stdout == result_without.stdout
 
-    def test_exit_code_always_zero(self) -> None:
-        result = preflight_verb.run(None)
-        assert result.exit_code == 0
 

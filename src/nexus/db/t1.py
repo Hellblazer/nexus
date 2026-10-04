@@ -1681,8 +1681,8 @@ def get_t1_database(
           (nexus-6a19f): ``NX_T1_ALLOW_SHARED_FALLBACK=1`` opts a caller
           back into the pre-fix shared CLI-dedicated fallback for THIS
           branch only (a structlog WARNING is emitted either way) --
-          for established consumers like
-          ``conexus/hooks/scripts/pre_close_verification_hook.sh`` that
+          for established consumers (the bd-close gate, deleted at cleanup
+          step A2, was one) that
           intentionally read the shared scope's cross-cutting markers under
           a forced ``NX_SESSION_ID``. Never consulted by
           :func:`resolve_t1_routing_tiers`, the MCP lifespan, or
@@ -1776,8 +1776,8 @@ def get_t1_database(
         # lease for that exact id (the MCP process is frozen-at-spawn; a
         # detached CLI/hook invocation resolves the CURRENT transcript id --
         # they diverge routinely, not as a rare edge case). Some established
-        # consumers (conexus/hooks/scripts/pre_close_verification_hook.sh)
-        # deliberately export NX_SESSION_ID to reach the shared CLI-dedicated
+        # consumers (the bd-close gate, deleted at cleanup step A2)
+        # deliberately exported NX_SESSION_ID to reach the shared CLI-dedicated
         # scope where cross-cutting markers (e.g. review-completed) live, and
         # were written against the PRE-f7xyq fallback behavior. Narrowing
         # "explicit" further would not help -- the hook sets NX_SESSION_ID

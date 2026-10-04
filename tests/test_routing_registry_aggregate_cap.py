@@ -26,7 +26,7 @@ is documentation, hooks.json is the registration surface" -- and the two
 disagree: ``conexus/hooks/hooks.json`` fires THREE hooks on the
 ``PreToolUse: Bash`` matcher (the ``hook_pre_close_verification`` MCP
 tool -- ``pre_close_verification_hook.sh`` until RDR-215 bead
-nexus-q02nx.21 -- plus the two routing hooks) while the registry lists two rules. A hook registered
+nexus-q02nx.21 -- plus the two routing hooks) while the registry listed two rules. A hook registered
 in hooks.json with no registry entry costs latency on every Bash call and
 was invisible to this cap, so a fifth could land while the lint reported
 2/4. The budget is cumulative wall-clock per Bash call, so the count that
@@ -170,19 +170,24 @@ def test_registered_bash_hooks_within_cap() -> None:
     )
 
 
-def test_registered_bash_hooks_is_currently_exactly_at_cap() -> None:
+#: The real cross-plugin PreToolUse:Bash count right now:
+#: `subagent_git_write_requires_orchestrator` + `credential_print_guard`.
+#: The bd-close gate and the phase-review close gate left at cleanup steps
+#: A2/A3 (nexus-0r1uz), taking the count from the cap (4) to 2.
+CURRENT_BASH_HOOK_COUNT = 2
+
+
+def test_registered_bash_hooks_is_currently_exactly_two() -> None:
     """Positive pin (nexus-wauo1.26 code review finding: the registry-only
-    test above could still pass at aggregate=4 with a REAL fifth hook
-    landing in hooks.json with no registry entry, exactly like
+    test above could still pass with a REAL extra hook landing in
+    hooks.json with no registry entry, exactly like
     `credential_print_guard` almost did). The real cross-plugin
     PreToolUse:Bash count, from ``_HOOKS_JSON_PATHS`` (the same
     registration-surface count `test_registered_bash_hooks_within_cap`
-    gates), is exactly the cap right now: `hook_pre_close_verification` +
-    `subagent_git_write_requires_orchestrator` +
-    `phase_review_close_requires_gate` + `credential_print_guard`. If this
-    genuinely changes, update the pin deliberately -- it exists so
-    landing a fifth hook is felt as a failure here, not silently absorbed
-    because the aggregate was already comfortably under a stale cap."""
+    gates), is ``CURRENT_BASH_HOOK_COUNT`` right now. If this genuinely
+    changes, update the pin deliberately -- it exists so landing another
+    hook is felt as a failure here, not silently absorbed because the
+    aggregate was comfortably under the cap."""
     per_plugin: dict[str, int] = {}
     for manifest_path in _HOOKS_JSON_PATHS:
         if not manifest_path.exists():
@@ -192,18 +197,18 @@ def test_registered_bash_hooks_is_currently_exactly_at_cap() -> None:
             json.loads(manifest_path.read_text(encoding="utf-8"))
         )
     aggregate = sum(per_plugin.values())
-    assert aggregate == AGGREGATE_CAP, (
+    assert aggregate == CURRENT_BASH_HOOK_COUNT, (
         f"expected the real cross-plugin PreToolUse:Bash count to be "
-        f"exactly {AGGREGATE_CAP} right now ({per_plugin}); if it "
+        f"exactly {CURRENT_BASH_HOOK_COUNT} right now ({per_plugin}); if it "
         "genuinely changed, update this pin deliberately"
     )
 
 
-def test_registered_bash_hooks_fails_at_five_with_a_planted_entry() -> None:
+def test_registered_bash_hooks_fails_over_the_cap_with_planted_entries() -> None:
     """Falsifiability control for the cap test above, against the REAL nx
     manifest (not a synthetic dict, unlike
-    `test_bash_hook_counter_is_falsifiable`): planting a synthetic 5th
-    PreToolUse:Bash hook onto a COPY of the actual
+    `test_bash_hook_counter_is_falsifiable`): planting synthetic
+    PreToolUse:Bash hooks (enough to pass the cap) onto a COPY of the actual
     `conexus/hooks/hooks.json` must push the cross-plugin aggregate over
     `AGGREGATE_CAP`, proving a genuine fifth real hook would be caught,
     not merely a hand-built fixture the counting function was never run
@@ -219,15 +224,19 @@ def test_registered_bash_hooks_fails_at_five_with_a_planted_entry() -> None:
 
     nx_manifest_path = REPO_ROOT / "conexus" / "hooks" / "hooks.json"
     manifest = json.loads(nx_manifest_path.read_text(encoding="utf-8"))
+    planted_count = AGGREGATE_CAP + 1 - sum(per_plugin.values())
     manifest.setdefault("hooks", {}).setdefault("PreToolUse", []).append(
-        {"matcher": "Bash", "hooks": [{"type": "command", "command": "planted"}]}
+        {
+            "matcher": "Bash",
+            "hooks": [{"type": "command", "command": "planted"}] * planted_count,
+        }
     )
     planted_per_plugin = dict(per_plugin)
     planted_per_plugin["conexus"] = _bash_hook_count(manifest)
     planted_aggregate = sum(planted_per_plugin.values())
     assert planted_aggregate > AGGREGATE_CAP, (
-        "planting a synthetic 5th PreToolUse:Bash hook onto the REAL nx "
+        "planting synthetic PreToolUse:Bash hooks past the cap onto the REAL nx "
         f"manifest only reached {planted_aggregate}, not over "
-        f"{AGGREGATE_CAP} -- this lint cannot actually catch a fifth "
-        "real hook landing"
+        f"{AGGREGATE_CAP} -- this lint cannot actually catch a hook "
+        "landing past the cap"
     )

@@ -2,10 +2,12 @@
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 """The fail-closed BOUNDARY, not the hook bodies (RDR-215 bead nexus-q02nx.21).
 
-``tests/test_routing_phase_review_close.py`` drives the hook script through
-its nineteen scenarios, and every one of them reaches a decision. None makes
-``body()`` RAISE, so nothing there exercises ``_lib.run_hook``'s except
-branch — the one place the fail-closed contract actually lives. Bead
+The phase-review close gate's test module drove its hook script through
+nineteen scenarios, and every one of them reached a decision. None made
+``body()`` RAISE, so nothing there exercised ``_lib.run_hook``'s except
+branch — the one place the fail-closed contract actually lives. (That hook
+was deleted at cleanup step A2, nexus-0r1uz; no rule is ``fail_closed`` now,
+and these tests keep the mechanism pinned.) Bead
 nexus-q02nx.21's round-2 audit note names that gap exactly: "the current
 tests exercise ``body()``, not the ``run_hook`` wrapper, so nothing today
 would catch the inversion."
@@ -40,26 +42,17 @@ ROUTING = (
     / "conexus" / "hooks" / "scripts" / "routing"
 )
 
-#: Where a PORTED guard lives (nexus-t9klx). The two-surface contract this
-#: module pins — registry.yaml and the call site must agree on fail_closed —
-#: is not about which directory the guard sits in, so the call-site scan
-#: covers both. Scanning only the plugin directory would have quietly
-#: reported a ported rule as having no call site at all, which is how this
-#: file first went red.
-WHEEL_HOOKS = pathlib.Path(__file__).parent.parent / "src" / "nexus" / "hooks"
-
 #: Drives ``_lib.run_hook`` with a body that raises, in a child process,
 #: because ``run_hook``'s emitters call ``sys.exit`` and its stdout IS the
 #: assertion. Nothing here imports the hook modules in-process.
 #:
-#: nexus-t9klx: a package import, not a ``sys.path`` insert into
-#: ``routing/``. Both guards are in the wheel now and the plugin's copy of
-#: the library is deleted. ``run_hook`` itself is deliberately still what
-#: is driven, not ``run_hook_result``: this file pins the fail-closed
-#: BOUNDARY — that a crashed guard still writes an envelope — and
-#: ``run_hook`` is the exiting form where that is hardest to hold.
+#: The driver imports the plugin-resident ``_lib`` by directory, the way the
+#: two live routing guards do. The wheel copy of the library had no importer
+#: left after cleanup step A4 and was deleted at step A5.
 _DRIVER = """
-from nexus.hooks import _routing_lib as _lib
+import sys
+sys.path.insert(0, {routing!r})
+import _lib
 
 def body(payload):
     raise RuntimeError("induced: the guard could not determine the state")
@@ -79,7 +72,7 @@ def _drive(*, fail_closed: bool) -> subprocess.CompletedProcess:
     below asserts its own expected shape.
     """
     return subprocess.run(
-        [sys.executable, "-c", _DRIVER.format(fail_closed=fail_closed)],
+        [sys.executable, "-c", _DRIVER.format(fail_closed=fail_closed, routing=str(ROUTING))],
         input="{}", capture_output=True, text=True, timeout=30,
     )
 
@@ -163,22 +156,10 @@ class TestTheTwoSurfacesAgree:
     @staticmethod
     def _call_site_flags() -> dict[str, bool]:
         flags: dict[str, bool] = {}
-        # Ported guards: keyed on the module's OWN RULE_NAME rather than its
-        # filename, because the verb name, the module name and the rule name
-        # deliberately differ — the port carried RULE_NAME unchanged so old
-        # and new routing-log rows stay comparable.
-        for module in sorted(WHEEL_HOOKS.glob("*.py")):
-            body = module.read_text()
-            m = re.search(r"run_hook_result\((?:[^)]|\n)*?fail_closed=(True|False)", body)
-            if not m:
-                continue
-            name = re.search(r'^RULE_NAME\s*=\s*"([^"]+)"', body, re.MULTILINE)
-            if name:
-                flags[name.group(1)] = m.group(1) == "True"
         # nexus-wauo1.22 (RDR-219 plan-audit residual 2): "`routing/` holds
         # no Python at all" was already stale when this comment was
         # written — `subagent_git_write_requires_orchestrator.py` and
-        # `phase_review_close_requires_gate.py` stayed plugin-resident
+        # the (since deleted) phase-review close gate stayed plugin-resident
         # through nexus-t9klx's port (7.58.0 kept hooks.json on the
         # scripts, not the verbs; see test_hooks_json_shape_lint.py's
         # docstring), and RDR-219 deliberately adds a THIRD plugin-
@@ -223,12 +204,6 @@ class TestTheTwoSurfacesAgree:
             f"(rule: registry, call-site): {disagree}. README item 5 states "
             "the contract as both together."
         )
-
-    def test_phase_review_close_is_still_the_fail_closed_one(self):
-        """Named rather than counted. If this rule ever goes fail-open the
-        change should have to delete this line and say why."""
-        assert self._registry_flags()["phase_review_close_requires_gate"] is True
-        assert self._call_site_flags()["phase_review_close_requires_gate"] is True
 
     @pytest.mark.parametrize(
         "rule",

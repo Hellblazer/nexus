@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """T2 records for the prose editor (RDR-221, "Memory in T2").
 
 The records go through the `nx memory` CLI.
@@ -20,12 +21,23 @@ Usage (all commands run inside the repo, from any subdirectory or worktree):
                     [--remove KEY | --remove-item KEY=VALUE]
   memory.py rejections TARGET [--remove N]
   memory.py filter TARGET|-                    # proposal JSON on stdin
+  memory.py voice-card TARGET [--from-stdin | --remove]  # {"voice_card": str} on stdin
   memory.py promote TARGET N --level user|repo [--dry-run]
   memory.py not-a-defect --level user|repo [--remove N]
-  memory.py log TARGET|- [--genre G]           # session JSON on stdin
+  memory.py log TARGET|- [--genre G] [--stamp S] # session JSON on stdin; S fixes the record's name and time
   memory.py genre-put NAME [--replace]         # {"exemplars": [...], "notes": [...]} on stdin
   memory.py exemplar-add GENRE PATH:START-END [--rev SHA]
   memory.py viewer [--set V]
+
+Site-page section 3 treatments (what a repo or one document does with a rule of the site-page style sheet):
+add-entry --level repo|doc (--path P for doc) takes a list under one of three keys, each entry the rule's opening
+words in double quotes, three dots inside the closing quote, then a reason in parentheses:
+  site_page_section3_ignored     the rule is dropped for that level
+  site_page_section3_query_only  the rule produces queries, never an edit
+  site_page_section3_note_only   the rule appears in the editor's note only
+For example {"scalars": {}, "lists": {"site_page_section3_ignored": ["\"Plain technical English...\" (this essay)"]}}
+on stdin with --from-stdin. The narrower layer wins; `brief.py build` stops, naming the `entries --remove-item`
+command, when an entry matches no rule. `entries --level L [--path P] --remove-item KEY=VALUE` removes one.
 
 TARGET is a path, optionally with a line range: PATH, PATH:START-END, or PATH:N
 (one line, the same as N-N). The path is repo-relative (an absolute path or one relative to the current
@@ -62,7 +74,8 @@ PROSE_EDIT_PROJECT_PREFIX (tests use it so they never touch the live projects):
 style sheet. All record bodies are JSON:
 
   stylesheet, doc/<path>:  {"scalars": {k: v}, "lists": {k: [v, ...]},
-                            "rejections": [{"old", "new", "at", "reason"?}]}   (doc only)
+                            "rejections": [{"old", "new", "at", "reason"?}],   (doc only)
+                            "voice_card": {"text", "at"}}                      (doc only, optional)
   not-a-defect:            {"entries": [{"old", "new", "from", "at"}]}
   genre/<name>:            {"exemplars": [{"text", "path", "start", "end", "rev"?}],
                             "notes": [str]}
@@ -145,11 +158,12 @@ lists them with their cause. The key is computed from "old" and "new" every time
 needed, never stored, so records written before the key existed are read the same way.
 
 `filter TARGET` drops every edit whose change key equals the key of a rejection stored
-for that document (not-a-defect entries are NOT applied here). Every other key passes
-through unchanged. Edit numbers "n" are kept, so dropped edits leave GAPS in the numbering:
-the marks in the marked-up copy keep their meaning. The output gains "dropped":
-[{"n", "old", "cause"}] (cause is always "rejected"; any "dropped" in the input is
-overwritten). The skill runs `brief.py filter`, which calls this and returns each dropped
+for that document, and every edit whose change key equals that of a promoted not-a-defect entry at user or
+repo level (a general entry, so it applies to a stdin run and to every document; overlap alone is not a match
+there either). Every other key passes through unchanged. Edit numbers "n" are kept, so dropped edits leave GAPS
+in the numbering: the marks in the marked-up copy keep their meaning. The output gains "dropped":
+[{"n", "old", "cause"}] (cause is "rejected" for the document's own rejection, "not-a-defect" for a promoted
+entry; an edit that matches both is "rejected"; any "dropped" in the input is overwritten). The skill runs `brief.py filter`, which calls this and returns each dropped
 edit as {"n", "old", "new", "cause"}: it adds "new" (the proposed text, so the review copy
 can show what was dropped) and drops further edits with its own causes.
 
@@ -169,10 +183,30 @@ Numbers in `rejections` are 1-based and renumbered after
 a removal. A document record left holding no rejections, scalars or lists is
 deleted. `promote` copies a stored rejection to the not-a-defect list at user or
 repo level and leaves the rejection where it is; `promote --dry-run` prints the
-entry and writes nothing. `not-a-defect --level L` lists that level's entries
+entry and writes nothing to T2. `not-a-defect --level L` lists that level's entries
 numbered; `--remove N` deletes one.
 
-Concurrency. Every read-modify-write (add-entry, reject, rejections --remove,
+A real promote needs a matching dry run first, as apply does (RDR-221, Sam 2026-10-03). The dry run leaves a
+record in `<git common dir>/prose-edit-promote/<h>.json`, `{"entry": "<h>"}`, where h is the sha256 of exactly
+what would be promoted: the level, its T2 project, the document path and the rejection's old and new strings
+(not the time, not the number: renumbering after a removal changes which rejection N is, and the hash then no
+longer matches). A real promote without that record, or with one older than two hours, stops with exit 1 and
+stores nothing; one that goes through consumes it, so a dry run vouches for one promote. The record is a
+hash, never the text.
+
+The voice card. `doc/<path>` may hold one author-approved voice card, the key "voice_card": {"text", "at"}
+(text a non-empty string of at most 4000 characters, at the UTC time the author approved it). It is absent
+until the author says yes to saving one after a run; the editor's own card is never stored by itself.
+`voice-card TARGET` prints {"path", "range", "voice_card": {text, at} | null}. `voice-card TARGET --from-stdin`
+takes {"voice_card": "<text>"} (nothing else) and replaces any card stored; `--remove` deletes it and stops with
+exit 1 when none is stored. A stdin run (TARGET "-") has no document record and stores no card. A range target
+keys on the bare path, like every record. The card sits beside "scalars", "lists" and "rejections" and none of the
+commands that write those touches it; a record that holds only a card is not empty and is not deleted with its
+last scalar, list or rejection. `read` carries it with the document layer (layers.document.voice_card); the brief
+builder puts it in the brief as the anchor for the next run, in place of a card rebuilt from the edited text. It is
+not a scalar or a list, so it takes no part in the merge.
+
+Concurrency. Every read-modify-write (add-entry, reject, rejections --remove, voice-card,
 promote, not-a-defect --remove, genre-put, exemplar-add, viewer --set) holds an
 exclusive flock on a lock file, keyed by project and title, from the read through
 the write. Repo records (repo project) lock under the git common directory, which
@@ -444,6 +478,11 @@ def check_record(kind: str, rec: Any, what: str) -> Obj:
         isinstance((_obj(r) or {}).get("reason", ""), str) for r in cast(list[Any], body.get("rejections", []))
     ):
         raise _bad(what, 'a rejection\'s "reason" is not a string')
+    if kind == "doc" and "voice_card" in body:
+        card = _obj(body["voice_card"])
+        if card is None or not (isinstance(card.get("text"), str) and card["text"].strip()
+                                and isinstance(card.get("at"), str)):
+            raise _bad(what, '"voice_card" is not {text, at} strings with a non-empty text')
     if kind == "nad" and not _is_str_dicts(body.get("entries", []), ("old", "new")):
         raise _bad(what, '"entries" is not a list of {old, new} strings')
     if kind == "genre":
@@ -852,7 +891,7 @@ def _layer(stylesheet: Obj | None, nad: Obj | None) -> Obj | None:
 
 
 def _is_empty_doc(rec: Obj) -> bool:
-    return not (rec.get("scalars") or rec.get("lists") or rec.get("rejections"))
+    return not (rec.get("scalars") or rec.get("lists") or rec.get("rejections") or rec.get("voice_card"))
 
 
 def _items(rec: Obj | None, key: str) -> list[Obj]:
@@ -1094,14 +1133,73 @@ def cmd_filter(ctx: Ctx, a: argparse.Namespace) -> None:
     if tgt.rel is not None:
         rec = ctx.t2.get_json(ctx.repo_project, f"doc/{tgt.rel}", "doc")
         stored = {change_key(rej["old"], rej["new"]) for rej in _items(rec, "rejections")}
+    promoted: set[tuple[str, str]] = set()
+    for project in (ctx.user_project, ctx.repo_project):
+        nad = ctx.t2.get_json(project, NAD, "nad")
+        promoted |= {change_key(e["old"], e["new"]) for e in _items(nad, "entries")}
     kept: list[Obj] = []
     dropped: list[Obj] = []
     for edit in proposal["edits"]:
-        if change_key(edit["old"], edit["new"]) in stored:
+        key = change_key(edit["old"], edit["new"])
+        if key in stored:
             dropped.append({"n": edit["n"], "old": edit["old"], "cause": "rejected"})
+        elif key in promoted:
+            dropped.append({"n": edit["n"], "old": edit["old"], "cause": "not-a-defect"})
         else:
             kept.append(edit)
     _emit({**proposal, "edits": kept, "dropped": dropped})
+
+
+PROMOTE_DRYRUN_DIR = "prose-edit-promote"
+PROMOTE_DRYRUN_MAX_AGE = 2 * 3600
+VOICE_CARD_MAX = 4000
+
+
+def _promote_hash(level: str, project: str, rel: str | None, entry: Obj) -> str:
+    """What a promote would store, as a hash: level, project, document and the rejection's old and new.
+    Not the time and not the rejection's number."""
+    what = {"level": level, "project": project, "path": rel, "old": entry["old"], "new": entry["new"]}
+    return hashlib.sha256(json.dumps(what, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
+
+
+def _promote_record(ctx: Ctx, digest: str) -> Path:
+    return ctx.repo.common / PROMOTE_DRYRUN_DIR / f"{digest}.json"
+
+
+def _write_promote_dry_run(ctx: Ctx, digest: str) -> None:
+    """Leave the record a real promote of exactly this entry will look for. Best effort sweep of old ones."""
+    directory = ctx.repo.common / PROMOTE_DRYRUN_DIR
+    try:
+        directory.mkdir(mode=0o700, exist_ok=True)
+        cutoff = datetime.now(timezone.utc).timestamp() - PROMOTE_DRYRUN_MAX_AGE
+        for old in (*directory.glob("*.json"), *directory.glob("*.tmp")):  # a .tmp is a write that died before its rename
+            try:
+                if old.stat().st_mtime < cutoff:
+                    old.unlink()
+            except OSError:
+                continue
+        tmp = directory / f"{digest}.tmp"
+        tmp.write_text(json.dumps({"entry": digest}), encoding="utf-8")
+        os.replace(tmp, directory / f"{digest}.json")
+    except OSError as exc:
+        raise UserError(f"promote: cannot record the dry run under {directory}: {exc}") from exc
+
+
+def _require_promote_dry_run(ctx: Ctx, digest: str, a: argparse.Namespace) -> Path:
+    """The record of the matching dry run, or UserError: a real promote needs one the author was shown."""
+    run_it = (f"Run `memory.py promote {a.path} {a.n} --level {a.level} --dry-run`, show the entry to the "
+              "author, and run the real promote only after the author confirms it")
+    path = _promote_record(ctx, digest)
+    try:
+        age = datetime.now(timezone.utc).timestamp() - path.stat().st_mtime
+        saved: Any = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        raise UserError(f"promote: no matching dry run on record for this entry at this level. {run_it}.") from None
+    if _obj(saved) is None or saved.get("entry") != digest:
+        raise UserError(f"promote: no matching dry run on record for this entry at this level. {run_it}.")
+    if age > PROMOTE_DRYRUN_MAX_AGE:
+        raise UserError(f"promote: the dry run for this entry is older than two hours. {run_it}.")
+    return path
 
 
 def cmd_promote(ctx: Ctx, a: argparse.Namespace) -> None:
@@ -1114,15 +1212,73 @@ def cmd_promote(ctx: Ctx, a: argparse.Namespace) -> None:
     entry: Obj = {"old": src["old"], "new": src["new"], "from": tgt.rel, "at": _iso(ctx.now)}
     project = ctx.level_project(a.level)
     out: Obj = {"level": a.level, "project": project, "title": NAD, "entry": entry}
+    digest = _promote_hash(a.level, project, tgt.rel, entry)
     if a.dry_run:
+        _write_promote_dry_run(ctx, digest)
         _emit({**out, "dry_run": True})
         return
+    record = _require_promote_dry_run(ctx, digest, a)
     with ctx.locked(project, NAD):
         nad = ctx.t2.get_json(project, NAD, "nad") or {}
         entries: list[Obj] = nad.setdefault("entries", [])
-        entries[:] = [e for e in entries if e.get("old") != entry["old"]] + [entry]
+        key = change_key(str(entry["old"]), str(entry["new"]))
+        entries[:] = [e for e in entries if change_key(str(e.get("old", "")), str(e.get("new", ""))) != key] + [entry]
         ctx.t2.put(project, NAD, nad)
+    record.unlink(missing_ok=True)  # one dry run vouches for one promote
     _emit(out)
+
+
+def _read_card_stdin() -> str:
+    """The card text from stdin: {"voice_card": "<text>"}, a JSON string, or the plain text itself.
+
+    A card is one string, so plain text is unambiguous; the live check at 858d959df saw a model write it that way
+    first (nexus-ger02.7). A fenced block is unfenced first. Anything that parses as JSON but is not a string or
+    that one-key object is refused, and so is text that opens with {, [ or " and does not parse.
+    """
+    if sys.stdin.isatty():
+        raise UserError("voice-card: expected the card on stdin but stdin is a terminal; pipe it in")
+    raw = _unfence(sys.stdin.read())
+    try:
+        body: Any = json.loads(raw)
+    except ValueError as exc:
+        # Plain text is a card; text that opens like JSON and does not parse is broken JSON, never a card
+        # (test validation of nexus-ger02.7, F1).
+        if raw.lstrip()[:1] in ('{', '[', '"'):
+            raise UserError(f"voice-card: stdin opens like JSON but is not valid JSON: {exc}") from exc
+        body = raw
+    if isinstance(body, dict) and set(body) == {"voice_card"}:
+        body = body["voice_card"]
+    if not isinstance(body, str) or not body.strip():
+        raise UserError('voice-card: expected the card text, or {"voice_card": "<text>"}: one non-empty string')
+    return body.strip()
+
+
+def cmd_voice_card(ctx: Ctx, a: argparse.Namespace) -> None:
+    if a.path == "-":
+        raise UserError("voice-card: a stdin run has no document record and stores no voice card")
+    title, tgt = ctx.doc_title(a.path)
+    shown: Obj = {"path": tgt.rel, "range": tgt.range}
+    if not (a.from_stdin or a.remove):
+        rec = ctx.t2.get_json(ctx.repo_project, title, "doc")
+        _emit({**shown, "voice_card": (rec or {}).get("voice_card")})
+        return
+    text = ""
+    if a.from_stdin:
+        text = _read_card_stdin()
+        if len(text) > VOICE_CARD_MAX:
+            raise UserError(f"voice-card: the card is {len(text)} characters; the limit is {VOICE_CARD_MAX}")
+    with ctx.locked(ctx.repo_project, title):
+        rec = _record(ctx.t2.get_json(ctx.repo_project, title, "doc"))
+        if a.from_stdin:
+            rec["voice_card"] = {"text": text, "at": _iso(ctx.now)}
+            rec.setdefault("rejections", [])
+            ctx.t2.put(ctx.repo_project, title, rec)
+        else:
+            if "voice_card" not in rec:
+                raise UserError(f"voice-card: no voice card stored for {tgt.rel}")
+            del rec["voice_card"]
+            _save_doc(ctx, title, rec)
+    _emit({**shown, "voice_card": rec.get("voice_card")})
 
 
 def cmd_nad(ctx: Ctx, a: argparse.Namespace) -> None:
@@ -1142,16 +1298,31 @@ def cmd_nad(ctx: Ctx, a: argparse.Namespace) -> None:
     _emit({"level": a.level, "project": project, "entries": _numbered(entries)})
 
 
+_STAMP = re.compile(r"[0-9]{8}T[0-9]{6}\.[0-9]{6}Z")
+
+
+def _stamp_time(stamp: str) -> datetime:
+    if not _STAMP.fullmatch(stamp):
+        raise UserError(f"--stamp {stamp!r}: expected a UTC stamp like 20261003T101500.123456Z")
+    try:
+        return datetime.strptime(stamp, "%Y%m%dT%H%M%S.%fZ").replace(tzinfo=timezone.utc)
+    except ValueError as exc:
+        raise UserError(f"--stamp {stamp!r}: not a valid time ({exc})") from exc
+
+
 def cmd_log(ctx: Ctx, a: argparse.Namespace) -> None:
     if a.genre:
         _genre_name(a.genre)
     tgt = ctx.target(a.path)
-    stamp = ctx.now.strftime("%Y%m%dT%H%M%S.%fZ")
+    # --stamp fixes the record's name and time: a caller that retries a log whose first put may have landed
+    # passes the same stamp, so the retry writes over the record instead of adding a second
+    when = _stamp_time(a.stamp) if a.stamp else ctx.now
+    stamp = when.strftime("%Y%m%dT%H%M%S.%fZ")
     title = f"log/stdin/{stamp}" if tgt.rel is None else f"log/{tgt.rel}/{stamp}"
     session = _read_stdin_json("log", default={})
     record: Obj = {
         "path": tgt.rel, "range": tgt.range, "genre": a.genre,
-        "at": _iso(ctx.now), "session": session,
+        "at": _iso(when), "session": session,
     }
     ctx.t2.put(ctx.repo_project, title, record, ttl=LOG_TTL)
     _emit({"project": ctx.repo_project, "title": title, "ttl": LOG_TTL, "range": tgt.range})
@@ -1282,6 +1453,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("path")
     sp.add_argument("--site-layer")
     sp = add("add-entry", cmd_add_entry)
+    sp.epilog = ("A rule of the site-page style sheet (section 3) is treated per level with a list under "
+                 "site_page_section3_ignored, site_page_section3_query_only or site_page_section3_note_only; each "
+                 "entry is the rule's opening words in double quotes, three dots inside the closing quote, then the "
+                 "reason in parentheses, for example \"Plain technical English...\" (this essay).")
     sp.add_argument("--level", choices=["user", "repo", "doc"], required=True)
     sp.add_argument("--path")
     sp.add_argument("--key")
@@ -1309,12 +1484,18 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("n", type=int)
     sp.add_argument("--level", choices=["user", "repo"], required=True)
     sp.add_argument("--dry-run", action="store_true")
+    sp = add("voice-card", cmd_voice_card)
+    sp.add_argument("path")
+    grp = sp.add_mutually_exclusive_group()
+    grp.add_argument("--from-stdin", action="store_true", help='set it from {"voice_card": "<text>"} on stdin')
+    grp.add_argument("--remove", action="store_true", help="delete the stored card")
     sp = add(NAD, cmd_nad)
     sp.add_argument("--level", choices=["user", "repo"], required=True)
     sp.add_argument("--remove", type=int)
     sp = add("log", cmd_log)
     sp.add_argument("path")
     sp.add_argument("--genre")
+    sp.add_argument("--stamp", help="UTC stamp of the record (20261003T101500.123456Z); default now")
     sp = add("genre-put", cmd_genre_put)
     sp.add_argument("name")
     sp.add_argument("--replace", action="store_true", help="replace the record instead of merging")

@@ -117,7 +117,7 @@ def test_healthy_engine_still_passes_in_strict_mode():
 def test_managed_endpoint_na_is_fatal_in_strict_mode():
     """nexus-b1v9z part B: interactive ``nx doctor --check-schema`` must
     keep vl8lk's honest, non-fatal N/A (the test above pins that). But a
-    RELEASE-GATE caller (release-sandbox.sh) cannot tell an honest N/A
+    RELEASE-GATE caller (a sandbox gate) cannot tell an honest N/A
     apart from a real pass by reading rc alone -- the whole point of
     running the check there is to prove the substrate is present and
     correct. --fail-on-violation (the existing doctor.py strict-mode

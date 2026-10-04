@@ -506,10 +506,8 @@ def find_immediate_claude_pid(start_pid: int | None = None) -> int:
 
     RDR-149 P4 retired the T1 addr-file publish/discovery that originally
     motivated this (T1 now keys its leased registry record on the
-    session-id, not the claude_pid). Consumers today: ``nexus.
-    phase_review_sentinel`` (keys its phase-gate sentinel files by the
-    immediate Claude pid) and nexus-d76vc's T1 handoff marker -- both the
-    SessionStart hook's writer (:func:`find_mcp_sibling_pids`, below) and
+    session-id, not the claude_pid). Consumer today: nexus-d76vc's T1
+    handoff marker -- both the SessionStart hook's writer (:func:`find_mcp_sibling_pids`, below) and
     the MCP lifespan's watcher use this SAME function so a marker's
     claimed ``claude_pid`` is always checked against the identical
     "immediate, not topmost" ancestor on both sides.

@@ -7,8 +7,9 @@ every Windows box, since the PG bundle has no Windows target and ``nx init``
 refuses — the first storage-touching MCP tool call in a server process never
 returned. Measured 2026-09-22 on qwentescence: ``tuple_registry`` and
 ``hook_stop_verification`` both blocked past 300s, while ``hook_auto_approve``
-and ``hook_stop_failure``, which touch no storage, returned in 0.0s.
-``hooks.json`` wires ``hook_stop_verification`` on Stop, so ``claude -p``
+and ``hook_stop_failure``, which touch no storage, returned in 0.0s (the two
+stop hooks were deleted at cleanup step A3).
+``hooks.json`` wired ``hook_stop_verification`` on Stop, so ``claude -p``
 answered the prompt and then sat there — the reported symptom, and the reason
 two observations of it read as "past 100s" and "past 150s" rather than as a
 number: both were under the harness's own 180s bound and the probe was killed
@@ -185,7 +186,7 @@ def test_every_registered_hook_bound_is_positive() -> None:
     failure this module's ``DECIDING_HOOKS`` comment describes, arrived at
     from the other side.
     """
-    assert len(_hooks.HOOK_TOOLS) >= 8, (
+    assert len(_hooks.HOOK_TOOLS) >= 2, (
         f"only {len(_hooks.HOOK_TOOLS)} hook specs found; this check has lost "
         "its grip on the registration table rather than the table having shrunk"
     )
@@ -204,8 +205,8 @@ def test_no_wired_hook_outlasts_the_budget_hooks_json_gives_it() -> None:
     while every one of them carried a 30s bound it could never reach: a
     ceiling wide enough to admit the defect it was written to catch.
 
-    9 -> 7 at bead nexus-5l8i8, which moved ``agent_dispatch_expect`` and
-    ``subagent_start_stamp`` off the ``mcp_tool`` tier onto the command tier
+    9 -> 7 at bead nexus-5l8i8, which moved two RDR-184 ledger writers
+    off the ``mcp_tool`` tier onto the command tier
     (via the ``nx-hook`` shim): an MCP-server outage was dropping the RDR-184
     ledger's EXPECT/START rows the same way an inert ``mcp_tool`` verdict
     dropped a decision at bead nexus-17i1n, and the command tier does not
@@ -213,11 +214,15 @@ def test_no_wired_hook_outlasts_the_budget_hooks_json_gives_it() -> None:
     migration off the tier, same reading as that bead's own floor move.
 
     7 -> 5 at bead nexus-egm7p, same reason and same reading: the RDR-205
-    ledger's two projectors (``subagent_start_tuple``, ``subagent_stop_tuple``)
-    move off the ``mcp_tool`` tier for the identical MCP-disconnect hazard.
+    ledger's two projectors move off the ``mcp_tool`` tier for the identical MCP-disconnect hazard.
+    (All four were deleted at cleanup step A1, nexus-0r1uz.)
+
+    5 -> 1 at cleanup steps A2 and A3 (nexus-0r1uz), which deleted the Stop,
+    StopFailure, PostCompact and divergence-language ``mcp_tool`` hooks:
+    ``hook_subagent_start`` is the one wired ``mcp_tool`` left.
     """
     wired = _wired_mcp_tool_timeouts()
-    assert len(wired) >= 5, (
+    assert len(wired) >= 1, (
         f"hooks.json yielded {len(wired)} mcp_tool entries; the parse has lost "
         "its grip on the file rather than the entries having gone"
     )
@@ -236,4 +241,4 @@ def test_no_wired_hook_outlasts_the_budget_hooks_json_gives_it() -> None:
             "tears the transport down (nexus-dgvsz). It has to land inside."
         )
         checked += 1
-    assert checked >= 5, f"only {checked} wired hooks compared"
+    assert checked >= 1, f"only {checked} wired hooks compared"

@@ -41,14 +41,8 @@ packages would resolve to a new leading version component; ``2`` the ``uv
 lock`` dry-run itself could not be run (uv missing, non-zero exit, timeout --
 "could not check" is never reported as "clean").
 
-WHERE THIS RUNS. Not wired into any CI workflow by this change -- see the
-coordination note in the commit this script ships with. The intended home is
-a weekly leg on ``.github/workflows/scheduled-failure-watch.yml`` (the
-existing daily silent-failure sweep for ``on.schedule`` workflows), run with
-a wider cron interval, opening/updating a tracking issue the same way that
-watchdog already does for its three failure modes. Wiring is deliberately
-left to a follow-up commit to avoid a concurrent edit collision with the
-sibling gap-2 fix landing in the same file around the same time.
+WHERE THIS RUNS. ``.github/workflows/dependency-drift-watch.yml`` runs it
+weekly with ``--fail-on shape``.
 """
 from __future__ import annotations
 

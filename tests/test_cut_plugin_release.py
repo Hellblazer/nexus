@@ -1022,10 +1022,8 @@ class TestBatterySubstrateEnv:
     the rehearsal could not reproduce the refusal. That is why it survived to
     bite a real cut.
 
-    The interesting half is the negative: exactly one step provisions its own
-    service, and disabling the substrate for it would leave it running while
-    proving less than it claims. So this pins the SPLIT, not the presence of a
-    flag.
+    A step that does need the engine must keep the ambient setting, so this
+    pins the SPLIT, not the presence of a flag.
     """
 
     def test_pytest_legs_are_marked_substrate_free(self) -> None:
@@ -1041,19 +1039,6 @@ class TestBatterySubstrateEnv:
                 f"bucket and these unit legs do not, and marking them so reintroduces "
                 f"the 1216-setup-error refusal on a clone with no jar (nexus-ps1gx)."
             )
-
-    def test_the_sandbox_leg_keeps_the_ambient_substrate(self) -> None:
-        import cut_plugin_release as mod
-
-        sandbox = [
-            (cmd, needs) for cmd, needs in mod._BATTERY if "release-sandbox.sh" in cmd[0]
-        ]
-        assert len(sandbox) == 1, "expected exactly one sandbox leg in the battery"
-        assert sandbox[0][1] is True, (
-            "release-sandbox.sh smoke provisions its own service; forcing "
-            "NX_TEST_T2_SUBSTRATE=none there would leave the step running while it "
-            "proves less than it claims (nexus-ps1gx)"
-        )
 
     def test_substrate_free_legs_actually_receive_the_env(self, monkeypatch) -> None:
         """The marking has to reach subprocess.run, not just sit in a table."""

@@ -13,9 +13,9 @@
 # `nexus.hooks.*` and calls `run(payload)`. Nothing proved that Claude Code
 # INVOKES them. The two harnesses that come closest each miss on one axis:
 # `tests/cc-validation` drives real Claude Code but, in its own words, "with
-# no plugin install" (fixtures, not our manifest); `tests/e2e/rdr208-mvv`
-# loads our real plugin but deliberately trims hooks.json to the two hooks
-# its journey needs.
+# no plugin install" (fixtures, not our manifest), and the retired RDR-208
+# MVV loaded our real plugin but deliberately trimmed hooks.json to the two
+# hooks its journey needed.
 #
 # THE FAILURE THIS IS AIMED AT IS SILENCE, not a crash. Claude Code treats an
 # unavailable mcp_tool hook as a NON-BLOCKING error: it logs
@@ -43,7 +43,6 @@ ROOT="$(cd "$HERE/../../.." && pwd)"
 source "$ROOT/tests/e2e/lib/python.sh"
 e2e_python_resolve || exit 2
 CRED_TOOL="$ROOT/tests/e2e/lib/claude_credentials.py"
-MVV="$ROOT/tests/e2e/rdr208-mvv"
 KEEP=""
 CLI_VERSION=""
 while [ $# -gt 0 ]; do
@@ -158,7 +157,7 @@ chmod +x "$STAGE/mcp_tee.sh"
 # generations. Both are SessionStart command-tier entries, so dropping them
 # leaves every tool-tier entry and every other verb in place -- which is the
 # surface this shakeout exists to exercise. Anything else removed here would
-# be the trim that made rdr208-mvv unable to answer this question.
+# be the trim that made the retired RDR-208 MVV unable to answer this question.
 # The UNSHIMMED manifest travels too: it is the census denominator.
 cp "$ROOT/conexus/hooks/hooks.json" "$STAGE/hooks.json.original"
 mkdir -p "$STAGE/shims"
@@ -237,12 +236,11 @@ print(f"[stage] hooks.json: {kept} entries kept, {dropped} dropped "
 PY
 
 # A checkout, because several hooks read one (rdr reads docs/rdr, the routing
-# rules resolve a repo, session-context wants beads). rdr208-mvv's trim exists
-# precisely because its container lacks this.
+# rules resolve a repo, session-context wants beads).
 git -C "$ROOT" archive HEAD | tar -x -C "$STAGE/checkout"
 printf '%s\n' "$SHA" > "$STAGE/checkout/.shakeout-sha"
 
-cp "$MVV/send.py" "$MVV/assistant_said.py" "$MVV/turn_end.py" "$STAGE/"
+cp "$HERE/send.py" "$HERE/assistant_said.py" "$HERE/turn_end.py" "$STAGE/"
 cp "$HERE/shakeout_in_container.sh" "$HERE/hook_census.py" "$STAGE/"
 cp "$HERE/Dockerfile" "$STAGE/"
 cat > "$STAGE/settings.json" <<'JSON'
@@ -286,7 +284,7 @@ set +e
 # two release nights and tripled the active-install headline with Sam's own
 # testing. `-e` is the only channel into the container: exporting this in the
 # launching shell does nothing, because docker run does not inherit the host's
-# environment. Same fix and reasoning as migration-rehearsal/run.sh:1065-1069
+# environment. Same fix and reasoning as migration-rehearsal/run.sh
 # (nexus-h5olw). The comment lives ABOVE the command, not inside it: a `#` line
 # within a backslash-continued command ENDS that command, and `bash -n` calls
 # the result valid because it is — it just runs `-e` as its own command.

@@ -355,7 +355,7 @@ from __future__ import annotations
 #: plus grants-nexus-diag.xml. Gates on the tagged tree 119f6441b: engine
 #: suite 2151/0/0, run.sh --shakeout CANDIDATE SHAKEOUT PASSED, run.sh
 #: --candidate-migration REHEARSAL PASSED (floor v0.1.82 populated store,
-#: delta=1, invariants exact), published-client-write-gate PASSED (7.11.0
+#: delta=1, invariants exact), the published-client write leg PASSED (7.11.0
 #: client), RDR-195 MVV PASSED (laravel/framework, 0 TOO_MANY_TOKENS, 0 429).
 #: The client half (byte-aware upsert paging, 422 detail surfaced) rides THIS
 #: release; an engine below this floor answers the oversize case with a
@@ -369,7 +369,7 @@ from __future__ import annotations
 #: the tagged tree d385a373c: engine suite 2193/0/0 (tree-identity with the
 #: mvn-green p6b commit), --shakeout CANDIDATE SHAKEOUT PASSED,
 #: --candidate-migration PASSED (floor v0.1.83 populated store, delta=11,
-#: invariants EXACT), published-client-write-gate PASSED (7.12.0 client),
+#: invariants EXACT), the published-client write leg PASSED (7.12.0 client),
 #: post-publish --acquire PASSED. DEPLOYED and cloud-gated 2026-08-20
 #: BEFORE this release cut (STEP-6 PASS first-run zero advisories; every
 #: migration NOTICE exact-matched the cc5/cc6 measured populations;
@@ -486,7 +486,7 @@ from __future__ import annotations
 #: engine now refuses a tuple body over 4096 bytes and oversized keys, dims,
 #: subspaces and identifiers with the new TooLarge (413), so the deploy relay
 #: was ARMED with conexus before this client tag
-#: (docs/release-arming/engine-service-v0.1.118.json, nexus-1emxn choreography
+#: (nexus-1emxn choreography
 #: (b)). Five new changesets (tuples-003-1..4, tuples-004-1); the PITR fork
 #: walk ran those 5 plus the 12 runAlways changesets. The engine logs
 #: reexecuted_changesets=25 on that walk because production carries 13

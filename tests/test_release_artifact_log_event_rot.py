@@ -18,12 +18,12 @@ independently rediscovered.
 TWO LIVE ESCAPES motivated this, both confirmed at develop a7553c88 by
 exhaustive inverse-grep before this module existed:
 
-  * nexus-xm0cp: ``tests/e2e/migration-rehearsal/rehearse_shakeout.sh``
-    greps ``dual_write_failed`` twice. The chash dual-write hook that used
+  * nexus-xm0cp: a since-deleted rehearsal script (cleanup step 11)
+    grepped ``dual_write_failed`` twice. The chash dual-write hook that used
     to emit it was retired at RDR-187 (``src/nexus/hook_registry.py``); the
     string now has ZERO producers anywhere in ``src/`` or ``service/``, so
     both assertions are permanent, silent passes.
-  * nexus-x8fuq: a sibling escape in ``tests/e2e/upgrade-shakeout.sh`` (a
+  * nexus-x8fuq: a sibling escape in a since-deleted upgrade gate (a
     demoted-*verb*-shaped regex, not a log event -- covered by
     ``test_release_artifact_verb_rot.py``'s class instead, not this one).
 
@@ -69,19 +69,14 @@ zero-or-more directories), so nothing already swept is dropped. NOT swept:
 skill markdown, workflow YAML, ``conexus/hooks/scripts/*.sh``,
 ``conexus/README.md`` -- the sibling module's remaining surfaces prescribe
 *commands* to run, not log-output assertions; the one hooks-script hit found
-during reconnaissance (``stop_verification_hook.sh`` grepping ``bd``'s own
+during reconnaissance (a Stop-hook script grepping ``bd``'s own
 ``in_progress`` status word) is a third-party CLI's status text, not
 something ``src/`` or ``service/`` ever produces, and does not belong in a
 producer search scoped to this repo's own log/API surfaces.
 
-TWO FILES ARE DELIBERATELY EXCLUDED FOR NOW (``_IN_FLIGHT_EXCLUDE``, not
-silently -- see that table): ``tests/e2e/warm-reindex-skip-gate.sh`` and
-``tests/e2e/local-index-memory-gate.sh`` are being actively edited by a
-sibling agent in this same session under nexus-acvi7 (the CombinedWriteService
-existence-partition observability gap this exact class predicts). Sweeping a
-file mid-edit races a moving target and this module's own hard constraint is
-not to touch either file; the exclusion is temporary and named, not a
-permanent carve-out.
+``_IN_FLIGHT_EXCLUDE`` names files temporarily out of scope because a sibling
+agent is editing them; it is empty now (the two files it carried were deleted
+in cleanup step 11, nexus-0r1uz), and its ceiling is 0.
 
 PRODUCER SEARCH (design decision 2). A single \\b-bounded substring search
 over the concatenated text of every ``src/nexus/**/*.py`` file (Python,
@@ -211,22 +206,8 @@ _JAVA_SRC_GLOB = "service/src/main/java/**/*.java"
 #: agent is actively editing them in this same session -- see module
 #: docstring. NOT a permanent carve-out; ceiling below must move (up or
 #: down) consciously.
-_IN_FLIGHT_EXCLUDE: dict[str, str] = {
-    "tests/e2e/warm-reindex-skip-gate.sh": (
-        "nexus-acvi7 (open P1, active this session): CombinedWriteService's "
-        "existence-partition path emits no observability at all and the gate "
-        "cannot currently be made green. A sibling agent is editing this exact "
-        "file this session; sweeping it here would race a moving target, and "
-        "this module's own hard constraint is not to touch it. Remove this "
-        "exclusion once nexus-acvi7 lands and re-sweep."
-    ),
-    "tests/e2e/local-index-memory-gate.sh": (
-        "Concurrently edited alongside warm-reindex-skip-gate.sh in this same "
-        "session under the same nexus-acvi7 remediation. Same TOCTOU "
-        "rationale as that entry."
-    ),
-}
-_IN_FLIGHT_EXCLUDE_CEILING = 2
+_IN_FLIGHT_EXCLUDE: dict[str, str] = {}
+_IN_FLIGHT_EXCLUDE_CEILING = 0
 
 #: ``grep``'s first quoted-literal argument on a line, stopping at the next
 #: ``|``/``;``/newline so a piped second ``grep`` on the same line is a
@@ -270,28 +251,8 @@ class Candidate:
 #: (relative-path, token) -> reason. General-purpose exemption for a
 #: genuinely non-log-event candidate the shape-based extractor cannot
 #: distinguish from a real one. See module docstring, design decision 3.
-_FALSE_CANDIDATE_ALLOWLIST: dict[tuple[str, str], str] = {
-    ("tests/e2e/migration-rehearsal/rehearse_shakeout_e2e.sh", "small_sentinel"): (
-        "small_sentinel is the synthetic fixture module's filename (see "
-        "rehearse_shakeout_e2e.sh's own comment above the hit: 'query the "
-        "real English phrase that genuinely appears in the sentinel "
-        "function's docstring'), asserted against `nx search` RESULT "
-        "CONTENT to prove semantic retrieval works -- not a log event. "
-        "There is and never was a producer for it in src/ or service/; "
-        "confirmed zero occurrences repo-wide outside this one assertion "
-        "and the fixture file itself."
-    ),
-    ("tests/e2e/rdr195-voyage-mvv.sh", "voyage_retry"): (
-        "LIVE producer the extractor cannot see: service/src/main/java/dev/"
-        "nexus/service/vectors/VoyageRetryLoop.java composes the event name "
-        "at runtime as `logPrefix + \"_retry\"` (line ~111) and "
-        "VoyageEmbedder constructs it with logPrefix=\"voyage\", so "
-        "`event=voyage_retry` is still emitted on every embed retry; the "
-        "literal never appears in source since the nexus-1vpal retry-loop "
-        "consolidation (bff9c7cdd). The gate's grep is correct."
-    ),
-}
-_ALLOWLIST_CEILING = 2
+_FALSE_CANDIDATE_ALLOWLIST: dict[tuple[str, str], str] = {}
+_ALLOWLIST_CEILING = 0
 
 
 #: (relative-path, token) -> reason. Distinct from _FALSE_CANDIDATE_ALLOWLIST
@@ -394,15 +355,6 @@ def _has_producer(token: str, corpus: str | None = None) -> bool:
 #: file -> minimum candidate count, hand-verified against the tree at
 #: authoring time (2026-08-10, develop a1b64b3c).
 _ANCHOR_MIN_COUNTS: dict[str, int] = {
-    # nexus-xm0cp (2026-08-10): dropped from 4 to 2 (dual_write_failed's
-    # two candidates DELETED, RDR-187 retired their producer), then back up
-    # to 3 (Finding 2's fix added a THIRD grep candidate, `grep
-    # "vector_gateway_retry"` in the Phase D log-tail-on-failure branch --
-    # a real, live-producer candidate, not a regression). Re-derived
-    # programmatically against the tree at this diff via
-    # `_extract_candidates`: exactly 3.
-    "tests/e2e/migration-rehearsal/rehearse_shakeout.sh": 3,
-    "tests/e2e/migration-rehearsal/rehearse_shakeout_e2e.sh": 4,
     "tests/e2e/fresh-install-mvv.sh": 2,
     "service/native-smoke.sh": 3,
     # nexus-xm0cp Finding 3: proves the widened scripts/**/*.sh scope
@@ -604,18 +556,21 @@ def test_mutation_extraction_detects_grep_invert_flag() -> None:
     assert _GREP_INVERT_FLAG_RE.search(" -c ") is None
     # End-to-end through the real extractor: the known live prod-copy.sh
     # hit must be marked is_exclusion, and a positive-assertion candidate
-    # (e.g. rehearse_shakeout.sh's docs_for_chashes_failed, `grep -q`) must
+    # (e.g. fresh-install-mvv.sh's manifest_hook_batch_missing_doc_identity, `grep -q`) must
     # NOT be.
     prod_copy = REPO_ROOT / "scripts/rdr152-sandbox/prod-copy.sh"
     row_failed_hits = [c for c in _extract_candidates(prod_copy) if c.token == "row_failed"]
     assert row_failed_hits, "expected row_failed to still be extracted from prod-copy.sh"
     assert all(c.is_exclusion for c in row_failed_hits)
 
-    shakeout = REPO_ROOT / "tests/e2e/migration-rehearsal/rehearse_shakeout.sh"
-    docs_hits = [c for c in _extract_candidates(shakeout) if c.token == "docs_for_chashes_failed"]
-    assert docs_hits, "expected docs_for_chashes_failed to still be extracted from rehearse_shakeout.sh"
-    assert not any(c.is_exclusion for c in docs_hits), (
-        "docs_for_chashes_failed is a `grep -q` positive assertion -- it must never be "
+    mvv = REPO_ROOT / "tests/e2e/fresh-install-mvv.sh"
+    mvv_hits = [
+        c for c in _extract_candidates(mvv)
+        if c.token == "manifest_hook_batch_missing_doc_identity"
+    ]
+    assert mvv_hits, "expected manifest_hook_batch_missing_doc_identity to still be extracted from fresh-install-mvv.sh"
+    assert not any(c.is_exclusion for c in mvv_hits), (
+        "manifest_hook_batch_missing_doc_identity is a `grep -q` positive assertion -- it must never be "
         "classified as an exclusion filter"
     )
 

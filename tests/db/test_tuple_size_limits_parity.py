@@ -8,8 +8,8 @@ never drift between:
 1. The engine — ``service/src/main/java/dev/nexus/service/db/
    TupleLimits.java``, the authority (it is what actually enforces them).
 2. The Python client — ``nexus.db.t2.http_tuple_store``'s module-level
-   ``_MAX_*`` constants, which the wheel's ledger projector
-   (``nexus.hooks.tuple_ledger_project``) imports rather than copying.
+   ``_MAX_*`` constants, which the wheel's other tuple writers import
+   rather than copying.
 
 A third copy, the plugin's stdlib-only ``_tuple_size_limits.py``, was
 deleted with the last plugin hook script that read it (nexus-z9cz2).

@@ -4,12 +4,8 @@
 # scripts/lib/installed-nx.sh: resolve the INSTALLED `nx` generation and label
 # the tuple-space endpoint it talks to. Sourced, never executed.
 #
-# Shared by scripts/git-push-develop.sh (push lock + develop-freeze read) and
-# scripts/develop-freeze.sh (freeze set/clear/status). The bodies moved here
-# verbatim from git-push-develop.sh (nexus-agctp review findings 1 and 2) so the
-# two scripts resolve the same `nx` against the same tuple space by construction.
-# A freeze set through one `nx` and read through another would be the same
-# split-brain the lock's scope label exists to expose.
+# Used by scripts/git-push-develop.sh (the push lock). The bodies moved here
+# verbatim from git-push-develop.sh (nexus-agctp review findings 1 and 2).
 
 # Installed nx only. `uv run` and an activated venv both prepend a checkout's
 # OWN `.venv/bin` to PATH ahead of the installed generation, so a bare `nx`

@@ -23,16 +23,12 @@ every Dockerfile under this directory that COPYs or ENTRYPOINTs one of
 these scripts), or the generic ``/.dockerenv`` / ``/run/.containerenv``
 container markers.
 
-SCOPE NOTE. The task that raised this named "the nine" rehearse*.sh
-scripts implicated in the git-config sweep. Two more scripts in the same
-directory (``rehearse_fullstack.sh``, ``rehearse_shakeout_e2e.sh``) carry
-the identical "runs INSIDE the container" header and the identical
-``$HOME/.config/nexus``-writing risk shape (confirmed:
-``rehearse_fullstack.sh``'s own Phase A comment says "PG provisioned
-in-box by `nx init --service`"), so this lint covers the whole
-``rehearse*.sh`` family (eleven scripts today), not only the nine the
-original incident touched -- guarding nine of eleven siblings with
-identical headers would leave a two-tier guarantee.
+SCOPE NOTE. The task that raised this covered the nine rehearse*.sh
+scripts implicated in the git-config sweep and widened to the whole
+``rehearse*.sh`` family. Cleanup step 11 (nexus-0r1uz) deleted every rehearsal
+journey but ``--package-upgrade`` and ``--acquire``, so two scripts remain
+(``rehearse_package_upgrade.sh``, ``rehearse_acquire.sh``); the lint still
+covers the whole family, whatever its size.
 
 This lint checks two things mechanically (every rehearse*.sh sources the
 guard; every Dockerfile that runs one sets the marker) plus two functional
@@ -80,10 +76,10 @@ def test_rehearse_script_scan_is_non_vacuous() -> None:
     """A broken glob (wrong extension, wrong directory) must fail loud
     rather than silently checking zero scripts."""
     scripts = _rehearse_scripts()
-    assert len(scripts) >= 9, (
+    assert len(scripts) >= 2, (
         f"only found {len(scripts)} rehearse*.sh under {REHEARSAL_DIR} -- "
         "the glob may be broken rather than the family genuinely shrinking "
-        "below the nine the 2026-09-12 incident sweep found"
+        "below the two journeys that survive cleanup step 11"
     )
 
 
@@ -109,7 +105,7 @@ def test_every_rehearse_script_sources_the_container_guard() -> None:
 
 def test_dockerfile_scan_is_non_vacuous() -> None:
     mapping = _dockerfiles_running_rehearse_scripts()
-    assert len(mapping) >= 7, (
+    assert len(mapping) >= 2, (
         f"only found {len(mapping)} Dockerfiles referencing a rehearse*.sh "
         f"script under {REHEARSAL_DIR} -- the scan may be broken"
     )

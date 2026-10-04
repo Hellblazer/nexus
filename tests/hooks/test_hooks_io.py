@@ -130,55 +130,38 @@ def test_permission_request_allow():
     )
 
 
-# -- stop_decision (the top-level decision form the stop hooks use) -----------
-
-def test_stop_decision_bare_approve():
-    """stop_verification_hook.sh:22."""
-    assert _io.stop_decision("approve") == '{"decision": "approve"}'
-
-
-def test_stop_decision_with_reason():
-    """stop_verification_hook.sh:20 and subagent-stop.sh:255,289."""
-    assert _io.stop_decision("block", reason="owes a report") == (
-        '{"decision": "block", "reason": "owes a report"}'
-    )
-
-
 # -- HookResult ---------------------------------------------------------------
 
-def test_hook_result_defaults_to_silent_and_zero():
-    """Most hooks emit nothing and exit 0; that must be the cheapest thing to say."""
+def test_hook_result_defaults_to_silent_and_not_crashed():
+    """Most hooks emit nothing; that must be the cheapest thing to say."""
     result = _io.HookResult()
     assert result.stdout is None
-    assert result.exit_code == 0
+    assert result.crashed is False
 
 
-def test_hook_result_carries_stdout_and_a_code():
-    result = _io.HookResult(stdout='{"decision": "approve"}', exit_code=2)
+def test_hook_result_carries_stdout():
+    result = _io.HookResult(stdout='{"decision": "approve"}')
     assert result.stdout == '{"decision": "approve"}'
-    assert result.exit_code == 2
 
 
 # -- the never-fail boundary --------------------------------------------------
 
 def test_never_fail_returns_the_wrapped_result_untouched():
-    assert _io.never_fail(lambda: _io.HookResult(stdout="x", exit_code=3), "demo") == _io.HookResult(
-        stdout="x", exit_code=3
+    assert _io.never_fail(lambda: _io.HookResult(stdout="x"), "demo") == _io.HookResult(
+        stdout="x"
     )
 
 
-def test_never_fail_swallows_an_exception_into_a_silent_zero_result():
+def test_never_fail_swallows_an_exception_into_a_silent_result():
     """The bash layer sets no ``set -e`` by design; Python needs this explicitly.
 
     A crashing hook must look exactly like a hook that decided to say
-    nothing — ON THE WIRE. stdout is None and the exit code is 0, which is
-    the whole fail-open contract and is unchanged.
+    nothing — ON THE WIRE. stdout is None, which is the whole fail-open
+    contract.
 
-    It is no longer indistinguishable IN THE VALUE: ``crashed`` marks the
-    swallow so that the one caller for whom an exit code is a contract —
-    a ledger verb, whose 0/1/2/3/4 a script branches on — can tell a crash
-    from a clean verdict. Nothing else reads the flag, and non-ledger verbs
-    still exit 0 (bead nexus-q02nx.9, Sam's ruling 2026-09-19).
+    It is not indistinguishable IN THE VALUE: ``crashed`` marks the swallow
+    so a caller can tell a crash from a clean verdict (bead nexus-q02nx.9,
+    Sam's ruling 2026-09-19).
     """
 
     def boom() -> _io.HookResult:
@@ -186,7 +169,6 @@ def test_never_fail_swallows_an_exception_into_a_silent_zero_result():
 
     result = _io.never_fail(boom, "demo")
     assert result.stdout is None, "the decision channel stays silent"
-    assert result.exit_code == 0, "fail-open is unchanged"
     assert result.crashed is True, "but the swallow is now marked"
 
 
@@ -243,7 +225,7 @@ def test_never_fail_swallows_an_error_raised_outside_the_normal_hierarchy():
     def boom() -> _io.HookResult:
         raise RecursionError("too deep")
 
-    assert _io.never_fail(boom, "demo").exit_code == 0
+    assert _io.never_fail(boom, "demo").stdout is None
 
 
 @pytest.mark.parametrize(

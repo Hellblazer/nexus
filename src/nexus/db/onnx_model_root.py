@@ -5,7 +5,7 @@
 The Java engine resolved its model paths from ``System.getProperty("user.home")``
 — the passwd entry — while the Python provisioners write under ``Path.home()``
 (the HOME env var). Any process tree where the two differ (containers with a
-custom HOME, the release-sandbox HOME, CI runners) got a green ``nx init``
+custom HOME, a sandbox HOME, CI runners) got a green ``nx init``
 ("model ready at $HOME/...") and then an engine crash ("model not found at
 <passwd-home>/..."). The container leg of the plugin-cut rehearsal measured
 exactly this on engine-service-v0.1.91 (2026-08-30).

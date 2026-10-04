@@ -111,35 +111,7 @@ class _FakeTelemetryHandler(FakeT2HandlerBase):
         pp = urlparse(self.path).path
         body = self._body()
 
-        if pp == "/v1/telemetry/capability_census/record":
-            # nexus-gjv9b PART 3 prerequisite: capabilities_orchestrator /
-            # capabilities_subagent combine into ONE capabilities_by_scope
-            # field on write, mirroring TelemetryHandler.
-            # handleCapabilityCensusRecord's real engine behavior -- NULL
-            # (omitted here) when a blindspot record, or neither is sent.
-            blindspot = bool(body.get("blindspot", False))
-            by_scope = None
-            if not blindspot and (
-                body.get("capabilities_orchestrator") or body.get("capabilities_subagent")
-            ):
-                by_scope = {
-                    "orchestrator": body.get("capabilities_orchestrator") or {},
-                    "subagent":     body.get("capabilities_subagent") or {},
-                }
-            with _STORE_LOCK:
-                _capability_census[body["session_id"]] = {
-                    "session_id":            body.get("session_id", ""),
-                    "ts":                    body.get("ts", ""),
-                    "blindspot":             blindspot,
-                    "unmeasurable_reason":   body.get("unmeasurable_reason"),
-                    "capabilities":          body.get("capabilities") or {},
-                    "dispatches":            body.get("dispatches"),
-                    "total_calls":           body.get("total_calls"),
-                    "capabilities_by_scope": by_scope,
-                }
-            self._send(200, {"ok": True})
-
-        elif pp == "/v1/telemetry/routing_events/record":
+        if pp == "/v1/telemetry/routing_events/record":
             with _STORE_LOCK:
                 _routing_events.append({
                     "ts":               body.get("ts", ""),
@@ -484,20 +456,7 @@ class _FakeTelemetryHandler(FakeT2HandlerBase):
             return
         qs = self._qs()
 
-        if pp == "/v1/telemetry/capability_census/query":
-            session_id = qs.get("session_id", "")
-            since      = qs.get("since", "")
-            limit      = int(qs.get("limit", "100"))
-            with _STORE_LOCK:
-                rows = list(_capability_census.values())
-            if session_id:
-                rows = [r for r in rows if r["session_id"] == session_id]
-            elif since:
-                rows = [r for r in rows if r["ts"] >= since]
-            rows = sorted(rows, key=lambda r: r["ts"], reverse=True)[:limit]
-            self._send(200, {"rows": rows})
-
-        elif pp == "/v1/telemetry/routing_events/list":
+        if pp == "/v1/telemetry/routing_events/list":
             since = qs.get("since", "")
             limit = int(qs.get("limit", "1000"))
             with _STORE_LOCK:
@@ -1937,144 +1896,7 @@ class TestGetRelevanceStatsAgainstRealEngine:
             db.close()
 
 
-# ── capability_census / routing_events (nexus-gjv9b) ────────────────────────
-
-class TestRecordCapabilityCensus:
-    def test_record_then_query_roundtrip(self, client):
-        client.record_capability_census(
-            session_id="sess-1", ts="2026-09-01T00:00:00Z", blindspot=False,
-            capabilities={"skill": 3, "agent": 1}, dispatches=1, total_calls=4,
-        )
-        rows = client.query_capability_census(session_id="sess-1")
-        assert len(rows) == 1
-        assert rows[0]["capabilities"]["skill"] == 3
-        assert rows[0]["total_calls"] == 4
-
-    def test_old_client_shape_omits_scope_split_keys_entirely(self, monkeypatch):
-        """Coordinator directive after critique-nexus-gjv9b-part3-9695b260f:
-        confirmed BY TEST, not by reading, that the exact wire body a
-        conexus 7.31.0-and-earlier client sends (no
-        capabilities_orchestrator/capabilities_subagent kwargs at all --
-        every call site that predates this bead's PART 3 prerequisite)
-        omits those two keys from the POST body ENTIRELY, not as
-        present-but-empty objects. This is what makes the engine's
-        ``!capabilitiesOrchestrator.isEmpty() ||
-        !capabilitiesSubagent.isEmpty()`` guard evaluate false and skip
-        the flat/scope invariant check -- see
-        CapabilityCensusAndRoutingEventsHandlerTest
-        .census_record_old731ClientShape_acceptedWithNullScope for the
-        matching real-engine confirmation. A pure unit test: no network,
-        no engine, just the payload this client method actually builds.
-        """
-        from nexus.db.t2.http_telemetry_store import HttpTelemetryStore
-
-        captured: dict = {}
-
-        def _fake_post(self, path, body, **kwargs):
-            captured["path"] = path
-            captured["body"] = body
-            return {}
-
-        monkeypatch.setattr(HttpTelemetryStore, "_post", _fake_post)
-
-        store = HttpTelemetryStore(base_url="http://engine.invalid", _token="t")
-        try:
-            store.record_capability_census(
-                session_id="sess-old-shape", ts="2026-09-01T00:00:00Z",
-                blindspot=False, capabilities={"skill": 3, "agent": 1},
-                dispatches=1, total_calls=4,
-            )
-        finally:
-            store.close()
-
-        body = captured["body"]
-        assert "capabilities_orchestrator" not in body
-        assert "capabilities_subagent" not in body
-        assert body["capabilities"] == {"skill": 3, "agent": 1}
-
-    def test_new_client_shape_includes_scope_split_keys_when_given(self, monkeypatch):
-        """The counterpart: passing the split kwargs DOES put both keys on
-        the wire -- the omission above is default-driven, not a code path
-        that silently drops explicit values too."""
-        from nexus.db.t2.http_telemetry_store import HttpTelemetryStore
-
-        captured: dict = {}
-
-        def _fake_post(self, path, body, **kwargs):
-            captured["body"] = body
-            return {}
-
-        monkeypatch.setattr(HttpTelemetryStore, "_post", _fake_post)
-
-        store = HttpTelemetryStore(base_url="http://engine.invalid", _token="t")
-        try:
-            store.record_capability_census(
-                session_id="sess-new-shape", ts="2026-09-01T00:00:00Z",
-                blindspot=False, capabilities={"skill": 3},
-                dispatches=1, total_calls=3,
-                capabilities_orchestrator={"skill": 2},
-                capabilities_subagent={"skill": 1},
-            )
-        finally:
-            store.close()
-
-        body = captured["body"]
-        assert body["capabilities_orchestrator"] == {"skill": 2}
-        assert body["capabilities_subagent"] == {"skill": 1}
-
-    def test_blindspot_record_omits_capabilities(self, client):
-        client.record_capability_census(
-            session_id="sess-blind", ts="2026-09-01T00:00:00Z", blindspot=True,
-            unmeasurable_reason="no-transcript-found",
-        )
-        rows = client.query_capability_census(session_id="sess-blind")
-        assert rows[0]["blindspot"] is True
-        assert rows[0]["unmeasurable_reason"] == "no-transcript-found"
-
-    def test_reupserting_same_session_replaces_not_duplicates(self, client):
-        client.record_capability_census(
-            session_id="sess-up", ts="2026-09-01T00:00:00Z", blindspot=False,
-            capabilities={"skill": 1}, dispatches=0, total_calls=1,
-        )
-        client.record_capability_census(
-            session_id="sess-up", ts="2026-09-01T00:05:00Z", blindspot=False,
-            capabilities={"skill": 5}, dispatches=2, total_calls=5,
-        )
-        rows = client.query_capability_census(session_id="sess-up")
-        assert len(rows) == 1
-        assert rows[0]["total_calls"] == 5
-
-    def test_scope_split_roundtrips_as_nested_object(self, client):
-        """nexus-gjv9b PART 3 prerequisite: capabilities_orchestrator /
-        capabilities_subagent combine engine-side into ONE
-        capabilities_by_scope column and round-trip as a nested
-        {"orchestrator": {...}, "subagent": {...}} object — a real
-        engine round trip, not a mocked wire shape."""
-        client.record_capability_census(
-            session_id="sess-scope-rt", ts="2026-09-05T00:00:00Z", blindspot=False,
-            capabilities={"skill": 3, "agent": 1},
-            capabilities_orchestrator={"skill": 2, "agent": 1},
-            capabilities_subagent={"skill": 1, "agent": 0},
-            dispatches=1, total_calls=4,
-        )
-        rows = client.query_capability_census(session_id="sess-scope-rt")
-        assert len(rows) == 1
-        by_scope = rows[0]["capabilities_by_scope"]
-        assert by_scope["orchestrator"]["skill"] == 2
-        assert by_scope["orchestrator"]["agent"] == 1
-        assert by_scope["subagent"]["skill"] == 1
-        assert by_scope["subagent"]["agent"] == 0
-
-    def test_no_scope_split_sent_leaves_capabilities_by_scope_absent(self, client):
-        """Additive: a caller that never passes the split gets exactly
-        the pre-PART-3 wire shape back, no fabricated breakdown."""
-        client.record_capability_census(
-            session_id="sess-no-scope-rt", ts="2026-09-05T00:00:00Z", blindspot=False,
-            capabilities={"skill": 1}, dispatches=0, total_calls=1,
-        )
-        rows = client.query_capability_census(session_id="sess-no-scope-rt")
-        assert rows[0].get("capabilities_by_scope") is None
-
+# ── capability_census trim / routing_events (nexus-gjv9b) ───────────────────
 
 class TestRecordRoutingEvent:
     def test_record_then_list_roundtrip(self, client):
@@ -2091,6 +1913,13 @@ class TestRecordRoutingEvent:
         assert len(rows) == 2
 
 
+def _seed_census(session_id: str, ts: str) -> None:
+    """The client's writer was deleted (cleanup step A1, nexus-0r1uz); rows
+    only exist from before then, so a test seeds the fake engine's table."""
+    with _STORE_LOCK:
+        _capability_census[session_id] = {"session_id": session_id, "ts": ts}
+
+
 class TestTrimCapabilityCensus:
     """nexus-gjv9b review fold-in, critique Significant 4: retention for
     capability_census, same age-only trim discipline as TestTrimHookFailures."""
@@ -2100,33 +1929,21 @@ class TestTrimCapabilityCensus:
             client.trim_capability_census(days=0)
 
     def test_trim_removes_old(self, client):
-        client.record_capability_census(
-            session_id="sess-trim-old", ts="2020-01-01T00:00:00+00:00",
-            blindspot=False, capabilities={"skill": 1}, dispatches=0, total_calls=1,
-        )
-        client.record_capability_census(
-            session_id="sess-trim-new", ts=datetime.now(UTC).isoformat(),
-            blindspot=False, capabilities={"skill": 1}, dispatches=0, total_calls=1,
-        )
+        _seed_census("sess-trim-old", "2020-01-01T00:00:00+00:00")
+        _seed_census("sess-trim-new", datetime.now(UTC).isoformat())
         deleted = client.trim_capability_census(days=365 * 3)
         assert deleted == 1
-        remaining = client.query_capability_census(session_id="sess-trim-old")
-        assert remaining == []
+        assert "sess-trim-old" not in _capability_census
+        assert "sess-trim-new" in _capability_census
 
     def test_dry_run_previews_then_matches_the_real_trim(self, client):
-        client.record_capability_census(
-            session_id="sess-dr-old", ts="2020-01-01T00:00:00+00:00",
-            blindspot=False, capabilities={"skill": 1}, dispatches=0, total_calls=1,
-        )
-        client.record_capability_census(
-            session_id="sess-dr-new", ts=datetime.now(UTC).isoformat(),
-            blindspot=False, capabilities={"skill": 1}, dispatches=0, total_calls=1,
-        )
+        _seed_census("sess-dr-old", "2020-01-01T00:00:00+00:00")
+        _seed_census("sess-dr-new", datetime.now(UTC).isoformat())
 
         preview = client.trim_capability_census(days=365 * 3, dry_run=True)
         assert preview == 1
         assert client.trim_capability_census(days=365 * 3, dry_run=True) == preview
-        assert client.query_capability_census(session_id="sess-dr-old") != []
+        assert "sess-dr-old" in _capability_census
 
         deleted = client.trim_capability_census(days=365 * 3, dry_run=False)
         assert deleted == preview
@@ -2172,14 +1989,13 @@ class TestTrimRoutingEvents:
         assert client.trim_routing_events(days=365 * 3, dry_run=True) == 0
 
 
-class TestCapabilityCensusAndRoutingEventProductionWriteGuard:
-    """nexus-a2qhz / nexus-onq1a review fix pass: both methods used to
+class TestRoutingEventProductionWriteGuard:
+    """nexus-a2qhz / nexus-onq1a review fix pass: the writer used to
     bypass ``RefreshableHttpStoreMixin``'s ``_send`` (and therefore the
-    dev-checkout production-write guard) via a raw ``httpx`` call.
-    ``capability_census`` fires on every SessionEnd, so an un-opted-in
-    dev checkout running as the operator's live ``nx`` would otherwise
-    write straight through to production with no guard at all -- exactly
-    the class of incident nexus-a2qhz exists to prevent.
+    dev-checkout production-write guard) via a raw ``httpx`` call, so an
+    un-opted-in dev checkout running as the operator's live ``nx`` would
+    otherwise write straight through to production with no guard at all --
+    exactly the class of incident nexus-a2qhz exists to prevent.
 
     ``tests/conftest.py``'s autouse ``_exempt_pytest_from_production_write_
     guard`` fixture sets the suite-wide exemption via an IN-PROCESS
@@ -2196,26 +2012,6 @@ class TestCapabilityCensusAndRoutingEventProductionWriteGuard:
     ``_dev_checkout_root`` mock is needed.
     """
 
-    def test_record_capability_census_refused_without_opt_in(
-        self, client, monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        from nexus.db import service_endpoint
-        from nexus.db.service_endpoint import ProductionWriteGuardError
-
-        monkeypatch.setattr(service_endpoint, "_test_only_opt_in_reason", None)
-        # The operator's shell may carry a real opt-in (a release battery
-        # exports one for its tracker write); the refusal needs none.
-        monkeypatch.delenv(service_endpoint.PROD_WRITE_OPT_IN_ENV, raising=False)
-        with pytest.raises(ProductionWriteGuardError):
-            client.record_capability_census(
-                session_id="sess-guarded", ts="2026-09-01T00:00:00Z",
-                blindspot=False, capabilities={}, dispatches=0, total_calls=0,
-            )
-        assert _REQUEST_COUNT["n"] == 0, (
-            "the guard must refuse BEFORE any network attempt -- the fake "
-            "server must never see this request"
-        )
-
     def test_record_routing_event_refused_without_opt_in(
         self, client, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -2229,50 +2025,3 @@ class TestCapabilityCensusAndRoutingEventProductionWriteGuard:
         with pytest.raises(ProductionWriteGuardError):
             client.record_routing_event(rule="r1", outcome="allow")
         assert _REQUEST_COUNT["n"] == 0
-
-    def test_dev_checkout_census_write_is_metered_as_a_drop_not_lost(
-        self, monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """End-to-end: the SessionEnd writer swap
-        (``_session_end_census._post_capability_census``) treats a
-        refused write exactly like any other failure -- a metered drop,
-        never a crash and never a silent loss."""
-        import nexus._session_end_census as mod
-        from nexus.db.service_endpoint import ProductionWriteGuardError
-
-        monkeypatch.delenv("NX_ALLOW_PROD_WRITE", raising=False)
-
-        def _boom(*a, **k):
-            raise ProductionWriteGuardError("refused: dev checkout, no opt-in")
-
-        monkeypatch.setattr(
-            "nexus.db.t2.http_telemetry_store.HttpTelemetryStore.record_capability_census",
-            _boom,
-        )
-        monkeypatch.setattr(
-            "nexus.db.service_endpoint.resolve_service_endpoint",
-            lambda: ("http://127.0.0.1:1", "fake-token"),
-        )
-        # No real mint attempt: this must reach the (mocked) guard refusal,
-        # not fail earlier on an unrelated connection error to the fake
-        # base_url above.
-        class _NoMintManager:
-            def bearer_for(self, base_url, tenant):
-                return None
-        monkeypatch.setattr(
-            "nexus.db.data_token.get_data_token_manager",
-            lambda: _NoMintManager(),
-        )
-        drops: list[dict] = []
-        monkeypatch.setattr(
-            "nexus.dropped_writes.record_drop",
-            lambda **kw: drops.append(kw),
-        )
-
-        mod._post_capability_census({
-            "session_id": "sess-guard-e2e", "timestamp": "2026-09-01T00:00:00Z",
-            "blindspot": False, "capabilities": {}, "dispatches": 0, "total_calls": 0,
-        })  # must not raise
-
-        assert len(drops) == 1
-        assert drops[0]["hook"] == "capability_census"

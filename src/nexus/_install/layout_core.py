@@ -42,7 +42,7 @@ the property nexus-utpuw exists to buy.
 
 WHY THE DEFAULTS MUST STAY $HOME-DERIVED, AND MUST NOT BE CACHED
 
-``tests/e2e/release-sandbox.sh`` and ``tests/e2e/run.sh`` isolate themselves
+Sandbox harnesses such as ``tests/e2e/run.sh`` isolate themselves
 ONLY by redirecting ``$HOME``. If these defaults were resolved once at import
 time, or hardcoded, those harnesses would silently start writing into the
 operator's live install. ``tools_dir()`` and ``bin_dir()`` therefore consult

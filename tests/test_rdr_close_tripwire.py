@@ -17,10 +17,10 @@ mem:feedback_phase_closeout_scope_audit):
 
 * The bead's fuller invariant ("an RDR whose *closing beads* are all closed
   must be status:closed AND have a post-mortem") additionally needs bead
-  status. The only test-accessible bead snapshot, ``.beads/issues.jsonl``, is
-  a STALE legacy export (no beads after 2026-05-10; the live tracker is
-  dolt-backed and not committed as JSONL). Keying the gate on it would produce
-  a flaky / false-negative tripwire. The "accepted-but-should-be-closed" and
+  status. No committed bead snapshot carries status (the live tracker is
+  dolt-backed; the stale May 2026 ``.beads/issues.jsonl`` export was removed
+  2026-10-03, and ``tests/fixtures/bead_ids.txt`` is ids only). Keying the
+  gate on either would produce a flaky / false-negative tripwire. The "accepted-but-should-be-closed" and
   "closed-beads-imply-close" halves are therefore intentionally out of scope
   until a reliable committed bead snapshot exists; this file covers the
   closed→post-mortem half, which is the most common back-of-funnel miss and is

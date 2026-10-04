@@ -8,9 +8,9 @@ message naming the preferred invocation.
 ## Plugin ownership (RDR-125)
 
 **Each plugin owns the routing rules whose deny message redirects to a
-tool the plugin ships.** The nx-side rule under this directory
-(`phase_review_close_requires_gate`) redirects to commands or skills
-that nx ships. sn's `grep_for_symbols_redirects_to_serena` rule was the
+tool the plugin ships.** The nx-side rules under this directory
+(`subagent_git_write_requires_orchestrator`, `credential_print_guard`)
+redirect to commands or skills that nx ships. sn's `grep_for_symbols_redirects_to_serena` rule was the
 worked example: it lived under `sn/hooks/scripts/routing/` because it
 redirected to Serena MCP tools that sn ships. Its registration was
 removed at a69bea883 (it silently blocked bash greps on code files) and
@@ -39,20 +39,19 @@ Expectations is an **aggregate across all installed plugins**, not a
 per-plugin count -- Claude Code merges hook registrations and fires
 them sequentially. Current count (the review-coverage push gate,
 `git_add_all_redirects_to_explicit_paths`, was deleted 2026-08-22 —
-Sam's decision, see the file's former git history; RDR-219
-(nexus-wauo1.22) added `credential_print_guard`, taking nx's own
-PreToolUse:Bash count to the cap):
+Sam's decision, see the file's former history; the bd-close review
+gate and the phase-review close gate were deleted at cleanup steps A2
+and A3, nexus-0r1uz):
 
 | Plugin | Routing rules | Other PreToolUse:Bash | Subtotal |
 |--------|----|----|----|
-| nx | 3 (`phase_review_close`, `subagent_git_write`, `credential_print_guard`) | 1 (`pre_close_verification_hook.sh`) | 4 |
+| nx | 2 (`subagent_git_write`, `credential_print_guard`) | 0 | 2 |
 | sn | 0 | 0 | 0 |
-| **Aggregate** | | | **4** |
+| **Aggregate** | | | **2** |
 
-The aggregate is now AT the cap. Adding a fifth routing rule in any
-plugin requires either consolidation or a budget revision in a
-successor RDR. The `tests/test_routing_registry_aggregate_cap.py` CI
-lint enforces this.
+The cap is 4. Adding a fifth routing rule in any plugin requires either
+consolidation or a budget revision in a successor RDR. The
+`tests/test_routing_registry_aggregate_cap.py` CI lint enforces this.
 
 ## Contract
 

@@ -32,8 +32,7 @@ mechanism:
                    debris.
   CONTAINER       runs INSIDE a throwaway Docker container that
                    provisions its own bundled PG/engine fresh per run (the
-                   migration-rehearsal ``rehearse_*.sh`` family plus
-                   ``seed_legacy.py``, invoked only from inside it), each
+                   migration-rehearsal ``rehearse_*.sh`` family), each
                    with its own header comment saying so -- the same
                    isolation class ``test_nx_init_autostart_collision_lint
                    .py``'s ``CONTAINER_ALLOWLIST`` already recognizes for
@@ -166,64 +165,16 @@ ALLOWLIST: dict[str, tuple[int, str]] = {
     # itself is the isolation boundary, the same class
     # test_nx_init_autostart_collision_lint.py's CONTAINER_ALLOWLIST
     # already recognizes for the launchd/systemd-domain hazard.
-    "tests/e2e/migration-rehearsal/lib/store_put_census.sh": (
-        1, "CONTAINER: shared function `census_concurrent_store_puts`, sourced+"
-           "called only by rehearse_shakeout.sh (container-executed, see below) "
-           "or by tests/test_shakeout_store_put_census.py with a STUB `nx` first "
-           "on $PATH -- the real `nx store put` binary is never reached from the "
-           "host.",
-    ),
-    "tests/e2e/migration-rehearsal/rehearse.sh": (
-        10, "CONTAINER: runs INSIDE the container (own header comment); "
-            "provisions its own bundled PG/engine fresh per run via `nx init "
-            "--service`; the remaining matches are further invocation/echo "
-            "lines, all still container-scoped.",
+    "tests/e2e/hook-surface-shakeout/send.py": (
+        1, "CONTAINER: copied into the hook-surface shakeout image and run "
+           "only inside it (own docstring), where `nx init` provisions the "
+           "container's own bundled PG/engine; its mailbox_send writes go to "
+           "that engine's tuple space and nowhere else.",
     ),
     "tests/e2e/migration-rehearsal/rehearse_acquire.sh": (
         3, "CONTAINER: runs INSIDE the container (own header comment: "
            "\"PUBLISHED-ARTIFACT acquire gate\"); provisions its own bundled "
            "PG/engine fresh per run; 2 extra matches are echo/label lines.",
-    ),
-    "tests/e2e/migration-rehearsal/rehearse_candidate_migration.sh": (
-        11, "CONTAINER: runs INSIDE the container (own header comment); Stage 2b "
-            "is `nx init --service` provisioning its own bundled PG fresh per "
-            "run; 10 more matches, all container-scoped, including Stage 3e's "
-            "`nx index repo` seeding the RDR-204 P1.9 MVV's code/docs "
-            "collections (bead nexus-ft04v.10) and, from nexus-z0o2p.42 "
-            "round 2, Stage 3a's two shared-chash `nx store put` seeds.",
-    ),
-    "tests/e2e/migration-rehearsal/rehearse_era_hop.sh": (
-        1, "CONTAINER: runs INSIDE the container (own header comment: "
-           "\"ERA-SPANNING HOP MVV\"); provisions its own bundled PG/engine "
-           "fresh per run.",
-    ),
-    "tests/e2e/migration-rehearsal/rehearse_fullstack.sh": (
-        11, "CONTAINER: runs INSIDE the container (own header comment: "
-            "\"Full-stack isolated shakeout\"); provisions its own bundled "
-            "PG/engine fresh per run; 10 extra matches are store_put/search/"
-            "nx_answer MCP-tool mentions inside the container, 3 of them the "
-            "grant mode's pre-start-skip check (nexus-wauo1.40).",
-    ),
-    "tests/e2e/migration-rehearsal/rehearse_shakeout.sh": (
-        7, "CONTAINER: runs INSIDE the container (own header comment); Phase D "
-           "sources lib/store_put_census.sh (see above) for the "
-           "concurrent-store-put census, entirely inside the throwaway "
-           "container; the remaining matches are further invocation/echo "
-           "lines from the same phase.",
-    ),
-    "tests/e2e/migration-rehearsal/rehearse_shakeout_e2e.sh": (
-        22, "CONTAINER: runs INSIDE the container (own header comment: "
-            "\"Daily-driver install-to-shakeout journey\"); provisions its own "
-            "bundled PG/engine fresh per run, including an `nx index pdf` leg "
-            "on a synthetic fixture; the remaining ~20 matches are further "
-            "`nx index pdf`/progress-label lines through its 10-step journey, "
-            "all inside the container.",
-    ),
-    "tests/e2e/rdr208-mvv/send.py": (
-        1, "CONTAINER: copied into the RDR-208 local-mode MVV image and run "
-           "only inside it (own docstring), where `nx init` provisions the "
-           "container's own bundled PG/engine; its mailbox_send writes go to "
-           "that engine's tuple space and nowhere else.",
     ),
     # ── NX_LOCAL+SANDBOX: no cloud "production tenant" concept applies
     # (the bundled engine is a private per-install Postgres under the
@@ -241,14 +192,6 @@ ALLOWLIST: dict[str, tuple[int, str]] = {
            "any scenario runs) -- `nx index repo` indexes into the scratch "
            "HOME's own bundled engine.",
     ),
-    "tests/e2e/scenarios/cc-catalog-decomposition-smoke.sh": (
-        2, "NX_LOCAL+SANDBOX: runs against $HOME/nexus-sandbox, populated by "
-           "release-sandbox.sh's own isolated generation install -- not the "
-           "operator's live production install. The `store_put` occurrences "
-           "are a `claude_prompt` payload (an English instruction to a live "
-           "Claude session) and an `echo` progress line, not a direct "
-           "`nx`/curl invocation.",
-    ),
     "tests/e2e/fresh-install-mvv.sh": (
         9, "NX_LOCAL+SANDBOX: HOME=\"$HOME_DIR\" (L364, L395) + NX_LOCAL=1 "
            "(L367); the real `_nx store put` / `_nx index md` / `_nx index "
@@ -256,39 +199,11 @@ ALLOWLIST: dict[str, tuple[int, str]] = {
            "engine. The opt-in formula-PDF leg (nexus-gqrg0 round 2, "
            "NX_MVV_FORMULA_PDF_CHECK=1) adds four more, all under the "
            "identical `_nx` wrapper: two `_nx store list` chunk-id "
-           "snapshots (before/after the index, release-sandbox.sh's own "
-           "chunk-id-set-diff shape), one `_nx index pdf`, and one `_nx "
+           "snapshots (before/after the index, a chunk-id-set-diff shape), one `_nx index pdf`, and one `_nx "
            "store get` for the post-hoc extractor-identity read-back. The "
            "ninth site is PROSE-ONLY: the `_fail \"nx index pdf (MinerU "
            "path...\"` line is an error-message string literal naming the "
            "failed step, never itself executed as a command.",
-    ),
-    "tests/e2e/local-index-memory-gate.sh": (
-        2, "NX_LOCAL+SANDBOX (isolated config dir): HOME=\"$HOME_DIR\" "
-           "NEXUS_CONFIG_DIR=\"$ISOLATED_CONFIG_DIR\" NX_LOCAL=1 (L639-644), "
-           "with an explicit _die guard (L599) if NEXUS_CONFIG_DIR ever equals "
-           "the operator's real config dir; both matches (L280, L886) are "
-           "progress-message labels, not invocations.",
-    ),
-    "tests/e2e/rdr195-voyage-mvv.sh": (
-        2, "NX_LOCAL+SANDBOX + self-provisioned engine: HOME=\"$SANDBOX_HOME\" "
-           "+ NX_LOCAL=1 (L279-280) -- a real Voyage API key is used for "
-           "embedding, but every write lands in the throwaway local engine "
-           "under $SANDBOX_HOME, never a cloud tenant.",
-    ),
-    "tests/e2e/release-sandbox.sh": (
-        24, "NX_LOCAL+SANDBOX: SANDBOX=\"$HOME/nexus-sandbox\" (L40), with "
-            "HOME=\"$SANDBOX\" + NX_LOCAL=1 re-exported at each entry point "
-            "(L685, L764, L1339); real invocations at L898, L913, L969, L971, "
-            "L983, L991, L1011 all target the sandbox's own bundled engine; "
-            "the remaining ~17 matches are echo/`_index_floor_check` progress "
-            "labels quoting step names like \"nx index repo\".",
-    ),
-    "tests/e2e/warm-reindex-skip-gate.sh": (
-        4, "NX_LOCAL+SANDBOX: the repo's `_nx()` HOME-swap wrapper (L77-97: "
-           "HOME=\"$HOME_DIR\", NX_LOCAL=1) fronts all 4 matches, each a real "
-           "`_nx index repo` call through it into the scratch HOME's own "
-           "bundled engine.",
     ),
     "tests/e2e/cloud-client-path-gate.sh": (
         1, "READ-ONLY: every leg in this gate is a read (per its own header, "
@@ -355,11 +270,6 @@ ALLOWLIST: dict[str, tuple[int, str]] = {
     "tests/e2e/index-throughput-bench/test_aggregate.py": (
         1, "PROSE-ONLY: docstring mention of \"nx index repo\" describing what this "
            "test aggregates, not a real invocation.",
-    ),
-    "tests/e2e/migration-rehearsal/seed_legacy.py": (
-        4, "CONTAINER: every real invocation is `python /home/nexus/seed_legacy.py` "
-           "from the rehearse_*.sh family (container-executed, see above); run.sh "
-           "only `cp`'s this file into container staging, never runs it on the host.",
     ),
 }
 

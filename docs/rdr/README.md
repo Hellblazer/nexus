@@ -138,15 +138,17 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-113](rdr-113-host-trust-model.md) | Host-Trust Model for nexus Daemons: UDS Permissions, Peer Credentials, Single-User v1 | Architecture | **Abandoned 2026-05-19** | 2026-05-13 |
 | [RDR-118](rdr-118-surfaces-as-tuples.md) | Surfaces as Tuples — The ORB is the Portal Broker (A2UI Adoption + Xanadu Inheritance) | Architecture | **Abandoned 2026-05-19** | 2026-05-17 |
 | [RDR-119](rdr-119-cockpit-ui-fabric.md) | Cockpit UI Fabric — Bakke Auto-Layout over A2UI Catalogs, per-Host Realization | Architecture | **Abandoned 2026-05-19** | 2026-05-18 |
-| [RDR-120](rdr-120-storage-substrate-split.md) | Storage Substrate Split: Substrate-Only Scope, No Co-Shipped Consumers | Architecture | Accepted 2026-05-21 | 2026-05-19 |
+| [RDR-120](rdr-120-storage-substrate-split.md) | Storage Substrate Split: Substrate-Only Scope, No Co-Shipped Consumers | Architecture | Closed | 2026-05-19 |
 | [RDR-121](rdr-121-hook-enforced-tool-routing.md) | Hook-Enforced Tool Routing: PreToolUse as Backstop for Soft Guidance | Architecture | Closed 2026-05-20 (shipped in 4.33.0) | 2026-05-19 |
 | [RDR-122](rdr-122-llm-json-repair-pass.md) | LLM-JSON Repair Pass: Port a2ui PayloadFixer Pattern to nx Structured-Output Parsers | Technical | Closed | 2026-05-19 |
+| [RDR-123](rdr-123-nx-answer-a2ui-surfaces.md) | nx_answer A2UI Surfaces: Render Composed-Retrieval Responses as Structured Surfaces | Architecture | Superseded by RDR-127 | 2026-05-19 |
+| [RDR-124](rdr-124-subagent-result-surfaces.md) | Subagent Result Surfaces: Return A2UI Cards from Subagents to Relieve Orchestrator Context | Architecture | Superseded by RDR-127 | 2026-05-19 |
 | [RDR-125](rdr-125-routing-hook-plugin-ownership.md) | Routing-Hook Plugin Ownership: Each Plugin Ships Its Own Rules | Architecture | Closed 2026-05-21 (shipped in 4.33.1) | 2026-05-20 |
 | [RDR-126](rdr-126-claude-desktop-deployment-unified-chat-cowork.md) | Claude Desktop Deployment: Unified Chat and Cowork Surface | Architecture | Closed | 2026-05-23 |
 | [RDR-127](rdr-127-substrate-decoupled-surface-rendering.md) | Substrate-Decoupled Surface Rendering | Architecture | Closed | 2026-05-22 |
 | [RDR-128](rdr-128-t2-single-writer-enforcement.md) | T2 Single-Writer Enforcement: One Owner for memory.db, or an Enforced Lock Discipline | Architecture | Closed 2026-05-25 (implemented, shipped 5.1.0) | 2026-05-25 |
 | [RDR-129](rdr-129-t2-daemon-serving-path-cross-store-contention.md) | T2 Daemon Write-Path Hardening: Guaranteed-Single-Daemon Enforcement and Contention-Free Internal Serialization | Architecture | Closed | 2026-05-25 |
-| [RDR-130](rdr-130-command-preambles-via-nx-cli.md) | Command Preambles via the nx CLI: Thin Commands, Tested Logic, No Inlined Bash | Architecture | Accepted 2026-05-26 | 2026-05-26 |
+| [RDR-130](rdr-130-command-preambles-via-nx-cli.md) | Command Preambles via the nx CLI: Thin Commands, Tested Logic, No Inlined Bash | Architecture | Closed | 2026-05-26 |
 | [RDR-131](rdr-131-t2-session-rollup-summaries.md) | T2 Session Rollup Summaries (MemTree-Lite): Recency-Windowed Memory Consolidation for Compact Context Injection | Architecture | Abandoned | 2026-05-27 |
 | [RDR-132](rdr-132-scope-routed-t1-t2-promotion.md) | Scope-Routed T1 to T2 Promotion: Entity / Session / Project Scopes for Targeted Memory Retrieval | Architecture | Abandoned | 2026-05-27 |
 | [RDR-133](rdr-133-entity-cluster-cross-tier-aggregation.md) | Entity-Cluster Cross-Tier Aggregation: A First-Class Entity Handle Unifying T2 Memory, T3 Catalog, and T3 Chunks | Architecture | Abandoned | 2026-05-27 |
@@ -217,7 +219,7 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-198](rdr-198-collapse-duplicated-client-transport.md) | Collapse the Duplicated Client Transport: One Pooled Connection to One Engine | Architecture | Closed | 2026-08-23 |
 | [RDR-199](rdr-199-indexing-lifecycle-ref-identity.md) | Indexing Lifecycle: Give the Corpus a Nameable Source Revision — Index the Mainline Ref from the Git Object Store, Diff-Driven and Opt-In | Architecture | Draft | 2026-08-23 |
 | [RDR-200](rdr-200-nx-answer-continuation-mode.md) | nx_answer Continuation Mode and the Composed-Retrieval Bridge Route | Architecture | Closed | 2026-09-01 |
-| [RDR-201](rdr-201-closed-vocabularies-as-checked-tables.md) | Closed | Architecture | Accepted | 2026-09-01 |
+| [RDR-201](rdr-201-closed-vocabularies-as-checked-tables.md) | Closed Vocabularies as Checked Tables | Architecture | Closed | 2026-09-01 |
 | [RDR-202](rdr-202-containerize-release-battery.md) | Containerize the Release Battery: Layered Images, a Compose-Expressed Gate DAG, and the macOS-Native Residue | Architecture | Draft | 2026-09-04 |
 | [RDR-203](rdr-203-composite-nx-answer-run-record.md) | One Composite Run Record: Collapse nx_answer's Three Telemetry Writes into a Single Engine Operation | Architecture | Closed | 2026-09-05 |
 | [RDR-204](rdr-204-embedding-profile-and-collection-authority.md) | Collections Stop Encoding Metadata in Their Names: An Install-Scoped Embedding Profile and catalog_collections as the Authority | Architecture | Closed | 2026-09-06 |

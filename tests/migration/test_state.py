@@ -11,9 +11,8 @@ These tests are the contract for the sentinel implemented in P1a.I
 (nexus-ue6g7.6). They pin four locked properties:
 
 * **Atomicity** — writes go through a ``.tmp`` sibling + ``os.rename`` (POSIX-
-  atomic), NEVER a bare ``write_text``. The ``phase_review_sentinel`` precedent
-  in ``src/nexus/phase_review_sentinel.py`` IS a bare ``write_text`` and is the
-  named anti-pattern: a concurrent poller must never observe a partial payload.
+  atomic), NEVER a bare ``write_text``, the named anti-pattern: a concurrent
+  poller must never observe a partial payload.
 * **Cross-process visibility** — a genuinely separate Python process polling
   the file observes the phase transitions the parent writes.
 * **Schema** — exactly ``{phase, started_at, collections_total,
@@ -167,8 +166,8 @@ def test_round_trip_read_state_returns_dataclass() -> None:
 
 
 def test_write_uses_os_rename_not_bare_write(monkeypatch: pytest.MonkeyPatch) -> None:
-    # The explicit rejection of the phase_review_sentinel bare-write_text
-    # anti-pattern: a write MUST route through os.rename (the atomic primitive).
+    # The bare-write_text anti-pattern is rejected: a write MUST route through
+    # os.rename (the atomic primitive).
     calls: list[tuple[str, str]] = []
     real_rename = os.rename
 

@@ -2,7 +2,7 @@
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 """MCP core tools: search, store, memory, scratch, collections, plans.
 
-64 registered tools + 3 demoted (plain functions, no @mcp.tool()). The
+54 registered tools + 3 demoted (plain functions, no @mcp.tool()). The
 RDR-182 consent-gated ``forensics``/``remediate`` pair (nexus-ykzbj.10/.11)
 was deleted at nexus-lgdel — the chash-rekey upgrade rung it steered
 operators toward no longer exists.
@@ -6417,8 +6417,9 @@ def _verify_t2_write_landed(
     nexus-zra63 (nexus-piqm5 Layer 2). ``db.put`` returning a row id proves
     the call returned, not that a row exists: a store that silently no-ops
     hands back the same success shape as one that wrote. Layer 1
-    (``subagent-stop-writes-scan.py``) catches writes that REPORTED failure by
-    reading the agent's transcript; it structurally cannot see this case,
+    (the SubagentStop transcript scan, since deleted) caught writes
+    that REPORTED failure by reading the agent's transcript; it structurally
+    could not see this case,
     because the transcript records the success string. So the only way to tell
     them apart is to read the value back.
 

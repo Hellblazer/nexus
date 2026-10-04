@@ -96,30 +96,26 @@ REQUIRED_DIRS = [
 ]
 
 
-@pytest.mark.parametrize("rel_path", REQUIRED_FILES)
-def test_required_file_present_after_install(installed_plugin: Path, rel_path: str) -> None:
-    """Every required plugin file must be present in a git-cloned install."""
-    full = installed_plugin / rel_path
-    assert full.exists(), (
-        f"CLAUDE_PLUGIN_ROOT/{rel_path} is MISSING from a cloned install.\n"
-        f"  This file would not exist for users installing from GitHub.\n"
-        f"  Check that it is committed to git and not in .gitignore."
-    )
-    assert full.stat().st_size > 0, (
-        f"CLAUDE_PLUGIN_ROOT/{rel_path} is empty in the cloned install."
-    )
-
-
-@pytest.mark.parametrize("rel_dir", REQUIRED_DIRS)
-def test_required_dir_present_after_install(installed_plugin: Path, rel_dir: str) -> None:
-    """Every required plugin directory must be present and non-empty after install."""
-    full = installed_plugin / rel_dir
-    assert full.is_dir(), (
-        f"CLAUDE_PLUGIN_ROOT/{rel_dir}/ is MISSING from a cloned install."
-    )
-    assert any(full.iterdir()), (
-        f"CLAUDE_PLUGIN_ROOT/{rel_dir}/ is empty in the cloned install."
-    )
+def test_required_files_and_dirs_present_after_install(installed_plugin: Path) -> None:
+    """Every required plugin file and directory must be present, and non-empty,
+    in a git-cloned install."""
+    offenders: list[str] = []
+    for rel_path in REQUIRED_FILES:
+        full = installed_plugin / rel_path
+        if not full.exists():
+            offenders.append(
+                f"CLAUDE_PLUGIN_ROOT/{rel_path} is MISSING from a cloned install "
+                "(check it is committed to git and not in .gitignore)"
+            )
+        elif full.stat().st_size == 0:
+            offenders.append(f"CLAUDE_PLUGIN_ROOT/{rel_path} is empty in the cloned install")
+    for rel_dir in REQUIRED_DIRS:
+        full = installed_plugin / rel_dir
+        if not full.is_dir():
+            offenders.append(f"CLAUDE_PLUGIN_ROOT/{rel_dir}/ is MISSING from a cloned install")
+        elif not any(full.iterdir()):
+            offenders.append(f"CLAUDE_PLUGIN_ROOT/{rel_dir}/ is empty in the cloned install")
+    assert not offenders, "\n".join(offenders)
 
 
 # ── $CLAUDE_PLUGIN_ROOT refs resolve in installed clone ───────────────────────
@@ -160,20 +156,28 @@ def test_all_plugin_root_refs_resolve_after_install(installed_plugin: Path) -> N
 
 
 def test_all_shared_relative_links_resolve_after_install(installed_plugin: Path) -> None:
-    """Every markdown link to _shared/ must resolve from its location in the clone."""
+    """Every markdown link to agent-shared/ must resolve from its location in the clone.
+
+    The pattern once said ``_shared/``, the directory's pre-nexus-cnzei.4 name,
+    which no link carries any more, so the walk examined nothing and passed.
+    The floor makes that state a failure.
+    """
     missing = []
+    examined = 0
     for md_file in sorted(installed_plugin.rglob("*.md")):
-        if "_shared" in md_file.parts:
+        if "agent-shared" in md_file.parts:
             continue
         text = md_file.read_text()
-        for match in re.finditer(r"\[([^\]]*)\]\(([^)]*_shared/[^)]*)\)", text):
+        for match in re.finditer(r"\[([^\]]*)\]\(([^)]*agent-shared/[^)]*)\)", text):
+            examined += 1
             raw_path = match.group(2).split("#")[0]
             resolved = (md_file.parent / raw_path).resolve()
             if not resolved.exists():
                 label = str(md_file.relative_to(installed_plugin))
                 missing.append(f"  {label}: [{raw_path!r}] → {resolved}")
+    assert examined >= 40, f"only {examined} agent-shared links examined in the installed clone"
     assert not missing, (
-        f"{len(missing)} relative _shared/ link(s) would be broken after install:\n"
+        f"{len(missing)} relative agent-shared/ link(s) would be broken after install:\n"
         + "\n".join(missing)
     )
 

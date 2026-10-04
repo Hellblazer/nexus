@@ -8,14 +8,10 @@ import yaml
 from nexus import config as cfgmod
 from nexus.config import (
     _DEFAULTS,
-    _DETECT_TABLE,
-    detect_test_command,
     get_telemetry_config,
-    get_verification_config,
     load_config,
     set_config_value,
 )
-from nexus.hooks.verification_config import DETECT_TABLE as _HOOK_DETECT_TABLE
 
 
 @pytest.fixture
@@ -180,81 +176,6 @@ def test_nexus_yml_indexing_overrides(home: Path) -> None:
     assert cfg["indexing"]["code_extensions"] == [".sql", ".proto"]
     assert cfg["indexing"]["rdr_paths"] == ["docs/rdr", "design/decisions"]
     assert cfg["indexing"]["prose_extensions"] == []
-
-
-# ── Verification config ─────────────────────────────────────────────────────
-
-
-def test_defaults_include_verification_section() -> None:
-    v = _DEFAULTS["verification"]
-    assert v == {
-        "on_stop": False, "on_close": False,
-        "test_command": "", "lint_command": "", "test_timeout": 120,
-    }
-
-
-def test_get_verification_config_defaults(home: Path) -> None:
-    cfg = get_verification_config(repo_root=home)
-    assert cfg == {
-        "on_stop": False, "on_close": False,
-        "test_command": "", "lint_command": "", "test_timeout": 120,
-    }
-
-
-def test_get_verification_config_merges_partial(home: Path) -> None:
-    (home / ".nexus.yml").write_text("verification:\n  on_stop: true\n")
-    cfg = get_verification_config(repo_root=home)
-    assert cfg["on_stop"] is True
-    assert cfg["on_close"] is False and cfg["test_command"] == "" and cfg["test_timeout"] == 120
-
-
-def test_get_verification_config_all_fields(home: Path) -> None:
-    (home / ".nexus.yml").write_text(
-        "verification:\n  on_stop: true\n  on_close: true\n"
-        "  test_command: uv run pytest\n  lint_command: ruff check .\n  test_timeout: 60\n"
-    )
-    cfg = get_verification_config(repo_root=home)
-    assert cfg == {
-        "on_stop": True, "on_close": True,
-        "test_command": "uv run pytest", "lint_command": "ruff check .", "test_timeout": 60,
-    }
-
-
-# ── detect_test_command ──────────────────────────────────────────────────────
-
-
-@pytest.mark.parametrize("filename,content,expected", [
-    ("pyproject.toml", "[build-system]\n", "uv run pytest"),
-    ("pom.xml", "<project/>\n", "mvn test"),
-    ("build.gradle", "// gradle\n", "./gradlew test"),
-    ("package.json", '{"scripts": {"test": "jest"}}\n', "npm test"),
-    ("Cargo.toml", '[package]\nname = "foo"\n', "cargo test"),
-    ("Makefile", "test:\n\tpython -m pytest\n", "make test"),
-    ("go.mod", "module example.com/foo\n", "go test ./..."),
-    ("build.gradle.kts", "// kotlin gradle\n", "./gradlew test"),
-])
-def test_detect_test_command(tmp_path: Path, filename: str, content: str, expected: str) -> None:
-    (tmp_path / filename).write_text(content)
-    assert detect_test_command(repo_root=tmp_path) == expected
-
-
-def test_detect_test_command_none(tmp_path: Path) -> None:
-    assert detect_test_command(repo_root=tmp_path) == ""
-
-
-def test_detect_test_command_priority(tmp_path: Path) -> None:
-    (tmp_path / "pyproject.toml").write_text("[build-system]\n")
-    (tmp_path / "Makefile").write_text("test:\n\tpython -m pytest\n")
-    assert detect_test_command(repo_root=tmp_path) == "uv run pytest"
-
-
-def test_detect_table_matches_hook_reader() -> None:
-    """The hook's verification reader carries its own copy of the table.
-
-    It was the plugin script read_verification_config.py until that was
-    deleted (nexus-z9cz2); the copy now lives in the wheel port.
-    """
-    assert tuple(_DETECT_TABLE) == _HOOK_DETECT_TABLE
 
 
 # ── RDR-087 Phase 2.3: telemetry config toggle ───────────────────────────────

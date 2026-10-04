@@ -200,15 +200,11 @@ def render_markdown_table(rows: list[AddedRow]) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Relay attestation (nexus-iu43o) -- mirrors docs/release-arming/'s shape
-# (one JSON file per tag, a reasoned reader/writer split, checked in a
-# release battery) for the OTHER direction of the same relay: release-
-# arming is conexus-authored and nexus-read (is the DEPLOY armed); this is
-# nexus-authored and nexus-read (did the DATA EFFECT table this script
-# itself produces actually reach the relay, or did a human run the script,
-# read the table, and then forget to paste it in). Both write/read sides
-# live in this ONE repo -- unlike release-arming, there is no cross-repo
-# ownership split to preserve, so one script owns both halves.
+# Relay attestation (nexus-iu43o) -- one JSON file per tag, checked in a
+# release battery: did the DATA EFFECT table this script itself produces
+# actually reach the relay, or did a human run the script, read the table,
+# and then forget to paste it in. Both write/read sides live in this ONE
+# repo, so one script owns both halves.
 #
 # THE GAP THIS CLOSES (nexus-iu43o, follow-up from nexus-f7dwp critic pass
 # T2 nexus/f7dwp-critic-pass-2026-09-13). The engine-release skill already
@@ -239,8 +235,7 @@ def record_relay_attestation(
     """Write the attestation that this range's DATA EFFECT table was
     generated and is about to be pasted into the relay -- the WRITER half,
     run by the human/AI preparing the handoff right after generating the
-    table (mirrors ``docs/release-arming``'s writer, conexus-side there,
-    nexus-side here).
+    table.
 
     ``changeset_ids`` is the exact ``file:changeset_id`` set
     :func:`find_added_data_effecting_changesets` computed for THIS range --
@@ -271,8 +266,7 @@ def verify_relay_attestation(
 
     - The range has NO data-effecting changesets at all: nothing could ever
       have been pasted into a relay, so there is nothing to attest.
-      NOT-APPLICABLE, exit 0 (an informational pass, same shape as
-      :func:`check_release_arming`'s "requirement: not_required" advisory).
+      NOT-APPLICABLE, exit 0 (an informational pass).
     - An attestation exists for *to_ref*, names this EXACT ``from_ref`` (a
       stale attestation from a different range must not silently pass),
       and its recorded changeset set matches what this range actually

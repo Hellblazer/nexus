@@ -325,7 +325,7 @@ def test_registered_rules_sees_the_REAL_shipped_manifest(tmp_path):  # noqa: ARG
     )
     # Named, not just counted: a count floor would survive a rename.
     assert "subagent_git_write_requires_orchestrator" in rules
-    assert "phase_review_close_requires_gate" in rules
+    assert "credential_print_guard" in rules
 
 
 def test_registered_rules_none_when_absent(tmp_path):
@@ -450,9 +450,7 @@ def test_cli_from_store_empty_result_exits_zero_matching_jsonl_twin(monkeypatch,
     """nexus-gjv9b review fold-in (code-review IMPORTANT 3 / critique
     Significant 5): the reviewer asked for a parity test proving
     ``--from-store`` and the JSONL reader agree on the empty-result exit
-    code. Unlike ``nx census capability`` (whose transcript-walk reader
-    already refuses to render "measured nothing" as success --
-    ``CorpusCensus.exit_code``), NEITHER of this command's two readers
+    code. NEITHER of this command's two readers
     has ever had an on-empty exit-code convention: an empty JSONL log
     (``test_cli_routing_stats_empty_log`` above) exits 0, and this
     command has no analog of ``CorpusCensus`` behind it -- there is no

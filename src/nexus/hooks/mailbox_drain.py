@@ -65,8 +65,8 @@ register and this hook runs on every prompt. As a verb it calls the
 client's own primitives -- endpoint discovery, the data-token lease, the
 persisted credentials, the tuple size caps -- instead of the stdlib mirrors
 the plugin script carries because it cannot import ``nexus``. The endpoint
-legs are :mod:`nexus.hooks.tuple_ledger_project`'s; only the credential
-policy differs, see :func:`_resolve_endpoint`. Wiring the verb means routing
+legs are :func:`_resolve_base_url` and :func:`_read_local_supervisor_token`;
+the credential policy is :func:`_resolve_endpoint`'s. Wiring the verb means routing
 it through ``conexus/hooks/scripts/nx_hook_shim.py`` (nexus-rcoze).
 
 OUTPUT IS STREAMED, not returned. ``nx-hook`` writes a verb's
@@ -82,10 +82,12 @@ import hashlib
 import json
 import os
 import secrets
+import stat
 import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any
@@ -626,10 +628,6 @@ def _post(base_url: str, token: str, route: str, body: dict[str, Any],
     500), so treating it as a clean negative drops the only trace of a row that
     is already consumed, and the message is gone with nobody having seen it.
     Raising ``_Skip`` instead keeps the record and lets the next prompt recover.
-
-    This also restores the pattern the sibling hook ``tuple_ledger_project.py``
-    already follows -- it captures ``exc.code`` and refuses anything outside
-    2xx -- which this hook's own docstring claims to share.
     """
     payload = json.dumps(body, separators=(",", ":")).encode("utf-8")
     url = f"{base_url}{route}"
@@ -1023,15 +1021,143 @@ def _drain_address(base_url: str, token: str, address: str, *, is_local: bool,
         return "cap"
 
 
+def _resolve_base_url() -> tuple[str, bool]:
+    """``(base_url, is_local_supervisor)``, or raise :class:`_Skip`.
+
+    TAKES NO ``config_dir``, and that is the correction rather than an
+    omission (nexus-t9klx). It used to accept one and never read it: both
+    legs resolve the process's own config dir themselves --
+    ``get_credential`` through ``nexus_config_dir``, and ``discover_lease``
+    which has no such parameter at all -- so the argument was a promise the
+    body could not keep, right only where the caller's dir and the
+    process's coincide.
+
+    That is the same defect this bead fixed one module over, in
+    ``_routing_lib._read_config_yml_credentials``, where a parity test
+    passing a tmp dir got the developer's real credentials back. Found by
+    sweeping for siblings of it rather than by a failure here. The fix is
+    the opposite one, because the cause is: there, a primitive existed that
+    could honour the directory, so the wrapper was pointed at it; here
+    ``discover_lease`` is the single discovery implementation shared by the
+    vector client, the catalog and the T2 resolvers, and threading a
+    config dir through it is a change to that contract, not a residual. So
+    the signature stops claiming what it never did, and a caller that needs
+    a specific config dir has to raise that with ``discover_lease``.
+
+    Mirrors :func:`nexus.db.service_endpoint.resolve_service_endpoint`'s
+    precedence, using its own primitives rather than a re-implementation:
+    the managed-cloud ``service_url`` leg (:func:`nexus.config.get_credential`
+    -- env ``NX_SERVICE_URL`` first, then the persisted ``config.yml``
+    credential) is checked BEFORE the local-supervisor legs. The
+    ``NX_SERVICE_HOST``/``NX_SERVICE_PORT`` env leg fills either missing
+    field from a live local supervisor lease
+    (:func:`nexus.db.service_endpoint.discover_lease`) before HOST defaults
+    to ``127.0.0.1``; PORT has no such default -- an unresolvable PORT is a
+    loud (well, a named :class:`_Skip`) failure.
+
+    ``is_local_supervisor`` is True ONLY when NEITHER env var was set and
+    the endpoint came purely from the lease file -- naming either field via
+    env is an explicit pin, never treated as "the lease backed this".
+    """
+    from nexus.config import get_credential  # noqa: PLC0415 — deferred to avoid a heavy import on every call
+    from nexus.db.service_endpoint import discover_lease  # noqa: PLC0415 — deferred, same reason
+
+    url = (get_credential("service_url") or "").strip().rstrip("/")
+    if url:
+        return url, False
+
+    host_str = os.environ.get("NX_SERVICE_HOST", "").strip()
+    port_str = os.environ.get("NX_SERVICE_PORT", "").strip()
+    if host_str or port_str:
+        port: int | None = None
+        if port_str:
+            try:
+                port = int(port_str)
+            except ValueError as exc:
+                raise _Skip(f"NX_SERVICE_PORT is not an integer: {port_str!r}") from exc
+        host: str | None = host_str or None
+        if host is None or port is None:
+            lease_url, _lease_token = discover_lease()
+            if lease_url is not None:
+                parsed = urllib.parse.urlsplit(lease_url)
+                if host is None:
+                    host = parsed.hostname
+                if port is None:
+                    port = parsed.port
+        host = host or "127.0.0.1"
+        if port is None:
+            raise _Skip(
+                f"NX_SERVICE_HOST={host_str!r} is set but NX_SERVICE_PORT is "
+                "not, and no live local supervisor lease supplies a port"
+            )
+        return f"http://{host}:{port}", False
+
+    lease_url, _lease_token = discover_lease()
+    if lease_url is not None:
+        return lease_url, True
+
+    raise _Skip(
+        "no service endpoint resolvable: no NX_SERVICE_URL, no persisted "
+        "config.yml service_url, no NX_SERVICE_PORT, and no live local "
+        "supervisor lease"
+    )
+
+
+def _read_local_supervisor_token(config_dir: Path) -> str:
+    """The LOCAL SUPERVISOR's own static token, straight off the
+    ``storage_service_addr.<uid>`` lease record -- or raise :class:`_Skip`
+    naming why.
+
+    Refuses (never trusts) a lease file that is not owner-only: the token
+    it carries authorizes real engine writes, and a group/other-readable
+    lease file means some other local account could have read it too.
+    Neither :func:`nexus.db.service_endpoint.discover_lease` nor
+    :class:`nexus.daemon.service_registry.ServiceRegistry` performs this
+    check (their callers accept a lower bar), so this fire-and-forget
+    writer's higher bar lives here, stat-checked BEFORE any content is
+    read. Liveness itself is delegated to
+    :meth:`~nexus.daemon.service_registry.ServiceRegistry.discover`
+    (nexus-wo6sc review round, 2026-09-24) -- the real primitive, not a
+    hand-parsed heartbeat/ttl comparison, and, unlike a bare
+    ``LeaseRecord.is_fresh`` check (this function's form before that
+    review round), grace-aware for a TTL-expired ``storage_service``
+    lease: the supervisor alive and healthy, its own heartbeat stamp
+    write simply overrunning the TTL. The permission check stays a
+    SEPARATE, prior gate on the raw file -- ``discover()`` has no
+    equivalent and must not be asked to grow one; this caller's extra bar
+    is additive to it, not a replacement for it.
+    """
+    from nexus.daemon.service_registry import ServiceRegistry  # noqa: PLC0415 — deferred, same reason as above
+
+    path = config_dir / f"storage_service_addr.{os.getuid()}"
+    try:
+        st_result = path.stat()
+    except OSError as exc:
+        raise _Skip(
+            f"local supervisor lease unavailable: cannot stat {path}: {exc}"
+        ) from exc
+    mode = stat.S_IMODE(st_result.st_mode)
+    if mode & (stat.S_IRWXG | stat.S_IRWXO):
+        raise _Skip(
+            f"local supervisor lease {path} is group/other-accessible "
+            f"(mode {oct(mode)}); refusing to use its token as a bearer"
+        )
+    registry = ServiceRegistry(dir=config_dir, tier="storage_service")
+    record = registry.discover(str(os.getuid()))
+    if record is None:
+        raise _Skip(f"local supervisor lease {path} is not live or is stale")
+    token = str(record.endpoint.get("token", "") or "")
+    if not token:
+        raise _Skip(f"local supervisor lease {path} carries no token")
+    return token
+
+
 def _resolve_endpoint(config_dir: Path) -> tuple[str, str, bool]:
     """Resolve ``(base_url, token, is_local_supervisor)``.
 
-    CREDENTIAL POLICY, and why it is not the sibling ledger hook's. That hook
-    (``tuple_ledger_project.py``) is a fire-and-forget write with no reader and
-    no retry, so it deliberately refuses anything but a fresh tenant-scoped
-    data-token lease. This hook is a SYNCHRONOUS call with a prompt waiting on
+    CREDENTIAL POLICY. This hook is a SYNCHRONOUS call with a prompt waiting on
     it, the same shape as ``t2_prefix_scan.py`` and ``routing/_lib.py``, so it
-    takes the same looser last resort those two take: a static ``service_token``
+    takes the same last resort those two take: a static ``service_token``
     from env or the persisted ``config.yml``. Refusing that would make the drain
     silently inert on a managed box onboarded with ``nx config set
     service_token`` and nothing else, which is a real, documented path -- the
@@ -1039,19 +1165,12 @@ def _resolve_endpoint(config_dir: Path) -> tuple[str, str, bool]:
 
     A fresh data-token lease for the resolved host still WINS over the static
     token wherever one exists, mirroring the real client's
-    ``DataTokenManager.bearer_for``. Base-URL precedence is the ledger
-    sibling's, called rather than re-derived, since that precedence is what
-    drifted between three hand-maintained copies before it was factored out
-    (nexus-aginu).
+    ``DataTokenManager.bearer_for``.
     """
     from nexus.config import persisted_credentials  # noqa: PLC0415 — deferred: a drain with no address never resolves
     from nexus.db.data_token import DataTokenManager  # noqa: PLC0415 — deferred, same reason
-    from nexus.hooks import tuple_ledger_project as _ledger  # noqa: PLC0415 — deferred, same reason
 
-    try:
-        base_url, is_local = _ledger._resolve_base_url()
-    except _ledger._Skip as exc:
-        raise _Skip(str(exc)) from exc
+    base_url, is_local = _resolve_base_url()
 
     try:
         # A peek: never mints, never touches the in-process cache.
@@ -1070,14 +1189,14 @@ def _resolve_endpoint(config_dir: Path) -> tuple[str, str, bool]:
     if not token:
         token = persisted_credentials(config_dir).get("service_token", "").strip()
     if not token and hasattr(os, "getuid"):
-        # Through the ledger's accessor, never off the raw lease record: it
+        # Through the accessor, never off the raw lease record: it
         # refuses a lease file that is not owner-only, because the token it
         # carries authorizes real engine writes and a group- or world-readable
         # lease means another local account could have read it too. The lease
         # filename carries the POSIX uid, so there is none to read on Windows.
         try:
-            token = _ledger._read_local_supervisor_token(config_dir).strip()
-        except _ledger._Skip:
+            token = _read_local_supervisor_token(config_dir).strip()
+        except _Skip:
             token = ""
     if not token:
         raise _Skip(

@@ -689,15 +689,15 @@ class TestFormulaPreservationOnRealPdf:
         ``pytest`` deselects this (see pyproject.toml addopts); run
         explicitly with ``uv run pytest -m slow``.
 
-        nexus-6xkdu: this docstring previously claimed the release-sandbox
-        shakedown covered this path "on every release run" -- false twice
+        nexus-6xkdu: this docstring previously claimed a release shakedown
+        covered this path "on every release run" -- false twice
         over (nothing invoked the shakedown, and its indexing steps ran
         under ``|| true`` so a broken MinerU could not have failed it
-        either way). As of nexus-6xkdu, ``tests/e2e/release-sandbox.sh
-        shakedown`` step 3b actually exercises this path through the
-        production ``nx index pdf`` command and can fail the run (the
+        either way). As of nexus-6xkdu, the shakedown's step 3b (the shakedown was deleted in
+        cleanup step 11) exercised this path through the
+        production ``nx index pdf`` command and could fail the run (the
         ``|| true`` is gone), and the release process (AGENTS.md "Cutting
-        a release" / docs/contributing.md § Release Process) invokes the
+        a release" / docs/contributing.md § Release Process) invoked the
         shakedown UNCONDITIONALLY on every release (nexus-7g40u: a
         diff-based trigger was tried and rejected -- MinerU/docling
         version drift lands via ``uv.lock`` alone, with no matching

@@ -85,7 +85,7 @@
 # GH #1533): additionally indexes tests/fixtures/bft-to-smr.pdf through the
 # real MinerU path against the PUBLISHED dependency resolution, BEFORE leg 9
 # replaces the uv-tool shim with a generation, and asserts the ADDED chunk's
-# extraction_method is literally mineru (release-sandbox.sh's nexus-jy4hd
+# extraction_method is literally mineru (the nexus-jy4hd
 # chunk-id-set-diff shape, not a LaTeX-content grep). Off by default — it
 # pays a MinerU pipeline model download (~2-3 GB) that would dominate every
 # default MVV run. The release skill's Step 11c post-publish invocation is
@@ -100,7 +100,7 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/python.sh"
 e2e_python_resolve || exit 2
 
 # ── pure helper functions (exercised directly by --self-test) ──────────────
-# House precedent: tests/e2e/local-index-memory-gate.sh extracts pure
+# House precedent: a since-deleted memory gate extracted pure
 # functions + a --self-test arm for exactly this reason (nexus-1ktd5
 # MANDATORY ACCEPTANCE CRITERION) — a full sandboxed run of THIS script
 # costs minutes (wheel build, engine download, PG bundle) and --published
@@ -176,12 +176,11 @@ _leg_log_is_substantive() {
 }
 
 # nexus-gqrg0 round 2 (GH #1533): the formula-PDF identity verdict helpers
-# below are DUPLICATED from tests/e2e/release-sandbox.sh's nexus-jy4hd
-# shape rather than sourced -- release-sandbox.sh is an executable script
+# below were DUPLICATED from a since-deleted sandbox gate's nexus-jy4hd
+# shape rather than sourced -- that gate was an executable script
 # with its own unconditional `case "$MODE" in ... esac` dispatch at the
-# bottom, not a library; `source`ing it here would run THAT dispatch
-# inside this script's own shell and abort the journey. Keep both copies
-# in the same shape if either changes.
+# bottom, not a library; `source`ing it here would have run THAT dispatch
+# inside this script's own shell and aborted the journey.
 _mineru_doctor_verdict() {
     # stdin: `nx doctor --check-mineru` output → "OK" or "FAIL|<cause>"
     "$E2E_PYTHON" -c '
@@ -312,7 +311,7 @@ _self_test() {
     printf 'Stored: %s\n' "$(printf 'a%.0s' $(seq 1 64))" > "$t/real-content.log"
     _assert_eq "GREEN: a real, traceback-free log -> OK" "$(_leg_log_is_substantive "$t/real-content.log")" "OK"
 
-    echo "== self-test: _mineru_doctor_verdict (nexus-gqrg0 round 2, duplicated from release-sandbox.sh) =="
+    echo "== self-test: _mineru_doctor_verdict (nexus-gqrg0 round 2, duplicated from a since-deleted sandbox gate) =="
     out=$(printf '✓ MinerU import\n✓ MinerU parse: parsed a synthesized one-page probe PDF\n' | _mineru_doctor_verdict)
     _assert_eq "passing doctor output -> OK" "$out" "OK"
     out=$(printf '✓ MinerU import\n✗ MinerU parse: TypeError: '"'"'PageChars'"'"' object is not iterable\n' | _mineru_doctor_verdict)
@@ -443,9 +442,6 @@ cleanup() {
     if [ -n "$BIN_DIR" ] && [ -x "$BIN_DIR/nx" ]; then
         _nx daemon service stop --with-pg >/dev/null 2>&1 || true
     fi
-    # nexus-0kmat: the staged copy of the candidate jar (~136 MB) is not evidence;
-    # the logs are. Removed on EVERY exit path, a refused load included.
-    rm -rf "$WORK/engine"
     if [ "$GATE_OK" = 1 ]; then
         rm -rf "$WORK"
     else
@@ -453,17 +449,6 @@ cleanup() {
     fi
 }
 trap cleanup EXIT
-
-# nexus-0kmat: the candidate engine (NX_CANDIDATE_ENGINE), through the one
-# explicit input that survives the `env -i` allowlist below. Without it `nx init`
-# downloads the PINNED PUBLISHED engine, which has no ownership check, and this
-# journey passes vacuously for an engine change that is not yet tagged. Resolved
-# before anything is built or provisioned: a cut-mode run with no candidate, or
-# a candidate that cannot be found, fails here. The cleanup trap is installed
-# first so a refusal (or a half-finished stage copy) still leaves nothing behind.
-# shellcheck source=tests/e2e/lib/candidate_engine.sh disable=SC1091
-source "$REPO_ROOT/tests/e2e/lib/candidate_engine.sh"
-candidate_engine_load "$WORK/engine" || _fail "candidate engine refused (see CANDIDATE ENGINE REFUSED above)"
 
 # ── env allowlist: the ONLY ambient state the journey may see ───────────────
 # Deliberately absent: VOYAGE_API_KEY (r5f3c — an ambient key must not flip
@@ -477,7 +462,6 @@ _nx() {
         NX_LOCAL=1 \
         ${HTTPS_PROXY:+HTTPS_PROXY="$HTTPS_PROXY"} \
         ${HTTP_PROXY:+HTTP_PROXY="$HTTP_PROXY"} \
-        ${CAND_ENV_ARGS[@]+"${CAND_ENV_ARGS[@]}"} \
         "$BIN_DIR/nx" "$@"
 }
 
@@ -841,11 +825,6 @@ echo "── 4/10 nx init (local mode, virgin HOME, scrubbed env) ──"
 _nx init -y --no-autostart 2>&1 | tee "$LOGS/init.log"
 grep -Eq "the service backend is serving" "$LOGS/init.log" \
     || _fail "init did not confirm a serving backend"
-# nexus-0kmat: name the engine this journey actually runs against, so a vacuous
-# pass against the pinned published engine is visible in the log, and fail in
-# cut mode unless it is the candidate.
-candidate_engine_identity "$HOME_DIR/.config/nexus" fresh-install-mvv 2>&1 | tee "$LOGS/engine-identity.log" \
-    || _fail "engine identity check failed (see CANDIDATE ENGINE CHECK FAILED above)"
 # nexus-9xfx5: init converges the ladder — a virgin box must not boot with a
 # vacuous pending rung. ("converged and verified" is the runner's literal
 # success line — upgrade.py's LadderRunner output.)
@@ -1027,15 +1006,6 @@ fi
 # The sentinel below matches NOTHING (an empty regex would match
 # everything through grep -v -E and silently allowlist every warning).
 ALLOWLIST_REGEX='__NO_ALLOWLISTED_WARNINGS_SENTINEL__'
-# nexus-0kmat: the ONE entry, and only while a candidate engine is active. A
-# candidate is launched through NEXUS_SERVICE_JAR / NEXUS_SERVICE_BIN, which
-# records no installed-binary provenance, so doctor's engine-convergence row
-# reads "installed vunknown". The default (pinned, `nx init`-installed) engine
-# path keeps the empty sentinel above: it must stay at ZERO warnings. The
-# trigger is mechanical, not a promise: with no candidate this branch never runs.
-if [ "${#CAND_ENV_ARGS[@]}" -gt 0 ]; then
-    ALLOWLIST_REGEX='Engine convergence: engine convergence pending .* installed vunknown, release dependency'
-fi
 WARNING_LINES="$(grep -E "level='warning'|\[warning|⚠" "$LOGS/doctor.log" || true)"
 UNALLOWLISTED="$(printf '%s\n' "$WARNING_LINES" | grep -v -E "$ALLOWLIST_REGEX" | grep -v '^$' || true)"
 if [ -n "$UNALLOWLISTED" ]; then
@@ -1108,7 +1078,7 @@ if [ "${NX_MVV_FORMULA_PDF_CHECK:-0}" = "1" ]; then
         FORMULA_COLLECTION="distributed-systems"
 
         # nexus-jy4hd's verdict parser (duplicated above, see that comment
-        # for why release-sandbox.sh is not sourced): `nx doctor
+        # for why that gate was not sourced): `nx doctor
         # --check-mineru`'s rc is not a reliable failure signal for this
         # one check, and a blind `grep -q '✗'` over the whole doctor
         # transcript is vacuous -- it says nothing about WHICH line
@@ -1122,7 +1092,7 @@ if [ "${NX_MVV_FORMULA_PDF_CHECK:-0}" = "1" ]; then
             _fail "nx doctor --check-mineru: ${MINERU_DOCTOR_VERDICT#FAIL|} — see $LOGS/mineru-doctor.log (nexus-gqrg0 class)"
         fi
 
-        # release-sandbox.sh's proven identity shape (its 3b/11 step):
+        # a since-deleted sandbox gate's proven identity shape (its 3b/11 step):
         # snapshot chunk ids before, index, set-diff to isolate ONLY the
         # chunk THIS step added (the collection is chash-ordered, so a
         # positional pick is the wrong document roughly half the time),
@@ -1130,7 +1100,7 @@ if [ "${NX_MVV_FORMULA_PDF_CHECK:-0}" = "1" ]; then
         # literally mineru -- belt-and-braces against a silent
         # in-extractor fallback to docling/pymupdf.
         FORMULA_IDS_DIR="$(mktemp -d "$WORK/formula-ids-XXXXXX")"
-        # `|| true` on both snapshots (release-sandbox.sh's own shape): an
+        # `|| true` on both snapshots (that gate's own shape): an
         # empty/first-use collection makes grep find zero matches (exit 1),
         # which is a legitimate "before" state, not a script-ending error
         # under this file's `set -e` -- the actual pass/fail signal is the
@@ -1159,165 +1129,6 @@ if [ "${NX_MVV_FORMULA_PDF_CHECK:-0}" = "1" ]; then
         echo "  [ok] indexed chunk extraction_method=mineru (identity proven, published bytes, uv-tool layer)"
     fi
 fi
-
-echo "── 8d/10 tuple ledger projector hook drive (nexus-g2lln pre-tag proof, nexus-cbo4a) ──"
-# No pre-tag gate previously drove the SubagentStart/SubagentStop ledger
-# projection hooks against a REAL install -- every case in
-# tests/hooks/test_tuple_ledger_project.py hand-writes the data-token lease
-# the projector reads (T2 nexus/shakeout-7.41.0-projector-local-install-
-# proof-2026-09-11), so a fully-inert projector shipped through every
-# existing gate unnoticed. This leg drives the real projection entry points
-# against the sandbox's own local install (supervisor up since leg 4/10)
-# with a synthetic SubagentStart/SubagentStop payload and polls for the
-# tuples they are supposed to write.
-#
-# WHAT IS DRIVEN MOVED AT RDR-215 bead nexus-q02nx.21, and the two halves
-# now live in different places. The WRAPPERS
-# (subagent-{start,stop}-tuple-async.sh) were ported to
-# nexus.hooks.tuple_projection and ARE in the wheel under test, so this
-# leg drives them out of the installed wheel -- which is strictly better
-# coverage than before, since the wheel's copy is now the one a user
-# runs. The PROJECTOR is in the wheel too now: tuple_projection calls
-# nexus.hooks.tuple_ledger_project in-process, and the plugin copy it
-# once spawned was deleted at nexus-z9cz2. So this leg drives the whole
-# path out of the installed wheel.
-#
-# EXPECTED TO FAIL while bead nexus-g2lln is open: the projector presents
-# ONLY a data-token-lease bearer, and a default local install runs on the
-# supervisor's static service_token with no mint_token configured, so no
-# data-token lease is ever written and every projection SKIPs. This leg
-# exists to CLOSE that blind spot, not to pass silently -- it starts
-# passing once nexus-g2lln's fix (owned separately) lands.
-HOOK_PY_DIR="$WORK/hook-py"
-mkdir -p "$HOOK_PY_DIR"
-# Symlink to $PROBE_PYTHON (already proven >=3.12 by the install this
-# journey just ran) rather than trust the ambient host `python3`, which
-# is routinely older than 3.12 (T2 proof: macOS /usr/bin/python3 3.9.6).
-ln -sf "$PROBE_PYTHON" "$HOOK_PY_DIR/python3"
-
-HOOK_SID="$("$PROBE_PYTHON" -c 'import uuid; print(uuid.uuid4().hex)')"
-HOOK_AGENT="mvv-hook-probe"
-HOOK_LOG="$HOME_DIR/.local/state/nexus/orchestration/$HOOK_SID.tuple-projection.log"
-
-cat > "$HOOK_PY_DIR/drive.py" <<'PY'
-# Drives nexus.hooks.tuple_projection -- the port of the two deleted
-# subagent-{start,stop}-tuple-async.sh wrappers (RDR-215 beads
-# nexus-q02nx.20 / .21) -- out of the INSTALLED wheel under test, which
-# is the point of this leg: the port travels in the wheel, the projector
-# it spawns does not.
-#
-# THE JOIN IS LOAD-BEARING. The bash detached a disowned subshell that
-# outlived the hook; the port uses a DAEMON thread, which dies at
-# interpreter exit (tuple_projection's own docstring records this as a
-# real durability regression). Without the join this process would start
-# the POST and then kill it, and the poll below would wait 30s for a
-# tuple nobody sent -- a false FAIL on a release gate.
-import json, sys, threading
-from nexus.hooks.tuple_projection import run_start, run_stop
-payload = json.loads(sys.stdin.read())
-(run_start if sys.argv[1] == "start" else run_stop)(payload)
-# The projector subprocess's own cap is _TIMEOUT_S=120; join past it so a
-# wedged projector is reported as wedged rather than silently truncated.
-for t in threading.enumerate():
-    if t.name.startswith("tuple-projection-"):
-        t.join(timeout=150)
-        if t.is_alive():
-            print(f"  WARNING: {t.name} still running after 150s", file=sys.stderr)
-PY
-
-_drive_hook() {
-    # $1 = "start"|"stop"; stdin = the JSON payload. Scrubbed env,
-    # matching _nx()'s discipline -- HOME points at the sandbox so the
-    # projector resolves the sandbox's own config dir / state dir /
-    # data-token lease, never the operator's.
-    #
-    # CLAUDE_PLUGIN_ROOT is left over from when tuple_projection's
-    # _projector() resolved a plugin script by it; the projector is
-    # in-process now and does not read it.
-    env -i \
-        HOME="$HOME_DIR" \
-        PATH="$HOOK_PY_DIR:/usr/bin:/bin" \
-        TERM="${TERM:-dumb}" \
-        NX_NO_TELEMETRY=1 \
-        CLAUDE_PLUGIN_ROOT="$REPO_ROOT/conexus" \
-        "$PROBE_PYTHON" "$HOOK_PY_DIR/drive.py" "$1"
-}
-
-# The stop carries what a real dispatch's SubagentStop carries: its agent_type
-# and a transcript file on disk. A stop with neither is a harness-internal
-# event the projector drops by design (nexus-uzntx).
-HOOK_TRANSCRIPT="$WORK/hook-transcript.jsonl"
-: >"$HOOK_TRANSCRIPT"
-printf '{"session_id":"%s","agent_id":"%s","agent_type":"Explore","hook_event_name":"SubagentStart"}' \
-    "$HOOK_SID" "$HOOK_AGENT" | _drive_hook start
-printf '{"session_id":"%s","agent_id":"%s","agent_type":"Explore","agent_transcript_path":"%s","hook_event_name":"SubagentStop"}' \
-    "$HOOK_SID" "$HOOK_AGENT" "$HOOK_TRANSCRIPT" | _drive_hook stop
-
-# The join inside drive.py means the POST has normally already completed
-# by here -- but poll anyway rather than assume: the join has its own
-# timeout, and a projector that gave up early writes its reason to the
-# log this loop also watches.
-HOOK_DEADLINE=$(( $(date +%s) + 30 ))
-HOOK_TOTAL=0
-HOOK_STATS=""
-while :; do
-    HOOK_STATS="$(_nx tuple stats "ledger/$HOOK_SID" 2>/dev/null || true)"
-    HOOK_TOTAL="$(printf '%s\n' "$HOOK_STATS" | sed -n 's/^total: //p')"
-    [ -n "$HOOK_TOTAL" ] || HOOK_TOTAL=0
-    if [ "$HOOK_TOTAL" -ge 2 ] 2>/dev/null; then
-        break
-    fi
-    HOOK_SKIP_LINES=0
-    if [ -f "$HOOK_LOG" ]; then
-        HOOK_SKIP_LINES="$(grep -c 'SKIP' "$HOOK_LOG" 2>/dev/null || echo 0)"
-    fi
-    # Both kinds have already given up -- no further wait will change that.
-    if [ "$HOOK_SKIP_LINES" -ge 2 ] 2>/dev/null; then
-        break
-    fi
-    [ "$(date +%s)" -lt "$HOOK_DEADLINE" ] || break
-    sleep 1
-done
-
-HOOK_START_ROWS="$(_nx tuple rd "ledger/$HOOK_SID" --pattern kind=start -n 5 2>&1 || true)"
-HOOK_REPORT_ROWS="$(_nx tuple rd "ledger/$HOOK_SID" --pattern kind=report -n 5 2>&1 || true)"
-HOOK_LOG_CONTENT=""
-[ -f "$HOOK_LOG" ] && HOOK_LOG_CONTENT="$(cat "$HOOK_LOG")"
-
-{
-    echo "session_id: $HOOK_SID"
-    echo "agent_id: $HOOK_AGENT"
-    echo "-- tuple stats --"
-    echo "$HOOK_STATS"
-    echo "-- kind=start rows --"
-    echo "$HOOK_START_ROWS"
-    echo "-- kind=report rows --"
-    echo "$HOOK_REPORT_ROWS"
-    echo "-- projection log ($HOOK_LOG) --"
-    printf '%s\n' "$HOOK_LOG_CONTENT"
-} > "$LOGS/tuple-hook-drive.log"
-
-HOOK_FAIL=""
-if ! [ "$HOOK_TOTAL" -ge 2 ] 2>/dev/null; then
-    HOOK_FAIL="ledger/$HOOK_SID total=$HOOK_TOTAL (want >=2) after 30s"
-fi
-case "$HOOK_START_ROWS" in
-    *"'agent_id': '$HOOK_AGENT'"*) : ;;
-    *) HOOK_FAIL="${HOOK_FAIL:+$HOOK_FAIL; }no kind=start row for agent_id=$HOOK_AGENT" ;;
-esac
-case "$HOOK_REPORT_ROWS" in
-    *"'agent_id': '$HOOK_AGENT'"*) : ;;
-    *) HOOK_FAIL="${HOOK_FAIL:+$HOOK_FAIL; }no kind=report row for agent_id=$HOOK_AGENT" ;;
-esac
-case "$HOOK_LOG_CONTENT" in
-    *SKIP*) HOOK_FAIL="${HOOK_FAIL:+$HOOK_FAIL; }projection log carries a SKIP line" ;;
-esac
-
-if [ -n "$HOOK_FAIL" ]; then
-    cat "$LOGS/tuple-hook-drive.log" >&2
-    _fail "tuple ledger projector hook drive: $HOOK_FAIL — expected while nexus-g2lln is open (a default local install has no data-token lease, so every projection SKIPs); see $LOGS/tuple-hook-drive.log. Will pass once nexus-g2lln's fix lands."
-fi
-echo "  ok: ledger/$HOOK_SID total=$HOOK_TOTAL, kind=start and kind=report rows present for $HOOK_AGENT, no SKIP in the projection log"
 
 echo "── 9/10 generation install path on the virgin HOME (nexus-utpuw.19) ──"
 # This gate installs via `uv pip install` into a scrubbed venv and never
@@ -1373,11 +1184,6 @@ if [ -n "$GEN_WAIT_S" ]; then
     PROPAGATION_WAIT_S=$(( ${PROPAGATION_WAIT_S:-0} + GEN_WAIT_S ))
 fi
 
-echo "── 9b/10 engine refusals (nexus-0kmat) ──"
-# The 0 is this gate's declared control count: it sends the engine no deliberate ownerless write.
-candidate_engine_refusals "$HOME_DIR/.config/nexus" fresh-install-mvv 0 2>&1 | tee "$LOGS/engine-refusals.log" \
-    || _fail "the end-of-journey engine read failed: a refusal, an unreadable counter or log, or an engine that is not the candidate (see CANDIDATE ENGINE CHECK FAILED above)"
-
 echo "── 10/10 non-vacuity ──"
 # The gate must never skip-pass: prove the substantive legs actually ran.
 # nexus-1ktd5 item C: `test -s` alone only proves non-emptiness -- every
@@ -1387,7 +1193,7 @@ echo "── 10/10 non-vacuity ──"
 # despite a background-thread exception) read as fine. This calls
 # _leg_log_is_substantive instead, which adds the one thing `-s` cannot: no
 # unhandled Python traceback anywhere in the leg's own log.
-LEGS_TO_CHECK="mcp-entrypoints.log init.log engine-identity.log engine-refusals.log store.log store-reput.log search-reput.log index.log doctor.log resolver-bound.log tuple-hook-drive.log generation-install.log"
+LEGS_TO_CHECK="mcp-entrypoints.log init.log store.log store-reput.log search-reput.log index.log doctor.log resolver-bound.log generation-install.log"
 if [ "$PUBLISHED_MODE" = 1 ]; then
     LEGS_TO_CHECK="install.log $LEGS_TO_CHECK"
 else

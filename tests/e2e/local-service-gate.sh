@@ -115,14 +115,6 @@ set -euo pipefail
 # anonymous install ping must not count them (tests/test_e2e_no_telemetry_lint.py).
 export NX_NO_TELEMETRY=1
 
-# nexus-0kmat critique S1: the vector leg below carries the cut battery's only positive control (one
-# deliberate ownerless write the engine must count and log). The knob that drops it would leave a green
-# cut gate with no control, so cut mode refuses it up front rather than after a 20-minute run.
-if [ "${NX_CUT_MODE:-0}" = 1 ] && [ -n "${NEXUS_GATE_NO_VECTOR_SMOKE:-}" ]; then
-  echo "[gate] NEXUS_GATE_NO_VECTOR_SMOKE is set in cut mode: it drops the vector leg's deliberate ownerless write, the only positive control for the engine's refusal counters (nexus-0kmat). Unset it." >&2
-  exit 2
-fi
-
 
 # ── Vacuity-guard summary-line parser (nexus-edwlp Task 6) ──────────────────
 # Extracts a count (e.g. "77" from "77 passed") out of a pytest -q summary
@@ -392,8 +384,7 @@ fi
 # to close, reproduced via this code path). Declared empty here, never
 # left unset under `set -u`, so cleanup() is always safe to call, even
 # from an exit path that fires before the stamp step below ever runs (the
-# native-binary launch path, or NX_GATE_ARTIFACTS, never populate it at
-# all).
+# native-binary launch path never populates it at all).
 RELEASE_PROPS="$REPO_ROOT/service/src/main/resources/META-INF/nexus/release.properties"
 RELEASE_PROPS_SNAPSHOT=""
 
@@ -461,7 +452,7 @@ NX_LOCAL=1 NEXUS_CONFIG_DIR="$SCRATCH" uv run nx daemon service stop
 #    whatever stamped jar an earlier rehearsal happened to leave in
 #    service/target — ambient machine state, the exact gate defect the
 #    self-provisioning rule forbids. release_version is derived from the
-#    floor constant (same parse as migration-rehearsal/run.sh).
+#    floor constant.
 #
 #    nexus-308ph (2026-08-02): ALSO stamps build_ref, a per-run nonce
 #    (<git short sha>+<epoch seconds>-<pid>) — mirrors
@@ -485,23 +476,7 @@ print(".".join(m.groups()) if m else "")
 ')"
 [ -n "$GATE_STAMP" ] || { echo "[gate] FATAL: could not parse REQUIRED_ENGINE_VERSION" >&2; exit 2; }
 GATE_BUILD_REF=""
-if [ -n "${NX_GATE_ARTIFACTS:-}" ]; then
-  # nexus-mfage fix B item 3: consume the stamped dev jar
-  # tests/e2e/migration-rehearsal/build-artifacts.sh built ONCE for the
-  # whole battery. The manifest's tree identity must equal this checkout's
-  # (verified here, refuses on mismatch) — the same nexus-mbeke rule
-  # run.sh --artifacts applies. Nothing in this tree is built, stamped or
-  # restored by this gate: the jar is copied into the scratch dir and the
-  # manifest's per-BUILD build_ref is what the smoke leg's discriminator
-  # (nexus-308ph) asserts against /version, in place of the per-run nonce.
-  [ -z "${NEXUS_SERVICE_BIN:-}" ] || { echo "[gate] NX_GATE_ARTIFACTS and NEXUS_SERVICE_BIN are contradictory launch artifacts; set one" >&2; exit 2; }
-  GATE_MANIFEST="$("$E2E_PYTHON" "$REPO_ROOT/tests/e2e/lib/artifact_manifest.py" verify "$NX_GATE_ARTIFACTS" "$REPO_ROOT")" || exit 3
-  GATE_BUILD_REF="$("$E2E_PYTHON" -c 'import json,sys;print(json.loads(sys.argv[1])["build_ref"])' "$GATE_MANIFEST")"
-  GATE_JAR_REL="$("$E2E_PYTHON" -c 'import json,sys;print(json.loads(sys.argv[1])["artifacts"]["jar"]["path"])' "$GATE_MANIFEST")"
-  cp "$NX_GATE_ARTIFACTS/$GATE_JAR_REL" "$SCRATCH/gate-service.jar"
-  JAR="$SCRATCH/gate-service.jar"
-  echo "[gate] artifacts: jar from $NX_GATE_ARTIFACTS (build_ref=$GATE_BUILD_REF) — no jar rebuild, no stamp"
-elif [ -z "${NEXUS_SERVICE_BIN:-}" ]; then
+if [ -z "${NEXUS_SERVICE_BIN:-}" ]; then
   JAR_SKIP_REASON="$(uv run python3 -c '
 from tests.db._service_fixture import jar_freshness_skip_reason
 print(jar_freshness_skip_reason() or "")
@@ -528,8 +503,8 @@ print(jar_freshness_skip_reason() or "")
   # window) — it closes the CONCURRENT-CLOBBER hazard the bead names as
   # fixable, not that specific unreplicated occurrence.
   # nexus-iexvl round 3: routed through scripts/lib/release-props-lease.sh's
-  # release_props_stamp_under_lease -- the SAME shared helper run.sh and
-  # build-artifacts.sh use -- instead of a hand-rolled acquire+guard+
+  # release_props_stamp_under_lease -- the SAME shared helper
+  # build-gate-jar.sh uses -- instead of a hand-rolled acquire+guard+
   # snapshot+sed sequence with local _restore_props/_restore_props_and_
   # release_lease functions. Those hand-rolled restores never cleared
   # RELEASE_PROPS_SNAPSHOT or removed the snapshot file, so this script's
@@ -542,7 +517,7 @@ print(jar_freshness_skip_reason() or "")
   # release_props_restore_and_release (below) restores AND removes the
   # snapshot file before releasing, so cleanup()'s trailing restore is a
   # genuine no-op once RELEASE_PROPS_SNAPSHOT is cleared to "" after each
-  # restore call, exactly as run.sh does for its own guided-family stamp.
+  # restore call, exactly as build-gate-jar.sh does.
   RELEASE_PROPS_SNAPSHOT="$(release_props_stamp_under_lease "$RELEASE_PROPS" service "${NX_BUILD_LEASE_WAIT:-3600}" "release_version=$GATE_STAMP" "build_ref=$GATE_BUILD_REF")" || exit $?
   echo "[gate] rebuilding service jar (release_version=$GATE_STAMP build_ref=$GATE_BUILD_REF)..."
   # Bare mvnw, deliberately (see the lease comment above) — this process
@@ -594,8 +569,7 @@ if [ -n "${NEXUS_SERVICE_BIN:-}" ]; then
   # apply) — log what is being pinned so a stale artifact is at least visible.
   # nexus-7m6uc: dialect detected ONCE, wrong-dialect stat never invoked --
   # a blind `stat -f ... || stat -c ...` leaks GNU's filesystem-status dump
-  # into this log line on Linux (see
-  # tests/e2e/post-publish-dispatch-check.sh's fix for the full writeup).
+  # into this log line on Linux.
   if stat --version >/dev/null 2>&1; then
     _bin_mtime="$(stat -c '%y' "$NEXUS_SERVICE_BIN" 2>/dev/null)"
   else
@@ -783,13 +757,6 @@ smoke_check "GET /v1/catalog/show -> index_state==failed (fence round-trip)" "d.
 # prior local-mode use already has it (verified present on this box; no
 # download is triggered by this leg). NEXUS_GATE_NO_VECTOR_SMOKE=1 drops the
 # leg (and SMOKE_EXPECTED with it) if that assumption stops holding somewhere.
-#
-# GATE_OWNERLESS_CONTROLS counts the DELIBERATE ownerless writes this gate sends its engine (the
-# negative control below, one per run, none when the vector leg is dropped). The end-of-journey
-# engine read (candidate_engine.py refusals --controls) must find EXACTLY that many refusals in
-# the counters and the engine log, so the control doubles as a positive control for both. Bump it
-# next to any control added here, never at the read.
-GATE_OWNERLESS_CONTROLS=0
 if [ -z "${NEXUS_GATE_NO_VECTOR_SMOKE:-}" ]; then
   SMOKE_CHASH="$("$E2E_PYTHON" -c "import hashlib;print(hashlib.sha256(b'gate-smoke-chunk-$SMOKE_UID').hexdigest())")"
   SMOKE_VEC_COLLECTION="knowledge__gate-smoke__bge-base-en-v15-768__v1"
@@ -839,7 +806,6 @@ if [ -z "${NEXUS_GATE_NO_VECTOR_SMOKE:-}" ]; then
   fi
   smoke_request POST /v1/vectors/upsert-chunks \
     "$("$E2E_PYTHON" -c "import json;print(json.dumps({'collection':'$SMOKE_VEC_COLLECTION','ids':['$SMOKE_ORPHAN'],'documents':['gate smoke orphan chunk $SMOKE_UID'],'metadatas':[{}]}))")"
-  GATE_OWNERLESS_CONTROLS=$((GATE_OWNERLESS_CONTROLS + 1))   # the one deliberate ownerless write (see the declaration above)
   if [ "${NX_OWNERLESS_WRITE_MODE:-enforce}" = "log-only" ]; then
     [ "$SMOKE_CODE" = "200" ] || smoke_fail "POST /v1/vectors/upsert-chunks (ownerless chash, log-only) want 200"
     smoke_request GET /v1/status
@@ -950,16 +916,16 @@ fi
 
 # The mandatory_regression_pin carve-out (nexus-z0o2p.41). The GitHub-backed pins skip under this
 # gate's fenced HOME (the fence never mirrors ~/.config/gh), and conftest holds a skipped pin to a zero
-# budget, so they read this gate FAILED on every run. They run in tests/e2e/mandatory-pins-gate.sh,
+# budget, so they read this gate FAILED on every run. They run in tests/e2e/release-preflight.sh,
 # under a real HOME. Same exact-count discipline as the carve-outs above, same reason: the marker
 # must never become a place to park a red test, and a pin that left this selection must still exist.
-# The selection expression and the count live in tests/e2e/lib/mandatory_pins.sh, shared with that gate.
+# The selection expression and the count live in tests/e2e/lib/mandatory_pins.sh, shared with that preflight.
 # shellcheck source=lib/mandatory_pins.sh
 . "$REPO_ROOT/tests/e2e/lib/mandatory_pins.sh"
 MANDATORY_PIN_COUNT="$(NX_TEST_T2_SUBSTRATE=none uv run pytest -m "$MANDATORY_PIN_MARK_EXPR" --collect-only -q 2>/dev/null | grep -cE '::' || true)"
 if [ "$MANDATORY_PIN_COUNT" -ne "$MANDATORY_PIN_EXPECTED" ]; then
   echo "[gate] VACUITY GUARD TRIPPED: mandatory_regression_pin carve-out is $MANDATORY_PIN_COUNT tests, expected exactly $MANDATORY_PIN_EXPECTED" >&2
-  echo "[gate] (a new pin must bump MANDATORY_PIN_EXPECTED in tests/e2e/lib/mandatory_pins.sh; it runs in tests/e2e/mandatory-pins-gate.sh, not here)" >&2
+  echo "[gate] (a new pin must bump MANDATORY_PIN_EXPECTED in tests/e2e/lib/mandatory_pins.sh; it runs in tests/e2e/release-preflight.sh, not here)" >&2
   exit 1
 fi
 
@@ -1026,32 +992,6 @@ set -e
 # editing this script.
 FLOOR="${NX_GATE_FLOOR:-440}"
 BUDGET="${NX_GATE_BUDGET:-40}"
-
-# nexus-0kmat: name the engine this gate served and read its ownerless-write
-# counters and engine log, while it is still up (the EXIT trap stops it). The
-# pytest run above drives the heaviest writers in the repo against this one
-# engine, and a refused write 422s inside a test only when the test asserts on
-# it; a background or hook writer fails in the engine log alone, which is the
-# half this read adds. The candidate here is the artifacts jar this gate copied
-# in (NX_GATE_ARTIFACTS), judged by sha256, so a battery cut that names a
-# different --candidate-engine cannot make this leg pass against the wrong
-# bytes. Outside cut mode the two lines are printed and never fail the gate. In cut mode the reading must
-# equal this gate's own declared control (GATE_OWNERLESS_CONTROLS), not zero: the smoke leg sent one
-# deliberate ownerless write to this same engine, so a zero would mean the counter is dead.
-GATE_CAND_ENV=()
-[ -z "${NX_GATE_ARTIFACTS:-}" ] || [ -z "${GATE_JAR_REL:-}" ] \
-  || GATE_CAND_ENV=("NX_CANDIDATE_ENGINE=$NX_GATE_ARTIFACTS/$GATE_JAR_REL")
-GATE_ENGINE_FAIL=0
-for _cand_cmd in identity refusals; do
-  env ${GATE_CAND_ENV[@]+"${GATE_CAND_ENV[@]}"} \
-    "$E2E_PYTHON" "$REPO_ROOT/tests/e2e/lib/candidate_engine.py" "$_cand_cmd" "$SCRATCH" --label local-service-gate \
-      --controls "$GATE_OWNERLESS_CONTROLS" \
-    || GATE_ENGINE_FAIL=1
-done
-if [ "$GATE_ENGINE_FAIL" = 1 ] && [ "${NX_CUT_MODE:-0}" = 1 ]; then
-  echo "[gate] ENGINE CANDIDATE/REFUSAL CHECK FAILED (cut mode): see CANDIDATE ENGINE CHECK FAILED above" >&2
-  STATUS=1
-fi
 
 SUMMARY_LINE="$(select_summary_line "$SCRATCH/pytest.out")"
 PASSED_COUNT="$(parse_summary_count passed "$SUMMARY_LINE")"

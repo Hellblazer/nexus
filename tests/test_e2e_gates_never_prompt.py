@@ -70,7 +70,7 @@ def _invocations() -> list[tuple[str, int, str]]:
 
 def test_every_nx_init_in_a_script_passes_no_autostart() -> None:
     found = _invocations()
-    assert len(found) >= 15, f"only {len(found)} nx init invocations found; the scan is broken"
+    assert len(found) >= 6, f"only {len(found)} nx init invocations found; the scan is broken"
     bad = [
         f"{p}:{n}: {c}" for p, n, c in found
         if "--no-autostart" not in c

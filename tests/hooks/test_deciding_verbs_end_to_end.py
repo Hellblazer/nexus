@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
-"""The three deciding verbs, driven as Claude Code drives them (nexus-17i1n).
+"""The deciding verbs, driven as Claude Code drives them (nexus-17i1n).
 
 Every other test of these hooks proves a PART: that ``run()`` returns the
 right envelope, that ``hooks.json`` names the right verb, that
@@ -120,111 +120,6 @@ def test_auto_approve_stays_silent_for_a_tool_it_does_not_own() -> None:
     assert proc.stdout.strip() == "", (
         f"auto-approve spoke for a tool outside its allowlist: {proc.stdout!r}"
     )
-
-
-def _unreachable_t1_env(tmp_path: Path) -> dict[str, str]:
-    """Environment that makes T1 deterministically UNREACHABLE for the gate.
-
-    A fake ``nx`` that always fails goes first on PATH, so ``nx scratch list``
-    fails whatever this box's real T1 is doing, and a fake ``bd`` keeps the
-    ``unverified`` stamp off the real tracker. Without this the verdict
-    depended on the machine: a live T1 with no marker denies, a dead one asks.
-    """
-    (tmp_path / ".nexus.yml").write_text("verification:\n  on_close: true\n")
-    bin_dir = tmp_path / "fakebin"
-    bin_dir.mkdir()
-    for name, body in (("nx", "#!/bin/sh\nexit 1\n"), ("bd", "#!/bin/sh\nexit 0\n")):
-        script = bin_dir / name
-        script.write_text(body)
-        script.chmod(0o755)
-    return {
-        "CLAUDE_PROJECT_DIR": str(tmp_path),
-        "PATH": f"{bin_dir}:{os.environ.get('PATH', '')}",
-    }
-
-
-_CLOSE_PAYLOAD = {
-    "session_id": "e2e-no-such-session",
-    "tool_name": "Bash",
-    "tool_input": {"command": "bd close nexus-99xyz --reason e2e"},
-}
-
-
-def test_the_close_gate_asks_when_t1_is_unreachable_over_the_real_wire(tmp_path) -> None:
-    """The regression, end to end, with the outcome PINNED.
-
-    T1 is made unreachable on purpose (:func:`_unreachable_t1_env`), so the
-    one correct verdict is ``ask`` (nexus-nmzsg). It used to accept
-    ``{ask, deny}``, which made the assertion true of two different gate
-    behaviours and so of neither. The config is a purpose-built
-    ``.nexus.yml`` under CLAUDE_PROJECT_DIR rather than the live one, so the
-    verdict does not depend on the developer's own ``on_close`` setting.
-    """
-    proc = _run_verb(
-        "pre-close-verification", _CLOSE_PAYLOAD, extra_env=_unreachable_t1_env(tmp_path)
-    )
-    assert proc.returncode == 0, proc.stderr
-    assert proc.stdout.strip(), "the close gate wrote nothing at all"
-    envelope = json.loads(proc.stdout)["hookSpecificOutput"]
-    assert envelope.get("permissionDecision") == "ask", proc.stdout
-    assert "nexus-99xyz" in envelope.get("permissionDecisionReason", ""), proc.stdout
-
-
-def test_the_ask_envelope_is_the_whole_of_stdout_over_the_real_wire(tmp_path) -> None:
-    """Raw stdout is exactly ONE JSON object, nothing before or after it.
-
-    A hook's stdout is a protocol channel; a stray log line makes the
-    harness discard the verdict. The in-process driver in
-    test_pre_close_verification_hook.py redirects stray stdout to stderr, so
-    it cannot see that. This is the real ``nx-hook`` process and the bytes it
-    wrote.
-    """
-    proc = _run_verb(
-        "pre-close-verification", _CLOSE_PAYLOAD, extra_env=_unreachable_t1_env(tmp_path)
-    )
-    assert proc.returncode == 0, proc.stderr
-    assert proc.stdout == proc.stdout.lstrip(), "leading bytes before the envelope"
-    obj, end = json.JSONDecoder().raw_decode(proc.stdout)
-    assert proc.stdout[end:].strip() == "", (
-        f"stdout carries more than the one envelope: {proc.stdout!r}"
-    )
-    assert obj["hookSpecificOutput"]["permissionDecision"] == "ask"
-
-
-def test_a_non_bash_call_is_no_decision_immediately() -> None:
-    """nexus-452oy: a non-Bash call is genuinely no-opinion for this gate
-    -- empty stdout, not an explicit allow. An explicit allow here would
-    bypass Claude Code's own permission prompt and its auto-mode
-    classifier for the command."""
-    proc = _run_verb(
-        "pre-close-verification",
-        {"session_id": "s", "tool_name": "Read", "tool_input": {"file_path": "/x"}},
-    )
-    assert proc.returncode == 0, proc.stderr
-    assert proc.stdout == "", f"expected empty (no-decision) stdout, got: {proc.stdout!r}"
-
-
-def test_subagent_stop_runs_and_stays_silent_with_no_ledger(tmp_path) -> None:
-    """It can only block an agent the ledger says owes a report.
-
-    With a throwaway XDG_STATE_HOME there is no ledger, so silence is
-    correct — and silence still proves the verb resolved and exited
-    cleanly rather than being not-found.
-    """
-    proc = _run_verb(
-        "subagent-stop",
-        {
-            "session_id": "e2e-no-such-session",
-            "agent_id": "e2e-agent",
-            "agent_type": "Explore",
-            "agent_transcript_path": str(tmp_path / "nope.jsonl"),
-            "stop_hook_active": "false",
-        },
-        extra_env={"XDG_STATE_HOME": str(tmp_path / "state")},
-    )
-    assert proc.returncode == 0, proc.stderr
-    if proc.stdout.strip():
-        json.loads(proc.stdout)  # whatever it says must at least be JSON
 
 
 def test_an_unknown_verb_is_refused_rather_than_silently_passing() -> None:

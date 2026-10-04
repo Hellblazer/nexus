@@ -10,7 +10,7 @@ from pathlib import Path
 # and that is load-bearing rather than tidy (bead nexus-q02nx.21).
 #
 # Every command-tier hook verb is a submodule of this package
-# (``nexus.hooks.session_start_verb``, ``auto_approve``, ``post_compact``,
+# (``nexus.hooks.session_start_verb``, ``auto_approve``, ``subagent_start``,
 # ``rdr_verb`` and the rest), and Python runs a package's ``__init__``
 # before any submodule. So an eager import here is paid by every verb
 # dispatch whatever the verb itself imports. Measured on the dev Mac, 10
@@ -53,8 +53,8 @@ def _open_t1():
     nexus-6a19f: ``NX_T1_ALLOW_SHARED_FALLBACK=1`` (see
     :func:`nexus.db.t1.get_t1_database`) exists so a caller with no usable
     lease for an explicit session id can opt back into the shared
-    CLI-dedicated scope for READING/WRITING markers (e.g.
-    ``conexus/hooks/scripts/pre_close_verification_hook.sh``). It must
+    CLI-dedicated scope for READING/WRITING markers (the bd-close gate,
+    deleted at cleanup step A2, was the established consumer). It must
     NEVER extend to :func:`session_end_flush`'s ``t1.clear()`` call below --
     clearing the shared scope on every lease-less SessionEnd would wipe
     every OTHER session's markers accumulated there (the nexus-6a19f

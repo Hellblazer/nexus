@@ -854,11 +854,8 @@ class DataTokenManager:
         in-process cache either (unlike :meth:`bearer_for`).
 
         For a caller that must present a data-token bearer WITHOUT ever
-        risking a mint call — the RDR-205 ledger tuple projector
-        (``nexus.hooks.tuple_ledger_project``, ported from the bead
-        nexus-b5ugt) is fire-and-forget with no reader and no retry, and
-        its credential policy (bead nexus-g2lln) refuses to mint under any
-        circumstance. :meth:`has_fresh_lease` answers the same question as
+        risking a mint call — a fire-and-forget hook with no reader and no retry whose credential
+        policy refuses to mint under any circumstance. :meth:`has_fresh_lease` answers the same question as
         a bool; this returns the token itself so such a caller need not
         re-read the lease file a second time or duplicate this method's
         validation (format version, tenant, digest, near-expiry threshold

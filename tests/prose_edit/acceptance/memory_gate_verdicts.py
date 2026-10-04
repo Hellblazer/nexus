@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """The rejection-memory gate's counts (RDR-221, nexus-ger02.16).
 
 usage: memory_gate_verdicts.py OUT_DIR [--threshold 0.10] [--min-measurable N] [--source LABEL=PATH ...]

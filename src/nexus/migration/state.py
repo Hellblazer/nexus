@@ -18,8 +18,7 @@ read with a cheap ``stat`` + ``read``.
 
 **Atomicity (gate-3 condition).** Writes go through a ``.tmp`` sibling +
 ``os.rename`` — POSIX-atomic, so a concurrent poller observes either the old
-file or the new one, never a torn payload. This is the deliberate rejection of
-the ``phase_review_sentinel`` precedent (a bare ``write_text``), which is the
+file or the new one, never a torn payload. A bare ``write_text`` is the
 named anti-pattern.
 
 **Derived progress.** ``collections_done`` / ``collections_total`` are RECOMPUTED
@@ -104,8 +103,8 @@ def write_state(state: MigrationState) -> Path:
 
     A ``.tmp`` sibling is written then ``os.rename``-d over the target (POSIX-
     atomic on the same filesystem), so a concurrent poller never reads a partial
-    payload. NOT a bare ``write_text`` — that is the ``phase_review_sentinel``
-    anti-pattern this mechanism exists to avoid.
+    payload. NOT a bare ``write_text``, the anti-pattern this mechanism
+    exists to avoid.
     """
     target = state_path()
     target.parent.mkdir(parents=True, exist_ok=True)

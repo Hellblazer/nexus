@@ -130,7 +130,7 @@ def test_other_legs_unaffected_no_propagation_wait_in_log(tmp_path) -> None:
     """A leg whose output never contains the literal (every leg besides
     mvv) must see its summary line completely unchanged -- the fold-in is
     a no-op there, never a spurious empty bracket."""
-    log = "SHAKEDOWN PASSED\n"
-    line = _run_finish_leg(tmp_path, log, verdict_regex="SHAKEDOWN (PASSED|FAILED)", rc=0)
-    assert line == "SHAKEDOWN PASSED"
+    log = "LOCAL-SERVICE GATE PASSED\n"
+    line = _run_finish_leg(tmp_path, log, verdict_regex="LOCAL-SERVICE GATE (PASSED|FAILED)", rc=0)
+    assert line == "LOCAL-SERVICE GATE PASSED"
     assert "PROPAGATION_WAIT_S" not in line

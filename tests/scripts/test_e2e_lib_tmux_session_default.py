@@ -8,7 +8,7 @@ unconditionally (no `${VAR:-default}` guard). Any script that computes its
 own `TMUX_SESSION` value BEFORE sourcing lib.sh, expecting that value to
 survive, had it silently overwritten the moment it sourced lib.sh.
 
-Found while migrating `tests/e2e/release-sandbox.sh`'s `tmux` mode to
+Found while migrating a since-deleted sandbox gate's `tmux` mode to
 `claude_credentials.py run --` (RDR-219 P2.1c, nexus-wauo1.12): the script
 computes `TMUX_SESSION="${TMUX_SESSION:-nexus-sandbox}"` and echoes it
 BEFORE sourcing lib.sh (for the `_tmux` wrapper), but the actual

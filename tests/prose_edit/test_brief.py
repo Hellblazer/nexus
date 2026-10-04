@@ -307,7 +307,7 @@ def test_the_brief_carries_each_layer_in_the_rdr_order_with_the_later_layer_winn
     seed(prose, "doc", {"tone": "doc-tone"}, {"banned": ["doc-banned"]}, path="docs/x.md")
     seed_genre(prose, "reference-doc", "EXEMPLAR-PASSAGE-TEXT", ["genre-note-one"])
     prose.ok("reject", "docs/x.md", "--old", "OLD-REJECTED", "--new", "NEW-REJECTED")
-    prose.ok("promote", "docs/x.md", "1", "--level", "repo")
+    prose.promote("docs/x.md", 1, "repo")
 
     text = brief_ok(prose, "build", "docs/x.md", "--budget", "7")
     positions = [text.index(h) for h in ORDER]
@@ -632,7 +632,7 @@ def test_the_agents_example_output_is_a_valid_proposal_in_memory_pys_format() ->
     blocks = re.findall(r"```json\n(.*?)\n```", AGENT.read_text(encoding="utf-8"), re.DOTALL)
     assert len(blocks) == 1, "the agent file shows the output format exactly once"
     prop = mem.validate_proposal(json.loads(blocks[0]))
-    assert set(prop) == {"voice_card", "note", "paragraphs", "edits", "queries"}
+    assert set(prop) == {"brief_sha", "voice_card", "note", "paragraphs", "edits", "queries"}
 
 
 def test_the_agent_body_carries_the_diagnostic_questions_and_the_protections() -> None:

@@ -1,8 +1,7 @@
 # syntax=docker/dockerfile:1
 # nexus-4mm24 — COLD-ACQUIRE fresh-machine validation box.
 #
-# Unlike the soup-to-nuts MVV (Dockerfile), this is a TRUE quarantine machine:
-# it pre-stages NOTHING the service needs. No system PostgreSQL, no native
+# A TRUE quarantine machine: it pre-stages NOTHING the service needs. No system PostgreSQL, no native
 # binary, no PG bundle, no ONNX model. Just the OS, Python, and the conexus
 # wheel — exactly what `pip install conexus` leaves a fresh user with.
 #
@@ -10,7 +9,7 @@
 # engine-service-v* GitHub Release (cosign-verified): the native binary AND the
 # relocatable PG+pgvector bundle. `nx init --service` extracts the bundle,
 # provisions PG, downloads the bge-768 ONNX, and starts the service. This proves
-# the auto-acquire + auto-provision paths the MVV skips by pre-staging.
+# the auto-acquire + auto-provision paths a pre-staged box would skip.
 #
 # Base = debian:trixie-slim — conexus's actual runtime deploy base (glibc 2.41),
 # so this ALSO validates the published linux binary's glibc floor + runtime-lib
@@ -58,15 +57,10 @@ RUN --mount=type=cache,target=/home/nexus/.cache/uv,uid=1000,gid=1000 \
     && uv pip check --python /home/nexus/nxenv \
     && nx --version
 
-# Driver + seed last (trivial layers). rehearse_hole_punch.sh (nexus-s3dd4.7)
-# reuses this SAME cold-acquire box via run.sh --hole-punch, which overrides
-# the entrypoint below — see run.sh for the --entrypoint swap.
-COPY rehearse_cold.sh /home/nexus/rehearse_cold.sh
-# nexus-1ddsy: the published-artifact acquire gate reuses this COLD image
-# (bare box, no system PG, wheel only) — it is the acquire half of the
-# retired rehearse_cold.sh, without the guided-upgrade tail that retired it.
+# Driver last (a trivial layer). The published-artifact acquire gate
+# (nexus-1ddsy, run.sh --acquire) is this image's only consumer: a bare box
+# (no system PG, wheel only) that cold-acquires the engine from the PUBLISHED
+# release.
 COPY rehearse_acquire.sh /home/nexus/rehearse_acquire.sh
-COPY rehearse_hole_punch.sh /home/nexus/rehearse_hole_punch.sh
-COPY seed_legacy.py /home/nexus/seed_legacy.py
 
-ENTRYPOINT ["/bin/bash", "/home/nexus/rehearse_cold.sh"]
+ENTRYPOINT ["/bin/bash", "/home/nexus/rehearse_acquire.sh"]

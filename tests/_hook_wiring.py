@@ -53,7 +53,7 @@ def command_verb(entry: dict) -> str | None:
 def names_hook(entry: dict, hook_name: str) -> bool:
     """Does one ``hooks[].hooks[]`` entry declare *hook_name*, on either tier?
 
-    *hook_name* is the underscore form (``pre_close_verification``); the
+    *hook_name* is the underscore form (``auto_approve``); the
     command tier's dashed verb is derived, so callers name a hook one way.
     """
     if entry.get("type") == "mcp_tool":

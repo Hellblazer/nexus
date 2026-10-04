@@ -299,23 +299,6 @@ _TYPE_PREFIXES = frozenset({"code__", "docs__", "rdr__", "knowledge__", "quarant
 #: judgement call, not a quieter gate.
 _EXCLUDED_SITES: dict[tuple[str, tuple[str, ...]], str] = {
     (
-        "src/nexus/hooks/behaviour_census.py",
-        (
-            'name = block.get("name") or ""',
-            'base = name.rsplit("__", 1)[-1]',
-        ),
-    ): (
-        "mcp__ tool name: the census reads a TRANSCRIPT's tool_use blocks, "
-        "where `name` is a tool identifier such as "
-        "`mcp__plugin_conexus_sequential-thinking__sequentialthinking`, and "
-        "the rsplit takes its bare verb to match against HANDS_ON and "
-        "DECISION_TOOL_NAMES. No collection name is in scope anywhere in "
-        "that file. It entered this census's domain by MOVING rather than "
-        "by being written: nexus-t9klx ported the script from "
-        "conexus/hooks/scripts/ into the wheel, and the census walks "
-        "src/nexus/."
-    ),
-    (
         "src/nexus/mcp/core.py",
         (
             'raw_tool = step.get("tool", "")',
@@ -348,21 +331,6 @@ _EXCLUDED_SITES: dict[tuple[str, tuple[str, ...]], str] = {
         "mcp__ tool name: strips an mcp__...__ prefix from a resolved plan "
         "step's tool identifier before dispatch, guarded by the same "
         '`startswith("mcp__")` check as the other three sites.'
-    ),
-    (
-        "src/nexus/hooks/subagent_stop_scans.py",
-        (
-            'return text.rsplit("__", 1)[-1] if text.startswith("mcp__") '
-            "else text",
-        ),
-    ): (
-        "mcp__ tool name: `_tool_key` reduces a fully-qualified MCP tool "
-        "name (mcp__plugin_conexus_nexus__memory_put) to its bare form so "
-        "RDR-215's ported SubagentStop writes-scan can match it against "
-        "_WRITE_TOOLS. Guarded by the same `startswith(\"mcp__\")` check as "
-        "the four sibling strippers in plans/ and mcp/core.py. No "
-        "collection name reaches this path -- the input is a transcript "
-        "tool_use block's `name` field."
     ),
     (
         "src/nexus/mcp/hooks.py",

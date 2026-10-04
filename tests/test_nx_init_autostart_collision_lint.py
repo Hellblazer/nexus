@@ -57,8 +57,7 @@ pytestmark = pytest.mark.lint
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 #: `nx init` or `_nx init` (this repo's host-side `env -i HOME=... nx`
-#: wrapper defined in fresh-install-mvv.sh / warm-reindex-skip-gate.sh /
-#: local-index-memory-gate.sh) -- a wrapped HOME is exactly the thing that
+#: wrapper defined in fresh-install-mvv.sh) -- a wrapped HOME is exactly the thing that
 #: does NOT isolate the launchd/systemd domain, so the wrapper form must be
 #: scanned identically to the bare form.
 _INIT_INVOCATION_RE = re.compile(r"(?<![\w])_?nx\s+init(?=\s|$)")
@@ -71,16 +70,12 @@ _NO_AUTOSTART_RE = re.compile(r"--no-autostart")
 #: growth beyond the named count (a new site) is a hard failure; a count
 #: that drops below the named number means a site died and the entry must
 #: be lowered so the ledger stays exact (see test_ledger_matches_live_count
-#: below). All ten are migration-rehearsal harnesses, run inside Docker
+#: below). The migration-rehearsal harnesses run inside Docker
 #: (nexus-d5yu5 investigation) -- their launchd/systemd domain is the
 #: container's, not the developer's live machine's.
 CONTAINER_ALLOWLIST: dict[str, int] = {
-    "tests/e2e/migration-rehearsal/rehearse_era_hop.sh": 1,
     "tests/e2e/migration-rehearsal/rehearse_acquire.sh": 1,
     "tests/e2e/migration-rehearsal/rehearse_package_upgrade.sh": 2,
-    "tests/e2e/migration-rehearsal/rehearse_stranded.sh": 3,
-    "tests/e2e/migration-rehearsal/rehearse_cold.sh": 1,
-    "tests/e2e/migration-rehearsal/rehearse_hole_punch.sh": 1,
     # Runs only inside the RDR-215 hook-surface shakeout image (Dockerfile
     # ENTRYPOINT), on a virgin HOME with no production install to collide
     # with: the whole point of that harness is a box where nothing is

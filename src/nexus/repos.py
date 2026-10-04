@@ -472,8 +472,8 @@ def list_repos_dual_with_catalog_roots(
         # nexus-qnp5s: list_owners_by_type() is implemented on both SQLite
         # Catalog and HttpCatalogClient — no raw _db access.
         #
-        # BEST-EFFORT (2026-07-08, found by the upgrade-shakeout drift
-        # cross-check): in service mode the reader factory returns a LAZY
+        # BEST-EFFORT (2026-07-08, found by a since-deleted upgrade
+        # shakeout drift cross-check): in service mode the reader factory returns a LAZY
         # proxy whose first real call resolves the endpoint — on an install
         # without a reachable service that RAISES here, and a caller-level
         # except (health.py's git-hook check) used to lose the REGISTRY leg

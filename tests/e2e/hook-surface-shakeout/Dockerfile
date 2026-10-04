@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # RDR-215 hook-surface shakeout image. Built by run.sh from a staging dir
 # holding wheel/, plugin/ (hooks.json UNTRIMMED except the two entries that
-# would replace the wheel under test), checkout/ (a real repo, which is what
-# rdr208-mvv's container lacks and why its hooks.json had to be trimmed),
+# would replace the wheel under test), checkout/ (a real repo, which several hooks read),
 # settings.json and the drive helpers. The Claude Code sessions are REAL:
 # run.sh mounts a fresh oauth credential read-only at run time.
 FROM debian:trixie-slim

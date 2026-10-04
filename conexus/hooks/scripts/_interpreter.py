@@ -14,14 +14,14 @@ TWO THINGS ARE LOST WITH THE SHIM, not one, and both are restored here:
   Python 3.12-, measured, not read off their guards -- only one spells the
   guard itself, the rest inherit it through ``_lib`` / ``_endpoint_resolve``.
   On a box where ``/usr/bin/python3`` (3.9 on macOS) wins PATH,
-  ``phase_review_close_requires_gate`` -- the routing framework's only
-  ``fail_closed`` rule -- exits 1 with no envelope. That is not a deny:
+  the phase-review close gate (deleted at cleanup step A2, nexus-0r1uz) --
+  the routing framework's only ``fail_closed`` rule -- exited 1 with no envelope. That is not a deny:
   Claude Code treats it as a non-blocking error and the close gate FAILS
   OPEN, the exact inversion the command tier was chosen to prevent.
 
 * **The interpreter's ``nexus``.** The generation python is the only
   interpreter on a box guaranteed to import ``nexus``, which
-  ``phase_review_close_requires_gate`` needs for
+  the phase-review close gate needed for
   ``nexus.session.find_immediate_claude_pid``. Under a bare Homebrew
   python3.13 that import fails, the hook degrades to ``os.getppid()``, and
   it misreads quietly -- the nexus-owna8 class, where ``rdr_hook`` reported
@@ -64,7 +64,7 @@ The probe budget sits UNDER the hooks' own declared timeout. Those
 entries declare ``"timeout": 5`` in hooks.json; an unbudgeted chain of
 three 10-second probes could reach 30 seconds, and a hook killed by its
 own timeout writes no envelope, which for
-``phase_review_close_requires_gate`` is not a deny but a FAIL-OPEN --
+the phase-review close gate was not a deny but a FAIL-OPEN --
 precisely the inversion this module exists to prevent. So a probe gets
 :data:`_PROBE_TIMEOUT_S` and the whole resolution gets
 :data:`_RESOLVE_BUDGET_S`, after which it gives up and stays put.

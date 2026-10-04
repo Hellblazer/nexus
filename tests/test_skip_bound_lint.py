@@ -110,9 +110,8 @@ introduced by this change): five ``pytest.importorskip("yaml")`` /
 ``shutil.which`` / filesystem-existence-conditioned ``skipif`` sites in
 genuinely gate-like files (``test_plan_template_inline_var_lint.py``,
 ``test_plugin_release_drift_ledger.py``, ``test_plugin_release_workflow.py``
-x2, ``test_plugin_structure.py``, ``test_plugin_surface_smoke_wiring.py``,
-``test_rehearsal_container_guard_lint.py``,
-``test_session_end_capability_census.py``) that have no non-vacuity budget
+x2, ``test_plugin_structure.py``,
+``test_rehearsal_container_guard_lint.py``) that have no non-vacuity budget
 of their own. Each is allowlisted with its own reason at the entry, per the
 shrink-only rule below -- do not widen the allowlist for a NEW site; a new
 gate-like environment-keyed skip introduced after this lint lands must
@@ -126,7 +125,7 @@ This lint does not re-implement or shadow:
 * ``tests/conftest.py:1436-1544`` -- the ``mandatory_regression_pin`` /
   ``scenario`` marker-budget guards (this lint READS their existence as a
   bound signal; it does not re-count their skips).
-* ``scripts/check_lint_leg_non_vacuity.py`` -- the CI-leg executed-count
+* the inline passed-count floor in ci.yml's ``test-lint`` job -- the CI-leg
   floor (that guards the whole ``-m lint`` invocation not going vacuous;
   this lint is itself one of the tests that invocation runs).
 * ``tests/containers/fanout.sh:149`` -- the container-fanout shard verdict
@@ -179,13 +178,11 @@ _GATE_KEYWORDS: tuple[str, ...] = (
 #: 253d0bc4a: all three sat unenforced in the substrate bucket).
 _GATE_LIKE_BY_NAME: dict[str, str] = {
     "tests/scripts/test_generation_flip_live_holder.py":
-        "release skill step 1c: required for any change to the shim / flip / GC "
-        "machinery (moved out of AGENTS.md 2026-09-20, when that section became a "
-        "pointer and the skill became the authority)",
+        "its own header: the live-holder flip property on real generations "
+        "(nexus-utpuw.16), the only fast-loop guard on the shim / flip / GC "
+        "machinery",
     "tests/scripts/test_reinstall_tool_generations.py":
         "its own docstring: 'THIS MODULE IS THE ACCEPTANCE CRITERION' (nexus-utpuw.8)",
-    "tests/scripts/test_post_publish_dispatch_check.py":
-        "drives tests/e2e/post-publish-dispatch-check.sh end to end: an e2e wiring test one directory over",
 }
 
 #: KNOWN DETECTOR GAPS. ``_ENV_MARKERS`` sees os.environ / os.getenv /
@@ -270,17 +267,11 @@ GATE_LIKE_SKIP_ALLOWLIST: dict[str, int] = {
     # (bash is assumed present on every dev/CI box this suite runs on), plus
     # a sibling "no ```! bash block found" content skip in the same test
     # function that inherits the function-level bash-availability marker.
-    "tests/test_plugin_structure.py": 2,
-    # pytest.importorskip("yaml") reading the plugin-surface-smoke workflow.
-    "tests/test_plugin_surface_smoke_wiring.py": 1,
     # skipif(os.path.exists("/.dockerenv") or .../.containerenv) -- this
     # test's own purpose is to assert the guard fires OUTSIDE a container;
     # it is a legitimate platform-shape condition, not a missing-dependency
     # skip, but carries no local budget of its own.
     "tests/test_rehearsal_container_guard_lint.py": 1,
-    # skipif(os.name == "nt") -- POSIX chmod permission semantics; this repo
-    # has no Windows CI leg to bound it against.
-    "tests/test_session_end_capability_census.py": 1,
     # Named gate-like 2026-09-17 by _GATE_LIKE_BY_NAME (review of this lint's
     # first cut); the debt is as old as the files, only its visibility is new.
     #
@@ -293,9 +284,6 @@ GATE_LIKE_SKIP_ALLOWLIST: dict[str, int] = {
     # shapes are platform specific, and there is no third platform leg to
     # bound it against.
     "tests/scripts/test_reinstall_tool_generations.py": 1,
-    # class-level skipif(sys.platform == "win32"): POSIX permission bits; no
-    # Windows CI leg.
-    "tests/scripts/test_post_publish_dispatch_check.py": 1,
 }
 
 #: NEVER RAISE this without a fresh review; LOWER it as an allowlist entry

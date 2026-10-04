@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Deterministic half of the prose-edit skill (RDR-221 Step 1.4): grammar, brief, agent output.
 
 The skill hands every mechanical job to this script so the model's instructions carry
@@ -7,15 +8,30 @@ project prefix override (PROSE_EDIT_PROJECT_PREFIX) passes through to that child
 Errors go to stderr with exit 1; memory.py's own exit codes (3: T2 unavailable) pass through.
 
   brief.py parse TOKEN...        the invocation, one token per argv, printed as JSON
-  brief.py build TARGET [--genre G] [--budget N] [--file F] [--site-page FILE]
+  brief.py build TARGET [--genre G] [--budget N] [--file F] [--work] [--site-page FILE]
                                  the brief text for the editor agent, on stdout
   brief.py filter TARGET [--budget N] [--file F] [--save F | --work DIR]
                                  the agent's reply on stdin -> filtered proposal JSON
-  brief.py tmpdir                a fresh temporary directory outside the repository
+  brief.py tmpdir [--ready]      a fresh temporary directory outside the repository; --ready prints WORK= and the
+                                 absolute path of INPUT, REPLY, FILTERED, REASONS, ENTRY and CARD inside it
   brief.py site-layer [--site-page FILE]
                                  the site-page section 3 layer memory.py `read` takes
 
 TARGET is PATH, PATH:START-END or "-" (a stdin run; --file names the saved text).
+
+The brief travels to the editor as a file, not as text the orchestrating model retypes. `build --work`
+(a path run) makes the work directory; a stdin run's --file already sits in one. In both cases `build`
+writes the brief to WORK/brief.md and prints the brief on stdout, preceded by a header and a blank line: for a path
+run `WORK=<dir>`, `DISPATCH=<the line-editor's whole prompt>`, then `REPLY=`, `FILTERED=` and `REASONS=` (the absolute
+paths of the files the skill writes next), for a stdin run the `DISPATCH=` line alone (`tmpdir --ready` printed the paths). The
+prompt names the absolute path of WORK/brief.md; the skill passes it as printed, so no model types a path. The file ends with a blank line and `Brief id: <the first 12 hex digits of the sha256 of the brief above it>`.
+The id is in the file and nowhere else (not on stdout, not in the dispatch prompt): the editor is told to read the file
+and to echo that last line's id as `brief_sha` in its reply, so a reply that names it came from reading to the end of
+the file. `filter` compares the reply with the file's id and, when the reply names none or another, or the file's id
+line is missing or no longer matches its text, warns on stderr and in `warnings` (never fatal). A copied id proves
+nothing and a missing one proves the file was not read to its last line. When the brief carries a stored voice card
+(section 2, between <voice_card> tags) and the reply's voice_card is not that card, `filter` warns the same way.
+A build whose --file is not in a work directory writes no file and prints the brief alone.
 
 Grammar (`parse`; every token is one argv element, never a shell string):
 
@@ -29,11 +45,19 @@ A file named `rejections` or `exemplar` is reached as `-- rejections` or `./reje
 `parse` prints {"mode": "edit", path, range, stdin, genre, budget, target} or
 {"mode": "rejections"|"exemplar", ..., "memory_argv": [...]}.
 
+Section 3 of the brief (the style sheet) ends every bullet with its layer, "(layer: document|genre|repo|user)",
+and states the rule: an entry from a narrower layer that contradicts a broader one wins (document > genre > repo >
+user). The site-page section 3 rules are the genre layer; an entry two layers hold is labelled with the narrower.
+Section 2 (the voice card) holds the document's saved author-approved card, when memory.py has one stored for it
+(`voice-card`), as the anchor the editor uses and returns unchanged; without one it asks the editor to write the card.
+
 `build` reads site-page section 3 from the sibling skill at run time for how-to and
 exploration-essay. Which section 3 rules are ignored, query-only or note-only comes from
 the repo style sheet lists site_page_section3_ignored, _query_only and _note_only, each
-entry starting with the rule's opening words in quotes; a listed rule that matches no
-bullet stops the build, so a skill edit cannot silently change what the editor applies.
+entry starting with the rule's opening words in quotes; a document's own record (`memory.py add-entry --level
+doc`) can carry the same three lists, and for a rule both treat the document's wins, so one essay can ignore or
+query a rule the genre applies. A listed rule that matches no bullet stops the build, so a skill edit cannot
+silently change what the editor applies.
 
 `filter` takes the agent's reply (one ```json block, a verbatim repeat of it, or bare JSON), keeps the first
 --budget edits, runs memory.py filter (validation and stored rejections), then drops any
@@ -48,18 +72,21 @@ model never retypes it. `--save` and `--work` are exclusive; the review loop del
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import io
 import json
 import os
 import re
 import secrets
+import shlex
 import shutil
 import subprocess
 import sys
 import tempfile
 import time
 from pathlib import Path
+from collections.abc import Callable
 from typing import Any, cast
 
 Obj = dict[str, Any]
@@ -288,31 +315,56 @@ def treatments_from_lists(lists: Obj) -> dict[str, list[str]]:
     return out
 
 
-def build_site_layer(bullets: list[str], treatments: dict[str, list[str]]) -> Obj:
-    """memory.py's {"scalars", "lists"} layer for site-page section 3.
+MEMORY_CMD = "python3 .claude/skills/prose-edit/scripts/memory.py"  # the allowlisted prefix, as the skill writes it
 
-    Ignored rules are dropped; query-only and note-only rules are kept under their own
-    list. Each listed rule is matched to exactly one bullet by its opening words.
-    """
-    normalized = [_norm(b) for b in bullets]
+
+def _remove_cmd(where: str, kind: str, entry: str) -> str:
+    """The whole command that removes one treatment entry, in the form the permission rule allows."""
+    return f"{MEMORY_CMD} entries {where} --remove-item {shlex.quote(f'{TREATMENT_KEYS[kind]}={entry}')}"
+
+
+def _treatment_kinds(normalized: list[str], treatments: dict[str, list[str]], layer: str,
+                     where: str = "--level repo") -> dict[int, str]:
+    """The treatment each bullet gets from one layer's lists, by bullet index. Each listed rule is matched to
+    exactly one bullet by its opening words; a stale, malformed or doubled entry stops the build, naming the layer
+    and the full command that removes the entry (`where` is that command's --level and --path)."""
     kind_of: dict[int, str] = {}
     for kind in ("ignored", "query_only", "note_only"):
         for entry in treatments.get(kind, []):
+            remove = _remove_cmd(where, kind, entry)
             m = _OPENING.match(entry)
             if not m:
-                raise _user(f'malformed treatment entry {entry!r}: expected "opening words..." first')
+                raise _user(f'malformed treatment entry {entry!r} ({kind} in the {layer} style sheet): '
+                            f'expected "opening words..." first. Remove the entry with: {remove}')
             opening = _norm(m.group("open"))
             hits = [i for i, b in enumerate(normalized) if b.startswith(opening)]
             if not hits:
                 raise _user(
-                    f'site-page section 3 has no bullet opening "{opening}..." ({kind} in the repo '
-                    "style sheet): the skill changed or the entry is stale"
+                    f'site-page section 3 has no bullet opening "{opening}..." ({kind} in the {layer} '
+                    f"style sheet): the skill changed or the entry is stale. Remove the entry with: {remove}"
                 )
             if len(hits) > 1:
-                raise _user(f'"{opening}..." matches more than one section 3 bullet')
+                raise _user(f'"{opening}..." matches more than one section 3 bullet ({kind} in the {layer} '
+                            f"style sheet): its opening words are too short. Remove the entry with: {remove}")
             if hits[0] in kind_of:
-                raise _user(f'section 3 bullet "{opening}..." matches more than one treatment')
+                raise _user(f'section 3 bullet "{opening}..." matches more than one treatment ({layer} style '
+                            f"sheet). Remove this entry with: {remove}")
             kind_of[hits[0]] = kind
+    return kind_of
+
+
+def build_site_layer(bullets: list[str], treatments: dict[str, list[str]],
+                     *narrower: tuple[str, dict[str, list[str]], str]) -> Obj:
+    """memory.py's {"scalars", "lists"} layer for site-page section 3.
+
+    Ignored rules are dropped; query-only and note-only rules are kept under their own
+    list. `treatments` is the repo style sheet's; each (layer name, treatments) after it is a narrower layer
+    (the document's), and for a bullet that two layers treat, the narrower layer's treatment wins.
+    """
+    normalized = [_norm(b) for b in bullets]
+    kind_of = _treatment_kinds(normalized, treatments, "repo")
+    for name, extra, where in narrower:
+        kind_of.update(_treatment_kinds(normalized, extra, name, where))
     rules: list[str] = []
     queries: list[str] = []
     notes: list[str] = []
@@ -352,10 +404,18 @@ def _site_page_text(path: Path) -> str:
         raise _user(f"site-page skill unreadable at {path}: {exc}") from exc
 
 
-def site_layer(site_page: Path) -> Obj:
+def site_layer(site_page: Path, target: str | None = None) -> Obj:
+    """Section 3 of the site-page skill as the genre layer. The repo style sheet lists which rules are ignored,
+    query-only or note-only; a document's own record can list them too (`target` names the document), and for a
+    rule both treat the document's entry wins, so one essay can ignore or query a rule the genre applies."""
     repo_sheet = memory_json(["entries", "--level", "repo"])
     treatments = treatments_from_lists(cast(Obj, repo_sheet.get("lists") or {}))
-    return build_site_layer(section3_bullets(_site_page_text(site_page)), treatments)
+    narrower: list[tuple[str, dict[str, list[str]], str]] = []
+    if target and target != "-":
+        doc_sheet = memory_json(["entries", "--level", "doc", "--path", target])
+        narrower.append(("document", treatments_from_lists(cast(Obj, doc_sheet.get("lists") or {})),
+                         f"--level doc --path {shlex.quote(target)}"))
+    return build_site_layer(section3_bullets(_site_page_text(site_page)), treatments, *narrower)
 
 
 # ---------------------------------------------------------------------------
@@ -369,8 +429,35 @@ def _shown(item: object) -> str:
     return item if isinstance(item, str) else json.dumps(item, ensure_ascii=False)
 
 
-def _bullets(items: list[Any]) -> str:
-    return "\n".join(f"- {_shown(i)}" for i in items)
+def _bullets(items: list[Any], label: Callable[[Any], str | None] | None = None) -> str:
+    """Bullets; with `label`, each ends in " (layer: <name>)" when the label function names one."""
+    out: list[str] = []
+    for i in items:
+        name = label(i) if label else None
+        out.append(f"- {_shown(i)}" + (f" (layer: {name})" if name else ""))
+    return "\n".join(out)
+
+
+# The brief's layer names. The site-page section 3 rules are the genre layer's (how-to, exploration-essay).
+LAYER_LABEL = {"user": "user", "repo": "repo", "site-page": "genre", "document": "document"}
+
+
+def _list_owner(layers: Obj, key: str) -> Callable[[Any], str | None]:
+    """The layer label of a merged list entry: the narrowest layer that holds the same entry under `key`."""
+    def owner(item: Any) -> str | None:
+        for name in reversed(list(_MEM.PRECEDENCE)):  # narrowest first
+            held = cast("list[Any]", cast(Obj, (layers.get(name) or {}).get("lists") or {}).get(key) or [])
+            if any(_MEM._same(item, h) for h in held):
+                return LAYER_LABEL.get(str(name))
+        return None
+    return owner
+
+
+def _scalar_owner(layers: Obj, key: str) -> str | None:
+    for name in reversed(list(_MEM.PRECEDENCE)):
+        if key in cast(Obj, (layers.get(name) or {}).get("scalars") or {}):
+            return LAYER_LABEL.get(str(name))
+    return None
 
 
 REJECTION_LIMIT = 20
@@ -434,6 +521,9 @@ def render_brief(read: Obj, budget: int, input_file: str | None, input_text: str
     lists = cast("dict[str, list[Any]]", merged.get("lists") or {})
     record = cast("Obj | None", read.get("genre_record"))
     rng = cast("Obj | None", read.get("range"))
+    layers = cast(Obj, read.get("layers") or {})
+    doc_layer = cast("Obj | None", layers.get("document"))
+    card = cast("Obj | None", (doc_layer or {}).get("voice_card"))
     out: list[str] = ["# Editing brief", "", f"Genre: {genre}"]
     if input_file:
         out.append(f"Input: the text under \"Text to edit\" below (a stdin run, saved at {input_file}; "
@@ -442,7 +532,7 @@ def render_brief(read: Obj, budget: int, input_file: str | None, input_text: str
         out.append(f"Document: {read['path']}")
     if rng:
         out.append(f"Propose edits only inside lines {rng['start']}-{rng['end']}. "
-                   "Build the voice card from the whole file.")
+                   + ("The voice card is the whole file's." if card else "Build the voice card from the whole file."))
     out += header or []
     out += ["", "## 1. Exemplars", ""]
     exemplars = cast("list[Obj]", (record or {}).get("exemplars") or [])
@@ -453,33 +543,50 @@ def render_brief(read: Obj, budget: int, input_file: str | None, input_text: str
                     str(ex["text"]), "</exemplar>"]
         notes = cast("list[Any]", (record or {}).get("notes") or [])
         if notes:
-            out += ["", "Genre notes:", _bullets(notes)]
+            out += ["", "Genre notes:", _bullets(notes, lambda _n: "genre")]
     else:
         out.append(
             f"No exemplars are stored for genre {genre}. Run without exemplars, build the voice "
             "card from the document alone, and say in the editor's note that no exemplars were used."
         )
-    out += ["", "## 2. Voice card", "",
-            "Before proposing any edit, write the voice card for this document from the whole "
-            "document and the exemplars above. Return it in the \"voice_card\" field."]
+    out += ["", "## 2. Voice card", ""]
+    if card:
+        out += ["The author approved this voice card for this document on "
+                f"{str(card.get('at', ''))[:10]}. It is author-approved: it is your anchor. Do not rebuild it "
+                "from the document, which has been edited since it was written. Use it as written to tell a "
+                "device from a defect. Return it unchanged in the \"voice_card\" field. If the document shows "
+                "a device the card does not list, say so in the note, never in the card.",
+                "", "<voice_card>", str(card["text"]), "</voice_card>"]
+    else:
+        out.append("Before proposing any edit, write the voice card for this document from the whole "
+                   "document and the exemplars above. Return it in the \"voice_card\" field.")
     out += ["", "## 3. Style sheet", "",
-            "Layers, least to most specific: user, repo, site-page section 3 (how-to and "
-            "exploration-essay), document. On a scalar setting the later layer wins; lists add. "
-            "This is the merge."]
+            "Every entry below ends with the layer it comes from: document, genre (site-page section 3, "
+            "for how-to and exploration-essay), repo or user.",
+            "When two entries contradict each other, the entry from the narrower layer wins and you ignore "
+            "the other (document > genre > repo > user).",
+            "Entries that do not contradict each other all apply. A setting shows the value of the "
+            "narrowest layer that gives it.",
+            "A voice-card device is not an entry and not a layer: it beats genre, repo and user entries. A "
+            "device is never edited, whatever such an entry below says. When one conflicts with a device, raise "
+            "a query instead, never an edit. Only an entry from the document layer, which the author wrote "
+            "for this document, beats a device."]
     if scalars:
-        out += ["", "### Settings", "", "\n".join(f"- {k}: {_shown(v)}" for k, v in scalars.items())]
+        out += ["", "### Settings", "", "\n".join(
+            f"- {k}: {_shown(v)}" + (f" (layer: {own})" if (own := _scalar_owner(layers, k)) else "")
+            for k, v in scalars.items())]
     keys = [k for k in lists if k not in _HIDDEN_LISTS and not k.startswith("site_page_") and lists[k]]
     for key in sorted(keys, key=lambda k: (k != "diagnostics", k)):
-        out += ["", f"### {key}", "", _bullets(lists[key])]
+        out += ["", f"### {key}", "", _bullets(lists[key], _list_owner(layers, key))]
     if lists.get("site_page_rules"):
-        out += ["", "### site-page section 3 rules (apply as written)", "",
-                _bullets(lists["site_page_rules"])]
+        out += ["", "### site-page section 3 rules (genre layer)", "",
+                _bullets(lists["site_page_rules"], _list_owner(layers, "site_page_rules"))]
     if lists.get("site_page_queries"):
         out += ["", "### site-page section 3 rules that produce QUERY ONLY (never an edit)", "",
-                _bullets(lists["site_page_queries"])]
+                _bullets(lists["site_page_queries"], _list_owner(layers, "site_page_queries"))]
     if lists.get("site_page_editors_note"):
         out += ["", "### site-page section 3 rule for the editor's note only (never an edit)", "",
-                _bullets(lists["site_page_editors_note"])]
+                _bullets(lists["site_page_editors_note"], _list_owner(layers, "site_page_editors_note"))]
     out += ["", "## 4. Not a defect", ""]
     nad = cast("list[Obj]", lists.get("not-a-defect") or [])
     rejected = _document_rejections(read)
@@ -609,7 +716,7 @@ def cmd_build(a: argparse.Namespace) -> str:
         if genre in SITE_GENRES:
             with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8") as fh:
                 layer_file = Path(fh.name)
-                json.dump(site_layer(Path(a.site_page)), fh)
+                json.dump(site_layer(Path(a.site_page), a.target), fh)
             read_args += ["--site-layer", str(layer_file)]
         read = memory_json(read_args)
     finally:
@@ -631,11 +738,22 @@ def cmd_build(a: argparse.Namespace) -> str:
     if rel:
         header.append(f"Exclude from the search: {rel}")
     brief = render_brief(read, budget, a.file if stdin else None, text, header)
+    if a.work and stdin:
+        raise _user("--work is for a path run; a stdin run already has its work directory")
+    work: Path | None = None
+    head = ""
     if a.work:
-        if stdin:
-            raise _user("--work is for a path run; a stdin run already has its work directory")
-        return f"WORK={cmd_tmpdir()}\n\n{brief}"
-    return brief
+        work = Path(cmd_tmpdir())
+        head = f"WORK={work}\n"
+    elif stdin and _is_work_dir(Path(a.file).parent.resolve(), Path(tempfile.gettempdir()).resolve()):
+        work = work_file(a.file).parent
+    if work is None:
+        return brief
+    # the id goes into the file only: stdout and the dispatch prompt never carry it, so a reply that names it read it
+    brief_file = work / BRIEF_FILE
+    brief_file.write_text(f"{brief}\n{ID_LABEL}{brief_sha(brief.encode('utf-8'))}\n", encoding="utf-8")
+    ready = ready_paths(work, READY_BUILD) if a.work else ""
+    return f"{head}{DISPATCH_LABEL}{dispatch_prompt(brief_file)}\n{ready}\n{brief}"
 
 
 # ---------------------------------------------------------------------------
@@ -994,9 +1112,88 @@ def cmd_filter(a: argparse.Namespace, reply: str) -> Obj:
         if window is not None and "inside" not in places:
             warnings.append(f"paragraph proposal {pr['n']} could not be placed inside the range")
         paragraphs.append(pr)
+    for brief_warning in _brief_warnings(a, proposal):
+        warnings.append(brief_warning)
+        sys.stderr.write(f"brief.py: {brief_warning}\n")
     return {**result, "edits": kept, "dropped": dropped, "queries": queries,
             "dropped_queries": dropped_queries, "paragraphs": paragraphs,
             "dropped_paragraphs": dropped_paragraphs, "warnings": warnings}
+
+
+_BRIEF_FILE_ID = re.compile(r"(?s)(.*\n)\nBrief id: ([0-9a-f]{12})\n")
+_CARD_IN_BRIEF = re.compile(r"\n<voice_card>\n(.*?)\n</voice_card>\n", re.DOTALL)
+
+
+def _brief_warnings(a: argparse.Namespace, proposal: Obj) -> list[str]:
+    """What the reply shows about the brief file, as warnings. Only a work directory that holds a brief.md is
+    checked. The id is the file's last line and is in no prompt: a reply that names it read to the end of the
+    file, and one that does not did not. A stored voice card in the brief (the author-approved anchor) must come
+    back unchanged."""
+    work: Path | None = None
+    if a.save:
+        work = work_file(a.save).parent
+    elif a.work:
+        work = work_dir(a.work)
+    if work is None or not (work / BRIEF_FILE).is_file():
+        return []
+    text = (work / BRIEF_FILE).read_text(encoding="utf-8")
+    found = _BRIEF_FILE_ID.fullmatch(text)
+    if found is None:
+        return [f"{BRIEF_FILE} has no id line (`Brief id: <id>` as its last line), so the reply cannot be checked "
+                "against it"]
+    body, expected = found.group(1), found.group(2)
+    out: list[str] = []
+    if brief_sha(body.encode("utf-8")) != expected:
+        out.append(f"{BRIEF_FILE} changed after it was built: its text no longer matches the id on its last line")
+    said = proposal.get("brief_sha")
+    if not isinstance(said, str) or not said.strip():
+        out.append(f"the editor's reply names no brief_sha: the id is the last line of {BRIEF_FILE} "
+                   f"({expected}), so the editor did not read the file to its last line")
+    elif not said.strip().lower().startswith(expected):
+        out.append(f"the editor's reply names brief_sha {said.strip()[:64]} but the last line of {BRIEF_FILE} "
+                   f"is {expected}: it did not read this file to its last line")
+    card = _CARD_IN_BRIEF.search(body)
+    if card is not None and _norm_card(str(proposal.get("voice_card") or "")) != _norm_card(card.group(1)):
+        out.append("the editor's voice_card is not the author-approved card the brief gave it (section 2); the "
+                   "stored card is unchanged and this run's card is the editor's")
+    return out
+
+
+def _norm_card(text: str) -> str:
+    return " ".join(text.split())
+
+
+BRIEF_FILE = "brief.md"
+ID_LABEL = "Brief id: "
+DISPATCH_LABEL = "DISPATCH="
+
+
+# The files the skill writes into a work directory, by the header label that prints each one's absolute path. The
+# skill copies those lines and never composes a path (nexus-ger02.7: a literal `WORK/...` was typed, and Write
+# creates a missing directory without a word, so a stray WORK/ appeared in the repository).
+READY_FILES = {"INPUT": "input.txt", "REPLY": "reply.txt", "FILTERED": "filtered.json", "REASONS": "reasons.json",
+               "ENTRY": "entry.json", "CARD": "card.json"}
+READY_BUILD = ("REPLY", "FILTERED", "REASONS")  # what a path run's header adds after DISPATCH=
+
+
+def ready_paths(work: Path | str, labels: tuple[str, ...] | list[str]) -> str:
+    """`LABEL=<absolute path>` lines, one per label, each ending in a newline."""
+    root = os.path.abspath(work)
+    return "".join(f"{label}={os.path.join(root, READY_FILES[label])}\n" for label in labels)
+
+
+def dispatch_prompt(brief_file: Path) -> str:
+    """The whole prompt the line-editor is dispatched with, one line, the absolute path already in it. The
+    orchestrating model passes this text as printed and never types a path itself (nexus-ger02.7: two of ten
+    sessions typed the literal `WORK/brief.md`). `<id>` stays as shown: the id is in the file, not in the prompt."""
+    return (f"Read {os.path.abspath(brief_file)} in full with Read and follow it. "
+            f'Its last line is "{ID_LABEL}<id>": put that id in your reply as brief_sha.')
+SHA_LENGTH = 12
+
+
+def brief_sha(data: bytes) -> str:
+    """The first SHA_LENGTH hex digits of the sha256 of the brief file's bytes."""
+    return hashlib.sha256(data).hexdigest()[:SHA_LENGTH]
 
 
 WORK_SENTINEL = ".prose-edit-work"
@@ -1015,7 +1212,7 @@ def work_dir(raw: str) -> Path:
 
     It must sit directly under the temp dir, carry the mkdtemp name shape and hold the sentinel
     file `tmpdir` wrote. memory.py's lock directory (prose-edit-locks-<uid>) has neither shape
-    nor sentinel.
+    nor sentinel. A name of the right shape with no directory is one the sweep took: the message says so.
     """
     path = Path(raw)
     if ".." in path.parts:
@@ -1025,8 +1222,20 @@ def work_dir(raw: str) -> Path:
         raise _user(f"{raw}: not a prose-edit work directory (it is a symbolic link)")
     real = path.resolve()
     if not _is_work_dir(real, base):
+        if real.parent == base and _WORK_NAME.fullmatch(real.name) and not real.exists():
+            raise _user(f"{raw}: the work directory has expired: one idle for more than two hours is swept, and "
+                        "this one was swept. The review in it is gone; run the edit again from the start")
         raise _user(f"{raw}: not a prose-edit work directory made by `tmpdir` directly under {base}")
     return real
+
+
+def touch_work(work: Path) -> None:
+    """Mark the work directory as in use now: the sweep takes a directory idle for two hours, so a review
+    the author is still reading must show activity. Best effort; a failure never stops the command."""
+    try:
+        os.utime(work / WORK_SENTINEL)
+    except OSError:
+        pass
 
 
 def work_file(raw: str) -> Path:
@@ -1037,6 +1246,9 @@ def work_file(raw: str) -> Path:
     base = Path(tempfile.gettempdir()).resolve()
     parent = path.parent.resolve()
     if not _is_work_dir(parent, base):
+        if parent.parent == base and _WORK_NAME.fullmatch(parent.name) and not parent.exists():
+            raise _user(f"{raw}: the work directory has expired: one idle for more than two hours is swept, and "
+                        "this one was swept. The review in it is gone; run the edit again from the start")
         if any(_is_work_dir(up, base) for up in parent.parents):
             raise _user(f"{raw}: must sit directly inside the work directory")
         raise _user(f"{raw}: not inside a prose-edit work directory made by `tmpdir` directly under {base}")
@@ -1054,7 +1266,8 @@ def cmd_rmtmp(raw: str) -> None:
 
 
 def sweep_stale_work(now: float | None = None) -> list[str]:
-    """Delete work directories older than two hours: the backstop for a run that stopped early."""
+    """Delete work directories idle for two hours (the sentinel's mtime, which `touch_work` renews): the
+    backstop for a run that stopped early, never for a review the author is still reading."""
     base = Path(tempfile.gettempdir()).resolve()
     cutoff = (time.time() if now is None else now) - WORK_MAX_AGE
     gone: list[str] = []
@@ -1125,7 +1338,9 @@ def _parser() -> argparse.ArgumentParser:
     f.add_argument("--file")
     f.add_argument("--work", help="delete this work directory after a successful filter")
     f.add_argument("--save", help="also write the filtered JSON to this file inside a work directory")
-    sub.add_parser("tmpdir", help="a fresh work directory outside the repository")
+    t = sub.add_parser("tmpdir", help="a fresh work directory outside the repository")
+    t.add_argument("--ready", action="store_true",
+                   help="print WORK=<dir> and the absolute path of each file the skill writes into it")
     r = sub.add_parser("rmtmp", help="delete a work directory made by tmpdir")
     r.add_argument("path")
     s = sub.add_parser("site-layer", help="the site-page section 3 layer")
@@ -1149,6 +1364,8 @@ def main(argv: list[str] | None = None) -> int:
             if args.save and args.work:
                 raise _user("--save and --work do not go together: --work deletes the directory --save writes into")
             save = work_file(args.save) if args.save else None  # a bad path stops before any work
+            if save is not None:
+                touch_work(save.parent)  # a filter after a long outage is the author still here
             out = cmd_filter(args, sys.stdin.read())
             if args.work:
                 remove_work(args.work)  # a bad path stops here, before any output
@@ -1157,7 +1374,8 @@ def main(argv: list[str] | None = None) -> int:
                 save.write_text(text_out, encoding="utf-8")
             sys.stdout.write(text_out)
         elif args.cmd == "tmpdir":
-            sys.stdout.write(cmd_tmpdir() + "\n")
+            made = cmd_tmpdir()
+            sys.stdout.write(f"WORK={made}\n" + ready_paths(made, list(READY_FILES)) if args.ready else made + "\n")
         elif args.cmd == "rmtmp":
             cmd_rmtmp(args.path)
         else:

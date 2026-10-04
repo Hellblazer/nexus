@@ -172,43 +172,157 @@ def _install_fake_t2(
 
 
 # ---------------------------------------------------------------------------
-# Legal transitions (succeed)
+# Edges of the lifecycle table: legal (rewrite), refused (typed code), no-op
 # ---------------------------------------------------------------------------
 
 
-def test_draft_to_accepted_with_gate_passed_succeeds(tmp_path, monkeypatch):
+#: One row per edge of the lifecycle table that ``set-status`` is asked to
+#: take: ``ok`` rewrites the file and the README cell; ``refused`` exits
+#: non-zero with the table row's typed refuse code and leaves the file
+#: untouched; ``noop`` (the requested status is the current one, for EVERY
+#: status, not only draft: the rdr-accept self-heal path and repeated
+#: rdr-close runs depend on it, Sam 2026-09-02) exits 0 and leaves the file
+#: untouched, without a T2 gate read.
+_ACCEPTED_DATE = "accepted_date: 2026-06-22\n"
+_EDGE_CASES = [
+    {"name": "draft_to_accepted_with_gate_passed", "num": 200, "status": "draft", "target": "accepted",
+     "gate": "PASSED", "outcome": "ok",
+     "file_has": ["status: accepted", "accepted_date: 2026-06-24", "## Problem Statement", "## Decision"],
+     "file_lacks": ["status: draft"]},
+    {"name": "accepted_to_closed", "num": 201, "status": "accepted", "target": "closed",
+     "extra_fm": _ACCEPTED_DATE, "outcome": "ok",
+     "file_has": ["status: closed", "closed_date: 2026-06-24", "accepted_date: 2026-06-22"],
+     "counts": {"accepted_date:": 1}},  # preserved, not duplicated
+    {"name": "deferred_to_draft_resume", "num": 220, "status": "deferred", "target": "draft", "outcome": "ok",
+     "file_has": ["status: draft"], "file_lacks": ["status: deferred"]},
+    {"name": "accepted_to_deferred", "num": 221, "status": "accepted", "target": "deferred",
+     "extra_fm": _ACCEPTED_DATE, "outcome": "ok", "file_has": ["status: deferred"]},
+    # A ``superseded`` flip is the one transition that also calls
+    # ``_ensure_supersedes_edge``, which can WRITE a catalog link; the fakes make
+    # the "no live store" property unconditional rather than incidental
+    # (nexus-r8643). The README cell carries the successor id because the
+    # frontmatter `superseded_by` key sits on the OLD file, not the index.
+    {"name": "accepted_to_superseded_with_a_successor_named", "num": 222, "status": "accepted",
+     "target": "superseded", "extra_fm": "superseded_by: RDR-999\n", "gate": "none", "catalog_fakes": True,
+     "outcome": "ok", "file_has": ["status: superseded"], "readme_cell": "Superseded by RDR-999"},
+    {"name": "draft_to_abandoned", "num": 233, "status": "draft", "target": "abandoned", "outcome": "ok",
+     "file_has": ["status: abandoned"]},
+    {"name": "accepted_to_abandoned", "num": 234, "status": "accepted", "target": "abandoned",
+     "extra_fm": _ACCEPTED_DATE, "outcome": "ok", "file_has": ["status: abandoned"]},
+    {"name": "deferred_to_abandoned", "num": 235, "status": "deferred", "target": "abandoned", "outcome": "ok",
+     "file_has": ["status: abandoned"]},
+    # `open` is a retired status word still advertised by the rdr-accept
+    # preamble as a pre-accept synonym for `draft` (nexus-qsryj): it resolves as
+    # draft (including consulting the gate) without ever being written back.
+    {"name": "open_to_accepted_with_gate_passed", "num": 236, "status": "open", "readme": "Draft",
+     "target": "accepted", "gate": "PASSED", "outcome": "ok",
+     "file_has": ["status: accepted"], "file_lacks": ["status: open"], "out_any_ci": ["alias", "open"]},
+    {"name": "draft_to_closed_with_a_reason", "num": 203, "status": "draft", "target": "closed",
+     "args": ["--date", "2026-06-24", "--reason", "shipped under nexus-xyz without a gate"], "outcome": "ok",
+     "file_has": ["status: closed", "closed_date: 2026-06-24"]},
+    # The stale-draft close edge (RDR-122, RDR-179 were hand-edited closed
+    # because none existed; nexus-nc08w.4) is guarded on a stated reason.
+    {"name": "draft_to_closed_without_a_reason", "num": 203, "status": "draft", "target": "closed",
+     "outcome": "refused", "out_has": ["reason-not-stated", "--reason"]},
+    # open == draft for resolution purposes; the status word is preserved.
+    {"name": "open_to_closed_without_a_reason", "num": 237, "status": "open", "target": "closed",
+     "outcome": "refused", "out_has": ["reason-not-stated"]},
+    {"name": "a_reason_does_not_license_deferred_to_closed", "num": 205, "status": "deferred",
+     "target": "closed", "args": ["--reason", "no"], "outcome": "refused", "out_has": ["illegal-transition"]},
+    # closed is terminal: abandon is only legal from draft/accepted/deferred.
+    {"name": "closed_to_abandoned_is_illegal", "num": 238, "status": "closed", "target": "abandoned",
+     "extra_fm": "accepted_date: 2026-06-20\nclosed_date: 2026-06-22\n", "outcome": "refused",
+     "out_has": ["illegal-transition"]},
+    # The ruling's sharpest edge: deferred resumes to draft only, never directly
+    # to accepted, and refuses WITHOUT touching T2 (asserted on the fake's call
+    # count: ``_gate_outcome_for``'s broad ``except Exception`` would swallow a
+    # raise_on_get sentinel into a misleading gate note).
+    {"name": "deferred_to_accepted_is_illegal_and_never_reads_t2", "num": 225, "status": "deferred",
+     "target": "accepted", "gate": "none", "t2_untouched": True, "outcome": "refused",
+     "out_has": ["illegal-transition"], "out_lacks": ["T2 unreachable"]},
+    {"name": "superseded_without_a_successor", "num": 226, "status": "accepted", "target": "superseded",
+     "outcome": "refused", "out_has": ["successor-not-named"]},
+    {"name": "draft_to_accepted_with_gate_blocked", "num": 230, "status": "draft", "target": "accepted",
+     "gate": "BLOCKED", "outcome": "refused", "out_has": ["gate-not-passed"]},
+    # No T2 gate record at all: the message names the missing record rather
+    # than a bare refusal.
+    {"name": "draft_to_accepted_with_no_gate_record", "num": 231, "status": "draft", "target": "accepted",
+     "gate": "none", "outcome": "refused",
+     "out_has": ["gate-not-passed", "no gate record found", "231-gate-latest"]},
+    # T2 cannot be reached: named as unreachable, never a crash or a silent pass.
+    {"name": "draft_to_accepted_with_t2_unreachable", "num": 232, "status": "draft", "target": "accepted",
+     "gate": "unreachable", "outcome": "refused", "out_has": ["gate-not-passed", "T2 unreachable"]},
+    {"name": "draft_to_draft_is_a_noop", "num": 223, "status": "draft", "target": "draft", "args": [],
+     "outcome": "noop"},
+    # No T2 gate read happens: the no-op short-circuit fires before the event is computed.
+    {"name": "accepted_to_accepted_is_a_noop", "num": 204, "status": "accepted", "target": "accepted",
+     "extra_fm": _ACCEPTED_DATE, "outcome": "noop", "out_has": ["no-op"]},
+]
+
+
+@pytest.mark.parametrize("case", [pytest.param(c, id=c["name"]) for c in _EDGE_CASES])
+def test_set_status_edge(tmp_path, monkeypatch, case):
+    name, num = case["name"], case["num"]
     rdr_dir = _rdr_dir(tmp_path)
-    f = _write_rdr(rdr_dir, 200, "draft")
-    _write_readme(rdr_dir, 200, "Draft")
-    project, title = _gate_coords(tmp_path, 200)
-    _install_fake_t2(monkeypatch, entries={(project, title): _gate_record("PASSED")})
+    f = _write_rdr(rdr_dir, num, case["status"], extra_fm=case.get("extra_fm", ""))
+    initial_cell = case.get("readme", case["status"].capitalize())
+    readme = _write_readme(rdr_dir, num, initial_cell)
+    before = f.read_text()
 
-    res = _invoke(rdr_dir, "200", "accepted", "--date", "2026-06-24")
-    assert res.exit_code == 0, res.output
+    fake = None
+    gate = case.get("gate")
+    if gate:
+        project, title = _gate_coords(tmp_path, num)
+        if gate == "unreachable":
+            fake = _install_fake_t2(monkeypatch, raise_on_get=ConnectionError("connection refused"))
+        else:
+            entries = {} if gate == "none" else {(project, title): _gate_record(gate)}
+            fake = _install_fake_t2(monkeypatch, entries=entries)
+    if case.get("catalog_fakes"):
+        monkeypatch.setattr(rdr_mod, "_catalog_reader_factory", lambda: object())
+        monkeypatch.setattr(rdr_mod, "_rdr_repo_scope", lambda _cat, root: (None, ""))
 
-    text = f.read_text()
-    assert "status: accepted" in text
-    assert "status: draft" not in text
-    assert "accepted_date: 2026-06-24" in text
-    # body preserved
-    assert "## Problem Statement" in text
-    assert "## Decision" in text
+    args = case.get("args", ["--date", "2026-06-24"])
+    res = _invoke(rdr_dir, str(num), case["target"], *args)
+    out = res.output
+    ctx = f"[{name}] {out}"
+
+    outcome = case["outcome"]
+    if outcome == "refused":
+        assert res.exit_code != 0, ctx
+        assert f.read_text() == before, f"[{name}] file must be untouched"
+    else:
+        assert res.exit_code == 0, ctx
+    if outcome == "noop":
+        assert f.read_text() == before, f"[{name}] file must be untouched"
+    for s in case.get("out_has", []):
+        assert s in out, f"{ctx}\nexpected {s!r} in the output"
+    for s in case.get("out_lacks", []):
+        assert s not in out, f"{ctx}\nunexpected {s!r} in the output"
+    if case.get("out_any_ci"):
+        assert any(s in out.lower() for s in case["out_any_ci"]), f"{ctx}\nexpected one of {case['out_any_ci']}"
+    if case.get("t2_untouched"):
+        assert fake.get_call_count == 0, f"[{name}] T2 was consulted {fake.get_call_count} time(s)"
+    if outcome == "ok":
+        text = f.read_text()
+        for s in case["file_has"]:
+            assert s in text, f"[{name}] {s!r} not in the file:\n{text}"
+        for s in case.get("file_lacks", []):
+            assert s not in text, f"[{name}] {s!r} still in the file:\n{text}"
+        for s, n in case.get("counts", {}).items():
+            assert text.count(s) == n, f"[{name}] {s!r} appears {text.count(s)} times, want {n}"
+        row = [ln for ln in readme.read_text().splitlines() if f"RDR-{num:03d}" in ln][0]
+        if "readme_cell" in case:
+            assert case["readme_cell"] in row, f"[{name}] README row lacks {case['readme_cell']!r}: {row}"
+        else:
+            cell = case["target"].capitalize()
+            assert f"| {cell} |" in row, f"[{name}] README row lacks {cell!r}: {row}"
+        assert f"| {initial_cell} |" not in row, f"[{name}] README row still reads {initial_cell!r}: {row}"
 
 
-def test_accepted_to_closed_flips_file_and_adds_closed_date(tmp_path):
-    rdr_dir = _rdr_dir(tmp_path)
-    f = _write_rdr(rdr_dir, 201, "accepted", extra_fm="accepted_date: 2026-06-22\n")
-    _write_readme(rdr_dir, 201, "Accepted")
-
-    res = _invoke(rdr_dir, "201", "closed", "--date", "2026-06-24")
-    assert res.exit_code == 0, res.output
-
-    text = f.read_text()
-    assert "status: closed" in text
-    assert "closed_date: 2026-06-24" in text
-    # accepted_date preserved, not duplicated
-    assert text.count("accepted_date:") == 1
-    assert "accepted_date: 2026-06-22" in text
+# ---------------------------------------------------------------------------
+# Further legal-transition behaviours
+# ---------------------------------------------------------------------------
 
 
 def test_present_but_blank_closed_date_is_filled(tmp_path):
@@ -228,167 +342,6 @@ def test_present_but_blank_closed_date_is_filled(tmp_path):
     assert text.count("closed_date:") == 1
     # accepted_date untouched
     assert "accepted_date: 2026-06-22" in text
-
-
-def test_readme_status_cell_updated(tmp_path):
-    """A legal transition (accepted -> closed) rewrites the README cell."""
-    rdr_dir = _rdr_dir(tmp_path)
-    _write_rdr(rdr_dir, 202, "accepted")
-    readme = _write_readme(rdr_dir, 202, "Accepted")
-
-    res = _invoke(rdr_dir, "202", "closed", "--date", "2026-06-24")
-    assert res.exit_code == 0, res.output
-
-    row = [ln for ln in readme.read_text().splitlines() if "RDR-202" in ln][0]
-    assert "| Closed |" in row
-    assert "Accepted" not in row
-
-
-def test_deferred_to_draft_succeeds_resume(tmp_path):
-    rdr_dir = _rdr_dir(tmp_path)
-    f = _write_rdr(rdr_dir, 220, "deferred")
-    _write_readme(rdr_dir, 220, "Deferred")
-
-    res = _invoke(rdr_dir, "220", "draft", "--date", "2026-06-24")
-    assert res.exit_code == 0, res.output
-    text = f.read_text()
-    assert "status: draft" in text
-    assert "status: deferred" not in text
-
-
-def test_accepted_to_deferred_succeeds(tmp_path):
-    rdr_dir = _rdr_dir(tmp_path)
-    f = _write_rdr(rdr_dir, 221, "accepted", extra_fm="accepted_date: 2026-06-22\n")
-    _write_readme(rdr_dir, 221, "Accepted")
-
-    res = _invoke(rdr_dir, "221", "deferred", "--date", "2026-06-24")
-    assert res.exit_code == 0, res.output
-    text = f.read_text()
-    assert "status: deferred" in text
-
-
-def test_supersede_with_successor_named_succeeds(tmp_path, monkeypatch):
-    """A ``superseded`` flip is the one transition that additionally calls
-    ``_ensure_supersedes_edge``, which can WRITE a catalog link
-    (``cat.link_if_absent``) -- unlike every other transition in this file,
-    which only ever GETs. nexus-r8643 (intrastate review [26115] #3's
-    sibling finding on this test): with no fakes installed here, that write
-    path ran against the real ``_catalog_reader_factory`` /
-    ``_t2_client_factory`` production seams. On a random ``tmp_path`` repo
-    root it always fell through to the "no catalog owner registered"
-    no-write branch in practice (nothing before this test ever registers
-    an owner for that path), but the test itself gave no guarantee of
-    that -- it asserted only on file text and relied on incidental
-    non-collision. Fakes here make the "no live store" property
-    unconditional rather than incidental; behavior asserted is unchanged
-    (file text + README row only -- the catalog/T2 side effects this
-    covers are pinned for real in
-    tests/test_rdr_needs_reexamination.py's substrate-backed test)."""
-    rdr_dir = _rdr_dir(tmp_path)
-    f = _write_rdr(rdr_dir, 222, "accepted", extra_fm="superseded_by: RDR-999\n")
-    readme = _write_readme(rdr_dir, 222, "Accepted")
-    _install_fake_t2(monkeypatch, entries={})
-    monkeypatch.setattr(rdr_mod, "_catalog_reader_factory", lambda: object())
-    monkeypatch.setattr(rdr_mod, "_rdr_repo_scope", lambda _cat, root: (None, ""))
-
-    res = _invoke(rdr_dir, "222", "superseded", "--date", "2026-06-24")
-    assert res.exit_code == 0, res.output
-    text = f.read_text()
-    assert "status: superseded" in text
-
-    # The README cell is decorated with the successor id — the frontmatter
-    # `superseded_by` key is on the OLD file, not the index, so a bare
-    # "Superseded" cell would be the only place that link is lost (code
-    # review, T2 nexus/critique-nexus-j9z30-4-2026-09-01 [24034] finding 9).
-    row = [ln for ln in readme.read_text().splitlines() if "RDR-222" in ln][0]
-    assert "Superseded by RDR-999" in row
-
-
-def test_draft_to_abandoned_succeeds(tmp_path):
-    rdr_dir = _rdr_dir(tmp_path)
-    f = _write_rdr(rdr_dir, 233, "draft")
-    _write_readme(rdr_dir, 233, "Draft")
-
-    res = _invoke(rdr_dir, "233", "abandoned", "--date", "2026-06-24")
-    assert res.exit_code == 0, res.output
-    assert "status: abandoned" in f.read_text()
-
-
-def test_accepted_to_abandoned_succeeds(tmp_path):
-    rdr_dir = _rdr_dir(tmp_path)
-    f = _write_rdr(rdr_dir, 234, "accepted", extra_fm="accepted_date: 2026-06-22\n")
-    _write_readme(rdr_dir, 234, "Accepted")
-
-    res = _invoke(rdr_dir, "234", "abandoned", "--date", "2026-06-24")
-    assert res.exit_code == 0, res.output
-    assert "status: abandoned" in f.read_text()
-
-
-def test_deferred_to_abandoned_succeeds(tmp_path):
-    rdr_dir = _rdr_dir(tmp_path)
-    f = _write_rdr(rdr_dir, 235, "deferred")
-    _write_readme(rdr_dir, 235, "Deferred")
-
-    res = _invoke(rdr_dir, "235", "abandoned", "--date", "2026-06-24")
-    assert res.exit_code == 0, res.output
-    assert "status: abandoned" in f.read_text()
-
-
-def test_open_to_accepted_with_gate_passed_succeeds(tmp_path, monkeypatch):
-    """`open` is a retired status word still advertised by the rdr-accept
-    preamble as a live pre-accept synonym for `draft` (nexus-qsryj). It
-    must resolve as draft (including consulting the gate) without ever
-    being written back to the file."""
-    rdr_dir = _rdr_dir(tmp_path)
-    f = _write_rdr(rdr_dir, 236, "open")
-    _write_readme(rdr_dir, 236, "Draft")
-    project, title = _gate_coords(tmp_path, 236)
-    _install_fake_t2(monkeypatch, entries={(project, title): _gate_record("PASSED")})
-
-    res = _invoke(rdr_dir, "236", "accepted", "--date", "2026-06-24")
-    assert res.exit_code == 0, res.output
-    text = f.read_text()
-    assert "status: accepted" in text
-    assert "status: open" not in text
-    assert "alias" in res.output.lower() or "open" in res.output.lower()
-
-
-def test_open_to_closed_without_reason_refuses(tmp_path):
-    """open == draft for resolution purposes; draft -> closed is the guarded
-    `close-unaccepted` edge (nexus-nc08w.4) and refuses without --reason."""
-    rdr_dir = _rdr_dir(tmp_path)
-    f = _write_rdr(rdr_dir, 237, "open")
-    before = f.read_text()
-
-    res = _invoke(rdr_dir, "237", "closed", "--date", "2026-06-24")
-    assert res.exit_code != 0
-    assert "reason-not-stated" in res.output
-    assert f.read_text() == before  # untouched, including status: open preserved
-
-
-def test_draft_to_draft_is_noop(tmp_path):
-    rdr_dir = _rdr_dir(tmp_path)
-    f = _write_rdr(rdr_dir, 223, "draft")
-    before = f.read_text()
-
-    res = _invoke(rdr_dir, "223", "draft")
-    assert res.exit_code == 0, res.output
-    assert f.read_text() == before  # untouched
-
-
-def test_accepted_to_accepted_is_noop(tmp_path):
-    """Same-status re-run is a no-op for EVERY status, not only draft — the
-    rdr-accept self-heal path and repeated rdr-close runs depend on
-    set-status being idempotent (Sam, 2026-09-02). No T2 gate read happens
-    here: the no-op short-circuit fires before the event is even computed."""
-    rdr_dir = _rdr_dir(tmp_path)
-    f = _write_rdr(rdr_dir, 204, "accepted", extra_fm="accepted_date: 2026-06-22\n")
-    before = f.read_text()
-
-    res = _invoke(rdr_dir, "204", "accepted", "--date", "2026-06-24")
-    assert res.exit_code == 0, res.output
-    assert "no-op" in res.output.lower()
-    assert f.read_text() == before  # untouched
 
 
 def test_command_works_with_no_docs_tables_dir_at_all(tmp_path):
@@ -438,139 +391,8 @@ def test_body_with_horizontal_rule_is_preserved(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Illegal transitions (refuse, typed reason)
+# Gate project name (the T2 coordinates the accept gate reads)
 # ---------------------------------------------------------------------------
-
-
-def test_draft_to_closed_without_reason_refuses(tmp_path):
-    """The stale-draft close edge (RDR-122, RDR-179 were hand-edited closed
-    because none existed; nexus-nc08w.4) is guarded on a stated reason."""
-    rdr_dir = _rdr_dir(tmp_path)
-    f = _write_rdr(rdr_dir, 203, "draft")
-    before = f.read_text()
-
-    res = _invoke(rdr_dir, "203", "closed", "--date", "2026-06-24")
-    assert res.exit_code != 0
-    assert "reason-not-stated" in res.output
-    assert "--reason" in res.output
-    assert f.read_text() == before  # untouched
-
-
-def test_draft_to_closed_with_reason_succeeds(tmp_path):
-    rdr_dir = _rdr_dir(tmp_path)
-    f = _write_rdr(rdr_dir, 203, "draft")
-    readme = _write_readme(rdr_dir, 203, "Draft")
-
-    res = _invoke(rdr_dir, "203", "closed", "--date", "2026-06-24",
-                  "--reason", "shipped under nexus-xyz without a gate")
-    assert res.exit_code == 0, res.output
-    text = f.read_text()
-    assert "status: closed" in text
-    assert "closed_date: 2026-06-24" in text
-    row = [ln for ln in readme.read_text().splitlines() if "RDR-203" in ln][0]
-    assert "| Closed |" in row
-
-
-def test_reason_does_not_license_other_illegal_edges(tmp_path):
-    rdr_dir = _rdr_dir(tmp_path)
-    f = _write_rdr(rdr_dir, 205, "deferred")
-    before = f.read_text()
-    res = _invoke(rdr_dir, "205", "closed", "--reason", "no")
-    assert res.exit_code != 0
-    assert "illegal-transition" in res.output
-    assert f.read_text() == before
-
-
-def test_closed_to_abandoned_refuses_illegal_transition(tmp_path):
-    """closed is terminal — abandon is only legal from draft/accepted/deferred."""
-    rdr_dir = _rdr_dir(tmp_path)
-    f = _write_rdr(rdr_dir, 238, "closed", extra_fm="accepted_date: 2026-06-20\nclosed_date: 2026-06-22\n")
-    before = f.read_text()
-
-    res = _invoke(rdr_dir, "238", "abandoned", "--date", "2026-06-24")
-    assert res.exit_code != 0
-    assert "illegal-transition" in res.output
-    assert f.read_text() == before  # untouched
-
-
-def test_deferred_to_accepted_refuses(tmp_path, monkeypatch):
-    """The ruling's sharpest edge: deferred resumes to draft only, never
-    directly to accepted. gate is only ever consulted for event=='accept'
-    AND current_status=='draft' — deferred is not draft, so this must
-    refuse WITHOUT touching T2 at all. Asserted on the fake's call count,
-    not on an exception surfacing (code review, T2
-    nexus/code-review-nexus-j9z30-4-2026-09-01 [24033] finding 4: a prior
-    version of this test used ``raise_on_get`` as a sentinel, but
-    ``_gate_outcome_for``'s broad ``except Exception`` silently swallowed
-    it into a misleading gate_note, so the test passed whether or not T2
-    was actually consulted)."""
-    rdr_dir = _rdr_dir(tmp_path)
-    f = _write_rdr(rdr_dir, 225, "deferred")
-    before = f.read_text()
-    fake = _install_fake_t2(monkeypatch, entries={})
-
-    res = _invoke(rdr_dir, "225", "accepted", "--date", "2026-06-24")
-    assert res.exit_code != 0
-    assert "illegal-transition" in res.output
-    assert "T2 unreachable" not in res.output
-    assert fake.get_call_count == 0
-    assert f.read_text() == before  # untouched
-
-
-def test_supersede_without_successor_refuses_successor_not_named(tmp_path):
-    rdr_dir = _rdr_dir(tmp_path)
-    f = _write_rdr(rdr_dir, 226, "accepted")  # no superseded_by
-    before = f.read_text()
-
-    res = _invoke(rdr_dir, "226", "superseded", "--date", "2026-06-24")
-    assert res.exit_code != 0
-    assert "successor-not-named" in res.output
-    assert f.read_text() == before  # untouched
-
-
-def test_draft_to_accepted_with_gate_blocked_refuses(tmp_path, monkeypatch):
-    rdr_dir = _rdr_dir(tmp_path)
-    f = _write_rdr(rdr_dir, 230, "draft")
-    before = f.read_text()
-    project, title = _gate_coords(tmp_path, 230)
-    _install_fake_t2(monkeypatch, entries={(project, title): _gate_record("BLOCKED")})
-
-    res = _invoke(rdr_dir, "230", "accepted", "--date", "2026-06-24")
-    assert res.exit_code != 0
-    assert "gate-not-passed" in res.output
-    assert f.read_text() == before  # untouched
-
-
-def test_draft_to_accepted_with_no_gate_record_refuses_and_names_it(tmp_path, monkeypatch):
-    """No T2 gate record at all -> gate-not-passed, and the message names
-    the missing record rather than a bare refusal."""
-    rdr_dir = _rdr_dir(tmp_path)
-    f = _write_rdr(rdr_dir, 231, "draft")
-    before = f.read_text()
-    _install_fake_t2(monkeypatch, entries={})  # no matching record
-
-    res = _invoke(rdr_dir, "231", "accepted", "--date", "2026-06-24")
-    assert res.exit_code != 0
-    assert "gate-not-passed" in res.output
-    assert "no gate record found" in res.output
-    assert "231-gate-latest" in res.output
-    assert f.read_text() == before  # untouched
-
-
-def test_draft_to_accepted_t2_unreachable_refuses_and_says_so(tmp_path, monkeypatch):
-    """T2 itself cannot be reached (e.g. a ConnectionError from the client)
-    -> gate-not-passed, message names T2 as unreachable rather than
-    crashing the CLI or silently passing the gate."""
-    rdr_dir = _rdr_dir(tmp_path)
-    f = _write_rdr(rdr_dir, 232, "draft")
-    before = f.read_text()
-    _install_fake_t2(monkeypatch, raise_on_get=ConnectionError("connection refused"))
-
-    res = _invoke(rdr_dir, "232", "accepted", "--date", "2026-06-24")
-    assert res.exit_code != 0
-    assert "gate-not-passed" in res.output
-    assert "T2 unreachable" in res.output
-    assert f.read_text() == before  # untouched
 
 
 def test_gate_repo_name_resolves_worktree_to_main_repo_name(tmp_path: Path) -> None:
@@ -727,7 +549,6 @@ def test_rewrite_frontmatter_status_stamps_its_own_date_key_once():
     assert new_text.count("accepted_date:") == 1
 
 
-
 # ---------------------------------------------------------------------------
 # RDR-201 P1.5: table-derived status-list helpers used by the accept/close
 # preambles (nexus-j9z30.5). These query the loaded table's rows directly —
@@ -803,7 +624,7 @@ to = { status = "a" }
 
 
 # ---------------------------------------------------------------------------
-# RDR-201 P1.5: the rdr-accept / rdr-close preambles' eligible-status
+# RDR-201 P1.5: the rdr-accept preamble's eligible-status
 # guards derive from these helpers against the LOADED table, not an
 # independently hand-typed literal (nexus-j9z30.5). A table swapped in via
 # monkeypatch with a DIFFERENT accept/close source status proves the
@@ -893,7 +714,7 @@ def _write_preamble_rdr(rdr_dir: Path, num: int, status: str, title: str) -> Pat
 
 
 class TestAcceptCloseGuardsDeriveFromTable:
-    """Proves the accept/close preamble guards and listings are bound to
+    """Proves the accept preamble guard and listing are bound to
     the loaded table's rows, not an independently hand-typed literal."""
 
     def test_accept_listing_follows_table_accept_source(self, tmp_path, monkeypatch):
@@ -958,45 +779,6 @@ class TestAcceptCloseGuardsDeriveFromTable:
         result = _runner().invoke(rdr, ["preamble", "rdr-accept", "--", "1"])
         assert result.exit_code == 0, result.output
         assert "BLOCKED" not in result.output
-
-    def test_close_guard_follows_table_close_source(self, tmp_path, monkeypatch):
-        rdr_dir = _preamble_rdr_dir_for(tmp_path)
-        fake_table = _write_fake_lifecycle_table(tmp_path)
-        monkeypatch.setattr(rdr_mod, "load_packaged_table", lambda *a, **k: fake_table)
-        monkeypatch.chdir(tmp_path)
-        _write_preamble_rdr(rdr_dir, 1, "greenlit", "Greenlit")
-
-        result = _runner().invoke(rdr, ["preamble", "rdr-close", "--", "1"])
-        assert result.exit_code == 0, result.output
-        assert "BLOCKED" not in result.output
-
-    def test_close_guard_blocks_real_table_accepted_when_table_differs(
-        self, tmp_path, monkeypatch
-    ):
-        rdr_dir = _preamble_rdr_dir_for(tmp_path)
-        fake_table = _write_fake_lifecycle_table(tmp_path)
-        monkeypatch.setattr(rdr_mod, "load_packaged_table", lambda *a, **k: fake_table)
-        monkeypatch.chdir(tmp_path)
-        _write_preamble_rdr(rdr_dir, 1, "accepted", "Accepted")
-
-        result = _runner().invoke(rdr, ["preamble", "rdr-close", "--", "1"])
-        assert result.exit_code == 0, result.output
-        assert "BLOCKED" in result.output
-
-    def test_close_message_no_longer_names_retired_final_status(
-        self, tmp_path, monkeypatch
-    ):
-        """``final`` is retired from the table's domain (RDR-201 Revision
-        History); the close-preamble BLOCKED message must not advertise it
-        as an acceptable close-source status any more."""
-        rdr_dir = _preamble_rdr_dir_for(tmp_path)
-        monkeypatch.chdir(tmp_path)
-        _write_preamble_rdr(rdr_dir, 1, "draft", "Hello World")
-
-        result = _runner().invoke(rdr, ["preamble", "rdr-close", "--", "1"])
-        assert result.exit_code == 0, result.output
-        assert "BLOCKED" in result.output
-        assert "final" not in result.output.lower()
 
 
 # ---------------------------------------------------------------------------

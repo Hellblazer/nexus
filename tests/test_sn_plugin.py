@@ -27,24 +27,22 @@ SESSION_START = SN_DIR / "hooks" / "scripts" / "session_start.py"
 class TestSnPluginStructure:
     """sn plugin must have required files with valid contents."""
 
-    def test_plugin_json_exists(self) -> None:
-        assert (SN_DIR / ".claude-plugin" / "plugin.json").exists()
-
-    def test_plugin_json_valid(self) -> None:
-        data = json.loads((SN_DIR / ".claude-plugin" / "plugin.json").read_text())
-        assert data["name"] == "sn"
-        assert "version" in data
-        assert "description" in data
-
-    def test_hooks_json_exists(self) -> None:
-        assert (SN_DIR / "hooks" / "hooks.json").exists()
-
-    def test_hooks_json_valid(self) -> None:
+    def test_required_files_exist_and_manifests_valid(self) -> None:
+        offenders: list[str] = []
+        for rel in (".claude-plugin/plugin.json", "hooks/hooks.json", ".mcp.json", "README.md"):
+            if not (SN_DIR / rel).exists():
+                offenders.append(f"sn/{rel} missing")
+        assert not offenders, "\n".join(offenders)
+        plugin = json.loads((SN_DIR / ".claude-plugin" / "plugin.json").read_text())
+        if plugin.get("name") != "sn":
+            offenders.append(f"plugin.json name is {plugin.get('name')!r}, expected 'sn'")
+        for key in ("version", "description"):
+            if key not in plugin:
+                offenders.append(f"plugin.json has no {key!r}")
         data = json.loads((SN_DIR / "hooks" / "hooks.json").read_text())
-        assert "hooks" in data
-        assert "SubagentStart" in data["hooks"]
-        hooks = data["hooks"]["SubagentStart"]
-        assert len(hooks) >= 1
+        hooks = data.get("hooks", {}).get("SubagentStart", [])
+        if not hooks:
+            offenders.append("hooks.json has no SubagentStart entry")
         # Exec form (RDR-215 bead nexus-q02nx.23): ``command`` is the
         # launcher and the script is an ``args`` entry, so a
         # ``command``-only walk sees the bare word ``uv`` and matches
@@ -56,13 +54,9 @@ class TestSnPluginStructure:
             for entry in hooks
             for h in entry["hooks"]
         ]
-        assert any(ln.startswith("uv run ") and ln.endswith("/subagent_start.py") for ln in lines), lines
-
-    def test_mcp_json_exists(self) -> None:
-        assert (SN_DIR / ".mcp.json").exists()
-
-    def test_readme_exists(self) -> None:
-        assert (SN_DIR / "README.md").exists()
+        if not any(ln.startswith("uv run ") and ln.endswith("/subagent_start.py") for ln in lines):
+            offenders.append(f"hooks.json SubagentStart does not run subagent_start.py under uv: {lines}")
+        assert not offenders, "\n".join(offenders)
 
     def test_every_hook_script_named_by_hooks_json_exists(self) -> None:
         """Exec form runs ``uv run ... <path>``, so the +x bit the bash wrappers
@@ -209,45 +203,36 @@ class TestSnHooksLaunchUnderUv:
 class TestSnMcpConfig:
     """MCP server definitions must have correct flags."""
 
-    @pytest.fixture(scope="class")
-    def mcp_config(self) -> dict:
-        return json.loads((SN_DIR / ".mcp.json").read_text())
-
-    def test_serena_server_defined(self, mcp_config: dict) -> None:
-        assert "serena" in mcp_config
-
-    def test_serena_uses_claude_code_context(self, mcp_config: dict) -> None:
+    def test_mcp_config_and_serena_snapshot(self) -> None:
+        mcp_config = json.loads((SN_DIR / ".mcp.json").read_text())
+        offenders: list[str] = []
+        for server in ("serena", "context7"):
+            if server not in mcp_config:
+                offenders.append(f".mcp.json defines no {server!r} server")
+        assert not offenders, "\n".join(offenders)
         args = mcp_config["serena"]["args"]
-        assert "--context" in args
-        ctx_idx = args.index("--context")
-        assert args[ctx_idx + 1] == "claude-code"
-
-    def test_serena_uses_project_from_cwd(self, mcp_config: dict) -> None:
-        args = mcp_config["serena"]["args"]
-        assert "--project-from-cwd" in args
-
-    def test_context7_server_defined(self, mcp_config: dict) -> None:
-        assert "context7" in mcp_config
-
-    def test_context7_uses_npx(self, mcp_config: dict) -> None:
-        assert mcp_config["context7"]["command"] == "npx"
-
-    def test_serena_pinned_to_revision(self, mcp_config: dict) -> None:
-        """nexus-jbt5x: an unpinned git+ URL gives every fresh spawn a different Serena."""
+        if "--context" not in args or args[args.index("--context") + 1] != "claude-code":
+            offenders.append("serena is not launched with --context claude-code")
+        if "--project-from-cwd" not in args:
+            offenders.append("serena is not launched with --project-from-cwd")
+        if mcp_config["context7"]["command"] != "npx":
+            offenders.append("context7 command is not npx")
+        # nexus-jbt5x: an unpinned URL gives every fresh spawn a different Serena.
         url, rev = serena_pin()
-        assert url == "https://github.com/oraios/serena"
-        assert len(rev) == 40
-
-    def test_context7_pinned_to_version(self, mcp_config: dict) -> None:
-        pkg = next(a for a in mcp_config["context7"]["args"] if a.startswith("@upstash/context7-mcp"))
-        assert re.fullmatch(r"@upstash/context7-mcp@\d+\.\d+\.\d+", pkg), pkg
-
-    def test_snapshot_matches_pin(self) -> None:
-        """serena-tools.txt was generated from the revision .mcp.json pins."""
-        _, rev = serena_pin()
+        if url != "https://github.com/oraios/serena":
+            offenders.append(f"serena pin url is {url!r}")
+        if len(rev) != 40:
+            offenders.append(f"serena pin {rev!r} is not a 40-character revision")
+        pkg = next((a for a in mcp_config["context7"]["args"] if a.startswith("@upstash/context7-mcp")), "")
+        if not re.fullmatch(r"@upstash/context7-mcp@\d+\.\d+\.\d+", pkg):
+            offenders.append(f"context7 is not pinned to an exact version: {pkg!r}")
+        # serena-tools.txt was generated from the revision .mcp.json pins.
         snap_rev, available, _ = parse_snapshot()
-        assert snap_rev == rev, "run scripts/sync_sn_serena_tools.py after changing the Serena pin"
-        assert len(available) > 20, available
+        if snap_rev != rev:
+            offenders.append("serena-tools.txt does not match the pin: run scripts/sync_sn_serena_tools.py")
+        if len(available) <= 20:
+            offenders.append(f"serena-tools.txt lists only {len(available)} tools")
+        assert not offenders, "\n".join(offenders)
 
 
 # ── Marketplace registration ─────────────────────────────────────────────────
@@ -256,53 +241,43 @@ class TestSnMcpConfig:
 class TestSnMarketplace:
     """sn must be listed in the marketplace."""
 
-    @pytest.fixture(scope="class")
-    def marketplace(self) -> dict:
-        return json.loads(MARKETPLACE_PATH.read_text())
-
-    def test_sn_in_marketplace(self, marketplace: dict) -> None:
-        names = [p["name"] for p in marketplace["plugins"]]
-        assert "sn" in names
-
-    def test_sn_source_path(self, marketplace: dict) -> None:
-        """nexus-mkj6u: source is now the git-subdir object form with tag
-        pinning. The plugin tree lives at `sn/` inside the repo; the
-        marketplace.json source declares that via `path: "sn"` plus
-        `ref: "v<version>"` pinning."""
-        sn_entry = next(p for p in marketplace["plugins"] if p["name"] == "sn")
+    def test_sn_marketplace_entry(self) -> None:
+        marketplace = json.loads(MARKETPLACE_PATH.read_text())
+        sn_entries = [p for p in marketplace["plugins"] if p["name"] == "sn"]
+        assert len(sn_entries) == 1, f"expected one sn marketplace entry, got {len(sn_entries)}"
+        sn_entry = sn_entries[0]
+        offenders: list[str] = []
+        # nexus-mkj6u: source is the subdirectory object form with tag
+        # pinning. The plugin tree lives at `sn/` inside the repo; `path: "sn"`
+        # plus `ref` pinning declares that. The exact ref value is enforced by
+        # tests/test_plugin_structure.py::TestMarketplaceVersion.
         source = sn_entry["source"]
-        assert isinstance(source, dict), (
-            f"sn source must be the object form (git-subdir), got {source!r}"
-        )
-        assert source["source"] == "git-subdir"
-        assert source["path"] == "sn"
-        assert source["url"] == "https://github.com/Hellblazer/nexus.git"
-        # ref is pinned in lock-step with the version field; the
-        # source-ref-matches-pyproject parity check enforces the exact
-        # value (see tests/test_plugin_structure.py::TestMarketplaceVersion).
-        from plugin_channel import client_version_of
+        if not isinstance(source, dict):
+            offenders.append(f"sn source must be the object form, got {source!r}")
+        else:
+            if source.get("source") != "git-subdir":
+                offenders.append(f"sn source.source is {source.get('source')!r}")
+            if source.get("path") != "sn":
+                offenders.append(f"sn source.path is {source.get('path')!r}")
+            if source.get("url") != "https://github.com/Hellblazer/nexus.git":
+                offenders.append(f"sn source.url is {source.get('url')!r}")
+            from plugin_channel import client_version_of
 
-        assert client_version_of(source.get("ref", "")) is not None, (
-            f"sn source.ref {source.get('ref')!r} is neither v<X.Y.Z> nor "
-            f"plugin-v<X.Y.Z>-<n> (RDR-197 invariant R)"
-        )
-
-    def test_sn_has_version(self, marketplace: dict) -> None:
-        sn_entry = next(p for p in marketplace["plugins"] if p["name"] == "sn")
-        assert "version" in sn_entry
-
-    def test_sn_version_matches_plugin_json(self, marketplace: dict) -> None:
-        """Marketplace and plugin.json versions must agree."""
-        sn_entry = next(p for p in marketplace["plugins"] if p["name"] == "sn")
+            if client_version_of(source.get("ref", "")) is None:
+                offenders.append(
+                    f"sn source.ref {source.get('ref')!r} is neither v<X.Y.Z> nor "
+                    "plugin-v<X.Y.Z>-<n> (RDR-197 invariant R)"
+                )
         plugin_json = json.loads((SN_DIR / ".claude-plugin" / "plugin.json").read_text())
-        assert sn_entry["version"] == plugin_json["version"]
-
-    # test_sn_version_matches_pyproject REMOVED (nexus-smsau, 2026-09-27):
-    # exact duplicate of tests/test_plugin_structure.py::TestMarketplaceVersion
-    # ::test_every_plugins_own_plugin_json_version_matches_pyproject, which
-    # loops over EVERY plugin marketplace.json lists (this file's "sn" case
-    # included) rather than hardcoding just sn -- covers conexus too, and any
-    # future plugin, with no test edit.
+        if "version" not in sn_entry:
+            offenders.append("sn marketplace entry has no version")
+        elif sn_entry["version"] != plugin_json["version"]:
+            offenders.append(
+                f"marketplace sn version {sn_entry['version']!r} != plugin.json {plugin_json['version']!r}"
+            )
+        # The pyproject parity case lives in tests/test_plugin_structure.py::
+        # TestMarketplaceVersion, which loops over every plugin marketplace.json lists.
+        assert not offenders, "\n".join(offenders)
 
 
 # ── Hook output ──────────────────────────────────────────────────────────────
@@ -1088,24 +1063,26 @@ class TestSnSessionStart:
         assert result.returncode == 0, result.stderr
         assert read_recorded_root("rec2") is None
 
-    @pytest.mark.parametrize(
-        "payload",
-        [
-            {"source": "startup"},  # no session_id, no cwd
-            {"source": "startup", "session_id": "rec3"},  # no cwd
-            {"source": "startup", "cwd": "/nowhere"},  # no session_id
-            {"source": "startup", "session_id": "rec3", "cwd": ""},
-            {"source": "startup", "session_id": 5, "cwd": "/tmp"},
-        ],
-        ids=["nothing", "no-cwd", "no-session-id", "empty-cwd", "non-string-session-id"],
-    )
     def test_partial_or_malformed_payload_still_emits_the_section(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, payload: dict,
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
-        result = self._run(stdin=json.dumps(payload))
-        assert result.returncode == 0, result.stderr
-        assert result.stdout == (SN_DIR / "hooks" / "scripts" / "session-start-section.md").read_text()
+        payloads = {
+            "nothing": {"source": "startup"},  # no session_id, no cwd
+            "no-cwd": {"source": "startup", "session_id": "rec3"},
+            "no-session-id": {"source": "startup", "cwd": "/nowhere"},
+            "empty-cwd": {"source": "startup", "session_id": "rec3", "cwd": ""},
+            "non-string-session-id": {"source": "startup", "session_id": 5, "cwd": "/tmp"},
+        }
+        section = (SN_DIR / "hooks" / "scripts" / "session-start-section.md").read_text()
+        offenders: list[str] = []
+        for label, payload in payloads.items():
+            result = self._run(stdin=json.dumps(payload))
+            if result.returncode != 0:
+                offenders.append(f"{label}: exit {result.returncode}: {result.stderr}")
+            elif result.stdout != section:
+                offenders.append(f"{label}: stdout is not the section text")
+        assert not offenders, "\n".join(offenders)
 
     def test_undecodable_stdin_still_emits_the_section_text(self) -> None:
         """The added stdin read must never cost session_start.py its primary
@@ -1286,9 +1263,17 @@ class TestNonStringToolName:
     noise standing in for an answer.
     """
 
-    @pytest.mark.parametrize("bad", [123, None, ["x"], {"a": 1}, 1.5, True])
-    def test_is_serena_write_tool_answers_rather_than_raising(self, bad: object) -> None:
-        assert is_serena_write_tool(bad) is False  # type: ignore[arg-type]
+    def test_is_serena_write_tool_answers_rather_than_raising(self) -> None:
+        offenders: list[str] = []
+        for bad in (123, None, ["x"], {"a": 1}, 1.5, True):
+            try:
+                answer = is_serena_write_tool(bad)  # type: ignore[arg-type]
+            except Exception as exc:  # noqa: BLE001 - the raise is the defect
+                offenders.append(f"{bad!r}: raised {exc!r}")
+                continue
+            if answer is not False:
+                offenders.append(f"{bad!r}: answered {answer!r}, expected False")
+        assert not offenders, "\n".join(offenders)
 
     def test_the_hook_decides_without_entering_the_boundary(self) -> None:
         result = subprocess.run(

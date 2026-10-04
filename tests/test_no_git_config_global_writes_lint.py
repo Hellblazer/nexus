@@ -12,10 +12,8 @@ git identity: every commit made on this host afterward carried the
 harness's throwaway author until the mistake was noticed.
 
 A sibling sweep of the whole repo (nexus-oqh4s) found the identical
-pattern in eight more scripts under the same directory
-(``rehearse_era_hop.sh``, ``rehearse_shakeout.sh``, ``rehearse_cold.sh``,
-``rehearse_acquire.sh``, ``rehearse.sh``, ``rehearse_candidate_migration.sh``,
-``rehearse_stranded.sh``, ``rehearse_hole_punch.sh``) — the same
+pattern in eight more scripts under the same directory (most since deleted in
+cleanup step 11, nexus-0r1uz; ``rehearse_acquire.sh`` survives) — the same
 copy-pasted two lines, each with its own throwaway identity string. All
 nine were converted to exported ``GIT_AUTHOR_NAME`` / ``GIT_AUTHOR_EMAIL``
 / ``GIT_COMMITTER_NAME`` / ``GIT_COMMITTER_EMAIL`` env vars, which reach
@@ -30,7 +28,7 @@ conceivable git-config write shape -- a BARE (unscoped) ``git config key
 value`` defaults to writing the CURRENT repo's local config, which is a
 real but different hazard (it depends on the ambient cwd rather than a
 fixed host-wide file); the one confirmed instance of that shape in this
-repo (``tests/e2e/upgrade-shakeout.sh``) runs inside a freshly ``git
+repo (in a since-deleted upgrade gate) ran inside a freshly ``git
 init``'d throwaway directory it built for exactly this purpose, audited by
 hand as part of the same nexus-oqh4s sweep, and is out of scope for this
 mechanized check. ``--global``/``--system`` name a FIXED file outside any
@@ -260,7 +258,7 @@ def test_detector_ignores_comment_lines() -> None:
 
 def test_detector_ignores_scoped_local_config() -> None:
     """A `git config` call with no `--global`/`--system` (the default,
-    local-repo-scoped write `tests/e2e/upgrade-shakeout.sh` uses inside its
+    local-repo-scoped write a release gate used inside its
     own throwaway `git init`'d directory) is out of this lint's scope --
     see the module docstring for why."""
     synthetic = 'git config user.email t@t.invalid && git config user.name T\n'
@@ -326,7 +324,7 @@ def test_detector_flags_file_write_to_a_risky_path() -> None:
 
 
 def test_detector_ignores_file_write_to_a_temp_or_repo_path() -> None:
-    """The exact throwaway-scope shape `tests/e2e/upgrade-shakeout.sh` uses
+    """The exact throwaway-scope shape a release gate used
     (a `--file` pointed inside a temp directory it built for the purpose)
     must stay out of scope, same as the bare-local-config case."""
     synthetic = (

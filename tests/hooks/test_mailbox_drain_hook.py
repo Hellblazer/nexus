@@ -114,7 +114,7 @@ def _import_closure(roots: tuple[Path, ...]) -> frozenset[Path]:
                 names.extend(a.name for a in node.names)
             elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
                 names.append(node.module)
-                # `from nexus.hooks import tuple_ledger_project` imports a module.
+                # `from nexus.hooks import mailbox_drain` imports a module.
                 names.extend(f"{node.module}.{a.name}" for a in node.names)
         for name in names:
             if name == "nexus" or name.startswith("nexus."):
@@ -2049,7 +2049,7 @@ def test_each_entry_points_watch_set_is_what_it_imports_and_nothing_of_the_other
 
     assert {_PLUGIN_SCRIPT, scripts / "_interpreter.py", scripts / "_endpoint_resolve.py",
             scripts / "_tuple_size_limits.py"} <= plugin
-    for mod in ("_locking.py", "hooks/mailbox_drain.py", "hooks/tuple_ledger_project.py",
+    for mod in ("_locking.py", "hooks/mailbox_drain.py",
                 "_hook_runtime/entry.py", "_hook_runtime/_io.py", "__init__.py",
                 "hooks/__init__.py"):
         assert src / mod in wheel, mod

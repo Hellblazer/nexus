@@ -719,7 +719,7 @@ def test_run_health_checks_survives_unresolvable_catalog_endpoint(monkeypatch, t
     uncaught out of run_health_checks() and crashed the whole `nx doctor`
     command instead of degrading gracefully like every sibling check.
 
-    Discovered live via upgrade-shakeout.sh (10/12 FAIL) during the 6.1.0
+    Discovered live via the upgrade shakeout (10/12 FAIL) during the 6.1.0
     release gate.
     """
     import nexus.health as health_mod

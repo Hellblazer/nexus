@@ -203,12 +203,13 @@ _NX_AUTOLINK = (
 
 _PHASE_GATE = (
     "\n## Phase Boundary Gate (mandatory)\n\n"
-    "If your task closes a phase-review bead, run `/conexus:phase-review-gate "
-    "<rdr-id> --phase N` BEFORE close. Pass 1 enumerates §Approach items; Pass 2 "
-    "validates each has a closing-bead pointer (`ItemN=nexus-xxxx`) or explicit "
-    "`none`. BLOCKED on any unaccounted item; phase close is gated on PASSED. "
-    "Skipping the gate is the silent-scope-reduction failure mode: RDR-112 Phase 1 "
-    "(nexus-52lb) lost days when the T3 daemon drop surfaced three phases later.\n"
+    "If your task closes a phase-review bead, walk the `phase-review-gate` "
+    "skill's checklist BEFORE close: list every numbered item of the phase in "
+    "the RDR, and for each write `Item N = <closing bead id>` or `Item N = none` "
+    "with a one-line reason. Do not close while an item has neither. Nothing "
+    "enforces this; skipping it is the silent-scope-reduction failure mode: "
+    "RDR-112 Phase 1 (nexus-52lb) lost days when the T3 daemon drop surfaced "
+    "three phases later.\n"
 )
 
 _SEQTHINK = (
@@ -268,9 +269,8 @@ def _nx_env(session_id: str) -> dict[str, str]:
     which command sits next to it in the file.
 
     **Deliberately does NOT set ``NX_T1_ALLOW_SHARED_FALLBACK``.**
-    ``pre_close_verification.py``'s own ``_nx_env`` sets that flag, but its
-    bash source (``pre_close_verification_hook.sh:86``) already exports it
-    too -- that fix landed there, not here. ``subagent-start.sh`` forces
+    The bd-close gate (deleted at cleanup step A2, nexus-0r1uz) set that flag
+    for its own T1 reads; this hook does not. ``subagent-start.sh`` forced
     ``NX_SESSION_ID`` (line 71) with no such flag, so an explicit session id
     with no live T1 lease under it can fail loud (``T1ServerNotFoundError``,
     nexus-f7xyq) exactly as it does in the bash today. That is a real,

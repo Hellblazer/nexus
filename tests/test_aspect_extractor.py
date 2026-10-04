@@ -1485,7 +1485,7 @@ class TestDocumentShapeClassifier:
         is 2 and this string scores exactly 2 ("we propose"/"in this paper" +
         "et al."), so a tightening of _PAPER_SHAPE_SIGNALS/_THRESHOLD would
         silently downgrade the workload to prose — this test fails loudly
-        instead. KEEP IN SYNC with rehearse_fullstack.sh doc (a)."""
+        instead."""
         from nexus.aspect_extractor import (
             _SCHOLARLY_PAPER_CONFIG,
             _classify_document_shape,

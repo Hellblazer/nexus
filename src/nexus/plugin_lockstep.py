@@ -336,7 +336,7 @@ def converge_plugins(
         # published plugin while this CLI is ahead of every release (a
         # dev checkout, or the release window itself); its ref can still
         # have moved under it, so it joins the drift check (measured by
-        # tests/e2e/plugin-lockstep-gate.sh step 9 on the 7.42.0 battery).
+        # step 9 of the since-deleted plugin-lockstep gate on the 7.42.0 battery).
         drift_candidates = dict(at_wheel)
         for o in report.outcomes:
             if o.status == "latest_published" and o.now == o.installed and o.plugin_id in behind:

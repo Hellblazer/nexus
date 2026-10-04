@@ -40,7 +40,6 @@ class TestRunFieldExtraction:
         ) as mock_start:
             result = run({"session_id": "s1", "source": "clear"})
         assert result.stdout == "Nexus ready (session: s1)."
-        assert result.exit_code == 0
         mock_start.assert_called_once_with(claude_session_id="s1", source="clear")
 
     def test_missing_payload_passes_none_for_both_fields(self) -> None:
@@ -90,11 +89,6 @@ class TestRegisteredInTheRealVerbTable:
     def test_session_start_resolves_to_the_new_module(self) -> None:
         assert entry.VERB_TABLE["session-start"] == "nexus.hooks.session_start_verb"
 
-    def test_session_start_is_not_a_ledger_verb(self) -> None:
-        """No caller branches on this verb's exit code (RDR-215 Contracts);
-        entry.main forces exit 0 for any verb not in LEDGER_VERBS."""
-        assert "session-start" not in entry.LEDGER_VERBS
-
 
 # -- real dispatch, in-process: entry.main() vs the Click verb --------------
 #
@@ -142,7 +136,6 @@ class TestInProcessDispatchParity:
             result = CliRunner().invoke(
                 hook_group, ["session-start"], input=stdin_text,
             )
-        assert result.exit_code == 0
         assert result.output == nx_hook_out
 
     def test_no_stdin_produces_the_same_bytes_as_the_click_verb(

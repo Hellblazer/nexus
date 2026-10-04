@@ -5,8 +5,8 @@ The single hybrid-discovery code path is the only T1 resolution surface.
 Verifies:
 
 * ``find_immediate_claude_pid`` returns the FIRST ``claude*`` ancestor
-  walking up, NOT the topmost (RF-6). Retained for its non-T1 consumer
-  (``phase_review_sentinel``); RDR-149 P4 moved T1 off pid keying.
+  walking up, NOT the topmost (RF-6). Retained for its non-T1 consumers
+  (the T1 handoff marker, the tuple directory); RDR-149 P4 moved T1 off pid keying.
 * ``T1Database.__init__`` flag-gated paths: env (Path A), session-id
   lease (Path B), isolation (Path C), fail-loud (Path D).
 * MCP lifespan Branch 3 publishes a leased registry record + populates

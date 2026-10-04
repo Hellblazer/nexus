@@ -516,10 +516,10 @@ def _hold_back_deferred_paths(repo: Path, paths: list[str]) -> None:
 
 
 #: Battery steps, each paired with whether it needs the engine substrate
-#: (nexus-ps1gx). Marked per step rather than set globally, because exactly one
-#: step DOES need an engine and blanket-disabling would quietly hollow it out.
+#: (nexus-ps1gx). Marked per step rather than set globally, so a step that does
+#: need an engine is never quietly hollowed out by a blanket disable.
 #:
-#: The three pytest legs are substrate-free and are run with
+#: The pytest legs are substrate-free and are run with
 #: ``NX_TEST_T2_SUBSTRATE=none``. Without it, a cut from a clone that has never
 #: built the engine jar dies at SETUP rather than on any real finding: on
 #: 2026-09-08 the plugin-v7.36.1-1 cut errored 1216 lint tests that way and
@@ -528,14 +528,13 @@ def _hold_back_deferred_paths(repo: Path, paths: list[str]) -> None:
 #: ``plugin-release.yml`` does — so the rehearsal could not reproduce the
 #: refusal, which is why this survived to bite a real cut.
 #:
-#: ``release-sandbox.sh smoke`` provisions its own service and MUST keep the
-#: ambient setting; forcing it off would leave the step running while proving
-#: less than it claims.
+#: No step needs the substrate today (the sandbox smoke leg was deleted in
+#: cleanup step 11, nexus-0r1uz); the flag stays so a
+#: future engine-backed step is not forced off.
 _BATTERY: list[tuple[list[str], bool]] = [
     (["uv", "run", "pytest", "-m", "lint", "-q"], False),
     (["uv", "run", "pytest", "tests/test_plugin_release_drift_ledger.py", "-q"], False),
     (["uv", "run", "pytest", "tests/hooks/", "-q"], False),
-    (["./tests/e2e/release-sandbox.sh", "smoke"], True),
 ]
 
 

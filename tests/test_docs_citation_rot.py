@@ -22,8 +22,7 @@ Two citation shapes are checked:
 
 Non-vacuity: zero citations found across the scanned tree is a FAILURE —
 scanning nothing is not finding nothing wrong (the
-``nx-hook expectations_undeclared`` rc=3 doctrine -- no ledger file means
-nothing checkable, which is not evidence of cleanliness).
+gate-vacuity doctrine -- nothing checkable is not evidence of cleanliness).
 """
 from __future__ import annotations
 
@@ -47,7 +46,7 @@ _SCAN_GLOBS = ("*.yml", "*.yaml", "*.sh")
 #: checked against root AGENTS.md — the lookbehind skips it (out of scope
 #: rather than mis-checked). KNOWN LIMITATION (disclosed, same review): a
 #: citation whose ``§ heading`` text wraps across comment lines is invisible
-#: to this line-oriented scan — e.g. warm-reindex-skip-gate.sh's wrapped
+#: to this line-oriented scan — e.g. a since-deleted warm-reindex gate's wrapped
 #: "Engine-service\nrelease" cite gets zero protection; a future multi-line
 #: joiner is the fix if that class ever rots in practice.
 _SECTION_CITE_RE = re.compile(

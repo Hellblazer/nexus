@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # tests/e2e/lib/harness_lock_test.sh — concurrent-invocation regression test
-# for the 4 e2e harnesses guarded by lock.sh (RDR-184 P0.2, nexus-ccs9v.2).
+# for the e2e harnesses guarded by lock.sh (RDR-184 P0.2, nexus-ccs9v.2).
 #
-# For each of the 4 harnesses this proves, WITHOUT ever running the harness's
+# For each harness this proves, WITHOUT ever running the harness's
 # real body (no docker, no native build, no `uv tool install`, no
 # `rm -rf $SANDBOX` for real):
 #
@@ -55,8 +55,8 @@ FAIL=0
 # this suite exercises. CI's pytest jobs check out at depth 1 with no tags, so
 # the derivation there aborts with "cannot derive PREV_RELEASE" and every
 # migration-rehearsal case fails for a reason unrelated to locking (7.45.0
-# release PR #1543, 2026-09-14). Pin the pair the way run_sh_guard_test.sh
-# does; the values only need to parse, nothing here converges an engine.
+# release PR #1543, 2026-09-14). Pin the pair; the values only need to
+# parse, nothing here converges an engine.
 export NEXUS_PREV_RELEASE="${NEXUS_PREV_RELEASE:-1.0.0}"
 export NEXUS_PREV_ENGINE_TAG="${NEXUS_PREV_ENGINE_TAG:-engine-service-v0.0.1}"
 ok()  { echo "  [ok] $1"; PASS=$((PASS + 1)); }
@@ -73,8 +73,6 @@ bad() { echo "  [FAIL] $1"; FAIL=$((FAIL + 1)); }
 declare -A HARNESS_SCRIPT=(
     [migration-rehearsal]="tests/e2e/migration-rehearsal/run.sh"
     [gc-ab]="tests/e2e/gc-ab/run-ab.sh"
-    [release-sandbox]="tests/e2e/release-sandbox.sh"
-    [upgrade-shakeout]="tests/e2e/upgrade-shakeout.sh"
     [sandbox]="tests/e2e/sandbox.sh"
 )
 # name -> cheap, side-effect-free positional args (empty for the
@@ -83,26 +81,10 @@ declare -A HARNESS_SCRIPT=(
 # path that would exit BEFORE reaching lock_acquire, which would make the
 # test vacuous rather than exercising the lock).
 declare -A HARNESS_ARGS=(
-    [migration-rehearsal]=""
+    [migration-rehearsal]="--package-upgrade"
     [gc-ab]=""
-    [release-sandbox]="reset"
-    [upgrade-shakeout]="reset"
     [sandbox]=""
 )
-# Per-harness lockdir NAME override — defaults to "$LOCKROOT/$name.lock"
-# when a name has no entry here. `sandbox` deliberately shares
-# release-sandbox's lockdir name: sandbox.sh mutates the IDENTICAL fixed
-# resource ($HOME/nexus-sandbox) as release-sandbox.sh, so it is the SAME
-# lock, not a new one (RDR-184 P0 review guard-surface gap). Using this
-# override in the loop below means the loop's "(2) simulate a running
-# holder" step for name=sandbox acquires the literal
-# release-sandbox.lock lockdir — i.e. this exercises the actual
-# cross-script contention (sandbox.sh blocked by release-sandbox's own
-# lock), not a lookalike.
-declare -A HARNESS_LOCKDIR=(
-    [sandbox]="release-sandbox"
-)
-
 # Machine-global lock root the harnesses themselves use (must match — this
 # test exercises the REAL lockdir path each harness computes, not a
 # lookalike). HARD-CODED /tmp, not ${TMPDIR:-/tmp} (code-review SIGNIFICANT
@@ -112,12 +94,12 @@ declare -A HARNESS_LOCKDIR=(
 # Per-user, matching the harnesses (nexus-c6lsu).
 LOCKROOT="/tmp/nexus-e2e-locks-$(id -u)"
 
-for name in migration-rehearsal gc-ab release-sandbox upgrade-shakeout sandbox; do
+for name in migration-rehearsal gc-ab sandbox; do
     echo
     echo "=== $name ==="
     script="${HARNESS_SCRIPT[$name]}"
     args="${HARNESS_ARGS[$name]}"
-    lock_name="${HARNESS_LOCKDIR[$name]:-$name}"
+    lock_name="$name"
     lockdir="$LOCKROOT/$lock_name.lock"
 
     # ── non-vacuity: wiring assertion ────────────────────────────────────
@@ -202,116 +184,35 @@ for name in migration-rehearsal gc-ab release-sandbox upgrade-shakeout sandbox; 
 done
 
 # ── migration-rehearsal arg-conflict region regression ───────────────────
-# Code-review CRITICAL finding: the FIRST trap (originally installed at
-# ~line 128, well before LOCKDIR is assigned at ~line 183 and lib/lock.sh
-# is sourced) referenced $LOCKDIR. Under `set -u`, any of the 12
-# argument-conflict guards between those two points (e.g. --cold + --guided
-# together) fires that trap on `exit 2`, and the trap's OWN evaluation
-# aborts on the unbound $LOCKDIR before the documented exit 2 / conflict
-# message ever reaches the caller — silently downgrading a clean usage
-# error into a confusing "unbound variable" crash (exit 1). This is
-# deliberately OUTSIDE the per-harness loop above (that loop only exercises
-# the post-lock-acquire region) — it targets the pre-lock region
-# specifically, no lock held, no SELFTEST var, real invocation.
+# Code-review CRITICAL finding: the FIRST trap (originally installed before
+# LOCKDIR is assigned and lib/lock.sh is sourced) referenced $LOCKDIR. Under
+# `set -u`, any of the argument-conflict guards between those two points (e.g.
+# --package-upgrade + --acquire together) fires that trap on `exit 2`, and the
+# trap's OWN evaluation aborts on the unbound $LOCKDIR before the documented
+# exit 2 / conflict message ever reaches the caller — silently downgrading a
+# clean usage error into a confusing "unbound variable" crash (exit 1). This
+# is deliberately OUTSIDE the per-harness loop above (that loop only exercises
+# the post-lock-acquire region) — it targets the pre-lock region specifically,
+# no lock held, no SELFTEST var, real invocation.
 echo
 echo "=== migration-rehearsal: arg-conflict region (pre-lock-acquire guards) ==="
-out3="$(cd "$REPO_ROOT" && bash tests/e2e/migration-rehearsal/run.sh --cold --guided 2>&1)"
+out3="$(cd "$REPO_ROOT" && bash tests/e2e/migration-rehearsal/run.sh --package-upgrade --acquire 2>&1)"
 rc3=$?
 if [[ $rc3 -eq 2 ]]; then
-    ok "migration-rehearsal --cold --guided: exits exactly 2"
+    ok "migration-rehearsal --package-upgrade --acquire: exits exactly 2"
 else
-    bad "migration-rehearsal --cold --guided: exited $rc3 (expected 2): $out3"
+    bad "migration-rehearsal --package-upgrade --acquire: exited $rc3 (expected 2): $out3"
 fi
-if [[ "$out3" == *"different flows; pick one"* ]]; then
-    ok "migration-rehearsal --cold --guided: conflict message present"
+if [[ "$out3" == *"standalone journeys"* ]]; then
+    ok "migration-rehearsal --package-upgrade --acquire: conflict message present"
 else
-    bad "migration-rehearsal --cold --guided: conflict message missing: $out3"
+    bad "migration-rehearsal --package-upgrade --acquire: conflict message missing: $out3"
 fi
 if [[ "${out3,,}" == *"unbound variable"* ]]; then
-    bad "migration-rehearsal --cold --guided: 'unbound variable' leaked on stderr (a pre-lock trap referenced \$LOCKDIR before assignment): $out3"
+    bad "migration-rehearsal --package-upgrade --acquire: 'unbound variable' leaked on stderr (a pre-lock trap referenced \$LOCKDIR before assignment): $out3"
 else
-    ok "migration-rehearsal --cold --guided: no unbound-variable leak"
+    ok "migration-rehearsal --package-upgrade --acquire: no unbound-variable leak"
 fi
-
-# ── upgrade-shakeout no-args regression (help/usage region, pre-lock) ────
-# Code-review CRITICAL-2 finding: this harness's lock_acquire originally ran
-# BEFORE its `"$0" --help` self-reinvocation (reached whenever MODE != run,
-# including the DEFAULT bare no-arg invocation, since MODE defaults to
-# "help"). The child re-entered the script and contended against its own
-# parent's still-held lock; under `set -e` that failure aborted the parent
-# before it reached `exit 0`, so `./upgrade-shakeout.sh` with no args at all
-# exited 1 with a lock-contention error instead of printing help. Wrapped in
-# `timeout` as a permanent safety net: the underlying `"$0" --help` pattern
-# was ALSO capable of unbounded recursion once lock contention was removed
-# from the picture (verified live during this fix — a bare invocation of the
-# unfixed intermediate state spawned 100+ processes before being force-
-# killed) — a future regression reintroducing either bug must not be able
-# to fork-bomb the machine running this test.
-echo
-echo "=== upgrade-shakeout: no-args region (pre-lock-acquire help dispatch) ==="
-out4="$(cd "$REPO_ROOT" && timeout 10 bash tests/e2e/upgrade-shakeout.sh 2>&1)"
-rc4=$?
-if [[ $rc4 -eq 0 ]]; then
-    ok "upgrade-shakeout (no args): exits 0"
-elif [[ $rc4 -eq 124 ]]; then
-    bad "upgrade-shakeout (no args): TIMED OUT (10s) — looks like unbounded recursion regressed"
-else
-    bad "upgrade-shakeout (no args): exited $rc4 (expected 0): $out4"
-fi
-if [[ $'\n'"$out4" == *$'\n'"Usage:"* ]]; then
-    ok "upgrade-shakeout (no args): usage text present"
-else
-    bad "upgrade-shakeout (no args): usage text missing: $out4"
-fi
-if [[ "${out4,,}" == *"unbound variable"* || "${out4,,}" == *"failed to acquire"* ]]; then
-    bad "upgrade-shakeout (no args): lock-contention/unbound-variable noise leaked: $out4"
-else
-    ok "upgrade-shakeout (no args): no lock-contention/unbound-variable noise"
-fi
-# Belt-and-suspenders: if the timeout ever fires, make sure nothing was left
-# running (timeout only signals the direct child, not a whole recursive
-# process chain under it).
-pgrep -f "upgrade-shakeout.sh" >/dev/null 2>&1 && pkill -9 -f "upgrade-shakeout.sh" 2>/dev/null || true
-
-# ── release-sandbox --help / unknown-mode region (pre-lock, already-correct
-#    ordering — coverage addition, not a fix) ────────────────────────────
-# release-sandbox.sh's help dispatch (--help option, and the MODE==help
-# check) and its unknown-mode _die both print/report IN-PROCESS (no
-# subprocess re-invocation like upgrade-shakeout's original `"$0" --help`),
-# so this harness never had CRITICAL-2's failure mode. This block is
-# coverage, confirming that stays true, not a red-then-green fix.
-echo
-echo "=== release-sandbox: --help / unknown-mode region ==="
-out5="$(cd "$REPO_ROOT" && bash tests/e2e/release-sandbox.sh --help 2>&1)"
-rc5=$?
-if [[ $rc5 -eq 0 ]]; then
-    ok "release-sandbox --help: exits 0"
-else
-    bad "release-sandbox --help: exited $rc5 (expected 0): $out5"
-fi
-if [[ $'\n'"$out5" == *$'\n'"Usage:"* ]]; then
-    ok "release-sandbox --help: usage text present"
-else
-    bad "release-sandbox --help: usage text missing: $out5"
-fi
-out6="$(cd "$REPO_ROOT" && bash tests/e2e/release-sandbox.sh bogus-mode-lock-test 2>&1)"
-rc6=$?
-if [[ $rc6 -ne 0 ]]; then
-    ok "release-sandbox bogus-mode: exits nonzero ($rc6)"
-else
-    bad "release-sandbox bogus-mode: exited 0 (expected nonzero)"
-fi
-if [[ "$out6" == *"unknown mode"* ]]; then
-    ok "release-sandbox bogus-mode: unknown-mode message present"
-else
-    bad "release-sandbox bogus-mode: unknown-mode message missing: $out6"
-fi
-if [[ "${out6,,}" == *"unbound variable"* ]]; then
-    bad "release-sandbox bogus-mode: 'unbound variable' leaked: $out6"
-else
-    ok "release-sandbox bogus-mode: no unbound-variable leak"
-fi
-rm -rf "$LOCKROOT/release-sandbox.lock"
 
 # ── gc-ab: no early-exit/validation-guard region exists ──────────────────
 # gc-ab/run-ab.sh takes no CLI arguments at all — a single linear path from
@@ -337,7 +238,7 @@ cat >"$SHIM_DIR/id" <<SHIM
 if [[ "\$*" == "-u" ]]; then echo "\${NX_FAKE_UID:?}"; else exec "$REAL_ID" "\$@"; fi
 SHIM
 chmod +x "$SHIM_DIR/id"
-for name in migration-rehearsal gc-ab release-sandbox upgrade-shakeout sandbox; do
+for name in migration-rehearsal gc-ab sandbox; do
     script="${HARNESS_SCRIPT[$name]}"
     args="${HARNESS_ARGS[$name]}"
     declare -A seen=()
@@ -360,11 +261,10 @@ rm -rf "${SHIM_DIR:?}"
 rm -rf "/tmp/nexus-e2e-locks-31337" "/tmp/nexus-e2e-locks-42424"
 
 # ── no harness may still name the shared (uid-less) lock root ─────────────
-# migration-rehearsal's --artifacts per-leg lock is only reached after a manifest-verified
-# artifact directory exists, so the self-test seam above cannot drive it. Scan the sources
-# instead: any lock path under the bare "/tmp/nexus-e2e-locks/" root (no uid) is the
+# Scan the sources: any lock path under the bare "/tmp/nexus-e2e-locks/" root (no uid) is the
 # permission failure nexus-c6lsu fixed, and the review found one such line left. Non-vacuity:
-# the per-leg line must be present (a scan that matched nothing proves nothing).
+# migration-rehearsal's own lock line must be present (a scan that matched nothing proves
+# nothing).
 echo
 echo "=== no harness names the shared lock root ==="
 shared_root_hits=""
@@ -377,10 +277,10 @@ if [[ -z "$shared_root_hits" ]]; then
 else
     bad "harness(es) still use the shared uid-less lock root: $shared_root_hits"
 fi
-if grep -qE 'LOCKDIR="/tmp/nexus-e2e-locks-\$\(id -u\)/migration-rehearsal-\$\{LEG\}\.lock"' "$REPO_ROOT/tests/e2e/migration-rehearsal/run.sh"; then
-    ok "migration-rehearsal --artifacts per-leg lock is per-user"
+if grep -qE 'LOCKDIR="/tmp/nexus-e2e-locks-\$\(id -u\)/migration-rehearsal\.lock"' "$REPO_ROOT/tests/e2e/migration-rehearsal/run.sh"; then
+    ok "migration-rehearsal lock is per-user"
 else
-    bad "migration-rehearsal --artifacts per-leg LOCKDIR is missing or not per-user (non-vacuity guard tripped)"
+    bad "migration-rehearsal LOCKDIR is missing or not per-user (non-vacuity guard tripped)"
 fi
 
 echo

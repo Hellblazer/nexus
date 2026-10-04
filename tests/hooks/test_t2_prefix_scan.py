@@ -83,8 +83,7 @@ class _MockMemoryEngine:
         self.fail_projects = fail_projects or set()
         #: nexus-8t9w8: deterministically reproduces a slow-but-working
         #: /v1/memory/get (the per-entry content fetch) -- mirrors
-        #: pre_close_verification's own fake_nx/fake_bd sleep_seconds
-        #: idiom. Deliberately NOT applied to /v1/memory/list, so a test
+        #: the sleep_seconds idiom of the bd-close gate's fakes (deleted). Deliberately NOT applied to /v1/memory/list, so a test
         #: can isolate the get-call clamp from the list-call clamp.
         self.get_sleep_seconds = get_sleep_seconds
         self.requests: list[str] = []
@@ -427,8 +426,8 @@ def test_get_call_timeout_is_clamped_to_the_remaining_scan_budget(
     """Critic follow-up on nexus-fow78/9b038bfae: a degraded
     ``/v1/memory/get`` must not burn the FULL configured
     ``NX_T2_SCAN_TIMEOUT_S`` ceiling once most of the whole-scan budget
-    is already spent -- the same stacking-timeout defect the
-    ``_stamp_ids`` fix closed for ``pre_close_verification``.
+    is already spent -- the same stacking-timeout defect
+    a ``_stamp_ids`` fix once closed for the (deleted) bd-close gate.
 
     ``/v1/memory/list`` answers instantly (isolating the get-call clamp
     from the list-call clamp); ``/v1/memory/get`` sleeps 5.0s, longer
@@ -558,12 +557,22 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 #: deleted every plugin shell script, and a scan over a directory with none
 #: in it is the vacuous half this lint used to have. ``conexus/hooks/scripts``
 #: dropped 12 -> 1 at nexus-z9cz2, which deleted the eleven plugin copies
-#: nothing shipped executed; ``divergence-language-scan.py`` remains.
+#: nothing shipped executed.
+#: ``src/nexus/hooks`` dropped 32 -> 23 at cleanup step A1 (nexus-0r1uz),
+#: which deleted the nine ledger, projector and census modules, and 23 -> 15 at
+#: cleanup steps A2 and A3, which deleted eight more (the bd-close gate, Stop
+#: verification, the phase-review close gate, the three small hooks, the
+#: verification config reader and ``_plugin``); ``_hook_runtime`` 4 -> 3 with
+#: ``_config``. ``src/nexus/hooks`` 15 -> 14 at cleanup step A4, which deleted the
+#: unwired subagent git-write verb, and 14 -> 13 at cleanup step A5, which deleted
+#: ``_routing_lib``. ``conexus/hooks/scripts`` is re-measured at 11 (its
+#: ``routing/`` subdirectory counts, and the mailbox and version-lockstep
+#: scripts live there); the earlier floor of 1 was loose.
 _HOOK_CODE_ROOTS: dict[str, int] = {
-    "conexus/hooks/scripts": 1,
+    "conexus/hooks/scripts": 11,
     "sn/hooks/scripts": 5,
-    "src/nexus/hooks": 32,
-    "src/nexus/_hook_runtime": 4,
+    "src/nexus/hooks": 13,
+    "src/nexus/_hook_runtime": 3,
 }
 
 

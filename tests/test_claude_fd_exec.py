@@ -90,7 +90,7 @@ def test_grant_launcher_hands_claude_the_token_on_fd3_only(tmp_path: pathlib.Pat
 
 # Container-side harnesses are excluded by design: their init process holds
 # the token via `docker run -e` either way (RDR-219 threat-model paragraph).
-CONTAINER_DIRS = ("hook-surface-shakeout", "rdr208-mvv", "migration-rehearsal")
+CONTAINER_DIRS = ("hook-surface-shakeout", "migration-rehearsal")
 
 
 def _host_harness_scripts() -> list[pathlib.Path]:
@@ -103,12 +103,12 @@ def test_pane_launches_go_through_fd_exec() -> None:
     """Every host-side harness line that types `claude` into a tmux pane uses
     the fd launcher, so none leaves the token in Claude's exec environment."""
     sources = {p: p.read_text() for p in _host_harness_scripts()}
-    assert LIB_SH in sources and (REPO / "tests/e2e/release-sandbox.sh") in sources
+    assert LIB_SH in sources
     bare = [f"{p.relative_to(REPO)}: {line.strip()}"
             for p, text in sources.items() for line in text.splitlines()
             if re.search(r'send[-_]keys\b.*"claude(\s|")', line)]
     assert not bare, "pane launches that bypass claude_fd_exec.sh:\n" + "\n".join(bare)
     via_fd = [line for text in sources.values() for line in text.splitlines()
               if re.search(r"send[-_]keys\b", line) and "claude_fd_exec" in line.replace("CLAUDE_FD_EXEC", "claude_fd_exec")]
-    # lib.sh claude_start, scenarios 16 and 28, release-sandbox.sh's tmux mode
+    # lib.sh claude_start, scenarios 16, 28 and 32
     assert len(via_fd) >= 4, via_fd

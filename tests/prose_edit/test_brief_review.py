@@ -452,7 +452,7 @@ def test_the_agent_has_the_large_file_and_sentence_and_query_rules() -> None:
 def test_the_skill_is_explicit_only_deletes_work_on_every_stop_and_splits_stdin_at_the_first_line() -> None:
     text = _skill()
     assert _frontmatter(SKILL)["disable-model-invocation"] == "true"
-    assert "On every stop after WORK exists and before step 12, delete WORK first with `BRIEF rmtmp WORK`." in text
+    assert "On every stop after WORK exists and before step 12, delete WORK first with `BRIEF rmtmp '<work>'`." in text
     # a path run never calls tmpdir: build --work makes WORK only once the brief exists
     assert text.count("BRIEF tmpdir") == 1
     tmp_line = next(ln for ln in text.splitlines() if "BRIEF tmpdir" in ln)
@@ -632,8 +632,10 @@ def test_build_work_makes_the_directory_only_after_the_brief_exists(prose: Prose
     failed = run_brief(prose, "build", "notes.txt", "--work")  # no genre: nothing may be created
     assert failed.returncode == 1 and _work_dirs(prose) == before
     out = brief_ok(prose, "build", "docs/x.md", "--work")
-    first, blank, rest = out.split("\n", 2)
-    assert first.startswith("WORK=") and blank == "" and rest.startswith("# Editing brief")
+    first, dispatch, *ready, blank, rest = out.split("\n", 6)
+    assert first.startswith("WORK=") and dispatch.startswith("DISPATCH=") and blank == ""
+    assert [r.split("=", 1)[0] for r in ready] == ["REPLY", "FILTERED", "REASONS"]
+    assert rest.startswith("# Editing brief") and "BRIEF_SHA" not in out
     work = Path(first[len("WORK="):])
     try:
         assert (work / ".prose-edit-work").is_file() and _work_dirs(prose) - before == {work.name}
@@ -704,7 +706,9 @@ def test_a_successful_filter_deletes_its_work_directory_and_a_failed_one_keeps_i
     assert refused.returncode == 1 and refused.stdout == "" and repo.is_dir()
 
 
-def test_tmpdir_sweeps_stale_work_directories_but_not_young_or_lookalike_ones(prose: Prose) -> None:
+def test_tmpdir_sweeps_work_directories_idle_for_two_hours_but_not_active_or_lookalike_ones(prose: Prose) -> None:
+    """The key is the sentinel's mtime, which review.py renews on render, apply and log-retry (see
+    test_fix_round1.py): a directory is swept for being idle, not for being old."""
     base = prose.tmp
     old = base / "prose-edit-oldwork1"
     young = base / "prose-edit-younger1"

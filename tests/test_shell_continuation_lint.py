@@ -97,8 +97,7 @@ def test_detector_ignores_backslash_inside_comment_prose() -> None:
 
     The fixture is real text, lifted from the comment block of what was
     ``conexus/hooks/scripts/expectations.sh:366`` before RDR-215 bead
-    nexus-q02nx.21 ported that library to ``nexus.hooks.expectations`` and
-    deleted it. Kept verbatim rather than re-derived from a surviving
+    nexus-q02nx.21 deleted that library. Kept verbatim rather than re-derived from a surviving
     script: it is the shape that would produce a false positive, and where
     it was found does not change whether the detector must tolerate it.
     """

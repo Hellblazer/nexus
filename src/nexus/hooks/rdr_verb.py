@@ -25,8 +25,7 @@ because the *hosting* mechanism changed, not because anything the script
 computed was wrong:
 
 * The ``sys.version_info < (3, 12)`` guard and its ``sys.exit(1)`` are
-  dropped, matching every other ported verb (:mod:`session_start_verb`,
-  :mod:`ledger_verbs`). That guard existed because ``_run_python_hook.sh``
+  dropped, matching every other ported verb (:mod:`session_start_verb`). That guard existed because ``_run_python_hook.sh``
   could fall through to an arbitrary system ``python3``; a verb reached
   only via ``importlib.import_module`` from inside the installed ``nexus``
   package has no such path -- the interpreter is whatever conexus itself
@@ -53,10 +52,10 @@ logic, on every session since it was written. That killed both halves.
 The writer half is DELETED rather than switched on: a never-watched
 two-way writer whose first live run would have resolved nine known file/T2
 disagreements by a ranking rule nobody had seen work was the risky thing
-here, not the missing feature. (The ruling's other ground -- that ``nx rdr
-set-status`` now writes file and T2 together -- is not so: set-status
-writes the file and README, the lifecycle skills write T2. The drift class
-therefore still exists and is DETECTED, not reconciled: ``nx rdr preamble
+here, not the missing feature. (``nx rdr set-status`` mirrors a file flip
+onto T2 best-effort since 2026-09-02 (``_write_t2_status``); a failed or
+missing mirror prints a note and the file flip stands, so the drift class
+still exists and is DETECTED, not reconciled: ``nx rdr preamble
 rdr-audit`` prints a ``DRIFT:`` line per disagreement for a human to
 settle.) The read-only summary is kept and the filter fixed so it finally
 prints. The nine known drift rows are bead nexus-nxn5g.

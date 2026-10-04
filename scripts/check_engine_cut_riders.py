@@ -1,23 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Engine-cut riders: named commits that MUST be in the tagged commit, and the proof they shipped.
-
-An engine tag is cut from whatever commit the releaser names, and a fix that is
-on develop does not ride a tag placed on an older commit. nexus-ujbz8 (Sam,
-2026-09-30): the native-image size fix must ride the next cut. Two commits carry
-it, and a tag that omits either ships binaries at the old size with no failing
-check, because the release job is not covered by the embedded-resources checker
-(nexus-zz2w7).
-
-Two subcommands, one before the tag and one at the draft-to-published gate:
-
-``ancestry <tag-commit>``
-    Every rider in ``RIDERS`` must be an ancestor of ``<tag-commit>`` (exit 0),
-    else the missing ones are named (exit 1). A rider that does not resolve in
-    this clone, or a ``<tag-commit>`` that does not, is exit 2 (UNVERIFIABLE),
-    never a pass: ``git merge-base --is-ancestor`` returns the same nonzero for
-    "not an ancestor" and "no such object" only by exit code 1 versus 128, and a
-    shell loop on ``||`` would merge them. An empty rider list is exit 2 too.
+"""Published engine binaries must be under their size ceilings (nexus-ujbz8).
 
 ``sizes <engine-service-vX.Y.Z>``
     Reads the release's asset sizes (``gh release view --json assets``, or
@@ -36,13 +19,7 @@ Placement. ``sizes`` is BLOCKING in ``scripts/promote_engine_release.sh``, the
 draft-to-published gate (engine-service-release.yml's promote-release job): an
 oversized binary leaves the release a DRAFT instead of publishing an immutable
 tag whose only remedy is a re-cut. The skill's Step 5c re-runs it against the
-published release as a second read. Ancestry (Step 2b) is the pre-tag check; it
-proves commit ancestry, not content, so a later revert of a rider leaves it an
-ancestor and passing, which is what the size gate and the CI trip-wire
-(nexus-vwfc0) are for.
-
-Wired in ``.claude/skills/engine-release/SKILL.md`` (Step 2b before the tag,
-Step 5c after the publish) and ``scripts/promote_engine_release.sh``.
+published release as a second read.
 """
 from __future__ import annotations
 
@@ -51,18 +28,6 @@ import json
 import subprocess
 import sys
 from pathlib import Path
-
-REPO_ROOT = Path(__file__).resolve().parents[1]
-
-#: (commit, bead, what it carries). Entries stay until the bead closes; an entry
-#: that is already in the last engine tag costs nothing, the check passes it.
-RIDERS: tuple[tuple[str, str, str], ...] = (
-    ("32f6987b2", "nexus-lhr6a",
-     "native build before shade, forceCreation, osx ORT globs out of the traced "
-     "metadata, ORT include names loadable libs only"),
-    ("29653410b", "nexus-vwfc0",
-     "4 more foreign traced globs removed; pom tests"),
-)
 
 _MIB = 1024 * 1024
 
@@ -79,54 +44,6 @@ SIZE_CEILINGS_MIB: dict[str, int] = {
     "nexus-service-linux-arm64": 175,
     "nexus-service-mac-arm64": 175,
 }
-
-
-def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        ["git", *args], cwd=repo, capture_output=True, text=True, check=False
-    )
-
-
-def check_ancestry(
-    repo: Path,
-    tag_commit: str,
-    riders: tuple[tuple[str, str, str], ...] = RIDERS,
-) -> tuple[int, list[str]]:
-    """Return ``(exit_code, report_lines)`` for ``ancestry``."""
-    if not riders:
-        return 2, ["UNVERIFIABLE: the rider list is empty; there is nothing to check"]
-    head = _git(repo, "rev-parse", "--verify", "--quiet", f"{tag_commit}^{{commit}}")
-    if head.returncode != 0:
-        return 2, [f"UNVERIFIABLE: {tag_commit!r} does not resolve to a commit in this clone"]
-    full = head.stdout.strip()
-    lines = [f"tag commit {tag_commit} = {full}"]
-    missing: list[str] = []
-    unresolved: list[str] = []
-    for sha, bead, what in riders:
-        if _git(repo, "rev-parse", "--verify", "--quiet", f"{sha}^{{commit}}").returncode != 0:
-            unresolved.append(f"{sha} ({bead})")
-            lines.append(f"UNRESOLVED {sha} {bead}: not a commit in this clone (fetch, or the sha is wrong)")
-            continue
-        rc = _git(repo, "merge-base", "--is-ancestor", sha, full).returncode
-        if rc == 0:
-            lines.append(f"ok       {sha} {bead}: {what}")
-        elif rc == 1:
-            missing.append(f"{sha} ({bead})")
-            lines.append(f"MISSING  {sha} {bead}: {what}")
-        else:
-            unresolved.append(f"{sha} ({bead})")
-            lines.append(f"UNRESOLVED {sha} {bead}: git merge-base exited {rc}")
-    if unresolved:
-        lines.append("UNVERIFIABLE: " + ", ".join(unresolved))
-        return 2, lines
-    if missing:
-        lines.append(
-            "FAILED: the tag commit does not carry " + ", ".join(missing)
-            + "; tag a commit that descends from them (the develop tip does)"
-        )
-        return 1, lines
-    lines.append(f"PASSED: all {len(riders)} rider commit(s) are ancestors of {full[:12]}")
-    return 0, lines
 
 
 def check_sizes(
@@ -180,8 +97,6 @@ def _release_assets(tag: str, assets_json: str | None, repo: str | None = None) 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     sub = parser.add_subparsers(dest="cmd", required=True)
-    a = sub.add_parser("ancestry", help="riders must be ancestors of the commit to tag")
-    a.add_argument("tag_commit", help="the commit (or ref) the engine tag will be placed on")
     s = sub.add_parser("sizes", help="published release assets must be under their size ceilings")
     s.add_argument("tag", help="engine-service-vX.Y.Z")
     s.add_argument("--assets-json", default=None, help="read a saved `gh release view --json assets` instead of calling gh")
@@ -189,22 +104,19 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--max", action="append", default=[], metavar="NAME=MIB", help="override one ceiling")
     args = parser.parse_args(argv)
 
-    if args.cmd == "ancestry":
-        rc, lines = check_ancestry(REPO_ROOT, args.tag_commit)
-    else:
-        ceilings = dict(SIZE_CEILINGS_MIB)
-        for item in args.max:
-            name, _, val = item.partition("=")
-            if not val.isdigit():
-                print(f"UNVERIFIABLE: --max {item!r} is not NAME=MIB", file=sys.stderr)
-                return 2
-            ceilings[name] = int(val)
-        try:
-            assets = _release_assets(args.tag, args.assets_json, args.repo)
-        except (RuntimeError, OSError, ValueError) as exc:
-            print(f"UNVERIFIABLE: {exc}", file=sys.stderr)
+    ceilings = dict(SIZE_CEILINGS_MIB)
+    for item in args.max:
+        name, _, val = item.partition("=")
+        if not val.isdigit():
+            print(f"UNVERIFIABLE: --max {item!r} is not NAME=MIB", file=sys.stderr)
             return 2
-        rc, lines = check_sizes(assets, ceilings)
+        ceilings[name] = int(val)
+    try:
+        assets = _release_assets(args.tag, args.assets_json, args.repo)
+    except (RuntimeError, OSError, ValueError) as exc:
+        print(f"UNVERIFIABLE: {exc}", file=sys.stderr)
+        return 2
+    rc, lines = check_sizes(assets, ceilings)
     print("\n".join(lines))
     return rc
 

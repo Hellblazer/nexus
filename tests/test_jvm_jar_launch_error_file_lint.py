@@ -266,7 +266,7 @@ def test_scanner_is_not_vacuous() -> None:
     sh = _files(".sh")
     assert any(p.name == "storage_service_daemon.py" for p in py), "src/ not scanned"
     assert any(p.name == "_engine_substrate.py" for p in py), "tests/ not scanned"
-    assert any(p.name == "check_release_workflow_shape.py" for p in py), "scripts/ not scanned"
+    assert any(p.name == "check_engine_release_floor.py" for p in py), "scripts/ not scanned"
     assert len(py) > 500, len(py)
     assert any(p.name == "up.sh" for p in sh), "scripts/*.sh not scanned"
     assert any(p.name == "trace-native.sh" for p in sh), "service/*.sh not scanned"

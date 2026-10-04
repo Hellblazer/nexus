@@ -3,7 +3,7 @@
 # The one place that names the `mandatory_regression_pin` tests' two homes (nexus-z0o2p.41).
 #
 # Sourced by tests/e2e/local-service-gate.sh (which must NOT run them) and
-# tests/e2e/mandatory-pins-gate.sh (which must). Two files naming one set by hand is how
+# tests/e2e/release-preflight.sh (which must). Two files naming one set by hand is how
 # a pin ends up run by neither.
 #
 # WHY THEY LEAVE THE LOCAL-SERVICE GATE. The gate runs under a fenced HOME that never mirrors

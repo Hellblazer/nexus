@@ -11,9 +11,7 @@ Validates the contract every routing hook must honor:
 """
 from __future__ import annotations
 
-import contextlib
 import hashlib
-import http.server
 import importlib.util
 import json
 import os
@@ -21,7 +19,6 @@ import pathlib
 import subprocess
 import sys
 import textwrap
-import threading
 import time as _time
 import urllib.error
 import urllib.parse
@@ -29,12 +26,10 @@ import urllib.parse
 import pytest
 
 PROJECT_ROOT = pathlib.Path(__file__).parent.parent
-#: nexus-t9klx: the library moved into the wheel, and the plugin copy was
-#: DELETED once its last plugin importer — the subagent git-write guard —
-#: was ported. These tests had stayed pinned to the plugin copy, which is
-#: to say they were exercising the one that no longer runs. The drift the
-#: port's own commit message warned about, arriving from the test side.
-LIB_PATH = PROJECT_ROOT / "src" / "nexus" / "hooks" / "_routing_lib.py"
+#: The plugin-resident library both live routing guards import. The wheel
+#: copy (`src/nexus/hooks/_routing_lib.py`) had no importer left after
+#: cleanup step A4 and was deleted at step A5.
+LIB_PATH = PROJECT_ROOT / "conexus" / "hooks" / "scripts" / "routing" / "_lib.py"
 REGISTRY_PATH = PROJECT_ROOT / "conexus" / "hooks" / "scripts" / "routing" / "registry.yaml"
 README_PATH = PROJECT_ROOT / "conexus" / "hooks" / "scripts" / "routing" / "README.md"
 
@@ -89,16 +84,15 @@ _ROUTING_ALLOW_OWNERSHIP_PHRASE = "not yours to reach for"
 
 #: Live guards whose deny message offers the `# routing-allow:` escape and
 #: must therefore carry the same ownership phrase as the authoring
-#: template. nexus-t9klx ported BOTH of them into the wheel, so these are
-#: wheel modules now rather than plugin script names.
+#: template.
 #:
 #: They stay in ONE list rather than being checked by each guard's own test
 #: file. The property is cross-file parity — the README template and every
 #: guard saying the same thing — and S8 shipped inconsistently in the first
 #: place precisely because each site was looked at on its own.
 _LIVE_HOOKS_WITH_ROUTING_ALLOW_ESCAPE = (
-    PROJECT_ROOT / "src" / "nexus" / "hooks" / "subagent_git_write_gate.py",
-    PROJECT_ROOT / "src" / "nexus" / "hooks" / "phase_review_close_gate.py",
+    PROJECT_ROOT / "conexus" / "hooks" / "scripts" / "routing"
+    / "subagent_git_write_requires_orchestrator.py",
 )
 
 
@@ -123,10 +117,10 @@ def test_the_escape_offering_guards_are_still_enumerated() -> None:
 
     The list names files by path, and a path that stops resolving makes
     the check below pass by examining nothing — which is exactly what a
-    port does to a list of filenames. Both guards moved once already.
+    port does to a list of filenames. The guards moved once already.
     """
-    assert len(_LIVE_HOOKS_WITH_ROUTING_ALLOW_ESCAPE) == 2, (
-        "the routing framework has two guards offering the escape; if one "
+    assert len(_LIVE_HOOKS_WITH_ROUTING_ALLOW_ESCAPE) == 1, (
+        "the routing framework has one guard offering the escape; if one "
         "was added or removed, say so here rather than letting the parity "
         "check below quietly cover less"
     )
@@ -256,26 +250,11 @@ def test_allow_envelope_is_reserved_and_unaffected_by_the_pass_helper():
 # ask -- a real PreToolUse decision (nexus-nmzsg)
 # ---------------------------------------------------------------------------
 
-PLUGIN_LIB_PATH = (
-    PROJECT_ROOT / "conexus" / "hooks" / "scripts" / "routing" / "_lib.py"
-)
-
-
-def _load_plugin_lib():
-    """The plugin-resident copy credential_print_guard.py still imports."""
-    spec = importlib.util.spec_from_file_location("nx_plugin_routing_lib", PLUGIN_LIB_PATH)
-    module = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    spec.loader.exec_module(module)
-    return module
-
-
-@pytest.mark.parametrize("loader", [_load_lib, _load_plugin_lib], ids=["wheel", "plugin"])
-def test_ask_envelope_shape(loader):
+def test_ask_envelope_shape():
     """``ask`` forces a permission prompt even in auto mode (the classifier
     can still deny but cannot approve silently); the reason is what the USER
     reads in that prompt. Shape per the Claude Code hooks docs."""
-    lib = loader()
+    lib = _load_lib()
     env = json.loads(lib.ask_envelope("cannot verify this close"))
     assert env == {
         "hookSpecificOutput": {
@@ -286,18 +265,16 @@ def test_ask_envelope_shape(loader):
     }
 
 
-@pytest.mark.parametrize("loader", [_load_lib, _load_plugin_lib], ids=["wheel", "plugin"])
-def test_ask_envelope_carries_optional_model_context(loader):
-    lib = loader()
+def test_ask_envelope_carries_optional_model_context():
+    lib = _load_lib()
     env = json.loads(lib.ask_envelope("why", context="for the model"))
     assert env["hookSpecificOutput"]["additionalContext"] == "for the model"
     assert env["hookSpecificOutput"]["permissionDecision"] == "ask"
 
 
-@pytest.mark.parametrize("loader", [_load_lib, _load_plugin_lib], ids=["wheel", "plugin"])
-def test_ask_envelope_blank_reason_does_not_crash_or_go_empty(loader):
+def test_ask_envelope_blank_reason_does_not_crash_or_go_empty():
     """A prompt with no reason is worse than none: it must never be blank."""
-    lib = loader()
+    lib = _load_lib()
     for raw in ("", "   ", "\n"):
         env = json.loads(lib.ask_envelope(raw))
         assert env["hookSpecificOutput"]["permissionDecisionReason"].strip()
@@ -309,12 +286,6 @@ def test_ask_exits_zero_with_json():
     payload = json.loads(proc.stdout)
     assert payload["hookSpecificOutput"]["permissionDecision"] == "ask"
     assert payload["hookSpecificOutput"]["permissionDecisionReason"] == "needs a human"
-
-
-def test_ask_result_is_the_ask_envelope_as_a_verb_result():
-    lib = _load_lib()
-    result = lib.ask_result("needs a human", context="ctx")
-    assert result.stdout == lib.ask_envelope("needs a human", context="ctx")
 
 
 # ---------------------------------------------------------------------------
@@ -330,12 +301,11 @@ def _run_stub(body: str, stdin: str = "") -> subprocess.CompletedProcess:
     test_rule/unknown fail-ladder pair into the LIVE
     ~/.config/nexus/routing_log.jsonl (312 pairs over the 48-day soak).
     """
-    # nexus-t9klx: a package import now, not a sys.path insert. The library
-    # lives in the wheel; the plugin copy it used to load by directory is
-    # deleted. Aliased to `_lib` so every stub body below reads unchanged.
     stub = textwrap.dedent(
         f"""
-        from nexus.hooks import _routing_lib as _lib
+        import sys
+        sys.path.insert(0, {str(LIB_PATH.parent)!r})
+        import _lib
         {body}
         """
     )
@@ -470,7 +440,7 @@ def _isolate_endpoint_discovery(tmp_path, monkeypatch):
     resolve against whatever is REALLY configured on the box running
     them (a live lease, a real service_url) instead of the scenario
     each test constructs -- the identical class of leak the routing-log/
-    dropped-writes/pre-close-verification isolation fixes in this same
+    dropped-writes isolation fixes in this same
     bead already closed for their own env surfaces."""
     cfg_dir = tmp_path / "isolated-nexus-config"
     cfg_dir.mkdir(exist_ok=True)
@@ -521,14 +491,14 @@ def test_log_routing_event_drop_record_preserves_rule_outcome_and_escape_reason(
     lib = _load_lib()
 
     lib.log_routing_event(
-        rule="phase_review_close_requires_gate",
+        rule="subagent_git_write_requires_orchestrator",
         outcome="escape",
         escape_reason="orchestrator sanctioned",
     )
 
     drops = _drop_records(drop_path)
     assert len(drops) == 1
-    assert drops[0]["rule"] == "phase_review_close_requires_gate"
+    assert drops[0]["rule"] == "subagent_git_write_requires_orchestrator"
     assert drops[0]["outcome"] == "escape"
     assert drops[0]["escape_reason"] == "orchestrator sanctioned"
 
@@ -675,69 +645,6 @@ def test_log_routing_event_expired_lease_is_ignored(tmp_path, monkeypatch):
 
     drops = _drop_records(drop_path)
     assert len(drops) == 1, "an expired lease must be treated as absent -- no attempt, straight to the drop meter"
-
-
-def test_read_service_lease_honors_reader_side_grace(tmp_path, monkeypatch):
-    """nexus-wo6sc review round (2026-09-24): this hook's own lease read
-    used to go straight through ``LeaseRecord.from_json`` + ``is_fresh``,
-    bypassing ``ServiceRegistry.discover()`` entirely -- so a TTL-expired
-    lease from an alive, healthy supervisor (the 2026-09-12 heartbeat-stall
-    shape) still read as absent HERE even after discover() itself grew
-    reader-side grace. Proves the routing hook now sees the same grace
-    everything else routed through discover() sees: real subprocess for
-    pid liveness, a real bound HTTP server for the /health identity check
-    -- no mocks of pid_alive."""
-    from nexus.daemon.service_registry import LeaseRecord
-
-    cfg_dir = _isolate_endpoint_discovery(tmp_path, monkeypatch)
-
-    class _Health(http.server.BaseHTTPRequestHandler):
-        def do_GET(self) -> None:  # noqa: N802
-            body = b'{"status": "ok", "db": "up"}'
-            self.send_response(200)
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-
-        def log_message(self, fmt, *args) -> None:  # noqa: A002
-            pass
-
-    server = http.server.HTTPServer(("127.0.0.1", 0), _Health)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    owner = subprocess.Popen(  # noqa: S603 — fixed argv, this interpreter
-        [sys.executable, "-c", "import time; time.sleep(120)"],
-    )
-    try:
-        port = server.server_address[1]
-        (cfg_dir / f"storage_service_addr.{os.getuid()}").write_text(
-            LeaseRecord(
-                scope_key=str(os.getuid()),
-                generation=1,
-                owner_token="owner-fixture",
-                heartbeat_epoch=_time.time() - 5.0,  # past ttl, inside the 10x grace bound
-                ttl=1.0,
-                endpoint={"host": "127.0.0.1", "port": port, "token": "grace-bearer-token"},
-                version="0.0.0-fixture",
-                payload={"supervisor_pid": owner.pid},
-            ).to_json()
-        )
-        lib = _load_lib()
-        lease = lib._read_service_lease(cfg_dir)
-        assert lease is not None, (
-            "a stale-but-alive-and-healthy lease must resolve here too -- "
-            "the fix routed this reader through discover()'s grace, not "
-            "around it"
-        )
-        assert lease["port"] == port
-        assert lease["token"] == "grace-bearer-token"
-    finally:
-        owner.terminate()
-        with contextlib.suppress(subprocess.TimeoutExpired):
-            owner.wait(timeout=5)
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=5)
 
 
 def test_log_routing_event_resolves_from_config_yml_service_url(tmp_path, monkeypatch):
@@ -1175,24 +1082,6 @@ def test_read_service_lease_fresh(tmp_path):
 
 def test_read_service_lease_expired(tmp_path):
     _write_lease(tmp_path, age=120.0)
-    assert _load_lib()._read_service_lease(tmp_path) is None
-
-
-def test_a_truncated_lease_record_is_refused(tmp_path):
-    """The reader validates the whole record through
-    ``LeaseRecord.from_json``, so a lease file missing ``scope_key`` /
-    ``generation`` / ``owner_token`` / ``version`` resolves to ``None``.
-
-    The supervisor never writes such a file. ``None`` is the safe
-    direction: it drops the routing event to the meter, where a wrong
-    endpoint would send it somewhere.
-    """
-    (tmp_path / f"storage_service_addr.{os.getuid()}").write_text(json.dumps({
-        "status": "live",
-        "heartbeat_epoch": _time.time(),
-        "ttl": 60.0,
-        "endpoint": {"host": "127.0.0.1", "port": 4242, "token": "tok"},
-    }))
     assert _load_lib()._read_service_lease(tmp_path) is None
 
 

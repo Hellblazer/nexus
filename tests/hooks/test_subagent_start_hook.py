@@ -60,7 +60,7 @@ finally:
     sys.stdout = real_stdout
 if result.stdout is not None:
     sys.stdout.write(result.stdout + "\\n")
-sys.exit(result.exit_code)
+sys.exit(0)
 """
 
 
@@ -153,9 +153,7 @@ class TestClaimantIdInjection:
     def test_module_does_no_network_io(self) -> None:
         """RDR-205: "It does no network I/O." A crude but effective source
         scan -- no curl/wget/socket/urllib/requests token anywhere in the
-        module. The actual tuple write lives in the separate hook
-        (``hook_subagent_start_tuple`` / ``nexus.hooks.tuple_projection``),
-        never here. Re-pointed at the Python module (nexus-q02nx.21): the
+        module. Re-pointed at the Python module (nexus-q02nx.21): the
         bash script this used to scan no longer runs in production.
         """
         src = Path(_subagent_start_mod.__file__).read_text()

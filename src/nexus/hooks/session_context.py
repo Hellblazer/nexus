@@ -37,9 +37,9 @@ than silently folded in:
    ``src/nexus/hooks/t2_prefix_scan.py`` -- a file that does not exist --
    and silently produce no T2 memory context (``run_command`` swallows
    ``FileNotFoundError`` into ``None``) rather than erroring loudly. This
-   is not a behavior change to author; it is the same class of fix
-   ``stop_verification.py`` already made for its own sibling script
-   (``read_verification_config.py``, bead nexus-q02nx.13/.17): resolve the
+   is not a behavior change to author; it is the same class of fix an
+   earlier hook made for its own sibling script (bead
+   nexus-q02nx.13/.17): resolve the
    plugin root via ``CLAUDE_PLUGIN_ROOT`` (falling back to the dev-checkout
    layout for a from-source run), and reach the still-plugin-only sibling
    through it. Gone as of bead nexus-b5ugt: the T2 section calls
@@ -65,16 +65,14 @@ avoid that cost while this module lives inside the ``nexus.hooks`` package.
 Measured: ``python -c "import nexus.hooks.session_context"`` puts
 ``structlog`` in ``sys.modules`` regardless of what this file itself
 imports. That is a property of every verb module already living in
-``nexus.hooks`` (``session_start_verb``, ``ledger_verbs``,
-``subagent_start_stamp``, ...), not something this port introduces or
+``nexus.hooks`` (``session_start_verb``, ``subagent_start``, ...), not something this port introduces or
 could fix by itself -- fixing it means deferring ``nexus.hooks``'s own
 package-level imports, a change shared by every hook this epic is
 concurrently porting, and out of scope for a "move, do not rewrite" bead.
 Reported rather than silently worked around.
 
-**Not a ledger verb.** No caller branches on this verb's exit code; every
-non-ledger verb is forced to exit 0 by ``entry.main`` regardless of what
-:class:`~nexus._hook_runtime._io.HookResult.exit_code` says.
+No caller branches on this verb's exit code; ``entry.main`` forces 0 for
+every verb.
 
 **Wired since bead ``nexus-q02nx.21``.** ``conexus/hooks/hooks.json``
 declares this as ``{"command": "nx-hook", "args": ["session-context"]}``;

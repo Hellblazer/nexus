@@ -87,8 +87,7 @@ class TestSC8HooksJson:
     def test_pretooluse_bash_timeout_is_short(self) -> None:
         """PreToolUse Bash timeout must stay short.
 
-        The pre-close gate (``nexus.hooks.pre_close_verification``, wired as
-        the ``hook_pre_close_verification`` MCP tool) is advisory (read
+        The PreToolUse Bash hooks (the routing guards) are advisory (read
         stdin, JSON
         out, exit 0); the body completes in <100 ms. A long timeout is a
         footgun: a future bug or filesystem stall would block every

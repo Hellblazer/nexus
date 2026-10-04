@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
-"""Endpoint resolution for the RDR-205 ledger projector:
-:func:`nexus.hooks.tuple_ledger_project._resolve_base_url`.
+"""Endpoint resolution for the mailbox-drain hook:
+:func:`nexus.hooks.mailbox_drain._resolve_base_url`.
 
 This file used to test ``conexus/hooks/scripts/_endpoint_resolve.py``
 (nexus-aginu), the plugin's stdlib-only mirror of
@@ -9,9 +9,7 @@ This file used to test ``conexus/hooks/scripts/_endpoint_resolve.py``
 last plugin script that imported it (nexus-z9cz2); its config.yml scanner
 and data-token-lease reader went with it, because the wheel calls the
 client's own primitives (``nexus.config.get_credential``,
-``DataTokenManager.fresh_lease_token``) instead. The bearer policy
-(nexus-g2lln) is pinned end to end by ``tests/hooks/test_tuple_ledger_project.py``.
-
+``DataTokenManager.fresh_lease_token``) instead. 
 What stays is the one piece the wheel still re-states rather than calls:
 the base-URL precedence and its ``is_local_supervisor`` flag.
 ``TestResolveBaseUrlPrecedence`` pins the individual cases;
@@ -31,7 +29,7 @@ from pathlib import Path
 
 import pytest
 
-from nexus.hooks.tuple_ledger_project import _resolve_base_url, _Skip
+from nexus.hooks.mailbox_drain import _resolve_base_url, _Skip
 
 
 def _config_dir() -> Path:

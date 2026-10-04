@@ -96,7 +96,8 @@ so nobody would notice.
 Those 26 were worth waiting for. They are the sites that hang a user's
 SESSION rather than a CLI command they can interrupt, and they hold the
 only MEASURED instance of the whole defect class:
-``hooks/verification_config.py`` running ``git rev-parse
+``hooks/verification_config.py`` (deleted at cleanup step A2,
+nexus-0r1uz) running ``git rev-parse
 --git-common-dir`` with a 5.0 s timeout, wired on Stop, sampled still
 blocked at 25 s on qwentescence — which is why a Windows session answers
 and then sits.
@@ -106,7 +107,7 @@ The import is DEFERRED into the spawning function, not placed at module
 scope like everywhere else in ``src/nexus``. Hooks fire on every tool
 call, and a module-scope
 ``from nexus.bounded_subprocess import run_bounded`` pulls structlog and
-about 231 further modules: measured on ``hooks/verification_config``,
+about 231 further modules: measured on the deleted ``hooks/verification_config``,
 14 ms and 106 modules becomes 62-84 ms and 337. The deferred form pays
 that only on the rare path that actually shells out, and the measurement
 is in the noqa comment at each site so it is not re-litigated from
@@ -610,17 +611,18 @@ def test_hooks_is_in_scope_and_stays_there() -> None:
     This pins the outcome rather than the mechanism: the most dangerous
     files in the census are reachable by the scan. They are the ones that
     hang a user's SESSION rather than a CLI command they can interrupt --
-    the one measured Windows hang was hooks/verification_config.py, wired
-    on Stop, sampled still blocked at 25 s on a 5.0 s timeout.
+    the one measured Windows hang was hooks/verification_config.py (deleted
+    at cleanup step A2), wired on Stop, sampled still blocked at 25 s on a
+    5.0 s timeout.
     """
     hooks = SRC_ROOT / "hooks"
     assert hooks.is_dir(), "src/nexus/hooks is gone; this test needs rewriting"
-    assert _in_scope(hooks / "verification_config.py"), (
-        "hooks/ is filtered out of _in_scope again. It holds the only measured "
+    assert _in_scope(hooks / "session_context.py"), (
+        "hooks/ is filtered out of _in_scope again. It held the only measured "
         "instance of the defect this lint watches; if it must be held out again, "
         "say which bead ends the deferral and assert it still excludes something."
     )
     scanned = {p.name for p in hooks.rglob("*.py") if _in_scope(p)}
-    assert "verification_config.py" in scanned and len(scanned) > 5, (
+    assert "session_context.py" in scanned and len(scanned) > 5, (
         f"the walk reaches only {len(scanned)} file(s) under hooks/"
     )

@@ -1,4 +1,5 @@
 #!/bin/bash
+# SPDX-License-Identifier: AGPL-3.0-or-later
 # usage: OUT_DIR=<dir> run-canaries.sh
 #
 # The cheap checks that the tool restriction and the stop rules hold:

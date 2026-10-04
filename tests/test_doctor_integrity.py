@@ -234,7 +234,7 @@ class TestCheckT2DroppedWrites:
         assert "retired" in r.detail.lower()
 
     def test_live_producer_drops_are_soft_warn(self, tmp_path, monkeypatch):
-        """nexus-gjv9b PARTs 1/2: capability_census and routing_events both
+        """nexus-gjv9b PARTs 1/2: routing_events
         adopted record_drop() for their own service-down degradation —
         the meter is no longer historical-only, and a drop from either
         must restore the soft-WARN posture RDR-129 B4 always intended for
@@ -296,13 +296,13 @@ class TestCheckT2DroppedWrites:
             '"collection": "", "rows": 1, "error": "old"}\n'
         )
         dropped_writes.record_drop(
-            hook="capability_census", collection="", rows=1, error="fresh failure",
+            hook="routing_events", collection="", rows=1, error="fresh failure",
         )
 
         results = _check_t2_dropped_writes()
         r = results[0]
         assert r.ok is False
-        assert "capability_census" in r.detail
+        assert "routing_events" in r.detail
         assert "2" in r.detail  # lifetime total = 2 (old + fresh)
 
     def test_window_of_only_guard_refused_drops_is_ok_not_soft_warn(
@@ -321,7 +321,7 @@ class TestCheckT2DroppedWrites:
         )
         for _ in range(3):
             dropped_writes.record_drop(
-                hook="capability_census", collection="", rows=1,
+                hook="routing_events", collection="", rows=1,
                 error="STOP: refusing a WRITE to 'https://x'.",
             )
 
@@ -343,7 +343,7 @@ class TestCheckT2DroppedWrites:
             "NX_DROPPED_WRITES_LOG_PATH", str(tmp_path / "drops.jsonl")
         )
         dropped_writes.record_drop(
-            hook="capability_census", collection="", rows=1,
+            hook="routing_events", collection="", rows=1,
             error="STOP: refusing a WRITE to 'https://x'.",
         )
         dropped_writes.record_drop(
@@ -387,7 +387,7 @@ class TestCheckT2DroppedWrites:
     def test_window_of_mixed_guard_refused_and_route_absent_is_ok(
         self, tmp_path, monkeypatch,
     ):
-        """A dev checkout's guard refusal (capability_census) and a
+        """A dev checkout's guard refusal (routing_events) and a
         properly-opted-in install hitting a not-yet-served route
         (routing_events) can land in the SAME meter window -- still
         version skew / expected behavior throughout, never a WARN."""
@@ -397,7 +397,7 @@ class TestCheckT2DroppedWrites:
             "NX_DROPPED_WRITES_LOG_PATH", str(tmp_path / "drops.jsonl")
         )
         dropped_writes.record_drop(
-            hook="capability_census", collection="", rows=1,
+            hook="routing_events", collection="", rows=1,
             error="STOP: refusing a WRITE to 'https://x'.",
         )
         dropped_writes.record_drop(

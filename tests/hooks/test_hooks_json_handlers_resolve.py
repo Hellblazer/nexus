@@ -11,14 +11,8 @@ The path-shaped version of this was already pinned (a declared script
 must exist on disk, tests/test_plugin_structure.py). The tool-shaped and
 verb-shaped versions had nothing, which is the same defect class one tier
 up -- seven `hook_*` names appeared in no hooks.json-reading test at all,
-including `hook_agent_dispatch_expect`, the writer of the RDR-184 EXPECT
-row that AGENTS.md names as the thing whose absence masks an undeclared
-start.
-
-Mutation M1 in ``mutations_qc4p1.sh`` used to falsify the registration of
-that entry and was retired during this bead as "analogue-free". It was
-not analogue-free, only harder: the invariant survived as an `mcp_tool`
-entry and is perfectly mutable. This file is what replaces it.
+including the RDR-184 EXPECT-row writer (deleted at cleanup step A1,
+nexus-0r1uz), the one whose absence masked an undeclared start.
 """
 from __future__ import annotations
 
@@ -51,21 +45,25 @@ HOOKS_JSON = REPO_ROOT / "conexus" / "hooks" / "hooks.json"
 #: tests/test_deciding_hooks_are_command_tier.py refuses a hooks.json
 #: that puts any of them back.
 #:
-#: 9 -> 7 at bead nexus-5l8i8, which moved `agent_dispatch_expect` and
-#: `subagent_start_stamp` to the command tier too -- for a different
+#: 9 -> 7 at bead nexus-5l8i8, which moved two RDR-184 ledger writers
+#: to the command tier too -- for a different
 #: reason than nexus-17i1n's three (neither returns a verdict; an
 #: `mcp_tool` hook was instead dropping RDR-184 EXPECT/START rows during
 #: an MCP-server outage, root-caused from session 81d1d28b's transcript).
 #: Same reading as the paragraph above: a second deliberate migration off
 #: the tier, not the extractor going blind a second time.
 #:
-#: 7 -> 5 at bead nexus-egm7p: `subagent_start_tuple` and
-#: `subagent_stop_tuple` (the RDR-205 ledger's two PROJECTORS) move for
+#: 7 -> 5 at bead nexus-egm7p: the RDR-205 ledger's two PROJECTORS move for
 #: the SAME reason nexus-5l8i8 moved -- an `mcp_tool` hook's invocation
 #: depends on this session's MCP connection, and the SubagentStart/
 #: SubagentStop event it observes fires whether or not that connection
 #: exists. Third deliberate migration off the tier.
-_MIN_MCP_TOOL_ENTRIES = 5
+#:
+#: 5 -> 1 at cleanup steps A2 and A3 (nexus-0r1uz): the Stop, StopFailure,
+#: PostCompact and divergence-language `mcp_tool` entries are deleted outright
+#: (not migrated); `hook_subagent_start` is the one left. Deliberate deletion,
+#: not the extractor going blind.
+_MIN_MCP_TOOL_ENTRIES = 1
 #: 3 -> 6 at bead nexus-q02nx.22, which converted the last four shell-form
 #: entries (`nx upgrade --auto ... || echo ...`, `nx self gc ... || true`,
 #: `nx hook session-start`, `nx-session-end-launcher`) to exec form. Three of
@@ -75,15 +73,18 @@ _MIN_MCP_TOOL_ENTRIES = 5
 #: 6 -> 10 at bead nexus-17i1n: the four entries the line above moved off
 #: the tool tier arrive here. 12 at nexus-rcoze: verbs wired through the
 #: nx-hook shim count too (four moved there, two veh77 entries added).
-#: 12 -> 14 at nexus-5l8i8: agent-dispatch-expect and subagent-start-stamp
+#: 12 -> 14 at nexus-5l8i8: two RDR-184 ledger writers
 #: arrive here through the same shim, for the reason _MIN_MCP_TOOL_ENTRIES'
 #: own comment names.
-#: 14 -> 16 at nexus-egm7p: subagent-start-tuple and subagent-stop-tuple
+#: 14 -> 16 at nexus-egm7p: the two RDR-205 projectors
 #: arrive here through the same shim, for the reason _MIN_MCP_TOOL_ENTRIES'
 #: own comment names.
 #: 16 -> 15 at nexus-qxyqz: the UserPromptSubmit mcp-connect-check entry is
 #: deleted (the verb stays registered as a silent no-op for older plugins).
-_MIN_NX_HOOK_ENTRIES = 15
+#: 15 -> 10 at cleanup step A1 (nexus-0r1uz): the RDR-184 ledger and RDR-205
+#: projector entries and the behaviour census entry are deleted.
+#: 10 -> 9 at cleanup step A2: the bd-close gate's shim entry is deleted.
+_MIN_NX_HOOK_ENTRIES = 9
 
 
 def _declared() -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
@@ -161,7 +162,7 @@ def _readme_handler_cells() -> list[str]:
         # Split on unescaped pipes only. An Event cell can legitimately
         # contain one -- `PreToolUse` (`Agent\|Task`) -- and splitting
         # naively shifts every later column, which made this check report
-        # a missing row for hook_agent_dispatch_expect that was there all
+        # a missing row for a hook that was there all
         # along. The checker's own parsing, again.
         parts = [
             c.strip().replace("\\|", "|")

@@ -144,39 +144,6 @@ class TestLayerTwoCensus:
         assert fake.put_calls == []
 
 
-class TestClosePreamble:
-    """Items 3 and 5."""
-
-    def _accepted(self, rdr_env, history: str) -> None:
-        body = _BODY + history
-        _write_rdr(
-            rdr_env["rdr_dir"], "rdr-210-x.md",
-            {"title": "X", "status": "accepted", "accepted_date": "2026-09-01"}, body,
-        )
-
-    def test_revision_history_that_stops_at_accept_is_named(self, rdr_env, monkeypatch):
-        self._accepted(rdr_env, "- 2026-08-30: drafted\n- 2026-09-01: gate PASSED; accepted\n")
-        monkeypatch.setattr(rdr_mod, "_t2_client_factory", lambda: _FakeT2ResearchClient())
-        res = _runner().invoke(rdr, ["preamble", "rdr-close", "--", "210", "--reason", "implemented"])
-        assert "Revision History stops at accept" in res.output, res.output
-
-    def test_an_entry_after_acceptance_satisfies_it(self, rdr_env, monkeypatch):
-        self._accepted(rdr_env, "- 2026-09-01: accepted\n- 2026-09-05: Phase 1 landed (nexus-abc)\n")
-        monkeypatch.setattr(rdr_mod, "_t2_client_factory", lambda: _FakeT2ResearchClient())
-        res = _runner().invoke(rdr, ["preamble", "rdr-close", "--", "210", "--reason", "implemented"])
-        assert "Revision History stops at accept" not in res.output, res.output
-
-    def test_force_implemented_prints_the_override_record_to_write(self, rdr_env, monkeypatch):
-        self._accepted(rdr_env, "- 2026-09-05: phase\n")
-        monkeypatch.setattr(rdr_mod, "_t2_client_factory", lambda: _FakeT2ResearchClient())
-        res = _runner().invoke(rdr, [
-            "preamble", "rdr-close", "--", "210", "--reason", "implemented",
-            "--force-implemented", "critic disagreed on scope, Sam decided",
-        ])
-        assert "210-close-override-" in res.output, res.output
-        assert "user_reason: critic disagreed on scope, Sam decided" in res.output
-
-
 class TestAuditProcessRows:
     """Items 3, 4 and 10 as audit rows."""
 
@@ -236,8 +203,8 @@ class TestSetStatusWritesTheReason:
     def test_reason_with_a_colon_still_parses_as_yaml(self, rdr_env, monkeypatch):
         """RDR-214's abandonment (2026-09-18) wrote `close_reason: Sam's decision
         2026-09-18: the batch tier ...` verbatim; the bare `: ` inside a plain
-        scalar broke the whole frontmatter, `nx rdr lint` went red and the
-        indexer would skip the file. A reason that cannot stand as a plain
+        scalar broke the whole frontmatter and the indexer would skip the
+        file. A reason that cannot stand as a plain
         scalar is written quoted, on the file and on the T2 record; one that
         can stays plain (the sibling test pins that)."""
         d = rdr_env["rdr_dir"]
@@ -296,17 +263,6 @@ class TestReviewRoundFixes:
             record_exists=True, record_content="dispatches: 3\nFIX CHECK: PASS\n",
         )
         assert any("three dispatches" in ln for ln in lines), lines
-
-    def test_an_accepted_rdr_with_no_acceptance_date_anywhere_is_named(self, rdr_env, monkeypatch):
-        _write_rdr(rdr_env["rdr_dir"], "rdr-210-x.md", {"title": "X", "status": "accepted"},
-                   _BODY + "- 2026-09-05: phase one\n")
-        monkeypatch.setattr(rdr_mod, "_t2_client_factory", lambda: _FakeT2ResearchClient())
-        res = _runner().invoke(rdr, ["preamble", "rdr-close", "--", "210", "--reason", "implemented"])
-        assert "no acceptance date" in res.output, res.output
-
-    def test_an_entry_is_dated_by_its_leading_date_not_a_date_it_mentions(self):
-        text = "## Revision History\n\n- 2026-09-05: following the 2020-01-01 baseline, phase one landed\n"
-        assert rdr_mod._revision_history_after_accept_lines(text, {"accepted_date": "2026-09-01"}) == []
 
     def test_unparseable_closed_dates_are_counted_in_the_override_row(self):
         rows = [

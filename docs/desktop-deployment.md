@@ -191,7 +191,7 @@ booting out a legacy `com.nexus.t2` unit if one is still present.
 
 ## Verification
 
-`tests/e2e/upgrade-shakeout.sh` exercises the full surface story in a sandbox: install OLD conexus → install hooks → upgrade to current → verify drift detection → run `nx hooks update` → verify drift resolved → verify marketplace.json rename → verify plugin-name-drift detection. 11/11 green is the gate before any release.
+The full surface story (install OLD conexus → install hooks → upgrade to current → verify drift detection → run `nx hooks update` → verify drift resolved → verify marketplace.json rename → verify plugin-name-drift detection) was exercised by a sandbox upgrade shakeout that was deleted in cleanup step 11; `tests/e2e/hook-surface-shakeout` is the surviving plugin-hook gate.
 
 ### Cowork bidirectional sentinel (manual)
 

@@ -19,8 +19,7 @@
 #      so machinery fixes are rehearsed before they land
 #   2. `uv sync --group dev` in the clone (what CI does)
 #   3. the real `scripts/cut_plugin_release.py <base-tag> --repo <clone>`,
-#      INCLUDING its own battery (lint bucket, ledger contract, tests/hooks/,
-#      release-sandbox smoke)
+#      INCLUDING its own battery (lint bucket, ledger contract, tests/hooks/)
 #   4. the cut PR's CI, shape-faithfully: the branch pushed to the fake
 #      origin, a real `--no-ff` merge into main published as refs/pull/1/merge,
 #      a DEPTH-1 checkout of that ref (what actions/checkout gives a
@@ -46,8 +45,7 @@
 #               script inside it with the source checkout bind-mounted
 #               read-only; nothing on the host is written except the image
 #               and two named cache volumes (uv, nexus downloads)
-#   --host      run directly on this box (git isolation only; the cut's
-#               battery already sandboxes $HOME for the smoke)
+#   --host      run directly on this box (git isolation only)
 # Options:
 #   --promote-machinery land develop's NEVER-DELIVERED paths (tests/ docs/
 #                       scripts/ .github/) on the fake main first, as the
@@ -228,12 +226,6 @@ cleanup() {
         cp "$SANDBOX"/*.log "$SANDBOX"/*.txt "$SANDBOX"/*.json "$dest"/ 2>/dev/null || true
         if [ -d "$CLONE/.git" ]; then
             { git -C "$CLONE" rev-parse --abbrev-ref HEAD; git -C "$CLONE" log --oneline -8; git -C "$CLONE" status --short; } > "$dest/git-state.txt" 2>&1 || true
-        fi
-        # The cut's battery runs release-sandbox smoke under $HOME/nexus-sandbox;
-        # its engine/PG logs are the diagnosis when `nx init` fails to serve.
-        if [ -d "$HOME/nexus-sandbox/.config/nexus/logs" ]; then
-            mkdir -p "$dest/nexus-sandbox-logs"
-            cp "$HOME"/nexus-sandbox/.config/nexus/logs/*.log "$dest/nexus-sandbox-logs/" 2>/dev/null || true
         fi
         echo "failure artifacts copied to $dest"
     fi
@@ -447,7 +439,7 @@ if grep -qE '[0-9]+ skipped' "$DRIFT_LOG"; then _die "VACUITY: drift-ledger test
 # and hides inside a multi-file run's green (the first rehearsal did that).
 "${prci_env[@]}" bash -c "cd '$PRCI' && uv run pytest -m lint tests/test_plugin_structure.py -q -p no:cacheprovider" \
     || _die "tests/test_plugin_structure.py (the per-plugin proof) failed on the cut PR's merge ref"
-"${prci_env[@]}" bash -c "cd '$PRCI' && uv run pytest tests/test_plugin_channel.py tests/test_cut_plugin_release.py tests/hooks/test_agent_dispatch_expect.py tests/test_sn_plugin.py tests/hooks/test_version_lockstep_hook.py -q -p no:cacheprovider" \
+"${prci_env[@]}" bash -c "cd '$PRCI' && uv run pytest tests/test_plugin_channel.py tests/test_cut_plugin_release.py tests/test_sn_plugin.py tests/hooks/test_version_lockstep_hook.py -q -p no:cacheprovider" \
     || _die "pin-reading checks failed on the cut PR's merge ref"
 # ci.yml's pytest SHARDS are a second CI shape on the same PR: a depth-1
 # checkout with NO tags and NO require flag (nexus-dhs30). Every test that
@@ -461,7 +453,7 @@ git -C "$SHARD" checkout -q --detach FETCH_HEAD
 [ "$(git -C "$SHARD" tag -l | wc -l | tr -d ' ')" = 0 ] || _die "the shard-shaped checkout must carry no tags"
 (cd "$SHARD" && uv sync -q --group dev) || _die "uv sync failed in the shard checkout"
 env -u NX_REQUIRE_PLUGIN_DRIFT_CHECK GITHUB_EVENT_NAME=pull_request "GITHUB_EVENT_PATH=$EVENT" "GITHUB_HEAD_REF=$BRANCH" GITHUB_BASE_REF=main \
-    bash -c "cd '$SHARD' && uv run pytest tests/test_plugin_release_drift_ledger.py tests/test_plugin_channel.py tests/test_cut_plugin_release.py tests/test_sn_plugin.py tests/hooks/test_agent_dispatch_expect.py -q -p no:cacheprovider" \
+    bash -c "cd '$SHARD' && uv run pytest tests/test_plugin_release_drift_ledger.py tests/test_plugin_channel.py tests/test_cut_plugin_release.py tests/test_sn_plugin.py -q -p no:cacheprovider" \
     || _die "pin-walking tests must pass (skip, not raise) on a tagless shard-shaped checkout"
 echo "   shard-shaped (tagless depth-1) checkout: pin-walking modules pass"
 
@@ -499,7 +491,7 @@ tagco_run pytest -m lint tests/test_plugin_structure.py -q -p no:cacheprovider |
 tagco_run pytest tests/hooks/ -q -p no:cacheprovider || _die "tests/hooks/ failed at the tag"
 # Same two exclusions as plugin-release.yml: both modules walk v* tag
 # history a depth-1, two-tag checkout cannot resolve.
-tagco_run pytest -m lint -q -p no:cacheprovider --ignore=tests/test_wire_contract_pairing_lint.py --ignore=tests/test_rehearsal_native_legs_refuse_no_build.py --ignore=tests/test_docs_reference_rot.py || _die "-m lint failed at the tag"
+tagco_run pytest -m lint -q -p no:cacheprovider --ignore=tests/test_wire_contract_pairing_lint.py --ignore=tests/test_docs_reference_rot.py || _die "-m lint failed at the tag"
 tagco_run python scripts/check_cut_ledger_clean.py --base "$derived_base" --cut "$TAG" || _die "check_cut_ledger_clean.py failed"
 
 _step "back-merge main -> develop (scripts/plugin_cut_back_merge.sh) and develop's own drift contract"

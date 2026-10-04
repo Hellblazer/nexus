@@ -6,8 +6,7 @@ which are complete rosters and one of which is corroboration only.
 
 WHY THE TRANSCRIPT IS NOT ENOUGH. Claude Code records a hook in the session
 transcript only when the hook PRODUCES OUTPUT. ``preflight`` returns
-``stdout=None`` on a healthy host by explicit design; ``behaviour_census``
-has nothing to say on a virgin box. Both vanish, so "silent and fine" and
+``stdout=None`` on a healthy host by explicit design, and vanishes, so "silent and fine" and
 "never ran" become the same observation -- and "never ran" is precisely the
 fail-open this harness exists to catch. The per-event roster that DOES list
 silent hooks (``hookInfos``) is emitted only for ``stop_hook_summary``; the
@@ -44,7 +43,7 @@ import sys
 #: Declared silent on a healthy virgin box. Absence from the TRANSCRIPT is
 #: expected for these and means nothing; absence from the SHIM roster is a
 #: real finding, because the shim runs before the handler can decline to speak.
-SILENT_BY_DESIGN = {"nx-hook preflight", "behaviour_census.py"}
+SILENT_BY_DESIGN = {"nx-hook preflight"}
 
 #: Removed from the staged manifest by run.sh because they would mutate the
 #: wheel under test: `upgrade-auto` installs a generation and flips
@@ -55,17 +54,11 @@ SILENT_BY_DESIGN = {"nx-hook preflight", "behaviour_census.py"}
 EXCLUDED_BY_HARNESS = {"nx-hook upgrade-auto", "nx-hook self-gc"}
 
 #: Real, documented events (code.claude.com/docs/en/hooks.md) that this
-#: harness cannot provoke. Verified with claude-code-guide rather than
-#: guessed, because "the event name is wrong" and "the event did not occur"
-#: are the same observation and only one of them is a defect:
-#:   PostCompact fires only when compaction ACTUALLY occurs -- `/compact` on
-#:     a short session has nothing to compact, so the turn completes and no
-#:     hook runs.
-#:   StopFailure fires only on an API error, which this run does not induce.
-NOT_PROVOKED = {
-    "hook_post_compact": "PostCompact fires only when compaction actually occurs",
-    "hook_stop_failure": "StopFailure fires only on an API error",
-}
+#: harness cannot provoke, verified rather than guessed, because "the event
+#: name is wrong" and "the event did not occur" are the same observation and
+#: only one of them is a defect. Empty since cleanup step A3 (nexus-0r1uz)
+#: deleted the PostCompact and StopFailure hooks that were the two entries.
+NOT_PROVOKED: dict[str, str] = {}
 
 
 def label(entry: dict) -> str:
@@ -181,26 +174,11 @@ def transcript_trouble(paths: list[pathlib.Path]) -> list[str]:
 
 
 #: The mcp_tool handlers one subagent-dispatch turn provokes (SHAKEOUT_HOOK_PROBE,
-#: nexus-wauo1.37): PreToolUse on the Agent tool, the three SubagentStart
-#: entries, SubagentStop, and the turn's own Stop.
-#:
-#: Two of the original six -- ``hook_agent_dispatch_expect`` and
-#: ``hook_subagent_start_stamp`` -- were removed at bead nexus-5l8i8, which
-#: moved both off the mcp_tool tier onto the command tier (an MCP-server
-#: outage was dropping the RDR-184 ledger rows they write). Neither is
-#: called as an MCP tool by an ordinary dispatch turn any more, so they
-#: would never appear in ``mcp-stdin.jsonl`` and this probe would report
-#: them PROBE FAILED forever, correctly and uselessly.
-#:
-#: ``hook_subagent_start_tuple`` and ``hook_subagent_stop_tuple`` -- the
-#: RDR-205 ledger's two projectors -- were removed the same way at bead
-#: nexus-egm7p, for the identical MCP-disconnect hazard nexus-5l8i8 fixed
-#: for the RDR-184 writers. What remains: ``hook_subagent_start`` (still
-#: mcp_tool) and the turn's own ``hook_stop_verification``.
-PROBE_HOOKS: tuple[str, ...] = (
-    "hook_subagent_start",
-    "hook_stop_verification",
-)
+#: nexus-wauo1.37). The RDR-184 ledger writers and RDR-205 projectors that
+#: used to be among them were deleted at cleanup step A1 (nexus-0r1uz).
+#: What remains: ``hook_subagent_start`` (mcp_tool). The Stop hook
+#: ``hook_stop_verification`` was deleted at cleanup step A3.
+PROBE_HOOKS: tuple[str, ...] = ("hook_subagent_start",)
 
 
 def probe_main(jsonl: pathlib.Path) -> int:

@@ -34,9 +34,10 @@ bd dolt push
 
 Issues in Beads are:
 - **Dolt-backed**: the live database is Dolt, embedded in-process; `bd dolt push`
-  sends it to the remote. `.beads/issues.jsonl` is a tracked JSONL EXPORT
-  (`bd export`), not the store: in this repo it was last written 2026-05-10,
-  so read it as a snapshot of that date, never as current state
+  sends it to the remote. No JSONL export is tracked: the May 2026
+  `.beads/issues.jsonl` snapshot was removed 2026-10-03 because readers took
+  its 255 rows for the store. `tests/fixtures/bead_ids.txt` (ids only,
+  `scripts/refresh_bead_id_manifest.py`) is the committed artifact
 - **AI-friendly**: CLI-first design works perfectly with AI coding agents
 - **Branch-aware**: Issues can follow your branch workflow
 - **Hooks**: `.beads/hooks/` carries the repo's own pre-commit/post-merge wiring

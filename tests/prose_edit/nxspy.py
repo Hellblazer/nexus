@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Recording shim for `nx`: logs argv to $PROSE_EDIT_NX_CALLS, then runs the real CLI.
 
 memory.py calls whatever PROSE_EDIT_NX names; the tests point it here so they can

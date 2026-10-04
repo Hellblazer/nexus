@@ -316,7 +316,6 @@ def test_expire_serverside_noMethod_returnsNone():
     db = _NoGcMethods()
     assert expire_quarantine_serverside(
         db, "quarantine-code__x", "code__x", now_stamp(),
-        floor_fraction=0.5, floor_min_chunks=100,
     ) is None
 
 
@@ -326,7 +325,6 @@ def test_expire_serverside_404_now_RAISES_fallback_retired():
     with pytest.raises(VectorServiceError):
         expire_quarantine_serverside(
             db, "quarantine-code__x", "code__x", now_stamp(),
-            floor_fraction=0.5, floor_min_chunks=100,
         )
 
 
@@ -335,7 +333,6 @@ def test_expire_serverside_non404_reraises():
     with pytest.raises(VectorServiceError):
         expire_quarantine_serverside(
             db, "quarantine-code__x", "code__x", now_stamp(),
-            floor_fraction=0.5, floor_min_chunks=100,
         )
 
 
@@ -343,6 +340,22 @@ def test_expire_serverside_success_returnsExpiredAndRefused():
     db = type("Db", (), {"gc_expire_quarantine": _Returns({"expired": 0, "refused": 12})})()
     result = expire_quarantine_serverside(
         db, "quarantine-code__x", "code__x", now_stamp(),
-        floor_fraction=0.5, floor_min_chunks=5,
     )
     assert result == (0, 12)
+
+
+def test_expire_serverside_sends_a_floor_that_can_never_trip_and_no_force():
+    """nexus-wbfpw.74: the client's expiry carries no fraction floor. The engine's test is
+    ``v_frac > p_floor_fraction`` with v_frac in (0, 1], so 1.0 never trips it; force stays false because it
+    would only be an override of a floor that is not there."""
+    seen: list[tuple] = []
+
+    class Db:
+        def gc_expire_quarantine(self, *args):
+            seen.append(args)
+            return {"expired": 5, "refused": 0}
+
+    assert expire_quarantine_serverside(Db(), "quarantine-code__x", "code__x", "2026-01-01T00:00:00Z") == (5, 0)
+    ((qname, origin, cutoff, fraction, minimum, force),) = seen
+    assert (qname, origin, cutoff) == ("quarantine-code__x", "code__x", "2026-01-01T00:00:00Z")
+    assert fraction == 1.0 and force is False

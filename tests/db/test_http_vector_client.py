@@ -2797,7 +2797,7 @@ def test_serving_embedding_mode_reads_singleton_best_effort(monkeypatch):
 class TestOnnxLocalUpsertChunkCapValidation:
     """nexus-97dp4 CRITICAL 2: ``NX_ONNX_LOCAL_UPSERT_CHUNK_CAP`` overrides
     the nexus-33hpq memory-safety cap (default 16) for
-    ``tests/e2e/local-index-memory-gate.sh``. Before this fix the raw
+    a since-deleted local-index memory gate. Before this fix the raw
     ``int(os.environ.get(...) or 16)`` had no validation (a non-numeric
     value crashed the process with an uncaught ValueError at IMPORT time,
     killing every ``nx`` invocation), no bounds checking, and no log line
@@ -2841,7 +2841,7 @@ class TestOnnxLocalUpsertChunkCapValidation:
 
     def test_valid_override_is_accepted_with_no_upper_bound(self) -> None:
         """Deliberately NOT bounded above the safe default (16) —
-        tests/e2e/local-index-memory-gate.sh's whole purpose is RAISING
+        that gate's whole purpose was RAISING
         this toward the pre-nexus-33hpq 300 (or beyond) to prove the
         gate's corpus actually binds a higher ceiling too. Capping this
         above the default would defeat that harness."""

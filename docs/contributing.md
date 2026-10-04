@@ -201,200 +201,11 @@ https://github.com/Hellblazer/nexus/settings/branches:
   - Require a pull request before merging
   - Require status checks to pass before merging:
     - `pytest-gate` (one required check on both `main` and `develop`; it fans
-      in over whichever suite path ran: the sharded hosted pytest matrix, or
-      the single `test-qwen` job on the self-hosted `qwen-linux` runner for an
-      owner push to develop while `QWEN_CI_PUSH_RUNNER` is `qwen-linux`, and it
-      fails when the chosen path did not
-      succeed or the other did not skip, plus the lint and census legs. The
+      in over the sharded hosted pytest matrix, plus the lint and census legs. The
       swap from the prior `pytest (Python 3.12)` / `pytest (Python 3.13)`
       two-check shape happened at nexus-n0ful)
   - Require branches to be up to date before merging
   - Do not allow force-pushes (the develop reset on 2026-05-21 was a one-time bypass via the API; routine resets are not permitted).
-
-### First run of the qwen-linux route
-
-The qwen route is OPT-IN (Sam, 2026-10-01): `test-qwen` and its routing do
-nothing until the repository variable `QWEN_CI_PUSH_RUNNER` is exactly
-`qwen-linux`. Unset, empty, a typo, another case or a trailing space all mean the
-hosted shards. So landing the change is safe, and enabling it is a deliberate
-sequence. Once enabled, the route fires on every owner push to develop whose diff
-is not doc-only, not only on merges that touch `ci.yml`. The host facts are in T2
-`nexus/qwentescence-test-host-howto`.
-
-The enable sequence, in order; stop at the first red:
-
-1. **Land the change.** The variable is unset, so the hosted shards still run.
-   Check `gh variable list` first: a leftover `qwen-linux` would make the landing
-   push route to the qwen runner.
-2. **Host steps, once.** Without them the job fails at its lease step, by design.
-   Create the shared lease directory (`QWEN_SUITE_LEASE_ROOT`, default
-   `/var/lib/nx-suite-lease`: `sudo groupadd -f nx-suite`,
-   `sudo usermod -aG nx-suite ghci`, `sudo usermod -aG nx-suite nxtest`,
-   `sudo install -d -o root -g nx-suite -m 2775 /var/lib/nx-suite-lease`),
-   restart the runner service so `ghci` has the group. Item 10 of the
-   first-run checklist was run green on 2026-10-02, so a hand run goes through
-   `scripts/qwen-hand-run.sh` (below), which takes the box lock and
-   passes `NX_BUILD_LEASE_ROOT` and `NX_SUITE_LEASE_WAIT=1` itself. Do not
-   export them from `nxtest`'s `.bashrc`: bash reads it in non-interactive ssh
-   shells, and the export leaked into tests that scrub the variable.
-   The host needs `flock` (util-linux); the job's toolchain preflight and its
-   suite step both fail closed without it. The hand-run wrapper also needs GNU
-   `timeout` (coreutils) and fails closed without it. Apply the `/etc/wsl.conf` fix
-   (WSL interop and the `/mnt` automount off, `AGENTS.md` § Self-hosted runners
-   and fork PRs).
-3. **Run the probe as `ghci` and read it green.** A `workflow_dispatch` is offered
-   only for a workflow file on the default branch (`main`), and this file is not
-   there until a release promotes it. Until then push a throwaway branch named
-   `runner-probe/qwen-<date>` from the commit under test (`git push origin
-   HEAD:refs/heads/runner-probe/qwen-<date>`): the probe's second trigger is a
-   push to that pattern, owner only, and no other workflow triggers on it
-   (`hellmini-probe.yml` is dispatch-only since 2026-10-02). Read the run (every
-   step green: identity as `ghci`, no `sudo`, no readable file under the nexus
-   config directory, the Windows side passing with its positive control). **Read
-   the credential line, not just the colour.** It passes when it is CHECKED with
-   zero readable files, or when the probe reports the live install's home
-   directory as closed (not traversable by `ghci`: a stronger state, no warning).
-   It fails when any file under the nexus config directory is readable. A
-   `NOT CHECKED` for any other cause (the listing did not complete, the config
-   directory absent while the home is traversable, no home at all) is not a
-   pass: the credential check never ran; the run is still green, and carries a
-   warning annotation on its summary. Do not record such a run as the isolation
-   evidence; fix the host (or the path) and run again. Then delete the branch (`git push origin :refs/heads/runner-probe/qwen-<date>`).
-   The same push works after the file is on `main`; a dispatch works then too.
-4. **Record the green run id** in `AGENTS.md` (the "Probe run record" line under
-   the routing section), in the change that does step 5.
-5. **Set the variable:** `gh variable set QWEN_CI_PUSH_RUNNER --body qwen-linux`,
-   then confirm with `gh variable list`.
-6. **Push once and walk the checklist below.**
-
-Turn it off with `gh variable delete QWEN_CI_PUSH_RUNNER`. **"Re-run failed jobs"
-keeps the OLD route** (the `changes` job succeeded, so it is not re-run, and its
-`ci_runner` output stays): after changing the variable use "Re-run all jobs" or
-push again. A green probe is one point in time. `ghci` is in the `docker` group,
-which is root on the distro, so a job could rewrite `/etc/wsl.conf` for the next
-WSL restart; the first step of `test-qwen` re-checks the Windows side on every run
-and fails the job closed (it notices after the fact, it does not prevent).
-
-First cold run:
-1. The job lands on `qwen-linux` (runner name in the log header); the consistency,
-   lease and toolchain steps are green as `ghci`.
-2. bge and docling prime and `ci_warm_docling.py` pass.
-3. The box lock is taken (the log says `box lock .../box.lock is free` or `is held ... waiting`), and
-   `build-gate-jar.sh` inside it is a cache hit or a roughly 9 minute build; the jar is stamped.
-4. The suite, in the same step and under the same lock at `-n 8`, reports 20000 or more passed and none
-   failed (the `-n 12` figure of 10 minutes is not yet measured at 8, expect somewhat longer); the floor
-   step is green.
-5. The six hosted shards and `service-jar` show skipped, and `pytest-gate` passes.
-6. The board has `queued`, `in_progress` and `completed` posts for
-   `pytest (qwen-linux full suite)` with an unmangled name, and
-   `scripts/ci_status.py <sha>` exits 0.
-7. The leftover-process report says no substrate processes were left behind.
-
-Then, before the route is called settled:
-8. A second warm run: checkout `clean` deletes `.venv` and `service/target`, so
-   this proves the cache paths (uv, models, the jar cache in the git common dir).
-9. A cancel test: push twice in quick succession so the first run is cancelled
-   mid-suite, then check on the host for orphan Postgres and `nexus-service`
-   processes, containers on the shared docker daemon, and shared-memory
-   segments (`ipcs -m`). The next run's orphan sweep should clear what it left.
-10. The overlap check: five cases, all through `scripts/qwen-hand-run.sh` as
-    `nxtest`, and none of them can be run from the laptop. It was run green on
-    2026-10-02.
-    (a) Start a hand run, push, and see in the CI job log that the box lock is held and
-    that it posted and locked its marker (`CI priority marker .../ci-waiting.<run>.<attempt>
-    posted and locked`); the CI job waits for the hand run to finish and starts when it
-    ends, with no OOM on the distro.
-    (b) The case the marker exists for: with a CI job queued behind a running hand
-    run, start a second hand run; it must exit 76 ("CI has strict priority") without
-    taking the lock, and once the first hand run ends CI must take the lock next.
-    (c) Cancel a CI job that is QUEUED behind a hand run (not a running one: the
-    common cancel is a newer push while the job waits): the marker must be gone
-    within seconds and a new hand run must be able to start at once, not after a
-    timeout. From another shell, `flock -n -s -E 200 <marker> true` returning 200
-    while the job is queued and the file being absent after the cancel shows both
-    halves.
-    (d) The marker must be readable by `nxtest`: `ls -l` on it while CI is queued
-    shows group or other read, and `flock -n -s -E 200 <marker> true` run as `nxtest`
-    returns 200, not an error.
-    (e) Time a hand run at `-n 8`, warm and cold. Measured 2026-10-02: 801 s cold,
-    723 s warm, so the hold cap (`QWEN_HAND_RUN_HOLD_SECONDS`, 1500) has about
-    a 1.9x margin over the cold run.
-11. The skip-reason diff (the `TODO(qwen-floor)` in `ci.yml`): diff the `-rs`
-    skip reasons in `suite-output.txt` against a hosted run of the same tree. The
-    measured gap is about 2k tests (25,705 passed here against about 27.7k from
-    the shards). Fix or accept each reason, then raise the floor to about
-    measured minus 2% and delete the TODO.
-12. One exercise of the toggle: delete `QWEN_CI_PUSH_RUNNER`, push, see the hosted
-    shards run and `test-qwen` skip, then set it back to `qwen-linux`. "Re-run
-    failed jobs" keeps the old route, so a toggle takes a new push or "Re-run all
-    jobs".
-
-A green run does not show the overlap or flake behaviour (that takes about ten
-runs), signal-timing tests under `-n 8` while the host's inference is loaded,
-or the `GITHUB_ACTIONS` CI-only skip branches (`NX_T2_SUBSTRATE_EXPECTED=1`
-disarms them, so only their fail-loud twins run).
-
-#### Hand runs on qwentescence
-
-A hand run as `nxtest` takes the same box lock the CI job does, across the jar
-build and the suite, so a hand run and CI cannot overlap at any stage (the WSL VM
-wedged twice on 2026-10-01 when a suite overlapped a Maven gate-jar build; the
-suite lease alone does not cover the build).
-
-Policy (Sam, 2026-10-02): agents' full suites use hellmini. Item 10 of `docs/contributing.md` § First run of the qwen-linux route (the overlap check) was run green on the host on 2026-10-02, so a hand run there is supported only through `scripts/qwen-hand-run.sh`, and only for a case that needs Linux.
-
-**CI has strict priority on that lock** (nexus-0wp30). `flock` does not order its
-waiters and the `test-qwen` job gives up after 1800 s, so on 2026-10-02 a queue of
-hand runs starved CI for about 24 minutes. The job therefore posts a marker,
-`ci-waiting.<run>.<attempt>`, in the lease directory before it waits for the
-lock, and holds a kernel lock (`flock`) on that file for as long as it is queued.
-The lock, not the file's age, is what says CI is still waiting: the kernel drops
-it when the job's process dies, SIGKILL included, so a killed job stops blocking
-hand runs at once. The job removes the file the moment it holds the box lock and
-on every other way out of the step (success, timeout, failure, cancellation,
-and an `always()` step after it). A cancel ends the wait at once: the lock wait
-runs as a background job the step `wait`s on, because bash defers a trapped
-signal until a foreground child ends. **A hand run goes ONLY through
-`scripts/qwen-hand-run.sh`**, as `nxtest` in a worktree under `~/src/nexus-wt/`:
-
-```bash
-scripts/qwen-hand-run.sh [pytest args]     # uv sync -q && scripts/build-gate-jar.sh && uv run pytest -n 8 -q [args]
-```
-
-It passes `NX_BUILD_LEASE_ROOT` and `NX_SUITE_LEASE_WAIT=1` itself, so nothing is
-exported from a profile. A marker counts as live only while the wrapper cannot
-take a shared lock on it. While one is live the wrapper refuses to start (exit
-76, "retry later"). If CI queues after it took the lock, it releases the lock and
-backs off with jitter, and gives up with 76 after `QWEN_HAND_RUN_MAX_WAIT_SECONDS`
-(3600). An unlocked marker is dead whatever its age, and one older than two
-minutes is removed. Only where the lock cannot be tested (the file cannot be
-opened) does it fall back to the file's age: younger than
-`QWEN_CI_MARKER_STALE_SECONDS` (2100: the job's 1800 s wait plus a margin) counts
-as live, and an age it cannot read does not count. The run is capped at
-`QWEN_HAND_RUN_HOLD_SECONDS` (1500, below CI's 1800 s wait; a cold run with the
-jar build may need more, and raising it makes CI wait that much longer); a run
-that hits the cap is stopped and exits 77. The suite runs with the box-lock file
-descriptor closed, so a Postgres or JVM left behind by a run does not keep the
-lock. Exit 69 means a host prerequisite is missing (`flock`, `timeout`, or the
-lease directory); 69, 76 and 77 each print that nothing ran to completion and
-that it is not a test failure. 75 is not used: the suite lease already exits 75.
-A hangup, `^C` or `TERM` sent to the wrapper stops the suite's whole process
-group first and releases the lock only once that group is gone (exit 129, 130 or
-143); a descendant that ignores `TERM` is killed after `QWEN_HAND_RUN_KILL_SECONDS`
-(20). A `SIGKILL` of the wrapper itself is not covered: the lock is released and the
-suite keeps running until someone stops it. A hand run that already holds the lock
-when CI arrives is not interrupted; CI waits for it, for at most the hold cap. A run at `-n 8` took 801 s cold and
-723 s warm (item 10e, 2026-10-02). A raw `flock ... box.lock` or a bare
-`pytest` is not a supported hand-run form: it takes the lock, or the suite lease
-CI's own pytest needs, with no regard for a queued CI job.
-
-`-n 8`, not 12 (about 2.5 GB per worker on a 40 GB VM shared with a production
-llama-server). No Maven or engine suites on qwentescence: the Java engine suites
-(`scripts/mvnw-leased.sh`, `service/` tests) run on hellmini. The CI job waits up
-to 30 minutes for the lock and then fails naming it. Host side nothing changes
-for this: the marker is an ordinary file in the existing lease directory
-(`root:nx-suite` 2775) that `ghci` writes and `nxtest` opens read-only, so the
-job creates it readable by the group whatever its umask.
 
 ## License
 
@@ -440,15 +251,16 @@ Every step below is **required**. Missing any one of them has caused problems in
    uv run python scripts/check_engine_release_floor.py --paired-deploy engine-service-vX.Y.Z
    ```
    The flag accepts a below-floor cloud only when the named tag independently
-   verifies as a published (non-draft, with assets) GH release, exactly equal
-   to `REQUIRED_ENGINE_VERSION`, and the newest published engine tag — any
-   single miss stays red with a named reason. On acceptance it prints a
+   verifies as a published (non-draft, with the `nexus-service-linux-amd64`
+   asset) GH release, exactly equal to `REQUIRED_ENGINE_VERSION`, the newest
+   published engine tag, and recent (72h) — any single miss stays red with a named reason. On acceptance it prints a
    "PAIRED MODE" acknowledgment and a POST-TAG VERIFY obligation: once the
    deploy lands, re-run the same command WITHOUT `--paired-deploy` to confirm
    convergence; escalate loudly if it is still behind at that point.
 
    The reverse direction — an engine deploying ahead of the client commits
-   it requires — is a separate gate, `scripts/check_client_release_precondition.py`,
+   it requires — is a separate mode of the same script,
+   `check_engine_release_floor.py --client-precondition <engine-tag>`,
    run from the `engine-release` skill before a new `engine-service-v*` tag
    deploys (nexus-9ssih deploy order); it is not part of this PyPI checklist.
 
@@ -538,15 +350,10 @@ Every step below is **required**. Missing any one of them has caused problems in
    built WHEEL actually ships `nexus/_install/*.sh` — every other test of
    `packaged_install_dir()` runs against an editable checkout, where that
    path exists because the repo does). Complements the upgrade-axis
-   gates (rehearsal, era-hop, guided) which all start from a populated
+   gate (package-upgrade) which starts from a populated
    install — the 2026-07-21 fresh-box defect class was invisible to every
    one of them. Must end `FRESH-INSTALL MVV PASSED — ... (LOCAL WHEEL,
-   release-battery layer)`. Leg 8d/10 (nexus-cbo4a) additionally drives the
-   real SubagentStart/SubagentStop tuple-ledger-projector hook wrappers
-   against this virgin install, and `tests/e2e/cloud-client-path-gate.sh`'s
-   leg G does the same against a live cloud config — together the only
-   pre-tag proof that the wheel's `nexus.hooks.tuple_ledger_project`
-   actually lands a tuple on both install classes (nexus-g2lln / nexus-0zsmg).
+   release-battery layer)`.
 
    This is the LOCAL WHEEL layer: it builds and installs the tree under
    test, so it proves the release candidate works, but it resolves
@@ -568,110 +375,15 @@ Every step below is **required**. Missing any one of them has caused problems in
    Run it manually after a tag publishes to verify what PyPI is actually
    serving; see the shakedown playbook for the standing T1 trigger.
 
-7b. **Run the sandbox smoke** (~2 min)
-   ```bash
-   ./tests/e2e/release-sandbox.sh smoke
-   ```
-   Required for any change touching `pyproject.toml`, `uv.lock`,
-   `src/nexus/mcp/**`, `conexus/**`,
-   `.claude-plugin/**`, or `src/nexus/commands/{doctor,upgrade}.py` — which
-   a release always does (the version bumps alone qualify). The reinstall it
-   drives is genuinely isolated and runs cleanly with live Claude Code
-   sessions/MCP servers active. There is no live-holder refusal to get past:
-   an install builds a new `<tools>/gen-<stamp>` and flips `current`, so
-   holders keep running from the tree they resolved at spawn and converge on
-   their next one (nexus-utpuw.8). What still matters here is ISOLATION —
-   the sandbox `HOME` must be activated *before* the reinstall runs, because
-   the generation root resolves off `$HOME`; get that wrong and the sandbox
-   writes into the live install (the `release` skill, step 6 — AGENTS.md
-   § Cutting a release is a pointer to it as of 2026-09-20).
-
-7c. **Run the sandbox shakedown** (~5-10 min warm cache, +10-15 min cold)
-   ```bash
-   ./tests/e2e/release-sandbox.sh shakedown
-   ```
-   Required on every release. Smoke (7b) only reinstalls and runs `nx
-   doctor` checks; it never calls `nx index pdf`, so it cannot catch an
-   indexing regression. The shakedown does — including MinerU end-to-end
-   through the production `nx index pdf` path (step 3b of 11, the
-   `bft-to-smr.pdf` formula fixture) — and it is the ONLY gate that does:
-   the slow-marked `test_mineru_path_preserves_formulas` pytest test is
-   not part of any default or scheduled run (nexus-6xkdu). Cold cache
-   pays MinerU's ~2-3 GB model download once. All four indexing steps
-   (2, 3a, 3b, 4) can fail the run — the `|| true` that previously made
-   them theatre was removed at nexus-6xkdu — and the run ends with an
-   explicit `SHAKEDOWN PASSED`/`SHAKEDOWN FAILED` verdict line. Halt on
-   any failure.
-
-7d. **Data-token CLI gate** (optional, ~5-15 min; not part of the
-   standard battery above — run it once before flipping `mint_token` on
-   for real, or after touching `src/nexus/db/data_token.py`,
-   `commands/config_cmd.py`, `commands/service_cmd.py`'s token group, or
-   `health.py`'s `_check_mint_token`)
-   ```bash
-   ./tests/e2e/data-token-cli-gate.sh
-   ```
-   RDR-005 2a self-minting (nexus-rftfs / nexus-wrwb7 / nexus-ssqk9): the
-   sandboxed-HOME, real-`nx`-subprocess journey for client-side
-   data-token self-minting — issues a `scope=mint-locked` credential
-   against a throwaway local engine, `nx config set mint_token`/
-   `mint_tenant`, a `store put`/`search` round trip that can only
-   succeed via the self-minted token, `nx doctor`'s mint check, and a
-   wrong-`mint_tenant` negative arm. Complements
-   `tests/db/test_data_token_manager_e2e.py` (which proves the
-   `DataTokenManager` seam in-process) by proving the CLI/config.yml/
-   doctor wiring only a real subprocess exercises. Must end
-   `DATA-TOKEN CLI GATE PASSED`.
-
-7e. **Run the upgrade-shakeout** (~3-5 min; EVERY RELEASE)
-   ```bash
-   ./tests/e2e/upgrade-shakeout.sh run                       # latest stable -> this branch
-   ./tests/e2e/upgrade-shakeout.sh run --from-version 4.34.6 # exercises drift -> reconcile
-   ```
-   **Unconditional as of 7.16.1.** This step previously read "conditional",
-   qualified by a trigger list ending in "plugin name / marketplace.json
-   `source.ref` pinning" — a condition true of EVERY release, since advancing
-   `source.ref` to the new tag IS the release (step 7 above). A gate whose
-   condition never fails is unconditional wearing a qualifier, and the
-   qualifier is what invites the skip. It got skipped on 7.16.1, caught only
-   because a human asked what testing remained.
-
-   The gate's own step 9/12 is `plugin marketplace.json reflects rename + tag
-   pinning`, so it checks precisely what every release changes, for 3-5
-   minutes. Sandbox smoke (7b) tests one version in isolation; this is the only
-   gate that tests `FROM_VERSION` → this branch, the path an installed user
-   actually traverses. Runnable from any baseline — it detects stanza drift at
-   runtime and cross-checks `nx doctor`'s drift claim against the actual stanza
-   byte-diff, so a doctor false-positive/negative fails the run. Must end
-   `UPGRADE-SHAKEOUT PASSED — steps=12 skipped=0`; a non-zero `skipped` is a
-   finding, not a pass. `./tests/e2e/upgrade-shakeout.sh reset` cleans the
-   sandbox.
-
-7f. **Run the generation-flip live-holder gate** (~30s; conditional)
-   ```bash
-   bash tests/e2e/gen-flip-live-holder.sh
-   ```
-   Required for any change touching `src/nexus/_install/**`,
-   `src/nexus/install_layout.py`, `src/nexus/install_census.py`, or anything
-   else in the shim / flip / GC machinery (nexus-utpuw.17). It builds TWO real
-   conexus generations from this checkout, spawns an actual `nx-mcp` holder
-   THROUGH the shim, flips `current` underneath it, and then asserts all three
-   parts of the side-by-side promise: the running holder still answers a real
-   MCP tools/call out of its ORIGINAL generation, a fresh spawn lands in the
-   NEW one, and GC refuses to reap the held tree. Hermetic (`env -i`, virgin
-   HOME, its own `NEXUS_CONFIG_DIR`), and it asserts its own seal: the sandbox
-   has no backend, so a green run REQUIRES that tool call to fail for want of
-   a BACKEND — a call that SUCCEEDS means the holder reached the operator's
-   real collections and fails the gate, and an import-shaped failure after the
-   flip is nexus-q3xrx itself. Must end `GEN-FLIP LIVE-HOLDER PASSED`.
-
-   The fast-loop half of the pair (`tests/scripts/test_generation_flip_live_holder.py`,
-   nexus-utpuw.16) runs on every `pytest -n auto`, but against a fixture
-   package. This one is the only thing that guards the ARTIFACT — real console
-   scripts, the real dependency graph, the real certifi path whose failure was
-   the concrete nexus-q3xrx symptom (95 cacert tracebacks). Nothing in the fast
-   gates exercises shim/current/GC at all. Kept in sync with AGENTS.md
-   § Cutting a release, step 1c.
+7b-7f. **Removed** (cleanup step 11). The sandbox smoke, the sandbox
+   shakedown, the data-token CLI gate, the upgrade shakeout and the
+   generation-flip live-holder gate were deleted with their scripts; the release
+   battery is now exactly the fresh-install MVV (7a), the package-upgrade
+   convergence MVV (`tests/e2e/migration-rehearsal/run.sh --package-upgrade`)
+   and the local-service gate, behind one preflight
+   (`tests/e2e/release-preflight.sh`). The fast-loop generation-flip test
+   (`tests/scripts/test_generation_flip_live_holder.py`) still runs on every
+   `pytest -n auto`.
 
 8. **Commit on a release branch and PR to `main`** (branch protection requires a PR; do NOT direct-push).
    Base the release branch on **develop**, not main — a release PROMOTES develop's accumulated
@@ -776,7 +488,6 @@ Every step below is **required**. Missing any one of them has caused problems in
     plain `-> working tree` here means `NEXUS_TARGET_RELEASE` was not set
     and the loop was not actually closed.
 
-11d. **Post-publish: real-dispatch check** (nexus-0zsmg, T2 `nexus/shakedown-playbook` §2 S18) — dispatch one trivial agent in a live Claude Code session on each box class (managed cloud, local supervisor), then run `tests/e2e/post-publish-dispatch-check.sh` against that session; must end `POST-PUBLISH DISPATCH CHECK PASSED` on both. Run it with NO argument first — it auto-discovers the session id from ledgers with recent agent-dispatch activity and uses it when exactly one exists, refusing (naming every candidate) rather than guess when more than one does. Do not reach for the harness's own session id: JDR-001 names three distinct T1 scopes on this box, and the ledger is written under the id leased at MCP-server spawn, not the harness's task/output-path id (nexus-7m6uc). A named session id that turns up no ledger gets its own diagnostic listing every ledger that does exist.
 
 12. **Reinstall local tool and verify**
     ```bash
@@ -837,19 +548,16 @@ Minimal battery, two layers that deliberately differ:
 
 - **The cut script runs locally**, against the cut branch's mixed state:
   the FULL `-m lint` bucket, `tests/test_plugin_release_drift_ledger.py`,
-  `tests/hooks/`, and `./tests/e2e/release-sandbox.sh smoke`.
+  and `tests/hooks/`.
 - **The tag workflow** (`plugin-release.yml`, verify-only, depth-1
   two-tag checkout) runs: the wheel-surface proof + drift-ledger contract,
   `tests/test_plugin_structure.py` under `-m lint` (the module is
   lint-marked; without the marker pytest collects nothing and exits 5),
   `tests/hooks/`, the `-m lint` bucket minus BOTH
-  `test_wire_contract_pairing_lint.py` and
-  `test_rehearsal_native_legs_refuse_no_build.py` (each walks `v*` tag
-  history the single-tag fetch cannot resolve; ci.yml's full-history lint
-  job still runs them), and `scripts/check_cut_ledger_clean.py` against
-  the cut's own range. It does NOT re-run release-sandbox smoke — that
-  runs only in the cut script's local battery today (CI wiring is
-  non-gating follow-on nexus-98gpl).
+  `test_wire_contract_pairing_lint.py` and `test_docs_reference_rot.py`
+  (each walks `v*` tag history or `origin/develop` the single-tag fetch
+  cannot resolve; ci.yml's full-history lint job still runs them), and
+  `scripts/check_cut_ledger_clean.py` against the cut's own range.
 
 Deliberately skipped everywhere, because none of them executes
 plugin-loader content: substrate gates, migration rehearsal,
@@ -864,7 +572,7 @@ cut derives its number from the new version's (empty) tag list.
 
 Trigger: this release's tag (client `vX.Y.Z` or engine `engine-service-vX.Y.Z`) carries a schema or data migration — a new Liquibase changeset, a new `upgrade_ladder` rung, or any change to a shape data already has to conform to. Four requirements, none of which the checklist above enforced before this section existed (T2 [22511] gap 9 — no schema-migration protocol existed in any release document; every prior trigger for "is this release safe" reduced to version identity and the standard functional gates, none of which speak to migration risk specifically). Operational checklist form: `.claude/skills/release/SKILL.md` Step 6d (client-side data migrations) and `.claude/skills/engine-release/SKILL.md` Step 5b (engine-side schema DDL). This section is their shared rationale and evidence citations.
 
-1. **Populated-store upgrade rehearsal at a stated, representative scale.** The mechanism is `NEXUS_TARGET_RELEASE=X.Y.Z tests/e2e/migration-rehearsal/run.sh --package-upgrade` (published-bytes mode; see Step 11c above) run against a corpus seeded above a named floor, not the harness's default toy seed (10-30 documents across `rehearse_cold.sh`, `rehearse_acquire.sh`, `rehearse_shakeout.sh`, `rehearse_hole_punch.sh`). State the floor and the actual seed count used in the release relay. If the seed cannot be brought to a genuinely representative scale before deploy, say so explicitly — do not let a toy-scale pass stand in for an at-scale one. RDR-191 is the standing evidence for why this matters: the cloud 385,484-row unify-chunks migration (T2 [22485]) is the only at-scale proof this project has produced for a chunk-table DDL change, and it ran in PRODUCTION — no pre-production rehearsal at that scale has ever happened. Treat that as a named, accepted gap until a representative-scale pre-production rehearsal exists, not a silently inherited one.
+1. **Populated-store upgrade rehearsal at a stated, representative scale.** The mechanism is `NEXUS_TARGET_RELEASE=X.Y.Z tests/e2e/migration-rehearsal/run.sh --package-upgrade` (published-bytes mode; see Step 11c above) run against a corpus seeded above a named floor, not the harness's default toy seed (10-30 documents in `rehearse_package_upgrade.sh` and `rehearse_acquire.sh`). State the floor and the actual seed count used in the release relay. If the seed cannot be brought to a genuinely representative scale before deploy, say so explicitly — do not let a toy-scale pass stand in for an at-scale one. RDR-191 is the standing evidence for why this matters: the cloud 385,484-row unify-chunks migration (T2 [22485]) is the only at-scale proof this project has produced for a chunk-table DDL change, and it ran in PRODUCTION — no pre-production rehearsal at that scale has ever happened. Treat that as a named, accepted gap until a representative-scale pre-production rehearsal exists, not a silently inherited one.
 
 2. **A rollback decision point, settled before the deploy relay fires.** Determine explicitly whether the migration can be rolled back after it commits. Non-transactional DDL (`CREATE INDEX CONCURRENTLY`, any Liquibase changeset that cannot run inside a transaction) forfeits the free atomic rollback a transactional migration gets — RDR-191's `nexus-o8dil.22` names this exactly: "CIC, non-blocking, +11%, cannot run in a transaction, and therefore forfeits the free atomic rollback that the local path gets." When the answer is no, write **IRREVERSIBLE** in the relay verbatim, and attach its substitute: a written rollback/abort runbook (exact statements, abort criteria) that exists and is in the operator's hand before the window opens, not improvised mid-window.
 
@@ -888,7 +596,7 @@ This is exactly the v7.7.0 sequence (2026-08-14, commit `62da4273b`): the first 
 - There is no button here to press; surface an explicit relay naming the target tag to redeploy (normally the previous `engine-service-v*` identity), never frame it as autonomous.
 - For a migration-carrying tag, redeploying an older BINARY does not undo an already-committed schema change — the schema and the binary are two different things to revert, and a `CREATE INDEX CONCURRENTLY`-style migration (see "Schema/data-migration releases" above) has no free rollback once committed. "Revert the engine" without "revert the schema" can leave an old binary talking to a new schema shape.
 - Local-mode installs are unaffected by any cloud revert — they pull whatever `REQUIRED_ENGINE_VERSION` (`src/nexus/engine_version.py`) pins on the client side. Walking local installs back to a prior engine identity requires a NEW client release that moves the pin backward, not a cloud-side action.
-- There is no automated post-revert verification today (T2 [22511] gap 2): confirm the revert landed with `nx service probe` (reads `/version` live) rather than trusting the `deployed-engine-version` T2 tracker, which is written by the post-tag verify (`scripts/check_engine_release_floor.py --record-deploy-from-gate-report`, from conexus's STEP-6 report; `nx service record-deploy --gate-report-dir` is the manual fallback) and is not consumed or re-checked by anything automatically.
+- There is no automated post-revert verification today (T2 [22511] gap 2): confirm the revert landed with `nx service probe` (reads `/version` live) rather than any recorded value. The `deployed-engine-version` T2 tracker and `nx service record-deploy` were deleted (cleanup step 10b); `/version` is the only source of truth.
 
 **Tag-retraction policy.** Moving, deleting, or force-pushing a published `vX.Y.Z` or `engine-service-vX.Y.Z` tag is **forbidden** except as an explicit, admin-only (Hal) decision — never a default remedy for a failed publish. Why: `.claude-plugin/marketplace.json`'s `source.ref` pins installed Claude Code plugin users to a specific, named tag as an IMMUTABLE identity; moving what a tag name resolves to after the fact is a supply-chain integrity violation, not a convenience — a user (or CI cache) that already resolved the old tag can silently diverge from one that resolves it after the move, with no way to tell from the tag name alone that this happened. `v7.6.0` is the standing lesson (2026-08-11): before the `workflow_dispatch` retry path existed, a publish failure (the twine/metadata mismatch above) was "fixed" by moving the tag, twice — `.github/workflows/release.yml`'s own header comment records it verbatim ("7.6.0 moved twice for exactly that reason") as the incident that justified building the retry path in the first place. If a tag genuinely must be retracted (e.g. a published artifact is actively harmful), it requires Hal's explicit authorization and: (a) a NEW tag carries the fix — never a reused or re-pointed old identity; (b) the bad PyPI release is yanked per the procedure above; (c) if `main`'s `source.ref` already points at the bad tag, a new release supersedes it — retracting the old tag alone does not move already-tagged users off it.
 

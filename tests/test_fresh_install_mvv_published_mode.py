@@ -717,8 +717,7 @@ def test_propagation_probe_argv_loses_no_cache_would_fail_this_test(tmp_path) ->
     assert needle in text, "probe invocation shape changed; update this control's needle"
     text = text.replace(needle, "pip install --dry-run --no-deps \\", 1)
     # The copy lives in tmp_path, so its own `dirname/../..` no longer finds the
-    # repo; the script sources tests/e2e/lib/candidate_engine.sh from REPO_ROOT
-    # (nexus-0kmat), so pin REPO_ROOT to the real checkout.
+    # repo; pin REPO_ROOT to the real checkout.
     repo_root_line = 'REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"'
     assert repo_root_line in text, "REPO_ROOT derivation changed; update this control"
     text = text.replace(repo_root_line, f'REPO_ROOT="{REPO_ROOT}"', 1)

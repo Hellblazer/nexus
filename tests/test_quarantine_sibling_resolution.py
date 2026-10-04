@@ -331,13 +331,16 @@ def test_a_shared_sibling_never_loses_another_origins_tagged_rows(
     assert s1.ids(shared) == set()
 
 
-def test_a_stranded_sibling_over_the_floor_is_refused_for_that_sibling_alone(
+def test_a_bulk_aged_quarantine_expires_through_nx_t3_gc_with_no_force(
     engine, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """A legacy-owner sibling is all old client rows, so the engine's per-sibling floor (>= 100 eligible rows and
-    more than NX_GC_FLOOR_FRACTION of the sibling's own rows) refuses it. ``nx t3 gc`` says so FOR THAT SIBLING,
-    names NX_GC_FORCE=1, and reports a different sibling's expiry as an expiry, not as a manifest keep."""
+    """The client's expiry of rows already past the restore window carries no fraction floor (nexus-wbfpw.74,
+    Sam 2026-10-03), matching the engine's own expiry: the engine function already keeps every chash the
+    origin's manifest still references, so a floor only wedged every bulk quarantine (one burst ages out as
+    ~100% of the sibling's client rows). A legacy-owner sibling of 110 unreferenced rows, all of the sibling's
+    client rows, expires with no NX_GC_FORCE; a different sibling's small expiry is reported as before."""
     monkeypatch.delenv("NX_GC_FORCE", raising=False)
+    monkeypatch.delenv("NX_GC_FLOOR_FRACTION", raising=False)
     cat, db = engine
     s = _Scenario(cat, db, monkeypatch, "floor", "legacy-owner", n_orphans=110)
     legacy = s.moved_into
@@ -349,16 +352,53 @@ def test_a_stranded_sibling_over_the_floor_is_refused_for_that_sibling_alone(
     out = capsys.readouterr().out
     legacy_line = next(line for line in out.splitlines() if f"Client expiry of {legacy} " in line)
     small_line = next(line for line in out.splitlines() if f"Client expiry of {s.reaper_name} " in line)
-    assert "0 expired, 110 refused" in legacy_line
-    assert "NX_GC_FLOOR_FRACTION floor" in legacy_line and "NX_GC_FORCE=1 overrides only the floor" in legacy_line
-    assert "3 expired, 0 refused" in small_line and "kept" not in small_line and "FORCE" not in small_line
-    assert len(s.ids(legacy)) == 110, "the refused sibling kept every row"
+    assert "110 expired, 0 refused" in legacy_line and "kept" not in legacy_line
+    assert "3 expired, 0 refused" in small_line and "kept" not in small_line
+    assert "FLOOR" not in out and "FORCE" not in out, out
+    assert s.ids(legacy) == set(), "the bulk sibling expired every row"
     assert s.ids(s.reaper_name) == set(), f"the small sibling expired its {len(small)} rows"
+    assert s.ids(s.coll) == set(s.live), "expiry touches nothing the origin holds"
 
-    # The remedy the line names works.
-    monkeypatch.setenv("NX_GC_FORCE", "1")
+
+def test_a_bulk_aged_quarantine_keeps_what_the_manifest_references_through_nx_t3_gc(
+    engine, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """No floor does not mean no protection: the 5 rows a heal re-referenced stay, and the line says they were
+    kept because the manifest references them, never because of a floor."""
+    monkeypatch.delenv("NX_GC_FORCE", raising=False)
+    cat, db = engine
+    s = _Scenario(cat, db, monkeypatch, "bulk-ref-gc", "legacy-owner", n_orphans=110)
+    healed = s.orphans[:5]
+    s.reference(healed)
+
     _gc(db, s)
-    assert s.ids(legacy) == set()
+
+    out = capsys.readouterr().out
+    line = next(ln for ln in out.splitlines() if f"Client expiry of {s.moved_into} " in ln)
+    assert "105 expired, 5 refused (kept: the manifest references them again)" in line, line
+    assert "FLOOR" not in out and "FORCE" not in out, out
+    assert s.ids(s.moved_into) == set(healed)
+
+
+def test_a_bulk_aged_quarantine_expires_through_the_index_gc_pass_with_no_force(
+    engine, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The same, through ``nx index repo``'s GC pass (``_prune_deleted_files``): 110 unreferenced rows past the
+    restore window, 100% of the sibling's client rows, expire. The pass restores the 5 rows the manifest
+    references again before it expires, so those leave the sibling by restore, not by deletion."""
+    from nexus.indexer import _prune_deleted_files
+
+    monkeypatch.delenv("NX_GC_FORCE", raising=False)
+    monkeypatch.delenv("NX_GC_FLOOR_FRACTION", raising=False)
+    cat, db = engine
+    s = _Scenario(cat, db, monkeypatch, "bulk-ref-idx", None, n_orphans=110)
+    healed = s.orphans[:5]
+    s.reference(healed)
+    assert s.ids(s.moved_into) == set(s.orphans)
+    _prune_deleted_files(s.coll, "docs__gcq-s3-unused", db, catalog=cat)
+
+    assert s.ids(s.moved_into) == set(), "110 aged rows left the sibling with no NX_GC_FORCE"
+    assert s.ids(s.coll) == set(s.live) | set(healed), "the 5 referenced rows are in the origin, the rest are gone"
 
 
 # ── where the engine cannot answer ───────────────────────────────────────────
@@ -454,14 +494,13 @@ def test_expiry_runs_over_every_sibling_and_sums_the_counts() -> None:
 
     assert cq.expire_quarantine_across_serverside(
         Db(), ["quarantine-a", "quarantine-b"], ORIGIN, "2026-01-01T00:00:00Z",
-        floor_fraction=0.25, floor_min_chunks=100,
     ) == (4, 2)
     assert seen == ["quarantine-a", "quarantine-b"]
 
 
 def test_expiry_with_no_route_is_none_not_zero() -> None:
     assert cq.expire_quarantine_across_serverside(
-        object(), ["quarantine-a"], ORIGIN, "2026-01-01T00:00:00Z", floor_fraction=0.25, floor_min_chunks=100,
+        object(), ["quarantine-a"], ORIGIN, "2026-01-01T00:00:00Z",
     ) is None
 
 
@@ -562,7 +601,7 @@ def test_a_primary_transport_failure_still_raises(rewritten_row) -> None:
     with pytest.raises(TimeoutError):
         cq.expire_quarantine_across_serverside(
             _IndexDb(fail=frozenset({("expire", ROW_NAME)}), error=TimeoutError), [ROW_NAME, REAPER_NAME], ORIGIN,
-            "2026-01-01T00:00:00Z", floor_fraction=0.25, floor_min_chunks=100, best_effort=True,
+            "2026-01-01T00:00:00Z", best_effort=True,
         )
 
 
@@ -606,8 +645,9 @@ def test_nx_t3_gc_prints_each_sibling_it_tried_with_its_own_outcome(
     lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.startswith("  Client expiry of")]
     assert [ln.split()[3] for ln in lines] == [ROW_NAME, REAPER_NAME, THIRD]
     assert "0 expired, 0 refused" in lines[0] and "kept" not in lines[0]
-    assert "4 expired, 2 refused (kept: the manifest references them again; NX_GC_FORCE=1 does not change that)" in lines[1]
-    assert "0 expired, 120 refused" in lines[2] and "NX_GC_FORCE=1 overrides only the floor" in lines[2]
+    assert "4 expired, 2 refused (kept: the manifest references them again)" in lines[1]
+    assert "0 expired, 120 refused (kept: the manifest references them again)" in lines[2]
+    assert not any("FLOOR" in ln or "FORCE" in ln for ln in lines)
 
 
 def test_a_failure_on_a_later_sibling_still_reports_what_the_earlier_ones_expired(

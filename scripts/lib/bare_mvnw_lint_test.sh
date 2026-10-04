@@ -70,7 +70,6 @@ DOC_ONLY_FILES=(
 SELF_GUARDED_FILES=(
     "scripts/mvnw-leased.sh"
     "scripts/build-gate-jar.sh"
-    "tests/e2e/migration-rehearsal/build-artifacts.sh"   # build_lease_acquire service at its top (nexus-mfage fix B); was red here since it landed
     "tests/e2e/local-service-gate.sh"   # build_lease_acquire_wait service at line 508, before the ./mvnw at line 532 (nexus-q1upi)
 )
 
@@ -78,7 +77,6 @@ SELF_GUARDED_FILES=(
 # file matches AND its line contains the substring.
 ALLOWLIST=(
     'tests/e2e/gc-ab/run-ab.sh|-c "./mvnw|host-side build_lease_acquire/build_lease_release wraps this docker run call (build_variant())'
-    'tests/e2e/migration-rehearsal/run.sh|-c "./mvnw|host-side build_lease_acquire/build_lease_release wraps this docker run call'
     'conexus/skills/cli-controller/SKILL.md|mvn clean install|generic tmux-driving example, not scoped to nexus service/ (see inline nx-mvnw-allowlist comment at the site)'
 )
 

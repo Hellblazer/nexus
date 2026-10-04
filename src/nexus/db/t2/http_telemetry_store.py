@@ -54,9 +54,9 @@ Route mapping (matches TelemetryHandler Java):
     POST /v1/telemetry/index_failures/acknowledge   — acknowledge_index_failure
     GET  /v1/telemetry/index_failures/acks          — list_index_failure_acknowledgments
     POST /v1/telemetry/index_failures/unacknowledge — unacknowledge_index_failure
-    POST /v1/telemetry/capability_census/record — record_capability_census (nexus-gjv9b
-                                           PART 1: upsert on (tenant_id, session_id))
-    GET  /v1/telemetry/capability_census/query  — query_capability_census
+    POST /v1/telemetry/capability_census/trim   — trim_capability_census (nexus-gjv9b
+                                           PART 1; the client record/query methods were
+                                           deleted, nexus-0r1uz)
     POST /v1/telemetry/routing_events/record    — record_routing_event (nexus-gjv9b
                                            PART 2: NOT called by the routing hooks
                                            themselves, which POST via urllib directly —
@@ -1537,98 +1537,10 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         return present
 
     # ── capability_census (nexus-gjv9b PART 1) ──────────────────────────────
-
-    def record_capability_census(
-        self,
-        *,
-        session_id: str,
-        ts: str,
-        blindspot: bool,
-        unmeasurable_reason: str | None = None,
-        capabilities: dict[str, int] | None = None,
-        dispatches: int | None = None,
-        total_calls: int | None = None,
-        capabilities_orchestrator: dict[str, int] | None = None,
-        capabilities_subagent: dict[str, int] | None = None,
-        timeout: float = 2.0,
-    ) -> None:
-        """Upsert one session's capability census. Calls
-        ``POST /v1/telemetry/capability_census/record``.
-
-        *capabilities_orchestrator* / *capabilities_subagent* (nexus-gjv9b
-        PART 3 prerequisite) carry the orchestrator/subagent-split
-        dimension — same 8-value vocabulary as *capabilities*, whose own
-        value is the MERGED total of the two. Both additive and optional:
-        omitting them (an old caller, or a blindspot record where neither
-        is ever meaningful) leaves the engine's ``capabilities_by_scope``
-        column NULL, never a fabricated all-zero breakdown.
-
-        Single-attempt with a hard *timeout* (default 2.0s, matching
-        ``_print_service_tier_summary``'s own precedent): this method is
-        called from the SessionEnd grandchild path
-        (``_session_end_census.write_session_capability_census``), which
-        has no retry budget to spend, so ``idempotent=False`` issues the
-        request EXACTLY ONCE per credential — no gateway 502/503/504
-        backoff loop — with the sole carve-out :meth:`_send` documents (a
-        definitive 401 re-mints and retries once; a genuinely dead
-        credential cannot silently wedge this path forever). ANY failure
-        is the caller's (``_post_capability_census``'s) cue to degrade to
-        a metered drop, never to retry itself on top of this.
-
-        Routed through :meth:`_post` (nexus-a2qhz / nexus-onq1a review
-        fix pass — a prior version bypassed the mixin's ``_client``
-        entirely via a raw ``httpx`` call, which ALSO bypassed the
-        production-write guard silently): this fires on every SessionEnd,
-        so a dev checkout running as the operator's live ``nx`` must
-        refuse it the same way every other T2 write does. ``mutates=True``
-        (the default) means :meth:`_send` calls
-        :func:`~nexus.db.service_endpoint.guard_production_write` BEFORE
-        the first network attempt; an unopted-in dev checkout gets
-        :class:`~nexus.db.service_endpoint.ProductionWriteGuardError`,
-        which the caller counts as a metered drop, never silently loses.
-        """
-        payload: dict[str, Any] = {
-            "session_id": session_id,
-            "ts":         ts,
-            "blindspot":  blindspot,
-        }
-        if blindspot:
-            payload["unmeasurable_reason"] = unmeasurable_reason or ""
-        else:
-            payload["capabilities"] = capabilities or {}
-            payload["dispatches"] = dispatches
-            payload["total_calls"] = total_calls
-            if capabilities_orchestrator is not None:
-                payload["capabilities_orchestrator"] = capabilities_orchestrator
-            if capabilities_subagent is not None:
-                payload["capabilities_subagent"] = capabilities_subagent
-        self._post(
-            "/v1/telemetry/capability_census/record",
-            payload,
-            idempotent=False,
-            timeout=timeout,
-        )
-
-    def query_capability_census(
-        self,
-        *,
-        session_id: str | None = None,
-        since: str | None = None,
-        limit: int = 100,
-    ) -> list[dict[str, Any]]:
-        """Read capability_census rows, newest first — the read half of
-        ``nx census capability`` (nexus-gjv9b PART 1, S11 doctrine). Calls
-        ``GET /v1/telemetry/capability_census/query``.
-        """
-        params: dict[str, Any] = {"limit": limit}
-        if session_id:
-            params["session_id"] = session_id
-        elif since:
-            params["since"] = normalize_since_filter(since)
-        resp = self._get("/v1/telemetry/capability_census/query", params=params)
-        if not isinstance(resp, dict):  # defensive: a stripped proxy response
-            return []
-        return list(resp.get("rows") or [])
+    #
+    # The writer (record) and reader (query) were deleted with the census
+    # hook and `nx census` (cleanup step A1, nexus-0r1uz). The engine table
+    # and its retention trim stay: rows written before then still age out.
 
     def trim_capability_census(self, days: int = 30, *, dry_run: bool = False) -> int:
         """Delete (or, with ``dry_run=True``, COUNT without deleting)
@@ -1684,7 +1596,7 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         request EXACTLY ONCE per credential (the sole carve-out is
         :meth:`_send`'s documented 401 re-mint-and-retry). ANY failure is
         the caller's cue to drop, never to retry itself on top of this —
-        same discipline as :meth:`record_capability_census`.
+        same discipline as :meth:`record_routing_event`'s own single-attempt shape.
 
         Routed through :meth:`_post` (nexus-a2qhz / nexus-onq1a review
         fix pass — a prior version bypassed the mixin's ``_client`` and

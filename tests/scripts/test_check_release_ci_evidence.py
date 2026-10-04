@@ -703,7 +703,7 @@ def test_v7_7_0_merge_parent_fallback_verifies_against_the_real_incident():
 def test_required_check_contexts_matches_live_branch_protection():
     """Drift check for the LOW flagged at review: REQUIRED_CHECK_CONTEXTS is
     a hand-maintained constant (same shape as
-    check_client_release_precondition.py's ENGINE_CLIENT_PRECONDITIONS) with
+    check_engine_release_floor.py's ENGINE_CLIENT_PRECONDITIONS) with
     no lint against live branch protection. This compares it against the
     real API so a rename shows up here first, instead of as a mysteriously
     red release gate naming a check that "never ran".

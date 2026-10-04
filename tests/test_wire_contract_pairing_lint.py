@@ -15,13 +15,13 @@ THIS LINT is the production gate: it runs
 :func:`scripts.check_wire_contract_pairing.check` against the LIVE repo state
 and fails if a both-halves commit lands undeclared, or a declared entry goes
 stale without being cleared. The remaining tests are the non-vacuity
-scaffolding proving the detector actually detects (rather than vacuously
-passing because nothing was ever exercised) and a kill-control proving an
-undeclared commit is caught.
+scaffolding proving the detector actually detects, and kill-controls.
 """
 from __future__ import annotations
 
+import os
 import pathlib
+import subprocess
 
 import pytest
 
@@ -33,8 +33,7 @@ _REPO_ROOT = pathlib.Path(__file__).parent.parent
 _LEDGER = wctp.DEFAULT_LEDGER_PATH
 
 #: The three known both-halves commits from the RDR-191 GATE-2 incident
-#: (T2 [22490] Q3b census). Fixed, permanent identifiers -- these commits do
-#: not move once merged to develop.
+#: (T2 [22490] Q3b census). Fixed, permanent identifiers.
 _KNOWN_MEMBERS = {
     "498c92953ea3ad60a75389aea53a9f501d8b126a",
     "b361a8106953c0bb586ab3aac969f904d3dff9df",
@@ -42,199 +41,124 @@ _KNOWN_MEMBERS = {
 }
 
 
-def test_ledger_file_exists() -> None:
-    assert _LEDGER.is_file(), (
-        f"{_LEDGER} is missing -- the both-halves wire-contract ledger must "
-        "exist for the tripwire to have anywhere to declare a pairing."
-    )
-
-
-def test_ledger_parses_seeded_history() -> None:
+def test_the_live_ledger_is_well_formed() -> None:
+    """The file exists, keeps its seeded history, and every bullet parses: a malformed line is
+    silently DROPPED by parse_ledger (the nexus-o8dil.33 line once vanished with zero signal).
+    The [additive] token must LEAD the note and carry direction-safety prose naming both
+    directions (nexus-1emxn, T2 [23828]), and every in-scope Shipped entry names its engine tag
+    once as `engine half <tag>` and leads a ` -- ` segment with the token (a mention is not a
+    statement)."""
+    assert _LEDGER.is_file(), f"{_LEDGER} is missing"
     ledger = wctp.parse_ledger(_LEDGER)
-    assert set(ledger.shipped) >= _KNOWN_MEMBERS, (
-        "seeded ## Shipped history is missing one or more of the three known "
-        "RDR-191 GATE-2 members -- do not delete the historical record."
-    )
+    assert set(ledger.shipped) >= _KNOWN_MEMBERS, "do not delete the historical record"
     for sha in _KNOWN_MEMBERS:
         assert ledger.shipped[sha].shipped_in == "v7.7.0"
 
+    section, bad = None, []
+    for line in _LEDGER.read_text(encoding="utf-8").splitlines():
+        if line.startswith("## Unshipped"):
+            section = wctp._UNSHIPPED_RE
+        elif line.startswith("## Shipped"):
+            section = wctp._SHIPPED_RE
+        elif line.startswith("## "):
+            section = None
+        elif section is not None and line.startswith("- `") and not section.match(line):
+            bad.append(line)
+    assert not bad, f"bullets that parse_ledger would silently drop: {bad}"
 
-# ---------------------------------------------------------------------------
-# Non-vacuity: the detector must actually detect, on a fixed historical range
-# that will never change (these tags are immutable once published).
-# ---------------------------------------------------------------------------
+    problems: list[str] = []
+    for e in ledger.unshipped.values():
+        for token in ("[additive]", "[not-additive]"):
+            if token in e.note and not e.note.startswith(token):
+                problems.append(f"{e.sha[:9]} ({e.bead}): {token} appears mid-note; lead the note with it or drop it")
+        if e.additive is True and not ("old client" in e.note.lower() and "new engine" in e.note.lower()):
+            problems.append(f"{e.sha[:9]} ({e.bead}): [additive] with no 'old client' + 'new engine' reasoning")
+    assert not problems, "\n".join(problems)
 
-
-def test_detector_finds_known_members_in_v761_range() -> None:
-    """The RDR-191 GATE-2 census, mechanized: run the real detector against
-    ``v7.6.1..HEAD`` (all three known members are permanent ancestors of
-    every commit on develop from here forward) and assert it finds them.
-    A detector that always returns an empty list would pass every OTHER
-    test in this module vacuously; this is the one that proves it doesn't.
-    """
-    flagged = wctp.flagged_commits("v7.6.1..HEAD", repo_root=_REPO_ROOT)
-    found = {c.sha for c in flagged}
-    missing = _KNOWN_MEMBERS - found
-    assert not missing, (
-        f"detector did not find known both-halves members {missing} in "
-        "v7.6.1..HEAD -- see the module docstring's 'WHAT COUNTS AS BOTH "
-        "HALVES' for why the engine-side surface must be the full service/ "
-        "tree (8c75a61a3's engine half is a service/src/test/java/** file "
-        "only)."
+    in_scope = [(sha, e) for sha, e in ledger.shipped.items() if wctp.shipped_is_in_convention_scope(e.note)]
+    assert len(in_scope) >= 20, f"only {len(in_scope)} in-scope shipped entries; the scan is broken"
+    floor = wctp.SHIPPED_CONVENTION_FLOOR
+    assert not [s for s, e in in_scope if len(wctp._SHIPPED_ENGINE_TAG_RE.findall(e.note)) != 1], (
+        f"shipped entries at or above {floor} must name their engine tag exactly once as `engine half <tag>`"
+    )
+    assert not [s for s, e in in_scope if wctp._shipped_additive_token(e.note) is None], (
+        f"shipped entries at or above {floor} must carry [additive] or [not-additive] LEADING a ` -- ` segment"
     )
 
 
-def test_detector_engine_side_requires_full_service_tree() -> None:
-    """8c75a61a3's only engine-side touch is a test file with no 'http' or
-    'changelog' path segment -- pins the deliberate over-flagging design
-    choice explained in the module docstring against a narrower reading
-    silently creeping back in."""
-    paths = wctp._touched_paths(
-        "8c75a61a3fd1d65f61695263ea1b0961377c358d", repo_root=_REPO_ROOT
+def test_live_repo_ledger_is_clean() -> None:
+    """The actual gate: a both-halves commit landing without a ledger entry, or an entry going
+    stale without being cleared, fails HERE (nexus-1vogq)."""
+    assert wctp.check(repo_root=_REPO_ROOT) == 0, (
+        "the wire-contract ledger and the live repo state disagree; run "
+        f"`uv run python scripts/check_wire_contract_pairing.py` and update {_LEDGER}"
     )
-    engine_paths = [p for p in paths if wctp._is_engine_path(p)]
-    assert engine_paths == [
+
+
+def test_the_detector_finds_the_known_historical_members() -> None:
+    """Non-vacuity on a fixed range (these tags are immutable): the real detector finds all
+    three RDR-191 GATE-2 members in v7.6.1..HEAD; 8c75a61a3's only engine touch is a test file,
+    so the engine side must be the FULL service/ tree; and a raw _post("/import/...") test
+    envelope counts as a client-side touch (the 2026-08-14 blind spot)."""
+    found = {c.sha for c in wctp.flagged_commits("v7.6.1..HEAD", repo_root=_REPO_ROOT)}
+    assert not (_KNOWN_MEMBERS - found), f"detector missed {_KNOWN_MEMBERS - found}"
+    paths = wctp._touched_paths("8c75a61a3fd1d65f61695263ea1b0961377c358d", repo_root=_REPO_ROOT)
+    assert [p for p in paths if wctp._is_engine_path(p)] == [
         "service/src/test/java/dev/nexus/service/RdrO8dil7GlobalManifestAntiJoinTest.java"
     ]
-    assert not any("/http/" in p for p in engine_paths)
-    assert not any("changelog" in p for p in engine_paths)
-
-
-def test_detector_finds_test_envelope_client_touch() -> None:
-    """The 2026-08-14 bead-comment class: a commit whose ONLY client-side
-    touch is a raw ``_post("/import/...")`` test envelope, not a client
-    module. Uses the real commit that introduced the /import/document raw
-    envelopes into tests/db/test_http_catalog_integration.py."""
-    touched = wctp._is_client_test_envelope(
+    assert wctp._is_client_test_envelope(
         "498c92953ea3ad60a75389aea53a9f501d8b126a",
         "tests/db/test_http_catalog_integration.py",
         repo_root=_REPO_ROOT,
     )
-    assert touched, (
-        "raw _post('/import/...') envelope in "
-        "tests/db/test_http_catalog_integration.py was not detected as a "
-        "client-side wire touch -- the hand-built-test-envelope blind spot "
-        "this tripwire exists to close would be silently unguarded."
-    )
 
 
 @pytest.mark.parametrize(
-    "path,expected",
+    ("classifier", "path", "expected"),
     [
-        ("src/nexus/catalog/http_catalog_client.py", True),
-        ("src/nexus/catalog/store_hook.py", True),
-        ("src/nexus/mcp_infra.py", True),
-        ("src/nexus/indexer.py", True),
-        ("src/nexus/doc_indexer.py", True),
-        ("src/nexus/db/http_vector_client.py", True),
-        # Structural http_ coverage (2026-08-14 consolidated review, T2
-        # [22513] recursive-gap fix): these are NOT in _CLIENT_FILE_SUBSTRINGS
-        # -- covered only because _is_client_module_path recognizes the
-        # http_ naming convention structurally.
-        ("src/nexus/db/t2/http_aspect_queue.py", True),
-        ("src/nexus/db/t2/http_taxonomy_store.py", True),
-        ("src/nexus/db/t2/http_document_aspects_store.py", True),
-        ("src/nexus/db/t2/http_document_highlights_store.py", True),
-        ("src/nexus/db/t2/http_centroid_store.py", True),
-        ("src/nexus/cli.py", False),
-        ("docs/architecture.md", False),
-        ("tests/test_indexer.py", False),  # tests/ handled separately (content-based)
+        ("client", "src/nexus/catalog/http_catalog_client.py", True),
+        ("client", "src/nexus/catalog/store_hook.py", True),
+        ("client", "src/nexus/mcp_infra.py", True),
+        ("client", "src/nexus/indexer.py", True),
+        ("client", "src/nexus/doc_indexer.py", True),
+        ("client", "src/nexus/db/http_vector_client.py", True),
+        # covered only by the structural http_ naming rule, not _CLIENT_FILE_SUBSTRINGS (T2 [22513])
+        ("client", "src/nexus/db/t2/http_aspect_queue.py", True),
+        ("client", "src/nexus/db/t2/http_taxonomy_store.py", True),
+        ("client", "src/nexus/cli.py", False),
+        ("client", "docs/architecture.md", False),
+        ("client", "tests/test_indexer.py", False),  # tests/ is content-based
+        ("engine", "service/src/main/java/dev/nexus/service/http/CatalogHandler.java", True),
+        ("engine", "service/src/main/resources/db/changelog/catalog-025-collection-not-null.xml", True),
+        ("engine", "service/src/test/java/dev/nexus/service/CatalogRepositoryTest.java", True),
+        ("engine", "src/nexus/catalog/http_catalog_client.py", False),
+        ("engine", "docs/architecture.md", False),
     ],
 )
-def test_client_module_path_classification(path: str, expected: bool) -> None:
-    assert wctp._is_client_module_path(path) is expected
+def test_path_classification(classifier: str, path: str, expected: bool) -> None:
+    fn = wctp._is_client_module_path if classifier == "client" else wctp._is_engine_path
+    assert fn(path) is expected
 
 
-@pytest.mark.parametrize(
-    "path,expected",
-    [
-        ("service/src/main/java/dev/nexus/service/http/CatalogHandler.java", True),
-        (
-            "service/src/main/resources/db/changelog/catalog-025-collection-not-null.xml",
-            True,
-        ),
-        ("service/src/test/java/dev/nexus/service/CatalogRepositoryTest.java", True),
-        ("src/nexus/catalog/http_catalog_client.py", False),
-        ("docs/architecture.md", False),
-    ],
-)
-def test_engine_path_classification(path: str, expected: bool) -> None:
-    assert wctp._is_engine_path(path) is expected
+def test_the_client_coverage_drift_guard_detects_a_real_gap(tmp_path: pathlib.Path) -> None:
+    """Every live module issuing a raw manifest/import _post is covered by
+    _is_client_module_path; a synthetic uncovered module IS caught, and one matching the http_
+    rule is NOT (kill controls: the guard is not vacuous)."""
+    assert wctp.live_client_modules_missing_coverage(_REPO_ROOT) == []
+    src = tmp_path / "src" / "nexus"
+    src.mkdir(parents=True)
+    call = 'class C:\n    def write(self):\n        return self._post("/manifest/write", {"collection": "x"})\n'
+    (src / "fake_wire_caller.py").write_text(call)
+    (src / "http_fake_store.py").write_text(call)
+    assert wctp.live_client_modules_missing_coverage(tmp_path) == ["src/nexus/fake_wire_caller.py"]
 
 
 # ---------------------------------------------------------------------------
-# Recursive-gap drift guard (2026-08-14 consolidated review, T2 [22513]):
-# _CLIENT_FILE_SUBSTRINGS / _is_client_module_path must not silently miss a
-# NEW client module that starts issuing manifest/import wire calls -- that
-# is exactly the shape of blind spot nexus-1vogq exists to close, one level
-# up. This is the PRODUCTION gate for that; the fixture test below is its
-# non-vacuity companion / kill-control.
-# ---------------------------------------------------------------------------
-
-
-def test_live_client_modules_are_covered_by_substrings() -> None:
-    """Scans the LIVE src/nexus/**/*.py tree for the raw manifest/import
-    _post envelope idiom and asserts every match is covered by
-    _is_client_module_path -- currently true only because of the structural
-    http_ prefix rule (http_aspect_queue.py, http_taxonomy_store.py,
-    http_document_aspects_store.py, http_document_highlights_store.py all
-    match the envelope regex and are NOT in _CLIENT_FILE_SUBSTRINGS)."""
-    offenders = wctp.live_client_modules_missing_coverage(_REPO_ROOT)
-    assert offenders == [], (
-        f"{offenders} issue raw manifest/import wire calls but are not "
-        "covered by _is_client_module_path in "
-        "scripts/check_wire_contract_pairing.py -- the both-halves detector "
-        "would silently miss commits that touch this file on the client "
-        "side. Prefer widening the structural rule (the http_ prefix) over "
-        "appending to _CLIENT_FILE_SUBSTRINGS."
-    )
-
-
-def test_kill_control_new_client_module_without_coverage_fails(tmp_path: pathlib.Path) -> None:
-    """A synthetic module that issues a manifest wire call but is named
-    neither http_* nor any _CLIENT_FILE_SUBSTRINGS entry must be caught --
-    proves the drift guard actually detects a real gap, not just the
-    already-fixed http_* family."""
-    fake_src = tmp_path / "src" / "nexus"
-    fake_src.mkdir(parents=True)
-    offender = fake_src / "fake_wire_caller.py"
-    offender.write_text(
-        'class FakeWireCaller:\n'
-        '    def write(self):\n'
-        '        return self._post("/manifest/write", {"collection": "x"})\n'
-    )
-    offenders = wctp.live_client_modules_missing_coverage(tmp_path)
-    assert offenders == ["src/nexus/fake_wire_caller.py"], (
-        "kill-control failed to detect a synthetic uncovered client module -- "
-        "the drift guard would vacuously pass even with a real gap present"
-    )
-
-
-def test_kill_control_covered_module_does_not_false_positive(tmp_path: pathlib.Path) -> None:
-    """Symmetry check: a module matching the http_ prefix rule must NOT be
-    flagged, even though it issues the same wire call."""
-    fake_src = tmp_path / "src" / "nexus"
-    fake_src.mkdir(parents=True)
-    (fake_src / "http_fake_store.py").write_text(
-        'class HttpFakeStore:\n'
-        '    def write(self):\n'
-        '        return self._post("/manifest/write", {"collection": "x"})\n'
-    )
-    assert wctp.live_client_modules_missing_coverage(tmp_path) == []
-
-
-# ---------------------------------------------------------------------------
-# Merge commits: ``git show --name-only`` of a merge is the COMBINED diff, so a
-# merge of two lines of history that each touched one half (in different hunks
-# of the same files) used to be flagged although no commit changed both. A
-# real two-parent fixture repo, never a mock of git's output.
+# Merge commits: a real two-parent fixture repo, never a mock of git's output.
 # ---------------------------------------------------------------------------
 
 
 def _git_in(repo: pathlib.Path, *args: str) -> str:
-    import os
-    import subprocess
-
     env = {
         "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.invalid",
         "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.invalid",
@@ -297,27 +221,18 @@ def _is_both_halves(paths: list[str]) -> bool:
     )
 
 
-def test_a_clean_merge_of_two_half_only_lines_is_not_flagged(tmp_path: pathlib.Path) -> None:
+def test_merge_commits_are_not_both_halves_unless_a_commit_in_them_is(tmp_path: pathlib.Path) -> None:
+    """`git show --name-only` of a merge is the COMBINED diff, so a merge of two lines that each
+    touched one half used to be flagged. It is not; and skipping merges must not hide a genuine
+    pairing, which is flagged by its own sha."""
     repo, merge, constituents = _both_halves_merge_repo(tmp_path)
-
-    # Non-vacuity: the fixture really is a two-parent commit whose combined-diff name list holds both
-    # halves, i.e. exactly what a `git log` that kept merges read as a both-halves commit.
+    # Non-vacuity: a two-parent commit whose combined-diff name list holds both halves.
     assert len(_git_in(repo, "rev-list", "--parents", "-n1", merge).split()) == 3
     assert _is_both_halves(wctp._touched_paths(merge, repo_root=repo))
     for sha in constituents:
-        assert not _is_both_halves(wctp._touched_paths(sha, repo_root=repo)), (
-            f"{sha} must change only one half"
-        )
-
+        assert not _is_both_halves(wctp._touched_paths(sha, repo_root=repo)), f"{sha} must change only one half"
     assert wctp.flagged_commits("main", repo_root=repo) == []
 
-
-def test_a_real_both_halves_commit_is_still_flagged_when_a_merge_brings_it_in(
-    tmp_path: pathlib.Path,
-) -> None:
-    """Skipping merges must not hide a genuine pairing: a commit that changes engine and client
-    together is flagged by its own sha, and the merge that brings it in is not."""
-    repo, _merge, _ = _both_halves_merge_repo(tmp_path)
     _git_in(repo, "checkout", "-q", "-b", "paired")
     for rel in (_ENGINE_FILE, _CLIENT_FILE):
         path = repo / rel
@@ -329,118 +244,51 @@ def test_a_real_both_halves_commit_is_still_flagged_when_a_merge_brings_it_in(
     paired = _git_in(repo, "rev-parse", "HEAD")
     _git_in(repo, "checkout", "-q", "main")
     _git_in(repo, "merge", "-q", "--no-ff", "-m", "merge paired", "paired")
-
     assert [f.sha for f in wctp.flagged_commits("main", repo_root=repo)] == [paired]
 
 
 # ---------------------------------------------------------------------------
-# Kill control: a synthetic both-halves commit absent from the ledger must
-# fail. Purely in-memory -- evaluate() only needs (sha, subject) tuples for
-# the undeclared check, no real git commit required.
+# Verdicts and token parsing.
 # ---------------------------------------------------------------------------
 
-
-def test_kill_control_undeclared_synthetic_commit_fails() -> None:
-    synthetic = wctp.FlaggedCommit(
-        sha="deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
-        subject="synthetic both-halves commit for kill-control",
-        engine_paths=("service/src/main/java/dev/nexus/service/http/FakeHandler.java",),
-        client_paths=("src/nexus/catalog/http_catalog_client.py",),
-    )
-    empty_ledger = wctp.Ledger()
-    result = wctp.evaluate([synthetic], empty_ledger, newest_tag=None)
-    assert result is not wctp.GIT_UNAVAILABLE
-    assert not result.ok
-    assert synthetic in result.undeclared
-    assert not result.stale
+_SYNTHETIC = wctp.FlaggedCommit(
+    sha="deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+    subject="synthetic both-halves commit",
+    engine_paths=("service/src/main/java/dev/nexus/service/http/FakeHandler.java",),
+    client_paths=("src/nexus/catalog/http_catalog_client.py",),
+)
 
 
-def test_kill_control_declared_commit_passes() -> None:
-    synthetic = wctp.FlaggedCommit(
-        sha="deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
-        subject="synthetic both-halves commit, declared",
-        engine_paths=("service/src/main/java/dev/nexus/service/http/FakeHandler.java",),
-        client_paths=("src/nexus/catalog/http_catalog_client.py",),
-    )
-    ledger = wctp.Ledger(
-        unshipped={
-            "deadbeef": wctp.LedgerEntry(
-                sha="deadbeef",
-                bead="nexus-fake",
-                note="kill-control fixture",
-                engine_tag="engine-service-v9.9.9",
-            )
-        }
-    )
-    result = wctp.evaluate([synthetic], ledger, newest_tag=None)
-    assert result.ok
+def test_evaluate_verdicts() -> None:
+    """Undeclared fails; declared passes whether Unshipped or already moved to Shipped (the
+    release-PR window moves an entry before the tag exists: nexus-55r6o); an Unshipped entry
+    whose commit is an ancestor of the newest published tag is STALE (a real, permanently
+    shipped commit, so is_ancestor has real git state to answer against)."""
+    undeclared = wctp.evaluate([_SYNTHETIC], wctp.Ledger(), newest_tag=None)
+    assert undeclared is not wctp.GIT_UNAVAILABLE and not undeclared.ok
+    assert _SYNTHETIC in undeclared.undeclared and not undeclared.stale
+
+    unshipped = wctp.Ledger(unshipped={"deadbeef": wctp.LedgerEntry(
+        sha="deadbeef", bead="nexus-fake", note="fixture", engine_tag="engine-service-v9.9.9")})
+    assert wctp.evaluate([_SYNTHETIC], unshipped, newest_tag=None).ok
+
+    shipped = wctp.Ledger(shipped={"deadbeef": wctp.LedgerEntry(
+        sha="deadbeef", bead="nexus-fake", note="fixture", shipped_in="v9.9.9")})
+    assert wctp.evaluate([_SYNTHETIC], shipped, newest_tag=None).ok
+
+    sha = "498c92953ea3ad60a75389aea53a9f501d8b126a"
+    stale_ledger = wctp.Ledger(unshipped={sha: wctp.LedgerEntry(
+        sha=sha, bead="nexus-sh9v2", note="already shipped in v7.7.0", engine_tag="engine-service-v0.1.73")})
+    stale = wctp.evaluate([], stale_ledger, newest_tag="v7.7.0", repo_root=_REPO_ROOT)
+    assert stale is not wctp.GIT_UNAVAILABLE and not stale.ok
+    assert [e.sha for e in stale.stale] == [sha]
 
 
-def test_every_ledger_bullet_parses() -> None:
-    """Every `- \\`sha\\`` bullet under ## Unshipped / ## Shipped must match
-    its section's regex — a malformed line is silently DROPPED by
-    parse_ledger (no error), which can reopen the exact declared-vs-gate
-    contradiction the Shipped-counts-as-declared fix closed (found live:
-    the nexus-o8dil.33 line used `-- engine tag` phrasing in ## Shipped and
-    vanished from ledger.shipped with zero signal)."""
-    section = None
-    bad: list[str] = []
-    for line in wctp.DEFAULT_LEDGER_PATH.read_text(encoding="utf-8").splitlines():
-        if line.startswith("## Unshipped"):
-            section = wctp._UNSHIPPED_RE
-        elif line.startswith("## Shipped"):
-            section = wctp._SHIPPED_RE
-        elif line.startswith("## "):
-            section = None
-        elif section is not None and line.startswith("- `") and not section.match(line):
-            bad.append(line)
-    assert not bad, (
-        "ledger bullet(s) do not match their section's regex and would be "
-        f"silently dropped by parse_ledger: {bad}"
-    )
-
-
-def test_additive_token_leads_and_carries_its_reasoning() -> None:
-    """nexus-1emxn round-2 controls on the [additive] direction-safety token.
-
-    The token is a bare self-assertion the gate ACTS on (it authorizes an
-    engine deploy ahead of the client tag), so two structural controls
-    apply to every LIVE ledger entry: (1) a token anywhere but the START of
-    the note is prose, not a statement — the anchored parser ignores it, and
-    this lint flags it so the author learns at commit time, not at deploy
-    time; (2) a leading [additive] must be accompanied by direction-safety
-    prose naming both directions ("old client" and "new engine",
-    case-insensitive) — presence of the reasoning, not proof of it, but a
-    token with no reasoning at all is exactly the rubber stamp the critique
-    (T2 [23828]) warned about."""
-    ledger = wctp.parse_ledger(wctp.DEFAULT_LEDGER_PATH)
-    problems: list[str] = []
-    for e in ledger.unshipped.values():
-        stray = (
-            "[additive]" in e.note and not e.note.startswith("[additive]")
-        ) or (
-            "[not-additive]" in e.note and not e.note.startswith("[not-additive]")
-        )
-        if stray:
-            problems.append(
-                f"{e.sha[:9]} ({e.bead}): direction-safety token appears "
-                "mid-note — the anchored parser ignores it; lead the note "
-                "with it or drop the mention"
-            )
-        if e.additive is True:
-            low = e.note.lower()
-            if not ("old client" in low and "new engine" in low):
-                problems.append(
-                    f"{e.sha[:9]} ({e.bead}): [additive] with no "
-                    "direction-safety prose naming both directions "
-                    "('old client' + 'new engine')"
-                )
-    assert not problems, "\n".join(problems)
-
-
-def test_mid_note_token_mention_is_not_a_statement(tmp_path: pathlib.Path) -> None:
-    """Anchoring pin (T2 [23829] Important-1): prose that MENTIONS
-    '[additive]' mid-note must not authorize anything."""
+def test_direction_safety_token_is_a_statement_only_where_it_leads(tmp_path: pathlib.Path) -> None:
+    """Prose that MENTIONS [additive] mid-note authorizes nothing (T2 [23829]); a Shipped token
+    must lead a ` -- ` segment, [not-additive] anywhere wins (fail-safe), entries below
+    SHIPPED_CONVENTION_FLOOR are out of scope by declaration rather than read as answers, and
+    the engine tag is the one `engine half` names, not the first one mentioned."""
     ledger_file = tmp_path / "ledger.md"
     ledger_file.write_text(
         "## Unshipped\n\n"
@@ -449,176 +297,20 @@ def test_mid_note_token_mention_is_not_a_statement(tmp_path: pathlib.Path) -> No
         "[additive], this one changes the wire\n"
         "## Shipped\n"
     )
-    entry = next(iter(wctp.parse_ledger(ledger_file).unshipped.values()))
-    assert entry.additive is None
+    assert next(iter(wctp.parse_ledger(ledger_file).unshipped.values())).additive is None
 
-
-def test_shipped_entry_counts_as_declared() -> None:
-    """A flagged commit declared under ## Shipped is NOT undeclared
-    (nexus-55r6o follow-up): the release-PR window moves an entry
-    Unshipped -> Shipped before the tag exists — the exact remedy the
-    release-ledger-gate prescribes — while the commit is still inside the
-    scanned range. Counting only Unshipped made the PR gate and this lint
-    contradictory for every release PR."""
-    synthetic = wctp.FlaggedCommit(
-        sha="deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
-        subject="synthetic both-halves commit, declared Shipped pre-tag",
-        engine_paths=("service/src/main/java/dev/nexus/service/http/FakeHandler.java",),
-        client_paths=("src/nexus/catalog/http_catalog_client.py",),
-    )
-    ledger = wctp.Ledger(
-        shipped={
-            "deadbeef": wctp.LedgerEntry(
-                sha="deadbeef",
-                bead="nexus-fake",
-                note="release-PR-window fixture",
-                shipped_in="v9.9.9",
-            )
-        }
-    )
-    result = wctp.evaluate([synthetic], ledger, newest_tag=None)
-    assert result is not wctp.GIT_UNAVAILABLE
-    assert result.ok
-
-
-def test_stale_ledger_entry_detected() -> None:
-    """An Unshipped entry whose commit is already an ancestor of the newest
-    published tag must be flagged stale -- reuses a real, permanently-shipped
-    commit so is_ancestor() has real git state to answer against."""
-    ledger = wctp.Ledger(
-        unshipped={
-            "498c92953ea3ad60a75389aea53a9f501d8b126a": wctp.LedgerEntry(
-                sha="498c92953ea3ad60a75389aea53a9f501d8b126a",
-                bead="nexus-sh9v2",
-                note="already shipped in v7.7.0 -- should be STALE here",
-                engine_tag="engine-service-v0.1.73",
-            )
-        }
-    )
-    result = wctp.evaluate([], ledger, newest_tag="v7.7.0", repo_root=_REPO_ROOT)
-    assert result is not wctp.GIT_UNAVAILABLE
-    assert not result.ok
-    assert len(result.stale) == 1
-    assert result.stale[0].sha == "498c92953ea3ad60a75389aea53a9f501d8b126a"
-
-
-# ---------------------------------------------------------------------------
-# Production gate: run against the LIVE repo + seeded ledger.
-# ---------------------------------------------------------------------------
-
-
-def test_live_repo_ledger_is_clean() -> None:
-    """The actual gate. A both-halves commit landing without a ledger entry,
-    or a ledger entry going stale without being cleared, fails HERE -- this
-    is what CI enforces on every push (nexus-1vogq)."""
-    rc = wctp.check(repo_root=_REPO_ROOT)
-    assert rc == 0, (
-        "the wire-contract ledger and the live repo state disagree -- run "
-        "`uv run python scripts/check_wire_contract_pairing.py` for the "
-        f"full report, and update {_LEDGER}."
-    )
-
-
-# --- the Shipped section's structural convention (bead nexus-h0fo3) --------
-#
-# The arming gate reads a pairing's additivity out of the ledger, and after a
-# release the entry it needs has moved from `## Unshipped` to `## Shipped`.
-# For that read to be structural rather than a guess at prose punctuation,
-# a shipped entry at or above `SHIPPED_CONVENTION_FLOOR` must carry both
-# facts in a fixed position. Entries below the floor are out of scope by
-# declaration -- see that constant's docstring for why they cannot simply be
-# backfilled.
-
-
-def _in_scope_shipped() -> list[tuple[str, wctp.LedgerEntry]]:
-    ledger = wctp.parse_ledger(_LEDGER)
-    return [
-        (sha, e) for sha, e in ledger.shipped.items()
-        if wctp.shipped_is_in_convention_scope(e.note)
-    ]
-
-
-def test_in_scope_shipped_entries_name_exactly_one_engine_half() -> None:
-    """The engine tag must be findable by the anchored `engine half <tag>`
-    phrase, once per entry. Two occurrences would make the anchor ambiguous;
-    zero leaves the gate nothing to match the pairing against."""
-    in_scope = _in_scope_shipped()
-    assert len(in_scope) >= 20, (
-        f"only {len(in_scope)} in-scope shipped entries found; the scan is broken"
-    )
-    bad = [
-        sha for sha, e in in_scope
-        if len(wctp._SHIPPED_ENGINE_TAG_RE.findall(e.note)) != 1
-    ]
-    assert not bad, (
-        "shipped entries at or above "
-        f"{wctp.SHIPPED_CONVENTION_FLOOR} must name their engine tag exactly "
-        f"once as `engine half <tag>`: {bad}"
-    )
-
-
-def test_in_scope_shipped_entries_lead_a_segment_with_the_token() -> None:
-    """The direction-safety token must LEAD a `--` segment, not sit mid-
-    sentence. A mention is not a statement (see `_additive_token`), and the
-    arming gate must never infer additivity from prose."""
-    in_scope = _in_scope_shipped()
-    bad = [
-        sha for sha, e in in_scope
-        if wctp._shipped_additive_token(e.note) is None
-    ]
-    assert not bad, (
-        "shipped entries at or above "
-        f"{wctp.SHIPPED_CONVENTION_FLOOR} must carry [additive] or "
-        "[not-additive] LEADING a ` -- ` segment (a mid-sentence token is a "
-        f"mention, not a statement): {bad}"
-    )
-
-
-def test_shipped_convention_lint_fails_on_a_mid_sentence_token(
-    tmp_path: pathlib.Path,
-) -> None:
-    """Kill control for the lint above: a token embedded mid-sentence — the
-    exact shape the v0.1.116 entries carried before the nexus-h0fo3 backfill
-    — must be read as UNKNOWN, never as an additive assertion."""
-    note = (
-        "engine half engine-service-v0.1.116 (deployed and cloud-gated "
-        "BEFORE the client tag). [additive] one NEW route, no field changes."
-    )
-    assert wctp.shipped_is_in_convention_scope(note) is True
-    assert wctp._shipped_additive_token(note) is None
-
-
-def test_shipped_token_leading_a_segment_is_a_statement() -> None:
-    note = (
-        "engine half engine-service-v0.1.112 (tagged on 9f0a5397c) -- "
-        "[additive] no route, request field or response field changes shape."
-    )
-    assert wctp._shipped_additive_token(note) is True
-
-
-def test_shipped_not_additive_anywhere_wins() -> None:
-    """Fail-safe, matching `_additive_token`'s own rule: a [not-additive]
-    appearing anywhere contradicts a leading [additive] assertion."""
-    note = "engine half engine-service-v0.1.109 -- [additive] but actually [not-additive]"
-    assert wctp._shipped_additive_token(note) is False
-
-
-def test_below_floor_entries_are_out_of_scope_by_declaration() -> None:
-    """The 16 untokened entries span v0.1.73 to v0.1.91 and cannot be
-    mechanically backfilled — there is no token to move. They are excluded by
-    a positive floor declaration rather than by reading their silence as an
-    answer."""
-    note = "engine half engine-service-v0.1.88 (deployed 2026-08-27), client half in the same commit"
-    assert wctp.shipped_is_in_convention_scope(note) is False
-    assert wctp._shipped_additive_token(note) is None
-
-
-def test_shipped_engine_tag_is_anchored_not_first_match() -> None:
-    """One in-scope entry legitimately mentions a second engine tag in its
-    prose. The anchor must return the one `engine half` names, not whichever
-    appears first."""
-    note = (
-        "engine half engine-service-v0.1.112 (supersedes the "
-        "engine-service-v0.1.109 behaviour) -- [additive] no shape change."
-    )
-    assert wctp.shipped_engine_tag(note) == "engine-service-v0.1.112"
+    for note, in_scope, token, tag in (
+        ("engine half engine-service-v0.1.116 (deployed BEFORE the client tag). [additive] one NEW route.",
+         True, None, "engine-service-v0.1.116"),
+        ("engine half engine-service-v0.1.112 (tagged on 9f0a5397c) -- [additive] no shape change.",
+         True, True, "engine-service-v0.1.112"),
+        ("engine half engine-service-v0.1.109 -- [additive] but actually [not-additive]",
+         True, False, "engine-service-v0.1.109"),
+        ("engine half engine-service-v0.1.88 (deployed 2026-08-27), client half in the same commit",
+         False, None, "engine-service-v0.1.88"),
+        ("engine half engine-service-v0.1.112 (supersedes the engine-service-v0.1.109 behaviour) -- [additive] no shape change.",
+         True, True, "engine-service-v0.1.112"),
+    ):
+        assert wctp.shipped_is_in_convention_scope(note) is in_scope, note
+        assert wctp._shipped_additive_token(note) is token, note
+        assert wctp.shipped_engine_tag(note) == tag, note

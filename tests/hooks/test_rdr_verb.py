@@ -154,7 +154,6 @@ def test_summary_prints_for_this_repos_real_tree(rdr_hook_mod, monkeypatch) -> N
     monkeypatch.setattr(mod, "_collection_exists", lambda target: False)
 
     result = mod.run(None)
-    assert result.exit_code == 0
     assert not result.crashed
     out = result.stdout or ""
     m = re.search(r"^RDR: (\d+) documents \((\d+) RDRs: 2 closed, 1 accepted\) in docs/rdr but NOT indexed\.$", out, re.M)
@@ -457,7 +456,6 @@ def test_main_prints_the_resolution_failure_on_the_verdict_line(rdr_hook_mod, tm
     monkeypatch.setattr(rdr_hook_mod, "_resolve_rdr_collection", failing_resolve)
     rdr_hook_mod._RESOLUTION_FAILURES.clear()
     result = rdr_hook_mod.run(None)
-    assert result.exit_code == 0
     out = result.stdout or ""
     assert "but NOT indexed." in out
     assert "(resolution failed: catalog: ModuleNotFoundError: No module named 'nexus'" in out
@@ -578,7 +576,7 @@ from nexus.hooks import rdr_verb as _hook
 result = never_fail(lambda: _hook.run(None), "rdr")
 if result.stdout is not None:
     sys.stdout.write(result.stdout + "\\n")
-sys.exit(result.exit_code)
+sys.exit(0)
 """
 
 

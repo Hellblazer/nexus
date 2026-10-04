@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Shared "bridge structlog to stderr/logfile before importing nexus" helper
 for hook scripts that import the ``nexus`` package (nexus-cnzei.2 fix round
-2, critic Significant: the instance-level fix in ``rdr_hook.py`` and
-``routing/phase_review_close_requires_gate.py`` was hand-duplicated in each
+2, critic Significant: the instance-level fix in ``rdr_hook.py`` and the
+phase-review close gate script (both since deleted) was hand-duplicated in each
 file with no shared home, no lint, and no repo-wide guard, so a THIRD hook
 script that imports ``nexus.*`` tomorrow would reintroduce the exact defect
 this closes with nothing to catch it).
@@ -29,9 +29,9 @@ That bridges structlog through stdlib logging to stderr plus
 USAGE: a hook script that imports ``nexus.*`` calls
 :func:`configure_hook_logging` as the FIRST statement of whichever function
 first imports ``nexus.*`` (or at module scope, if the nexus import is
-itself at module scope), before that import executes. See ``rdr_hook.py``
-and ``routing/phase_review_close_requires_gate.py`` for the two shipped
-call sites; ``tests/hooks/test_hook_scripts_configure_logging_before_nexus_import.py``
+itself at module scope), before that import executes. The two
+shipped call sites (``rdr_hook.py`` and the phase-review close gate script)
+were deleted. ``tests/hooks/test_hook_scripts_configure_logging_before_nexus_import.py``
 enumerates every ``conexus/hooks/scripts/**/*.py`` file with a real
 ``import nexus`` / ``from nexus import ...`` statement (AST-detected, not a
 substring grep) and asserts this module is imported and called before the

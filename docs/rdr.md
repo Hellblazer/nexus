@@ -203,7 +203,7 @@ If T2 and the file disagree on status, `/conexus:rdr-accept` self-heals by repai
 
 ## Close (`/conexus:rdr-close`)
 
-Finalizes an Accepted RDR. Requires status Accepted (use `--force` to override).
+Finalizes an Accepted RDR. Requires status Accepted; a draft that shipped without acceptance closes only through `nx rdr set-status NNN closed --reason "..."`.
 
 Close reasons: `implemented` · `reverted` · `abandoned` · `superseded`
 
@@ -223,7 +223,7 @@ Both commands read from T2; no markdown parsing required.
 
 ## T2 synchronization
 
-T2 is the process authority for RDR status; the markdown file is the human-readable persistence layer. On session start, a reconciliation hook ensures they agree using a monotonic-advance rule: status only moves forward, never regresses. If a human edits the file ahead of T2, T2 catches up. If T2 is ahead (e.g., a file write failed), the file is repaired.
+T2 is the process authority for RDR status; the markdown file is the human-readable persistence layer. Nothing reconciles the two automatically: a session-start reconciler was specified, never ran, and was deleted (nexus-e19sa; `src/nexus/tables/rdr-lifecycle.toml` carries the record). `nx rdr set-status` flips the file and then mirrors the flip onto the T2 entry on a best-effort basis, printing a note when the mirror fails or the entry is missing; `nx rdr preamble rdr-audit` prints a `DRIFT:` line per remaining disagreement for a human to settle. That is why lifecycle transitions go through the verb rather than a hand edit of the frontmatter.
 
 ---
 

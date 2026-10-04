@@ -52,7 +52,7 @@ T1 is service-backed and session-id scoped (`resolve_active_session_id()`, whose
 - **Stateless one-shot operators** (`ephemeral=True`) get their OWN freshly minted, PG-backed T1 session per dispatch, but ONLY when the dispatch actually grants the subprocess tool access that could reach T1 (`mcp_servers`/`allowed_tools` set — nexus-bjltu, 2026-08); the tool-free default (~15/17 call sites: extract/rank/compare/summarize/etc.) mints nothing, since nothing in a tool-free subprocess can reach T1. A mint failure never kills the dispatch — it's logged and deferred to the subprocess's own decision-2 fail-loud path. The minted session is closed after the subprocess exits (nexus-bjltu), not left to the passive TTL sweep alone. No null-store branches; the retired in-process `InMemoryVectorClient` leg is gone (nexus-4lkmz decision 1, 2026-08). The operator-dispatch default (`nx_answer`, `nx_tidy`, plan-runner inline planning).
 - **Cross-process findings between sibling sub-processes go to T2** (`memory_put`). T1 is process-local by design; T2 is the shared bus (PG over the engine, multi-process-safe).
 - **Removed env names:** the legacy `NEXUS_SKIP_T1=1` alias was REMOVED at 6.5.2 (promised gone in 5.0) — recognized-but-IGNORED with a one-shot warning through 7.0.0, now simply unrecognised. `NX_T1_ISOLATED` itself is retired too (nexus-4lkmz, 2026-08: "T1 exists in PG only") — setting it now HARD-FAILS with `T1IsolatedLegRetiredError` naming the real remedy (`nx daemon service start` / `nx doctor --check-t1`), not a recognized-but-ignored shim.
-- **Three T1 scopes exist simultaneously; the rule of record is JDR-001** (`docs/rdr/joint/JDR-001-t1-three-scopes.md`, which carries the full text, the nexus-d76vc handoff mechanism and the measured history; nexus-aj564). MCP-tool T1 is scoped to the session id leased at MCP-server spawn and moves only when a `/clear` or `/resume` handoff marker is consumed (one poll tick; the old session's rows strand rather than migrate). `nx` CLI T1 follows the current transcript session's live lease; an explicit `NX_SESSION_ID`/`CLAUDE_CODE_SESSION_ID` with no lease fails loud (`T1ServerNotFoundError`, nexus-f7xyq); only a bare invocation falls through to the shared CLI identity. `~/.config/nexus/current_session` is a machine-wide last-writer-wins file. A borrower whose owner exits re-mints under the mint flock and becomes the owner (nexus-k9sec; JDR-001 § borrower recovery), and the owner's clean exit keeps the session's rows for it. `review-completed` markers go through the CLI (what `pre_close_verification_hook.sh` reads); durable cross-session write-back belongs in T2; confirm an agent has terminated before declaring its write-back lost (the recorded "prior-session T1 is never searchable" lesson was a timing race, true only for the CLI path).
+- **Three T1 scopes exist simultaneously; the rule of record is JDR-001** (`docs/rdr/joint/JDR-001-t1-three-scopes.md`, which carries the full text, the nexus-d76vc handoff mechanism and the measured history; nexus-aj564). MCP-tool T1 is scoped to the session id leased at MCP-server spawn and moves only when a `/clear` or `/resume` handoff marker is consumed (one poll tick; the old session's rows strand rather than migrate). `nx` CLI T1 follows the current transcript session's live lease; an explicit `NX_SESSION_ID`/`CLAUDE_CODE_SESSION_ID` with no lease fails loud (`T1ServerNotFoundError`, nexus-f7xyq); only a bare invocation falls through to the shared CLI identity. `~/.config/nexus/current_session` is a machine-wide last-writer-wins file. A borrower whose owner exits re-mints under the mint flock and becomes the owner (nexus-k9sec; JDR-001 § borrower recovery), and the owner's clean exit keeps the session's rows for it. durable cross-session write-back belongs in T2; confirm an agent has terminated before declaring its write-back lost (the recorded "prior-session T1 is never searchable" lesson was a timing race, true only for the CLI path).
 
 Collection prefixes coexist in one T3 database. Always `__` (double underscore) as separator (colons are invalid in ChromaDB collection names). Conformant collection-name shape (RDR-103) is `<content_type>__<owner_id>__<embedding_model>__v<n>`, e.g. `code__nexus-1-1__voyage-code-3__v1`:
 
@@ -112,15 +112,8 @@ Pagination over a large collection: `limit ≤ 300` per call, `offset += 300` in
 - **Push `develop` only through `scripts/git-push-develop.sh <sha>...`** (nexus-9wxu6): it refuses unless `origin/develop..develop` equals the commits you name, so a peer's unpushed commits in the shared checkout never ride your push (four times on 2026-09-07). `NX_PUSH_SOURCE=HEAD` from a detached worktree pushes your commits without touching the local branch. Never `git commit --amend` in the primary checkout; the user-level hook denies it when HEAD is not this session's commit. See `docs/contributing.md` § Git Workflow. **Sessions no longer work in the shared primary at all** (§ Worktrees below), so this guard now fires rarely rather than routinely — it stays because it is the mechanical check, not because the shared-tree workflow it was written for is still the practice.
 - **Never include AI attribution in commits.** No "Generated with Claude", no `Co-Authored-By: Claude`. Bead references and `Closes #N` only.
 - **Never delete RDR files.** Closing an RDR is a frontmatter `status: closed` flip — the file stays. See [`docs/rdr/AGENTS.md`](docs/rdr/AGENTS.md).
-- **Closed vocabularies (RDR status, and future ones) are CHECKED TABLES, not prose — see [`docs/rdr/AGENTS.md`](docs/rdr/AGENTS.md) § RDR lifecycle for the full story.** `src/nexus/tables/` (packaged, checked at load time); `docs/tables/` for repo-only tables (the release-choreography table both release gates resolve).
+- **Closed vocabularies (RDR status, and future ones) are CHECKED TABLES, not prose — see [`docs/rdr/AGENTS.md`](docs/rdr/AGENTS.md) § RDR lifecycle for the full story.** `src/nexus/tables/` (packaged, checked at load time); `docs/tables/` is the home for repo-only tables (none today).
 - **Always use full MCP tool names.** `mcp__plugin_<plugin>_<server>__<tool>`. Short names fail at runtime.
-- **`expectations_*` is an `nx-hook` VERB, not an MCP tool.** The RDR-184 background-teammate ledger (`expectations_expect` / `expectations_census` / `expectations_undeclared` / `expectations_reconcile`) moved from a sourced bash library to `nexus.hooks.expectations` at RDR-215 bead nexus-q02nx.14. Searching the MCP tool registry for it still returns nothing **by design** — the answer IS the exit code and an MCP tool has none, so these are command tier only; `nx expectations` / `nx orchestration` / `nx guard` do not exist (nexus-3ra9h).
-  ```bash
-  nx-hook expectations_census "$SESSION_ID"      # retro counts — NEVER hand-count (nexus-hybv1)
-  nx-hook expectations_undeclared "$SESSION_ID"  # rc: 0 clean, 1 BLINDSPOT (EXPECT rows present but zero STARTs walked — the audit examined nothing, not a pass; nexus-houpu), 2 undeclared>0 deficit (nexus-suuja), 3 no ledger file for this session — nothing checkable, not evidence of cleanliness (nexus-ahl9v)
-  ```
-  No `source` step, and nothing to keep in sync. **`nx-hook` needs a conexus generation at or past the wheel that declares it** — it is a console script, so an older installed generation simply has no `nx-hook` shim and the command is not found (measured 2026-09-19 on this box: `~/.local/bin/` had `nx`, `nx-mcp`, `nx-mcp-catalog` and `nx-session-end-launcher`, no `nx-hook`; `scripts/reinstall-tool.sh` writes it, and a fresh install always carries it). In a dev checkout, `uv run nx-hook ...` works regardless. The plugin's bash copy is GONE and the wired `hooks.json` entries no longer run any shell: nexus-q02nx.21 (`f6fff5501`) deleted the twelve bash hook scripts together with the `expectations.sh` library they sourced, and nexus-q02nx.22 (`7ad666ebb`) deleted the last one, `_run_python_hook.sh`, both on 2026-09-19. Measured 2026-09-20: `git ls-files conexus` matches zero `.sh`/`.bash`/`.zsh`, and `hooks.json` names no shell at all — its entries are `nx-hook` verbs, `mcp_tool` registrations, and exec-form `python3` invocations of plugin-resident scripts. The deletion happened in the same change that re-pointed the entries, which is what the order was for: doing it the other way round would have stripped the library from the four hooks that sourced it, and two of them exited 0 in silence on a bare `|| exit 0`.
-  **The EXPECT row is MECHANIZED and LIVE** (nexus-qc4p1, shipped at the 7.0.0 plugin pin; verified 2026-08-02: 70/70 recognized, 0 undeclared): a PreToolUse hook on the Agent tool writes it from the dispatch's own `subagent_type` + `run_in_background`. **Do NOT hand-write EXPECT rows** — the ledger matches N EXPECT rows of a type against N STARTs of that type, so a manual duplicate inflates the credit pool and can mask an undeclared start. Hand-call `nx-hook expectations_expect` ONLY for a dispatch the hook cannot see, keyed on the **subagent type verbatim, colon included** — never an invented name (the Agent tool has no `name` parameter; nexus-nu7fo). `conexus/skills/orchestration/SKILL.md` is canonical for the dispatch-time contract; this entry exists so the *surface* is discoverable — two 2026-07 sessions concluded the ledger was unavailable and skipped it, and it was available both times.
 - **Worktree-dispatched agents run `scripts/agent-worktree-preflight.sh [required-sha]` as their FIRST action and stop on any `PREFLIGHT_FAIL` line.** The harness cuts `isolation:worktree` worktrees from the DEFAULT branch's tip, not the session's current branch, so a fresh worktree can be silently stale relative to `develop` by construction (nexus-5kwkf); the script also refuses outright if the agent turns out to be in the shared primary checkout, not a worktree at all. `required-sha` is optional — when omitted it defaults to local `develop` if that branch exists, else `origin/develop`, else refuses (`PREFLIGHT_FAIL_BAD_SHA`); local is checked first because this project's own batched-push workflow routinely runs local `develop` ahead of `origin/develop`. It recovers a stale-but-clean worktree via `git merge --ff-only`; a dirty or diverged worktree is refused untouched. The conexus SubagentStart hook injects this instruction for `isolation:worktree` dispatches once the plugin ships it (`conexus/PENDING_RELEASE.md`); until then this bullet is the delivery path.
 - **Daemon-lifecycle fixes land in the shared primitive, never one tier's copy.** Discovery / single-writer / self-heal / version-skew for T1/T2/T3 all live in `src/nexus/daemon/service_registry.py` + the conformance suite `tests/daemon/test_rdr149_lifecycle_conformance.py` (RDR-149). Editing a single tier's lifecycle without touching both is the recurring bug class. Mechanically enforced by `tests/daemon/test_lifecycle_gate.py`. See [`src/nexus/daemon/AGENTS.md`](src/nexus/daemon/AGENTS.md).
 
@@ -153,321 +146,32 @@ PRs #1375/#1376):
 
 ## Self-hosted runners and fork PRs
 
-This repo is public and has four self-hosted runners:
+CI runs on GitHub-hosted runners only. The `qwen-linux` and `hellmini-ci`
+routes, the runner isolation probes, the box lock and the qwentescence
+post-publish gate were deleted on 2026-10-03 (cleanup step 7). `hellmini` (a Mac
+mini, macOS user `ghrunner`) is a self-hosted runner for release legs only: the
+engine-service release legs, the PG-bundle cache seed and the signing rehearsal
+(Sam, 2026-09-28, nexus-yd9po). `qwentescence` (WSL) is a test host reachable by
+ssh, not a runner. Both hosts take hand-run suites and gates through ssh;
+agents' full suites go to hellmini (Sam, 2026-10-02). The T2 how-tos
+`nexus/hellmini-second-test-host-howto` and `nexus/qwentescence-test-host-howto`
+carry the recipes.
 
-| Label | Host and user | Takes |
-|---|---|---|
-| `hellmini` | Mac mini, macOS user `ghrunner` | release jobs: the engine-service release legs, the PG-bundle cache seed (Sam, 2026-09-28, nexus-yd9po) |
-| `hellmini-ci` | same Mac mini, macOS user `ghci` | nothing by default since 2026-10-02: the Service CI Java job's owner-push route, on only while `SERVICE_CI_PUSH_RUNNER` is exactly `hellmini-ci` (opt-in; see Service CI routing; Sam, 2026-09-30 to 2026-10-02, nexus-f5i1m, nexus-xyrtc) |
-| `qwen-linux` (custom label `qwen-linux`; today's registration also carries `self-hosted`, `Linux`, `X64`, to be dropped, see below) | qwentescence, WSL, Linux user `ghci` (private TMPDIR) | the full Python pytest suite as one `-n 8` job (`test-qwen` in `ci.yml`), on owner pushes to develop only, and only while the repository variable `QWEN_CI_PUSH_RUNNER` is `qwen-linux` (opt-in; Sam, 2026-10-01) |
-| `gtr-windows` (`[self-hosted, X64, Windows]`, registered earlier as `qwen-windows`) | host not recorded in this repo | no workflow in this repo. Sam will deregister it (decided 2026-10-02; pending host action, still online until then) |
-
-The two qwen runners carry the generic self-hosted labels today. Any job in any
-workflow file that says `runs-on: self-hosted` (or an array with `Linux` or
-`Windows`) lands on one of them, so an approved fork-PR run could reach them by
-naming the generic label. `hellmini` and `hellmini-ci` are bare custom labels
-(registered with `--no-default-labels`), so a job has to name them. Decided
-(Sam, 2026-10-02), pending host action: `gtr-windows` is deregistered, and
-`qwen-linux` is re-registered with `--no-default-labels`. The jobs that target
-`qwen-linux` (`test-qwen` and the isolation probe) already name only the custom
-label, `runs-on: qwen-linux`, which works with today's registration and after
-the re-registration. Until the host action is done the generic labels still
-reach it.
-
-**CI pytest routing (qwen-linux) is OPT-IN (Sam, 2026-10-01).** `ci.yml`'s
-comments are the one authoritative copy; this is the summary. The `route` step
-of the `changes` job decides once and publishes `ci_runner`. It is `qwen-linux`
-only when BOTH hold: the event is an owner push (same owner rule as Service CI:
-push event, account id and triggering actor both the repo owner) AND the
-repository variable `QWEN_CI_PUSH_RUNNER` is exactly `qwen-linux` (compared in
-bash, case-sensitively: every GitHub `==` ignores case, so an expression could
-not say "exactly"). Unset, empty, a typo, `Qwen-Linux`, a trailing space,
-`ubuntu-latest` or any other value means `ubuntu-latest`: the hosted shards run
-and `test-qwen` is skipped. So landing the route changes nothing; the default
-is the shards. When it is on, `test-qwen` runs the whole default suite as one
-`uv run pytest tests/ -n 8` on the qwen runner (the runner's own uv, JDK and
-Docker, no `setup-*` action; `scripts/build-gate-jar.sh` for the stamped jar,
-built and tested under one box lock, see below)
-and the six hosted shards and `service-jar` are skipped. Every `pull_request`
-and any other actor's push gets the hosted shards whatever the variable says.
-The job's `runs-on` is a literal label set, so the variable cannot reach a
-release or Service CI runner. The route is decided in the `changes` job, and
-**"Re-run failed jobs" does not re-run a `changes` job that succeeded, so it
-keeps the OLD `ci_runner`**, whichever way the variable moved since: changing the
-route for a commit already pushed needs "Re-run all jobs" or a new push. While
-the variable is on there is no automatic fallback when the runner is offline:
-the qwen job queues, `pytest-gate` pends until the 24 hour limit, and someone
-deletes the variable. `pytest-gate` reads `ci_runner` and requires the chosen
-path `success` and the other `skipped`, so a qwen job that was skipped,
-cancelled, timed out or never reported fails the required check, and
-`scripts/ci_status.py` expects the job on the develop topic. The lint, census
-and Service CI legs are unchanged.
-
-**Enabling the route is a sequence, not a flip.** Once the route is on, it fires
-on EVERY owner push to develop whose diff is not doc-only (the `code` predicate:
-anything outside `docs/**`, `web/**`, root `README.md`, `CHANGELOG*`, `LICENSE*`,
-`conexus/CHANGELOG.md`), not only on merges that touch `ci.yml`. Do these in
-order and stop at the first red:
-
-1. Land the change. The variable is unset, so the route is off and nothing
-   changes. (Check with `gh variable list` that it is unset; a leftover `qwen-linux`
-   from an earlier attempt would be the one way this step is not safe.)
-2. Host prerequisites, once: the shared lease directory and the `/etc/wsl.conf`
-   fix (`docs/contributing.md` § First run of the qwen-linux route).
-3. Run `qwen-linux-isolation-probe` as `ghci` and read it green. Before the file
-   reaches `main` a dispatch is not offered, so push a throwaway branch named
-   `runner-probe/qwen-<date>` (the probe's second trigger), read the run, then
-   delete the branch. After it is on `main`, a dispatch works too.
-4. Record the green run id in the line below, in the same change that sets the
-   variable.
-5. Set the variable: `gh variable set QWEN_CI_PUSH_RUNNER --body qwen-linux`,
-   then confirm with `gh variable list`.
-6. Push once and walk the first-run checklist in `docs/contributing.md`.
-
-To turn it off: `gh variable delete QWEN_CI_PUSH_RUNNER`; the next push (or a
-"Re-run all jobs") runs the hosted shards.
-
-**Probe run record: run 36980355165, green, 2026-10-02** (the current probe at
-c82471f2d, branch `runner-probe/qwen-2026-10-02b`, deleted after). Identity exactly
-`ghci`, passwordless sudo refused, Docker reachable (root-equivalent, as
-documented), and the Windows side clean (no `WSLInterop` handler, no `cmd.exe`,
-the `/mnt` drive directories empty). The credential line is the closed-home pass,
-in the probe's own words: `/home/nexus exists and is closed to the runner user (no
-search permission) ... the stronger state, and the credential line passes`, with no
-`::warning::`. `/home/nexus` is 0700 (the host owner set it 2026-09-30; `ghci` is
-in the groups `ghci`, `docker` and `nx-suite` only), and the host owner ruled on
-2026-10-02 to keep it closed, not to open it to 0711. The run before it, 36971401953
-(develop bb206eb8c, the probe before the closed-home line existed), logged the same
-state as a generic `NOT CHECKED` with a warning.
-
-**Correction to the earlier record.** Run 36956876942 (2026-10-02 02:42Z,
-develop 5a31da34f plus the box-lock change, branch `runner-probe/qwen-2026-10-01`)
-was recorded here as having the credential line CHECKED. It was not: it logged the
-same `NOT CHECKED` line as the run above (same cause), and the record was written
-from the green status without reading that line. Its other checks were as above,
-and the same run showed no earlyoom kill and an idle runner on the host.
-
-**The credential line passes in two states and fails in one.** It PASSES when it
-is CHECKED and zero files under the nexus config directory are readable by the
-runner user, or when it is not checked because the live install's home directory
-(`/home/nexus`) exists but is not traversable by the runner user (a stronger state:
-nothing under that home is reachable by file mode, the config directory included;
-the current probe reports it as a closed home and raises no warning). It FAILS
-when any file under the config directory is readable. A `NOT CHECKED` for any
-other cause (the listing did not complete, the config directory is absent while
-the home is traversable, the home is absent) is not a pass: the run is green and
-carries a `::warning::` annotation, because the probe cannot fail on it. A run
-recorded here must be a run that passes, with the state named. The probe ran no
-suite, so capacity under a real `test-qwen` run is still unmeasured. The isolation
-boundary is still "owner pushes only", not the Unix user, because the `docker`
-group is root-equivalent: a closed home does not stop `docker run -v /:/h`.
-
-The job and a hand-run suite by the host's `nxtest` user serialize on one lease,
-not by agreement: `test-qwen` points `NX_BUILD_LEASE_ROOT` at a host directory
-(`QWEN_SUITE_LEASE_ROOT`, default `/var/lib/nx-suite-lease`, group-writable,
-not sticky) and sets `NX_SUITE_LEASE_WAIT=1`, and the hand-run wrapper passes the same two
-variables itself (`nxtest`'s `.bashrc` no longer exports them: bash reads
-`~/.bashrc` in non-interactive ssh shells, and the export leaked into tests that
-scrub the variable); the job's lease step fails loud, with the host setup text, when
-the directory is missing or unusable (the suite lease itself would otherwise run
-unguarded and say nothing). The suite lease's refusal rules are in § Engine-service
-release, next to the build lease's; a lint test pins that no workflow sets its
-opt-out. The job also keeps `TMPDIR` on the runner's
-persistent private directory on purpose: the test substrate's orphan sweep finds
-a cancelled run's Postgres and JVM through sidecar files there, which a per-job
-`RUNNER_TEMP` would delete. The host also serves production inference, so a
-suite run costs it about 10% decode while it runs (accepted by Sam). A qwen-only
-red on push has no PR-side twin, and the difference is more than the platform:
-PRs run the hosted shards on the GitHub Ubuntu image with GraalVM, serial inside
-each of six `pytest-split` shards, while the qwen job is one `xdist -n 8` run
-on Ubuntu 26.04 with OpenJDK 25.0.4.1 as a persistent non-root user. Coverage is
-not yet reconciled: 25,705 tests passed there against about 27.7k summed from the
-shards, so the executed-count floor stays at 20000 until the skip-reason diff in
-`docs/contributing.md` § First run of the qwen-linux route has been done.
-
-**The box lock (host owner's request, 2026-10-01).** The suite lease covers
-pytest only, and the qwentescence WSL VM (40 GB, shared with a production
-llama-server) wedged twice on 2026-10-01 when one `-n 12` suite overlapped a
-Maven gate-jar build, which holds the separate `service` build lease. So there
-is ONE box-wide lock, `box.lock` in the same lease directory
-(`$QWEN_SUITE_LEASE_ROOT/box.lock`, default `/var/lib/nx-suite-lease/box.lock`;
-the directory is `root:nx-suite` 2775, `ghci` and `nxtest` are both in
-`nx-suite`, so the file is cross-user), and everything heavy runs under it. In
-`test-qwen` the gate-jar build and pytest are ONE step: `flock -w <wait> -E 200
-box.lock bash -c 'scripts/build-gate-jar.sh; uv run pytest ... -n 8'`. A held
-lock logs a waiting line; a wait that outruns `QWEN_BOX_LOCK_WAIT_SECONDS`
-(1800, under the job's 75-minute timeout) fails the job naming the lock; a host
-without `flock` fails the job closed. The suite lease stays: CI's pytest takes
-it inside the box lock. Worker count is `-n 8`, not 12: each xdist worker boots
-its own Postgres at about 2.5 GB and 12 left the VM too little headroom. **CI has
-strict priority on that lock** (nexus-0wp30, Sam 2026-10-02). `flock` does not
-order its waiters and `test-qwen` gives up after 1800 s, so a queue of hand runs
-starved CI for about 24 minutes. `test-qwen` therefore posts
-`ci-waiting.<run>.<attempt>` in the lease root before it waits for the lock and
-holds a kernel lock on that file while it is queued. The lock, not the file's
-age, says whether CI is still waiting: the kernel drops it when the job dies,
-SIGKILL included. The job removes the file when it holds the box lock or leaves
-the step any other way. **Hand runs go ONLY through `scripts/qwen-hand-run.sh`**,
-as `nxtest` in a worktree under `~/src/nexus-wt/`. It refuses to start (exit 76,
-retry later) while a live marker exists, yields the lock and backs off if CI
-queued while it waited, stops itself after `QWEN_HAND_RUN_HOLD_SECONDS` (1500,
-exit 77) so a hand run cannot outlast CI's 1800 s wait, and passes
-`NX_BUILD_LEASE_ROOT` and `NX_SUITE_LEASE_WAIT=1` itself. A raw `flock ...
-box.lock` or a bare `pytest` is not a supported hand-run form. A hand run already
-holding the lock when CI arrives is not interrupted, so CI waits for it, for at
-most the hold cap (a hand run at `-n 8` took 801 s cold and 723 s warm, measured
-2026-10-02). Policy
-(Sam, 2026-10-02): agents' full suites use hellmini. Item 10 of `docs/contributing.md` § First run of the qwen-linux route (the
-overlap check) was run green on the host on 2026-10-02, so a hand run there is
-supported only through `scripts/qwen-hand-run.sh`, and only for a case that needs
-Linux. No Maven or engine suites on qwentescence at all (`scripts/mvnw-leased.sh`,
-`service/` test runs, `-Pnative`): the Java engine suites run on hellmini. The
-stamped-jar build that tests need is the only Maven the box runs, and only
-inside the lock. The T2 how-to `nexus/qwentescence-test-host-howto` carries the
-full host recipe.
-
-**Service CI routing.** `service-ci.yml`'s comments are the one authoritative
-copy of how it works; this is the summary. **The default is GitHub-hosted
-`ubuntu-latest` (Sam, 2026-10-02, nexus-xyrtc).** An owner push (account id and
-triggering actor both the repo owner) runs the Java job on `hellmini-ci` ONLY
-when the repository variable `SERVICE_CI_PUSH_RUNNER` is exactly `hellmini-ci`;
-unset, empty, a typo, `Hellmini-CI`, a stray space, `hellmini`, `ubuntu-latest`
-or any other value means `ubuntu-latest`, and every `pull_request` and any other
-actor's push runs on `ubuntu-latest` whatever the variable says. The decision is
-made in bash, in the `route` step of the `changes` job (output `java_runner`,
-read by the Java job's `runs-on`), because every `==` in a GitHub expression
-ignores case and "exactly `hellmini-ci`" needs a case-sensitive test; the
-expression only carries the owner-push rule. The step publishes one of two
-literals, so the variable can never route to `hellmini` or any other label.
-Like `QWEN_CI_PUSH_RUNNER`, the variable is read when `changes` runs and a
-"Re-run failed jobs" keeps the old output; use "Re-run all jobs" or push.
-Before this the default was `hellmini-ci` and the variable was set to
-`ubuntu-latest` as the off switch; that is inverted, and the variable is
-currently set to `ubuntu-latest`, which now means the same thing as unset (the
-setting is harmless and can be deleted). The decision followed the 10-run
-review Sam set on 2026-09-30 (21 runs on `hellmini-ci` by then):
-`hellmini-ci` green Java jobs had a median of 20.6 min against 25.2 min hosted,
-a gain of about 4.6 min on a check nothing blocks on for develop pushes, and
-hosted jobs showed no queueing (started 2 to 4 s after change detection). Against
-that, three false reds on 2026-10-02 came from colima port leaks. The cause is
-closed on the host (nexus-c7lqs, verified 2026-10-03): Lima forwards every
-published container port through one shared host port namespace, so each
-colima VM now allocates from its own guest `ip_local_port_range`, set by a
-provision script in its `colima.yaml` (`hhildebrand` 32768-39999, `ghrunner`
-40600-44999, `ghci` 45000-49151). A leaked forward can still pin a port, but
-only inside the VM that leaked it, until that VM's colima restarts. T2
-`nexus/hellmini-colima-port-ranges-verified-2026-10-03` has the recipe.
-`hellmini-ci` stays registered as the opt-in route. When it is in use the Java
-job tests macOS arm64 on push while PRs test linux amd64, so a platform-specific
-red on push has no PR-side twin. The `ghci` runner carries a host-side guard
-(`wait-for-host.sh`, a runner hook that exists only on the host, not in this
-repo) that holds the job up to 20 minutes while the `ghrunner` runner has a job
-running or a suite or service lease is held, then proceeds. It is
-one-directional: it does not stop a hand run or a release leg that starts after
-the CI job. A full `pytest -n auto` or a native release build on the same 24 GB
-box can still thrash it.
-
-**What is and is not a control.** The routing (a `runs-on` label, or the bash `route` step that feeds one) is a routing rule,
-not a security boundary: it lives in a file whoever can push a branch controls.
-The controls are the collaborator list (owner only since 2026-09-30, when four
-write collaborators were removed), the fork-PR approval policy (all external
-contributors need an approval click), and branch protection. A merged external
-or Dependabot PR runs its code on `hellmini-ci` at the owner's next `service/**`
-push while the Service CI route is on `hellmini-ci` (variable exactly `hellmini-ci`; not the current state), and, once `QWEN_CI_PUSH_RUNNER` is `qwen-linux`, on `qwen-linux` at the owner's next push to develop that changes
-anything outside the doc-only set (`docs/**`, `web/**`, root `README.md`,
-`CHANGELOG*` and `LICENSE*`, `conexus/CHANGELOG.md`), by design: that is `src/`,
-`tests/`, `scripts/`, `pyproject.toml`, `uv.lock`, `service/`, `conexus/`, `sn/`
-and `.github/` alike.
-
-**Isolation is intended, not proven by prose.** `ghci` is a separate macOS user,
-not a sandbox. The evidence is a green run of
-`.github/workflows/hellmini-ci-isolation-probe.yml` (owner-only
-`workflow_dispatch`, runs on `hellmini-ci`): ghrunner's paths unreadable, no
-passwordless `sudo`, no Developer ID signing identity, `/Volumes/Bulk` mounted
-with ownership honoured. Run 36793205972 (`hellmini-ci-isolation-probe`, branch
-`runner-probe/ci-isolation2`, 2026-09-30) is green, so the isolation is
-evidenced, not only intended, as of that run. The probe has since become
-dispatch-only and is not on `main`, so it cannot be dispatched again until a
-release promotes it.
-Both macOS runners keep state between jobs (Maven `~/.m2`, tool caches); a job on
-`hellmini-ci` can also write the repo's Actions cache in the develop scope.
-
-`qwen-linux` is weaker, and the file modes alone cannot make it otherwise. Its
-`ghci` user is in the `docker` group, and on a rootful Docker daemon that is
-**root on the distro**: `docker run -v /:/h` reads and writes every file in it,
-the live install's credentials and `/etc/wsl.conf` included. A job could
-therefore rewrite `/etc/wsl.conf` and, at the next WSL restart, bring interop and
-the `/mnt` automount back. The wsl.conf fix defeats `ghci` acting as `ghci`; it
-does not defeat `ghci` acting through docker, and nothing has measured whether
-it survives that. The same WSL distro hosts a live nexus install and its service
-(user `nexus`), the suite user `nxtest`, and a Windows host whose `C:` drive WSL
-can mount; the WSL data and `.wslconfig` belong to the Windows user.
-
-Two controls, and they are different in kind:
-
-- **The per-run Windows-side preflight** (first step of `test-qwen`, before
-  `actions/checkout`, so it reads the host as the last job left it; it guards
-  host drift, not a hostile commit, since this file is part of the pushed commit
-  and a commit can edit the step out) fails the job closed on every run
-  unless the kernel is WSL with binfmt_misc mounted (a positive control: every
-  check below is true on a machine that is not WSL), and there is no
-  `WSLInterop` handler, no `cmd.exe` under `/mnt/*/Windows/System32`, no
-  non-empty or mounted `/mnt/<letter>` drive, and no `/mnt` entry on `PATH`. It
-  notices a wsl.conf rewrite after the fact, at the next run that follows a WSL
-  restart. It does not prevent one, and it does not bound docker.
-- **The probe**, `.github/workflows/qwen-linux-isolation-probe.yml` (owner only;
-  triggers: `workflow_dispatch`, which GitHub offers only for a file on the
-  default branch, and a push to a `runner-probe/qwen-*` branch, which is how it
-  runs from develop-era code), checks the unprivileged route once. It FAILS on:
-  a job that is not running as exactly `ghci`; passwordless `sudo`; ANY file
-  under `/home/nexus/.config/nexus` readable by `ghci` (a count, never a name;
-  `config.yml` is also tested by name, since `find -readable` is blind in a
-  directory `ghci` may search but not list; an absent or unreachable directory, or
-  a `find` that fails and counts no readable file, is
-  reported as NOT CHECKED, which is also what a closed `/home/nexus` looks like,
-  so it cannot fail, and so it is emitted as a `::warning::` annotation: NOT
-  CHECKED is not a pass); and the Windows
-  side (the preflight's checks plus an attempt to run `cmd.exe`). It REPORTS
-  docker-group membership and whether the daemon is reachable. It runs no
-  container (an image is third-party code on the runner; an earlier draft pulled
-  an unpinned `alpine` and the step was dropped, not pinned). **Its docker
-  report is not a bound on docker.** Its log carries pass or fail and counts
-  only: no modes, owners, user names, group lists or file names. What the probe
-  asserts about file-mode isolation is the credential count and nothing else;
-  that `/home/nexus` or `/home/nxtest` is listable is reported, not failed.
-
-**WSL interop and the `/mnt` automount must be OFF before the route is
-enabled.** Measured on qwentescence with both on: the host admin, running as
-`ghci`, read the Windows user's SSH private key under `/mnt/c` and ran
-`/mnt/c/Windows/System32/cmd.exe` as a Windows admin. The fix is host-side, in
-`/etc/wsl.conf` (`[interop] enabled=false`, `appendWindowsPath=false`,
-`[automount] enabled=false`, then `wsl --shutdown`), and it was applied on the
-host on 2026-10-01 (reported by the host's operator; its checks were run by hand
-from an `nxtest` ssh session and passed, which is not the workflow run as
-`ghci`, and a read of the host showed a WSL kernel, binfmt_misc mounted, no
-`/mnt/<letter>` mount). Until a probe run is green (see the run record above),
-read this runner's isolation as "intended", with docker as the known hole; a
-separate or rootless Docker for `ghci` is the remedy if Sam wants it closed.
-`qwen-linux` keeps state between jobs too: the docker daemon and its images and
-tags are shared by every user of the distro, and `ghci`'s home keeps the uv,
-Maven, model and PG-bundle caches and the `TMPDIR`.
+`hellmini` is a bare custom label (registered with `--no-default-labels`), so a
+job has to name it. Older registrations on those hosts (`hellmini-ci`,
+`qwen-linux`, `gtr-windows`) may still be online until the host owner removes
+them, and some carry the generic `self-hosted`, `Linux`, `X64` or `Windows`
+labels, so a job that says `runs-on: self-hosted` (or an array with one of those
+labels) can land on one of them. A `runs-on` label is a routing rule, not a
+security boundary: whoever can push a branch controls the workflow files. The
+controls are the collaborator list (owner only), the fork-PR approval policy and
+branch protection.
 
 **Before approving a fork-PR run, read its diff for:**
 
 - anything under `.github/` (a workflow or action can name any runner);
 - any `runs-on` that names a self-hosted label, `self-hosted`, `hellmini`,
-  `hellmini-ci`, `qwen-linux` or `gtr-windows`;
-- `service/` tests and `pom.xml` (merged, they run on `hellmini-ci` at the next
-  owner push that changes `service/**` while `SERVICE_CI_PUSH_RUNNER` is exactly
-  `hellmini-ci` (not the default), and on `qwen-linux` at the next owner push
-  to develop: `scripts/build-gate-jar.sh` runs Maven, its plugins and the jOOQ
-  codegen there as `ghci`, with docker);
-- anything the `code` predicate admits, which is everything but the doc-only set
-  (`docs/**`, `web/**`, root `README.md`, `CHANGELOG*`, `LICENSE*`,
-  `conexus/CHANGELOG.md`): `tests/`, `src/`, `scripts/`, `pyproject.toml`,
-  `uv.lock`, `service/`, `conexus/` and `sn/` all reach `qwen-linux` at the next
-  owner push to develop once `QWEN_CI_PUSH_RUNNER` is `qwen-linux` (the route is
-  opt-in), where the runner user is in the docker group (see above).
+  `hellmini-ci`, `qwen-linux` or `gtr-windows`.
 
 **Agents never approve a fork-PR run** (`POST /actions/runs/{id}/approve`), even
 when they hold the owner's `gh` token. Report the run id and stop; the approval
@@ -545,18 +249,11 @@ The Java **engine-service** binary is a separate release artifact with its own c
 
 Build or test the engine through `scripts/mvnw-leased.sh` (never a bare `./mvnw`/`mvn`) — one builder at a time; a concurrent `./mvnw` invocation against the same `service/target` corrupts jOOQ codegen mid-build (nexus-c00dw, see `scripts/lib/build-lease.sh`). The lease lives in the git common dir, so every worktree shares it, and a live holder is waited for rather than refused (`NX_BUILD_LEASE_WAIT`, nexus-g6xpa): one engine build or suite per box. `scripts/build-gate-jar.sh` caches the stamped jar on the exact `service/` content, so a fresh worktree with an unchanged tree gets a copy instead of a nine-minute rebuild. The Python suite reads the same lease at session start (nexus-pv93h): while a build holds it, `pytest` refuses the whole run with one line and exit 75 naming the holder, and `NX_BUILD_LEASE_WAIT=<seconds>` makes it wait instead; `NX_TEST_T2_SUBSTRATE=none` runs are never gated.
 
-  The suite takes a lease of its own, `suite`, under the same root (`tests/_suite_lease.py`), so two full runs on one box see each other. **It fails closed on contention**: a run that finds the lease held (or loses the race for it) exits 75, naming the holder, the lease directory and the recovery command (`rm -rf <lease dir>`, valid only when no pytest run is live). `NX_SUITE_LEASE_WAIT=<any non-zero>` queues behind a live holder for up to 30 minutes instead of refusing, and a lease directory whose pid file is missing, empty or garbage (a run killed between its `mkdir` and its pid write) is reclaimed automatically once it is 60 seconds old, so a corpse cannot wedge the queue. **A lease this user cannot READ (EACCES on the directory or the pid file) is HELD, never reclaimed**: it may be a live peer's, so the run exits 75 naming the path (`acquire` creates the directory and its files group/world-readable explicitly, whatever the umask, so peers can read each other's). Two gaps stay open: a pid write that fails after `mkdir`, and a maker stalled over 60 s between the two (`_reclaim_if_dead`'s docstring). **Fails closed is a claim about contention only**: an unwritable lease root still runs UNGUARDED, silently (`acquire` swallows it and hands back a no-op release), which is why CI's qwen job validates its lease root in a step of its own. `NX_SUITE_LEASE_UNGUARDED=1` (exactly `1`; `true`, `off` or a typo do not count) is the explicit opt-out for a HAND run; no workflow may set it, pinned by `tests/test_suite_lease_unguarded_lint.py`.
+  The suite takes a lease of its own, `suite`, under the same root (`tests/_suite_lease.py`), so two full runs on one box see each other. **It fails closed on contention**: a run that finds the lease held (or loses the race for it) exits 75, naming the holder, the lease directory and the recovery command (`rm -rf <lease dir>`, valid only when no pytest run is live). `NX_SUITE_LEASE_WAIT=<any non-zero>` queues behind a live holder for up to 30 minutes instead of refusing, and a lease directory whose pid file is missing, empty or garbage (a run killed between its `mkdir` and its pid write) is reclaimed automatically once it is 60 seconds old, so a corpse cannot wedge the queue. **A lease this user cannot READ (EACCES on the directory or the pid file) is HELD, never reclaimed**: it may be a live peer's, so the run exits 75 naming the path (`acquire` creates the directory and its files group/world-readable explicitly, whatever the umask, so peers can read each other's). Two gaps stay open: a pid write that fails after `mkdir`, and a maker stalled over 60 s between the two (`_reclaim_if_dead`'s docstring). **Fails closed is a claim about contention only**: an unwritable lease root still runs UNGUARDED, silently (`acquire` swallows it and hands back a no-op release). `NX_SUITE_LEASE_UNGUARDED=1` (exactly `1`; `true`, `off` or a typo do not count) is the explicit opt-out for a HAND run; no workflow may set it, pinned by `tests/test_suite_lease_unguarded_lint.py`.
 
-- **hellmini is inside the release trust boundary (Sam, 2026-09-28, nexus-yd9po).** The mac-arm64 release legs (native build + PG bundle, in both `engine-service-release.yml` and `pg-bundle-cache-seed.yml`) build on hellmini, a self-hosted Mac mini runner — accepted as trusted infrastructure for release jobs, not merely "another CI box." That means: physical and network access to it are release-security-relevant (same footing as the GH-hosted runners' isolation, minus the ephemerality); and it PERSISTS STATE BETWEEN JOBS — the Maven `~/.m2` cache, `RUNNER_TOOL_CACHE` (GraalVM/uv installs via `actions/setup-*`), and the Homebrew install (flex/bison) all survive across runs, unlike a GH-hosted runner's throwaway VM. `workflow_dispatch`'s `mac_runner` input falls back to `macos-14` when hellmini is down (FileVault reboot waiting on KVM unlock). Since 2026-09-30 a second runner on the same box, `hellmini-ci` (user `ghci`), took the Service CI Java job on owner pushes so that test code stays off the release runner's caches (since 2026-10-02 the variable `SERVICE_CI_PUSH_RUNNER` routes it to GitHub-hosted runners instead, and `hellmini-ci` is an opt-in route); the routing, the isolation evidence, the offline toggle and the fork-PR rules are in § Self-hosted runners and fork PRs, and `service-ci.yml`'s comments carry the mechanics.
+- **hellmini is inside the release trust boundary (Sam, 2026-09-28, nexus-yd9po).** The mac-arm64 release legs (native build + PG bundle, in both `engine-service-release.yml` and `pg-bundle-cache-seed.yml`) build on hellmini, a self-hosted Mac mini runner — accepted as trusted infrastructure for release jobs, not merely "another CI box." That means: physical and network access to it are release-security-relevant (same footing as the GH-hosted runners' isolation, minus the ephemerality); and it PERSISTS STATE BETWEEN JOBS — the Maven `~/.m2` cache, `RUNNER_TOOL_CACHE` (GraalVM/uv installs via `actions/setup-*`), and the Homebrew install (flex/bison) all survive across runs, unlike a GH-hosted runner's throwaway VM. `workflow_dispatch`'s `mac_runner` input falls back to `macos-14` when hellmini is down (FileVault reboot waiting on KVM unlock). The Service CI Java job runs on GitHub-hosted runners, never on `hellmini`; the fork-PR rules are in § Self-hosted runners and fork PRs.
 - **Artifact + trigger:** an `engine-service-vX.Y.Z` git tag fires `engine-service-release.yml`, which builds + cosign-signs the 3 native binaries (linux-amd64, linux-arm64, mac-arm64 — mac-arm64 now SMOKED, built on the hellmini self-hosted runner which has Docker via colima; nexus-yd9po closed the nexus-4xf5m no-Docker-on-GH-macOS gap for the default tag-push path, a `workflow_dispatch` run that falls back to `macos-14` when hellmini is offline is still unsmoked there; mac-amd64/Intel is not a supported target). It publishes **nothing to PyPI** and is **NOT gated by the luxe6 / RDR-155-P4a develop release boundary** (the workflow header says so explicitly). **The release is a DRAFT until every asset is attached** (nexus-cl14i, after v0.1.95 published PG bundles with no binary): a final `promote-release` job flips it only when both matrices succeeded and all 21 assets are present, so a tag is consumable roughly 35 to 65 minutes (v0.1.118 took 36, a single measurement) after push, never partially; a failed leg, mac-arm64 included, leaves a draft that `gh run rerun --failed` completes and promotes. So the engine can be refreshed in the cloud at any time, independent of the unreleasable-develop state.
-- **Version is tag-stamped — there is NO manifest to bump.** `release.properties` `release_version` is blank in source and stamped at native-build time from the tag (the Maven `pom.xml` stays `1.0-SNAPSHOT`, the dev coordinate). The cut is NOT just suite-green-then-tag: the `engine-release` skill (Authority: this section) enforces a full pre-tag battery — full engine suite green on the tagged commit, `tests/e2e/migration-rehearsal/run.sh --shakeout` (must end `CANDIDATE SHAKEOUT PASSED`) — then human pushes `engine-service-vX.Y.Z`, followed by a post-publish `--acquire` gate against the published bytes. `scripts/check_client_release_precondition.py --engine-tag engine-service-vX.Y.Z` gates the **DEPLOY, never the tag cut** (Hal directive 2026-08-02 — its pre-tag wiring forced conexus 7.1.0 to ship pinned to a pre-fence engine, its own flagship feature inert on fresh local installs; a red exit means the deploy waits for the client tag carrying the listed commits, per the paired-release choreography below). **A tag gates DELIVERY, not work**: engine changes are fully testable end-to-end on develop (`scripts/mvnw-leased.sh test` + the Python suite's engine substrate + LSG against a `build-gate-jar.sh` dev jar) — "cannot deploy yet" is never "cannot do/test/tag it" (error recurred 3x: nexus-0ehwe thread 2026-07-31 twice, the 7.1.0/v0.1.62 inversion 2026-08-02). Use the `engine-release` skill as the executable checklist, not this summary.
-- **PRE-TAG gate: release-workflow SHAPE, not just content** (nexus-xihsm). Three tags burned in one day (2026-09-05) on defects invisible to every gate above because those gates run in a DIFFERENT shape from `engine-service-release.yml` on two axes: `--shakeout` drives `service/native-smoke.sh`'s real-client probes from a `uv`-tool-INSTALLED WHEEL inside its container, where the nexus-a2qhz dev-checkout production-write guard is inert by construction, while the release workflow runs the byte-identical script from the CI CHECKOUT, where the guard fires; and every local Java leg (the host suite, `--shakeout`'s own `-Ob` build, `--candidate-migration`) runs WITH Docker, while the release build (`./mvnw -Pnative -Pprebuilt-jooq -DskipTests package`) runs on runners WITHOUT it. `scripts/check_release_workflow_shape.py` closes both: phase (a) runs native-smoke.sh's client probes from THIS checkout with a non-vacuity assert that `nexus.db.service_endpoint.is_dev_checkout_process()` is actually `True` for the process doing the asserting; phase (b) parses the release's EXACT Maven invocation out of the workflow YAML (never retyped: `extract_release_native_build_argv` is pinned against drift by `tests/scripts/test_check_release_workflow_shape.py::test_extraction_matches_the_real_workflow_file`) and runs it through `test-compile` with `DOCKER_HOST` pointed at a nonexistent socket. Self-sufficient, no manual pre-step: phase (b) populates `service/target/generated-sources/jooq` itself when absent, via `scripts/mvnw-leased.sh -q generate-sources` (the SAME command the release's separate `jooq-codegen` job runs, WITH Docker, exactly matching that job's two-stage split; routed through the leased wrapper, never a bare `./mvnw`, so it respects the one-builder-per-box lease above).
-
-  **Wired into `--shakeout` automatically** (`tests/e2e/migration-rehearsal/lib/shakeout_shape_check.sh`, called from `run.sh` right after the native-build step, never from a manual invocation and never from inside `rehearse_shakeout.sh`): a run-by-nobody check rots exactly like the procedures it exists to catch, and `rehearse_shakeout.sh`'s own container is the WRONG place for it regardless, since that container is a `uv`-tool-installed wheel with no `.git`/`pyproject.toml` ancestor by design (phase (a)'s non-vacuity assert could only ever refuse there, and phase (b) has no `service/mvnw` or JDK inside that image to run at all). `run.sh` is the one place both preconditions hold: it is itself a checkout, and it is where the just-built `-Ob` native candidate and freshly generated jOOQ sources already sit on THIS host, right after the build step. Phase (a) runs against the native candidate (`service/target/nexus-service`, or `$ARTIFACTS/native/nexus-service` under `--artifacts`); on a host that cannot execute that Linux candidate (macOS, where the `-Ob` build runs in a container) it boots the same build's JVM jar through a shim, and a missing jar is a FAILED verdict. A failure prints `[shakeout] release-workflow SHAPE check: FAILED` and exits `run.sh` with a nonzero status before the container ever starts, so it gates `--shakeout`'s own exit code and its verdict line is visible in the same terminal output as everything else `--shakeout` prints. Tests: `tests/scripts/test_shakeout_release_workflow_shape_wiring.py`.
-
-  **Standalone invocation still works** for other legs / ad hoc runs: `uv run python scripts/check_release_workflow_shape.py [--bin <BIN>]`: omit `--bin` to fall through to `native-smoke.sh`'s own default (`target/nexus-service`, relative to `service/`), or pass `--bin <path-to-a-shim-that-execs-java-jar>` (a JVM-jar shim via `build-gate-jar.sh` is far cheaper than a fresh native build, and legitimate here since phase (a)'s checkout-classification defect is orthogonal to native-image vs JVM). Must end `RELEASE WORKFLOW SHAPE CHECK PASSED`.
-
-  **What remains uncovered even when wired** (critic finding, nexus-vpl9c riders review): this exercises the CANDIDATE binary and the Maven invocation shape only. It proves nothing about cosign signing (`engine-service-release.yml`'s keyless-Sigstore steps, tag-gated, never exercised by `--shakeout` at all), the `promote-release` job's all-21-assets gate (`scripts/promote_engine_release.sh`, its own separate forced-failure proof per `tests/scripts/test_promote_engine_release_sh.py`), or mac-arm64's genuine no-Docker GitHub-hosted runner (this check runs on a box that HAS Docker throughout; mac-arm64's `smoke: false` posture and its own coverage gaps are `nexus-4xf5m`'s territory, unrelated to and unclosed by this check).
+- **Version is tag-stamped — there is NO manifest to bump.** `release.properties` `release_version` is blank in source and stamped at native-build time from the tag (the Maven `pom.xml` stays `1.0-SNAPSHOT`, the dev coordinate). The cut is NOT just suite-green-then-tag: the `engine-release` skill (Authority: this section) enforces a pre-tag check — full engine suite green on the tagged commit (the local-candidate shakeout, candidate-migration and published-client write legs were deleted in cleanup step 11, nexus-0r1uz) — then human pushes `engine-service-vX.Y.Z`, followed by a post-publish `--acquire` gate against the published bytes. `scripts/check_engine_release_floor.py --client-precondition engine-service-vX.Y.Z` gates the **DEPLOY, never the tag cut** (Hal directive 2026-08-02 — its pre-tag wiring forced conexus 7.1.0 to ship pinned to a pre-fence engine, its own flagship feature inert on fresh local installs; a red exit means the deploy waits for the client tag carrying the listed commits, per the paired-release choreography below). **A tag gates DELIVERY, not work**: engine changes are fully testable end-to-end on develop (`scripts/mvnw-leased.sh test` + the Python suite's engine substrate + LSG against a `build-gate-jar.sh` dev jar) — "cannot deploy yet" is never "cannot do/test/tag it" (error recurred 3x: nexus-0ehwe thread 2026-07-31 twice, the 7.1.0/v0.1.62 inversion 2026-08-02). Use the `engine-release` skill as the executable checklist, not this summary.
 - **Cut from develop tip; don't let it drift.** Cloud-relevant engine work (pooler/RLS, pgvector, catalog conformance, aspect queue, batch endpoints) lands on develop continuously. Cut + deploy + cloud-gate the engine on its own cadence. Rule of thumb: if `git log <last-engine-tag>..HEAD -- service/` is non-trivial AND cloud-relevant, cut a fresh engine **before** relying on cloud test results or pinning it into a PyPI release.
 - **Prep (AI) vs cut (human).** AI preps: confirm the `service/` tree at the target commit equals a green-`service-ci` commit (the Java CI is a required check on `main` and `develop`, so a PR into either is gated on it, but nothing gates a DIRECT push to `develop` on it, and a develop run can be cancelled or time out, so verify the full `scripts/mvnw-leased.sh test` + native build actually passed on that exact tree). The human pushes the tag.
 - **Deploy + cloud-gate is conexus-side (passive bus).** After the tag publishes + signs, conexus deploys the signed binary and re-runs the cloud gate (recall + hybrid parity, xr7.8.9-style). Surface an explicit "relay: deploy `engine-service-vX.Y.Z` + re-gate" to Hal — never frame the cross-instance deploy as autonomous. **This line is a POINTER, not a terminus.** conexus owns pre-deploy instruments this repo does not document, because they are not this repo's to document. Two of them, confirmed 2026-08-27:
@@ -564,8 +261,8 @@ Build or test the engine through `scripts/mvnw-leased.sh` (never a bare `./mvnw`
   - **`deploy/engine/image-smoke.sh`** (conexus repo) — pre-push, image-level: boots the built image, asserts `release_version`, and fails on any `/version` key outside the public contract. `push-engine-image.sh:129` (conexus repo) refuses an image that never proved it boots.
   What does NOT exist: a staged / shadow / non-prod deploy target. There is ONE environment (`dev`), and it carries the live estate, so deploying to "dev" IS the live deploy (conexus-vbti, OPEN). Say that precisely; do not generalise it into "the cloud cutover is unvalidated by construction".
   Measured 2026-08-27 (`engine-service-v0.1.86`): this section plus the engine-release skill's post-deploy-only gate list was read as "validated post-hoc by construction" and reported to Hal that way. The binary half of that was right; the WALK half was wrong, and the fork rehearsal was omitted entirely.
-- **Their gate probes the engine DIRECT; it does not prove client-visibility.** After every cloud deploy (and before signing off a release shakeout), run `tests/e2e/cloud-client-path-gate.sh` from a cloud-mode box: it asserts the engine's pinned contracts (/version fields, ez5.1 /health, client embedding_mode probe, /v1 read path) survive the PUBLIC edge. Against an engine that carries the RDR-223 ownerless-write refusal, run it with `NX_EXPECTED_OWNERLESS_WRITE_MODE=log-only` (after the first deploy) or `=enforce` (after the flip): plain, it FAILS leg B3 on any engine that reports a mode, and on an unreadable `/v1/status` body in every case (nexus-20onx; `engine-release` skill Step 6.1). 2026-07-23 (nexus-bwulw): the edge stubbed /version and auth-gated /health, silently disabling voyage threshold gating + dimension-orphan tooling and blocking guided migrations to cloud — three client features shipped green through every engine-direct gate.
-- **A new engine bumps these downstream references:** `tests/e2e/migration-rehearsal/run.sh` `COLD_TAG` default; and — **unconditionally** — `REQUIRED_ENGINE_VERSION` in `src/nexus/engine_version.py`. ONE engine identity per release: the engine it was built and gated with, on every install path. Not a compatibility minimum, not a range, no "only if the release needs the features" carve-out (Hal directive 2026-07-15, after the 14h GH #1402 incident; the identical 2026-07-14 v0.1.42 episode came from exactly that carve-out). Cloud users get whatever conexus deployed; **local-mode installs get ONLY what this constant names**, so a tag that is cut, gated, and never pinned reaches nobody. That single constant also drives `PINNED_SERVICE_TAG` (`src/nexus/daemon/binary_install.py` DERIVES it, not an independent literal), so there is nothing separate to bump there. **Sequencing — the PAIRED-RELEASE choreography (Hal directive 2026-08-02, supersedes the old "bump only after deploy, floor lags a release" reading):** when a client release carries client halves of engine features, the engine tag is cut FIRST (tag-cut is never blocked — see 3b above), the client release gates its battery against that engine and bumps the floor to it IN the same release, and the deploy fires at client-tag push, in PARALLEL with the ~90s PyPI publish workflow — any client-release precondition is satisfied the instant the client tag exists, and the engine is live before any user can install the client that requires it. Zero refusal window (GH #1402: a floor-bumped client published with NO deploy armed makes cloud clients refuse the managed service as below-identity — the deploy must fire at tag push, not "eventually") and zero inert-window (the 7.1.0/v0.1.62 inversion: floor lagging a release ships a client whose pinned engine lacks the engine halves of its own features). `scripts/check_engine_release_floor.py` fails the release in BOTH directions. **nexus-1emxn refinement (measured twice, 2026-08-29: "fires at tag push" was a human relay, PyPI published in ~90s, and the window sat open 48+ min):** (a) when every wire-ledger `## Unshipped` entry carries the `[additive]` direction-safety token (old client + new engine safe), deploy the engine BEFORE the client tag push — `check_client_release_precondition.py` accepts an all-`[additive]` ledger with the pairing named, so the client tag can never open a window at all; (b) when any entry is not additive, the relay must be ARMED with conexus (image built, redeploy staged on a named trigger) and that arming CONFIRMED before the client tag pushes — an unarmed non-additive pairing does not tag, enforced by `check_release_arming` at the end of the paired battery against conexus's attestation in `docs/release-arming/` — which the ATTENDED `--paired-deploy` run reaches and the tag-push `--paired-deploy-auto` run does not always, by ruling (nexus-h0fo3 landed it, nexus-jv9h3 is the accepted gap; contract in that directory's README); (c) on a cloud-mode box, the post-release local reinstall waits for the bare floor verify to pass against the live cloud (exit 1 = the cloud is still behind = new spawns would refuse the service — wait, don't reinstall).
+- **Their gate probes the engine DIRECT; it does not prove client-visibility.** After every cloud deploy (and before signing off a release), run `tests/e2e/cloud-client-path-gate.sh` from a cloud-mode box: it asserts the engine's pinned contracts (/version fields, ez5.1 /health, client embedding_mode probe, /v1 read path) survive the PUBLIC edge. Against an engine that carries the RDR-223 ownerless-write refusal, run it with `NX_EXPECTED_OWNERLESS_WRITE_MODE=log-only` (after the first deploy) or `=enforce` (after the flip): plain, it FAILS leg B3 on any engine that reports a mode, and on an unreadable `/v1/status` body in every case (nexus-20onx; `engine-release` skill Step 6.1). 2026-07-23 (nexus-bwulw): the edge stubbed /version and auth-gated /health, silently disabling voyage threshold gating + dimension-orphan tooling and blocking guided migrations to cloud — three client features shipped green through every engine-direct gate.
+- **A new engine bumps this downstream reference, unconditionally:** `REQUIRED_ENGINE_VERSION` in `src/nexus/engine_version.py`. ONE engine identity per release: the engine it was built and gated with, on every install path. Not a compatibility minimum, not a range, no "only if the release needs the features" carve-out (Hal directive 2026-07-15, after the 14h GH #1402 incident; the identical 2026-07-14 v0.1.42 episode came from exactly that carve-out). Cloud users get whatever conexus deployed; **local-mode installs get ONLY what this constant names**, so a tag that is cut, gated, and never pinned reaches nobody. That single constant also drives `PINNED_SERVICE_TAG` (`src/nexus/daemon/binary_install.py` DERIVES it, not an independent literal), so there is nothing separate to bump there. **Sequencing — the PAIRED-RELEASE choreography (Hal directive 2026-08-02, supersedes the old "bump only after deploy, floor lags a release" reading):** when a client release carries client halves of engine features, the engine tag is cut FIRST (tag-cut is never blocked — see 3b above), the client release gates its battery against that engine and bumps the floor to it IN the same release, and the deploy fires at client-tag push, in PARALLEL with the ~90s PyPI publish workflow — any client-release precondition is satisfied the instant the client tag exists, and the engine is live before any user can install the client that requires it. Zero refusal window (GH #1402: a floor-bumped client published with NO deploy armed makes cloud clients refuse the managed service as below-identity — the deploy must fire at tag push, not "eventually") and zero inert-window (the 7.1.0/v0.1.62 inversion: floor lagging a release ships a client whose pinned engine lacks the engine halves of its own features). `scripts/check_engine_release_floor.py` fails the release in BOTH directions. **nexus-1emxn refinement (measured twice, 2026-08-29: "fires at tag push" was a human relay, PyPI published in ~90s, and the window sat open 48+ min):** (a) when every wire-ledger `## Unshipped` entry carries the `[additive]` direction-safety token (old client + new engine safe), deploy the engine BEFORE the client tag push — `check_engine_release_floor.py --client-precondition` accepts an all-`[additive]` ledger, so the client tag can never open a window at all; (b) when any entry is not additive, the redeploy must be staged with conexus (image built, a named trigger) and that CONFIRMED back before the client tag pushes — a human confirmation, nothing mechanical checks it; (c) on a cloud-mode box, the post-release local reinstall waits for the bare floor verify to pass against the live cloud (exit 1 = the cloud is still behind = new spawns would refuse the service — wait, don't reinstall).
 
 ### Cutting a release (version bump + tag-push to PyPI)
 
@@ -632,15 +329,17 @@ things to avoid carefully; they are impossible.
    false on first contact becomes advisory.
 
 4. **The release battery runs IN THE RELEASE WORKTREE, never the primary**
-   (nexus-57cvk; this said "in the primary" until 2026-09-22). It keys
-   artifacts on the working tree's identity and refuses artifacts whose
-   manifest identity is not this checkout's (nexus-mbeke), so the tree it
-   runs in must not move underneath it — and the primary moves by
-   construction, because rule 9 fast-forwards it on every push to
-   `develop`. On 2026-09-22 that ended 7.57.0's battery on its twelfth leg
-   with a tree-identity mismatch naming two hashes: eleven legs green,
-   nothing wrong with the code, and neither session having done anything
-   the rules did not tell it to. A release worktree holds the release
+   (nexus-57cvk; this said "in the primary" until 2026-09-22). The battery
+   is three legs behind one preflight — the fresh-install MVV, the
+   package-upgrade MVV and the local-service gate — and each builds and
+   gates the checkout it runs in, so the tree must not move underneath an
+   hour-long run — and the primary moves by construction, because rule 9
+   fast-forwards it on every push to `develop`. On 2026-09-22 that ended
+   7.57.0's battery on its twelfth leg with a tree-identity mismatch
+   naming two hashes (the battery then keyed prebuilt artifacts on a tree
+   identity; that mechanism was deleted in cleanup step 11, nexus-0r1uz):
+   eleven legs green, nothing wrong with the code, and neither session
+   having done anything the rules did not tell it to. A release worktree holds the release
    branch, which a `develop` push cannot move at all, so the collision
    stops existing rather than being avoided carefully.
 
@@ -659,12 +358,12 @@ things to avoid carefully; they are impossible.
    of rule. Rule 9's reason is correctness: a stale primary answers
    questions wrongly and looks complete doing it. Rule 4's reason was
    cost: the primary was where the artifacts already were, so rotating
-   worktrees rebuilt the wheel and the native candidate every time. Cost
+   worktrees rebuilt the wheel and the engine jar every time. Cost
    yields to correctness.
 
    The rebuild is worth paying on its own merits anyway. The version bump
    lands in the release branch, so a battery run in the primary gates a
-   tree that is NOT the tree that ships. One artifact rebuild per release
+   tree that is NOT the tree that ships. One rebuild per release
    buys "we gated what we shipped", which is the whole point of a battery.
 
    The engine build needs neither tree: the lease lives in the git common
@@ -694,113 +393,19 @@ things to avoid carefully; they are impossible.
    are clear, it is the jar. Measured 2026-09-19: 20673 setup errors in a
    fresh worktree, zero shared-memory segments, missing jar.
 
-7. **Before pushing, check the `board/ci/nexus-develop` topic, not GitHub.**
-   Ask whether a run someone is waiting on is in flight — not whether the
-   slot is free. Worktrees split the tree; CI remains one shared resource
-   with one queue, and a push cancels the run in progress. GitHub's
-   `workflow_run` and `workflow_job` webhooks reach the conexus-hosted
-   adapter (RDR-220; `infra/terraform/ci-board-adapter` in the conexus
-   repo), which posts one tuple per state change — `queued`,
-   `in_progress`, `completed` with GitHub's conclusion — for every run and
-   every job of every workflow, about 70 posts per develop push; nothing in
-   this repo's workflows posts anything. Read the board for one commit with
-   `uv run python scripts/ci_status.py <full 40-char sha>` (exit 0 green,
-   1 failed, 2 pending, 3 no posts for that sha, 4 cancelled). Its fold:
-   within one attempt the most advanced state wins, so a late `queued`
-   copy cannot hide a finished job; across reruns the newest attempt wins;
-   and when GitHub starts two runs of one workflow for one commit, only
-   the newest run that was not cancelled counts (the newest outright
-   when every run was), and the other run's jobs, failures included,
-   are ignored (nexus-wqvv9).
-   A commit whose run has no `completed` post and no newer commit posting
-   behind it is live. A superseded run (the concurrency group cancelled it
-   when a newer commit pushed) posts `cancelled` for the run and its jobs,
-   with `pytest-gate` alone reading `failure` because its shards never
-   reported; every row of a run whose own run post is `cancelled` reads
-   `cancelled`, the aggregator included, and the exit is 4, not 1
-   (nexus-lgx93), so read the newer commit's run instead. That covers a
-   job that failed on its merits before the supersede too: an audit of a
-   superseded commit reads the `conclusion` column, not the verdict. A
-   `cancelled` job inside a run GitHub did not cancel was not superseded
-   (a job past its time limit, for one) and reads `failed`, so rerun it.
-   But GitHub also cancels the RUN when the timed-out job was its only real
-   job (Service CI's Java job, twice on 2026-09-30, nexus-rjk2a), so the
-   run post cannot tell a timeout from a supersede. The fold decides per
-   workflow, on the develop topic only (any other topic keeps the run-post
-   rule above). Service CI's `cancel-in-progress` is true for
-   `pull_request` only, so a newer push never cancels a started Service CI
-   run (it cancels a PENDING one, which has no job posts): a cancelled job
-   in a Service CI run that started reads `failed`, with its run, and no
-   clock is involved. A workflow whose push runs DO cancel in progress
-   (`PUSH_CANCELS_IN_PROGRESS` in `scripts/ci_status.py`: CI, CI commit
-   coverage audit, mac-signing-rehearsal,
-   pg-bundle-cache-seed, plugin drift ledger, plugin release; the lint test
-   `tests/scripts/test_ci_status_policy_lint.py` derives the set from the
-   workflow YAMLs and fails on disagreement) reads `cancelled` when a newer
-   run of that workflow exists (higher run id, other commit, first retained
-   post no later than the run's EARLIEST cancel post plus 30 s), and
-   `failed` when none does. No lower bound: a newer push cancels the old
-   run when it arrives, however long the runner then takes (0 to 92 s
-   measured, about 300 s allowed). "Started" means persistent evidence:
-   a cancelled job with an `in_progress` post, or another job of the same
-   run and attempt that completed with a conclusion other than `cancelled`
-   (Service CI's `service change detection`). Completed posts last three
-   days; `queued` and `in_progress` posts last six hours, so the reading
-   does not depend on them for Service CI. A run whose only cancelled row
-   is the RUN row, or whose cancelled jobs show no sign of having started,
-   was cancelled while pending and reads `cancelled`. Known misreadings,
-   all of them: (1) an in-set timeout within 30 s before an unrelated newer
-   push reads `cancelled`; (2) a run cancelled by hand after it started
-   reads `failed`, unless an in-set newer run began before the cancel;
-   (3) in-set, a newer run whose earliest retained post is `completed`
-   (its `queued` post expired) has an unknown start and counts as
-   excusing the cancel, so an in-set timeout older than six hours can read
-   `cancelled`; (4) a newer run dated by an `in_progress` post because its
-   `queued` post expired is dated later than it began; (5) a rerun attempt
-   cancelled when a newer run already exists reads `cancelled`, in-set;
-   (6) an in-set run cancelled while its jobs were still queued, with one
-   sibling job already complete, reads `failed` when no newer run is found,
-   because a sibling's completion shows the run started, not that the
-   cancelled job did; (7) a cancelled job with no run post and no sign it
-   started reads `cancelled` and exits 4, because the run post is a
-   separate delivery and can be missing.
-   A job that never posted is not green either (nexus-vyg07). On the develop
-   topic `ci_status.py` expects Service CI's Java job once `service change
-   detection` has completed green (`EXPECTED_JOBS`); with no row it adds a
-   `missing` one, `pending` for 30 minutes after the detector finished and
-   `failed` after that. Without it, a Java job left queued for an offline
-   `hellmini-ci` read green once its `queued` post expired at six hours. CI's
-   `pytest (qwen-linux full suite)` job is expected the same way, anchored on
-   `doc-only fast lane predicate`: it posts `queued` or `completed skipped` on
-   every develop push. No row is added for a run in which a hosted shard
-   (`pytest (Python ...`) completed with anything but `skipped`
-   (`EXPECTED_UNLESS_PEER_RAN`): that run either predates the job, so a sha
-   pushed before the job landed does not read as a red suite, or was routed to
-   the shards, where the qwen job is skipped and nothing hides. A doc-only sha
-   that predates the job still reads `failed` once, because every shard skipped,
-   until its posts expire.
-   Subscribe once per session with
-   `mcp__plugin_conexus_nexus__tuple_subscribe("board/ci/nexus-develop")`;
-   delivery starts at the subscribe time, and the posts of one wait
-   arrive as one ping naming the count, the first and last tuple id and
-   the `tuple_rd` call that reads them (nexus-zxthy; before it, a fresh
-   subscription replayed the topic's whole backlog one ping per post).
-   The engine itself now owns that start position (nexus-n36sw,
-   follow-up): a per-subscriber `announce` spec carries `since`, and the
-   engine excludes a backlog row before it is ever selected or stamped,
-   not just before it is pushed; an engine predating that bead falls
-   back to the client-side drop the parenthetical above describes,
-   automatically, for the life of the session's waiter. Either way,
-   wait for the state you care about or read the board for your sha
-   rather than acting on every ping. From a shell, `nx tuple rd board/ci/nexus-develop --newest -n 300 --json`
-   (rows come back oldest first, so without `--newest` a plain read shows
-   the 300 oldest posts; nexus-sh1ea).
-   Never `gh run watch`: several concurrent watch loops on one token
-   tripped GitHub's secondary rate limit on 2026-09-26 and every Actions
-   call 403'd (T2 `nexus/github-api-usage-research-2026-09-26`). If the
-   board has no post for your sha, fall back to ONE
-   `gh api repos/Hellblazer/nexus/commits/<sha>/check-runs` call at a time,
-   90s apart.
+7. **Before pushing, ask whether a run someone is waiting on is in flight.**
+   Worktrees split the tree; CI remains one shared resource with one queue,
+   and a push cancels the run in progress. Read one commit's checks with a
+   single call: `gh api repos/Hellblazer/nexus/commits/<sha>/check-runs`. Never
+   `gh run watch` and never a polling loop: several concurrent watch loops on
+   one token tripped GitHub's secondary rate limit on 2026-09-26 and every
+   Actions call 403'd (T2 `nexus/github-api-usage-research-2026-09-26`). The
+   conexus-hosted adapter still posts one tuple per run and job state change
+   to `board/ci/nexus-develop`; subscribe once per session with
+   `mcp__plugin_conexus_nexus__tuple_subscribe("board/ci/nexus-develop")` if
+   you want pings instead of polling. Nothing in this repo folds those posts
+   into a verdict any more, so read the `conclusion` of the check runs, not
+   the board.
 
 8. **Push unchanged**: `NX_PUSH_SOURCE=HEAD scripts/git-push-develop.sh <sha>...`
    from INSIDE the worktree. It reads HEAD from the shell's cwd, so `cd`
@@ -811,24 +416,6 @@ things to avoid carefully; they are impossible.
    (nexus-agctp) — a `PUSH_REFUSED_LOCK_HELD` names the holder and lease
    expiry; `NX_PUSH_SKIP_LOCK='<reason>'` is the named escape when the
    tuple space is unreachable.
-
-   **A develop freeze is a post, not a message** (nexus-eusu6). The release
-   owner runs `scripts/develop-freeze.sh set --reason "<text>"`, which posts
-   `state=frozen` to the `board/develop-freeze` topic, and `clear` at thaw
-   (`status` reads it; exit 10 while frozen). `git-push-develop.sh` reads the
-   newest post and refuses with `PUSH_REFUSED_FROZEN` (exit 12) naming holder,
-   reason and age; a board it cannot read refuses `PUSH_REFUSED_FREEZE_UNKNOWN`
-   (exit 13) unless the existing `NX_PUSH_SKIP_LOCK` is set, and a
-   release-owner-sanctioned push uses `NX_PUSH_FREEZE_OVERRIDE='<reason>'`.
-   Subscribe once per session with
-   `mcp__plugin_conexus_nexus__tuple_subscribe("board/develop-freeze")`.
-   Announce a freeze by message too, but the post is the authority: on
-   2026-09-29 a session missing from a hand-picked message list pushed
-   mid-freeze. The override and `clear` are honour-system (any session can
-   post either, and the newest post wins, so one `clear` thaws overlapping
-   freezes); an abandoned release must clear its freeze, since the board only
-   expires it after 7 days. The gate covers pushes made through the script; a
-   bare `git push` is not checked (nexus-wvokz).
 
 9. **Whoever pushes to `develop` fast-forwards the primary in the same
    breath.** `cd` to the primary and `git merge --ff-only origin/develop`.
@@ -896,10 +483,9 @@ things to avoid carefully; they are impossible.
     `hellmini`), or `git fetch laptop <branch>` on the mini (a fetch-only
     remote). Pushes to origin go from the laptop through
     `scripts/git-push-develop.sh` only. Run `tests/e2e/local-service-gate.sh`
-    there with `</dev/null`. The same box is also two self-hosted GitHub
-    Actions runners (`hellmini` for release jobs, `hellmini-ci` for the Service
-    CI Java job); see § Self-hosted runners and fork PRs. How-to and host
-    details: T2 `nexus/hellmini-second-test-host-howto`.
+    there with `</dev/null`. The same box is also the self-hosted `hellmini`
+    runner for release jobs; see § Self-hosted runners and fork PRs. How-to and
+    host details: T2 `nexus/hellmini-second-test-host-howto`.
 
 **Moving an in-flight session.** Cherry-pick or apply into the new worktree
 FIRST and verify there, and only then revert the primary — never the

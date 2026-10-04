@@ -2,7 +2,7 @@
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 """nexus-59bah: a heartbeat tick that stalls past the lease TTL must log.
 
-Observed 2026-09-06 (package-upgrade rehearsal, run.sh --artifacts): the
+Observed 2026-09-06 (package-upgrade rehearsal, run.sh): the
 supervisor stayed alive, its lease stamp stopped for 17+ s during an
 in-place venv reinstall, the lease was reaped, every client resolved
 "endpoint not resolvable", and the supervisor log said nothing. The tick

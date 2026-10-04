@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Every producer of service/target waits on the shared build lease
 (nexus-pv93h): no shell script outside the lease library itself calls the
-refuse-immediately ``build_lease_acquire``. The --shakeout native build was
+refuse-immediately ``build_lease_acquire``. A since-deleted rehearsal native build was
 the last bare caller and exited 75 the instant a cached gate-jar copy held
 the lease on 2026-09-07; ``build_lease_acquire_wait`` bounded by
 ``NX_BUILD_LEASE_WAIT`` is the only acquire a caller may use.

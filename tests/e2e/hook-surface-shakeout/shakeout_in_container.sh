@@ -5,8 +5,8 @@
 # plugin under test, captures the pane, and censuses what actually fired
 # against what hooks.json declares.
 #
-# The tmux/launch/prompt helpers below are taken from
-# tests/e2e/rdr208-mvv/mvv_in_container.sh rather than re-derived: the private
+# The tmux/launch/prompt helpers below were taken from the retired RDR-208
+# MVV driver rather than re-derived: the private
 # socket, the dialog walk, the `exec` so the pane process IS claude, the
 # explicit PATH (tmux opens a login shell and drops the image's ENV PATH), and
 # the Stop-hook turn sentinel instead of pane scraping. Each of those cost a
@@ -69,12 +69,11 @@ nx init --service --yes > "$RUN/init.log" 2>&1 \
     || { echo "nx init failed"; tail -30 "$RUN/init.log"; exit 1; }
 ok "nx init completed"
 
-SID_OF=""
 # The sentinel is found by GLOB, not by session id. turn_end.py names its file
 # after the session in its own stdin payload, so asking for a specific id
 # means resolving that id FIRST -- and the first cut of this script resolved
 # it from the wrong directory (`~/.config/nexus/status`; the record actually
-# lives under the transcript workspace, as rdr208-mvv's STATUS_D shows). The
+# lives under the transcript workspace). The
 # id came back empty, every check then looked for a file literally named
 # "turn-end.", and five turns timed out at 240 s each while the session was
 # doing the work perfectly well. Only one session runs here, so the newest
@@ -113,8 +112,8 @@ say "launch: real Claude Code, plugin from ${SHAKEOUT_SHA:-?}, ALL hooks live"
 # server called plain `nexus` and left the tool tier addressing a name that
 # did not exist -- measured as "Stop hook error: MCP server
 # 'plugin:conexus:nexus' not connected", with the session continuing anyway.
-# rdr208-mvv can use --mcp-config because the two hooks it tests are
-# command-tier and never name a server. This one cannot -- UNLESS the
+# A harness whose hooks are all command-tier can use --mcp-config because it
+# never names a server. This one cannot -- UNLESS the
 # override names the entry EXACTLY `plugin:conexus:nexus` (not `nexus`),
 # which is the shape RDR-219's "nx-mcp dispatch grant" needs for a
 # plugin-loaded harness (T3 analysis-deep-rdr219-devfd-mcp-config-2026-09-25
@@ -178,19 +177,6 @@ ok "session launched"
 # the wrong place. An assertion that can only be read one way when it fails
 # is worse than no assertion, and the census already covers this claim with a
 # denominator it derives from the shipped manifest.
-#
-# The session id is taken from the sentinel turn_end.py writes, once a turn
-# has actually ended, because that file is named by the id the HOOK saw --
-# no second source to disagree with.
-sid_from_sentinel() {
-    local f
-    for f in "$RUN"/turn-end.*; do
-        [ -e "$f" ] || continue
-        basename "$f" | sed 's/^turn-end\.//'
-        return 0
-    done
-    return 1
-}
 
 # RACE MODE (nexus-veh77): the interactive half of bead .6's M1. That bead
 # measured the connection race under headless `claude -p` ONLY and the RDR says
@@ -201,9 +187,11 @@ sid_from_sentinel() {
 # server.
 if [ -n "${SHAKEOUT_RACE_DELAY:-}" ]; then
     say "race: submitting immediately, server delayed ${SHAKEOUT_RACE_DELAY}s"
-    # A Bash turn, because PreToolUse:Bash carries hook_pre_close_verification,
-    # a TOOL-TIER entry -- the thing that cannot run before its server.
-    printf 'Run exactly this bash command and nothing else: echo RACEPROBE' | T load-buffer -
+    # A subagent dispatch, because SubagentStart carries hook_subagent_start,
+    # a TOOL-TIER entry -- the thing that cannot run before its server. (The
+    # Bash turn this used to be carried hook_pre_close_verification, deleted at
+    # cleanup step A2, nexus-0r1uz.)
+    printf 'Use the Agent tool to dispatch one general-purpose subagent whose entire task is to reply with the word RACEPROBE. Then tell me what it said.' | T load-buffer -
     T paste-buffer -t S
     T send-keys -t S Enter
     wait_for 240 turn_ended_since "$(turn_stamp)" || true
@@ -219,14 +207,8 @@ fi
 
 # HOOK PROBE MODE (nexus-wauo1.37): one turn, chosen because it is the
 # cheapest single turn that provokes the largest slice of the mcp_tool
-# roster -- dispatching a subagent fires two of three SubagentStart entries
-# (hook_subagent_start, hook_subagent_start_tuple), SubagentStop's
-# hook_subagent_stop_tuple, and the turn's own Stop fires hook_stop_
-# verification -- four of the seven mcp_tool handlers in one billed turn.
-# (Bead nexus-5l8i8 moved PreToolUse's hook_agent_dispatch_expect and
-# SubagentStart's hook_subagent_start_stamp off the mcp_tool tier onto the
-# command tier, so this turn no longer provokes either as an MCP call; the
-# nine/six figures this comment used to carry are nine/six no longer.)
+# roster -- dispatching a subagent fires SubagentStart's hook_subagent_start,
+# the one mcp_tool handler left in hooks.json.
 # No warmup turn: the Agent tool is a Claude Code built-in, not a deferred
 # MCP tool, so nothing here needs ToolSearch discovery first. Evidence is
 # read from $RUN/mcp-stdin.jsonl (the tee'd JSON-RPC stream into nx-mcp,
@@ -241,35 +223,6 @@ if [ -n "${SHAKEOUT_HOOK_PROBE:-}" ]; then
     # The verdict is asserted here, not compared by hand across runs.
     python3 "$HOME_DIR/hook_census.py" --probe "$RUN/mcp-stdin.jsonl"
     PROBE_RC=$?
-
-    # LEDGER CHECK (nexus-5l8i8 review, code-review-expert suggestion): the
-    # mcp_tool roster above cannot see agent-dispatch-expect /
-    # subagent-start-stamp any more -- both moved to the command tier
-    # (nx-hook, via nx_hook_shim.py), so mcp-stdin.jsonl carries no trace of
-    # them by construction, not by regression. This is this fast path's own
-    # replacement signal: the same subagent-dispatch turn that provokes the
-    # mcp_tool roster also fires both command-tier writers, so the
-    # session's real ledger file should carry one EXPECT row and one START
-    # row the instant the turn ends. Resolved the same way the full run's
-    # own expectations_census check resolves it below (sid_from_sentinel,
-    # HOME_DIR's default XDG_STATE_HOME) -- no per-hook env override exists
-    # in a real hooks.json invocation for this to depend on instead.
-    SID_OF="$(sid_from_sentinel || true)"
-    LEDGER_RC=0
-    if [ -n "$SID_OF" ]; then
-        LEDGER="$HOME_DIR/.local/state/nexus/orchestration/$SID_OF.expectations"
-        if [ -f "$LEDGER" ] && grep -q "$(printf '\t')EXPECT$(printf '\t')" "$LEDGER" \
-            && grep -q "$(printf '\t')START$(printf '\t')" "$LEDGER"; then
-            ok "command-tier ledger writers (agent-dispatch-expect, subagent-start-stamp) both fired: $LEDGER"
-        else
-            bad "command-tier ledger is missing an EXPECT or a START row: $LEDGER"
-            LEDGER_RC=1
-        fi
-    else
-        bad "no turn-end sentinel found -- cannot resolve the session id for the ledger check"
-        LEDGER_RC=1
-    fi
-    [ "$LEDGER_RC" -ne 0 ] && PROBE_RC=1
 
     echo "HOOK PROBE COMPLETE (override=${SHAKEOUT_MCP_OVERRIDE:-0}, rc=$PROBE_RC)"
     exit "$PROBE_RC"
@@ -306,35 +259,14 @@ if [ -n "${SHAKEOUT_PROBE:-}" ]; then
     exit 0
 fi
 
-say "PreToolUse (Bash): the close gate and the two routing rules"
+say "PreToolUse (Bash): the two routing rules"
 prompt "Run this exact bash command and show me its output: echo shakeout-bash-ok" "Bash turn"
-
-say "PostToolUse (Write): the divergence-language guard"
-# NAME THE TOOL. "Create a file containing ..." let the model reach for Bash
-# (`cat >`), which is a perfectly good way to create a file and does not match
-# the PostToolUse matcher `Write|Edit`, so the guard correctly did not fire and
-# the census reported it NEVER FIRED. Measured: the session used Bash x2,
-# mcp__plugin_conexus_nexus__scratch and Agent, and no Write at all. A prompt
-# that leaves the tool to the model cannot test a tool-matched hook.
-prompt "Use the Write tool (not Bash) to create /home/nexus/repo/shakeout_note.md with the single line: shakeout wrote this. Then say WROTE." "Write turn"
 
 say "PreToolUse (mcp tool): auto-approve, and a real tool round-trip"
 prompt "Call mcp__plugin_conexus_nexus__scratch with action=put, content='shakeout scratch', tags='shakeout'. Then say DONE." "MCP tool turn"
 
-say "SubagentStart/SubagentStop + the RDR-184 EXPECT writer"
+say "SubagentStart"
 prompt "Use the Agent tool to dispatch one general-purpose subagent whose entire task is to reply with the word PONG. Then tell me what it said." "subagent turn"
-
-say "PostCompact"
-before_compact="$(turn_stamp)"
-T send-keys -t S "/compact" Enter
-# /compact is a full model round-trip, not a UI action; 45 s was a guess and
-# hook_post_compact did not appear. Wait for the turn sentinel like any other
-# turn, and say so out loud when it does not arrive rather than moving on.
-if wait_for 240 turn_ended_since "$before_compact"; then
-    ok "/compact completed"
-else
-    bad "/compact did not complete within 240 s (PostCompact cannot have fired)"
-fi
 
 say "SessionEnd"
 T send-keys -t S "/exit" Enter
@@ -360,11 +292,9 @@ if [ -n "${SHAKEOUT_CLI_VERSION:-}" ]; then
         done
         return 1
     }
-    for tok in shakeout-bash-ok WROTE DONE PONG; do
+    for tok in shakeout-bash-ok DONE PONG; do
         if said "$tok"; then ok "the session answered $tok"; else bad "no assistant message carries $tok: that turn was blocked or failed"; fi
     done
-    if [ -f "$HOME_DIR/repo/shakeout_note.md" ]; then ok "the Write turn wrote its file"
-    else bad "the Write turn left no file"; fi
     EXITS="$RUN/hook-exits.tsv"
     ROWS="$(awk 'END{print NR}' "$EXITS" 2>/dev/null || echo 0)"
     BLOCKED="$(awk -F'\t' '$3 == 2' "$EXITS" 2>/dev/null)"
@@ -402,19 +332,6 @@ TRANSCRIPTS="$(find "$HOME_DIR/.claude/projects" -name '*.jsonl' 2>/dev/null | t
 python3 "$HOME_DIR/hook_census.py" "$HOME_DIR/hooks.json.original" \
     "$RUN/hook-census.tsv" "$RUN/mcp-stdin.jsonl" $TRANSCRIPTS
 CENSUS=$?
-
-say "RDR-184 ledger (the subagent family's own record)"
-SID_OF="$(sid_from_sentinel || true)"
-if [ -z "$SID_OF" ]; then
-    printf '  note  no turn-end sentinel, so no session id: the ledger check\n'
-    printf '        below is UNRUN, not clean.\n'
-fi
-if [ -n "$SID_OF" ] && nx-hook expectations_census "$SID_OF" > "$RUN/census.txt" 2>&1; then
-    ok "expectations_census ran"
-else
-    printf '  note  expectations_census exit %s\n' "$?"
-fi
-sed -n '1,12p' "$RUN/census.txt" 2>/dev/null | sed 's/^/    /'
 
 say "summary: $PASS passed, $FAIL failed"
 # In old-CLI mode the census is advisory: a shim-skipped verb never runs its

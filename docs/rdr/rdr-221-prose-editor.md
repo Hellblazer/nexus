@@ -276,8 +276,19 @@ range it came from, so a later edit to the source file does not change it.
 | Repo style sheet | `<repo>_prose` | `stylesheet` |
 | Genre: exemplars and notes | `<repo>_prose` | `genre/<name>` |
 | General "not a defect" entries | `prose` or `<repo>_prose` | `not-a-defect` |
-| Document voice card, style notes, stored rejections | `<repo>_prose` | `doc/<path>` |
+| Document voice card (author-approved), style notes, stored rejections | `<repo>_prose` | `doc/<path>` |
 | Session log (proposals, accepted, rejected) | `<repo>_prose` | `log/<path>/<utc timestamp>`, 90-day TTL |
+
+The document record is `{"scalars", "lists", "rejections", "voice_card"}`. `voice_card` is optional and has the
+shape `{"text", "at"}` (a non-empty string of at most 4000 characters, and the UTC time the author approved it).
+It is absent until the author says yes, after a run, to saving the card the editor returned; the editor's card is
+never stored by itself, and a stdin run stores none. Later runs put the saved card in the brief, labelled
+author-approved, as the anchor the editor starts from and returns unchanged, in place of a card rebuilt from text
+the editor has already edited (the drift Discovery 8 names). Without a saved card a run behaves as before.
+Every bullet of the brief's style-sheet section ends with its layer (document, genre, repo or user), and the
+brief states the rule: an entry from a narrower layer that contradicts a broader one wins (document > genre >
+repo > user); entries that do not contradict each other all apply. The site-page section 3 rules are the genre
+layer.
 
 A sentence edit is rejected only when the author says so: `reject N` or
 `reject the rest`, with an optional one-line reason (to tell a wrong edit from
@@ -295,7 +306,10 @@ the same insertion anywhere. And a fix the brief holds back is never proposed, s
 there is nothing to drop and nothing to see: it is invisible except through the
 editor's note, which nothing enforces. A rejection becomes a
 general "not a defect" entry at user or repo level only when the author says
-so and has read the entry's text. `/prose-edit rejections <path>` lists a
+so and has read the entry's text, and only after a dry run that showed the author that entry (the real promote
+is refused without a matching dry run, as apply is). Once stored, the entry goes into the editor's brief and the
+filter drops any later edit that makes the same change, by the same key as a rejection, in every document at
+that level; the dropped edit stays visible in the marked-up copy with the cause `not-a-defect`. `/prose-edit rejections <path>` lists a
 document's stored rejections, numbered, and
 `/prose-edit rejections <path> --remove <n>` removes one. The session log keeps
 each session's detail for 90 days; the document record is the authority for
@@ -610,3 +624,9 @@ Phase 2.
 
 - 2026-09-29: Gate round 1 — PASSED (0 Critical, 8 Significant, 0 ship-blocker(s)); commit `d31715dda`; critique `nexus_rdr/221-gate-critique-2026-09-29-r1`.
 - 2026-09-29: Accepted with fix-check residuals dispositioned by bead (epic nexus-ger02): R1 nexus-ger02.7, nexus-ger02.10; R2 nexus-ger02.10; R3 nexus-ger02.2; R4 nexus-ger02.1, nexus-ger02.3, nexus-ger02.4; R5 nexus-ger02.8; R6 nexus-ger02.10.
+- 2026-10-03: Phase 1 (Steps 1.2 to 1.5) changed these things relative to the text accepted on 2026-09-29, found in the Phase 1 review (nexus-ger02.5, nexus-ger02.6):
+  - Rejection memory (`1d94d2a28`, nexus-ger02.16) amended the body: a rejection matches a later proposal by its minimal change, the document's rejections go into the editor's brief, an edit the author does not name is held, and "Memory helps" is measured narrowly in Phase 1.
+  - Sam's ruling of 2026-09-30 on qualifiers (bd comment on nexus-ger02.3: only filler words are cut by default, every other qualifier or intensifier is a query) is in effect, and it deviates from the Technical Design sentence and Test Plan scenario 4 as accepted, which this entry leaves as they were; the deviation will be recorded in the post-mortem at close.
+  - The genre map for a path lives in `memory.py`'s default map (`_default_genre`), not in the repo style sheet that Step 1.3 item 3 names. The repo style sheet can still carry `genre_map` entries.
+  - Additions the accepted text does not describe: the stdin channel (flags on the first line, the text after it, written to the work directory); `--hold` and `--reject` on apply, so only a named `--reject` stores a rejection; a mandatory dry run before a real apply, enforced by `dryrun.json` hashes; a flat-text marked-up copy for an HTML page; and the brief as a file (`WORK/brief.md`, whose last line is an id the editor echoes as `brief_sha`; the id is in no prompt).
+  - Sam's three decisions of 2026-10-03 on the Phase 1 review (nexus-ger02.5, nexus-ger02.6; T2 `nexus_rdr/221-decision-phase1-review-2026-10-03`): precedence labels (every style-sheet bullet in the brief carries its layer and the brief states that the narrower layer wins; a document's own record can also ignore or make query-only a site-page section 3 rule), a stored voice card (an author-approved card kept in `doc/<path>`, offered after a run and used as the anchor for later runs), and the promote filter plus dry-run gate (the filter drops edits matching a promoted not-a-defect entry, and a real promote needs a matching dry run first).

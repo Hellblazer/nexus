@@ -128,19 +128,19 @@ def test_parsers_are_not_vacuous() -> None:
     vacuously. If the parse breaks (reworded guard, restructured case block),
     fail HERE rather than let the real guards go quietly green."""
     live = _live_flags()
-    assert len(live) >= 10, f"live-flag parse looks broken: {sorted(live)}"
-    assert "--shakeout" in live and "--acquire" in live, sorted(live)
-
-    retired = _retired_flags()
-    assert retired, "retired-flag parse found nothing; the RETIRED block moved"
-    assert "--cold" in retired, sorted(retired)
+    # Cleanup step 11 (nexus-0r1uz) deleted every journey but these two, and
+    # with them the RETIRED refusal block: the retired set is empty now, kept
+    # wired so a future retirement is policed the same way.
+    assert set(live) == {"--package-upgrade", "--acquire"}, sorted(live)
 
     standalone = _standalone_flags()
-    assert len(standalone) >= 5, f"standalone parse looks broken: {sorted(standalone)}"
+    assert standalone == {"--package-upgrade", "--acquire"}, (
+        f"standalone parse looks broken: {sorted(standalone)}"
+    )
 
     prescribed = _prescribed_flags()
     assert prescribed, "skill prescribes no run.sh flags; fence parse broke"
-    assert "--shakeout" in prescribed, sorted(prescribed)
+    assert "--acquire" in prescribed, sorted(prescribed)
 
 
 # ── Forward: the skill cannot prescribe something that does not work ────────
@@ -190,18 +190,17 @@ def test_every_live_standalone_journey_is_named_in_the_skill() -> None:
     )
 
 
-@pytest.mark.parametrize("flag", ["--shakeout", "--acquire"])
-def test_the_two_release_gates_are_prescribed_as_commands(flag: str) -> None:
-    """--shakeout (pre-tag, local candidate) and --acquire (post-publish, the
-    PUBLISHED bytes) are the two gates a cut must not ship without.
+@pytest.mark.parametrize("flag", ["--package-upgrade", "--acquire"])
+def test_the_release_gates_are_prescribed_as_commands(flag: str) -> None:
+    """--acquire (post-publish, the PUBLISHED bytes) and --package-upgrade
+    (the populated-store rehearsal Step 5b names) are the gates the skill must
+    give the operator a runnable command for.
 
-    Mentioning them is not enough — the skill must give the operator a runnable
-    command, because the failure mode being guarded is a step degrading into
-    prose nobody executes. Their coverage does not overlap: the shakeout drives
-    the locally built -Ob candidate; the published artifact is different bytes
-    from a different builder (full native build, codesign, cosign, PG-bundle
-    packaging), so a workflow-introduced defect is invisible to the shakeout by
-    construction (nexus-2oh5q).
+    Mentioning them is not enough — the failure mode being guarded is a step
+    degrading into prose nobody executes. The published artifact is different
+    bytes from any locally built candidate (full native build, codesign,
+    cosign, PG-bundle packaging), so a workflow-introduced defect is invisible
+    to every local gate by construction (nexus-2oh5q).
     """
     assert flag in _prescribed_flags(), (
         f"{flag} is not prescribed as a runnable command in the engine-release "

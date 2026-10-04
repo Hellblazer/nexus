@@ -1784,7 +1784,7 @@ def _check_git_hooks(repo_scope: str | Path | None = None) -> list[HealthResult]
     ``repo_scope`` (nexus-jds59): the catalog + legacy registry this walk
     reads from are a SHARED, machine-wide store — not scoped to the
     caller's ``$HOME``/``NEXUS_CONFIG_DIR``. An automation harness that
-    provisions its own throwaway repo (the release-sandbox shakedown's
+    provisions its own throwaway repo (a sandbox shakedown's
     fixture checkout) still sees every OTHER repo ever registered on the
     same machine, including the live dev checkout the harness reinstalls
     from — so a deliberate hold on that repo's hook stanza (e.g. pinned
@@ -2850,22 +2850,23 @@ def _check_t2_schema_applied() -> list[HealthResult]:
     return results
 
 
-#: Hook names for LIVE producers of nexus.dropped_writes.record_drop as of
-#: nexus-gjv9b PARTs 1/2 — a drop from one of these is CURRENT evidence a
-#: best-effort write to the engine is failing, not RDR-187 chash-hook
-#: history. Keep in lockstep with the ``hook=`` value each producer passes
-#: (``_session_end_census._post_capability_census``,
-#: ``routing/_lib.py``'s ``_record_dropped_routing_event``).
-_LIVE_DROP_PRODUCER_HOOKS = frozenset({"capability_census", "routing_events"})
+#: Hook names for LIVE producers of the dropped-write meter — a drop from one
+#: of these is CURRENT evidence a best-effort write to the engine is failing,
+#: not RDR-187 chash-hook history. Keep in lockstep with the ``hook=`` value
+#: each producer passes (``routing/_lib.py``'s ``_record_dropped_routing_event``).
+#: The ``capability_census`` producer was deleted with the census hook
+#: (cleanup step A1, nexus-0r1uz); its historical records read as history.
+_LIVE_DROP_PRODUCER_HOOKS = frozenset({"routing_events"})
 
 
 def _check_t2_dropped_writes() -> list[HealthResult]:
     """Surface the dropped-best-effort-write meter (RDR-129 B4, nexus-uq8a4).
 
     RDR-187 (nexus-piwya.4) retired the meter's FOUNDING producer — the
-    chash dual-write hook — but nexus-gjv9b PARTs 1/2 gave it two LIVE
-    ones (see :data:`_LIVE_DROP_PRODUCER_HOOKS`): the capability_census
-    and routing_events writer swaps both degrade here on service-down.
+    chash dual-write hook — but nexus-gjv9b PARTs 1/2 gave it LIVE
+    ones (see :data:`_LIVE_DROP_PRODUCER_HOOKS`): the routing_events writer
+    swap degrades here on service-down (the capability_census producer was
+    deleted, nexus-0r1uz).
     Framing keys on :attr:`DropSummary.recent_last_hook` — a WINDOWED
     field (:func:`nexus.dropped_writes.count_drops`'s ``recent_hours``,
     24h default), NOT the lifetime ``last_hook`` (review fold-in,
@@ -5207,19 +5208,6 @@ ORDER BY tbl.schema_name, tbl.table_name;
     )]
 
 
-#: First conexus plugin release whose hooks.json carries the RDR-184
-#: orchestration hook registrations (subagent-start-stamp + subagent-stop
-#: landed ~78bb02b6/d613f2e7, ancestors of v6.14.0; nexus-3h0u6 then made
-#: the plugin's hooks.json the ONLY registration surface). An installed
-#: plugin below this floor has ZERO orchestration-hook coverage —
-#: silently: no EXPECT/START rows, no stop guard (defeats the
-#: nexus-ccs9v.15 default-ON directive). The plugin cannot warn about
-#: this itself (a pre-floor plugin's hooks.json predates any warning hook
-#: we could add), so the CLI — which upgrades via PyPI independently of
-#: the plugin pin — carries the check (nexus-3xg21).
-_ORCH_HOOKS_PLUGIN_FLOOR: tuple[int, int, int] = (6, 14, 0)
-
-
 def _installed_conexus_plugin_versions(registry_path: Path | None = None) -> list[str] | None:
     """Versions of the installed conexus plugin per Claude Code's
     ``installed_plugins.json``. ``None`` when the registry is absent/unreadable
@@ -5238,44 +5226,6 @@ def _installed_conexus_plugin_versions(registry_path: Path | None = None) -> lis
         for e in entries if isinstance(e.get("version"), str)
     ]
     return versions or None
-
-
-def _check_orchestration_hook_floor(registry_path: Path | None = None) -> list[HealthResult]:
-    """nexus-3xg21: warn when the installed conexus plugin predates the
-    RDR-184 orchestration hook registrations. Soft WARN, never fatal —
-    orchestration hooks are a multi-agent hygiene surface, and a box
-    without the plugin at all is simply not in scope (ok row)."""
-    label = "Orchestration hooks (plugin floor)"
-    from nexus.engine_version import parse_engine_version  # noqa: PLC0415 — generic X.Y.Z parser, deferred import
-
-    versions = _installed_conexus_plugin_versions(registry_path)
-    if versions is None:
-        return [HealthResult(
-            label=label, ok=True,
-            detail="no conexus plugin install detected — not applicable",
-        )]
-    parsed = [v for v in (parse_engine_version(s) for s in versions) if v is not None]
-    if not parsed:
-        return [HealthResult(
-            label=label, ok=True,
-            detail=f"plugin version unparseable ({versions[:3]}) — cannot verify",
-        )]
-    newest = max(parsed)
-    floor_str = ".".join(str(p) for p in _ORCH_HOOKS_PLUGIN_FLOOR)
-    if newest >= _ORCH_HOOKS_PLUGIN_FLOOR:
-        return [HealthResult(
-            label=label, ok=True,
-            detail=f"plugin v{'.'.join(str(p) for p in newest)} >= v{floor_str} (hooks present)",
-        )]
-    return [HealthResult(
-        label=label, ok=False, warn=True,
-        detail=(
-            f"installed conexus plugin v{'.'.join(str(p) for p in newest)} predates the "
-            f"RDR-184 orchestration hooks (v{floor_str}+): NO stop-guard, NO "
-            f"expectations ledger — multi-agent sessions run unguarded, silently"
-        ),
-        fix_suggestions=["/plugin update conexus (then restart the session)"],
-    )]
 
 
 def _check_catalog_legacy_file(*, config_dir: Path | None = None) -> list[HealthResult]:
@@ -9512,7 +9462,7 @@ def run_health_checks(
     try:
         _cat = make_catalog_reader()
     except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash `nx doctor`
-        # Discovered via upgrade-shakeout.sh (10/12 FAIL) during the 6.1.0
+        # Discovered via the upgrade shakeout (10/12 FAIL) during the 6.1.0
         # release gate: unlike every sibling check in this function (chroma
         # pagination, storage-service health, migration state, RLS — all
         # explicitly "gated internally... always safe to run"), this call was
@@ -9605,18 +9555,6 @@ def run_health_checks(
         results.append(HealthResult(
             label="Retired Claude Code plugin", ok=False, warn=True,
             detail=f"check failed ({exc}) — could not read the plugin registry",
-        ))
-
-    # nexus-3xg21: plugin-floor check for the RDR-184 orchestration hooks —
-    # the CLI is the only surface that can warn (a pre-floor plugin's own
-    # hooks.json predates any warning hook). Best-effort.
-    try:
-        results.extend(_check_orchestration_hook_floor())
-    except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash `nx doctor`
-        _log.warning("doctor_orch_hook_floor_check_failed", error=str(exc))
-        results.append(HealthResult(
-            label="Orchestration hooks (plugin floor)", ok=True,
-            detail="check failed (non-critical)",
         ))
 
     return results, _local

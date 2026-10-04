@@ -32,8 +32,8 @@
 # JOURNEY OWNERSHIP: this script owns the UPGRADE axis (an EXISTING install's
 # PACKAGE moving forward while its engine converges). It does not test
 # whether a client that has NEVER upgraded can WRITE against a newer engine
-# fresh — that is tests/e2e/published-client-write-gate.sh's axis (nexus-
-# 86mx2). Neither substitutes for the other.
+# fresh — that fresh-write axis was owned by a since-deleted gate (nexus-
+# 86mx2).
 set -uo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/require_container.sh"
 

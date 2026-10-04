@@ -18,7 +18,7 @@ module. Then in the fully detached grandchild it imports
 to return control to Claude Code: ~17ms for the fork itself; measured
 2026-08-28 (nexus-33fhv) the parent path totals ~150ms with a reachable
 engine (~120ms with none), the balance being the POST-fork tier-summary
-read and capability census below, which never delay the cleanup
+read below, which never delay the cleanup
 dispatch. The detached grandchild's own work is ~1ms against a local
 engine (one T2 expire round-trip; the T1 routing resolve is file reads).
 
@@ -133,18 +133,6 @@ def _run_session_end_synchronously() -> None:
     server's lifespan/atexit/signal handlers (Phase 4, unconditional
     as of 4.13.0); calling stop_t1_server here would race those paths
     and was the documented source of double-stop failures.
-
-    nexus-h33x8.3: also records this session's capability census (nexus-
-    gjv9b PART 1: to the ``capability_census`` engine table now, not a
-    JSONL log), in its own failure-isolated step -- a census bug
-    must never prevent (or be prevented by) the storage flush above.
-    This is the ONLY place the census writer runs: the grandchild's
-    stdio is already redirected to /dev/null by the time this function
-    is reached (see :func:`_daemonize_and_run`), so the write is
-    PROVABLY INVISIBLE on screen and does not need to race the
-    pre-fork budget invariant that gates :func:`_print_service_tier_summary`
-    below -- see ``nexus._session_end_census``'s module docstring for the
-    full reasoning on why no visible line was added.
     """
     try:
         from nexus._hook_runtime._io import configure_hook_logging  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import); off the POSIX pre-fork path, see docstring above
@@ -157,7 +145,6 @@ def _run_session_end_synchronously() -> None:
     except Exception:  # noqa: BLE001 — boundary catch of undocumented third-party exceptions; non-fatal
         # Fully detached; nothing upstream can observe us. Swallow.
         pass
-    _write_capability_census()
     _sweep_local_garbage()
 
 
@@ -166,7 +153,7 @@ def _sweep_local_garbage() -> None:
     ``t1_mint_<session>.lock`` files older than a day with no live lease,
     rotated logs, operator dumps. The same sweep ``nx doctor --fix`` runs,
     so a box no one doctors stops accumulating hundreds of zero-byte
-    locks. Failure-isolated like the census above."""
+    locks. Failure-isolated."""
     try:
         from nexus.config import nexus_config_dir  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
         from nexus.garbage import sweep_local_garbage  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
@@ -178,30 +165,6 @@ def _sweep_local_garbage() -> None:
 
             structlog.get_logger(__name__).debug(
                 "session_end_garbage_sweep_failed", error=str(exc),
-            )
-        except Exception:  # noqa: BLE001 — even the debug log is best-effort
-            pass
-
-
-def _write_capability_census() -> None:
-    """Best-effort per-session capability census append (nexus-h33x8.3).
-
-    Wraps ``nexus._session_end_census.write_session_capability_census``
-    so a census bug can never break SessionEnd cleanup; unlike the flush
-    above, failures here are logged via structlog (debug level) rather
-    than bare-swallowed, since an environment whose census silently
-    fails forever must stay diagnosable from the logs (same discipline
-    as :func:`_print_service_tier_summary`).
-    """
-    try:
-        from nexus._session_end_census import write_session_capability_census  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
-        write_session_capability_census()
-    except Exception as exc:  # noqa: BLE001 — boundary catch; session close must never break on census
-        try:
-            import structlog  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
-            structlog.get_logger(__name__).debug(
-                "session_end_capability_census_failed",
-                error=str(exc),
             )
         except Exception:  # noqa: BLE001 — even the debug log is best-effort
             pass

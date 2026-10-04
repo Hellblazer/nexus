@@ -142,8 +142,8 @@ fi
 # ── Downgrade / stale-checkout guard (nexus-q3xrx, nexus-r024j) ──────────────
 # nexus-zfutt, PRESERVED VERBATIM IN INTENT: resolve the installed version from
 # the TARGET tree this invocation is about to replace, never from a bare `nx`
-# lookup on the ambient $PATH. tests/e2e/release-sandbox.sh activates a sandbox
-# HOME and prepends its own bin dir before calling this script; on a fresh
+# lookup on the ambient $PATH. A sandbox gate (since deleted) activated a sandbox
+# HOME and prepended its own bin dir before calling this script; on a fresh
 # sandbox no `nx` exists there yet, so a PATH lookup falls through to the REAL
 # global install and a lagging develop pyproject reads as a false downgrade of
 # an install this run has nothing to do with. Under generations the target is

@@ -119,7 +119,7 @@ def test_recent_hours_param_is_honoured(tmp_path, monkeypatch):
         "%Y-%m-%dT%H:%M:%SZ", _time.gmtime(_time.time() - 2 * 3600)
     )
     log.write_text(
-        f'{{"ts": "{two_hours_ago}", "hook": "capability_census", '
+        f'{{"ts": "{two_hours_ago}", "hook": "routing_events", '
         f'"collection": "", "rows": 1, "error": "x"}}\n'
     )
 
@@ -175,7 +175,7 @@ def test_classify_drop_cause_guard_refused():
 
 def test_classify_drop_cause_401():
     assert dropped_writes.classify_drop_cause(
-        "HttpTelemetryStore.record_capability_census failed: HTTP 401: unauthorized"
+        "HttpTelemetryStore.record_routing_event failed: HTTP 401: unauthorized"
     ) == "401"
 
 
@@ -197,13 +197,13 @@ def test_classify_drop_cause_route_absent_404():
 
 def test_classify_drop_cause_route_absent_405():
     assert dropped_writes.classify_drop_cause(
-        "HttpTelemetryStore.record_capability_census failed: HTTP 405: Method Not Allowed"
+        "HttpTelemetryStore.record_routing_event failed: HTTP 405: Method Not Allowed"
     ) == "route_absent"
 
 
 def test_classify_drop_cause_5xx():
     assert dropped_writes.classify_drop_cause(
-        "HttpTelemetryStore.record_capability_census failed: HTTP 503: unavailable"
+        "HttpTelemetryStore.record_routing_event failed: HTTP 503: unavailable"
     ) == "5xx"
 
 
@@ -236,7 +236,7 @@ def test_record_drop_auto_classifies_cause_from_error(tmp_path, monkeypatch):
     log = tmp_path / "drops.jsonl"
     monkeypatch.setenv("NX_DROPPED_WRITES_LOG_PATH", str(log))
     dropped_writes.record_drop(
-        hook="capability_census", collection="", rows=1,
+        hook="routing_events", collection="", rows=1,
         error="STOP: refusing a WRITE to 'https://x'.",
     )
     line = log.read_text().splitlines()[0]
@@ -314,7 +314,7 @@ def test_count_drops_recent_all_guard_refused_true_when_every_in_window_drop_is(
     monkeypatch.setenv("NX_DROPPED_WRITES_LOG_PATH", str(tmp_path / "drops.jsonl"))
     for _ in range(3):
         dropped_writes.record_drop(
-            hook="capability_census", collection="", rows=1,
+            hook="routing_events", collection="", rows=1,
             error="STOP: refusing a WRITE", cause="guard_refused",
         )
     summary = dropped_writes.count_drops()
@@ -327,11 +327,11 @@ def test_count_drops_recent_all_guard_refused_false_with_one_other_cause_mixed_i
     monkeypatch.setenv("NX_DROPPED_WRITES_LOG_PATH", str(tmp_path / "drops.jsonl"))
     for _ in range(3):
         dropped_writes.record_drop(
-            hook="capability_census", collection="", rows=1,
+            hook="routing_events", collection="", rows=1,
             error="STOP: refusing a WRITE", cause="guard_refused",
         )
     dropped_writes.record_drop(
-        hook="capability_census", collection="", rows=1, error="x", cause="401",
+        hook="routing_events", collection="", rows=1, error="x", cause="401",
     )
     summary = dropped_writes.count_drops()
     assert summary.recent_all_guard_refused is False, (
@@ -348,7 +348,7 @@ def test_count_drops_recent_all_guard_refused_false_when_cause_unclassified(
     window."""
     monkeypatch.setenv("NX_DROPPED_WRITES_LOG_PATH", str(tmp_path / "drops.jsonl"))
     dropped_writes.record_drop(
-        hook="capability_census", collection="", rows=1, error="",
+        hook="routing_events", collection="", rows=1, error="",
     )
     summary = dropped_writes.count_drops()
     assert summary.recent_all_guard_refused is False
@@ -388,7 +388,7 @@ def test_recent_all_benign_true_for_mixed_guard_refused_and_route_absent(
 ):
     monkeypatch.setenv("NX_DROPPED_WRITES_LOG_PATH", str(tmp_path / "drops.jsonl"))
     dropped_writes.record_drop(
-        hook="capability_census", collection="", rows=1,
+        hook="routing_events", collection="", rows=1,
         error="STOP: refusing a WRITE",
     )
     dropped_writes.record_drop(

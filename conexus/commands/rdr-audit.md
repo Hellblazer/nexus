@@ -35,4 +35,4 @@ The skill body should:
 7. **Surface a compact summary** to the user: verdict, rate, confidence, drift distribution, T2 record id for the full record
 8. **Discrepancy check**: `memory_search(project="rdr_process", query="audit-<project>")` — if this audit contradicts a prior one (different verdict category or dominant drift category), flag it for user review before returning
 
-For management subcommands (`list` / `status` / `history` / `schedule` / `unschedule`), follow the `## Management Subcommands` section in the skill body. Honor the safety split: read-only subcommands (`list`/`status`/`history`) must not mutate OS or T2 state; print-only subcommands (`schedule`/`unschedule`) must not execute `launchctl load`, `launchctl unload`, crontab edits, or plist file writes — print the install/uninstall templates for the user to run manually.
+For management subcommands (`list` / `status` / `history`), follow the `## Management Subcommands` section in the skill body. They are read-only and must not mutate OS or T2 state.

@@ -7,8 +7,8 @@ The two probe files under ``service/smoke-probes/`` (``t1_real_client.py``,
 ``uv run python -c '...'`` heredocs in ``service/native-smoke.sh``. Before
 this extraction, the ONLY execution of that Python ever happened either
 (a) against a real GraalVM native binary during a release build, or
-(b) inside the pre-tag ``--shakeout`` rehearsal image, where both blocks
-self-skip (no ``pyproject.toml`` there — ``rehearse_shakeout.sh:400-420``)
+(b) inside a since-deleted pre-tag shakeout rehearsal image, where both blocks
+self-skip (no ``pyproject.toml`` there)
 because ``uv``/the repo checkout aren't present. So a plain Python bug in
 either block — like ``HttpPlanLibrary.save_plan`` losing its required
 ``verb=`` kwarg after hygiene-001 (b9ab65606) — had NO pre-tag gate at all:
@@ -76,8 +76,7 @@ def _run_probe(probe: Path, *, extra_env: dict[str, str]) -> subprocess.Complete
     subprocess spawned via ``env=os.environ.copy()`` — this probe
     subprocess is exactly such a spawn, so it needs the REAL
     ``NX_ALLOW_PROD_WRITE`` set explicitly here, same as
-    ``tests/hooks/test_pre_close_verification_hook.py``'s write-subprocess
-    round-trip and ``tests/test_mcp_concurrency.py``'s spawned T2 writer.
+    ``tests/test_mcp_concurrency.py``'s spawned T2 writer.
     """
     env = os.environ.copy()
     env["NX_ALLOW_PROD_WRITE"] = (
@@ -149,7 +148,7 @@ def test_native_smoke_script_opts_into_the_prod_write_guard() -> None:
     checkout, which the nexus-a2qhz guard classifies as a dev checkout; without
     the reason-bearing opt-in every probe write is refused. engine-service-
     v0.1.101 burned all three native legs this way (2026-09-05) while the
-    wheel-driven --shakeout stayed green, so the export is pinned here."""
+    wheel-driven shakeout stayed green, so the export is pinned here."""
     from pathlib import Path
 
     script = Path(__file__).resolve().parents[1] / "service" / "native-smoke.sh"
@@ -169,9 +168,8 @@ def test_native_smoke_t1_block_scrubs_ambient_session_identity() -> None:
     ambient CLAUDE_CODE_SESSION_ID -- set in every subprocess Claude Code
     spawns, a routine way this script gets run on this project -- passes
     through unisolated exactly like the NX_SERVICE_URL leak nexus-rxqqd
-    already fixed. Found live: the checkout-shape pre-tag check
-    (scripts/check_release_workflow_shape.py, nexus-xihsm) failed its very
-    first real run this way, off this session's own worktree, with
+    already fixed. Found live: a pre-tag checkout-shape check
+    (nexus-xihsm) failed its very first real run this way, off this session's own worktree, with
     T1ServerNotFoundError against a lease that pointed at nothing this
     freshly-booted engine ever published."""
     from pathlib import Path

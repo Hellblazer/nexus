@@ -70,10 +70,7 @@ fragment of the real file under test, under ``mktemp -d`` and copy the real
 ``gate_jar_cache_*`` resolve their storage root from the SOURCED file's own
 ``BASH_SOURCE``, not the caller's cwd, so a copied library resolves against
 the throwaway repo's own ``.git``, never this checkout's real build lease,
-release.properties, or gate-jar cache. ``run_sh_guard_test.sh`` additionally
-stubs ``docker``/``uv`` via a fixture ``PATH`` and patches its copy of
-``run.sh``'s hard-coded lock directory into the same tmpdir — no real
-Docker, no real `uv build`, no network. Of the new round-2 suites, only
+release.properties, or gate-jar cache. Of the new round-2 suites, only
 ``commit_scope_audit_test.sh`` makes real git commits — inside its own two
 throwaway repos, both configured with LOCAL ``user.email``/``user.name``,
 never ``--global`` — so a runner with no ambient git identity at all
@@ -157,13 +154,12 @@ SUITES = [
     _Suite("scripts/lib/bare_mvnw_lint_test.sh", 2),
     _Suite("scripts/lib/gate-jar-cache_test.sh", 24),
     _Suite("scripts/lib/release-props-lease_test.sh", 28),
-    _Suite("tests/e2e/migration-rehearsal/run_sh_guard_test.sh", 10),
     _Suite("tests/e2e/local_service_gate_guard_test.sh", 9),
     # Round 2 (nexus-fcjt7): found by the substantive-critic pass on round 1
     # plus a re-check of round 1's own "already wired" claim about the two
     # build-lease suites (see module docstring).
     _Suite("tests/e2e/lib/lock_test.sh", 30),
-    _Suite("tests/e2e/lib/harness_lock_test.sh", 61),
+    _Suite("tests/e2e/lib/harness_lock_test.sh", 35),
     # 16, not the 19 this suite reports on macOS: its Test F only runs its
     # 3 assertions under the stock macOS /bin/bash 3.2 (the guard's actual
     # target); on any host whose /bin/bash is already 4+ -- every Linux CI
@@ -183,24 +179,10 @@ SUITES = [
     # run or container does. Deleting Test 10 still turns either floor red.
     _Suite("scripts/lib/build-lease_test.sh", 39 if os.geteuid() == 0 else 40),
     _Suite("scripts/mvnw-leased_test.sh", 22),
-    # nexus-9a6io: the published-client gate's verdict section (RDR-223 P3.2
-    # ownerless-write modes), extracted from the real script and run against
-    # canned /v1/status bodies. 47 cases (18 + 4 ack-evidence, nexus-9a6io fix round; +4 non-integer
-    # counter, +9 refusal-classifier cases sourced from the real script, round 3; +4 journey call
-    # sites and +8 console-evidence cases, round 4).
-    _Suite("tests/e2e/published_client_write_gate_verdict_test.sh", 47),
     # nexus-20onx round 3: leg B3's compare logic, sourced from the real cloud
     # gate script and fed canned /v1/status bodies (11 cases + 3 wiring checks;
     # round 4: 4 unreadable-body cases, S4, 17 in all).
     _Suite("tests/e2e/cloud_client_path_gate_b3_test.sh", 17),
-    # nexus-k9fs1 round 4: two-walk-check.sh's three decisions (walk 1 pin, final
-    # sentinel, start-count guard), sourced from the real script.
-    _Suite("tests/e2e/two_walk_check_decisions_test.sh", 15),
-    # nexus-0kmat: the candidate-engine plumbing the cut battery's gates share;
-    # 59 is the passed count measured 2026-10-01 (44 when this line was first written; round 3 took it to
-    # 55 without moving the floor, so 11 assertions could have vanished unseen; round 4 added 4 and the
-    # floor now equals the real count, nexus-0kmat critique S3).
-    _Suite("tests/e2e/lib/candidate_engine_test.sh", 59),
     # nexus-u67ow: lib/python.sh, the one-interpreter resolver the e2e harness uses in place of a
     # bare python3 (hellmini's is 3.9.6). Stub interpreters on a PATH of their own; 37 measured.
     _Suite("tests/e2e/lib/python_test.sh", 37),
@@ -215,7 +197,7 @@ _LEASE_ENV_PREFIXES = ("NX_BUILD_LEASE_ROOT", "NX_SUITE_LEASE_")
 #: EVERY suite, not a hand-kept list of the ones known to be sensitive. Measured on
 #: the qwentescence host (nxtest exports NX_BUILD_LEASE_ROOT=/var/lib/nx-suite-lease,
 #: where another run holds the leases): six suites fail or hang there and the other
-#: five pass. Three of them (build-lease, mvnw-leased, run_sh_guard) failed against
+#: five pass. Three of them (build-lease, mvnw-leased, and a since-deleted run.sh guard suite) failed against
 #: an EMPTY inherited root; the other three (release-props-lease,
 #: local_service_gate_guard, build-gate-jar; nexus-mntbl) only fail when the shared
 #: root carries a live holder, which the test below pre-holds. A list of "the

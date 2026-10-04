@@ -179,8 +179,8 @@ class TestRunShWiring:
             if not line.strip().startswith("#")
         )
         exit_traps = re.findall(r"trap\s+'([^']*)'\s+EXIT", code_only)
-        assert len(exit_traps) >= 5, (
-            f"expected at least 5 `trap '...' EXIT` installs in run.sh, found "
+        assert len(exit_traps) >= 4, (
+            f"expected at least 4 `trap '...' EXIT` installs in run.sh, found "
             f"{len(exit_traps)} -- this test's count assumption needs updating "
             f"if that's an intentional refactor"
         )

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """The review loop of the prose-edit skill (RDR-221 Steps 1.1 and 1.5): marked-up copy, accept, apply.
 
 The skill hands every mechanical job to this script so the model's instructions carry none of
@@ -7,7 +8,7 @@ runner), and the project prefix override (PROSE_EDIT_PROJECT_PREFIX) passes thro
 to stderr with exit 1; memory.py's exit code 3 (T2 unavailable) passes through.
 
   review.py render TARGET --work WORK [--file F] [--genre G]
-  review.py apply --work WORK --accept SPEC [--hold SPEC] [--reject SPEC] [--reason N=TEXT]... [--dry-run]
+  review.py apply --work WORK [--accept SPEC] [--hold SPEC] [--reject SPEC] [--reasons-file F] [--reason N=TEXT]... [--dry-run]
   review.py log-retry --work WORK
 
 `render` and `apply` take the filtered proposal that `brief.py filter TARGET --save WORK/filtered.json` wrote:
@@ -44,7 +45,7 @@ not opened and its path is the answer. PROSE_EDIT_OPEN replaces `open -a` with a
 viewer name and the path are appended); like PROSE_EDIT_NOW it needs PROSE_EDIT_TEST=1 and is
 ignored without it. `render` also writes WORK/session.json; `apply` needs it.
 
-`apply` takes the author's answer. --accept is the numbers to apply, --reject the numbers to store
+`apply` takes the author's answer. --accept (default "none") is the numbers to apply, --reject the numbers to store
 as rejections for the document, and --hold the numbers left undecided: a comma or space separated
 list of numbers and ranges ("1, 3-5"), or "all" or "none"; --reject also takes "rest", which is
 every edit not accepted, held or named otherwise (the author's "reject the rest"). An edit the
@@ -52,6 +53,10 @@ author does not name is HELD: neither applied nor stored. Only --reject stores a
 silence, or "accept 1", never does. An edit the copy could not show inline is left alone by "rest"
 and by being unnamed; the author may still name it in --reject. --reason N=TEXT (repeatable) keeps
 the author's one line on why edit N is rejected; N must be a rejected edit and TEXT not empty.
+--reasons-file F is the same thing as a file, for words that must not ride a shell string: a JSON object
+{"2": "why", ...} that the model writes with its Write tool, directly inside WORK (WORK/reasons.json).
+Both may be given; two reasons for one edit stop the run. The dry run's hashes cover the reasons however
+they arrive, so editing the file after the dry run needs the dry run again.
 An unknown number, an edit named by two of the three flags, or a reason that names no rejected edit
 stops the run before anything is written.
 --dry-run prints the interpreted sets (accept, hold, reject with its reasons, left alone, would
@@ -69,7 +74,12 @@ the dry run each need the dry run again. Otherwise, in order:
   2. A path run with edits to write checks that the document resolves inside the repository and
      that it and its directory are writable, then writes the new text to a temp file and fsyncs
      it. A failure here stops the run with a message ending "run apply again": nothing was
-     changed and nothing was stored.
+     changed and nothing was stored. So does every failure before the file is written (T2 down
+     or refusing, the file saved meanwhile, mixed line endings): the message says "nothing was
+     written; run apply again" (exit code kept, 3 for T2 down), or, when rejections were already
+     stored, "apply did not change the file, and the rejections already stored are kept; run apply
+     again" (not "the file was not changed": the author's own save may have changed it). The skill
+     keys on the lower-case phrase `run apply again`.
   3. A path run stores every rejected edit verbatim in the document's record (memory.py reject),
      with its reason when the author gave one. With none to store it still asks T2 one question,
      so a service that is down stops the run here, before the file changes. The rejections are the
@@ -79,7 +89,9 @@ the dry run each need the dry run again. Otherwise, in order:
      is the same, the temp file is renamed over it. The placed edits are written in one pass, in
      file order, computed against the original text. A stdin run applies nothing: it prints the
      text with the accepted edits applied, under "text".
-  5. The session is logged (memory.py log; under log/stdin/ for a stdin run). The log comes last,
+  5. The session is logged (memory.py log --stamp S; under log/stdin/ for a stdin run; S is fixed
+     before the first try and kept in the pending file, so a retry whose first put landed with the
+     reply lost writes the same record again, not a second one). The log comes last,
      so it never says "applied" for a file that was not written. If T2 fails after the file was
      written, whatever the failure (T2 down, a timeout, bad output), the output carries "log_error"
      and "log_retry" and the exit status is 0, and the payload waits in WORK/log-pending.json:
@@ -87,7 +99,8 @@ the dry run each need the dry run again. Otherwise, in order:
      apply run again over such a WORK is refused and names log-retry.
   6. WORK is deleted, so the copy is gone even when nothing was accepted. A run that stops
      before step 5 keeps WORK so the author can run apply again; a run whose log failed keeps it
-     for log-retry (a work directory older than two hours is swept by the next `brief.py tmpdir`).
+     for log-retry. A work directory idle for two hours is swept by the next `brief.py tmpdir`; `render`,
+     `apply` (a dry run, a refused answer, a failed run) and `log-retry` each renew it.
 
 The file is read and written byte for byte apart from the edits: UTF-8, line endings kept
 (a file with mixed line endings is refused), a symbolic link followed and kept, the mode kept.
@@ -146,6 +159,38 @@ Passthrough: type[Exception] = _BRIEF.Passthrough
 
 def _user(message: str) -> Exception:
     return UserError(message)
+
+
+RETRY = "run apply again"
+
+
+def _aborted(exc: BaseException, *, stored: bool) -> BaseException:
+    """`exc` with an ending that says what is true of the file and to run apply again, same type and exit code.
+
+    Called for a failure after the plan was made and before the file was written. Nothing is claimed that
+    a stored rejection would make false: with rejections already stored apply did not change the file but the
+    store is kept. A message that already says the retry words and that nothing was changed is left as it is.
+    """
+    if isinstance(exc, OSError):
+        exc = _user(f"{exc}")
+    if not isinstance(exc, (Passthrough, UserError)):
+        return exc
+    msg = str(exc).rstrip()
+    low = msg.lower()
+    state: str | None = None
+    if stored:
+        # "the file was not changed" would be false when the author's own save changed it: say what apply did
+        state = "apply did not change the file, and the rejections already stored are kept"
+    elif "nothing was written" not in low and "nothing was changed" not in low:
+        state = "nothing was written"
+    if RETRY in msg:  # the message already ends with the retry words: the state goes before it, not after
+        parts = ([state] if state else []) + [msg.rstrip(".")]
+    else:
+        parts = [msg.rstrip("."), *([state] if state else []), RETRY]
+    new = "; ".join(parts)
+    if isinstance(exc, Passthrough):
+        return Passthrough(int(getattr(exc, "code", 1)), new)
+    return _user(new)
 
 
 def _test_mode() -> bool:
@@ -673,8 +718,7 @@ class Staged:
             try:
                 replace(str(self.tmp), str(self.target))
             except OSError as exc:
-                raise _user(f"cannot replace {self.target}: {exc}. Nothing was changed; "
-                            "fix it and run apply again") from exc
+                raise _user(f"cannot replace {self.target}: {exc}. Fix it and run apply again") from exc
         except BaseException:
             self.discard()
             raise
@@ -682,7 +726,7 @@ class Staged:
 
 def require_unchanged(target: Path, expected: bytes) -> None:
     if read_bytes(target) != expected:
-        raise _user(f"{target} changed while the edits were being applied; nothing was written. "
+        raise _user(f"{target} changed while the edits were being applied. "
                     "Save and close it in the editor, then run apply again")
 
 
@@ -760,6 +804,7 @@ def _source_of(target: str, file: str | None, work: Path) -> tuple[str | None, O
 
 def cmd_render(a: argparse.Namespace) -> Obj:
     work = cast(Path, _BRIEF.work_dir(a.work))
+    _BRIEF.touch_work(work)
     stdin = a.target == "-"
     prop = _load_json(work / "filtered.json", "WORK/filtered.json (run `brief.py filter ... --save` first)")
     rel, rng, source, html, _ = _source_of(a.target, a.file, work)
@@ -817,7 +862,9 @@ def _dry_run_record(accept: set[int], hold: set[int], reject: set[int], reasons:
 
 def _require_dry_run(work: Path, record: Obj, source: Path) -> None:
     """Refuse a real apply that no matching dry run, shown to the author, came before."""
-    run_it = ("Run `review.py apply --work WORK --accept ... --dry-run` for the answer, show its output to the "
+    # No flag name in this text: the skill keys on `--accept` and the others to mean "ask the author for numbers
+    # again", and on `dry run` to mean "run the dry run", so a refusal about a missing dry run must hold only the latter.
+    run_it = ("Run `review.py apply --work WORK <the answer's flags> --dry-run` for the answer, show its output to the "
               "author, and run the real apply only after the author confirms it")
     path = work / "dryrun.json"
     if not path.is_file():
@@ -835,20 +882,56 @@ def _require_dry_run(work: Path, record: Obj, source: Path) -> None:
 _REASON = re.compile(r"\s*([0-9]+)\s*=(.*)", re.DOTALL)
 
 
-def parse_reasons(raw: list[str], rejected: set[int]) -> dict[int, str]:
-    """The author's reasons, `N=TEXT` each: N must be a rejected edit, TEXT not empty, one per edit."""
+def parse_reasons(raw: list[str], rejected: set[int], from_file: dict[int, str] | None = None) -> dict[int, str]:
+    """The author's reasons, `N=TEXT` each (and `from_file`, read from --reasons-file): N must be a rejected
+    edit, TEXT not empty, one reason per edit across both."""
     out: dict[int, str] = {}
+    have = ", ".join(str(r) for r in sorted(rejected)) or "none"
     for item in raw:
         m = _REASON.fullmatch(item)
         if m is None or not m.group(2).strip():
             raise _user(f"--reason {item!r}: expected N=TEXT with a reason after the equals sign")
         n = int(m.group(1))
         if n not in rejected:
-            have = ", ".join(str(r) for r in sorted(rejected)) or "none"
             raise _user(f"--reason {item!r}: edit {n} is not rejected (the rejected edits are {have})")
         if n in out:
             raise _user(f"--reason: two reasons for edit {n}")
         out[n] = m.group(2).strip()
+    for n, text in sorted((from_file or {}).items()):
+        if n not in rejected:
+            raise _user(f"--reasons-file: edit {n} is not rejected (the rejected edits are {have})")
+        if n in out:
+            raise _user(f"--reasons-file: two reasons for edit {n}")
+        out[n] = text
+    return out
+
+
+def load_reasons_file(raw: str | None, work: Path) -> dict[int, str]:
+    """The reasons in --reasons-file: a JSON object {"2": "why"} directly inside WORK. Empty when not given."""
+    if not raw:
+        return {}
+    try:
+        path = cast(Path, _BRIEF.work_file(raw))
+    except UserError as exc:
+        raise _user(f"--reasons-file {raw!r}: {exc}") from exc
+    if path.parent != work:
+        raise _user(f"--reasons-file {raw!r}: must sit directly inside this work directory")
+    try:
+        value: Any = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise _user(f"--reasons-file {raw!r}: cannot read it as JSON ({exc})") from exc
+    if not isinstance(value, dict):
+        raise _user(f'--reasons-file {raw!r}: expected a JSON object like {{"2": "why"}}')
+    out: dict[int, str] = {}
+    for key, text in cast("dict[Any, Any]", value).items():
+        if not re.fullmatch(r"[0-9]+", str(key)):
+            raise _user(f"--reasons-file {raw!r}: key {key!r} is not an edit number")
+        if not isinstance(text, str) or not text.strip():
+            raise _user(f"--reasons-file {raw!r}: the reason for edit {key} must be a non-empty string")
+        n = int(key)  # "2" and "02" are the same edit: two keys for it are two reasons, not one that wins
+        if n in out:
+            raise _user(f"--reasons-file {raw!r}: two reasons for edit {n} (more than one key names that number)")
+        out[n] = text.strip()
     return out
 
 
@@ -862,6 +945,7 @@ def _both(flags: list[tuple[str, set[int]]]) -> None:
 
 def cmd_apply(a: argparse.Namespace) -> Obj:
     work = cast(Path, _BRIEF.work_dir(a.work))
+    _BRIEF.touch_work(work)  # the author is here: a dry run, a refused answer or a failed run all count
     if (work / "log-pending.json").is_file():
         raise _user("the file was already written; only its session log is outstanding. "
                     f"Run `review.py log-retry --work {work}` instead of applying again")
@@ -881,14 +965,18 @@ def cmd_apply(a: argparse.Namespace) -> Obj:
     rest = valid - set(unshown) - accept - hold
     reject: set[int] = parse_numbers(a.reject, valid, "--reject", rest=rest) if a.reject else set()
     _both([("--accept", accept), ("--hold", hold), ("--reject", reject)])
-    reasons = parse_reasons(list(a.reason or []), reject)
+    reasons = parse_reasons(list(a.reason or []), reject, load_reasons_file(a.reasons_file, work))
     stdin = bool(session["stdin"])
     target = str(session["target"])
     rel, rng, source, html, root = _source_of(target, cast("str | None", session.get("file")), work)
-    raw = read_bytes(source)
+    try:
+        raw = read_bytes(source)
+    except UserError as exc:
+        raise _aborted(exc, stored=False) from exc
     text, eol = decode_source(raw, source)
     if eol == "mixed" and not stdin:
-        raise _user(f"{source}: mixed line endings (CRLF and LF); the file is not touched")
+        raise _user(f"{source}: mixed line endings (CRLF and LF); the file is not touched; nothing was written. "
+                    f"Fix the line endings, then {RETRY}")
     record = _dry_run_record(accept, hold, reject, reasons, proposal_bytes, raw)
     if not a.dry_run:
         _require_dry_run(work, record, source)
@@ -915,6 +1003,7 @@ def cmd_apply(a: argparse.Namespace) -> Obj:
         }
     new_text = apply_plan(text, plans)
     staged: Staged | None = None
+    stored = False  # the rejections are the author's decisions: once stored they stay, whatever stops the run
     try:
         if writes:
             data = (new_text.replace("\n", "\r\n") if eol == "crlf" else new_text).encode("utf-8")
@@ -923,18 +1012,25 @@ def cmd_apply(a: argparse.Namespace) -> Obj:
             _BRIEF.memory(["reject", target, "--from-stdin"], json.dumps([
                 {"old": by_n[n]["old"], "new": by_n[n]["new"], **({"reason": reasons[n]} if n in reasons else {})}
                 for n in rejected]))
+            stored = True
         elif staged is not None:
             _BRIEF.memory_json(["viewer"])  # nothing to store: ask T2 anyway, so a service that is down stops us before the write
         if staged is not None:
             staged.commit(raw, before_replace=_before_replace_hook())
-    except BaseException:
+    except BaseException as exc:
         if staged is not None:
             staged.discard()
-        raise
+        failure = _aborted(exc, stored=stored)
+        if failure is exc:
+            raise
+        raise failure from exc
     applied_n = sorted(int(p["n"]) for p in placed)
     entry: Obj | None = None
     log_error: str | None = None
-    log_args = ["log", target, "--genre", str(session["genre"])]
+    # the stamp is fixed here, before the first try, and travels in the args the retry replays: a first put that
+    # landed with its reply lost is then written over, not logged a second time
+    stamp = cast(Any, _BRIEF._MEM)._now().strftime("%Y%m%dT%H%M%S.%fZ")
+    log_args = ["log", target, "--genre", str(session["genre"]), "--stamp", stamp]
     log_payload: Obj = {
         "stdin": stdin, "edits": edits, "paragraphs": prop.get("paragraphs") or [],
         "queries": prop.get("queries") or [], "dropped": prop.get("dropped") or [],
@@ -953,10 +1049,10 @@ def cmd_apply(a: argparse.Namespace) -> Obj:
         entry = _BRIEF.memory_json(log_args, json.dumps(log_payload))
     except Exception as exc:  # after the write, no failure of the log step may be a traceback
         if staged is None:
-            if isinstance(exc, (Passthrough, UserError)):
-                raise  # nothing was written: stop here, WORK kept, the author can run apply again
-            raise _user(f"the session log failed ({type(exc).__name__}: {exc}); nothing was written. "
-                        "Run apply again") from exc
+            # no file was written: stop here, WORK kept, the author can run apply again
+            cause = exc if isinstance(exc, (Passthrough, UserError)) else _user(
+                f"the session log failed ({type(exc).__name__}: {exc})")
+            raise _aborted(cause, stored=stored) from exc
         log_error = str(exc) or type(exc).__name__
         sys.stderr.write(f"review.py: the file was written but the session log was not: {log_error}\n")
     if log_error is None:
@@ -983,6 +1079,7 @@ def cmd_apply(a: argparse.Namespace) -> Obj:
 def cmd_log_retry(a: argparse.Namespace) -> Obj:
     """Send the session log an `apply` wrote to WORK but could not deliver, then delete WORK."""
     work = cast(Path, _BRIEF.work_dir(a.work))
+    _BRIEF.touch_work(work)
     pending = work / "log-pending.json"
     if not pending.is_file():
         raise _user("no pending session log in this work directory: `apply` leaves one only when the file "
@@ -1014,11 +1111,14 @@ def _parser() -> argparse.ArgumentParser:
     r.add_argument("--genre")
     ap = sub.add_parser("apply", help="take the author's answer: apply, store rejections, log, clean up")
     ap.add_argument("--work", required=True)
-    ap.add_argument("--accept", required=True)
+    ap.add_argument("--accept", default="none",
+                    help="numbers to apply (default none: an edit nobody names is held)")
     ap.add_argument("--hold", help="numbers left undecided (an edit nobody names is held anyway)")
     ap.add_argument("--reject", help="numbers to store as rejections, or `rest`: every edit nobody else names")
     ap.add_argument("--reason", action="append", metavar="N=TEXT",
                     help="the author's reason for rejecting edit N (repeatable)")
+    ap.add_argument("--reasons-file", metavar="FILE",
+                    help="the reasons as a JSON object {\"2\": \"why\"} in a file inside WORK (written with the Write tool)")
     ap.add_argument("--dry-run", action="store_true",
                     help="print the interpreted sets and change nothing; a real apply needs one first")
     lr = sub.add_parser("log-retry", help="send the session log of an apply whose log failed, then delete WORK")
