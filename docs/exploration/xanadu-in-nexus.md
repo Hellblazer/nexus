@@ -2,7 +2,7 @@
 
 Nexus borrows ideas from Ted Nelson's Project Xanadu, the original vision of a universal, interconnected document system, and adapts them for a practical problem: helping AI agents understand not just what documents say, but how they relate to each other and where specific claims come from.
 
-To be clear: this is a linking system, not an attempt to build Xanadu. We needed permanent document addresses, typed relationships, and durable sub-document references. Nelson's model provided all three in a form that was simple, well-studied, and easy to implement. We could have used RDF triples, property graphs, or ad-hoc foreign keys. We chose tumblers and typed links because they map cleanly onto the problems our RDR process and agent suite actually face: tracing where a decision came from, what code implements a design, and which findings have been superseded. The Xanadu lineage gives us a coherent vocabulary and a set of proven design principles without requiring us to build the full docuverse.
+To be clear: this is a linking system, not an attempt to build Xanadu. We needed permanent document addresses, typed relationships, and durable sub-document references. Nelson's model provided all three in a form that was simple, well-studied, and easy to implement. We could have used RDF triples, property graphs, or ad-hoc foreign keys. We chose tumblers and typed links because they map cleanly onto the concrete problems our RDR process and agent suite face: tracing where a decision came from, what code implements a design, and which findings have been superseded. The Xanadu lineage gives us a coherent vocabulary and a set of proven design principles without requiring us to build the full docuverse.
 
 This document explains what we took, what we deliberately left out, and how the result works in practice. The full design rationale is in [RDR-053: Xanadu Fidelity](../rdr/rdr-053-xanadu-fidelity.md), with its [post-mortem](../rdr/post-mortem/053-xanadu-fidelity.md) documenting lessons learned during implementation.
 
@@ -28,7 +28,7 @@ The catalog is the connective tissue between Nexus's [storage tiers](../storage-
 
 **Other agents do the same thing.** A research synthesizer `cites` source papers. Debugger and analyst agents `relates` findings to each other. The knowledge tidier `supersedes` duplicates when consolidating. Agents can link at the chunk level when search results provide specific passages, but most links today are document-to-document.
 
-**The [query planner](../querying-guide.md) uses the catalog to optimize search.** Instead of searching everything and hoping for relevance, the planner resolves matching documents in the catalog first, by author, content type, document subtree, or link relationships, then searches only their collections. For multi-step analytical queries, it composes graph traversal with search to maximize the quality of retrieved content: following citation chains, crossing collection boundaries, and scoping each step to the documents that actually matter.
+**The [query planner](../querying-guide.md) uses the catalog to optimize search.** Instead of searching everything and hoping for relevance, the planner resolves matching documents in the catalog first, by author, content type, document subtree, or link relationships, then searches only their collections. For multi-step analytical queries, it composes graph traversal with search to maximize the quality of retrieved content: following citation chains, crossing collection boundaries, and scoping each step to the documents relevant to the question.
 
 **Link audit maintains graph health.** [`nx catalog link-audit`](../catalog.md#link-health) verifies that content-hash spans resolve, detects orphaned links to deleted documents, and flags positional spans that may have gone stale. Existing collections can be backfilled with content hashes without re-embedding.
 
@@ -40,8 +40,6 @@ Every document in Nexus gets a permanent hierarchical address called a tumbler. 
 
 Tumblers are assigned once and never reused. If you delete document `1.2.5` and compact the catalog, the number 5 is retired. The next document under that owner gets `1.2.6`. Any reference to a tumbler, whether in a link, in an agent's memory, or in a conversation, remains valid indefinitely.
 
-Nelson's tumblers were more ambitious. They supported inserting new addresses between existing ones using a specialized number system. We use simple integer segments instead. This covers our actual use cases and avoids significant complexity. The trade-off is documented in [RDR-053](../rdr/rdr-053-xanadu-fidelity.md).
-
 ### Typed links between documents
 
 Nelson envisioned a universal link graph where every connection between documents is typed, bidirectional, and permanent. Nexus ships with seven built-in link types: five that agents create automatically (`cites`, `implements`, `implements-heuristic`, `supersedes`, `relates`) and two for human annotation (`quotes`, `comments`). The link type field is a free-form string at the API level, so custom types can be added without code changes. See the [catalog guide](../catalog.md#link-types) for when to use each type.
@@ -52,7 +50,7 @@ Every link carries `created_by` provenance, so you can always distinguish auto-g
 
 ### Append-only storage
 
-Nelson's docuverse was explicitly append-only; bytes are never truly deleted. Nexus follows this principle: tumblers are append-only — updating an entry preserves its tumbler, and deletion creates a tombstone rather than freeing the slot. The document registry and link graph are now service-owned, stored in the Java engine's Postgres tables and reached through `HttpCatalogClient` (the earlier append-only-JSONL-with-a-SQLite-query-cache design was deleted at RDR-158 P4; git no longer tracks catalog history directly). Tombstones still mark deletions without erasing the original record. This is why tumbler permanence works. Even after deletion and compaction, the tombstoned row preserves the fact that an address was once assigned.
+Nelson's docuverse was explicitly append-only; bytes are never truly deleted. Nexus follows this principle: tumblers are append-only. Updating an entry preserves its tumbler, and deletion creates a tombstone rather than freeing the slot. The document registry and link graph are now service-owned, stored in the Java engine's Postgres tables and reached through `HttpCatalogClient` (the earlier append-only-JSONL-with-a-SQLite-query-cache design was deleted at RDR-158 P4; git no longer tracks catalog history directly). Tombstones still mark deletions without erasing the original record. This is why tumbler permanence works. Even after deletion and compaction, the tombstoned row preserves the fact that an address was once assigned.
 
 ### Span transclusion
 
@@ -70,17 +68,17 @@ The [link audit](../catalog.md#link-health) system tracks both: positional spans
 
 Nelson's Xanadu was a complete alternative to the file system. Nexus is a catalog that sits alongside existing storage. The deliberate departures are documented in [RDR-053's deviations register](../rdr/rdr-053-xanadu-fidelity.md):
 
-**No tumbler arithmetic.** Nelson's system could insert new addresses between existing ones using a specialized number system. We use simple integer comparison instead. Parent documents sort before their children; `sorted()` on a list of tumblers gives the right order. The trade-off: span widths can't be computed by subtraction. If span-weighted reranking is needed later, that would require additional work, documented in [RDR-053](../rdr/rdr-053-xanadu-fidelity.md).
+**No tumbler arithmetic.** Nelson's system could insert new addresses between existing ones using a specialized number system. We use simple integer comparison instead. Parent documents sort before their children, so `sorted()` on a list of tumblers gives the right order. The trade-off: span widths can't be computed by subtraction. If span-weighted reranking is needed later, that would require additional work, documented in [RDR-053](../rdr/rdr-053-xanadu-fidelity.md).
 
-**No byte-level addressing.** Nelson's spans could reference arbitrary byte ranges within any document version. Our spans reference chunks, the semantic units produced by the [indexing pipeline](../repo-indexing.md). This is coarser but matches how the system actually stores and retrieves content.
+**No byte-level addressing.** Nelson's spans could reference arbitrary byte ranges within any document version. Our spans reference chunks, the semantic units produced by the [indexing pipeline](../repo-indexing.md). This is coarser but matches how the system stores and retrieves content.
 
-**No version tracking.** Xanadu preserved every version of every document. Nexus tracks the current state via content hashes and detects when documents change, but does not store historical versions. Git handles version history for source files; the catalog tracks the current indexed state.
+**No version tracking.** Xanadu preserved every version of every document. Nexus tracks the current state via content hashes and detects when documents change, but does not store historical versions. Git handles version history for source files, and the catalog tracks the current indexed state.
 
 **No meta-links.** Nelson's links lived in the address space alongside documents. You could annotate a link, cite a link, or create trust provenance on a citation. In Nexus, links are a separate relation table, not addressable entities. This forecloses annotations on annotations but keeps the link schema simple.
 
-**No federation.** Nelson's docuverse was inherently distributed, with multiple stores cooperating across a network. Nexus is single-user, single-machine. The catalog is a local git repository; the vector store can be local or cloud, but there is no multi-user catalog federation. The tumbler's store segment (always `1` today) leaves the door open.
+**No federation.** Nelson's docuverse was inherently distributed, with multiple stores cooperating across a network. Nexus runs in one of two modes: local, where the catalog and vector store live in a Postgres bundled on your machine, or managed cloud, where a hosted service holds them for each tenant separately. Either way there is one store, and no catalog federates with another. The tumbler's store segment (always `1` today) leaves the door open.
 
-**TTL expiry.** Nelson insisted that all addresses remain valid forever. Nexus supports time-to-live expiry on knowledge entries. An expired tumbler becomes unresolvable. The tumbler number is still retired (never reused), but the content is gone. A pragmatic concession for managing growth.
+**TTL expiry.** Nelson insisted that all addresses remain valid forever. Nexus supports time-to-live expiry on knowledge entries. An expired tumbler becomes unresolvable. The tumbler number is still retired (never reused), but the content is gone.
 
 ## Further reading
 
