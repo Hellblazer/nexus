@@ -22,6 +22,8 @@ out. Diagnose with `ipcs -m` before suspecting the code.
 
 `-m lint` selects the O(repo) meta-tests (AST/regex scans of `src/nexus`, `conexus/` agent-skill-command markdown, RDR frontmatter, marker-selection coverage itself) that the default `addopts` (`-m 'not integration and not slow and not lint'`) excludes from the hot loop — they only change when repo *structure* changes, not application behavior, and run once in CI's dedicated `pytest (lint markers)` job rather than once per shard. Run them explicitly with `uv run pytest -m lint` when touching `conexus/`, RDR frontmatter, or a storage-boundary/hook-registration invariant those files pin.
 
+`-m integration` is also deselected by default. Three gates run it. CI's `pytest (integration, affected)` job runs, on every push and PR, the integration files the change touched or that import a `src/nexus` module it changed (`scripts/select_affected_integration_tests.py`), with a per-file non-vacuity check (`scripts/assert_integration_affected_ran.py`). The nightly local-service gate runs the whole family, and the release battery runs it per release. A new integration test therefore runs in CI on the push that adds it. If the job reports that a file skipped every test, give the job the missing prerequisite, or list the file in `ALL_SKIP_ALLOWED` with the reason a hosted runner cannot have it.
+
 ## Scenario journey layer (test-suite-compression P2, 2026-08-05)
 
 `tests/test_scenario_journeys.py` holds `scenario`-marked journey tests that run
