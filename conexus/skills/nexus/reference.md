@@ -113,7 +113,7 @@ Returns `{"tumblers": [...], "ids": [...], "collections": [...]}`.
 
 ### store_get_many
 
-Batch-hydrate document content by ID past the ChromaDB 300-record read cap (RDR-079 hydration primitive). Use after `search(structured=True)` or `traverse` to fetch the actual text.
+Batch-hydrate document content by ID past the 300-record read cap (MAX_QUERY_RESULTS; RDR-079 hydration primitive). Use after `search(structured=True)` or `traverse` to fetch the actual text.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|

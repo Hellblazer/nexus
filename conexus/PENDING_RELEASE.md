@@ -45,6 +45,7 @@ stale -- and stays exactly where it is until moved back deliberately.
 
 ONE PATH PER BULLET, on the bullet's FIRST line.
 
+- hydration cap wording (nexus-rf87b): `conexus/skills/nexus/reference.md` calls the `store_get_many` cap the "300-record read cap (MAX_QUERY_RESULTS)" rather than a ChromaDB one, matching SKILL.md. Text only.
 
 
 ## Deferred to the next client release

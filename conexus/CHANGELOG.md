@@ -10,10 +10,11 @@ since v7.70.0 becomes live at this pin (four entries):
   first use. `nexus` and `sequential-thinking` keep `alwaysLoad: true`
   (nexus-ivi4s).
 - `skills/nexus/SKILL.md` drops the ten direct `operator_*` call examples and
-  points at `nx_answer`; `skills/nexus/reference.md` replaces the per-operator
-  tool sections with one table of plan verbs. They ship with this client
-  release because it is the one that stops advertising the operators as MCP
-  tools (nexus-ivi4s).
+  points at `nx_answer`. It ships with this client release because it is the
+  one that stops advertising the operators as MCP tools (nexus-ivi4s).
+- `skills/nexus/reference.md` replaces the ten per-operator tool sections with
+  one table of plan verbs and drops the operators from its core-tool list. Same
+  pairing as the entry above (nexus-ivi4s).
 - `commands/nx-preflight.md` no longer assumes its preflight output is present;
   when the `!` preamble's output is missing it runs
   `nx command-context nx-preflight` (nexus-0cq5m). Text only.
