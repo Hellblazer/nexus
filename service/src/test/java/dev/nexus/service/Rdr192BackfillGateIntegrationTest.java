@@ -232,6 +232,62 @@ class Rdr192BackfillGateIntegrationTest {
         exemptingGate.requireComplete(tenant);
     }
 
+    // ── nexus-rf87b: the empty-tenant pass line is DEBUG, so it needs a DEBUG capture to be seen at all ─────
+
+    private static final String EMPTY_PASS_EVENT = "event=rdr192_backfill_gate_passed_empty_tenant";
+
+    /** Runs {@code body} with the gate's own logger at DEBUG, returning "LEVEL message" for every line it logged. */
+    private static List<String> captureGateLogsAtDebug(Runnable body) {
+        ch.qos.logback.classic.Logger gateLogger =
+                (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger(Rdr192BackfillGate.class);
+        ch.qos.logback.classic.Level before = gateLogger.getLevel();
+        ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent> appender =
+                new ch.qos.logback.core.read.ListAppender<>();
+        appender.start();
+        gateLogger.addAppender(appender);
+        gateLogger.setLevel(ch.qos.logback.classic.Level.DEBUG);
+        try {
+            body.run();
+            return appender.list.stream().map(e -> e.getLevel() + " " + e.getFormattedMessage()).toList();
+        } finally {
+            gateLogger.setLevel(before);
+            gateLogger.detachAppender(appender);
+            appender.stop();
+        }
+    }
+
+    @Test
+    void anEmptyTenantPassLogsTheDebugLineExactlyOnce_withTenantAndRung() {
+        String tenant = "rdr192-gate-hollow-logged";
+
+        List<String> logs = captureGateLogsAtDebug(() -> exemptingGate.requireComplete(tenant));
+
+        assertThat(logs).as("once per empty-tenant pass").hasSize(1);
+        assertThat(logs.get(0))
+                .startsWith("DEBUG ")
+                .contains(EMPTY_PASS_EVENT)
+                .contains("tenant=" + tenant)
+                .contains("rung=" + Rdr192BackfillGate.RUNG_NAME);
+    }
+
+    @Test
+    void aTenantWithContentNeverLogsTheEmptyTenantLine() throws Exception {
+        String held = "rdr192-gate-logged-holds-chunk";
+        seedChunk(held, "knowledge__" + held + "__minilm-l6-v2-384__v1", "a");
+        String recorded = "rdr192-gate-logged-recorded";
+        ladder.record(recorded, Rdr192BackfillGate.RUNG_NAME, "7.99.0", "");
+
+        List<String> logs = captureGateLogsAtDebug(() -> {
+            assertThatThrownBy(() -> exemptingGate.requireComplete(held))
+                    .isInstanceOf(BackfillIncompleteException.class);
+            exemptingGate.requireComplete(recorded);
+        });
+
+        assertThat(logs).as("control: the capture is live, the refusal line was seen")
+                .anyMatch(l -> l.contains("event=rdr192_backfill_gate_refused") && l.contains("tenant=" + held));
+        assertThat(logs).noneMatch(l -> l.contains(EMPTY_PASS_EVENT));
+    }
+
     @Test
     void anUnreadableEmptinessTestFailsClosed() {
         var broken = new Rdr192BackfillGate(ladder, t -> {
