@@ -541,7 +541,8 @@ class _IndexDb:
         self._hit("restore", quarantine)
         return {"restored": 1, "remaining": 0}
 
-    def gc_quarantine_orphans_bounded(self, origin, quarantine, at, sample, row_limit):
+    def gc_quarantine_orphans_bounded(self, origin, quarantine, at, sample, row_limit, **floor):
+        # nexus-wbfpw.52: the real client takes the optional floor fields; this engine ignores them (no echo).
         self._hit("move", quarantine)
         return {"moved": 2, "sample": [], "remaining": 0}
 

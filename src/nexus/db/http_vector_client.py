@@ -3783,13 +3783,38 @@ class HttpVectorClient:
     # back to the client-side path, same shape as :meth:`list_collections`'s
     # ``/stats`` -> ``/collections`` + ``/count`` fallback above.
 
+    @staticmethod
+    def _floor_body(
+        floor_fraction: float | None, floor_min_chunks: int | None, force: bool,
+    ) -> dict:
+        """The optional fraction-floor fields of the move route (nexus-wbfpw.52), additive.
+
+        Sent only when ``floor_fraction`` is given, so a caller without a floor sends
+        the request this method always sent. An engine that honours them answers with a
+        ``floor`` key (``{"given": true, "fraction": ..., "min_chunks": ..., "force": ...}``,
+        or ``{"given": false}`` for a request without one) and, when it refused,
+        ``refused: true`` with ``reapable_count`` / ``total_count``; an older engine
+        ignores the fields and answers with no ``floor`` key, which is how a caller
+        detects it was never guarded.
+        """
+        if floor_fraction is None:
+            return {}
+        body: dict = {"floor_fraction": floor_fraction, "force": force}
+        if floor_min_chunks is not None:
+            body["floor_min_chunks"] = floor_min_chunks
+        return body
+
     def gc_quarantine_orphans(
         self, collection: str, quarantine_collection: str,
-        quarantined_at: str, sample_limit: int = 20,
+        quarantined_at: str, sample_limit: int = 20, *,
+        floor_fraction: float | None = None, floor_min_chunks: int | None = None,
+        force: bool = False,
     ) -> dict:
         """POST /v1/vectors/gc/quarantine-orphans.
 
-        Returns ``{"moved": N, "sample": [{"chash": hex, "title": ...}, ...]}``.
+        Returns ``{"moved": N, "sample": [{"chash": hex, "title": ...}, ...]}``, plus
+        ``floor`` (and, with a floor, ``refused`` and the judged counts) from an engine
+        that honours the optional floor fields (:meth:`_floor_body`).
         Raises :class:`VectorServiceError` (``code=404`` on a pre-route engine).
         """
         return _post(
@@ -3799,13 +3824,16 @@ class HttpVectorClient:
                 "quarantine_collection": quarantine_collection,
                 "quarantined_at": quarantined_at,
                 "sample_limit": sample_limit,
+                **self._floor_body(floor_fraction, floor_min_chunks, force),
             },
             tenant=self._tenant,
         )
 
     def gc_quarantine_orphans_bounded(
         self, collection: str, quarantine_collection: str,
-        quarantined_at: str, sample_limit: int, row_limit: int,
+        quarantined_at: str, sample_limit: int, row_limit: int, *,
+        floor_fraction: float | None = None, floor_min_chunks: int | None = None,
+        force: bool = False,
     ) -> dict:
         """POST /v1/vectors/gc/quarantine-orphans with ``row_limit`` (catalog-037/
         nexus-a6mon's engine route; wired client-side at nexus-e8h5x review
@@ -3822,6 +3850,11 @@ class HttpVectorClient:
         performs the UNBOUNDED quarantine regardless of what this call
         asked for. Callers detect that by the absent ``remaining`` key,
         never by inferring engine version.
+
+        The optional floor fields (nexus-wbfpw.52, :meth:`_floor_body`) ride the
+        same request; an engine that honours them judges the floor under its sweep
+        gate on the whole reapable set and may answer ``refused: true`` with nothing
+        moved, ``remaining`` still naming the whole reapable set.
         """
         return _post(
             "/v1/vectors/gc/quarantine-orphans",
@@ -3831,6 +3864,7 @@ class HttpVectorClient:
                 "quarantined_at": quarantined_at,
                 "sample_limit": sample_limit,
                 "row_limit": row_limit,
+                **self._floor_body(floor_fraction, floor_min_chunks, force),
             },
             tenant=self._tenant,
         )

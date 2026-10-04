@@ -1714,6 +1714,13 @@
     <include file="db/changelog/vectors-026-gc-expire-quarantine-skips-engine-rows.xml"/>
 
     <!--
+        nexus-wbfpw.52 (RDR-192): nexus.gc_quarantine_orphans_floored, the optional fraction floor on the
+        gc/quarantine-orphans route, judged under the sweep gate in the same call as the move. A wrapper over
+        the released move functions, so none of them changes. Placed after vectors-026, before the grants blocks.
+    -->
+    <include file="db/changelog/vectors-027-gc-quarantine-orphans-floored.xml"/>
+
+    <!--
         RDR-223 Phase 3 step 2 (nexus-z0o2p.27): DROP the staging landing
         schema, retired with the /v1/staging routes — see the included file's
         own header for the dependents (grants-nexus-diag-3, the staging-4

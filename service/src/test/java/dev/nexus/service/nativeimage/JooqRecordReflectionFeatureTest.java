@@ -259,7 +259,11 @@ class JooqRecordReflectionFeatureTest {
     // (nexus-wbfpw.49) widened that record's columns and added
     // nexus.quarantine_reattach_plan, which RETURNS jsonb (a scalar, no
     // Record type): no further delta from it.
-    private static final int EXPECTED_RECORD_TYPES = 111;
+    // 111 -> 112: nexus-wbfpw.52, vectors-027-gc-quarantine-orphans-floored.xml
+    // added nexus.gc_quarantine_orphans_floored, a RETURNS TABLE(moved,
+    // sample, remaining, refused, reapable_count, total_count) function, one
+    // generated Record type (GcQuarantineOrphansFlooredRecord), +1.
+    private static final int EXPECTED_RECORD_TYPES = 112;
 
     @Test
     void enumeratesEveryGeneratedRecordTypeViaTheSchemaModel() {
