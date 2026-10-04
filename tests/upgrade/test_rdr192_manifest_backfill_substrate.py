@@ -20,10 +20,7 @@ the substrate provisions itself.
 """
 from __future__ import annotations
 
-import hashlib
 import json
-import subprocess
-from pathlib import Path
 
 import pytest
 from click.testing import CliRunner
@@ -45,66 +42,17 @@ from nexus.upgrade_ladder.rungs.rdr192_manifest_backfill import (
     require_rdr192_backfill_complete,
 )
 from nexus.upgrade_ladder.runner import LadderRunner, RungOutcome
-
-_MODEL = "bge-base-en-v15-768"
+from tests.upgrade._substrate_sql import MODEL, lit, psql, register_collection, seed_chunk
 
 
 def _coll(tag: str) -> str:
-    return f"knowledge__wbfpw41{tag}__{_MODEL}__v1"
-
-
-def _chash(text: str) -> str:
-    return hashlib.sha256(text.encode()).hexdigest()
-
-
-def _lit(value: str) -> str:
-    return "'" + value.replace("'", "''") + "'"
-
-
-def _psql(sql: str) -> str:
-    from tests._engine_substrate import ensure_engine  # noqa: PLC0415 — substrate boots lazily
-
-    state = ensure_engine()
-    proc = subprocess.run(
-        [
-            str(Path(state["pg_bin"]) / "psql"), "-h", "127.0.0.1", "-p", str(state["pg_port"]),
-            "-U", state["pg_user"], "-d", state["pg_dbname"],
-            "-v", "ON_ERROR_STOP=1", "-At", "-c", sql,
-        ],
-        capture_output=True, text=True, timeout=60,
-    )
-    assert proc.returncode == 0, f"psql failed: {proc.stderr}\nSQL: {sql}"
-    return proc.stdout
-
-
-def _register_collection(tenant: str, collection: str, lifecycle_state: str = "live") -> None:
-    _psql(
-        "INSERT INTO nexus.catalog_collections "
-        "(tenant_id, name, content_type, owner_id, embedding_model, lifecycle_state) "
-        f"VALUES ({_lit(tenant)}, {_lit(collection)}, 'knowledge', 'test-seed', {_lit(_MODEL)}, "
-        f"{_lit(lifecycle_state)}) "
-        "ON CONFLICT DO NOTHING"
-    )
-
-
-def _seed_chunk(tenant: str, collection: str, text: str, metadata: dict) -> str:
-    """Insert one ``nexus.chunks`` row by direct SQL and return its chash."""
-    chash = _chash(text)
-    _register_collection(tenant, collection)
-    vec = "[" + ",".join(["0"] * 768) + "]"
-    _psql(
-        "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_768, metadata) "
-        f"VALUES ({_lit(tenant)}, {_lit(collection)}, decode({_lit(chash)}, 'hex'), {_lit(text)}, "
-        f"{_lit(vec)}::nexus.vector, {_lit(json.dumps({'chunk_text_hash': chash, **metadata}))}::jsonb) "
-        "ON CONFLICT DO NOTHING"
-    )
-    return chash
+    return f"knowledge__wbfpw41{tag}__{MODEL}__v1"
 
 
 def _stored(tenant: str, collection: str) -> set[str]:
-    out = _psql(
+    out = psql(
         "SELECT encode(chash, 'hex') FROM nexus.chunks "
-        f"WHERE tenant_id = {_lit(tenant)} AND collection = {_lit(collection)}"
+        f"WHERE tenant_id = {lit(tenant)} AND collection = {lit(collection)}"
     )
     return {line for line in out.splitlines() if line}
 
@@ -132,7 +80,7 @@ def _legacy_note(
         physical_collection=doc_collection or collection,
         chunk_count=chunk_count,
     ))
-    chash = _seed_chunk(
+    chash = seed_chunk(
         tenant, collection, f"{title} body",
         {"catalog_doc_id": tumbler, "title": title, "chunk_index": 0, "chunk_count": 1},
     )
@@ -236,15 +184,15 @@ def test_other_buckets_are_left_alone_and_nothing_is_deleted(t2_service_env, cat
 
     _legacy_tumbler, legacy = _legacy_note(cat, owner, coll, "legacy in mixed collection", tenant)
 
-    no_owner = _seed_chunk(tenant, coll, "no owner body", {"title": "no-owner"})
+    no_owner = seed_chunk(tenant, coll, "no owner body", {"title": "no-owner"})
 
     dead_doc = str(cat.register(owner, "dead doc", content_type="knowledge", physical_collection=coll))
-    dead_owner = _seed_chunk(tenant, coll, "dead owner body", {"catalog_doc_id": dead_doc})
+    dead_owner = seed_chunk(tenant, coll, "dead owner body", {"catalog_doc_id": dead_doc})
     cat.delete_document(dead_doc)
 
     live_doc = str(cat.register(owner, "live doc", content_type="knowledge", physical_collection=coll))
-    current = _seed_chunk(tenant, coll, "current body", {"catalog_doc_id": live_doc})
-    superseded = _seed_chunk(tenant, coll, "superseded body", {"catalog_doc_id": live_doc})
+    current = seed_chunk(tenant, coll, "current body", {"catalog_doc_id": live_doc})
+    superseded = seed_chunk(tenant, coll, "superseded body", {"catalog_doc_id": live_doc})
     cat.write_manifest(live_doc, [{"chash": current, "position": 0}], collection=coll)
 
     before = _census_totals(tenant, coll)
@@ -283,7 +231,7 @@ def test_an_unhealable_residual_defers_loudly_records_nothing_and_is_not_retried
     cat, owner = catalog
     coll = _coll("stuck")
     elsewhere = _coll("elsewhere")
-    _register_collection(tenant, elsewhere)
+    register_collection(tenant, elsewhere)
     tumbler, chash = _legacy_note(cat, owner, coll, "stranded note", tenant, doc_collection=elsewhere)
 
     backfill_calls: list[str] = []
@@ -350,12 +298,12 @@ def test_the_remedy_works_a_re_put_heals_a_stranded_legacy_note(t2_service_env, 
     title = "wbfpw41 stranded note"
     coll = t3_collection_name(subject, t3=client)
     elsewhere = _coll("reput-elsewhere")
-    _register_collection(tenant, elsewhere)
+    register_collection(tenant, elsewhere)
     tumbler = str(cat.register(
         owner, title, content_type="knowledge", physical_collection=elsewhere,
         source_uri=uri_for(coll, title), chunk_count=1,
     ))
-    old = _seed_chunk(
+    old = seed_chunk(
         tenant, coll, "wbfpw41 the old text of a stranded note",
         {"catalog_doc_id": tumbler, "title": title, "chunk_index": 0, "chunk_count": 1},
     )
@@ -401,8 +349,8 @@ def test_a_note_with_an_old_and_a_current_chunk_is_reported_not_manifested(
             physical_collection=coll, chunk_count=registered,
         ))
         meta = {"catalog_doc_id": tumbler, "chunk_index": 0, "chunk_count": 1}
-        old = _seed_chunk(tenant, coll, f"old text {registered}", {**meta, "title": "old"})
-        current = _seed_chunk(tenant, coll, f"current text {registered}", {**meta, "title": "current"})
+        old = seed_chunk(tenant, coll, f"old text {registered}", {**meta, "title": "old"})
+        current = seed_chunk(tenant, coll, f"current text {registered}", {**meta, "title": "current"})
         assert _census_totals(tenant, coll)["legacy-unmanifested"] == 2  # control
 
         result = backfill_manifest_for_collection(
@@ -425,7 +373,7 @@ def test_write_manifest_refuses_two_chunks_at_one_position_atomically(t2_service
     cat, owner = catalog
     coll = _coll("dup")
     tumbler, first = _legacy_note(cat, owner, coll, "dup note", tenant)
-    second = _seed_chunk(tenant, coll, "dup note second", {"catalog_doc_id": tumbler})
+    second = seed_chunk(tenant, coll, "dup note second", {"catalog_doc_id": tumbler})
     with pytest.raises(httpx.HTTPStatusError) as excinfo:
         cat.write_manifest(
             tumbler, [{"chash": first, "position": 0}, {"chash": second, "position": 0}],
@@ -477,8 +425,8 @@ def test_a_skipped_document_reaches_the_deferred_detail(t2_service_env, catalog,
         owner, "two-chunk note", content_type="knowledge", physical_collection=coll, chunk_count=1,
     ))
     meta = {"catalog_doc_id": tumbler, "chunk_index": 0}
-    _seed_chunk(tenant, coll, "skiplist old", {**meta, "title": "old"})
-    _seed_chunk(tenant, coll, "skiplist current", {**meta, "title": "current"})
+    seed_chunk(tenant, coll, "skiplist old", {**meta, "title": "old"})
+    seed_chunk(tenant, coll, "skiplist current", {**meta, "title": "current"})
 
     _run_ladder(dry_run=False, auto_mode=False)
 
@@ -503,8 +451,8 @@ def test_a_repeated_piece_note_is_still_manifested(t2_service_env, catalog) -> N
         owner, "repeated piece note", content_type="knowledge",
         physical_collection=coll, chunk_count=3,
     ))
-    first = _seed_chunk(tenant, coll, "piece one", {"catalog_doc_id": tumbler, "chunk_index": 0})
-    third = _seed_chunk(tenant, coll, "piece three", {"catalog_doc_id": tumbler, "chunk_index": 2})
+    first = seed_chunk(tenant, coll, "piece one", {"catalog_doc_id": tumbler, "chunk_index": 0})
+    third = seed_chunk(tenant, coll, "piece three", {"catalog_doc_id": tumbler, "chunk_index": 2})
     assert _census_totals(tenant, coll)["legacy-unmanifested"] == 2  # control
 
     result = backfill_manifest_for_collection(
@@ -530,8 +478,8 @@ def test_the_census_prints_the_owner_title_for_legacy_rows(t2_service_env, catal
 
     # Only legacy rows carry a title: a superseded row for the same document does not.
     live_doc = str(cat.register(owner, "Titled live doc", content_type="knowledge", physical_collection=coll))
-    current = _seed_chunk(tenant, coll, "current live body", {"catalog_doc_id": live_doc})
-    stale = _seed_chunk(tenant, coll, "stale live body", {"catalog_doc_id": live_doc})
+    current = seed_chunk(tenant, coll, "current live body", {"catalog_doc_id": live_doc})
+    stale = seed_chunk(tenant, coll, "stale live body", {"catalog_doc_id": live_doc})
     cat.write_manifest(live_doc, [{"chash": current, "position": 0}], collection=coll)
     again = CliRunner().invoke(t3, ["census-manifest-less", "--collection", coll])
     stale_line = next(line for line in again.output.splitlines() if stale in line)
@@ -551,8 +499,8 @@ def test_backfill_manifest_verb_reports_the_chunk_count_mismatch_class(
         owner, "verb note", content_type="knowledge", physical_collection=coll, chunk_count=1,
     ))
     meta = {"catalog_doc_id": tumbler, "chunk_index": 0}
-    _seed_chunk(tenant, coll, "verb old", {**meta, "title": "old"})
-    _seed_chunk(tenant, coll, "verb current", {**meta, "title": "current"})
+    seed_chunk(tenant, coll, "verb old", {**meta, "title": "old"})
+    seed_chunk(tenant, coll, "verb current", {**meta, "title": "current"})
     state_file = tmp_path / "backfill_state.json"
     monkeypatch.setenv("NEXUS_BACKFILL_STATE_FILE", str(state_file))
 
@@ -574,8 +522,8 @@ def test_a_quarantine_collection_is_skipped_and_counted_in_the_record(t2_service
     coll = _coll("qcount")
     _legacy_note(cat, owner, coll, "healthy legacy", tenant)
     quarantine = "quarantine-wbfpw41-probe"
-    _register_collection(tenant, quarantine, lifecycle_state="quarantine")
-    _seed_chunk(tenant, quarantine, "quarantined body", {"title": "q"})
+    register_collection(tenant, quarantine, lifecycle_state="quarantine")
+    seed_chunk(tenant, quarantine, "quarantined body", {"title": "q"})
 
     _run_ladder(dry_run=False, auto_mode=True)
 

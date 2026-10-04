@@ -26,6 +26,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.stream.Stream;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -107,10 +108,25 @@ class Rdr192EmptyTenantParityIntegrationTest {
                 List<String> hex = new ArrayList<>();
                 for (int k = 0; k < chunks; k++) hex.add(Chash.ofText(collection + "/" + k).toHex());
                 if (chunks == 0) continue;
-                if (documents.equals("owned-with-manifest")) {
-                    PgContainerHelper.insertOwnedChunks(ctx, tenant, collection, 384, hex.toArray(new String[0]));
-                } else {
-                    PgContainerHelper.insertChunks(ctx, tenant, collection, hex,
+                switch (documents) {
+                    case "owned-with-manifest" ->
+                        PgContainerHelper.insertOwnedChunks(ctx, tenant, collection, 384, hex.toArray(new String[0]));
+                    case "owned-no-manifest" -> {
+                        // The legacy-unmanifested shape: a live document that owns the chunk by its metadata
+                        // catalog_doc_id only. physical_collection set, no file_path, and no manifest row
+                        // (ownChunks' document insert without its manifest insert).
+                        String doc = "legacy-" + collection;
+                        ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
+                                CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
+                            .values(tenant, doc, "Legacy " + doc, collection)
+                            .onConflictDoNothing()
+                            .execute();
+                        PgContainerHelper.insertChunks(ctx, tenant, collection, hex,
+                            hex.stream().map(h -> "text").toList(),
+                            hex.stream().map(h -> new float[384]).toList(),
+                            hex.stream().map(h -> Map.<String, Object>of("catalog_doc_id", doc)).toList());
+                    }
+                    default -> PgContainerHelper.insertChunks(ctx, tenant, collection, hex,
                         hex.stream().map(h -> "text").toList(),
                         hex.stream().map(h -> new float[384]).toList(),
                         hex.stream().map(h -> Map.<String, Object>of()).toList());
@@ -125,7 +141,7 @@ class Rdr192EmptyTenantParityIntegrationTest {
         List<String> names = new ArrayList<>();
         shapes().forEach(s -> names.add(s.get("name").asText()));
         assertThat(names).contains("empty", "chunk-only", "quarantine-only",
-            "registered-collection-no-chunks", "content-owned-with-manifest");
+            "registered-collection-no-chunks", "content-owned-with-manifest", "legacy-unmanifested-note");
     }
 
     @TestFactory
@@ -138,12 +154,8 @@ class Rdr192EmptyTenantParityIntegrationTest {
                 assertThat(reaperStore.holdsNothing(tenant, BOUND))
                     .as("holdsNothing(%s)", shape.get("name").asText())
                     .isEqualTo(expected);
-                // The parity direction: an engine "empty" must be a client-clean census.
-                if (expected) {
-                    assertThat(shape.get("client_census_clean").asBoolean())
-                        .as("engine calls %s empty, so the client census must converge on it", shape.get("name").asText())
-                        .isTrue();
-                }
+                // The parity direction (engine_empty implies client_census_clean) is checked in the Python
+                // half over the table and over the seeded state; this side pins the engine verdict only.
             }));
         }
         return tests.stream();
