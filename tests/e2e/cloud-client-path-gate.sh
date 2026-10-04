@@ -90,17 +90,27 @@ export NX_ALLOW_PROD_WRITE="cloud-client-path-gate: deliberate post-deploy MVV w
 #      (nexus-wbfpw.50, widened by the RDR-192 Phase 3 gate): the `reaper`
 #      object is PRESENT, enabled, last_completed_pass_at is non-null and no
 #      older than three of its own intervals plus the wall-clock budget (both
-#      read from the same object), and failed_passes_total is 0. An edge that
-#      strips the key makes `nx doctor`'s Engine reaper row read "not
-#      applicable", which looks healthy, so the gate asserts the key. Tenant
-#      counts are never hardcoded. A freshly booted engine fails this leg until
+#      read from the same object), failed_passes_total is 0 (a since-boot
+#      counter: a recovered blip keeps it nonzero, and the failure message says
+#      so) and last_pass.tenants_errored is 0; the ok line prints the last_pass
+#      counts. An edge that strips the key makes `nx doctor`'s Engine reaper row
+#      read "not applicable", which looks healthy, so the gate asserts the key.
+#      Tenant counts are never hardcoded. A freshly booted engine fails this leg until
 #      its first pass (about a minute after start): run it a few minutes after
 #      a deploy, never inside the boot window. Read-only (reuses leg B's body).
 #   K  RDR-191/192 vector sweep routes through the edge (nexus-wbfpw.50): the
 #      engine's own JSON (not an edge page) and the status codes the client
 #      branches on, using ONLY requests that cannot move, restore, expire or
 #      delete anything (each is refused by validation, answers 404, or reads an
-#      unregistered collection name):
+#      unregistered collection name). Each 400 asserts a fragment of the ENGINE's
+#      own message (an edge or WAF can answer a 400 with a JSON error of its own),
+#      and K1 the engine's exact 404 body. The read-only property is pinned by a
+#      structural allowlist audit in tests/e2e/cloud_client_path_gate_b3_test.sh,
+#      itself falsified by negative tests over mutated copies of this file.
+#      Read from code, NOT pinned by an engine route test: K2's 422
+#      reason=unregistered_collection for quarantine-restore and K8/K11's 200 empty
+#      result for an unregistered name. A first live red on K2, K8 or K11 means
+#      re-check the engine's behaviour before blaming the edge.
 #        K1  POST /v1/vectors/gc/<no-such-route>        404 + JSON (the client
 #            reads a 404 as "engine predates the route", exit 4 of the
 #            quarantine-restore verb; the real route cannot be used for this, it
@@ -271,6 +281,8 @@ B3_NOT_RUN=0
 #   - last_completed_pass_at null (no pass yet) or unparseable     -> 1
 #   - last pass older than 3 * interval + wall_clock_budget        -> 1
 #   - failed_passes_total absent, not an int, or not 0             -> 1
+#     (a since-boot counter: the message says so, so a recovered blip is not read as live)
+#   - last_pass absent, or its tenants_errored absent or not 0     -> 1
 # The test (tests/e2e/cloud_client_path_gate_b3_test.sh) sources this function from
 # the real script.
 _reaper_status_verdict() {
@@ -341,11 +353,26 @@ failed = reaper.get("failed_passes_total")
 if type(failed) is not int:
     errs.append("reaper.failed_passes_total is %r, expected the integer 0" % (failed,))
 elif failed != 0:
-    errs.append("reaper.failed_passes_total is %d, expected 0 (read the engine log for event=reaper_pass_failed)" % failed)
+    errs.append("reaper.failed_passes_total is %d, expected 0. It is a since-boot counter: it stays nonzero after a "
+                "recovered blip, so read last_completed_pass_at above and the engine log (event=reaper_pass_failed) "
+                "before treating this as a live outage" % failed)
+last_pass = reaper.get("last_pass")
+lp_text = "last_pass absent"
+if not isinstance(last_pass, dict):
+    errs.append("reaper.last_pass is %r, expected an object once a pass has completed" % (last_pass,))
+else:
+    errored = last_pass.get("tenants_errored")
+    if type(errored) is not int:
+        errs.append("reaper.last_pass.tenants_errored is %r, expected the integer 0" % (errored,))
+    elif errored != 0:
+        errs.append("reaper.last_pass.tenants_errored is %d, expected 0: the last pass completed but could not work on "
+                    "that many tenants (read the engine log for the per-tenant error)" % errored)
+    lp_text = "last_pass visited=%s errored=%s refused=%s empty=%s" % tuple(
+        last_pass.get(k, "absent") for k in ("tenants_visited", "tenants_errored", "tenants_refused", "tenants_empty"))
 if errs:
     violation("; ".join(errs))
-print("ok [J]: reaper enabled, last completed pass %ds ago (limit %ds = 3 x %ds + %ds budget), failed_passes_total=0"
-      % (age, limit, interval, budget))
+print("ok [J]: reaper enabled, last completed pass %ds ago (limit %ds = 3 x %ds + %ds budget), failed_passes_total=0, %s"
+      % (age, limit, interval, budget, lp_text))
 PY
 }
 
@@ -432,7 +459,9 @@ PY
 #    credential classes). A different /health status is reported as a change
 #    in conexus's gate, not as an engine fault.
 _leg_enter B "edge auth contract (unauthenticated /health refused, data token accepted on /v1)"
-NOAUTH_STATUS="$(curl -sS -m 20 -o /dev/null -w "%{http_code}" "$SERVICE_URL/health" || echo 000)"
+# curl -w prints 000 itself when the request fails, so the fallback ASSIGNS 000 rather than
+# appending a second one (an `|| echo 000` inside the substitution read "000000").
+NOAUTH_STATUS="$(curl -sS -m 20 -o /dev/null -w "%{http_code}" "$SERVICE_URL/health")" || NOAUTH_STATUS=000
 case "$NOAUTH_STATUS" in
     403) echo "  ok [B1]: unauthenticated /health refused by the edge (403)" ;;
     200) _leg_fail "B1: unauthenticated /health returned 200 — the edge no longer gates /health (conexus changed relay [21082] decision (b)); confirm with conexus and update this pin" ;;
@@ -447,11 +476,11 @@ esac
 # never stdout (structlog writes its info lines there, and the first live run
 # carried one into the Authorization header), argv, or a shell variable; curl
 # reads it with -H @file. Which kind was used goes to stderr.
+# Leg K reuses the bearer, so it outlives leg B; the trap removes it on every exit, a
+# _fail included, and is installed BEFORE mktemp so a kill between the two cannot leak it.
+trap 'rm -f "${BEARER_FILE:-}"' EXIT
 BEARER_FILE="$(mktemp)"
 chmod 600 "$BEARER_FILE"
-# Leg K reuses the bearer, so it outlives leg B; the trap removes it on every exit,
-# a _fail included.
-trap 'rm -f "$BEARER_FILE"' EXIT
 STATUS_BODY=""
 BEARER_RC=0
 SERVICE_URL="$SERVICE_URL" BEARER_FILE="$BEARER_FILE" uv run python - <<'PY' || BEARER_RC=$?
@@ -484,7 +513,7 @@ if [ "$BEARER_RC" -ne 0 ]; then
 elif [ ! -s "$BEARER_FILE" ]; then
     _leg_fail "B2: no bearer — neither a mint_token (minted data token) nor a service_token credential is usable"
 else
-    V1_STATUS="$(curl -sS -m 20 -H @"$BEARER_FILE" -o /dev/null -w "%{http_code}" "$SERVICE_URL/v1/catalog/collections/list" || echo 000)"
+    V1_STATUS="$(curl -sS -m 20 -H @"$BEARER_FILE" -o /dev/null -w "%{http_code}" "$SERVICE_URL/v1/catalog/collections/list")" || V1_STATUS=000
     if [ "$V1_STATUS" = "200" ]; then
         echo "  ok [B2]: /v1 accepts the client's bearer (200)"
     else
@@ -886,20 +915,24 @@ _edge_post() {
     local path="$1" data="$2" out
     out="$(mktemp)"
     EDGE_CODE="$(curl -sS -m 30 -X POST -H @"$BEARER_FILE" -H 'Content-Type: application/json' \
-        --data "$data" -o "$out" -w '%{http_code}' "$SERVICE_URL$path" || echo 000)"
+        --data "$data" -o "$out" -w '%{http_code}' "$SERVICE_URL$path")" || EDGE_CODE=000
     EDGE_BODY="$(cat "$out")"
     rm -f "$out"
 }
 # Judge the last _edge_post: the status code first, then a body that is a JSON
-# object of the kind named. kinds: error (a non-empty "error" string), unregistered
-# (error + reason unregistered_collection), reapable_empty, census_empty.
+# object of the kind named. kinds: notfound (the engine's exact 404 body,
+# {"error":"not found"}), error (the "error" string CONTAINS the fourth argument, a
+# fragment of the engine's own message: an edge or WAF can answer a 400 with a JSON
+# {"error": ...} of its own, and only the engine's wording proves the request got
+# there), unregistered (error + reason unregistered_collection), reapable_empty,
+# census_empty.
 _edge_expect() {
-    local label="$1" want="$2" kind="$3"
-    "$E2E_PYTHON" - "$label" "$want" "$EDGE_CODE" "$kind" "$K_COLLECTION" "$EDGE_BODY" <<'PY'
+    local label="$1" want="$2" kind="$3" fragment="${4:-}"
+    "$E2E_PYTHON" - "$label" "$want" "$EDGE_CODE" "$kind" "$K_COLLECTION" "$EDGE_BODY" "$fragment" <<'PY'
 import json
 import sys
 
-label, want, got, kind, coll, body = sys.argv[1:7]
+label, want, got, kind, coll, body, fragment = sys.argv[1:8]
 head = body[:160].replace("\n", " ")
 
 
@@ -917,9 +950,16 @@ except ValueError:
 if not isinstance(doc, dict):
     violation("HTTP %s body is not a JSON object (%r): an edge page or a stripped body, not the engine's answer" % (got, head))
 errs = []
-if kind in ("error", "unregistered"):
-    if not (isinstance(doc.get("error"), str) and doc["error"]):
-        errs.append("no non-empty 'error' string in %r" % (head,))
+if kind == "notfound" and doc != {"error": "not found"}:
+    errs.append("body is %r, expected exactly the engine's {\"error\": \"not found\"}" % (head,))
+if kind == "error":
+    if not fragment:
+        errs.append("internal: an 'error' probe must name the engine message fragment it expects")
+    elif not (isinstance(doc.get("error"), str) and fragment in doc["error"]):
+        errs.append("'error' is %r, expected it to contain the engine's %r (an edge or WAF answer reads differently)"
+                    % (doc.get("error"), fragment))
+if kind == "unregistered" and not (isinstance(doc.get("error"), str) and doc["error"]):
+    errs.append("no non-empty 'error' string in %r" % (head,))
 if kind == "unregistered" and doc.get("reason") != "unregistered_collection":
     errs.append("reason is %r, expected 'unregistered_collection' (the key clients branch on)" % (doc.get("reason"),))
 if kind == "reapable_empty":
@@ -958,31 +998,33 @@ if [ ! -s "$BEARER_FILE" ]; then
 else
     K_BAD=0
     _edge_post "/v1/vectors/gc/this-route-does-not-exist-${K_STAMP}" '{}'
-    _edge_expect K1 404 error || K_BAD=1
+    _edge_expect K1 404 notfound || K_BAD=1
     _edge_post "/v1/vectors/gc/quarantine-restore" \
         "{\"origin_collection\":\"$K_COLLECTION\",\"chashes\":[\"$K_CHASH\"],\"dry_run\":true}"
     _edge_expect K2 422 unregistered || K_BAD=1
     _edge_post "/v1/vectors/gc/quarantine-restore" "{\"origin_collection\":\"$K_COLLECTION\",\"dry_run\":true}"
-    _edge_expect K3 400 error || K_BAD=1
+    _edge_expect K3 400 error "name exactly one source" || K_BAD=1
+    # audit_id -1 can never name a gc_audit row; the engine counts any non-null audit_id as a
+    # source and refuses the two-source request before it parses the value.
     _edge_post "/v1/vectors/gc/quarantine-restore" \
-        "{\"origin_collection\":\"$K_COLLECTION\",\"chashes\":[\"$K_CHASH\"],\"audit_id\":1,\"dry_run\":true}"
-    _edge_expect K4 400 error || K_BAD=1
+        "{\"origin_collection\":\"$K_COLLECTION\",\"chashes\":[\"$K_CHASH\"],\"audit_id\":-1,\"dry_run\":true}"
+    _edge_expect K4 400 error "name exactly one source" || K_BAD=1
     _edge_post "/v1/vectors/gc/quarantine-orphans" '{}'
-    _edge_expect K5 400 error || K_BAD=1
+    _edge_expect K5 400 error "missing required field: collection" || K_BAD=1
     _edge_post "/v1/vectors/gc/restore-rereferenced" '{}'
-    _edge_expect K6 400 error || K_BAD=1
+    _edge_expect K6 400 error "missing required field: quarantine_collection" || K_BAD=1
     _edge_post "/v1/vectors/gc/expire-quarantine" '{}'
-    _edge_expect K7 400 error || K_BAD=1
+    _edge_expect K7 400 error "missing required field: quarantine_collection" || K_BAD=1
     _edge_post "/v1/vectors/reapable" "{\"collection\":\"$K_COLLECTION\",\"limit\":1}"
     _edge_expect K8 200 reapable_empty || K_BAD=1
     _edge_post "/v1/vectors/reapable" "{\"collection\":\"$K_QUARANTINE\"}"
-    _edge_expect K9 400 error || K_BAD=1
+    _edge_expect K9 400 error "is a quarantine collection" || K_BAD=1
     _edge_post "/v1/vectors/reapable" "{\"collection\":\"$K_COLLECTION\",\"grace_seconds\":-1}"
-    _edge_expect K10 400 error || K_BAD=1
+    _edge_expect K10 400 error "field 'grace_seconds' must be between 0 and" || K_BAD=1
     _edge_post "/v1/vectors/manifest-less-census" "{\"collection\":\"$K_COLLECTION\",\"limit\":1}"
     _edge_expect K11 200 census_empty || K_BAD=1
     _edge_post "/v1/vectors/manifest-less-census" "{\"collection\":\"$K_QUARANTINE\"}"
-    _edge_expect K12 400 error || K_BAD=1
+    _edge_expect K12 400 error "is a quarantine collection" || K_BAD=1
     [ "$K_BAD" -eq 0 ] || _leg_fail "K: the sweep routes through the edge did not answer as the engine does (see above)"
 fi
 
