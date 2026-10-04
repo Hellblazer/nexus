@@ -29,8 +29,9 @@ honest test of the signed configuration is one that applies the xattr by hand
 > local-mode embedding initializes. `service/deploy/mac-entitlements.plist`
 > carries `com.apple.security.cs.disable-library-validation` to permit them, but
 > a shipped entitlement proves only that the flag was passed to `codesign` — not
-> that the loads succeed. **Do not set `APPLE_SIGNING_REQUIRED=true` until §5
-> passes on real hardware.**
+> that the loads succeed. The first tag cut with `APPLE_SIGNING_REQUIRED=true`
+> is the experiment and §5 is its verdict; if §5 fails, §6 switches signing back
+> off.
 
 ## 1. Prerequisites
 
@@ -151,9 +152,12 @@ gh secret set APPLE_NOTARY_ISSUER_ID     --env $E --repo $R
 gh api repos/$R/environments/$E/secrets --jq '.secrets[].name'   # expect all six
 ```
 
-**All-three-or-none per group.** The workflow hard-fails on partial
-configuration rather than silently shipping ad-hoc — provision a whole group or
-none of it.
+**Loading the secrets arms nothing.** A release signs only when the repository
+variable `APPLE_SIGNING_REQUIRED` is `true` (§5); until then it ships the ad-hoc
+binary whatever this environment holds (nexus-e8iml). The secrets can sit here
+for the rehearsal below without touching any tag. Once the variable is on, a
+release hard-fails on an absent or partial group rather than silently shipping
+ad-hoc, so provision both groups whole.
 
 ### Pre-flight: prove the certificate signs, before trusting CI
 
@@ -167,13 +171,27 @@ codesign --force --options runtime --timestamp \
 codesign -dv /tmp/testsign 2>&1 | grep TeamIdentifier   # must NOT say "not set"
 ```
 
-## 5. Cut a tag, then GATE IT on real hardware
+### Rehearse on the release runner
 
-Cut the next engine tag per [the engine-release skill](../../.claude/skills/engine-release/SKILL.md).
+`.github/workflows/mac-signing-rehearsal.yml` runs `service/deploy/mac-sign.sh`,
+the same script the release runs, on hellmini against a throwaway binary: sign,
+notarize, then TeamIdentifier, Hardened Runtime, the entitlement and Gatekeeper
+on a quarantined copy. It fails on missing secrets. It runs on a develop push
+that touches the signing inputs, or by dispatch once the file is on `main`. Do
+not go on to §5 until it passes, notarization included.
 
-> **The tag build now PAUSES for approval.** `build-publish` declares the
-> `apple-signing` environment, so the run waits on you. One approval releases
-> all three matrix legs. This is the gate working, not a hang.
+## 5. Switch signing on, cut a tag, then GATE IT on real hardware
+
+```bash
+gh variable set APPLE_SIGNING_REQUIRED --body true --repo Hellblazer/nexus
+```
+
+This is a repository **variable**, not a secret, and it is the only switch.
+Then cut the next engine tag per [the engine-release skill](../../.claude/skills/engine-release/SKILL.md).
+
+> **Every tag build PAUSES for approval**, signing on or off. `build-publish`
+> declares the `apple-signing` environment, so the run waits on you. One
+> approval releases all three matrix legs. This is the gate working, not a hang.
 
 Then, on your arm64 Mac:
 
@@ -193,26 +211,26 @@ This cannot be a CI job: mac-arm64 is `smoke: false` in the release workflow
 smoke, so CI never boots the signed mac bytes at all. `codesign --verify` cannot
 see a runtime dlopen refusal.
 
-## 6. Arm the regression guard
-
-Only after §5 passes:
+## 6. If the gate fails, switch signing off
 
 ```bash
-gh variable set APPLE_SIGNING_REQUIRED --body true --repo Hellblazer/nexus
+gh variable delete APPLE_SIGNING_REQUIRED --repo Hellblazer/nexus
 ```
 
-This is a repository **variable**, not a secret. With it set, absent `APPLE_*`
-secrets become a hard build failure instead of a warn-and-ship-ad-hoc — so a
-later credential expiry or accidental deletion cannot silently regress you to
-unsigned binaries.
+Then cut a fresh tag, which ships ad-hoc. Do not re-run a signed tag's job once
+its release has published (see the `--clobber` caution in the release
+workflow); a run that failed before promotion is still a draft, which is why
+§7's rerun after a notary timeout is safe. When §5 passes, leave
+the variable set: with it on, a credential deleted or rotated away later fails
+the build instead of silently regressing to unsigned binaries.
 
 ## 7. Renewal and failure modes
 
 | symptom | cause | remedy |
 |---|---|---|
-| build fails "secrets PARTIALLY configured" | one of a group of three missing | provision the whole group |
-| build warns "UNSIGNED (ad-hoc)" | no secrets at all, `APPLE_SIGNING_REQUIRED` unset | expected pre-provisioning |
-| build fails "APPLE_SIGNING_REQUIRED=true but secrets absent" | credentials deleted or expired after arming | restore them, or consciously unset the variable |
+| step summary says signing SKIPPED | `APPLE_SIGNING_REQUIRED` is not `true` | expected while signing is off |
+| build fails "APPLE_SIGNING_REQUIRED=true but the ... secrets are absent or partial" | a group missing or incomplete in `apple-signing` | restore the whole group, or consciously unset the variable |
+| notarization step times out | Apple held the submission (the first one, 2026-09-29, was still In Progress at 20 min; nexus-aq9y8) | wait and `gh run rerun --failed`, or unset the variable and cut a fresh tag |
 | notarization 403 | notary key role too narrow | escalate the key's role to App Manager |
 | §5 gate fails on library validation | the entitlement is not reaching the signature | check `service/deploy/mac-entitlements.plist` and the `--entitlements` flag |
 

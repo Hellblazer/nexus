@@ -297,6 +297,30 @@ class StatusHandlerTest {
             .isFalse();
     }
 
+    // ── nexus-wbfpw.48, [additive]: chunks_tenant_isolation_intact ──────────────────────────────────────────────
+
+    @Test
+    void chunksIsolation_keyIsAbsentWhenNoSupplierIsWired_andWhenTheProbeCouldNotRun() throws Exception {
+        start(new StatusHandler(null));
+        assertThat(get().has("chunks_tenant_isolation_intact")).as("an engine that predates the field").isFalse();
+        stop();
+        start(new StatusHandler(null, null, 0L, null, null, () -> null));
+        assertThat(get().has("chunks_tenant_isolation_intact")).as("a probe that could not run").isFalse();
+    }
+
+    @Test
+    void chunksIsolation_reportsTrueAndFalse_asABooleanOnly() throws Exception {
+        start(new StatusHandler(null, null, 0L, null, null, () -> Boolean.TRUE));
+        assertThat(get().get("chunks_tenant_isolation_intact").isBoolean()).isTrue();
+        assertThat(get().get("chunks_tenant_isolation_intact").asBoolean()).isTrue();
+        stop();
+        start(new StatusHandler(null, null, 0L, null, null, () -> Boolean.FALSE));
+        JsonNode body = get();
+        assertThat(body.get("chunks_tenant_isolation_intact").asBoolean()).isFalse();
+        assertThat(body.toString()).as("an unauthenticated route never names a policy or a role")
+            .doesNotContain("chunks_gate_probe_owner_read").doesNotContain("nexus_admin");
+    }
+
     @Test
     void nonGetMethodIsRejected() throws Exception {
         start(new StatusHandler(null));

@@ -111,6 +111,7 @@ public final class StatusHandler implements HttpHandler {
     private final long processStartMillis;
     private final OwnerlessWritePolicy ownerlessWritePolicy;   // nullable — mode field omitted
     private final Supplier<ReaperStatus> reaperStatus;          // nullable — "reaper" key omitted
+    private final Supplier<Boolean> chunksTenantIsolationIntact; // nullable — key omitted
 
     public StatusHandler(EmbedderRouter embedderRouter) {
         this(embedderRouter, null);
@@ -222,11 +223,31 @@ public final class StatusHandler implements HttpHandler {
             long processStartMillis,
             OwnerlessWritePolicy ownerlessWritePolicy,
             Supplier<ReaperStatus> reaperStatus) {
+        this(embedderRouter, localEmbedActivitySupplier, processStartMillis, ownerlessWritePolicy, reaperStatus,
+            null);
+    }
+
+    /**
+     * @param chunksTenantIsolationIntact nexus-wbfpw.48 ([additive]): whether no permissive policy on
+     *                     nexus.chunks other than tenant_isolation applies to the role this engine serves
+     *                     tenant traffic as (ChunksIsolationCheck). Null supplier omits the
+     *                     {@code chunks_tenant_isolation_intact} key (a wiring that cannot ask); a supplier
+     *                     that returns null omits it too (a probe that could not run). A boolean only: this
+     *                     route is unauthenticated, so it never names a policy or a role.
+     */
+    public StatusHandler(
+            EmbedderRouter embedderRouter,
+            Supplier<EmbedActivitySnapshot> localEmbedActivitySupplier,
+            long processStartMillis,
+            OwnerlessWritePolicy ownerlessWritePolicy,
+            Supplier<ReaperStatus> reaperStatus,
+            Supplier<Boolean> chunksTenantIsolationIntact) {
         this.embedderRouter = embedderRouter;
         this.localEmbedActivitySupplier = localEmbedActivitySupplier;
         this.processStartMillis = processStartMillis;
         this.ownerlessWritePolicy = ownerlessWritePolicy;
         this.reaperStatus = reaperStatus;
+        this.chunksTenantIsolationIntact = chunksTenantIsolationIntact;
     }
 
     @Override
@@ -310,6 +331,17 @@ public final class StatusHandler implements HttpHandler {
                         .append(",\"tenants_empty\":").append(r.lastPass().tenantsEmpty()).append('}');
                 }
                 body.append('}');
+            }
+        }
+
+        // nexus-wbfpw.48, [additive]: false when a permissive policy other than tenant_isolation on
+        // nexus.chunks applies to the role this engine serves traffic as (it would read or write every tenant's
+        // chunks), or when row security on nexus.chunks is not enabled and forced or tenant_isolation is gone.
+        // Absent = an engine that predates the field, or a probe that could not run.
+        if (chunksTenantIsolationIntact != null) {
+            Boolean intact = chunksTenantIsolationIntact.get();
+            if (intact != null) {
+                body.append(",\"chunks_tenant_isolation_intact\":").append(intact);
             }
         }
 

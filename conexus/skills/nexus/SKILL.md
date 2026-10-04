@@ -36,17 +36,9 @@ mcp__plugin_conexus_nexus__store_get_many(ids="id1,id2", collections="rdr__nexus
 mcp__plugin_conexus_nexus__traverse(seeds=["1.1.635"], link_types=["implements","cites"], depth=2
 mcp__plugin_conexus_nexus__traverse(seeds="1.1.635", purpose="find-implementations"          # link_types XOR purpose
 
-# Analytical operators — each spawns `claude -p` (default timeout 300s; nx_plan_audit/nx_tidy 600s)
-mcp__plugin_conexus_nexus__operator_summarize(content="...", cited=True
-mcp__plugin_conexus_nexus__operator_extract(inputs=["doc1","doc2"], fields="title,year,author"
-mcp__plugin_conexus_nexus__operator_rank(items=["a","b","c"], criterion="relevance to X"
-mcp__plugin_conexus_nexus__operator_compare(items=["x","y"], focus="scalability"
-mcp__plugin_conexus_nexus__operator_generate(template="release note", context="..."
-mcp__plugin_conexus_nexus__operator_filter(items='[{"id":"a", ...}, ...]', criterion="peer-reviewed only"
-mcp__plugin_conexus_nexus__operator_check(items='[{"id":"p1"}, ...]', check_instruction="do the papers agree?"
-mcp__plugin_conexus_nexus__operator_verify(claim="X uses attention", evidence="Section 2.1: ...
-mcp__plugin_conexus_nexus__operator_groupby(items='[{"id":"a", ...}, ...]', key="dataset used"
-mcp__plugin_conexus_nexus__operator_aggregate(groups='[{"key_value":"...", "items":[...]}]', reducer="count"
+# Analytical operators (summarize, extract, rank, compare, generate, filter, check, verify, groupby,
+# aggregate) are NOT MCP tools: they run as plan steps inside nx_answer, each a claude -p subprocess
+mcp__plugin_conexus_nexus__nx_answer(question="rank these approaches by relevance to X"   # plan-matched; operator steps run server-side
 
 # Background hygiene — call and let run (claude -p subprocesses); each requires real args
 mcp__plugin_conexus_nexus__nx_tidy(topic="chromadb quotas", collection="<subject>")   # read-only T3 consolidation report for one collection

@@ -22,6 +22,8 @@ out. Diagnose with `ipcs -m` before suspecting the code.
 
 `-m lint` selects the O(repo) meta-tests (AST/regex scans of `src/nexus`, `conexus/` agent-skill-command markdown, RDR frontmatter, marker-selection coverage itself) that the default `addopts` (`-m 'not integration and not slow and not lint'`) excludes from the hot loop — they only change when repo *structure* changes, not application behavior, and run once in CI's dedicated `pytest (lint markers)` job rather than once per shard. Run them explicitly with `uv run pytest -m lint` when touching `conexus/`, RDR frontmatter, or a storage-boundary/hook-registration invariant those files pin.
 
+`-m integration` is also deselected by default. CI's `pytest (integration, affected)` job runs, on every push and PR, the integration files the change touched or that directly import a `src/nexus` module it changed (`scripts/select_affected_integration_tests.py`), with a per-file non-vacuity check (`scripts/assert_integration_affected_ran.py`). Transitive imports and `service/` changes select nothing by themselves; the nightly local-service gate runs the whole family, the release battery runs it per release, and the CA-3 and write-seam jobs run their own files. A new integration test FILE therefore runs in CI on the push that adds it; a new test inside an existing file runs too, but a skip in it is visible only in the job's `-rs` output, not as a failure. If the job reports that a file skipped every test, give the job the missing prerequisite, or list the file in `ALL_SKIP_ALLOWED` with its reason (a runner limit, or a bead for a test no gate arms).
+
 ## Scenario journey layer (test-suite-compression P2, 2026-08-05)
 
 `tests/test_scenario_journeys.py` holds `scenario`-marked journey tests that run
@@ -66,9 +68,9 @@ never writes — and self-skips on a named content precondition (this tenant
 missing real collections for one of the five corpus specs) rather than
 passing vacuously. Run it by hand after any change to
 `nexus.search_engine.search_cross_corpus`'s batching, grouping, or per-batch
-sizing logic; it is not wired into CI (the `integration` marker is excluded
-from `addopts` project-wide, same as every other live-substrate gate in this
-file).
+sizing logic. CI's affected-integration job selects it when it changes, but it
+skips there (a hosted runner has no live cloud config), so in practice it runs
+only by hand.
 
 The bounded-retry decision that separates a real regression from measured
 ANN/embedding-index jitter (`_is_confirmed_regression`) is a pure function

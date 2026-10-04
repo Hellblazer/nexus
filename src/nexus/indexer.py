@@ -347,8 +347,9 @@ _LOCK_STALE_SECONDS = 5  # lock files older than this with no live PID are stale
 #: multi-page behaviour without a 1000+ file corpus.
 _CATALOG_REGISTER_PAGE = 1000
 
-#: nexus-mr89x: minimum orphan count before `nx t3 gc`'s safety floor on the
-#: MOVE into quarantine can refuse a pass. Below this, even a 100%-orphan verdict
+#: nexus-mr89x: minimum orphan count before the safety floor on the MOVE into
+#: quarantine (`nx t3 gc` and the indexer's prune, both judged by the engine since
+#: nexus-wbfpw.52) can refuse a pass. Below this, even a 100%-orphan verdict
 #: is small enough to be a plausible real cleanup (tiny collections, test corpora)
 #: and refusing would just nag; at/above it, a >floor-fraction verdict is the
 #: manifest-gap misclassification shape. Pairs with NX_GC_FLOOR_FRACTION
@@ -4049,6 +4050,8 @@ def _prune_collection_serverside(
 
     from nexus.catalog.chunk_quarantine import (  # noqa: PLC0415 — deferred import
         GC_AUDIT_MAX_CHASHES,
+        GcFloor,
+        GcFloorRefused,
         expire_quarantine_across_serverside,
         quarantine_days,
         quarantine_orphans_bounded_serverside,
@@ -4132,16 +4135,54 @@ def _prune_collection_serverside(
     # investigation into the restore-clobber bug this bead fixes: a
     # 41,032-row quarantine pass audited only its first 20 chashes (T2
     # nexus/debug-u6d93-brxnp).
-    quarantined = quarantine_orphans_bounded_serverside(
-        db, collection_name, quarantine_name, quarantined_at, sample_limit=GC_AUDIT_MAX_CHASHES,
+    #
+    # nexus-wbfpw.52: the move carries the GC family's fraction floor (NX_GC_FLOOR_FRACTION and the
+    # 100-chunk minimum nx t3 gc uses, NX_GC_FORCE=1 to override), which the ENGINE judges under its
+    # sweep gate on the whole reapable set. Until now this move had no floor at all: NX_GC_FLOOR_FRACTION
+    # guarded only the later hard delete. A refusal moves nothing, is audited by the engine
+    # (gc_quarantine_orphans_refused), and is logged here; the expiry below still runs, since it
+    # is not the move. An engine that predates the floor ignores the fields and moves unguarded:
+    # it says so by not echoing the floor, and the prune logs that rather than pretending.
+    floor = GcFloor(
+        fraction=_gc_floor_fraction(),
+        min_chunks=_GC_FLOOR_MIN_CHUNKS,
+        force=os.environ.get("NX_GC_FORCE", "") == "1",
     )
-    if quarantined is None:
-        quarantined = quarantine_orphans_serverside(
+    try:
+        quarantined = quarantine_orphans_bounded_serverside(
             db, collection_name, quarantine_name, quarantined_at, sample_limit=GC_AUDIT_MAX_CHASHES,
+            floor=floor,
         )
+        if quarantined is None:
+            quarantined = quarantine_orphans_serverside(
+                db, collection_name, quarantine_name, quarantined_at, sample_limit=GC_AUDIT_MAX_CHASHES,
+                floor=floor,
+            )
+    except GcFloorRefused as refused:
+        _log.warning(
+            "gc_prune_refused_by_floor",
+            collection=collection_name, reapable=refused.reapable, total=refused.total,
+            floor_fraction=floor.fraction, floor_min_chunks=floor.min_chunks, moved_before=refused.moved,
+            note=(
+                "the engine refused to move this many chunks into quarantine: the reapable set is the "
+                "manifest-gap misclassification shape, not routine churn. Nothing was moved by the refused "
+                "call. If the collection really is mostly garbage, run `nx t3 gc` for it (NX_GC_FORCE=1 "
+                "overrides the floor); gc_audit records the refusal."
+            ),
+        )
+        quarantined = (refused.moved, [])
     if quarantined is None:
         return False  # route unavailable
     moved, sample = quarantined
+    if floor.engine_applied is False and moved:
+        _log.warning(
+            "gc_prune_floor_not_applied_by_engine",
+            collection=collection_name, floor_fraction=floor.fraction, floor_min_chunks=floor.min_chunks,
+            note=(
+                "the engine did not echo the fraction floor, so it predates it and moved without applying "
+                "it; this move was unguarded. Upgrade the engine (nx upgrade) for the floor to hold."
+            ),
+        )
 
     if moved:
         _log.info(
@@ -4153,12 +4194,12 @@ def _prune_collection_serverside(
     cutoff = (
         datetime.now(UTC) - timedelta(days=quarantine_days())
     ).strftime("%Y-%m-%dT%H:%M:%SZ")
-    # No fraction floor on the move above (gc_quarantine_orphans) and none on this
-    # expiry either (nexus-wbfpw.74): the engine function keeps every chunk the
-    # manifest still references, so the rows it deletes are the ones past the
-    # restore window that nothing owns. NX_GC_FLOOR_FRACTION / NX_GC_FORCE govern
-    # `nx t3 gc`'s own move only; the engine reaper's move carries
-    # NX_REAPER_FLOOR_FRACTION (RDR-192 / nexus-2x9xa).
+    # The move above carries the GC family's floor (nexus-wbfpw.52), judged by the
+    # engine. This expiry has none (nexus-wbfpw.74): the engine function keeps every
+    # chunk the manifest still references, so the rows it deletes are the ones past
+    # the restore window that nothing owns. NX_GC_FLOOR_FRACTION / NX_GC_FORCE govern
+    # the MOVE (here and in `nx t3 gc`) and not this expiry; the engine reaper's move
+    # carries NX_REAPER_FLOOR_FRACTION (RDR-192 / nexus-2x9xa).
     expired = expire_quarantine_across_serverside(
         db, siblings, collection_name, cutoff, best_effort=True,
     )
@@ -4228,9 +4269,13 @@ def _prune_deleted_files(
     Note (operator runbook): the ``nx t3 gc`` CLI verb takes its candidates
     from the same engine predicate and moves them through the same route
     (``gc_quarantine_orphans``, RDR-192 Step 8, nexus-wbfpw.18), so the two
-    agree on what is garbage. They differ in guards: the verb adds a
-    permanent client-side fraction floor, the census gate and the
-    index-state breaker; this function calls the route with no floor.
+    agree on what is garbage. Both send the GC family's fraction floor
+    (``NX_GC_FLOOR_FRACTION``, 100-chunk minimum, ``NX_GC_FORCE`` override) on
+    the route's first batch, and the engine judges it (nexus-wbfpw.52). They
+    differ in the rest of the guards: the verb also checks the floor against
+    its advisory listing before the move, and adds the census gate and the
+    index-state breaker. ``NX_GC_FORCE=1`` in the environment disables the
+    floor here too.
 
     ``on_phase`` (RDR-191 Phase 6, nexus-o8dil.33, 2026-08-15: now UNUSED —
     kept in the signature so this function's ONE caller needs no edit).

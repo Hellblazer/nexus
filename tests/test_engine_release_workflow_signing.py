@@ -14,6 +14,7 @@ import hashlib
 import os
 import re
 import subprocess
+import tempfile
 from pathlib import Path
 
 import yaml
@@ -60,12 +61,11 @@ def test_signing_steps_are_mac_and_tag_gated_and_run_before_any_digest() -> None
     assert "security import" not in codesign_run and "codesign --force" not in codesign_run
 
 
-def test_signing_secrets_are_environment_scoped_and_never_skipped_silently() -> None:
+def test_signing_secrets_are_environment_scoped_and_the_skip_is_reported() -> None:
     """Repo-level secrets are readable by ANY job in ANY workflow that names them; the Developer
     ID key is the credential whose compromise is not cleanly recoverable, so build-publish
     carries `environment: apple-signing` and the secrets it reads are the six provisioned ones.
-    Absent secrets warn into the step summary (never silent), partial sets fail loud, once
-    signing is activated vanished secrets hard-fail, and the keychain is always cleaned up."""
+    An ad-hoc release says so in the step summary, and the keychain is always cleaned up."""
     text = WORKFLOW.read_text()
     job = yaml.safe_load(text)["jobs"]["build-publish"]
     assert job.get("environment") == "apple-signing"
@@ -74,13 +74,64 @@ def test_signing_secrets_are_environment_scoped_and_never_skipped_silently() -> 
                  "APPLE_NOTARY_KEY_P8", "APPLE_NOTARY_KEY_ID", "APPLE_NOTARY_ISSUER_ID"):
         assert name in text, f"secret {name} vanished from the workflow"
     assert "APPLE_DEV_ID_CERT_P12" in step_env, "the codesign secrets are no longer read by build-publish"
-    assert "::warning title=mac-arm64 UNSIGNED" in text
-    assert "::warning title=mac-arm64 NOT NOTARIZED" in text
-    assert text.count("GITHUB_STEP_SUMMARY") >= 4
-    assert text.count("PARTIALLY configured") == 2, "both secret sets need the partial-config guard"
     assert text.count("APPLE_SIGNING_REQUIRED: ${{ vars.APPLE_SIGNING_REQUIRED }}") == 2
-    assert text.count('if [ "${APPLE_SIGNING_REQUIRED:-}" = "true" ]') == 2
     assert "always()" in text[text.index("Clean up signing keychain"):][:400]
+
+
+_VERB = {"Developer ID codesign": "sign", "Notarize (mac-arm64": "notarize"}
+_SECRETS = {
+    "Developer ID codesign": ("APPLE_DEV_ID_CERT_P12", "APPLE_DEV_ID_CERT_PASSWORD", "APPLE_DEV_ID_IDENTITY"),
+    "Notarize (mac-arm64": ("APPLE_NOTARY_KEY_P8", "APPLE_NOTARY_KEY_ID", "APPLE_NOTARY_ISSUER_ID"),
+}
+
+
+def _run_step(tmp_path: Path, step: str, required: str | None, present: tuple[str, ...]) -> tuple[int, str, str]:
+    """Execute the step's real run body under bash in a FRESH scratch tree (never shared
+    between steps, so one step's marker or summary cannot satisfy another's assert) whose
+    mac-sign.sh is a stub recording its verb. Returns (exit code, verb called or "", summary)."""
+    tmp_path = Path(tempfile.mkdtemp(dir=tmp_path))
+    run = _step_run(yaml.safe_load(WORKFLOW.read_text()), "build-publish", step)
+    stub = tmp_path / "service" / "deploy" / "mac-sign.sh"
+    stub.parent.mkdir(parents=True, exist_ok=True)
+    marker = tmp_path / "called"
+    stub.write_text(f'#!/usr/bin/env bash\nprintf %s "$1" > "{marker}"\necho "PASSED ($1)"\n')
+    stub.chmod(0o755)
+    summary = tmp_path / "summary.md"
+    env = {"PATH": os.environ["PATH"], "RUNNER_TEMP": str(tmp_path), "GITHUB_STEP_SUMMARY": str(summary)}
+    if required is not None:
+        env["APPLE_SIGNING_REQUIRED"] = required
+    env.update({name: "x" for name in present})
+    proc = subprocess.run(["bash", "-c", run], cwd=tmp_path, env=env, capture_output=True, text=True)
+    return (
+        proc.returncode,
+        marker.read_text() if marker.exists() else "",
+        summary.read_text() if summary.exists() else "",
+    )
+
+
+def test_signing_is_opt_in_by_variable_not_by_secret_presence(tmp_path: Path) -> None:
+    """nexus-e8iml: the secrets live in apple-signing so the off-release rehearsal can run, and
+    restoring them for that must not arm the next engine tag. A release signs and notarizes only
+    when the repo variable APPLE_SIGNING_REQUIRED is exactly "true"; otherwise it ships the
+    ad-hoc binary whatever secrets exist, and a signing defect or a slow notary cannot block it."""
+    for step, secrets in _SECRETS.items():
+        for required in (None, "", "false", "TRUE", "yes"):
+            for present in ((), secrets, secrets[:1]):
+                rc, called, summary = _run_step(tmp_path, step, required, present)
+                assert (rc, called) == (0, ""), f"{step}: switch={required!r} secrets={present} must skip"
+                assert "SKIPPED" in summary and "APPLE_SIGNING_REQUIRED" in summary, step
+
+
+def test_switched_on_signing_fails_loud_on_missing_secrets_and_runs_when_complete(tmp_path: Path) -> None:
+    """Switched on, a release never downgrades silently: no secrets or a partial set fails the
+    step before the script runs; the full set runs the shared script."""
+    for step, secrets in _SECRETS.items():
+        for present in ((), secrets[:1], secrets[:2]):
+            rc, called, _ = _run_step(tmp_path, step, "true", present)
+            assert rc != 0 and not called, f"{step}: switched on with secrets={present} must fail before signing"
+        rc, called, summary = _run_step(tmp_path, step, "true", secrets)
+        assert (rc, called) == (0, _VERB[step]), step
+        assert "PASSED" in summary, step
 
 
 def test_the_shared_sign_script_enforces_the_signing_invariants() -> None:

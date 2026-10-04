@@ -8,14 +8,14 @@ For **when to use which retrieval interface**, see [Querying Guide](querying-gui
 
 | Server | Entry point | Tools | Purpose |
 |---|---|---|---|
-| `nexus` | `nx-mcp` | 54 | Storage tiers, retrieval, operators, orchestration, diagnostics |
+| `nexus` | `nx-mcp` | 44 | Storage tiers, retrieval, orchestration, diagnostics |
 | `nexus-catalog` | `nx-mcp-catalog` | 10 | Document catalog, link graph, tumbler resolution |
 
 The `nexus` and `nexus-catalog` servers register automatically when you install the plugin (`/plugin install conexus@nexus-plugins`). No separate install. The `.mcpb` extension registers only `nexus` — catalog tools (`catalog_search`, `catalog_link`, etc.) are unavailable in Claude Desktop until the plugin also ships a second `.mcpb` entry.
 
 **Substrate dependency**: since RDR-155, every persistent tier (T2 + T3 storage/retrieval tools) routes through the native nexus-service (`nx daemon service`, Postgres 17 + pgvector), not a ChromaDB daemon. A single `nx init` provisions and starts it and offers to register the OS autostart unit so it survives reboots (RDR-174 collapsed flow). See [Getting Started § Install](getting-started.md#install) for the install walkthrough and [Container Integration](container-integration.md) for the multi-process / multi-host model.
 
-## `nexus` — retrieval + storage (54 tools)
+## `nexus` — retrieval + storage (44 tools)
 
 Full tool names follow `mcp__plugin_conexus_nexus__<tool>`.
 
@@ -28,7 +28,7 @@ Full tool names follow `mcp__plugin_conexus_nexus__<tool>`.
 | `search_metadata_scoped` | Combined-query, requires an HttpVectorClient-backed T3 (every current local or cloud install): catalog-metadata-scoped vector search in one SQL statement (`content_type`, `author`, `year`, `subtree`, chunk-metadata `where`) |
 | `search_graph_hop` | Combined-query, requires an HttpVectorClient-backed T3: BFS over `catalog_links` from seed tumblers + vector rank in one statement (`link_type`, `depth` ≤ 3, `direction`); `where` chunk-metadata equality filter applied post-BFS (catalog-012, equality-only — operator syntax rejected loudly) |
 | `search_topic_scoped` | Combined-query, requires an HttpVectorClient-backed T3: topic-label-scoped chunk search via `topic_assignments` join |
-| `search_aspect_scoped` | Combined-query, requires an HttpVectorClient-backed T3: vector rank + `document_aspects` predicate (`field`, `pattern`, `min_confidence`, chunk-metadata `where`) in one statement — retires the `search` + `operator_filter(source="aspects")` two-step for selective aspect predicates. Requires the doc's aspects row to carry a non-NULL `doc_id` (backfilled by exact `source_uri` match; legacy rows with no match are excluded, not a bug) |
+| `search_aspect_scoped` | Combined-query, requires an HttpVectorClient-backed T3: vector rank + `document_aspects` predicate (`field`, `pattern`, `min_confidence`, chunk-metadata `where`) in one statement — retires a plan's `search` step followed by an aspects `filter` step for selective aspect predicates. Requires the doc's aspects row to carry a non-NULL `doc_id` (backfilled by exact `source_uri` match; legacy rows with no match are excluded, not a bug) |
 | `store_put` | Write a document into a T3 collection. Fires post-store hooks: batch chain auto-assigns to nearest topic; document-grain chain enqueues aspect extraction on `knowledge__*` (RDR-089). A note too large for the collection embedding model's token window is written as several chunk pieces under one title instead of being refused or truncated (nexus-spujb) |
 | `store_get` | Retrieve a document by id from a T3 collection. Reassembles a `store_put`-split note transparently — the caller reads back the whole note, not one piece |
 | `store_get_many` | Batch hydration: given N ids, return N contents (with `missing` for not-found). Handles 300+ ids beyond the per-request 300-record limit. Also reassembles a split note whose piece ids are all passed together |
@@ -86,24 +86,26 @@ Full tool names follow `mcp__plugin_conexus_nexus__<tool>`.
 
 **Failure modes**: the engine renders twelve typed errors as `{"error": "<code>", "detail": "..."}`; the four most likely to surface from a tool call are `ParkCapExceeded` (429 — the per-claimant or global park cap is at capacity; back off and retry), `TimeoutTooLong` (400 — `timeout_s` above the engine's cap), `TooLarge` (413 — a `tuple_out`/`tuple_ack` field, e.g. `body`, over the engine's size limit), and `CensusTimeout` (503 — `tuple_list`'s own census query exceeded its statement_timeout; the engine is reachable, retry narrower or later). A 502/503/504 during an engine deploy is retried by the client transparently (`rd`/`out` freely, `in` with the same claimant); the deploy gap is a retry, not an error surfaced to the caller — a genuine `CensusTimeout` 503 is distinguishable by its `error` code, not conflated with a deploy-gap retry. See [Tuple Space § Errors](tuple-space.md#errors) for the full twelve.
 
-### Operators (LLM-backed, RDR-079)
+### Operators (LLM-backed, RDR-079) — not MCP tools
 
 Each operator spawns a `claude -p --output-format json --json-schema …` subprocess with a task-specific system prompt. Structured output is unwrapped from the wrapper.
 
-Inside `nx_answer` / `plan_run`, consecutive operator steps collapse into a single subprocess via operator bundling (55–72% latency savings). Direct MCP-tool calls still spawn per-operator subprocesses. See [Plan-Centric Retrieval § Operator bundling](plan-centric-retrieval.md#operator-bundling-v4100).
+**The operators are not on the MCP surface** (nexus-ivi4s). They are plain functions in `nexus.mcp.core`, reached only through `nx_answer` / plan execution: a plan step names a bare verb (`summarize`, `rank`, …), and the plan runner resolves it in-process to `operator_<verb>`. A session cannot call them directly, which keeps ten subprocess-spawning tools and about 4k tokens of schema out of every session. Inside `nx_answer` / `plan_run`, consecutive operator steps collapse into a single subprocess via operator bundling (55–72% latency savings). See [Plan-Centric Retrieval § Operator bundling](plan-centric-retrieval.md#operator-bundling-v4100).
 
-| Tool | Purpose |
+The plan verbs and what each does:
+
+| Plan verb | Purpose |
 |---|---|
-| `operator_extract` | Pull structured fields (`fields="a,b,c"`) from free text |
-| `operator_rank` | Order items by a criterion |
-| `operator_compare` | Compare items focused on a specific axis |
-| `operator_summarize` | Summarize content (citation-aware via `cited=True`) |
-| `operator_generate` | Generate text following a template, grounded in `context` |
-| `operator_filter` | Narrow items by a natural-language criterion (RDR-088 §D.4). Returns `{items, rationale[{id, reason}]}` |
-| `operator_check` | Cross-item consistency probe (RDR-088 §D.2). Returns `{ok, evidence[{item_id, quote, role}]}` |
-| `operator_verify` | Single-claim verification against one evidence source (RDR-088 §D.2). Returns `{verified, reason, citations[]}` |
-| `operator_groupby` | Partition items by a natural-language key into `[{key_value, items}]` (RDR-093 §D.4). SQL fast-path over `document_aspects` when items carry catalog identity, else `claude -p` |
-| `operator_aggregate` | Reduce each `operator_groupby` group to a per-group summary (RDR-093 §D.4). Pairs with `operator_groupby` for the `filter → groupby → aggregate` pipeline |
+| `extract` | Pull structured fields (`fields="a,b,c"`) from free text |
+| `rank` | Order items by a criterion |
+| `compare` | Compare items focused on a specific axis |
+| `summarize` | Summarize content (citation-aware via `cited=True`) |
+| `generate` | Generate text following a template, grounded in `context` |
+| `filter` | Narrow items by a natural-language criterion (RDR-088 §D.4). Returns `{items, rationale[{id, reason}]}` |
+| `check` | Cross-item consistency probe (RDR-088 §D.2). Returns `{ok, evidence[{item_id, quote, role}]}` |
+| `verify` | Single-claim verification against one evidence source (RDR-088 §D.2). Returns `{verified, reason, citations[]}` |
+| `groupby` | Partition items by a natural-language key into `[{key_value, items}]` (RDR-093 §D.4). SQL fast-path over `document_aspects` when items carry catalog identity, else `claude -p` |
+| `aggregate` | Reduce each `groupby` group to a per-group summary (RDR-093 §D.4). Pairs with `groupby` for the `filter → groupby → aggregate` pipeline |
 
 ### Orchestration (RDR-080)
 
@@ -127,7 +129,7 @@ engine-service + Postgres stack; destructive, `confirm=true` gated).
 
 ### Hook-tier tools (internal plumbing, RDR-215)
 
-The remaining 2 of the 54 registered tools are `hook_*` entries
+The remaining 2 of the 44 registered tools are `hook_*` entries
 (`src/nexus/mcp/hooks.py`, `nexus.mcp.hooks.HOOK_TOOLS`). Each ports a
 conexus plugin `hooks.json` entry to a `hook_*` MCP tool.
 `hook_subagent_start` is what `hooks.json` WIRES for `SubagentStart` (an
@@ -143,8 +145,8 @@ and divergence-language hook tools (`hook_pre_close_verification`,
 `hook_divergence_language_guard`) at cleanup steps A2 and A3; the wire
 snapshot moved with them. There is no reason to call either remaining tool by
 hand, and their own tool descriptions say so ("not meant to be invoked
-directly"). Listed here only so the 54-tool count reconciles with the tables
-above, which cover the 52 tools an agent calls directly:
+directly"). Listed here only so the 44-tool count reconciles with the tables
+above, which cover the 42 tools an agent calls directly:
 
 | Tool | Fires on |
 |---|---|
@@ -266,15 +268,15 @@ To enforce stricter permission boundaries on a custom agent, narrow the matcher 
 
 ## Failure modes
 
-The `nx_answer` / `nx_tidy` / `nx_plan_audit` / `nx_enrich_beads` / `operator_*` tools all wrap a `claude -p` subprocess (`src/nexus/operators/dispatch.py::claude_dispatch`). Understanding that substrate explains most of their failure surface.
+The `nx_answer` / `nx_tidy` / `nx_plan_audit` / `nx_enrich_beads` tools, and the `operator_*` functions `nx_answer` plans run, all wrap a `claude -p` subprocess (`src/nexus/operators/dispatch.py::claude_dispatch`). Understanding that substrate explains most of their failure surface.
 
-- **Subprocess timeout (`OperatorTimeoutError`)**: every call to `claude_dispatch` runs under `asyncio.wait_for(proc.communicate(...), timeout=timeout)`. Standalone `operator_*` tools default to 300s; `nx_plan_audit` / `nx_tidy` default to 600s.
+- **Subprocess timeout (`OperatorTimeoutError`)**: every call to `claude_dispatch` runs under `asyncio.wait_for(proc.communicate(...), timeout=timeout)`. Operator steps default to 300s; `nx_plan_audit` / `nx_tidy` default to 600s.
   - **Symptom**: the tool call raises with a message like `claude -p timed out after 300.0s; partial output (N B stdout, N B stderr) logged to <path>`.
   - **Cause**: the underlying analytical workload (extraction, ranking, comparison, plan audit) genuinely didn't finish inside the budget — bead nexus-7sbf raised these defaults after real workloads were false-timing-out at 60–120s, so a timeout at the current defaults usually means the input is unusually large, not that the timeout is miscalibrated.
   - **Check**: the exception message names the log file directly — `~/.config/nexus/logs/operator-timeout-<UTC-timestamp>.log` — which holds whatever partial stdout/stderr the subprocess had produced when it was killed (SIGKILL to the whole process group via `safe_killpg`, so nested `claude -p` children and tool subprocesses are reaped too, not just the leader). Read that file first — it often shows the child was still mid-tool-call, which tells you whether to raise the budget or narrow the input.
   - **Fix**: pass a larger `timeout` argument to the tool call (callers cannot go *below* the 300s floor — `mcp/core.py::_clamp_subagent_timeout` silently clamps a lower request upward and emits a `subagent_timeout_clamped` structlog warning, so lowering it to "fail faster" during debugging won't work; look for that warning in `mcp.log` if a requested timeout appears to have been ignored), or reduce the amount of content passed in (`items`, `context`, `groups`) so the subprocess has less to reason over.
   - **Verify**: re-run with the raised timeout and confirm the call returns a structured result rather than raising again; for `nx_answer` specifically, `plan_run` emits per-step `nx_answer_step_start` / `nx_answer_step_complete` structlog events to `mcp.log`, so tailing that file during a re-run shows which step is actually slow.
-- **`nx_answer` plan-step failure is non-fatal by design**: unlike a standalone `operator_*` call, a single step timing out or erroring inside an `nx_answer` multi-step plan does **not** fail the whole call. `plans/runner.py` catches `OperatorError`/`OperatorTimeoutError` per step (or per bundled segment), logs a `operator_step_failed` structlog warning naming the failing tool and step index, substitutes a sentinel value, and continues the plan.
+- **`nx_answer` plan-step failure is non-fatal by design**: a single step timing out or erroring inside an `nx_answer` multi-step plan does **not** fail the whole call. `plans/runner.py` catches `OperatorError`/`OperatorTimeoutError` per step (or per bundled segment), logs a `operator_step_failed` structlog warning naming the failing tool and step index, substitutes a sentinel value, and continues the plan.
   - **Symptom**: `nx_answer` returns a plausible-looking answer that's actually missing a step's contribution, or a downstream `$stepN.<field>` reference resolves to an empty/sentinel value instead of raising.
   - **Check**: grep `mcp.log` for `operator_step_failed` around the call's timestamp — the log line names the tool and step index that degraded.
   - **Fix**: same as the timeout entry above (raise timeout / shrink input for that step), or re-run with `structured=True` to inspect which step produced the sentinel.

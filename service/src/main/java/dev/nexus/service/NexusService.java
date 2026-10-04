@@ -513,7 +513,9 @@ public final class NexusService {
         // moment) -- the "no second clock source" requirement in one place.
         server.createContext("/v1/status",
                 new dev.nexus.service.http.StatusHandler(docEmbedderRouter, localEmbedActivitySupplier,
-                        versionHandler.processStartMillis(), ownerlessWritePolicy, this::reaperStatus));
+                        versionHandler.processStartMillis(), ownerlessWritePolicy, this::reaperStatus,
+                        dev.nexus.service.db.ChunksIsolationCheck.statusSupplier(
+                                dataSource, java.time.Clock.systemUTC())));
 
         // /v1/install-ping — unauthenticated anonymous daily client beacon
         // (nexus-h5olw). Local-mode installs have no tenant or token, and they
@@ -699,7 +701,8 @@ public final class NexusService {
         // sweep visits: the default tenant plus every token-bearing tenant (nexus.chunks is FORCE RLS, so a
         // tenant cannot be enumerated from the chunks table itself).
         // The same pass also expires the quarantine it filled (reaper_expire_quarantine, 14 days, only the chunks
-        // it tagged; the client's gc_expire_quarantine skips those in turn), so ONE kill switch
+        // it tagged; the client's gc_expire_quarantine skips those in turn), and, for quarantine-knowledge__*
+        // siblings only, the rows a client moved (reaper_expire_client_quarantine, nexus-wbfpw.75), so ONE kill switch
         // (NX_REAPER_ENABLED) and ONE wall-clock budget cover both. The first pass runs ChunkReaper.INITIAL_DELAY
         // after boot, not a full interval: an engine that restarts more often than hourly must still reap.
         ChunkReaper.Settings reaperSettings = ChunkReaper.Settings.fromEnv(System::getenv);
@@ -719,11 +722,13 @@ public final class NexusService {
             );
             log.info("event=reaper_scheduled initial_delay_seconds={} interval_seconds={} batch_size={} "
                     + "floor_fraction={} floor_min_chunks={} census_timeout_seconds={} wall_clock_budget_seconds={} "
-                    + "quarantine_retention_days={} floor_exempt_collections={}",
+                    + "quarantine_retention_days={} floor_exempt_collections={} "
+                    + "client_quarantine_retention_days={}",
                 ChunkReaper.INITIAL_DELAY.toSeconds(), reaperSettings.interval().toSeconds(),
                 reaperSettings.batchSize(), reaperSettings.floorFraction(), reaperSettings.floorMinChunks(),
                 reaperSettings.censusTimeout().toSeconds(), reaperSettings.wallClockBudget().toSeconds(),
-                reaperSettings.quarantineRetention().toDays(), new java.util.TreeSet<>(reaperSettings.floorExemptCollections()));
+                reaperSettings.quarantineRetention().toDays(), new java.util.TreeSet<>(reaperSettings.floorExemptCollections()),
+                reaperSettings.clientQuarantineRetention().toDays());
         } else {
             this.chunkReaper = null;
             this.reaperScheduledTask = null;

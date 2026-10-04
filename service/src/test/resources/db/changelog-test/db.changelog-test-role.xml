@@ -103,6 +103,20 @@ GRANT UPDATE ON SEQUENCE nexus.topics_id_seq TO ${svcRole};
 -- for the superuser owner connection only (see db.changelog-test-objects.xml).
 GRANT USAGE ON SCHEMA nexus_test TO ${svcRole};
 GRANT EXECUTE ON FUNCTION nexus_test.fts_matches(tsvector, text, text) TO ${svcRole};
+-- nexus-wbfpw.48 (vectors-029): the gate probes are SECURITY DEFINER with EXECUTE revoked from PUBLIC and
+-- granted to nexus_svc only, so a per-class service role needs its own grant, exactly as nexus_svc has it.
+-- Guarded: this changelog also runs against schemas migrated before vectors-029 existed.
+DO $$
+DECLARE
+    dim text;
+BEGIN
+    FOREACH dim IN ARRAY ARRAY['384', '768', '1024'] LOOP
+        IF to_regprocedure('nexus.text_gate_probe_' || dim || '(text, text[], jsonb, text, integer)') IS NOT NULL THEN
+            EXECUTE format('GRANT EXECUTE ON FUNCTION nexus.text_gate_probe_%s(text, text[], jsonb, text, integer) TO ${svcRole}', dim);
+        END IF;
+    END LOOP;
+END
+$$;
         </sql>
         <rollback>
             <!-- Test-only role/grant bootstrap; not automated, same as

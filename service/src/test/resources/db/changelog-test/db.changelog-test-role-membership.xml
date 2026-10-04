@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-wbfpw.48 — make ${memberRole} a member of ${grantedRole}, creating ${memberRole} as a LOGIN role
+    when it does not exist, so a test can put a role in the position the vectors-029 guard exists for.
+
+    WHY: vectors-029's owner policy is created TO CURRENT_USER (the migrating role) and applies to every
+    role that has that role's privileges, has_privs_of_role. Whether a role has them depends on a grant's
+    INHERIT option (PostgreSQL 16+), so the tests need to build four shapes the product never does by
+    itself: a member that inherits (the guard must skip the changeset), a member that does not (the
+    changeset must run), an extra login role that is not nexus_svc (the guard must see it), and a
+    BYPASSRLS member (the policy gives it nothing, so it must not skip the changeset). ${memberAttrs} is
+    NOBYPASSRLS or BYPASSRLS and applies only when the role is created here.
+
+    Run on a superuser connection through its own databasechangelog table (see
+    PgContainerHelper#grantRoleMembership). runAlways, so a repeat call with other parameters runs again.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="test-role-membership-1" author="nexus-wbfpw.48" runAlways="true">
+        <comment>Create ${memberRole} when absent, then GRANT ${grantedRole} TO ${memberRole} WITH INHERIT ${inheritOption}.</comment>
+        <sql splitStatements="false" stripComments="false">
+DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${memberRole}') THEN
+        CREATE ROLE ${memberRole} LOGIN PASSWORD '${memberPass}' NOSUPERUSER NOCREATEDB NOCREATEROLE ${memberAttrs};
+    END IF;
+END $$;
+
+GRANT ${grantedRole} TO ${memberRole} WITH INHERIT ${inheritOption};
+        </sql>
+        <rollback>
+            <!-- Test-only; the container is thrown away. -->
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

@@ -15,6 +15,6 @@
   "nexus-catalog": {
     "command": "nx-mcp-catalog",
     "args": [],
-    "alwaysLoad": true
+    "alwaysLoad": false
   }
 }

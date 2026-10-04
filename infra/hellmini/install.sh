@@ -9,7 +9,7 @@
 # owned by the runner user).
 #
 # Per file:
-#   - live file absent:        install it (mode 700, or 755 for wait-for-host.sh).
+#   - live file absent:        install it (mode 700).
 #   - live file identical:     nothing to do.
 #   - live file differs:       print the diff and REFUSE unless --force. With
 #                              --force, first copy the live file to
@@ -20,15 +20,14 @@
 #
 # Exit: 0 ok, 1 a live file differs (no --force), 2 usage or a missing directory.
 #
-# Test hooks (tests/scripts/test_hellmini_infra.py): HELLMINI_ROOT replaces
-# /Volumes/Bulk; HELLMINI_RUN_AS, when set, is a command called as
+# For a dry run off the host: HELLMINI_ROOT replaces /Volumes/Bulk; HELLMINI_RUN_AS, when set, is a command called as
 # "$HELLMINI_RUN_AS <user> <cmd...>" in place of "sudo -n -u <user> <cmd...>".
 
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="${HELLMINI_ROOT:-/Volumes/Bulk}"
-USERS_ALL=(ghci ghrunner)
+USERS_ALL=(ghrunner)
 
 force=0
 users=()
@@ -47,7 +46,6 @@ as_user() {
   if [ -n "${HELLMINI_RUN_AS:-}" ]; then "$HELLMINI_RUN_AS" "$u" "$@"; else sudo -n -u "$u" "$@"; fi
 }
 
-default_mode() { if [ "$1" = wait-for-host.sh ]; then echo 755; else echo 700; fi; }
 
 live_mode() { as_user "$1" stat -c %a "$2" 2>/dev/null || as_user "$1" stat -f %Lp "$2"; }
 
@@ -98,7 +96,7 @@ for i in "${!plan_user[@]}"; do
         as_user "$u" cp -p "$dest" "$dest.bak-$ts"
         echo "backup: $dest.bak-$ts"
       else
-        mode="$(default_mode "$f")"
+        mode=700
       fi
       tmp="$dest.new.$$"
       as_user "$u" sh -c 'cat > "$1"' _ "$tmp" < "$src"

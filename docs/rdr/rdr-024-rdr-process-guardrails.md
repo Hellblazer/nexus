@@ -164,8 +164,8 @@ guardrail falls back to "warn and proceed."
 
 ## Success Criteria
 
-- [ ] Brainstorming-gate scans for `RDR-\d+` and warns when status is not accepted
-- [ ] Strategic-planner scans relay for `RDR-\d+` and warns when status is not accepted
-- [ ] Bead creation hook detects `RDR-\d+` in description and prints reminder
-- [ ] All guardrails fail open (no workflow breakage when T2 is unavailable)
-- [ ] No false positives for work not tracked by an RDR
+- [x] Brainstorming-gate scans for `RDR-\d+` and warns when status is not accepted
+- [x] Strategic-planner scans relay for `RDR-\d+` and warns when status is not accepted
+- [ ] Bead creation hook detects `RDR-\d+` in description and prints reminder (not present in the conexus hook set as of 2026-10-04; the two skill guardrails above carry the check)
+- [x] All guardrails fail open (no workflow breakage when T2 is unavailable)
+- [x] No false positives for work not tracked by an RDR

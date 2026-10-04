@@ -2,7 +2,8 @@
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 """MCP core tools: search, store, memory, scratch, collections, plans.
 
-54 registered tools + 3 demoted (plain functions, no @mcp.tool()). The
+44 registered tools + 13 demoted (plain functions, no @mcp.tool();
+the ten operator_* functions were demoted at nexus-ivi4s). The
 RDR-182 consent-gated ``forensics``/``remediate`` pair (nexus-ykzbj.10/.11)
 was deleted at nexus-lgdel — the chash-rekey upgrade rung it steered
 operators toward no longer exists.
@@ -4413,9 +4414,9 @@ def search_aspect_scoped(
 ) -> "str | dict":
     """Vector search over T3 chunks, filtered by an extracted `document_aspects` field.
 
-    Use this instead of `search` + `operator_filter(source="aspects")` when
-    the aspect predicate is selective — that two-step path filters after
-    vector truncation and can miss a distant match this tool would keep.
+    Use this instead of `search` followed by an aspects filter step in a
+    plan when the aspect predicate is selective — that two-step path filters
+    after vector truncation and can miss a distant match this tool would keep.
     Use `search_metadata_scoped` to filter by catalog metadata instead of an
     extracted aspect.
 
@@ -8027,7 +8028,16 @@ def collection_verify(name: str) -> str:
         return _mcp_tool_error("collection_verify", e)
 
 
-# ── Operator tools ───────────────────────────────────────────────────────────
+# ── Operator functions (demoted, no @mcp.tool()) ────────────────────────────
+#
+# nexus-ivi4s (2026-10-04): the ten operator_* functions are NOT on the MCP
+# surface. Each spawns a ``claude -p`` subprocess on the user's credentials and
+# together they cost every session ~4k tokens of schema, so a session reaches
+# them only through ``nx_answer`` / plan execution. The plan runner resolves a
+# step with ``getattr(nexus.mcp.core, "operator_<verb>")`` in-process
+# (``plans/runner.py`` ``_default_dispatcher``), which never touched the MCP
+# registry, so demotion changes what a model can call and nothing else.
+# Do not re-add ``@mcp.tool()`` here without revisiting that decision.
 
 
 def _pin_default_model(model: "str | None") -> "str | None":
@@ -8068,11 +8078,6 @@ _OPERATOR_MODEL_DESC = (
 )
 
 
-@mcp.tool(
-    title="Extract Structured Fields",
-    annotations={"readOnlyHint": True},
-    structured_output=False,
-)
 async def operator_extract(
     inputs: Annotated[str, Field(description="Items to extract from (plain text or a JSON array string).")],
     fields: Annotated[str, Field(description="Comma-separated field names to extract.")],
@@ -8094,11 +8099,6 @@ async def operator_extract(
     )
 
 
-@mcp.tool(
-    title="Rank Items by Criterion",
-    annotations={"readOnlyHint": True},
-    structured_output=False,
-)
 async def operator_rank(
     items: Annotated[str, Field(description="Items to rank (plain text or a JSON array string).")],
     criterion: Annotated[str, Field(description="Natural-language ranking criterion.")],
@@ -8123,11 +8123,6 @@ async def operator_rank(
 # HISTORY (nexus-km5i): two-sided mode. List/dict values in items/items_a/
 # items_b are JSON-serialized before prompt interpolation so the LLM sees
 # clean JSON instead of Python repr output.
-@mcp.tool(
-    title="Compare Items",
-    annotations={"readOnlyHint": True},
-    structured_output=False,
-)
 async def operator_compare(
     items: Annotated[str, Field(
         description="Items to compare, one-sided mode (plain text or a JSON array string); ignored if items_a/items_b are set.",
@@ -8160,11 +8155,6 @@ async def operator_compare(
     )
 
 
-@mcp.tool(
-    title="Summarize Content",
-    annotations={"readOnlyHint": True},
-    structured_output=False,
-)
 async def operator_summarize(
     content: Annotated[str, Field(description="Text to summarize.")],
     cited: Annotated[bool, Field(description="Include a citations list in the output.")] = False,
@@ -8186,11 +8176,6 @@ async def operator_summarize(
     )
 
 
-@mcp.tool(
-    title="Generate from Template",
-    annotations={"readOnlyHint": True},
-    structured_output=False,
-)
 async def operator_generate(
     template: Annotated[str, Field(description="Named template or description of the desired output form.")],
     context: Annotated[str, Field(description="Source material or context to generate from.")],
@@ -8216,11 +8201,6 @@ async def operator_generate(
 # HISTORY (RDR-088 Phase 1, Paper §D.4 Filter operator; RDR-089 follow-up
 # added the SQL fast path). Composable with `operator_extract`,
 # `operator_rank`, and retrieval tools via `plan_run`.
-@mcp.tool(
-    title="Filter Items by Criterion",
-    annotations={"readOnlyHint": True},
-    structured_output=False,
-)
 async def operator_filter(
     items: Annotated[str, Field(
         description=(
@@ -8295,11 +8275,6 @@ async def operator_filter(
     )
 
 
-@mcp.tool(
-    title="Check Cross-Item Consistency",
-    annotations={"readOnlyHint": True},
-    structured_output=False,
-)
 async def operator_check(
     items: Annotated[str, Field(
         description=(
@@ -8335,11 +8310,6 @@ async def operator_check(
     )
 
 
-@mcp.tool(
-    title="Verify Claim Against Evidence",
-    annotations={"readOnlyHint": True},
-    structured_output=False,
-)
 async def operator_verify(
     claim: Annotated[str, Field(
         description="A single assertion to verify (e.g. \"the paper reports 2048 GPU-hours for training\").",
@@ -8380,11 +8350,6 @@ async def operator_verify(
 # would break it. Cardinality cap `_OPERATOR_MAX_INPUTS=100` (RDR-093 S-1,
 # generalised nexus-3j6b) is enforced by the plan runner's auto-hydration;
 # a fired cap attaches a `{truncated, original_count, kept_count}` block.
-@mcp.tool(
-    title="Group Items by Key",
-    annotations={"readOnlyHint": True},
-    structured_output=False,
-)
 async def operator_groupby(
     items: Annotated[str, Field(
         description=(
@@ -8460,11 +8425,6 @@ async def operator_groupby(
 # isolation (the prompt instructs the model to summarise USING ONLY the
 # items in each group) was verified 0% cross-group leakage on adversarial
 # fixtures with overlapping vocabulary (Spike B, bead nexus-rojs).
-@mcp.tool(
-    title="Aggregate Grouped Items",
-    annotations={"readOnlyHint": True},
-    structured_output=False,
-)
 async def operator_aggregate(
     groups: Annotated[str, Field(
         description=(

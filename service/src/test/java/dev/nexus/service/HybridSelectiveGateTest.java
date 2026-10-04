@@ -193,11 +193,17 @@ class HybridSelectiveGateTest {
         // production actually returns the right rows at fixture scale; production-scale
         // recall is the conexus xr7.8.9 gate's.
         Table<?> gateFn = TEXT_GATE_PROBE_1024.call(TOKEN, new String[] {COLL}, null, null, TARGETS + 1);
+        // Since vectors-029 (nexus-wbfpw.48) the probe is a SECURITY DEFINER function, which the planner
+        // never inlines: EXPLAIN of the call is one Function Scan and shows nothing of the body. The
+        // probe's index use is pinned where it can be seen and where it is true to production, in
+        // Rdr192LiveCExplainEvidenceIntegrationTest#gateProbe_selective_underNexusSvcRls_reachesAGinTextIndex
+        // (auto_explain's nested-statement plan, as nexus_svc, in a container migrated by a non-superuser
+        // owner; this class's container is superuser-owned, where a plan pin on the body would pass by
+        // bypassing RLS). What stays here is that the gate is evaluated ONCE, by one probe call.
         String gatePlan = explain(gateFn);
         assertThat(gatePlan)
-            .as("the gate MUST be evaluated via the GIN text indexes (tsv/trgm), once. "
-                + "Plan was:%n%s", gatePlan)
-            .containsAnyOf("idx_chunks_tsv", "idx_chunks_trgm", "Bitmap Index Scan");
+            .as("the gate is ONE call of the probe function, evaluated once. Plan was:%n%s", gatePlan)
+            .contains("Function Scan on text_gate_probe_1024");
 
         byte[][] chashes = targetChashes.stream()
             .map(c -> Chash.fromHex(c).toBytes())

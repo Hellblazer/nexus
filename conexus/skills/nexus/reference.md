@@ -22,7 +22,7 @@ is gone from `uv.lock`); this section described both as current until 7.20.0.
 
 Core tools are prefixed `mcp__plugin_conexus_nexus__`; catalog tools are prefixed `mcp__plugin_conexus_nexus-catalog__`.
 
-There are 29 core tools: `search`, `query`, `store_put`, `store_get`, `store_get_many`, `store_list`, `memory_put`, `memory_get`, `memory_delete`, `memory_search`, `memory_consolidate`, `scratch`, `scratch_manage`, `collection_list`, `plan_save`, `plan_search`, `traverse`, `nx_answer`, `nx_tidy`, `nx_enrich_beads`, `nx_plan_audit`, `operator_summarize`, `operator_extract`, `operator_rank`, `operator_compare`, `operator_generate`, `operator_filter`, `operator_check`, `operator_verify`.
+There are 21 core tools: `search`, `query`, `store_put`, `store_get`, `store_get_many`, `store_list`, `memory_put`, `memory_get`, `memory_delete`, `memory_search`, `memory_consolidate`, `scratch`, `scratch_manage`, `collection_list`, `plan_save`, `plan_search`, `traverse`, `nx_answer`, `nx_tidy`, `nx_enrich_beads`, `nx_plan_audit`. The analytical operators are plan steps inside `nx_answer`, not tools (see Operators below).
 There are 10 catalog tools (nexus-catalog server): `search`, `show`, `list`, `register`, `update`, `link`, `links`, `link_query`, `resolve`, `stats`.
 
 ### search
@@ -127,85 +127,27 @@ mcp__plugin_conexus_nexus__store_get_many(ids=["id1","id2"], collections="knowle
 mcp__plugin_conexus_nexus__store_get_many(ids="id1,id2", collections="rdr__nexus-1-1__voyage-context-3__v1", structured=True
 ```
 
-### operator_summarize
+### Operators (plan steps, not MCP tools)
 
-Summarize content via `claude -p` (default timeout 300s; nx_plan_audit/nx_tidy 600s). Set `cited=True` for a citations list in the output.
+The ten analytical operators are not callable from a session. They run as steps
+of a plan inside `nx_answer` (or `plan_run`), each a `claude -p` subprocess
+(default timeout 300s); consecutive steps are bundled into one subprocess. A
+plan step names the bare verb, and the plan runner resolves it in-process to
+`operator_<verb>`. To use one, ask `nx_answer` a question its plans cover, or
+save a plan with `plan_save` whose steps name these verbs.
 
-```
-mcp__plugin_conexus_nexus__operator_summarize(content="<text>"
-mcp__plugin_conexus_nexus__operator_summarize(content="<text>", cited=True
-```
-
-### operator_extract
-
-Extract named fields from each input item. `inputs` accepts a list or a JSON-array string. `fields` is a comma-separated list of field names.
-
-```
-mcp__plugin_conexus_nexus__operator_extract(inputs=["doc1","doc2"], fields="title,year,author"
-```
-
-Returns `{"extractions": [{...}, {...}]}`.
-
-### operator_rank
-
-Rank items by a natural-language criterion.
-
-```
-mcp__plugin_conexus_nexus__operator_rank(items=["a","b","c"], criterion="relevance to X"
-```
-
-Returns `{"ranked": [...]}`.
-
-### operator_compare
-
-Compare items; optional `focus` narrows the comparison dimension.
-
-```
-mcp__plugin_conexus_nexus__operator_compare(items=["x","y"], focus="scalability"
-```
-
-Returns `{"comparison": "<markdown>"}`.
-
-### operator_generate
-
-Generate output from a template + context. Template is a natural-language description or named template; `context` is source material. `cited=True` to include a citations list.
-
-```
-mcp__plugin_conexus_nexus__operator_generate(template="release note", context="v4.4.0 adds ..."
-mcp__plugin_conexus_nexus__operator_generate(template="..", context="..", cited=True
-```
-
-Returns `{"output": "<generated>"}`.
-
-### operator_filter
-
-Narrow items by a natural-language criterion (RDR-088 §D.4). `items` is a JSON array of prior-step outputs; `criterion` is the keep predicate. Output `items` is a subset of the input; `rationale` carries one `{id, reason}` per input explaining the keep / reject decision.
-
-```
-mcp__plugin_conexus_nexus__operator_filter(items='[{"id": "a", ...}, ...]', criterion="peer-reviewed only")
-```
-
-Returns `{"items": [...], "rationale": [{"id": str, "reason": str}, ...]}`.
-
-### operator_check
-
-Cross-item consistency probe (RDR-088 §D.2). Given N peer items and a claim, returns a composable boolean plus grounding evidence. Downstream plan steps can branch on `ok`.
-
-```
-mcp__plugin_conexus_nexus__operator_check(items='[{"id": "p1", ...}, ...]', check_instruction="do the papers agree on the baseline?")
-```
-
-Returns `{"ok": bool, "evidence": [{"item_id": str, "quote": str, "role": "supports" | "contradicts" | "neutral"}, ...]}`.
-
-### operator_verify
-
-Single-claim verification against an evidence source (RDR-088 §D.2). 1-claim / 1-evidence cardinality (distinct from `operator_check`'s 1-claim / N-items shape). Citations are span anchors in the evidence text that ground the verdict.
-
-```
-mcp__plugin_conexus_nexus__operator_verify(claim="X uses attention", evidence="Section 2.1: X builds on transformer layers...")
-```
-
-Returns `{"verified": bool, "reason": str, "citations": [str, ...]}`.
+| Plan verb | Input | Returns |
+|---|---|---|
+| `summarize` | `content`, optional `cited=True` | summary text, with citations when cited |
+| `extract` | `inputs` (list or JSON array), `fields` (comma-separated) | `{"extractions": [...]}` |
+| `rank` | `items`, `criterion` | `{"ranked": [...]}` |
+| `compare` | `items` (or `items_a`/`items_b`), optional `focus` | `{"comparison": "<markdown>"}` |
+| `generate` | `template`, `context`, optional `cited=True` | `{"output": "<generated>"}` |
+| `filter` | `items` (JSON array), `criterion` | `{"items": [...], "rationale": [{"id", "reason"}]}` |
+| `check` | `items`, `check_instruction` | `{"ok": bool, "evidence": [{"item_id", "quote", "role"}]}` |
+| `verify` | `claim`, `evidence` | `{"verified": bool, "reason": str, "citations": [...]}` |
+| `groupby` | `items`, `key` | `[{"key_value", "items"}]` |
+| `aggregate` | `groups` (from `groupby`), `reducer` | one summary per group |
 
 ### nx_tidy / nx_enrich_beads / nx_plan_audit
 

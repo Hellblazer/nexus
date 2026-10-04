@@ -227,13 +227,11 @@ _SEQTHINK = (
 
 _OPERATORS = (
     "\n## Analytical operators (RDR-080)\n\n"
-    "5 ops wrap claude -p (300s default; nx_plan_audit/nx_tidy 600s). One claude -p "
-    "round\n"
-    "trip costs ~11s minimum before any real work. Call directly, no Agent "
-    "dispatch:\n"
-    "  operator_summarize, operator_extract, operator_rank, operator_compare, "
-    "operator_generate\n\n"
-    "Multi-step retrieval (plan-match gate): nx_answer.\n"
+    "summarize, extract, rank, compare and generate are plan steps inside "
+    "nx_answer,\n"
+    "not MCP tools; each wraps claude -p (300s default, ~11s minimum per "
+    "round trip).\n"
+    "For analysis or multi-step retrieval (plan-match gate), call nx_answer.\n"
 )
 
 _CATALOG_TOOLS = (

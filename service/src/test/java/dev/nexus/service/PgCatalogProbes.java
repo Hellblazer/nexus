@@ -819,6 +819,63 @@ public final class PgCatalogProbes {
                 r.get(qual), r.get(withCheck)));
     }
 
+    /**
+     * One policy's role list and command, as {@code pg_policies} renders them ({@code roles} is the
+     * {@code name[]} as text, e.g. {@code {public}} or {@code {nexus_admin}}; {@code cmd} is ALL, SELECT, ...).
+     * Names the roles a policy BINDS TO, which {@link PolicyRow} does not, and is what a "this policy
+     * must never apply to the service role" pin reads.
+     */
+    public record PolicyRoles(String policyname, String roles, String cmd) {
+        @Override
+        public String toString() {
+            return policyname + " roles=" + roles + " cmd=" + cmd;
+        }
+    }
+
+    /** Every policy on {@code schema.table}, sorted by name. */
+    public static List<PolicyRoles> policyRoles(DSLContext ctx, String schema, String table) {
+        Field<String> policyname = DSL.field(DSL.name("policyname"), String.class);
+        Field<String> roles = DSL.field(DSL.name("roles")).cast(org.jooq.impl.SQLDataType.VARCHAR);
+        Field<String> cmd = DSL.field(DSL.name("cmd"), String.class);
+        return ctx.select(policyname, roles, cmd)
+            .from(DSL.table(DSL.name("pg_policies")))
+            .where(DSL.field(DSL.name("schemaname"), String.class).eq(schema))
+            .and(DSL.field(DSL.name("tablename"), String.class).eq(table))
+            .orderBy(policyname)
+            .fetch(r -> new PolicyRoles(r.get(policyname), r.get(roles), r.get(cmd)));
+    }
+
+    /**
+     * One function's security-relevant shape: identity, SECURITY DEFINER flag, {@code proconfig} (the
+     * {@code SET} clauses), {@code proacl} and owner. A rollback that restores a function's body but not
+     * its security mode, search_path pin or ACL changes none of the table-shaped categories, so the
+     * round-trip test needs this one.
+     */
+    public record FunctionShape(String schema, String identity, boolean securityDefiner, String config,
+                                String acl, String owner) {
+        @Override
+        public String toString() {
+            return schema + "." + identity + " secdef=" + securityDefiner + " config=" + config
+                + " acl=" + acl + " owner=" + owner;
+        }
+    }
+
+    public static List<FunctionShape> functionShapesIn(DSLContext ctx, Collection<String> schemas) {
+        Field<String> nspname = DSL.field(DSL.name("n", "nspname"), String.class);
+        Field<String> proname = DSL.field(DSL.name("p", "proname"), String.class);
+        Field<String> args = DSL.function("pg_get_function_identity_arguments", String.class,
+            DSL.field(DSL.name("p", "oid")));
+        Field<Boolean> secdef = DSL.field(DSL.name("p", "prosecdef"), Boolean.class);
+        Field<String> config = DSL.field(DSL.name("p", "proconfig")).cast(org.jooq.impl.SQLDataType.VARCHAR);
+        Field<String> acl = DSL.field(DSL.name("p", "proacl")).cast(org.jooq.impl.SQLDataType.VARCHAR);
+        Field<String> owner = DSL.function("pg_get_userbyid", String.class, DSL.field(DSL.name("p", "proowner")));
+        return ctx.select(nspname, proname, args, secdef, config, acl, owner)
+            .from(pgProcJoined())
+            .where(nspname.in(schemas))
+            .fetch(r -> new FunctionShape(r.get(nspname), r.get(proname) + "(" + r.get(args) + ")",
+                Boolean.TRUE.equals(r.get(secdef)), r.get(config), r.get(acl), r.get(owner)));
+    }
+
     /** RLS flags of one ordinary table ({@code relkind = 'r'}). */
     public record RowSecurityRow(String schema, String table, boolean enabled, boolean forced) {
     }

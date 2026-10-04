@@ -44,6 +44,7 @@ import static dev.nexus.service.jooq.nexus.Tables.GC_EXPIRE_QUARANTINE;
 import static dev.nexus.service.jooq.nexus.Tables.QUARANTINE_RESTORE_CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.GC_QUARANTINE_ORPHANS;
 import static dev.nexus.service.jooq.nexus.Tables.GC_QUARANTINE_ORPHANS_BOUNDED;
+import static dev.nexus.service.jooq.nexus.Tables.GC_QUARANTINE_ORPHANS_FLOORED;
 import static dev.nexus.service.jooq.nexus.Tables.GC_RESTORE_REREFERENCED_BOUNDED;
 import dev.nexus.service.jooq.nexus.Routines;
 import static dev.nexus.service.jooq.nexus.Tables.SEARCH_GRAPH_HOP_1024;
@@ -3782,6 +3783,51 @@ FROM scope s
         JSONB sampleJson = rec.get(GC_QUARANTINE_ORPHANS_BOUNDED.SAMPLE);
         return new QuarantineBoundedOutcome(
             moved, fromJsonList(sampleJson != null ? sampleJson.data() : null), remaining);
+    }
+
+    /**
+     * nexus-wbfpw.52: the outcome of {@link #quarantineOrphansFloored}. {@code remaining} is null for the
+     * unbounded form. {@code reapableCount} and {@code totalCount} are the counts the floor was judged on
+     * (null when no floor was judged: none given, or {@code force}). When {@code refused} is true nothing
+     * moved and {@code moved} is 0.
+     */
+    public record QuarantineFlooredOutcome(long moved, List<Map<String, Object>> sample, Long remaining,
+                                           boolean refused, Long reapableCount, Long totalCount) {}
+
+    /**
+     * nexus-wbfpw.52: the quarantine move with an OPTIONAL fraction floor, judged by
+     * {@code nexus.gc_quarantine_orphans_floored} in the same call as the move and under the sweep gate
+     * (vectors-027). A null {@code rowLimit} is the unbounded form, a positive one the bounded form (with the
+     * bounded form's own statement and lock bounds, set before the call as
+     * {@link #quarantineOrphansBounded} does). A null {@code floorFraction} is no floor: the move runs exactly as
+     * {@link #quarantineOrphans} / {@link #quarantineOrphansBounded} would. {@code force} skips the judgement.
+     */
+    public QuarantineFlooredOutcome quarantineOrphansFloored(String tenant, String collection,
+                                                              String quarantineCollection, String quarantinedAt,
+                                                              int sampleLimit, Integer rowLimit,
+                                                              Double floorFraction, Integer floorMinChunks,
+                                                              boolean force) {
+        int dim = dimForCollection(tenant, collection);
+        var rec = tenantScope.withTenant(tenant, ctx -> {
+            if (rowLimit != null) {
+                PgSession.setStatementAndLockBounds(ctx,
+                    PgSession.DEFAULT_GC_QUARANTINE_BOUNDED_STATEMENT_TIMEOUT_MS,
+                    PgSession.DEFAULT_GC_QUARANTINE_BOUNDED_LOCK_TIMEOUT_MS);
+            }
+            return ctx.selectFrom(GC_QUARANTINE_ORPHANS_FLOORED.call(
+                    dim, tenant, collection, quarantineCollection, quarantinedAt, sampleLimit, rowLimit,
+                    floorFraction, floorMinChunks, force))
+               .fetchOne();
+        });
+        JSONB sampleJson = rec.get(GC_QUARANTINE_ORPHANS_FLOORED.SAMPLE);
+        Long moved = rec.get(GC_QUARANTINE_ORPHANS_FLOORED.MOVED);
+        return new QuarantineFlooredOutcome(
+            moved == null ? 0L : moved,
+            fromJsonList(sampleJson != null ? sampleJson.data() : null),
+            rec.get(GC_QUARANTINE_ORPHANS_FLOORED.REMAINING),
+            Boolean.TRUE.equals(rec.get(GC_QUARANTINE_ORPHANS_FLOORED.REFUSED)),
+            rec.get(GC_QUARANTINE_ORPHANS_FLOORED.REAPABLE_COUNT),
+            rec.get(GC_QUARANTINE_ORPHANS_FLOORED.TOTAL_COUNT));
     }
 
     public QuarantineOutcome quarantineOrphans(String tenant, String collection,

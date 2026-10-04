@@ -52,9 +52,12 @@ import static org.assertj.core.api.Assertions.assertThat;
  *   <li>that it inlines: planned under {@code nexus_svc}, a statement that calls it shows no function in the plan and
  *       the same access path (nodes, index, index condition) as the open-coded predicate it replaced, for the SELECT,
  *       the DELETE, the negated shapes and the DISTINCT-origin read the call shapes use;</li>
- *   <li>that both expiry functions use it, by behaviour: seeded engine-tagged, client and stale-tagged rows are
- *       expired by exactly one of {@code reaper_expire_quarantine} and {@code gc_expire_quarantine}, whichever runs
- *       first;</li>
+ *   <li>that all three expiry functions use it, by behaviour: seeded engine-tagged, client and stale-tagged rows,
+ *       the engine-tagged ones are expired by {@code reaper_expire_quarantine} alone (neither
+ *       {@code gc_expire_quarantine} nor {@code reaper_expire_client_quarantine} ever takes one), and the others
+ *       by {@code gc_expire_quarantine} or {@code reaper_expire_client_quarantine}, whichever runs first (the
+ *       latter is a strict subset of the former, and only for a registered knowledge sibling and live knowledge
+ *       origin);</li>
  *   <li>that nothing open-codes it again: no changelog outside the function's own body reads the
  *       {@code quarantined_by} or {@code reaper_quarantined_at} key by any operator, and no Java main source names
  *       either key. The Java half is behavioural too ({@code ReaperRepository#taggedOrigins} returns exactly the
@@ -245,9 +248,10 @@ class EngineOwnedPredicateIntegrationTest {
      * them; the behavioural probe below is the proof that the call does what it should.
      */
     @Test
-    void bothExpiryFunctionsCallThePredicateInCode_notJustInAComment() throws Exception {
+    void allThreeExpiryFunctionsCallThePredicateInCode_notJustInAComment() throws Exception {
         assertThat(bodyWithoutComments("reaper_expire_quarantine")).contains("reaper_owns_quarantined_row(");
         assertThat(bodyWithoutComments("gc_expire_quarantine")).contains("reaper_owns_quarantined_row(");
+        assertThat(bodyWithoutComments("reaper_expire_client_quarantine")).contains("reaper_owns_quarantined_row(");
     }
 
     /**
@@ -471,6 +475,33 @@ class EngineOwnedPredicateIntegrationTest {
         assertThat(remaining(q)).isZero();
     }
 
+    @Test
+    void clientMovedExpiryTakesOnlyTheRowsTheReaperDoesNotOwn_andReaperExpiryTheRest() throws Exception {
+        String q = seedProbe("client-fn");
+        // The probe's sibling name is not conformant, so the registry typed it "unknown"; the client-moved expiry
+        // reads the registry, so type it as the knowledge quarantine sibling it stands for. ORIGIN_P is a registered
+        // live knowledge collection.
+        try (Connection su = pg.createConnection("")) {
+            int n = DSL.using(su, SQLDialect.POSTGRES).update(CATALOG_COLLECTIONS)
+                .set(CATALOG_COLLECTIONS.CONTENT_TYPE, "knowledge")
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT).and(CATALOG_COLLECTIONS.NAME.eq(q))).execute();
+            assertThat(n).isEqualTo(1);
+        }
+        assertThat(remaining(q)).isEqualTo(6);
+
+        var client = new ReaperRepository(tenantScope).expireClientMoved(TENANT, q, ORIGIN_P, CUTOFF, 1000, 60_000,
+            2_000);
+        assertThat(client.expired()).as("reaper_expire_client_quarantine: the client's two, the stale tag and the"
+            + " missing stamp, never the two the reaper owns").isEqualTo(4);
+        assertThat(remaining(q)).isEqualTo(2);
+        assertThat(remainingOwned(q)).as("the engine-owned rows are untouched").isEqualTo(2);
+
+        var expiry = new ReaperRepository(tenantScope).expire(TENANT, q, ORIGIN_P, CUTOFF, 1000, 60_000, 2_000);
+        assertThat(expiry.expired()).as("reaper_expire_quarantine takes exactly what the client function left")
+            .isEqualTo(2);
+        assertThat(remaining(q)).isZero();
+    }
+
     // ---- 4. nothing open-codes it again --------------------------------------------------------------------------
 
     @Test
@@ -546,8 +577,9 @@ class EngineOwnedPredicateIntegrationTest {
             }
         }
         assertThat(definitions).as("non-vacuity: the definition was found, exactly once").isEqualTo(1);
-        assertThat(callSites).as("non-vacuity: reaper_expire_quarantine (3) and gc_expire_quarantine (2) call it")
-            .isGreaterThanOrEqualTo(5);
+        assertThat(callSites).as("non-vacuity: reaper_expire_quarantine (3), gc_expire_quarantine (2) and"
+                + " reaper_expire_client_quarantine (3) call it")
+            .isGreaterThanOrEqualTo(8);
         assertThat(writes).as("non-vacuity: vectors-024-1 writes both keys, and the scan saw it").isEqualTo(2);
         assertThat(removals).as("non-vacuity: vectors-025 removes both keys, and the scan saw it").isGreaterThanOrEqualTo(2);
         assertThat(offenders).isEmpty();

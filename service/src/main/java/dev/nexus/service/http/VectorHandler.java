@@ -1125,6 +1125,20 @@ public final class VectorHandler implements HttpHandler {
      * commit, statement bound 25 s and gate-lock bound 2 s set by the engine):
      * {"moved": N, "sample": [...], "remaining": R, "row_limit": L} — loop while
      * {@code remaining > 0}; {@code row_limit <= 0} is a 400, never "unbounded".
+     *
+     * <p>FRACTION FLOOR (nexus-wbfpw.52, vectors-027), optional and additive. A request may carry
+     * {@code floor_fraction} (a number in [0, 1]), {@code floor_min_chunks} (default 100, the GC family's
+     * minimum; sent without {@code floor_fraction} it is a 400) and {@code force} (boolean, default false).
+     * With a {@code floor_fraction} and no {@code force}, the engine judges the reaper's reading INSIDE the
+     * move's own call, under the exclusive sweep gate, on the collection's whole reapable set: when that set
+     * is at least {@code floor_min_chunks} and strictly more than {@code floor_fraction} of every stored
+     * chunk, nothing moves and the response is {@code {"moved": 0, "sample": [], "refused": true,
+     * "reapable_count": R, "total_count": T, ...}} (with {@code "remaining": R} and {@code "row_limit"} on
+     * the bounded form), plus one {@code gc_quarantine_orphans_refused} gc_audit row (skipped when the newest such row of the collection has identical counts and floor values and is under an hour old). {@code force} skips the
+     * judgement. EVERY response, floor or not, carries {@code "floor"}: {@code {"given": false}} when the
+     * request had no floor, else {@code {"given": true, "fraction": f, "min_chunks": n, "force": b}}. An
+     * older engine ignores the fields and its response has no {@code floor} key, which is how a client
+     * detects that it was never guarded. A request without a floor takes the unchanged path.
      */
     private void handleGcQuarantineOrphans(HttpExchange ex, String method) throws IOException {
         requireMethod(ex, method, "POST");
@@ -1154,6 +1168,28 @@ public final class VectorHandler implements HttpHandler {
         // convoy (measured on the owner-1.1 repair: three stacked UPDATEs, one
         // working at 81 s, two blocked).
         int rowLimit = resolveRowLimit(body);
+
+        // nexus-wbfpw.52: the optional fraction floor. Absent floor_fraction means NO floor and the unchanged
+        // path below; the response still echoes {"given": false} so a client can tell this engine knows the field.
+        FloorRequest floor = resolveFloor(body);
+        if (floor.given()) {
+            var out = repo.quarantineOrphansFloored(tenant, collection, quarantineCollection, quarantinedAt,
+                sampleLimit, rowLimit > 0 ? rowLimit : null, floor.fraction(), floor.minChunks(), floor.force());
+            var resp = new java.util.LinkedHashMap<String, Object>();
+            resp.put("moved", out.moved());
+            resp.put("sample", out.sample());
+            if (rowLimit > 0) {
+                resp.put("remaining", out.remaining());
+                resp.put("row_limit", rowLimit);
+            }
+            resp.put("refused", out.refused());
+            if (out.reapableCount() != null) resp.put("reapable_count", out.reapableCount());
+            if (out.totalCount() != null) resp.put("total_count", out.totalCount());
+            resp.put("floor", floor.echo());
+            HttpUtil.send(ex, 200, json(resp));
+            return;
+        }
+
         if (rowLimit > 0) {
             var bounded = repo.quarantineOrphansBounded(
                 tenant, collection, quarantineCollection, quarantinedAt, sampleLimit, rowLimit);
@@ -1161,12 +1197,77 @@ public final class VectorHandler implements HttpHandler {
                 "moved", bounded.moved(),
                 "sample", bounded.sample(),
                 "remaining", bounded.remaining(),
-                "row_limit", rowLimit)));
+                "row_limit", rowLimit,
+                "floor", floor.echo())));
             return;
         }
 
         var outcome = repo.quarantineOrphans(tenant, collection, quarantineCollection, quarantinedAt, sampleLimit);
-        HttpUtil.send(ex, 200, json(Map.of("moved", outcome.moved(), "sample", outcome.sample())));
+        HttpUtil.send(ex, 200, json(Map.of(
+            "moved", outcome.moved(), "sample", outcome.sample(), "floor", floor.echo())));
+    }
+
+    /** The default {@code floor_min_chunks} when a request sends only {@code floor_fraction}: the GC family's 100. */
+    static final int GC_FLOOR_MIN_CHUNKS_DEFAULT = 100;
+
+    /**
+     * The optional floor on {@code gc/quarantine-orphans} (nexus-wbfpw.52). {@code given} is true exactly when the
+     * request carried a {@code floor_fraction}; {@code fraction} and {@code minChunks} are null otherwise.
+     */
+    record FloorRequest(boolean given, Double fraction, Integer minChunks, boolean force) {
+        /** What the response says about the floor, always present: how a client learns this engine honours it. */
+        Map<String, Object> echo() {
+            if (!given) return Map.of("given", false);
+            return Map.of("given", true, "fraction", fraction, "min_chunks", minChunks, "force", force);
+        }
+    }
+
+    /**
+     * {@code floor_fraction} / {@code floor_min_chunks} / {@code force} routing for {@code handleGcQuarantineOrphans}.
+     * A fraction outside [0, 1], a negative minimum, a non-number, a non-boolean {@code force}, or a minimum sent
+     * with no fraction is a 400, never a floor silently dropped (a malformed guard that vanishes is the failure this
+     * field exists to prevent). Absent {@code floor_fraction} (or an explicit null) is no floor. Pinned by
+     * {@code GcQuarantineOrphansFloorRouteTest}.
+     */
+    static FloorRequest resolveFloor(Map<String, Object> body) {
+        Object forceRaw = body.get("force");
+        if (forceRaw != null && !(forceRaw instanceof Boolean)) {
+            throw new IllegalArgumentException("force must be a boolean, got: " + forceRaw);
+        }
+        boolean force = Boolean.TRUE.equals(forceRaw);
+        Object fractionRaw = body.get("floor_fraction");
+        Object minRaw = body.get("floor_min_chunks");
+        if (fractionRaw == null) {
+            if (minRaw != null) {
+                throw new IllegalArgumentException("floor_min_chunks needs floor_fraction (send both, or neither)");
+            }
+            return new FloorRequest(false, null, null, force);
+        }
+        if (!(fractionRaw instanceof Number fn) || Double.isNaN(fn.doubleValue())) {
+            throw new IllegalArgumentException("floor_fraction must be a number in [0, 1], got: " + fractionRaw);
+        }
+        double fraction = fn.doubleValue();
+        if (fraction < 0.0 || fraction > 1.0) {
+            throw new IllegalArgumentException("floor_fraction must be in [0, 1], got: " + fraction);
+        }
+        int minChunks = GC_FLOOR_MIN_CHUNKS_DEFAULT;
+        if (minRaw != null) {
+            if (!(minRaw instanceof Number mn) || mn.doubleValue() != Math.rint(mn.doubleValue())) {
+                throw new IllegalArgumentException("floor_min_chunks must be an integer >= 0, got: " + minRaw);
+            }
+            // intValue() wraps a Long past the int range (4294967396 would become 100): a 400, never a wrapped floor.
+            if (mn.doubleValue() > Integer.MAX_VALUE) {
+                throw new IllegalArgumentException("floor_min_chunks must be <= " + Integer.MAX_VALUE + ", got: " + minRaw);
+            }
+            if (mn.doubleValue() < 0) {
+                throw new IllegalArgumentException("floor_min_chunks must be >= 0, got: " + minRaw);
+            }
+            minChunks = mn.intValue();
+            if (minChunks < 0) {
+                throw new IllegalArgumentException("floor_min_chunks must be >= 0, got: " + minChunks);
+            }
+        }
+        return new FloorRequest(true, fraction, minChunks, force);
     }
 
     /**

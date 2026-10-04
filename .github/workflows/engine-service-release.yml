@@ -145,8 +145,8 @@ jobs:
             "(hellmini offline) builds mac-arm64 UNSMOKED instead -- GH-hosted macOS" \
             "has no Docker for native-smoke.sh; treat that build as experimental." \
             "All three binaries ARE smoke-tested on a normal tag-push release." \
-            "mac-arm64 signing: Developer-ID signed + notarized WHEN the APPLE_*" \
-            "secrets are provisioned (see the build job summary for this run's" \
+            "mac-arm64 signing: Developer-ID signed + notarized WHEN the repo" \
+            "variable APPLE_SIGNING_REQUIRED is true (see the build job summary for this run's" \
             "actual status); otherwise ad-hoc-signed — browser downloads are then" \
             "Gatekeeper-blocked, but 'nx daemon service install-binary' (urllib" \
             "fetch, no quarantine xattr) works either way. Ticket is checked" \
@@ -412,12 +412,15 @@ jobs:
         #   APPLE_DEV_ID_CERT_P12      — Developer ID Application cert, .p12 base64
         #   APPLE_DEV_ID_CERT_PASSWORD — the .p12 passphrase
         #   APPLE_DEV_ID_IDENTITY      — e.g. "Developer ID Application: Hal Hildebrand (TEAMID)"
-        # ABSENT secrets → LOUD warning annotation + step-summary line and the
-        # ad-hoc GraalVM linker signature ships (status quo: runs via
-        # nx install-binary, Gatekeeper-blocked on browser download).
-        # PARTIALLY-present secrets → hard FAIL (misconfiguration, never a
-        # silent downgrade). The non-vacuity pin lives in
-        # tests/test_engine_release_workflow_signing.py.
+        # OPT-IN by repo variable, not by secret presence (nexus-e8iml): the
+        # secrets also live in apple-signing so mac-signing-rehearsal.yml can
+        # run, and restoring them for a rehearsal must not arm the next tag.
+        # APPLE_SIGNING_REQUIRED unset (or anything but "true") → the ad-hoc
+        # GraalVM linker signature ships whatever secrets exist, said in the
+        # step summary (runs via nx install-binary; Gatekeeper-blocked on
+        # browser download). "true" → sign, and absent or partial secrets
+        # FAIL (never a silent downgrade). Behavior is pinned by running this
+        # body in tests/test_engine_release_workflow_signing.py.
         # TAG-GATED like the sibling cosign steps (review 96677bf7 Critical):
         # a workflow_dispatch dev/smoke run must not burn a Developer-ID
         # sign + a 20-minute notarytool wait on a 10x-billed macOS runner
@@ -431,22 +434,13 @@ jobs:
         run: |
           set -euo pipefail
           bin="service/target/nexus-service"
-          if [ -z "${APPLE_DEV_ID_CERT_P12:-}" ] && [ -z "${APPLE_DEV_ID_CERT_PASSWORD:-}" ] && [ -z "${APPLE_DEV_ID_IDENTITY:-}" ]; then
-            # Post-activation regression guard (critique 96677bf7 Sig 1):
-            # once Hal confirms end-to-end signing works, setting the repo
-            # variable APPLE_SIGNING_REQUIRED=true promotes vanished secrets
-            # (org rotation, repo transfer) from a warn-in-a-run-nobody-reads
-            # to a hard release failure — the silent-downgrade class.
-            if [ "${APPLE_SIGNING_REQUIRED:-}" = "true" ]; then
-              echo "FAIL: APPLE_SIGNING_REQUIRED=true but the APPLE_DEV_ID_* secrets are absent — signing was activated and has silently regressed. Restore the secrets (or consciously unset the repo variable)." >&2
-              exit 1
-            fi
-            echo "::warning title=mac-arm64 UNSIGNED (ad-hoc)::APPLE_DEV_ID_* secrets not provisioned — publishing the ad-hoc-signed binary (browser downloads stay Gatekeeper-blocked). See nexus-27i0m for the provisioning checklist."
-            echo "### mac-arm64 signing: SKIPPED — no Developer ID secrets (ad-hoc binary published)" >> "$GITHUB_STEP_SUMMARY"
+          if [ "${APPLE_SIGNING_REQUIRED:-}" != "true" ]; then
+            echo "::notice title=mac-arm64 UNSIGNED (ad-hoc)::Signing is off (repo variable APPLE_SIGNING_REQUIRED is not true); publishing the ad-hoc-signed binary. See docs/operations/apple-code-signing.md."
+            echo "### mac-arm64 signing: SKIPPED — APPLE_SIGNING_REQUIRED is not true (ad-hoc binary published)" >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
           if [ -z "${APPLE_DEV_ID_CERT_P12:-}" ] || [ -z "${APPLE_DEV_ID_CERT_PASSWORD:-}" ] || [ -z "${APPLE_DEV_ID_IDENTITY:-}" ]; then
-            echo "FAIL: APPLE_DEV_ID_* secrets are PARTIALLY configured — refusing to silently ship ad-hoc. Provision all three or none." >&2
+            echo "FAIL: APPLE_SIGNING_REQUIRED=true but the APPLE_DEV_ID_* secrets are absent or partial in the apple-signing environment. Restore all three, or consciously unset the repo variable." >&2
             exit 1
           fi
           # Mechanics live in service/deploy/mac-sign.sh (nexus-aq9y8) so the
@@ -469,7 +463,8 @@ jobs:
         # A bare Mach-O CANNOT be stapled (stapler needs .app/.dmg/.pkg) —
         # the notarization ticket is checked ONLINE by Gatekeeper, which is
         # sufficient for the browser-download case this bead closes.
-        # TAG-GATED (same rationale as the codesign step above).
+        # TAG-GATED and OPT-IN by APPLE_SIGNING_REQUIRED (same rationale as
+        # the codesign step above).
         if: matrix.target.arch == 'mac-arm64' && startsWith(github.ref, 'refs/tags/engine-service-v')
         env:
           APPLE_NOTARY_KEY_P8: ${{ secrets.APPLE_NOTARY_KEY_P8 }}
@@ -479,18 +474,12 @@ jobs:
         run: |
           set -euo pipefail
           bin="service/target/nexus-service"
-          if [ -z "${APPLE_NOTARY_KEY_P8:-}" ] && [ -z "${APPLE_NOTARY_KEY_ID:-}" ] && [ -z "${APPLE_NOTARY_ISSUER_ID:-}" ]; then
-            # Same post-activation regression guard as the codesign step.
-            if [ "${APPLE_SIGNING_REQUIRED:-}" = "true" ]; then
-              echo "FAIL: APPLE_SIGNING_REQUIRED=true but the APPLE_NOTARY_* secrets are absent — notarization was activated and has silently regressed." >&2
-              exit 1
-            fi
-            echo "::warning title=mac-arm64 NOT NOTARIZED::APPLE_NOTARY_* secrets not provisioned — Gatekeeper will block browser downloads even if Developer-ID signed. See nexus-27i0m."
-            echo "### mac-arm64 notarization: SKIPPED — no notary secrets" >> "$GITHUB_STEP_SUMMARY"
+          if [ "${APPLE_SIGNING_REQUIRED:-}" != "true" ]; then
+            echo "### mac-arm64 notarization: SKIPPED — APPLE_SIGNING_REQUIRED is not true" >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
           if [ -z "${APPLE_NOTARY_KEY_P8:-}" ] || [ -z "${APPLE_NOTARY_KEY_ID:-}" ] || [ -z "${APPLE_NOTARY_ISSUER_ID:-}" ]; then
-            echo "FAIL: APPLE_NOTARY_* secrets are PARTIALLY configured — refusing a silent skip." >&2
+            echo "FAIL: APPLE_SIGNING_REQUIRED=true but the APPLE_NOTARY_* secrets are absent or partial in the apple-signing environment. Restore all three, or consciously unset the repo variable." >&2
             exit 1
           fi
           # mac-sign.sh refuses an ad-hoc binary up front ("cannot notarize",

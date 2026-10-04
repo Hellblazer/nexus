@@ -68,9 +68,15 @@ class _Engine:
                  unclassified: int = 0, unclassified_on_recheck: int | None = None,
                  batches: list[int] | None = None, omit_scope: bool = False,
                  move_script: list | None = None, stuck: dict | None = None,
-                 expire: dict | Exception | None = None, siblings: list[str] | None = None) -> None:
+                 expire: dict | Exception | None = None, siblings: list[str] | None = None,
+                 floor_echo: bool = False, floor_refuse: tuple[int, int] | None = None) -> None:
         # move_script: results (dict) or exceptions the move route answers with, in order; stuck: a
         # result the route answers with forever once the script is exhausted.
+        # floor_echo: the engine honours the route's floor fields (nexus-wbfpw.52) and echoes them;
+        # floor_refuse=(reapable, total): that engine judges the floor and refuses the move over it
+        # (unless the request carries force). Neither: an older engine that ignores the fields.
+        self.floor_echo = floor_echo or floor_refuse is not None
+        self.floor_refuse = floor_refuse
         self.omit_scope = omit_scope
         self.siblings = list(siblings) if siblings is not None else []
         self.expire = {"expired": 0, "refused": 0} if expire is None else expire
@@ -133,21 +139,16 @@ class _Engine:
                 "chunks": [_row(i) for i in rows],
             }
         if path == "/v1/vectors/gc/quarantine-orphans":
-            if self.move_script is not None:
-                if self.move_script:
-                    step = self.move_script.pop(0)
-                    if isinstance(step, Exception):
-                        raise step
-                    return step
-                if self.stuck is not None:
-                    return self.stuck
-                raise AssertionError("the move was called more often than the test scripted")
-            if self.batches is not None:
-                moved = self.batches.pop(0)
-                return {"moved": moved, "sample": [], "remaining": sum(self.batches),
-                        "row_limit": body.get("row_limit")}
-            return {"moved": len(self.reapable), "sample": [], "remaining": 0,
-                    "row_limit": body.get("row_limit")}
+            result = self._move(body)
+            if "floor_fraction" in body and self.floor_echo and "refused" not in result:
+                result = {**result, "refused": False, "floor": {
+                    "given": True, "fraction": body["floor_fraction"],
+                    "min_chunks": body.get("floor_min_chunks", 100), "force": body.get("force", False)}}
+            elif "floor_fraction" not in body and self.floor_echo and "floor" not in result:
+                # A floor-aware engine answers EVERY response with the echo; a request that carried no floor
+                # (the verb sends it on the first batch only) gets {"given": false}.
+                result = {**result, "floor": {"given": False}}
+            return result
         if path == "/v1/vectors/gc/restore-rereferenced":
             # Only the indexer's re-reference leg reaches this (nx t3 gc has none): nothing to restore.
             return {"restored": 0, "remaining": 0}
@@ -163,6 +164,29 @@ class _Engine:
                 raise self.expire
             return dict(self.expire)
         raise AssertionError(f"unexpected engine route {path}: nx t3 gc must not use it")
+
+    def _move(self, body: dict) -> dict:
+        if self.floor_refuse is not None and "floor_fraction" in body and not body.get("force"):
+            reapable, total = self.floor_refuse
+            return {"moved": 0, "sample": [], "remaining": reapable, "row_limit": body.get("row_limit"),
+                    "refused": True, "reapable_count": reapable, "total_count": total,
+                    "floor": {"given": True, "fraction": body["floor_fraction"],
+                              "min_chunks": body.get("floor_min_chunks", 100), "force": False}}
+        if self.move_script is not None:
+            if self.move_script:
+                step = self.move_script.pop(0)
+                if isinstance(step, Exception):
+                    raise step
+                return step
+            if self.stuck is not None:
+                return self.stuck
+            raise AssertionError("the move was called more often than the test scripted")
+        if self.batches is not None:
+            moved = self.batches.pop(0)
+            return {"moved": moved, "sample": [], "remaining": sum(self.batches),
+                    "row_limit": body.get("row_limit")}
+        return {"moved": len(self.reapable), "sample": [], "remaining": 0,
+                "row_limit": body.get("row_limit")}
 
     def paths(self) -> list[str]:
         return [p for p, _ in self.posted]
@@ -433,6 +457,93 @@ def test_a_dry_run_over_the_floor_says_a_real_run_would_refuse_and_exits_one(run
     assert result.exit_code == 1, result.output
     assert "REFUSE" in result.output and "NX_GC_FORCE=1" in result.output
     assert _MOVE not in engine.paths() and _EXPIRE not in engine.paths()
+
+
+# ── nexus-wbfpw.52: the route's own floor, passed through and read back ───────────────────────────
+
+
+def test_the_move_carries_the_floor_and_the_override_to_the_engine(runner, real_client, monkeypatch):
+    """The verb sends the floor it checked on the listing, on the FIRST batch only, so the engine can judge it
+    under its sweep gate: NX_GC_FLOOR_FRACTION, the 100-chunk minimum, NX_GC_FORCE. A later batch cannot be
+    refused, and carrying the floor would add a whole-collection count to each bounded statement."""
+    monkeypatch.delenv("NX_GC_FLOOR_FRACTION", raising=False)
+    monkeypatch.delenv("NX_GC_FORCE", raising=False)
+    engine = _Engine(total=400, reapable=[1, 2, 3], batches=[2, 1], floor_echo=True)
+    result = _invoke(runner, real_client, engine, ["--no-dry-run", "--yes"])
+    assert result.exit_code == 0, result.output
+    moves = engine.moves()
+    assert len(moves) == 2
+    assert (moves[0]["floor_fraction"], moves[0]["floor_min_chunks"], moves[0]["force"]) == (0.25, 100, False)
+    assert not {"floor_fraction", "floor_min_chunks", "force"} & set(moves[1]), "batch 2 carries no floor fields"
+    assert "did not echo" not in result.output, "the later batch's {given: false} must not read as no echo"
+
+    monkeypatch.setenv("NX_GC_FLOOR_FRACTION", "0.4")
+    monkeypatch.setenv("NX_GC_FORCE", "1")
+    forced = _Engine(total=400, reapable=[1, 2, 3], floor_echo=True)
+    result = _invoke(runner, real_client, forced, ["--no-dry-run", "--yes"])
+    assert result.exit_code == 0, result.output
+    assert [(m["floor_fraction"], m["floor_min_chunks"], m["force"]) for m in forced.moves()] == [(0.4, 100, True)]
+
+
+def test_an_engine_that_echoes_the_floor_is_not_second_guessed(runner, real_client, monkeypatch):
+    monkeypatch.delenv("NX_GC_FLOOR_FRACTION", raising=False)
+    monkeypatch.delenv("NX_GC_FORCE", raising=False)
+    engine = _Engine(total=400, reapable=[1, 2, 3], floor_echo=True)
+    result = _invoke(runner, real_client, engine, ["--no-dry-run", "--yes"])
+    assert result.exit_code == 0, result.output
+    assert "did not echo" not in result.output
+
+
+def test_an_engine_that_ignores_the_floor_is_named_and_the_listing_check_stays(runner, real_client, monkeypatch):
+    """An older engine ignores the fields and moves unguarded. The verb cannot know that before the move,
+    so the listing check still runs first (the refusal tests above); after the move the summary says the
+    engine did not judge the floor."""
+    monkeypatch.delenv("NX_GC_FLOOR_FRACTION", raising=False)
+    monkeypatch.delenv("NX_GC_FORCE", raising=False)
+    engine = _Engine(total=400, reapable=[1, 2, 3])  # no echo
+    result = _invoke(runner, real_client, engine, ["--no-dry-run", "--yes"])
+    assert result.exit_code == 0, result.output
+    assert "quarantined 3 chunk(s)" in result.output
+    assert "NOTE: the engine did not echo the fraction floor" in result.output
+    assert "only floor this run had was the listing check" in result.output
+
+
+def test_the_engine_refuses_a_set_that_grew_past_the_floor_after_the_listing(runner, real_client, monkeypatch):
+    """The listing read 3 reapable chunks (under the 100 minimum, so the advisory check passed); the engine,
+    judging under its lock, reads 130 of 400. Exit 1, nothing moved, no expiry, the override named."""
+    monkeypatch.delenv("NX_GC_FLOOR_FRACTION", raising=False)
+    monkeypatch.delenv("NX_GC_FORCE", raising=False)
+    engine = _Engine(total=400, reapable=[1, 2, 3], floor_refuse=(130, 400))
+    result = _invoke(runner, real_client, engine, ["--no-dry-run", "--yes"])
+    assert result.exit_code == 1, result.output
+    assert "REFUSING to move: the engine judged 130 of 400 chunk(s)" in result.output
+    assert "under its own lock" in result.output
+    assert "The listing this verb checked first read 3" in result.output
+    assert "NX_GC_FORCE=1" in result.output and "gc_audit" in result.output
+    assert len(engine.moves()) == 1
+    assert _EXPIRE not in engine.paths(), "a refused run is not a successful move: no expiry follows"
+    assert "quarantined" not in result.output
+
+
+def test_nx_gc_force_reaches_the_engine_and_overrides_its_refusal(runner, real_client, monkeypatch):
+    monkeypatch.delenv("NX_GC_FLOOR_FRACTION", raising=False)
+    monkeypatch.setenv("NX_GC_FORCE", "1")
+    engine = _Engine(total=400, reapable=[1, 2, 3], floor_refuse=(130, 400))
+    result = _invoke(runner, real_client, engine, ["--no-dry-run", "--yes"])
+    assert result.exit_code == 0, result.output
+    assert engine.moves()[-1]["force"] is True
+    assert "quarantined 3 chunk(s)" in result.output
+    assert "did not echo" not in result.output
+
+
+def test_a_surplus_over_the_listing_is_judged_by_the_engine_when_it_echoes(runner, real_client, monkeypatch):
+    monkeypatch.delenv("NX_GC_FLOOR_FRACTION", raising=False)
+    monkeypatch.delenv("NX_GC_FORCE", raising=False)
+    engine = _Engine(total=10, reapable=[1, 2], move_script=[_result(3, 0)], floor_echo=True)
+    result = _invoke(runner, real_client, engine, ["--no-dry-run", "--yes"])
+    assert result.exit_code == 0, result.output
+    assert "MORE than listed" in result.output
+    assert "judged the floor under its own lock on the whole reapable set" in result.output
 
 
 # ── the RUNFENCE circuit breaker is unchanged ─────────────────────────────────

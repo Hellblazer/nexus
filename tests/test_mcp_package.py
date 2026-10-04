@@ -34,10 +34,6 @@ def test_core_registered_tools():
         "scratch", "scratch_manage", "collection_list",
         "plan_save", "plan_search", "plan_delete",
         "traverse",
-        "operator_extract", "operator_rank", "operator_compare",
-        "operator_summarize", "operator_generate",
-        "operator_filter", "operator_check", "operator_verify",
-        "operator_groupby", "operator_aggregate",
         "nx_answer", "nx_tidy", "nx_enrich_beads", "nx_plan_audit",
         # RDR-200 P1c (nexus-4e75w.5): the continuation handoff's
         # completion-report half — a SECOND append pairing on
@@ -168,7 +164,7 @@ def test_no_registered_mcp_tool_is_backed_by_a_private_function():
     (as _file_path_matches did) is exactly the failure mode this catches,
     mechanically, for every current and future tool on both servers — not
     just the one instance found by hand. Non-vacuity: the tool counts are
-    asserted well above the current registry (53 core / 10 catalog) so a
+    asserted well above the current registry (44 core / 10 catalog) so a
     collection regression (e.g. an import error silently emptying the
     registry) fails loud rather than passing on an empty set.
     """
@@ -210,6 +206,31 @@ def test_demoted_catalog_functions_callable():
     assert callable(catalog_unlink)
     assert callable(catalog_link_audit)
     assert callable(catalog_link_bulk)
+
+
+_OPERATOR_VERBS = (
+    "extract", "rank", "compare", "summarize", "generate",
+    "filter", "check", "verify", "groupby", "aggregate",
+)
+
+
+def test_operators_are_demoted_but_resolve_for_plans():
+    """nexus-ivi4s: the ten operator_* functions are off the MCP surface (each
+    spawns ``claude -p``; ~4k tokens of schema per session) yet stay reachable
+    in-process, which is how plans and nx_answer call them: the runner's
+    _default_dispatcher resolves a step with getattr(nexus.mcp.core, name)
+    after cost_estimate._resolved maps the bare plan verb to operator_<verb>."""
+    import asyncio
+    import inspect
+
+    import nexus.mcp.core as core
+    from nexus.plans.cost_estimate import _resolved
+
+    registered = {t.name for t in asyncio.run(core.mcp.list_tools())}
+    assert not {n for n in registered if n.startswith("operator_")}
+    for verb in _OPERATOR_VERBS:
+        fn = getattr(core, _resolved(verb), None)
+        assert fn is not None and inspect.iscoroutinefunction(fn), verb
 
 
 def test_init_reexports_all():

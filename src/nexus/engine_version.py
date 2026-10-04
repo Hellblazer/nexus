@@ -595,7 +595,16 @@ from __future__ import annotations
 #: entries are [additive], so the engine deploys BEFORE this client tag
 #: (nexus-1emxn choreography (a)). 7.67.0 and 7.68.0 paired with
 #: v0.1.142 and v0.1.143 and added no line here.
-REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 145)
+#:
+#: 7.71.0 pairs with engine-service-v0.1.146 (tagged 2026-10-04 on
+#: 2b85b3357, deployed 19:02Z): vectors-027 route-level fraction floor on
+#: gc/quarantine-orphans (nexus-wbfpw.52), vectors-028 the reaper also
+#: expires client-moved knowledge quarantine (nexus-wbfpw.75), vectors-029
+#: the hybrid text-gate probe reaches the GIN indexes under FORCE RLS behind
+#: a guarded owner-read policy, the boot isolation check and
+#: /v1/status chunks_tenant_isolation_intact (nexus-wbfpw.48). All wire
+#: entries [additive]; the engine deployed BEFORE this client tag.
+REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 146)
 
 #: nexus-5uoxu: the first engine version whose telemetry trim honors the
 #: ``dry_run`` field (the 3-arg ``trimSearchTelemetry`` overload, re-landed

@@ -17,7 +17,7 @@
 # the PG-bundle packaging. A defect introduced by the release workflow is
 # invisible to every local gate BY CONSTRUCTION — nexus-2oh5q is exactly that
 # hazard (signing breaking JNI dlopen of the bundled onnxruntime/DJL libs),
-# dormant today only because the Apple secrets are unprovisioned. This leg is
+# dormant only while the repo variable APPLE_SIGNING_REQUIRED is not true. This leg is
 # what would catch it.
 #
 # LINEAGE. This is the acquire half of the retired cold-install rehearsal

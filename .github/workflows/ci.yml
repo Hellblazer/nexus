@@ -212,6 +212,12 @@ jobs:
     timeout-minutes: 5
     outputs:
       code: ${{ steps.gate.outputs.code }}
+      # nexus-rpaat: the integration-marked test files this change affects,
+      # space-separated, and whether there are any. Computed by the separate
+      # `integration` step below so the gate step above stays exactly what
+      # tests/test_docs_only_predicate_git_direct.py executes.
+      integration_files: ${{ steps.integration.outputs.integration_files }}
+      integration_any: ${{ steps.integration.outputs.integration_any }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
         with:
@@ -323,6 +329,50 @@ jobs:
             echo "code=false" >> "$GITHUB_OUTPUT"
           else
             echo "code=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Select the affected integration tests (nexus-rpaat)
+        id: integration
+        # Same diff base as the gate step: three-dot against the PR base, or
+        # the branch's previous tip on a push. Where the gate step falls back
+        # to code=true (no usable base), this selects EVERY integration file,
+        # the same conservative-toward-running rule. A change to the selector
+        # or its checker also selects everything, so the gate's own machinery
+        # runs the whole family once. The selector is stdlib only and runs
+        # under the runner's bare python3; if it crashes this job fails, never
+        # an empty selection.
+        run: |
+          set -euo pipefail
+          ZERO_SHA="0000000000000000000000000000000000000000"
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            BASE="${{ github.event.pull_request.base.sha }}"
+            RANGE=("${BASE}...HEAD")
+          else
+            BASE="${{ github.event.before }}"
+            RANGE=("${BASE}" HEAD)
+          fi
+          mode="diff"
+          if [ -z "$BASE" ] || [ "$BASE" = "$ZERO_SHA" ] || ! git cat-file -e "${BASE}^{commit}" 2>/dev/null; then
+            echo "::warning::no usable diff base ('$BASE'); selecting every integration file"
+            mode="all"
+          else
+            CHANGED="$(git diff --name-only "${RANGE[@]}")"
+            if grep -qxE 'scripts/(select_affected_integration_tests|assert_integration_affected_ran)\.py' <<< "$CHANGED"; then
+              mode="all"
+            fi
+          fi
+          if [ "$mode" = all ]; then
+            sel="$(python3 scripts/select_affected_integration_tests.py --repo . --all)"
+          else
+            sel="$(printf '%s\n' "$CHANGED" | python3 scripts/select_affected_integration_tests.py --repo .)"
+          fi
+          echo "affected integration test files ($mode):"
+          echo "${sel:-  (none)}"
+          echo "integration_files=$(tr '\n' ' ' <<< "$sel" | sed 's/ *$//')" >> "$GITHUB_OUTPUT"
+          if [ -n "$sel" ]; then
+            echo "integration_any=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "integration_any=false" >> "$GITHUB_OUTPUT"
           fi
 
   service-jar:
@@ -993,6 +1043,202 @@ jobs:
         # census actually scans request.session.items instead of skipping.
         run: NX_CENSUS_ONLY_JOB=1 uv run pytest tests/ -q
 
+  test-integration-affected:
+    # nexus-rpaat: run the integration-marked tests THIS change affects.
+    #
+    # The default addopts deselect `-m integration`, so the shard matrix above
+    # never runs them; the nightly local-service gate runs the whole family
+    # once a day and the release battery runs it per release. A test added in
+    # the same push as the change it proves therefore went unrun until the
+    # next nightly (the 7.67.0 evidence table found four in one range).
+    #
+    # scripts/select_affected_integration_tests.py picks the integration files
+    # the push changed, plus the ones that DIRECTLY import a src/nexus module
+    # it changed (a transitive closure would run the whole family on about a
+    # quarter of pushes; see the selector's docstring). Measured over 200 develop commits (2026-10-04): 146 selected
+    # nothing, so this job skips on most pushes; the large selections come
+    # from edits to the engine-facing client modules (http_vector_client,
+    # catalog factory and client, corpus), which is where a broad run belongs.
+    # A service/ or shared-fixture change selects nothing by itself; those move
+    # every integration test at once and the nightly covers them.
+    #
+    # Same environment as the shard matrix (jar, pinned PG bundle, bge-768,
+    # docling), not the nightly's throwaway service. Files that need what no
+    # hosted runner has are listed with reasons in
+    # scripts/assert_integration_affected_ran.py's ALL_SKIP_ALLOWED; files a
+    # dedicated job already runs are listed in the selector's
+    # COVERED_ELSEWHERE.
+    #
+    # NON-VACUITY: the JUnit testcase count must equal the --collect-only count
+    # for the same selection, and every selected file that collects tests must
+    # execute at least one, unless allowlisted. A selection whose files carry
+    # only carved-out marks collects nothing and says so.
+    name: pytest (integration, affected)
+    runs-on: ubuntu-latest
+    needs: [changes, service-jar]
+    if: success() && needs.changes.outputs.integration_any == 'true'
+    # Worst case is the whole family. The nightly's pytest step for it took
+    # 38 minutes on this runner class (run 37197448487, 2026-10-04: 789 passed
+    # in 2301 s), so 60 leaves room for setup and a cold cache.
+    timeout-minutes: 60
+    env:
+      NX_T2_SUBSTRATE_EXPECTED: "1"
+      # Must equal LSG_PYTEST_MARK_EXPR in tests/e2e/lib/mandatory_pins.sh
+      # (pinned by tests/scripts/test_select_affected_integration_tests.py).
+      INTEGRATION_MARK_EXPR: "integration and not lived_in and not cloud_mode and not mandatory_regression_pin"
+      INTEGRATION_FILES: ${{ needs.changes.outputs.integration_files }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
+
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7
+        with:
+          python-version: "3.12"
+          enable-cache: false
+
+      - name: Cache uv wheel cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v5
+        with:
+          path: ${{ runner.temp }}/setup-uv-cache
+          key: uv-${{ runner.os }}-3.12-${{ hashFiles('uv.lock') }}
+          restore-keys: |
+            uv-${{ runner.os }}-3.12-
+
+      - name: Cache MiniLM ONNX model
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v5
+        with:
+          path: ~/.cache/chroma
+          key: chromadb-onnx-${{ runner.os }}-${{ hashFiles('uv.lock') }}
+          restore-keys: |
+            chromadb-onnx-${{ runner.os }}-
+
+      - name: Cache HuggingFace models (cross-encoder)
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v5
+        with:
+          path: ~/.cache/huggingface
+          key: huggingface-models-${{ runner.os }}-${{ hashFiles('uv.lock') }}
+          restore-keys: |
+            huggingface-models-${{ runner.os }}-
+
+      - name: Fetch the service jar
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: service-jar
+          path: service/target
+
+      - name: Re-stamp the jar mtime
+        # Same reason as the shard matrix: checkout stamps sources newer than
+        # the downloaded jar, and the service-jar cache key already proves
+        # the jar matches these sources.
+        run: touch service/target/nexus-service-1.0-SNAPSHOT.jar
+
+      - name: Set up Java (to launch the service jar)
+        uses: graalvm/setup-graalvm@5298d94fb55a4f185c602eeac5de1b553882abe2  # v1
+        with:
+          java-version: '25.0.3'
+          distribution: 'graalvm'
+
+      - name: Stamp release_version into this job's copy of the jar
+        # The service-jar artifact is a plain `mvn package`, so its
+        # release.properties carries a BLANK release_version. Tests marked
+        # needs_stamped_jar construct a vector client, whose version probe
+        # fail-closes on a blank version, and tests/db/conftest.py FAILS them
+        # in CI (nexus-ao29z). The shard matrix runs none of them; this job
+        # selects four. Same remedy as the write-seam job's stamp step and
+        # scripts/build-gate-jar.sh: stamp REQUIRED_ENGINE_VERSION, so the
+        # probe sees a conformant engine and stays armed. Only this job's
+        # downloaded copy changes; the shared artifact does not.
+        run: |
+          set -euo pipefail
+          jar_path="$PWD/service/target/nexus-service-1.0-SNAPSHOT.jar"
+          ver=$(python3 -c "import re,pathlib; s=pathlib.Path('src/nexus/engine_version.py').read_text(); m=re.search(r'REQUIRED_ENGINE_VERSION[^=]*=\s*\((\d+),\s*(\d+),\s*(\d+)\)', s); assert m, 'REQUIRED_ENGINE_VERSION not parseable'; print('.'.join(m.groups()))")
+          work="$(mktemp -d)"
+          mkdir -p "$work/META-INF/nexus"
+          unzip -p "$jar_path" META-INF/nexus/release.properties | grep -v '^release_version=' > "$work/META-INF/nexus/release.properties"
+          printf 'release_version=%s\n' "$ver" >> "$work/META-INF/nexus/release.properties"
+          (cd "$work" && jar uf "$jar_path" META-INF/nexus/release.properties)
+          touch "$jar_path"
+          unzip -p "$jar_path" META-INF/nexus/release.properties | grep '^release_version='
+
+      - name: Cache the pinned PG bundle
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v5
+        with:
+          path: ~/.cache/nexus-test-substrate
+          key: pg-bundle-${{ runner.os }}-${{ hashFiles('src/nexus/engine_version.py') }}
+
+      - name: Install ripgrep
+        run: sudo apt-get install -y ripgrep
+
+      - name: Prime bge-768 ONNX (cache or self-hosted asset)
+        uses: ./.github/actions/prime-bge-onnx
+
+      - name: Install project + dev deps
+        run: uv sync --group dev
+
+      - name: Verify the jar passes the fixtures' own stamp check
+        # Asks the exact function tests/db/conftest.py consults, so a stamp
+        # the fixtures would reject fails here, by name, before the run.
+        run: uv run python -c "import sys; from tests.db._service_fixture import unstamped_jar_skip_reason as r; reason = r(); sys.exit(reason) if reason else print('jar stamped')"
+
+      - name: Prime docling artifacts (cache or self-hosted asset)
+        uses: ./.github/actions/prime-docling
+
+      - name: Verify docling extracts from the mirrored models
+        run: uv run python scripts/ci_warm_docling.py
+
+      - name: Collect the affected selection
+        id: collect
+        run: |
+          set -euo pipefail
+          tr ' ' '\n' <<< "$INTEGRATION_FILES" | sed '/^$/d' > integration-selected.txt
+          echo "selected files:"
+          cat integration-selected.txt
+          files=(); while IFS= read -r f; do files+=("$f"); done < integration-selected.txt
+          [ "${#files[@]}" -gt 0 ] || { echo "::error::integration_any=true but the selection is empty"; exit 1; }
+          set +e
+          NX_TEST_T2_SUBSTRATE=none uv run pytest -o addopts="" -m "$INTEGRATION_MARK_EXPR" \
+            --collect-only -q "${files[@]}" > integration-collect.txt
+          rc=$?
+          set -e
+          # 0 = collected, 5 = nothing matched the expression; anything else
+          # is a collection error and fails here, loudly.
+          if [ "$rc" -ne 0 ] && [ "$rc" -ne 5 ]; then
+            cat integration-collect.txt
+            echo "::error::pytest --collect-only exited $rc on the affected selection"
+            exit 1
+          fi
+          collected="$(grep -cE '^[^ ]+\.py::' integration-collect.txt || true)"
+          echo "collected=$collected" >> "$GITHUB_OUTPUT"
+          echo "collected $collected integration tests"
+
+      - name: Run the affected integration tests
+        env:
+          # Same reason as the nightly's ungated-integration step: these files
+          # self-provision a throwaway engine substrate and write to it.
+          NX_ALLOW_PROD_WRITE: "per-push affected-integration job: self-provisioned throwaway engine substrate on the CI runner (nexus-rpaat)"
+          VOYAGE_API_KEY: ${{ secrets.VOYAGE_API_KEY }}
+        run: |
+          set -euo pipefail
+          files=(); while IFS= read -r f; do files+=("$f"); done < integration-selected.txt
+          set +e
+          uv run pytest -o addopts="" -m "$INTEGRATION_MARK_EXPR" -q -rs --color=no \
+            --junit-xml=integration-affected.xml "${files[@]}"
+          rc=$?
+          set -e
+          if [ "$rc" -eq 5 ] && [ "${{ steps.collect.outputs.collected }}" = "0" ]; then
+            echo "no affected test matches the mark expression (only carved-out marks); nothing to run"
+            exit 0
+          fi
+          exit "$rc"
+
+      - name: Non-vacuity (nexus-rpaat)
+        run: |
+          set -euo pipefail
+          [ -f integration-affected.xml ] || echo '<testsuites/>' > integration-affected.xml
+          python3 scripts/assert_integration_affected_ran.py \
+            --junit integration-affected.xml \
+            --selected integration-selected.txt \
+            --collected "${{ steps.collect.outputs.collected }}"
+
   pytest-gate:
     # nexus-n0ful: required-check fan-in over the sharded `test` matrix.
     #
@@ -1045,7 +1291,7 @@ jobs:
     # condition for the exact same reason.
     name: pytest-gate
     if: always()
-    needs: [changes, test, test-lint, test-mode-census, release-ledger-gate]
+    needs: [changes, test, test-lint, test-mode-census, release-ledger-gate, test-integration-affected]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -1058,6 +1304,8 @@ jobs:
           test_lint_result="${{ needs.test-lint.result }}"
           test_mode_census_result="${{ needs.test-mode-census.result }}"
           release_ledger_result="${{ needs.release-ledger-gate.result }}"
+          integration_any="${{ needs.changes.outputs.integration_any }}"
+          integration_result="${{ needs.test-integration-affected.result }}"
           event_name="${{ github.event_name }}"
           base_ref="${{ github.base_ref }}"
 
@@ -1066,6 +1314,7 @@ jobs:
           echo "test-lint result: $test_lint_result"
           echo "test-mode-census result: $test_mode_census_result"
           echo "release-ledger-gate result: $release_ledger_result (event=$event_name base_ref=$base_ref)"
+          echo "test-integration-affected result: $integration_result (integration_any=$integration_any)"
 
           if [ "$changes_result" != "success" ]; then
             echo "::error::the doc-only predicate job (changes) did not succeed ($changes_result) — cannot prove whether the pytest matrix was needed, failing loud instead of guessing"
@@ -1136,6 +1385,30 @@ jobs:
                 ;;
             esac
           fi
+
+          # nexus-rpaat: the affected-integration job MUST succeed when the
+          # changes job selected anything; it legitimately skips otherwise.
+          case "$integration_any" in
+            true)
+              if [ "$integration_result" != "success" ]; then
+                echo "::error::the change affects integration tests but test-integration-affected reported '$integration_result' instead of success"
+                exit 1
+              fi
+              ;;
+            false)
+              case "$integration_result" in
+                success|skipped) ;;
+                *)
+                  echo "::error::no integration tests affected but test-integration-affected reported '$integration_result' instead of skipped/success"
+                  exit 1
+                  ;;
+              esac
+              ;;
+            *)
+              echo "::error::unrecognised integration_any '$integration_any' from the changes job — failing loud instead of guessing"
+              exit 1
+              ;;
+          esac
 
           echo "pytest-gate: PASS"
 
@@ -1828,6 +2101,10 @@ jobs:
               - 'service/src/main/java/dev/nexus/service/http/CatalogHandler.java'
               - 'service/src/main/resources/db/changelog/**'
               - 'src/nexus/catalog/http_catalog_client.py'
+              # nexus-rpaat: both test files import these, and the affected-
+              # integration job leaves the files to this job.
+              - 'src/nexus/corpus.py'
+              - 'src/nexus/chunk_identity.py'
               - 'tests/db/test_write_seam_gate_integration.py'
               - 'tests/db/test_http_combined_query_integration.py'
               - 'scripts/assert_write_seam_ran.py'

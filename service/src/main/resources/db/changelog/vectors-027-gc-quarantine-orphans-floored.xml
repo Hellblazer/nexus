@@ -1,0 +1,197 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    RDR-192 (bead nexus-wbfpw.52): nexus.gc_quarantine_orphans_floored, the route-level fraction floor on
+    POST /v1/vectors/gc/quarantine-orphans. Two callers move through that route: `nx t3 gc` (which judged a
+    floor of its own on a lock-free listing) and indexer._prune_deleted_files (which judged none; the
+    NX_GC_FLOOR_FRACTION it shares a family with guarded only the later hard delete, never the move into
+    quarantine). The engine reaper's floor lives inside reaper_quarantine_chunks (vectors-024), which has no
+    HTTP route, so it reached neither. Sam approved this design on 2026-10-04.
+
+    A WRAPPER, NOT A SIGNATURE CHANGE. gc_quarantine_orphans (vectors-022-1) and gc_quarantine_orphans_bounded
+    (vectors-022-2) are released functions with their own tests, grants and jOOQ records; giving them
+    parameters would drop and recreate both. This function takes the same arguments plus the floor, judges the
+    floor, and calls the existing function for the move, so the move's own body (victim set, collision guard,
+    sibling registration, audit row) is not copied and cannot drift. p_row_limit NULL selects the unbounded
+    function, a positive value selects the bounded one; zero or negative is refused here, as there.
+
+    THE FLOOR IS JUDGED IN THE SAME CALL AS THE MOVE, UNDER THE SWEEP GATE. The wrapper takes the exclusive
+    per-collection sweep gate (the same pg_advisory_xact_lock key the move takes, so the inner call's own
+    acquisition is a re-entrant no-op), counts the collection's whole reapable set and its stored chunks
+    with nexus.chunk_is_reapable, and only then calls the move. A manifest writer cannot change either count
+    between the judgement and the move because it needs that gate; the one thing that can, a client write
+    refreshing a chunk's last_written_at, is the interleaving the move's own DELETE already rechecks. The
+    caller sees one function call: there is no window in which a client reads a listing, decides, and acts
+    on a snapshot.
+
+    THE READING is the reaper's (vectors-024-1): refuse when the WHOLE reapable set is at least
+    p_floor_min_chunks AND the reapable set is strictly more than p_floor_fraction of every stored chunk of
+    the collection, compared by division, never `n > f * total`. The set is the whole reapable set, not the
+    at most p_row_limit one batch would take: a bounded drain of a collection the floor would refuse is
+    refused on its first batch, and because every batch shrinks the reapable set and the stored count by
+    the same number the ratio only falls, so a drain that passed its first batch is not refused halfway.
+
+    REFUSED, NOT MOVED. A refusal copies and deletes nothing and returns refused = true with the two counts
+    that were judged. It writes ONE gc_audit row in the same transaction, operation
+    'gc_quarantine_orphans_refused', actor 'engine' (the move's own rows are 'gc_quarantine_orphans' and
+    'gc_quarantine_orphans_bounded'; a distinct name keeps the reaper's 'reaper_refused' stream and the
+    move stream unmixed). The row is written once per STATE, not once per call: when the newest refused row
+    of the same (tenant, collection) has identical reapable and total counts and floor values and is under
+    an hour old, the INSERT is skipped and the call still answers refused = true. Without that, a collection
+    that stays over the floor (old orphans past the 30 day grace) wrote one row per `nx index repo` walk
+    forever, and gc_audit has no retention.
+
+    NO FLOOR, NO CHANGE. p_floor_fraction NULL means no floor was given: the wrapper takes no gate of its
+    own, counts nothing and calls the move, so a request without the new fields behaves exactly as before.
+    p_force true also skips the judgement (the operator override, NX_GC_FORCE=1) and returns NULL counts.
+    The Java handler echoes the floor it applied so a client of an older engine, which ignores the fields,
+    can tell it was never guarded.
+
+    DEFAULTS ARE THE CALLER'S. The function validates (fraction in [0, 1], minimum non-negative and not
+    NULL when a fraction is given) and applies no defaults of its own; the handler fills the minimum with
+    the GC family's 100 when only a fraction is sent.
+
+    No row changes at deploy, so there is no DATA EFFECT line. A new function adds one jOOQ record type
+    (GcQuarantineOrphansFlooredRecord). Placed after vectors-026 and in its own file so a parallel changeset
+    is an include-order question; before the grants blocks.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="vectors-027-1" author="nexus-wbfpw.52">
+        <comment>nexus.gc_quarantine_orphans_floored: the fraction floor on the gc/quarantine-orphans route. Takes the exclusive sweep gate, judges the reaper's floor (whole reapable set at least the minimum and strictly more than the fraction of every stored chunk) with nexus.chunk_is_reapable, refuses with counts and a gc_quarantine_orphans_refused gc_audit row, otherwise calls gc_quarantine_orphans or gc_quarantine_orphans_bounded for the move. No floor given means the move is called untouched.</comment>
+        <sql splitStatements="false" stripComments="false"><![CDATA[
+CREATE OR REPLACE FUNCTION nexus.gc_quarantine_orphans_floored(
+    dim                      int,
+    p_tenant_id              text,
+    p_collection             text,
+    p_quarantine_collection  text,
+    p_quarantined_at         text,
+    p_sample_limit           int,
+    p_row_limit              int,
+    p_floor_fraction         float8,
+    p_floor_min_chunks       int,
+    p_force                  boolean
+)
+RETURNS TABLE(moved bigint, sample jsonb, remaining bigint, refused boolean,
+              reapable_count bigint, total_count bigint)
+LANGUAGE plpgsql
+SECURITY INVOKER
+AS $$
+DECLARE
+    v_reapable   bigint;
+    v_total      bigint;
+    v_moved      bigint;
+    v_sample     jsonb;
+    v_remaining  bigint;
+    v_repeat     boolean;
+BEGIN
+    IF p_row_limit IS NOT NULL AND p_row_limit <= 0 THEN
+        RAISE EXCEPTION
+            'gc_quarantine_orphans_floored: p_row_limit must be positive when given (NULL selects the unbounded sweep), got %',
+            p_row_limit
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+
+    IF p_floor_fraction IS NOT NULL AND (
+           p_floor_fraction < 0 OR p_floor_fraction > 1
+           OR p_floor_min_chunks IS NULL OR p_floor_min_chunks < 0) THEN
+        RAISE EXCEPTION
+            'gc_quarantine_orphans_floored: the floor must be a fraction in [0, 1] and a non-negative minimum, got % / %',
+            p_floor_fraction, p_floor_min_chunks
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+
+    -- The judgement. Only when a floor was given and the caller did not override it.
+    IF p_floor_fraction IS NOT NULL AND NOT COALESCE(p_force, false) THEN
+        PERFORM set_config('lock_timeout', '2000', true);
+        BEGIN
+            PERFORM pg_advisory_xact_lock(hashtext('sweepgate:' || p_tenant_id || '/' || p_collection));
+        EXCEPTION
+            WHEN lock_not_available THEN
+                RAISE EXCEPTION
+                    'gc_quarantine_orphans_floored: timed out acquiring the RDR-191 sweep gate for tenant=%, collection=% -- a manifest writer is holding it; retry',
+                    p_tenant_id, p_collection
+                    USING ERRCODE = 'lock_not_available';
+        END;
+
+        -- Counted UNDER the gate, on the whole collection: the reapable set is the numerator, every
+        -- stored chunk the denominator (the reaper's reading, vectors-024-1).
+        SELECT count(*),
+               count(*) FILTER (WHERE EXISTS (SELECT 1 FROM nexus.chunk_is_reapable(
+                     c.tenant_id, c.collection, c.chash, c.last_written_at, NULL)))
+          INTO v_total, v_reapable
+          FROM nexus.chunks c
+         WHERE c.tenant_id = p_tenant_id AND c.collection = p_collection;
+
+        IF v_reapable >= p_floor_min_chunks AND v_total > 0
+           AND v_reapable::float8 / v_total::float8 > p_floor_fraction THEN
+            -- One row per STATE, not per call: skip the INSERT when the newest refusal row of this
+            -- (tenant, collection) carries identical counts and floor values and is under an hour old.
+            -- Every `nx index repo` walk repeats the same refusal for a collection that stays over the
+            -- floor, and gc_audit has no retention. The refusal is still returned either way.
+            SELECT EXISTS (
+                SELECT 1 FROM (
+                    SELECT a.details, a.created_at
+                      FROM nexus.gc_audit a
+                     WHERE a.tenant_id = p_tenant_id AND a.collection = p_collection
+                       AND a.operation = 'gc_quarantine_orphans_refused'
+                     ORDER BY a.id DESC
+                     LIMIT 1) last
+                 WHERE last.created_at > now() - interval '1 hour'
+                   AND (last.details->>'reapable_count')::bigint = v_reapable
+                   AND (last.details->>'total_count')::bigint = v_total
+                   AND (last.details->>'floor_fraction')::float8 = p_floor_fraction
+                   AND (last.details->>'floor_min_chunks')::int = p_floor_min_chunks)
+              INTO v_repeat;
+            IF NOT v_repeat THEN
+                INSERT INTO nexus.gc_audit
+                    (tenant_id, operation, collection, actor, dry_run, chash_count, chashes, details)
+                VALUES (
+                    p_tenant_id, 'gc_quarantine_orphans_refused', p_collection, 'engine', false, 0, '[]'::jsonb,
+                    jsonb_build_object(
+                        'reason', 'FLOOR',
+                        'form', CASE WHEN p_row_limit IS NULL THEN 'unbounded' ELSE 'bounded' END,
+                        'quarantine_collection', p_quarantine_collection,
+                        'reapable_count', v_reapable,
+                        'total_count', v_total,
+                        'floor_fraction', p_floor_fraction,
+                        'floor_min_chunks', p_floor_min_chunks));
+            END IF;
+            RETURN QUERY SELECT 0::bigint, NULL::jsonb, v_reapable, true, v_reapable, v_total;
+            RETURN;
+        END IF;
+    END IF;
+
+    -- The move. The existing functions take the same gate (already ours on the judged path), choose their
+    -- victim set once, and write their own audit row.
+    IF p_row_limit IS NULL THEN
+        SELECT g.moved, g.sample INTO v_moved, v_sample
+          FROM nexus.gc_quarantine_orphans(
+                   dim, p_tenant_id, p_collection, p_quarantine_collection, p_quarantined_at, p_sample_limit) g;
+        v_remaining := NULL;
+    ELSE
+        SELECT g.moved, g.sample, g.remaining INTO v_moved, v_sample, v_remaining
+          FROM nexus.gc_quarantine_orphans_bounded(
+                   dim, p_tenant_id, p_collection, p_quarantine_collection, p_quarantined_at,
+                   p_sample_limit, p_row_limit) g;
+    END IF;
+
+    RETURN QUERY SELECT v_moved, v_sample, v_remaining, false, v_reapable, v_total;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION nexus.gc_quarantine_orphans_floored(int, text, text, text, text, int, int, float8, int, boolean) TO nexus_svc;
+]]>
+        </sql>
+        <rollback>
+            <sql splitStatements="false" stripComments="false"><![CDATA[
+DROP FUNCTION IF EXISTS nexus.gc_quarantine_orphans_floored(int, text, text, text, text, int, int, float8, int, boolean)
+]]>
+            </sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

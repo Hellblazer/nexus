@@ -134,20 +134,22 @@ it -> `doctor` with no ✗.
 different builder than any locally built candidate: full native build (not
 quick-build), codesign, cosign, PG-bundle packaging. A defect introduced by the
 release workflow is invisible to a local gate BY CONSTRUCTION — `nexus-2oh5q` is exactly that hazard (signing breaking JNI dlopen
-of the bundled onnxruntime/DJL), dormant only while the Apple secrets are
-unprovisioned. Historically this gate caught `nexus-pi3s3` + `nexus-qeoxf`
+of the bundled onnxruntime/DJL), dormant only while the repository variable
+`APPLE_SIGNING_REQUIRED` is not `true`. Historically this gate caught `nexus-pi3s3` + `nexus-qeoxf`
 (2026-06-26), defects every local suite missed.
 
 **Scope limit, carried from `nexus-1ddsy`'s close:** the container is Linux, so
 this exercises the linux artifact. The mac-arm64 post-signing path is NOT covered
 here — tracked on `nexus-2oh5q`.
 
-**The mac-arm64 gap has a gate — it is just MANUAL and not yet armed.** The
+**The mac-arm64 gap has a gate — it is just MANUAL, and has nothing to check until signing is switched on.** The
 provisioning half (six Apple credentials, both portals, the pre-flight and the
 renewal failure modes) is
 [`docs/operations/apple-code-signing.md`](../../../docs/operations/apple-code-signing.md).
-Once those are provisioned and the first Developer-ID-signed tag publishes,
-run on an arm64 Mac, BEFORE setting `APPLE_SIGNING_REQUIRED=true`:
+Signing is opt-in: a tag signs only when the repository variable
+`APPLE_SIGNING_REQUIRED` is `true`, whatever secrets exist (nexus-e8iml). After
+the first tag cut with it set, run on an arm64 Mac (on failure, delete the
+variable and cut a fresh tag):
 
 ```bash
 NEXUS_SERVICE_TAG=engine-service-vX.Y.Z tests/e2e/mac-signed-binary-gate.sh
@@ -254,6 +256,8 @@ tests/e2e/cloud-client-path-gate.sh                                             
 The mode assertion (leg B3) reads `ownerless_write_mode` from `/v1/status` through the public edge. Nothing else in this repo reads the live mode, and conexus wires the knob, so without it a mis-wired parameter enforces on the first deploy and refuses every legacy write from the hosts before anyone looks. Unset, an engine that reports a mode FAILS the gate (a live mode nobody asserted), and so does an unreadable `/v1/status` body (a curl failure, an edge 401/403/502 or a WAF page: a body without `embedding_mode` is not a status body), whether or not the variable is set; an engine that reports none prints `NOT RUN [B3]` and the final sentinel then reads `... violations=0 (ownerless-write mode NOT asserted: B3 not run)`: that is a skipped check, not a passed one, so a cut that carries the refusal always sets the variable.
 
 Run this AFTER Step 6's deploy relay confirms the tag is live, and BEFORE Step 7's downstream-ref bump or signing off any release that depends on this engine (T2 [22511] gap 7 — this gate existed only as one prose line in AGENTS.md, in no numbered step of this checklist, since it was born from the nexus-bwulw incident). The gates above prove the ENGINE works, direct; they do not prove the PUBLIC edge (`api.conexus-nexus.com`) exposes the same contracts — 2026-07-23 (nexus-bwulw): the edge stubbed `/version` and auth-gated `/health`, silently disabling voyage threshold gating and dimension-orphan tooling and blocking guided migrations to cloud, while three client features shipped green through every engine-direct gate above. This asserts the engine's pinned contracts (`/version` fields, the `ez5.1` `/health` contract, the client `embedding_mode` probe, the `/v1` read path) survive the public edge.
+
+Two legs added by nexus-wbfpw.50 cover the RDR-192 surface through the same edge, both read-only against production (the script's older legs E and H do write probe rows; see its header). Leg J asserts the `reaper` object of `/v1/status`: present, `enabled`, `last_completed_pass_at` non-null and within three `interval_seconds` plus the `wall_clock_budget_seconds` the same object reports, `failed_passes_total` 0. An edge that strips the key makes `nx doctor`'s Engine reaper row read "not applicable", which looks healthy, so this is the only check that notices. It FAILS on an engine whose first pass has not happened (about a minute after boot): run Step 6.1 a few minutes after the deploy relay confirms the tag live, never inside the boot window. Leg K posts only refused, missing-route or unregistered-collection requests to `/v1/vectors/gc/*`, `/v1/vectors/reapable` and `/v1/vectors/manifest-less-census`, and asserts the engine's own JSON and the 404/400/422/200 the client branches on (the restore verb's exit 4 is a 404). It does NOT cover the success shapes of the four `gc/*` routes (each moves, restores or deletes) or the typed 503 `quarantine_restore_busy` (it needs a held sweep gate), so those stay with the conexus-side gate and the engine's own tests.
 
 Client version to run it from: the working tree (`HEAD`) — this script has no separate published-client mode. This step's job is edge-contract visibility, not client-write compatibility.
 

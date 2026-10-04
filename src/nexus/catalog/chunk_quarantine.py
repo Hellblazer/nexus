@@ -15,9 +15,16 @@ Lifecycle per GC pass (wired in ``indexer._prune_deleted_files``):
    origin collection and leave quarantine. Chash-keyed upsert = idempotent.
 2. **Quarantine** — this pass's orphans move over with their embeddings
    (no re-embed), stamped ``quarantined_at`` + ``origin_collection`` at add
-   time. NO safety floor here: the move is recoverable, so mass supersede
-   churn from a big ``git pull`` proceeds silently instead of warning
-   forever (the nexus-mr89x refusal nag this module retires).
+   time. The move carries the GC family's fraction floor
+   (``NX_GC_FLOOR_FRACTION``, nexus-wbfpw.52), judged by the ENGINE under its
+   sweep gate on the whole reapable set (see :class:`GcFloor`): a pass that
+   would move more than the floor admits is refused, counted and audited
+   rather than moved, and ``NX_GC_FORCE=1`` overrides it. The engine echoes
+   the floor it applied; an older engine ignores the fields and moves
+   unguarded, which :attr:`GcFloor.engine_applied` reports so the caller can
+   say so. (The nexus-mr89x refusal nag this module retired was a client-side
+   floor that re-warned on every pass; a refusal here is one audit row per
+   refused state: a repeat within the hour writes none.)
 3. **Expire** — quarantine rows older than ``NX_GC_QUARANTINE_DAYS``
    (default 14) hard-delete. NO fraction floor here either (nexus-wbfpw.74,
    Sam 2026-10-03), matching the engine's own expiry: the engine function
@@ -26,13 +33,19 @@ Lifecycle per GC pass (wired in ``indexer._prune_deleted_files``):
    loss persisting for the whole grace window) is covered row by row, while
    a floor wedged every bulk quarantine, because one burst ages out as ~100%
    of the sibling's client rows. ``NX_GC_FLOOR_FRACTION`` / ``NX_GC_FORCE``
-   govern ``nx t3 gc``'s own move into quarantine and nothing on this path.
+   govern the move into quarantine and nothing on this path.
+   ``NX_GC_QUARANTINE_DAYS`` governs this client expiry only. For a
+   ``quarantine-knowledge__*`` sibling a newer engine also expires the client-moved
+   rows, on its own ``NX_REAPER_CLIENT_QUARANTINE_RETENTION_DAYS`` (default 14),
+   whatever ``NX_GC_QUARANTINE_DAYS`` says; it never touches a code, docs or rdr
+   sibling, so a longer client value is honoured there and only there.
 
 First concrete piece of the RDR-156 soft-delete theme (nexus-70r3c).
 """
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -191,16 +204,100 @@ def now_stamp() -> str:
 # A ``None`` return is a ROUTE-UNAVAILABLE signal, never "nothing to do" —
 # the caller must not mistake it for a zero-orphan result.
 
+@dataclass
+class GcFloor:
+    """The optional fraction floor a caller hands the engine's move route (nexus-wbfpw.52).
+
+    ``fraction`` and ``min_chunks`` are the GC family's (``NX_GC_FLOOR_FRACTION``,
+    default 0.25, and 100); the engine refuses the move when the collection's WHOLE
+    reapable set is at least ``min_chunks`` and strictly more than ``fraction`` of
+    every stored chunk, judged under its sweep gate in the same call as the move.
+    ``force`` is the operator override (``NX_GC_FORCE=1``): the engine skips the
+    judgement.
+
+    ``engine_applied`` is the OUTCOME, written by the ``*_serverside`` wrappers from
+    the engine's own response: ``None`` until a response was read, ``True`` when the
+    engine echoed the floor (it judged it, or skipped it on ``force``), ``False``
+    when it did not (an older engine ignores the fields and moves unguarded). A
+    caller whose move had to be guarded reads it after the call and says so.
+    """
+
+    fraction: float
+    min_chunks: int
+    force: bool = False
+    engine_applied: bool | None = None
+
+    def request_fields(self) -> dict[str, Any]:
+        """The three additive request fields."""
+        return {
+            "floor_fraction": self.fraction,
+            "floor_min_chunks": self.min_chunks,
+            "force": self.force,
+        }
+
+
+class GcFloorRefused(Exception):
+    """The engine refused a move over its fraction floor: nothing moved in the refused call.
+
+    ``reapable`` and ``total`` are the engine's own counts (the whole reapable set and
+    every stored chunk, judged under its sweep gate); ``moved`` is what earlier batches
+    of the same drain had already moved and committed (0 when the first batch was the
+    one refused, which is the usual case since every batch lowers the ratio).
+    """
+
+    def __init__(self, reapable: int | None, total: int | None, floor: GcFloor, moved: int = 0) -> None:
+        self.reapable, self.total, self.floor, self.moved = reapable, total, floor, moved
+        super().__init__(
+            f"the engine refused the move: {reapable} reapable of {total} stored chunk(s) is over the "
+            f"floor ({floor.fraction:.0%} from {floor.min_chunks} reapable chunks up)"
+        )
+
+
+def _floor_echoed(result: dict) -> bool:
+    """Whether a move response carries the engine's floor echo (``floor.given`` is true).
+
+    Only an engine that honours the request fields writes ``floor`` at all; an older one
+    answers without the key, and a floor-aware engine answering a request that carried
+    no floor writes ``{"given": false}``, which is not an echo of THIS request's floor.
+    """
+    echo = result.get("floor")
+    return isinstance(echo, dict) and echo.get("given") is True
+
+
+def _read_floor(result: dict, floor: GcFloor | None, moved_before: int) -> None:
+    """Record the echo on *floor* and raise :class:`GcFloorRefused` when the engine refused."""
+    if floor is None:
+        return
+    echoed = _floor_echoed(result)
+    # Called on floor-bearing responses only; the AND keeps the flag false if a caller ever reads more than one.
+    floor.engine_applied = echoed if floor.engine_applied is None else (floor.engine_applied and echoed)
+    if echoed and result.get("refused") is True:
+        reapable, total = result.get("reapable_count"), result.get("total_count")
+        raise GcFloorRefused(
+            int(reapable) if reapable is not None else None,
+            int(total) if total is not None else None,
+            floor, moved_before,
+        )
+
+
 def quarantine_orphans_serverside(
     db: Any, collection_name: str, quarantine_name: str,
-    quarantined_at: str, sample_limit: int = 20,
+    quarantined_at: str, sample_limit: int = 20, *, floor: GcFloor | None = None,
 ) -> tuple[int, list[dict]] | None:
     """Try the server-side anti-join move. ``(moved, sample)`` or ``None``
-    if the route is unavailable (caller falls back to :func:`quarantine_orphans`)."""
+    if the route is unavailable (caller falls back to :func:`quarantine_orphans`).
+
+    With *floor* (nexus-wbfpw.52) the three floor fields ride the request, the engine's
+    echo is recorded on ``floor.engine_applied``, and an engine refusal raises
+    :class:`GcFloorRefused`. Without it the call is the unchanged one."""
     fn = getattr(db, "gc_quarantine_orphans", None)
     if fn is None:
         return None
-    result = fn(collection_name, quarantine_name, quarantined_at, sample_limit)
+    if floor is None:
+        result = fn(collection_name, quarantine_name, quarantined_at, sample_limit)
+    else:
+        result = fn(collection_name, quarantine_name, quarantined_at, sample_limit, **floor.request_fields())
+        _read_floor(result, floor, 0)
     return int(result.get("moved", 0)), list(result.get("sample") or [])
 
 
@@ -350,7 +447,7 @@ class BoundedDrainIncomplete(Exception):
 def quarantine_orphans_bounded_serverside(
     db: Any, collection_name: str, quarantine_name: str, quarantined_at: str,
     sample_limit: int = 20, row_limit: int = GC_QUARANTINE_ROW_LIMIT_DEFAULT,
-    *, strict: bool = False,
+    *, strict: bool = False, floor: GcFloor | None = None,
 ) -> tuple[int, list[dict]] | None:
     """Try the server-side BOUNDED quarantine sweep (nexus-e8h5x review
     round 2). The engine route (catalog-037/nexus-a6mon,
@@ -381,6 +478,15 @@ def quarantine_orphans_bounded_serverside(
     batch that raises after earlier batches already committed (the first batch's
     own failure is re-raised as is, nothing having moved). Without it (the
     indexer's end-of-run prune) the behaviour is unchanged: a warning, never a raise.
+
+    ``floor`` (nexus-wbfpw.52) rides the FIRST batch's request only. The engine judges it
+    under its sweep gate on the whole reapable set, at the cost of a whole-collection count
+    inside the bounded statement, and only the first batch of a drain can be refused: each
+    later batch lowers the reapable count and the total equally, so the ratio only falls.
+    A refusal raises :class:`GcFloorRefused` (``moved`` is 0), strict mode included: it is
+    the engine's decision, not a stalled drain. The echo is read from the first response
+    alone and recorded on ``floor.engine_applied``; an engine that ignores the fields (no
+    echo) moves as it always did, and the caller reads the flag to say so.
     """
     fn = getattr(db, "gc_quarantine_orphans_bounded", None)
     if fn is None:
@@ -391,13 +497,22 @@ def quarantine_orphans_bounded_serverside(
     remaining = None
     batches = 0
     for _ in range(max_iterations):
+        # The floor rides the FIRST batch only (nexus-wbfpw.52): the engine judges it on a
+        # whole-collection count, which is real work inside the 25 s statement bound and the
+        # exclusive gate, and a later batch cannot be refused (each batch lowers the reapable
+        # count and the total equally, so the ratio only falls). Only a floor-bearing response
+        # is read: a later batch's ``{"given": false}`` is not an echo of this request.
+        floor_bearing = floor is not None and batches == 0
+        extra = floor.request_fields() if floor_bearing else {}
         try:
-            result = fn(collection_name, quarantine_name, quarantined_at, sample_limit, row_limit)
+            result = fn(collection_name, quarantine_name, quarantined_at, sample_limit, row_limit, **extra)
         except Exception as exc:  # noqa: BLE001 — strict mode re-labels a mid-drain failure; otherwise re-raised unchanged
             if strict and batches:
                 raise BoundedDrainIncomplete("batch failed", total_moved, None, batches) from exc
             raise
         batches += 1
+        if floor_bearing:
+            _read_floor(result, floor, total_moved)
         batch_moved = int(result.get("moved", 0))
         total_moved += batch_moved
         if len(sample) < sample_limit:

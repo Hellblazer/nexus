@@ -391,6 +391,81 @@ public final class PgContainerHelper {
     }
 
     /**
+     * The DBA-side provisioning a NON-SUPERUSER schema owner needs before the product changelog can be
+     * walked as that owner (nexus-wbfpw.48): the owner role, {@code nexus_svc}, the database/public
+     * grants, both extensions, the {@code nexus} schema owned by {@code adminRole} and the extension
+     * relocation helpers. See {@code db.changelog-test-nonsuper-owner.xml}'s header for why a test that
+     * wants production's ownership (and so production's row-level-security behaviour for a SECURITY
+     * DEFINER function) cannot migrate as the superuser. After this, migrate with
+     * {@code SchemaMigrator.migrate} over a pool connected as {@code adminRole}.
+     *
+     * <p><b>ONLY call this against a {@link #startDedicated()} container, before any product migration.</b>
+     * Runs through its own Liquibase bookkeeping tables, so the owner's later product walk does not find a
+     * superuser-owned {@code databasechangelog}.
+     *
+     * @param su        superuser connection
+     * @param adminRole the owner role to create (the production nexus_admin equivalent)
+     * @param adminPass its password
+     */
+    public static void bootstrapNonSuperuserOwner(Connection su, String adminRole, String adminPass) throws Exception {
+        runSuperuserTestChangelog(su, "db/changelog-test/db.changelog-test-nonsuper-owner.xml",
+            "databasechangelog_test_nonsuper_owner", Map.of(
+                "adminRole", adminRole, "adminPass", adminPass, "svcPass", SVC_PASSWORD));
+    }
+
+    /**
+     * Make {@link #SVC_USERNAME}'s NEW sessions log every statement's plan, statements nested in a
+     * function included, to the server log (see {@code db.changelog-test-auto-explain.xml}). Open a fresh
+     * pool after this; existing pooled connections keep their old settings. Read the plans back with
+     * {@code container.getLogs()}.
+     */
+    public static void enableAutoExplainForService(Connection su) throws Exception {
+        runSuperuserTestChangelog(su, "db/changelog-test/db.changelog-test-auto-explain.xml",
+            "databasechangelog_test_auto_explain", Map.of("svcRole", SVC_USERNAME));
+    }
+
+    /** Password every role {@link #grantRoleMembership} creates gets. */
+    public static final String MEMBER_PASSWORD = "nexus_member_pass";
+
+    /**
+     * {@code GRANT grantedRole TO memberRole WITH INHERIT <inherit>}, creating {@code memberRole} as a LOGIN
+     * role (password {@link #MEMBER_PASSWORD}) when it does not exist yet. {@code bypassRls} applies only to a
+     * role created here. See {@code db.changelog-test-role-membership.xml}. Role names are fixed test
+     * literals, never input.
+     */
+    public static void grantRoleMembership(Connection su, String grantedRole, String memberRole,
+                                           boolean inherit, boolean bypassRls) throws Exception {
+        runSuperuserTestChangelog(su, "db/changelog-test/db.changelog-test-role-membership.xml",
+            "databasechangelog_test_role_membership", Map.of(
+                "grantedRole", grantedRole, "memberRole", memberRole, "memberPass", MEMBER_PASSWORD,
+                "inheritOption", inherit ? "TRUE" : "FALSE",
+                "memberAttrs", bypassRls ? "BYPASSRLS" : "NOBYPASSRLS"));
+    }
+
+    /**
+     * Run one DDL statement on a superuser connection through a test changelog (nexus-wbfpw.48), for the
+     * statements jOOQ has no typed form for (RLS policies, ALTER TABLE ... ROW LEVEL SECURITY, CREATE ROLE
+     * with attributes). Same mechanism as {@link #grantRoleMembership}: its own bookkeeping table, runAlways.
+     */
+    public static void runSuperuserDdl(Connection su, String ddl) throws Exception {
+        runSuperuserTestChangelog(su, "db/changelog-test/db.changelog-test-superuser-ddl.xml",
+            "databasechangelog_test_superuser_ddl", Map.of("ddl", ddl));
+    }
+
+    private static void runSuperuserTestChangelog(Connection su, String changelog, String bookkeepingTable,
+                                                  Map<String, String> params) throws Exception {
+        Database db = DatabaseFactory.getInstance().findCorrectDatabaseImplementation(new JdbcConnection(su));
+        db.setDatabaseChangeLogTableName(bookkeepingTable);
+        db.setDatabaseChangeLogLockTableName(bookkeepingTable + "_lock");
+        Liquibase liquibase = new Liquibase(changelog, new ClassLoaderResourceAccessor(), db);
+        for (var entry : params.entrySet()) {
+            liquibase.setChangeLogParameter(entry.getKey(), entry.getValue());
+        }
+        liquibase.update(new Contexts());
+        su.setAutoCommit(true);
+    }
+
+    /**
      * Seed one {@code nexus.service_tokens} row via generated jOOQ DSL (nexus-cbo4a
      * batch 1a) — replaces the hand-rolled {@code INSERT INTO nexus.service_tokens
      * (token_hash, tenant_id, label) VALUES (...) ON CONFLICT (token_hash) DO

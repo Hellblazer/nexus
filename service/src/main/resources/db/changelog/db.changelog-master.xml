@@ -1706,12 +1706,33 @@
         nexus-2x9xa: the other half of the symmetric expiry split. gc_expire_quarantine
         (a released function, catalog-033-3) skips the rows the reaper tagged, so the
         client expires only what the client moved and the engine only what it moved.
+        (Overtaken for quarantine-knowledge__* siblings by vectors-028 below: there the engine
+        also expires the client-moved rows, so "only what it moved" no longer holds on the
+        engine's side.)
         New changeset, never an edit of the released one. vectors-025 is the restore
         verb's (nexus-wbfpw.49) and vectors-023 (the text-gate probe) is included below, after fk-006; this is
         026. Placed after
         vectors-024, before the grants blocks.
     -->
     <include file="db/changelog/vectors-026-gc-expire-quarantine-skips-engine-rows.xml"/>
+
+    <!--
+        nexus-wbfpw.52 (RDR-192): nexus.gc_quarantine_orphans_floored, the optional fraction floor on the
+        gc/quarantine-orphans route, judged under the sweep gate in the same call as the move. A wrapper over
+        the released move functions, so none of them changes. Placed after vectors-026, before the grants blocks.
+    -->
+    <include file="db/changelog/vectors-027-gc-quarantine-orphans-floored.xml"/>
+
+    <!--
+        nexus-wbfpw.75 (Sam, 2026-10-04): the engine also expires the quarantine a CLIENT moved, but
+        only in quarantine-knowledge__* siblings (no client sweep runs on a knowledge__ collection
+        routinely; code, docs and rdr stay with the client and its NX_GC_QUARANTINE_DAYS). A new
+        function under its own gc_audit operation, reaper_expire_client_quarantine, scoped to a
+        registered quarantine knowledge sibling and a registered live knowledge origin; the reaper's
+        own expiry (vectors-024-2) and the client's (vectors-026-1) are untouched. It lands after
+        vectors-027 (nexus-wbfpw.52), so it is 028.
+    -->
+    <include file="db/changelog/vectors-028-reaper-expire-client-quarantine.xml"/>
 
     <!--
         RDR-223 Phase 3 step 2 (nexus-z0o2p.27): DROP the staging landing
@@ -1734,6 +1755,21 @@
         effect. Placed after fk-006 (the tail when this landed) and before the grants blocks.
     -->
     <include file="db/changelog/vectors-023-text-gate-probe-live-c.xml"/>
+
+    <!--
+        nexus-wbfpw.48: nexus.text_gate_probe_<dim> becomes a SECURITY DEFINER function with its own
+        fail-closed tenant predicate, plus a SELECT-only owner policy on nexus.chunks, so the GIN text
+        indexes can be index conditions under nexus_svc's FORCE RLS (a user qual with a non-leakproof
+        operator cannot be, on a relation with a security qual). The two parts only work together and the
+        included file's header says why. A policy and function definitions, no data effect. The changeset is
+        guarded: it is skipped whole (MARK_RAN) when nexus_svc, or any other login role that RLS binds, is or has
+        the privileges of the migrating role, because the owner policy would then bind to that role. Numbered
+        029 because vectors-027 (nexus-wbfpw.52) and vectors-028 (nexus-wbfpw.75) landed before it. It is the
+        last of the 02x includes in file order (027 and 028 sit above, after vectors-026), placed after
+        vectors-023 (the probe's previous definition, the only ordering it needs) and before the grants
+        blocks.
+    -->
+    <include file="db/changelog/vectors-029-text-gate-probe-definer.xml"/>
 
     <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".
