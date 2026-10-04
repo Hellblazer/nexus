@@ -86,6 +86,56 @@ export NX_ALLOW_PROD_WRITE="cloud-client-path-gate: deliberate post-deploy MVV w
 #      one non-mutating rd on a fresh probe subspace. A missing echo FAILS
 #      this leg; it is never skipped.
 #
+#   J  engine reaper liveness on the /v1/status body through the edge
+#      (nexus-wbfpw.50, widened by the RDR-192 Phase 3 gate): the `reaper`
+#      object is PRESENT, enabled, last_completed_pass_at is non-null and no
+#      older than three of its own intervals plus the wall-clock budget (both
+#      read from the same object), and failed_passes_total is 0. An edge that
+#      strips the key makes `nx doctor`'s Engine reaper row read "not
+#      applicable", which looks healthy, so the gate asserts the key. Tenant
+#      counts are never hardcoded. A freshly booted engine fails this leg until
+#      its first pass (about a minute after start): run it a few minutes after
+#      a deploy, never inside the boot window. Read-only (reuses leg B's body).
+#   K  RDR-191/192 vector sweep routes through the edge (nexus-wbfpw.50): the
+#      engine's own JSON (not an edge page) and the status codes the client
+#      branches on, using ONLY requests that cannot move, restore, expire or
+#      delete anything (each is refused by validation, answers 404, or reads an
+#      unregistered collection name):
+#        K1  POST /v1/vectors/gc/<no-such-route>        404 + JSON (the client
+#            reads a 404 as "engine predates the route", exit 4 of the
+#            quarantine-restore verb; the real route cannot be used for this, it
+#            exists on the deployed engine)
+#        K2  gc/quarantine-restore, dry_run, unregistered origin   422,
+#            reason=unregistered_collection (a throwaway tenant, or this one,
+#            has no such origin, so the engine refuses before it looks anywhere)
+#        K3  gc/quarantine-restore, no source                      400
+#        K4  gc/quarantine-restore, two sources                    400
+#        K5  gc/quarantine-orphans, empty body                     400
+#        K6  gc/restore-rereferenced, empty body                   400
+#        K7  gc/expire-quarantine, empty body                      400
+#        K8  POST /v1/vectors/reapable, unregistered collection    200, empty
+#            page in the engine's shape (collection, grace_seconds null,
+#            returned 0, next_after null, chunks [])
+#        K9  reapable, a quarantine- collection                    400
+#        K10 reapable, grace_seconds=-1                            400
+#        K11 POST /v1/vectors/manifest-less-census, unregistered   200, empty
+#            census (all five bucket totals, scope_chunk_total 0)
+#        K12 manifest-less-census, a quarantine- collection        400
+#      NOT COVERED, and why (no read-only or validation-only form exists):
+#        - the 200 success shape of quarantine-orphans, restore-rereferenced,
+#          expire-quarantine and quarantine-restore (each moves, restores or
+#          deletes; quarantine-restore's own dry run needs a REGISTERED origin,
+#          which is a catalog write);
+#        - the typed 503 quarantine_restore_busy (reason, Retry-After: 5,
+#          nothing_moved): it fires only when a sweep gate or an index-run lock
+#          is held past 2 s, which cannot be provoked from outside without
+#          writes;
+#        - GET /v1/vectors/count, the denominator of the reaper runbook's
+#          reapable-ratio preview: no leg here or in the bead's scope, and a
+#          read of an unregistered collection is not known to answer 200.
+#      Every K request goes with the same bearer leg B resolved. The 200 probes
+#      read a collection name no tenant has registered, so they touch no data.
+#
 # Applicability: requires a CLOUD-mode box (service_url is a non-loopback
 # https endpoint). On a local-mode box this gate REFUSES (exit 2) rather
 # than skip-passing — a vacuous pass here would be exactly the blindness
@@ -135,18 +185,21 @@ _fail() { echo "CLOUD CLIENT-PATH GATE FAILED: $*" >&2; exit 1; }
 # side — a heredoc that dies mid-leg still counts as a leg that failed to
 # complete, never a leg that quietly did not run.
 #
-# EXPECTED_LEGS=7 (dated 2026-09-13; [B] redefined 2026-09-28; [I] added 2026-09-29;
-# [G] deleted at cleanup step A1, nexus-0r1uz): [A] /version,
+# EXPECTED_LEGS=9 (dated 2026-09-13; [B] redefined 2026-09-28; [I] added 2026-09-29;
+# [J] and [K] added 2026-10-04, nexus-wbfpw.50; [G] deleted at cleanup step A1,
+# nexus-0r1uz): [A] /version,
 # [B] edge auth contract (unauthenticated /health refused, data token
 # accepted on /v1), [C+D] client probe heredoc (one shell-side entry for the
 # combined python leg), [E] T2 write body carrying shell-substitution text
 # (nexus-cmzib WAF passthrough), [F] RDR-205 tuple-space CA 3 through the
 # edge (nexus-em75s.15), [H] RDR-206 renew and ack-with-reply through
 # the edge (nexus-zjzt1, 2026-09-13), [I] descending tuple read echo through
-# the edge (nexus-kp5q3, 2026-09-29). Editing the battery means updating this
+# the edge (nexus-kp5q3, 2026-09-29), [J] engine reaper liveness on /v1/status
+# through the edge, [K] the vector sweep routes through the edge (both
+# nexus-wbfpw.50, 2026-10-04). Editing the battery means updating this
 # constant in the same diff.
 LEGS_RAN=0
-EXPECTED_LEGS=7
+EXPECTED_LEGS=9
 _leg_enter() { LEGS_RAN=$((LEGS_RAN + 1)); echo "[$1] $2"; }
 
 # Leg B3's compare logic (nexus-20onx; nexus-i1oh4 doctrine applied to it in the
@@ -203,6 +256,98 @@ except Exception:
     return 3
 }
 B3_NOT_RUN=0
+
+# Leg J's compare logic (nexus-wbfpw.50): the engine reaper's liveness read from the
+# `reaper` object of /v1/status through the edge. Takes the status body and, for the
+# test, a fixed "now" in epoch seconds (default: the real clock). Prints one line and
+# returns 0 = holds, 1 = violation. There is no not-run state: unlike the ownerless-
+# write mode, this check has no unset knob, and a body without the object is exactly
+# the failure the leg exists for (an edge that strips the key makes `nx doctor`'s
+# Engine reaper row read "not applicable", which looks healthy).
+#   - body unreadable (not a status body)                          -> 1
+#   - `reaper` absent or not an object                             -> 1
+#   - enabled is not true                                          -> 1
+#   - interval_seconds / wall_clock_budget_seconds unusable        -> 1
+#   - last_completed_pass_at null (no pass yet) or unparseable     -> 1
+#   - last pass older than 3 * interval + wall_clock_budget        -> 1
+#   - failed_passes_total absent, not an int, or not 0             -> 1
+# The test (tests/e2e/cloud_client_path_gate_b3_test.sh) sources this function from
+# the real script.
+_reaper_status_verdict() {
+    local body="$1" now="${2:-}"
+    "$E2E_PYTHON" - "$body" "$now" <<'PY'
+import json
+import sys
+import time
+from datetime import datetime, timezone
+
+body, now_arg = sys.argv[1], sys.argv[2]
+now = float(now_arg) if now_arg else time.time()
+
+
+def violation(msg):
+    print("J: " + msg)
+    sys.exit(1)
+
+
+try:
+    doc = json.loads(body)
+    if not isinstance(doc, dict) or "embedding_mode" not in doc:
+        raise ValueError("not a status body")
+except Exception:
+    violation("/v1/status through the edge returned no readable status body (a curl failure, or an edge "
+              "401/403/502/WAF page), so the engine reaper's liveness could not be read")
+reaper = doc.get("reaper")
+if not isinstance(reaper, dict):
+    violation("/v1/status carries no `reaper` object (got %r): the engine predates the reaper liveness field, or the "
+              "edge strips it, and `nx doctor`'s Engine reaper row then reads not applicable, which looks healthy"
+              % (reaper,))
+errs = []
+if reaper.get("enabled") is not True:
+    errs.append("reaper.enabled is %r, expected true (NX_REAPER_ENABLED=false, or no reaper scheduled in this process)"
+                % (reaper.get("enabled"),))
+
+
+def whole(key, floor):
+    v = reaper.get(key)
+    if type(v) is not int or v < floor:
+        errs.append("reaper.%s is %r, expected an integer >= %d" % (key, v, floor))
+        return None
+    return v
+
+
+interval = whole("interval_seconds", 1)
+budget = whole("wall_clock_budget_seconds", 0)
+last_raw = reaper.get("last_completed_pass_at")
+last = None
+if last_raw is None:
+    errs.append("reaper.last_completed_pass_at is null: the reaper has made no completed pass (a young engine's first "
+                "pass is due about a minute after boot, so run this leg a few minutes after a deploy; later, a dead reaper)")
+else:
+    try:
+        last = datetime.fromisoformat(str(last_raw).replace("Z", "+00:00"))
+        if last.tzinfo is None:
+            last = last.replace(tzinfo=timezone.utc)
+    except ValueError:
+        errs.append("reaper.last_completed_pass_at is %r, not an ISO-8601 instant" % (last_raw,))
+age = limit = None
+if last is not None and interval is not None and budget is not None:
+    age = now - last.timestamp()
+    limit = 3 * interval + budget
+    if age > limit:
+        errs.append("last completed pass was %ds ago, more than 3 intervals of %ds plus the %ds wall-clock budget (%ds): "
+                    "the reaper may be dead" % (age, interval, budget, limit))
+failed = reaper.get("failed_passes_total")
+if type(failed) is not int:
+    errs.append("reaper.failed_passes_total is %r, expected the integer 0" % (failed,))
+elif failed != 0:
+    errs.append("reaper.failed_passes_total is %d, expected 0 (read the engine log for event=reaper_pass_failed)" % failed)
+if errs:
+    violation("; ".join(errs))
+print("ok [J]: reaper enabled, last completed pass %ds ago (limit %ds = 3 x %ds + %ds budget), failed_passes_total=0"
+      % (age, limit, interval, budget))
+PY
+}
 
 # Every python whose STDOUT is captured below configures cli logging first:
 # structlog's unconfigured default writes to stdout, and a log line there
@@ -304,6 +449,10 @@ esac
 # reads it with -H @file. Which kind was used goes to stderr.
 BEARER_FILE="$(mktemp)"
 chmod 600 "$BEARER_FILE"
+# Leg K reuses the bearer, so it outlives leg B; the trap removes it on every exit,
+# a _fail included.
+trap 'rm -f "$BEARER_FILE"' EXIT
+STATUS_BODY=""
 BEARER_RC=0
 SERVICE_URL="$SERVICE_URL" BEARER_FILE="$BEARER_FILE" uv run python - <<'PY' || BEARER_RC=$?
 import os
@@ -352,7 +501,6 @@ else
         *) _leg_fail "$B3_LINE" ;;
     esac
 fi
-rm -f "$BEARER_FILE"
 
 # ── Legs C+D: real client code through the live config ───────────────────
 _leg_enter C+D "client embedding_mode probe + client read path"
@@ -690,6 +838,153 @@ if read.rows != [] or read.limit != 1:
     sys.exit(1)
 print("  ok [I]: descending rd echoed order=desc and limit=1 through the edge")
 PY
+
+# ── Leg J: engine reaper liveness through the edge (nexus-wbfpw.50) ──────
+# Judged on the /v1/status body leg B already fetched with the client's bearer;
+# no second request. The compare logic is _reaper_status_verdict, above, and is
+# unit-tested in tests/e2e/cloud_client_path_gate_b3_test.sh.
+_leg_enter J "engine reaper liveness on /v1/status through the edge (present, enabled, fresh, no failed pass)"
+J_RC=0
+J_LINE="$(_reaper_status_verdict "$STATUS_BODY")" || J_RC=$?
+if [ "$J_RC" -eq 0 ]; then
+    echo "  $J_LINE"
+else
+    _leg_fail "$J_LINE"
+fi
+
+# ── Leg K: vector sweep routes through the edge (nexus-wbfpw.50) ─────────
+# The routes under /v1/vectors/gc/*, POST /v1/vectors/reapable and POST
+# /v1/vectors/manifest-less-census, reached through the PUBLIC edge with the
+# client's own bearer. What is asserted is what the client reads: the status
+# code, and a body that is the engine's own JSON rather than an edge page. The
+# restore verb's exit 4 ("the engine predates the route") is a 404, the typed
+# refusals are 400/422, and nothing else notices an edge that rewrites any of
+# them (nexus-bwulw).
+#
+# READ-ONLY BY CONSTRUCTION. This runs against the live engine, so every request
+# below is one the engine refuses or answers without touching data: an empty or
+# source-less body (400 before any repository call), a quarantine- collection
+# (400), a route that does not exist (404), a dry run naming an UNREGISTERED
+# origin (422, refused before the engine looks anywhere), and two reads of an
+# unregistered collection name (200 with an empty result). Nothing is moved,
+# restored, expired or deleted. The three older sweep routes (quarantine-orphans,
+# restore-rereferenced, expire-quarantine) have no dry-run form, so only their
+# validation refusal is reachable; their 200 shapes, and quarantine-restore's own
+# 200 shape (its dry run needs a REGISTERED origin, a catalog write), are
+# UNCOVERED here. So is the typed 503 quarantine_restore_busy (reason,
+# Retry-After: 5, nothing_moved): it needs a sweep gate or an index-run lock held
+# past 2 s, which cannot be provoked from outside without writes.
+_leg_enter K "vector sweep routes through the edge (gc/* refusals + 404, reapable, manifest-less-census; read-only)"
+K_STAMP="$(date +%s)-$RANDOM"
+K_COLLECTION="knowledge__ccpg-unregistered-${K_STAMP}__voyage-context-3__v1"
+K_QUARANTINE="quarantine-${K_COLLECTION}"
+K_CHASH="0000000000000000000000000000000000000000000000000000000000000000"
+EDGE_CODE=""
+EDGE_BODY=""
+# POST a JSON body through the edge with the leg-B bearer: sets EDGE_CODE and EDGE_BODY.
+_edge_post() {
+    local path="$1" data="$2" out
+    out="$(mktemp)"
+    EDGE_CODE="$(curl -sS -m 30 -X POST -H @"$BEARER_FILE" -H 'Content-Type: application/json' \
+        --data "$data" -o "$out" -w '%{http_code}' "$SERVICE_URL$path" || echo 000)"
+    EDGE_BODY="$(cat "$out")"
+    rm -f "$out"
+}
+# Judge the last _edge_post: the status code first, then a body that is a JSON
+# object of the kind named. kinds: error (a non-empty "error" string), unregistered
+# (error + reason unregistered_collection), reapable_empty, census_empty.
+_edge_expect() {
+    local label="$1" want="$2" kind="$3"
+    "$E2E_PYTHON" - "$label" "$want" "$EDGE_CODE" "$kind" "$K_COLLECTION" "$EDGE_BODY" <<'PY'
+import json
+import sys
+
+label, want, got, kind, coll, body = sys.argv[1:7]
+head = body[:160].replace("\n", " ")
+
+
+def violation(msg):
+    print("  VIOLATION [%s]: %s" % (label, msg), file=sys.stderr)
+    sys.exit(1)
+
+
+if got != want:
+    violation("HTTP %s, expected %s (body: %r) -- the client branches on this status" % (got, want, head))
+try:
+    doc = json.loads(body)
+except ValueError:
+    doc = None
+if not isinstance(doc, dict):
+    violation("HTTP %s body is not a JSON object (%r): an edge page or a stripped body, not the engine's answer" % (got, head))
+errs = []
+if kind in ("error", "unregistered"):
+    if not (isinstance(doc.get("error"), str) and doc["error"]):
+        errs.append("no non-empty 'error' string in %r" % (head,))
+if kind == "unregistered" and doc.get("reason") != "unregistered_collection":
+    errs.append("reason is %r, expected 'unregistered_collection' (the key clients branch on)" % (doc.get("reason"),))
+if kind == "reapable_empty":
+    if doc.get("collection") != coll:
+        errs.append("collection echo is %r, expected %r" % (doc.get("collection"), coll))
+    if "grace_seconds" not in doc or doc["grace_seconds"] is not None:
+        errs.append("grace_seconds is %r, expected an echoed null (the engine default)" % (doc.get("grace_seconds", "<absent>"),))
+    if type(doc.get("returned")) is not int or doc["returned"] != 0:
+        errs.append("returned is %r, expected 0 for an unregistered collection" % (doc.get("returned"),))
+    if doc.get("chunks") != []:
+        errs.append("chunks is %r, expected []" % (doc.get("chunks"),))
+    if "next_after" not in doc or doc["next_after"] is not None:
+        errs.append("next_after is %r, expected null" % (doc.get("next_after", "<absent>"),))
+if kind == "census_empty":
+    buckets = ("superseded", "legacy-unmanifested", "dead-owner", "no-owner", "unclassified")
+    if doc.get("collection") != coll:
+        errs.append("collection echo is %r, expected %r" % (doc.get("collection"), coll))
+    totals = doc.get("totals")
+    if not isinstance(totals, dict) or any(type(totals.get(b)) is not int for b in buckets):
+        errs.append("totals is %r, expected an integer for each of %s" % (totals, ", ".join(buckets)))
+    if type(doc.get("scope_chunk_total")) is not int or doc["scope_chunk_total"] != 0:
+        errs.append("scope_chunk_total is %r, expected 0 for an unregistered collection" % (doc.get("scope_chunk_total"),))
+    if type(doc.get("returned")) is not int or doc["returned"] != 0:
+        errs.append("returned is %r, expected 0" % (doc.get("returned"),))
+    for key in ("chashes", "owners"):
+        if not isinstance(doc.get(key), dict):
+            errs.append("%s is %r, expected an object" % (key, doc.get(key)))
+if errs:
+    violation("; ".join(errs))
+print("  ok [%s]: HTTP %s, the engine's own JSON (%s)" % (label, got, kind))
+PY
+}
+
+if [ ! -s "$BEARER_FILE" ]; then
+    _leg_fail "K: no bearer (leg B could not resolve one), so the sweep routes could not be reached"
+else
+    K_BAD=0
+    _edge_post "/v1/vectors/gc/this-route-does-not-exist-${K_STAMP}" '{}'
+    _edge_expect K1 404 error || K_BAD=1
+    _edge_post "/v1/vectors/gc/quarantine-restore" \
+        "{\"origin_collection\":\"$K_COLLECTION\",\"chashes\":[\"$K_CHASH\"],\"dry_run\":true}"
+    _edge_expect K2 422 unregistered || K_BAD=1
+    _edge_post "/v1/vectors/gc/quarantine-restore" "{\"origin_collection\":\"$K_COLLECTION\",\"dry_run\":true}"
+    _edge_expect K3 400 error || K_BAD=1
+    _edge_post "/v1/vectors/gc/quarantine-restore" \
+        "{\"origin_collection\":\"$K_COLLECTION\",\"chashes\":[\"$K_CHASH\"],\"audit_id\":1,\"dry_run\":true}"
+    _edge_expect K4 400 error || K_BAD=1
+    _edge_post "/v1/vectors/gc/quarantine-orphans" '{}'
+    _edge_expect K5 400 error || K_BAD=1
+    _edge_post "/v1/vectors/gc/restore-rereferenced" '{}'
+    _edge_expect K6 400 error || K_BAD=1
+    _edge_post "/v1/vectors/gc/expire-quarantine" '{}'
+    _edge_expect K7 400 error || K_BAD=1
+    _edge_post "/v1/vectors/reapable" "{\"collection\":\"$K_COLLECTION\",\"limit\":1}"
+    _edge_expect K8 200 reapable_empty || K_BAD=1
+    _edge_post "/v1/vectors/reapable" "{\"collection\":\"$K_QUARANTINE\"}"
+    _edge_expect K9 400 error || K_BAD=1
+    _edge_post "/v1/vectors/reapable" "{\"collection\":\"$K_COLLECTION\",\"grace_seconds\":-1}"
+    _edge_expect K10 400 error || K_BAD=1
+    _edge_post "/v1/vectors/manifest-less-census" "{\"collection\":\"$K_COLLECTION\",\"limit\":1}"
+    _edge_expect K11 200 census_empty || K_BAD=1
+    _edge_post "/v1/vectors/manifest-less-census" "{\"collection\":\"$K_QUARANTINE\"}"
+    _edge_expect K12 400 error || K_BAD=1
+    [ "$K_BAD" -eq 0 ] || _leg_fail "K: the sweep routes through the edge did not answer as the engine does (see above)"
+fi
 
 if [ "$LEGS_RAN" -ne "$EXPECTED_LEGS" ]; then
     # Distinct from a violation: "the gate did not run its full battery" is

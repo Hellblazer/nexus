@@ -181,8 +181,9 @@ SUITES = [
     _Suite("scripts/mvnw-leased_test.sh", 22),
     # nexus-20onx round 3: leg B3's compare logic, sourced from the real cloud
     # gate script and fed canned /v1/status bodies (11 cases + 3 wiring checks;
-    # round 4: 4 unreadable-body cases, S4, 17 in all).
-    _Suite("tests/e2e/cloud_client_path_gate_b3_test.sh", 17),
+    # round 4: 4 unreadable-body cases, S4, 17 in all). nexus-wbfpw.50: leg J's reaper verdict (17
+    # cases), its 3 wiring checks and the leg-K read-only audit, 38 in all.
+    _Suite("tests/e2e/cloud_client_path_gate_b3_test.sh", 38),
     # nexus-u67ow: lib/python.sh, the one-interpreter resolver the e2e harness uses in place of a
     # bare python3 (hellmini's is 3.9.6). Stub interpreters on a PATH of their own; 37 measured.
     _Suite("tests/e2e/lib/python_test.sh", 37),

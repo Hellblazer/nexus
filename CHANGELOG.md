@@ -6,6 +6,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **The cloud client-path gate checks the RDR-192 sweep routes and the reaper through the public edge** (nexus-wbfpw.50). Leg K posts requests that move nothing (refusals, a missing route, a read of an unregistered collection name) to `/v1/vectors/gc/*`, `/v1/vectors/reapable` and `/v1/vectors/manifest-less-census`, and asserts the engine's own JSON and the 404/400/422/200 the client reads; leg J asserts the `reaper` object of `/v1/status` is present, enabled, fresh and free of failed passes. The success shapes of the sweep routes and the typed 503 `quarantine_restore_busy` are listed in the script as uncovered, since they need writes.
+
 ## [7.70.0] - 2026-10-04
 
 Pairs with engine-service-v0.1.145, unchanged from 7.69.0: no engine cut, no
