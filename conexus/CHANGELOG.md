@@ -1,5 +1,23 @@
 # Changelog
 
+## [7.71.0] - 2026-10-04
+
+Plugin version aligned with conexus 7.71.0. Everything `PENDING_RELEASE.md` held
+since v7.70.0 becomes live at this pin (four entries):
+
+- `.mcp.json` sets `alwaysLoad: false` on `nexus-catalog` (10 tools, about 3.4k
+  tokens of schema), so Claude Code loads those schemas through tool search on
+  first use. `nexus` and `sequential-thinking` keep `alwaysLoad: true`
+  (nexus-ivi4s).
+- `skills/nexus/SKILL.md` drops the ten direct `operator_*` call examples and
+  points at `nx_answer`; `skills/nexus/reference.md` replaces the per-operator
+  tool sections with one table of plan verbs. They ship with this client
+  release because it is the one that stops advertising the operators as MCP
+  tools (nexus-ivi4s).
+- `commands/nx-preflight.md` no longer assumes its preflight output is present;
+  when the `!` preamble's output is missing it runs
+  `nx command-context nx-preflight` (nexus-0cq5m). Text only.
+
 ## [7.70.0] - 2026-10-04
 
 Plugin version aligned with conexus 7.70.0. Everything `PENDING_RELEASE.md` held

@@ -6,6 +6,21 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.71.0] - 2026-10-04
+
+Pairs with engine-service-v0.1.146 (tagged on 2b85b3357, live in the cloud since
+19:02Z, before this client tag: every wire-ledger entry is additive). The engine
+carries three RDR-192 changesets: vectors-027 (a fraction floor on the
+quarantine move route), vectors-028 (the reaper expires client-moved knowledge
+quarantine) and vectors-029 (the hybrid text-gate probe uses the GIN indexes
+under row-level security, guarded, with a boot isolation check). Measured on a
+PITR fork of production at the same tenant data, the text-gate probe went from
+1,176 ms to 93 ms for a rare token in one collection and from 25.7 s to 157 ms
+across all collections; the post-deploy gate read hybrid client p95 from
+1,724 ms to 1,161 ms. The MCP surface shrinks: the ten `operator_*` tools are no
+longer advertised (`nx_answer` runs them through plans), and Claude Code defers
+the `nexus-catalog` schemas. See `conexus/CHANGELOG.md` for the plugin side.
+
 ### Added
 
 - **The cloud client-path gate checks the RDR-192 sweep routes and the reaper through the public edge** (nexus-wbfpw.50). Leg K posts requests that move nothing (refusals, a missing route, a read of an unregistered collection name) to `/v1/vectors/gc/*`, `/v1/vectors/reapable` and `/v1/vectors/manifest-less-census`, and asserts the engine's own JSON and the 404/400/422/200 the client reads; leg J asserts the `reaper` object of `/v1/status` is present, enabled, fresh and free of failed passes. The success shapes of the sweep routes and the typed 503 `quarantine_restore_busy` are listed in the script as uncovered, since they need writes.
