@@ -62,16 +62,78 @@ def test_fetch_engine_status_returns_parsed_body_on_success():
     assert mock_get.call_args.kwargs["headers"] == {"Authorization": "Bearer tok"}
 
 
+def _manager_minting(bearer):
+    manager = MagicMock()
+    manager.bearer_for.return_value = bearer
+    return manager
+
+
 def test_fetch_engine_status_sends_no_auth_header_without_a_token():
+    """No static token AND no mint credential (bearer_for -> None): a plain
+    local box. The probe sends no bearer, as before."""
     resp = MagicMock()
     resp.raise_for_status.return_value = None
     resp.json.return_value = {"embedding_mode": "onnx-local"}
     with patch(
         "nexus.db.service_endpoint.resolve_service_endpoint_with_evidence_gate",
         return_value=("http://127.0.0.1:1", None),
+    ), patch(
+        "nexus.db.data_token.get_data_token_manager", return_value=_manager_minting(None),
     ), patch("nexus.db.http_engine_status.httpx.get", return_value=resp) as mock_get:
         assert fetch_engine_status() is not None
     assert "Authorization" not in mock_get.call_args.kwargs["headers"]
+
+
+def test_fetch_engine_status_mints_a_data_token_when_the_resolver_returns_none():
+    """nexus-z0o2p.40: a mint-armed cloud box resolves an EMPTY static token
+    (nexus-xzeml), and the public edge answers 403 to a bare GET on /v1/status,
+    so the doctor's Ownerless writes row read "could not be read" on every
+    cloud box. The probe must mint the data token the way the stores and
+    tests/e2e/cloud-client-path-gate.sh do, for the resolved base_url and
+    the default tenant."""
+    resp = MagicMock()
+    resp.raise_for_status.return_value = None
+    resp.json.return_value = {"ownerless_write_mode": "log-only"}
+    manager = _manager_minting("minted-data-token")
+    with patch(
+        "nexus.db.service_endpoint.resolve_service_endpoint_with_evidence_gate",
+        return_value=("https://edge.example", ""),
+    ), patch(
+        "nexus.db.data_token.get_data_token_manager", return_value=manager,
+    ), patch("nexus.db.http_engine_status.httpx.get", return_value=resp) as mock_get:
+        status = fetch_engine_status()
+    assert status == {"ownerless_write_mode": "log-only"}
+    manager.bearer_for.assert_called_once_with("https://edge.example", "default")
+    assert mock_get.call_args.kwargs["headers"] == {"Authorization": "Bearer minted-data-token"}
+
+
+def test_fetch_engine_status_returns_none_when_the_mint_fails():
+    """A mint failure is 'unprobeable', never a crash and never a bare GET
+    that the edge would 403 anyway."""
+    with patch(
+        "nexus.db.service_endpoint.resolve_service_endpoint_with_evidence_gate",
+        return_value=("https://edge.example", ""),
+    ), patch(
+        "nexus.db.data_token.get_data_token_manager",
+        side_effect=RuntimeError("mint round trip failed"),
+    ), patch("nexus.db.http_engine_status.httpx.get") as mock_get:
+        assert fetch_engine_status() is None
+    mock_get.assert_not_called()
+
+
+def test_fetch_engine_status_does_not_mint_when_a_static_token_resolves():
+    resp = MagicMock()
+    resp.raise_for_status.return_value = None
+    resp.json.return_value = {"embedding_mode": "voyage"}
+    with patch(
+        "nexus.db.service_endpoint.resolve_service_endpoint_with_evidence_gate",
+        return_value=("https://edge.example", "static"),
+    ), patch("nexus.db.data_token.get_data_token_manager") as mock_mgr, patch(
+        "nexus.db.http_engine_status.httpx.get", return_value=resp,
+    ) as mock_get:
+        assert fetch_engine_status() is not None
+    mock_mgr.assert_not_called()
+    assert mock_get.call_args.kwargs["headers"] == {"Authorization": "Bearer static"}
 
 
 def test_fetch_engine_status_returns_none_on_non_dict_body():

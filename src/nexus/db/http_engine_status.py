@@ -44,6 +44,25 @@ def fetch_engine_status(*, timeout: float = 5.0) -> dict | None:
         _log.debug("engine_status_endpoint_unresolvable", error=str(exc))
         return None
 
+    if not token:
+        # nexus-z0o2p.40 (2026-10-03): on a mint-armed cloud box the resolver
+        # returns an EMPTY token by design (nexus-xzeml: the stores mint a
+        # data token per request and need no static bearer). A bare GET on the
+        # auth-gated /v1 prefix then gets 403 from the public edge, so every
+        # consumer of this probe -- the doctor's Ownerless writes and reaper
+        # rows, the engine-activity line -- reported "could not be read" on
+        # EVERY cloud box, in green, while tests/e2e/cloud-client-path-gate.sh
+        # read the same endpoint fine because it mints the data token first.
+        # Do what the gate does. bearer_for returns None when no mint
+        # credential is configured (a static-token or local box: unchanged).
+        try:
+            from nexus.db.data_token import get_data_token_manager  # noqa: PLC0415 — deferred to keep CLI startup fast
+            from nexus.db.http_scratch_store import DEFAULT_TENANT  # noqa: PLC0415 — deferred to keep CLI startup fast
+            token = get_data_token_manager().bearer_for(base_url, DEFAULT_TENANT)
+        except Exception as exc:  # noqa: BLE001 — fail-closed: a mint failure makes the engine "unprobeable", never a crash
+            _log.debug("engine_status_data_token_unavailable", error=str(exc))
+            return None
+
     try:
         # /v1/status is under the auth-gated /v1 prefix: the public edge answers
         # 403 to a bare GET and 200 with the resolved token (nexus-grzai; the

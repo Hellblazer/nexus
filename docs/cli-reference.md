@@ -3782,7 +3782,11 @@ never sends the version header. The remedy is to upgrade conexus and then restar
 server (one per Claude Code session) and hook-spawned `nx`; `nx daemon restart-stale`
 lists what predates the install. The counters are since the engine booted. The row is
 green and says "not applicable" when the engine cannot be reached or predates the
-refusal. The row warns from since-boot totals and cannot clear after the cause is
+refusal. `/v1/status` sits under the auth-gated `/v1` prefix: the probe sends the static
+`service_token` when one resolves and otherwise mints the per-request data token, the same
+bearer the stores send, so a cloud box with no static token reads the row (through 7.69.0 it
+sent no bearer there and the row read "could not be read" on every cloud install). The row
+warns from since-boot totals and cannot clear after the cause is
 fixed until the engine restarts. The order of operations for the cloud engine is
 [`docs/operations/ownerless-write-cutover.md`](operations/ownerless-write-cutover.md).
 
