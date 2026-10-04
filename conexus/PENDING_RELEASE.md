@@ -45,6 +45,14 @@ stale -- and stays exactly where it is until moved back deliberately.
 
 ONE PATH PER BULLET, on the bullet's FIRST line.
 
+- outside-critique doc drift (nexus-aruua): `conexus/commands/devonthink-index.md` no longer says its data is pre-loaded with no tool calls needed; it says the sections are the `!` preamble's output and to gather them with the skill's tools when they are missing.
+- outside-critique doc drift (nexus-aruua): `conexus/commands/rdr-list.md` same change; on a missing table it runs `nx rdr preamble rdr-list` or reads `docs/rdr/README.md` instead of reporting an empty index.
+- outside-critique doc drift (nexus-aruua): `conexus/commands/rdr-gate.md` same change; text only.
+- outside-critique doc drift (nexus-aruua): `conexus/commands/rdr-fix.md` same change; text only.
+- outside-critique doc drift (nexus-aruua): `conexus/commands/rdr-accept.md` same change; text only.
+- outside-critique doc drift (nexus-aruua): `conexus/skills/nexus/SKILL.md` hydration example no longer attributes the 300-record read cap to ChromaDB; text only.
+- outside-critique doc drift (nexus-aruua): `conexus/agents/developer.md` drops the "do NOT commit `.beads/issues.jsonl`" clause; the export is untracked.
+- outside-critique doc drift (nexus-aruua): `conexus/resources/agent-shared/CONTEXT_PROTOCOL.md` drops the "always commit `.beads/issues.jsonl`" bullet; the export is untracked.
 - cleanup step A1 (nexus-0r1uz): `conexus/hooks/hooks.json` drops the six entries for the RDR-184 ledger and RDR-205 projector hooks and the behaviour census (SessionStart `behaviour_census.py`, PreToolUse `agent-dispatch-expect`, SubagentStart `subagent-start-stamp` and `subagent-start-tuple`, SubagentStop `subagent-stop` and `subagent-stop-tuple`); the SubagentStop event is no longer wired.
 - cleanup step A1 (nexus-0r1uz): `conexus/hooks/scripts/behaviour_census.py` is deleted; its SessionStart entry is gone and the module it fed (`nx census`) no longer exists.
 - cleanup step A1 (nexus-0r1uz): `conexus/hooks/scripts/mailbox_drain.py` has comment-only edits dropping references to the deleted `tuple_ledger_project.py` hook; no behaviour change.

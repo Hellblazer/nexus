@@ -138,9 +138,11 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-113](rdr-113-host-trust-model.md) | Host-Trust Model for nexus Daemons: UDS Permissions, Peer Credentials, Single-User v1 | Architecture | **Abandoned 2026-05-19** | 2026-05-13 |
 | [RDR-118](rdr-118-surfaces-as-tuples.md) | Surfaces as Tuples — The ORB is the Portal Broker (A2UI Adoption + Xanadu Inheritance) | Architecture | **Abandoned 2026-05-19** | 2026-05-17 |
 | [RDR-119](rdr-119-cockpit-ui-fabric.md) | Cockpit UI Fabric — Bakke Auto-Layout over A2UI Catalogs, per-Host Realization | Architecture | **Abandoned 2026-05-19** | 2026-05-18 |
-| [RDR-120](rdr-120-storage-substrate-split.md) | Storage Substrate Split: Substrate-Only Scope, No Co-Shipped Consumers | Architecture | Accepted 2026-05-21 | 2026-05-19 |
+| [RDR-120](rdr-120-storage-substrate-split.md) | Storage Substrate Split: Substrate-Only Scope, No Co-Shipped Consumers | Architecture | Closed | 2026-05-19 |
 | [RDR-121](rdr-121-hook-enforced-tool-routing.md) | Hook-Enforced Tool Routing: PreToolUse as Backstop for Soft Guidance | Architecture | Closed 2026-05-20 (shipped in 4.33.0) | 2026-05-19 |
 | [RDR-122](rdr-122-llm-json-repair-pass.md) | LLM-JSON Repair Pass: Port a2ui PayloadFixer Pattern to nx Structured-Output Parsers | Technical | Closed | 2026-05-19 |
+| [RDR-123](rdr-123-nx-answer-a2ui-surfaces.md) | nx_answer A2UI Surfaces: Render Composed-Retrieval Responses as Structured Surfaces | Architecture | Superseded by RDR-127 | 2026-05-19 |
+| [RDR-124](rdr-124-subagent-result-surfaces.md) | Subagent Result Surfaces: Return A2UI Cards from Subagents to Relieve Orchestrator Context | Architecture | Superseded by RDR-127 | 2026-05-19 |
 | [RDR-125](rdr-125-routing-hook-plugin-ownership.md) | Routing-Hook Plugin Ownership: Each Plugin Ships Its Own Rules | Architecture | Closed 2026-05-21 (shipped in 4.33.1) | 2026-05-20 |
 | [RDR-126](rdr-126-claude-desktop-deployment-unified-chat-cowork.md) | Claude Desktop Deployment: Unified Chat and Cowork Surface | Architecture | Closed | 2026-05-23 |
 | [RDR-127](rdr-127-substrate-decoupled-surface-rendering.md) | Substrate-Decoupled Surface Rendering | Architecture | Closed | 2026-05-22 |

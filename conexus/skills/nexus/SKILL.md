@@ -28,7 +28,7 @@ mcp__plugin_conexus_nexus__search(query="query", corpus="code"           # code 
 mcp__plugin_conexus_nexus__search(query="query", structured=True         # returns {ids, tumblers, distances, collections}
 mcp__plugin_conexus_nexus__query(question="...", corpus="knowledge", follow_links="cites"    # catalog-aware, document-level
 
-# Batch hydrate chunks past the ChromaDB 300-record quota
+# Batch hydrate chunks past the 300-record read cap (MAX_QUERY_RESULTS)
 mcp__plugin_conexus_nexus__store_get_many(ids=["id1","id2","id3"], collections="knowledge__art-1-1__voyage-context-3__v1"
 mcp__plugin_conexus_nexus__store_get_many(ids="id1,id2", collections="rdr__nexus-1-1__voyage-context-3__v1", structured=True
 

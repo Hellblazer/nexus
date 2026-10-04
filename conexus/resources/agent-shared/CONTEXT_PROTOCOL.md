@@ -347,7 +347,6 @@ All agents should:
 - Update bead status when starting: `/beads:update <id>` with status=in_progress
 - Close beads when complete: `/beads:close <id>`
 - Create new beads for discovered work: `/beads:create`
-- Always commit `.beads/issues.jsonl` with code changes
 
 ## nx Store Patterns
 

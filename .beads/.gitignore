@@ -56,3 +56,8 @@ dolt-access.lock
 # git-tracked copy was a perpetually-dirty duplicate that blocked branch
 # switches and hitchhiked into commits (nexus-p9blu, Hal directive 2026-08-18).
 interactions.jsonl
+# The tracked issues.jsonl export was a May 2026 snapshot of 255 rows against a
+# Dolt store of thousands, cited as if current by readers who found it first
+# (outside critique, 2026-10-03). Untracked for the same reason as above; the
+# ids-only manifest tests/fixtures/bead_ids.txt is the committed artifact.
+issues.jsonl

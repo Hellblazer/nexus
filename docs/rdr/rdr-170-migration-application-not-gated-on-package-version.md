@@ -97,7 +97,7 @@ sequence.
   disagreement for deferred/gated steps. RDR-170 addresses a different disagreement — the
   *registry vs package-version* upper bound — but both stem from treating the semver row as
   the source of truth about schema state rather than the registry + per-step guards.
-- Surfaced during the RDR-651 cutover F4 rollback analysis (`conexus-jya7`), 2026-06-25.
+- Surfaced during the conexus-side 651 cutover's F4 rollback analysis (`conexus-jya7`; the 651 flip-mechanism relay, T2 `conexus/conexus-to-nexus-651-flip-mechanism-CONFIRMED-2026-06-25`), 2026-06-25. There is no RDR-651 in this repo.
 
 ### Production call-sites audited
 
