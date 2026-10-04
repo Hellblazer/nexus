@@ -1706,6 +1706,9 @@
         nexus-2x9xa: the other half of the symmetric expiry split. gc_expire_quarantine
         (a released function, catalog-033-3) skips the rows the reaper tagged, so the
         client expires only what the client moved and the engine only what it moved.
+        (Overtaken for quarantine-knowledge__* siblings by vectors-028 below: there the engine
+        also expires the client-moved rows, so "only what it moved" no longer holds on the
+        engine's side.)
         New changeset, never an edit of the released one. vectors-025 is the restore
         verb's (nexus-wbfpw.49) and vectors-023 (the text-gate probe) is included below, after fk-006; this is
         026. Placed after
@@ -1719,6 +1722,17 @@
         the released move functions, so none of them changes. Placed after vectors-026, before the grants blocks.
     -->
     <include file="db/changelog/vectors-027-gc-quarantine-orphans-floored.xml"/>
+
+    <!--
+        nexus-wbfpw.75 (Sam, 2026-10-04): the engine also expires the quarantine a CLIENT moved, but
+        only in quarantine-knowledge__* siblings (no client sweep runs on a knowledge__ collection
+        routinely; code, docs and rdr stay with the client and its NX_GC_QUARANTINE_DAYS). A new
+        function under its own gc_audit operation, reaper_expire_client_quarantine, scoped to a
+        registered quarantine knowledge sibling and a registered live knowledge origin; the reaper's
+        own expiry (vectors-024-2) and the client's (vectors-026-1) are untouched. It lands after
+        vectors-027 (nexus-wbfpw.52), so it is 028.
+    -->
+    <include file="db/changelog/vectors-028-reaper-expire-client-quarantine.xml"/>
 
     <!--
         RDR-223 Phase 3 step 2 (nexus-z0o2p.27): DROP the staging landing

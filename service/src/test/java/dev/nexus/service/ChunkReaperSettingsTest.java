@@ -130,6 +130,25 @@ class ChunkReaperSettingsTest {
         }
     }
 
+    /** nexus-wbfpw.75: the client-moved population's retention is its own setting, same bounds and fallback. */
+    @Test
+    void theClientMovedQuarantineRetentionIsItsOwnSetting_14DaysByDefault_independentOfTheReapers() {
+        assertThat(of(Map.of()).clientQuarantineRetention()).isEqualTo(Duration.ofDays(14));
+        assertThat(of(Map.of(ChunkReaper.CLIENT_QUARANTINE_RETENTION_DAYS_ENV, "30")).clientQuarantineRetention())
+            .isEqualTo(Duration.ofDays(30));
+        assertThat(of(Map.of(ChunkReaper.CLIENT_QUARANTINE_RETENTION_DAYS_ENV, "3650")).clientQuarantineRetention())
+            .isEqualTo(Duration.ofDays(3650));
+        for (String bad : new String[] {"0", "-1", "soon", "3651", ""}) {
+            assertThat(of(Map.of(ChunkReaper.CLIENT_QUARANTINE_RETENTION_DAYS_ENV, bad)).clientQuarantineRetention())
+                .as(bad).isEqualTo(Duration.ofDays(14));
+        }
+        var both = of(Map.of(ChunkReaper.QUARANTINE_RETENTION_DAYS_ENV, "30",
+            ChunkReaper.CLIENT_QUARANTINE_RETENTION_DAYS_ENV, "7"));
+        assertThat(both.quarantineRetention()).isEqualTo(Duration.ofDays(30));
+        assertThat(both.clientQuarantineRetention()).isEqualTo(Duration.ofDays(7));
+        assertThat(ChunkReaper.Settings.defaults().clientQuarantineRetention()).isEqualTo(Duration.ofDays(14));
+    }
+
     @Test
     void theFloorExemptionIsAnExactCollectionList_emptyByDefault_andQuarantineNamesAreIgnored() {
         assertThat(of(Map.of()).floorExemptCollections()).isEmpty();

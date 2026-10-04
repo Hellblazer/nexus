@@ -1522,6 +1522,42 @@ class ChunkReaperIntegrationTest extends AtomicWriteTestBase {
         return hexes;
     }
 
+    /**
+     * {@code n} client-moved rows (no engine tag) written straight into {@code sibling}, each tagged as moved from
+     * {@code tagOrigin} and stamped {@code ageDays} before CLOCK. Registers neither collection: the caller says what
+     * the registry holds, because the registry is what the engine's scope reads (nexus-wbfpw.75).
+     */
+    private List<String> clientRowsInto(String tenant, String sibling, String tagOrigin, String tag, int n,
+                                        int ageDays) throws Exception {
+        String stamp = CLOCK.instant().minus(Duration.ofDays(ageDays)).truncatedTo(java.time.temporal.ChronoUnit.SECONDS)
+            .toString();
+        List<String> hexes = new ArrayList<>();
+        List<String> texts = new ArrayList<>();
+        List<float[]> vecs = new ArrayList<>();
+        List<Map<String, Object>> metas = new ArrayList<>();
+        for (int i = 0; i < n; i++) {
+            hexes.add(Chash.ofText(sibling + "/" + tag + i).toHex());
+            texts.add(tag + i);
+            vecs.add(new float[384]);
+            metas.add(Map.of("quarantined_at", stamp, "origin_collection", tagOrigin));
+        }
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.insertChunks(DSL.using(su, SQLDialect.POSTGRES), tenant, sibling, hexes, texts, vecs,
+                metas);
+        }
+        return hexes;
+    }
+
+    /** Set a collection's registry lifecycle state (the registry, never a name, is what the engine's scope reads). */
+    private void setLifecycle(String tenant, String name, String state) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            int n = DSL.using(su, SQLDialect.POSTGRES).update(CATALOG_COLLECTIONS)
+                .set(CATALOG_COLLECTIONS.LIFECYCLE_STATE, state)
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant).and(CATALOG_COLLECTIONS.NAME.eq(name))).execute();
+            assertThat(n).as("registry row %s exists", name).isEqualTo(1);
+        }
+    }
+
     @Test
     void aPassExpiresTheChunksItMovedOnceTheyAreOlderThan14Days_andKeepsTheRest_andTheExpiryIsAudited()
             throws Exception {
@@ -1605,31 +1641,301 @@ class ChunkReaperIntegrationTest extends AtomicWriteTestBase {
     }
 
     @Test
-    void quarantineAClientFilled_isNeverExpiredByTheEngine_evenAt30Days() throws Exception {
+    void quarantineAClientFilledInACodeDocsOrRdrSibling_isNeverExpiredByTheEngine_evenAt400Days() throws Exception {
+        String t = newTenant();
+        openGate(t);
+        ChunkReaper r = reaper(t);
+        // nx index repo / nx t3 gc moved these: quarantined_at and origin_collection, and no engine tag. The
+        // client expires code, docs and rdr quarantine on every nx index repo with the user's own
+        // NX_GC_QUARANTINE_DAYS, which the engine cannot see; the engine must not, whatever the age
+        // (nexus-wbfpw.75 widened the engine's expiry to knowledge__ siblings only).
+        Map<String, List<String>> rowsByPrefix = new LinkedHashMap<>();
+        Map<String, String> originByPrefix = new LinkedHashMap<>();
+        for (String prefix : List.of("code", "docs", "rdr")) {
+            String origin = col(prefix);
+            originByPrefix.put(prefix, origin);
+            rowsByPrefix.put(prefix, quarantined(t, origin, "client", 3, 400, true, false));
+        }
+
+        ChunkReaper.TenantResult result = r.runOnce(null).tenant(t);
+
+        for (String prefix : rowsByPrefix.keySet()) {
+            String origin = originByPrefix.get(prefix);
+            String q = quarantineOf(origin);
+            assertThat(result.expiry(q).expired()).isZero();
+            assertThat(result.expiry(q).refusal()).isNull();
+            assertThat(result.expiry(q).protectedCount()).isZero();
+            assertThat(result.clientExpiry(q)).as("no client-moved expiry runs on a %s sibling", prefix).isNull();
+            for (String h : rowsByPrefix.get(prefix)) {
+                assertThat(inCollection(t, q, h)).as("400 days old, client-moved, %s sibling: kept", prefix).isTrue();
+            }
+        }
+        assertThat(result.clientExpired()).isZero();
+        assertThat(auditRows(t, ChunkReaper.AUDIT_EXPIRED)).isEmpty();
+        assertThat(auditRows(t, ChunkReaper.AUDIT_EXPIRED_CLIENT)).isEmpty();
+        assertThat(r.refusedTotal()).isZero();
+    }
+
+    /**
+     * The function enforces the scope itself, not only the Java caller: called directly on a code sibling, or on a
+     * knowledge sibling for a code origin, it deletes nothing (nexus-wbfpw.75). The cross half is not vacuous: the
+     * knowledge sibling HOLDS rows tagged with the code origin (registered, live), so only the origin's own
+     * content-type guard keeps them.
+     */
+    @Test
+    void theClientMovedExpiryFunctionRefusesAnyScopeButKnowledgeItself() throws Exception {
+        String t = newTenant();
+        openGate(t);
+        String codeOrigin = col("code");
+        List<String> code = quarantined(t, codeOrigin, "client", 2, 400, true, false);
+        String knowledgeOrigin = col("knowledge");
+        List<String> knowledge = quarantined(t, knowledgeOrigin, "client", 2, 400, true, false);
+        List<String> crossed = clientRowsInto(t, quarantineOf(knowledgeOrigin), codeOrigin, "crossed", 2, 400);
+        String cutoff = CLOCK.instant().minus(Duration.ofDays(14)).truncatedTo(java.time.temporal.ChronoUnit.SECONDS)
+            .toString();
+
+        var codeOut = store.expireClientMoved(t, quarantineOf(codeOrigin), codeOrigin, cutoff, 5000, 25_000, 2_000);
+        // A knowledge sibling asked about a code origin whose tag some of its rows carry.
+        var crossOut = store.expireClientMoved(t, quarantineOf(knowledgeOrigin), codeOrigin, cutoff, 5000, 25_000,
+            2_000);
+
+        assertThat(codeOut.expired()).isZero();
+        assertThat(crossOut.expired()).isZero();
+        for (String h : code) assertThat(inCollection(t, quarantineOf(codeOrigin), h)).isTrue();
+        for (String h : knowledge) assertThat(inCollection(t, quarantineOf(knowledgeOrigin), h)).isTrue();
+        for (String h : crossed) {
+            assertThat(inCollection(t, quarantineOf(knowledgeOrigin), h)).as("tagged for a code origin: kept").isTrue();
+        }
+        assertThat(auditRows(t, ChunkReaper.AUDIT_EXPIRED_CLIENT)).isEmpty();
+
+        var knowledgeOut = store.expireClientMoved(t, quarantineOf(knowledgeOrigin), knowledgeOrigin, cutoff, 5000,
+            25_000, 2_000);
+        assertThat(knowledgeOut.expired()).as("non-vacuity: the same call on its own scope deletes").isEqualTo(2);
+        for (String h : crossed) {
+            assertThat(inCollection(t, quarantineOf(knowledgeOrigin), h)).as("and still not the crossed rows").isTrue();
+        }
+    }
+
+    /**
+     * I1 (code review of nexus-wbfpw.75): the SIBLING is validated against the registry too, not only the origin. A
+     * code-typed sibling holding rows tagged for a live knowledge origin is not expired from, by the function or by
+     * the origin listing; a sibling registered as a live (not quarantine) collection is not either. fk-004
+     * guarantees a sibling has a registry row, so the check costs nothing the data does not already satisfy.
+     */
+    @Test
+    void aSiblingTheRegistryDoesNotCallAQuarantineKnowledgeCollection_isNotExpiredFrom_byTheFunctionOrTheListing()
+            throws Throwable {
+        String t = newTenant();
+        openGate(t);
+        String knowledgeOrigin = col("knowledge");
+        String codeSibling = quarantineOf(col("code"));
+        String liveSibling = quarantineOf(col("knowledge"));
+        try (Connection su = pg.createConnection("")) {
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCollection(ctx, t, knowledgeOrigin);
+            PgContainerHelper.insertCollection(ctx, t, codeSibling);
+            PgContainerHelper.insertCollection(ctx, t, liveSibling);
+        }
+        setLifecycle(t, liveSibling, "live");
+        List<String> inCode = clientRowsInto(t, codeSibling, knowledgeOrigin, "kt", 2, 400);
+        List<String> inLive = clientRowsInto(t, liveSibling, knowledgeOrigin, "kl", 2, 400);
+        // Non-vacuity: the same rows in a real knowledge quarantine sibling go.
+        List<String> inReal = quarantined(t, knowledgeOrigin, "real", 2, 400, false, false);
+        String cutoff = CLOCK.instant().minus(Duration.ofDays(14)).truncatedTo(java.time.temporal.ChronoUnit.SECONDS)
+            .toString();
+
+        var codeOut = store.expireClientMoved(t, codeSibling, knowledgeOrigin, cutoff, 5000, 25_000, 2_000);
+        var liveOut = store.expireClientMoved(t, liveSibling, knowledgeOrigin, cutoff, 5000, 25_000, 2_000);
+
+        assertThat(codeOut.expired()).as("a code-typed sibling: the function refuses").isZero();
+        assertThat(liveOut.expired()).as("a sibling registered live, not quarantine: the function refuses").isZero();
+        assertThat(store.clientMovedOrigins(t, codeSibling, "knowledge", 25_000)).isEmpty();
+        assertThat(store.clientMovedOrigins(t, liveSibling, "knowledge", 25_000)).isEmpty();
+        assertThat(store.clientMovedOrigins(t, quarantineOf(knowledgeOrigin), "knowledge", 25_000))
+            .containsExactly(knowledgeOrigin);
+        for (String h : inCode) assertThat(inCollection(t, codeSibling, h)).isTrue();
+        for (String h : inLive) assertThat(inCollection(t, liveSibling, h)).isTrue();
+
+        ChunkReaper.TenantResult result = reaper(t).runOnce(null).tenant(t);
+
+        assertThat(result.clientExpiry(codeSibling)).isNull();
+        assertThat(result.clientExpiry(liveSibling)).isNull();
+        assertThat(result.clientExpiry(quarantineOf(knowledgeOrigin)).expired()).isEqualTo(2);
+        for (String h : inReal) assertThat(inCollection(t, quarantineOf(knowledgeOrigin), h)).isFalse();
+        for (String h : inCode) assertThat(inCollection(t, codeSibling, h)).isTrue();
+        for (String h : inLive) assertThat(inCollection(t, liveSibling, h)).isTrue();
+    }
+
+    /**
+     * I2 (code review of nexus-wbfpw.75): the origin must be LIVE, as the restore function requires (vectors-025). A
+     * dormant origin keeps its client-moved quarantine, by the function and by the listing.
+     */
+    @Test
+    void aDormantOrigin_keepsItsClientMovedQuarantine_andExpiresOnceItIsLiveAgain() throws Throwable {
         String t = newTenant();
         openGate(t);
         String origin = col("knowledge");
         String q = quarantineOf(origin);
-        // nx index repo / nx t3 gc moved these: quarantined_at and origin_collection, and no engine tag. The
-        // client expires them on its own run with NX_GC_QUARANTINE_DAYS; the engine must not.
-        List<String> clientMoved = quarantined(t, origin, "client", 3, 30, true, false);
-        ChunkReaper r = reaper(t);
+        List<String> old = quarantined(t, origin, "old", 2, 400, true, false);
+        setLifecycle(t, origin, "dormant");
+        String cutoff = CLOCK.instant().minus(Duration.ofDays(14)).truncatedTo(java.time.temporal.ChronoUnit.SECONDS)
+            .toString();
+
+        ChunkReaper.TenantResult result = reaper(t).runOnce(null).tenant(t);
+        var direct = store.expireClientMoved(t, q, origin, cutoff, 5000, 25_000, 2_000);
+
+        assertThat(store.clientMovedOrigins(t, q, "knowledge", 25_000)).as("a dormant origin is not listed").isEmpty();
+        assertThat(result.clientExpiry(q)).isNull();
+        assertThat(direct.expired()).as("the function refuses a dormant origin on its own").isZero();
+        for (String h : old) assertThat(inCollection(t, q, h)).isTrue();
+        assertThat(auditRows(t, ChunkReaper.AUDIT_EXPIRED_CLIENT)).isEmpty();
+
+        setLifecycle(t, origin, "live");
+        var live = store.expireClientMoved(t, q, origin, cutoff, 5000, 25_000, 2_000);
+        assertThat(live.expired()).as("non-vacuity: live again, the same rows go").isEqualTo(2);
+    }
+
+    /**
+     * Two knowledge origins sharing one sibling: each row is judged against ITS OWN origin's manifest. A chash the
+     * OTHER origin's manifest names is not protected, and one its own origin names is; one audit row per origin.
+     */
+    @Test
+    void twoKnowledgeOriginsSharingOneSibling_eachRowIsJudgedAgainstItsOwnOriginsManifest() throws Exception {
+        String t = newTenant();
+        openGate(t);
+        String a = col("knowledge");
+        String b = col("knowledge");
+        String sibling = quarantineOf(col("knowledge"));
+        try (Connection su = pg.createConnection("")) {
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCollection(ctx, t, a);
+            PgContainerHelper.insertCollection(ctx, t, b);
+            PgContainerHelper.insertCollection(ctx, t, sibling);
+        }
+        String aPlain = clientRowsInto(t, sibling, a, "a-plain", 1, 40).get(0);
+        String bPlain = clientRowsInto(t, sibling, b, "b-plain", 1, 40).get(0);
+        // The sibling's a-tagged row whose chash B's manifest names: not A's manifest, so not protected.
+        String aNamedByB = Chash.ofText(sibling + "/a-named-by-b").toHex();
+        // The sibling's b-tagged row whose chash B's manifest names: protected.
+        String bNamedByB = Chash.ofText(sibling + "/b-named-by-b").toHex();
+        String stamp = CLOCK.instant().minus(Duration.ofDays(40)).truncatedTo(java.time.temporal.ChronoUnit.SECONDS)
+            .toString();
+        try (Connection su = pg.createConnection("")) {
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertChunks(ctx, t, b, List.of(aNamedByB, bNamedByB), List.of("x", "y"),
+                List.of(new float[384], new float[384]), List.of(Map.of(), Map.of()));
+            PgContainerHelper.ownChunks(ctx, t, b, aNamedByB, bNamedByB);
+            PgContainerHelper.insertChunks(ctx, t, sibling, List.of(aNamedByB, bNamedByB), List.of("x", "y"),
+                List.of(new float[384], new float[384]),
+                List.of(Map.of("quarantined_at", stamp, "origin_collection", a),
+                        Map.of("quarantined_at", stamp, "origin_collection", b)));
+        }
+
+        ChunkReaper.TenantResult result = reaper(t).runOnce(null).tenant(t);
+
+        assertThat(inCollection(t, sibling, aPlain)).isFalse();
+        assertThat(inCollection(t, sibling, bPlain)).isFalse();
+        assertThat(inCollection(t, sibling, aNamedByB)).as("another origin's manifest does not protect it").isFalse();
+        assertThat(inCollection(t, sibling, bNamedByB)).as("its own origin's manifest does").isTrue();
+        assertThat(result.clientExpiry(sibling).expired()).isEqualTo(3);
+        assertThat(result.clientExpiry(sibling).protectedCount()).isEqualTo(1);
+        assertThat(auditRows(t, ChunkReaper.AUDIT_EXPIRED_CLIENT)).as("one audit row per origin call")
+            .hasSize(2).satisfiesExactlyInAnyOrder(
+                row -> {
+                    assertThat(row.details()).contains(a);
+                    assertThat(row.chashCount()).isEqualTo(2);
+                },
+                row -> {
+                    assertThat(row.details()).contains(b);
+                    assertThat(row.chashCount()).isEqualTo(1);
+                    assertThat(row.chashes()).contains(bPlain).doesNotContain(bNamedByB);
+                });
+    }
+
+    /** The cutoff is compared with text stamps, so a malformed one is refused outright instead of mass-deleting. */
+    @Test
+    void aMalformedCutoff_isRefusedByTheFunction_nothingIsDeleted() throws Exception {
+        String t = newTenant();
+        openGate(t);
+        String origin = col("knowledge");
+        String q = quarantineOf(origin);
+        List<String> old = quarantined(t, origin, "old", 2, 400, true, false);
+
+        for (String bad : List.of("2026-09-20", "2026-09-20T00:00:00.5Z", "2026-09-20T00:00:00+00:00", "zzzz", "")) {
+            org.assertj.core.api.Assertions.assertThatThrownBy(
+                () -> store.expireClientMoved(t, q, origin, bad, 5000, 25_000, 2_000))
+                .as("cutoff '%s'", bad).hasStackTraceContaining("p_cutoff");
+        }
+        for (String h : old) assertThat(inCollection(t, q, h)).isTrue();
+    }
+
+    /**
+     * The client-moved population looks in EVERY sibling, so a timeout while listing its origins in a code sibling
+     * is logged only: no refusal, no refusal audit row filed against a sibling the engine never expires from.
+     */
+    @Test
+    void aTimeoutListingTheClientMovedOriginsOfACodeSibling_isLoggedOnly_noRefusalRowAndNoRefusal() throws Throwable {
+        String t = newTenant();
+        openGate(t);
+        String origin = col("code");
+        String q = quarantineOf(origin);
+        quarantined(t, origin, "client", 2, 400, true, false);
+        ReaperRepository timingOutListing = new ReaperRepository(tenantScope) {
+            @Override
+            public List<String> clientMovedOrigins(String tenant, String quarantineCollection, String contentType,
+                                                   int statementTimeoutMs) {
+                throw statementTimeout();
+            }
+        };
+        ChunkReaper r = reaperOver(timingOutListing, t);
+
+        ChunkReaper.TenantResult[] result = new ChunkReaper.TenantResult[1];
+        List<String> logs = captureLogs(() -> result[0] = r.runOnce(null).tenant(t));
+
+        assertThat(result[0].clientExpiry(q)).isNull();
+        assertThat(result[0].refused()).isZero();
+        assertThat(r.refusedTotal()).isZero();
+        assertThat(r.statementTimedOutTotal()).isEqualTo(1);
+        assertThat(refusedRows(t)).as("no refusal row against a sibling the engine never expires from").isEmpty();
+        assertThat(logs).anyMatch(l -> l.contains("event=reaper_client_expire_timed_out") && l.contains(q));
+        assertThat(logs).noneMatch(l -> l.contains("event=reaper_client_expire_refused"));
+    }
+
+    /** ...but once an origin is known to be a knowledge one, a timeout of the expiry itself is still a counted, audited refusal. */
+    @Test
+    void aTimeoutOfTheClientMovedExpiryItselfInAKnowledgeSibling_isStillAnAuditedRefusal() throws Throwable {
+        String t = newTenant();
+        openGate(t);
+        String origin = col("knowledge");
+        String q = quarantineOf(origin);
+        quarantined(t, origin, "client", 2, 400, true, false);
+        ReaperRepository timingOutExpiry = new ReaperRepository(tenantScope) {
+            @Override
+            public Expiry expireClientMoved(String tenant, String quarantineCollection, String originCollection,
+                                            String cutoff, int rowLimit, int statementTimeoutMs, int lockTimeoutMs) {
+                throw statementTimeout();
+            }
+        };
+        ChunkReaper r = reaperOver(timingOutExpiry, t);
 
         ChunkReaper.TenantResult result = r.runOnce(null).tenant(t);
 
-        assertThat(result.expiry(q).expired()).isZero();
-        assertThat(result.expiry(q).refusal()).isNull();
-        assertThat(result.expiry(q).protectedCount()).isZero();
-        for (String h : clientMoved) assertThat(inCollection(t, q, h)).as("30 days old, client-moved: kept").isTrue();
-        assertThat(auditRows(t, "reaper_expire_quarantine")).isEmpty();
-        assertThat(r.refusedTotal()).isZero();
+        assertThat(result.clientExpiry(q).refusal()).isEqualTo(Refusal.STATEMENT_TIMED_OUT);
+        assertThat(r.refusedTotal()).isEqualTo(1);
+        assertThat(refusedRows(t)).singleElement().satisfies(a -> {
+            assertThat(a.collection()).isEqualTo(q);
+            assertThat(a.details()).contains("client-moved");
+        });
     }
 
     @Test
     void aTagLeftOverFromTheReaper_onAChunkAClientMovedAgain_doesNotMakeItTheEnginesToExpire() throws Exception {
         String t = newTenant();
         openGate(t);
-        String origin = col("knowledge");
+        // A code sibling, where the engine expires only what the reaper moved. In a knowledge sibling the same row
+        // is the client's and the client-moved expiry takes it, by its own audit operation (see
+        // aStaleTagRowInAKnowledgeSibling_isExpiredAsClientMoved).
+        String origin = col("code");
         String q = quarantineOf(origin);
         // The reaper moved it 40 days ago, a restore stripped quarantined_at and origin_collection but not the
         // tag, and a client's quarantine then moved it again 30 days ago: a NEW quarantined_at, with the old
@@ -1663,7 +1969,7 @@ class ChunkReaperIntegrationTest extends AtomicWriteTestBase {
         List<String> fifteen = quarantined(t, origin, "d15", 1, 15, true);
         List<String> thirtyOne = quarantined(t, origin, "d31", 1, 31, false);
         Settings sixty = new Settings(true, Duration.ofHours(1), 300, 0.25, 100, Duration.ofMinutes(10),
-            Duration.ofSeconds(60), Duration.ofDays(30), java.util.Set.of());
+            Duration.ofSeconds(60), Duration.ofDays(30), java.util.Set.of(), Duration.ofDays(14));
 
         reaper(sixty, t).runOnce(null);
 
@@ -1974,6 +2280,265 @@ class ChunkReaperIntegrationTest extends AtomicWriteTestBase {
         assertThat(countIn(t, q)).as("the 9 engine-owned rows are all that is left").isEqualTo(9);
     }
 
+    // ── the engine also expires what a client moved, in knowledge__ siblings only (nexus-wbfpw.75) ──────────
+
+    @Test
+    void aClientMovedKnowledgeRowPastRetentionIsExpiredAndAudited_oneInsideRetentionSurvives() throws Throwable {
+        String t = newTenant();
+        openGate(t);
+        String origin = col("knowledge");
+        String q = quarantineOf(origin);
+        List<String> old = quarantined(t, origin, "old", 3, 15, true, false);
+        List<String> recent = quarantined(t, origin, "recent", 2, 5, false, false);
+        ChunkReaper r = reaper(t);
+
+        ChunkReaper.TenantResult[] result = new ChunkReaper.TenantResult[1];
+        List<String> logs = captureLogs(() -> result[0] = r.runOnce(null).tenant(t));
+
+        assertThat(result[0].clientExpiry(q).expired()).isEqualTo(3);
+        assertThat(result[0].clientExpired()).isEqualTo(3);
+        assertThat(result[0].expiry(q).expired()).as("the reaper's own population is untouched").isZero();
+        assertThat(result[0].expired()).isZero();
+        for (String h : old) assertThat(inCollection(t, q, h)).as("15 days old, client-moved: expired").isFalse();
+        for (String h : recent) assertThat(inCollection(t, q, h)).as("5 days old: kept").isTrue();
+        assertThat(auditRows(t, ChunkReaper.AUDIT_EXPIRED_CLIENT)).as("its own operation name, every chash named")
+            .singleElement().satisfies(a -> {
+                assertThat(a.actor()).isEqualTo(ChunkReaper.ACTOR);
+                assertThat(a.collection()).isEqualTo(q);
+                assertThat(a.chashCount()).isEqualTo(3);
+                for (String h : old) assertThat(a.chashes()).contains(h);
+                assertThat(a.details()).contains("client_moved").contains(origin);
+            });
+        assertThat(auditRows(t, ChunkReaper.AUDIT_EXPIRED)).as("not filed as the reaper's expiry").isEmpty();
+        assertThat(result[0].refused()).isZero();
+        assertThat(r.refusedTotal()).isZero();
+        assertThat(logs).anyMatch(l -> l.contains("event=reaper_client_expired") && l.contains("expired=3"));
+        assertThat(logs).anyMatch(l -> l.contains("event=reaper_pass") && l.contains(" expired=0 ")
+            && l.contains("client_expired=3"));
+        assertThat(logs).anyMatch(l -> l.contains("event=reaper_run") && l.contains("client_expired=3"));
+    }
+
+    /** The retention boundary of the client-moved population, pinned from both sides, on the row's own stamp. */
+    @Test
+    void theClientMovedRetentionBoundary_13DaysKept_15DaysExpired_theBoundarySecondExpired_oneSecondShortKept()
+            throws Exception {
+        String t = newTenant();
+        openGate(t);
+        String origin = col("knowledge");
+        String q = quarantineOf(origin);
+        String cutoff = CLOCK.instant().minus(Duration.ofDays(14)).toString();
+        List<String> thirteen = quarantined(t, origin, "d13", 1, 13, true, false);
+        List<String> fifteen = quarantined(t, origin, "d15", 1, 15, false, false);
+        List<String> exactly = quarantinedAt(t, origin, "exact", 1, cutoff, false, false);
+        List<String> oneSecondShort = quarantinedAt(t, origin, "short", 1,
+            CLOCK.instant().minus(Duration.ofDays(14)).plusSeconds(1).toString(), false, false);
+
+        ChunkReaper.TenantResult result = reaper(t).runOnce(null).tenant(t);
+
+        assertThat(inCollection(t, q, thirteen.get(0))).as("13 days: kept").isTrue();
+        assertThat(inCollection(t, q, fifteen.get(0))).as("15 days: expired").isFalse();
+        assertThat(inCollection(t, q, exactly.get(0))).as("stamped exactly 14 days ago: expired (<=)").isFalse();
+        assertThat(inCollection(t, q, oneSecondShort.get(0))).as("one second short of 14 days: kept").isTrue();
+        assertThat(result.clientExpiry(q).expired()).isEqualTo(2);
+    }
+
+    @Test
+    void aClientMovedKnowledgeChunkTheOriginsManifestStillNames_survives_andIsLabelledProtectedNotRefused()
+            throws Throwable {
+        String t = newTenant();
+        openGate(t);
+        String origin = col("knowledge");
+        String q = quarantineOf(origin);
+        List<String> free = quarantined(t, origin, "free", 1, 40, true, false);   // non-vacuity: this one goes
+        String named = orphan(t, origin, "named");
+        try (Connection su = pg.createConnection("")) {
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.ownChunks(ctx, t, origin, named);
+            PgContainerHelper.insertChunks(ctx, t, q, List.of(named), List.of("named text"),
+                List.of(new float[384]), List.of(Map.of("quarantined_at", "2026-09-01T00:00:00Z",
+                    "origin_collection", origin)));
+        }
+        ChunkReaper r = reaper(t);
+
+        ChunkReaper.TenantResult[] result = new ChunkReaper.TenantResult[1];
+        List<String> logs = captureLogs(() -> result[0] = r.runOnce(null).tenant(t));
+
+        assertThat(inCollection(t, q, named)).as("a chunk a live manifest row names is never deleted").isTrue();
+        assertThat(inCollection(t, q, free.get(0))).as("the unnamed one beside it is").isFalse();
+        assertThat(result[0].clientExpiry(q).expired()).isEqualTo(1);
+        assertThat(result[0].clientExpiry(q).protectedCount()).as("labelled on its own").isEqualTo(1);
+        assertThat(result[0].clientExpiry(q).refusal()).as("not a refusal").isNull();
+        assertThat(result[0].clientExpiryProtected()).isEqualTo(1);
+        assertThat(result[0].expiryProtected()).as("not the reaper's count").isZero();
+        assertThat(result[0].refused()).isZero();
+        assertThat(r.refusedTotal()).isZero();
+        assertThat(refusedRows(t)).isEmpty();
+        assertThat(auditRows(t, ChunkReaper.AUDIT_EXPIRED_CLIENT)).singleElement().satisfies(a -> {
+            assertThat(a.chashCount()).isEqualTo(1);
+            assertThat(a.chashes()).doesNotContain(named);
+        });
+        assertThat(logs).anyMatch(l -> l.contains("event=reaper_pass") && l.contains("client_expiry_protected=1"));
+    }
+
+    /**
+     * Both populations in one knowledge sibling: the reaper's own rows keep their path, their retention and their
+     * audit operation, the client's get theirs, and neither audit row names the other's chashes.
+     */
+    @Test
+    void inOneKnowledgeSibling_theReapersRowsKeepTheirOwnPathAndRetention_theClientsRowsGetTheirOwn()
+            throws Exception {
+        String t = newTenant();
+        openGate(t);
+        String origin = col("knowledge");
+        String q = quarantineOf(origin);
+        List<String> engine = quarantined(t, origin, "engine", 2, 10, true, true);
+        List<String> client = quarantined(t, origin, "client", 3, 10, false, false);
+        Settings sevenForClient = new Settings(true, Duration.ofHours(1), 300, 0.25, 100, Duration.ofMinutes(10),
+            Duration.ofSeconds(60), Duration.ofDays(14), java.util.Set.of(), Duration.ofDays(7));
+
+        ChunkReaper.TenantResult first = reaper(sevenForClient, t).runOnce(null).tenant(t);
+
+        assertThat(first.clientExpiry(q).expired()).as("10 days is past the client-moved 7").isEqualTo(3);
+        assertThat(first.expiry(q).expired()).as("10 days is inside the reaper's 14").isZero();
+        for (String h : client) assertThat(inCollection(t, q, h)).isFalse();
+        for (String h : engine) assertThat(inCollection(t, q, h)).isTrue();
+
+        ChunkReaper.TenantResult later = reaperAt(Instant.parse("2026-10-06T12:00:00Z"), sevenForClient, t)
+            .runOnce(null).tenant(t);
+
+        assertThat(later.expiry(q).expired()).as("15 days now: the reaper's own path takes its rows").isEqualTo(2);
+        assertThat(later.clientExpired()).as("none left: the first pass took them").isZero();
+        assertThat(countIn(t, q)).isZero();
+        assertThat(auditRows(t, ChunkReaper.AUDIT_EXPIRED)).singleElement().satisfies(a -> {
+            assertThat(a.chashCount()).isEqualTo(2);
+            for (String h : engine) assertThat(a.chashes()).contains(h);
+            for (String h : client) assertThat(a.chashes()).doesNotContain(h);
+        });
+        assertThat(auditRows(t, ChunkReaper.AUDIT_EXPIRED_CLIENT)).singleElement().satisfies(a -> {
+            assertThat(a.chashCount()).isEqualTo(3);
+            for (String h : client) assertThat(a.chashes()).contains(h);
+            for (String h : engine) assertThat(a.chashes()).doesNotContain(h);
+        });
+    }
+
+    @Test
+    void aStaleTagRowInAKnowledgeSibling_isExpiredAsClientMoved_notAsTheReapers() throws Exception {
+        String t = newTenant();
+        openGate(t);
+        String origin = col("knowledge");
+        String q = quarantineOf(origin);
+        String reaperStamp = CLOCK.instant().minus(Duration.ofDays(40)).truncatedTo(java.time.temporal.ChronoUnit.SECONDS)
+            .toString();
+        String clientStamp = CLOCK.instant().minus(Duration.ofDays(30)).truncatedTo(java.time.temporal.ChronoUnit.SECONDS)
+            .toString();
+        String chash = Chash.ofText(q + "/stale").toHex();
+        try (Connection su = pg.createConnection("")) {
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCollection(ctx, t, origin);
+            PgContainerHelper.insertCollection(ctx, t, q);
+            PgContainerHelper.insertChunks(ctx, t, q, List.of(chash), List.of("stale tag"),
+                List.of(new float[384]), List.of(Map.of("quarantined_at", clientStamp,
+                    "origin_collection", origin, "quarantined_by", "engine-reaper",
+                    "reaper_quarantined_at", reaperStamp)));
+        }
+
+        ChunkReaper.TenantResult result = reaper(t).runOnce(null).tenant(t);
+
+        assertThat(result.expiry(q).expired()).as("not the reaper's").isZero();
+        assertThat(result.clientExpiry(q).expired()).as("the client's, by the same predicate gc_expire_quarantine uses")
+            .isEqualTo(1);
+        assertThat(inCollection(t, q, chash)).isFalse();
+    }
+
+    @Test
+    void aClientMovedKnowledgeSiblingWhoseOriginIsNotRegistered_isLeftAlone() throws Throwable {
+        String t = newTenant();
+        openGate(t);
+        String origin = col("knowledge");
+        // registerOrigin=false: the rows are aged and untagged. A missing origin is also what a wrongly
+        // mass-quarantined collection looks like (Sam, 2026-10-03), and a knowledge origin is known only by its
+        // registry row, so an unregistered one is left alone by the origin listing and by the function itself.
+        List<String> old = quarantined(t, origin, "old", 3, 40, false, false);
+
+        ChunkReaper.TenantResult result = reaper(t).runOnce(null).tenant(t);
+        var direct = store.expireClientMoved(t, quarantineOf(origin), origin,
+            CLOCK.instant().minus(Duration.ofDays(14)).toString(), 5000, 25_000, 2_000);
+
+        assertThat(result.clientExpiry(quarantineOf(origin))).as("no origin to expire for").isNull();
+        assertThat(result.clientExpired()).isZero();
+        assertThat(direct.expired()).as("the function refuses an unregistered origin on its own").isZero();
+        assertThat(countIn(t, quarantineOf(origin))).isEqualTo(3);
+        for (String h : old) assertThat(inCollection(t, quarantineOf(origin), h)).isTrue();
+        assertThat(auditRows(t, ChunkReaper.AUDIT_EXPIRED_CLIENT)).isEmpty();
+    }
+
+    @Test
+    void aClientMovedRowThatNamesNoOriginOrCarriesNoTimestamp_isNeverExpiredByTheEngine() throws Exception {
+        String t = newTenant();
+        openGate(t);
+        String origin = col("knowledge");
+        String q = quarantineOf(origin);
+        List<String> ok = quarantined(t, origin, "ok", 1, 40, true, false);   // non-vacuity: this one goes
+        String noOrigin = Chash.ofText(q + "/no-origin").toHex();
+        String looseStamp = Chash.ofText(q + "/loose-stamp").toHex();
+        String noStamp = Chash.ofText(q + "/no-stamp").toHex();
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.insertChunks(DSL.using(su, SQLDialect.POSTGRES), t, q,
+                List.of(noOrigin, looseStamp, noStamp), List.of("a", "b", "c"),
+                List.of(new float[384], new float[384], new float[384]),
+                List.of(Map.of("quarantined_at", "2025-01-01T00:00:00Z"),
+                        Map.of("quarantined_at", "2020-01-01", "origin_collection", origin),
+                        Map.of("origin_collection", origin)));
+        }
+
+        ChunkReaper.TenantResult result = reaper(t).runOnce(null).tenant(t);
+
+        assertThat(result.clientExpiry(q).expired()).isEqualTo(1);
+        assertThat(inCollection(t, q, ok.get(0))).isFalse();
+        assertThat(inCollection(t, q, noOrigin)).as("no origin tag: the engine reads no origin from a name").isTrue();
+        assertThat(inCollection(t, q, looseStamp)).as("a stamp of another shape could sort before the cutoff").isTrue();
+        assertThat(inCollection(t, q, noStamp)).as("no stamp: no age").isTrue();
+    }
+
+    /**
+     * The client's gc_expire_quarantine takes a SUPERSET of the engine's client-moved rows (its own retention): run in
+     * either order, each finds what the other took absent without error, and the engine still takes what only it
+     * would (a row inside the client's 30 days but past the engine's 14).
+     */
+    @Test
+    void theEnginesClientMovedExpiryAndTheClientsOwn_eachFindsTheOthersRowsAbsent_inEitherOrder() throws Exception {
+        String t = newTenant();
+        openGate(t);
+        String origin = col("knowledge");
+        String q = quarantineOf(origin);
+        String clientCutoff = CLOCK.instant().minus(Duration.ofDays(30)).toString();
+        List<String> engineFirst = quarantined(t, origin, "ef", 2, 40, true, false);
+
+        ChunkReaper.TenantResult one = reaper(t).runOnce(null).tenant(t);
+        var clientAfter = vectors.expireQuarantine(t, q, origin, clientCutoff, 0.25, 100, false);
+
+        assertThat(one.clientExpiry(q).expired()).isEqualTo(2);
+        assertThat(clientAfter.expired()).as("the engine already took them").isZero();
+        assertThat(clientAfter.refused()).isZero();
+        for (String h : engineFirst) assertThat(inCollection(t, q, h)).isFalse();
+
+        List<String> clientFirst = quarantined(t, origin, "cf", 2, 40, false, false);
+        // Inside the client's 30 days, past the engine's 14: only the engine takes it.
+        List<String> onlyEngine = quarantined(t, origin, "oe", 1, 20, false, false);
+        var clientNow = vectors.expireQuarantine(t, q, origin, clientCutoff, 0.25, 100, false);
+
+        assertThat(clientNow.expired()).as("the client took its 40 day rows, not the 20 day one").isEqualTo(2);
+        for (String h : clientFirst) assertThat(inCollection(t, q, h)).isFalse();
+        assertThat(inCollection(t, q, onlyEngine.get(0))).as("the client's 30 days have not passed").isTrue();
+
+        ChunkReaper.TenantResult two = reaper(t).runOnce(null).tenant(t);
+
+        assertThat(two.clientExpired()).as("the engine takes only the row the client left").isEqualTo(1);
+        assertThat(inCollection(t, q, onlyEngine.get(0))).isFalse();
+        assertThat(two.errors()).isZero();
+        assertThat(two.refused()).isZero();
+    }
+
     /** SIG-3: a past-cutoff chunk a manifest row still names is benign, and must not read as a refusal. */
     @Test
     void anAgedChunkAManifestRowStillNames_isNeverExpired_andIsLabelledProtectedNotRefused() throws Throwable {
@@ -2222,7 +2787,7 @@ class ChunkReaperIntegrationTest extends AtomicWriteTestBase {
 
     private static Settings exempting(String... collections) {
         return new Settings(true, Duration.ofHours(1), 300, 0.25, 100, Duration.ofMinutes(10), Duration.ofSeconds(60),
-            Duration.ofDays(14), java.util.Set.of(collections));
+            Duration.ofDays(14), java.util.Set.of(collections), Duration.ofDays(14));
     }
 
     @Test

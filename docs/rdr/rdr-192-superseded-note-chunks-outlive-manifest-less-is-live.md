@@ -1505,7 +1505,9 @@ change). Where this step says the reaper's quarantine is "expired by the existin
 - **The split is symmetric** (`vectors-026`): the client's expiry, `gc_expire_quarantine`
   (what `nx index repo` calls, and the `gc/expire-quarantine` route with or without
   `force`), skips tagged rows and deletes only untagged, client-moved rows, with its floor
-  judged on those rows alone. Each side expires only what it moved. One exception, closed on the client
+  judged on those rows alone. Each side expires only what it moved. (Overtaken 2026-10-04,
+  `nexus-wbfpw.75`: in `quarantine-knowledge__*` siblings the engine now also expires the client-moved
+  rows, `vectors-028`; see the 2026-10-04 revision entry.) One exception, closed on the client
   side (`nexus-wbfpw.58`): the client derives the sibling's name from the catalog row, and
   `catalog-044` rewrote that row's owner, so a client-moved chunk (untagged, which the engine's
   expiry skips) whose origin was renamed that way sat where neither expirer looked. `nx t3 gc`
@@ -2041,7 +2043,7 @@ the doctor check narrowed to `knowledge__` (Step 14).
   with its own `reaper_expire_quarantine`, after `NX_REAPER_QUARANTINE_RETENTION_DAYS`; there
   is NO fraction floor on that expiry (it wedged every drain), the floor on the move stays;
   the client's `gc_expire_quarantine` skips tagged rows in turn (`vectors-026`), so each side
-  expires only what it moved; `NX_REAPER_FLOOR_EXEMPT_COLLECTIONS` waives the move floor for
+  expires only what it moved (overtaken for knowledge siblings, 2026-10-04, `nexus-wbfpw.75`); `NX_REAPER_FLOOR_EXEMPT_COLLECTIONS` waives the move floor for
   named collections; the restore verb is `nexus-wbfpw.49`. The `last_written_at` column is
   kept (the only clock for a chunk that never had an owner). The first line of Step 9 that
   says the quarantine is "expired by the existing `gc_expire_quarantine`" and the Day-2
@@ -2141,3 +2143,14 @@ the doctor check narrowed to `knowledge__` (Step 14).
 - 2026-10-03: The backfill gate passes an empty tenant (bead `nexus-wbfpw.73`; text only, no status
   change). Legacy-note backfill prerequisite carries the amendment: no chunk row
   means no completion record is needed, and the gate writes none.
+- 2026-10-04: The engine also expires client-moved knowledge quarantine (bead `nexus-wbfpw.75`;
+  Sam's decision of the same day; T2 `nexus/review-wbfpw75-code-review-2026-10-04`,
+  `nexus/critique-wbfpw75-engine-client-expiry-2026-10-04`; text only, no status change).
+  Statements the build overtook: "each side expires only what it moved" holds for code, docs and
+  rdr siblings only. In `quarantine-knowledge__*` siblings the engine's `vectors-028` function
+  (`reaper_expire_client_quarantine`, own audit operation, own retention
+  `NX_REAPER_CLIENT_QUARANTINE_RETENTION_DAYS`) also deletes the rows a client moved, for a
+  registered live knowledge origin and a registered quarantine knowledge sibling, and the
+  user's `NX_GC_QUARANTINE_DAYS` no longer governs those rows. The client's own expiry still
+  takes them when run, so the engine's population is a strict subset of the client's, not the
+  same rows.

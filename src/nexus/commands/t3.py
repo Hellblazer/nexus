@@ -442,14 +442,19 @@ def gc_cmd(
 
     \b
     The verb frees no storage by itself: the moved chunks sit in
-    ``quarantine-*`` until they are expired, and each side expires only what it
-    moved. After its own move this verb runs the client expiry (as
-    ``nx index repo`` does for a repo's code, docs and rdr collections): rows in
-    the quarantine sibling older than ``NX_GC_QUARANTINE_DAYS`` (default 14) that
-    the engine's reaper did not tag are hard-deleted, except the chunks the
-    manifest references again. That expiry carries no fraction floor
-    (nexus-wbfpw.74). That is how a
-    ``knowledge__*`` quarantine ever expires, since no repo index sweeps it. A
+    ``quarantine-*`` until they are expired. After its own move this verb runs
+    the client expiry (as ``nx index repo`` does for a repo's code, docs and rdr
+    collections): rows in the quarantine sibling older than
+    ``NX_GC_QUARANTINE_DAYS`` (default 14) that the engine's reaper did not tag
+    are hard-deleted, except the chunks the manifest references again. That
+    expiry carries no fraction floor. That is how a ``knowledge__*`` quarantine
+    expires from the client side, since no repo index sweeps it. An engine that
+    also expires client-moved rows in ``quarantine-knowledge__*`` siblings (a
+    newer engine does; an older one does not) deletes them on its own
+    ``NX_REAPER_CLIENT_QUARANTINE_RETENTION_DAYS`` (default 14) and ignores
+    ``NX_GC_QUARANTINE_DAYS`` there, so a longer value of that variable does not
+    keep knowledge quarantine past the engine's retention. The two never
+    conflict. A
     chunk the engine's reaper moved (tagged ``quarantined_by``) is expired by the
     engine alone, on its own retention. A chunk whose document is re-registered
     is restored automatically by the ``nx index repo`` run. The operator restore
@@ -832,7 +837,9 @@ def gc_cmd(
         f"recorded each batch in gc_audit (nx catalog gc-audit list). The chunks are moved, not "
         f"freed: the client expiry below hard-deletes them once they are older than "
         f"NX_GC_QUARANTINE_DAYS (a later run of this verb, or of 'nx index repo' for a repo "
-        f"collection, does it)."
+        f"collection, does it). An engine that expires client-moved knowledge quarantine "
+        f"(a newer engine does, an older one does not) deletes them on its own retention, "
+        f"default 14 days, whatever NX_GC_QUARANTINE_DAYS says."
     )
     if moved < len(candidates):
         click.echo(

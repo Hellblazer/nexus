@@ -24,7 +24,7 @@ Lifecycle per GC pass (wired in ``indexer._prune_deleted_files``):
    unguarded, which :attr:`GcFloor.engine_applied` reports so the caller can
    say so. (The nexus-mr89x refusal nag this module retired was a client-side
    floor that re-warned on every pass; a refusal here is one audit row per
-   refused call.)
+   refused state: a repeat within the hour writes none.)
 3. **Expire** — quarantine rows older than ``NX_GC_QUARANTINE_DAYS``
    (default 14) hard-delete. NO fraction floor here either (nexus-wbfpw.74,
    Sam 2026-10-03), matching the engine's own expiry: the engine function
@@ -34,6 +34,11 @@ Lifecycle per GC pass (wired in ``indexer._prune_deleted_files``):
    a floor wedged every bulk quarantine, because one burst ages out as ~100%
    of the sibling's client rows. ``NX_GC_FLOOR_FRACTION`` / ``NX_GC_FORCE``
    govern the move into quarantine and nothing on this path.
+   ``NX_GC_QUARANTINE_DAYS`` governs this client expiry only. For a
+   ``quarantine-knowledge__*`` sibling a newer engine also expires the client-moved
+   rows, on its own ``NX_REAPER_CLIENT_QUARANTINE_RETENTION_DAYS`` (default 14),
+   whatever ``NX_GC_QUARANTINE_DAYS`` says; it never touches a code, docs or rdr
+   sibling, so a longer client value is honoured there and only there.
 
 First concrete piece of the RDR-156 soft-delete theme (nexus-70r3c).
 """

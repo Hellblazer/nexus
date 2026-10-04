@@ -18,6 +18,7 @@ import java.util.Map;
 import static dev.nexus.service.jooq.nexus.Routines.reaperOwnsQuarantinedRow;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.REAPER_EXPIRE_CLIENT_QUARANTINE;
 import static dev.nexus.service.jooq.nexus.Tables.REAPER_EXPIRE_QUARANTINE;
 import static dev.nexus.service.jooq.nexus.Tables.REAPER_QUARANTINE_CHUNKS;
 
@@ -184,6 +185,61 @@ public class ReaperRepository {   // not final: ChunkReaperIntegrationTest raise
                .fetchOne();
         });
         return new Expiry(rec.get(REAPER_EXPIRE_QUARANTINE.EXPIRED), rec.get(REAPER_EXPIRE_QUARANTINE.PROTECTED_COUNT));
+    }
+
+    /**
+     * The origins of the chunks a CLIENT moved into {@code quarantineCollection} (nexus-wbfpw.75): the distinct
+     * {@code origin_collection} tags of its rows that the reaper does not own
+     * ({@code nexus.reaper_owns_quarantined_row} is not true, the complement of {@link #taggedOrigins}), limited to
+     * the scope {@code nexus.reaper_expire_client_quarantine} itself enforces, all of it registry rows and never a
+     * parse of a name: the quarantine collection is registered with catalog {@code content_type}
+     * {@code contentType} and lifecycle state {@code quarantine}, and the origin is registered with that content
+     * type and lifecycle state {@code live} (restore, {@code vectors-025}, requires a live origin too). A row with
+     * no origin tag names no origin and is not listed: the engine never derives an origin from the sibling's name.
+     */
+    public List<String> clientMovedOrigins(String tenant, String quarantineCollection, String contentType,
+                                           int statementTimeoutMs) {
+        Field<String> origin = DSL.jsonbGetAttributeAsText(CHUNKS.METADATA, "origin_collection");
+        // The function is total (true or false, never NULL: vectors-024-2), so NOT agrees with IS NOT TRUE.
+        Condition clientMoved = DSL.not(DSL.condition(reaperOwnsQuarantinedRow(CHUNKS.METADATA)));
+        return tenantScope.withTenant(tenant, ctx -> {
+            PgSession.setStatementAndLockBounds(ctx, statementTimeoutMs, 2_000);
+            return ctx.selectDistinct(origin).from(CHUNKS)
+                .where(CHUNKS.TENANT_ID.eq(tenant).and(CHUNKS.COLLECTION.eq(quarantineCollection))
+                    .and(clientMoved).and(origin.isNotNull())
+                    .and(DSL.exists(DSL.selectOne().from(CATALOG_COLLECTIONS)
+                        .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)
+                            .and(CATALOG_COLLECTIONS.NAME.eq(quarantineCollection))
+                            .and(CATALOG_COLLECTIONS.CONTENT_TYPE.eq(contentType))
+                            .and(CATALOG_COLLECTIONS.LIFECYCLE_STATE.eq("quarantine")))))
+                    .and(DSL.exists(DSL.selectOne().from(CATALOG_COLLECTIONS)
+                        .where(CATALOG_COLLECTIONS.TENANT_ID.eq(CHUNKS.TENANT_ID)
+                            .and(CATALOG_COLLECTIONS.NAME.eq(origin))
+                            .and(CATALOG_COLLECTIONS.CONTENT_TYPE.eq(contentType))
+                            .and(CATALOG_COLLECTIONS.LIFECYCLE_STATE.eq("live"))))))
+                .fetch(origin).stream().sorted().toList();
+        });
+    }
+
+    /**
+     * The engine's expiry of what a client moved ({@code nexus.reaper_expire_client_quarantine}, vectors-028): at
+     * most {@code rowLimit} rows of {@code quarantineCollection} that the reaper does not own, tagged for
+     * {@code originCollection}, stamped at or before {@code cutoff}, never one a manifest row of the origin names.
+     * The function itself refuses to touch anything but a registered quarantine knowledge collection and a registered
+     * live knowledge origin, and refuses a cutoff that is not {@code yyyy-MM-ddTHH:mm:ssZ}. No fraction floor. One {@code reaper_expire_client_quarantine} audit row per call
+     * that deletes. Throws on a database error; a lock wait that times out surfaces as SQLSTATE 55P03 and a
+     * statement that hits its bound as 57014.
+     */
+    public Expiry expireClientMoved(String tenant, String quarantineCollection, String originCollection,
+                                    String cutoff, int rowLimit, int statementTimeoutMs, int lockTimeoutMs) {
+        var rec = tenantScope.withTenant(tenant, ctx -> {
+            PgSession.setStatementAndLockBounds(ctx, statementTimeoutMs, lockTimeoutMs);
+            return ctx.selectFrom(REAPER_EXPIRE_CLIENT_QUARANTINE.call(
+                    tenant, quarantineCollection, originCollection, cutoff, rowLimit))
+               .fetchOne();
+        });
+        return new Expiry(rec.get(REAPER_EXPIRE_CLIENT_QUARANTINE.EXPIRED),
+                          rec.get(REAPER_EXPIRE_CLIENT_QUARANTINE.PROTECTED_COUNT));
     }
 
     private Pass call(String tenant, String collection, String quarantineCollection, String quarantinedAt,
