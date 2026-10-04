@@ -134,20 +134,22 @@ it -> `doctor` with no ✗.
 different builder than any locally built candidate: full native build (not
 quick-build), codesign, cosign, PG-bundle packaging. A defect introduced by the
 release workflow is invisible to a local gate BY CONSTRUCTION — `nexus-2oh5q` is exactly that hazard (signing breaking JNI dlopen
-of the bundled onnxruntime/DJL), dormant only while the Apple secrets are
-unprovisioned. Historically this gate caught `nexus-pi3s3` + `nexus-qeoxf`
+of the bundled onnxruntime/DJL), dormant only while the repository variable
+`APPLE_SIGNING_REQUIRED` is not `true`. Historically this gate caught `nexus-pi3s3` + `nexus-qeoxf`
 (2026-06-26), defects every local suite missed.
 
 **Scope limit, carried from `nexus-1ddsy`'s close:** the container is Linux, so
 this exercises the linux artifact. The mac-arm64 post-signing path is NOT covered
 here — tracked on `nexus-2oh5q`.
 
-**The mac-arm64 gap has a gate — it is just MANUAL and not yet armed.** The
+**The mac-arm64 gap has a gate — it is just MANUAL, and has nothing to check until signing is switched on.** The
 provisioning half (six Apple credentials, both portals, the pre-flight and the
 renewal failure modes) is
 [`docs/operations/apple-code-signing.md`](../../../docs/operations/apple-code-signing.md).
-Once those are provisioned and the first Developer-ID-signed tag publishes,
-run on an arm64 Mac, BEFORE setting `APPLE_SIGNING_REQUIRED=true`:
+Signing is opt-in: a tag signs only when the repository variable
+`APPLE_SIGNING_REQUIRED` is `true`, whatever secrets exist (nexus-e8iml). After
+the first tag cut with it set, run on an arm64 Mac (on failure, delete the
+variable and cut a fresh tag):
 
 ```bash
 NEXUS_SERVICE_TAG=engine-service-vX.Y.Z tests/e2e/mac-signed-binary-gate.sh

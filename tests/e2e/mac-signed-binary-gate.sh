@@ -34,8 +34,9 @@
 # between a signed release and a mac-arm64 install whose first `nx init
 # --service` embed dies with UnsatisfiedLinkError.
 #
-# RUN IT AFTER the first signed tag publishes, BEFORE setting the repo variable
-# APPLE_SIGNING_REQUIRED=true. Passing here is what earns that flag.
+# RUN IT AFTER the first tag cut with the repo variable APPLE_SIGNING_REQUIRED=true
+# publishes (signing is opt-in by that variable, nexus-e8iml). Passing here is
+# what keeps the variable set; on failure, delete it and cut a fresh tag.
 #
 #   NEXUS_SERVICE_TAG=engine-service-v0.1.59 tests/e2e/mac-signed-binary-gate.sh
 #
@@ -197,10 +198,10 @@ printf '\n\033[1m== Verdict ==\033[0m\n'
 if [ "$fail" -eq 0 ]; then
   printf '\033[32mMAC SIGNED-BINARY GATE PASSED\033[0m — %s runs quarantined on arm64 macOS\n' "$TAG"
   printf 'with Hardened Runtime active and the bundled JNI libraries loading.\n'
-  printf 'This is what earns APPLE_SIGNING_REQUIRED=true (nexus-2oh5q).\n'
+  printf 'APPLE_SIGNING_REQUIRED=true can stay set (nexus-2oh5q).\n'
   exit 0
 fi
-printf '\033[31mMAC SIGNED-BINARY GATE FAILED\033[0m — do NOT set APPLE_SIGNING_REQUIRED=true.\n'
+printf '\033[31mMAC SIGNED-BINARY GATE FAILED\033[0m — delete the repo variable APPLE_SIGNING_REQUIRED and cut a fresh tag.\n'
 printf 'Full smoke log: %s (copied to /tmp/mac-signed-gate.log)\n' "$SMOKE_LOG"
 cp "$SMOKE_LOG" /tmp/mac-signed-gate.log 2>/dev/null || true
 exit 1
