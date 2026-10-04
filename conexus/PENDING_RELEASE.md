@@ -41,15 +41,11 @@ stale -- and stays exactly where it is until moved back deliberately.
 
 
 
-## Awaiting the next release or plugin cut (pinned: v7.70.0)
+## Awaiting the next release or plugin cut (pinned: v7.71.0)
 
 ONE PATH PER BULLET, on the bullet's FIRST line.
 
-- nexus-catalog schemas deferred (nexus-ivi4s): `conexus/.mcp.json` sets `alwaysLoad: false` on `nexus-catalog` (10 tools, about 3.4k tokens of schema), so Claude Code loads its schemas through tool search on first use instead of in every session. `nexus` and `sequential-thinking` keep `alwaysLoad: true`, which conexus 4.34.4 set because deferred tools stopped being invoked (3cd9e7d12); the catalog tools are the least-used of the three servers. Sam, 2026-10-04.
-- outside-critique reply (nexus-0cq5m): `conexus/commands/nx-preflight.md` no longer assumes its preflight output is present; when the `!` preamble's output is missing it runs `nx command-context nx-preflight` instead of summarizing nothing. Text only.
 
 
 ## Deferred to the next client release
 
-- operators demoted from the MCP surface (nexus-ivi4s): `conexus/skills/nexus/SKILL.md` drops the ten direct `operator_*` call examples and points at `nx_answer`. Ships with the client release that demotes the tools in `src/nexus/mcp/core.py`; shipped alone it would tell sessions on the old client not to call tools they still have.
-- operators demoted from the MCP surface (nexus-ivi4s): `conexus/skills/nexus/reference.md` replaces the ten per-operator tool sections with one table of plan verbs, and drops the operators from its core-tool list. Same pairing as above.
