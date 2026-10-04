@@ -88,7 +88,7 @@ sed -n '/^_reaper_status_verdict() {/,/^}/p' "$GATE" > "$TMP/jfn.sh"
 # Anchored on the closing PY heredoc line (the python body ends there, then the function's brace), so a
 # truncated extraction cannot pass by being long enough.
 if [ "$(head -n 1 "$TMP/jfn.sh")" != '_reaper_status_verdict() {' ] \
-   || [ "$(tail -n 2 "$TMP/jfn.sh" | head -n 1)" != 'PY' ] || [ "$(tail -n 1 "$TMP/jfn.sh")" != '}' ]; then
+   || [ "$(sed -n 'x;$p' "$TMP/jfn.sh")" != 'PY' ] || [ "$(tail -n 1 "$TMP/jfn.sh")" != '}' ]; then
   echo "[FAIL] _reaper_status_verdict not found or not closed on its PY heredoc in $GATE (extracted $(wc -l < "$TMP/jfn.sh") lines)"
   echo "$NAME: $PASS passed, $((FAIL + 1)) failed"
   exit 1
@@ -163,7 +163,7 @@ run_j "J: an edge 401 JSON error body -> violation (1)" 1 "no readable status bo
 # when the error string carries the fragment the engine's handler writes (nexus-wbfpw.50 review, I2).
 sed -n '/^_edge_expect() {/,/^}/p' "$GATE" > "$TMP/efn.sh"
 if [ "$(head -n 1 "$TMP/efn.sh")" != '_edge_expect() {' ] \
-   || [ "$(tail -n 2 "$TMP/efn.sh" | head -n 1)" != 'PY' ] || [ "$(tail -n 1 "$TMP/efn.sh")" != '}' ]; then
+   || [ "$(sed -n 'x;$p' "$TMP/efn.sh")" != 'PY' ] || [ "$(tail -n 1 "$TMP/efn.sh")" != '}' ]; then
   echo "[FAIL] _edge_expect not found or not closed on its PY heredoc in $GATE (extracted $(wc -l < "$TMP/efn.sh") lines)"
   echo "$NAME: $PASS passed, $((FAIL + 1)) failed"
   exit 1
@@ -323,7 +323,7 @@ else:
         errs.append("_edge_post's curl uses methods %r, expected exactly ['POST']" % (methods,))
 
 # 4. No client write outside the legs that already wrote.
-CLIENT_WRITE = re.compile(r"\.(put|post|delete|patch|out|ack|renew|nack|store_put|upsert\w*)\(|\btuple_out\b")
+CLIENT_WRITE = re.compile(r"\.(put|post|delete|patch|out|ack|renew|nack|stor[e]_put|upsert\w*)\(|\btuple_out\b")
 for name, lines in legs.items():
     if name not in WRITE_LEGS_BEFORE_K | {"K"} and CLIENT_WRITE.search("\n".join(code(lines))):
         errs.append("a client write call in leg %s, which has none today" % name)
