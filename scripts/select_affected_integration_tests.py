@@ -13,8 +13,15 @@ the ``integration (affected)`` job runs what it prints. A file is selected
 when it is integration-marked and either:
 
 * the push changed the test file itself, or
-* the push changed a ``src/nexus`` module the test file imports (any
-  ``import`` or ``from ... import`` statement, function-local ones too).
+* the push changed a ``src/nexus`` module the test file imports directly
+  (any ``import`` or ``from ... import`` statement, function-local ones
+  too), or a package ``__init__`` that such an import executes.
+
+Only direct imports count. A change to a module the test reaches through
+another module selects nothing. A transitive closure was measured and
+rejected on cost (2026-10-04, last 200 develop commits): it selects 80 or
+more of the ~100 files on 48 commits, which is the whole family on a
+quarter of pushes. The nightly gate covers the transitive reach.
 
 A change to ``service/`` or to shared test fixtures selects nothing by
 itself. Those move every integration test at once, and the nightly gate
@@ -33,7 +40,6 @@ from __future__ import annotations
 import argparse
 import ast
 import pathlib
-import re
 import sys
 
 #: Integration files that a dedicated ci.yml job already runs with the
@@ -56,7 +62,6 @@ COVERED_ELSEWHERE: dict[str, str] = {
     ),
 }
 
-_MARK = re.compile(r"\bmark\.integration\b")
 
 
 def _module_of(rel: str) -> str | None:
@@ -66,11 +71,31 @@ def _module_of(rel: str) -> str | None:
     return mod.removesuffix(".__init__")
 
 
-def _imported_modules(source: str) -> set[str]:
-    try:
-        tree = ast.parse(source)
-    except SyntaxError:
-        return set()
+def _with_parents(modules: set[str]) -> set[str]:
+    """Add every parent package: importing a.b.c executes a/__init__ and a/b/__init__."""
+    out = set(modules)
+    for m in modules:
+        parts = m.split(".")
+        out.update(".".join(parts[:k]) for k in range(1, len(parts)))
+    return out
+
+
+def _has_integration_mark(tree: ast.AST) -> bool:
+    """True when the code names ``<something>.mark.integration``.
+
+    Reads the syntax tree, not the text, so a file that only mentions the
+    marker in a string or comment is not an integration file.
+    """
+    return any(
+        isinstance(node, ast.Attribute)
+        and node.attr == "integration"
+        and isinstance(node.value, ast.Attribute)
+        and node.value.attr == "mark"
+        for node in ast.walk(tree)
+    )
+
+
+def _imported_modules(tree: ast.AST) -> set[str]:
     mods: set[str] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
@@ -88,9 +113,12 @@ def _integration_files(repo: pathlib.Path) -> dict[str, set[str]]:
         rel = path.relative_to(repo).as_posix()
         if rel in COVERED_ELSEWHERE:
             continue
-        source = path.read_text(encoding="utf-8", errors="replace")
-        if _MARK.search(source):
-            found[rel] = _imported_modules(source)
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
+        except SyntaxError:
+            continue
+        if _has_integration_mark(tree):
+            found[rel] = _with_parents(_imported_modules(tree))
     return found
 
 

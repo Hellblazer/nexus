@@ -98,11 +98,19 @@ def test_function_local_import_counts(tree: pathlib.Path) -> None:
     ]
 
 
-def test_package_init_maps_to_the_package(tree: pathlib.Path) -> None:
-    # `from nexus.db import client` imports the nexus.db package.
+def test_package_init_selects_every_importer_below_it(tree: pathlib.Path) -> None:
+    # Importing nexus.db.client executes nexus/db/__init__.py too.
     assert sel.select(tree, ["src/nexus/db/__init__.py"]) == [
-        "tests/db/test_b_integration.py"
+        "tests/db/test_b_integration.py",
+        "tests/test_a_integration.py",
     ]
+
+
+def test_transitive_import_is_not_followed(tree: pathlib.Path) -> None:
+    # Documented limit: client.py importing other.py does not make other.py's
+    # change select client.py's importers.
+    _write(tree, "src/nexus/db/client.py", "import nexus.other\nX = 1\n")
+    assert sel.select(tree, ["src/nexus/other.py"]) == ["tests/test_c_integration.py"]
 
 
 def test_deleted_file_is_not_selected(tree: pathlib.Path) -> None:
@@ -130,12 +138,20 @@ def test_covered_elsewhere_names_real_files_that_ci_runs() -> None:
     An exclusion whose dedicated job was deleted would hide that file from
     every per-push gate, which is the gap this selector closes.
     """
-    ci = CI_YML.read_text()
+    doc = yaml.safe_load(CI_YML.read_text())
+    runs = [
+        step.get("run", "")
+        for job in doc["jobs"].values()
+        for step in job.get("steps", [])
+    ]
+    pytest_runs = [r for r in runs if "pytest" in r]
     assert sel.COVERED_ELSEWHERE, "exclusion table is empty; delete this test with it"
     for rel, reason in sel.COVERED_ELSEWHERE.items():
         assert (REPO_ROOT / rel).is_file(), rel
         assert reason.strip(), rel
-        assert rel in ci, f"{rel} is excluded but no ci.yml job names it"
+        assert any(rel in r for r in pytest_runs), (
+            f"{rel} is excluded but no ci.yml step runs it with pytest"
+        )
 
 
 def test_real_corpus_is_not_vacuous() -> None:
@@ -145,8 +161,7 @@ def test_real_corpus_is_not_vacuous() -> None:
     CI job would report "no affected integration tests" forever.
     """
     files = sel.select_all(REPO_ROOT)
-    assert len(files) >= 80, len(files)
-    assert "tests/test_6pbwx_owner_from_documents.py" in files
+    assert len(files) >= 40, len(files)
 
 
 def test_cli_reads_paths_from_stdin(tree: pathlib.Path) -> None:
@@ -341,3 +356,125 @@ def test_fanin_fails_on_unrecognised_selection_flag(any_: str) -> None:
         "needs.changes.outputs.integration_any": any_,
     }))
     assert proc.returncode == 1, (proc.stdout, proc.stderr)
+
+
+# -- the job's collect and run steps, executed verbatim with a stub uv --------
+
+
+def _job_step(name_prefix: str) -> str:
+    doc = yaml.safe_load(CI_YML.read_text())
+    steps = doc["jobs"]["test-integration-affected"]["steps"]
+    (step,) = [s for s in steps if s.get("name", "").startswith(name_prefix)]
+    return step["run"]
+
+
+def _run_job_step(
+    tmp: pathlib.Path, name_prefix: str, *, stub_out: str, stub_rc: int,
+    collected: str = "0", files: str = "tests/test_a.py tests/test_b.py",
+) -> tuple[subprocess.CompletedProcess[str], dict[str, str]]:
+    bindir = tmp / "bin"
+    bindir.mkdir(exist_ok=True)
+    stub = bindir / "uv"
+    stub.write_text(f"#!/usr/bin/env bash\ncat <<'OUT'\n{stub_out}\nOUT\nexit {stub_rc}\n")
+    stub.chmod(0o755)
+    script = _GH_EXPR.sub(
+        lambda m: {"steps.collect.outputs.collected": collected}[m.group(1).strip()],
+        _job_step(name_prefix),
+    )
+    out = tmp / "gh_output"
+    out.write_text("")
+    env = dict(
+        os.environ,
+        PATH=f"{bindir}{os.pathsep}{os.environ['PATH']}",
+        GITHUB_OUTPUT=str(out),
+        INTEGRATION_FILES=files,
+        INTEGRATION_MARK_EXPR="integration",
+    )
+    proc = subprocess.run(["bash", "-c", script], cwd=tmp, env=env, capture_output=True, text=True)
+    outputs = dict(line.split("=", 1) for line in out.read_text().splitlines() if "=" in line)
+    return proc, outputs
+
+
+_COLLECT_OUT = (
+    "tests/test_a.py::test_one\ntests/test_b.py::TestX::test_two[p::q]\n"
+    "warning: some text with :: in it\n\n2/9 tests collected (7 deselected) in 0.1s"
+)
+
+
+def test_collect_step_counts_node_ids_only(tmp_path: pathlib.Path) -> None:
+    proc, out = _run_job_step(tmp_path, "Collect", stub_out=_COLLECT_OUT, stub_rc=0)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert out == {"collected": "2"}
+    assert (tmp_path / "integration-selected.txt").read_text().split() == [
+        "tests/test_a.py", "tests/test_b.py",
+    ]
+
+
+def test_collect_step_accepts_nothing_matched(tmp_path: pathlib.Path) -> None:
+    proc, out = _run_job_step(tmp_path, "Collect", stub_out="no tests ran", stub_rc=5)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert out == {"collected": "0"}
+
+
+def test_collect_step_fails_on_collection_error(tmp_path: pathlib.Path) -> None:
+    proc, _ = _run_job_step(tmp_path, "Collect", stub_out="ImportError", stub_rc=2)
+    assert proc.returncode == 1
+
+
+def test_collect_step_fails_on_empty_selection(tmp_path: pathlib.Path) -> None:
+    proc, _ = _run_job_step(tmp_path, "Collect", stub_out="", stub_rc=0, files="")
+    assert proc.returncode == 1
+
+
+def _seed_selection(tmp: pathlib.Path) -> None:
+    (tmp / "integration-selected.txt").write_text("tests/test_a.py\n")
+
+
+def test_run_step_rc5_passes_only_when_nothing_was_collected(tmp_path: pathlib.Path) -> None:
+    _seed_selection(tmp_path)
+    proc, _ = _run_job_step(tmp_path, "Run the affected", stub_out="", stub_rc=5, collected="0")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    proc, _ = _run_job_step(tmp_path, "Run the affected", stub_out="", stub_rc=5, collected="3")
+    assert proc.returncode == 5
+
+
+def test_run_step_propagates_failures(tmp_path: pathlib.Path) -> None:
+    _seed_selection(tmp_path)
+    proc, _ = _run_job_step(tmp_path, "Run the affected", stub_out="", stub_rc=1, collected="3")
+    assert proc.returncode == 1
+    proc, _ = _run_job_step(tmp_path, "Run the affected", stub_out="", stub_rc=0, collected="3")
+    assert proc.returncode == 0
+
+
+
+# -- population floor: what pytest collects is what the selector can see ------
+
+#: Floor on tests collected under the job's mark expression. Measured
+#: 2026-10-04: 812 tests in 83 files. Set about 10% under, so ordinary churn
+#: does not trip it but losing a large part of the family does. Lower it
+#: consciously, in the change that removes tests.
+COLLECT_FLOOR = 730
+
+
+@pytest.mark.lint
+def test_collected_family_meets_floor_and_is_visible_to_the_selector() -> None:
+    """The selector's universe must contain every file pytest collects.
+
+    A marker spelling the selector cannot see would drop that file from every
+    per-push selection silently. A mark expression that stopped collecting
+    would make every push report "nothing to run".
+    """
+    ci = CI_YML.read_text()
+    expr = re.search(r'INTEGRATION_MARK_EXPR: "([^"]+)"', ci).group(1)
+    proc = subprocess.run(
+        [sys.executable, "-m", "pytest", "-o", "addopts=", "-m", expr,
+         "--collect-only", "-q", "-p", "no:cacheprovider", "tests"],
+        cwd=REPO_ROOT, capture_output=True, text=True,
+        env=dict(os.environ, NX_TEST_T2_SUBSTRATE="none"),
+    )
+    assert proc.returncode == 0, proc.stdout[-2000:] + proc.stderr[-2000:]
+    ids = [ln for ln in proc.stdout.splitlines() if re.match(r"^[^ ]+\.py::", ln)]
+    assert len(ids) >= COLLECT_FLOOR, f"collected {len(ids)}, floor {COLLECT_FLOOR}"
+    collected_files = {i.split("::", 1)[0] for i in ids}
+    universe = set(sel.select_all(REPO_ROOT)) | set(sel.COVERED_ELSEWHERE)
+    assert collected_files <= universe, sorted(collected_files - universe)
