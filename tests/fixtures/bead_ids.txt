@@ -3342,8 +3342,18 @@ nexus-ger02.15
 nexus-ger02.15.1
 nexus-ger02.16
 nexus-ger02.16.1
+nexus-ger02.17
+nexus-ger02.18
+nexus-ger02.19
 nexus-ger02.2
 nexus-ger02.2.1
+nexus-ger02.20
+nexus-ger02.21
+nexus-ger02.22
+nexus-ger02.23
+nexus-ger02.24
+nexus-ger02.25
+nexus-ger02.26
 nexus-ger02.3
 nexus-ger02.3.1
 nexus-ger02.4
@@ -3917,6 +3927,7 @@ nexus-itxet
 nexus-iu43o
 nexus-ivdqt
 nexus-ivdqt.1
+nexus-ivi4s
 nexus-ivra
 nexus-ivu52
 nexus-ivu52.1

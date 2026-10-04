@@ -8,14 +8,14 @@ For **when to use which retrieval interface**, see [Querying Guide](querying-gui
 
 | Server | Entry point | Tools | Purpose |
 |---|---|---|---|
-| `nexus` | `nx-mcp` | 54 | Storage tiers, retrieval, operators, orchestration, diagnostics |
+| `nexus` | `nx-mcp` | 44 | Storage tiers, retrieval, orchestration, diagnostics |
 | `nexus-catalog` | `nx-mcp-catalog` | 10 | Document catalog, link graph, tumbler resolution |
 
 The `nexus` and `nexus-catalog` servers register automatically when you install the plugin (`/plugin install conexus@nexus-plugins`). No separate install. The `.mcpb` extension registers only `nexus` — catalog tools (`catalog_search`, `catalog_link`, etc.) are unavailable in Claude Desktop until the plugin also ships a second `.mcpb` entry.
 
 **Substrate dependency**: since RDR-155, every persistent tier (T2 + T3 storage/retrieval tools) routes through the native nexus-service (`nx daemon service`, Postgres 17 + pgvector), not a ChromaDB daemon. A single `nx init` provisions and starts it and offers to register the OS autostart unit so it survives reboots (RDR-174 collapsed flow). See [Getting Started § Install](getting-started.md#install) for the install walkthrough and [Container Integration](container-integration.md) for the multi-process / multi-host model.
 
-## `nexus` — retrieval + storage (54 tools)
+## `nexus` — retrieval + storage (44 tools)
 
 Full tool names follow `mcp__plugin_conexus_nexus__<tool>`.
 
@@ -86,11 +86,13 @@ Full tool names follow `mcp__plugin_conexus_nexus__<tool>`.
 
 **Failure modes**: the engine renders twelve typed errors as `{"error": "<code>", "detail": "..."}`; the four most likely to surface from a tool call are `ParkCapExceeded` (429 — the per-claimant or global park cap is at capacity; back off and retry), `TimeoutTooLong` (400 — `timeout_s` above the engine's cap), `TooLarge` (413 — a `tuple_out`/`tuple_ack` field, e.g. `body`, over the engine's size limit), and `CensusTimeout` (503 — `tuple_list`'s own census query exceeded its statement_timeout; the engine is reachable, retry narrower or later). A 502/503/504 during an engine deploy is retried by the client transparently (`rd`/`out` freely, `in` with the same claimant); the deploy gap is a retry, not an error surfaced to the caller — a genuine `CensusTimeout` 503 is distinguishable by its `error` code, not conflated with a deploy-gap retry. See [Tuple Space § Errors](tuple-space.md#errors) for the full twelve.
 
-### Operators (LLM-backed, RDR-079)
+### Operators (LLM-backed, RDR-079) — not MCP tools
 
 Each operator spawns a `claude -p --output-format json --json-schema …` subprocess with a task-specific system prompt. Structured output is unwrapped from the wrapper.
 
-Inside `nx_answer` / `plan_run`, consecutive operator steps collapse into a single subprocess via operator bundling (55–72% latency savings). Direct MCP-tool calls still spawn per-operator subprocesses. See [Plan-Centric Retrieval § Operator bundling](plan-centric-retrieval.md#operator-bundling-v4100).
+**The operators are not on the MCP surface** (nexus-ivi4s). They are plain functions in `nexus.mcp.core`, reached only through `nx_answer` / plan execution: a plan step names a bare verb (`summarize`, `rank`, …), and the plan runner resolves it in-process to `operator_<verb>`. A session cannot call them directly, which keeps ten subprocess-spawning tools and about 4k tokens of schema out of every session. Inside `nx_answer` / `plan_run`, consecutive operator steps collapse into a single subprocess via operator bundling (55–72% latency savings). See [Plan-Centric Retrieval § Operator bundling](plan-centric-retrieval.md#operator-bundling-v4100).
+
+The plan verbs and what each does:
 
 | Tool | Purpose |
 |---|---|
@@ -127,7 +129,7 @@ engine-service + Postgres stack; destructive, `confirm=true` gated).
 
 ### Hook-tier tools (internal plumbing, RDR-215)
 
-The remaining 2 of the 54 registered tools are `hook_*` entries
+The remaining 2 of the 44 registered tools are `hook_*` entries
 (`src/nexus/mcp/hooks.py`, `nexus.mcp.hooks.HOOK_TOOLS`). Each ports a
 conexus plugin `hooks.json` entry to a `hook_*` MCP tool.
 `hook_subagent_start` is what `hooks.json` WIRES for `SubagentStart` (an
@@ -143,8 +145,8 @@ and divergence-language hook tools (`hook_pre_close_verification`,
 `hook_divergence_language_guard`) at cleanup steps A2 and A3; the wire
 snapshot moved with them. There is no reason to call either remaining tool by
 hand, and their own tool descriptions say so ("not meant to be invoked
-directly"). Listed here only so the 54-tool count reconciles with the tables
-above, which cover the 52 tools an agent calls directly:
+directly"). Listed here only so the 44-tool count reconciles with the tables
+above, which cover the 42 tools an agent calls directly:
 
 | Tool | Fires on |
 |---|---|

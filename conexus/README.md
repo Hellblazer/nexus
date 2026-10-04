@@ -374,7 +374,7 @@ The plugin ships `.mcp.json` which Claude Code picks up automatically on install
 | Collections | `collection_list` |
 | Plans (RDR-078) | `plan_save`, `plan_search`, `plan_delete`, `traverse` |
 | Tuple space (RDR-205/206/211/213) | `tuple_out`, `tuple_rd`, `tuple_in`, `tuple_ack`, `tuple_nack`, `tuple_renew`, `tuple_release`, `tuple_registry`, `tuple_list`, `tuple_stats`, `tuple_subscribe`, `tuple_unsubscribe`, `tuple_subscriptions` |
-| Operators (RDR-079/088/093) | `operator_extract`, `operator_rank`, `operator_compare`, `operator_summarize`, `operator_generate`, `operator_filter`, `operator_groupby`, `operator_aggregate`, `operator_check`, `operator_verify` |
+| Operators (RDR-079/088/093) | none on the MCP surface (nexus-ivi4s): `summarize`, `extract`, `rank`, `compare`, `generate`, `filter`, `groupby`, `aggregate`, `check`, `verify` run as plan steps inside `nx_answer` |
 | Orchestration (RDR-080) | `nx_answer`, `nx_tidy`, `nx_enrich_beads`, `nx_plan_audit` |
 | Admin | `daemon_uninstall` |
 

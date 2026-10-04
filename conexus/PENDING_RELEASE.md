@@ -50,4 +50,5 @@ ONE PATH PER BULLET, on the bullet's FIRST line.
 
 ## Deferred to the next client release
 
-_Empty. The entry deferred here (nexus-wbfpw.41, the `skills/upgrade/SKILL.md` text for the `rdr192-manifest-backfill` rung) shipped with the 7.68.0 client release._
+- operators demoted from the MCP surface (nexus-ivi4s): `conexus/skills/nexus/SKILL.md` drops the ten direct `operator_*` call examples and points at `nx_answer`. Ships with the client release that demotes the tools in `src/nexus/mcp/core.py`; shipped alone it would tell sessions on the old client not to call tools they still have.
+- operators demoted from the MCP surface (nexus-ivi4s): `conexus/skills/nexus/reference.md` replaces the ten per-operator tool sections with one table of plan verbs, and drops the operators from its core-tool list. Same pairing as above.
