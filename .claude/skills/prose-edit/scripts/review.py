@@ -469,6 +469,49 @@ def _dropped_lines(prop: Obj) -> list[str]:
     return lines
 
 
+def change_core(old: str, new: str) -> tuple[str, str, str, str]:
+    """(shared head, old part, new part, shared tail) of an edit, cut at word edges (nexus-ger02.19).
+
+    The copy strikes only the part that changes: a whole sentence struck and re-inserted hides a one-character
+    change in two near-identical lines. The changed part grows to whole words, so a word is never split.
+    """
+    p = 0
+    while p < min(len(old), len(new)) and old[p] == new[p]:
+        p += 1
+    s = 0
+    while s < min(len(old), len(new)) - p and old[-1 - s] == new[-1 - s]:
+        s += 1
+    lo, hi_old, hi_new = p, len(old) - s, len(new) - s
+
+    def word(c: str) -> bool:
+        return c.isalnum() or c in "_'"
+
+    def starts_word(part: str) -> bool:
+        return bool(part) and word(part[0])
+
+    while lo > 0 and word(old[lo - 1]) and (starts_word(old[lo:hi_old]) or starts_word(new[lo:hi_new])):
+        lo -= 1
+    tail = len(old) - hi_old
+    while tail > 0 and word(old[hi_old]) and (old[lo:hi_old][-1:].isalnum() or new[lo:hi_new][-1:].isalnum()):
+        hi_old += 1
+        hi_new += 1
+        tail -= 1
+    return old[:lo], old[lo:hi_old], new[lo:hi_new], old[hi_old:]
+
+
+def _show(part: str) -> str:
+    return f"`{part}`" if part.strip() else ("a space" if part == " " else "whitespace" if part else "nothing")
+
+
+def change_note(old: str, new: str) -> str:
+    """A footnote line naming a change no reader would spot by eye: punctuation or whitespace only."""
+    _, a, b, _ = change_core(old, new)
+    if any(c.isalnum() for c in a + b):
+        return ""
+    kind = "whitespace only" if not (a + b).strip() else "punctuation only"
+    return f" ({kind}: {_show(a)} → {_show(b)})"
+
+
 def _unplaced_note(p: Obj) -> str:
     tail = (" Accepted together they are both skipped; accepted alone it is applied."
             if p["cause"] == "overlap" else " It is skipped if accepted.")
@@ -496,8 +539,9 @@ def build_copy(text: str, prop: Obj, *, label: str, genre: str, rng: Obj | None,
     for p in plans:
         if p["span"] is not None:
             start, end = cast(Span, p["span"])
-            ins = f"<ins>{p['new']}</ins>" if p["new"] else ""
-            edit_marks.append((start, end, f"<del>{p['old']}</del>{ins}<sup>{p['n']}</sup>"))
+            head, gone, put, tail = change_core(str(p["old"]), str(p["new"]))
+            mark = (f"<del>{gone}</del>" if gone else "") + (f"<ins>{put}</ins>" if put else "")
+            edit_marks.append((start, end, f"{head}{mark}{tail}<sup>{p['n']}</sup>"))
     unplaced = [_unplaced_note(p) for p in plans if p["span"] is None]
     p_notes: list[tuple[int, str]] = []
     for pr in sorted(paragraphs, key=lambda x: int(x["n"])):
@@ -561,7 +605,8 @@ def build_copy(text: str, prop: Obj, *, label: str, genre: str, rng: Obj | None,
     gone = _dropped_lines(prop)
     if gone:
         head_lines += ["", _quote("**Dropped before this copy.**\n" + "\n".join(gone))]
-    notes: list[tuple[int, str]] = [(int(e["n"]), str(e.get("reason", ""))) for e in edits]
+    notes: list[tuple[int, str]] = [
+        (int(e["n"]), str(e.get("reason", "")) + change_note(str(e["old"]), str(e.get("new") or ""))) for e in edits]
     notes += [(int(d["n"]), f"dropped before this copy: {d.get('cause', '')}") for d in dropped if d.get("n") is not None]
     foot = "\n\n".join(f"<sup>{n}</sup> {why}" for n, why in sorted(notes))
     return "\n".join(head_lines) + "\n\n---\n\n" + body_text.rstrip("\n") + "\n\n---\n\n" + foot + "\n"
