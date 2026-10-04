@@ -45,6 +45,8 @@ stale -- and stays exactly where it is until moved back deliberately.
 
 ONE PATH PER BULLET, on the bullet's FIRST line.
 
+- outside-critique reply (nexus-0cq5m): `conexus/commands/nx-preflight.md` no longer assumes its preflight output is present; when the `!` preamble's output is missing it runs `nx command-context nx-preflight` instead of summarizing nothing. Text only.
+
 
 ## Deferred to the next client release
 

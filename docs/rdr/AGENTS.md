@@ -40,6 +40,8 @@ finding. A lint test (`tests/test_tables_lint.py`) asserts this list matches
 the table's `status` domain exactly, so this section cannot silently drift
 from the table again.
 
+The table governs RDR records only: the top-level `docs/rdr/rdr-NNN-*.md` files that are not `kind: companion`. Companion notes, the JDRs under `joint/` and the post-mortems under `post-mortem/` carry their own `status:` words (`frozen` on a pre-registration, `active` on a JDR, `resolved` on a post-mortem), and nothing in the lifecycle acts on them; `rdr-audit` skips companions and scans `docs/rdr/` non-recursively, so it never reports them.
+
 The **only** way to retire an RDR is the `status:` flip. **Never delete an RDR file** — they're the project's permanent decision record.
 
 

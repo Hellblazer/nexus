@@ -8,7 +8,7 @@ disable-model-invocation: false
 
 ## Summary
 
-Based on the preflight output above, produce a summary table:
+The preflight output above is the command's own gathered data when the `!` preamble ran; if it is missing or empty, run `nx command-context nx-preflight` via the Bash tool rather than proceeding on nothing. From it, produce a summary table:
 
 | Dependency | Status | Action needed |
 |-----------|--------|---------------|
