@@ -496,9 +496,13 @@ each: sentence edits proposed, accepted and rejected, with each rejection's
 reason (wrong, or right but unwanted); paragraph proposals and queries,
 counted separately; and Sam's answer to "would you reach for this again?".
 As a comparison, run the existing `site-page` voice-pass brief on the original
-text of the essay and the reference doc, with a voice card written as
-`site-page` §2 describes and a word budget of 10% of the document; present
-its cuts in the same marked-up form, and Sam accepts or rejects each.
+text of the essay and the reference doc, with the voice card the editor built
+and Sam approved for that document and a cap of 10 cuts, each inside one
+sentence; present its cuts in the same marked-up form, and Sam accepts or
+rejects each. The cap replaced a word budget of 10% of the document (Sam,
+2026-10-04) so that both arms' accept rates count the same unit. The full
+comparison settings (denominators, pooling, no exemplar for the brief, blind
+A/B presentation) are the 2026-10-04 comment on nexus-ger02.8.
 
 #### Step 2.2: Decide
 
