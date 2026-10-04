@@ -1,5 +1,41 @@
 # Changelog
 
+## [7.70.0] - 2026-10-04
+
+Plugin version aligned with conexus 7.70.0. Everything `PENDING_RELEASE.md` held
+since v7.69.0 becomes live at this pin (41 entries, all from the 2026-10-03 process
+cleanup, nexus-0r1uz, plus the doc-drift fixes, nexus-aruua):
+
+- `hooks/hooks.json` drops the RDR-184 ledger and RDR-205 projector hooks, the
+  behaviour census, the bd-close review gate, the phase-review close gate, Stop
+  verification, StopFailure, PostCompact and the divergence-language guard.
+  PreToolUse Bash carries two hooks (the subagent git-write guard and the
+  credential-print guard); no rule is `fail_closed`. `bd close` is no longer
+  gated on a review marker. The deleted scripts go with their entries
+  (`behaviour_census.py`, `routing/phase_review_close_requires_gate.py`,
+  `divergence-language-scan.py`); `mailbox_drain.py`, `_endpoint_resolve.py`,
+  `routing/_lib.py`, `_hook_logging.py` and `_interpreter.py` lose only comments
+  and one unused credential-policy helper.
+- Skills: `orchestration` drops the Background-Teammate Ledger, the
+  ledger-reading wait section and the agent-verify-claims text; `mailbox` drops
+  the unacked-request sweep; `rdr-audit-checklist` drops the `schedule` and
+  `unschedule` subcommands and their launchd and crontab templates;
+  `phase-review-gate` is a short manual checklist; `rdr-close` drops the Problem
+  Statement Replay, the force-implemented audit path and the T1 marker;
+  `rdr-create`, `using-nx-skills`, `writing-nx-skills` and `code-review` lose the
+  text that described deleted verbs or the `review-completed` marker; the
+  `nexus` skill no longer attributes the 300-record read cap to ChromaDB.
+- Commands: `continuation` drops the two ledger audits; `rdr-audit` drops the
+  schedule text; `devonthink-index`, `rdr-list`, `rdr-gate`, `rdr-fix` and
+  `rdr-accept` no longer say their data is pre-loaded with no tool calls allowed;
+  they name the preamble command to run when the `!` preamble did not.
+- Agents: `code-review-expert` and `substantive-critic` drop the
+  `review-completed` marker prohibition; `developer` drops the
+  `.beads/issues.jsonl` clause (the export is untracked).
+- `resources/agent-shared/CONTEXT_PROTOCOL.md`, `resources/rdr/TEMPLATE.md`,
+  `registry.yaml` and `README.md` updated to match (the core server registers 2
+  internal `hook_*` tools, not 12).
+
 ## [7.69.0] - 2026-10-03
 
 Plugin version aligned with conexus 7.69.0. No plugin-side changes: nothing

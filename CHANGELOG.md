@@ -6,6 +6,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.70.0] - 2026-10-04
+
+Pairs with engine-service-v0.1.145, unchanged from 7.69.0: no engine cut, no
+changeset, no deploy. A client-only release. The plugin shrinks: the 41 entries
+`conexus/PENDING_RELEASE.md` held become live at this pin (the cleanup's hook,
+command, skill and agent deletions, and the doc-drift command fixes); see
+`conexus/CHANGELOG.md`.
+
 ### Fixed
 
 - **Doc drift an outside critique measured is corrected: the RDR index, a promised hook, five slash commands, two unresolved citations and the stale bead export** (nexus-aruua; from the 2026-10-03 outside critique, T2 `nexus/outside-critique-nexus-ecosystem-2026-10-04`). `docs/rdr.md` no longer promises a session-start reconciliation hook that never ran and was deleted; it says `nx rdr set-status` writes file and T2 together. `docs/rdr/README.md` gains the two rows it omitted (RDR-123, RDR-124, both superseded by RDR-127), corrects RDR-120 and RDR-130 to Closed, and restores RDR-201's title cell, which held the word "Closed". `conexus/commands/rdr-list.md` and the `nexus.hooks.rdr_verb` docstring stop describing a SessionStart reconciliation or a set-status that never writes T2: the verb mirrors a flip onto T2 best-effort and `nx rdr preamble rdr-audit` prints the drift that remains. The five commands that said "all data is pre-loaded above, no additional tool calls needed" (devonthink-index, rdr-list, rdr-gate, rdr-fix, rdr-accept) now say the data is the `!` preamble's output and tell the agent to gather it when the preamble did not run, instead of forbidding the fetch. The nexus skill's hydration example no longer attributes the 300-record cap to ChromaDB. RDR-090's `RDR-326` and RDR-170's `RDR-651` citations, which name no record in this repo, now say so inline (651 is the conexus-side cutover). `.beads/issues.jsonl`, a May 2026 export of 255 rows that readers took for the store, is untracked and ignored like `interactions.jsonl`; `tests/fixtures/bead_ids.txt` remains the committed bead artifact, and the agent docs no longer tell anyone to commit the export.
