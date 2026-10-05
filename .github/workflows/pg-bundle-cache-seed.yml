@@ -205,7 +205,9 @@ jobs:
   seed-windows:
     name: Seed PG bundle cache (windows-x64 @ win-release)
     runs-on: win-release
-    if: ${{ vars.NX_WINDOWS_RELEASE_LEGS == 'on' }}
+    # Actor guard as in the rehearsal and the release leg (nexus-f9bgu.27): public repo,
+    # self-hosted runner that is inside the release trust boundary.
+    if: ${{ github.actor == 'Hellblazer' && vars.NX_WINDOWS_RELEASE_LEGS == 'on' }}
     timeout-minutes: 40
     defaults:
       run:
@@ -248,3 +250,7 @@ jobs:
           # controls, the four VC++ DLLs). The cache post-save runs only on job
           # success, so a non-zero exit here prevents a hollow seed.
           & $env:PYTHON scripts\build_pg_bundle_windows.py verify --prefix "$env:GITHUB_WORKSPACE\bundle"
+
+      - name: Stop stray engine and Postgres processes (always)
+        if: always()
+        uses: ./.github/actions/windows-job-cleanup

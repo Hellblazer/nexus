@@ -1067,6 +1067,21 @@ jobs:
   # why the gate is a variable Sam flips once the runner is registered, not the
   # job's mere presence. When 'on', the assets BLOCK promotion (P0.4).
   #
+  # ACTOR GUARD (nexus-f9bgu.27): `github.actor == 'Hellblazer'`, as in the rehearsal
+  # and the seed leg. A tag push or a dispatch needs write access, so this is the
+  # owner today; the guard makes that a property of the file and not of the collaborator
+  # list. An actor who is not the owner skips the job, and with the switch on that
+  # leaves the release a draft (the safe direction). It does not make the job's CODE
+  # safe: the scripts it runs execute on the release runner after merge with no click,
+  # which is why AGENTS.md reviews a change to them as release-runner code.
+  #
+  # NEVER RUN BY THE REHEARSAL: this file is not in the rehearsal's path filter (a
+  # push trigger on a release workflow would run release jobs). Its Windows jobs are
+  # proven only by a workflow_dispatch run of THIS workflow, on develop, with the
+  # switch on, before the first Windows-carrying cut (a non-tag ref runs everything
+  # except sign, upload and promote). The engine-release skill's pre-cut steps and the
+  # checklist bead record that run.
+  #
   # The build is scripts/build_pg_bundle_windows.py (nexus-f9bgu.12): MSVC +
   # meson, stdlib Python. Cache key = the script's own `cache-key` output (version
   # pins + the script's sha256), the same exact-input shape as the other legs;
@@ -1085,7 +1100,7 @@ jobs:
     name: Build + sign + publish PG bundle (windows-x64)
     runs-on: win-release
     needs: create-release
-    if: ${{ !cancelled() && needs.create-release.result != 'failure' && vars.NX_WINDOWS_RELEASE_LEGS == 'on' }}
+    if: ${{ !cancelled() && github.actor == 'Hellblazer' && needs.create-release.result != 'failure' && vars.NX_WINDOWS_RELEASE_LEGS == 'on' }}
     timeout-minutes: 40
     defaults:
       run:
@@ -1181,6 +1196,9 @@ jobs:
           # makes re-runs idempotent.
           gh release upload "$env:GITHUB_REF_NAME" --clobber `
             "dist\$env:ASSET.txz" "dist\$env:ASSET.txz.sha256" "dist\$env:ASSET.txz.sigstore.json"
+      - name: Stop stray engine and Postgres processes (always)
+        if: always()
+        uses: ./.github/actions/windows-job-cleanup
 
   # nexus-f9bgu.9 (RDR-224 P1.2): the windows-x64 engine. A job of its own for the
   # reasons in the header; same runner, same switch and the same trust boundary as
@@ -1202,7 +1220,7 @@ jobs:
     name: Build + smoke + sign + publish engine (windows-x64)
     runs-on: win-release
     needs: [jooq-codegen, create-release, build-publish-pg-bundle-windows]
-    if: ${{ !cancelled() && needs.jooq-codegen.result == 'success' && needs.create-release.result != 'failure' && needs.build-publish-pg-bundle-windows.result == 'success' && vars.NX_WINDOWS_RELEASE_LEGS == 'on' }}
+    if: ${{ !cancelled() && github.actor == 'Hellblazer' && needs.jooq-codegen.result == 'success' && needs.create-release.result != 'failure' && needs.build-publish-pg-bundle-windows.result == 'success' && vars.NX_WINDOWS_RELEASE_LEGS == 'on' }}
     timeout-minutes: 75
     defaults:
       run:
@@ -1278,6 +1296,9 @@ jobs:
           # The release exists (this job needs create-release); --clobber makes re-runs idempotent.
           gh release upload "$env:GITHUB_REF_NAME" --clobber `
             "dist\$env:ASSET.txz" "dist\$env:ASSET.txz.sha256" "dist\$env:ASSET.txz.sigstore.json"
+      - name: Stop stray engine and Postgres processes (always)
+        if: always()
+        uses: ./.github/actions/windows-job-cleanup
 
   # nexus-cl14i: the all-or-nothing gate. engine-service-v0.1.95 (run
   # 33697831082) published a non-draft release carrying 9 PG-bundle assets

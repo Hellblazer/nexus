@@ -20,7 +20,11 @@ description: >-
   Runner prerequisites (on top of the PG bundle leg's): Visual Studio 2022 Build
   Tools with the x64 C++ tools (cl, link, dumpbin) and its VC redist folder;
   network access to download GraalVM (setup-graalvm) and, on a first run, the
-  bge model from this repository's ci-assets-bge-768-v1 release.
+  bge model from this repository's ci-assets-bge-768-v1 release. The right to
+  ship the four VC++ DLLs comes from the releasing identity's Visual Studio
+  PRODUCT licence (Community or higher), not from Build Tools, which is only a
+  supplement (T2 nexus_rdr/224-vcruntime-terms-signoff). The package step also
+  refuses any of the four that is not validly signed by Microsoft Corporation.
 
 inputs:
   version:
