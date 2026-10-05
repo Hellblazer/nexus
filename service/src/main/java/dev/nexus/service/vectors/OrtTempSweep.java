@@ -11,13 +11,13 @@ import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
-import java.util.Locale;
 
 /**
  * nexus-f9bgu.11 -- removes the {@code onnxruntime-java<random>} directories that
@@ -45,8 +45,8 @@ import java.util.Locale;
  * works and there is nothing to sweep. A directory is removed only when
  * <ul>
  *   <li>its name starts with {@code onnxruntime-java} and it is a real directory
- *       holding only regular files (a symbolic link or anything nested is not
- *       ORT's and is left alone);</li>
+ *       holding only regular files (a symbolic link, a junction or any other
+ *       reparse point, or anything nested is not ORT's and is left alone);</li>
  *   <li>it is not one an engine may be filling right now. A directory missing a
  *       loaded library is mid-extraction (or a crashed one) and is left for
  *       {@link #INCOMPLETE_MIN_AGE}; a complete one is left only for
@@ -82,9 +82,27 @@ public final class OrtTempSweep {
      */
     public static final Duration INCOMPLETE_MIN_AGE = Duration.ofSeconds(30);
 
-    /** The libraries ORT loads; a live engine's copies are mapped and cannot be deleted. */
-    private static final List<String> LOADED_LIBS =
+    /**
+     * The libraries ORT loads; a live engine's copies are mapped and cannot be deleted. This is the
+     * sweep's safety property, true for onnxruntime-java 1.20.0 only: {@code OrtTempSweepTest} ties
+     * these names to the win-x64 entries of the committed jar listing, so a bump that renames one
+     * fails there.
+     */
+    static final List<String> LOADED_LIBS =
             List.of("onnxruntime.dll", "onnxruntime4j_jni.dll");
+
+    /**
+     * Reads a path's attributes WITHOUT following links, injectable so a test can present a Windows
+     * junction (a directory the JDK reports as {@code isOther()} and not as a symbolic link) on any host.
+     */
+    @FunctionalInterface
+    public interface AttrReader {
+        BasicFileAttributes read(Path path) throws IOException;
+    }
+
+    private static BasicFileAttributes readNoFollow(Path path) throws IOException {
+        return Files.readAttributes(path, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
+    }
 
     /** File deletion, injectable so a test can stand in for a Windows file lock. */
     @FunctionalInterface
@@ -102,11 +120,6 @@ public final class OrtTempSweep {
 
     private OrtTempSweep() {}
 
-    /** True when {@code os.name} names Windows. */
-    public static boolean isWindows(String osName) {
-        return osName != null && osName.toLowerCase(Locale.ROOT).startsWith("windows");
-    }
-
     /**
      * Production entry point: sweeps {@code java.io.tmpdir} when running on Windows.
      * Never throws.
@@ -117,7 +130,7 @@ public final class OrtTempSweep {
             if (tmp == null || tmp.isBlank()) {
                 return;
             }
-            Result r = sweep(Paths.get(tmp), isWindows(System.getProperty("os.name")),
+            Result r = sweep(Paths.get(tmp), WindowsHost.isWindows(System.getProperty("os.name")),
                     Clock.systemUTC(), Files::delete);
             if (r.examined() > 0) {
                 log.info("event=ort_temp_sweep examined={} removed={} live={} too_new={} foreign={} failed={}",
@@ -134,6 +147,12 @@ public final class OrtTempSweep {
      * @param windows false makes this a no-op returning {@link Result#NONE}
      */
     public static Result sweep(Path tmpRoot, boolean windows, Clock clock, Deleter deleter) {
+        return sweep(tmpRoot, windows, clock, deleter, OrtTempSweep::readNoFollow);
+    }
+
+    /** As {@link #sweep(Path, boolean, Clock, Deleter)} with the attribute reader injected. */
+    public static Result sweep(Path tmpRoot, boolean windows, Clock clock, Deleter deleter,
+                               AttrReader attrs) {
         if (!windows || !Files.isDirectory(tmpRoot)) {
             return Result.NONE;
         }
@@ -152,7 +171,7 @@ public final class OrtTempSweep {
         }
         for (Path dir : candidates) {
             examined++;
-            switch (sweepOne(dir, clock, deleter)) {
+            switch (sweepOne(dir, clock, deleter, attrs)) {
                 case REMOVED -> removed++;
                 case LIVE -> live++;
                 case TOO_NEW -> tooNew++;
@@ -165,21 +184,25 @@ public final class OrtTempSweep {
 
     private enum Outcome { REMOVED, LIVE, TOO_NEW, FOREIGN, FAILED }
 
-    private static Outcome sweepOne(Path dir, Clock clock, Deleter deleter) {
+    private static Outcome sweepOne(Path dir, Clock clock, Deleter deleter, AttrReader attrs) {
         List<Path> files = new ArrayList<>();
         Instant newest;
         try {
-            if (!Files.isDirectory(dir, LinkOption.NOFOLLOW_LINKS)) {
+            // A symlink, or any other reparse point (a Windows junction reads as directory + other), is
+            // not ORT's directory: following it would delete files somewhere else.
+            BasicFileAttributes d = attrs.read(dir);
+            if (!d.isDirectory() || d.isSymbolicLink() || d.isOther()) {
                 return Outcome.FOREIGN;
             }
-            newest = Files.getLastModifiedTime(dir, LinkOption.NOFOLLOW_LINKS).toInstant();
+            newest = d.lastModifiedTime().toInstant();
             try (DirectoryStream<Path> ds = Files.newDirectoryStream(dir)) {
                 for (Path p : ds) {
-                    if (!Files.isRegularFile(p, LinkOption.NOFOLLOW_LINKS)) {
+                    BasicFileAttributes a = attrs.read(p);
+                    if (!a.isRegularFile() || a.isSymbolicLink() || a.isOther()) {
                         return Outcome.FOREIGN;
                     }
                     files.add(p);
-                    Instant m = Files.getLastModifiedTime(p, LinkOption.NOFOLLOW_LINKS).toInstant();
+                    Instant m = a.lastModifiedTime().toInstant();
                     if (m.isAfter(newest)) {
                         newest = m;
                     }

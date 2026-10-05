@@ -2,16 +2,25 @@
 package dev.nexus.service.vectors;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.EnabledOnOs;
+import org.junit.jupiter.api.condition.OS;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.Path;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.nio.file.attribute.FileTime;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
+import java.util.TreeSet;
+import java.util.function.Predicate;
 import java.util.stream.Stream;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -246,12 +255,160 @@ class OrtTempSweepTest {
         assertThat(peer.resolve("onnxruntime.dll")).exists();
     }
 
+    // ── reparse points (nexus-f9bgu.27, review m2) ──────────────────────────────
+
+    /**
+     * Real attributes, except that paths selected by {@code other} read as a Windows junction does under
+     * NOFOLLOW_LINKS: {@code isOther()} true, not a symbolic link, not a regular file.
+     */
+    private static OrtTempSweep.AttrReader reparsePoints(Predicate<Path> other) {
+        return p -> {
+            BasicFileAttributes real = Files.readAttributes(p, BasicFileAttributes.class,
+                    LinkOption.NOFOLLOW_LINKS);
+            if (!other.test(p)) {
+                return real;
+            }
+            return new BasicFileAttributes() {
+                public FileTime lastModifiedTime() { return real.lastModifiedTime(); }
+                public FileTime lastAccessTime() { return real.lastAccessTime(); }
+                public FileTime creationTime() { return real.creationTime(); }
+                public boolean isRegularFile() { return false; }
+                public boolean isDirectory() { return real.isDirectory(); }
+                public boolean isSymbolicLink() { return false; }
+                public boolean isOther() { return true; }
+                public long size() { return real.size(); }
+                public Object fileKey() { return real.fileKey(); }
+            };
+        };
+    }
+
     @Test
-    void windowsIsRecognisedFromTheOsName() {
-        assertThat(OrtTempSweep.isWindows("Windows 11")).isTrue();
-        assertThat(OrtTempSweep.isWindows("Windows Server 2022")).isTrue();
-        assertThat(OrtTempSweep.isWindows("Mac OS X")).isFalse();
-        assertThat(OrtTempSweep.isWindows("Linux")).isFalse();
-        assertThat(OrtTempSweep.isWindows(null)).isFalse();
+    void aCandidateDirectoryThatIsAReparsePointIsForeignAndItsFilesSurvive() throws IOException {
+        Path junction = ortDir("onnxruntime-java1111", OLD);
+        Path dead = ortDir("onnxruntime-java2222", OLD);
+        assertThat(List.of(junction, dead)).allSatisfy(d -> assertThat(d).isDirectory());
+
+        var r = OrtTempSweep.sweep(tmp, true, CLOCK, Files::delete,
+                reparsePoints(p -> p.equals(junction)));
+
+        assertThat(r.examined()).isEqualTo(2);
+        assertThat(r.foreign()).isEqualTo(1);
+        assertThat(r.removed()).isEqualTo(1);
+        assertThat(dead).doesNotExist();
+        assertThat(junction.resolve("onnxruntime.dll")).exists();
+        assertThat(junction.resolve("onnxruntime4j_jni.dll")).exists();
+        assertThat(junction.resolve("onnxruntime_providers_shared.dll")).exists();
+    }
+
+    @Test
+    void anEntryThatIsAReparsePointMakesTheDirectoryForeignBeforeAnythingIsDeleted() throws IOException {
+        Path d = ortDir("onnxruntime-java1111", OLD);
+        Path odd = d.resolve("onnxruntime_providers_shared.dll");
+        List<Path> deleted = new ArrayList<>();
+
+        var r = OrtTempSweep.sweep(tmp, true, CLOCK, p -> {
+            deleted.add(p);
+            Files.delete(p);
+        }, reparsePoints(odd::equals));
+
+        assertThat(r.foreign()).isEqualTo(1);
+        assertThat(r.removed()).isZero();
+        assertThat(deleted).as("nothing is deleted from a directory holding a reparse point").isEmpty();
+        assertThat(d.resolve("onnxruntime.dll")).exists();
+    }
+
+    /**
+     * The real thing, where the OS has junctions: {@code mklink /J}, which the JDK reads as a directory
+     * that is "other" and not a symbolic link. Skipped on other hosts; the injected-attribute tests above
+     * carry the logic everywhere. Run on native Windows for nexus-f9bgu.27.
+     */
+    @Test
+    @EnabledOnOs(OS.WINDOWS)
+    void aRealWindowsJunctionNamedLikeOrtsDirectoryIsLeftAlone() throws Exception {
+        Path target = Files.createDirectory(tmp.resolve("junction-target"));
+        for (String f : List.of("onnxruntime_providers_shared.dll", "onnxruntime.dll",
+                "onnxruntime4j_jni.dll")) {
+            Path p = Files.writeString(target.resolve(f), "x");
+            Files.setLastModifiedTime(p, OLD);
+        }
+        Files.setLastModifiedTime(target, OLD);
+        Path root = Files.createDirectory(tmp.resolve("sweep-root"));
+        Path junction = root.resolve("onnxruntime-javaJUNC");
+        Process mk = new ProcessBuilder("cmd", "/c", "mklink", "/J", junction.toString(), target.toString())
+                .redirectErrorStream(true).start();
+        String out = new String(mk.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+        assertThat(mk.waitFor()).as("mklink /J: " + out).isZero();
+        try {
+            BasicFileAttributes attrs = Files.readAttributes(junction, BasicFileAttributes.class,
+                    LinkOption.NOFOLLOW_LINKS);
+            assertThat(attrs.isSymbolicLink()).as("premise: the JDK does not call a junction a symlink")
+                    .isFalse();
+            assertThat(attrs.isOther()).as("premise: the JDK reads a junction as 'other'").isTrue();
+
+            // The files are OLD against the fixed clock, so only the reparse check can stop the sweep.
+            var r = OrtTempSweep.sweep(root, true, CLOCK, Files::delete);
+
+            assertThat(r.examined()).isEqualTo(1);
+            assertThat(r.foreign()).isEqualTo(1);
+            assertThat(r.removed()).isZero();
+            assertThat(target.resolve("onnxruntime.dll")).exists();
+            assertThat(target.resolve("onnxruntime4j_jni.dll")).exists();
+            assertThat(target.resolve("onnxruntime_providers_shared.dll")).exists();
+        } finally {
+            // rmdir on a junction removes the link only, never the target's contents
+            new ProcessBuilder("cmd", "/c", "rmdir", junction.toString()).start().waitFor();
+        }
+    }
+
+    // ── LOADED_LIBS is a property of the pinned ORT jar (RDR-224 critique, Observation 1) ─────
+
+    private static final Path LISTING = Path.of("..", "tests", "fixtures", "native_jar_listings.txt");
+
+    /** Libraries named in {@code loaded} that {@code shippedDlls} does not carry. */
+    private static List<String> missingFrom(List<String> loaded, Set<String> shippedDlls) {
+        return loaded.stream().filter(n -> !shippedDlls.contains(n)).toList();
+    }
+
+    @Test
+    void theLoadedLibrariesAreTheWindowsLibrariesOfThePinnedOrtJar() throws Exception {
+        List<String> win = new ArrayList<>();
+        String version = null;
+        boolean inOrt = false;
+        for (String line : Files.readAllLines(LISTING)) {
+            if (line.startsWith("# jar ")) {
+                inOrt = line.contains(" com.microsoft.onnxruntime:onnxruntime:");
+                if (inOrt) {
+                    version = line.split(" ")[2].split(":")[2];
+                }
+            } else if (inOrt && line.startsWith("ai/onnxruntime/native/win-x64/")) {
+                win.add(line.substring(line.lastIndexOf('/') + 1));
+            }
+        }
+        assertThat(version).as("the committed listing has an onnxruntime section").isNotNull();
+        assertThat(win).as("that section has win-x64 entries").isNotEmpty();
+
+        // The listing is only evidence for the version the build pins.
+        Path jar = Path.of(ai.onnxruntime.OrtEnvironment.class.getProtectionDomain()
+                .getCodeSource().getLocation().toURI());
+        assertThat(jar.getFileName().toString())
+                .as("listing is for onnxruntime %s; a bump must re-list (scripts/native_jar_listing.py)", version)
+                .isEqualTo("onnxruntime-" + version + ".jar");
+
+        // The sweep's safety: a live peer's directory refuses deletion at the first of these, because
+        // ORT keeps them mapped. A bump that renames one makes a live peer's directory look incomplete
+        // for 30 s and then deletes an unlocked file in it.
+        Set<String> dlls = new TreeSet<>();
+        win.stream().filter(n -> n.endsWith(".dll")).forEach(dlls::add);
+        assertThat(OrtTempSweep.LOADED_LIBS).isNotEmpty();
+        assertThat(missingFrom(OrtTempSweep.LOADED_LIBS, dlls))
+                .as("OrtTempSweep.LOADED_LIBS names DLLs absent from onnxruntime %s win-x64: %s", version, dlls)
+                .isEmpty();
+    }
+
+    @Test
+    void theMembershipCheckSeesARenamedLibrary() {
+        Set<String> shipped = Set.of("onnxruntime.dll", "onnxruntime4j_jni_v2.dll");
+        assertThat(missingFrom(List.of("onnxruntime.dll", "onnxruntime4j_jni.dll"), shipped))
+                .containsExactly("onnxruntime4j_jni.dll");
     }
 }

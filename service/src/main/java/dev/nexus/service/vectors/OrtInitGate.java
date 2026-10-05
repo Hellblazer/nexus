@@ -132,8 +132,7 @@ public final class OrtInitGate {
      * BREAK}.
      */
     static List<String> exitSignals(String osName) {
-        boolean windows = osName != null && osName.toLowerCase(java.util.Locale.ROOT).startsWith("windows");
-        return windows ? WINDOWS_EXIT_SIGNALS : POSIX_EXIT_SIGNALS;
+        return WindowsHost.isWindows(osName) ? WINDOWS_EXIT_SIGNALS : POSIX_EXIT_SIGNALS;
     }
 
     /** Thrown by {@link #enter(String)} once shutdown has begun. */

@@ -178,7 +178,7 @@ class OrtInitGateTest {
     // ── CTRL_BREAK on Windows (nexus-f9bgu.8, RDR-224 Gap 4) ───────────────────
 
     @Test
-    void onWindowsTheInstalledSetAlsoIncludesBreak() {
+    void onWindowsTheInstalledSetIsTermIntAndBreak() {
         FakeSignals signals = new FakeSignals();
         new OrtInitGate(5_000, signals, status -> { }, "Windows 11").installSignalHandlers();
         assertThat(signals.handlers.keySet())
