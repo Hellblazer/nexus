@@ -294,6 +294,19 @@ DEFAULT_STOP_ELECTION_BUDGET: float = 2.0
 #: LOCK_NB poll cadence for the bounded election.
 _ELECTION_POLL_INTERVAL: float = 0.05
 
+#: Windows only (RDR-224, nexus-f9bgu.19): how long a lease read, replace or
+#: unlink keeps retrying a sharing violation before it gives up. Python opens
+#: files without ``FILE_SHARE_DELETE``, so ``os.replace`` onto (or ``unlink`` of)
+#: a lease another process has open for reading fails with ``PermissionError``
+#: until that reader closes it, and a reader's own open can fail the same way
+#: mid-replace. Readers hold the file for microseconds, so the retry is short;
+#: the bound is what keeps a genuine ACL problem from hanging a heartbeat.
+_WINDOWS_SHARING_RETRY_BUDGET_S: float = 2.0
+
+#: First and longest pause between those retries (doubling in between).
+_WINDOWS_SHARING_RETRY_FIRST_S: float = 0.002
+_WINDOWS_SHARING_RETRY_MAX_S: float = 0.01
+
 
 def mint_owner_token() -> str:
     """A server-unique owner identity. Never a pid (pid-reuse immunity)."""
@@ -368,6 +381,7 @@ class ServiceRegistry:
         heartbeat_interval: float = DEFAULT_HEARTBEAT_INTERVAL,
         monotonic: Clock = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
+        platform: str | None = None,
     ) -> None:
         if ttl < heartbeat_interval:
             raise ValueError(
@@ -382,6 +396,7 @@ class ServiceRegistry:
         self._heartbeat_interval = heartbeat_interval
         self._monotonic = monotonic
         self._sleep = sleep
+        self._windows = _is_windows(platform)
         # nexus-wo6sc: per-tick stamp sub-phase timings, replaced (never
         # accumulated) on every heartbeat. See ``last_heartbeat_phases``.
         self._last_heartbeat_phases: dict[str, float] = {}
@@ -522,10 +537,36 @@ class ServiceRegistry:
 
     # -- atomic IO ----------------------------------------------------------
 
+    def _retry_sharing_violation(self, op: Callable[[], _T]) -> _T:
+        """Run one lease-file operation, retrying a Windows sharing violation.
+
+        Off Windows this is ``op()``: a ``PermissionError`` there is a real
+        permission problem and fails at once, as it always did. On Windows a
+        read, ``os.replace`` or ``unlink`` of a lease another process has open
+        (Python opens without ``FILE_SHARE_DELETE``) raises ``PermissionError``
+        until that handle closes, so it is retried with a doubling pause up to
+        ``_WINDOWS_SHARING_RETRY_BUDGET_S`` and then raised. The pause goes
+        through the injected ``sleep`` and ``monotonic`` so the bound runs
+        deterministically under test. RDR-224, nexus-f9bgu.19.
+        """
+        if not self._windows:
+            return op()
+        deadline = self._monotonic() + _WINDOWS_SHARING_RETRY_BUDGET_S
+        pause = _WINDOWS_SHARING_RETRY_FIRST_S
+        while True:
+            try:
+                return op()
+            except PermissionError:
+                now = self._monotonic()
+                if now >= deadline:
+                    raise
+                self._sleep(min(pause, deadline - now))
+                pause = min(pause * 2, _WINDOWS_SHARING_RETRY_MAX_S)
+
     def _read_record(self, scope_key: str) -> Optional[LeaseRecord]:
         path = self._record_path(scope_key)
         try:
-            text = path.read_text()
+            text = self._retry_sharing_violation(path.read_text)
         except OSError:
             return None
         except UnicodeDecodeError as exc:
@@ -572,7 +613,11 @@ class ServiceRegistry:
                     os.close(fd)
 
             self._timed(phases, "write_body", _body)
-            self._timed(phases, "write_replace", lambda: os.replace(str(tmp), str(path)))
+            self._timed(
+                phases,
+                "write_replace",
+                lambda: self._retry_sharing_violation(lambda: os.replace(str(tmp), str(path))),
+            )
         except BaseException:
             with contextlib.suppress(OSError):
                 tmp.unlink()
@@ -848,7 +893,7 @@ class ServiceRegistry:
             if current.is_fresh(self._clock()):
                 return  # re-stamped fresh under the lock; leave the live record
             with contextlib.suppress(OSError):
-                self._record_path(stale.scope_key).unlink()
+                self._retry_sharing_violation(self._record_path(stale.scope_key).unlink)
 
     def mark_shutting_down(
         self, record: LeaseRecord, *, budget: Optional[float] = None
@@ -921,7 +966,7 @@ class ServiceRegistry:
             if current.owner_token != record.owner_token:
                 return  # a successor owns it now; leave it alone
             with contextlib.suppress(OSError):
-                self._record_path(record.scope_key).unlink()
+                self._retry_sharing_violation(self._record_path(record.scope_key).unlink)
             _we_owned = True
         # Unlink the elect lock only when WE owned the scope.  Done AFTER the
         # flock is released.  Openers after the unlink get a fresh inode;
@@ -1670,6 +1715,45 @@ def pid_running(pid: int) -> bool:
 _POST_KILL_SETTLE_S: float = 5.0
 
 
+def hard_kill_pid(pid: int) -> bool:
+    """The platform's hard kill of one pid. Never raises for a pid that is gone.
+
+    ``True`` when the kill was delivered, ``False`` when the pid no longer
+    exists or is not ours to kill. The catch is ``OSError``, not the
+    ``(ProcessLookupError, PermissionError)`` pair every site wrote before: on
+    Windows ``os.kill`` of a pid that has already exited raises
+    ``OSError: [WinError 87]`` (``ERROR_INVALID_PARAMETER``), which is neither,
+    so a process that died between the grace wait and the kill turned a stop
+    into a traceback (measured on native Windows, RDR-224, nexus-f9bgu.19).
+
+    Delivery is not death: ``SIGKILL`` and ``TerminateProcess`` both return
+    before the process has left the table. A caller that reports "stopped"
+    confirms with :func:`wait_for_exit`.
+    """
+    try:
+        os.kill(pid, KILL_SIGNAL)
+    except OSError:
+        return False
+    return True
+
+
+def wait_for_exit(
+    pids: list[int], *, timeout_s: float = _POST_KILL_SETTLE_S, poll_s: float = 0.1,
+) -> list[int]:
+    """Wait up to *timeout_s* for every pid to stop RUNNING (zombies count as
+    stopped, see :func:`pid_running`); returns the pids still running.
+
+    The confirmation half of a stop: a stop is done when the targets have
+    exited, never when the signal was sent.
+    """
+    live = [p for p in pids if pid_running(p)]
+    deadline = time.monotonic() + timeout_s
+    while live and time.monotonic() < deadline:
+        time.sleep(poll_s)
+        live = [p for p in live if pid_running(p)]
+    return live
+
+
 @dataclass(frozen=True)
 class GracefulStopSend:
     """What :func:`request_graceful_stop` did for one pid.
@@ -1785,10 +1869,7 @@ def terminate_pids(
         time.sleep(0.2)
     else:
         for pid in live:
-            try:
-                os.kill(pid, KILL_SIGNAL)
-            except (ProcessLookupError, PermissionError):
-                pass
+            hard_kill_pid(pid)
         settle_deadline = time.monotonic() + _POST_KILL_SETTLE_S
         while True:
             live = [p for p in live if pid_running(p)]

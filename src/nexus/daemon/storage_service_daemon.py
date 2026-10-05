@@ -97,7 +97,6 @@ from nexus.db.onnx_model_root import ENV_MODEL_DIR, service_onnx_models_root
 from nexus.db.service_bge_model import service_bge_engine_dir_mismatch
 from nexus.db.service_crossencoder_model import service_crossencoder_engine_dir_mismatch
 from nexus.util import win_job as _win_job
-from nexus.util.process_group import KILL_SIGNAL
 from nexus.daemon.appliance_handoff import HANDOFF_FILE_ENV
 from nexus.daemon.service_registry import (
     DEFAULT_HEARTBEAT_INTERVAL,
@@ -108,12 +107,14 @@ from nexus.daemon.service_registry import (
     ServiceSupervisor,
     exit_if_process_unowned,
     fenced_exit_code,
+    hard_kill_pid,
     pid_alive,
     pid_running,
     reclaim_lease_if_dead_owner,
     request_graceful_stop,
     service_identity,
     ttl_for_tier,
+    wait_for_exit,
 )
 
 _log = structlog.get_logger(__name__)
@@ -3332,6 +3333,8 @@ def stop_storage_service(
     lease_seen = record is not None
 
     signalled: list[int] = []
+    #: Lease-named pids still running after the hard kill had its settle window.
+    lease_stubborn: list[int] = []
     source = "none"
 
     if record is not None:
@@ -3398,10 +3401,10 @@ def stop_storage_service(
                     grace_s=_SUPERVISOR_STOP_GRACE,
                     msg="the supervisor did not exit within the grace; hard-killing it",
                 )
-                try:
-                    os.kill(supervisor_pid, KILL_SIGNAL)
-                except (ProcessLookupError, PermissionError):
-                    pass
+                hard_kill_pid(supervisor_pid)
+                # SIGKILL and TerminateProcess both return before the process
+                # has left the table: a stop is done when it HAS exited.
+                lease_stubborn.extend(wait_for_exit([supervisor_pid]))
             signalled.append(supervisor_pid)
         elif isinstance(pid_to_signal, int) and pid_to_signal > 0:
             source = "lease"
@@ -3439,8 +3442,8 @@ def stop_storage_service(
                         grace_s=_GRACEFUL_STOP_TIMEOUT,
                         via="hard_kill",
                     )
-                    with contextlib.suppress(ProcessLookupError, PermissionError):
-                        os.kill(pid_to_signal, KILL_SIGNAL)
+                    hard_kill_pid(pid_to_signal)
+                    lease_stubborn.extend(wait_for_exit([pid_to_signal]))
             else:
                 from nexus.util.process_group import safe_killpg  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
 
@@ -3486,7 +3489,7 @@ def stop_storage_service(
             )
         return StopOutcome(
             pids=tuple(signalled),
-            stubborn=(),
+            stubborn=tuple(lease_stubborn),
             source=source,
             lease_seen=lease_seen,
             sweep_verified=False,
@@ -3560,7 +3563,7 @@ def stop_storage_service(
 
     return StopOutcome(
         pids=tuple(signalled),
-        stubborn=sweep.stubborn,
+        stubborn=tuple(dict.fromkeys([*lease_stubborn, *sweep.stubborn])),
         source=source,
         lease_seen=lease_seen,
         sweep_verified=True,
