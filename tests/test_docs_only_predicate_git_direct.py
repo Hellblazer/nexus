@@ -128,7 +128,9 @@ def test_conservative_family_still_uses_dorny(job_name: str) -> None:
 @pytest.mark.parametrize(
     ("consumer_job", "expected_condition"),
     [
-        ("service-jar", "success() && needs.changes.outputs.code == 'true'"),
+        # nexus-q99w4: service-jar also feeds the docs-reader leg on a doc-only diff.
+        ("service-jar", "success() && (needs.changes.outputs.code == 'true' || needs.changes.outputs.code == 'false')"),
+        ("test-docs-readers", "success() && needs.changes.outputs.code == 'false'"),
         ("test", "success() && needs.changes.outputs.code == 'true'"),
         ("test-lint", "success() && needs.changes.outputs.code == 'true'"),
         ("test-mode-census", "success() && needs.changes.outputs.code == 'true'"),
