@@ -25,6 +25,7 @@ from __future__ import annotations
 import os
 import signal
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -165,7 +166,7 @@ class TestServiceChildLogging:
         # Both streams land in the SAME file so interleaved banners and stack
         # traces keep their relative order.
         name = getattr(captured["stdout"], "name", "")
-        assert str(name).endswith("logs/storage_service_native.log"), name
+        assert Path(str(name)) == config_dir / "logs" / "storage_service_native.log", name
         assert captured["stderr"] is captured["stdout"]
 
     def test_service_log_lives_under_config_dir(
@@ -289,8 +290,21 @@ def fake_storage_sup(monkeypatch: pytest.MonkeyPatch) -> type[_FakeStorageSuperv
     return _FakeStorageSupervisor
 
 
+def _stop_signal_to_self() -> None:
+    """The stop signal the supervisor's own handlers take, delivered to this process.
+
+    POSIX: a real SIGTERM. Windows: ``os.kill(os.getpid(), SIGTERM)`` is
+    ``TerminateProcess`` on the pytest process itself (the run ends with exit code
+    15), so the supervisor's Windows stop channel, ``SIGBREAK``, is raised in
+    process instead (RDR-224, nexus-f9bgu.44)."""
+    if sys.platform == "win32":
+        signal.raise_signal(signal.SIGBREAK)
+    else:
+        os.kill(os.getpid(), signal.SIGTERM)
+
+
 def _sigterm_after(delay: float) -> threading.Timer:
-    t = threading.Timer(delay, lambda: os.kill(os.getpid(), signal.SIGTERM))
+    t = threading.Timer(delay, _stop_signal_to_self)
     t.start()
     return t
 
@@ -486,4 +500,4 @@ class TestStatusLogPaths:
         assert str(config_dir / "logs" / "storage_service_native.log") in out
         assert str(config_dir / "logs" / "storage_service.crash.log") in out
         # pg_log derives from the probed pg_data.
-        assert "/tmp/testpgdata/pg.log" in out
+        assert str(Path("/tmp/testpgdata") / "pg.log") in out

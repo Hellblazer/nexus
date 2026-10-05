@@ -35,6 +35,7 @@ shell-out is mocked; template substitution + file placement are exercised for re
 from __future__ import annotations
 
 import subprocess
+import sys
 import time
 from pathlib import Path
 from unittest.mock import patch
@@ -43,6 +44,10 @@ import pytest
 
 from nexus.commands import daemon as daemon_cmd
 from nexus.daemon import installer
+from tests.daemon._children import CHILD_PYTHON
+
+#: The darwin arms these tests run read os.getuid(), absent on Windows (see conftest).
+pytestmark = pytest.mark.usefixtures("launchd_uid")
 
 #: What a pre-retirement install left on disk. Content is deliberately opaque —
 #: the uninstall path keys on the unit's NAME and label, never its body.
@@ -117,6 +122,11 @@ class TestPublicSurface:
 
 
 class TestInstallMode:
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="a POSIX file mode: Windows reads st_mode as 0o666 for every file, and the launchd "
+        "unit this test installs is a macOS artifact that no Windows host ever writes",
+    )
     def test_installed_unit_is_mode_0644(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -422,6 +432,13 @@ class TestManagerActionsCarryATimeout:
         assert calls[0].get("timeout") == installer._MANAGER_ACTION_TIMEOUT_S
 
 
+#: A wedged service manager and a healthy one, as real child processes that exist
+#: on every host (``sleep`` and ``true`` are POSIX binaries; Windows has neither).
+_HUNG_MANAGER = [CHILD_PYTHON, "-c", "import time; time.sleep(30)"]
+_HUNG_MANAGER_CMD = " ".join(_HUNG_MANAGER)
+_QUICK_MANAGER = [CHILD_PYTHON, "-c", "pass"]
+
+
 class TestHungManagerIsKilledAtTheBound:
     """nexus-k9i56: a manager that never answers -- a fake binary that
     sleeps, standing in for a wedged ``launchctl``/``systemctl`` -- must be
@@ -445,13 +462,13 @@ class TestHungManagerIsKilledAtTheBound:
         (tmp_path / "units").mkdir()
         (tmp_path / "units" / "com.nexus.service.plist").write_text("<!-- old -->\n")
         monkeypatch.setattr(
-            installer, "_deactivate_cmd", lambda dest, *, tier="t2": ["sleep", "30"]
+            installer, "_deactivate_cmd", lambda dest, *, tier="t2": _HUNG_MANAGER
         )
         # The activation call that follows the predeactivate branch must
         # itself complete fast and successfully, so this test isolates the
         # predeactivate site's own timeout handling rather than also
         # exercising (and being slowed or failed by) the activation site.
-        monkeypatch.setattr(installer, "_activate_cmd", lambda dest: ["true"])
+        monkeypatch.setattr(installer, "_activate_cmd", lambda dest: _QUICK_MANAGER)
         monkeypatch.setattr(installer, "_MANAGER_ACTION_TIMEOUT_S", 0.2)
 
         warnings: list[tuple[str, dict]] = []
@@ -478,7 +495,7 @@ class TestHungManagerIsKilledAtTheBound:
         assert warnings, "the predeactivate timeout was silently swallowed"
         event, kw = warnings[0]
         assert "predeactivate_timeout" in event, event
-        assert kw.get("cmd") == "sleep 30", f"warning does not name the verb: {kw!r}"
+        assert kw.get("cmd") == _HUNG_MANAGER_CMD, f"warning does not name the verb: {kw!r}"
         assert kw.get("timeout_s") == 0.2, f"warning does not name the bound: {kw!r}"
 
     def test_hung_activation_is_killed_and_raises_naming_the_verb_and_bound(
@@ -486,7 +503,7 @@ class TestHungManagerIsKilledAtTheBound:
     ) -> None:
         _set_platform(monkeypatch, "darwin")
         _stub_paths(tmp_path, monkeypatch)
-        monkeypatch.setattr(installer, "_activate_cmd", lambda dest: ["sleep", "30"])
+        monkeypatch.setattr(installer, "_activate_cmd", lambda dest: _HUNG_MANAGER)
         monkeypatch.setattr(installer, "_MANAGER_ACTION_TIMEOUT_S", 0.2)
 
         start = time.monotonic()
@@ -499,7 +516,7 @@ class TestHungManagerIsKilledAtTheBound:
             "actually bounded"
         )
         msg = str(excinfo.value)
-        assert "sleep 30" in msg, f"error does not name the verb: {msg!r}"
+        assert _HUNG_MANAGER_CMD in msg, f"error does not name the verb: {msg!r}"
         assert "0.2s" in msg, f"error does not name the bound: {msg!r}"
 
     def test_hung_deactivate_during_uninstall_is_killed_and_warned_not_raised(
@@ -512,7 +529,7 @@ class TestHungManagerIsKilledAtTheBound:
         _stub_paths(tmp_path, monkeypatch)
         dest = _plant_legacy_t2_unit(tmp_path)
         monkeypatch.setattr(
-            installer, "_deactivate_cmd", lambda dest, *, tier="t2": ["sleep", "30"]
+            installer, "_deactivate_cmd", lambda dest, *, tier="t2": _HUNG_MANAGER
         )
         monkeypatch.setattr(installer, "_MANAGER_ACTION_TIMEOUT_S", 0.2)
 
@@ -528,4 +545,4 @@ class TestHungManagerIsKilledAtTheBound:
         assert not dest.exists()
         assert result.deactivated is False
         assert result.warnings
-        assert any("sleep 30" in w and "0.2s" in w for w in result.warnings), result.warnings
+        assert any(_HUNG_MANAGER_CMD in w and "0.2s" in w for w in result.warnings), result.warnings

@@ -14,6 +14,8 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import sys
+
 import pytest
 
 from nexus.daemon.binary_lifecycle import well_known_binary_path
@@ -71,6 +73,11 @@ def test_find_binary_absent_returns_none(tmp_path, monkeypatch):
     assert _find_service_binary(tmp_path / "cfg") is None
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Windows has no execute permission bit: os.access(X_OK) is true for any file, so a "
+    "present-but-not-executable engine cannot exist there",
+)
 def test_find_binary_not_executable_fails_loud(tmp_path, monkeypatch):
     # Present but non-executable -> a chmod remedy, not a bare PermissionError
     # later from Popen.

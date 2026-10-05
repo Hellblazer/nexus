@@ -20,10 +20,14 @@ file placement / removal is exercised for real under a tmp config dir.
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+
+#: The darwin arms these tests run read os.getuid(), absent on Windows (see conftest).
+pytestmark = pytest.mark.usefixtures("launchd_uid")
 
 from nexus.commands import daemon as daemon_cmd
 from nexus.daemon import installer
@@ -250,7 +254,10 @@ class TestConfirmedUninstall:
         real directory from this test."""
         import shutil
 
-        monkeypatch.setenv("NEXUS_CONFIG_DIR", "/tmp")
+        # ``/tmp`` does not exist on Windows (the guard only runs on a data dir that
+        # does), so a Windows host uses the drive root: as shallow as a path gets.
+        shallow = "/tmp" if sys.platform != "win32" else Path.home().anchor
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", shallow)
         rmtree_calls: list = []
         monkeypatch.setattr(shutil, "rmtree", lambda *a, **k: rmtree_calls.append(a))
         with patch.object(installer.subprocess, "run") as mock_run, \

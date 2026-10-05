@@ -15,7 +15,7 @@ the branch runs on macOS and Linux as well. A test that only asserted "no
 error" would pass with the Windows branch deleted, so each names something the
 POSIX branch cannot produce (a creation flag, a job call, an ordered ladder).
 The engine in the stop tests is a REAL child process: the fake API delivers
-the break to it as a signal, and an "ignoring" engine really ignores it.
+the break to it as a file it polls, and an "ignoring" engine really ignores it.
 """
 from __future__ import annotations
 
@@ -36,6 +36,10 @@ import structlog
 from nexus.daemon import readiness
 from nexus.daemon import storage_service_daemon as ssd
 from nexus.daemon.storage_service_daemon import StorageServiceSupervisor
+from nexus.util.process_group import KILL_SIGNAL
+from tests.daemon._children import KILLED_RC as _KILLED_RC
+from tests.daemon._children import WIN as _WIN
+from tests.daemon._children import spawn_breakable
 
 CREATE_NEW_PROCESS_GROUP = 0x00000200
 
@@ -46,7 +50,14 @@ CREATE_NEW_PROCESS_GROUP = 0x00000200
 class _FakeJobApi:
     """Stands in for ``nexus.util.win_job``. ``break_action`` decides what the
     break does to the registered engine; ``close_job`` is TerminateJobObject:
-    it hard-kills whatever is still alive and records that it was."""
+    it hard-kills whatever is still alive and records that it was.
+
+    The break is delivered to the engine as a FILE the stand-in engine polls
+    (see :func:`_spawn_engine`), on every platform. A real ``CTRL_BREAK`` would
+    reach the pytest run's own process group on Windows (the test run was
+    measured dying with ``0xC000013A``), and ``SIGTERM`` is not a graceful
+    signal there (``os.kill`` is ``TerminateProcess``), so neither can stand in
+    for it; a file can, and it lets an "ignoring" engine really ignore it."""
 
     IS_WINDOWS = True
 
@@ -55,7 +66,7 @@ class _FakeJobApi:
         *,
         create_ok: bool = True,
         assign_ok: bool = True,
-        break_action: str = "sigterm",  # "sigterm" | "none"
+        break_action: str = "deliver",  # "deliver" | "none"
     ) -> None:
         self.create_ok = create_ok
         self.assign_ok = assign_ok
@@ -74,8 +85,9 @@ class _FakeJobApi:
 
     def send_ctrl_break(self, pid: int) -> bool:
         self.events.append(("break", pid))
-        if self.break_action == "sigterm":
-            os.kill(pid, signal.SIGTERM)
+        if self.break_action == "deliver":
+            assert self.engine is not None and pid == self.engine.pid
+            self.engine.break_file.write_text("break")  # type: ignore[attr-defined]
         return True  # a send returning True proves nothing about delivery
 
     def close_job(self, job: int | None) -> bool:
@@ -84,7 +96,7 @@ class _FakeJobApi:
         self.alive_when_closed.append(alive)
         self.events.append(("close_job", job))
         if alive and engine is not None:
-            os.kill(engine.pid, signal.SIGKILL)
+            os.kill(engine.pid, KILL_SIGNAL)
         return True
 
     def names(self) -> list[str]:
@@ -130,19 +142,9 @@ def _supervisor(
     )
 
 
-def _spawn_engine(*, ignore_term: bool) -> subprocess.Popen[bytes]:
-    code = "import signal,time\n"
-    if ignore_term:
-        code += "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
-    code += "print('up', flush=True)\ntime.sleep(120)\n"
-    proc = subprocess.Popen(  # noqa: S603 — fixed argv, this interpreter
-        [sys.executable, "-c", code],
-        stdout=subprocess.PIPE,
-        start_new_session=True,  # its own group, so a group kill never reaches pytest
-    )
-    assert proc.stdout is not None
-    assert proc.stdout.readline().strip() == b"up", "fixture must have armed its handler"
-    return proc
+def _spawn_engine(*, ignore_break: bool, where: Path) -> subprocess.Popen[bytes]:
+    """A real child standing in for the engine (see ``tests/daemon/_children.py``)."""
+    return spawn_breakable(ignore_break=ignore_break, where=where)
 
 
 @contextlib.contextmanager
@@ -295,9 +297,9 @@ def fast_grace(monkeypatch: pytest.MonkeyPatch) -> float:
 def test_windows_stop_sends_the_break_and_a_responsive_engine_exits_cleanly(
     config_dir: Path, fast_grace: float,
 ) -> None:
-    job = _FakeJobApi(break_action="sigterm")
+    job = _FakeJobApi(break_action="deliver")
     sup = _supervisor(config_dir, platform="win32", job=job)
-    with _reaped(_spawn_engine(ignore_term=False)) as engine:
+    with _reaped(_spawn_engine(ignore_break=False, where=config_dir)) as engine:
         job.engine = engine
         sup._proc = engine
         sup._engine_job = 77
@@ -316,9 +318,9 @@ def test_an_engine_that_ignores_the_break_is_killed_through_the_job_after_the_gr
 ) -> None:
     """The backstop (acceptance): the engine ignores CTRL_BREAK, the supervisor
     waits the grace, terminates the job, and the engine is gone and reaped."""
-    job = _FakeJobApi(break_action="sigterm")  # delivered as SIGTERM, which this engine ignores
+    job = _FakeJobApi(break_action="deliver")  # delivered, and this engine ignores it
     sup = _supervisor(config_dir, platform="win32", job=job)
-    with _reaped(_spawn_engine(ignore_term=True)) as engine:
+    with _reaped(_spawn_engine(ignore_break=True, where=config_dir)) as engine:
         job.engine = engine
         sup._proc = engine
         sup._engine_job = 77
@@ -330,7 +332,7 @@ def test_an_engine_that_ignores_the_break_is_killed_through_the_job_after_the_gr
         # job close is what killed it, and it did wait the grace first.
         assert job.alive_when_closed == [True]
         assert elapsed >= fast_grace
-        assert engine.poll() == -signal.SIGKILL
+        assert engine.poll() == _KILLED_RC
     assert job.names() == ["break", "close_job"]
     unclean = [e for e in logs if e["event"] == "storage_service_engine_unclean_stop"]
     assert len(unclean) == 1 and unclean[0]["via"] == "job_object"
@@ -345,17 +347,17 @@ def test_without_a_job_the_backstop_is_the_hard_kill(
     killed: list[int] = []
     real = __import__("nexus.util.process_group", fromlist=["safe_killpg"]).safe_killpg
 
-    def spy(proc_or_pid: Any, sig: int = signal.SIGKILL) -> bool:
+    def spy(proc_or_pid: Any, sig: int = KILL_SIGNAL) -> bool:
         killed.append(proc_or_pid)
         return real(proc_or_pid, sig)
 
     monkeypatch.setattr("nexus.util.process_group.safe_killpg", spy)
-    with _reaped(_spawn_engine(ignore_term=True)) as engine:
+    with _reaped(_spawn_engine(ignore_break=True, where=config_dir)) as engine:
         sup._proc = engine
         sup._engine_job = None
         with structlog.testing.capture_logs() as logs:
             sup._stop_service()
-        assert engine.poll() == -signal.SIGKILL
+        assert engine.poll() == _KILLED_RC
     assert killed == [engine.pid]
     assert job.names() == ["break"], "no job to terminate, and none invented"
     unclean = [e for e in logs if e["event"] == "storage_service_engine_unclean_stop"]
@@ -381,23 +383,29 @@ def test_the_job_is_released_when_the_engine_died_on_its_own(
 def test_readiness_failure_kill_uses_the_same_ladder(
     config_dir: Path, fast_grace: float,
 ) -> None:
-    job = _FakeJobApi(break_action="sigterm")
+    job = _FakeJobApi(break_action="deliver")
     sup = _supervisor(config_dir, platform="win32", job=job)
-    with _reaped(_spawn_engine(ignore_term=True)) as engine:
+    with _reaped(_spawn_engine(ignore_break=True, where=config_dir)) as engine:
         job.engine = engine
         sup._engine_job = 77
         sup._kill_after_readiness_failure(engine)
-        assert engine.poll() == -signal.SIGKILL
+        assert engine.poll() == _KILLED_RC
     assert job.names() == ["break", "close_job"]
     assert job.alive_when_closed == [True]
 
 
+@pytest.mark.skipif(
+    _WIN,
+    reason="the POSIX arm stops the engine's process GROUP with SIGTERM and reads a "
+    "-SIGTERM exit; Windows has no group signal and os.kill(SIGTERM) is TerminateProcess, "
+    "so the arm cannot run there (its Windows counterpart is the Windows ladder tests above)",
+)
 def test_posix_stop_is_unchanged_and_never_touches_a_job(
     config_dir: Path, fast_grace: float,
 ) -> None:
     job = _FakeJobApi()
     sup = _supervisor(config_dir, platform="linux", job=job)
-    with _reaped(_spawn_engine(ignore_term=False)) as engine:
+    with _reaped(_spawn_engine(ignore_break=False, where=config_dir)) as engine:
         sup._proc = engine
         sup._stop_service()
         assert engine.poll() == -signal.SIGTERM

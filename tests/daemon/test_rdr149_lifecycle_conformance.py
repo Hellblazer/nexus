@@ -2091,7 +2091,11 @@ if os.environ.get("STANDIN_JOB") == "1":
     from nexus.util import win_job
     job = win_job.create_job()
     assert job is not None and win_job.assign_process(job, engine.pid)
-(cd / "ready.json").write_text(json.dumps({"supervisor": me, "engine": engine.pid}))
+# Atomic: the harness polls for ready.json's EXISTENCE and then parses it, so a plain
+# write_text lets it read the file empty between create and write (measured on Windows,
+# nexus-f9bgu.44: a JSONDecodeError in one run of three).
+(cd / "ready.tmp").write_text(json.dumps({"supervisor": me, "engine": engine.pid}))
+os.replace(cd / "ready.tmp", cd / "ready.json")
 ignore = os.environ.get("STANDIN_IGNORE") == "1"
 while True:
     if not ignore and (cd / f"stop-{me}").exists():

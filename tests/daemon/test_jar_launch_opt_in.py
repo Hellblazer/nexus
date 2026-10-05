@@ -145,7 +145,7 @@ def test_jar_argv_is_java_dash_jar(monkeypatch):
         "-Duser.timezone=UTC",
         "-Djava.net.preferIPv4Stack=true",
         # nexus-o5xyx.2: hs_err goes to the logs dir, before -jar
-        "-XX:ErrorFile=/tmp/logs/hs_err_%p.log",
+        f"-XX:ErrorFile={Path('/tmp') / 'logs' / 'hs_err_%p.log'}",
         "-jar",
         str(jar),
     ]
@@ -183,7 +183,7 @@ def test_jar_argv_states_false_when_opted_out(monkeypatch):
         "-Duser.timezone=UTC",
         "-Djava.net.preferIPv4Stack=false",
         # nexus-o5xyx.2: hs_err goes to the logs dir, before -jar
-        "-XX:ErrorFile=/tmp/logs/hs_err_%p.log",
+        f"-XX:ErrorFile={Path('/tmp') / 'logs' / 'hs_err_%p.log'}",
         "-jar",
         str(jar),
     ]
@@ -216,7 +216,7 @@ def test_jar_argv_with_heap_orders_xmx_before_jar(monkeypatch):
         "-Djava.net.preferIPv4Stack=true",
         "-Xmx1g",
         # nexus-o5xyx.2: hs_err goes to the logs dir, before -jar
-        "-XX:ErrorFile=/tmp/logs/hs_err_%p.log",
+        f"-XX:ErrorFile={Path('/tmp') / 'logs' / 'hs_err_%p.log'}",
         "-jar",
         str(jar),
     ]
@@ -521,4 +521,4 @@ def test_the_jar_argv_points_error_file_into_the_logs_dir(monkeypatch, tmp_path)
     captured: dict = {}
     _stub_spawn(monkeypatch, captured)
     _supervisor(tmp_path, launch_kind="jar", artifact=Path("/build/svc.jar"))._spawn_service()
-    assert f"-XX:ErrorFile={tmp_path}/logs/hs_err_%p.log" in captured["argv"]
+    assert f"-XX:ErrorFile={tmp_path / 'logs' / 'hs_err_%p.log'}" in captured["argv"]

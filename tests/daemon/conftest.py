@@ -14,3 +14,8 @@ path gained its fail-loud validation call). The surviving daemon tests
 service-substrate tests and run under the suite's service default.
 """
 from __future__ import annotations
+
+# The launchd uid stand-in lives with the other cross-platform test stand-ins
+# (``_children.py``) so that no ``getuid`` appears in a module every run imports
+# (tests/test_service_identity_lint.py sweeps conftest files).
+from tests.daemon._children import launchd_uid  # noqa: F401

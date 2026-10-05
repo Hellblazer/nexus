@@ -30,7 +30,8 @@ from click.testing import CliRunner
 
 from nexus.commands import daemon as daemon_mod
 from nexus.daemon import storage_service_daemon as ssd
-from nexus.daemon.service_registry import GracefulStopSend, LeaseRecord
+from nexus.daemon.service_registry import GracefulStopSend, LeaseRecord, service_identity
+from tests.daemon._children import KILLED_RC, break_file_for, spawn_breakable
 
 CREATE_NEW_PROCESS_GROUP = 0x00000200
 CREATE_NO_WINDOW = 0x08000000
@@ -48,7 +49,7 @@ def config_dir(tmp_path: Path) -> Path:
 
 
 def _write_lease(config_dir: Path, *, supervisor_pid: int | None, engine_pid: int | None) -> Path:
-    scope = str(os.getuid())
+    scope = service_identity()
     record = LeaseRecord(
         scope_key=scope,
         generation=1,
@@ -64,17 +65,10 @@ def _write_lease(config_dir: Path, *, supervisor_pid: int | None, engine_pid: in
     return path
 
 
-def _spawn(*, ignore_term: bool) -> subprocess.Popen[bytes]:
-    code = "import signal,time\n"
-    if ignore_term:
-        code += "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
-    code += "print('up', flush=True)\ntime.sleep(120)\n"
-    proc = subprocess.Popen(  # noqa: S603 — fixed argv, this interpreter
-        [sys.executable, "-c", code], stdout=subprocess.PIPE,
-    )
-    assert proc.stdout is not None
-    assert proc.stdout.readline().strip() == b"up"
-    return proc
+def _spawn(*, ignore_break: bool, where: Path) -> subprocess.Popen[bytes]:
+    """A real child that takes the scripted break, or ignores it (see
+    ``tests/daemon/_children.py``)."""
+    return spawn_breakable(ignore_break=ignore_break, where=where)
 
 
 @contextlib.contextmanager
@@ -89,11 +83,16 @@ def _reaped(proc: subprocess.Popen[bytes]):
 
 
 class _ConsoleApi:
-    """Scripted console calls. ``deliver`` turns a successful send into a
-    SIGTERM on the target (the break arriving); ``refuse`` pids fail attach
-    with access denied. The sequence is recorded for ordering assertions."""
+    """Scripted console calls. ``deliver`` turns a successful send into the
+    target's break file appearing (the break arriving; a real CTRL_BREAK would
+    reach the pytest run's own group, see ``_children.spawn_breakable``);
+    ``refuse`` pids fail attach with access denied. The sequence is recorded for
+    ordering assertions."""
 
-    def __init__(self, *, deliver: bool = True, refuse: frozenset[int] = frozenset()) -> None:
+    def __init__(
+        self, where: Path, *, deliver: bool = True, refuse: frozenset[int] = frozenset(),
+    ) -> None:
+        self.where = where
         self.deliver = deliver
         self.refuse = refuse
         self.calls: list[tuple[str, int | None]] = []
@@ -109,7 +108,7 @@ class _ConsoleApi:
     def generate_ctrl_break(self, pid: int) -> tuple[bool, int]:
         self.calls.append(("send", pid))
         if self.deliver:
-            os.kill(pid, signal.SIGTERM)
+            break_file_for(self.where, pid).write_text("break")
         return True, 0
 
     def attach_parent_console(self) -> tuple[bool, int]:
@@ -176,22 +175,22 @@ def test_windows_stop_attaches_sends_and_confirms_by_the_supervisors_exit(
     config_dir: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     sweep = _no_sweep(monkeypatch)
-    api = _ConsoleApi(deliver=True)
-    with _reaped(_spawn(ignore_term=False)) as sup:
+    api = _ConsoleApi(config_dir, deliver=True)
+    with _reaped(_spawn(ignore_break=False, where=config_dir)) as sup:
         _write_lease(config_dir, supervisor_pid=sup.pid, engine_pid=None)
         with patch("os.kill", wraps=os.kill) as spy:
             outcome = ssd.stop_storage_service(
                 config_dir=config_dir, platform="win32", console_api=api,
             )
-        assert sup.wait(timeout=30) == -signal.SIGTERM  # it received the delivered break and exited
+        assert sup.wait(timeout=30) == 0  # it received the delivered break and exited
     assert api.calls == [
         ("free", None), ("attach", sup.pid), ("send", sup.pid), ("free", None), ("parent", None),
     ]
     assert outcome.pids == (sup.pid,) and outcome.stubborn == () and outcome.refused == ()
     assert outcome.source == "lease"
-    # No hard kill: the only os.kill was the scripted delivery of the break.
+    # No hard kill: nothing but a liveness probe (signal 0) was ever sent with os.kill.
     sent = [c.args[1] for c in spy.call_args_list if c.args[0] == sup.pid and c.args[1] != 0]
-    assert sent == [signal.SIGTERM]
+    assert sent == []
     assert sweep == ["sweep"], "the tree-completion sweep still runs after the lease branch"
 
 
@@ -200,8 +199,8 @@ def test_a_supervisor_that_ignores_the_break_is_hard_killed_after_the_grace_and_
 ) -> None:
     _no_sweep(monkeypatch)
     monkeypatch.setattr(ssd, "_SUPERVISOR_STOP_GRACE", 0.6)
-    api = _ConsoleApi(deliver=False)  # TRUE returned, nothing delivered
-    with _reaped(_spawn(ignore_term=True)) as sup:
+    api = _ConsoleApi(config_dir, deliver=False)  # TRUE returned, nothing delivered
+    with _reaped(_spawn(ignore_break=True, where=config_dir)) as sup:
         _write_lease(config_dir, supervisor_pid=sup.pid, engine_pid=None)
         t0 = time.monotonic()
         with structlog.testing.capture_logs() as logs:
@@ -209,7 +208,7 @@ def test_a_supervisor_that_ignores_the_break_is_hard_killed_after_the_grace_and_
                 config_dir=config_dir, platform="win32", console_api=api,
             )
         elapsed = time.monotonic() - t0
-        assert sup.wait(timeout=30) == -signal.SIGKILL
+        assert sup.wait(timeout=30) == KILLED_RC
     assert ("send", sup.pid) in api.calls, "non-vacuity: the break WAS sent and ignored"
     assert elapsed >= 0.6
     assert outcome.stubborn == ()
@@ -223,8 +222,8 @@ def test_a_stop_from_another_session_is_refused_and_kills_nothing(
     """Sam DECIDED 2026-10-05: cross-session stop fails loud, never hard-kills."""
     sweep = _no_sweep(monkeypatch)
     monkeypatch.setattr(ssd, "_SUPERVISOR_STOP_GRACE", 0.3)
-    with _reaped(_spawn(ignore_term=False)) as sup:
-        api = _ConsoleApi(refuse=frozenset({sup.pid}))
+    with _reaped(_spawn(ignore_break=False, where=config_dir)) as sup:
+        api = _ConsoleApi(config_dir, refuse=frozenset({sup.pid}))
         lease = _write_lease(config_dir, supervisor_pid=sup.pid, engine_pid=None)
         real_kill = os.kill
 
@@ -252,17 +251,17 @@ def test_lease_with_no_supervisor_pid_signals_the_engine_through_the_console_on_
     config_dir: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _no_sweep(monkeypatch)
-    api = _ConsoleApi(deliver=True)
+    api = _ConsoleApi(config_dir, deliver=True)
     monkeypatch.setattr(
         "nexus.util.process_group.safe_killpg",
         lambda *a, **k: pytest.fail("Windows must not take the TerminateProcess path first"),
     )
-    with _reaped(_spawn(ignore_term=False)) as engine:
+    with _reaped(_spawn(ignore_break=False, where=config_dir)) as engine:
         lease = _write_lease(config_dir, supervisor_pid=None, engine_pid=engine.pid)
         outcome = ssd.stop_storage_service(
             config_dir=config_dir, platform="win32", console_api=api,
         )
-        assert engine.wait(timeout=30) == -signal.SIGTERM
+        assert engine.wait(timeout=30) == 0  # it took the delivered break and exited
     assert api.calls[:3] == [("free", None), ("attach", engine.pid), ("send", engine.pid)]
     assert outcome.pids == (engine.pid,) and outcome.refused == ()
     assert not lease.exists(), "the lease is relinquished once the engine is gone"
@@ -273,12 +272,12 @@ def test_an_engine_that_ignores_the_break_is_hard_killed_on_the_no_supervisor_br
 ) -> None:
     _no_sweep(monkeypatch)
     monkeypatch.setattr(ssd, "_GRACEFUL_STOP_TIMEOUT", 0.5)
-    api = _ConsoleApi(deliver=False)
-    with _reaped(_spawn(ignore_term=True)) as engine:
+    api = _ConsoleApi(config_dir, deliver=False)
+    with _reaped(_spawn(ignore_break=True, where=config_dir)) as engine:
         _write_lease(config_dir, supervisor_pid=None, engine_pid=engine.pid)
         with structlog.testing.capture_logs() as logs:
             ssd.stop_storage_service(config_dir=config_dir, platform="win32", console_api=api)
-        assert engine.wait(timeout=30) == -signal.SIGKILL
+        assert engine.wait(timeout=30) == KILLED_RC
     assert any(e["event"] == "storage_service_engine_unclean_stop" for e in logs)
 
 
@@ -286,8 +285,8 @@ def test_a_refused_engine_signal_on_the_no_supervisor_branch_kills_nothing(
     config_dir: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _no_sweep(monkeypatch)
-    with _reaped(_spawn(ignore_term=False)) as engine:
-        api = _ConsoleApi(refuse=frozenset({engine.pid}))
+    with _reaped(_spawn(ignore_break=False, where=config_dir)) as engine:
+        api = _ConsoleApi(config_dir, refuse=frozenset({engine.pid}))
         lease = _write_lease(config_dir, supervisor_pid=None, engine_pid=engine.pid)
         outcome = ssd.stop_storage_service(
             config_dir=config_dir, platform="win32", console_api=api,
@@ -298,12 +297,17 @@ def test_a_refused_engine_signal_on_the_no_supervisor_branch_kills_nothing(
     assert outcome.source == "refused"
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="the POSIX arm stops the supervisor with SIGTERM and reads a -SIGTERM exit; os.kill(SIGTERM) is "
+    "TerminateProcess on Windows, so the arm cannot run there (the Windows arm is the tests above)",
+)
 def test_posix_stop_never_touches_a_console(
     config_dir: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _no_sweep(monkeypatch)
-    api = _ConsoleApi()
-    with _reaped(_spawn(ignore_term=False)) as sup:
+    api = _ConsoleApi(config_dir)
+    with _reaped(_spawn(ignore_break=False, where=config_dir)) as sup:
         _write_lease(config_dir, supervisor_pid=sup.pid, engine_pid=None)
         outcome = ssd.stop_storage_service(
             config_dir=config_dir, platform="linux", console_api=api,

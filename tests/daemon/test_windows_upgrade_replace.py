@@ -511,12 +511,17 @@ def test_install_on_a_posix_host_does_not_stop_anything(tmp_path, monkeypatch):
 _MARKER = pg_bundle._EXTRACT_MARKER
 
 
+def _initdb(bin_dir):
+    """The extracted ``initdb`` as the host names it (``initdb.exe`` on Windows)."""
+    return pg_bundle.PgBinaries.from_dir(bin_dir).initdb
+
+
 def _two_archives(tmp_path, make_pg_bundle_txz):
     first = make_pg_bundle_txz(tmp_path, "nexus-pg-first.txz")
     second = make_pg_bundle_txz(tmp_path / "second", "nexus-pg-second.txz")
     root = tmp_path / "pg-bundle"
     bin_dir = pg_bundle.extract_bundle(first, root, platform=_WIN)
-    (bin_dir / "initdb").write_text("FROM-FIRST-ARCHIVE\n")
+    _initdb(bin_dir).write_text("FROM-FIRST-ARCHIVE\n")
     return first, second, root, bin_dir
 
 
@@ -531,11 +536,11 @@ def test_bundle_swap_stops_pg_after_staging_and_starts_it_on_the_new_tree(
     def stop_pg():
         fake.events.append("stop_pg")
         seen["staging_ready"] = (tmp_path / "pg-bundle.incoming").is_dir()
-        seen["tree_old_at_stop"] = (bin_dir / "initdb").read_text() == "FROM-FIRST-ARCHIVE\n"
+        seen["tree_old_at_stop"] = _initdb(bin_dir).read_text() == "FROM-FIRST-ARCHIVE\n"
 
     def start_pg():
         fake.events.append("start_pg")
-        seen["tree_new_at_start"] = (bin_dir / "initdb").read_text() != "FROM-FIRST-ARCHIVE\n"
+        seen["tree_new_at_start"] = _initdb(bin_dir).read_text() != "FROM-FIRST-ARCHIVE\n"
         seen["marked_new_at_start"] = (
             pg_bundle.is_bundle_extracted(root)
             and (root / _MARKER).read_text() == pg_bundle._archive_identity(second)
@@ -583,7 +588,7 @@ def test_bundle_swap_refused_across_sessions_keeps_the_old_tree(tmp_path, make_p
     with pytest.raises(rg.ReplaceBlockedError, match="session 2"):
         pg_bundle.extract_bundle(second, root, platform=_WIN, quiesce=rq.quiesced(
             tmp_path, replacing="pg_bundle", platform=_WIN, ops=fake.ops()))
-    assert (bin_dir / "initdb").read_text() == "FROM-FIRST-ARCHIVE\n"
+    assert _initdb(bin_dir).read_text() == "FROM-FIRST-ARCHIVE\n"
     assert (root / _MARKER).read_text() == marker_before
     assert pg_bundle.is_bundle_extracted(root)
     assert not (tmp_path / "pg-bundle.incoming").exists()  # staging cleaned up

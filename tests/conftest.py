@@ -3960,8 +3960,11 @@ def make_pg_bundle_txz():
         bundle = staging / "bundle"
         bin_dir = bundle / "bin"
         bin_dir.mkdir(parents=True)
+        # The names the HOST's extractor will look for: the Windows bundle ships
+        # ``initdb.exe`` and friends (``PgBinaries.from_dir``).
+        suffix = ".exe" if _sys.platform == "win32" else ""
         for b in ("initdb", "pg_ctl", "psql", "createdb"):
-            f = bin_dir / b
+            f = bin_dir / f"{b}{suffix}"
             f.write_text("#!/bin/sh\nexit 0\n")
             f.chmod(0o755)
         for sub in ("include", "lib", "share"):

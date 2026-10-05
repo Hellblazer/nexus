@@ -10,6 +10,7 @@ discovery helpers used by the Postgres probe.
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 from unittest.mock import patch
 
@@ -27,7 +28,8 @@ from nexus.daemon.binary_lifecycle import (
 
 class TestWellKnownBinaryPath:
     def test_points_at_service_subdir(self, tmp_path: Path) -> None:
-        assert well_known_binary_path(tmp_path) == tmp_path / "service" / "nexus-service"
+        name = "nexus-service.exe" if sys.platform == "win32" else "nexus-service"
+        assert well_known_binary_path(tmp_path) == tmp_path / "service" / name
 
 
 class TestReadInstalledProvenance:

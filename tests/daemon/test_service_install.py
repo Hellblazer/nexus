@@ -24,6 +24,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+
+#: The darwin arms these tests run read os.getuid(), absent on Windows (see conftest).
+pytestmark = pytest.mark.usefixtures("launchd_uid")
 from click.testing import CliRunner
 
 from nexus.commands import daemon as daemon_cmd
@@ -649,6 +652,12 @@ _ENABLED_LISTING = '\tdisabled services = {\n\t\t"com.other.agent" => enabled\n\
 def _fake_manager(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str, body: str) -> Path:
     """A fake manager binary as the ONLY thing on PATH, with the absolute
     fallbacks emptied so the real /bin/launchctl is never consulted."""
+    if sys.platform == "win32":
+        pytest.skip(
+            "the fake manager is a #!/bin/sh script, which Windows cannot execute as a bare command "
+            "(CreateProcess runs no shell and applies no PATHEXT to a .cmd); launchctl and systemctl "
+            "are not Windows managers either"
+        )
     fake_bin = tmp_path / "fakebin"
     fake_bin.mkdir(exist_ok=True)
     script = fake_bin / name

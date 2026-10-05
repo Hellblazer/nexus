@@ -28,6 +28,9 @@ from unittest.mock import patch
 
 import pytest
 
+from tests.daemon._children import CHILD_PYTHON
+
+from nexus.daemon.binary_lifecycle import well_known_binary_path
 from nexus.daemon.service_registry import (
     LeaseRecord,
     ServiceRegistry,
@@ -489,7 +492,7 @@ class TestReclaimLeaseIfDeadOwner:
     ) -> None:
         import subprocess
 
-        dead = subprocess.Popen(["true"])  # noqa: S603, S607 — fixed argv
+        dead = subprocess.Popen([CHILD_PYTHON, "-c", "pass"])  # noqa: S603 — fixed argv, this interpreter
         dead.wait()
         sup = ServiceSupervisor(
             registry, "42", version="1", endpoint_provider=lambda: _endpoint(),
@@ -509,7 +512,7 @@ class TestReclaimLeaseIfDeadOwner:
         generation regardless (CA-4)."""
         import subprocess
 
-        dead = subprocess.Popen(["true"])  # noqa: S603, S607
+        dead = subprocess.Popen([CHILD_PYTHON, "-c", "pass"])  # noqa: S603 — fixed argv, this interpreter
         dead.wait()
         sup = ServiceSupervisor(
             registry, "42", version="1", endpoint_provider=lambda: _endpoint(),
@@ -595,7 +598,7 @@ class TestStorageServiceStackMatcher:
         assert matcher(
             f"nx daemon service start --foreground --config-dir {cfg}"
         )
-        assert matcher(f"{cfg}/service/nexus-service -Xmx1g")
+        assert matcher(f"{well_known_binary_path(cfg)} -Xmx1g")
 
     def test_rejects_unrelated_and_sibling_profile(self, tmp_path: Path) -> None:
         cfg = tmp_path / "nexus"
@@ -608,7 +611,7 @@ class TestStorageServiceStackMatcher:
         assert not matcher(
             f"nx daemon service start --foreground --config-dir {sibling}"
         )
-        assert not matcher(f"tail -f {cfg}/service/nexus-service.log")
+        assert not matcher(f"tail -f {well_known_binary_path(cfg)}.log")
 
     def test_flagless_unit_launched_supervisor_matches_the_default_dir(
         self, monkeypatch: pytest.MonkeyPatch,
@@ -648,7 +651,7 @@ class TestStorageServiceStackMatcher:
         assert matcher(
             f"nx daemon service start --foreground --config-dir {spaced}"
         )
-        assert matcher(f"{spaced}/service/nexus-service -Duser.timezone=UTC")
+        assert matcher(f"{well_known_binary_path(spaced)} -Duser.timezone=UTC")
 
     def test_config_dir_with_a_space_still_requires_the_flag(self) -> None:
         """A flagless command means only the DEFAULT dir -- a space in the
@@ -691,7 +694,7 @@ class TestStorageServiceStackMatcher:
         matcher = storage_service_stack_matcher(cfg)
         assert matcher(f"{dev_bin} -Xmx1g")
         # the well-known path under config_dir must still match too.
-        assert matcher(f"{cfg}/service/nexus-service -Xmx1g")
+        assert matcher(f"{well_known_binary_path(cfg)} -Xmx1g")
 
     def test_matches_engine_launched_via_nexus_service_jar_override(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
@@ -743,7 +746,7 @@ class TestSweepMatchingProcesses:
         cfg = tmp_path / "nexus"
         rows = [
             (196, 60, f"nx daemon service start --foreground --config-dir {cfg}"),
-            (214, 60, f"{cfg}/service/nexus-service -Xmx1g"),
+            (214, 60, f"{well_known_binary_path(cfg)} -Xmx1g"),
             (153, 60, "/x/pg-bundle/bundle/bin/postgres -D /x/postgres"),
         ]
         terminated: list[list[int]] = []
@@ -788,7 +791,7 @@ class TestSweepMatchingProcesses:
         cfg = tmp_path / "nexus"
         rows = [
             (196, 60, f"nx daemon service start --foreground --config-dir {cfg}"),
-            (214, 60, f"{cfg}/service/nexus-service -Xmx1g"),
+            (214, 60, f"{well_known_binary_path(cfg)} -Xmx1g"),
         ]
         current = {196: "vim /etc/hosts", 214: rows[1][2]}
         terminated: list[list[int]] = []
@@ -910,7 +913,7 @@ class TestProcessState:
             "1234 (py (x) thing) Z " + " ".join(["0"] * 48) + "\n",
         )
         with patch("nexus.daemon.service_registry.PROCFS_ROOT", tmp_path):
-            assert process_state(1234) == "Z"
+            assert process_state(1234, platform="linux") == "Z"
 
     def test_unreadable_or_missing_is_unknown_never_a_state(
         self, tmp_path: Path,
@@ -919,7 +922,7 @@ class TestProcessState:
         reported as some state a caller could act on."""
         (tmp_path / "uptime").write_text("500.00 1000.00\n")
         with patch("nexus.daemon.service_registry.PROCFS_ROOT", tmp_path):
-            assert process_state(999999) is None
+            assert process_state(999999, platform="linux") is None
 
     def test_ps_fallback_takes_only_the_leading_state_character(self) -> None:
         """On a /proc-less box (macOS/BSD) ``ps -o state=`` answers, and its
@@ -931,7 +934,7 @@ class TestProcessState:
             "nexus.daemon.service_registry.run_bounded",
             return_value=SimpleNamespace(stdout="S+\n", returncode=0),
         ):
-            assert process_state(4321) == "S"
+            assert process_state(4321, platform="darwin") == "S"
 
     def test_ps_absent_is_unknown(self) -> None:
         with patch(
@@ -940,7 +943,7 @@ class TestProcessState:
             "nexus.daemon.service_registry.run_bounded",
             side_effect=FileNotFoundError("no ps"),
         ):
-            assert process_state(4321) is None
+            assert process_state(4321, platform="darwin") is None
 
 
 class TestPidRunning:

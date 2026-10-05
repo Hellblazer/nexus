@@ -905,7 +905,12 @@ class _LogTailer:
         # exactly on a newline) or a not-yet-terminated partial line —
         # buffer it for the next call either way.
         self._partial = lines.pop()
-        return [line.decode("utf-8", errors="replace") for line in lines]
+        # The engine writes CRLF line ends on Windows; the readiness state
+        # machine matches whole lines, so the terminator's CR is not content
+        # (RDR-224, nexus-f9bgu.44). A CR inside a line is left alone.
+        return [
+            line.removesuffix(b"\r").decode("utf-8", errors="replace") for line in lines
+        ]
 
 
 def _default_engine_liveness_scan(

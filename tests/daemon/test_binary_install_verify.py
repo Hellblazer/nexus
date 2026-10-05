@@ -49,6 +49,7 @@ import pytest
 # would instead let CI stay green-by-skip if the consumer never lands, hiding
 # the gap (feedback_no_silent_fallbacks_for_correctness).
 from nexus.daemon import binary_install as binstall  # noqa: E402
+from nexus.daemon.binary_install import well_known_binary_path  # noqa: E402
 
 _SIGSTORE_INSTALLED = importlib.util.find_spec("sigstore") is not None
 
@@ -486,7 +487,8 @@ class TestVerifyInstalledBinary:
 
         svc = tmp_path / "service"
         svc.mkdir(parents=True, exist_ok=True)
-        binary = svc / "nexus-service"
+        # The platform's own name for the engine (``nexus-service.exe`` on Windows).
+        binary = well_known_binary_path(tmp_path)
         binary.write_bytes(payload)
         digest = sha if sha is not None else hashlib.sha256(payload).hexdigest()
         (svc / "nexus-service.meta.json").write_text(

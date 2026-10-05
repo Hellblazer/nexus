@@ -21,7 +21,7 @@ import pytest
 import structlog.testing
 
 import nexus.daemon.storage_service_daemon as ssd_mod
-from nexus.daemon.service_registry import ttl_for_tier
+from nexus.daemon.service_registry import ttl_for_tier, service_identity
 from nexus.daemon.storage_service_daemon import HealthProbe
 
 from tests.daemon.test_storage_service_daemon import (  # noqa: F401 — config_dir/clock are pytest fixtures re-exported into this module
@@ -136,4 +136,4 @@ def test_timing_is_reported_even_when_the_tick_returns_early(
 def test_scope_is_the_real_uid(config_dir: Path, clock: _FakeClock, mono) -> None:
     """Sanity: the fixture publishes under this uid, as production does."""
     sup = _healthy_supervisor(config_dir, clock, mono)
-    assert sup._scope == str(os.getuid())
+    assert sup._scope == service_identity()
