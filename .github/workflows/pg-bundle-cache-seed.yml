@@ -31,6 +31,14 @@
 # nexus-yd9po (see the release workflow's build-publish-pg-bundle header for
 # detail); Sam has accepted hellmini into the release trust boundary
 # (2026-09-28, see AGENTS.md).
+#
+# windows-x64 (nexus-f9bgu.14, RDR-224 P2.2) is the seed-windows job below, on
+# the self-hosted `win-release` runner, and only while the repo variable
+# NX_WINDOWS_RELEASE_LEGS is 'on'. Its key is NOT the line above: it is whatever
+# `python scripts/build_pg_bundle_windows.py cache-key` prints (version pins plus
+# that script's sha256, no macfloor segment), computed the same way in the
+# release workflow's build-publish-pg-bundle-windows job, so the two cannot
+# diverge by hand-editing; tests/test_windows_release_legs_workflow.py pins it.
 name: pg-bundle-cache-seed
 
 on:
@@ -38,6 +46,7 @@ on:
     branches: [main]
     paths:
       - 'scripts/build_pg_bundle.sh'
+      - 'scripts/build_pg_bundle_windows.py'
       - '.github/workflows/pg-bundle-cache-seed.yml'
   schedule:
     # Weekly keep-warm (Mondays 07:23 UTC — off the hour to dodge cron rush).
@@ -188,3 +197,54 @@ jobs:
             fi
           done
           echo "prefix ok — cache will be saved on job success"
+
+  # nexus-f9bgu.14: seed + keep-warm the compiled windows-x64 prefix. Own job (the
+  # runner, shell and steps differ from the matrix above); skipped unless the
+  # NX_WINDOWS_RELEASE_LEGS variable is 'on', so with no runner online nothing here
+  # queues. Same triggers as the rest of the file, none of them pull_request.
+  seed-windows:
+    name: Seed PG bundle cache (windows-x64 @ win-release)
+    runs-on: win-release
+    if: ${{ vars.NX_WINDOWS_RELEASE_LEGS == 'on' }}
+    timeout-minutes: 40
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      # Pinned identically to engine-service-release.yml + ci.yml (see header).
+      PG_VERSION: "17.5"
+      PGVECTOR_VERSION: "v0.8.2"
+      # Runner label segment of the cache key; must equal the release workflow's.
+      PG_BUNDLE_RUNNER: win-release
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
+
+      - name: Resolve Python
+        uses: ./.github/actions/resolve-windows-python
+
+      - name: Compute the cache key
+        id: key
+        run: |
+          $key = (& $env:PYTHON scripts\build_pg_bundle_windows.py cache-key)
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "key=$("$key".Trim())" >> $env:GITHUB_OUTPUT
+
+      - name: Restore/claim cache slot
+        id: pg-bundle-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v5
+        with:
+          path: bundle
+          key: ${{ steps.key.outputs.key }}
+
+      - name: Compile PG + pgvector (cache miss only)
+        if: steps.pg-bundle-cache.outputs.cache-hit != 'true'
+        run: |
+          & $env:PYTHON scripts\build_pg_bundle_windows.py build --prefix "$env:GITHUB_WORKSPACE\bundle"
+
+      - name: Sanity-check the prefix before it becomes the cached artifact
+        if: steps.pg-bundle-cache.outputs.cache-hit != 'true'
+        run: |
+          # verify asserts the whole layout (PG toolchain, vector and pg_trgm
+          # controls, the four VC++ DLLs). The cache post-save runs only on job
+          # success, so a non-zero exit here prevents a hollow seed.
+          & $env:PYTHON scripts\build_pg_bundle_windows.py verify --prefix "$env:GITHUB_WORKSPACE\bundle"

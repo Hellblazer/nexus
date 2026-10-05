@@ -1018,6 +1018,137 @@ jobs:
           gh release upload "$tag" --clobber \
             "dist/$ASSET.txz" "dist/$ASSET.txz.sha256" "dist/$ASSET.txz.sigstore.json"
 
+  # nexus-f9bgu.14 (RDR-224 P2.2): the windows-x64 PG bundle. A job of its own,
+  # not a matrix entry: the runner, the shell and every build step differ from
+  # the other three, and a matrix entry cannot be skipped on its own.
+  #
+  # Host: `win-release`, the self-hosted runner on qwentescence's native Windows
+  # side (P0.1, Sam 2026-10-05). Release legs only, never pull_request, inside the
+  # release trust boundary, like hellmini; see AGENTS.md § Self-hosted runners and
+  # fork PRs. A bare custom label (no 'self-hosted' in runs-on).
+  #
+  # SWITCH: the repo variable NX_WINDOWS_RELEASE_LEGS. Unset or anything but
+  # 'on', this job is skipped and promote-release neither waits for it nor expects
+  # its assets, so a tag run is exactly what it was before this job existed. With
+  # no runner online a job queued here would wait with nothing to run it, which is
+  # why the gate is a variable Sam flips once the runner is registered, not the
+  # job's mere presence. When 'on', the assets BLOCK promotion (P0.4).
+  #
+  # The build is scripts/build_pg_bundle_windows.py (nexus-f9bgu.12): MSVC +
+  # meson, stdlib Python. Cache key = the script's own `cache-key` output (version
+  # pins + the script's sha256), the same exact-input shape as the other legs;
+  # pg-bundle-cache-seed.yml's seed-windows job computes it the same way, so a
+  # tag restores what main seeded. Restore-only here, for the reason given on the
+  # other legs. The four VC++ runtime DLLs are NOT a key input (P0.6 condition 8:
+  # refreshed from the current redist every release), so a restored prefix goes
+  # through refresh-runtime before it is packaged.
+  #
+  # Gate: the relocation smoke runs against the exact .txz about to be signed,
+  # with the build tree deleted first (the smoke refuses a reachable build prefix).
+  # Runner prerequisites: Python 3.12+ (or uv), Visual Studio 2022 Build Tools,
+  # win_flex_bison, meson, ninja, Strawberry Perl, git, gh, PowerShell 7 (pwsh)
+  # and the Windows tar on PATH for the service account.
+  build-publish-pg-bundle-windows:
+    name: Build + sign + publish PG bundle (windows-x64)
+    runs-on: win-release
+    needs: create-release
+    if: ${{ !cancelled() && needs.create-release.result != 'failure' && vars.NX_WINDOWS_RELEASE_LEGS == 'on' }}
+    timeout-minutes: 40
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      # Pinned identically to the other PG-bundle jobs (tests/test_pg_bundle_version_parity.py).
+      PG_VERSION: "17.5"
+      PGVECTOR_VERSION: "v0.8.2"
+      # Runner label segment of the cache key; must equal pg-bundle-cache-seed.yml's seed-windows.
+      PG_BUNDLE_RUNNER: win-release
+      ASSET: nexus-pg-windows-x64
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
+
+      - name: Resolve Python
+        uses: ./.github/actions/resolve-windows-python
+
+      - name: Compute the cache key
+        id: key
+        run: |
+          $key = (& $env:PYTHON scripts\build_pg_bundle_windows.py cache-key)
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "key=$("$key".Trim())" >> $env:GITHUB_OUTPUT
+
+      - name: Restore compiled PG bundle cache
+        id: pg-bundle-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v5
+        with:
+          path: bundle
+          key: ${{ steps.key.outputs.key }}
+
+      - name: Build PG + pgvector bundle (cache miss only)
+        if: steps.pg-bundle-cache.outputs.cache-hit != 'true'
+        run: |
+          & $env:PYTHON scripts\build_pg_bundle_windows.py build --prefix "$env:GITHUB_WORKSPACE\bundle"
+
+      - name: Refresh the VC++ runtime from the current redist (cache hit only)
+        if: steps.pg-bundle-cache.outputs.cache-hit == 'true'
+        run: |
+          & $env:PYTHON scripts\build_pg_bundle_windows.py refresh-runtime --prefix "$env:GITHUB_WORKSPACE\bundle"
+
+      - name: Verify the bundle layout
+        run: |
+          & $env:PYTHON scripts\build_pg_bundle_windows.py verify --prefix "$env:GITHUB_WORKSPACE\bundle"
+
+      - name: Package .txz
+        run: |
+          & $env:PYTHON scripts\build_pg_bundle_windows.py package --prefix "$env:GITHUB_WORKSPACE\bundle" --out-dir dist
+
+      - name: Verify the PUBLISHED artifact is genuinely relocatable (relocation gate)
+        run: |
+          # The smoke refuses to run while the recorded build prefix still exists,
+          # and after a cache hit that prefix is this workspace's bundle. Nothing
+          # below needs the build tree (this job restores the cache, never saves it).
+          Remove-Item -Recurse -Force "$env:GITHUB_WORKSPACE\bundle"
+          & $env:PYTHON scripts\pg_bundle_windows_smoke.py --archive "dist\$env:ASSET.txz"
+
+      - name: Install cosign (release tag only)
+        if: startsWith(github.ref, 'refs/tags/engine-service-v')
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6  # v4.1.2
+
+      - name: Sign PG bundle (cosign keyless, release tag only)
+        if: startsWith(github.ref, 'refs/tags/engine-service-v')
+        env:
+          COSIGN_YES: "true"
+        run: |
+          # Same protobuf-bundle-only contract as the other PG bundles, and the
+          # same certificate identity (this workflow at this ref).
+          cosign sign-blob "dist\$env:ASSET.txz" --new-bundle-format --bundle "dist\$env:ASSET.txz.sigstore.json"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cosign verify-blob "dist\$env:ASSET.txz" `
+            --new-bundle-format `
+            --bundle "dist\$env:ASSET.txz.sigstore.json" `
+            --certificate-identity "https://github.com/$env:GITHUB_REPOSITORY/.github/workflows/engine-service-release.yml@$env:GITHUB_REF" `
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Write-Host "cosign signature verified for $env:ASSET.txz (.sigstore.json)"
+
+      - name: Upload Actions artifact (always; dev smoke / non-tag path)
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: ${{ env.ASSET }}
+          path: dist/*
+          retention-days: 14
+          if-no-files-found: error
+
+      - name: Publish PG bundle to GitHub Release (engine-service-v* tag only)
+        if: startsWith(github.ref, 'refs/tags/engine-service-v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # The release already exists (this job `needs` create-release); --clobber
+          # makes re-runs idempotent.
+          gh release upload "$env:GITHUB_REF_NAME" --clobber `
+            "dist\$env:ASSET.txz" "dist\$env:ASSET.txz.sha256" "dist\$env:ASSET.txz.sigstore.json"
+
   # nexus-cl14i: the all-or-nothing gate. engine-service-v0.1.95 (run
   # 33697831082) published a non-draft release carrying 9 PG-bundle assets
   # and ZERO engine binaries after a transient upstream fetch failure skipped
@@ -1031,8 +1162,14 @@ jobs:
   promote-release:
     name: Promote GitHub Release (all assets present, engine-service-v* tag only)
     runs-on: ubuntu-latest
-    needs: [create-release, build-publish, build-publish-pg-bundle]
-    if: ${{ startsWith(github.ref, 'refs/tags/engine-service-v') && needs.create-release.result == 'success' && needs.build-publish.result == 'success' && needs.build-publish-pg-bundle.result == 'success' }}
+    # nexus-f9bgu.14: the Windows leg is required to have SUCCEEDED only while the
+    # NX_WINDOWS_RELEASE_LEGS variable is 'on' (P0.4: Windows assets block promotion).
+    # Off, that job is skipped by design and its absence must not hold the release:
+    # a job whose `needs` include a SKIPPED job is itself skipped unless its `if`
+    # has a status function, so `!cancelled()` replaces the implied success() and
+    # the explicit result checks below carry the all-succeeded requirement.
+    needs: [create-release, build-publish, build-publish-pg-bundle, build-publish-pg-bundle-windows]
+    if: ${{ !cancelled() && startsWith(github.ref, 'refs/tags/engine-service-v') && needs.create-release.result == 'success' && needs.build-publish.result == 'success' && needs.build-publish-pg-bundle.result == 'success' && (vars.NX_WINDOWS_RELEASE_LEGS != 'on' || needs.build-publish-pg-bundle-windows.result == 'success') }}
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
@@ -1046,6 +1183,9 @@ jobs:
       - name: Assert the complete asset set, then publish
         env:
           GH_TOKEN: ${{ github.token }}
+          # Normalised here (GitHub compares strings case-insensitively) so the
+          # script sees exactly "on" or "off" and reads no GitHub state itself.
+          WINDOWS_LEGS: ${{ vars.NX_WINDOWS_RELEASE_LEGS == 'on' && 'on' || 'off' }}
         run: |
           set -euo pipefail
-          scripts/promote_engine_release.sh "${GITHUB_REF_NAME}" "${GITHUB_REPOSITORY}"
+          scripts/promote_engine_release.sh "${GITHUB_REF_NAME}" "${GITHUB_REPOSITORY}" "${WINDOWS_LEGS}"
