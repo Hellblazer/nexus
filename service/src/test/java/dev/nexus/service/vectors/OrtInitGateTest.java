@@ -167,12 +167,110 @@ class OrtInitGateTest {
     @Test
     void installTakesOverTermIntHupExactlyOnce() {
         FakeSignals signals = new FakeSignals();
-        OrtInitGate gate = new OrtInitGate(5_000, signals, status -> { });
+        OrtInitGate gate = new OrtInitGate(5_000, signals, status -> { }, "Linux");
         gate.installSignalHandlers();
         var first = new java.util.LinkedHashMap<>(signals.handlers);
         gate.installSignalHandlers();
         assertThat(signals.handlers.keySet()).containsExactly("TERM", "INT", "HUP");
         assertThat(signals.handlers).as("second install is a no-op").isEqualTo(first);
+    }
+
+    // ── CTRL_BREAK on Windows (nexus-f9bgu.8, RDR-224 Gap 4) ───────────────────
+
+    @Test
+    void onWindowsTheInstalledSetAlsoIncludesBreak() {
+        FakeSignals signals = new FakeSignals();
+        new OrtInitGate(5_000, signals, status -> { }, "Windows 11").installSignalHandlers();
+        assertThat(signals.handlers.keySet())
+                .as("CTRL_BREAK reaches a native-image process only through a BREAK handler; "
+                        + "without one it is silently ignored")
+                .containsExactly("TERM", "INT", "HUP", "BREAK");
+    }
+
+    @Test
+    void windowsIsDetectedFromTheOsNameCaseInsensitively() {
+        assertThat(OrtInitGate.exitSignals("Windows Server 2022")).contains("BREAK");
+        assertThat(OrtInitGate.exitSignals("WINDOWS 10")).contains("BREAK");
+        assertThat(OrtInitGate.exitSignals("Mac OS X")).doesNotContain("BREAK");
+        assertThat(OrtInitGate.exitSignals("Linux")).doesNotContain("BREAK");
+        assertThat(OrtInitGate.exitSignals(null)).as("an unreadable os.name is not Windows")
+                .doesNotContain("BREAK");
+    }
+
+    /**
+     * Measured 2026-10-05 on macOS arm64 (GraalVM JDK 25.0.3), Linux amd64 and Linux arm64 (Temurin
+     * 25.0.4): {@code Signal.handle(new Signal("BREAK"), ..)} throws
+     * {@code IllegalArgumentException: Unknown signal: BREAK}. This installer reproduces that, so a
+     * BREAK request on a POSIX gate would log {@code ort_init_signal_gate_unavailable} on every boot.
+     */
+    private static final class PosixLikeSignals implements OrtInitGate.SignalInstaller {
+        final List<String> requested = new ArrayList<>();
+        @Override
+        public void install(String name, java.util.function.IntConsumer onSignal) {
+            requested.add(name);
+            if (name.equals("BREAK")) {
+                throw new IllegalArgumentException("Unknown signal: BREAK");
+            }
+        }
+    }
+
+    @Test
+    void onPosixBreakIsNeverRequestedSoNoUnavailableWarningIsLogged() {
+        for (String os : List.of("Linux", "Mac OS X")) {
+            PosixLikeSignals signals = new PosixLikeSignals();
+            List<String> logs = captureLogs(() ->
+                    new OrtInitGate(5_000, signals, status -> { }, os).installSignalHandlers());
+            assertThat(signals.requested).as(os + ": BREAK is not asked of a POSIX JVM")
+                    .containsExactly("TERM", "INT", "HUP");
+            assertThat(logs).as(os + ": no unavailable warning for any signal")
+                    .noneMatch(l -> l.contains("ort_init_signal_gate_unavailable"));
+        }
+    }
+
+    @Test
+    void theWindowsGateOnAPosixLikeJvmDoesLogTheUnavailableWarningForBreak() {
+        // Non-vacuity of the test above: the capture sees the warning when BREAK is requested.
+        PosixLikeSignals signals = new PosixLikeSignals();
+        List<String> logs = captureLogs(() ->
+                new OrtInitGate(5_000, signals, status -> { }, "Windows 11").installSignalHandlers());
+        assertThat(signals.requested).contains("BREAK");
+        assertThat(logs).anyMatch(l -> l.contains("ort_init_signal_gate_unavailable") && l.contains("BREAK"));
+    }
+
+    @Test
+    void aBreakSignalRunsTheDeferredExitWithItsStatus() throws Exception {
+        FakeSignals signals = new FakeSignals();
+        java.util.concurrent.atomic.AtomicInteger exited = new java.util.concurrent.atomic.AtomicInteger(-1);
+        CountDownLatch exitCalled = new CountDownLatch(1);
+        OrtInitGate gate = new OrtInitGate(10_000, signals, status -> {
+            exited.set(status);
+            exitCalled.countDown();
+        }, "Windows 11");
+        gate.installSignalHandlers();
+
+        OrtInitGate.Scope scope = gate.enter("test-model");
+        signals.handlers.get("BREAK").accept(149); // 128 + 21, the status the spike measured
+        assertThat(exitCalled.await(400, TimeUnit.MILLISECONDS))
+                .as("a stop during ORT init is deferred exactly as for SIGTERM").isFalse();
+        scope.close();
+        assertThat(exitCalled.await(5, TimeUnit.SECONDS)).isTrue();
+        assertThat(exited.get()).isEqualTo(149);
+    }
+
+    private static List<String> captureLogs(Runnable body) {
+        ch.qos.logback.classic.Logger target =
+                (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger(OrtInitGate.class);
+        ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent> logs =
+                new ch.qos.logback.core.read.ListAppender<>();
+        logs.start();
+        target.addAppender(logs);
+        try {
+            body.run();
+            return logs.list.stream().map(e -> e.getLevel() + " " + e.getFormattedMessage()).toList();
+        } finally {
+            target.detachAppender(logs);
+            logs.stop();
+        }
     }
 
     @Test
