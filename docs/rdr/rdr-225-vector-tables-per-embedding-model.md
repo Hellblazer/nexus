@@ -61,7 +61,7 @@ other anyway. Every tenant's rows share the same graph too.
 - **PITR fork**: a point-in-time copy of the production database, used for rehearsals.
 - **Changeset**: one Liquibase schema migration step. The schema walk runs at engine boot.
 - **The router** (cardinality router, nexus-tu8wp.6): sends a plain search to exact search when the selected collections hold at most a threshold of rows, and to HNSW otherwise.
-- **Protocol labels** (A1t, A6, F7, H4 to H6, T1 to T3, E1): defined in § Evaluation Protocol. **ABBA** means running the two arms in the order A, B, B, A within a cycle, so neither always goes first.
+- **Protocol labels** (A1t, A6, F7, H4 to H6, TS1 to TS3, E1): defined in § Evaluation Protocol. **ABBA** means running the two arms in the order A, B, B, A within a cycle, so neither always goes first.
 - **SECURITY DEFINER**: a Postgres function that runs with its owner's privileges. **DETACH**: removing a partition from its parent.
 
 ### Enumerated gaps to close
@@ -79,13 +79,15 @@ it: HNSW's poor agreement with exact search on filtered queries (0.60 to 0.80,
 F2) is filter- and graph-driven, and the split's effect on it is measured only as
 non-inferiority (protocol step 3).
 
-#### Gap 2: Tenants share one graph, one heap and one cache
+#### Gap 2: Tenants share one graph and one heap
 
 Row-level security keeps tenants from reading each other's rows. It does
 nothing for performance: another tenant's rows raise the share of every
 filtered walk that is wasted, and its pages compete for the same shared buffers.
 On the production fork, one pass over our main tenant's 98 collections read
-3.3 to 4 GB "warm" on an 8 GB host and evicted itself (F3).
+3.3 to 4 GB "warm" on an 8 GB host and evicted itself (F3). This RDR closes the
+shared graph and the shared heap. The buffer pool stays shared by every
+partition; its size is a hosting decision (memory-16, F3), outside this RDR.
 
 #### Gap 3: The layout gives the planner no way to scope a search
 
@@ -148,7 +150,7 @@ work also surfaced the mixed-model graph.
 ### Investigation
 
 Fork measurements by conexus-0e on PITR forks of production, 2026-10-05,
-standard-8 and memory-16. Raw JSON is in `~/nexus-evidence/rdr225-2026-10-05/` with `SHA256SUMS`.
+standard-8 and memory-16. Raw JSON is in `~/nexus-evidence/rdr225-2026-10-05/` (`fork/`, `census/`, `step2/`), each with `SHA256SUMS`.
 
 ### Key Discoveries
 
@@ -175,8 +177,10 @@ standard-8 and memory-16. Raw JSON is in `~/nexus-evidence/rdr225-2026-10-05/` w
   HNSW time by at least 2x. E2 also measures the tenant-only step separately.
 - **F7 (Verified, research-14).** On `chunks` LIST-partitioned by
   `embedding_model` and then `tenant_id`, with literal model and tenant predicates
-  under `force_custom_plan`, every search family is pruned at plan time to one
-  (model, tenant) leaf.
+  under `force_custom_plan`, every chunk search family is pruned at plan time to
+  one (model, tenant) leaf. The taxonomy families were prototyped on
+  `taxonomy_centroids` partitioned by model only, so their tenant-level pruning
+  is not yet shown; the Test Plan pins it.
 
 #### Registered research findings (T2 `nexus_rdr/225-research-1` to `-16`)
 
@@ -208,7 +212,8 @@ standard-8 and memory-16. Raw JSON is in `~/nexus-evidence/rdr225-2026-10-05/` w
   *Source: the fork.*
 - **✅ Verified** (spike), research-14. F7: on the model-then-tenant layout, every SQL search family prunes to exactly one (model, tenant) leaf. All 156 of 156 checks pass, after `assign_from_chashes` was given the new `embedding_model` column the design requires.
   *Source: ~/nexus-evidence/rdr225-2026-10-05/step2/f7_a6.json.*
-- **❓ Assumed** (spike, pending step 2), research-15. H4: the partitioned layout, with its four-column FKs, costs at most 1.25x on every write path.
+- **✅ Verified, one exception** (spike), research-15. H4 write cost on the final layout (ratio new/old): single insert 1.01, update 0.85, delete 1.02, rename 0.95, all within the 1.25 rule. Bulk insert is 1.02 with CI [0.82, 1.28], over the rule's upper bound because of one disturbed pair; it is repeated on the step-3 fork as a prerequisite. The deferred FK behaves as today. 300 tenant creations take 27 ms each on average (p95 40 ms). Planning at 302 tenants takes 0.62 ms (0.41 ms at 2).
+  *Source: T2 `nexus/rdr225-step2-local-feasibility-2026-10-05`; ~/nexus-evidence/rdr225-2026-10-05/step2/ (SHA256SUMS).*
 - **⚠️ Documented** (docs only), research-16. The literature crossover points (Veda, Compass) were measured warm, and VADER finds query-filter correlation.
   *Source: knowledge__dt-papers.*
 
@@ -233,7 +238,7 @@ jumping." Five critique rounds preceded this revision (T2
 - **E1:** 400 sampled vectors had a cross-model neighbour fraction of 0.000, so the two models are disjoint islands. 14.6% of neighbours lay in the duplicate tenant `gate-xr789`.
 - **Census:** in the run record.
 - **Fork measurements:** T2 `conexus/tu8wp-fork-measurements-2026-10-05`.
-- **Raw data:** `~/nexus-evidence/rdr225-2026-10-05/` with `SHA256SUMS`.
+- **Raw data:** `~/nexus-evidence/rdr225-2026-10-05/` (`fork/`, `census/`, `step2/`), each with `SHA256SUMS`.
 
 **Integrity.**
 - Fixed before the first confirmatory run, and never edited after: the margins, decision rules and outcome labels below.
@@ -298,13 +303,29 @@ The substrate is the bundled PG 17 with pgvector 0.8.2 (versions recorded; any o
 - **Fail label:** DESIGN-H4.
 
 **Addendum (2026-10-05, after gate round 2): tenant scale.** It is part of
-step 2's hard gate, with these thresholds set by this addendum:
+step 2's hard gate. Its thresholds are set by the author in this addendum and
+are not among the thresholds Sam initialled. Sample sizes: TS1 over 300
+creations; TS2 over every search family, each planned 20 times at each tenant
+count.
 
 | Check | Pass rule | Fail label |
 | --- | --- | --- |
-| **T1, tenant creation.** Time `create_tenant_partitions` for one new tenant, with 2, 100 and 300 existing tenants, and record the locks it takes on the referencing tables (`pg_locks`) | p95 creation time at most 2 s at 300 tenants, and no lock held on a referencing table for more than 2 s | DESIGN-T1 |
-| **T2, planning.** Plan time of each search family with literal keys, at 2 and at 300 tenants | p95 at 300 tenants at most 2x the 2-tenant p95, and at most 25 ms | DESIGN-T2 |
-| **T3, deferred FK.** The `purge_trash` pattern: `SET CONSTRAINTS nexus.fk_catalog_chunks_chunk DEFERRED`, then delete and re-insert within one transaction, against the partitioned parent | commits, and an orphaned manifest row fails at commit | DESIGN-T3 |
+| **TS1, tenant creation.** Time `create_tenant_partitions` for one new tenant, with 2, 100 and 300 existing tenants. Record the locks it takes and, with an open reader holding a conflicting lock, its wait under `lock_timeout = 2s` | p95 creation time at most 2 s at 300 tenants, and a blocked creation fails at the lock timeout instead of queueing other writers | DESIGN-TS1 |
+| **TS2, planning.** Plan time of each search family with literal keys, at 2 and at 300 tenants | p95 at 300 tenants at most 2x the 2-tenant p95, and at most 25 ms | DESIGN-TS2 |
+| **TS3, deferred FK.** Under `SET CONSTRAINTS nexus.fk_catalog_chunks_chunk DEFERRED`, against the partitioned parent: (a) the `catalog-029-3` purge shape, deleting chunks while manifest rows exist and then removing those rows, commits; (b) a delete and re-insert of the chunk commits; (c) a delete that leaves a manifest row orphaned fails at commit | all three behave as stated | DESIGN-TS3 |
+
+**Step-2 results (2026-10-05, research-14, research-15):**
+- F7 pass: 156 of 156.
+- H5 pass.
+- H4: four paths pass; bulk is over the upper bound, repeated on the step-3 fork.
+- TS1 pass: p95 40 ms. A creation blocked behind an open reader waits until `lock_timeout`, so the trigger sets it (§ Tenant creation).
+- TS2 pass: 0.62 ms against 0.41 ms.
+- TS3 pass.
+
+**Dated record of edits to frozen text (2026-10-05, after gate round 1):** three wordings were changed to describe the chosen layout, with no change to any rule, threshold or statistic:
+- the A6 router table (§ Harness fidelity, Execution path);
+- the F7 observable, now a plan naming one leaf, because plan-time pruning emits no "Subplans Removed";
+- the step-4 rollback, now "exercised as a PITR restore on the fork".
 
 #### Step 3: non-inferiority on a fork (standard-8)
 
@@ -450,29 +471,29 @@ settled in Phase 1. Where the code is quoted, the source is develop
 
 | Object | Kind | New form |
 |---|---|---|
-| `fk_catalog_chunks_chunk` (catalog-029) | FK into chunks | 4-column; ON UPDATE CASCADE, NO ACTION, DEFERRABLE INITIALLY IMMEDIATE. Same name: Java issues `SET CONSTRAINTS nexus.fk_catalog_chunks_chunk DEFERRED` (CatalogRepository.java:8297), and so do plpgsql (catalog-029:125, 251) |
+| `fk_catalog_chunks_chunk` (catalog-029) | FK into chunks | 4-column; ON UPDATE CASCADE, NO ACTION, DEFERRABLE INITIALLY IMMEDIATE. Same name: Java issues `SET CONSTRAINTS nexus.fk_catalog_chunks_chunk DEFERRED` (CatalogRepository.java:8297), and so do plpgsql sites (catalog-029:306, catalog-033:99 and 199, vectors-017:1064 and 1177) in the unqualified form. Step 2 found that the bare name fails without the schema on `search_path`, so every site is rewritten schema-qualified |
 | `topic_assignments_chunk_fk` (taxonomy-012) | FK into chunks | 4-column; ON UPDATE CASCADE, ON DELETE CASCADE; same name |
 | `chunk_orphaned_at_chunk_fk` (vectors-021) | FK into chunks | 4-column; ON UPDATE CASCADE, ON DELETE CASCADE; same name |
 | `chunks_collection_fk` (fk-004) | FK out of chunks | replaced by the composite model FK |
 | Every `ON CONFLICT (tenant_id, collection, chash)` target whose arbiter is `nexus.chunks`, and every `INSERT INTO nexus.chunks` column list: the Java upsert at PgVectorRepository.java:1168 and plpgsql in vectors-022, vectors-024, catalog-033, catalog-042, catalog-043, hygiene-008 and others the script finds. `chunk_orphaned_at` keeps its own three-column arbiter, as do other tables whose PKs do not change. Writers of the referencing tables (for example the manifest upsert, CatalogRepository.java:5067) supply `embedding_model` | write sites | Rewritten. The conflict target becomes the four-column PK and the insert supplies `embedding_model`. Redefined once, at migration step 7.8, against the swapped table |
 | `stamp_chunks_on_manifest_delete` and `_update` (vectors-021-3) | trigger functions inserting into `chunk_orphaned_at` and joining `chunks` | Rewritten to carry `embedding_model` from the manifest row and to join on all four columns |
 | `nexus.live_chunks`, `nexus.collection_vector_stats` (vectors-019:1118-1190), `nexus.diag_chash_conformance` (taxonomy-011-8) | views over `chunks` | Dropped before the swap and recreated over the new table in the same transaction. They bind by OID, so they would otherwise follow the retired table. `diag_chash_conformance` may be owned by a superuser (taxonomy-011), so its drop and recreate runs as that owner, or is a documented operator step if the migration role cannot |
-| `chunks_gate_probe_owner_read` policy (vectors-029); the `tenant_isolation` policy; FORCE RLS | RLS | Created on every model partition and every leaf. PostgreSQL does not inherit RLS state or policies to partitions (the step-2 prototype applied them leaf by leaf) |
-| `chunks_content_retention_consistent` (vectors-014), `chunks_chash_octet_check` (vectors-004:313), `idx_chunks_tenant_chash` (vectors-004:333), the HNSW, GIN and trigram indexes | constraints and indexes | Declared on the parent so every leaf inherits them. On the retired table they are renamed with a `_retired_225` suffix before the swap, because index and constraint names are schema-wide |
+| `chunks_gate_probe_owner_read` policy (vectors-029); the `tenant_isolation` policy; FORCE RLS | RLS | On the parent `chunks`, because queries through the parent use the parent's policies, and on every model partition and leaf, because PostgreSQL does not inherit RLS state or policies and a leaf can be queried directly. The step-2 prototype applied both. |
+| `chunks_content_retention_consistent` (vectors-014), `chunks_chash_octet_check` (vectors-004:313), `idx_chunks_tenant_chash` (vectors-004:333), the HNSW, GIN and trigram indexes | constraints and indexes | Declared on the parent so every leaf inherits them. On the retired table, its indexes and index-backed constraints (PK, UNIQUE) are renamed with a `_retired_225` suffix before the swap, because those names are schema-wide. CHECK and FK constraint names are per table and need no rename |
 | Grants on `nexus.chunks` (grants-nexus-svc.xml, grants-nexus-diag.xml) | grants | Re-issued on the new parent. These are `runAlways` changesets, so they re-run on every walk |
 | `ChunksIsolationCheck.verifyAtStartup` (Main.java:131), the doctor RLS canary (`_RLS_TENANT_TABLES`, health.py:3408) | isolation checks | Extended to assert FORCE RLS and the policy on every model partition and leaf |
-| `taxonomy_centroids` (taxonomy-007) and its upsert at TaxonomyCentroidRepository.java:124 | mixed-model table | Gains `embedding_model`, partitioned the same way. The upsert's conflict target includes the model. A centroid whose dimension changes (nexus-2qryr) is deleted and re-inserted, not upserted, because an upsert cannot move a row across partitions |
+| `taxonomy_centroids` (taxonomy-007) and its upsert at TaxonomyCentroidRepository.java:124 | mixed-model table | Gains `embedding_model`, partitioned the same way (model, then tenant). The step-2 prototype proposed model-only partitioning because centroids are few. Tenant isolation is required, so the tenant level stays. The upsert's conflict target includes the model. A centroid whose dimension changes (nexus-2qryr) is deleted and re-inserted, not upserted, because an upsert cannot move a row across partitions |
 
 **Tenant creation.**
 - A tenant exists from the moment its first token row is written. Four sites write token rows: `issueToken` (TokenStore.java:401, for `/v1/tenants/create`, `/v1/service-tokens/issue` and `/v1/data-tokens/mint`), `ensureBootstrapToken` (:242, the `default` tenant at every boot, after the walk) and `rotateTokens` (:585).
 - An AFTER INSERT trigger on `service_tokens` calls `nexus.create_tenant_partitions(tenant)` in the inserting transaction, so every site is covered.
-- The function is idempotent: it creates only leaves that do not exist. A second token for the same tenant costs one catalog check.
+- The function is idempotent: it looks a leaf up by its partition bound (`pg_inherits` plus the bound expression), not by name, and creates only those that do not exist. A second token for the same tenant costs one catalog check.
 - For each model partition of `chunks` and of `taxonomy_centroids`, it creates the tenant's leaf, enables and forces RLS, and creates the policies.
 - It is SECURITY DEFINER with a fixed `search_path`, EXECUTE revoked from PUBLIC and granted to the engine role only. It quotes with `format('%I')` and `%L`. Leaf names combine the model's short code with a 16-hex-character hash of the tenant (for example `chunks_vcode3_t_<hash>`), and a collision check against the existing leaf's bound refuses a second tenant hashing to the same name. Concurrent first tokens for one tenant are serialised by a transaction-scoped advisory lock on the tenant. New leaves receive the same grants as the parent, including MAINTAIN for the purge VACUUM.
-- Creating a partition of a referenced partitioned table takes locks on the referencing tables. Step 2 (addendum) measures those locks and their duration.
-- Removing a tenant is DETACH and DROP of its leaves (runbook).
+- Creating a leaf takes ShareRowExclusive on the referencing tables and ACCESS EXCLUSIVE on the model partition (step 2, TS1). The function sets `lock_timeout = 2s`. A creation that times out fails the token insert, and the engine returns a retryable 503, so a long reader cannot make every writer queue behind a partition creation.
+- Removing a tenant: first delete the tenant's manifest, topic-assignment and orphaned-at rows, which reference its leaves; then DETACH and DROP its leaves; then delete its tokens (runbook, Phase 3 Step 2).
 
-**New model.** Adding a model is a changeset that inserts the `embedding_models` row and calls `nexus.create_model_partition(model)`. That function creates the model partition with its dimension CHECK, then a leaf for every existing tenant. A write for a model with no partition is refused by the engine before any SQL, naming the model.
+**New model.** Adding a model is a changeset that inserts the `embedding_models` row and calls `nexus.create_model_partition(model)`. That function creates the model partition with its dimension CHECK, then a leaf for every existing tenant. A write for a model with no partition is refused by the engine before any SQL, naming the model (Phase 2 Step 1, Test Plan). A model with a new dimension needs a new typed column and is out of scope (RDR-191).
 
 **Read path.**
 - The search families keep their per-dimension function bodies. vectors-019 wrote them once per dimension; they are not generated per model.
@@ -489,10 +510,10 @@ settled in Phase 1. Where the code is quoted, the source is develop
 - **Cross-model migration** registers a new collection under the target model. There is no in-place re-embed, and none is added.
 
 **Migration** (one engine release, a schema-carrying tag):
-- All of steps 2 to 7 run in **one transactional changeset**. A failure anywhere rolls back everything, so the old layout and the live referencing tables are untouched, and a retry starts clean.
+- Steps 2 to 7 (the SQL steps) run in **one transactional changeset**. Steps 1 and 8, the freeze and unfreeze, are operational. A failure anywhere rolls back everything, so the old layout and the live referencing tables are untouched, and a retry starts clean.
 - Writes are frozen for the walk.
   - **Locally:** the engine is not yet serving (Main.java:113-123).
-  - **In the cloud:** the freeze mechanism and the deploy topology (rolling or stop-start) are confirmed with conexus before the walk, recorded as an open ask in T2 22408 §2(d). That confirmation is a Phase 3 prerequisite.
+  - **In the cloud:** the deploy topology was an open ask in T2 22408 §2(d), and T2 22410 later records it as stop-start (SSM). The freeze mechanism is a new ask. conexus confirms both before the walk, as a Phase 3 prerequisite.
 
 The steps:
 1. Freeze writes.
@@ -519,17 +540,17 @@ The steps:
 - After the changeset commits, the change is **IRREVERSIBLE** in place.
   - **Cloud rollback** is a restore from PITR (point-in-time recovery) to before the walk. Writes made since the walk are lost.
   - **Local rollback** does not exist. `chunks_retired_225` is kept for 14 days only as a data-recovery source, and a later changeset drops it.
-- **Local disk preflight.** Before the walk, the engine checks that free disk is at least 2.2x the chunks table plus its indexes (inferred, not measured: 1x for the copy, 1x while the retired table is kept, 0.2x headroom). If it is not, the engine refuses to start, naming the shortfall. Step 4 of the protocol measures the real peak.
-- A local install has the `default` tenant (and any it creates), so it holds eight leaves (one per model partition of `chunks` and of `taxonomy_centroids`), mostly empty. It gains nothing in isolation and still migrates, so that every install runs one schema.
+- **Local disk preflight.** Before the walk, the engine checks that free disk is at least 1.2x the chunks table plus its indexes, plus the WAL the copy generates (estimated as 1x the table). This is inferred, not measured: the copy needs 1x, headroom is 0.2x, and the retired table already occupies its space. If it is not, the engine refuses to start, naming the shortfall. Step 4 of the protocol measures the real peak.
+- A local install has the `default` tenant (and any it creates), so it holds eight leaves per tenant (one per model partition of `chunks` and of `taxonomy_centroids`, four models each), mostly empty. It gains nothing in isolation and still migrates, so that every install runs one schema.
 
-**If step 3 is not PASS** (the per-model split is deferred):
-- `nexus.chunks` is LIST-partitioned by `tenant_id` only, with no model level.
-- The PK and the referencing FKs keep three columns, and no `embedding_model` column, composite model FK or dimension CHECK is added.
-- `create_tenant_partitions` creates one leaf per tenant (and one per tenant for `taxonomy_centroids`), and there is no `create_model_partition`.
-- The migration drops step 4 and the model parts of steps 2, 3 and 6.
-- The views, policies, grants, isolation checks, ANALYZE, swap, failure handling and the Day 2 tenant rows are as above.
-- The Day 2 "Model partitions" row and the model-mismatch test do not apply.
-- Step 4 of the protocol rehearses whichever layout step 3 selects.
+**If step 3 is not PASS** (the per-model split is deferred), these differ from the design above:
+- `nexus.chunks` and `taxonomy_centroids` are LIST-partitioned by `tenant_id` only.
+- The PK keeps its three columns, which already include the partition key `tenant_id`. The referencing tables, their FKs, the conflict targets and the manifest triggers therefore keep their current form. No `embedding_model` column, composite model FK, dimension CHECK or `create_model_partition` is added.
+- The read path adds only the `tenant_id` predicate.
+- `create_tenant_partitions` creates one leaf per tenant in each table.
+- The migration has no step 4. Steps 2, 3 and 6 work per tenant. Step 7 swaps tables, views, policies and grants, with the three-column FKs re-added.
+- Phase 2 Step 1 keeps only the token trigger, the no-leaf error mapping and the guard. The Day 2 "Model partitions" row and the model-mismatch test do not apply.
+- Everything else is as above: views, policies, grants, isolation checks, ANALYZE, failure handling, the Day 2 tenant rows, and step 4 of the protocol rehearsing whichever layout step 3 selects.
 
 **Router.** The router stays (nexus-tu8wp.6). Its threshold is set from the protocol's measurements, outside this RDR.
 
@@ -611,10 +632,11 @@ already give.
 
 ### Failure Modes
 
-- **A write for a tenant with no leaf.** `issueToken` creates the leaves, so this needs a bypassed token path or a dropped leaf.
+- **A write for a tenant with no leaf.** The `service_tokens` trigger and the migration create every tenant's leaves, so this needs a dropped leaf or a disabled trigger.
   - PostgreSQL raises SQLSTATE 23514, "no partition of relation found for row". `HttpUtil.sendTypedDbError` would map that to 409 as a caller error. The engine maps this specific error to a 500 naming the tenant, because it is an engine invariant, not a caller mistake.
   - *Recovery:* call `create_tenant_partitions`. The doctor row lists tenants with tokens against leaves.
-- **A chunk filed under the wrong model, or with the wrong vector dimension.** The composite model FK and the dimension CHECK refuse it at write time.
+- **A chunk filed under the wrong model, or with the wrong vector dimension.** The composite model FK and the dimension CHECK refuse it at write time. For the same reason, an upsert of `catalog_collections` that changes a collection's model while chunks exist (CatalogRepository.java:9206) is refused with a 409. That is intended: re-modelling a collection is a cross-model migration.
+- **A tenant creation blocked by locks.** It fails at `lock_timeout`, and the token request returns a retryable 503.
 - **A pruning regression.** A function edit can stop plan-time pruning, so that a search touches every leaf.
   - RLS still filters, so it shows only as cost.
   - *Detection:* EXPLAIN-pinned tests per family.
@@ -632,9 +654,10 @@ already give.
 
 - [ ] The cardinality router (`feature/nexus-tu8wp.6-cardinality-router`) is merged to develop.
 - [ ] Protocol step 2 PASS: F7, H5 and H4, plus the step-2 addendum (tenant creation, planning at 300 tenants, the deferrable 4-column FK).
+- [ ] H4 bulk insert repeated on the step-3 fork, within the 1.25 rule.
 - [ ] Protocol step 3 outcome recorded. PASS keeps the model level; any other outcome uses the tenant-only layout.
 - [ ] Protocol step 4 (H6, under write freeze) PASS.
-- [ ] conexus confirms the cloud freeze mechanism and deploy topology (T2 22408 §2(d)).
+- [ ] conexus confirms the cloud deploy topology (recorded as stop-start in T2 22410) and the freeze mechanism.
 
 ### Minimum Viable Validation
 
@@ -661,14 +684,16 @@ conflict targets. Each item gets its new form, as in the Technical Design table.
 
 #### Step 3: The migration changeset
 
-The single transactional changeset in the Technical Design (steps 1 to 8), plus
+The single transactional changeset in the Technical Design (steps 2 to 7; steps 1 and 8 are operational), plus
 the local disk preflight.
 
 ### Phase 2: Engine
 
 #### Step 1: Write path and tenant creation
 
-- `issueToken` calls `create_tenant_partitions`.
+- The `service_tokens` AFTER INSERT trigger and `create_tenant_partitions` (all four token-writing sites).
+- The refusal of a write for a model with no partition, naming the model.
+- Every `SET CONSTRAINTS` site, Java and plpgsql, schema-qualified.
 - Every chunk-writing and chunk-referencing write supplies `embedding_model`.
 - The Java upsert's conflict target becomes the four-column PK.
 - The no-leaf error is mapped to a 500.
@@ -708,14 +733,18 @@ confirmed.
 
 - **Every search family under the tenant GUC.** Verify: the plan shows exactly one (model, tenant) leaf, pinned per family.
 - **No tenant GUC, and tenant B's GUC.** Verify: zero rows, and no tenant-A row is ever returned.
-- **A first token through each of the three paths (tenants/create, service-tokens/issue, data-tokens/mint), then a write.** Verify: the leaves exist and the write lands in them. Verify too that a second token for the same tenant is a no-op.
-- **300 tenants created.** Verify: creation time, locks and search planning time are within the step-2 addendum's bounds.
+- **A first token through each of the four sites (tenants/create, service-tokens/issue, data-tokens/mint, the boot `ensureBootstrapToken`), and a rotation; then a write.** Verify: the leaves exist and the write lands in them, and a second token for the same tenant is a no-op.
+- **A fresh install.** Verify: the `default` tenant has its leaves from the migration, and its first write succeeds.
+- **A tenant creation behind an open conflicting lock.** Verify: it fails at `lock_timeout` with a retryable 503, and other writers are not queued behind it.
+- **300 tenants created.** Verify: creation time and search planning time are within TS1 and TS2.
+- **Taxonomy search families under the tenant GUC.** Verify: the plan shows one (model, tenant) leaf of `taxonomy_centroids`.
 - **Every write family: insert, upsert, delete, canonical and cross-model rename, quarantine, restore, GC, and `purge_trash` with deferred FKs.** Verify:
   - the four-column FKs and conflict targets hold;
   - cascades fire;
   - `SET CONSTRAINTS nexus.fk_catalog_chunks_chunk DEFERRED` works against the partitioned parent.
 - **A chunk written with a model or vector dimension that disagrees with its collection.** Verify: refused.
-- **A new model added by changeset.** Verify: the partition and a leaf per existing tenant exist, and a write lands.
+- **A new model added by changeset.** Verify: the partition and a leaf per existing tenant exist, and a write lands. A write for an unregistered model is refused before any SQL, naming the model.
+- **A disputed-dimension row in the migration.** Verify: it lands in the holding collection, it is counted in the walk log, and the walk completes.
 - **Migration of a seeded two-tenant, two-model store, including hidden rows and a disputed-dimension row.** Verify:
   - exact reconciliation;
   - ANALYZE ran;
@@ -728,22 +757,28 @@ confirmed.
 
 ### Contradiction Check
 
-These have been checked against each other after the round-2 fix check (T2
-`nexus_rdr/225-fix-check-c0feaa2b1`):
-- Step 4 and the migration both specify a write freeze.
-- Tenant creation is hooked on `issueToken`, which covers all three token paths.
-- The step-2 addendum defines the tenant-scale bounds.
-- The F7 finding text matches research-14.
-- The fallback paragraph names what changes.
+The two fix checks' counted findings and observations (T2
+`nexus_rdr/225-fix-check-c0feaa2b1`, `-2296ed853`) and the step-2 results are
+reconciled in the text. These are now stated once:
+- the write freeze in step 4 and the migration;
+- the token trigger covering all four sites;
+- the post-swap trigger redefinition;
+- the nullable-then-NOT-NULL order;
+- the fallback's differences;
+- RLS on the parent and the leaves;
+- the leaf count;
+- the disk arithmetic.
 
-No contradiction was found among the findings, the design and the protocol.
+One tension is open and recorded: the per-model split is held only to
+non-inferiority. No recall gain is claimed for it.
 
 ### Assumption Verification
 
-- **Verified:** research-14 (F7: 156 of 156 checks on the model-then-tenant layout).
-- **Open, tested by step 2 as a prerequisite:**
-  - research-15: write cost and the four-column FKs;
-  - the step-2 addendum's tenant-creation and planning bounds.
+- **Verified:** research-14 (F7, chunk search families) and research-15 (H4 on four paths, TS1 to TS3).
+- **Open, as Implementation Plan prerequisites:**
+  - H4 bulk insert, repeated on the step-3 fork;
+  - the taxonomy tenant-level pruning test;
+  - protocol steps 3 and 4.
 
 #### API Verification
 
@@ -752,7 +787,7 @@ No contradiction was found among the findings, the design and the protocol.
 | FK referencing a partitioned table, with a PK that includes the partition keys | PostgreSQL 17 | Spike (step 2) |
 | Plan-time pruning on literal `embedding_model` and `tenant_id` under `force_custom_plan` | PostgreSQL 17 | Spike (step 2, research-14) |
 | HNSW declared on a partitioned parent | pgvector 0.8.2 | Spike (step 2 prototype) |
-| RLS is not inherited by partitions | PostgreSQL 17 | Spike (the step-2 prototype applied it per leaf) |
+| RLS is not inherited by partitions; queries through the parent use the parent's policies | PostgreSQL 17 | Docs (PostgreSQL row-security and partitioning). The step-2 prototype applied RLS to the parent and every leaf, and the cross-tenant controls held |
 
 ### Scope Verification
 
@@ -808,3 +843,4 @@ through the real changeset and engine. It is in scope.
   - leaf grants, the function contract, and holding-collection disposition for disputed rows (never-wedge).
 
   The remaining items are implementation beads.
+- 2026-10-05: All open findings and observations from fix checks 1 and 2 and the step-2 results are addressed in the text. Changes: TS1 to TS3 relabelled, with sample sizes and results; dated record of the frozen-text edits; RLS on the parent and the leaves; lock_timeout and a retryable 503 on tenant creation; idempotency by partition bound; tenant removal order; new-model refusal and test; scoped constraint renames; schema-qualified `SET CONSTRAINTS` everywhere; T2 22410 topology; disk arithmetic; leaf count; precise fallback; H4 bulk as a prerequisite; taxonomy tenant pruning as a test; an honest Contradiction Check.
