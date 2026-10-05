@@ -125,18 +125,58 @@ __all__ = [
 PS_COMMAND = ("ps", "axww", "-o", "pid=,command=")
 
 
-def ps_snapshot() -> str:
+def _windows_snapshot(win_info_api: object | None = None) -> str:
+    """The Windows process table in ``ps axww -o pid=,command=`` shape:
+    ``<pid> <space-joined argv>`` per line, via ``winproc_core`` (a stdlib-only
+    sibling, so this still runs with nexus absent).
+
+    Backslashes in the command are written as ``/``: the generation prefix this
+    census matches on is built with ``/`` boundaries (see :func:`_match_prefix`),
+    and a Windows argv may spell the same directory with either separator. Both
+    sides are normalised the same way, so a tree that is held is reported held.
+    Under-reporting is the direction that lets a live tree look free, and a
+    backslash/slash mismatch would produce exactly that, silently.
+
+    Empty string when the table cannot be read, as for a ps-less box.
+    """
+    core = _sibling("winproc_core")
+    api = win_info_api if win_info_api is not None else core.ctypes_win_info_api()
+    try:
+        rows = core.enumerate_processes(api)
+    except (RuntimeError, OSError):
+        return ""
+    return "".join(
+        f"{pid} {command.replace(chr(92), '/')}\n" for pid, _ppid, _age, command in rows
+    )
+
+
+def ps_snapshot(
+    *, platform: str | None = None, win_info_api: object | None = None,
+) -> str:
     """One process snapshot. Empty string when ``ps`` is unavailable.
 
     A ps-less box (minimal container, stripped host) yields no holders rather
     than an exception: ``nexus-p78a0`` is the record of what happens when this
-    leg raises and takes unrelated work down with it.
+    leg raises and takes unrelated work down with it. Windows has no ``ps``;
+    it reads its own process table (:func:`_windows_snapshot`, RDR-224,
+    nexus-f9bgu.21). *platform* and *win_info_api* are test seams.
     """
+    if (platform if platform is not None else sys.platform) == "win32":
+        return _windows_snapshot(win_info_api)
     try:
         r = subprocess.run(PS_COMMAND, capture_output=True, text=True, timeout=10)  # noqa: S603
     except (OSError, subprocess.SubprocessError):
         return ""
     return r.stdout if r.returncode == 0 else ""
+
+
+def _boundary_text(path_text: str, platform: str | None = None) -> str:
+    """*path_text* with the trailing separator dropped, and on Windows with
+    ``\\`` spelt ``/`` so it compares against :func:`_windows_snapshot` rows.
+    Unchanged on POSIX."""
+    if (platform if platform is not None else sys.platform) == "win32":
+        path_text = path_text.replace("\\", "/")
+    return path_text.rstrip("/")
 
 
 def _match_prefix(generation: Path | str) -> str:
@@ -173,8 +213,8 @@ def _match_prefix(generation: Path | str) -> str:
         if resolved:
             path = Path(resolved)
 
-    text = str(path).rstrip("/")
-    if not text:
+    text = _boundary_text(str(path))
+    if not text or (sys.platform == "win32" and len(text) == 2 and text[1] == ":"):
         # "/" normalises to empty, and an empty match makes the boundary "/" —
         # every process on the machine a holder of everything. Refuse instead;
         # answering "no holders" would be worse, being the answer that invites

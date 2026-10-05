@@ -37,7 +37,9 @@ from typing import TYPE_CHECKING
 
 import structlog
 
+from nexus._install.winproc_core import executable_stem
 from nexus.bounded_subprocess import run_bounded
+from nexus.daemon.binary_lifecycle import well_known_binary_path
 from nexus.daemon.service_registry import (
     _parse_etime,
     _procfs_enumerate,
@@ -404,12 +406,16 @@ def _classify(command: str) -> str:
     if not parts:
         return "other"
 
-    exe = os.path.basename(parts[0])
+    # ``executable_stem``: the last path component on EITHER separator with a
+    # trailing ``.exe`` removed, so a Windows ``...\\nx.exe`` classifies as
+    # ``nx`` (RDR-224, nexus-f9bgu.21). Identical to ``os.path.basename`` for
+    # every POSIX name.
+    exe = executable_stem(parts[0])
     rest = parts[1:]
     # A shebang-wrapped entry point: the kernel rewrites argv to
     # [python, script, ...], so the SCRIPT is the real executable.
     if exe.startswith("python") and rest:
-        exe = os.path.basename(rest[0])
+        exe = executable_stem(rest[0])
         rest = rest[1:]
 
     if exe in ("mineru", "mineru-api"):
@@ -418,7 +424,7 @@ def _classify(command: str) -> str:
         return "mcp-host"
     # The engine ships as a native binary and as a jar; both name themselves.
     if exe.startswith("nexus-service") or any(
-        os.path.basename(tok).startswith("nexus-service") for tok in rest
+        executable_stem(tok).startswith("nexus-service") for tok in rest
     ):
         return "service"
     if exe == "nx":
@@ -1430,7 +1436,9 @@ def _sweep_surviving_stack(
         survivors.append((pid, cmd))
     if not survivors:
         return ""
-    engine_path = str(config_dir / "service" / "nexus-service")
+    # nexus-service.exe on Windows (nexus-f9bgu.15, .21): the one function
+    # that knows the installed name, never the literal.
+    engine_path = str(well_known_binary_path(config_dir))
     supervisors = [p for p, c in survivors if engine_path not in c]
     engines = [p for p, c in survivors if engine_path in c]
     stubborn = terminate_pids(supervisors)

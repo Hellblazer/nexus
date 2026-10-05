@@ -62,6 +62,7 @@ from typing import Any, Callable, Iterator, Mapping, Optional, Protocol, TypeVar
 import structlog
 
 from nexus import _locking
+from nexus._install import winproc_core
 from nexus._winsec import _windows_user_sid, open_private  # the SID lookup lives with the other Windows security calls
 from nexus.bounded_subprocess import run_bounded
 from nexus.util.process_group import KILL_SIGNAL
@@ -1349,19 +1350,51 @@ def _parse_ps_table(ps_output: str) -> list[tuple[int, int, str]]:
     return out
 
 
-def all_process_rows(ps_output: str | None = None) -> list[tuple[int, int, str]]:
+def _is_windows(platform: str | None) -> bool:
+    return (platform if platform is not None else sys.platform) == "win32"
+
+
+def _win_info(win_info_api: "winproc_core.WinProcessInfoApi | None") -> "winproc_core.WinProcessInfoApi":
+    return win_info_api if win_info_api is not None else winproc_core.ctypes_win_info_api()
+
+
+def _windows_process_rows(
+    api: "winproc_core.WinProcessInfoApi",
+) -> list[tuple[int, int, str]]:
+    """``[(pid, age_s, command)]`` from the Windows process table
+    (RDR-224, nexus-f9bgu.21): a Toolhelp snapshot, then creation time and
+    the space-joined argv per process (see :mod:`nexus._install.winproc_core`).
+    Raises ``RuntimeError`` when the snapshot cannot be taken, the same
+    fail-loud contract as the ``ps`` and ``/proc`` readers."""
+    return [
+        (pid, int(age), command)
+        for pid, _ppid, age, command in winproc_core.enumerate_processes(api)
+    ]
+
+
+def all_process_rows(
+    ps_output: str | None = None,
+    *,
+    platform: str | None = None,
+    win_info_api: "winproc_core.WinProcessInfoApi | None" = None,
+) -> list[tuple[int, int, str]]:
     """``[(pid, age_s, command)]`` for EVERY process on the box, unfiltered.
 
     Reads ``ps`` when a ``ps`` binary exists, else ``/proc`` (see
-    :func:`_procfs_enumerate`). A box with NEITHER raises; so does a box
+    :func:`_procfs_enumerate`); on Windows, which has neither, the Win32
+    process table (:func:`_windows_process_rows`). A box with NEITHER
+    raises; so does a box
     whose PRESENT ``ps`` fails or returns an empty table (that is a signal
     worth surfacing — e.g. a hidepid-restricted or corrupted procps — not a
     case to silently route around). It raises rather than reporting an
     empty table: a silent "zero processes" is the fail-open this function
-    exists to eliminate. ``ps_output`` is injectable for tests.
+    exists to eliminate. ``ps_output`` is injectable for tests, as are
+    *platform* and *win_info_api* (the Windows branch runs on any host).
     """
     if ps_output is not None:
         return _parse_ps_table(ps_output)
+    if _is_windows(platform):
+        return _windows_process_rows(_win_info(win_info_api))
     rows = _ps_enumerate()
     if rows is None:
         if not _procfs_available():
@@ -1374,12 +1407,23 @@ def all_process_rows(ps_output: str | None = None) -> list[tuple[int, int, str]]
     return rows
 
 
-def process_command(pid: int) -> str:
+def process_command(
+    pid: int,
+    *,
+    platform: str | None = None,
+    win_info_api: "winproc_core.WinProcessInfoApi | None" = None,
+) -> str:
     """The full command line of *pid*, or ``""`` when it is gone.
 
     Used by pid-recycle re-checks — a bare ``ps -p`` direct call would add
-    a userland dependency this module otherwise sheds via ``/proc``.
+    a userland dependency this module otherwise sheds via ``/proc``. On
+    Windows the answer is the space-joined argv from the kernel's copy of
+    the command line, the image path when that is unreadable (the same text
+    :func:`all_process_rows` reports, so the recycle re-check compares like
+    with like), ``""`` when the process is gone.
     """
+    if _is_windows(platform):
+        return winproc_core.process_command_line(pid, _win_info(win_info_api))
     if _procfs_available():
         try:
             raw = (PROCFS_ROOT / str(pid) / "cmdline").read_bytes()
@@ -1539,7 +1583,7 @@ def pid_alive(
     return True
 
 
-def process_state(pid: int) -> str | None:
+def process_state(pid: int, *, platform: str | None = None) -> str | None:
     """The kernel's scheduler-state letter for *pid* (``R``, ``S``, ``D``,
     ``Z``, ``T``, ...), or ``None`` when it cannot be determined.
 
@@ -1556,8 +1600,15 @@ def process_state(pid: int) -> str | None:
     (macOS, BSD) ``ps -o state=`` is the portable equivalent; its output
     can carry trailing flag characters (``S+``, ``R<``), so only the first
     character is significant.
+
+    Windows has no scheduler-state letter and no zombie: a process that has
+    exited is simply dead, which :func:`pid_alive` already answers. So it
+    is always ``None`` there, which :func:`pid_running` reads as running,
+    and no ``ps`` is spawned (RDR-224, nexus-f9bgu.21).
     """
     if pid <= 0:
+        return None
+    if _is_windows(platform):
         return None
     if _procfs_available():
         try:
@@ -1661,7 +1712,9 @@ def terminate_pids(pids: list[int], *, grace_s: float = 10.0) -> list[int]:
         time.sleep(0.1)
 
 
-def storage_service_stack_matcher(config_dir: Path) -> Callable[[str], bool]:
+def storage_service_stack_matcher(
+    config_dir: Path, *, platform_tag: str | None = None,
+) -> Callable[[str], bool]:
     """Argv predicate matching the storage-service SUPERVISOR (``nx daemon
     service start --foreground --config-dir <config_dir>``) or ENGINE
     (argv[0] under ``<config_dir>/service/nexus-service``) belonging to
@@ -1753,7 +1806,13 @@ def storage_service_stack_matcher(config_dir: Path) -> Callable[[str], bool]:
     also embeds a value indistinguishable from a following flag or the
     NUL-turned-space bytes.
     """
-    engine_path = str(config_dir / "service" / "nexus-service")
+    # The installed engine is nexus-service.exe on Windows (nexus-f9bgu.15),
+    # so the exact path comes from the one function that knows that.
+    from nexus.daemon.binary_lifecycle import (  # noqa: PLC0415 — deferred: binary_lifecycle is a sibling the registry's import graph does not otherwise need
+        well_known_binary_path,
+    )
+
+    engine_path = str(well_known_binary_path(config_dir, platform_tag=platform_tag))
     target = str(config_dir)
     # nexus-cd1k0.6 finding (9): an engine launched via an EXPLICIT
     # NEXUS_SERVICE_BIN / NEXUS_SERVICE_JAR override (the dev/test opt-in

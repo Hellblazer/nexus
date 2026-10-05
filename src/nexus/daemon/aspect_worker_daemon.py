@@ -35,6 +35,7 @@ from __future__ import annotations
 import os
 import signal
 import subprocess
+import sys
 import threading
 import time
 from collections.abc import Callable
@@ -149,10 +150,25 @@ def _process_age_ms_from(stat: str, uptime: str, clk_tck: int) -> float | None:
         return None
 
 
-def _process_age_ms() -> float | None:
+def _process_age_ms(
+    *,
+    platform: str | None = None,
+    win_info_api: Any = None,
+    now: Callable[[], float] = time.time,
+) -> float | None:
     """This process's age in ms on Linux, None where /proc is absent (nexus-1m9sb:
     the slow boot was in a Linux container, and the time before start() -- CLI
-    startup -- is invisible to start()'s own phase timings)."""
+    startup -- is invisible to start()'s own phase timings).
+
+    Windows reads the creation time through ``GetProcessTimes`` instead
+    (RDR-224, nexus-f9bgu.21): same quantity, same unit, None when unreadable.
+    """
+    if (platform if platform is not None else sys.platform) == "win32":
+        from nexus._install import winproc_core  # noqa: PLC0415 — Windows-only path, deferred
+
+        api = win_info_api if win_info_api is not None else winproc_core.ctypes_win_info_api()
+        age = winproc_core.process_age_seconds(os.getpid(), api, now=now)
+        return None if age is None else round(age * 1000, 1)
     try:
         stat = Path("/proc/self/stat").read_text()
         uptime = Path("/proc/uptime").read_text()
