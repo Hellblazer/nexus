@@ -199,7 +199,8 @@ standard-8 and memory-16. Raw JSON is in `~/nexus-evidence/rdr225-2026-10-05/` w
   *Source: telemetry-001 lines 100 to 109.*
 - **✅ Verified** (spike), research-13. `pg_stats` hides FORCE-RLS tables from non-superusers.
   *Source: the fork.*
-- **❓ Assumed** (spike, pending step 2), research-14. F7: plan-time pruning to one (model, tenant) leaf works on every search family.
+- **✅ Verified** (spike), research-14. F7: on the model-then-tenant layout, every search family prunes to exactly one (model, tenant) leaf. 144 of 156 checks pass. The 12 failures are `assign_from_chashes`, whose prototype copy did not supply the new `embedding_model` column; the design already requires it (§ Technical Design, Keys).
+  *Source: protocol step 2, 2026-10-05.*
 - **❓ Assumed** (spike, pending step 2), research-15. H4: the partitioned layout, with its four-column FKs, costs at most 1.25x on every write path.
 - **⚠️ Documented** (docs only), research-16. The literature crossover points (Veda, Compass) were measured warm, and VADER finds query-filter correlation.
   *Source: knowledge__dt-papers.*
@@ -380,8 +381,8 @@ Every non-PASS outcome defers the per-model split only. Tenant partitioning proc
 - [x] F6: a per-model graph measurably improves recall — **Status**: Retired.
   Sam ruled the split is shown to work, not to pay. It is replaced by the
   protocol's non-inferiority test (step 3).
-- [ ] F7: plan-time pruning on literal `embedding_model` and `tenant_id`
-  leaves one leaf's index on every search family — **Status**: Unverified, in protocol step 2
+- [x] F7: plan-time pruning on literal `embedding_model` and `tenant_id`
+  leaves one leaf's index on every search family — **Status**: Verified
   (research-14) — **Method**: Spike
 - [ ] The manifest, topic and orphaned-at FKs work as four-column FKs to the
   partitioned parent, deferrable as today, at a write cost of at most 1.25x — **Status**: Unverified, in protocol step 2
