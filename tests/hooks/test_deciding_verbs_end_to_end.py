@@ -33,7 +33,7 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 from nexus.mcp.hooks import DECIDING_HOOKS
-from tests._hook_wiring import HOOKS_JSON, NX_HOOK_SHIM, REPO_ROOT, command_verb
+from tests._hook_wiring import HOOKS_JSON, REPO_ROOT, command_verb, launcher_script_args
 
 #: hook name -> the nx-hook verb hooks.json actually wires it as. Read
 #: from the file rather than written down, so this cannot drift from the
@@ -51,15 +51,19 @@ def _wired_verbs() -> dict[str, str]:
 
 
 def _wired_argv(verb: str) -> list[str]:
-    """The argv hooks.json runs for *verb*: the nx-hook shim when that is
-    how it is wired (nexus-rcoze), so the real path is shim then nx-hook."""
+    """The argv hooks.json runs for *verb*: the ``uv``-launched nx-hook shim
+    when that is how it is wired (nexus-rcoze, nexus-efk2h), so the real path
+    is uv, then the shim, then nx-hook."""
     data = json.loads(HOOKS_JSON.read_text())
     for groups in data.get("hooks", {}).values():
         for group in groups:
             for hook in group.get("hooks", []):
-                if command_verb(hook) == verb and hook.get("command") == "python3":
-                    shim = NX_HOOK_SHIM.replace("${CLAUDE_PLUGIN_ROOT}", str(REPO_ROOT / "conexus"))
-                    return [sys.executable, shim, verb]
+                if command_verb(hook) == verb and launcher_script_args(hook):
+                    root = str(REPO_ROOT / "conexus")
+                    return [
+                        hook["command"],
+                        *(a.replace("${CLAUDE_PLUGIN_ROOT}", root) for a in hook["args"]),
+                    ]
     return ["nx-hook", verb]
 
 

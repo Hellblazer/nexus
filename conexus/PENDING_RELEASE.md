@@ -48,6 +48,12 @@ ONE PATH PER BULLET, on the bullet's FIRST line.
 - hydration cap wording (nexus-rf87b): `conexus/skills/nexus/reference.md` calls the `store_get_many` cap the "300-record read cap (MAX_QUERY_RESULTS)" rather than a ChromaDB one, matching SKILL.md. Text only.
 - service identity (nexus-f9bgu.16): `conexus/hooks/scripts/_endpoint_resolve.py` derives the lease file name from a stdlib mirror of `service_identity()` (uid on POSIX, unchanged; the user SID on Windows) instead of a bare `os.getuid()`. No behaviour change on POSIX.
 - owner-only lease check (nexus-f9bgu.22): `conexus/hooks/scripts/_endpoint_resolve.py` refuses a local-supervisor lease whose ACL grants another account on Windows (a stdlib mirror of `nexus._winsec.owner_only_problem`) instead of testing `st_mode` group/other bits, which Windows reports as `0o666` for every file. POSIX behaviour and its refusal message are unchanged.
+- hook launcher (nexus-efk2h): `conexus/hooks/hooks.json` launches its seven plugin-resident entries (version-lockstep, subagent-git-write-gate, credential-print-guard, mailbox-drain, and the three nx-hook shim entries) as `uv run --no-project --no-config --quiet <script>` instead of `python3 <script>`. Stock Windows has no `python3` on PATH, so those hooks never fired there. A machine with no Python 3.12 or newer has uv fetch one on the first hook run.
+- hook interpreter floor (nexus-efk2h): `conexus/hooks/scripts/version_lockstep_hook.py` gained a PEP 723 `requires-python = ">=3.12"` block, the floor its own guard enforces, so uv runs it under a 3.12+ interpreter. No behaviour change otherwise.
+- hook interpreter floor (nexus-efk2h): `conexus/hooks/scripts/mailbox_drain.py` gained the same PEP 723 `requires-python = ">=3.12"` block. No behaviour change otherwise.
+- hook interpreter floor (nexus-efk2h): `conexus/hooks/scripts/routing/credential_print_guard.py` gained the same PEP 723 `requires-python = ">=3.12"` block. No behaviour change otherwise.
+- hook interpreter floor (nexus-efk2h): `conexus/hooks/scripts/routing/subagent_git_write_requires_orchestrator.py` gained the same PEP 723 `requires-python = ">=3.12"` block. No behaviour change otherwise.
+- shim on Windows (nexus-efk2h): `conexus/hooks/scripts/nx_hook_shim.py` no longer names `signal.SIGHUP` unconditionally, which does not exist on Windows and raised AttributeError after `nx-hook` had started. It forwards the signals the platform has. No change on POSIX.
 
 
 ## Deferred to the next client release

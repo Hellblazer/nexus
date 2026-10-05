@@ -11,8 +11,9 @@ it exists to repair (caught by tests/e2e/plugin-lockstep-gate.sh during the
 
 Two properties, both about the shipped plugin tree:
 
-* hooks.json runs it as a plugin-resident script through ``python3``, never
-  as an ``nx-hook`` verb;
+* hooks.json runs it as a plugin-resident script through ``uv run``
+  (nexus-efk2h; stock Windows has no ``python3``), never as an ``nx-hook``
+  verb;
 * the script, its action and its interpreter helper import only the
   standard library and each other at module scope, so an absent or older
   ``nexus`` cannot stop the hook from starting.
@@ -23,6 +24,8 @@ import ast
 import json
 import sys
 from pathlib import Path
+
+from tests._hook_wiring import launcher_script_args
 
 _ROOT = Path(__file__).resolve().parents[2]
 _SCRIPTS = _ROOT / "conexus" / "hooks" / "scripts"
@@ -46,10 +49,10 @@ def test_lockstep_is_a_plugin_script_not_an_nx_hook_verb() -> None:
     assert not verbs, (
         "hooks.json runs version lockstep as `nx-hook version-lockstep`; an "
         "older nx-hook exits 2 on that verb, so plugin-ahead skew can never "
-        "repair itself. Keep it a plugin-resident python3 script."
+        "repair itself. Keep it a plugin-resident script launched through uv."
     )
     script = f"${{CLAUDE_PLUGIN_ROOT}}/hooks/scripts/{_HOOK}"
-    wired = [e for e in entries if e.get("command") == "python3" and e.get("args") == [script]]
+    wired = [e for e in entries if launcher_script_args(e) == [script]]
     assert len(wired) == 1, f"expected exactly one SessionStart entry running {script}; got {entries}"
     assert (_SCRIPTS / _HOOK).is_file()
 

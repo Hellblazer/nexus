@@ -1,6 +1,12 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
+# PEP 723 metadata: `uv run` reads the interpreter floor from here, so no shell-
+# special `>=` has to ride in hooks.json argv (nexus-efk2h). This script refuses
+# Python 3.11 and older below.
+# /// script
+# requires-python = ">=3.12"
+# ///
 """RDR-143 SessionStart hook: plugin<->CLI version lockstep (Shape B).
 
 The blocking, stdlib-only SessionStart entry point. It detects skew

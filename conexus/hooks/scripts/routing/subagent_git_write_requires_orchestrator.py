@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-or-later
+# PEP 723 metadata: `uv run` reads the interpreter floor from here, so no shell-
+# special `>=` has to ride in hooks.json argv (nexus-efk2h). This script refuses
+# Python 3.11 and older below.
+# /// script
+# requires-python = ">=3.12"
+# ///
 """RDR-184 Gap-4 mechanization (nexus-s88vq, widened by nexus-ays2l): deny
 index-writing AND working-tree-destroying git verbs from SUBAGENTS in the
 shared tree.

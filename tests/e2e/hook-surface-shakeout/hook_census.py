@@ -73,6 +73,11 @@ def label(entry: dict) -> str:
     cmd = entry.get("command") or "?"
     if cmd == "nx-hook" and args:
         return f"nx-hook {args[0]}"
+    if cmd == "uv":
+        # The launcher (nexus-efk2h): skip its flags; the handler is the first
+        # script path and whatever follows it.
+        i = next((k for k, a in enumerate(args) if a.endswith(".py")), len(args))
+        args = args[i:]
     if args and pathlib.Path(args[0]).name == "nx_hook_shim.py" and len(args) == 2:
         return f"nx_hook_shim.py {args[1]}"
     return pathlib.Path(args[0]).name if args else cmd

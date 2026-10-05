@@ -12,12 +12,14 @@ from __future__ import annotations
 
 import ast
 import importlib.util
+import io
 import os
 import re
 import signal
 import subprocess
 import sys
 import time
+import types
 from pathlib import Path
 
 import pytest
@@ -123,6 +125,38 @@ def test_a_signalled_shim_takes_its_nx_hook_child_down_with_it(tmp_path: Path) -
             break
         assert time.monotonic() < deadline, f"nx-hook child {child} outlived the shim"
         time.sleep(0.05)
+
+
+def test_the_shim_runs_where_signal_has_no_sighup(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Windows has no ``signal.SIGHUP``; the forwarding loop named it
+    unconditionally, so on Windows the shim raised AttributeError after it had
+    started ``nx-hook`` and never returned its exit code (nexus-efk2h, RDR-224
+    Phase 4). The loop is driven here against a ``signal`` stand-in that lacks
+    it, with ``nx-hook`` faked, so the proof does not need a Windows box."""
+    spec = importlib.util.spec_from_file_location("nx_hook_shim_nosighup", _SHIM)
+    assert spec is not None and spec.loader is not None
+    shim = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(shim)
+
+    installed: list[int] = []
+    shim.signal = types.SimpleNamespace(
+        SIGTERM=15, SIGINT=2, signal=lambda sig, _handler: installed.append(sig),
+    )
+
+    class _Proc:
+        returncode = 0
+
+        def communicate(self, payload: bytes) -> tuple[bytes, bytes]:
+            return b"verdict", b""
+
+    monkeypatch.setattr(shim.subprocess, "Popen", lambda *a, **k: _Proc())
+    monkeypatch.setattr(sys, "stdin", types.SimpleNamespace(buffer=io.BytesIO(b"{}")))
+    out = io.BytesIO()
+    monkeypatch.setattr(sys, "stdout", types.SimpleNamespace(buffer=out))
+
+    assert shim.main(["auto-approve"]) == 0
+    assert out.getvalue() == b"verdict"
+    assert installed == [15, 2], "the signals this platform has must still be forwarded"
 
 
 def test_the_shim_imports_only_the_standard_library() -> None:

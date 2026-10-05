@@ -276,6 +276,17 @@ A `hooks/scripts/nx_hook_shim.py <verb>` handler runs
 on a verb it does not know, which blocks the session, so any verb one of those CLIs lacks
 is wired through the shim, which skips it with a notice instead.
 
+Every `hooks/scripts/...` handler is launched as `uv run --no-project --no-config --quiet
+<script>`, never as `python3 <script>` (nexus-efk2h, RDR-224). Stock Windows has no
+`python3` on PATH, so a `python3`-launched hook never fires there; `uv` is already required
+(sn's hooks use it, and it installs as `uv.exe`). `--no-project` and `--no-config` keep uv
+from syncing the session's project or reading a `.python-version`. The four plugin scripts
+carry a PEP 723 `requires-python = ">=3.12"` block, the floor their own guards enforce, so
+uv never runs them under an older interpreter it happens to find first; the shim is
+stdlib-only and has no floor. The first hook run on a machine with no Python 3.12 or newer
+makes uv fetch one, which can outlast a hook's timeout once; later runs find it. Direct
+`nx-hook <verb>` entries are unchanged.
+
 | Event | Handler | Purpose |
 |-------|--------|---------|
 | `SessionStart` | `nx-hook upgrade-auto` | Auto-converge the CLI to the plugin's minimum required version. Spawns `nx upgrade --auto`; the shell form's `2>/dev/null` and its version-skew `|| echo` guidance live in the verb (`nexus.hooks.upgrade_auto`) |

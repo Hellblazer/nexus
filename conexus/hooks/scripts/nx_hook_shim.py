@@ -23,7 +23,8 @@ it.
 Standard library only, and no ``nexus`` import: it has to run under whatever
 CLI is installed, including none. It sets no timeout of its own; the entry's
 ``timeout`` in hooks.json bounds the whole call. When that timeout, or anything
-else, signals the shim with SIGTERM, SIGINT or SIGHUP, the shim terminates the
+else, signals the shim with SIGTERM, SIGINT or SIGHUP (SIGHUP where the platform
+has it; Windows does not), the shim terminates the
 ``nx-hook`` child before it exits, so the handler is not left running orphaned
 (review finding, nexus-rcoze). A SIGKILL cannot be forwarded; the verbs bound
 their own subprocess work.
@@ -71,8 +72,11 @@ def main(argv: list[str]) -> int:
             proc.kill()
         sys.exit(128 + signum)
 
-    for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
-        signal.signal(sig, _forward)
+    # SIGHUP does not exist on Windows (nexus-efk2h); forward what the platform has.
+    for name in ("SIGTERM", "SIGINT", "SIGHUP"):
+        sig = getattr(signal, name, None)
+        if sig is not None:
+            signal.signal(sig, _forward)
     out, err = proc.communicate(payload)
     stderr = err.decode("utf-8", errors="replace")
     if proc.returncode == 2 and UNKNOWN_VERB_LINE.search(stderr):

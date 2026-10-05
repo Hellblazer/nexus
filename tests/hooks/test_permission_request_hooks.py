@@ -447,7 +447,11 @@ class TestPreToolUseApproval:
         nx_pre, nx_perm = handlers(self.NX_HOOKS, "PreToolUse"), handlers(self.NX_HOOKS, "PermissionRequest")
         # Through the nx-hook shim since nexus-rcoze: a 7.55.0 CLI does not
         # register auto-approve and a direct entry exits 2 on every MCP call.
-        assert nx_pre == nx_perm == {"python3 ${CLAUDE_PLUGIN_ROOT}/hooks/scripts/nx_hook_shim.py auto-approve"}, (
+        # Launched through uv since nexus-efk2h (no python3 on stock Windows).
+        assert nx_pre == nx_perm == {
+            "uv run --no-project --no-config --quiet "
+            "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/nx_hook_shim.py auto-approve"
+        }, (
             f"{self.NX_HOOKS}: PreToolUse {nx_pre} vs PermissionRequest {nx_perm}"
         )
 
