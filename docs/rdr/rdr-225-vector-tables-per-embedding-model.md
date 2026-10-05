@@ -189,7 +189,7 @@ standard-8 and memory-16. Raw JSON is to be copied to durable storage named in t
 - **⚠️ Documented** (docs only), research-16. The literature crossover points (Veda, Compass) were measured warm, and VADER finds query-filter correlation.
   *Source: knowledge__dt-papers.*
 
-### Evaluation Protocol (pre-registered, revision 5, 2026-10-05)
+### Evaluation Protocol (pre-registered, revision 6, frozen, 2026-10-05)
 
 Sam: "let us prove out our design first this time rather than just reflexively
 jumping." Three critique rounds preceded this revision (T2
@@ -302,17 +302,21 @@ Each arm is built twice, with seeds 1 and 2. Build pair i is A1t build i with A6
 **Statistics.** All CIs are two-sided 95%.
 - Recall uses a cluster bootstrap-t: clustered on collection for single-collection statements, and on the query for multi-collection and unrouted-path queries.
 - Latency is the geometric-mean ratio A6/A1t, with a cluster bootstrap-t over restart cycles.
-- **Decision set:** pooled logged plus synthetic. Logged-only is the agreement check: if it disagrees in sign with pooled, the result is INCONCLUSIVE.
-- **Stratum guard:** scopes over 10k rows are also tested alone, at a margin of −0.05.
+- **Decision set:** pooled logged plus synthetic queries. States are also computed on the logged-only subset. A logged-only BAD makes that cell BAD. Any other logged-only state, including a sign flip, is reported but decides nothing.
+- **Minimum clusters:** a cell with fewer than 5 clusters is UNKNOWN. Per-cell cluster counts are reported.
+- **Pilot:** pilot queries are excluded from the decision set.
+- **Stratum guard:** scopes over 10k rows are also tested alone, at a margin of −0.05. A model with no such scope has no stratum-guard cell (N/A).
 
 **Cold latency.**
 - A cycle is a restart, then a 16 GB sequential scan to flush the OS cache, then a panel of 16 queries: 8 per model, 4 per router setting, drawn at random from the decision set.
-- Both arms run the panel ABBA within the cycle.
-- 5 cycles per phase.
+- Both arms run the panel ABBA within the cycle. The cold value is each arm's first touch of a query in the cycle. The arm that goes first alternates across cycles.
+- 6 cycles per phase.
+- **Router.** In the harness, T (60000, or 0 for router off) is a parameter that mirrors the engine's `NX_SEARCH_EXACT_MAX_ROWS`. A1t's probe counts both models' rows in scope and A6's counts one model's. That difference is part of the design under test.
 
 **Controls.**
-- **Degraded arm (positive control).** On phase 1, the router-off set is rerun on A6 with `hnsw.ef_search=40` and `hnsw.iterative_scan=off`. The rule must return FAIL against A1t. If it does not, the query set cannot detect a margin-sized drop, and the outcome is INCONCLUSIVE.
-- **Ceiling check.** If both arms' mean recall@10 is at least 0.98 on a set, recall is uninformative there and the outcome is INCONCLUSIVE.
+- **Degraded arm (positive control).** On phase 1, the router-off set is rerun on A6 with `hnsw.ef_search=40` and `hnsw.iterative_scan=off`. For each model, its router-off recall state must be BAD against A1t. If it is not, the query set cannot detect a margin-sized drop. The degraded arm is a control only and never enters the outcome table's cells.
+- **Ceiling check.** This applies to the router-on set, since the degraded arm already proves detectability for router-off. If both arms' mean recall@10 is at least 0.98 there, recall is uninformative.
+- Control failures count only when there is no BAD (see the table).
 
 **Per-endpoint states (each model, each router setting, each build pair).**
 - Recall: **OK** if the CI lower bound is at least −0.02; **BAD** if the CI upper bound is below −0.02; **UNKNOWN** otherwise. The same rule applies at −0.05 for the stratum guard, where BAD counts as BAD.
@@ -322,9 +326,10 @@ Each arm is built twice, with seeds 1 and 2. Build pair i is A1t build i with A6
 
 | Condition | Outcome |
 |---|---|
-| Any BAD, in any model, setting or build pair | **FAIL-RECALL** or **FAIL-LATENCY** (recall listed first if both). The split is deferred. |
+| Any BAD in any outcome cell (model × router setting × build pair, plus the stratum guard) | **FAIL-RECALL**, **FAIL-LATENCY** or **FAIL-BOTH**. The split is deferred. |
 | No BAD; every state OK; both controls valid | **PASS** |
-| No BAD; any UNKNOWN, or a control invalid | **INCONCLUSIVE**. One escalation: double the synthetic queries and cycles for the affected cells, then re-evaluate. Still not PASS or FAIL afterwards: **DEFER-UNDERPOWERED**, and the split is deferred. |
+| No BAD; any UNKNOWN | **INCONCLUSIVE**. There is one escalation, run inside the same phase before it is dropped: double the synthetic queries and cycles for the affected cells, then re-evaluate. If the result is still not PASS or FAIL: **DEFER-UNDERPOWERED**, and the split is deferred. |
+| No BAD; no UNKNOWN; a control invalid (degraded arm not BAD, or the ceiling hit) | **DEFER-INSENSITIVE**. The query set cannot resolve the margin, and the split is deferred. |
 
 Every non-PASS outcome defers the per-model split only. Tenant partitioning proceeds with the mixed layout inside each partition. The build-pair difference within each arm is reported as the noise floor.
 
@@ -349,9 +354,9 @@ Every non-PASS outcome defers the per-model split only. Tenant partitioning proc
 - the 70% disk ceiling;
 - the query floors of 150 and 300 per model.
 
-**Protocol constants, frozen with the above:** 95% two-sided CIs; cluster bootstrap-t; one escalation step (2x) then DEFER-UNDERPOWERED; 5 cycles per phase with a 16-query panel; two builds per arm; the degraded-arm control (ef_search=40, iterative scan off); the ceiling at 0.98; the stratum guard at −0.05 for scopes over 10k rows; the plan-flip rule; queries run under the main tenant `nexus`, with the second tenant present in every arm.
+**Protocol constants, frozen with the above:** 95% two-sided CIs; cluster bootstrap-t; one escalation step (2x) then DEFER-UNDERPOWERED; 6 cycles per phase with a 16-query panel, alternating first arm; two builds per arm; the degraded-arm control (ef_search=40, iterative scan off); the ceiling at 0.98; the stratum guard at −0.05 for scopes over 10k rows; the plan-flip rule; queries run under the main tenant `nexus`, with the second tenant present in every arm.
 
-**Estimated fork time:** step 3 about 8 hours, step 4 about 7 hours. Each fork needs Sam's go in conexus's session.
+**Estimated fork time:** step 3 about 8 hours, about 12 with the one escalation, step 4 about 7 hours. Each fork needs Sam's go in conexus's session.
 
 ### Critical Assumptions
 
@@ -417,20 +422,53 @@ write path) needs to be re-checked rather than assumed.
 
 ### Technical Design
 
-To be completed after the fork results. Questions it must settle:
+This design is proven by protocol steps 2 to 4 before any production code is
+written. Every identifier below is a working name, settled in Phase 1.
 
-- The model key: a new `embedding_model` column, written from the collection's
-  registry entry at insert, or a derived key.
-- Partition creation for a new tenant: an ops step or changeset at tenant
-  creation, given the handful of tenants. Engine runtime DDL is not wanted.
-- Search-function changes so the model key reaches the plan as a constant,
-  under `plan_cache_mode = force_custom_plan`.
-- The migration: copy `nexus.chunks` into the partitioned layout, rebuild
-  indexes per partition, then swap. Includes the copy-peak disk, WAL budget and
-  the rollback decision required by the engine-release skill's Step 5b.
-  RDR-192's hidden rows could be dropped in the same copy.
-- Interaction with the cardinality router (nexus-tu8wp.6): with small per-model,
-  per-tenant graphs, the router's threshold may change.
+**Storage layout.**
+- `nexus.embedding_models` registry: one row per model, `(model, dim, table_name)`, written only by changesets. It is today's model knowledge (`catalog_collections.embedding_model`, `DimTables`), rekeyed by model instead of dimension.
+- `nexus.chunk_identity`: one row per chunk, `(tenant_id, collection, chash, embedding_model)`.
+  - PK `(tenant_id, collection, chash)`; no vector, no text.
+  - LIST-partitioned by `tenant_id`, with FORCE RLS and the production `tenant_isolation` policy.
+  - This is the single target that a foreign key needs (RDR-191's reason for one table). The two FKs that point at `nexus.chunks` today are re-pointed at it with their semantics unchanged:
+    - the manifest FK (catalog-029): ON UPDATE CASCADE, NO ACTION on delete, DEFERRABLE INITIALLY IMMEDIATE;
+    - the topic-assignment FK (taxonomy-012): ON UPDATE CASCADE, ON DELETE CASCADE.
+- One vector table per model, for example `nexus.vectors_voyage_code_3`, `nexus.vectors_voyage_context_3`, `nexus.vectors_bge_768` and `nexus.vectors_minilm_384`.
+  - Columns: today's `chunks` columns (`chunk_text`, the generated `chunk_tsv`, `metadata`, `created_at`) plus exactly one typed `embedding vector(dim)`.
+  - PK `(tenant_id, collection, chash)`, with an FK to `chunk_identity` ON UPDATE CASCADE ON DELETE CASCADE.
+  - LIST-partitioned by `tenant_id`, FORCE RLS, the same policy.
+  - HNSW (`m=16`, `ef_construction=64`), GIN `chunk_tsv` and trigram indexes are declared on the parent, so every tenant partition gets its own.
+- **Tenant partitions** are created by a changeset or a tenant-onboarding runbook step, never by engine DDL at runtime. There is no DEFAULT partition, so a write for a tenant with no partition fails loudly rather than landing in a shared heap.
+- **Taxonomy** (`taxonomy_centroids` mixes models today, research-9) is split the same way: one centroid table per model, LIST-partitioned by tenant.
+
+**Read path.**
+- Every search family in the H5 inventory (research-9) gets a per-model version that is textually identical except for the table it names. The functions are generated per registry row, as `plain_search_<dim>` is generated per dimension today.
+- `hybrid_search_<dim>` has no caller and is dropped.
+- The engine resolves a collection's model through `CollectionRegistry` (it already does, for `requireHomogeneousModel`) and dispatches by model instead of dimension. `DimTables` becomes a model-keyed table map.
+- The cardinality router's probe (`probeSelectedRows`) counts the model's table.
+- Tenant pruning comes from the RLS predicate at execution time (F7, research-14).
+- The views `live_chunks` and `collection_vector_stats` become per-model, or are rewritten over `chunk_identity` where they need no vector.
+
+**Write path.**
+- One transaction inserts the identity row and the model row (H4, research-15), then the manifest row as today.
+- Re-embedding a collection under another model moves its rows from one model table to another in one transaction; the identity row's `embedding_model` is updated in the same transaction.
+- Collection rename and quarantine moves (an UPDATE of `collection`) cascade from `chunk_identity` to the model rows and to the manifest.
+
+**GC, quarantine, reaper.** The 8 GC/quarantine/hygiene families (research-9) operate on `chunk_identity` where they need no vector. Where they do need one, they operate per model through the registry. The cascades delete model rows when their identity row goes.
+
+**Migration (one engine release, a schema-carrying tag).**
+1. Create the new tables and partitions for every tenant present.
+2. Copy from `nexus.chunks` per (tenant, model): the identity rows, then the model rows. Rows hidden by RDR-192 are copied as they are; dropping them is a separate decision.
+3. Build the indexes after the copy, per partition.
+4. Re-point the two FKs: add them NOT VALID to `chunk_identity`, VALIDATE, then drop the old ones.
+5. Reconcile row counts exactly per (tenant, model). On any mismatch, abort before the swap.
+6. The new engine reads and writes only the new tables. `nexus.chunks` is renamed to `chunks_retired_225`, kept for a 14-day rollback window, and dropped by a later changeset.
+
+- Writes are frozen for the copy. The freeze length, peak disk and WAL come from the H6 rehearsal.
+- The migration is **IRREVERSIBLE** once the retired table is dropped. Until then, rollback is the previous engine reading `chunks_retired_225` under its old name. Writes made in the new layout during the window are lost, and the rollback runbook states this.
+- Local installs run the same changesets on their bundled PG (one model in the default bge-768 setup).
+
+**Router.** The router stays, with its threshold set from the protocol's measurements (nexus-tu8wp.6). Whether small per-model graphs justify a lower threshold is decided after step 3, outside this RDR.
 
 ## Alternatives Considered
 
@@ -502,41 +540,130 @@ cardinality router already serves small collections exact. Rejected.
 
 ### Failure Modes
 
-To be completed with the technical design.
+- **A write for a tenant with no partition.** It fails with Postgres's "no partition of relation found for row" error, surfaced as a 5xx naming the tenant. *Recovery:* the onboarding runbook creates the partition. `nx doctor` gains a row that lists the tenants in `chunk_identity` against the partitions of each model table.
+- **A write for a model with no registry row or table.** It is refused by the engine before any SQL, naming the model, as `requireHomogeneousModel` refuses today. *Recovery:* a changeset that adds the model.
+- **A pruning regression.** For example, a function edit that stops inlining makes a search touch other tenants' partitions. It is invisible in results, because RLS still filters, and visible only as cost. *Detection:* EXPLAIN-pinned tests per search family (Test Plan) that assert one partition's index.
+- **A migration count mismatch, or a validation failure.** The migration aborts before the swap. The old table stays live and the engine version does not change. *Diagnosis:* the reconciliation table in the migration log.
+- **Rollback after a bad cutover, within the window.** The previous engine is redeployed against `chunks_retired_225`, renamed back. Writes made since the cutover are lost, and the runbook says so before anyone runs it.
+- **A cascade surprise.** A collection UPDATE cascades through three tables. *Test:* rename and quarantine round trips (Test Plan).
 
 ## Implementation Plan
 
 ### Prerequisites
 
-- [ ] Fork results E1, E2 and the partition feasibility check (F5 to F7)
-- [ ] All Critical Assumptions verified
+- [ ] Protocol step 2 PASS: F7, H5 and H4 (research-14 and research-15 verified)
+- [ ] Protocol step 3 outcome recorded: PASS keeps the per-model split, and any other outcome defers it while tenant partitioning proceeds
+- [ ] Protocol step 4 (H6 migration rehearsal) PASS
 
 ### Minimum Viable Validation
 
-On a production fork: the partitioned layout, migrated from a copy of
-production, serves the B query set through the engine's own search functions
-with one partition's HNSW per query. Recall against exact and cold latency must
-be at least as good as F6's measurement.
+On a fork of production, migrated by the real changesets: the engine serves the
+protocol's frozen query set through its own search functions. Each query touches
+one model's tenant partition, recall against exact is non-inferior to A1t by the
+protocol's rule, and the per-(tenant, model) row reconciliation is exact.
 
-### Phase 1: Code Implementation
+### Phase 1: Schema
 
-To be planned after the design is settled.
+#### Step 1: Registry, identity table and per-model tables
+
+Changesets for `embedding_models`, `chunk_identity` and the per-model tables,
+with partitions for the existing tenants, RLS and indexes. Includes the
+per-model centroid tables.
+
+#### Step 2: FK re-pointing and the retired-table rename
+
+The two FKs move to `chunk_identity`, with semantics unchanged.
+
+### Phase 2: Engine dispatch by model
+
+#### Step 1: `DimTables` to a model-keyed map; write path
+
+Write path: the identity row plus the model row in one transaction.
+
+#### Step 2: Per-model search functions and router probe
+
+Generate the per-model search functions. Retarget the router probe. Drop
+`hybrid_search_<dim>`.
+
+#### Step 3: GC, quarantine, reaper and taxonomy per model
+
+Over `chunk_identity` and the registry.
+
+### Phase 3: Migration and release
+
+#### Step 1: Copy, build, reconcile and swap changesets
+
+Rehearsed on a PITR fork (engine-release Step 5b): representative scale,
+IRREVERSIBLE marked, freeze window from H6.
+
+#### Step 2: Tenant-onboarding runbook and `nx doctor` partition row
+
+#### Step 3: Drop `chunks_retired_225` after 14 days
+
+A later changeset.
 
 ### Day 2 Operations
 
 | Resource | List | Info | Delete | Verify | Backup |
 | --- | --- | --- | --- | --- | --- |
-| Per-tenant/model partitions | To design | To design | To design | To design | Covered by cluster backups |
+| Tenant partitions | In scope: `nx doctor` row | In scope: row counts per (tenant, model) | In scope: runbook DETACH and DROP on tenant removal | In scope: doctor compares tenants against partitions | Cluster backups |
+| Per-model tables and registry | In scope: registry query | In scope | Deferred: retiring a model is its own changeset when needed | In scope: doctor checks registry against tables | Cluster backups |
+| `chunks_retired_225` | N/A | N/A | In scope: Phase 3 Step 3 | N/A | Cluster backups during the window |
 
 ## Test Plan
 
-To be completed with the technical design. It must include an EXPLAIN-pinned
-plan test per search function and a recall gate against exact ground truth
-using Robustness-δ@K (catalog 1.12.162).
+- **Scenario:** each search family on the new layout under the tenant GUC. **Verify:** EXPLAIN shows only that tenant's partition of the query's model (pinned per family).
+- **Scenario:** a session with no tenant GUC, and a session for tenant B. **Verify:** zero rows, and no tenant-A row ever returned.
+- **Scenario:** insert, delete and re-embed across models; collection rename and quarantine round trip. **Verify:** the identity, model and manifest rows stay consistent; the cascades fire; the deferred manifest FK behaves as in catalog-029.
+- **Scenario:** a write for an unknown tenant, and for an unregistered model. **Verify:** a loud refusal naming the tenant or the model.
+- **Scenario:** a migration on a seeded store with two tenants and two models, including hidden rows. **Verify:** exact per-(tenant, model) reconciliation; abort on an injected mismatch leaves the old table live.
+- **Scenario:** the recall and latency non-inferiority of protocol step 3. **Verify:** the frozen rule's outcome.
+- **Scenario:** a local install (bge-768 only). **Verify:** migration and search work with a single model table.
 
 ## Finalization Gate
 
-To be completed before acceptance.
+### Contradiction Check
+
+Revision 3's arms and gate (H8) were replaced at revision 4 by Sam's rulings, and
+the Approach and protocol now state the same thing. Tenant partitioning is
+required and ungated, and the per-model split is shown to work, not to pay. No
+contradictions found between research findings, design and protocol.
+
+### Assumption Verification
+
+Two assumptions remain: research-14 (F7 pruning) and research-15 (H4 write cost).
+Both are tested in protocol step 2, a prerequisite of implementation. Every other
+load-bearing finding is verified (research-1 to -13).
+
+#### API Verification
+
+| API Call | Library | Verification |
+| --- | --- | --- |
+| LIST partitioning with HNSW declared on the parent | PostgreSQL 17, pgvector 0.8.2 | Spike (step 2) |
+| Execution-time partition pruning on `current_setting('nexus.tenant')` | PostgreSQL 17 | Spike (step 2) |
+| Typed `vector(dim)` per table (RDR-191 V1 is not triggered) | pgvector 0.8.2 | Source search (research-10) |
+
+### Scope Verification
+
+The MVV runs in protocol step 4 and Phase 3 Step 1 on a production fork, through
+the real changesets and engine. It is in scope and not deferred.
+
+### Cross-Cutting Concerns
+
+- **Versioning:** a schema-carrying engine tag. Client unchanged (no wire change). The paired-release rules apply only if a later client change rides with it.
+- **Build tool compatibility:** jOOQ codegen gains the new tables and functions. The record-count guard is bumped in the same change.
+- **Licensing:** N/A.
+- **Deployment model:** cloud via conexus's PITR walk rehearsal and deploy. Local via the bundled PG at engine boot.
+- **IDE compatibility:** N/A.
+- **Incremental adoption:** none. One cutover per install, with a 14-day rollback window.
+- **Secret/credential lifecycle:** N/A.
+- **Memory management:** index builds per partition bound `maintenance_work_mem` use. The copy streams per (tenant, model).
+
+### Proportionality
+
+The design sections are sized to a storage-layout change with a one-way
+migration. The protocol section is long because it is the proof the owner asked
+for before building.
 
 ## References
 
@@ -555,3 +682,4 @@ To be completed before acceptance.
 - 2026-10-05: Sam ruled tenant isolation required, not subject to the gate. LIST partitioning by tenant joins the design. The gate H8 now compares tenant-partitioned mixed (A1t) against tenant-partitioned per-model (A6), both with the router, because the migration happens for isolation either way. E1 recorded: 0.000 cross-model neighbour fraction (400 samples), and 14.6% of neighbours in the duplicate tenant gate-xr789.
 - 2026-10-05: Evaluation protocol revision 4. The step-1 census showed the benefit gate cannot be decided on real queries (10.1% gate population, 13 code and 27 prose distinct queries). Sam ruled: prove it works, not a benefit. H8 is replaced by a non-inferiority test (A6 vs A1t, router on and router off), the feasibility checks (F7, H5, H4) become a local hard gate, and round 3's harness-fidelity, router-threshold, hybrid and taxonomy corrections are adopted. Evidence copied to ~/nexus-evidence/rdr225-2026-10-05/.
 - 2026-10-05: Evaluation protocol revision 5, answering T2 critique-rdr225-evaluation-protocol-round4-2026-10-05 (3 critical, 11 significant; 'ready after small text edits'). Disjoint OK/BAD/UNKNOWN states with an exactly-once outcome table and DEFER-UNDERPOWERED; co-resident build pairs for ABBA cycles; degraded-arm positive control and ceiling check; concrete F7 observables and controls; H5 diff script and smoke run; H4 comparator and CI; SQL replay harness validated against the engine; synthetic generation rule; pilot-set floors; frozen protocol constants.
+- 2026-10-05: Protocol revision 6 (frozen), applying the round-5 fixes without a further critique round, per Sam ('fix all the things and button this RDR up'). Technical Design, Failure Modes, Implementation Plan, Day 2, Test Plan and Finalization Gate written.
