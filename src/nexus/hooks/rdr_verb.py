@@ -68,10 +68,69 @@ import re
 import subprocess
 import sys
 import threading
+import time
 from collections import Counter
+from collections.abc import Callable
 from pathlib import Path
+from typing import TypeVar
 
 from nexus._hook_runtime._io import HookResult, configure_hook_logging
+
+_T = TypeVar("_T")
+
+# ── the run's wall-clock budget (nexus-wozn6) ───────────────────────────────
+#
+# hooks.json gives this hook 10 s, and Claude Code cancels it at 10 s with
+# nothing printed. Measured 2026-10-05 against the cloud tenant: the run spent
+# 3.3 s in the T3 existence probe (a tenant-wide listing, since replaced by a
+# one-collection count) and 1.7-8.9 s fetching the 1527-row ``nexus_rdr`` T2
+# project, and 295 of 447 SessionStart firings since 2026-09-30 were
+# cancelled. Every network call below now runs under the time left in ONE
+# budget, so the run returns before the cap whatever the engine does. The
+# 10 s cap leaves ~3 s beyond this budget for interpreter start, imports and
+# the write.
+
+#: Seconds from the start of :func:`run` that the network legs may use.
+_HOOK_BUDGET_S = 7.0
+
+#: ``time.monotonic()`` at which the current :func:`run` must stop waiting on
+#: the network; ``None`` outside a run, so a helper called on its own gets its
+#: own per-leg cap.
+_run_deadline: float | None = None
+
+
+def _remaining(cap: float) -> float:
+    """The smaller of *cap* and what is left of the run's budget, never
+    negative."""
+    if _run_deadline is None:
+        return cap
+    return max(0.0, min(cap, _run_deadline - time.monotonic()))
+
+
+def _call_with_deadline(fn: Callable[[], _T], seconds: float) -> _T:
+    """Run *fn* in a DAEMON thread and wait at most *seconds* for it.
+
+    Raises :class:`TimeoutError` past the deadline and re-raises whatever
+    *fn* raised. A daemon thread, never a ``ThreadPoolExecutor`` worker:
+    ``concurrent.futures`` joins its non-daemon workers at interpreter exit,
+    so a hung call would hold the hook process past its own deadline
+    (nexus-r8643)."""
+    outcome: dict[str, object] = {}
+
+    def _worker() -> None:
+        try:
+            outcome["value"] = fn()
+        except BaseException as exc:  # noqa: BLE001 — carried back via `outcome`, not raised across the thread boundary
+            outcome["error"] = exc
+
+    worker = threading.Thread(target=_worker, daemon=True)
+    worker.start()
+    worker.join(timeout=seconds)
+    if worker.is_alive():
+        raise TimeoutError(f"no answer within {seconds:.1f}s")
+    if "error" in outcome:
+        raise outcome["error"]  # type: ignore[misc]
+    return outcome["value"]  # type: ignore[return-value]
 
 _EXCLUDE_FILES = {
     "readme.md", "template.md", "index.md", "overview.md",
@@ -176,11 +235,18 @@ def _resolve_rdr_collection(repo_root: Path) -> str | None:
         # carries the same lookup.
         from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415
 
-        cat = make_catalog_reader()
-        try:
-            return cat.collection_for_repo(repo_root, "rdr").render()
-        except LookupError:
-            pass  # owner not registered yet, fall through
+        def _lookup() -> str | None:
+            cat = make_catalog_reader()
+            try:
+                return cat.collection_for_repo(repo_root, "rdr").render()
+            except LookupError:
+                return None  # owner not registered yet, fall through
+
+        # nexus-wozn6: the catalog call is a network call with the client's
+        # own 30 s request timeout, three times this hook's cap.
+        found = _call_with_deadline(_lookup, _remaining(_CATALOG_DEADLINE_S))
+        if found is not None:
+            return found
     except Exception as exc:  # noqa: BLE001 — the SessionStart hook must never fail; the reason is logged, not swallowed (nexus-owna8)
         _log_resolution_error("catalog", exc)
     try:
@@ -253,60 +319,58 @@ def _log_resolution_error(source: str, exc: BaseException) -> None:
 
 # hooks.json caps this hook at 10s and the T3 client's own request timeout
 # is 30s, so a slow-but-reachable store would have the harness kill the hook
-# before the listing fallback ever ran (review of a71c93e92). Both halves
-# get a budget that fits inside the cap.
-_T3_DEADLINE_S = 4.0
+# before the listing fallback ever ran (review of a71c93e92). Every leg gets
+# a cap, and inside a run each cap is further cut to what the run's budget
+# has left (:func:`_remaining`). The caps are several times the measured
+# cost (2026-10-05, cloud tenant): catalog lookup 0.4 s, one-collection
+# count 0.31 s.
+_CATALOG_DEADLINE_S = 2.0
+_T3_DEADLINE_S = 2.0
 _LISTING_TIMEOUT_S = 4
+#: The listing fallback spawns the ``nx`` CLI, whose start alone costs about
+#: a second, so it is not worth starting with less than this left.
+_LISTING_MIN_S = 1.0
 
 
 def _collection_exists(target: str) -> bool:
-    """Whether *target* exists in T3, asked of the store itself
+    """Whether *target* holds chunks in T3, asked of the store itself
     (nexus-owna8: the previous substring match over ``nx collection list``
     output missed a listed collection when the resolved name and the
     listed name were rendered differently). The T3 call runs under
     ``_T3_DEADLINE_S``; past it, or on any error, the listing is the fallback.
 
-    nexus-r8643 (intrastate review [26115] #3): this used to hand the T3
-    call to a ``ThreadPoolExecutor`` and ``pool.shutdown(wait=False)`` on
-    timeout -- ``wait=False`` does not cancel or interrupt the already-
-    running worker, and ``ThreadPoolExecutor``'s worker threads are
-    NON-daemon (``concurrent.futures``' own ``atexit`` handler joins every
-    active worker before interpreter exit), so a genuinely hung T3 client
-    left a thread the process could not exit past: this hook could outlive
-    its own ``_T3_DEADLINE_S`` budget and get killed by the harness's 10s
-    cap instead of falling back to the listing cleanly. A bare
-    ``threading.Thread(daemon=True)`` has no such handler -- the process
-    can exit with it still running, which is exactly the property a
-    fire-and-abandon timeout needs."""
+    nexus-wozn6: the probe is ``collection_info`` (one collection's STORED
+    count, ``KeyError`` when it holds none), not ``collection_exists``. On
+    the HTTP client ``collection_exists`` lists every collection's LIVE
+    stats to answer for one, which measured 3.3 s on a 98-collection tenant
+    against 0.31 s here. The two differ only for a collection whose every
+    chunk is trashed or unowned: this reads it as indexed. For a line whose
+    other answer is "run ``nx index repo``", that edge is acceptable.
+
+    nexus-r8643 (intrastate review [26115] #3): the T3 call runs in a DAEMON
+    thread (:func:`_call_with_deadline`), never a ``ThreadPoolExecutor``
+    worker, so a hung client cannot hold the process past the deadline."""
     from nexus.bounded_subprocess import run_bounded  # noqa: PLC0415 — deferred: a hook process pays its import cost on every invocation, and a module-scope import of this pulls structlog + ~231 modules (measured on verification_config: 14ms/106 -> 62-84ms/337). Deferred, it is paid only when we actually spawn
 
     try:
         from nexus.db import make_t3  # noqa: PLC0415
 
-        outcome: dict[str, object] = {}
-
-        def _worker() -> None:
+        def _probe() -> bool:
             try:
-                outcome["value"] = bool(make_t3().collection_exists(target))
-            except Exception as exc:  # noqa: BLE001 — carried back via `outcome`, not raised across the thread boundary
-                outcome["error"] = exc
+                return int(make_t3().collection_info(target).get("count", 0)) > 0
+            except KeyError:
+                return False
 
-        worker = threading.Thread(target=_worker, daemon=True)
-        worker.start()
-        worker.join(timeout=_T3_DEADLINE_S)
-        if worker.is_alive():
-            raise TimeoutError(f"no answer within {_T3_DEADLINE_S}s")
-        if "error" in outcome:
-            raise outcome["error"]  # type: ignore[misc]
-        return bool(outcome.get("value", False))
-    except TimeoutError as exc:
-        _log_resolution_error("t3-exists", exc)
+        return _call_with_deadline(_probe, _remaining(_T3_DEADLINE_S))
     except Exception as exc:  # noqa: BLE001 — the hook must never fail; fall back to the listing
         _log_resolution_error("t3-exists", exc)
+    left = _remaining(_LISTING_TIMEOUT_S)
+    if left < _LISTING_MIN_S:
+        return False
     try:
         result = run_bounded(
             ["nx", "collection", "list"],
-            timeout=_LISTING_TIMEOUT_S,
+            timeout=left,
         )
         if result.returncode == 0:
             return target in result.stdout
@@ -326,11 +390,30 @@ def _extract_rdr_id(filepath: Path) -> str | None:
 
 _T2_ROWS_CACHE: dict[str, list[dict]] = {}
 
+#: Projects whose T2 fetch did not answer inside the run's budget this run.
+_T2_LATE: set[str] = set()
+
+#: The line :func:`run` adds when the T2 fetch ran out of budget. Without it
+#: a late fetch reads exactly like a project with no recorded statuses, and a
+#: filter that selects nothing looking like a quiet success is the whole
+#: lesson of nexus-e19sa.
+_T2_LATE_NOTE = "(T2 RDR statuses did not arrive within the hook budget; status breakdown and rdr-fix pointers omitted)"
+
+#: Cap on the T2 fetch. Inside a run the budget's remainder binds first;
+#: measured 1.7-8.9 s for the 1527-row ``nexus_rdr`` project (2026-10-05).
+_T2_DEADLINE_S = 7.0
+
 
 def _fetch_rdr_rows(repo_name: str) -> list[dict]:
     """One ``get_all`` per hook run, shared by the status and gate loaders
     (code review [24883] finding 5: two full fetches of a 1000-row project
-    inside a 10s SessionStart budget)."""
+    inside a 10s SessionStart budget).
+
+    nexus-wozn6: the fetch runs under what is left of the run's budget. Past
+    it the project reads as empty for this run and lands in
+    :data:`_T2_LATE`, so :func:`run` can say so. The fetch is the whole
+    project because the engine has no narrower read: ``/v1/memory/list``
+    carries no content and ``/v1/memory/all`` no title filter."""
     if repo_name in _T2_ROWS_CACHE:
         return _T2_ROWS_CACHE[repo_name]
     # The handle is opened on the db/ side of the RDR-120 storage boundary:
@@ -340,7 +423,15 @@ def _fetch_rdr_rows(repo_name: str) -> list[dict]:
     # inline.
     from nexus.db.t2_reads import rdr_rows  # noqa: PLC0415 — deferred: only a real T2 lookup pays for this
 
-    rows = rdr_rows(f"{repo_name}_rdr")
+    try:
+        rows = _call_with_deadline(
+            lambda: rdr_rows(f"{repo_name}_rdr"), _remaining(_T2_DEADLINE_S),
+        )
+    except TimeoutError:
+        _T2_LATE.add(repo_name)
+        rows = []
+    except Exception:  # noqa: BLE001 — rdr_rows never raises; this keeps the hook's never-fail contract if that ever changes
+        rows = []
     _T2_ROWS_CACHE[repo_name] = rows
     return rows
 
@@ -428,10 +519,13 @@ def _unchecked_fix_edits(root: Path, rdr_files: list[Path], statuses: dict[str, 
             status = _file_frontmatter(path).get("status") or "draft"
         if status.lower() not in ("draft", "open"):
             continue
+        left = _remaining(10.0)
+        if left <= 0:
+            break  # nexus-wozn6: out of budget; a pointer missed this session beats a cancelled hook
         try:
             tip = run_bounded(
                 ["git", "-C", str(root), "log", "-1", "--format=%h", "--", str(path)],
-                timeout=10,
+                timeout=left,
             ).stdout.strip()
         except (OSError, subprocess.SubprocessError):
             continue
@@ -501,7 +595,20 @@ def run(payload: dict | None) -> HookResult:  # noqa: ARG001 — this hook takes
     ``sys.exit(0)``, and the accumulated ``print()`` lines become one
     ``"\\n".join(...)`` string -- see the module docstring's "Structural
     adaptation" section for why the join point is exactly there.
+
+    nexus-wozn6: every network leg runs under one budget,
+    :data:`_HOOK_BUDGET_S` from here, so the run returns before hooks.json's
+    10 s cap instead of being cancelled with nothing printed.
     """
+    global _run_deadline
+    _run_deadline = time.monotonic() + _HOOK_BUDGET_S
+    try:
+        return _run()
+    finally:
+        _run_deadline = None
+
+
+def _run() -> HookResult:
     root = _repo_root()
     if root is None:
         return HookResult()
@@ -548,6 +655,9 @@ def run(payload: dict | None) -> HookResult:  # noqa: ARG001 — this hook takes
                 where = ""
             lines.append(f"     (resolution failed: {'; '.join(_RESOLUTION_FAILURES)}{where})")
         lines.append(f"     Run: nx index repo {root}")
+
+    if repo_name in _T2_LATE:
+        lines.append(f"     {_T2_LATE_NOTE}")
 
     lines.extend(_unchecked_fix_edits(root, rdr_files, statuses, _load_gated_commits(repo_name)))
 

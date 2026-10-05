@@ -24,6 +24,8 @@ import os
 import re
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -58,9 +60,11 @@ def _reset_module_state():
     free."""
     rdr_hook_module._RESOLUTION_FAILURES.clear()
     rdr_hook_module._T2_ROWS_CACHE.clear()
+    rdr_hook_module._T2_LATE.clear()
     yield
     rdr_hook_module._RESOLUTION_FAILURES.clear()
     rdr_hook_module._T2_ROWS_CACHE.clear()
+    rdr_hook_module._T2_LATE.clear()
 
 
 def test_resolve_rdr_collection_synthesises_conformant_when_catalog_absent(
@@ -245,8 +249,10 @@ def test_collection_exists_asks_the_store_not_the_listing(rdr_hook_mod, monkeypa
     mod = rdr_hook_mod
 
     class _T3:
-        def collection_exists(self, name):
-            return name == "rdr__1-1__voyage-context-3__v1"
+        def collection_info(self, name):
+            if name != "rdr__1-1__voyage-context-3__v1":
+                raise KeyError(name)
+            return {"count": 1, "metadata": {}}
     monkeypatch.setattr("nexus.db.make_t3", lambda: _T3())
     assert mod._collection_exists("rdr__1-1__voyage-context-3__v1")
     assert not mod._collection_exists("rdr__other__voyage-context-3__v1")
@@ -328,9 +334,9 @@ def test_slow_t3_answer_falls_back_to_the_listing_within_the_hook_budget(
     monkeypatch.setattr(mod, "_T3_DEADLINE_S", 0.2)
 
     class _SlowT3:
-        def collection_exists(self, name):
+        def collection_info(self, name):
             time.sleep(2)
-            return True
+            return {"count": 1, "metadata": {}}
     monkeypatch.setattr("nexus.db.make_t3", lambda: _SlowT3())
 
     class _Done:
@@ -373,11 +379,11 @@ def test_slow_t3_worker_cannot_hold_the_process_past_the_deadline(
     release = threading.Event()
 
     class _HangingT3:
-        def collection_exists(self, name):
+        def collection_info(self, name):
             # Never returns within the hook's own budget -- release() lets
             # it finish at teardown so it does not leak across tests.
             release.wait(timeout=5)
-            return True
+            return {"count": 1, "metadata": {}}
     monkeypatch.setattr("nexus.db.make_t3", lambda: _HangingT3())
 
     class _Done:
@@ -643,6 +649,121 @@ def test_subprocess_run_leaks_no_structlog_debug_lines_to_stdout(tmp_path) -> No
     assert lines, "expected at least the RDR: verdict line"
     assert lines[0].startswith("RDR:")
     for ln in lines[1:]:
-        assert ln.strip().startswith(("(resolution failed:", "Run:", "RDR-")), (
+        assert ln.strip().startswith(
+            ("(resolution failed:", "Run:", "RDR-", rdr_hook_module._T2_LATE_NOTE)
+        ), (
             f"unexpected stdout line, possible leak: {ln!r}"
         )
+
+
+# ── nexus-wozn6: the hook finishes inside its own SessionStart budget ───────
+#
+# Measured 2026-10-05 against the cloud tenant (98 collections, 1527 rows in
+# nexus_rdr): ``collection_exists`` took 3.3 s because the HTTP client answers
+# it by listing every collection's live stats, and the T2 ``get_all`` took
+# 1.7 to 8.9 s. Together they exceeded hooks.json's 10 s cap on 295 of 447
+# SessionStart firings since 2026-09-30, and a cancelled hook prints nothing.
+
+
+class _ListingT3:
+    """Mirrors HttpVectorClient: ``collection_exists`` is a tenant-wide
+    listing, ``collection_info`` reads one collection and raises KeyError
+    for an absent one."""
+
+    def __init__(self) -> None:
+        self.listings = 0
+
+    def list_collections(self):
+        self.listings += 1
+        return [{"name": "rdr__1-1__voyage-context-3__v1", "count": 3}]
+
+    def collection_exists(self, name):
+        return any(c["name"] == name for c in self.list_collections())
+
+    def collection_info(self, name):
+        if name != "rdr__1-1__voyage-context-3__v1":
+            raise KeyError(name)
+        return {"count": 3, "metadata": {}}
+
+
+def test_collection_exists_reads_one_collection_not_the_tenant_listing(
+    rdr_hook_mod, monkeypatch,
+) -> None:
+    """The tenant-wide listing costs 3.3 s on a 98-collection tenant against
+    0.31 s for the one-collection count, inside a 10 s hook."""
+    t3 = _ListingT3()
+    monkeypatch.setattr("nexus.db.make_t3", lambda: t3)
+    assert rdr_hook_mod._collection_exists("rdr__1-1__voyage-context-3__v1") is True
+    assert rdr_hook_mod._collection_exists("rdr__other__voyage-context-3__v1") is False
+    assert t3.listings == 0, "the probe listed every collection to answer for one"
+
+
+def _rdr_tree(tmp_path):
+    root = tmp_path / "repo"
+    (root / "docs" / "rdr").mkdir(parents=True)
+    (root / "docs" / "rdr" / "rdr-001-x.md").write_text("---\nstatus: draft\n---\n# x\n")
+    return root
+
+
+def test_run_returns_inside_its_budget_when_every_network_leg_hangs(
+    rdr_hook_mod, tmp_path, monkeypatch,
+) -> None:
+    """Catalog, T3 and T2 all hang: run() still returns at the budget with
+    the summary line, instead of the harness killing it with nothing said."""
+    mod = rdr_hook_mod
+    root = _rdr_tree(tmp_path)
+    release = threading.Event()
+
+    def hang(*_a, **_k):
+        release.wait(timeout=10)
+        raise ConnectionError("released at teardown")
+
+    class _HangingT3:
+        def collection_info(self, name):
+            return hang()
+
+    monkeypatch.setenv("NX_RDR_HOOK_LOG", str(tmp_path / "rdr_hook.log"))
+    monkeypatch.setattr(mod, "_repo_root", lambda: root)
+    monkeypatch.setattr(mod, "_repo_name", lambda r: "repo")
+    monkeypatch.setattr(mod, "_HOOK_BUDGET_S", 1.0)
+    monkeypatch.setattr("nexus.catalog.factory.make_catalog_reader", hang)
+    monkeypatch.setattr(
+        "nexus.indexer._conformant_name_for_repo",
+        lambda r, t: "rdr__repo-1__voyage-context-3__v1",
+    )
+    monkeypatch.setattr("nexus.db.make_t3", lambda: _HangingT3())
+    monkeypatch.setattr("nexus.db.t2_reads.rdr_rows", hang)
+
+    def listing(argv, *, timeout, **_k):
+        time.sleep(timeout)
+        raise subprocess.TimeoutExpired(argv, timeout)
+
+    monkeypatch.setattr("nexus.bounded_subprocess.run_bounded", listing)
+    started = time.monotonic()
+    try:
+        out = mod.run(None).stdout or ""
+        elapsed = time.monotonic() - started
+    finally:
+        release.set()
+    assert elapsed < 1.8, f"run() took {elapsed:.2f}s against a 1.0s budget"
+    assert out.startswith("RDR: 1 documents (1 RDRs)"), out
+    assert rdr_hook_module._T2_LATE_NOTE in out, out
+
+
+def test_t2_rows_that_arrive_in_time_still_give_the_breakdown(
+    rdr_hook_mod, tmp_path, monkeypatch,
+) -> None:
+    """The bound must not cost the ordinary path its status breakdown."""
+    mod = rdr_hook_mod
+    root = _rdr_tree(tmp_path)
+    monkeypatch.setattr(mod, "_repo_root", lambda: root)
+    monkeypatch.setattr(mod, "_repo_name", lambda r: "repo")
+    monkeypatch.setattr(mod, "_resolve_rdr_collection", lambda r: "rdr__1-1__voyage-context-3__v1")
+    monkeypatch.setattr("nexus.db.make_t3", lambda: _ListingT3())
+    monkeypatch.setattr(
+        "nexus.db.t2_reads.rdr_rows",
+        lambda project: [{"title": "001", "content": "status: draft\n"}],
+    )
+    out = mod.run(None).stdout or ""
+    assert out.startswith("RDR: 1 documents (1 RDRs: 1 draft), indexed in rdr__1-1__"), out
+    assert rdr_hook_module._T2_LATE_NOTE not in out
