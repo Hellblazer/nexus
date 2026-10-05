@@ -531,9 +531,9 @@ runs, release-shaped `-Ob` native exe; nothing here ran on a workflow runner):
   migration window before the changelog lock — **Status**: Verified —
   **Method**: Spike (T2 `224-research-17`, `-18`), then the release-shaped
   `-Ob` exe in all four phases (T2 `224-p1.1-stop-probe`). A stop during a
-  changeset exits but leaves the changelog lock held (Failure Modes). The
-  recurring coverage is thin: the probe driver is not in the repository, and the
-  release-leg smoke only warns when its stop fails (Phase 1 Step 2).
+  changeset exits but leaves the changelog lock held (Failure Modes). The probe
+  driver is in the repository (`scripts/engine_windows_stop_probe.py`), and the
+  release-leg smoke asserts the serving-phase stop (Phase 1 Step 2).
 - [x] A same-session CLI can stop a supervisor, and through it an engine, with
   `CTRL_BREAK` under the topology in § Technical Design — **Status**: Verified
   with the real supervisor and engine — **Method**: Spike with stand-ins (T2
@@ -786,9 +786,9 @@ new). Measured on qwentescence, 5 start and stop cycles: 5 directories without
 the sweep, 1 with it; a real `%TEMP%` holding 19 went to 1 after one start; with
 engine A running, three starts of B kept A's directory and left A alive (T2
 `224-p1.3-ort-temp-sweep`). The safety rests on the loaded-library names being
-true for the pinned 1.20.0 jar; as of the 2026-10-05 review nothing tied them to
-the jar's listing, so an ONNX Runtime bump could change them unnoticed (T2
-`224-review-p1p2-critique`, Observation 1).
+true for the pinned 1.20.0 jar; a test ties them to the committed jar listing,
+so an ONNX Runtime bump that renames one fails it (T2 `224-review-p1p2-critique`,
+Observation 1). The sweep also skips junctions and any reparse point.
 
 **Release build host (Gap 1, Gap 7).** Phase 0 Step 0.1 chose qwentescence as a
 self-hosted runner on 2026-10-05, over GitHub's hosted `windows-latest` (inside
@@ -1002,7 +1002,9 @@ the supervisor and the engine from a same-session sender (T2 `224-research-20`,
   assets and no Windows asset, becomes immutable, and gives a Windows client
   nothing to install; the recovery is another engine cut.
   **Mitigation**: the cut checklist and release-skill guard recorded with the
-  P0.4 amendment (Phase 0 Step 0.4). Not on develop at 2026-10-05.
+  P0.4 amendment (Phase 0 Step 0.4): the .42 pre-cut checklist, the
+  engine-release skill's step 3f and `check_engine_release_floor.py
+  --require-windows`.
 - **Risk**: the Windows build host is a persistent machine inside the release
   trust boundary (qwentescence, chosen in Phase 0 Step 0.1).
   **Mitigation**: hellmini's rules by analogy, written into AGENTS.md: release
@@ -1171,7 +1173,7 @@ add 6 assets, 27 in all, and block promotion. The reason is that no runner is
 registered, so a required Windows job would queue until it times out and hold
 every platform's release in draft. The risk is a Windows-carrying cut made with
 the variable off, which publishes an immutable tag with no Windows asset. The
-guard that was agreed, and is not on develop at this date: the pre-cut checklist
+guard that was agreed and landed with the review fixes: the pre-cut checklist
 (variable on, a green `workflow_dispatch` run of the release workflow, a
 clean-guest candidate run), a step in the engine-release skill, and
 `check_engine_release_floor.py --require-windows`. Sam flips the variable after
@@ -1209,11 +1211,11 @@ with the o5xyx window probe on Windows, driven by `CTRL_BREAK`, in each phase th
 Test Plan names: migration (before the lock and during a changeset), ONNX Runtime
 initialisation (both branches of the gate) and serving; all measured (Critical
 Assumptions; T2 `224-p1.1-stop-probe`, `224-p1.1-ort-init-timeout-probe`). The
-probe driver stayed on qwentescence and is not in the repository, so the rows
-cannot be re-run when `OrtInitGate`, `Main` or the native-image configuration
-changes. The recurring coverage is `OrtInitGateTest`, which uses a stand-in signal
-installer, and the release-leg smoke's stop, which warns and does not fail (Step
-2). The `OrtTempSweep` boot cleanup (Technical Design, Runtime extraction hygiene)
+probe driver first stayed on qwentescence; the review fixes committed it as
+`scripts/engine_windows_stop_probe.py`, so the rows can be re-run when
+`OrtInitGate`, `Main` or the native-image configuration changes. The recurring
+coverage is `OrtInitGateTest`, which uses a stand-in signal installer, and the
+release-leg smoke's stop assertion (Step 2). The `OrtTempSweep` boot cleanup (Technical Design, Runtime extraction hygiene)
 belongs to this phase too.
 
 #### Step 2: Windows release leg (Gap 1, Gap 6)
@@ -1242,11 +1244,12 @@ run, handed over as the artifact `nexus-pg-windows-x64` by
 `build-publish-pg-bundle-windows`, so Phase 2 Step 1 lands before it runs. It
 asserts health, that every changeset in the changelog applied, a 768-dimension
 embedding, and that the four VC++ DLLs loaded from the engine directory, then
-stops the engine with `CTRL_BREAK`. A stop that cannot be delivered, or that the
-engine does not obey in 30 s, only warns and kills the engine (`SMOKE stop
-WARNING`), so the leg stays green. That is the review's open Significant finding:
-the Windows stop is not gated on the release path (T2 `224-review-p1p2-critique`,
-S1). The smoke is narrower than `native-smoke.sh`: no cross-encoder rerank and no
+stops the engine with `CTRL_BREAK`. The stop is an assertion (review finding S1,
+T2 `224-review-p1p2-critique`): exit code 149 within a bound, `shutdown_signal` and
+`service_stopped` in the engine log, then a second boot that reaches health with
+no new changesets and stops the same way; a session that cannot deliver the break
+fails the leg. The smoke extracts the PG bundle through the client's own ACL grant
+and compares module paths in long form (S5). The smoke is narrower than `native-smoke.sh`: no cross-encoder rerank and no
 Python client probes. A hand run on qwentescence passed: 8 binaries in the
 dependency check, an archive of 33,687,976 bytes with VC++ redistributable
 14.44.35112, health after 3.0 s, 508 of 508 changesets, a 768-dimension embedding
@@ -1651,6 +1654,13 @@ Right-sized for an Architecture record that replaces an accepted direction.
   Windows Claude Code session; the packaged archives on a clean machine; every
   Windows release-workflow step on `win-release` (none has run); a host shutdown,
   logoff or sleep with PostgreSQL running; signed binaries (deferred); a real
-  logon trigger; a real engine that ignores the break. Review findings S1 (the
-  smoke's stop only warns), S3, S5 and S6 stay open in their beads; this pass
-  records them and does not close them.
+  logon trigger; a real engine that ignores the break.
+- 2026-10-05: The Phase 1-2 review fixes landed after the pass above: the smoke's
+  stop is asserted (S1), the smoke extracts with the client's ACL grant and
+  compares long-form paths (S5), the probe driver is committed, `OrtTempSweep`'s
+  loaded-library names are tied to the jar listing and it skips reparse points,
+  the shipped VC++ DLLs are checked for a valid Microsoft signature, and the
+  pre-cut guards exist (engine-release skill step 3f,
+  `check_engine_release_floor.py --require-windows`). Still open: S3 (clean-guest
+  candidate run, bead nexus-f9bgu.45) and S6 (the release workflow's Windows jobs
+  have not run on `win-release`).
