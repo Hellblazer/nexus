@@ -599,14 +599,15 @@ class TestRealRepoNonVacuityFloor:
         self,
     ) -> None:
         """Reviewer critique [24072] SIGNIFICANT 1: a bare count passes even
-        if the generator emits six WRONG edges. These six (from, to) pairs
+        if the generator emits six WRONG edges. These seven (from, to) pairs
         are stable facts about the tree (verified live against the real
         multi-tenant catalog via mcp__plugin_conexus_nexus-catalog__list on
         2026-09-02: content_type=rdr (287 entries) + legacy content_type=
         prose under owner 1.10 (241 entries) resolve to the IDENTICAL six
         pairs and the identical 259 relates edges this local single-
         registration fixture produces -- the canonical, de-duplicated graph
-        is the same regardless of how many raw registrations feed it).
+        is the same regardless of how many raw registrations feed it; the
+        seventh, RDR-224 over RDR-218, landed 2026-10-05).
 
         related_rdrs (252 raw references across 50 files, T2 nexus/rdr-201-
         p3.2-dependency-edges-impl-notes) is the dominant source -- 259 of
@@ -637,6 +638,8 @@ class TestRealRepoNonVacuityFloor:
             ("rdr-127-substrate-decoupled-surface-rendering", "rdr-123-nx-answer-a2ui-surfaces"),
             ("rdr-127-substrate-decoupled-surface-rendering", "rdr-124-subagent-result-surfaces"),
             ("rdr-185-single-ladder-convergent-upgrade", "rdr-159-guided-upgrade-migration"),
+            # nexus-f9bgu.3, 15f4c7a94: RDR-224 (native Windows) superseded RDR-218.
+            ("rdr-224-native-windows-support", "rdr-218-windows-platform-support"),
         }, f"exact supersedes pairs mismatch: got {supersedes_pairs}"
 
         by_type = w.count_by_link_type()
