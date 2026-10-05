@@ -10,6 +10,7 @@ tested here on every OS. The real run is recorded on the bead and in T2
 
 from __future__ import annotations
 
+import json
 import socket
 import sys
 import types
@@ -145,3 +146,130 @@ def test_the_script_is_stdlib_only_and_names_its_record() -> None:
     tops = {m.split(".")[0] for m in re.findall(r"^(?:from|import) ([a-zA-Z_][\w.]*)", src, re.M)}
     assert not (tops - set(sys.stdlib_module_names)), tops - set(sys.stdlib_module_names)
     assert "224-p1.1-stop-probe" in src
+
+
+# --------------------------------------------------------------------------- #
+# The verdict: the probe ends with PASS or FAIL, never just a recording (review finding 8)
+# --------------------------------------------------------------------------- #
+
+CLEAN = probe.CLEAN_STOP_EXIT_CODE
+
+
+def _good(phase: str) -> dict[str, object]:
+    """A canned result in the shape the phase functions produce, for a run that proved what the phase is for."""
+    if phase == "a":
+        return {"boot1_break_before_lock": {"seen": "migration_pending", "exit_code": CLEAN},
+                "boot2_plain": {"seen": "ready", "stop_exit_code": CLEAN}}
+    if phase == "b":
+        return {"boot1_break_mid_changeset": {"seen": "changesets_running=120", "exit_code": CLEAN}}
+    if phase == "c":
+        rows = [{"seen": "onnx_model_root", "exit_code": CLEAN, "landed_in_init": i in (3, 4)} for i in range(8)]
+        return {"warm_stop_exit": CLEAN, "sweep": rows, "landed_count": 2, "crash_artifacts": [],
+                "next_boot": {"stop_exit_code": CLEAN}}
+    return {"serving_stop": {"exit_code": CLEAN, "shutdown_signal_logged": True, "service_stopped_logged": True},
+            "next_boot": {"stop_exit_code": CLEAN, "new_changesets": 0}, "crash_artifacts": []}
+
+
+@pytest.mark.parametrize("phase", ["a", "b", "c", "d"])
+def test_a_run_that_proved_its_phase_has_no_problems(phase: str) -> None:
+    assert probe.phase_problems(phase, _good(phase)) == []
+
+
+def _with(phase: str, path: tuple[str, ...], value: object) -> dict[str, object]:
+    res = _good(phase)
+    node = res
+    for key in path[:-1]:
+        node = node[key]  # type: ignore[assignment,index]
+    node[path[-1]] = value  # type: ignore[index]
+    return res
+
+
+@pytest.mark.parametrize(
+    "phase, result, expect",
+    [
+        ("a", {"error": "RuntimeError('cluster did not start')", "tb": "..."}, "raised"),
+        ("a", _with("a", ("boot1_break_before_lock", "seen"), "missed"), "trigger saw 'missed'"),
+        ("a", _with("a", ("boot1_break_before_lock", "seen"), None), "trigger saw None"),
+        ("a", _with("a", ("boot1_break_before_lock", "exit_code"), 1), "a boot 1: stop was unexpected:1"),
+        ("a", _with("a", ("boot1_break_before_lock", "exit_code"), "no-exit-20s"), "a boot 1: stop was no-exit"),
+        ("a", _with("a", ("boot2_plain", "seen"), None), "did not reach ready"),
+        ("a", _with("a", ("boot2_plain", "stop_exit_code"), 143), "a boot 2: stop was unexpected:143"),
+        ("b", _with("b", ("boot1_break_mid_changeset", "seen"), "missed"), "mid-changeset"),
+        ("b", _with("b", ("boot1_break_mid_changeset", "seen"), None), "mid-changeset"),
+        ("b", _with("b", ("boot1_break_mid_changeset", "exit_code"), 0), "b boot 1: stop was unexpected:0"),
+        ("c", _with("c", ("landed_count",), 0), "no stop landed inside ORT init"),
+        ("c", {k: v for k, v in _good("c").items() if k != "landed_count"}, "no stop landed inside ORT init"),
+        ("c", _with("c", ("sweep",), []), "no sweep rows"),
+        ("c", _with("c", ("warm_stop_exit",), 1), "c warm boot: stop was unexpected:1"),
+        ("c", _with("c", ("next_boot", "stop_exit_code"), None), "c next boot: stop was no-exit"),
+        ("c", _with("c", ("crash_artifacts",), ["C:\\run\\hs_err_pid1.log"]), "crash artifacts found"),
+        ("d", _with("d", ("serving_stop", "exit_code"), 143), "d serving stop: stop was unexpected:143"),
+        ("d", _with("d", ("serving_stop", "shutdown_signal_logged"), False), "did not log shutdown_signal"),
+        ("d", _with("d", ("serving_stop", "service_stopped_logged"), False), "did not log service_stopped"),
+        ("d", _with("d", ("next_boot", "new_changesets"), 3), "second boot applied changesets"),
+        ("d", _with("d", ("next_boot", "new_changesets"), None), "second boot applied changesets"),
+        ("d", _with("d", ("crash_artifacts",), ["x.dmp"]), "crash artifacts found"),
+    ],
+)
+def test_the_verdict_names_each_way_a_phase_can_fail(phase: str, result: dict[str, object], expect: str) -> None:
+    problems = probe.phase_problems(phase, result)
+    assert any(expect in p for p in problems), problems
+
+
+def test_a_sweep_row_with_a_missed_trigger_or_a_bad_exit_is_named_by_its_index() -> None:
+    res = _good("c")
+    res["sweep"][2]["seen"] = "ready"  # type: ignore[index]
+    res["sweep"][5]["exit_code"] = 134  # type: ignore[index]
+    problems = probe.phase_problems("c", res)
+    assert any("row 2" in p and "not onnx_model_root" in p for p in problems), problems
+    assert any("row 5" in p and "unexpected:134" in p for p in problems), problems
+
+
+def _run_main(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, results: dict[str, object]) -> int:
+    """main() as on Windows, with the phase functions replaced by canned results."""
+    monkeypatch.setattr(probe, "sys", types.SimpleNamespace(platform="win32", stderr=sys.stderr))
+    for ph, value in results.items():
+        if isinstance(value, BaseException):
+            def boom(cfg, _v=value):  # noqa: ANN001
+                raise _v
+            monkeypatch.setitem(probe.PHASES, ph, boom)
+        else:
+            monkeypatch.setitem(probe.PHASES, ph, lambda cfg, _v=value: dict(_v))  # type: ignore[arg-type]
+    return probe.main(["--exe", "e", "--pg-bin", "p", "--models", "m", "--changelog-dir", "c", "--run-dir", str(tmp_path / "run"),
+                       *results])
+
+
+def test_main_exits_zero_and_says_pass_when_every_phase_proved_itself(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert _run_main(monkeypatch, tmp_path, {"a": _good("a"), "d": _good("d")}) == 0
+    out = capsys.readouterr().out
+    assert "PROBE phase a: PASS" in out and "PROBE phase d: PASS" in out
+    saved = json.loads((tmp_path / "run" / "results-d.json").read_text())
+    assert saved["verdict"] == "PASS" and saved["problems"] == []
+
+
+def test_main_exits_one_on_a_phase_error_a_missed_trigger_or_a_bad_stop(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    results: dict[str, object] = {
+        "a": RuntimeError("cluster did not start"),
+        "b": _with("b", ("boot1_break_mid_changeset", "seen"), "missed"),
+        "c": _with("c", ("landed_count",), 0),
+        "d": _with("d", ("serving_stop", "exit_code"), 143),
+    }
+    assert _run_main(monkeypatch, tmp_path, results) == 1
+    out = capsys.readouterr().out
+    for ph in "abcd":
+        assert f"PROBE phase {ph}: FAIL" in out, out
+        assert json.loads((tmp_path / "run" / f"results-{ph}.json").read_text())["verdict"] == "FAIL"
+
+
+def test_one_failing_phase_fails_the_run_even_when_the_others_pass(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    assert _run_main(monkeypatch, tmp_path, {"a": _good("a"), "d": _with("d", ("next_boot", "new_changesets"), 2)}) == 1
+
+
+def test_the_probes_clean_stop_exit_code_is_the_smokes_and_is_128_plus_sigbreak() -> None:
+    """Two scripts name the CTRL_BREAK exit code separately; a drift between them would make the probe
+    call clean what the release smoke refuses (or the reverse)."""
+    assert probe.CLEAN_STOP_EXIT_CODE == es.WINDOWS_STOP_EXIT_CODE == 128 + 21 == 149

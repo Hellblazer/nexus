@@ -464,7 +464,7 @@ def test_a_bad_embedding_fails(tmp_path: Path) -> None:
 def test_the_engine_dying_during_startup_fails_with_its_log_tail(tmp_path: Path) -> None:
     launcher = FakeLauncher(FakeProc(dies_at_poll=2))
     http = FakeHttp(health_after=99, version=GOOD_VERSION, embed=GOOD_EMBED)
-    with pytest.raises(es.SmokeError, match="exited"):
+    with pytest.raises(es.SmokeError, match=r"exited with code \d+ during startup"):
         _run(tmp_path, windows=True, http=http, launcher=launcher, runner=_ListingRunner(launcher))
 
 
@@ -704,6 +704,22 @@ def test_extract_engine_refuses_member_names_that_are_not_bare_file_names(
     with pytest.raises(es.SmokeError, match="not a file name|holds ':'|not a bare"):
         es.extract_engine(arc, tmp_path / "out2")
     assert sorted(p.name for p in (tmp_path / "out2").iterdir() if p.name == bad) == []
+
+
+def test_extract_engine_names_a_non_regular_member_instead_of_asserting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With the layout check out of the picture, a directory member (extractfile returns None) is a
+    named SmokeError, not an AssertionError that python -O would skip into a NoneType crash."""
+    arc = tmp_path / "e.txz"
+    with lzma.open(arc, "wb") as xz, tarfile.open(fileobj=xz, mode="w") as tf:
+        ti = tarfile.TarInfo("sub")
+        ti.type = tarfile.DIRTYPE
+        tf.addfile(ti)
+    monkeypatch.setattr(wer, "verify_archive", lambda a: [])
+    with pytest.raises(es.SmokeError, match="member 'sub' is not a regular file"):
+        es.extract_engine(arc, tmp_path / "out")
+    assert "assert src" not in (REPO / "scripts" / "engine_windows_smoke.py").read_text(encoding="utf-8")
 
 
 def test_the_engine_module_check_compares_long_forms_so_an_8_3_temp_is_not_a_false_failure() -> None:

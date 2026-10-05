@@ -349,8 +349,11 @@ def extract_engine(archive: Path, dest: Path) -> Path:
             bad = wer.bare_name_problem(member.name)
             if bad is not None:
                 raise SmokeError(f"engine archive {archive.name}: {bad}")
-            src = tf.extractfile(member)
-            assert src is not None  # verify_archive proved every member is a regular file
+            src = tf.extractfile(member) if member.isreg() else None
+            if src is None:
+                # verify_archive refused every non-regular member; reaching here means the archive
+                # changed between the check and the extraction, or the check was bypassed.
+                raise SmokeError(f"engine archive {archive.name}: member {member.name!r} is not a regular file")
             with src, (dest / member.name).open("wb") as out:
                 shutil.copyfileobj(src, out)
     return dest / wer.ENGINE_EXE

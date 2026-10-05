@@ -25,7 +25,11 @@ engine's group::
 Every phase reports engine exit codes (149 = 128 + 21 is a clean CTRL_BREAK),
 seconds to exit, the engine's own shutdown events, the changelog row counts and
 the lock row, and whether Postgres logged a crash recovery. Results go to
-``<run-dir>/results-<phase>.json`` and stdout.
+``<run-dir>/results-<phase>.json`` and stdout, each ending with a ``verdict`` (PASS or FAIL
+with the problems named). The exit status is 1 when any phase failed: it raised, its trigger did
+not fire where it was meant to, no stop landed inside ORT init (phase c), an exit code was not 149,
+a serving stop did not log its shutdown events, the second boot re-applied changesets, or a crash
+artifact appeared (``phase_problems``).
 
 Windows only (CTRL_BREAK_EVENT, taskkill), stdlib only. Run it from a session
 that has a console. Phases a to d start and kill engines of their own; nothing
@@ -121,6 +125,73 @@ def stop_verdict(exit_code: object, *, expected: int = CLEAN_STOP_EXIT_CODE) -> 
 def landed_in_init(text: str) -> bool:
     """True when the stop arrived while ONNX Runtime was initialising (the gate logged that it deferred the exit)."""
     return "event=ort_init_shutdown_wait " in text
+
+
+def _get(d: object, *path: str) -> object:
+    """``d[path[0]][path[1]]...`` through mappings; None when any step is missing or not a mapping."""
+    for key in path:
+        if not isinstance(d, Mapping):
+            return None
+        d = d.get(key)
+    return d
+
+
+def _stop_problems(label: str, exit_code: object) -> list[str]:
+    verdict = stop_verdict(exit_code)
+    return [] if verdict == "clean" else [f"{label}: stop was {verdict}, expected a clean exit {CLEAN_STOP_EXIT_CODE}"]
+
+
+def phase_problems(phase: str, res: Mapping[str, object]) -> list[str]:
+    """What a phase's result says is wrong. An empty list means the phase proved what it exists to prove.
+
+    The probe used to record and exit 0 whatever happened. As the only recurring instrument for the
+    stop-at-a-chosen-instant phases (a to c) it must fail on a phase error, a trigger that did not fire
+    where it was meant to, no stop landing inside ORT init, a stop that was not a clean 149, a second
+    boot that re-applied changesets, or a crash artifact."""
+    if "error" in res:
+        return [f"phase {phase} raised: {res['error']}"]
+    problems: list[str] = []
+    if phase == "a":
+        seen = _get(res, "boot1_break_before_lock", "seen")
+        if seen != "migration_pending":
+            problems.append(f"a: the stop was to land before the changelog lock, the trigger saw {seen!r}")
+        problems += _stop_problems("a boot 1", _get(res, "boot1_break_before_lock", "exit_code"))
+        if _get(res, "boot2_plain", "seen") != "ready":
+            problems.append(f"a: the boot after the early stop did not reach ready (saw {_get(res, 'boot2_plain', 'seen')!r})")
+        problems += _stop_problems("a boot 2", _get(res, "boot2_plain", "stop_exit_code"))
+    elif phase == "b":
+        seen = _get(res, "boot1_break_mid_changeset", "seen")
+        if not (isinstance(seen, str) and seen.startswith("changesets_running=")):
+            problems.append(f"b: the stop was to land mid-changeset, the trigger saw {seen!r}")
+        problems += _stop_problems("b boot 1", _get(res, "boot1_break_mid_changeset", "exit_code"))
+    elif phase == "c":
+        problems += _stop_problems("c warm boot", res.get("warm_stop_exit"))
+        sweep = res.get("sweep")
+        if not isinstance(sweep, list) or not sweep:
+            problems.append("c: no sweep rows were recorded")
+            sweep = []
+        for i, row in enumerate(sweep):
+            if not isinstance(row, Mapping):
+                continue
+            if row.get("seen") != "onnx_model_root":
+                problems.append(f"c offset row {i}: the trigger saw {row.get('seen')!r}, not onnx_model_root (the stop was not placed)")
+            problems += _stop_problems(f"c offset row {i}", row.get("exit_code"))
+        landed = res.get("landed_count")
+        if not isinstance(landed, int) or landed < 1:
+            problems.append(f"c: no stop landed inside ORT init (landed_count={landed!r}); the sweep proved nothing about that window")
+        problems += _stop_problems("c next boot", _get(res, "next_boot", "stop_exit_code"))
+    elif phase == "d":
+        problems += _stop_problems("d serving stop", _get(res, "serving_stop", "exit_code"))
+        for flag in ("shutdown_signal_logged", "service_stopped_logged"):
+            if _get(res, "serving_stop", flag) is not True:
+                problems.append(f"d: the serving stop did not log {flag.removesuffix('_logged')}")
+        problems += _stop_problems("d next boot", _get(res, "next_boot", "stop_exit_code"))
+        if _get(res, "next_boot", "new_changesets") != 0:
+            problems.append(f"d: the second boot applied changesets (new_changesets={_get(res, 'next_boot', 'new_changesets')!r}), expected 0")
+    artifacts = res.get("crash_artifacts")
+    if artifacts:
+        problems.append(f"{phase}: crash artifacts found: {artifacts}")
+    return problems
 
 
 def free_port() -> int:
@@ -476,6 +547,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
     cfg = Config(args.exe, args.pg_bin, args.models, args.changelog_dir, args.run_dir, args.ort_wait_ms)
     cfg.run_dir.mkdir(parents=True, exist_ok=True)
+    verdicts: dict[str, list[str]] = {}
     for ph in args.phases:
         t = time.time()
         try:
@@ -485,11 +557,19 @@ def main(argv: Sequence[str] | None = None) -> int:
 
             res = {"error": repr(e), "tb": traceback.format_exc()[-1500:]}
         res["phase_wall_s"] = round(time.time() - t, 1)
+        problems = phase_problems(ph, res)
+        res["verdict"] = "FAIL" if problems else "PASS"
+        res["problems"] = problems
         text = json.dumps(res, indent=1, default=str)
         (cfg.run_dir / f"results-{ph}.json").write_text(text)
         print(f"=== phase {ph}")
         print(text)
-    return 0
+        verdicts[ph] = problems
+    for ph, problems in verdicts.items():
+        print(f"PROBE phase {ph}: {'FAIL' if problems else 'PASS'}")
+        for line in problems:
+            print(f"  - {line}")
+    return 1 if any(verdicts.values()) else 0
 
 
 if __name__ == "__main__":

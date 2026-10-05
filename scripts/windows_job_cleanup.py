@@ -21,7 +21,8 @@ and a name-only match would kill them. Paths are compared in their long,
 resolved form, case-insensitively, on a path boundary (``C:\\w`` is not ``C:\\work``).
 
 Exit 0 when nothing matched or every match was stopped; 1 when a match could
-not be stopped (the job then fails visibly rather than leaving the box dirty);
+not be stopped or the process listing came back empty (the job then fails visibly
+rather than leaving the box dirty or reporting a clean it never checked);
 2 on bad arguments or off Windows. Stdlib only. Tests: tests/test_windows_job_cleanup.py.
 
 Usage::
@@ -123,7 +124,14 @@ def run(
     emit: Callable[[str], None] = print,
     dry_run: bool = False,
 ) -> int:
-    victims = select_victims(lister(), roots, images, long_path=long_path, self_pid=os.getpid())
+    procs = lister()
+    # The denominator. A listing that returned nothing on a running Windows machine (this very process
+    # is on it) is a broken listing, and "no stray process" over it would be a vacuous clean.
+    emit(f"cleanup: examined {len(procs)} process(es) with an executable path")
+    if not procs:
+        emit("cleanup: the process listing is empty, so nothing was checked")
+        return 1
+    victims = select_victims(procs, roots, images, long_path=long_path, self_pid=os.getpid())
     if not victims:
         emit("cleanup: no stray engine or postgres process under the job's directories")
         return 0

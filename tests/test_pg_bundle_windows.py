@@ -815,6 +815,15 @@ def test_runtime_presence_check_names_the_missing_dll(tmp_path: Path) -> None:
         sm.check_runtime_present(root)
 
 
+def test_runtime_presence_check_refuses_a_bundle_without_the_notice(tmp_path: Path) -> None:
+    """The licence condition (P0.6): the four DLLs ship with THIRD-PARTY-NOTICES.txt or not at all."""
+    root = _smoke_root(tmp_path, windows=True)
+    sm.check_runtime_present(root)
+    (root / "THIRD-PARTY-NOTICES.txt").unlink()
+    with pytest.raises(sm.SmokeError, match="THIRD-PARTY-NOTICES.txt missing"):
+        sm.check_runtime_present(root)
+
+
 def test_materialise_extracts_the_archive_the_build_packages(tmp_path: Path) -> None:
     archive = bw.package(stage_bundle(tmp_path / "w" / "bundle"), tmp_path / "dist")
     root = sm.materialise(archive, archive=True, dest=tmp_path / "fresh")

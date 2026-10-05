@@ -36,6 +36,9 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
+import sys
+import zipfile
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
@@ -529,3 +532,82 @@ def test_platform_glob_detector_catches(glob: str) -> None:
 )
 def test_platform_glob_detector_passes_ordinary_resources(glob: str) -> None:
     assert not _names_platform_native_library(glob)
+
+
+# --------------------------------------------------------------------------- #
+# The committed listing against the REAL jars (RDR-224 review finding 6)
+# --------------------------------------------------------------------------- #
+#
+# tests/fixtures/native_jar_listings.txt is the evidence several tests above are built on, and it is
+# checked against the pom (test_ort_listing_is_the_jar_the_pom_pins) but only
+# `scripts/native_jar_listing.py --check` compares it with the jars. The CI lint job has no ~/.m2, so
+# the real comparison cannot run there. It runs where the jars exist: the Java CI job resolves them
+# for the Maven build and calls --check (a step that fails loudly, never skips); locally, the lint
+# test below runs it whenever ~/.m2 has the jars. The hermetic tests prove the check itself, and the
+# wiring test fails if the Java job loses the step, so a skip in the lint leg is covered, not vacuous.
+
+import native_jar_listing as njl  # noqa: E402 - scripts/ is on pythonpath
+
+
+def _synthetic_m2(root: Path, extra: dict[str, list[str]] | None = None) -> Path:
+    """A Maven repository holding, for each listed jar, a jar whose entries are exactly the committed listing's."""
+    extra = extra or {}
+    for group, artifact, prop, _prefix in njl.JARS:
+        version = njl.pom_property(prop)
+        entries = _LISTING[artifact][1] + extra.get(artifact, [])
+        path = njl.jar_path(root, group, artifact, version)
+        path.parent.mkdir(parents=True)
+        with zipfile.ZipFile(path, "w") as jar:
+            for name in entries:
+                jar.writestr(name, b"x")
+            jar.writestr("some/Unrelated.class", b"x")  # not under a listed prefix and not listed
+    return root
+
+
+def test_the_listing_check_accepts_jars_that_hold_exactly_the_committed_entries(tmp_path: Path) -> None:
+    m2 = _synthetic_m2(tmp_path / "repo")
+    assert njl.main(["--check", "--m2", str(m2)]) == 0
+
+
+def test_the_listing_check_fails_when_a_jar_gained_an_entry(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    m2 = _synthetic_m2(tmp_path / "repo", {"onnxruntime": ["ai/onnxruntime/native/win-x64/surprise.dll"]})
+    assert njl.main(["--check", "--m2", str(m2)]) == 1
+    assert "differs from the jars" in capsys.readouterr().err
+
+
+def test_the_listing_check_fails_loudly_when_the_jars_are_absent(tmp_path: Path) -> None:
+    with pytest.raises(SystemExit, match="jar not found"):
+        njl.main(["--check", "--m2", str(tmp_path / "empty")])
+
+
+def _real_m2_has_the_jars() -> bool:
+    m2 = Path.home() / ".m2" / "repository"
+    return all(njl.jar_path(m2, g, a, njl.pom_property(prop)).is_file() for g, a, prop, _ in njl.JARS)
+
+
+@pytest.mark.lint
+def test_the_committed_jar_listing_matches_the_real_jars() -> None:
+    """Skips only where ~/.m2 lacks the jars (the CI lint job); the Java CI job runs the same check
+    without a skip path (test_the_java_ci_job_runs_the_jar_listing_check)."""
+    if not _real_m2_has_the_jars():
+        pytest.skip("no ~/.m2 jars here; the service-ci Java job runs scripts/native_jar_listing.py --check")
+    r = subprocess.run(
+        [sys.executable, str(ROOT / "scripts" / "native_jar_listing.py"), "--check"],
+        capture_output=True, text=True, timeout=120,
+    )
+    assert r.returncode == 0, r.stdout + r.stderr
+
+
+def test_the_java_ci_job_runs_the_jar_listing_check() -> None:
+    """The non-skipping home of the real-jar comparison: after the Java build resolved the jars."""
+    import yaml  # noqa: PLC0415
+
+    doc = yaml.safe_load((ROOT / ".github" / "workflows" / "service-ci.yml").read_text(encoding="utf-8"))
+    steps = doc["jobs"]["java-test-and-drift-guard"]["steps"]
+    runs = [str(st.get("run", "")) for st in steps]
+    idx = [i for i, r in enumerate(runs) if "scripts/native_jar_listing.py --check" in "\n".join(
+        ln for ln in r.splitlines() if not ln.lstrip().startswith("#"))]
+    assert len(idx) == 1, "service-ci's Java job must call scripts/native_jar_listing.py --check exactly once"
+    build = next(i for i, r in enumerate(runs) if "./mvnw -q test" in r)
+    assert idx[0] > build, "the jars are in ~/.m2 only after the Maven build resolved them"
+    assert "if" not in steps[idx[0]], "a conditional check is a check that can be skipped"

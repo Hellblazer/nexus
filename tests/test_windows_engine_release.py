@@ -229,6 +229,54 @@ def test_extract_embedded_keeps_two_origins_of_one_resource_apart(tmp_path: Path
     assert len({e.path for e in out}) == 2
 
 
+WINDOWS_FIXTURES = REPO / "tests" / "fixtures" / "windows_engine"
+
+
+def test_the_windows_shaped_embedded_resources_fragment_passes_the_checker_and_names_its_libraries() -> None:
+    """tests/fixtures/windows_engine/embedded-resources-fragment.json (see PROVENANCE.md: derived, with real
+    member sizes and the file:///C:/ origin form GraalVM printed on Windows) against both consumers."""
+    report = wer.read_report(WINDOWS_FIXTURES / "embedded-resources-fragment.json")
+    assert chk.check_report(report, chk.PLATFORMS["windows-x64"]) == []
+    names = {str(i["name"]).lstrip("/") for i in report}
+    assert set(chk.PLATFORMS["windows-x64"].required) <= names
+    assert all(str(e["origin"]).startswith("file:///C:/") for i in report for e in i["entries"])
+
+
+def test_extract_embedded_reads_windows_file_uris_through_the_windows_url_to_path_rule(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """On Windows urllib maps /C:/Users/... to C:\\Users\\...; nturl2path is that rule on every OS. The jars are
+    staged where the mapped path lands (the C:\\Users\\Sam\\.m2 prefix swapped for a temp directory)."""
+    import nturl2path
+
+    report = wer.read_report(WINDOWS_FIXTURES / "embedded-resources-fragment.json")
+    seen: list[str] = []
+
+    def windows_url2pathname(path: str) -> str:
+        win = nturl2path.url2pathname(path)
+        seen.append(win)
+        assert win.startswith("C:\\"), win
+        return win.replace("C:\\Users\\Sam\\.m2", str(tmp_path / "m2")).replace("\\", "/")
+
+    monkeypatch.setattr(wer.urllib.request, "url2pathname", windows_url2pathname)
+    members: dict[str, dict[str, bytes]] = {}
+    for item in report:
+        name = str(item["name"]).lstrip("/")
+        if not name.endswith(".dll"):
+            continue
+        origin = windows_url2pathname(wer.urllib.parse.urlparse(item["entries"][0]["origin"]).path)
+        members.setdefault(origin, {})[name] = b"MZ-" + name.encode()
+    for origin, entries in members.items():
+        jar = Path(origin)
+        jar.parent.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(jar, "w") as z:
+            for n, data in entries.items():
+                z.writestr(n, data)
+    out = wer.extract_embedded(report, tmp_path / "x")
+    assert sorted(e.resource for e in out) == sorted(chk.PLATFORMS["windows-x64"].required)
+    assert any(s.startswith("C:\\Users\\Sam\\.m2\\repository\\com\\microsoft\\onnxruntime") for s in seen)
+
+
 # --------------------------------------------------------------------------- #
 # check_deps end to end, with the real captured dumpbin output
 # --------------------------------------------------------------------------- #
@@ -450,6 +498,25 @@ def _write_tar(path: Path, members: dict[str, bytes]) -> Path:
     return path
 
 
+def _write_members(path: Path, members: list[tuple[str, str, bytes]]) -> Path:
+    """Like :func:`_write_tar` but ordered, repeatable and typed: ``(name, kind, data)`` with kind one of
+    ``file``, ``dir``, ``symlink`` (data is the link target)."""
+    with lzma.open(path, "wb") as xz, tarfile.open(fileobj=xz, mode="w") as tf:
+        for name, kind, data in members:
+            ti = tarfile.TarInfo(name)
+            if kind == "dir":
+                ti.type = tarfile.DIRTYPE
+                tf.addfile(ti)
+            elif kind == "symlink":
+                ti.type = tarfile.SYMTYPE
+                ti.linkname = data.decode()
+                tf.addfile(ti)
+            else:
+                ti.size = len(data)
+                tf.addfile(ti, io.BytesIO(data))
+    return path
+
+
 GOOD = {"nexus-service.exe": b"MZ", **{d: b"MZ" for d in bw.VC_RUNTIME_DLLS}, "THIRD-PARTY-NOTICES.txt": b"n"}
 
 
@@ -469,6 +536,29 @@ GOOD = {"nexus-service.exe": b"MZ", **{d: b"MZ" for d in bw.VC_RUNTIME_DLLS}, "T
 def test_verify_archive_names_each_defect(tmp_path: Path, mutate, expect: str) -> None:
     problems = wer.verify_archive(_write_tar(tmp_path / "a.txz", mutate(GOOD)))
     assert problems and any(expect in p for p in problems), problems
+
+
+_GOOD_LIST = [(k, "file", v) for k, v in {"nexus-service.exe": b"MZ", **{d: b"MZ" for d in bw.VC_RUNTIME_DLLS},
+                                           "THIRD-PARTY-NOTICES.txt": b"n"}.items()]
+
+
+@pytest.mark.parametrize(
+    "extra, expect",
+    [
+        ([("bundle", "dir", b"")], "nested directory member 'bundle'"),
+        ([("msvcp140.dll", "file", b"MZ")], "duplicate member 'msvcp140.dll'"),
+        ([("link.dll", "symlink", b"msvcp140.dll")], "non-regular member 'link.dll'"),
+        ([("other.exe", "file", b"MZ")], "other.exe: an executable other than nexus-service.exe"),
+        ([("OTHER.EXE", "file", b"MZ")], "OTHER.EXE: an executable other than nexus-service.exe"),
+    ],
+    ids=["nested-dir", "duplicate", "symlink", "extra-exe", "extra-exe-upper-case"],
+)
+def test_verify_archive_names_each_structural_defect(tmp_path: Path, extra, expect: str) -> None:
+    """The member-by-member checks: a directory, a repeated name, a non-regular member and a second
+    executable each get their own message, and the good archive without them has none."""
+    assert wer.verify_archive(_write_members(tmp_path / "good.txz", _GOOD_LIST)) == []
+    problems = wer.verify_archive(_write_members(tmp_path / "bad.txz", _GOOD_LIST + extra))
+    assert expect in problems, problems
 
 
 def test_verify_archive_reports_an_unreadable_archive(tmp_path: Path) -> None:

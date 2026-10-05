@@ -369,9 +369,9 @@ def find_redist(vs_path: Path) -> Redist:
         if not numbered:
             raise BuildError(f"no versioned redist folder under {base}")
         version = numbered[-1].name
+    # debug_nonredist is a sibling of x64 (<version>/debug_nonredist/x64/...DebugCRT), so scanning only
+    # <version>/x64 for the release CRT folders never reaches it; no guard is needed here.
     for crt in sorted((base / version / "x64").glob("Microsoft.VC*.CRT")):
-        if "debug_nonredist" in crt.parts:
-            continue
         if all((crt / dll).is_file() for dll in VC_RUNTIME_DLLS):
             return Redist(crt, version)
     raise BuildError(
