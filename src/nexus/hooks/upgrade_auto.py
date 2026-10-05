@@ -32,12 +32,33 @@ so it still runs when ``nx`` is old or absent; it detects the skew, emits an
 reinstall. This line is the cruder duplicate that predates it, kept because a
 box with no ``nx`` at all is one the lockstep hook cannot upgrade either, and
 then a sentence on stderr is the only thing left.
+
+**The child is detached and the hook does not wait for it (nexus-wozn6).**
+Since 7.68 ``nx upgrade --auto`` walks the RDR-192 rung, which is pending
+after every package-version change and whose census read every collection in
+turn: measured 51.5 s over 98 collections on 2026-10-05, plus about 2.7 s of
+fixed work, against this hook's 30 s cap. The verb used to wait on the child
+with its streams on pipes, on the stated premise that Claude Code's kill would
+leave the child running to finish in the background. The ledger refutes that:
+7.70 and 7.71 were each installed, each saw a run of cancelled SessionStarts
+(84 cancelled across the transcripts, every one at the 30 s timeout), and
+neither ever recorded the rung, which one surviving 55 s child would have
+done. The child died with the hook, so every session after a version change
+paid 30 s and converged nothing. The nexus-34f7r measurement of the
+SessionEnd launcher shows the mechanism: a cancelled hook's kill walks the
+process tree and reaches a child through its still-living parent. So the
+child now starts in a session of its own with its streams on the null device,
+and the hook waits at most :data:`_SKEW_WAIT_S` and returns, long before any
+cancel; an orphan nobody kills then runs its upgrade to completion.
 """
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import sys
+import warnings
+from typing import Any
 
 from nexus._hook_runtime._io import HookResult
 
@@ -50,16 +71,53 @@ SKEW_GUIDANCE = (
 )
 
 
+#: How long the hook waits for the child before leaving it to run on. Long
+#: enough to see the skew case: an ``nx`` that does not know ``--auto`` exits
+#: 2 on the flag in about 0.17 s (measured 2026-10-05). Far short of the 30 s
+#: cap in hooks.json, so the hook is never the process a cancel kills.
+_SKEW_WAIT_S = 2.0
+
+# Windows creation flags, by value so this module never imports anything for
+# them: DETACHED_PROCESS, CREATE_NEW_PROCESS_GROUP, CREATE_BREAKAWAY_FROM_JOB
+# (the same three ``nexus._session_end_launcher`` uses, nexus-34f7r).
+_DETACHED_PROCESS = 0x00000008
+_CREATE_NEW_PROCESS_GROUP = 0x00000200
+_CREATE_BREAKAWAY_FROM_JOB = 0x01000000
+
+
+def _spawn_detached(argv: list[str]) -> subprocess.Popen[Any]:
+    """Start *argv* outside the hook's session (POSIX) or process group and
+    job (Windows), with every stream on the null device. Raises ``OSError``
+    when no attempt could start it."""
+    common: dict[str, Any] = {
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+        "close_fds": True,
+    }
+    if os.name != "nt":
+        return subprocess.Popen(argv, start_new_session=True, **common)  # noqa: S603 — argv list, resolved binary, no shell
+    base = _DETACHED_PROCESS | _CREATE_NEW_PROCESS_GROUP
+    try:
+        return subprocess.Popen(argv, creationflags=base | _CREATE_BREAKAWAY_FROM_JOB, **common)  # noqa: S603 — argv list, resolved binary, no shell
+    except OSError:
+        # A job that forbids breakaway refuses the flag; start without it.
+        return subprocess.Popen(argv, creationflags=base, **common)  # noqa: S603 — argv list, resolved binary, no shell
+
+
 def run(payload: dict | None) -> HookResult:  # noqa: ARG001 — reads no stdin, as the shell form read none
-    """Spawn ``nx upgrade --auto``; emit :data:`SKEW_GUIDANCE` if it fails.
+    """Start ``nx upgrade --auto`` detached; emit :data:`SKEW_GUIDANCE` if it
+    fails inside :data:`_SKEW_WAIT_S`.
 
     Returns a stdout-silent :class:`HookResult` on every path. The child's
-    streams are CAPTURED rather than inherited, which is what ``2>/dev/null``
-    did for stderr and is a deliberate tightening for stdout: under the shell
-    form the child inherited fd 1, so anything ``nx`` printed there was handed
-    to Claude Code as this hook's JSON decision.
+    streams go to the null device, which is what ``2>/dev/null`` did for
+    stderr and is a deliberate tightening for stdout: under the shell form the
+    child inherited fd 1, so anything ``nx`` printed there was handed to
+    Claude Code as this hook's JSON decision. Null rather than a pipe because
+    the child outlives this process, and a write to a pipe whose reader has
+    exited kills the writer with SIGPIPE.
 
-    Capturing stdout loses nothing, and that was checked rather than assumed.
+    Discarding stdout loses nothing, and that was checked rather than assumed.
     Every ``click.echo`` on this command's path is guarded by
     ``not auto_mode`` (``nexus.commands.upgrade``: the precondition lines, the
     per-rung convergence lines, the empty-registry line, the deferred-rung
@@ -67,35 +125,32 @@ def run(payload: dict | None) -> HookResult:  # noqa: ARG001 — reads no stdin,
     hook invocation reaches. Under ``--auto`` and without ``--dry-run`` the
     command is silent on stdout by construction, so the shell form was
     forwarding an empty stream to the decision channel.
+
+    No timeout kills the child, deliberately: a kill partway through a ladder
+    rung is worse than letting it finish unattended, and the rung's own
+    cross-process lock turns concurrent session starts into quick deferrals.
     """
     nx = shutil.which("nx")
     if nx is None:
         sys.stderr.write(SKEW_GUIDANCE + "\n")
         return HookResult()
     try:
-        proc = subprocess.run(  # noqa: S603 — argv list, resolved binary, no shell
-            [nx, "upgrade", "--auto"],
-            capture_output=True,
-            text=True,
-            stdin=subprocess.DEVNULL,
-        )
-    except OSError:
+        proc = _spawn_detached([nx, "upgrade", "--auto"])
+    except (OSError, ValueError):
         # The spawn itself failed (no fork, bad exec). The shell saw this as a
         # nonzero status and fired the same `||`.
         sys.stderr.write(SKEW_GUIDANCE + "\n")
         return HookResult()
-    # NO `timeout=` HERE, AND THAT IS THE DECISION, not an omission. Code
-    # review proposed one, citing `_cycle_storage_service_to_current`'s
-    # `timeout=60` as the house pattern. It is the wrong pattern for this
-    # call. `hooks.json` gives this hook 30 s; Claude Code enforces that on
-    # the `nx-hook` process, and an orphaned `nx upgrade --auto` then RUNS TO
-    # COMPLETION in the background and takes effect at the next session --
-    # which is the accepted shape RDR-143 CA-4 already relies on for the
-    # detached lockstep upgrade ("the new CLI takes effect on the next
-    # session, not the current one"). A `subprocess.run(timeout=...)` would
-    # instead SIGKILL a legitimate in-flight upgrade partway through a ladder
-    # rung. Letting it finish unattended is the better failure, so the
-    # 30 s budget stays where it is and this call does not add a second one.
-    if proc.returncode != 0:
+    try:
+        returncode = proc.wait(timeout=_SKEW_WAIT_S)
+    except subprocess.TimeoutExpired:
+        # Still running: an upgrade doing real work, not skew. Leave it. The
+        # handle is dropped on purpose; Popen.__del__ would otherwise print
+        # "subprocess N is still running" on the hook's stderr.
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", ResourceWarning)
+            del proc
+        return HookResult()
+    if returncode != 0:
         sys.stderr.write(SKEW_GUIDANCE + "\n")
     return HookResult()
