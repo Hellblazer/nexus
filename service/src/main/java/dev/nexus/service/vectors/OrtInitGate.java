@@ -38,7 +38,7 @@ import java.util.function.UnaryOperator;
  * immediately) with ones that, on a fresh thread, {@link #quiesce close the gate
  * to new inits and wait, bounded, for in-flight ones} and only then call
  * {@code System.exit(128+n)}, the exit status the default handlers produce.
- * On Windows the set also holds BREAK, the CTRL_BREAK stop channel (see
+ * On Windows the set is TERM, INT and BREAK (there is no HUP), BREAK being the CTRL_BREAK stop channel (see
  * {@link #exitSignals(String)}). BREAK has no exit-style default to replace:
  * HotSpot answers it with a thread dump and native-image ignores it, so there the
  * handler is what makes the process stop at all, and it must go through the gate
@@ -106,28 +106,34 @@ public final class OrtInitGate {
     /** Default shutdown wait bound; must stay under the supervisor's 5 s SIGKILL grace. */
     public static final long DEFAULT_WAIT_MILLIS = 3_000L;
 
-    /** Signals whose default JVM handler is {@code System.exit(128 + n)}, on every platform. */
+    /** POSIX: signals whose default JVM handler is {@code System.exit(128 + n)}. */
     private static final List<String> POSIX_EXIT_SIGNALS = List.of("TERM", "INT", "HUP");
 
+    /** Windows: TERM and INT install, HUP does not exist there, BREAK is the stop channel. */
+    private static final List<String> WINDOWS_EXIT_SIGNALS = List.of("TERM", "INT", "BREAK");
+
     /**
-     * The signal set to take over on the OS named {@code osName} ({@code os.name}). On Windows,
-     * {@code BREAK} is added: the stop channel there is CTRL_BREAK (RDR-224 Gap 4, nexus-f9bgu.8), and a
-     * native-image process silently ignores it unless {@code BREAK} has a handler. BREAK is not an
-     * exit-style signal: HotSpot's default for it is a thread dump, not {@code System.exit}, and HotSpot
-     * refuses {@code Signal.handle} for it.
+     * The signal set to take over on the OS named {@code osName} ({@code os.name}). Each set is what
+     * {@code Signal.handle} accepts there, so a normal boot never logs
+     * {@code ort_init_signal_gate_unavailable}.
      *
-     * <p>{@code BREAK} is requested ONLY on Windows. Measured 2026-10-05: on macOS arm64 (JDK 25.0.3), Linux
-     * amd64 and Linux arm64 (Temurin 25.0.4) {@code Signal.handle(new Signal("BREAK"), ..)} throws
-     * {@code IllegalArgumentException: Unknown signal: BREAK}, so asking for it there would log
-     * {@code ort_init_signal_gate_unavailable} on every boot. {@code HUP} is the mirror case: unknown on
-     * Windows, so it still logs that warning there (spiked fact, left as is).
+     * <p><b>Windows: TERM, INT, BREAK.</b> The stop channel is CTRL_BREAK (RDR-224 Gap 4, nexus-f9bgu.8), and
+     * a native-image process silently ignores it unless {@code BREAK} has a handler. BREAK is not an
+     * exit-style signal: HotSpot's default for it is a thread dump, not {@code System.exit}, and HotSpot
+     * refuses {@code Signal.handle} for it ({@code Signal already used by VM or OS: SIGBREAK}), so on a
+     * Windows JVM, as opposed to the native engine, BREAK is logged unavailable and skipped. {@code HUP} is
+     * left out. Measured 2026-10-05 on Windows 11 (GraalVM 25.0.3): {@code Signal.handle(new Signal("HUP"),
+     * ..)} throws {@code IllegalArgumentException: Unknown signal: HUP} in both JVM and native-image mode,
+     * while TERM and INT install in both and BREAK installs in native-image.
+     *
+     * <p><b>Elsewhere: TERM, INT, HUP.</b> {@code BREAK} is requested ONLY on Windows. Measured 2026-10-05:
+     * on macOS arm64 (JDK 25.0.3), Linux amd64 and Linux arm64 (Temurin 25.0.4)
+     * {@code Signal.handle(new Signal("BREAK"), ..)} throws {@code IllegalArgumentException: Unknown signal:
+     * BREAK}.
      */
     static List<String> exitSignals(String osName) {
         boolean windows = osName != null && osName.toLowerCase(java.util.Locale.ROOT).startsWith("windows");
-        if (!windows) return POSIX_EXIT_SIGNALS;
-        List<String> all = new java.util.ArrayList<>(POSIX_EXIT_SIGNALS);
-        all.add("BREAK");
-        return List.copyOf(all);
+        return windows ? WINDOWS_EXIT_SIGNALS : POSIX_EXIT_SIGNALS;
     }
 
     /** Thrown by {@link #enter(String)} once shutdown has begun. */

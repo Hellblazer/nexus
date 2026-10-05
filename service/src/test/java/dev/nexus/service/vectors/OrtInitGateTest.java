@@ -184,7 +184,55 @@ class OrtInitGateTest {
         assertThat(signals.handlers.keySet())
                 .as("CTRL_BREAK reaches a native-image process only through a BREAK handler; "
                         + "without one it is silently ignored")
-                .containsExactly("TERM", "INT", "HUP", "BREAK");
+                .containsExactly("TERM", "INT", "BREAK");
+    }
+
+    @Test
+    void onWindowsHupIsNeverRequested() {
+        // Measured 2026-10-05 on Windows 11 (GraalVM 25.0.3, JVM and native-image):
+        // Signal.handle(new Signal("HUP"), ..) throws IllegalArgumentException: Unknown signal: HUP.
+        for (String os : List.of("Windows 11", "Windows Server 2022", "WINDOWS 10")) {
+            assertThat(OrtInitGate.exitSignals(os)).as(os).doesNotContain("HUP")
+                    .containsExactly("TERM", "INT", "BREAK");
+        }
+        assertThat(OrtInitGate.exitSignals("Linux")).as("POSIX keeps HUP").contains("HUP");
+    }
+
+    /**
+     * Windows as measured 2026-10-05 (Windows 11, GraalVM 25.0.3, native-image): TERM, INT and BREAK
+     * install, HUP throws {@code IllegalArgumentException: Unknown signal: HUP}.
+     */
+    private static final class WindowsLikeSignals implements OrtInitGate.SignalInstaller {
+        final List<String> requested = new ArrayList<>();
+        @Override
+        public void install(String name, java.util.function.IntConsumer onSignal) {
+            requested.add(name);
+            if (name.equals("HUP")) {
+                throw new IllegalArgumentException("Unknown signal: HUP");
+            }
+        }
+    }
+
+    @Test
+    void theWindowsGateLogsNoUnavailableWarningOnAWindowsLikeJvm() {
+        for (String os : List.of("Windows 11", "Windows Server 2022")) {
+            WindowsLikeSignals signals = new WindowsLikeSignals();
+            List<String> logs = captureLogs(() ->
+                    new OrtInitGate(5_000, signals, status -> { }, os).installSignalHandlers());
+            assertThat(signals.requested).as(os).containsExactly("TERM", "INT", "BREAK");
+            assertThat(logs).as(os + ": no ort_init_signal_gate_unavailable on a Windows boot")
+                    .noneMatch(l -> l.contains("ort_init_signal_gate_unavailable"));
+        }
+    }
+
+    @Test
+    void aPosixGateOnAWindowsLikeJvmDoesLogTheUnavailableWarningForHup() {
+        // Non-vacuity of the test above: the same installer and capture see the warning when HUP is asked.
+        WindowsLikeSignals signals = new WindowsLikeSignals();
+        List<String> logs = captureLogs(() ->
+                new OrtInitGate(5_000, signals, status -> { }, "Linux").installSignalHandlers());
+        assertThat(signals.requested).contains("HUP");
+        assertThat(logs).anyMatch(l -> l.contains("ort_init_signal_gate_unavailable") && l.contains("HUP"));
     }
 
     @Test
