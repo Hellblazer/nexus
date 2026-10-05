@@ -292,10 +292,95 @@ def test_port_never_accepting_raises_with_the_log_tail(start_env, monkeypatch: p
 
 def test_a_pg_ctl_that_never_returns_is_killed_and_times_out(start_env, monkeypatch: pytest.MonkeyPatch) -> None:
     bins, pgdata, *_ = start_env
+    # The wait is a loop of short ticks (nexus-f9bgu.17), so the overall bound
+    # is the deadline, not one wait() raising. Shorten both so the test is quick.
+    monkeypatch.setattr(pp, "_PG_CTL_WAIT_TIMEOUT_S", 0.3)
+    monkeypatch.setattr(pp, "_PG_CTL_WAIT_TICK_S", 0.05)
     proc = _Proc(0, wait_raises=subprocess.TimeoutExpired("pg_ctl", 1))
     with pytest.raises(subprocess.TimeoutExpired):
         _start_cluster(bins, pgdata, 5433, platform="win32", popen=_Spawner(proc))
     assert proc.killed
+
+
+# ── nexus-f9bgu.17: the wait is a loop of ticks the supervisor's SIGBREAK
+# handler can run between (a CPython handler does not run inside one long wait) ──
+
+
+class _TickingProc:
+    """Times out `timeouts` times, recording each wait's timeout, then exits 0."""
+
+    def __init__(self, timeouts: int) -> None:
+        self.remaining = timeouts
+        self.waits: list[float | None] = []
+        self.killed = False
+        self.returncode = 0
+
+    def wait(self, timeout: float | None = None) -> int:
+        self.waits.append(timeout)
+        if self.remaining > 0:
+            self.remaining -= 1
+            raise subprocess.TimeoutExpired("pg_ctl", timeout or 0)
+        return 0
+
+    def kill(self) -> None:
+        self.killed = True
+
+
+def test_windows_start_waits_in_ticks_no_longer_than_one_second(start_env) -> None:
+    bins, pgdata, *_ = start_env
+    proc = _TickingProc(timeouts=3)
+    _start_cluster(bins, pgdata, 5433, platform="win32", popen=_Spawner(proc))  # type: ignore[arg-type]
+    # Non-vacuity: it really waited more than once, and never in one long call.
+    assert len(proc.waits) == 4
+    assert all(w is not None and 0 < w <= 1.0 for w in proc.waits), proc.waits
+
+
+def test_a_stop_request_ends_the_wait_without_killing_pg_ctl(start_env) -> None:
+    """pg_ctl is what is bringing the postmaster up. Abandoning the wait must
+    leave it running: PostgreSQL is left running by design, and a killed
+    pg_ctl could leave a half-started cluster."""
+    bins, pgdata, *_ = start_env
+    proc = _TickingProc(timeouts=10_000)
+    checks = iter([False, False, True])
+    with pytest.raises(pp.StartInterruptedError):
+        _start_cluster(
+            bins, pgdata, 5433, platform="win32", popen=_Spawner(proc),  # type: ignore[arg-type]
+            stop_check=lambda: next(checks),
+        )
+    assert proc.killed is False
+    assert len(proc.waits) == 3  # one tick per check: the stop was seen at the third
+
+
+def test_stop_check_is_also_polled_while_waiting_for_the_port(start_env, monkeypatch: pytest.MonkeyPatch) -> None:
+    bins, pgdata, *_ = start_env
+    monkeypatch.setattr(pp, "_port_accepting", lambda host, port: False)
+    monkeypatch.setattr(pp, "_PG_ACCEPT_TIMEOUT_S", 30.0)
+    seen: list[bool] = []
+
+    def stop_check() -> bool:
+        seen.append(True)
+        return len(seen) >= 2
+
+    with pytest.raises(pp.StartInterruptedError):
+        _start_cluster(
+            bins, pgdata, 5433, platform="win32", popen=_Spawner(_Proc(0)),
+            stop_check=stop_check,
+        )
+    assert len(seen) >= 2
+
+
+def test_posix_start_ignores_stop_check(start_env, tmp_path: Path) -> None:
+    """POSIX behaviour is unchanged: the start goes through run_bounded and
+    nothing polls the stop request."""
+    bins, pgdata, bounded, _ = start_env
+    posix = PgBinaries.from_dir(tmp_path / "pbin", platform="linux")
+    polled: list[int] = []
+    _start_cluster(
+        posix, pgdata, 5433, platform="linux",
+        stop_check=lambda: polled.append(1) or True,
+    )
+    assert polled == []
+    assert bounded[-1][-2:] == ["start", "-w"]
 
 
 def test_log_tail_of_a_missing_file_is_a_marker_not_an_exception(tmp_path: Path) -> None:

@@ -12,7 +12,9 @@ logic lives in the shared primitive, not here. This module:
 2. Starts the native nexus-service binary (RDR-157 native-image; acquired via
    ``nx daemon service install-binary``) with the environment variables read
    from ``pg_credentials``, a free ``NX_SERVICE_PORT``, and process-group
-   isolation (``start_new_session=True`` / ``os.killpg`` on stop). The
+   isolation (``start_new_session=True`` / ``os.killpg`` on stop; on Windows
+   ``CREATE_NEW_PROCESS_GROUP`` plus a Job Object, stopped with ``CTRL_BREAK``,
+   RDR-224 nexus-f9bgu.17). The
    cosign-verified native binary is the production launch artifact (RDR-161).
    ``NEXUS_SERVICE_JAR`` is an EXPLICIT dev/test opt-in that launches a JVM
    (``java -jar``) instead — never auto-discovered, never a silent fallback,
@@ -69,6 +71,7 @@ import shutil
 import signal
 import socket
 import subprocess
+import sys
 
 # TEST SEAM (nexus-9p6sv): patch THIS attribute, never
 # ``daemon_mod.subprocess.Popen`` -- ``daemon_mod.subprocess`` IS the stdlib
@@ -93,6 +96,7 @@ from nexus.daemon import readiness
 from nexus.db.onnx_model_root import ENV_MODEL_DIR, service_onnx_models_root
 from nexus.db.service_bge_model import service_bge_engine_dir_mismatch
 from nexus.db.service_crossencoder_model import service_crossencoder_engine_dir_mismatch
+from nexus.util import win_job as _win_job
 from nexus.util.process_group import KILL_SIGNAL
 from nexus.daemon.appliance_handoff import HANDOFF_FILE_ENV
 from nexus.daemon.service_registry import (
@@ -972,6 +976,72 @@ def _daemon_version() -> str:
 # ── StorageServiceSupervisor ───────────────────────────────────────────────────
 
 
+def _install_stop_handlers(
+    stop_requested: threading.Event, *, signal_module: Any = signal,
+) -> None:
+    """Make SIGTERM, SIGINT and (on Windows) SIGBREAK set *stop_requested*.
+
+    ``CTRL_BREAK`` is the Windows stop signal (RDR-224, nexus-f9bgu.17): the
+    ``nx`` CLI sends it to the supervisor's console process group and CPython
+    raises it as ``SIGBREAK``. The same handler serves all three, so the stop
+    that follows (``StorageServiceSupervisor.stop``: mark shutting down,
+    relinquish, stop the engine) cannot diverge by platform.
+
+    A CPython ``SIGBREAK`` handler only runs when the main thread executes
+    bytecode, never inside one long wait (T2 ``nexus_rdr/224-research-22``),
+    so the main thread must wait in ticks no longer than
+    ``DEFAULT_HEARTBEAT_INTERVAL``. See :func:`_acquire_spawn_lock`,
+    ``pg_provision._PG_CTL_WAIT_TICK_S`` and the supervise loop's sleep.
+    """
+
+    def _on_signal(_signum: int, _frame: Any) -> None:
+        stop_requested.set()
+
+    signal_module.signal(signal_module.SIGTERM, _on_signal)
+    signal_module.signal(signal_module.SIGINT, _on_signal)
+    sigbreak = getattr(signal_module, "SIGBREAK", None)
+    if sigbreak is not None:
+        signal_module.signal(sigbreak, _on_signal)
+
+
+#: Pause between non-blocking spawn-lock attempts on Windows. Well inside the
+#: 1.0 s tick, so a ``SIGBREAK`` handler runs within one pause.
+_SPAWN_LOCK_POLL_S: float = 0.2
+
+
+def _acquire_spawn_lock(
+    lock_fd: int,
+    stop_requested: threading.Event | None,
+    *,
+    windows: bool,
+    lock: Callable[..., None] = _locking.lock_fd,
+    sleep: Callable[[float], None] = time.sleep,
+) -> None:
+    """Take the spawn lock, observing a stop request while waiting.
+
+    POSIX is the single blocking call it always was. On Windows the blocking
+    form is a loop of ``msvcrt.locking(LK_LOCK)``, each of which blocks about
+    ten seconds inside the C runtime, and no ``SIGBREAK`` handler runs while
+    it does (nexus-f9bgu.17). So Windows polls with the non-blocking form and a
+    short pause, and a stop request ends the wait with
+    :class:`readiness.ReadinessStopRequestedError`, which the supervise loop
+    already treats as a clean stop.
+    """
+    if not windows:
+        lock(lock_fd, blocking=True)  # lifecycle-gate-allow: spawn serialisation, not a lifecycle election
+        return
+    while True:
+        try:
+            lock(lock_fd, blocking=False)  # lifecycle-gate-allow: spawn serialisation, not a lifecycle election
+            return
+        except BlockingIOError:
+            if stop_requested is not None and stop_requested.is_set():
+                raise readiness.ReadinessStopRequestedError(
+                    "stop requested while waiting for the spawn lock"
+                ) from None
+            sleep(_SPAWN_LOCK_POLL_S)
+
+
 class StorageServiceSupervisor:
     """RDR-149 P5.1: the long-lived storage-service supervisor.
 
@@ -1001,6 +1071,14 @@ class StorageServiceSupervisor:
     orchestrates process management.
     """
 
+    # Class-level defaults for the Windows stop channel (nexus-f9bgu.17), so a
+    # supervisor built without ``__init__`` (the lifecycle conformance harness
+    # does this) still has them. ``__init__`` sets the instance values.
+    _platform: str = sys.platform
+    _win_job: Any = _win_job
+    _engine_job: int | None = None
+    _stop_requested: threading.Event | None = None
+
     def __init__(
         self,
         *,
@@ -1015,6 +1093,8 @@ class StorageServiceSupervisor:
         engine_liveness_scan: Callable[[Path, Path], list[tuple[int, str]]]
         | None = None,
         monotonic: Callable[[], float] = time.monotonic,
+        platform: str | None = None,
+        win_job_api: Any = None,
     ) -> None:
         # RDR-161: the cosign-verified native binary is the production launch
         # artifact. ``launch_kind="jar"`` is the explicit dev/test opt-in
@@ -1051,6 +1131,16 @@ class StorageServiceSupervisor:
             engine_liveness_scan or _default_engine_liveness_scan
         )
         self._scope = service_identity()
+        # RDR-224 (nexus-f9bgu.17): the Windows stop channel. *platform* and
+        # *win_job_api* are injection seams so the Windows branches run under
+        # test on every host; production leaves both None.
+        self._platform = platform if platform is not None else sys.platform
+        self._win_job = win_job_api if win_job_api is not None else _win_job
+        #: The Job Object holding the engine (Windows only). It holds the
+        #: engine and nothing else: PostgreSQL is never assigned to it.
+        self._engine_job: int | None = None
+        #: Set by ``start`` so the Windows PostgreSQL start can see a stop.
+        self._stop_requested: threading.Event | None = None
         self._proc: subprocess.Popen[bytes] | None = None
         # nexus-8vp0i: the byte offset into the engine log at the moment THIS
         # process was spawned, and the log path itself — captured in
@@ -1375,27 +1465,19 @@ class StorageServiceSupervisor:
         except OSError:
             self._log_offset_at_spawn = 0
         try:
-            # nexus-6y4e0 surveyed this site and left it unwired: the
-            # supervisor's identity (self._scope above) is now portable
-            # (service_identity(), nexus-f9bgu.16), but this spawn is still
-            # POSIX-shaped (start_new_session, preexec_fn); the Windows
-            # spawn flags and Job Object backstop belong to the Windows
-            # stop-channel work (RDR-224 P3.2b), not here.
             proc = _popen(
                 argv,
                 env=env,
                 stdout=svc_log,
                 stderr=svc_log,
-                start_new_session=True,
-                # nexus-03bcg: die with the supervisor (Linux PR_SET_PDEATHSIG) so
-                # an OOM-killed supervisor leaves no orphaned JVM. None off Linux.
-                preexec_fn=_set_pdeathsig_preexec if _LIBC is not None else None,
+                **self._engine_popen_kwargs(),
             )
         finally:
             # The child holds its own duplicated fd; the parent's handle is
             # no longer needed (and must not leak across respawns).
             if not isinstance(svc_log, int):
                 svc_log.close()
+        self._attach_engine_job(proc)
         _log.info(
             "storage_service_spawned",
             pid=proc.pid,
@@ -1406,6 +1488,117 @@ class StorageServiceSupervisor:
             service_log=getattr(svc_log, "name", "DEVNULL"),
         )
         return proc, port
+
+    def _is_windows(self) -> bool:
+        return self._platform == "win32"
+
+    def _engine_popen_kwargs(self) -> dict[str, Any]:
+        """``Popen`` kwargs that give the engine its own process group.
+
+        POSIX: ``start_new_session`` so one ``killpg`` reaches it, and
+        ``PR_SET_PDEATHSIG`` where Linux has it (nexus-03bcg). Windows:
+        ``CREATE_NEW_PROCESS_GROUP``, so the supervisor's ``CTRL_BREAK`` reaches
+        the engine and not the supervisor's own group. Not ``CREATE_NO_WINDOW``
+        and not ``DETACHED_PROCESS``: the engine must share the supervisor's
+        console, because ``GenerateConsoleCtrlEvent`` only reaches a group on the
+        caller's console (T2 ``nexus_rdr/224-research-20``, ``-21``).
+        """
+        if self._is_windows():
+            return {"creationflags": _win_job.CREATE_NEW_PROCESS_GROUP}
+        return {
+            "start_new_session": True,
+            # nexus-03bcg: die with the supervisor (Linux PR_SET_PDEATHSIG) so
+            # an OOM-killed supervisor leaves no orphaned JVM. None off Linux.
+            "preexec_fn": _set_pdeathsig_preexec if _LIBC is not None else None,
+        }
+
+    def _attach_engine_job(self, proc: subprocess.Popen[bytes]) -> None:
+        """Windows: put the just-spawned engine in a Job Object, the backstop
+        for an engine that ignores ``CTRL_BREAK`` (RDR-224, nexus-f9bgu.17).
+
+        The job is created with ``KILL_ON_JOB_CLOSE``, so it kills the engine
+        in two cases: the supervisor terminates it after the break grace
+        (:meth:`_kill_engine`), and the OS closes the supervisor's handle when
+        the supervisor itself dies, however it dies. The engine therefore never
+        outlives its supervisor on Windows, the counterpart of the Linux
+        ``PR_SET_PDEATHSIG`` and of the engine's own parent-death exit
+        (``NX_SERVICE_PARENT_DEATH_EXIT``).
+
+        THE JOB HOLDS THE ENGINE AND NOTHING ELSE. PostgreSQL is started by
+        ``pg_provision`` through its own ``Popen`` and is never assigned to this
+        job, so a supervisor stop or death leaves the postmaster running, as the
+        module docstring promises. The supervisor process itself is not put in a
+        job either, so no breakaway flag is needed for ``pg_ctl``. ``nx daemon
+        service stop --with-pg`` is what stops PostgreSQL, explicitly.
+
+        Degrades with a warning when the job cannot be made or the engine
+        cannot be assigned (a nested job refused by an older Windows, a
+        permission mismatch): the break and the hard kill still work, only the
+        tree-kill backstop is missing.
+        """
+        if not self._is_windows():
+            return
+        job = self._win_job.create_job()
+        if job is not None and self._win_job.assign_process(job, proc.pid):
+            self._engine_job = job
+            return
+        if job is not None:
+            self._win_job.close_job(job)
+        self._engine_job = None
+        _log.warning(
+            "storage_service_job_object_unavailable",
+            pid=proc.pid,
+            created=job is not None,
+            consequence="an engine that ignores CTRL_BREAK is stopped by TerminateProcess "
+            "(its own children are not reached) and the engine can outlive a killed supervisor",
+        )
+
+    def _release_engine_job(self) -> None:
+        """Close the engine's job handle if it is still held. Idempotent.
+
+        Closing it terminates anything still in the job, which after a clean
+        stop is nothing, and after a failed start is the engine we are done
+        with. It must run on every exit path or the handle leaks for the life
+        of the supervisor.
+        """
+        job, self._engine_job = self._engine_job, None
+        if job is not None:
+            self._win_job.close_job(job)
+
+    def _signal_engine(self, pid: int) -> None:
+        """The graceful stop of the engine: ``SIGTERM`` to its group on POSIX,
+        ``CTRL_BREAK`` on Windows. The send's result never decides that the
+        engine stopped; the caller waits for its exit."""
+        if self._is_windows():
+            sent = self._win_job.send_ctrl_break(pid)
+            if not sent:
+                _log.warning("storage_service_engine_break_not_sent", pid=pid)
+            return
+        from nexus.util.process_group import safe_killpg  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
+
+        safe_killpg(pid, signal.SIGTERM)
+
+    def _kill_engine(self, proc: subprocess.Popen[bytes]) -> None:
+        """The backstop, after the grace ran out. Windows with a job:
+        terminate the job, which takes the engine and anything it spawned.
+        Otherwise the platform's hard kill. Logged either way, so an unclean
+        stop is visible rather than silent (RDR-224 Failure Modes)."""
+        from nexus.util.process_group import safe_killpg  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
+
+        via = "hard_kill"
+        if self._is_windows() and self._engine_job is not None:
+            via = "job_object"
+        if self._is_windows():
+            _log.warning(
+                "storage_service_engine_unclean_stop",
+                pid=proc.pid,
+                grace_s=_GRACEFUL_STOP_TIMEOUT,
+                via=via,
+            )
+        if via == "job_object":
+            self._release_engine_job()
+        else:
+            safe_killpg(proc.pid)
 
     def _probe_service_health(self, port: int | None = None) -> "HealthProbe":
         """Classify ``GET /health`` into :class:`HealthProbe`.
@@ -1704,10 +1897,12 @@ class StorageServiceSupervisor:
             )
 
     def _kill_after_readiness_failure(self, proc: subprocess.Popen[bytes]) -> None:
-        """SIGTERM + grace window + SIGKILL, matching ``_stop_service`` (not
-        a bare SIGKILL) so the service can flush before it dies (POSIX: the
-        supervisor does not run on native Windows, where SIGTERM would be
-        TerminateProcess; nexus-6y4e0). Best-effort
+        """Graceful stop + grace window + hard stop, matching ``_stop_service``
+        (not a bare SIGKILL) so the service can flush before it dies. The
+        graceful stop is ``SIGTERM`` on POSIX and ``CTRL_BREAK`` on Windows
+        (:meth:`_signal_engine`); the hard stop is ``SIGKILL`` there and a
+        Job Object termination here (:meth:`_kill_engine`; RDR-224,
+        nexus-f9bgu.17). Best-effort
         — a signal failure (process already gone) must never mask the
         ``StorageServiceStartError`` this precedes.
 
@@ -1721,15 +1916,15 @@ class StorageServiceSupervisor:
         child actually exits, zombie ambiguity included.
         """
         with contextlib.suppress(Exception):
-            from nexus.util.process_group import safe_killpg  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
-
-            safe_killpg(proc.pid, signal.SIGTERM)
+            self._signal_engine(proc.pid)
             try:
                 proc.wait(timeout=_GRACEFUL_STOP_TIMEOUT)
             except subprocess.TimeoutExpired:
-                safe_killpg(proc.pid)
+                self._kill_engine(proc)
                 with contextlib.suppress(subprocess.TimeoutExpired):
                     proc.wait(timeout=_POST_KILL_REAP_TIMEOUT)
+        with contextlib.suppress(Exception):
+            self._release_engine_job()
 
     def _wait_for_service_ready(
         self,
@@ -2039,11 +2234,14 @@ class StorageServiceSupervisor:
         )
 
     def _stop_service(self) -> None:
-        """Send SIGTERM (escalating to SIGKILL) to the service process group,
+        """Stop the engine (SIGTERM escalating to SIGKILL on POSIX;
+        ``CTRL_BREAK`` escalating to a Job Object termination on Windows),
         then REAP our own child.
 
         Postgres is intentionally NOT stopped here — PG is independently
-        managed and may serve other clients (see module docstring).
+        managed and may serve other clients (see module docstring). On Windows
+        that is true by construction as well as by policy: the Job Object holds
+        the engine only, so terminating it never reaches PostgreSQL.
 
         nexus-cd1k0.1: ``self._proc`` is OUR OWN un-reaped child (this
         supervisor's ``start()`` spawned it and nothing has ``wait()``ed
@@ -2059,18 +2257,17 @@ class StorageServiceSupervisor:
         """
         if self._proc is None:
             return
-        from nexus.util.process_group import safe_killpg  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
-
         proc = self._proc
         pid = proc.pid
         if _pid_is_alive(pid):
-            safe_killpg(pid, signal.SIGTERM)
+            self._signal_engine(pid)
             try:
                 proc.wait(timeout=_GRACEFUL_STOP_TIMEOUT)
             except subprocess.TimeoutExpired:
-                safe_killpg(pid)
+                self._kill_engine(proc)
                 with contextlib.suppress(subprocess.TimeoutExpired):
                     proc.wait(timeout=_POST_KILL_REAP_TIMEOUT)
+        self._release_engine_job()
         self._proc = None
 
     # RDR-175: the in-process respawn mechanism (``_respawn`` + the windowed
@@ -2101,10 +2298,11 @@ class StorageServiceSupervisor:
         self._config_dir.mkdir(parents=True, exist_ok=True)
         lock_path = self._config_dir / _SPAWN_LOCK_FILE
         lock_fd = os.open(str(lock_path), os.O_WRONLY | os.O_CREAT, 0o600)
+        self._stop_requested = stop_requested
         try:
-            _locking.lock_fd(
-                lock_fd, blocking=True
-            )  # lifecycle-gate-allow: spawn serialisation, not a lifecycle election
+            _acquire_spawn_lock(
+                lock_fd, stop_requested, windows=self._is_windows(),
+            )
             return self._start_locked(stop_requested=stop_requested)
         finally:
             try:
@@ -2268,6 +2466,7 @@ class StorageServiceSupervisor:
             _log.debug("storage_service_pg_already_running", port=self._pg_port)
         else:
             _log.info("storage_service_starting_pg", port=self._pg_port)
+            from nexus.db.pg_provision import StartInterruptedError  # noqa: PLC0415 — deferred import — bound before the try so the except clause below can always name it
             try:
                 from nexus.db.pg_provision import discover_pg_binaries, _start_cluster  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
 
@@ -2279,9 +2478,19 @@ class StorageServiceSupervisor:
                     )
                 pgdata = Path(pg_data_str)
                 bins = discover_pg_binaries()
-                _start_cluster(bins, pgdata, self._pg_port)
+                # Windows only: let a stop request end the start's wait
+                # (nexus-f9bgu.17). POSIX keeps its single blocking call.
+                stop = self._stop_requested
+                if self._is_windows() and stop is not None:
+                    _start_cluster(
+                        bins, pgdata, self._pg_port, stop_check=stop.is_set,
+                    )
+                else:
+                    _start_cluster(bins, pgdata, self._pg_port)
             except StorageServiceStartError:
                 raise
+            except StartInterruptedError as exc:
+                raise readiness.ReadinessStopRequestedError(str(exc)) from exc
             except Exception as exc:
                 raise StorageServiceStartError(
                     f"Failed to start Postgres on port {self._pg_port}: {exc}. "
@@ -2760,15 +2969,11 @@ def run_storage_supervisor(
 
     configure_logging("storage_service", config_dir=config_dir)
 
-    # Register signal handlers BEFORE start() so a SIGTERM during startup
-    # leads to a clean stop() rather than orphaning the service.
+    # Register signal handlers BEFORE start() so a SIGTERM (a CTRL_BREAK, as
+    # SIGBREAK, on Windows) during startup leads to a clean stop() rather than
+    # orphaning the service.
     stop_requested = threading.Event()
-
-    def _on_signal(_signum: int, _frame: Any) -> None:
-        stop_requested.set()
-
-    signal.signal(signal.SIGTERM, _on_signal)
-    signal.signal(signal.SIGINT, _on_signal)
+    _install_stop_handlers(stop_requested)
 
     creds = _load_credentials(config_dir)
     pg_port_str = creds.get("PG_PORT", "")
@@ -2937,6 +3142,12 @@ def _supervise_until_stopped(
                 try:
                     sup._ensure_pg_running()
                     _log.info("storage_service_pg_restarted_independently")
+                except readiness.ReadinessStopRequestedError:
+                    # nexus-f9bgu.17: a stop arrived while PostgreSQL was
+                    # restarting (Windows polls the stop event there). A clean
+                    # stop, not a failure: the finally below stops the engine.
+                    _log.info("storage_service_stop_during_pg_restart")
+                    break
                 except StorageServiceStartError as exc:
                     _log.error(
                         "storage_service_pg_restart_failed",

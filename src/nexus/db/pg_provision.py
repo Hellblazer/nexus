@@ -1163,9 +1163,28 @@ class PgStartError(RuntimeError):
     """
 
 
+class StartInterruptedError(Exception):
+    """A caller's stop request ended :func:`_start_cluster`'s wait early.
+
+    NOT a failure and not a :class:`PgStartError`: nothing went wrong with the
+    cluster. ``pg_ctl`` is left running, so a postmaster it is bringing up
+    carries on. PostgreSQL is left running by design, and killing ``pg_ctl``
+    could strand a half-started cluster (RDR-224, nexus-f9bgu.17).
+    """
+
+
 #: How long :func:`_start_cluster` waits for the port after ``pg_ctl start -w``
 #: returned. A constant so a test can shorten it.
 _PG_ACCEPT_TIMEOUT_S: float = 30.0
+
+#: The wait on ``pg_ctl start -w`` on Windows is a loop of waits this long.
+#: A CPython ``SIGBREAK`` handler does not run while the main thread sits in
+#: one long wait (T2 ``nexus_rdr/224-research-22``: 120 s of sleep, a stdin
+#: read and ``Event.wait`` all ignored it; a 1.0 s sleep loop ran it within
+#: 0.5 s), so a stop request sent to the supervisor during a PostgreSQL start
+#: would not even be SEEN until the start returned. Matches the supervisor's
+#: tick, ``service_registry.DEFAULT_HEARTBEAT_INTERVAL``.
+_PG_CTL_WAIT_TICK_S: float = 1.0
 
 #: Lines of each log file :func:`_log_tail` puts in an error message.
 _LOG_TAIL_LINES: int = 40
@@ -1209,6 +1228,7 @@ def _pg_ctl_start_detached(
     *,
     platform: str | None = None,
     popen: Callable[..., "subprocess.Popen[bytes]"] = subprocess.Popen,
+    stop_check: Callable[[], bool] | None = None,
 ) -> None:
     """Start the cluster with ``pg_ctl start -w`` the way Windows needs it
     (RDR-224, nexus-f9bgu.18). Not a path for POSIX, which keeps :func:`_run`.
@@ -1236,6 +1256,12 @@ def _pg_ctl_start_detached(
     repeated here, since leaving :func:`run_bounded` would otherwise drop it.
     pg_ctl is named by absolute path: ``CreateProcess`` resolves a bare name
     against the PARENT's ``PATH``, not the child's environment.
+
+    The wait for pg_ctl is a loop of waits no longer than
+    :data:`_PG_CTL_WAIT_TICK_S` (nexus-f9bgu.17), so the supervisor's
+    ``SIGBREAK`` handler can run between them. *stop_check*, when given, is
+    polled after each tick; True raises :class:`StartInterruptedError`
+    without killing pg_ctl.
     """
     refuse_root()
     from nexus.util.win_job import CREATE_NEW_PROCESS_GROUP  # noqa: PLC0415 — deferred: Windows spawn path only
@@ -1255,13 +1281,24 @@ def _pg_ctl_start_detached(
             env=env,
             creationflags=CREATE_NEW_PROCESS_GROUP,
         )
-        try:
-            returncode = proc.wait(timeout=_PG_CTL_WAIT_TIMEOUT_S)
-        except subprocess.TimeoutExpired:
-            # pg_ctl only: a postmaster it already started is what we wanted.
-            proc.kill()
-            proc.wait()
-            raise
+        deadline = time.monotonic() + _PG_CTL_WAIT_TIMEOUT_S
+        while True:
+            remaining = deadline - time.monotonic()
+            try:
+                if remaining <= 0:
+                    raise subprocess.TimeoutExpired(cmd, _PG_CTL_WAIT_TIMEOUT_S)
+                returncode = proc.wait(timeout=min(_PG_CTL_WAIT_TICK_S, remaining))
+                break
+            except subprocess.TimeoutExpired:
+                if time.monotonic() >= deadline:
+                    # pg_ctl only: a postmaster it already started is what we wanted.
+                    proc.kill()
+                    proc.wait()
+                    raise
+                if stop_check is not None and stop_check():
+                    raise StartInterruptedError(
+                        "a stop was requested while pg_ctl was starting the cluster"
+                    ) from None
     if returncode != 0:
         raise PgStartError(
             _start_failure_message(
@@ -1278,6 +1315,7 @@ def _start_cluster(
     *,
     platform: str | None = None,
     popen: Callable[..., "subprocess.Popen[bytes]"] = subprocess.Popen,
+    stop_check: Callable[[], bool] | None = None,
 ) -> None:
     """Start the cluster if not already running.
 
@@ -1295,6 +1333,11 @@ def _start_cluster(
 
     Windows takes :func:`_pg_ctl_start_detached` for the start itself;
     *platform* and *popen* are test seams for that branch.
+
+    *stop_check* (Windows only; nexus-f9bgu.17) is polled between the short
+    waits of the start and of the port wait, and a True raises
+    :class:`StartInterruptedError`. POSIX never polls it, so the POSIX start
+    is unchanged.
     """
     status = _run(
         [str(bins.pg_ctl), "-D", str(pgdata), "status"],
@@ -1307,7 +1350,9 @@ def _start_cluster(
 
     pglog = str(pgdata / "pg.log")
     if _on_windows(platform):
-        _pg_ctl_start_detached(bins, pgdata, port, platform=platform, popen=popen)
+        _pg_ctl_start_detached(
+            bins, pgdata, port, platform=platform, popen=popen, stop_check=stop_check,
+        )
     else:
         # No "-k <pgdata>" — avoids UNIX socket path length issues on macOS.
         # TCP-only: listen_addresses='127.0.0.1' is written to postgresql.conf.
@@ -1322,6 +1367,10 @@ def _start_cluster(
     while time.monotonic() < deadline:
         if _port_accepting("127.0.0.1", port):
             break
+        if stop_check is not None and _on_windows(platform) and stop_check():
+            raise StartInterruptedError(
+                "a stop was requested while waiting for PostgreSQL to accept connections"
+            )
         time.sleep(0.2)
     else:
         raise PgStartError(
