@@ -74,7 +74,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import TypeVar
 
-from nexus._hook_runtime._io import HookResult, configure_hook_logging
+from nexus._hook_runtime._io import HookResult, _emit, configure_hook_logging  # noqa: PLC2701 — _emit is the shared never-stdout logging spine (its docstring says why); a hook verb must not log through an ambient structlog logger
 
 _T = TypeVar("_T")
 
@@ -88,7 +88,8 @@ _T = TypeVar("_T")
 # cancelled. Every network call below now runs under the time left in ONE
 # budget, so the run returns before the cap whatever the engine does. The
 # 10 s cap leaves ~3 s beyond this budget for interpreter start, imports and
-# the write.
+# the write. ``tests/test_hook_budgets_pinned_to_hooks_json.py`` holds this
+# number against the timeout hooks.json declares.
 
 #: Seconds from the start of :func:`run` that the network legs may use.
 _HOOK_BUDGET_S = 7.0
@@ -107,30 +108,48 @@ def _remaining(cap: float) -> float:
     return max(0.0, min(cap, _run_deadline - time.monotonic()))
 
 
-def _call_with_deadline(fn: Callable[[], _T], seconds: float) -> _T:
-    """Run *fn* in a DAEMON thread and wait at most *seconds* for it.
+class _Pending:
+    """A call running in a DAEMON thread that the caller waits on later.
 
-    Raises :class:`TimeoutError` past the deadline and re-raises whatever
-    *fn* raised. A daemon thread, never a ``ThreadPoolExecutor`` worker:
+    A daemon thread, never a ``ThreadPoolExecutor`` worker:
     ``concurrent.futures`` joins its non-daemon workers at interpreter exit,
     so a hung call would hold the hook process past its own deadline
-    (nexus-r8643)."""
-    outcome: dict[str, object] = {}
+    (nexus-r8643). Starting and waiting are separate so the slowest leg (the
+    T2 fetch) can start first and run alongside the others."""
 
-    def _worker() -> None:
+    def __init__(self, fn: Callable[[], object]) -> None:
+        self._outcome: dict[str, object] = {}
+        self.started = time.monotonic()
+        self._thread = threading.Thread(target=self._work, args=(fn,), daemon=True)
+        self._thread.start()
+
+    def _work(self, fn: Callable[[], object]) -> None:
         try:
-            outcome["value"] = fn()
-        except BaseException as exc:  # noqa: BLE001 — carried back via `outcome`, not raised across the thread boundary
-            outcome["error"] = exc
+            self._outcome["value"] = fn()
+        except BaseException as exc:  # noqa: BLE001 — carried back via the outcome dict, not raised across the thread boundary
+            self._outcome["error"] = exc
 
-    worker = threading.Thread(target=_worker, daemon=True)
-    worker.start()
-    worker.join(timeout=seconds)
-    if worker.is_alive():
-        raise TimeoutError(f"no answer within {seconds:.1f}s")
-    if "error" in outcome:
-        raise outcome["error"]  # type: ignore[misc]
-    return outcome["value"]  # type: ignore[return-value]
+    def elapsed(self) -> float:
+        """Seconds since the call started."""
+        return time.monotonic() - self.started
+
+    def wait(self, seconds: float) -> object:
+        """The call's value, waiting at most *seconds*. Raises
+        :class:`TimeoutError` past it and re-raises whatever the call
+        raised."""
+        self._thread.join(timeout=seconds)
+        if self._thread.is_alive():
+            raise TimeoutError(f"no answer within {seconds:.1f}s")
+        if "error" in self._outcome:
+            raise self._outcome["error"]  # type: ignore[misc]
+        return self._outcome["value"]
+
+
+def _call_with_deadline(fn: Callable[[], _T], seconds: float) -> _T:
+    """Run *fn* in a daemon thread and wait at most *seconds* for it
+    (:class:`_Pending`). Raises :class:`TimeoutError` past the deadline and
+    re-raises whatever *fn* raised."""
+    return _Pending(fn).wait(seconds)  # type: ignore[return-value]
 
 _EXCLUDE_FILES = {
     "readme.md", "template.md", "index.md", "overview.md",
@@ -151,7 +170,7 @@ def _repo_root() -> Path | None:
     try:
         result = run_bounded(
             ["git", "rev-parse", "--show-toplevel"],
-            timeout=5,
+            timeout=_remaining(5),
         )
         if result.returncode == 0:
             return Path(result.stdout.strip())
@@ -170,7 +189,7 @@ def _repo_name(root: Path) -> str:
     try:
         result = run_bounded(
             ["git", "-C", str(root), "rev-parse", "--path-format=absolute", "--git-common-dir"],
-            timeout=5,
+            timeout=_remaining(5),
         )
         if result.returncode == 0 and result.stdout.strip():
             return Path(result.stdout.strip()).resolve().parent.name
@@ -332,20 +351,27 @@ _LISTING_TIMEOUT_S = 4
 _LISTING_MIN_S = 1.0
 
 
-def _collection_exists(target: str) -> bool:
+def _collection_exists(target: str) -> bool | None:
     """Whether *target* holds chunks in T3, asked of the store itself
     (nexus-owna8: the previous substring match over ``nx collection list``
     output missed a listed collection when the resolved name and the
     listed name were rendered differently). The T3 call runs under
     ``_T3_DEADLINE_S``; past it, or on any error, the listing is the fallback.
 
+    Returns ``None`` when neither the probe nor the listing answered (the
+    probe failed or timed out and the listing was skipped for budget, failed
+    or timed out): the hook does not know, and :func:`_run` says so rather
+    than claiming "NOT indexed" and telling the user to re-index a tree that
+    may be fine.
+
     nexus-wozn6: the probe is ``collection_info`` (one collection's STORED
     count, ``KeyError`` when it holds none), not ``collection_exists``. On
     the HTTP client ``collection_exists`` lists every collection's LIVE
     stats to answer for one, which measured 3.3 s on a 98-collection tenant
-    against 0.31 s here. The two differ only for a collection whose every
-    chunk is trashed or unowned: this reads it as indexed. For a line whose
-    other answer is "run ``nx index repo``", that edge is acceptable.
+    against 0.31 s here. The two differ for a collection whose every chunk
+    is trashed or unowned: its stored count is above zero, so this reads it
+    as indexed, where the live-stats listing read it as absent. For a line
+    whose other answer is "run ``nx index repo``", that edge is acceptable.
 
     nexus-r8643 (intrastate review [26115] #3): the T3 call runs in a DAEMON
     thread (:func:`_call_with_deadline`), never a ``ThreadPoolExecutor``
@@ -366,7 +392,7 @@ def _collection_exists(target: str) -> bool:
         _log_resolution_error("t3-exists", exc)
     left = _remaining(_LISTING_TIMEOUT_S)
     if left < _LISTING_MIN_S:
-        return False
+        return None  # the probe failed and there is no budget to ask the listing: unknown, not absent
     try:
         result = run_bounded(
             ["nx", "collection", "list"],
@@ -376,7 +402,7 @@ def _collection_exists(target: str) -> bool:
             return target in result.stdout
     except Exception:  # noqa: BLE001 — best-effort fallback
         pass
-    return False
+    return None
 
 
 def _extract_rdr_id(filepath: Path) -> str | None:
@@ -399,9 +425,37 @@ _T2_LATE: set[str] = set()
 #: lesson of nexus-e19sa.
 _T2_LATE_NOTE = "(T2 RDR statuses did not arrive within the hook budget; status breakdown and rdr-fix pointers omitted)"
 
-#: Cap on the T2 fetch. Inside a run the budget's remainder binds first;
-#: measured 1.7-8.9 s for the 1527-row ``nexus_rdr`` project (2026-10-05).
-_T2_DEADLINE_S = 7.0
+#: Cap on the T2 fetch when it is called outside a run. Inside a run the
+#: remainder of the budget binds, and the cap is the whole budget because the
+#: fetch now STARTS first (:func:`_start_t2_fetch`) and runs beside the
+#: catalog and T3 legs: it can use all of it, and raising the budget raises
+#: this with it. Measured 1.7-8.9 s for the 1527-row ``nexus_rdr`` project
+#: (2026-10-05).
+_T2_DEADLINE_S = _HOOK_BUDGET_S
+
+#: T2 fetches started this run and not yet collected, by repo name.
+_T2_PENDING: dict[str, _Pending] = {}
+
+
+def _start_t2_fetch(repo_name: str) -> _Pending:
+    """Start the project's T2 fetch in a daemon thread and return at once.
+
+    The fetch is the slowest leg and independent of the catalog and T3 legs,
+    so it starts first and is collected last by :func:`_fetch_rdr_rows`. The
+    handle is opened on the db/ side of the RDR-120 storage boundary: this
+    module is in the wheel now, where the lint can see it, and T2Database
+    construction outside src/nexus/db/ is a violation there. ``rdr_rows()``
+    also owns the never-raise contract. A second call for the same repo
+    returns the fetch already running."""
+    pending = _T2_PENDING.get(repo_name)
+    if pending is not None:
+        return pending
+    from nexus.db.t2_reads import rdr_rows  # noqa: PLC0415 — deferred: only a real T2 lookup pays for this
+
+    project = f"{repo_name}_rdr"
+    pending = _Pending(lambda: rdr_rows(project))
+    _T2_PENDING[repo_name] = pending
+    return pending
 
 
 def _fetch_rdr_rows(repo_name: str) -> list[dict]:
@@ -410,26 +464,26 @@ def _fetch_rdr_rows(repo_name: str) -> list[dict]:
     inside a 10s SessionStart budget).
 
     nexus-wozn6: the fetch runs under what is left of the run's budget. Past
-    it the project reads as empty for this run and lands in
-    :data:`_T2_LATE`, so :func:`run` can say so. The fetch is the whole
-    project because the engine has no narrower read: ``/v1/memory/list``
-    carries no content and ``/v1/memory/all`` no title filter."""
+    it the project reads as empty for this run, lands in :data:`_T2_LATE` so
+    :func:`run` can say so, and is logged as ``rdr_hook_t2_late`` with the
+    time it had taken, so the rate of degraded sessions is countable from
+    ``hook.log`` instead of from transcripts. The fetch is the whole project
+    because the engine has no narrower read: ``/v1/memory/list`` carries no
+    content and ``/v1/memory/all`` no title filter (nexus-pxp44)."""
     if repo_name in _T2_ROWS_CACHE:
         return _T2_ROWS_CACHE[repo_name]
-    # The handle is opened on the db/ side of the RDR-120 storage boundary:
-    # this module is in the wheel now, where the lint can see it, and
-    # T2Database construction outside src/nexus/db/ is a violation there.
-    # rdr_rows() also owns the never-raise contract this used to spell
-    # inline.
-    from nexus.db.t2_reads import rdr_rows  # noqa: PLC0415 — deferred: only a real T2 lookup pays for this
-
+    rows: list[dict] = []
     try:
-        rows = _call_with_deadline(
-            lambda: rdr_rows(f"{repo_name}_rdr"), _remaining(_T2_DEADLINE_S),
-        )
+        pending = _start_t2_fetch(repo_name)
+        rows = pending.wait(_remaining(_T2_DEADLINE_S))  # type: ignore[assignment]
     except TimeoutError:
         _T2_LATE.add(repo_name)
-        rows = []
+        _emit(
+            "warning", "rdr_hook_t2_late",
+            project=f"{repo_name}_rdr",
+            elapsed_s=round(pending.elapsed(), 2),
+            budget_s=_HOOK_BUDGET_S,
+        )
     except Exception:  # noqa: BLE001 — rdr_rows never raises; this keeps the hook's never-fail contract if that ever changes
         rows = []
     _T2_ROWS_CACHE[repo_name] = rows
@@ -497,11 +551,20 @@ def _load_gated_commits(repo_name: str) -> dict[str, str]:
     return gated
 
 
+#: The line :func:`_unchecked_fix_edits` adds when the budget ended its walk
+#: before every draft RDR was checked.
+_FIX_CHECK_CUT_SHORT_NOTE = (
+    "(rdr-fix check cut short: the hook budget ran out before every draft RDR "
+    "was checked; pointers above may be incomplete)"
+)
+
+
 def _unchecked_fix_edits(root: Path, rdr_files: list[Path], statuses: dict[str, str], gated: dict[str, str]) -> list[str]:
     """Lines naming draft RDRs whose file tip is past the gated commit."""
     from nexus.bounded_subprocess import run_bounded  # noqa: PLC0415 — deferred: a hook process pays its import cost on every invocation, and a module-scope import of this pulls structlog + ~231 modules (measured on verification_config: 14ms/106 -> 62-84ms/337). Deferred, it is paid only when we actually spawn
 
     lines: list[str] = []
+    cut_short = False
     for path in rdr_files:
         rid = _extract_rdr_id(path)
         if rid is None:
@@ -521,12 +584,16 @@ def _unchecked_fix_edits(root: Path, rdr_files: list[Path], statuses: dict[str, 
             continue
         left = _remaining(10.0)
         if left <= 0:
+            cut_short = True
             break  # nexus-wozn6: out of budget; a pointer missed this session beats a cancelled hook
         try:
             tip = run_bounded(
                 ["git", "-C", str(root), "log", "-1", "--format=%h", "--", str(path)],
                 timeout=left,
             ).stdout.strip()
+        except subprocess.TimeoutExpired:
+            cut_short = True  # this file was not checked either
+            continue
         except (OSError, subprocess.SubprocessError):
             continue
         if not tip:
@@ -539,6 +606,11 @@ def _unchecked_fix_edits(root: Path, rdr_files: list[Path], statuses: dict[str, 
             f"RDR-{rid}: edits since the gated commit {commit}; run /conexus:rdr-fix {rid} "
             "before re-gating (fix check first)."
         )
+    if cut_short:
+        # A filter that selects nothing looks exactly like a quiet success
+        # (nexus-e19sa); without this line a budget that ran out here reads
+        # as a tree with no unchecked edits.
+        lines.append(_FIX_CHECK_CUT_SHORT_NOTE)
     return lines
 
 
@@ -606,6 +678,7 @@ def run(payload: dict | None) -> HookResult:  # noqa: ARG001 — this hook takes
         return _run()
     finally:
         _run_deadline = None
+        _T2_PENDING.clear()
 
 
 def _run() -> HookResult:
@@ -622,9 +695,15 @@ def _run() -> HookResult:
         return HookResult()
 
     repo_name = _repo_name(root)
+    # Logging is configured BEFORE any worker thread starts: a worker that
+    # logs through an unconfigured structlog writes to stdout, the hook's
+    # decision channel.
     configure_hook_logging()
+    # The slowest leg starts first and runs beside the catalog and T3 legs,
+    # so it has the whole budget rather than what they leave over.
+    _start_t2_fetch(repo_name)
     rdr_collection = _resolve_rdr_collection(root)
-    indexed = bool(rdr_collection) and _collection_exists(rdr_collection)
+    indexed: bool | None = _collection_exists(rdr_collection) if rdr_collection else False
 
     statuses = _load_all_t2_statuses(repo_name)
     counts = _rdr_status_counts(repo_name, statuses)
@@ -639,14 +718,22 @@ def _run() -> HookResult:
     if indexed:
         lines.append(f"RDR: {status_info}, indexed in {rdr_collection}")
     else:
-        # nexus-3o4lt: the remedy is the REPO indexer. This line used to
-        # say ``nx index rdr <root>``, which registered every RDR under
-        # the curator owner with an absolute path; on the work box that
-        # produced 198 such rows that no owner-scoped reader could see.
-        # ``nx index repo`` walks docs/rdr under the repo owner. The
-        # single-file ``nx index rdr <file>`` now lands there too, but the
-        # whole-tree remedy is the repo index.
-        lines.append(f"RDR: {status_info} in {rdr_dir.relative_to(root)} but NOT indexed.")
+        if indexed is None:
+            # The T3 probe did not answer and the listing could not: the hook
+            # does not know, so it must not tell the user to re-index.
+            lines.append(
+                f"RDR: {status_info} in {rdr_dir.relative_to(root)}; whether it is "
+                "indexed is unknown (the T3 check did not answer within the hook budget)."
+            )
+        else:
+            # nexus-3o4lt: the remedy is the REPO indexer. This line used to
+            # say ``nx index rdr <root>``, which registered every RDR under
+            # the curator owner with an absolute path; on the work box that
+            # produced 198 such rows that no owner-scoped reader could see.
+            # ``nx index repo`` walks docs/rdr under the repo owner. The
+            # single-file ``nx index rdr <file>`` now lands there too, but the
+            # whole-tree remedy is the repo index.
+            lines.append(f"RDR: {status_info} in {rdr_dir.relative_to(root)} but NOT indexed.")
         if _RESOLUTION_FAILURES:
             # The verdict may be the hook's own failure, not the tree's state.
             try:
@@ -654,7 +741,8 @@ def _run() -> HookResult:
             except Exception:  # noqa: BLE001 — Path.home() can raise in a scrubbed container
                 where = ""
             lines.append(f"     (resolution failed: {'; '.join(_RESOLUTION_FAILURES)}{where})")
-        lines.append(f"     Run: nx index repo {root}")
+        if indexed is not None:
+            lines.append(f"     Run: nx index repo {root}")
 
     if repo_name in _T2_LATE:
         lines.append(f"     {_T2_LATE_NOTE}")

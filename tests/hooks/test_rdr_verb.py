@@ -61,10 +61,12 @@ def _reset_module_state():
     rdr_hook_module._RESOLUTION_FAILURES.clear()
     rdr_hook_module._T2_ROWS_CACHE.clear()
     rdr_hook_module._T2_LATE.clear()
+    rdr_hook_module._T2_PENDING.clear()
     yield
     rdr_hook_module._RESOLUTION_FAILURES.clear()
     rdr_hook_module._T2_ROWS_CACHE.clear()
     rdr_hook_module._T2_LATE.clear()
+    rdr_hook_module._T2_PENDING.clear()
 
 
 def test_resolve_rdr_collection_synthesises_conformant_when_catalog_absent(
@@ -767,3 +769,226 @@ def test_t2_rows_that_arrive_in_time_still_give_the_breakdown(
     out = mod.run(None).stdout or ""
     assert out.startswith("RDR: 1 documents (1 RDRs: 1 draft), indexed in rdr__1-1__"), out
     assert rdr_hook_module._T2_LATE_NOTE not in out
+
+
+# ── nexus-wozn6 fix round: a budget cut is said, never silent ───────────────
+
+
+def _gated_draft(tmp_path):
+    root = _rdr_tree(tmp_path)
+    return root, [root / "docs" / "rdr" / "rdr-001-x.md"], {"1": "draft"}, {"1": "abc1234"}
+
+
+def test_fix_check_says_so_when_the_budget_ran_out_before_it_started(
+    rdr_hook_mod, tmp_path, monkeypatch,
+) -> None:
+    """A budget spent before the rdr-fix check used to end its walk with no
+    mark, so the output read as a tree with no unchecked edits (the
+    nexus-e19sa failure). It now adds a note line, and runs no git probe."""
+    mod = rdr_hook_mod
+    root, files, statuses, gated = _gated_draft(tmp_path)
+    probes: list[object] = []
+    monkeypatch.setattr(
+        "nexus.bounded_subprocess.run_bounded", lambda *a, **k: probes.append(a),
+    )
+    monkeypatch.setattr(mod, "_run_deadline", time.monotonic() - 1.0)
+    out = mod._unchecked_fix_edits(root, files, statuses, gated)
+    assert out == [mod._FIX_CHECK_CUT_SHORT_NOTE]
+    assert probes == [], "no git probe may start with the budget spent"
+
+
+def test_fix_check_says_so_when_a_git_probe_times_out(
+    rdr_hook_mod, tmp_path, monkeypatch,
+) -> None:
+    mod = rdr_hook_mod
+    root, files, statuses, gated = _gated_draft(tmp_path)
+
+    def slow(argv, *, timeout, **_k):
+        raise subprocess.TimeoutExpired(argv, timeout)
+
+    monkeypatch.setattr("nexus.bounded_subprocess.run_bounded", slow)
+    out = mod._unchecked_fix_edits(root, files, statuses, gated)
+    assert out == [mod._FIX_CHECK_CUT_SHORT_NOTE]
+
+
+def test_fix_check_adds_no_note_when_every_file_was_checked(
+    rdr_hook_mod, tmp_path, monkeypatch,
+) -> None:
+    mod = rdr_hook_mod
+    root, files, statuses, gated = _gated_draft(tmp_path)
+
+    class _Tip:
+        stdout = "abc1234\n"
+
+    monkeypatch.setattr("nexus.bounded_subprocess.run_bounded", lambda *a, **k: _Tip())
+    assert mod._unchecked_fix_edits(root, files, statuses, gated) == []
+
+
+def test_skipped_listing_fallback_reads_as_unknown_not_absent(
+    rdr_hook_mod, monkeypatch,
+) -> None:
+    """The T3 probe failed and under _LISTING_MIN_S of budget is left, so the
+    listing is skipped. The hook does not know whether the tree is indexed,
+    and must not answer False (which prints "NOT indexed. Run: nx index
+    repo")."""
+    mod = rdr_hook_mod
+
+    def broken_t3():
+        raise ConnectionError("engine unreachable")
+
+    def no_listing(*_a, **_k):
+        raise AssertionError("the listing must be skipped, not started")
+
+    monkeypatch.setattr("nexus.db.make_t3", broken_t3)
+    monkeypatch.setattr("nexus.bounded_subprocess.run_bounded", no_listing)
+    monkeypatch.setattr(mod, "_run_deadline", time.monotonic() + mod._LISTING_MIN_S / 2)
+    assert mod._collection_exists("rdr__1-1__voyage-context-3__v1") is None
+
+
+def test_run_does_not_say_not_indexed_when_the_index_state_is_unknown(
+    rdr_hook_mod, tmp_path, monkeypatch,
+) -> None:
+    mod = rdr_hook_mod
+    root = _rdr_tree(tmp_path)
+
+    def broken_t3():
+        raise ConnectionError("engine unreachable")
+
+    monkeypatch.setenv("NX_RDR_HOOK_LOG", str(tmp_path / "rdr_hook.log"))
+    monkeypatch.setattr(mod, "_repo_root", lambda: root)
+    monkeypatch.setattr(mod, "_repo_name", lambda r: "repo")
+    monkeypatch.setattr(mod, "_HOOK_BUDGET_S", 0.5)  # under _LISTING_MIN_S: the listing is skipped
+    monkeypatch.setattr(mod, "_resolve_rdr_collection", lambda r: "rdr__1-1__voyage-context-3__v1")
+    monkeypatch.setattr("nexus.db.make_t3", broken_t3)
+    monkeypatch.setattr("nexus.db.t2_reads.rdr_rows", lambda project: [])
+    out = mod.run(None).stdout or ""
+    assert "unknown" in out, out
+    assert "NOT indexed" not in out, out
+    assert "Run: nx index repo" not in out, out
+    assert out.startswith("RDR: 1 documents (1 RDRs) in docs/rdr"), out
+
+
+def test_a_listing_that_answers_absent_still_says_not_indexed(
+    rdr_hook_mod, tmp_path, monkeypatch,
+) -> None:
+    """The unknown path must not swallow a real answer: the listing ran and
+    the collection is not in it."""
+    mod = rdr_hook_mod
+    root = _rdr_tree(tmp_path)
+
+    class _Listing:
+        returncode = 0
+        stdout = "some__other__collection\n"
+
+    monkeypatch.setenv("NX_RDR_HOOK_LOG", str(tmp_path / "rdr_hook.log"))
+    monkeypatch.setattr(mod, "_repo_root", lambda: root)
+    monkeypatch.setattr(mod, "_repo_name", lambda r: "repo")
+    monkeypatch.setattr(mod, "_resolve_rdr_collection", lambda r: "rdr__1-1__voyage-context-3__v1")
+    monkeypatch.setattr("nexus.db.make_t3", lambda: (_ for _ in ()).throw(ConnectionError("down")))
+    monkeypatch.setattr("nexus.db.t2_reads.rdr_rows", lambda project: [])
+    monkeypatch.setattr("nexus.bounded_subprocess.run_bounded", lambda *a, **k: _Listing())
+    out = mod.run(None).stdout or ""
+    assert "but NOT indexed." in out, out
+    assert "unknown" not in out, out
+
+
+# ── nexus-wozn6 fix round: budget allocation and visibility ─────────────────
+
+
+def test_the_t2_fetch_starts_before_the_catalog_and_t3_legs(
+    rdr_hook_mod, tmp_path, monkeypatch,
+) -> None:
+    """The T2 fetch is the slowest leg. Started after the catalog and T3
+    legs it got what they left over (about 6 of 7 s); started first it runs
+    beside them and has the whole budget."""
+    mod = rdr_hook_mod
+    root = _rdr_tree(tmp_path)
+    t2_started = threading.Event()
+    seen: dict[str, bool] = {}
+
+    def rows(project):
+        t2_started.set()
+        return [{"title": "001", "content": "status: draft\n"}]
+
+    def resolve(_root):
+        seen["t2_running_before_catalog"] = t2_started.wait(timeout=2.0)
+        return "rdr__1-1__voyage-context-3__v1"
+
+    monkeypatch.setattr(mod, "_repo_root", lambda: root)
+    monkeypatch.setattr(mod, "_repo_name", lambda r: "repo")
+    monkeypatch.setattr(mod, "_resolve_rdr_collection", resolve)
+    monkeypatch.setattr("nexus.db.make_t3", lambda: _ListingT3())
+    monkeypatch.setattr("nexus.db.t2_reads.rdr_rows", rows)
+    out = mod.run(None).stdout or ""
+    assert seen["t2_running_before_catalog"] is True
+    assert "1 draft" in out, out
+
+
+def test_a_late_t2_fetch_is_logged_with_its_elapsed_time(
+    rdr_hook_mod, tmp_path, monkeypatch,
+) -> None:
+    """So the rate of degraded sessions is countable from hook.log. The event
+    goes through ``_emit``, which never writes to stdout, the hook's JSON
+    channel."""
+    mod = rdr_hook_mod
+    root = _rdr_tree(tmp_path)
+    release = threading.Event()
+    events: list[tuple[str, str, dict]] = []
+
+    def hang(project):
+        release.wait(timeout=5)
+        return []
+
+    monkeypatch.setattr(mod, "_emit", lambda level, event, **f: events.append((level, event, f)))
+    monkeypatch.setattr(mod, "_repo_root", lambda: root)
+    monkeypatch.setattr(mod, "_repo_name", lambda r: "repo")
+    monkeypatch.setattr(mod, "_HOOK_BUDGET_S", 0.4)
+    monkeypatch.setattr(mod, "_resolve_rdr_collection", lambda r: "rdr__1-1__voyage-context-3__v1")
+    monkeypatch.setattr("nexus.db.make_t3", lambda: _ListingT3())
+    monkeypatch.setattr("nexus.db.t2_reads.rdr_rows", hang)
+    try:
+        out = mod.run(None).stdout or ""
+    finally:
+        release.set()
+    late = [e for e in events if e[1] == "rdr_hook_t2_late"]
+    assert len(late) == 1, events
+    level, _event, fields = late[0]
+    assert level == "warning"
+    assert fields["project"] == "repo_rdr"
+    assert 0.3 <= fields["elapsed_s"] < 1.5, fields
+    assert fields["budget_s"] == 0.4
+    assert "rdr_hook_t2_late" not in out, "the event is a log line, not hook output"
+
+
+def test_the_two_git_probes_run_under_the_budget(
+    rdr_hook_mod, monkeypatch, tmp_path,
+) -> None:
+    """_repo_root and _repo_name used to keep a fixed 5 s each, outside the
+    budget: a hung git on a stalled filesystem could take 10 s before any
+    network leg began."""
+    mod = rdr_hook_mod
+    timeouts: list[float] = []
+
+    class _Done:
+        returncode = 0
+        stdout = str(tmp_path) + "\n"
+
+    def probe(argv, *, timeout, **_k):
+        timeouts.append(timeout)
+        return _Done()
+
+    monkeypatch.setattr("nexus.bounded_subprocess.run_bounded", probe)
+    mod._repo_root()
+    mod._repo_name(tmp_path)
+    assert timeouts == [5, 5], "outside a run the per-call cap applies"
+    timeouts.clear()
+    monkeypatch.setattr(mod, "_run_deadline", time.monotonic() + 1.5)
+    mod._repo_root()
+    mod._repo_name(tmp_path)
+    assert len(timeouts) == 2 and all(0.0 < t <= 1.5 for t in timeouts), timeouts
+
+
+def test_the_t2_cap_is_the_hook_budget() -> None:
+    """Derived, not a second number: raising the budget alone must raise the
+    T2 cap with it."""
+    assert rdr_hook_module._T2_DEADLINE_S == rdr_hook_module._HOOK_BUDGET_S
