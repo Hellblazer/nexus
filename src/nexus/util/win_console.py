@@ -208,7 +208,7 @@ def _parse_helper_answer(stdout: str) -> ConsoleBreakResult | None:
 def send_ctrl_break_via_helper(
     pid: int,
     *,
-    run: Callable[..., "subprocess.CompletedProcess[str]"] = subprocess.run,
+    run: Callable[..., "subprocess.CompletedProcess[str]"] | None = None,
     timeout_s: float = HELPER_TIMEOUT_S,
 ) -> ConsoleBreakResult:
     """:func:`send_ctrl_break_via_console` in a short-lived helper process, so
@@ -220,21 +220,25 @@ def send_ctrl_break_via_helper(
     prints no result is reported as ``stage="helper"``, ``sent=False``: not a
     send and not a refusal, so the caller's escalation ladder carries on.
 
-    *run* is a test seam (``subprocess.run``'s shape).
+    The helper runs under :func:`nexus.bounded_subprocess.run_bounded`: a helper that
+    hangs is killed with its process group at *timeout_s*. *run* is a test seam (its
+    shape).
     """
     if pid <= 0 or pid > _MAX_WINDOWS_PID:
         return ConsoleBreakResult(sent=False, stage="invalid")
     from nexus.util.nx_argv import console_python  # noqa: PLC0415 — stdlib-only; deferred so the module imports without it on the hook path
 
+    if run is None:
+        from nexus.bounded_subprocess import run_bounded  # noqa: PLC0415 — deferred: the helper process itself never reaches this
+
+        run = run_bounded
     argv = [console_python(sys.executable), "-m", "nexus.util.win_console", str(pid)]
     try:
         done = run(
             argv,
             stdin=subprocess.DEVNULL,
-            capture_output=True,
-            text=True,
             timeout=timeout_s,
-            creationflags=DETACHED_PROCESS,
+            extra_creationflags=DETACHED_PROCESS,
         )
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
         _log.warning("win_console_helper_failed", pid=pid, error=repr(exc))

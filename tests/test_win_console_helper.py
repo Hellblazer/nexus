@@ -106,9 +106,8 @@ class TestHelperSpawn:
         # No console of its own: the CLI's console is never detached. Not
         # CREATE_NEW_CONSOLE (a window flash) and not CREATE_NO_WINDOW (a
         # hidden console the helper would only have to free).
-        assert kwargs["creationflags"] == win_console.DETACHED_PROCESS
+        assert kwargs["extra_creationflags"] == win_console.DETACHED_PROCESS
         assert kwargs["stdin"] == subprocess.DEVNULL
-        assert kwargs["capture_output"] is True
         assert float(kwargs["timeout"]) > 0  # type: ignore[arg-type]
         assert result.sent is True  # non-vacuity: the answer round-tripped
 
@@ -208,3 +207,51 @@ class TestRequestGracefulStopUsesTheHelper:
         monkeypatch.setattr(sr.os, "kill", lambda pid, sig: killed.append((pid, sig)))
         assert sr.request_graceful_stop(77, platform="linux").sent is True
         assert killed and killed[0][0] == 77
+
+
+class TestRunBoundedCarriesTheDetachedFlag:
+    """The helper runs under ``run_bounded`` (the repo ratchet wants every capture-with-timeout
+    spawn bounded); ``extra_creationflags`` is how it asks for ``DETACHED_PROCESS`` without losing
+    the process-group kill ``run_bounded`` is for."""
+
+    def test_the_flag_is_merged_into_the_windows_group_flag(self) -> None:
+        from nexus.bounded_subprocess import _isolation_kwargs
+
+        group = 0x00000200  # CREATE_NEW_PROCESS_GROUP
+        merged = _isolation_kwargs({"creationflags": group}, win_console.DETACHED_PROCESS)
+        assert merged == {"creationflags": group | win_console.DETACHED_PROCESS}
+
+    def test_posix_isolation_is_untouched(self) -> None:
+        from nexus.bounded_subprocess import _isolation_kwargs
+
+        assert _isolation_kwargs({"start_new_session": True}, win_console.DETACHED_PROCESS) == {
+            "start_new_session": True,
+        }
+
+    def test_no_extra_flag_leaves_the_base_exactly_as_it_was(self) -> None:
+        from nexus.bounded_subprocess import _isolation_kwargs
+
+        base = {"creationflags": 0x200}
+        assert _isolation_kwargs(base, 0) is base
+
+    def test_the_real_spawn_receives_the_merged_flag(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import nexus.bounded_subprocess as bs
+
+        seen: dict[str, object] = {}
+
+        class _Proc:
+            args = ["x"]
+            returncode = 0
+
+            def communicate(self, input=None, timeout=None):  # noqa: A002, ANN001, ANN201
+                return "", ""
+
+        def popen(argv, **kwargs):  # noqa: ANN001, ANN003, ANN202
+            seen.update(kwargs)
+            return _Proc()
+
+        monkeypatch.setattr(bs.subprocess, "Popen", popen)
+        monkeypatch.setattr(bs, "isolation_popen_kwargs", lambda: {"creationflags": 0x200}, raising=False)
+        monkeypatch.setattr("nexus.util.process_group.isolation_popen_kwargs", lambda: {"creationflags": 0x200})
+        bs.run_bounded(["x"], timeout=5, extra_creationflags=win_console.DETACHED_PROCESS)
+        assert seen["creationflags"] == 0x200 | win_console.DETACHED_PROCESS

@@ -219,6 +219,14 @@ def kill_child_and_descendants(
     return "process"
 
 
+def _isolation_kwargs(base: dict[str, Any], extra_creationflags: int) -> dict[str, Any]:
+    """*base* (``isolation_popen_kwargs()``) with *extra_creationflags* merged into its
+    ``creationflags`` when it has one (Windows); *base* unchanged otherwise."""
+    if extra_creationflags and "creationflags" in base:
+        return {**base, "creationflags": base["creationflags"] | extra_creationflags}
+    return base
+
+
 def run_bounded(
     argv: Sequence[str],
     *,
@@ -231,6 +239,7 @@ def run_bounded(
     check: bool = False,
     stdout: IO[Any] | int = subprocess.PIPE,
     stderr: IO[Any] | int = subprocess.PIPE,
+    extra_creationflags: int = 0,
 ) -> subprocess.CompletedProcess[Any]:
     """``subprocess.run(capture_output=True, timeout=...)`` that is actually bounded.
 
@@ -253,6 +262,11 @@ def run_bounded(
     (``commands/doctor.py``'s MinerU parse probe, which redirects
     PRECISELY because a pipe deadlocked against the pool it spawns).
 
+    *extra_creationflags* (Windows only, ignored elsewhere) is OR-ed into the
+    ``CREATE_NEW_PROCESS_GROUP`` this helper always sets: the way a caller asks for
+    ``DETACHED_PROCESS`` and the like without giving up the group kill
+    (RDR-224, nexus-f9bgu.33: the console helper must start with no console).
+
     Raises ``subprocess.TimeoutExpired`` on timeout, after the kill and the
     reap, so callers that already handle it keep working unchanged.
     """
@@ -273,7 +287,7 @@ def run_bounded(
         # leader so the whole group is killable as a unit. Windows:
         # creationflags=CREATE_NEW_PROCESS_GROUP -- see the module
         # docstring; kill_child_and_descendants owns the platform split.
-        **isolation_popen_kwargs(),
+        **_isolation_kwargs(isolation_popen_kwargs(), extra_creationflags),
     )
     # nexus-6y4e0: assign to a Windows job object right away, so every
     # descendant this child spawns from here on joins it automatically. A
