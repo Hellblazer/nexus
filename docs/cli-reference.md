@@ -3943,6 +3943,23 @@ accept the autostart prompt (decide-first — the unit is the sole starter, no
 session supervisor underneath it). `--force` overwrites an existing unit whose
 content differs. Remove with `nx daemon service uninstall --autostart`.
 
+On Windows (RDR-224) the same command registers a per-user Task Scheduler task,
+`NexusStorageService`, with a logon trigger for you only. It runs while you are
+logged on (`InteractiveToken`, no stored password), with no elevation, no
+execution time limit and no battery restrictions, and it starts the service once
+at install. The task runs a small launcher under `pythonw` (no window), not the
+supervisor itself: the launcher starts the supervisor in its own hidden console
+and process group, which is what `nx daemon service stop` signals with
+`CTRL_BREAK`, and it restarts the supervisor 30 s after any non-zero exit. A
+clean stop (exit 0) ends the launcher and the task stays idle until the next
+logon or `schtasks /Run /TN NexusStorageService`. The task's own "restart on
+failure" setting only covers a launch failure of the launcher: Task Scheduler
+does not restart a task whose process exits non-zero. Uninstalling ends the
+launcher and deletes the task; a supervisor that is running keeps running (it
+is not in the task's job), so run `nx daemon service stop` as well. `nx doctor`
+reports the task through the `Service autostart unit` row (registered, enabled,
+and its definition current).
+
 > **Fixed (nexus-oyo2g):** `nx daemon service stop` used to decide what to
 > signal purely from the discovery lease (15s TTL) — a supervisor whose
 > heartbeat had stalled was alive and serving while invisible to that check,

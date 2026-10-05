@@ -84,9 +84,15 @@ def _autostart_install_dir() -> Path:
         return Path.home() / "Library" / "LaunchAgents"
     if platform.startswith("linux"):
         return Path.home() / ".config" / "systemd" / "user"
+    if platform == "win32":
+        # RDR-224 (nexus-f9bgu.23): the kept copy of the Task Scheduler task
+        # definition. Home-relative, like the other two, so the test HOME fence
+        # redirects it.
+        return Path.home() / "AppData" / "Local" / "nexus" / "autostart"
     raise click.ClickException(
-        f"Autostart is not supported on platform {platform!r}; "
-        "supported platforms are macOS (launchd) and Linux (systemd user units)."
+        f"Autostart is not supported on platform {platform!r}; supported "
+        "platforms are macOS (launchd), Linux (systemd user units) and "
+        "Windows (a Task Scheduler logon task)."
     )
 
 
@@ -94,6 +100,8 @@ def _autostart_log_dir() -> Path:
     platform = _autostart_platform()
     if platform == "darwin":
         return Path.home() / "Library" / "Logs"
+    if platform == "win32":
+        return Path.home() / "AppData" / "Local" / "nexus" / "logs"
     return Path.home() / ".local" / "state" / "nexus"
 
 
@@ -199,11 +207,14 @@ def _resolve_nx_bin() -> list[str]:
 
 
 def _autostart_filename_service() -> str:
-    return (
-        _SERVICE_PLIST_NAME
-        if _autostart_platform() == "darwin"
-        else _SERVICE_SERVICE_NAME
-    )
+    platform = _autostart_platform()
+    if platform == "darwin":
+        return _SERVICE_PLIST_NAME
+    if platform == "win32":
+        from nexus.daemon.windows_autostart import TASK_FILENAME  # noqa: PLC0415 — deferred import — Windows-only path
+
+        return TASK_FILENAME
+    return _SERVICE_SERVICE_NAME
 
 
 def _autostart_filename_t2() -> str:
@@ -481,7 +492,8 @@ def _supervisor_popen_kwargs(platform: str | None = None) -> dict[str, object]:
     attaches to. NEVER ``DETACHED_PROCESS``: that leaves the supervisor with no
     console, ``AttachConsole`` fails with ``ERROR_INVALID_HANDLE`` and
     ``CTRL_BREAK`` cannot reach it (T2 ``nexus_rdr/224-research-20``). The
-    logon-task spawn path is nexus-f9bgu.23's.
+    logon-task launcher (``nexus.daemon.windows_autostart``, nexus-f9bgu.23)
+    spawns its supervisor through this same function.
     """
     if (platform if platform is not None else sys.platform) == "win32":
         from nexus.util import win_job  # noqa: PLC0415 — deferred import — Windows spawn path only
@@ -490,6 +502,25 @@ def _supervisor_popen_kwargs(platform: str | None = None) -> dict[str, object]:
             "creationflags": win_job.CREATE_NEW_PROCESS_GROUP | win_job.CREATE_NO_WINDOW,
         }
     return {"start_new_session": True}
+
+
+def _supervisor_argv(config_dir: Path, *, nx_bin: list[str] | None = None) -> list[str]:
+    """argv of the foreground supervisor for *config_dir*.
+
+    The config dir is always RESOLVED to an absolute path and always passed as
+    ``--config-dir``: ``storage_service_stack_matcher`` matches it token-exact.
+    *nx_bin* overrides :func:`_resolve_nx_bin` for the Windows logon-task
+    launcher (nexus-f9bgu.23), which bakes its own interpreter.
+    """
+    return [
+        *(nx_bin if nx_bin is not None else _resolve_nx_bin()),
+        "daemon",
+        "service",
+        "start",
+        "--foreground",
+        "--config-dir",
+        str(Path(config_dir).resolve()),
+    ]
 
 
 def ensure_storage_supervisor(config_dir: Path, *, platform: str | None = None):
@@ -594,15 +625,7 @@ def ensure_storage_supervisor(config_dir: Path, *, platform: str | None = None):
     # string another caller's own (independently resolved) matcher target
     # compares against, defeating the token-exact discipline
     # storage_service_stack_matcher relies on.
-    argv = [
-        *_resolve_nx_bin(),
-        "daemon",
-        "service",
-        "start",
-        "--foreground",
-        "--config-dir",
-        str(Path(config_dir).resolve()),
-    ]
+    argv = _supervisor_argv(config_dir)
     # nexus-ovbr7: route the child's streams to a crash-channel file so a failure
     # BEFORE run_storage_supervisor's configure_logging runs (import error, bad
     # argv) and interpreter-fatal tracebacks are captured. Post-configure, the

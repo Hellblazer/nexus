@@ -34,9 +34,11 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
+from types import ModuleType
 
 import structlog
 
@@ -137,6 +139,9 @@ def _render_for_service() -> tuple[Path, str]:
     from nexus.commands import daemon as _daemon  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
     from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
 
+    if _daemon._autostart_platform() == "win32":
+        return _render_windows_task(_daemon)
+
     install_dir = _daemon._autostart_install_dir()
     install_dir.mkdir(parents=True, exist_ok=True)
     log_dir = _daemon._autostart_log_dir()
@@ -158,6 +163,41 @@ def _render_for_service() -> tuple[Path, str]:
         config_dir=config_dir,
     )
     return install_dir / template_name, rendered
+
+
+def _task_user_sid() -> str:
+    """The SID the logon task is registered for (seam: tests inject one)."""
+    from nexus.daemon.service_registry import service_identity  # noqa: PLC0415 — deferred import — Windows-only path
+
+    return service_identity()
+
+
+def _task_pythonw() -> str:
+    """The windowless interpreter the task launches (seam: tests inject one)."""
+    from nexus.daemon.windows_autostart import pythonw_for  # noqa: PLC0415 — deferred import — Windows-only path
+
+    return pythonw_for(sys.executable)
+
+
+def _render_windows_task(_daemon: ModuleType) -> tuple[Path, str]:
+    """RDR-224 (nexus-f9bgu.23): destination and body of the Task Scheduler task.
+
+    The kept copy (under ``_autostart_install_dir``) is the drift reference the
+    doctor row and ``converge_service_autostart_unit`` compare against, and is
+    what ``schtasks /Create /XML`` imports. The body bakes
+    the RESOLVED ABSOLUTE config dir the install used, as the launchd and
+    systemd units do, so the supervisor the launcher spawns is argv-explicit.
+    """
+    from nexus.daemon.windows_autostart import task_xml  # noqa: PLC0415 — deferred import — Windows-only path
+
+    install_dir = _daemon._autostart_install_dir()
+    install_dir.mkdir(parents=True, exist_ok=True)
+    body = task_xml(
+        sid=_task_user_sid(),
+        pythonw=_task_pythonw(),
+        config_dir=str(_daemon._config.nexus_config_dir().resolve()),
+    )
+    return install_dir / _daemon._autostart_filename_service(), body
 
 
 def _render_for(tier: str) -> tuple[Path, str]:
@@ -195,9 +235,39 @@ def _is_darwin() -> bool:
     return _daemon._autostart_platform() == "darwin"
 
 
+def _is_windows() -> bool:
+    from nexus.commands import daemon as _daemon  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
+
+    return _daemon._autostart_platform() == "win32"
+
+
+def _task_name() -> str:
+    from nexus.daemon.windows_autostart import TASK_NAME  # noqa: PLC0415 — deferred import — Windows-only path
+
+    return TASK_NAME
+
+
+def _task_run_cmd() -> list[str]:
+    """Start the registered task now (``/Run``): the install's activation half.
+
+    ``launchctl bootstrap`` and ``systemctl enable --now`` start the unit as
+    they register it; a logon task only fires at the next logon, so the install
+    asks for the first run itself.
+    """
+    return ["schtasks", "/Run", "/TN", _task_name()]
+
+
+def _task_end_cmd() -> list[str]:
+    return ["schtasks", "/End", "/TN", _task_name()]
+
+
 def _activate_cmd(dest: Path) -> list[str]:
     from nexus.commands import daemon as _daemon  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
 
+    if _daemon._autostart_platform() == "win32":
+        # /F replaces a task of the same name; /XML carries the whole definition
+        # (a flags-only /Create cannot set restart, time limit or battery rules).
+        return ["schtasks", "/Create", "/TN", _task_name(), "/XML", str(dest), "/F"]
     if _daemon._autostart_platform() == "darwin":
         uid = os.getuid()
         return ["launchctl", "bootstrap", f"gui/{uid}", str(dest)]
@@ -207,6 +277,8 @@ def _activate_cmd(dest: Path) -> list[str]:
 def _deactivate_cmd(dest: Path, *, tier: str = "t2") -> list[str]:
     from nexus.commands import daemon as _daemon  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
 
+    if _daemon._autostart_platform() == "win32":
+        return ["schtasks", "/Delete", "/TN", _task_name(), "/F"]
     if _daemon._autostart_platform() == "darwin":
         uid = os.getuid()
         # The launchd bootout target is the unit LABEL, which is tier-specific
@@ -336,6 +408,12 @@ _MANAGER_ACTION_TIMEOUT_S: float = 120.0
 _MANAGER_ABSOLUTE_PATHS: dict[str, tuple[str, ...]] = {
     "launchctl": ("/bin/launchctl",),
     "systemctl": ("/usr/bin/systemctl", "/bin/systemctl"),
+    # RDR-224 (nexus-f9bgu.23): the Windows service manager for a per-user
+    # logon task. SystemRoot is read when this module imports, which is fine on
+    # every host: on POSIX the path simply does not exist.
+    "schtasks": (
+        os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "schtasks.exe"),
+    ),
 }
 
 REINSTALL_REMEDY = "nx daemon service uninstall --autostart && nx daemon service install --autostart"
@@ -380,15 +458,36 @@ _READ_ONLY_MANAGER_VERBS: dict[str, frozenset[str]] = {
         "list-sockets", "list-timers", "get-default", "is-system-running",
         "show-environment",
     }),
+    # ``schtasks`` verbs are slash flags (``/Query``) and case-insensitive, so
+    # they are compared lower-cased with the slash stripped (see ``_manager_verb``).
+    "schtasks": frozenset({"query"}),
 }
 
 
+def _manager_key(command: str) -> str:
+    """The manager's name for classification: basename, lower-cased, no ``.exe``."""
+    name = re.split(r"[\\/]", command)[-1].lower()  # both separators, on any host
+    return name[:-4] if name.endswith(".exe") else name
+
+
+def _manager_verb(manager: str, args: list[str]) -> str | None:
+    """The verb of a manager argv: the first argument that is not a flag.
+
+    ``launchctl`` and ``systemctl`` flags start with ``-``; ``schtasks`` verbs
+    ARE the slash arguments (``/Query``, ``/Create``), so there the first
+    argument is the verb, lower-cased with its slash stripped.
+    """
+    if manager == "schtasks":
+        return args[0].lstrip("/").lower() if args else None
+    return next((a for a in args if not a.startswith("-")), None)
+
+
 def is_service_manager_cmd(cmd: list[str]) -> bool:
-    """True when *cmd* invokes ``launchctl`` or ``systemctl`` (by basename).
+    """True when *cmd* invokes ``launchctl``, ``systemctl`` or ``schtasks`` (by basename).
     Anything else routed through :func:`_run_manager` -- the test suite's fake
     managers are ``sleep`` and ``true`` -- is not a service manager and is
     outside the fence."""
-    return bool(cmd) and os.path.basename(cmd[0]) in _READ_ONLY_MANAGER_VERBS
+    return bool(cmd) and _manager_key(cmd[0]) in _READ_ONLY_MANAGER_VERBS
 
 
 def is_mutating_manager_cmd(cmd: list[str]) -> bool:
@@ -401,10 +500,11 @@ def is_mutating_manager_cmd(cmd: list[str]) -> bool:
     """
     if not cmd:
         return True
-    verbs = _READ_ONLY_MANAGER_VERBS.get(os.path.basename(cmd[0]))
+    manager = _manager_key(cmd[0])
+    verbs = _READ_ONLY_MANAGER_VERBS.get(manager)
     if verbs is None:
         return True
-    verb = next((a for a in cmd[1:] if not a.startswith("-")), None)
+    verb = _manager_verb(manager, cmd[1:])
     return verb is None or verb not in verbs
 
 
@@ -503,6 +603,8 @@ def _activation_query_cmd(dest: Path, *, tier: str) -> list[str]:
     which is the enable state directly."""
     from nexus.commands import daemon as _daemon  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
 
+    if _daemon._autostart_platform() == "win32":
+        return ["schtasks", "/Query", "/TN", _task_name(), "/XML"]
     if _daemon._autostart_platform() == "darwin":
         return ["launchctl", "print-disabled", f"gui/{os.getuid()}"]
     return ["systemctl", "--user", "is-enabled", dest.name]
@@ -549,8 +651,12 @@ def autostart_activation_state(dest: Path, *, tier: str) -> ActivationProbe:
             ActivationState.UNREACHABLE,
             f"`{shown}` did not answer within {_ACTIVATION_QUERY_TIMEOUT:g}s",
         )
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
+        # ValueError: the manager's output did not decode (UnicodeDecodeError).
         return ActivationProbe(ActivationState.UNREACHABLE, f"`{shown}` could not run ({exc})")
+
+    if cmd[0] == "schtasks":
+        return _windows_task_activation(result, shown)
 
     if cmd[0] == "launchctl":
         if result.returncode != 0:
@@ -589,6 +695,75 @@ def autostart_activation_state(dest: Path, *, tier: str) -> ActivationProbe:
         ActivationState.UNREACHABLE,
         f"`{shown}` exited {result.returncode}: {_first_line(result)}",
     )
+
+
+def _windows_task_activation(
+    result: subprocess.CompletedProcess[str], shown: str
+) -> ActivationProbe:
+    """Read ``schtasks /Query /TN <task> /XML`` (RDR-224, nexus-f9bgu.23).
+
+    Exit 0 means the task is registered; its ``Enabled`` setting says whether the
+    logon trigger can fire. A non-zero exit is ambiguous (``schtasks`` exits 1
+    for a missing task, an access error and a stopped scheduler alike, and its
+    message is localised), so it is settled by listing every task: an answered
+    listing that lacks the name is a POSITIVE "not registered"; anything else
+    could not be asked and is ``UNREACHABLE``, never a defect.
+    """
+    from nexus.daemon.windows_autostart import task_enabled  # noqa: PLC0415 — deferred import — Windows-only path
+
+    name = _task_name()
+    if result.returncode == 0:
+        if task_enabled(result.stdout or ""):
+            return ActivationProbe(ActivationState.ACTIVE)
+        return ActivationProbe(
+            ActivationState.NOT_ACTIVE,
+            f"`{shown}` reports the {name} task disabled",
+            remedy=f"schtasks /Change /TN {name} /ENABLE",
+        )
+    listing_cmd = ["schtasks", "/Query", "/FO", "CSV", "/NH"]
+    try:
+        listing = _run_manager(
+            listing_cmd, capture_output=True, text=True, check=False,
+            timeout=_ACTIVATION_QUERY_TIMEOUT,
+        )
+    except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
+        return ActivationProbe(
+            ActivationState.UNREACHABLE,
+            f"`{shown}` exited {result.returncode} and the task list could not be read ({exc})",
+        )
+    if listing.returncode != 0:
+        return ActivationProbe(
+            ActivationState.UNREACHABLE,
+            f"`{shown}` exited {result.returncode}: {_first_line(result)}",
+        )
+    registered = {
+        row.split(",", 1)[0].strip().strip('"').lstrip("\\").lower()
+        for row in (listing.stdout or "").splitlines()
+        if row.strip()
+    }
+    if name.lower() in registered:
+        return ActivationProbe(
+            ActivationState.UNREACHABLE,
+            f"`{shown}` exited {result.returncode}: {_first_line(result)}",
+        )
+    return ActivationProbe(
+        ActivationState.NOT_ACTIVE,
+        f"the {name} task is not registered with Task Scheduler",
+        remedy=REINSTALL_REMEDY,
+    )
+
+
+def _windows_task_registered() -> bool:
+    """True when Task Scheduler has the logon task (the kept XML may be gone)."""
+    try:
+        result = _run_manager(
+            ["schtasks", "/Query", "/TN", _task_name()],
+            capture_output=True, text=True, check=False,
+            timeout=_ACTIVATION_QUERY_TIMEOUT,
+        )
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0
 
 
 def _launchd_loaded_now(tier: str) -> bool | None:
@@ -729,6 +904,16 @@ def install_autostart(*, tier: str, force: bool = False) -> InstallResult:
     # so the unload runs for any previous content, not only differing.
     previous: str | None = existing if dest.exists() else None
     if force and previous is not None:
+        if _is_windows():
+            # A running launcher keeps the OLD definition's argv; end it so the
+            # /Run after the re-create starts the new one (nexus-f9bgu.23).
+            try:
+                _run_manager(
+                    _task_end_cmd(), capture_output=True, text=True, check=False,
+                    timeout=_MANAGER_ACTION_TIMEOUT_S,
+                )
+            except (OSError, ValueError, subprocess.TimeoutExpired):
+                pass
         predeactivate_cmd = _deactivate_cmd(dest, tier=tier)
         try:
             _run_manager(
@@ -814,11 +999,42 @@ def install_autostart(*, tier: str, force: bool = False) -> InstallResult:
             status=InstallStatus.NEWLY_INSTALLED, dest=dest, detail=msg, warnings=warnings
         )
 
+    detail = f"Activated via: {' '.join(cmd)}"
+    if _is_windows():
+        # RDR-224 (nexus-f9bgu.23): a logon task fires at the NEXT logon, where
+        # launchctl bootstrap and systemctl enable --now start the unit as they
+        # register it. nx init waits on the lease the first start publishes, so
+        # the install asks for that first run itself. A refusal here leaves the
+        # task registered (it still fires at logon) and is only a warning.
+        run_cmd = _task_run_cmd()
+        run_failure = ""
+        try:
+            run_result = _run_manager(
+                run_cmd, capture_output=True, text=True, check=False,
+                timeout=_MANAGER_ACTION_TIMEOUT_S,
+            )
+            if run_result.returncode != 0:
+                run_failure = (
+                    f"{' '.join(run_cmd)} exited {run_result.returncode}: "
+                    f"{_first_line(run_result)}"
+                )
+        except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
+            run_failure = f"{' '.join(run_cmd)} failed: {type(exc).__name__}: {exc}"
+        if run_failure:
+            _log.warning(f"{tier}_install_task_run_failed", detail=run_failure)
+            warnings = (
+                f"the task is registered and will start at the next logon, but "
+                f"it could not be started now ({run_failure})",
+            )
+        else:
+            detail += f"; started via: {' '.join(run_cmd)}"
+
     return InstallResult(
         status=InstallStatus.NEWLY_INSTALLED,
         dest=dest,
-        detail=f"Activated via: {' '.join(cmd)}",
+        detail=detail,
         activated_cmd=cmd,
+        warnings=warnings,
     )
 
 
@@ -1054,11 +1270,25 @@ def uninstall_autostart(*, tier: str = "t2") -> UninstallResult:
     install_dir = _daemon._autostart_install_dir()
     dest = install_dir / _autostart_filename_for(tier)
 
-    if not dest.exists():
+    on_windows = _is_windows() and tier == "service"
+    if not dest.exists() and not (on_windows and _windows_task_registered()):
         return UninstallResult(status=UninstallStatus.NOT_INSTALLED, dest=dest)
 
     warnings: list[str] = []
     deactivated = True
+    if on_windows:
+        # End a running launcher first: deleting a task leaves its running
+        # instance alone, and the launcher would respawn a supervisor that the
+        # uninstall's caller is about to stop. The supervisor itself is NOT in
+        # the task's job (measured), so ending the task does not stop the
+        # service; the survivor report below says so.
+        try:
+            _run_manager(
+                _task_end_cmd(), capture_output=True, text=True, check=False,
+                timeout=_MANAGER_ACTION_TIMEOUT_S,
+            )
+        except (OSError, ValueError, subprocess.TimeoutExpired):
+            pass  # best effort: the delete below is what removes the task
     cmd = _deactivate_cmd(dest, tier=tier)
     try:
         result = _run_manager(
@@ -1083,7 +1313,7 @@ def uninstall_autostart(*, tier: str = "t2") -> UninstallResult:
         )
         deactivated = False
 
-    dest.unlink()
+    dest.unlink(missing_ok=True)
 
     # nexus-dmgvx: the unit is gone, so nothing will come BACK — but say what
     # is still running NOW. Probed after the unlink so the report describes

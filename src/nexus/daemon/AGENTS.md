@@ -28,7 +28,8 @@ A reviewer seeing a lifecycle change that edits one tier's file without a corres
 | `aspect_worker_daemon.py` | Aspect-worker consumer. Leased, per-tenant host for the aspect queue. |
 | `binary_install.py` / `binary_lifecycle.py` | Engine-binary download, pin verification, and version-cycle wiring. |
 | `mineru_lifecycle.py` | MinerU sidecar lifecycle. |
-| `installer.py` | Daemon install / autostart wiring. INSTALL is service-tier only; UNINSTALL still knows the legacy `t2` unit, because removal machinery outlives what it removes. |
+| `installer.py` | Daemon install / autostart wiring. INSTALL is service-tier only; UNINSTALL still knows the legacy `t2` unit, because removal machinery outlives what it removes. Three managers: `launchctl`, `systemctl` and, on Windows, `schtasks` (all behind `_run_manager`, so the test fence and tripwire cover each). |
+| `windows_autostart.py` | Windows autostart (RDR-224, nexus-f9bgu.23): the Task Scheduler logon-task XML and the launcher it runs under `pythonw`. The launcher spawns the supervisor with the stop-channel flags, waits, and respawns it after any non-zero exit (launchd's `SuccessfulExit=false`), because the task's `RestartOnFailure` does NOT fire on a non-zero exit (measured: it restarts only a task that fails to launch). Do not "simplify" it to `nx ... --foreground` as the task action: the supervisor would sit in the task's own group and `CTRL_BREAK` could not reach it. Task Scheduler's job is `KILL_ON_JOB_CLOSE \| SILENT_BREAKAWAY_OK`; the supervisor and PostgreSQL survive `schtasks /End` (measured). |
 
 **Deleted, and deliberately absent from this table:** `t2_daemon.py`, `t2_client.py`,
 `discovery.py`, `spin_guard.py`, `catalog_write_shim.py` (nexus-i711w Stage 2 sub-stage B)
