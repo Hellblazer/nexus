@@ -7,6 +7,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.TenantScope;
+import dev.nexus.service.vectors.EmbedResult;
+import dev.nexus.service.vectors.Embedder;
 import dev.nexus.service.vectors.PgVectorRepository;
 import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
@@ -53,10 +55,36 @@ class VectorHandlerSearchPerCollectionTest {
     private static final String OTHER_MODEL = "knowledge__tu8wp-http-other__bge-base-en-v15-768__v1";
     private static final String ORPHAN = "knowledge__tu8wp-http-orphan__minilm-l6-v2-384__v1";
     private static final String GHOST = "knowledge__tu8wp-http-ghost__minilm-l6-v2-384__v1";
+    private static final List<String> FAN = List.of(
+        "knowledge__tu8wp-http-fan0__minilm-l6-v2-384__v1", "knowledge__tu8wp-http-fan1__minilm-l6-v2-384__v1",
+        "knowledge__tu8wp-http-fan2__minilm-l6-v2-384__v1", "knowledge__tu8wp-http-fan3__minilm-l6-v2-384__v1");
+
+    /** A query embedder that reports a fixed token count per embed call, to prove the count is emitted once. */
+    private static final class TokenReportingEmbedder implements Embedder {
+        private final Embedder delegate;
+        private final long tokens;
+
+        TokenReportingEmbedder(Embedder delegate, long tokens) {
+            this.delegate = delegate;
+            this.tokens = tokens;
+        }
+
+        @Override
+        public List<float[]> embed(List<String> texts) {
+            return delegate.embed(texts);
+        }
+
+        @Override
+        public EmbedResult embedWithUsage(List<String> texts) {
+            return new EmbedResult(delegate.embed(texts), tokens);
+        }
+    }
 
     PostgreSQLContainer<?> pg;
     HikariDataSource svcDs;
     ArmProbeDataSource probe;
+    TenantScope probeScope;
+    PgVectorRepository serviceRepo;
     NexusService service;
     HttpClient http;
     PgVectorRepositoryContractTest.FakeEmbedder embedder;
@@ -84,16 +112,24 @@ class VectorHandlerSearchPerCollectionTest {
         embedder.register(QUERY, 1f, 0f);
         var seedScope = new TenantScope(svcDs);
         var seedRepo = new PgVectorRepository(seedScope, embedder, embedder);
-        var repo = new PgVectorRepository(new TenantScope(probe.dataSource()), embedder, embedder);
+        probeScope = new TenantScope(probe.dataSource());
+        serviceRepo = new PgVectorRepository(probeScope, embedder, new TokenReportingEmbedder(embedder, 7L));
+        var repo = serviceRepo;
 
         try (Connection su = pg.createConnection("")) {
             var dsl = DSL.using(su, SQLDialect.POSTGRES);
             for (String c : List.of(DENSE, SMALL, OTHER_MODEL, ORPHAN)) {
                 PgContainerHelper.insertCollection(dsl, TENANT, c);
             }
+            for (String c : FAN) {
+                PgContainerHelper.insertCollection(dsl, TENANT, c);
+            }
         }
         seed(seedScope, seedRepo, DENSE, "dense", 30, 0.0, 0.001);
         seed(seedScope, seedRepo, SMALL, "small", 3, 1.0, 0.01);
+        for (String c : FAN) {
+            seed(seedScope, seedRepo, c, "fan", 2, 0.2, 0.01);
+        }
         // Every collection needs a chunk of its own: the engine sweeps registered-but-empty
         // "ghost" collections on a tenant's first authenticated request.
         seed(seedScope, seedRepo, ORPHAN, "orphan", 1, 0.5, 0.01);
@@ -212,11 +248,12 @@ class VectorHandlerSearchPerCollectionTest {
         assertThat(pc).hasSize(2);
         assertThat(pc.get(0).fieldNames()).toIterable().containsExactly(
             "collection", "raw_count", "dropped", "min_raw_distance", "min_dropped_distance", "error",
-            "error_class");
+            "error_kind");
         assertThat(pc.get(0).get("collection").asText()).isEqualTo(DENSE);
         assertThat(pc.get(0).get("raw_count").asInt()).isEqualTo(5);
         assertThat(pc.get(0).get("dropped").asInt()).isZero();
         assertThat(pc.get(0).get("error").isNull()).isTrue();
+        assertThat(pc.get(0).get("error_kind").isNull()).isTrue();
         assertThat(pc.get(1).get("collection").asText()).isEqualTo(SMALL);
         assertThat(pc.get(1).get("raw_count").asInt()).isEqualTo(3);
         assertThat(r.headers().firstValue("X-Nexus-Skipped-Collections")).isEmpty();
@@ -278,7 +315,8 @@ class VectorHandlerSearchPerCollectionTest {
         assertThat(orphan.get("collection").asText()).isEqualTo(ORPHAN);
         assertThat(orphan.get("error").asText())
             .isEqualTo("query embedder produced a 384-dim vector but the collection dispatches to embedding_768");
-        assertThat(orphan.get("error_class").asText()).isEqualTo("IllegalArgumentException");
+        assertThat(orphan.get("error_kind").asText()).isEqualTo("dimension_mismatch");
+        assertThat(orphan.has("error_class")).as("the Java class name is no longer on the wire").isFalse();
         assertThat(body.get("per_collection").get(0).get("error").isNull()).isTrue();
     }
 
@@ -300,11 +338,55 @@ class VectorHandlerSearchPerCollectionTest {
     }
 
     @Test
-    void aStatementTimeoutInAnyArmIs503WithRetryAfterForTheWholeRequest() throws Exception {
+    void aStatementTimeoutInOneArmIsIsolatedWithItsKind_theOtherCollectionIsServed() throws Exception {
+        post(ok());
+        probe.reset();
+        probe.failFromArm = 2;     // exactly one of the two arms times out
+        probe.failure = () -> new SQLException("canceling statement due to statement timeout", "57014");
+        try {
+            var r = post(ok());
+            assertThat(r.statusCode()).as(r.body()).isEqualTo(200);
+            JsonNode body = json(r);
+            long timedOut = 0;
+            for (JsonNode pc : body.get("per_collection")) {
+                if (!pc.get("error").isNull()) {
+                    timedOut++;
+                    assertThat(pc.get("error_kind").asText()).isEqualTo("statement_timeout");
+                    assertThat(pc.get("error").asText()).contains("statement timeout");
+                    assertThat(pc.get("raw_count").asInt()).isZero();
+                }
+            }
+            assertThat(timedOut).isEqualTo(1);
+            assertThat(body.get("results")).as("the other collection was served").isNotEmpty();
+        } finally {
+            probe.reset();
+        }
+    }
+
+    @Test
+    void everyArmTimingOutStillAnswers200_withEveryCollectionNamedAsFailed() throws Exception {
+        post(ok());
+        probe.reset();
+        probe.failFromArm = 1;
+        probe.failure = () -> new SQLException("canceling statement due to statement timeout", "57014");
+        try {
+            var r = post(ok());
+            assertThat(r.statusCode()).as(r.body()).isEqualTo(200);
+            JsonNode body = json(r);
+            assertThat(body.get("results")).isEmpty();
+            assertThat(body.get("per_collection")).hasSize(2)
+                .allSatisfy(pc -> assertThat(pc.get("error_kind").asText()).isEqualTo("statement_timeout"));
+        } finally {
+            probe.reset();
+        }
+    }
+
+    @Test
+    void anOtherTransientFailureIs503WithRetryAfterForTheWholeRequest() throws Exception {
         post(ok());
         probe.reset();
         probe.failFromArm = 2;
-        probe.failure = () -> new SQLException("canceling statement due to statement timeout", "57014");
+        probe.failure = () -> new SQLException("out of memory (probe)", "53200");
         try {
             var r = post(ok());
             assertThat(r.statusCode()).as(r.body()).isEqualTo(503);
@@ -316,6 +398,97 @@ class VectorHandlerSearchPerCollectionTest {
         } finally {
             probe.reset();
         }
+    }
+
+    @Test
+    void theFanoutBudgetIsReportedPerCollectionWithItsKind() throws Exception {
+        post(ok());
+        probe.reset();
+        probe.borrowDelayMs = 400;
+        serviceRepo.overrideFanoutBudgetMsForTests(300);
+        try {
+            Map<String, Object> req = request(FAN, 2, 100);
+            var r = post(req);
+            assertThat(r.statusCode()).as(r.body()).isEqualTo(200);
+            JsonNode body = json(r);
+            assertThat(body.get("per_collection")).hasSize(4)
+                .allSatisfy(pc -> {
+                    assertThat(pc.get("error_kind").asText()).isEqualTo("fanout_budget_exhausted");
+                    assertThat(pc.get("error").asText()).contains("300 ms");
+                });
+            assertThat(body.get("results")).isEmpty();
+        } finally {
+            serviceRepo.overrideFanoutBudgetMsForTests(0);
+            probe.reset();
+        }
+    }
+
+    @Test
+    void theErrorKindsHaveStableWireNames() {
+        assertThat(java.util.Arrays.stream(PgVectorRepository.ArmErrorKind.values())
+                .map(PgVectorRepository.ArmErrorKind::wire).toList())
+            .containsExactly("dimension_mismatch", "unsupported_dimension", "statement_timeout",
+                             "fanout_budget_exhausted");
+    }
+
+    @Test
+    void theUsageTokenHeaderCountsTheQueryEmbedOnce_notOncePerArm() throws Exception {
+        var r = post(request(FAN, 2, 100));      // four arms, one embed
+        assertThat(r.statusCode()).as(r.body()).isEqualTo(200);
+        assertThat(r.headers().firstValue("X-Nexus-Usage-Tokens")).hasValue("7");
+    }
+
+    // ── cross-request concurrency: plain /search is not starved (code review I2) ──
+
+    @Test
+    void aPlainSearchCompletesWhileSlowFanoutsHoldTheirArmSlots() throws Exception {
+        post(request(FAN, 2, 100));     // warm the registry cache so only arms borrow below
+        probeScope.replaceFanoutArmGateForTests(3);
+        try {
+            probe.reset();
+            probe.holdMs = 2_000;       // each arm keeps its connection two seconds after it finishes
+            // Two fan-out requests of four arms each: eight arm workers against a pool of eight, unless
+            // a gate shared across requests holds them to three.
+            var f1 = http.sendAsync(perCollectionRequest(request(FAN, 2, 100)), HttpResponse.BodyHandlers.ofString());
+            var f2 = http.sendAsync(perCollectionRequest(request(FAN, 2, 100)), HttpResponse.BodyHandlers.ofString());
+            Thread.sleep(500);          // both fan-outs are running and have taken what they will take
+            long t0 = System.nanoTime();
+            var search = http.send(TestHttp.request("http://127.0.0.1:" + service.getPort() + "/v1/vectors/search")
+                .header("Authorization", "Bearer " + TOKEN).header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString(MAPPER.writeValueAsString(
+                    Map.of("query", QUERY, "collections", List.of(DENSE), "n_results", 3)))).build(),
+                HttpResponse.BodyHandlers.ofString());
+            long elapsedMs = (System.nanoTime() - t0) / 1_000_000L;
+            assertThat(search.statusCode()).as(search.body()).isEqualTo(200);
+            assertThat(elapsedMs)
+                .as("a plain search needs one connection; the fan-outs may hold three of the eight, not all of them")
+                .isLessThan(1_000);
+            assertThat(f1.get().statusCode()).isEqualTo(200);
+            assertThat(f2.get().statusCode()).isEqualTo(200);
+            assertThat(probe.peak.get()).as("arm connections in flight across both requests").isLessThanOrEqualTo(3);
+        } finally {
+            probeScope.replaceFanoutArmGateForTests(5);
+            probe.reset();
+        }
+    }
+
+    private HttpRequest perCollectionRequest(Map<String, Object> body) throws Exception {
+        return TestHttp.request("http://127.0.0.1:" + service.getPort() + "/v1/vectors/search-per-collection")
+            .header("Authorization", "Bearer " + TOKEN)
+            .header("Content-Type", "application/json")
+            .POST(HttpRequest.BodyPublishers.ofString(MAPPER.writeValueAsString(body)))
+            .build();
+    }
+
+    @Test
+    void aLongThatWouldWrapIntoARangeIsA400_notASmallValidNumber() throws Exception {
+        // 4294967306 = 2^32 + 10: intValue() wraps it to 10, which the range check would accept.
+        Map<String, Object> req = ok();
+        req.put("per_collection_k", 4294967306L);
+        assertBadRequest(req, "32-bit");
+        Map<String, Object> req2 = ok();
+        req2.put("limit", 4294967396L);
+        assertBadRequest(req2, "32-bit");
     }
 
     // ── validation: 400 with the engine's JSON ────────────────────────────────

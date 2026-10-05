@@ -8,6 +8,8 @@ import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.db.UnregisteredCollectionException;
 import dev.nexus.service.http.RequestContext;
 import dev.nexus.service.vectors.PgVectorRepository;
+import dev.nexus.service.vectors.PgVectorRepository.ArmErrorKind;
+import dev.nexus.service.vectors.PgVectorRepository.FanoutSettings;
 import dev.nexus.service.vectors.PgVectorRepository.PerCollectionResult;
 import dev.nexus.service.vectors.PgVectorRepository.PerCollectionStat;
 import dev.nexus.service.vectors.RequestDeadlineExceededException;
@@ -67,6 +69,7 @@ class PgVectorSearchPerCollectionIntegrationTest {
     PgVectorRepository repo;
 
     ArmProbeDataSource probe;
+    TenantScope probeScope;
     PgVectorRepository probeRepo;
 
     @BeforeAll
@@ -85,7 +88,8 @@ class PgVectorSearchPerCollectionIntegrationTest {
         repo = new PgVectorRepository(scope, embedder, embedder);
 
         probe = new ArmProbeDataSource(ds);
-        probeRepo = new PgVectorRepository(new TenantScope(probe.dataSource()), embedder, embedder);
+        probeScope = new TenantScope(probe.dataSource());
+        probeRepo = new PgVectorRepository(probeScope, embedder, embedder);
 
         // Crowd-out fixture. DENSE: 200 chunks in a narrow cone round the query. SMALL: 5 chunks far
         // from it. Every DENSE chunk is nearer than every SMALL chunk, so a flat top-20 over both
@@ -103,6 +107,11 @@ class PgVectorSearchPerCollectionIntegrationTest {
         if (pg != null) {
             pg.stop();
         }
+    }
+
+    @org.junit.jupiter.api.BeforeEach
+    void resetProbe() {
+        probe.reset();
     }
 
     // ── fixture helpers ──────────────────────────────────────────────────────
@@ -324,7 +333,7 @@ class PgVectorSearchPerCollectionIntegrationTest {
         PerCollectionStat bad = stat(r, orphan);
         assertThat(bad.error())
             .isEqualTo("query embedder produced a 384-dim vector but the collection dispatches to embedding_768");
-        assertThat(bad.errorClass()).isEqualTo("IllegalArgumentException");
+        assertThat(bad.errorKind()).isEqualTo(ArmErrorKind.DIMENSION_MISMATCH);
         assertThat(bad.rawCount()).isZero();
         // The healthy collections are served, in full.
         assertThat(rowsOf(r.rows(), DENSE)).hasSize(K);
@@ -413,7 +422,7 @@ class PgVectorSearchPerCollectionIntegrationTest {
     }
 
     @Test
-    void concurrency_theDefaultIsHalfThePool_andOneRequestStaysUnderTheAdmissionLimit() throws Exception {
+    void concurrency_theDefaultIsHalfThePool() throws Exception {
         String tenant = "tu8wp-cc";
         List<String> cols = tinyCollections(tenant, 12);
         probe.reset();
@@ -421,14 +430,62 @@ class PgVectorSearchPerCollectionIntegrationTest {
         // A non-Hikari DataSource is sized at the TenantScope default pool of 10: default is 5.
         probeRepo.searchPerCollection(tenant, QUERY, cols, 3, 100, null, null, false);
         assertThat(probe.peak.get()).isEqualTo(5);
-        // An absurd explicit cap is clamped under the admission limit (2 x pool = 20) and, here,
-        // by the 12 arms and the 12-connection pool; it never starves the request into a deadlock.
-        probe.reset();
-        probe.holdMs = 20;
-        PerCollectionResult r = probeRepo.searchPerCollection(tenant, QUERY, cols, 3, 100, null, null,
-                                                              false, 10_000);
-        assertThat(r.rows()).hasSize(36);
-        assertThat(probe.peak.get()).isLessThanOrEqualTo(20);
+    }
+
+    @Test
+    void concurrency_anExplicitParallelismIsClampedToThePoolSize_notTheAdmissionLimit() throws Exception {
+        String tenant = "tu8wp-cc";
+        List<String> cols = tinyCollections(tenant, 24);
+        // Lift the cross-request arm gate out of the way so the per-request clamp is what is measured.
+        probeScope.replaceFanoutArmGateForTests(24);
+        try {
+            probe.reset();
+            probe.holdMs = 60;
+            // The probe's TenantScope sizes itself at the default pool of 10 (admission limit 20);
+            // the real pool behind it holds 12 connections. 24 arms, an absurd request of 10000.
+            PerCollectionResult r = probeRepo.searchPerCollection(tenant, QUERY, cols, 3, 100, null, null,
+                                                                  false, 10_000);
+            assertThat(r.rows()).hasSize(72);
+            assertThat(probe.peak.get())
+                .as("clamped to the pool size (10); a clamp to the admission limit (20) would reach the 12 the pool holds")
+                .isEqualTo(10);
+        } finally {
+            probeScope.replaceFanoutArmGateForTests(5);
+        }
+    }
+
+    @Test
+    void concurrency_theArmGateIsSharedByEveryRequest_notPerRequest() throws Exception {
+        String tenant = "tu8wp-cc";
+        List<String> cols = tinyCollections(tenant, 12);
+        probeScope.replaceFanoutArmGateForTests(3);
+        try {
+            probe.reset();
+            probe.holdMs = 80;
+            // Two requests at once, each wanting 5 arms: 10 arms against a gate of 3.
+            var failures = new java.util.concurrent.CopyOnWriteArrayList<Throwable>();
+            Runnable one = () -> {
+                try {
+                    PerCollectionResult r = probeRepo.searchPerCollection(tenant, QUERY, cols, 3, 100, null, null,
+                                                                          false, 5);
+                    assertThat(r.rows()).hasSize(36);
+                } catch (Throwable t) {
+                    failures.add(t);
+                }
+            };
+            Thread a = Thread.ofVirtual().start(one);
+            Thread b = Thread.ofVirtual().start(one);
+            a.join();
+            b.join();
+            assertThat(failures).isEmpty();
+            assertThat(probe.armBorrows.get()).isEqualTo(24);
+            assertThat(probe.peak.get())
+                .as("simultaneous arm connections across BOTH requests stay within the shared gate")
+                .isLessThanOrEqualTo(3);
+            assertThat(probe.peak.get()).as("non-vacuity: the gate was actually saturated").isEqualTo(3);
+        } finally {
+            probeScope.replaceFanoutArmGateForTests(5);
+        }
     }
 
     // ── a transient failure fails the WHOLE request ───────────────────────────
@@ -448,13 +505,30 @@ class PgVectorSearchPerCollectionIntegrationTest {
             .satisfies(t -> assertThat(causeChain(t)).anyMatch(c -> c instanceof SQLTransientConnectionException));
         assertThat(probe.armBorrows.get()).as("arms 3..12 were never started").isEqualTo(2);
 
-        // A statement timeout (57014) becomes the typed whole-request transient failure.
+        // Other transient states become the typed whole-request transient failure: resource
+        // exhaustion (class 53), a lock timeout (55P03), a lost connection (08006), a
+        // serialization failure (40001), an operator shutdown (57P01).
+        for (String state : new String[] {"53100", "53200", "53300", "55P03", "08006", "40001", "40P01", "57P01"}) {
+            probe.reset();
+            probe.failFromArm = 3;
+            probe.failure = () -> new SQLException("transient (probe)", state);
+            assertThatThrownBy(() -> probeRepo.searchPerCollection(tenant, QUERY, cols, 3, 100, null, null, false, 1))
+                .as("sqlstate %s", state)
+                .isInstanceOf(SearchFanoutTransientException.class)
+                .satisfies(t -> assertThat(((SearchFanoutTransientException) t).sqlState()).isEqualTo(state));
+        }
+
+        // A statement timeout (57014) is NOT a whole-request failure: it is isolated to its
+        // collection (Sam, 2026-10-05). Arms 1 and 2 are served, arm 3 onward time out, and every
+        // later arm is still attempted: a timeout is not a reason to stop the others.
         probe.reset();
         probe.failFromArm = 3;
         probe.failure = () -> new SQLException("canceling statement due to statement timeout", "57014");
-        assertThatThrownBy(() -> probeRepo.searchPerCollection(tenant, QUERY, cols, 3, 100, null, null, false, 1))
-            .isInstanceOf(SearchFanoutTransientException.class)
-            .satisfies(t -> assertThat(((SearchFanoutTransientException) t).sqlState()).isEqualTo("57014"));
+        PerCollectionResult timedOut = probeRepo.searchPerCollection(tenant, QUERY, cols, 3, 100, null, null,
+                                                                     false, 1);
+        assertThat(timedOut.perCollection().stream().filter(s -> s.errorKind() == ArmErrorKind.STATEMENT_TIMEOUT))
+            .hasSize(10);
+        assertThat(timedOut.rows()).as("the two arms that ran are served").hasSize(6);
 
         // A SQL failure that is not transient is a request-level error and propagates untyped.
         probe.reset();
@@ -494,6 +568,277 @@ class PgVectorSearchPerCollectionIntegrationTest {
                 .hasSize(12);
         } finally {
             RequestContext.clearDeadline();
+        }
+    }
+
+    // ── a non-dimension IllegalArgumentException is NOT isolated ──────────────
+
+    @Test
+    void anIllegalArgumentExceptionThatIsNotADimensionCasePropagates_itIsNotReportedAsACollectionError()
+            throws Exception {
+        String tenant = "tu8wp-cc";
+        List<String> cols = tinyCollections(tenant, 4);
+        probeRepo.searchPerCollection(tenant, QUERY, cols, 3, 100, null, null, false, 1);   // warm
+        probe.reset();
+        probe.failFromArm = 2;
+        probe.failure = () -> new IllegalArgumentException("a programming error in an arm");
+        assertThatThrownBy(() -> probeRepo.searchPerCollection(tenant, QUERY, cols, 3, 100, null, null, false, 1))
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("a programming error in an arm");
+    }
+
+    @Test
+    void anUnsupportedDispatchDimensionIsIsolatedWithItsOwnKind() throws Exception {
+        // A collection whose recorded dimension has no plain_search function, searched by an
+        // embedder that produces that same width: the width check passes, the dispatch cannot.
+        String odd = "knowledge__tu8wp-d512__minilm-l6-v2-384__v1";
+        register(CROWD_TENANT, odd);
+        try (Connection su = pg.createConnection("")) {
+            DSL.using(su, SQLDialect.POSTGRES).update(CATALOG_COLLECTIONS)
+               .set(CATALOG_COLLECTIONS.DIMENSION, 512)
+               .where(CATALOG_COLLECTIONS.TENANT_ID.eq(CROWD_TENANT).and(CATALOG_COLLECTIONS.NAME.eq(odd)))
+               .execute();
+        }
+        dev.nexus.service.db.CollectionRegistry.evict(CROWD_TENANT, odd);
+        var embedder512 = new PgVectorRepositoryContractTest.FakeEmbedder(512);
+        var repo512 = new PgVectorRepository(scope, embedder512, embedder512);
+        PerCollectionResult r = repo512.searchPerCollection(CROWD_TENANT, QUERY, List.of(odd), 5, 10, null, null, false);
+        assertThat(r.rows()).isEmpty();
+        PerCollectionStat s = r.perCollection().get(0);
+        assertThat(s.errorKind()).isEqualTo(ArmErrorKind.UNSUPPORTED_DIMENSION);
+        assertThat(s.error()).isEqualTo("unsupported dim 512");
+    }
+
+    // ── the statement bound is computed AFTER admission (code review I1) ──────
+
+    @Test
+    void statementBound_isComputedAfterTheConnectionWait_notBefore() throws Exception {
+        String tenant = "tu8wp-cc";
+        List<String> cols = tinyCollections(tenant, 4);
+        probeRepo.searchPerCollection(tenant, QUERY, cols, 3, 100, null, null, false, 1);   // warm
+        probe.reset();
+        probe.borrowDelayMs = 1_000;     // each arm queues one second for its connection
+        RequestContext.setDeadlineNanos(System.nanoTime() + 5_000_000_000L);
+        try {
+            PerCollectionResult r = probeRepo.searchPerCollection(tenant, QUERY, cols, 3, 100, null, null, false,
+                new FanoutSettings(4, 60_000, 30_000));
+            assertThat(r.rows()).hasSize(12);
+        } finally {
+            RequestContext.clearDeadline();
+        }
+        assertThat(probe.statementTimeouts).as("one statement_timeout per arm").hasSize(4);
+        assertThat(probe.statementTimeouts)
+            .as("the bound reflects the 5 s budget MINUS the 1 s queue wait; a bound computed before the wait is ~5000")
+            .allSatisfy(ms -> assertThat(ms).isLessThanOrEqualTo(4_100).isPositive());
+    }
+
+    @Test
+    void statementBound_aBudgetSpentWhileTheArmQueuedRefusesTheStatement() throws Exception {
+        String tenant = "tu8wp-cc";
+        List<String> cols = tinyCollections(tenant, 4);
+        probeRepo.searchPerCollection(tenant, QUERY, cols, 3, 100, null, null, false, 1);   // warm
+        probe.reset();
+        probe.borrowDelayMs = 1_000;
+        RequestContext.setDeadlineNanos(System.nanoTime() + 500_000_000L);   // spent before the borrow returns
+        try {
+            assertThatThrownBy(() -> probeRepo.searchPerCollection(tenant, QUERY, cols, 3, 100, null, null, false,
+                    new FanoutSettings(1, 60_000, 30_000)))
+                .isInstanceOf(RequestDeadlineExceededException.class);
+        } finally {
+            RequestContext.clearDeadline();
+        }
+        assertThat(probe.statementTimeouts).as("no statement was ever bounded and run").isEmpty();
+        assertThat(probe.armBorrows.get()).as("no further arm was launched").isEqualTo(1);
+    }
+
+    // ── a REAL statement timeout (an ACCESS EXCLUSIVE lock on nexus.chunks) ───
+
+    /** A superuser connection holding ACCESS EXCLUSIVE on nexus.chunks until {@link #unlock}. */
+    private Connection lockChunks() throws Exception {
+        Connection su = pg.createConnection("");
+        su.setAutoCommit(false);
+        try (var st = su.createStatement()) {
+            st.execute("LOCK TABLE nexus.chunks IN ACCESS EXCLUSIVE MODE");
+        }
+        return su;
+    }
+
+    private static void unlock(Connection su) {
+        try {
+            su.rollback();
+            su.close();
+        } catch (SQLException ignored) {
+            // already released
+        }
+    }
+
+    @Test
+    void aRealStatementTimeoutIsIsolatedToItsCollection_theOthersAreServed() throws Exception {
+        String tenant = "tu8wp-cc";
+        List<String> cols = tinyCollections(tenant, 3);
+        probeRepo.searchPerCollection(tenant, QUERY, cols, 3, 100, null, null, false, 1);   // warm
+        probe.reset();
+        Connection su = lockChunks();
+        // Release the lock the moment the SECOND arm has its connection: arm 1 has by then run into
+        // its 400 ms bound, arm 2 waits out the few milliseconds left and is served.
+        Thread releaser = Thread.ofVirtual().start(() -> {
+            long end = System.nanoTime() + 20_000_000_000L;
+            while (probe.armBorrows.get() < 2 && System.nanoTime() < end) {
+                try {
+                    Thread.sleep(5);
+                } catch (InterruptedException e) {
+                    return;
+                }
+            }
+            unlock(su);
+        });
+        PerCollectionResult r;
+        try {
+            r = probeRepo.searchPerCollection(tenant, QUERY, cols, 3, 100, null, null, false,
+                new FanoutSettings(1, 60_000, 400));
+        } finally {
+            releaser.join();
+            unlock(su);
+        }
+        PerCollectionStat first = stat(r, cols.get(0));
+        assertThat(first.errorKind()).isEqualTo(ArmErrorKind.STATEMENT_TIMEOUT);
+        assertThat(first.error()).contains("400 ms").contains("57014");
+        assertThat(first.rawCount()).isZero();
+        assertThat(stat(r, cols.get(1)).error()).isNull();
+        assertThat(stat(r, cols.get(2)).error()).isNull();
+        assertThat(rowsOf(r.rows(), cols.get(1))).hasSize(3);
+        assertThat(rowsOf(r.rows(), cols.get(2))).hasSize(3);
+        assertThat(probe.statementTimeouts.get(0)).as("the search bound, since neither budget was nearer").isEqualTo(400);
+    }
+
+    @Test
+    void aStatementCancelledByTheRequestBudgetsBoundIsAWholeRequestDeadline_notAnIsolatedTimeout() throws Exception {
+        String tenant = "tu8wp-cc";
+        List<String> cols = tinyCollections(tenant, 3);
+        probeRepo.searchPerCollection(tenant, QUERY, cols, 3, 100, null, null, false, 1);   // warm
+        probe.reset();
+        Connection su = lockChunks();
+        RequestContext.setDeadlineNanos(System.nanoTime() + 700_000_000L);
+        try {
+            assertThatThrownBy(() -> probeRepo.searchPerCollection(tenant, QUERY, cols, 3, 100, null, null, false,
+                    new FanoutSettings(1, 60_000, 30_000)))
+                .as("the request ran out of time: that is the request's failure, not one collection's")
+                .isInstanceOf(RequestDeadlineExceededException.class);
+        } finally {
+            RequestContext.clearDeadline();
+            unlock(su);
+        }
+        assertThat(probe.armBorrows.get()).as("no further arm was launched after the whole-request failure")
+            .isEqualTo(1);
+    }
+
+    @Test
+    void aStatementRunningWhenTheFanoutBudgetEndsIsReportedPerCollection_andNoLaterArmStarts() throws Exception {
+        String tenant = "tu8wp-cc";
+        List<String> cols = tinyCollections(tenant, 3);
+        probeRepo.searchPerCollection(tenant, QUERY, cols, 3, 100, null, null, false, 1);   // warm
+        probe.reset();
+        Connection su = lockChunks();
+        long t0 = System.nanoTime();
+        PerCollectionResult r;
+        try {
+            r = probeRepo.searchPerCollection(tenant, QUERY, cols, 3, 100, null, null, false,
+                new FanoutSettings(1, 500, 30_000));
+        } finally {
+            unlock(su);
+        }
+        long elapsedMs = (System.nanoTime() - t0) / 1_000_000L;
+        assertThat(r.rows()).isEmpty();
+        assertThat(r.perCollection()).hasSize(3)
+            .allSatisfy(s -> assertThat(s.errorKind()).isEqualTo(ArmErrorKind.FANOUT_BUDGET_EXHAUSTED));
+        assertThat(probe.armBorrows.get()).as("arms 2 and 3 were never started").isEqualTo(1);
+        assertThat(probe.statementTimeouts.get(0)).as("the arm was bounded by the fan-out budget, not the 30 s bound")
+            .isLessThanOrEqualTo(500);
+        assertThat(elapsedMs).as("answered at the budget, not at the search bound").isLessThan(5_000);
+    }
+
+    // ── the fan-out wall budget (critique S1), without a database stall ──────
+
+    @Test
+    void fanoutBudget_armsNotStartedWhenItIsSpentAreReportedPerCollection() throws Exception {
+        String tenant = "tu8wp-cc";
+        List<String> cols = tinyCollections(tenant, 6);
+        probeRepo.searchPerCollection(tenant, QUERY, cols, 3, 100, null, null, false, 1);   // warm
+        probe.reset();
+        probe.borrowDelayMs = 300;       // each arm queues 300 ms; the budget is 500 ms
+        PerCollectionResult r = probeRepo.searchPerCollection(tenant, QUERY, cols, 3, 100, null, null, false,
+            new FanoutSettings(1, 500, 30_000));
+        // Arm 1 borrows at ~300 ms (inside the budget) and is served; arm 2's borrow returns at
+        // ~600 ms, past it, and its statement is refused; arms 3..6 are never launched.
+        assertThat(stat(r, cols.get(0)).error()).isNull();
+        assertThat(rowsOf(r.rows(), cols.get(0))).hasSize(3);
+        for (int i = 1; i < 6; i++) {
+            PerCollectionStat s = stat(r, cols.get(i));
+            assertThat(s.errorKind()).as("collection %d", i).isEqualTo(ArmErrorKind.FANOUT_BUDGET_EXHAUSTED);
+            assertThat(s.error()).contains("500 ms");
+        }
+        assertThat(probe.armBorrows.get()).as("arms 3..6 were not launched once the budget was spent").isEqualTo(2);
+        assertThat(r.rows()).hasSize(3);
+    }
+
+    // ── cross-collection ties (code review test gap) ──────────────────────────
+
+    @Test
+    void crossCollectionTies_areOrderedByCollection_whateverTheRequestOrder() throws Exception {
+        String tenant = "tu8wp-tie";
+        String t1 = "knowledge__tu8wp-tie1__minilm-l6-v2-384__v1";
+        String t2 = "knowledge__tu8wp-tie2__minilm-l6-v2-384__v1";
+        register(tenant, t1, t2);
+        // The SAME five chunks (same text, so the same chash and the same vector) in both collections.
+        List<String> ids = new ArrayList<>();
+        List<String> texts = new ArrayList<>();
+        List<Map<String, Object>> metas = new ArrayList<>();
+        for (int i = 0; i < 5; i++) {
+            String text = "tu8wp-tie|" + i;
+            embedder.register(text, (float) Math.cos(0.05 * i), (float) Math.sin(0.05 * i));
+            ids.add(chash(text));
+            texts.add(text);
+            metas.add(Map.of());
+        }
+        for (String c : List.of(t1, t2)) {
+            repo.upsertChunks(tenant, c, ids, texts, metas);
+            scope.withTenant(tenant, ctx -> {
+                PgContainerHelper.ownChunks(ctx, tenant, c, ids.toArray(new String[0]));
+                return null;
+            });
+        }
+        // distance ascending by index, and each id appears once per collection at the same distance:
+        // (id0,t1) (id0,t2) (id1,t1) (id1,t2) (id2,t1) ...  limit 5 cuts BETWEEN a tied pair.
+        List<String> expected = List.of(ids.get(0) + "@" + t1, ids.get(0) + "@" + t2, ids.get(1) + "@" + t1,
+                                        ids.get(1) + "@" + t2, ids.get(2) + "@" + t1);
+        for (List<String> order : List.of(List.of(t1, t2), List.of(t2, t1))) {
+            // parallelism 1: arrival order IS the request order, so only the tie-break can equalise them
+            PerCollectionResult r = repo.searchPerCollection(tenant, QUERY, order, 5, 5, null, null, false, 1);
+            assertThat(r.rows().stream().map(x -> x.get("id") + "@" + x.get("collection")).toList())
+                .as("request order %s", order).isEqualTo(expected);
+        }
+    }
+
+    // ── the merge holds at most `limit` rows (code review I3, critique S2) ────
+
+    @Test
+    void theMergeRetainsAtMostLimitRows_andStillReturnsTheGlobalBest() throws Exception {
+        String tenant = "tu8wp-cc";
+        List<String> cols = tinyCollections(tenant, 12);       // 12 collections x 3 rows = 36 survivors
+        PerCollectionResult all = repo.searchPerCollection(tenant, QUERY, cols, 3, 1200, null, null, false, 1);
+        assertThat(all.rows()).hasSize(36);
+        assertThat(all.peakRetainedRows()).isEqualTo(36);       // limit 1200: nothing to evict
+        for (int arrivals : new int[] {1, 4}) {
+            PerCollectionResult cut = repo.searchPerCollection(tenant, QUERY, cols, 3, 5, null, null, false, arrivals);
+            assertThat(cut.rows()).hasSize(5);
+            assertThat(cut.peakRetainedRows())
+                .as("36 rows were offered; the merge never held more than limit=5 of them")
+                .isEqualTo(5);
+            assertThat(ids(cut.rows()))
+                .as("the global best 5, whatever order the arms finished in")
+                .isEqualTo(ids(all.rows()).subList(0, 5));
+            // per-collection stats still describe each arm's FULL row set, before the cut
+            assertThat(cut.perCollection()).allSatisfy(s -> assertThat(s.rawCount()).isEqualTo(3));
         }
     }
 

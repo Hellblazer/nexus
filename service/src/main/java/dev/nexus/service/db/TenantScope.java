@@ -107,7 +107,6 @@ public final class TenantScope {
     private final Semaphore admission;
     private final long admissionTimeoutMs;
     private final int poolSize;
-    private final int admissionLimit;
 
     public TenantScope(DataSource dataSource) {
         this.dataSource = dataSource;
@@ -126,7 +125,6 @@ public final class TenantScope {
         this.admissionTimeoutMs = timeoutMs;
         this.poolSize = poolSize;
         final int permits = poolSize * 2;
-        this.admissionLimit = permits;
         this.admission = ADMISSION.computeIfAbsent(
             dataSource, ds -> new Semaphore(permits, true));
     }
@@ -136,7 +134,6 @@ public final class TenantScope {
         this.dataSource = dataSource;
         this.admissionTimeoutMs = admissionTimeoutMs;
         this.poolSize = Math.max(1, admissionPermits / 2);
-        this.admissionLimit = admissionPermits;
         this.admission = ADMISSION.computeIfAbsent(
             dataSource, ds -> new Semaphore(admissionPermits, true));
     }
@@ -151,13 +148,31 @@ public final class TenantScope {
     }
 
     /**
-     * The number of callers admitted inside {@link #withTenant} at once, {@code 2 *}
-     * {@link #poolSize()}. A single request that fans out over several
-     * {@code withTenant} calls must keep its own parallelism under this figure, or it
-     * would queue behind itself (nexus-tu8wp.1).
+     * Cross-request gate on per-collection search fan-out ARMS (nexus-tu8wp.1), static per
+     * {@link DataSource} for the same reason as {@link #ADMISSION}: production builds several
+     * {@code TenantScope}s over one pool, and the gate must be one object for all of them.
+     *
+     * <p>A fan-out arm acquires one permit BEFORE it calls {@link #withTenant}, so an arm that is
+     * waiting for a slot holds neither an admission permit nor a connection. Capping the arms in
+     * flight across ALL fan-out requests (not per request) keeps the rest of the pool free for
+     * {@code /health}, writes and plain search: two concurrent requests, each wanting half the
+     * pool, would otherwise take all of it. Fair, so a burst cannot starve an early arrival.
      */
-    public int admissionLimit() {
-        return admissionLimit;
+    private static final Map<DataSource, Semaphore> FANOUT_ARMS =
+        Collections.synchronizedMap(new IdentityHashMap<>());
+
+    /**
+     * The fan-out arm gate for this scope's {@link DataSource}, created with {@code permits} the
+     * first time any scope over that DataSource asks (the permit count is process-wide config, so
+     * the first caller and every later one agree).
+     */
+    public Semaphore fanoutArmGate(int permits) {
+        return FANOUT_ARMS.computeIfAbsent(dataSource, ds -> new Semaphore(Math.max(1, permits), true));
+    }
+
+    /** Test seam: replace this DataSource's arm gate with a fresh one of {@code permits}. */
+    public void replaceFanoutArmGateForTests(int permits) {
+        FANOUT_ARMS.put(dataSource, new Semaphore(Math.max(1, permits), true));
     }
 
     /**

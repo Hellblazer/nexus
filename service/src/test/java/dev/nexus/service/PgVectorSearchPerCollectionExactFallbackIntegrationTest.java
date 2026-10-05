@@ -53,6 +53,8 @@ class PgVectorSearchPerCollectionExactFallbackIntegrationTest {
     PostgreSQLContainer<?> pg;
     HikariDataSource ds;
     PgVectorRepository repo;
+    ArmProbeDataSource probe;
+    PgVectorRepository probeRepo;
 
     @BeforeAll
     void startAll() throws Exception {
@@ -73,6 +75,8 @@ class PgVectorSearchPerCollectionExactFallbackIntegrationTest {
         var scope = new TenantScope(ds);
         var embedder = new PgVectorRepositoryContractTest.FakeEmbedder(384);
         repo = new PgVectorRepository(scope, embedder, embedder);
+        probe = new ArmProbeDataSource(ds);
+        probeRepo = new PgVectorRepository(new TenantScope(probe.dataSource()), embedder, embedder);
 
         try (Connection su = pg.createConnection("")) {
             var dsl = DSL.using(su, SQLDialect.POSTGRES);
@@ -146,19 +150,29 @@ class PgVectorSearchPerCollectionExactFallbackIntegrationTest {
     }
 
     @Test
-    void theExactRerunStillWorksWhenTheArmCarriesARequestBudget() {
-        // With a deadline on the request thread the arm re-binds its statement bound to the
-        // remaining budget just before the exact re-run; the repair must be unaffected.
-        RequestContext.setDeadlineNanos(System.nanoTime() + 120_000_000_000L);
+    void theExactRerunIsReboundToTheRemainingBudget_andStillRepairsTheArm() {
+        // A deadline SMALLER than the 30 s search bound, so the request budget (not the search bound)
+        // is what sets each statement's bound. The spy records every statement_timeout the arm was
+        // given: the first attempt's, and (only because the arm starved and re-ran) the re-run's.
+        probe.reset();
+        RequestContext.setDeadlineNanos(System.nanoTime() + 20_000_000_000L);
         try {
             long before = PgVectorRepository.exactFallbackCount();
-            PerCollectionResult r = repo.searchPerCollection(TENANT, QUERY, List.of(SMALL1), K, 100, null, null,
-                                                             false);
+            PerCollectionResult r = probeRepo.searchPerCollection(TENANT, QUERY, List.of(SMALL1), K, 100, null,
+                                                                  null, false);
             assertThat(r.rows()).hasSize(SMALL_ROWS);
             assertThat(PgVectorRepository.exactFallbackCount() - before).isEqualTo(1);
         } finally {
             RequestContext.clearDeadline();
         }
+        assertThat(probe.statementTimeouts)
+            .as("the starved arm set statement_timeout twice: before its first attempt and again before the "
+                + "exact re-run (with the rebind deleted there is only one)")
+            .hasSize(2);
+        int first = probe.statementTimeouts.get(0);
+        int rerun = probe.statementTimeouts.get(1);
+        assertThat(first).as("bounded by the 20 s request budget, not the 30 s search bound").isLessThanOrEqualTo(20_000);
+        assertThat(rerun).as("re-bound to what is left: never more than the first attempt had").isLessThanOrEqualTo(first);
     }
 
     private static String chash(String text) {

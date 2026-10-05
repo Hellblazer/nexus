@@ -304,8 +304,9 @@ public final class VectorHandler implements HttpHandler {
             log.info("event=vector_refused_shutting_down op={} error={}", op, e.getMessage());
             HttpUtil.send(exchange, 503, json(Map.of("error", e.getMessage())));
         } catch (dev.nexus.service.vectors.SearchFanoutTransientException e) {
-            // nexus-tu8wp.1: a per-collection search statement failed transiently (a statement
-            // timeout above all). The WHOLE request fails, never a partial result. 503, inside the
+            // nexus-tu8wp.1: a per-collection search statement failed transiently (connection
+            // loss, shutdown, resource exhaustion, a lock timeout; NOT a statement timeout, which
+            // is isolated per collection). The WHOLE request fails, never a partial result. 503, inside the
             // client's gateway retry codes, with the same Retry-After shape the deadline arm uses.
             long retryAfter = dev.nexus.service.vectors.RequestDeadlineExceededException.DEFAULT_RETRY_AFTER_SECONDS;
             log.warn("event=vector_search_fanout_transient op={} sqlstate={} error={}",
@@ -612,7 +613,7 @@ public final class VectorHandler implements HttpHandler {
      * {
      *   "results": [ ...the /search row shape, at most limit rows... ],
      *   "per_collection": [{"collection", "raw_count", "dropped", "min_raw_distance",
-     *                       "min_dropped_distance", "error", "error_class"}, ...],
+     *                       "min_dropped_distance", "error", "error_kind"}, ...],
      *   "per_collection_k": 40,   // echo
      *   "limit": 300,             // echo
      *   // when rerank: rerank_degraded / rerank_model / rerank_error, as on /search
@@ -620,9 +621,15 @@ public final class VectorHandler implements HttpHandler {
      * </pre>
      * {@code X-Nexus-Usage-Tokens} and {@code X-Nexus-Skipped-Collections} are emitted as on
      * {@code /search}. A row is dropped by its collection's threshold when
-     * {@code distance > threshold}. A permanent per-collection error (for example a dimension
-     * mismatch) is reported in that collection's {@code per_collection} entry while the others are
-     * served; a transient failure in any collection fails the whole request with 503.
+     * {@code distance > threshold}. A collection that returned no rows for a reason of its own is
+     * reported in its {@code per_collection} entry, {@code error} (human text) beside
+     * {@code error_kind} (a stable value), and the others are served. The {@code error_kind}
+     * values are {@code dimension_mismatch}, {@code unsupported_dimension},
+     * {@code statement_timeout} (the collection's statement hit the search bound) and
+     * {@code fanout_budget_exhausted} (the fan-out's aggregate wall budget,
+     * {@code NX_SEARCH_FANOUT_BUDGET_MS}, default 20 s, was spent before or while it ran);
+     * {@code error} and {@code error_kind} are both {@code null} for a collection that answered. Pool or admission exhaustion, an expired
+     * request budget and any other transient database failure fail the whole request with 503.
      *
      * <p><strong>Rerank semantics.</strong> The rerank stage runs once over the merged rows (at
      * most {@code limit}), not once per batch of a client fan-out, so a row beyond the distance
@@ -680,7 +687,7 @@ public final class VectorHandler implements HttpHandler {
             m.put("min_raw_distance", stat.minRawDistance());
             m.put("min_dropped_distance", stat.minDroppedDistance());
             m.put("error", stat.error());
-            m.put("error_class", stat.errorClass());
+            m.put("error_kind", stat.errorKind() == null ? null : stat.errorKind().wire());
             perCollection.add(m);
         }
         envelope.put("per_collection", perCollection);
@@ -2229,7 +2236,14 @@ public final class VectorHandler implements HttpHandler {
     private int optInt(Map<String, Object> body, String key, int defaultValue) {
         Object val = body.get(key);
         if (val == null) return defaultValue;
-        if (val instanceof Number n) return n.intValue();
+        if (val instanceof Number n) {
+            // A long (or bigger) must not wrap into a small positive int and pass a range check.
+            double d = n.doubleValue();
+            if (Double.isNaN(d) || d < Integer.MIN_VALUE || d > Integer.MAX_VALUE) {
+                throw new IllegalArgumentException("field '" + key + "' must be an integer in the 32-bit range");
+            }
+            return n.intValue();
+        }
         try { return Integer.parseInt(val.toString()); }
         catch (NumberFormatException e) {
             throw new IllegalArgumentException("field '" + key + "' must be an integer");
