@@ -6,6 +6,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **The engine serves per-collection top-K search in one request** (nexus-tu8wp.1). `POST /v1/vectors/search-per-collection` takes one embedding-model group of up to 256 collections and returns each collection's own top `per_collection_k`, so a dense collection can no longer crowd a small one out of a flat `LIMIT`. The engine embeds the query once, runs one single-collection `plain_search_<dim>` statement per collection on a bounded set of workers (`NX_SEARCH_FANOUT_CONCURRENCY`, default half the pool, never above the admission limit), applies the client's per-collection thresholds, merges by `(distance, id)` to `limit`, and reranks once. A transient failure in any collection is a 503 for the whole request; a permanent one (a dimension mismatch) is isolated in `per_collection[].error`. No changeset. Engine-side only: the client does not call the route yet.
+
 ## [7.71.0] - 2026-10-04
 
 Pairs with engine-service-v0.1.146 (tagged on 2b85b3357, live in the cloud since

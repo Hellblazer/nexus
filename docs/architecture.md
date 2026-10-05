@@ -662,6 +662,8 @@ search_cross_corpus()              # search_engine.py
   │  otherwise fall back to Ward hierarchical clustering
 ```
 
+**Per-collection top-K route (engine, nexus-tu8wp.1).** `POST /v1/vectors/search-per-collection` takes one embedding-model group of up to 256 collections in a single request and returns each collection's own top `per_collection_k` (1 to 300), thresholded per collection from a client-sent `thresholds` map, merged by `(distance, id)` and cut to `limit` (up to 1200), with the rerank stage run once over the merged rows. It exists because a flat `plain_search_<dim>(q, [A, B, ...], n)` hands every slot to a dense collection and returns nothing for a small one. The query is embedded once, then each collection runs as its own single-collection `plain_search_<dim>` statement (its own transaction, serving GUCs and exact re-run) on a bounded set of virtual threads: `NX_SEARCH_FANOUT_CONCURRENCY`, default half the pool, always under the admission limit. A transient failure in any collection (admission or pool exhaustion, a statement timeout, an expired request budget) fails the whole request with 503, never a partial result; a permanent per-collection error (a dimension mismatch) is reported in that collection's `per_collection[].error` and the others are served. Lexical and hybrid search stay on `/v1/vectors/hybrid-search`. The client does not call the route yet (nexus-tu8wp.2).
+
 ### Storage
 
 **T2 tables** (engine Postgres via `HttpTaxonomyStore`; `CatalogTaxonomy` is the retired pre-RDR-158 name):
