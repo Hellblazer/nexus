@@ -270,3 +270,16 @@ def test_switch_off_does_not_hold_an_attached_windows_archive_to_its_ceiling(tmp
     r = _run(bindir, "off")
     assert r.returncode == 0, r.stdout + r.stderr
     assert len(_edits(log)) == 1
+
+
+def test_the_floor_checks_asset_sets_are_the_ones_promotion_expects(tmp_path: Path) -> None:
+    """scripts/check_engine_release_floor.py --require-windows (nexus-f9bgu.28) names the same 21 and 27
+    assets this script waits for: compared as sets, and driven through the script itself, so a name
+    added to one and not the other fails here."""
+    import check_engine_release_floor as floor
+
+    assert set(floor.expected_engine_assets(windows=False)) == set(_all_assets())
+    assert set(floor.expected_engine_assets(windows=True)) == set(_all_assets()) | set(WINDOWS_ASSETS)
+    bindir, _ = _stub_gh(tmp_path, list(floor.expected_engine_assets(windows=True)))
+    r = _run(bindir, "on")
+    assert r.returncode == 0 and "all 27 expected assets present" in r.stdout, r.stdout + r.stderr

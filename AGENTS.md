@@ -195,6 +195,34 @@ registers the runner and flips the variable; agents never do either.
 when they hold the owner's `gh` token. Report the run id and stop; the approval
 click is Sam's.
 
+**Review a contributor change as release-runner code, not only a fork-PR run**
+(nexus-f9bgu.27, RDR-224 review). A fork PR's run needs a click; MERGED code does
+not. A push to `develop` runs `windows-pg-bundle-rehearsal.yml` on `win-release`
+under the merger's actor, so its `github.actor == 'Hellblazer'` guard says who
+merged, not who wrote the code, and the scripts, the pom and the composite
+actions it runs execute with the runner's standing access and no further click.
+So a contributor change that touches ANY path in that workflow's `paths:` filter
+(which includes `service/pom.xml`, since a pom edit is arbitrary code at build
+time), `scripts/*windows*`, `scripts/windows_*.py`, the `.github/actions/windows-*`
+actions, `.github/actions/resolve-windows-python/**` or the Windows jobs of
+`engine-service-release.yml` and `pg-bundle-cache-seed.yml` is read in full for
+what it executes (commands, downloads, `subprocess`, environment, anything that
+reaches the network or the runner's files), the same way as a change under
+`.github/` above. The Windows jobs carry the owner actor guard and the
+`NX_WINDOWS_RELEASE_LEGS` switch; neither makes the code they run trustworthy. If
+that standing is ever too much, a GitHub `environment:` with a required reviewer on
+those jobs would make the click mechanical; it is a repository setting and Sam's
+call, so it is not configured.
+
+**What the rehearsal does not prove.** `windows-pg-bundle-rehearsal.yml` runs the
+shared composite actions and scripts. It deliberately does not run
+`engine-service-release.yml`'s own Windows jobs (a push trigger on a release
+workflow would run release jobs): the cosign steps, `gh release upload`, the
+cross-job artifact handoff, cache restore on the self-hosted runner and the
+promotion check are proven only by a `workflow_dispatch` run of
+`engine-service-release.yml` on `develop` with the switch on, before the first
+Windows-carrying cut. The `engine-release` skill's pre-cut steps name it.
+
 ## Workflows
 
 ### Adding a CLI command
