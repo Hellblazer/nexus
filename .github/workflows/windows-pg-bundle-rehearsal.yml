@@ -19,10 +19,12 @@
 #                 linux codegen job (a Windows runner has no Docker), which is why this
 #                 workflow now has one ubuntu job; it is held behind the same actor
 #                 guard and switch as the Windows jobs;
-#   conformance:  the supervisor lifecycle conformance suite on Windows. It is a
-#                 job of its own so its result does not hide the bundle's; until
-#                 the Windows supervisor work lands (RDR-224 Phase 3) it can be
-#                 red for reasons that have nothing to do with the bundle.
+#   conformance:  the Windows test set, the supervisor lifecycle conformance suite
+#                 and everything else RDR-224 Phase 3 proved green natively (the
+#                 daemon tests, the stop channel's console sequence, the owner-only
+#                 DACL helper, the session sweep and the plugin's lease read), in
+#                 one pytest run with a junit floor. It is a job of its own so its
+#                 result does not hide the bundle's.
 # The release legs run the smoke again at tag time.
 #
 # Triggers: a push to develop that touches those inputs (the mac rehearsal's
@@ -89,9 +91,34 @@ on:
       - tests/fixtures/windows_dumpbin/**
       - service/pom.xml
       - service/src/main/resources/META-INF/native-image/**
-      - tests/daemon/test_rdr149_lifecycle_conformance.py
+      # The Phase 3 Windows process-management code and the tests that run on it
+      # natively (RDR-224, nexus-f9bgu.33/.34, critique S3): a change to the stop
+      # channel's attach sequence cost a measured defect that only a hand run
+      # found, so each of these re-runs the Windows test set below.
+      - tests/daemon/**
+      - tests/test_process_group_safety.py
+      - tests/test_session_sweep_orphan_trackers.py
+      - tests/test_win_console.py
+      - tests/test_winsec.py
+      - tests/hooks/test_endpoint_resolve_lease_retry.py
+      - tests/test_windows_service_stop_driver.py
+      - scripts/windows_service_stop_driver.py
       - src/nexus/daemon/service_registry.py
       - src/nexus/daemon/storage_service_daemon.py
+      - src/nexus/daemon/aspect_worker_daemon.py
+      - src/nexus/daemon/windows_autostart.py
+      - src/nexus/daemon/replace_*.py
+      - src/nexus/daemon/binary_install.py
+      - src/nexus/util/win_console.py
+      - src/nexus/util/win_job.py
+      - src/nexus/util/process_group.py
+      - src/nexus/_winsec.py
+      - src/nexus/_install/winproc_core.py
+      - src/nexus/db/pg_provision.py
+      - src/nexus/db/pg_bundle.py
+      - src/nexus/commands/daemon.py
+      - src/nexus/session.py
+      - conexus/hooks/scripts/_endpoint_resolve.py
       - tests/_engine_substrate.py
       - tests/conftest.py
       - scripts/check_junit_floor.py
@@ -245,7 +272,7 @@ jobs:
         uses: ./.github/actions/windows-job-cleanup
 
   conformance:
-    name: Supervisor lifecycle conformance suite on Windows (win-release)
+    name: Windows test set, supervisor conformance and Phase 3 process management (win-release)
     if: ${{ github.actor == 'Hellblazer' && vars.NX_WINDOWS_RELEASE_LEGS == 'on' }}
     runs-on: win-release
     timeout-minutes: 30
@@ -257,14 +284,21 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
 
-      - name: Conformance suite
+      # The set RDR-224 nexus-f9bgu.44 proved green on native Windows, in one pytest
+      # process (default addopts: integration, slow and lint tests are deselected).
+      # The conformance suite is tests/daemon/test_rdr149_lifecycle_conformance.py,
+      # inside tests/daemon/. Measured on qwentescence 2026-10-05, py3.13, this exact
+      # command: 1076 passed, 38 skipped, 2 xfailed, 0 failed in 78 s.
+      - name: Windows test set
         run: |
-          uv run --python 3.13 --frozen pytest tests/daemon/test_rdr149_lifecycle_conformance.py -o addopts="" -p no:cacheprovider -q -rs --junitxml=conformance-junit.xml
+          uv run --python 3.13 --frozen pytest tests/daemon/ tests/test_process_group_safety.py tests/test_session_sweep_orphan_trackers.py tests/test_win_console.py tests/test_winsec.py tests/hooks/test_endpoint_resolve_lease_retry.py -p no:cacheprovider -q -rs --junitxml=windows-tests-junit.xml
 
-      # A suite that skipped itself on Windows would pass having proved nothing.
-      # The ceiling counts xfail too (pytest reports it as a skip): the two
-      # documented GAP cells plus the two platform skips (nexus-f9bgu.19).
+      # A run that skipped itself on Windows would pass having proved nothing. The
+      # floor is sized from the measured run above: junit counts an xfail as a skip,
+      # so the ceiling is 38 skips + 2 xfail = 40, plus 5 of headroom; the passed
+      # floor is about 90% of the 1076 measured, so a suite that quietly lost a tenth
+      # of its tests fails while ordinary additions do not (nexus-f9bgu.33).
       - name: Non-vacuity floor
         if: ${{ !cancelled() }}
         run: |
-          uv run --python 3.13 --frozen python scripts/check_junit_floor.py conformance-junit.xml --min-passed 65 --max-skipped 4
+          uv run --python 3.13 --frozen python scripts/check_junit_floor.py windows-tests-junit.xml --min-passed 970 --max-skipped 45

@@ -333,7 +333,9 @@ def test_the_rehearsal_runs_all_three_decided_checks() -> None:
     assert "tests/test_pg_bundle_windows.py" in bundle  # the build-script check
     assert "build_pg_bundle_windows.py build" in bundle
     assert "pg_bundle_windows_smoke.py --archive" in bundle  # the relocation smoke
-    assert "test_rdr149_lifecycle_conformance.py" in _run_text(jobs["conformance"])
+    # The conformance suite is inside tests/daemon/, which the widened Windows test set runs whole.
+    assert "tests/daemon/" in _run_text(jobs["conformance"])
+    assert (REPO / "tests" / "daemon" / "test_rdr149_lifecycle_conformance.py").exists()
 
 
 def test_the_rehearsal_deletes_the_build_tree_before_the_smoke() -> None:
@@ -683,3 +685,59 @@ def test_every_file_the_rehearsal_triggers_on_exists_or_is_a_glob_over_something
             assert list(REPO.glob(path)), f"{path} matches nothing: a dead trigger"
         else:
             assert (REPO / path).exists(), path
+
+
+# --------------------------------------------------------------------------- #
+# The widened Windows test set (nexus-f9bgu.33/.34, critique S3)
+# --------------------------------------------------------------------------- #
+
+#: The Phase 3 Windows modules: a change to any of them must re-run the Windows tests.
+PHASE3_WINDOWS_MODULES = (
+    "src/nexus/util/win_console.py", "src/nexus/util/win_job.py", "src/nexus/_winsec.py",
+    "src/nexus/daemon/windows_autostart.py", "src/nexus/daemon/replace_*.py",
+    "src/nexus/_install/winproc_core.py", "src/nexus/daemon/binary_install.py",
+    "src/nexus/db/pg_provision.py", "src/nexus/db/pg_bundle.py", "src/nexus/commands/daemon.py",
+    "src/nexus/daemon/storage_service_daemon.py", "src/nexus/daemon/service_registry.py",
+    "src/nexus/daemon/aspect_worker_daemon.py",
+)
+#: What .44 proved green on native Windows, run as one pytest process.
+WINDOWS_TEST_SET = (
+    "tests/daemon/", "tests/test_process_group_safety.py", "tests/test_session_sweep_orphan_trackers.py",
+    "tests/test_win_console.py", "tests/test_winsec.py", "tests/hooks/test_endpoint_resolve_lease_retry.py",
+)
+
+
+def test_the_rehearsal_triggers_on_every_phase3_windows_module_and_its_tests() -> None:
+    paths = _triggers(_doc(REHEARSAL))["push"]["paths"]
+    for module in PHASE3_WINDOWS_MODULES:
+        assert module in paths, module
+    assert "tests/daemon/**" in paths
+    for test in WINDOWS_TEST_SET[1:]:
+        assert test in paths, test
+
+
+def test_the_windows_job_runs_the_whole_set_in_one_pytest_with_a_junit_floor() -> None:
+    job = _doc(REHEARSAL)["jobs"]["conformance"]
+    run_steps = [s["run"] for s in job["steps"] if "pytest" in s.get("run", "")]
+    assert len(run_steps) == 1, "non-vacuity: exactly one pytest step in the job"
+    for target in WINDOWS_TEST_SET:
+        assert target in run_steps[0], target
+    assert "--junitxml=windows-tests-junit.xml" in run_steps[0]
+    # default addopts stay: integration, slow and lint tests need services a runner step does not have.
+    assert 'addopts=""' not in run_steps[0]
+    floor = next(s for s in job["steps"] if "check_junit_floor.py" in s.get("run", ""))
+    assert "windows-tests-junit.xml" in floor["run"]
+    # a floor that can be passed by a mostly-skipped or much smaller run is no floor
+    passed = int(re.search(r"--min-passed (\d+)", floor["run"]).group(1))
+    skipped = int(re.search(r"--max-skipped (\d+)", floor["run"]).group(1))
+    assert passed >= 900, passed
+    assert skipped <= 50, skipped
+
+
+def test_the_windows_job_keeps_the_switch_the_actor_guard_and_never_runs_on_pull_request() -> None:
+    doc = _doc(REHEARSAL)
+    job = doc["jobs"]["conformance"]
+    assert "github.actor == 'Hellblazer'" in str(job["if"])
+    assert SWITCH in str(job["if"])
+    assert "pull_request" not in _triggers(doc)
+    assert doc["concurrency"]["cancel-in-progress"] is True
