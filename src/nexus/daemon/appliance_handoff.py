@@ -49,6 +49,8 @@ import os
 from collections.abc import Callable, Mapping
 from pathlib import Path
 
+from nexus._winsec import ensure_owner_only, open_private
+
 #: The unit sets this to /var/lib/nexus/appliance/endpoint.json. Unset (every
 #: non-appliance install), no handoff file is written and nothing is issued.
 HANDOFF_FILE_ENV: str = "NX_APPLIANCE_HANDOFF_FILE"
@@ -107,7 +109,7 @@ def _atomic_write(target: Path, data: bytes) -> None:
     tmp = target.with_name(f".{target.name}.tmp.{os.getpid()}")
     with contextlib.suppress(FileNotFoundError):
         tmp.unlink()
-    fd = os.open(str(tmp), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    fd = open_private(tmp, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
     try:
         try:
             view = memoryview(data)
@@ -133,8 +135,7 @@ def _atomic_write(target: Path, data: bytes) -> None:
 
 def _enforce_0600(path: Path) -> None:
     """Tighten an existing file that is readable beyond its owner."""
-    if path.stat().st_mode & 0o077:
-        path.chmod(0o600)
+    ensure_owner_only(path)
 
 
 def write_handoff_if_changed(target: Path, port: int, mint_token: str, mint_tenant: str) -> bool:

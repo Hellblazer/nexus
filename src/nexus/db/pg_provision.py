@@ -98,6 +98,7 @@ from typing import NamedTuple
 
 import structlog
 
+from nexus._winsec import restrict_to_owner
 from nexus.bounded_subprocess import run_bounded
 from nexus.redact import redact_credentials
 
@@ -1938,8 +1939,8 @@ def _write_credentials(
     # left in a half-written state.
     tmp_fd, tmp_path = tempfile.mkstemp(dir=creds_path.parent, prefix=".pg_creds_")
     try:
-        os.fchmod(tmp_fd, 0o600)
         with os.fdopen(tmp_fd, "w") as fh:
+            restrict_to_owner(tmp_path)  # before any secret byte is written; os.fchmod does not exist on Windows
             fh.write(content)
         os.replace(tmp_path, creds_path)
     except Exception:
@@ -1972,8 +1973,8 @@ def _persist_service_token(creds_path: Path, service_token: str) -> None:
     content = existing + f"NX_SERVICE_TOKEN={service_token}\n"
     tmp_fd, tmp_path = tempfile.mkstemp(dir=creds_path.parent, prefix=".pg_creds_")
     try:
-        os.fchmod(tmp_fd, 0o600)
         with os.fdopen(tmp_fd, "w") as fh:
+            restrict_to_owner(tmp_path)  # before any secret byte is written; os.fchmod does not exist on Windows
             fh.write(content)
         os.replace(tmp_path, creds_path)
     except Exception:
@@ -2005,8 +2006,8 @@ def _persist_diag_credentials(creds_path: Path, diag_pass: str) -> None:
     )
     tmp_fd, tmp_path = tempfile.mkstemp(dir=creds_path.parent, prefix=".pg_creds_")
     try:
-        os.fchmod(tmp_fd, 0o600)
         with os.fdopen(tmp_fd, "w") as fh:
+            restrict_to_owner(tmp_path)  # before any secret byte is written; os.fchmod does not exist on Windows
             fh.write(content)
         os.replace(tmp_path, creds_path)
     except Exception:

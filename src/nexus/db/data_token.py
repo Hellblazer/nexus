@@ -224,6 +224,7 @@ from uuid import uuid4
 import structlog
 
 from nexus import _locking
+from nexus._winsec import open_private
 from nexus.rate_brake import parse_retry_after
 
 _log = structlog.get_logger(__name__)
@@ -979,7 +980,7 @@ class DataTokenManager:
             }
             data = json.dumps(payload).encode("utf-8")
             tmp = path.with_name(f"{path.name}.{os.getpid()}.{uuid4().hex}.tmp")
-            fd = os.open(str(tmp), os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+            fd = open_private(tmp, os.O_CREAT | os.O_WRONLY | os.O_TRUNC)
             try:
                 os.write(fd, data)
             finally:

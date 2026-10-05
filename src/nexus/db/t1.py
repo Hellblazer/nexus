@@ -19,6 +19,7 @@ _log = structlog.get_logger(__name__)
 from datetime import UTC, datetime
 
 from nexus import _locking
+from nexus._winsec import open_private
 from nexus.db.t2 import T2Database
 
 
@@ -915,7 +916,7 @@ def publish_t1_session_lease(
     payload = json.dumps(
         {"token": session_token, "expires_at": time.time() + ttl_seconds}
     ).encode("utf-8")
-    fd = os.open(str(tmp), os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+    fd = open_private(tmp, os.O_CREAT | os.O_WRONLY | os.O_TRUNC)
     try:
         os.write(fd, payload)
     finally:

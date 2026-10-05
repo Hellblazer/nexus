@@ -18,6 +18,7 @@ from pathlib import Path
 
 import pytest
 
+from nexus import _winsec
 from nexus.daemon import service_registry as sr
 from nexus.daemon.service_registry import ServiceIdentityError, ServiceRegistry, service_identity
 
@@ -147,7 +148,7 @@ class TestPluginMirror:
             fn.body = [s for s in fn.body if not (isinstance(s, ast.Expr) and isinstance(s.value, ast.Constant))]  # drop docstring
             return ast.dump(fn)
 
-        real = func(Path(sr.__file__), "_windows_user_sid")
+        real = func(Path(_winsec.__file__), "_windows_user_sid")  # moved out of service_registry by nexus-f9bgu.22
         mirror = func(PLUGIN_SCRIPT, "_windows_user_sid")
         assert dump(real) == dump(mirror)
         # Non-vacuity: the compared bodies really are the Windows token lookup.

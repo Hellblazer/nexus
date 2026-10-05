@@ -62,6 +62,7 @@ from typing import Any, Callable, Iterator, Mapping, Optional, Protocol, TypeVar
 import structlog
 
 from nexus import _locking
+from nexus._winsec import _windows_user_sid, open_private  # the SID lookup lives with the other Windows security calls
 from nexus.bounded_subprocess import run_bounded
 from nexus.util.process_group import KILL_SIGNAL
 
@@ -222,56 +223,6 @@ class ServiceIdentityError(ServiceRegistryError):
 #: Digits, ``S`` and ``-`` only, so it is safe as a file name, lock name and
 #: endpoint-name suffix without escaping.
 _SID_PATTERN = re.compile(r"S-1-\d+(-\d+)+")
-
-
-def _windows_user_sid() -> str:
-    """The current process token's user SID as a string (``S-1-5-21-...``).
-
-    Windows only; ctypes against advapi32. Any other platform raises OSError.
-    """
-    if os.name != "nt":
-        raise OSError("the Windows user SID is only readable on Windows")
-    import ctypes  # noqa: PLC0415 — Windows-only branch
-    from ctypes import wintypes  # noqa: PLC0415 — Windows-only branch
-
-    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    kernel32.GetCurrentProcess.restype = wintypes.HANDLE
-    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
-    kernel32.LocalFree.argtypes = [ctypes.c_void_p]
-    kernel32.LocalFree.restype = ctypes.c_void_p
-    advapi32.OpenProcessToken.argtypes = [wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE)]
-    advapi32.OpenProcessToken.restype = wintypes.BOOL
-    advapi32.GetTokenInformation.argtypes = [
-        wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD),
-    ]
-    advapi32.GetTokenInformation.restype = wintypes.BOOL
-    advapi32.ConvertSidToStringSidW.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)]
-    advapi32.ConvertSidToStringSidW.restype = wintypes.BOOL
-
-    token = wintypes.HANDLE()
-    if not advapi32.OpenProcessToken(kernel32.GetCurrentProcess(), 0x0008, ctypes.byref(token)):  # TOKEN_QUERY
-        raise ctypes.WinError(ctypes.get_last_error())
-    try:
-        needed = wintypes.DWORD()
-        # TokenUser = 1. The sizing call fails by design (ERROR_INSUFFICIENT_BUFFER) and fills `needed`.
-        advapi32.GetTokenInformation(token, 1, None, 0, ctypes.byref(needed))
-        if needed.value == 0:
-            raise ctypes.WinError(ctypes.get_last_error())
-        buf = ctypes.create_string_buffer(needed.value)
-        if not advapi32.GetTokenInformation(token, 1, buf, needed, ctypes.byref(needed)):
-            raise ctypes.WinError(ctypes.get_last_error())
-        # TOKEN_USER starts with SID_AND_ATTRIBUTES { PSID Sid; DWORD Attributes }: the first pointer is the SID.
-        psid = ctypes.c_void_p.from_buffer(buf).value
-        string_sid = ctypes.c_void_p()
-        if not advapi32.ConvertSidToStringSidW(psid, ctypes.byref(string_sid)):
-            raise ctypes.WinError(ctypes.get_last_error())
-        try:
-            return ctypes.wstring_at(string_sid.value)
-        finally:
-            kernel32.LocalFree(string_sid)
-    finally:
-        kernel32.CloseHandle(token)
 
 
 def service_identity(
@@ -609,7 +560,7 @@ class ServiceRegistry:
         fd = self._timed(
             phases,
             "write_open",
-            lambda: os.open(str(tmp), os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600),
+            lambda: open_private(tmp, os.O_CREAT | os.O_WRONLY | os.O_TRUNC),
         )
         try:
             def _body() -> None:

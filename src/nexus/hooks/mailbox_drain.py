@@ -82,7 +82,6 @@ import hashlib
 import json
 import os
 import secrets
-import stat
 import sys
 import threading
 import time
@@ -1127,6 +1126,7 @@ def _read_local_supervisor_token(config_dir: Path) -> str:
     equivalent and must not be asked to grow one; this caller's extra bar
     is additive to it, not a replacement for it.
     """
+    from nexus._winsec import owner_only_problem  # noqa: PLC0415 — deferred, same reason as above
     from nexus.daemon.service_registry import ServiceRegistry, service_identity  # noqa: PLC0415 — deferred, same reason as above
 
     scope = service_identity()
@@ -1137,11 +1137,11 @@ def _read_local_supervisor_token(config_dir: Path) -> str:
         raise _Skip(
             f"local supervisor lease unavailable: cannot stat {path}: {exc}"
         ) from exc
-    mode = stat.S_IMODE(st_result.st_mode)
-    if mode & (stat.S_IRWXG | stat.S_IRWXO):
+    problem = owner_only_problem(path, st_result.st_mode)
+    if problem is not None:
         raise _Skip(
-            f"local supervisor lease {path} is group/other-accessible "
-            f"(mode {oct(mode)}); refusing to use its token as a bearer"
+            f"local supervisor lease {path} is {problem}; "
+            "refusing to use its token as a bearer"
         )
     registry = ServiceRegistry(dir=config_dir, tier="storage_service")
     record = registry.discover(scope)
