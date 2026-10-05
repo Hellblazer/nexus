@@ -524,25 +524,43 @@ def _chunked_collections(collections: list[str], n: int) -> list[list[str]]:
     return [collections[i:i + size] for i in range(0, len(collections), size)]
 
 
-def _per_collection_floor(n_results: int, mult: int) -> int:
+#: Divisor applied to ``n_results`` for the per-collection candidate floor
+#: (nexus-abdp2): a collection's guaranteed share of a batch request is half a
+#: result page, never below :data:`_MIN_PER_COLLECTION_FLOOR`.
+_PER_COLLECTION_FLOOR_DIVISOR = 2
+_MIN_PER_COLLECTION_FLOOR = 5
+
+
+def _per_collection_floor(n_results: int) -> int:
     """The minimum candidate share a single collection should get from a
-    batch request: ``max(5, n_results * mult)`` -- this IS the exact
-    pre-batching per-collection budget (nexus-d9xt2 critique round 2):
-    the pre-batching ``_search_one`` computed ``per_k = min(max(5,
-    n_results * mult), CAP)`` for every collection it queried,
-    unconditionally, where *mult* is that collection's own
-    ``_overfetch_multiplier`` (4x for knowledge/docs/rdr, 2x for code).
-    An earlier version of this floor (nexus-d9xt2 review/critique
-    fold-in round 1) used ``max(5, n_results)`` -- dropping the
-    multiplier entirely -- which silently defeated ``mult``'s own
-    purpose (a larger noise-tolerant candidate pool for knowledge/docs/
-    rdr) for any group past a small handful of collections (breakeven at
-    ``len(cols) > mult``: 5 collections for mult=4, 3 for mult=2) --
-    including plain ``--corpus knowledge`` on a real tenant, not just
-    ``--corpus all``. This version restores true parity: a collection's
-    share of a batch's requested pool never falls below what it would
-    have received as its own isolated call."""
-    return max(5, n_results * mult)
+    batch request: ``max(5, n_results // 2)`` (nexus-abdp2).
+
+    History. nexus-d9xt2 first sized a batch at ``n_results * mult`` for the
+    WHOLE group, which starved most members of a 44-collection group to zero
+    rows. Round 1 added a per-collection floor of ``max(5, n_results)``;
+    critique round 2 raised it to ``max(5, n_results * mult)`` (``mult`` = 4x
+    for knowledge/docs/rdr, 2x for code), the exact budget each collection
+    received as its own call before batching, so that parity with the
+    one-call-per-collection fan-out held by construction. Priced in requests
+    that was the plan nexus-w032x measured: a warm default
+    ``knowledge,code,docs,rdr`` search split into 28 ``/v1/vectors/search``
+    calls (the 67-collection voyage-context-3 group alone wanted 10,720
+    candidates and split into up to 36), about 6 s of a 12-13 s search.
+
+    nexus-abdp2 (Sam, 2026-09-29, "B with A as a stopgap"; A is this change)
+    lowers the floor to half a page. The floor only has to keep one dominant
+    collection from crowding every sibling to zero before threshold
+    filtering; the group's pool is still at least ``n_results * mult``
+    (:func:`_desired_candidate_count`), so a lone collection keeps its full
+    historical over-fetch. The live recall-parity gate
+    (``tests/test_search_fanout_recall_parity.py``) was the judge: the
+    measured sweep is in T2 ``nexus/measurements-abdp2-floor-sweep-2026-10-04``
+    (lower floors were never worse than the old one; fewer splits meant fewer
+    filter-partition tail swaps). The multiplier no longer enters the floor,
+    which is why this takes no ``mult``."""
+    return max(
+        _MIN_PER_COLLECTION_FLOOR, n_results // _PER_COLLECTION_FLOOR_DIVISOR,
+    )
 
 
 def _desired_candidate_count(cols: list[str], n_results: int) -> int:
@@ -562,9 +580,14 @@ def _desired_candidate_count(cols: list[str], n_results: int) -> int:
     in a group shares one embedding model, and in practice one corpus
     class, so one multiplier applies to the whole group; a name that
     doesn't parse a model token is its own singleton group of one, so
-    this never blends multipliers across genuinely different corpora) --
-    used for BOTH terms, so the floor no longer silently drops it past
-    breakeven group size (critique round 2 Critical).
+    this never blends multipliers across genuinely different corpora).
+    nexus-abdp2: *mult* now enters only the ``n_results * mult`` term (the
+    group's pool is never smaller than one collection's historical
+    over-fetch); the per-collection floor is ``max(5, n_results // 2)``
+    (:func:`_per_collection_floor`, which carries the history of why it
+    was lowered from ``n_results * mult``), so ``len(cols) * floor``
+    dominates ``n_results * mult`` only once a group passes ``2 * mult``
+    collections instead of one.
 
     CAVEAT the caller must not lose sight of: the engine's combined
     ``plain_search_<dim>`` SQL function runs ONE flat ``ORDER BY
@@ -586,8 +609,10 @@ def _desired_candidate_count(cols: list[str], n_results: int) -> int:
     batching loop uses the UNCAPPED value to decide whether/how many ways
     to split a group via :func:`_chunked_collections`).
 
-    ACCEPTED COST of splitting (nexus-atylb, Sam's ruling 2026-09-07, to be
-    revisited): when a group is split into sub-batches, each sub-batch is a
+    ACCEPTED COST of splitting (nexus-atylb, Sam's ruling 2026-09-07;
+    nexus-abdp2 is the revisit and shrinks the exposure rather than
+    removing it: the lower floor splits far fewer groups, and the real fix
+    is the engine-side per-collection top-K, nexus-tu8wp): when a group is split into sub-batches, each sub-batch is a
     separately filtered HNSW search, and pgvector's approximate top-K for a
     filtered query depends on which other vectors the filter excludes. Two
     partitions of the same collections can therefore rank near-tied
@@ -602,7 +627,7 @@ def _desired_candidate_count(cols: list[str], n_results: int) -> int:
     evidence-based floor for that reason.
     """
     mult = max((_overfetch_multiplier(c) for c in cols), default=2)
-    return max(n_results * mult, len(cols) * _per_collection_floor(n_results, mult))
+    return max(n_results * mult, len(cols) * _per_collection_floor(n_results))
 
 
 #: Collections a prior call in THIS PROCESS has already proven unservable in

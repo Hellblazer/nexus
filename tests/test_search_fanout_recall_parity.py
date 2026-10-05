@@ -330,9 +330,16 @@ def test_recall_parity_old_vs_batched_fan_out(
         f"({_JACCARD_FLOOR} unsplit, {_JACCARD_FLOOR_SPLIT} split, nexus-atylb): "
         f"{failures}\n{report}"
     )
-    # Every corpus on the live tenant splits today (13+ collections exceed the
-    # cap once the floor is multiplier-scaled), so the per-query split floor
-    # alone would hold nothing to 0.9. The strict floor is kept in AGGREGATE:
+    # nexus-abdp2 (2026-10-04): the floor is now max(5, n // 2), so at
+    # _LIMIT=10 only the 107-collection "all" corpus still splits; the others
+    # are held to the strict 0.9 per query. That strictness is exposed to the
+    # OLD fan-out's own run-to-run jitter (OLD against OLD measured 0.818 on
+    # two of these queries, T2 nexus/measurements-abdp2-floor-sweep-2026-10-04),
+    # so a lone 0.818 can fail a run that no batching change caused; the retry
+    # above absorbs most of it. Before abdp2 every live corpus split (13+
+    # collections exceeded the cap under the multiplier-scaled floor), so the
+    # per-query split floor alone held nothing to 0.9. The strict floor is
+    # also kept in AGGREGATE:
     # one accepted tail swap (measured 2026-09-07: nine queries at 1.000, rdr at
     # 0.667, mean 0.967) passes; a batching regression that drags several
     # queries into the 0.6-0.9 band fails here even though no single query

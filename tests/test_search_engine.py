@@ -1565,15 +1565,28 @@ class TestModelGroupedFanOutRequestCount:
             lambda: {"search": {"contradiction_check": False}},
         )
 
-    def test_knowledge_corpus_splits_into_two_calls(self, monkeypatch):
-        """12 knowledge collections (one model, mult=4) -> the group's own
-        floor-restoring sizing (critique round 2 Critical:
-        ``_desired_candidate_count`` = max(10*4, 12*max(5,10*4)) =
-        max(40, 480) = 480 > QUOTAS.MAX_QUERY_RESULTS=300) now splits into
-        2 calls of 6 collections each, never one per collection (12 would
-        be the fully-degraded count) and never the single combined call
-        the flat (mult-dropping) floor used to allow."""
+    def test_knowledge_corpus_fits_one_call(self, monkeypatch):
+        """12 knowledge collections (one model, mult=4) at n_results=10:
+        the nexus-abdp2 floor is ``max(5, 10 // 2)`` = 5, so
+        ``_desired_candidate_count`` = max(10*4, 12*5) = 60 <= 300 and the
+        whole group goes out as ONE combined call. (Under the pre-abdp2
+        floor, ``max(5, n_results * mult)`` = 40, it was 480 and split in
+        two.)"""
         cols = _conformant_collections("knowledge", "voyage-context-3", 12)
+        fake = _RequestCountingT3(monkeypatch)
+        search_cross_corpus(
+            "q", cols, 10, fake.client,
+            threshold_override=float("inf"), cluster_by=None,
+        )
+        assert len(fake.search_calls) == 1
+        assert set(fake.search_calls[0]["collections"]) == set(cols)
+        assert fake.search_calls[0]["n_results"] == 60
+
+    def test_large_knowledge_group_still_splits(self, monkeypatch):
+        """The split path is kept for a group the cap cannot hold: 67
+        collections at n_results=10 want max(40, 67*5) = 335 > 300, so the
+        group splits into ceil(335/300) = 2 calls, never one per collection."""
+        cols = _conformant_collections("knowledge", "voyage-context-3", 67)
         fake = _RequestCountingT3(monkeypatch)
         search_cross_corpus(
             "q", cols, 10, fake.client,
@@ -1586,11 +1599,20 @@ class TestModelGroupedFanOutRequestCount:
         for c in fake.search_calls:
             assert c["n_results"] <= 300
 
-    def test_code_corpus_splits_into_two_calls(self, monkeypatch):
-        """20 code collections (one model, mult=2) -> max(10*2,
-        20*max(5,10*2)) = max(20, 400) = 400 > 300, splits into 2 calls of
-        10 collections each."""
+    def test_code_corpus_fits_one_call(self, monkeypatch):
+        """20 code collections (one model, mult=2): max(10*2, 20*5) = 100."""
         cols = _conformant_collections("code", "voyage-code-3", 20)
+        fake = _RequestCountingT3(monkeypatch)
+        search_cross_corpus(
+            "q", cols, 10, fake.client,
+            threshold_override=float("inf"), cluster_by=None,
+        )
+        assert len(fake.search_calls) == 1
+        assert fake.search_calls[0]["n_results"] == 100
+
+    def test_large_code_group_still_splits(self, monkeypatch):
+        """61 code collections want max(20, 61*5) = 305 > 300: 2 calls."""
+        cols = _conformant_collections("code", "voyage-code-3", 61)
         fake = _RequestCountingT3(monkeypatch)
         search_cross_corpus(
             "q", cols, 10, fake.client,
@@ -1605,13 +1627,12 @@ class TestModelGroupedFanOutRequestCount:
 
     def test_all_corpus_issues_one_call_per_model_group(self, monkeypatch):
         """corpus=all spans two embedding models (voyage-code-3 for code,
-        voyage-context-3 for knowledge/docs/rdr). Neither group fits in a
-        single call once the floor is correctly scaled by the group's own
-        overfetch multiplier (critique round 2 Critical): the 20-collection
-        code group (mult=2) needs max(20, 20*20)=400>300 -> splits into 2;
-        the 44-collection knowledge+docs+rdr group (mult=4) needs
-        max(40, 44*40)=1760>300 -> splits into 6 -- 8 calls total, still
-        never one per collection (64 would be the fully-degraded count)."""
+        voyage-context-3 for knowledge/docs/rdr). At n_results=10 the
+        nexus-abdp2 floor (5) lets each group fit the cap: the 20-collection
+        code group wants max(20, 20*5)=100 and the 44-collection
+        knowledge+docs+rdr group wants max(40, 44*5)=220, so two calls
+        total, one per model (64 would be the one-call-per-collection
+        count)."""
         code_cols = _conformant_collections("code", "voyage-code-3", 20)
         knowledge_cols = _conformant_collections("knowledge", "voyage-context-3", 12)
         docs_cols = _conformant_collections("docs", "voyage-context-3", 23)
@@ -1624,20 +1645,42 @@ class TestModelGroupedFanOutRequestCount:
             "q", all_cols, 10, fake.client,
             threshold_override=float("inf"), cluster_by=None,
         )
-        assert len(fake.search_calls) == 8
+        assert len(fake.search_calls) == 2
         code_calls = [c for c in fake.search_calls if set(c["collections"]) <= set(code_cols)]
         context_calls = [c for c in fake.search_calls if set(c["collections"]) <= set(voyage_context_cols)]
-        assert len(code_calls) == 2
-        assert len(context_calls) == 6
-        # Each group's split calls cover it exactly once, with no overlap
-        # and no drop.
-        code_sets = [set(c["collections"]) for c in code_calls]
-        assert set.union(*code_sets) == set(code_cols)
-        assert sum(len(s) for s in code_sets) == len(code_cols)
-        context_sets = [set(c["collections"]) for c in context_calls]
-        assert set.union(*context_sets) == set(voyage_context_cols)
-        assert sum(len(s) for s in context_sets) == len(voyage_context_cols)
-        # Every split call still respects the service cap.
+        assert len(code_calls) == 1
+        assert len(context_calls) == 1
+        assert set(code_calls[0]["collections"]) == set(code_cols)
+        assert set(context_calls[0]["collections"]) == set(voyage_context_cols)
+        for c in fake.search_calls:
+            assert c["n_results"] <= 300
+
+    def test_default_search_tenant_shape_plans_few_batches(self, monkeypatch):
+        """nexus-abdp2: the shape nexus-w032x measured on the cloud tenant,
+        a default ``knowledge,code,docs,rdr`` search (67 voyage-context-3
+        collections + 25 voyage-code-3) at n_results=40, planned 28
+        ``/v1/vectors/search`` calls under the pre-abdp2 floor. Under the
+        half-page floor (20 at n_results=40) the context group wants
+        67*20 = 1340 -> ceil(1340/300) = 5 calls and the code group
+        25*20 = 500 -> 2 calls: 7 in all. The bound is the regression
+        guard; the exact plan is pinned so a floor change shows up here."""
+        context_cols = (
+            _conformant_collections("knowledge", "voyage-context-3", 34)
+            + _conformant_collections("docs", "voyage-context-3", 28)
+            + _conformant_collections("rdr", "voyage-context-3", 5)
+        )
+        code_cols = _conformant_collections("code", "voyage-code-3", 25)
+        fake = _RequestCountingT3(monkeypatch)
+        search_cross_corpus(
+            "q", context_cols + code_cols, 40, fake.client,
+            threshold_override=float("inf"), cluster_by=None,
+        )
+        assert len(fake.search_calls) == 7
+        assert len([
+            c for c in fake.search_calls if set(c["collections"]) <= set(code_cols)
+        ]) == 2
+        covered = [col for c in fake.search_calls for col in c["collections"]]
+        assert sorted(covered) == sorted(context_cols + code_cols)
         for c in fake.search_calls:
             assert c["n_results"] <= 300
 
@@ -1652,9 +1695,8 @@ class TestModelGroupedFanOutRequestCount:
             "q", cols, 10, fake.client,
             threshold_override=float("inf"), cluster_by=None,
         )
-        # The grouped (and, past the per-collection floor's own breakeven
-        # size, split) fan-out issues 2 calls here, never len(cols)=12.
-        assert len(fake.search_calls) == 2
+        # The grouped fan-out issues 1 call here, never len(cols)=12.
+        assert len(fake.search_calls) == 1
         assert len(fake.search_calls) != len(cols)
 
 
@@ -1668,76 +1710,86 @@ class TestDesiredCandidateCountSizing:
     previously requested only 40 total candidates (0.9/collection before
     threshold filtering), silently starving most members to zero rows.
 
-    Critique round 2 Critical: the FIRST fix's floor (``max(5,
-    n_results)``) still dropped the group's own overfetch multiplier --
-    since ``len(cols) * floor >= floor >= n_results * mult`` for every
-    ``len(cols) >= 1``, the floor term now ALWAYS determines
-    ``_desired_candidate_count`` once *mult* is folded into the floor
-    itself (``max(5, n_results * mult)``); the outer ``max(...)`` with
-    the bare ``n_results * mult`` term is kept only as a defensive
-    floor for a pathological empty ``cols`` (never hit via
-    :func:`_group_collections_by_embedding_model`, which never emits an
-    empty group)."""
+    nexus-abdp2 (Sam, 2026-09-29): the per-collection floor is
+    ``max(5, n_results // 2)``, no longer ``max(5, n_results * mult)``;
+    the group's overall pool keeps its ``n_results * mult`` lower bound.
+    Which term wins therefore depends on group size: ``n_results * mult``
+    for a handful of collections, ``len(cols) * floor`` beyond that. The
+    values below are the live-measured sweep's chosen point (T2
+    nexus/measurements-abdp2-floor-sweep-2026-10-04)."""
+
+    def test_floor_is_half_a_page_with_a_minimum_of_five(self):
+        from nexus.search_engine import _per_collection_floor
+        assert _per_collection_floor(1) == 5
+        assert _per_collection_floor(10) == 5
+        assert _per_collection_floor(12) == 6
+        assert _per_collection_floor(40) == 20
+        assert _per_collection_floor(300) == 150
 
     def test_small_group_uses_the_mult_term(self):
         from nexus.search_engine import _desired_candidate_count
-        # 1 knowledge collection, n_results=10, mult=4:
-        # floor = max(5, 10*4) = 40; max(40, 1*40) = 40.
+        # 1 knowledge collection, n_results=10, mult=4: floor = 5;
+        # max(10*4, 1*5) = 40 -- a lone collection keeps its full
+        # historical over-fetch.
         assert _desired_candidate_count(
             _conformant_collections("knowledge", "voyage-context-3", 1), 10,
         ) == 40
 
     def test_knowledge_12_at_n_results_10(self):
         from nexus.search_engine import _desired_candidate_count
-        # floor = max(5, 10*4) = 40. max(10*4, 12*40) = max(40, 480) = 480.
+        # floor = 5. max(10*4, 12*5) = max(40, 60) = 60.
         assert _desired_candidate_count(
             _conformant_collections("knowledge", "voyage-context-3", 12), 10,
-        ) == 480
+        ) == 60
 
     def test_code_20_at_n_results_10(self):
         from nexus.search_engine import _desired_candidate_count
-        # floor = max(5, 10*2) = 20. max(10*2, 20*20) = max(20, 400) = 400.
+        # floor = 5. max(10*2, 20*5) = max(20, 100) = 100.
         assert _desired_candidate_count(
             _conformant_collections("code", "voyage-code-3", 20), 10,
-        ) == 400
+        ) == 100
 
-    def test_44_collection_group_exceeds_the_cap_uncapped(self):
+    def test_44_collection_group_fits_the_cap_at_n_results_10(self):
         from nexus.search_engine import _desired_candidate_count
         from nexus.db.limits import QUOTAS
-        # floor = max(5, 10*4) = 40. max(10*4, 44*40) = max(40, 1760) = 1760
-        # -- this is the exact shape (this tenant's corpus=all
-        # knowledge+docs+rdr group) that silently starved to 40 total
-        # candidates before round 1's fix, and to 440 (still short of the
-        # group's own historical n_results*mult=4x-per-collection budget
-        # once len(cols)=44 crossed the mult=4 breakeven point) after it.
+        # floor = 5. max(10*4, 44*5) = max(40, 220) = 220 -- this is the
+        # exact shape (this tenant's corpus=all knowledge+docs+rdr group)
+        # that starved to 40 total candidates before nexus-d9xt2's fix and
+        # asked for 1760 (a 6-way split) under the pre-abdp2 floor.
         desired = _desired_candidate_count(
             _conformant_collections("knowledge", "voyage-context-3", 44), 10,
         )
-        assert desired == 1760
+        assert desired == 220
+        assert desired <= QUOTAS.MAX_QUERY_RESULTS
+
+    def test_tenant_context_group_at_n_results_40_exceeds_the_cap(self):
+        from nexus.search_engine import _desired_candidate_count
+        from nexus.db.limits import QUOTAS
+        # nexus-w032x's measured shape: 67 voyage-context-3 collections at
+        # n_results=40 (a default search plus its page lookahead). floor =
+        # 20; 67*20 = 1340 (was 10,720 under the pre-abdp2 floor of 160).
+        desired = _desired_candidate_count(
+            _conformant_collections("knowledge", "voyage-context-3", 67), 40,
+        )
+        assert desired == 1340
         assert desired > QUOTAS.MAX_QUERY_RESULTS
 
     def test_floor_dominates_at_low_n_results(self):
         from nexus.search_engine import _desired_candidate_count
         # n_results=1, mult=4: n_results*mult=4 < 5, so the absolute-5
-        # floor wins: floor = max(5, 4) = 5. 10 collections * 5 = 50,
-        # vs n_results*mult = 1*4 = 4 -- the floor term must win.
+        # floor wins: 10 collections * 5 = 50, vs n_results*mult = 4.
         assert _desired_candidate_count(
             _conformant_collections("knowledge", "voyage-context-3", 10), 1,
         ) == 50
 
-    def test_group_size_scales_the_mult_scaled_floor(self):
+    def test_mult_term_dominates_for_a_small_group_at_high_n_results(self):
         from nexus.search_engine import _desired_candidate_count
-        # n_results=100, mult=4: floor = max(5, 100*4) = 400 (mult, not
-        # the absolute 5, sets the floor at this n_results). 2 collections
-        # * 400 = 800 -- the len(cols)*floor term dominates the bare
-        # n_results*mult=400 term for any len(cols) >= 1, exactly as the
-        # class docstring above states; this was named
-        # "mult_dominates_at_high_n_results_small_group" before the fix
-        # restored mult to the floor itself, when 400 (the bare mult
-        # term) was still the larger of the two.
+        # n_results=100, mult=4: floor = 50. 2 collections * 50 = 100, vs
+        # n_results*mult = 400: the mult term wins (under the pre-abdp2
+        # floor the len(cols)*floor term won at 800).
         assert _desired_candidate_count(
             _conformant_collections("knowledge", "voyage-context-3", 2), 100,
-        ) == 800
+        ) == 400
 
 
 # ── nexus-d9xt2 review/critique fold-in: batch-failure fallback ─────────────
