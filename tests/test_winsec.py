@@ -68,7 +68,46 @@ def _kw(win_kw: dict[str, object], *names: str) -> dict[str, object]:
     return {k: win_kw[k] for k in names}
 
 
+class TestOpenPrivateWritesTheBytesItIsGiven:
+    """RDR-224, nexus-f9bgu.44. ``os.open`` on Windows opens in TEXT mode unless
+    ``O_BINARY`` is set, and ``os.write`` then turns every ``\\n`` byte into
+    ``\\r\\n``. ``open_private`` hands callers a raw descriptor they write
+    bytes to (lease records, the appliance handoff), so a file it makes must hold
+    exactly those bytes."""
+
+    def test_o_binary_is_passed_where_the_platform_defines_it(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        seen: list[int] = []
+        real_open = os.open
+        fake_o_binary = 0x8000  # Windows' value; a bit POSIX never sets
+
+        def spy(path, flags, mode=0o777):
+            seen.append(flags)
+            return real_open(path, flags & ~fake_o_binary, mode)
+
+        monkeypatch.setattr(os, "O_BINARY", fake_o_binary, raising=False)
+        monkeypatch.setattr(os, "open", spy)
+        fd = open_private(tmp_path / "t", os.O_CREAT | os.O_WRONLY, platform="linux", acl_apply=_boom)
+        os.close(fd)
+        assert seen and seen[0] & fake_o_binary
+
+    def test_a_newline_byte_is_one_byte_on_disk(self, tmp_path: Path) -> None:
+        path = tmp_path / "t"
+        fd = open_private(path, os.O_CREAT | os.O_WRONLY | os.O_TRUNC)
+        try:
+            os.write(fd, b"a\nb\n")
+        finally:
+            os.close(fd)
+        assert path.read_bytes() == b"a\nb\n"
+
+
 class TestPosix:
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="asserts the 0o600 file mode os.open sets; Windows ignores them (st_mode reads 0o666 for every file), and its owner-only "
+        "check is the DACL, covered by the Windows classes below",
+    )
     def test_open_private_is_the_old_os_open_0600(self, tmp_path: Path) -> None:
         old = os.umask(0)
         try:
@@ -78,6 +117,11 @@ class TestPosix:
         os.close(fd)
         assert stat.S_IMODE((tmp_path / "t").stat().st_mode) == 0o600
 
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="asserts a chmod 0o600 result; Windows ignores them (st_mode reads 0o666 for every file), and its owner-only "
+        "check is the DACL, covered by the Windows classes below",
+    )
     def test_restrict_to_owner_is_chmod_0600(self, tmp_path: Path) -> None:
         path = tmp_path / "t"
         path.write_text("x")
@@ -94,6 +138,11 @@ class TestPosix:
         problem = owner_only_problem("p", stat.S_IFREG | mode, platform="linux", sid_lookup=_boom, trustees_lookup=_boom)
         assert problem == f"group/other-accessible (mode {oct(mode)})"
 
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="builds a loose file with chmod 0o644; Windows ignores them (st_mode reads 0o666 for every file), and its owner-only "
+        "check is the DACL, covered by the Windows classes below",
+    )
     def test_ensure_owner_only_tightens_a_loose_file_and_leaves_a_tight_one(self, tmp_path: Path) -> None:
         path = tmp_path / "t"
         path.write_text("x")
@@ -376,16 +425,24 @@ class TestReadersUseTheAclOnWindows:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         mirror = _load_mirror()
-        lease = mirror.storage_service_lease_path(tmp_path)
-        _live_lease(lease, "bearer-1")
         monkeypatch.setattr(mirror, "_is_windows", lambda platform: True)
         monkeypatch.setattr(mirror, "_windows_user_sid", lambda: SID)
+        # After the stand-ins: the lease NAME is the identity, which on a real
+        # Windows host would otherwise be the host's own SID and not the one
+        # the reader below sees.
+        lease = mirror.storage_service_lease_path(tmp_path)
+        _live_lease(lease, "bearer-1")
         monkeypatch.setattr(mirror, "_windows_dacl_trustees", lambda p: [SID])
         assert mirror.read_local_supervisor_token(tmp_path) == "bearer-1"
         monkeypatch.setattr(mirror, "_windows_dacl_trustees", lambda p: [SID, OTHER])
         with pytest.raises(mirror.EndpointUnresolvable, match="accessible to other accounts"):
             mirror.read_local_supervisor_token(tmp_path)
 
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="builds a group-readable lease with chmod 0o644; Windows ignores them (st_mode reads 0o666 for every file), and its owner-only "
+        "check is the DACL, covered by the Windows classes below",
+    )
     def test_the_plugin_mirror_still_refuses_a_group_readable_lease_on_posix(self, tmp_path: Path) -> None:
         mirror = _load_mirror()
         lease = mirror.storage_service_lease_path(tmp_path)
@@ -414,6 +471,11 @@ class TestReadersUseTheAclOnWindows:
         with pytest.raises(md._Skip, match="not live or is stale|malformed|corrupt|no token"):
             md._read_local_supervisor_token(tmp_path)
 
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="builds a group-readable lease with chmod 0o644; Windows ignores them (st_mode reads 0o666 for every file), and its owner-only "
+        "check is the DACL, covered by the Windows classes below",
+    )
     def test_the_mailbox_drain_reader_still_refuses_a_group_readable_lease_on_posix(self, tmp_path: Path) -> None:
         from nexus.hooks import mailbox_drain as md
 

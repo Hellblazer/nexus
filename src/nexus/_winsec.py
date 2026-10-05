@@ -331,7 +331,9 @@ def open_private(
     the descriptor is closed, an empty file this call just made is removed
     (a non-empty one is somebody's data and stays), and the error propagates.
     """
-    fd = os.open(str(path), flags, 0o600)
+    # O_BINARY: without it Windows opens in text mode and os.write turns each
+    # "\n" byte into "\r\n" (RDR-224, nexus-f9bgu.44). Absent off Windows.
+    fd = os.open(str(path), flags | getattr(os, "O_BINARY", 0), 0o600)
     if not _is_windows(platform):
         return fd
     try:
