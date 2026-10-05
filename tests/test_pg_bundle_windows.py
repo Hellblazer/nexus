@@ -835,6 +835,24 @@ def test_loaded_module_check_compares_case_and_slashes() -> None:
     assert sm.check_loaded_modules(["c:\\X\\BIN\\VCRUNTIME140.DLL"], bin_dir)
 
 
+def test_loaded_module_check_ignores_windows_own_msvcp_win_and_still_catches_a_versioned_runtime() -> None:
+    """msvcp_win.dll is a Windows component (System32, loaded by ucrtbase), not the VC++ runtime
+    this check polices; the first real run of the engine smoke (nexus-f9bgu.9, qwentescence) failed
+    on it because the old filter was a bare 'msvcp' prefix. A versioned msvcp/vcruntime module from
+    anywhere but the bundle must still fail."""
+    bin_dir = Path("C:/x/bin")
+    listing = [
+        "C:\\x\\bin\\vcruntime140.dll",
+        "C:\\WINDOWS\\System32\\msvcp_win.dll",
+        "C:\\WINDOWS\\System32\\ucrtbase.dll",
+    ]
+    assert sm.check_loaded_modules(listing, bin_dir) == ["C:\\x\\bin\\vcruntime140.dll"]
+    with pytest.raises(sm.SmokeError, match="msvcp140_2.dll"):
+        sm.check_loaded_modules([*listing, "C:\\WINDOWS\\System32\\msvcp140_2.dll"], bin_dir)
+    with pytest.raises(sm.SmokeError, match="saw nothing"):
+        sm.check_loaded_modules(["C:\\WINDOWS\\System32\\msvcp_win.dll"], bin_dir)
+
+
 # --------------------------------------------------------------------------- #
 # pg_ctl's output handle must not make a caller wait (the real process, no fakes)
 # --------------------------------------------------------------------------- #

@@ -378,22 +378,31 @@ def notice_text(redist: Redist, digests: Mapping[str, str], pins: Pins) -> str:
 """
 
 
-def copy_runtime(
-    bundle: Path, redist: Redist, pins: Pins, *, extra_notice: str = ""
-) -> dict[str, str]:
-    """Copy the four DLLs unmodified into bundle/bin and write the notice.
-    Idempotent: re-running replaces them from the redist it is given."""
-    bin_dir = bundle / "bin"
-    bin_dir.mkdir(parents=True, exist_ok=True)
+def copy_runtime_dlls(dest_dir: Path, redist: Redist) -> dict[str, str]:
+    """Copy the four VC++ runtime DLLs unmodified into *dest_dir*; return name -> sha256.
+
+    The one copy routine for every Windows artifact that ships the runtime (the PG
+    bundle's bin, the engine archive's staging directory, nexus-f9bgu.9), so the
+    P0.6 "ship unmodified" condition is enforced in one place. Idempotent."""
+    dest_dir.mkdir(parents=True, exist_ok=True)
     digests: dict[str, str] = {}
     for dll in VC_RUNTIME_DLLS:
         src = redist.directory / dll
-        dst = bin_dir / dll
+        dst = dest_dir / dll
         shutil.copyfile(src, dst)
         want, got = file_sha256(src), file_sha256(dst)
         if want != got:
             raise BuildError(f"{dll} changed in transit ({want} != {got}); must ship unmodified")
         digests[dll] = got
+    return digests
+
+
+def copy_runtime(
+    bundle: Path, redist: Redist, pins: Pins, *, extra_notice: str = ""
+) -> dict[str, str]:
+    """Copy the four DLLs unmodified into bundle/bin and write the notice.
+    Idempotent: re-running replaces them from the redist it is given."""
+    digests = copy_runtime_dlls(bundle / "bin", redist)
     (bundle / NOTICE_NAME).write_text(notice_text(redist, digests, pins) + extra_notice)
     return digests
 

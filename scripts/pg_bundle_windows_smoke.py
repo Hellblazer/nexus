@@ -37,6 +37,7 @@ from __future__ import annotations
 import argparse
 import getpass
 import os
+import re
 import secrets
 import shutil
 import socket
@@ -58,6 +59,7 @@ VC_RUNTIME_DLLS: tuple[str, ...] = (
 )
 EXPECT_VECTOR = "0.8.2"
 ARCHIVE_ROOT = "bundle"
+_VERSIONED_VC_RUNTIME_RE = re.compile(r"^(?:vcruntime|msvcp)\d+(?:_\d+)?\.dll$")
 
 
 class SmokeError(RuntimeError):
@@ -202,7 +204,9 @@ def check_loaded_modules(modules: Sequence[str], bin_dir: Path) -> list[str]:
     seen: list[str] = []
     for m in modules:
         name = Path(m.replace("\\", "/")).name.lower()
-        if name in wanted or name.startswith(("vcruntime", "msvcp")):
+        # The four shipped files, or any versioned VC++ runtime module (msvcp120, vcruntime140_2, ...).
+        # NOT a bare 'msvcp' prefix: msvcp_win.dll is a Windows component in System32 (nexus-f9bgu.9).
+        if name in wanted or _VERSIONED_VC_RUNTIME_RE.match(name):
             seen.append(m)
             if _win_norm(m) != _win_norm(str(bin_dir / name)):
                 raise SmokeError(f"{name} loaded from {m}, not from the bundle's {bin_dir}")

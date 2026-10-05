@@ -1,0 +1,33 @@
+Microsoft (R) COFF/PE Dumper Version 14.44.35229.0
+Copyright (C) Microsoft Corporation.  All rights reserved.
+
+
+Dump of file dlls\native__lib__win-x86_64__cpu__tokenizers.dll
+
+File Type: DLL
+
+  Image has the following dependencies:
+
+    bcryptprimitives.dll
+    api-ms-win-core-synch-l1-2-0.dll
+    kernel32.dll
+    shell32.dll
+    ole32.dll
+    ws2_32.dll
+    advapi32.dll
+    bcrypt.dll
+    ntdll.dll
+    VCRUNTIME140.dll
+    api-ms-win-crt-math-l1-1-0.dll
+    api-ms-win-crt-string-l1-1-0.dll
+    api-ms-win-crt-runtime-l1-1-0.dll
+    api-ms-win-crt-heap-l1-1-0.dll
+    api-ms-win-crt-stdio-l1-1-0.dll
+
+  Summary
+
+        E000 .data
+       45000 .pdata
+      2F0000 .rdata
+        E000 .reloc
+      765000 .text
