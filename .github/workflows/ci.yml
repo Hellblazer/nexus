@@ -2145,16 +2145,18 @@ jobs:
         # Fails on a native library embedded from more than one origin, a
         # foreign-platform onnxruntime/djl path, .pdb/.dSYM debug symbols, a
         # jar -> native -> shade order violation, or an empty/vacuous report.
-        # Platform dirs are per library: onnxruntime names ubuntu-latest
-        # linux-x64, djl names it linux-x86_64. JNA is exempt (it ships every
-        # platform through its own metadata; see the checker).
+        # Also fails on a native library of another platform's suffix anywhere
+        # outside com/sun/jna/, and on a library the platform must carry that
+        # the report does not name (nexus-zz2w7). The per-platform directories
+        # and required list live in the checker's PLATFORMS table; the release
+        # workflow runs the same check on every native leg. JNA is exempt (it
+        # ships every platform through its own metadata; see the checker).
         if: steps.changes.outputs.svc == 'true'
         run: |
           python3 scripts/check_native_embedded_resources.py \
             --report service/target/embedded-resources.json \
             --build-log "$RUNNER_TEMP/native-build.log" \
-            --platform-dir onnxruntime=linux-x64 \
-            --platform-dir djl=linux-x86_64
+            --platform linux-amd64
 
   write-seam-gate:
     # nexus-h29w1 — Behavioural cross-boundary write-seam CI gate (F1 closure).

@@ -898,10 +898,16 @@
                                              .pdb had no effect on the Windows build. Measured
                                              (nexus-vwfc0): there -H:ExcludeResources=.*[.]pdb excluded both
                                              .pdb files (exe 143 MB) while -H:ExcludeResources=.*\.pdb, one arg
-                                             changed, did not (435 MB). The mechanism is not established (a
-                                             merely dropped backslash would still have matched), so write a
-                                             literal dot as [.] and never put a backslash in a buildArg. -->
-                                        <buildArg>-H:IncludeResources=ai/onnxruntime/native/${onnx.native.dir}/[^/]*[.](so|dylib|dll)</buildArg>
+                                             changed, did not (435 MB). Mechanism (nexus-zz2w7, read from the
+                                             native-build-tools 1.1.2 and GraalVM 25 driver bytecode, not
+                                             observed on Windows): on Windows the plugin writes the args to an
+                                             @argfile through escapeArg, which doubles every backslash and
+                                             quotes only args containing a space, and the driver unescapes a
+                                             backslash only inside quotes, so the pdb pattern arrived as
+                                             .*\\.pdb and matched nothing. Write a literal dot as [.] and never
+                                             put a backslash in a buildArg. The suffix group also takes a
+                                             versioned .so.N, which (so|dylib|dll) dropped silently. -->
+                                        <buildArg>-H:IncludeResources=ai/onnxruntime/native/${onnx.native.dir}/[^/]*[.](so([.][0-9]+)*|dylib|dll)</buildArg>
                                         <buildArg>-H:IncludeResources=native/lib/${djl.native.dir}/.*</buildArg>
                                         <!-- Portability: compatibility march for CI/prod (not native) -->
                                         <buildArg>-march=compatibility</buildArg>

@@ -8,6 +8,7 @@ report, no native library, no log stages) must fail, never pass.
 """
 from __future__ import annotations
 
+import dataclasses
 import json
 from pathlib import Path
 
@@ -15,7 +16,7 @@ import pytest
 
 import check_native_embedded_resources as chk
 
-LINUX = {"onnxruntime": "linux-x64", "djl": "linux-x86_64"}
+LINUX = chk.PLATFORMS["linux-amd64"]
 ORIGIN = "/home/runner/.m2/repository/x.jar"
 
 
@@ -76,7 +77,7 @@ def test_foreign_djl_platform_fails():
 def test_platform_dirs_are_per_library():
     """onnxruntime says linux-x64, djl says linux-x86_64: swapping them is a
     foreign-platform resource for each, not an accepted alias."""
-    swapped = {"onnxruntime": "linux-x86_64", "djl": "linux-x64"}
+    swapped = dataclasses.replace(LINUX, onnxruntime_dir="linux-x86_64", djl_dir="linux-x64")
     problems = chk.check_report(CLEAN, swapped)
     assert any("libonnxruntime.so" in p for p in problems)
     assert any("libtokenizers.so" in p for p in problems)
@@ -121,7 +122,97 @@ def test_report_with_no_native_library_fails_non_vacuity():
 def test_report_without_onnxruntime_fails():
     report = [_res("native/lib/linux-x86_64/cpu/libtokenizers.so")]
     problems = chk.check_report(report, LINUX)
-    assert any("no onnxruntime native library" in p for p in problems)
+    assert any("required native library not embedded: ai/onnxruntime/native/linux-x64/libonnxruntime.so" in p
+               for p in problems)
+
+
+@pytest.mark.parametrize("platform_name", sorted(chk.PLATFORMS))
+def test_losing_any_one_required_library_fails_on_every_platform(platform_name: str):
+    """The required list is the non-vacuity: dropping ANY one library the
+    platform carries (libonnxruntime4j_jni, libtokenizers, a Windows MinGW
+    runtime DLL) must fail even though every forbidden-resource check is green."""
+    platform = chk.PLATFORMS[platform_name]
+    full = [_res(path) for path in platform.required]
+    assert chk.check_report(full, platform) == [], "the required list itself must be a clean report"
+    for missing in platform.required:
+        report = [r for r in full if r["name"] != missing]
+        problems = chk.check_report(report, platform)
+        assert any(f"required native library not embedded: {missing}" in p for p in problems), missing
+
+
+def test_required_lists_are_distinct_per_platform_and_non_empty():
+    seen: set[str] = set()
+    for name, platform in chk.PLATFORMS.items():
+        assert len(platform.required) >= 3, f"{name}: too few required libraries; the list was gutted"
+        for path in platform.required:
+            assert path not in seen, f"{path} required by two platforms: a foreign-platform path leaked in"
+            seen.add(path)
+
+
+def test_losing_jni_or_tokenizers_alone_fails_on_linux():
+    no_jni = [r for r in CLEAN if not r["name"].endswith("libonnxruntime4j_jni.so")]
+    no_tok = [r for r in CLEAN if not r["name"].endswith("libtokenizers.so")]
+    assert any("libonnxruntime4j_jni.so" in p for p in chk.check_report(no_jni, LINUX))
+    assert any("libtokenizers.so" in p for p in chk.check_report(no_tok, LINUX))
+
+
+# ── foreign native-library suffix anywhere outside com/sun/jna/ ─────────────
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["libcudart.dylib", "vendor/native/foo.dll", "lib/libfoo.jnilib", "x/y/z/onnxruntime_providers_cuda.dll"],
+)
+def test_foreign_suffix_outside_platform_paths_fails_on_linux(name: str):
+    """A single-origin foreign library at a path neither per-library prefix covers
+    used to pass (nexus-zz2w7): the suffix alone decides."""
+    problems = chk.check_report(CLEAN + [_res(name)], LINUX)
+    assert len(problems) == 1 and "foreign-platform native library" in problems[0] and name in problems[0]
+
+
+@pytest.mark.parametrize(
+    ("platform_name", "name"),
+    [
+        ("linux-amd64", "vendor/x.dll"),
+        ("linux-arm64", "vendor/x.dylib"),
+        ("mac-arm64", "vendor/libx.so"),
+        ("mac-arm64", "vendor/libx.so.1"),
+        ("mac-arm64", "vendor/x.dll"),
+        ("windows-x64", "vendor/libx.so"),
+        ("windows-x64", "vendor/libx.dylib"),
+        ("windows-x64", "vendor/x.jnilib"),
+    ],
+)
+def test_foreign_suffix_fails_per_platform(platform_name: str, name: str):
+    platform = chk.PLATFORMS[platform_name]
+    clean = [_res(path) for path in platform.required]
+    problems = chk.check_report(clean + [_res(name)], platform)
+    assert any("foreign-platform native library" in p and name in p for p in problems)
+
+
+@pytest.mark.parametrize(
+    ("platform_name", "name"),
+    [
+        ("linux-amd64", "vendor/libx.so.1.2"),
+        ("mac-arm64", "vendor/libx.jnilib"),
+        ("mac-arm64", "vendor/libx.dylib"),
+        ("windows-x64", "vendor/X.DLL"),
+    ],
+)
+def test_own_suffix_elsewhere_passes(platform_name: str, name: str):
+    platform = chk.PLATFORMS[platform_name]
+    clean = [_res(path) for path in platform.required]
+    assert chk.check_report(clean + [_res(name)], platform) == []
+
+
+def test_foreign_suffix_under_jna_is_still_exempt():
+    report = CLEAN + [_res("com/sun/jna/darwin-aarch64/libjnidispatch.jnilib"), _res("com/sun/jna/x/y.dll")]
+    assert chk.check_report(report, LINUX) == []
+
+
+def test_foreign_path_and_suffix_report_once():
+    report = CLEAN + [_res("ai/onnxruntime/native/osx-aarch64/libonnxruntime.dylib")]
+    assert len(chk.check_report(report, LINUX)) == 1
 
 
 def test_item_without_name_is_reported():
@@ -183,27 +274,44 @@ def test_log_without_stage_lines_fails(log: str):
 # ── platform mapping and CLI ───────────────────────────────────────────────
 
 
-def test_parse_platform_dirs_per_library_and_bare():
-    assert chk.parse_platform_dirs(["onnxruntime=linux-x64", "djl=linux-x86_64"]) == LINUX
-    assert chk.parse_platform_dirs(["osx-aarch64"]) == {"onnxruntime": "osx-aarch64", "djl": "osx-aarch64"}
-    with pytest.raises(ValueError):
-        chk.parse_platform_dirs(["bogus=linux-x64"])
+def test_platform_keys_are_the_release_matrix_arches():
+    assert sorted(chk.PLATFORMS) == ["linux-amd64", "linux-arm64", "mac-arm64", "windows-x64"]
 
 
-def _cli(tmp_path: Path, report: object, log: str, *extra: str) -> int:
+def test_unknown_platform_is_rejected_by_the_cli(tmp_path):
+    report_path = tmp_path / "r.json"
+    report_path.write_text("[]")
+    with pytest.raises(SystemExit):
+        chk.main(["--report", str(report_path), "--build-log", str(report_path), "--platform", "freebsd-x64"])
+
+
+def _cli(tmp_path: Path, report: object, log: str, platform: str = "linux-amd64") -> int:
     report_path = tmp_path / "embedded-resources.json"
     report_path.write_text(json.dumps(report))
     log_path = tmp_path / "build.log"
     log_path.write_text(log)
     return chk.main(
-        ["--report", str(report_path), "--build-log", str(log_path),
-         "--platform-dir", "onnxruntime=linux-x64", "--platform-dir", "djl=linux-x86_64", *extra]
+        ["--report", str(report_path), "--build-log", str(log_path), "--platform", platform]
     )
 
 
 def test_cli_passes_on_clean_inputs(tmp_path, capsys):
     assert _cli(tmp_path, CLEAN, GOOD_LOG) == 0
     assert "PASSED" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("platform_name", sorted(chk.PLATFORMS))
+def test_cli_passes_each_platforms_own_required_set(tmp_path, platform_name: str):
+    report = [_res(path) for path in chk.PLATFORMS[platform_name].required]
+    assert _cli(tmp_path, report, GOOD_LOG, platform_name) == 0
+
+
+def test_cli_fails_when_the_leg_is_given_another_platforms_report(tmp_path, capsys):
+    """A mac report on the linux leg: required libraries missing AND foreign."""
+    report = [_res(path) for path in chk.PLATFORMS["mac-arm64"].required]
+    assert _cli(tmp_path, report, GOOD_LOG, "linux-amd64") == 1
+    err = capsys.readouterr().err
+    assert "required native library not embedded" in err and "foreign-platform" in err
 
 
 def test_cli_fails_and_lists_every_problem(tmp_path, capsys):
@@ -217,7 +325,7 @@ def test_cli_missing_report_fails(tmp_path, capsys):
     log_path = tmp_path / "build.log"
     log_path.write_text(GOOD_LOG)
     rc = chk.main(["--report", str(tmp_path / "absent.json"), "--build-log", str(log_path),
-                   "--platform-dir", "linux-x64"])
+                   "--platform", "linux-amd64"])
     assert rc == 1 and "not found" in capsys.readouterr().err
 
 
@@ -226,5 +334,5 @@ def test_cli_invalid_json_fails(tmp_path, capsys):
     report_path.write_text("{not json")
     log_path = tmp_path / "build.log"
     log_path.write_text(GOOD_LOG)
-    rc = chk.main(["--report", str(report_path), "--build-log", str(log_path), "--platform-dir", "linux-x64"])
+    rc = chk.main(["--report", str(report_path), "--build-log", str(log_path), "--platform", "linux-amd64"])
     assert rc == 1 and "not valid JSON" in capsys.readouterr().err

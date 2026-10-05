@@ -373,7 +373,30 @@ jobs:
           # Darwin-only env var. Must match the "Assert binary ABI floor"
           # step's ceiling below and the pom.xml value.
           MACOSX_DEPLOYMENT_TARGET: "14.0"
-        run: ./mvnw -q -Pnative -Pprebuilt-jooq -DskipTests -Dnative.image.maxheap=${{ matrix.target.maxheap }} package
+          # nexus-zz2w7: native-image writes target/embedded-resources.json (every
+          # embedded resource and its origins) for the "Check the embedded native
+          # resources" step below. No extra build: the same native-image run.
+          NATIVE_IMAGE_OPTIONS: "-H:+UnlockExperimentalVMOptions -H:+GenerateEmbeddedResourcesFile"
+        # No -q: the checker reads the `--- jar:...:jar`, `--- native:...:compile-no-fork`,
+        # `--- shade:...:shade` execution lines to prove build order, and -q suppresses
+        # them. -B -ntp keep the log free of progress bars and download noise. The log
+        # goes to $RUNNER_TEMP through tee, with pipefail so a failed build still fails
+        # the step (a bare pipe into tee would exit with tee's status).
+        run: |
+          set -euo pipefail
+          ./mvnw -B -ntp -Pnative -Pprebuilt-jooq -DskipTests -Dnative.image.maxheap=${{ matrix.target.maxheap }} package 2>&1 | tee "$RUNNER_TEMP/native-build.log"
+
+      - name: Check the embedded native resources (nexus-zz2w7)
+        # The same check ci.yml's PR trip-wire runs on linux, now on every shipped
+        # binary: a mac-only regression (osx onnxruntime embedded twice, a .dSYM)
+        # or a lost required library fails the leg before smoke and publish.
+        # Per-platform directories and the required-library list are the
+        # checker's PLATFORMS entry for this leg's matrix arch.
+        run: |
+          python3 scripts/check_native_embedded_resources.py \
+            --report service/target/embedded-resources.json \
+            --build-log "$RUNNER_TEMP/native-build.log" \
+            --platform ${{ matrix.target.arch }}
 
       - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7
         if: ${{ format('{0}', matrix.target.smoke) == 'true' }}
