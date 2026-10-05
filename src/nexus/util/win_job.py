@@ -69,6 +69,13 @@ IS_WINDOWS: bool = sys.platform == "win32"
 #: :func:`nexus.util.process_group.isolation_popen_kwargs`.
 CREATE_NEW_PROCESS_GROUP: int = 0x00000200
 
+#: ``CREATE_NO_WINDOW`` — the child gets a console but no window. The
+#: storage-service supervisor is spawned with this and
+#: :data:`CREATE_NEW_PROCESS_GROUP`, never ``DETACHED_PROCESS`` (which leaves
+#: it no console to attach to, so ``CTRL_BREAK`` could not reach it; T2
+#: ``nexus_rdr/224-research-20``).
+CREATE_NO_WINDOW: int = 0x08000000
+
 #: Console control event for a graceful stop of a process spawned with
 #: ``CREATE_NEW_PROCESS_GROUP`` (see :func:`send_ctrl_break`). The storage
 #: supervisor sends it to its engine from the same console; the stopper
@@ -344,6 +351,7 @@ def send_ctrl_break(pid: int) -> bool:
 
 __all__ = [
     "CREATE_NEW_PROCESS_GROUP",
+    "CREATE_NO_WINDOW",
     "CTRL_BREAK_EVENT",
     "IS_WINDOWS",
     "assign_process",

@@ -471,14 +471,36 @@ def service_uninstall_cmd(autostart: bool) -> None:
         click.echo(f"Still running: {survivor}", err=True)
 
 
-def ensure_storage_supervisor(config_dir: Path):
+def _supervisor_popen_kwargs(platform: str | None = None) -> dict[str, object]:
+    """``Popen`` kwargs for the detached supervisor spawn.
+
+    POSIX: ``start_new_session=True``, as before. Windows (RDR-224,
+    nexus-f9bgu.17): ``CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW``. The new
+    group gives ``nx daemon service stop`` a group to send ``CTRL_BREAK`` to
+    without reaching anything else; the hidden console is what the stopper
+    attaches to. NEVER ``DETACHED_PROCESS``: that leaves the supervisor with no
+    console, ``AttachConsole`` fails with ``ERROR_INVALID_HANDLE`` and
+    ``CTRL_BREAK`` cannot reach it (T2 ``nexus_rdr/224-research-20``). The
+    logon-task spawn path is nexus-f9bgu.23's.
+    """
+    if (platform if platform is not None else sys.platform) == "win32":
+        from nexus.util import win_job  # noqa: PLC0415 — deferred import — Windows spawn path only
+
+        return {
+            "creationflags": win_job.CREATE_NEW_PROCESS_GROUP | win_job.CREATE_NO_WINDOW,
+        }
+    return {"start_new_session": True}
+
+
+def ensure_storage_supervisor(config_dir: Path, *, platform: str | None = None):
     """Ensure a persistent (heartbeated) storage-service supervisor owns the lease.
 
     Returns the live :class:`LeaseRecord`. If a FRESH lease already exists this
     is a no-op (idempotent — re-running ``nx init --service`` / ``nx daemon
     service start`` is safe). Otherwise it detached-spawns the ``--foreground``
-    supervisor (``start_new_session=True``) and waits up to 60s for it to publish
-    a lease.
+    supervisor (``start_new_session=True``; on Windows its own process group and
+    a hidden console, see :func:`_supervisor_popen_kwargs`) and waits up to 60s
+    for it to publish a lease. *platform* is a test seam for that choice.
 
     Liveness is TTL-FRESHNESS, not BARE process-aliveness: the short-circuit
     returns any lease whose heartbeat is within the ServiceRegistry TTL (a
@@ -589,22 +611,20 @@ def ensure_storage_supervisor(config_dir: Path):
 
     spawn_log = open_child_log_or_devnull("storage_service.crash", config_dir)
     try:
-        # nexus-6y4e0 surveyed this site and left it unwired for two
-        # independent reasons: (1) the supervisor this spawns is stopped by
-        # a LATER, separate CLI invocation (``nx daemon service stop``)
-        # reading its pid from the lease registry, not by this process --
-        # the same cross-process shape as the mineru spawn in
-        # _mineru_spawn.py, which a Windows job-object handle held only in
-        # THIS process's memory cannot reach; and (2) the supervisor's
-        # identity is portable now (``service_identity()``, nexus-f9bgu.16)
-        # but its spawn flags are still POSIX-shaped: the Windows spawn and
-        # stop channel are RDR-224 P3.2b, not this site.
+        # nexus-6y4e0 surveyed this site and left it without a Job Object:
+        # the supervisor this spawns is stopped by a LATER, separate CLI
+        # invocation (``nx daemon service stop``) reading its pid from the
+        # lease registry, not by this process, so a job handle held only in
+        # THIS process's memory cannot reach it. The Windows stop channel
+        # (RDR-224, nexus-f9bgu.17) is the spawn flags below plus a console
+        # CTRL_BREAK from the stopper; the Job Object lives one level down,
+        # around the ENGINE, in the supervisor.
         _popen(
             argv,
             stdin=subprocess.DEVNULL,  # detached daemon: never inherit a TTY stdin (avoids read-block / dangling fd)
             stdout=spawn_log,
             stderr=spawn_log,
-            start_new_session=True,
+            **_supervisor_popen_kwargs(platform),
         )
     finally:
         if not isinstance(spawn_log, int):
@@ -889,6 +909,46 @@ def service_install_binary_cmd(
     )
 
 
+def _refused_stop_lines(refusals: object) -> list[str]:
+    """The lines ``nx daemon service stop`` prints when the service runs in
+    another Windows session, so the console stop could not be sent.
+
+    Names the pid, the session that owns it and the session this shell is in,
+    says that nothing was signalled or killed, and says where to run the stop.
+    When the session ids are unknown or equal the denial has another cause (a
+    different user, an elevated process) and the message says so instead of
+    inventing a session."""
+    lines: list[str] = []
+    remedies: list[str] = []
+    for r in refusals:  # type: ignore[attr-defined]
+        if r.target_session is not None and r.target_session != r.own_session:
+            lines.append(
+                f"nx daemon service stop: REFUSED. The storage service (pid {r.pid}) "
+                f"runs in Windows session {r.target_session}; this shell is in "
+                f"session {r.own_session}. A console stop cannot cross Windows "
+                "sessions."
+            )
+            remedy = (
+                f"Run 'nx daemon service stop' from session {r.target_session}: "
+                "sign in to that session, or use a terminal on that desktop."
+            )
+        else:
+            lines.append(
+                f"nx daemon service stop: REFUSED. The storage service (pid {r.pid}) "
+                "could not be reached: access was denied when attaching to its "
+                "console."
+            )
+            remedy = (
+                "Run 'nx daemon service stop' as the account, and with the "
+                "elevation, that started the service."
+            )
+        if remedy not in remedies:
+            remedies.append(remedy)
+    lines.extend(remedies)
+    lines.append("Nothing was signalled or killed.")
+    return lines
+
+
 @service_group.command("stop")
 @click.option(
     "--config-dir",
@@ -921,6 +981,7 @@ def service_stop_cmd(config_dir_str: str | None, with_pg: bool) -> None:
     outcome = stop_storage_service(config_dir=config_dir)
     pid = outcome.pids[0] if outcome.pids else None
     pids_str = ", ".join(str(p) for p in outcome.pids)
+    refused_pids = {r.pid for r in outcome.refused}
 
     # Honest-output contract (nexus-oyo2g): a lease MISS is never proof
     # nothing is running, so "already stopped" is said ONLY when the
@@ -932,7 +993,11 @@ def service_stop_cmd(config_dir_str: str | None, with_pg: bool) -> None:
     # printed, never just the first (review finding 1) — a partial pid
     # list is a partial truth for a command whose entire point here is
     # honest reporting.
-    if outcome.source == "none":
+    if outcome.refused and not outcome.pids:
+        # Printed below, with the refusal; "stopped" or "already stopped"
+        # would both be false here.
+        pass
+    elif outcome.source == "none":
         if outcome.lease_seen:
             click.echo(
                 "A storage service lease was found but had no usable "
@@ -1001,14 +1066,23 @@ def service_stop_cmd(config_dir_str: str | None, with_pg: bool) -> None:
     # any --with-pg Postgres teardown) is deliberate: touching Postgres
     # while the storage-service state is unverified is itself unsafe, not
     # just unhelpful.
-    if outcome.stubborn:
+    if outcome.refused:
+        # RDR-224 (nexus-f9bgu.17), Sam DECIDED 2026-10-05: a stop from
+        # another Windows session cannot attach to the service's console and
+        # is NOT turned into a hard kill. Say who owns it and where to stop
+        # it from; exit non-zero so a `stop && start` chain breaks.
+        for line in _refused_stop_lines(outcome.refused):
+            click.echo(line, err=True)
+    stubborn_only = [p for p in outcome.stubborn if p not in refused_pids]
+    if stubborn_only:
         click.echo(
             f"nx daemon service stop: FAILED — pid(s) "
-            f"{', '.join(str(p) for p in outcome.stubborn)} survived the "
+            f"{', '.join(str(p) for p in stubborn_only)} survived the "
             "stop escalation and may still be running. Do not run "
             "'nx daemon service start' until this is resolved manually.",
             err=True,
         )
+    if stubborn_only or outcome.refused:
         sys.exit(1)
     if outcome.source == "process_table_unavailable" and not outcome.pids:
         click.echo(

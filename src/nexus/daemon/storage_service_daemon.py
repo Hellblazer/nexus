@@ -103,6 +103,7 @@ from nexus.daemon.service_registry import (
     DEFAULT_HEARTBEAT_INTERVAL,
     DEFAULT_STOP_ELECTION_BUDGET,
     ElectionBusyError,
+    GracefulStopSend,
     ServiceRegistry,
     ServiceSupervisor,
     exit_if_process_unowned,
@@ -110,6 +111,7 @@ from nexus.daemon.service_registry import (
     pid_alive,
     pid_running,
     reclaim_lease_if_dead_owner,
+    request_graceful_stop,
     service_identity,
     ttl_for_tier,
 )
@@ -3194,6 +3196,9 @@ class StopOutcome:
       to this config_dir instead.
     - ``"none"``: nothing was signalled from the lease AND the process
       table confirms nothing is running — genuinely already stopped.
+    - ``"refused"``: the target runs in another Windows session, so the
+      console stop could not be sent (``refused`` names it and both session
+      ids). Nothing was signalled or killed.
     - ``"process_table_unavailable"``: nothing was signalled from the
       lease, and the process table itself could not be read (no ``ps``
       and no ``/proc``) — degrades to the pre-nexus-oyo2g behaviour but
@@ -3232,13 +3237,24 @@ class StopOutcome:
     source: str
     lease_seen: bool = False
     sweep_verified: bool = True
+    #: Windows only (RDR-224, nexus-f9bgu.17): processes that could not be
+    #: reached because they run in another Windows session. NOT signalled and
+    #: NOT killed (Sam, 2026-10-05: a cross-session stop fails loud and never
+    #: hard-kills). ``source`` is ``"refused"`` when nothing else was signalled.
+    #: A refused pid is still running, so it is also in ``stubborn``.
+    refused: tuple[GracefulStopSend, ...] = ()
 
     @property
     def already_stopped(self) -> bool:
-        return not self.pids
+        return not self.pids and not self.refused
 
 
-def stop_storage_service(*, config_dir: Path | None = None) -> StopOutcome:
+def stop_storage_service(
+    *,
+    config_dir: Path | None = None,
+    platform: str | None = None,
+    console_api: Any = None,
+) -> StopOutcome:
     """Stop the running storage-service SUPERVISOR + ENGINE tree.
 
     Three phases, all converging on the same tree-sweep (nexus-oyo2g):
@@ -3261,6 +3277,15 @@ def stop_storage_service(*, config_dir: Path | None = None) -> StopOutcome:
 
     Never reports "already stopped" while a matching process exists; see
     :class:`StopOutcome`.
+
+    The graceful stop is ``SIGTERM`` on POSIX. On Windows it is ``CTRL_BREAK``
+    sent after attaching to the target's console (``request_graceful_stop``;
+    RDR-224, nexus-f9bgu.17), the result is confirmed by the target's EXIT and
+    never by the send, and the hard kill stays as the fallback, logged as an
+    unclean stop. A target in another Windows session cannot be reached
+    (``AttachConsole`` is denied): it is reported in ``StopOutcome.refused``
+    and is neither signalled nor killed. *platform* and *console_api* are
+    injection seams for the Windows branches.
 
     Freshness gate (mirrors stop_t3_daemon CRITICAL P3 guard), REVISED
     nexus-wo6sc (2026-09-24): a non-None ``registry.discover()`` return is
@@ -3324,10 +3349,27 @@ def stop_storage_service(*, config_dir: Path | None = None) -> StopOutcome:
             _log.info(
                 "storage_service_stopping_supervisor", supervisor_pid=supervisor_pid
             )
-            try:
-                os.kill(supervisor_pid, signal.SIGTERM)
-            except (ProcessLookupError, PermissionError):
-                pass
+            send = request_graceful_stop(
+                supervisor_pid, platform=platform, console_api=console_api,
+            )
+            if send.refused:
+                # Another Windows session: nothing was sent, so there is
+                # nothing to wait for and nothing to escalate. Leave the lease
+                # and every process alone; the CLI says where to stop it from.
+                _log.warning(
+                    "storage_service_stop_refused_other_session",
+                    supervisor_pid=supervisor_pid,
+                    target_session=send.target_session,
+                    own_session=send.own_session,
+                )
+                return StopOutcome(
+                    pids=(),
+                    stubborn=(supervisor_pid,),
+                    source="refused",
+                    lease_seen=True,
+                    sweep_verified=False,
+                    refused=(send,),
+                )
             # The WAIT is zombie-aware (nexus-o8dil.21): a supervisor that
             # is already dead-and-unreaped — because a previous stop, an
             # upgrade sweep, or any concurrent killer got there first —
@@ -3350,6 +3392,12 @@ def stop_storage_service(*, config_dir: Path | None = None) -> StopOutcome:
                     break
                 time.sleep(0.1)
             if _pid_is_running(supervisor_pid):
+                _log.warning(
+                    "storage_service_supervisor_unclean_stop",
+                    pid=supervisor_pid,
+                    grace_s=_SUPERVISOR_STOP_GRACE,
+                    msg="the supervisor did not exit within the grace; hard-killing it",
+                )
                 try:
                     os.kill(supervisor_pid, KILL_SIGNAL)
                 except (ProcessLookupError, PermissionError):
@@ -3357,9 +3405,46 @@ def stop_storage_service(*, config_dir: Path | None = None) -> StopOutcome:
             signalled.append(supervisor_pid)
         elif isinstance(pid_to_signal, int) and pid_to_signal > 0:
             source = "lease"
-            from nexus.util.process_group import safe_killpg  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
+            if (platform if platform is not None else sys.platform) == "win32":
+                # No process group to signal there. CTRL_BREAK through the
+                # target's console, confirmed by exit, hard kill as the
+                # fallback, a cross-session target refused (nexus-f9bgu.17).
+                send = request_graceful_stop(
+                    pid_to_signal, platform=platform, console_api=console_api,
+                )
+                if send.refused:
+                    _log.warning(
+                        "storage_service_stop_refused_other_session",
+                        pid=pid_to_signal,
+                        target_session=send.target_session,
+                        own_session=send.own_session,
+                    )
+                    return StopOutcome(
+                        pids=(),
+                        stubborn=(pid_to_signal,),
+                        source="refused",
+                        lease_seen=True,
+                        sweep_verified=False,
+                        refused=(send,),
+                    )
+                engine_deadline = time.monotonic() + _GRACEFUL_STOP_TIMEOUT
+                while time.monotonic() < engine_deadline:
+                    if not _pid_is_running(pid_to_signal):
+                        break
+                    time.sleep(0.1)
+                if _pid_is_running(pid_to_signal):
+                    _log.warning(
+                        "storage_service_engine_unclean_stop",
+                        pid=pid_to_signal,
+                        grace_s=_GRACEFUL_STOP_TIMEOUT,
+                        via="hard_kill",
+                    )
+                    with contextlib.suppress(ProcessLookupError, PermissionError):
+                        os.kill(pid_to_signal, KILL_SIGNAL)
+            else:
+                from nexus.util.process_group import safe_killpg  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
 
-            safe_killpg(pid_to_signal, signal.SIGTERM)
+                safe_killpg(pid_to_signal, signal.SIGTERM)
             # Clean up the lease record. Bounded (nexus-cd1k0 review round 3
             # finding 6): this is the OUTER ``stop_storage_service`` caller
             # (e.g. the CLI's ``nx daemon service stop``) doing its own
@@ -3415,6 +3500,13 @@ def stop_storage_service(*, config_dir: Path | None = None) -> StopOutcome:
     # had no usable pid; nexus-oyo2g review finding 2).
     had_lease_signal = bool(signalled)
 
+    if sweep.refused:
+        # Windows, another session: left alone, reported (nexus-f9bgu.17).
+        _log.warning(
+            "storage_service_stop_refused_other_session",
+            pids=[r.pid for r in sweep.refused],
+        )
+
     if sweep.pids:
         if not had_lease_signal:
             source = "process_table"
@@ -3435,7 +3527,20 @@ def stop_storage_service(*, config_dir: Path | None = None) -> StopOutcome:
                 "storage_service_stop_stubborn_survivors",
                 pids=list(sweep.stubborn),
             )
-        signalled.extend(p for p in sweep.pids if p not in signalled)
+        refused_pids = {r.pid for r in sweep.refused}
+        signalled.extend(
+            p for p in sweep.pids if p not in signalled and p not in refused_pids
+        )
+
+    if sweep.refused and not signalled:
+        return StopOutcome(
+            pids=(),
+            stubborn=sweep.stubborn,
+            source="refused",
+            lease_seen=lease_seen,
+            sweep_verified=True,
+            refused=sweep.refused,
+        )
 
     if not signalled:
         _log.info(
@@ -3459,4 +3564,5 @@ def stop_storage_service(*, config_dir: Path | None = None) -> StopOutcome:
         source=source,
         lease_seen=lease_seen,
         sweep_verified=True,
+        refused=sweep.refused,
     )
