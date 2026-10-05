@@ -871,3 +871,4 @@ through the real changeset and engine. It is in scope.
   - the lock-timeout 503 mapping;
   - honest step-2 results and a complete record of dated edits;
   - corrections to the counts, wording and the history line.
+- 2026-10-05: Gate round 2 — PASSED (0 Critical, 3 Significant, 0 ship-blocker(s)); commit `7fafc96c2`; critique `nexus_rdr/225-gate-critique-2026-10-05-r2`.
