@@ -2472,27 +2472,60 @@ def live_collection_rows(t3: Any) -> list[dict]:
     return [row for row in t3.list_collections() if is_live_collection_row(row)]
 
 
-#: How long a 404 from ``/v1/vectors/search-per-collection`` is trusted before
-#: the route is probed again (nexus-tu8wp.2). Same posture as the catalog's
-#: chash_positions memo: an old engine costs one extra round trip per
-#: interval, and a process that outlives an engine upgrade starts using the
-#: route without a restart.
+#: How long a route-absent answer from ``/v1/vectors/search-per-collection``
+#: is trusted before the route is probed again (nexus-tu8wp.2): a 404, the
+#: edge refusing the path (403 or an edge-generated response), 405 and 501.
+#: Same posture as the catalog's chash_positions memo: an engine without the
+#: route costs one extra round trip per interval, and a process that outlives
+#: an engine upgrade starts using the route without a restart. The memo lives
+#: on the client instance, so it is per PROCESS: the MCP server keeps it for
+#: the window, and each ``nx`` invocation is a fresh process that pays one
+#: probe against an engine without the route.
 _PER_COLLECTION_ROUTE_RETRY_S: float = 600.0
 
-#: How long a present-but-malformed answer from the route is trusted: briefer,
-#: since it is not the expected pre-upgrade state.
+#: How long a present-but-failing answer from the route is trusted: a 500 (a
+#: route bug, not a deployment state) and a malformed 200. Briefer, since
+#: neither is the expected pre-upgrade state.
 _PER_COLLECTION_FAILURE_RETRY_S: float = 60.0
 
-#: The per-collection ``error_kind`` values the engine documents
-#: (``VectorHandler#handleSearchPerCollection``). A value outside this set is
-#: passed through verbatim: the client treats any non-null ``error`` as a
-#: failed collection whatever its kind.
-PER_COLLECTION_ERROR_KINDS: frozenset[str] = frozenset({
-    "dimension_mismatch",
-    "unsupported_dimension",
-    "statement_timeout",
-    "fanout_budget_exhausted",
-})
+#: Statuses on which the route is NOT written off and the error propagates as
+#: a failure of the group: load shedding and transport-class failures.
+#: ``_request`` already retried 502/503/504 through the gateway backoff, and
+#: the batched path they would fall back to hits the same exhausted pool with
+#: a larger fan-out. (An edge-generated 502/503/504 is in this set too: the
+#: edge refusal flag only widens the write-off for the other statuses.)
+_PER_COLLECTION_PROPAGATED_CODES: frozenset[int] = frozenset({429, 502, 503, 504})
+
+#: Statuses that mean "this engine or edge does not serve the route": written
+#: off for :data:`_PER_COLLECTION_ROUTE_RETRY_S`. An edge-generated response
+#: with any other status is treated the same way (nexus-bwulw: the edge
+#: refuses or stubs routes it does not know).
+_PER_COLLECTION_ABSENT_CODES: frozenset[int] = frozenset({403, 404, 405, 501})
+
+#: Env switch that turns the per-collection route off (nexus-tu8wp.2), so a
+#: field defect in the route needs no client release. ``0``, ``false``,
+#: ``off`` or ``no`` (any case) sends every search down the batched path.
+PER_COLLECTION_ROUTE_ENV = "NX_SEARCH_PER_COLLECTION"
+
+
+def per_collection_route_enabled() -> bool:
+    """False when ``NX_SEARCH_PER_COLLECTION`` is ``0``/``false``/``off``/``no``.
+
+    Read on every search, so a flip takes effect on the next one.
+    """
+    return os.environ.get(PER_COLLECTION_ROUTE_ENV, "").strip().lower() not in {
+        "0", "false", "off", "no",
+    }
+
+
+#: Serialises the probe of the route until one request has proved it present:
+#: the groups of one search run in parallel, and without this every group
+#: pays its own 404 before the first one sets the memo.
+_per_collection_probe_lock = threading.Lock()
+
+#: True after this process has logged a route-absent write-off at WARNING;
+#: later ones log at DEBUG (the memo already bounds how often they happen).
+_per_collection_absent_warned = False
 
 
 class HttpVectorClient:
@@ -3454,10 +3487,16 @@ class HttpVectorClient:
     #: call (:meth:`search_per_collection` returns ``None`` on a 404).
     supports_per_collection_search: bool = True
 
-    #: ``(monotonic start, window)`` of the last route miss or malformed
-    #: answer; ``None`` when the route is not currently written off. Class
-    #: default so partially-constructed test instances still resolve.
+    #: ``(monotonic start, window)`` of the last route write-off (absent,
+    #: failing or malformed); ``None`` when the route is not currently written
+    #: off. Class default so partially-constructed test instances still
+    #: resolve.
     _per_collection_backoff: tuple[float, float] | None = None
+
+    #: True once this instance has seen the route answer (a validated 200, or a
+    #: 400/422 the route itself produced); until then the first request is
+    #: single-flight (:data:`_per_collection_probe_lock`). Reset by a write-off.
+    _per_collection_confirmed: bool = False
 
     def search_per_collection(
         self,
@@ -3490,14 +3529,21 @@ class HttpVectorClient:
         is the ``X-Nexus-Skipped-Collections`` header, parsed: a skipped
         collection has no ``per_collection`` entry.
 
-        ``None`` when the engine predates the route (404). The miss is
-        remembered for :data:`_PER_COLLECTION_ROUTE_RETRY_S`, during which
-        this returns ``None`` without a round trip, so an old engine costs one
-        404 per interval rather than one per search. A 200 body the client
-        refuses (:class:`PerCollectionEnvelopeError`) switches the route off
-        for :data:`_PER_COLLECTION_FAILURE_RETRY_S` and raises. Every other
-        failure propagates as the :class:`VectorServiceError` ``_post`` raised
-        and is not remembered.
+        ``None`` when the route cannot serve this group and the caller falls
+        back to the batched path: the engine predates the route (404), the
+        edge refuses it (403 or any edge-generated response), 405, 501 (all
+        remembered for :data:`_PER_COLLECTION_ROUTE_RETRY_S`) or the route
+        fails with a 500 (remembered for :data:`_PER_COLLECTION_FAILURE_RETRY_S`).
+        While remembered, this returns ``None`` without a round trip, and each
+        write-off logs a WARNING naming the status (a repeat 404 logs at DEBUG
+        after the first per process). The memo is per client instance, so per
+        process. A 200 body the client refuses
+        (:class:`PerCollectionEnvelopeError`) switches the route off for
+        :data:`_PER_COLLECTION_FAILURE_RETRY_S` and raises. Every other
+        failure (429, 502, 503, 504, a 400 or 422 the route itself produced)
+        propagates as the :class:`VectorServiceError` ``_post`` raised and is
+        not remembered. Until one request proves the route present, the
+        first request is single-flight, so concurrent callers share one probe.
 
         *thresholds*: only FINITE values are sent. ``None`` and non-finite
         values (the parity gate's ``threshold_override=inf`` is not valid JSON)
@@ -3508,8 +3554,7 @@ class HttpVectorClient:
         ``rerank`` follows :meth:`search`: the degrade state lands in
         *rerank_meta_out*, once for the whole request.
         """
-        backoff = self._per_collection_backoff
-        if backoff is not None and _monotonic() - backoff[0] < backoff[1]:
+        if self._per_collection_written_off():
             return None
 
         body: dict[str, Any] = {
@@ -3535,14 +3580,70 @@ class HttpVectorClient:
             from nexus.rate_brake import get_brake  # noqa: PLC0415 — deferred import: leaf module, keeps this otherwise-urllib-only module's load-time graph unchanged
             get_brake().wait()
 
+        if self._per_collection_confirmed:
+            return self._per_collection_exchange(
+                body, collection_names, per_collection_k, limit, rerank, rerank_meta_out,
+            )
+        # Single-flight probe: the first caller in the process asks, the rest
+        # wait and then either see its write-off or run in parallel once the
+        # route is confirmed.
+        with _per_collection_probe_lock:
+            if self._per_collection_written_off():
+                return None
+            return self._per_collection_exchange(
+                body, collection_names, per_collection_k, limit, rerank, rerank_meta_out,
+            )
+
+    def _per_collection_written_off(self) -> bool:
+        backoff = self._per_collection_backoff
+        return backoff is not None and _monotonic() - backoff[0] < backoff[1]
+
+    def _per_collection_write_off(self, window: float) -> None:
+        self._per_collection_backoff = (_monotonic(), window)
+        self._per_collection_confirmed = False
+
+    def _per_collection_exchange(
+        self,
+        body: dict[str, Any],
+        collection_names: list[str],
+        per_collection_k: int,
+        limit: int,
+        rerank: bool,
+        rerank_meta_out: dict | None,
+    ) -> dict | None:
+        """One request to the route and its envelope, or ``None`` after a
+        write-off (see :meth:`search_per_collection`)."""
+        global _per_collection_absent_warned  # noqa: PLW0603 — process-wide "logged once" flag
         try:
             payload = _post("/v1/vectors/search-per-collection", body, tenant=self._tenant)
         except VectorServiceError as exc:
-            if exc.code == 404:
-                self._per_collection_backoff = (_monotonic(), _PER_COLLECTION_ROUTE_RETRY_S)
-                _log.debug("http_vector_client.search_per_collection_route_absent")
-                return None
-            raise
+            code = exc.code
+            if code in _PER_COLLECTION_PROPAGATED_CODES or code is None:
+                raise
+            if code in _PER_COLLECTION_ABSENT_CODES or exc.edge_refusal:
+                window = _PER_COLLECTION_ROUTE_RETRY_S
+            elif code == 500:
+                window = _PER_COLLECTION_FAILURE_RETRY_S
+            else:
+                # 400 / 422 and the like: the route itself answered about this
+                # request. It is present, so later groups need no probe.
+                self._per_collection_confirmed = True
+                raise
+            self._per_collection_write_off(window)
+            fields = {
+                "status": code, "edge_refusal": exc.edge_refusal,
+                "retry_in_s": window,
+                "consequence": "searches take the batched /v1/vectors/search path",
+            }
+            if code == 404 and _per_collection_absent_warned:
+                _log.debug("http_vector_client.search_per_collection_route_absent", **fields)
+            else:
+                if code == 404:
+                    _per_collection_absent_warned = True
+                _log.warning(
+                    "http_vector_client.search_per_collection_route_unavailable", **fields,
+                )
+            return None
         # Pop the header capture before anything else touches the network on
         # this thread (see _pop_response_headers).
         skipped = _log_skipped_collections(
@@ -3555,8 +3656,9 @@ class HttpVectorClient:
                 payload, collection_names, per_collection_k, limit, skipped,
             )
         except PerCollectionEnvelopeError:
-            self._per_collection_backoff = (_monotonic(), _PER_COLLECTION_FAILURE_RETRY_S)
+            self._per_collection_write_off(_PER_COLLECTION_FAILURE_RETRY_S)
             raise
+        self._per_collection_confirmed = True
         if rerank:
             envelope["results"] = _unpack_rerank_envelope(payload, rerank_meta_out)
         return envelope
@@ -3575,9 +3677,12 @@ class HttpVectorClient:
         ``per_collection`` that are not lists; a ``per_collection_k`` or
         ``limit`` echo that is absent or differs from what was sent (an engine
         that read different numbers than the client sized its request for);
-        a ``per_collection`` entry that is not an object, names a collection
-        that was not requested, or repeats one; a requested collection that
-        has neither an entry nor a place in the skipped-collections header.
+        a result row that is not an object or lacks a string ``id`` or a
+        numeric ``distance``; a ``per_collection`` entry that is not an
+        object, names a collection that was not requested, repeats one, or
+        carries a count or distance of the wrong type; a requested collection
+        that has neither an entry nor a place in the skipped-collections
+        header.
         """
         def refuse(why: str) -> PerCollectionEnvelopeError:
             return PerCollectionEnvelopeError(
@@ -3598,6 +3703,33 @@ class HttpVectorClient:
             echoed = payload.get(key)
             if isinstance(echoed, bool) or echoed != sent:
                 raise refuse(f"'{key}' echo is {echoed!r}, sent {sent}")
+        def is_number(v: Any) -> bool:
+            return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+        for row in rows:
+            if not isinstance(row, dict):
+                raise refuse(f"a result row is {type(row).__name__}, not an object")
+            if not isinstance(row.get("id"), str) or not row["id"]:
+                raise refuse("a result row has no 'id'")
+            if not is_number(row.get("distance")):
+                raise refuse(f"result row '{row['id']}' has no numeric 'distance'")
+            if row.get("collection") is not None and not isinstance(row["collection"], str):
+                raise refuse(f"result row '{row['id']}' has a non-string 'collection'")
+
+        def count(entry: dict, key: str) -> int:
+            v = entry.get(key)
+            if v is None:
+                return 0
+            if is_number(v) and float(v).is_integer() and v >= 0:
+                return int(v)
+            raise refuse(f"'{key}' of '{entry['collection']}' is {v!r}, not a count")
+
+        def distance(entry: dict, key: str) -> Any:
+            v = entry.get(key)
+            if v is not None and not is_number(v):
+                raise refuse(f"'{key}' of '{entry['collection']}' is {v!r}, not a number")
+            return v
+
         wanted = set(requested)
         seen: set[str] = set()
         entries: list[dict] = []
@@ -3610,10 +3742,10 @@ class HttpVectorClient:
             seen.add(name)
             entries.append({
                 "collection": name,
-                "raw_count": int(entry.get("raw_count") or 0),
-                "dropped": int(entry.get("dropped") or 0),
-                "min_raw_distance": entry.get("min_raw_distance"),
-                "min_dropped_distance": entry.get("min_dropped_distance"),
+                "raw_count": count(entry, "raw_count"),
+                "dropped": count(entry, "dropped"),
+                "min_raw_distance": distance(entry, "min_raw_distance"),
+                "min_dropped_distance": distance(entry, "min_dropped_distance"),
                 "error": entry.get("error"),
                 "error_kind": entry.get("error_kind"),
             })

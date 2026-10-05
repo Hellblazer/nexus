@@ -211,7 +211,17 @@ def _top_ids(results, limit: int) -> set[str]:
 
 @pytest.fixture()
 def _live_client(_real_cloud_credentials: None) -> HttpVectorClient:
-    return HttpVectorClient()
+    client = HttpVectorClient()
+    # nexus-tu8wp.2: these cells measure the BATCHED path (their floor swap
+    # patches ``_desired_candidate_count``, which the per-collection route
+    # never reads, and they count ``client.search`` calls, which the route
+    # does not make). Once the cloud engine serves
+    # POST /v1/vectors/search-per-collection, a client that still asks for
+    # it would compare the route with itself and pass vacuously. The
+    # route-parity leg (reference = this batched path, candidate = the route,
+    # asserting the route was served) is nexus-tu8wp.3's.
+    client.supports_per_collection_search = False  # type: ignore[misc]
+    return client
 
 
 @pytest.fixture()

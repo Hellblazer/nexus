@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import io
 import json
+import threading
+import time
 import urllib.error
 
 import pytest
@@ -39,10 +41,27 @@ def _cols(kind: str, model: str, n: int) -> list[str]:
     return [f"{kind}__c{i}__{model}__v1" for i in range(n)]
 
 
-def _http_error(path: str, code: int, body: dict) -> urllib.error.HTTPError:
+def _http_error(
+    path: str, code: int, body: dict, headers: dict | None = None,
+) -> urllib.error.HTTPError:
     return urllib.error.HTTPError(
-        path, code, "err", {}, io.BytesIO(json.dumps(body).encode()),  # type: ignore[arg-type]
+        path, code, "err", headers or {},  # type: ignore[arg-type]
+        io.BytesIO(json.dumps(body).encode()),
     )
+
+
+#: What the AWS edge adds to a response it generated itself.
+_EDGE_HEADERS = {"Server": "awselb/2.0"}
+
+
+@pytest.fixture(autouse=True)
+def _fresh_process_state(monkeypatch):
+    """The route's process-wide state: the mixed-model group memo, the
+    "route absent already logged" flag and the kill-switch env. Each test
+    starts as a fresh process would."""
+    monkeypatch.setattr(se, "_mixed_model_groups", {})
+    monkeypatch.setattr(hvc, "_per_collection_absent_warned", False)
+    monkeypatch.delenv(hvc.PER_COLLECTION_ROUTE_ENV, raising=False)
 
 
 class _FakeEngine:
@@ -63,9 +82,12 @@ class _FakeEngine:
         self.skipped: set[str] = set()
         #: edit the 200 envelope before it is returned (malformed-envelope tests)
         self.mutate = None
-        #: raise this HTTP error for a route request (code, body), once per
-        #: predicate hit: ``fail_when(body) -> (code, body) | None``
+        #: raise this HTTP error for a route request:
+        #: ``fail_when(body) -> (code, body[, headers]) | None``
         self.fail_when = None
+        #: called with the request body at the start of every route request
+        #: (concurrency tests block in it); may sleep or wait on a barrier
+        self.on_route = None
         #: lexical rows /hybrid-search returns: list of row dicts
         self.lexical_rows: list[dict] = []
         self.client = hvc.HttpVectorClient()
@@ -88,12 +110,14 @@ class _FakeEngine:
     def _request(self, method, path, *, tenant, timeout, body):
         self.calls.append((path, body))
         if path == _ROUTE:
+            if self.on_route is not None:
+                self.on_route(body)
             if not self.route:
                 raise _http_error(path, 404, {"error": "not found"})
             if self.fail_when is not None:
                 failure = self.fail_when(body)
                 if failure is not None:
-                    raise _http_error(path, failure[0], failure[1])
+                    raise _http_error(path, *failure)
             return self._serve_route(body)
         if path == _SEARCH:
             return self._serve_flat(body)
@@ -193,10 +217,13 @@ class TestOneRequestPerModelGroup:
         (300, False, 1200),   # 4n = 1200: the route's ceiling
         (500, False, 1200),   # 4n = 2000 would be a 400: clamped
         (300, True, 1000),    # the route 400s on rerank with limit > 1000
-        (100, True, 400),
-        (10, True, 300),
+        (500, True, 1000),    # 4n = 2000: still the rerank maximum
+        # Rerank asks for the deepest pool the route allows, whatever n is:
+        # the reranked page is pool-sensitive (nexus-abdp2).
+        (100, True, 1000),
+        (10, True, 1000),
     ])
-    def test_limit_is_the_pool_cap_clamped_for_the_route_and_for_rerank(
+    def test_limit_is_the_pool_cap_without_rerank_and_the_rerank_maximum_with_it(
         self, monkeypatch, n, rerank, expected_limit,
     ):
         cols = _cols("code", _BGE, 2)
@@ -222,6 +249,16 @@ class TestOneRequestPerModelGroup:
         results = _search(engine, cols, n=5)
         sizes = sorted(len(b["collections"]) for b in engine.route_calls())
         assert sizes == [44, 256]
+        assert {r.collection for r in results} == set(cols)
+
+    def test_the_requests_of_a_split_group_run_in_parallel(self, monkeypatch):
+        cols = _cols("code", _BGE, 300)
+        engine = _FakeEngine(monkeypatch, {c: _rows("r", 1, 0.2) for c in cols})
+        # Confirm the route first so the probe lock is out of the picture.
+        engine.client.search_per_collection("q", cols[:2], per_collection_k=5, limit=300)
+        barrier = threading.Barrier(2)
+        engine.on_route = lambda body: barrier.wait(timeout=5)  # serial -> BrokenBarrierError
+        results = _search(engine, cols, n=5)
         assert {r.collection for r in results} == set(cols)
 
 
@@ -345,6 +382,210 @@ class TestFallbackOnAnOldEngine:
         assert {r.collection for r in results} == set(bge + mini)
 
 
+# ── a route failure falls back, or fails the group, by status ────────────────
+
+#: status, response headers, the memo window the client keeps. Every row here
+#: is "the engine or edge does not serve the route": the batched path serves
+#: the group and the route is skipped for the window.
+_FALLBACK_STATUSES = [
+    pytest.param(404, None, 600.0, id="404-engine-without-the-route"),
+    pytest.param(403, None, 600.0, id="403-forbidden"),
+    pytest.param(403, _EDGE_HEADERS, 600.0, id="403-edge-refusal"),
+    pytest.param(400, _EDGE_HEADERS, 600.0, id="400-edge-refusal"),
+    pytest.param(405, None, 600.0, id="405-method-not-allowed"),
+    pytest.param(501, None, 600.0, id="501-not-implemented"),
+    pytest.param(500, None, 60.0, id="500-a-route-bug"),
+]
+
+#: Failures of the GROUP: load shedding (the gateway already retried 502-504)
+#: and validation errors. The batched path is not tried, the route is not
+#: written off.
+_GROUP_FAILURE_STATUSES = [
+    pytest.param(429, None, id="429"),
+    pytest.param(502, None, id="502"),
+    pytest.param(503, None, id="503"),
+    pytest.param(504, None, id="504"),
+    pytest.param(503, _EDGE_HEADERS, id="503-edge-generated"),
+    pytest.param(422, None, id="422"),
+    pytest.param(400, None, id="400-validation"),
+]
+
+
+class TestRouteFailureFallsBackByStatus:
+    @pytest.mark.parametrize("code, headers, window", _FALLBACK_STATUSES)
+    def test_the_group_is_served_by_the_batched_path_and_the_route_is_remembered_off(
+        self, monkeypatch, code, headers, window,
+    ):
+        cols = _cols("code", _BGE, 3)
+        engine = _FakeEngine(monkeypatch, {c: _rows(c[:7], 4, 0.2) for c in cols})
+        engine.fail_when = lambda body: (code, {"error": "nope"}, headers)
+        clock = [0.0]
+        monkeypatch.setattr(hvc, "_monotonic", lambda: clock[0])
+        warnings = []
+        monkeypatch.setattr(hvc._log, "warning", lambda event, **kw: warnings.append((event, kw)))
+
+        results = _search(engine, cols, n=5)
+
+        assert len(results) == 12
+        assert engine.paths().count(_ROUTE) == 1
+        assert _SEARCH in engine.paths()
+        # A WARNING that names the status.
+        assert [kw["status"] for e, kw in warnings if "route_unavailable" in e] == [code]
+        # Remembered for exactly the window.
+        _search(engine, cols)
+        assert engine.paths().count(_ROUTE) == 1, "the memo must skip the route"
+        clock[0] += window - 1.0
+        _search(engine, cols)
+        assert engine.paths().count(_ROUTE) == 1
+        clock[0] += 2.0
+        _search(engine, cols)
+        assert engine.paths().count(_ROUTE) == 2
+
+    @pytest.mark.parametrize("code, headers", _GROUP_FAILURE_STATUSES)
+    def test_load_shedding_and_validation_errors_fail_the_group_without_a_fallback(
+        self, monkeypatch, code, headers,
+    ):
+        cols = _cols("code", _BGE, 3)
+        engine = _FakeEngine(monkeypatch, {c: _rows(c[:7], 4, 0.2) for c in cols})
+        engine.fail_when = lambda body: (code, {"error": "busy"}, headers)
+        with pytest.raises(VectorServiceError, match="all 3 collections failed"):
+            _search(engine, cols)
+        assert _SEARCH not in engine.paths(), "no fallback: the batched path would hit the same pool"
+        # Not written off: the next search asks again.
+        with pytest.raises(VectorServiceError):
+            _search(engine, cols)
+        assert engine.paths().count(_ROUTE) == 2
+
+    def test_a_route_bug_in_one_group_still_returns_every_collection_of_both(self, monkeypatch):
+        # The write-off is per client, so whether the second group is served by
+        # the route (it ran first) or by the batched path (it ran after the
+        # write-off) depends on scheduling; either way nothing is lost.
+        bge, mini = _cols("code", _BGE, 2), _cols("docs", _MINI, 2)
+        engine = _FakeEngine(monkeypatch, {c: _rows(c[:7], 3, 0.2) for c in bge + mini})
+        engine.fail_when = lambda body: (
+            (500, {"error": "boom"}, None) if body["collections"][0] in bge else None
+        )
+        diags: list[SearchDiagnostics] = []
+        results = _search(engine, bge + mini, diagnostics_out=diags)
+        assert {r.collection for r in results} == set(bge + mini)
+        assert diags[0].failed_collections == {}
+
+    def test_the_first_route_missing_fallback_per_process_is_a_warning_the_rest_are_debug(
+        self, monkeypatch,
+    ):
+        cols = _cols("code", _BGE, 2)
+        engine = _FakeEngine(monkeypatch, {c: _rows("r", 2, 0.2) for c in cols}, route=False)
+        clock = [0.0]
+        monkeypatch.setattr(hvc, "_monotonic", lambda: clock[0])
+        warnings, debugs = [], []
+        monkeypatch.setattr(hvc._log, "warning", lambda event, **kw: warnings.append((event, kw)))
+        monkeypatch.setattr(hvc._log, "debug", lambda event, **kw: debugs.append((event, kw)))
+
+        _search(engine, cols)
+        assert len(warnings) == 1 and warnings[0][1]["status"] == 404
+        assert not [e for e, _ in debugs if "route_absent" in e]
+
+        clock[0] += 601.0  # the memo expires, the next probe misses again
+        _search(engine, cols)
+        assert len(warnings) == 1, "the 404 is already on record for this process"
+        assert [kw["status"] for e, kw in debugs if "route_absent" in e] == [404]
+
+
+# ── kill switch ──────────────────────────────────────────────────────────────
+
+
+class TestKillSwitch:
+    @pytest.mark.parametrize("value", ["0", "false", "FALSE", "off", "Off", "no", " 0 "])
+    def test_the_env_switch_turns_the_route_off_and_the_batched_path_serves(
+        self, monkeypatch, value,
+    ):
+        cols = _cols("code", _BGE, 2)
+        engine = _FakeEngine(monkeypatch, {c: _rows("r", 3, 0.2) for c in cols})
+        monkeypatch.setenv(hvc.PER_COLLECTION_ROUTE_ENV, value)
+        results = _search(engine, cols)
+        assert _ROUTE not in engine.paths()
+        assert _SEARCH in engine.paths()
+        assert len(results) == 6
+
+    @pytest.mark.parametrize("value", ["", "1", "true", "on", "yes", "anything"])
+    def test_any_other_value_leaves_the_route_on(self, monkeypatch, value):
+        cols = _cols("code", _BGE, 2)
+        engine = _FakeEngine(monkeypatch, {c: _rows("r", 3, 0.2) for c in cols})
+        monkeypatch.setenv(hvc.PER_COLLECTION_ROUTE_ENV, value)
+        _search(engine, cols)
+        assert _ROUTE in engine.paths()
+        assert _SEARCH not in engine.paths()
+
+    def test_the_switch_is_read_on_every_search(self, monkeypatch):
+        cols = _cols("code", _BGE, 2)
+        engine = _FakeEngine(monkeypatch, {c: _rows("r", 3, 0.2) for c in cols})
+        _search(engine, cols)
+        assert engine.paths().count(_ROUTE) == 1
+        monkeypatch.setenv(hvc.PER_COLLECTION_ROUTE_ENV, "0")
+        _search(engine, cols)
+        assert engine.paths().count(_ROUTE) == 1
+        monkeypatch.delenv(hvc.PER_COLLECTION_ROUTE_ENV)
+        _search(engine, cols)
+        assert engine.paths().count(_ROUTE) == 2
+
+
+# ── the first probe is single-flight ─────────────────────────────────────────
+
+
+class TestFirstProbeIsSingleFlight:
+    def test_two_model_groups_of_one_search_probe_an_absent_route_once(self, monkeypatch):
+        bge, mini = _cols("code", _BGE, 2), _cols("docs", _MINI, 2)
+        engine = _FakeEngine(monkeypatch, {c: _rows("r", 2, 0.2) for c in bge + mini}, route=False)
+        engine.on_route = lambda body: time.sleep(0.1)  # let the second group arrive
+        results = _search(engine, bge + mini)
+        assert engine.paths().count(_ROUTE) == 1
+        assert {r.collection for r in results} == set(bge + mini)
+
+    def test_concurrent_callers_share_one_probe(self, monkeypatch):
+        cols = _cols("code", _BGE, 2)
+        engine = _FakeEngine(monkeypatch, {c: _rows("r", 2, 0.2) for c in cols}, route=False)
+        engine.on_route = lambda body: time.sleep(0.1)
+        barrier = threading.Barrier(6)
+        out: list = []
+
+        def go():
+            barrier.wait(timeout=5)
+            out.append(engine.client.search_per_collection(
+                "q", cols, per_collection_k=5, limit=300))
+
+        threads = [threading.Thread(target=go) for _ in range(6)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10)
+        assert out == [None] * 6
+        assert engine.paths().count(_ROUTE) == 1
+
+    def test_once_the_route_is_confirmed_requests_run_in_parallel(self, monkeypatch):
+        cols = _cols("code", _BGE, 2)
+        engine = _FakeEngine(monkeypatch, {c: _rows("r", 2, 0.2) for c in cols})
+        engine.client.search_per_collection("q", cols, per_collection_k=5, limit=300)
+        barrier = threading.Barrier(4)
+        engine.on_route = lambda body: barrier.wait(timeout=5)  # BrokenBarrierError if serialised
+        results: list = []
+        errors: list = []
+
+        def go():
+            try:
+                results.append(engine.client.search_per_collection(
+                    "q", cols, per_collection_k=5, limit=300))
+            except Exception as exc:  # noqa: BLE001 - the assertion below names it
+                errors.append(exc)
+
+        threads = [threading.Thread(target=go) for _ in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10)
+        assert not errors, errors
+        assert len(results) == 4 and all(r is not None for r in results)
+
+
 # ── a malformed envelope is refused ──────────────────────────────────────────
 
 
@@ -366,6 +607,34 @@ _MALFORMED = {
         **env, "per_collection": env["per_collection"] + [{"collection": "ghost"}]},
     "a_requested_collection_unaccounted_for": lambda env: {
         **env, "per_collection": env["per_collection"][:-1]},
+    # Row and count shapes (nexus-tu8wp.2 fix round): each used to escape as a
+    # bare ValueError / KeyError / AttributeError past the group.
+    "a_row_that_is_not_an_object": lambda env: {**env, "results": ["a string row"]},
+    "a_row_without_an_id": lambda env: {
+        **env, "results": [{k: v for k, v in env["results"][0].items() if k != "id"}]},
+    "a_row_without_a_distance": lambda env: {
+        **env, "results": [{k: v for k, v in env["results"][0].items() if k != "distance"}]},
+    "a_row_with_a_non_numeric_distance": lambda env: {
+        **env, "results": [{**env["results"][0], "distance": "near"}]},
+    "a_row_with_a_boolean_distance": lambda env: {
+        **env, "results": [{**env["results"][0], "distance": True}]},
+    "a_row_with_a_non_string_collection": lambda env: {
+        **env, "results": [{**env["results"][0], "collection": ["x"]}]},
+    "a_non_numeric_raw_count": lambda env: {
+        **env, "per_collection": [{**env["per_collection"][0], "raw_count": "many"},
+                                  *env["per_collection"][1:]]},
+    "a_non_integral_dropped_count": lambda env: {
+        **env, "per_collection": [{**env["per_collection"][0], "dropped": 1.5},
+                                  *env["per_collection"][1:]]},
+    "a_negative_count": lambda env: {
+        **env, "per_collection": [{**env["per_collection"][0], "raw_count": -1},
+                                  *env["per_collection"][1:]]},
+    "a_list_as_a_count": lambda env: {
+        **env, "per_collection": [{**env["per_collection"][0], "dropped": [1]},
+                                  *env["per_collection"][1:]]},
+    "a_non_numeric_min_distance": lambda env: {
+        **env, "per_collection": [{**env["per_collection"][0], "min_raw_distance": "0.1"},
+                                  *env["per_collection"][1:]]},
 }
 
 
@@ -402,6 +671,22 @@ class TestMalformedEnvelopeIsRefused:
         results = _search(engine, cols)
         assert _SEARCH in engine.paths()
         assert len(results) == 4
+
+    @pytest.mark.parametrize("name", sorted(_MALFORMED))
+    def test_no_malformed_shape_escapes_search_cross_corpus_as_a_raw_exception(
+        self, monkeypatch, name,
+    ):
+        # The envelope is refused INSIDE the client, so the group falls back and
+        # the route is switched off: a ValueError/KeyError/AttributeError here
+        # would abort the whole search instead.
+        cols = _cols("code", _BGE, 2)
+        engine = _FakeEngine(monkeypatch, {c: _rows("r", 2, 0.2) for c in cols})
+        engine.mutate = _MALFORMED[name]
+        results = _search(engine, cols)
+        assert _SEARCH in engine.paths()
+        assert len(results) == 4
+        _search(engine, cols)
+        assert engine.paths().count(_ROUTE) == 1, "the refusal is memoized"
 
     def test_the_skipped_header_accounts_for_a_collection_with_no_entry(self, monkeypatch):
         cols = _cols("code", _BGE, 3)
@@ -536,6 +821,61 @@ class TestMixedModelFallsBackToSingletons:
         assert sizes == [3, 1, 1, 1]
         assert {r.collection for r in results} == set(cols)
         assert _SEARCH not in engine.paths()
+
+    @staticmethod
+    def _mixed(engine):
+        engine.fail_when = lambda body: (
+            (400, {"error": "mixed embedding models in one combined-query call: 'a' vs 'b'"}, None)
+            if len(body["collections"]) > 1 else None
+        )
+
+    def test_the_singleton_retries_run_in_parallel(self, monkeypatch):
+        cols = _cols("code", _BGE, 6)
+        engine = _FakeEngine(monkeypatch, {c: _rows(c[:7], 3, 0.2) for c in cols})
+        self._mixed(engine)
+        barrier = threading.Barrier(6)
+
+        def hold_singletons(body):
+            # All six singleton requests must be in flight at once; a serial
+            # loop times the barrier out (BrokenBarrierError -> group failure).
+            if len(body["collections"]) == 1:
+                barrier.wait(timeout=5)
+
+        engine.on_route = hold_singletons
+        results = _search(engine, cols)
+        assert {r.collection for r in results} == set(cols)
+
+    def test_a_group_that_drew_the_mixed_model_400_goes_straight_to_singletons_for_600_s(
+        self, monkeypatch,
+    ):
+        cols = _cols("code", _BGE, 3)
+        engine = _FakeEngine(monkeypatch, {c: _rows(c[:7], 3, 0.2) for c in cols})
+        self._mixed(engine)
+        clock = [0.0]
+        monkeypatch.setattr(se, "_monotonic", lambda: clock[0])
+
+        _search(engine, cols)
+        first = sorted(len(b["collections"]) for b in engine.route_calls())
+        assert first == [1, 1, 1, 3]
+
+        _search(engine, cols)  # remembered: no grouped request this time
+        second = sorted(len(b["collections"]) for b in engine.route_calls()[len(first):])
+        assert second == [1, 1, 1]
+
+        clock[0] += 601.0  # expired: the grouped request is tried again
+        _search(engine, cols)
+        third = sorted(len(b["collections"]) for b in engine.route_calls()[len(first) + 3:])
+        assert third == [1, 1, 1, 3]
+
+    def test_a_different_set_of_collections_is_not_covered_by_the_memo(self, monkeypatch):
+        cols = _cols("code", _BGE, 4)
+        engine = _FakeEngine(monkeypatch, {c: _rows(c[:7], 3, 0.2) for c in cols})
+        self._mixed(engine)
+        _search(engine, cols[:3])
+        before = len(engine.route_calls())
+        _search(engine, cols[1:])  # a different group: pays its own 400
+        sizes = sorted(len(b["collections"]) for b in engine.route_calls()[before:])
+        assert sizes == [1, 1, 1, 3]
 
     def test_a_400_that_is_not_the_model_mix_fails_the_group_without_a_retry_storm(
         self, monkeypatch,

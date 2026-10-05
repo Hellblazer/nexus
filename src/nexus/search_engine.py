@@ -6,6 +6,7 @@ from __future__ import annotations
 import itertools
 import math
 import threading
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -18,6 +19,7 @@ from nexus.db.http_vector_client import (
     HttpVectorClient,
     PerCollectionEnvelopeError,
     VectorServiceError,
+    per_collection_route_enabled,
 )
 from nexus.errors import (
     SearchEmbeddingProfileMismatchError,
@@ -608,6 +610,30 @@ _PER_COLLECTION_MAX_COLLECTIONS = 256
 #: by the dimension-mismatch path below.
 _DIMENSION_ERROR_KINDS = frozenset({"dimension_mismatch", "unsupported_dimension"})
 
+#: How long a model group that drew the engine's mixed-model 400 is sent as
+#: one request per collection straight away, instead of paying the failing
+#: grouped request first on every search (nexus-tu8wp.2). Keyed by the exact
+#: set of collection names; process-lifetime state like
+#: :data:`_poisoned_collections`. Guarded by :data:`_mixed_model_groups_lock`.
+_MIXED_MODEL_GROUP_MEMO_S = 600.0
+_mixed_model_groups: dict[frozenset[str], float] = {}
+_mixed_model_groups_lock = threading.Lock()
+_monotonic = time.monotonic
+
+
+def _group_is_known_mixed(group: list[str]) -> bool:
+    with _mixed_model_groups_lock:
+        deadline = _mixed_model_groups.get(frozenset(group))
+        return deadline is not None and _monotonic() < deadline
+
+
+def _record_mixed_model_group(group: list[str]) -> None:
+    now = _monotonic()
+    with _mixed_model_groups_lock:
+        for key in [k for k, d in _mixed_model_groups.items() if d <= now]:
+            del _mixed_model_groups[key]
+        _mixed_model_groups[frozenset(group)] = now + _MIXED_MODEL_GROUP_MEMO_S
+
 
 def _per_collection_request_sizes(
     n_results: int, mult: int, *, rerank: bool,
@@ -623,10 +649,15 @@ def _per_collection_request_sizes(
     one model) takes the largest multiplier, so no member gets less than it
     had.
 
-    ``limit`` is the global cut after the merge, the figure
-    :func:`_cap_enrichment_pool` keeps afterwards: ``max(MAX_QUERY_RESULTS,
-    n_results * 4)``, clamped to the route's ceiling of 1200 and, with rerank
-    on, to the 1000 rows the reranker accepts.
+    ``limit`` is the global cut after the merge. Without rerank it is the
+    figure :func:`_cap_enrichment_pool` keeps afterwards, ``max(MAX_QUERY_RESULTS,
+    n_results * 4)``, clamped to the route's ceiling of 1200: the cut is
+    exact, the same top rows the batched path kept. With rerank on it is the
+    most the reranker accepts, 1000, so the pool the reranker orders is as
+    deep as the route allows (the page it produces is pool-sensitive,
+    nexus-abdp2's final-order measurement); :func:`_cap_enrichment_pool` then
+    keeps the top ``max(300, 4n)`` of it by rerank score. The n-derived value
+    never exceeds the ceiling either way.
     """
     from nexus.db.limits import QUOTAS  # noqa: PLC0415 — branch-local; same deferral as search_cross_corpus
 
@@ -635,7 +666,7 @@ def _per_collection_request_sizes(
     limit = min(max(QUOTAS.MAX_QUERY_RESULTS, n_results * _ENRICHMENT_POOL_HEADROOM),
                 _PER_COLLECTION_MAX_LIMIT)
     if rerank:
-        limit = min(limit, _PER_COLLECTION_RERANK_MAX_LIMIT)
+        limit = _PER_COLLECTION_RERANK_MAX_LIMIT
     return per_k, limit
 
 
@@ -1281,7 +1312,20 @@ def search_cross_corpus(
     # nexus-tu8wp.2: the engine-side per-collection top-K. One request per
     # embedding-model group replaces the batch-and-over-fetch fan-out of
     # _search_batch; see _search_group_per_collection.
-    per_collection_route = getattr(t3, "supports_per_collection_search", False) is True
+    # NX_SEARCH_PER_COLLECTION=0 turns the route off without a client release.
+    per_collection_route = (
+        getattr(t3, "supports_per_collection_search", False) is True
+        and per_collection_route_enabled()
+    )
+
+    def _map_parallel(fn, items: list) -> list:
+        """``[fn(i) for i in items]`` through a pool of at most 8 workers, the
+        same width the batched path used for its per-collection retries."""
+        workers = min(8, len(items))
+        if workers <= 1:
+            return [fn(i) for i in items]
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            return list(pool.map(fn, items))
 
     def _search_group_per_collection(
         group: list[str], *, allow_split: bool = True,
@@ -1301,9 +1345,10 @@ def search_cross_corpus(
         ``failed_collections`` and the error classes run unchanged.
 
         Returns ``None`` when the group must be searched by the batched path
-        instead: the engine does not serve the route (404, remembered by the
-        client for 10 minutes) or answered with an envelope the client
-        refuses. Failure mapping, per collection (``error_kind``, the engine's
+        instead: the engine does not serve the route (404, an edge refusal,
+        403, 405, 501: remembered by the client for 10 minutes; a 500:
+        remembered for 60 s) or answered with an envelope the client refuses.
+        Failure mapping, per collection (``error_kind``, the engine's
         stable value; the human ``error`` text is kept):
 
         - ``dimension_mismatch`` / ``unsupported_dimension``: the nexus-9tsdf
@@ -1313,12 +1358,14 @@ def search_cross_corpus(
         - any other non-null error: failed collection, same handling.
 
         A request the engine fails as a whole (503 pool or admission
-        exhaustion, a spent request budget, 422 for an unregistered or
-        model-unavailable group) marks every collection of the group failed
-        with the engine's text, which the existing text classifiers read. A
-        400 that says the collections do not share one model (the engine
-        trusts its registry, the client the model token in the name) is
-        retried as one request per collection instead of failing the group.
+        exhaustion, a spent request budget, 429, 422 for an unregistered or
+        model-unavailable group, a 400 for a bad request) marks every
+        collection of the group failed with the engine's text, which the
+        existing text classifiers read. A 400 that says the collections do not
+        share one model (the engine trusts its registry, the client the model
+        token in the name) is retried as one request per collection, through
+        a pool of 8, instead of failing the group, and the group is remembered
+        for 10 minutes so later searches go straight to per-collection.
 
         ``--lexical``: the lexical leg stays on ``/hybrid-search`` exactly as
         the batched path runs it (same batches, same per-batch size). Its rows
@@ -1326,15 +1373,30 @@ def search_cross_corpus(
         tie; the diagnostics count each added row as raw.
         """
         if len(group) > _PER_COLLECTION_MAX_COLLECTIONS:
-            parts: list[dict] = []
-            for i in range(0, len(group), _PER_COLLECTION_MAX_COLLECTIONS):
-                sub = _search_group_per_collection(
-                    group[i:i + _PER_COLLECTION_MAX_COLLECTIONS], allow_split=allow_split,
-                )
-                if sub is None:
-                    return None
-                parts.extend(sub)
-            return parts
+            chunks = [
+                group[i:i + _PER_COLLECTION_MAX_COLLECTIONS]
+                for i in range(0, len(group), _PER_COLLECTION_MAX_COLLECTIONS)
+            ]
+            chunk_parts = _map_parallel(
+                lambda chunk: _search_group_per_collection(chunk, allow_split=allow_split),
+                chunks,
+            )
+            if any(sub is None for sub in chunk_parts):
+                return None
+            return [p for sub in chunk_parts for p in sub]
+
+        def _split_per_collection() -> list[dict] | None:
+            """One request per collection, in parallel; ``None`` when any of
+            them must fall back to the batched path."""
+            singles = _map_parallel(
+                lambda c: _search_group_per_collection([c], allow_split=False), group,
+            )
+            if any(sub is None for sub in singles):
+                return None
+            return [p for sub in singles for p in sub]
+
+        if allow_split and len(group) > 1 and _group_is_known_mixed(group):
+            return _split_per_collection()
 
         mult = max((_overfetch_multiplier(c) for c in group), default=2)
         per_collection_k, limit = _per_collection_request_sizes(
@@ -1369,15 +1431,11 @@ def search_cross_corpus(
                     "search_per_collection_mixed_model_group",
                     collections=len(group),
                     error=str(exc),
-                    consequence="searched as one request per collection",
+                    consequence="searched as one request per collection "
+                                "for the next 10 minutes",
                 )
-                split: list[dict] = []
-                for c in group:
-                    sub = _search_group_per_collection([c], allow_split=False)
-                    if sub is None:
-                        return None
-                    split.extend(sub)
-                return split
+                _record_mixed_model_group(group)
+                return _split_per_collection()
             return [{"col": c, "error": str(exc)} for c in group]
         if envelope is None:
             return None
