@@ -250,6 +250,14 @@ jobs:
         working-directory: service
         run: ./mvnw -q test -Dnexus.test.forks=1
 
+      # RDR-224 review (nexus-f9bgu.29/.32): tests/fixtures/native_jar_listings.txt is the
+      # evidence the native-resource tests and OrtTempSweep's LOADED_LIBS pin are built on.
+      # Only this comparison with the real jars proves it; the lint leg has no ~/.m2, so it
+      # runs here, after the build resolved them. Fails loudly (jar not found, listing
+      # differs); there is no skip path.
+      - name: Native jar listing matches the resolved jars
+        run: python3 scripts/native_jar_listing.py --check
+
       # nexus-yuogq: the @Tag("integration") group is EXCLUDED from the step
       # above (service/pom.xml sets test.excluded.groups=integration) and, until
       # 2026-09-12, ran in no default suite, no release battery and no schedule.

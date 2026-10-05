@@ -1446,8 +1446,9 @@ skipped assertion fails; it does not pass.
     Windows Error Reporting event. A real initialisation longer than 3 s is
     unmeasured;
   - serving: the engine exits (149 in 0.076 s), logs `shutdown_signal` and
-    `service_stopped`, and the next boot is clean. The release-leg smoke does not
-    assert this (Phase 1 Step 2).
+    `service_stopped`, and the next boot is clean. The release-leg smoke asserts
+    this stop (Phase 1 Step 2): exit 149 within a bound, both events in the log, a
+    second boot with no new changesets that stops the same way.
 - **Scenario**: `nx daemon service stop` from the same Windows session —
   **Verify**: the supervisor and the engine have both exited, confirmed by
   process exit and not by the send's return value.

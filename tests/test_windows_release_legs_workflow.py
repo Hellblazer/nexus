@@ -453,6 +453,54 @@ def test_the_engine_job_signs_the_txz_with_the_new_bundle_format_only_and_upload
     assert [f"nexus-service-windows-x64{u}" for u in uploaded] == list(ENGINE_ASSETS)
 
 
+PG_JOB = "build-publish-pg-bundle-windows"
+PG_ASSETS = (
+    "nexus-pg-windows-x64.txz",
+    "nexus-pg-windows-x64.txz.sha256",
+    "nexus-pg-windows-x64.txz.sigstore.json",
+)
+
+
+@pytest.mark.parametrize(
+    "job_name, asset, sign_prefix, upload_prefix, expected",
+    [
+        (ENGINE, "nexus-service-windows-x64", "Sign release asset", "Upload the engine archive", ENGINE_ASSETS),
+        (PG_JOB, "nexus-pg-windows-x64", "Sign PG bundle", "Publish PG bundle", PG_ASSETS),
+    ],
+    ids=["engine", "pg-bundle"],
+)
+def test_each_windows_release_job_signs_verifies_and_uploads_its_pinned_asset_set(
+    job_name: str, asset: str, sign_prefix: str, upload_prefix: str, expected: tuple[str, ...]
+) -> None:
+    """The PG job is pinned exactly as the engine job is: the sign step self-verifies (verify-blob,
+    this workflow at this ref as the identity, the GitHub OIDC issuer, both calls in the new bundle
+    format, both exit codes checked) and the upload names the txz, its digest and its .sigstore.json."""
+    job = _doc(RELEASE)["jobs"][job_name]
+    assert job["env"]["ASSET"] == asset
+    steps = job["steps"]
+    names = [s.get("name", "") for s in steps]
+    install = next(i for i, n in enumerate(names) if n.startswith("Install cosign"))
+    sign_i = next(i for i, n in enumerate(names) if n.startswith(sign_prefix))
+    publish_i = next(i for i, n in enumerate(names) if n.startswith(upload_prefix))
+    assert install < sign_i < publish_i, names
+    for i in (install, sign_i, publish_i):
+        assert "refs/tags/engine-service-v" in steps[i]["if"], names[i]
+    sign = _code(steps[sign_i]["run"])
+    assert "cosign sign-blob" in sign
+    assert "cosign verify-blob" in sign, "a signature published without being verified in the same step"
+    assert sign.count("--new-bundle-format") == 2, "sign and self-verify both use the format the client verifies"
+    assert ".cosign.bundle" not in sign
+    assert "engine-service-release.yml@$env:GITHUB_REF" in sign
+    assert '--certificate-oidc-issuer "https://token.actions.githubusercontent.com"' in sign
+    assert sign.count("if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }") == 2, "a failed sign or verify must fail the step"
+    assert 'dist\\$env:ASSET.txz"' in sign
+    assert steps[sign_i]["env"]["COSIGN_YES"] == "true"
+    publish = _code(steps[publish_i]["run"])
+    assert "gh release upload" in publish and "--clobber" in publish
+    uploaded = re.findall(r'"dist\\\$env:ASSET(\.txz[\w.]*)"', publish)
+    assert [f"{asset}{u}" for u in uploaded] == list(expected)
+
+
 def test_the_assets_the_engine_job_uploads_are_the_ones_promotion_expects() -> None:
     text = (REPO / "scripts" / "promote_engine_release.sh").read_text()
     on_block = text[text.index('if [ "$windows" = "on" ]'):]
@@ -610,7 +658,7 @@ def test_the_rehearsals_windows_unit_test_steps_do_not_load_the_posix_only_conft
     steps = [s for job in ("bundle", "engine") for s in jobs[job]["steps"] if "pytest" in s.get("run", "")]
     assert len(steps) == 2, "non-vacuity: one unit-test step in each of the bundle and engine jobs"
     for step in steps:
-        assert "--noconftest" in step["run"], step["name"]
+        assert "--noconftest" in _code(step["run"]), step["name"]
     substrate = (REPO / "tests" / "_engine_substrate.py").read_text(encoding="utf-8")
     assert "os.getuid()" in substrate, (
         "the premise is gone: tests/_engine_substrate.py no longer needs a POSIX uid at import; "

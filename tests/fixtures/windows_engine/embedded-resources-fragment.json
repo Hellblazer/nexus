@@ -1,0 +1,72 @@
+[
+  {
+    "name": "/ai/onnxruntime/native/win-x64/onnxruntime.dll",
+    "entries": [
+      {
+        "origin": "file:///C:/Users/Sam/.m2/repository/com/microsoft/onnxruntime/onnxruntime/1.20.0/onnxruntime-1.20.0.jar",
+        "registration_origin": "command line",
+        "size": 11567672
+      }
+    ]
+  },
+  {
+    "name": "/ai/onnxruntime/native/win-x64/onnxruntime4j_jni.dll",
+    "entries": [
+      {
+        "origin": "file:///C:/Users/Sam/.m2/repository/com/microsoft/onnxruntime/onnxruntime/1.20.0/onnxruntime-1.20.0.jar",
+        "registration_origin": "command line",
+        "size": 87096
+      }
+    ]
+  },
+  {
+    "name": "/native/lib/win-x86_64/cpu/tokenizers.dll",
+    "entries": [
+      {
+        "origin": "file:///C:/Users/Sam/.m2/repository/ai/djl/huggingface/tokenizers/0.30.0/tokenizers-0.30.0.jar",
+        "registration_origin": "command line",
+        "size": 11218432
+      }
+    ]
+  },
+  {
+    "name": "/native/lib/win-x86_64/cpu/libwinpthread-1.dll",
+    "entries": [
+      {
+        "origin": "file:///C:/Users/Sam/.m2/repository/ai/djl/huggingface/tokenizers/0.30.0/tokenizers-0.30.0.jar",
+        "registration_origin": "command line",
+        "size": 56978
+      }
+    ]
+  },
+  {
+    "name": "/native/lib/win-x86_64/cpu/libstdc++-6.dll",
+    "entries": [
+      {
+        "origin": "file:///C:/Users/Sam/.m2/repository/ai/djl/huggingface/tokenizers/0.30.0/tokenizers-0.30.0.jar",
+        "registration_origin": "command line",
+        "size": 2011975
+      }
+    ]
+  },
+  {
+    "name": "/native/lib/win-x86_64/cpu/libgcc_s_seh-1.dll",
+    "entries": [
+      {
+        "origin": "file:///C:/Users/Sam/.m2/repository/ai/djl/huggingface/tokenizers/0.30.0/tokenizers-0.30.0.jar",
+        "registration_origin": "command line",
+        "size": 511408
+      }
+    ]
+  },
+  {
+    "name": "/db/changelog/db.changelog-master.xml",
+    "entries": [
+      {
+        "origin": "file:///C:/build/f9bgu8/src/service/target/nexus-service-1.0-SNAPSHOT.jar",
+        "registration_origin": "META-INF/native-image/dev.nexus/nexus-service/resource-config.json",
+        "size": 4821
+      }
+    ]
+  }
+]

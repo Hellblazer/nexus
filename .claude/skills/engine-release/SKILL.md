@@ -118,7 +118,7 @@ Two more things must hold, and neither can be read from the variable:
 - A `workflow_dispatch` run of `engine-service-release.yml` on `develop` with the
   switch on was GREEN on a commit whose Windows surface (the Windows jobs of that
   workflow and of `pg-bundle-cache-seed.yml`, `scripts/*windows*`,
-  `scripts/windows_*.py`, `.github/actions/windows-*`, `service/pom.xml`) equals the
+  `scripts/windows_*.py`, `.github/actions/*windows*`, `service/pom.xml`) equals the
   commit being tagged. A non-tag ref runs every Windows step except sign, upload and
   promote, so this is the only run that exercises the release workflow's own Windows
   jobs before the tag (the rehearsal cannot: it is not allowed to trigger release
