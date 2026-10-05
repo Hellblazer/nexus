@@ -1456,7 +1456,8 @@ public final class PgVectorRepository {
                 completed = true;
                 return result;
             } finally {
-                logIfSlow(colls, exact, probedRows, System.nanoTime() - startNanos, completed);
+                logIfSlow(colls, slowRouteLabel(exactMaxRows, exact, probedRows),
+                          probedRows, System.nanoTime() - startNanos, completed);
             }
         });
     }
@@ -1468,6 +1469,11 @@ public final class PgVectorRepository {
      * search's own tenant transaction, so row-level security supplies the tenant predicate: another
      * tenant's rows in a same-named collection are not counted. It counts PHYSICAL rows (not the
      * live(c) subset the search returns), because that is the population the exact plan scans.
+     *
+     * <p>COUPLING: this WHERE clause must select the same rows as the {@code plain_search_<dim>} SQL
+     * function's predicate (collection = ANY(...), tenant through row-level security). A predicate
+     * added to one must be added to the other (RDR-225 adds model and tenant predicates). An
+     * under-count here routes exact over a collection set far larger than the threshold.
      */
     private static int probeSelectedRows(DSLContext ctx, int dim, String[] colls, int limit) {
         DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
@@ -1517,7 +1523,19 @@ public final class PgVectorRepository {
         slowStatementMs = SLOW_STATEMENT_MS;
     }
 
-    private static void logIfSlow(String[] colls, boolean exact, int probedRows, long elapsedNanos,
+    /**
+     * The route named on the slow-statement line: {@code exact}; {@code hnsw} when the router is off
+     * or the probe counted above the threshold; {@code unrouted} when the router is on but the probe
+     * never produced a count (it threw, so no route was decided and the statement did not run).
+     */
+    public static String slowRouteLabel(int exactMaxRows, boolean exact, int probedRows) {
+        if (exact) {
+            return "exact";
+        }
+        return exactMaxRows > 0 && probedRows < 0 ? "unrouted" : "hnsw";
+    }
+
+    private static void logIfSlow(String[] colls, String route, int probedRows, long elapsedNanos,
                                   boolean completed) {
         long ms = elapsedNanos / 1_000_000L;
         if (ms < slowStatementMs) {
@@ -1529,7 +1547,7 @@ public final class PgVectorRepository {
               + ",+" + (colls.length - SLOW_LOG_MAX_NAMES) + "_more";
         log.warn("event=vector_search_statement_slow route={} probed_rows={} elapsed_ms={} "
                  + "collection_count={} collections={} completed={}",
-                 exact ? "exact" : "hnsw", probedRows, ms, colls.length, names, completed);
+                 route, probedRows, ms, colls.length, names, completed);
     }
 
     /** Maps one {@code plain_search_<dim>} record to the flat search row shape (shared by both routes). */

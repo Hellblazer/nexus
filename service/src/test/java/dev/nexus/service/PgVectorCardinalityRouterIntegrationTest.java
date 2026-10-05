@@ -353,22 +353,27 @@ class PgVectorCardinalityRouterIntegrationTest {
 
     // ── slow-statement line ───────────────────────────────────────────────────
 
-    @Test
-    void aSlowStatementLogsItsRouteRowsAndCollections() {
-        PgSession.overrideSearchExactMaxRowsForTests(10);
-        PgVectorRepository.overrideSlowStatementMsForTests(0);
+    /** The {@code vector_search_statement_slow} lines emitted while {@code body} runs. */
+    private static List<String> slowLines(Runnable body) {
         var root = (ch.qos.logback.classic.Logger) LoggerFactory.getLogger(org.slf4j.Logger.ROOT_LOGGER_NAME);
         ListAppender<ILoggingEvent> logs = new ListAppender<>();
         logs.start();
         root.addAppender(logs);
         try {
-            flat(TENANT, List.of(S1, S2), K);
+            body.run();
         } finally {
             root.detachAppender(logs);
             logs.stop();
         }
-        List<String> slow = logs.list.stream().map(ILoggingEvent::getFormattedMessage)
+        return logs.list.stream().map(ILoggingEvent::getFormattedMessage)
             .filter(m -> m.contains("event=vector_search_statement_slow")).toList();
+    }
+
+    @Test
+    void aSlowStatementLogsItsRouteRowsAndCollections() {
+        PgSession.overrideSearchExactMaxRowsForTests(10);
+        PgVectorRepository.overrideSlowStatementMsForTests(0);
+        List<String> slow = slowLines(() -> flat(TENANT, List.of(S1, S2), K));
         assertThat(slow).hasSize(1);
         assertThat(slow.get(0)).contains("route=exact", "probed_rows=8", "elapsed_ms=", S1, S2);
     }
@@ -376,18 +381,82 @@ class PgVectorCardinalityRouterIntegrationTest {
     @Test
     void aFastStatementLogsNoSlowLine() {
         PgSession.overrideSearchExactMaxRowsForTests(10);
-        var root = (ch.qos.logback.classic.Logger) LoggerFactory.getLogger(org.slf4j.Logger.ROOT_LOGGER_NAME);
-        ListAppender<ILoggingEvent> logs = new ListAppender<>();
-        logs.start();
-        root.addAppender(logs);
-        try {
-            flat(TENANT, List.of(S1), K);
-        } finally {
-            root.detachAppender(logs);
-            logs.stop();
+        // A threshold of ten minutes: no statement on any box can reach it, so the absence below
+        // is the logging rule and not a race against a loaded CI runner.
+        PgVectorRepository.overrideSlowStatementMsForTests(600_000);
+        assertThat(slowLines(() -> flat(TENANT, List.of(S1), K))).as("under the threshold: no line").isEmpty();
+
+        // Non-vacuity: the identical statement logs once the threshold is lowered, so the empty
+        // result above is the threshold at work and not a logger that cannot see the line.
+        PgVectorRepository.overrideSlowStatementMsForTests(0);
+        assertThat(slowLines(() -> flat(TENANT, List.of(S1), K))).as("same statement, threshold 0").hasSize(1);
+    }
+
+    // ── the probe is bounded at T + 1 ─────────────────────────────────────────
+
+    @Test
+    void theProbeStopsCountingAtTPlusOneHoweverLargeTheCollection() {
+        PgSession.overrideSearchExactMaxRowsForTests(10);
+        PgVectorRepository.overrideSlowStatementMsForTests(0);
+        // BIG holds 300 physical rows. A probe without its LIMIT would report 300 here.
+        List<String> slow = slowLines(() -> flat(TENANT, List.of(BIG), K));
+        assertThat(slow).hasSize(1);
+        assertThat(slow.get(0)).contains("route=hnsw", "probed_rows=11");
+    }
+
+    // ── the slow line's route label ───────────────────────────────────────────
+
+    @Test
+    void theSlowLineNamesARouteNeverDecidedAsUnrouted() {
+        assertThat(PgVectorRepository.slowRouteLabel(10, true, 4)).isEqualTo("exact");
+        assertThat(PgVectorRepository.slowRouteLabel(10, false, 11)).isEqualTo("hnsw");
+        assertThat(PgVectorRepository.slowRouteLabel(0, false, -1)).as("router off").isEqualTo("hnsw");
+        assertThat(PgVectorRepository.slowRouteLabel(10, false, -1))
+            .as("router on, the probe threw before counting").isEqualTo("unrouted");
+    }
+
+    // ── the exact route's planner switches do not outlive the transaction ─────
+
+    /**
+     * enable_indexscan=off and its siblings are SET LOCAL. A pool of ONE connection makes "the next
+     * transaction on the same pooled connection" literal: after an exact-routed search, a plain
+     * transaction reads the connection-level values again (the fixture's options), not the exact
+     * route's, or every later statement on that connection would silently lose its index scans.
+     */
+    @Test
+    void theExactRoutesPlannerSwitchesDoNotSurviveTheTransaction() {
+        PgSession.overrideSearchExactMaxRowsForTests(10);
+        var cfg = new HikariConfig();
+        cfg.setJdbcUrl(pg.getJdbcUrl());
+        cfg.setUsername(PgContainerHelper.SVC_USERNAME);
+        cfg.setPassword(PgContainerHelper.SVC_PASSWORD);
+        cfg.setMaximumPoolSize(1);
+        cfg.setAutoCommit(true);
+        cfg.addDataSourceProperty("options",
+            "-c enable_seqscan=off -c enable_bitmapscan=off -c enable_sort=off");
+        try (HikariDataSource one = new HikariDataSource(cfg)) {
+            var oneScope = new TenantScope(one);
+            var embedder = new PgVectorRepositoryContractTest.FakeEmbedder(384);
+            embedder.register(QUERY, 1f, 0f);
+            var oneRepo = new PgVectorRepository(oneScope, embedder, embedder);
+            Counters before = Counters.now();
+            oneRepo.searchWithTokens(TENANT, QUERY, List.of(S1), K, null, false);
+            assertThat(Counters.now().since(before).exact())
+                .as("non-vacuity: the search took the exact route that sets the switches").isEqualTo(1);
+
+            List<String> after = oneScope.withTenant(TENANT, ctx -> {
+                List<String> out = new ArrayList<>();
+                for (String guc : List.of("enable_indexscan", "enable_bitmapscan", "enable_seqscan",
+                                          "enable_sort")) {
+                    out.add(ctx.select(DSL.function("current_setting", String.class, DSL.val(guc)))
+                               .fetchSingle().value1());
+                }
+                return out;
+            });
+            assertThat(one.getMaximumPoolSize()).isEqualTo(1);
+            assertThat(after).as("indexscan, bitmapscan, seqscan, sort on the connection after the search")
+                .containsExactly("on", "off", "off", "off");
         }
-        assertThat(logs.list.stream().map(ILoggingEvent::getFormattedMessage)
-                       .filter(m -> m.contains("vector_search_statement_slow"))).isEmpty();
     }
 
     private static String chash(String text) {
