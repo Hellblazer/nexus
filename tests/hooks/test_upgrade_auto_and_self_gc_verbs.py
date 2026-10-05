@@ -30,9 +30,9 @@ The properties under test are the SHELL's, restated:
 
 One property is NOT the shell's (nexus-wozn6): upgrade-auto no longer waits
 for its child. ``nx upgrade --auto`` can take about a minute after a version
-change, longer than the hook's 30 s timeout, and a cancelled hook took the
-child down with it. The verb now starts the child in its own session and
-returns after a short bounded wait.
+change, longer than the hook's 30 s timeout, and a cancelled hook most likely
+took the child down with it (inferred from the ledger, not observed). The verb
+now starts the child in its own session and returns after a short bounded wait.
 """
 from __future__ import annotations
 
@@ -81,6 +81,19 @@ def spy(monkeypatch):
 # These drive a REAL child: a fake `nx` shell script in tmp_path. The verb now
 # spawns detached and waits a bounded time (nexus-wozn6), so what matters is
 # real process behaviour -- exit codes, streams, sessions -- not call shape.
+
+@pytest.fixture(autouse=True)
+def emitted(monkeypatch):
+    """Record the verb's hook.log events instead of configuring structlog in
+    the test process (which would also put them on the stderr these tests
+    assert is empty)."""
+    events: list[tuple[str, str, dict]] = []
+    monkeypatch.setattr(
+        upgrade_auto, "_emit",
+        lambda level, event, **fields: events.append((level, event, fields)),
+    )
+    return events
+
 
 _posix_only = pytest.mark.skipif(not hasattr(os, "getsid"), reason="session ids are POSIX")
 
@@ -131,7 +144,15 @@ def test_upgrade_auto_is_silent_on_success(fake_nx, capfd):
     captured = capfd.readouterr()
     assert result.stdout is None, "never writes to the decision channel"
     assert captured.out == ""
-    assert captured.err == "", "2>/dev/null: the child's stderr is swallowed"
+    assert captured.err == "", "the child's stderr never reaches the hook's own stderr"
+    log = upgrade_auto._child_log_path()
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline and not (log.exists() and log.read_text()):
+        time.sleep(0.02)
+    assert "a warning the shell form sent to /dev/null" in log.read_text(), (
+        "the child outlives the hook, so its stderr goes to a log file, not the null device"
+    )
+    assert "on stdout" not in log.read_text(), "stdout stays on the null device"
 
 
 def test_upgrade_auto_emits_the_skew_guidance_on_a_nonzero_child(fake_nx, capsys):
@@ -161,7 +182,7 @@ def test_upgrade_auto_emits_the_guidance_when_nx_is_not_on_path(monkeypatch, cap
     assert upgrade_auto.SKEW_GUIDANCE in captured.err
 
 
-def test_upgrade_auto_swallows_a_spawn_failure(monkeypatch, capsys):
+def test_upgrade_auto_swallows_a_spawn_failure(monkeypatch, capsys, emitted):
     """An OSError from the spawn itself is still a hook that must not fail."""
     monkeypatch.setattr(upgrade_auto.shutil, "which", lambda _: "/gen/bin/nx")
 
@@ -172,17 +193,19 @@ def test_upgrade_auto_swallows_a_spawn_failure(monkeypatch, capsys):
     result = upgrade_auto.run(None)
     assert result.stdout is None
     assert upgrade_auto.SKEW_GUIDANCE in capsys.readouterr().err
+    assert [e[1] for e in emitted] == ["upgrade_auto_spawn_failed"]
+    assert emitted[0][2]["error_type"] == "OSError"
 
 
 @_posix_only
 def test_upgrade_auto_returns_while_a_long_upgrade_runs_on_in_its_own_session(
-    fake_nx, monkeypatch, capsys,
+    fake_nx, monkeypatch, capsys, emitted,
 ):
     """nexus-wozn6. Since 7.68 `nx upgrade --auto` runs the RDR-192 census
     after every package-version change: 51.5 s over 98 collections, against
-    this hook's 30 s cap. The old verb waited on the child, Claude Code
-    cancelled the hook at 30 s, and the child died with it, so the census
-    never recorded and every later session paid 30 s again. The verb must
+    this hook's 30 s cap. The old verb waited on the child and Claude Code
+    cancelled the hook at 30 s; the census most likely died with it (the
+    ledger shows no completion, nobody watched the child). The verb must
     return within its short wait while the child keeps running, in a session
     of its own that a kill aimed at the hook's process tree does not reach."""
     monkeypatch.setattr(upgrade_auto, "_SKEW_WAIT_S", 0.3)
@@ -197,9 +220,125 @@ def test_upgrade_auto_returns_while_a_long_upgrade_runs_on_in_its_own_session(
         assert os.getsid(pid) != os.getsid(0), "the child shares the hook's session"
         assert result.stdout is None
         assert capsys.readouterr().err == "", "a still-running child is not skew"
+        (level, event, fields), = emitted
+        assert (level, event) == ("info", "upgrade_auto_child_spawned")
+        assert fields["pid"] == pid
+        assert fields["argv"][1:] == ["upgrade", "--auto"]
+        assert fields["returncode"] is None, "still running when the hook returned"
     finally:
         with contextlib.suppress(ProcessLookupError):
             os.kill(pid, signal.SIGKILL)
+
+
+def test_upgrade_auto_logs_the_spawn_with_the_childs_pid_and_exit_status(fake_nx, emitted):
+    """nexus-wozn6: the detached child runs unattended, so its start is on
+    record in hook.log: pid and argv, and the exit status when it exited
+    inside the wait."""
+    _, pid_file = fake_nx("exit 0")
+    upgrade_auto.run(None)
+    pid = int(_wait_for(pid_file))
+    (level, event, fields), = emitted
+    assert (level, event) == ("info", "upgrade_auto_child_spawned")
+    assert fields["pid"] == pid
+    assert fields["argv"][1:] == ["upgrade", "--auto"]
+    assert fields["returncode"] == 0
+    assert fields["stderr_log"] == str(upgrade_auto._child_log_path())
+
+
+def test_child_log_is_rotated_once_it_reaches_the_cap(monkeypatch):
+    monkeypatch.setattr(upgrade_auto, "_CHILD_LOG_MAX_BYTES", 100)
+    log = upgrade_auto._child_log_path()
+    log.parent.mkdir(parents=True, exist_ok=True)
+    log.write_bytes(b"old" * 50)
+    handle, path = upgrade_auto._open_child_log()
+    assert handle is not None and path == log
+    handle.write(b"new")
+    handle.close()
+    assert log.read_bytes() == b"new"
+    assert log.with_name(log.name + ".1").read_bytes() == b"old" * 50
+
+
+def test_child_log_under_the_cap_is_appended_not_rotated(monkeypatch):
+    monkeypatch.setattr(upgrade_auto, "_CHILD_LOG_MAX_BYTES", 100)
+    log = upgrade_auto._child_log_path()
+    log.parent.mkdir(parents=True, exist_ok=True)
+    log.write_bytes(b"old")
+    handle, _ = upgrade_auto._open_child_log()
+    handle.write(b"new")
+    handle.close()
+    assert log.read_bytes() == b"oldnew"
+    assert not log.with_name(log.name + ".1").exists()
+
+
+def test_an_unopenable_child_log_falls_back_to_the_null_device(monkeypatch, tmp_path):
+    """A log problem must never stop the upgrade: the parent of the log
+    directory is a FILE, so mkdir fails, and the child starts on DEVNULL."""
+    blocker = tmp_path / "not-a-dir"
+    blocker.write_text("x")
+    monkeypatch.setattr(upgrade_auto, "_child_log_path", lambda: blocker / "logs" / "child.log")
+    monkeypatch.setattr(upgrade_auto.shutil, "which", lambda _: "/gen/bin/nx")
+    seen: list[dict] = []
+
+    def _popen(argv, **kwargs):
+        seen.append(kwargs)
+        raise OSError("stop here")
+
+    monkeypatch.setattr(subprocess, "Popen", _popen)
+    upgrade_auto.run(None)
+    assert seen[0]["stderr"] == subprocess.DEVNULL
+
+
+# Windows. No Windows host runs these: Popen is monkeypatched and the flags
+# are pinned by their literal values, so a wrong constant fails here.
+_WIN_NO_WINDOW = 0x08000000
+_WIN_NEW_GROUP = 0x00000200
+_WIN_BREAKAWAY = 0x01000000
+_WIN_DETACHED = 0x00000008
+
+
+def _windows_popen(monkeypatch, *, refuse_first: int = 0):
+    monkeypatch.setattr(upgrade_auto, "_IS_WINDOWS", True)
+    seen: list[dict] = []
+
+    def _popen(argv, **kwargs):
+        seen.append({"argv": argv, **kwargs})
+        if len(seen) <= refuse_first:
+            raise PermissionError("breakaway not permitted by the job")
+        return object()
+
+    monkeypatch.setattr(subprocess, "Popen", _popen)
+    return seen
+
+
+def test_windows_spawn_hides_the_console_asks_for_breakaway_then_retries_without(monkeypatch):
+    """CREATE_NO_WINDOW, not DETACHED_PROCESS: a detached process has no
+    console, so the console grandchild ``nx.exe`` starts would allocate a
+    visible one. The first attempt asks for breakaway from the job; a job
+    that forbids it refuses CreateProcess, and the retry drops only that."""
+    seen = _windows_popen(monkeypatch, refuse_first=1)
+    upgrade_auto._spawn_detached(["nx", "upgrade", "--auto"], 7)
+    base = _WIN_NO_WINDOW | _WIN_NEW_GROUP
+    assert [c["creationflags"] for c in seen] == [base | _WIN_BREAKAWAY, base]
+    for call in seen:
+        assert not call["creationflags"] & _WIN_DETACHED
+        assert "start_new_session" not in call
+        assert call["stdin"] == call["stdout"] == subprocess.DEVNULL
+        assert call["stderr"] == 7, "the stderr handle reaches the child on both attempts"
+        assert call["close_fds"] is True
+
+
+def test_windows_spawn_stops_after_one_attempt_when_breakaway_is_allowed(monkeypatch):
+    seen = _windows_popen(monkeypatch)
+    upgrade_auto._spawn_detached(["nx"], subprocess.DEVNULL)
+    assert len(seen) == 1
+    assert seen[0]["creationflags"] == _WIN_NO_WINDOW | _WIN_NEW_GROUP | _WIN_BREAKAWAY
+
+
+def test_windows_spawn_raises_when_both_attempts_fail(monkeypatch):
+    seen = _windows_popen(monkeypatch, refuse_first=2)
+    with pytest.raises(PermissionError):
+        upgrade_auto._spawn_detached(["nx"])
+    assert len(seen) == 2
 
 
 # ── nx-hook self-gc ─────────────────────────────────────────────────────────
