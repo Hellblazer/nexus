@@ -64,11 +64,11 @@ def test_changeset_count_on_the_real_changelog_is_the_sum_over_its_includes() ->
     n = es.changeset_count(CHANGELOG)
     assert n >= 500  # 508 on 2026-10-05; the count is read, never hardcoded, so only a floor is asserted
     strip = lambda t: re.sub(r"<!--.*?-->", "", t, flags=re.S)  # noqa: E731
-    master = strip((CHANGELOG / "db.changelog-master.xml").read_text())
+    master = strip((CHANGELOG / "db.changelog-master.xml").read_text(encoding="utf-8"))
     files = re.findall(r'<include\s+file="db/changelog/([^"]+)"', master)
     assert len(set(files)) == len(files), "the master includes a file twice: Liquibase would run it once"
     independent = len(re.findall(r"<changeSet\b", master)) + sum(
-        len(re.findall(r"<changeSet\b", strip((CHANGELOG / f).read_text()))) for f in files
+        len(re.findall(r"<changeSet\b", strip((CHANGELOG / f).read_text(encoding="utf-8")))) for f in files
     )
     assert n == independent
 
@@ -93,7 +93,7 @@ def test_changeset_count_refuses_an_include_that_does_not_exist(tmp_path: Path) 
 
 
 def test_model_pins_equal_the_prime_action_s() -> None:
-    action = (REPO / ".github" / "actions" / "prime-bge-onnx" / "action.yml").read_text()
+    action = (REPO / ".github" / "actions" / "prime-bge-onnx" / "action.yml").read_text(encoding="utf-8")
     assert re.search(rf"MODEL_SHA256: {es.MODEL_PINS['model.onnx']}\b", action)
     assert re.search(rf"TOKENIZER_SHA256: {es.MODEL_PINS['tokenizer.json']}\b", action)
     assert re.search(rf"default: {es.MODEL_ASSET_TAG}\b", action)
@@ -487,7 +487,7 @@ def test_the_default_launcher_is_windows_aware_and_never_used_in_tests() -> None
 
 
 def test_the_script_is_pure_stdlib_and_imports_only_sibling_scripts() -> None:
-    src = (REPO / "scripts" / "engine_windows_smoke.py").read_text()
+    src = (REPO / "scripts" / "engine_windows_smoke.py").read_text(encoding="utf-8")
     tops = {m.split(".")[0] for m in re.findall(r"^(?:from|import) ([a-zA-Z_][\w.]*)", src, re.M)}
     siblings = {"pg_bundle_windows_smoke", "windows_engine_release"}
     assert siblings <= tops, "the smoke reuses the PG smoke's helpers and the packaging script's layout check"

@@ -34,7 +34,7 @@ FIXTURES = REPO / "tests" / "fixtures" / "windows_dumpbin"
 
 
 def _fixture(name: str) -> str:
-    return (FIXTURES / name).read_text()
+    return (FIXTURES / name).read_text(encoding="utf-8")
 
 
 def _dump(*deps: str, delay: tuple[str, ...] = ()) -> str:
@@ -379,7 +379,7 @@ def test_package_copies_every_file_unmodified(tmp_path: Path) -> None:
 
 def test_package_sha256_first_token_is_the_archives_digest(tmp_path: Path) -> None:
     _, archive = _packaged(tmp_path)
-    sidecar = archive.with_name(archive.name + ".sha256").read_text()
+    sidecar = archive.with_name(archive.name + ".sha256").read_text(encoding="utf-8")
     assert sidecar == f"{hashlib.sha256(archive.read_bytes()).hexdigest()}  {archive.name}\n"
 
 
@@ -496,7 +496,7 @@ def test_stamp_refuses_a_version_that_is_not_dotted_digits(bad: str) -> None:
 
 
 def test_the_stamp_matches_the_real_properties_file_shape() -> None:
-    props = (REPO / "service/src/main/resources/META-INF/nexus/release.properties").read_text()
+    props = (REPO / "service/src/main/resources/META-INF/nexus/release.properties").read_text(encoding="utf-8")
     out = wer.stamp_release_version(props, "9.9.9")
     stamped = [ln for ln in out.splitlines() if ln.startswith("release_version=")]
     assert stamped == ["release_version=9.9.9"] and out.endswith("release_version=9.9.9\n")
@@ -550,7 +550,7 @@ def test_main_stamp_rewrites_the_file(tmp_path: Path) -> None:
     p = tmp_path / "release.properties"
     p.write_text("# h\nrelease_version=\n")
     assert wer.main(["stamp", "--file", str(p), "--version", "0.1.7"]) == 0
-    assert p.read_text() == "# h\nrelease_version=0.1.7\n"
+    assert p.read_text(encoding="utf-8") == "# h\nrelease_version=0.1.7\n"
 
 
 def test_report_json_round_trips_through_the_cli_reader(tmp_path: Path) -> None:

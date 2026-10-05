@@ -549,24 +549,33 @@ def test_verify_and_package_cli_run_on_any_os(tmp_path: Path) -> None:
     assert bw.main(["verify", "--prefix", str(bundle)], env={}, platform="darwin") == 1
 
 
+def _fake_tool(directory: Path, name: str, output: str) -> Path:
+    """An executable *name* that prints *output*. On Windows shutil.which finds only PATHEXT
+    suffixes, so the stand-in is a .cmd there; found on the first real Windows run of this file
+    (nexus-f9bgu.9): the POSIX-only stand-ins were never found, which is the exact lookup under test."""
+    directory.mkdir(parents=True, exist_ok=True)
+    if os.name == "nt":
+        tool = directory / f"{name}.cmd"
+        tool.write_text(f"@echo off\r\n{'echo ' + output if output else 'rem'}\r\n")
+    else:
+        tool = directory / name
+        tool.write_text(f"#!/bin/sh\n{'echo ' + output if output else ':'}\n")
+        tool.chmod(0o755)
+    return tool
+
+
 def test_a_tool_only_on_the_build_path_is_resolved_against_that_path(tmp_path: Path) -> None:
     """Windows' CreateProcess searches the parent's PATH, so nmake/cl (present only
     after vcvars) must be resolved by the script, not left to the loader."""
-    tool = tmp_path / "bin" / "nmake"
-    tool.parent.mkdir()
-    tool.write_text("#!/bin/sh\n")
-    tool.chmod(0o755)
+    tool = _fake_tool(tmp_path / "bin", "nmake", "")
     resolved = bw.resolve_exe(["nmake", "/NOLOGO"], {"PATH": str(tool.parent)})
-    assert resolved == [str(tool), "/NOLOGO"]
+    assert [os.path.normcase(resolved[0]), *resolved[1:]] == [os.path.normcase(str(tool)), "/NOLOGO"]
     with pytest.raises(bw.BuildError, match="nmake: not found"):
         bw.resolve_exe(["nmake"], {"PATH": str(tmp_path / "elsewhere")})
 
 
 def test_runner_runs_a_tool_found_only_through_the_given_env(tmp_path: Path) -> None:
-    tool = tmp_path / "bin" / "only-here"
-    tool.parent.mkdir()
-    tool.write_text("#!/bin/sh\necho from-build-path\n")
-    tool.chmod(0o755)
+    tool = _fake_tool(tmp_path / "bin", "only-here", "from-build-path")
     env = {"PATH": str(tool.parent)}
     assert bw.Runner().capture(["only-here"], cwd=None, env=env).strip() == "from-build-path"
     log = tmp_path / "l.log"
@@ -734,7 +743,9 @@ def test_children_never_see_the_build_hosts_toolchain_path(tmp_path: Path) -> No
     bin_dir = str(tmp_path / "relocated" / "bundle" / "bin")
     for env in runner.envs:
         assert "/opt/vs/bin" not in env["PATH"]
-        assert env["PATH"].split(os.pathsep)[0] == bin_dir
+        # windows=False: scrubbed_env joins with ":" on every host (and a Windows drive letter holds one,
+        # so the whole value is compared, not its first field)
+        assert env["PATH"] == f"{bin_dir}:/usr/bin:/bin"
 
 
 def test_scrubbed_env_windows_is_bin_plus_os_dirs_only() -> None:

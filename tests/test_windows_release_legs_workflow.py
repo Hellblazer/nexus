@@ -479,6 +479,23 @@ def test_the_rehearsal_engine_job_gets_its_pg_bundle_and_jooq_sources_from_jobs_
     assert up["with"]["name"] == "jooq-sources"
 
 
+def test_the_rehearsals_windows_unit_test_steps_do_not_load_the_posix_only_conftest() -> None:
+    """tests/conftest.py imports tests/_engine_substrate.py, whose import calls os.getuid(): on Windows
+    `pytest` dies loading the conftest before collecting anything (measured on qwentescence,
+    nexus-f9bgu.9). The two unit-test steps use no conftest fixture, so they run with --noconftest;
+    without it the rehearsal's first step is red for a reason that has nothing to do with the change."""
+    jobs = _doc(REHEARSAL)["jobs"]
+    steps = [s for job in ("bundle", "engine") for s in jobs[job]["steps"] if "pytest" in s.get("run", "")]
+    assert len(steps) == 2, "non-vacuity: one unit-test step in each of the bundle and engine jobs"
+    for step in steps:
+        assert "--noconftest" in step["run"], step["name"]
+    substrate = (REPO / "tests" / "_engine_substrate.py").read_text(encoding="utf-8")
+    assert "os.getuid()" in substrate, (
+        "the premise is gone: tests/_engine_substrate.py no longer needs a POSIX uid at import; "
+        "re-measure on Windows and drop --noconftest if conftest loads there now"
+    )
+
+
 def test_the_rehearsal_is_triggered_by_the_engine_inputs_too() -> None:
     paths = _triggers(_doc(REHEARSAL))["push"]["paths"]
     for needed in (
