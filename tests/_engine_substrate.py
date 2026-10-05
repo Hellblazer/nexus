@@ -498,9 +498,20 @@ _MAX_CONCURRENT_PG_BOOTS = 4
 _BOOT_SEMAPHORE_DIR_PREFIX = "nexus_t2_substrate_boot_locks"
 
 
-def _boot_semaphore_dir(root: Path, uid: int | None = None) -> Path:
-    """The boot-lock directory for one Unix user under ``root`` (``uid`` defaults to ours)."""
-    return root / f"{_BOOT_SEMAPHORE_DIR_PREFIX}-{os.getuid() if uid is None else uid}"
+def _boot_semaphore_dir(root: Path, uid: int | str | None = None) -> Path:
+    """The boot-lock directory for one user under ``root`` (``uid`` defaults to ours).
+
+    The default is the service identity (``str(os.getuid())`` on POSIX, so the
+    directory name is byte for byte what it was; the user SID on Windows, where
+    ``os.getuid`` does not exist and this runs at import time, so a native
+    Windows pytest run died in ``tests/conftest.py`` before collecting a test,
+    RDR-224, nexus-f9bgu.19).
+    """
+    if uid is None:
+        from nexus.daemon.service_registry import service_identity  # noqa: PLC0415 — deferred: keep this module's import light until the default is needed
+
+        uid = service_identity()
+    return root / f"{_BOOT_SEMAPHORE_DIR_PREFIX}-{uid}"
 
 
 _BOOT_SEMAPHORE_DIR = _boot_semaphore_dir(Path(tempfile.gettempdir()))

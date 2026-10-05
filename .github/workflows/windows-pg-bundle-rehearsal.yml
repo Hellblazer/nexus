@@ -66,6 +66,10 @@ on:
       - service/src/main/resources/META-INF/native-image/**
       - tests/daemon/test_rdr149_lifecycle_conformance.py
       - src/nexus/daemon/service_registry.py
+      - src/nexus/daemon/storage_service_daemon.py
+      - tests/_engine_substrate.py
+      - tests/conftest.py
+      - scripts/check_junit_floor.py
       - .github/actions/resolve-windows-python/**
       - .github/actions/windows-engine-leg/**
       - .github/workflows/windows-pg-bundle-rehearsal.yml
@@ -221,4 +225,12 @@ jobs:
 
       - name: Conformance suite
         run: |
-          uv run --python 3.13 --frozen pytest tests/daemon/test_rdr149_lifecycle_conformance.py -o addopts="" -p no:cacheprovider -q
+          uv run --python 3.13 --frozen pytest tests/daemon/test_rdr149_lifecycle_conformance.py -o addopts="" -p no:cacheprovider -q -rs --junitxml=conformance-junit.xml
+
+      # A suite that skipped itself on Windows would pass having proved nothing.
+      # The ceiling counts xfail too (pytest reports it as a skip): the two
+      # documented GAP cells plus the two platform skips (nexus-f9bgu.19).
+      - name: Non-vacuity floor
+        if: ${{ !cancelled() }}
+        run: |
+          uv run --python 3.13 --frozen python scripts/check_junit_floor.py conformance-junit.xml --min-passed 65 --max-skipped 4

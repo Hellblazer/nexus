@@ -145,3 +145,63 @@ def test_a_planted_violation_fails_the_sweep(tmp_path: Path) -> None:
     _, planted = _scan(tmp_path)
     assert planted == {("src/nexus/planted.py", "scope"): [4]}
     assert any("planted.py:scope" in v for v in _violations(planted)), "the planted site must be reported by name"
+
+
+# ---------------------------------------------------------------------------
+# Test-support modules (RDR-224, nexus-f9bgu.19).
+#
+# ``tests/conftest.py`` imports ``tests/_engine_substrate.py`` at collection
+# start, and that module called ``os.getuid()`` at import, so a native Windows
+# pytest run died before collecting a test. The sweep above covers the wheel and
+# the plugin scripts, not the harness. Test FILES (``test_*.py``) are not swept:
+# a ``getuid`` inside one test body fails that test on Windows, not the run.
+# What must hold is that the modules every run imports carry none.
+# ---------------------------------------------------------------------------
+
+TEST_SUPPORT_GLOBS = ("tests/conftest.py", "tests/*/conftest.py", "tests/_*.py")
+
+#: Raw ``getuid`` the test-support modules may still call, each with its reason.
+TEST_SUPPORT_EXEMPT: dict[tuple[str, str], int] = {
+    # Inside the `shutil.which("launchctl")` branch: the macOS service-manager snapshot,
+    # where the number IS the POSIX uid. Never reached on Windows.
+    ("tests/conftest.py", "_snapshot_manager_state"): 1,
+}
+
+#: The sweep must read at least this many helper modules (there are dozens).
+MIN_TEST_SUPPORT_FILES = 10
+
+
+def _scan_test_support(root: Path) -> tuple[int, dict[tuple[str, str], list[int]]]:
+    paths = sorted({p for pattern in TEST_SUPPORT_GLOBS for p in root.glob(pattern)})
+    out: dict[tuple[str, str], list[int]] = {}
+    for path in paths:
+        rel = path.relative_to(root).as_posix()
+        for line, scope in _sites(path.read_text(encoding="utf-8")):
+            out.setdefault((rel, scope), []).append(line)
+    return len(paths), out
+
+
+def test_test_support_modules_call_getuid_nowhere_but_the_named_exemptions() -> None:
+    files, found = _scan_test_support(REPO)
+    assert files >= MIN_TEST_SUPPORT_FILES, f"the sweep read only {files} test-support files"
+    bad = []
+    for key, lines in sorted(found.items()):
+        if len(lines) != TEST_SUPPORT_EXEMPT.get(key, 0):
+            bad.append(f"{key[0]}:{key[1]} has getuid at lines {lines}, allowed {TEST_SUPPORT_EXEMPT.get(key, 0)}")
+    for key, count in sorted(TEST_SUPPORT_EXEMPT.items()):
+        if key not in found:
+            bad.append(f"{key[0]}:{key[1]} is allowed {count} getuid call(s) but has none (stale exemption)")
+    assert not bad, (
+        "os.getuid() in a module every pytest run imports kills a native Windows run before it "
+        "collects a test: use service_identity().\n" + "\n".join(bad)
+    )
+
+
+def test_the_test_support_scan_finds_a_planted_import_time_call(tmp_path: Path) -> None:
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "conftest.py").write_text("import os\nUID = os.getuid()\n")
+    for i in range(MIN_TEST_SUPPORT_FILES):
+        (tmp_path / "tests" / f"_helper{i}.py").write_text("X = 1\n")
+    files, found = _scan_test_support(tmp_path)
+    assert files == MIN_TEST_SUPPORT_FILES + 1
+    assert found == {("tests/conftest.py", "<module>"): [2]}

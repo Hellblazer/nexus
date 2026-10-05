@@ -27,7 +27,14 @@ from nexus.db.t3 import T3Database
 # tests._posix_spawn routes this process's subprocess spawns onto posix_spawn
 # on macOS, where a fork child can die in Network.framework's atfork handler;
 # see that module's docstring.
-pytest_plugins = ["pytester", "tests._posix_spawn", "tests._env_restore"]
+# Not on native Windows (RDR-224, nexus-f9bgu.19): the adapter is a macOS
+# fork-crash workaround that imports fcntl and os.posix_spawn at module scope,
+# neither of which exists there, and its ACTIVE gate is false off macOS anyway.
+import sys as _sys  # noqa: E402
+
+pytest_plugins = ["pytester", "tests._env_restore"]
+if _sys.platform != "win32":
+    pytest_plugins.insert(1, "tests._posix_spawn")
 
 
 # NO _enable_t2_test_auto_migrate: the RDR-120 P3b auto-migrate default
