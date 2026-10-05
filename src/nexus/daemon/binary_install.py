@@ -28,8 +28,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import lzma
 import os
 import re
+import shutil
+import tarfile
 import tempfile
 import urllib.request
 from dataclasses import dataclass
@@ -39,7 +42,11 @@ from typing import Protocol
 
 import structlog
 
-from nexus.daemon.binary_lifecycle import well_known_binary_path
+from nexus.daemon.binary_lifecycle import (
+    WINDOWS_ENGINE_EXE,
+    WINDOWS_RUNTIME_DLLS,
+    well_known_binary_path,
+)
 from nexus.db.pg_bundle import current_platform_tag
 from nexus.engine_version import REQUIRED_ENGINE_VERSION
 
@@ -329,13 +336,24 @@ def verify_signature(
 # ── download + atomic place ─────────────────────────────────────────────────
 
 
-def asset_name() -> str:
-    """Native-binary asset name for this host (``nexus-service-<platform>``).
+def _is_windows_tag(platform_tag: str) -> bool:
+    return platform_tag.startswith("windows-")
+
+
+def asset_name(platform_tag: str | None = None) -> str:
+    """Native-binary asset name for this host.
+
+    Unix: ``nexus-service-<platform>``, one file. Windows (RDR-224, P0.4): one
+    archive, ``nexus-service-windows-x64.txz``, holding ``nexus-service.exe``
+    and the four app-local VC++ runtime DLLs.
 
     Same ``<target>`` tokens as the PG bundle — reuses
-    :func:`nexus.db.pg_bundle.current_platform_tag`.
+    :func:`nexus.db.pg_bundle.current_platform_tag`. *platform_tag* is
+    injectable so every branch runs on every host.
     """
-    return f"nexus-service-{current_platform_tag()}"
+    tag = platform_tag if platform_tag is not None else current_platform_tag()
+    suffix = ".txz" if _is_windows_tag(tag) else ""
+    return f"nexus-service-{tag}{suffix}"
 
 
 def release_asset_url(tag: str, name: str) -> str:
@@ -391,6 +409,7 @@ class InstalledBinaryVerdict:
 
 def verify_installed_binary(
     config_dir: Path, *, provenance: dict | None = None,
+    platform_tag: str | None = None,
 ) -> InstalledBinaryVerdict:
     """Verify the installed engine binary against its own install receipt.
 
@@ -400,8 +419,15 @@ def verify_installed_binary(
 
     ``provenance`` is an injection seam — callers that already read the
     sidecar pass it rather than reading it twice.
+
+    An archive-layout receipt (Windows) records the verified ARCHIVE digest in
+    ``sha256`` and the digest of the placed exe in ``installed_sha256``; the
+    exe is checked against the latter, and every file in ``support_files``
+    (the app-local DLLs, without which the engine cannot start) is checked
+    beside it. A receipt without ``installed_sha256`` is the single-file layout
+    and compares ``sha256`` directly.
     """
-    dest = well_known_binary_path(config_dir)
+    dest = well_known_binary_path(config_dir, platform_tag=platform_tag)
     if provenance is None:
         from nexus.daemon.binary_lifecycle import read_installed_provenance  # noqa: PLC0415 — deferred to avoid import cycle
 
@@ -414,7 +440,7 @@ def verify_installed_binary(
             path=dest,
         )
 
-    recorded = provenance.get("sha256")
+    recorded = provenance.get("installed_sha256") or provenance.get("sha256")
     _sha_match = (
         _SHA256_LINE_RE.match(recorded.strip())
         if isinstance(recorded, str) else None
@@ -459,6 +485,42 @@ def verify_installed_binary(
             path=dest,
             sha256=actual,
         )
+    support = provenance.get("support_files") or {}
+    if not isinstance(support, dict):
+        return InstalledBinaryVerdict(
+            ok=False,
+            reason="install receipt's support_files is not a name-to-digest map",
+            path=dest,
+            sha256=actual,
+        )
+    for name, want in support.items():
+        if not isinstance(name, str) or Path(name).name != name or not isinstance(want, str):
+            return InstalledBinaryVerdict(
+                ok=False,
+                reason=f"install receipt names an unusable support file {name!r}",
+                path=dest,
+                sha256=actual,
+            )
+        path = dest.parent / name
+        try:
+            got = compute_sha256(path)
+        except OSError as exc:
+            return InstalledBinaryVerdict(
+                ok=False,
+                reason=f"installed support file {name} at {path} is missing or unreadable: {exc}",
+                path=dest,
+                sha256=actual,
+            )
+        if got != want.strip().lower():
+            return InstalledBinaryVerdict(
+                ok=False,
+                reason=(
+                    f"installed support file {name} at {path} does not match "
+                    f"its receipt (receipt {want[:12]}, on disk {got[:12]})"
+                ),
+                path=dest,
+                sha256=actual,
+            )
     return InstalledBinaryVerdict(ok=True, path=dest, sha256=actual)
 
 
@@ -493,6 +555,7 @@ def install_binary(
     installed_by: str = "",
     checker: _SignatureChecker | None = None,
     download_dir: Path | None = None,
+    platform_tag: str | None = None,
 ) -> tuple[Path, dict]:
     """Download, verify, and atomically place the native binary for *tag*.
 
@@ -500,10 +563,17 @@ def install_binary(
     :class:`BinaryVerificationError` (fail closed) on any download or
     verification failure — the well-known location is only ever updated with a
     binary that passed BOTH gates.
+
+    On Windows (*platform_tag* ``windows-x64``) the asset is one archive; both
+    gates run on the ARCHIVE bytes, then ``nexus-service.exe`` and the four
+    runtime DLLs are placed side by side (RDR-224 P0.4).
     """
     _validate_tag(tag)
-    name = asset_name()
+    ptag = platform_tag if platform_tag is not None else current_platform_tag()
+    name = asset_name(ptag)
     asset_url = release_asset_url(tag, name)
+    archive_layout = _is_windows_tag(ptag)
+    extra: dict = {}
 
     with tempfile.TemporaryDirectory(
         dir=str(download_dir) if download_dir else None, prefix="nx_install_binary_"
@@ -523,10 +593,14 @@ def install_binary(
         # Gate 2: provenance.
         verify_signature(asset, bundle, checker=checker)
 
-        dest = well_known_binary_path(config_dir)
-        _atomic_copy(asset, dest, executable=True)
+        dest = well_known_binary_path(config_dir, platform_tag=ptag)
+        if archive_layout:
+            extra = _place_engine_archive(asset, dest)
+        else:
+            _atomic_copy(asset, dest, executable=True)
 
     provenance = _provenance(tag, name, digest, asset_url, installed_by)
+    provenance.update(extra)
     try:
         _atomic_write_json(binary_sidecar_path(config_dir), provenance)
     except OSError as exc:
@@ -543,6 +617,104 @@ def install_binary(
         sha256=digest[:12],
     )
     return dest, provenance
+
+
+def _flat_member_name(raw: str) -> str | None:
+    """The single file name an archive member denotes, or ``None`` for the
+    archive-root entry (``.`` / ``./``). Raises
+    :class:`BinaryVerificationError` for anything that is not a plain file name
+    directly in the archive root: absolute paths, ``..``, nested paths,
+    backslashes, drive letters and NTFS stream suffixes (``:``), empty names.
+    """
+    if raw.startswith("/") or "\\" in raw or ":" in raw or "\x00" in raw:
+        raise BinaryVerificationError(f"unsafe archive member name {raw!r}")
+    parts = [p for p in raw.split("/") if p not in ("", ".")]
+    if not parts:
+        if raw in (".", "./"):
+            return None
+        raise BinaryVerificationError(f"unsafe archive member name {raw!r}")
+    if len(parts) != 1 or parts[0] == "..":
+        raise BinaryVerificationError(f"unsafe archive member name {raw!r}")
+    return parts[0]
+
+
+def _place_engine_archive(archive: Path, exe_dest: Path) -> dict:
+    """Extract the Windows engine archive and place its files beside *exe_dest*.
+
+    The archive is already sha256- and signature-verified; this is defence in
+    depth. The layout is FLAT: ``nexus-service.exe`` plus the four runtime DLLs
+    in the archive root. Members stream out of the tar (no ``extractall``), so
+    no member name ever reaches the filesystem unless it is one of the five
+    required names. Any other regular file (a third-party notice, P0.6) is
+    tolerated and ignored; any unsafe member, link, device or nested path fails
+    the whole archive before anything is placed.
+
+    Staged beside the destination, then moved into place with the DLLs first
+    and the exe last, so the exe never sits next to a missing DLL because of
+    this function. Returns the receipt fields ``installed_sha256`` (exe),
+    ``support_files`` (DLL digests) and ``layout``.
+    """
+    required = (WINDOWS_ENGINE_EXE, *WINDOWS_RUNTIME_DLLS)
+    exe_dest.parent.mkdir(parents=True, exist_ok=True)
+    stage = Path(tempfile.mkdtemp(dir=exe_dest.parent, prefix=".nx_stage_"))
+    digests: dict[str, str] = {}
+    seen: set[str] = set()
+    try:
+        try:
+            with tarfile.open(archive, "r:xz") as tf:
+                for member in tf:
+                    name = _flat_member_name(member.name)
+                    if member.isdir():
+                        if name is not None:
+                            raise BinaryVerificationError(
+                                f"unsafe archive member {member.name!r}: nested directory"
+                            )
+                        continue
+                    if not member.isreg() or name is None:
+                        raise BinaryVerificationError(
+                            f"unsafe archive member {member.name!r}: not a regular file"
+                        )
+                    if name in seen:
+                        raise BinaryVerificationError(
+                            f"unsafe archive: duplicate member {name!r}"
+                        )
+                    seen.add(name)
+                    if name not in required:
+                        _log.debug("service_binary_archive_extra_member_ignored", member=name)
+                        continue
+                    src = tf.extractfile(member)
+                    if src is None:  # defensive: isreg() members always have data
+                        raise BinaryVerificationError(
+                            f"unsafe archive member {member.name!r}: no data"
+                        )
+                    sha = hashlib.sha256()
+                    with src, (stage / name).open("wb") as out:
+                        for block in iter(lambda: src.read(_HASH_BLOCK), b""):
+                            sha.update(block)
+                            out.write(block)
+                    digests[name] = sha.hexdigest()
+        except (tarfile.TarError, lzma.LZMAError, EOFError) as exc:
+            raise BinaryVerificationError(
+                f"engine archive {archive.name} could not be read: {exc}"
+            ) from exc
+
+        missing = [n for n in required if n not in digests]
+        if missing:
+            raise BinaryVerificationError(
+                f"engine archive {archive.name} is missing required file(s): "
+                f"{', '.join(missing)}; not installing."
+            )
+
+        for name in (*WINDOWS_RUNTIME_DLLS, WINDOWS_ENGINE_EXE):
+            os.replace(stage / name, exe_dest.parent / name)
+    finally:
+        shutil.rmtree(stage, ignore_errors=True)
+
+    return {
+        "layout": "archive",
+        "installed_sha256": digests[WINDOWS_ENGINE_EXE],
+        "support_files": {dll: digests[dll] for dll in WINDOWS_RUNTIME_DLLS},
+    }
 
 
 def _provenance(
@@ -601,20 +773,21 @@ def _atomic_write_json(dest: Path, data: dict) -> None:
 # ── PG bundle acquisition (RDR-161 P2, same verified seam) ──────────────────
 
 
-def pg_bundle_asset_name() -> str:
+def pg_bundle_asset_name(platform_tag: str | None = None) -> str:
     """PG-bundle asset name for this host (``nexus-pg-<platform>.txz``).
 
     Same ``<target>`` tokens as the binary, and the SAME name
     :func:`nexus.db.pg_bundle.locate_bundle_archive` /
     ``_select_bundled_pg`` look for under ``<config_dir>/service/``.
     """
-    return f"nexus-pg-{current_platform_tag()}.txz"
+    tag = platform_tag if platform_tag is not None else current_platform_tag()
+    return f"nexus-pg-{tag}.txz"
 
 
-def pg_bundle_dest(config_dir: Path) -> Path:
+def pg_bundle_dest(config_dir: Path, *, platform_tag: str | None = None) -> Path:
     """Where the acquired PG bundle is placed — next to the binary, where the
     (RF-161-3-fixed) ``_select_bundled_pg`` default search dir looks."""
-    return config_dir / "service" / pg_bundle_asset_name()
+    return config_dir / "service" / pg_bundle_asset_name(platform_tag)
 
 
 def install_pg_bundle(
@@ -624,6 +797,7 @@ def install_pg_bundle(
     installed_by: str = "",
     checker: _SignatureChecker | None = None,
     download_dir: Path | None = None,
+    platform_tag: str | None = None,
 ) -> tuple[Path, dict]:
     """Download, verify, and atomically place the PG bundle for *tag*.
 
@@ -633,7 +807,7 @@ def install_pg_bundle(
     sidecar. Returns ``(installed_path, provenance)``.
     """
     _validate_tag(tag)
-    name = pg_bundle_asset_name()
+    name = pg_bundle_asset_name(platform_tag)
     asset_url = release_asset_url(tag, name)
 
     with tempfile.TemporaryDirectory(
@@ -651,7 +825,7 @@ def install_pg_bundle(
         digest = verify_sha256(asset, sha_sidecar)
         verify_signature(asset, bundle, checker=checker)
 
-        dest = pg_bundle_dest(config_dir)
+        dest = pg_bundle_dest(config_dir, platform_tag=platform_tag)
         _atomic_copy(asset, dest, executable=False)  # a tarball, not an executable
 
     provenance = _provenance(tag, name, digest, asset_url, installed_by)

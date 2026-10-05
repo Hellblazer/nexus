@@ -842,8 +842,9 @@ the supervisor and the engine from a same-session sender (T2 `224-research-20`,
 
 On a clean Windows 11 x64 machine with no developer tools: `nx init --service`
 installs the published `windows-x64` engine (`commands/init.py:229`) and PG
-bundle (`:563`); `nx daemon service install-binary <tag>` alone installs only
-the engine (`commands/daemon.py:769`). The supervisor starts both, a
+bundle (`:563`); `nx daemon service install-binary <tag>` installs the engine and,
+by default, the PG bundle (`--pg-bundle`, `commands/daemon.py:777-785`;
+`--no-pg-bundle` installs the engine alone). The supervisor starts both, a
 store-then-search round trip returns the stored text, and
 `nx daemon service stop --with-pg` from the same Windows session leaves no
 supervisor, engine or postgres process behind, confirmed by process exit, and no

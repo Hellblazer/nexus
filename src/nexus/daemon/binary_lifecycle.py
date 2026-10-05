@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import os
+import platform
 import re
 import subprocess
 from pathlib import Path
@@ -32,6 +33,9 @@ import structlog
 _log = structlog.get_logger(__name__)
 
 __all__ = [
+    "WINDOWS_ENGINE_EXE",
+    "WINDOWS_RUNTIME_DLLS",
+    "engine_binary_name",
     "well_known_binary_path",
     "read_installed_provenance",
     "fetch_service_version",
@@ -40,15 +44,43 @@ __all__ = [
 _WELL_KNOWN_SUBDIR = "service"
 _WELL_KNOWN_BINARY_NAME = "nexus-service"
 
+#: The installed engine on Windows (RDR-224).
+WINDOWS_ENGINE_EXE = "nexus-service.exe"
 
-def well_known_binary_path(config_dir: Path) -> Path:
-    """``<config_dir>/service/nexus-service`` — the installed-user NATIVE binary.
+#: The four app-local VC++ runtime DLLs the Windows engine needs beside its exe
+#: (RDR-224 Phase 0 Step 0.4: one archive holds the exe and these four).
+WINDOWS_RUNTIME_DLLS: tuple[str, ...] = (
+    "vcruntime140.dll",
+    "vcruntime140_1.dll",
+    "msvcp140.dll",
+    "msvcp140_1.dll",
+)
+
+
+def engine_binary_name(platform_tag: str | None = None) -> str:
+    """File name of the installed engine: ``nexus-service.exe`` on Windows,
+    ``nexus-service`` elsewhere.
+
+    *platform_tag* (``windows-x64``, ``linux-amd64`` ...) is injectable so the
+    Windows branch runs on any host; ``None`` asks the running host. This never
+    raises on an unsupported OS, unlike ``current_platform_tag``.
+    """
+    if platform_tag is None:
+        windows = platform.system().lower() == "windows"
+    else:
+        windows = platform_tag.startswith("windows-")
+    return WINDOWS_ENGINE_EXE if windows else _WELL_KNOWN_BINARY_NAME
+
+
+def well_known_binary_path(config_dir: Path, *, platform_tag: str | None = None) -> Path:
+    """``<config_dir>/service/nexus-service`` (``.exe`` on Windows) — the
+    installed-user NATIVE binary.
 
     RDR-157 ships per-OS/arch native-image binaries (no JVM). When one is
     positioned here (by ``nx daemon service install-binary`` / ``nx init
     --service``), the storage-service supervisor execs it directly.
     """
-    return config_dir / _WELL_KNOWN_SUBDIR / _WELL_KNOWN_BINARY_NAME
+    return config_dir / _WELL_KNOWN_SUBDIR / engine_binary_name(platform_tag)
 
 
 def read_installed_provenance(config_dir: Path) -> dict | None:

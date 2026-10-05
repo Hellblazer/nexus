@@ -17,7 +17,8 @@ LOCATE + idempotent EXTRACT + SELECT orchestration.
 
 Artifact contract (RDR-157 P3.1, bead nexus-vwvv5.10): the ``.txz`` extracts to a
 ``bundle/`` tree containing ``bin/ include/ lib/ share/``; the CI artifact is named
-``nexus-pg-<target>`` for targets ``mac-arm64`` / ``linux-amd64`` / ``linux-arm64``.
+``nexus-pg-<target>`` for targets ``mac-arm64`` / ``linux-amd64`` / ``linux-arm64`` /
+``windows-x64``.
 """
 
 from __future__ import annotations
@@ -52,14 +53,19 @@ _BUILD_PREFIX_MARKER = ".build_prefix"
 _CACHE_SUBDIR = "pg-bundle"
 
 
-def current_platform_tag() -> str:
+def current_platform_tag(*, system: str | None = None, machine: str | None = None) -> str:
     """Return the artifact platform tag for this host (matches ``nexus-pg-<tag>``).
 
-    Release N targets: ``mac-arm64`` (darwin; mac-x64 is out of scope, owner call),
-    ``linux-amd64`` (x86_64), ``linux-arm64`` (aarch64). Windows is release N+1.
+    Targets: ``mac-arm64`` (darwin; mac-x64 is out of scope, owner call),
+    ``linux-amd64`` (x86_64), ``linux-arm64`` (aarch64), ``windows-x64``
+    (RDR-224). Windows on ARM and 32-bit Windows have no engine or bundle and
+    refuse.
+
+    *system* and *machine* default to the running host's ``platform`` values;
+    callers and tests inject them so every branch runs on every host.
     """
-    system = platform.system().lower()
-    machine = platform.machine().lower()
+    system = (platform.system() if system is None else system).lower()
+    machine = (platform.machine() if machine is None else machine).lower()
     if system == "darwin":
         # mac-x64 is out of scope for the bundle (owner call); return its true tag
         # anyway so locate simply finds no artifact and the caller fails loudly,
@@ -68,9 +74,16 @@ def current_platform_tag() -> str:
         return "mac-arm64" if machine in {"arm64", "aarch64"} else "mac-x64"
     if system == "linux":
         return "linux-arm64" if machine in {"aarch64", "arm64"} else "linux-amd64"
+    if system == "windows":
+        if machine in {"amd64", "x86_64", "x64"}:
+            return "windows-x64"
+        raise RuntimeError(
+            f"No engine or PostgreSQL bundle target for Windows/{machine!r}: "
+            "only Windows x64 is supported (there is no GraalVM native-image "
+            "target and no onnxruntime library for Windows on ARM)."
+        )
     raise RuntimeError(
-        f"No PostgreSQL bundle target for platform {system!r}/{machine!r} "
-        "(Windows is a release N+1 follow-on)."
+        f"No PostgreSQL bundle target for platform {system!r}/{machine!r}."
     )
 
 
