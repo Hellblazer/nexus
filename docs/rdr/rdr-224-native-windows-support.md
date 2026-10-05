@@ -1198,3 +1198,4 @@ Right-sized for an Architecture record that replaces an accepted direction.
   `224-research-15`. A follow-up browser download (Edge, real Mark of the Web)
   of a new unsigned program also ran: T2 `224-research-16`.
 - 2026-10-05: Gate round 1 — BLOCKED (3 Critical, 10 Significant, 2 ship-blocker(s)); commit `c080de3d6`; critique `nexus_rdr/224-gate-critique-2026-10-05-r1`.
+- 2026-10-05: Gate round 2 — PASSED (0 Critical, 2 Significant, 0 ship-blocker(s)); commit `107e0f958`; critique `nexus_rdr/224-gate-critique-2026-10-05-r2`.
