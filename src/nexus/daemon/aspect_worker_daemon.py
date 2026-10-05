@@ -45,6 +45,7 @@ from typing import Any
 import structlog
 
 from nexus.daemon.service_registry import (
+    DEFAULT_HEARTBEAT_INTERVAL,
     DEFAULT_STOP_ELECTION_BUDGET,
     ServiceRegistry,
     ServiceSupervisor,
@@ -59,6 +60,13 @@ TIER: str = "aspect_worker"
 #: Heartbeat / lease-reassert cadence (s). The registry TTL (``ttl_for_tier``)
 #: must be >= this; the substrate enforces that invariant.
 _HEARTBEAT_INTERVAL: float = 1.0
+
+#: Longest single wait on the main thread (s). A CPython ``SIGBREAK`` handler
+#: only runs when the main thread executes bytecode, never inside one long
+#: ``Event.wait()`` (T2 ``nexus_rdr/224-research-22``), so the main thread waits
+#: in ticks no longer than the heartbeat interval, exactly as the storage-service
+#: supervisor does (RDR-224, nexus-f9bgu.33).
+_STOP_TICK_S: float = DEFAULT_HEARTBEAT_INTERVAL
 
 #: A factory producing the hosted worker. Injected in tests; the default builds
 #: the real :class:`~nexus.aspect_worker.AspectExtractionWorker`.
@@ -450,14 +458,26 @@ class AspectWorkerDaemon:
                     tenant=self._tenant, error=str(exc),
                 )
 
-    def run_until_signal(self) -> None:
-        """Block until SIGTERM/SIGINT, or until fenced by a newer owner."""
+    def run_until_signal(self, *, signal_module: Any = signal) -> None:
+        """Block until SIGTERM/SIGINT/SIGBREAK, or until fenced by a newer owner.
+
+        ``SIGBREAK`` is the Windows stop signal (RDR-224): ``nx`` sends
+        ``CTRL_BREAK`` to this process's group through the shared graceful-stop
+        primitive, and CPython raises it as ``SIGBREAK``. It sets the same event
+        ``SIGTERM`` does, so the stop that follows cannot diverge by platform.
+        The wait is a loop of ticks of at most :data:`_STOP_TICK_S` so the
+        handler runs promptly. *signal_module* is a test seam.
+        """
         def _handle(_signum: int, _frame: Any) -> None:
             self._stop.set()
 
-        signal.signal(signal.SIGTERM, _handle)
-        signal.signal(signal.SIGINT, _handle)
-        self._stop.wait()
+        signal_module.signal(signal_module.SIGTERM, _handle)
+        signal_module.signal(signal_module.SIGINT, _handle)
+        sigbreak = getattr(signal_module, "SIGBREAK", None)
+        if sigbreak is not None:
+            signal_module.signal(sigbreak, _handle)
+        while not self._stop.wait(_STOP_TICK_S):
+            pass
 
     def stop(self, timeout: float = 10.0) -> None:
         """Stop the worker, then relinquish the lease (idempotent)."""
@@ -615,6 +635,7 @@ def ensure_aspect_worker_daemon(
     tenant: str = "default",
     _popen: Callable[..., Any] = subprocess.Popen,
     _clock: Callable[[], float] = time.monotonic,
+    _platform: str | None = None,
 ) -> bool:
     """Spawn-if-absent: ensure a CURRENT-version leased aspect-worker daemon is up
     for *tenant* (RDR-173 P2 / bead nexus-gtdtc). The enqueue-hook replacement for
@@ -631,8 +652,10 @@ def ensure_aspect_worker_daemon(
     Credential model (nexus-x01oe): the spawn passes NO ``env=`` override, so the
     CHILD inherits this process's environment — ``PATH``, ``~/.claude``, and the
     Anthropic credential context the storing process already uses for ``claude
-    -p``. Detached via ``start_new_session`` so the daemon outlives the (often
-    short-lived) storing process.
+    -p``. Detached so the daemon outlives the (often short-lived) storing
+    process: ``start_new_session`` on POSIX; on Windows its own process group and
+    no console window (the supervisor's flags, so ``CTRL_BREAK`` can reach it and
+    no window opens beside a console-less MCP host; RDR-224, nexus-f9bgu.33).
 
     Returns True if a current-version daemon is up or a spawn was initiated;
     the spawned daemon may not have published its lease yet (the name is
@@ -650,7 +673,10 @@ def ensure_aspect_worker_daemon(
             return True  # we spawned within the suppression window; it is coming up
         _recent_spawn[tenant] = _clock() + _SPAWN_SUPPRESS_WINDOW
 
-        from nexus.commands.daemon import _resolve_nx_bin  # noqa: PLC0415 — deferred to break the CLI<->daemon import cycle
+        from nexus.commands.daemon import (  # noqa: PLC0415 — deferred to break the CLI<->daemon import cycle
+            _resolve_nx_bin,
+            _supervisor_popen_kwargs,
+        )
         from nexus.logging_setup import open_child_log_or_devnull  # noqa: PLC0415 — deferred; CLI/daemon-only
 
         argv = [
@@ -678,7 +704,7 @@ def ensure_aspect_worker_daemon(
                 stdin=subprocess.DEVNULL,
                 stdout=spawn_log,
                 stderr=spawn_log,
-                start_new_session=True,
+                **_supervisor_popen_kwargs(_platform),
             )
         finally:
             if not isinstance(spawn_log, int):

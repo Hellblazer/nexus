@@ -47,6 +47,7 @@ from nexus.daemon.service_registry import (
     all_process_rows,
     process_command,
     process_state,
+    request_graceful_stop,
     storage_service_stack_matcher,
     terminate_pids,
 )
@@ -718,9 +719,38 @@ def restart_stale(report: SkewReport, *, dry_run: bool = False) -> list[str]:
                         f"{proc.kind} pid {proc.pid}: gone or recycled; skipped"
                     )
                     continue
-                import signal as _signal  # noqa: PLC0415 — stdlib, deferred
-
-                os.kill(proc.pid, _signal.SIGTERM)
+                # The shared graceful-stop primitive (RDR-224, nexus-f9bgu.33):
+                # SIGTERM on POSIX, exactly as before; CTRL_BREAK on Windows,
+                # where a bare os.kill(SIGTERM) is TerminateProcess and skips
+                # the worker's bounded drain (its claude -p child is orphaned,
+                # the case the comment below says this branch avoids).
+                send = request_graceful_stop(proc.pid)
+                if send.refused:
+                    # Another Windows session: never signalled, never
+                    # hard-killed (Sam, 2026-10-05).
+                    where = (
+                        f"session {send.target_session}"
+                        if send.target_session is not None
+                        and send.target_session != send.own_session
+                        else "an account or elevation this shell lacks"
+                    )
+                    actions.append(
+                        f"NEEDS HUMAN: {proc.kind} pid {proc.pid}: REFUSED, it runs "
+                        f"in {where}; nothing was signalled or killed — run "
+                        "`nx daemon restart-stale` from there"
+                    )
+                    continue
+                if send.gone:
+                    actions.append(f"{proc.kind} pid {proc.pid}: gone; skipped")
+                    continue
+                if not send.sent:
+                    # POSIX: PermissionError (a pid that is not ours). Windows:
+                    # the console send failed (no console to attach to).
+                    actions.append(
+                        f"{proc.kind} pid {proc.pid}: the stop could not be sent "
+                        f"(error {send.error}); left running"
+                    )
+                    continue
                 # Critique 38b7db3d C3: the worker's graceful drain is
                 # bounded at 10s while an in-flight claude -p child can run
                 # far longer, and PDEATHSIG is inactive on macOS (the RF8
@@ -770,7 +800,7 @@ def restart_stale(report: SkewReport, *, dry_run: bool = False) -> list[str]:
                         )
                 else:
                     actions.append(
-                        f"{proc.kind} pid {proc.pid}: SIGTERM sent but still "
+                        f"{proc.kind} pid {proc.pid}: stop sent but still "
                         "draining (likely an in-flight extraction) — left "
                         "running; re-check with `nx doctor`"
                     )
