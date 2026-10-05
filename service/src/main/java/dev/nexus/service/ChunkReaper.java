@@ -573,8 +573,9 @@ final class ChunkReaper {
     }
 
     /**
-     * The empty-tenant test the production gate is built with (nexus-wbfpw.73): no chunk row and no manifest row,
-     * read under the tenant's RLS context with the same statement bound as the reaper's own enumeration.
+     * The empty-tenant test the production gate is built with (nexus-wbfpw.73): no chunk row in {@code nexus.chunks},
+     * read under the tenant's RLS context with the same statement bound as the reaper's own enumeration. The
+     * manifest is not read: a manifest row cannot outlive its chunk (see {@code ReaperRepository#holdsNothing}).
      */
     static java.util.function.Predicate<String> emptyTenantProbe(ReaperRepository store) {
         return tenant -> store.holdsNothing(tenant, Duration.ofMillis(STATEMENT_TIMEOUT_MS));
