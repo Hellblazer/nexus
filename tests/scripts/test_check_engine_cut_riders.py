@@ -123,3 +123,57 @@ def test_a_failing_release_view_is_unverifiable_not_a_pass(
 def test_the_engine_release_skill_runs_the_sizes_subcommand() -> None:
     text = SKILL.read_text()
     assert "scripts/check_engine_cut_riders.py sizes" in text
+
+
+# nexus-f9bgu.9 (RDR-224 P1.2): the Windows engine archive has its own ceiling, checked only
+# while the Windows legs are on (`--windows on`), where it is also REQUIRED. Off (the default)
+# the archive is neither required nor measured, so a release with the switch off is exactly as before.
+
+WIN = "nexus-service-windows-x64.txz"
+
+
+def _with_windows(mib: float, assets: list[dict] | None = None) -> list[dict]:
+    return [*(assets if assets is not None else _assets(150, 148, 154)), {"name": WIN, "size": int(mib * _MIB)}]
+
+
+def test_windows_archive_has_its_own_ceiling_and_it_is_not_in_the_default_set() -> None:
+    assert WIN in cr.WINDOWS_SIZE_CEILINGS_MIB
+    assert WIN not in cr.SIZE_CEILINGS_MIB, "the default set must stay the three binaries the switch-off state publishes"
+    assert 40 < cr.WINDOWS_SIZE_CEILINGS_MIB[WIN] <= 70, (
+        "measured 32.1 MiB for an -Ob build (2026-10-05); a ceiling far above the -O2 build "
+        "stops catching a doubled library or a .pdb"
+    )
+
+
+def test_default_off_ignores_the_windows_archive_whatever_its_size() -> None:
+    assert cr.check_sizes(_with_windows(500))[0] == 0
+    assert cr.check_sizes(_assets(150, 148, 154))[0] == 0, "absent and off: still a pass"
+
+
+def test_on_requires_and_measures_the_windows_archive() -> None:
+    ceilings = cr.ceilings_for(windows=True)
+    assert WIN in ceilings
+    assert cr.check_sizes(_with_windows(34), ceilings)[0] == 0
+    rc, lines = cr.check_sizes(_with_windows(120), ceilings)
+    assert rc == 1 and any(line.startswith("TOO BIG") and WIN in line for line in lines)
+    rc, lines = cr.check_sizes(_assets(150, 148, 154), ceilings)
+    assert rc == 1 and any(line.startswith("MISSING") and WIN in line for line in lines)
+
+
+def test_ceilings_for_off_is_exactly_the_default_set() -> None:
+    assert cr.ceilings_for(windows=False) == cr.SIZE_CEILINGS_MIB
+
+
+def test_main_windows_flag(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    saved = tmp_path / "rel.json"
+    saved.write_text(json.dumps({"assets": _with_windows(34)}))
+    base = ["sizes", "engine-service-vX", "--assets-json", str(saved)]
+    assert cr.main(base) == 0
+    assert cr.main([*base, "--windows", "off"]) == 0
+    assert cr.main([*base, "--windows", "on"]) == 0
+    saved.write_text(json.dumps({"assets": _assets(150, 148, 154)}))
+    assert cr.main([*base, "--windows", "off"]) == 0
+    assert cr.main([*base, "--windows", "on"]) == 1
+    assert "nexus-service-windows-x64.txz" in capsys.readouterr().out
+    with pytest.raises(SystemExit):
+        cr.main([*base, "--windows", "maybe"])

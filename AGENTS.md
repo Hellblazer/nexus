@@ -169,9 +169,13 @@ controls are the collaborator list (owner only), the fork-PR approval policy and
 branch protection.
 
 `win-release` is the native Windows side of qwentescence, a self-hosted runner
-for the Windows release legs only: the windows-x64 PG-bundle leg in
-`engine-service-release.yml`, its seed in `pg-bundle-cache-seed.yml` and
-`windows-pg-bundle-rehearsal.yml` (RDR-224 P0.1, Sam 2026-10-05). It is a bare
+for the Windows release legs only: the windows-x64 PG-bundle leg and the
+windows-x64 engine leg (`build-publish-engine-windows`: native build, dumpbin
+dependency check, the `nexus-service-windows-x64.txz` with the four VC++ DLLs,
+a smoke against the Windows PG bundle; its steps are the composite action
+`.github/actions/windows-engine-leg`, which the rehearsal runs too) in
+`engine-service-release.yml`, the PG bundle's seed in `pg-bundle-cache-seed.yml`
+and `windows-pg-bundle-rehearsal.yml` (RDR-224 P0.1, Sam 2026-10-05). It is a bare
 custom label like `hellmini`, never runs a `pull_request` job, is inside the
 release trust boundary on the same terms as hellmini, and persists state between
 jobs (the actions tool cache, uv and the Pythons it installs, the Visual Studio

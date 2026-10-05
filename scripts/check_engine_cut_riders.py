@@ -15,6 +15,10 @@ build at 150 (amd64) and 154 (mac). It never measured linux-arm64; its
 ceiling uses the amd64 margin (see ``SIZE_CEILINGS_MIB``). ``--max NAME=MIB``
 overrides one ceiling.
 
+``--windows on`` adds the Windows engine archive (RDR-224, nexus-f9bgu.9) to the checked set, as
+required: the promote script passes it while the Windows legs are on and omits it otherwise, so a
+release with them off is checked exactly as before.
+
 Placement. ``sizes`` is BLOCKING in ``scripts/promote_engine_release.sh``, the
 draft-to-published gate (engine-service-release.yml's promote-release job): an
 oversized binary leaves the release a DRAFT instead of publishing an immutable
@@ -44,6 +48,23 @@ SIZE_CEILINGS_MIB: dict[str, int] = {
     "nexus-service-linux-arm64": 175,
     "nexus-service-mac-arm64": 175,
 }
+
+#: The windows-x64 engine archive (RDR-224 P0.4, nexus-f9bgu.9): one .txz holding the exe, the four
+#: VC++ runtime DLLs and the notice. Checked, and REQUIRED, only with ``--windows on``: the Windows
+#: legs run only while NX_WINDOWS_RELEASE_LEGS is on, and with it off the release has no such asset.
+#: MEASURED: 32.1 MiB (33,687,968 bytes) for an -Ob build of the exe on qwentescence, 2026-10-05 (the
+#: exe 127.1 MB, xz). The release builds at -O2, which was NOT measured; it is expected a few MiB
+#: larger. 55 leaves about 15 MiB over that expectation, enough to catch a .pdb (290 MB raw in the
+#: nexus-lhr6a incident) or a second copy of the larger native libraries, and no more. Replace the
+#: estimate with the first published size, as for linux-arm64 above.
+WINDOWS_SIZE_CEILINGS_MIB: dict[str, int] = {
+    "nexus-service-windows-x64.txz": 55,
+}
+
+
+def ceilings_for(*, windows: bool) -> dict[str, int]:
+    """The ceilings that apply: the three binaries, plus the Windows archive when the Windows legs are on."""
+    return {**SIZE_CEILINGS_MIB, **(WINDOWS_SIZE_CEILINGS_MIB if windows else {})}
 
 
 def check_sizes(
@@ -102,9 +123,14 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--assets-json", default=None, help="read a saved `gh release view --json assets` instead of calling gh")
     s.add_argument("--repo", default=None, help="owner/repo for gh (default: the current checkout's)")
     s.add_argument("--max", action="append", default=[], metavar="NAME=MIB", help="override one ceiling")
+    s.add_argument(
+        "--windows", choices=("on", "off"), default="off",
+        help="on: the Windows engine archive is required and held to its ceiling (the release has the "
+        "Windows legs on); off (default): it is neither",
+    )
     args = parser.parse_args(argv)
 
-    ceilings = dict(SIZE_CEILINGS_MIB)
+    ceilings = ceilings_for(windows=args.windows == "on")
     for item in args.max:
         name, _, val = item.partition("=")
         if not val.isdigit():

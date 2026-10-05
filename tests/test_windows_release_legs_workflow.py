@@ -159,14 +159,16 @@ def test_the_seed_workflow_reseeds_when_the_windows_script_changes() -> None:
     assert "scripts/build_pg_bundle_windows.py" in paths
 
 
-def test_promote_release_waits_for_the_windows_leg_only_while_the_switch_is_on() -> None:
+def test_promote_release_waits_for_the_windows_legs_only_while_the_switch_is_on() -> None:
     promote = _doc(RELEASE)["jobs"]["promote-release"]
     assert "build-publish-pg-bundle-windows" in promote["needs"]
+    assert "build-publish-engine-windows" in promote["needs"]
     cond = promote["if"]
-    # on: the leg must have succeeded. off: its skip must not hold the release.
+    # on: both legs must have succeeded. off: their skip must not hold the release.
     assert (
         "(vars.NX_WINDOWS_RELEASE_LEGS != 'on' || "
-        "needs.build-publish-pg-bundle-windows.result == 'success')"
+        "(needs.build-publish-pg-bundle-windows.result == 'success' && "
+        "needs.build-publish-engine-windows.result == 'success'))"
     ) in cond
     # A job whose needs include a skipped job is skipped unless the `if` carries a status
     # function; without this the off state would silently stop promoting at all.
@@ -226,3 +228,271 @@ def test_the_release_leg_deletes_the_build_tree_before_the_smoke() -> None:
     text = _run_text(_doc(RELEASE)["jobs"]["build-publish-pg-bundle-windows"])
     assert "--allow-build-prefix-present" not in text
     assert text.index("Remove-Item") < text.index("pg_bundle_windows_smoke.py")
+
+
+# --------------------------------------------------------------------------- #
+# The engine leg (RDR-224 P1.2, nexus-f9bgu.9)
+# --------------------------------------------------------------------------- #
+
+ENGINE = "build-publish-engine-windows"
+ACTION = REPO / ".github" / "actions" / "windows-engine-leg" / "action.yml"
+ENGINE_ASSETS = (
+    "nexus-service-windows-x64.txz",
+    "nexus-service-windows-x64.txz.sha256",
+    "nexus-service-windows-x64.txz.sigstore.json",
+)
+
+
+def _engine() -> dict:
+    return _doc(RELEASE)["jobs"][ENGINE]
+
+
+def _action_steps() -> list[dict]:
+    return yaml.safe_load(ACTION.read_text())["runs"]["steps"]
+
+
+def _code(script: str) -> str:
+    """The script with PowerShell (#) and cmd (rem) comment lines removed: a pin a comment can satisfy is not a pin."""
+    return "\n".join(
+        ln for ln in script.splitlines() if not ln.lstrip().startswith("#") and not ln.lstrip().lower().startswith("rem ")
+    )
+
+
+def _step_index(steps: list[dict], needle: str) -> int:
+    for i, s in enumerate(steps):
+        if needle in str(s.get("name", "")) or needle in str(s.get("run", "")) or needle in str(s.get("uses", "")):
+            return i
+    raise AssertionError(f"no step mentions {needle!r}: {[s.get('name') for s in steps]}")
+
+
+def test_the_engine_job_is_a_job_of_its_own_and_the_matrix_is_untouched() -> None:
+    jobs = _doc(RELEASE)["jobs"]
+    assert ENGINE in jobs
+    matrix = jobs["build-publish"]["strategy"]["matrix"]["target"]
+    assert [t["arch"] for t in matrix] == ["linux-amd64", "linux-arm64", "mac-arm64"], (
+        "windows-x64 is its own job: a matrix entry cannot be skipped alone and would pull in the apple-signing environment"
+    )
+    assert jobs["build-publish"]["needs"] == ["jooq-codegen", "create-release"]
+    assert "windows" not in str(jobs["build-publish"]["runs-on"]).lower()
+
+
+def test_the_engine_job_waits_for_codegen_the_release_and_the_pg_bundle_and_is_behind_the_switch() -> None:
+    job = _engine()
+    assert job["runs-on"] == LABEL
+    assert set(job["needs"]) == {"jooq-codegen", "create-release", "build-publish-pg-bundle-windows"}
+    cond = job["if"]
+    assert SWITCH in cond
+    for need in ("jooq-codegen", "build-publish-pg-bundle-windows"):
+        assert f"needs.{need}.result == 'success'" in cond, need
+    assert "needs.create-release.result != 'failure'" in cond
+    assert job["defaults"]["run"]["shell"] == "pwsh"
+    assert job["timeout-minutes"] >= 60, "an -O2 native build plus the model download needs room"
+
+
+def test_the_engine_job_takes_the_pg_bundle_from_this_runs_artifact_not_a_rebuild() -> None:
+    steps = _engine()["steps"]
+    download = steps[_step_index(steps, "Download the Windows PG bundle")]
+    assert download["with"]["name"] == "nexus-pg-windows-x64"
+    pg_upload = next(
+        s for s in _doc(RELEASE)["jobs"]["build-publish-pg-bundle-windows"]["steps"]
+        if str(s.get("uses", "")).startswith("actions/upload-artifact@")
+    )
+    assert pg_upload["with"]["name"] == "${{ env.ASSET }}"
+    assert _doc(RELEASE)["jobs"]["build-publish-pg-bundle-windows"]["env"]["ASSET"] == "nexus-pg-windows-x64"
+    leg = steps[_step_index(steps, "./.github/actions/windows-engine-leg")]
+    assert leg["with"]["pg-archive"] == f"{download['with']['path']}/nexus-pg-windows-x64.txz"
+
+
+def test_the_engine_job_signs_and_publishes_on_tags_only_after_the_leg_passed() -> None:
+    steps = _engine()["steps"]
+    names = [s.get("name", "") for s in steps]
+    leg = _step_index(steps, "./.github/actions/windows-engine-leg")
+    sign = next(i for i, n in enumerate(names) if n.startswith("Sign release asset"))
+    publish = next(i for i, n in enumerate(names) if n.startswith("Upload the engine archive"))
+    install = next(i for i, n in enumerate(names) if n.startswith("Install cosign"))
+    assert leg < install < sign < publish, names
+    for i in (install, sign, publish):
+        assert "refs/tags/engine-service-v" in steps[i]["if"], names[i]
+    assert "if" not in steps[leg], "the build, checks and smoke run on every trigger, tag or not"
+
+
+def test_the_engine_job_signs_the_txz_with_the_new_bundle_format_only_and_uploads_exactly_the_three_assets() -> None:
+    job = _engine()
+    assert job["env"]["ASSET"] == "nexus-service-windows-x64"
+    steps = job["steps"]
+    sign = _code(steps[_step_index(steps, "Sign release asset")]["run"])
+    assert "cosign sign-blob" in sign and "--new-bundle-format" in sign
+    assert sign.count("--new-bundle-format") == 2, "sign and self-verify both use the format the client verifies"
+    assert ".cosign.bundle" not in sign, "the client needs only the protobuf bundle; nothing else consumes this asset"
+    assert "engine-service-release.yml@$env:GITHUB_REF" in sign
+    assert 'dist\\$env:ASSET.txz"' in sign
+    publish = steps[_step_index(steps, "Upload the engine archive")]["run"]
+    uploaded = re.findall(r'"dist\\\$env:ASSET(\.txz[\w.]*)"', publish)
+    assert [f"nexus-service-windows-x64{u}" for u in uploaded] == list(ENGINE_ASSETS)
+
+
+def test_the_assets_the_engine_job_uploads_are_the_ones_promotion_expects() -> None:
+    text = (REPO / "scripts" / "promote_engine_release.sh").read_text()
+    on_block = text[text.index('if [ "$windows" = "on" ]'):]
+    assert "nexus-service-windows-x64.txz" in on_block and "$p.sha256" in on_block and "$p.sigstore.json" in on_block
+    off_block = text[text.index("for arch in"): text.index('if [ "$windows" = "on" ]')]
+    assert "for arch in linux-amd64 linux-arm64 mac-arm64; do" in off_block
+    assert "windows" not in off_block, "the off set must stay the three platforms"
+
+
+def test_the_engine_job_stamps_the_tag_version_through_the_leg_and_a_dispatch_run_stamps_nothing() -> None:
+    steps = _engine()["steps"]
+    ver = steps[_step_index(steps, "Resolve engine-service version")]
+    assert "refs/tags/engine-service-v" in ver["run"] and "engine-service-v'.Length" in ver["run"]
+    assert ver["env"] == {"REF": "${{ github.ref }}", "REF_NAME": "${{ github.ref_name }}"}, (
+        "the tag reaches the script through env, never interpolated: a tag can hold shell metacharacters"
+    )
+    leg = steps[_step_index(steps, "./.github/actions/windows-engine-leg")]
+    assert leg["with"]["version"] == "${{ steps.ver.outputs.version }}"
+    stamp = _action_steps()[_step_index(_action_steps(), "Stamp release_version")]
+    assert stamp["if"] == "inputs.version != ''"
+    assert stamp["env"]["RELEASE_VERSION"] == "${{ inputs.version }}"
+    assert "$env:RELEASE_VERSION" in stamp["run"] and "${{" not in stamp["run"]
+
+
+def test_the_composite_runs_the_leg_in_the_order_that_makes_each_check_mean_something() -> None:
+    steps = _action_steps()
+    order = [
+        _step_index(steps, "Download pre-generated jOOQ sources"),
+        _step_index(steps, "Stamp release_version"),
+        _step_index(steps, "Load the MSVC build environment"),
+        _step_index(steps, "Build native image"),
+        _step_index(steps, "check_native_embedded_resources.py"),
+        _step_index(steps, "windows_engine_release.py check-deps"),
+        _step_index(steps, "windows_engine_release.py package"),
+        _step_index(steps, "engine_windows_smoke.py"),
+    ]
+    assert order == sorted(order) and len(set(order)) == len(order), order
+    assert steps[order[0]]["with"] == {"name": "jooq-sources", "path": "service/target/generated-sources/jooq"}
+
+
+def test_the_composite_builds_once_without_docker_and_reports_embedded_resources() -> None:
+    steps = _action_steps()
+    build = steps[_step_index(steps, "Build native image")]
+    assert build["shell"] == "cmd", "Maven warnings go to stderr; cmd redirects them without PowerShell turning them into errors"
+    assert build["working-directory"] == "service"
+    assert build["env"]["NATIVE_IMAGE_OPTIONS"] == "-H:+UnlockExperimentalVMOptions -H:+GenerateEmbeddedResourcesFile"
+    run = _code(build["run"])
+    assert len(re.findall(r"-Pnative\b", run)) == 1
+    assert "-Pprebuilt-jooq" in run, "codegen needs Docker (testcontainers); this runner has none"
+    assert not re.search(r"\s-q(?:\s|$)", run), "-q would blind the checker's read of the Maven log"
+    assert "native-build.log" in run
+    assert "exit /b %BUILD_RC%" in run, "the build's status must survive the `type` that prints the log"
+    assert " clean" not in run, "clean would wipe the downloaded jOOQ sources"
+
+
+def test_the_composite_runs_every_check_with_the_windows_platform_and_the_builds_own_outputs() -> None:
+    steps = _action_steps()
+    emb = steps[_step_index(steps, "check_native_embedded_resources.py")]["run"]
+    assert "--platform windows-x64" in emb
+    assert "--report service\\target\\embedded-resources.json" in emb and "native-build.log" in emb
+    deps = steps[_step_index(steps, "windows_engine_release.py check-deps")]["run"]
+    assert "--exe service\\target\\nexus-service.exe" in deps and "--report service\\target\\embedded-resources.json" in deps
+    smoke = steps[_step_index(steps, "engine_windows_smoke.py")]["run"]
+    assert '--engine-archive "$env:OUT_DIR\\nexus-service-windows-x64.txz"' in smoke
+    assert "--pg-archive $env:PG_ARCHIVE" in smoke
+    for step in steps:
+        if step.get("shell") == "pwsh" and "PYTHON" in step.get("run", ""):
+            assert "$LASTEXITCODE" in step["run"], f"{step.get('name')}: a failing script must fail the step"
+
+
+def test_every_script_the_engine_leg_runs_exists() -> None:
+    text = ACTION.read_text() + "\n".join(_run_text(j) for j in (_engine(), _doc(REHEARSAL)["jobs"]["engine"]))
+    scripts = set(re.findall(r"scripts[\\/]([\w]+\.py)", text))
+    assert {"windows_engine_release.py", "engine_windows_smoke.py", "check_native_embedded_resources.py"} <= scripts
+    for name in scripts:
+        assert (REPO / "scripts" / name).is_file(), name
+
+
+# The `if` of promote-release, evaluated for the cases that matter: the claim "with the switch off a tag run
+# behaves exactly as today, with it on a Windows failure keeps the release a draft" is a property of this
+# expression, so it is run, not just read.
+
+
+def _promotes(switch: str, **results: str) -> bool:
+    cond = _doc(RELEASE)["jobs"]["promote-release"]["if"].strip()
+    assert cond.startswith("${{") and cond.endswith("}}")
+    expr = cond[3:-2].strip()
+    expr = expr.replace("!cancelled()", "True")
+    expr = re.sub(r"startsWith\(github\.ref, '[^']*'\)", "True", expr)
+    expr = re.sub(r"needs\.([\w-]+)\.result", lambda m: f"R[{m.group(1)!r}]", expr)
+    expr = expr.replace("vars.NX_WINDOWS_RELEASE_LEGS", "SWITCH").replace("&&", " and ").replace("||", " or ")
+    return bool(eval(expr, {"R": results, "SWITCH": switch}))  # noqa: S307 - the expression is the repo's own
+
+
+BASE = {"create-release": "success", "build-publish": "success", "build-publish-pg-bundle": "success"}
+
+
+def test_promotion_with_the_switch_off_is_what_it_was_before_the_windows_legs_existed() -> None:
+    skipped = {"build-publish-pg-bundle-windows": "skipped", "build-publish-engine-windows": "skipped"}
+    assert _promotes("", **BASE, **skipped) is True
+    assert _promotes("off", **BASE, **skipped) is True
+    assert _promotes("", **{**BASE, "build-publish": "failure"}, **skipped) is False
+    assert _promotes("", **{**BASE, "build-publish-pg-bundle": "failure"}, **skipped) is False
+
+
+def test_promotion_with_the_switch_on_needs_both_windows_legs() -> None:
+    ok = {"build-publish-pg-bundle-windows": "success", "build-publish-engine-windows": "success"}
+    assert _promotes("on", **BASE, **ok) is True
+    for leg in ok:
+        for bad in ("failure", "skipped", "cancelled"):
+            assert _promotes("on", **BASE, **{**ok, leg: bad}) is False, (leg, bad)
+    assert _promotes("on", **{**BASE, "build-publish": "failure"}, **ok) is False
+
+
+# --------------------------------------------------------------------------- #
+# The rehearsal's engine job
+# --------------------------------------------------------------------------- #
+
+
+def test_the_rehearsal_engine_job_runs_the_same_composite_and_ships_nothing() -> None:
+    job = _doc(REHEARSAL)["jobs"]["engine"]
+    assert job["runs-on"] == LABEL
+    assert set(job["needs"]) == {"bundle", "jooq-codegen"}
+    steps = job["steps"]
+    leg = steps[_step_index(steps, "./.github/actions/windows-engine-leg")]
+    assert "version" not in leg["with"], "a rehearsal stamps no release version"
+    release_leg = _engine()["steps"][_step_index(_engine()["steps"], "./.github/actions/windows-engine-leg")]
+    assert leg["uses"] == release_leg["uses"], "the rehearsal must run the release leg's own steps"
+    text = "\n".join(str(s) for s in steps)
+    assert "cosign" not in text and "gh release" not in text and "upload-artifact" not in text
+    assert any("test_windows_engine_release.py" in s.get("run", "") and "test_engine_windows_smoke.py" in s.get("run", "") for s in steps)
+
+
+def test_the_rehearsal_engine_job_gets_its_pg_bundle_and_jooq_sources_from_jobs_in_the_same_run() -> None:
+    doc = _doc(REHEARSAL)
+    bundle_upload = next(s for s in doc["jobs"]["bundle"]["steps"] if str(s.get("uses", "")).startswith("actions/upload-artifact@"))
+    download = next(s for s in doc["jobs"]["engine"]["steps"] if str(s.get("uses", "")).startswith("actions/download-artifact@"))
+    assert bundle_upload["with"]["name"] == download["with"]["name"]
+    assert bundle_upload["with"]["path"].endswith("nexus-pg-windows-x64.txz")
+    codegen = doc["jobs"]["jooq-codegen"]
+    assert codegen["runs-on"] == "ubuntu-latest"
+    assert "github.actor == 'Hellblazer'" in codegen["if"] and SWITCH in codegen["if"], (
+        "with the switch off the rehearsal creates no job at all, the codegen job included"
+    )
+    up = next(s for s in codegen["steps"] if str(s.get("uses", "")).startswith("actions/upload-artifact@"))
+    assert up["with"]["name"] == "jooq-sources"
+
+
+def test_the_rehearsal_is_triggered_by_the_engine_inputs_too() -> None:
+    paths = _triggers(_doc(REHEARSAL))["push"]["paths"]
+    for needed in (
+        "scripts/windows_engine_release.py", "scripts/engine_windows_smoke.py",
+        "scripts/check_native_embedded_resources.py", "service/pom.xml",
+        ".github/actions/windows-engine-leg/**", "tests/test_windows_engine_release.py",
+        "tests/test_engine_windows_smoke.py",
+    ):
+        assert needed in paths, needed
+
+
+def test_every_file_the_rehearsal_triggers_on_exists_or_is_a_glob_over_something_real() -> None:
+    for path in _triggers(_doc(REHEARSAL))["push"]["paths"]:
+        if "*" in path:
+            assert list(REPO.glob(path)), f"{path} matches nothing: a dead trigger"
+        else:
+            assert (REPO / path).exists(), path
