@@ -209,6 +209,104 @@ class ElectionBusyError(ServiceRegistryError):
     """
 
 
+class ServiceIdentityError(ServiceRegistryError):
+    """The service identity could not be derived (RDR-224 Gap 3, nexus-f9bgu.16).
+
+    Raised, never papered over with a fallback: two processes of one user that
+    disagreed about their identity would each publish their own lease and the
+    election would no longer converge on one owner per scope.
+    """
+
+
+#: A Windows user SID in string form: ``S-1-<authority>(-<subauthority>)+``.
+#: Digits, ``S`` and ``-`` only, so it is safe as a file name, lock name and
+#: endpoint-name suffix without escaping.
+_SID_PATTERN = re.compile(r"S-1-\d+(-\d+)+")
+
+
+def _windows_user_sid() -> str:
+    """The current process token's user SID as a string (``S-1-5-21-...``).
+
+    Windows only; ctypes against advapi32. Any other platform raises OSError.
+    """
+    if os.name != "nt":
+        raise OSError("the Windows user SID is only readable on Windows")
+    import ctypes  # noqa: PLC0415 — Windows-only branch
+    from ctypes import wintypes  # noqa: PLC0415 — Windows-only branch
+
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.LocalFree.argtypes = [ctypes.c_void_p]
+    kernel32.LocalFree.restype = ctypes.c_void_p
+    advapi32.OpenProcessToken.argtypes = [wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE)]
+    advapi32.OpenProcessToken.restype = wintypes.BOOL
+    advapi32.GetTokenInformation.argtypes = [
+        wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD),
+    ]
+    advapi32.GetTokenInformation.restype = wintypes.BOOL
+    advapi32.ConvertSidToStringSidW.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)]
+    advapi32.ConvertSidToStringSidW.restype = wintypes.BOOL
+
+    token = wintypes.HANDLE()
+    if not advapi32.OpenProcessToken(kernel32.GetCurrentProcess(), 0x0008, ctypes.byref(token)):  # TOKEN_QUERY
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        needed = wintypes.DWORD()
+        # TokenUser = 1. The sizing call fails by design (ERROR_INSUFFICIENT_BUFFER) and fills `needed`.
+        advapi32.GetTokenInformation(token, 1, None, 0, ctypes.byref(needed))
+        if needed.value == 0:
+            raise ctypes.WinError(ctypes.get_last_error())
+        buf = ctypes.create_string_buffer(needed.value)
+        if not advapi32.GetTokenInformation(token, 1, buf, needed, ctypes.byref(needed)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        # TOKEN_USER starts with SID_AND_ATTRIBUTES { PSID Sid; DWORD Attributes }: the first pointer is the SID.
+        psid = ctypes.c_void_p.from_buffer(buf).value
+        string_sid = ctypes.c_void_p()
+        if not advapi32.ConvertSidToStringSidW(psid, ctypes.byref(string_sid)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        try:
+            return ctypes.wstring_at(string_sid.value)
+        finally:
+            kernel32.LocalFree(string_sid)
+    finally:
+        kernel32.CloseHandle(token)
+
+
+def service_identity(
+    *,
+    platform: str | None = None,
+    getuid: Callable[[], int] | None = None,
+    sid_lookup: Callable[[], str] | None = None,
+) -> str:
+    """THE scope key for every local-service lease, lock and endpoint name.
+
+    POSIX: ``str(os.getuid())``, exactly as every caller computed it before, so
+    existing ``storage_service_addr.<uid>`` files stay where they are. Windows:
+    the user's SID, because it is stable across sessions and renames of the
+    account, is not settable through an environment variable the way
+    ``USERNAME`` is, and its characters (``S``, digits, ``-``) are safe in file,
+    lock and endpoint names where a login name (spaces, case-folding on NTFS) is
+    not. Anything that is not a SID there raises :class:`ServiceIdentityError`.
+
+    ``platform`` (default: ``win32`` when ``os.name == "nt"``), ``getuid`` and ``sid_lookup`` are
+    seams so both branches run on every host; production callers pass nothing.
+    Every ``os.getuid()`` outside this function is a defect the lint
+    ``tests/test_service_identity_lint.py`` fails on.
+    """
+    on_windows = (platform == "win32") if platform is not None else (os.name == "nt")
+    if not on_windows:
+        return str(getuid() if getuid is not None else os.getuid())
+    try:
+        sid = (sid_lookup if sid_lookup is not None else _windows_user_sid)()
+    except (OSError, AttributeError, ValueError) as exc:
+        raise ServiceIdentityError(f"cannot read the Windows user SID: {exc}") from exc
+    if not _SID_PATTERN.fullmatch(sid):
+        raise ServiceIdentityError(f"the Windows user identity is not a SID: {sid!r}")
+    return sid
+
+
 #: Fraction of the lease TTL a heartbeat may spend waiting for the election
 #: flock (nexus-59bah). One third: a tick that spends its whole budget still
 #: returns with two thirds of the TTL left, so a transient holder costs a

@@ -1628,12 +1628,12 @@ def _holder_evidence(config_dir: Path) -> str:
     bits: list[str] = []
     try:
         from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred, CLI startup cost
-        from nexus.daemon.service_registry import ServiceRegistry  # noqa: PLC0415 — deferred, CLI startup cost
+        from nexus.daemon.service_registry import ServiceRegistry, service_identity  # noqa: PLC0415 — deferred, CLI startup cost
 
         registry = ServiceRegistry(
             dir=config_dir or nexus_config_dir(), tier="storage_service",
         )
-        record = registry.discover(str(os.getuid()))
+        record = registry.discover(service_identity())
         if record is None:
             bits.append("lease=none")
         else:

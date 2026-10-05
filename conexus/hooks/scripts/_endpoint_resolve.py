@@ -27,7 +27,7 @@ matching, and the full base-URL precedence mirroring
      local supervisor lease when PORT is set but HOST is not -- nexus-aginu,
      matching ``resolve_service_config``'s per-field lease merge).
   4. The local ``ServiceRegistry`` supervisor lease
-     (``storage_service_addr.<uid>``).
+     (``storage_service_addr.<identity>``).
 
 WHAT THIS MODULE DOES NOT OWN: which CREDENTIAL a caller presents once the
 base URL is known. Callers differ here BY DESIGN, not by drift:
@@ -43,12 +43,13 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import stat
 import sys
 import time
 import urllib.parse
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 if sys.version_info < (3, 12):
     sys.stderr.write(
@@ -89,8 +90,89 @@ def default_config_dir() -> Path:
     return Path.home() / ".config" / "nexus"
 
 
+class ServiceIdentityError(RuntimeError):
+    """Mirror of ``nexus.daemon.service_registry.ServiceIdentityError``."""
+
+
+#: Mirror of ``service_registry._SID_PATTERN`` (a parity test compares the two).
+_SID_PATTERN = re.compile(r"S-1-\d+(-\d+)+")
+
+
+def _windows_user_sid() -> str:
+    """The current process token's user SID as a string (``S-1-5-21-...``).
+
+    Windows only; ctypes against advapi32. Any other platform raises OSError.
+    """
+    if os.name != "nt":
+        raise OSError("the Windows user SID is only readable on Windows")
+    import ctypes  # noqa: PLC0415 — Windows-only branch
+    from ctypes import wintypes  # noqa: PLC0415 — Windows-only branch
+
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.LocalFree.argtypes = [ctypes.c_void_p]
+    kernel32.LocalFree.restype = ctypes.c_void_p
+    advapi32.OpenProcessToken.argtypes = [wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE)]
+    advapi32.OpenProcessToken.restype = wintypes.BOOL
+    advapi32.GetTokenInformation.argtypes = [
+        wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD),
+    ]
+    advapi32.GetTokenInformation.restype = wintypes.BOOL
+    advapi32.ConvertSidToStringSidW.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)]
+    advapi32.ConvertSidToStringSidW.restype = wintypes.BOOL
+
+    token = wintypes.HANDLE()
+    if not advapi32.OpenProcessToken(kernel32.GetCurrentProcess(), 0x0008, ctypes.byref(token)):  # TOKEN_QUERY
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        needed = wintypes.DWORD()
+        # TokenUser = 1. The sizing call fails by design (ERROR_INSUFFICIENT_BUFFER) and fills `needed`.
+        advapi32.GetTokenInformation(token, 1, None, 0, ctypes.byref(needed))
+        if needed.value == 0:
+            raise ctypes.WinError(ctypes.get_last_error())
+        buf = ctypes.create_string_buffer(needed.value)
+        if not advapi32.GetTokenInformation(token, 1, buf, needed, ctypes.byref(needed)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        # TOKEN_USER starts with SID_AND_ATTRIBUTES { PSID Sid; DWORD Attributes }: the first pointer is the SID.
+        psid = ctypes.c_void_p.from_buffer(buf).value
+        string_sid = ctypes.c_void_p()
+        if not advapi32.ConvertSidToStringSidW(psid, ctypes.byref(string_sid)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        try:
+            return ctypes.wstring_at(string_sid.value)
+        finally:
+            kernel32.LocalFree(string_sid)
+    finally:
+        kernel32.CloseHandle(token)
+
+
+def service_identity(
+    *,
+    platform: str | None = None,
+    getuid: Callable[[], int] | None = None,
+    sid_lookup: Callable[[], str] | None = None,
+) -> str:
+    """Stdlib mirror of ``nexus.daemon.service_registry.service_identity``:
+    ``str(os.getuid())`` on POSIX, the user SID on Windows. This file must not
+    import ``nexus``, so the derivation is restated here and a parity test
+    (``tests/daemon/test_service_identity.py``) pins the two together.
+    """
+    on_windows = (platform == "win32") if platform is not None else (os.name == "nt")
+    if not on_windows:
+        return str(getuid() if getuid is not None else os.getuid())
+    try:
+        sid = (sid_lookup if sid_lookup is not None else _windows_user_sid)()
+    except (OSError, AttributeError, ValueError) as exc:
+        raise ServiceIdentityError(f"cannot read the Windows user SID: {exc}") from exc
+    if not _SID_PATTERN.fullmatch(sid):
+        raise ServiceIdentityError(f"the Windows user identity is not a SID: {sid!r}")
+    return sid
+
+
 def storage_service_lease_path(config_dir: Path) -> Path:
-    return config_dir / f"{STORAGE_SERVICE_TIER}_addr.{os.getuid()}"
+    return config_dir / f"{STORAGE_SERVICE_TIER}_addr.{service_identity()}"
 
 
 def read_storage_service_lease(config_dir: Path) -> dict[str, Any] | None:

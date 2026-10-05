@@ -519,6 +519,7 @@ def ensure_storage_supervisor(config_dir: Path):
     from nexus.daemon.service_registry import (  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
         ServiceRegistry,
         reclaim_lease_if_dead_owner,
+        service_identity,
     )
     from nexus.daemon import storage_service_daemon as _ssd  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
     from nexus.db import service_endpoint as _service_endpoint  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
@@ -526,7 +527,7 @@ def ensure_storage_supervisor(config_dir: Path):
     StorageServiceStartError = _ssd.StorageServiceStartError
 
     registry = ServiceRegistry(dir=config_dir, tier="storage_service")
-    scope = str(os.getuid())
+    scope = service_identity()
     existing = _service_endpoint.discover_storage_service_lease(registry, scope)
     if existing is not None:
         # RDR-175 heal-on-next-use hardening, generalized into the shared
@@ -594,13 +595,10 @@ def ensure_storage_supervisor(config_dir: Path):
         # reading its pid from the lease registry, not by this process --
         # the same cross-process shape as the mineru spawn in
         # _mineru_spawn.py, which a Windows job-object handle held only in
-        # THIS process's memory cannot reach; and (2) the supervisor class
-        # itself (``storage_service_daemon.StorageServiceSupervisor``) calls
-        # ``os.getuid()`` unconditionally at construction and does not run
-        # on native Windows at all (its own module docstring says so) --
-        # RDR-218's Windows story is a WSL2 appliance, a real POSIX
-        # environment, so this spawn site is dead code from a native-
-        # Windows-client perspective regardless of containment.
+        # THIS process's memory cannot reach; and (2) the supervisor's
+        # identity is portable now (``service_identity()``, nexus-f9bgu.16)
+        # but its spawn flags are still POSIX-shaped: the Windows spawn and
+        # stop channel are RDR-224 P3.2b, not this site.
         _popen(
             argv,
             stdin=subprocess.DEVNULL,  # detached daemon: never inherit a TTY stdin (avoids read-block / dangling fd)
@@ -1215,12 +1213,11 @@ def service_status_cmd(config_dir_str: str | None, as_json: bool) -> None:
     Exits non-zero when no live lease is found.
     """
     import json as _json  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
-    from nexus.daemon.service_registry import ServiceRegistry  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
-    import os as _os  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
+    from nexus.daemon.service_registry import ServiceRegistry, service_identity  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
 
     config_dir = Path(config_dir_str) if config_dir_str else _config.nexus_config_dir()
     registry = ServiceRegistry(dir=config_dir, tier="storage_service")
-    scope = str(_os.getuid())
+    scope = service_identity()
     record = registry.discover(scope)
 
     if record is None:
@@ -1230,7 +1227,7 @@ def service_status_cmd(config_dir_str: str | None, as_json: bool) -> None:
             click.echo(_json.dumps({
                 "status": "no_lease",
                 "running": False,
-                "addr_file": str(config_dir / f"storage_service_addr.{_os.getuid()}"),
+                "addr_file": str(config_dir / f"storage_service_addr.{scope}"),
                 "detail": "No storage service lease found; this install either "
                           "runs against a managed endpoint or the local service "
                           "is not running (nx daemon service start).",
@@ -1257,10 +1254,9 @@ def service_status_cmd(config_dir_str: str | None, as_json: bool) -> None:
     # it configured" — supervisor, native service (/health + /version), PG cluster,
     # embedding mode, pgvector version, and the paths an operator would
     # otherwise assemble from ps aux + psql + curl + the addr file by hand.
-    import os as _os  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
 
     data["supervisor_pid"] = record.payload.get("supervisor_pid")
-    data["addr_file"] = str(config_dir / f"storage_service_addr.{_os.getuid()}")
+    data["addr_file"] = str(config_dir / f"storage_service_addr.{scope}")
     host = ep.get("host", "127.0.0.1")
     port = int(ep.get("port") or 0)
     data["health"] = _probe_health(host, port)

@@ -401,18 +401,17 @@ def _cycle_storage_service_to_current(
     patching local imports deep in try blocks). Default values reproduce
     production behaviour exactly.
     """
-    import os  # noqa: PLC0415 — stdlib import kept branch-local
     import subprocess  # noqa: PLC0415 — stdlib import kept branch-local
 
     try:
         from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
-        from nexus.daemon.service_registry import ServiceRegistry  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+        from nexus.daemon.service_registry import ServiceRegistry, service_identity  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
         # Discover via the storage_service tier (matches what the supervisor
         # publishes and health._resolve_service_endpoint reads).
         if _discover_fn is None:
             registry = ServiceRegistry(dir=nexus_config_dir(), tier="storage_service")
-            scope = str(os.getuid())
+            scope = service_identity()
             live = registry.discover(scope)
         else:
             live = _discover_fn()

@@ -21,12 +21,12 @@ logic lives in the shared primitive, not here. This module:
    HealthHandler returns ``{"status":"ok","db":"up"}`` or ``{"status":"error",
    "db":"down"}`` with a 503 status).
 4. Publishes a lease via ``ServiceRegistry(tier="storage_service")`` under
-   scope=str(os.getuid()) ONLY after a 200 response. The endpoint carries
+   scope=service_identity() ONLY after a 200 response. The endpoint carries
    ``{"host": ..., "port": ..., "token": ...}``. The token is also published
    so clients can re-read it after an auto-restart (see HIGH-3 fix note).
    This matches what ``health._resolve_service_endpoint`` reads: tier=
-   "storage_service", scope=str(os.getuid()) → addr file
-   ``storage_service_addr.<uid>``.
+   "storage_service", scope=service_identity() → addr file
+   ``storage_service_addr.<identity>``.
 5. Heartbeats the lease while: (a) service pid is alive, (b) ``/health`` returns
    200, (c) Postgres TCP-reachable. Delegates to ``supervisor.heartbeat_tick()``.
    When PG dies independently (service still alive), the run loop calls
@@ -106,6 +106,7 @@ from nexus.daemon.service_registry import (
     pid_alive,
     pid_running,
     reclaim_lease_if_dead_owner,
+    service_identity,
     ttl_for_tier,
 )
 
@@ -1049,7 +1050,7 @@ class StorageServiceSupervisor:
         self._engine_liveness_scan = (
             engine_liveness_scan or _default_engine_liveness_scan
         )
-        self._scope = str(os.getuid())
+        self._scope = service_identity()
         self._proc: subprocess.Popen[bytes] | None = None
         # nexus-8vp0i: the byte offset into the engine log at the moment THIS
         # process was spawned, and the log path itself — captured in
@@ -1374,13 +1375,12 @@ class StorageServiceSupervisor:
         except OSError:
             self._log_offset_at_spawn = 0
         try:
-            # nexus-6y4e0 surveyed this site and left it unwired: this
-            # class's own __init__ calls os.getuid() unconditionally (see
-            # self._scope above), so StorageServiceSupervisor cannot even
-            # be constructed on native Windows, let alone reach this spawn
-            # -- RDR-218's Windows story runs the storage service inside a
-            # WSL2 appliance (a real POSIX environment), never natively.
-            # Windows job-object containment is therefore moot here.
+            # nexus-6y4e0 surveyed this site and left it unwired: the
+            # supervisor's identity (self._scope above) is now portable
+            # (service_identity(), nexus-f9bgu.16), but this spawn is still
+            # POSIX-shaped (start_new_session, preexec_fn); the Windows
+            # spawn flags and Job Object backstop belong to the Windows
+            # stop-channel work (RDR-224 P3.2b), not here.
             proc = _popen(
                 argv,
                 env=env,
@@ -3086,7 +3086,7 @@ def stop_storage_service(*, config_dir: Path | None = None) -> StopOutcome:
         config_dir = nexus_config_dir()
 
     registry = ServiceRegistry(dir=config_dir, tier=_REGISTRY_TIER)
-    scope = str(os.getuid())
+    scope = service_identity()
     # Freshness gate: discover() reaps stale leases; non-None means live.
     record = registry.discover(scope)
     # Independent of what gets signalled below: did discover() find a

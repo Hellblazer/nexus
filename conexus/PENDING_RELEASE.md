@@ -46,6 +46,7 @@ stale -- and stays exactly where it is until moved back deliberately.
 ONE PATH PER BULLET, on the bullet's FIRST line.
 
 - hydration cap wording (nexus-rf87b): `conexus/skills/nexus/reference.md` calls the `store_get_many` cap the "300-record read cap (MAX_QUERY_RESULTS)" rather than a ChromaDB one, matching SKILL.md. Text only.
+- service identity (nexus-f9bgu.16): `conexus/hooks/scripts/_endpoint_resolve.py` derives the lease file name from a stdlib mirror of `service_identity()` (uid on POSIX, unchanged; the user SID on Windows) instead of a bare `os.getuid()`. No behaviour change on POSIX.
 
 
 ## Deferred to the next client release

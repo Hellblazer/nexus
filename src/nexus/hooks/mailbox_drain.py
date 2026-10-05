@@ -1127,9 +1127,10 @@ def _read_local_supervisor_token(config_dir: Path) -> str:
     equivalent and must not be asked to grow one; this caller's extra bar
     is additive to it, not a replacement for it.
     """
-    from nexus.daemon.service_registry import ServiceRegistry  # noqa: PLC0415 — deferred, same reason as above
+    from nexus.daemon.service_registry import ServiceRegistry, service_identity  # noqa: PLC0415 — deferred, same reason as above
 
-    path = config_dir / f"storage_service_addr.{os.getuid()}"
+    scope = service_identity()
+    path = config_dir / f"storage_service_addr.{scope}"
     try:
         st_result = path.stat()
     except OSError as exc:
@@ -1143,7 +1144,7 @@ def _read_local_supervisor_token(config_dir: Path) -> str:
             f"(mode {oct(mode)}); refusing to use its token as a bearer"
         )
     registry = ServiceRegistry(dir=config_dir, tier="storage_service")
-    record = registry.discover(str(os.getuid()))
+    record = registry.discover(scope)
     if record is None:
         raise _Skip(f"local supervisor lease {path} is not live or is stale")
     token = str(record.endpoint.get("token", "") or "")
@@ -1188,12 +1189,12 @@ def _resolve_endpoint(config_dir: Path) -> tuple[str, str, bool]:
     token = os.environ.get("NX_SERVICE_TOKEN", "").strip()
     if not token:
         token = persisted_credentials(config_dir).get("service_token", "").strip()
-    if not token and hasattr(os, "getuid"):
+    if not token:
         # Through the accessor, never off the raw lease record: it
         # refuses a lease file that is not owner-only, because the token it
         # carries authorizes real engine writes and a group- or world-readable
         # lease means another local account could have read it too. The lease
-        # filename carries the POSIX uid, so there is none to read on Windows.
+        # filename carries the service identity (uid on POSIX, SID on Windows).
         try:
             token = _read_local_supervisor_token(config_dir).strip()
         except _Skip:

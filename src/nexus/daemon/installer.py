@@ -1115,17 +1115,15 @@ def _discover_service_lease() -> object | None:
     lifecycle gate (``tests/daemon/test_lifecycle_gate.py``) exists to stop.
     """
     try:
-        import os  # noqa: PLC0415 — deferred, branch-local
-
         from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred
-        from nexus.daemon.service_registry import ServiceRegistry  # noqa: PLC0415 — deferred
+        from nexus.daemon.service_registry import ServiceRegistry, service_identity  # noqa: PLC0415 — deferred
 
         # Same construction service_endpoint.discover_lease uses (tier
-        # "storage_service", scope = uid) — going through the registry rather
+        # "storage_service", scope = service_identity()) — going through the registry rather
         # than through discover_lease() because that helper returns only
         # (base_url, token) and the operator line wants supervisor_pid.
         registry = ServiceRegistry(dir=nexus_config_dir(), tier="storage_service")
-        return registry.discover(str(os.getuid()))
+        return registry.discover(service_identity())
     except Exception:  # noqa: BLE001 — a probe is never a verdict
         return None
 
