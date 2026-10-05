@@ -113,9 +113,11 @@ def test_collection_reindex_survives_the_delete_hop(t2_service_env, tmp_path: Pa
 
 def _quarantined_ids(db, sibling: str) -> set[str]:
     """Chashes stored in *sibling*, live or not; empty when it was never registered."""
+    from nexus.errors import CollectionNotFoundError
+
     try:
         return set(db.get_collection(sibling).get_all_metadata(include_non_live=True)["ids"])
-    except Exception:  # noqa: BLE001 — an unregistered sibling holds nothing
+    except CollectionNotFoundError:  # an unregistered sibling holds nothing; anything else is a real failure
         return set()
 
 

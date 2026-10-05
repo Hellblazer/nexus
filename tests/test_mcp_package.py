@@ -251,16 +251,21 @@ def test_runner_dispatcher_resolves_bare_operator_verb_to_core_function(
 
     calls: list[str] = []
 
-    async def _stub(**_kw):
-        calls.append(verb)
-        return {"stub_for": f"operator_{verb}"}
+    def _stub_for(name: str):
+        async def _stub(**_kw):
+            calls.append(name)
+            return {"stub_for": name}
+        return _stub
 
     monkeypatch.setenv("NX_OPERATOR_MODEL_TIERING", "0")
-    monkeypatch.setattr(core, f"operator_{verb}", _stub)
+    # Stub all ten, so a map regression that sends the verb to the wrong operator
+    # fails on the recorded name instead of spawning a real operator.
+    for other in _OPERATOR_VERBS:
+        monkeypatch.setattr(core, f"operator_{other}", _stub_for(f"operator_{other}"))
 
     out = asyncio.run(_default_dispatcher(verb, {}))
 
-    assert calls == [verb]
+    assert calls == [f"operator_{verb}"]
     assert out == {"stub_for": f"operator_{verb}"}
 
 
