@@ -441,7 +441,9 @@ runs, release-shaped `-Ob` native exe; nothing here ran on a workflow runner):
   killed it, both gone in 2.81 s, `unclean_stop` logged.
 - **Verified** — An elevated session's `initdb` runs `postgres` with a
   restricted token (Administrators deny-only). `Path.mkdir(mode=0o700)` and
-  Python 3.12+'s `tarfile` directory members create an owner-only ACL (SYSTEM,
+  Python 3.12+'s `tarfile` directory members create an owner-only ACL (CPython
+  3.12.4 and later; earlier 3.12 releases ignore the mode on Windows, and
+  `requires-python` is `>=3.12`, so nothing pins the minimum) (SYSTEM,
   Administrators and the owner), so a bundle extracted under such a directory,
   or a data directory created in one, makes `initdb` die `0xC0000135` with no
   message. It needs an explicit inheritable ACE for the user's SID on both the
@@ -534,14 +536,29 @@ runs, release-shaped `-Ob` native exe; nothing here ran on a workflow runner):
   changeset exits but leaves the changelog lock held (Failure Modes). The probe
   driver is in the repository (`scripts/engine_windows_stop_probe.py`), and the
   release-leg smoke asserts the serving-phase stop (Phase 1 Step 2).
-- [x] A same-session CLI can stop a supervisor, and through it an engine, with
-  `CTRL_BREAK` under the topology in § Technical Design — **Status**: Verified
-  with the real supervisor and engine — **Method**: Spike with stand-ins (T2
-  `224-research-20`, `-21`, `-22`), then the real client, supervisor and engine
-  (T2 `224-f9bgu17-round1`, `224-f9bgu17round2`). Not covered: a stop from a
-  visible-console `cmd` window (the stop CLI ran under a hidden console, which is
-  also the logon task's shape), a real engine that ignores the break (stand-in
-  only), and a logon trigger that actually fires.
+- [ ] A same-session CLI can stop a supervisor, and through it an engine, with
+  `CTRL_BREAK` under the topology in § Technical Design — **Status**: Partially
+  verified — **Method**: Spike with stand-ins (T2 `224-research-20`, `-21`,
+  `-22`), then the real client, supervisor and engine (T2 `224-f9bgu17-round1`,
+  `224-f9bgu17round2`). Verified: the plain stop and `--with-pg` from a session-1
+  launcher, the cross-session refusal, and a stand-in engine that ignores the
+  break. Not covered, so the box stays open:
+  (a) a stop from a visible-console `cmd.exe` or Windows Terminal window. Round 2
+  ran the stop CLI under `pythonw` with a `CREATE_NO_WINDOW` console and stdout
+  to files, so `AttachConsole(ATTACH_PARENT_PROCESS)` had no console parent to
+  return to, and a dead standard handle would not have shown. The re-attach to a
+  real parent console was shown only in the ssh conpty spike. Whether the CLI can
+  still print after the stop, and whether the REFUSED text reaches stderr, is
+  unmeasured. The result of that measurement is recorded here when it lands;
+  (b) a real engine that ignores the break (stand-in only);
+  (c) a logon trigger that actually fires;
+  (d) a same-session denial (an elevated target stopped from a non-elevated
+  shell, or another user's service);
+  (e) a lease pid that is not the console group's root:
+  `GenerateConsoleCtrlEvent` takes a process group id. The measured stop worked
+  and the record does not say whether the break landed through the lease pid or
+  through the process-table sweep, so a launcher layer other than the venv
+  trampoline is untested.
 - [x] A stop during ONNX Runtime initialisation, sent as `CTRL_BREAK`, exits
   without the o5xyx crash — **Status**: Verified on both branches of the gate,
   with caveats — **Method**: probes on the native Windows exe. Deferral branch:
@@ -667,7 +684,11 @@ through it, and it exists from process start, which an HTTP request does not
   `AttachConsole` with access denied, and Sam ruled that this fails loud: the CLI
   prints REFUSED, names the owning session and the remedy ("run this from session
   N"), exits 1, and signals, kills and relinquishes nothing (T2 `224-decisions`,
-  `224-f9bgu17round2`).
+  `224-f9bgu17round2`). The same refusal covers a same-session denial (an
+  elevated target stopped from a non-elevated shell, or another user's service):
+  the text then names no session and says to run the stop as the account, and with
+  the elevation, that started the service (`_refused_stop_lines`). That case is
+  unmeasured.
 
 No new HTTP route is added to the engine. The draft's loopback shutdown request
 is removed, so no operator gate (`RequestContext.isOperator`,
@@ -712,7 +733,7 @@ suite, per the daemon-lifecycle hot rule), never one tier's copy:
 | `os.kill(pid, 0)` liveness | `OpenProcess` + exit-code query (ctypes), or psutil if added as a Windows-only dependency |
 | SIGTERM / `killpg` stop | `CTRL_BREAK` to the supervisor, and `CTRL_BREAK` from the supervisor to the engine (stop channel above, as built); the engine-only Job Object kill as the backstop; PostgreSQL is left running by default, as on POSIX (`commands/daemon.py:909-915`), and stopped with `pg_ctl stop -m fast` under `--with-pg` |
 | `ps` / `/proc` identity | process creation time + image path via the Win32 API (done, through one stdlib-only core at every `ps` and `/proc` site) |
-| launchd / systemd autostart | a per-user Task Scheduler task at logon, run only while the user is logged on (`/IT`, the configuration spiked, T2 `224-research-21`), with restart on failure, a hidden window and no execution time limit; the last three settings are not read from any source (inferred, not read, T2 `224-research-32`). Measured at implementation (nexus-f9bgu.23, 2026-10-05, T2 `224-f9bgu23-autostart`): the task's restart-on-failure fires only when the task's program fails to launch, never on a non-zero exit (exit codes 1, 3, 255, 0x80070005, 0xC0000005 and 0xFFFFFFFF did not restart), so the task runs a launcher that stays as the task's process and respawns the supervisor 30 s after any non-zero exit; the window is hidden by pythonw and CREATE_NO_WINDOW, since the task's Hidden flag only hides it in the Task Scheduler UI |
+| launchd / systemd autostart | a per-user Task Scheduler task at logon, run only while the user is logged on (`/IT`, the configuration spiked, T2 `224-research-21`), with restart on failure and no execution time limit, and the task's `Hidden` flag left false; the settings are not read from any source (inferred, not read, T2 `224-research-32`). Measured at implementation (nexus-f9bgu.23, 2026-10-05, T2 `224-f9bgu23-autostart`): the task's restart-on-failure fires only when the task's program fails to launch, never on a non-zero exit (exit codes 1, 3, 255, 0x80070005, 0xC0000005 and 0xFFFFFFFF did not restart), so the task runs a launcher that stays as the task's process and respawns the supervisor 30 s after any non-zero exit; no window opens because the launcher runs under `pythonw` and spawns with `CREATE_NO_WINDOW`; the task's `Hidden` flag only hides the task in the Task Scheduler UI, and the XML sets it false |
 | `.exe`-less names, `LD_LIBRARY_PATH` | platform-derived executable names (`PgBinaries.from_dir`, `pg_provision.py:193-198`); no library-path injection (`_bundle_lib_env`, `:462`) |
 | `pg_ctl start` through `run_bounded`: piped output, per-call Job Object that closes when `pg_ctl` returns | `pg_ctl` started detached: a plain `Popen` that never goes through `run_bounded` or `contain`, so no per-call Job Object, with `CREATE_NEW_PROCESS_GROUP`, stdin from `DEVNULL` and output to `pgdata/pg_ctl.out`; `PgStartError` names `pg.log` and `pg_ctl.out` with credential-scrubbed tails. The postmaster's own process group is what keeps a plain stop from reaching it: a plain stop left it serving across two stops (T2 `224-f9bgu18-windows-pg-start`, `224-f9bgu17round2`) |
 | cluster superuser from `USER` / `LOGNAME` | derived from the same SID as the scope: `nx_` plus the first 16 hex characters of the SHA-256 of the SID string (`windows_superuser_name`; `bootstrap_superuser` uses `service_identity()` on Windows), so two accounts on one machine get distinct superusers |
@@ -1034,7 +1055,8 @@ the supervisor and the engine from a same-session sender (T2 `224-research-20`,
   the grace, and a supervisor that outlasts its own grace is hard-killed by the
   stopper, which then waits for it to leave the process table. The event is
   logged (`unclean_stop`) so an unclean stop is visible, not silent.
-- A stop is sent from another Windows session: `AttachConsole` fails with access
+- A stop is sent from another Windows session, or is denied for another reason
+  (an elevation or user mismatch; unmeasured): `AttachConsole` fails with access
   denied (T2 `224-research-20`) and the CLI REFUSES: it names the owning session
   and the remedy, exits 1, and signals and kills nothing (T2
   `224-f9bgu17round2`). A refused upgrade or install behaves the same way.
@@ -1298,15 +1320,23 @@ is published, so that fetch has not run end to end on Windows.
 #### Step 2: Supervisor port
 
 The table in § Technical Design, in the shared primitive, with the conformance
-suite extended to Windows. As built, every item below landed on develop: the 21
-sites call `service_identity()` and a lint rejects any other `os.getuid()`; the
+suite extended to Windows. As built, every item below landed on develop: the 22
+sites (see the list) call `service_identity()` and a lint rejects any other `os.getuid()`; the
 conformance properties passed on real Windows (74 passed, 2 skipped, 2 xfailed); a
 junit floor in the rehearsal job keeps a vacuous run from passing. Two siblings
 found along the way were fixed with them: the session sweep's orphan-tracker kill
 and the plugin's lease read (T2 `224-f9bgu19-conformance`,
-`224-f9bgu44-windows-tests`). The port covers:
+`224-f9bgu44-windows-tests`). The orphan-tracker fix is unreachable from the
+production sweep on Windows (`sweep_orphan_resource_trackers` returns 0 before it
+lists anything, T2 `224-f9bgu44-windows-tests` item 6); it serves direct callers
+only. The port covers:
 
-- the 21 `os.getuid()` code sites in 11 files: `health.py:3546`,
+- the `os.getuid()` code sites: 21 were listed at planning and implementation
+  found a 22nd (`hooks/mailbox_drain.py:1191`, hidden behind a `getattr`). The
+  lint also keeps six raw `os.getuid()` sites exempt, none reachable on Windows
+  (five `launchctl` domain strings in `installer.py` and one `pwd` lookup in
+  `db/onnx_model_root.py`), besides the helper's own two. The planning list, in 11
+  files: `health.py:3546`,
   `upgrade_finish.py:1638`, `daemon/installer.py:202`, `:211`, `:507`, `:570`,
   `:603`, `:1128`, `daemon/storage_service_daemon.py:1052`, `:3089`,
   `hooks/mailbox_drain.py:1132`, `:1146`, `db/onnx_model_root.py:48` (already
@@ -1326,13 +1356,31 @@ and the plugin's lease read (T2 `224-f9bgu19-conformance`,
   have exited, and the lease file is replaced under concurrent readers;
 - an upgrade that stops the service before it replaces the installed executable
   or the PostgreSQL bundle directory (`binary_install.py:574-576`,
-  `pg_bundle.py:235-244`).
+  `pg_bundle.py:235-244`). Run against a stand-in executable only (T2
+  `224-f9bgu20-upgrade-stop`): the real bundle swap with a live `postgres.exe`
+  was not run (Gap 3), and a placement that succeeds sweeps the `.nx_old_*` keep
+  directories earlier blocked upgrades left behind;
+- the aspect-worker daemon, which the Phase 3 critique found nobody had ported
+  (T2 `224-review-p3-critique` S4, `224-review-p3-fixes-b`). The store path starts
+  it, so the Phase 5 round trip spawns it. It is spawned with the supervisor's
+  flags (its own process group, no console window), handles `SIGBREAK`, waits in
+  ticks of 1 s so the handler runs, and `nx daemon restart-stale` stops it through
+  `request_graceful_stop` instead of `os.kill(SIGTERM)`, which is
+  `TerminateProcess` on Windows and skips its drain. `nx daemon service stop` does
+  not stop it, on Windows as on POSIX (the worker belongs to the store path, not
+  to the service), so assertion 4 counts only the supervisor, the engine and
+  PostgreSQL. Measured on qwentescence from a session-1 launcher with a stand-in
+  worker and queue: with the new flags the worker's console window handle is 0,
+  where the pre-fix spawn gets a visible one; `restart-stale` stopped it in 0.54 s
+  with the drain run and the lease gone; from another session the stop was
+  refused and the worker kept running.
 
 #### Step 3: Autostart
 
 A Task Scheduler implementation in `installer.py` and `windows_autostart.py`,
-with the task settings in § Technical Design: logged-on user only, a hidden
-window, no execution time limit. The task's restart-on-failure does not restart a
+with the task settings in § Technical Design: logged-on user only, no execution
+time limit, `Hidden` left false (no window opens because the launcher runs under
+`pythonw` and spawns with `CREATE_NO_WINDOW`, not because of the flag). The task's restart-on-failure does not restart a
 supervisor that exits non-zero (Key Discoveries), so the task's process is a
 launcher that respawns the supervisor 30 s after any non-zero exit and ends on
 exit 0. Verified by hand on qwentescence with a stand-in supervisor: install,
@@ -1665,3 +1713,14 @@ Right-sized for an Architecture record that replaces an accepted direction.
   `check_engine_release_floor.py --require-windows`). Still open: S3 (clean-guest
   candidate run, bead nexus-f9bgu.45) and S6 (the release workflow's Windows jobs
   have not run on `win-release`).
+- 2026-10-05: Phase 3 review fix round B (nexus-f9bgu.33, .34). The same-session
+  stop assumption is now marked partially verified, with its five uncovered shapes
+  listed and a slot for the visible-console measurement; the getuid count is 22
+  sites plus six exempt; the orphan-tracker fix is noted as unreachable from the
+  production sweep on Windows; the autostart text says `Hidden` is false and what
+  hides the window; the upgrade bullet says the real bundle swap with a live
+  `postgres.exe` was not run; the refusal text is noted to cover a same-session
+  denial. Added: the aspect-worker daemon port, with its decision that `service
+  stop` leaves it running as on POSIX, and the stale `.nx_old_*` sweep. The
+  rehearsal's Windows job now runs the 1076-test native set under a junit floor,
+  and a real-stack stop driver is committed (`scripts/windows_service_stop_driver.py`).
