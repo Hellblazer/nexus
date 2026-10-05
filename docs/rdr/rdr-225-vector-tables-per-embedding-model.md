@@ -156,6 +156,39 @@ standard-8 and memory-16. Raw JSON is to be copied to durable storage named in t
   own HNSW index. A query run as `nexus_svc` under the tenant GUC is pruned at
   execution time to one partition's HNSW scan, with iterative scan in effect.
 
+#### Registered research findings (T2 `nexus_rdr/225-research-1` to `-16`)
+
+- **✅ Verified** (source search), research-1. The two 1024-d models share one column and one HNSW index across all tenants.
+  *Source: vectors-004 lines 269 and 326; `requireHomogeneousModel`.*
+- **✅ Verified** (spike), research-2. E1: the cross-model neighbour fraction is 0.000 over 400 samples, so the models are disjoint islands.
+  *Source: conexus-0e fork, 2026-10-05.*
+- **✅ Verified** (spike), research-3. The index holds two tenants. `gate-xr789` (116,491 rows) is a re-import of `nexus` (314,181 rows), and 14.6% of nearest neighbours are its near-duplicates.
+  *Source: the same fork.*
+- **✅ Verified** (spike), research-4. F2: on real queries, HNSW agreement with exact is 0.60 to 0.80 on single-collection filters.
+  *Source: fork B.*
+- **✅ Verified** (spike), research-5. F3: standard-8 evicts itself on a full pass. memory-16 and memory-32 stay resident.
+  *Source: the forks.*
+- **✅ Verified** (spike), research-6. F4: code__1-15 times out under HNSW at 30 s cold. Exact takes 67 to 74 ms.
+  *Source: fork B.*
+- **✅ Verified** (spike), research-7. All-exact over 98 collections on standard-8 costs 17.7 s serial cold and 4.3 s warm. No plan seq-scanned the whole heap.
+  *Source: the fourth fork.*
+- **✅ Verified** (source search), research-8. Census: under the per-collection route at 60k, 10.1% of logged searches use HNSW. That is 13 code and 27 prose distinct queries.
+  *Source: the transcripts.*
+- **✅ Verified** (source search), research-9. H5 inventory: 11 search families, 8 GC families, and these mixed-model objects: `chunks`, `taxonomy_centroids`, `live_chunks`, `collection_vector_stats` and both HNSW index families.
+  *Source: the inventory.*
+- **✅ Verified** (source search), research-10. RDR-191 V1 rejected partitioning only by dimension.
+  *Source: rdr-191 lines 170 to 178.*
+- **✅ Verified** (source search), research-11. The router covers plain search only. Hybrid uses HNSW above 5000 text matches. Taxonomy has its own index. The default threshold is 10000.
+  *Source: PgVectorRepository and PgSession at 0e3aaf60f.*
+- **✅ Verified** (source search), research-12. `search_telemetry` has no path, scope or model column.
+  *Source: telemetry-001 lines 100 to 109.*
+- **✅ Verified** (spike), research-13. `pg_stats` hides FORCE-RLS tables from non-superusers.
+  *Source: the fork.*
+- **❓ Assumed** (spike, pending step 2), research-14. F7: partition pruning works under RLS on every search family.
+- **❓ Assumed** (spike, pending step 2), research-15. H4: the identity-table FK costs at most 1.25x on every write path.
+- **⚠️ Documented** (docs only), research-16. The literature crossover points (Veda, Compass) were measured warm, and VADER finds query-filter correlation.
+  *Source: knowledge__dt-papers.*
+
 ### Evaluation Protocol (pre-registered, revision 5, 2026-10-05)
 
 Sam: "let us prove out our design first this time rather than just reflexively
