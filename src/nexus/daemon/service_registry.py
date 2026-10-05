@@ -52,6 +52,7 @@ import os
 import re
 import signal
 import subprocess
+import sys
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
@@ -1346,8 +1347,111 @@ def process_command(pid: int) -> str:
     return probe.stdout.strip()
 
 
-def pid_alive(pid: int) -> bool:
-    """True when signalling 0 to *pid* succeeds.
+#: Win32 values :func:`pid_alive`'s Windows branch reads (winnt.h, winerror.h,
+#: winbase.h). Module-level so tests script the same numbers.
+PROCESS_QUERY_LIMITED_INFORMATION: int = 0x1000
+SYNCHRONIZE: int = 0x00100000
+ERROR_ACCESS_DENIED: int = 5
+ERROR_INVALID_PARAMETER: int = 87
+WAIT_OBJECT_0: int = 0x0
+WAIT_TIMEOUT: int = 0x102
+WAIT_FAILED: int = 0xFFFFFFFF
+_MAX_WINDOWS_PID: int = 0xFFFFFFFF
+
+
+class WinProcessApi(Protocol):
+    """The three kernel32 calls :func:`pid_alive` makes on Windows.
+
+    Injected so the Windows branch runs under test on any host; the real
+    binding is :func:`_ctypes_win_process_api`.
+    """
+
+    def open_process(self, pid: int) -> tuple[int | None, int]:
+        """``OpenProcess(QUERY_LIMITED_INFORMATION | SYNCHRONIZE)``:
+        ``(handle, 0)`` on success, ``(None, GetLastError())`` on failure."""
+        ...
+
+    def wait_zero(self, handle: int) -> int:
+        """``WaitForSingleObject(handle, 0)``."""
+        ...
+
+    def close(self, handle: int) -> None:
+        """``CloseHandle(handle)``."""
+        ...
+
+
+class _CtypesWinProcessApi:
+    def __init__(self) -> None:
+        import ctypes  # noqa: PLC0415 — Windows-only binding, built on first Windows probe
+        from ctypes import wintypes  # noqa: PLC0415
+
+        self._ctypes = ctypes
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
+        k32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+        k32.OpenProcess.restype = wintypes.HANDLE
+        k32.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+        k32.WaitForSingleObject.restype = wintypes.DWORD
+        k32.CloseHandle.argtypes = (wintypes.HANDLE,)
+        k32.CloseHandle.restype = wintypes.BOOL
+        self._k32 = k32
+
+    def open_process(self, pid: int) -> tuple[int | None, int]:
+        handle = self._k32.OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, False, pid,
+        )
+        if not handle:
+            return None, self._ctypes.get_last_error()  # type: ignore[attr-defined]
+        return handle, 0
+
+    def wait_zero(self, handle: int) -> int:
+        return self._k32.WaitForSingleObject(handle, 0)
+
+    def close(self, handle: int) -> None:
+        self._k32.CloseHandle(handle)
+
+
+_win_api_cache: list[WinProcessApi] = []
+
+
+def _ctypes_win_process_api() -> WinProcessApi:
+    """The real kernel32 binding, built once per process. Windows only."""
+    if not _win_api_cache:
+        _win_api_cache.append(_CtypesWinProcessApi())
+    return _win_api_cache[0]
+
+
+def _windows_pid_alive(pid: int, api: WinProcessApi) -> bool:
+    """Windows liveness: open the process and ask whether it has exited.
+
+    A Windows process object outlives its exit for as long as any handle
+    to it is open, so a successful ``OpenProcess`` alone proves nothing;
+    the zero-timeout wait is the answer (signalled = exited). There is no
+    zombie state, so :func:`pid_running` needs no Windows counterpart.
+    The wait, not ``GetExitCodeProcess``, because a process that exits
+    with code 259 reads as ``STILL_ACTIVE`` there.
+
+    Ambiguity reads as alive, matching the POSIX arm: access denied (the
+    process exists under another user, or is protected), any other open
+    error, and a failed wait.
+    """
+    if pid > _MAX_WINDOWS_PID:
+        return False
+    handle, last_error = api.open_process(pid)
+    if handle is None:
+        return last_error != ERROR_INVALID_PARAMETER
+    try:
+        return api.wait_zero(handle) != WAIT_OBJECT_0
+    finally:
+        api.close(handle)
+
+
+def pid_alive(
+    pid: int,
+    *,
+    platform: str | None = None,
+    win_api: WinProcessApi | None = None,
+) -> bool:
+    """True when *pid* names a process that has not exited.
 
     THE single implementation (nexus-oyo2g review finding 3): this used to
     be duplicated in ``storage_service_daemon._pid_is_alive`` with a
@@ -1359,9 +1463,22 @@ def pid_alive(pid: int) -> bool:
     "nothing to signal" must not treat an ambiguous errno as proof of
     death — a false "dead" here is exactly the class of bug this bead
     fixes (declaring something stopped when it might still be running).
+
+    POSIX signals 0. Windows must not: CPython maps ``os.kill(pid, 0)`` to
+    ``CTRL_C_EVENT`` there, so it asks kernel32 instead
+    (:func:`_windows_pid_alive`; RDR-224, nexus-f9bgu.25). ctypes rather
+    than psutil because psutil is only a transitive dependency and three
+    kernel32 calls do not justify a direct one. *platform* (default
+    ``sys.platform``) and *win_api* are injection seams so both arms run
+    under test on every host. ``tests/test_pid_alive_single_probe_lint.py``
+    keeps this the only ``os.kill(pid, 0)`` in ``src/nexus``.
     """
     if pid <= 0:
         return False
+    if (platform if platform is not None else sys.platform) == "win32":
+        return _windows_pid_alive(
+            pid, win_api if win_api is not None else _ctypes_win_process_api(),
+        )
     try:
         os.kill(pid, 0)
     except ProcessLookupError:

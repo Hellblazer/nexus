@@ -722,9 +722,7 @@ def restart_stale(report: SkewReport, *, dry_run: bool = False) -> list[str]:
                 deadline = time.time() + 12
                 exited = False
                 while time.time() < deadline:
-                    try:
-                        os.kill(proc.pid, 0)
-                    except ProcessLookupError:
+                    if not _pid_alive(proc.pid):
                         exited = True
                         break
                     time.sleep(0.5)

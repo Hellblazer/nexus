@@ -237,20 +237,14 @@ def _ppid_of(pid: int) -> int | None:
 def _is_pid_alive(pid: int) -> bool:
     """Return True if *pid* names a running process (liveness probe).
 
-    Uses ``os.kill(pid, 0)`` — raises ``ProcessLookupError`` when the
-    process is gone, ``PermissionError`` when it exists but is owned
-    by a different uid (treated as alive). Invalid pids (<=0) are
-    treated as dead.
+    Delegates to :func:`nexus.daemon.service_registry.pid_alive`, the one
+    probe with a Windows branch (nexus-f9bgu.25). Kept as a name because
+    the test harness's ``_AliveSet`` patches this seam. Invalid pids (<=0)
+    are dead; a process owned by another uid is alive.
     """
-    if pid <= 0:
-        return False
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    return True
+    from nexus.daemon.service_registry import pid_alive  # noqa: PLC0415 — deferred: keeps nexus.session's import cost flat for the hooks
+
+    return pid_alive(pid)
 
 
 def _parse_etime_seconds(etime: str) -> float | None:
