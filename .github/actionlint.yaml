@@ -4,5 +4,11 @@ self-hosted-runner:
   # -- no 'self-hosted'/'macos'/'arm64' defaults -- hence `runs-on: hellmini`
   # (a bare custom label, not an array with 'self-hosted') in the workflows
   # that target it.
+  #
+  # win-release: the native Windows side of qwentescence, self-hosted for the
+  # Windows release legs and the Windows rehearsal only (RDR-224 P0.1,
+  # nexus-f9bgu.14). Registered the same way, so also a bare custom label. Its
+  # jobs are gated on the repo variable NX_WINDOWS_RELEASE_LEGS == 'on'.
   labels:
     - hellmini
+    - win-release

@@ -1,0 +1,34 @@
+name: Resolve Python (Windows release runner)
+description: >-
+  Find a Python 3.12+ on the self-hosted win-release runner and export it as
+  PYTHON for the steps that follow (RDR-224, nexus-f9bgu.14). The Windows PG
+  bundle scripts are stdlib-only, so any 3.12+ interpreter will do. Prefers
+  the one uv manages (uv python find 3.13), then a python on PATH that is not
+  the Microsoft Store stub. Fails loud, naming what to install, rather than
+  letting a later step die on a missing or too-old interpreter.
+
+runs:
+  using: composite
+  steps:
+    - name: Resolve Python 3.12+
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $py = $null
+        if (Get-Command uv -ErrorAction SilentlyContinue) {
+          $found = (& uv python find 3.13 2>$null)
+          if ($LASTEXITCODE -eq 0 -and $found) { $py = "$found".Trim() }
+        }
+        if (-not $py) {
+          $cmd = Get-Command python -ErrorAction SilentlyContinue
+          if ($cmd -and $cmd.Source -notmatch 'WindowsApps') { $py = $cmd.Source }
+        }
+        if (-not $py) {
+          throw 'no Python found: install uv or Python 3.13 for the runner service account'
+        }
+        $ver = (& $py -c 'import sys; print("%d.%d" % sys.version_info[:2])')
+        if ([version]"$ver".Trim() -lt [version]'3.12') {
+          throw "Python $ver at $py is older than 3.12"
+        }
+        "PYTHON=$py" >> $env:GITHUB_ENV
+        Write-Host "python: $py ($ver)"

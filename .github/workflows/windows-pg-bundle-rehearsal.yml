@@ -1,0 +1,124 @@
+# nexus-f9bgu.5 (RDR-224 P0.5a, Sam 2026-10-05): exercise the Windows PG-bundle
+# machinery OFF the release path, on the same runner and through the same scripts
+# the release leg uses (engine-service-release.yml's
+# build-publish-pg-bundle-windows), so the first real run of any change to it is
+# not the tag. Modelled on mac-signing-rehearsal.yml.
+#
+# Why this exists: the release legs only run on a tag, and a Windows build that
+# fails mid-release costs a tag. This runs, on a push that touches the inputs:
+#   bundle:       the build-script unit tests, a fresh from-source build of the
+#                 bundle (no cache, so the script itself is what is proven),
+#                 the layout check, the package step and the relocation smoke
+#                 against the exact archive (build tree deleted first);
+#   conformance:  the supervisor lifecycle conformance suite on Windows. It is a
+#                 job of its own so its result does not hide the bundle's; until
+#                 the Windows supervisor work lands (RDR-224 Phase 3) it can be
+#                 red for reasons that have nothing to do with the bundle.
+# The release legs run the smoke again at tag time.
+#
+# Triggers: a push to develop that touches those inputs (the mac rehearsal's
+# accepted shape: a workflow_dispatch workflow is only runnable once it is on the
+# default branch), plus workflow_dispatch once this file reaches main. Never
+# pull_request: this is a public repo on a self-hosted runner.
+#
+# Runner: `win-release`, the self-hosted runner on qwentescence's native Windows
+# side (P0.1). It carries no per-minute charge. The guard below and the
+# NX_WINDOWS_RELEASE_LEGS switch mean nothing queues for it until Sam has
+# registered it and flipped the variable. One runner runs one job at a time, so a
+# rehearsal in flight delays a release leg by about its length (a few minutes).
+#
+# Runner prerequisites: uv (or Python 3.13), Visual Studio 2022 Build Tools,
+# win_flex_bison, meson, ninja, Strawberry Perl, git, PowerShell 7 (pwsh) and the
+# Windows tar on PATH for the service account.
+name: windows-pg-bundle-rehearsal
+
+on:
+  push:
+    branches: [develop]
+    paths:
+      - scripts/build_pg_bundle_windows.py
+      - scripts/pg_bundle_windows_smoke.py
+      - tests/test_pg_bundle_windows.py
+      - tests/daemon/test_rdr149_lifecycle_conformance.py
+      - src/nexus/daemon/service_registry.py
+      - .github/actions/resolve-windows-python/**
+      - .github/workflows/windows-pg-bundle-rehearsal.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-pg-bundle-rehearsal
+  cancel-in-progress: true
+
+jobs:
+  bundle:
+    name: Build, package and relocation-smoke the Windows PG bundle (win-release)
+    # Guard: public repo, self-hosted runner. The variable is the switch: with it
+    # off (or unset) no job is created, so nothing waits for an offline runner.
+    if: ${{ github.actor == 'Hellblazer' && vars.NX_WINDOWS_RELEASE_LEGS == 'on' }}
+    runs-on: win-release
+    timeout-minutes: 40
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      PG_VERSION: "17.5"
+      PGVECTOR_VERSION: "v0.8.2"
+      PG_BUNDLE_RUNNER: win-release
+      NX_TEST_T2_SUBSTRATE: none
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
+
+      - name: Resolve Python
+        uses: ./.github/actions/resolve-windows-python
+
+      - name: Build-script unit tests
+        run: |
+          uv run --python 3.13 --frozen pytest tests/test_pg_bundle_windows.py -o addopts="" -p no:cacheprovider -q
+
+      - name: Build the bundle from source (no cache)
+        run: |
+          $prefix = Join-Path $env:RUNNER_TEMP 'rehearsal-bundle'
+          if (Test-Path $prefix) { Remove-Item -Recurse -Force $prefix }
+          & $env:PYTHON scripts\build_pg_bundle_windows.py build --prefix $prefix
+
+      - name: Verify the bundle layout
+        run: |
+          & $env:PYTHON scripts\build_pg_bundle_windows.py verify --prefix (Join-Path $env:RUNNER_TEMP 'rehearsal-bundle')
+
+      - name: Package .txz
+        run: |
+          & $env:PYTHON scripts\build_pg_bundle_windows.py package --prefix (Join-Path $env:RUNNER_TEMP 'rehearsal-bundle') --out-dir (Join-Path $env:RUNNER_TEMP 'rehearsal-dist')
+
+      - name: Relocation smoke against the packaged archive
+        run: |
+          # The smoke refuses to run while the recorded build prefix still exists.
+          Remove-Item -Recurse -Force (Join-Path $env:RUNNER_TEMP 'rehearsal-bundle')
+          & $env:PYTHON scripts\pg_bundle_windows_smoke.py --archive (Join-Path $env:RUNNER_TEMP 'rehearsal-dist\nexus-pg-windows-x64.txz')
+
+      - name: Clean up
+        if: always()
+        run: |
+          foreach ($d in 'rehearsal-bundle', 'rehearsal-dist') {
+            $p = Join-Path $env:RUNNER_TEMP $d
+            if (Test-Path $p) { Remove-Item -Recurse -Force $p }
+          }
+
+  conformance:
+    name: Supervisor lifecycle conformance suite on Windows (win-release)
+    if: ${{ github.actor == 'Hellblazer' && vars.NX_WINDOWS_RELEASE_LEGS == 'on' }}
+    runs-on: win-release
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      NX_TEST_T2_SUBSTRATE: none
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
+
+      - name: Conformance suite
+        run: |
+          uv run --python 3.13 --frozen pytest tests/daemon/test_rdr149_lifecycle_conformance.py -o addopts="" -p no:cacheprovider -q
