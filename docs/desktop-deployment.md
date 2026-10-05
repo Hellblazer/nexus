@@ -71,6 +71,7 @@ Pre-requisite: [uv](https://docs.astral.sh/uv/) on host PATH.
 
 - macOS: `brew install uv`
 - Linux: `pipx install uv` or `curl -LsSf https://astral.sh/uv/install.sh | sh`
+- Windows (not installable yet: the manifest lists only darwin and linux until the Windows client release, RDR-224): `winget install astral-sh.uv`. The bundle's launcher resolves `uv` through `PATHEXT` (to `uv.exe`). Windows has no `exec`, so the launcher runs the MCP server as a child on its own stdin and stdout handles, waits for it, exits with its exit code, and ends the server with it if the host kills the launcher (a Job Object). The service itself still comes from `nx init`; its Windows support is tracked in RDR-224.
 
 Install:
 
