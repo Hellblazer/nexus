@@ -2,9 +2,9 @@
 
 Nexus organizes data across three tiers with increasing durability. Data flows upward (T1 → T2 → T3).
 
-**Two access paths**: Humans use the `nx` CLI. Agents use MCP tools (`mcp__plugin_conexus_nexus__*`) which call the same Python APIs directly — no Bash dependency. MCP tools that return lists (`search`, `store_list`, `memory_search`) are paged — pass `offset=N` for subsequent pages. See [conexus/README.md](../conexus/README.md#mcp-servers) for MCP tool details.
+**Two access paths**: Humans use the `nx` CLI. Agents use MCP tools (`mcp__plugin_conexus_nexus__*`) which call the same Python APIs directly. MCP tools that return lists (`search`, `store_list`, `memory_search`) are paged: pass `offset=N` for subsequent pages. See [conexus/README.md](../conexus/README.md#mcp-servers) for MCP tool details.
 
-**One arbitrator per tier**: Since RDR-152, T2 hard-defaults to the **service backend** — the native `nexus-service` over Postgres 17 — and since RDR-155, T3 serving routes through that same service (pgvector). Every consumer — host CLI, the MCP server, multiple Claude Code sessions, Claude Cowork agents (via SDK transport), dev containers — routes through the same arbitrator, so all T2 and vector traffic goes through one service. Start it via `nx daemon service start`. The SQLite+FTS5 substrate is GONE (RDR-158 P4, nexus-i711w): the stores were deleted and the `NX_STORAGE_BACKEND[_<store>]=sqlite` opt-out that used to select them now hard-errors with the stranded-install redirect (RDR-158 P3). Pre-migration SQLite files on disk are frozen migration sources only — migrate via the last migration-capable 6.x release.
+**One arbitrator per tier**: Since RDR-152, T2 hard-defaults to the **service backend** (the native `nexus-service` over Postgres 17), and since RDR-155, T3 serving routes through that same service (pgvector). Every consumer routes through the same arbitrator: the host CLI, the MCP server, multiple Claude Code sessions, Claude Cowork agents (via SDK transport) and dev containers. Start it via `nx daemon service start`. The SQLite+FTS5 substrate is GONE (RDR-158 P4, nexus-i711w): the stores were deleted and the `NX_STORAGE_BACKEND[_<store>]=sqlite` opt-out that used to select them now hard-errors with the stranded-install redirect (RDR-158 P3). Pre-migration SQLite files on disk are frozen migration sources only. Migrate via the last migration-capable 6.x release.
 
 | Tier | Storage | Arbitrator | Transport | Durability | Use |
 |------|---------|------------|-----------|------------|-----|
@@ -17,7 +17,7 @@ The catalog sits alongside T3 as a metadata layer. While T3 stores document *con
 
 ### Storage / service-stack architecture
 
-How the access paths reach each substrate today (post-RDR-155). T1, T2, and T3 all serve through the one native `nexus-service`; there is no SQLite opt-out anymore (`=sqlite` hard-errors, RDR-158 P3) and ChromaDB is not a live substrate in any mode. Pre-PG Chroma directories left on disk are relics: nothing in the running system reads them, and there is no path back to that era (Sam, 2026-08-29); not a rollback option, just debris to delete.
+How the access paths reach each substrate today (post-RDR-155). T1, T2, and T3 all serve through the one native `nexus-service`; there is no SQLite opt-out anymore (`=sqlite` hard-errors, RDR-158 P3) and ChromaDB is not a live substrate in any mode. Pre-PG Chroma directories left on disk are relics: nothing in the running system reads them, and there is no path back to that era (Sam, 2026-08-29).
 
 ```mermaid
 flowchart TD
@@ -50,7 +50,7 @@ flowchart TD
   SVC --> CAT[("Postgres<br/>catalog (documents · links · manifests)")]
 ```
 
-(The [reference architecture diagram](architecture-diagram.svg) covers the *retrieval / planning* layer — query decomposition, the operator DAG, taxonomy, the knowledge graph — which is substrate-agnostic; the diagram above is its storage-plane complement.)
+(The [reference architecture diagram](architecture-diagram.svg) covers the *retrieval / planning* layer: query decomposition, the operator DAG, taxonomy and the knowledge graph. That layer is substrate-agnostic; the diagram above is its storage-plane complement.)
 
 ## Progressive Formalization (RDR-057)
 
@@ -61,35 +61,29 @@ institutional knowledge. Several RDR-057 features work together to make
 this progression observable and to reward information that proves useful
 over time:
 
-- **Access tracking** on T1 and T2 — every successful read bumps
+- **Access tracking** on T1 and T2: every successful read bumps
   `access_count` and `last_accessed`, so the system can see which entries
   actually get used.
-- **Heat-weighted TTL** on T2 — frequently-accessed notes survive longer
+- **Heat-weighted TTL** on T2: frequently-accessed notes survive longer
   than their nominal TTL. The formula is
   `effective_ttl = base_ttl * (1 + log(access_count + 1))`. See
   [Configuration § Heat-Weighted T2 Expiry](configuration.md#heat-weighted-t2-expiry).
-- **`PromotionReport`** on `nx scratch promote` and `T1.promote()` — the
+- **`PromotionReport`** on `nx scratch promote` and `T1.promote()`: the
   promotion result reports `action=new` when the T2 destination is clean
   or `action=overlap_detected` when a full-text scan (Postgres, server-side)
   finds a similar entry under a different title. The promoted row is still
   written; the report only signals that a manual merge may be warranted.
-- **Contradiction flagging** during T3 search — `search_cross_corpus`
+- **Contradiction flagging** during T3 search: `search_cross_corpus`
   adds `[CONTRADICTS ANOTHER RESULT]` to any result pair where two
   high-similarity chunks come from different `source_agent` provenance,
   surfacing inconsistencies for human review. Default-on; opt out via
   `search.contradiction_check: false`. See
   [Querying Guide § Contradiction detection](querying-guide.md#contradiction-detection-rdr-057-phase-3a).
-- **`formalizes` catalog link type** — when a higher-abstraction
+- **`formalizes` catalog link type**: when a higher-abstraction
   representation (extracted entities, RDF triples, structured notes) is
   derived from a raw text chunk, link the two with type `formalizes` so
   the multi-representation relationship is explicit in the graph. See
   [Document Catalog § Link Types](catalog.md#link-types).
-
-Together these features let Nexus reward useful information without
-rigidly deleting the rest: frequently-read entries stick around, the
-promotion path from scratch to memory to knowledge is auditable, and
-contradictory claims bubble up during retrieval instead of silently
-coexisting.
 
 ## T1 -- Session Scratch
 
@@ -99,7 +93,7 @@ Claude session-id resolved via `nexus.session.resolve_active_session_id()`'s
 tiered chain: `NX_SESSION_ID` env, then `CLAUDE_CODE_SESSION_ID` env
 (inherited by child Agent-tool and Bash-tool processes, so they resolve the
 same session-id as their parent and share scratch space), and only as a
-last resort the flat file `~/.config/nexus/current_session` — a
+last resort the flat file `~/.config/nexus/current_session`, a
 machine-wide, last-writer-wins record a concurrent session can overwrite.
 An explicit `NX_SESSION_ID`/`CLAUDE_CODE_SESSION_ID` with no live lease
 fails loud with `T1ServerNotFoundError` rather than silently falling
@@ -110,32 +104,32 @@ stay isolated because each has its own session-id.
 The chroma-backed per-session T1 server (and its `t1_addr.<session_id>`
 lease discovery) retired with the chroma substrate. The in-process
 `NX_T1_ISOLATED=1` opt-out that survived that retirement is itself retired
-(nexus-4lkmz, 2026-08: "T1 exists in PG only") — setting it now hard-fails
+(nexus-4lkmz, 2026-08: "T1 exists in PG only"). Setting it now hard-fails
 with `T1IsolatedLegRetiredError`. A process outside service-mode routing
 raises `T1ServerNotFoundError` rather than inventing a private store.
 
 Everything is wiped at session end: the `SessionEnd` hook flushes flagged entries to T2 and the session's scratch rows expire against the service (backstopped by the 24h TTL sweep). Use `nx scratch flag` to mark items for auto-promotion to T2 when the session closes.
 
-**Access tracking (RDR-057)**: Every `T1.get()` and `T1.search()` hit increments `access_count` and updates `last_accessed` on the returned entries (stored as row metadata in the service's Postgres backing store — schemaless-shaped, no client migration). The counts feed the progressive formalization tier model but do not drive expiry at T1 (T1 is wiped at session end regardless).
+**Access tracking (RDR-057)**: Every `T1.get()` and `T1.search()` hit increments `access_count` and updates `last_accessed` on the returned entries (stored as row metadata in the service's Postgres backing store, schemaless-shaped, no client migration). The counts feed the progressive formalization tier model but do not drive expiry at T1 (T1 is wiped at session end).
 
 **Use for**: working hypotheses, temporary notes, in-flight analysis shared across spawned agents.
 
 ## T2 -- Memory Bank
 
-Every entry has a project, a title, and content — like a flat filesystem where project is the directory and title is the filename. Entries can have tags and an optional TTL. Keyword search is server-side full-text search over the engine's Postgres. Served through `HttpMemoryStore` over the one `nexus-service` (the only backend since RDR-158 — the historical direct-`sqlite3` `~/.config/nexus/memory.db` was the migration source, deleted at RDR-158 P4).
+Every entry has a project, a title, and content, like a flat filesystem where project is the directory and title is the filename. Entries can have tags and an optional TTL. Keyword search is server-side full-text search over the engine's Postgres. Served through `HttpMemoryStore` over the one `nexus-service` (the only backend since RDR-158: the historical direct-`sqlite3` `~/.config/nexus/memory.db` was the migration source, deleted at RDR-158 P4).
 
 T2 is the persistent local layer that bridges sessions. Notes, project state, and agent relay context survive restarts here. Different usage patterns share the same simple model:
 
-- **Developer notes** — hypotheses, findings, decisions-in-progress via `nx memory put`
-- **Project memory** — design notes, working state, active decisions. Store with `nx memory put`, retrieve with `nx memory get`. 
-- **RDR metadata** — status, type, priority, dates for each RDR document. See [RDR: Nexus Integration](rdr.md#nexus-integration).
-- **Plan library** — saved query execution plans with project scoping, full-text search, dimensional identity (`verb`, `scope`, `strategy` + optional axes), and optional TTL. Twelve builtin templates (`conexus/plans/builtin/*.yml`; five `*-default` plans plus seven scenario-strategy plans) are seeded via `nx plan reseed`, idempotent by default — only previously-missing builtins insert, `--force` reloads all of them. Access via `plan_save` / `plan_search` MCP tools, or indirectly via `nx_answer` (the retrieval trunk — see [Plan-Centric Retrieval](plan-centric-retrieval.md)). **Auto-growth (RDR-084, closed/implemented)**: when `nx_answer` falls through the plan-match gate onto an inline `claude -p` planner and the resulting ad-hoc DAG runs without error, the plan is auto-saved via `plan_save` with `scope="personal"` so the next paraphrase of the same question can match it. Best-effort: a save failure never affects the answer already returned. TTL is config-driven (`.nexus.yml#plans.ad_hoc_ttl`, 30-day fallback), separate from the builtin templates' own permanent TTL.
-- **Agent relay** — context passed between agent invocations
-- **Promoted scratch** — T1 entries flagged during a session are auto-flushed to T2 at session end
+- **Developer notes**: hypotheses, findings, decisions-in-progress via `nx memory put`
+- **Project memory**: design notes, working state, active decisions. Store with `nx memory put`, retrieve with `nx memory get`. 
+- **RDR metadata**: status, type, priority, dates for each RDR document. See [RDR: Nexus Integration](rdr.md#nexus-integration).
+- **Plan library**: saved query execution plans with project scoping, full-text search, dimensional identity (`verb`, `scope`, `strategy` + optional axes), and optional TTL. Twelve builtin templates (`conexus/plans/builtin/*.yml`; five `*-default` plans plus seven scenario-strategy plans) are seeded via `nx plan reseed`, idempotent by default: only previously-missing builtins insert, `--force` reloads all of them. Access via `plan_save` / `plan_search` MCP tools, or indirectly via `nx_answer` (the retrieval trunk; see [Plan-Centric Retrieval](plan-centric-retrieval.md)). **Auto-growth (RDR-084, closed/implemented)**: when `nx_answer` falls through the plan-match gate onto an inline `claude -p` planner and the resulting ad-hoc DAG runs without error, the plan is auto-saved via `plan_save` with `scope="personal"` so the next paraphrase of the same question can match it. Best-effort: a save failure never affects the answer already returned. TTL is config-driven (`.nexus.yml#plans.ad_hoc_ttl`, 30-day fallback), separate from the builtin templates' own permanent TTL.
+- **Agent relay**: context passed between agent invocations
+- **Promoted scratch**: T1 entries flagged during a session are auto-flushed to T2 at session end
 
 Data is organized by project via the `--project` flag. TTL values: `30d`, `4w`, or permanent. Default is **permanent** for both `nx memory put --ttl` and the `memory_put` MCP tool (reversed 2026-09-12, nexus-473mx: a caller now asks for a clock explicitly rather than getting one by omission). `ttl<=0` is rejected outright by the engine, not coerced to any special meaning.
 
-**Heat-weighted expiry (RDR-057 Phase 2a)**: T2 `access_count` and `last_accessed` columns track usage. Effective TTL becomes `base_ttl * (1 + log(access_count + 1))` — frequently-accessed entries survive longer. See [Configuration — Heat-Weighted T2 Expiry](configuration.md#heat-weighted-t2-expiry).
+**Heat-weighted expiry (RDR-057 Phase 2a)**: T2 `access_count` and `last_accessed` columns track usage. Effective TTL becomes `base_ttl * (1 + log(access_count + 1))`. See [Configuration — Heat-Weighted T2 Expiry](configuration.md#heat-weighted-t2-expiry).
 
 **Expiry quarantines, it does not delete (RDR-207)**: an entry past its effective TTL disappears from every read (`get`, `search`, `list`, the MCP memory tools) but stays in the table. `nx memory list --quarantined` shows these entries. `nx memory reap` deletes one only after a rollup summary covers it, `nx memory restore ID` brings one back as permanent, and `nx memory delete --id ID` removes one outright. See [nx memory](cli-reference.md#nx-memory).
 
@@ -168,15 +162,15 @@ Merges run as a single transaction against the engine so UPDATE and DELETE are a
 
 **Taxonomy cascade on delete**: When a memory entry is deleted, the T2 facade also calls `db.taxonomy.purge_assignments_for_doc(project, title)` (the `HttpTaxonomyStore` instance), removing any topic assignments that reference the deleted entry and dropping any topics left empty by the deletion.
 
-**Relevance log (RDR-061 E2)**: T2 also holds a `relevance_log` table that records `(query, chunk_id, action)` triples when an agent acts on search results (`store_put`, `catalog_link`). This is internal telemetry — not exposed as an MCP tool. Purged by `T2Database.expire(relevance_log_days=90)` alongside memory TTL expiry.
+**Relevance log (RDR-061 E2)**: T2 also holds a `relevance_log` table that records `(query, chunk_id, action)` triples when an agent acts on search results (`store_put`, `catalog_link`). This is internal telemetry, not exposed as an MCP tool. Purged by `T2Database.expire(relevance_log_days=90)` alongside memory TTL expiry.
 
-**Domain split (RDR-063, substrate cut over by RDR-158)**: T2 is implemented as **nine** service-backed domain stores under `src/nexus/db/t2/` — `HttpMemoryStore` (memory), `HttpPlanLibrary` (plans), `HttpTaxonomyStore` (topics + topic_assignments + taxonomy_meta + topic_links), `HttpTelemetryStore` (relevance_log + search/hook telemetry), `HttpChashIndex` (RDR-086; **retired by RDR-187** — the PG table is dropped as of engine v0.1.51, the class remains a shim until the final 410 flip), `HttpDocumentAspectsStore` (RDR-089), `HttpAspectQueue`, `HttpDocumentHighlightsStore` (RDR-139 Layer E), and `HttpTupleStore` (RDR-205 cross-agent tuple space; see the Tuple Space section below). The catalog is the engine's (`HttpCatalogClient`); the SQLite store classes and the local `.catalog.db` were deleted in RDR-158 P4 (nexus-i711w), and the `=sqlite` opt-out hard-errors (P3). **Backend routing (RDR-152/158):** every store routes through the `nexus-service` over Postgres — there is no other backend. `T2Database` is a composing facade: existing `db.put(...)`, `db.search(...)`, `db.save_plan(...)` calls work via delegation, and new code reaches the stores directly as `db.memory`, `db.plans`, `db.taxonomy`, `db.telemetry`, `db.chash_index`, `db.document_aspects`, `db.aspect_queue`, `db.document_highlights`, `db.tuples`, `db.catalog`. See [Architecture — T2 Domain Stores](architecture.md#t2-domain-stores) for the full map and concurrency model.
+**Domain split (RDR-063, substrate cut over by RDR-158)**: T2 is implemented as **nine** service-backed domain stores under `src/nexus/db/t2/`: `HttpMemoryStore` (memory), `HttpPlanLibrary` (plans), `HttpTaxonomyStore` (topics + topic_assignments + taxonomy_meta + topic_links), `HttpTelemetryStore` (relevance_log + search/hook telemetry), `HttpChashIndex` (RDR-086; **retired by RDR-187**: the PG table is dropped as of engine v0.1.51, the class remains a shim until the final 410 flip), `HttpDocumentAspectsStore` (RDR-089), `HttpAspectQueue`, `HttpDocumentHighlightsStore` (RDR-139 Layer E), and `HttpTupleStore` (RDR-205 cross-agent tuple space; see the Tuple Space section below). The catalog is the engine's (`HttpCatalogClient`); the SQLite store classes and the local `.catalog.db` were deleted in RDR-158 P4 (nexus-i711w), and the `=sqlite` opt-out hard-errors (P3). **Backend routing (RDR-152/158):** every store routes through the `nexus-service` over Postgres. There is no other backend. `T2Database` is a composing facade: existing `db.put(...)`, `db.search(...)`, `db.save_plan(...)` calls work via delegation, and new code reaches the stores directly as `db.memory`, `db.plans`, `db.taxonomy`, `db.telemetry`, `db.chash_index`, `db.document_aspects`, `db.aspect_queue`, `db.document_highlights`, `db.tuples`, `db.catalog`. See [Architecture — T2 Domain Stores](architecture.md#t2-domain-stores) for the full map and concurrency model.
 
 **Topic taxonomy**: `HttpTaxonomyStore` (`db.taxonomy`; `CatalogTaxonomy` is the retired pre-RDR-158 name still visible in a few historical comments) discovers topics from T3 collection embeddings using HDBSCAN, labels them automatically with Claude Haiku (`nx taxonomy label`), and uses them for search grouping and relevance boosting. Topics are discovered automatically after `nx index repo`. Operator-curated labels are preserved across re-discovery runs. See [CLI Reference — nx taxonomy](cli-reference.md#nx-taxonomy) for the full command set and [Architecture — Taxonomy](architecture.md#taxonomy) for architecture details.
 
 The taxonomy spans two storage tiers:
 
-*T2 schema* — four tables, served through `HttpTaxonomyStore` over the engine's Postgres (the only backend, per T2's domain split above — no separate `memory.db`):
+*T2 schema*: four tables, served through `HttpTaxonomyStore` over the engine's Postgres:
 
 | Table | Purpose |
 |-------|---------|
@@ -185,7 +179,7 @@ The taxonomy spans two storage tiers:
 | `taxonomy_meta` | Per-collection watermark used to decide whether re-discovery is needed |
 | `topic_links` | Aggregated link counts between topics, derived from the catalog link graph |
 
-*T3 centroids* — `nexus.taxonomy_centroids` (one unified table with three nullable typed embedding columns under an exactly-one-populated CHECK, since RDR-191 Phase 4 — previously three per-dim tables `taxonomy_centroids_{384,768,1024}`) hold one vector per live topic (cosine space), the cluster centroid computed during `discover_topics`. **Served through pgvector via `nexus-service` (`HttpCentroidStore`) since RDR-155 P4a.2.** Both centroid reads (ANN assignment) and writes go through `HttpCentroidStore` — Chroma is not a live substrate in any mode (RDR-155 P4b, shipped 2026-07-25). `discover_topics` populates the centroids, `rebuild_taxonomy` clears and rebuilds wholesale, `split_topic` replaces one with two.
+*T3 centroids*: `nexus.taxonomy_centroids` (one unified table with three nullable typed embedding columns under an exactly-one-populated CHECK, since RDR-191 Phase 4; previously three per-dim tables `taxonomy_centroids_{384,768,1024}`) hold one vector per live topic (cosine space), the cluster centroid computed during `discover_topics`. **Served through pgvector via `nexus-service` (`HttpCentroidStore`) since RDR-155 P4a.2.** Both centroid reads (ANN assignment) and writes go through `HttpCentroidStore`. Chroma is not a live substrate in any mode (RDR-155 P4b, shipped 2026-07-25). `discover_topics` populates the centroids, `rebuild_taxonomy` clears and rebuilds wholesale, `split_topic` replaces one with two.
 
 *Tier interaction*: Discovery reads embeddings from T3, clusters in memory, then writes topics to T2 and centroids to T3 (pgvector). Incremental assignment (for new documents) queries centroids via ANN and writes a `topic_assignments` row to T2, without re-running the full clustering algorithm.
 
@@ -199,7 +193,7 @@ with supervisor-lease discovery (`~/.config/nexus/storage_service_addr.<uid>`).
 Embedding happens **server-side**, so the choice of model is a property of the
 service, not of the client. Managed-cloud mode always runs Voyage. Local mode
 runs bge-768 by default, or Voyage instead when `NX_VOYAGE_API_KEY` reaches the
-service (nexus-umm29 carve-out) — a local install can use either, but not both
+service (nexus-umm29 carve-out): a local install can use either, but not both
 from the same boot (RDR-210 tracks a dual-mode engine that would end that
 limit):
 
@@ -212,11 +206,11 @@ limit):
 
 A collection embedded under the posture NOT running at the moment is refused
 with a 422 (RDR-204's "reads never refused" is the design intent, not today's
-behavior — see [RDR-204 § Technical Design](rdr/rdr-204-embedding-profile-and-collection-authority.md)'s 2026-09-15 amendment); switching postures needs a service restart, and re-running `nx init` or the upgrade ladder's provision leg reverts a Voyage opt-in back to bge-768 (see [nx init](cli-reference.md#nx-init) "Local mode with Voyage").
+behavior; see [RDR-204 § Technical Design](rdr/rdr-204-embedding-profile-and-collection-authority.md)'s 2026-09-15 amendment); switching postures needs a service restart, and re-running `nx init` or the upgrade ladder's provision leg reverts a Voyage opt-in back to bge-768 (see [nx init](cli-reference.md#nx-init) "Local mode with Voyage").
 
-Both modes rerank server-side in the Java engine on `rerank=true`; there is no client-side rerank path (the old `nexus.cross_encoder` rerank caller was deleted at RDR-188 P2.6; that module's ONNX cross-encoder has no live production consumer at all since its salience caller was also retired at nexus-0hqez, 2026-09-23). A missing local cross-encoder model degrades loud (`rerank_degraded=true`) rather than silently skipping the stage; `nx doctor` flags it.
+Both modes rerank server-side in the Java engine on `rerank=true`; there is no client-side rerank path (the old `nexus.cross_encoder` rerank caller was deleted at RDR-188 P2.6; that module's ONNX cross-encoder has no live production consumer since its salience caller was also retired at nexus-0hqez, 2026-09-23). A missing local cross-encoder model degrades loud (`rerank_degraded=true`) rather than silently skipping the stage; `nx doctor` flags it.
 
-bge-768 is the standard local-mode service embedder by default (RDR-160
+bge-768 is the standard local-mode service embedder (RDR-160
 replaced the earlier MiniLM-384), not an opt-in extra; Voyage in local mode IS
 an explicit opt-in (`NX_VOYAGE_API_KEY`, nexus-umm29). Run `nx daemon service
 start` to bring the stack up and `nx daemon service status` to verify health
@@ -250,13 +244,13 @@ Conformant collection names (RDR-103) follow a 4-segment shape:
 | `rdr__<owner_id>__voyage-context-3__v1` | Indexed RDR documents | voyage-context-3 (CCE) | bge-768 | voyage-context-3 |
 | `knowledge__<owner_id>__voyage-context-3__v1` | Stored agent outputs and notes | voyage-context-3 (CCE) | bge-768 | voyage-context-3 |
 
-(`<owner_id>` is a stable slug like `nexus-1-1` — see [RDR-103](rdr/rdr-103-catalog-collection-name-authority.md).)
+(`<owner_id>` is a stable slug like `nexus-1-1`. See [RDR-103](rdr/rdr-103-catalog-collection-name-authority.md).)
 
 **Legacy shape (fallback, pre-RDR-103)**: 2-segment `<content_type>__<repo>-<hash>`, e.g. `code__myrepo-a1b2c3`. Still present on collections created before the conformance migration; new collections use the 4-segment shape above.
 
-A collection is indexed and queried under the same embedding model — mixing models across one vector space produces near-random similarity scores. The voyage-capability gate in the ladder's substrate rung refuses to migrate genuine voyage-model collections onto a bge-only service for exactly this reason. The same principle is enforced at query time: multi-collection combined queries are dispatched per embedding-model group by the MCP layer (a corpus spanning `voyage-code-3` and `voyage-context-3` collections issues one query per model and merges results, nexus-3l6gz), and the service rejects a mixed-model collection list outright (`requireHomogeneousModel`, engine-service ≥ 0.1.36).
+A collection is indexed and queried under the same embedding model: mixing models across one vector space produces near-random similarity scores. The voyage-capability gate in the ladder's substrate rung refuses to migrate genuine voyage-model collections onto a bge-only service for this reason. The same principle is enforced at query time: multi-collection combined queries are dispatched per embedding-model group by the MCP layer (a corpus spanning `voyage-code-3` and `voyage-context-3` collections issues one query per model and merges results, nexus-3l6gz), and the service rejects a mixed-model collection list outright (`requireHomogeneousModel`, engine-service ≥ 0.1.36).
 
-**TTL and expiry**: `nx store expire` removes expired entries from `knowledge__*` collections only. Code, docs, and RDR collections are never expired — they are refreshed via re-indexing.
+**TTL and expiry**: `nx store expire` removes expired entries from `knowledge__*` collections only. Code, docs, and RDR collections are never expired: they are refreshed via re-indexing.
 
 **Use for**: semantic search across sessions, institutional knowledge.
 
@@ -264,13 +258,13 @@ A collection is indexed and queried under the same embedding model — mixing mo
 
 ## T3 Backup and Migration (Export/Import)
 
-`nx store export` / `import` operate on **live T3** — both read and write
+`nx store export` / `import` operate on **live T3**: both read and write
 through `make_t3()`, which resolves to `HttpVectorClient` (the pgvector
 serving path) in both local and managed-cloud mode. This is a real backup
 path for your current knowledge store, not a legacy-ChromaDB-only tool: a
 `.nxexp` file exported today round-trips through the current service.
 
-Collections can be exported to portable `.nxexp` files that preserve all documents, metadata, and embeddings. Importing restores the collection without re-embedding — saving Voyage AI API costs and time.
+Collections can be exported to portable `.nxexp` files that preserve all documents, metadata, and embeddings. Importing restores the collection without re-embedding, which saves Voyage AI API costs and time.
 
 ```bash
 # Export a single collection
@@ -292,13 +286,13 @@ nx store import myrepo-backup.nxexp --remap "/old/path:/new/path"
 nx store import myrepo-backup.nxexp --collection code__newname
 ```
 
-**Format**: `.nxexp` files contain a JSON header line (format version, collection name, embedding model) followed by a gzip-compressed msgpack stream of records. Embeddings are stored as raw float32 bytes. Each record may also carry an `owner` field (source URI, title, content type, manifest position) naming the chunk's live catalog document at export time; import registers that document in the target collection and writes each chunk together with its manifest row, carrying the vector from the file, so an imported chunk gets its own catalog ownership instead of arriving manifest-less and the vectors are the ones that were exported (RDR-192, nexus-wbfpw.31; RDR-223, nexus-z0o2p.19). A document that already owns chunks in the target keeps its chunk list; the file's chunks for it are left out and reported. If that document still lives in another collection, import copies rather than moves: the original is left alone and the target gets its own document with source URI `nxexp://<target>/<original source URI>`. A record with no `owner` (an older export, or a chunk that had none) is grouped under one document per import file instead.
+**Format**: `.nxexp` files contain a JSON header line (format version, collection name, embedding model) followed by a gzip-compressed msgpack stream of records. Embeddings are stored as raw float32 bytes. Each record may also carry an `owner` field (source URI, title, content type, manifest position) naming the chunk's live catalog document at export time; import registers that document in the target collection and writes each chunk together with its manifest row, carrying the vector from the file, so an imported chunk gets its own catalog ownership instead of arriving manifest-less (RDR-192, nexus-wbfpw.31; RDR-223, nexus-z0o2p.19). A document that already owns chunks in the target keeps its chunk list; the file's chunks for it are left out and reported. If that document still lives in another collection, import copies rather than moves: the original is left alone and the target gets its own document with source URI `nxexp://<target>/<original source URI>`. A record with no `owner` (an older export, or a chunk that had none) is grouped under one document per import file instead.
 
-**Safety**: Embedding model validation is enforced on import — importing a `code__` export (voyage-code-3) into a `docs__` collection (voyage-context-3) is rejected to prevent vector space corruption.
+**Safety**: Embedding model validation is enforced on import: importing a `code__` export (voyage-code-3) into a `docs__` collection (voyage-context-3) is rejected to prevent vector space corruption.
 
 ## Tuple Space (RDR-205)
 
-The tuple space is the ninth T2-adjacent store (`db.tuples`, `HttpTupleStore`), for cross-agent and cross-instance coordination metadata (a mailbox, a work queue, a dispatch ledger), not for notes or search hits. Three templates ship today:
+The tuple space is the ninth T2 store (`db.tuples`, `HttpTupleStore`), for cross-agent and cross-instance coordination metadata (a mailbox, a work queue, a dispatch ledger), not for notes or search hits. Three templates ship today:
 
 - **`mailbox/<address>`**: agent/instance/session messages, 7-day retention.
 - **`ledger/<session_id>`**: read-only session-lifecycle rows (`kind` in `start`/`report`), 90-day retention.
@@ -327,7 +321,7 @@ T3 (knowledge)
 
 ### TTL translation on promote
 
-T3 has no separate `expires_at` field: both real T3 substrates compute expiry as `indexed_at + ttl_days`. `nx memory promote` translates T2's TTL one-to-one:
+T3 has no separate `expires_at` field: expiry is computed client-side as `indexed_at + ttl_days`. `nx memory promote` translates T2's TTL one-to-one:
 
 | T2 TTL | T3 `ttl_days` |
 |--------|---------------|
@@ -344,6 +338,6 @@ T3 has no separate `expires_at` field: both real T3 substrates compute expiry as
 | Project decisions that survive restarts | T2 | Local, fast, searchable |
 | Research findings for future sessions | T3 | Semantic search across time |
 | Indexed code/docs | T3 | Vector similarity + reranking |
-| Cross-agent/cross-instance coordination (mailbox, work queue, a dispatch ledger) | Tuple space (`db.tuples`, a T2-adjacent ninth store) | Atomic claim under a lease, `ack`/`nack`, dead letter — not a fit for a note or a search hit; see [Tuple Space](tuple-space.md) |
+| Cross-agent/cross-instance coordination (mailbox, work queue, a dispatch ledger) | Tuple space (`db.tuples`, the ninth T2 store) | Atomic claim under a lease, `ack`/`nack`, dead letter — not a fit for a note or a search hit; see [Tuple Space](tuple-space.md) |
 
 See [cli-reference.md](cli-reference.md) for command details.
