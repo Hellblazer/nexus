@@ -836,13 +836,19 @@ def test_skipped_listing_fallback_reads_as_unknown_not_absent(
     def broken_t3():
         raise ConnectionError("engine unreachable")
 
-    def no_listing(*_a, **_k):
-        raise AssertionError("the listing must be skipped, not started")
+    listings: list[tuple] = []
+
+    def no_listing(*a, **_k):
+        # Recorded, not raised: _collection_exists swallows exceptions from
+        # the listing, so a raise here could not tell started from skipped.
+        listings.append(a)
+        raise ConnectionError("listing must not run")
 
     monkeypatch.setattr("nexus.db.make_t3", broken_t3)
     monkeypatch.setattr("nexus.bounded_subprocess.run_bounded", no_listing)
     monkeypatch.setattr(mod, "_run_deadline", time.monotonic() + mod._LISTING_MIN_S / 2)
     assert mod._collection_exists("rdr__1-1__voyage-context-3__v1") is None
+    assert listings == [], "the listing must be skipped, not started"
 
 
 def test_run_does_not_say_not_indexed_when_the_index_state_is_unknown(
@@ -865,6 +871,26 @@ def test_run_does_not_say_not_indexed_when_the_index_state_is_unknown(
     assert "unknown" in out, out
     assert "NOT indexed" not in out, out
     assert "Run: nx index repo" not in out, out
+    assert out.startswith("RDR: 1 documents (1 RDRs) in docs/rdr"), out
+
+
+def test_a_t2_fetch_that_cannot_start_still_prints_the_summary(
+    rdr_hook_mod, tmp_path, monkeypatch,
+) -> None:
+    """Starting the T2 worker sits outside _fetch_rdr_rows' guard in run();
+    an import error there must cost the breakdown, not the whole summary."""
+    mod = rdr_hook_mod
+    root = _rdr_tree(tmp_path)
+
+    def cannot_start(_repo_name):
+        raise ImportError("t2_reads unavailable")
+
+    monkeypatch.setenv("NX_RDR_HOOK_LOG", str(tmp_path / "rdr_hook.log"))
+    monkeypatch.setattr(mod, "_repo_root", lambda: root)
+    monkeypatch.setattr(mod, "_repo_name", lambda r: "repo")
+    monkeypatch.setattr(mod, "_resolve_rdr_collection", lambda r: None)
+    monkeypatch.setattr(mod, "_start_t2_fetch", cannot_start)
+    out = mod.run(None).stdout or ""
     assert out.startswith("RDR: 1 documents (1 RDRs) in docs/rdr"), out
 
 

@@ -70,7 +70,7 @@ def test_every_rdr_leg_cap_fits_inside_the_budget() -> None:
 
 def test_upgrade_auto_skew_wait_is_under_the_upgrade_auto_timeout() -> None:
     timeout = _session_start_timeout("upgrade-auto")
-    assert upgrade_auto._SKEW_WAIT_S < timeout, (
-        f"upgrade_auto._SKEW_WAIT_S={upgrade_auto._SKEW_WAIT_S} must be under "
-        f"the hooks.json upgrade-auto timeout {timeout}"
+    assert upgrade_auto._SKEW_WAIT_S + _START_MARGIN_S < timeout, (
+        f"upgrade_auto._SKEW_WAIT_S={upgrade_auto._SKEW_WAIT_S} + start margin "
+        f"{_START_MARGIN_S} must be under the hooks.json upgrade-auto timeout {timeout}"
     )

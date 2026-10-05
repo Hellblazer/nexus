@@ -700,8 +700,13 @@ def _run() -> HookResult:
     # decision channel.
     configure_hook_logging()
     # The slowest leg starts first and runs beside the catalog and T3 legs,
-    # so it has the whole budget rather than what they leave over.
-    _start_t2_fetch(repo_name)
+    # so it has the whole budget rather than what they leave over. A failure
+    # to start it (an import error) must not cost the rest of the summary:
+    # _fetch_rdr_rows retries the start inside its own never-fail guard.
+    try:
+        _start_t2_fetch(repo_name)
+    except Exception:  # noqa: BLE001 — never-fail hook contract
+        pass
     rdr_collection = _resolve_rdr_collection(root)
     indexed: bool | None = _collection_exists(rdr_collection) if rdr_collection else False
 
