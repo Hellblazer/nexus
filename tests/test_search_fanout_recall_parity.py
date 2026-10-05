@@ -51,7 +51,7 @@ from nexus.db.limits import QUOTAS
 from nexus.search_engine import _group_collections_by_embedding_model
 from nexus.search_engine import search_cross_corpus as new_search_cross_corpus
 
-pytestmark = pytest.mark.integration
+pytestmark = [pytest.mark.integration, pytest.mark.lived_in]
 
 #: credentials.<key> in config.yml -> the env var get_credential() checks
 #: FIRST (nexus.config.CREDENTIALS) -- setting these bypasses the autouse

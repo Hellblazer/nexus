@@ -870,7 +870,7 @@ smoke_verify_count "$SMOKE_PASSED" "$SMOKE_EXPECTED" || exit 1
 # no engine, and a substrate-backed collect takes the machine suite lease, so a
 # peer run holding it made pytest refuse with stderr discarded here, which read
 # as "0 tests" and tripped the vacuity guard on contention, not on a count.
-LIVED_IN_EXPECTED=75  # 2026-09-05: +3 lived_in tests landed this wave
+LIVED_IN_EXPECTED=86  # 2026-10-05: +11, the live-cloud recall-parity gate (tests/test_search_fanout_recall_parity.py, nexus-abdp2) needs the operator's real config, so it always skipped in the gate sandbox and pushed skipped past BUDGET (47 vs 40). 2026-09-05: +3 lived_in tests landed this wave
 LIVED_IN_COUNT="$(NX_TEST_T2_SUBSTRATE=none uv run pytest -m "integration and lived_in" --collect-only -q 2>/dev/null | grep -cE '::' || true)"
 if [ "$LIVED_IN_COUNT" -ne "$LIVED_IN_EXPECTED" ]; then
   echo "[gate] VACUITY GUARD TRIPPED: lived_in carve-out is $LIVED_IN_COUNT tests, expected exactly $LIVED_IN_EXPECTED" >&2
