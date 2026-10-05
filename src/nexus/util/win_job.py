@@ -70,9 +70,9 @@ IS_WINDOWS: bool = sys.platform == "win32"
 CREATE_NEW_PROCESS_GROUP: int = 0x00000200
 
 #: Console control event for a graceful stop of a process spawned with
-#: ``CREATE_NEW_PROCESS_GROUP`` (see :func:`send_ctrl_break`). Not wired
-#: into any call site by this bead — job-object containment is the ask;
-#: graceful stop is future work the constant is exported for.
+#: ``CREATE_NEW_PROCESS_GROUP`` (see :func:`send_ctrl_break`). The storage
+#: supervisor sends it to its engine from the same console; the stopper
+#: reaches the supervisor through ``nexus.util.win_console``.
 CTRL_BREAK_EVENT: int = 1
 
 #: ``JOBOBJECT_LIMIT_KILL_ON_JOB_CLOSE`` — the job-object limit flag that
@@ -313,12 +313,18 @@ def send_ctrl_break(pid: int) -> bool:
     *pid* — the graceful-stop counterpart of a POSIX ``SIGTERM`` to a
     process group, for a child spawned with :data:`CREATE_NEW_PROCESS_GROUP`.
 
-    Not called by any site in this bead: containment (:func:`create_job` /
-    :func:`assign_process` / :func:`close_job`) is nexus-6y4e0's ask.
-    Exported so the graceful-stop design nexus-6y4e0's own bead comment
-    calls out (the storage daemon's and mineru's SIGTERM sites, which are
-    ``TerminateProcess`` on Windows today with no grace window at all) has
-    the primitive ready without a second ctypes pass.
+    The caller must already be on the target's console. That holds for the
+    storage-service supervisor stopping its own engine (the engine inherits
+    the supervisor's console), which is the caller today
+    (``StorageServiceSupervisor._stop_service`` and
+    ``_kill_after_readiness_failure``, RDR-224, nexus-f9bgu.17). A caller on
+    a DIFFERENT console, such as the ``nx`` CLI stopping the supervisor,
+    must attach first: :func:`nexus.util.win_console.send_ctrl_break_via_console`.
+    From the wrong console this can return ``True`` and deliver nothing, so
+    the stop is confirmed by the target's exit and never by this return value.
+
+    The mineru stop sites are still ``TerminateProcess`` on Windows; they do
+    not use this.
 
     Returns ``False`` (never raises) off Windows or on any API failure.
     """

@@ -74,9 +74,12 @@ from nexus.daemon.service_registry import (
     pid_alive,
     pid_running,
     process_state,
+    request_graceful_stop,
+    sweep_matching_processes,
     terminate_pids,
     ttl_for_tier,
 )
+from nexus.util.win_console import ConsoleBreakResult
 from nexus import session as _sess
 
 
@@ -1335,6 +1338,181 @@ class TestTerminationSurvivorVerdict:
             "nexus.daemon.service_registry.process_state", lambda _pid: None,
         )
         assert pid_running(424243) is True
+
+
+class _ScriptedConsoleApi:
+    """Win32 console calls for the stop send, scripted per target pid.
+
+    ``refuse`` pids fail ``AttachConsole`` with access denied (another
+    Windows session); every other pid attaches and "sends" successfully,
+    delivering nothing, which is the ``TRUE``-and-nothing-delivered case a
+    real send can produce.
+    """
+
+    def __init__(self, *, refuse: frozenset[int] = frozenset()) -> None:
+        self.refuse = refuse
+        self.attached: list[int] = []
+        self.sent: list[int] = []
+        self._current: int | None = None
+
+    def free_console(self) -> bool:
+        return True
+
+    def attach_console(self, pid: int) -> tuple[bool, int]:
+        self.attached.append(pid)
+        if pid in self.refuse:
+            return False, 5
+        self._current = pid
+        return True, 0
+
+    def generate_ctrl_break(self, pid: int) -> tuple[bool, int]:
+        self.sent.append(pid)
+        return True, 0
+
+    def attach_parent_console(self) -> tuple[bool, int]:
+        return True, 0
+
+    def session_of(self, pid: int) -> int | None:
+        return 1 if pid in self.refuse else 0
+
+
+def _spawn_ignoring_sleeper() -> subprocess.Popen[bytes]:
+    proc = subprocess.Popen(  # noqa: S603 — fixed argv, this interpreter
+        [sys.executable, "-c",
+         "import signal,time\n"
+         "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+         "print('up', flush=True)\n"
+         "time.sleep(120)\n"],
+        stdout=subprocess.PIPE,
+    )
+    assert proc.stdout is not None
+    assert proc.stdout.readline().strip() == b"up", "fixture must have armed its handler"
+    return proc
+
+
+class TestGracefulStopChannel:
+    """The platform's graceful-stop signal is chosen in ONE place, the
+    primitive's :func:`request_graceful_stop`, and every stop path that
+    signals a supervisor or an engine funnels through it (``terminate_pids``,
+    ``stop_storage_service``). RDR-224, nexus-f9bgu.17.
+
+    Tier-incidental for the same reason ``TestTerminationSurvivorVerdict``
+    is. Both platform arms run on every host: the Windows arm through an
+    injected console API, the POSIX arm against a real child.
+    """
+
+    def test_posix_sends_sigterm_to_a_real_child(self) -> None:
+        proc = subprocess.Popen(  # noqa: S603 — fixed argv, this interpreter
+            [sys.executable, "-c", "import time; time.sleep(120)"],
+        )
+        try:
+            send = request_graceful_stop(proc.pid, platform="linux")
+            assert send.sent is True and send.refused is False
+            assert proc.wait(timeout=30) == -signal.SIGTERM
+        finally:
+            with contextlib.suppress(OSError):
+                proc.kill()
+            proc.wait(timeout=5)
+
+    def test_posix_gone_pid_is_not_sent_and_not_refused(self) -> None:
+        with patch("os.kill", side_effect=ProcessLookupError):
+            send = request_graceful_stop(424244, platform="linux")
+        assert (send.sent, send.refused, send.gone) == (False, False, True)
+
+    def test_posix_permission_error_is_not_a_refusal(self) -> None:
+        # POSIX behaviour is unchanged: EPERM was swallowed and the caller's
+        # escalation ladder carried on. Only the Windows cross-session case
+        # stops the ladder.
+        with patch("os.kill", side_effect=PermissionError):
+            send = request_graceful_stop(424245, platform="linux")
+        assert (send.sent, send.refused) == (False, False)
+
+    def test_windows_never_reaches_os_kill_and_sends_ctrl_break(self) -> None:
+        api = _ScriptedConsoleApi()
+        with patch("os.kill", side_effect=AssertionError("os.kill is TerminateProcess on Windows")):
+            send = request_graceful_stop(4242, platform="win32", console_api=api)
+        assert send.sent is True
+        assert api.attached == [4242] and api.sent == [4242]
+
+    def test_windows_cross_session_is_a_refusal_with_both_sessions(self) -> None:
+        api = _ScriptedConsoleApi(refuse=frozenset({4242}))
+        send = request_graceful_stop(4242, platform="win32", console_api=api)
+        assert (send.sent, send.refused) == (False, True)
+        assert (send.target_session, send.own_session) == (1, 0)
+        assert api.sent == []
+
+    def test_a_refused_pid_is_never_hard_killed_and_is_reported(self) -> None:
+        """Sam DECIDED (2026-10-05): a stop from another Windows session
+        fails loud and never hard-kills. A sibling pid the send DID reach
+        still gets the full ladder, so the refusal does not weaken the stop
+        for processes this session can reach."""
+        refused_proc = _spawn_ignoring_sleeper()
+        reachable_proc = _spawn_ignoring_sleeper()
+        api = _ScriptedConsoleApi(refuse=frozenset({refused_proc.pid}))
+        refusals: list = []
+        try:
+            stubborn = terminate_pids(
+                [refused_proc.pid, reachable_proc.pid],
+                grace_s=0.5,
+                platform="win32",
+                console_api=api,
+                refused_out=refusals,
+            )
+            # Non-vacuity: both pids were attempted, only one send went out.
+            assert api.attached == [refused_proc.pid, reachable_proc.pid]
+            assert api.sent == [reachable_proc.pid]
+            # The reachable pid ignored the break, so it took the hard kill.
+            assert reachable_proc.wait(timeout=30) == -signal.SIGKILL
+            # The refused pid is untouched, still running, and reported.
+            assert refused_proc.poll() is None
+            assert stubborn == [refused_proc.pid]
+            assert [r.pid for r in refusals] == [refused_proc.pid]
+            assert refusals[0].refused is True
+        finally:
+            for proc in (refused_proc, reachable_proc):
+                with contextlib.suppress(OSError):
+                    proc.kill()
+                proc.wait(timeout=5)
+
+    def test_sweep_carries_the_refusal_to_its_caller(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        proc = _spawn_ignoring_sleeper()
+        api = _ScriptedConsoleApi(refuse=frozenset({proc.pid}))
+        real_terminate = terminate_pids
+        monkeypatch.setattr(
+            "nexus.daemon.service_registry.terminate_pids",
+            lambda pids, **kw: real_terminate(
+                pids, platform="win32", console_api=api, **kw,
+            ),
+        )
+        command = f"{sys.executable} -c import signal,time"
+        monkeypatch.setattr(
+            "nexus.daemon.service_registry.all_process_rows",
+            lambda *a, **k: [(proc.pid, 1, command)],
+        )
+        monkeypatch.setattr(
+            "nexus.daemon.service_registry.process_command", lambda *a, **k: command,
+        )
+        try:
+            result = sweep_matching_processes(
+                lambda cmd: cmd == command, exclude_pid=os.getpid(), grace_s=0.3,
+            )
+            assert result.pids == (proc.pid,)
+            assert result.stubborn == (proc.pid,)
+            assert [r.pid for r in result.refused] == [proc.pid]
+            assert proc.poll() is None, "a refused process must not be killed"
+        finally:
+            with contextlib.suppress(OSError):
+                proc.kill()
+            proc.wait(timeout=5)
+
+    def test_console_result_type_is_what_the_primitive_reads(self) -> None:
+        # Guard against the two modules drifting: every field the primitive
+        # copies off the console result exists on it.
+        fields = ConsoleBreakResult.__dataclass_fields__
+        for name in ("sent", "refused", "error", "target_session", "own_session"):
+            assert name in fields
 
 
 # ---------------------------------------------------------------------------

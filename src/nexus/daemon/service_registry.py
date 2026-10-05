@@ -65,6 +65,7 @@ from nexus import _locking
 from nexus._install import winproc_core
 from nexus._winsec import _windows_user_sid, open_private  # the SID lookup lives with the other Windows security calls
 from nexus.bounded_subprocess import run_bounded
+from nexus.util import win_console
 from nexus.util.process_group import KILL_SIGNAL
 
 _log = structlog.get_logger(__name__)
@@ -1669,9 +1670,81 @@ def pid_running(pid: int) -> bool:
 _POST_KILL_SETTLE_S: float = 5.0
 
 
-def terminate_pids(pids: list[int], *, grace_s: float = 10.0) -> list[int]:
-    """SIGTERM, wait up to *grace_s*, then SIGKILL. Returns pids still
-    RUNNING afterwards (never zombies — see :func:`pid_running`).
+@dataclass(frozen=True)
+class GracefulStopSend:
+    """What :func:`request_graceful_stop` did for one pid.
+
+    ``sent`` means a stop signal was handed to the OS. It is NOT proof the
+    process will exit: on Windows the send can return ``TRUE`` and deliver
+    nothing, so a stop is confirmed by the target's exit (:func:`pid_alive`),
+    never by this. ``refused`` is the Windows cross-session case
+    (``AttachConsole`` access denied): the process was never signalled and
+    must NOT be hard-killed either. ``target_session`` and ``own_session``
+    are filled for a refusal so the caller can say where the stop has to come
+    from.
+    """
+
+    pid: int
+    sent: bool
+    refused: bool = False
+    gone: bool = False
+    error: int | None = None
+    target_session: int | None = None
+    own_session: int | None = None
+
+
+def request_graceful_stop(
+    pid: int,
+    *,
+    platform: str | None = None,
+    console_api: "win_console.WinConsoleApi | None" = None,
+) -> GracefulStopSend:
+    """Ask *pid* to stop, the way its platform does it. Never raises.
+
+    POSIX: ``SIGTERM``, exactly as every stop site did before this existed
+    (a ``PermissionError`` is not a refusal there; the caller's escalation
+    ladder carries on as it always did). Windows: ``SIGTERM`` is
+    ``TerminateProcess``, which is the hard kill, so the stop is
+    ``CTRL_BREAK`` to the target's console process group, sent after
+    attaching to the target's console (:mod:`nexus.util.win_console`;
+    RDR-224, nexus-f9bgu.17). That reaches a target spawned with
+    ``CREATE_NEW_PROCESS_GROUP`` on a console, which is how the supervisor
+    and the engine are spawned.
+
+    *platform* (default ``sys.platform``) and *console_api* are injection
+    seams so both arms run under test on every host.
+    """
+    if not _is_windows(platform):
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            return GracefulStopSend(pid=pid, sent=False, gone=True)
+        except PermissionError:
+            return GracefulStopSend(pid=pid, sent=False)
+        return GracefulStopSend(pid=pid, sent=True)
+    api = console_api if console_api is not None else win_console.ctypes_win_console_api()
+    result = win_console.send_ctrl_break_via_console(pid, api)
+    return GracefulStopSend(
+        pid=pid,
+        sent=result.sent,
+        refused=result.refused,
+        error=result.error,
+        target_session=result.target_session,
+        own_session=result.own_session,
+    )
+
+
+def terminate_pids(
+    pids: list[int],
+    *,
+    grace_s: float = 10.0,
+    platform: str | None = None,
+    console_api: "win_console.WinConsoleApi | None" = None,
+    refused_out: list[GracefulStopSend] | None = None,
+) -> list[int]:
+    """Graceful stop (:func:`request_graceful_stop`), wait up to *grace_s*,
+    then the hard kill. Returns pids still RUNNING afterwards (never
+    zombies, see :func:`pid_running`).
 
     A SIGSTOPped process never acts on SIGTERM while stopped, which is
     exactly why the escalation to the uncatchable, unblockable SIGKILL is
@@ -1680,6 +1753,12 @@ def terminate_pids(pids: list[int], *, grace_s: float = 10.0) -> list[int]:
     reported as running here and still gets the escalation — only ``Z``
     (already dead, merely unreaped) is excluded.
 
+    A pid whose stop was REFUSED (Windows, another session: nothing could be
+    sent) is never escalated: the hard kill would do to it what the refusal
+    exists to avoid. It is left alone, counted among the returned survivors
+    when still running, and described in *refused_out* when that list is
+    given. The wait and the escalation cover only the pids that were sent.
+
     The survivor verdict is zombie-aware and bounded-retry rather than a
     single post-SIGKILL sleep (nexus-o8dil.21), which makes this tolerant
     of a CONCURRENT killer as a side effect: a pid another sweep already
@@ -1687,29 +1766,36 @@ def terminate_pids(pids: list[int], *, grace_s: float = 10.0) -> list[int]:
     yet reads as ``Z`` — neither is a survivor. Both legs previously
     produced a false "survived SIGKILL".
     """
-    live = [p for p in pids if pid_running(p)]
-    for pid in live:
-        try:
-            os.kill(pid, signal.SIGTERM)
-        except (ProcessLookupError, PermissionError):
-            pass
+    candidates = [p for p in pids if pid_running(p)]
+    refused: list[int] = []
+    live: list[int] = []
+    for pid in candidates:
+        send = request_graceful_stop(pid, platform=platform, console_api=console_api)
+        if send.refused:
+            refused.append(pid)
+            if refused_out is not None:
+                refused_out.append(send)
+        else:
+            live.append(pid)
     deadline = time.monotonic() + grace_s
     while time.monotonic() < deadline:
         live = [p for p in live if pid_running(p)]
         if not live:
-            return []
+            break
         time.sleep(0.2)
-    for pid in live:
-        try:
-            os.kill(pid, KILL_SIGNAL)
-        except (ProcessLookupError, PermissionError):
-            pass
-    settle_deadline = time.monotonic() + _POST_KILL_SETTLE_S
-    while True:
-        live = [p for p in live if pid_running(p)]
-        if not live or time.monotonic() >= settle_deadline:
-            return live
-        time.sleep(0.1)
+    else:
+        for pid in live:
+            try:
+                os.kill(pid, KILL_SIGNAL)
+            except (ProcessLookupError, PermissionError):
+                pass
+        settle_deadline = time.monotonic() + _POST_KILL_SETTLE_S
+        while True:
+            live = [p for p in live if pid_running(p)]
+            if not live or time.monotonic() >= settle_deadline:
+                break
+            time.sleep(0.1)
+    return live + [p for p in refused if pid_running(p)]
 
 
 def storage_service_stack_matcher(
@@ -1887,6 +1973,10 @@ class ProcessSweepResult:
     error: str | None
     found: tuple[tuple[int, str], ...]
     stubborn: tuple[int, ...]
+    #: Windows only: matched processes that could not be reached at all
+    #: (another session; nexus-f9bgu.17). They were not signalled and not
+    #: killed, and they are also among ``stubborn`` while still running.
+    refused: tuple[GracefulStopSend, ...] = ()
 
     @property
     def pids(self) -> tuple[int, ...]:
@@ -1950,7 +2040,13 @@ def sweep_matching_processes(
     if not found:
         return ProcessSweepResult(available=True, error=None, found=(), stubborn=())
 
-    stubborn = tuple(terminate_pids([pid for pid, _cmd in found], grace_s=grace_s))
+    refused: list[GracefulStopSend] = []
+    stubborn = tuple(
+        terminate_pids(
+            [pid for pid, _cmd in found], grace_s=grace_s, refused_out=refused,
+        )
+    )
     return ProcessSweepResult(
         available=True, error=None, found=tuple(found), stubborn=stubborn,
+        refused=tuple(refused),
     )
