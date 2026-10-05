@@ -653,9 +653,13 @@ taxonomy_assign_hook()             # mcp_infra.py  (fires on every store_put)
   ▼
 search_cross_corpus()              # search_engine.py
   │  one POST /v1/vectors/search per embedding-model group (collections of one
-  │  prefix share a model; nexus-d9xt2), per-collection floor n_results*mult,
-  │  capped at 300 and split into sub-batches above it; thresholds and
-  │  diagnostics still resolved per collection from the row's collection tag
+  │  prefix share a model; nexus-d9xt2), sized max(n_results*mult, group size
+  │  * per-collection floor), capped at 300 and split into sub-batches above
+  │  it. The floor is max(5, n_results//2) (nexus-abdp2), or max(5,
+  │  n_results*mult) when server rerank, the lexical leg or a post-filter
+  │  (--path, --max-file-chunks) reads the pool; the lean floor shrinks the
+  │  candidate pool the later stages see. Thresholds and diagnostics are
+  │  still resolved per collection from the row's collection tag
   │  get_assignments_for_docs(result_ids) → topic_assignments dict
   │  apply_topic_boost(): distance -= 0.1 (same topic), -= 0.05 (linked topic)
   │  topic grouping when assignment coverage >50%

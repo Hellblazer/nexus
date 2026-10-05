@@ -474,6 +474,9 @@ def search_cmd(
                 rerank=want_server_rerank,
                 rerank_meta_out=rerank_meta,
                 lexical=lexical,
+                # nexus-abdp2: --path and --max-file-chunks filter the pool
+                # after retrieval, so they need the deep per-collection floor.
+                deep_candidates=resolved is not None or max_file_chunks is not None,
             )
         return raw
 

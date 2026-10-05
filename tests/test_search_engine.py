@@ -1544,6 +1544,11 @@ class _RequestCountingT3:
                         "id": f"{col}-{i}", "content": "x",
                         "distance": 0.1 + i * 0.001, "collection": col,
                     })
+                if body.get("rerank"):
+                    return {
+                        "results": rows, "rerank_degraded": False,
+                        "rerank_model": "fake",
+                    }
                 return rows
             raise AssertionError(f"unexpected request in this test: {method} {path}")
 
@@ -1585,7 +1590,9 @@ class TestModelGroupedFanOutRequestCount:
     def test_large_knowledge_group_still_splits(self, monkeypatch):
         """The split path is kept for a group the cap cannot hold: 67
         collections at n_results=10 want max(40, 67*5) = 335 > 300, so the
-        group splits into ceil(335/300) = 2 calls, never one per collection."""
+        group splits into ceil(335/300) = 2 calls, never one per collection.
+        The calls carry 34 and 33 collections, so ``max(40, k * 5)`` is 170
+        and 165 candidates each."""
         cols = _conformant_collections("knowledge", "voyage-context-3", 67)
         fake = _RequestCountingT3(monkeypatch)
         search_cross_corpus(
@@ -1596,8 +1603,8 @@ class TestModelGroupedFanOutRequestCount:
         call_sets = [set(c["collections"]) for c in fake.search_calls]
         assert call_sets[0] & call_sets[1] == set()
         assert call_sets[0] | call_sets[1] == set(cols)
-        for c in fake.search_calls:
-            assert c["n_results"] <= 300
+        assert sorted(len(c["collections"]) for c in fake.search_calls) == [33, 34]
+        assert sorted(c["n_results"] for c in fake.search_calls) == [165, 170]
 
     def test_code_corpus_fits_one_call(self, monkeypatch):
         """20 code collections (one model, mult=2): max(10*2, 20*5) = 100."""
@@ -1611,7 +1618,8 @@ class TestModelGroupedFanOutRequestCount:
         assert fake.search_calls[0]["n_results"] == 100
 
     def test_large_code_group_still_splits(self, monkeypatch):
-        """61 code collections want max(20, 61*5) = 305 > 300: 2 calls."""
+        """61 code collections want max(20, 61*5) = 305 > 300: 2 calls of 31
+        and 30 collections, ``max(20, k * 5)`` = 155 and 150 candidates."""
         cols = _conformant_collections("code", "voyage-code-3", 61)
         fake = _RequestCountingT3(monkeypatch)
         search_cross_corpus(
@@ -1622,8 +1630,8 @@ class TestModelGroupedFanOutRequestCount:
         call_sets = [set(c["collections"]) for c in fake.search_calls]
         assert call_sets[0] & call_sets[1] == set()
         assert call_sets[0] | call_sets[1] == set(cols)
-        for c in fake.search_calls:
-            assert c["n_results"] <= 300
+        assert sorted(len(c["collections"]) for c in fake.search_calls) == [30, 31]
+        assert sorted(c["n_results"] for c in fake.search_calls) == [150, 155]
 
     def test_all_corpus_issues_one_call_per_model_group(self, monkeypatch):
         """corpus=all spans two embedding models (voyage-code-3 for code,
@@ -1655,34 +1663,86 @@ class TestModelGroupedFanOutRequestCount:
         for c in fake.search_calls:
             assert c["n_results"] <= 300
 
-    def test_default_search_tenant_shape_plans_few_batches(self, monkeypatch):
-        """nexus-abdp2: the shape nexus-w032x measured on the cloud tenant,
-        a default ``knowledge,code,docs,rdr`` search (67 voyage-context-3
-        collections + 25 voyage-code-3) at n_results=40, planned 28
-        ``/v1/vectors/search`` calls under the pre-abdp2 floor. Under the
-        half-page floor (20 at n_results=40) the context group wants
-        67*20 = 1340 -> ceil(1340/300) = 5 calls and the code group
-        25*20 = 500 -> 2 calls: 7 in all. The bound is the regression
-        guard; the exact plan is pinned so a floor change shows up here."""
+    @staticmethod
+    def _default_shape():
+        """67 voyage-context-3 collections (34 knowledge, 28 docs, 5 rdr) and
+        25 voyage-code-3: the shape of a default ``knowledge,code,docs,rdr``
+        search on the cloud tenant (nexus-w032x, 2026-09-28)."""
         context_cols = (
             _conformant_collections("knowledge", "voyage-context-3", 34)
             + _conformant_collections("docs", "voyage-context-3", 28)
             + _conformant_collections("rdr", "voyage-context-3", 5)
         )
-        code_cols = _conformant_collections("code", "voyage-code-3", 25)
+        return context_cols, _conformant_collections("code", "voyage-code-3", 25)
+
+    def test_default_search_shape_at_n_30_plans_six_batches(self, monkeypatch):
+        """nexus-abdp2: the MCP ``search`` tool's default fetch is 30 rows
+        (limit 10 plus two lookahead pages). The lean floor is 15, so the
+        context group wants 67*15 = 1005 -> ceil(1005/300) = 4 calls of
+        17, 17, 17 and 16 collections (255, 255, 255 and 240 candidates) and
+        the code group 25*15 = 375 -> 2 calls of 13 and 12 collections (195
+        and 180): 6 in all, where the pre-abdp2 floor planned 28 for the
+        same shape (``test_deep_floor_keeps_the_pre_abdp2_plan``)."""
+        context_cols, code_cols = self._default_shape()
         fake = _RequestCountingT3(monkeypatch)
         search_cross_corpus(
-            "q", context_cols + code_cols, 40, fake.client,
+            "q", context_cols + code_cols, 30, fake.client,
             threshold_override=float("inf"), cluster_by=None,
         )
-        assert len(fake.search_calls) == 7
-        assert len([
-            c for c in fake.search_calls if set(c["collections"]) <= set(code_cols)
-        ]) == 2
+        assert len(fake.search_calls) == 6
+        code_calls = [c for c in fake.search_calls if set(c["collections"]) <= set(code_cols)]
+        context_calls = [c for c in fake.search_calls if set(c["collections"]) <= set(context_cols)]
+        assert sorted(len(c["collections"]) for c in context_calls) == [16, 17, 17, 17]
+        assert sorted(c["n_results"] for c in context_calls) == [240, 255, 255, 255]
+        assert sorted(len(c["collections"]) for c in code_calls) == [12, 13]
+        assert sorted(c["n_results"] for c in code_calls) == [180, 195]
         covered = [col for c in fake.search_calls for col in c["collections"]]
         assert sorted(covered) == sorted(context_cols + code_cols)
-        for c in fake.search_calls:
-            assert c["n_results"] <= 300
+
+    @pytest.mark.parametrize("how", ["rerank", "lexical", "deep_candidates"])
+    def test_deep_floor_keeps_the_pre_abdp2_plan(self, monkeypatch, how):
+        """The reranked path, the lexical leg and a caller that post-filters
+        the pool (``deep_candidates``) keep the pre-abdp2 floor
+        ``max(5, n * mult)``: the same default shape at n=30 plans 28 calls
+        (22 context batches of 3 collections, one of 1, 5 code batches of 5):
+        27 of them ask for the 300-row cap and the lone-collection batch for
+        its own ``n * mult`` = 120."""
+        context_cols, code_cols = self._default_shape()
+        fake = _RequestCountingT3(monkeypatch)
+        kwargs = {
+            "rerank": {"rerank": True},
+            "lexical": {"lexical": True},
+            "deep_candidates": {"deep_candidates": True},
+        }[how]
+        if how == "lexical":
+            # the lexical leg is a second route; this test only counts the
+            # vector leg, so serve it empty.
+            monkeypatch.setattr(
+                fake.client, "hybrid_search", lambda *a, **kw: [], raising=False,
+            )
+        search_cross_corpus(
+            "q", context_cols + code_cols, 30, fake.client,
+            threshold_override=float("inf"), cluster_by=None, **kwargs,
+        )
+        assert len(fake.search_calls) == 28
+        assert sorted(c["n_results"] for c in fake.search_calls) == [120] + [300] * 27
+        covered = [col for c in fake.search_calls for col in c["collections"]]
+        assert sorted(covered) == sorted(context_cols + code_cols)
+
+    def test_28_collection_docs_group_at_n_300(self, monkeypatch):
+        """The largest page the service allows. The lean floor is 150, so 28
+        docs collections want 28*150 = 4200 candidates -> 14 calls of two
+        collections, each asking for the 300-row cap (the pre-abdp2 floor
+        was 28 calls of one)."""
+        cols = _conformant_collections("docs", "voyage-context-3", 28)
+        fake = _RequestCountingT3(monkeypatch)
+        search_cross_corpus(
+            "q", cols, 300, fake.client,
+            threshold_override=float("inf"), cluster_by=None,
+        )
+        assert len(fake.search_calls) == 14
+        assert {c["n_results"] for c in fake.search_calls} == {300}
+        assert {len(c["collections"]) for c in fake.search_calls} == {2}
 
     def test_falsifier_documents_the_pre_fix_call_count(self, monkeypatch):
         """Not a regression test on its own -- documents the count the OLD
@@ -1715,8 +1775,9 @@ class TestDesiredCandidateCountSizing:
     the group's overall pool keeps its ``n_results * mult`` lower bound.
     Which term wins therefore depends on group size: ``n_results * mult``
     for a handful of collections, ``len(cols) * floor`` beyond that. The
-    values below are the live-measured sweep's chosen point (T2
-    nexus/measurements-abdp2-floor-sweep-2026-10-04)."""
+    values below are the lean floor's (T2
+    nexus/measurements-abdp2-floor-sweep-2026-10-04 and
+    nexus/measurements-abdp2-final-order-2026-10-05)."""
 
     def test_floor_is_half_a_page_with_a_minimum_of_five(self):
         from nexus.search_engine import _per_collection_floor
@@ -1765,14 +1826,29 @@ class TestDesiredCandidateCountSizing:
     def test_tenant_context_group_at_n_results_40_exceeds_the_cap(self):
         from nexus.search_engine import _desired_candidate_count
         from nexus.db.limits import QUOTAS
-        # nexus-w032x's measured shape: 67 voyage-context-3 collections at
-        # n_results=40 (a default search plus its page lookahead). floor =
-        # 20; 67*20 = 1340 (was 10,720 under the pre-abdp2 floor of 160).
+        # nexus-w032x's group of 67 voyage-context-3 collections at a deeper
+        # fetch of n_results=40 (the real default is 30, pinned in
+        # test_default_search_shape_at_n_30_plans_six_batches). floor = 20;
+        # 67*20 = 1340 (the deep floor of 160 wants 10,720).
         desired = _desired_candidate_count(
             _conformant_collections("knowledge", "voyage-context-3", 67), 40,
         )
         assert desired == 1340
         assert desired > QUOTAS.MAX_QUERY_RESULTS
+
+    def test_deep_floor_is_the_pre_abdp2_value(self):
+        from nexus.search_engine import _desired_candidate_count, _per_collection_floor
+        assert _per_collection_floor(10, 4, deep=True) == 40
+        assert _per_collection_floor(10, 2, deep=True) == 20
+        assert _per_collection_floor(1, 2, deep=True) == 5
+        # 12 knowledge collections at n=10: 12 * 40 = 480 deep, 60 lean.
+        cols = _conformant_collections("knowledge", "voyage-context-3", 12)
+        assert _desired_candidate_count(cols, 10, deep=True) == 480
+        assert _desired_candidate_count(cols, 10) == 60
+        # 67 at n=40: 67 * 160 = 10,720 deep.
+        assert _desired_candidate_count(
+            _conformant_collections("knowledge", "voyage-context-3", 67), 40, deep=True,
+        ) == 10720
 
     def test_floor_dominates_at_low_n_results(self):
         from nexus.search_engine import _desired_candidate_count
@@ -1790,6 +1866,61 @@ class TestDesiredCandidateCountSizing:
         assert _desired_candidate_count(
             _conformant_collections("knowledge", "voyage-context-3", 2), 100,
         ) == 400
+
+
+@pytest.mark.usefixtures("cloud_mode")
+class TestBatchPlanInvariants:
+    """nexus-abdp2 fix round: properties of the plan that hold for ANY floor,
+    so a floor change cannot quietly break the plan's shape. Run through the
+    real ``HttpVectorClient`` and a counting transport, like the request-count
+    tests above."""
+
+    @pytest.fixture(autouse=True)
+    def _disable_contradiction_check(self, monkeypatch):
+        monkeypatch.setattr(
+            "nexus.search_engine.load_config",
+            lambda: {"search": {"contradiction_check": False}},
+        )
+
+    @pytest.mark.parametrize("kind,model", [
+        ("knowledge", "voyage-context-3"),  # mult 4
+        ("code", "voyage-code-3"),          # mult 2
+    ])
+    @pytest.mark.parametrize("size", [1, 2, 5, 34, 67])
+    @pytest.mark.parametrize("n", [1, 5, 10, 30, 40, 100, 300])
+    def test_every_call_asks_for_a_full_page_and_the_floor_adds_up(
+        self, monkeypatch, kind, model, size, n,
+    ):
+        from nexus.db.limits import QUOTAS
+        from nexus.search_engine import _per_collection_floor
+
+        cols = _conformant_collections(kind, model, size)
+        fake = _RequestCountingT3(monkeypatch)
+        search_cross_corpus(
+            "q", cols, n, fake.client,
+            threshold_override=float("inf"), cluster_by=None,
+        )
+        cap = QUOTAS.MAX_QUERY_RESULTS
+        sizes = [c["n_results"] for c in fake.search_calls]
+        # Each collection is searched exactly once.
+        covered = [col for c in fake.search_calls for col in c["collections"]]
+        assert sorted(covered) == sorted(cols)
+        # No call asks for fewer rows than one page (the top-n by raw distance
+        # needs at least n candidates from every batch), and none for more
+        # than the service cap.
+        assert all(min(n, cap) <= s <= cap for s in sizes), sizes
+        # The batches together carry at least the per-collection floor for
+        # every collection, up to the cap each call can hold.
+        assert sum(sizes) >= min(len(cols) * _per_collection_floor(n), cap * len(sizes)), sizes
+        # A group that fits the cap goes out as one call (never split without
+        # need), and a split group is split into as few calls as the cap
+        # allows.
+        from nexus.search_engine import _desired_candidate_count
+        desired = _desired_candidate_count(cols, n)
+        if desired <= cap or size == 1:
+            assert len(fake.search_calls) == 1
+        else:
+            assert len(fake.search_calls) <= min(size, -(-desired // cap))
 
 
 # ── nexus-d9xt2 review/critique fold-in: batch-failure fallback ─────────────

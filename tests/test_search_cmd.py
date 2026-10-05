@@ -1329,3 +1329,26 @@ def test_the_silent_zero_hint_never_suggests_a_threshold_below_the_top_distance(
     _maybe_emit_silent_zero_note([diag], quiet=False, config={})
     err = capsys.readouterr().err
     assert "Use --threshold 0.453 to surface" in err, err
+
+
+@pytest.mark.parametrize(
+    ("extra_args", "expected"),
+    [
+        ([], False),
+        (["--max-file-chunks", "20"], True),
+        (["src"], True),  # the PATH argument
+    ],
+    ids=["no-post-filter", "max-file-chunks", "path"],
+)
+def test_post_filters_ask_for_the_deep_candidate_floor(
+    runner: CliRunner, cloud_env, extra_args: list[str], expected: bool,
+) -> None:
+    """nexus-abdp2: --path and --max-file-chunks filter the pool after
+    retrieval, so the CLI asks search_cross_corpus for the deep per-collection
+    floor; a plain search does not."""
+    mock_t3 = _mock_t3(["knowledge__test", "rdr__nexus"])
+    with patch("nexus.commands.search_cmd._t3", return_value=mock_t3), patched_mcp_infra_t3(mock_t3), \
+         patch("nexus.commands.search_cmd.search_cross_corpus", return_value=[]) as ms:
+        result = runner.invoke(main, ["search", "query", *extra_args, "--corpus", "knowledge,rdr"])
+    assert result.exit_code == 0, result.output
+    assert ms.call_args.kwargs["deep_candidates"] is expected

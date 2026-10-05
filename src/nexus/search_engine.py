@@ -524,16 +524,20 @@ def _chunked_collections(collections: list[str], n: int) -> list[list[str]]:
     return [collections[i:i + size] for i in range(0, len(collections), size)]
 
 
-#: Divisor applied to ``n_results`` for the per-collection candidate floor
+#: Divisor applied to ``n_results`` for the LEAN per-collection candidate floor
 #: (nexus-abdp2): a collection's guaranteed share of a batch request is half a
 #: result page, never below :data:`_MIN_PER_COLLECTION_FLOOR`.
 _PER_COLLECTION_FLOOR_DIVISOR = 2
 _MIN_PER_COLLECTION_FLOOR = 5
 
 
-def _per_collection_floor(n_results: int) -> int:
+def _per_collection_floor(n_results: int, mult: int = 1, *, deep: bool = False) -> int:
     """The minimum candidate share a single collection should get from a
-    batch request: ``max(5, n_results // 2)`` (nexus-abdp2).
+    batch request (nexus-abdp2).
+
+    LEAN (default): ``max(5, n_results // 2)``. DEEP: ``max(5, n_results *
+    mult)``, the pre-abdp2 value (*mult* is the group's over-fetch multiplier;
+    it is ignored when lean).
 
     History. nexus-d9xt2 first sized a batch at ``n_results * mult`` for the
     WHOLE group, which starved most members of a 44-collection group to zero
@@ -542,28 +546,50 @@ def _per_collection_floor(n_results: int) -> int:
     for knowledge/docs/rdr, 2x for code), the exact budget each collection
     received as its own call before batching, so that parity with the
     one-call-per-collection fan-out held by construction. Priced in requests
-    that was the plan nexus-w032x measured: a warm default
-    ``knowledge,code,docs,rdr`` search split into 28 ``/v1/vectors/search``
-    calls (the 67-collection voyage-context-3 group alone wanted 10,720
-    candidates and split into up to 36), about 6 s of a 12-13 s search.
+    that was a warm default ``knowledge,code,docs,rdr`` search that
+    nexus-w032x measured on 2026-09-28 at 28 ``/v1/vectors/search`` calls,
+    about 6 s of a 12-13 s search.
 
     nexus-abdp2 (Sam, 2026-09-29, "B with A as a stopgap"; A is this change)
-    lowers the floor to half a page. The floor only has to keep one dominant
-    collection from crowding every sibling to zero before threshold
-    filtering; the group's pool is still at least ``n_results * mult``
+    adds the lean floor. It only has to keep one dominant collection from
+    crowding every sibling to zero before threshold filtering; the group's
+    pool is still at least ``n_results * mult``
     (:func:`_desired_candidate_count`), so a lone collection keeps its full
-    historical over-fetch. The live recall-parity gate
-    (``tests/test_search_fanout_recall_parity.py``) was the judge: the
-    measured sweep is in T2 ``nexus/measurements-abdp2-floor-sweep-2026-10-04``
-    (lower floors were never worse than the old one; fewer splits meant fewer
-    filter-partition tail swaps). The multiplier no longer enters the floor,
-    which is why this takes no ``mult``."""
+    historical over-fetch.
+
+    The lean floor shrinks the candidate POOL, roughly 2x to 8x depending on
+    the group, and the pool is what every later stage reads. What was
+    measured (T2 ``nexus/measurements-abdp2-final-order-2026-10-05``, cloud,
+    the page a user reads after boosts and rerank, against an old-vs-old
+    noise control):
+
+    - No server rerank: the page is within noise at fetch sizes 10 and 30
+      (the case the MCP ``search`` tool is in by default).
+    - Server rerank on: the page is NOT within noise at any lean floor
+      tried. The reranker reads exactly the rows fetched per batch and picks
+      the page from them, so a smaller pool hides rows it would have ranked
+      first; mean top-10 overlap with the old page fell to about 0.7 where
+      the old page against itself was 1.0, and raising the floor to ``n``
+      or ``n * mult // 2`` recovered only part of it. The reranked path
+      therefore keeps the DEEP floor.
+    - A caller-side filter that runs after retrieval (``nx search --path``,
+      ``--max-file-chunks``) sees only the pool, and a path that selects a
+      minority collection lost rows (18 survivors became 8 in one pair).
+      Those callers ask for the deep floor too (``deep_candidates``).
+
+    The first of those is the cost the stopgap accepts; the real fix is the
+    engine-side per-collection top-K (nexus-tu8wp), which removes the pool
+    trade altogether."""
+    if deep:
+        return max(_MIN_PER_COLLECTION_FLOOR, n_results * mult)
     return max(
         _MIN_PER_COLLECTION_FLOOR, n_results // _PER_COLLECTION_FLOOR_DIVISOR,
     )
 
 
-def _desired_candidate_count(cols: list[str], n_results: int) -> int:
+def _desired_candidate_count(
+    cols: list[str], n_results: int, *, deep: bool = False,
+) -> int:
     """Uncapped per-batch candidate-count target for *cols* (nexus-d9xt2
     review/critique fold-in, T2 code-review-nexus-d9xt2 / critique-nexus-d9xt2).
 
@@ -581,13 +607,15 @@ def _desired_candidate_count(cols: list[str], n_results: int) -> int:
     class, so one multiplier applies to the whole group; a name that
     doesn't parse a model token is its own singleton group of one, so
     this never blends multipliers across genuinely different corpora).
-    nexus-abdp2: *mult* now enters only the ``n_results * mult`` term (the
-    group's pool is never smaller than one collection's historical
-    over-fetch); the per-collection floor is ``max(5, n_results // 2)``
-    (:func:`_per_collection_floor`, which carries the history of why it
-    was lowered from ``n_results * mult``), so ``len(cols) * floor``
-    dominates ``n_results * mult`` only once a group passes ``2 * mult``
-    collections instead of one.
+
+    nexus-abdp2: the per-collection floor is lean (``max(5, n_results //
+    2)``) unless *deep* (:func:`_per_collection_floor`, which carries the
+    history and the measurements). Lean, *mult* enters only the
+    ``n_results * mult`` term, so ``len(cols) * floor`` dominates it once a
+    group passes ``2 * mult`` collections at ``n_results`` 10 and above. At
+    ``n_results`` 300 the lean floor is 150, the term is capped at 300 per
+    call, and a group of ``len(cols)`` collections needs about
+    ``len(cols) / 2`` calls rather than ``len(cols)``.
 
     CAVEAT the caller must not lose sight of: the engine's combined
     ``plain_search_<dim>`` SQL function runs ONE flat ``ORDER BY
@@ -611,23 +639,27 @@ def _desired_candidate_count(cols: list[str], n_results: int) -> int:
 
     ACCEPTED COST of splitting (nexus-atylb, Sam's ruling 2026-09-07;
     nexus-abdp2 is the revisit and shrinks the exposure rather than
-    removing it: the lower floor splits far fewer groups, and the real fix
-    is the engine-side per-collection top-K, nexus-tu8wp): when a group is split into sub-batches, each sub-batch is a
-    separately filtered HNSW search, and pgvector's approximate top-K for a
-    filtered query depends on which other vectors the filter excludes. Two
-    partitions of the same collections can therefore rank near-tied
-    candidates at the tail differently from one another and from the old
-    one-call-per-collection fan-out, even though the candidate union is the
-    same. Measured live on the 9-collection rdr corpus: Jaccard 0.667
-    against the pre-batching design, the four differing ids all at ranks
-    7-10 inside a 0.005 distance band, every home collection still
-    contributing other rows. That is tail reordering among near-ties, not
-    lost recall, and it is accepted rather than avoided by not splitting;
+    removing it: the lean floor splits far fewer groups, and the real fix
+    is the engine-side per-collection top-K, nexus-tu8wp): when a group is
+    split into sub-batches, each sub-batch is a separately filtered HNSW
+    search, and pgvector's approximate top-K for a filtered query depends on
+    which other vectors the filter excludes. Two partitions of the same
+    collections can therefore rank near-tied candidates at the tail
+    differently from one another and from the old one-call-per-collection
+    fan-out, even though the candidate union is the same. Measured live on
+    the 9-collection rdr corpus: Jaccard 0.667 against the pre-batching
+    design, the four differing ids all at ranks 7-10 inside a 0.005
+    distance band, every home collection still contributing other rows.
+    That is tail reordering among near-ties, not lost recall, and it is
+    accepted rather than avoided by not splitting;
     ``tests/test_search_fanout_recall_parity.py`` holds split corpora to an
     evidence-based floor for that reason.
     """
     mult = max((_overfetch_multiplier(c) for c in cols), default=2)
-    return max(n_results * mult, len(cols) * _per_collection_floor(n_results))
+    return max(
+        n_results * mult,
+        len(cols) * _per_collection_floor(n_results, mult, deep=deep),
+    )
 
 
 #: Collections a prior call in THIS PROCESS has already proven unservable in
@@ -741,21 +773,25 @@ def search_cross_corpus(
     rerank: bool = False,
     rerank_meta_out: dict[str, dict] | None = None,
     lexical: bool = False,
+    deep_candidates: bool = False,
 ) -> list[SearchResult]:
     """Query each collection, returning combined raw results.
 
-    Per-corpus over-fetch: each collection is fetched with a target of
-    ``max(5, n_results * mult)`` candidates where *mult* is
+    Over-fetch: a batch is sized at ``max(n_results * mult, len(group) *
+    floor)`` candidates (:func:`_desired_candidate_count`), where *mult* is
     ``_overfetch_multiplier(collection)`` — 4x for knowledge/docs/rdr, 2x
-    for code.  The larger pool compensates for the distance-threshold
-    filtering that follows, ensuring enough survivors reach the caller's
-    reranker.
+    for code — and the per-collection *floor* is ``max(5, n_results // 2)``
+    (the lean floor) or, when server rerank, the lexical leg or
+    *deep_candidates* is on, ``max(5, n_results * mult)`` (the deep floor).
+    The larger pool compensates for the distance-threshold filtering that
+    follows and gives the reranker rows to choose from.
 
     nexus-d9xt2: collections are grouped by embedding model
     (:func:`_group_collections_by_embedding_model`) and each group is
     fetched with ONE combined ``/v1/vectors/search`` call sized at
     ``max(n_results * mult, len(group) * per_collection_floor)`` for the
-    whole group (see :func:`_desired_candidate_count`; capped at
+    whole group (see :func:`_desired_candidate_count`, which holds both
+    floors and what each costs; capped at
     ``QUOTAS.MAX_QUERY_RESULTS``, and a group that would need more than
     the cap to give every collection its floor is split into as few
     calls as the cap allows — see :func:`_chunked_collections`) rather
@@ -802,6 +838,15 @@ def search_cross_corpus(
     instance summarising per-collection raw/dropped counts and threshold
     context. Used by the CLI to emit the silent-zero stderr note; the
     engine never emits stderr itself.
+
+    *deep_candidates* (nexus-abdp2): size every batch with the deep
+    per-collection floor, ``max(5, n_results * mult)``. A caller that
+    filters the returned pool AFTER retrieval (``nx search --path`` and
+    ``--max-file-chunks`` do) passes it, because a post-filter sees only the
+    rows fetched and the lean floor can leave it fewer. Server rerank and
+    *lexical* imply it without being asked: the reranker reads exactly the
+    rows fetched per batch (see :func:`_per_collection_floor` for the
+    measurement).
 
     *rerank* (RDR-188, bead nexus-9o6y2.8): request the SERVER's fused
     rerank stage on each per-collection call. Only honored when *t3*
@@ -894,6 +939,9 @@ def search_cross_corpus(
 
     # RDR-188: only a capability-marked backend is asked to rerank.
     server_rerank = rerank and getattr(t3, "supports_server_rerank", False)
+    # nexus-abdp2: the reranked and lexical paths, and any caller that
+    # post-filters the pool, need the deep per-collection floor.
+    deep_pool = bool(server_rerank) or lexical or deep_candidates
 
     # RDR-217 P3: the lexical leg, ADDITIVE. Phase 1 measured why it cannot be
     # a mode-swap: the hybrid route returned ZERO rows for every prose query
@@ -948,7 +996,10 @@ def search_cross_corpus(
         # MAX_QUERY_RESULTS=300. A large limit/offset feeding fetch_n
         # upstream, multiplied by up to 4x, must not punch through the
         # service quota.
-        per_k = min(_desired_candidate_count(cols, n_results), QUOTAS.MAX_QUERY_RESULTS)
+        per_k = min(
+            _desired_candidate_count(cols, n_results, deep=deep_pool),
+            QUOTAS.MAX_QUERY_RESULTS,
+        )
         rerank_meta: dict = {}
         #: Chunk ids the lexical leg returned, whether or not the vector leg
         #: also returned them. Read by the threshold filter below.
@@ -1183,7 +1234,7 @@ def search_cross_corpus(
         # _desired_candidate_count's docstring -- scaled by len(group) as
         # well as n_results*mult, so a large group is no longer starved
         # to a handful of total candidates shared across every member.
-        desired = _desired_candidate_count(group, n_results)
+        desired = _desired_candidate_count(group, n_results, deep=deep_pool)
         if desired > QUOTAS.MAX_QUERY_RESULTS and len(group) > 1:
             # The group would need more than the service cap to give
             # every collection a fair shot -- split into as few calls as
