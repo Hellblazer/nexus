@@ -9,6 +9,8 @@ dist/
 .coverage.*
 htmlcov/
 *.log
+# Real engine log excerpts used as test fixtures (RDR-224, nexus-f9bgu.29).
+!tests/fixtures/windows_engine/*.log
 .pm/
 .pm-archives/
 .DS_Store

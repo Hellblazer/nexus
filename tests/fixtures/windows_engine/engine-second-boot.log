@@ -1,0 +1,10 @@
+2026-10-05 13:59:10,080 INFO  [main] d.nexus.service.vectors.OrtTempSweep - event=ort_temp_sweep examined=1 removed=1 live=0 too_new=0 foreign=0 failed=0
+2026-10-05 13:59:10,119 INFO  [main] dev.nexus.service.db.SchemaMigrator - event=schema_migration_start changelog=db/changelog/db.changelog-master.xml
+2026-10-05 13:59:10,121 INFO  [main] dev.nexus.service.db.SchemaMigrator - event=schema_migration_session role=nexus_admin current_schema=public search_path="$user", public pg_db_role_setting=[]
+2026-10-05 13:59:10,515 INFO  [main] dev.nexus.service.db.SchemaMigrator - event=schema_migration_pending changesets=12
+2026-10-05 13:59:10,569 INFO  [main] dev.nexus.service.db.SchemaMigrator - event=schema_migration_complete new_changesets=0 reexecuted_changesets=12 pending_at_start=12 mark_ran_changesets=0
+2026-10-05 13:59:10,579 INFO  [main] dev.nexus.service.Main - event=onnx_model_root root=C:\build\f9bgu17r2\onnx_models source=NX_ONNX_MODEL_DIR
+2026-10-05 13:59:11,065 INFO  [main] dev.nexus.service.Main - event=service_ready port=61078
+2026-10-05 13:59:27,614 INFO  [Thread-2] dev.nexus.service.Main - event=shutdown_signal
+2026-10-05 13:59:27,614 INFO  [Thread-2] dev.nexus.service.NexusService - event=service_stopped
+2026-10-05 13:59:27,631 INFO  [Thread-2] dev.nexus.service.db.BackendReaper - event=own_backends_terminated application_name=nexus-service/dev/beeb3467 count=10 pool_active=0

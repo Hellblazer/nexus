@@ -1,0 +1,11 @@
+2026-10-05 13:56:12,766 INFO  [main] dev.nexus.service.db.SchemaMigrator - event=schema_migration_start changelog=db/changelog/db.changelog-master.xml
+2026-10-05 13:56:12,770 INFO  [main] dev.nexus.service.db.SchemaMigrator - event=schema_migration_session role=nexus_admin current_schema=public search_path="$user", public pg_db_role_setting=[]
+2026-10-05 13:56:13,157 INFO  [main] dev.nexus.service.db.SchemaMigrator - event=schema_migration_pending changesets=508
+Running Changeset: db/changelog/role-001-nexus-svc.xml::role-001-1::nexus-9qvam
+Running Changeset: db/changelog/memory-001-baseline.xml::memory-001-1::nexus-gmiaf.5
+2026-10-05 13:56:14,808 INFO  [main] dev.nexus.service.db.SchemaMigrator - event=schema_migration_complete new_changesets=508 reexecuted_changesets=0 pending_at_start=508 mark_ran_changesets=0
+2026-10-05 13:56:14,820 INFO  [main] dev.nexus.service.Main - event=onnx_model_root root=C:\build\f9bgu17r2\onnx_models source=NX_ONNX_MODEL_DIR
+2026-10-05 13:56:15,533 INFO  [main] dev.nexus.service.Main - event=service_ready port=61620
+2026-10-05 13:57:35,266 INFO  [Thread-2] dev.nexus.service.Main - event=shutdown_signal
+2026-10-05 13:57:35,266 INFO  [Thread-2] dev.nexus.service.NexusService - event=service_stopped
+2026-10-05 13:57:35,284 INFO  [Thread-2] dev.nexus.service.db.BackendReaper - event=own_backends_terminated application_name=nexus-service/dev/324ce889 count=10 pool_active=0
