@@ -37,6 +37,7 @@ from typing import Callable
 
 __all__ = [
     "ensure_owner_only",
+    "grant_user_tree_access",
     "open_private",
     "owner_only_problem",
     "restrict_to_owner",
@@ -53,6 +54,10 @@ _SID_OWNER_RIGHTS = "S-1-3-4"
 
 #: Full control for one SID, protected (``P``) so nothing is inherited.
 _OWNER_ONLY_SDDL = "D:P(A;;FA;;;{sid})"
+
+#: Full control for one SID, inheritable by files (OI) and directories (CI),
+#: with inheritance from the parent left on (no ``P``).
+_USER_TREE_SDDL = "D:(A;OICI;FA;;;{sid})"
 
 
 def _is_windows(platform: str | None) -> bool:
@@ -116,6 +121,22 @@ def _windows_set_owner_only_dacl(path: str, sid: str) -> None:
     ``SetNamedSecurityInfoW`` with ``PROTECTED_DACL_SECURITY_INFORMATION``, the
     documented way to cut inheritance. Windows only; raises OSError on failure.
     """
+    _windows_set_dacl(path, _OWNER_ONLY_SDDL.format(sid=sid), protected=True)
+
+
+def _windows_grant_user_tree(path: str, sid: str) -> None:
+    """Add an explicit, inheritable full-control ACE for *sid* to *path* and keep
+    inheritance from the parent switched on. Windows only; raises OSError."""
+    _windows_set_dacl(path, _USER_TREE_SDDL.format(sid=sid), protected=False)
+
+
+def _windows_set_dacl(path: str, sddl: str, *, protected: bool) -> None:
+    """Hand the DACL of *sddl* to ``SetNamedSecurityInfoW`` for *path*.
+
+    *protected* True cuts inheritance (PROTECTED_DACL_SECURITY_INFORMATION);
+    False turns it on and lets Windows merge the parent's inheritable ACEs back
+    in (UNPROTECTED_DACL_SECURITY_INFORMATION). Windows only.
+    """
     if os.name != "nt":
         raise OSError("a Windows DACL can only be set on Windows")
     import ctypes  # noqa: PLC0415 — Windows-only branch
@@ -142,7 +163,7 @@ def _windows_set_owner_only_dacl(path: str, sid: str) -> None:
     descriptor = ctypes.c_void_p()
     # SDDL_REVISION_1 = 1
     if not advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW(
-        _OWNER_ONLY_SDDL.format(sid=sid), 1, ctypes.byref(descriptor), None,
+        sddl, 1, ctypes.byref(descriptor), None,
     ):
         raise ctypes.WinError(ctypes.get_last_error())
     try:
@@ -154,11 +175,11 @@ def _windows_set_owner_only_dacl(path: str, sid: str) -> None:
         ):
             raise ctypes.WinError(ctypes.get_last_error())
         if not present.value or not dacl.value:
-            raise OSError("the owner-only security descriptor carries no DACL")
-        # SE_FILE_OBJECT = 1; DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION
-        error = advapi32.SetNamedSecurityInfoW(
-            path, 1, 0x00000004 | 0x80000000, None, None, dacl, None,
-        )
+            raise OSError("the security descriptor carries no DACL")
+        # SE_FILE_OBJECT = 1; DACL_SECURITY_INFORMATION (4) with PROTECTED (0x80000000)
+        # or UNPROTECTED (0x20000000)
+        flags = 0x00000004 | (0x80000000 if protected else 0x20000000)
+        error = advapi32.SetNamedSecurityInfoW(path, 1, flags, None, None, dacl, None)
         if error:
             raise ctypes.WinError(error)
     finally:
@@ -339,3 +360,31 @@ def ensure_owner_only(
         platform=platform, sid_lookup=sid_lookup, trustees_lookup=trustees_lookup,
     ) is not None:
         restrict_to_owner(path, platform=platform, sid_lookup=sid_lookup, acl_apply=acl_apply)
+
+
+def grant_user_tree_access(
+    path: str | os.PathLike[str],
+    *,
+    platform: str | None = None,
+    sid_lookup: Callable[[], str] | None = None,
+    acl_apply: Callable[[str, str], None] | None = None,
+) -> None:
+    """Give the current user an explicit, inheritable full-control ACE on the
+    directory *path*, so every file created under it afterwards carries one.
+
+    WHY (nexus-f9bgu.18, measured on Windows 11 / Python 3.12.13, elevated
+    session). PostgreSQL's ``initdb`` and ``postgres`` re-run themselves under
+    a restricted token that marks Administrators deny-only. A directory made
+    with ``Path.mkdir(mode=0o700)`` (Python 3.12.4 and later apply an ACL for
+    0o700 on Windows; nexus makes its config dir that way in several places)
+    carries ACEs for SYSTEM, Administrators and OWNER RIGHTS only, and files an
+    elevated process creates under it are owned by Administrators. Under the
+    restricted token none of those ACEs grants anything, so ``initdb`` dies
+    ``0xC0000135`` with no message. An explicit ACE for the user's own SID does
+    grant, and it must be on BOTH the extracted bundle tree and the data
+    directory (each alone fails). POSIX: nothing to do.
+    """
+    if not _is_windows(platform):
+        return
+    sid = (sid_lookup if sid_lookup is not None else _windows_user_sid)()
+    (acl_apply if acl_apply is not None else _windows_grant_user_tree)(str(path), sid)

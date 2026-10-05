@@ -32,6 +32,7 @@ from pathlib import Path
 
 import structlog
 
+from nexus._winsec import grant_user_tree_access
 from nexus.db.pg_provision import PgBinaries
 
 _log = structlog.get_logger(__name__)
@@ -277,6 +278,11 @@ def _extract_and_validate(archive: Path, dest: Path) -> None:
     tree already in service.
     """
     dest.mkdir(parents=True, exist_ok=True)
+    # Windows: an explicit, inheritable user ACE BEFORE the tree is written.
+    # Under a 0o700 config dir an elevated extraction otherwise lands files
+    # postgres cannot read under its restricted token (initdb dies 0xC0000135).
+    # A no-op on POSIX. See grant_user_tree_access.
+    grant_user_tree_access(dest)
     _log.info("pg_bundle_extracting", archive=str(archive), extract_root=str(dest))
     try:
         with tarfile.open(archive, "r:xz") as tf:
