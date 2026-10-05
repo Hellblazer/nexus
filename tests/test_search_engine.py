@@ -1462,6 +1462,10 @@ class TestThresholdGateServiceMode:
                 TestThresholdGateServiceMode._ROWS.get(collection_names[0], []),
         )
         monkeypatch.setattr(client.__class__, "embedding_mode", lambda self: mode)
+        # This test pins the threshold gate through the batched path (its fake
+        # replaces ``search``); the per-collection route is covered in
+        # tests/test_search_per_collection_route.py.
+        monkeypatch.setattr(client.__class__, "supports_per_collection_search", False)
         return client
 
     @pytest.mark.parametrize(
@@ -1532,6 +1536,14 @@ class _RequestCountingT3:
         self.client = hvc.HttpVectorClient()
 
         def _fake_request(method, path, *, tenant, timeout, body):
+            if method == "POST" and path == "/v1/vectors/search-per-collection":
+                # An engine that predates the route (nexus-tu8wp.2): the batched
+                # path these tests pin is what a client falls back to.
+                import io
+                import urllib.error
+                raise urllib.error.HTTPError(
+                    path, 404, "Not Found", {}, io.BytesIO(b'{"error": "not found"}'),
+                )
             if method == "POST" and path == "/v1/vectors/search":
                 cols = body["collections"]
                 self.search_calls.append(

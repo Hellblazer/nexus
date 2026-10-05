@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import itertools
+import math
 import threading
 from dataclasses import dataclass, field
 from typing import Any
@@ -13,7 +14,11 @@ import structlog
 from nexus import call_deadline
 from nexus.config import TuningConfig, get_telemetry_config, load_config
 from nexus.corpus import embedding_model_for_collection_name
-from nexus.db.http_vector_client import HttpVectorClient, VectorServiceError
+from nexus.db.http_vector_client import (
+    HttpVectorClient,
+    PerCollectionEnvelopeError,
+    VectorServiceError,
+)
 from nexus.errors import (
     SearchEmbeddingProfileMismatchError,
     is_embedding_profile_mismatch_error_text,
@@ -587,6 +592,65 @@ def _per_collection_floor(n_results: int, mult: int = 1, *, deep: bool = False) 
     )
 
 
+#: Largest ``limit`` the per-collection route accepts (4 x MAX_QUERY_RESULTS) and
+#: the ceiling it applies when rerank is on (the reranker's per-request cap).
+#: A request above either is a 400 on the engine, so the client clamps rather
+#: than learns it from the refusal (nexus-tu8wp.2, critique-tu8wp1 trap 3).
+_PER_COLLECTION_MAX_LIMIT = 1200
+_PER_COLLECTION_RERANK_MAX_LIMIT = 1000
+
+#: Collections one per-collection request may name; a larger model group is
+#: sent as several requests and merged client-side.
+_PER_COLLECTION_MAX_COLLECTIONS = 256
+
+#: ``error_kind`` values that mean "this collection's vector width does not
+#: match the query embedder's": the nexus-9tsdf stale-orphan class, handled
+#: by the dimension-mismatch path below.
+_DIMENSION_ERROR_KINDS = frozenset({"dimension_mismatch", "unsupported_dimension"})
+
+
+def _per_collection_request_sizes(
+    n_results: int, mult: int, *, rerank: bool,
+) -> tuple[int, int]:
+    """``(per_collection_k, limit)`` for one ``search-per-collection`` request
+    over a group whose widest over-fetch multiplier is *mult* (nexus-tu8wp.2).
+
+    ``per_collection_k`` is the per-collection count the pre-batching
+    one-call-per-collection fan-out used, ``max(5, n_results * mult)`` capped
+    at ``MAX_QUERY_RESULTS``: the engine route reproduces that fan-out's
+    candidates for each collection, which is what the recall-parity reference
+    measures. A group that mixes corpora (local bge-768 puts code and docs on
+    one model) takes the largest multiplier, so no member gets less than it
+    had.
+
+    ``limit`` is the global cut after the merge, the figure
+    :func:`_cap_enrichment_pool` keeps afterwards: ``max(MAX_QUERY_RESULTS,
+    n_results * 4)``, clamped to the route's ceiling of 1200 and, with rerank
+    on, to the 1000 rows the reranker accepts.
+    """
+    from nexus.db.limits import QUOTAS  # noqa: PLC0415 — branch-local; same deferral as search_cross_corpus
+
+    per_k = max(1, min(_per_collection_floor(n_results, mult, deep=True),
+                       QUOTAS.MAX_QUERY_RESULTS))
+    limit = min(max(QUOTAS.MAX_QUERY_RESULTS, n_results * _ENRICHMENT_POOL_HEADROOM),
+                _PER_COLLECTION_MAX_LIMIT)
+    if rerank:
+        limit = min(limit, _PER_COLLECTION_RERANK_MAX_LIMIT)
+    return per_k, limit
+
+
+def _is_mixed_model_error(exc: VectorServiceError) -> bool:
+    """True when the engine refused a request because its collections do not
+    share one embedding model or width (HTTP 400, "mixed embedding models in
+    one combined-query call" / "mixed dimensions"). The client groups by the
+    model token in the collection NAME; a registry that disagrees with a name
+    is the case this catches, and the remedy is to ask per collection."""
+    if exc.code != 400:
+        return False
+    text = str(exc).lower()
+    return "mixed embedding" in text or "mixed dimension" in text
+
+
 def _desired_candidate_count(
     cols: list[str], n_results: int, *, deep: bool = False,
 ) -> int:
@@ -967,6 +1031,76 @@ def search_cross_corpus(
             "--lexical."
         )
 
+    def _threshold_for(col: str) -> float | None:
+        """The distance threshold applied to *col*: ``None`` when thresholds
+        are off for this handle, the override when one was given, else the
+        configured per-corpus value."""
+        if not apply_thresholds:
+            return None
+        if threshold_override is not None:
+            return threshold_override
+        return _threshold_for_collection(col, cfg)
+
+    def _to_result(r: dict, col: str) -> SearchResult:
+        """One engine row as a :class:`SearchResult` attributed to *col*."""
+        return SearchResult(
+            id=r["id"],
+            # RDR-169 Phase B fix round 1 (T2 review-nexus-zw2em-
+            # rdr169-phase-b-2026-09-11, CRITICAL): a reference-only
+            # chunk (chunk_text=NULL) is reachable through plain
+            # /v1/vectors/search (hybrid_search's FTS/trigram gate is
+            # the only path that excludes it). Coerce None -> "" here,
+            # at the SINGLE boundary where the raw engine dict becomes
+            # a SearchResult, so every downstream consumer (mcp/core's
+            # render code, formatters.py, the CLI) sees a plain string
+            # and never has to re-guard defensively.
+            content=r.get("content") or "",
+            distance=r["distance"],
+            collection=col,
+            metadata={k: v for k, v in r.items()
+                      if k not in {"id", "content", "distance"}},
+        )
+
+    def _lexical_rows(cols: list[str], per_k: int, rerank_meta: dict) -> list[dict]:
+        """The lexical leg's rows for *cols*: ``hybrid_search`` with its OWN
+        failure handling (see the P3 review notes below), a degrade merged
+        into *rerank_meta*. Raises :class:`LexicalLegUnavailableError` rather
+        than returning vector-only rows."""
+        try:
+            # RERANKED WHENEVER THE VECTOR LEG IS (P3 critique CRITICAL
+            # 1). Without this the union is defeated by the CLI's own
+            # ordering: search_cmd.py puts rows carrying a rerank_score
+            # FIRST and truncates at n, and a lexical row that was never
+            # scored lands in the unscored tail and is dropped — in the
+            # default invocation, which is exactly where Phase 1
+            # measured the rare-token win. Both routes share one rerank
+            # tail server-side (VectorHandler#sendSearchResult), so the
+            # two legs' scores are on the same scale by construction and
+            # the rows can be ordered against each other honestly.
+            if server_rerank:
+                lex_meta: dict = {}
+                lex_raw = t3.hybrid_search(
+                    query, cols, n_results=per_k, where=effective_where,
+                    rerank=True, rerank_meta_out=lex_meta,
+                )
+                # A degrade on EITHER leg is a degrade for this batch;
+                # merged rather than overwritten so the vector leg's
+                # state cannot be masked by the lexical leg's success.
+                if lex_meta.get("degraded"):
+                    rerank_meta.update(lex_meta)
+            else:
+                lex_raw = t3.hybrid_search(query, cols, n_results=per_k,
+                                           where=effective_where)
+        except VectorServiceError as lex_exc:
+            raise LexicalLegUnavailableError(
+                f"the lexical leg failed for {cols}: {lex_exc}. Refusing "
+                "rather than returning vector-only rows, which would look "
+                "like an answer while the leg you asked for never ran. The "
+                "vector search itself succeeded, so retrying without "
+                "--lexical will return results."
+            ) from lex_exc
+        return lex_raw
+
     def _search_batch(cols: list[str]) -> list[dict]:
         """Search one embedding-model-homogeneous batch of collections in a
         single combined ``/v1/vectors/search`` call, returning one result
@@ -1029,39 +1163,7 @@ def search_cross_corpus(
                 # outcome the whole design forbids. What changes is that the
                 # failure now names the lexical leg as the cause and never
                 # poisons the collection.
-                try:
-                    # RERANKED WHENEVER THE VECTOR LEG IS (P3 critique CRITICAL
-                    # 1). Without this the union is defeated by the CLI's own
-                    # ordering: search_cmd.py puts rows carrying a rerank_score
-                    # FIRST and truncates at n, and a lexical row that was never
-                    # scored lands in the unscored tail and is dropped — in the
-                    # default invocation, which is exactly where Phase 1
-                    # measured the rare-token win. Both routes share one rerank
-                    # tail server-side (VectorHandler#sendSearchResult), so the
-                    # two legs' scores are on the same scale by construction and
-                    # the rows can be ordered against each other honestly.
-                    if server_rerank:
-                        lex_meta: dict = {}
-                        lex_raw = t3.hybrid_search(
-                            query, cols, n_results=per_k, where=effective_where,
-                            rerank=True, rerank_meta_out=lex_meta,
-                        )
-                        # A degrade on EITHER leg is a degrade for this batch;
-                        # merged rather than overwritten so the vector leg's
-                        # state cannot be masked by the lexical leg's success.
-                        if lex_meta.get("degraded"):
-                            rerank_meta.update(lex_meta)
-                    else:
-                        lex_raw = t3.hybrid_search(query, cols, n_results=per_k,
-                                                   where=effective_where)
-                except VectorServiceError as lex_exc:
-                    raise LexicalLegUnavailableError(
-                        f"the lexical leg failed for {cols}: {lex_exc}. Refusing "
-                        "rather than returning vector-only rows, which would look "
-                        "like an answer while the leg you asked for never ran. The "
-                        "vector search itself succeeded, so retrying without "
-                        "--lexical will return results."
-                    ) from lex_exc
+                lex_raw = _lexical_rows(cols, per_k, rerank_meta)
                 # Provenance is tracked in a SET, never stamped on the row
                 # (review IMPORTANT 3 and 4). Stamping had two defects: a row
                 # BOTH legs returned kept the vector copy and so lost the
@@ -1123,12 +1225,7 @@ def search_cross_corpus(
 
         parts = []
         for col in cols:
-            if not apply_thresholds:
-                threshold = None
-            elif threshold_override is not None:
-                threshold = threshold_override
-            else:
-                threshold = _threshold_for_collection(col, cfg)
+            threshold = _threshold_for(col)
             col_raw = by_col.get(col, [])
             results: list[SearchResult] = []
             dropped = 0
@@ -1166,23 +1263,7 @@ def search_cross_corpus(
                     if min_dropped_distance is None or distance < min_dropped_distance:
                         min_dropped_distance = distance
                     continue
-                results.append(SearchResult(
-                    id=r["id"],
-                    # RDR-169 Phase B fix round 1 (T2 review-nexus-zw2em-
-                    # rdr169-phase-b-2026-09-11, CRITICAL): a reference-only
-                    # chunk (chunk_text=NULL) is reachable through plain
-                    # /v1/vectors/search (hybrid_search's FTS/trigram gate is
-                    # the only path that excludes it). Coerce None -> "" here,
-                    # at the SINGLE boundary where the raw engine dict becomes
-                    # a SearchResult, so every downstream consumer (mcp/core's
-                    # render code, formatters.py, the CLI) sees a plain string
-                    # and never has to re-guard defensively.
-                    content=r.get("content") or "",
-                    distance=distance,
-                    collection=col,
-                    metadata={k: v for k, v in r.items()
-                              if k not in {"id", "content", "distance"}},
-                ))
+                results.append(_to_result(r, col))
             parts.append({
                 "col": col,
                 "error": None,
@@ -1195,6 +1276,196 @@ def search_cross_corpus(
                 "rerank_meta": rerank_meta,
                 "lexical_ids": {r.id for r in results if r.id in lexical_ids},
             })
+        return parts
+
+    # nexus-tu8wp.2: the engine-side per-collection top-K. One request per
+    # embedding-model group replaces the batch-and-over-fetch fan-out of
+    # _search_batch; see _search_group_per_collection.
+    per_collection_route = getattr(t3, "supports_per_collection_search", False) is True
+
+    def _search_group_per_collection(
+        group: list[str], *, allow_split: bool = True,
+    ) -> list[dict] | None:
+        """Search one embedding-model group with ONE
+        ``/v1/vectors/search-per-collection`` request, returning one part per
+        collection in *group* in the shape the merge loop below reads.
+
+        Each collection yields its own top-``per_collection_k`` (the count the
+        pre-batching one-call-per-collection fan-out used), so a dominant
+        collection cannot crowd a small one out of the pool; the engine applies
+        the per-collection thresholds we send, merges and cuts at ``limit``,
+        and reranks once over the merged rows when rerank is on. The part for
+        a collection is built from its ``per_collection`` stats (raw count,
+        dropped count, minimum distances: the numbers the old client counted
+        itself) and the rows tagged with its name, so diagnostics, telemetry,
+        ``failed_collections`` and the error classes run unchanged.
+
+        Returns ``None`` when the group must be searched by the batched path
+        instead: the engine does not serve the route (404, remembered by the
+        client for 10 minutes) or answered with an envelope the client
+        refuses. Failure mapping, per collection (``error_kind``, the engine's
+        stable value; the human ``error`` text is kept):
+
+        - ``dimension_mismatch`` / ``unsupported_dimension``: the nexus-9tsdf
+          stale-orphan class, handled by the dimension-mismatch path;
+        - ``statement_timeout`` / ``fanout_budget_exhausted``: the collection
+          is reported failed (``failed_collections``), the others are served;
+        - any other non-null error: failed collection, same handling.
+
+        A request the engine fails as a whole (503 pool or admission
+        exhaustion, a spent request budget, 422 for an unregistered or
+        model-unavailable group) marks every collection of the group failed
+        with the engine's text, which the existing text classifiers read. A
+        400 that says the collections do not share one model (the engine
+        trusts its registry, the client the model token in the name) is
+        retried as one request per collection instead of failing the group.
+
+        ``--lexical``: the lexical leg stays on ``/hybrid-search`` exactly as
+        the batched path runs it (same batches, same per-batch size). Its rows
+        are unioned in here, threshold-exempt, with the vector copy winning a
+        tie; the diagnostics count each added row as raw.
+        """
+        if len(group) > _PER_COLLECTION_MAX_COLLECTIONS:
+            parts: list[dict] = []
+            for i in range(0, len(group), _PER_COLLECTION_MAX_COLLECTIONS):
+                sub = _search_group_per_collection(
+                    group[i:i + _PER_COLLECTION_MAX_COLLECTIONS], allow_split=allow_split,
+                )
+                if sub is None:
+                    return None
+                parts.extend(sub)
+            return parts
+
+        mult = max((_overfetch_multiplier(c) for c in group), default=2)
+        per_collection_k, limit = _per_collection_request_sizes(
+            n_results, mult, rerank=bool(server_rerank),
+        )
+        # Finite thresholds only: the client method omits None and non-finite
+        # values, and a threshold_override of inf (--no-threshold, the parity
+        # gate) is not valid JSON.
+        thresholds: dict[str, float | None] = {}
+        for c in group:
+            t = _threshold_for(c)
+            if t is not None and math.isfinite(t):
+                thresholds[c] = t
+        rerank_meta: dict = {}
+        try:
+            envelope = t3.search_per_collection(
+                query, group, per_collection_k=per_collection_k, limit=limit,
+                thresholds=thresholds or None, where=effective_where,
+                rerank=bool(server_rerank), rerank_meta_out=rerank_meta,
+            )
+        except PerCollectionEnvelopeError as exc:
+            _log.warning(
+                "search_per_collection_envelope_refused",
+                collections=len(group),
+                error=str(exc),
+                consequence="this group is searched by the batched /search path",
+            )
+            return None
+        except VectorServiceError as exc:
+            if allow_split and len(group) > 1 and _is_mixed_model_error(exc):
+                _log.warning(
+                    "search_per_collection_mixed_model_group",
+                    collections=len(group),
+                    error=str(exc),
+                    consequence="searched as one request per collection",
+                )
+                split: list[dict] = []
+                for c in group:
+                    sub = _search_group_per_collection([c], allow_split=False)
+                    if sub is None:
+                        return None
+                    split.extend(sub)
+                return split
+            return [{"col": c, "error": str(exc)} for c in group]
+        if envelope is None:
+            return None
+
+        rows_by_col: dict[str, list[dict]] = {c: [] for c in group}
+        for r in envelope["results"]:
+            name = r.get("collection") or (group[0] if len(group) == 1 else "")
+            if name in rows_by_col:
+                rows_by_col[name].append(r)
+        stats = {e["collection"]: e for e in envelope["per_collection"]}
+
+        parts = []
+        for col in group:
+            stat = stats.get(col)
+            if stat is not None and (stat["error"] is not None
+                                     or stat["error_kind"] is not None):
+                parts.append({
+                    "col": col,
+                    "error": str(stat["error"] or stat["error_kind"]),
+                    "error_kind": stat["error_kind"],
+                })
+                continue
+            results = [_to_result(r, col) for r in rows_by_col[col]]
+            if stat is None:
+                # Reported skipped (X-Nexus-Skipped-Collections): no catalog
+                # row, so the engine did not search it. As in the batched
+                # path, that reads as a collection with no rows.
+                raw_count, dropped = 0, 0
+                min_raw = min_dropped = None
+            else:
+                raw_count, dropped = stat["raw_count"], stat["dropped"]
+                min_raw, min_dropped = stat["min_raw_distance"], stat["min_dropped_distance"]
+            parts.append({
+                "col": col,
+                "error": None,
+                "results": results,
+                "raw_count": raw_count,
+                "dropped": dropped,
+                "threshold": _threshold_for(col),
+                "min_dropped_distance": min_dropped,
+                "min_raw_distance": min_raw,
+                "rerank_meta": rerank_meta,
+                "lexical_ids": set(),
+            })
+
+        if lexical:
+            desired = _desired_candidate_count(group, n_results, deep=True)
+            if desired > QUOTAS.MAX_QUERY_RESULTS and len(group) > 1:
+                n_batches = min(len(group), -(-desired // QUOTAS.MAX_QUERY_RESULTS))
+                lex_batches = _chunked_collections(group, n_batches)
+            else:
+                lex_batches = [group]
+
+            def _lex_batch(cols: list[str]) -> tuple[list[str], list[dict]]:
+                per_k = min(_desired_candidate_count(cols, n_results, deep=True),
+                            QUOTAS.MAX_QUERY_RESULTS)
+                return cols, _lexical_rows(cols, per_k, rerank_meta)
+
+            lex_workers = min(8, len(lex_batches))
+            if lex_workers <= 1:
+                lex_out = [_lex_batch(b) for b in lex_batches]
+            else:
+                with ThreadPoolExecutor(max_workers=lex_workers) as lex_pool:
+                    lex_out = list(lex_pool.map(_lex_batch, lex_batches))
+            live = {p["col"]: p for p in parts if p["error"] is None}
+            lexical_by_col: dict[str, set[str]] = {c: set() for c in live}
+            for cols, lex_raw in lex_out:
+                for r in lex_raw:
+                    rid = r.get("id")
+                    col = r.get("collection") or (cols[0] if len(cols) == 1 else "")
+                    part = live.get(col)
+                    if not rid or part is None:
+                        continue
+                    lexical_by_col[col].add(rid)
+                    if any(x.id == rid for x in part["results"]):
+                        continue
+                    # A vector copy the engine dropped by threshold comes back
+                    # in here: lexical rows are threshold-exempt, so the row
+                    # is kept, as the batched path keeps it.
+                    part["results"].append(_to_result(r, col))
+                    part["raw_count"] += 1
+                    d = r["distance"]
+                    if part["min_raw_distance"] is None or d < part["min_raw_distance"]:
+                        part["min_raw_distance"] = d
+            for col, part in live.items():
+                part["lexical_ids"] = {
+                    x.id for x in part["results"] if x.id in lexical_by_col[col]
+                }
         return parts
 
     # nexus-d9xt2: group the collection fan-out by embedding model (the
@@ -1224,10 +1495,32 @@ def search_cross_corpus(
     # multi-collection group again, so one persistently-orphaned
     # collection cannot keep downgrading its whole healthy model group
     # back to N round trips on every subsequent search.
+    #
+    # nexus-tu8wp.2: when the engine serves the per-collection route, every
+    # model group is ONE request to it (below) and the batching that follows
+    # sees only the groups the route could not serve: all of them against an
+    # engine that predates it (404), none against one that has it. The
+    # batched path is untouched, so against an old engine it behaves exactly
+    # as before.
+    pc_partials: list[dict] = []
+    fallback_collections = collections
+    if per_collection_route:
+        route_groups = _group_collections_by_embedding_model(collections)
+        group_workers = min(8, len(route_groups))
+        if group_workers <= 1:
+            group_parts = [_search_group_per_collection(g) for g in route_groups]
+        else:
+            with ThreadPoolExecutor(max_workers=group_workers) as group_pool:
+                group_parts = list(group_pool.map(_search_group_per_collection, route_groups))
+        fallback_collections = [
+            c for g, gp in zip(route_groups, group_parts) if gp is None for c in g
+        ]
+        pc_partials = [p for gp in group_parts if gp is not None for p in gp]
+
     with _poisoned_collections_lock:
         poisoned_snapshot = set(_poisoned_collections)
-    batches: list[list[str]] = [[c] for c in collections if c in poisoned_snapshot]
-    healthy_collections = [c for c in collections if c not in poisoned_snapshot]
+    batches: list[list[str]] = [[c] for c in fallback_collections if c in poisoned_snapshot]
+    healthy_collections = [c for c in fallback_collections if c not in poisoned_snapshot]
 
     for group in _group_collections_by_embedding_model(healthy_collections):
         # Sizing (nexus-d9xt2 review/critique fold-in): see
@@ -1255,7 +1548,7 @@ def search_cross_corpus(
     else:
         with ThreadPoolExecutor(max_workers=workers) as pool:
             batch_results = list(pool.map(_search_batch, batches))
-    partials = [part for batch in batch_results for part in batch]
+    partials = pc_partials + [part for batch in batch_results for part in batch]
     # nexus-5ezgn: a caller that has abandoned this call (nx_answer's
     # budget cut) stops it here and between the enrichment legs below,
     # rather than letting it run its remaining round trips for nothing.
@@ -1297,9 +1590,14 @@ def search_cross_corpus(
         col = part["col"]
         if part.get("error") is not None:
             failed_collections[col] = part["error"]
+            # nexus-tu8wp.2: the per-collection route names its failure with a
+            # stable error_kind; the batched path has only text, so a part
+            # without a kind keeps the text classifier.
+            kind = part.get("error_kind")
             if is_embedding_profile_mismatch_error_text(part["error"]):
                 model_unavailable_cols[col] = part["error"]
-            elif "dim" in part["error"].lower():
+            elif (kind in _DIMENSION_ERROR_KINDS if kind is not None
+                  else "dim" in part["error"].lower()):
                 dim_mismatch_cols.append(col)
             else:
                 _log.warning(
