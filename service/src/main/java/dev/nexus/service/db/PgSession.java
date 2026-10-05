@@ -361,8 +361,13 @@ public final class PgSession {
         setSearchStatementTimeout(ctx, SEARCH_STATEMENT_TIMEOUT_MS);
     }
 
-    /** Explicit-bound form, for tests that need a bound shorter than the env-resolved one. */
-    static void setSearchStatementTimeout(DSLContext ctx, int timeoutMs) {
+    /**
+     * Explicit-bound form: for tests that need a bound shorter than the env-resolved one,
+     * and for the per-collection fan-out, whose arms bound each statement by
+     * {@code min(search bound, remaining request budget)} (nexus-tu8wp.1). The caller owns
+     * keeping the value at {@code >= 1}: to Postgres {@code 0} means DISABLED.
+     */
+    public static void setSearchStatementTimeout(DSLContext ctx, int timeoutMs) {
         setLocal(ctx, "statement_timeout", Integer.toString(timeoutMs));
     }
 

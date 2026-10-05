@@ -203,6 +203,7 @@ public final class VectorHandler implements HttpHandler {
                 case "/upsert-reference-only" -> handleUpsertReferenceOnlyGone(exchange); // RDR-223 P3.2: retired
                 case "/search"        -> handleSearch(exchange, method);
                 case "/query"         -> handleSearch(exchange, method);   // alias
+                case "/search-per-collection" -> handleSearchPerCollection(exchange, method);  // nexus-tu8wp.1
                 case "/hybrid-search" -> handleHybridSearch(exchange, method);  // RDR-155 P3
                 case "/search-metadata-scoped" -> handleSearchMetadataScoped(exchange, method);  // RDR-156 P4
                 case "/search-topic-scoped"    -> handleSearchTopicScoped(exchange, method);     // RDR-156 P4
@@ -302,6 +303,17 @@ public final class VectorHandler implements HttpHandler {
             // so the request is retried against the restarted engine.
             log.info("event=vector_refused_shutting_down op={} error={}", op, e.getMessage());
             HttpUtil.send(exchange, 503, json(Map.of("error", e.getMessage())));
+        } catch (dev.nexus.service.vectors.SearchFanoutTransientException e) {
+            // nexus-tu8wp.1: a per-collection search statement failed transiently (a statement
+            // timeout above all). The WHOLE request fails, never a partial result. 503, inside the
+            // client's gateway retry codes, with the same Retry-After shape the deadline arm uses.
+            long retryAfter = dev.nexus.service.vectors.RequestDeadlineExceededException.DEFAULT_RETRY_AFTER_SECONDS;
+            log.warn("event=vector_search_fanout_transient op={} sqlstate={} error={}",
+                     op, e.sqlState(), e.getMessage());
+            exchange.getResponseHeaders().set("Retry-After", Long.toString(retryAfter));
+            HttpUtil.send(exchange, 503, json(Map.of(
+                "error", e.getMessage(),
+                "retry_after_seconds", retryAfter)));
         } catch (OwnerlessChunkWriteException e) {
             // RDR-223 Phase 3 Step 2 (nexus-z0o2p.24): the write names a chash no live document
             // owns. 422 (well-formed, refused), with a reason a client can branch on and the first
@@ -572,6 +584,109 @@ public final class VectorHandler implements HttpHandler {
         var searchResult = repo.searchWithTokens(tenant, queryText, collections, nResults, where,
                                                  includeSourceUri);
         sendSearchResult(ex, body, queryText, searchResult);
+    }
+
+    /**
+     * POST /v1/vectors/search-per-collection (nexus-tu8wp.1): per-collection top-K over ONE
+     * embedding model group, merged and ranked server-side. Replaces the client's
+     * batch-and-over-fetch fan-out of {@code /search}, which a dense collection could crowd a small
+     * one out of.
+     *
+     * <p>Request:
+     * <pre>
+     * {
+     *   "query":              "search text",
+     *   "collections":        ["name1", ...],   // one embedding model, at most 256
+     *   "per_collection_k":   40,               // 1..300, each collection's own top-K
+     *   "limit":              300,              // 1..1200, global cut after the merge
+     *   "thresholds":         {"name1": 0.45, "name2": null},  // optional; keys must be in collections
+     *   "where":              {"key": "val"},   // optional, applied in every collection's arm
+     *   "include_source_uri": false,
+     *   "rerank":             false,            // optional; then limit must be &lt;= 1000
+     *   "rerank_top_k":       null              // optional; requires rerank
+     * }
+     * </pre>
+     *
+     * <p>Response 200, always an object (the route has no legacy shape to preserve):
+     * <pre>
+     * {
+     *   "results": [ ...the /search row shape, at most limit rows... ],
+     *   "per_collection": [{"collection", "raw_count", "dropped", "min_raw_distance",
+     *                       "min_dropped_distance", "error", "error_class"}, ...],
+     *   "per_collection_k": 40,   // echo
+     *   "limit": 300,             // echo
+     *   // when rerank: rerank_degraded / rerank_model / rerank_error, as on /search
+     * }
+     * </pre>
+     * {@code X-Nexus-Usage-Tokens} and {@code X-Nexus-Skipped-Collections} are emitted as on
+     * {@code /search}. A row is dropped by its collection's threshold when
+     * {@code distance > threshold}. A permanent per-collection error (for example a dimension
+     * mismatch) is reported in that collection's {@code per_collection} entry while the others are
+     * served; a transient failure in any collection fails the whole request with 503.
+     *
+     * <p><strong>Rerank semantics.</strong> The rerank stage runs once over the merged rows (at
+     * most {@code limit}), not once per batch of a client fan-out, so a row beyond the distance
+     * cut can no longer be rescued by rerank. Accepted in the design of record (T2
+     * {@code nexus/design-tu8wp-engine-per-collection-topk-2026-10-04-part2}, Q3).
+     *
+     * <p>Lexical/hybrid search stays on {@code /hybrid-search}.
+     */
+    private void handleSearchPerCollection(HttpExchange ex, String method) throws IOException {
+        requireMethod(ex, method, "POST");
+        var repo   = requirePgRepo(ex);
+        var tenant = requireTenant(ex);
+        Map<String, Object> body = readBody(ex);
+        String queryText          = requireString(body, "query");
+        List<String> collections  = requireStringList(body, "collections");
+        for (String c : collections) {
+            if (c.isBlank()) {
+                throw new IllegalArgumentException("field 'collections' must not contain a blank name");
+            }
+        }
+        int perK                  = requireInt(body, "per_collection_k");
+        int limit                 = requireInt(body, "limit");
+        Map<String, Double> thresholds = optThresholds(body, "thresholds");
+        Map<String, Object> where = optMap(body, "where");
+        boolean includeSourceUri  = optBool(body, "include_source_uri", false);
+        boolean rerank            = optBool(body, "rerank", false);
+        Integer rerankTopK        = optInteger(body, "rerank_top_k");
+        if (!rerank && rerankTopK != null) {
+            throw new IllegalArgumentException(
+                    "rerank_top_k requires \"rerank\": true — set both or neither");
+        }
+        if (rerank && limit > dev.nexus.service.vectors.VoyageReranker.MAX_DOCS_PER_REQUEST) {
+            throw new IllegalArgumentException("rerank scores at most "
+                    + dev.nexus.service.vectors.VoyageReranker.MAX_DOCS_PER_REQUEST
+                    + " rows, but limit is " + limit + " — lower limit or drop rerank");
+        }
+
+        var result = repo.searchPerCollection(tenant, queryText, collections, perK, limit,
+                                              thresholds, where, includeSourceUri);
+        emitTokenUsage(ex, result.tokens());
+        emitSkippedCollections(ex, result.skippedCollections());
+
+        Map<String, Object> envelope = new LinkedHashMap<>();
+        if (rerank) {
+            envelope.putAll(rerankStage.apply(queryText, result.rows(), rerankTopK));
+        } else {
+            envelope.put("results", result.rows());
+        }
+        List<Map<String, Object>> perCollection = new ArrayList<>(result.perCollection().size());
+        for (var stat : result.perCollection()) {
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("collection", stat.collection());
+            m.put("raw_count", stat.rawCount());
+            m.put("dropped", stat.dropped());
+            m.put("min_raw_distance", stat.minRawDistance());
+            m.put("min_dropped_distance", stat.minDroppedDistance());
+            m.put("error", stat.error());
+            m.put("error_class", stat.errorClass());
+            perCollection.add(m);
+        }
+        envelope.put("per_collection", perCollection);
+        envelope.put("per_collection_k", perK);
+        envelope.put("limit", limit);
+        HttpUtil.send(ex, 200, json(envelope));
     }
 
     /**
@@ -2078,6 +2193,37 @@ public final class VectorHandler implements HttpHandler {
         if (val == null) return null;
         if (val instanceof Map<?, ?> m) return (Map<String, Object>) m;
         return null;
+    }
+
+    /** Required integer field: absent or null is a 400, never a silent default. */
+    private int requireInt(Map<String, Object> body, String key) {
+        if (body.get(key) == null) {
+            throw new IllegalArgumentException("missing required field: " + key);
+        }
+        return optInt(body, key, 0);
+    }
+
+    /**
+     * Optional {@code {collection: number|null}} map (the per-collection distance thresholds).
+     * Absent/null is an empty map; a non-object body or a non-numeric value is a 400.
+     */
+    private Map<String, Double> optThresholds(Map<String, Object> body, String key) {
+        Object val = body.get(key);
+        if (val == null) return Map.of();
+        if (!(val instanceof Map<?, ?> m)) {
+            throw new IllegalArgumentException("field '" + key + "' must be an object of collection -> number|null");
+        }
+        Map<String, Double> out = new LinkedHashMap<>();
+        for (Map.Entry<?, ?> e : m.entrySet()) {
+            Object v = e.getValue();
+            if (v == null) continue;
+            if (!(v instanceof Number num)) {
+                throw new IllegalArgumentException(
+                    "field '" + key + "' value for '" + e.getKey() + "' must be a number or null");
+            }
+            out.put(String.valueOf(e.getKey()), num.doubleValue());
+        }
+        return out;
     }
 
     private int optInt(Map<String, Object> body, String key, int defaultValue) {

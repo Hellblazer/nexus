@@ -106,6 +106,8 @@ public final class TenantScope {
     private final DataSource dataSource;
     private final Semaphore admission;
     private final long admissionTimeoutMs;
+    private final int poolSize;
+    private final int admissionLimit;
 
     public TenantScope(DataSource dataSource) {
         this.dataSource = dataSource;
@@ -122,7 +124,9 @@ public final class TenantScope {
             }
         }
         this.admissionTimeoutMs = timeoutMs;
+        this.poolSize = poolSize;
         final int permits = poolSize * 2;
+        this.admissionLimit = permits;
         this.admission = ADMISSION.computeIfAbsent(
             dataSource, ds -> new Semaphore(permits, true));
     }
@@ -131,8 +135,29 @@ public final class TenantScope {
     TenantScope(DataSource dataSource, int admissionPermits, long admissionTimeoutMs) {
         this.dataSource = dataSource;
         this.admissionTimeoutMs = admissionTimeoutMs;
+        this.poolSize = Math.max(1, admissionPermits / 2);
+        this.admissionLimit = admissionPermits;
         this.admission = ADMISSION.computeIfAbsent(
             dataSource, ds -> new Semaphore(admissionPermits, true));
+    }
+
+    /**
+     * The pool size this scope sized its admission bound from (HikariCP's maximum pool
+     * size, else {@link #DEFAULT_POOL_SIZE}). Read by the per-request search fan-out to
+     * derive its default parallelism (nexus-tu8wp.1).
+     */
+    public int poolSize() {
+        return poolSize;
+    }
+
+    /**
+     * The number of callers admitted inside {@link #withTenant} at once, {@code 2 *}
+     * {@link #poolSize()}. A single request that fans out over several
+     * {@code withTenant} calls must keep its own parallelism under this figure, or it
+     * would queue behind itself (nexus-tu8wp.1).
+     */
+    public int admissionLimit() {
+        return admissionLimit;
     }
 
     /**
