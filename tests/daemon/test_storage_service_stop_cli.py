@@ -366,6 +366,12 @@ def test_refusal_message_names_the_owning_session_and_the_remedy_and_exits_nonze
     assert "already stopped" not in text
     assert "survived the stop escalation" not in text
     assert "Storage service stopped" not in text
+    # Measured on Windows 11 (nexus-f9bgu.17 round 2): the refused pid sits in
+    # ``stubborn`` by design, and these two stderr lines used to be printed
+    # for it, claiming a SIGKILL and an unreadable process table on a stop
+    # that signalled nothing and never looked.
+    assert "survived SIGKILL" not in text
+    assert "process table could not be checked" not in text
 
 
 def test_refusal_without_session_ids_still_says_what_to_do(config_dir: Path) -> None:

@@ -1040,16 +1040,25 @@ def service_stop_cmd(config_dir_str: str | None, with_pg: bool) -> None:
     # dropping that caveat. Skipped when source is already
     # "process_table_unavailable" — that branch's own message already
     # covers this.
-    if not outcome.sweep_verified and outcome.source != "process_table_unavailable":
+    if (
+        not outcome.sweep_verified
+        and outcome.source != "process_table_unavailable"
+        and not outcome.refused
+    ):
         click.echo(
             "Note: the process table could not be checked (no 'ps' and no "
             "/proc), so a lingering engine child surviving the supervisor "
             "signal above could not be ruled out.",
             err=True,
         )
-    if outcome.stubborn:
+    # A refused pid is in ``stubborn`` by design (it is still running), but it
+    # was never signalled: "survived SIGKILL" would be false for it, and the
+    # refusal block below already says what happened (nexus-f9bgu.17 round 2,
+    # measured on Windows 11).
+    killed_survivors = [p for p in outcome.stubborn if p not in refused_pids]
+    if killed_survivors:
         click.echo(
-            f"Warning: pid(s) {', '.join(str(p) for p in outcome.stubborn)} "
+            f"Warning: pid(s) {', '.join(str(p) for p in killed_survivors)} "
             "survived SIGKILL and may still be running.",
             err=True,
         )
