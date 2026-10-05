@@ -547,17 +547,29 @@ runs, release-shaped `-Ob` native exe; nothing here ran on a workflow runner):
   ran the stop CLI under `pythonw` with a `CREATE_NO_WINDOW` console and stdout
   to files, so `AttachConsole(ATTACH_PARENT_PROCESS)` had no console parent to
   return to, and a dead standard handle would not have shown. The re-attach to a
-  real parent console was shown only in the ssh conpty spike. Whether the CLI can
-  still print after the stop, and whether the REFUSED text reaches stderr, is
-  unmeasured. The result of that measurement is recorded here when it lands;
+  real parent console was shown only in the ssh conpty spike. Measured in fix
+  round A (T2 `224-review-p3-fixes-a`, stand-in supervisor): from a `cmd.exe`
+  console and from a Windows Terminal tab, `nx daemon service stop` printed its
+  result into the console buffer (read back with `ReadConsoleOutputCharacterW`),
+  exited 0, and a follow-up echo worked, both before and after the change; the
+  dead-handle hazard did not reproduce. The attach and send now run in a short
+  helper process (`python -m nexus.util.win_console`, `DETACHED_PROCESS`), so the
+  CLI never detaches its own console. Covered with a stand-in supervisor only;
   (b) a real engine that ignores the break (stand-in only);
   (c) a logon trigger that actually fires;
   (d) a same-session denial (an elevated target stopped from a non-elevated
-  shell, or another user's service);
+  shell, or another user's service). Measured in round A for a High-integrity
+  session-0 target stopped from a Medium visible console: REFUSED on stderr with
+  the account-and-elevation remedy (the helper cannot read a High-integrity
+  target's session, so the session-numbered text is not shown), exit 1, nothing
+  killed. Another user's service is unmeasured;
   (e) a lease pid that is not the console group's root:
-  `GenerateConsoleCtrlEvent` takes a process group id. The measured stop worked
-  and the record does not say whether the break landed through the lease pid or
-  through the process-table sweep, so a launcher layer other than the venv
+  `GenerateConsoleCtrlEvent` takes a process group id. Measured in round A: the
+  lease's `supervisor_pid` is the real `python.exe`, a child of the venv
+  trampoline that is the group root, and a break sent to it was delivered 3 of 3
+  (exit in 0.9 to 1.1 s); the real stop CLI made one helper call, to that pid,
+  and the sweep found nothing left, so the lease path delivered the break. Why a
+  non-root pid works is undocumented, so a launcher layer other than the venv
   trampoline is untested.
 - [x] A stop during ONNX Runtime initialisation, sent as `CTRL_BREAK`, exits
   without the o5xyx crash — **Status**: Verified on both branches of the gate,
@@ -1715,7 +1727,9 @@ Right-sized for an Architecture record that replaces an accepted direction.
   have not run on `win-release`).
 - 2026-10-05: Phase 3 review fix round B (nexus-f9bgu.33, .34). The same-session
   stop assumption is now marked partially verified, with its five uncovered shapes
-  listed and a slot for the visible-console measurement; the getuid count is 22
+  listed; fix round A then measured (a), (d) and (e) with a stand-in supervisor
+  and wrote the results into the assumption, leaving (b), (c) and another user's
+  service open; the getuid count is 22
   sites plus six exempt; the orphan-tracker fix is noted as unreachable from the
   production sweep on Windows; the autostart text says `Hidden` is false and what
   hides the window; the upgrade bullet says the real bundle swap with a live
