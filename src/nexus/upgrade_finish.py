@@ -69,6 +69,7 @@ from nexus.daemon.service_registry import (
 #: not exercise this behavior).
 from nexus.daemon.service_registry import pid_alive as _pid_alive
 from nexus.engine_version import REQUIRED_ENGINE_VERSION, parse_engine_version
+from nexus.util.nx_argv import nx_argv
 
 if TYPE_CHECKING:
     from nexus import install_layout
@@ -801,8 +802,8 @@ def restart_stale(report: SkewReport, *, dry_run: bool = False) -> list[str]:
                 actions.append(f"{proc.kind} pid {proc.pid}: gone or recycled; skipped")
                 continue
             try:
-                run_bounded(["nx", "mineru", "stop"], text=False, timeout=60)
-                run_bounded(["nx", "mineru", "start"], text=False, timeout=300)
+                run_bounded(nx_argv("mineru", "stop"), text=False, timeout=60)
+                run_bounded(nx_argv("mineru", "start"), text=False, timeout=300)
                 actions.append(f"cycled MinerU (was pid {proc.pid})")
             except Exception as exc:  # noqa: BLE001 — best-effort cycle; failure surfaced in the action line
                 actions.append(f"mineru cycle failed: {exc}")
@@ -1563,7 +1564,7 @@ def _restart_and_verify(
     resolved_config_dir = str(config_dir.resolve())
     try:
         stop = run_bounded(
-            ["nx", "daemon", "service", "stop", "--config-dir", resolved_config_dir],
+            nx_argv("daemon", "service", "stop", "--config-dir", resolved_config_dir),
             timeout=60,
         )
         sweep_refused: list[GracefulStopSend] = []
@@ -1580,7 +1581,7 @@ def _restart_and_verify(
             actions.append(f"NEEDS HUMAN: {sweep_note}")
             return actions
         start = run_bounded(
-            ["nx", "daemon", "service", "start", "--config-dir", resolved_config_dir],
+            nx_argv("daemon", "service", "start", "--config-dir", resolved_config_dir),
             timeout=120,
         )
     except Exception as exc:  # noqa: BLE001 — best-effort cycle; surfaced in the line
@@ -2404,7 +2405,7 @@ def _restart_service_after_unit_reinstall(config_dir: Path) -> tuple[bool, str]:
     the only thing a human reads.
     """
     resolved_config_dir = str(config_dir.resolve())
-    argv = ["nx", "daemon", "service", "start", "--config-dir", resolved_config_dir]
+    argv = nx_argv("daemon", "service", "start", "--config-dir", resolved_config_dir)
     try:
         start = run_bounded(argv, timeout=120)
     except Exception as exc:  # noqa: BLE001 — best-effort restart; surfaced in the returned clause
@@ -2664,7 +2665,7 @@ def converge_service_autostart_unit(
 
     try:
         stop = run_bounded(
-            ["nx", "daemon", "service", "stop", "--config-dir", resolved_config_dir],
+            nx_argv("daemon", "service", "stop", "--config-dir", resolved_config_dir),
             timeout=60,
         )
     except Exception as exc:  # noqa: BLE001 — best-effort convergence; surfaced in the line

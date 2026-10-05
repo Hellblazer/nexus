@@ -30,6 +30,7 @@ Design rules:
 """
 from __future__ import annotations
 
+import ntpath
 import os
 import re
 import shutil
@@ -430,12 +431,38 @@ _LAUNCHD_DISABLED_TOKENS = frozenset({"disabled", "true"})
 _LAUNCHD_ENABLED_TOKENS = frozenset({"enabled", "false"})
 
 
+def _windows_manager_path(name: str) -> str | None:
+    """The one absolute location of a Windows manager, or ``None`` for a name
+    that is not one. ``%SystemRoot%\\System32\\<name>.exe``, joined with the
+    Windows rules on any host so the arm runs under test everywhere."""
+    if name not in _WINDOWS_MANAGERS:
+        return None
+    root = os.environ.get("SystemRoot") or r"C:\Windows"
+    return ntpath.join(root, "System32", f"{name}.exe")
+
+
+#: Managers that exist on Windows. ``launchctl`` and ``systemctl`` do not.
+_WINDOWS_MANAGERS: frozenset[str] = frozenset({"schtasks"})
+
+
 def _manager_executable(name: str) -> str:
     """The argv[0] to spawn for a manager command: the bare name when PATH
     resolves it (the OS does the lookup, argv stays as every log and test
     has always seen it), a known absolute location when PATH is trimmed,
     and the bare name again when neither holds so the spawn raises the
-    OS's own FileNotFoundError."""
+    OS's own FileNotFoundError.
+
+    On Windows the bare name is NEVER spawned (RDR-224, nexus-f9bgu.33):
+    ``CreateProcess`` searches the current directory before ``System32``, and
+    ``shutil.which`` prepends it, so a ``schtasks.exe`` in the working
+    directory would run as the user. A Windows manager resolves to its
+    ``%SystemRoot%\\System32`` path whether or not it exists there (a missing
+    file raises the OS's own ``FileNotFoundError`` at the spawn).
+    """
+    if _is_windows():
+        absolute = _windows_manager_path(name)
+        if absolute is not None:
+            return absolute
     if shutil.which(name):
         return name
     for candidate in _MANAGER_ABSOLUTE_PATHS.get(name, ()):
@@ -510,6 +537,10 @@ def is_mutating_manager_cmd(cmd: list[str]) -> bool:
 
 def _manager_found(name: str) -> bool:
     """True when :func:`_manager_executable` resolves *name* to a real binary."""
+    if _is_windows():
+        absolute = _windows_manager_path(name)
+        if absolute is not None:
+            return os.access(absolute, os.X_OK)
     if shutil.which(name):
         return True
     return any(

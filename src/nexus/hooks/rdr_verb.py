@@ -394,8 +394,10 @@ def _collection_exists(target: str) -> bool | None:
     if left < _LISTING_MIN_S:
         return None  # the probe failed and there is no budget to ask the listing: unknown, not absent
     try:
+        from nexus.util.nx_argv import nx_argv  # noqa: PLC0415 — stdlib-only; kept off the hook's import path until the listing fallback runs
+
         result = run_bounded(
-            ["nx", "collection", "list"],
+            nx_argv("collection", "list"),
             timeout=left,
         )
         if result.returncode == 0:

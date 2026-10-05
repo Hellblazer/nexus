@@ -25,6 +25,7 @@ import click
 import yaml
 
 from nexus.bounded_subprocess import run_bounded
+from nexus.util.nx_argv import nx_argv
 from nexus.plans.audit_rounds import (
     BLOCKS_PLANNING,
     DISCOVER_AT_IMPLEMENTATION,
@@ -3295,7 +3296,7 @@ def preamble_rdr_research(args: tuple[str, ...]) -> None:
             print("### Existing Research Findings (T2)")
             try:
                 list_result = run_bounded(
-                    ["nx", "memory", "list", "--project", f"{repo_name}_rdr"],
+                    nx_argv("memory", "list", "--project", f"{repo_name}_rdr"),
                     timeout=10,
                 )
                 list_out = (list_result.stdout or "").strip()

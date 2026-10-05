@@ -267,7 +267,11 @@ class _FakeSchtasks:
         return [c[1].lstrip("/").lower() for c in self.calls]
 
     def __call__(self, argv: list[str], *, timeout: float, **_kw: object) -> subprocess.CompletedProcess[str]:
-        assert argv[0] == "schtasks", f"a Windows install must only ever call schtasks, saw {argv[0]!r}"
+        # The absolute System32 path, never the bare name (nexus-f9bgu.33: the bare
+        # name is resolved through the current directory on Windows).
+        assert argv[0] == installer._windows_manager_path("schtasks"), (
+            f"a Windows install must only ever call System32 schtasks, saw {argv[0]!r}"
+        )
         self.calls.append(list(argv))
         verb = argv[1].lstrip("/").lower()
         if verb == "create":
@@ -361,9 +365,10 @@ class TestWindowsInstall:
         assert str((tmp_path / "cfg").resolve()) in body
         assert win.verbs() == ["create", "run"], "register first, then start it now"
         assert win.calls[0] == [
-            "schtasks", "/Create", "/TN", windows_autostart.TASK_NAME, "/XML", str(result.dest), "/F",
+            installer._windows_manager_path("schtasks"), "/Create", "/TN", windows_autostart.TASK_NAME, "/XML", str(result.dest), "/F",
         ]
-        assert result.activated_cmd == win.calls[0]
+        # The reported command is the logical one; the spawn resolved argv[0].
+        assert result.activated_cmd == ["schtasks", *win.calls[0][1:]]
         assert "started via" in result.detail and result.warnings == ()
 
     def test_an_identical_registered_task_is_left_alone(self, win: _FakeSchtasks) -> None:
@@ -429,7 +434,7 @@ class TestWindowsInstall:
         # launchd/systemd arms would call a different binary and trip the fake.
         installer.install_autostart(tier="service")
         assert win.calls, "the injected Windows platform never reached schtasks"
-        assert all(c[0] == "schtasks" for c in win.calls)
+        assert all(c[0] == installer._windows_manager_path("schtasks") for c in win.calls)
 
 
 class TestWindowsActivationState:

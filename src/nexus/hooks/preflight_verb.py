@@ -145,8 +145,10 @@ def run(payload: dict | None) -> HookResult:  # noqa: ARG001 — preflight never
     """Run the preflight checks. Ignores *payload*: this verb never reads
     stdin, exactly as the original script never did.
     """
+    from nexus.util.nx_argv import nx_argv  # noqa: PLC0415 — stdlib-only; kept off the hook's import path
+
     checks = [
-        _probe("nx (conexus CLI)",  ["nx", "--version"]),
+        _probe("nx (conexus CLI)",  nx_argv("--version")),
         _probe("bd (beads, optional)", ["bd", "version"]),
     ]
     # bd is optional; only nx-being-broken triggers the degraded

@@ -35,6 +35,7 @@ import structlog
 
 from nexus import config as _config
 from nexus.bounded_subprocess import run_bounded
+from nexus.util.nx_argv import nx_argv
 
 _log = structlog.get_logger(__name__)
 
@@ -199,7 +200,15 @@ def _resolve_nx_bin() -> list[str]:
     back to ``[python, "-m", "nexus.cli"]`` when ``shutil.which("nx")``
     returns None. Callers must respect the token boundaries when
     rendering into platform autostart formats.
+
+    On Windows it is always ``[python, "-m", "nexus.cli"]`` with this
+    process's own interpreter (RDR-224, nexus-f9bgu.33): ``shutil.which``
+    there searches the current directory first, so an ``nx.exe`` left in the
+    working directory would be spawned as the supervisor. The argv is the same
+    program the ``nx`` console script runs.
     """
+    if _autostart_platform() == "win32":
+        return nx_argv()
     found = shutil.which("nx")
     if found:
         return [found]
