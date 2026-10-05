@@ -72,6 +72,10 @@ class PgVectorSearchPerCollectionExactFallbackIntegrationTest {
             "-c enable_seqscan=off -c enable_bitmapscan=off -c enable_sort=off");
         ds = new HikariDataSource(cfg);
         PgSession.overrideScanBudgetForTests(SCAN_CAP, 1);
+        // nexus-tu8wp.6: these fixtures are small, so the cardinality router would send them exact
+        // and the starved HNSW walk this class exists to repair would never run. Router off here;
+        // the routed path is PgVectorCardinalityRouterIntegrationTest's.
+        PgSession.overrideSearchExactMaxRowsForTests(0);
         var scope = new TenantScope(ds);
         var embedder = new PgVectorRepositoryContractTest.FakeEmbedder(384);
         repo = new PgVectorRepository(scope, embedder, embedder);
@@ -117,6 +121,7 @@ class PgVectorSearchPerCollectionExactFallbackIntegrationTest {
     @AfterAll
     void stopAll() {
         PgSession.resetScanBudgetForTests();
+        PgSession.resetSearchExactMaxRowsForTests();
         if (ds != null) {
             ds.close();
         }

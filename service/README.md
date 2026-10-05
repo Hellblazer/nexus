@@ -75,6 +75,10 @@ would disable the bound and is refused at boot. The shutdown hook also
 terminates this process's own backends (`BackendReaper`, keyed on a
 per-boot `application_name`) before closing the pool, since a CPU-bound
 backend never notices a closed socket.
+`NX_SEARCH_EXACT_MAX_ROWS` (default 10000, provisional; range 0..1000000, `0` disables) is the
+cardinality router's threshold (nexus-tu8wp.6): a plain-search statement whose selected
+collections hold at most that many physical rows in the tenant runs exact instead of
+walking the shared HNSW index. A malformed value fails the service AT BOOT.
 `NX_OWNERLESS_WRITE_MODE` (RDR-223 Phase 3 Step 2) is `enforce` or `log-only`;
 **unset or blank means `log-only`**, so only an explicit `enforce` refuses a
 `/v1/vectors/upsert-chunks` or `/store-put` write whose chashes have no live

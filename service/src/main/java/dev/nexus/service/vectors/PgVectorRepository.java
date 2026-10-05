@@ -1359,7 +1359,7 @@ public final class PgVectorRepository {
         org.jooq.Table<?> fn = plainSearchFn(dim, queryVec, colls, wherePlan, nResults);
 
         Result<? extends Record> result = runPlainSearchStatement(
-            tenant, fn, nResults, PgSession::startupSearchStatementTimeoutMs, false);
+            tenant, fn, dim, colls, nResults, PgSession::startupSearchStatementTimeoutMs, false);
 
         List<Map<String, Object>> rows = plainSearchRows(result);
         // RDR-169 G5: surface address triple additively (chash + span always; source_uri opt-in)
@@ -1388,9 +1388,13 @@ public final class PgVectorRepository {
 
     /**
      * ONE {@code plain_search_<dim>} statement under the tenant RLS scope with the serving
-     * GUCs. This is {@link #searchWithTokens}'s single-collection statement verbatim (moved,
-     * not changed) and the body of every fan-out arm.
+     * GUCs. This is {@link #searchWithTokens}'s single-collection statement (moved, not changed) and
+     * the body of every fan-out arm, plus the cardinality router (nexus-tu8wp.6): inside the same
+     * transaction, a bounded count of the physical rows the selected collections hold decides whether
+     * the statement runs exact or walks the shared HNSW index. See {@link #probeSelectedRows}.
      *
+     * @param dim the dispatch dim {@code fn} was built for (names the chunks embedding column)
+     * @param colls the collection names {@code fn} selects, the set the router's probe counts
      * @param statementTimeoutMs the statement bound, EVALUATED inside the transaction at the moment
      *        {@code statement_timeout} is set (after admission and the connection wait, so queueing
      *        is charged to the caller): the env-resolved search bound for {@link #searchWithTokens};
@@ -1401,6 +1405,7 @@ public final class PgVectorRepository {
      *        budget shrinks while the first attempt runs); false keeps the first bound
      */
     private Result<? extends Record> runPlainSearchStatement(String tenant, org.jooq.Table<?> fn,
+                                                             int dim, String[] colls,
                                                              int nResults,
                                                              java.util.function.IntSupplier statementTimeoutMs,
                                                              boolean rebindBeforeExactRerun) {
@@ -1422,11 +1427,109 @@ public final class PgVectorRepository {
             // collection set's selectivity (a cached generic HNSW plan on a tiny
             // collection ran ~30s and returned EMPTY in production).
             PgSession.setSearchPlanCacheMode(ctx);
-            // nexus-zrcj7: plain_search_<dim> (vectors-009) replaces the raw
-            // rawVectorFetch(sql, binds) call — still wrapped by exactSelectFrom/
-            // exactOnUnderReturn for the nexus-bq06h exact fallback.
-            return exactSelectFrom(ctx, nResults, fn, rebindBeforeExactRerun ? statementTimeoutMs : null);
+            // nexus-tu8wp.6: the cardinality router. The threshold 0 disables it, and no probe runs.
+            long startNanos = System.nanoTime();
+            int exactMaxRows = PgSession.searchExactMaxRows();
+            int probedRows = -1;
+            boolean exact = false;
+            boolean completed = false;
+            try {
+                Result<? extends Record> result;
+                if (exactMaxRows > 0) {
+                    probedRows = probeSelectedRows(ctx, dim, colls, exactMaxRows);
+                    exact = probedRows <= exactMaxRows;
+                }
+                if (exact) {
+                    // The selected set is small enough that the exact plan (PK-prefix bitmap scan or
+                    // seq scan, then sort) is cheaper than an HNSW walk filtered down to it, and it is
+                    // complete, so the empty-result fallback below has nothing to repair.
+                    ROUTED_EXACT.incrementAndGet();
+                    PgSession.disableIndexScanForExactFallback(ctx);
+                    result = ctx.selectFrom(fn).fetch();
+                } else {
+                    ROUTED_HNSW.incrementAndGet();
+                    // nexus-zrcj7: plain_search_<dim> (vectors-009) replaces the raw
+                    // rawVectorFetch(sql, binds) call — still wrapped by exactSelectFrom/
+                    // exactOnUnderReturn for the nexus-bq06h exact fallback.
+                    result = exactSelectFrom(ctx, nResults, fn, rebindBeforeExactRerun ? statementTimeoutMs : null);
+                }
+                completed = true;
+                return result;
+            } finally {
+                logIfSlow(colls, exact, probedRows, System.nanoTime() - startNanos, completed);
+            }
         });
+    }
+
+    /**
+     * The cardinality router's probe (nexus-tu8wp.6): how many physical rows the selected collections
+     * hold in this tenant, counted only up to {@code limit + 1}. Bounded at O(limit) on the primary
+     * key's {@code (tenant, collection)} prefix however large the collections are. Runs inside the
+     * search's own tenant transaction, so row-level security supplies the tenant predicate: another
+     * tenant's rows in a same-named collection are not counted. It counts PHYSICAL rows (not the
+     * live(c) subset the search returns), because that is the population the exact plan scans.
+     */
+    private static int probeSelectedRows(DSLContext ctx, int dim, String[] colls, int limit) {
+        DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
+        Integer n = ctx.selectCount()
+                       .from(ctx.selectOne()
+                                .from(ch.table())
+                                .where(ch.collection().eq(DSL.any(colls)))
+                                .limit(limit + 1)
+                                .asTable("probe"))
+                       .fetchOne(0, Integer.class);
+        return n == null ? 0 : n;
+    }
+
+    /** Statements routed exact / left on HNSW by the cardinality router (nexus-tu8wp.6). */
+    private static final java.util.concurrent.atomic.AtomicLong ROUTED_EXACT =
+            new java.util.concurrent.atomic.AtomicLong();
+    private static final java.util.concurrent.atomic.AtomicLong ROUTED_HNSW =
+            new java.util.concurrent.atomic.AtomicLong();
+
+    /** Package-visible for tests, same shape as {@link #exactFallbackCount()}. */
+    public static long routedExactCount() {
+        return ROUTED_EXACT.get();
+    }
+
+    /**
+     * Plain-search statements that took the HNSW path: above the router threshold, or with the router
+     * disabled ({@code NX_SEARCH_EXACT_MAX_ROWS=0}).
+     */
+    public static long routedHnswCount() {
+        return ROUTED_HNSW.get();
+    }
+
+    /** A plain-search statement slower than this logs {@code vector_search_statement_slow}. */
+    static final long SLOW_STATEMENT_MS = 1_000L;
+
+    /** Most collection names one slow-statement line spells out; a wide flat search names the rest by count. */
+    private static final int SLOW_LOG_MAX_NAMES = 8;
+
+    private static volatile long slowStatementMs = SLOW_STATEMENT_MS;
+
+    /** TEST SEAM (nexus-tu8wp.6): pin the slow-statement threshold. Pair with {@link #resetSlowStatementMsForTests()}. */
+    public static void overrideSlowStatementMsForTests(long ms) {
+        slowStatementMs = ms;
+    }
+
+    public static void resetSlowStatementMsForTests() {
+        slowStatementMs = SLOW_STATEMENT_MS;
+    }
+
+    private static void logIfSlow(String[] colls, boolean exact, int probedRows, long elapsedNanos,
+                                  boolean completed) {
+        long ms = elapsedNanos / 1_000_000L;
+        if (ms < slowStatementMs) {
+            return;
+        }
+        String names = colls.length <= SLOW_LOG_MAX_NAMES
+            ? String.join(",", colls)
+            : String.join(",", java.util.Arrays.copyOf(colls, SLOW_LOG_MAX_NAMES))
+              + ",+" + (colls.length - SLOW_LOG_MAX_NAMES) + "_more";
+        log.warn("event=vector_search_statement_slow route={} probed_rows={} elapsed_ms={} "
+                 + "collection_count={} collections={} completed={}",
+                 exact ? "exact" : "hnsw", probedRows, ms, colls.length, names, completed);
     }
 
     /** Maps one {@code plain_search_<dim>} record to the flat search row shape (shared by both routes). */
@@ -2103,10 +2206,11 @@ public final class PgVectorRepository {
                                    WherePlan wherePlan, int k, long requestDeadlineNanos,
                                    long fanoutDeadlineNanos, int searchBoundMs, Semaphore armGate,
                                    ArmRun run) {
-        org.jooq.Table<?> fn = plainSearchFn(dim, queryVec, new String[] {collection}, wherePlan, k);
+        String[] colls = new String[] {collection};
+        org.jooq.Table<?> fn = plainSearchFn(dim, queryVec, colls, wherePlan, k);
         acquireArmSlot(armGate, requestDeadlineNanos, fanoutDeadlineNanos);
         try {
-            return plainSearchCandidates(runPlainSearchStatement(tenant, fn, k, () -> {
+            return plainSearchCandidates(runPlainSearchStatement(tenant, fn, dim, colls, k, () -> {
                 ArmBound bound = armBound(requestDeadlineNanos, fanoutDeadlineNanos, System.nanoTime(),
                                           searchBoundMs);
                 run.limiter = bound.limiter();

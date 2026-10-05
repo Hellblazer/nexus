@@ -324,6 +324,9 @@ public final class Main {
                      scanBudget.maxScanTuples(), scanBudget.workMemBytes(),
                      scanBudget.budgetBytes(), scanBudget.memMultiplier(),
                      scanBudget.effectiveMemBytes());
+            // nexus-tu8wp.6: same fail-fast for the cardinality router's NX_SEARCH_EXACT_MAX_ROWS.
+            log.info("event=search_exact_router max_rows={}",
+                     dev.nexus.service.db.PgSession.startupSearchExactMaxRows());
             // nexus-r0vkh: same fail-fast for the taxonomy assign bounds.
             log.info("event=taxonomy_assign_bounds statement_timeout_ms={} lock_timeout_ms={}",
                      dev.nexus.service.db.PgSession.startupTaxonomyAssignStatementTimeoutMs(),

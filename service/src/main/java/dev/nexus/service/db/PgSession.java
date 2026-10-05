@@ -511,6 +511,77 @@ public final class PgSession {
     }
 
     /**
+     * Cardinality router threshold (nexus-tu8wp.6): when the collections one plain search selects
+     * hold at most this many PHYSICAL rows in the tenant, the statement runs exact (index scans
+     * off) instead of walking the shared HNSW index. 0 disables the router.
+     *
+     * <p>PROVISIONAL. 10000 is a placeholder chosen to sit well inside what an exact scan over a
+     * PK-prefix bitmap or seq scan costs on 768/1024-d rows; the conexus fork measurement B sets the
+     * real value, and no engine tag is cut on this number. Until then, set
+     * {@code NX_SEARCH_EXACT_MAX_ROWS} explicitly where it matters.
+     */
+    static final int DEFAULT_SEARCH_EXACT_MAX_ROWS = 10_000;
+
+    /** Upper bound on the {@code NX_SEARCH_EXACT_MAX_ROWS} override: an exact scan over more rows than
+     *  this would no longer be the cheap plan the router exists to take. */
+    static final int SEARCH_EXACT_MAX_ROWS_MAX = 1_000_000;
+
+    private static final int SEARCH_EXACT_MAX_ROWS =
+        searchExactMaxRows(System.getenv("NX_SEARCH_EXACT_MAX_ROWS"));
+
+    /** Test pin for the threshold; null means the env-resolved value. */
+    private static volatile Integer searchExactMaxRowsOverride;
+
+    /**
+     * Parse the {@code NX_SEARCH_EXACT_MAX_ROWS} override. Null/blank means
+     * {@link #DEFAULT_SEARCH_EXACT_MAX_ROWS}; anything else must be an integer in
+     * [0, {@link #SEARCH_EXACT_MAX_ROWS_MAX}] (0 disables the router), loud at boot.
+     */
+    static int searchExactMaxRows(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return DEFAULT_SEARCH_EXACT_MAX_ROWS;
+        }
+        int v;
+        try {
+            v = Integer.parseInt(raw.trim());
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException(
+                "NX_SEARCH_EXACT_MAX_ROWS must be an integer, got: " + raw, e);
+        }
+        if (v < 0 || v > SEARCH_EXACT_MAX_ROWS_MAX) {
+            throw new IllegalArgumentException("NX_SEARCH_EXACT_MAX_ROWS must be in 0.."
+                + SEARCH_EXACT_MAX_ROWS_MAX + " (0 disables the router), got: " + v);
+        }
+        return v;
+    }
+
+    /**
+     * Boot-time touch for {@code NX_SEARCH_EXACT_MAX_ROWS}, for the same class-init reason as
+     * {@link #startupEfSearchFloor()}: a malformed value must fail at boot, not at the first search.
+     *
+     * @return the resolved threshold, for the boot log line
+     */
+    public static int startupSearchExactMaxRows() {
+        return SEARCH_EXACT_MAX_ROWS;
+    }
+
+    /** The threshold the router compares against: the test pin when set, else the env-resolved value. */
+    public static int searchExactMaxRows() {
+        Integer o = searchExactMaxRowsOverride;
+        return o != null ? o : SEARCH_EXACT_MAX_ROWS;
+    }
+
+    /** TEST SEAM (nexus-tu8wp.6): pin the router threshold. Pair with {@link #resetSearchExactMaxRowsForTests()}. */
+    public static void overrideSearchExactMaxRowsForTests(int maxRows) {
+        searchExactMaxRowsOverride = maxRows;
+    }
+
+    /** Drop the pinned threshold; the env-resolved value applies again. */
+    public static void resetSearchExactMaxRowsForTests() {
+        searchExactMaxRowsOverride = null;
+    }
+
+    /**
      * Parse the {@code NX_HNSW_SCAN_MEM_BUDGET_MB} override into bytes. Null/blank
      * means {@link #DEFAULT_SCAN_MEM_BUDGET_MB}; anything else must be an integer
      * in [1, {@link #SCAN_MEM_BUDGET_MB_MAX}], loud at boot.
