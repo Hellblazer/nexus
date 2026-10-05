@@ -2,12 +2,12 @@
 title: "Native Windows Support: Windows x64 Engine, PostgreSQL Bundle and Client"
 id: RDR-224
 type: Architecture
-status: draft
+status: accepted
 priority: high
 author: Sam
 reviewed-by: self
 created: 2026-09-30
-accepted_date:
+accepted_date: 2026-10-05
 related_issues: [nexus-f9bgu, nexus-ijue9, nexus-lhr6a, nexus-vwfc0, nexus-efk2h, nexus-jevq5, nexus-zz2w7]
 related_rdrs: [RDR-218, RDR-157, RDR-161, RDR-197]
 ---
