@@ -54,6 +54,7 @@ ONE PATH PER BULLET, on the bullet's FIRST line.
 - hook interpreter floor (nexus-efk2h): `conexus/hooks/scripts/routing/credential_print_guard.py` gained the same PEP 723 `requires-python = ">=3.12"` block. No behaviour change otherwise.
 - hook interpreter floor (nexus-efk2h): `conexus/hooks/scripts/routing/subagent_git_write_requires_orchestrator.py` gained the same PEP 723 `requires-python = ">=3.12"` block. No behaviour change otherwise.
 - shim on Windows (nexus-efk2h): `conexus/hooks/scripts/nx_hook_shim.py` no longer names `signal.SIGHUP` unconditionally, which does not exist on Windows and raised AttributeError after `nx-hook` had started. It forwards the signals the platform has. No change on POSIX.
+- lease read retry (nexus-f9bgu.44): `conexus/hooks/scripts/_endpoint_resolve.py` retries a Windows sharing violation for up to 2 s when it reads the supervisor lease (a stdlib mirror of `ServiceRegistry`'s own bounded retry), so a read that lands during the supervisor's lease replace no longer resolves to no endpoint. No change on POSIX.
 
 
 ## Deferred to the next client release

@@ -298,6 +298,49 @@ def storage_service_lease_path(config_dir: Path) -> Path:
     return config_dir / f"{STORAGE_SERVICE_TIER}_addr.{service_identity()}"
 
 
+#: Mirror of ``service_registry._WINDOWS_SHARING_RETRY_*`` (a parity test
+#: compares the constants and the pause sequence): how long a lease read keeps
+#: retrying a Windows sharing violation, with a doubling pause between tries.
+_WINDOWS_SHARING_RETRY_BUDGET_S = 2.0
+_WINDOWS_SHARING_RETRY_FIRST_S = 0.002
+_WINDOWS_SHARING_RETRY_MAX_S = 0.01
+
+
+def read_lease_text(
+    path: Path,
+    *,
+    platform: str | None = None,
+    read: Callable[[Path], str] | None = None,
+    sleep: Callable[[float], None] = time.sleep,
+    monotonic: Callable[[], float] = time.monotonic,
+) -> str:
+    """Read the supervisor lease file, retrying a Windows sharing violation.
+
+    Stdlib mirror of ``ServiceRegistry._retry_sharing_violation`` around its
+    lease read (RDR-224, nexus-f9bgu.44). Off Windows this is a plain read: a
+    ``PermissionError`` there is a real permission problem and fails at once.
+    On Windows the supervisor's ``os.replace`` of the lease makes a concurrent
+    reader's open raise ``PermissionError`` for an instant, so the read is
+    retried with a doubling pause up to the budget and then raised. The callers
+    treat any ``OSError`` as "no lease", so a miss during a replace no longer
+    reads as a stopped service.
+    """
+    do_read = read if read is not None else (lambda p: p.read_text())
+    if not _is_windows(platform):
+        return do_read(path)
+    deadline = monotonic() + _WINDOWS_SHARING_RETRY_BUDGET_S
+    pause = _WINDOWS_SHARING_RETRY_FIRST_S
+    while True:
+        try:
+            return do_read(path)
+        except PermissionError:
+            now = monotonic()
+            if now >= deadline:
+                raise
+            sleep(min(pause, deadline - now))
+            pause = min(pause * 2, _WINDOWS_SHARING_RETRY_MAX_S)
+
+
 def read_storage_service_lease(config_dir: Path) -> dict[str, Any] | None:
     """Best-effort read of the local supervisor's ``ServiceRegistry``
     lease: ``{"host", "port", "token"}``, or ``None``. Any failure --
@@ -306,7 +349,7 @@ def read_storage_service_lease(config_dir: Path) -> dict[str, Any] | None:
     """
     path = storage_service_lease_path(config_dir)
     try:
-        data = json.loads(path.read_text())
+        data = json.loads(read_lease_text(path))
     except (OSError, json.JSONDecodeError, ValueError):
         return None
     try:
@@ -354,7 +397,7 @@ def read_local_supervisor_token(config_dir: Path) -> str:
             "refusing to use its token as a bearer"
         )
     try:
-        data = json.loads(path.read_text())
+        data = json.loads(read_lease_text(path))
     except (OSError, json.JSONDecodeError, ValueError) as exc:
         raise EndpointUnresolvable(
             f"local supervisor lease {path} unreadable/malformed: {exc}"
