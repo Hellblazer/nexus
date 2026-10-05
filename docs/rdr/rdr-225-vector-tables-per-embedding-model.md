@@ -145,13 +145,13 @@ standard-8 and memory-16. Raw JSON is to be copied to durable storage named in t
   own plan: 30 s timeout cold, 2.8 to 4.4 s partly warm. Exact search takes
   67 to 74 ms. dt-papers, about the same size, is fine. Literature (VADER,
   catalog 1.12.157) attributes such differences to query-filter correlation.
-- **F5 (Assumed, fork E1 pending).** Code and prose vectors form separate
+- **F5 (Verified by E1, research-2).** Code and prose vectors form separate
   regions: under 5% of a vector's exact nearest neighbours come from the other
   model.
-- **F6 (Assumed, fork E2 pending).** A single-model graph for one tenant raises
+- **F6 (Retired: superseded by the non-inferiority test).** A single-model graph for one tenant raises
   code__1-2's agreement on query 1 from 0.60 to at least 0.90, and cuts cold
   HNSW time by at least 2x. E2 also measures the tenant-only step separately.
-- **F7 (Assumed, fork feasibility pending).** A table LIST-partitioned by
+- **F7 (Assumed; protocol step 2, research-14).** A table LIST-partitioned by
   `tenant_id`, with an HNSW index created on the parent, gives each partition its
   own HNSW index. A query run as `nexus_svc` under the tenant GUC is pruned at
   execution time to one partition's HNSW scan, with iterative scan in effect.
@@ -360,20 +360,20 @@ Every non-PASS outcome defers the per-model split only. Tenant partitioning proc
 
 ### Critical Assumptions
 
-- [ ] F5: the models occupy separate regions, or mix enough to poison
-  neighbourhoods — **Status**: Unverified — **Method**: Spike (fork E1)
-- [ ] F6: a per-model graph measurably improves recall and cold time —
-  **Status**: Unverified — **Method**: Spike (fork E2)
-- [ ] F7: runtime partition pruning on `current_setting('nexus.tenant')` leaves
-  one partition's HNSW scan, with iterative scan — **Status**: Unverified —
-  **Method**: Spike (fork)
-- [ ] The manifest FK stays expressible with per-model tables, through an
-  identity table written in the same transaction, without a trigger and without
-  a measurable write-path cost — **Status**: Unverified — **Method**: Spike
-- [ ] The search functions (`plain_search_<dim>`, text-gated, combined,
-  metadata-scoped, taxonomy) can name the model so the planner picks the right
-  partition or partial index at plan time — **Status**: Unverified —
-  **Method**: Source Search + Spike
+- [x] F5: the models occupy separate regions — **Status**: Verified
+  (research-2, 0.000 cross-model neighbours) — **Method**: Spike
+- [x] F6: a per-model graph measurably improves recall — **Status**: Retired.
+  Sam ruled the split is shown to work, not to pay. It is replaced by the
+  protocol's non-inferiority test (step 3).
+- [ ] F7: execution-time partition pruning under RLS leaves one partition's
+  index on every search family — **Status**: Unverified, in protocol step 2
+  (research-14) — **Method**: Spike
+- [ ] The manifest and topic FKs stay expressible through `chunk_identity` at a
+  write cost of at most 1.25x — **Status**: Unverified, in protocol step 2
+  (research-15) — **Method**: Spike
+- [x] The search functions can name their model's table: they are generated
+  per registry row, as `plain_search_<dim>` is generated per dimension today
+  (research-9, research-11) — **Status**: Verified — **Method**: Source Search
 
 ## Proposed Solution
 
