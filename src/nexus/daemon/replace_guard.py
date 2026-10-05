@@ -114,6 +114,51 @@ def _keep_old(src: Path, dst: Path) -> None:
         shutil.copy2(src, dst)
 
 
+#: A keep directory younger than this is left alone by the sweep: a placement
+#: that is running right now owns it. A placement keeps its directory for
+#: seconds (hard links, then renames), so a minute is far past any live one.
+KEEP_DIR_MIN_AGE_S: float = 60.0
+
+_KEEP_PREFIX = ".nx_old_"
+
+
+def sweep_stale_keep_dirs(
+    dest_dir: Path,
+    *,
+    now: Callable[[], float] = time.time,
+    min_age_s: float = KEEP_DIR_MIN_AGE_S,
+) -> list[Path]:
+    """Remove the ``.nx_old_*`` keep directories an earlier placement left behind.
+
+    A placement removes its own keep directory, but ``rmtree(ignore_errors=True)``
+    fails silently when a process still runs from the hard-linked old executable,
+    so every blocked upgrade used to leave one behind for good. The next
+    SUCCESSFUL placement calls this: by then the files the old content belonged
+    to are replaced, so it is of no use. Directories younger than *min_age_s* are
+    skipped (a concurrent placement may own them). Never raises; returns the
+    directories that are still there (a process still holds them), each logged.
+    """
+    left: list[Path] = []
+    try:
+        entries = list(dest_dir.iterdir())
+    except OSError:
+        return left
+    cutoff = now() - min_age_s
+    for entry in entries:
+        if not entry.name.startswith(_KEEP_PREFIX):
+            continue
+        try:
+            if not entry.is_dir() or entry.is_symlink() or entry.stat().st_mtime > cutoff:
+                continue
+        except OSError:
+            continue
+        shutil.rmtree(entry, ignore_errors=True)
+        if entry.exists():
+            _log.warning("replace_keep_dir_not_removed", path=str(entry))
+            left.append(entry)
+    return left
+
+
 def place_set_with_rollback(
     stage: Path,
     dest_dir: Path,
@@ -136,6 +181,8 @@ def place_set_with_rollback(
     when a file cannot be placed, after the rollback. When the rollback itself
     fails the old content is left in a ``.nx_old_*`` directory beside the
     destinations and the error names it and each file it could not restore.
+    A success also sweeps the stale ``.nx_old_*`` directories earlier blocked
+    placements left behind (:func:`sweep_stale_keep_dirs`).
     """
     keep = Path(tempfile.mkdtemp(dir=dest_dir, prefix=".nx_old_"))
     kept: set[str] = set()
@@ -171,6 +218,7 @@ def place_set_with_rollback(
             ) from exc
         raise
     shutil.rmtree(keep, ignore_errors=True)
+    sweep_stale_keep_dirs(dest_dir)
 
 
 def _roll_back(

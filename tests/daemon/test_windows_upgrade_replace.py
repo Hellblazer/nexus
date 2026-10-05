@@ -207,6 +207,85 @@ def test_a_failed_rollback_keeps_the_old_content_and_names_where(tmp_path):
     assert (kept[0] / first_dll).read_text() == f"old:{first_dll}"
 
 
+# ── stale keep directories (nexus-f9bgu.33, code review m5) ───────────────────
+
+
+def _make_keep_dir(dest: Path, name: str, *, age_s: float) -> Path:
+    keep = dest / name
+    keep.mkdir()
+    (keep / WINDOWS_ENGINE_EXE).write_bytes(b"a blocked upgrade's old exe")
+    old = keep.stat().st_mtime - age_s
+    os.utime(keep, (old, old))
+    return keep
+
+
+def test_the_next_successful_install_sweeps_a_stale_keep_directory(tmp_path):
+    stage, dest = _stage_new(tmp_path)
+    stale = _make_keep_dir(dest, ".nx_old_abandoned", age_s=3600)
+    rg.place_set_with_rollback(stage, dest, _NAMES, platform=_WIN, sleep=lambda s: None)
+    assert not stale.exists()
+    assert _read_set(dest) == {n: f"new:{n}" for n in _NAMES}
+
+
+def test_a_young_keep_directory_is_left_because_a_placement_may_be_in_flight(tmp_path):
+    stage, dest = _stage_new(tmp_path)
+    young = _make_keep_dir(dest, ".nx_old_inflight", age_s=1)
+    rg.place_set_with_rollback(stage, dest, _NAMES, platform=_WIN, sleep=lambda s: None)
+    assert young.exists()
+
+
+def test_a_failed_install_does_not_sweep_an_older_keep_directory(tmp_path):
+    """The old content in a stale keep directory may be the only copy until a
+    placement has succeeded, so only success sweeps."""
+    stage, dest = _stage_new(tmp_path)
+    stale = _make_keep_dir(dest, ".nx_old_abandoned", age_s=3600)
+
+    def replace(src, dst):
+        if Path(dst).name == WINDOWS_ENGINE_EXE and Path(src).parent == stage:
+            raise PermissionError(13, "exe held")
+        os.replace(src, dst)
+
+    with pytest.raises(rg.ReplaceBlockedError):
+        rg.place_set_with_rollback(
+            stage, dest, _NAMES, platform=_WIN, sleep=lambda s: None, replace=replace,
+        )
+    assert stale.exists()
+
+
+def test_the_sweep_touches_only_old_keep_directories(tmp_path):
+    stage, dest = _stage_new(tmp_path)
+    stage_dir = dest / ".nx_stage_x"
+    stage_dir.mkdir()
+    other = dest / "data"
+    other.mkdir()
+    a_file = dest / ".nx_old_but_a_file"
+    a_file.write_text("x")
+    for p in (stage_dir, other):
+        os.utime(p, (1, 1))
+    rg.place_set_with_rollback(stage, dest, _NAMES, platform=_WIN, sleep=lambda s: None)
+    assert stage_dir.exists() and other.exists() and a_file.exists()
+
+
+def test_a_keep_directory_that_cannot_be_removed_is_reported_not_raised(tmp_path, monkeypatch):
+    """The hard-linked old exe of a process that is still running keeps its
+    keep directory alive: the install that finds it must still succeed."""
+    stage, dest = _stage_new(tmp_path)
+    stuck = _make_keep_dir(dest, ".nx_old_held", age_s=3600)
+    real_rmtree = rg.shutil.rmtree
+
+    def rmtree(path, ignore_errors=False, **kw):
+        if Path(path) == stuck:
+            return  # still held: ignore_errors swallowed the error, the dir stays
+        real_rmtree(path, ignore_errors=ignore_errors, **kw)
+
+    monkeypatch.setattr(rg.shutil, "rmtree", rmtree)
+    left = rg.sweep_stale_keep_dirs(dest)
+    assert left == [stuck]
+    rg.place_set_with_rollback(stage, dest, _NAMES, platform=_WIN, sleep=lambda s: None)
+    assert _read_set(dest) == {n: f"new:{n}" for n in _NAMES}
+    assert stuck.exists()
+
+
 # ── quiesced ──────────────────────────────────────────────────────────────────
 
 
