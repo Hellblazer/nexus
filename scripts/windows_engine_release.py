@@ -38,8 +38,11 @@ fails the leg and gets a reviewed one-line addition: the failure is the
 prompt to ask whether that DLL really ships with every Windows the client
 supports.
 
-Environment: none read implicitly except GITHUB_ENV (vcvars) and the Visual
-Studio location (VS_INSTALL_PATH, as build_pg_bundle_windows.py).
+Environment: none read implicitly except GITHUB_ENV (vcvars), RUNNER_TEMP (the
+default parent of ``check-deps``' temporary extraction directory, which is removed when
+the check ends unless --keep-work-dir) and the Visual Studio location (VS_INSTALL_PATH,
+as build_pg_bundle_windows.py). ``package`` refuses a runtime DLL that is not validly
+signed by Microsoft Corporation (build_pg_bundle_windows.copy_runtime_dlls).
 """
 from __future__ import annotations
 
@@ -299,6 +302,29 @@ def check_deps(
 # --------------------------------------------------------------------------- #
 
 
+#: The native libraries the exe embeds and extracts (the embedded-resources report names them
+#: and ``check-deps`` dumps every one), with the licence each is published under
+#: (nexus-f9bgu.27, code review m6). A test pins the file names against the committed jar listings,
+#: so an embedded library added by a dependency bump cannot ship without a line here.
+EMBEDDED_NOTICE = """   ONNX Runtime 1.20.0 (onnxruntime.dll, onnxruntime4j_jni.dll)
+       MIT License. https://github.com/microsoft/onnxruntime
+
+   DJL Hugging Face tokenizers 0.30.0 (tokenizers.dll)
+       Apache License 2.0. https://github.com/deepjavalibrary/djl
+
+   MinGW-w64 runtime libraries that tokenizers.dll links (libgcc_s_seh-1.dll,
+   libstdc++-6.dll, libwinpthread-1.dll)
+       libgcc_s_seh-1.dll and libstdc++-6.dll: GNU General Public License v3 or
+       later with the GCC Runtime Library Exception, version 3.1; source at
+       https://gcc.gnu.org. libwinpthread-1.dll: the mingw-w64 licence (MIT
+       style), https://www.mingw-w64.org.
+
+   Java Native Access, JNA (its jnidispatch library)
+       Apache License 2.0 or LGPL 2.1 or later, at your option.
+       https://github.com/java-native-access/jna
+"""
+
+
 def notice_text(redist: bw.Redist, digests: Mapping[str, str]) -> str:
     dll_lines = "\n".join(f"    {n}  sha256 {digests[n]}" for n in VC_RUNTIME_DLLS)
     return f"""THIRD-PARTY NOTICES for the nexus engine service ({ARCH})
@@ -316,13 +342,23 @@ def notice_text(redist: bw.Redist, digests: Mapping[str, str]) -> str:
    Files shipped beside {ENGINE_EXE}:
 {dll_lines}
 
-2. The other libraries linked into {ENGINE_EXE} keep their own licenses; see the
-   nexus source distribution for the list.
+2. Native components embedded in {ENGINE_EXE} and extracted beside it at run time
+   in a temporary directory. Each keeps the licence it is published under; none
+   is modified here.
+
+{EMBEDDED_NOTICE}
+3. Everything else linked into {ENGINE_EXE} (the GraalVM runtime and the Java
+   libraries) keeps its own licence; see the nexus source distribution for the list.
 """
 
 
 def package(
-    exe: Path, redist: bw.Redist, out_dir: Path, *, min_exe_bytes: int = MIN_EXE_BYTES
+    exe: Path,
+    redist: bw.Redist,
+    out_dir: Path,
+    *,
+    min_exe_bytes: int = MIN_EXE_BYTES,
+    signature_reader: bw.SignatureReader | None = None,
 ) -> Path:
     """exe + four DLLs + notice -> ``nexus-service-windows-x64.txz`` and its ``.sha256``.
 
@@ -343,7 +379,7 @@ def package(
     with tempfile.TemporaryDirectory(prefix="engine-stage-") as stage_name:
         stage = Path(stage_name)
         try:
-            digests = bw.copy_runtime_dlls(stage, redist)
+            digests = bw.copy_runtime_dlls(stage, redist, signature_reader=signature_reader)
         except bw.BuildError as exc:
             raise CheckError(str(exc)) from exc
         (stage / NOTICE_NAME).write_text(notice_text(redist, digests), encoding="utf-8", newline="\n")
@@ -361,6 +397,20 @@ def package(
     return archive
 
 
+def bare_name_problem(name: str) -> str | None:
+    """Why *name* is not a bare file name, or None. Stricter than "no slash": on Windows
+    ``C:x`` is drive-relative and ``dest / "C:x"`` leaves *dest*, and ``..`` climbs out of it."""
+    if not name or name == "." or ".." in name:
+        return f"member name {name!r} is not a file name"
+    if "/" in name or "\\" in name:
+        return f"nested member {name!r}: the layout is flat"
+    if ":" in name:
+        return f"member name {name!r} holds ':' (a drive or stream designator on Windows)"
+    if Path(name).name != name:
+        return f"member name {name!r} is not a bare file name"
+    return None
+
+
 def verify_archive(archive: Path) -> list[str]:
     """Problems with an engine archive (empty list = the P0.4 layout, intact)."""
     problems: list[str] = []
@@ -375,8 +425,9 @@ def verify_archive(archive: Path) -> list[str]:
                 if not member.isreg():
                     problems.append(f"non-regular member {name!r}")
                     continue
-                if "/" in name or "\\" in name:
-                    problems.append(f"nested member {name!r}: the layout is flat")
+                bad_name = bare_name_problem(name)
+                if bad_name is not None:
+                    problems.append(bad_name)
                     continue
                 if name in seen:
                     problems.append(f"duplicate member {name!r}")
@@ -461,7 +512,8 @@ def _parser() -> argparse.ArgumentParser:
     cd.add_argument("--report", type=Path, required=True, help="service/target/embedded-resources.json")
     cd.add_argument("--dumpbin", type=Path, help="default: the newest under the Visual Studio install")
     cd.add_argument("--vs-install", type=Path)
-    cd.add_argument("--workdir", type=Path, help="extraction directory (default: a temporary one)")
+    cd.add_argument("--workdir", type=Path, help="extraction directory (default: a temporary one, removed afterwards; yours is never removed)")
+    cd.add_argument("--keep-work-dir", action="store_true", help="keep the temporary extraction directory")
     pk = sub.add_parser("package")
     pk.add_argument("--exe", type=Path, required=True)
     pk.add_argument("--out-dir", type=Path, required=True)
@@ -513,8 +565,14 @@ def main(argv: Sequence[str] | None = None, env: Mapping[str, str] | None = None
         if report is None:
             raise CheckError(f"embedded-resources report {args.report} not found")
         dumpbin = args.dumpbin or find_dumpbin(_vs_path(env, args.vs_install))
-        work = args.workdir or Path(tempfile.mkdtemp(prefix="engine-deps-"))
-        rc, lines = check_deps(args.exe, report, run_dumpbin(dumpbin), work)
+        # Extracted DLLs on a persistent runner: remove them, pass or fail (nexus-f9bgu.27, review S3).
+        owned = args.workdir is None
+        work = args.workdir or Path(tempfile.mkdtemp(prefix="engine-deps-", dir=env.get("RUNNER_TEMP") or None))
+        try:
+            rc, lines = check_deps(args.exe, report, run_dumpbin(dumpbin), work)
+        finally:
+            if owned and not args.keep_work_dir:
+                bw.remove_tree(work)
         print("\n".join(lines), file=sys.stderr if rc else sys.stdout)
         return rc
     except CheckError as exc:

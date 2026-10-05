@@ -51,7 +51,15 @@ Hazards found by the spike, each handled below:
     toolset's redist folder.
 
 Environment (flags win): BUNDLE_PREFIX, PG_VERSION, PGVECTOR_VERSION,
-WORK_DIR, PG_BUNDLE_RUNNER, VS_INSTALL_PATH, WIN_FLEX_BISON_DIR.
+WORK_DIR, PG_BUNDLE_RUNNER, VS_INSTALL_PATH, WIN_FLEX_BISON_DIR, RUNNER_TEMP.
+
+The build's work directory (PG tarball, source tree, meson build tree: gigabytes) is a
+temporary one under RUNNER_TEMP unless WORK_DIR / --work-dir names one, and is removed
+when the build ends, passed or failed, unless --keep-work-dir; a directory the caller
+named is the caller's and is never removed (nexus-f9bgu.27). Every shipped VC++ DLL must
+carry a Valid Authenticode signature from Microsoft Corporation, the PG tarball must match
+the sha256 pinned in this file and pgvector the pinned commit (PINNED_PG_SHA256,
+PINNED_PGVECTOR_COMMITS).
 """
 from __future__ import annotations
 
@@ -62,19 +70,35 @@ import lzma
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tarfile
 import tempfile
 import urllib.request
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 #: Defaults mirror scripts/build_pg_bundle.sh and the workflows' env pins;
-#: tests/test_pg_bundle_windows_build.py pins all three together.
+#: tests/test_pg_bundle_windows.py pins all three together.
 DEFAULT_PG_VERSION = "17.5"
 DEFAULT_PGVECTOR_VERSION = "v0.8.2"
+
+#: Literal pins (nexus-f9bgu.27, code review m5). ftp.postgresql.org publishes the
+#: tarball and its .sha256 side by side, so the published file proves integrity but
+#: not authenticity; the literal below was fetched once from the host on 2026-10-05
+#: and recomputed locally over the downloaded tarball, and the build refuses a
+#: tarball that matches only the host's own file. A git tag moves; the commit does
+#: not (``git ls-remote https://github.com/pgvector/pgvector refs/tags/v0.8.2`` on
+#: 2026-10-05). A version not listed here is refused: moving a pin is one reviewed
+#: line, never an environment variable.
+PINNED_PG_SHA256: dict[str, str] = {
+    "17.5": "fcb7ab38e23b264d1902cb25e6adafb4525a6ebcbd015434aeef9eda80f528d8",
+}
+PINNED_PGVECTOR_COMMITS: dict[str, str] = {
+    "v0.8.2": "cab9da72c04353f143bb06b42ab70a403daac64a",
+}
 
 ARCH = "windows-x64"
 ASSET_NAME = f"nexus-pg-{ARCH}.txz"
@@ -378,12 +402,96 @@ def notice_text(redist: Redist, digests: Mapping[str, str], pins: Pins) -> str:
 """
 
 
-def copy_runtime_dlls(dest_dir: Path, redist: Redist) -> dict[str, str]:
+#: The organisation the four runtime files must be signed by (nexus-f9bgu.27, code review S4). Measured
+#: on the real VS 2022 redist (14.44.35112, qwentescence, 2026-10-05): Status Valid, subject
+#: ``CN=Microsoft Windows, O=Microsoft Corporation, L=Redmond, S=Washington, C=US``. The organisation is
+#: the signer; the CN is the certificate's own name (here the Windows-component one), so it is held only
+#: to start with "Microsoft", never to equal the organisation.
+MICROSOFT_SIGNER = "Microsoft Corporation"
+
+_AUTHENTICODE_PS = (
+    "$s = Get-AuthenticodeSignature -LiteralPath $env:NX_SIGCHECK_PATH; "
+    "$subject = ''; if ($s.SignerCertificate) { $subject = $s.SignerCertificate.Subject }; "
+    "ConvertTo-Json -Compress -InputObject @{ Status = [string]$s.Status; Subject = $subject }"
+)
+
+
+@dataclass(frozen=True)
+class Signature:
+    status: str
+    subject: str
+
+
+SignatureReader = Callable[[Path], Signature]
+
+
+def read_authenticode(path: Path) -> Signature:
+    """The Authenticode status and signer subject of *path* (Windows PowerShell's
+    Get-AuthenticodeSignature; the path travels in the environment, never quoted into
+    the script). Windows only: off Windows there is nothing to ask, and a check that
+    cannot run must fail, not pass."""
+    if sys.platform != "win32":
+        raise BuildError(
+            f"cannot read the Authenticode signature of {path.name} on {sys.platform}: "
+            "the runtime DLLs are packaged on Windows only"
+        )
+    proc = subprocess.run(
+        ["powershell", "-NoProfile", "-NonInteractive", "-Command", _AUTHENTICODE_PS],
+        env={**os.environ, "NX_SIGCHECK_PATH": str(path)},
+        stdin=subprocess.DEVNULL, capture_output=True, text=True, errors="replace",
+    )
+    if proc.returncode != 0:
+        raise BuildError(f"Get-AuthenticodeSignature failed ({proc.returncode}) on {path.name}: {proc.stderr.strip()[:300]}")
+    try:
+        body = json.loads(proc.stdout)
+        return Signature(str(body["Status"]), str(body["Subject"]))
+    except (ValueError, KeyError, TypeError) as exc:
+        raise BuildError(f"unreadable Get-AuthenticodeSignature output for {path.name}: {proc.stdout[:200]!r}") from exc
+
+
+def subject_attribute(subject: str, key: str) -> str | None:
+    """The value of attribute *key* (``CN``, ``O``, ...) in a certificate subject such as
+    ``CN=Microsoft Windows, O=Microsoft Corporation, L=Redmond``, quoted values included; None when absent."""
+    match = re.search(rf'(?:^|,)\s*{re.escape(key)}=(?:"((?:[^"]|"")*)"|([^,]*))', subject)
+    if not match:
+        return None
+    value = match.group(1).replace('""', '"') if match.group(1) is not None else match.group(2)
+    return value.strip()
+
+
+def check_microsoft_signature(path: Path, reader: SignatureReader) -> str:
+    """Return the signer subject of *path*; raise unless it is Valid and signed by an organisation of
+    ``Microsoft Corporation`` under a ``Microsoft ...`` certificate name.
+
+    Distribution rights come from the Distributable Code terms for Microsoft's files
+    (T2 224-vcruntime-terms). A copy that is unsigned, tampered with, or signed by anyone
+    else is not that file, whatever its hash says about the copy."""
+    sig = reader(path)
+    if sig.status != "Valid":
+        raise BuildError(f"{path.name}: Authenticode status {sig.status!r}, expected 'Valid'; refusing to ship it")
+    cn = subject_attribute(sig.subject, "CN") or ""
+    if subject_attribute(sig.subject, "O") != MICROSOFT_SIGNER or not cn.startswith("Microsoft"):
+        raise BuildError(
+            f"{path.name}: signed by {sig.subject!r}, not by {MICROSOFT_SIGNER!r}; refusing to ship it"
+        )
+    return sig.subject
+
+
+def copy_runtime_dlls(
+    dest_dir: Path,
+    redist: Redist,
+    *,
+    signature_reader: SignatureReader | None = None,
+    emit: Callable[[str], None] = print,
+) -> dict[str, str]:
     """Copy the four VC++ runtime DLLs unmodified into *dest_dir*; return name -> sha256.
 
     The one copy routine for every Windows artifact that ships the runtime (the PG
     bundle's bin, the engine archive's staging directory, nexus-f9bgu.9), so the
-    P0.6 "ship unmodified" condition is enforced in one place. Idempotent."""
+    P0.6 "ship unmodified" condition is enforced in one place. Each shipped copy must
+    carry a Valid Authenticode signature from Microsoft Corporation, and the signer is
+    printed so the build log records what shipped. Idempotent."""
+    reader = signature_reader if signature_reader is not None else read_authenticode
     dest_dir.mkdir(parents=True, exist_ok=True)
     digests: dict[str, str] = {}
     for dll in VC_RUNTIME_DLLS:
@@ -393,16 +501,23 @@ def copy_runtime_dlls(dest_dir: Path, redist: Redist) -> dict[str, str]:
         want, got = file_sha256(src), file_sha256(dst)
         if want != got:
             raise BuildError(f"{dll} changed in transit ({want} != {got}); must ship unmodified")
+        subject = check_microsoft_signature(dst, reader)
+        emit(f"signature {dll}: Valid, {subject}")
         digests[dll] = got
     return digests
 
 
 def copy_runtime(
-    bundle: Path, redist: Redist, pins: Pins, *, extra_notice: str = ""
+    bundle: Path,
+    redist: Redist,
+    pins: Pins,
+    *,
+    extra_notice: str = "",
+    signature_reader: SignatureReader | None = None,
 ) -> dict[str, str]:
     """Copy the four DLLs unmodified into bundle/bin and write the notice.
     Idempotent: re-running replaces them from the redist it is given."""
-    digests = copy_runtime_dlls(bundle / "bin", redist)
+    digests = copy_runtime_dlls(bundle / "bin", redist, signature_reader=signature_reader)
     (bundle / NOTICE_NAME).write_text(notice_text(redist, digests, pins) + extra_notice)
     return digests
 
@@ -533,6 +648,26 @@ class Host:
     runner: Runner
     fetch: Callable[[str, Path], None] = fetch_to
     unpack: Callable[[Path, Path], None] = unpack_bz2
+    signature_reader: SignatureReader | None = None
+    pg_sha256_pins: Mapping[str, str] = field(default_factory=lambda: dict(PINNED_PG_SHA256))
+    pgvector_commit_pins: Mapping[str, str] = field(default_factory=lambda: dict(PINNED_PGVECTOR_COMMITS))
+
+
+def remove_tree(path: Path) -> None:
+    """Delete a build directory, never raising: a failure to clean up must not turn a
+    finished build red. Clears the read-only bit first (git's object files carry it, and
+    Windows refuses to delete them otherwise)."""
+
+    def clear_and_retry(func: Callable[[str], object], name: str, _exc: BaseException) -> None:
+        try:
+            os.chmod(name, stat.S_IWRITE)
+            func(name)
+        except OSError:
+            pass
+
+    shutil.rmtree(path, onexc=clear_and_retry)
+    if path.exists():
+        print(f"WARNING: could not fully remove the work directory {path}", file=sys.stderr, flush=True)
 
 
 def build(
@@ -572,6 +707,17 @@ def build(
     got = file_sha256(tarball)
     if want != got:
         raise BuildError(f"PostgreSQL tarball sha256 {got} != published {want}")
+    pinned = host.pg_sha256_pins.get(pins.pg_version)
+    if pinned is None:
+        raise BuildError(
+            f"no pinned sha256 for PostgreSQL {pins.pg_version}: add it to PINNED_PG_SHA256 "
+            "(the host's own .sha256 proves integrity, not authenticity)"
+        )
+    if got != pinned:
+        raise BuildError(
+            f"PostgreSQL tarball sha256 {got} != the pin in this script {pinned}: the host's "
+            "published file agrees with the download, but neither is what was reviewed"
+        )
     host.unpack(tarball, work)
     pg_src = work / f"postgresql-{pins.pg_version}"
 
@@ -590,10 +736,22 @@ def build(
 
     _log(f"pgvector {pins.pgvector_version} against pg_config")
     pgv_src = work / "pgvector"
+    pgv_commit = host.pgvector_commit_pins.get(pins.pgvector_version)
+    if pgv_commit is None:
+        raise BuildError(
+            f"no pinned commit for pgvector {pins.pgvector_version}: add it to PINNED_PGVECTOR_COMMITS "
+            "(a tag can be moved; a commit cannot)"
+        )
     r.run(
         ["git", "clone", "--depth", "1", "--branch", pins.pgvector_version, PGVECTOR_REPO, str(pgv_src)],
         cwd=work, env=run_env, log=logs / "pgvector-clone.log",
     )
+    head = r.capture(["git", "-C", str(pgv_src), "rev-parse", "HEAD"], cwd=None, env=run_env).strip().lower()
+    if head != pgv_commit:
+        raise BuildError(
+            f"pgvector {pins.pgvector_version} resolved to commit {head}, the pin is {pgv_commit}: "
+            "the tag moved, or the clone is not what was reviewed"
+        )
     pg_config = prefix / "bin" / "pg_config.exe"
     dirs = {
         k: r.capture([str(pg_config), f"--{k}"], cwd=None, env=run_env).strip()
@@ -610,7 +768,7 @@ def build(
         if (pgv_src / name).is_file():
             shutil.copyfile(pgv_src / name, lic / "pgvector-LICENSE.txt")
             break
-    copy_runtime(prefix, redist, pins)
+    copy_runtime(prefix, redist, pins, signature_reader=host.signature_reader)
     (prefix / ".build_prefix").write_text(os.path.realpath(prefix) + "\n")
 
     problems = verify_layout(prefix)
@@ -642,6 +800,11 @@ def _parser() -> argparse.ArgumentParser:
     b.add_argument("--prefix", type=Path)
     b.add_argument("--work-dir", type=Path)
     b.add_argument("--jobs", type=int, default=min(os.cpu_count() or 4, 8))
+    b.add_argument(
+        "--keep-work-dir", action="store_true",
+        help="keep the temporary work directory (PG source, build tree, logs) after the build; "
+        "a --work-dir / WORK_DIR you named is yours and is never removed",
+    )
     rr = sub.add_parser("refresh-runtime")
     common(rr)
     rr.add_argument("--prefix", type=Path)
@@ -698,12 +861,21 @@ def main(
             _log(f"VC++ runtime refreshed from redist {redist.version}: {sorted(digests)}")
             return 0
         work_env = args.work_dir or (Path(env["WORK_DIR"]) if env.get("WORK_DIR") else None)
-        work = work_env or Path(tempfile.mkdtemp(prefix="pgbundle-"))
-        build(
-            prefix=prefix, work=work.resolve(), pins=pins, jobs=args.jobs, env=env,
-            vs_env=load_vs_env(vs_path, env), flex_bison_dir=find_flex_bison_dir(env),
-            redist=redist, host=Host(runner),
-        )
+        # An auto-made directory holds the PG tarball, source tree and build tree (gigabytes) and the
+        # runner is persistent: remove it, win or lose (nexus-f9bgu.27, code review S3).
+        owned = work_env is None
+        # Under RUNNER_TEMP when the runner sets it: the runner empties that directory between jobs, so a
+        # job killed mid-build (cancel-in-progress) leaves nothing behind either.
+        work = work_env or Path(tempfile.mkdtemp(prefix="pgbundle-", dir=env.get("RUNNER_TEMP") or None))
+        try:
+            build(
+                prefix=prefix, work=work.resolve(), pins=pins, jobs=args.jobs, env=env,
+                vs_env=load_vs_env(vs_path, env), flex_bison_dir=find_flex_bison_dir(env),
+                redist=redist, host=Host(runner),
+            )
+        finally:
+            if owned and not args.keep_work_dir:
+                remove_tree(work)
         return 0
     except BuildError as exc:
         print(f"FATAL: {exc}", file=sys.stderr)

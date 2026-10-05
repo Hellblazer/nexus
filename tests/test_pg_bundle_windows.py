@@ -29,6 +29,23 @@ REPO = Path(__file__).resolve().parent.parent
 SCRIPT = REPO / "scripts" / "build_pg_bundle_windows.py"
 WORKFLOWS = REPO / ".github" / "workflows"
 
+#: The real reader, kept before the fixture below replaces it, so one test can prove that off
+#: Windows it refuses rather than passes.
+REAL_READ_AUTHENTICODE = bw.read_authenticode
+#: The subject the real VS 2022 redist DLLs carry (measured on qwentescence, 2026-10-05, redist 14.44.35112).
+MS_SUBJECT = "CN=Microsoft Windows, O=Microsoft Corporation, L=Redmond, S=Washington, C=US"
+
+
+def _microsoft_signed(path: Path) -> bw.Signature:
+    return bw.Signature("Valid", MS_SUBJECT)
+
+
+@pytest.fixture(autouse=True)
+def _runtime_dlls_are_signed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These tests stage fake DLLs on whatever OS runs them; Authenticode is asked of a real file on
+    Windows only. The signature check itself is pinned by its own tests below, which inject readers."""
+    monkeypatch.setattr(bw, "read_authenticode", _microsoft_signed)
+
 
 # --------------------------------------------------------------------------- #
 # Pins and the cache key
@@ -385,9 +402,14 @@ def test_package_refuses_an_incomplete_bundle(tmp_path: Path) -> None:
 # --------------------------------------------------------------------------- #
 
 
+PGVECTOR_COMMIT = "cab9da72c04353f143bb06b42ab70a403daac64a"
+FAKE_PG_BODY = b"pg tarball"
+
+
 class FakeBuildRunner(bw.Runner):
-    def __init__(self, prefix: Path) -> None:
+    def __init__(self, prefix: Path, *, pgvector_head: str = PGVECTOR_COMMIT) -> None:
         self.prefix = prefix
+        self.pgvector_head = pgvector_head
         self.calls: list[tuple[str, list[str], dict[str, str]]] = []
 
     def run(self, argv, *, cwd, env, log):  # type: ignore[override]
@@ -408,11 +430,13 @@ class FakeBuildRunner(bw.Runner):
         self.calls.append(("capture", argv, dict(env)))
         if argv[0] == "ninja":
             return NOISE + LISTING_20
+        if argv[0] == "git" and argv[-2:] == ["rev-parse", "HEAD"]:
+            return self.pgvector_head + "\n"
         return PG_DIRS[argv[-1].removeprefix("--")] + "\r\n"
 
 
-def _host(runner: FakeBuildRunner, *, corrupt: bool = False) -> bw.Host:
-    body = b"pg tarball"
+def _host(runner: FakeBuildRunner, *, corrupt: bool = False, pg_pin: str | None = None) -> bw.Host:
+    body = FAKE_PG_BODY
 
     def fetch(url: str, dest: Path) -> None:
         if url.endswith(".sha256"):
@@ -426,7 +450,11 @@ def _host(runner: FakeBuildRunner, *, corrupt: bool = False) -> bw.Host:
         src.mkdir()
         (src / "COPYRIGHT").write_text("PostgreSQL license")
 
-    return bw.Host(runner=runner, fetch=fetch, unpack=unpack)
+    return bw.Host(
+        runner=runner, fetch=fetch, unpack=unpack,
+        pg_sha256_pins={"17.5": pg_pin or hashlib.sha256(body).hexdigest()},
+        pgvector_commit_pins={"v0.8.2": PGVECTOR_COMMIT},
+    )
 
 
 def _toolchain(tmp_path: Path) -> tuple[dict[str, str], Path]:
@@ -447,11 +475,12 @@ def _build(tmp_path: Path, **kw):
     work = tmp_path / "work"
     vs_env, flex = _toolchain(tmp_path)
     redist = bw.find_redist(_vs_tree(tmp_path / "vs"))
-    runner = FakeBuildRunner(prefix)
+    runner = FakeBuildRunner(prefix, pgvector_head=kw.get("pgvector_head", PGVECTOR_COMMIT))
+    kw.get("runners", []).append(runner)
     bw.build(
-        prefix=kw.get("prefix", prefix), work=work, pins=bw.Pins("17.5", "v0.8.2"), jobs=6,
+        prefix=kw.get("prefix", prefix), work=work, pins=kw.get("pins", bw.Pins("17.5", "v0.8.2")), jobs=6,
         env={}, vs_env=vs_env, flex_bison_dir=flex, redist=redist,
-        host=_host(runner, corrupt=kw.get("corrupt", False)),
+        host=_host(runner, corrupt=kw.get("corrupt", False), pg_pin=kw.get("pg_pin")),
     )
     return prefix, runner, flex
 
@@ -475,7 +504,7 @@ def test_build_runs_the_steps_in_the_order_the_hazards_demand(tmp_path: Path) ->
     assert shapes[:2] == ["run:meson", "ninja-list"]
     gen = [i for i, s in enumerate(shapes) if s == "ninja-gen"]
     assert len(gen) == 20 and gen == list(range(2, 22)), "20 serial generations right after listing"
-    assert shapes[22:25] == ["ninja-build", "ninja-install", "run:git"]
+    assert shapes[22:26] == ["ninja-build", "ninja-install", "run:git", "capture:git"]
     assert shapes.count("capture:pg_config") == 5  # pg_config asked, not guessed
     assert shapes[-2:] == ["nmake-build", "nmake-install"]
     # The parallel build is the capped one, and it comes after every generation.
@@ -915,3 +944,312 @@ def test_a_pipe_capture_really_would_wait_on_that_grandchild(tmp_path: Path) -> 
                 os.kill(int(pidfile.read_text()), 15)
             except OSError:
                 pass
+
+
+# --------------------------------------------------------------------------- #
+# nexus-f9bgu.27: the Authenticode check on the shipped runtime (code review S4)
+# --------------------------------------------------------------------------- #
+
+
+def _reader(status: str, subject: str):
+    def read(path: Path) -> bw.Signature:
+        return bw.Signature(status, subject)
+
+    return read
+
+
+@pytest.mark.parametrize(
+    "status", ["NotSigned", "HashMismatch", "NotTrusted", "UnknownError", "Incompatible"],
+)
+def test_a_runtime_dll_without_a_valid_signature_is_refused_and_named(tmp_path: Path, status: str) -> None:
+    redist = bw.find_redist(_vs_tree(tmp_path / "vs"))
+    with pytest.raises(bw.BuildError, match=rf"vcruntime140\.dll.*{status}"):
+        bw.copy_runtime_dlls(tmp_path / "bin", redist, signature_reader=_reader(status, MS_SUBJECT))
+
+
+@pytest.mark.parametrize(
+    "subject",
+    [
+        "CN=Contoso Ltd, O=Contoso Ltd, C=US",
+        "CN=Microsoft Corporation, O=Microsoft Corporation Evil, C=US",  # a Microsoft-looking CN is not the organisation
+        "CN=Microsoft Windows, O=Contoso Ltd, C=US",
+        "CN=Contoso, O=Microsoft Corporation, C=US",  # the organisation without a Microsoft certificate name
+        "O=Microsoft Corporation, C=US",  # no CN at all
+        "CN=Microsoft Windows",  # no organisation
+        "CN=Not Microsoft, OU=O=Microsoft Corporation",
+        "",
+    ],
+)
+def test_a_runtime_dll_signed_by_anyone_but_microsoft_corporation_is_refused(tmp_path: Path, subject: str) -> None:
+    redist = bw.find_redist(_vs_tree(tmp_path / "vs"))
+    with pytest.raises(bw.BuildError, match="not by 'Microsoft Corporation'"):
+        bw.copy_runtime_dlls(tmp_path / "bin", redist, signature_reader=_reader("Valid", subject))
+
+
+def test_each_shipped_dll_is_checked_and_its_signer_is_printed(tmp_path: Path) -> None:
+    redist = bw.find_redist(_vs_tree(tmp_path / "vs"))
+    seen: list[str] = []
+    out: list[str] = []
+
+    def read(path: Path) -> bw.Signature:
+        seen.append(path.name)
+        return bw.Signature("Valid", MS_SUBJECT)
+
+    bw.copy_runtime_dlls(tmp_path / "bin", redist, signature_reader=read, emit=out.append)
+    assert seen == list(bw.VC_RUNTIME_DLLS)
+    assert [ln.split(":")[0] for ln in out] == [f"signature {d}" for d in bw.VC_RUNTIME_DLLS]
+    assert all(MS_SUBJECT in ln for ln in out)
+
+
+@pytest.mark.parametrize(
+    ("subject", "key", "value"),
+    [
+        ("CN=Microsoft Windows, O=Microsoft Corporation, L=Redmond", "CN", "Microsoft Windows"),
+        ("CN=Microsoft Windows, O=Microsoft Corporation, L=Redmond", "O", "Microsoft Corporation"),
+        ('O=Acme, CN="Acme, Inc.", C=US', "CN", "Acme, Inc."),
+        ("C=US, CN=x", "CN", "x"),
+        ("O=Only", "CN", None),
+        ("OU=Only", "O", None),  # OU is not O
+    ],
+)
+def test_subject_attribute_parses_the_subject(subject: str, key: str, value: str | None) -> None:
+    assert bw.subject_attribute(subject, key) == value
+
+
+def test_the_real_redist_subject_and_the_older_microsoft_corporation_cn_are_both_accepted(tmp_path: Path) -> None:
+    """The real DLLs carry CN=Microsoft Windows (the first draft of this check demanded CN=Microsoft
+    Corporation and refused them on the first real run). A CN of Microsoft Corporation, as the VS
+    installer's own files carry, passes too."""
+    redist = bw.find_redist(_vs_tree(tmp_path / "vs"))
+    for subject in (MS_SUBJECT, "CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US"):
+        bw.copy_runtime_dlls(tmp_path / "bin", redist, signature_reader=_reader("Valid", subject), emit=lambda m: None)
+
+
+def test_the_default_reader_refuses_off_windows_instead_of_passing(monkeypatch: pytest.MonkeyPatch) -> None:
+    import types
+
+    monkeypatch.setattr(bw, "sys", types.SimpleNamespace(platform="linux"))
+    with pytest.raises(bw.BuildError, match="cannot read the Authenticode signature"):
+        REAL_READ_AUTHENTICODE(Path("vcruntime140.dll"))
+
+
+def test_the_windows_reader_passes_the_path_in_the_environment_and_parses_the_answer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import types
+
+    calls: list[dict] = []
+
+    def fake_run(argv, **kw):  # noqa: ANN001
+        calls.append({"argv": list(argv), "env": kw["env"]})
+        return types.SimpleNamespace(returncode=0, stdout=json.dumps({"Status": "Valid", "Subject": MS_SUBJECT}), stderr="")
+
+    monkeypatch.setattr(bw, "sys", types.SimpleNamespace(platform="win32"))
+    monkeypatch.setattr(bw.subprocess, "run", fake_run)
+    sig = REAL_READ_AUTHENTICODE(Path(r"C:\it's here\vcruntime140.dll"))
+    assert sig == bw.Signature("Valid", MS_SUBJECT)
+    (call,) = calls
+    assert call["env"]["NX_SIGCHECK_PATH"] == r"C:\it's here\vcruntime140.dll"
+    script = call["argv"][-1]
+    assert "Get-AuthenticodeSignature" in script and "it's here" not in script, "the path is never quoted into the script"
+    for bad in (
+        types.SimpleNamespace(returncode=1, stdout="", stderr="boom"),
+        types.SimpleNamespace(returncode=0, stdout="not json", stderr=""),
+        types.SimpleNamespace(returncode=0, stdout="{}", stderr=""),
+    ):
+        monkeypatch.setattr(bw.subprocess, "run", lambda *a, _b=bad, **k: _b)
+        with pytest.raises(bw.BuildError):
+            REAL_READ_AUTHENTICODE(Path("x.dll"))
+
+
+def test_the_bundle_build_refuses_an_unsigned_runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(bw, "read_authenticode", _reader("NotSigned", ""))
+    with pytest.raises(bw.BuildError, match="NotSigned"):
+        _build(tmp_path)
+
+
+def test_refresh_refuses_an_unsigned_runtime_and_writes_no_notice(tmp_path: Path) -> None:
+    redist = bw.find_redist(_vs_tree(tmp_path / "vs"))
+    bundle = tmp_path / "bundle"
+    with pytest.raises(bw.BuildError, match="HashMismatch"):
+        bw.copy_runtime(bundle, redist, bw.Pins("17.5", "v0.8.2"), signature_reader=_reader("HashMismatch", MS_SUBJECT))
+    assert not (bundle / bw.NOTICE_NAME).exists(), "no notice is written for a runtime that was refused"
+
+
+# --------------------------------------------------------------------------- #
+# nexus-f9bgu.27: pins (code review m5)
+# --------------------------------------------------------------------------- #
+
+
+def test_the_pins_are_the_literals_measured_on_2026_10_05() -> None:
+    assert bw.PINNED_PG_SHA256 == {"17.5": "fcb7ab38e23b264d1902cb25e6adafb4525a6ebcbd015434aeef9eda80f528d8"}
+    assert bw.PINNED_PGVECTOR_COMMITS == {"v0.8.2": "cab9da72c04353f143bb06b42ab70a403daac64a"}
+    assert bw.DEFAULT_PG_VERSION in bw.PINNED_PG_SHA256 and bw.DEFAULT_PGVECTOR_VERSION in bw.PINNED_PGVECTOR_COMMITS
+    host = bw.Host(runner=bw.Runner())
+    assert host.pg_sha256_pins == bw.PINNED_PG_SHA256 and host.pgvector_commit_pins == bw.PINNED_PGVECTOR_COMMITS
+
+
+def test_a_tarball_that_agrees_with_the_hosts_file_but_not_with_the_pin_is_refused(tmp_path: Path) -> None:
+    """The host's .sha256 sits beside the tarball: it proves the download is intact, not that it is the
+    one that was reviewed. The control builds with a matching pin, so the host check alone passes."""
+    prefix, runner, _ = _build(tmp_path)
+    assert bw.verify_layout(prefix) == []
+    (tmp_path / "again").mkdir()
+    with pytest.raises(bw.BuildError, match="pin in this script"):
+        _build(tmp_path / "again", pg_pin="0" * 64)
+
+
+def test_a_postgresql_version_without_a_pin_is_refused_before_meson(tmp_path: Path) -> None:
+    with pytest.raises(bw.BuildError, match="no pinned sha256 for PostgreSQL 17.6"):
+        _build(tmp_path, pins=bw.Pins("17.6", "v0.8.2"))
+
+
+def test_pgvector_must_resolve_to_the_pinned_commit(tmp_path: Path) -> None:
+    runners: list[FakeBuildRunner] = []
+    with pytest.raises(bw.BuildError, match="tag moved"):
+        _build(tmp_path, pgvector_head="f" * 40, runners=runners)
+    shapes = [_shape(c) for c in runners[0].calls]
+    assert "capture:git" in shapes and "nmake-build" not in shapes, "nothing was built past the check"
+    (tmp_path / "other").mkdir()
+    with pytest.raises(bw.BuildError, match="no pinned commit for pgvector v0.9.0"):
+        _build(tmp_path / "other", pins=bw.Pins("17.5", "v0.9.0"))
+
+
+def test_the_docstring_names_only_test_files_that_exist() -> None:
+    named = set(re.findall(r"tests/test_[\w]+\.py", SCRIPT.read_text(encoding="utf-8")))
+    assert named, "non-vacuity: the script names its pinning test"
+    for name in named:
+        assert (REPO / name).is_file(), f"{SCRIPT.name} names {name}, which does not exist"
+
+
+# --------------------------------------------------------------------------- #
+# nexus-f9bgu.27: the work directory does not outlive the build (code review S3)
+# --------------------------------------------------------------------------- #
+
+
+def _drive_main(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *extra: str, fail: bool = False,
+                env: dict[str, str] | None = None) -> tuple[int, list[Path]]:
+    """bw.main on 'win32' with every Windows-only step stubbed and the build recording its work dir."""
+    import tempfile
+
+    tmp_root = tmp_path / "tmp"
+    tmp_root.mkdir(exist_ok=True)
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_root))
+    seen: list[Path] = []
+
+    def fake_build(*, work: Path, **_kw) -> None:
+        seen.append(work)
+        (work / "pgbuild").mkdir(parents=True)
+        ro = work / "pgbuild" / "readonly.obj"
+        ro.write_text("x")
+        ro.chmod(0o444)
+        if fail:
+            raise bw.BuildError("compile failed")
+
+    monkeypatch.setattr(bw, "find_vs_install", lambda e, r: tmp_path)
+    monkeypatch.setattr(bw, "find_redist", lambda vs: None)
+    monkeypatch.setattr(bw, "load_vs_env", lambda vs, e: {})
+    monkeypatch.setattr(bw, "find_flex_bison_dir", lambda e: tmp_path)
+    monkeypatch.setattr(bw, "build", fake_build)
+    rc = bw.main(["build", "--prefix", str(tmp_path / "prefix"), *extra], env=env or {}, platform="win32")
+    return rc, seen
+
+
+def test_the_auto_made_work_dir_is_removed_after_a_build_and_after_a_failed_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rc, seen = _drive_main(tmp_path, monkeypatch)
+    assert rc == 0 and len(seen) == 1 and seen[0].name.startswith("pgbundle-") and not seen[0].exists()
+    (tmp_path / "f").mkdir()
+    rc, seen = _drive_main(tmp_path / "f", monkeypatch, fail=True)
+    assert rc == 1 and len(seen) == 1 and not seen[0].exists(), "a failed build leaves no gigabytes behind either"
+
+
+def test_keep_work_dir_keeps_it_and_a_named_work_dir_is_never_removed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rc, seen = _drive_main(tmp_path, monkeypatch, "--keep-work-dir")
+    assert rc == 0 and seen[0].is_dir()
+    (tmp_path / "n").mkdir()
+    named = tmp_path / "n" / "mine"
+    rc, seen = _drive_main(tmp_path / "n", monkeypatch, "--work-dir", str(named))
+    assert rc == 0 and seen == [named.resolve()] and named.is_dir(), "a directory the caller named is the caller's"
+    (tmp_path / "e").mkdir()
+    named2 = tmp_path / "e" / "fromenv"
+    rc, seen = _drive_main(tmp_path / "e", monkeypatch, env={"WORK_DIR": str(named2)})
+    assert rc == 0 and named2.is_dir()
+
+
+def test_the_auto_made_work_dir_lives_under_runner_temp_when_the_runner_sets_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The runner empties RUNNER_TEMP between jobs, so a job killed mid-build leaves nothing."""
+    rt = tmp_path / "runner-temp"
+    rt.mkdir()
+    rc, seen = _drive_main(tmp_path, monkeypatch, "--keep-work-dir", env={"RUNNER_TEMP": str(rt)})
+    assert rc == 0 and seen[0].parent == rt.resolve()
+
+
+def test_remove_tree_clears_read_only_files_and_never_raises(tmp_path: Path) -> None:
+    tree = tmp_path / "t"
+    (tree / "d").mkdir(parents=True)
+    ro = tree / "d" / "object"
+    ro.write_text("x")
+    ro.chmod(0o444)
+    bw.remove_tree(tree)
+    assert not tree.exists()
+    bw.remove_tree(tmp_path / "never-existed")  # must not raise
+
+
+# --------------------------------------------------------------------------- #
+# nexus-f9bgu.27: the smoke extracts the way the client does, and compares long paths
+# --------------------------------------------------------------------------- #
+
+
+def test_materialise_grants_the_current_user_before_anything_is_extracted(tmp_path: Path) -> None:
+    archive = bw.package(stage_bundle(tmp_path / "w" / "bundle"), tmp_path / "dist")
+    seen: list[tuple[Path, list[str]]] = []
+
+    def grant(path: Path) -> None:
+        seen.append((path, sorted(p.name for p in path.iterdir())))
+
+    root = sm.materialise(archive, archive=True, dest=tmp_path / "fresh", grant=grant)
+    assert seen == [(tmp_path / "fresh", [])], "one grant, on the destination, while it was still empty"
+    assert (root / "bin" / "initdb.exe").is_file()
+
+
+def test_the_default_grant_is_the_clients_own_function_and_a_no_op_off_windows(tmp_path: Path) -> None:
+    grant = sm.load_grant_user_tree_access()
+    assert grant.__name__ == "grant_user_tree_access"
+    if os.name != "nt":
+        grant(tmp_path)  # POSIX: nothing to do, and it must not raise
+    src = (REPO / "src" / "nexus" / "db" / "pg_bundle.py").read_text(encoding="utf-8")
+    assert "grant_user_tree_access(dest)" in src, "premise: the client still grants before it extracts"
+
+
+def test_the_work_dir_defaults_under_runner_temp(tmp_path: Path) -> None:
+    rt = tmp_path / "runner-temp"
+    work = sm.make_workdir(None, sm.Platform(windows=False), env={"RUNNER_TEMP": str(rt)})
+    assert work.parent == rt and work.is_dir()
+
+
+def test_a_short_form_temp_is_not_a_false_failure_once_both_sides_are_made_long() -> None:
+    short_bin = Path("C:/Users/RUNNER~1/AppData/Local/Temp/pgsmoke/bundle/bin")
+    modules = [r"C:\Users\runneradmin\AppData\Local\Temp\pgsmoke\bundle\bin\vcruntime140.dll"]
+
+    def long_form(p: str) -> str:
+        return p.replace("RUNNER~1", "runneradmin")
+
+    assert sm.check_loaded_modules(modules, short_bin, long_path=long_form)
+    # control: without the expansion the same listing is a (false) failure
+    with pytest.raises(sm.SmokeError, match="not from the bundle"):
+        sm.check_loaded_modules(modules, short_bin, long_path=lambda p: p)
+    # a genuinely foreign module still fails under the expansion
+    with pytest.raises(sm.SmokeError, match="not from the bundle"):
+        sm.check_loaded_modules([r"C:\Windows\System32\vcruntime140.dll"], short_bin, long_path=long_form)
+
+
+def test_resolve_long_path_normalises_dot_segments_on_any_os(tmp_path: Path) -> None:
+    (tmp_path / "b").mkdir()
+    messy = str(tmp_path / "a" / ".." / "b")
+    assert sm.resolve_long_path(messy, windows=False) == os.path.realpath(tmp_path / "b")

@@ -32,6 +32,12 @@ REPO = Path(__file__).resolve().parent.parent
 CHANGELOG = REPO / "service" / "src" / "main" / "resources" / "db" / "changelog"
 
 
+@pytest.fixture(autouse=True)
+def _runtime_dlls_are_signed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The packaging round trip below stages fake DLLs on any OS; Authenticode is asked of a real file on Windows only."""
+    monkeypatch.setattr(bw, "read_authenticode", lambda path: bw.Signature("Valid", "CN=Microsoft Windows, O=Microsoft Corporation, C=US"))
+
+
 # --------------------------------------------------------------------------- #
 # The expected changeset count is read from the changelog
 # --------------------------------------------------------------------------- #
@@ -192,7 +198,12 @@ def test_check_embedding_requires_one_finite_nonzero_768_vector() -> None:
 
 
 class FakeProc:
-    def __init__(self, *, exits_after_interrupt: bool = True, exit_code: int = 149, dies_at_poll: int | None = None) -> None:
+    """A stand-in engine. On a delivered interrupt it exits with *exit_code* and appends what the real engine's
+    stop path logs (*stop_log*) to the log it was started with."""
+
+    def __init__(self, *, exits_after_interrupt: bool = True, exit_code: int = 149, dies_at_poll: int | None = None,
+                 interrupt_error: OSError | None = None,
+                 stop_log: str = "event=shutdown_signal\nevent=service_stopped\n") -> None:
         self.pid = 4242
         self.polls = 0
         self.interrupted = False
@@ -200,7 +211,15 @@ class FakeProc:
         self._exits_after_interrupt = exits_after_interrupt
         self._exit_code = exit_code
         self._dies_at_poll = dies_at_poll
+        self._interrupt_error = interrupt_error
+        self._stop_log = stop_log
+        self.log: Path | None = None
         self.returncode: int | None = None
+
+    def fresh(self) -> FakeProc:
+        """The same engine, booted again."""
+        return FakeProc(exits_after_interrupt=self._exits_after_interrupt, exit_code=self._exit_code,
+                        dies_at_poll=self._dies_at_poll, interrupt_error=self._interrupt_error, stop_log=self._stop_log)
 
     def poll(self) -> int | None:
         self.polls += 1
@@ -209,6 +228,8 @@ class FakeProc:
         return self.returncode
 
     def interrupt(self) -> None:
+        if self._interrupt_error is not None:
+            raise self._interrupt_error
         self.interrupted = True
 
     def kill(self) -> None:
@@ -218,20 +239,36 @@ class FakeProc:
     def wait(self, timeout: float) -> int | None:
         if self.interrupted and self._exits_after_interrupt and self.returncode is None:
             self.returncode = self._exit_code
+            if self.log is not None and self._stop_log:
+                with self.log.open("a", encoding="utf-8") as fh:
+                    fh.write(self._stop_log)
         return self.returncode
 
 
 class FakeLauncher:
-    def __init__(self, proc: FakeProc | None = None) -> None:
+    """Each start gets a fresh engine like the first. The first boots a fresh database (*first_boot_new*
+    changesets applied); every later boot finds it migrated (*reboot_new* applied)."""
+
+    def __init__(self, proc: FakeProc | None = None, *, first_boot_new: int = 3, reboot_new: int | None = 0) -> None:
         self.proc = proc or FakeProc()
+        self.procs: list[FakeProc] = []
         self.started: list[tuple[list[str], dict[str, str], Path]] = []
         self.engine_dir_listing: list[str] = []
+        self._first_boot_new = first_boot_new
+        self._reboot_new = reboot_new
 
     def start(self, argv, env, log):  # noqa: ANN001
         self.started.append((list(argv), dict(env), log))
         self.engine_dir_listing = sorted(p.name for p in Path(argv[0]).parent.iterdir())
-        log.write_text("event=service_ready\n")
-        return self.proc
+        proc = self.proc if not self.procs else self.procs[-1].fresh()
+        proc.log = log
+        self.procs.append(proc)
+        new = self._first_boot_new if len(self.procs) == 1 else self._reboot_new
+        text = "event=service_ready\n"
+        if new is not None:
+            text = f"event=schema_migration_complete new_changesets={new} reexecuted_changesets=12\n" + text
+        log.write_text(text)
+        return proc
 
 
 class FakeHttp:
@@ -372,7 +409,9 @@ def test_the_happy_path_runs_every_stage_in_order(tmp_path: Path, windows: bool)
     assert [Path(c[0]).name for c in pg_calls] == [f"initdb{exe}", f"pg_ctl{exe}", f"createdb{exe}", f"pg_ctl{exe}"]
     assert pg_calls[1][-1] == "start" and pg_calls[3][-1] == "stop"
     kinds = [(m, u.rsplit("/", 1)[-1]) for m, u in http.calls]
-    assert kinds == [("GET", "health"), ("GET", "version"), ("POST", "embed")]
+    first = [("GET", "health"), ("GET", "version"), ("POST", "embed")]
+    reboot = [("GET", "health"), ("GET", "version")]
+    assert kinds == (first + reboot if windows else first)
     assert (len([c for c in runner.calls if "powershell" in str(c[0]).lower()]) == 1) is windows
     text = "\n".join(out)
     assert "changesets 3/3" in text and "768" in text
@@ -453,13 +492,13 @@ def test_the_embed_must_have_loaded_msvcp140_from_the_engine_directory(tmp_path:
         _run(tmp_path, windows=True, launcher=launcher, runner=runner)
 
 
-def test_a_graceful_stop_reports_the_exit_code_and_a_hard_stop_is_reported_as_one(tmp_path: Path) -> None:
+def test_a_graceful_stop_reports_the_exit_code_and_off_windows_a_hard_stop_is_only_reported(tmp_path: Path) -> None:
     launcher = FakeLauncher(FakeProc(exits_after_interrupt=True, exit_code=149))
     out, *_ = _run(tmp_path, windows=True, launcher=launcher, runner=_ListingRunner(launcher))
     assert any("CTRL_BREAK" in ln and "149" in ln for ln in out)
     launcher = FakeLauncher(FakeProc(exits_after_interrupt=False))
     (tmp_path / "again").mkdir()
-    out, *_ = _run(tmp_path / "again", windows=True, launcher=launcher, runner=_ListingRunner(launcher))
+    out, *_ = _run(tmp_path / "again", windows=False, launcher=launcher, runner=FakeRunner())
     assert launcher.proc.killed
     assert any("hard" in ln.lower() for ln in out)
     assert out[-1] == "SMOKE PASSED"
@@ -506,3 +545,174 @@ def test_the_engine_archive_checked_here_is_the_one_package_builds(tmp_path: Pat
     launcher = FakeLauncher()
     out, *_ = _run(tmp_path, windows=True, launcher=launcher, runner=_ListingRunner(launcher), engine=archive)
     assert out[-1] == "SMOKE PASSED"
+
+
+# --------------------------------------------------------------------------- #
+# nexus-f9bgu.30 (critique S1): on Windows the stop is an ASSERTION
+# --------------------------------------------------------------------------- #
+
+
+def _run_windows(tmp_path: Path, proc: FakeProc, **launcher_kw):
+    launcher = FakeLauncher(proc, **launcher_kw)
+    return _run(tmp_path, windows=True, launcher=launcher, runner=_ListingRunner(launcher)) + (launcher,)
+
+
+def test_the_windows_run_stops_boots_again_and_stops_again(tmp_path: Path) -> None:
+    out, launcher, http, runner, _ = _run_windows(tmp_path, FakeProc())
+    assert out[-1] == "SMOKE PASSED"
+    assert len(launcher.started) == 2 and [p.interrupted for p in launcher.procs] == [True, True]
+    assert launcher.started[0][1] == launcher.started[1][1], "the reboot runs under the same environment, against the same database"
+    assert not any(p.killed for p in launcher.procs)
+    text = "\n".join(out)
+    assert text.count("CTRL_BREAK, exit code 149") == 2
+    assert "applied 0 new changesets" in text
+    reboot_get = [u for m, u in http.calls if m == "GET"][-2:]
+    assert [u.rsplit("/", 1)[1] for u in reboot_get] == ["health", "version"]
+
+
+def test_a_session_that_cannot_deliver_ctrl_break_fails_the_windows_smoke_rather_than_warning(tmp_path: Path) -> None:
+    proc = FakeProc(interrupt_error=OSError(6, "The handle is invalid"))
+    with pytest.raises(es.SmokeError, match="no console"):
+        _run_windows(tmp_path, proc)
+    assert proc.killed, "the engine is still stopped, hard, before the failure is raised"
+
+
+def test_off_windows_an_undeliverable_signal_is_a_warning_as_before(tmp_path: Path) -> None:
+    launcher = FakeLauncher(FakeProc(interrupt_error=OSError(1, "nope")))
+    out, *_ = _run(tmp_path, windows=False, launcher=launcher, runner=FakeRunner())
+    assert any("WARNING" in ln for ln in out) and out[-1] == "SMOKE PASSED"
+
+
+def test_an_engine_that_ignores_ctrl_break_fails_the_windows_smoke(tmp_path: Path) -> None:
+    proc = FakeProc(exits_after_interrupt=False)
+    with pytest.raises(es.SmokeError, match="did not exit within"):
+        _run_windows(tmp_path, proc)
+    assert proc.killed
+
+
+@pytest.mark.parametrize("code", [0, 1, 143, -9])
+def test_any_exit_code_but_149_fails_the_windows_stop(tmp_path: Path, code: int) -> None:
+    with pytest.raises(es.SmokeError, match=rf"exited with code {code} on CTRL_BREAK, expected 149"):
+        _run_windows(tmp_path, FakeProc(exit_code=code))
+
+
+@pytest.mark.parametrize(
+    ("stop_log", "missing"),
+    [
+        ("event=service_stopped\n", "shutdown_signal"),
+        ("event=shutdown_signal\n", "service_stopped"),
+        ("", "shutdown_signal, event=service_stopped"),
+        ("shutdown_signal service_stopped\n", "shutdown_signal"),  # the words without the event= key are not the events
+    ],
+)
+def test_the_windows_stop_requires_both_shutdown_events_in_the_engine_log(tmp_path: Path, stop_log: str, missing: str) -> None:
+    with pytest.raises(es.SmokeError, match=rf"lacks event={missing}"):
+        _run_windows(tmp_path, FakeProc(stop_log=stop_log))
+
+
+def test_a_stop_slower_than_the_bound_fails_even_with_the_right_exit_code(tmp_path: Path) -> None:
+    ticks = iter([0.0, 11.0])
+    proc = FakeProc()
+    log = tmp_path / "e.log"
+    proc.log = log
+    with pytest.raises(es.SmokeError, match="took 11.0s"):
+        es.assert_serving_stop(proc, log, lambda m: None, bound_s=10.0, clock=lambda: next(ticks))
+
+
+def test_the_bound_is_the_documented_ten_seconds_and_the_code_is_128_plus_21() -> None:
+    assert es.STOP_BOUND_S == 10.0 and es.WINDOWS_STOP_EXIT_CODE == 149
+
+
+@pytest.mark.parametrize("new", [1, 12, 508])
+def test_a_second_boot_that_applies_changesets_fails(tmp_path: Path, new: int) -> None:
+    with pytest.raises(es.SmokeError, match=rf"applied {new} new changesets"):
+        _run_windows(tmp_path, FakeProc(), reboot_new=new)
+
+
+def test_a_second_boot_log_without_the_changeset_line_is_not_a_pass(tmp_path: Path) -> None:
+    with pytest.raises(es.SmokeError, match="new_changesets=<n>"):
+        _run_windows(tmp_path, FakeProc(), reboot_new=None)
+
+
+def test_a_second_boot_that_never_becomes_healthy_fails_and_is_stopped(tmp_path: Path) -> None:
+    launcher = FakeLauncher(FakeProc())
+    http = FakeHttp(version=GOOD_VERSION, embed=GOOD_EMBED)
+    real_get = http.get
+    state = {"health": 0}
+
+    def get(url: str, headers: dict[str, str]):  # noqa: ANN202
+        if url.endswith("/health"):
+            state["health"] += 1
+            if state["health"] > 1:
+                return 0, ""
+        return real_get(url, headers)
+
+    http.get = get  # type: ignore[method-assign]
+    with pytest.raises(es.SmokeError, match="never became healthy"):
+        _run(tmp_path, windows=True, http=http, launcher=launcher, runner=_ListingRunner(launcher), health_timeout_s=2)
+    assert launcher.procs[-1].interrupted or launcher.procs[-1].killed
+
+
+def test_a_second_stop_that_fails_fails_the_run(tmp_path: Path) -> None:
+    """First boot stops cleanly, the reboot exits wrong: the leg is red."""
+
+    class Flaky(FakeProc):
+        def fresh(self) -> FakeProc:
+            return FakeProc(exit_code=1)
+
+    with pytest.raises(es.SmokeError, match="exited with code 1"):
+        _run_windows(tmp_path, Flaky())
+
+
+# --------------------------------------------------------------------------- #
+# nexus-f9bgu.27: review findings
+# --------------------------------------------------------------------------- #
+
+
+def test_the_model_download_carries_no_credential(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """urllib forwards every header across the redirect to the CDN host; the repository is public."""
+    seen: list[object] = []
+
+    def fake_urlopen(req, timeout=None):  # noqa: ANN001
+        seen.append(req)
+        return io.BytesIO(b"payload")
+
+    monkeypatch.setenv("GH_TOKEN", "ghp_should_never_be_sent")
+    monkeypatch.setenv("GITHUB_TOKEN", "also_never")
+    monkeypatch.setattr(es.urllib.request, "urlopen", fake_urlopen)
+    dest = tmp_path / "m"
+    es.fetch_url("https://github.com/o/r/releases/download/t/model.onnx", dest)
+    assert dest.read_bytes() == b"payload" and len(seen) == 1
+    headers = getattr(seen[0], "headers", {})
+    assert not any(k.lower() == "authorization" for k in headers), headers
+    assert isinstance(seen[0], str) or not getattr(seen[0], "has_header", lambda h: False)("Authorization")
+    src = (REPO / "scripts" / "engine_windows_smoke.py").read_text(encoding="utf-8")
+    assert "GH_TOKEN" not in src and "GITHUB_TOKEN" not in src and "Bearer {token}" not in src
+
+
+@pytest.mark.parametrize("bad", ["C:evil.exe", "a:b", "..", "x..y.dll"])
+def test_extract_engine_refuses_member_names_that_are_not_bare_file_names(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, bad: str
+) -> None:
+    arc = _tar(tmp_path / "e.txz", {"nexus-service.exe": b"MZ", **{d: b"MZ" for d in bw.VC_RUNTIME_DLLS},
+                                    "THIRD-PARTY-NOTICES.txt": b"n", bad: b"x"})
+    with pytest.raises(es.SmokeError, match="layout check"):
+        es.extract_engine(arc, tmp_path / "out")  # verify_archive refuses it first
+    assert not (tmp_path / "out").exists()
+    # and the second, local refusal stands on its own when the first is out of the picture
+    monkeypatch.setattr(wer, "verify_archive", lambda a: [])
+    with pytest.raises(es.SmokeError, match="not a file name|holds ':'|not a bare"):
+        es.extract_engine(arc, tmp_path / "out2")
+    assert sorted(p.name for p in (tmp_path / "out2").iterdir() if p.name == bad) == []
+
+
+def test_the_engine_module_check_compares_long_forms_so_an_8_3_temp_is_not_a_false_failure() -> None:
+    short = Path("C:/Users/RUNNER~1/AppData/Local/Temp/engine")
+    modules = [rf"C:\Users\runneradmin\AppData\Local\Temp\engine\{d}" for d in bw.VC_RUNTIME_DLLS]
+
+    def long_form(p: str) -> str:
+        return p.replace("RUNNER~1", "runneradmin")
+
+    assert "vcruntime140.dll" in es.check_engine_modules(modules, short, long_path=long_form)
+    with pytest.raises(es.SmokeError, match="not from the bundle"):
+        es.check_engine_modules(modules, short, long_path=lambda p: p)

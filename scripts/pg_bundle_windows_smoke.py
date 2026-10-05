@@ -20,7 +20,13 @@ Hazards it is built around:
     OS directories only, so Visual Studio, Python and Strawberry Perl cannot
     satisfy a DLL lookup.
   * On Windows the postmaster's loaded modules are listed and every VC++
-    runtime module must resolve from bundle/bin (the CI proxy of P0.5b).
+    runtime module must resolve from bundle/bin (the CI proxy of P0.5b). Both
+    sides of that comparison are resolved to the long form first, so a TEMP in
+    8.3 short form (C:\\Users\\RUNNER~1\\...) is not a false failure.
+  * The archive is extracted the way the client extracts it (nexus.db.pg_bundle:
+    an inheritable ACE for the current user on the destination BEFORE the tree is
+    written, then tarfile), so an elevated runner token that would hit the
+    owner-only-ACL 0xC0000135 fails here and not in a user's first run.
 
 This script does NOT prove Visual Studio is absent: the loader may still find
 a system-wide runtime. That claim needs the clean Windows 11 guest, a release-
@@ -36,6 +42,7 @@ from __future__ import annotations
 
 import argparse
 import getpass
+import importlib.util
 import os
 import re
 import secrets
@@ -46,7 +53,7 @@ import sys
 import tarfile
 import tempfile
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -120,7 +127,9 @@ def scrubbed_env(bin_dir: Path, platform: Platform, base: Mapping[str, str]) -> 
     return env
 
 
-def make_workdir(parent: Path | None, platform: Platform) -> Path:
+def make_workdir(
+    parent: Path | None, platform: Platform, *, env: Mapping[str, str] | None = None
+) -> Path:
     """A fresh private directory for one smoke run.
 
     NOT ``tempfile.mkdtemp`` on Windows: since Python 3.12 that gives the
@@ -131,7 +140,10 @@ def make_workdir(parent: Path | None, platform: Platform) -> Path:
     then cannot read libpq.dll: initdb dies 0xC0000135 with no message. Seen
     on qwentescence 2026-10-05. A plain mkdir inherits the parent's ACL (Users
     read, as for any ordinary directory)."""
-    base = parent if parent is not None else Path(tempfile.gettempdir())
+    # RUNNER_TEMP first: the runner empties it between jobs, and the job-end cleanup step finds a
+    # stray postgres or engine by the directory it was started from (nexus-f9bgu.27).
+    runner_temp = (env if env is not None else os.environ).get("RUNNER_TEMP")
+    base = parent if parent is not None else Path(runner_temp or tempfile.gettempdir())
     base.mkdir(parents=True, exist_ok=True)
     while True:
         path = base / f"pgsmoke-{secrets.token_hex(4)}"
@@ -151,10 +163,36 @@ def free_port() -> int:
         return int(s.getsockname()[1])
 
 
-def materialise(source: Path, *, archive: bool, dest: Path) -> Path:
-    """Extract the archive (or copy the tree) into ``dest``; return the bundle root."""
+_WINSEC_SOURCE = Path(__file__).resolve().parent.parent / "src" / "nexus" / "_winsec.py"
+
+
+def load_grant_user_tree_access() -> Callable[[Path], None]:
+    """The client's own ``grant_user_tree_access`` (src/nexus/_winsec.py, stdlib only).
+
+    Loaded from its file when the repository is at hand, so the smoke runs the client's
+    code, not a copy of it, without needing nexus installed in the interpreter that runs
+    this script; falls back to the installed package. A no-op off Windows."""
+    if _WINSEC_SOURCE.is_file():
+        spec = importlib.util.spec_from_file_location("_nexus_winsec_for_smoke", _WINSEC_SOURCE)
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module.grant_user_tree_access
+    from nexus._winsec import grant_user_tree_access  # noqa: PLC0415 - only when the repository is absent
+    return grant_user_tree_access
+
+
+def materialise(
+    source: Path, *, archive: bool, dest: Path, grant: Callable[[Path], None] | None = None
+) -> Path:
+    """Extract the archive (or copy the tree) into ``dest``; return the bundle root.
+
+    The archive path is the client's (``nexus.db.pg_bundle._extract_and_validate``): the
+    destination gets an inheritable ACE for the current user before anything is written,
+    then ``tarfile`` extracts with the ``data`` filter."""
     dest.mkdir(parents=True, exist_ok=True)
     if archive:
+        (grant if grant is not None else load_grant_user_tree_access())(dest)
         with tarfile.open(source, "r:xz") as tf:
             tf.extractall(dest, filter="data")
         root = dest / ARCHIVE_ROOT
@@ -191,15 +229,34 @@ def check_runtime_present(root: Path) -> None:
         raise SmokeError("THIRD-PARTY-NOTICES.txt missing from the bundle")
 
 
+def resolve_long_path(path: str, *, windows: bool | None = None) -> str:
+    """*path* in its long, resolved form: ``GetLongPathNameW`` on Windows (8.3 short names such
+    as ``RUNNER~1`` expanded), then ``realpath`` (junctions and symlinks). The module list of a
+    process reports long paths; a TEMP in short form would otherwise differ from it as a string."""
+    if windows is None:
+        windows = sys.platform == "win32"
+    if windows:
+        import ctypes  # noqa: PLC0415 - Windows only
+
+        buf = ctypes.create_unicode_buffer(32768)
+        n = ctypes.windll.kernel32.GetLongPathNameW(path, buf, len(buf))  # type: ignore[attr-defined]
+        if 0 < n < len(buf):
+            path = buf.value
+    return os.path.realpath(path)
+
+
 def _win_norm(path: str) -> str:
     """Windows paths compare case-insensitively with either slash; done by hand
     so the check behaves the same when run under another OS."""
     return path.replace("\\", "/").rstrip("/").lower()
 
 
-def check_loaded_modules(modules: Sequence[str], bin_dir: Path) -> list[str]:
+def check_loaded_modules(
+    modules: Sequence[str], bin_dir: Path, *, long_path: Callable[[str], str] = resolve_long_path
+) -> list[str]:
     """Every VC++ runtime module the process loaded must be bundle/bin's own.
-    Non-vacuous: at least one runtime module must be present in the listing."""
+    Both paths are compared in their long form (*long_path*), so an 8.3 short TEMP is not a
+    false failure. Non-vacuous: at least one runtime module must be present in the listing."""
     wanted = {d.lower() for d in VC_RUNTIME_DLLS}
     seen: list[str] = []
     for m in modules:
@@ -208,7 +265,7 @@ def check_loaded_modules(modules: Sequence[str], bin_dir: Path) -> list[str]:
         # NOT a bare 'msvcp' prefix: msvcp_win.dll is a Windows component in System32 (nexus-f9bgu.9).
         if name in wanted or _VERSIONED_VC_RUNTIME_RE.match(name):
             seen.append(m)
-            if _win_norm(m) != _win_norm(str(bin_dir / name)):
+            if _win_norm(long_path(m)) != _win_norm(long_path(str(bin_dir / name))):
                 raise SmokeError(f"{name} loaded from {m}, not from the bundle's {bin_dir}")
     if not seen:
         raise SmokeError("module listing held no VC++ runtime module: the check saw nothing")

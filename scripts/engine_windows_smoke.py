@@ -22,10 +22,17 @@ the same job. Pass means all of:
   * the engine process then has vcruntime140.dll and msvcp140.dll loaded, every
     VC++ runtime module from the engine directory (not System32): proof that the
     shipped copies are what the process actually used;
-  * a stop. CTRL_BREAK is sent to the engine (the P1.1 stop channel) and its exit
-    code reported; where the runner's session cannot deliver it the engine is
-    stopped hard and the report says so (a warning: the stop behaviour itself is
-    proved by nexus-f9bgu.8, not re-proved here).
+  * a stop, ASSERTED on Windows (nexus-f9bgu.30, critique S1): CTRL_BREAK, the P1.1
+    stop channel, ends the serving engine with exit code 149 (128 + 21) within
+    ``STOP_BOUND_S`` seconds, its log carries ``shutdown_signal`` and
+    ``service_stopped``, a second boot of the same database reaches health with
+    ``new_changesets=0`` and the right changeset count, and that boot stops the same
+    way. A session that cannot deliver CTRL_BREAK (no console: a service session)
+    FAILS the smoke rather than warns: run it in a session that has one. The
+    driver for the other three phases (a stop before the changelog lock, in the
+    middle of a changeset, during ONNX Runtime initialisation) is
+    scripts/engine_windows_stop_probe.py. Off Windows the stop is reported, not
+    asserted (SIGTERM, exit code 143, the cloud and Linux legs' own behaviour).
 
 Not covered, stated rather than implied: the fused-rerank stage and the real
 Python client probes of native-smoke.sh (they need the cross-encoder model and a
@@ -135,9 +142,11 @@ def _sha256(path: Path) -> str:
     return h.hexdigest()
 
 
-def fetch_url(url: str, dest: Path, token: str | None = None) -> None:
-    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"} if token else {})
-    with urllib.request.urlopen(req, timeout=120) as resp, dest.open("wb") as out:  # noqa: S310
+def fetch_url(url: str, dest: Path) -> None:
+    """Download a public release asset. Unauthenticated on purpose: the repository is public, and
+    urllib forwards every header to the CDN host the release URL redirects to, where a second
+    credential is at best rejected and at worst leaked (code review m1)."""
+    with urllib.request.urlopen(url, timeout=120) as resp, dest.open("wb") as out:  # noqa: S310
         shutil.copyfileobj(resp, out, 1 << 20)
 
 
@@ -216,10 +225,12 @@ def check_embedding(text: str) -> int:
     return len(vec)
 
 
-def check_engine_modules(modules: Sequence[str], engine_dir: Path) -> str:
+def check_engine_modules(
+    modules: Sequence[str], engine_dir: Path, *, long_path: Callable[[str], str] = sm.resolve_long_path
+) -> str:
     """Every VC++ runtime module the engine loaded came from its own directory, and the two
     that matter most were loaded at all (vcruntime140 by the exe, msvcp140 by onnxruntime.dll)."""
-    seen = sm.check_loaded_modules(modules, engine_dir)
+    seen = sm.check_loaded_modules(modules, engine_dir, long_path=long_path)
     names = {Path(m.replace("\\", "/")).name.lower() for m in seen}
     absent = [n for n in ("vcruntime140.dll", "msvcp140.dll") if n not in names]
     if absent:
@@ -333,6 +344,11 @@ def extract_engine(archive: Path, dest: Path) -> Path:
     os.mkdir(dest)
     with tarfile.open(archive, "r:xz") as tf:
         for member in tf:
+            # verify_archive already refused these; a second, local refusal keeps this function safe
+            # on its own, because `dest / "C:x"` leaves dest on Windows (code review m3).
+            bad = wer.bare_name_problem(member.name)
+            if bad is not None:
+                raise SmokeError(f"engine archive {archive.name}: {bad}")
             src = tf.extractfile(member)
             assert src is not None  # verify_archive proved every member is a regular file
             with src, (dest / member.name).open("wb") as out:
@@ -378,6 +394,75 @@ def stop_engine(proc: Proc, platform: sm.Platform, emit: Callable[[str], None], 
         emit(f"SMOKE stop WARNING: the engine did not exit on {signame}; stopped hard (this session may have no console)")
     else:
         emit(f"SMOKE stop: stopped by {signame}, exit code {rc}")
+
+
+#: CTRL_BREAK is signal 21 on Windows; the engine exits 128 + signal (OrtInitGate, Main).
+WINDOWS_STOP_EXIT_CODE = 128 + 21
+#: A serving engine stops in well under a second (76 ms measured, nexus-f9bgu.8); ten seconds is slack, not a target.
+STOP_BOUND_S = 10.0
+_SHUTDOWN_EVENTS = ("shutdown_signal", "service_stopped")
+_NEW_CHANGESETS_RE = re.compile(r"\bnew_changesets=(\d+)")
+
+
+def read_log(log: Path) -> str:
+    return log.read_text(encoding="utf-8", errors="replace") if log.exists() else ""
+
+
+def check_shutdown_log(text: str) -> None:
+    """The engine's own account of a clean stop: it saw the signal and ran its stop path to the end."""
+    missing = [ev for ev in _SHUTDOWN_EVENTS if not re.search(rf"\bevent={ev}\b", text)]
+    if missing:
+        raise SmokeError(
+            f"the engine log lacks event={', event='.join(missing)}: the stop did not run the engine's own "
+            f"shutdown path; log tail:\n{text[-1500:]}"
+        )
+
+
+def check_reboot_log(text: str) -> None:
+    """A second boot of an already-migrated database applies nothing new."""
+    match = _NEW_CHANGESETS_RE.search(text)
+    if match is None:
+        raise SmokeError(
+            "the second boot's log carries no new_changesets=<n> (schema_migration_complete): the check "
+            f"cannot tell whether the migration was clean; log tail:\n{text[-1500:]}"
+        )
+    if int(match.group(1)) != 0:
+        raise SmokeError(f"the second boot applied {match.group(1)} new changesets: the first stop left the migration unfinished")
+
+
+def assert_serving_stop(
+    proc: Proc, log: Path, emit: Callable[[str], None], *,
+    bound_s: float = STOP_BOUND_S, clock: Callable[[], float] = time.monotonic,
+) -> float:
+    """CTRL_BREAK a serving engine and assert the stop (Windows). Returns the seconds it took.
+
+    Exit code 149, inside *bound_s*, with the shutdown events in the log. A session that cannot
+    deliver the signal is a failure, not a warning (nexus-f9bgu.30): a leg that passes through a
+    hard kill proves nothing about the stop."""
+    t0 = clock()
+    try:
+        proc.interrupt()
+    except OSError as exc:
+        proc.kill()
+        proc.wait(10)
+        raise SmokeError(
+            f"CTRL_BREAK could not be delivered ({exc}): this session has no console. The Windows stop is "
+            "asserted, not skipped; run the smoke in a session that has one (an interactive or ssh session, "
+            "not a Windows service)."
+        ) from exc
+    rc = proc.wait(bound_s)
+    if rc is None:
+        proc.kill()
+        proc.wait(10)
+        raise SmokeError(f"the engine did not exit within {bound_s:.0f}s of CTRL_BREAK; stopped hard. log tail:\n{_tail(log, 1500)}")
+    elapsed = clock() - t0
+    if rc != WINDOWS_STOP_EXIT_CODE:
+        raise SmokeError(f"the engine exited with code {rc} on CTRL_BREAK, expected {WINDOWS_STOP_EXIT_CODE}; log tail:\n{_tail(log, 1500)}")
+    if elapsed > bound_s:
+        raise SmokeError(f"the engine took {elapsed:.1f}s to stop, the bound is {bound_s:.0f}s")
+    check_shutdown_log(read_log(log))
+    emit(f"SMOKE stop: CTRL_BREAK, exit code {rc} in {elapsed:.2f}s, shutdown_signal and service_stopped logged")
+    return elapsed
 
 
 # --------------------------------------------------------------------------- #
@@ -480,6 +565,21 @@ def run(
             if rc != 0:
                 raise SmokeError(f"module listing failed ({rc}): {listing.strip()}")
             emit(f"SMOKE runtime modules: {check_engine_modules(listing.splitlines(), engine_exe.parent)}, all from the engine directory")
+
+            # The stop is part of the leg (nexus-f9bgu.30): stop the serving engine, then boot the
+            # same database again and stop that too.
+            assert_serving_stop(proc, log, emit)
+            log2 = work / "engine-reboot.log"
+            proc = launcher.start([str(engine_exe), "-Duser.timezone=UTC"], env, log2)
+            t0 = time.monotonic()
+            wait_healthy(http, base, proc, log2, timeout_s=health_timeout_s, sleep=sleep)
+            status, text = http.get(f"{base}/version", auth)
+            if status != 200:
+                raise SmokeError(f"/version returned {status} after the reboot: {text[:200]!r}")
+            emit(f"SMOKE reboot: healthy after {time.monotonic() - t0:.1f}s, {check_version(text, expected)}")
+            assert_serving_stop(proc, log2, emit)
+            check_reboot_log(read_log(log2))
+            emit("SMOKE reboot: second boot applied 0 new changesets")
     finally:
         if proc is not None:
             stop_engine(proc, platform, emit)
@@ -510,9 +610,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     model_root = args.model_root or (Path.home() / ".cache" / "nexus" / "onnx_models")
     try:
         if not args.no_model_download:
-            token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
             ensure_model(
-                model_root, fetch=lambda url, dest: fetch_url(url, dest, token),
+                model_root, fetch=fetch_url,
                 repo=os.environ.get("GITHUB_REPOSITORY", DEFAULT_REPO),
             )
         run(

@@ -31,6 +31,14 @@ from nexus.daemon import binary_install
 
 REPO = Path(__file__).resolve().parent.parent
 FIXTURES = REPO / "tests" / "fixtures" / "windows_dumpbin"
+MS_SUBJECT = "CN=Microsoft Windows, O=Microsoft Corporation, L=Redmond, S=Washington, C=US"
+
+
+@pytest.fixture(autouse=True)
+def _runtime_dlls_are_signed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The packaging tests stage fake DLLs on any OS; Authenticode is asked of a real file on Windows only.
+    The signature check has its own tests (tests/test_pg_bundle_windows.py and below), which inject readers."""
+    monkeypatch.setattr(bw, "read_authenticode", lambda path: bw.Signature("Valid", MS_SUBJECT))
 
 
 def _fixture(name: str) -> str:
@@ -596,3 +604,116 @@ def test_the_encoding_pin_can_fail() -> None:
     """Non-vacuity: the walk flags each bare form and passes the encoded and the binary ones."""
     assert _unencoded_text_io("p.read_text()\nq.write_text('x')\nr.open('r')") == [1, 2, 3]
     assert _unencoded_text_io("p.read_text(encoding='utf-8')\nq.open('rb')\nlzma.open(a, 'wb')") == []
+
+
+# --------------------------------------------------------------------------- #
+# nexus-f9bgu.27: review findings
+# --------------------------------------------------------------------------- #
+
+
+def test_package_refuses_a_runtime_that_is_not_validly_signed_by_microsoft(tmp_path: Path) -> None:
+    exe = tmp_path / "nexus-service.exe"
+    exe.write_bytes(b"MZ-engine" * 1000)
+    redist = _redist(tmp_path)
+    for reader, needle in (
+        (lambda p: bw.Signature("NotSigned", ""), "NotSigned"),
+        (lambda p: bw.Signature("Valid", "CN=Contoso Ltd, C=US"), "Contoso"),
+    ):
+        dist = tmp_path / f"dist-{needle}"
+        with pytest.raises(wer.CheckError, match=needle):
+            wer.package(exe, redist, dist, min_exe_bytes=1, signature_reader=reader)
+        assert not (dist / wer.ASSET_NAME).exists(), "no archive is left behind for a refused runtime"
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["C:evil.exe", "c:", "..", "a..b.dll", "a:stream", "dir/file.dll", "dir\\file.dll", "."],
+)
+def test_a_member_name_that_is_not_a_bare_file_name_is_refused(tmp_path: Path, name: str) -> None:
+    assert wer.bare_name_problem(name) is not None
+    assert wer.bare_name_problem("") is not None
+    problems = wer.verify_archive(_write_tar(tmp_path / "a.txz", {**GOOD, name: b"x"}))
+    assert problems, name
+
+
+@pytest.mark.parametrize("name", ["nexus-service.exe", "vcruntime140.dll", "THIRD-PARTY-NOTICES.txt", "a-b_c.1.txt"])
+def test_a_bare_file_name_passes(name: str) -> None:
+    assert wer.bare_name_problem(name) is None
+
+
+def test_the_engine_notice_names_every_embedded_windows_library_with_its_licence(tmp_path: Path) -> None:
+    """Every Windows DLL the jars the image embeds ship (the committed listing) has a line in the notice,
+    so a dependency bump that adds one cannot ship without a licence entry."""
+    listing = (REPO / "tests" / "fixtures" / "native_jar_listings.txt").read_text(encoding="utf-8")
+    dlls = {
+        Path(ln).name for ln in listing.splitlines()
+        if ln and not ln.startswith("#") and ("/win-" in ln) and ln.lower().endswith(".dll")
+    }
+    assert len(dlls) >= 6, f"non-vacuity: the listing names the windows libraries ({sorted(dlls)})"
+    notice = wer.notice_text(_redist(tmp_path), {d: "0" * 64 for d in bw.VC_RUNTIME_DLLS})
+    for dll in sorted(dlls):
+        assert dll in notice, f"{dll} is embedded in the engine but has no THIRD-PARTY-NOTICES line"
+    for needle in ("ONNX Runtime", "MIT", "DJL", "Apache License 2.0", "GCC Runtime Library Exception", "JNA"):
+        assert needle in notice, needle
+    assert "source distribution" in notice
+
+
+def test_check_deps_removes_its_extraction_directory_pass_or_fail(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import tempfile
+
+    tmp_root = tmp_path / "tmp"
+    tmp_root.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_root))
+    report = tmp_path / "r.json"
+    report.write_text("[]")
+    seen: list[Path] = []
+    outcome = {"rc": 0}
+
+    def fake_check(exe, rep, dumper, work):  # noqa: ANN001
+        seen.append(work)
+        (work / "x").mkdir(parents=True)
+        (work / "x" / "dep.dll").write_bytes(b"MZ")
+        return outcome["rc"], ["line"]
+
+    monkeypatch.setattr(wer, "check_deps", fake_check)
+    argv = ["check-deps", "--exe", "e.exe", "--report", str(report), "--dumpbin", "d.exe"]
+    assert wer.main(argv) == 0
+    outcome["rc"] = 1
+    assert wer.main(argv) == 1
+    assert len(seen) == 2 and all(w.name.startswith("engine-deps-") and not w.exists() for w in seen)
+    outcome["rc"] = 0
+    assert wer.main([*argv, "--keep-work-dir"]) == 0
+    assert seen[-1].is_dir(), "--keep-work-dir keeps it"
+    named = tmp_path / "mine"
+    assert wer.main([*argv, "--workdir", str(named)]) == 0
+    assert named.is_dir(), "a directory the caller named is the caller's"
+
+
+def test_check_deps_extracts_under_runner_temp_when_the_runner_sets_it(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    report = tmp_path / "r.json"
+    report.write_text("[]")
+    rt = tmp_path / "runner-temp"
+    rt.mkdir()
+    seen: list[Path] = []
+    monkeypatch.setattr(wer, "check_deps", lambda exe, rep, dumper, work: (seen.append(work), (0, ["ok"]))[1])
+    assert wer.main(["check-deps", "--exe", "e.exe", "--report", str(report), "--dumpbin", "d.exe", "--keep-work-dir"],
+                    env={"RUNNER_TEMP": str(rt)}) == 0
+    assert seen[0].parent == rt
+
+
+def test_check_deps_removes_its_directory_when_the_check_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import tempfile
+
+    tmp_root = tmp_path / "tmp"
+    tmp_root.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_root))
+    report = tmp_path / "r.json"
+    report.write_text("[]")
+
+    def boom(exe, rep, dumper, work):  # noqa: ANN001
+        (work / "x").mkdir(parents=True)
+        raise wer.CheckError("dumpbin blew up")
+
+    monkeypatch.setattr(wer, "check_deps", boom)
+    assert wer.main(["check-deps", "--exe", "e.exe", "--report", str(report), "--dumpbin", "d.exe"]) == 1
+    assert list(tmp_root.iterdir()) == []
