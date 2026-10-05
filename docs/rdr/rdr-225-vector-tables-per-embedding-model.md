@@ -9,7 +9,7 @@ reviewed-by: self
 created: 2026-10-05
 accepted_date:
 related_issues: [nexus-tu8wp, nexus-tu8wp.6]
-related_rdrs: [RDR-152, RDR-155, RDR-156, RDR-191, RDR-192]
+related_rdrs: [RDR-152, RDR-155, RDR-156, RDR-164, RDR-169, RDR-191, RDR-192, RDR-194, RDR-204]
 ---
 
 # RDR-225: One Vector Table per Embedding Model, with Tenant Isolation
@@ -46,20 +46,35 @@ measure of anything. The engine already knows this: `requireHomogeneousModel` in
 vector. The index does not know it, and it links code and prose vectors to each
 other anyway. Every tenant's rows share the same graph too.
 
+### Terms used here
+
+- **HNSW**: the approximate nearest-neighbour graph index pgvector builds.
+- **Exact search**: scanning every candidate row and sorting by distance.
+- **Iterative scan** and **`ef_search`**: pgvector settings that keep a filtered HNSW walk going past its first candidates.
+- **Tenant**: one isolated customer namespace.
+- **RLS** (row-level security): Postgres policies that hide other tenants' rows. **FORCE** applies them to the table owner too. The **tenant GUC** is the per-transaction setting `nexus.tenant` that the policies read.
+- **chash**: the SHA-256 of a chunk's text, which is its identity.
+- **Manifest**: `catalog_document_chunks`, listing which chunks make up each document.
+- **GC, reaper, quarantine**: the background paths that move unreferenced chunks aside and later delete them.
+- **live(c)**: RDR-192's rule for which chunks a search may return. Hidden rows are chunks no live manifest row claims.
+- **Leaf**: a physical partition table.
+- **PITR fork**: a point-in-time copy of the production database, used for rehearsals.
+- **Changeset**: one Liquibase schema migration step. The schema walk runs at engine boot.
+- **The router** (cardinality router, nexus-tu8wp.6): sends a plain search to exact search when the selected collections hold at most a threshold of rows, and to HNSW otherwise.
+- **Protocol labels** (A1t, A6, F7, H4 to H6, E1, ABBA): defined in § Evaluation Protocol.
+
 ### Enumerated gaps to close
 
 #### Gap 1: Code and prose vectors share one HNSW graph
 
 Links between vectors of different models are built from meaningless distances.
-If the two models' vectors fall in separate regions, which is likely, the graph
-is two near-islands joined by a few arbitrary links, with a single entry point
-in one of them. A query from the other model must cross those links, and the
-greedy walk can stop at a poor local match. If the models instead mix, every
-neighbourhood carries noise links. Either way the walk is longer and recall is
-lower than a single-model graph would give. A filtered search also spends visits
-on the other model's nodes, none of which can ever match. Measured on a
-production fork with real queries (§ Research Findings, F2), HNSW's top-40
-agreed with exact search on only 0.60 to 0.975 of results.
+Measured on a production fork (E1, research-2), the two models' vectors are
+disjoint: no vector's exact top-32 neighbours include one from the other model.
+The graph is therefore two islands joined only by arbitrary links, with a single
+entry point in one of them. One graph holds two embedding spaces it cannot
+compare. This RDR fixes that on principle and does not claim a recall gain from
+it: HNSW's poor agreement with exact search on filtered queries (0.60 to 0.80,
+F2) is driven by the collection filter, which the cardinality router addresses.
 
 #### Gap 2: Tenants share one graph, one heap and one cache
 
@@ -126,7 +141,7 @@ work also surfaced the mixed-model graph.
 ### Investigation
 
 Fork measurements by conexus-0e on PITR forks of production, 2026-10-05,
-standard-8 and memory-16. Raw JSON is to be copied to durable storage named in the run record.
+standard-8 and memory-16. Raw JSON is in `~/nexus-evidence/rdr225-2026-10-05/` with `SHA256SUMS`.
 
 ### Key Discoveries
 
@@ -146,8 +161,8 @@ standard-8 and memory-16. Raw JSON is to be copied to durable storage named in t
   67 to 74 ms. dt-papers, about the same size, is fine. Literature (VADER,
   catalog 1.12.157) attributes such differences to query-filter correlation.
 - **F5 (Verified by E1, research-2).** Code and prose vectors form separate
-  regions: under 5% of a vector's exact nearest neighbours come from the other
-  model.
+  regions: 0.000 of a vector's exact top-32 neighbours come from the other
+  model (400 samples).
 - **F6 (Retired: superseded by the non-inferiority test).** A single-model graph for one tenant raises
   code__1-2's agreement on query 1 from 0.60 to at least 0.90, and cuts cold
   HNSW time by at least 2x. E2 also measures the tenant-only step separately.
@@ -184,16 +199,16 @@ standard-8 and memory-16. Raw JSON is to be copied to durable storage named in t
   *Source: telemetry-001 lines 100 to 109.*
 - **✅ Verified** (spike), research-13. `pg_stats` hides FORCE-RLS tables from non-superusers.
   *Source: the fork.*
-- **❓ Assumed** (spike, pending step 2), research-14. F7: partition pruning works under RLS on every search family.
-- **❓ Assumed** (spike, pending step 2), research-15. H4: the identity-table FK costs at most 1.25x on every write path.
+- **❓ Assumed** (spike, pending step 2), research-14. F7: plan-time pruning to one (model, tenant) leaf works on every search family.
+- **❓ Assumed** (spike, pending step 2), research-15. H4: the partitioned layout, with its four-column FKs, costs at most 1.25x on every write path.
 - **⚠️ Documented** (docs only), research-16. The literature crossover points (Veda, Compass) were measured warm, and VADER finds query-filter correlation.
   *Source: knowledge__dt-papers.*
 
 ### Evaluation Protocol (pre-registered, revision 6, frozen, 2026-10-05)
 
 Sam: "let us prove out our design first this time rather than just reflexively
-jumping." Three critique rounds preceded this revision (T2
-`nexus/critique-rdr225-evaluation-protocol-2026-10-05`, `-round2-`, `-round3-`).
+jumping." Five critique rounds preceded this revision (T2
+`nexus/critique-rdr225-evaluation-protocol-2026-10-05`, `-round2-` to `-round5-`).
 
 **Rulings that shape it (Sam, 2026-10-05):**
 - Tenant isolation is required and not subject to evaluation.
@@ -227,8 +242,8 @@ jumping." Three critique rounds preceded this revision (T2
   - statement timeout of 120 s for measurement, with the count over 30 s reported.
 - **Router.** The engine runs the router with `NX_SEARCH_EXACT_MAX_ROWS=60000`, set explicitly and recorded. The code default is 10000.
 - **Build.** Every HNSW build uses `m=16`, `ef_construction=64` and one `maintenance_work_mem` and worker count. ANALYZE runs after every build. Insertion order is seeded with `ORDER BY hashtext(chash || seed)`.
-- **Equivalence.** A6 runs per-model versions of the engine's search functions that are textually identical to today's except for the table they name. Their diff is recorded.
-- **Plan check.** An untimed EXPLAIN pass precedes the timed pass. Planning is deterministic, so a plan that differs from the declared one is a result, not noise. The declared plans are: that tenant partition's HNSW index, or the PK-prefix bitmap scan for exact.
+- **Equivalence.** A6 runs the engine's search functions with only the added `embedding_model` and `tenant_id` predicates. Their diff is recorded.
+- **Plan check.** An untimed EXPLAIN pass precedes the timed pass. Planning is deterministic, so a plan that differs from the declared one is a result, not noise. The declared plans are: the (model, tenant) leaf's HNSW index, or the PK-prefix bitmap scan for exact.
   - A flip in A6 fails that statement class for A6 (DESIGN-F7).
   - A flip in A1t is a harness error, fixed before any decision.
   - Flips are counted per arm.
@@ -267,7 +282,7 @@ The substrate is the bundled PG 17 with pgvector 0.8.2 (versions recorded; any o
 - **Fail label:** DESIGN-H5.
 
 **H4, write path.**
-- Comparator: today's `chunks` (HNSW present) against the identity table plus per-model tables (HNSW present).
+- Comparator: today's `chunks` against the model-and-tenant partitioned `chunks`, with the four-column FKs. HNSW is present in both.
 - Same seeded vectors as F7.
 - Paths: bulk 10k, single insert, update, delete, rename.
 - Runs are paired and alternated ABAB, 5 pairs per path. The CI is a t-interval on the log ratio across pairs.
@@ -278,7 +293,7 @@ The substrate is the bundled PG 17 with pgvector 0.8.2 (versions recorded; any o
 
 **Arms and builds.**
 - **A1t:** today's single table with both models, LIST-partitioned by tenant, plus the router.
-- **A6:** per-model tables, each LIST-partitioned by tenant, plus the router.
+- **A6:** `chunks` LIST-partitioned by model, then by tenant, plus the router.
 
 Each arm is built twice, with seeds 1 and 2. Build pair i is A1t build i with A6 build i, and the two pairs are measured in two phases:
 - Phase i has A1t build i and A6 build i resident together, so cycles can alternate ABBA.
@@ -365,305 +380,321 @@ Every non-PASS outcome defers the per-model split only. Tenant partitioning proc
 - [x] F6: a per-model graph measurably improves recall — **Status**: Retired.
   Sam ruled the split is shown to work, not to pay. It is replaced by the
   protocol's non-inferiority test (step 3).
-- [ ] F7: execution-time partition pruning under RLS leaves one partition's
-  index on every search family — **Status**: Unverified, in protocol step 2
+- [ ] F7: plan-time pruning on literal `embedding_model` and `tenant_id`
+  leaves one leaf's index on every search family — **Status**: Unverified, in protocol step 2
   (research-14) — **Method**: Spike
-- [ ] The manifest and topic FKs stay expressible through `chunk_identity` at a
-  write cost of at most 1.25x — **Status**: Unverified, in protocol step 2
+- [ ] The manifest, topic and orphaned-at FKs work as four-column FKs to the
+  partitioned parent, deferrable as today, at a write cost of at most 1.25x — **Status**: Unverified, in protocol step 2
   (research-15) — **Method**: Spike
-- [x] The search functions can name their model's table: they are generated
-  per registry row, as `plain_search_<dim>` is generated per dimension today
-  (research-9, research-11) — **Status**: Verified — **Method**: Source Search
+- [ ] Tenant creation can create a tenant's leaves in its transaction, within
+  the step-2 cost budget, and search planning stays bounded with 300 tenants
+  present — **Status**: Unverified, in protocol step 2 — **Method**: Spike
 
 ## Proposed Solution
 
 ### Approach
 
-**Decided (Sam, 2026-10-05): one vector table per embedding model.** "We need
-vector tables that are per embedding"; "just because they have the same dims
-doesn't mean jack." The storage key is the embedding **model**. Dimension is a
-property of the model, never the key on its own.
+**Decided (Sam, 2026-10-05).**
+- On vectors: "We need vector tables that are per embedding"; "just because they have the same dims doesn't mean jack."
+- On tenants: "tenant isolation is a *must*, I don't think it's up for question."
+- After gate round 1: per-model physical tables are realised as **partitions of one logical table**, and tenant partitions are **created at tenant creation**.
 
-- Each model gets its own table with its own typed vector column and its own
-  HNSW index. Today that means `voyage-code-3` (1024), `voyage-context-3`
-  (1024), bge-768 (768) and MiniLM (384); the table names are settled in the
-  technical design. Vectors from two models can then never share a graph,
-  whatever their dimension.
-- A new model is a new table, created by a changeset, never a new column on an
-  existing table.
-- Every search already resolves its model through `CollectionRegistry`, and
-  `requireHomogeneousModel` already refuses mixed-model searches. The search
-  functions become per model rather than per dimension, so a search reaches
-  exactly one graph.
-- Row-level security stays as the security boundary on every table.
-- **Tenant isolation is required (Sam, 2026-10-05: "tenant isolation is a
-  *must*, I don't think it's up for question").** Each per-model table is
-  LIST-partitioned by tenant, so every (tenant, model) pair has its own heap
-  and its own HNSW graph. This works because each table's vector column is
-  typed, so RDR-191 V1 does not apply. It is not subject to the evaluation
-  protocol's accept/defer gate. The protocol proves only that it works (F7:
-  pruning to one partition, under RLS, on every search path) and that the
-  migration is feasible (H6). Fork evidence (E1, 2026-10-05): the second cloud
-  tenant, `gate-xr789`, is a re-import of the main tenant's corpus (116k of
-  431k 1024-d rows), and 14.6% of a main-tenant vector's exact top-32
-  neighbours were its near-duplicates. Every filtered walk crosses them, and
-  RLS discards them afterwards.
+**The storage key is the embedding model.** Dimension is a property of the model, never a key on its own.
+- `nexus.chunks` stays one logical table.
+- It is LIST-partitioned by `embedding_model`, and each model partition is LIST-partitioned by `tenant_id`.
+- Every (model, tenant) leaf is a physical table with its own heap and its own HNSW, full-text and trigram indexes.
+- Two models never share a graph, whatever their dimension. Two tenants never share a heap, a graph or a cache footprint.
+- Row-level security stays as the security boundary on every leaf.
 
-**The tension this reopens.** RDR-191 unified the per-dimension tables
-specifically so the document manifest (`catalog_document_chunks`) could carry a
-foreign key to the chunks: "a foreign key targets exactly one table." Splitting
-by model brings back several chunk tables. The technical design must keep the FK
-expressible. The candidate is a thin identity table holding one row per chunk
-`(tenant_id, collection, chash, embedding_model)`, without vectors. The manifest
-foreign-keys to it, and each per-model vector table foreign-keys to it, both
-written in the same transaction. RDR-191 rejected a trigger-maintained registry
-table; this one would use no trigger, so its objection (a trigger on the hottest
-write path) needs to be re-checked rather than assumed.
+**Why one logical table.** RDR-191 unified the chunk tables so that the document manifest could carry a foreign key to its chunks: "a foreign key targets exactly one table." PostgreSQL lets a foreign key reference a partitioned table. The manifest therefore keeps a single, checked reference to the exact chunk row, and RDR-191's guarantee is unchanged. Gate round 1 rejected the alternative, separate tables behind an identity table, because nothing would then enforce that every identity row has its vector row (§ Alternatives Considered).
+
+**Tenants.** A new tenant's leaves (one per model) are created by the engine's tenant-creation path, in the same transaction that creates the tenant. Every tenant is isolated from its first write, and there is no shared DEFAULT partition.
+
+**What is shown before building, and what is not claimed.**
+- The evaluation protocol shows this layout works: pruning on every search family, bounded write cost, a safe migration, and recall and latency no worse than tenant isolation alone.
+- It does not claim the per-model split raises recall. E1 (research-2) shows the models never share a true nearest neighbour, and F2's recall loss is driven by the collection filter, not by mixing.
+- The split is adopted on principle: one graph per embedding space.
 
 ### Technical Design
 
-This design is proven by protocol steps 2 to 4 before any production code is
-written. Every identifier below is a working name, settled in Phase 1.
+Proven by protocol steps 2 to 4 before production code. Working names are
+settled in Phase 1.
 
-**Storage layout.**
-- `nexus.embedding_models` registry: one row per model, `(model, dim, table_name)`, written only by changesets. It is today's model knowledge (`catalog_collections.embedding_model`, `DimTables`), rekeyed by model instead of dimension.
-- `nexus.chunk_identity`: one row per chunk, `(tenant_id, collection, chash, embedding_model)`.
-  - PK `(tenant_id, collection, chash)`; no vector, no text.
-  - LIST-partitioned by `tenant_id`, with FORCE RLS and the production `tenant_isolation` policy.
-  - This is the single target that a foreign key needs (RDR-191's reason for one table). The two FKs that point at `nexus.chunks` today are re-pointed at it with their semantics unchanged:
-    - the manifest FK (catalog-029): ON UPDATE CASCADE, NO ACTION on delete, DEFERRABLE INITIALLY IMMEDIATE;
-    - the topic-assignment FK (taxonomy-012): ON UPDATE CASCADE, ON DELETE CASCADE.
-- One vector table per model, for example `nexus.vectors_voyage_code_3`, `nexus.vectors_voyage_context_3`, `nexus.vectors_bge_768` and `nexus.vectors_minilm_384`.
-  - Columns: today's `chunks` columns (`chunk_text`, the generated `chunk_tsv`, `metadata`, `created_at`) plus exactly one typed `embedding vector(dim)`.
-  - PK `(tenant_id, collection, chash)`, with an FK to `chunk_identity` ON UPDATE CASCADE ON DELETE CASCADE.
-  - LIST-partitioned by `tenant_id`, FORCE RLS, the same policy.
-  - HNSW (`m=16`, `ef_construction=64`), GIN `chunk_tsv` and trigram indexes are declared on the parent, so every tenant partition gets its own.
-- **Tenant partitions** are created by a changeset or a tenant-onboarding runbook step, never by engine DDL at runtime. There is no DEFAULT partition, so a write for a tenant with no partition fails loudly rather than landing in a shared heap.
-- **Taxonomy** (`taxonomy_centroids` mixes models today, research-9) is split the same way: one centroid table per model, LIST-partitioned by tenant.
+**Model key.** `nexus.embedding_models` already exists (catalog-036, RDR-204): `(embedding_model, dimension, provider)`, with the tokens `voyage-code-3`, `voyage-context-3`, `bge-base-en-v15-768` and `minilm-l6-v2-384`, and `catalog_collections.embedding_model` references it. This RDR adds no registry.
+- `nexus.chunks` gains `embedding_model text NOT NULL`, written by the engine from the collection's `catalog_collections` row.
+- A composite FK `(tenant_id, collection, embedding_model)` to `catalog_collections`, backed by a new UNIQUE `(tenant_id, name, embedding_model)` there, makes it impossible for a chunk to sit in the wrong model partition. It replaces `chunks_collection_fk` (fk-004).
+
+**Keys.** PostgreSQL requires a partitioned table's primary key to include its partition keys, so the PK becomes `(tenant_id, collection, chash, embedding_model)`.
+- `(tenant_id, collection, chash)` stays unique in practice, because a collection has exactly one model, enforced by the composite FK above.
+- Every table that references a chunk gains an `embedding_model` column, written by the same code that writes its collection, and its FK becomes four-column. Semantics are unchanged: same ON UPDATE / ON DELETE and deferrability, same constraint names.
+- The full inventory of objects that name `nexus.chunks` is generated and pinned in Phase 1 Step 1 (H5's script). Known at a798f07ea:
+
+| Object | Kind | New form |
+|---|---|---|
+| `fk_catalog_chunks_chunk` (catalog-029) | FK into chunks | 4-column, ON UPDATE CASCADE, NO ACTION, DEFERRABLE INITIALLY IMMEDIATE; same name (Java issues `SET CONSTRAINTS fk_catalog_chunks_chunk DEFERRED`, CatalogRepository.java:8297) |
+| `topic_assignments_chunk_fk` (taxonomy-012) | FK into chunks | 4-column, ON UPDATE CASCADE, ON DELETE CASCADE; same name |
+| `chunk_orphaned_at_chunk_fk` (vectors-021) | FK into chunks | 4-column; same name |
+| `chunks_collection_fk` (fk-004) | FK out of chunks | replaced by the composite model FK above |
+| `stamp_chunks_on_manifest_delete` and `_update` (vectors-021) | statement triggers reading `chunks.last_written_at` | unchanged text; they read the logical table |
+| `chunks_content_retention_consistent` (vectors-014), the chash octet-length CHECK, the `(tenant_id, chash)` probe index (vectors-003) | constraints and index | declared on the parent, so every leaf gets them |
+| `retention`, `last_written_at` and every other current column | columns | carried unchanged |
+| `ChunksIsolationCheck.verifyAtStartup` (Main.java:131); the doctor RLS canary (`_RLS_TENANT_TABLES`, health.py) | boot and doctor isolation checks | extended to assert FORCE RLS and the policy on every leaf |
+
+**Tenant creation.**
+- `POST /v1/tenants/create` (TokenAdminHandler.handleTenantCreate) calls a new SECURITY DEFINER function, `nexus.create_tenant_partitions(tenant)`, in the same transaction. It creates the tenant's leaf under every model partition. The indexes, constraints and RLS policy come from the parent declarations.
+- The migration calls the same function for every tenant that has a token row or any chunk.
+- Removing a tenant is DETACH and DROP of its leaves (runbook).
+- Step 2 measures the cost per tenant creation, and planning time with 300 tenants present, because the test substrate mints hundreds of tenants per engine.
 
 **Read path.**
-- Every search family in the H5 inventory (research-9) gets a per-model version that is textually identical except for the table it names. The functions are generated per registry row, as `plain_search_<dim>` is generated per dimension today.
-- `hybrid_search_<dim>` has no caller and is dropped.
-- The engine resolves a collection's model through `CollectionRegistry` (it already does, for `requireHomogeneousModel`) and dispatches by model instead of dimension. `DimTables` becomes a model-keyed table map.
-- The cardinality router's probe (`probeSelectedRows`) counts the model's table.
-- Tenant pruning comes from the RLS predicate at execution time (F7, research-14).
-- The views `live_chunks` and `collection_vector_stats` become per-model, or are rewritten over `chunk_identity` where they need no vector.
+- The search families keep their per-dimension functions. They are hand-written per dimension today (vectors-019), not generated. Each gains `embedding_model = $model AND tenant_id = $tenant` predicates, so that under `force_custom_plan` the planner prunes to one leaf at plan time. RLS is kept as well.
+- The engine already resolves the model through `CollectionRegistry` (`requireHomogeneousModel`) and passes it.
+- The router's probe (`probeSelectedRows`) adds the same predicates.
+- `hybrid_search_<dim>` has no caller and is left as it is (not this RDR's cleanup).
+- **Taxonomy.** `taxonomy_centroids` mixes models today (research-9). It gets the same treatment: an `embedding_model` column, then partitioning by model and by tenant.
 
-**Write path.**
-- One transaction inserts the identity row and the model row (H4, research-15), then the manifest row as today.
-- Re-embedding a collection under another model moves its rows from one model table to another in one transaction; the identity row's `embedding_model` is updated in the same transaction.
-- Collection rename and quarantine moves (an UPDATE of `collection`) cascade from `chunk_identity` to the model rows and to the manifest.
+**Write path, rename, quarantine.**
+- Inserts land in their leaf by the partition keys, so the write path changes only by supplying `embedding_model`.
+- **Rename.** As today: insert the new registry row, then UPDATE the children's `collection`. The UPDATE stays within the leaf because model and tenant are unchanged. The manifest follows by ON UPDATE CASCADE through the four-column FK.
+- **Quarantine.** As today: `reaper_quarantine_chunks` DELETE … RETURNING into INSERT under the quarantine collection (vectors-024). Model and tenant are unchanged, so the row stays in its leaf.
+- **Cross-model migration** registers a new collection under the target model (as today), so its rows go into that model's partition. No in-place re-embed exists, and none is added.
+- **GC and reaper families** keep their statements against `nexus.chunks`. Each gains the model and tenant predicates where it scans by collection.
 
-**GC, quarantine, reaper.** The 8 GC/quarantine/hygiene families (research-9) operate on `chunk_identity` where they need no vector. Where they do need one, they operate per model through the registry. The cascades delete model rows when their identity row goes.
+**Migration** (one engine release, a schema-carrying tag, rehearsed by protocol step 4 under write freeze):
+1. Writes are frozen. In the cloud this means maintenance mode at the edge (conexus). Locally, the engine is not yet serving.
+2. Create the partitioned `chunks_new`, its model partitions, and the tenant leaves via `create_tenant_partitions`.
+3. Copy per (model, tenant) from `nexus.chunks`, with `embedding_model` taken from `catalog_collections`. Rows hidden by RDR-192's liveness rule (chunks no live manifest row claims) are copied unchanged.
+4. Add `embedding_model` to the referencing tables and backfill it.
+5. Build the indexes per leaf, then ANALYZE every leaf and every parent. Autovacuum never analyzes a partitioned parent, and a bulk-copied table without statistics turns the planner off HNSW (vectors-004 Step 5b, BUG-0148).
+6. Reconcile row counts exactly per (model, tenant). On a mismatch, the changeset fails.
+7. Swap: drop the old FKs, rename `chunks` to `chunks_retired_225` and `chunks_new` to `chunks`, and add the four-column FKs with their old names (NOT VALID, then VALIDATE).
+8. Writes are unfrozen.
 
-**Migration (one engine release, a schema-carrying tag).**
-1. Create the new tables and partitions for every tenant present.
-2. Copy from `nexus.chunks` per (tenant, model): the identity rows, then the model rows. Rows hidden by RDR-192 are copied as they are; dropping them is a separate decision.
-3. Build the indexes after the copy, per partition.
-4. Re-point the two FKs: add them NOT VALID to `chunk_identity`, VALIDATE, then drop the old ones.
-5. Reconcile row counts exactly per (tenant, model). On any mismatch, abort before the swap.
-6. The new engine reads and writes only the new tables. `nexus.chunks` is renamed to `chunks_retired_225`, kept for a 14-day rollback window, and dropped by a later changeset.
+**Failure and rollback.**
+- Before step 7, any failure fails the Liquibase walk. A failed walk exits the engine at boot (`Main.java:116-121`, `System.exit(1)`).
+  - Cloud: the deploy does not complete and the old engine keeps serving, which is conexus's rolling deploy.
+  - Local: the install is down until the previous engine version is reinstalled. The old table is untouched.
+- After step 7 the change is **IRREVERSIBLE** in place.
+  - Cloud rollback is a PITR restore to before the walk. PITR (point-in-time recovery) means restoring the database to a moment just before the change. Writes since the walk are lost.
+  - Local: there is no rollback. `chunks_retired_225` is kept for 14 days only as a data-recovery source, and a later changeset drops it.
+- **Local preflight.** Before step 2 the engine checks that free disk is at least 2.2x the chunks table plus its indexes. If not, it refuses with a message naming the shortfall. A local install has one tenant and usually one model, so its layout has one or two leaves. It gains nothing in isolation and still migrates, so that every install runs one schema.
 
-- Writes are frozen for the copy. The freeze length, peak disk and WAL come from the H6 rehearsal.
-- The migration is **IRREVERSIBLE** once the retired table is dropped. Until then, rollback is the previous engine reading `chunks_retired_225` under its old name. Writes made in the new layout during the window are lost, and the rollback runbook states this.
-- Local installs run the same changesets on their bundled PG (one model in the default bge-768 setup).
+**If step 3 is not PASS** (the per-model split is deferred), the same design applies with one change: `nexus.chunks` is LIST-partitioned by `tenant_id` only, so there is no model level. The PK and the referencing FKs keep three columns, no `embedding_model` column is added, and tenant creation, migration steps, ANALYZE, failure handling and the Day 2 rows are otherwise identical.
 
-**Router.** The router stays, with its threshold set from the protocol's measurements (nexus-tu8wp.6). Whether small per-model graphs justify a lower threshold is decided after step 3, outside this RDR.
+**Router.** The router stays (nexus-tu8wp.6). Its threshold is set from the protocol's measurements, outside this RDR.
 
 ## Alternatives Considered
 
-### Alternative 1: A column per model in the one table
+### Alternative 1: Separate per-model tables behind an identity table
 
-**Description**: `embedding_code_1024` and `embedding_context_1024`, each with
-its own HNSW, under the existing one-of CHECK.
+**Description**: One independent table per model, plus a thin `chunk_identity`
+table that the manifest and topic FKs point at.
 
-**Pros**: keeps one table and RDR-191's manifest FK unchanged; an index per
-model.
+**Pros**: Each model's table is fully independent, and no NULL vector columns
+are carried.
 
-**Cons**: the table keeps growing a column per model. Every model's rows share
-one heap and one cache, so a scan of one model's rows still reads pages full of
-another model's rows. It treats a model as an attribute of a chunk row, when it
-is the identity of the vector space.
+**Cons**: The manifest-to-identity and vector-to-identity directions can be
+enforced by FKs. The other direction, "every identity row has exactly one vector
+row", cannot be. Enforcing it takes a constraint trigger on the hottest write
+path, which is the objection RDR-191 recorded against `chunks_registry`.
+Otherwise RDR-191's guarantee is lost, and its detection checks were retired in
+catalog-030.
 
-**Reason for rejection**: Sam's decision for per-model tables (§ Approach).
+**Reason for rejection**: Gate round 1 (critique r1, Critical 2). Sam chose
+partitions of one table.
 
-### Alternative 1b: LIST partition one table by model
+### Alternative 2: A column per model in the one unpartitioned table
 
-**Description**: keep one logical `chunks` table and partition it by
-`embedding_model`, giving a heap and an index per model.
+**Cons**: Every model's rows share one heap and one cache. The table grows a
+column per model. Tenants are not isolated.
 
-**Cons**: every partition must carry the same columns, so all three typed
-vector columns (or an untyped one, which RDR-191 V1 shows cannot be indexed)
-appear in every partition, mostly empty. The single logical table keeps the FK
-simple, which is its one advantage. It is worth comparing against the
-identity-table design in the technical design.
+**Reason for rejection**: It fails the tenant-isolation requirement and keeps
+the shared heap.
 
-### Alternative 2: Partial HNSW indexes per model
+### Alternative 3: Partial HNSW indexes per model
 
-**Description**: add `embedding_model` and create `... WHERE embedding_model =
-'voyage-code-3'` per model.
+**Cons**: The planner uses a partial index only when it can prove the query's
+WHERE implies the index predicate. vectors-004 measured a silent ~250x
+sequential scan when that failed. There is no tenant isolation.
 
-**Pros**: no table rewrite into partitions; indexes can be built concurrently.
+**Reason for rejection**: Fragile planning, and no isolation.
 
-**Cons**: the planner uses a partial index only when it can prove the query's
-WHERE implies the index predicate. vectors-004 measured a silent ~250x sequential
-scan when that failed. Fixes Gap 1 only.
+### Alternative 4: Partition per collection
 
-### Alternative 3: Partition per collection
+**Cons**: Hundreds of leaves per tenant. The router already serves small
+collections exact.
 
-**Cons**: hundreds of partitions per tenant times three dimensions; the
-cardinality router already serves small collections exact. Rejected.
+**Reason for rejection**: The partition count, for no gain the router does not
+already give.
 
 ### Briefly Rejected
 
 - **Partition by dimension**: impossible in pgvector 0.8.2 (RDR-191 V1).
-- **Leave the graph, rely on the router**: fixes only single-collection paths.
-  Multi-collection, hybrid, combined and taxonomy searches keep walking a
-  mixed graph.
+- **A DEFAULT tenant partition**: a tenant there shares a heap and a graph, so
+  it is not isolated (Sam, 2026-10-05).
+- **Leave the graph and rely on the router**: fixes only single-collection
+  plain search.
 
 ## Trade-offs
 
 ### Consequences
 
-- Recall and latency improve on every HNSW path, not only single-collection
-  ones (pending F6).
-- A tenant's cache footprint becomes its own.
+- Each (model, tenant) pair gets its own graph, heap and cache footprint, so no
+  tenant's growth slows another tenant's filtered walk.
+- No recall improvement is claimed. The split is held to non-inferiority
+  (protocol step 3).
+- Every chunk-referencing table carries a redundant `embedding_model` column,
+  checked by FK.
+- Tenant creation does DDL (leaf creation), at a cost measured in step 2.
 - A large, effectively one-way migration of the chunks table.
-- Partition maintenance becomes an operation: one partition per new tenant.
 
 ### Risks and Mitigations
 
-- **Risk**: runtime pruning fails, and a query scans every partition.
-  **Mitigation**: F7 spike; an EXPLAIN-pinned test on each search function.
-- **Risk**: the migration runs out of disk or WAL mid-copy on the cloud.
-  **Mitigation**: the Step 5b freeze-window derivation and a PITR-fork rehearsal.
+- **Risk**: plan-time pruning fails for some family, and a query scans every
+  leaf. **Mitigation**: F7 in step 2, plus an EXPLAIN-pinned test per family.
+- **Risk**: hundreds of test tenants make tenant creation or planning slow.
+  **Mitigation**: step 2 measures both. Pruning on literal keys keeps planning
+  to one leaf.
+- **Risk**: the migration runs out of disk or WAL. **Mitigation**: the step 4
+  rehearsal, the engine-release Step 5b derivation, and the local disk
+  preflight.
 
 ### Failure Modes
 
-- **A write for a tenant with no partition.** It fails with Postgres's "no partition of relation found for row" error, surfaced as a 5xx naming the tenant. *Recovery:* the onboarding runbook creates the partition. `nx doctor` gains a row that lists the tenants in `chunk_identity` against the partitions of each model table.
-- **A write for a model with no registry row or table.** It is refused by the engine before any SQL, naming the model, as `requireHomogeneousModel` refuses today. *Recovery:* a changeset that adds the model.
-- **A pruning regression.** For example, a function edit that stops inlining makes a search touch other tenants' partitions. It is invisible in results, because RLS still filters, and visible only as cost. *Detection:* EXPLAIN-pinned tests per search family (Test Plan) that assert one partition's index.
-- **A migration count mismatch, or a validation failure.** The migration aborts before the swap. The old table stays live and the engine version does not change. *Diagnosis:* the reconciliation table in the migration log.
-- **Rollback after a bad cutover, within the window.** The previous engine is redeployed against `chunks_retired_225`, renamed back. Writes made since the cutover are lost, and the runbook says so before anyone runs it.
-- **A cascade surprise.** A collection UPDATE cascades through three tables. *Test:* rename and quarantine round trips (Test Plan).
+- **A write for a tenant with no leaf.** This can happen only if tenant creation was bypassed. PostgreSQL refuses it ("no partition of relation found for row"), and it surfaces as a 5xx naming the tenant. *Recovery:* call `create_tenant_partitions`. The doctor row lists tenants with tokens against leaves.
+- **A chunk whose model disagrees with its collection.** The composite FK refuses it at write time.
+- **A pruning regression.** A function edit that stops plan-time pruning makes a search touch every leaf. RLS still filters, so it shows only as cost. *Detection:* the EXPLAIN-pinned tests per family.
+- **A migration failure before the swap.** The walk fails, and the engine exits at boot. Cloud keeps the old engine; local is down until the previous version is reinstalled. Nothing has changed in the data. *Diagnosis:* the reconciliation table in the walk log.
+- **A bad cutover after the swap.** Cloud: PITR restore, with writes since the walk lost and the runbook saying so before anyone runs it. Local: no rollback; data recovery from `chunks_retired_225` for 14 days.
+- **Missing statistics after the copy.** The planner leaves HNSW. Migration step 5 runs ANALYZE on every leaf and parent, and a test asserts the post-migration plans.
 
 ## Implementation Plan
 
 ### Prerequisites
 
-- [ ] Protocol step 2 PASS: F7, H5 and H4 (research-14 and research-15 verified)
-- [ ] Protocol step 3 outcome recorded: PASS keeps the per-model split, and any other outcome defers it while tenant partitioning proceeds
-- [ ] Protocol step 4 (H6 migration rehearsal) PASS
+- [ ] Protocol step 2 PASS: F7, H5, H4, the deferrable 4-column FK against the partitioned parent, tenant-creation cost, and planning time at 300 tenants (research-14, research-15)
+- [ ] Protocol step 3 outcome recorded. PASS keeps the model level; any other outcome uses the tenant-only layout (§ Technical Design, "If step 3 is not PASS")
+- [ ] Protocol step 4 (H6 migration rehearsal under write freeze) PASS
 
 ### Minimum Viable Validation
 
-On a fork of production, migrated by the real changesets: the engine serves the
-protocol's frozen query set through its own search functions. Each query touches
-one model's tenant partition, recall against exact is non-inferior to A1t by the
-protocol's rule, and the per-(tenant, model) row reconciliation is exact.
+The real changesets migrate a fork of production. On it, the engine serves the
+protocol's frozen query set through its own search functions. Each query's plan
+touches one (model, tenant) leaf, recall against exact is non-inferior to
+tenant-only partitioning by the protocol's rule, and the per-(model, tenant)
+row reconciliation is exact.
 
 ### Phase 1: Schema
 
-#### Step 1: Registry, identity table and per-model tables
+#### Step 1: Pinned inventory
 
-Changesets for `embedding_models`, `chunk_identity` and the per-model tables,
-with partitions for the existing tenants, RLS and indexes. Includes the
-per-model centroid tables.
+Run H5's script to generate and pin the inventory of every object naming
+`nexus.chunks` or `taxonomy_centroids`. Each item gets its new form.
 
-#### Step 2: FK re-pointing and the retired-table rename
+#### Step 2: Changesets
 
-The two FKs move to `chunk_identity`, with semantics unchanged.
+- The `embedding_model` column and the composite FK.
+- The partitioned `chunks_new` with its declarations.
+- `create_tenant_partitions`.
+- The referencing-table columns.
+- The same treatment for `taxonomy_centroids`.
 
-### Phase 2: Engine dispatch by model
+#### Step 3: Migration changesets
 
-#### Step 1: `DimTables` to a model-keyed map; write path
+Copy, build, ANALYZE, reconcile, swap. Also the local disk preflight.
 
-Write path: the identity row plus the model row in one transaction.
+### Phase 2: Engine
 
-#### Step 2: Per-model search functions and router probe
+#### Step 1: Write path and tenant creation
 
-Generate the per-model search functions. Retarget the router probe. Drop
-`hybrid_search_<dim>`.
+Supply `embedding_model` on every chunk-writing and chunk-referencing write.
+`handleTenantCreate` calls `create_tenant_partitions`.
 
-#### Step 3: GC, quarantine, reaper and taxonomy per model
+#### Step 2: Read path
 
-Over `chunk_identity` and the registry.
+Add model and tenant predicates to every search family and the router probe.
+Update the jOOQ record-count guard.
 
-### Phase 3: Migration and release
+#### Step 3: Checks
 
-#### Step 1: Copy, build, reconcile and swap changesets
+Extend `ChunksIsolationCheck` and the doctor RLS canary to every leaf. Add the
+doctor tenants-against-leaves row.
 
-Rehearsed on a PITR fork (engine-release Step 5b): representative scale,
-IRREVERSIBLE marked, freeze window from H6.
+### Phase 3: Release
 
-#### Step 2: Tenant-onboarding runbook and `nx doctor` partition row
+#### Step 1: Rehearsal and deploy
+
+PITR-fork walk rehearsal at production scale (engine-release Step 5b), marked
+IRREVERSIBLE, with the freeze length from H6.
+
+#### Step 2: Tenant-removal runbook
 
 #### Step 3: Drop `chunks_retired_225` after 14 days
-
-A later changeset.
 
 ### Day 2 Operations
 
 | Resource | List | Info | Delete | Verify | Backup |
 | --- | --- | --- | --- | --- | --- |
-| Tenant partitions | In scope: `nx doctor` row | In scope: row counts per (tenant, model) | In scope: runbook DETACH and DROP on tenant removal | In scope: doctor compares tenants against partitions | Cluster backups |
-| Per-model tables and registry | In scope: registry query | In scope | Deferred: retiring a model is its own changeset when needed | In scope: doctor checks registry against tables | Cluster backups |
+| Tenant leaves | In scope: doctor row | In scope: rows per (model, tenant) | In scope: runbook DETACH and DROP | In scope: doctor compares token tenants against leaves | Cluster backups |
+| Model partitions | In scope: catalog query | In scope | Deferred: retiring a model is its own changeset | In scope: doctor compares `embedding_models` against partitions | Cluster backups |
 | `chunks_retired_225` | N/A | N/A | In scope: Phase 3 Step 3 | N/A | Cluster backups during the window |
 
 ## Test Plan
 
-- **Scenario:** each search family on the new layout under the tenant GUC. **Verify:** EXPLAIN shows only that tenant's partition of the query's model (pinned per family).
-- **Scenario:** a session with no tenant GUC, and a session for tenant B. **Verify:** zero rows, and no tenant-A row ever returned.
-- **Scenario:** insert, delete and re-embed across models; collection rename and quarantine round trip. **Verify:** the identity, model and manifest rows stay consistent; the cascades fire; the deferred manifest FK behaves as in catalog-029.
-- **Scenario:** a write for an unknown tenant, and for an unregistered model. **Verify:** a loud refusal naming the tenant or the model.
-- **Scenario:** a migration on a seeded store with two tenants and two models, including hidden rows. **Verify:** exact per-(tenant, model) reconciliation; abort on an injected mismatch leaves the old table live.
-- **Scenario:** the recall and latency non-inferiority of protocol step 3. **Verify:** the frozen rule's outcome.
-- **Scenario:** a local install (bge-768 only). **Verify:** migration and search work with a single model table.
+- **Every search family under the tenant GUC.** Verify: the plan shows exactly one (model, tenant) leaf, pinned per family.
+- **No tenant GUC, and tenant B's GUC.** Verify: zero rows, and no tenant-A row is ever returned.
+- **Tenant creation followed by a write; 300 tenants created.** Verify: the write lands in the new leaf. Creation time and search planning time stay within the step-2 budget.
+- **Insert, delete, rename and quarantine round trips; `purge_trash` with deferred FKs.** Verify: the four-column FKs hold, cascades fire, and `SET CONSTRAINTS fk_catalog_chunks_chunk DEFERRED` works against the partitioned parent.
+- **A chunk written with a model that disagrees with its collection.** Verify: refused by the composite FK.
+- **Migration of a seeded two-tenant, two-model store, including hidden rows.** Verify: exact reconciliation; ANALYZE ran; an injected mismatch fails the walk and leaves the old table live.
+- **Recall and latency non-inferiority.** Verify: protocol step 3's rule.
+- **A local install with one model and one tenant.** Verify: the preflight, the migration and search.
 
 ## Finalization Gate
 
 ### Contradiction Check
 
-Revision 3's arms and gate (H8) were replaced at revision 4 by Sam's rulings, and
-the Approach and protocol now state the same thing. Tenant partitioning is
-required and ungated, and the per-model split is shown to work, not to pay. No
-contradictions found between research findings, design and protocol.
+Gate round 1's contradictions are corrected:
+- the recall range (0.60 to 0.80);
+- F5 (0.000);
+- the Consequences no longer claim a recall gain;
+- the number of protocol critique rounds (five);
+- the evidence location;
+- freeze vs concurrent writes (step 4 now rehearses under freeze);
+- the FK count (three inbound, all listed).
+
+No remaining contradiction between findings, design and protocol.
 
 ### Assumption Verification
 
-Two assumptions remain: research-14 (F7 pruning) and research-15 (H4 write cost).
-Both are tested in protocol step 2, a prerequisite of implementation. Every other
-load-bearing finding is verified (research-1 to -13).
+The open assumptions are research-14 (pruning) and research-15 (write cost). Both are now stated for the partitioned layout, and both are tested in step 2, which is a prerequisite. Step 2 also tests the 4-column deferrable FK against a partitioned parent, tenant-creation cost, and planning time at 300 tenants.
 
 #### API Verification
 
 | API Call | Library | Verification |
 | --- | --- | --- |
-| LIST partitioning with HNSW declared on the parent | PostgreSQL 17, pgvector 0.8.2 | Spike (step 2) |
-| Execution-time partition pruning on `current_setting('nexus.tenant')` | PostgreSQL 17 | Spike (step 2) |
-| Typed `vector(dim)` per table (RDR-191 V1 is not triggered) | pgvector 0.8.2 | Source search (research-10) |
+| FK referencing a partitioned table; PK including partition keys | PostgreSQL 17 | Spike (step 2) |
+| Plan-time pruning on literal `embedding_model` and `tenant_id` under `force_custom_plan` | PostgreSQL 17 | Spike (step 2) |
+| HNSW declared on a partitioned parent | pgvector 0.8.2 | Spike (step 2) |
 
 ### Scope Verification
 
-The MVV runs in protocol step 4 and Phase 3 Step 1 on a production fork, through
-the real changesets and engine. It is in scope and not deferred.
+The MVV runs in protocol step 4 and Phase 3 Step 1 on a production fork, through the real changesets and engine. It is in scope.
 
 ### Cross-Cutting Concerns
 
-- **Versioning:** a schema-carrying engine tag. Client unchanged (no wire change). The paired-release rules apply only if a later client change rides with it.
-- **Build tool compatibility:** jOOQ codegen gains the new tables and functions. The record-count guard is bumped in the same change.
+- **Versioning:** a schema-carrying engine tag. Client unchanged.
+- **Build tool compatibility:** jOOQ codegen and its record-count guard.
 - **Licensing:** N/A.
-- **Deployment model:** cloud via conexus's PITR walk rehearsal and deploy. Local via the bundled PG at engine boot.
+- **Deployment model:** cloud via conexus's PITR walk rehearsal and maintenance-mode freeze. Local at boot, with the disk preflight.
 - **IDE compatibility:** N/A.
-- **Incremental adoption:** none. One cutover per install, with a 14-day rollback window.
+- **Incremental adoption:** one cutover per install.
 - **Secret/credential lifecycle:** N/A.
-- **Memory management:** index builds per partition bound `maintenance_work_mem` use. The copy streams per (tenant, model).
+- **Memory management:** indexes are built per leaf, which bounds `maintenance_work_mem`.
 
 ### Proportionality
 
-The design sections are sized to a storage-layout change with a one-way
-migration. The protocol section is long because it is the proof the owner asked
-for before building.
+The protocol is long because the owner asked for proof first. The design section names every object the migration touches, in a pinned inventory, rather than summarising them.
 
 ## References
 
@@ -684,3 +715,4 @@ for before building.
 - 2026-10-05: Evaluation protocol revision 5, answering T2 critique-rdr225-evaluation-protocol-round4-2026-10-05 (3 critical, 11 significant; 'ready after small text edits'). Disjoint OK/BAD/UNKNOWN states with an exactly-once outcome table and DEFER-UNDERPOWERED; co-resident build pairs for ABBA cycles; degraded-arm positive control and ceiling check; concrete F7 observables and controls; H5 diff script and smoke run; H4 comparator and CI; SQL replay harness validated against the engine; synthetic generation rule; pilot-set floors; frozen protocol constants.
 - 2026-10-05: Protocol revision 6 (frozen), applying the round-5 fixes without a further critique round, per Sam ('fix all the things and button this RDR up'). Technical Design, Failure Modes, Implementation Plan, Day 2, Test Plan and Finalization Gate written.
 - 2026-10-05: Gate round 1 — BLOCKED (2 Critical, 7 Significant, 2 ship-blocker(s)); commit `71437ca05`; critique `nexus_rdr/225-gate-critique-2026-10-05-r1`.
+- 2026-10-05: Fixes for gate round 1. Sam chose partitions of one logical `nexus.chunks` (by model, then tenant) over separate tables plus an identity table, which keeps RDR-191's manifest FK guarantee, and tenant leaves created at tenant creation. Inventory, migration (freeze, ANALYZE, failure, rollback, local preflight), fallback layout, write-path facts, contradictions and terms corrected.
