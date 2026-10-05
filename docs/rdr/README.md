@@ -235,7 +235,7 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-214](rdr-214-standing-code-correctness-review.md) | Standing-Code Correctness Review: From Pilot to Decision | Technical Debt | Abandoned | 2026-09-17 |
 | [RDR-215](rdr-215-plugin-hooks-as-nx-verbs.md) | Plugin Hooks as nx Verbs: Retire the Bash Hook Layer | Technical Debt | Closed | 2026-09-18 |
 | [RDR-217](rdr-217-client-lexical-retrieval-leg.md) | A Lexical Leg for the nexus Client: Reach the Engine's FTS Hybrid Route | Feature | Closed | 2026-09-19 |
-| [RDR-218](rdr-218-windows-platform-support.md) | Windows Platform Support: a Low-Friction Plugin Install for the CLI and the Desktop | Architecture | Accepted | 2026-09-21 |
+| [RDR-218](rdr-218-windows-platform-support.md) | Windows Platform Support: a Low-Friction Plugin Install for the CLI and the Desktop | Architecture | Superseded by RDR-224 | 2026-09-21 |
 | [RDR-219](rdr-219-harness-credentials-never-leave-the-keychain.md) | Harness Credentials Never Leave the Keychain: an Automation Token, Passed by Environment | Architecture | Closed | 2026-09-25 |
 | [RDR-220](rdr-220-ci-status-from-github-webhooks-to-the-tuple-space.md) | CI Status From GitHub Webhooks to the Tuple Space | Architecture | Accepted | 2026-09-26 |
 | [RDR-221](rdr-221-prose-editor.md) | Prose Editor: an Example-Anchored Line Editor with Memory in T2 | Feature | Accepted | 2026-09-27 |

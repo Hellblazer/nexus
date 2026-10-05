@@ -2,8 +2,9 @@
 title: "Windows Platform Support: a Low-Friction Plugin Install for the CLI and the Desktop"
 id: RDR-218
 type: Architecture
-status: accepted
+status: superseded
 accepted_date: 2026-09-22
+superseded_by: RDR-224
 priority: high
 author: Sam
 reviewed-by: self
