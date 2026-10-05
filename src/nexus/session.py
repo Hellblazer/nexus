@@ -16,7 +16,6 @@ import structlog
 
 from nexus._install import winproc_core
 from nexus.bounded_subprocess import run_bounded
-from nexus.util.process_group import KILL_SIGNAL
 
 _log = structlog.get_logger()
 
@@ -447,16 +446,27 @@ def _kill_orphan_tracker_pids(
     *grace_seconds* for any survivor. Returns the count of PIDs we
     successfully signalled (SIGTERM-step). Best-effort: missing
     PIDs and EPERM are skipped silently. Pure side effects + return
-    count; testable independently of the parser."""
+    count; testable independently of the parser.
+
+    Unreachable from the production sweep on Windows (it returns before it
+    lists anything), but correct for a direct caller there: a gone pid is an
+    ``OSError`` on Windows, and the hard kill goes through
+    ``service_registry.hard_kill_pid`` (RDR-224, nexus-f9bgu.44)."""
+    # Deferred, like the other service_registry import in this module: keeps
+    # nexus.session's import cost flat for the hooks.
+    from nexus.daemon.service_registry import hard_kill_pid  # noqa: PLC0415
+
     signalled = 0
     for pid in pids:
         try:
             os.kill(pid, signal.SIGTERM)
             signalled += 1
-        except ProcessLookupError:
-            continue
         except PermissionError as exc:
             _log.debug("sweep_orphan_tracker_eperm", pid=pid, error=str(exc))
+            continue
+        except OSError:
+            # ProcessLookupError on POSIX; on Windows a pid that has already
+            # exited raises a plain OSError (WinError 87), not that subclass.
             continue
 
     deadline = time.time() + grace_seconds
@@ -466,10 +476,7 @@ def _kill_orphan_tracker_pids(
         time.sleep(0.1)
     for pid in pids:
         if _is_pid_alive(pid):
-            try:
-                os.kill(pid, KILL_SIGNAL)
-            except (ProcessLookupError, PermissionError):
-                continue
+            hard_kill_pid(pid)  # never raises for a pid that is gone
     return signalled
 
 
