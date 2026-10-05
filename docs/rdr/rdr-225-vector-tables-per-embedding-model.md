@@ -706,7 +706,7 @@ the local disk preflight.
 
 #### Step 1: Write path and tenant creation
 
-- The `service_tokens` AFTER INSERT trigger and `create_tenant_partitions` (all four token-writing sites).
+- The `service_tokens` AFTER INSERT trigger and `create_tenant_partitions` (the three token INSERT sites).
 - The refusal of a write for a model with no partition, naming the model.
 - Every `SET CONSTRAINTS` site, Java and plpgsql, schema-qualified.
 - Every chunk-writing and chunk-referencing write supplies `embedding_model`.
@@ -749,7 +749,7 @@ confirmed.
 
 - **Every search family under the tenant GUC.** Verify: the plan shows exactly one (model, tenant) leaf, pinned per family.
 - **No tenant GUC, and tenant B's GUC.** Verify: zero rows, and no tenant-A row is ever returned.
-- **A first token through each of the four sites (tenants/create, service-tokens/issue, data-tokens/mint, the boot `ensureBootstrapToken`), and a rotation; then a write.** Verify: the leaves exist and the write lands in them, and a second token for the same tenant is a no-op.
+- **A first token through each entry point (tenants/create, service-tokens/issue, data-tokens/mint, the boot `ensureBootstrapToken`), and a rotation; then a write.** Verify: the leaves exist and the write lands in them, and a second token for the same tenant is a no-op.
 - **A fresh install.** Verify: the `default` tenant has its leaves from the migration, and its first write succeeds.
 - **A tenant creation behind an open conflicting lock.** Verify: it fails at `lock_timeout` (2 s) with a retryable 503, and other writers wait at most that long.
 - **300 tenants created.** Verify: creation time and search planning time are within TS1 and TS2.
@@ -777,7 +777,7 @@ The two fix checks' counted findings and observations (T2
 `nexus_rdr/225-fix-check-c0feaa2b1`, `-2296ed853`) and the step-2 results are
 reconciled in the text. These are now stated once:
 - the write freeze in step 4 and the migration;
-- the token trigger covering all four sites;
+- the token trigger covering the three token INSERT sites;
 - the post-swap trigger redefinition;
 - the nullable-then-NOT-NULL order;
 - the fallback's differences;
