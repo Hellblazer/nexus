@@ -95,20 +95,29 @@ class OrtTempSweepTest {
 
     @Test
     void leavesUnrelatedEntriesAlone() throws IOException {
+        // Every entry is OLD against the fixed clock, so the age guard cannot protect it: only the
+        // name filter (the onnxruntime-java* glob) stands between these and deletion.
         Path dead = ortDir("onnxruntime-java1111", OLD);
         Path other = Files.createDirectory(tmp.resolve("some-other-dir"));
+        Path otherFile = Files.writeString(other.resolve("f"), "keep");
         Path file = Files.writeString(tmp.resolve("onnxruntime-java-notes.txt"), "keep");
         Path near = Files.createDirectory(tmp.resolve("onnxruntime-jav"));
-        Files.writeString(other.resolve("f"), "keep");
+        Path nearFile = Files.writeString(near.resolve("g"), "keep");
+        for (Path p : List.of(otherFile, other, file, nearFile, near)) {
+            Files.setLastModifiedTime(p, OLD);
+        }
         assertThat(dead).isDirectory();
 
         var r = sweepWindows();
 
+        assertThat(r.examined()).as("only names starting with onnxruntime-java are examined").isEqualTo(2);
         assertThat(r.removed()).isEqualTo(1);
+        assertThat(r.foreign()).as("the plain file named like ORT's directory is not ours").isEqualTo(1);
         assertThat(dead).doesNotExist();
-        assertThat(other.resolve("f")).exists();
+        assertThat(otherFile).exists();
         assertThat(file).exists();
         assertThat(near).isDirectory();
+        assertThat(nearFile).exists();
     }
 
     @Test
@@ -188,6 +197,107 @@ class OrtTempSweepTest {
 
         assertThat(r.tooNew()).isEqualTo(1);
         assertThat(d).isDirectory();
+    }
+
+    @Test
+    void theAgeBoundIsStrictAtExactlyTheMinimumAge() throws IOException {
+        // Not strictly older than the bound is too new: at exactly the bound a starter may still be
+        // mid-extract; one millisecond past it the directory is sweepable. Both bounds.
+        Path completeAt = ortDir("onnxruntime-java1111",
+                FileTime.from(NOW.minus(OrtTempSweep.COMPLETE_MIN_AGE)));
+        Path completePast = ortDir("onnxruntime-java2222",
+                FileTime.from(NOW.minus(OrtTempSweep.COMPLETE_MIN_AGE).minusMillis(1)));
+        Path incompleteAt = ortDir("onnxruntime-java3333",
+                FileTime.from(NOW.minus(OrtTempSweep.INCOMPLETE_MIN_AGE)));
+        Files.delete(incompleteAt.resolve("onnxruntime.dll"));
+        Files.setLastModifiedTime(incompleteAt, FileTime.from(NOW.minus(OrtTempSweep.INCOMPLETE_MIN_AGE)));
+        Path incompletePast = ortDir("onnxruntime-java4444",
+                FileTime.from(NOW.minus(OrtTempSweep.INCOMPLETE_MIN_AGE).minusMillis(1)));
+        Files.delete(incompletePast.resolve("onnxruntime.dll"));
+        Files.setLastModifiedTime(incompletePast,
+                FileTime.from(NOW.minus(OrtTempSweep.INCOMPLETE_MIN_AGE).minusMillis(1)));
+        assertThat(List.of(completeAt, completePast, incompleteAt, incompletePast))
+                .allSatisfy(d -> assertThat(d).isDirectory());
+
+        var r = sweepWindows();
+
+        assertThat(r.tooNew()).isEqualTo(2);
+        assertThat(r.removed()).isEqualTo(2);
+        assertThat(completeAt).isDirectory();
+        assertThat(incompleteAt).isDirectory();
+        assertThat(completePast).doesNotExist();
+        assertThat(incompletePast).doesNotExist();
+    }
+
+    // ── the boot path (sweepAtBoot and Main's call) ───────────────────────────
+
+    @Test
+    void theBootPathOnWindowsSweepsTheGivenTempDirectory() throws IOException {
+        Path a = ortDir("onnxruntime-java1111", OLD);
+        Path b = ortDir("onnxruntime-java2222", OLD);
+        assertThat(List.of(a, b)).allSatisfy(d -> assertThat(d).isDirectory());
+
+        var r = OrtTempSweep.sweepAtBoot(tmp.toString(), "Windows 11", CLOCK);
+
+        assertThat(r.examined()).as("the boot path examined the directories it was pointed at").isEqualTo(2);
+        assertThat(r.removed()).isEqualTo(2);
+        assertThat(a).doesNotExist();
+        assertThat(b).doesNotExist();
+    }
+
+    @Test
+    void theBootPathOffWindowsDoesNothing() throws IOException {
+        Path a = ortDir("onnxruntime-java1111", OLD);
+        assertThat(a).isDirectory();
+
+        assertThat(OrtTempSweep.sweepAtBoot(tmp.toString(), "Mac OS X", CLOCK))
+                .isEqualTo(OrtTempSweep.Result.NONE);
+        assertThat(OrtTempSweep.sweepAtBoot(tmp.toString(), null, CLOCK)).isEqualTo(OrtTempSweep.Result.NONE);
+        assertThat(a).isDirectory();
+    }
+
+    @Test
+    void theBootPathNeverThrowsOnAnUnusableTempDirectory() {
+        assertThat(OrtTempSweep.sweepAtBoot(null, "Windows 11", CLOCK)).isEqualTo(OrtTempSweep.Result.NONE);
+        assertThat(OrtTempSweep.sweepAtBoot("  ", "Windows 11", CLOCK)).isEqualTo(OrtTempSweep.Result.NONE);
+        assertThat(OrtTempSweep.sweepAtBoot("bad\0path", "Windows 11", CLOCK))
+                .isEqualTo(OrtTempSweep.Result.NONE);
+    }
+
+    @Test
+    void theNoArgumentBootEntryReadsJavaIoTmpdirAndOsName() throws IOException {
+        // The production entry point reads two system properties; drive it with both set. Forks are
+        // sequential within a JVM (surefire forkCount, no same-JVM parallelism), and both are restored.
+        Path a = ortDir("onnxruntime-java1111", FileTime.from(Instant.now().minusSeconds(3600)));
+        assertThat(a).isDirectory();
+        String tmpProp = System.getProperty("java.io.tmpdir");
+        String osProp = System.getProperty("os.name");
+        try {
+            System.setProperty("java.io.tmpdir", tmp.toString());
+            System.setProperty("os.name", "Windows 11");
+            OrtTempSweep.sweepAtBoot();
+        } finally {
+            System.setProperty("java.io.tmpdir", tmpProp);
+            System.setProperty("os.name", osProp);
+        }
+        assertThat(a).as("sweepAtBoot() swept java.io.tmpdir as Windows").doesNotExist();
+    }
+
+    @Test
+    void mainSweepsAtBootAfterTheSignalGateIsInstalled() throws IOException {
+        String main = stripComments(Files.readString(
+                Path.of("src", "main", "java", "dev", "nexus", "service", "Main.java")));
+        int gate = main.indexOf("OrtInitGate.process().installSignalHandlers()");
+        int sweep = main.indexOf("OrtTempSweep.sweepAtBoot()");
+        assertThat(gate).as("Main installs the OrtInitGate handlers").isNotEqualTo(-1);
+        assertThat(sweep).as("Main calls OrtTempSweep.sweepAtBoot()").isNotEqualTo(-1);
+        assertThat(sweep).as("the sweep runs after the signal gate is installed").isGreaterThan(gate);
+        assertThat(main.indexOf("OrtTempSweep.sweepAtBoot()", sweep + 1))
+                .as("and is called once").isEqualTo(-1);
+    }
+
+    private static String stripComments(String source) {
+        return source.replaceAll("(?s)/\\*.*?\\*/", "").replaceAll("//[^\\n]*", "");
     }
 
     @Test
@@ -393,6 +503,19 @@ class OrtTempSweepTest {
         assertThat(jar.getFileName().toString())
                 .as("listing is for onnxruntime %s; a bump must re-list (scripts/native_jar_listing.py)", version)
                 .isEqualTo("onnxruntime-" + version + ".jar");
+
+        // The committed listing is only a fixture; the jar on this test's own classpath is the evidence.
+        // Its win-x64 entries must be exactly the listing's, and carry the libraries the sweep keys on.
+        Set<String> inJar = new TreeSet<>();
+        try (java.util.zip.ZipFile z = new java.util.zip.ZipFile(jar.toFile())) {
+            z.stream().map(java.util.zip.ZipEntry::getName)
+                    .filter(n -> n.startsWith("ai/onnxruntime/native/win-x64/") && !n.endsWith("/"))
+                    .forEach(n -> inJar.add(n.substring(n.lastIndexOf('/') + 1)));
+        }
+        assertThat(inJar).as("win-x64 entries of the real %s", jar.getFileName())
+                .containsExactlyInAnyOrderElementsOf(win);
+        assertThat(inJar).as("the real jar carries every library the sweep treats as loaded")
+                .containsAll(OrtTempSweep.LOADED_LIBS);
 
         // The sweep's safety: a live peer's directory refuses deletion at the first of these, because
         // ORT keeps them mapped. A bump that renames one makes a live peer's directory look incomplete

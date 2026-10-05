@@ -125,19 +125,27 @@ public final class OrtTempSweep {
      * Never throws.
      */
     public static void sweepAtBoot() {
+        sweepAtBoot(System.getProperty("java.io.tmpdir"), System.getProperty("os.name"), Clock.systemUTC());
+    }
+
+    /**
+     * {@link #sweepAtBoot()} with the temp directory, OS name and clock as parameters, so a test can drive
+     * the boot path as Windows over a real directory on any host. Never throws.
+     */
+    static Result sweepAtBoot(String tmpDir, String osName, Clock clock) {
         try {
-            String tmp = System.getProperty("java.io.tmpdir");
-            if (tmp == null || tmp.isBlank()) {
-                return;
+            if (tmpDir == null || tmpDir.isBlank()) {
+                return Result.NONE;
             }
-            Result r = sweep(Paths.get(tmp), WindowsHost.isWindows(System.getProperty("os.name")),
-                    Clock.systemUTC(), Files::delete);
+            Result r = sweep(Paths.get(tmpDir), WindowsHost.isWindows(osName), clock, Files::delete);
             if (r.examined() > 0) {
                 log.info("event=ort_temp_sweep examined={} removed={} live={} too_new={} foreign={} failed={}",
                         r.examined(), r.removed(), r.live(), r.tooNew(), r.foreign(), r.failed());
             }
+            return r;
         } catch (RuntimeException e) {
             log.warn("event=ort_temp_sweep_error error=\"{}\"", e.toString());
+            return Result.NONE;
         }
     }
 
