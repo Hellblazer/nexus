@@ -33,6 +33,7 @@ import java.util.Map;
 import java.util.stream.Collectors;
 
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -653,13 +654,15 @@ class PgVectorSearchPerCollectionIntegrationTest {
 
     // ── a REAL statement timeout (an ACCESS EXCLUSIVE lock on nexus.chunks) ───
 
-    /** A superuser connection holding ACCESS EXCLUSIVE on nexus.chunks until {@link #unlock}. */
+    /**
+     * A superuser connection holding ACCESS EXCLUSIVE on nexus.chunks until {@link #unlock}. The lock
+     * is taken by an uncommitted {@code ALTER TABLE ... RENAME} (transactional DDL, undone by the
+     * rollback), which jOOQ's typed DSL can express where {@code LOCK TABLE} would be raw SQL.
+     */
     private Connection lockChunks() throws Exception {
         Connection su = pg.createConnection("");
         su.setAutoCommit(false);
-        try (var st = su.createStatement()) {
-            st.execute("LOCK TABLE nexus.chunks IN ACCESS EXCLUSIVE MODE");
-        }
+        DSL.using(su, SQLDialect.POSTGRES).alterTable(CHUNKS).renameTo("chunks_tu8wp_lock").execute();
         return su;
     }
 
