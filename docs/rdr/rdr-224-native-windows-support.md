@@ -157,7 +157,7 @@ native binary, which the WSL2 design could not rely on (nested virtualisation),
 but a real-session check in a native Windows Claude Code session still needs a
 real Windows box. RDR-218's version of that check ran
 `tests/e2e/post-publish-dispatch-check.sh`, which no longer exists: it was
-deleted with the RDR-184 ledger (`CHANGELOG.md:71`, nexus-0r1uz; T2
+deleted with the RDR-184 ledger (`CHANGELOG.md:87`, nexus-0r1uz; T2
 `224-research-26`). Phase 5 redefines the check against what exists.
 
 ## Relationship to Prior RDRs
