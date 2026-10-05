@@ -40,6 +40,7 @@ import importlib.util
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -50,6 +51,7 @@ from nexus.db.http_vector_client import HttpVectorClient
 from nexus.db.limits import QUOTAS
 from nexus.search_engine import _group_collections_by_embedding_model
 from nexus.search_engine import search_cross_corpus as new_search_cross_corpus
+from tests import _route_parity as _rp
 
 pytestmark = [pytest.mark.integration, pytest.mark.lived_in]
 
@@ -681,4 +683,181 @@ def test_path_scoped_yield_old_vs_new_floor(
     mean_old = sum(r["j_old"] for r in measured) / len(measured)
     assert mean_new >= mean_old - _NOISE_MARGIN, (
         "path-scoped final page drifted past reference noise\n" + "\n".join(lines)
+    )
+
+
+# ── Route parity (nexus-tu8wp.3) ────────────────────────────────────────────
+#
+# Everything above measures the BATCHED path (``_live_client`` pins
+# ``supports_per_collection_search = False``). The cells below measure the
+# candidate that engine-service-v0.1.147 makes possible: the same
+# ``search_cross_corpus`` over a client that reaches
+# ``POST /v1/vectors/search-per-collection``, against two references, the
+# batched path (deep floor, run twice: its own noise, nexus-e9sux) and, OPT-IN
+# only (``NX_TU8WP3_LOADER=1``), the pre-batching ab837d219 fan-out. The machinery, and the guard that a route
+# which was not served fails loudly instead of comparing the batched path with
+# itself, is tests/_route_parity.py, tested hermetically in
+# tests/test_route_parity_helpers.py.
+#
+# Run (needs the operator's cloud config; the route must be served, i.e. the
+# cloud engine is >= engine-service-v0.1.147)::
+#
+#     uv run pytest -m integration tests/test_search_fanout_recall_parity.py -k route_parity -s
+#
+# ``-s`` shows the per-cell tables, which are the measurement. Each cell prints
+# the requests it expects to send BEFORE sending any, a pause of
+# ``NX_TU8WP3_PAUSE_S`` seconds (default 1) separates queries, and it ends with
+# its UTC window and a ``TU8WP3_PARITY_JSON`` line. Cells run one at a time (no
+# ``-n``: the cell refuses under xdist). LOAD: a cell is about (queries x
+# (2 batched + 1 route runs)) requests, the opt-in loader adds one per
+# collection per query (~98); select cells with ``-k`` rather than running all
+# 12 back to back (nexus-abdp2's runs of the per-collection reference sent
+# ~10k searches in three hours and pushed the live engine's plain_search mean
+# from ~230 ms to 516 ms).
+#
+# QUERY STRINGS PER LEG. Each leg sends its own, distinct strings: the base
+# ``_QUERIES`` with a leg marker appended, so a request in the engine, edge or
+# gateway logs can be attributed to a leg (the engine's own
+# ``event=search_per_collection`` line also carries ``per_collection_k`` and
+# ``limit``, which tell the rerank sweep legs apart). ``NX_TU8WP3_NO_MARKERS=1``
+# runs the bare base queries instead. The existing floor cells above keep the
+# bare ``_QUERIES``.
+#
+#   leg norerank  rerank off, the route's shipped sizing        marker tu8wp3-nr
+#   leg rr1000    rerank on, the route's shipped limit (1000)   marker tu8wp3-r1000
+#   leg rr300     rerank on, ``limit`` patched to 300           marker tu8wp3-r300
+
+_ASSERT_RERANK_ENV = "NX_TU8WP3_ASSERT_RERANK"
+_NO_MARKERS_ENV = "NX_TU8WP3_NO_MARKERS"
+#: The ab837d219 one-/search-per-collection reference is OPT-IN (``=1``): it is
+#: ~98 requests per query. The nexus-abdp2 runs of it (about 10k searches in
+#: three hours) pushed the live engine's plain_search mean from ~230 ms to
+#: 516 ms and into the 30 s statement timeout. The default reference is the
+#: batched path (deep floor), a handful of requests per query.
+_LOADER_ENV = "NX_TU8WP3_LOADER"
+#: Seconds to pause between queries (default 1.0); the cells run one after
+#: another and never in parallel.
+_PAUSE_ENV = "NX_TU8WP3_PAUSE_S"
+
+#: The query strings each leg sends, spelled out (the base list with the leg's
+#: marker appended; the hermetic tests pin that no string is in two legs and
+#: none equals a base query).
+_QUERIES_NORERANK = _rp.mark_queries(_QUERIES, _rp.LEG_MARKERS["norerank"])
+_QUERIES_RR1000 = _rp.mark_queries(_QUERIES, _rp.LEG_MARKERS["rr1000"])
+_QUERIES_RR300 = _rp.mark_queries(_QUERIES, _rp.LEG_MARKERS["rr300"])
+_LEG_QUERIES = {
+    "norerank": _QUERIES_NORERANK, "rr1000": _QUERIES_RR1000, "rr300": _QUERIES_RR300,
+}
+
+
+def _leg_queries(leg: str) -> list[tuple[str, str]]:
+    return _QUERIES if os.environ.get(_NO_MARKERS_ENV) == "1" else _LEG_QUERIES[leg]
+
+
+_ROUTE_CELLS = [
+    pytest.param(
+        leg, n, thr,
+        id=f"{leg}-n{n}-{'inf' if thr == float('inf') else 'default'}",
+    )
+    for leg in ("norerank", "rr1000", "rr300")
+    for n in (10, 30)
+    for thr in (float("inf"), None)
+]
+
+
+@pytest.fixture()
+def _route_client(_real_cloud_credentials: None, monkeypatch) -> HttpVectorClient:
+    """A FRESH client that asks for the route (its 404 memo starts empty), with
+    the kill switch cleared so a stray ``NX_SEARCH_PER_COLLECTION=0`` cannot
+    turn the candidate into the reference."""
+    from nexus.db.http_vector_client import (  # noqa: PLC0415
+        PER_COLLECTION_ROUTE_ENV,
+        per_collection_route_enabled,
+    )
+
+    monkeypatch.delenv(PER_COLLECTION_ROUTE_ENV, raising=False)
+    assert per_collection_route_enabled()
+    client = HttpVectorClient()
+    assert client.supports_per_collection_search is True
+    return client
+
+
+@pytest.mark.parametrize(("leg", "n", "threshold"), _ROUTE_CELLS)
+def test_route_parity_vs_batched_and_pre_batching(
+    leg, n, threshold,
+    _route_client: HttpVectorClient, _live_client: HttpVectorClient,
+    _corpus_collections: dict[str, list[str]],
+):
+    """The route's FINAL page (and, rerank off, its raw top-10) must match the
+    batched reference as closely as the reference matches itself.
+
+    Per query, interleaved: batched reference, route, (opt-in) ab837d219 loader,
+    batched reference again. A route that was not served for every model group, or a
+    reference that never called ``/search``, raises ``RouteNotServedError``
+    instead of passing. Rerank off is asserted (per query: >= 0.9 or within the
+    reference's own noise, nexus-e9sux; and in the mean); rerank on is reported
+    (the reranked pool legitimately differs: the route reranks the merged
+    top-limit of each model group once, the batched path reranked each batch),
+    unless ``NX_TU8WP3_ASSERT_RERANK=1``. Leg ``rr300`` patches the route's
+    rerank ``limit`` to 300 against the shipped 1000 to show whether the deeper
+    pool brings the reranked page closer to the reference."""
+    import json  # noqa: PLC0415
+    from unittest import mock  # noqa: PLC0415
+
+    import nexus.search_engine as _se  # noqa: PLC0415
+
+    rerank = leg != "norerank"
+    if rerank and not getattr(_live_client, "supports_server_rerank", False):
+        pytest.skip("backend has no server-side rerank")
+    if os.environ.get("PYTEST_XDIST_WORKER"):
+        pytest.fail(
+            "the route-parity cells measure the live engine and must run one at a time "
+            "(no -n): parallel cells are the load that nexus-abdp2's runs put on it",
+        )
+    use_loader = os.environ.get(_LOADER_ENV) == "1"
+    loader = _load_old_search_cross_corpus() if use_loader else None
+    pause_s = float(os.environ.get(_PAUSE_ENV, "1.0"))
+    sized = _rp.sized_with_rerank_limit(
+        _se._per_collection_request_sizes, _rp.LEG_RERANK_LIMIT[leg],
+    )
+    rows = []
+    queries = _leg_queries(leg)
+    print(_rp.expected_cell_calls(  # noqa: T201 — the load this cell will put on the engine, before it starts
+        queries, _corpus_collections, n, loader=use_loader,
+    ) + f"; pause {pause_s}s between queries")
+    with mock.patch.object(_se, "_per_collection_request_sizes", sized):
+        for i, (query, corpus_name) in enumerate(queries):
+            if i:
+                time.sleep(pause_s)
+            rows.append(_rp.measure_query(
+                query=query, corpus=corpus_name, cols=_corpus_collections[corpus_name],
+                n=n, threshold=threshold, rerank=rerank,
+                route_client=_route_client, ref_client=_live_client,
+                search=new_search_cross_corpus, user_page=_user_page, loader=loader,
+            ))
+
+    thr_label = "inf" if threshold == float("inf") else "default"
+    label = f"leg={leg} n={n} threshold={thr_label} rerank={rerank}"
+    print(_rp.format_cell(label, rows))  # noqa: T201 — the table is the measurement
+    print("TU8WP3_PARITY_JSON " + json.dumps({  # noqa: T201
+        "leg": leg, "n": n, "threshold": thr_label, "rerank": rerank,
+        "rerank_limit_patched": _rp.LEG_RERANK_LIMIT[leg],
+        "rows": [{
+            "query": r.query, "corpus": r.corpus, "page_route": r.page_route,
+            "page_noise": r.page_noise, "raw_route": r.raw_route, "raw_noise": r.raw_noise,
+            "route_vs_loader": r.page_route_loader, "ref_vs_loader": r.page_ref_loader,
+            "route_pool": r.route_pool, "ref_pool": r.ref_pool,
+            "route_shapes": r.route_shapes, "ref_search_calls": r.ref_search_calls,
+            "loader_search_calls": r.loader_search_calls,
+            "start_utc": r.start_utc, "end_utc": r.end_utc,
+        } for r in rows],
+    }))
+
+    assert len(rows) == len(_QUERIES), "vacuous run: not every query was measured"
+    problems = _rp.cell_failures(
+        rows, rerank=rerank, assert_rerank=os.environ.get(_ASSERT_RERANK_ENV) == "1",
+    )
+    assert not problems, (
+        f"the route's page drifted past reference noise ({label}):\n  "
+        + "\n  ".join(problems) + "\n" + _rp.format_cell(label, rows)
     )
