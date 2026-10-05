@@ -285,7 +285,9 @@ def test_posix_restart_still_sends_sigterm() -> None:
     def _kill(pid: int, sig: int) -> None:
         calls.append((pid, sig))
 
-    with patch.object(uf.os, "kill", side_effect=_kill), \
+    posix_stop = functools.partial(request_graceful_stop, platform="linux")
+    with patch.object(uf, "request_graceful_stop", posix_stop), \
+            patch.object(uf.os, "kill", side_effect=_kill), \
             patch.object(uf, "process_command", return_value=_COMMAND), \
             patch.object(uf, "_process_markers", return_value=("/uv/tools/conexus",)), \
             patch.object(uf, "_pid_alive", return_value=False), \

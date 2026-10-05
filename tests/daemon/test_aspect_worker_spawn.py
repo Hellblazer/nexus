@@ -106,7 +106,9 @@ def test_spawn_is_detached_child(tmp_path: Path) -> None:
     """Detached (start_new_session) so the daemon survives the short-lived
     storing process, but still a child that inherited its env at fork."""
     _FakePopen.reset()
-    ensure_aspect_worker_daemon(config_dir=tmp_path, tenant="default", _popen=_FakePopen)
+    ensure_aspect_worker_daemon(
+        config_dir=tmp_path, tenant="default", _popen=_FakePopen, _platform="linux",
+    )
     assert _FakePopen.calls[0]["kwargs"].get("start_new_session") is True
 
 
