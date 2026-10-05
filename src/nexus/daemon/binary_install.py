@@ -35,6 +35,7 @@ import shutil
 import tarfile
 import tempfile
 import urllib.request
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -47,6 +48,7 @@ from nexus.daemon.binary_lifecycle import (
     WINDOWS_RUNTIME_DLLS,
     well_known_binary_path,
 )
+from nexus.daemon.replace_guard import place_set_with_rollback
 from nexus.db.pg_bundle import current_platform_tag
 from nexus.engine_version import REQUIRED_ENGINE_VERSION
 
@@ -556,6 +558,9 @@ def install_binary(
     checker: _SignatureChecker | None = None,
     download_dir: Path | None = None,
     platform_tag: str | None = None,
+    quiesce: AbstractContextManager[object] | None = None,
+    restart_after: bool = True,
+    host_platform: str | None = None,
 ) -> tuple[Path, dict]:
     """Download, verify, and atomically place the native binary for *tag*.
 
@@ -566,7 +571,16 @@ def install_binary(
 
     On Windows (*platform_tag* ``windows-x64``) the asset is one archive; both
     gates run on the ARCHIVE bytes, then ``nexus-service.exe`` and the four
-    runtime DLLs are placed side by side (RDR-224 P0.4).
+    runtime DLLs are placed side by side (RDR-224 P0.4). Windows refuses to
+    overwrite a running executable, so on a Windows HOST the placement runs
+    inside :func:`nexus.daemon.replace_quiesce.quiesced`: the storage service
+    is stopped, the set is placed as one unit (a failure puts every file back,
+    see :func:`~nexus.daemon.replace_guard.place_set_with_rollback`), and the
+    service is started again, or not when *restart_after* is False because the
+    caller restarts and verifies it itself. *quiesce* replaces that context
+    manager and *host_platform* (default ``sys.platform``) is the platform the
+    stop and the retry are decided on; both are test seams. On POSIX nothing
+    is stopped and the placement is unchanged.
     """
     _validate_tag(tag)
     ptag = platform_tag if platform_tag is not None else current_platform_tag()
@@ -595,7 +609,11 @@ def install_binary(
 
         dest = well_known_binary_path(config_dir, platform_tag=ptag)
         if archive_layout:
-            extra = _place_engine_archive(asset, dest)
+            guard = quiesce if quiesce is not None else _engine_quiesce(
+                config_dir, restart_after=restart_after, host_platform=host_platform,
+            )
+            with guard:
+                extra = _place_engine_archive(asset, dest, platform=host_platform)
         else:
             _atomic_copy(asset, dest, executable=True)
 
@@ -638,7 +656,20 @@ def _flat_member_name(raw: str) -> str | None:
     return parts[0]
 
 
-def _place_engine_archive(archive: Path, exe_dest: Path) -> dict:
+def _engine_quiesce(
+    config_dir: Path, *, restart_after: bool, host_platform: str | None,
+) -> AbstractContextManager[object]:
+    """The default stop-replace-restart guard for the engine files."""
+    from nexus.daemon.replace_quiesce import quiesced  # noqa: PLC0415 - deferred, keeps CLI startup light
+
+    return quiesced(
+        config_dir, replacing="engine", platform=host_platform, restart_after=restart_after,
+    )
+
+
+def _place_engine_archive(
+    archive: Path, exe_dest: Path, *, platform: str | None = None,
+) -> dict:
     """Extract the Windows engine archive and place its files beside *exe_dest*.
 
     The archive is already sha256- and signature-verified; this is defence in
@@ -649,9 +680,11 @@ def _place_engine_archive(archive: Path, exe_dest: Path) -> dict:
     tolerated and ignored; any unsafe member, link, device or nested path fails
     the whole archive before anything is placed.
 
-    Staged beside the destination, then moved into place with the DLLs first
-    and the exe last, so the exe never sits next to a missing DLL because of
-    this function. Returns the receipt fields ``installed_sha256`` (exe),
+    Staged beside the destination, then moved into place as one set with the
+    DLLs first and the exe last (:func:`~nexus.daemon.replace_guard.
+    place_set_with_rollback`): each file by one atomic replace, retried on
+    Windows when a scan or a handle holds it, and a failure part way restores
+    every file, so the set is never half old and half new. Returns the receipt fields ``installed_sha256`` (exe),
     ``support_files`` (DLL digests) and ``layout``.
     """
     required = (WINDOWS_ENGINE_EXE, *WINDOWS_RUNTIME_DLLS)
@@ -705,8 +738,10 @@ def _place_engine_archive(archive: Path, exe_dest: Path) -> dict:
                 f"{', '.join(missing)}; not installing."
             )
 
-        for name in (*WINDOWS_RUNTIME_DLLS, WINDOWS_ENGINE_EXE):
-            os.replace(stage / name, exe_dest.parent / name)
+        place_set_with_rollback(
+            stage, exe_dest.parent, (*WINDOWS_RUNTIME_DLLS, WINDOWS_ENGINE_EXE),
+            platform=platform,
+        )
     finally:
         shutil.rmtree(stage, ignore_errors=True)
 

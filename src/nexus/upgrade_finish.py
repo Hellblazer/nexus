@@ -41,6 +41,7 @@ from nexus._install.winproc_core import executable_stem
 from nexus.bounded_subprocess import run_bounded
 from nexus.daemon.binary_lifecycle import well_known_binary_path
 from nexus.daemon.service_registry import (
+    GracefulStopSend,
     _parse_etime,
     _procfs_enumerate,
     all_process_rows,
@@ -1381,6 +1382,51 @@ def service_stack_pids(config_dir: Path) -> list[tuple[int, str]]:
 def _sweep_surviving_stack(
     config_dir: Path, before: list[tuple[int, str]],
 ) -> str:
+    """The note :func:`_sweep_surviving_stack_detail` produces, without the
+    refusals (kept for callers that only report)."""
+    return _sweep_surviving_stack_detail(config_dir, before)[0]
+
+
+def _refused_sweep_note(
+    refused: list[GracefulStopSend], listed: str, stubborn: list[int],
+) -> str:
+    """The sweep note for a stack member the stop could not reach.
+
+    Windows only (RDR-224, nexus-f9bgu.17/.20): the pid runs in another
+    session, so the console stop was refused; it was not signalled and is NOT
+    hard-killed (Sam, 2026-10-05). ``terminate_pids`` still counts it among the
+    survivors because it still runs, which on its own reads as a stop that was
+    tried and failed. Name the session and where to run the upgrade."""
+    lines: list[str] = []
+    for r in refused:
+        if r.target_session is not None and r.target_session != r.own_session:
+            lines.append(
+                f"pid {r.pid} runs in Windows session {r.target_session}, this "
+                f"shell is in session {r.own_session}; a console stop cannot "
+                f"cross sessions. Run this upgrade from session {r.target_session}"
+            )
+        else:
+            lines.append(
+                f"pid {r.pid} could not be reached (access denied attaching to "
+                "its console). Run this upgrade as the account, and with the "
+                "elevation, that started the service"
+            )
+    refused_pids = {r.pid for r in refused}
+    others = [p for p in stubborn if p not in refused_pids]
+    extra = (
+        f" pid(s) {', '.join(str(p) for p in others)} also survived the stop "
+        "escalation." if others else ""
+    )
+    return (
+        f"[stop-sweep] REFUSED: pid(s) {listed} were still running after "
+        "`nx daemon service stop` returned. " + "; ".join(lines) + ". Nothing "
+        "was signalled or killed across sessions." + extra
+    )
+
+
+def _sweep_surviving_stack_detail(
+    config_dir: Path, before: list[tuple[int, str]],
+) -> tuple[str, list[GracefulStopSend]]:
     """Kill any pre-stop stack member that survived ``nx daemon service stop``.
 
     THE FIX for the nexus-cfgo9 convergence defect. ``stop`` reports success
@@ -1435,15 +1481,22 @@ def _sweep_surviving_stack(
             continue
         survivors.append((pid, cmd))
     if not survivors:
-        return ""
+        return "", []
     # nexus-service.exe on Windows (nexus-f9bgu.15, .21): the one function
     # that knows the installed name, never the literal.
     engine_path = str(well_known_binary_path(config_dir))
     supervisors = [p for p, c in survivors if engine_path not in c]
     engines = [p for p, c in survivors if engine_path in c]
-    stubborn = terminate_pids(supervisors)
-    stubborn += terminate_pids(engines)
+    refused: list[GracefulStopSend] = []
+    stubborn = terminate_pids(supervisors, refused_out=refused)
+    stubborn += terminate_pids(engines, refused_out=refused)
     listed = ", ".join(str(p) for p, _ in survivors)
+    if refused:
+        # Windows, another session (RDR-224, nexus-f9bgu.17/.20): the pid was
+        # not signalled and is not killed, and it is among the stubborn pids
+        # only because it still runs. Say that, and where the stop has to come
+        # from, instead of reporting a survivor of an escalation that never ran.
+        return _refused_sweep_note(refused, listed, list(stubborn)), refused
     # Report what was OBSERVED, never a cause that was not (nexus-o8dil.21).
     # Both strings used to assert "(its lease-based check saw no live
     # lease)" unconditionally — a hardcoded diagnosis this function never
@@ -1459,12 +1512,12 @@ def _sweep_surviving_stack(
             f"`nx daemon service stop` returned; pid(s) "
             f"{', '.join(str(p) for p in stubborn)} were STILL running after "
             "a direct SIGKILL escalation (not merely awaiting reap)"
-        )
+        ), []
     return (
         f"[stop-sweep] pid(s) {listed} were still running after "
         "`nx daemon service stop` returned — terminated them directly so the "
         "restart cycles the engine instead of short-circuiting"
-    )
+    ), []
 
 
 def _restart_and_verify(
@@ -1513,11 +1566,19 @@ def _restart_and_verify(
             ["nx", "daemon", "service", "stop", "--config-dir", resolved_config_dir],
             timeout=60,
         )
+        sweep_refused: list[GracefulStopSend] = []
         try:
-            sweep_note = _sweep_surviving_stack(config_dir, before)
+            sweep_note, sweep_refused = _sweep_surviving_stack_detail(config_dir, before)
         except Exception as exc:  # noqa: BLE001 — the sweep is belt, never the reason start doesn't run (review M2)
             _log.warning("restart_stack_sweep_failed", error=str(exc))
             sweep_note = f"(stack sweep failed: {exc} — proceeding to start)"
+        if sweep_refused:
+            # RDR-224 (nexus-f9bgu.20): a stack member in another Windows
+            # session cannot be stopped from here and is never hard-killed, so
+            # `start` could only short-circuit onto it and the verdict below
+            # would be a stale version with no cause. Stop with the cause.
+            actions.append(f"NEEDS HUMAN: {sweep_note}")
+            return actions
         start = run_bounded(
             ["nx", "daemon", "service", "start", "--config-dir", resolved_config_dir],
             timeout=120,
@@ -1958,7 +2019,14 @@ def converge_engine(
         ]
 
     try:
-        install_binary(tag, config_dir, installed_by="upgrade-finish engine convergence")
+        # restart_after=False: on Windows the install stops the service to free
+        # the executable (RDR-224, nexus-f9bgu.20); the cycle below starts it
+        # again AND verifies the version, so the install must not start it
+        # first. A failed install still restarts what it stopped.
+        install_binary(
+            tag, config_dir, installed_by="upgrade-finish engine convergence",
+            restart_after=False,
+        )
     except Exception as exc:  # noqa: BLE001 — code-review HIGH: install_binary
         # can raise more than BinaryVerificationError -- _atomic_copy
         # (binary_install.py) re-raises bare OSError/etc UNWRAPPED on

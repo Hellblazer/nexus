@@ -836,6 +836,8 @@ def service_install_binary_cmd(
         install_pg_bundle,
         pg_bundle_asset_name,
     )
+    from nexus.daemon.replace_guard import ReplaceBlockedError  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
+    from nexus.daemon.replace_quiesce import RestartAfterReplaceError  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
 
     try:
         _nx_version = _pkg_version("conexus")
@@ -867,7 +869,10 @@ def service_install_binary_cmd(
     click.echo(f"Resolving {asset_name()} from release {tag}…")
     try:
         dest, prov = install_binary(tag, config_dir, installed_by=installed_by)
-    except BinaryVerificationError as exc:
+    except (BinaryVerificationError, ReplaceBlockedError, RestartAfterReplaceError) as exc:
+        # On Windows the install stops the service to free the engine files;
+        # these two (RDR-224, nexus-f9bgu.20) carry a message meant to be
+        # printed as it stands, naming the session or the file and the remedy.
         click.echo(f"Error: {exc}", err=True)
         sys.exit(2)
 
