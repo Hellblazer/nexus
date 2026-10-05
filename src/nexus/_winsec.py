@@ -33,11 +33,12 @@ import contextlib
 import os
 import stat
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 __all__ = [
     "ensure_owner_only",
     "grant_user_tree_access",
+    "make_user_dir",
     "open_private",
     "owner_only_problem",
     "restrict_to_owner",
@@ -64,18 +65,30 @@ def _is_windows(platform: str | None) -> bool:
     return (platform == "win32") if platform is not None else (os.name == "nt")
 
 
-def _windows_user_sid() -> str:
-    """The current process token's user SID as a string (``S-1-5-21-...``).
+#: The current process token's user SID, read once per process (RDR-224,
+#: nexus-f9bgu.33, review m11). A token's user cannot change, and the lease
+#: writer asked for it on every heartbeat.
+_SID_CACHE: list[str] = []
 
-    Windows only; ctypes against advapi32. Any other platform raises OSError.
-    """
-    if os.name != "nt":
-        raise OSError("the Windows user SID is only readable on Windows")
+#: advapi32 and kernel32 with every ``argtypes`` / ``restype`` the calls below
+#: need, bound once per process: a ``WinDLL`` load plus a dozen attribute
+#: assignments on every lease write is pure overhead.
+_WIN_LIBS: list[tuple[Any, Any]] = []
+
+
+def _win_libs(*, loader: Callable[[str], Any] | None = None) -> tuple[Any, Any]:
+    """``(advapi32, kernel32)``, bound once. *loader* is the test seam for
+    ``ctypes.WinDLL``; without it, anything but Windows raises OSError."""
+    if _WIN_LIBS:
+        return _WIN_LIBS[0]
+    if loader is None and os.name != "nt":
+        raise OSError("the Windows security APIs are only reachable on Windows")
     import ctypes  # noqa: PLC0415 — Windows-only branch
     from ctypes import wintypes  # noqa: PLC0415 — Windows-only branch
 
-    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    load = loader if loader is not None else (lambda name: ctypes.WinDLL(name, use_last_error=True))
+    advapi32 = load("advapi32")
+    kernel32 = load("kernel32")
     kernel32.GetCurrentProcess.restype = wintypes.HANDLE
     kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
     kernel32.LocalFree.argtypes = [ctypes.c_void_p]
@@ -88,6 +101,46 @@ def _windows_user_sid() -> str:
     advapi32.GetTokenInformation.restype = wintypes.BOOL
     advapi32.ConvertSidToStringSidW.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)]
     advapi32.ConvertSidToStringSidW.restype = wintypes.BOOL
+    advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW.argtypes = [
+        wintypes.LPCWSTR, wintypes.DWORD, ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p,
+    ]
+    advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW.restype = wintypes.BOOL
+    advapi32.GetSecurityDescriptorDacl.argtypes = [
+        ctypes.c_void_p, ctypes.POINTER(wintypes.BOOL), ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(wintypes.BOOL),
+    ]
+    advapi32.GetSecurityDescriptorDacl.restype = wintypes.BOOL
+    advapi32.SetNamedSecurityInfoW.argtypes = [
+        wintypes.LPWSTR, ctypes.c_int, wintypes.DWORD,
+        ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p,
+    ]
+    advapi32.SetNamedSecurityInfoW.restype = wintypes.DWORD
+    advapi32.GetNamedSecurityInfoW.argtypes = [
+        wintypes.LPCWSTR, ctypes.c_int, wintypes.DWORD,
+        ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_void_p),
+    ]
+    advapi32.GetNamedSecurityInfoW.restype = wintypes.DWORD
+    advapi32.GetAclInformation.argtypes = [ctypes.c_void_p, ctypes.c_void_p, wintypes.DWORD, ctypes.c_int]
+    advapi32.GetAclInformation.restype = wintypes.BOOL
+    advapi32.GetAce.argtypes = [ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(ctypes.c_void_p)]
+    advapi32.GetAce.restype = wintypes.BOOL
+    _WIN_LIBS.append((advapi32, kernel32))
+    return _WIN_LIBS[0]
+
+
+def _windows_user_sid() -> str:
+    """The current process token's user SID as a string (``S-1-5-21-...``).
+
+    Windows only; ctypes against advapi32. Any other platform raises OSError.
+    """
+    if _SID_CACHE:
+        return _SID_CACHE[0]
+    if os.name != "nt":
+        raise OSError("the Windows user SID is only readable on Windows")
+    import ctypes  # noqa: PLC0415 — Windows-only branch
+    from ctypes import wintypes  # noqa: PLC0415 — Windows-only branch
+
+    advapi32, kernel32 = _win_libs()
 
     token = wintypes.HANDLE()
     if not advapi32.OpenProcessToken(kernel32.GetCurrentProcess(), 0x0008, ctypes.byref(token)):  # TOKEN_QUERY
@@ -107,9 +160,11 @@ def _windows_user_sid() -> str:
         if not advapi32.ConvertSidToStringSidW(psid, ctypes.byref(string_sid)):
             raise ctypes.WinError(ctypes.get_last_error())
         try:
-            return ctypes.wstring_at(string_sid.value)
+            sid = ctypes.wstring_at(string_sid.value)
         finally:
             kernel32.LocalFree(string_sid)
+        _SID_CACHE.append(sid)
+        return sid
     finally:
         kernel32.CloseHandle(token)
 
@@ -142,23 +197,7 @@ def _windows_set_dacl(path: str, sddl: str, *, protected: bool) -> None:
     import ctypes  # noqa: PLC0415 — Windows-only branch
     from ctypes import wintypes  # noqa: PLC0415 — Windows-only branch
 
-    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    kernel32.LocalFree.argtypes = [ctypes.c_void_p]
-    kernel32.LocalFree.restype = ctypes.c_void_p
-    advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW.argtypes = [
-        wintypes.LPCWSTR, wintypes.DWORD, ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p,
-    ]
-    advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW.restype = wintypes.BOOL
-    advapi32.GetSecurityDescriptorDacl.argtypes = [
-        ctypes.c_void_p, ctypes.POINTER(wintypes.BOOL), ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(wintypes.BOOL),
-    ]
-    advapi32.GetSecurityDescriptorDacl.restype = wintypes.BOOL
-    advapi32.SetNamedSecurityInfoW.argtypes = [
-        wintypes.LPWSTR, ctypes.c_int, wintypes.DWORD,
-        ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p,
-    ]
-    advapi32.SetNamedSecurityInfoW.restype = wintypes.DWORD
+    advapi32, kernel32 = _win_libs()
 
     descriptor = ctypes.c_void_p()
     # SDDL_REVISION_1 = 1
@@ -200,22 +239,7 @@ def _windows_dacl_trustees(path: str) -> list[str] | None:
     import ctypes  # noqa: PLC0415 — Windows-only branch
     from ctypes import wintypes  # noqa: PLC0415 — Windows-only branch
 
-    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    kernel32.LocalFree.argtypes = [ctypes.c_void_p]
-    kernel32.LocalFree.restype = ctypes.c_void_p
-    advapi32.GetNamedSecurityInfoW.argtypes = [
-        wintypes.LPCWSTR, ctypes.c_int, wintypes.DWORD,
-        ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p,
-        ctypes.POINTER(ctypes.c_void_p),
-    ]
-    advapi32.GetNamedSecurityInfoW.restype = wintypes.DWORD
-    advapi32.GetAclInformation.argtypes = [ctypes.c_void_p, ctypes.c_void_p, wintypes.DWORD, ctypes.c_int]
-    advapi32.GetAclInformation.restype = wintypes.BOOL
-    advapi32.GetAce.argtypes = [ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(ctypes.c_void_p)]
-    advapi32.GetAce.restype = wintypes.BOOL
-    advapi32.ConvertSidToStringSidW.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)]
-    advapi32.ConvertSidToStringSidW.restype = wintypes.BOOL
+    advapi32, kernel32 = _win_libs()
 
     class AclSizeInformation(ctypes.Structure):
         _fields_ = [
@@ -390,3 +414,35 @@ def grant_user_tree_access(
         return
     sid = (sid_lookup if sid_lookup is not None else _windows_user_sid)()
     (acl_apply if acl_apply is not None else _windows_grant_user_tree)(str(path), sid)
+
+
+def make_user_dir(
+    path: str | os.PathLike[str],
+    *,
+    platform: str | None = None,
+    sid_lookup: Callable[[], str] | None = None,
+    acl_apply: Callable[[str, str], None] | None = None,
+) -> bool:
+    """``mkdir -p`` *path* (``0o700``), and on Windows give the user's own SID an
+    inheritable ACE on the directory when THIS call creates it. True when it did.
+
+    WHY (nexus-f9bgu.33, critique S5; measured on Windows 11). A directory an
+    ELEVATED process makes with ``Path.mkdir(mode=0o700)`` carries ACEs for SYSTEM,
+    Administrators and OWNER RIGHTS only, and the elevated creator owns it as
+    ``BUILTIN\\Administrators``. A LeastPrivilege token of the same user (the Task
+    Scheduler logon task, a plain ``nx`` in a normal shell) has Administrators
+    deny-only and is not the owner, so it could not list the directory, read or
+    execute what an elevated install placed in it, or write anything. The explicit
+    ACE for the user's SID (:func:`grant_user_tree_access`) is what a normal token
+    then matches, and it is inherited by every file created under the directory
+    afterwards. A directory that already exists is left alone: re-granting would
+    propagate through everything under it (a PostgreSQL data directory) on every
+    call. POSIX: exactly ``mkdir(parents=True, exist_ok=True, mode=0o700)``.
+    """
+    target = Path(path)
+    existed = target.exists()
+    target.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if existed or not _is_windows(platform):
+        return not existed
+    grant_user_tree_access(target, platform=platform, sid_lookup=sid_lookup, acl_apply=acl_apply)
+    return True

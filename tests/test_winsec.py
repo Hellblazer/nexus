@@ -512,7 +512,9 @@ class TestMirrorParity:
     """``_endpoint_resolve.py`` cannot import nexus, so the reader's check is restated there. The ctypes walk
     cannot run off Windows, so its parity is structural: identical ASTs."""
 
-    @pytest.mark.parametrize("name", ["_is_windows", "_windows_dacl_trustees", "owner_only_problem"])
+    @pytest.mark.parametrize(
+        "name", ["_is_windows", "_windows_dacl_trustees", "owner_only_problem", "_win_libs"],
+    )
     def test_same_code(self, name: str) -> None:
         real, mirror = _func(Path(_winsec.__file__), name), _func(PLUGIN_SCRIPT, name)
         assert _dump(real) == _dump(mirror)
@@ -543,8 +545,121 @@ class TestMirrorParity:
 # ── the real thing, on Windows only ─────────────────────────────────────────
 
 
+# ── the DACL seam (nexus-f9bgu.33, review: falsifiability) ───────────────────
+
+
+class TestTheDaclIsProtected:
+    """``SetNamedSecurityInfoW`` honours only ``PROTECTED_DACL_SECURITY_INFORMATION``
+    (the flag), never the descriptor's own ``P`` control bit. An owner-only DACL
+    applied with ``protected=False`` leaves inheritance ON, so a credential file
+    inherits its directory's ACEs, and the SDDL-string test alone cannot tell:
+    only the seam-level ``protected`` argument can."""
+
+    def _record(self, monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str, bool]]:
+        calls: list[tuple[str, str, bool]] = []
+        monkeypatch.setattr(
+            _winsec, "_windows_set_dacl",
+            lambda path, sddl, *, protected: calls.append((path, sddl, protected)),
+        )
+        return calls
+
+    def test_the_owner_only_dacl_is_applied_protected(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        calls = self._record(monkeypatch)
+        _winsec._windows_set_owner_only_dacl("C:/secret", SID)
+        assert calls == [("C:/secret", f"D:P(A;;FA;;;{SID})", True)]
+
+    def test_the_user_tree_grant_keeps_inheritance_on(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # The contrast case: the two seams differ, so a swap of the flags is caught.
+        calls = self._record(monkeypatch)
+        _winsec._windows_grant_user_tree("C:/dir", SID)
+        assert calls == [("C:/dir", f"D:(A;OICI;FA;;;{SID})", False)]
+
+    def test_open_private_reaches_the_protected_seam(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        calls = self._record(monkeypatch)
+        fd = open_private(tmp_path / "f", os.O_CREAT | os.O_WRONLY, platform="win32", sid_lookup=lambda: SID)
+        os.close(fd)
+        assert [c[2] for c in calls] == [True], "open_private must route through the protected owner-only DACL"
+
+
+class _FakeFn:
+    argtypes = None
+    restype = None
+
+
+class _FakeDll:
+    def __init__(self, name: str, log: list[str]) -> None:
+        self._name = name
+        log.append(name)
+        self._fns: dict[str, _FakeFn] = {}
+
+    def __getattr__(self, attr: str) -> _FakeFn:
+        return self._fns.setdefault(attr, _FakeFn())
+
+
+def _clean_caches(monkeypatch: pytest.MonkeyPatch, module: object) -> None:
+    monkeypatch.setattr(module, "_WIN_LIBS", [])
+    monkeypatch.setattr(module, "_SID_CACHE", [])
+
+
+class TestPerProcessCaches:
+    """The SID and the kernel32/advapi32 bindings are built once per process, in
+    the module and in the plugin's stdlib mirror (nexus-f9bgu.33, review m11)."""
+
+    @pytest.mark.parametrize("which", ["module", "mirror"])
+    def test_the_libraries_load_once_and_carry_every_signature(
+        self, which: str, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        mod = _winsec if which == "module" else _load_mirror()
+        _clean_caches(monkeypatch, mod)
+        loads: list[str] = []
+
+        def loader(name: str) -> _FakeDll:
+            return _FakeDll(name, loads)
+
+        first = mod._win_libs(loader=loader)
+        second = mod._win_libs(loader=loader)
+        assert first is second
+        assert loads == ["advapi32", "kernel32"], "the second call must not load anything"
+        advapi32 = first[0]
+        # Non-vacuity: the signatures every caller relies on were set, not just the DLL loaded.
+        for fn in ("OpenProcessToken", "GetNamedSecurityInfoW", "SetNamedSecurityInfoW", "GetAce"):
+            assert getattr(advapi32, fn).argtypes is not None, fn
+
+    @pytest.mark.parametrize("which", ["module", "mirror"])
+    def test_a_cached_sid_is_returned_without_touching_a_dll(
+        self, which: str, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        mod = _winsec if which == "module" else _load_mirror()
+        _clean_caches(monkeypatch, mod)
+        if sys.platform != "win32":
+            with pytest.raises(OSError):  # non-vacuity: an empty cache off Windows has no answer
+                mod._windows_user_sid()
+        mod._SID_CACHE.append(SID)
+        monkeypatch.setattr(mod, "_win_libs", _boom)
+        assert mod._windows_user_sid() == SID
+
+    @pytest.mark.parametrize("which", ["module", "mirror"])
+    def test_nothing_is_cached_off_windows(self, which: str, monkeypatch: pytest.MonkeyPatch) -> None:
+        mod = _winsec if which == "module" else _load_mirror()
+        _clean_caches(monkeypatch, mod)
+        if sys.platform != "win32":
+            with pytest.raises(OSError):
+                mod._win_libs()
+            assert mod._WIN_LIBS == []
+
+
 @pytest.mark.skipif(sys.platform != "win32", reason="real advapi32 calls; the seams above cover the branch everywhere")
 class TestRealWindows:
+    def test_the_sid_and_the_bindings_are_read_once_then_served_from_the_cache(self) -> None:
+        _winsec._SID_CACHE.clear()
+        _winsec._WIN_LIBS.clear()
+        first = _winsec._windows_user_sid()
+        assert first.startswith("S-1-5-21-") or first.startswith("S-1-5-")  # non-vacuity: a real SID
+        libs = _winsec._win_libs()
+        assert _winsec._windows_user_sid() == first and _winsec._SID_CACHE == [first]
+        assert _winsec._win_libs() is libs
+
+
     def test_open_private_leaves_exactly_the_current_user_and_the_check_agrees(self, tmp_path: Path) -> None:
         path = tmp_path / "secret"
         fd = open_private(path, os.O_CREAT | os.O_WRONLY | os.O_TRUNC)

@@ -375,7 +375,7 @@ _ACTIVATION_QUERY_TIMEOUT: float = 10.0
 #: for what actually gets shelled out: the shipped ``com.nexus.service.plist``/
 #: ``nexus-service.service`` unit runs ``nx daemon service start
 #: --foreground``, and that supervisor's own architected shutdown budget
-#: (``storage_service_daemon._SUPERVISOR_STOP_GRACE``, currently 12.0s --
+#: (``storage_service_daemon._SUPERVISOR_STOP_GRACE``, currently 12.0s on POSIX and 20.0s on Windows --
 #: 2x its election budget plus a graceful-SIGTERM window plus a
 #: post-SIGKILL reap, with a 1s margin) is the slow half of what a
 #: bootout/disable --now actually waits on, and it is an order of

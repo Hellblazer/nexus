@@ -56,6 +56,8 @@ ONE PATH PER BULLET, on the bullet's FIRST line.
 - shim on Windows (nexus-efk2h): `conexus/hooks/scripts/nx_hook_shim.py` no longer names `signal.SIGHUP` unconditionally, which does not exist on Windows and raised AttributeError after `nx-hook` had started. It forwards the signals the platform has. No change on POSIX.
 - lease read retry (nexus-f9bgu.44): `conexus/hooks/scripts/_endpoint_resolve.py` retries a Windows sharing violation for up to 2 s when it reads the supervisor lease (a stdlib mirror of `ServiceRegistry`'s own bounded retry), so a read that lands during the supervisor's lease replace no longer resolves to no endpoint. No change on POSIX.
 
+- identity failure fails open (nexus-f9bgu.33): `conexus/hooks/scripts/_endpoint_resolve.py` resolves "no lease" instead of raising when the Windows user SID cannot be read (`ServiceIdentityError` used to escape `read_storage_service_lease`, `resolve_base_url` and `read_local_supervisor_token`), and caches the SID and the advapi32/kernel32 bindings per process (a stdlib mirror of `nexus._winsec`'s own caches). No change on POSIX.
+
 
 ## Deferred to the next client release
 

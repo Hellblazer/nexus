@@ -43,6 +43,7 @@ from typing import Protocol
 
 import structlog
 
+from nexus._winsec import grant_user_tree_access
 from nexus.daemon.binary_lifecycle import (
     WINDOWS_ENGINE_EXE,
     WINDOWS_RUNTIME_DLLS,
@@ -667,6 +668,17 @@ def _engine_quiesce(
     )
 
 
+def _grant_user_ace(path: Path, platform: str | None) -> None:
+    """Give the user's own SID an inheritable full-control ACE on *path*: a normal
+    token must be able to read and run what an ELEVATED install places here
+    (nexus-f9bgu.33, critique S5; see :func:`nexus._winsec.make_user_dir` for the
+    measurement). A no-op off Windows; a failure is logged, never the install's."""
+    try:
+        grant_user_tree_access(path, platform=platform)
+    except OSError as exc:
+        _log.warning("service_binary_dir_acl_grant_failed", dir=str(path), error=str(exc))
+
+
 def _place_engine_archive(
     archive: Path, exe_dest: Path, *, platform: str | None = None,
 ) -> dict:
@@ -689,7 +701,14 @@ def _place_engine_archive(
     """
     required = (WINDOWS_ENGINE_EXE, *WINDOWS_RUNTIME_DLLS)
     exe_dest.parent.mkdir(parents=True, exist_ok=True)
+    _grant_user_ace(exe_dest.parent, platform)
     stage = Path(tempfile.mkdtemp(dir=exe_dest.parent, prefix=".nx_stage_"))
+    # ``mkdtemp`` makes the stage directory owner-only (SYSTEM, Administrators, OWNER
+    # RIGHTS), and ``os.replace`` keeps the SOURCE's security descriptor: without this
+    # grant, every placed file carries that ACL and a normal token cannot read or run the
+    # engine an elevated install placed (measured, nexus-f9bgu.33). Granted BEFORE the first
+    # staged byte so the files inherit it.
+    _grant_user_ace(stage, platform)
     digests: dict[str, str] = {}
     seen: set[str] = set()
     try:

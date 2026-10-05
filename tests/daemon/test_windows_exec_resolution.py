@@ -110,7 +110,7 @@ class TestNxArgv:
         # program as the `nx` console script if the module has a main guard.
         text = (Path(__file__).parents[2] / "src" / "nexus" / "cli.py").read_text(encoding="utf-8")
         assert 'if __name__ == "__main__"' in text
-        assert 'nx = "nexus.cli:main"' in (Path(__file__).parents[2] / "pyproject.toml").read_text()
+        assert 'nx = "nexus.cli:main"' in (Path(__file__).parents[2] / "pyproject.toml").read_text(encoding="utf-8")
 
     def test_posix_nx_is_the_bare_name(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(nx_argv_mod, "_platform", lambda: "linux")

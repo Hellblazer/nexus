@@ -171,9 +171,13 @@ def root_user_remedy() -> str:
 def refuse_root() -> None:
     """Refuse local provisioning when the process euid is 0 (nexus-ov1oq).
 
-    ``os.geteuid`` is POSIX-only; on Windows the attribute is absent, and a
-    native-Windows client is out of scope anyway (Windows support is WSL2
-    only), so a missing ``geteuid`` means 'not root'.
+    ``os.geteuid`` is POSIX-only; on Windows the attribute is absent, so a
+    missing ``geteuid`` means 'not root': Windows has no euid, and an elevated
+    Administrator is NOT refused here. Native Windows is a supported client
+    (RDR-224); what protects an elevated install is the ACL work instead:
+    ``nexus._winsec.grant_user_tree_access`` gives the user's own SID an
+    explicit, inheritable ACE on the bundle tree and the data directory, which
+    PostgreSQL's restricted token needs (nexus-f9bgu.18).
     """
     geteuid = getattr(os, "geteuid", None)
     if geteuid is None or geteuid() != 0:

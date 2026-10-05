@@ -63,7 +63,11 @@ import structlog
 
 from nexus import _locking
 from nexus._install import winproc_core
-from nexus._winsec import _windows_user_sid, open_private  # the SID lookup lives with the other Windows security calls
+from nexus._winsec import (  # the SID lookup and the user-directory grant live with the other Windows security calls
+    _windows_user_sid,
+    make_user_dir,
+    open_private,
+)
 from nexus.bounded_subprocess import run_bounded
 from nexus.util import win_console
 from nexus.util.process_group import KILL_SIGNAL
@@ -465,7 +469,12 @@ class ServiceRegistry:
         return self._dir / f"{self._tier}_elect.{scope_key}.lock"
 
     def _ensure_dir(self) -> None:
-        self._dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        try:
+            make_user_dir(self._dir, platform="win32" if self._windows else None)
+        except OSError as exc:
+            # The directory exists (mkdir came first); only the user's own ACE is missing,
+            # which is what every install did before nexus-f9bgu.33. Never stop a lease over it.
+            _log.warning("service_registry_dir_acl_grant_failed", dir=str(self._dir), error=str(exc))
 
     # -- election -----------------------------------------------------------
 

@@ -11,6 +11,7 @@ the same input on POSIX so a matcher that folds everywhere fails.
 """
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 from nexus._install import census_core
@@ -19,7 +20,8 @@ from nexus.daemon.service_registry import storage_service_stack_matcher
 
 
 class TestCensus:
-    GEN = "/Users/Sam/AppData/tools/conexus-gen1"
+    #: Absolute on the host's own rules: a POSIX-style path is relative on Windows.
+    GEN = "C:/Users/Sam/AppData/tools/conexus-gen1" if sys.platform == "win32" else "/Users/Sam/AppData/tools/conexus-gen1"
 
     def _snapshot(self, spelling: str) -> str:
         return f"4242 {spelling}/Scripts/python.exe -m nexus.cli daemon service start\n"

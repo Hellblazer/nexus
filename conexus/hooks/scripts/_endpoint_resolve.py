@@ -98,18 +98,30 @@ class ServiceIdentityError(RuntimeError):
 _SID_PATTERN = re.compile(r"S-1-\d+(-\d+)+")
 
 
-def _windows_user_sid() -> str:
-    """The current process token's user SID as a string (``S-1-5-21-...``).
+#: The current process token's user SID, read once per process (RDR-224,
+#: nexus-f9bgu.33, review m11). A token's user cannot change, and the lease
+#: writer asked for it on every heartbeat.
+_SID_CACHE: list[str] = []
 
-    Windows only; ctypes against advapi32. Any other platform raises OSError.
-    """
-    if os.name != "nt":
-        raise OSError("the Windows user SID is only readable on Windows")
+#: advapi32 and kernel32 with every ``argtypes`` / ``restype`` the calls below
+#: need, bound once per process: a ``WinDLL`` load plus a dozen attribute
+#: assignments on every lease write is pure overhead.
+_WIN_LIBS: list[tuple[Any, Any]] = []
+
+
+def _win_libs(*, loader: Callable[[str], Any] | None = None) -> tuple[Any, Any]:
+    """``(advapi32, kernel32)``, bound once. *loader* is the test seam for
+    ``ctypes.WinDLL``; without it, anything but Windows raises OSError."""
+    if _WIN_LIBS:
+        return _WIN_LIBS[0]
+    if loader is None and os.name != "nt":
+        raise OSError("the Windows security APIs are only reachable on Windows")
     import ctypes  # noqa: PLC0415 — Windows-only branch
     from ctypes import wintypes  # noqa: PLC0415 — Windows-only branch
 
-    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    load = loader if loader is not None else (lambda name: ctypes.WinDLL(name, use_last_error=True))
+    advapi32 = load("advapi32")
+    kernel32 = load("kernel32")
     kernel32.GetCurrentProcess.restype = wintypes.HANDLE
     kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
     kernel32.LocalFree.argtypes = [ctypes.c_void_p]
@@ -122,6 +134,46 @@ def _windows_user_sid() -> str:
     advapi32.GetTokenInformation.restype = wintypes.BOOL
     advapi32.ConvertSidToStringSidW.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)]
     advapi32.ConvertSidToStringSidW.restype = wintypes.BOOL
+    advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW.argtypes = [
+        wintypes.LPCWSTR, wintypes.DWORD, ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p,
+    ]
+    advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW.restype = wintypes.BOOL
+    advapi32.GetSecurityDescriptorDacl.argtypes = [
+        ctypes.c_void_p, ctypes.POINTER(wintypes.BOOL), ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(wintypes.BOOL),
+    ]
+    advapi32.GetSecurityDescriptorDacl.restype = wintypes.BOOL
+    advapi32.SetNamedSecurityInfoW.argtypes = [
+        wintypes.LPWSTR, ctypes.c_int, wintypes.DWORD,
+        ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p,
+    ]
+    advapi32.SetNamedSecurityInfoW.restype = wintypes.DWORD
+    advapi32.GetNamedSecurityInfoW.argtypes = [
+        wintypes.LPCWSTR, ctypes.c_int, wintypes.DWORD,
+        ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_void_p),
+    ]
+    advapi32.GetNamedSecurityInfoW.restype = wintypes.DWORD
+    advapi32.GetAclInformation.argtypes = [ctypes.c_void_p, ctypes.c_void_p, wintypes.DWORD, ctypes.c_int]
+    advapi32.GetAclInformation.restype = wintypes.BOOL
+    advapi32.GetAce.argtypes = [ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(ctypes.c_void_p)]
+    advapi32.GetAce.restype = wintypes.BOOL
+    _WIN_LIBS.append((advapi32, kernel32))
+    return _WIN_LIBS[0]
+
+
+def _windows_user_sid() -> str:
+    """The current process token's user SID as a string (``S-1-5-21-...``).
+
+    Windows only; ctypes against advapi32. Any other platform raises OSError.
+    """
+    if _SID_CACHE:
+        return _SID_CACHE[0]
+    if os.name != "nt":
+        raise OSError("the Windows user SID is only readable on Windows")
+    import ctypes  # noqa: PLC0415 — Windows-only branch
+    from ctypes import wintypes  # noqa: PLC0415 — Windows-only branch
+
+    advapi32, kernel32 = _win_libs()
 
     token = wintypes.HANDLE()
     if not advapi32.OpenProcessToken(kernel32.GetCurrentProcess(), 0x0008, ctypes.byref(token)):  # TOKEN_QUERY
@@ -141,9 +193,11 @@ def _windows_user_sid() -> str:
         if not advapi32.ConvertSidToStringSidW(psid, ctypes.byref(string_sid)):
             raise ctypes.WinError(ctypes.get_last_error())
         try:
-            return ctypes.wstring_at(string_sid.value)
+            sid = ctypes.wstring_at(string_sid.value)
         finally:
             kernel32.LocalFree(string_sid)
+        _SID_CACHE.append(sid)
+        return sid
     finally:
         kernel32.CloseHandle(token)
 
@@ -197,22 +251,7 @@ def _windows_dacl_trustees(path: str) -> list[str] | None:
     import ctypes  # noqa: PLC0415 — Windows-only branch
     from ctypes import wintypes  # noqa: PLC0415 — Windows-only branch
 
-    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    kernel32.LocalFree.argtypes = [ctypes.c_void_p]
-    kernel32.LocalFree.restype = ctypes.c_void_p
-    advapi32.GetNamedSecurityInfoW.argtypes = [
-        wintypes.LPCWSTR, ctypes.c_int, wintypes.DWORD,
-        ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p,
-        ctypes.POINTER(ctypes.c_void_p),
-    ]
-    advapi32.GetNamedSecurityInfoW.restype = wintypes.DWORD
-    advapi32.GetAclInformation.argtypes = [ctypes.c_void_p, ctypes.c_void_p, wintypes.DWORD, ctypes.c_int]
-    advapi32.GetAclInformation.restype = wintypes.BOOL
-    advapi32.GetAce.argtypes = [ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(ctypes.c_void_p)]
-    advapi32.GetAce.restype = wintypes.BOOL
-    advapi32.ConvertSidToStringSidW.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)]
-    advapi32.ConvertSidToStringSidW.restype = wintypes.BOOL
+    advapi32, kernel32 = _win_libs()
 
     class AclSizeInformation(ctypes.Structure):
         _fields_ = [
@@ -298,6 +337,21 @@ def storage_service_lease_path(config_dir: Path) -> Path:
     return config_dir / f"{STORAGE_SERVICE_TIER}_addr.{service_identity()}"
 
 
+def _shown(lease_path: Path | None) -> str:
+    return str(lease_path) if lease_path is not None else "<the Windows user identity cannot be read>"
+
+
+def _lease_path_or_none(config_dir: Path) -> Path | None:
+    """:func:`storage_service_lease_path`, or ``None`` when the Windows user SID
+    cannot be read (:class:`ServiceIdentityError`). Every hook caller degrades
+    "no lease" on a failure here, so an identity that cannot be read must never
+    raise out of one (RDR-224, nexus-f9bgu.33, review m10)."""
+    try:
+        return storage_service_lease_path(config_dir)
+    except ServiceIdentityError:
+        return None
+
+
 #: Mirror of ``service_registry._WINDOWS_SHARING_RETRY_*`` (a parity test
 #: compares the constants and the pause sequence): how long a lease read keeps
 #: retrying a Windows sharing violation, with a doubling pause between tries.
@@ -347,7 +401,9 @@ def read_storage_service_lease(config_dir: Path) -> dict[str, Any] | None:
     missing file, unreadable, malformed JSON, non-``live`` status, or a
     heartbeat older than its TTL -- resolves to ``None``. Never raises.
     """
-    path = storage_service_lease_path(config_dir)
+    path = _lease_path_or_none(config_dir)
+    if path is None:
+        return None
     try:
         data = json.loads(read_lease_text(path))
     except (OSError, json.JSONDecodeError, ValueError):
@@ -383,7 +439,11 @@ def read_local_supervisor_token(config_dir: Path) -> str:
     so this function is a complete, independent audit trail for the one
     credential-bearing read in this module.
     """
-    path = storage_service_lease_path(config_dir)
+    path = _lease_path_or_none(config_dir)
+    if path is None:
+        raise EndpointUnresolvable(
+            "local supervisor lease unavailable: the Windows user identity cannot be read"
+        )
     try:
         st_result = path.stat()
     except OSError as exc:
@@ -630,10 +690,10 @@ def resolve_base_url(config_dir: Path) -> tuple[str, bool]:
                     port = lease["port"]
         host = host or "127.0.0.1"
         if port is None:
-            lease_path = storage_service_lease_path(config_dir)
+            lease_path = _lease_path_or_none(config_dir)
             raise EndpointUnresolvable(
                 f"NX_SERVICE_HOST={host_str!r} is set but NX_SERVICE_PORT is "
-                f"not, and no live local supervisor lease at {lease_path} "
+                f"not, and no live local supervisor lease at {_shown(lease_path)} "
                 f"supplies a port"
             )
         return f"http://{host}:{port}", False
@@ -642,9 +702,9 @@ def resolve_base_url(config_dir: Path) -> tuple[str, bool]:
     if lease is not None:
         return f"http://{lease['host']}:{lease['port']}", True
 
-    lease_path = storage_service_lease_path(config_dir)
+    lease_path = _lease_path_or_none(config_dir)
     raise EndpointUnresolvable(
         f"no service endpoint resolvable: no NX_SERVICE_URL, no persisted "
         f"config.yml service_url, no NX_SERVICE_PORT, and no live local "
-        f"supervisor lease at {lease_path}"
+        f"supervisor lease at {_shown(lease_path)}"
     )
