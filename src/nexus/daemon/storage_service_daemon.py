@@ -115,7 +115,9 @@ from nexus.daemon.service_registry import (
     service_identity,
     ttl_for_tier,
     wait_for_exit,
+    write_stop_marker,
 )
+from nexus.daemon.service_registry import _WINDOWS_SHARING_RETRY_BUDGET_S
 
 _log = structlog.get_logger(__name__)
 
@@ -239,9 +241,33 @@ _STOP_ELECTION_BUDGET: float = DEFAULT_STOP_ELECTION_BUDGET
 #: ``_POST_KILL_REAP_TIMEOUT`` -- plus a small margin for the supervisor's
 #: own log-flush + exit-path overhead, so a genuinely clean stop always has
 #: room to finish.
-_SUPERVISOR_STOP_GRACE: float = (
-    2 * _STOP_ELECTION_BUDGET + _GRACEFUL_STOP_TIMEOUT + _POST_KILL_REAP_TIMEOUT + 1.0
-)
+#:
+#: WINDOWS (RDR-224, nexus-f9bgu.33, review m2): each of the four lease-file
+#: operations inside those two election blocks (the read and the replace in
+#: ``mark_shutting_down``, the read and the unlink in ``relinquish``) is wrapped
+#: in the sharing-violation retry, up to ``_WINDOWS_SHARING_RETRY_BUDGET_S``
+#: each, which the POSIX figure never carried. A violation lasting the budget on
+#: every operation made a CLEAN shutdown outrun the grace and get hard-killed
+#: mid-way, the race this constant exists to prevent. The figure is therefore
+#: per platform (:func:`_supervisor_stop_grace`); POSIX keeps 12 s.
+_STOP_LEASE_RETRIED_OPS: int = 4
+
+
+def _supervisor_stop_inner_worst_case(*, windows: bool) -> float:
+    """The longest a CLEAN supervisor shutdown can take: two election waits,
+    on Windows four sharing-violation retries, the engine's SIGTERM grace and
+    its post-kill reap."""
+    sharing = _STOP_LEASE_RETRIED_OPS * _WINDOWS_SHARING_RETRY_BUDGET_S if windows else 0.0
+    return 2 * _STOP_ELECTION_BUDGET + sharing + _GRACEFUL_STOP_TIMEOUT + _POST_KILL_REAP_TIMEOUT
+
+
+def _supervisor_stop_grace(*, windows: bool) -> float:
+    """The outer wait: strictly longer than the inner worst case, plus 1 s for the
+    supervisor's own log-flush and exit path."""
+    return _supervisor_stop_inner_worst_case(windows=windows) + 1.0
+
+
+_SUPERVISOR_STOP_GRACE: float = _supervisor_stop_grace(windows=sys.platform == "win32")
 
 #: Bound on the readiness monitor's pg_probe call (nexus-cd1k0.19 review
 #: round 2, finding 5). ``_migration_pg_probe`` shells out to ``psql``
@@ -3329,6 +3355,17 @@ def stop_storage_service(
 
     registry = ServiceRegistry(dir=config_dir, tier=_REGISTRY_TIER)
     scope = service_identity()
+    # RDR-224 (nexus-f9bgu.33): on Windows a stop is authoritative against the
+    # Task Scheduler launcher, which respawns after any non-zero exit. The marker
+    # goes down BEFORE anything is signalled and even when nothing is found, so a
+    # hard kill (exit 1), a break that lands before the handler exists (0xC000013A)
+    # and a stop during the launcher's throttle sleep all leave the service stopped.
+    try:
+        write_stop_marker(config_dir, _REGISTRY_TIER, scope, platform=platform)
+    except (OSError, ValueError) as exc:
+        # The marker is the launcher's hint, never a precondition of stopping: a
+        # config dir that cannot take the file must not stop the stop itself.
+        _log.warning("storage_service_stop_marker_failed", error=str(exc))
     # Freshness gate: discover() reaps stale leases; non-None means live.
     record = registry.discover(scope)
     # Independent of what gets signalled below: did discover() find a
@@ -3406,7 +3443,7 @@ def stop_storage_service(
                     grace_s=_SUPERVISOR_STOP_GRACE,
                     msg="the supervisor did not exit within the grace; hard-killing it",
                 )
-                hard_kill_pid(supervisor_pid)
+                hard_kill_pid(supervisor_pid, platform=platform)
                 # SIGKILL and TerminateProcess both return before the process
                 # has left the table: a stop is done when it HAS exited.
                 lease_stubborn.extend(wait_for_exit([supervisor_pid]))
@@ -3447,7 +3484,7 @@ def stop_storage_service(
                         grace_s=_GRACEFUL_STOP_TIMEOUT,
                         via="hard_kill",
                     )
-                    hard_kill_pid(pid_to_signal)
+                    hard_kill_pid(pid_to_signal, platform=platform)
                     lease_stubborn.extend(wait_for_exit([pid_to_signal]))
             else:
                 from nexus.util.process_group import safe_killpg  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it

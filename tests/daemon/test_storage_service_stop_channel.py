@@ -521,3 +521,11 @@ def test_posix_postgres_start_gets_no_stop_check(
     monkeypatch.setattr(sup, "_backfill_provision_grants", lambda: None)
     sup._ensure_pg_running()
     assert seen_kwargs.get("stop_check") is None
+
+
+@pytest.mark.skipif(not hasattr(signal, "setitimer"), reason="Windows arms faulthandler instead of an interval timer")
+def test_the_per_test_watchdog_is_armed_for_this_file() -> None:
+    """A hang here fails instead of stalling the run (tests/daemon/_watchdog.py)."""
+    assert signal.getitimer(signal.ITIMER_REAL)[0] > 0, (
+        "the autouse watchdog fixture did not arm for this module: check WATCHED_MODULES"
+    )

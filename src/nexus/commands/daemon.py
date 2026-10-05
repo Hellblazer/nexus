@@ -580,6 +580,7 @@ def ensure_storage_supervisor(config_dir: Path, *, platform: str | None = None):
     """
     from nexus.daemon.service_registry import (  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
         ServiceRegistry,
+        clear_stop_marker,
         reclaim_lease_if_dead_owner,
         service_identity,
     )
@@ -590,6 +591,9 @@ def ensure_storage_supervisor(config_dir: Path, *, platform: str | None = None):
 
     registry = ServiceRegistry(dir=config_dir, tier="storage_service")
     scope = service_identity()
+    # A start is the user's "run again": it ends any earlier stop request, whether
+    # or not a supervisor turns out to be running already (RDR-224, nexus-f9bgu.33).
+    clear_stop_marker(config_dir, "storage_service", scope)
     existing = _service_endpoint.discover_storage_service_lease(registry, scope)
     if existing is not None:
         # RDR-175 heal-on-next-use hardening, generalized into the shared

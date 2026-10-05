@@ -21,6 +21,17 @@ target's console. The send is
 process-global state (a process has one console at a time), so the sequence
 runs under one lock.
 
+PRODUCTION RUNS THE SEQUENCE IN A HELPER PROCESS (nexus-f9bgu.33, review S2).
+The sequence is process-global: while it runs, every thread of the process is
+off its console, and the CLI's own console is whatever
+``AttachConsole(ATTACH_PARENT_PROCESS)`` rebuilds afterwards. So
+:func:`send_ctrl_break_via_helper` spawns ``python -m nexus.util.win_console
+<pid>`` as a ``DETACHED_PROCESS`` (no console of its own) and reads one JSON
+result from its stdout pipe; the stop CLI's console is never detached.
+:func:`send_ctrl_break_via_console` remains the sequence itself, run by the
+helper (``reattach=False``: there is nothing to restore) and by tests with an
+injected API.
+
 A ``TRUE`` from the send is not proof of delivery. A caller confirms a stop
 by the target's exit (``service_registry.pid_alive``), never by this module's
 return value.
@@ -37,9 +48,13 @@ the sequence runs under test on every host. The real binding
 """
 from __future__ import annotations
 
+import json
 import os
+import subprocess
+import sys
 import threading
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import asdict, dataclass
 from typing import Protocol
 
 import structlog
@@ -57,6 +72,16 @@ ERROR_ACCESS_DENIED: int = 5
 ERROR_INVALID_HANDLE: int = 6
 
 _MAX_WINDOWS_PID: int = 0xFFFFFFFF
+
+#: ``CreateProcess`` flag: a child with no console at all. The helper must not
+#: start on one (``AttachConsole`` fails while the caller has a console, and the
+#: helper's ``FreeConsole`` then has nothing to free), and a ``CREATE_NEW_CONSOLE``
+#: child would flash a window.
+DETACHED_PROCESS: int = 0x00000008
+
+#: Bound on the helper: interpreter start plus four kernel32 calls take well
+#: under a second; this only has to be finite.
+HELPER_TIMEOUT_S: float = 20.0
 
 #: A process has one console at a time, so two sends in one process must not
 #: interleave their detach/attach steps.
@@ -110,17 +135,21 @@ class ConsoleBreakResult:
 
 
 def send_ctrl_break_via_console(
-    pid: int, api: WinConsoleApi, *, own_pid: int | None = None,
+    pid: int, api: WinConsoleApi, *, own_pid: int | None = None, reattach: bool = True,
 ) -> ConsoleBreakResult:
     """Send ``CTRL_BREAK`` to the console process group rooted at *pid*, from
-    a process on any console (or none). Never raises."""
+    a process on any console (or none). Never raises.
+
+    *reattach* False skips the ``AttachConsole(ATTACH_PARENT_PROCESS)`` that puts
+    the caller's own console back: the helper process has none to restore.
+    """
     if pid <= 0 or pid > _MAX_WINDOWS_PID:
         return ConsoleBreakResult(sent=False, stage="invalid")
     with _CONSOLE_LOCK:
         api.free_console()
         attached, attach_error = api.attach_console(pid)
         if not attached:
-            reattached, _ = api.attach_parent_console()
+            reattached = reattach and api.attach_parent_console()[0]
             refused = attach_error == ERROR_ACCESS_DENIED
             _log.info(
                 "win_console_attach_failed",
@@ -150,7 +179,7 @@ def send_ctrl_break_via_console(
             # and the caller stays on the supervisor's hidden console
             # (measured on Windows 11, nexus-f9bgu.17: reattached=False).
             api.free_console()
-            reattached, _ = api.attach_parent_console()
+            reattached = reattach and api.attach_parent_console()[0]
         if not sent:
             _log.info("win_console_send_failed", pid=pid, error=send_error)
         return ConsoleBreakResult(
@@ -159,6 +188,72 @@ def send_ctrl_break_via_console(
             error=None if sent else send_error,
             reattached=reattached,
         )
+
+
+def _parse_helper_answer(stdout: str) -> ConsoleBreakResult | None:
+    """The helper's JSON result: the LAST stdout line that parses as one.
+    Logging may share the pipe, so earlier lines are not the answer."""
+    for line in reversed((stdout or "").splitlines()):
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            data = json.loads(line)
+            return ConsoleBreakResult(**data)
+        except (ValueError, TypeError):
+            continue
+    return None
+
+
+def send_ctrl_break_via_helper(
+    pid: int,
+    *,
+    run: Callable[..., "subprocess.CompletedProcess[str]"] = subprocess.run,
+    timeout_s: float = HELPER_TIMEOUT_S,
+) -> ConsoleBreakResult:
+    """:func:`send_ctrl_break_via_console` in a short-lived helper process, so
+    the calling process's console is never detached. Never raises.
+
+    The helper is this interpreter (``pythonw`` mapped to ``python``: it needs a
+    console-subsystem build to have a stdout) running this module as ``__main__``
+    with ``DETACHED_PROCESS``. A helper that cannot be started, times out or
+    prints no result is reported as ``stage="helper"``, ``sent=False``: not a
+    send and not a refusal, so the caller's escalation ladder carries on.
+
+    *run* is a test seam (``subprocess.run``'s shape).
+    """
+    if pid <= 0 or pid > _MAX_WINDOWS_PID:
+        return ConsoleBreakResult(sent=False, stage="invalid")
+    from nexus.util.nx_argv import console_python  # noqa: PLC0415 — stdlib-only; deferred so the module imports without it on the hook path
+
+    argv = [console_python(sys.executable), "-m", "nexus.util.win_console", str(pid)]
+    try:
+        done = run(
+            argv,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=timeout_s,
+            creationflags=DETACHED_PROCESS,
+        )
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        _log.warning("win_console_helper_failed", pid=pid, error=repr(exc))
+        return ConsoleBreakResult(sent=False, stage="helper")
+    answer = _parse_helper_answer(done.stdout)
+    if answer is None:
+        _log.warning("win_console_helper_no_answer", pid=pid, returncode=done.returncode)
+        return ConsoleBreakResult(sent=False, stage="helper")
+    return answer
+
+
+def _helper_main(argv: list[str]) -> int:
+    """``python -m nexus.util.win_console <pid>``: run the sequence once and print
+    the result as one JSON line. Windows only (the binding needs kernel32)."""
+    pid = int(argv[0])
+    result = send_ctrl_break_via_console(pid, ctypes_win_console_api(), reattach=False)
+    sys.stdout.write(json.dumps(asdict(result)) + "\n")
+    sys.stdout.flush()
+    return 0
 
 
 class _CtypesWinConsoleApi:
@@ -220,10 +315,15 @@ def ctypes_win_console_api() -> WinConsoleApi:
 __all__ = [
     "ATTACH_PARENT_PROCESS",
     "CTRL_BREAK_EVENT",
+    "DETACHED_PROCESS",
     "ERROR_ACCESS_DENIED",
     "ERROR_INVALID_HANDLE",
     "ConsoleBreakResult",
     "WinConsoleApi",
     "ctypes_win_console_api",
     "send_ctrl_break_via_console",
+    "send_ctrl_break_via_helper",
 ]
+
+if __name__ == "__main__":
+    sys.exit(_helper_main(sys.argv[1:]))

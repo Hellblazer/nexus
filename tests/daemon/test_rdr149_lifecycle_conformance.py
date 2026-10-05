@@ -1979,12 +1979,15 @@ class TestStaleLeaseReaderGrace:
 # ---------------------------------------------------------------------------
 
 
+#: (error, the platform whose arm treats it as a gone pid). The platform is part of the
+#: case because ``hard_kill_pid`` swallows only the gone-pid errors OF ITS PLATFORM
+#: (nexus-f9bgu.33, review m3): ``EINVAL`` is a gone pid on Windows and a bad signal on POSIX.
 _GONE_PID_ERRORS = [
-    pytest.param(ProcessLookupError(3, "no such process"), id="posix-esrch"),
-    pytest.param(PermissionError(13, "not permitted"), id="eperm"),
+    pytest.param(ProcessLookupError(3, "no such process"), "linux", id="posix-esrch"),
+    pytest.param(PermissionError(13, "not permitted"), "linux", id="eperm"),
     # What CPython raises on Windows for a pid that no longer exists. The
     # fourth argument is the winerror, which non-Windows builds accept and drop.
-    pytest.param(OSError(22, "The parameter is incorrect", None, 87), id="windows-winerror-87"),
+    pytest.param(OSError(22, "The parameter is incorrect", None, 87), "win32", id="windows-winerror-87"),
 ]
 
 
@@ -1992,10 +1995,10 @@ class TestHardKillOfAGonePid:
     """Property 1. ``hard_kill_pid`` is the one place the platform's hard kill
     is sent, and no site that sends it may raise for a pid that is gone."""
 
-    @pytest.mark.parametrize("exc", _GONE_PID_ERRORS)
-    def test_a_gone_or_foreign_pid_is_reported_not_raised(self, exc: OSError) -> None:
+    @pytest.mark.parametrize(("exc", "platform"), _GONE_PID_ERRORS)
+    def test_a_gone_or_foreign_pid_is_reported_not_raised(self, exc: OSError, platform: str) -> None:
         with patch("os.kill", side_effect=exc):
-            assert hard_kill_pid(424246) is False
+            assert hard_kill_pid(424246, platform=platform) is False
 
     def test_a_live_child_is_killed(self) -> None:
         proc = _live_pid()
@@ -2007,9 +2010,9 @@ class TestHardKillOfAGonePid:
                 proc.kill()
             proc.wait(timeout=5)
 
-    @pytest.mark.parametrize("exc", _GONE_PID_ERRORS)
+    @pytest.mark.parametrize(("exc", "_platform"), _GONE_PID_ERRORS)
     def test_terminate_pids_survives_a_pid_that_vanished_before_the_kill(
-        self, exc: OSError, monkeypatch: pytest.MonkeyPatch,
+        self, exc: OSError, _platform: str, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         monkeypatch.setattr("nexus.daemon.service_registry.pid_alive", lambda _pid: True)
         monkeypatch.setattr("nexus.daemon.service_registry.process_state", lambda _pid: "D")
@@ -2185,8 +2188,8 @@ def _delayed_hard_kill(delay_s: float):
     accepted now and the process leaves the table a moment afterwards."""
     real = hard_kill_pid
 
-    def fake(pid: int) -> bool:
-        timer = threading.Timer(delay_s, real, args=(pid,))
+    def fake(pid: int, **kwargs: Any) -> bool:
+        timer = threading.Timer(delay_s, real, args=(pid,), kwargs=kwargs)
         timer.daemon = True
         timer.start()
         return True
@@ -2693,3 +2696,11 @@ class TestWindowsRunIsNotVacuous:
         for arm in arms:
             assert arm in tests, arm
             assert arm not in _POSIX_ONLY and arm not in _WINDOWS_ONLY, arm
+
+
+@pytest.mark.skipif(not hasattr(signal, "setitimer"), reason="Windows arms faulthandler instead of an interval timer")
+def test_the_per_test_watchdog_is_armed_for_this_file() -> None:
+    """A hang here fails instead of stalling the run (tests/daemon/_watchdog.py)."""
+    assert signal.getitimer(signal.ITIMER_REAL)[0] > 0, (
+        "the autouse watchdog fixture did not arm for this module: check WATCHED_MODULES"
+    )

@@ -1715,16 +1715,36 @@ def pid_running(pid: int) -> bool:
 _POST_KILL_SETTLE_S: float = 5.0
 
 
-def hard_kill_pid(pid: int) -> bool:
+def _is_gone_pid_error(exc: OSError, platform: str | None) -> bool:
+    """True for the errors a hard kill of a pid that is gone, or not ours, raises.
+
+    POSIX: ``ProcessLookupError`` (ESRCH) and ``PermissionError`` (EPERM), exactly
+    what every stop site caught before this was shared. Windows adds
+    ``OSError: [WinError 87]`` (``ERROR_INVALID_PARAMETER``, errno ``EINVAL``), what
+    ``os.kill`` raises there for a pid that has exited. Nothing else is a gone-pid
+    error: ``EINVAL`` on POSIX is a bad signal number, a programmer error that must
+    not read as "the process is already dead".
+    """
+    if isinstance(exc, (ProcessLookupError, PermissionError)):
+        return True
+    if _is_windows(platform):
+        return getattr(exc, "winerror", None) == ERROR_INVALID_PARAMETER or exc.errno == errno.EINVAL
+    return False
+
+
+def hard_kill_pid(pid: int, *, platform: str | None = None) -> bool:
     """The platform's hard kill of one pid. Never raises for a pid that is gone.
 
     ``True`` when the kill was delivered, ``False`` when the pid no longer
-    exists or is not ours to kill. The catch is ``OSError``, not the
-    ``(ProcessLookupError, PermissionError)`` pair every site wrote before: on
-    Windows ``os.kill`` of a pid that has already exited raises
-    ``OSError: [WinError 87]`` (``ERROR_INVALID_PARAMETER``), which is neither,
-    so a process that died between the grace wait and the kill turned a stop
-    into a traceback (measured on native Windows, RDR-224, nexus-f9bgu.19).
+    exists or is not ours to kill. Only the gone-pid errors are swallowed
+    (:func:`_is_gone_pid_error`); any other ``OSError`` propagates, so a
+    failure that is NOT "the process is already dead" is not reported as one
+    (RDR-224, nexus-f9bgu.33, review m3). On Windows ``os.kill`` of a pid that
+    has already exited raises ``OSError: [WinError 87]`` rather than
+    ``ProcessLookupError``, so a process that died between the grace wait and the
+    kill turned a stop into a traceback (measured on native Windows, RDR-224,
+    nexus-f9bgu.19). *platform* (default ``sys.platform``) is the seam that runs
+    that arm on every host.
 
     Delivery is not death: ``SIGKILL`` and ``TerminateProcess`` both return
     before the process has left the table. A caller that reports "stopped"
@@ -1732,8 +1752,10 @@ def hard_kill_pid(pid: int) -> bool:
     """
     try:
         os.kill(pid, KILL_SIGNAL)
-    except OSError:
-        return False
+    except OSError as exc:
+        if _is_gone_pid_error(exc, platform):
+            return False
+        raise
     return True
 
 
@@ -1744,7 +1766,12 @@ def wait_for_exit(
     stopped, see :func:`pid_running`); returns the pids still running.
 
     The confirmation half of a stop: a stop is done when the targets have
-    exited, never when the signal was sent.
+    exited, never when the signal was sent. ``stop_storage_service`` calls it
+    after its hard kill on EVERY platform (RDR-224, nexus-f9bgu.33, review m3):
+    POSIX used to send ``SIGKILL`` and move on, and now reports a supervisor that
+    outlives the kill by *timeout_s* (an unreaped or foreign-uid process) as
+    stubborn, so the CLI exits non-zero where it used to say "stopped". A
+    SIGKILLed child that is reaped promptly, or left a zombie, reads as exited.
     """
     live = [p for p in pids if pid_running(p)]
     deadline = time.monotonic() + timeout_s
@@ -1806,8 +1833,12 @@ def request_graceful_stop(
         except PermissionError:
             return GracefulStopSend(pid=pid, sent=False)
         return GracefulStopSend(pid=pid, sent=True)
-    api = console_api if console_api is not None else win_console.ctypes_win_console_api()
-    result = win_console.send_ctrl_break_via_console(pid, api)
+    if console_api is not None:
+        result = win_console.send_ctrl_break_via_console(pid, console_api)
+    else:
+        # Production: the attach/send sequence runs in a helper process, so the
+        # CLI's own console is never detached (nexus-f9bgu.33, review S2).
+        result = win_console.send_ctrl_break_via_helper(pid)
     return GracefulStopSend(
         pid=pid,
         sent=result.sent,
@@ -1869,7 +1900,7 @@ def terminate_pids(
         time.sleep(0.2)
     else:
         for pid in live:
-            hard_kill_pid(pid)
+            hard_kill_pid(pid, platform=platform)
         settle_deadline = time.monotonic() + _POST_KILL_SETTLE_S
         while True:
             live = [p for p in live if pid_running(p)]
@@ -1879,8 +1910,83 @@ def terminate_pids(
     return live + [p for p in refused if pid_running(p)]
 
 
+# -- stop marker (RDR-224, nexus-f9bgu.33) ----------------------------------
+#
+# A deliberate stop must beat the Windows Task Scheduler launcher
+# (``windows_autostart.run_launcher``), which respawns the supervisor after any
+# non-zero exit. The stop path writes this marker BEFORE it signals anything;
+# the launcher does not spawn (or respawn) while the marker is not older than
+# its last spawn; a start clears it. Windows only: launchd and systemd already
+# stand down on exit 0 and have no launcher of ours in front of them.
+
+
+def stop_marker_path(config_dir: Path, tier: str, scope_key: str) -> Path:
+    """``<config_dir>/<tier>_stop.<scope_key>``: one marker per service identity."""
+    return Path(config_dir) / f"{tier}_stop.{scope_key}"
+
+
+def write_stop_marker(
+    config_dir: Path,
+    tier: str,
+    scope_key: str,
+    *,
+    platform: str | None = None,
+    clock: Callable[[], float] = time.time,
+) -> Path | None:
+    """Record "a stop was requested now". Returns the path, or ``None`` off Windows.
+
+    Created owner-only through :func:`nexus._winsec.open_private` like every
+    other file in the config directory that steers a process. Written in place
+    (no temp file and rename): a reader that catches it mid-write falls back to
+    the file's own timestamp, and a rename would add a sharing-violation window.
+    """
+    if not _is_windows(platform):
+        return None
+    path = stop_marker_path(config_dir, tier, scope_key)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = open_private(path, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, platform=platform)
+    try:
+        os.write(fd, json.dumps({"requested_at": clock(), "pid": os.getpid()}).encode("utf-8"))
+    finally:
+        os.close(fd)
+    return path
+
+
+def stop_requested_since(config_dir: Path, tier: str, scope_key: str, since: float) -> bool:
+    """True when a stop marker exists that is not older than *since* (epoch seconds).
+
+    An unparseable or half-written marker is dated by its file time, so a
+    marker the launcher reads while the stop is still writing it still counts.
+    A missing marker, or one that cannot be read, is no request.
+    """
+    path = stop_marker_path(config_dir, tier, scope_key)
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        try:
+            return path.stat().st_mtime >= since
+        except OSError:
+            return False
+    except UnicodeDecodeError:
+        text = ""
+    try:
+        requested_at = float(json.loads(text)["requested_at"])
+    except (ValueError, KeyError, TypeError):
+        try:
+            requested_at = path.stat().st_mtime
+        except OSError:
+            return False
+    return requested_at >= since
+
+
+def clear_stop_marker(config_dir: Path, tier: str, scope_key: str) -> None:
+    """Remove the stop marker; a start's way of saying "run again". Idempotent."""
+    with contextlib.suppress(OSError):
+        stop_marker_path(config_dir, tier, scope_key).unlink()
+
+
 def storage_service_stack_matcher(
-    config_dir: Path, *, platform_tag: str | None = None,
+    config_dir: Path, *, platform_tag: str | None = None, platform: str | None = None,
 ) -> Callable[[str], bool]:
     """Argv predicate matching the storage-service SUPERVISOR (``nx daemon
     service start --foreground --config-dir <config_dir>``) or ENGINE
@@ -2015,10 +2121,21 @@ def storage_service_stack_matcher(
     # function itself, so this never depends on this process's own
     # NEXUS_CONFIG_DIR.
     is_default_target = config_dir == (Path.home() / ".config" / "nexus")
-    config_dir_eq = f" --config-dir={target}"
-    config_dir_sp = f" --config-dir {target}"
+    # Windows paths compare case-insensitively (RDR-224, nexus-f9bgu.33, review
+    # m7): the process table spells a path however its launcher did, so every
+    # comparison below is made on case-folded text. ``fold`` is the identity
+    # elsewhere, so POSIX matching is byte-for-byte what it was.
+    fold: Callable[[str], str] = str.lower if _is_windows(platform) else (lambda text: text)
+    engine_path = fold(engine_path)
+    if engine_override_path is not None:
+        engine_override_path = fold(engine_override_path)
+    if jar_override_marker is not None:
+        jar_override_marker = fold(jar_override_marker)
+    config_dir_eq = fold(f" --config-dir={target}")
+    config_dir_sp = fold(f" --config-dir {target}")
 
     def _match(command: str) -> bool:
+        command = fold(command)
         if command == engine_path or command.startswith(engine_path + " "):
             return True
         if engine_override_path is not None and (

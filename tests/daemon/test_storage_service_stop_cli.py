@@ -395,3 +395,11 @@ def test_a_normal_stop_message_is_unchanged(config_dir: Path) -> None:
     result = _invoke_stop(outcome, config_dir)
     assert "Storage service stopped (pid(s)=4242)." in result.output
     assert "REFUSED" not in result.output
+
+
+@pytest.mark.skipif(not hasattr(signal, "setitimer"), reason="Windows arms faulthandler instead of an interval timer")
+def test_the_per_test_watchdog_is_armed_for_this_file() -> None:
+    """A hang here fails instead of stalling the run (tests/daemon/_watchdog.py)."""
+    assert signal.getitimer(signal.ITIMER_REAL)[0] > 0, (
+        "the autouse watchdog fixture did not arm for this module: check WATCHED_MODULES"
+    )

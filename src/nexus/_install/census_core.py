@@ -225,10 +225,29 @@ def _match_prefix(generation: Path | str) -> str:
     return text + "/"
 
 
+def _fold(text: str, platform: str | None = None) -> str:
+    """*text* case-folded on Windows, unchanged elsewhere.
+
+    NTFS paths compare case-insensitively, so a process whose argv spells a
+    generation in another case (``C:\\Users\\Sam`` against ``c:\\users\\sam``,
+    both of which an installer, a shell and a task definition produce) still runs
+    from it. This is ``os.path.normcase``'s folding; its separator swap is not
+    wanted here, because :func:`_boundary_text` has already spelt the paths with
+    ``/`` to match :func:`_windows_snapshot`'s rows. Stdlib only, like the file.
+    """
+    if (platform if platform is not None else sys.platform) == "win32":
+        return text.lower()
+    return text
+
+
 def generation_holder_pids(
-    generation: Path | str, snapshot: str | None = None
+    generation: Path | str, snapshot: str | None = None, *, platform: str | None = None,
 ) -> list[int]:
     """PIDs running from *generation*, in snapshot order.
+
+    On Windows the match ignores case (:func:`_fold`): a held generation spelt in
+    another case would otherwise read free, the under-reporting direction. *platform*
+    is a test seam.
 
     Pass *snapshot* to attribute several generations from ONE view of the
     process table; omit it and one is taken for this call alone.
@@ -238,7 +257,7 @@ def generation_holder_pids(
     would end the over-attribution and buy under-reporting instead, and
     under-reporting is the direction that lets a live tree look free.
     """
-    prefix = _match_prefix(generation)
+    prefix = _fold(_match_prefix(generation), platform)
     text = ps_snapshot() if snapshot is None else snapshot
 
     # THE CENSUS IS NOT A HOLDER. When census.sh dispatches here, this process
@@ -260,7 +279,7 @@ def generation_holder_pids(
 
     pids: list[int] = []
     for line in text.splitlines():
-        if prefix not in line:
+        if prefix not in _fold(line, platform):
             continue
         head = line.split(maxsplit=1)
         if not head:

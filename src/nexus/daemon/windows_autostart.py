@@ -238,14 +238,41 @@ def _supervise_once(
     return proc.wait()
 
 
+def _stop_requested_since(config_dir: Path) -> Callable[[float], bool]:
+    """The default stop check: a marker for this user's storage service that is
+    not older than the given time. A check that cannot run is "no stop"."""
+
+    def check(since: float) -> bool:
+        from nexus.daemon.service_registry import (  # noqa: PLC0415 — deferred: the launcher's heavy imports load once, at the first check
+            service_identity,
+            stop_requested_since,
+        )
+
+        return stop_requested_since(config_dir, "storage_service", service_identity(), since)
+
+    return check
+
+
 def run_launcher(
     config_dir: Path,
     *,
     supervise: Callable[[Path], int] = _supervise_once,
     sleep: Callable[[float], None] = time.sleep,
     throttle_s: float = RESTART_THROTTLE_S,
+    clock: Callable[[], float] = time.time,
+    stop_requested: Callable[[float], bool] | None = None,
 ) -> int:
     """Run the supervisor until it exits 0, respawning it after any other exit.
+
+    A deliberate stop wins over the respawn (RDR-224, nexus-f9bgu.33): ``nx daemon
+    service stop`` writes a stop marker before it signals, and the launcher neither
+    spawns nor respawns while the marker is not older than its last spawn. That
+    covers the three paths where a stop is not an exit 0: the hard-kill fallback
+    (exit 1), a break that lands before the supervisor's handler is installed
+    (exit ``0xC000013A``), and a stop that arrives while the launcher sleeps its
+    throttle. A marker older than this launcher's own start is a previous
+    session's stop and is ignored. *clock* and *stop_requested* are test seams;
+    a stop check that raises counts as no stop.
 
     launchd's ``KeepAlive/SuccessfulExit=false`` rule, applied here because the
     Task Scheduler cannot apply it (module docstring). Exit 0 is the supervisor's
@@ -257,7 +284,21 @@ def run_launcher(
     up. A spawn that raises ``OSError`` is treated the same way, so a missing
     interpreter at logon heals when it appears.
     """
+    check = stop_requested if stop_requested is not None else _stop_requested_since(config_dir)
+
+    def stop_wanted(since: float) -> bool:
+        try:
+            return check(since)
+        except Exception as exc:  # noqa: BLE001 — a check that cannot run is "no stop", never a dead launcher
+            _log.warning("windows_autostart_stop_check_failed", error=str(exc))
+            return False
+
+    last_spawn = clock()
     while True:
+        if stop_wanted(last_spawn):
+            _log.info("windows_autostart_stop_marker_honoured", where="before_spawn")
+            return 0
+        last_spawn = clock()
         try:
             code = supervise(config_dir)
         except OSError as exc:
@@ -265,6 +306,9 @@ def run_launcher(
         else:
             _log.info("windows_autostart_supervisor_exited", exit_code=code)
             if code == 0:
+                return 0
+            if stop_wanted(last_spawn):
+                _log.info("windows_autostart_stop_marker_honoured", where="after_exit", exit_code=code)
                 return 0
         sleep(throttle_s)
 
