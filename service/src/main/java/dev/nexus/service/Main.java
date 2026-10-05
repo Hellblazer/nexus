@@ -7,6 +7,7 @@ import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.vectors.Bge768Embedder;
 import dev.nexus.service.vectors.EmbedderRouter;
 import dev.nexus.service.vectors.OrtInitGate;
+import dev.nexus.service.vectors.OrtTempSweep;
 import dev.nexus.service.vectors.PgVectorRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -64,6 +65,10 @@ public final class Main {
         // instead of 143). This defers signal-driven exit until in-flight model inits
         // finish (bounded), before any hook runs; see OrtInitGate.
         OrtInitGate.process().installSignalHandlers();
+        // nexus-f9bgu.11: onnxruntime-java leaves a %TEMP%\onnxruntime-java<random> directory
+        // per start on Windows (its DLLs are locked at exit, so deleteOnExit loses). Remove
+        // the dead ones from earlier runs; Windows only, best effort, never throws.
+        OrtTempSweep.sweepAtBoot();
         int port   = intEnv("NX_SERVICE_PORT", 8080);
         // RDR-152 bead nexus-gmiaf.32.5: NX_SERVICE_TOKEN is the persistent random
         // root bearer token (minted + persisted by `nx init --service`). Auth resolves
