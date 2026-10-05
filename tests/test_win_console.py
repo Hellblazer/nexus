@@ -62,7 +62,11 @@ class _FakeConsoleApi:
 def test_sequence_is_free_attach_send_reattach_in_that_order() -> None:
     api = _FakeConsoleApi()
     result = send_ctrl_break_via_console(4242, api)
-    assert api.calls == [("free", None), ("attach", 4242), ("send", 4242), ("parent", None)]
+    # The second free is load-bearing: AttachConsole(ATTACH_PARENT_PROCESS) is
+    # refused while the caller is still on the target's console.
+    assert api.calls == [
+        ("free", None), ("attach", 4242), ("send", 4242), ("free", None), ("parent", None),
+    ]
     assert result.sent is True
     assert result.refused is False
     assert result.stage == "ok"
@@ -102,7 +106,7 @@ def test_send_failure_still_reattaches_the_parent_console() -> None:
     api = _FakeConsoleApi(send_ok=False, send_error=87)
     result = send_ctrl_break_via_console(4242, api)
     assert (result.sent, result.stage, result.error) == (False, "generate", 87)
-    assert api.calls[-1] == ("parent", None)
+    assert api.calls[-2:] == [("free", None), ("parent", None)]
 
 
 def test_send_exception_still_reattaches_the_parent_console() -> None:
@@ -113,7 +117,7 @@ def test_send_exception_still_reattaches_the_parent_console() -> None:
     api = _Boom()
     with pytest.raises(OSError):
         send_ctrl_break_via_console(4242, api)
-    assert api.calls[-1] == ("parent", None)
+    assert api.calls[-2:] == [("free", None), ("parent", None)]
 
 
 def test_no_parent_console_is_reported_not_raised() -> None:

@@ -12,9 +12,12 @@ console, attaches to the target's, sends, and re-attaches to its parent's:
     FreeConsole()
     AttachConsole(target pid)
     GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, target pid)
+    FreeConsole()
     AttachConsole(ATTACH_PARENT_PROCESS)
 
-The last step puts the CLI's own standard output back. The send is
+The last two steps put the CLI's own console back. The second ``FreeConsole``
+is required: ``AttachConsole`` is refused while the caller is still on the
+target's console. The send is
 process-global state (a process has one console at a time), so the sequence
 runs under one lock.
 
@@ -141,6 +144,12 @@ def send_ctrl_break_via_console(
         try:
             sent, send_error = api.generate_ctrl_break(pid)
         finally:
+            # AttachConsole fails with ERROR_ACCESS_DENIED while the caller is
+            # still attached to a console, and here it is attached to the
+            # TARGET's. Without this FreeConsole the re-attach silently fails
+            # and the caller stays on the supervisor's hidden console
+            # (measured on Windows 11, nexus-f9bgu.17: reattached=False).
+            api.free_console()
             reattached, _ = api.attach_parent_console()
         if not sent:
             _log.info("win_console_send_failed", pid=pid, error=send_error)

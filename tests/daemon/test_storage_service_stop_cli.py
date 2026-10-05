@@ -184,7 +184,9 @@ def test_windows_stop_attaches_sends_and_confirms_by_the_supervisors_exit(
                 config_dir=config_dir, platform="win32", console_api=api,
             )
         assert sup.wait(timeout=30) == -signal.SIGTERM  # it received the delivered break and exited
-    assert api.calls == [("free", None), ("attach", sup.pid), ("send", sup.pid), ("parent", None)]
+    assert api.calls == [
+        ("free", None), ("attach", sup.pid), ("send", sup.pid), ("free", None), ("parent", None),
+    ]
     assert outcome.pids == (sup.pid,) and outcome.stubborn == () and outcome.refused == ()
     assert outcome.source == "lease"
     # No hard kill: the only os.kill was the scripted delivery of the break.
