@@ -36,7 +36,7 @@ def _all_assets() -> list[str]:
 _MIB = 1024 * 1024
 
 #: The fixed build's binary sizes in MiB (nexus-lhr6a measured amd64 and mac; arm64 is an estimate).
-FIXED_SIZES_MIB = {"linux-amd64": 150, "linux-arm64": 147, "mac-arm64": 154}
+FIXED_SIZES_MIB = {"linux-amd64": 150, "linux-arm64": 147, "mac-arm64": 154, "windows-x64.txz": 34}
 
 
 def _stub_gh(
@@ -78,10 +78,11 @@ def _stub_gh(
     return bindir, log
 
 
-def _run(bindir: Path) -> subprocess.CompletedProcess[str]:
+def _run(bindir: Path, *extra: str) -> subprocess.CompletedProcess[str]:
+    """Run the script; *extra* is the optional third argument (the Windows switch)."""
     env = dict(os.environ, PATH=f"{bindir}:{os.environ['PATH']}")
     return subprocess.run(
-        ["/bin/bash", str(SCRIPT), "engine-service-v0.0.0-test", "owner/repo"],
+        ["/bin/bash", str(SCRIPT), "engine-service-v0.0.0-test", "owner/repo", *extra],
         env=env, capture_output=True, text=True, timeout=60, check=False,
     )
 
@@ -150,3 +151,135 @@ def test_zero_assets_fails_cleanly(tmp_path: Path) -> None:
     r = _run(bindir)
     assert r.returncode == 1
     assert "release edit" not in log.read_text()
+
+
+# nexus-f9bgu.14 (RDR-224 P0.4): the Windows assets BLOCK promotion, but only once the repo
+# variable NX_WINDOWS_RELEASE_LEGS is on. The workflow passes the switch in as the third
+# argument ("on" or "off"); the script reads no GitHub state and no environment.
+
+WINDOWS_PG_ASSETS = [
+    "nexus-pg-windows-x64.txz",
+    "nexus-pg-windows-x64.txz.sha256",
+    "nexus-pg-windows-x64.txz.sigstore.json",
+]
+# nexus-f9bgu.9 (P1.2): the engine archive, one .txz with its .sha256 and one new-format
+# sigstore bundle (no .cosign.bundle: the client verifies the new format, nothing else uses it).
+WINDOWS_ENGINE_ASSETS = [
+    "nexus-service-windows-x64.txz",
+    "nexus-service-windows-x64.txz.sha256",
+    "nexus-service-windows-x64.txz.sigstore.json",
+]
+WINDOWS_ASSETS = WINDOWS_PG_ASSETS + WINDOWS_ENGINE_ASSETS
+
+
+def _edits(log: Path) -> list[str]:
+    return [c for c in log.read_text().splitlines() if c.startswith("release edit")]
+
+
+def test_switch_off_is_the_default_and_expects_the_21_assets(tmp_path: Path) -> None:
+    """No third argument and an explicit "off" behave the same: 21 assets, no Windows."""
+    bindir, log = _stub_gh(tmp_path, _all_assets())
+    r = _run(bindir, "off")
+    assert r.returncode == 0, r.stderr + r.stdout
+    assert "all 21 expected assets present" in r.stdout
+    assert len(_edits(log)) == 1
+
+
+def test_switch_off_does_not_wait_for_windows_assets(tmp_path: Path) -> None:
+    """Non-vacuity of the off state: the Windows names are absent from the release, and the
+    release still promotes. A script that expected them regardless would exit 1 here."""
+    assets = _all_assets()
+    assert not set(WINDOWS_ASSETS) & set(assets)
+    bindir, log = _stub_gh(tmp_path, assets)
+    r = _run(bindir, "off")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert len(_edits(log)) == 1
+
+
+def test_switch_off_ignores_windows_assets_that_happen_to_be_attached(tmp_path: Path) -> None:
+    bindir, log = _stub_gh(tmp_path, _all_assets() + WINDOWS_ASSETS)
+    r = _run(bindir, "off")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "all 21 expected assets present" in r.stdout
+
+
+def test_switch_on_with_the_full_windows_set_promotes_exactly_once(tmp_path: Path) -> None:
+    bindir, log = _stub_gh(tmp_path, _all_assets() + WINDOWS_ASSETS)
+    r = _run(bindir, "on")
+    assert r.returncode == 0, r.stderr + r.stdout
+    assert "all 27 expected assets present" in r.stdout
+    edits = _edits(log)
+    assert len(edits) == 1 and "--draft=false" in edits[0], edits
+
+
+def test_switch_on_without_any_windows_asset_leaves_the_draft(tmp_path: Path) -> None:
+    """P0.4: a missing Windows leg keeps every platform's release a draft."""
+    bindir, log = _stub_gh(tmp_path, _all_assets())
+    r = _run(bindir, "on")
+    assert r.returncode == 1, r.stdout + r.stderr
+    for name in WINDOWS_ASSETS:
+        assert name in r.stdout
+    assert "DRAFT" in r.stdout
+    assert not _edits(log), "a missing Windows asset must never flip the draft flag"
+
+
+@pytest.mark.parametrize("missing", WINDOWS_ASSETS)
+def test_switch_on_names_each_single_missing_windows_asset(tmp_path: Path, missing: str) -> None:
+    assets = _all_assets() + [a for a in WINDOWS_ASSETS if a != missing]
+    bindir, log = _stub_gh(tmp_path, assets)
+    r = _run(bindir, "on")
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert missing in r.stdout
+    assert not _edits(log)
+
+
+@pytest.mark.parametrize("bad", ["ON", "true", "1", "", "yes"])
+def test_a_switch_value_other_than_on_or_off_is_refused_before_gh(tmp_path: Path, bad: str) -> None:
+    """The workflow normalises to on/off; anything else here is a wiring bug, not an "off"."""
+    bindir, log = _stub_gh(tmp_path, _all_assets())
+    r = _run(bindir, bad)
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert not log.exists() or not log.read_text().strip(), "gh must not be called on a bad switch"
+
+
+def test_switch_on_with_only_the_pg_bundle_leaves_the_draft_naming_the_engine_archive(tmp_path: Path) -> None:
+    """The state the engine leg's failure leaves: every other asset attached, the engine archive absent."""
+    bindir, log = _stub_gh(tmp_path, _all_assets() + WINDOWS_PG_ASSETS)
+    r = _run(bindir, "on")
+    assert r.returncode == 1, r.stdout + r.stderr
+    for name in WINDOWS_ENGINE_ASSETS:
+        assert name in r.stdout
+    assert not _edits(log)
+
+
+def test_switch_on_leaves_the_draft_when_the_windows_engine_archive_is_over_its_ceiling(tmp_path: Path) -> None:
+    sizes = dict(FIXED_SIZES_MIB)
+    sizes["windows-x64.txz"] = 120
+    bindir, log = _stub_gh(tmp_path, _all_assets() + WINDOWS_ASSETS, sizes)
+    r = _run(bindir, "on")
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "TOO BIG" in r.stdout and "nexus-service-windows-x64.txz" in r.stdout
+    assert not _edits(log), "an oversized Windows archive must never flip the draft flag"
+
+
+def test_switch_off_does_not_hold_an_attached_windows_archive_to_its_ceiling(tmp_path: Path) -> None:
+    """Off means the Windows legs are not part of this release: neither required nor measured."""
+    sizes = dict(FIXED_SIZES_MIB)
+    sizes["windows-x64.txz"] = 120
+    bindir, log = _stub_gh(tmp_path, _all_assets() + WINDOWS_ASSETS, sizes)
+    r = _run(bindir, "off")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert len(_edits(log)) == 1
+
+
+def test_the_floor_checks_asset_sets_are_the_ones_promotion_expects(tmp_path: Path) -> None:
+    """scripts/check_engine_release_floor.py --require-windows (nexus-f9bgu.28) names the same 21 and 27
+    assets this script waits for: compared as sets, and driven through the script itself, so a name
+    added to one and not the other fails here."""
+    import check_engine_release_floor as floor
+
+    assert set(floor.expected_engine_assets(windows=False)) == set(_all_assets())
+    assert set(floor.expected_engine_assets(windows=True)) == set(_all_assets()) | set(WINDOWS_ASSETS)
+    bindir, _ = _stub_gh(tmp_path, list(floor.expected_engine_assets(windows=True)))
+    r = _run(bindir, "on")
+    assert r.returncode == 0 and "all 27 expected assets present" in r.stdout, r.stdout + r.stderr

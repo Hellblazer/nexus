@@ -27,7 +27,7 @@ matching, and the full base-URL precedence mirroring
      local supervisor lease when PORT is set but HOST is not -- nexus-aginu,
      matching ``resolve_service_config``'s per-field lease merge).
   4. The local ``ServiceRegistry`` supervisor lease
-     (``storage_service_addr.<uid>``).
+     (``storage_service_addr.<identity>``).
 
 WHAT THIS MODULE DOES NOT OWN: which CREDENTIAL a caller presents once the
 base URL is known. Callers differ here BY DESIGN, not by drift:
@@ -43,12 +43,13 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import stat
 import sys
 import time
 import urllib.parse
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 if sys.version_info < (3, 12):
     sys.stderr.write(
@@ -89,8 +90,309 @@ def default_config_dir() -> Path:
     return Path.home() / ".config" / "nexus"
 
 
+class ServiceIdentityError(RuntimeError):
+    """Mirror of ``nexus.daemon.service_registry.ServiceIdentityError``."""
+
+
+#: Mirror of ``service_registry._SID_PATTERN`` (a parity test compares the two).
+_SID_PATTERN = re.compile(r"S-1-\d+(-\d+)+")
+
+
+#: The current process token's user SID, read once per process (RDR-224,
+#: nexus-f9bgu.33, review m11). A token's user cannot change, and the lease
+#: writer asked for it on every heartbeat.
+_SID_CACHE: list[str] = []
+
+#: advapi32 and kernel32 with every ``argtypes`` / ``restype`` the calls below
+#: need, bound once per process: a ``WinDLL`` load plus a dozen attribute
+#: assignments on every lease write is pure overhead.
+_WIN_LIBS: list[tuple[Any, Any]] = []
+
+
+def _win_libs(*, loader: Callable[[str], Any] | None = None) -> tuple[Any, Any]:
+    """``(advapi32, kernel32)``, bound once. *loader* is the test seam for
+    ``ctypes.WinDLL``; without it, anything but Windows raises OSError."""
+    if _WIN_LIBS:
+        return _WIN_LIBS[0]
+    if loader is None and os.name != "nt":
+        raise OSError("the Windows security APIs are only reachable on Windows")
+    import ctypes  # noqa: PLC0415 — Windows-only branch
+    from ctypes import wintypes  # noqa: PLC0415 — Windows-only branch
+
+    load = loader if loader is not None else (lambda name: ctypes.WinDLL(name, use_last_error=True))
+    advapi32 = load("advapi32")
+    kernel32 = load("kernel32")
+    kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.LocalFree.argtypes = [ctypes.c_void_p]
+    kernel32.LocalFree.restype = ctypes.c_void_p
+    advapi32.OpenProcessToken.argtypes = [wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE)]
+    advapi32.OpenProcessToken.restype = wintypes.BOOL
+    advapi32.GetTokenInformation.argtypes = [
+        wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD),
+    ]
+    advapi32.GetTokenInformation.restype = wintypes.BOOL
+    advapi32.ConvertSidToStringSidW.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)]
+    advapi32.ConvertSidToStringSidW.restype = wintypes.BOOL
+    advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW.argtypes = [
+        wintypes.LPCWSTR, wintypes.DWORD, ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p,
+    ]
+    advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW.restype = wintypes.BOOL
+    advapi32.GetSecurityDescriptorDacl.argtypes = [
+        ctypes.c_void_p, ctypes.POINTER(wintypes.BOOL), ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(wintypes.BOOL),
+    ]
+    advapi32.GetSecurityDescriptorDacl.restype = wintypes.BOOL
+    advapi32.SetNamedSecurityInfoW.argtypes = [
+        wintypes.LPWSTR, ctypes.c_int, wintypes.DWORD,
+        ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p,
+    ]
+    advapi32.SetNamedSecurityInfoW.restype = wintypes.DWORD
+    advapi32.GetNamedSecurityInfoW.argtypes = [
+        wintypes.LPCWSTR, ctypes.c_int, wintypes.DWORD,
+        ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_void_p),
+    ]
+    advapi32.GetNamedSecurityInfoW.restype = wintypes.DWORD
+    advapi32.GetAclInformation.argtypes = [ctypes.c_void_p, ctypes.c_void_p, wintypes.DWORD, ctypes.c_int]
+    advapi32.GetAclInformation.restype = wintypes.BOOL
+    advapi32.GetAce.argtypes = [ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(ctypes.c_void_p)]
+    advapi32.GetAce.restype = wintypes.BOOL
+    _WIN_LIBS.append((advapi32, kernel32))
+    return _WIN_LIBS[0]
+
+
+def _windows_user_sid() -> str:
+    """The current process token's user SID as a string (``S-1-5-21-...``).
+
+    Windows only; ctypes against advapi32. Any other platform raises OSError.
+    """
+    if _SID_CACHE:
+        return _SID_CACHE[0]
+    if os.name != "nt":
+        raise OSError("the Windows user SID is only readable on Windows")
+    import ctypes  # noqa: PLC0415 — Windows-only branch
+    from ctypes import wintypes  # noqa: PLC0415 — Windows-only branch
+
+    advapi32, kernel32 = _win_libs()
+
+    token = wintypes.HANDLE()
+    if not advapi32.OpenProcessToken(kernel32.GetCurrentProcess(), 0x0008, ctypes.byref(token)):  # TOKEN_QUERY
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        needed = wintypes.DWORD()
+        # TokenUser = 1. The sizing call fails by design (ERROR_INSUFFICIENT_BUFFER) and fills `needed`.
+        advapi32.GetTokenInformation(token, 1, None, 0, ctypes.byref(needed))
+        if needed.value == 0:
+            raise ctypes.WinError(ctypes.get_last_error())
+        buf = ctypes.create_string_buffer(needed.value)
+        if not advapi32.GetTokenInformation(token, 1, buf, needed, ctypes.byref(needed)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        # TOKEN_USER starts with SID_AND_ATTRIBUTES { PSID Sid; DWORD Attributes }: the first pointer is the SID.
+        psid = ctypes.c_void_p.from_buffer(buf).value
+        string_sid = ctypes.c_void_p()
+        if not advapi32.ConvertSidToStringSidW(psid, ctypes.byref(string_sid)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        try:
+            sid = ctypes.wstring_at(string_sid.value)
+        finally:
+            kernel32.LocalFree(string_sid)
+        _SID_CACHE.append(sid)
+        return sid
+    finally:
+        kernel32.CloseHandle(token)
+
+
+def service_identity(
+    *,
+    platform: str | None = None,
+    getuid: Callable[[], int] | None = None,
+    sid_lookup: Callable[[], str] | None = None,
+) -> str:
+    """Stdlib mirror of ``nexus.daemon.service_registry.service_identity``:
+    ``str(os.getuid())`` on POSIX, the user SID on Windows. This file must not
+    import ``nexus``, so the derivation is restated here and a parity test
+    (``tests/daemon/test_service_identity.py``) pins the two together.
+    """
+    on_windows = (platform == "win32") if platform is not None else (os.name == "nt")
+    if not on_windows:
+        return str(getuid() if getuid is not None else os.getuid())
+    try:
+        sid = (sid_lookup if sid_lookup is not None else _windows_user_sid)()
+    except (OSError, AttributeError, ValueError) as exc:
+        raise ServiceIdentityError(f"cannot read the Windows user SID: {exc}") from exc
+    if not _SID_PATTERN.fullmatch(sid):
+        raise ServiceIdentityError(f"the Windows user identity is not a SID: {sid!r}")
+    return sid
+
+
+#: Mirror of ``nexus._winsec``'s tolerated SIDs (SYSTEM, Administrators: the
+#: Windows counterparts of ``root`` on a POSIX ``0600`` file; OWNER RIGHTS: the
+#: file's owner, the user again).
+_SID_SYSTEM = "S-1-5-18"
+_SID_ADMINISTRATORS = "S-1-5-32-544"
+_SID_OWNER_RIGHTS = "S-1-3-4"
+
+
+def _is_windows(platform: str | None) -> bool:
+    return (platform == "win32") if platform is not None else (os.name == "nt")
+
+
+def _windows_dacl_trustees(path: str) -> list[str] | None:
+    """The SID of every ACE in *path*'s DACL that GRANTS access, or ``None``
+    when the file has no DACL at all (a NULL DACL grants everyone everything).
+
+    Deny ACEs grant nothing and are skipped. An ACE type this walk cannot read
+    (object ACEs, anything new) is reported as ``<ace-type-N>`` so the caller
+    fails closed rather than counting it as harmless. Windows only; raises
+    OSError when the descriptor cannot be read.
+    """
+    if os.name != "nt":
+        raise OSError("a Windows DACL can only be read on Windows")
+    import ctypes  # noqa: PLC0415 — Windows-only branch
+    from ctypes import wintypes  # noqa: PLC0415 — Windows-only branch
+
+    advapi32, kernel32 = _win_libs()
+
+    class AclSizeInformation(ctypes.Structure):
+        _fields_ = [
+            ("AceCount", wintypes.DWORD),
+            ("AclBytesInUse", wintypes.DWORD),
+            ("AclBytesFree", wintypes.DWORD),
+        ]
+
+    dacl = ctypes.c_void_p()
+    descriptor = ctypes.c_void_p()
+    # SE_FILE_OBJECT = 1; DACL_SECURITY_INFORMATION = 4
+    error = advapi32.GetNamedSecurityInfoW(
+        path, 1, 0x00000004, None, None, ctypes.byref(dacl), None, ctypes.byref(descriptor),
+    )
+    if error:
+        raise ctypes.WinError(error)
+    try:
+        if not dacl.value:
+            return None
+        info = AclSizeInformation()
+        # AclSizeInformation = 2
+        if not advapi32.GetAclInformation(dacl, ctypes.byref(info), ctypes.sizeof(info), 2):
+            raise ctypes.WinError(ctypes.get_last_error())
+        trustees: list[str] = []
+        for index in range(info.AceCount):
+            ace = ctypes.c_void_p()
+            if not advapi32.GetAce(dacl, index, ctypes.byref(ace)):
+                raise ctypes.WinError(ctypes.get_last_error())
+            ace_type = ctypes.string_at(ace.value, 1)[0]
+            if ace_type in (1, 10):  # ACCESS_DENIED_ACE_TYPE, ACCESS_DENIED_CALLBACK_ACE_TYPE
+                continue
+            if ace_type not in (0, 9):  # ACCESS_ALLOWED_ACE_TYPE, ACCESS_ALLOWED_CALLBACK_ACE_TYPE
+                trustees.append(f"<ace-type-{ace_type}>")
+                continue
+            # ACCESS_ALLOWED_ACE: ACE_HEADER (4 bytes), ACCESS_MASK (4 bytes), then the SID.
+            string_sid = ctypes.c_void_p()
+            if not advapi32.ConvertSidToStringSidW(ctypes.c_void_p(ace.value + 8), ctypes.byref(string_sid)):
+                raise ctypes.WinError(ctypes.get_last_error())
+            try:
+                trustees.append(ctypes.wstring_at(string_sid.value))
+            finally:
+                kernel32.LocalFree(string_sid)
+        return trustees
+    finally:
+        kernel32.LocalFree(descriptor)
+
+
+def owner_only_problem(
+    path: str | os.PathLike[str],
+    st_mode: int,
+    *,
+    platform: str | None = None,
+    sid_lookup: Callable[[], str] | None = None,
+    trustees_lookup: Callable[[str], list[str] | None] | None = None,
+) -> str | None:
+    """Why *path* is readable by someone besides its owner, or ``None`` when it is not.
+
+    POSIX: any group or other mode bit (*st_mode* is the caller's own
+    ``stat``, so the check runs on the file the caller opened). Windows
+    ignores *st_mode*, which says ``0o666`` for every file, and reads the DACL:
+    a file with no DACL, or one that grants anyone except the current user,
+    SYSTEM, Administrators and OWNER RIGHTS, is refused, naming the extra SIDs.
+    """
+    if not _is_windows(platform):
+        mode = stat.S_IMODE(st_mode)
+        if mode & (stat.S_IRWXG | stat.S_IRWXO):
+            return f"group/other-accessible (mode {oct(mode)})"
+        return None
+    try:
+        user = (sid_lookup if sid_lookup is not None else _windows_user_sid)()
+        trustees = (trustees_lookup if trustees_lookup is not None else _windows_dacl_trustees)(str(path))
+    except (OSError, AttributeError, ValueError) as exc:
+        return f"its access list cannot be read ({exc})"
+    if trustees is None:
+        return "has no access list, so every account can read it"
+    foreign = sorted({t for t in trustees if t not in (user, _SID_SYSTEM, _SID_ADMINISTRATORS, _SID_OWNER_RIGHTS)})
+    if foreign:
+        return f"accessible to other accounts ({', '.join(foreign)})"
+    return None
+
+
 def storage_service_lease_path(config_dir: Path) -> Path:
-    return config_dir / f"{STORAGE_SERVICE_TIER}_addr.{os.getuid()}"
+    return config_dir / f"{STORAGE_SERVICE_TIER}_addr.{service_identity()}"
+
+
+def _shown(lease_path: Path | None) -> str:
+    return str(lease_path) if lease_path is not None else "<the Windows user identity cannot be read>"
+
+
+def _lease_path_or_none(config_dir: Path) -> Path | None:
+    """:func:`storage_service_lease_path`, or ``None`` when the Windows user SID
+    cannot be read (:class:`ServiceIdentityError`). Every hook caller degrades
+    "no lease" on a failure here, so an identity that cannot be read must never
+    raise out of one (RDR-224, nexus-f9bgu.33, review m10)."""
+    try:
+        return storage_service_lease_path(config_dir)
+    except ServiceIdentityError:
+        return None
+
+
+#: Mirror of ``service_registry._WINDOWS_SHARING_RETRY_*`` (a parity test
+#: compares the constants and the pause sequence): how long a lease read keeps
+#: retrying a Windows sharing violation, with a doubling pause between tries.
+_WINDOWS_SHARING_RETRY_BUDGET_S = 2.0
+_WINDOWS_SHARING_RETRY_FIRST_S = 0.002
+_WINDOWS_SHARING_RETRY_MAX_S = 0.01
+
+
+def read_lease_text(
+    path: Path,
+    *,
+    platform: str | None = None,
+    read: Callable[[Path], str] | None = None,
+    sleep: Callable[[float], None] = time.sleep,
+    monotonic: Callable[[], float] = time.monotonic,
+) -> str:
+    """Read the supervisor lease file, retrying a Windows sharing violation.
+
+    Stdlib mirror of ``ServiceRegistry._retry_sharing_violation`` around its
+    lease read (RDR-224, nexus-f9bgu.44). Off Windows this is a plain read: a
+    ``PermissionError`` there is a real permission problem and fails at once.
+    On Windows the supervisor's ``os.replace`` of the lease makes a concurrent
+    reader's open raise ``PermissionError`` for an instant, so the read is
+    retried with a doubling pause up to the budget and then raised. The callers
+    treat any ``OSError`` as "no lease", so a miss during a replace no longer
+    reads as a stopped service.
+    """
+    do_read = read if read is not None else (lambda p: p.read_text())
+    if not _is_windows(platform):
+        return do_read(path)
+    deadline = monotonic() + _WINDOWS_SHARING_RETRY_BUDGET_S
+    pause = _WINDOWS_SHARING_RETRY_FIRST_S
+    while True:
+        try:
+            return do_read(path)
+        except PermissionError:
+            now = monotonic()
+            if now >= deadline:
+                raise
+            sleep(min(pause, deadline - now))
+            pause = min(pause * 2, _WINDOWS_SHARING_RETRY_MAX_S)
 
 
 def read_storage_service_lease(config_dir: Path) -> dict[str, Any] | None:
@@ -99,9 +401,11 @@ def read_storage_service_lease(config_dir: Path) -> dict[str, Any] | None:
     missing file, unreadable, malformed JSON, non-``live`` status, or a
     heartbeat older than its TTL -- resolves to ``None``. Never raises.
     """
-    path = storage_service_lease_path(config_dir)
+    path = _lease_path_or_none(config_dir)
+    if path is None:
+        return None
     try:
-        data = json.loads(path.read_text())
+        data = json.loads(read_lease_text(path))
     except (OSError, json.JSONDecodeError, ValueError):
         return None
     try:
@@ -135,21 +439,25 @@ def read_local_supervisor_token(config_dir: Path) -> str:
     so this function is a complete, independent audit trail for the one
     credential-bearing read in this module.
     """
-    path = storage_service_lease_path(config_dir)
+    path = _lease_path_or_none(config_dir)
+    if path is None:
+        raise EndpointUnresolvable(
+            "local supervisor lease unavailable: the Windows user identity cannot be read"
+        )
     try:
         st_result = path.stat()
     except OSError as exc:
         raise EndpointUnresolvable(
             f"local supervisor lease unavailable: cannot stat {path}: {exc}"
         ) from exc
-    mode = stat.S_IMODE(st_result.st_mode)
-    if mode & (stat.S_IRWXG | stat.S_IRWXO):
+    problem = owner_only_problem(path, st_result.st_mode)
+    if problem is not None:
         raise EndpointUnresolvable(
-            f"local supervisor lease {path} is group/other-accessible "
-            f"(mode {oct(mode)}); refusing to use its token as a bearer"
+            f"local supervisor lease {path} is {problem}; "
+            "refusing to use its token as a bearer"
         )
     try:
-        data = json.loads(path.read_text())
+        data = json.loads(read_lease_text(path))
     except (OSError, json.JSONDecodeError, ValueError) as exc:
         raise EndpointUnresolvable(
             f"local supervisor lease {path} unreadable/malformed: {exc}"
@@ -382,10 +690,10 @@ def resolve_base_url(config_dir: Path) -> tuple[str, bool]:
                     port = lease["port"]
         host = host or "127.0.0.1"
         if port is None:
-            lease_path = storage_service_lease_path(config_dir)
+            lease_path = _lease_path_or_none(config_dir)
             raise EndpointUnresolvable(
                 f"NX_SERVICE_HOST={host_str!r} is set but NX_SERVICE_PORT is "
-                f"not, and no live local supervisor lease at {lease_path} "
+                f"not, and no live local supervisor lease at {_shown(lease_path)} "
                 f"supplies a port"
             )
         return f"http://{host}:{port}", False
@@ -394,9 +702,9 @@ def resolve_base_url(config_dir: Path) -> tuple[str, bool]:
     if lease is not None:
         return f"http://{lease['host']}:{lease['port']}", True
 
-    lease_path = storage_service_lease_path(config_dir)
+    lease_path = _lease_path_or_none(config_dir)
     raise EndpointUnresolvable(
         f"no service endpoint resolvable: no NX_SERVICE_URL, no persisted "
         f"config.yml service_url, no NX_SERVICE_PORT, and no live local "
-        f"supervisor lease at {lease_path}"
+        f"supervisor lease at {_shown(lease_path)}"
     )

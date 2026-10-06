@@ -417,8 +417,12 @@ jobs:
     # false only by the coincidence of an empty outputs.code — success()
     # makes the fail-loud-on-broken-predicate behavior explicit instead of
     # accidental.
+    #
+    # nexus-q99w4: it also runs on doc-only pushes, for the docs-reader leg's
+    # substrate. Unchanged service sources make that a cache hit, so it costs
+    # a checkout, a restore and an upload.
     needs: changes
-    if: success() && needs.changes.outputs.code == 'true'
+    if: success() && (needs.changes.outputs.code == 'true' || needs.changes.outputs.code == 'false')
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
 
@@ -923,6 +927,112 @@ jobs:
           [[ "$summary" =~ ([0-9]+)\ passed ]] && [ "${BASH_REMATCH[1]}" -ge 400 ] \
             || { echo "::error::lint leg passed fewer than 400 tests (summary: ${summary:-none}) — a mass-skip that still exits 0"; exit 1; }
 
+  test-docs-readers:
+    # nexus-q99w4 (Sam, 2026-10-05, option B): the doc-only fast lane skips
+    # the shard matrix, but some tests read docs/ at assert time, so a
+    # docs-only push could turn one red unseen. 15f4c7a94 (an RDR status
+    # flip) broke the exact supersedes pin in
+    # tests/catalog/test_rdr_dependency_edges.py and sat latent until a
+    # hand-run suite found it. On a docs-only push this job runs only the
+    # test files that anchor "docs" to the repo root
+    # (scripts/select_docs_reader_tests.py: 33 files, 1061 tests, ~3 min
+    # serial on 2026-10-05), with the engine substrate, because a dozen of
+    # those files need it (test_rdr_preamble among them). On a code push the
+    # shard matrix and the lint leg already run every one of these, so it
+    # skips. The substrate setup mirrors the `test` job minus docling and
+    # the HF cache, which no selected file reaches.
+    name: pytest (docs readers)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    needs: [changes, service-jar]
+    if: success() && needs.changes.outputs.code == 'false'
+    timeout-minutes: 20
+    env:
+      NX_T2_SUBSTRATE_EXPECTED: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
+        with:
+          # tests/test_docs_reference_rot.py resolves cited commit shas and
+          # tags, which a depth-1 checkout does not carry (same reason as the
+          # lint leg's checkout).
+          fetch-depth: 0
+
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7
+        with:
+          python-version: "3.12"
+          enable-cache: false
+
+      - name: Cache uv wheel cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v5
+        with:
+          path: ${{ runner.temp }}/setup-uv-cache
+          key: uv-${{ runner.os }}-3.12-${{ hashFiles('uv.lock') }}
+          restore-keys: |
+            uv-${{ runner.os }}-3.12-
+
+      - name: Cache MiniLM ONNX model
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v5
+        with:
+          path: ~/.cache/chroma
+          key: chromadb-onnx-${{ runner.os }}-${{ hashFiles('uv.lock') }}
+          restore-keys: |
+            chromadb-onnx-${{ runner.os }}-
+
+      - name: Fetch the service jar
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: service-jar
+          path: service/target
+
+      - name: Re-stamp the jar mtime
+        # Same reason as the `test` job's step: checkout stamps every source
+        # newer than the downloaded jar, and the cache key already proves the
+        # jar was built from exactly these sources.
+        run: touch service/target/nexus-service-1.0-SNAPSHOT.jar
+
+      - name: Set up Java (to launch the service jar)
+        uses: graalvm/setup-graalvm@5298d94fb55a4f185c602eeac5de1b553882abe2  # v1
+        with:
+          java-version: '25.0.3'
+          distribution: 'graalvm'
+
+      - name: Cache the pinned PG bundle
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v5
+        with:
+          path: ~/.cache/nexus-test-substrate
+          key: pg-bundle-${{ runner.os }}-${{ hashFiles('src/nexus/engine_version.py') }}
+
+      - name: Install ripgrep
+        run: sudo apt-get install -y ripgrep
+
+      - name: Prime bge-768 ONNX (cache or self-hosted asset)
+        # The engine binds its port only after Bge768Embedder loads; see the
+        # `test` job's step of the same name.
+        uses: ./.github/actions/prime-bge-onnx
+
+      - name: Install project + dev deps
+        run: uv sync --group dev
+
+      - name: Run the docs-reading tests
+        # The selector exits 1 below its own floor, which fails this step
+        # under pipefail. -o addopts="" so lint-marked docs scans run too;
+        # integration and slow stay out, as in every other leg.
+        run: |
+          set -euo pipefail
+          files="$(python3 scripts/select_docs_reader_tests.py --repo .)"
+          echo "selected: $files"
+          # shellcheck disable=SC2086  # one path per word, by design
+          uv run pytest -q -o addopts="" -m "not integration and not slow" $files | tee docs-output.txt
+
+      - name: Executed-count floor (a docs lane that skipped its corpus must not report green)
+        # 1061 passed on 2026-10-05; 600 catches a mass-skip, not normal drift.
+        run: |
+          set -euo pipefail
+          summary="$(grep -aE ' in [0-9.]+s( \([0-9:]+\))?$' docs-output.txt | tail -1)" || summary=""
+          [[ "$summary" =~ ([0-9]+)\ passed ]] && [ "${BASH_REMATCH[1]}" -ge 600 ] \
+            || { echo "::error::docs-reader leg passed fewer than 600 tests (summary: ${summary:-none}) — a mass-skip that still exits 0"; exit 1; }
+
   test-mode-census:
     # nexus-vdti6 (candidate 1, chosen over: candidate 2 — an out-of-band
     # merge across the shard processes, more plumbing for no benefit over
@@ -1291,7 +1401,7 @@ jobs:
     # condition for the exact same reason.
     name: pytest-gate
     if: always()
-    needs: [changes, test, test-lint, test-mode-census, release-ledger-gate, test-integration-affected]
+    needs: [changes, test, test-lint, test-mode-census, test-docs-readers, release-ledger-gate, test-integration-affected]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -1303,6 +1413,7 @@ jobs:
           test_result="${{ needs.test.result }}"
           test_lint_result="${{ needs.test-lint.result }}"
           test_mode_census_result="${{ needs.test-mode-census.result }}"
+          test_docs_readers_result="${{ needs.test-docs-readers.result }}"
           release_ledger_result="${{ needs.release-ledger-gate.result }}"
           integration_any="${{ needs.changes.outputs.integration_any }}"
           integration_result="${{ needs.test-integration-affected.result }}"
@@ -1313,6 +1424,7 @@ jobs:
           echo "test matrix result: $test_result"
           echo "test-lint result: $test_lint_result"
           echo "test-mode-census result: $test_mode_census_result"
+          echo "test-docs-readers result: $test_docs_readers_result"
           echo "release-ledger-gate result: $release_ledger_result (event=$event_name base_ref=$base_ref)"
           echo "test-integration-affected result: $integration_result (integration_any=$integration_any)"
 
@@ -1335,6 +1447,14 @@ jobs:
                 echo "::error::code changed but the mode-declarations census leg (test-mode-census) reported '$test_mode_census_result' instead of success — nexus-vdti6: this is the ONLY leg that gives the RDR-109 census a real, unsharded view of the corpus"
                 exit 1
               fi
+              # The shard matrix already covers every docs reader on a code push.
+              case "$test_docs_readers_result" in
+                success|skipped) ;;
+                *)
+                  echo "::error::code changed and test-docs-readers reported '$test_docs_readers_result' instead of skipped/success"
+                  exit 1
+                  ;;
+              esac
               ;;
             false)
               case "$test_result" in
@@ -1358,6 +1478,12 @@ jobs:
                   exit 1
                   ;;
               esac
+              # nexus-q99w4: the one leg that runs on a doc-only diff, so it
+              # must have RUN and passed; skipped here means it never ran.
+              if [ "$test_docs_readers_result" != "success" ]; then
+                echo "::error::doc-only diff but the docs-reader leg (test-docs-readers) reported '$test_docs_readers_result' instead of success — the tests that read docs/ must run when only docs changed"
+                exit 1
+              fi
               ;;
             *)
               echo "::error::unrecognised code predicate '$code' from the changes job — failing loud instead of guessing"
@@ -2021,16 +2147,18 @@ jobs:
         # Fails on a native library embedded from more than one origin, a
         # foreign-platform onnxruntime/djl path, .pdb/.dSYM debug symbols, a
         # jar -> native -> shade order violation, or an empty/vacuous report.
-        # Platform dirs are per library: onnxruntime names ubuntu-latest
-        # linux-x64, djl names it linux-x86_64. JNA is exempt (it ships every
-        # platform through its own metadata; see the checker).
+        # Also fails on a native library of another platform's suffix anywhere
+        # outside com/sun/jna/, and on a library the platform must carry that
+        # the report does not name (nexus-zz2w7). The per-platform directories
+        # and required list live in the checker's PLATFORMS table; the release
+        # workflow runs the same check on every native leg. JNA is exempt (it
+        # ships every platform through its own metadata; see the checker).
         if: steps.changes.outputs.svc == 'true'
         run: |
           python3 scripts/check_native_embedded_resources.py \
             --report service/target/embedded-resources.json \
             --build-log "$RUNNER_TEMP/native-build.log" \
-            --platform-dir onnxruntime=linux-x64 \
-            --platform-dir djl=linux-x86_64
+            --platform linux-amd64
 
   write-seam-gate:
     # nexus-h29w1 — Behavioural cross-boundary write-seam CI gate (F1 closure).

@@ -224,6 +224,7 @@ from uuid import uuid4
 import structlog
 
 from nexus import _locking
+from nexus._winsec import make_user_dir, open_private
 from nexus.rate_brake import parse_retry_after
 
 _log = structlog.get_logger(__name__)
@@ -966,7 +967,7 @@ class DataTokenManager:
             if remaining <= 0:
                 return  # already expired by the time we got here — nothing worth publishing
             config_dir = self._resolve_config_dir()
-            config_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+            make_user_dir(config_dir)
             path = _data_token_lease_path(base_url, tenant, config_dir)
             payload = {
                 "format_version": _LEASE_FORMAT_VERSION,
@@ -979,7 +980,7 @@ class DataTokenManager:
             }
             data = json.dumps(payload).encode("utf-8")
             tmp = path.with_name(f"{path.name}.{os.getpid()}.{uuid4().hex}.tmp")
-            fd = os.open(str(tmp), os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+            fd = open_private(tmp, os.O_CREAT | os.O_WRONLY | os.O_TRUNC)
             try:
                 os.write(fd, data)
             finally:
@@ -1058,7 +1059,7 @@ class DataTokenManager:
         """
         config_dir = self._resolve_config_dir()
         try:
-            config_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+            make_user_dir(config_dir)
             lock_path = _data_token_mint_lock_path(base_url, tenant, config_dir)
             lock_fd = os.open(str(lock_path), os.O_WRONLY | os.O_CREAT, 0o600)
         except OSError as exc:

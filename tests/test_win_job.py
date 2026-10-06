@@ -146,6 +146,31 @@ class TestNonWindows:
         assert win_job.send_ctrl_break(456) is False
 
 
+class TestWin32ConstantsArePinnedAsLiterals:
+    """The tests below compare a value to the module's own constant, which cannot fail when the
+    constant is wrong (JB1, JB2). These pin the values the Windows headers define, spelled out,
+    so a wrong constant fails here on any host."""
+
+    def test_the_console_event_and_creation_flags(self) -> None:
+        assert win_job.CTRL_BREAK_EVENT == 1  # wincon.h: CTRL_BREAK_EVENT
+        assert win_job.CREATE_NEW_PROCESS_GROUP == 0x00000200
+        assert win_job.CREATE_NO_WINDOW == 0x08000000
+
+    def test_the_job_object_and_process_access_values(self) -> None:
+        assert win_job._JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE == 0x00002000
+        assert win_job._JOB_OBJECT_EXTENDED_LIMIT_INFORMATION == 9
+        assert win_job._PROCESS_SET_QUOTA == 0x0100
+        assert win_job._PROCESS_TERMINATE == 0x0001
+
+    def test_the_console_module_agrees_with_the_headers_too(self) -> None:
+        from nexus.util import win_console
+
+        assert win_console.CTRL_BREAK_EVENT == 1
+        assert win_console.DETACHED_PROCESS == 0x00000008
+        assert win_console.ATTACH_PARENT_PROCESS == 0xFFFFFFFF
+        assert win_console.ERROR_ACCESS_DENIED == 5
+
+
 class TestWindowsShapedHappyPath:
     def test_create_job_sets_kill_on_close_limit_flag(
         self, windows_shaped: _FakeKernel32,

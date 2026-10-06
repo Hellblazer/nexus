@@ -116,6 +116,92 @@ def test_no_bare_posix_only_kill_primitives() -> None:
     )
 
 
+# -- os.kill(pid, SIGTERM): TerminateProcess on Windows (RDR-224 test review m9) ----------------
+#
+# The census above is about names that do not EXIST on Windows. This one is about a name that
+# does and means something else: ``os.kill(pid, signal.SIGTERM)`` is ``TerminateProcess`` there,
+# a hard kill with no grace window, where POSIX gets a catchable signal. A stop that must be
+# graceful goes through ``service_registry.request_graceful_stop`` (CTRL_BREAK), and a hard
+# kill through ``hard_kill_pid``. A raw SIGTERM send is allowed only where each site's own
+# reason is written down here, so a new one is a decision and not an accident.
+
+#: (module relative to src/nexus, enclosing function) -> why a raw SIGTERM send is right there.
+_SIGTERM_SEND_ALLOWED: dict[tuple[str, str], str] = {
+    ("daemon/service_registry.py", "request_graceful_stop"): (
+        "the primitive itself: this is its POSIX arm, and the Windows arm returns before it"
+    ),
+    ("session.py", "_kill_orphan_tracker_pids"): (
+        "unreachable from production on Windows (sweep_orphan_trackers returns 0 before it lists "
+        "anything); a direct caller there gets TerminateProcess followed by hard_kill_pid, which "
+        "is the ladder's own end state, and a multiprocessing resource_tracker is no console group"
+    ),
+    ("commands/mineru.py", "start"): (
+        "cleanup of a mineru-api that never became healthy: TerminateProcess is the same end "
+        "state `nx mineru stop` documents for Windows (mineru.py, 'there is no grace window'), "
+        "and a server that never served holds no state to flush"
+    ),
+    ("mcp_client/devonthink.py", "_sigterm_handler"): (
+        "DEVONthink is macOS-only (commands/dt.py gates every verb on _is_darwin), and the call "
+        "re-raises the process's own SIGTERM after restoring its disposition"
+    ),
+}
+
+
+def _sigterm_sends(tree: ast.AST) -> list[tuple[str, int]]:
+    """``(enclosing function, line)`` of every ``os.kill(<x>, signal.SIGTERM | SIGTERM)``."""
+    out: list[tuple[str, int]] = []
+
+    def is_sigterm(node: ast.AST) -> bool:
+        return (isinstance(node, ast.Attribute) and node.attr == "SIGTERM") or (
+            isinstance(node, ast.Name) and node.id == "SIGTERM"
+        )
+
+    def visit(node: ast.AST, scope: str) -> None:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            scope = node.name
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "kill"
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "os"
+            and len(node.args) == 2
+            and is_sigterm(node.args[1])
+        ):
+            out.append((scope, node.lineno))
+        for child in ast.iter_child_nodes(node):
+            visit(child, scope)
+
+    visit(tree, "<module>")
+    return out
+
+
+def test_the_sigterm_send_detector_sees_both_spellings_and_ignores_the_rest() -> None:
+    assert _sigterm_sends(ast.parse("import os, signal\ndef f(p):\n    os.kill(p, signal.SIGTERM)\n")) == [("f", 3)]
+    assert _sigterm_sends(ast.parse("import os\nfrom signal import SIGTERM\nos.kill(1, SIGTERM)\n")) == [("<module>", 3)]
+    assert _sigterm_sends(ast.parse("import os\nos.kill(1, 0)\n")) == []  # a liveness probe, not a send
+    assert _sigterm_sends(ast.parse("import os, signal\nos.kill(1, signal.SIGINT)\n")) == []
+
+
+def test_no_unlisted_raw_sigterm_send() -> None:
+    found: dict[tuple[str, str], list[int]] = {}
+    for path in sorted(_SRC.rglob("*.py")):
+        rel = path.relative_to(_SRC).as_posix()
+        for scope, lineno in _sigterm_sends(ast.parse(path.read_text(encoding="utf-8"))):
+            found.setdefault((rel, scope), []).append(lineno)
+    assert set(_SIGTERM_SEND_ALLOWED) <= set(found), (
+        "the scan did not find a listed site; the detector is broken or the site moved: "
+        f"{sorted(set(_SIGTERM_SEND_ALLOWED) - set(found))}"
+    )
+    stray = {k: v for k, v in found.items() if k not in _SIGTERM_SEND_ALLOWED}
+    assert not stray, (
+        "os.kill(pid, SIGTERM) is TerminateProcess on Windows. Use service_registry."
+        "request_graceful_stop (graceful) or hard_kill_pid (hard), or list the site in "
+        "_SIGTERM_SEND_ALLOWED with its reason: "
+        + ", ".join(f"src/nexus/{p}:{lines} in {s}" for (p, s), lines in sorted(stray.items()))
+    )
+
+
 def test_every_allowed_module_still_references_a_primitive() -> None:
     # A stale allowlist entry would silently exempt a future regression in
     # that module, so each entry must still earn its place.

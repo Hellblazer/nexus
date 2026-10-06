@@ -49,6 +49,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import stat
 import sys
 import time
 from pathlib import Path
@@ -134,20 +135,25 @@ class GCError(Exception):
     """The sweep refuses to proceed. Never raised after a deletion begins."""
 
 
-def _protected_targets(root: Path) -> list[str]:
+def _protected_targets(root: Path, platform: str | None = None) -> list[str]:
     """The generations ``current`` and ``previous`` name, as written.
 
     Read with ``readlink`` and compared as STRINGS, exactly as the shell half
     does. Not resolved: the contract is that both pointers hold absolute
     targets, and resolving here would start matching a generation reached by a
     different spelling, which is a behaviour change dressed as a tidy-up.
+
+    On Windows the pointers are junctions (``is_link`` covers them, where
+    ``is_symlink`` reads a junction as a plain directory and protects
+    nothing), the target loses its ``\\\\?\\`` prefix, and :func:`plan`
+    compares :func:`layout_core.compare_key` forms rather than strings.
     """
     layout = _layout()
     out: list[str] = []
     for name in (layout.CURRENT_LINK_NAME, layout.PREVIOUS_LINK_NAME):
         link = root / name
-        if link.is_symlink():
-            target = os.readlink(link)
+        if layout.is_link(link, platform=platform):
+            target = layout.read_link(link, platform=platform)
             if target:
                 out.append(target)
     return out
@@ -197,6 +203,7 @@ def plan(
     snapshot: str | None = None,
     grace_minutes: int = DEFAULT_BUILD_GRACE_MINUTES,
     claim_minutes: int = DEFAULT_BUILD_CLAIM_MINUTES,
+    platform: str | None = None,
 ) -> list[tuple[str, Path, str]]:
     """Decide what happens to every ``gen-*`` entry, deleting nothing.
 
@@ -216,9 +223,16 @@ def plan(
     prefix, receipt = layout.GENERATION_PREFIX, layout.RECEIPT_NAME
     marker = layout.BUILDING_MARKER_NAME
 
-    protected = _protected_targets(root)
+    # Rules (a), (b) and (d) compare compare_key forms: the strings themselves
+    # on POSIX (unchanged), and on Windows the case-, prefix- and 8.3-folded
+    # real path, so the running installer's own generation cannot read as "some
+    # other tree" because it was spelt differently from the pointer.
+    def key(text: str) -> str:
+        return layout.compare_key(text, platform=platform)
+
+    protected = [key(t) for t in _protected_targets(root, platform)]
     if self_generation:
-        protected.append(self_generation)
+        protected.append(key(self_generation))
 
     entries = [e for e in sorted(root.iterdir(), key=lambda p: p.name)
                if e.name.startswith(prefix) and e.is_dir()]
@@ -240,7 +254,7 @@ def plan(
             if total_complete - index < keep:
                 out.append(("skip", entry, "inside the keep window"))
                 continue
-        elif not entry.is_symlink() and (
+        elif not layout.is_link(entry, platform=platform) and (
             _recently_written(entry, grace_minutes)
             or _claimed_recently(entry, marker, claim_minutes)
         ):
@@ -256,11 +270,11 @@ def plan(
         # A receipt-less directory falls through deliberately: reapable, and
         # never counted toward the keep window.
 
-        if str(entry) in protected:
+        if key(str(entry)) in protected:
             out.append(("skip", entry, "protected pointer"))
             continue
 
-        holders = census.generation_holder_pids(entry, snapshot=view)
+        holders = census.generation_holder_pids(entry, snapshot=view, platform=platform)
         if holders:
             # Said on stdout: a held tree outside the keep window is 1.7 GB the
             # operator cannot see go, and a reap that only reported deletions
@@ -274,7 +288,81 @@ def plan(
     return out
 
 
-def _reap(entry: Path, emit_err) -> list[str]:
+def _rmtree(path: Path, on_error) -> None:
+    """``shutil.rmtree`` that reports each failure to *on_error* and carries on.
+
+    Its own function so a test can substitute the deletion; a Windows install
+    cannot be made to hold a file open on demand on every host.
+    """
+    shutil.rmtree(path, onexc=on_error)
+
+
+def _collecting_handler(failures: list[tuple[str, BaseException]]):
+    """An ``onexc`` handler that retries a read-only file once, then records.
+
+    The retry is the one the standard Windows recipe makes: a file with the
+    read-only attribute refuses ``os.unlink``/``os.rmdir`` with PermissionError
+    until it is made writable. Anything that still fails is RECORDED, not
+    swallowed -- ``ignore_errors=True`` is what let a locked, half-deleted
+    venv be reported as reaped.
+    """
+    def handler(func, path, exc) -> None:
+        if isinstance(exc, PermissionError):
+            try:
+                os.chmod(path, stat.S_IWRITE)
+                func(path)
+            except OSError as retry:
+                failures.append((str(path), retry))
+            return
+        failures.append((str(path), exc))
+    return handler
+
+
+def _reap_windows_tree(path: Path) -> tuple[bool, str]:
+    """Delete one generation directory on Windows. ``(gone, detail)``.
+
+    Receipt first: with the completion marker gone the tree is not a
+    generation to anything that enumerates them, so a half-deleted venv can
+    never be mistaken for a usable one. Then the tree, collecting failures. Any
+    failure leaves the directory "kept (in use)" for the next run to retry; the
+    caller says ``reaped`` only when the directory is actually gone.
+    """
+    layout = _layout()
+    try:
+        (path / layout.RECEIPT_NAME).unlink(missing_ok=True)
+    except OSError as exc:
+        return False, f"could not remove the receipt ({exc})"
+    failures: list[tuple[str, BaseException]] = []
+    _rmtree(path, _collecting_handler(failures))
+    if not path.exists():
+        return True, ""
+    first = failures[0] if failures else (str(path), "still present")
+    return False, f"could not remove {len(failures) or 1} item(s), first {first[0]}: {first[1]}"
+
+
+def _looks_like_venv(target: Path, nt: bool) -> bool:
+    """Whether *target* is the venv the ledger claims, as far as a reap can tell.
+
+    ``pyvenv.cfg`` alone is the POSIX test. On Windows it is not enough: a reap
+    that a running ``Scripts\\python.exe`` stops half-way has already removed
+    ``pyvenv.cfg`` (NTFS lists ``Include``, ``Lib``, ``pyvenv.cfg``, ``Scripts``),
+    so the NEXT run read the remains as "not a venv", unlinked the pointer, and
+    printed ``reaped``, stranding the partial tree with nothing left to name it.
+    A tree that still holds uv's receipt or a venv interpreter is the same
+    venv, mid-delete. A Python install root (``python.exe`` at the root, not in
+    ``Scripts``) and a home directory are neither.
+    """
+    if (target / "pyvenv.cfg").is_file():
+        return True
+    if not nt:
+        return False
+    layout = _layout()
+    return (target / "uv-receipt.toml").is_file() or layout.venv_python(
+        target, platform="win32",
+    ).is_file()
+
+
+def _reap(entry: Path, emit_err, platform: str | None = None) -> list[str]:
     """Delete one planned entry. Returns the lines to print on stdout.
 
     THE SCOPING GUARD LIVES HERE. Following a ``gen-*`` symlink is the ONLY way
@@ -295,11 +383,15 @@ def _reap(entry: Path, emit_err) -> list[str]:
         data.
     """
     layout = _layout()
+    nt = layout._is_nt(platform)
 
-    if not entry.is_symlink():
+    if not layout.is_link(entry, platform=platform):
         # rmtree on the directory itself, never through a pointer: the pointers
         # live in this same directory and following one would empty the
         # generation it names rather than removing a link.
+        if nt:
+            gone, detail = _reap_windows_tree(entry)
+            return [f"reaped {entry}"] if gone else [f"kept {entry}: in use ({detail})"]
         shutil.rmtree(entry, ignore_errors=True)
         return [f"reaped {entry}"]
 
@@ -314,19 +406,36 @@ def _reap(entry: Path, emit_err) -> list[str]:
     # here is deleting the legacy tree. Resolve one level -- registration only
     # ever writes a direct absolute symlink, never a chain -- and remove both:
     # the real tree, then the now-dangling pointer.
-    real = os.readlink(entry)
-    if not real.startswith("/"):
+    real = layout.read_link(entry, platform=platform)
+    if not (Path(real).is_absolute() if nt else real.startswith("/")):
         emit_err(f"nexus: ledger target is not an absolute path, refusing: '{real}'")
         return []
 
     target = Path(real)
-    if not target.is_dir() or not (target / "pyvenv.cfg").is_file():
+    if not target.is_dir() or not _looks_like_venv(target, nt):
         emit_err(f"nexus: ledger target is not a venv, unlinking the pointer only: {real}")
-        entry.unlink(missing_ok=True)
+        if nt:
+            layout.remove_link(entry)
+        else:
+            entry.unlink(missing_ok=True)
         return [f"reaped {entry}"]
 
-    shutil.rmtree(target, ignore_errors=True)
-    entry.unlink(missing_ok=True)
+    if nt:
+        # Never report a tree reaped that is still there, and keep the pointer
+        # until it is gone: the next run retries a locked legacy tree, and the
+        # pointer is what tells it which tree.
+        failures: list[tuple[str, BaseException]] = []
+        _rmtree(target, _collecting_handler(failures))
+        if target.exists():
+            first = failures[0] if failures else (str(target), "still present")
+            return [
+                f"kept {entry}: in use (could not remove {len(failures) or 1} "
+                f"item(s), first {first[0]}: {first[1]})"
+            ]
+        layout.remove_link(entry)
+    else:
+        shutil.rmtree(target, ignore_errors=True)
+        entry.unlink(missing_ok=True)
     # Reaping the tree IS what closes uv's door: measured against uv 0.8
     # (2026-08-28), with the venv gone `uv tool list` says "No tools installed"
     # and `uv tool upgrade conexus` REFUSES rather than rebuilding. Never
@@ -349,6 +458,7 @@ def gc_generations(
     grace_minutes: int = DEFAULT_BUILD_GRACE_MINUTES,
     claim_minutes: int = DEFAULT_BUILD_CLAIM_MINUTES,
     emit_err=None,
+    platform: str | None = None,
 ) -> list[str]:
     """Run the sweep. Returns the stdout lines; refusals go to *emit_err*.
 
@@ -374,7 +484,7 @@ def gc_generations(
     lines: list[str] = []
     for action, entry, detail in plan(
         resolved, keep=keep, self_generation=self_generation, snapshot=snapshot,
-        grace_minutes=grace_minutes, claim_minutes=claim_minutes,
+        grace_minutes=grace_minutes, claim_minutes=claim_minutes, platform=platform,
     ):
         if action == "skip":
             continue
@@ -383,7 +493,7 @@ def gc_generations(
         elif dry_run:
             lines.append(f"would reap {entry}")
         else:
-            lines.extend(_reap(entry, emit_err))
+            lines.extend(_reap(entry, emit_err, platform))
     return lines
 
 

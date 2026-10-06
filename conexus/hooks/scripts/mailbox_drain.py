@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-or-later
+# PEP 723 metadata: `uv run` reads the interpreter floor from here, so no shell-
+# special `>=` has to ride in hooks.json argv (nexus-efk2h). This script refuses
+# Python 3.11 and older below.
+# /// script
+# requires-python = ">=3.12"
+# ///
 """UserPromptSubmit hook: drain this session's RDR-205 mailboxes and inject
 what it finds (bead nexus-6konb.7, MM-2.2; design bead nexus-73vnw).
 

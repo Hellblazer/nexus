@@ -223,3 +223,79 @@ class TestKillOrphanTrackerPids:
             if proc.poll() is None:
                 os.kill(proc.pid, signal.SIGKILL)
                 proc.wait(timeout=5.0)
+
+
+class TestKillOrphanTrackerPidsGoneShapes:
+    """nexus-f9bgu.44: on Windows ``os.kill`` of a pid that has already exited
+    raises a plain ``OSError`` (``WinError 87``), not ``ProcessLookupError``, so
+    a process that left between the listing and the signal turned the sweep
+    into a traceback. The sweep itself is a no-op on Windows (it returns before
+    any listing), so this is reachable only by a direct caller; the helper is
+    still held to the shared contract: a gone pid is skipped, never raised."""
+
+    def test_a_gone_pid_of_any_oserror_shape_is_skipped_at_the_sigterm_step(
+        self, monkeypatch
+    ):
+        import nexus.session as session
+
+        def _gone(pid, sig):
+            raise OSError(22, "The parameter is incorrect")  # the WinError 87 shape
+
+        monkeypatch.setattr(session.os, "kill", _gone)
+        monkeypatch.setattr(session, "_is_pid_alive", lambda pid: False)
+        assert session._kill_orphan_tracker_pids([4242], grace_seconds=0.0) == 0
+
+    def test_the_escalation_goes_through_the_shared_hard_kill(self, monkeypatch):
+        """A survivor of the grace is killed by ``hard_kill_pid`` (the one place
+        that knows a gone pid raises ``OSError`` on Windows), not a raw
+        ``os.kill`` with a narrower except."""
+        import nexus.daemon.service_registry as registry
+        import nexus.session as session
+
+        sigterms: list[int] = []
+        hard: list[int] = []
+        monkeypatch.setattr(session.os, "kill", lambda pid, sig: sigterms.append(pid))
+        monkeypatch.setattr(session, "_is_pid_alive", lambda pid: True)
+        monkeypatch.setattr(
+            registry, "hard_kill_pid", lambda pid: hard.append(pid) or True
+        )
+        assert session._kill_orphan_tracker_pids([4242], grace_seconds=0.0) == 1
+        assert sigterms == [4242]
+        assert hard == [4242], "the escalation must use service_registry.hard_kill_pid"
+
+    @pytest.mark.parametrize(
+        ("gone_exc", "platform"),
+        [
+            # POSIX: the pid is gone at the SIGKILL step.
+            (ProcessLookupError(3, "No such process"), "linux"),
+            # Windows: os.kill of an exited pid raises WinError 87 (errno EINVAL).
+            # Injected, because on a POSIX host EINVAL is a bad-signal error that
+            # hard_kill_pid re-raises by design (RDR-224, nexus-f9bgu.33 m3).
+            (OSError(22, "The parameter is incorrect"), "win32"),
+        ],
+        ids=["posix-esrch", "windows-winerror-87"],
+    )
+    def test_a_survivor_that_exits_before_the_hard_kill_does_not_raise(
+        self, monkeypatch, gone_exc, platform
+    ):
+        """The window the narrow except left open: alive at the check, gone at
+        the kill. ``hard_kill_pid`` swallows that; the sweep must not raise."""
+        import functools
+
+        import nexus.daemon.service_registry as registry
+        import nexus.session as session
+
+        calls: list[int] = []
+
+        def _kill(pid, sig):
+            calls.append(sig)
+            if len(calls) > 1:  # the SIGKILL step: the pid is already gone
+                raise gone_exc
+
+        monkeypatch.setattr(session.os, "kill", _kill)
+        monkeypatch.setattr(session, "_is_pid_alive", lambda pid: True)
+        monkeypatch.setattr(
+            registry, "hard_kill_pid",
+            functools.partial(registry.hard_kill_pid, platform=platform),
+        )
+        assert session._kill_orphan_tracker_pids([4242], grace_seconds=0.0) == 1

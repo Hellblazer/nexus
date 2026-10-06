@@ -33,7 +33,7 @@ def _config_dir() -> Path:
 #: nexus-i711w Stage 2 sub-stage B removed "t2_daemon" — its only caller was
 #: t2_daemon.py. ("t3_daemon" is a P4b residual with no caller either; tracked
 #: on nexus-pmag3 with the other phantom tier strings that deletion left.)
-_DAEMON_MODES: frozenset[str] = frozenset({"t3_daemon", "storage_service"})
+_DAEMON_MODES: frozenset[str] = frozenset({"t3_daemon", "storage_service", "windows_autostart"})
 
 
 def _resolve_level(mode: str, verbose: bool) -> int:
@@ -106,7 +106,7 @@ def emit_import_time_warning(event: str, **fields: object) -> None:
 def configure_logging(
     mode: Literal[
         "cli", "console", "mcp", "hook", "watchdog",
-        "t3_daemon", "storage_service",
+        "t3_daemon", "storage_service", "windows_autostart",
     ],
     verbose: bool = False,
     config_dir: Path | None = None,

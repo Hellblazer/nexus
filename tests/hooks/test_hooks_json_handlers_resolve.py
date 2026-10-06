@@ -198,8 +198,14 @@ def _mentions(handler: str, cells: list[str]) -> bool:
         return any(handler in c for c in cells)
     # A command line: the table gives the readable core, not the full
     # shell with its redirections and fallbacks.
+    if handler.startswith("uv run "):
+        # The launcher (nexus-efk2h) is flags then the script; the table
+        # names the script (and a shim verb), so start the comparison there.
+        tokens = handler.split()
+        i = next((k for k, t in enumerate(tokens) if t.endswith(".py")), 0)
+        handler = " ".join(tokens[i:])
     core = handler.split(" 2>")[0].split(" >")[0].strip()
-    if core.startswith("python3 "):
+    if core.startswith("python3 ") or core.endswith(".py") or ".py " in core:
         core = core.split("/")[-1]
     return any(core in c for c in cells)
 

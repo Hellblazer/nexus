@@ -458,3 +458,22 @@ def test_the_pid_recycle_guard_still_refuses_a_foreign_command(
 
     assert calls == []
     assert any("gone or recycled" in a for a in actions)
+
+
+def test_the_gate_is_true_for_a_windows_shaped_generation(tmp_path, monkeypatch) -> None:
+    """nexus-f9bgu.47: a Windows venv keeps site-packages at <venv>/Lib/site-packages,
+    one level shallower than POSIX; the fixed parents[2] named the tools dir instead."""
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    gen = _fake_generation(tools, "20260826T010000Z")
+    monkeypatch.setenv("NX_TOOLS_DIR", str(tools))
+    monkeypatch.setattr(upgrade_finish, "_install_root", lambda: gen / "Lib" / "site-packages")
+
+    assert upgrade_finish.running_from_tool_install() is True
+
+
+def test_the_venv_root_follows_the_site_packages_shape(tmp_path) -> None:
+    posix = tmp_path / "v" / "lib" / "python3.12" / "site-packages"
+    windows = tmp_path / "w" / "Lib" / "site-packages"
+    assert upgrade_finish.venv_root_of_site_packages(posix) == tmp_path / "v"
+    assert upgrade_finish.venv_root_of_site_packages(windows) == tmp_path / "w"

@@ -75,6 +75,32 @@ would disable the bound and is refused at boot. The shutdown hook also
 terminates this process's own backends (`BackendReaper`, keyed on a
 per-boot `application_name`) before closing the pool, since a CPU-bound
 backend never notices a closed socket.
+`NX_PG_SOCKET_TIMEOUT_MARGIN_SECONDS` (default 30; `0` disables) is the read bound on a Postgres
+server that has gone silent (nexus-u9zkn; the 2026-10-05 failover hung one search read 59 s with no
+RST). It is per path, not pool-wide, and it covers the statements a path bounds, not every read of a
+request: every `statement_timeout` the Java side sets also gives its connection a socket read timeout of
+that bound plus the margin (`PgSession.setLocal` sets both, so they cannot drift; it runs first among a
+borrow's `setLocal` round trips so the others are covered), restored when the connection returns to the
+pool. At the defaults: search 30 + 30 = 60 s, taxonomy assign 60 s, reaper statements and the gc batches
+25 + 30 = 55 s, a bounded reaper census 60 + 30 = 90 s, the scheduled sweeps 60 s, the sweep gate
+5 + 30 = 35 s, tuple subspace list 10 + 30 = 40 s. That ends a silent bounded statement at about the 59 s
+the failover took, deterministically; lower the margin to end it sooner. Reads that stay unbounded: the
+token store's reads on an auth-cache miss and session resolution (`TokenStore`, no stamp, no statement
+bound), `CollectionRegistry.lookup` on a cache miss, and any read with no statement bound. A request can
+still wait on TCP in any of them. Paths with no statement bound get no read bound, deliberately (collection
+re-home, quarantine, purge-trash, delete and rename collection, the taxonomy link joins, `VACUUM`, writes
+in general, the Liquibase migration): they legitimately run for minutes with the server silent, and a
+socket timeout closes the socket without cancelling the backend, so the write would roll back and its
+retry would stack a second backend behind the first. The tenant stamp that opens every borrow runs before
+the bound is set, so it gets a read bound of the margin, never under 5 s, reset to none before the path
+runs. The `gc_*` and `reaper_*` plpgsql functions set `statement_timeout` themselves (5 s or 25 s), which
+no Java bound covers; every path that calls a 25 s function sets a Java bound of 25 s, so its read bound
+(25 s plus the margin) outlasts it, and a new such path must do the same. `tcpKeepAlive` is on for both
+pools (`PoolKeepAlive`, which does not load `PgSession`). A bad margin fails the service AT BOOT.
+`NX_SEARCH_EXACT_MAX_ROWS` (default 10000, provisional; range 0..1000000, `0` disables) is the
+cardinality router's threshold (nexus-tu8wp.6): a plain-search statement whose selected
+collections hold at most that many physical rows in the tenant runs exact instead of
+walking the shared HNSW index. A malformed value fails the service AT BOOT.
 `NX_OWNERLESS_WRITE_MODE` (RDR-223 Phase 3 Step 2) is `enforce` or `log-only`;
 **unset or blank means `log-only`**, so only an explicit `enforce` refuses a
 `/v1/vectors/upsert-chunks` or `/store-put` write whose chashes have no live

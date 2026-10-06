@@ -76,8 +76,9 @@ import java.util.function.Supplier;
  *       {@link Settings#floorMinChunks} chunks and more than {@link Settings#floorFraction} of the collection is
  *       refused without paying for a census, every hour. The move re-judges it under the gate;</li>
  *   <li>the manifest-less census, re-run in the engine and bounded by {@link Settings#censusTimeout}, on every pass
- *       that would move something. It must read {@code scope_chunk_total} equal to the dry run's total (else it
- *       read a different set than the one being judged, and a false zero is possible), and
+ *       that would move something. It must read {@code scope_chunk_total} not below the dry run's total (below it,
+ *       it read a different set than the one being judged, and a false zero is possible; above it, a chunk was written
+ *       between the two reads, which proceeds and is logged), and
  *       {@code legacy-unmanifested == 0} and {@code unclassified == 0}. The stored ladder record is not enough:
  *       a tenant with an old record can later gain legacy-shaped chunks, and a live legacy note with no manifest
  *       row reads reapable once aged (matrix row R8);</li>
@@ -572,8 +573,9 @@ final class ChunkReaper {
     }
 
     /**
-     * The empty-tenant test the production gate is built with (nexus-wbfpw.73): no chunk row and no manifest row,
-     * read under the tenant's RLS context with the same statement bound as the reaper's own enumeration.
+     * The empty-tenant test the production gate is built with (nexus-wbfpw.73): no chunk row in {@code nexus.chunks},
+     * read under the tenant's RLS context with the same statement bound as the reaper's own enumeration. The
+     * manifest is not read: a manifest row cannot outlive its chunk (see {@code ReaperRepository#holdsNothing}).
      */
     static java.util.function.Predicate<String> emptyTenantProbe(ReaperRepository store) {
         return tenant -> store.holdsNothing(tenant, Duration.ofMillis(STATEMENT_TIMEOUT_MS));

@@ -3300,16 +3300,24 @@ def _probe_semaphore_namespace() -> tuple[bool, str]:
         return False, f"{exc!r}"
 
 
-def _count_orphan_trackers() -> int | None:
+def _count_orphan_trackers(*, platform: str | None = None) -> int | None:
     """Return the number of PPID=1 multiprocessing tracker orphans
     visible to this user, or ``None`` if the count cannot be
     obtained. Pure read; no side effects.
+
+    ``None`` on Windows (RDR-224, nexus-f9bgu.21): there is no POSIX
+    semaphore namespace for an orphan to leak from and no reparenting to
+    pid 1, so the count has no meaning and no ``ps`` is run.
 
     Bead nexus-9h1s. Each orphan tracker holds POSIX semaphores
     until killed; the namespace is bounded
     (``kern.posix.sem.max=10000`` on macOS). A high count predicts
     imminent SemLock failure even when the live probe still passes.
     """
+    import sys as _sys  # noqa: PLC0415 — deferred to keep CLI startup fast
+
+    if (platform if platform is not None else _sys.platform) == "win32":
+        return None
     try:
         import subprocess  # noqa: PLC0415 — deferred to keep CLI startup fast
 

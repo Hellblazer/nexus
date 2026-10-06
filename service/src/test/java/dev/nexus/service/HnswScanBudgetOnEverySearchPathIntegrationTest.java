@@ -63,6 +63,11 @@ class HnswScanBudgetOnEverySearchPathIntegrationTest {
     @BeforeAll
     void startAll() throws Exception {
         PgSession.resetScanBudgetForTests();
+        // nexus-tu8wp.6: the six-row fixture is under the cardinality router's default threshold, so
+        // searchWithTokens would run exact and never walk HNSW; the probe only sees the GUCs set, so
+        // the non-vacuity claim below would be false. Router off: the routed path is
+        // PgVectorCardinalityRouterIntegrationTest's.
+        PgSession.overrideSearchExactMaxRowsForTests(0);
         pg = PgContainerHelper.start();
         try (Connection su = pg.createConnection("")) {
             PgContainerHelper.applyProductSchema(su);
@@ -114,6 +119,7 @@ class HnswScanBudgetOnEverySearchPathIntegrationTest {
     @AfterAll
     void stopAll() {
         PgSession.resetScanBudgetForTests();
+        PgSession.resetSearchExactMaxRowsForTests();
         if (svcDs != null) svcDs.close();
         if (pg != null) pg.stop();
     }

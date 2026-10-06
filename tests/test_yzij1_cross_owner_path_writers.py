@@ -22,7 +22,6 @@ still works would pass against every version of this code ever written.
 """
 from __future__ import annotations
 
-import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -392,9 +391,14 @@ class TestSessionSummaryShowsEveryDocumentForAPath:
         """PRE-FIX: only row 1.1 was consulted, so this printed the
         'No linked RDRs found for recently modified files.' line instead."""
         monkeypatch.setattr(_cat_cmd, "_get_catalog", lambda: _ReportCatalog())
+        # session_summary reaches git through run_bounded (Popen), so patching
+        # subprocess.run never applied and the test ran real `git log --since`,
+        # passing only when the checkout had changes in the last 24 hours.
+        import nexus.bounded_subprocess as _bounded
+
         monkeypatch.setattr(
-            subprocess, "run",
-            lambda *a, **k: SimpleNamespace(stdout="src/a.py\n", returncode=0),
+            _bounded, "run_bounded",
+            lambda *a, **k: SimpleNamespace(stdout="src/a.py\n", stderr="", returncode=0),
         )
 
         runner = CliRunner()

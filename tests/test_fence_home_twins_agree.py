@@ -244,3 +244,31 @@ def test_a_rootless_docker_socket_survives_the_runtime_dir_fence(tmp_path: Path)
         real_runtime.rmdir()
     assert py["DOCKER_HOST"] == f"unix://{sock_path}"
     assert sh["DOCKER_HOST"] == f"unix://{sock_path}"
+
+
+def test_a_refused_symlink_on_windows_links_through_without_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A non-admin Windows account (the win-release runner's) cannot create
+    # symlinks: WinError 1314 killed the whole Windows test set at session
+    # start (rehearsal run 37410530509). The fence links through instead.
+    import tests._fence_home as fh
+
+    real = tmp_path / "real"
+    (real / "proj").mkdir(parents=True)
+    (real / ".gitconfig").write_text("x")
+
+    def refuse(self: Path, target: Path, *a: object, **k: object) -> None:
+        raise OSError(1314, "A required privilege is not held by the client")
+
+    linked: list[tuple[str, str]] = []
+    monkeypatch.setattr(Path, "symlink_to", refuse)
+    monkeypatch.setattr(fh, "_windows_link", lambda link, entry: linked.append((link.name, entry.name)))
+    monkeypatch.setattr(fh.sys, "platform", "win32")
+    fh.fence_home(real, tmp_path / "gate", ".config/nexus")
+    assert sorted(linked) == [(".gitconfig", ".gitconfig"), ("proj", "proj")]
+
+    # Off Windows the same refusal is not swallowed.
+    monkeypatch.setattr(fh.sys, "platform", "linux")
+    with pytest.raises(OSError):
+        fh.fence_home(real, tmp_path / "gate2", ".config/nexus")

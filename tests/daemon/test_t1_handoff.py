@@ -8,7 +8,10 @@ against the writer (tests/test_hooks.py) and the watcher
 """
 from __future__ import annotations
 
+import sys
 from pathlib import Path
+
+import pytest
 
 from nexus.daemon.t1_handoff import (
     HandoffMarker,
@@ -43,6 +46,11 @@ def test_write_then_read_round_trips(tmp_path: Path) -> None:
     )
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="the writer asks for 0o600 through os.open's mode argument, which Windows ignores (st_mode reads 0o666 "
+    "there); privacy on Windows is the ACL the directory grants, checked by nexus._winsec.owner_only_problem",
+)
 def test_write_is_mode_0600(tmp_path: Path) -> None:
     write_handoff_marker(
         111, new_session_id="s", claude_pid=1, config_dir=tmp_path,
@@ -341,6 +349,11 @@ def test_write_if_absent_leaves_no_temp_file_on_supersede(tmp_path: Path) -> Non
     assert leftovers == []
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="the writer asks for 0o600 through os.open's mode argument, which Windows ignores (st_mode reads 0o666 "
+    "there); privacy on Windows is the ACL the directory grants, checked by nexus._winsec.owner_only_problem",
+)
 def test_write_if_absent_mode_0600_on_success(tmp_path: Path) -> None:
     write_handoff_marker_if_absent(111, new_session_id="s", claude_pid=1, config_dir=tmp_path)
     path = handoff_marker_path(111, tmp_path)

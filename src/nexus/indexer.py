@@ -16,7 +16,6 @@ Per-file indexing logic lives in focused sub-modules (RDR-032):
   nexus.indexer_utils  — staleness check, credential check, shared helpers
   nexus.index_context  — IndexContext dataclass
 """
-import errno
 import os
 import subprocess
 import threading
@@ -421,11 +420,12 @@ def _clear_stale_lock(lock_path: Path) -> None:
         if age > _LOCK_STALE_SECONDS:
             _remove_stale(lock_path)
         return
-    try:
-        os.kill(pid, 0)
-    except OSError as exc:
-        if exc.errno == errno.ESRCH:
-            _remove_stale(lock_path)
+    from nexus.daemon.service_registry import pid_alive  # noqa: PLC0415 — deferred: advisory cleanup path only
+
+    # pid_alive reads only ESRCH (Windows: no such process) as dead, so an
+    # ambiguous probe leaves the lock, as before (nexus-f9bgu.25).
+    if not pid_alive(pid):
+        _remove_stale(lock_path)
 
 
 def _sweep_stale_locks(lock_dir: Path) -> None:

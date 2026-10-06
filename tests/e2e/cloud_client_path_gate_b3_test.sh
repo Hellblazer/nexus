@@ -203,6 +203,59 @@ run_e "E: 200 empty reapable page in the engine's shape -> ok" 0 "ok [K8]" 200 \
   '{"collection":"knowledge__ccpg-unregistered-1-2__voyage-context-3__v1","grace_seconds":null,"returned":0,"next_after":null,"chunks":[]}' \
   K8 200 reapable_empty
 
+# Leg L's judge, _route_probe_verdict, extracted from the real script (nexus-tu8wp.3): the per-collection search
+# route read through the edge. A route-serving engine answers a refused request with 400 and its own JSON error;
+# an older engine answers with its generic 404 JSON; everything else is named for what the client does with it.
+sed -n '/^_route_probe_verdict() {/,/^}/p' "$GATE" > "$TMP/lfn.sh"
+if [ "$(head -n 1 "$TMP/lfn.sh")" != '_route_probe_verdict() {' ] \
+   || [ "$(sed -n 'x;$p' "$TMP/lfn.sh")" != 'PY' ] || [ "$(tail -n 1 "$TMP/lfn.sh")" != '}' ]; then
+  echo "[FAIL] _route_probe_verdict not found or not closed on its PY heredoc in $GATE (extracted $(wc -l < "$TMP/lfn.sh") lines)"
+  echo "$NAME: $PASS passed, $((FAIL + 1)) failed"
+  exit 1
+fi
+# run_l <label> <want-rc> <want-text> <code> <body> <fragment> [<expected>]
+run_l() {
+  local label="$1" want_rc="$2" want_text="$3" code="$4" body="$5" fragment="$6" expected="${7:-}" out rc
+  # shellcheck disable=SC1091
+  out="$(source "$TMP/lfn.sh"; _route_probe_verdict L1 "$code" "$body" "$fragment" "$expected")"
+  rc=$?
+  if [ "$rc" = "$want_rc" ] && [[ "$out" == *"$want_text"* ]]; then
+    PASS=$((PASS + 1)); echo "[ok]   $label"
+  else
+    FAIL=$((FAIL + 1)); echo "[FAIL] $label: want rc=$want_rc text='$want_text', got rc=$rc"
+    printf '%s\n' "$out" | sed 's/^/         /'
+  fi
+}
+FRAG_K="per_collection_k must be in 1.."
+FRAG_LIM="limit must be in 1.."
+BAD_K='{"error":"per_collection_k must be in 1..300, got 0"}'
+NOTFOUND='{"error":"not found"}'
+run_l "L: a route-serving engine's 400 carrying its message -> served (0)" 0 "ok [L1]: route served" 400 "$BAD_K" "$FRAG_K"
+run_l "L: the limit probe's 400 -> served (0)" 0 "route served" 400 '{"error":"limit must be in 1..1200, got 1201"}' "$FRAG_LIM"
+run_l "L: the engine's own 404 JSON, nothing asserted -> NOT SERVED (3), says what the client does" 3 "NOT SERVED [L1]" 404 "$NOTFOUND" "$FRAG_K"
+run_l "L: ... and it names the fall back to the batched path" 3 "falls back to the batched path" 404 "$NOTFOUND" "$FRAG_K"
+run_l "L: the engine's 404 with served expected -> violation (1)" 1 "predates engine-service-v0.1.147" 404 "$NOTFOUND" "$FRAG_K" served
+run_l "L: the engine's 404 with absent expected -> asserted absent (4)" 4 "route absent as expected" 404 "$NOTFOUND" "$FRAG_K" absent
+run_l "L: a served route with absent expected -> violation (1)" 1 "NX_EXPECTED_SEARCH_PER_COLLECTION_ROUTE=absent" 400 "$BAD_K" "$FRAG_K" absent
+run_l "L: a served route with served expected -> served (0)" 0 "route served" 400 "$BAD_K" "$FRAG_K" served
+run_l "L: an edge's own 404 JSON -> violation (1), not taken for the engine's" 1 "expected exactly the engine's" 404 \
+  '{"message":"Not Found"}' "$FRAG_K"
+run_l "L: an edge 404 HTML page -> violation (1)" 1 "expected exactly the engine's" 404 '<html>404</html>' "$FRAG_K"
+run_l "L: a 400 with an edge's own JSON error -> violation (1): the request may never have reached the engine" 1 \
+  "expected it to contain the engine's" 400 '{"error":"Request blocked by security policy"}' "$FRAG_K"
+run_l "L: a 400 HTML page -> violation (1)" 1 "not a JSON object" 400 '<html>400</html>' "$FRAG_K"
+run_l "L: 403 (a WAF or edge refusal) -> violation (1), names the silent 10-minute fall back" 1 "silently inert" 403 \
+  '{"message":"Forbidden"}' "$FRAG_K"
+run_l "L: 405 -> violation (1), same class" 1 "route-absent and runs the batched path for 10 minutes" 405 '' "$FRAG_K"
+run_l "L: 501 -> violation (1), same class" 1 "route-absent and runs the batched path for 10 minutes" 501 '' "$FRAG_K"
+run_l "L: 500 -> violation (1), names the 60 s fall back" 1 "falls back to the batched path for 60 s" 500 '{"error":"internal"}' "$FRAG_K"
+run_l "L: 502 -> violation (1), a failed model group" 1 "reports the whole model group as failed" 502 '<html>Bad Gateway</html>' "$FRAG_K"
+run_l "L: 503 -> violation (1)" 1 "reports the whole model group as failed" 503 '{"error":"busy"}' "$FRAG_K"
+run_l "L: a refused request answered 200 -> violation (1)" 1 "was not answered like one" 200 '{"results":[]}' "$FRAG_K"
+run_l "L: curl failure (000) -> violation (1)" 1 "was not answered like one" 000 '' "$FRAG_K"
+run_l "L: a probe that names no fragment -> violation (1), never a pass on any 400" 1 "must name the engine message fragment" \
+  400 "$BAD_K" ""
+
 # Wiring: the not-run state reaches the final sentinel, a violation is a leg
 # failure, and the function is called with the bearer-resolved status body.
 check_wiring() {
@@ -217,7 +270,15 @@ check_wiring "B3 return 3 sets B3_NOT_RUN" '3\) echo "  \$B3_LINE"; B3_NOT_RUN=1
 check_wiring "B3 violation is a leg failure" '\*\) _leg_fail "\$B3_LINE"'
 check_wiring "J is judged on the status body leg B fetched" 'J_LINE="\$\(_reaper_status_verdict "\$STATUS_BODY"\)"'
 check_wiring "J violation is a leg failure" '_leg_fail "\$J_LINE"'
-check_wiring "the leg battery expects 9 legs (A B C+D E F H I J K)" '^EXPECTED_LEGS=9$'
+check_wiring "the leg battery expects 10 legs (A B C+D E F H I J K L)" '^EXPECTED_LEGS=10$'
+check_wiring "L runs each probe through _route_probe, which judges with the real _route_probe_verdict and the expectation env" \
+  'line="\$\(_route_probe_verdict "\$label" "\$EDGE_CODE" "\$EDGE_BODY" "\$fragment" "\$NX_EXPECTED_SEARCH_PER_COLLECTION_ROUTE"\)" \|\| rc=\$\?'
+check_wiring "L: an unasserted old-engine 404 (exit 3) sets the not-served flag" '3\) echo "  \$line"; L_ABSENT=\$\(\(L_ABSENT \+ 1\)\); L_ROUTE_NOT_SERVED=1 ;;'
+check_wiring "L: an asserted absent route (exit 4) does NOT set the not-served flag" '4\) echo "  \$line"; L_ABSENT=\$\(\(L_ABSENT \+ 1\)\) ;;'
+check_wiring "L: a violation is a leg failure" '_leg_fail "L: the per-collection route through the edge did not answer as the engine does'
+check_wiring "L: probes that disagree are a violation" 'the two probes disagree'
+check_wiring "the expectation env accepts only unset, served, absent" '""\|served\|absent\) ;;'
+check_wiring "the not-served note reaches the PASSED line" 'PASS_NOTE="\$\{PASS_NOTE:\+\$PASS_NOTE; \}per-collection route NOT served: L saw the old engine'"'"'s JSON 404"'
 
 # Leg K runs against the LIVE engine, so its read-only property is pinned here rather than left to a comment,
 # and pinned STRUCTURALLY: the audit below holds an allowlist of what the gate may send, not a per-probe
@@ -281,8 +342,8 @@ k_code = "\n".join(code(legs["K"]))
 
 # 1. _edge_post only inside leg K.
 for name, lines in legs.items():
-    if name != "K" and re.search(r"\b_edge_post\b", "\n".join(code(lines))):
-        errs.append("_edge_post used outside leg K (in %s)" % name)
+    if name not in ("K", "L") and re.search(r"\b_edge_post\b", "\n".join(code(lines))):
+        errs.append("_edge_post used outside legs K and L (in %s)" % name)
 
 # 2. The leg-K names are assigned exactly once, to the unregistered shape, and never rebound another way.
 want_assign = {
@@ -373,7 +434,45 @@ for path, body, label, code_s, kind, fragment in calls:
         errs.append("%s: path %s is not in the allowlist" % (label, path))
     if code_s == "400" and kind == "error" and not fragment:
         errs.append("%s: a 400 probe must name the engine message fragment it expects" % label)
-print("; ".join(errs) if errs else "OK %d" % len(calls))
+
+# 6. Leg L (the per-collection search route, nexus-tu8wp.3): exactly two probes, each a request the engine refuses
+# by validation before it resolves a collection, embeds or opens a transaction, on the one allowlisted path with
+# one allowlisted body and the engine's own message fragment, each paired with a _route_probe judge.
+if "L" not in legs:
+    errs.append("no leg L found")
+else:
+    l_code = "\n".join(code(legs["L"]))
+    L_ALLOWED = {
+        "L1": ('{"query":"ccpg route probe","collections":["$K_COLLECTION"],"per_collection_k":0,"limit":1}',
+               "per_collection_k must be in 1.."),
+        "L2": ('{"query":"ccpg route probe","collections":["$K_COLLECTION"],"per_collection_k":1,"limit":1201}',
+               "limit must be in 1.."),
+    }
+    L_CALL = re.compile(
+        r'^[ \t]*_edge_post\s+"([^"]+)"\s+("(?:[^"\\]|\\.)*")[ \t]*\n'
+        r'[ \t]*_route_probe\s+(L\d+)\s+"([^"]*)"\s*\|\|\s*L_BAD=1[ \t]*$',
+        re.M,
+    )
+    l_calls = L_CALL.findall(l_code)
+    l_posted = len(re.findall(r"^[ \t]*_edge_post\s", l_code, re.M))
+    l_judged = len(re.findall(r"^[ \t]*_route_probe\s", l_code, re.M))
+    if not (len(l_calls) == l_posted == l_judged == len(L_ALLOWED)):
+        errs.append("leg L must hold exactly %d _edge_post calls, each paired with one _route_probe, got %d paired, %d posted, %d judged"
+                    % (len(L_ALLOWED), len(l_calls), l_posted, l_judged))
+    if sorted(c[2] for c in l_calls) != sorted(L_ALLOWED):
+        errs.append("leg L probe labels are %r, expected %r" % (sorted(c[2] for c in l_calls), sorted(L_ALLOWED)))
+    for path, body, label, fragment in l_calls:
+        if path != "/v1/vectors/search-per-collection":
+            errs.append("%s: path %s is not in the allowlist (leg L may probe only /v1/vectors/search-per-collection)" % (label, path))
+        want = L_ALLOWED.get(label)
+        if want is None:
+            continue
+        b = body[1:-1].replace('\\"', '"')
+        if b != want[0]:
+            errs.append("%s: leg L body %r is not the allowlisted refused request %r" % (label, b, want[0]))
+        if fragment != want[1]:
+            errs.append("%s: leg L must expect the engine message fragment %r, got %r" % (label, want[1], fragment))
+print("; ".join(errs) if errs else "OK %d" % (len(calls) + len(l_calls)))
 PY
 K_AUDIT="$("$E2E_PYTHON" "$TMP/k_audit.py" "$GATE")"
 if [[ "$K_AUDIT" == OK\ * ]]; then
@@ -446,7 +545,7 @@ neg_case "a curl with a clustered -sSX write flag outside leg K" "a curl with a 
   'NOAUTH_STATUS="$(curl -sS -m 20 -o /dev/null' 'NOAUTH_STATUS="$(curl -sSX POST -m 20 -o /dev/null'
 neg_case "the helper's method changed to DELETE" "methods ['DELETE']" \
   'curl -sS -m 30 -X POST' 'curl -sS -m 30 -X DELETE'
-neg_case "_edge_post called from leg J" "_edge_post used outside leg K (in J)" \
+neg_case "_edge_post called from leg J" "_edge_post used outside legs K and L (in J)" \
   'J_RC=0
 ' 'J_RC=0
 _edge_post "/v1/vectors/reapable" '"'{}'"'
@@ -486,7 +585,49 @@ neg_case "an unpaired _edge_post" "to pair with one _edge_expect" \
 ' '    _edge_expect K11 200 census_empty || K_BAD=1
     _edge_post "/v1/vectors/reapable" "{\"collection\":\"$K_COLLECTION\"}"
 '
-check_wiring "the PASSED line carries the unasserted-mode note" 'violations=0 \(ownerless-write mode NOT asserted'
+check_wiring "the PASSED line carries the unasserted-mode note" 'PASS_NOTE="ownerless-write mode NOT asserted: B3 not run"'
+check_wiring "the PASSED line prints the notes" 'violations=0 \(\$PASS_NOTE\)'
+
+# Leg L's read-only property, falsified like leg K's: each case rewrites ONE spot of a copy of the real gate.
+neg_case "a leg-L probe to another path" "is not in the allowlist" \
+  '_edge_post "/v1/vectors/search-per-collection" "{\"query\":\"ccpg route probe\",\"collections\":[\"$K_COLLECTION\"],\"per_collection_k\":0,\"limit\":1}"' \
+  '_edge_post "/v1/vectors/search" "{\"query\":\"ccpg route probe\",\"collections\":[\"$K_COLLECTION\"],\"per_collection_k\":0,\"limit\":1}"'
+neg_case "a leg-L probe that would be a valid search (per_collection_k 1)" "is not the allowlisted refused request" \
+  '\"per_collection_k\":0,\"limit\":1}"
+    _route_probe L1' '\"per_collection_k\":1,\"limit\":1}"
+    _route_probe L1'
+neg_case "a leg-L probe that adds rerank" "is not the allowlisted refused request" \
+  '\"per_collection_k\":1,\"limit\":1201}"' '\"per_collection_k\":1,\"limit\":1201,\"rerank\":true}"'
+neg_case "a leg-L probe that names a real collection" "is not the allowlisted refused request" \
+  '{\"query\":\"ccpg route probe\",\"collections\":[\"$K_COLLECTION\"],\"per_collection_k\":1,\"limit\":1201}' \
+  '{\"query\":\"ccpg route probe\",\"collections\":[\"knowledge__real__voyage-context-3__v1\"],\"per_collection_k\":1,\"limit\":1201}'
+neg_case "a leg-L probe body from a variable" "is not the allowlisted refused request" \
+  '_edge_post "/v1/vectors/search-per-collection" "{\"query\":\"ccpg route probe\",\"collections\":[\"$K_COLLECTION\"],\"per_collection_k\":1,\"limit\":1201}"' \
+  '_edge_post "/v1/vectors/search-per-collection" "$L_BODY"'
+neg_case "a leg-L probe judged with a different fragment" "must expect the engine message fragment" \
+  '_route_probe L2 "limit must be in 1.."' '_route_probe L2 "error"'
+neg_case "a third leg-L probe" "leg L must hold exactly 2 _edge_post calls" \
+  '    if [ "$L_SERVED" -gt 0 ] && [ "$L_ABSENT" -gt 0 ]; then' '    _edge_post "/v1/vectors/search-per-collection" "{}"
+    _route_probe L3 "x" || L_BAD=1
+    if [ "$L_SERVED" -gt 0 ] && [ "$L_ABSENT" -gt 0 ]; then'
+neg_case "an unjudged leg-L probe" "leg L must hold exactly 2 _edge_post calls" \
+  '    if [ "$L_SERVED" -gt 0 ] && [ "$L_ABSENT" -gt 0 ]; then' '    _edge_post "/v1/vectors/search-per-collection" "{}"
+    if [ "$L_SERVED" -gt 0 ] && [ "$L_ABSENT" -gt 0 ]; then'
+neg_case "a raw curl -X POST inside leg L" "a curl with a write flag in leg L" \
+  '    L_BAD=0
+' '    L_BAD=0
+    curl -sS -X POST -H @"$BEARER_FILE" --data '"'{}'"' "$SERVICE_URL/v1/vectors/search-per-collection" >/dev/null
+'
+neg_case "a client write call added to leg L" "a client write call in leg L" \
+  'L_ROUTE_NOT_SERVED=0
+' 'L_ROUTE_NOT_SERVED=0
+uv run python -c '"'store.put(1)'"'
+'
+neg_case "_edge_post called from leg I" "_edge_post used outside legs K and L (in I)" \
+  'store = HttpTupleStore()
+addr = f"ccpg-desc-' 'store = HttpTupleStore()
+_edge_post "/v1/vectors/search-per-collection" "{}"
+addr = f"ccpg-desc-'
 
 echo "$NAME: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

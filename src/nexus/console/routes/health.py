@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 import time
 from pathlib import Path
 from typing import Any
@@ -65,10 +64,13 @@ def _collect_health_data() -> dict[str, Any]:
         try:
             info = json.loads(mineru_pid_path.read_text())
             pid = info.get("pid", 0)
-            try:
-                os.kill(pid, 0)
+            from nexus.daemon.service_registry import pid_alive  # noqa: PLC0415 — deferred, as the config import above
+
+            # nexus-f9bgu.25: pid_alive, not os.kill(pid, 0). A missing pid
+            # (0) used to signal our own process group and report running.
+            if isinstance(pid, int) and pid_alive(pid):
                 data["mineru"] = {"running": True, "port": info.get("port"), "pid": pid}
-            except OSError:
+            else:
                 data["mineru"] = {"running": False, "stale_pid": True}
         except (json.JSONDecodeError, OSError):
             data["mineru"] = {"running": False}

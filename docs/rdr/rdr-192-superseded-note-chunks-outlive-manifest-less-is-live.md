@@ -2,7 +2,8 @@
 title: "Superseded store_put note chunks are permanently live: the manifest-less-is-live contract outlived its transition"
 id: RDR-192
 type: Bug Fix
-status: accepted
+status: closed
+closed_date: 2026-10-04
 priority: high
 author: Hal Hildebrand
 reviewed-by: self (solo)
@@ -128,6 +129,11 @@ of "is this chunk current," and they disagree:
 9. **`taxonomy_unassigned_chashes`** (`taxonomy-019`, new in v0.1.132): only
    considers chunks that already carry an own-collection manifest row, in
    any owner state; a manifest-less chunk is invisible to it either way.
+
+(2026-10-04: "nine ways" is the filing-time count. `text_gate_probe_<dim>`, the hybrid search's
+dispatch gate, was a tenth: it read a chunk's liveness its own way and was moved onto `live(c)` in
+`vectors-023` and `vectors-029` (Revision History 2026-10-01). The end state of all ten is in
+Scope Verification.)
 
 These collapse to three families: **manifest-less is LIVE** at {1, 2, 3,
 4's-notes-arm, 5's-notes-arm}; **manifest-less is DEAD** at {7, 8 minus note
@@ -417,7 +423,7 @@ develop `135bb38a4` / engine `v0.1.132`, 2026-09-26.
   "legitimate" or defect) is superseded by a smaller, undecomposed
   population — see Phase 1 below, which replaces this assumption with a
   concrete census requirement.
-- [ ] A legacy note's chunk cannot enter a sweep's dropped set, so the notes-guard
+- [x] A legacy note's chunk cannot enter a sweep's dropped set, so the notes-guard
   arm is removable — **Status**: REFUTED — **Method**: Spike (amended 2026-10-02,
   Step 11). A dropped set is a document's previous manifest minus its new rows, so an
   unrelated document that shared the note's text and then dropped it puts the note's chash
@@ -427,6 +433,10 @@ develop `135bb38a4` / engine `v0.1.132`, 2026-09-26.
   retained (Step 11); the cost is bounded over-retention. A genuine legacy note is never
   collected (the census gate refuses its collection); only a chunk a dangling stamp
   names, whose owner has manifest rows, is later collected by the reaper.
+  (2026-10-04: the box is checked because the assumption is settled, as REFUTED. "Never
+  collected" holds while the census classifies the note as `legacy-unmanifested`; a note the
+  census put in another bucket, such as `no-owner`, passes the gate and is a reaper candidate
+  once ownerless past the grace. The census's classification is what the guarantee rests on.)
 
 ## Proposed Solution
 
@@ -445,6 +455,10 @@ lands last, behind a completed backfill:
    for every candidate-selection predicate (part of Gap 1, feeds Gap 4). Replaces
    predicates 7, 8, and 9's manifest-less handling with one rule, and backs
    a new state-derived reaper described below.
+   (2026-10-04: the build did not replace predicate 9's handling. `reapable(c)` replaced
+   predicates 7 and 8 and backs the reaper; predicate 9, `taxonomy_unassigned_chashes`, is
+   unchanged, as Migration order item 3 and Technical Design say, and Sam ratified keeping it
+   (Scope Verification (a)).)
 3. **State-derived reaper**: replace the post-commit sweep's persisted
    drop set with a state-derived engine reaper for every collection prefix
    (`knowledge__`, `docs__`, `code__`, `rdr__`; Sam, 2026-09-30, see the
@@ -893,7 +907,7 @@ refused nor errored in `reaper.last_pass`, which also gains an additive `tenants
 | Proposed Component | Existing Module | Decision |
 | --- | --- | --- |
 | `live(c)` predicate | `PgVectorRepository.liveChunksCondition`, `nexus.live_chunks` | Replace both with one shared, inlinable predicate; collection-scope `live_chunks` in the same change |
-| `reapable(c)` predicate | `indexer_utils.orphaned_chashes`, `gc_quarantine_orphans`, `nx t3 gc`'s candidate logic | Consolidate into one engine-side predicate; client tools call it rather than re-deriving it |
+| `reapable(c)` predicate | `indexer_utils.orphaned_chashes`, `gc_quarantine_orphans`, `nx t3 gc`'s candidate logic | Consolidate into one engine-side predicate; client tools call it rather than re-deriving it (2026-10-04: `gc_quarantine_orphans` and `nx t3 gc` were consolidated onto it. `indexer_utils.orphaned_chashes` was not: predicate 5 keeps its shape per Migration order item 4, and `orphaned_chashes` is still present and still fails open, which Sam ratified (Scope Verification (b)); the reaper recovers what it misses) |
 | State-derived reaper | `CatalogRepository.sweepChunksQuery` / `runSweepTransaction` | Extend with a periodic pass over every collection prefix (per-collection census gate, Step 9) driven by `reapable(c)` against current state, not the write transaction's drop set (`nexus-2x9xa`) |
 | Legacy-note backfill | `manifest_backfill` (client repair script) | Reuse; the census gate is the reaper's per-collection census (Step 9). The Phase 4 guard removal it was to gate was dropped: Step 11 is retained by decision (Sam, 2026-10-02) |
 | Silent-skip fix | `mcp_infra._sweep_superseded_vectors[_many]`, `CatalogRepository.runSweepTransaction` (`store_hook._reap_superseded_note_chunks` was deleted by RDR-223) | Add an unconditional `kept`/`kept_notes` log line to every site that remains — the engine sweep has the same gap, not a model to copy from |
@@ -1045,6 +1059,10 @@ grown.
   RDR's predicate-consolidation work; flag as a follow-up if a production
   case surfaces, since today's window is at least no wider than it was
   before `nexus-bb6n2`.
+  (2026-10-04: the premise is gone. The `store_hook.py` read/diff/reap window was deleted by
+  RDR-223 (`nexus-z0o2p.12` and `.32`), and a note re-put now writes its chunks and manifest as
+  one engine request, so the client-side read/diff/reap window this Risk describes no longer
+  exists. The engine's own concurrent-writer handling is described in Technical Design.)
 - **Risk**: The 147-row `knowledge__*` manifest-less population is not yet
   decomposed, so Phase 2's visibility change could hide a legacy current
   note from search before backfill completes — Phase 2 changes what
@@ -1220,6 +1238,13 @@ sweeps keep the chunk through their retained notes-guard arm, where `reapable(c)
 selects it and the reaper's census gate is what protects it.
 
 All four in scope; none deferred.
+
+(2026-10-04: all four were built and have tests, but MVV (b)'s production half is not shown and
+was never going to be before deploy plus 30 days, because nothing is reapable sooner. That
+evidence, the first `reaper_quarantine` or `reaper_refused` rows (about 2026-11-01) and the first
+expiries (about 2026-11-15), is tracked in `nexus-wbfpw.54` and `.61`, standalone beads detached
+from the epic by Sam on 2026-10-04. "None deferred" holds for the build, not for that evidence.
+See Scope Verification.)
 
 Amended 2026-10-01 (nexus-wbfpw.39): (e) **Reaper between batches**. A
 multi-batch re-index of an existing document, with a reaper pass between
@@ -1654,7 +1679,8 @@ backfill read zero. It does not, and nothing changes in behavior:
   census, where the reaper re-runs the census per collection per pass. Trusting the record
   would give the sweep more destructive reach than the reaper has.
 - **Cost:** bounded over-retention, and the two cases differ. A GENUINE legacy note (no
-  manifest row anywhere) is kept by the sweep and is never collected: the reaper's census
+  manifest row anywhere) is kept by the sweep and is never collected while the census
+  classifies it that way (2026-10-04): the reaper's census
   gate refuses the collection while `legacy-unmanifested` is above zero
   (`ChunkReaper.java`, the `CENSUS_LEGACY_UNMANIFESTED` refusal in the per-collection pass), so only the operator's backfill clears it. A chunk a dangling
   `meta.doc_id` stamp names, whose owner has manifest rows and so is censused as
@@ -1688,7 +1714,7 @@ after `Stored:`:
   reaper collects them later, once the collection passes its census and floor.` The reaper
   promise is conditional on purpose: it moves a chunk only after 30 days without an owner and
   refuses a collection that fails the floor or holds any legacy-unmanifested chunk (Step 9),
-  and a genuine legacy note is never collected (Step 11). `up to N` is the manifest's drop list,
+  and a genuine legacy note is never collected while the census classifies it as one (Step 11). `up to N` is the manifest's drop list,
   an upper bound, since the sweep never ran; with no drop list (the previous manifest could not
   be read) the line names no count and says which chunks the put replaced is not known (an
   identical re-put replaced none, so it does not claim the replaced chunks were not removed);
@@ -1866,7 +1892,10 @@ sequence with one `write_manifest_many` request (Step 3a), so their evidence is 
 the invariant is now pinned by `CatalogManifestSweepRepositoryTest` and
 `tests/test_z0o2p12_note_write.py`. CA3 (no consumer depends on superseded raw-search results)
 is **Verified** (`nexus-wbfpw.3`, Sam, 2026-09-26) with the unattributable-telemetry residual
-named in the assumption. CA4 is **Obsolete**: the population it was measured against no longer
+named in the assumption. (2026-10-04: "Verified" here means no consumer was found: the evidence
+is the absence of a call site, issue, CHANGELOG entry or telemetry row, by Source Search and a
+usage scan, not a demonstration that none exists. The residual is why `live(c)` shipped with no
+opt-out and why the 2026-10-04 production check counts what `live(c)` hides.) CA4 is **Obsolete**: the population it was measured against no longer
 exists, and Phase 1's census replaced the question with a concrete, gated decomposition
 requirement. One assumption added later, that a legacy note's chunk cannot enter a sweep's
 dropped set, was **REFUTED** (Step 11).
@@ -1882,6 +1911,72 @@ deploy-time rung assertion), and the follow-ups `.52` (a census gate on the `gc_
 route), `.58`, `.53` and `.48`. Where scope was reduced it was by decision of Sam and is recorded
 in place: the notes-guard arms retained (Step 11), the reaper quarantining instead of deleting,
 the doctor check narrowed to `knowledge__` (Step 14).
+
+(2026-10-04, closure critique, T2 `nexus_rdr/192-closure-critique-2026-10-04`: the paragraph
+above is the 2026-10-02 cross-walk and is kept as history. Its three-item list of reductions was
+not the whole set, and `.54` is no longer a carrier inside this epic. The end state follows.)
+
+**End-state accounting of Gap 1 (2026-10-04).** Gap 1 named nine sites that each answered
+"is this chunk current"; the build found a tenth (`text_gate_probe_<dim>`). They did not all
+collapse onto one predicate, by design, and the matrix tests reconcile every site's verdict per
+fixture row (`Rdr192EngineLivenessMatrixIntegrationTest`, engine; `tests/test_wbfpw2_client_liveness_matrix.py`,
+client; both carry a column per site and fail on drift).
+
+- Moved to `live(c)`: search, get, list, by-chash and topic-scoped reads and the hybrid search
+  (site 1); the `nexus.live_chunks` view, now collection-scoped (site 2; it stays a view with no
+  production reader, Revision History 2026-10-01); `text_gate_probe_<dim>` (the tenth site,
+  `vectors-023`).
+- Moved to `reapable(c)`: `gc_quarantine_orphans` and its bounded variant (site 7), `nx t3 gc`
+  (site 8), and the state-derived reaper (`nexus-2x9xa`).
+- Kept their own answers, because they ask a different question or guard a destructive path:
+  `purge_trash` step 1 and `strandedChunkCount` (site 3) and `PgVectorRepository.delete`'s
+  anti-join (site 6) are delete-time protection, not visibility; the engine superseded sweep
+  (site 4) and the client guards `orphaned_chashes` and `live_note_chashes` (site 5) keep their
+  notes-guard arms (Step 11, decision of Sam, 2026-10-02); `taxonomy_unassigned_chashes` (site 9)
+  keeps its own shape (item (a) below).
+
+Four items were ratified by Sam on 2026-10-04 as the design of record. Each was a reading of the
+text or the build that had not been recorded as a decision of Sam; none changes shipped behavior.
+
+- (a) Predicate 9, `taxonomy_unassigned_chashes`, is kept as is although it differs from `live(c)`
+  on R3 and R9 (an own-collection manifest row whose owners are all tombstoned). The
+  `nexus-wbfpw.10` close note decided it and Migration order item 3 recorded the difference;
+  Sam ratified it (Sam, 2026-10-04). The matrix's P9 column pins it.
+- (b) The indexer's non-combined client sweeps (`mcp_infra._sweep_superseded_vectors` and
+  `_sweep_superseded_vectors_many`) still hard-delete, fail open and write no `gc_audit` row
+  (Step 9 parenthetical). The reaper recovers whatever they miss, after the 30-day grace
+  (Sam, 2026-10-04).
+- (c) The `chroma://` permalink resolver (`fetchChunkText`) reads physical chunks, not `live(c)`.
+  This is a deliberate exception to Gap 2: a permalink to a chunk of a trashed or superseded
+  document keeps resolving, and that chunk's text stays readable through it until `purge_trash`
+  or the reaper reclaims it (M7, option A, 2026-10-01; ratified by Sam, 2026-10-04).
+- (d) The sweeps and the reaper answer R8 (a manifest-less current note) differently by design:
+  the sweeps keep it through the retained notes-guard arm, and `reapable(c)` selects it with the
+  reaper's census gate as the protection (MVV (d); Sam, 2026-10-04).
+
+The three reductions in the paragraph above stand with their attributions: the notes-guard arms
+retained (Step 11, Sam, 2026-10-02), the reaper quarantining instead of deleting (Sam,
+2026-10-01) and the doctor check narrowed to `knowledge__` (Step 14).
+
+Beads `nexus-wbfpw.54`, `.61`, `.63` and `.64` were detached from the epic by Sam on 2026-10-04
+so this RDR could close, and are standalone follow-ups. `.54` (the Day-2 checkpoints) and `.61`
+(the first cold move pass) are the production checks that wait on the grace window. `.63` (a
+comment reword in `ChunkReaper.java` and the vectors-024 header) and `.64` (engine-side
+quarantine-sibling resolution in two more routes) ride a later engine cut. Nothing in this
+section's earlier cross-walk depends on them.
+
+**Deployment and production evidence (2026-10-04).**
+
+- The reaper engine first deployed in `engine-service-v0.1.143` on 2026-10-02. `engine-service-v0.1.146`
+  (`vectors-027`, `-028`, `-029`) went live on 2026-10-04 at 19:02Z, paired with client conexus 7.71.0.
+- On 2026-10-04, `nx catalog doctor --visible-outside-manifest` against production through the public
+  edge: PASS. 139 of 139 census-superseded chunks, in 34 `knowledge__` collections, were hidden by
+  `live(c)`. This is Step 14's check on real data, and the only non-vacuous production proof of
+  `live(c)` the RDR has.
+- The cloud-client-path gate legs J and K passed through the edge (9/9) on `v0.1.146`.
+- Not yet shown: MVV (b)'s production half. The first `reaper_quarantine` or `reaper_refused` rows
+  are due about 2026-11-01 (deploy plus 30 days), and the first reaper expiries about 2026-11-15,
+  tracked in `nexus-wbfpw.54` and `.61`. This RDR closes as implemented, with that evidence pending.
 
 ## Revision History
 
@@ -2154,3 +2249,23 @@ the doctor check narrowed to `knowledge__` (Step 14).
   user's `NX_GC_QUARANTINE_DAYS` no longer governs those rows. The client's own expiry still
   takes them when run, so the engine's population is a strict subset of the client's, not the
   same rows.
+- 2026-10-04: Closure amendments (closure critique, T2 `nexus_rdr/192-closure-critique-2026-10-04`;
+  bead `nexus-wbfpw`; text only, no status change). (1) Scope Verification gains the end-state
+  accounting of Gap 1 (which sites moved to `live(c)` and `reapable(c)`, which kept their own
+  answers and why, reconciled by `Rdr192EngineLivenessMatrixIntegrationTest` and
+  `tests/test_wbfpw2_client_liveness_matrix.py`) and four items Sam ratified on 2026-10-04 as the
+  design of record: predicate 9 kept as is (R3, R9), the indexer's non-combined client sweeps
+  still hard-deleting fail-open with no audit row, the `chroma://` permalink reading physical
+  chunks, and the sweeps and reaper answering R8 differently. `nexus-wbfpw.54`, `.61`, `.63` and
+  `.64` were detached from the epic by Sam on 2026-10-04 and are standalone follow-ups. (2)
+  Dated notes on five sentences the build overtook: Approach item 2 (predicate 9 unchanged),
+  the Existing Infrastructure Audit row (`orphaned_chashes` kept), the Risk about concurrent
+  re-puts (code deleted by RDR-223), Gap 1's "nine ways" (a tenth site), and MVV's "none
+  deferred" (production evidence pending). (3) Deployment and production evidence recorded:
+  `engine-service-v0.1.143` (2026-10-02, first reaper), `v0.1.146` (2026-10-04, paired with
+  conexus 7.71.0), `nx catalog doctor --visible-outside-manifest` PASS on 139 of 139
+  census-superseded chunks in 34 `knowledge__` collections, edge gate legs J and K passed; MVV
+  (b)'s first moves are due about 2026-11-01 and expiries about 2026-11-15. (4) The Step 11
+  Critical Assumption checkbox is checked (REFUTED is a settled status), "never collected" is
+  qualified by the census's classification, and CA3's "Verified" is glossed as absence of
+  evidence.

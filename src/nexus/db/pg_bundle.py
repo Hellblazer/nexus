@@ -17,7 +17,8 @@ LOCATE + idempotent EXTRACT + SELECT orchestration.
 
 Artifact contract (RDR-157 P3.1, bead nexus-vwvv5.10): the ``.txz`` extracts to a
 ``bundle/`` tree containing ``bin/ include/ lib/ share/``; the CI artifact is named
-``nexus-pg-<target>`` for targets ``mac-arm64`` / ``linux-amd64`` / ``linux-arm64``.
+``nexus-pg-<target>`` for targets ``mac-arm64`` / ``linux-amd64`` / ``linux-arm64`` /
+``windows-x64``.
 """
 
 from __future__ import annotations
@@ -27,10 +28,13 @@ import platform
 import shutil
 import sys
 import tarfile
+from contextlib import AbstractContextManager
 from pathlib import Path
 
 import structlog
 
+from nexus._winsec import grant_user_tree_access
+from nexus.daemon.replace_guard import replace_with_retry
 from nexus.db.pg_provision import PgBinaries
 
 _log = structlog.get_logger(__name__)
@@ -52,14 +56,19 @@ _BUILD_PREFIX_MARKER = ".build_prefix"
 _CACHE_SUBDIR = "pg-bundle"
 
 
-def current_platform_tag() -> str:
+def current_platform_tag(*, system: str | None = None, machine: str | None = None) -> str:
     """Return the artifact platform tag for this host (matches ``nexus-pg-<tag>``).
 
-    Release N targets: ``mac-arm64`` (darwin; mac-x64 is out of scope, owner call),
-    ``linux-amd64`` (x86_64), ``linux-arm64`` (aarch64). Windows is release N+1.
+    Targets: ``mac-arm64`` (darwin; mac-x64 is out of scope, owner call),
+    ``linux-amd64`` (x86_64), ``linux-arm64`` (aarch64), ``windows-x64``
+    (RDR-224). Windows on ARM and 32-bit Windows have no engine or bundle and
+    refuse.
+
+    *system* and *machine* default to the running host's ``platform`` values;
+    callers and tests inject them so every branch runs on every host.
     """
-    system = platform.system().lower()
-    machine = platform.machine().lower()
+    system = (platform.system() if system is None else system).lower()
+    machine = (platform.machine() if machine is None else machine).lower()
     if system == "darwin":
         # mac-x64 is out of scope for the bundle (owner call); return its true tag
         # anyway so locate simply finds no artifact and the caller fails loudly,
@@ -68,9 +77,16 @@ def current_platform_tag() -> str:
         return "mac-arm64" if machine in {"arm64", "aarch64"} else "mac-x64"
     if system == "linux":
         return "linux-arm64" if machine in {"aarch64", "arm64"} else "linux-amd64"
+    if system == "windows":
+        if machine in {"amd64", "x86_64", "x64"}:
+            return "windows-x64"
+        raise RuntimeError(
+            f"No engine or PostgreSQL bundle target for Windows/{machine!r}: "
+            "only Windows x64 is supported (there is no GraalVM native-image "
+            "target and no onnxruntime library for Windows on ARM)."
+        )
     raise RuntimeError(
-        f"No PostgreSQL bundle target for platform {system!r}/{machine!r} "
-        "(Windows is a release N+1 follow-on)."
+        f"No PostgreSQL bundle target for platform {system!r}/{machine!r}."
     )
 
 
@@ -173,7 +189,13 @@ def _archive_identity(archive: Path) -> str:
     return f"source={archive}\nname={archive.name}\nsize={stat.st_size}\nmtime_ns={stat.st_mtime_ns}\n"
 
 
-def extract_bundle(archive: Path, extract_root: Path) -> Path:
+def extract_bundle(
+    archive: Path,
+    extract_root: Path,
+    *,
+    quiesce: AbstractContextManager[object] | None = None,
+    platform: str | None = None,
+) -> Path:
     """Idempotently extract *archive* to *extract_root*; return the ``bin/`` dir.
 
     A complete prior extraction of THE SAME archive is a no-op — the existing
@@ -194,6 +216,18 @@ def extract_bundle(archive: Path, extract_root: Path) -> Path:
     existing cluster surfaces as a loud PostgreSQL startup refusal, not
     silent corruption, but a real major bump additionally needs pg_upgrade or
     dump/restore. That is RDR-scale and deliberately out of scope here.
+
+    Windows (RDR-224, nexus-f9bgu.20): a running ``postgres.exe`` keeps its
+    bundle directory from being renamed, so the swap below runs inside
+    :func:`nexus.daemon.replace_quiesce.quiesced` with ``replacing="pg_bundle"``:
+    the storage service and the PostgreSQL cluster are stopped, the two renames
+    run (each retried when a scan holds the tree), the marker is written, and
+    PostgreSQL and the service are started again. Only a swap that happens
+    stops anything: the extraction into the staging tree, which is the slow
+    part, runs before the stop, and a first extraction or a repeat of the
+    extracted archive stops nothing. *quiesce* replaces that context manager and
+    *platform* (default ``sys.platform``) decides the stop and the retry; both
+    are test seams. On POSIX nothing is stopped.
     """
     bin_dir = bundle_bin_dir(extract_root)
     marker = extract_root / _EXTRACT_MARKER
@@ -231,28 +265,54 @@ def extract_bundle(archive: Path, extract_root: Path) -> Path:
         # Swap: move the old tree aside (fast rename), move the proven tree
         # into place, then drop the old one. If the second rename fails the
         # backup is restored, so the window where neither exists is a single
-        # rename wide and is recoverable.
+        # rename wide and is recoverable. On Windows the tree is first freed
+        # of the running PostgreSQL and the marker is written before it starts
+        # again, because the start finds the binaries through the marker.
         backup = extract_root.parent / (extract_root.name + ".replaced")
         shutil.rmtree(backup, ignore_errors=True)
-        extract_root.replace(backup)
+        guard = quiesce if quiesce is not None else _bundle_quiesce(
+            extract_root.parent, platform=platform,
+        )
         try:
-            staging.replace(extract_root)
-        except Exception:
-            backup.replace(extract_root)
+            with guard:
+                replace_with_retry(extract_root, backup, platform=platform)
+                try:
+                    replace_with_retry(staging, extract_root, platform=platform)
+                except Exception:
+                    replace_with_retry(backup, extract_root, platform=platform)
+                    raise
+                shutil.rmtree(backup, ignore_errors=True)
+                _write_marker(extract_root, identity)
+        except BaseException:
+            # Refused before the swap, or failed in it with the old tree put
+            # back: the staged tree is hundreds of megabytes nobody will use,
+            # and the next call stages afresh anyway.
             shutil.rmtree(staging, ignore_errors=True)
             raise
-        shutil.rmtree(backup, ignore_errors=True)
     else:
         # Nothing usable is present, so extracting in place risks nothing.
         _extract_and_validate(archive, extract_root)
+        _write_marker(extract_root, identity)
 
-    # Atomic marker: write to a temp file then rename, so a kill mid-write never
-    # leaves a truncated marker that a re-run would trust.
-    tmp = extract_root / (_EXTRACT_MARKER + ".tmp")
-    tmp.write_text(identity)
-    tmp.replace(marker)
     _log.info("pg_bundle_extracted", bin_dir=str(bin_dir))
     return bin_dir
+
+
+def _write_marker(extract_root: Path, identity: str) -> None:
+    """Atomic marker: write to a temp file then rename, so a kill mid-write never
+    leaves a truncated marker that a re-run would trust."""
+    tmp = extract_root / (_EXTRACT_MARKER + ".tmp")
+    tmp.write_text(identity)
+    tmp.replace(extract_root / _EXTRACT_MARKER)
+
+
+def _bundle_quiesce(
+    config_dir: Path, *, platform: str | None,
+) -> AbstractContextManager[object]:
+    """The default stop-replace-restart guard for the extracted bundle tree."""
+    from nexus.daemon.replace_quiesce import quiesced  # noqa: PLC0415 - deferred: the daemon package imports this module
+
+    return quiesced(config_dir, replacing="pg_bundle", platform=platform)
 
 
 def _extract_and_validate(archive: Path, dest: Path) -> None:
@@ -264,6 +324,11 @@ def _extract_and_validate(archive: Path, dest: Path) -> None:
     tree already in service.
     """
     dest.mkdir(parents=True, exist_ok=True)
+    # Windows: an explicit, inheritable user ACE BEFORE the tree is written.
+    # Under a 0o700 config dir an elevated extraction otherwise lands files
+    # postgres cannot read under its restricted token (initdb dies 0xC0000135).
+    # A no-op on POSIX. See grant_user_tree_access.
+    grant_user_tree_access(dest)
     _log.info("pg_bundle_extracting", archive=str(archive), extract_root=str(dest))
     try:
         with tarfile.open(archive, "r:xz") as tf:

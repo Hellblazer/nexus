@@ -152,29 +152,78 @@ post-publish gate were deleted on 2026-10-03 (cleanup step 7). `hellmini` (a Mac
 mini, macOS user `ghrunner`) is a self-hosted runner for release legs only: the
 engine-service release legs, the PG-bundle cache seed and the signing rehearsal
 (Sam, 2026-09-28, nexus-yd9po). `qwentescence` (WSL) is a test host reachable by
-ssh, not a runner. Both hosts take hand-run suites and gates through ssh;
+ssh, not a runner; its native Windows side is the separate `win-release` runner
+described below. Both hosts take hand-run suites and gates through ssh;
 agents' full suites go to hellmini (Sam, 2026-10-02). The T2 how-tos
 `nexus/hellmini-second-test-host-howto` and `nexus/qwentescence-test-host-howto`
 carry the recipes.
 
 `hellmini` is a bare custom label (registered with `--no-default-labels`), so a
-job has to name it. It is the only self-hosted registration: `qwen-linux` and
-`gtr-windows` were removed on 2026-10-03 and `hellmini-ci` on 2026-10-04, so a
-job that says `runs-on: self-hosted` (or names any other self-hosted label) waits
-with no runner rather than landing somewhere unexpected. A `runs-on` label is a routing rule, not a
+job has to name it. There are two self-hosted registrations, `hellmini` and
+`win-release`: `qwen-linux` and `gtr-windows` were removed on 2026-10-03 and
+`hellmini-ci` on 2026-10-04, so a job that says `runs-on: self-hosted` (or names
+any other self-hosted label) waits with no runner rather than landing somewhere
+unexpected. A `runs-on` label is a routing rule, not a
 security boundary: whoever can push a branch controls the workflow files. The
 controls are the collaborator list (owner only), the fork-PR approval policy and
 branch protection.
+
+`win-release` is the native Windows side of qwentescence, a self-hosted runner
+for the Windows release legs only: the windows-x64 PG-bundle leg and the
+windows-x64 engine leg (`build-publish-engine-windows`: native build, dumpbin
+dependency check, the `nexus-service-windows-x64.txz` with the four VC++ DLLs,
+a smoke against the Windows PG bundle; its steps are the composite action
+`.github/actions/windows-engine-leg`, which the rehearsal runs too) in
+`engine-service-release.yml`, the PG bundle's seed in `pg-bundle-cache-seed.yml`
+and `windows-pg-bundle-rehearsal.yml` (RDR-224 P0.1, Sam 2026-10-05). It is a bare
+custom label like `hellmini`, never runs a `pull_request` job, is inside the
+release trust boundary on the same terms as hellmini, and persists state between
+jobs (the actions tool cache, uv and the Pythons it installs, the Visual Studio
+Build Tools). The runner's name and service must not contain `qwen` or `llama` (a host
+rule). Every job on it is gated on the repo variable `NX_WINDOWS_RELEASE_LEGS`
+being `on`; with it unset a tag run queues nothing and promotion expects no
+Windows asset, and with it `on` the Windows assets block promotion (P0.4). The
+runner (`gtr9-win`, service account `ghwin`; T2 `nexus/qwentescence-win-release-runner`)
+was registered and the variable turned `on` by an agent on 2026-10-06, each on Sam's
+explicit go; any later change to either needs the same explicit go.
 
 **Before approving a fork-PR run, read its diff for:**
 
 - anything under `.github/` (a workflow or action can name any runner);
 - any `runs-on` that names a self-hosted label, `self-hosted`, `hellmini`,
-  `hellmini-ci`, `qwen-linux` or `gtr-windows`.
+  `win-release`, `hellmini-ci`, `qwen-linux` or `gtr-windows`.
 
 **Agents never approve a fork-PR run** (`POST /actions/runs/{id}/approve`), even
 when they hold the owner's `gh` token. Report the run id and stop; the approval
 click is Sam's.
+
+**Review a contributor change as release-runner code, not only a fork-PR run**
+(nexus-f9bgu.27, RDR-224 review). A fork PR's run needs a click; MERGED code does
+not. A push to `develop` runs `windows-pg-bundle-rehearsal.yml` on `win-release`
+under the merger's actor, so its `github.actor == 'Hellblazer'` guard says who
+merged, not who wrote the code, and the scripts, the pom and the composite
+actions it runs execute with the runner's standing access and no further click.
+So a contributor change that touches ANY path in that workflow's `paths:` filter
+(which includes `service/pom.xml`, since a pom edit is arbitrary code at build
+time), `scripts/*windows*`, `scripts/windows_*.py`, the `.github/actions/windows-*`
+actions, `.github/actions/resolve-windows-python/**` or the Windows jobs of
+`engine-service-release.yml` and `pg-bundle-cache-seed.yml` is read in full for
+what it executes (commands, downloads, `subprocess`, environment, anything that
+reaches the network or the runner's files), the same way as a change under
+`.github/` above. The Windows jobs carry the owner actor guard and the
+`NX_WINDOWS_RELEASE_LEGS` switch; neither makes the code they run trustworthy. If
+that standing is ever too much, a GitHub `environment:` with a required reviewer on
+those jobs would make the click mechanical; it is a repository setting and Sam's
+call, so it is not configured.
+
+**What the rehearsal does not prove.** `windows-pg-bundle-rehearsal.yml` runs the
+shared composite actions and scripts. It deliberately does not run
+`engine-service-release.yml`'s own Windows jobs (a push trigger on a release
+workflow would run release jobs): the cosign steps, `gh release upload`, the
+cross-job artifact handoff, cache restore on the self-hosted runner and the
+promotion check are proven only by a `workflow_dispatch` run of
+`engine-service-release.yml` on `develop` with the switch on, before the first
+Windows-carrying cut. The `engine-release` skill's pre-cut steps name it.
 
 ## Workflows
 

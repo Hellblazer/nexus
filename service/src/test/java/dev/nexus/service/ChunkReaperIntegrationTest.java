@@ -2783,6 +2783,95 @@ class ChunkReaperIntegrationTest extends AtomicWriteTestBase {
         assertThat(logs).anyMatch(l -> l.contains("event=reaper_expire_failed") && l.contains("expired_before_refusal=2"));
     }
 
+    // ── nexus-rf87b: expiry_protected_before_refusal on the refused / skipped / failed line ──────────────
+
+    /**
+     * Adds to the FIRST origin's sibling rows one aged, engine-tagged chunk that a manifest row of that origin
+     * still names: past the cutoff, so the expiry looks at it, and protected, so it is never deleted. The first
+     * origin is expired before the second, so a later-origin refusal has to report it.
+     */
+    private String protectedChunkInFirstOrigin(TwoOriginSibling s) throws Exception {
+        String named = orphan(s.tenant(), s.first(), "named");
+        try (Connection su = pg.createConnection("")) {
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.ownChunks(ctx, s.tenant(), s.first(), named);
+            String stamp = CLOCK.instant().minus(Duration.ofDays(15)).truncatedTo(java.time.temporal.ChronoUnit.SECONDS)
+                .toString();
+            PgContainerHelper.insertChunks(ctx, s.tenant(), s.sibling(), List.of(named), List.of("named text"),
+                List.of(new float[384]), List.of(Map.of("quarantined_at", stamp, "origin_collection", s.first(),
+                    "quarantined_by", "engine-reaper", "reaper_quarantined_at", stamp)));
+        }
+        return named;
+    }
+
+    @Test
+    void aLockTimeoutOnALaterOrigin_reportsTheChunkAnEarlierOriginProtected() throws Throwable {
+        TwoOriginSibling s = twoOriginSibling(2, 1);
+        String t = s.tenant();
+        String named = protectedChunkInFirstOrigin(s);
+        ChunkReaper r = reaper(t);
+        ChunkReaper.TenantResult[] result = new ChunkReaper.TenantResult[1];
+        List<String> logs;
+        try (Connection writer = svcDs.getConnection()) {
+            writer.setAutoCommit(false);
+            PgContainerHelper.setTenant(writer, TenantScope.DEFAULT_TENANT_GUC, t, true);
+            DSL.using(writer, SQLDialect.POSTGRES).update(CHUNKS).set(CHUNKS.LAST_WRITTEN_AT, OffsetDateTime.now())
+               .where(CHUNKS.TENANT_ID.eq(t).and(CHUNKS.COLLECTION.eq(s.sibling()))
+                      .and(CHUNKS.CHASH.eq(Chash.fromHex(s.secondChunks().get(0)).toBytes()))).execute();
+            logs = captureLogs(() -> result[0] = r.runOnce(null).tenant(t));
+            writer.rollback();
+        }
+
+        ChunkReaper.ExpiryResult e = result[0].expiry(s.sibling());
+        assertThat(e.refusal()).isEqualTo(Refusal.LOCK_TIMEOUT);
+        assertThat(e.expired()).isEqualTo(2);
+        assertThat(e.protectedCount()).as("the result carries the protected count too").isEqualTo(1);
+        assertThat(inCollection(t, s.sibling(), named)).as("the protected chunk was not deleted").isTrue();
+        assertThat(logs).as("the skip line carries both counts")
+            .anyMatch(l -> l.contains("event=reaper_expire_skipped") && l.contains("reason=LOCK_TIMEOUT")
+                && l.contains("expired_before_refusal=2 ") && l.contains("expiry_protected_before_refusal=1 "));
+    }
+
+    @Test
+    void aStatementTimeoutOnALaterOrigin_reportsTheChunkAnEarlierOriginProtected() throws Throwable {
+        TwoOriginSibling s = twoOriginSibling(2, 1);
+        String t = s.tenant();
+        String named = protectedChunkInFirstOrigin(s);
+        ChunkReaper r = reaperOver(failingOnOrigin(s.second(), statementTimeout()), t);
+
+        ChunkReaper.TenantResult[] result = new ChunkReaper.TenantResult[1];
+        List<String> logs = captureLogs(() -> result[0] = r.runOnce(null).tenant(t));
+
+        ChunkReaper.ExpiryResult e = result[0].expiry(s.sibling());
+        assertThat(e.refusal()).isEqualTo(Refusal.STATEMENT_TIMED_OUT);
+        assertThat(e.expired()).isEqualTo(2);
+        assertThat(e.protectedCount()).isEqualTo(1);
+        assertThat(inCollection(t, s.sibling(), named)).isTrue();
+        assertThat(logs).as("the refusal line carries both counts")
+            .anyMatch(l -> l.startsWith("WARN") && l.contains("event=reaper_expire_refused")
+                && l.contains("expired_before_refusal=2 ") && l.contains("expiry_protected_before_refusal=1 "));
+    }
+
+    @Test
+    void anUnclassifiedFailureOnALaterOrigin_reportsTheChunkAnEarlierOriginProtected() throws Throwable {
+        TwoOriginSibling s = twoOriginSibling(2, 1);
+        String t = s.tenant();
+        String named = protectedChunkInFirstOrigin(s);
+        ChunkReaper r = reaperOver(failingOnOrigin(s.second(), new IllegalStateException("boom")), t);
+
+        ChunkReaper.TenantResult[] result = new ChunkReaper.TenantResult[1];
+        List<String> logs = captureLogs(() -> result[0] = r.runOnce(null).tenant(t));
+
+        ChunkReaper.ExpiryResult e = result[0].expiry(s.sibling());
+        assertThat(e.error()).isEqualTo("boom");
+        assertThat(e.expired()).isEqualTo(2);
+        assertThat(e.protectedCount()).isEqualTo(1);
+        assertThat(inCollection(t, s.sibling(), named)).isTrue();
+        assertThat(logs).as("the failure line carries both counts")
+            .anyMatch(l -> l.startsWith("WARN") && l.contains("event=reaper_expire_failed")
+                && l.contains("expired_before_refusal=2 ") && l.contains("expiry_protected_before_refusal=1 "));
+    }
+
     // ── the floor exemption: one named collection, move floor only ───────────
 
     private static Settings exempting(String... collections) {

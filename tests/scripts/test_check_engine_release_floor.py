@@ -797,3 +797,94 @@ class TestCheckDataEffectRelay:
         rc = gate.check_data_effect_relay("engine-service-v0.1.1", two_tag_repo)
         assert rc == 0
         assert "NOT-APPLICABLE" in capsys.readouterr().out
+
+
+# ── --require-windows (nexus-f9bgu.28, RDR-224 critique S4) ─────────────────
+
+
+class TestRequireWindows:
+    """The opt-in Windows-assets check: 27 assets on a published tag, and nothing else changes."""
+
+    TAG = "engine-service-v0.1.140"
+    ALL = gate.expected_engine_assets(windows=True)
+
+    @staticmethod
+    def _release(names, *, draft=False):
+        return _gh({"isDraft": draft, "assets": [{"name": n} for n in names]})
+
+    def test_the_asset_sets_are_21_and_27(self) -> None:
+        assert len(gate.expected_engine_assets(windows=False)) == 21
+        assert len(self.ALL) == 27 and len(set(self.ALL)) == 27
+        assert set(gate.expected_engine_assets(windows=False)) < set(self.ALL)
+        windows = set(self.ALL) - set(gate.expected_engine_assets(windows=False))
+        assert windows == {
+            f"{a}{suffix}"
+            for a in ("nexus-pg-windows-x64.txz", "nexus-service-windows-x64.txz")
+            for suffix in ("", ".sha256", ".sigstore.json")
+        }
+
+    def test_a_published_release_with_all_27_passes(self, capsys) -> None:
+        with patch.object(gate.subprocess, "run", return_value=self._release(self.ALL)):
+            assert gate.check_windows_assets(self.TAG) == 0
+        assert "all 27 assets" in capsys.readouterr().out
+
+    def test_a_cut_with_the_switch_off_is_named_as_such(self, capsys) -> None:
+        with patch.object(gate.subprocess, "run", return_value=self._release(gate.expected_engine_assets(windows=False))):
+            assert gate.check_windows_assets(self.TAG) == 1
+        err = capsys.readouterr().err
+        assert "missing 6 of 27" in err and "nexus-service-windows-x64.txz" in err
+        assert "NX_WINDOWS_RELEASE_LEGS off" in err and "another cut" in err
+
+    def test_any_single_missing_asset_fails_and_is_named(self, capsys) -> None:
+        for victim in self.ALL:
+            with patch.object(gate.subprocess, "run", return_value=self._release([n for n in self.ALL if n != victim])):
+                assert gate.check_windows_assets(self.TAG) == 1, victim
+            assert victim in capsys.readouterr().err
+
+    def test_a_draft_fails_even_with_every_asset(self, capsys) -> None:
+        with patch.object(gate.subprocess, "run", return_value=self._release(self.ALL, draft=True)):
+            assert gate.check_windows_assets(self.TAG) == 1
+        assert "DRAFT" in capsys.readouterr().err
+
+    @pytest.mark.parametrize(
+        "fake",
+        [
+            _gh(returncode=1, stdout="", stderr="release not found"),
+            _gh(stdout="not json"),
+            _gh({"assets": []}),
+            _gh({"isDraft": False}),
+            _gh(["a"]),
+        ],
+        ids=["gh-fails", "not-json", "no-isdraft", "no-assets", "wrong-shape"],
+    )
+    def test_an_unreadable_answer_is_unverifiable_never_a_pass(self, fake, capsys) -> None:
+        with patch.object(gate.subprocess, "run", return_value=fake):
+            assert gate.check_windows_assets(self.TAG) == 2
+        assert "CANNOT VERIFY" in capsys.readouterr().err
+
+    def test_a_missing_gh_is_unverifiable(self, capsys) -> None:
+        with patch.object(gate.subprocess, "run", side_effect=FileNotFoundError("gh")):
+            assert gate.check_windows_assets(self.TAG) == 2
+        assert "CANNOT VERIFY" in capsys.readouterr().err
+
+    def test_the_flag_defaults_to_the_pinned_tag_and_names_it_in_the_gh_call(self) -> None:
+        with patch.object(gate.subprocess, "run", return_value=self._release(self.ALL)) as run:
+            assert gate.main(["--require-windows"]) == 0
+        assert run.call_args[0][0][:3] == ["gh", "release", "view"]
+        assert run.call_args[0][0][3] == gate._pinned_engine_tag()
+        with patch.object(gate.subprocess, "run", return_value=self._release(self.ALL)) as run:
+            assert gate.main(["--require-windows", self.TAG]) == 0
+        assert run.call_args[0][0][3] == self.TAG
+
+    @pytest.mark.parametrize("other", [["--ledger-only"], ["--url", _TEST_URL], ["--paired-deploy-auto"], ["--client-precondition"]])
+    def test_the_flag_is_mutually_exclusive_with_every_other_mode(self, other) -> None:
+        with pytest.raises(SystemExit):
+            gate.main(["--require-windows", *other])
+
+    def test_the_default_behaviour_never_consults_the_windows_check(self) -> None:
+        """Without the flag nothing about the gate changes: check_windows_assets is not reached."""
+        with patch.object(gate, "check_windows_assets") as win, \
+             patch.object(gate, "check_floor", return_value=0), \
+             patch.object(gate, "check_source_ancestry", return_value=0):
+            assert gate.main([]) == 0
+        win.assert_not_called()

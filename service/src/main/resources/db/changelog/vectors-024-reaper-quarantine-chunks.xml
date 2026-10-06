@@ -42,8 +42,8 @@
 
     DRY RUN. p_dry_run = true counts and returns without taking the gate or moving anything; the reaper
     uses it to decide whether a collection needs the census at all (nothing reapable, nothing at risk),
-    to judge the floor before the census, and to check the census read the same number of chunks
-    (scope_chunk_total = total_count).
+    to judge the floor before the census, and to check the census did not read fewer chunks
+    (scope_chunk_total not below total_count; a census that read more is allowed, nexus-wbfpw.56).
 
     GRACE. p_grace is passed straight to chunk_is_reapable, so this function is a consumer whose grace is not
     a literal NULL, and ReapableConsumersScanTest carries it in SQL_CONSUMERS with the reason. NULL is the

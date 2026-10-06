@@ -385,7 +385,7 @@ def test_build_work_writes_brief_md_and_prints_the_work_directory_and_the_dispat
     fields, brief = _split_build(out)
     work = Path(fields["WORK"])
     try:
-        assert list(fields) == ["WORK", "DISPATCH", "REPLY", "FILTERED", "REASONS"]
+        assert list(fields) == ["WORK", "DISPATCH", "REPLY", "FILTERED", "REASONS", "ANSWERS"]
         data = (work / "brief.md").read_bytes()
         assert data.decode("utf-8").startswith(brief)
         assert re.fullmatch(r"[0-9a-f]{12}", _brief_id(work))

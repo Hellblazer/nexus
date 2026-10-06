@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-or-later
+# PEP 723 metadata: `uv run` reads the interpreter floor from here, so no shell-
+# special `>=` has to ride in hooks.json argv (nexus-efk2h). This script refuses
+# Python 3.11 and older below.
+# /// script
+# requires-python = ">=3.12"
+# ///
 """RDR-219 Phase 3 Step 1 (nexus-wauo1.22): deny a Bash command that would
 print a Claude Code credential.
 

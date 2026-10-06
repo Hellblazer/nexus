@@ -88,6 +88,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import ntpath
 import os
 import re
 import subprocess
@@ -156,8 +157,141 @@ for ep in eps:
         print(ep.name)
 """
 
+# ---------------------------------------------------------------------------
+# Windows seams (RDR-224, nexus-f9bgu.47)
+#
+# Every function below that differs between POSIX and native Windows takes a
+# keyword-only ``platform: str | None = None``, resolved the way
+# ``nexus._winsec._is_windows`` resolves it: ``"win32"`` forces the Windows
+# reading, any other string forces POSIX, ``None`` asks ``os.name``. With the
+# default on a POSIX host every one of them returns exactly what it returned
+# before, which is what keeps the shell twins' pins green.
+# ---------------------------------------------------------------------------
+
+def _is_nt(platform: str | None = None) -> bool:
+    """True for the native-Windows reading of a path question."""
+    return (platform == "win32") if platform is not None else (os.name == "nt")
+
+
+def strip_extended_prefix(text: str) -> str:
+    """*text* without a Win32 extended-length prefix (``\\\\?\\`` or ``\\??\\``).
+
+    ``os.readlink`` on a junction returns ``\\\\?\\C:\\...``. Every comparison
+    and every path that is shown to a person wants the plain spelling, and
+    ``\\\\?\\UNC\\server\\share`` goes back to ``\\\\server\\share``.
+    """
+    if text.startswith("\\\\?\\UNC\\"):
+        return "\\\\" + text[len("\\\\?\\UNC\\"):]
+    for prefix in ("\\\\?\\", "\\??\\"):
+        if text.startswith(prefix):
+            return text[len(prefix):]
+    return text
+
+
+def venv_bin_name(*, platform: str | None = None) -> str:
+    """The directory a venv keeps its executables in: ``Scripts`` on Windows."""
+    return "Scripts" if _is_nt(platform) else "bin"
+
+
+def venv_bin(venv: Path, *, platform: str | None = None) -> Path:
+    """``<venv>/bin``, or ``<venv>\\Scripts`` on Windows."""
+    return venv / venv_bin_name(platform=platform)
+
+
+def exe_name(name: str, *, platform: str | None = None) -> str:
+    """*name* as a file in a venv's executables directory: ``.exe`` on Windows."""
+    return f"{name}.exe" if _is_nt(platform) else name
+
+
+def venv_script(venv: Path, name: str, *, platform: str | None = None) -> Path:
+    """The file a console script *name* is in *venv*."""
+    return venv_bin(venv, platform=platform) / exe_name(name, platform=platform)
+
+
+def venv_python(venv: Path, *, platform: str | None = None) -> Path:
+    """*venv*'s own interpreter."""
+    return venv_script(venv, "python", platform=platform)
+
+
+def is_link(
+    path: Path | str, *, platform: str | None = None, isjunction=None,
+) -> bool:
+    """True when *path* is a symlink, or on Windows a directory junction.
+
+    A junction is NOT a symlink to ``Path.is_symlink`` (measured on Windows,
+    Python 3.13: ``is_symlink()`` False, ``os.path.isjunction()`` True), so
+    every "is this a pointer" test that was written against symlinks reads a
+    junction as an ordinary directory -- and the first thing done to an
+    ordinary directory here is ``rmtree``. *isjunction* is the test seam.
+    """
+    candidate = Path(path)
+    if candidate.is_symlink():
+        return True
+    if not _is_nt(platform):
+        return False
+    probe = isjunction if isjunction is not None else getattr(os.path, "isjunction", None)
+    if probe is None:
+        return False
+    try:
+        return bool(probe(candidate))
+    except OSError:
+        return False
+
+
+def read_link(path: Path | str, *, platform: str | None = None, readlink=None) -> str:
+    """The target of the link at *path*, as written.
+
+    Unchanged from ``os.readlink`` on POSIX. On Windows the extended-length
+    prefix a junction target carries is stripped (:func:`strip_extended_prefix`).
+    *readlink* is the test seam.
+    """
+    raw = (readlink if readlink is not None else os.readlink)(path)
+    raw = str(raw)
+    return strip_extended_prefix(raw) if _is_nt(platform) else raw
+
+
+def compare_key(text: Path | str, *, platform: str | None = None, realpath=None) -> str:
+    """A string that two spellings of ONE path share.
+
+    Identity on POSIX (the generation rules there compare the strings the
+    pointers hold, deliberately). On Windows: the extended prefix stripped, the
+    path resolved through junctions and 8.3 names, and case and separators
+    folded by ``ntpath.normcase``. Rules (a) current, (b) previous and (d) the
+    running installer compare these, because string equality let the running
+    generation's own spelling differ from the pointer's -- case, ``\\\\?\\``,
+    ``PROGRA~1`` -- and read as "not the same tree" about the tree being run.
+    *realpath* is the test seam; a path that cannot be resolved keeps its
+    spelling.
+    """
+    if not _is_nt(platform):
+        return str(text)
+    resolved = strip_extended_prefix(str(text))
+    try:
+        resolved = (realpath if realpath is not None else os.path.realpath)(resolved)
+    except OSError:
+        pass
+    return ntpath.normcase(strip_extended_prefix(resolved)).rstrip("\\")
+
+
+def remove_link(path: Path | str) -> None:
+    """Remove the LINK at *path*, never what it points at.
+
+    A symlink is unlinked; a Windows junction is ``os.rmdir``'d, which removes
+    the reparse point and nothing under it (``shutil.rmtree`` on a junction is
+    how a retained generation gets emptied). Refuses a path that is not a link
+    at all, so a caller that mis-identified a real directory deletes nothing.
+    """
+    candidate = Path(path)
+    if candidate.is_symlink():
+        candidate.unlink()
+    elif is_link(candidate, platform="win32"):
+        os.rmdir(candidate)
+    else:
+        raise LayoutError(f"refusing to remove {candidate}: it is not a link")
+
+
 def declared_console_scripts_detail(
-    generation: Path, dist: str = "conexus"
+    generation: Path, dist: str = "conexus", *, platform: str | None = None,
 ) -> tuple[frozenset[str], tuple[str, ...]]:
     """The console scripts *generation*'s installed *dist* declares.
 
@@ -180,10 +314,11 @@ def declared_console_scripts_detail(
     so a caller says "could not check" rather than guessing an owned set from
     a listing. Uncertain means say so.
     """
-    python = generation / "bin" / "python"
+    python = venv_python(generation, platform=platform)
     if not python.is_file():
         raise LayoutError(
-            f"{generation} has no bin/python to ask which console scripts it declares"
+            f"{generation} has no {venv_bin_name(platform=platform)}/{python.name} "
+            "to ask which console scripts it declares"
         )
     try:
         proc = subprocess.run(  # noqa: S603 -- the generation's own interpreter, fixed argv
@@ -229,7 +364,9 @@ def declared_console_scripts_detail(
     return frozenset(names) - NEVER_SHIM, tuple(refused)
 
 
-def declared_console_scripts(generation: Path, dist: str = "conexus") -> frozenset[str]:
+def declared_console_scripts(
+    generation: Path, dist: str = "conexus", *, platform: str | None = None,
+) -> frozenset[str]:
     """:func:`declared_console_scripts_detail`'s accepted set, with each refused
     name said out loud through the warning stream.
 
@@ -238,7 +375,7 @@ def declared_console_scripts(generation: Path, dist: str = "conexus") -> frozens
     as everything else. A dispatch must use the detail form and place the
     refusals itself; see the comment at the refusal site.
     """
-    names, refused = declared_console_scripts_detail(generation, dist)
+    names, refused = declared_console_scripts_detail(generation, dist, platform=platform)
     for name in refused:
         _warn(
             "declared_console_script_refused",
@@ -247,7 +384,9 @@ def declared_console_scripts(generation: Path, dist: str = "conexus") -> frozens
     return names
 
 
-def owned_from_declared(declared: frozenset[str], generation: Path) -> frozenset[str]:
+def owned_from_declared(
+    declared: frozenset[str], generation: Path, *, platform: str | None = None,
+) -> frozenset[str]:
     """The owned shim set, given an ALREADY-FETCHED declared set.
 
     Split out so that the writer and this module cannot hold two copies of the
@@ -259,10 +398,15 @@ def owned_from_declared(declared: frozenset[str], generation: Path) -> frozenset
     ``shims_core``'s module docstring for the measurement.
     """
     candidates = (declared | DEPENDENCY_SCRIPTS) - NEVER_SHIM
-    return frozenset(name for name in candidates if (generation / "bin" / name).exists())
+    return frozenset(
+        name for name in candidates
+        if venv_script(generation, name, platform=platform).exists()
+    )
 
 
-def owned_shim_names(generation: Path, dist: str = "conexus") -> frozenset[str]:
+def owned_shim_names(
+    generation: Path, dist: str = "conexus", *, platform: str | None = None,
+) -> frozenset[str]:
     """The shim names the writer WRITES for *generation* -- the exact set nexus
     owns in the shared bin dir, derived the way the writer derives it: the
     distribution's declared console scripts plus :data:`DEPENDENCY_SCRIPTS`,
@@ -275,10 +419,29 @@ def owned_shim_names(generation: Path, dist: str = "conexus") -> frozenset[str]:
     The rule itself is :func:`owned_from_declared`, which the writer calls with
     the same declared set, so the two cannot drift apart.
     """
-    return owned_from_declared(declared_console_scripts(generation, dist), generation)
+    return owned_from_declared(
+        declared_console_scripts(generation, dist, platform=platform),
+        generation, platform=platform,
+    )
 
 
-def reclaimed_shims(generation: Path, bin_dir: Path) -> list[str]:
+def reclaimed_from_owned(
+    owned: frozenset[str] | set[str], bin_dir: Path, *, platform: str | None = None,
+) -> list[str]:
+    """Which of the *owned* shim names at *bin_dir* are symlinks (uv's).
+
+    POSIX only. On Windows there is nothing to reclaim: nexus writes no files
+    into uv's bin dir (the shims are a PATH entry, ``<tools>\\current\\bin``,
+    ahead of it), so uv rewriting its own launchers there is harmless.
+    """
+    if _is_nt(platform):
+        return []
+    return [name for name in sorted(owned) if (bin_dir / name).is_symlink()]
+
+
+def reclaimed_shims(
+    generation: Path, bin_dir: Path, *, platform: str | None = None,
+) -> list[str]:
     """The owned shim names at *bin_dir* that are symlinks -- uv's, not ours.
 
     nexus writes every shim as a regular file, so a symlink at an OWNED name
@@ -288,10 +451,9 @@ def reclaimed_shims(generation: Path, bin_dir: Path) -> list[str]:
     shipped one -- is not ours to judge and is never listed. Propagates
     :class:`LayoutError` from :func:`owned_shim_names`.
     """
-    return [
-        name for name in sorted(owned_shim_names(generation))
-        if (bin_dir / name).is_symlink()
-    ]
+    return reclaimed_from_owned(
+        owned_shim_names(generation, platform=platform), bin_dir, platform=platform,
+    )
 
 
 #: The pointer every shim resolves. Always an ABSOLUTE symlink, so that plain
@@ -460,7 +622,7 @@ def tools_dir() -> Path:
 #: They are different directories answering different questions and a caller
 #: that confuses them gets a confidently wrong answer, which is why the names
 #: are deliberately not near-homonyms.
-def uv_tool_root() -> Path:
+def uv_tool_root(*, platform: str | None = None) -> Path:
     """Where uv keeps its tools, resolved the way UV ITSELF resolves it.
 
     nexus-orhp5. Four rules in this tree answered this question and they
@@ -496,15 +658,24 @@ def uv_tool_root() -> Path:
     raw = os.environ.get("UV_TOOL_DIR")
     if raw and raw.strip():
         return Path(raw.strip()).expanduser()
+    if _is_nt(platform):
+        # MEASURED on native Windows (uv, 2026-10-06): ``uv tool dir`` is
+        # %APPDATA%\uv\tools, not the XDG-shaped default below. XDG_DATA_HOME
+        # is not consulted here: no measurement says uv honours it on Windows.
+        appdata = os.environ.get("APPDATA")
+        base = Path(appdata.strip()) if appdata and appdata.strip() else (
+            Path.home() / "AppData" / "Roaming"
+        )
+        return base / "uv" / "tools"
     xdg = os.environ.get("XDG_DATA_HOME")
     if xdg and xdg.strip():
         return Path(xdg.strip()).expanduser() / "uv" / "tools"
     return Path.home() / ".local" / "share" / "uv" / "tools"
 
 
-def uv_conexus_venv() -> Path:
+def uv_conexus_venv(*, platform: str | None = None) -> Path:
     """The legacy ``uv tool install conexus`` venv root."""
-    return uv_tool_root() / "conexus"
+    return uv_tool_root(platform=platform) / "conexus"
 
 
 def is_under_uv_tool_install(path: Path | str) -> bool:
@@ -558,7 +729,7 @@ def _require_component(label: str, value: str) -> str:
     return value
 
 
-def source_kind(spec: str) -> str:
+def source_kind(spec: str, *, platform: str | None = None) -> str:
     """Which KIND of source *spec* names, decided by SHAPE alone.
 
     The Python twin of ``nx_source_kind``, and until the collapse this rule had
@@ -586,6 +757,12 @@ def source_kind(spec: str) -> str:
     ``test_both_halves_classify_every_source_shape_alike`` is what says so
     rather than this comment.
     """
+    if _is_nt(platform) and ("\\" in spec or re.match(r"[A-Za-z]:", spec)):
+        # Native Windows only: ``C:\src\nexus``, ``.\nexus`` and ``C:nexus``
+        # have no slash and are directories. A PEP 508 name cannot hold a
+        # backslash or a colon, so nothing registry-shaped is reclassified, and
+        # the POSIX rule the shell twin pins is not touched.
+        return "directory"
     return "directory" if spec in (".", "..") or "/" in spec else "registry"
 
 
@@ -810,7 +987,7 @@ def render_shim(command: str, *, tools: Path | None = None) -> str:
     ])
 
 
-def current_generation(*, tools: Path | None = None) -> Path:
+def current_generation(*, tools: Path | None = None, platform: str | None = None) -> Path:
     """The generation ``<tools>/current`` points at, via one ``readlink``.
 
     Raises :class:`LayoutError` rather than a bare ``OSError`` when
@@ -825,7 +1002,7 @@ def current_generation(*, tools: Path | None = None) -> Path:
     """
     link = current_link(tools=tools)
     try:
-        raw = os.readlink(link)
+        raw = read_link(link, platform=platform)
     except OSError as exc:
         raise LayoutError(f"no current generation at {link}: {exc}") from exc
     target = Path(raw)
@@ -836,7 +1013,9 @@ def current_generation(*, tools: Path | None = None) -> Path:
     return target
 
 
-def is_stale(baked: Path | None = None, *, tools: Path | None = None) -> bool:
+def is_stale(
+    baked: Path | None = None, *, tools: Path | None = None, platform: str | None = None,
+) -> bool:
     """Exact staleness: *baked* (default this process's ``sys.prefix``) is
     compared against the CURRENT generation on disk.
 
@@ -859,7 +1038,11 @@ def is_stale(baked: Path | None = None, *, tools: Path | None = None) -> bool:
     never equal a live baseline, so it reports stale rather than raising.
     """
     baseline = Path(sys.prefix) if baked is None else baked
-    return baseline != current_generation(tools=tools)
+    current = current_generation(tools=tools, platform=platform)
+    if _is_nt(platform):
+        # Windows spells one directory several ways (case, \\?\, 8.3).
+        return compare_key(baseline, platform=platform) != compare_key(current, platform=platform)
+    return baseline != current
 
 
 def list_generations(*, tools: Path | None = None) -> list[Path]:

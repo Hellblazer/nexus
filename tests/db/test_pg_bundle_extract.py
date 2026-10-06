@@ -45,8 +45,10 @@ def test_current_platform_tag_matches_ci_artifact_naming() -> None:
         assert tag == ("mac-arm64" if machine in {"arm64", "aarch64"} else "mac-x64")
     elif sys_name == "linux":
         assert tag == ("linux-arm64" if machine in {"aarch64", "arm64"} else "linux-amd64")
-    # Release-N shipped targets (the only ones with a real artifact).
-    assert tag in {"mac-arm64", "mac-x64", "linux-amd64", "linux-arm64"}
+    elif sys_name == "windows":
+        assert tag == "windows-x64"
+    # Targets with a real artifact (windows-x64 from RDR-224).
+    assert tag in {"mac-arm64", "mac-x64", "linux-amd64", "linux-arm64", "windows-x64"}
 
 
 # ── locate_bundle_archive ───────────────────────────────────────────────────────

@@ -67,9 +67,23 @@ Exit ``1`` when a required client commit is missing from the latest ``v*``
 tag or the ledger has a blocking entry; ``2`` when git cannot be interrogated.
 It gates the DEPLOY, never the tag cut.
 
+**Windows-assets mode** (``--require-windows [TAG]``, nexus-f9bgu.28,
+RDR-224 critique S4): an OPT-IN check that the engine release TAG (default: the
+pinned ``REQUIRED_ENGINE_VERSION`` tag) is published and carries the full
+27-asset set, the 21 of the three native platforms plus the six Windows assets
+(``nexus-pg-windows-x64.txz`` and ``nexus-service-windows-x64.txz``, each with its
+``.sha256`` and ``.sigstore.json``). It exists because a tag cut with the
+``NX_WINDOWS_RELEASE_LEGS`` switch off publishes 21 assets, becomes immutable, and
+leaves a Windows client nothing to install from it; the only recovery is another
+cut. Run it after the cut that is meant to carry Windows and before the client
+release pins it. It changes nothing about any other mode: without the flag this
+script behaves exactly as before. Exit ``0`` complete, ``1`` a draft or assets
+missing (named), ``2`` when ``gh`` could not answer.
+
 Usage::
 
     uv run python scripts/check_engine_release_floor.py
+    uv run python scripts/check_engine_release_floor.py --require-windows engine-service-v0.1.140
     uv run python scripts/check_engine_release_floor.py --url https://staging.example.com
     uv run python scripts/check_engine_release_floor.py --paired-deploy engine-service-v0.1.63
     uv run python scripts/check_engine_release_floor.py --paired-deploy-auto
@@ -1218,6 +1232,81 @@ def check_client_precondition(engine_tag: str) -> int:
     return 0
 
 
+#: The assets a Windows-carrying engine release holds, in lockstep with scripts/promote_engine_release.sh
+#: (a test runs that script against exactly this set, so the two cannot drift): per native platform the
+#: binary with .sha256, .cosign.bundle and .sigstore.json plus the PG bundle with .sha256 and
+#: .sigstore.json, then, with the Windows legs on, the PG bundle and the engine archive with .sha256
+#: and .sigstore.json each.
+_ENGINE_NATIVE_PLATFORMS = ("linux-amd64", "linux-arm64", "mac-arm64")
+_WINDOWS_ARCHIVES = ("nexus-pg-windows-x64.txz", "nexus-service-windows-x64.txz")
+
+
+def expected_engine_assets(*, windows: bool) -> tuple[str, ...]:
+    """The release's asset names: 21 without the Windows legs, 27 with them."""
+    names: list[str] = []
+    for arch in _ENGINE_NATIVE_PLATFORMS:
+        b = f"nexus-service-{arch}"
+        names += [b, f"{b}.sha256", f"{b}.cosign.bundle", f"{b}.sigstore.json"]
+        pg = f"nexus-pg-{arch}.txz"
+        names += [pg, f"{pg}.sha256", f"{pg}.sigstore.json"]
+    if windows:
+        for archive in _WINDOWS_ARCHIVES:
+            names += [archive, f"{archive}.sha256", f"{archive}.sigstore.json"]
+    return tuple(names)
+
+
+def check_windows_assets(tag: str, repo_root: pathlib.Path | None = None) -> int:
+    """Is ``tag`` a published engine release holding all 27 assets (``--require-windows``)?
+
+    Exit ``0`` when it is; ``1`` for a draft or named missing assets (the Windows ones are
+    called out, because 21 present and 6 absent means the cut ran with the switch off);
+    ``2`` when ``gh`` could not be consulted. Fail-closed like the paired-tag check."""
+    root = repo_root or pathlib.Path(__file__).resolve().parent.parent
+    try:
+        out = subprocess.run(
+            ["gh", "release", "view", tag, "--json", "isDraft,assets"],
+            cwd=root, capture_output=True, text=True, timeout=30, check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        print(f"CANNOT VERIFY: could not invoke `gh` ({exc})", file=sys.stderr)
+        return 2
+    if out.returncode != 0:
+        detail = out.stderr.strip() or out.stdout.strip() or f"exit {out.returncode}"
+        print(f"CANNOT VERIFY: `gh release view {tag}` failed: {detail}", file=sys.stderr)
+        return 2
+    try:
+        payload = json.loads(out.stdout)
+    except json.JSONDecodeError as exc:
+        print(f"CANNOT VERIFY: `gh release view {tag}` returned unparseable JSON ({exc})", file=sys.stderr)
+        return 2
+    if not isinstance(payload, dict) or "isDraft" not in payload or not isinstance(payload.get("assets"), list):
+        print(f"CANNOT VERIFY: `gh release view {tag}` response lacks isDraft or assets", file=sys.stderr)
+        return 2
+    if payload["isDraft"]:
+        print(f"BLOCKED: release {tag} is still a DRAFT -- not published", file=sys.stderr)
+        return 1
+    present = {a.get("name") for a in payload["assets"] if isinstance(a, dict)}
+    expected = expected_engine_assets(windows=True)
+    missing = [a for a in expected if a not in present]
+    if missing:
+        windows_missing = [a for a in missing if "windows" in a]
+        hint = (
+            " The native platforms are all present, so this cut ran with NX_WINDOWS_RELEASE_LEGS off "
+            "(or the Windows jobs were skipped): a Windows client has nothing to install from this tag, "
+            "and the recovery is another cut with the switch on."
+            if windows_missing and len(windows_missing) == len(missing)
+            else ""
+        )
+        print(
+            f"BLOCKED: release {tag} is missing {len(missing)} of {len(expected)} assets: "
+            f"{', '.join(missing)}.{hint}",
+            file=sys.stderr,
+        )
+        return 1
+    print(f"OK: release {tag} is published with all {len(expected)} assets, the Windows legs included")
+    return 0
+
+
 def stale_precondition_rows(
     table: dict[str, dict[str, str]] | None = None,
     floor: tuple[int, ...] | None = None,
@@ -1306,7 +1395,33 @@ def main(argv: list[str] | None = None) -> int:
         "defaults to the pinned REQUIRED_ENGINE_VERSION tag. Gates the "
         "DEPLOY, never the tag cut. Mutually exclusive with every other mode.",
     )
+    parser.add_argument(
+        "--require-windows",
+        nargs="?",
+        const="",
+        default=None,
+        metavar="TAG",
+        help="Windows-assets mode (nexus-f9bgu.28), OPT-IN. Verify that TAG "
+        "(default: the pinned REQUIRED_ENGINE_VERSION tag) is a published "
+        "release carrying all 27 assets, the six Windows ones included. Run it "
+        "after the cut meant to carry Windows and before a client release pins "
+        "it. Mutually exclusive with every other mode; no other mode's "
+        "behaviour changes.",
+    )
     args = parser.parse_args(argv)
+    if args.require_windows is not None:
+        if (
+            args.ledger_only
+            or args.paired_deploy is not None
+            or args.paired_deploy_auto
+            or args.url is not None
+            or args.client_precondition is not None
+        ):
+            parser.error(
+                "--require-windows is mutually exclusive with --url, --paired-deploy, "
+                "--paired-deploy-auto, --ledger-only and --client-precondition"
+            )
+        return check_windows_assets(args.require_windows or _pinned_engine_tag())
     if args.paired_deploy is not None and args.paired_deploy_auto:
         parser.error("--paired-deploy and --paired-deploy-auto are mutually exclusive")
     if args.ledger_only and (

@@ -298,13 +298,15 @@ class TestBootSemaphoreDirIsPerUser:
         assert d.name.startswith("nexus_t2_substrate_boot_locks") and "1001" in d.name
 
     def test_the_real_default_is_the_running_users_directory(self) -> None:
-        import os
         import tempfile
         from pathlib import Path
 
+        from nexus.daemon.service_registry import service_identity
         from tests import _engine_substrate as sub
 
-        assert sub._BOOT_SEMAPHORE_DIR == sub._boot_semaphore_dir(Path(tempfile.gettempdir()), uid=os.getuid())
+        assert sub._BOOT_SEMAPHORE_DIR == sub._boot_semaphore_dir(
+            Path(tempfile.gettempdir()), uid=service_identity(),
+        )
 
     def test_a_second_users_directory_is_never_the_first_users(self, tmp_path, monkeypatch) -> None:
         """End to end through the DEFAULT uid resolution (no explicit ``uid=``): as user A
@@ -315,13 +317,15 @@ class TestBootSemaphoreDirIsPerUser:
 
         from tests._engine_substrate import _boot_semaphore_dir
 
-        monkeypatch.setattr(os, "getuid", lambda: 1001)
+        # The identity the default resolves through (``str(os.getuid())`` on POSIX, the
+        # user SID on Windows, where ``os.getuid`` does not exist; nexus-f9bgu.19).
+        monkeypatch.setattr("nexus.daemon.service_registry.service_identity", lambda: "1001")
         a = _boot_semaphore_dir(tmp_path)
         with _boot_semaphore_slot(lock_dir=a):
             pass
         os.chmod(a, stat.S_IRUSR | stat.S_IXUSR)  # a peer-owned directory this user cannot write
         try:
-            monkeypatch.setattr(os, "getuid", lambda: 1002)
+            monkeypatch.setattr("nexus.daemon.service_registry.service_identity", lambda: "1002")
             b = _boot_semaphore_dir(tmp_path)
             assert b != a
             with _boot_semaphore_slot(lock_dir=b):

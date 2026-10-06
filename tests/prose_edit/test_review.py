@@ -106,7 +106,7 @@ def test_an_edit_is_inline_del_ins_then_a_superscript_number_and_its_reason_is_a
     mod = _review()
     copy = mod.build_copy(DOC, proposal([E1, edit(2, "Basically ", "", "filler")]), label="docs/s.md",
                           genre="reference-doc", rng=None, html=False, stdin=False)
-    assert "<del>It really is quite simple.</del><ins>It is simple.</ins><sup>1</sup>" in copy
+    assert "It <del>really is quite</del><ins>is</ins> simple.<sup>1</sup>" in copy
     assert "<del>Basically </del><sup>2</sup>it is ordered." in copy  # a pure cut has no ins
     assert "<sup>1</sup> filler" in copy and "<sup>2</sup> filler" in copy
     body, notes = copy.split("\n---\n")[-2:]
@@ -155,7 +155,7 @@ def test_an_edit_that_cannot_be_placed_is_listed_with_its_cause_instead_of_marke
     copy = mod.build_copy(DOC, proposal([E1, dup]), label="docs/s.md", genre="rdr", rng=None, html=False, stdin=False)
     assert "<del>Third paragraph repeats itself.</del>" not in copy
     assert "> **[E3]** Cannot be placed: the old string occurs 2 times. It is skipped if accepted." in copy
-    assert "<del>It really is quite simple.</del>" in copy
+    assert "It <del>really is quite</del><ins>is</ins> simple." in copy
 
 
 def test_dropped_edits_keep_their_numbers_in_the_footnotes() -> None:
@@ -377,8 +377,8 @@ def test_an_html_copy_shows_entities_as_characters_but_marks_keep_the_source_tex
     assert plans[2]["span"] is not None  # matching is against the raw source, entity and all
     copy = mod.build_copy(HTML_ENTITIES, prop, label="web/e.html", genre="exploration-essay", rng=None,
                           html=True, stdin=False)
-    assert "Use <b> tags & say <del>it really is quite simple</del><ins>it is simple</ins><sup>1</sup>." in copy
-    assert "<del>Fish &amp; chips are good.</del><ins>Fish and chips are good.</ins><sup>2</sup>" in copy
+    assert "Use <b> tags & say it <del>really is quite</del><ins>is</ins> simple<sup>1</sup>." in copy
+    assert "Fish <del>&amp;</del><ins>and</ins> chips are good.<sup>2</sup>" in copy
     assert "&lt;" not in copy and "tags &amp;" not in copy
 
 
@@ -396,8 +396,8 @@ def test_an_html_copy_is_flat_excerpts_with_marks_and_notes_beside_their_section
     for markup in ("<style", "<script", "<head", "<!doctype", "goatcounter", "color: red", "<p>", "<h1>", "<body>",
                    "href", "<a ", "example.com", "<title"):
         assert markup not in copy, markup
-    assert "<del>It really is quite simple.</del><ins>It is simple.</ins><sup>1</sup>" in copy
-    assert "<del>basically nothing</del><ins>nothing</ins><sup>2</sup>" in copy
+    assert "It <del>really is quite</del><ins>is</ins> simple.<sup>1</sup>" in copy
+    assert "<del>basically </del>nothing<sup>2</sup>" in copy
     assert "Second paragraph links to the long page and says" in copy  # the link text stays, its URL does not
     assert "Unmarked paragraph" not in copy  # an excerpt holds only sections a mark or note belongs to
     assert "The queue" in copy  # the heading the excerpt sits under
@@ -414,7 +414,7 @@ def test_an_html_target_renders_a_flat_copy_and_applies_to_the_real_markup(prose
                                     edit(2, "basically nothing", "nothing", "filler")],
                       text=HTML, rel="web/page.html", genre="exploration-essay")
     copy = Path(out["copy"]).read_text(encoding="utf-8")
-    assert "<style" not in copy and "<script" not in copy and "<del>basically nothing</del>" in copy
+    assert "<style" not in copy and "<script" not in copy and "<del>basically </del>nothing" in copy
     done = review_ok(prose, "apply", "--work", str(work), "--accept", "all")
     assert [a["n"] for a in done["applied"]] == [1, 2]
     assert git_add.read_text(encoding="utf-8") == HTML.replace("It really is quite simple.", "It is simple.").replace(
@@ -472,7 +472,7 @@ def test_copy_location_is_outside_the_repo_and_the_repo_status_is_unchanged(pros
         assert copy.is_file() and work in copy.parents
         assert repo.resolve() not in copy.resolve().parents
         assert status(repo) == before
-        assert "<del>It really is quite simple.</del>" in copy.read_text(encoding="utf-8")
+        assert "It <del>really is quite</del><ins>is</ins> simple." in copy.read_text(encoding="utf-8")
         assert out["viewer"] is None and out["opened"] is False  # no viewer record: the path is printed
         assert (repo / "docs" / "s.md").read_text(encoding="utf-8") == DOC  # render never edits the file
     finally:
@@ -781,7 +781,7 @@ def test_the_skill_runs_render_then_apply_and_deletes_work_only_after_the_answer
     assert "A successful apply has already deleted WORK (unless it reports `log_error`, below); do not delete it again." in text
     assert "--work WORK < WORK/reply.txt" not in text  # filter no longer deletes the copy's directory
     for verb in re.findall(r"REVIEW ([\w-]+)", text):
-        assert verb in {"render", "apply", "log-retry"}
+        assert verb in {"render", "apply", "answer", "log-retry"}
     # a failed log keeps WORK and the skill says what the author does: log-retry, never a second apply
     assert "REVIEW log-retry --work '<work>'" in text and "Never run apply again for it" in text
     # the script refuses an apply with no matching dry run; the skill says so and never skips it

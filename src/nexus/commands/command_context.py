@@ -25,6 +25,7 @@ from pathlib import Path
 import click
 
 from nexus.bounded_subprocess import run_bounded
+from nexus.util.nx_argv import nx_argv
 
 
 # ---------------------------------------------------------------------------
@@ -475,7 +476,7 @@ def nx_doctor_block() -> list[str]:
     lines: list[str] = [heading, ""]
     try:
         proc = run_bounded(
-            ["nx", "doctor"],
+            nx_argv("doctor"),
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             timeout=_PREAMBLE_TIMEOUT,
@@ -895,7 +896,7 @@ def _nx_memory_titles_block(repo: str) -> list[str]:
     header = f"### nx memory ({proj_active}) titles"
     try:
         output = _check_output(
-            ["nx", "memory", "get", "--project", proj_active, "--title", ""],
+            nx_argv("memory", "get", "--project", proj_active, "--title", ""),
             stderr=subprocess.DEVNULL,
             text=True,
         ).strip()

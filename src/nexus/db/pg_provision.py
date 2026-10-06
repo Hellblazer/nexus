@@ -86,6 +86,7 @@ contains PG_DATA and PG_PORT for daemon lifecycle use.
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import secrets
 import socket
@@ -94,10 +95,11 @@ import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import NamedTuple
+from typing import Callable, NamedTuple
 
 import structlog
 
+from nexus._winsec import grant_user_tree_access, restrict_to_owner
 from nexus.bounded_subprocess import run_bounded
 from nexus.redact import redact_credentials
 
@@ -169,15 +171,26 @@ def root_user_remedy() -> str:
 def refuse_root() -> None:
     """Refuse local provisioning when the process euid is 0 (nexus-ov1oq).
 
-    ``os.geteuid`` is POSIX-only; on Windows the attribute is absent, and a
-    native-Windows client is out of scope anyway (Windows support is WSL2
-    only), so a missing ``geteuid`` means 'not root'.
+    ``os.geteuid`` is POSIX-only; on Windows the attribute is absent, so a
+    missing ``geteuid`` means 'not root': Windows has no euid, and an elevated
+    Administrator is NOT refused here. Native Windows is a supported client
+    (RDR-224); what protects an elevated install is the ACL work instead:
+    ``nexus._winsec.grant_user_tree_access`` gives the user's own SID an
+    explicit, inheritable ACE on the bundle tree and the data directory, which
+    PostgreSQL's restricted token needs (nexus-f9bgu.18).
     """
     geteuid = getattr(os, "geteuid", None)
     if geteuid is None or geteuid() != 0:
         return
     _log.error("pg_provision_refused_root")
     raise PgRootUserError(root_user_remedy())
+
+
+def _on_windows(platform: str | None = None) -> bool:
+    """True on native Windows. *platform* (``"win32"`` or anything else) is the
+    seam that lets both branches of every Windows-aware function here run on any
+    host; production callers pass nothing."""
+    return (platform == "win32") if platform is not None else (os.name == "nt")
 
 
 @dataclass(frozen=True)
@@ -191,13 +204,17 @@ class PgBinaries:
     createdb: Path
 
     @classmethod
-    def from_dir(cls, d: Path) -> "PgBinaries":
+    def from_dir(cls, d: Path, *, platform: str | None = None) -> "PgBinaries":
+        """Paths for the four binaries under *d*. Windows executables carry
+        ``.exe`` (the Windows PG bundle ships ``initdb.exe`` and friends,
+        RDR-224 / nexus-f9bgu.18); everything else is the bare name."""
+        suffix = ".exe" if _on_windows(platform) else ""
         return cls(
             bin_dir=d,
-            initdb=d / "initdb",
-            pg_ctl=d / "pg_ctl",
-            psql=d / "psql",
-            createdb=d / "createdb",
+            initdb=d / f"initdb{suffix}",
+            pg_ctl=d / f"pg_ctl{suffix}",
+            psql=d / f"psql{suffix}",
+            createdb=d / f"createdb{suffix}",
         )
 
     def all_present(self) -> bool:
@@ -459,7 +476,9 @@ class ProvisionResult:
 # ── Low-level helpers ──────────────────────────────────────────────────────────
 
 
-def _bundle_lib_env(cmd: list[str], env: dict | None) -> dict:
+def _bundle_lib_env(
+    cmd: list[str], env: dict | None, *, platform: str | None = None
+) -> dict:
     """Build a subprocess env that lets a relocatable PG binary find its own libs.
 
     The RDR-161 relocatable PG bundle ships its libraries in ``<bundle>/lib`` but
@@ -485,6 +504,11 @@ def _bundle_lib_env(cmd: list[str], env: dict | None) -> dict:
     guard makes the already-published bundle work for nx-managed provisioning.
     """
     base = dict(os.environ if env is None else env)
+    if _on_windows(platform):
+        # Windows loads a DLL from the executable's own directory, and the
+        # Windows bundle keeps its DLLs beside the .exe files (RDR-224). There
+        # is no loader search variable to set, and PATH is left alone.
+        return base
     try:
         lib_dir = Path(cmd[0]).resolve().parent.parent / "lib"
     except (IndexError, OSError):
@@ -678,7 +702,35 @@ def _role_exists(bins: PgBinaries, port: int, superuser: str, rolename: str) -> 
     return "1 row" in res.stdout
 
 
-def bootstrap_superuser() -> str:
+def windows_superuser_name(identity: str) -> str:
+    """The cluster superuser's role name for a Windows service identity (the
+    user SID from :func:`nexus.daemon.service_registry.service_identity`).
+
+    ``nx_`` plus the first 16 hex digits of the SID's SHA-256, for four reasons:
+
+    * STABLE. The SID survives renaming the account and is not settable through
+      ``USERNAME`` the way the login name is, so the name written by ``initdb``
+      today is the name every later start and repair derives.
+    * LEGAL UNQUOTED. Lowercase letters, digits and underscore, starting with a
+      letter. A SID is not (``S-1-5-21-...`` has hyphens and an upper-case
+      letter), and a login name can carry spaces, upper case or non-ASCII
+      characters; several call sites in this module interpolate the name into
+      SQL without quoting it.
+    * BOUNDED. PostgreSQL role names stop at 63 bytes and a SID with fifteen
+      sub-authorities is longer than that; a digest is always 19 characters.
+    * NEVER RESERVED. ``pg_`` is a reserved role prefix; ``nx_`` is not.
+
+    The name carries no information a reader needs: the cluster is trust
+    authenticated on 127.0.0.1 for the owning OS user, so the role name is an
+    internal handle, not an identity anyone types.
+    """
+    digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16]
+    return f"nx_{digest}"
+
+
+def bootstrap_superuser(
+    *, platform: str | None = None, identity: Callable[[], str] | None = None
+) -> str:
     """The OS identity that owns this box's local cluster's superuser role.
 
     initdb is run with ``--username <this>`` (see :func:`_init_cluster`), and
@@ -691,7 +743,20 @@ def bootstrap_superuser() -> str:
     SAME identity — a second, independently re-derived copy of this
     expression is exactly the drift class this module's docstring warns
     about elsewhere (nexus-b6qlf).
+
+    POSIX: the ``USER`` / ``LOGNAME`` login name, as before. Windows
+    (nexus-f9bgu.18): :func:`windows_superuser_name` of the service identity
+    (the user SID), never ``USER`` or ``LOGNAME``, which Windows does not set.
+    *platform* and *identity* are test seams.
     """
+    if _on_windows(platform):
+        if identity is None:
+            from nexus.daemon.service_registry import service_identity  # noqa: PLC0415 — deferred: the daemon package imports this module's callers
+
+            def identity() -> str:
+                return service_identity(platform=platform)
+
+        return windows_superuser_name(identity())
     return os.environ.get("USER") or os.environ.get("LOGNAME") or "postgres"
 
 
@@ -1012,7 +1077,9 @@ def reassign_diag_view_owner_before_restart(
 # ── Core provisioning steps ────────────────────────────────────────────────────
 
 
-def _init_cluster(bins: PgBinaries, pgdata: Path, os_user: str) -> bool:
+def _init_cluster(
+    bins: PgBinaries, pgdata: Path, os_user: str, *, platform: str | None = None
+) -> bool:
     """Run initdb to create a new cluster.
 
     Returns True when initdb ran (new cluster), False when the cluster
@@ -1023,6 +1090,10 @@ def _init_cluster(bins: PgBinaries, pgdata: Path, os_user: str) -> bool:
         return False
 
     pgdata.mkdir(parents=True, exist_ok=True)
+    # Windows: an explicit user ACE on the data directory BEFORE initdb fills
+    # it, or an elevated session under a 0o700 config dir dies 0xC0000135
+    # (see grant_user_tree_access). A no-op on POSIX.
+    grant_user_tree_access(pgdata, platform=platform)
     _run([
         str(bins.initdb),
         "-D", str(pgdata),
@@ -1087,7 +1158,169 @@ def _configure_cluster(pgdata: Path, port: int) -> None:
     conf_path.write_text("\n".join(lines) + "\n")
 
 
-def _start_cluster(bins: PgBinaries, pgdata: Path, port: int) -> None:
+class PgStartError(RuntimeError):
+    """``pg_ctl start`` failed or the postmaster never accepted connections.
+
+    The message names the PostgreSQL log (``pg_ctl -l``) and pg_ctl's own output
+    file and carries the tail of both, so the failure reads at the point it is
+    raised instead of sending the user to find a file (RDR-224, nexus-f9bgu.18).
+    """
+
+
+class StartInterruptedError(Exception):
+    """A caller's stop request ended :func:`_start_cluster`'s wait early.
+
+    NOT a failure and not a :class:`PgStartError`: nothing went wrong with the
+    cluster. ``pg_ctl`` is left running, so a postmaster it is bringing up
+    carries on. PostgreSQL is left running by design, and killing ``pg_ctl``
+    could strand a half-started cluster (RDR-224, nexus-f9bgu.17).
+    """
+
+
+#: How long :func:`_start_cluster` waits for the port after ``pg_ctl start -w``
+#: returned. A constant so a test can shorten it.
+_PG_ACCEPT_TIMEOUT_S: float = 30.0
+
+#: The wait on ``pg_ctl start -w`` on Windows is a loop of waits this long.
+#: A CPython ``SIGBREAK`` handler does not run while the main thread sits in
+#: one long wait (T2 ``nexus_rdr/224-research-22``: 120 s of sleep, a stdin
+#: read and ``Event.wait`` all ignored it; a 1.0 s sleep loop ran it within
+#: 0.5 s), so a stop request sent to the supervisor during a PostgreSQL start
+#: would not even be SEEN until the start returned. Matches the supervisor's
+#: tick, ``service_registry.DEFAULT_HEARTBEAT_INTERVAL``.
+_PG_CTL_WAIT_TICK_S: float = 1.0
+
+#: Lines of each log file :func:`_log_tail` puts in an error message.
+_LOG_TAIL_LINES: int = 40
+
+
+def _log_tail(path: Path, *, lines: int = _LOG_TAIL_LINES) -> str:
+    """The last *lines* lines of *path*, credential-scrubbed, or a marker.
+
+    The PostgreSQL log can carry the statement text of a failed
+    ``CREATE ROLE ... PASSWORD`` (the same payload :func:`_redacted` guards in
+    argv), so the tail goes through ``redact_credentials`` before it reaches an
+    exception message.
+    """
+    try:
+        with path.open("rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            size = fh.tell()
+            fh.seek(max(0, size - 16384))
+            data = fh.read()
+    except OSError as exc:
+        return f"(cannot read {path}: {exc})"
+    text = data.decode("utf-8", errors="replace")
+    tail = "\n".join(text.splitlines()[-lines:])
+    return redact_credentials(tail) if tail else "(empty)"
+
+
+def _start_failure_message(headline: str, pgdata: Path, pglog: Path, ctl_out: Path | None) -> str:
+    parts = [headline, f"PostgreSQL log: {pglog}"]
+    if ctl_out is not None:
+        parts.append(f"pg_ctl output: {ctl_out}")
+    parts.append(f"--- tail of {pglog.name} ---\n{_log_tail(pglog)}")
+    if ctl_out is not None:
+        parts.append(f"--- tail of {ctl_out.name} ---\n{_log_tail(ctl_out)}")
+    return "\n".join(parts)
+
+
+def _pg_ctl_start_detached(
+    bins: PgBinaries,
+    pgdata: Path,
+    port: int,
+    *,
+    platform: str | None = None,
+    popen: Callable[..., "subprocess.Popen[bytes]"] = subprocess.Popen,
+    stop_check: Callable[[], bool] | None = None,
+) -> None:
+    """Start the cluster with ``pg_ctl start -w`` the way Windows needs it
+    (RDR-224, nexus-f9bgu.18). Not a path for POSIX, which keeps :func:`_run`.
+
+    Three things differ from :func:`_run`, each for a measured reason:
+
+    * pg_ctl's own stdout and stderr go to a FILE. pg_ctl hands its standard
+      handles to the postmaster it starts, so a pipe stays open for the life of
+      the cluster and a reader of that pipe waits forever (the spike hung on
+      exactly this).
+    * The postmaster must outlive this call, so pg_ctl is NOT run under
+      :func:`run_bounded`: that helper assigns the child to a Windows Job Object
+      with ``JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`` and closes it when the call
+      returns, which terminates every descendant, the postmaster included.
+      Spawning with :class:`subprocess.Popen` directly and never calling
+      ``contain`` keeps pg_ctl, and the postmaster that inherits its group, out
+      of any job this module owns.
+    * pg_ctl is spawned with ``CREATE_NEW_PROCESS_GROUP``. The postmaster joins
+      pg_ctl's console process group, and PostgreSQL on Windows treats
+      CTRL_BREAK as SIGINT, a fast shutdown. Left in the supervisor's group, a
+      CTRL_BREAK sent to the supervisor for a plain ``nx daemon service stop``
+      would take PostgreSQL down with it (nexus-f9bgu.24 carries the proof).
+
+    The root refusal that :func:`_run` gives every PostgreSQL subprocess is
+    repeated here, since leaving :func:`run_bounded` would otherwise drop it.
+    pg_ctl is named by absolute path: ``CreateProcess`` resolves a bare name
+    against the PARENT's ``PATH``, not the child's environment.
+
+    The wait for pg_ctl is a loop of waits no longer than
+    :data:`_PG_CTL_WAIT_TICK_S` (nexus-f9bgu.17), so the supervisor's
+    ``SIGBREAK`` handler can run between them. *stop_check*, when given, is
+    polled after each tick; True raises :class:`StartInterruptedError`
+    without killing pg_ctl.
+    """
+    refuse_root()
+    from nexus.util.win_job import CREATE_NEW_PROCESS_GROUP  # noqa: PLC0415 — deferred: Windows spawn path only
+
+    pg_ctl = os.path.abspath(str(bins.pg_ctl))
+    pglog = pgdata / "pg.log"
+    ctl_out = pgdata / "pg_ctl.out"
+    cmd = [pg_ctl, "-D", str(pgdata), "-l", str(pglog), "-o", f"-p {port}", "start", "-w"]
+    _log.debug("pg_provision_run", cmd=_redacted(cmd), detached=True)
+    env = _bundle_lib_env(cmd, None, platform=platform)
+    with ctl_out.open("ab") as out:
+        proc = popen(
+            cmd,
+            stdin=subprocess.DEVNULL,
+            stdout=out,
+            stderr=subprocess.STDOUT,
+            env=env,
+            creationflags=CREATE_NEW_PROCESS_GROUP,
+        )
+        deadline = time.monotonic() + _PG_CTL_WAIT_TIMEOUT_S
+        while True:
+            remaining = deadline - time.monotonic()
+            try:
+                if remaining <= 0:
+                    raise subprocess.TimeoutExpired(cmd, _PG_CTL_WAIT_TIMEOUT_S)
+                returncode = proc.wait(timeout=min(_PG_CTL_WAIT_TICK_S, remaining))
+                break
+            except subprocess.TimeoutExpired:
+                if time.monotonic() >= deadline:
+                    # pg_ctl only: a postmaster it already started is what we wanted.
+                    proc.kill()
+                    proc.wait()
+                    raise
+                if stop_check is not None and stop_check():
+                    raise StartInterruptedError(
+                        "a stop was requested while pg_ctl was starting the cluster"
+                    ) from None
+    if returncode != 0:
+        raise PgStartError(
+            _start_failure_message(
+                f"pg_ctl start exited {returncode} for the cluster at {pgdata}.",
+                pgdata, pglog, ctl_out,
+            )
+        )
+
+
+def _start_cluster(
+    bins: PgBinaries,
+    pgdata: Path,
+    port: int,
+    *,
+    platform: str | None = None,
+    popen: Callable[..., "subprocess.Popen[bytes]"] = subprocess.Popen,
+    stop_check: Callable[[], bool] | None = None,
+) -> None:
     """Start the cluster if not already running.
 
     Uses pg_ctl status to detect a running cluster, then pg_ctl start -w
@@ -1101,6 +1334,14 @@ def _start_cluster(bins: PgBinaries, pgdata: Path, port: int) -> None:
     (``listen_addresses = '127.0.0.1'``, configured in postgresql.conf during
     cluster setup).  All client connections use ``-h 127.0.0.1``, so no
     UNIX socket is needed.
+
+    Windows takes :func:`_pg_ctl_start_detached` for the start itself;
+    *platform* and *popen* are test seams for that branch.
+
+    *stop_check* (Windows only; nexus-f9bgu.17) is polled between the short
+    waits of the start and of the port wait, and a True raises
+    :class:`StartInterruptedError`. POSIX never polls it, so the POSIX start
+    is unchanged.
     """
     status = _run(
         [str(bins.pg_ctl), "-D", str(pgdata), "status"],
@@ -1112,24 +1353,37 @@ def _start_cluster(bins: PgBinaries, pgdata: Path, port: int) -> None:
         return
 
     pglog = str(pgdata / "pg.log")
-    # No "-k <pgdata>" — avoids UNIX socket path length issues on macOS.
-    # TCP-only: listen_addresses='127.0.0.1' is written to postgresql.conf.
-    _run([
-        str(bins.pg_ctl), "-D", str(pgdata),
-        "-l", pglog,
-        "-o", f"-p {port}",
-        "start", "-w",
-    ], timeout=_PG_CTL_WAIT_TIMEOUT_S)
+    if _on_windows(platform):
+        _pg_ctl_start_detached(
+            bins, pgdata, port, platform=platform, popen=popen, stop_check=stop_check,
+        )
+    else:
+        # No "-k <pgdata>" — avoids UNIX socket path length issues on macOS.
+        # TCP-only: listen_addresses='127.0.0.1' is written to postgresql.conf.
+        _run([
+            str(bins.pg_ctl), "-D", str(pgdata),
+            "-l", pglog,
+            "-o", f"-p {port}",
+            "start", "-w",
+        ], timeout=_PG_CTL_WAIT_TIMEOUT_S)
     # Confirm the port is accepting connections (belt-and-suspenders).
-    deadline = time.monotonic() + 30.0
+    deadline = time.monotonic() + _PG_ACCEPT_TIMEOUT_S
     while time.monotonic() < deadline:
         if _port_accepting("127.0.0.1", port):
             break
+        if stop_check is not None and _on_windows(platform) and stop_check():
+            raise StartInterruptedError(
+                "a stop was requested while waiting for PostgreSQL to accept connections"
+            )
         time.sleep(0.2)
     else:
-        raise RuntimeError(
-            f"Postgres did not accept connections on 127.0.0.1:{port} within 30 s. "
-            f"Check {pglog} for details."
+        raise PgStartError(
+            _start_failure_message(
+                f"Postgres did not accept connections on 127.0.0.1:{port} within "
+                f"{_PG_ACCEPT_TIMEOUT_S:g} s.",
+                pgdata, Path(pglog),
+                (pgdata / "pg_ctl.out") if _on_windows(platform) else None,
+            )
         )
     _log.info("pg_cluster_started", port=port, pgdata=str(pgdata))
 
@@ -1938,8 +2192,8 @@ def _write_credentials(
     # left in a half-written state.
     tmp_fd, tmp_path = tempfile.mkstemp(dir=creds_path.parent, prefix=".pg_creds_")
     try:
-        os.fchmod(tmp_fd, 0o600)
         with os.fdopen(tmp_fd, "w") as fh:
+            restrict_to_owner(tmp_path)  # before any secret byte is written; os.fchmod does not exist on Windows
             fh.write(content)
         os.replace(tmp_path, creds_path)
     except Exception:
@@ -1972,8 +2226,8 @@ def _persist_service_token(creds_path: Path, service_token: str) -> None:
     content = existing + f"NX_SERVICE_TOKEN={service_token}\n"
     tmp_fd, tmp_path = tempfile.mkstemp(dir=creds_path.parent, prefix=".pg_creds_")
     try:
-        os.fchmod(tmp_fd, 0o600)
         with os.fdopen(tmp_fd, "w") as fh:
+            restrict_to_owner(tmp_path)  # before any secret byte is written; os.fchmod does not exist on Windows
             fh.write(content)
         os.replace(tmp_path, creds_path)
     except Exception:
@@ -2005,8 +2259,8 @@ def _persist_diag_credentials(creds_path: Path, diag_pass: str) -> None:
     )
     tmp_fd, tmp_path = tempfile.mkstemp(dir=creds_path.parent, prefix=".pg_creds_")
     try:
-        os.fchmod(tmp_fd, 0o600)
         with os.fdopen(tmp_fd, "w") as fh:
+            restrict_to_owner(tmp_path)  # before any secret byte is written; os.fchmod does not exist on Windows
             fh.write(content)
         os.replace(tmp_path, creds_path)
     except Exception:

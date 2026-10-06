@@ -22,6 +22,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import structlog
+from nexus._winsec import make_user_dir
 
 _log = structlog.get_logger(__name__)
 
@@ -51,7 +52,7 @@ def _mineru_output_root() -> Path:
             base = Path(runtime) / "nexus-mineru"
         else:
             base = Path.home() / ".cache" / "nexus" / "mineru-output"
-    base.mkdir(parents=True, exist_ok=True, mode=0o700)
+    make_user_dir(base)
     # Re-chmod in case the directory pre-existed with wider mode.
     try:
         os.chmod(base, 0o700)

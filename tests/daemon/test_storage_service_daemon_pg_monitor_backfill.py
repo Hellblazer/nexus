@@ -36,6 +36,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from nexus.daemon.service_registry import service_identity
 from nexus.db.pg_provision import (
     CREDENTIALS_FILENAME,
     NEXUS_DB_NAME,
@@ -307,7 +308,7 @@ class TestStartReachesBackfillBeforeSpawn:
 
         from nexus.daemon.service_registry import ServiceRegistry
         registry = ServiceRegistry(dir=config_dir, tier="storage_service")
-        assert registry.discover(str(os.getuid())) is None, (
+        assert registry.discover(service_identity()) is None, (
             "precondition: no live lease -- this must NOT short-circuit"
         )
 

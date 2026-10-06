@@ -37,13 +37,17 @@ from typing import TYPE_CHECKING
 
 import structlog
 
+from nexus._install.winproc_core import executable_stem
 from nexus.bounded_subprocess import run_bounded
+from nexus.daemon.binary_lifecycle import well_known_binary_path
 from nexus.daemon.service_registry import (
+    GracefulStopSend,
     _parse_etime,
     _procfs_enumerate,
     all_process_rows,
     process_command,
     process_state,
+    request_graceful_stop,
     storage_service_stack_matcher,
     terminate_pids,
 )
@@ -66,6 +70,7 @@ from nexus.daemon.service_registry import (
 #: not exercise this behavior).
 from nexus.daemon.service_registry import pid_alive as _pid_alive
 from nexus.engine_version import REQUIRED_ENGINE_VERSION, parse_engine_version
+from nexus.util.nx_argv import nx_argv
 
 if TYPE_CHECKING:
     from nexus import install_layout
@@ -88,6 +93,22 @@ def _install_root() -> Path:
     import importlib.metadata as md  # noqa: PLC0415 — stdlib, deferred
 
     return Path(str(md.distribution("conexus").locate_file("")))
+
+
+def venv_root_of_site_packages(site_packages: Path) -> Path:
+    """The venv root that holds *site_packages*.
+
+    POSIX venvs keep it at <venv>/lib/pythonX.Y/site-packages; Windows
+    venvs at <venv>/Lib/site-packages (backslashes there), one level shallower, so the fixed
+    parents[2] this replaced named the directory ABOVE a Windows generation
+    and the finish pass treated every Windows generation install as unmanaged
+    (nexus-f9bgu.47). Decided by the path's shape, not the host, so a POSIX root
+    resolves exactly as before. Raises IndexError for a root too shallow to be
+    either layout.
+    """
+    if site_packages.parent.name.lower() == "lib":
+        return site_packages.parents[1]
+    return site_packages.parents[2]
 
 
 def running_from_tool_install() -> bool:
@@ -117,7 +138,7 @@ def running_from_tool_install() -> bool:
     root = _install_root()
 
     try:
-        venv_root = root.parents[2]
+        venv_root = venv_root_of_site_packages(root)
     except IndexError:  # a root too shallow to be a venv layout
         return False
 
@@ -404,12 +425,16 @@ def _classify(command: str) -> str:
     if not parts:
         return "other"
 
-    exe = os.path.basename(parts[0])
+    # ``executable_stem``: the last path component on EITHER separator with a
+    # trailing ``.exe`` removed, so a Windows ``...\\nx.exe`` classifies as
+    # ``nx`` (RDR-224, nexus-f9bgu.21). Identical to ``os.path.basename`` for
+    # every POSIX name.
+    exe = executable_stem(parts[0])
     rest = parts[1:]
     # A shebang-wrapped entry point: the kernel rewrites argv to
     # [python, script, ...], so the SCRIPT is the real executable.
     if exe.startswith("python") and rest:
-        exe = os.path.basename(rest[0])
+        exe = executable_stem(rest[0])
         rest = rest[1:]
 
     if exe in ("mineru", "mineru-api"):
@@ -418,7 +443,7 @@ def _classify(command: str) -> str:
         return "mcp-host"
     # The engine ships as a native binary and as a jar; both name themselves.
     if exe.startswith("nexus-service") or any(
-        os.path.basename(tok).startswith("nexus-service") for tok in rest
+        executable_stem(tok).startswith("nexus-service") for tok in rest
     ):
         return "service"
     if exe == "nx":
@@ -508,7 +533,7 @@ def _process_markers() -> tuple[str, ...]:
     try:
         # No generation layout readable: the venv root of the running install,
         # which is what a pre-generation box carries.
-        return (str(_install_root().parents[2]),)
+        return (str(venv_root_of_site_packages(_install_root())),)
     except Exception:  # noqa: BLE001 — metadata unavailable: conventional layout
         return _PROC_MARKERS
 
@@ -710,9 +735,38 @@ def restart_stale(report: SkewReport, *, dry_run: bool = False) -> list[str]:
                         f"{proc.kind} pid {proc.pid}: gone or recycled; skipped"
                     )
                     continue
-                import signal as _signal  # noqa: PLC0415 — stdlib, deferred
-
-                os.kill(proc.pid, _signal.SIGTERM)
+                # The shared graceful-stop primitive (RDR-224, nexus-f9bgu.33):
+                # SIGTERM on POSIX, exactly as before; CTRL_BREAK on Windows,
+                # where a bare os.kill(SIGTERM) is TerminateProcess and skips
+                # the worker's bounded drain (its claude -p child is orphaned,
+                # the case the comment below says this branch avoids).
+                send = request_graceful_stop(proc.pid)
+                if send.refused:
+                    # Another Windows session: never signalled, never
+                    # hard-killed (Sam, 2026-10-05).
+                    where = (
+                        f"session {send.target_session}"
+                        if send.target_session is not None
+                        and send.target_session != send.own_session
+                        else "an account or elevation this shell lacks"
+                    )
+                    actions.append(
+                        f"NEEDS HUMAN: {proc.kind} pid {proc.pid}: REFUSED, it runs "
+                        f"in {where}; nothing was signalled or killed — run "
+                        "`nx daemon restart-stale` from there"
+                    )
+                    continue
+                if send.gone:
+                    actions.append(f"{proc.kind} pid {proc.pid}: gone; skipped")
+                    continue
+                if not send.sent:
+                    # POSIX: PermissionError (a pid that is not ours). Windows:
+                    # the console send failed (no console to attach to).
+                    actions.append(
+                        f"{proc.kind} pid {proc.pid}: the stop could not be sent "
+                        f"(error {send.error}); left running"
+                    )
+                    continue
                 # Critique 38b7db3d C3: the worker's graceful drain is
                 # bounded at 10s while an in-flight claude -p child can run
                 # far longer, and PDEATHSIG is inactive on macOS (the RF8
@@ -722,9 +776,7 @@ def restart_stale(report: SkewReport, *, dry_run: bool = False) -> list[str]:
                 deadline = time.time() + 12
                 exited = False
                 while time.time() < deadline:
-                    try:
-                        os.kill(proc.pid, 0)
-                    except ProcessLookupError:
+                    if not _pid_alive(proc.pid):
                         exited = True
                         break
                     time.sleep(0.5)
@@ -764,7 +816,7 @@ def restart_stale(report: SkewReport, *, dry_run: bool = False) -> list[str]:
                         )
                 else:
                     actions.append(
-                        f"{proc.kind} pid {proc.pid}: SIGTERM sent but still "
+                        f"{proc.kind} pid {proc.pid}: stop sent but still "
                         "draining (likely an in-flight extraction) — left "
                         "running; re-check with `nx doctor`"
                     )
@@ -796,8 +848,8 @@ def restart_stale(report: SkewReport, *, dry_run: bool = False) -> list[str]:
                 actions.append(f"{proc.kind} pid {proc.pid}: gone or recycled; skipped")
                 continue
             try:
-                run_bounded(["nx", "mineru", "stop"], text=False, timeout=60)
-                run_bounded(["nx", "mineru", "start"], text=False, timeout=300)
+                run_bounded(nx_argv("mineru", "stop"), text=False, timeout=60)
+                run_bounded(nx_argv("mineru", "start"), text=False, timeout=300)
                 actions.append(f"cycled MinerU (was pid {proc.pid})")
             except Exception as exc:  # noqa: BLE001 — best-effort cycle; failure surfaced in the action line
                 actions.append(f"mineru cycle failed: {exc}")
@@ -1377,6 +1429,51 @@ def service_stack_pids(config_dir: Path) -> list[tuple[int, str]]:
 def _sweep_surviving_stack(
     config_dir: Path, before: list[tuple[int, str]],
 ) -> str:
+    """The note :func:`_sweep_surviving_stack_detail` produces, without the
+    refusals (kept for callers that only report)."""
+    return _sweep_surviving_stack_detail(config_dir, before)[0]
+
+
+def _refused_sweep_note(
+    refused: list[GracefulStopSend], listed: str, stubborn: list[int],
+) -> str:
+    """The sweep note for a stack member the stop could not reach.
+
+    Windows only (RDR-224, nexus-f9bgu.17/.20): the pid runs in another
+    session, so the console stop was refused; it was not signalled and is NOT
+    hard-killed (Sam, 2026-10-05). ``terminate_pids`` still counts it among the
+    survivors because it still runs, which on its own reads as a stop that was
+    tried and failed. Name the session and where to run the upgrade."""
+    lines: list[str] = []
+    for r in refused:
+        if r.target_session is not None and r.target_session != r.own_session:
+            lines.append(
+                f"pid {r.pid} runs in Windows session {r.target_session}, this "
+                f"shell is in session {r.own_session}; a console stop cannot "
+                f"cross sessions. Run this upgrade from session {r.target_session}"
+            )
+        else:
+            lines.append(
+                f"pid {r.pid} could not be reached (access denied attaching to "
+                "its console). Run this upgrade as the account, and with the "
+                "elevation, that started the service"
+            )
+    refused_pids = {r.pid for r in refused}
+    others = [p for p in stubborn if p not in refused_pids]
+    extra = (
+        f" pid(s) {', '.join(str(p) for p in others)} also survived the stop "
+        "escalation." if others else ""
+    )
+    return (
+        f"[stop-sweep] REFUSED: pid(s) {listed} were still running after "
+        "`nx daemon service stop` returned. " + "; ".join(lines) + ". Nothing "
+        "was signalled or killed across sessions." + extra
+    )
+
+
+def _sweep_surviving_stack_detail(
+    config_dir: Path, before: list[tuple[int, str]],
+) -> tuple[str, list[GracefulStopSend]]:
     """Kill any pre-stop stack member that survived ``nx daemon service stop``.
 
     THE FIX for the nexus-cfgo9 convergence defect. ``stop`` reports success
@@ -1431,13 +1528,22 @@ def _sweep_surviving_stack(
             continue
         survivors.append((pid, cmd))
     if not survivors:
-        return ""
-    engine_path = str(config_dir / "service" / "nexus-service")
+        return "", []
+    # nexus-service.exe on Windows (nexus-f9bgu.15, .21): the one function
+    # that knows the installed name, never the literal.
+    engine_path = str(well_known_binary_path(config_dir))
     supervisors = [p for p, c in survivors if engine_path not in c]
     engines = [p for p, c in survivors if engine_path in c]
-    stubborn = terminate_pids(supervisors)
-    stubborn += terminate_pids(engines)
+    refused: list[GracefulStopSend] = []
+    stubborn = terminate_pids(supervisors, refused_out=refused)
+    stubborn += terminate_pids(engines, refused_out=refused)
     listed = ", ".join(str(p) for p, _ in survivors)
+    if refused:
+        # Windows, another session (RDR-224, nexus-f9bgu.17/.20): the pid was
+        # not signalled and is not killed, and it is among the stubborn pids
+        # only because it still runs. Say that, and where the stop has to come
+        # from, instead of reporting a survivor of an escalation that never ran.
+        return _refused_sweep_note(refused, listed, list(stubborn)), refused
     # Report what was OBSERVED, never a cause that was not (nexus-o8dil.21).
     # Both strings used to assert "(its lease-based check saw no live
     # lease)" unconditionally — a hardcoded diagnosis this function never
@@ -1453,12 +1559,12 @@ def _sweep_surviving_stack(
             f"`nx daemon service stop` returned; pid(s) "
             f"{', '.join(str(p) for p in stubborn)} were STILL running after "
             "a direct SIGKILL escalation (not merely awaiting reap)"
-        )
+        ), []
     return (
         f"[stop-sweep] pid(s) {listed} were still running after "
         "`nx daemon service stop` returned — terminated them directly so the "
         "restart cycles the engine instead of short-circuiting"
-    )
+    ), []
 
 
 def _restart_and_verify(
@@ -1504,16 +1610,24 @@ def _restart_and_verify(
     resolved_config_dir = str(config_dir.resolve())
     try:
         stop = run_bounded(
-            ["nx", "daemon", "service", "stop", "--config-dir", resolved_config_dir],
+            nx_argv("daemon", "service", "stop", "--config-dir", resolved_config_dir),
             timeout=60,
         )
+        sweep_refused: list[GracefulStopSend] = []
         try:
-            sweep_note = _sweep_surviving_stack(config_dir, before)
+            sweep_note, sweep_refused = _sweep_surviving_stack_detail(config_dir, before)
         except Exception as exc:  # noqa: BLE001 — the sweep is belt, never the reason start doesn't run (review M2)
             _log.warning("restart_stack_sweep_failed", error=str(exc))
             sweep_note = f"(stack sweep failed: {exc} — proceeding to start)"
+        if sweep_refused:
+            # RDR-224 (nexus-f9bgu.20): a stack member in another Windows
+            # session cannot be stopped from here and is never hard-killed, so
+            # `start` could only short-circuit onto it and the verdict below
+            # would be a stale version with no cause. Stop with the cause.
+            actions.append(f"NEEDS HUMAN: {sweep_note}")
+            return actions
         start = run_bounded(
-            ["nx", "daemon", "service", "start", "--config-dir", resolved_config_dir],
+            nx_argv("daemon", "service", "start", "--config-dir", resolved_config_dir),
             timeout=120,
         )
     except Exception as exc:  # noqa: BLE001 — best-effort cycle; surfaced in the line
@@ -1630,12 +1744,12 @@ def _holder_evidence(config_dir: Path) -> str:
     bits: list[str] = []
     try:
         from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred, CLI startup cost
-        from nexus.daemon.service_registry import ServiceRegistry  # noqa: PLC0415 — deferred, CLI startup cost
+        from nexus.daemon.service_registry import ServiceRegistry, service_identity  # noqa: PLC0415 — deferred, CLI startup cost
 
         registry = ServiceRegistry(
             dir=config_dir or nexus_config_dir(), tier="storage_service",
         )
-        record = registry.discover(str(os.getuid()))
+        record = registry.discover(service_identity())
         if record is None:
             bits.append("lease=none")
         else:
@@ -1952,7 +2066,14 @@ def converge_engine(
         ]
 
     try:
-        install_binary(tag, config_dir, installed_by="upgrade-finish engine convergence")
+        # restart_after=False: on Windows the install stops the service to free
+        # the executable (RDR-224, nexus-f9bgu.20); the cycle below starts it
+        # again AND verifies the version, so the install must not start it
+        # first. A failed install still restarts what it stopped.
+        install_binary(
+            tag, config_dir, installed_by="upgrade-finish engine convergence",
+            restart_after=False,
+        )
     except Exception as exc:  # noqa: BLE001 — code-review HIGH: install_binary
         # can raise more than BinaryVerificationError -- _atomic_copy
         # (binary_install.py) re-raises bare OSError/etc UNWRAPPED on
@@ -2330,7 +2451,7 @@ def _restart_service_after_unit_reinstall(config_dir: Path) -> tuple[bool, str]:
     the only thing a human reads.
     """
     resolved_config_dir = str(config_dir.resolve())
-    argv = ["nx", "daemon", "service", "start", "--config-dir", resolved_config_dir]
+    argv = nx_argv("daemon", "service", "start", "--config-dir", resolved_config_dir)
     try:
         start = run_bounded(argv, timeout=120)
     except Exception as exc:  # noqa: BLE001 — best-effort restart; surfaced in the returned clause
@@ -2590,7 +2711,7 @@ def converge_service_autostart_unit(
 
     try:
         stop = run_bounded(
-            ["nx", "daemon", "service", "stop", "--config-dir", resolved_config_dir],
+            nx_argv("daemon", "service", "stop", "--config-dir", resolved_config_dir),
             timeout=60,
         )
     except Exception as exc:  # noqa: BLE001 — best-effort convergence; surfaced in the line

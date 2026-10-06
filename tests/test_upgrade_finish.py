@@ -3734,7 +3734,7 @@ class TestNoAcquisitionOnPreviewOrConvergedBox:
         self._creds(tmp_path)
         self._receipt(tmp_path, _older_version_str())
 
-        def _fake_install(tag, cfg_dir, *, installed_by):
+        def _fake_install(tag, cfg_dir, *, installed_by, restart_after=True):
             self._receipt(cfg_dir, _REQUIRED_STR)
             return (cfg_dir / "service" / "nexus-service", {"version": _REQUIRED_STR})
 

@@ -35,6 +35,7 @@ import structlog
 
 from nexus import config as _config
 from nexus.bounded_subprocess import run_bounded
+from nexus.util.nx_argv import nx_argv
 
 _log = structlog.get_logger(__name__)
 
@@ -84,9 +85,15 @@ def _autostart_install_dir() -> Path:
         return Path.home() / "Library" / "LaunchAgents"
     if platform.startswith("linux"):
         return Path.home() / ".config" / "systemd" / "user"
+    if platform == "win32":
+        # RDR-224 (nexus-f9bgu.23): the kept copy of the Task Scheduler task
+        # definition. Home-relative, like the other two, so the test HOME fence
+        # redirects it.
+        return Path.home() / "AppData" / "Local" / "nexus" / "autostart"
     raise click.ClickException(
-        f"Autostart is not supported on platform {platform!r}; "
-        "supported platforms are macOS (launchd) and Linux (systemd user units)."
+        f"Autostart is not supported on platform {platform!r}; supported "
+        "platforms are macOS (launchd), Linux (systemd user units) and "
+        "Windows (a Task Scheduler logon task)."
     )
 
 
@@ -94,6 +101,8 @@ def _autostart_log_dir() -> Path:
     platform = _autostart_platform()
     if platform == "darwin":
         return Path.home() / "Library" / "Logs"
+    if platform == "win32":
+        return Path.home() / "AppData" / "Local" / "nexus" / "logs"
     return Path.home() / ".local" / "state" / "nexus"
 
 
@@ -191,7 +200,15 @@ def _resolve_nx_bin() -> list[str]:
     back to ``[python, "-m", "nexus.cli"]`` when ``shutil.which("nx")``
     returns None. Callers must respect the token boundaries when
     rendering into platform autostart formats.
+
+    On Windows it is always ``[python, "-m", "nexus.cli"]`` with this
+    process's own interpreter (RDR-224, nexus-f9bgu.33): ``shutil.which``
+    there searches the current directory first, so an ``nx.exe`` left in the
+    working directory would be spawned as the supervisor. The argv is the same
+    program the ``nx`` console script runs.
     """
+    if _autostart_platform() == "win32":
+        return nx_argv()
     found = shutil.which("nx")
     if found:
         return [found]
@@ -199,11 +216,14 @@ def _resolve_nx_bin() -> list[str]:
 
 
 def _autostart_filename_service() -> str:
-    return (
-        _SERVICE_PLIST_NAME
-        if _autostart_platform() == "darwin"
-        else _SERVICE_SERVICE_NAME
-    )
+    platform = _autostart_platform()
+    if platform == "darwin":
+        return _SERVICE_PLIST_NAME
+    if platform == "win32":
+        from nexus.daemon.windows_autostart import TASK_FILENAME  # noqa: PLC0415 — deferred import — Windows-only path
+
+        return TASK_FILENAME
+    return _SERVICE_SERVICE_NAME
 
 
 def _autostart_filename_t2() -> str:
@@ -471,14 +491,56 @@ def service_uninstall_cmd(autostart: bool) -> None:
         click.echo(f"Still running: {survivor}", err=True)
 
 
-def ensure_storage_supervisor(config_dir: Path):
+def _supervisor_popen_kwargs(platform: str | None = None) -> dict[str, object]:
+    """``Popen`` kwargs for the detached supervisor spawn.
+
+    POSIX: ``start_new_session=True``, as before. Windows (RDR-224,
+    nexus-f9bgu.17): ``CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW``. The new
+    group gives ``nx daemon service stop`` a group to send ``CTRL_BREAK`` to
+    without reaching anything else; the hidden console is what the stopper
+    attaches to. NEVER ``DETACHED_PROCESS``: that leaves the supervisor with no
+    console, ``AttachConsole`` fails with ``ERROR_INVALID_HANDLE`` and
+    ``CTRL_BREAK`` cannot reach it (T2 ``nexus_rdr/224-research-20``). The
+    logon-task launcher (``nexus.daemon.windows_autostart``, nexus-f9bgu.23)
+    spawns its supervisor through this same function.
+    """
+    if (platform if platform is not None else sys.platform) == "win32":
+        from nexus.util import win_job  # noqa: PLC0415 — deferred import — Windows spawn path only
+
+        return {
+            "creationflags": win_job.CREATE_NEW_PROCESS_GROUP | win_job.CREATE_NO_WINDOW,
+        }
+    return {"start_new_session": True}
+
+
+def _supervisor_argv(config_dir: Path, *, nx_bin: list[str] | None = None) -> list[str]:
+    """argv of the foreground supervisor for *config_dir*.
+
+    The config dir is always RESOLVED to an absolute path and always passed as
+    ``--config-dir``: ``storage_service_stack_matcher`` matches it token-exact.
+    *nx_bin* overrides :func:`_resolve_nx_bin` for the Windows logon-task
+    launcher (nexus-f9bgu.23), which bakes its own interpreter.
+    """
+    return [
+        *(nx_bin if nx_bin is not None else _resolve_nx_bin()),
+        "daemon",
+        "service",
+        "start",
+        "--foreground",
+        "--config-dir",
+        str(Path(config_dir).resolve()),
+    ]
+
+
+def ensure_storage_supervisor(config_dir: Path, *, platform: str | None = None):
     """Ensure a persistent (heartbeated) storage-service supervisor owns the lease.
 
     Returns the live :class:`LeaseRecord`. If a FRESH lease already exists this
     is a no-op (idempotent — re-running ``nx init --service`` / ``nx daemon
     service start`` is safe). Otherwise it detached-spawns the ``--foreground``
-    supervisor (``start_new_session=True``) and waits up to 60s for it to publish
-    a lease.
+    supervisor (``start_new_session=True``; on Windows its own process group and
+    a hidden console, see :func:`_supervisor_popen_kwargs`) and waits up to 60s
+    for it to publish a lease. *platform* is a test seam for that choice.
 
     Liveness is TTL-FRESHNESS, not BARE process-aliveness: the short-circuit
     returns any lease whose heartbeat is within the ServiceRegistry TTL (a
@@ -518,7 +580,9 @@ def ensure_storage_supervisor(config_dir: Path):
     """
     from nexus.daemon.service_registry import (  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
         ServiceRegistry,
+        clear_stop_marker,
         reclaim_lease_if_dead_owner,
+        service_identity,
     )
     from nexus.daemon import storage_service_daemon as _ssd  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
     from nexus.db import service_endpoint as _service_endpoint  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
@@ -526,7 +590,10 @@ def ensure_storage_supervisor(config_dir: Path):
     StorageServiceStartError = _ssd.StorageServiceStartError
 
     registry = ServiceRegistry(dir=config_dir, tier="storage_service")
-    scope = str(os.getuid())
+    scope = service_identity()
+    # A start is the user's "run again": it ends any earlier stop request, whether
+    # or not a supervisor turns out to be running already (RDR-224, nexus-f9bgu.33).
+    clear_stop_marker(config_dir, "storage_service", scope)
     existing = _service_endpoint.discover_storage_service_lease(registry, scope)
     if existing is not None:
         # RDR-175 heal-on-next-use hardening, generalized into the shared
@@ -571,15 +638,7 @@ def ensure_storage_supervisor(config_dir: Path):
     # string another caller's own (independently resolved) matcher target
     # compares against, defeating the token-exact discipline
     # storage_service_stack_matcher relies on.
-    argv = [
-        *_resolve_nx_bin(),
-        "daemon",
-        "service",
-        "start",
-        "--foreground",
-        "--config-dir",
-        str(Path(config_dir).resolve()),
-    ]
+    argv = _supervisor_argv(config_dir)
     # nexus-ovbr7: route the child's streams to a crash-channel file so a failure
     # BEFORE run_storage_supervisor's configure_logging runs (import error, bad
     # argv) and interpreter-fatal tracebacks are captured. Post-configure, the
@@ -588,25 +647,20 @@ def ensure_storage_supervisor(config_dir: Path):
 
     spawn_log = open_child_log_or_devnull("storage_service.crash", config_dir)
     try:
-        # nexus-6y4e0 surveyed this site and left it unwired for two
-        # independent reasons: (1) the supervisor this spawns is stopped by
-        # a LATER, separate CLI invocation (``nx daemon service stop``)
-        # reading its pid from the lease registry, not by this process --
-        # the same cross-process shape as the mineru spawn in
-        # _mineru_spawn.py, which a Windows job-object handle held only in
-        # THIS process's memory cannot reach; and (2) the supervisor class
-        # itself (``storage_service_daemon.StorageServiceSupervisor``) calls
-        # ``os.getuid()`` unconditionally at construction and does not run
-        # on native Windows at all (its own module docstring says so) --
-        # RDR-218's Windows story is a WSL2 appliance, a real POSIX
-        # environment, so this spawn site is dead code from a native-
-        # Windows-client perspective regardless of containment.
+        # nexus-6y4e0 surveyed this site and left it without a Job Object:
+        # the supervisor this spawns is stopped by a LATER, separate CLI
+        # invocation (``nx daemon service stop``) reading its pid from the
+        # lease registry, not by this process, so a job handle held only in
+        # THIS process's memory cannot reach it. The Windows stop channel
+        # (RDR-224, nexus-f9bgu.17) is the spawn flags below plus a console
+        # CTRL_BREAK from the stopper; the Job Object lives one level down,
+        # around the ENGINE, in the supervisor.
         _popen(
             argv,
             stdin=subprocess.DEVNULL,  # detached daemon: never inherit a TTY stdin (avoids read-block / dangling fd)
             stdout=spawn_log,
             stderr=spawn_log,
-            start_new_session=True,
+            **_supervisor_popen_kwargs(platform),
         )
     finally:
         if not isinstance(spawn_log, int):
@@ -818,6 +872,8 @@ def service_install_binary_cmd(
         install_pg_bundle,
         pg_bundle_asset_name,
     )
+    from nexus.daemon.replace_guard import ReplaceBlockedError  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
+    from nexus.daemon.replace_quiesce import RestartAfterReplaceError  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
 
     try:
         _nx_version = _pkg_version("conexus")
@@ -849,7 +905,10 @@ def service_install_binary_cmd(
     click.echo(f"Resolving {asset_name()} from release {tag}…")
     try:
         dest, prov = install_binary(tag, config_dir, installed_by=installed_by)
-    except BinaryVerificationError as exc:
+    except (BinaryVerificationError, ReplaceBlockedError, RestartAfterReplaceError) as exc:
+        # On Windows the install stops the service to free the engine files;
+        # these two (RDR-224, nexus-f9bgu.20) carry a message meant to be
+        # printed as it stands, naming the session or the file and the remedy.
         click.echo(f"Error: {exc}", err=True)
         sys.exit(2)
 
@@ -891,6 +950,60 @@ def service_install_binary_cmd(
     )
 
 
+def _refused_stop_lines(refusals: object) -> list[str]:
+    """The lines ``nx daemon service stop`` prints when the service runs in
+    another Windows session, so the console stop could not be sent.
+
+    Names the pid, the session that owns it and the session this shell is in,
+    says that nothing was signalled or killed, and says where to run the stop.
+    When the session ids are unknown or equal the denial has another cause (a
+    different user, an elevated process) and the message says so instead of
+    inventing a session."""
+    lines: list[str] = []
+    remedies: list[str] = []
+    for r in refusals:  # type: ignore[attr-defined]
+        if (
+            r.target_session is not None
+            and r.own_session is not None
+            and r.target_session != r.own_session
+        ):
+            lines.append(
+                f"nx daemon service stop: REFUSED. The storage service (pid {r.pid}) "
+                f"runs in Windows session {r.target_session}; this shell is in "
+                f"session {r.own_session}. A console stop cannot cross Windows "
+                "sessions."
+            )
+            remedy = (
+                f"Run 'nx daemon service stop' from session {r.target_session}: "
+                "sign in to that session, or use a terminal on that desktop."
+            )
+        elif getattr(r, "stage", None) == "helper":
+            lines.append(
+                f"nx daemon service stop: REFUSED. The storage service (pid {r.pid}) "
+                "could not be reached: the console helper did not answer, and the "
+                "service is not known to be in this Windows session."
+            )
+            remedy = (
+                "Run 'nx daemon service stop' again from the session that started "
+                "the service."
+            )
+        else:
+            lines.append(
+                f"nx daemon service stop: REFUSED. The storage service (pid {r.pid}) "
+                "could not be reached: access was denied when attaching to its "
+                "console."
+            )
+            remedy = (
+                "Run 'nx daemon service stop' as the account, and with the "
+                "elevation, that started the service."
+            )
+        if remedy not in remedies:
+            remedies.append(remedy)
+    lines.extend(remedies)
+    lines.append("Nothing was signalled or killed.")
+    return lines
+
+
 @service_group.command("stop")
 @click.option(
     "--config-dir",
@@ -923,6 +1036,7 @@ def service_stop_cmd(config_dir_str: str | None, with_pg: bool) -> None:
     outcome = stop_storage_service(config_dir=config_dir)
     pid = outcome.pids[0] if outcome.pids else None
     pids_str = ", ".join(str(p) for p in outcome.pids)
+    refused_pids = {r.pid for r in outcome.refused}
 
     # Honest-output contract (nexus-oyo2g): a lease MISS is never proof
     # nothing is running, so "already stopped" is said ONLY when the
@@ -934,7 +1048,11 @@ def service_stop_cmd(config_dir_str: str | None, with_pg: bool) -> None:
     # printed, never just the first (review finding 1) — a partial pid
     # list is a partial truth for a command whose entire point here is
     # honest reporting.
-    if outcome.source == "none":
+    if outcome.refused and not outcome.pids:
+        # Printed below, with the refusal; "stopped" or "already stopped"
+        # would both be false here.
+        pass
+    elif outcome.source == "none":
         if outcome.lease_seen:
             click.echo(
                 "A storage service lease was found but had no usable "
@@ -977,16 +1095,25 @@ def service_stop_cmd(config_dir_str: str | None, with_pg: bool) -> None:
     # dropping that caveat. Skipped when source is already
     # "process_table_unavailable" — that branch's own message already
     # covers this.
-    if not outcome.sweep_verified and outcome.source != "process_table_unavailable":
+    if (
+        not outcome.sweep_verified
+        and outcome.source != "process_table_unavailable"
+        and not outcome.refused
+    ):
         click.echo(
             "Note: the process table could not be checked (no 'ps' and no "
             "/proc), so a lingering engine child surviving the supervisor "
             "signal above could not be ruled out.",
             err=True,
         )
-    if outcome.stubborn:
+    # A refused pid is in ``stubborn`` by design (it is still running), but it
+    # was never signalled: "survived SIGKILL" would be false for it, and the
+    # refusal block below already says what happened (nexus-f9bgu.17 round 2,
+    # measured on Windows 11).
+    killed_survivors = [p for p in outcome.stubborn if p not in refused_pids]
+    if killed_survivors:
         click.echo(
-            f"Warning: pid(s) {', '.join(str(p) for p in outcome.stubborn)} "
+            f"Warning: pid(s) {', '.join(str(p) for p in killed_survivors)} "
             "survived SIGKILL and may still be running.",
             err=True,
         )
@@ -1003,14 +1130,23 @@ def service_stop_cmd(config_dir_str: str | None, with_pg: bool) -> None:
     # any --with-pg Postgres teardown) is deliberate: touching Postgres
     # while the storage-service state is unverified is itself unsafe, not
     # just unhelpful.
-    if outcome.stubborn:
+    if outcome.refused:
+        # RDR-224 (nexus-f9bgu.17), Sam DECIDED 2026-10-05: a stop from
+        # another Windows session cannot attach to the service's console and
+        # is NOT turned into a hard kill. Say who owns it and where to stop
+        # it from; exit non-zero so a `stop && start` chain breaks.
+        for line in _refused_stop_lines(outcome.refused):
+            click.echo(line, err=True)
+    stubborn_only = [p for p in outcome.stubborn if p not in refused_pids]
+    if stubborn_only:
         click.echo(
             f"nx daemon service stop: FAILED — pid(s) "
-            f"{', '.join(str(p) for p in outcome.stubborn)} survived the "
+            f"{', '.join(str(p) for p in stubborn_only)} survived the "
             "stop escalation and may still be running. Do not run "
             "'nx daemon service start' until this is resolved manually.",
             err=True,
         )
+    if stubborn_only or outcome.refused:
         sys.exit(1)
     if outcome.source == "process_table_unavailable" and not outcome.pids:
         click.echo(
@@ -1215,12 +1351,11 @@ def service_status_cmd(config_dir_str: str | None, as_json: bool) -> None:
     Exits non-zero when no live lease is found.
     """
     import json as _json  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
-    from nexus.daemon.service_registry import ServiceRegistry  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
-    import os as _os  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
+    from nexus.daemon.service_registry import ServiceRegistry, service_identity  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
 
     config_dir = Path(config_dir_str) if config_dir_str else _config.nexus_config_dir()
     registry = ServiceRegistry(dir=config_dir, tier="storage_service")
-    scope = str(_os.getuid())
+    scope = service_identity()
     record = registry.discover(scope)
 
     if record is None:
@@ -1230,7 +1365,7 @@ def service_status_cmd(config_dir_str: str | None, as_json: bool) -> None:
             click.echo(_json.dumps({
                 "status": "no_lease",
                 "running": False,
-                "addr_file": str(config_dir / f"storage_service_addr.{_os.getuid()}"),
+                "addr_file": str(config_dir / f"storage_service_addr.{scope}"),
                 "detail": "No storage service lease found; this install either "
                           "runs against a managed endpoint or the local service "
                           "is not running (nx daemon service start).",
@@ -1257,10 +1392,9 @@ def service_status_cmd(config_dir_str: str | None, as_json: bool) -> None:
     # it configured" — supervisor, native service (/health + /version), PG cluster,
     # embedding mode, pgvector version, and the paths an operator would
     # otherwise assemble from ps aux + psql + curl + the addr file by hand.
-    import os as _os  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
 
     data["supervisor_pid"] = record.payload.get("supervisor_pid")
-    data["addr_file"] = str(config_dir / f"storage_service_addr.{_os.getuid()}")
+    data["addr_file"] = str(config_dir / f"storage_service_addr.{scope}")
     host = ep.get("host", "127.0.0.1")
     port = int(ep.get("port") or 0)
     data["health"] = _probe_health(host, port)

@@ -61,6 +61,7 @@ from typing import Callable
 from uuid import uuid4
 
 import structlog
+from nexus._winsec import make_user_dir
 
 _log = structlog.get_logger(__name__)
 
@@ -128,7 +129,7 @@ def write_handoff_marker(
     for the reinstate-specific primitive that closes this instead.
     """
     config_dir = Path(config_dir)
-    config_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    make_user_dir(config_dir)
     path = handoff_marker_path(mcp_pid, config_dir)
     tmp = path.with_name(f"{path.name}.{os.getpid()}.{uuid4().hex}.tmp")
     payload = json.dumps(
@@ -191,7 +192,7 @@ def write_handoff_marker_if_absent(
     COMPLETELY untouched.
     """
     config_dir = Path(config_dir)
-    config_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    make_user_dir(config_dir)
     path = handoff_marker_path(mcp_pid, config_dir)
     tmp = path.with_name(f"{path.name}.{os.getpid()}.{uuid4().hex}.reinstate.tmp")
     payload = json.dumps(

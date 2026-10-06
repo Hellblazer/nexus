@@ -14,3 +14,28 @@ path gained its fail-loud validation call). The surviving daemon tests
 service-substrate tests and run under the suite's service default.
 """
 from __future__ import annotations
+
+import threading
+
+import pytest
+
+from tests.daemon import _watchdog
+
+# The launchd uid stand-in lives with the other cross-platform test stand-ins
+# (``_children.py``) so that no ``getuid`` appears in a module every run imports
+# (tests/test_service_identity_lint.py sweeps conftest files).
+from tests.daemon._children import launchd_uid  # noqa: F401
+
+
+@pytest.fixture(autouse=True)
+def _watched_tests_cannot_hang(request: pytest.FixtureRequest):
+    """Per-test watchdog for the stop-channel and conformance files (see ``_watchdog``).
+
+    Only the modules in ``WATCHED_MODULES``, and only on the main thread (a signal
+    handler cannot be installed anywhere else)."""
+    module = request.module.__name__.rsplit(".", 1)[-1]
+    if module not in _watchdog.WATCHED_MODULES or threading.current_thread() is not threading.main_thread():
+        yield
+        return
+    with _watchdog.watchdog(_watchdog.PER_TEST_TIMEOUT_S, request.node.nodeid):
+        yield

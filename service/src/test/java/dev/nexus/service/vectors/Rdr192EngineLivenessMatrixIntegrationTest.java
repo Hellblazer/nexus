@@ -423,6 +423,35 @@ class Rdr192EngineLivenessMatrixIntegrationTest {
         assertVisibility(visible, fx, "P1s");
     }
 
+    /**
+     * nexus-tu8wp.1: {@code POST /v1/vectors/search-per-collection}'s arms run the same
+     * {@code plain_search_<dim>} function, so they must return exactly the P1s visible set:
+     * manifest-less (R1, R8), tombstoned-owner (R3, R9) and other-collection-owner (R4, R6) chunks
+     * never, shared-chunk and live rows (R2, R5, R7) always. Run twice: over A alone, and over A and
+     * B together, where B holds live rows of its own that must not displace A's verdicts.
+     */
+    @Test
+    void p1s_perCollectionRouteVisibility() throws Exception {
+        String tenant = "wbfpw1-ro";
+        Fixture fx = seedLivenessFixture(tenant);
+
+        PgVectorRepository.PerCollectionResult alone = vecRepo.searchPerCollection(
+            tenant, "rdr-192 liveness probe", List.of(COLLECTION_A), 300, 1200, null, null, false);
+        assertVisibility(alone.rows().stream().map(r -> (String) r.get("id")).toList(), fx, "P1s");
+        assertThat(alone.perCollection()).singleElement()
+            .extracting(PgVectorRepository.PerCollectionStat::error).isNull();
+
+        PgVectorRepository.PerCollectionResult both = vecRepo.searchPerCollection(
+            tenant, "rdr-192 liveness probe", List.of(COLLECTION_A, COLLECTION_B), 300, 1200, null, null, false);
+        List<String> visibleInA = both.rows().stream()
+            .filter(r -> COLLECTION_A.equals(r.get("collection")))
+            .map(r -> (String) r.get("id")).toList();
+        assertVisibility(visibleInA, fx, "P1s");
+        // Non-vacuity: B contributed rows of its own (its live R4/R6/R9 owners), so the two-arm
+        // run really did serve two collections.
+        assertThat(both.rows()).anyMatch(r -> COLLECTION_B.equals(r.get("collection")));
+    }
+
     // ── P2: nexus.live_chunks (tenant-wide, Gap 5) ───────────────────────────
 
     @Test

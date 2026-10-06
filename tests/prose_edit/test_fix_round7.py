@@ -268,7 +268,7 @@ def test_a_path_run_build_prints_ready_reply_filtered_and_reasons_paths(prose: P
     fields = _fields(head)
     work = Path(fields["WORK"])
     try:
-        assert list(fields) == ["WORK", "DISPATCH", "REPLY", "FILTERED", "REASONS"], list(fields)
+        assert list(fields) == ["WORK", "DISPATCH", "REPLY", "FILTERED", "REASONS", "ANSWERS"], list(fields)
         assert Path(fields["REPLY"]) == work / "reply.txt"
         assert Path(fields["FILTERED"]) == work / "filtered.json"
         assert Path(fields["REASONS"]) == work / "reasons.json"
@@ -281,7 +281,7 @@ def test_tmpdir_ready_prints_the_directory_and_every_file_path_the_skill_writes(
     fields = _fields(brief_ok(prose, "tmpdir", "--ready").strip())
     work = Path(fields["WORK"])
     try:
-        assert list(fields) == ["WORK", "INPUT", "REPLY", "FILTERED", "REASONS", "ENTRY", "CARD"], list(fields)
+        assert list(fields) == ["WORK", "INPUT", "REPLY", "FILTERED", "REASONS", "ANSWERS", "ENTRY", "CARD"], list(fields)
         assert work.is_dir() and (work / ".prose-edit-work").is_file()
         for key, name in (("INPUT", "input.txt"), ("REPLY", "reply.txt"), ("FILTERED", "filtered.json"),
                           ("REASONS", "reasons.json"), ("ENTRY", "entry.json"), ("CARD", "card.json")):

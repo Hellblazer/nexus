@@ -15,10 +15,12 @@ import hashlib
 import json
 import os
 import stat
+import sys
 from pathlib import Path
 
 import pytest
 
+from nexus._winsec import owner_only_problem
 from nexus.daemon.appliance_handoff import (
     ABSENT,
     CHECK_RETRY_S,
@@ -73,11 +75,20 @@ def test_bytes_refuse_values_a_reader_would_refuse(port, token, tenant) -> None:
         handoff_bytes(port, token, tenant)
 
 
+def _assert_private(path) -> None:
+    """Owner-only: mode 0o600 on POSIX; on Windows, where ``st_mode`` reads 0o666 for
+    every file, the DACL (``nexus._winsec.owner_only_problem``)."""
+    if sys.platform == "win32":
+        assert owner_only_problem(path, path.stat().st_mode) is None
+    else:
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
 def test_first_write_is_exact_bytes_mode_0600_and_leaves_no_temp(tmp_path) -> None:
     target = tmp_path / "endpoint.json"
     assert write_handoff_if_changed(target, 29517, FIXTURE_TOKEN, FIXTURE_TENANT) is True
     assert target.read_bytes() == FIXTURE.read_bytes()
-    assert stat.S_IMODE(target.stat().st_mode) == 0o600
+    _assert_private(target)
     assert [p.name for p in tmp_path.iterdir()] == ["endpoint.json"]
 
 
@@ -97,7 +108,7 @@ def test_a_changed_port_rewrites_the_file(tmp_path) -> None:
     write_handoff_if_changed(target, 29517, FIXTURE_TOKEN, FIXTURE_TENANT)
     assert write_handoff_if_changed(target, 29518, FIXTURE_TOKEN, FIXTURE_TENANT) is True
     assert json.loads(target.read_text())["port"] == 29518
-    assert stat.S_IMODE(target.stat().st_mode) == 0o600
+    _assert_private(target)
 
 
 def test_a_stale_temp_from_a_crash_is_removed(tmp_path) -> None:
@@ -133,7 +144,7 @@ def test_absent_credential_is_issued_once_and_persisted_0600(tmp_path) -> None:
     issuer = _Issuer({"token": "mint-abc", "tenant": "default", "token_hash": "h"})
     assert ensure_mint_credential(tmp_path, issuer) == ("mint-abc", "default")
     path = tmp_path / MINT_CREDENTIAL_FILENAME
-    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    _assert_private(path)
     assert ensure_mint_credential(tmp_path, issuer) == ("mint-abc", "default")
     assert issuer.calls == 1, "a persisted credential is never re-issued"
 
@@ -318,6 +329,11 @@ def test_a_failed_check_keeps_the_file_and_is_not_absent(tmp_path) -> None:
     assert "appliance_mint_credential_check_failed" in log.names()
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="chmod 0o500 makes a directory read-only only on POSIX; on Windows a directory's mode bits "
+    "are ignored and files are still created in it, so the failure this test needs cannot be made that way",
+)
 def test_an_issued_but_unpersisted_credential_is_revoked(tmp_path) -> None:
     engine, clock, log = _Engine(), _Clock(), _Log()
     p = _projector(tmp_path, engine, clock, log)
@@ -331,6 +347,11 @@ def test_an_issued_but_unpersisted_credential_is_revoked(tmp_path) -> None:
     assert "appliance_mint_credential_orphan_revoked" in log.names()
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="chmod 0o500 makes a directory read-only only on POSIX; on Windows a directory's mode bits "
+    "are ignored and files are still created in it, so the failure this test needs cannot be made that way",
+)
 def test_an_orphan_that_cannot_be_revoked_is_logged_as_an_error(tmp_path) -> None:
     engine, clock, log = _Engine(), _Clock(), _Log()
     p = _projector(tmp_path, engine, clock, log)
@@ -349,6 +370,11 @@ def test_an_orphan_that_cannot_be_revoked_is_logged_as_an_error(tmp_path) -> Non
     assert orphaned and orphaned[0][0] == "error" and orphaned[0][1]["token_hash"]
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="the loose mode is made with chmod 0o644, which Windows ignores; the Windows tightening is the "
+    "ACL (nexus._winsec.ensure_owner_only), covered by tests/test_winsec.py",
+)
 def test_loose_modes_are_tightened(tmp_path) -> None:
     engine, clock, log = _Engine(), _Clock(), _Log()
     p = _projector(tmp_path, engine, clock, log)
@@ -358,8 +384,8 @@ def test_loose_modes_are_tightened(tmp_path) -> None:
     handoff.chmod(0o644)
     cred.chmod(0o644)
     p.project(29517)
-    assert stat.S_IMODE(handoff.stat().st_mode) == 0o600
-    assert stat.S_IMODE(cred.stat().st_mode) == 0o600
+    _assert_private(handoff)
+    _assert_private(cred)
 
 
 def test_the_fixture_port_is_the_appliance_default() -> None:
@@ -414,6 +440,11 @@ def test_other_live_credentials_under_the_label_are_reported(tmp_path) -> None:
     assert extra and extra[0]["token_hashes"] == ["stray"]
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="chmod 0o500 makes a directory read-only only on POSIX; on Windows a directory's mode bits "
+    "are ignored and files are still created in it, so the failure this test needs cannot be made that way",
+)
 def test_a_marker_that_cannot_be_written_still_takes_the_handoff_down(tmp_path) -> None:
     engine, clock, log = _Engine(), _Clock(), _Log()
     p = _projector(tmp_path, engine, clock, log)

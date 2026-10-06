@@ -82,7 +82,6 @@ import hashlib
 import json
 import os
 import secrets
-import stat
 import sys
 import threading
 import time
@@ -429,7 +428,8 @@ def _write_seen(config_dir: Path, address: str, dead_surfaced: set[str]) -> None
     noise; failing the drain over it would lose live mail, which is worse."""
     path = _seen_path(config_dir, address)
     try:
-        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        from nexus._winsec import make_user_dir  # noqa: PLC0415 -- deferred, hook import cost
+        make_user_dir(path.parent)
         tmp = path.with_suffix(".json.tmp")
         tmp.write_text(
             json.dumps({"dead_surfaced": sorted(dead_surfaced)}), encoding="utf-8",
@@ -466,7 +466,8 @@ def _save_pending(config_dir: Path, address: str, entries: list[dict[str, str]])
         if not entries:
             path.unlink(missing_ok=True)
             return
-        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        from nexus._winsec import make_user_dir  # noqa: PLC0415 -- deferred, hook import cost
+        make_user_dir(path.parent)
         tmp = path.with_suffix(".json.tmp")
         tmp.write_text(json.dumps({"entries": entries}), encoding="utf-8")
         tmp.replace(path)
@@ -510,7 +511,8 @@ def _pending_lock(config_dir: Path, address: str, *, deadline: float):
     """
     path = config_dir / "tuple-watch" / _address_file_name(address, ".pending.lock")
     try:
-        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        from nexus._winsec import make_user_dir  # noqa: PLC0415 -- deferred, hook import cost
+        make_user_dir(path.parent)
         fd = os.open(str(path), os.O_CREAT | os.O_RDWR, 0o600)
     except OSError:
         yield False
@@ -1127,23 +1129,25 @@ def _read_local_supervisor_token(config_dir: Path) -> str:
     equivalent and must not be asked to grow one; this caller's extra bar
     is additive to it, not a replacement for it.
     """
-    from nexus.daemon.service_registry import ServiceRegistry  # noqa: PLC0415 — deferred, same reason as above
+    from nexus._winsec import owner_only_problem  # noqa: PLC0415 — deferred, same reason as above
+    from nexus.daemon.service_registry import ServiceRegistry, service_identity  # noqa: PLC0415 — deferred, same reason as above
 
-    path = config_dir / f"storage_service_addr.{os.getuid()}"
+    scope = service_identity()
+    path = config_dir / f"storage_service_addr.{scope}"
     try:
         st_result = path.stat()
     except OSError as exc:
         raise _Skip(
             f"local supervisor lease unavailable: cannot stat {path}: {exc}"
         ) from exc
-    mode = stat.S_IMODE(st_result.st_mode)
-    if mode & (stat.S_IRWXG | stat.S_IRWXO):
+    problem = owner_only_problem(path, st_result.st_mode)
+    if problem is not None:
         raise _Skip(
-            f"local supervisor lease {path} is group/other-accessible "
-            f"(mode {oct(mode)}); refusing to use its token as a bearer"
+            f"local supervisor lease {path} is {problem}; "
+            "refusing to use its token as a bearer"
         )
     registry = ServiceRegistry(dir=config_dir, tier="storage_service")
-    record = registry.discover(str(os.getuid()))
+    record = registry.discover(scope)
     if record is None:
         raise _Skip(f"local supervisor lease {path} is not live or is stale")
     token = str(record.endpoint.get("token", "") or "")
@@ -1188,12 +1192,12 @@ def _resolve_endpoint(config_dir: Path) -> tuple[str, str, bool]:
     token = os.environ.get("NX_SERVICE_TOKEN", "").strip()
     if not token:
         token = persisted_credentials(config_dir).get("service_token", "").strip()
-    if not token and hasattr(os, "getuid"):
+    if not token:
         # Through the accessor, never off the raw lease record: it
         # refuses a lease file that is not owner-only, because the token it
         # carries authorizes real engine writes and a group- or world-readable
         # lease means another local account could have read it too. The lease
-        # filename carries the POSIX uid, so there is none to read on Windows.
+        # filename carries the service identity (uid on POSIX, SID on Windows).
         try:
             token = _read_local_supervisor_token(config_dir).strip()
         except _Skip:

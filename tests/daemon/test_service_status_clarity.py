@@ -8,6 +8,7 @@ running BY DESIGN — the command must say so (and offer --with-pg).
 """
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -235,6 +236,12 @@ class TestPgVectorPreflight:
         pg_config.write_text(f"#!/bin/sh\necho {sharedir}\n")
         pg_config.chmod(0o755)
 
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="the fake pg_config is a #!/bin/sh script, which Windows cannot execute (WinError 193), so the "
+        "preflight reads it as indeterminate and neither outcome under test can occur; a passing run there "
+        "would be vacuous",
+    )
     def test_missing_control_file_fails_with_remedy(self, tmp_path: Path) -> None:
         bins = self._bins(tmp_path)
         sharedir = tmp_path / "share"
@@ -257,6 +264,12 @@ class TestPgVectorPreflight:
             f"PostgreSQL that nexus will never use: {msg}"
         )
 
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="the fake pg_config is a #!/bin/sh script, which Windows cannot execute (WinError 193), so the "
+        "preflight reads it as indeterminate and neither outcome under test can occur; a passing run there "
+        "would be vacuous",
+    )
     def test_present_control_file_passes(self, tmp_path: Path) -> None:
         bins = self._bins(tmp_path)
         sharedir = tmp_path / "share"

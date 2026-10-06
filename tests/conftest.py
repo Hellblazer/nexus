@@ -27,7 +27,14 @@ from nexus.db.t3 import T3Database
 # tests._posix_spawn routes this process's subprocess spawns onto posix_spawn
 # on macOS, where a fork child can die in Network.framework's atfork handler;
 # see that module's docstring.
-pytest_plugins = ["pytester", "tests._posix_spawn", "tests._env_restore"]
+# Not on native Windows (RDR-224, nexus-f9bgu.19): the adapter is a macOS
+# fork-crash workaround that imports fcntl and os.posix_spawn at module scope,
+# neither of which exists there, and its ACTIVE gate is false off macOS anyway.
+import sys as _sys  # noqa: E402
+
+pytest_plugins = ["pytester", "tests._env_restore"]
+if _sys.platform != "win32":
+    pytest_plugins.insert(1, "tests._posix_spawn")
 
 
 # NO _enable_t2_test_auto_migrate: the RDR-120 P3b auto-migrate default
@@ -2233,6 +2240,28 @@ def _check_mandatory_pin_non_vacuity(session) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _restore_cwd():
+    """Put the working directory back after every test. Production code moves
+    the process cwd (the aspect-worker daemon's prologue chdirs to its config
+    dir, aspect_worker_daemon.py), and so do a couple of dozen tests, so a test
+    that runs such code in-process leaves the rest of its xdist worker in a
+    temp dir, where every repo-relative read (Path("src/nexus/...")) misses.
+    That turned shard 1 of develop red on 5cd8b18f4. Restoring here makes test
+    order irrelevant; a cwd deleted under the test falls back to the rootdir."""
+    try:
+        before = os.getcwd()
+    except OSError:
+        before = str(Path(__file__).resolve().parents[1])
+    yield
+    try:
+        if os.getcwd() == before:
+            return
+    except OSError:
+        pass
+    os.chdir(before)
+
+
+@pytest.fixture(autouse=True)
 def _no_engine_restart_taxonomy_deferral(monkeypatch):
     """nexus-tawfg: ``nx index repo`` defers taxonomy work while the engine's
     /version reports ``process_uptime_seconds`` under a threshold. The
@@ -3953,8 +3982,11 @@ def make_pg_bundle_txz():
         bundle = staging / "bundle"
         bin_dir = bundle / "bin"
         bin_dir.mkdir(parents=True)
+        # The names the HOST's extractor will look for: the Windows bundle ships
+        # ``initdb.exe`` and friends (``PgBinaries.from_dir``).
+        suffix = ".exe" if _sys.platform == "win32" else ""
         for b in ("initdb", "pg_ctl", "psql", "createdb"):
-            f = bin_dir / b
+            f = bin_dir / f"{b}{suffix}"
             f.write_text("#!/bin/sh\nexit 0\n")
             f.chmod(0o755)
         for sub in ("include", "lib", "share"):

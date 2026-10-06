@@ -3270,6 +3270,13 @@ running its own hooks, which on v4.34.x approved every Bash command
 Only that marketplace's `nx` counts. The row reads "none installed" on a box
 without the plugin or without a registry.
 
+**Config directory access row (Windows only, nexus-f9bgu.50).** "Config
+directory access (non-elevated)" fails when the config directory's access list has
+no entry for the current user (the shape an elevated first run leaves, which
+grants only Administrators and SYSTEM) or cannot be read, so a normal session
+cannot write it. The fix it prints is an `icacls` grant to the current
+user, run from an elevated Command Prompt. The row is absent on POSIX.
+
 **Supplementary checks (new in 7.11.0).** After the default sweep prints its
 own result, `nx doctor` additionally runs the cheap, read-only subset of the
 `--check-*` diagnostics inline: `resources`, `plan-library`, `taxonomy`,
@@ -3892,9 +3899,15 @@ design** (it is independently managed and may serve other clients) — the
 command says so; pass `--with-pg` to stop the cluster too (`pg_ctl -m
 fast`).
 
+On Windows (RDR-224), `stop` sends the supervisor CTRL_BREAK and waits;
+a supervisor that does not exit in time is ended through its Job Object, which
+takes the engine with it. A supervisor running in another logon session is
+refused, never killed. At sign-out, restart or shutdown the supervisor stops
+the engine and PostgreSQL itself (nexus-f9bgu.51).
+
 | Flag | Description |
 |------|-------------|
-| `--foreground` | Block until SIGTERM (for launchd/systemd supervision). |
+| `--foreground` | Block until SIGTERM (for launchd/systemd supervision). On Windows the supervisor stops on CTRL_BREAK (`SIGBREAK`). |
 | `--config-dir` | Config directory override. |
 | `--json` | (`status`) Raw JSON output. |
 | `--with-pg` | (`stop`) Also stop the nx-managed Postgres cluster. |
@@ -3942,6 +3955,23 @@ it to stay down. `nx init` runs this for you when you
 accept the autostart prompt (decide-first — the unit is the sole starter, no
 session supervisor underneath it). `--force` overwrites an existing unit whose
 content differs. Remove with `nx daemon service uninstall --autostart`.
+
+On Windows (RDR-224) the same command registers a per-user Task Scheduler task,
+`NexusStorageService`, with a logon trigger for you only. It runs while you are
+logged on (`InteractiveToken`, no stored password), with no elevation, no
+execution time limit and no battery restrictions, and it starts the service once
+at install. The task runs a small launcher under `pythonw` (no window), not the
+supervisor itself: the launcher starts the supervisor in its own hidden console
+and process group, which is what `nx daemon service stop` signals with
+`CTRL_BREAK`, and it restarts the supervisor 30 s after any non-zero exit. A
+clean stop (exit 0) ends the launcher and the task stays idle until the next
+logon or `schtasks /Run /TN NexusStorageService`. The task's own "restart on
+failure" setting only covers a launch failure of the launcher: Task Scheduler
+does not restart a task whose process exits non-zero. Uninstalling ends the
+launcher and deletes the task; a supervisor that is running keeps running (it
+is not in the task's job), so run `nx daemon service stop` as well. `nx doctor`
+reports the task through the `Service autostart unit` row (registered, enabled,
+and its definition current).
 
 > **Fixed (nexus-oyo2g):** `nx daemon service stop` used to decide what to
 > signal purely from the discovery lease (15s TTL) — a supervisor whose
@@ -4065,6 +4095,16 @@ rewrites the shims in `<bin>`, then reaps old generations. Nothing is ever
 swapped underneath a running process — a live holder keeps executing its own
 generation byte-identically and converges at its next spawn, so no session has
 to be closed and there is nothing to force.
+
+**On native Windows (nexus-f9bgu.47)** `current` and `previous` are directory
+junctions, and there are no shim files: each generation carries `<gen>\bin`
+with copies of its own launchers, and the user PATH gets `<tools>\current\bin`
+ahead of uv's bin dir, so an upgrade only flips the junction. A running
+launcher exe cannot be replaced on Windows, so nothing is written into
+`~\.local\bin`. Terminals and sessions started before the one-time PATH change
+keep the old `nx` until restarted. A legacy `uv tool install` tree is migrated
+on the first run and its old launchers are removed by `nx self gc` once
+nothing runs them. The installer runs in Python there, never through `bash`.
 
 **Adding an extra (nexus-pffc4):** `nx self install --extras local` builds the
 new generation with that extra ADDED — the flag MERGES with the extras the

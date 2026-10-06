@@ -125,13 +125,44 @@ __all__ = [
 PS_COMMAND = ("ps", "axww", "-o", "pid=,command=")
 
 
-def ps_snapshot() -> str:
+def _windows_snapshot(win_info_api: object | None = None) -> str:
+    """The Windows process table in ``ps axww -o pid=,command=`` shape:
+    ``<pid> <space-joined argv>`` per line, via ``winproc_core`` (a stdlib-only
+    sibling, so this still runs with nexus absent).
+
+    Backslashes in the command are written as ``/``: the generation prefix this
+    census matches on is built with ``/`` boundaries (see :func:`_match_prefix`),
+    and a Windows argv may spell the same directory with either separator. Both
+    sides are normalised the same way, so a tree that is held is reported held.
+    Under-reporting is the direction that lets a live tree look free, and a
+    backslash/slash mismatch would produce exactly that, silently.
+
+    Empty string when the table cannot be read, as for a ps-less box.
+    """
+    core = _sibling("winproc_core")
+    api = win_info_api if win_info_api is not None else core.ctypes_win_info_api()
+    try:
+        rows = core.enumerate_processes(api)
+    except (RuntimeError, OSError):
+        return ""
+    return "".join(
+        f"{pid} {command.replace(chr(92), '/')}\n" for pid, _ppid, _age, command in rows
+    )
+
+
+def ps_snapshot(
+    *, platform: str | None = None, win_info_api: object | None = None,
+) -> str:
     """One process snapshot. Empty string when ``ps`` is unavailable.
 
     A ps-less box (minimal container, stripped host) yields no holders rather
     than an exception: ``nexus-p78a0`` is the record of what happens when this
-    leg raises and takes unrelated work down with it.
+    leg raises and takes unrelated work down with it. Windows has no ``ps``;
+    it reads its own process table (:func:`_windows_snapshot`, RDR-224,
+    nexus-f9bgu.21). *platform* and *win_info_api* are test seams.
     """
+    if (platform if platform is not None else sys.platform) == "win32":
+        return _windows_snapshot(win_info_api)
     try:
         r = subprocess.run(PS_COMMAND, capture_output=True, text=True, timeout=10)  # noqa: S603
     except (OSError, subprocess.SubprocessError):
@@ -139,7 +170,16 @@ def ps_snapshot() -> str:
     return r.stdout if r.returncode == 0 else ""
 
 
-def _match_prefix(generation: Path | str) -> str:
+def _boundary_text(path_text: str, platform: str | None = None) -> str:
+    """*path_text* with the trailing separator dropped, and on Windows with
+    ``\\`` spelt ``/`` so it compares against :func:`_windows_snapshot` rows.
+    Unchanged on POSIX."""
+    if (platform if platform is not None else sys.platform) == "win32":
+        path_text = path_text.replace("\\", "/")
+    return path_text.rstrip("/")
+
+
+def _match_prefix(generation: Path | str, platform: str | None = None) -> str:
     """The string an argv must contain to count as running from *generation*.
 
     Mirrors the shell half exactly, including two properties that were paid for:
@@ -168,13 +208,23 @@ def _match_prefix(generation: Path | str) -> str:
         raise ValueError(
             f"generation must be an absolute path, got {str(generation)!r}"
         )
-    if path.is_symlink():
-        resolved = os.readlink(path)
+    layout = _sibling_layout()
+    # ``is_link`` rather than ``is_symlink``: on Windows the registered ledger
+    # pointer is a junction, which ``is_symlink`` reads as a plain directory, so
+    # the pointer's own path was matched and a live holder (whose argv names the
+    # real tree) read as absent -- the under-reporting direction.
+    if layout.is_link(path, platform=platform):
+        resolved = layout.read_link(path, platform=platform)
         if resolved:
             path = Path(resolved)
 
-    text = str(path).rstrip("/")
-    if not text:
+    is_nt = (platform if platform is not None else sys.platform) == "win32"
+    # Separators follow the HOST as well as the target: on a Windows host
+    # str(path) is backslash-spelt whatever platform is being asked about, and
+    # the snapshot rows are slash-spelt (the rehearsal caught platform="linux" on a
+    # Windows host matching nothing).
+    text = _boundary_text(str(path), "win32" if (is_nt or sys.platform == "win32") else platform)
+    if not text or (is_nt and len(text) == 2 and text[1] == ":"):
         # "/" normalises to empty, and an empty match makes the boundary "/" —
         # every process on the machine a holder of everything. Refuse instead;
         # answering "no holders" would be worse, being the answer that invites
@@ -185,10 +235,29 @@ def _match_prefix(generation: Path | str) -> str:
     return text + "/"
 
 
+def _fold(text: str, platform: str | None = None) -> str:
+    """*text* case-folded on Windows, unchanged elsewhere.
+
+    NTFS paths compare case-insensitively, so a process whose argv spells a
+    generation in another case (``C:\\Users\\Sam`` against ``c:\\users\\sam``,
+    both of which an installer, a shell and a task definition produce) still runs
+    from it. This is ``os.path.normcase``'s folding; its separator swap is not
+    wanted here, because :func:`_boundary_text` has already spelt the paths with
+    ``/`` to match :func:`_windows_snapshot`'s rows. Stdlib only, like the file.
+    """
+    if (platform if platform is not None else sys.platform) == "win32":
+        return text.lower()
+    return text
+
+
 def generation_holder_pids(
-    generation: Path | str, snapshot: str | None = None
+    generation: Path | str, snapshot: str | None = None, *, platform: str | None = None,
 ) -> list[int]:
     """PIDs running from *generation*, in snapshot order.
+
+    On Windows the match ignores case (:func:`_fold`): a held generation spelt in
+    another case would otherwise read free, the under-reporting direction. *platform*
+    is a test seam.
 
     Pass *snapshot* to attribute several generations from ONE view of the
     process table; omit it and one is taken for this call alone.
@@ -198,7 +267,7 @@ def generation_holder_pids(
     would end the over-attribution and buy under-reporting instead, and
     under-reporting is the direction that lets a live tree look free.
     """
-    prefix = _match_prefix(generation)
+    prefix = _fold(_match_prefix(generation, platform), platform)
     text = ps_snapshot() if snapshot is None else snapshot
 
     # THE CENSUS IS NOT A HOLDER. When census.sh dispatches here, this process
@@ -220,7 +289,7 @@ def generation_holder_pids(
 
     pids: list[int] = []
     for line in text.splitlines():
-        if prefix not in line:
+        if prefix not in _fold(line, platform):
             continue
         head = line.split(maxsplit=1)
         if not head:
@@ -297,7 +366,9 @@ def generation_match_pairs(
     return tuple(pairs)
 
 
-def legacy_tree_candidates(*, tools: Path | None = None) -> list[Path]:
+def legacy_tree_candidates(
+    *, tools: Path | None = None, platform: str | None = None,
+) -> list[Path]:
     """The legacy ``uv tool install`` tree(s) live processes may run from.
 
     Two structural locations, in ledger-first order: the target of the
@@ -315,15 +386,17 @@ def legacy_tree_candidates(*, tools: Path | None = None) -> list[Path]:
     out: list[Path] = []
     try:
         link = install_layout.legacy_generation_link(tools=tools)
-        if link.is_symlink():
-            target = Path(os.readlink(link))
-            if target.is_absolute() and (target / "bin").is_dir():
+        if install_layout.is_link(link, platform=platform):
+            target = Path(install_layout.read_link(link, platform=platform))
+            if target.is_absolute() and install_layout.venv_bin(
+                target, platform=platform,
+            ).is_dir():
                 out.append(target)
     except Exception:  # noqa: BLE001 — an unreadable ledger is "cannot tell", not "none"
         pass
     try:
-        venv = install_layout.uv_conexus_venv()
-        if (venv / "bin").is_dir() and venv not in out:
+        venv = install_layout.uv_conexus_venv(platform=platform)
+        if install_layout.venv_bin(venv, platform=platform).is_dir() and venv not in out:
             out.append(venv)
     except Exception:  # noqa: BLE001 — same posture
         pass

@@ -210,7 +210,7 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-189](rdr-189-target-definition-layer.md) | Target-Definition Layer for NL-to-X Querying: Answer-Object Families, Target Contracts, and Witness Obligations over the Existing Plan/Operator Realization Layer | Architecture | Draft | 2026-07-25 |
 | [RDR-190](rdr-190-plan-ir-loop-collect-primitives.md) | Plan-IR Fan-Out and Fold: Add `loop` and `collect` Step Primitives So Plans Can Process More Than 100 Items Without Truncating or Round-Tripping Through the Agent | Architecture | Deferred | 2026-07-26 |
 | [RDR-191](rdr-191-unify-chunk-tables-enable-manifest-fk.md) | Unify the Dim-Sharded Chunk Tables into One nexus.chunks with Nullable Typed Embedding Columns: Make the Manifest FK Expressible and Retire the Client-Side Integrity Apparatus | Architecture | Closed | 2026-08-10 |
-| [RDR-192](rdr-192-superseded-note-chunks-outlive-manifest-less-is-live.md) | Superseded store_put note chunks are permanently live: the manifest-less-is-live contract outlived its transition | Bug Fix | Accepted | 2026-08-12 |
+| [RDR-192](rdr-192-superseded-note-chunks-outlive-manifest-less-is-live.md) | Superseded store_put note chunks are permanently live: the manifest-less-is-live contract outlived its transition | Bug Fix | Closed | 2026-08-12 |
 | [RDR-193](rdr-193-server-side-catalog-reconciliation-and-taxonomy-compute.md) | Server-Side Catalog Reconciliation and Taxonomy Compute: Move the Index-Time Catalog Diff/Housekeeping/Linking and the Taxonomy Discover Pipeline onto the Engine as Transactional SQL and Java Jobs | Architecture | Deferred | 2026-08-15 |
 | [RDR-194](rdr-194-fk-census-structural-schema-warts.md) | Post-RDR-187 FK Census and Structural Wart Retirement: One chash Encoding, One doc_id Meaning, Tenant-Keyed Uniqueness Everywhere, One TTL Semantics, and Every Enforceable Relationship Enforced | Architecture | Closed | 2026-08-15 |
 | [RDR-195](rdr-195-voyage-batch-token-limit.md) | Token-Aware Voyage Batch Splitting: Make the 120K-Tokens-Per-Request Ceiling a Planned Bound Instead of an Opaque 500 | Bug Fix | Closed | 2026-08-19 |
@@ -235,13 +235,14 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-214](rdr-214-standing-code-correctness-review.md) | Standing-Code Correctness Review: From Pilot to Decision | Technical Debt | Abandoned | 2026-09-17 |
 | [RDR-215](rdr-215-plugin-hooks-as-nx-verbs.md) | Plugin Hooks as nx Verbs: Retire the Bash Hook Layer | Technical Debt | Closed | 2026-09-18 |
 | [RDR-217](rdr-217-client-lexical-retrieval-leg.md) | A Lexical Leg for the nexus Client: Reach the Engine's FTS Hybrid Route | Feature | Closed | 2026-09-19 |
-| [RDR-218](rdr-218-windows-platform-support.md) | Windows Platform Support: a Low-Friction Plugin Install for the CLI and the Desktop | Architecture | Accepted | 2026-09-21 |
+| [RDR-218](rdr-218-windows-platform-support.md) | Windows Platform Support: a Low-Friction Plugin Install for the CLI and the Desktop | Architecture | Superseded by RDR-224 | 2026-09-21 |
 | [RDR-219](rdr-219-harness-credentials-never-leave-the-keychain.md) | Harness Credentials Never Leave the Keychain: an Automation Token, Passed by Environment | Architecture | Closed | 2026-09-25 |
 | [RDR-220](rdr-220-ci-status-from-github-webhooks-to-the-tuple-space.md) | CI Status From GitHub Webhooks to the Tuple Space | Architecture | Accepted | 2026-09-26 |
 | [RDR-221](rdr-221-prose-editor.md) | Prose Editor: an Example-Anchored Line Editor with Memory in T2 | Feature | Accepted | 2026-09-27 |
 | [RDR-222](rdr-222-request-identity-for-mutating-engine-routes.md) | Request Identity for Mutating Engine Routes | Architecture | Draft | 2026-09-27 |
 | [RDR-223](rdr-223-atomic-chunk-plus-owner-write.md) | Atomic Chunk-Plus-Owner Write on Every Client Path | Architecture | Accepted | 2026-09-28 |
-| [RDR-224](rdr-224-native-windows-support.md) | Native Windows Support: Windows x64 Engine, PostgreSQL Bundle and Client | Architecture | Draft | 2026-09-30 |
+| [RDR-224](rdr-224-native-windows-support.md) | Native Windows Support: Windows x64 Engine, PostgreSQL Bundle and Client | Architecture | Accepted | 2026-09-30 |
+| [RDR-225](rdr-225-vector-tables-per-embedding-model.md) | One Vector Table per Embedding Model, with Tenant Isolation | Architecture | Accepted | 2026-10-05 |
 
 > RDR-216 is unused on `develop`: drafted, gated BLOCKED, then abandoned 2026-09-19 without landing. Its measurements survive in T2 as `nexus_rdr/216-research-1` through `-19` and in `nexus/manticore-auto-chunking-analysis-2026-09-19`; the record itself never merged.
 

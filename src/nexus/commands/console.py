@@ -54,12 +54,12 @@ def _write_pid_file(path: Path, pid: int, port: int, project: str) -> None:
 
 
 def _is_process_alive(pid: int) -> bool:
-    """Return True if the PID is still running. Signal 0 probes liveness."""
-    try:
-        os.kill(pid, 0)
-        return True
-    except OSError:
-        return False
+    """Return True if the PID is still running (nexus-f9bgu.25: through
+    :func:`nexus.daemon.service_registry.pid_alive`, which has the Windows
+    branch)."""
+    from nexus.daemon.service_registry import pid_alive  # noqa: PLC0415 — deferred: CLI module import stays light
+
+    return pid_alive(pid)
 
 
 def _check_stale_pid_file(path: Path) -> None:

@@ -48,6 +48,7 @@ single event loop for the one live-daemon self-heal proof, which is
 """
 from __future__ import annotations
 
+import ast
 import asyncio
 import contextlib
 import http.server
@@ -61,23 +62,89 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 from pathlib import Path
 from typing import Any, Optional
 from unittest.mock import patch
 
 import pytest
 
+from nexus.daemon import service_registry as sr
+from nexus.daemon import storage_service_daemon as ssd
 from nexus.daemon.service_registry import (
+    _WINDOWS_SHARING_RETRY_BUDGET_S,
     LeaseRecord,
     ServiceRegistry,
     ServiceSupervisor,
+    hard_kill_pid,
     pid_alive,
     pid_running,
     process_state,
+    request_graceful_stop,
+    service_identity,
+    sweep_matching_processes,
     terminate_pids,
     ttl_for_tier,
+    wait_for_exit,
 )
+from nexus.util.process_group import KILL_SIGNAL
+from nexus.util.win_console import ConsoleBreakResult
 from nexus import session as _sess
+
+# RDR-224 (nexus-f9bgu.19): this suite runs on native Windows too. The three
+# places it used to assume POSIX are named once here so each platform branch is
+# visible and counted (``TestWindowsRunIsNotVacuous``).
+_WIN = sys.platform == "win32"
+
+#: ``Popen.wait()`` result of a process taken down by ``KILL_SIGNAL``: the
+#: negated signal on POSIX, the ``TerminateProcess`` exit code (the signal
+#: number itself) on Windows.
+_KILLED_RC = KILL_SIGNAL if _WIN else -KILL_SIGNAL
+
+#: A child that takes neither the POSIX stop (SIGTERM) nor the Windows one
+#: (CTRL_BREAK, SIGBREAK), so a ladder test reaches the hard kill on both.
+_IGNORE_STOP_SIGNALS = (
+    "import signal,time\n"
+    "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+    "signal.signal(getattr(signal, 'SIGBREAK', signal.SIGTERM), signal.SIG_IGN)\n"
+)
+
+#: Spawn kwargs that give a child its own console process group on Windows, as
+#: the production spawns do (supervisor and engine are both
+#: ``CREATE_NEW_PROCESS_GROUP``). A child sharing the test run's group takes a
+#: real ``CTRL_BREAK`` aimed at it AND the pytest process: measured on
+#: qwentescence, a bare ``terminate_pids`` here ended the run with exit code
+#: 0xC000013A before the next test (nexus-f9bgu.19).
+_OWN_GROUP: dict[str, Any] = (
+    {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if _WIN else {}  # type: ignore[attr-defined]
+)
+
+#: Tests that cannot run on native Windows, by name, each with its reason on the
+#: marker. ``TestWindowsRunIsNotVacuous`` pins this set against the markers
+#: actually applied, so a new Windows skip must be declared here AND counted.
+_POSIX_ONLY: dict[str, str] = {}
+
+
+def _posix_only(reason: str):
+    """Skip on native Windows. Registers the test in ``_POSIX_ONLY``."""
+
+    def deco(fn):
+        _POSIX_ONLY[fn.__qualname__] = reason
+        return pytest.mark.skipif(_WIN, reason=reason)(fn)
+
+    return deco
+
+
+#: Windows-only tests (real Win32 behaviour no injection can stand in for).
+_WINDOWS_ONLY: dict[str, str] = {}
+
+
+def _windows_only(reason: str):
+    def deco(fn):
+        _WINDOWS_ONLY[fn.__qualname__] = reason
+        return pytest.mark.skipif(not _WIN, reason=reason)(fn)
+
+    return deco
 
 
 # "t2" removed (nexus-i711w Stage 2 sub-stage B): the T2 daemon is retired, so
@@ -294,7 +361,7 @@ class _LeaseHarness(RecordHarness):
             dir=config_dir, tier=self._REGISTRY_TIER, clock=clock,
             ttl=self._tier_ttl, heartbeat_interval=1.0,
         )
-        self._scope = str(os.getuid())
+        self._scope = service_identity()
         # One ServiceSupervisor per owner, exactly as the migrated daemon
         # uses it (publish_once + heartbeat_tick) — so the unit battery
         # exercises the real daemon dispatch path, including the fenced-flag
@@ -353,7 +420,7 @@ class _LeaseHarness(RecordHarness):
     def dead_owner_lease_is_reclaimed(self, owner: int = _OWNER_PID) -> bool:
         from nexus.daemon.service_registry import reclaim_lease_if_dead_owner
 
-        dead = subprocess.Popen(["true"])  # noqa: S603, S607 — fixed argv, a genuinely dead pid
+        dead = subprocess.Popen([sys.executable, "-c", "pass"])  # noqa: S603 — fixed argv, a genuinely dead pid
         dead.wait()
         sup = ServiceSupervisor(
             self._registry, self._scope, version="1.0.0",
@@ -391,7 +458,7 @@ class StorageServiceRecordHarness(_LeaseHarness):
     supervised by StorageServiceSupervisor. Identical lease semantics to the
     retired T3-daemon tier (uid-scoped, uid-scoped external-process supervisor,
     version-cycled by _cycle_storage_service_to_current). The scope key is
-    str(os.getuid()); the registry tier prefix is "storage_service"; addr file
+    service_identity(); the registry tier prefix is "storage_service"; addr file
     = storage_service_addr.<uid>.
     """
 
@@ -418,6 +485,7 @@ class StorageServiceRecordHarness(_LeaseHarness):
         engine = subprocess.Popen(  # noqa: S603 — fixed argv, this interpreter
             [sys.executable, "-c", "import time; time.sleep(60)"],
             start_new_session=True,
+            **_OWN_GROUP,  # the supervisor's stop sends a REAL CTRL_BREAK on Windows
         )
         sup._proc = engine
         owner_registry = ServiceRegistry(dir=self._cd, tier=self._REGISTRY_TIER, clock=self._clock)
@@ -1159,7 +1227,7 @@ def _spawn_unreaped_zombie() -> "subprocess.Popen[bytes]":
     proc = subprocess.Popen(  # noqa: S603 — fixed argv, this interpreter
         [sys.executable, "-c", "import time; time.sleep(120)"],
     )
-    os.kill(proc.pid, signal.SIGKILL)
+    os.kill(proc.pid, KILL_SIGNAL)
     deadline = time.monotonic() + 30.0
     while time.monotonic() < deadline:
         if process_state(proc.pid) == "Z":
@@ -1192,6 +1260,7 @@ class TestTerminationSurvivorVerdict:
     ``nx daemon service stop: FAILED`` / ``NEEDS HUMAN``.
     """
 
+    @_posix_only("a zombie (dead, unreaped, still in the process table) does not exist on Windows: a terminated process's handle keeps no PID alive for the poll to misread")
     def test_zombie_is_not_reported_as_a_sigkill_survivor(self) -> None:
         proc = _spawn_unreaped_zombie()
         pid = proc.pid
@@ -1273,10 +1342,8 @@ class TestTerminationSurvivorVerdict:
         """Non-vacuity, other direction: a genuinely running process must
         still be killed by the escalation and then reported clean."""
         proc = subprocess.Popen(  # noqa: S603 — fixed argv, this interpreter
-            [sys.executable, "-c",
-             "import signal,time\n"
-             "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
-             "time.sleep(120)\n"],
+            [sys.executable, "-c", _IGNORE_STOP_SIGNALS + "time.sleep(120)\n"],
+            **_OWN_GROUP,
         )
         try:
             deadline = time.monotonic() + 30.0
@@ -1293,7 +1360,7 @@ class TestTerminationSurvivorVerdict:
             assert pid_running(proc.pid) is False
         finally:
             with contextlib.suppress(ChildProcessError, OSError):
-                os.kill(proc.pid, signal.SIGKILL)
+                proc.kill()
             with contextlib.suppress(ChildProcessError, OSError, subprocess.TimeoutExpired):
                 proc.wait(timeout=5)
 
@@ -1335,6 +1402,179 @@ class TestTerminationSurvivorVerdict:
             "nexus.daemon.service_registry.process_state", lambda _pid: None,
         )
         assert pid_running(424243) is True
+
+
+class _ScriptedConsoleApi:
+    """Win32 console calls for the stop send, scripted per target pid.
+
+    ``refuse`` pids fail ``AttachConsole`` with access denied (another
+    Windows session); every other pid attaches and "sends" successfully,
+    delivering nothing, which is the ``TRUE``-and-nothing-delivered case a
+    real send can produce.
+    """
+
+    def __init__(self, *, refuse: frozenset[int] = frozenset()) -> None:
+        self.refuse = refuse
+        self.attached: list[int] = []
+        self.sent: list[int] = []
+        self._current: int | None = None
+
+    def free_console(self) -> bool:
+        return True
+
+    def attach_console(self, pid: int) -> tuple[bool, int]:
+        self.attached.append(pid)
+        if pid in self.refuse:
+            return False, 5
+        self._current = pid
+        return True, 0
+
+    def generate_ctrl_break(self, pid: int) -> tuple[bool, int]:
+        self.sent.append(pid)
+        return True, 0
+
+    def attach_parent_console(self) -> tuple[bool, int]:
+        return True, 0
+
+    def session_of(self, pid: int) -> int | None:
+        return 1 if pid in self.refuse else 0
+
+
+def _spawn_ignoring_sleeper() -> subprocess.Popen[bytes]:
+    proc = subprocess.Popen(  # noqa: S603 — fixed argv, this interpreter
+        [sys.executable, "-c", _IGNORE_STOP_SIGNALS + "print('up', flush=True)\ntime.sleep(120)\n"],
+        stdout=subprocess.PIPE,
+        **_OWN_GROUP,
+    )
+    assert proc.stdout is not None
+    assert proc.stdout.readline().strip() == b"up", "fixture must have armed its handler"
+    return proc
+
+
+class TestGracefulStopChannel:
+    """The platform's graceful-stop signal is chosen in ONE place, the
+    primitive's :func:`request_graceful_stop`, and every stop path that
+    signals a supervisor or an engine funnels through it (``terminate_pids``,
+    ``stop_storage_service``). RDR-224, nexus-f9bgu.17.
+
+    Tier-incidental for the same reason ``TestTerminationSurvivorVerdict``
+    is. Both platform arms run on every host: the Windows arm through an
+    injected console API, the POSIX arm against a real child.
+    """
+
+    @_posix_only("asserts a -SIGTERM exit status; on Windows SIGTERM is TerminateProcess and exits 15, covered by the injected Windows arm below")
+    def test_posix_sends_sigterm_to_a_real_child(self) -> None:
+        proc = subprocess.Popen(  # noqa: S603 — fixed argv, this interpreter
+            [sys.executable, "-c", "import time; time.sleep(120)"],
+        )
+        try:
+            send = request_graceful_stop(proc.pid, platform="linux")
+            assert send.sent is True and send.refused is False
+            assert proc.wait(timeout=30) == -signal.SIGTERM
+        finally:
+            with contextlib.suppress(OSError):
+                proc.kill()
+            proc.wait(timeout=5)
+
+    def test_posix_gone_pid_is_not_sent_and_not_refused(self) -> None:
+        with patch("os.kill", side_effect=ProcessLookupError):
+            send = request_graceful_stop(424244, platform="linux")
+        assert (send.sent, send.refused, send.gone) == (False, False, True)
+
+    def test_posix_permission_error_is_not_a_refusal(self) -> None:
+        # POSIX behaviour is unchanged: EPERM was swallowed and the caller's
+        # escalation ladder carried on. Only the Windows cross-session case
+        # stops the ladder.
+        with patch("os.kill", side_effect=PermissionError):
+            send = request_graceful_stop(424245, platform="linux")
+        assert (send.sent, send.refused) == (False, False)
+
+    def test_windows_never_reaches_os_kill_and_sends_ctrl_break(self) -> None:
+        api = _ScriptedConsoleApi()
+        with patch("os.kill", side_effect=AssertionError("os.kill is TerminateProcess on Windows")):
+            send = request_graceful_stop(4242, platform="win32", console_api=api)
+        assert send.sent is True
+        assert api.attached == [4242] and api.sent == [4242]
+
+    def test_windows_cross_session_is_a_refusal_with_both_sessions(self) -> None:
+        api = _ScriptedConsoleApi(refuse=frozenset({4242}))
+        send = request_graceful_stop(4242, platform="win32", console_api=api)
+        assert (send.sent, send.refused) == (False, True)
+        assert (send.target_session, send.own_session) == (1, 0)
+        assert api.sent == []
+
+    def test_a_refused_pid_is_never_hard_killed_and_is_reported(self) -> None:
+        """Sam DECIDED (2026-10-05): a stop from another Windows session
+        fails loud and never hard-kills. A sibling pid the send DID reach
+        still gets the full ladder, so the refusal does not weaken the stop
+        for processes this session can reach."""
+        refused_proc = _spawn_ignoring_sleeper()
+        reachable_proc = _spawn_ignoring_sleeper()
+        api = _ScriptedConsoleApi(refuse=frozenset({refused_proc.pid}))
+        refusals: list = []
+        try:
+            stubborn = terminate_pids(
+                [refused_proc.pid, reachable_proc.pid],
+                grace_s=0.5,
+                platform="win32",
+                console_api=api,
+                refused_out=refusals,
+            )
+            # Non-vacuity: both pids were attempted, only one send went out.
+            assert api.attached == [refused_proc.pid, reachable_proc.pid]
+            assert api.sent == [reachable_proc.pid]
+            # The reachable pid ignored the break, so it took the hard kill.
+            assert reachable_proc.wait(timeout=30) == _KILLED_RC
+            # The refused pid is untouched, still running, and reported.
+            assert refused_proc.poll() is None
+            assert stubborn == [refused_proc.pid]
+            assert [r.pid for r in refusals] == [refused_proc.pid]
+            assert refusals[0].refused is True
+        finally:
+            for proc in (refused_proc, reachable_proc):
+                with contextlib.suppress(OSError):
+                    proc.kill()
+                proc.wait(timeout=5)
+
+    def test_sweep_carries_the_refusal_to_its_caller(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        proc = _spawn_ignoring_sleeper()
+        api = _ScriptedConsoleApi(refuse=frozenset({proc.pid}))
+        real_terminate = terminate_pids
+        monkeypatch.setattr(
+            "nexus.daemon.service_registry.terminate_pids",
+            lambda pids, **kw: real_terminate(
+                pids, platform="win32", console_api=api, **kw,
+            ),
+        )
+        command = f"{sys.executable} -c import signal,time"
+        monkeypatch.setattr(
+            "nexus.daemon.service_registry.all_process_rows",
+            lambda *a, **k: [(proc.pid, 1, command)],
+        )
+        monkeypatch.setattr(
+            "nexus.daemon.service_registry.process_command", lambda *a, **k: command,
+        )
+        try:
+            result = sweep_matching_processes(
+                lambda cmd: cmd == command, exclude_pid=os.getpid(), grace_s=0.3,
+            )
+            assert result.pids == (proc.pid,)
+            assert result.stubborn == (proc.pid,)
+            assert [r.pid for r in result.refused] == [proc.pid]
+            assert proc.poll() is None, "a refused process must not be killed"
+        finally:
+            with contextlib.suppress(OSError):
+                proc.kill()
+            proc.wait(timeout=5)
+
+    def test_console_result_type_is_what_the_primitive_reads(self) -> None:
+        # Guard against the two modules drifting: every field the primitive
+        # copies off the console result exists on it.
+        fields = ConsoleBreakResult.__dataclass_fields__
+        for name in ("sent", "refused", "error", "target_session", "own_session"):
+            assert name in fields
 
 
 # ---------------------------------------------------------------------------
@@ -1486,7 +1726,7 @@ def _dead_pid() -> int:
     """A REAL, already-reaped, genuinely dead pid (spawn + wait), mirroring
     the established pattern (``TestDiscoverReapToctou``'s sibling harness /
     ``test_storage_service_daemon.py``'s identical fixture)."""
-    proc = subprocess.Popen(["true"])  # noqa: S603, S607 — fixed argv, a genuinely dead pid
+    proc = subprocess.Popen([sys.executable, "-c", "pass"])  # noqa: S603 — fixed argv, a genuinely dead pid
     proc.wait()
     return proc.pid
 
@@ -1713,3 +1953,754 @@ class TestStaleLeaseReaderGrace:
             owner.terminate()
             with contextlib.suppress(subprocess.TimeoutExpired):
                 owner.wait(timeout=5)
+
+
+# ---------------------------------------------------------------------------
+# Windows conformance properties (RDR-224, nexus-f9bgu.19).
+#
+# Three properties, each with a branch that is Windows-specific:
+#
+# 1. The hard kill of a pid that is already gone is not an error. On Windows
+#    ``os.kill`` of an exited pid raises ``OSError: [WinError 87]``, which the
+#    stop sites' ``except (ProcessLookupError, PermissionError)`` missed.
+# 2. ``stop_storage_service`` returns only once the supervisor AND the engine
+#    have exited, including after a hard kill (``SIGKILL`` and
+#    ``TerminateProcess`` both return before the process has left the table).
+# 3. The lease file is replaced under concurrent readers and every read gets a
+#    whole lease. ``os.replace`` onto, and ``unlink`` of, a file another process
+#    holds open fails with ``PermissionError`` on Windows (Python opens files
+#    without ``FILE_SHARE_DELETE``), and the reader's own open can fail the same
+#    way mid-replace, which ``_read_record`` reads as "no lease".
+#
+# Every Windows arm runs on every host with the platform injected; the one real
+# Win32 behaviour no injection can stand in for (a Job Object taking the engine
+# down with its supervisor) is a Windows-only test, counted by
+# ``TestWindowsRunIsNotVacuous``.
+# ---------------------------------------------------------------------------
+
+
+#: (error, the platform whose arm treats it as a gone pid). The platform is part of the
+#: case because ``hard_kill_pid`` swallows only the gone-pid errors OF ITS PLATFORM
+#: (nexus-f9bgu.33, review m3): ``EINVAL`` is a gone pid on Windows and a bad signal on POSIX.
+_GONE_PID_ERRORS = [
+    pytest.param(ProcessLookupError(3, "no such process"), "linux", id="posix-esrch"),
+    pytest.param(PermissionError(13, "not permitted"), "linux", id="eperm"),
+    # What CPython raises on Windows for a pid that no longer exists. The
+    # fourth argument is the winerror, which non-Windows builds accept and drop.
+    pytest.param(OSError(22, "The parameter is incorrect", None, 87), "win32", id="windows-winerror-87"),
+]
+
+
+class TestHardKillOfAGonePid:
+    """Property 1. ``hard_kill_pid`` is the one place the platform's hard kill
+    is sent, and no site that sends it may raise for a pid that is gone."""
+
+    @pytest.mark.parametrize(("exc", "platform"), _GONE_PID_ERRORS)
+    def test_a_gone_or_foreign_pid_is_reported_not_raised(self, exc: OSError, platform: str) -> None:
+        with patch("os.kill", side_effect=exc):
+            assert hard_kill_pid(424246, platform=platform) is False
+
+    def test_a_live_child_is_killed(self) -> None:
+        proc = _live_pid()
+        try:
+            assert hard_kill_pid(proc.pid) is True
+            assert proc.wait(timeout=30) == _KILLED_RC
+        finally:
+            with contextlib.suppress(OSError):
+                proc.kill()
+            proc.wait(timeout=5)
+
+    @pytest.mark.parametrize(("exc", "_platform"), _GONE_PID_ERRORS)
+    def test_terminate_pids_survives_a_pid_that_vanished_before_the_kill(
+        self, exc: OSError, _platform: str, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr("nexus.daemon.service_registry.pid_alive", lambda _pid: True)
+        monkeypatch.setattr("nexus.daemon.service_registry.process_state", lambda _pid: "D")
+        monkeypatch.setattr("nexus.daemon.service_registry._POST_KILL_SETTLE_S", 0.05)
+        # The Windows graceful arm, scripted, so the only os.kill is the hard one.
+        with patch("os.kill", side_effect=exc):
+            stubborn = terminate_pids(
+                [424242], grace_s=0.05, platform="win32", console_api=_ScriptedConsoleApi(),
+            )
+        assert stubborn == [424242]
+
+    def test_no_stop_site_sends_a_raw_os_kill(self) -> None:
+        """The helper is only a fix while nothing bypasses it. A raw
+        ``os.kill`` in either function would put the narrow ``except`` back."""
+
+        def raw_kills(module: Any, name: str) -> list[int]:
+            tree = ast.parse(inspect.getsource(module))
+            fn = next(
+                n for n in ast.walk(tree)
+                if isinstance(n, ast.FunctionDef) and n.name == name
+            )
+            return [
+                c.lineno for c in ast.walk(fn)
+                if isinstance(c, ast.Call)
+                and isinstance(c.func, ast.Attribute)
+                and c.func.attr == "kill"
+                and isinstance(c.func.value, ast.Name)
+                and c.func.value.id == "os"
+            ]
+
+        assert raw_kills(sr, "terminate_pids") == []
+        assert raw_kills(ssd, "stop_storage_service") == []
+        # Non-vacuity: the scan does find a raw kill where one is known to be.
+        assert raw_kills(sr, "hard_kill_pid") != []
+
+
+class TestWaitForExit:
+    def test_returns_empty_once_every_pid_has_exited(self) -> None:
+        proc = subprocess.Popen(  # noqa: S603 — fixed argv, this interpreter
+            [sys.executable, "-c", "import time; time.sleep(0.5)"],
+        )
+        try:
+            t0 = time.monotonic()
+            assert wait_for_exit([proc.pid], timeout_s=30.0, poll_s=0.05) == []
+            assert time.monotonic() - t0 >= 0.3, "it must actually have waited for the exit"
+        finally:
+            with contextlib.suppress(OSError):
+                proc.kill()
+            proc.wait(timeout=5)
+
+    def test_returns_the_pids_still_running_at_the_deadline(self) -> None:
+        proc = _live_pid()
+        try:
+            assert wait_for_exit([proc.pid], timeout_s=0.3, poll_s=0.05) == [proc.pid]
+        finally:
+            with contextlib.suppress(OSError):
+                proc.kill()
+            proc.wait(timeout=5)
+
+
+# -- Property 2: stop returns only after BOTH processes exited ---------------
+
+_SUPERVISOR_STANDIN = r'''
+import json, os, subprocess, sys, time
+from pathlib import Path
+
+cd = Path(sys.argv[-1])  # argv ends "... daemon service start --foreground --config-dir <cd>"
+me = os.getpid()
+flags = subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
+# The BASE interpreter, not sys.executable: inside a Windows venv that is a
+# launcher that spawns the real python as a child, so the pid recorded for the
+# engine would not be the pid the engine's own getpid() reports.
+engine = subprocess.Popen(
+    [getattr(sys, "_base_executable", sys.executable), str(cd / "engine_standin.py")],
+    creationflags=flags,
+)
+job = None
+if os.environ.get("STANDIN_JOB") == "1":
+    from nexus.util import win_job
+    job = win_job.create_job()
+    assert job is not None and win_job.assign_process(job, engine.pid)
+# Atomic: the harness polls for ready.json's EXISTENCE and then parses it, so a plain
+# write_text lets it read the file empty between create and write (measured on Windows,
+# nexus-f9bgu.44: a JSONDecodeError in one run of three).
+(cd / "ready.tmp").write_text(json.dumps({"supervisor": me, "engine": engine.pid}))
+os.replace(cd / "ready.tmp", cd / "ready.json")
+ignore = os.environ.get("STANDIN_IGNORE") == "1"
+while True:
+    if not ignore and (cd / f"stop-{me}").exists():
+        (cd / f"stop-{engine.pid}").write_text("x")
+        engine.wait()
+        (cd / "supervisor_exit.txt").write_text(repr(time.time()))
+        sys.exit(0)
+    time.sleep(0.02)
+'''
+
+_ENGINE_STANDIN = r'''
+import os, sys, time
+from pathlib import Path
+
+cd = Path(__file__).parent
+stop = cd / f"stop-{os.getpid()}"
+while not stop.exists():
+    time.sleep(0.02)
+if os.environ.get("STANDIN_ENGINE_IGNORE") == "1":
+    time.sleep(120)
+time.sleep(float(os.environ.get("STANDIN_ENGINE_DELAY", "1.0")))
+(cd / "engine_exit.txt").write_text(repr(time.time()))
+'''
+
+
+class _StopFileConsoleApi(_ScriptedConsoleApi):
+    """The scripted Windows console, where a "CTRL_BREAK" is a file the stand-in
+    polls for. Delivers the stop through the same call sequence the real send
+    makes, without a console, so the same test runs on every host."""
+
+    def __init__(self, stand_in_dir: Path) -> None:
+        super().__init__()
+        self._dir = stand_in_dir
+
+    def generate_ctrl_break(self, pid: int) -> tuple[bool, int]:
+        (self._dir / f"stop-{pid}").write_text("x")
+        return super().generate_ctrl_break(pid)
+
+
+class _Stack:
+    """A supervisor stand-in and its engine child, spawned from scripts in
+    *dir*. The supervisor's argv ends ``daemon service start --foreground
+    --config-dir <dir>``, which is what ``storage_service_stack_matcher`` keys
+    on, so the process-table sweep sees it as the real one."""
+
+    def __init__(self, directory: Path, **env: str) -> None:
+        self.dir = directory
+        (directory / "engine_standin.py").write_text(_ENGINE_STANDIN)
+        script = directory / "supervisor_standin.py"
+        script.write_text(_SUPERVISOR_STANDIN)
+        self.proc = subprocess.Popen(  # noqa: S603 — fixed argv, this interpreter
+            [sys.executable, str(script), "daemon", "service", "start", "--foreground",
+             "--config-dir", str(directory)],
+            env={**os.environ, **env},
+            **_OWN_GROUP,
+        )
+        ready = directory / "ready.json"
+        deadline = time.monotonic() + 60.0
+        while not ready.exists():
+            if time.monotonic() > deadline or self.proc.poll() is not None:
+                self.close()
+                pytest.fail("the stand-in stack did not come up")
+            time.sleep(0.05)
+        info = json.loads(ready.read_text())
+        self.supervisor: int = info["supervisor"]
+        self.engine: int = info["engine"]
+
+    def publish_lease(self, *, with_supervisor_pid: bool = True) -> None:
+        ServiceRegistry(dir=self.dir, tier="storage_service").publish(
+            service_identity(),
+            endpoint={"pid": self.engine, "host": "127.0.0.1", "port": 1},
+            version="1",
+            owner_token="standin",
+            payload={"supervisor_pid": self.supervisor} if with_supervisor_pid else {},
+        )
+
+    def close(self) -> None:
+        for pid in (getattr(self, "engine", None), self.proc.pid):
+            if pid is not None:
+                        hard_kill_pid(pid)
+        with contextlib.suppress(OSError, subprocess.TimeoutExpired):
+            self.proc.wait(timeout=10)
+
+
+def _delayed_hard_kill(delay_s: float):
+    """A ``hard_kill_pid`` that delivers late, like the real one: the kill is
+    accepted now and the process leaves the table a moment afterwards."""
+    real = hard_kill_pid
+
+    def fake(pid: int, **kwargs: Any) -> bool:
+        timer = threading.Timer(delay_s, real, args=(pid,), kwargs=kwargs)
+        timer.daemon = True
+        timer.start()
+        return True
+
+    return fake
+
+
+class TestStopReturnsAfterBothProcessesExit:
+    """Property 2. A stop is confirmed by the targets' EXIT, never by the send
+    or by the kill's return (RDR-224, nexus-f9bgu.19). The stand-ins stand for
+    the supervisor and the engine; the code under test is the real
+    ``stop_storage_service`` and ``request_graceful_stop`` with the Windows
+    console scripted, so it runs unchanged on every host."""
+
+    @pytest.fixture
+    def directory(self, config_dir: Path) -> Path:
+        return config_dir
+
+    def test_graceful_stop_returns_after_the_engine_and_then_the_supervisor_exited(
+        self, directory: Path,
+    ) -> None:
+
+        stack = _Stack(directory, STANDIN_ENGINE_DELAY="1.0")
+        try:
+            stack.publish_lease()
+            api = _StopFileConsoleApi(directory)
+            t0 = time.time()
+            outcome = ssd.stop_storage_service(
+                config_dir=directory, platform="win32", console_api=api,
+            )
+            t_return = time.time()
+            # The property: nothing of the stack is running when stop returns.
+            assert pid_running(stack.supervisor) is False
+            assert pid_running(stack.engine) is False
+            engine_exit = float((directory / "engine_exit.txt").read_text())
+            supervisor_exit = float((directory / "supervisor_exit.txt").read_text())
+            slack = 0.1  # clock granularity across processes
+            assert t0 + 0.8 <= engine_exit, "the engine's own 1 s shutdown must have been waited for"
+            assert engine_exit <= supervisor_exit + slack <= t_return + 2 * slack
+            # Non-vacuity: the stop went through the break channel, to the supervisor only.
+            assert api.sent == [stack.supervisor]
+            assert outcome.source == "lease"
+            assert stack.supervisor in outcome.pids
+            assert outcome.stubborn == ()
+        finally:
+            stack.close()
+
+    def test_a_supervisor_that_ignores_the_break_is_hard_killed_and_stop_waits_for_the_exit(
+        self, directory: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+
+        monkeypatch.setattr(ssd, "_SUPERVISOR_STOP_GRACE", 0.5)
+        # The kill is accepted now and lands 0.6 s later. A stop that reports
+        # on the send, not the exit, returns with the supervisor still running.
+        monkeypatch.setattr(ssd, "hard_kill_pid", _delayed_hard_kill(0.6))
+        stack = _Stack(directory, STANDIN_IGNORE="1")
+        try:
+            stack.publish_lease()
+            api = _StopFileConsoleApi(directory)
+            outcome = ssd.stop_storage_service(
+                config_dir=directory, platform="win32", console_api=api,
+            )
+            assert pid_running(stack.supervisor) is False, (
+                "stop returned while the supervisor it hard-killed was still running"
+            )
+            assert api.sent == [stack.supervisor]
+            assert stack.supervisor in outcome.pids
+            assert outcome.stubborn == ()
+        finally:
+            stack.close()
+
+    def test_an_engine_that_ignores_the_break_is_hard_killed_and_stop_waits_for_the_exit(
+        self, directory: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The lease names no supervisor (a legacy lease), so the engine itself
+        is the target: the Windows engine arm of ``stop_storage_service``."""
+
+        monkeypatch.setattr(ssd, "_GRACEFUL_STOP_TIMEOUT", 0.5)
+        monkeypatch.setattr(ssd, "hard_kill_pid", _delayed_hard_kill(0.6))
+        stack = _Stack(directory, STANDIN_IGNORE="1", STANDIN_ENGINE_IGNORE="1")
+        try:
+            # The engine stand-in only reacts to its own stop file; the
+            # supervisor ignores its break, so nothing but the hard kill stops it.
+            stack.publish_lease(with_supervisor_pid=False)
+            # Take the supervisor out of the picture so the engine is the lease's
+            # only live target.
+            hard_kill_pid(stack.supervisor)
+            stack.proc.wait(timeout=30)
+            api = _StopFileConsoleApi(directory)
+            outcome = ssd.stop_storage_service(
+                config_dir=directory, platform="win32", console_api=api,
+            )
+            assert pid_running(stack.engine) is False, (
+                "stop returned while the engine it hard-killed was still running"
+            )
+            assert api.sent == [stack.engine]
+            assert stack.engine in outcome.pids
+            assert outcome.stubborn == ()
+        finally:
+            stack.close()
+
+    @_windows_only("a Job Object is real Win32 behaviour; the injected tests above cover the stop ladder")
+    def test_hard_killing_the_supervisor_takes_its_job_engine_with_it(
+        self, directory: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The Windows reason the stop does not wait on the engine after a hard
+        kill: the supervisor's ``KILL_ON_JOB_CLOSE`` job dies with it. Real
+        ``CreateJobObject``, real ``TerminateProcess``, the product's own
+        ``win_job`` helpers in the stand-in."""
+
+        monkeypatch.setattr(ssd, "_SUPERVISOR_STOP_GRACE", 1.0)
+        stack = _Stack(directory, STANDIN_IGNORE="1", STANDIN_JOB="1")
+        try:
+            stack.publish_lease()
+            api = _StopFileConsoleApi(directory)
+            outcome = ssd.stop_storage_service(
+                config_dir=directory, platform="win32", console_api=api,
+            )
+            assert pid_running(stack.supervisor) is False
+            deadline = time.monotonic() + 10.0
+            while pid_running(stack.engine) and time.monotonic() < deadline:
+                time.sleep(0.05)
+            assert pid_running(stack.engine) is False, (
+                "the job engine outlived its hard-killed supervisor: KILL_ON_JOB_CLOSE did not fire"
+            )
+            assert outcome.stubborn == ()
+        finally:
+            stack.close()
+
+
+# -- Property 3: the lease is replaced under concurrent readers ---------------
+
+
+class _SleepClock:
+    """Injected ``monotonic`` and ``sleep``: sleeping advances the clock, so a
+    bounded retry loop runs to its budget at once and deterministically."""
+
+    def __init__(self) -> None:
+        self.t = 0.0
+        self.sleeps: list[float] = []
+
+    def monotonic(self) -> float:
+        return self.t
+
+    def sleep(self, delay: float) -> None:
+        self.sleeps.append(delay)
+        self.t += delay
+
+
+def _sharing_violation() -> PermissionError:
+    # What a Windows open/replace/unlink raises while another handle is open
+    # without FILE_SHARE_DELETE (winerror 32 or 5), as seen from Python.
+    return PermissionError(13, "The process cannot access the file because it is being used by another process")
+
+
+class TestLeaseReplaceUnderConcurrentReaders:
+    """Property 3. The lease file is replaced once a second while readers
+    elsewhere hold it open, and every read returns a whole lease.
+
+    The injected tests drive the Windows branch on every host; the real stress
+    test below it is the measurement: on native Windows it is the one that
+    fails without the retry (nexus-f9bgu.19)."""
+
+    SCOPE = "s"
+
+    def _registry(
+        self, config_dir: Path, platform: str, sc: _SleepClock, **kw: Any,
+    ) -> ServiceRegistry:
+        return ServiceRegistry(
+            dir=config_dir, tier="storage_service", platform=platform,
+            monotonic=sc.monotonic, sleep=sc.sleep, **kw,
+        )
+
+    def _published(self, reg: ServiceRegistry) -> LeaseRecord:
+        return reg.publish(
+            self.SCOPE, endpoint={"host": "127.0.0.1", "port": 1}, version="1", owner_token="t",
+        )
+
+    # -- the writer -----------------------------------------------------------
+
+    def test_windows_replace_retries_a_sharing_violation_until_it_lands(
+        self, config_dir: Path,
+    ) -> None:
+        clock = _SleepClock()
+        reg = self._registry(config_dir, "win32", clock)
+        record = self._published(reg)
+        real_replace, failures = os.replace, [3]
+
+        def flaky(src: str, dst: str) -> None:
+            if failures[0]:
+                failures[0] -= 1
+                raise _sharing_violation()
+            real_replace(src, dst)
+
+        with patch("os.replace", flaky):
+            refreshed = reg.heartbeat(record)
+
+        assert failures[0] == 0 and len(clock.sleeps) == 3
+        on_disk = reg._read_record(self.SCOPE)
+        assert on_disk is not None and on_disk.heartbeat_epoch == refreshed.heartbeat_epoch
+        assert list(config_dir.glob("*.tmp")) == [], "a retried replace must not leave its temp file"
+
+    def test_windows_replace_gives_up_after_its_budget_and_leaves_the_old_lease_whole(
+        self, config_dir: Path,
+    ) -> None:
+        clock = _SleepClock()
+        reg = self._registry(config_dir, "win32", clock)
+        record = self._published(reg)
+        with patch("os.replace", side_effect=_sharing_violation()):
+            with pytest.raises(PermissionError):
+                reg.heartbeat(record)
+        assert _WINDOWS_SHARING_RETRY_BUDGET_S <= clock.t < _WINDOWS_SHARING_RETRY_BUDGET_S + 0.2, f"gave up after {clock.t:.3f}s, budget {_WINDOWS_SHARING_RETRY_BUDGET_S}"
+        assert list(config_dir.glob("*.tmp")) == []
+        on_disk = reg._read_record(self.SCOPE)
+        assert on_disk is not None and on_disk.heartbeat_epoch == record.heartbeat_epoch
+
+    def test_posix_replace_permission_error_is_raised_at_once(self, config_dir: Path) -> None:
+        clock = _SleepClock()
+        reg = self._registry(config_dir, "linux", clock)
+        record = self._published(reg)
+        with patch("os.replace", side_effect=_sharing_violation()) as replace:
+            with pytest.raises(PermissionError):
+                reg.heartbeat(record)
+        assert replace.call_count == 1 and clock.sleeps == [], (
+            "off Windows a PermissionError is a real permission problem, not a sharing violation to wait out"
+        )
+
+    # -- the reader -----------------------------------------------------------
+
+    def _flaky_read(self, failures: list[int]):
+        real = Path.read_text
+
+        def read(self_: Path, *a: Any, **k: Any) -> str:
+            if self_.name.startswith("storage_service_addr.") and failures[0]:
+                failures[0] -= 1
+                raise _sharing_violation()
+            return real(self_, *a, **k)
+
+        return read
+
+    def test_windows_reader_retries_a_sharing_violation_and_returns_the_whole_lease(
+        self, config_dir: Path,
+    ) -> None:
+        clock = _SleepClock()
+        reg = self._registry(config_dir, "win32", clock)
+        self._published(reg)
+        failures = [2]
+        with patch.object(Path, "read_text", self._flaky_read(failures)):
+            found = reg.discover(self.SCOPE)
+        assert failures[0] == 0 and len(clock.sleeps) == 2
+        assert found is not None and found.owner_token == "t", (
+            "a reader that lost the open race must retry, not report the service as not running"
+        )
+
+    def test_windows_reader_gives_up_to_a_miss_after_its_budget(self, config_dir: Path) -> None:
+        clock = _SleepClock()
+        reg = self._registry(config_dir, "win32", clock)
+        self._published(reg)
+        with patch.object(Path, "read_text", self._flaky_read([10**9])):
+            assert reg.discover(self.SCOPE) is None
+        assert _WINDOWS_SHARING_RETRY_BUDGET_S <= clock.t < _WINDOWS_SHARING_RETRY_BUDGET_S + 0.2
+
+    def test_posix_reader_permission_error_is_a_miss_with_no_retry(self, config_dir: Path) -> None:
+        clock = _SleepClock()
+        reg = self._registry(config_dir, "linux", clock)
+        self._published(reg)
+        failures = [1]
+        with patch.object(Path, "read_text", self._flaky_read(failures)):
+            assert reg.discover(self.SCOPE) is None
+        assert failures[0] == 0 and clock.sleeps == []
+
+    # -- the unlinks (relinquish, reap) ----------------------------------------
+
+    def _flaky_unlink(self, failures: list[int]):
+        real = Path.unlink
+
+        def unlink(self_: Path, *a: Any, **k: Any) -> None:
+            if self_.name.startswith("storage_service_addr.") and failures[0]:
+                failures[0] -= 1
+                raise _sharing_violation()
+            real(self_, *a, **k)
+
+        return unlink
+
+    def test_windows_relinquish_retries_the_unlink_so_the_lease_really_goes(
+        self, config_dir: Path,
+    ) -> None:
+        clock = _SleepClock()
+        reg = self._registry(config_dir, "win32", clock)
+        record = self._published(reg)
+        failures = [2]
+        with patch.object(Path, "unlink", self._flaky_unlink(failures)):
+            reg.relinquish(record)
+        assert failures[0] == 0
+        assert reg._read_record(self.SCOPE) is None, (
+            "relinquish swallowed the sharing violation and left the lease on disk"
+        )
+
+    def test_windows_reap_retries_the_unlink_of_an_expired_lease(self, config_dir: Path) -> None:
+        clock, wall = _SleepClock(), _FakeClock()
+        reg = self._registry(config_dir, "win32", clock, clock=wall, ttl=1.0)
+        self._published(reg)
+        wall.advance(5.0)
+        failures = [2]
+        with patch.object(Path, "unlink", self._flaky_unlink(failures)):
+            assert reg.discover(self.SCOPE) is None
+        assert failures[0] == 0
+        assert not (config_dir / f"storage_service_addr.{self.SCOPE}").exists()
+
+    # -- the measurement --------------------------------------------------------
+
+    _READER = r'''
+import json, sys, time
+from pathlib import Path
+from nexus.daemon.service_registry import ServiceRegistry
+
+directory, scope, stop = Path(sys.argv[1]), sys.argv[2], Path(sys.argv[3])
+reg = ServiceRegistry(dir=directory, tier="storage_service")
+reads = misses = 0
+epochs, errors = set(), []
+print("ready", flush=True)
+while not stop.exists():
+    try:
+        rec = reg.discover(scope)
+    except BaseException as exc:
+        errors.append(repr(exc))
+        break
+    reads += 1
+    if rec is None:
+        misses += 1
+    else:
+        epochs.add(rec.heartbeat_epoch)
+    time.sleep(0.001)  # 1000 reads a second each: far beyond any real poller
+print(json.dumps({"reads": reads, "misses": misses, "epochs": len(epochs), "errors": errors[:3]}))
+'''
+
+    #: Each replace costs about 15 ms on Windows while four readers spin on the
+    #: file (measured, nexus-f9bgu.19), so this stays in the hundreds.
+    REPLACES = 1000
+    PROCESS_READERS = 2
+    THREAD_READERS = 2
+
+    def test_every_read_returns_a_whole_lease_while_the_writer_replaces_it(
+        self, config_dir: Path, tmp_path: Path,
+    ) -> None:
+        """REAL files, REAL processes, no injection, on every host. The writer
+        re-stamps the lease (a temp file and an ``os.replace``) as fast as it
+        can while two reader processes and two reader threads loop on
+        ``discover``. A read that is not a whole lease is a service reported as
+        not running; a writer that raises is a heartbeat that stops."""
+        # A long TTL: the property is about a replace, so a writer starved of
+        # the CPU by its own readers for longer than the 3 s default must not
+        # turn into an "expired lease" miss (it did, once in 160k reads).
+        reg = ServiceRegistry(dir=config_dir, tier="storage_service", ttl=300.0)
+        record = reg.publish(
+            self.SCOPE, endpoint={"host": "127.0.0.1", "port": 1}, version="1", owner_token="t",
+        )
+        stop = tmp_path / "stop"
+        procs = [
+            subprocess.Popen(  # noqa: S603 — fixed argv, this interpreter
+                [sys.executable, "-c", self._READER, str(config_dir), self.SCOPE, str(stop)],
+                stdout=subprocess.PIPE, text=True,
+            )
+            for _ in range(self.PROCESS_READERS)
+        ]
+        stop_threads = threading.Event()
+        thread_tallies: list[dict[str, Any]] = [
+            {"reads": 0, "misses": 0, "epochs": set(), "errors": []} for _ in range(self.THREAD_READERS)
+        ]
+
+        def thread_reader(tally: dict[str, Any]) -> None:
+            r = ServiceRegistry(dir=config_dir, tier="storage_service")
+            while not stop_threads.is_set():
+                try:
+                    rec = r.discover(self.SCOPE)
+                except BaseException as exc:  # noqa: BLE001 — the tally is the assertion
+                    tally["errors"].append(repr(exc))
+                    return
+                tally["reads"] += 1
+                if rec is None:
+                    tally["misses"] += 1
+                else:
+                    tally["epochs"].add(rec.heartbeat_epoch)
+                time.sleep(0.001)  # as the reader processes: far beyond any real poller
+
+        threads = [threading.Thread(target=thread_reader, args=(t,), daemon=True) for t in thread_tallies]
+        writer_errors: list[str] = []
+        results: list[dict[str, Any]] = []
+        try:
+            for proc in procs:
+                assert proc.stdout is not None
+                assert proc.stdout.readline().strip() == "ready", "a reader process did not start"
+            for t in threads:
+                t.start()
+            for _ in range(self.REPLACES):
+                try:
+                    record = reg.heartbeat(record)
+                except BaseException:  # noqa: BLE001 — the tally is the assertion
+                    writer_errors.append(traceback.format_exc())
+                    break
+        finally:
+            stop.write_text("x")
+            stop_threads.set()
+            for t in threads:
+                t.join(timeout=30)
+            for proc in procs:
+                try:
+                    out, _ = proc.communicate(timeout=60)
+                    results.append(json.loads(out.strip().splitlines()[-1]))
+                except Exception:  # noqa: BLE001 — a dead reader is reported below
+                    proc.kill()
+                    results.append({"reads": 0, "misses": 0, "epochs": 0, "errors": ["reader process died"]})
+        results += [
+            {"reads": t["reads"], "misses": t["misses"], "epochs": len(t["epochs"]), "errors": t["errors"]}
+            for t in thread_tallies
+        ]
+
+        assert writer_errors == [], f"the writer's replace failed under readers: {writer_errors}"
+        for r in results:
+            assert r["errors"] == [], f"a reader raised: {r}"
+            assert r["misses"] == 0, f"a reader saw no lease while one was being replaced: {r}"
+            # Non-vacuity: the readers were genuinely reading while the lease changed.
+            assert r["reads"] >= 50 and r["epochs"] >= 3, f"a reader barely overlapped the writer: {r}"
+
+
+# ---------------------------------------------------------------------------
+# Non-vacuity floor for the Windows run (RDR-224, nexus-f9bgu.19).
+#
+# A suite that skips itself on a platform passes there having proved nothing,
+# which is the failure this floor exists to catch: "the supervisor conformance
+# suite runs on Windows" must not be satisfiable by a run that skipped most of
+# it. The census is static (from the module, not the session) so a ``-k``
+# selection cannot move it. Every platform skip in this file goes through
+# ``_posix_only`` / ``_windows_only``, which register it; the sets below are
+# what a Windows run skips and what any other run skips.
+# ---------------------------------------------------------------------------
+
+
+def _declared_tests() -> dict[str, Any]:
+    found: dict[str, Any] = {}
+    for cls_name, cls in list(globals().items()):
+        if inspect.isclass(cls) and cls_name.startswith("Test"):
+            for name, fn in inspect.getmembers(cls, inspect.isfunction):
+                if name.startswith("test_"):
+                    found[f"{cls_name}.{name}"] = fn
+    return found
+
+
+class TestWindowsRunIsNotVacuous:
+    #: Most tests a native-Windows run of this file may skip. Raising it is a
+    #: decision: say why in the skip's reason and here.
+    MAX_WINDOWS_SKIPS = 4
+    #: Fewest test functions a native-Windows run must actually execute.
+    MIN_WINDOWS_RUN = 60
+
+    def test_every_declared_platform_skip_names_a_test_that_exists(self) -> None:
+        tests = _declared_tests()
+        assert set(_POSIX_ONLY) <= set(tests), set(_POSIX_ONLY) - set(tests)
+        assert set(_WINDOWS_ONLY) <= set(tests), set(_WINDOWS_ONLY) - set(tests)
+        # Non-vacuity of the registry itself: it is not empty.
+        assert _POSIX_ONLY and _WINDOWS_ONLY
+
+    def test_no_test_skips_on_a_platform_without_being_declared(self) -> None:
+        declared = set(_POSIX_ONLY) | set(_WINDOWS_ONLY)
+        undeclared = [
+            name for name, fn in _declared_tests().items()
+            if any(m.name in ("skip", "skipif") for m in getattr(fn, "pytestmark", []))
+            and name not in declared
+        ]
+        assert undeclared == [], (
+            f"skip markers not registered through _posix_only/_windows_only: {undeclared}"
+        )
+
+    def test_a_windows_run_skips_few_and_runs_many(self) -> None:
+        total = len(_declared_tests())
+        windows_skips = len(_POSIX_ONLY)
+        assert windows_skips <= self.MAX_WINDOWS_SKIPS, (
+            f"a Windows run would skip {windows_skips} of {total}: {sorted(_POSIX_ONLY)}"
+        )
+        assert total - windows_skips >= self.MIN_WINDOWS_RUN, (
+            f"a Windows run would execute only {total - windows_skips} of {total} test functions"
+        )
+
+    def test_every_other_platform_runs_all_but_the_windows_only_tests(self) -> None:
+        total = len(_declared_tests())
+        assert total - len(_WINDOWS_ONLY) >= self.MIN_WINDOWS_RUN
+
+    def test_the_windows_arms_are_not_among_the_skips(self) -> None:
+        """The injected Windows arms are what runs on Linux and macOS; if one
+        of them were marked POSIX-only the Windows branch would be covered
+        nowhere but on a Windows host."""
+        arms = [
+            "TestGracefulStopChannel.test_windows_never_reaches_os_kill_and_sends_ctrl_break",
+            "TestGracefulStopChannel.test_windows_cross_session_is_a_refusal_with_both_sessions",
+            "TestHardKillOfAGonePid.test_a_gone_or_foreign_pid_is_reported_not_raised",
+            "TestStopReturnsAfterBothProcessesExit."
+            "test_graceful_stop_returns_after_the_engine_and_then_the_supervisor_exited",
+            "TestLeaseReplaceUnderConcurrentReaders."
+            "test_windows_replace_retries_a_sharing_violation_until_it_lands",
+            "TestLeaseReplaceUnderConcurrentReaders."
+            "test_every_read_returns_a_whole_lease_while_the_writer_replaces_it",
+        ]
+        tests = _declared_tests()
+        for arm in arms:
+            assert arm in tests, arm
+            assert arm not in _POSIX_ONLY and arm not in _WINDOWS_ONLY, arm
+
+
+@pytest.mark.skipif(not hasattr(signal, "setitimer"), reason="Windows arms faulthandler instead of an interval timer")
+def test_the_per_test_watchdog_is_armed_for_this_file() -> None:
+    """A hang here fails instead of stalling the run (tests/daemon/_watchdog.py)."""
+    assert signal.getitimer(signal.ITIMER_REAL)[0] > 0, (
+        "the autouse watchdog fixture did not arm for this module: check WATCHED_MODULES"
+    )

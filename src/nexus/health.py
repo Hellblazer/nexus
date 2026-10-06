@@ -289,7 +289,9 @@ def _check_generation_layout() -> list[HealthResult]:
         # an empty tools root is a box that has not installed yet, and
         # hard-failing that would fail every fresh machine (RG-C).
         link = install_layout.current_link(tools=tools)
-        if not link.is_symlink() and not link.exists():
+        # is_link, not is_symlink: on Windows ``current`` is a junction, which
+        # pathlib reads as a plain directory (RDR-224, nexus-f9bgu.47).
+        if not install_layout.is_link(link) and not link.exists():
             generations = install_layout.list_generations(tools=tools)
             if not generations:
                 return [HealthResult(
@@ -354,7 +356,7 @@ def _check_generation_layout() -> list[HealthResult]:
                 f"— {exc}; the shim-ownership check cannot run"
             ),
         )]
-    reclaimed = [name for name in sorted(owned) if (bin_dir / name).is_symlink()]
+    reclaimed = install_layout.reclaimed_from_owned(owned, bin_dir, platform=_win())
     if reclaimed:
         return [HealthResult(
             label=label, ok=False, fatal=True,
@@ -377,11 +379,53 @@ def _check_generation_layout() -> list[HealthResult]:
             f"generation(s), shims owned by nexus"
         ),
     )]
-    results.extend(_check_shims_match_template(current, bin_dir, tools, owned))
+    if _win():
+        results.extend(_check_windows_user_path(tools))
+    else:
+        results.extend(_check_shims_match_template(current, bin_dir, tools, owned))
     results.extend(_check_base_interpreters(current, generations))
     results.extend(_check_orphan_uv_install())
     results.extend(_check_generation_holders(current, generations, tools=tools))
     return results
+
+
+def _win() -> str | None:
+    """``"win32"`` on native Windows, else ``None``: the platform argument the
+    layout helpers take, and the one place tests move the Windows reading."""
+    return "win32" if os.name == "nt" else None
+
+
+def _check_windows_user_path(tools, *, store=None, environ=None) -> list[HealthResult]:
+    """The Windows shim row: the user PATH must carry ``<tools>\\current\\bin``
+    ahead of every other directory that provides ``nx.exe``, and that directory
+    must hold ``nx.exe``.
+
+    Windows nexus writes no launcher into uv's bin dir (a running one cannot be
+    replaced), so this PATH entry IS the shim; if it is missing or shadowed,
+    every new terminal runs whatever ``nx.exe`` comes first instead of
+    ``current``. The persisted user PATH is read, not this process's, which may
+    predate it. ``nx self install`` re-ensures it.
+    """
+    from nexus._install import generation_core  # noqa: PLC0415 — Windows row only
+
+    entry = generation_core.current_launcher_dir(tools)
+    try:
+        problems = generation_core.inspect_user_path(entry, store=store, environ=environ)
+    except Exception as exc:  # noqa: BLE001 — never crash doctor
+        return [HealthResult(
+            label="User PATH", ok=False, warn=True,
+            detail=f"could not check the user PATH — {exc}",
+        )]
+    if not problems:
+        return [HealthResult(
+            label="User PATH", ok=True,
+            detail=f"{entry} is first on the user PATH and provides nx.exe",
+        )]
+    return [HealthResult(
+        label="User PATH", ok=False, fatal=True,
+        detail="; ".join(problems),
+        fix_suggestions=["nx self install    # re-ensures the user PATH entry and the launcher directory"],
+    )]
 
 
 def _check_shims_match_template(current, bin_dir, tools, owned) -> list[HealthResult]:
@@ -494,10 +538,10 @@ def _check_orphan_uv_install() -> list[HealthResult]:
     # nexus-orhp5: one resolver for "where is uv's tool dir". This site
     # honoured UV_TOOL_DIR but not XDG_DATA_HOME, so it reported "no uv
     # install" on an XDG-relocated box while one sat right there.
-    from nexus.install_layout import uv_conexus_venv  # noqa: PLC0415 — deferred, avoids an import cycle
+    from nexus.install_layout import uv_conexus_venv, venv_bin  # noqa: PLC0415 — deferred, avoids an import cycle
 
     legacy = uv_conexus_venv()
-    if not (legacy / "bin").is_dir():
+    if not venv_bin(legacy).is_dir():
         return [HealthResult(
             label="Orphan uv install", ok=True,
             detail="no uv-managed conexus alongside the generation layout",
@@ -507,10 +551,10 @@ def _check_orphan_uv_install() -> list[HealthResult]:
     # `nx self install` once nothing runs from it. An unregistered one is
     # never reaped by anything -- the state every checkout-driven box sat in
     # until nexus-hibpr -- and the row used to render both identically.
-    from nexus.install_layout import legacy_generation_link  # noqa: PLC0415 — deferred import
+    from nexus.install_layout import is_link, legacy_generation_link  # noqa: PLC0415 — deferred import
 
     link = legacy_generation_link()
-    registered = link.is_symlink() and link.resolve() == legacy.resolve()
+    registered = is_link(link) and link.resolve() == legacy.resolve()
     if registered:
         return [HealthResult(
             label="Orphan uv install", ok=False, warn=True,
@@ -1687,6 +1731,17 @@ def _resolve_mcp_binary(binary_name: str) -> tuple[str | None, bool]:
             continue
         hit = shutil.which(binary_name, path=directory)
         if not hit:
+            continue
+        # On Windows, Python 3.12's which() searches the current directory
+        # first even with path= set, so a planted nx-mcp.exe in the cwd would
+        # come back for every entry (RDR-224, nexus-f9bgu.35). Accept a hit
+        # only from the directory being scanned.
+        try:
+            if os.path.normcase(str(Path(hit).absolute().parent)) != os.path.normcase(
+                str(Path(directory).absolute())
+            ):
+                continue
+        except OSError:
             continue
         try:
             resolved_dir = str(Path(hit).resolve().parent)
@@ -3529,21 +3584,21 @@ def _resolve_service_endpoint(
 
     Resolution order:
     1. ServiceRegistry discover() — the supervisor (gmiaf.30) publishes a
-       lease record under tier="storage_service", scope=str(os.getuid()).
+       lease record under tier="storage_service", scope=service_identity().
        addr file = storage_service_addr.<uid>.  NOT the t2 tier.
     2. NX_SERVICE_HOST / NX_SERVICE_PORT environment variables (fallback).
     3. None — endpoint not discoverable (soft-warn, skip ping).
     """
     # 1. Registry discover.
-    # IMPORTANT: tier="storage_service", scope=str(os.getuid()) — this matches
+    # IMPORTANT: tier="storage_service", scope=service_identity() — this matches
     # exactly what StorageServiceSupervisor._publish() writes (tier=_REGISTRY_TIER,
-    # scope=str(os.getuid())).  The stale comment "t2 tier" drove a bug where
+    # scope=service_identity()).  The stale comment "t2 tier" drove a bug where
     # this used tier="t2" + scope_key="storage_service" (t2_addr.storage_service),
     # which never matched the supervisor's storage_service_addr.<uid> file.
     try:
-        from nexus.daemon.service_registry import ServiceRegistry  # noqa: PLC0415 — deferred to avoid circular import
+        from nexus.daemon.service_registry import ServiceRegistry, service_identity  # noqa: PLC0415 — deferred to avoid circular import
         registry = ServiceRegistry(dir=config_dir, tier="storage_service")
-        scope = str(os.getuid())
+        scope = service_identity()
         lease = registry.discover(scope)
         if lease is not None:
             ep = lease.endpoint
@@ -4287,6 +4342,53 @@ def _check_service_launchagent_stray() -> list[HealthResult]:
         ),
         fix_suggestions=[
             "nx daemon service uninstall --autostart  # removes the stray autostart unit",
+        ],
+    )]
+
+
+def _check_config_dir_user_access(
+    config_dir: Path | None = None,
+    *,
+    platform: str | None = None,
+    problem: Callable[[Path], str | None] | None = None,
+) -> list[HealthResult]:
+    """nexus-f9bgu.50: on Windows, a config directory an ELEVATED process made
+    grants only SYSTEM, Administrators and OWNER RIGHTS and is owned by
+    Administrators, so a non-elevated session of the same user (the logon task,
+    a plain ``nx`` in a normal shell) gets WinError 5 on every read and write.
+    Read from the ACL (``nexus._winsec.user_dir_problem``), so the row is right
+    when ``nx doctor`` itself runs elevated. Silent off Windows and before the
+    directory exists (a virgin box has nothing to check).
+    """
+    import sys as _sys  # noqa: PLC0415 — deferred to keep CLI startup fast
+
+    if (platform if platform is not None else _sys.platform) != "win32":
+        return []
+    try:
+        if config_dir is None:
+            import nexus.config as _config  # noqa: PLC0415 — deferred to avoid circular import
+
+            config_dir = _config.nexus_config_dir()
+        if not config_dir.is_dir():
+            return []
+        if problem is None:
+            from nexus._winsec import user_dir_problem  # noqa: PLC0415 — deferred, Windows-only path
+
+            reason = user_dir_problem(config_dir, platform=platform)
+        else:
+            reason = problem(config_dir)
+    except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash `nx doctor`
+        _log.debug("doctor_config_dir_access_check_failed", error=str(exc))
+        return []
+    label = "Config directory access (non-elevated)"
+    if reason is None:
+        return [HealthResult(label=label, ok=True, detail=f"{config_dir} is usable by a non-elevated session")]
+    return [HealthResult(
+        label=label,
+        ok=False,
+        detail=f"{config_dir} {reason}" + (" (made by an elevated process)" if reason.startswith("grants only") else ""),
+        fix_suggestions=[
+            f'from an elevated Command Prompt: icacls "{config_dir}" /grant "%USERDOMAIN%\\%USERNAME%:(OI)(CI)F" /T',
         ],
     )]
 
@@ -9559,6 +9661,7 @@ def run_health_checks(
     results.extend(_check_t2_launchagent_stray())
     results.extend(_check_service_launchagent_stray())
     results.extend(_check_service_autostart_drift())
+    results.extend(_check_config_dir_user_access())  # nexus-f9bgu.50
     results.extend(_check_migration_state())
     results.extend(_check_rls_present())
     # RDR-205 Phase 2 Step 2 (bead nexus-em75s.10): the Linda tuple space's

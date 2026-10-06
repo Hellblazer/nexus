@@ -12,7 +12,6 @@ turn so concurrent siblings serialize into strictly increasing generations.
 """
 from __future__ import annotations
 
-import fcntl
 import os
 import threading
 import time
@@ -21,6 +20,7 @@ from pathlib import Path
 import pytest
 import structlog.testing
 
+from nexus import _locking
 from nexus.daemon.service_registry import (
     ElectionBusyError,
     LeaseRecord,
@@ -88,11 +88,11 @@ def held_flock(registry: ServiceRegistry):
     path = registry._election_path("42")
     path.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(str(path), os.O_WRONLY | os.O_CREAT, 0o600)
-    fcntl.flock(fd, fcntl.LOCK_EX)
+    _locking.lock_fd(fd, blocking=True)
     try:
         yield fd
     finally:
-        fcntl.flock(fd, fcntl.LOCK_UN)
+        _locking.unlock_fd(fd)
         os.close(fd)
 
 
@@ -227,7 +227,7 @@ def test_mark_shutting_down_and_relinquish_default_to_blocking(
 
     def release_later() -> None:
         time.sleep(0.2)
-        fcntl.flock(held_flock, fcntl.LOCK_UN)
+        _locking.unlock_fd(held_flock)
         released.set()
 
     threading.Thread(target=release_later, daemon=True).start()
@@ -247,7 +247,7 @@ def test_publish_still_blocks_on_a_held_election(
 
     def release_later() -> None:
         time.sleep(0.2)
-        fcntl.flock(held_flock, fcntl.LOCK_UN)
+        _locking.unlock_fd(held_flock)
         released.set()
 
     threading.Thread(target=release_later, daemon=True).start()

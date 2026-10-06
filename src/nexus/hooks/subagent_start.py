@@ -370,13 +370,15 @@ def _linked_rdrs_section(task_text: str, env: dict[str, str]) -> str:
     """The "## Linked RDRs (files in task)" section, or "" (subagent-start.sh:173-199)."""
     if shutil.which("nx") is None:
         return ""
+    from nexus.util.nx_argv import nx_argv  # noqa: PLC0415 — stdlib-only; kept off the hook's import path
+
     file_paths = _extract_file_paths(task_text)
     if not file_paths:
         return ""
     link_chunks: list[str] = []
     for fp in file_paths:
         raw = _run_captured(
-            ["nx", "catalog", "links-for-file", fp], env=env, timeout=30
+            nx_argv("catalog", "links-for-file", fp), env=env, timeout=30
         )
         matched = [ln for ln in raw.splitlines() if _ARROW_LINE_RE.match(ln)]
         if matched:
@@ -424,7 +426,9 @@ def _t1_scratch_section(env: dict[str, str]) -> str:
     """The "## T1 Scratch (shared session state)" section, or "" (subagent-start.sh:390-399)."""
     if shutil.which("nx") is None:
         return ""
-    t1_entries = _run_captured(["nx", "scratch", "list"], env=env, timeout=30)
+    from nexus.util.nx_argv import nx_argv  # noqa: PLC0415 — stdlib-only; kept off the hook's import path
+
+    t1_entries = _run_captured(nx_argv("scratch", "list"), env=env, timeout=30)
     if not t1_entries or t1_entries == "No scratch entries.":
         return ""
     return f"\n## T1 Scratch (shared session state)\n{t1_entries}\n\n"

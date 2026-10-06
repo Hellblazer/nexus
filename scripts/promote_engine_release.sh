@@ -14,13 +14,33 @@
 # publishing the draft by hand (gh release edit, draft flag off) is the human's
 # override.
 #
-# Usage: promote_engine_release.sh <tag> <owner/repo>
+# Windows (RDR-224 P0.4, nexus-f9bgu.14 and .9): the Windows assets BLOCK promotion, but
+# only while the repo variable NX_WINDOWS_RELEASE_LEGS is on, because with it off
+# no Windows leg runs and waiting for its assets would hold every release a draft
+# forever. The workflow normalises the variable to the literal "on" or "off" and
+# passes it as the optional third argument; this script reads no GitHub state and
+# no environment, so both states are driven by tests/scripts/. Omitted means off.
+# "on" expects 27 assets (the PG bundle and the engine archive add 6) and holds the
+# engine archive to its size ceiling too; "off" expects the 21 and measures only the
+# three binaries.
+# Any other value is a wiring bug and exits 2 before gh is called, never "off".
+#
+# Usage: promote_engine_release.sh <tag> <owner/repo> [on|off]
 # Exit 0: all assets present and sized, release promoted out of draft.
 # Exit 1: assets missing or a binary over its ceiling; release left a DRAFT
 #         (no consumer resolves it).
+# Exit 2: the third argument is neither "on" nor "off"; nothing was read or changed.
 set -euo pipefail
 tag="${1:?tag}"
 repo="${2:?owner/repo}"
+windows="${3-off}"
+case "$windows" in
+  on|off) ;;
+  *)
+    echo "::error::third argument must be 'on' or 'off', got '$windows'"
+    exit 2
+    ;;
+esac
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 expected=""
 for arch in linux-amd64 linux-arm64 mac-arm64; do
@@ -29,6 +49,15 @@ for arch in linux-amd64 linux-arm64 mac-arm64; do
   p="nexus-pg-$arch.txz"
   expected="$expected $p $p.sha256 $p.sigstore.json"
 done
+if [ "$windows" = "on" ]; then
+  # P0.4 layout: one archive and one .sha256 and one sigstore bundle per artifact.
+  # The PG bundle (P2.2, nexus-f9bgu.14) and the engine archive (P1.2, nexus-f9bgu.9:
+  # exe plus the four VC++ DLLs). Both carry the new-format .sigstore.json only: the
+  # client verifies that, and no cloud deploy consumes the Windows assets.
+  for p in nexus-pg-windows-x64.txz nexus-service-windows-x64.txz; do
+    expected="$expected $p $p.sha256 $p.sigstore.json"
+  done
+fi
 present="$(gh release view "$tag" --repo "$repo" --json assets --jq '.assets[].name')"
 missing=""
 # Pipe-free exact-line match: under pipefail, `printf | grep -q` can report
@@ -47,7 +76,7 @@ echo "all $count expected assets present on $tag"
 assets_json="$(mktemp "${TMPDIR:-/tmp}/promote-assets.XXXXXX")"
 trap 'rm -f "$assets_json"' EXIT
 gh release view "$tag" --repo "$repo" --json assets > "$assets_json"
-if ! python3 "$HERE/check_engine_cut_riders.py" sizes "$tag" --assets-json "$assets_json"; then
+if ! python3 "$HERE/check_engine_cut_riders.py" sizes "$tag" --assets-json "$assets_json" --windows "$windows"; then
   echo "::error::release $tag has a native binary over its size ceiling (or the sizes could not be read) -- leaving it a DRAFT (nexus-ujbz8)"
   exit 1
 fi

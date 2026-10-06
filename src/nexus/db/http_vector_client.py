@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import threading
 import time
@@ -1839,12 +1840,19 @@ def _warn_skipped_collections(route: str, requested: list[str]) -> None:
     :func:`_pop_response_headers`'s docstring for why the capture is
     thread-local and pop-not-peek.
     """
-    raw = _pop_response_headers().get("X-Nexus-Skipped-Collections")
+    _log_skipped_collections(
+        route, requested, _pop_response_headers().get("X-Nexus-Skipped-Collections"),
+    )
+
+
+def _log_skipped_collections(route: str, requested: list[str], raw: str | None) -> list[str]:
+    """Log the skipped-collections warning for the already-popped header value
+    *raw* and return the skipped names (empty when the header was absent)."""
     if not raw:
-        return
+        return []
     skipped = [name for name in raw.split(",") if name]
     if not skipped:
-        return
+        return []
     _log.warning(
         "vector_read_skipped_unregistered_collections",
         route=route,
@@ -1859,6 +1867,7 @@ def _warn_skipped_collections(route: str, requested: list[str]) -> None:
             "corpus if it is genuinely retired."
         ),
     )
+    return skipped
 
 
 def _unpack_rerank_envelope(results: Any, rerank_meta_out: dict | None) -> Any:
@@ -1984,6 +1993,17 @@ class VectorServiceError(RuntimeError):
         #: response and the application never saw the request. Deterministic
         #: in the request body — a caller must not retry it.
         self.edge_refusal = edge_refusal
+
+
+class PerCollectionEnvelopeError(VectorServiceError):
+    """``POST /v1/vectors/search-per-collection`` answered 200 with a body the
+    client refuses to use (nexus-tu8wp.2): not an object, a missing or wrong
+    ``per_collection_k`` / ``limit`` echo, a ``per_collection`` list that does
+    not account for every requested collection, or rows of the wrong shape.
+
+    Never partial: a caller falls back to the batched ``/search`` path for the
+    group rather than reading half an envelope.
+    """
 
 
 # ── Collection-handle stub ────────────────────────────────────────────────────
@@ -2450,6 +2470,62 @@ def live_collection_rows(t3: Any) -> list[dict]:
     if isinstance(t3, HttpVectorClient):
         return t3.list_live_collections()
     return [row for row in t3.list_collections() if is_live_collection_row(row)]
+
+
+#: How long a route-absent answer from ``/v1/vectors/search-per-collection``
+#: is trusted before the route is probed again (nexus-tu8wp.2): a 404, the
+#: edge refusing the path (403 or an edge-generated response), 405 and 501.
+#: Same posture as the catalog's chash_positions memo: an engine without the
+#: route costs one extra round trip per interval, and a process that outlives
+#: an engine upgrade starts using the route without a restart. The memo lives
+#: on the client instance, so it is per PROCESS: the MCP server keeps it for
+#: the window, and each ``nx`` invocation is a fresh process that pays one
+#: probe against an engine without the route.
+_PER_COLLECTION_ROUTE_RETRY_S: float = 600.0
+
+#: How long a present-but-failing answer from the route is trusted: a 500 (a
+#: route bug, not a deployment state) and a malformed 200. Briefer, since
+#: neither is the expected pre-upgrade state.
+_PER_COLLECTION_FAILURE_RETRY_S: float = 60.0
+
+#: Statuses on which the route is NOT written off and the error propagates as
+#: a failure of the group: load shedding and transport-class failures.
+#: ``_request`` already retried 502/503/504 through the gateway backoff, and
+#: the batched path they would fall back to hits the same exhausted pool with
+#: a larger fan-out. (An edge-generated 502/503/504 is in this set too: the
+#: edge refusal flag only widens the write-off for the other statuses.)
+_PER_COLLECTION_PROPAGATED_CODES: frozenset[int] = frozenset({429, 502, 503, 504})
+
+#: Statuses that mean "this engine or edge does not serve the route": written
+#: off for :data:`_PER_COLLECTION_ROUTE_RETRY_S`. An edge-generated response
+#: with any other status is treated the same way (nexus-bwulw: the edge
+#: refuses or stubs routes it does not know).
+_PER_COLLECTION_ABSENT_CODES: frozenset[int] = frozenset({403, 404, 405, 501})
+
+#: Env switch that turns the per-collection route off (nexus-tu8wp.2), so a
+#: field defect in the route needs no client release. ``0``, ``false``,
+#: ``off`` or ``no`` (any case) sends every search down the batched path.
+PER_COLLECTION_ROUTE_ENV = "NX_SEARCH_PER_COLLECTION"
+
+
+def per_collection_route_enabled() -> bool:
+    """False when ``NX_SEARCH_PER_COLLECTION`` is ``0``/``false``/``off``/``no``.
+
+    Read on every search, so a flip takes effect on the next one.
+    """
+    return os.environ.get(PER_COLLECTION_ROUTE_ENV, "").strip().lower() not in {
+        "0", "false", "off", "no",
+    }
+
+
+#: Serialises the probe of the route until one request has proved it present:
+#: the groups of one search run in parallel, and without this every group
+#: pays its own 404 before the first one sets the memo.
+_per_collection_probe_lock = threading.Lock()
+
+#: True after this process has logged a route-absent write-off at WARNING;
+#: later ones log at DEBUG (the memo already bounds how often they happen).
+_per_collection_absent_warned = False
 
 
 class HttpVectorClient:
@@ -3402,6 +3478,290 @@ class HttpVectorClient:
             results = _unpack_rerank_envelope(results, rerank_meta_out)
 
         return results
+
+    #: nexus-tu8wp.2: this backend reaches the engine's per-collection top-K
+    #: route, ``POST /v1/vectors/search-per-collection``. Capability marker in
+    #: the same shape as ``supports_server_rerank``, read by
+    #: ``search_engine.search_cross_corpus``. The marker says the CLIENT can
+    #: ask; whether the ENGINE serves the route is learned from the first
+    #: call (:meth:`search_per_collection` returns ``None`` on a 404).
+    supports_per_collection_search: bool = True
+
+    #: ``(monotonic start, window)`` of the last route write-off (absent,
+    #: failing or malformed); ``None`` when the route is not currently written
+    #: off. Class default so partially-constructed test instances still
+    #: resolve.
+    _per_collection_backoff: tuple[float, float] | None = None
+
+    #: True once this instance has seen the route answer (a validated 200, or a
+    #: 400/422 the route itself produced); until then the first request is
+    #: single-flight (:data:`_per_collection_probe_lock`). Reset by a write-off.
+    _per_collection_confirmed: bool = False
+
+    def search_per_collection(
+        self,
+        query: str,
+        collection_names: list[str],
+        *,
+        per_collection_k: int,
+        limit: int,
+        thresholds: dict[str, float | None] | None = None,
+        where: dict | None = None,
+        include_source_uri: bool = False,
+        rerank: bool = False,
+        rerank_top_k: int | None = None,
+        rerank_meta_out: dict | None = None,
+    ) -> dict | None:
+        """Per-collection top-K over ONE embedding-model group via
+        ``POST /v1/vectors/search-per-collection`` (nexus-tu8wp.1 engine half,
+        nexus-tu8wp.2 this half).
+
+        Each collection contributes its own top-*per_collection_k*; the engine
+        applies the per-collection *thresholds*, merges the survivors, cuts at
+        *limit* and, when *rerank*, reranks once over the merged rows. A dense
+        collection therefore cannot crowd a small one out the way the flat
+        ``LIMIT`` of :meth:`search` does.
+
+        Returns the envelope ``{"results": [rows], "per_collection":
+        [{collection, raw_count, dropped, min_raw_distance,
+        min_dropped_distance, error, error_kind}], "per_collection_k",
+        "limit", "skipped_collections": [names]}``. ``skipped_collections``
+        is the ``X-Nexus-Skipped-Collections`` header, parsed: a skipped
+        collection has no ``per_collection`` entry.
+
+        ``None`` when the route cannot serve this group and the caller falls
+        back to the batched path: the engine predates the route (404), the
+        edge refuses it (403 or any edge-generated response), 405, 501 (all
+        remembered for :data:`_PER_COLLECTION_ROUTE_RETRY_S`) or the route
+        fails with a 500 (remembered for :data:`_PER_COLLECTION_FAILURE_RETRY_S`).
+        While remembered, this returns ``None`` without a round trip, and each
+        write-off logs a WARNING naming the status (a repeat 404 logs at DEBUG
+        after the first per process). The memo is per client instance, so per
+        process. A 200 body the client refuses
+        (:class:`PerCollectionEnvelopeError`) switches the route off for
+        :data:`_PER_COLLECTION_FAILURE_RETRY_S` and raises. Every other
+        failure (429, 502, 503, 504, a 400 or 422 the route itself produced)
+        propagates as the :class:`VectorServiceError` ``_post`` raised and is
+        not remembered. Until one request proves the route present, the
+        first request is single-flight, so concurrent callers share one probe.
+
+        *thresholds*: only FINITE values are sent. ``None`` and non-finite
+        values (the parity gate's ``threshold_override=inf`` is not valid JSON)
+        are omitted, which the engine reads as "no threshold" for that
+        collection; a key not in *collection_names* is dropped, since the
+        engine 400s on one.
+
+        ``rerank`` follows :meth:`search`: the degrade state lands in
+        *rerank_meta_out*, once for the whole request.
+        """
+        if self._per_collection_written_off():
+            return None
+
+        body: dict[str, Any] = {
+            "query": query,
+            "collections": collection_names,
+            "per_collection_k": per_collection_k,
+            "limit": limit,
+        }
+        finite: dict[str, float] = {}
+        for name, value in (thresholds or {}).items():
+            if name in collection_names and value is not None and math.isfinite(value):
+                finite[name] = float(value)
+        if finite:
+            body["thresholds"] = finite
+        if where:
+            body["where"] = where
+        if include_source_uri:
+            body["include_source_uri"] = True
+        if rerank:
+            body["rerank"] = True
+            if rerank_top_k is not None:
+                body["rerank_top_k"] = rerank_top_k
+            from nexus.rate_brake import get_brake  # noqa: PLC0415 — deferred import: leaf module, keeps this otherwise-urllib-only module's load-time graph unchanged
+            get_brake().wait()
+
+        if self._per_collection_confirmed:
+            return self._per_collection_exchange(
+                body, collection_names, per_collection_k, limit, rerank, rerank_meta_out,
+            )
+        # Single-flight probe: the first caller in the process asks, the rest
+        # wait and then either see its write-off or run in parallel once the
+        # route is confirmed.
+        with _per_collection_probe_lock:
+            if self._per_collection_written_off():
+                return None
+            return self._per_collection_exchange(
+                body, collection_names, per_collection_k, limit, rerank, rerank_meta_out,
+            )
+
+    def _per_collection_written_off(self) -> bool:
+        backoff = self._per_collection_backoff
+        return backoff is not None and _monotonic() - backoff[0] < backoff[1]
+
+    def _per_collection_write_off(self, window: float) -> None:
+        self._per_collection_backoff = (_monotonic(), window)
+        self._per_collection_confirmed = False
+
+    def _per_collection_exchange(
+        self,
+        body: dict[str, Any],
+        collection_names: list[str],
+        per_collection_k: int,
+        limit: int,
+        rerank: bool,
+        rerank_meta_out: dict | None,
+    ) -> dict | None:
+        """One request to the route and its envelope, or ``None`` after a
+        write-off (see :meth:`search_per_collection`)."""
+        global _per_collection_absent_warned  # noqa: PLW0603 — process-wide "logged once" flag
+        try:
+            payload = _post("/v1/vectors/search-per-collection", body, tenant=self._tenant)
+        except VectorServiceError as exc:
+            code = exc.code
+            if code in _PER_COLLECTION_PROPAGATED_CODES or code is None:
+                raise
+            if code in _PER_COLLECTION_ABSENT_CODES or exc.edge_refusal:
+                window = _PER_COLLECTION_ROUTE_RETRY_S
+            elif code == 500:
+                window = _PER_COLLECTION_FAILURE_RETRY_S
+            else:
+                # 400 / 422 and the like: the route itself answered about this
+                # request. It is present, so later groups need no probe.
+                self._per_collection_confirmed = True
+                raise
+            self._per_collection_write_off(window)
+            fields = {
+                "status": code, "edge_refusal": exc.edge_refusal,
+                "retry_in_s": window,
+                "consequence": "searches take the batched /v1/vectors/search path",
+            }
+            if code == 404 and _per_collection_absent_warned:
+                _log.debug("http_vector_client.search_per_collection_route_absent", **fields)
+            else:
+                if code == 404:
+                    _per_collection_absent_warned = True
+                _log.warning(
+                    "http_vector_client.search_per_collection_route_unavailable", **fields,
+                )
+            return None
+        # Pop the header capture before anything else touches the network on
+        # this thread (see _pop_response_headers).
+        skipped = _log_skipped_collections(
+            "search_per_collection", collection_names,
+            _pop_response_headers().get("X-Nexus-Skipped-Collections"),
+        )
+
+        try:
+            envelope = self._validate_per_collection_envelope(
+                payload, collection_names, per_collection_k, limit, skipped,
+            )
+        except PerCollectionEnvelopeError:
+            self._per_collection_write_off(_PER_COLLECTION_FAILURE_RETRY_S)
+            raise
+        self._per_collection_confirmed = True
+        if rerank:
+            envelope["results"] = _unpack_rerank_envelope(payload, rerank_meta_out)
+        return envelope
+
+    @staticmethod
+    def _validate_per_collection_envelope(
+        payload: Any,
+        requested: list[str],
+        per_collection_k: int,
+        limit: int,
+        skipped: list[str],
+    ) -> dict:
+        """The envelope, normalised, or :class:`PerCollectionEnvelopeError`.
+
+        Refused (never partially used): a non-object body; ``results`` or
+        ``per_collection`` that are not lists; a ``per_collection_k`` or
+        ``limit`` echo that is absent or differs from what was sent (an engine
+        that read different numbers than the client sized its request for);
+        a result row that is not an object or lacks a string ``id`` or a
+        numeric ``distance``; a ``per_collection`` entry that is not an
+        object, names a collection that was not requested, repeats one, or
+        carries a count or distance of the wrong type; a requested collection
+        that has neither an entry nor a place in the skipped-collections
+        header.
+        """
+        def refuse(why: str) -> PerCollectionEnvelopeError:
+            return PerCollectionEnvelopeError(
+                f"POST /v1/vectors/search-per-collection answered 200 with a "
+                f"malformed envelope ({why}); refusing it rather than reading "
+                "a partial per-collection result"
+            )
+
+        if not isinstance(payload, dict):
+            raise refuse(f"body is {type(payload).__name__}, not an object")
+        rows = payload.get("results")
+        stats = payload.get("per_collection")
+        if not isinstance(rows, list):
+            raise refuse("'results' is not a list")
+        if not isinstance(stats, list):
+            raise refuse("'per_collection' is not a list")
+        for key, sent in (("per_collection_k", per_collection_k), ("limit", limit)):
+            echoed = payload.get(key)
+            if isinstance(echoed, bool) or echoed != sent:
+                raise refuse(f"'{key}' echo is {echoed!r}, sent {sent}")
+        def is_number(v: Any) -> bool:
+            return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+        for row in rows:
+            if not isinstance(row, dict):
+                raise refuse(f"a result row is {type(row).__name__}, not an object")
+            if not isinstance(row.get("id"), str) or not row["id"]:
+                raise refuse("a result row has no 'id'")
+            if not is_number(row.get("distance")):
+                raise refuse(f"result row '{row['id']}' has no numeric 'distance'")
+            if row.get("collection") is not None and not isinstance(row["collection"], str):
+                raise refuse(f"result row '{row['id']}' has a non-string 'collection'")
+
+        def count(entry: dict, key: str) -> int:
+            v = entry.get(key)
+            if v is None:
+                return 0
+            if is_number(v) and float(v).is_integer() and v >= 0:
+                return int(v)
+            raise refuse(f"'{key}' of '{entry['collection']}' is {v!r}, not a count")
+
+        def distance(entry: dict, key: str) -> Any:
+            v = entry.get(key)
+            if v is not None and not is_number(v):
+                raise refuse(f"'{key}' of '{entry['collection']}' is {v!r}, not a number")
+            return v
+
+        wanted = set(requested)
+        seen: set[str] = set()
+        entries: list[dict] = []
+        for entry in stats:
+            if not isinstance(entry, dict) or not isinstance(entry.get("collection"), str):
+                raise refuse("a 'per_collection' entry has no collection name")
+            name = entry["collection"]
+            if name not in wanted or name in seen:
+                raise refuse(f"'per_collection' names '{name}' unexpectedly")
+            seen.add(name)
+            entries.append({
+                "collection": name,
+                "raw_count": count(entry, "raw_count"),
+                "dropped": count(entry, "dropped"),
+                "min_raw_distance": distance(entry, "min_raw_distance"),
+                "min_dropped_distance": distance(entry, "min_dropped_distance"),
+                "error": entry.get("error"),
+                "error_kind": entry.get("error_kind"),
+            })
+        unaccounted = wanted - seen - set(skipped)
+        if unaccounted:
+            raise refuse(
+                f"{len(unaccounted)} requested collection(s) have no 'per_collection' "
+                f"entry and were not reported skipped, e.g. '{sorted(unaccounted)[0]}'"
+            )
+        return {
+            "results": rows,
+            "per_collection": entries,
+            "per_collection_k": payload["per_collection_k"],
+            "limit": payload["limit"],
+            "skipped_collections": skipped,
+        }
 
     def search_metadata_scoped(
         self,

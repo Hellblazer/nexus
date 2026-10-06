@@ -12,7 +12,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "conexus"
-version = "7.71.0"
+version = "7.72.0"
 description = "Self-hosted semantic search and knowledge management for LLM-driven development"
 readme = { file = "README.md", content-type = "text/markdown" }
 requires-python = ">=3.12,<3.14"
@@ -96,6 +96,12 @@ dependencies = [
     # 0.3.7 (a >=0.2,<1.0 cap admitted every future 0.x minor). Bumped to
     # the locked minor, capped at the next.
     "voyageai>=0.3,<0.4",
+    # nexus-f9bgu.52: on Windows, verify TLS through the OS (CryptoAPI) rather
+    # than OpenSSL over the Windows ROOT store. A fresh Windows holds ~17 roots
+    # and fetches the rest on demand only through the OS, so every nx download
+    # (PG bundle, engine, models) failed CERTIFICATE_VERIFY_FAILED on a new
+    # machine (measured on a clean Win11 guest). Activated in nexus/__init__.py.
+    "truststore>=0.10,<0.11; sys_platform == 'win32'",
     # Same discipline as mineru: docling is the formula screen and the fallback
     # extractor for every PDF; its output shape is gated, so the cap sits at the
     # locked minor.

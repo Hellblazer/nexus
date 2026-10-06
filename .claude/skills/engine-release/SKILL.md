@@ -14,7 +14,7 @@ Follow in order. Releaser is **human**: AI preps + validates; the human pushes t
 **Removed in cleanup step 11 (nexus-0r1uz), numbering left as it was:** Step 3
 (the local-candidate `--shakeout` gate and the `--candidate-migration` populated-store
 rehearsal) and Step 3c (the published-client write leg) went with the scripts and
-harness modes they ran. Steps that remain: 1, 2, 3b, 3e, 4, 5, 5b, 5c, 6, 6.1, 7, 8.
+harness modes they ran. Steps that remain: 1, 2, 3b, 3e, 3f, 4, 5, 5b, 5c, 6, 6.1, 7, 8.
 
 ### 1. Decide whether a cut is needed (drift check)
 
@@ -96,6 +96,42 @@ absent on older engines stays absent") and record the conexus bead id on the
 nexus bead before the tag — the edge half must be live before Step 6.1 can
 pass, and Step 6.1 is what gates the paired client release.
 
+### 3f. PRE-CUT check: the Windows switch, when the cut must carry Windows (RDR-224, nexus-f9bgu.28)
+
+A tag cut with the repo variable `NX_WINDOWS_RELEASE_LEGS` off publishes the 21
+assets of the three native platforms, becomes immutable, and leaves a Windows
+client nothing to install from it; the only recovery is another cut. So before the
+tag, say out loud which kind of cut this is and check the variable matches:
+
+```bash
+gh variable get NX_WINDOWS_RELEASE_LEGS      # 'on' for a cut that must carry Windows (27 assets); anything else = 21
+```
+
+A cut meant to carry Windows (the paired release's P5.0a cut, nexus-f9bgu.42) needs
+`on`. A mismatch with intent stops the cut and goes to Sam: the variable and the
+runner are his, agents flip neither (AGENTS.md § Self-hosted runners and fork PRs).
+Two more things must hold, and neither can be read from the variable:
+
+- The `win-release` runner is online. With the switch on and the runner offline,
+  EVERY engine tag, Linux and mac included, stays a draft until the queued Windows
+  jobs time out (see Step 4).
+- A `workflow_dispatch` run of `engine-service-release.yml` on `develop` with the
+  switch on was GREEN on a commit whose Windows surface (the Windows jobs of that
+  workflow and of `pg-bundle-cache-seed.yml`, `scripts/*windows*`,
+  `scripts/windows_*.py`, `.github/actions/*windows*`, `service/pom.xml`) equals the
+  commit being tagged. A non-tag ref runs every Windows step except sign, upload and
+  promote, so this is the only run that exercises the release workflow's own Windows
+  jobs before the tag (the rehearsal cannot: it is not allowed to trigger release
+  jobs). Read the run's conclusion once:
+  `gh run list --workflow=engine-service-release.yml --event=workflow_dispatch --branch=develop --limit 5 --json conclusion,headSha,createdAt`.
+  Record the run id in the cut's bead.
+
+After the cut publishes (Step 4), confirm it carries them:
+
+```bash
+uv run python scripts/check_engine_release_floor.py --require-windows engine-service-vX.Y.Z   # exit 0 = published, all 27 assets
+```
+
 ### 4. Push the tag (human, or AI when explicitly authorized)
 
 Releaser is **human, every time** (AI preps + validates; the human pushes the
@@ -111,6 +147,8 @@ git push origin engine-service-vX.Y.Z
 ```
 
 Tag-push fires `engine-service-release.yml` → builds + cosign-signs the 3 native binaries for the supported targets (`linux-amd64`, `linux-arm64`, `mac-arm64`) plus their PG bundles, and publishes the GitHub release. The release is created as a DRAFT and promoted by the final `promote-release` job only after both matrices succeed and `scripts/promote_engine_release.sh` finds all 21 assets (nexus-cl14i); until then no consumer can resolve the tag, `check_engine_release_floor.py` reads it as unpublished, and a failed leg on any platform (mac-arm64 is the slowest) holds the whole release as a draft: rerun the failed jobs and promote runs again. (Intel macOS / `mac-amd64` is NOT a supported target — not built.) Publishes nothing to PyPI. Wait for the workflow to finish publishing before Step 5 (prior runs about 35 to 65 min (v0.1.118 took 36, a single measurement)).
+
+**With `NX_WINDOWS_RELEASE_LEGS` on and the `win-release` runner offline, every engine tag stays a draft until the Windows jobs time out** (nexus-f9bgu.28, code review m8). `promote-release` requires both Windows jobs to have succeeded while the switch is on (P0.4), the jobs queue with nothing to run them, and GitHub cancels a queued job after 24 hours; Linux and mac assets are attached all the while, so the release looks broken and is not. A hotfix cut during that window waits too. Recovery: Sam brings the runner back and runs `gh run rerun <run-id> --failed` (the Windows jobs run, `promote-release` follows). If the cut must ship WITHOUT Windows, Sam sets the variable to off first and then reruns the failed jobs: `vars` is read per job when it is scheduled, so `promote-release` then expects the 21 assets. Flipping the variable mid-run can make the jobs disagree with each other; every disagreement ends in a draft, never in a wrong publish.
 
 ### 5. POST-PUBLISH gate: `--acquire` (the leg that drives the PUBLISHED bytes)
 
@@ -206,7 +244,7 @@ The size ceilings are enforced BLOCKING in `scripts/promote_engine_release.sh`, 
 uv run python scripts/check_engine_cut_riders.py sizes engine-service-vX.Y.Z
 ```
 
-Must end `PASSED`. It reads the release's asset sizes (`gh release view`) and fails when a binary is at or near its pre-fix size: v0.1.142 shipped `nexus-service-linux-amd64` at 231.8 MiB, `linux-arm64` at 227.0 and `mac-arm64` at 193.3; nexus-lhr6a measured the fixed build at 150 (amd64) and 154 (mac), and the ceilings are 175, 175 and 175. linux-arm64 was never measured: its expected size is about 147 (an estimate scaled from amd64) and its ceiling uses amd64's margin; replace the estimate with the first published arm64 size. A size back near the old values means the dedup did not take effect in the release build, which the embedded-resources checker does not cover (nexus-zz2w7). Step 2b proves the fix was in the tagged commit (ancestry, not content: a later revert leaves it an ancestor); the size gate proves it shipped. Close nexus-ujbz8 after a pass.
+Add `--windows on` when the Windows legs were on for the cut (repo variable `NX_WINDOWS_RELEASE_LEGS`): the Windows engine archive `nexus-service-windows-x64.txz` is then required and held to its own ceiling (55 MiB; measured 32.1 MiB for an `-Ob` build, the `-O2` release build not yet measured), as `promote_engine_release.sh` already did. Must end `PASSED`. It reads the release's asset sizes (`gh release view`) and fails when a binary is at or near its pre-fix size: v0.1.142 shipped `nexus-service-linux-amd64` at 231.8 MiB, `linux-arm64` at 227.0 and `mac-arm64` at 193.3; nexus-lhr6a measured the fixed build at 150 (amd64) and 154 (mac), and the ceilings are 175, 175 and 175. linux-arm64 was never measured: its expected size is about 147 (an estimate scaled from amd64) and its ceiling uses amd64's margin; replace the estimate with the first published arm64 size. A size back near the old values means the dedup did not take effect in the release build, which the size gate catches after the fact and the embedded-resources checker catches earlier: it now runs as a step on every native release leg (`scripts/check_native_embedded_resources.py --platform <arch>`, nexus-zz2w7), so a build with a doubled or foreign library fails the leg before publish. Step 2b proves the fix was in the tagged commit (ancestry, not content: a later revert leaves it an ancestor); the size gate proves it shipped. Close nexus-ujbz8 after a pass.
 
 ### 6. Relay deploy + post-deploy cloud validation to conexus
 

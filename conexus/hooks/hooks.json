@@ -59,16 +59,24 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3",
+            "command": "uv",
             "args": [
+              "run",
+              "--no-project",
+              "--no-config",
+              "--quiet",
               "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/version_lockstep_hook.py"
             ],
             "timeout": 5
           },
           {
             "type": "command",
-            "command": "python3",
+            "command": "uv",
             "args": [
+              "run",
+              "--no-project",
+              "--no-config",
+              "--quiet",
               "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/nx_hook_shim.py",
               "mcp-connect-wait"
             ],
@@ -115,16 +123,24 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3",
+            "command": "uv",
             "args": [
+              "run",
+              "--no-project",
+              "--no-config",
+              "--quiet",
               "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/routing/subagent_git_write_requires_orchestrator.py"
             ],
             "timeout": 5
           },
           {
             "type": "command",
-            "command": "python3",
+            "command": "uv",
             "args": [
+              "run",
+              "--no-project",
+              "--no-config",
+              "--quiet",
               "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/routing/credential_print_guard.py"
             ],
             "timeout": 5
@@ -136,8 +152,12 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3",
+            "command": "uv",
             "args": [
+              "run",
+              "--no-project",
+              "--no-config",
+              "--quiet",
               "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/nx_hook_shim.py",
               "auto-approve"
             ],
@@ -152,8 +172,12 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3",
+            "command": "uv",
             "args": [
+              "run",
+              "--no-project",
+              "--no-config",
+              "--quiet",
               "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/nx_hook_shim.py",
               "auto-approve"
             ],
@@ -168,8 +192,12 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3",
+            "command": "uv",
             "args": [
+              "run",
+              "--no-project",
+              "--no-config",
+              "--quiet",
               "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/mailbox_drain.py"
             ],
             "timeout": 10

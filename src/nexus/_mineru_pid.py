@@ -13,7 +13,6 @@ process liveness or read the PID without reaching up into commands/.
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 
 
@@ -35,9 +34,13 @@ def read_pid_file() -> dict | None:
 
 
 def is_process_alive(pid: int) -> bool:
-    """Check if a process with the given PID is alive."""
-    try:
-        os.kill(pid, 0)
-        return True
-    except OSError:
-        return False
+    """Check if a process with the given PID is alive.
+
+    Delegates to :func:`nexus.daemon.service_registry.pid_alive`
+    (nexus-f9bgu.25): Windows branch, pid <= 0 dead (``os.kill(0, 0)``
+    signalled our own process group and read as alive), another user's
+    process alive.
+    """
+    from nexus.daemon.service_registry import pid_alive  # noqa: PLC0415 — deferred: library modules import this one cheaply
+
+    return pid_alive(pid)

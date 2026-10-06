@@ -145,6 +145,23 @@ export NX_ALLOW_PROD_WRITE="cloud-client-path-gate: deliberate post-deploy MVV w
 #          read of an unregistered collection is not known to answer 200.
 #      Every K request goes with the same bearer leg B resolved. The 200 probes
 #      read a collection name no tenant has registered, so they touch no data.
+#   L  the per-collection search route through the edge (nexus-tu8wp.3): POST
+#      /v1/vectors/search-per-collection with two requests the engine refuses by
+#      validation before it touches a collection, an embedder or the database
+#      (per_collection_k 0; limit 1201). A route-serving engine
+#      (engine-service-v0.1.147 and later) answers 400 with its own JSON error
+#      (per_collection_k must be in 1.. / limit must be in 1..); an older engine
+#      answers 404 with exactly {"error": "not found"}. Both must ARRIVE as the
+#      engine's JSON through the public edge: the client falls back to the batched
+#      path on a 404, an edge refusal, 403, 405 or 501 (for 10 minutes) and on a
+#      500 (for 60 s), and does so quietly, so an edge that refuses the new path
+#      leaves the feature inert with nothing else noticing (the nexus-bwulw class).
+#      The verdict is _route_probe_verdict. The leg passes on either engine, and
+#      when it sees the old engine's 404 the final sentinel line says "per-collection
+#      route NOT served"; NX_EXPECTED_SEARCH_PER_COLLECTION_ROUTE=served turns that
+#      into a failure (run it so after the deploy of the route's engine) and =absent
+#      turns a served route into one. Read-only by construction, pinned by the same
+#      structural audit as leg K (tests/e2e/cloud_client_path_gate_b3_test.sh).
 #
 # Applicability: requires a CLOUD-mode box (service_url is a non-loopback
 # https endpoint). On a local-mode box this gate REFUSES (exit 2) rather
@@ -162,6 +179,11 @@ export NX_ALLOW_PROD_WRITE="cloud-client-path-gate: deliberate post-deploy MVV w
 #       carries the refusal. Unset, an engine that reports a mode FAILS the
 #       gate (a live mode nobody asserted); an engine that reports none
 #       (before P3.2) reports B3 NOT RUN and the final sentinel line says so.
+#   NX_EXPECTED_SEARCH_PER_COLLECTION_ROUTE=served tests/e2e/cloud-client-path-gate.sh
+#       asserts leg L sees the per-collection search route SERVED (nexus-tu8wp.3):
+#       set it for the run after engine-service-v0.1.147's deploy, where an old
+#       engine's 404 would otherwise pass with a NOT SERVED note on the sentinel
+#       line. `absent` asserts the opposite (the route not yet deployed).
 # Exit 0 == CLOUD CLIENT-PATH GATE PASSED (literal sentinel on last line).
 # Exit 2 == not applicable (not a cloud-mode box). Any other == FAILED.
 set -euo pipefail
@@ -180,6 +202,13 @@ case "$NX_EXPECTED_OWNERLESS_WRITE_MODE" in
     *) echo "FATAL: NX_EXPECTED_OWNERLESS_WRITE_MODE=$NX_EXPECTED_OWNERLESS_WRITE_MODE is not one of: (unset), log-only, enforce." >&2; exit 2 ;;
 esac
 
+# nexus-tu8wp.3: the optional assertion on leg L (the per-collection search route).
+NX_EXPECTED_SEARCH_PER_COLLECTION_ROUTE="${NX_EXPECTED_SEARCH_PER_COLLECTION_ROUTE:-}"
+case "$NX_EXPECTED_SEARCH_PER_COLLECTION_ROUTE" in
+    ""|served|absent) ;;
+    *) echo "FATAL: NX_EXPECTED_SEARCH_PER_COLLECTION_ROUTE=$NX_EXPECTED_SEARCH_PER_COLLECTION_ROUTE is not one of: (unset), served, absent." >&2; exit 2 ;;
+esac
+
 # Legs accumulate violations instead of fail-fast: a red run is relay
 # evidence, and "which legs are broken" is the payload.
 VIOLATIONS=0
@@ -195,9 +224,9 @@ _fail() { echo "CLOUD CLIENT-PATH GATE FAILED: $*" >&2; exit 1; }
 # side — a heredoc that dies mid-leg still counts as a leg that failed to
 # complete, never a leg that quietly did not run.
 #
-# EXPECTED_LEGS=9 (dated 2026-09-13; [B] redefined 2026-09-28; [I] added 2026-09-29;
-# [J] and [K] added 2026-10-04, nexus-wbfpw.50; [G] deleted at cleanup step A1,
-# nexus-0r1uz): [A] /version,
+# EXPECTED_LEGS=10 (dated 2026-09-13; [B] redefined 2026-09-28; [I] added 2026-09-29;
+# [J] and [K] added 2026-10-04, nexus-wbfpw.50; [L] added 2026-10-05, nexus-tu8wp.3;
+# [G] deleted at cleanup step A1, nexus-0r1uz): [A] /version,
 # [B] edge auth contract (unauthenticated /health refused, data token
 # accepted on /v1), [C+D] client probe heredoc (one shell-side entry for the
 # combined python leg), [E] T2 write body carrying shell-substitution text
@@ -206,10 +235,11 @@ _fail() { echo "CLOUD CLIENT-PATH GATE FAILED: $*" >&2; exit 1; }
 # the edge (nexus-zjzt1, 2026-09-13), [I] descending tuple read echo through
 # the edge (nexus-kp5q3, 2026-09-29), [J] engine reaper liveness on /v1/status
 # through the edge, [K] the vector sweep routes through the edge (both
-# nexus-wbfpw.50, 2026-10-04). Editing the battery means updating this
+# nexus-wbfpw.50, 2026-10-04), [L] the per-collection search route through the
+# edge (nexus-tu8wp.3, 2026-10-05). Editing the battery means updating this
 # constant in the same diff.
 LEGS_RAN=0
-EXPECTED_LEGS=9
+EXPECTED_LEGS=10
 _leg_enter() { LEGS_RAN=$((LEGS_RAN + 1)); echo "[$1] $2"; }
 
 # Leg B3's compare logic (nexus-20onx; nexus-i1oh4 doctrine applied to it in the
@@ -373,6 +403,88 @@ if errs:
     violation("; ".join(errs))
 print("ok [J]: reaper enabled, last completed pass %ds ago (limit %ds = 3 x %ds + %ds budget), failed_passes_total=0, %s"
       % (age, limit, interval, budget, lp_text))
+PY
+}
+
+# Leg L's judge (nexus-tu8wp.3): one refused request to POST
+# /v1/vectors/search-per-collection, read through the edge. Arguments: label, HTTP
+# status, response body, the fragment of the engine's own 400 message the probe
+# expects, and the expectation (NX_EXPECTED_SEARCH_PER_COLLECTION_ROUTE: empty,
+# `served` or `absent`). Prints one line; exit status:
+#   0  route SERVED: 400 + the engine's own JSON error carrying the fragment
+#      (engine-service-v0.1.147 and later; the request is refused by validation
+#      before any collection, embedding or database is touched)
+#   3  route ABSENT, unasserted: 404 + exactly the engine's {"error":"not found"}
+#      (an engine before the route; the client reads this as "fall back to the
+#      batched path" and remembers it for 10 minutes). The final sentinel line
+#      says so, so an old engine can never read as a clean pass of the route.
+#   4  route ABSENT, asserted (NX_EXPECTED_SEARCH_PER_COLLECTION_ROUTE=absent)
+#   1  anything else, each status named with what the client does with it:
+#      403/405/501 or an edge-generated page (client falls back for 10 min, silently),
+#      500 (falls back for 60 s), 429/502/503/504 (a failed model group), 200 (a
+#      refused request was answered), a 404 that is not the engine's body, a 400 with
+#      an edge's JSON of its own. `served` with the route absent is a violation, and
+#      so is `absent` with the route served.
+# The test (tests/e2e/cloud_client_path_gate_b3_test.sh) sources this function from
+# the real script.
+_route_probe_verdict() {
+    "$E2E_PYTHON" - "$1" "$2" "$3" "$4" "${5:-}" <<'PY'
+import json
+import sys
+
+label, code, body, fragment, expected = sys.argv[1:6]
+head = body[:160].replace("\n", " ")
+
+
+def violation(msg):
+    print("%s: %s" % (label, msg))
+    sys.exit(1)
+
+
+if not fragment:
+    violation("internal: a route probe must name the engine message fragment it expects")
+try:
+    doc = json.loads(body)
+except ValueError:
+    doc = None
+if code in ("403", "405", "501"):
+    violation("HTTP %s from the edge for the route (body: %r): the client reads 403/405/501 as route-absent and runs "
+              "the batched path for 10 minutes, logging only a WARNING, so the feature is silently inert" % (code, head))
+if code == "500":
+    violation("HTTP 500 for a request the engine must refuse with 400 (body: %r): the client falls back to the batched "
+              "path for 60 s on a 500" % (head,))
+if code in ("429", "502", "503", "504"):
+    violation("HTTP %s (body: %r): the client does not fall back on this; it reports the whole model group as failed"
+              % (code, head))
+if code == "404":
+    if doc != {"error": "not found"}:
+        violation("HTTP 404 with body %r, expected exactly the engine's {\"error\": \"not found\"}: an edge-generated 404 "
+                  "(the client treats any 404 as route-absent, so this reads the same, but it is the edge, not the engine, "
+                  "saying so)" % (head,))
+    if expected == "served":
+        violation("the route is ABSENT (404, the engine's own not-found body) but NX_EXPECTED_SEARCH_PER_COLLECTION_ROUTE=served: "
+                  "the deployed engine predates engine-service-v0.1.147, so every client runs the batched fallback")
+    if expected == "absent":
+        print("ok [%s]: route absent as expected: 404 with the engine's own JSON, which the client reads as fall back to the "
+              "batched path" % label)
+        sys.exit(4)
+    print("NOT SERVED [%s]: 404 with the engine's own {\"error\": \"not found\"}: the engine predates the per-collection route, "
+          "and the client falls back to the batched path (set NX_EXPECTED_SEARCH_PER_COLLECTION_ROUTE=served to make this a "
+          "failure after the deploy)" % label)
+    sys.exit(3)
+if code == "400":
+    if not isinstance(doc, dict):
+        violation("HTTP 400 body is not a JSON object (%r): an edge page or a stripped body, not the engine's answer" % (head,))
+    err = doc.get("error")
+    if not (isinstance(err, str) and fragment in err):
+        violation("HTTP 400 'error' is %r, expected it to contain the engine's %r (an edge or WAF answers a 400 with JSON of its "
+                  "own, and the request may never have reached the engine)" % (err, fragment))
+    if expected == "absent":
+        violation("the route is SERVED (400 with the engine's validation message) but NX_EXPECTED_SEARCH_PER_COLLECTION_ROUTE=absent")
+    print("ok [%s]: route served: HTTP 400, the engine's own JSON (%r)" % (label, err))
+    sys.exit(0)
+violation("HTTP %s (body: %r), expected the engine's 400 (route served) or its JSON 404 (route absent): a request the engine "
+          "refuses by validation was not answered like one" % (code, head))
 PY
 }
 
@@ -1028,6 +1140,47 @@ else
     [ "$K_BAD" -eq 0 ] || _leg_fail "K: the sweep routes through the edge did not answer as the engine does (see above)"
 fi
 
+# ── Leg L: the per-collection search route through the edge (nexus-tu8wp.3) ──
+# Two requests to POST /v1/vectors/search-per-collection that the engine refuses by
+# validation, before it resolves a collection, embeds the query or opens a database
+# transaction (VectorHandler.handleSearchPerCollection and PgVectorRepository.
+# searchPerCollection validate per_collection_k and limit first): per_collection_k 0
+# and limit 1201. K_COLLECTION is leg K's unregistered name; the engine never looks
+# it up. Nothing is searched, written or embedded. An engine that predates the route
+# answers both with its generic 404. The same _edge_post helper as leg K, so the one
+# POST curl stays the one the audit pins; the compare logic is _route_probe_verdict,
+# above, unit-tested in tests/e2e/cloud_client_path_gate_b3_test.sh.
+_leg_enter L "per-collection search route through the edge (engine's 400 JSON when served, its 404 JSON when absent; read-only)"
+L_SERVED=0
+L_ABSENT=0
+L_ROUTE_NOT_SERVED=0
+# Judge the last _edge_post as a route probe: one line to stdout (stderr for a violation),
+# and count which state it saw.
+_route_probe() {
+    local label="$1" fragment="$2" line rc=0
+    line="$(_route_probe_verdict "$label" "$EDGE_CODE" "$EDGE_BODY" "$fragment" "$NX_EXPECTED_SEARCH_PER_COLLECTION_ROUTE")" || rc=$?
+    case "$rc" in
+        0) echo "  $line"; L_SERVED=$((L_SERVED + 1)) ;;
+        3) echo "  $line"; L_ABSENT=$((L_ABSENT + 1)); L_ROUTE_NOT_SERVED=1 ;;
+        4) echo "  $line"; L_ABSENT=$((L_ABSENT + 1)) ;;
+        *) echo "  VIOLATION [${line%%:*}]:${line#*:}" >&2; return 1 ;;
+    esac
+}
+if [ ! -s "$BEARER_FILE" ]; then
+    _leg_fail "L: no bearer (leg B could not resolve one), so the per-collection route could not be reached"
+else
+    L_BAD=0
+    _edge_post "/v1/vectors/search-per-collection" "{\"query\":\"ccpg route probe\",\"collections\":[\"$K_COLLECTION\"],\"per_collection_k\":0,\"limit\":1}"
+    _route_probe L1 "per_collection_k must be in 1.." || L_BAD=1
+    _edge_post "/v1/vectors/search-per-collection" "{\"query\":\"ccpg route probe\",\"collections\":[\"$K_COLLECTION\"],\"per_collection_k\":1,\"limit\":1201}"
+    _route_probe L2 "limit must be in 1.." || L_BAD=1
+    if [ "$L_SERVED" -gt 0 ] && [ "$L_ABSENT" -gt 0 ]; then
+        echo "  VIOLATION [L]: the two probes disagree ($L_SERVED saw the route served, $L_ABSENT saw it absent): an edge or a rolling deploy answers this path two ways" >&2
+        L_BAD=1
+    fi
+    [ "$L_BAD" -eq 0 ] || _leg_fail "L: the per-collection route through the edge did not answer as the engine does (see above)"
+fi
+
 if [ "$LEGS_RAN" -ne "$EXPECTED_LEGS" ]; then
     # Distinct from a violation: "the gate did not run its full battery" is
     # a different fact from "the edge is broken", and the relay must be able
@@ -1037,8 +1190,16 @@ fi
 if [ "$VIOLATIONS" -gt 0 ]; then
     _fail "$VIOLATIONS leg(s) violated — the public edge does not deliver the engine's pinned client contract"
 fi
+# Every unasserted state reaches the sentinel line, so a pass never reads as more than it proved.
+PASS_NOTE=""
 if [ "$B3_NOT_RUN" = 1 ]; then
-    echo "CLOUD CLIENT-PATH GATE PASSED — legs=$LEGS_RAN/$EXPECTED_LEGS violations=0 (ownerless-write mode NOT asserted: B3 not run)"
+    PASS_NOTE="ownerless-write mode NOT asserted: B3 not run"
+fi
+if [ "$L_ROUTE_NOT_SERVED" = 1 ]; then
+    PASS_NOTE="${PASS_NOTE:+$PASS_NOTE; }per-collection route NOT served: L saw the old engine's JSON 404"
+fi
+if [ -n "$PASS_NOTE" ]; then
+    echo "CLOUD CLIENT-PATH GATE PASSED — legs=$LEGS_RAN/$EXPECTED_LEGS violations=0 ($PASS_NOTE)"
 else
     echo "CLOUD CLIENT-PATH GATE PASSED — legs=$LEGS_RAN/$EXPECTED_LEGS violations=0"
 fi

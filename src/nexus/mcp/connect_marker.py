@@ -93,6 +93,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
+from nexus._winsec import make_user_dir
 
 #: File-name prefix, mirroring ``nexus.db.t1``'s ``t1_session_lease.`` --
 #: a distinct name so this marker is never confused with, or accidentally
@@ -126,7 +127,7 @@ def publish_mcp_connect_marker(
     twice for the same session id simply refreshes ``published_at``/
     ``expires_at``.
     """
-    config_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    make_user_dir(config_dir)
     path = _marker_path(session_id, config_dir)
     tmp = path.with_name(f"{path.name}.{os.getpid()}.{uuid4().hex}.tmp")
     now = time.time()

@@ -52,6 +52,7 @@ import os
 import re
 import signal
 import subprocess
+import sys
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
@@ -61,7 +62,14 @@ from typing import Any, Callable, Iterator, Mapping, Optional, Protocol, TypeVar
 import structlog
 
 from nexus import _locking
+from nexus._install import winproc_core
+from nexus._winsec import (  # the SID lookup and the user-directory grant live with the other Windows security calls
+    _windows_user_sid,
+    make_user_dir,
+    open_private,
+)
 from nexus.bounded_subprocess import run_bounded
+from nexus.util import win_console
 from nexus.util.process_group import KILL_SIGNAL
 
 _log = structlog.get_logger(__name__)
@@ -208,6 +216,54 @@ class ElectionBusyError(ServiceRegistryError):
     """
 
 
+class ServiceIdentityError(ServiceRegistryError):
+    """The service identity could not be derived (RDR-224 Gap 3, nexus-f9bgu.16).
+
+    Raised, never papered over with a fallback: two processes of one user that
+    disagreed about their identity would each publish their own lease and the
+    election would no longer converge on one owner per scope.
+    """
+
+
+#: A Windows user SID in string form: ``S-1-<authority>(-<subauthority>)+``.
+#: Digits, ``S`` and ``-`` only, so it is safe as a file name, lock name and
+#: endpoint-name suffix without escaping.
+_SID_PATTERN = re.compile(r"S-1-\d+(-\d+)+")
+
+
+def service_identity(
+    *,
+    platform: str | None = None,
+    getuid: Callable[[], int] | None = None,
+    sid_lookup: Callable[[], str] | None = None,
+) -> str:
+    """THE scope key for every local-service lease, lock and endpoint name.
+
+    POSIX: ``str(os.getuid())``, exactly as every caller computed it before, so
+    existing ``storage_service_addr.<uid>`` files stay where they are. Windows:
+    the user's SID, because it is stable across sessions and renames of the
+    account, is not settable through an environment variable the way
+    ``USERNAME`` is, and its characters (``S``, digits, ``-``) are safe in file,
+    lock and endpoint names where a login name (spaces, case-folding on NTFS) is
+    not. Anything that is not a SID there raises :class:`ServiceIdentityError`.
+
+    ``platform`` (default: ``win32`` when ``os.name == "nt"``), ``getuid`` and ``sid_lookup`` are
+    seams so both branches run on every host; production callers pass nothing.
+    Every ``os.getuid()`` outside this function is a defect the lint
+    ``tests/test_service_identity_lint.py`` fails on.
+    """
+    on_windows = (platform == "win32") if platform is not None else (os.name == "nt")
+    if not on_windows:
+        return str(getuid() if getuid is not None else os.getuid())
+    try:
+        sid = (sid_lookup if sid_lookup is not None else _windows_user_sid)()
+    except (OSError, AttributeError, ValueError) as exc:
+        raise ServiceIdentityError(f"cannot read the Windows user SID: {exc}") from exc
+    if not _SID_PATTERN.fullmatch(sid):
+        raise ServiceIdentityError(f"the Windows user identity is not a SID: {sid!r}")
+    return sid
+
+
 #: Fraction of the lease TTL a heartbeat may spend waiting for the election
 #: flock (nexus-59bah). One third: a tick that spends its whole budget still
 #: returns with two thirds of the TTL left, so a transient holder costs a
@@ -241,6 +297,19 @@ DEFAULT_STOP_ELECTION_BUDGET: float = 2.0
 
 #: LOCK_NB poll cadence for the bounded election.
 _ELECTION_POLL_INTERVAL: float = 0.05
+
+#: Windows only (RDR-224, nexus-f9bgu.19): how long a lease read, replace or
+#: unlink keeps retrying a sharing violation before it gives up. Python opens
+#: files without ``FILE_SHARE_DELETE``, so ``os.replace`` onto (or ``unlink`` of)
+#: a lease another process has open for reading fails with ``PermissionError``
+#: until that reader closes it, and a reader's own open can fail the same way
+#: mid-replace. Readers hold the file for microseconds, so the retry is short;
+#: the bound is what keeps a genuine ACL problem from hanging a heartbeat.
+_WINDOWS_SHARING_RETRY_BUDGET_S: float = 2.0
+
+#: First and longest pause between those retries (doubling in between).
+_WINDOWS_SHARING_RETRY_FIRST_S: float = 0.002
+_WINDOWS_SHARING_RETRY_MAX_S: float = 0.01
 
 
 def mint_owner_token() -> str:
@@ -316,6 +385,7 @@ class ServiceRegistry:
         heartbeat_interval: float = DEFAULT_HEARTBEAT_INTERVAL,
         monotonic: Clock = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
+        platform: str | None = None,
     ) -> None:
         if ttl < heartbeat_interval:
             raise ValueError(
@@ -330,6 +400,7 @@ class ServiceRegistry:
         self._heartbeat_interval = heartbeat_interval
         self._monotonic = monotonic
         self._sleep = sleep
+        self._windows = _is_windows(platform)
         # nexus-wo6sc: per-tick stamp sub-phase timings, replaced (never
         # accumulated) on every heartbeat. See ``last_heartbeat_phases``.
         self._last_heartbeat_phases: dict[str, float] = {}
@@ -398,7 +469,12 @@ class ServiceRegistry:
         return self._dir / f"{self._tier}_elect.{scope_key}.lock"
 
     def _ensure_dir(self) -> None:
-        self._dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        try:
+            make_user_dir(self._dir, platform="win32" if self._windows else None)
+        except OSError as exc:
+            # The directory exists (mkdir came first); only the user's own ACE is missing,
+            # which is what every install did before nexus-f9bgu.33. Never stop a lease over it.
+            _log.warning("service_registry_dir_acl_grant_failed", dir=str(self._dir), error=str(exc))
 
     # -- election -----------------------------------------------------------
 
@@ -470,10 +546,36 @@ class ServiceRegistry:
 
     # -- atomic IO ----------------------------------------------------------
 
+    def _retry_sharing_violation(self, op: Callable[[], _T]) -> _T:
+        """Run one lease-file operation, retrying a Windows sharing violation.
+
+        Off Windows this is ``op()``: a ``PermissionError`` there is a real
+        permission problem and fails at once, as it always did. On Windows a
+        read, ``os.replace`` or ``unlink`` of a lease another process has open
+        (Python opens without ``FILE_SHARE_DELETE``) raises ``PermissionError``
+        until that handle closes, so it is retried with a doubling pause up to
+        ``_WINDOWS_SHARING_RETRY_BUDGET_S`` and then raised. The pause goes
+        through the injected ``sleep`` and ``monotonic`` so the bound runs
+        deterministically under test. RDR-224, nexus-f9bgu.19.
+        """
+        if not self._windows:
+            return op()
+        deadline = self._monotonic() + _WINDOWS_SHARING_RETRY_BUDGET_S
+        pause = _WINDOWS_SHARING_RETRY_FIRST_S
+        while True:
+            try:
+                return op()
+            except PermissionError:
+                now = self._monotonic()
+                if now >= deadline:
+                    raise
+                self._sleep(min(pause, deadline - now))
+                pause = min(pause * 2, _WINDOWS_SHARING_RETRY_MAX_S)
+
     def _read_record(self, scope_key: str) -> Optional[LeaseRecord]:
         path = self._record_path(scope_key)
         try:
-            text = path.read_text()
+            text = self._retry_sharing_violation(path.read_text)
         except OSError:
             return None
         except UnicodeDecodeError as exc:
@@ -510,7 +612,7 @@ class ServiceRegistry:
         fd = self._timed(
             phases,
             "write_open",
-            lambda: os.open(str(tmp), os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600),
+            lambda: open_private(tmp, os.O_CREAT | os.O_WRONLY | os.O_TRUNC),
         )
         try:
             def _body() -> None:
@@ -520,7 +622,11 @@ class ServiceRegistry:
                     os.close(fd)
 
             self._timed(phases, "write_body", _body)
-            self._timed(phases, "write_replace", lambda: os.replace(str(tmp), str(path)))
+            self._timed(
+                phases,
+                "write_replace",
+                lambda: self._retry_sharing_violation(lambda: os.replace(str(tmp), str(path))),
+            )
         except BaseException:
             with contextlib.suppress(OSError):
                 tmp.unlink()
@@ -796,7 +902,7 @@ class ServiceRegistry:
             if current.is_fresh(self._clock()):
                 return  # re-stamped fresh under the lock; leave the live record
             with contextlib.suppress(OSError):
-                self._record_path(stale.scope_key).unlink()
+                self._retry_sharing_violation(self._record_path(stale.scope_key).unlink)
 
     def mark_shutting_down(
         self, record: LeaseRecord, *, budget: Optional[float] = None
@@ -869,7 +975,7 @@ class ServiceRegistry:
             if current.owner_token != record.owner_token:
                 return  # a successor owns it now; leave it alone
             with contextlib.suppress(OSError):
-                self._record_path(record.scope_key).unlink()
+                self._retry_sharing_violation(self._record_path(record.scope_key).unlink)
             _we_owned = True
         # Unlink the elect lock only when WE owned the scope.  Done AFTER the
         # flock is released.  Openers after the unlink get a fresh inode;
@@ -1299,19 +1405,51 @@ def _parse_ps_table(ps_output: str) -> list[tuple[int, int, str]]:
     return out
 
 
-def all_process_rows(ps_output: str | None = None) -> list[tuple[int, int, str]]:
+def _is_windows(platform: str | None) -> bool:
+    return (platform if platform is not None else sys.platform) == "win32"
+
+
+def _win_info(win_info_api: "winproc_core.WinProcessInfoApi | None") -> "winproc_core.WinProcessInfoApi":
+    return win_info_api if win_info_api is not None else winproc_core.ctypes_win_info_api()
+
+
+def _windows_process_rows(
+    api: "winproc_core.WinProcessInfoApi",
+) -> list[tuple[int, int, str]]:
+    """``[(pid, age_s, command)]`` from the Windows process table
+    (RDR-224, nexus-f9bgu.21): a Toolhelp snapshot, then creation time and
+    the space-joined argv per process (see :mod:`nexus._install.winproc_core`).
+    Raises ``RuntimeError`` when the snapshot cannot be taken, the same
+    fail-loud contract as the ``ps`` and ``/proc`` readers."""
+    return [
+        (pid, int(age), command)
+        for pid, _ppid, age, command in winproc_core.enumerate_processes(api)
+    ]
+
+
+def all_process_rows(
+    ps_output: str | None = None,
+    *,
+    platform: str | None = None,
+    win_info_api: "winproc_core.WinProcessInfoApi | None" = None,
+) -> list[tuple[int, int, str]]:
     """``[(pid, age_s, command)]`` for EVERY process on the box, unfiltered.
 
     Reads ``ps`` when a ``ps`` binary exists, else ``/proc`` (see
-    :func:`_procfs_enumerate`). A box with NEITHER raises; so does a box
+    :func:`_procfs_enumerate`); on Windows, which has neither, the Win32
+    process table (:func:`_windows_process_rows`). A box with NEITHER
+    raises; so does a box
     whose PRESENT ``ps`` fails or returns an empty table (that is a signal
     worth surfacing — e.g. a hidepid-restricted or corrupted procps — not a
     case to silently route around). It raises rather than reporting an
     empty table: a silent "zero processes" is the fail-open this function
-    exists to eliminate. ``ps_output`` is injectable for tests.
+    exists to eliminate. ``ps_output`` is injectable for tests, as are
+    *platform* and *win_info_api* (the Windows branch runs on any host).
     """
     if ps_output is not None:
         return _parse_ps_table(ps_output)
+    if _is_windows(platform):
+        return _windows_process_rows(_win_info(win_info_api))
     rows = _ps_enumerate()
     if rows is None:
         if not _procfs_available():
@@ -1324,12 +1462,23 @@ def all_process_rows(ps_output: str | None = None) -> list[tuple[int, int, str]]
     return rows
 
 
-def process_command(pid: int) -> str:
+def process_command(
+    pid: int,
+    *,
+    platform: str | None = None,
+    win_info_api: "winproc_core.WinProcessInfoApi | None" = None,
+) -> str:
     """The full command line of *pid*, or ``""`` when it is gone.
 
     Used by pid-recycle re-checks — a bare ``ps -p`` direct call would add
-    a userland dependency this module otherwise sheds via ``/proc``.
+    a userland dependency this module otherwise sheds via ``/proc``. On
+    Windows the answer is the space-joined argv from the kernel's copy of
+    the command line, the image path when that is unreadable (the same text
+    :func:`all_process_rows` reports, so the recycle re-check compares like
+    with like), ``""`` when the process is gone.
     """
+    if _is_windows(platform):
+        return winproc_core.process_command_line(pid, _win_info(win_info_api))
     if _procfs_available():
         try:
             raw = (PROCFS_ROOT / str(pid) / "cmdline").read_bytes()
@@ -1346,8 +1495,111 @@ def process_command(pid: int) -> str:
     return probe.stdout.strip()
 
 
-def pid_alive(pid: int) -> bool:
-    """True when signalling 0 to *pid* succeeds.
+#: Win32 values :func:`pid_alive`'s Windows branch reads (winnt.h, winerror.h,
+#: winbase.h). Module-level so tests script the same numbers.
+PROCESS_QUERY_LIMITED_INFORMATION: int = 0x1000
+SYNCHRONIZE: int = 0x00100000
+ERROR_ACCESS_DENIED: int = 5
+ERROR_INVALID_PARAMETER: int = 87
+WAIT_OBJECT_0: int = 0x0
+WAIT_TIMEOUT: int = 0x102
+WAIT_FAILED: int = 0xFFFFFFFF
+_MAX_WINDOWS_PID: int = 0xFFFFFFFF
+
+
+class WinProcessApi(Protocol):
+    """The three kernel32 calls :func:`pid_alive` makes on Windows.
+
+    Injected so the Windows branch runs under test on any host; the real
+    binding is :func:`_ctypes_win_process_api`.
+    """
+
+    def open_process(self, pid: int) -> tuple[int | None, int]:
+        """``OpenProcess(QUERY_LIMITED_INFORMATION | SYNCHRONIZE)``:
+        ``(handle, 0)`` on success, ``(None, GetLastError())`` on failure."""
+        ...
+
+    def wait_zero(self, handle: int) -> int:
+        """``WaitForSingleObject(handle, 0)``."""
+        ...
+
+    def close(self, handle: int) -> None:
+        """``CloseHandle(handle)``."""
+        ...
+
+
+class _CtypesWinProcessApi:
+    def __init__(self) -> None:
+        import ctypes  # noqa: PLC0415 — Windows-only binding, built on first Windows probe
+        from ctypes import wintypes  # noqa: PLC0415
+
+        self._ctypes = ctypes
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
+        k32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+        k32.OpenProcess.restype = wintypes.HANDLE
+        k32.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+        k32.WaitForSingleObject.restype = wintypes.DWORD
+        k32.CloseHandle.argtypes = (wintypes.HANDLE,)
+        k32.CloseHandle.restype = wintypes.BOOL
+        self._k32 = k32
+
+    def open_process(self, pid: int) -> tuple[int | None, int]:
+        handle = self._k32.OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, False, pid,
+        )
+        if not handle:
+            return None, self._ctypes.get_last_error()  # type: ignore[attr-defined]
+        return handle, 0
+
+    def wait_zero(self, handle: int) -> int:
+        return self._k32.WaitForSingleObject(handle, 0)
+
+    def close(self, handle: int) -> None:
+        self._k32.CloseHandle(handle)
+
+
+_win_api_cache: list[WinProcessApi] = []
+
+
+def _ctypes_win_process_api() -> WinProcessApi:
+    """The real kernel32 binding, built once per process. Windows only."""
+    if not _win_api_cache:
+        _win_api_cache.append(_CtypesWinProcessApi())
+    return _win_api_cache[0]
+
+
+def _windows_pid_alive(pid: int, api: WinProcessApi) -> bool:
+    """Windows liveness: open the process and ask whether it has exited.
+
+    A Windows process object outlives its exit for as long as any handle
+    to it is open, so a successful ``OpenProcess`` alone proves nothing;
+    the zero-timeout wait is the answer (signalled = exited). There is no
+    zombie state, so :func:`pid_running` needs no Windows counterpart.
+    The wait, not ``GetExitCodeProcess``, because a process that exits
+    with code 259 reads as ``STILL_ACTIVE`` there.
+
+    Ambiguity reads as alive, matching the POSIX arm: access denied (the
+    process exists under another user, or is protected), any other open
+    error, and a failed wait.
+    """
+    if pid > _MAX_WINDOWS_PID:
+        return False
+    handle, last_error = api.open_process(pid)
+    if handle is None:
+        return last_error != ERROR_INVALID_PARAMETER
+    try:
+        return api.wait_zero(handle) != WAIT_OBJECT_0
+    finally:
+        api.close(handle)
+
+
+def pid_alive(
+    pid: int,
+    *,
+    platform: str | None = None,
+    win_api: WinProcessApi | None = None,
+) -> bool:
+    """True when *pid* names a process that has not exited.
 
     THE single implementation (nexus-oyo2g review finding 3): this used to
     be duplicated in ``storage_service_daemon._pid_is_alive`` with a
@@ -1359,9 +1611,22 @@ def pid_alive(pid: int) -> bool:
     "nothing to signal" must not treat an ambiguous errno as proof of
     death — a false "dead" here is exactly the class of bug this bead
     fixes (declaring something stopped when it might still be running).
+
+    POSIX signals 0. Windows must not: CPython maps ``os.kill(pid, 0)`` to
+    ``CTRL_C_EVENT`` there, so it asks kernel32 instead
+    (:func:`_windows_pid_alive`; RDR-224, nexus-f9bgu.25). ctypes rather
+    than psutil because psutil is only a transitive dependency and three
+    kernel32 calls do not justify a direct one. *platform* (default
+    ``sys.platform``) and *win_api* are injection seams so both arms run
+    under test on every host. ``tests/test_pid_alive_single_probe_lint.py``
+    keeps this the only ``os.kill(pid, 0)`` in ``src/nexus``.
     """
     if pid <= 0:
         return False
+    if (platform if platform is not None else sys.platform) == "win32":
+        return _windows_pid_alive(
+            pid, win_api if win_api is not None else _ctypes_win_process_api(),
+        )
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -1373,7 +1638,7 @@ def pid_alive(pid: int) -> bool:
     return True
 
 
-def process_state(pid: int) -> str | None:
+def process_state(pid: int, *, platform: str | None = None) -> str | None:
     """The kernel's scheduler-state letter for *pid* (``R``, ``S``, ``D``,
     ``Z``, ``T``, ...), or ``None`` when it cannot be determined.
 
@@ -1390,8 +1655,15 @@ def process_state(pid: int) -> str | None:
     (macOS, BSD) ``ps -o state=`` is the portable equivalent; its output
     can carry trailing flag characters (``S+``, ``R<``), so only the first
     character is significant.
+
+    Windows has no scheduler-state letter and no zombie: a process that has
+    exited is simply dead, which :func:`pid_alive` already answers. So it
+    is always ``None`` there, which :func:`pid_running` reads as running,
+    and no ``ps`` is spawned (RDR-224, nexus-f9bgu.21).
     """
     if pid <= 0:
+        return None
+    if _is_windows(platform):
         return None
     if _procfs_available():
         try:
@@ -1452,9 +1724,155 @@ def pid_running(pid: int) -> bool:
 _POST_KILL_SETTLE_S: float = 5.0
 
 
-def terminate_pids(pids: list[int], *, grace_s: float = 10.0) -> list[int]:
-    """SIGTERM, wait up to *grace_s*, then SIGKILL. Returns pids still
-    RUNNING afterwards (never zombies — see :func:`pid_running`).
+def _is_gone_pid_error(exc: OSError, platform: str | None) -> bool:
+    """True for the errors a hard kill of a pid that is gone, or not ours, raises.
+
+    POSIX: ``ProcessLookupError`` (ESRCH) and ``PermissionError`` (EPERM), exactly
+    what every stop site caught before this was shared. Windows adds
+    ``OSError: [WinError 87]`` (``ERROR_INVALID_PARAMETER``, errno ``EINVAL``), what
+    ``os.kill`` raises there for a pid that has exited. Nothing else is a gone-pid
+    error: ``EINVAL`` on POSIX is a bad signal number, a programmer error that must
+    not read as "the process is already dead".
+    """
+    if isinstance(exc, (ProcessLookupError, PermissionError)):
+        return True
+    if _is_windows(platform):
+        return getattr(exc, "winerror", None) == ERROR_INVALID_PARAMETER or exc.errno == errno.EINVAL
+    return False
+
+
+def hard_kill_pid(pid: int, *, platform: str | None = None) -> bool:
+    """The platform's hard kill of one pid. Never raises for a pid that is gone.
+
+    ``True`` when the kill was delivered, ``False`` when the pid no longer
+    exists or is not ours to kill. Only the gone-pid errors are swallowed
+    (:func:`_is_gone_pid_error`); any other ``OSError`` propagates, so a
+    failure that is NOT "the process is already dead" is not reported as one
+    (RDR-224, nexus-f9bgu.33, review m3). On Windows ``os.kill`` of a pid that
+    has already exited raises ``OSError: [WinError 87]`` rather than
+    ``ProcessLookupError``, so a process that died between the grace wait and the
+    kill turned a stop into a traceback (measured on native Windows, RDR-224,
+    nexus-f9bgu.19). *platform* (default ``sys.platform``) is the seam that runs
+    that arm on every host.
+
+    Delivery is not death: ``SIGKILL`` and ``TerminateProcess`` both return
+    before the process has left the table. A caller that reports "stopped"
+    confirms with :func:`wait_for_exit`.
+    """
+    try:
+        os.kill(pid, KILL_SIGNAL)
+    except OSError as exc:
+        if _is_gone_pid_error(exc, platform):
+            return False
+        raise
+    return True
+
+
+def wait_for_exit(
+    pids: list[int], *, timeout_s: float = _POST_KILL_SETTLE_S, poll_s: float = 0.1,
+) -> list[int]:
+    """Wait up to *timeout_s* for every pid to stop RUNNING (zombies count as
+    stopped, see :func:`pid_running`); returns the pids still running.
+
+    The confirmation half of a stop: a stop is done when the targets have
+    exited, never when the signal was sent. ``stop_storage_service`` calls it
+    after its hard kill on EVERY platform (RDR-224, nexus-f9bgu.33, review m3):
+    POSIX used to send ``SIGKILL`` and move on, and now reports a supervisor that
+    outlives the kill by *timeout_s* (an unreaped or foreign-uid process) as
+    stubborn, so the CLI exits non-zero where it used to say "stopped". A
+    SIGKILLed child that is reaped promptly, or left a zombie, reads as exited.
+    """
+    live = [p for p in pids if pid_running(p)]
+    deadline = time.monotonic() + timeout_s
+    while live and time.monotonic() < deadline:
+        time.sleep(poll_s)
+        live = [p for p in live if pid_running(p)]
+    return live
+
+
+@dataclass(frozen=True)
+class GracefulStopSend:
+    """What :func:`request_graceful_stop` did for one pid.
+
+    ``sent`` means a stop signal was handed to the OS. It is NOT proof the
+    process will exit: on Windows the send can return ``TRUE`` and deliver
+    nothing, so a stop is confirmed by the target's exit (:func:`pid_alive`),
+    never by this. ``refused`` is the Windows cross-session case
+    (``AttachConsole`` access denied): the process was never signalled and
+    must NOT be hard-killed either. ``target_session`` and ``own_session``
+    are filled for a refusal so the caller can say where the stop has to come
+    from.
+    """
+
+    pid: int
+    sent: bool
+    refused: bool = False
+    gone: bool = False
+    error: int | None = None
+    target_session: int | None = None
+    own_session: int | None = None
+    #: Where a failed send stopped (``win_console.ConsoleBreakResult.stage``);
+    #: ``"helper"`` marks a refusal that is "could not ask", not "access denied".
+    stage: str | None = None
+
+
+def request_graceful_stop(
+    pid: int,
+    *,
+    platform: str | None = None,
+    console_api: "win_console.WinConsoleApi | None" = None,
+) -> GracefulStopSend:
+    """Ask *pid* to stop, the way its platform does it. Never raises.
+
+    POSIX: ``SIGTERM``, exactly as every stop site did before this existed
+    (a ``PermissionError`` is not a refusal there; the caller's escalation
+    ladder carries on as it always did). Windows: ``SIGTERM`` is
+    ``TerminateProcess``, which is the hard kill, so the stop is
+    ``CTRL_BREAK`` to the target's console process group, sent after
+    attaching to the target's console (:mod:`nexus.util.win_console`;
+    RDR-224, nexus-f9bgu.17). That reaches a target spawned with
+    ``CREATE_NEW_PROCESS_GROUP`` on a console, which is how the supervisor
+    and the engine are spawned.
+
+    *platform* (default ``sys.platform``) and *console_api* are injection
+    seams so both arms run under test on every host.
+    """
+    if not _is_windows(platform):
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            return GracefulStopSend(pid=pid, sent=False, gone=True)
+        except PermissionError:
+            return GracefulStopSend(pid=pid, sent=False)
+        return GracefulStopSend(pid=pid, sent=True)
+    if console_api is not None:
+        result = win_console.send_ctrl_break_via_console(pid, console_api)
+    else:
+        # Production: the attach/send sequence runs in a helper process, so the
+        # CLI's own console is never detached (nexus-f9bgu.33, review S2).
+        result = win_console.send_ctrl_break_via_helper(pid)
+    return GracefulStopSend(
+        pid=pid,
+        sent=result.sent,
+        refused=result.refused,
+        error=result.error,
+        target_session=result.target_session,
+        own_session=result.own_session,
+        stage=result.stage,
+    )
+
+
+def terminate_pids(
+    pids: list[int],
+    *,
+    grace_s: float = 10.0,
+    platform: str | None = None,
+    console_api: "win_console.WinConsoleApi | None" = None,
+    refused_out: list[GracefulStopSend] | None = None,
+) -> list[int]:
+    """Graceful stop (:func:`request_graceful_stop`), wait up to *grace_s*,
+    then the hard kill. Returns pids still RUNNING afterwards (never
+    zombies, see :func:`pid_running`).
 
     A SIGSTOPped process never acts on SIGTERM while stopped, which is
     exactly why the escalation to the uncatchable, unblockable SIGKILL is
@@ -1463,6 +1881,12 @@ def terminate_pids(pids: list[int], *, grace_s: float = 10.0) -> list[int]:
     reported as running here and still gets the escalation — only ``Z``
     (already dead, merely unreaped) is excluded.
 
+    A pid whose stop was REFUSED (Windows, another session: nothing could be
+    sent) is never escalated: the hard kill would do to it what the refusal
+    exists to avoid. It is left alone, counted among the returned survivors
+    when still running, and described in *refused_out* when that list is
+    given. The wait and the escalation cover only the pids that were sent.
+
     The survivor verdict is zombie-aware and bounded-retry rather than a
     single post-SIGKILL sleep (nexus-o8dil.21), which makes this tolerant
     of a CONCURRENT killer as a side effect: a pid another sweep already
@@ -1470,32 +1894,113 @@ def terminate_pids(pids: list[int], *, grace_s: float = 10.0) -> list[int]:
     yet reads as ``Z`` — neither is a survivor. Both legs previously
     produced a false "survived SIGKILL".
     """
-    live = [p for p in pids if pid_running(p)]
-    for pid in live:
-        try:
-            os.kill(pid, signal.SIGTERM)
-        except (ProcessLookupError, PermissionError):
-            pass
+    candidates = [p for p in pids if pid_running(p)]
+    refused: list[int] = []
+    live: list[int] = []
+    for pid in candidates:
+        send = request_graceful_stop(pid, platform=platform, console_api=console_api)
+        if send.refused:
+            refused.append(pid)
+            if refused_out is not None:
+                refused_out.append(send)
+        else:
+            live.append(pid)
     deadline = time.monotonic() + grace_s
     while time.monotonic() < deadline:
         live = [p for p in live if pid_running(p)]
         if not live:
-            return []
+            break
         time.sleep(0.2)
-    for pid in live:
+    else:
+        for pid in live:
+            hard_kill_pid(pid, platform=platform)
+        settle_deadline = time.monotonic() + _POST_KILL_SETTLE_S
+        while True:
+            live = [p for p in live if pid_running(p)]
+            if not live or time.monotonic() >= settle_deadline:
+                break
+            time.sleep(0.1)
+    return live + [p for p in refused if pid_running(p)]
+
+
+# -- stop marker (RDR-224, nexus-f9bgu.33) ----------------------------------
+#
+# A deliberate stop must beat the Windows Task Scheduler launcher
+# (``windows_autostart.run_launcher``), which respawns the supervisor after any
+# non-zero exit. The stop path writes this marker BEFORE it signals anything;
+# the launcher does not spawn (or respawn) while the marker is not older than
+# its last spawn; a start clears it. Windows only: launchd and systemd already
+# stand down on exit 0 and have no launcher of ours in front of them.
+
+
+def stop_marker_path(config_dir: Path, tier: str, scope_key: str) -> Path:
+    """``<config_dir>/<tier>_stop.<scope_key>``: one marker per service identity."""
+    return Path(config_dir) / f"{tier}_stop.{scope_key}"
+
+
+def write_stop_marker(
+    config_dir: Path,
+    tier: str,
+    scope_key: str,
+    *,
+    platform: str | None = None,
+    clock: Callable[[], float] = time.time,
+) -> Path | None:
+    """Record "a stop was requested now". Returns the path, or ``None`` off Windows.
+
+    Created owner-only through :func:`nexus._winsec.open_private` like every
+    other file in the config directory that steers a process. Written in place
+    (no temp file and rename): a reader that catches it mid-write falls back to
+    the file's own timestamp, and a rename would add a sharing-violation window.
+    """
+    if not _is_windows(platform):
+        return None
+    path = stop_marker_path(config_dir, tier, scope_key)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = open_private(path, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, platform=platform)
+    try:
+        os.write(fd, json.dumps({"requested_at": clock(), "pid": os.getpid()}).encode("utf-8"))
+    finally:
+        os.close(fd)
+    return path
+
+
+def stop_requested_since(config_dir: Path, tier: str, scope_key: str, since: float) -> bool:
+    """True when a stop marker exists that is not older than *since* (epoch seconds).
+
+    An unparseable or half-written marker is dated by its file time, so a
+    marker the launcher reads while the stop is still writing it still counts.
+    A missing marker, or one that cannot be read, is no request.
+    """
+    path = stop_marker_path(config_dir, tier, scope_key)
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
         try:
-            os.kill(pid, KILL_SIGNAL)
-        except (ProcessLookupError, PermissionError):
-            pass
-    settle_deadline = time.monotonic() + _POST_KILL_SETTLE_S
-    while True:
-        live = [p for p in live if pid_running(p)]
-        if not live or time.monotonic() >= settle_deadline:
-            return live
-        time.sleep(0.1)
+            return path.stat().st_mtime >= since
+        except OSError:
+            return False
+    except UnicodeDecodeError:
+        text = ""
+    try:
+        requested_at = float(json.loads(text)["requested_at"])
+    except (ValueError, KeyError, TypeError):
+        try:
+            requested_at = path.stat().st_mtime
+        except OSError:
+            return False
+    return requested_at >= since
 
 
-def storage_service_stack_matcher(config_dir: Path) -> Callable[[str], bool]:
+def clear_stop_marker(config_dir: Path, tier: str, scope_key: str) -> None:
+    """Remove the stop marker; a start's way of saying "run again". Idempotent."""
+    with contextlib.suppress(OSError):
+        stop_marker_path(config_dir, tier, scope_key).unlink()
+
+
+def storage_service_stack_matcher(
+    config_dir: Path, *, platform_tag: str | None = None, platform: str | None = None,
+) -> Callable[[str], bool]:
     """Argv predicate matching the storage-service SUPERVISOR (``nx daemon
     service start --foreground --config-dir <config_dir>``) or ENGINE
     (argv[0] under ``<config_dir>/service/nexus-service``) belonging to
@@ -1586,8 +2091,25 @@ def storage_service_stack_matcher(config_dir: Path) -> Callable[[str], bool]:
     process-table abstraction allows; it cannot help a config_dir that
     also embeds a value indistinguishable from a following flag or the
     NUL-turned-space bytes.
+
+    Windows spellings (RDR-224 test review m5, nexus-f9bgu.35): a Windows row
+    reaches this function through ``winproc_core.render_command_line``, so a
+    quoted, backslashed config_dir with a space in it is matched like any other
+    (``tests/daemon/test_windows_case_insensitive_paths.py``). A ``--config-dir``
+    spelt with a trailing separator or a ``\\\\?\\`` prefix is NOT normalised, on
+    purpose: every command line nexus writes (the CLI spawn, the Task Scheduler
+    launcher, the unit templates) is ``str(Path)``, which carries neither, so the
+    matcher reads what nexus writes; a hand-typed ``start --foreground`` in one
+    of those spellings is outside that contract and is still stopped through its
+    lease.
     """
-    engine_path = str(config_dir / "service" / "nexus-service")
+    # The installed engine is nexus-service.exe on Windows (nexus-f9bgu.15),
+    # so the exact path comes from the one function that knows that.
+    from nexus.daemon.binary_lifecycle import (  # noqa: PLC0415 — deferred: binary_lifecycle is a sibling the registry's import graph does not otherwise need
+        well_known_binary_path,
+    )
+
+    engine_path = str(well_known_binary_path(config_dir, platform_tag=platform_tag))
     target = str(config_dir)
     # nexus-cd1k0.6 finding (9): an engine launched via an EXPLICIT
     # NEXUS_SERVICE_BIN / NEXUS_SERVICE_JAR override (the dev/test opt-in
@@ -1623,10 +2145,21 @@ def storage_service_stack_matcher(config_dir: Path) -> Callable[[str], bool]:
     # function itself, so this never depends on this process's own
     # NEXUS_CONFIG_DIR.
     is_default_target = config_dir == (Path.home() / ".config" / "nexus")
-    config_dir_eq = f" --config-dir={target}"
-    config_dir_sp = f" --config-dir {target}"
+    # Windows paths compare case-insensitively (RDR-224, nexus-f9bgu.33, review
+    # m7): the process table spells a path however its launcher did, so every
+    # comparison below is made on case-folded text. ``fold`` is the identity
+    # elsewhere, so POSIX matching is byte-for-byte what it was.
+    fold: Callable[[str], str] = str.lower if _is_windows(platform) else (lambda text: text)
+    engine_path = fold(engine_path)
+    if engine_override_path is not None:
+        engine_override_path = fold(engine_override_path)
+    if jar_override_marker is not None:
+        jar_override_marker = fold(jar_override_marker)
+    config_dir_eq = fold(f" --config-dir={target}")
+    config_dir_sp = fold(f" --config-dir {target}")
 
     def _match(command: str) -> bool:
+        command = fold(command)
         if command == engine_path or command.startswith(engine_path + " "):
             return True
         if engine_override_path is not None and (
@@ -1662,6 +2195,10 @@ class ProcessSweepResult:
     error: str | None
     found: tuple[tuple[int, str], ...]
     stubborn: tuple[int, ...]
+    #: Windows only: matched processes that could not be reached at all
+    #: (another session; nexus-f9bgu.17). They were not signalled and not
+    #: killed, and they are also among ``stubborn`` while still running.
+    refused: tuple[GracefulStopSend, ...] = ()
 
     @property
     def pids(self) -> tuple[int, ...]:
@@ -1725,7 +2262,13 @@ def sweep_matching_processes(
     if not found:
         return ProcessSweepResult(available=True, error=None, found=(), stubborn=())
 
-    stubborn = tuple(terminate_pids([pid for pid, _cmd in found], grace_s=grace_s))
+    refused: list[GracefulStopSend] = []
+    stubborn = tuple(
+        terminate_pids(
+            [pid for pid, _cmd in found], grace_s=grace_s, refused_out=refused,
+        )
+    )
     return ProcessSweepResult(
         available=True, error=None, found=tuple(found), stubborn=stubborn,
+        refused=tuple(refused),
     )

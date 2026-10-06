@@ -41,6 +41,12 @@ needs — nothing about the box's installed generation should ever be able
 to widen what it denies. A seventh script appearing is drift the lint
 refuses until someone argues for it.
 
+THE LAUNCHER IS `uv`, NOT `python3` (nexus-efk2h, RDR-224 Phase 4). Stock
+Windows has no `python3` on PATH, so a conexus entry launched through it
+never fires there; the governance gates among them never ran. The seven
+plugin-resident entries (four scripts and three nx-hook shim entries) now launch through `uv` with sn's argv plus the 3.12 request. Direct `nx-hook` entries are
+unchanged: the console script is `nx-hook.exe` on Windows.
+
 sn left `python3` for the same reason (nexus-j4iy0) by a different route. It
 ships no Python package, so it has no console script to ride; it runs its
 own stdlib scripts through `uv`, which it already requires because Serena
@@ -53,6 +59,7 @@ cwd and uv 0.12 above the script's directory, so the flag covers both.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -96,10 +103,27 @@ MCP_SERVER = "plugin:conexus:nexus"
 #: Equality targets, never substrings. See the module docstring.
 FORBIDDEN_TOKENS = frozenset({"bash", "sh", "nx"})
 
-CONEXUS_COMMANDS = frozenset({"nx-hook", "nx-session-end-launcher", "python3"})
+#: `python3` is NOT here. It is not on PATH on stock Windows, so an entry
+#: launched through it never fires there (nexus-efk2h). The plugin-resident
+#: scripts and the shim go through `uv` instead, with sn's argv.
+CONEXUS_COMMANDS = frozenset({"nx-hook", "nx-session-end-launcher", "uv"})
+
+#: Everything before the script path, in order: sn's argv (:data:`SN_UV_ARGV`).
+#: The interpreter floor is NOT in the argv. The conexus scripts refuse Python
+#: 3.11 and older, and without a request uv runs them under whatever it finds
+#: first (a ``/usr/bin/python3`` 3.9, or a ``.venv`` above the cwd even under
+#: ``--no-project``, measured). On POSIX a script re-execs into the install
+#: generation's interpreter, which is why that used to be survivable; on
+#: Windows it cannot (no ``bin/python``, and ``os.execv`` there spawns and
+#: exits), so the old interpreter would fail every hook open, silently. Each
+#: script carries a PEP 723 ``requires-python = ">=3.12"`` block, which uv
+#: reads; ``test_every_launched_script_declares_the_interpreter_floor`` pins
+#: it. A ``--python ">=3.12"`` argv would do the same job but puts ``>`` in
+#: argv, which a shell would read as a redirect.
+CONEXUS_UV_ARGV = ("run", "--no-project", "--no-config", "--quiet")
 
 #: The stdlib wrapper an entry uses for a verb that some fail-closed CLI
-#: (7.55.0 through 7.57.x) does not register: `python3 <shim> <verb>`.
+#: (7.55.0 through 7.57.x) does not register: `uv run ... <shim> <verb>`.
 #: tests/test_hooks_json_verb_release_floor.py decides which entries must use it.
 NX_HOOK_SHIM = "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/nx_hook_shim.py"
 
@@ -220,19 +244,25 @@ def reject_conexus(event: str, entry: dict) -> str | None:
             f"runs `nx-session-end-launcher` with {len(args)} args; it takes "
             f"none, and its empty `args` is what makes the entry exec form."
         )
-    if command == "python3":
-        if args and args[0] == NX_HOOK_SHIM:
-            if len(args) != 2:
-                return f"runs the nx-hook shim with {len(args) - 1} verbs; exactly one is permitted"
-            if args[1] not in VERB_TABLE:
-                return f"runs the nx-hook shim on {args[1]!r}, which this wheel does not register"
-            return None
-        if len(args) != 1:
-            return f"runs python3 with {len(args)} args; exactly one script path is permitted"
-        if args[0] not in PLUGIN_RESIDENT_SCRIPTS:
+    if command == "uv":
+        if tuple(args[: len(CONEXUS_UV_ARGV)]) != CONEXUS_UV_ARGV:
             return (
-                f"runs python3 on {args[0]!r}, which is not one of the five "
-                f"handlers bead .21 resolved as plugin-resident."
+                f"runs uv with {args!r}; the argv must begin with "
+                f"{list(CONEXUS_UV_ARGV)} (nexus-efk2h)"
+            )
+        rest = args[len(CONEXUS_UV_ARGV):]
+        if rest and rest[0] == NX_HOOK_SHIM:
+            if len(rest) != 2:
+                return f"runs the nx-hook shim with {len(rest) - 1} verbs; exactly one is permitted"
+            if rest[1] not in VERB_TABLE:
+                return f"runs the nx-hook shim on {rest[1]!r}, which this wheel does not register"
+            return None
+        if len(rest) != 1:
+            return f"runs uv with {len(rest)} trailing args; exactly one script path is permitted"
+        if rest[0] not in PLUGIN_RESIDENT_SCRIPTS:
+            return (
+                f"runs uv on {rest[0]!r}, which is not one of the plugin-resident "
+                f"handlers (PLUGIN_RESIDENT_SCRIPTS)."
             )
     return None
 
@@ -282,6 +312,31 @@ def reject_sn(event: str, entry: dict) -> str | None:
 # --------------------------------------------------------------------------
 # The real manifests
 # --------------------------------------------------------------------------
+
+
+def test_every_launched_script_declares_the_interpreter_floor() -> None:
+    """The floor lives in the script, not the argv (nexus-efk2h).
+
+    Every conexus entry that launches a plugin script through uv must name a
+    script carrying a PEP 723 block with ``requires-python = ">=3.12"``, the
+    floor the script's own guard enforces. Without it uv runs the script under
+    the first interpreter it finds, which on Windows can be one the script
+    refuses, and the hook then fails open.
+    """
+    scripts = {
+        rest[0]
+        for _, entry in _walk(CONEXUS_HOOKS)
+        if entry.get("command") == "uv"
+        for rest in [entry["args"][len(CONEXUS_UV_ARGV):]]
+        if rest and rest[0] != NX_HOOK_SHIM
+    }
+    assert scripts == PLUGIN_RESIDENT_SCRIPTS, scripts
+    for script in sorted(scripts):
+        text = (REPO_ROOT / "conexus" / script.removeprefix("${CLAUDE_PLUGIN_ROOT}/")).read_text()
+        match = re.search(r"(?m)^# /// script$\n((?:^#(?: .*)?$\n)+?)^# ///$", text)
+        assert match, f"{script} has no PEP 723 `# /// script` block, so uv cannot see its floor"
+        body = "\n".join(line.removeprefix("# ").removeprefix("#") for line in match.group(1).splitlines())
+        assert 'requires-python = ">=3.12"' in body, f"{script}: {body!r}"
 
 
 def test_the_walk_is_not_vacuous() -> None:
@@ -342,8 +397,11 @@ CONEXUS_REJECTS = [
         "SessionStart",
         {
             "type": "command",
-            "command": "python3",
-            "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/scripts/old_hook.sh"],
+            "command": "uv",
+            "args": [
+                "run", "--no-project", "--no-config", "--quiet",
+                "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/old_hook.sh",
+            ],
         },
         id="dot-sh-in-args",
     ),
@@ -391,29 +449,36 @@ CONEXUS_REJECTS = [
         "UserPromptSubmit",
         {
             "type": "command",
-            "command": "python3",
-            "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/scripts/rdr_hook.py"],
+            "command": "uv",
+            "args": [
+                "run", "--no-project", "--no-config", "--quiet",
+                "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/rdr_hook.py",
+            ],
         },
-        id="python3-on-a-script-outside-the-five",
+        id="uv-on-a-script-outside-the-plugin-resident-set",
     ),
     pytest.param(
         "UserPromptSubmit",
         {
             "type": "command",
-            "command": "python3",
+            "command": "uv",
             "args": [
+                "run", "--no-project", "--no-config", "--quiet",
                 "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/mailbox_drain.py",
                 "--extra",
             ],
         },
-        id="python3-with-a-second-argument",
+        id="uv-with-a-second-argument",
     ),
     pytest.param(
         "UserPromptSubmit",
         {
             "type": "command",
-            "command": "python3",
-            "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/scripts/nx_hook_shim.py", "no-such-verb"],
+            "command": "uv",
+            "args": [
+                "run", "--no-project", "--no-config", "--quiet",
+                "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/nx_hook_shim.py", "no-such-verb",
+            ],
         },
         id="shim-on-an-unregistered-verb",
     ),
@@ -421,14 +486,47 @@ CONEXUS_REJECTS = [
         "UserPromptSubmit",
         {
             "type": "command",
-            "command": "python3",
+            "command": "uv",
             "args": [
+                "run", "--no-project", "--no-config", "--quiet",
                 "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/nx_hook_shim.py",
                 "mailbox-drain",
                 "mcp-connect-check",
             ],
         },
         id="shim-with-two-verbs",
+    ),
+    # nexus-efk2h: python3 is not on PATH on stock Windows, so no conexus
+    # entry may launch through it, whatever it runs.
+    pytest.param(
+        "UserPromptSubmit",
+        {
+            "type": "command",
+            "command": "python3",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/scripts/mailbox_drain.py"],
+        },
+        id="python3-launcher-is-not-permitted",
+    ),
+    pytest.param(
+        "UserPromptSubmit",
+        {
+            "type": "command",
+            "command": "uv",
+            "args": [
+                "run", "--quiet",
+                "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/mailbox_drain.py",
+            ],
+        },
+        id="uv-without-no-project-and-no-config",
+    ),
+    pytest.param(
+        "UserPromptSubmit",
+        {
+            "type": "command",
+            "command": "uv",
+            "args": ["run", "--no-project", "--no-config", "--quiet"],
+        },
+        id="uv-with-no-script",
     ),
     # The default-branch gap. Each of these was ACCEPTED before
     # nexus-q02nx.29, because anything that was not `mcp_tool` fell

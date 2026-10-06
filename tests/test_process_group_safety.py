@@ -20,7 +20,18 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from nexus.util.process_group import safe_killpg
+from nexus.util.process_group import KILL_SIGNAL, safe_killpg
+from tests.daemon._children import CHILD_PYTHON, OWN_GROUP
+
+#: The primitive ``safe_killpg`` signals through on this host: ``os.killpg`` where it
+#: exists, ``os.kill`` on Windows (one process, no group). A test that traces "no
+#: signal was delivered" traces THIS name, so the property is checked on both.
+_KILL_PRIMITIVE = "killpg" if hasattr(os, "killpg") else "kill"
+
+#: A real group-less kill of a live pid exists on both platforms; the liveness probe
+#: ``sig=0`` does not (``os.kill(pid, 0)`` is ``CTRL_C_EVENT`` on Windows), so it is
+#: taken only where ``os.killpg`` is.
+_POSIX = hasattr(os, "killpg")
 
 
 class TestMockGuard:
@@ -43,27 +54,27 @@ class TestMockGuard:
         # signal) for the real-pgid branch, but MagicMock should never
         # reach it.
         import nexus.util.process_group as mod
-        original_killpg = os.killpg
+        original = getattr(os, _KILL_PRIMITIVE)
         calls: list[tuple] = []
 
-        def _trace_killpg(pgid, sig):
-            calls.append((pgid, sig))
-            return original_killpg(pgid, sig)
+        def _trace(target, sig):
+            calls.append((target, sig))
+            return original(target, sig)
 
-        mod.os.killpg = _trace_killpg  # type: ignore[assignment]
+        setattr(mod.os, _KILL_PRIMITIVE, _trace)
         try:
-            assert safe_killpg(proc, signal.SIGKILL) is False
+            assert safe_killpg(proc, KILL_SIGNAL) is False
         finally:
-            mod.os.killpg = original_killpg  # type: ignore[assignment]
+            setattr(mod.os, _KILL_PRIMITIVE, original)
         assert calls == [], (
-            f"safe_killpg invoked os.killpg {calls!r} for a mock proc — "
+            f"safe_killpg invoked os.{_KILL_PRIMITIVE} {calls!r} for a mock proc — "
             "the isinstance(pid, int) guard is broken"
         )
 
     def test_magicmock_bare_pid_returns_false(self):
         """Same contract when a bare mock is passed instead of a proc wrapper."""
         mock_pid = MagicMock()
-        assert safe_killpg(mock_pid, signal.SIGKILL) is False
+        assert safe_killpg(mock_pid, KILL_SIGNAL) is False
 
 
 class TestRealSubprocess:
@@ -72,20 +83,21 @@ class TestRealSubprocess:
         signalable via safe_killpg.
         """
         proc = subprocess.Popen(
-            [sys.executable, "-c", "import time; time.sleep(10)"],
-            start_new_session=True,
+            [CHILD_PYTHON, "-c", "import time; time.sleep(10)"],
+            **OWN_GROUP,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
         try:
-            # Probe that the PID exists first (signal 0 is the portable
-            # "liveness" test — does not deliver a signal).
-            assert safe_killpg(proc, 0) is True, (
-                "live subprocess is unreachable via its own pgid"
-            )
+            if _POSIX:
+                # Probe that the PID exists first (signal 0 is the portable
+                # "liveness" test on POSIX — does not deliver a signal).
+                assert safe_killpg(proc, 0) is True, (
+                    "live subprocess is unreachable via its own pgid"
+                )
 
             # Now actually kill it.
-            assert safe_killpg(proc, signal.SIGKILL) is True
+            assert safe_killpg(proc, KILL_SIGNAL) is True
         finally:
             try:
                 proc.wait(timeout=5)
@@ -98,14 +110,15 @@ class TestRealSubprocess:
         pass the int directly instead of wrapping in a proc-like object.
         """
         proc = subprocess.Popen(
-            [sys.executable, "-c", "import time; time.sleep(10)"],
-            start_new_session=True,
+            [CHILD_PYTHON, "-c", "import time; time.sleep(10)"],
+            **OWN_GROUP,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
         try:
-            assert safe_killpg(proc.pid, 0) is True
-            assert safe_killpg(proc.pid, signal.SIGKILL) is True
+            if _POSIX:
+                assert safe_killpg(proc.pid, 0) is True
+            assert safe_killpg(proc.pid, KILL_SIGNAL) is True
         finally:
             try:
                 proc.wait(timeout=5)
@@ -120,18 +133,19 @@ class TestErrorSwallowing:
         # Very high PID unlikely to be in use. If by chance it maps to a
         # real process, the test will still be correct — safe_killpg
         # returns True only when the signal is actually delivered.
-        assert safe_killpg(2**30 - 1, 0) in (False, True)
+        if _POSIX:  # sig 0 is CTRL_C_EVENT on Windows, not a probe
+            assert safe_killpg(2**30 - 1, 0) in (False, True)
         # The False path is what we're testing. Force it with a sentinel
         # that OS will always reject — negative PIDs are never valid.
-        assert safe_killpg(-1, signal.SIGKILL) is False
+        assert safe_killpg(-1, KILL_SIGNAL) is False
 
     def test_never_raises_for_common_failure_modes(self):
         """Helper must swallow ProcessLookupError / PermissionError / OSError."""
         # Non-int — handled by the mock-guard branch.
-        assert safe_killpg("not-a-pid", signal.SIGKILL) is False
-        assert safe_killpg(None, signal.SIGKILL) is False
+        assert safe_killpg("not-a-pid", KILL_SIGNAL) is False
+        assert safe_killpg(None, KILL_SIGNAL) is False
         # Negative int — kernel rejects.
-        assert safe_killpg(-42, signal.SIGKILL) is False
+        assert safe_killpg(-42, KILL_SIGNAL) is False
 
 
 class TestNonPositivePidGuard:
@@ -145,17 +159,17 @@ class TestNonPositivePidGuard:
         """pid=0 must not signal the caller's own process group."""
         import nexus.util.process_group as mod
         calls: list[tuple] = []
-        original_killpg = os.killpg
+        original_killpg = getattr(os, _KILL_PRIMITIVE)
 
         def _trace_killpg(pgid, sig):
             calls.append((pgid, sig))
             return original_killpg(pgid, sig)
 
-        mod.os.killpg = _trace_killpg  # type: ignore[assignment]
+        setattr(mod.os, _KILL_PRIMITIVE, _trace_killpg)
         try:
-            assert safe_killpg(0, signal.SIGKILL) is False
+            assert safe_killpg(0, KILL_SIGNAL) is False
         finally:
-            mod.os.killpg = original_killpg  # type: ignore[assignment]
+            setattr(mod.os, _KILL_PRIMITIVE, original_killpg)
         assert calls == [], (
             f"safe_killpg(0, …) invoked os.killpg {calls!r} — the "
             "pid <= 0 guard is broken and would kill the caller's own "
@@ -167,18 +181,18 @@ class TestNonPositivePidGuard:
         call — do not trust the OS to always reject and never reach killpg."""
         import nexus.util.process_group as mod
         calls: list[tuple] = []
-        original_killpg = os.killpg
+        original_killpg = getattr(os, _KILL_PRIMITIVE)
 
         def _trace_killpg(pgid, sig):
             calls.append((pgid, sig))
             return original_killpg(pgid, sig)
 
-        mod.os.killpg = _trace_killpg  # type: ignore[assignment]
+        setattr(mod.os, _KILL_PRIMITIVE, _trace_killpg)
         try:
-            assert safe_killpg(-1, signal.SIGKILL) is False
-            assert safe_killpg(-42, signal.SIGKILL) is False
+            assert safe_killpg(-1, KILL_SIGNAL) is False
+            assert safe_killpg(-42, KILL_SIGNAL) is False
         finally:
-            mod.os.killpg = original_killpg  # type: ignore[assignment]
+            setattr(mod.os, _KILL_PRIMITIVE, original_killpg)
         assert calls == [], (
             "safe_killpg invoked os.killpg for a negative pid — guard broken"
         )
@@ -189,6 +203,12 @@ class TestNonPositivePidGuard:
 # cannot see once the leader is reaped.
 
 
+@pytest.mark.skipif(
+    not _POSIX,
+    reason="a process GROUP of an exited leader exists only on POSIX; on Windows safe_killpg_group "
+    "refuses by design (a recorded pid is not safe to kill by number), pinned by "
+    "test_group_sweep_refuses_unsafe_ids and the Windows-shaped probe below",
+)
 def test_group_sweep_reaches_children_of_an_exited_leader(tmp_path):
     import subprocess
     import sys
@@ -239,7 +259,7 @@ def test_group_sweep_refuses_unsafe_ids(pgid, monkeypatch):
     from nexus.util.process_group import safe_killpg_group
 
     calls: list = []
-    monkeypatch.setattr(os, "killpg", lambda g, s: calls.append(g))
+    monkeypatch.setattr(os, "killpg", lambda g, s: calls.append(g), raising=False)
     assert safe_killpg_group(pgid) is False
     assert calls == []
 
@@ -253,11 +273,15 @@ def test_group_sweep_refuses_unsafe_ids(pgid, monkeypatch):
 _WINDOWS_SHAPED_PROBE = r"""
 import json, os, signal, subprocess, sys, time
 for name in ("killpg", "getpgid"):
-    delattr(os, name)
-del signal.SIGKILL
+    if hasattr(os, name):
+        delattr(os, name)
+if hasattr(signal, "SIGKILL"):
+    del signal.SIGKILL
 from nexus.util import process_group as pg
 
-child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+# The base interpreter: a venv python.exe on Windows is a launcher whose child is
+# the process that sleeps, and a kill by the launcher's pid would not reach it.
+child = subprocess.Popen([getattr(sys, "_base_executable", sys.executable), "-c", "import time; time.sleep(60)"])
 time.sleep(0.2)
 group = pg.safe_killpg_group(child.pid)
 alive_after_group = child.poll() is None
@@ -286,13 +310,15 @@ def test_windows_shaped_platform_imports_and_degrades_honestly():
     assert result["alive_after_group"] is True
     # One process: signalled directly, and reported as delivered.
     assert result["single"] is True
-    assert result["returncode"] == -signal.SIGTERM
+    # TerminateProcess's exit code is the signal number; POSIX reports it negated.
+    assert result["returncode"] == (signal.SIGTERM if sys.platform == "win32" else -signal.SIGTERM)
 
 
-def test_kill_signal_is_sigkill_on_posix():
-    from nexus.util.process_group import KILL_SIGNAL
-
-    assert KILL_SIGNAL == signal.SIGKILL
+def test_kill_signal_is_the_platforms_hard_kill():
+    """SIGKILL where the platform has it; SIGTERM, which is TerminateProcess,
+    on Windows, which does not."""
+    assert KILL_SIGNAL == getattr(signal, "SIGKILL", signal.SIGTERM)
+    assert (KILL_SIGNAL == getattr(signal, "SIGKILL", None)) is hasattr(signal, "SIGKILL")
 
 
 # nexus-6y4e0: real Windows containment via a Job Object. isolation_popen_kwargs
@@ -306,6 +332,11 @@ def test_kill_signal_is_sigkill_on_posix():
 
 
 class TestIsolationPopenKwargsPosix:
+    @pytest.mark.skipif(
+        not _POSIX,
+        reason="the POSIX arm dispatches on os.killpg being present; a Windows host takes the Windows arm "
+        "(TestIsolationPopenKwargsWindowsShaped pins it, and runs here too)",
+    )
     def test_returns_start_new_session_true(self):
         from nexus.util.process_group import isolation_popen_kwargs
 
@@ -325,6 +356,11 @@ class TestIsolationPopenKwargsWindowsShaped:
 
 
 class TestContainPosix:
+    @pytest.mark.skipif(
+        not _POSIX,
+        reason="contain() is a no-op only where os.killpg exists; a Windows host takes the Job Object arm "
+        "(TestContainAndKillTreeWindowsShaped pins it, and runs here too)",
+    )
     def test_returns_none_without_touching_win_job(self, monkeypatch):
         """On POSIX, start_new_session=True already contains the tree via a
         process group -- contain() must be a pure no-op, never reaching for

@@ -1,0 +1,44 @@
+Microsoft (R) COFF/PE Dumper Version 14.44.35229.0
+Copyright (C) Microsoft Corporation.  All rights reserved.
+
+
+Dump of file src\service\target\nexus-service.exe
+
+File Type: EXECUTABLE IMAGE
+
+  Image has the following dependencies:
+
+    VERSION.dll
+    ADVAPI32.dll
+    WS2_32.dll
+    USERENV.dll
+    USER32.dll
+    KERNEL32.dll
+    VCRUNTIME140.dll
+    VCRUNTIME140_1.dll
+    api-ms-win-crt-runtime-l1-1-0.dll
+    api-ms-win-crt-string-l1-1-0.dll
+    api-ms-win-crt-environment-l1-1-0.dll
+    api-ms-win-crt-heap-l1-1-0.dll
+    api-ms-win-crt-convert-l1-1-0.dll
+    api-ms-win-crt-stdio-l1-1-0.dll
+    api-ms-win-crt-filesystem-l1-1-0.dll
+    api-ms-win-crt-math-l1-1-0.dll
+    api-ms-win-crt-locale-l1-1-0.dll
+    WINHTTP.dll
+    PSAPI.DLL
+    ncrypt.dll
+    CRYPT32.dll
+    Secur32.dll
+    IPHLPAPI.DLL
+    MSWSOCK.dll
+
+  Summary
+
+        4000 .data
+       FA000 .pdata
+       BB000 .rdata
+       75000 .reloc
+        8000 .rodata
+     48B0000 .svm_hea
+     2E5C000 .text

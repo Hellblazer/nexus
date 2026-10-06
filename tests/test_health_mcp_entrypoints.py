@@ -226,6 +226,35 @@ class TestResolveMcpBinary:
         assert path == str(installed_dir / "nx-mcp")
         assert is_own_venv is False
 
+    def test_a_hit_from_outside_the_scanned_directory_is_ignored(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """RDR-224 (nexus-f9bgu.35): on Windows, Python 3.12's ``which``
+        searches the current directory first even when ``path=`` names one
+        directory, so a planted ``nx-mcp.exe`` in the cwd would come back for
+        every PATH entry and be spawned by ``nx doctor``. A hit is accepted
+        only when it lives in the directory being scanned."""
+        planted = tmp_path / "project" / "nx-mcp"
+        planted.parent.mkdir()
+        _write_fake_binary(planted, _HEALTHY_NEXUS_RESPONSE)
+        installed_dir = tmp_path / "installed-bin"
+        installed_dir.mkdir()
+        _write_fake_binary(installed_dir / "nx-mcp", _HEALTHY_NEXUS_RESPONSE)
+        empty_dir = tmp_path / "empty-bin"
+        empty_dir.mkdir()
+        monkeypatch.setenv("PATH", f"{empty_dir}{os.pathsep}{installed_dir}")
+        monkeypatch.setattr("nexus.health.sys.prefix", str(tmp_path / "elsewhere"))
+
+        def _which_with_cwd_first(name, path=None):
+            # The Windows behaviour: the cwd wins before the named directory.
+            return str(planted)
+
+        monkeypatch.setattr("nexus.health.shutil.which", _which_with_cwd_first)
+
+        path, _ = _resolve_mcp_binary("nx-mcp")
+
+        assert path != str(planted)
+
     def test_home_scoping_prefers_own_venv_over_foreign_home_install(
         self, tmp_path: Path, monkeypatch
     ) -> None:

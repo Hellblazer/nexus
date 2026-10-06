@@ -15,7 +15,7 @@ import sys
 
 import pytest
 
-from tests import _posix_spawn as ps
+ps = pytest.importorskip("tests._posix_spawn", reason="fcntl/posix_spawn: not on native Windows (nexus-f9bgu.19)")
 
 pytestmark = pytest.mark.skipif(not ps.ACTIVE, reason="posix_spawn adapter is macOS-only")
 

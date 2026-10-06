@@ -1,0 +1,29 @@
+name: Stop stray engine and Postgres processes (Windows runner)
+description: >-
+  End-of-job cleanup for the self-hosted win-release runner (RDR-224, nexus-f9bgu.27,
+  critique O7). Call it as the LAST step of every Windows job with `if: always()`, so it
+  also runs when the run is cancelled (the workflows cancel superseded runs). The smokes
+  start Postgres and the engine in their own process groups, and a cancelled step does
+  not always take them with it: a stray postgres.exe holds its data directory open, so
+  the runner cannot empty RUNNER_TEMP afterwards.
+
+  Stops a nexus-service.exe, postgres.exe, pg_ctl.exe or initdb.exe ONLY when its
+  executable lies under this job's RUNNER_TEMP or GITHUB_WORKSPACE, never by bare name:
+  the box runs other Postgres instances. Fails the job when a match cannot be stopped.
+  Build work directories are made under RUNNER_TEMP, which the runner empties between
+  jobs; this step is what lets that happen.
+
+runs:
+  using: composite
+  steps:
+    - name: Stop stray processes started from this job's directories
+      shell: pwsh
+      run: |
+        if (-not $env:PYTHON -or -not (Test-Path 'scripts\windows_job_cleanup.py')) {
+          # The job ended before Python was resolved or the repository was checked out:
+          # nothing from this job can have been started.
+          Write-Host 'cleanup: no resolved Python or no checkout, so nothing of this job is running'
+          exit 0
+        }
+        & $env:PYTHON scripts\windows_job_cleanup.py --under "$env:RUNNER_TEMP" --under "$env:GITHUB_WORKSPACE"
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

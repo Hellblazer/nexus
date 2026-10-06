@@ -16,6 +16,7 @@ import structlog
 import yaml
 
 from nexus._locking import lock_fd, unlock_fd
+from nexus._winsec import restrict_to_owner
 
 _log = structlog.get_logger(__name__)
 
@@ -1414,8 +1415,8 @@ def set_config_value(dotted_key: str, value: str | bool) -> None:
         tmp_fd, tmp_path = tempfile.mkstemp(dir=path.parent, prefix=".config_")
         try:
             with os.fdopen(tmp_fd, "w") as fh:
+                restrict_to_owner(tmp_path)  # before any secret byte is written; os.replace keeps this file's ACL
                 fh.write(content)
-            os.chmod(tmp_path, 0o600)
             os.replace(tmp_path, path)
         except Exception:
             try:
@@ -1445,8 +1446,8 @@ def set_credential(name: str, value: str) -> None:
         tmp_fd, tmp_path = tempfile.mkstemp(dir=path.parent, prefix=".config_")
         try:
             with os.fdopen(tmp_fd, "w") as fh:
+                restrict_to_owner(tmp_path)  # before any secret byte is written; os.replace keeps this file's ACL
                 fh.write(content)
-            os.chmod(tmp_path, 0o600)
             os.replace(tmp_path, path)
         except Exception:
             try:
@@ -1490,8 +1491,8 @@ def unset_credential(name: str) -> bool:
         tmp_fd, tmp_path = tempfile.mkstemp(dir=path.parent, prefix=".config_")
         try:
             with os.fdopen(tmp_fd, "w") as fh:
+                restrict_to_owner(tmp_path)  # before any secret byte is written; os.replace keeps this file's ACL
                 fh.write(content)
-            os.chmod(tmp_path, 0o600)
             os.replace(tmp_path, path)
         except Exception:
             try:

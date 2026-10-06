@@ -1,12 +1,11 @@
 # MCP tools vs agents
 
-> **Note**: despite living under `exploration/`, this is a LIVE normative rule
-> — architecture.md:1054 and querying-guide.md:224 delegate to it. Not a
+> **Note**: despite living under `exploration/`, this is a LIVE normative rule:
+> architecture.md:1054 and querying-guide.md:224 delegate to it. Not a
 > candidate for archive.
 
 When should a capability ship as an **MCP tool** versus a **Claude Code agent**?
-This page encodes the boundary rule from RDR-080 and the practical patterns
-that followed.
+This page encodes the boundary rule from RDR-080.
 
 ## The rule
 
@@ -15,30 +14,27 @@ that followed.
 > multi-turn reasoning, tool selection, or context accumulation across turns,
 > it is an agent.
 
-Single-shot and single-purpose → MCP tool.  Multi-turn with judgement calls →
-agent.
-
 ## Why it matters
 
-Agents are expensive to invoke — a sub-agent spawn loads a full system prompt,
+Agents are expensive to invoke. A sub-agent spawn loads a full system prompt,
 pulls plugin context, and runs multiple LLM turns before returning.  If the
-underlying operation is really a structured call with a fixed schema (extract
+underlying operation is a structured call with a fixed schema (extract
 these fields, rank these items, summarise this text), wrapping it in an agent
-burns tokens and latency for no benefit.
+burns tokens and latency.
 
-Conversely, some operations really do need multi-turn reasoning: deciding
+Conversely, some operations do need multi-turn reasoning: deciding
 which file to look at next based on what the last file said, revising a
 hypothesis after gathering evidence, or planning a multi-step retrieval from
 an ambiguous intent.  Those don't compress into a single `claude -p`
 invocation without losing their essence.
 
 **Operator bundling is the middle ground** (v4.10.0). A fixed-shape
-operator *pipeline* — extract → rank → summarise, where each step has
+operator *pipeline* (extract → rank → summarise, where each step has
 a known contract and the downstream step feeds on the upstream step's
-output — *does* compress into one `claude -p` call. The LLM carries
+output) *does* compress into one `claude -p` call. The LLM carries
 the intermediate state in its reasoning window; the host side only
 sees the terminal output. This isn't multi-turn reasoning getting
-crushed into one turn; it's a deterministic DAG running in one
+crushed into one turn. It's a deterministic DAG running in one
 subprocess instead of N. Measured win on real corpora: 55-72% latency
 reduction on plans with multiple consecutive operators. See
 [plan-centric-retrieval.md §Operator bundling](../plan-centric-retrieval.md#operator-bundling-v4100).
@@ -52,15 +48,15 @@ reduction on plans with multiple consecutive operators. See
 | Bead enrichment | `plan-enricher` agent | `mcp__plugin_conexus_nexus__nx_enrich_beads` |
 | Multi-step retrieval | `query-planner` + `analytical-operator` agents | `mcp__plugin_conexus_nexus__nx_answer` |
 | PDF indexing | `pdf-chromadb-processor` agent | `nx index pdf` CLI / direct ingest |
-| Code review | `code-review-expert` agent | (kept) — multi-turn inspection with judgement |
-| Debugging | `debugger` agent | (kept) — hypothesis → evidence → revise loop |
-| Research synthesis | `deep-research-synthesizer` agent | (kept) — cross-source comparison + synthesis |
-| Strategic planning | `strategic-planner` agent | (kept) — multi-phase decomposition, tradeoffs |
-| Architecture design | `architect-planner` agent | (kept) — design alternatives, phased plans |
-| Code analysis | `codebase-deep-analyzer` agent | (kept) — exploration + dependency mapping |
-| Substantive critique | `substantive-critic` agent | (kept) — multi-axis review |
+| Code review | `code-review-expert` agent | (kept): multi-turn inspection with judgement |
+| Debugging | `debugger` agent | (kept): hypothesis → evidence → revise loop |
+| Research synthesis | `deep-research-synthesizer` agent | (kept): cross-source comparison + synthesis |
+| Strategic planning | `strategic-planner` agent | (kept): multi-phase decomposition, tradeoffs |
+| Architecture design | `architect-planner` agent | (kept): design alternatives, phased plans |
+| Code analysis | `codebase-deep-analyzer` agent | (kept): exploration + dependency mapping |
+| Substantive critique | `substantive-critic` agent | (kept): multi-axis review |
 
-Anything in the "kept" column fundamentally needs multi-turn reasoning —
+Anything in the "kept" column needs multi-turn reasoning:
 hypothesis testing, alternative comparison, or exploration-with-backtracking.
 Everything that was moved to MCP is a structured-output call disguised as
 an agent.
@@ -94,11 +90,9 @@ When a caller dispatched the stub agent via the `Agent` tool, Claude read
 the stub body as the system prompt, recognised the redirect, and invoked
 the MCP tool on the caller's behalf.
 
-**All three stub files were deleted outright at nexus-cnzei.4** rather than
-kept as a compatibility redirect: they were 40 lines of indirection for a
+**All three stub files were deleted at nexus-cnzei.4**: they were 40 lines of indirection for a
 one-line call, and the corresponding pointer skill (`knowledge-tidying`,
-`plan-validation`, `enrich-plan`) already documents the same MCP-tool call
-without the agent-dispatch detour. New callers go to the MCP tool, or the
+`plan-validation`, `enrich-plan`) already documents the same MCP-tool call. New callers go to the MCP tool, or the
 pointer skill, directly.
 
 ## When you're authoring a new capability
@@ -106,12 +100,12 @@ pointer skill, directly.
 1. Can it be a schema-conforming single call?  → MCP tool.  Done.
 2. Does it need cross-turn state (revising based on what you find)?  → Agent.
 3. Does it spawn one LLM call to decide + one LLM call to act?  → Agent with
-   a narrower system prompt; or two MCP tools chained by a skill.
+   a narrower system prompt, or two MCP tools chained by a skill.
 4. Is the "multi-turn" really just "large output split across turns"?  →
    MCP tool with a larger timeout.
 
 Most new capabilities fit in bucket 1 or 4.  Be suspicious of the second and
-third buckets — RDR-080 argues that most "agent" capabilities were actually
+third buckets: RDR-080 argues that most "agent" capabilities were actually
 structured calls in disguise.
 
 ## How the MCP tools run under the hood
@@ -123,12 +117,12 @@ ten operator functions, plan steps rather than MCP tools since nexus-ivi4s (`ope
 `operator_verify`) use a single primitive:
 `nexus.operators.dispatch.claude_dispatch`. Three of the ten
 (`operator_filter`, `operator_groupby`, `operator_aggregate`) also have a
-SQL fast path ahead of the LLM dispatch — see `src/nexus/mcp/operator_requests.py`.
+SQL fast path ahead of the LLM dispatch (see `src/nexus/mcp/operator_requests.py`).
 
 `claude_dispatch` spawns `claude -p --output-format json --json-schema <schema>`,
 feeds the prompt via stdin, times out at a configurable limit (default 120s),
 and unwraps `structured_output` from claude's JSON result wrapper.  The
-subprocess authenticates via the caller's `~/.claude` and `~/.claude.json` —
+subprocess authenticates via the caller's `~/.claude` and `~/.claude.json`, so
 nothing in the MCP server needs API keys.
 
 Tools that need to reach Nexus storage during their reasoning (e.g.
@@ -137,8 +131,8 @@ tools via the subprocess inheriting `~/.claude`.
 
 ## See also
 
-- [RDR-080](../rdr/rdr-080-retrieval-layer-consolidation.md) — the architectural decision
-- [MCP Servers](../mcp-servers.md) — full tool catalog
-- [Querying Guide](../querying-guide.md) — the `nx_answer` retrieval trunk
-- [Plan Authoring Guide](../plan-authoring-guide.md) — for capabilities that
+- [RDR-080](../rdr/rdr-080-retrieval-layer-consolidation.md): the architectural decision
+- [MCP Servers](../mcp-servers.md): full tool catalog
+- [Querying Guide](../querying-guide.md): the `nx_answer` retrieval trunk
+- [Plan Authoring Guide](../plan-authoring-guide.md): for capabilities that
   compose multiple MCP tools into a reusable plan

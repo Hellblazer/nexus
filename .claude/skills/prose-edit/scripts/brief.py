@@ -197,6 +197,12 @@ def _scan(tokens: list[str], value_flags: tuple[str, ...]) -> tuple[list[tuple[s
     return positionals, flags
 
 
+def _unmention(token: str, literal: bool) -> str:
+    """A path the author typed with Claude Code's @ file mention arrives with the @ (nexus-ger02.17): drop it.
+    After a bare `--` the token is literal, so a file whose name starts with @ is reached that way."""
+    return token[1:] if not literal and len(token) > 1 and token.startswith("@") else token
+
+
 def _genre_arg(raw: str) -> str:
     if raw not in GENRES:
         raise _user(f"genre {raw!r}: not one of {', '.join(GENRES)}")
@@ -213,6 +219,7 @@ def _parse_edit(tokens: list[str]) -> Obj:
         raise _user(f"an edit run takes one path, got {len(positionals)}: "
                     f"{' '.join(t for t, _ in positionals)}")
     given, literal_path = positionals[0]
+    given = _unmention(given, literal_path)
     genre = _genre_arg(flags["--genre"]) if "--genre" in flags else None
     budget = _positive("--budget", flags["--budget"]) if "--budget" in flags else DEFAULT_BUDGET
     if given == "-" and not literal_path:
@@ -235,6 +242,7 @@ def _parse_rejections(tokens: list[str]) -> Obj:
     if len(positionals) > 1:
         raise _user(f"rejections takes one path, got {len(positionals)}")
     path, literal_path = positionals[0]
+    path = _unmention(path, literal_path)
     if path == "-" and not literal_path:
         raise _user("a stdin run keeps no rejections")
     if not literal_path and _range_of(path)[1] is not None:
@@ -252,7 +260,7 @@ def _parse_exemplar(tokens: list[str]) -> Obj:
     if len(positionals) != 2:
         raise _user("exemplar needs <genre> <path>:<start>-<end>; " + _USAGE)
     genre = _genre_arg(positionals[0][0])
-    where = positionals[1][0]
+    where = _unmention(*positionals[1])
     rng = _range_of(where)[1]
     if rng is None or not re.search(r":[0-9]+-[0-9]+$", where):
         raise _user(f"exemplar {where!r}: expected <path>:<start>-<end> (a line range)")
@@ -535,20 +543,30 @@ def render_brief(read: Obj, budget: int, input_file: str | None, input_text: str
                    + ("The voice card is the whole file's." if card else "Build the voice card from the whole file."))
     out += header or []
     out += ["", "## 1. Exemplars", ""]
-    exemplars = cast("list[Obj]", (record or {}).get("exemplars") or [])
+    stored = cast("list[Obj]", (record or {}).get("exemplars") or [])
+    # an exemplar taken from the document under edit would show the editor its own target as the model voice;
+    # a stdin run has no path, so it keeps every exemplar
+    doc = read.get("path")
+    exemplars = [ex for ex in stored if doc is None or ex.get("path") != doc]
     if exemplars:
         out.append(f"Passages in the voice this genre wants ({genre}):")
         for ex in exemplars:
             out += ["", f'<exemplar path="{ex["path"]}" lines="{ex["start"]}-{ex["end"]}">',
                     str(ex["text"]), "</exemplar>"]
-        notes = cast("list[Any]", (record or {}).get("notes") or [])
-        if notes:
-            out += ["", "Genre notes:", _bullets(notes, lambda _n: "genre")]
+    elif stored:
+        out.append(
+            f"The exemplars stored for genre {genre} all come from this document, so none is shown. Run "
+            "without exemplars, build the voice card from the document alone, and say in the editor's note "
+            "that no exemplars were used."
+        )
     else:
         out.append(
             f"No exemplars are stored for genre {genre}. Run without exemplars, build the voice "
             "card from the document alone, and say in the editor's note that no exemplars were used."
         )
+    notes = cast("list[Any]", (record or {}).get("notes") or [])
+    if notes:  # the genre's notes hold whether or not an exemplar is shown
+        out += ["", "Genre notes:", _bullets(notes, lambda _n: "genre")]
     out += ["", "## 2. Voice card", ""]
     if card:
         out += ["The author approved this voice card for this document on "
@@ -948,11 +966,9 @@ _ABBREVIATIONS = frozenset({"e.g", "i.e", "etc", "vs", "cf", "approx", "fig", "n
 _BREAK = re.compile(r"(?P<term>[.!?])(?P<close>[\"')\]]*)(?P<gap>\s+)(?=[\"'(\[]*[A-Z])")
 
 
-def sentence_span(old: str) -> str | None:
-    """"multi" when `old` clearly holds more than one sentence, "maybe" when a period might end one."""
-    if "\n\n" in old:
-        return "multi"
-    verdict: str | None = None
+def _breaks(old: str) -> list[tuple[re.Match[str], bool]]:
+    """Each candidate sentence break in `old`, with True when it clearly ends a sentence."""
+    out: list[tuple[re.Match[str], bool]] = []
     for m in _BREAK.finditer(old):
         before = old[:m.start()]
         if before.count("`") % 2 == 1:
@@ -961,10 +977,50 @@ def sentence_span(old: str) -> str | None:
         token = word.group(1) if word else ""
         if token.lower() in _ABBREVIATIONS:
             continue
-        if re.fullmatch(r"[A-Za-z]{3,}", token):
-            return "multi"
-        verdict = "maybe"
-    return verdict
+        out.append((m, bool(re.fullmatch(r"[A-Za-z]{3,}", token))))
+    return out
+
+
+def sentence_span(old: str) -> str | None:
+    """"multi" when `old` clearly holds more than one sentence, "maybe" when a period might end one."""
+    if "\n\n" in old:
+        return "multi"
+    found = _breaks(old)
+    if any(clear for _, clear in found):
+        return "multi"
+    return "maybe" if found else None
+
+
+def narrow_edit(old: str, new: str) -> tuple[str, str] | None:
+    """A multi-sentence edit cut down to the sentence(s) its change touches (nexus-ger02.22), or None.
+
+    The editor often quotes a neighbouring sentence as context: "A ends. B." -> "A ends." is a cut of B.
+    The common prefix and suffix are context; the edit keeps whole sentences around the changed part,
+    and a change that starts in the gap before a sentence keeps that gap, so the cut leaves no double space.
+    """
+    if "\n\n" in old:
+        return None
+    p = 0
+    while p < min(len(old), len(new)) and old[p] == new[p]:
+        p += 1
+    s = 0
+    while s < min(len(old), len(new)) - p and old[-1 - s] == new[-1 - s]:
+        s += 1
+    lo, hi = p, len(old) - s
+    if lo >= hi and p == len(new) - s:
+        return None  # no change at all
+    clear = [m for m, ok in _breaks(old) if ok]
+    starts = [0] + [m.end() for m in clear]
+    ends = [m.start("gap") for m in clear] + [len(old)]
+    begin = max(b for b in starts if b <= lo + (len(old[lo:hi]) - len(old[lo:hi].lstrip())))
+    begin = min(begin, lo)
+    finish = min(e for e in ends if e >= hi - (len(old[lo:hi]) - len(old[lo:hi].rstrip())))
+    finish = max(finish, hi)
+    old2 = old[begin:finish]
+    new2 = old[begin:lo] + new[p:len(new) - s] + old[hi:finish]
+    if old2 == old or not old2.strip() or sentence_span(old2) == "multi":
+        return None
+    return old2, new2
 
 
 def _quoted_phrases(text: str) -> list[str]:
@@ -1074,7 +1130,14 @@ def cmd_filter(a: argparse.Namespace, reply: str) -> Obj:
             cause = "markup"
         sentences = sentence_span(str(e["old"])) if cause is None else None
         if cause is None and sentences == "multi":
-            cause = "multi-sentence"
+            narrowed = narrow_edit(str(e["old"]), str(e.get("new") or ""))
+            if narrowed is not None and edit_problem(text, narrowed[0], spans, window) is None \
+                    and len(_occurrences(text, narrowed[0])) == 1:
+                warnings.append(f"edit {e['n']} spanned more than one sentence; narrowed to the sentence it changes")
+                e = {**e, "old": narrowed[0], "new": narrowed[1]}
+                sentences = sentence_span(narrowed[0])
+            else:
+                cause = "multi-sentence"
         if cause:
             dropped.append({"n": e["n"], "old": e["old"], "new": e.get("new"), "cause": cause})
             continue
@@ -1172,8 +1235,8 @@ DISPATCH_LABEL = "DISPATCH="
 # skill copies those lines and never composes a path (nexus-ger02.7: a literal `WORK/...` was typed, and Write
 # creates a missing directory without a word, so a stray WORK/ appeared in the repository).
 READY_FILES = {"INPUT": "input.txt", "REPLY": "reply.txt", "FILTERED": "filtered.json", "REASONS": "reasons.json",
-               "ENTRY": "entry.json", "CARD": "card.json"}
-READY_BUILD = ("REPLY", "FILTERED", "REASONS")  # what a path run's header adds after DISPATCH=
+               "ANSWERS": "answers.json", "ENTRY": "entry.json", "CARD": "card.json"}
+READY_BUILD = ("REPLY", "FILTERED", "REASONS", "ANSWERS")  # what a path run's header adds after DISPATCH=
 
 
 def ready_paths(work: Path | str, labels: tuple[str, ...] | list[str]) -> str:

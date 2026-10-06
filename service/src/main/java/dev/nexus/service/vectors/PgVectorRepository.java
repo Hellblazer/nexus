@@ -93,9 +93,14 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.PriorityQueue;
 import java.util.Set;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Semaphore;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Pattern;
 
 /**
@@ -1351,7 +1356,26 @@ public final class PgVectorRepository {
         WherePlan wherePlan = planWhere(where);
         String[] colls = collectionNames.toArray(String[]::new);
 
-        org.jooq.Table<?> fn = switch (dim) {
+        org.jooq.Table<?> fn = plainSearchFn(dim, queryVec, colls, wherePlan, nResults);
+
+        Result<? extends Record> result = runPlainSearchStatement(
+            tenant, fn, dim, colls, nResults, PgSession::startupSearchStatementTimeoutMs, false);
+
+        List<Map<String, Object>> rows = plainSearchRows(result);
+        // RDR-169 G5: surface address triple additively (chash + span always; source_uri opt-in)
+        enrichSearchRows(tenant, rows, includeSourceUri);
+        return new Tokened<>(rows, embedResult.tokens(), skippedCollections);
+    }
+
+    /**
+     * The generated {@code plain_search_<dim>} table-function call for one dispatch dim.
+     * Shared by {@link #searchWithTokens} and the per-collection fan-out arms
+     * ({@link #searchPerCollection}), so both run the SAME function with the same bind
+     * order, which is what the fan-out's equivalence contract rests on.
+     */
+    private static org.jooq.Table<?> plainSearchFn(int dim, Vector queryVec, String[] colls,
+                                                   WherePlan wherePlan, int nResults) {
+        return switch (dim) {
             case 384  -> PLAIN_SEARCH_384.call(
                 queryVec, colls, wherePlan.containment(), wherePlan.jsonPath(), nResults);
             case 768  -> PLAIN_SEARCH_768.call(
@@ -1360,8 +1384,36 @@ public final class PgVectorRepository {
                 queryVec, colls, wherePlan.containment(), wherePlan.jsonPath(), nResults);
             default   -> throw new IllegalArgumentException("unsupported dim " + dim);
         };
+    }
 
-        Result<? extends Record> result = tenantScope.withTenant(tenant, ctx -> {
+    /**
+     * ONE {@code plain_search_<dim>} statement under the tenant RLS scope with the serving
+     * GUCs. This is {@link #searchWithTokens}'s single-collection statement (moved, not changed) and
+     * the body of every fan-out arm, plus the cardinality router (nexus-tu8wp.6): inside the same
+     * transaction, a bounded count of the physical rows the selected collections hold decides whether
+     * the statement runs exact or walks the shared HNSW index. See {@link #probeSelectedRows}.
+     *
+     * @param dim the dispatch dim {@code fn} was built for (names the chunks embedding column)
+     * @param colls the collection names {@code fn} selects, the set the router's probe counts
+     * @param statementTimeoutMs the statement bound, EVALUATED inside the transaction at the moment
+     *        {@code statement_timeout} is set (after admission and the connection wait, so queueing
+     *        is charged to the caller): the env-resolved search bound for {@link #searchWithTokens};
+     *        {@code min(search bound, fan-out budget remaining, request budget remaining)} for a
+     *        fan-out arm, which may throw there to refuse a statement whose budget is already spent
+     * @param rebindBeforeExactRerun when true, {@code statementTimeoutMs} is evaluated again,
+     *        immediately before the exact re-run, and its value bounds that re-run (the remaining
+     *        budget shrinks while the first attempt runs); false keeps the first bound
+     */
+    private Result<? extends Record> runPlainSearchStatement(String tenant, org.jooq.Table<?> fn,
+                                                             int dim, String[] colls,
+                                                             int nResults,
+                                                             java.util.function.IntSupplier statementTimeoutMs,
+                                                             boolean rebindBeforeExactRerun) {
+        return tenantScope.withTenant(tenant, ctx -> {
+            // nexus-g17tf: bound the statement so an orphaned or pathological
+            // scan cancels (57014) instead of pinning xmin for hours. First, so the
+            // GUC round trips below run under its network bound too (nexus-u9zkn).
+            PgSession.setSearchStatementTimeout(ctx, statementTimeoutMs.getAsInt());
             // Filtered-ANN recall: keep HNSW scanning past ef_search when the RLS +
             // collection + metadata predicates narrow the candidate set. SET LOCAL is
             // txn-scoped (same pool discipline as the TenantScope GUC stamp).
@@ -1372,38 +1424,897 @@ public final class PgVectorRepository {
             PgSession.setHnswEfSearch(ctx, nResults);
             // nexus-wbfpw.47: raise the iterative-scan budget so recall holds past 95% dead.
             PgSession.setHnswScanBudget(ctx);
-            // nexus-g17tf: bound the statement so an orphaned or pathological
-            // scan cancels (57014) instead of pinning xmin for hours.
-            PgSession.setSearchStatementTimeout(ctx);
             // nexus-6nkn3: a custom plan per execution so the planner sees the
             // collection set's selectivity (a cached generic HNSW plan on a tiny
             // collection ran ~30s and returned EMPTY in production).
             PgSession.setSearchPlanCacheMode(ctx);
-            // nexus-zrcj7: plain_search_<dim> (vectors-009) replaces the raw
-            // rawVectorFetch(sql, binds) call — still wrapped by exactSelectFrom/
-            // exactOnUnderReturn for the nexus-bq06h exact fallback.
-            return exactSelectFrom(ctx, nResults, fn);
+            // nexus-tu8wp.6: the cardinality router. The threshold 0 disables it, and no probe runs.
+            long startNanos = System.nanoTime();
+            int exactMaxRows = PgSession.searchExactMaxRows();
+            int probedRows = -1;
+            boolean exact = false;
+            boolean completed = false;
+            try {
+                Result<? extends Record> result;
+                if (exactMaxRows > 0) {
+                    probedRows = probeSelectedRows(ctx, dim, colls, exactMaxRows);
+                    exact = probedRows <= exactMaxRows;
+                }
+                if (exact) {
+                    // The selected set is small enough that the exact plan (PK-prefix bitmap scan or
+                    // seq scan, then sort) is cheaper than an HNSW walk filtered down to it, and it is
+                    // complete, so the empty-result fallback below has nothing to repair.
+                    ROUTED_EXACT.incrementAndGet();
+                    PgSession.disableIndexScanForExactFallback(ctx);
+                    result = ctx.selectFrom(fn).fetch();
+                } else {
+                    ROUTED_HNSW.incrementAndGet();
+                    // nexus-zrcj7: plain_search_<dim> (vectors-009) replaces the raw
+                    // rawVectorFetch(sql, binds) call — still wrapped by exactSelectFrom/
+                    // exactOnUnderReturn for the nexus-bq06h exact fallback.
+                    result = exactSelectFrom(ctx, nResults, fn, rebindBeforeExactRerun ? statementTimeoutMs : null);
+                }
+                completed = true;
+                return result;
+            } finally {
+                logIfSlow(colls, slowRouteLabel(exactMaxRows, exact, probedRows),
+                          probedRows, System.nanoTime() - startNanos, completed);
+            }
         });
+    }
 
+    /**
+     * The cardinality router's probe (nexus-tu8wp.6): how many physical rows the selected collections
+     * hold in this tenant, counted only up to {@code limit + 1}. Bounded at O(limit) on the primary
+     * key's {@code (tenant, collection)} prefix however large the collections are. Runs inside the
+     * search's own tenant transaction, so row-level security supplies the tenant predicate: another
+     * tenant's rows in a same-named collection are not counted. It counts PHYSICAL rows (not the
+     * live(c) subset the search returns), because that is the population the exact plan scans.
+     *
+     * <p>COUPLING: this WHERE clause must select the same rows as the {@code plain_search_<dim>} SQL
+     * function's predicate (collection = ANY(...), tenant through row-level security). A predicate
+     * added to one must be added to the other (RDR-225 adds model and tenant predicates). An
+     * under-count here routes exact over a collection set far larger than the threshold.
+     */
+    private static int probeSelectedRows(DSLContext ctx, int dim, String[] colls, int limit) {
+        DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
+        Integer n = ctx.selectCount()
+                       .from(ctx.selectOne()
+                                .from(ch.table())
+                                .where(ch.collection().eq(DSL.any(colls)))
+                                .limit(limit + 1)
+                                .asTable("probe"))
+                       .fetchOne(0, Integer.class);
+        return n == null ? 0 : n;
+    }
+
+    /** Statements routed exact / left on HNSW by the cardinality router (nexus-tu8wp.6). */
+    private static final java.util.concurrent.atomic.AtomicLong ROUTED_EXACT =
+            new java.util.concurrent.atomic.AtomicLong();
+    private static final java.util.concurrent.atomic.AtomicLong ROUTED_HNSW =
+            new java.util.concurrent.atomic.AtomicLong();
+
+    /** Package-visible for tests, same shape as {@link #exactFallbackCount()}. */
+    public static long routedExactCount() {
+        return ROUTED_EXACT.get();
+    }
+
+    /**
+     * Plain-search statements that took the HNSW path: above the router threshold, or with the router
+     * disabled ({@code NX_SEARCH_EXACT_MAX_ROWS=0}).
+     */
+    public static long routedHnswCount() {
+        return ROUTED_HNSW.get();
+    }
+
+    /** A plain-search statement slower than this logs {@code vector_search_statement_slow}. */
+    static final long SLOW_STATEMENT_MS = 1_000L;
+
+    /** Most collection names one slow-statement line spells out; a wide flat search names the rest by count. */
+    private static final int SLOW_LOG_MAX_NAMES = 8;
+
+    private static volatile long slowStatementMs = SLOW_STATEMENT_MS;
+
+    /** TEST SEAM (nexus-tu8wp.6): pin the slow-statement threshold. Pair with {@link #resetSlowStatementMsForTests()}. */
+    public static void overrideSlowStatementMsForTests(long ms) {
+        slowStatementMs = ms;
+    }
+
+    public static void resetSlowStatementMsForTests() {
+        slowStatementMs = SLOW_STATEMENT_MS;
+    }
+
+    /**
+     * The route named on the slow-statement line: {@code exact}; {@code hnsw} when the router is off
+     * or the probe counted above the threshold; {@code unrouted} when the router is on but the probe
+     * never produced a count (it threw, so no route was decided and the statement did not run).
+     */
+    public static String slowRouteLabel(int exactMaxRows, boolean exact, int probedRows) {
+        if (exact) {
+            return "exact";
+        }
+        return exactMaxRows > 0 && probedRows < 0 ? "unrouted" : "hnsw";
+    }
+
+    private static void logIfSlow(String[] colls, String route, int probedRows, long elapsedNanos,
+                                  boolean completed) {
+        long ms = elapsedNanos / 1_000_000L;
+        if (ms < slowStatementMs) {
+            return;
+        }
+        String names = colls.length <= SLOW_LOG_MAX_NAMES
+            ? String.join(",", colls)
+            : String.join(",", java.util.Arrays.copyOf(colls, SLOW_LOG_MAX_NAMES))
+              + ",+" + (colls.length - SLOW_LOG_MAX_NAMES) + "_more";
+        log.warn("event=vector_search_statement_slow route={} probed_rows={} elapsed_ms={} "
+                 + "collection_count={} collections={} completed={}",
+                 route, probedRows, ms, colls.length, names, completed);
+    }
+
+    /** Maps one {@code plain_search_<dim>} record to the flat search row shape (shared by both routes). */
+    private static Map<String, Object> searchRow(Record rec) {
+        Map<String, Object> row = new LinkedHashMap<>();
+        row.put("id",         rec.get("id", String.class));
+        row.put("content",    rec.get("content", String.class));
+        row.put("distance",   rec.get("distance", Double.class));
+        row.put("collection", rec.get("collection", String.class));
+        // RDR-169 Phase B fix round 1 (Gap 2, T2 critique-nexus-zw2em-
+        // rdr169-phase-b-2026-09-11): additive, alongside the already-
+        // nullable content -- plain_search_<dim> now selects it
+        // (vectors-015-retention-search-return.xml).
+        row.put("retention",  rec.get("retention", String.class));
+        JSONB meta = rec.get("metadata", JSONB.class);
+        row.putAll(fromJson(meta != null ? meta.data() : null));
+        return row;
+    }
+
+    private static List<Map<String, Object>> plainSearchRows(Result<? extends Record> result) {
         List<Map<String, Object>> rows = new ArrayList<>(result.size());
         for (Record rec : result) {
-            Map<String, Object> row = new LinkedHashMap<>();
-            row.put("id",         rec.get("id", String.class));
-            row.put("content",    rec.get("content", String.class));
-            row.put("distance",   rec.get("distance", Double.class));
-            row.put("collection", rec.get("collection", String.class));
-            // RDR-169 Phase B fix round 1 (Gap 2, T2 critique-nexus-zw2em-
-            // rdr169-phase-b-2026-09-11): additive, alongside the already-
-            // nullable content -- plain_search_<dim> now selects it
-            // (vectors-015-retention-search-return.xml).
-            row.put("retention",  rec.get("retention", String.class));
-            JSONB meta = rec.get("metadata", JSONB.class);
-            row.putAll(fromJson(meta != null ? meta.data() : null));
-            rows.add(row);
+            rows.add(searchRow(rec));
         }
-        // RDR-169 G5: surface address triple additively (chash + span always; source_uri opt-in)
+        return rows;
+    }
+
+    /**
+     * As {@link #plainSearchRows}, but each row travels with its merge sort key read from the jOOQ
+     * record itself, never from the row map: the map has stored metadata flattened into it, so a
+     * metadata key named {@code id}, {@code distance} or {@code collection} could otherwise shadow
+     * the key the merge orders by.
+     */
+    private static List<Candidate> plainSearchCandidates(Result<? extends Record> result) {
+        List<Candidate> out = new ArrayList<>(result.size());
+        for (Record rec : result) {
+            out.add(new Candidate(rec.get("distance", Double.class), rec.get("id", String.class),
+                                  rec.get("collection", String.class), searchRow(rec)));
+        }
+        return out;
+    }
+
+    // ── Per-collection top-K fan-out (nexus-tu8wp.1) ─────────────────────────
+
+    /** Most collections one {@link #searchPerCollection} request may name. */
+    public static final int MAX_FANOUT_COLLECTIONS = 256;
+
+    /** Per-collection top-K ceiling (the same 300 ceiling as every other paged read). */
+    public static final int MAX_PER_COLLECTION_K = 300;
+
+    /** Global cut ceiling: four full {@link #MAX_PER_COLLECTION_K} pages. */
+    public static final int MAX_FANOUT_LIMIT = 1200;
+
+    /** Env name of the per-request fan-out parallelism override. */
+    public static final String FANOUT_CONCURRENCY_ENV = "NX_SEARCH_FANOUT_CONCURRENCY";
+
+    /** Env name of the cross-request cap on fan-out arms in flight (see {@link #fanoutArmPermits}). */
+    public static final String FANOUT_ARM_PERMITS_ENV = "NX_SEARCH_FANOUT_ARM_PERMITS";
+
+    /** Env name of the aggregate wall budget of one fan-out, in milliseconds. */
+    public static final String FANOUT_BUDGET_MS_ENV = "NX_SEARCH_FANOUT_BUDGET_MS";
+
+    /**
+     * Default aggregate wall budget of one fan-out: 20 s, the public edge's 30 s upstream bound
+     * minus the 10 s margin the nexus-99r7y request-scoped budget uses, so the engine has answered
+     * (with whatever it finished, the rest reported per collection) before the edge gives up.
+     */
+    static final long DEFAULT_FANOUT_BUDGET_MS = 20_000L;
+
+    /** Upper bound on the budget override: the same ceiling as the search statement bound. */
+    static final long MAX_FANOUT_BUDGET_MS = 600_000L;
+
+    /**
+     * Why one collection of a {@link #searchPerCollection} request returned no rows. The wire
+     * names are a stable contract (the client branches on them); the human text rides beside them
+     * in {@link PerCollectionStat#error()}.
+     */
+    public enum ArmErrorKind {
+        /** The query vector's width does not match the collection's dispatch dimension (nexus-9tsdf). */
+        DIMENSION_MISMATCH("dimension_mismatch"),
+        /** The collection's dispatch dimension has no {@code plain_search} function. */
+        UNSUPPORTED_DIMENSION("unsupported_dimension"),
+        /** Its statement ran into the search statement bound (SQLSTATE 57014). */
+        STATEMENT_TIMEOUT("statement_timeout"),
+        /** The fan-out's aggregate wall budget was spent before, or while, it ran. */
+        FANOUT_BUDGET_EXHAUSTED("fanout_budget_exhausted");
+
+        private final String wire;
+
+        ArmErrorKind(String wire) {
+            this.wire = wire;
+        }
+
+        /** The value sent on the wire. */
+        public String wire() {
+            return wire;
+        }
+    }
+
+    /**
+     * What one collection contributed to a {@link #searchPerCollection} request. Every figure is
+     * about the collection's own top-K and is taken BEFORE the global {@code limit} cut: the cut
+     * is applied to a bounded heap as arms finish, but raw count, drop count and the two minimum
+     * distances are computed over each arm's full row set when the arm completes.
+     *
+     * @param collection          the collection searched
+     * @param rawCount            rows its top-K returned, before the threshold (0 on error)
+     * @param dropped             rows the client-sent threshold removed
+     * @param minRawDistance      smallest raw distance, {@code null} when it returned nothing
+     * @param minDroppedDistance  smallest distance among the dropped rows, {@code null} if none
+     * @param error               the failure text when the collection returned no rows, else {@code null}
+     * @param errorKind           the stable failure kind (set exactly when {@code error} is), else {@code null}
+     */
+    public record PerCollectionStat(String collection, int rawCount, int dropped,
+                                    Double minRawDistance, Double minDroppedDistance,
+                                    String error, ArmErrorKind errorKind) {}
+
+    /**
+     * Result of {@link #searchPerCollection}: the merged, enriched rows (at most {@code limit}),
+     * one stat per surviving collection in request order, the query-embedding token count, the
+     * names dropped as unregistered, and the most rows the merge held at once
+     * ({@code peakRetainedRows}, never more than {@code limit}; a diagnostic, not on the wire).
+     */
+    public record PerCollectionResult(List<Map<String, Object>> rows, List<PerCollectionStat> perCollection,
+                                      long tokens, List<String> skippedCollections, int peakRetainedRows) {}
+
+    /** What bounded one arm's statement: the search bound, the fan-out budget, or the request budget. */
+    enum Limiter { SEARCH, FANOUT, REQUEST }
+
+    /** An arm's statement bound and which of the three limits set it. */
+    record ArmBound(int timeoutMs, Limiter limiter) {}
+
+    /** An arm found the fan-out's aggregate wall budget spent; isolated to that collection. */
+    static final class FanoutBudgetSpentException extends RuntimeException {
+        FanoutBudgetSpentException(String message) {
+            super(message);
+        }
+    }
+
+    /** One merge candidate: the sort key read from the jOOQ record, and the row that goes on the wire. */
+    record Candidate(double distance, String id, String collection, Map<String, Object> row) {}
+
+    /** Total order of the merge: distance, then id, then collection (deterministic across arrival orders). */
+    static final Comparator<Candidate> MERGE_ORDER = Comparator
+        .comparingDouble(Candidate::distance)
+        .thenComparing(Candidate::id)
+        .thenComparing(Candidate::collection);
+
+    /**
+     * Streaming bounded merge: each arm hands its rows over as it completes, and the merge keeps
+     * only the best {@code limit} survivors, in a heap with the worst on top. Per-collection stats
+     * are computed from the arm's full row set at that moment, so nothing about a finished arm is
+     * retained beyond its stat and whatever it contributed to the heap. Rows held by the merge are
+     * at most {@code limit}; the transient extra is the rows of arms still in flight.
+     */
+    private static final class FanoutMerger {
+        private final int limit;
+        private final PriorityQueue<Candidate> worstOnTop;
+        private final PerCollectionStat[] stats;
+        private int peak;
+
+        FanoutMerger(int collections, int limit) {
+            this.limit = limit;
+            this.worstOnTop = new PriorityQueue<>(MERGE_ORDER.reversed());
+            this.stats = new PerCollectionStat[collections];
+        }
+
+        synchronized void accept(int slot, String collection, Double threshold, List<Candidate> candidates) {
+            int dropped = 0;
+            Double minRaw = null;
+            Double minDropped = null;
+            for (Candidate c : candidates) {
+                double d = c.distance();
+                if (minRaw == null || d < minRaw) {
+                    minRaw = d;
+                }
+                if (threshold != null && d > threshold) {
+                    dropped++;
+                    if (minDropped == null || d < minDropped) {
+                        minDropped = d;
+                    }
+                } else {
+                    offer(c);
+                }
+            }
+            stats[slot] = new PerCollectionStat(collection, candidates.size(), dropped, minRaw, minDropped,
+                                                null, null);
+        }
+
+        synchronized void error(int slot, String collection, ArmErrorKind kind, String text) {
+            stats[slot] = new PerCollectionStat(collection, 0, 0, null, null, text, kind);
+        }
+
+        synchronized boolean isSettled(int slot) {
+            return stats[slot] != null;
+        }
+
+        private void offer(Candidate c) {
+            if (worstOnTop.size() < limit) {
+                worstOnTop.add(c);
+            } else if (MERGE_ORDER.compare(c, worstOnTop.peek()) < 0) {
+                worstOnTop.poll();
+                worstOnTop.add(c);
+            }
+            peak = Math.max(peak, worstOnTop.size());
+        }
+
+        synchronized List<PerCollectionStat> stats() {
+            return List.of(stats);
+        }
+
+        synchronized int peakRetained() {
+            return peak;
+        }
+
+        /** The retained survivors, best first. */
+        synchronized List<Map<String, Object>> drainBestFirst() {
+            List<Candidate> all = new ArrayList<>(worstOnTop);
+            all.sort(MERGE_ORDER);
+            List<Map<String, Object>> rows = new ArrayList<>(all.size());
+            for (Candidate c : all) {
+                rows.add(c.row());
+            }
+            return rows;
+        }
+    }
+
+    /** Per-arm scratch: which limit set the arm's CURRENT statement bound, and the bound itself. */
+    private static final class ArmRun {
+        volatile Limiter limiter = Limiter.SEARCH;
+        volatile int boundMs;
+    }
+
+    /**
+     * Resolve the per-request fan-out parallelism: {@code NX_SEARCH_FANOUT_CONCURRENCY} when it is
+     * a positive integer, else {@code max(1, poolSize / 2)}, never above the pool size. A malformed
+     * or non-positive value takes the default with a warning, never a crash at boot.
+     *
+     * @param raw      the env value, or {@code null}
+     * @param poolSize the connection pool size the default derives from and the override clamps to
+     */
+    static int fanoutParallelism(String raw, int poolSize) {
+        int dflt = Math.max(1, poolSize / 2);
+        return Math.max(1, Math.min(positiveIntOrDefault(FANOUT_CONCURRENCY_ENV, raw, dflt), poolSize));
+    }
+
+    /**
+     * Resolve the cross-request cap on fan-out arms in flight: {@code NX_SEARCH_FANOUT_ARM_PERMITS}
+     * when it is a positive integer, else {@code max(1, poolSize / 2)}, never above the pool size.
+     * Half the pool by default leaves at least the other half for {@code /health}, writes and plain
+     * search however many fan-out requests are running.
+     */
+    static int fanoutArmPermits(String raw, int poolSize) {
+        int dflt = Math.max(1, poolSize / 2);
+        return Math.max(1, Math.min(positiveIntOrDefault(FANOUT_ARM_PERMITS_ENV, raw, dflt), poolSize));
+    }
+
+    /**
+     * Resolve the fan-out's aggregate wall budget in milliseconds: {@code NX_SEARCH_FANOUT_BUDGET_MS}
+     * when it is an integer in {@code 1..}{@link #MAX_FANOUT_BUDGET_MS}, else
+     * {@link #DEFAULT_FANOUT_BUDGET_MS}. A malformed or out-of-range value takes the default with a
+     * warning; it is a tuning knob, and a typo must not stop the engine from booting.
+     */
+    static long fanoutBudgetMs(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return DEFAULT_FANOUT_BUDGET_MS;
+        }
+        try {
+            long v = Long.parseLong(raw.trim());
+            if (v >= 1 && v <= MAX_FANOUT_BUDGET_MS) {
+                return v;
+            }
+        } catch (NumberFormatException ignored) {
+            // falls through to the warning
+        }
+        log.warn("event=search_fanout_setting_invalid name={} raw={} using={} expected=integer_1_to_{}",
+                 FANOUT_BUDGET_MS_ENV, raw, DEFAULT_FANOUT_BUDGET_MS, MAX_FANOUT_BUDGET_MS);
+        return DEFAULT_FANOUT_BUDGET_MS;
+    }
+
+    private static int positiveIntOrDefault(String envName, String raw, int dflt) {
+        if (raw == null || raw.isBlank()) {
+            return dflt;
+        }
+        try {
+            int v = Integer.parseInt(raw.trim());
+            if (v >= 1) {
+                return v;
+            }
+        } catch (NumberFormatException ignored) {
+            // falls through to the warning
+        }
+        log.warn("event=search_fanout_setting_invalid name={} raw={} using={} expected=positive_integer",
+                 envName, raw, dflt);
+        return dflt;
+    }
+
+    private static long ceilMillis(long nanos) {
+        return Math.max(1L, (nanos + 999_999L) / 1_000_000L);
+    }
+
+    /**
+     * The statement bound for one arm, evaluated at the moment the statement is about to run:
+     * {@code min(search bound, fan-out budget remaining, request budget remaining)}, never below
+     * 1 ms (to Postgres {@code 0} means DISABLED). {@code requestDeadlineNanos ==}
+     * {@link RequestDeadlineProbe#NONE} (no request context: direct, in-process callers) leaves
+     * the request budget out. When two limits tie, the more external one is named.
+     *
+     * @throws RequestDeadlineExceededException when the request's budget is already spent: a
+     *         whole-request failure
+     * @throws FanoutBudgetSpentException when the fan-out's budget is already spent: isolated to
+     *         the collection whose arm asked
+     */
+    static ArmBound armBound(long requestDeadlineNanos, long fanoutDeadlineNanos, long nowNanos,
+                             int searchBoundMs) {
+        long requestRemaining = Long.MAX_VALUE;
+        if (requestDeadlineNanos != RequestDeadlineProbe.NONE) {
+            requestRemaining = requestDeadlineNanos - nowNanos;
+            if (requestRemaining <= 0L) {
+                throw new RequestDeadlineExceededException(
+                    "request budget spent before a per-collection search statement could start",
+                    RequestDeadlineExceededException.DEFAULT_RETRY_AFTER_SECONDS);
+            }
+        }
+        long fanoutRemaining = fanoutDeadlineNanos - nowNanos;
+        if (fanoutRemaining <= 0L) {
+            throw new FanoutBudgetSpentException(
+                "fan-out budget spent before this collection's search statement could start");
+        }
+        long bound = searchBoundMs;
+        Limiter limiter = Limiter.SEARCH;
+        long fanoutMs = ceilMillis(fanoutRemaining);
+        if (fanoutMs <= bound) {
+            bound = fanoutMs;
+            limiter = Limiter.FANOUT;
+        }
+        if (requestRemaining != Long.MAX_VALUE) {
+            long requestMs = ceilMillis(requestRemaining);
+            if (requestMs <= bound) {
+                bound = requestMs;
+                limiter = Limiter.REQUEST;
+            }
+        }
+        return new ArmBound((int) bound, limiter);
+    }
+
+    /**
+     * Per-collection top-K search over ONE embedding model group: the new
+     * {@code POST /v1/vectors/search-per-collection} route's engine half (nexus-tu8wp.1).
+     *
+     * <p><strong>Why per-collection arms and not one flat {@code LIMIT}.</strong> A flat
+     * {@code plain_search_<dim>(q, [A, B, ...], n)} returns the {@code n} nearest chunks of the
+     * UNION, so one dense collection can take every slot and a small one returns zero rows (the
+     * client's old over-fetch floor existed to paper over exactly that). Each arm here is the
+     * single-collection call, {@code plain_search_<dim>(q, [c], k)}: byte-identical SQL to the
+     * pre-batching client fan-out, so each collection yields its own top-{@code k}.
+     *
+     * <p><strong>Execution.</strong> The query is embedded ONCE, on the request thread, before any
+     * connection is borrowed. The arms then run on a bounded set of virtual-thread workers
+     * ({@code parallelism}, see {@link #fanoutParallelism}), each arm in its own
+     * {@code tenantScope.withTenant} transaction with the serving GUCs and its own exact re-run
+     * ({@link #exactOnUnderReturn}, nexus-bq06h), so a starved small collection is repaired on its
+     * own statement. The tenant id and the request deadline are captured on the request thread and
+     * passed in as arguments: the workers never read {@code RequestContext}'s thread-locals.
+     *
+     * <p><strong>Concurrency across requests.</strong> Every arm takes one permit from a gate that
+     * is shared by ALL fan-out requests on the same pool ({@link TenantScope#fanoutArmGate}, default
+     * {@code max(1, pool/2)}) BEFORE it asks for an admission permit or a connection. An arm waiting
+     * for its slot therefore holds nothing, and at least half the pool stays free for {@code /health},
+     * writes and plain search however many fan-outs run at once.
+     *
+     * <p><strong>Time.</strong> A statement's bound is {@code min(search bound, fan-out budget
+     * remaining, request budget remaining)}, computed INSIDE the transaction at the moment the bound
+     * is set (after admission and the connection wait, and again before an exact re-run), so queueing
+     * is charged to the arm. The fan-out budget ({@link #FANOUT_BUDGET_MS_ENV}, default 20 s, counted
+     * from entry to this method) sits under the public edge's 30 s upstream bound: collections whose
+     * arms have not started when it is spent are reported per collection
+     * ({@link ArmErrorKind#FANOUT_BUDGET_EXHAUSTED}) rather than run, and the arms still in flight
+     * are bounded by what is left of it. No new arm launches once the budget is spent or any
+     * whole-request failure has been seen.
+     *
+     * <p><strong>Failure.</strong> ISOLATED to the collection (its {@link PerCollectionStat#error()}
+     * and {@link PerCollectionStat#errorKind()} say why, and the others are served): a query vector
+     * whose width does not match the collection's dispatch dimension
+     * ({@link ArmErrorKind#DIMENSION_MISMATCH}), an unsupported dimension
+     * ({@link ArmErrorKind#UNSUPPORTED_DIMENSION}), a statement timeout at the search bound
+     * ({@link ArmErrorKind#STATEMENT_TIMEOUT}, Sam 2026-10-05: a deterministic slow collection must
+     * not 503 every search of its group), and the fan-out budget
+     * ({@link ArmErrorKind#FANOUT_BUDGET_EXHAUSTED}). WHOLE-REQUEST: pool or admission exhaustion and an
+     * expired request budget (including a statement cancelled by the request budget's bound), which
+     * keep their typed shapes, and any other transient SQL failure (connection loss, shutdown,
+     * serialization, resource exhaustion, a lock timeout), which becomes a
+     * {@link SearchFanoutTransientException}. Anything else propagates unchanged.
+     *
+     * <p><strong>Merge and memory.</strong> As each arm completes, its rows are cut by the
+     * collection's client-sent threshold (a row is dropped when {@code distance > threshold}; no entry
+     * or {@code null} means no threshold), its stats are taken over its full row set, and the
+     * survivors are offered to a heap that keeps only the best {@code limit} by
+     * {@code (distance, id, collection)}. The merge never holds more than {@code limit} rows; beyond
+     * that a request holds only the rows of arms still in flight ({@code workers x per_collection_k}),
+     * not every arm's rows. {@link #enrichSearchRows} then runs once over the survivors. Distances
+     * are compared across collections only because the request is one embedding model (enforced here).
+     *
+     * @param thresholds per-collection distance thresholds; keys must be among {@code collectionNames}
+     * @throws IllegalArgumentException on an out-of-range {@code perCollectionK} / {@code limit},
+     *         too many collections, a {@code thresholds} key not in {@code collectionNames},
+     *         mixed embedding models, or a malformed {@code where}
+     */
+    public PerCollectionResult searchPerCollection(String tenant, String queryText,
+                                                   List<String> collectionNames,
+                                                   int perCollectionK, int limit,
+                                                   Map<String, Double> thresholds,
+                                                   Map<String, Object> where,
+                                                   boolean includeSourceUri) {
+        return searchPerCollection(tenant, queryText, collectionNames, perCollectionK, limit,
+                                   thresholds, where, includeSourceUri, defaultFanoutParallelism());
+    }
+
+    /** Resolved once per instance: {@code NX_SEARCH_FANOUT_CONCURRENCY} against this scope's pool. */
+    private volatile int fanoutParallelismResolved;
+    private volatile long fanoutBudgetMsResolved;
+
+    private int defaultFanoutParallelism() {
+        int v = fanoutParallelismResolved;
+        if (v == 0) {
+            v = fanoutParallelism(System.getenv(FANOUT_CONCURRENCY_ENV), tenantScope.poolSize());
+            fanoutParallelismResolved = v;
+        }
+        return v;
+    }
+
+    /** Test seam: pin this instance's default fan-out budget; {@code 0} restores the env-resolved value. */
+    public void overrideFanoutBudgetMsForTests(long ms) {
+        fanoutBudgetMsResolved = ms;
+    }
+
+    private long defaultFanoutBudgetMs() {
+        long v = fanoutBudgetMsResolved;
+        if (v == 0L) {
+            v = fanoutBudgetMs(System.getenv(FANOUT_BUDGET_MS_ENV));
+            fanoutBudgetMsResolved = v;
+        }
+        return v;
+    }
+
+    /**
+     * The three knobs a fan-out reads from the environment, made explicit so a test can set them
+     * without touching process env.
+     *
+     * @param parallelism    arms of ONE request in flight at once, clamped to {@code [1, pool size]}
+     * @param fanoutBudgetMs aggregate wall budget of the fan-out, counted from entry
+     * @param searchBoundMs  the per-statement search bound ({@code NX_SEARCH_STATEMENT_TIMEOUT_MS})
+     */
+    public record FanoutSettings(int parallelism, long fanoutBudgetMs, int searchBoundMs) {}
+
+    /** As above with an explicit {@code parallelism} (clamped to {@code [1, pool size]}); a test seam. */
+    public PerCollectionResult searchPerCollection(String tenant, String queryText,
+                                                   List<String> collectionNames,
+                                                   int perCollectionK, int limit,
+                                                   Map<String, Double> thresholds,
+                                                   Map<String, Object> where,
+                                                   boolean includeSourceUri,
+                                                   int parallelism) {
+        return searchPerCollection(tenant, queryText, collectionNames, perCollectionK, limit, thresholds,
+            where, includeSourceUri,
+            new FanoutSettings(parallelism, defaultFanoutBudgetMs(), PgSession.startupSearchStatementTimeoutMs()));
+    }
+
+    /** As above with every fan-out knob explicit; a test seam. */
+    public PerCollectionResult searchPerCollection(String tenant, String queryText,
+                                                   List<String> collectionNames,
+                                                   int perCollectionK, int limit,
+                                                   Map<String, Double> thresholds,
+                                                   Map<String, Object> where,
+                                                   boolean includeSourceUri,
+                                                   FanoutSettings settings) {
+        final int parallelism = settings.parallelism();
+        final long fanoutBudgetMs = settings.fanoutBudgetMs();
+        final int searchBoundMs = settings.searchBoundMs();
+        long startNanos = System.nanoTime();
+        if (collectionNames == null || collectionNames.isEmpty()) {
+            throw new IllegalArgumentException("field 'collections' must name at least one collection");
+        }
+        List<String> requested = new ArrayList<>(new LinkedHashSet<>(collectionNames));
+        if (requested.size() > MAX_FANOUT_COLLECTIONS) {
+            throw new IllegalArgumentException("at most " + MAX_FANOUT_COLLECTIONS
+                + " collections per request, got " + requested.size());
+        }
+        if (perCollectionK < 1 || perCollectionK > MAX_PER_COLLECTION_K) {
+            throw new IllegalArgumentException("per_collection_k must be in 1.." + MAX_PER_COLLECTION_K
+                + ", got " + perCollectionK);
+        }
+        if (limit < 1 || limit > MAX_FANOUT_LIMIT) {
+            throw new IllegalArgumentException("limit must be in 1.." + MAX_FANOUT_LIMIT + ", got " + limit);
+        }
+        Map<String, Double> thresholdMap = thresholds == null ? Map.of() : thresholds;
+        for (String key : thresholdMap.keySet()) {
+            if (!requested.contains(key)) {
+                throw new IllegalArgumentException("thresholds names '" + key
+                    + "', which is not in collections");
+            }
+        }
+        List<String> skipped = new ArrayList<>();
+        List<String> cols = registeredSurvivors(tenant, requested, "searchPerCollection", skipped);
+        requireHomogeneousModel(tenant, cols);
+        WherePlan wherePlan = planWhere(where);
+
+        // Embed ONCE, before any arm borrows a connection (embed-before-borrow). The vector's width
+        // is the reference each collection's dispatch dimension is checked against.
+        EmbedResult embed = embedQueryRaw(tenant, cols.get(0), queryText);
+        float[] qv = embed.embeddings().get(0);
+        Vector queryVec = Vector.of(qv);
+        int queryDim = qv.length;
+
+        // Captured here, on the request thread: the arms never read RequestContext.
+        final long requestDeadlineNanos = RequestDeadlineProbe.currentDeadlineNanos();
+        final long fanoutDeadlineNanos = startNanos + fanoutBudgetMs * 1_000_000L;
+        if (RequestDeadlineProbe.expired(requestDeadlineNanos, System.nanoTime())) {
+            throw new RequestDeadlineExceededException(
+                "request budget spent before the per-collection search could start",
+                RequestDeadlineExceededException.DEFAULT_RETRY_AFTER_SECONDS);
+        }
+
+        int n = cols.size();
+        FanoutMerger merger = new FanoutMerger(n, limit);
+        int[] dims = new int[n];
+        List<Integer> runnable = new ArrayList<>(n);
+        for (int i = 0; i < n; i++) {
+            dims[i] = dimForCollection(tenant, cols.get(i));
+            if (dims[i] != queryDim) {
+                // Same wording as embedQuery's single-collection dimension check, which the
+                // client's stale-orphan classification (nexus-9tsdf) reads.
+                merger.error(i, cols.get(i), ArmErrorKind.DIMENSION_MISMATCH,
+                    "query embedder produced a " + queryDim
+                    + "-dim vector but the collection dispatches to embedding_" + dims[i]);
+            } else if (dims[i] != 384 && dims[i] != 768 && dims[i] != 1024) {
+                merger.error(i, cols.get(i), ArmErrorKind.UNSUPPORTED_DIMENSION, "unsupported dim " + dims[i]);
+            } else {
+                runnable.add(i);
+            }
+        }
+
+        int workers = Math.max(1, Math.min(Math.min(parallelism, tenantScope.poolSize()), runnable.size()));
+        Semaphore armGate = tenantScope.fanoutArmGate(
+            fanoutArmPermits(System.getenv(FANOUT_ARM_PERMITS_ENV), tenantScope.poolSize()));
+        AtomicInteger cursor = new AtomicInteger();
+        AtomicReference<Throwable> failure = new AtomicReference<>();
+        long[] armNanos = new long[n];
+        if (!runnable.isEmpty()) {
+            try (var pool = Executors.newVirtualThreadPerTaskExecutor()) {
+                for (int w = 0; w < workers; w++) {
+                    pool.submit(() -> {
+                        // Stop launching new arms after a whole-request failure AND once the
+                        // fan-out budget is spent.
+                        while (failure.get() == null && fanoutDeadlineNanos - System.nanoTime() > 0L) {
+                            int slot = cursor.getAndIncrement();
+                            if (slot >= runnable.size()) {
+                                return;
+                            }
+                            int i = runnable.get(slot);
+                            String col = cols.get(i);
+                            ArmRun run = new ArmRun();
+                            long armStart = System.nanoTime();
+                            try {
+                                List<Candidate> rows = runArm(tenant, col, dims[i], queryVec, wherePlan,
+                                                              perCollectionK, requestDeadlineNanos,
+                                                              fanoutDeadlineNanos, searchBoundMs, armGate, run);
+                                merger.accept(i, col, thresholdMap.get(col), rows);
+                            } catch (Throwable t) {
+                                settleArmFailure(t, i, col, run, fanoutBudgetMs, merger, failure);
+                            } finally {
+                                armNanos[i] = System.nanoTime() - armStart;
+                            }
+                        }
+                    });
+                }
+            }  // close() joins every worker: no arm outlives the request
+        }
+        Throwable failed = failure.get();
+        if (failed != null) {
+            throw fanoutFailure(failed);
+        }
+        // Arms the budget stopped from launching: reported per collection, never silently empty.
+        for (int slot : runnable) {
+            if (!merger.isSettled(slot)) {
+                merger.error(slot, cols.get(slot), ArmErrorKind.FANOUT_BUDGET_EXHAUSTED,
+                    "fan-out budget of " + fanoutBudgetMs + " ms was spent before this collection's search started");
+            }
+        }
+
+        List<Map<String, Object>> rows = merger.drainBestFirst();
         enrichSearchRows(tenant, rows, includeSourceUri);
-        return new Tokened<>(rows, embedResult.tokens(), skippedCollections);
+        List<PerCollectionStat> stats = merger.stats();
+        long fanoutMs = (System.nanoTime() - startNanos) / 1_000_000L;
+        long slowestArmMs = 0L;
+        long sumArmMs = 0L;
+        for (int slot : runnable) {
+            long ms = armNanos[slot] / 1_000_000L;
+            slowestArmMs = Math.max(slowestArmMs, ms);
+            sumArmMs += ms;
+            if (log.isDebugEnabled()) {
+                PerCollectionStat s = stats.get(slot);
+                log.debug("event=search_per_collection_arm collection={} arm_ms={} raw_count={} error_kind={}",
+                          cols.get(slot), ms, s.rawCount(), s.errorKind() == null ? null : s.errorKind().wire());
+            }
+        }
+        log.info("event=search_per_collection collections={} arms={} workers={} per_collection_k={} limit={} "
+                 + "rows={} peak_retained_rows={} isolated_errors={} budget_exhausted={} statement_timeouts={} "
+                 + "skipped={} fanout_ms={} slowest_arm_ms={} sum_arm_ms={} budget_ms={}",
+                 n, runnable.size(), workers, perCollectionK, limit, rows.size(), merger.peakRetained(),
+                 stats.stream().filter(s -> s.error() != null).count(),
+                 stats.stream().filter(s -> s.errorKind() == ArmErrorKind.FANOUT_BUDGET_EXHAUSTED).count(),
+                 stats.stream().filter(s -> s.errorKind() == ArmErrorKind.STATEMENT_TIMEOUT).count(),
+                 skipped.size(), fanoutMs, slowestArmMs, sumArmMs, fanoutBudgetMs);
+        return new PerCollectionResult(rows, stats, embed.tokens(), skipped, merger.peakRetained());
+    }
+
+    /**
+     * Decide what an arm's failure means: isolate it to its collection, or make it the request's
+     * failure. A statement timeout is isolated when the SEARCH bound set it
+     * ({@link ArmErrorKind#STATEMENT_TIMEOUT}) or the FAN-OUT budget did
+     * ({@link ArmErrorKind#FANOUT_BUDGET_EXHAUSTED}); when the REQUEST budget's bound cancelled it,
+     * the request itself is out of time and the whole request fails with the deadline shape.
+     */
+    private static void settleArmFailure(Throwable t, int slot, String collection, ArmRun run,
+                                         long fanoutBudgetMs, FanoutMerger merger,
+                                         AtomicReference<Throwable> failure) {
+        for (Throwable c = t, last = null; c != null && c != last; last = c, c = c.getCause()) {
+            if (c instanceof FanoutBudgetSpentException spent) {
+                merger.error(slot, collection, ArmErrorKind.FANOUT_BUDGET_EXHAUSTED,
+                    "fan-out budget of " + fanoutBudgetMs + " ms was spent before this collection's search "
+                    + "finished (" + spent.getMessage() + ")");
+                return;
+            }
+        }
+        if ("57014".equals(firstSqlState(t))) {
+            switch (run.limiter) {
+                case SEARCH -> merger.error(slot, collection, ArmErrorKind.STATEMENT_TIMEOUT,
+                    "search statement for collection '" + collection + "' exceeded its " + run.boundMs
+                    + " ms bound (statement timeout, SQLSTATE 57014)");
+                case FANOUT -> merger.error(slot, collection, ArmErrorKind.FANOUT_BUDGET_EXHAUSTED,
+                    "fan-out budget of " + fanoutBudgetMs + " ms ran out while collection '" + collection
+                    + "' was searching (its statement was bounded to " + run.boundMs + " ms)");
+                case REQUEST -> failure.compareAndSet(null, new RequestDeadlineExceededException(
+                    "request budget expired during the search statement for collection '" + collection + "'",
+                    RequestDeadlineExceededException.DEFAULT_RETRY_AFTER_SECONDS));
+            }
+            return;
+        }
+        failure.compareAndSet(null, t);
+    }
+
+    /** The first SQLSTATE found walking a cause chain, or {@code null}. */
+    private static String firstSqlState(Throwable t) {
+        int depth = 0;
+        for (Throwable c = t; c != null && depth < 32; c = c.getCause(), depth++) {
+            if (c instanceof java.sql.SQLException sql && sql.getSQLState() != null) {
+                return sql.getSQLState();
+            }
+        }
+        return null;
+    }
+
+    /**
+     * One fan-out arm: today's single-collection {@code plain_search_<dim>} statement for
+     * {@code collection}. Runs on a worker thread; everything it needs arrives as an argument.
+     *
+     * <p>It first takes a slot from the cross-request {@code armGate}, waiting no longer than the
+     * fan-out or request budget allows; only then does it ask {@code withTenant} for an admission
+     * permit and a connection, so a waiting arm holds neither. The statement bound is computed
+     * inside the transaction, at the moment it is set, and recomputed before an exact re-run.
+     */
+    private List<Candidate> runArm(String tenant, String collection, int dim, Vector queryVec,
+                                   WherePlan wherePlan, int k, long requestDeadlineNanos,
+                                   long fanoutDeadlineNanos, int searchBoundMs, Semaphore armGate,
+                                   ArmRun run) {
+        String[] colls = new String[] {collection};
+        org.jooq.Table<?> fn = plainSearchFn(dim, queryVec, colls, wherePlan, k);
+        acquireArmSlot(armGate, requestDeadlineNanos, fanoutDeadlineNanos);
+        try {
+            return plainSearchCandidates(runPlainSearchStatement(tenant, fn, dim, colls, k, () -> {
+                ArmBound bound = armBound(requestDeadlineNanos, fanoutDeadlineNanos, System.nanoTime(),
+                                          searchBoundMs);
+                run.limiter = bound.limiter();
+                run.boundMs = bound.timeoutMs();
+                return bound.timeoutMs();
+            }, true));
+        } finally {
+            armGate.release();
+        }
+    }
+
+    /**
+     * Take one arm slot, waiting at most until the nearer of the fan-out and request budgets. On
+     * timeout the request budget wins (whole-request deadline), else the fan-out budget (isolated).
+     */
+    private static void acquireArmSlot(Semaphore armGate, long requestDeadlineNanos, long fanoutDeadlineNanos) {
+        long now = System.nanoTime();
+        long waitNanos = fanoutDeadlineNanos - now;
+        boolean requestIsNearer = false;
+        if (requestDeadlineNanos != RequestDeadlineProbe.NONE) {
+            long requestRemaining = requestDeadlineNanos - now;
+            if (requestRemaining <= waitNanos) {
+                waitNanos = requestRemaining;
+                requestIsNearer = true;
+            }
+        }
+        try {
+            if (waitNanos > 0L && armGate.tryAcquire(waitNanos, TimeUnit.NANOSECONDS)) {
+                return;
+            }
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+            throw new RuntimeException("interrupted awaiting a search fan-out arm slot", ie);
+        }
+        if (requestIsNearer) {
+            throw new RequestDeadlineExceededException(
+                "request budget spent waiting for a search fan-out arm slot",
+                RequestDeadlineExceededException.DEFAULT_RETRY_AFTER_SECONDS);
+        }
+        throw new FanoutBudgetSpentException("fan-out budget spent waiting for a search fan-out arm slot");
+    }
+
+    /**
+     * SQLSTATEs that mean "try again", for the failures that are NOT isolated per collection: a
+     * statement timeout (57014) is settled per arm before it gets here. Class 08 connection
+     * exceptions, 57P operator intervention (shutdown, cannot-connect-now), 40001 and 40P01
+     * (serialization and deadlock, retryable by definition), class 53 insufficient resources
+     * (53100 disk full, 53200 out of memory, 53300 too many connections) and 55P03 (lock not
+     * available).
+     */
+    private static boolean isTransientSqlState(String state) {
+        return state != null && (state.startsWith("57P") || state.startsWith("08") || state.startsWith("53")
+            || state.equals("40001") || state.equals("40P01") || state.equals("55P03"));
+    }
+
+    /**
+     * Classify the failure that stopped a fan-out. Pool or admission exhaustion and an expired
+     * request budget already carry the typed shapes the handler maps to 503, so they pass through
+     * unchanged; any other transient SQL failure becomes a {@link SearchFanoutTransientException},
+     * also 503. Anything else is a request-level failure and propagates as it is.
+     */
+    private static RuntimeException fanoutFailure(Throwable failed) {
+        if (failed instanceof Error err) {
+            throw err;
+        }
+        RuntimeException re = failed instanceof RuntimeException r ? r : new RuntimeException(failed);
+        if (re instanceof RequestDeadlineExceededException) {
+            return re;
+        }
+        String sqlState = null;
+        int depth = 0;
+        for (Throwable c = re; c != null && depth < 32; c = c.getCause(), depth++) {
+            if (c instanceof java.sql.SQLTransientConnectionException) {
+                return re;
+            }
+            if (sqlState == null && c instanceof java.sql.SQLException sql) {
+                sqlState = sql.getSQLState();
+            }
+        }
+        if (isTransientSqlState(sqlState)) {
+            return new SearchFanoutTransientException(
+                "a per-collection search statement failed transiently (SQLSTATE " + sqlState
+                + "); no partial results are returned, retry", sqlState, re);
+        }
+        return re;
     }
 
     /**
@@ -1635,16 +2546,17 @@ public final class PgVectorRepository {
         final int probeCap = selectiveGateMax + 1;
 
         Result<? extends Record> result = tenantScope.withTenant(tenant, ctx -> {
+            // nexus-g17tf: bound EVERY statement in this transaction -- the gate probe (a
+            // <% trigram heap-recheck), the selective rank, and the HNSW-first rank all
+            // inherit it. Set here, before the first fetch, rather than per branch: a
+            // branch without HNSW is still a scan that can pin xmin. First of the GUC round
+            // trips so the rest run under its network bound too (nexus-u9zkn).
+            PgSession.setSearchStatementTimeout(ctx);
             // Trigram gate calibration (contract anchor): word_similarity >= 0.6, pg_trgm's
             // default - typo-probe candidates sit at ~0.9 and pass, no-signal rows at ~0.1
             // do not. Pinned per-transaction so the gate is independent of cluster config --
             // every schema function below is LANGUAGE sql and cannot SET LOCAL its own GUC.
             PgSession.setLocal(ctx, "pg_trgm.word_similarity_threshold", "0.6");
-            // nexus-g17tf: bound EVERY statement in this transaction -- the gate probe (a
-            // <% trigram heap-recheck), the selective rank, and the HNSW-first rank all
-            // inherit it. Set here, before the first fetch, rather than per branch: a
-            // branch without HNSW is still a scan that can pin xmin.
-            PgSession.setSearchStatementTimeout(ctx);
             // nexus-6nkn3: a custom plan per execution so the planner sees the
             // collection set's selectivity (a cached generic HNSW plan on a tiny
             // collection ran ~30s and returned EMPTY in production).
@@ -2652,14 +3564,24 @@ public final class PgVectorRepository {
     }
 
     /**
+     * Embed the query server-side, routing by {@code collection}'s model, with NO dimension
+     * check: the per-collection fan-out compares the vector's width with each collection's own
+     * dispatch dimension instead, so one orphaned collection is isolated rather than failing the
+     * request (nexus-tu8wp.1).
+     */
+    private EmbedResult embedQueryRaw(String tenant, String collection, String queryText) {
+        return (queryRouter != null)
+                ? queryRouter.embedOneForCollectionWithUsage(tenantScope, tenant, collection, queryText)
+                : queryEmbedder.embedWithUsage(List.of(queryText));
+    }
+
+    /**
      * Embed the query server-side, routing by collection; fail loud on dim mismatch.
      * Returns the embedding result including the token count so callers can propagate
      * it as a return value (bead nexus-ehc4q — no ThreadLocal side-channel).
      */
     private EmbedResult embedQuery(String tenant, String collection, String queryText, int dim) {
-        EmbedResult result = (queryRouter != null)
-                ? queryRouter.embedOneForCollectionWithUsage(tenantScope, tenant, collection, queryText)
-                : queryEmbedder.embedWithUsage(List.of(queryText));
+        EmbedResult result = embedQueryRaw(tenant, collection, queryText);
         float[] queryVec = result.embeddings().get(0);
         if (queryVec.length != dim) {
             throw new IllegalArgumentException(
@@ -2684,15 +3606,16 @@ public final class PgVectorRepository {
     private List<Map<String, Object>> runCombinedQuery(
             String tenant, org.jooq.Table<?> fn, int nResults) {
         Result<? extends Record> result = tenantScope.withTenant(tenant, ctx -> {
+            // nexus-g17tf: bound the statement so an orphaned or pathological
+            // scan cancels (57014) instead of pinning xmin for hours. First, so the
+            // GUC round trips below run under its network bound too (nexus-u9zkn).
+            PgSession.setSearchStatementTimeout(ctx);
             PgSession.setLocal(ctx, "hnsw.iterative_scan", "relaxed_order");
             // nexus-4ktfm: crowd-out headroom — the combined-query SQL functions run
             // inside this same transaction, so the GUC governs their HNSW scans.
             PgSession.setHnswEfSearch(ctx, nResults);
             // nexus-wbfpw.47: raise the iterative-scan budget so recall holds past 95% dead.
             PgSession.setHnswScanBudget(ctx);
-            // nexus-g17tf: bound the statement so an orphaned or pathological
-            // scan cancels (57014) instead of pinning xmin for hours.
-            PgSession.setSearchStatementTimeout(ctx);
             // nexus-6nkn3: a custom plan per execution so the planner sees the
             // collection set's selectivity (a cached generic HNSW plan on a tiny
             // collection ran ~30s and returned EMPTY in production).
@@ -2724,14 +3647,14 @@ public final class PgVectorRepository {
     private List<Map<String, Object>> runCombinedQueryWithChash(
             String tenant, org.jooq.Table<?> fn, int nResults) {
         Result<? extends Record> result = tenantScope.withTenant(tenant, ctx -> {
+            // nexus-g17tf: bound the statement first (see runCombinedQuery), so the GUC round
+            // trips below run under its network bound too (nexus-u9zkn).
+            PgSession.setSearchStatementTimeout(ctx);
             PgSession.setLocal(ctx, "hnsw.iterative_scan", "relaxed_order");
             // nexus-4ktfm: same crowd-out headroom as runCombinedQuery.
             PgSession.setHnswEfSearch(ctx, nResults);
             // nexus-wbfpw.47: raise the iterative-scan budget so recall holds past 95% dead.
             PgSession.setHnswScanBudget(ctx);
-            // nexus-g17tf: bound the statement so an orphaned or pathological
-            // scan cancels (57014) instead of pinning xmin for hours.
-            PgSession.setSearchStatementTimeout(ctx);
             // nexus-6nkn3: a custom plan per execution so the planner sees the
             // collection set's selectivity (a cached generic HNSW plan on a tiny
             // collection ran ~30s and returned EMPTY in production).
@@ -5304,11 +6227,26 @@ FROM scope s
      */
     private static <R extends Result<? extends Record>> R exactOnUnderReturn(
             DSLContext ctx, int nResults, java.util.function.Supplier<R> fetch) {
+        return exactOnUnderReturn(ctx, nResults, fetch, null);
+    }
+
+    /**
+     * As above; {@code rebindTimeoutMs}, when non-null, is consulted once just before the exact
+     * re-run and its value becomes the statement bound for that re-run (a fan-out arm's remaining
+     * request budget shrinks while its first attempt runs; nexus-tu8wp.1). It may throw to refuse
+     * the re-run, which rolls the arm's transaction back.
+     */
+    private static <R extends Result<? extends Record>> R exactOnUnderReturn(
+            DSLContext ctx, int nResults, java.util.function.Supplier<R> fetch,
+            java.util.function.IntSupplier rebindTimeoutMs) {
         R first = fetch.get();
         if (!first.isEmpty()) {
             return first;
         }
         PgSession.disableIndexScanForExactFallback(ctx);
+        if (rebindTimeoutMs != null) {
+            PgSession.setLocal(ctx, "statement_timeout", Integer.toString(rebindTimeoutMs.getAsInt()));
+        }
         R exact = fetch.get();
         EXACT_FALLBACKS.incrementAndGet();
         log.info("event=vector_exact_fallback indexed_rows={} exact_rows={} n_results={}",
@@ -5329,7 +6267,13 @@ FROM scope s
      */
     private static <R extends Record> Result<R> exactSelectFrom(
             DSLContext ctx, int nResults, org.jooq.Table<R> fn) {
-        return exactOnUnderReturn(ctx, nResults, () -> ctx.selectFrom(fn).fetch());
+        return exactSelectFrom(ctx, nResults, fn, null);
+    }
+
+    private static <R extends Record> Result<R> exactSelectFrom(
+            DSLContext ctx, int nResults, org.jooq.Table<R> fn,
+            java.util.function.IntSupplier rebindTimeoutMs) {
+        return exactOnUnderReturn(ctx, nResults, () -> ctx.selectFrom(fn).fetch(), rebindTimeoutMs);
     }
 
     /** Count of exact re-runs (nexus-bq06h): an absorption counter, so the belt is measurable. */

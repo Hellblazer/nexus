@@ -8,8 +8,9 @@ decision that changes over time:
 * tool tier -- ``{"type": "mcp_tool", "tool": "hook_<name>", ...}``
 * command tier -- ``{"type": "command", "command": "nx-hook",
   "args": ["<name-with-dashes>"], ...}``, or the same verb through the
-  stdlib shim (nexus-rcoze): ``{"type": "command", "command": "python3",
-  "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/scripts/nx_hook_shim.py",
+  stdlib shim (nexus-rcoze, launched through ``uv`` since nexus-efk2h):
+  ``{"type": "command", "command": "uv", "args": ["run", "--no-project",
+  "--no-config", "--quiet", "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/nx_hook_shim.py",
   "<name-with-dashes>"]}``, which is how a verb that an older CLI lacks
   is wired so it cannot block. It is still the command tier.
 
@@ -45,9 +46,34 @@ def command_verb(entry: dict) -> str | None:
     args = [a for a in (entry.get("args") or []) if isinstance(a, str)]
     if entry.get("command") == "nx-hook" and args:
         return args[0]
-    if entry.get("command") == "python3" and len(args) == 2 and args[0] == NX_HOOK_SHIM:
-        return args[1]
+    shim_args = launcher_script_args(entry)
+    if len(shim_args) == 2 and shim_args[0] == NX_HOOK_SHIM:
+        return shim_args[1]
     return None
+
+
+#: Everything `uv` is given before the script path (nexus-efk2h): sn's argv.
+UV_LAUNCHER_ARGV = ("run", "--no-project", "--no-config", "--quiet")
+
+
+def launcher_script_args(entry: dict) -> list[str]:
+    """The args after the launcher: ``[script, *script_args]``.
+
+    Plugin-resident scripts and the shim launch through ``uv`` with
+    :data:`UV_LAUNCHER_ARGV` first (nexus-efk2h: ``python3`` is not on PATH on
+    stock Windows). Anything else, a direct ``nx-hook`` entry included,
+    returns ``[]``.
+    """
+    args = [a for a in (entry.get("args") or []) if isinstance(a, str)]
+    n = len(UV_LAUNCHER_ARGV)
+    if entry.get("command") == "uv" and tuple(args[:n]) == UV_LAUNCHER_ARGV:
+        return args[n:]
+    return []
+
+
+def is_plugin_launcher(entry: dict) -> bool:
+    """Is *entry* a plugin-resident script or shim launched through ``uv``?"""
+    return bool(launcher_script_args(entry))
 
 
 def names_hook(entry: dict, hook_name: str) -> bool:

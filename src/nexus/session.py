@@ -5,6 +5,7 @@ import re
 import signal
 import socket
 import subprocess
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -13,8 +14,9 @@ from uuid import uuid4
 
 import structlog
 
+from nexus._install import winproc_core
 from nexus.bounded_subprocess import run_bounded
-from nexus.util.process_group import KILL_SIGNAL
+from nexus._winsec import make_user_dir
 
 _log = structlog.get_logger()
 
@@ -66,7 +68,7 @@ def generate_session_id() -> str:
 def write_claude_session_id(session_id: str) -> None:
     """Write the Claude session ID to the stable flat file (mode 0o600)."""
     path = claude_session_file()
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    make_user_dir(path.parent)
     fd = os.open(str(path), os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
     try:
         os.write(fd, session_id.encode())
@@ -201,12 +203,33 @@ def resolve_explicit_session_id() -> str | None:
 # spawned them, and `nx doctor --check-resources` still counts + names it.
 
 
-def _ppid_of(pid: int) -> int | None:
+def _is_windows(platform: str | None) -> bool:
+    return (platform if platform is not None else sys.platform) == "win32"
+
+
+def _win_info(
+    api: "winproc_core.WinProcessInfoApi | None",
+) -> "winproc_core.WinProcessInfoApi":
+    return api if api is not None else winproc_core.ctypes_win_info_api()
+
+
+def _ppid_of(
+    pid: int,
+    *,
+    platform: str | None = None,
+    win_info_api: "winproc_core.WinProcessInfoApi | None" = None,
+) -> int | None:
     """Return the parent PID of *pid*, or None if the process is gone.
 
     Tries ``/proc/{pid}/status`` first (Linux; works in minimal containers
     without ``ps``), then falls back to ``ps`` (macOS + Linux with procps).
+    Windows (RDR-224, nexus-f9bgu.21) asks the kernel through
+    ``NtQueryInformationProcess`` and refuses a parent created after its
+    child, since Windows never reparents and a stale parent number can be
+    recycled (:func:`nexus._install.winproc_core.parent_pid`).
     """
+    if _is_windows(platform):
+        return winproc_core.parent_pid(pid, _win_info(win_info_api))
     # Linux: /proc is more reliable than ps in containers (Alpine, distroless).
     status_path = Path(f"/proc/{pid}/status")
     if status_path.exists():
@@ -237,20 +260,14 @@ def _ppid_of(pid: int) -> int | None:
 def _is_pid_alive(pid: int) -> bool:
     """Return True if *pid* names a running process (liveness probe).
 
-    Uses ``os.kill(pid, 0)`` — raises ``ProcessLookupError`` when the
-    process is gone, ``PermissionError`` when it exists but is owned
-    by a different uid (treated as alive). Invalid pids (<=0) are
-    treated as dead.
+    Delegates to :func:`nexus.daemon.service_registry.pid_alive`, the one
+    probe with a Windows branch (nexus-f9bgu.25). Kept as a name because
+    the test harness's ``_AliveSet`` patches this seam. Invalid pids (<=0)
+    are dead; a process owned by another uid is alive.
     """
-    if pid <= 0:
-        return False
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    return True
+    from nexus.daemon.service_registry import pid_alive  # noqa: PLC0415 — deferred: keeps nexus.session's import cost flat for the hooks
+
+    return pid_alive(pid)
 
 
 def _parse_etime_seconds(etime: str) -> float | None:
@@ -347,8 +364,13 @@ def sweep_orphan_resource_trackers(
     min_age_seconds: float = 60.0,
     command_substring: str = "multiprocessing",
     protected_pids: set[int] | None = None,
+    platform: str | None = None,
 ) -> int:
     """Reap multiprocessing.resource_tracker / spawn workers re-parented to init.
+
+    Windows has no POSIX named semaphores to leak and does not reparent an
+    orphan to pid 1, so there is nothing to find or reap and no ``ps`` to
+    run: returns 0 (RDR-224, nexus-f9bgu.21).
 
     Each ungraceful MCP shutdown (SIGKILL/OOM, lost SessionEnd hook)
     leaves chroma's multiprocessing workers' resource_tracker
@@ -369,6 +391,8 @@ def sweep_orphan_resource_trackers(
     cleared in single SIGTERM batch on a system that had been
     accumulating for 11+ days. Bead nexus-9h1s.
     """
+    if _is_windows(platform):
+        return 0
     try:
         ps_output = subprocess.check_output(
             ["ps", "-ww", "-eo", "pid,ppid,etime,command"],
@@ -423,16 +447,27 @@ def _kill_orphan_tracker_pids(
     *grace_seconds* for any survivor. Returns the count of PIDs we
     successfully signalled (SIGTERM-step). Best-effort: missing
     PIDs and EPERM are skipped silently. Pure side effects + return
-    count; testable independently of the parser."""
+    count; testable independently of the parser.
+
+    Unreachable from the production sweep on Windows (it returns before it
+    lists anything), but correct for a direct caller there: a gone pid is an
+    ``OSError`` on Windows, and the hard kill goes through
+    ``service_registry.hard_kill_pid`` (RDR-224, nexus-f9bgu.44)."""
+    # Deferred, like the other service_registry import in this module: keeps
+    # nexus.session's import cost flat for the hooks.
+    from nexus.daemon.service_registry import hard_kill_pid  # noqa: PLC0415
+
     signalled = 0
     for pid in pids:
         try:
             os.kill(pid, signal.SIGTERM)
             signalled += 1
-        except ProcessLookupError:
-            continue
         except PermissionError as exc:
             _log.debug("sweep_orphan_tracker_eperm", pid=pid, error=str(exc))
+            continue
+        except OSError:
+            # ProcessLookupError on POSIX; on Windows a pid that has already
+            # exited raises a plain OSError (WinError 87), not that subclass.
             continue
 
     deadline = time.time() + grace_seconds
@@ -442,10 +477,7 @@ def _kill_orphan_tracker_pids(
         time.sleep(0.1)
     for pid in pids:
         if _is_pid_alive(pid):
-            try:
-                os.kill(pid, KILL_SIGNAL)
-            except (ProcessLookupError, PermissionError):
-                continue
+            hard_kill_pid(pid)  # never raises for a pid that is gone
     return signalled
 
 
@@ -468,13 +500,22 @@ _NX_SESSION_ID_ENV = "NX_SESSION_ID"
 
 
 
-def _command_name_of(pid: int) -> str:
+def _command_name_of(
+    pid: int,
+    *,
+    platform: str | None = None,
+    win_info_api: "winproc_core.WinProcessInfoApi | None" = None,
+) -> str:
     """Return the command name (argv[0] basename) of *pid*, or "" if unknown.
 
     Used by :func:`find_immediate_claude_pid` to identify which ancestor
     is Claude Code. Falls back to an empty string on any error; the
-    caller treats that as "not a match" and keeps walking.
+    caller treats that as "not a match" and keeps walking. On Windows the
+    name is the image's file name without ``.exe``, which is what POSIX
+    ``comm`` looks like (RDR-224, nexus-f9bgu.21).
     """
+    if _is_windows(platform):
+        return winproc_core.process_command_name(pid, _win_info(win_info_api))
     try:
         out = run_bounded(
             ["ps", "-o", "comm=", "-p", str(pid)],
@@ -543,9 +584,22 @@ _MCP_SIBLING_COMMANDS = ("nx-mcp", "nx-mcp-catalog")
 _PYTHON_EXECUTABLE_RE = re.compile(r"^python[0-9.]*$")
 
 
-def _list_processes() -> list[tuple[int, int, str]]:
+def _list_processes(
+    *,
+    ppid: int | None = None,
+    platform: str | None = None,
+    win_info_api: "winproc_core.WinProcessInfoApi | None" = None,
+) -> list[tuple[int, int, str]]:
     """Return ``(pid, ppid, command_line)`` for every live process,
     best-effort.
+
+    *ppid* narrows the answer to one parent's children. POSIX reads the
+    whole table in one ``ps`` either way and the caller filters; Windows
+    pays one process open per row it returns, so it narrows BEFORE opening
+    (this runs on the SessionStart hook path). On Windows the command line
+    is the space-joined argv from :mod:`nexus._install.winproc_core`
+    (RDR-224, nexus-f9bgu.21); a snapshot failure is an empty list, the
+    same posture as a failed ``ps``.
 
     Real process-table enumeration via ``ps -eo pid,ppid,args=`` (portable
     across macOS + Linux; unlike :func:`_ppid_of` this has no ``/proc``
@@ -575,6 +629,16 @@ def _list_processes() -> list[tuple[int, int, str]]:
     which is why this reproduced only in CI; BSD and procps both accept
     ``-ww``.
     """
+    if _is_windows(platform):
+        try:
+            return [
+                (pid, parent, command)
+                for pid, parent, _age, command in winproc_core.enumerate_processes(
+                    _win_info(win_info_api), only_ppid=ppid,
+                )
+            ]
+        except (RuntimeError, OSError):
+            return []
     try:
         out = run_bounded(
             ["ps", "-ww", "-eo", "pid,ppid,args="],
@@ -640,18 +704,21 @@ def find_mcp_sibling_pids(claude_pid: int) -> list[int]:
     if claude_pid <= 0:
         return []
     matches: list[int] = []
-    for pid, ppid, command_line in _list_processes():
+    for pid, ppid, command_line in _list_processes(ppid=claude_pid):
         if ppid != claude_pid:
             continue
         tokens = command_line.split()
         if not tokens:
             continue
-        executable = Path(tokens[0]).name
+        # ``executable_stem``: either separator, no ``.exe`` -- a Windows
+        # ``nx-mcp.exe`` launcher and ``python.exe`` match the same names
+        # (RDR-224, nexus-f9bgu.21); the identity of a POSIX name.
+        executable = winproc_core.executable_stem(tokens[0])
         if executable in _MCP_SIBLING_COMMANDS:
             matches.append(pid)
             continue
         if _PYTHON_EXECUTABLE_RE.match(executable) and len(tokens) > 1 \
-                and Path(tokens[1]).name in _MCP_SIBLING_COMMANDS:
+                and winproc_core.executable_stem(tokens[1]) in _MCP_SIBLING_COMMANDS:
             matches.append(pid)
     return matches
 

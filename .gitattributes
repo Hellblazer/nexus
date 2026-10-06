@@ -1,3 +1,8 @@
 
 # Use bd merge for beads JSONL files
 .beads/issues.jsonl merge=beads
+
+# Fixtures are byte-exact: no end-of-line conversion on any checkout. Git for
+# Windows ships core.autocrlf=true, which turned the appliance endpoint fixture's
+# trailing \n into \r\n on the win-release runner (nexus-f9bgu.14).
+tests/fixtures/** -text

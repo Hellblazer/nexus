@@ -830,6 +830,67 @@ class QuarantineCollectionLifecycleTest extends AtomicWriteTestBase {
         assertThat(registered(t, x)).isTrue();
     }
 
+    /** "LEVEL message" for every line logged by anything while {@code body} runs. */
+    private static List<String> captureLogs(Runnable body) {
+        ch.qos.logback.classic.Logger root =
+            (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger(org.slf4j.Logger.ROOT_LOGGER_NAME);
+        ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent> logs =
+            new ch.qos.logback.core.read.ListAppender<>();
+        logs.start();
+        root.addAppender(logs);
+        try {
+            body.run();
+            return logs.list.stream().map(e -> e.getLevel() + " " + e.getFormattedMessage()).toList();
+        } finally {
+            root.detachAppender(logs);
+            logs.stop();
+        }
+    }
+
+    // nexus-rf87b: the response carries a count only, so the held origin's name is in the log line.
+    @Test
+    void theGhostSweepLogsTheOriginItHolds_atInfo_withTenantOriginAndDryRun() throws Exception {
+        String t = newTenant();
+        String x = col("e4x");
+        String plain = col("e4plain");
+        register(t, x);
+        register(t, plain);
+        qrow(t, reaperSibling(x), "tagged", x);
+
+        var result = new Object() { Object value; };
+        List<String> logs = captureLogs(() -> result.value = repo.sweepGhostsAndMarkDormant(t));
+
+        assertThat(result.value).isNotNull();
+        assertThat(logs.stream().filter(l -> l.contains("event=ghost_sweep_held_quarantined_origin")
+                && l.contains("tenant=" + t + " ")).toList())
+            .as("one line, for the held origin only: the plain ghost is deleted, not held")
+            .singleElement()
+            .satisfies(l -> assertThat(l)
+                .startsWith("INFO ")
+                .contains("tenant=" + t + " ")
+                .contains("origin=" + x)
+                .contains("dry_run=false"));
+    }
+
+    @Test
+    void theGhostSweepDryRunLogsTheHeldOriginWithDryRunTrue_andACleanSweepLogsNoSuchLine() throws Exception {
+        String t = newTenant();
+        String x = col("e5x");
+        register(t, x);
+        qrow(t, reaperSibling(x), "tagged", x);
+        String quiet = newTenant();
+        register(quiet, col("e5plain"));
+
+        List<String> dry = captureLogs(() -> repo.sweepGhostsAndMarkDormant(t, true));
+        List<String> clean = captureLogs(() -> repo.sweepGhostsAndMarkDormant(quiet));
+
+        assertThat(dry).anyMatch(l -> l.startsWith("INFO ") && l.contains("event=ghost_sweep_held_quarantined_origin")
+            && l.contains("tenant=" + t + " ") && l.contains("origin=" + x) && l.contains("dry_run=true"));
+        assertThat(clean).as("a sweep that holds nothing logs no hold line")
+            .noneMatch(l -> l.contains("event=ghost_sweep_held_quarantined_origin")
+                && l.contains("tenant=" + quiet + " "));
+    }
+
     @Test
     void theGhostSweepDoesNotHoldAnOriginForAnotherOriginsRows() throws Exception {
         String t = newTenant();

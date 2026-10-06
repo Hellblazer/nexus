@@ -1005,6 +1005,8 @@ def _sweep_dead_worker_locks(locks_dir: Path) -> None:
     """
     import os  # noqa: PLC0415 — stdlib os deferred to function scope
 
+    from nexus.daemon.service_registry import pid_alive  # noqa: PLC0415 — deferred with os above
+
     if not locks_dir.exists():
         return
     own_pid = os.getpid()
@@ -1015,17 +1017,14 @@ def _sweep_dead_worker_locks(locks_dir: Path) -> None:
             continue  # not a PID-suffixed lock file
         if pid == own_pid:
             continue
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
+        # pid_alive (nexus-f9bgu.25): alive under another user stays alive,
+        # and the Windows branch never signals.
+        if not pid_alive(pid):
             try:
                 lock_file.unlink(missing_ok=True)
                 _log.info("aspect_worker_stale_lock_swept", pid=pid)
             except Exception:  # noqa: BLE001 — liveness probe of foreign pid is best-effort; treat unknown as stale
                 pass
-        except PermissionError:
-            # Alive under another user — leave it.
-            continue
 
 
 def _write_worker_lock(locks_dir: Path | None = None) -> None:

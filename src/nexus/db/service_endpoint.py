@@ -126,10 +126,10 @@ def discover_lease() -> tuple[str | None, str | None]:
     global _has_ever_resolved_lease
     try:
         from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred to avoid circular import
-        from nexus.daemon.service_registry import ServiceRegistry  # noqa: PLC0415 — deferred to avoid circular import
+        from nexus.daemon.service_registry import ServiceRegistry, service_identity  # noqa: PLC0415 — deferred to avoid circular import
 
         registry = ServiceRegistry(dir=nexus_config_dir(), tier="storage_service")
-        lease = registry.discover(str(os.getuid()))
+        lease = registry.discover(service_identity())
         if lease is not None:
             ep = lease.endpoint
             host = str(ep.get("host", "127.0.0.1"))

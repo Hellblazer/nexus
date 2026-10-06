@@ -353,11 +353,11 @@ def _poll_service_lease(config_dir: Path, *, timeout: float = 60.0):  # noqa: AN
     """
     import time  # noqa: PLC0415 — deferred local import
 
-    from nexus.daemon.service_registry import ServiceRegistry  # noqa: PLC0415 — deferred local import — CLI startup cost
+    from nexus.daemon.service_registry import ServiceRegistry, service_identity  # noqa: PLC0415 — deferred local import — CLI startup cost
     from nexus.db import service_endpoint as _service_endpoint  # noqa: PLC0415 — deferred local import — CLI startup cost
 
     registry = ServiceRegistry(dir=config_dir, tier="storage_service")
-    scope = str(os.getuid())  # POSIX-only; service mode is Linux/macOS
+    scope = service_identity()
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         # nexus-jw44t: route through the shared discover-and-mark seam — this

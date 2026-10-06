@@ -9,6 +9,7 @@ never a silent fallback.
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -145,7 +146,7 @@ def test_jar_argv_is_java_dash_jar(monkeypatch):
         "-Duser.timezone=UTC",
         "-Djava.net.preferIPv4Stack=true",
         # nexus-o5xyx.2: hs_err goes to the logs dir, before -jar
-        "-XX:ErrorFile=/tmp/logs/hs_err_%p.log",
+        f"-XX:ErrorFile={Path('/tmp') / 'logs' / 'hs_err_%p.log'}",
         "-jar",
         str(jar),
     ]
@@ -183,7 +184,7 @@ def test_jar_argv_states_false_when_opted_out(monkeypatch):
         "-Duser.timezone=UTC",
         "-Djava.net.preferIPv4Stack=false",
         # nexus-o5xyx.2: hs_err goes to the logs dir, before -jar
-        "-XX:ErrorFile=/tmp/logs/hs_err_%p.log",
+        f"-XX:ErrorFile={Path('/tmp') / 'logs' / 'hs_err_%p.log'}",
         "-jar",
         str(jar),
     ]
@@ -216,7 +217,7 @@ def test_jar_argv_with_heap_orders_xmx_before_jar(monkeypatch):
         "-Djava.net.preferIPv4Stack=true",
         "-Xmx1g",
         # nexus-o5xyx.2: hs_err goes to the logs dir, before -jar
-        "-XX:ErrorFile=/tmp/logs/hs_err_%p.log",
+        f"-XX:ErrorFile={Path('/tmp') / 'logs' / 'hs_err_%p.log'}",
         "-jar",
         str(jar),
     ]
@@ -396,7 +397,16 @@ def test_mismatch_symlink_spelling_same_file_no_raise(monkeypatch, tmp_path):
     real_binary.chmod(0o755)
 
     link_dir = tmp_path / "link"
-    link_dir.symlink_to(real_dir)
+    try:
+        link_dir.symlink_to(real_dir)
+    except OSError:
+        if sys.platform != "win32":
+            raise
+        # No symlink privilege (a non-admin Windows account, the win-release
+        # runner's): a junction is the directory link Windows grants anyone.
+        import _winapi  # noqa: PLC0415 -- Windows only
+
+        _winapi.CreateJunction(str(real_dir), str(link_dir))
     linked_binary = link_dir / "nexus-service"
     assert linked_binary.is_file()  # sanity: the symlink resolves
 
@@ -521,4 +531,4 @@ def test_the_jar_argv_points_error_file_into_the_logs_dir(monkeypatch, tmp_path)
     captured: dict = {}
     _stub_spawn(monkeypatch, captured)
     _supervisor(tmp_path, launch_kind="jar", artifact=Path("/build/svc.jar"))._spawn_service()
-    assert f"-XX:ErrorFile={tmp_path}/logs/hs_err_%p.log" in captured["argv"]
+    assert f"-XX:ErrorFile={tmp_path / 'logs' / 'hs_err_%p.log'}" in captured["argv"]

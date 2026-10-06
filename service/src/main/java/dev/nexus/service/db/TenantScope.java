@@ -106,6 +106,7 @@ public final class TenantScope {
     private final DataSource dataSource;
     private final Semaphore admission;
     private final long admissionTimeoutMs;
+    private final int poolSize;
 
     public TenantScope(DataSource dataSource) {
         this.dataSource = dataSource;
@@ -122,6 +123,7 @@ public final class TenantScope {
             }
         }
         this.admissionTimeoutMs = timeoutMs;
+        this.poolSize = poolSize;
         final int permits = poolSize * 2;
         this.admission = ADMISSION.computeIfAbsent(
             dataSource, ds -> new Semaphore(permits, true));
@@ -131,8 +133,46 @@ public final class TenantScope {
     TenantScope(DataSource dataSource, int admissionPermits, long admissionTimeoutMs) {
         this.dataSource = dataSource;
         this.admissionTimeoutMs = admissionTimeoutMs;
+        this.poolSize = Math.max(1, admissionPermits / 2);
         this.admission = ADMISSION.computeIfAbsent(
             dataSource, ds -> new Semaphore(admissionPermits, true));
+    }
+
+    /**
+     * The pool size this scope sized its admission bound from (HikariCP's maximum pool
+     * size, else {@link #DEFAULT_POOL_SIZE}). Read by the per-request search fan-out to
+     * derive its default parallelism (nexus-tu8wp.1).
+     */
+    public int poolSize() {
+        return poolSize;
+    }
+
+    /**
+     * Cross-request gate on per-collection search fan-out ARMS (nexus-tu8wp.1), static per
+     * {@link DataSource} for the same reason as {@link #ADMISSION}: production builds several
+     * {@code TenantScope}s over one pool, and the gate must be one object for all of them.
+     *
+     * <p>A fan-out arm acquires one permit BEFORE it calls {@link #withTenant}, so an arm that is
+     * waiting for a slot holds neither an admission permit nor a connection. Capping the arms in
+     * flight across ALL fan-out requests (not per request) keeps the rest of the pool free for
+     * {@code /health}, writes and plain search: two concurrent requests, each wanting half the
+     * pool, would otherwise take all of it. Fair, so a burst cannot starve an early arrival.
+     */
+    private static final Map<DataSource, Semaphore> FANOUT_ARMS =
+        Collections.synchronizedMap(new IdentityHashMap<>());
+
+    /**
+     * The fan-out arm gate for this scope's {@link DataSource}, created with {@code permits} the
+     * first time any scope over that DataSource asks (the permit count is process-wide config, so
+     * the first caller and every later one agree).
+     */
+    public Semaphore fanoutArmGate(int permits) {
+        return FANOUT_ARMS.computeIfAbsent(dataSource, ds -> new Semaphore(Math.max(1, permits), true));
+    }
+
+    /** Test seam: replace this DataSource's arm gate with a fresh one of {@code permits}. */
+    public void replaceFanoutArmGateForTests(int permits) {
+        FANOUT_ARMS.put(dataSource, new Semaphore(Math.max(1, permits), true));
     }
 
     /**
@@ -236,9 +276,13 @@ public final class TenantScope {
             // function. The PERMITTED_GUCS allowlist check above stays as defense in
             // depth (a programming-error guard, not an injection necessity now that the
             // name is bound rather than concatenated).
+            // nexus-u9zkn: the stamp is the first read of the borrow and runs before any path sets its
+            // statement bound, so it gets its own network bound, removed again before the work runs.
+            PgSession.bindStampNetworkTimeout(conn, true);
             ctx.select(DSL.function("set_config", SQLDataType.VARCHAR,
                     DSL.val(gucName), DSL.val(tenant), DSL.inline(true)))
                .fetch();
+            PgSession.bindStampNetworkTimeout(conn, false);
 
             T result = work.apply(ctx);
 
