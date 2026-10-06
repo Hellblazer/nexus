@@ -38,7 +38,7 @@ _DANGLING_COUNT_SQL = (
     "SELECT count(*) FROM nexus.catalog_document_chunks d "
     "WHERE NOT EXISTS (SELECT 1 FROM nexus.chunks c "
     "WHERE c.tenant_id = d.tenant_id AND c.collection = d.collection "
-    "AND c.chash = d.chash);"
+    "AND c.chash = d.chash AND c.embedding_model = d.embedding_model);"
 )
 
 

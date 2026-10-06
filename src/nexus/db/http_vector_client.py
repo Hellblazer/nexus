@@ -2679,7 +2679,8 @@ class HttpVectorClient:
 
         Dedup + conflict-merge are SERVER-ENFORCED (nexus-57dh4): the service's
         ``PgVectorRepository.upsertChunksInternal`` does first-wins in-batch dedup
-        and ``ON CONFLICT (tenant_id, collection, chash) DO UPDATE``. There is no
+        and ``ON CONFLICT (tenant_id, collection, chash, embedding_model) DO UPDATE``
+        (RDR-225: the collection's registered model is part of the key). There is no
         client-side quota check or 300-record cap on this path — the whole id set
         is sent in one POST. (The old "quota-check" framing was a ChromaDB-Cloud
         leftover; Postgres has no such limit.)

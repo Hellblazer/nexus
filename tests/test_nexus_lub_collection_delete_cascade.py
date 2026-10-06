@@ -68,7 +68,7 @@ def _seed_topic(tax, *, src_id: int, label: str, collection: str,
     )
 
 
-def _seed_chunk(tenant: str, collection: str, chash_hex: str, *, dim: int = 384) -> None:
+def _seed_chunk(tenant: str, collection: str, chash_hex: str, *, dim: int = 768) -> None:
     """RDR-194 P3d (nexus-tk070.p3d): seed a real nexus.chunks row so a
     topic_assignments insert for (tenant, collection, chash) satisfies
     the new topic_assignments_chunk_fk composite FK. Mirrors
@@ -88,15 +88,19 @@ def _seed_chunk(tenant: str, collection: str, chash_hex: str, *, dim: int = 384)
     # registered with a different model". The stub chunk's own dim is
     # an unrelated FK-satisfaction detail (which embedding_<dim> column
     # holds the zero-vector), not a model choice.
+    # RDR-225: a model partition holds one vector width (its dimension CHECK) and this
+    # substrate registers every collection under the bge-768 profile, so the stub is a
+    # 768-wide chunk; a stub of another width would not route to any partition.
     model_for_dim = "bge-base-en-v15-768"
+    assert dim == 768, f"stub chunks follow the substrate's bge-768 profile, not dim={dim}"
     vec = "[" + ",".join(["0"] * dim) + "]"
     sql = (
         "INSERT INTO nexus.catalog_collections "
         "(tenant_id, name, content_type, owner_id, embedding_model, lifecycle_state) "
         f"VALUES ('{tenant}', '{collection}', 'knowledge', 'test-seed', '{model_for_dim}', 'live') "
         "ON CONFLICT DO NOTHING; "
-        f"INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, {embed_col}) "
-        f"VALUES ('{tenant}', '{collection}', decode('{chash_hex}', 'hex'), 'seed', '{vec}'::nexus.vector) "
+        f"INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, {embed_col}, embedding_model) "
+        f"VALUES ('{tenant}', '{collection}', decode('{chash_hex}', 'hex'), 'seed', '{vec}'::nexus.vector, '{model_for_dim}') "
         "ON CONFLICT DO NOTHING;"
     )
     psql = Path(state["pg_bin"]) / "psql"

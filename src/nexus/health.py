@@ -5219,6 +5219,13 @@ def _check_rls_present(
     # rather than by position (ORDER BY is alphabetical, not VALUES-list order).
     # Uses a VALUES list as the driving table so we get one output row per
     # expected table even if the table doesn't exist in pg_class (NULL row).
+    # RDR-225: nexus.chunks and nexus.taxonomy_centroids are partitioned, and each model
+    # partition and tenant leaf is a pg_class row with RLS flags and pg_policies rows of its
+    # own. Both joins below are by EXACT relation name and a leaf's name is never a listed
+    # name (chunks_m<hash>_t_<hash>), so a leaf cannot add a row or inflate a policy count:
+    # each parent is judged on its own flags and its own policies.
+    # tests/db/test_rls_canary_partitioned_tables.py pins that on a migrated schema. That the
+    # partitions and leaves are ALSO enabled, forced and policed is nexus-3wh8d.16.
     table_values = ", ".join(
         f"('{schema}', '{tname}')"
         for schema, _, tname in (t.partition(".") for t in _RLS_TENANT_TABLES)

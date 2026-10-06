@@ -70,7 +70,7 @@ def _seed_topic(
     )
 
 
-def _seed_chunk(topic_id: int, collection: str, chash_hex: str, *, dim: int = 384) -> None:
+def _seed_chunk(topic_id: int, collection: str, chash_hex: str, *, dim: int = 768) -> None:
     """RDR-194 P3d (nexus-tk070.p3d): seed a real ``nexus.chunks`` row so a
     ``topic_assignments`` insert for ``(tenant, collection, chash)``
     satisfies the new ``topic_assignments_chunk_fk`` composite FK
@@ -108,7 +108,11 @@ def _seed_chunk(topic_id: int, collection: str, chash_hex: str, *, dim: int = 38
     # registered with a different model". The stub chunk's own dim is
     # an unrelated FK-satisfaction detail (which embedding_<dim> column
     # holds the zero-vector), not a model choice.
+    # RDR-225: a model partition holds one vector width (its dimension CHECK) and this
+    # substrate registers every collection under the bge-768 profile, so the stub is a
+    # 768-wide chunk; a stub of another width would not route to any partition.
     model_for_dim = "bge-base-en-v15-768"
+    assert dim == 768, f"stub chunks follow the substrate's bge-768 profile, not dim={dim}"
     vec = "[" + ",".join(["0"] * dim) + "]"
     sql = (
         "INSERT INTO nexus.catalog_collections "
@@ -116,8 +120,9 @@ def _seed_chunk(topic_id: int, collection: str, chash_hex: str, *, dim: int = 38
         f"SELECT tenant_id, '{collection}', 'knowledge', 'test-seed', '{model_for_dim}', 'live' "
         f"FROM nexus.topics WHERE id = {topic_id} "
         "ON CONFLICT DO NOTHING; "
-        f"INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, {embed_col}) "
-        f"SELECT tenant_id, '{collection}', decode('{chash_hex}', 'hex'), 'seed', '{vec}'::nexus.vector "
+        f"INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, {embed_col}, embedding_model) "
+        f"SELECT tenant_id, '{collection}', decode('{chash_hex}', 'hex'), 'seed', '{vec}'::nexus.vector, "
+        f"'{model_for_dim}' "
         f"FROM nexus.topics WHERE id = {topic_id} "
         "ON CONFLICT DO NOTHING;"
     )
@@ -141,7 +146,7 @@ def _run_seed_psql(sql: str, caller: str) -> None:
     assert proc.returncode == 0, f"{caller} failed: {proc.stdout}\n{proc.stderr}"
 
 
-def _seed_chunks(taxonomy: Any, collection: str, chash_hexes: list[str], *, dim: int = 384) -> None:
+def _seed_chunks(taxonomy: Any, collection: str, chash_hexes: list[str], *, dim: int = 768) -> None:
     """Bulk variant of :func:`_seed_chunk` for tests that need the FK's
     parent rows to exist BEFORE any topic does -- the discover/persist_
     discovered_topics/rebuild_taxonomy family, which create their OWN
@@ -171,7 +176,11 @@ def _seed_chunks(taxonomy: Any, collection: str, chash_hexes: list[str], *, dim:
     # registered with a different model". The stub chunk's own dim is
     # an unrelated FK-satisfaction detail (which embedding_<dim> column
     # holds the zero-vector), not a model choice.
+    # RDR-225: a model partition holds one vector width (its dimension CHECK) and this
+    # substrate registers every collection under the bge-768 profile, so the stub is a
+    # 768-wide chunk; a stub of another width would not route to any partition.
     model_for_dim = "bge-base-en-v15-768"
+    assert dim == 768, f"stub chunks follow the substrate's bge-768 profile, not dim={dim}"
     vec = "[" + ",".join(["0"] * dim) + "]"
     values = ", ".join(
         f"(tenant_id, '{collection}', decode('{c}', 'hex'), 'seed', '{vec}'::nexus.vector)"
@@ -183,15 +192,15 @@ def _seed_chunks(taxonomy: Any, collection: str, chash_hexes: list[str], *, dim:
         f"SELECT tenant_id, '{collection}', 'knowledge', 'test-seed', '{model_for_dim}', 'live' "
         f"FROM nexus.topics WHERE id = {bootstrap_id} "
         "ON CONFLICT DO NOTHING; "
-        f"INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, {embed_col}) "
-        f"SELECT * FROM (VALUES {values}) AS v(tenant_id, collection, chash, chunk_text, {embed_col}) "
+        f"INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, {embed_col}, embedding_model) "
+        f"SELECT v.*, '{model_for_dim}' FROM (VALUES {values}) AS v(tenant_id, collection, chash, chunk_text, {embed_col}) "
         "ON CONFLICT DO NOTHING;"
     )
     _run_seed_psql(sql, "_seed_chunks")
 
 
 def _seed_chunks_for_tenant(
-    tenant: str, collection: str, chash_hexes: list[str], *, dim: int = 384,
+    tenant: str, collection: str, chash_hexes: list[str], *, dim: int = 768,
 ) -> None:
     """Explicit-tenant twin of :func:`_seed_chunk` (RDR-194 P3d,
     nexus-tk070.p3d) for callers that need to seed nexus.chunks rows
@@ -221,7 +230,11 @@ def _seed_chunks_for_tenant(
     # registered with a different model". The stub chunk's own dim is
     # an unrelated FK-satisfaction detail (which embedding_<dim> column
     # holds the zero-vector), not a model choice.
+    # RDR-225: a model partition holds one vector width (its dimension CHECK) and this
+    # substrate registers every collection under the bge-768 profile, so the stub is a
+    # 768-wide chunk; a stub of another width would not route to any partition.
     model_for_dim = "bge-base-en-v15-768"
+    assert dim == 768, f"stub chunks follow the substrate's bge-768 profile, not dim={dim}"
     vec = "[" + ",".join(["0"] * dim) + "]"
     values = ", ".join(
         f"('{tenant}', '{collection}', decode('{c}', 'hex'), 'seed', '{vec}'::nexus.vector)"
@@ -232,8 +245,8 @@ def _seed_chunks_for_tenant(
         "(tenant_id, name, content_type, owner_id, embedding_model, lifecycle_state) "
         f"VALUES ('{tenant}', '{collection}', 'knowledge', 'test-seed', '{model_for_dim}', 'live') "
         "ON CONFLICT DO NOTHING; "
-        f"INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, {embed_col}) "
-        f"VALUES {values} ON CONFLICT DO NOTHING;"
+        f"INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, {embed_col}, embedding_model) "
+        f"SELECT v.*, '{model_for_dim}' FROM (VALUES {values}) AS v ON CONFLICT DO NOTHING;"
     )
     psql = Path(state["pg_bin"]) / "psql"
     proc = subprocess.run(

@@ -139,7 +139,8 @@ _DOCUMENTED_EXCLUSIONS: dict[tuple[str, str], str] = {
     ("chunk_orphaned_at", "collection"): (
         "RDR-192 reapable(c) (nexus-wbfpw.15, vectors-021-1): the side table of orphaning "
         "times, one row per chunk, keyed (tenant_id, collection, chash) with a foreign key "
-        "to nexus.chunks that is ON UPDATE CASCADE ON DELETE CASCADE. It is carried by "
+        "to nexus.chunks (four columns since RDR-225, embedding_model last) that is ON UPDATE "
+        "CASCADE ON DELETE CASCADE. It is carried by "
         "nexus.chunks, which IS registered: renameCollectionTxn's UPDATE of chunks.collection "
         "rewrites these rows through the cascade (pinned through the real rename route by "
         "ChunkIsReapableIntegrationTest.aRecordFollowsItsChunkThroughTheRenameRoute), and a "
@@ -148,6 +149,22 @@ _DOCUMENTED_EXCLUSIONS: dict[tuple[str, str], str] = {
         "the cascade does and can conflict with it mid-statement (the "
         "CASCADE_CARRIED_TABLES reasoning). Registering it would add nothing the chunks "
         "entry does not already give."
+    ),
+    ("chunks_retired_225", "collection"): (
+        "RDR-225 vectors-030-1: the pre-partition nexus.chunks, kept for 14 days after the migration "
+        "walk as its rollback source and the baseline of its reconciliation, then dropped. It holds "
+        "the same rows the partitioned nexus.chunks was copied from, nothing writes to it, and "
+        "nothing reads it but the rollback, so it is not live collection data: a rename that "
+        "re-homed it would rewrite a copy no code consults, and collectionIsEmpty must not count it "
+        "(the live rows are in nexus.chunks, which IS registered). Remove this entry when the "
+        "table is dropped; test_documented_exclusions_are_live fails until then."
+    ),
+    ("taxonomy_centroids_retired_225", "collection"): (
+        "RDR-225 vectors-030-1: the pre-partition nexus.taxonomy_centroids, kept for 14 days as "
+        "the walk's rollback source (it also holds the centroids the walk declined to copy, which "
+        "taxonomy rebuilds). Same ruling as chunks_retired_225 above: a retired copy nothing "
+        "writes or reads, not live collection data; the live rows are in nexus.taxonomy_centroids, "
+        "which IS registered. Remove this entry when the table is dropped."
     ),
     ("chash_remap", "target_collection"): (
         "Same ledger and same ruling as source_collection above; the target leg is "
@@ -259,9 +276,22 @@ def schema_pairs(t2_service_env: str) -> set[tuple[str, str]]:
         "WHERE c.table_schema = 'nexus' "
         f"  AND {_COLLECTION_COLUMN_PREDICATE} "
         "  AND t.table_type = 'BASE TABLE' "
+        # RDR-225: chunks and taxonomy_centroids are LIST-partitioned by model then tenant, and
+        # information_schema reports every partition (model partitions and per-tenant leaves) as a
+        # BASE TABLE of its own. The registry names the parent, so a partition is not a table.
+        "  AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_class pc "
+        "                  JOIN pg_catalog.pg_namespace pn ON pn.oid = pc.relnamespace "
+        "                  WHERE pn.nspname = t.table_schema AND pc.relname = t.table_name "
+        "                    AND pc.relispartition) "
         "ORDER BY 1",
     )
     pairs = {tuple(r.split(" ", 1)) for r in rows}  # type: ignore[misc]
+    # Non-vacuity for the partition filter: the partitioned parents themselves must still be
+    # counted, or the filter has swallowed the tables it was meant to leave.
+    for parent in ("chunks", "taxonomy_centroids"):
+        assert any(t == parent for t, _ in pairs), (
+            f"the partition filter dropped the partitioned parent {parent!r}; pairs: {sorted(pairs)}"
+        )
     assert len(pairs) >= _MIN_EXPECTED_ENTRIES, (
         f"information_schema returned only {len(pairs)} collection-scoped columns in "
         f"schema 'nexus'. The engine substrate almost certainly did not apply the "

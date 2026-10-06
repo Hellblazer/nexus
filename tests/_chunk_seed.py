@@ -159,15 +159,25 @@ def chunks_insert_sql(
     already be distinct and valid, and the collection registered."""
     dim = len(embeddings[0])
     col = _EMBED_COLUMN[dim]
+    # RDR-225: chunks is partitioned by embedding_model and its key carries it, so every row
+    # names the model its collection is registered under. Resolved in SQL from the registry
+    # row, because a caller that registered the collection has already fixed it there; an
+    # unregistered collection yields NULL and the NOT NULL refuses the row, as the old
+    # collection foreign key did.
+    model = (
+        "(SELECT embedding_model FROM nexus.catalog_collections "
+        f"WHERE tenant_id = {_lit(tenant)} AND name = {_lit(collection)})"
+    )
     rows = ",\n".join(
         f"({_lit(tenant)}, {_lit(collection)}, decode({_lit(chash)}, 'hex'), "
-        f"{_lit(doc)}, {_vector_lit(vec)}, {_lit(json.dumps(meta))}::jsonb)"
+        f"{_lit(doc)}, {_vector_lit(vec)}, {_lit(json.dumps(meta))}::jsonb, {model})"
         for chash, doc, vec, meta in zip(ids, documents, embeddings, metas, strict=True)
     )
     return (
-        f"INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, {col}, metadata)\n"
+        "INSERT INTO nexus.chunks "
+        f"(tenant_id, collection, chash, chunk_text, {col}, metadata, embedding_model)\n"
         f"VALUES {rows}\n"
-        "ON CONFLICT (tenant_id, collection, chash) DO UPDATE SET\n"
+        "ON CONFLICT (tenant_id, collection, chash, embedding_model) DO UPDATE SET\n"
         f"  chunk_text = EXCLUDED.chunk_text, {col} = EXCLUDED.{col},\n"
         "  metadata = COALESCE(nexus.chunks.metadata, '{}'::jsonb) || EXCLUDED.metadata,\n"
         "  retention = 'full',\n"

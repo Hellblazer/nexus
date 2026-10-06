@@ -533,8 +533,9 @@ def test_inverted_control_handseeded_dangling_row_detected(t2_service_env):
     # Correlation pin: one unrelated LIVE chunk in the same collection, so
     # the anti-join cannot pass by "the chunk table happens to be empty".
     _psql(state, (
-        "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_1024) "
-        f"VALUES ('{tenant}', '{coll}', decode('{pin_chash}', 'hex'), 'pin', '{vec_1024}'::nexus.vector)"
+        "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_1024, embedding_model) "
+        f"VALUES ('{tenant}', '{coll}', decode('{pin_chash}', 'hex'), 'pin', '{vec_1024}'::nexus.vector, "
+        "'voyage-code-3')"
     ))
     _psql(state, (
         "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title, physical_collection) "
@@ -548,8 +549,9 @@ def test_inverted_control_handseeded_dangling_row_detected(t2_service_env):
     # what tests/_catalog_fixture_ops.fk_dropped_for_dangling_seed exists for.
     with fk_dropped_for_dangling_seed():
         _psql(state, (
-            "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection) "
-            f"VALUES ('{tenant}', '{doc_id}', 0, decode('{ghost_chash}', 'hex'), '{coll}')"
+            "INSERT INTO nexus.catalog_document_chunks "
+            "(tenant_id, doc_id, position, chash, collection, embedding_model) "
+            f"VALUES ('{tenant}', '{doc_id}', 0, decode('{ghost_chash}', 'hex'), '{coll}', 'voyage-code-3')"
         ))
 
     dangling_after = _dangling_count(state, tenant)
