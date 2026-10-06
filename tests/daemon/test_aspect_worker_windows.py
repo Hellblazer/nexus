@@ -171,8 +171,13 @@ def test_the_main_thread_waits_in_ticks_no_longer_than_one_second(tmp_path: Path
     assert awd._STOP_TICK_S <= DEFAULT_HEARTBEAT_INTERVAL <= 1.0
 
 
-def test_run_aspect_worker_daemon_serves_through_run_until_signal(tmp_path: Path) -> None:
+def test_run_aspect_worker_daemon_serves_through_run_until_signal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The entry point calls the ticked wait, not a bare Event.wait()."""
+    # The real prologue chdirs to config_dir; keep that from leaking into the
+    # rest of the worker (it turned develop's shard 1 red).
+    monkeypatch.chdir(Path.cwd())
     calls: list[str] = []
 
     class _D:

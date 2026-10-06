@@ -2240,6 +2240,28 @@ def _check_mandatory_pin_non_vacuity(session) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _restore_cwd():
+    """Put the working directory back after every test. Production code moves
+    the process cwd (the aspect-worker daemon's prologue chdirs to its config
+    dir, aspect_worker_daemon.py), and so do a couple of dozen tests, so a test
+    that runs such code in-process leaves the rest of its xdist worker in a
+    temp dir, where every repo-relative read (Path("src/nexus/...")) misses.
+    That turned shard 1 of develop red on 5cd8b18f4. Restoring here makes test
+    order irrelevant; a cwd deleted under the test falls back to the rootdir."""
+    try:
+        before = os.getcwd()
+    except OSError:
+        before = str(Path(__file__).resolve().parents[1])
+    yield
+    try:
+        if os.getcwd() == before:
+            return
+    except OSError:
+        pass
+    os.chdir(before)
+
+
+@pytest.fixture(autouse=True)
 def _no_engine_restart_taxonomy_deferral(monkeypatch):
     """nexus-tawfg: ``nx index repo`` defers taxonomy work while the engine's
     /version reports ``process_uptime_seconds`` under a threshold. The
