@@ -152,7 +152,17 @@ class _MockMemoryEngine:
                 self.end_headers()
                 self.wfile.write(body)
 
-        self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        class _Server(ThreadingHTTPServer):
+            def handle_error(self, request, client_address) -> None:  # noqa: ANN001
+                # A get_sleep_seconds request outlives the client that timed out on it and
+                # outlives close() too (shutdown() does not join request threads), so its
+                # late write hits a closed socket. The default handler prints that traceback
+                # to stderr, inside whichever test runs next on this worker.
+                if isinstance(sys.exc_info()[1], ConnectionError):
+                    return
+                super().handle_error(request, client_address)
+
+        self._server = _Server(("127.0.0.1", 0), Handler)
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
         self._thread.start()
 
