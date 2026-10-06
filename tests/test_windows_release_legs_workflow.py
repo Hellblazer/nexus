@@ -427,6 +427,20 @@ def test_the_engine_job_takes_the_pg_bundle_from_this_runs_artifact_not_a_rebuil
     assert leg["with"]["pg-archive"] == f"{download['with']['path']}/nexus-pg-windows-x64.txz"
 
 
+def _assert_cosign_installs_on_every_run_with_gits_bash(steps: list[dict], install: int) -> None:
+    # The first tag run (engine-service-v0.1.148, run 37425299859) failed installing
+    # cosign: the installer's `shell: bash` step reached System32\bash.exe, the WSL
+    # launcher. Git's bin goes first, and the install runs on every run so a
+    # workflow_dispatch proves it before a tag; only signing and upload are tag-gated.
+    names = [s.get("name", "") for s in steps]
+    assert "if" not in steps[install], "the install must run on a dispatch too, or only a tag can prove it"
+    path = steps[install - 1]
+    assert path.get("name", "").startswith("Put Git's bin first on PATH"), names[install - 1]
+    assert "'C:\\Program Files\\Git\\bin'" in path["run"] and "GITHUB_PATH" in path["run"]
+    check = steps[install + 1]
+    assert "if" not in check and "cosign version" in check["run"] and "Get-Command bash" in check["run"], names[install + 1]
+
+
 def test_the_engine_job_signs_and_publishes_on_tags_only_after_the_leg_passed() -> None:
     steps = _engine()["steps"]
     names = [s.get("name", "") for s in steps]
@@ -435,9 +449,10 @@ def test_the_engine_job_signs_and_publishes_on_tags_only_after_the_leg_passed() 
     publish = next(i for i, n in enumerate(names) if n.startswith("Upload the engine archive"))
     install = next(i for i, n in enumerate(names) if n.startswith("Install cosign"))
     assert leg < install < sign < publish, names
-    for i in (install, sign, publish):
+    for i in (sign, publish):
         assert "refs/tags/engine-service-v" in steps[i]["if"], names[i]
     assert "if" not in steps[leg], "the build, checks and smoke run on every trigger, tag or not"
+    _assert_cosign_installs_on_every_run_with_gits_bash(steps, install)
 
 
 def test_the_engine_job_signs_the_txz_with_the_new_bundle_format_only_and_uploads_exactly_the_three_assets() -> None:
@@ -485,8 +500,9 @@ def test_each_windows_release_job_signs_verifies_and_uploads_its_pinned_asset_se
     sign_i = next(i for i, n in enumerate(names) if n.startswith(sign_prefix))
     publish_i = next(i for i, n in enumerate(names) if n.startswith(upload_prefix))
     assert install < sign_i < publish_i, names
-    for i in (install, sign_i, publish_i):
+    for i in (sign_i, publish_i):
         assert "refs/tags/engine-service-v" in steps[i]["if"], names[i]
+    _assert_cosign_installs_on_every_run_with_gits_bash(steps, install)
     sign = _code(steps[sign_i]["run"])
     assert "cosign sign-blob" in sign
     assert "cosign verify-blob" in sign, "a signature published without being verified in the same step"
