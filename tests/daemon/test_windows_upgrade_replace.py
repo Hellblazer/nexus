@@ -527,6 +527,53 @@ def test_install_stops_before_the_first_replace_and_starts_after_the_last(tmp_pa
     assert len(observed["at_start"]) == 5
 
 
+def test_the_archive_is_extracted_before_the_stop_so_the_service_is_down_only_for_the_swap(tmp_path, monkeypatch):
+    """nexus-f9bgu.49: verify and extract run with the service UP (as the PG bundle path does);
+    at the moment of the stop every file is already staged and nothing is replaced yet."""
+    svc = tmp_path / "service"
+    _write_set(svc, "old")
+    fake = _Ops()
+    ops = fake.ops()
+    staged_at_stop: list[set[str]] = []
+
+    def stop_service():
+        stages = [p for p in svc.iterdir() if p.name.startswith(".nx_stage_")]
+        staged_at_stop.append({f.name for st in stages for f in st.iterdir()})
+        assert _read_set(svc) == {n: f"old:{n}" for n in _NAMES}
+        return _stopped(100, 200)
+
+    ops.stop_service = stop_service
+    _serve(monkeypatch, _archive("new"))
+    guard = rq.quiesced(tmp_path, replacing="engine", platform=_WIN, ops=ops)
+    b.install_binary(
+        _TAG, tmp_path, checker=_OkChecker(), download_dir=tmp_path,
+        platform_tag="windows-x64", quiesce=guard, host_platform=_WIN,
+    )
+    assert staged_at_stop == [set(_NAMES)], "the whole set was staged before the stop"
+    assert _read_set(svc) == {n: f"new:{n}" for n in _NAMES}
+
+
+def test_a_bad_archive_fails_without_stopping_the_service(tmp_path, monkeypatch):
+    """nexus-f9bgu.49: an archive that fails extraction never enters the stop at all."""
+    svc = tmp_path / "service"
+    _write_set(svc, "old")
+    fake = _Ops()
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:xz") as tf:  # the exe alone: four DLLs missing
+        info = tarfile.TarInfo(WINDOWS_ENGINE_EXE)
+        info.size = 3
+        tf.addfile(info, io.BytesIO(b"new"))
+    _serve(monkeypatch, buf.getvalue())
+    guard = rq.quiesced(tmp_path, replacing="engine", platform=_WIN, ops=fake.ops())
+    with pytest.raises(b.BinaryVerificationError, match="missing required"):
+        b.install_binary(
+            _TAG, tmp_path, checker=_OkChecker(), download_dir=tmp_path,
+            platform_tag="windows-x64", quiesce=guard, host_platform=_WIN,
+        )
+    assert fake.events == [], "the service was never stopped"
+    assert _read_set(svc) == {n: f"old:{n}" for n in _NAMES}
+
+
 def test_the_runtime_libraries_are_placed_first_and_the_executable_last(tmp_path, monkeypatch):
     """The set goes in DLLs first, exe last, so a failure part-way never leaves a new exe beside
     old libraries (BI1). The order is the contract, not the membership."""

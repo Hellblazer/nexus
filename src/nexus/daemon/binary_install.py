@@ -26,6 +26,7 @@ protobuf bundle is verifiable offline by the pure-Python ``sigstore`` package.
 """
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import lzma
@@ -613,8 +614,9 @@ def install_binary(
             guard = quiesce if quiesce is not None else _engine_quiesce(
                 config_dir, restart_after=restart_after, host_platform=host_platform,
             )
-            with guard:
-                extra = _place_engine_archive(asset, dest, platform=host_platform)
+            # The archive is verified and extracted with the service still up; only
+            # the swap runs inside the stop (nexus-f9bgu.49, as the PG bundle does).
+            extra = _place_engine_archive(asset, dest, platform=host_platform, guard=guard)
         else:
             _atomic_copy(asset, dest, executable=True)
 
@@ -680,7 +682,11 @@ def _grant_user_ace(path: Path, platform: str | None) -> None:
 
 
 def _place_engine_archive(
-    archive: Path, exe_dest: Path, *, platform: str | None = None,
+    archive: Path,
+    exe_dest: Path,
+    *,
+    platform: str | None = None,
+    guard: AbstractContextManager[object] | None = None,
 ) -> dict:
     """Extract the Windows engine archive and place its files beside *exe_dest*.
 
@@ -696,8 +702,11 @@ def _place_engine_archive(
     DLLs first and the exe last (:func:`~nexus.daemon.replace_guard.
     place_set_with_rollback`): each file by one atomic replace, retried on
     Windows when a scan or a handle holds it, and a failure part way restores
-    every file, so the set is never half old and half new. Returns the receipt fields ``installed_sha256`` (exe),
-    ``support_files`` (DLL digests) and ``layout``.
+    every file, so the set is never half old and half new. *guard* (the
+    service stop on a Windows host) is entered only for that move: reading,
+    hashing and extracting the ~190 MB archive happen before it, with the
+    service still running (nexus-f9bgu.49). Returns the receipt fields
+    ``installed_sha256`` (exe), ``support_files`` (DLL digests) and ``layout``.
     """
     required = (WINDOWS_ENGINE_EXE, *WINDOWS_RUNTIME_DLLS)
     exe_dest.parent.mkdir(parents=True, exist_ok=True)
@@ -757,10 +766,11 @@ def _place_engine_archive(
                 f"{', '.join(missing)}; not installing."
             )
 
-        place_set_with_rollback(
-            stage, exe_dest.parent, (*WINDOWS_RUNTIME_DLLS, WINDOWS_ENGINE_EXE),
-            platform=platform,
-        )
+        with guard if guard is not None else contextlib.nullcontext():
+            place_set_with_rollback(
+                stage, exe_dest.parent, (*WINDOWS_RUNTIME_DLLS, WINDOWS_ENGINE_EXE),
+                platform=platform,
+            )
     finally:
         shutil.rmtree(stage, ignore_errors=True)
 
