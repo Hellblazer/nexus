@@ -287,6 +287,9 @@ def fake_storage_sup(monkeypatch: pytest.MonkeyPatch) -> type[_FakeStorageSuperv
     # RDR-161: run_storage_supervisor resolves a native binary before building
     # the supervisor; provide a fake so the breadcrumb path runs.
     monkeypatch.setattr(ssd, "_find_service_binary", lambda cfg: Path("/fake/nexus-service"))
+    # On Windows the real installer builds a hidden window and a console handler in
+    # this process (nexus-f9bgu.51); the breadcrumb tests are not about session end.
+    monkeypatch.setattr(ssd, "_install_session_end_handler", lambda *a, **k: lambda: None)
     return _FakeStorageSupervisor
 
 

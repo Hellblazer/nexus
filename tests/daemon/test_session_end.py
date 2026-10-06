@@ -321,9 +321,13 @@ def test_a_registration_the_os_refuses_leaves_a_no_op_uninstall() -> None:
 
 def test_importing_the_module_loads_no_windows_only_ctypes_module() -> None:
     # A clean interpreter: the module's own import must not touch ctypes.wintypes (the
-    # Windows-only types are built lazily inside the registrar), on any host.
+    # Windows-only types are built lazily inside the registrar), on any host. On Windows
+    # ``import nexus`` itself loads ctypes.wintypes (truststore, nexus-f9bgu.52), so the
+    # package is imported first and the module dropped before session_end is imported.
     code = (
-        "import sys, nexus.daemon.session_end;"
+        "import sys, nexus;"
+        "sys.modules.pop('ctypes.wintypes', None);"
+        "import nexus.daemon.session_end;"
         "sys.exit(1 if 'ctypes.wintypes' in sys.modules else 0)"
     )
     assert subprocess.run([sys.executable, "-c", code], check=False).returncode == 0
