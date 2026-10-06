@@ -147,7 +147,7 @@ ORT_SYNTHETIC_UNWANTED = [
 # variants), or sits under the per-library platform paths.
 _NATIVE_SUFFIX = re.compile(r"\.(?:so(?:\.\d+)*|dylib|jnilib|dll)$", re.IGNORECASE)
 _PLATFORM_SEGMENT = re.compile(
-    r"^(?:darwin|osx|macos|linux|win|win32|win64|windows)(?:[-_][A-Za-z0-9_]+)*$", re.IGNORECASE
+    r"^(?:darwin|osx|macos|linux|win|win32|win64|windows)(?:[-_][A-Za-z0-9]+)*$", re.IGNORECASE
 )
 
 
