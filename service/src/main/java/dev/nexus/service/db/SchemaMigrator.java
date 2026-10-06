@@ -409,6 +409,17 @@ public final class SchemaMigrator {
      * rehearsals) uses.
      */
     public static MigrationOutcome migrate(DataSource ds, Runnable afterUpdateHook) {
+        return migrate(ds, afterUpdateHook, LocalDiskPreflight::dataDirFreeBytesFromEnv);
+    }
+
+    /**
+     * Test seam (nexus-3wh8d.9): as {@link #migrate(DataSource, Runnable)} with the free-space source of the
+     * RDR-225 local disk preflight injected, so a test can simulate low free space without filling a disk. The
+     * source is read only while {@code vectors-030-1} is pending and there is data to copy; see {@link
+     * LocalDiskPreflight}. Public for the same cross-package reason as the overload above.
+     */
+    public static MigrationOutcome migrate(DataSource ds, Runnable afterUpdateHook,
+                                           java.util.function.Supplier<java.util.OptionalLong> dataDirFreeBytes) {
         log.info("event=schema_migration_start changelog={}", MASTER_CHANGELOG);
         try {
             pinJvmTimeZoneToUtc();
@@ -447,6 +458,9 @@ public final class SchemaMigrator {
             pinSearchPathToPublic(conn);
             refuseSplitHistory(conn);
             preflightChashConstraints(conn);
+            // RDR-225 P1.4 (nexus-3wh8d.9): refuse early, naming the shortfall, rather than fill the disk mid-walk.
+            // A refusal is a MigrationException, so Main exits non-zero exactly as for a failed walk.
+            LocalDiskPreflight.check(conn, dataDirFreeBytes);
 
             Database database = DatabaseFactory.getInstance()
                 .findCorrectDatabaseImplementation(new JdbcConnection(conn));

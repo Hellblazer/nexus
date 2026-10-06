@@ -3143,6 +3143,33 @@ class TestPdeathsigOrphanPrevention:
         sup._spawn_service()
         assert captured["env"].get("NX_SERVICE_PARENT_DEATH_EXIT") == "1"
 
+    def test_spawn_service_hands_the_engine_the_pg_data_dir_for_the_disk_preflight(
+        self, config_dir: Path, clock: _FakeClock, monkeypatch
+    ) -> None:
+        """RDR-225 P1.4 (nexus-3wh8d.9): the engine reads free disk only from a data directory it is told
+        about, because its Postgres may be remote. The supervisor owns the bundled cluster, so it names
+        PG_DATA as NX_PG_DATA_DIR; a credentials file with no PG_DATA (managed or BYO) names nothing."""
+        import nexus.daemon.storage_service_daemon as ssd_mod
+
+        def _spawn_env(creds: dict[str, str] | None) -> dict:
+            sup = _make_supervisor(config_dir, clock, creds=creds)
+            captured: dict = {}
+
+            def _fake_popen(argv, **kw):
+                captured.update(kw)
+                return _FakeProc(pid=49204)
+
+            monkeypatch.setattr(ssd_mod, "_popen", _fake_popen)
+            monkeypatch.setattr(ssd_mod, "_allocate_free_port", lambda: 18079)
+            sup._spawn_service()
+            return captured["env"]
+
+        monkeypatch.delenv("NX_PG_DATA_DIR", raising=False)
+        assert _spawn_env(None)["NX_PG_DATA_DIR"] == "/tmp/pgdata"
+        managed = {"NX_DB_URL": "jdbc:...", "NX_DB_USER": "svc", "NX_DB_PASS": "pass",
+                   "NX_SERVICE_TOKEN": "root-token-from-creds-deadbeef"}
+        assert "NX_PG_DATA_DIR" not in _spawn_env(managed)
+
     def test_spawn_service_sets_the_ownerless_write_mode_to_enforce_locally(
         self, config_dir: Path, clock: _FakeClock, monkeypatch
     ) -> None:
