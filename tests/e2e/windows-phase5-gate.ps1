@@ -139,7 +139,10 @@ function Fail([string]$msg) { throw $msg }
 # PowerShell 5.1 when ErrorActionPreference is Stop; run natives with Continue.
 function Native([scriptblock]$sb) { $ErrorActionPreference = 'Continue'; (& $sb 2>&1 | Out-String) }
 # A deserialized JSON object is a Dictionary; read optional keys through K.
-function K($d, [string]$k) { if ($d -is [System.Collections.IDictionary] -and $k -and $d.ContainsKey($k)) { $d[$k] } else { $null } }
+# The leading comma matters: PowerShell unrolls an array a function returns, so
+# a one-element array (a transcript message whose content holds a single tool
+# call) would come back as its element and fail every `-is [array]` test.
+function K($d, [string]$k) { if ($d -is [System.Collections.IDictionary] -and $k -and $d.ContainsKey($k)) { return , $d[$k] } else { return $null } }
 
 function Load-State {
     if (-not (Test-Path $statePath)) { return $null }
@@ -417,9 +420,23 @@ function Session-View($tx, [string]$sid) {
     return @{ uses = $uses; results = $results; hooks = $hooks; version = $version }
 }
 
-$tx = Read-Transcripts
 $script:sid = $null
 $script:view = $null
+
+function Find-VerifyCalls($tx) {
+    @($tx.lines | Where-Object { (K $_ 'isSidechain') -ne $true -and (K $_ 'entrypoint') -eq 'cli' } | ForEach-Object {
+        $e = $_; $content = K (K $e 'message') 'content'
+        if ($content -is [array]) { foreach ($c in $content) {
+            if ((K $c 'type') -eq 'tool_use' -and "$(K (K $c 'input') 'command')" -match 'windows-phase5-gate\.ps1.*-Phase\s+verify') { $e } } } } |
+        Sort-Object { K $_ 'timestamp' })
+}
+
+function Claude-Ancestor {
+    $all = @(Get-CimInstance Win32_Process); $byId = @{}; foreach ($p in $all) { $byId[[int]$p.ProcessId] = $p }
+    $cur = $byId[[int]$PID]; $hops = 0
+    while ($cur -and $hops -lt 12) { if ($cur.Name -eq 'claude.exe') { return [int]$cur.ProcessId }; $cur = $byId[[int]$cur.ParentProcessId]; $hops++ }
+    return $null
+}
 
 # V0: versions after the relaunch, and this process belongs to the live session.
 try {
@@ -430,16 +447,23 @@ try {
     $ip = Join-Path $env:USERPROFILE '.claude\plugins\installed_plugins.json'
     $pv = K (@(K (K $Json.DeserializeObject((Get-Content -Raw $ip)) 'plugins') 'conexus@nexus-plugins') | Select-Object -First 1) 'version'
     if ($pv -ne $ExpectedVersion) { Fail "conexus plugin is '$pv', expected $ExpectedVersion" }
-    # The tool call that started this verify is in the live session's transcript.
-    $runs = @($tx.lines | Where-Object { (K $_ 'isSidechain') -ne $true -and (K $_ 'entrypoint') -eq 'cli' } | ForEach-Object {
-        $e = $_; $content = K (K $e 'message') 'content'
-        if ($content -is [array]) { foreach ($c in $content) {
-            if ((K $c 'type') -eq 'tool_use' -and "$(K (K $c 'input') 'command')" -match 'windows-phase5-gate\.ps1.*-Phase\s+verify') { $e } } } } |
-        Sort-Object { K $_ 'timestamp' })
-    if ($runs.Count -eq 0) { Fail 'no interactive (entrypoint cli) session transcript holds the tool call that ran this verify: run it from the live session' }
+    # This verify was started by a Claude Code session: claude.exe is an
+    # ancestor, and that session's transcript holds the tool call that ran it.
+    # Claude Code writes the call's message to the transcript after the tool
+    # has started (measured 2026-10-06), so poll for it.
+    $claudePid = Claude-Ancestor
+    if (-not $claudePid) { Fail 'no claude.exe among this process''s ancestors: run verify from the live session' }
+    $deadline = (Get-Date).AddSeconds(60)
+    do {
+        $tx = Read-Transcripts
+        $runs = Find-VerifyCalls $tx
+        if ($runs.Count -gt 0) { break }
+        Start-Sleep -Seconds 3
+    } while ((Get-Date) -lt $deadline)
+    if ($runs.Count -eq 0) { Fail 'no interactive (entrypoint cli) session transcript holds the tool call that ran this verify within 60 s: run it from the live session' }
     $script:sid = K $runs[-1] 'sessionId'
     $script:view = Session-View $tx $script:sid
-    Record 'V0' 'PASS' ("$ver; engine $($s['service_release_version']); conexus plugin $pv; live session $($script:sid) (Claude Code $($script:view.version))")
+    Record 'V0' 'PASS' ("$ver; engine $($s['service_release_version']); conexus plugin $pv; live session $($script:sid) (Claude Code $($script:view.version)), started under claude.exe pid $claudePid")
 } catch {
     Record 'V0' 'FAIL' $_.Exception.Message
 }

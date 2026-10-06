@@ -111,7 +111,10 @@ def test_verify_checks_versions_and_the_live_session() -> None:
     v0 = text[text.index("# V0:"):text.index("Run-Assertion 2 ")]
     assert "installed_plugins.json" in v0
     assert "service_release_version" in v0
-    assert "(K $_ 'entrypoint') -eq 'cli'" in v0
+    assert "(K $_ 'entrypoint') -eq 'cli'" in text
+    # the launching call reaches the transcript after the tool starts: poll for it
+    assert "$runs = Find-VerifyCalls $tx" in v0 and "Start-Sleep -Seconds 3" in v0
+    assert "$claudePid = Claude-Ancestor" in v0
 
 
 def test_refuses_off_windows_before_touching_paths() -> None:
@@ -133,3 +136,10 @@ def test_assertion_bodies_keep_their_deciding_clauses() -> None:
     assert "a credential file appeared during the run" in a5
     setup = text[text.index("Run-Assertion 1 "):text.index("# --------------------------------------------------------------- verify ----")]
     assert "setup cannot be re-run on this box" in setup and "exit 1" in setup
+
+
+def test_k_returns_arrays_unrolled_by_nothing() -> None:
+    # A one-element array returned bare from a PowerShell function arrives as
+    # its element; the gate missed every single-tool-call message that way on
+    # the first real run (2026-10-06).
+    assert "return , $d[$k]" in _text()
