@@ -198,7 +198,10 @@ def swap_link(target: str, link: Path | str, ops: LinkOps | None = None) -> None
         raise GenerationError(
             f"{link} exists and is not a link; refusing to replace it"
         )
-    ops.create(target, new)
+    try:
+        ops.create(target, new)
+    except OSError as exc:
+        raise GenerationError(f"could not create a pointer to {target} beside {link}: {exc}") from exc
     try:
         if present:
             os.rename(link, aside)
@@ -298,15 +301,20 @@ def register_legacy(
 
 def _run(argv: list[str], run, what: str) -> str:
     """Run one command; return its stdout, or raise with what it said."""
-    runner = run if run is not None else subprocess.run
+    # utf-8 with replacement, not ``text=True``: that decodes with the console
+    # code page on Windows, and uv prints non-ASCII progress glyphs; a
+    # UnicodeDecodeError out of the reader thread would replace the build's own
+    # diagnostic with a decoding traceback.
     try:
-        # utf-8 with replacement, not ``text=True``: that decodes with the
-        # console code page on Windows, and uv prints non-ASCII progress glyphs;
-        # a UnicodeDecodeError out of the reader thread would replace the
-        # build's own diagnostic with a decoding traceback.
-        done = runner(  # noqa: S603 -- fixed argv, no shell
-            argv, capture_output=True, encoding="utf-8", errors="replace", check=False,
-        )
+        # ``run`` is the test seam. subprocess.run is NOT bound to a name here
+        # and its keywords are spelt out, not unpacked: an alias or a ``**``
+        # hides the call from the bounded-subprocess lint's AST scan.
+        if run is not None:
+            done = run(argv, capture_output=True, encoding="utf-8", errors="replace", check=False)
+        else:
+            done = subprocess.run(  # noqa: S603 -- fixed argv, no shell
+                argv, capture_output=True, encoding="utf-8", errors="replace", check=False,
+            )
     except FileNotFoundError as exc:
         raise GenerationError(
             f"{what}: {argv[0]} was not found on PATH. nx self install needs uv "

@@ -270,6 +270,19 @@ class TestFlipAndRollback:
         assert os.readlink(tools / "current") == str(a)
         assert [p.name for p in tools.iterdir() if p.name.startswith(".")] == []
 
+    def test_a_pointer_that_cannot_be_created_is_a_generation_error_and_changes_nothing(
+        self, tools: Path,
+    ) -> None:
+        class Broken(SymlinkOps):
+            def create(self, target: str, link: Path) -> None:
+                raise OSError(1314, "A required privilege is not held by the client")
+
+        a = _gen(tools, "gen-A")
+        self._flip(a, tools)
+        with pytest.raises(gen_core.GenerationError, match="could not create a pointer"):
+            gen_core.flip_current(_gen(tools, "gen-B"), tools, ops=Broken(), platform="linux")
+        assert os.readlink(tools / "current") == str(a)
+
     def test_litter_from_an_interrupted_swap_is_swept(self, tools: Path) -> None:
         a = _gen(tools, "gen-A")
         os.symlink(str(a), tools / ".current.new.999")
