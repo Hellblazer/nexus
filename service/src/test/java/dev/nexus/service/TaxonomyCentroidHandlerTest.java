@@ -39,6 +39,9 @@ class TaxonomyCentroidHandlerTest {
     private static final String SVC_PASS = "svc_centroid_handler_test_pass";
     private static final String TENANT = TenantConstants.DEFAULT_TENANT;
 
+    /** Seeded {@code nexus.embedding_models} row of dimension 384 (catalog-036-embedding-profile.xml). */
+    private static final String MODEL_384 = "minilm-l6-v2-384";
+
     private static final TypeReference<Map<String, Object>> MAP_T = new TypeReference<>() {};
     private static final TypeReference<List<Map<String, Object>>> LIST_T = new TypeReference<>() {};
 
@@ -73,6 +76,14 @@ class TaxonomyCentroidHandlerTest {
         service = new NexusService(0, TOKEN, svcDs);
         service.start();
         http = TestHttp.client();
+
+        // The first authenticated request a tenant makes in a process runs the RDR-204 ghost sweep
+        // (CatalogRepository.ensureGhostSweepRanOnce), which deletes every registered collection that
+        // has no documents or chunks. Centroid tests register a collection and then upsert only
+        // centroids into it, so the sweep must already have run when the first one is registered.
+        assertThat(get("/v1/taxonomy/centroids/dimension", TENANT).statusCode())
+            .as("warm-up request: runs the tenant's one-time ghost sweep before any collection is registered")
+            .isEqualTo(200);
     }
 
     @AfterAll
@@ -91,8 +102,22 @@ class TaxonomyCentroidHandlerTest {
         return List.of(v);
     }
 
+    /**
+     * Register {@code collection} for the test tenant under the seeded 384-dim model, as production
+     * does before any centroid can be filed (RDR-225, nexus-3wh8d.13: a centroid carries its
+     * collection's model, and an unregistered collection is a 422). Idempotent; creates the
+     * tenant's partition leaves if the service-token trigger has not.
+     */
+    private void register(String collection, String model) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, collection, model);
+        }
+    }
+
     private void upsert(String collection, long topicId, float x, float y,
                         String label, Integer docCount) throws Exception {
+        register(collection, MODEL_384);
         var rec = new java.util.LinkedHashMap<String, Object>();
         rec.put("collection", collection);
         rec.put("topic_id", topicId);
@@ -101,7 +126,7 @@ class TaxonomyCentroidHandlerTest {
         rec.put("doc_count", docCount);
         var body = mapper.writeValueAsString(Map.of("records", List.of(rec)));
         var resp = post("/v1/taxonomy/centroids/upsert", TENANT, body);
-        assertThat(resp.statusCode()).as("upsert 200").isEqualTo(200);
+        assertThat(resp.statusCode()).as("upsert 200 for %s: %s", collection, resp.body()).isEqualTo(200);
     }
 
     @Test
@@ -234,6 +259,35 @@ class TaxonomyCentroidHandlerTest {
         var r3 = post("/v1/taxonomy/centroids/delete", TENANT,
             "{\"collection\":\"knowledge__x\",\"topic_ids\":[\"foo\"]}");
         assertThat(r3.statusCode()).as("non-numeric topic_id -> 400").isEqualTo(400);
+    }
+
+    @Test
+    void upsert_unregisteredCollection_returns422() throws Exception {
+        // RDR-225: no catalog_collections row means no model to file the centroid under.
+        var rec = new java.util.LinkedHashMap<String, Object>();
+        rec.put("collection", "knowledge__neverregistered");
+        rec.put("topic_id", 1L);
+        rec.put("embedding", unit(1.0f, 0.0f));
+        rec.put("label", "x");
+        rec.put("doc_count", 1);
+        var resp = post("/v1/taxonomy/centroids/upsert", TENANT,
+            mapper.writeValueAsString(Map.of("records", List.of(rec))));
+        assertThat(resp.statusCode()).as("unregistered collection -> 422").isEqualTo(422);
+    }
+
+    @Test
+    void upsert_dimensionDisagreeingWithCollectionModel_returns400() throws Exception {
+        // A 384-dim centroid in a collection registered under a 768-dim model is refused before any SQL.
+        register("knowledge__dimmismatch", "bge-base-en-v15-768");
+        var rec = new java.util.LinkedHashMap<String, Object>();
+        rec.put("collection", "knowledge__dimmismatch");
+        rec.put("topic_id", 1L);
+        rec.put("embedding", unit(1.0f, 0.0f));
+        rec.put("label", "x");
+        rec.put("doc_count", 1);
+        var resp = post("/v1/taxonomy/centroids/upsert", TENANT,
+            mapper.writeValueAsString(Map.of("records", List.of(rec))));
+        assertThat(resp.statusCode()).as("dimension vs model mismatch -> 400").isEqualTo(400);
     }
 
     @Test
