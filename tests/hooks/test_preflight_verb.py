@@ -138,3 +138,56 @@ class TestPreflightVerbDirect:
         assert result_with_payload.stdout == result_without.stdout
 
 
+
+
+class TestWindowsSkipsTheRedundantNxSpawn:
+    """nexus-3cydr: on Windows the nx probe re-imported the CLI in this very
+    venv (nx_argv uses sys.executable -m nexus.cli) and cost 2-7 s on a fresh
+    install, cancelling the 5 s hook. The Windows arm runs here on any host."""
+
+    @staticmethod
+    def _wire(monkeypatch, which: dict[str, str | None], hook_dir: str) -> list[list[str]]:
+        from nexus.hooks import preflight_verb as pv
+
+        probed: list[list[str]] = []
+
+        def fake_probe(name: str, args: list[str], timeout: float = 3.0):
+            probed.append(list(args))
+            return pv._ToolStatus(name=name, available=True, detail="probed", install_hint="")
+
+        monkeypatch.setattr(pv, "_platform", lambda: "win32")
+        monkeypatch.setattr(pv, "_which", lambda cmd: which.get(cmd))
+        monkeypatch.setattr(pv, "_hook_dir", lambda: hook_dir)
+        monkeypatch.setattr(pv, "_probe", fake_probe)
+        return probed
+
+    def test_nx_beside_the_hook_is_not_spawned(self, monkeypatch) -> None:
+        from nexus.hooks import preflight_verb as pv
+
+        probed = self._wire(monkeypatch, {"nx": r"C:\u\.local\bin\nx.exe"}, r"C:\u\.local\bin")
+        assert pv.run(None).stdout is None
+        assert all(a[0] not in (r"C:\u\.local\bin\nx.exe",) and "nexus.cli" not in a for a in probed), probed
+        assert probed == [["bd", "version"]]
+
+    def test_nx_missing_from_path_is_reported_without_a_spawn(self, monkeypatch) -> None:
+        from nexus.hooks import preflight_verb as pv
+
+        probed = self._wire(monkeypatch, {}, r"C:\u\.local\bin")
+        out = pv.run(None).stdout
+        assert out is not None and "## nx Preflight: FAILED" in out and "not on PATH" in out
+        assert probed == [["bd", "version"]]
+
+    def test_a_foreign_nx_on_path_is_probed_itself(self, monkeypatch) -> None:
+        from nexus.hooks import preflight_verb as pv
+
+        probed = self._wire(monkeypatch, {"nx": r"D:\other\bin\nx.exe"}, r"C:\u\.local\bin")
+        assert pv.run(None).stdout is None
+        assert probed[0] == [r"D:\other\bin\nx.exe", "--version"]
+
+    def test_posix_keeps_the_nx_argv_probe(self, monkeypatch) -> None:
+        from nexus.hooks import preflight_verb as pv
+
+        probed = self._wire(monkeypatch, {"nx": "/u/.local/bin/nx"}, "/u/.local/bin")
+        monkeypatch.setattr(pv, "_platform", lambda: "darwin")
+        pv.run(None)
+        assert probed[0][-1] == "--version" and len(probed) == 2

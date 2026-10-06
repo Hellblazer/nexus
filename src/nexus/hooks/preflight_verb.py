@@ -60,9 +60,22 @@ pins ``source.ref`` to a release tag -- see ``conexus/PENDING_RELEASE.md``.
 
 No caller branches on this verb's exit code; ``entry.main`` forces 0 for
 every verb.
+
+**Windows skips the nx spawn when it would prove nothing (nexus-3cydr).** On
+Windows :func:`nexus.util.nx_argv.nx_argv` runs this venv's own interpreter
+with ``-m nexus.cli``, not the ``nx`` on PATH, so the probe re-imports the
+whole CLI in the install that is already running this verb and cannot see a
+missing or foreign ``nx``. On a fresh install with no compiled bytecode that
+import alone took 2 to 7 s on the RDR-224 guest, and the 5 s hook was
+cancelled in a new user's first session (and past 3 s the probe would have
+reported nx unreachable when it was not). So on Windows the check is what the
+skills actually need: ``nx`` resolves on PATH. When it resolves beside the
+``nx-hook`` running this verb it is the same install, and nothing is spawned;
+when it resolves elsewhere, that ``nx`` is probed. POSIX is unchanged.
 """
 from __future__ import annotations
 
+import ntpath
 import os
 import shutil
 import subprocess
@@ -70,6 +83,35 @@ import sys
 from dataclasses import dataclass
 
 from nexus._hook_runtime._io import HookResult
+
+#: Injectable seams so the Windows arm runs under test on any host.
+_which = shutil.which
+
+
+def _platform() -> str:
+    return sys.platform
+
+
+def _hook_dir() -> str:
+    """Directory of the ``nx-hook`` launcher running this verb."""
+    launched = sys.argv[0] if sys.argv and sys.argv[0] else (_which("nx-hook") or "")
+    return os.path.dirname(os.path.abspath(launched)) if launched else ""
+
+
+def _same_dir(a: str, b: str) -> bool:
+    """Windows path equality (the only caller is the Windows arm; ntpath keeps
+    it exact on any host the tests run on)."""
+    return bool(a and b) and ntpath.normcase(ntpath.normpath(a)) == ntpath.normcase(ntpath.normpath(b))
+
+
+def _nx_status_windows() -> "_ToolStatus":
+    name = "nx (conexus CLI)"
+    nx = _which("nx")
+    if not nx:
+        return _ToolStatus(name=name, available=False, detail="not on PATH", install_hint="")
+    if _same_dir(ntpath.dirname(nx), _hook_dir()):
+        return _ToolStatus(name=name, available=True, detail="same install as nx-hook", install_hint="")
+    return _probe(name, [nx, "--version"])
 
 
 @dataclass
@@ -86,7 +128,7 @@ def _probe(name: str, args: list[str], timeout: float = 3.0) -> _ToolStatus:
     """
     from nexus.bounded_subprocess import run_bounded  # noqa: PLC0415 — deferred: a hook process pays its import cost on every invocation, and a module-scope import of this pulls structlog + ~231 modules (measured on verification_config: 14ms/106 -> 62-84ms/337). Deferred, it is paid only when we actually spawn
 
-    path = shutil.which(args[0])
+    path = _which(args[0])
     if not path:
         return _ToolStatus(
             name=name, available=False,
@@ -147,8 +189,12 @@ def run(payload: dict | None) -> HookResult:  # noqa: ARG001 — preflight never
     """
     from nexus.util.nx_argv import nx_argv  # noqa: PLC0415 — stdlib-only; kept off the hook's import path
 
+    nx_status = (
+        _nx_status_windows() if _platform() == "win32"
+        else _probe("nx (conexus CLI)", nx_argv("--version"))
+    )
     checks = [
-        _probe("nx (conexus CLI)",  nx_argv("--version")),
+        nx_status,
         _probe("bd (beads, optional)", ["bd", "version"]),
     ]
     # bd is optional; only nx-being-broken triggers the degraded
