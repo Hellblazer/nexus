@@ -604,7 +604,14 @@ from __future__ import annotations
 #: a guarded owner-read policy, the boot isolation check and
 #: /v1/status chunks_tenant_isolation_intact (nexus-wbfpw.48). All wire
 #: entries [additive]; the engine deployed BEFORE this client tag.
-REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 146)
+#:
+#: 7.72.0 pairs with engine-service-v0.1.149 (tagged 2026-10-06 on
+#: bd11d1cd3), the first engine with windows-x64 engine and PG bundle
+#: assets (RDR-224, nexus-f9bgu.42/.43). Since v0.1.147: the cardinality
+#: router (nexus-tu8wp.6), the PG socket read bound (nexus-u9zkn), the
+#: OrtInitGate break and ORT temp sweep (nexus-f9bgu.8/.11). No
+#: changesets; the engine deploys BEFORE this client tag.
+REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 149)
 
 #: nexus-5uoxu: the first engine version whose telemetry trim honors the
 #: ``dry_run`` field (the 3-arg ``trimSearchTelemetry`` overload, re-landed

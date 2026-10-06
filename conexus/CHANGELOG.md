@@ -1,5 +1,40 @@
 # Changelog
 
+## [7.72.0] - 2026-10-06
+
+Plugin version aligned with conexus 7.72.0. Everything `PENDING_RELEASE.md` held
+since v7.71.0 becomes live at this pin (eleven entries):
+
+- `skills/nexus/reference.md` calls the `store_get_many` cap the "300-record
+  read cap (MAX_QUERY_RESULTS)" rather than a ChromaDB one, matching SKILL.md
+  (nexus-rf87b). Text only.
+- `hooks/scripts/_endpoint_resolve.py` derives the lease file name from a
+  stdlib mirror of `service_identity()`: the uid on POSIX (unchanged), the user
+  SID on Windows (nexus-f9bgu.16).
+- `hooks/scripts/_endpoint_resolve.py` refuses a local-supervisor lease whose
+  ACL grants another account on Windows, instead of testing `st_mode` bits that
+  Windows reports as `0o666` for every file. POSIX is unchanged (nexus-f9bgu.22).
+- `hooks/scripts/_endpoint_resolve.py` retries a Windows sharing violation for
+  up to 2 s when it reads the supervisor lease, so a read during the
+  supervisor's lease replace no longer resolves to no endpoint (nexus-f9bgu.44).
+- `hooks/scripts/_endpoint_resolve.py` resolves "no lease" instead of raising
+  when the Windows user SID cannot be read, and caches the SID and the
+  advapi32/kernel32 bindings per process (nexus-f9bgu.33).
+- `hooks/hooks.json` launches its seven plugin-resident entries as
+  `uv run --no-project --no-config --quiet <script>` instead of
+  `python3 <script>`. Stock Windows has no `python3` on PATH, so those hooks
+  never fired there. A machine with no Python 3.12 or newer has uv fetch one on
+  the first hook run (nexus-efk2h).
+- `hooks/scripts/version_lockstep_hook.py`, `hooks/scripts/mailbox_drain.py`,
+  `hooks/scripts/routing/credential_print_guard.py` and
+  `hooks/scripts/routing/subagent_git_write_requires_orchestrator.py` each
+  gained a PEP 723 `requires-python = ">=3.12"` block, so uv runs them under a
+  3.12+ interpreter (nexus-efk2h). No other behaviour change.
+- `hooks/scripts/nx_hook_shim.py` forwards only the signals the platform has.
+  It named `signal.SIGHUP` unconditionally, which does not exist on Windows and
+  raised AttributeError after `nx-hook` had started (nexus-efk2h). No change on
+  POSIX.
+
 ## [7.71.0] - 2026-10-04
 
 Plugin version aligned with conexus 7.71.0. Everything `PENDING_RELEASE.md` held

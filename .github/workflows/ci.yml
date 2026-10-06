@@ -943,6 +943,8 @@ jobs:
     # the HF cache, which no selected file reaches.
     name: pytest (docs readers)
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     needs: [changes, service-jar]
     if: success() && needs.changes.outputs.code == 'false'
     timeout-minutes: 20
