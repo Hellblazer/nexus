@@ -113,11 +113,14 @@ class ChunkIsReapablePlanIntegrationTest {
             // 20,000 of the 30,000 chunks are owned.
             var rows = DSL.generateSeries(1, 20000).as("g", "n");
             Field<Integer> n = rows.field("n", Integer.class);
+            // RDR-225: the manifest and orphaning rows carry the model of the chunk they reference.
+            final String model = PgContainerHelper.collectionModel(ctx, TENANT, COL);
             ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
-                    CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION)
+                    CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION,
+                    CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
                .select(ctx.select(DSL.inline(TENANT),
                                   DSL.concat(DSL.inline("doc"), DSL.cast(n.mod(1000), SQLDataType.VARCHAR)),
-                                  n, chash("a", n), DSL.inline(COL)).from(rows))
+                                  n, chash("a", n), DSL.inline(COL), DSL.inline(model)).from(rows))
                .execute();
 
             // 8,000 of the 10,000 orphans carry an orphaning record, as they would after a deletion or a
@@ -127,8 +130,9 @@ class ChunkIsReapablePlanIntegrationTest {
             var orphans = DSL.generateSeries(20001, 28000).as("g", "n");
             Field<Integer> on = orphans.field("n", Integer.class);
             ctx.insertInto(CHUNK_ORPHANED_AT, CHUNK_ORPHANED_AT.TENANT_ID, CHUNK_ORPHANED_AT.COLLECTION,
-                    CHUNK_ORPHANED_AT.CHASH, CHUNK_ORPHANED_AT.ORPHANED_AT)
-               .select(ctx.select(DSL.inline(TENANT), DSL.inline(COL), chash("a", on), DSL.val(old)).from(orphans))
+                    CHUNK_ORPHANED_AT.CHASH, CHUNK_ORPHANED_AT.ORPHANED_AT, CHUNK_ORPHANED_AT.EMBEDDING_MODEL)
+               .select(ctx.select(DSL.inline(TENANT), DSL.inline(COL), chash("a", on), DSL.val(old),
+                                  DSL.inline(model)).from(orphans))
                .execute();
 
             PgContainerHelper.analyzeTable(su, CHUNK_ORPHANED_AT);
@@ -148,9 +152,12 @@ class ChunkIsReapablePlanIntegrationTest {
                                      OffsetDateTime when, Vector vector) {
         var series = DSL.generateSeries(1, count).as("g", "n");
         Field<Integer> n = series.field("n", Integer.class);
-        ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.CHUNK_TEXT,
-                CHUNKS.EMBEDDING_384, CHUNKS.CREATED_AT, CHUNKS.LAST_WRITTEN_AT)
-           .select(ctx.select(DSL.inline(TENANT), DSL.inline(collection), chash(prefix, n), DSL.inline("x"),
+        // RDR-225: a chunk carries its collection's model (minilm-l6-v2-384, matching the 384-wide vector).
+        final String model = PgContainerHelper.collectionModel(ctx, TENANT, collection);
+        ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL,
+                CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_384, CHUNKS.CREATED_AT, CHUNKS.LAST_WRITTEN_AT)
+           .select(ctx.select(DSL.inline(TENANT), DSL.inline(collection), chash(prefix, n), DSL.inline(model),
+                              DSL.inline("x"),
                               DSL.val(vector, CHUNKS.EMBEDDING_384.getDataType()),
                               DSL.val(when), DSL.val(when)).from(series))
            .execute();
@@ -193,11 +200,28 @@ class ChunkIsReapablePlanIntegrationTest {
         assertThat(plan).contains("Delete on chunks");
     }
 
+    /** {@code nexus.partition_name('chunks', model, tenant)}: the tenant's leaf under the model partition. */
+    private static String leafName(String model, String tenant) {
+        return "chunks_m" + sha256Hex(model).substring(0, 8) + "_t_" + sha256Hex(tenant).substring(0, 16);
+    }
+
+    private static String sha256Hex(String s) {
+        try {
+            return java.util.HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256")
+                .digest(s.getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+        } catch (java.security.NoSuchAlgorithmException e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
     private static void assertPlanShape(String plan) {
         assertThat(plan).as("inlined, not an opaque call:%n%s", plan)
             .doesNotContain("chunk_is_reapable").doesNotContain("Function Scan");
+        // RDR-225: nexus.chunks is LIST-partitioned by model then tenant, so the primary-key range scanned is
+        // the one of the tenant's LEAF under the collection's model partition (Postgres names a leaf's primary
+        // key index <leaf>_pkey), not the parent's chunks_pk.
         assertThat(plan).as("candidates come from the (tenant, collection) primary-key range:%n%s", plan)
-            .contains("chunks_pk");
+            .contains(leafName("minilm-l6-v2-384", TENANT) + "_pkey");
         assertThat(plan).as("manifest probe:%n%s", plan).contains("idx_catalog_chunks_chash");
         assertThat(plan).as("quarantine probe is the catalog_collections primary key:%n%s", plan)
             .containsPattern("Index (Only )?Scan using \\w*catalog_collections\\w*");

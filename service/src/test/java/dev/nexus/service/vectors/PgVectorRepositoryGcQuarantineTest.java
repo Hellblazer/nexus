@@ -26,6 +26,7 @@ import java.util.List;
 import java.util.Map;
 
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -64,6 +65,8 @@ class PgVectorRepositoryGcQuarantineTest {
     private static final String TENANT_B = "gcq-tenant-b";
     private static final String SVC_ROLE = "svc_gcq_test";
     private static final String SVC_PASS = "svc_gcq_test_pass";
+    /** RDR-225: every collection in this suite is a voyage-code-3 one, and every chunk-side row carries its model. */
+    private static final String MODEL = "voyage-code-3";
     private static final OffsetDateTime PAST =
         OffsetDateTime.of(2026, 7, 16, 0, 8, 44, 0, ZoneOffset.UTC);
 
@@ -196,14 +199,81 @@ class PgVectorRepositoryGcQuarantineTest {
             conn.createStatement().execute(
                 "ALTER TABLE nexus.catalog_document_chunks DROP CONSTRAINT IF EXISTS fk_catalog_chunks_chunk");
         }
-        seedManifest(tenant, docId, chash, collection);
+        if (collectionRegistered(tenant, collection)) {
+            seedManifest(tenant, docId, chash, collection);
+        } else {
+            // RDR-225: the manifest writer now answers 422 'register it first' for an unregistered collection
+            // (it reads the collection's model to stamp the row), and the "first-ever origin" scenarios are
+            // exactly the ones whose origin is unregistered. The row is written directly instead, carrying the
+            // suite's model, which is the model of the chunk it will later be restored with.
+            catalogRepo.upsertDocument(tenant, Map.of(
+                "tumbler", docId,
+                "title", "GC quarantine fixture " + docId,
+                "content_type", "code",
+                "corpus", "code",
+                "physical_collection", collection
+            ));
+            try (var conn = pg.createConnection("")) {
+                DSL.using(conn, SQLDialect.POSTGRES)
+                    .insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID,
+                        CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION,
+                        CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.CHUNK_INDEX,
+                        CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
+                    .values(tenant, docId, 0, java.util.HexFormat.of().parseHex(chash), 0, collection, MODEL)
+                    .execute();
+            }
+        }
         try (var conn = pg.createConnection("")) {
             conn.setAutoCommit(true);
             conn.createStatement().execute(
                 "ALTER TABLE nexus.catalog_document_chunks "
                 + "ADD CONSTRAINT fk_catalog_chunks_chunk "
-                + "FOREIGN KEY (tenant_id, collection, chash) REFERENCES nexus.chunks (tenant_id, collection, chash) "
+                + "FOREIGN KEY (tenant_id, collection, chash, embedding_model) "
+                + "REFERENCES nexus.chunks (tenant_id, collection, chash, embedding_model) "
                 + "ON UPDATE CASCADE DEFERRABLE INITIALLY IMMEDIATE NOT VALID");
+        }
+    }
+
+    /**
+     * Seeds one chunk of a collection that has NO {@code catalog_collections} row, the state the
+     * "unregistered origin / quarantine collection" tests need. {@code chunks_collection_fk} is dropped around
+     * the insert, and (RDR-225) it cannot be re-added NOT VALID, because PostgreSQL refuses that on a
+     * partitioned table. So the foreign key stays off until {@link #restoreChunksCollectionFk}, which each
+     * caller runs in a {@code finally}: it deletes the stray chunk (the one row the key would refuse) and
+     * adds the key back validated. The chunk carries the suite's model explicitly, since there is no
+     * collection row to read it from.
+     */
+    private void seedChunkOfUnregisteredCollection(String tenant, String collection, String chashHex)
+            throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            org.jooq.DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.ensureTenantPartitions(ctx, tenant);
+            PgContainerHelper.dropConstraint(su, CHUNKS, "chunks_collection_fk");
+            ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL,
+                           CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_1024)
+               .values(tenant, collection, java.util.HexFormat.of().parseHex(chashHex), MODEL, "text",
+                       Vector.of(constantVector1024()))
+               .execute();
+        }
+    }
+
+    /** Undoes {@link #seedChunkOfUnregisteredCollection}: removes the stray chunk, then re-adds the key validated. */
+    private void restoreChunksCollectionFk(String tenant, String collection, String chashHex) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            org.jooq.DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            ctx.deleteFrom(CHUNKS)
+               .where(CHUNKS.TENANT_ID.eq(tenant).and(CHUNKS.COLLECTION.eq(collection))
+                      .and(CHUNKS.CHASH.eq(java.util.HexFormat.of().parseHex(chashHex))))
+               .execute();
+            PgContainerHelper.dropConstraint(su, CHUNKS, "chunks_collection_fk");
+            ctx.alterTable(CHUNKS).add(DSL.constraint("chunks_collection_fk")
+                    .foreignKey(CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.EMBEDDING_MODEL)
+                    .references(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME,
+                                CATALOG_COLLECTIONS.EMBEDDING_MODEL)
+                    .onDeleteRestrict())
+               .execute();
         }
     }
 
@@ -359,9 +429,14 @@ class PgVectorRepositoryGcQuarantineTest {
     // ── STRUCTURAL: the pre-RDR-180 "undecidable identity" case cannot occur ──
 
     @Test
-    void chash_isNotNullPrimaryKeyColumn_undecidableIdentityIsImpossible() {
+    void chash_isNotNullPrimaryKeyColumn_undecidableIdentityIsImpossible() throws Exception {
         String originCol = originCol("case3");
         String quarantineCol = quarantineCol("case3");
+        // RDR-225: the statement below must fail on chash and nothing else, so the tenant has its partition
+        // leaves and the row names a real model (a missing leaf or model would also be an SQLException).
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.ensureTenantPartitions(DSL.using(su, SQLDialect.POSTGRES), TENANT_A);
+        }
         // Python's _prune_deleted_files refused to classify a chunk lacking
         // chunk_text_hash metadata ("unsafe_skipped"). Post-RDR-180 chash IS
         // the PK — there is no state in which a live chunks_<dim> row lacks
@@ -370,8 +445,8 @@ class PgVectorRepositoryGcQuarantineTest {
         assertThatThrownBy(() -> {
             try (var conn = pg.createConnection(""); var st = conn.createStatement()) {
                 st.execute(
-                    "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(1024) + ") "
-                    + "VALUES ('" + TENANT_A + "', '" + originCol + "', NULL, 'x', "
+                    "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, embedding_model, chunk_text, " + DimTables.embeddingColumn(1024) + ") "
+                    + "VALUES ('" + TENANT_A + "', '" + originCol + "', NULL, '" + MODEL + "', 'x', "
                     + "('[' || repeat('0,', 1023) || '0]')::nexus.vector)");
             }
         }).isInstanceOf(SQLException.class);
@@ -564,28 +639,24 @@ class PgVectorRepositoryGcQuarantineTest {
         String originCol = originCol("uxd2a-unreg-origin");
         String quarantineCol = quarantineCol("uxd2a-unreg-origin");
         String chash = ch("gcq-uxd2a-unreg-origin-orphan");
-        try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            org.jooq.DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
-            PgContainerHelper.dropConstraint(su, CHUNKS, "chunks_collection_fk");
-            PgContainerHelper.insertChunk1024(ctx, TENANT_A, originCol,
-                java.util.HexFormat.of().parseHex(chash), Vector.of(constantVector1024()));
-            PgContainerHelper.addFkNotValid(su, CHUNKS, "chunks_collection_fk", "collection",
-                CATALOG_COLLECTIONS, "name", "ON UPDATE CASCADE DEFERRABLE INITIALLY IMMEDIATE");
-        }
-        assertThat(collectionRegistered(TENANT_A, originCol))
-            .as("precondition: the origin has a chunk but was never registered")
-            .isFalse();
+        seedChunkOfUnregisteredCollection(TENANT_A, originCol, chash);
+        try {
+            assertThat(collectionRegistered(TENANT_A, originCol))
+                .as("precondition: the origin has a chunk but was never registered")
+                .isFalse();
 
-        assertThatThrownBy(() -> vectorRepo.quarantineOrphans(TENANT_A, originCol, quarantineCol,
-                "2026-09-09T00:00:00Z", 20))
-            .as("an unregistered origin is a fail-loud precondition -- attributes are "
-                + "copied from its row, never parsed from either name")
-            .hasMessageContaining(originCol)
-            .hasMessageContaining(TENANT_A);
-        assertThat(collectionRegistered(TENANT_A, quarantineCol))
-            .as("a failed-loud quarantine attempt must not register the sibling")
-            .isFalse();
+            assertThatThrownBy(() -> vectorRepo.quarantineOrphans(TENANT_A, originCol, quarantineCol,
+                    "2026-09-09T00:00:00Z", 20))
+                .as("an unregistered origin is a fail-loud precondition -- attributes are "
+                    + "copied from its row, never parsed from either name")
+                .hasMessageContaining(originCol)
+                .hasMessageContaining(TENANT_A);
+            assertThat(collectionRegistered(TENANT_A, quarantineCol))
+                .as("a failed-loud quarantine attempt must not register the sibling")
+                .isFalse();
+        } finally {
+            restoreChunksCollectionFk(TENANT_A, originCol, chash);
+        }
     }
 
     @Test
@@ -822,33 +893,29 @@ class PgVectorRepositoryGcQuarantineTest {
         String originCol = originCol("uxd2a-restore-unreg-quar");
         String quarantineCol = quarantineCol("uxd2a-restore-unreg-quar");
         String chash = ch("gcq-uxd2a-restore-unreg-quar");
-        try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            org.jooq.DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
-            PgContainerHelper.dropConstraint(su, CHUNKS, "chunks_collection_fk");
-            PgContainerHelper.insertChunk1024(ctx, TENANT_A, quarantineCol,
-                java.util.HexFormat.of().parseHex(chash), Vector.of(constantVector1024()));
-            PgContainerHelper.addFkNotValid(su, CHUNKS, "chunks_collection_fk", "collection",
-                CATALOG_COLLECTIONS, "name", "ON UPDATE CASCADE DEFERRABLE INITIALLY IMMEDIATE");
-        }
-        seedManifestBypassingFk(TENANT_A, "gcq.doc.uxd2a-restore-unreg-quar", chash, originCol);
-        assertThat(collectionRegistered(TENANT_A, quarantineCol))
-            .as("precondition: the quarantine collection has a chunk but was never registered")
-            .isFalse();
+        seedChunkOfUnregisteredCollection(TENANT_A, quarantineCol, chash);
+        try {
+            seedManifestBypassingFk(TENANT_A, "gcq.doc.uxd2a-restore-unreg-quar", chash, originCol);
+            assertThat(collectionRegistered(TENANT_A, quarantineCol))
+                .as("precondition: the quarantine collection has a chunk but was never registered")
+                .isFalse();
 
-        try (Connection su = pg.createConnection("")) {
-            org.jooq.DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
-            assertThatThrownBy(() ->
-                    dev.nexus.service.jooq.nexus.Routines.gcRestoreRereferenced(
-                        ctx.configuration(), 1024, TENANT_A, quarantineCol, originCol))
-                .as("an unregistered quarantine collection is a fail-loud precondition for "
-                    + "a first-ever origin registration")
-                .hasMessageContaining(quarantineCol)
-                .hasMessageContaining(TENANT_A);
+            try (Connection su = pg.createConnection("")) {
+                org.jooq.DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+                assertThatThrownBy(() ->
+                        dev.nexus.service.jooq.nexus.Routines.gcRestoreRereferenced(
+                            ctx.configuration(), 1024, TENANT_A, quarantineCol, originCol))
+                    .as("an unregistered quarantine collection is a fail-loud precondition for "
+                        + "a first-ever origin registration")
+                    .hasMessageContaining(quarantineCol)
+                    .hasMessageContaining(TENANT_A);
+            }
+            assertThat(collectionRegistered(TENANT_A, originCol))
+                .as("a failed-loud restore attempt must not register the origin either")
+                .isFalse();
+        } finally {
+            restoreChunksCollectionFk(TENANT_A, quarantineCol, chash);
         }
-        assertThat(collectionRegistered(TENANT_A, originCol))
-            .as("a failed-loud restore attempt must not register the origin either")
-            .isFalse();
     }
 
     @Test

@@ -86,6 +86,22 @@ class TaxonomyCentroidAnnPlanShapeTest {
     // build fast under Testcontainers.
     private static final int CENTROIDS_PER_DIM = 3_000;
 
+    // RDR-225: nexus.taxonomy_centroids is partitioned by embedding_model, then tenant, and each model's
+    // partition holds one vector width. The centroids carry no registry foreign key, so the fixtures name
+    // the model of each dimension directly.
+    private static final String MODEL_1024 = "voyage-context-3";
+    private static final String MODEL_768 = "bge-base-en-v15-768";
+    private static final String MODEL_384 = "minilm-l6-v2-384";
+
+    private static String modelFor(int dim) {
+        return switch (dim) {
+            case 384 -> MODEL_384;
+            case 768 -> MODEL_768;
+            case 1024 -> MODEL_1024;
+            default -> throw new IllegalArgumentException("unsupported dim: " + dim);
+        };
+    }
+
     PostgreSQLContainer<?> pg;
     TenantScope tenantScope;
     HikariDataSource svcDs;
@@ -191,6 +207,8 @@ class TaxonomyCentroidAnnPlanShapeTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            // RDR-225: TENANT is never issued a service token, so its partition leaves are made here.
+            PgContainerHelper.ensureTenantPartitions(ctx, TENANT);
             // Deterministic filler positions (CLAUDE.md: seeded randomness) -- a
             // client-side seeded Random replaces the retired setseed(0.42)/random()
             // SQL-side generation (nexus-cbo4a: the raw generate_series/LATERAL/
@@ -206,18 +224,18 @@ class TaxonomyCentroidAnnPlanShapeTest {
                 // with the single "nearest" row seeded below — see the method javadoc).
                 var insert = ctx.insertInto(TAXONOMY_CENTROIDS,
                     TAXONOMY_CENTROIDS.TENANT_ID, TAXONOMY_CENTROIDS.COLLECTION,
-                    TAXONOMY_CENTROIDS.TOPIC_ID, embCol,
+                    TAXONOMY_CENTROIDS.TOPIC_ID, TAXONOMY_CENTROIDS.EMBEDDING_MODEL, embCol,
                     TAXONOMY_CENTROIDS.LABEL, TAXONOMY_CENTROIDS.DOC_COUNT);
                 for (int i = 1; i <= CENTROIDS_PER_DIM; i++) {
-                    insert = insert.values(TENANT, coll, (long) i, fillerVector(rnd, dim), "filler", 1);
+                    insert = insert.values(TENANT, coll, (long) i, modelFor(dim), fillerVector(rnd, dim), "filler", 1);
                 }
                 insert.execute();
                 // The single nearest row: unit vector along the first axis.
                 ctx.insertInto(TAXONOMY_CENTROIDS,
                         TAXONOMY_CENTROIDS.TENANT_ID, TAXONOMY_CENTROIDS.COLLECTION,
-                        TAXONOMY_CENTROIDS.TOPIC_ID, embCol,
+                        TAXONOMY_CENTROIDS.TOPIC_ID, TAXONOMY_CENTROIDS.EMBEDDING_MODEL, embCol,
                         TAXONOMY_CENTROIDS.LABEL, TAXONOMY_CENTROIDS.DOC_COUNT)
-                    .values(TENANT, coll, (long) (CENTROIDS_PER_DIM + dim), queryVec(dim), "nearest", 1)
+                    .values(TENANT, coll, (long) (CENTROIDS_PER_DIM + dim), modelFor(dim), queryVec(dim), "nearest", 1)
                     .execute();
                 PgContainerHelper.analyzeTable(su, TAXONOMY_CENTROIDS);
             }
@@ -225,17 +243,19 @@ class TaxonomyCentroidAnnPlanShapeTest {
             // Mixed-dim collection: topic 1 at 384-dim (near), topic 2 at 768-dim (near
             // in ITS own space) — disjoint topic_ids, same (tenant, collection), two
             // different populated embedding columns on two different physical rows.
+            // RDR-225: the two rows sit in two model partitions (the primary key carries the model, and
+            // a centroid has no registry foreign key), the mid-migration shape a re-embed passes through.
             ctx.insertInto(TAXONOMY_CENTROIDS,
                     TAXONOMY_CENTROIDS.TENANT_ID, TAXONOMY_CENTROIDS.COLLECTION,
-                    TAXONOMY_CENTROIDS.TOPIC_ID, TAXONOMY_CENTROIDS.EMBEDDING_384,
-                    TAXONOMY_CENTROIDS.LABEL, TAXONOMY_CENTROIDS.DOC_COUNT)
-                .values(TENANT, COL_MIXED, 1L, queryVec(384), "mixed-384", 1)
+                    TAXONOMY_CENTROIDS.TOPIC_ID, TAXONOMY_CENTROIDS.EMBEDDING_MODEL,
+                    TAXONOMY_CENTROIDS.EMBEDDING_384, TAXONOMY_CENTROIDS.LABEL, TAXONOMY_CENTROIDS.DOC_COUNT)
+                .values(TENANT, COL_MIXED, 1L, MODEL_384, queryVec(384), "mixed-384", 1)
                 .execute();
             ctx.insertInto(TAXONOMY_CENTROIDS,
                     TAXONOMY_CENTROIDS.TENANT_ID, TAXONOMY_CENTROIDS.COLLECTION,
-                    TAXONOMY_CENTROIDS.TOPIC_ID, TAXONOMY_CENTROIDS.EMBEDDING_768,
-                    TAXONOMY_CENTROIDS.LABEL, TAXONOMY_CENTROIDS.DOC_COUNT)
-                .values(TENANT, COL_MIXED, 2L, queryVec(768), "mixed-768", 1)
+                    TAXONOMY_CENTROIDS.TOPIC_ID, TAXONOMY_CENTROIDS.EMBEDDING_MODEL,
+                    TAXONOMY_CENTROIDS.EMBEDDING_768, TAXONOMY_CENTROIDS.LABEL, TAXONOMY_CENTROIDS.DOC_COUNT)
+                .values(TENANT, COL_MIXED, 2L, MODEL_768, queryVec(768), "mixed-768", 1)
                 .execute();
             PgContainerHelper.analyzeTable(su, TAXONOMY_CENTROIDS);
         }
@@ -250,6 +270,25 @@ class TaxonomyCentroidAnnPlanShapeTest {
             dev.nexus.service.db.PgSession.setLocal(ctx, "hnsw.iterative_scan", "relaxed_order");
             return ctx.explain(ctx.selectFrom(fn)).plan();
         });
+    }
+
+    /**
+     * RDR-225: the leaf of {@code nexus.taxonomy_centroids} that holds this fixture's rows for {@code model}.
+     * The planner reads every model's leaf (the function does not name a model), and the empty ones of a
+     * same-width model are rightly seq-scanned, so the plan assertions are about the populated leaf, the
+     * only one whose access path the claim is about.
+     */
+    private String populatedLeaf(String model) {
+        try (Connection su = pg.createConnection("")) {
+            return PartitionScratch.partitionName(DSL.using(su, SQLDialect.POSTGRES), "taxonomy_centroids", model, TENANT);
+        } catch (java.sql.SQLException e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
+    /** The plan lines that seq-scan {@code leaf} (EXPLAIN may or may not schema-qualify the name). */
+    private static List<String> seqScannedLines(String plan, String leaf) {
+        return plan.lines().filter(l -> l.contains("Seq Scan") && l.contains(leaf)).toList();
     }
 
     /** A length-{@code dim} typed pgvector value: first component 1.0, rest zero --
@@ -299,13 +338,12 @@ class TaxonomyCentroidAnnPlanShapeTest {
         Table<?> fn = TAXONOMY_ANN_QUERY_1024.call(queryVec(1024), COL_1024, false, 10);
         String plan = explain(fn);
         assertThat(plan)
-            .as("annQuery's distance projection (1024-dim) must bind to the FULL"
-                + " idx_taxonomy_centroids_embedding_1024 HNSW index. Plan was:%n%s", plan)
-            .contains("idx_taxonomy_centroids_embedding_1024");
-        assertThat(plan)
-            .as("must not degrade to a sequential scan of the unified (mixed-dim) table."
-                + " Plan was:%n%s", plan)
-            .doesNotContain("Seq Scan");
+            .as("annQuery's distance projection (1024-dim) must bind to the HNSW index"
+                + " idx_taxonomy_centroids_embedding_1024 (RDR-225: on a leaf, that is its child index"
+                + " <leaf>_embedding_1024_idx). Plan was:%n%s", plan)
+            .contains("embedding_1024_idx");
+        assertThat(seqScannedLines(plan, populatedLeaf(MODEL_1024)))
+            .as("must not degrade to a sequential scan of the populated leaf. Plan was:%n%s", plan).isEmpty();
         assertThat(plan)
             .as("a Function Scan node means taxonomy_ann_query_1024 is not inlinable — "
                 + "it must stay LANGUAGE sql/STABLE/SECURITY INVOKER with no SET clause. "
@@ -318,10 +356,12 @@ class TaxonomyCentroidAnnPlanShapeTest {
         Table<?> fn = TAXONOMY_ANN_QUERY_768.call(queryVec(768), COL_768, false, 10);
         String plan = explain(fn);
         assertThat(plan)
-            .as("annQuery's distance projection (768-dim) must bind to the FULL"
-                + " idx_taxonomy_centroids_embedding_768 HNSW index. Plan was:%n%s", plan)
-            .contains("idx_taxonomy_centroids_embedding_768");
-        assertThat(plan).as("no Seq Scan. Plan was:%n%s", plan).doesNotContain("Seq Scan");
+            .as("annQuery's distance projection (768-dim) must bind to the HNSW index"
+                + " idx_taxonomy_centroids_embedding_768 (a leaf's child index is <leaf>_embedding_768_idx)."
+                + " Plan was:%n%s", plan)
+            .contains("embedding_768_idx");
+        assertThat(seqScannedLines(plan, populatedLeaf(MODEL_768)))
+            .as("no Seq Scan of the populated leaf. Plan was:%n%s", plan).isEmpty();
         assertThat(plan)
             .as("no Function Scan (inlining proof). Plan was:%n%s", plan)
             .doesNotContain("Function Scan");
@@ -332,10 +372,12 @@ class TaxonomyCentroidAnnPlanShapeTest {
         Table<?> fn = TAXONOMY_ANN_QUERY_384.call(queryVec(384), COL_384, false, 10);
         String plan = explain(fn);
         assertThat(plan)
-            .as("annQuery's distance projection (384-dim) must bind to the FULL"
-                + " idx_taxonomy_centroids_embedding_384 HNSW index. Plan was:%n%s", plan)
-            .contains("idx_taxonomy_centroids_embedding_384");
-        assertThat(plan).as("no Seq Scan. Plan was:%n%s", plan).doesNotContain("Seq Scan");
+            .as("annQuery's distance projection (384-dim) must bind to the HNSW index"
+                + " idx_taxonomy_centroids_embedding_384 (a leaf's child index is <leaf>_embedding_384_idx)."
+                + " Plan was:%n%s", plan)
+            .contains("embedding_384_idx");
+        assertThat(seqScannedLines(plan, populatedLeaf(MODEL_384)))
+            .as("no Seq Scan of the populated leaf. Plan was:%n%s", plan).isEmpty();
         assertThat(plan)
             .as("no Function Scan (inlining proof). Plan was:%n%s", plan)
             .doesNotContain("Function Scan");

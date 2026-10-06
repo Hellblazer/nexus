@@ -134,14 +134,18 @@ class CatalogHandlerManifestEnvelopeTest {
             // PgVectorRepository#upsertChunks' own ensure-registered step. RDR-204
             // nexus-ft04v.4/.5: routed through PgContainerHelper.insertCollection.
             PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, collection);
+            // RDR-225: the row carries its collection's model; this collection name is not
+            // conformant, so it registers under the 768-wide fallback model.
+            String model = PgContainerHelper.collectionModel(DSL.using(su, SQLDialect.POSTGRES), TENANT, collection);
             try (var ps = su.prepareStatement(
-                    "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_384) "
-                    + "VALUES (?, ?, decode(?, 'hex'), 'stub', ?::nexus.vector) "
-                    + "ON CONFLICT (tenant_id, collection, chash) DO NOTHING")) {
+                    "INSERT INTO nexus.chunks (tenant_id, collection, chash, embedding_model, chunk_text, embedding_768) "
+                    + "VALUES (?, ?, decode(?, 'hex'), ?, 'stub', ?::nexus.vector) "
+                    + "ON CONFLICT (tenant_id, collection, chash, embedding_model) DO NOTHING")) {
                 ps.setString(1, TENANT);
                 ps.setString(2, collection);
                 ps.setString(3, chash);
-                ps.setString(4, "[" + "0.1,".repeat(383) + "0.1]");
+                ps.setString(4, model);
+                ps.setString(5, "[" + "0.1,".repeat(767) + "0.1]");
                 ps.execute();
             }
         }

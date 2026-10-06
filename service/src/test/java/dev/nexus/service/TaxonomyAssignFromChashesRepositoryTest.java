@@ -356,12 +356,15 @@ class TaxonomyAssignFromChashesRepositoryTest {
             // RDR-194 P3c: doc_id is bytea now -- decode('hex') the bind parameter.
             try (PreparedStatement ps = su.prepareStatement(
                     "INSERT INTO nexus.topic_assignments"
-                    + " (tenant_id, doc_id, topic_id, assigned_by, similarity, assigned_at, source_collection)"
-                    + " VALUES (?, decode(?, 'hex'), ?, 'projection', 0.999, now(), ?)")) {
+                    + " (tenant_id, doc_id, topic_id, assigned_by, similarity, assigned_at, source_collection,"
+                    + " embedding_model)"
+                    + " VALUES (?, decode(?, 'hex'), ?, 'projection', 0.999, now(), ?, ?)")) {
                 ps.setString(1, tenant);
                 ps.setString(2, c1);
                 ps.setLong(3, tStrong);
                 ps.setString(4, col);
+                // RDR-225: the assignment carries the model of the chunk it references.
+                ps.setString(5, PgContainerHelper.collectionModel(DSL.using(su, SQLDialect.POSTGRES), tenant, col));
                 ps.executeUpdate();
             }
         }
@@ -621,13 +624,15 @@ class TaxonomyAssignFromChashesRepositoryTest {
             su.setAutoCommit(true);
             try (PreparedStatement ps = su.prepareStatement(
                     "INSERT INTO nexus.chunks"
-                    + " (tenant_id, collection, chash, chunk_text, embedding_" + dim + ")"
-                    + " VALUES (?, ?, decode(?, 'hex'), ?, ?::nexus.vector)")) {
+                    + " (tenant_id, collection, chash, embedding_model, chunk_text, embedding_" + dim + ")"
+                    + " VALUES (?, ?, decode(?, 'hex'), ?, ?, ?::nexus.vector)")) {
                 ps.setString(1, tenant);
                 ps.setString(2, collection);
                 ps.setString(3, hexChashValue);
-                ps.setString(4, "seed text " + hexChashValue);
-                ps.setString(5, vectorLiteral(emb));
+                // RDR-225: a chunk carries its collection's model (its vector width must be that model's dim).
+                ps.setString(4, PgContainerHelper.collectionModel(DSL.using(su, SQLDialect.POSTGRES), tenant, collection));
+                ps.setString(5, "seed text " + hexChashValue);
+                ps.setString(6, vectorLiteral(emb));
                 ps.executeUpdate();
             }
         }
@@ -681,12 +686,14 @@ class TaxonomyAssignFromChashesRepositoryTest {
                     // nexus-tk070.p6a follow-on) -- no test in this class asserts
                     // on the label value, so a fixed placeholder satisfies the
                     // constraint without changing any assertion surface.
-                    + " (tenant_id, collection, topic_id, label, embedding_" + dim + ") VALUES (?, ?, ?, ?, ?::nexus.vector)")) {
+                    + " (tenant_id, collection, topic_id, label, embedding_model, embedding_" + dim
+                    + ") VALUES (?, ?, ?, ?, ?, ?::nexus.vector)")) {
                 ps.setString(1, tenant);
                 ps.setString(2, collection);
                 ps.setLong(3, topicId);
                 ps.setString(4, "seed-centroid-label");
-                ps.setString(5, vectorLiteral(emb));
+                ps.setString(5, PgContainerHelper.collectionModel(DSL.using(su, SQLDialect.POSTGRES), tenant, collection));
+                ps.setString(6, vectorLiteral(emb));
                 ps.executeUpdate();
             }
         }

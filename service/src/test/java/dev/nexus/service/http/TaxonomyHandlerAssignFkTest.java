@@ -109,7 +109,7 @@ class TaxonomyHandlerAssignFkTest {
         // WHICH violation Postgres reports first. seedChunk isolates the
         // topic_id FK specifically, matching assign_existingTopicId_stillReturns200's
         // own isolation discipline below.
-        seedChunk(TENANT, "coll", DOC_ID_HEX, 384);
+        seedChunk(TENANT, "coll", DOC_ID_HEX, 768);
         CapturingExchange ex = post("/v1/taxonomy/assignments/assign",
             "{\"doc_id\":\"" + DOC_ID_HEX + "\",\"topic_id\":999999,\"assigned_by\":\"manual\","
             + "\"source_collection\":\"coll\"}");
@@ -157,7 +157,7 @@ class TaxonomyHandlerAssignFkTest {
         long topicId = repo.insertTopic(TENANT, "fk-test-topic", null, "coll", 0, "2026-07-01T00:00:00Z", null);
         // RDR-194 P3d (nexus-tk070.p3d): topic_assignments_chunk_fk now requires
         // a matching nexus.chunks row for this assign to succeed at all.
-        seedChunk(TENANT, "coll", DOC_ID_HEX, 384);
+        seedChunk(TENANT, "coll", DOC_ID_HEX, 768);
         CapturingExchange ex = post("/v1/taxonomy/assignments/assign",
             "{\"doc_id\":\"" + DOC_ID_HEX + "\",\"topic_id\":" + topicId + ",\"assigned_by\":\"manual\","
             + "\"source_collection\":\"coll\"}");
@@ -232,11 +232,14 @@ class TaxonomyHandlerAssignFkTest {
             // RDR-204 nexus-ft04v.4/.5: routed through PgContainerHelper.insertCollection.
             PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), tenant, collection);
             String embeddingCol = "embedding_" + dim;
+            // RDR-225: the chunk carries its collection's model, and {@code dim} must be that model's
+            // dimension ("coll" is non-conformant, so it registers under the 768-d bge fallback).
+            String model = PgContainerHelper.collectionModel(DSL.using(su, SQLDialect.POSTGRES), tenant, collection);
             su.createStatement().execute(
-                "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, " + embeddingCol + ") VALUES " +
-                "('" + tenant + "', '" + collection + "', decode('" + chashHex + "', 'hex'), 'fk-assign-test chunk', " +
+                "INSERT INTO nexus.chunks (tenant_id, collection, chash, embedding_model, chunk_text, " + embeddingCol + ") VALUES " +
+                "('" + tenant + "', '" + collection + "', decode('" + chashHex + "', 'hex'), '" + model + "', 'fk-assign-test chunk', " +
                 "('[" + "0.1,".repeat(dim - 1) + "0.1]')::nexus.vector) " +
-                "ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
+                "ON CONFLICT (tenant_id, collection, chash, embedding_model) DO NOTHING");
         }
     }
 

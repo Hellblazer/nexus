@@ -966,7 +966,7 @@ class RawSqlGateTest {
         Map.entry("dev/nexus/service/ManifestChunkFkTest.java", 11),
         Map.entry("dev/nexus/service/ManifestCollectionStampTest.java", 8),
         Map.entry("dev/nexus/service/ManifestFunctionsTest.java", 14),
-        Map.entry("dev/nexus/service/ManifestVerifyTest.java", 13),
+        Map.entry("dev/nexus/service/ManifestVerifyTest.java", 12),
         Map.entry("dev/nexus/service/NexusServiceScheduledSweepTest.java", 3),
         // Round-2 verification (CRE pass 2, 2026-09-13, coordinator-directed): a
         // REVOKE/GRANT pair (column-level, to isolate arm 1's full-row SELECT from
@@ -1665,7 +1665,7 @@ class RawSqlGateTest {
     // 2 -> 1, new StagingSchemaDropLiquibaseTest.java at 2). Set to the measured per-file sum
     // so the ceiling carries no slack.
     // nexus-z0o2p.27 fix round 3: 967 -> 979 (+12, StagingSchemaDropLiquibaseTest.java 2 -> 14, see its entry).
-    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 979;
+    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 978;
 
     /**
      * The reduce-only ratchet test itself: walks {@code src/test/java}, scans

@@ -60,6 +60,8 @@ class TaxonomyUnassignedChashesRepositoryTest {
     private static final String TENANT_B = "unassigned-tenant-b";
 
     private static final int DIM = 1024;
+    /** RDR-225: every collection here is a voyage-code-3 one, and every chunk-side row carries its model. */
+    private static final String MODEL = "voyage-code-3";
 
     PostgreSQLContainer<?> pg;
     TenantScope tenantScope;
@@ -179,8 +181,9 @@ class TaxonomyUnassignedChashesRepositoryTest {
             su.setAutoCommit(true);
             try (PreparedStatement ps = su.prepareStatement(
                     "INSERT INTO nexus.topic_assignments"
-                    + " (tenant_id, doc_id, topic_id, assigned_by, similarity, assigned_at, source_collection)"
-                    + " VALUES (?, decode(?, 'hex'), ?, 'projection', 1.0, now(), ?)")) {
+                    + " (tenant_id, doc_id, topic_id, assigned_by, similarity, assigned_at, source_collection,"
+                    + " embedding_model)"
+                    + " VALUES (?, decode(?, 'hex'), ?, 'projection', 1.0, now(), ?, '" + MODEL + "')")) {
                 ps.setString(1, TENANT_A);
                 ps.setString(2, c1);
                 ps.setLong(3, tForeign);
@@ -324,8 +327,8 @@ class TaxonomyUnassignedChashesRepositoryTest {
             // one fixed filler embedding for all rows (correctness of the EMBEDDING
             // VALUE is irrelevant to this read-route test; only non-null matters).
             try (PreparedStatement ps = su.prepareStatement(
-                    "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_1024)"
-                    + " SELECT ?, ?, decode(lpad(to_hex(i), 64, '0'), 'hex'), 'text', ?::nexus.vector"
+                    "INSERT INTO nexus.chunks (tenant_id, collection, chash, embedding_model, chunk_text, embedding_1024)"
+                    + " SELECT ?, ?, decode(lpad(to_hex(i), 64, '0'), 'hex'), '" + MODEL + "', 'text', ?::nexus.vector"
                     + "   FROM generate_series(1, ?) i")) {
                 ps.setString(1, TENANT_A);
                 ps.setString(2, col);
@@ -346,8 +349,8 @@ class TaxonomyUnassignedChashesRepositoryTest {
             }
             try (PreparedStatement ps = su.prepareStatement(
                     "INSERT INTO nexus.catalog_document_chunks"
-                    + " (tenant_id, doc_id, position, chash, chunk_index, collection)"
-                    + " SELECT ?, ?, i, decode(lpad(to_hex(i), 64, '0'), 'hex'), i, ?"
+                    + " (tenant_id, doc_id, position, chash, chunk_index, collection, embedding_model)"
+                    + " SELECT ?, ?, i, decode(lpad(to_hex(i), 64, '0'), 'hex'), i, ?, '" + MODEL + "'"
                     + "   FROM generate_series(1, ?) i")) {
                 ps.setString(1, TENANT_A);
                 ps.setString(2, "unassigned-scale-doc");
@@ -360,8 +363,9 @@ class TaxonomyUnassignedChashesRepositoryTest {
             java.sql.Array excluded = su.createArrayOf("integer",
                 java.util.Arrays.stream(unassignedIdx).boxed().toArray());
             try (PreparedStatement ps = su.prepareStatement(
-                    "INSERT INTO nexus.topic_assignments (tenant_id, doc_id, topic_id, assigned_by, source_collection)"
-                    + " SELECT ?, decode(lpad(to_hex(i), 64, '0'), 'hex'), ?, 'centroid', ?"
+                    "INSERT INTO nexus.topic_assignments (tenant_id, doc_id, topic_id, assigned_by, source_collection,"
+                    + " embedding_model)"
+                    + " SELECT ?, decode(lpad(to_hex(i), 64, '0'), 'hex'), ?, 'centroid', ?, '" + MODEL + "'"
                     + "   FROM generate_series(1, ?) i"
                     + "  WHERE i <> ALL (?)")) {
                 ps.setString(1, TENANT_A);
@@ -451,8 +455,8 @@ class TaxonomyUnassignedChashesRepositoryTest {
             PgContainerHelper.insertCatalogDocument(ctx, tenant, doc);
             try (PreparedStatement ps = su.prepareStatement(
                     "INSERT INTO nexus.catalog_document_chunks"
-                    + " (tenant_id, doc_id, position, chash, chunk_index, collection)"
-                    + " VALUES (?, ?, 0, decode(?, 'hex'), 0, ?)")) {
+                    + " (tenant_id, doc_id, position, chash, chunk_index, collection, embedding_model)"
+                    + " VALUES (?, ?, 0, decode(?, 'hex'), 0, ?, '" + MODEL + "')")) {
                 ps.setString(1, tenant);
                 ps.setString(2, doc);
                 ps.setString(3, hexChashValue);
@@ -470,8 +474,8 @@ class TaxonomyUnassignedChashesRepositoryTest {
             su.setAutoCommit(true);
             try (PreparedStatement ps = su.prepareStatement(
                     "INSERT INTO nexus.chunks"
-                    + " (tenant_id, collection, chash, chunk_text, embedding_1024)"
-                    + " VALUES (?, ?, decode(?, 'hex'), ?, ?::nexus.vector)")) {
+                    + " (tenant_id, collection, chash, embedding_model, chunk_text, embedding_1024)"
+                    + " VALUES (?, ?, decode(?, 'hex'), '" + MODEL + "', ?, ?::nexus.vector)")) {
                 ps.setString(1, tenant);
                 ps.setString(2, collection);
                 ps.setString(3, hexChashValue);
@@ -498,7 +502,8 @@ class TaxonomyUnassignedChashesRepositoryTest {
             su.setAutoCommit(true);
             try (PreparedStatement ps = su.prepareStatement(
                     "INSERT INTO nexus.taxonomy_centroids"
-                    + " (tenant_id, collection, topic_id, label, embedding_1024) VALUES (?, ?, ?, ?, ?::nexus.vector)")) {
+                    + " (tenant_id, collection, topic_id, embedding_model, label, embedding_1024)"
+                    + " VALUES (?, ?, ?, '" + MODEL + "', ?, ?::nexus.vector)")) {
                 ps.setString(1, tenant);
                 ps.setString(2, collection);
                 ps.setLong(3, topicId);

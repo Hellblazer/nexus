@@ -65,6 +65,8 @@ class ChashConformanceReportIntegrationTest {
     // dim=768 IN-list, the same routing the now-retired manifest_orphans
     // used, RDR-191 Phase 6 nexus-o8dil.33).
     private static final String COLLECTION = "knowledge__chashconf__bge-base-en-v15-768__v1";
+    // RDR-225: the model the collection name's token registers it under (insertCollection).
+    private static final String MODEL = "bge-base-en-v15-768";
 
     PostgreSQLContainer<?> pg;
     com.zaxxer.hikari.HikariDataSource svcDs;
@@ -143,13 +145,14 @@ class ChashConformanceReportIntegrationTest {
 
     private static void insertChunk768(Connection su, String tenant, byte[] chash, String text) {
         try (PreparedStatement ps = su.prepareStatement(
-            "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_768) "
-            + "VALUES (?, ?, ?, ?, ?::nexus.vector)")) {
+            "INSERT INTO nexus.chunks (tenant_id, collection, chash, embedding_model, chunk_text, embedding_768) "
+            + "VALUES (?, ?, ?, ?, ?, ?::nexus.vector)")) {
             ps.setString(1, tenant);
             ps.setString(2, COLLECTION);
             ps.setBytes(3, chash);
-            ps.setString(4, text);
-            ps.setString(5, vec(768));
+            ps.setString(4, MODEL);
+            ps.setString(5, text);
+            ps.setString(6, vec(768));
             ps.executeUpdate();
         } catch (Exception e) {
             throw new RuntimeException(e);
@@ -196,8 +199,8 @@ class ChashConformanceReportIntegrationTest {
                 insertChunk768(su, TENANT_A, legacyChash, "poisoned legacy row");
                 try (PreparedStatement ps = su.prepareStatement(
                     "INSERT INTO nexus.catalog_document_chunks "
-                    + "(tenant_id, doc_id, position, chash, collection) VALUES ('"
-                    + TENANT_A + "', '1.1', 0, ?, '" + COLLECTION + "')")) {
+                    + "(tenant_id, doc_id, position, chash, collection, embedding_model) VALUES ('"
+                    + TENANT_A + "', '1.1', 0, ?, '" + COLLECTION + "', '" + MODEL + "')")) {
                     ps.setBytes(1, legacyChash);
                     ps.executeUpdate();
                 } catch (Exception e) {

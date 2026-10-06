@@ -85,8 +85,10 @@ class ManifestCollectionStampTest {
         try (Connection su = pg.createConnection(""); Statement st = su.createStatement()) {
             // RDR-204 nexus-ft04v.4/.5: routed through PgContainerHelper.insertCollection.
             PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, COLL);
-            st.execute("INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(1024) + ") "
-                + "VALUES ('" + TENANT + "', '" + COLL + "', decode('" + CH_A + "', 'hex'), 'alpha text', "
+            st.execute("INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, embedding_model, chunk_text, " + DimTables.embeddingColumn(1024) + ") "
+                + "VALUES ('" + TENANT + "', '" + COLL + "', decode('" + CH_A + "', 'hex'), "
+                + "(SELECT embedding_model FROM nexus.catalog_collections WHERE tenant_id = '" + TENANT
+                + "' AND name = '" + COLL + "'), 'alpha text', "
                 + "('[' || repeat('0.1,', 1023) || '0.1]')::nexus.vector)");
         }
     }
@@ -106,9 +108,18 @@ class ManifestCollectionStampTest {
     private void seedChunkContent(String coll, String chash, String text) throws Exception {
         try (Connection su = pg.createConnection(""); Statement st = su.createStatement()) {
             // RDR-204 nexus-ft04v.4/.5: routed through PgContainerHelper.insertCollection.
-            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, coll);
-            st.execute("INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(1024) + ") "
-                + "VALUES ('" + TENANT + "', '" + coll + "', decode('" + chash + "', 'hex'), '"
+            // RDR-225: the stub vector is 1024-wide, so the collection is registered under a 1024-d model.
+            var dsl = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCollection(dsl, TENANT, coll);
+            String registered = PgContainerHelper.collectionModel(dsl, TENANT, coll);
+            if (!registered.equals("voyage-code-3") && !registered.equals("voyage-context-3")) {
+                // No chunk can exist under a model of another width, so the model is still free to change.
+                PgContainerHelper.insertCollection(dsl, TENANT, coll, "voyage-code-3");
+            }
+            st.execute("INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, embedding_model, chunk_text, " + DimTables.embeddingColumn(1024) + ") "
+                + "VALUES ('" + TENANT + "', '" + coll + "', decode('" + chash + "', 'hex'), "
+                + "(SELECT embedding_model FROM nexus.catalog_collections WHERE tenant_id = '" + TENANT
+                + "' AND name = '" + coll + "'), '"
                 + text + "', ('[' || repeat('0.1,', 1023) || '0.1]')::nexus.vector) "
                 + "ON CONFLICT DO NOTHING");
         }
@@ -600,9 +611,9 @@ class ManifestCollectionStampTest {
                 var ex = org.junit.jupiter.api.Assertions.assertThrows(
                     java.sql.SQLException.class, () ->
                         st.execute("INSERT INTO nexus.catalog_document_chunks "
-                            + "(tenant_id, doc_id, position, chash, collection) "
+                            + "(tenant_id, doc_id, position, chash, collection, embedding_model) "
                             + "VALUES ('" + TENANT + "', '" + docTumbler + "', 99, decode('"
-                            + chNull + "', 'hex'), NULL)"));
+                            + chNull + "', 'hex'), NULL, 'voyage-context-3')"));
                 assertThat(ex.getSQLState())
                     .as("NOT NULL is a column constraint -- FORCE RLS being off must not exempt it")
                     .isEqualTo("23502");

@@ -1133,6 +1133,7 @@ class ChunkReaperIntegrationTest extends AtomicWriteTestBase {
         try (Connection su = pg.createConnection("")) {
             DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
             byte[] chash = Chash.fromHex(shared).toBytes();
+            final String model = PgContainerHelper.collectionModel(ctx, t, c);
             for (int i = 0; i < owners; i++) {
                 String doc = "wbfpw60-owner-" + i;
                 ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
@@ -1140,8 +1141,9 @@ class ChunkReaperIntegrationTest extends AtomicWriteTestBase {
                     .values(t, doc, "Owner " + doc, c).execute();
                 ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID,
                         CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION,
-                        CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION)
-                    .values(t, doc, 0, chash, c).execute();
+                        CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION,
+                        CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
+                    .values(t, doc, 0, chash, c, model).execute();
             }
         }
         assertThat(countIn(t, c)).as("two chunks, however many manifest rows name one of them").isEqualTo(2);

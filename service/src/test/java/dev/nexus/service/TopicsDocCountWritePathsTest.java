@@ -215,8 +215,9 @@ class TopicsDocCountWritePathsTest {
             ctx.insertInto(TOPIC_ASSIGNMENTS,
                     TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID,
                     TOPIC_ASSIGNMENTS.TOPIC_ID, TOPIC_ASSIGNMENTS.ASSIGNED_BY,
-                    TOPIC_ASSIGNMENTS.SOURCE_COLLECTION)
-               .values(TENANT, Chash.fromHex(docIdHex).toBytes(), topicId, "manual", collection)
+                    TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, TOPIC_ASSIGNMENTS.EMBEDDING_MODEL)
+               .values(TENANT, Chash.fromHex(docIdHex).toBytes(), topicId, "manual", collection,
+                       PgContainerHelper.collectionModel(ctx, TENANT, collection))
                .execute();
             return null;
         });

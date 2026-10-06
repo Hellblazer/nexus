@@ -193,6 +193,26 @@ public final class HttpUtil {
      *       ({@link #OWNERLESS_CHUNK_WRITE_REASON}, RDR-223 Phase 3 Step 2); the body also
      *       carries {@code unowned_count}, {@code requested_count} and {@code unowned_chashes}
      *       (a sample), and {@code error} names the combined write routes that replace it.</li>
+     *   <li>{@code collection_model_mismatch} (409): a re-home ({@code POST /v1/chash/rename_collection},
+     *       {@code POST /v1/catalog/collections/rehome}) would file chunks of one embedding model under a
+     *       collection of another ({@link #COLLECTION_MODEL_MISMATCH_REASON}, RDR-225); the body also
+     *       carries {@code source_collection}, {@code source_model}, {@code target_collection} and
+     *       {@code target_model}. Not retryable: a move between models is a cross-model migration.</li>
+     *   <li>{@code unregistered_embedding_model} (422): a chunk or centroid write named a collection whose
+     *       embedding model is registered in no {@code nexus.embedding_models} row and has no partition
+     *       ({@link #UNREGISTERED_EMBEDDING_MODEL_REASON}, RDR-225); the body carries {@code model}.</li>
+     *   <li>{@code model_partition_missing} (500): the model is registered but its changeset never created
+     *       the partition ({@link #MODEL_PARTITION_MISSING_REASON}, RDR-225); an engine or deploy defect,
+     *       not a caller error. The body carries {@code model} and the remedy.</li>
+     *   <li>{@code tenant_partition_missing} (500): PostgreSQL found no partition for the row (SQLSTATE
+     *       23514, "no partition of relation ... found for row"): a tenant's leaf was dropped or the
+     *       {@code service_tokens} trigger was disabled ({@link #TENANT_PARTITION_MISSING_REASON}, RDR-225).
+     *       An engine invariant, so a 500 and not the 409 a CHECK violation gets; the body names the
+     *       tenant and the model when the server's detail carries them.</li>
+     *   <li>{@code tenant_creation_busy} (503): issuing a tenant's first token waited on a lock the
+     *       partition creation needs, past the bound {@code TokenStore} gives it
+     *       ({@link #TENANT_CREATION_BUSY_REASON}, RDR-225). Nothing was issued; retryable, the body
+     *       carries {@code retry_after_seconds}.</li>
      *   <li>{@code quarantine_restore_busy} (503): {@code POST /gc/quarantine-restore} could not take the
      *       collection's sweep gate (or an owning document's index-run lock) inside its 2 s bound, or ran past
      *       its statement bound, or was the victim of a deadlock ({@link #QUARANTINE_RESTORE_BUSY_REASON}); the
@@ -340,6 +360,72 @@ public final class HttpUtil {
                 + SQLSTATE_RAISE_EXCEPTION + "\",\"detail\":" + jsonString(tripwireDetail) + "}");
             return true;
         }
+        // RDR-225 (nexus-3wh8d.13): the partitioned-chunks refusals, all ahead of the generic class-23
+        // walk. Each is raised by the repository before its statement runs (no SQLSTATE) except the
+        // PostgreSQL no-partition error, which IS a 23514 and must be told apart from a CHECK violation.
+        var collectionModelMismatch = collectionModelMismatch(e);
+        if (collectionModelMismatch != null) {
+            log.warn("event={}_collection_model_mismatch {} source={} source_model={} target={} target_model={}",
+                event, context, collectionModelMismatch.sourceCollection(), collectionModelMismatch.sourceModel(),
+                collectionModelMismatch.targetCollection(), collectionModelMismatch.targetModel());
+            send(exchange, 409,
+                "{\"error\":" + jsonString(collectionModelMismatch.getMessage())
+                + ",\"reason\":\"" + COLLECTION_MODEL_MISMATCH_REASON + "\""
+                + ",\"source_collection\":" + jsonString(collectionModelMismatch.sourceCollection())
+                + ",\"source_model\":" + jsonString(collectionModelMismatch.sourceModel())
+                + ",\"target_collection\":" + jsonString(collectionModelMismatch.targetCollection())
+                + ",\"target_model\":" + jsonString(collectionModelMismatch.targetModel())
+                + "}");
+            return true;
+        }
+        var modelPartitionMissing = modelPartitionMissing(e);
+        if (modelPartitionMissing != null) {
+            if (modelPartitionMissing.registered()) {
+                // The model has an embedding_models row and no partition: its changeset forgot
+                // create_model_partition. Nothing a caller can change, so a 500 that names the model.
+                log.error("event={}_model_partition_missing {} model={} parent={}",
+                    event, context, modelPartitionMissing.model(), modelPartitionMissing.parent());
+                send(exchange, 500,
+                    "{\"error\":" + jsonString(modelPartitionMissing.getMessage())
+                    + ",\"reason\":\"" + MODEL_PARTITION_MISSING_REASON + "\""
+                    + ",\"model\":" + jsonString(modelPartitionMissing.model()) + "}");
+            } else {
+                log.warn("event={}_unregistered_embedding_model {} model={} parent={}",
+                    event, context, modelPartitionMissing.model(), modelPartitionMissing.parent());
+                send(exchange, 422,
+                    "{\"error\":" + jsonString(modelPartitionMissing.getMessage())
+                    + ",\"reason\":\"" + UNREGISTERED_EMBEDDING_MODEL_REASON + "\""
+                    + ",\"model\":" + jsonString(modelPartitionMissing.model()) + "}");
+            }
+            return true;
+        }
+        var tenantCreationBusy = tenantCreationBusy(e);
+        if (tenantCreationBusy != null) {
+            log.warn("event={}_tenant_creation_busy {} tenant={} attempts={}",
+                event, context, tenantCreationBusy.tenant(), tenantCreationBusy.attempts());
+            exchange.getResponseHeaders().set("Retry-After", Long.toString(TENANT_CREATION_RETRY_AFTER_SECONDS));
+            send(exchange, 503,
+                "{\"error\":" + jsonString(tenantCreationBusy.getMessage())
+                + ",\"reason\":\"" + TENANT_CREATION_BUSY_REASON + "\""
+                + ",\"retry_after_seconds\":" + TENANT_CREATION_RETRY_AFTER_SECONDS + "}");
+            return true;
+        }
+        String noPartition = noPartitionMessage(e);
+        if (noPartition != null) {
+            String[] keyed = partitionKeyOf(noPartition);   // {tenant-or-null, model-or-null}
+            log.error("event={}_tenant_partition_missing {} tenant={} model={} error={}",
+                event, context, keyed[0], keyed[1], noPartition);
+            send(exchange, 500,
+                "{\"error\":" + jsonString("no partition exists for tenant "
+                    + (keyed[0] == null ? "(not reported by the server)" : "'" + keyed[0] + "'")
+                    + (keyed[1] == null ? "" : " and embedding model '" + keyed[1] + "'")
+                    + "; the write was refused before it landed. This is an engine invariant, not a request error")
+                + ",\"reason\":\"" + TENANT_PARTITION_MISSING_REASON + "\""
+                + (keyed[0] == null ? "" : ",\"tenant\":" + jsonString(keyed[0]))
+                + (keyed[1] == null ? "" : ",\"model\":" + jsonString(keyed[1]))
+                + ",\"remedy\":\"an operator runs nexus.create_tenant_partitions for the tenant\"}");
+            return true;
+        }
         String sqlState = sqlState23(e);
         if (sqlState != null) {
             // nexus-7e057: class-23 integrity violations are caller errors (bad FK id
@@ -485,6 +571,101 @@ public final class HttpUtil {
             }
         }
         return null;
+    }
+
+    /** {@code reason} on the 409 for a re-home across embedding models (RDR-225). Wire contract. */
+    static final String COLLECTION_MODEL_MISMATCH_REASON = "collection_model_mismatch";
+
+    /** {@code reason} on the 422 for a write naming a model that is registered nowhere (RDR-225). Wire contract. */
+    static final String UNREGISTERED_EMBEDDING_MODEL_REASON = "unregistered_embedding_model";
+
+    /** {@code reason} on the 500 for a registered model whose partition was never created (RDR-225). Wire contract. */
+    static final String MODEL_PARTITION_MISSING_REASON = "model_partition_missing";
+
+    /** {@code reason} on the 500 for PostgreSQL's "no partition of relation found for row" (RDR-225). Wire contract. */
+    static final String TENANT_PARTITION_MISSING_REASON = "tenant_partition_missing";
+
+    /** {@code reason} on the retryable 503 for a first token that waited on partition-creation locks (RDR-225). Wire contract. */
+    static final String TENANT_CREATION_BUSY_REASON = "tenant_creation_busy";
+
+    /** {@code Retry-After} on {@link #TENANT_CREATION_BUSY_REASON}: one {@code lock_timeout} of the creation. */
+    static final long TENANT_CREATION_RETRY_AFTER_SECONDS = 2;
+
+    /** The {@link dev.nexus.service.db.CollectionModelMismatchException} in {@code t}'s cause chain, or null. */
+    static dev.nexus.service.db.CollectionModelMismatchException collectionModelMismatch(Throwable t) {
+        for (Throwable c = t; c != null; c = c.getCause()) {
+            if (c instanceof dev.nexus.service.db.CollectionModelMismatchException m) {
+                return m;
+            }
+        }
+        return null;
+    }
+
+    /** The {@link dev.nexus.service.db.ModelPartitions.ModelPartitionMissingException} in {@code t}'s cause chain, or null. */
+    static dev.nexus.service.db.ModelPartitions.ModelPartitionMissingException modelPartitionMissing(Throwable t) {
+        for (Throwable c = t; c != null; c = c.getCause()) {
+            if (c instanceof dev.nexus.service.db.ModelPartitions.ModelPartitionMissingException m) {
+                return m;
+            }
+        }
+        return null;
+    }
+
+    /** The {@link dev.nexus.service.db.TenantCreationBusyException} in {@code t}'s cause chain, or null. */
+    static dev.nexus.service.db.TenantCreationBusyException tenantCreationBusy(Throwable t) {
+        for (Throwable c = t; c != null; c = c.getCause()) {
+            if (c instanceof dev.nexus.service.db.TenantCreationBusyException b) {
+                return b;
+            }
+        }
+        return null;
+    }
+
+    /** The message of PostgreSQL's "no partition of relation ... found for row" error, or null. */
+    private static final String NO_PARTITION_MESSAGE = "no partition of relation";
+
+    /**
+     * RDR-225: the driver message of a SQLSTATE 23514 whose text is "no partition of relation ... found
+     * for row" (tuple routing found no partition), or null. The dimension CHECK on a model partition
+     * raises 23514 too, so the SQLSTATE alone cannot tell them apart; this keys on the message, as the
+     * doc-count tripwire does on its prefix. The same locale caveat applies: a server reporting in
+     * another language degrades this to the class-23 409 (wrong status, never a wrong success).
+     */
+    static String noPartitionMessage(Throwable t) {
+        Throwable c = t;
+        for (int depth = 0; c != null && depth < 32; depth++, c = c.getCause()) {
+            if (c instanceof SQLException se
+                    && "23514".equals(se.getSQLState())
+                    && se.getMessage() != null
+                    && se.getMessage().contains(NO_PARTITION_MESSAGE)) {
+                return se.getMessage();
+            }
+        }
+        return null;
+    }
+
+    private static final java.util.regex.Pattern PARTITION_KEY_DETAIL = java.util.regex.Pattern.compile(
+        "Partition key of the failing row contains \\(([^)]*)\\) = \\((.*)\\)");
+
+    /**
+     * The tenant and model out of the server's detail line, {@code Partition key of the failing row
+     * contains (embedding_model, tenant_id) = (m, t)} (the model partition missing) or
+     * {@code (tenant_id) = (t)} (a leaf missing under an existing model partition). Either element is
+     * null when the detail does not carry it.
+     */
+    static String[] partitionKeyOf(String message) {
+        var m = PARTITION_KEY_DETAIL.matcher(message);
+        String tenant = null;
+        String model = null;
+        if (m.find()) {
+            String[] cols = m.group(1).split(", ");
+            String[] vals = m.group(2).split(", ", cols.length);
+            for (int i = 0; i < cols.length && i < vals.length; i++) {
+                if ("tenant_id".equals(cols[i])) tenant = vals[i];
+                if ("embedding_model".equals(cols[i])) model = vals[i];
+            }
+        }
+        return new String[] {tenant, model};
     }
 
     /** The {@code reason} value on the typed 422 for an unregistered collection

@@ -5048,10 +5048,16 @@ public final class CatalogRepository {
             throw new IllegalArgumentException(
                 "insertManifestChunkRows: 'coll' must be non-blank (tenant=" + tenant + " doc_id=" + docId + ")");
         }
+        // RDR-225 (nexus-3wh8d.13): the manifest row carries its collection's model, the fourth column
+        // of fk_catalog_chunks_chunk. It is read through the open ctx (require, not lookup: no second
+        // pooled connection mid-transaction) and is the same value every chunk row of the collection was
+        // written with. An unregistered collection answers 422 'register it first' here, as the chunk
+        // writers do, instead of the opaque foreign-key violation it used to surface as.
+        final String embeddingModel = CollectionRegistry.require(ctx, tenant, coll).embeddingModel();
         var insert = ctx.insertInto(CATALOG_DOCUMENT_CHUNKS,
                 CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION, CHK_CHASH_HEX, CATALOG_DOCUMENT_CHUNKS.CHUNK_INDEX,
                 CATALOG_DOCUMENT_CHUNKS.LINE_START, CATALOG_DOCUMENT_CHUNKS.LINE_END, CATALOG_DOCUMENT_CHUNKS.CHAR_START, CATALOG_DOCUMENT_CHUNKS.CHAR_END,
-                CATALOG_DOCUMENT_CHUNKS.COLLECTION);
+                CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL);
         for (var row : rows) {
             // hygiene-001 (nexus-tk070.p6a follow-on): catalog_document_chunks.chunk_index
             // is NOT NULL now — a client that omits it (the wire field predates this
@@ -5060,7 +5066,8 @@ public final class CatalogRepository {
             // NULL and failing the constraint.
             insert = insert.values(tenant, docId, i(row,"position"), s(row,"chash"),
                     ni(i(row,"chunk_index"), i(row,"position")),
-                    i(row,"line_start"), i(row,"line_end"), i(row,"char_start"), i(row,"char_end"), coll);
+                    i(row,"line_start"), i(row,"line_end"), i(row,"char_start"), i(row,"char_end"), coll,
+                    embeddingModel);
         }
         switch (mode) {
             case PLAIN -> insert.execute();
@@ -5074,6 +5081,10 @@ public final class CatalogRepository {
                 // used to guard against required a ghost-resolution path
                 // that could hand back NULL; that path no longer exists).
                 .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, EX_CHK_COLL)
+                // RDR-225: the model follows the collection it names (fk_catalog_chunks_chunk is on
+                // (tenant, collection, chash, model)); a conflict that re-points the row at another
+                // collection re-points its model with it.
+                .set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, DSL.excluded(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL))
                 .execute();
             case UPSERT_IMPORT -> insert
                 .onConflict(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION)
@@ -5086,6 +5097,7 @@ public final class CatalogRepository {
                 .set(CATALOG_DOCUMENT_CHUNKS.CHAR_END, EX_CHK_CEN)
                 // RDR-191: same reasoning as the UPSERT_APPEND arm above.
                 .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, EX_CHK_COLL)
+                .set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, DSL.excluded(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL))
                 .execute();
         }
     }
@@ -5349,7 +5361,12 @@ public final class CatalogRepository {
         // RDR-204 Phase 2 (bead nexus-ft04v.16): the row's dimension, read through
         // the ALREADY-OPEN ctx (require, not lookup — a nested withTenant here
         // would borrow a second pooled connection mid-transaction for no reason).
-        int dim = CollectionRegistry.require(ctx, tenant, collection).dimension();
+        CollectionRow collectionRow = CollectionRegistry.require(ctx, tenant, collection);
+        int dim = collectionRow.dimension();
+        // RDR-225 (nexus-3wh8d.13): the chunk rows carry the collection's model; a model with no
+        // partition is refused before the insert, naming the model.
+        final String embeddingModel = collectionRow.embeddingModel();
+        ModelPartitions.require(ctx, ModelPartitions.CHUNKS, embeddingModel);
         DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
 
         if (!mustAlreadyExist.isEmpty()) {
@@ -5408,10 +5425,11 @@ public final class CatalogRepository {
             if (resolved.get(c).keepStoredOnConflict()) keepChashes.add(c);
         }
         var insert = ctx.insertInto(ch.table(),
-                ch.tenantId(), ch.collection(), ch.chash(), ch.chunkText(), ch.embedding(), ch.metadata());
+                ch.tenantId(), ch.collection(), ch.chash(), ch.embeddingModel(),
+                ch.chunkText(), ch.embedding(), ch.metadata());
         for (String c : toWrite) {
             ResolvedChunk rc = resolved.get(c);
-            insert = insert.values(tenant, collection, c, rc.text(),
+            insert = insert.values(tenant, collection, c, embeddingModel, rc.text(),
                     Vector.of(rc.embedding()), JSONB.jsonb(rc.metadataJson()));
         }
         long raced = 0;
@@ -5439,7 +5457,7 @@ public final class CatalogRepository {
         Field<JSONB> metadataSet = mergeKeys == null ? DSL.excluded(ch.metadata())
             : dev.nexus.service.vectors.PgVectorRepository.mergeMetadata(
                 ch.metadata(), DSL.excluded(ch.metadata()), mergeKeys);
-        var returned = insert.onConflict(ch.tenantId(), ch.collection(), ch.chash())
+        var returned = insert.onConflict(ch.tenantId(), ch.collection(), ch.chash(), ch.embeddingModel())
               .doUpdate()
               .set(ch.chunkText(), textSet)
               .set(ch.embedding(), embeddingSet)
@@ -5450,8 +5468,7 @@ public final class CatalogRepository {
               // The identical-text branch never reaches this INSERT: it is refreshed by
               // PgVectorRepository#batchUpdateMetadata.
               .set(ch.lastWrittenAt(), DimTables.lastWrittenNow())
-              .returningResult(ch.chash(), DSL.field(
-                  DSL.field(DSL.name("xmax"), SQLDataType.INTEGER).eq(0)))
+              .returningResult(ch.chash(), DSL.field(DimTables.insertedByThisStatement(ch)))
               .fetch();
         for (var r : returned) {
             if (!Boolean.TRUE.equals(r.value2()) && originalAbsentChashes.contains(r.value1())) {
@@ -8696,6 +8713,12 @@ public final class CatalogRepository {
         // circuited by a stale KNOWN entry.
         if (counts.containsKey("catalog_collections_superseded")) {
             CollectionRegistry.evict(tenant, oldName);
+            // RDR-225 (nexus-3wh8d.13): newName is evicted first. Step 1's upsert can REVIVE a
+            // tombstone of newName and, with it, replace the model that tombstone carried (the target
+            // holds no data by the emptiness check, so the swap is allowed). Every chunk, manifest and
+            // centroid write now takes its model from this cached row, so a lookup that answered from
+            // a stale entry would file the next write under a model the row no longer has.
+            CollectionRegistry.evict(tenant, newName);
             // RDR-204 nexus-ft04v.14: markKnown now caches the row, not presence — read
             // the row step 1 of the transaction just wrote (copied from oldName's
             // metadata) so newName's cache entry carries its real attributes instead of
@@ -9099,8 +9122,22 @@ public final class CatalogRepository {
                 // combined-query join stays live under the new name. Leaving
                 // this out was the THIRD door back into the silent-empty
                 // state (docs pointed at the target, manifests at the source).
+                // RDR-225 (nexus-3wh8d.13): the manifest row's foreign key to chunks is on
+                // (tenant, collection, chash, embedding_model), and the target's chunk rows carry the
+                // TARGET's model, so a cross-model re-home sets the model together with the collection
+                // or the row would still name the source's model under the target's collection name.
+                // The model is read in the same statement from the target's registry row. Nothing else
+                // changes model here: the topic assignments and orphan stamps keep naming the source's
+                // chunks, which stay in the source collection, and the stamp triggers carry the model
+                // the manifest row they fire on had (vectors-030-1 step 7.8).
                 counts.put("catalog_document_chunks",
-                    ctx.update(CATALOG_DOCUMENT_CHUNKS).set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, newName)
+                    ctx.update(CATALOG_DOCUMENT_CHUNKS)
+                       .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, newName)
+                       .set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL,
+                            DSL.field(ctx.select(CATALOG_COLLECTIONS.EMBEDDING_MODEL)
+                                .from(CATALOG_COLLECTIONS)
+                                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant))
+                                .and(CATALOG_COLLECTIONS.NAME.eq(newName))))
                        .where(CATALOG_DOCUMENT_CHUNKS.COLLECTION.eq(oldName)).execute());
                 // nexus-wbfpw.68/.71: NO quarantine retag here, deliberately. This branch is the RDR-162
                 // cross-model COPY: oldName stays registered and live, and its quarantine rows carry
@@ -9503,6 +9540,25 @@ public final class CatalogRepository {
             }
             requireLiveCollection(ctx, source, "source");
             requireLiveCollection(ctx, target, "target");
+            // RDR-225 (nexus-3wh8d.13): the chunk UPDATE below files the source's chunk rows under the
+            // target, and a chunk keeps its collection's embedding model (the composite foreign key to
+            // catalog_collections, and the partition the row lives in). Across models that UPDATE cannot
+            // succeed, so refuse it up front naming both models, rather than let PostgreSQL abort the
+            // transaction on a constraint named for a partition. A source with no chunk rows moves
+            // everything else whatever its model.
+            String sourceModel = ctx.select(CATALOG_COLLECTIONS.EMBEDDING_MODEL).from(CATALOG_COLLECTIONS)
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.eq(source))
+                .fetchOne(CATALOG_COLLECTIONS.EMBEDDING_MODEL);
+            String targetModel = ctx.select(CATALOG_COLLECTIONS.EMBEDDING_MODEL).from(CATALOG_COLLECTIONS)
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.eq(target))
+                .fetchOne(CATALOG_COLLECTIONS.EMBEDDING_MODEL);
+            if (!sourceModel.equals(targetModel)
+                    && ctx.fetchExists(ctx.selectOne().from(CHUNKS).where(CHUNKS.COLLECTION.eq(source)))) {
+                throw new RehomeRefused("collection " + source + " (embedding model " + sourceModel
+                    + ") holds chunks and cannot be re-homed onto " + target + " (embedding model "
+                    + targetModel + "): a chunk keeps its collection's model, and a move between models "
+                    + "is a cross-model migration into a new collection.");
+            }
 
             Map<String, Integer> moved = new LinkedHashMap<>();
             Map<String, Integer> leftBehind = new LinkedHashMap<>();

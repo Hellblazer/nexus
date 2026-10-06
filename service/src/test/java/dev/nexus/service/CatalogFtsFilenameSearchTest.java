@@ -312,7 +312,7 @@ class CatalogFtsFilenameSearchTest {
     /**
      * RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk now requires a
      * matching nexus.chunks row for every catalog_document_chunks insert. Stub a
-     * minimal chunk (single embedding_384 vector, arbitrary text) under COLLECTION.
+     * minimal chunk (single embedding_1024 vector, arbitrary text) under COLLECTION.
      */
     private void stubChunk(String chashHex) {
         try (Connection su = pg.createConnection("")) {
@@ -324,9 +324,11 @@ class CatalogFtsFilenameSearchTest {
             // nexus-ft04v.4/.5: routed through PgContainerHelper.insertCollection.
             PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, COLLECTION);
             su.createStatement().execute(
-                "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_384) VALUES ("
-                + "'" + TENANT + "', '" + COLLECTION + "', decode('" + chashHex + "', 'hex'), 'stub', "
-                + "('[" + "0.1,".repeat(383) + "0.1]')::nexus.vector) ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
+                "INSERT INTO nexus.chunks (tenant_id, collection, chash, embedding_model, chunk_text, embedding_1024) VALUES ("
+                + "'" + TENANT + "', '" + COLLECTION + "', decode('" + chashHex + "', 'hex'), "
+                + "(SELECT embedding_model FROM nexus.catalog_collections WHERE tenant_id = '" + TENANT
+                + "' AND name = '" + COLLECTION + "'), 'stub', "
+                + "('[" + "0.1,".repeat(1023) + "0.1]')::nexus.vector) ON CONFLICT (tenant_id, collection, chash, embedding_model) DO NOTHING");
         } catch (Exception e) {
             throw new RuntimeException(e);
         }

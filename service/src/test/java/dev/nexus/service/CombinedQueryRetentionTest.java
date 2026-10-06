@@ -127,6 +127,8 @@ class CombinedQueryRetentionTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             var ctx = DSL.using(su, SQLDialect.POSTGRES);
+            // RDR-225: manifest and assignment rows carry the model of the chunk they reference.
+            final String model = PgContainerHelper.collectionModel(ctx, TENANT, COL);
 
             // Reference-only chunk: no content, a caller-supplied embedding (RDR-169 G4),
             // through the test fixture (the engine has no writer for one, nexus-z0o2p.36).
@@ -151,8 +153,8 @@ class CombinedQueryRetentionTest {
             ctx.insertInto(CATALOG_DOCUMENT_CHUNKS,
                     CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
                     CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
-                    CATALOG_DOCUMENT_CHUNKS.COLLECTION)
-               .values(TENANT, FULL_TUMBLER, 0, HexFormat.of().parseHex(FULL_CHASH), COL)
+                    CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
+               .values(TENANT, FULL_TUMBLER, 0, HexFormat.of().parseHex(FULL_CHASH), COL, model)
                .onConflict(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
                     CATALOG_DOCUMENT_CHUNKS.POSITION)
                .doNothing()
@@ -160,8 +162,8 @@ class CombinedQueryRetentionTest {
             ctx.insertInto(CATALOG_DOCUMENT_CHUNKS,
                     CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
                     CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
-                    CATALOG_DOCUMENT_CHUNKS.COLLECTION)
-               .values(TENANT, REFONLY_TUMBLER, 0, HexFormat.of().parseHex(REFONLY_CHASH), COL)
+                    CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
+               .values(TENANT, REFONLY_TUMBLER, 0, HexFormat.of().parseHex(REFONLY_CHASH), COL, model)
                .onConflict(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
                     CATALOG_DOCUMENT_CHUNKS.POSITION)
                .doNothing()
@@ -191,9 +193,10 @@ class CombinedQueryRetentionTest {
             for (String chash : List.of(FULL_CHASH, REFONLY_CHASH)) {
                 ctx.insertInto(TOPIC_ASSIGNMENTS,
                         TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID, TOPIC_ASSIGNMENTS.TOPIC_ID,
-                        TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, TOPIC_ASSIGNMENTS.ASSIGNED_AT)
+                        TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, TOPIC_ASSIGNMENTS.ASSIGNED_AT,
+                        TOPIC_ASSIGNMENTS.EMBEDDING_MODEL)
                    .values(TENANT, HexFormat.of().parseHex(chash), topicId, COL,
-                        OffsetDateTime.parse("2026-01-01T00:00:00+00:00"))
+                        OffsetDateTime.parse("2026-01-01T00:00:00+00:00"), model)
                    .onConflict(TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID,
                         TOPIC_ASSIGNMENTS.TOPIC_ID)
                    .doNothing()

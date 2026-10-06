@@ -64,8 +64,25 @@ class VectorsChashIndexLiquibaseTest {
     private static final int[] DIMS = {384, 768, 1024};
 
     private static final String TENANT = "probe-tenant";
-    private static final String COLL_A = "docs__probe__test__v1";
-    private static final String COLL_B = "code__probe__test__v1";
+
+    // RDR-225: a collection holds one embedding model, so one width. The two collections a dim's shared chash
+    // lives in are therefore registered per dim, each under a real model of that width.
+    private static String modelToken(int dim) {
+        return switch (dim) {
+            case 384  -> "minilm-l6-v2-384";
+            case 768  -> "bge-base-en-v15-768";
+            case 1024 -> "voyage-code-3";
+            default   -> throw new IllegalArgumentException("unsupported dim " + dim);
+        };
+    }
+
+    private static String collA(int dim) {
+        return "docs__probe-" + dim + "__" + modelToken(dim) + "__v1";
+    }
+
+    private static String collB(int dim) {
+        return "code__probe-" + dim + "__" + modelToken(dim) + "__v1";
+    }
 
     /**
      * The probed chash for a given dim: present in BOTH collections of the
@@ -119,12 +136,14 @@ class VectorsChashIndexLiquibaseTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             // RDR-204 nexus-ft04v.4/.5: routed through PgContainerHelper.insertCollection.
-            for (String coll : new String[] {COLL_A, COLL_B}) {
-                PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, coll);
+            for (int dim : DIMS) {
+                for (String coll : new String[] {collA(dim), collB(dim)}) {
+                    PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, coll);
+                }
             }
             for (int dim : DIMS) {
                 int filler = 0;
-                for (String coll : new String[] {COLL_A, COLL_B}) {
+                for (String coll : new String[] {collA(dim), collB(dim)}) {
                     insertChunk(su, dim, coll, sharedChashForDim(dim));
                     for (int i = 0; i < 8; i++) {
                         insertChunk(su, dim, coll,
@@ -140,10 +159,12 @@ class VectorsChashIndexLiquibaseTest {
             throws Exception {
         su.createStatement().execute(
             "INSERT INTO nexus.chunks" +
-            " (tenant_id, collection, chash, chunk_text, embedding_" + dim + ") VALUES " +
+            " (tenant_id, collection, chash, embedding_model, chunk_text, embedding_" + dim + ") VALUES " +
             "('" + TENANT + "', '" + collection + "', decode('" + chashHex + "', 'hex'), " +
+            "(SELECT embedding_model FROM nexus.catalog_collections WHERE tenant_id = '" + TENANT
+            + "' AND name = '" + collection + "'), " +
             "'chunk " + chashHex.substring(0, 8) + "', " + zeroVec(dim) + "::nexus.vector)" +
-            " ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
+            " ON CONFLICT (tenant_id, collection, chash, embedding_model) DO NOTHING");
     }
 
     private static String zeroVec(int dim) {
@@ -170,7 +191,7 @@ class VectorsChashIndexLiquibaseTest {
                 .isNotNull();
             assertThat(indexdef)
                 .as("index %s must be a btree on (tenant_id, chash)", indexName)
-                .contains("ON nexus.chunks USING btree (tenant_id, chash)");
+                .contains("nexus.chunks USING btree (tenant_id, chash)");   // "ON ONLY nexus.chunks" on the partitioned parent
         }
     }
 
@@ -216,9 +237,13 @@ class VectorsChashIndexLiquibaseTest {
                 String plan = explain(su, ctx -> ctx.select(CHUNKS.field("collection"))
                     .from(CHUNKS)
                     .where(cond));
+                // RDR-225: nexus.chunks is partitioned, so the plan names each LEAF's copy of the index,
+                // which PostgreSQL names <leaf>_<columns>_idx (the parent's idx_chunks_tenant_chash is the
+                // definition the leaves inherit, never an index a scan can name).
                 assertThat(plan)
-                    .as("chash-only probe (dim %d row) on nexus.chunks must use %s", dim, indexName)
-                    .contains(indexName);
+                    .as("chash-only probe (dim %d row) on nexus.chunks must use the leaves' copy of %s", dim,
+                        indexName)
+                    .contains("_tenant_id_chash_idx");
             }
         }
     }
@@ -244,7 +269,7 @@ class VectorsChashIndexLiquibaseTest {
                 }
                 assertThat(collections)
                     .as("chash-only probe (dim %d row) on nexus.chunks must return both collections", dim)
-                    .containsExactly(COLL_B, COLL_A);
+                    .containsExactly(collB(dim), collA(dim));
             }
         }
     }

@@ -83,9 +83,25 @@ class ChunksRlsBehavioralTest {
     private static final String TENANT_A = "tenant-a";
     private static final String TENANT_B = "tenant-b";
 
-    // Distinct collection names to avoid cross-test pollution on the PK.
-    private static final String COL_A = "code__owner-a__voyage-code-3__v1";
-    private static final String COL_B = "knowledge__owner-b__voyage-context-3__v1";
+    /**
+     * RDR-225: a collection has exactly ONE embedding model, and a chunk's vector must be that model's
+     * dimension. The three parameterized dims therefore each get their own collection, named with the model
+     * token of that dimension (minilm-l6-v2-384, bge-base-en-v15-768, voyage-context-3), which
+     * {@link PgContainerHelper#insertCollection} derives the registered model from.
+     */
+    private static String modelFor(int dim) {
+        return switch (dim) {
+            case 384 -> "minilm-l6-v2-384";
+            case 768 -> "bge-base-en-v15-768";
+            case 1024 -> "voyage-context-3";
+            default -> throw new IllegalArgumentException("no model of dimension " + dim);
+        };
+    }
+
+    /** A distinct, conformant collection name per (content type, owner, dim) to avoid cross-test pollution. */
+    private static String colFor(String type, String owner, int dim) {
+        return type + "__" + owner + "__" + modelFor(dim) + "__v1";
+    }
 
     PostgreSQLContainer<?> pg;
     TenantScope tenantScope;
@@ -104,6 +120,13 @@ class ChunksRlsBehavioralTest {
         }
         try (Connection su = pg.createConnection("")) {
             PgContainerHelper.bootstrapServiceRole(su, SVC_ROLE, SVC_PASS);
+        }
+
+        // RDR-225: a row of a tenant with no partition leaf is refused by tuple routing before RLS is
+        // consulted, so the cross-tenant INSERT/UPDATE scenarios need the other tenant's leaves to exist.
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.ensureTenantPartitions(DSL.using(su, SQLDialect.POSTGRES), TENANT_A);
+            PgContainerHelper.ensureTenantPartitions(DSL.using(su, SQLDialect.POSTGRES), TENANT_B);
         }
 
         // --- Step 4: build the svc-role Hikari pool used by TenantScope.
@@ -144,22 +167,23 @@ class ChunksRlsBehavioralTest {
     @ParameterizedTest
     @ValueSource(ints = {384, 768, 1024})
     void failClosed_noGucStamp_seesZeroRows(int dim) throws Exception {
+        final String colA = colFor("code", "owner-a", dim);
         // Seed 2 rows as tenant-a via TenantScope (SET LOCAL stamped, txn-local).
-        insertChunk(dim, TENANT_A, COL_A, "chash-fc-1-" + dim, "text one", dim);
-        insertChunk(dim, TENANT_A, COL_A, "chash-fc-2-" + dim, "text two", dim);
+        insertChunk(dim, TENANT_A, colA, "chash-fc-1-" + dim, "text one", dim);
+        insertChunk(dim, TENANT_A, colA, "chash-fc-2-" + dim, "text two", dim);
 
         // Superuser count: prove the rows are physically there (not empty table).
         // Scoped to COL_A + embedding_<dim> IS NOT NULL so sibling parameterized
         // tests' rows for OTHER dims (same collection, unified table post-RDR-191)
         // cannot inflate the count (JUnit method ordering is undefined).
-        long suCount = superuserCount(dim, COL_A);
+        long suCount = superuserCount(dim, colA);
         assertThat(suCount)
             .as("superuser must see the 2 seeded rows (rows exist, RLS is the guard)")
             .isEqualTo(2L);
 
         // Svc-role connection WITHOUT any GUC stamp: borrow a raw connection from the
         // pool and query without entering TenantScope (no set_config call).
-        long unstampedCount = unstampedSvcCount(dim, COL_A);
+        long unstampedCount = unstampedSvcCount(dim, colA);
         assertThat(unstampedCount)
             .as("unstamped svc-role connection must see 0 rows (fail-closed RLS)")
             .isEqualTo(0L);
@@ -175,7 +199,7 @@ class ChunksRlsBehavioralTest {
     @ParameterizedTest
     @ValueSource(ints = {384, 768, 1024})
     void crossTenantSelect_tenantBSeesOnlyOwnRows(int dim) {
-        String col = "knowledge__isolation__ctx3__v1";  // unique collection per test
+        String col = colFor("knowledge", "isolation", dim);  // unique collection per test and dim
 
         // Seed 2 rows for tenant-a and 1 row for tenant-b (distinct chash values).
         insertChunk(dim, TENANT_A, col, "chash-iso-a1-" + dim, "a content 1", dim);
@@ -207,7 +231,7 @@ class ChunksRlsBehavioralTest {
     @ParameterizedTest
     @ValueSource(ints = {384, 768, 1024})
     void crossTenantInsert_blockedByWithCheck(int dim) {
-        String col = "code__withcheck__vc3__v1";
+        String col = colFor("code", "withcheck", dim);
         String vec = vectorLiteral(dim);
 
         // Seed a legitimate row for tenant-a.
@@ -224,9 +248,9 @@ class ChunksRlsBehavioralTest {
             tenantScope.withTenant(TENANT_A, ctx -> {
                 ctx.execute(
                     "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME +
-                    " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(dim) + ") " +
-                    "VALUES (?, ?, decode(?, 'hex'), ?, ?::nexus.vector)",
-                    TENANT_B, col, padChash("chash-wc-cross-" + dim), "cross-tenant inject", vec);
+                    " (tenant_id, collection, chash, embedding_model, chunk_text, " + DimTables.embeddingColumn(dim) + ") " +
+                    "VALUES (?, ?, decode(?, 'hex'), ?, ?, ?::nexus.vector)",
+                    TENANT_B, col, padChash("chash-wc-cross-" + dim), modelFor(dim), "cross-tenant inject", vec);
                 return null;
             })
         ).as("INSERT with tenant_id='tenant-b' inside tenant-a scope must be rejected by RLS WITH CHECK")
@@ -252,7 +276,7 @@ class ChunksRlsBehavioralTest {
     @ParameterizedTest
     @ValueSource(ints = {384, 768, 1024})
     void crossTenantUpdate_blockedByWithCheck(int dim) {
-        String col = "code__withcheck-upd__vc3__v1";
+        String col = colFor("code", "withcheck-upd", dim);
 
         // Seed a legitimate row for tenant-a.
         insertChunk(dim, TENANT_A, col, "chash-wcu-own-" + dim, "own row for update", dim);
@@ -309,7 +333,7 @@ class ChunksRlsBehavioralTest {
     @ParameterizedTest
     @ValueSource(ints = {384, 768, 1024})
     void setLocalOverPooler_gucDoesNotBleedToNextBorrower(int dim) throws Exception {
-        String col = "code__leak-probe__vc3__v1";
+        String col = colFor("code", "leak-probe", dim);
         TenantScope leakScope = new TenantScope(leakDs);
 
         // Seed a row so we have something that would show if the GUC leaked.
@@ -372,7 +396,7 @@ class ChunksRlsBehavioralTest {
     @ParameterizedTest
     @ValueSource(ints = {384, 768, 1024})
     void crossTenantDelete_deletesZeroRows_rowSurvives(int dim) {
-        String col = "code__delete-iso__vc3__v1";
+        String col = colFor("code", "delete-iso", dim);
 
         insertChunk(dim, TENANT_A, col, "chash-del-own-" + dim, "own row for delete", dim);
         assertThat(tenantCount(dim, TENANT_A, col))
@@ -448,10 +472,10 @@ class ChunksRlsBehavioralTest {
             PgContainerHelper.insertCollection(ctx, tenant, collection);
             ctx.execute(
                 "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME +
-                " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(dim) + ")" +
-                " VALUES (?, ?, decode(?, 'hex'), ?, ?::nexus.vector)" +
-                " ON CONFLICT (tenant_id, collection, chash) DO NOTHING",
-                tenant, collection, paddedChash, chunkText, vec);
+                " (tenant_id, collection, chash, embedding_model, chunk_text, " + DimTables.embeddingColumn(dim) + ")" +
+                " VALUES (?, ?, decode(?, 'hex'), ?, ?, ?::nexus.vector)" +
+                " ON CONFLICT (tenant_id, collection, chash, embedding_model) DO NOTHING",
+                tenant, collection, paddedChash, modelFor(dim), chunkText, vec);
             return null;
         });
     }

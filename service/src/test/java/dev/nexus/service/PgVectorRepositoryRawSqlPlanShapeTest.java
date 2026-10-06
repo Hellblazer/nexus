@@ -274,9 +274,11 @@ class PgVectorRepositoryRawSqlPlanShapeTest {
                 // the single "nearest" row seeded below — see the method javadoc for why
                 // this must be per-row-random rather than one repeated literal).
                 st.execute(
-                    "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, " + embCol + ") "
+                    "INSERT INTO nexus.chunks (tenant_id, collection, chash, embedding_model, chunk_text, " + embCol + ") "
                     + "SELECT '" + TENANT + "', '" + coll + "', "
                     + "       decode(md5('planshape-" + dim + "-' || i) || md5('fill-" + dim + "-' || i), 'hex'), "
+                    + "       (SELECT embedding_model FROM nexus.catalog_collections WHERE tenant_id = '" + TENANT
+                    + "' AND name = '" + coll + "'), "
                     + "       'planshape filler chunk ' || i, v.vec "
                     + "FROM generate_series(1, " + CHUNKS_PER_DIM + ") i "
                     + "CROSS JOIN LATERAL (SELECT (array_agg(random() * 2 - 1))::nexus.vector AS vec"
@@ -286,8 +288,10 @@ class PgVectorRepositoryRawSqlPlanShapeTest {
                 // assertion below checks for.
                 String nearestChash = md5x2("planshape-near-" + dim, "target-" + dim);
                 st.execute(
-                    "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, " + embCol + ") "
+                    "INSERT INTO nexus.chunks (tenant_id, collection, chash, embedding_model, chunk_text, " + embCol + ") "
                     + "VALUES ('" + TENANT + "', '" + coll + "', decode('" + nearestChash + "', 'hex'), "
+                    + "(SELECT embedding_model FROM nexus.catalog_collections WHERE tenant_id = '" + TENANT
+                    + "' AND name = '" + coll + "'), "
                     + "'planshape nearest target chunk', "
                     + "('[1' || repeat(',0', " + (dim - 1) + ") || ']')::nexus.vector)");
                 if (dim == 1024) {
@@ -317,8 +321,8 @@ class PgVectorRepositoryRawSqlPlanShapeTest {
                 + "VALUES ('" + TENANT + "', 'planshape-graphhop-doc', 'planshape graph-hop seed doc', '"
                 + COL_768 + "') ON CONFLICT (tenant_id, tumbler) DO NOTHING");
             st.execute(
-                "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection) "
-                + "SELECT tenant_id, 'planshape-graphhop-doc', row_number() OVER (ORDER BY chash), chash, collection "
+                "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection, embedding_model) "
+                + "SELECT tenant_id, 'planshape-graphhop-doc', row_number() OVER (ORDER BY chash), chash, collection, embedding_model "
                 + "FROM nexus.chunks WHERE tenant_id = '" + TENANT + "' AND collection = '" + COL_768 + "'");
 
             st.execute(
@@ -341,8 +345,8 @@ class PgVectorRepositoryRawSqlPlanShapeTest {
             // directly, no encode('hex').
             st.execute(
                 "INSERT INTO nexus.topic_assignments "
-                + "(tenant_id, doc_id, topic_id, assigned_by, source_collection, assigned_at) "
-                + "SELECT tenant_id, chash, 900001, 'planshape-seed', collection, NOW() "
+                + "(tenant_id, doc_id, topic_id, assigned_by, source_collection, assigned_at, embedding_model) "
+                + "SELECT tenant_id, chash, 900001, 'planshape-seed', collection, NOW(), embedding_model "
                 + "FROM nexus.chunks WHERE tenant_id = '" + TENANT + "' AND collection = '" + COL_384 + "' "
                 + "AND get_byte(chash, 0) < 26");
 
@@ -424,7 +428,7 @@ class PgVectorRepositoryRawSqlPlanShapeTest {
                 + " idx_chunks_embedding_1024 HNSW index with the nexus-74zvm"
                 + " embedding_1024 IS NOT NULL guard added — the guard must not defeat"
                 + " the index bind. Plan was:%n%s", plan)
-            .contains("idx_chunks_embedding_1024");
+            .containsPattern("Index Scan using \"?\\S*embedding_1024");
         assertThat(plan)
             .as("must not degrade to a sequential scan of the unified (mixed-dim) table's"
                 + " chunks rows (narrowed to the table this test actually targets, not the"
@@ -443,7 +447,7 @@ class PgVectorRepositoryRawSqlPlanShapeTest {
             .as("searchWithTokens' distance projection (768-dim) must bind to the FULL"
                 + " idx_chunks_embedding_768 HNSW index with the nexus-74zvm guard added."
                 + " Plan was:%n%s", plan)
-            .contains("idx_chunks_embedding_768");
+            .containsPattern("Index Scan using \"?\\S*embedding_768");
         assertThat(plan)
             .as("no Seq Scan of the chunks table itself (see the 1024-dim test's assertion"
                 + " for why this is narrowed to \"on chunks\" rather than the whole plan)."
@@ -459,7 +463,7 @@ class PgVectorRepositoryRawSqlPlanShapeTest {
             .as("searchWithTokens' distance projection (384-dim) must bind to the FULL"
                 + " idx_chunks_embedding_384 HNSW index with the nexus-74zvm guard added."
                 + " Plan was:%n%s", plan)
-            .contains("idx_chunks_embedding_384");
+            .containsPattern("Index Scan using \"?\\S*embedding_384");
         assertThat(plan)
             .as("no Seq Scan of the chunks table itself (see the 1024-dim test's assertion"
                 + " for why this is narrowed to \"on chunks\" rather than the whole plan)."
@@ -552,7 +556,7 @@ class PgVectorRepositoryRawSqlPlanShapeTest {
                 + " idx_chunks_embedding_384 HNSW index for its distance ORDER BY, WITH the"
                 + " nexus-74zvm embedding_384 IS NOT NULL guard added — the guard must not"
                 + " defeat the index bind. Plan was:%n%s", plan)
-            .contains("idx_chunks_embedding_384");
+            .containsPattern("Index Scan using \"?\\S*embedding_384");
     }
 
     // ════════════════════════════════════════════════════════════════════════
@@ -579,7 +583,7 @@ class PgVectorRepositoryRawSqlPlanShapeTest {
                 + "(vectors-006-1) must not defeat the FULL idx_chunks_embedding_1024 "
                 + "HNSW bind this inlinable LANGUAGE sql function relies on. Plan was:%n%s",
                 plan)
-            .contains("idx_chunks_embedding_1024");
+            .containsPattern("Index Scan using \"?\\S*embedding_1024");
         assertThat(plan)
             .as("must not degrade to a sequential scan of nexus.chunks. Plan was:%n%s", plan)
             .doesNotContain("Seq Scan on chunks");
@@ -595,7 +599,7 @@ class PgVectorRepositoryRawSqlPlanShapeTest {
             .as("search_graph_hop_768's embedding_768 IS NOT NULL guard (vectors-006-2) "
                 + "must not defeat the FULL idx_chunks_embedding_768 HNSW bind for the "
                 + "outer SELECT's distance ORDER BY. Plan was:%n%s", plan)
-            .contains("idx_chunks_embedding_768");
+            .containsPattern("Index Scan using \"?\\S*embedding_768");
         assertThat(plan)
             .as("must not degrade to a sequential scan of nexus.chunks. Plan was:%n%s", plan)
             .doesNotContain("Seq Scan on chunks");
@@ -647,7 +651,7 @@ class PgVectorRepositoryRawSqlPlanShapeTest {
             .as("search_topic_scoped_384's embedding_384 IS NOT NULL guard (vectors-006-3) must "
                 + "not degrade the scan into an UNSCOPED sequential scan of nexus.chunks -- it must "
                 + "still be scoped by tenant_id (chunks_pk or idx_chunks_tenant_chash). Plan was:%n%s", plan)
-            .containsAnyOf("chunks_pk", "idx_chunks_tenant_chash");
+            .containsAnyOf("_pkey", "_tenant_id_chash_idx", "_embedding_384_idx", "chunks_pk", "idx_chunks_tenant_chash");
         assertThat(plan)
             .as("must not degrade to a full sequential scan of nexus.chunks ignoring "
                 + "tenant/collection scoping. Plan was:%n%s", plan)

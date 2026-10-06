@@ -338,7 +338,11 @@ class TaxonomyAssignCrossLateralHnswTest {
             su.setAutoCommit(true);
             DSLContext bootstrapCtx = DSL.using(su, SQLDialect.POSTGRES);
             for (String coll : order) {
-                PgContainerHelper.insertCollection(bootstrapCtx, TENANT, coll);
+                // RDR-225: a collection has exactly one model, and the centroids below are 1024-wide. The
+                // filler names are not conformant (they would register under the 768-d bge fallback), so
+                // every collection is registered under voyage-code-3, COL_DENSE's own model: the whole
+                // fixture then sits in ONE model/tenant leaf, the shape the plan-shape assertions measure.
+                PgContainerHelper.insertCollection(bootstrapCtx, TENANT, coll, "voyage-code-3");
             }
         }
 
@@ -364,10 +368,12 @@ class TaxonomyAssignCrossLateralHnswTest {
                 long[] topicIds = bulkInsertTopics(ctx, TENANT, coll, n);
                 var insert = ctx.insertInto(TAXONOMY_CENTROIDS,
                     TAXONOMY_CENTROIDS.TENANT_ID, TAXONOMY_CENTROIDS.COLLECTION,
-                    TAXONOMY_CENTROIDS.TOPIC_ID, TAXONOMY_CENTROIDS.EMBEDDING_1024,
+                    TAXONOMY_CENTROIDS.TOPIC_ID, TAXONOMY_CENTROIDS.EMBEDDING_MODEL,
+                    TAXONOMY_CENTROIDS.EMBEDDING_1024,
                     TAXONOMY_CENTROIDS.LABEL, TAXONOMY_CENTROIDS.DOC_COUNT);
+                final String model = PgContainerHelper.collectionModel(ctx, TENANT, coll);
                 for (long topicId : topicIds) {
-                    insert = insert.values(TENANT, coll, topicId,
+                    insert = insert.values(TENANT, coll, topicId, model,
                         clusteredVector(rnd, center, sigma), "seed-centroid", 1);
                 }
                 insert.execute();
@@ -383,13 +389,14 @@ class TaxonomyAssignCrossLateralHnswTest {
                 chunkChashes.add(chash);
                 float[] emb = clusteredVectorRaw(rnd, denseCenter, OWN_CLUSTER_SIGMA);
                 try (PreparedStatement ps = su.prepareStatement(
-                        "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_1024)"
-                        + " VALUES (?, ?, decode(?, 'hex'), ?, ?::nexus.vector)")) {
+                        "INSERT INTO nexus.chunks (tenant_id, collection, chash, embedding_model, chunk_text, embedding_1024)"
+                        + " VALUES (?, ?, decode(?, 'hex'), ?, ?, ?::nexus.vector)")) {
                     ps.setString(1, TENANT);
                     ps.setString(2, COL_DENSE);
                     ps.setString(3, chash);
-                    ps.setString(4, "lateral incremental-fixture chunk " + i);
-                    ps.setString(5, vectorLiteral(emb));
+                    ps.setString(4, PgContainerHelper.collectionModel(ctx, TENANT, COL_DENSE));
+                    ps.setString(5, "lateral incremental-fixture chunk " + i);
+                    ps.setString(6, vectorLiteral(emb));
                     ps.executeUpdate();
                 }
             }
@@ -650,13 +657,14 @@ class TaxonomyAssignCrossLateralHnswTest {
         // runs and the fixture is never mutated.
         return
             "WITH batch AS ("
-            + "    SELECT c.chash AS b_chash, c.embedding_1024 AS b_emb"
+            + "    SELECT c.chash AS b_chash, c.embedding_1024 AS b_emb, c.embedding_model AS b_model"
             + "      FROM nexus.chunks c"
             + "     WHERE c.collection = '" + COL_DENSE + "'"
             + "       AND c.embedding_1024 IS NOT NULL"
             + "       AND c.chash = ANY(ARRAY(SELECT decode(x, 'hex') FROM unnest(" + chashArrayLiteral + ") x))"
             + " ), nearest AS ("
             + "    SELECT encode(b.b_chash, 'hex') AS m_chash, b.b_chash AS m_chash_bytes,"
+            + "           b.b_model AS m_model,"
             + "           n.n_topic_id AS m_topic_id, (1 - n.n_dist)::double precision AS m_sim"
             + "      FROM batch b"
             + "      CROSS JOIN LATERAL ("
@@ -669,10 +677,14 @@ class TaxonomyAssignCrossLateralHnswTest {
             + "           LIMIT 1"
             + "      ) n"
             + " ), persisted AS ("
+            // RDR-225: the function's own SQL comments are part of its prosrc, so they are copied here too
+            // (each ends in a newline, or it would comment out the rest of this one-line statement).
+            + "    -- RDR-225: embedding_model is the chunk's own (it is part of the four-column chunk foreign key).\n"
             + "    INSERT INTO nexus.topic_assignments AS ta"
-            + "        (tenant_id, doc_id, topic_id, assigned_by, similarity, assigned_at, source_collection)"
+            + "        (tenant_id, doc_id, topic_id, assigned_by, similarity, assigned_at, source_collection,"
+            + "         embedding_model)"
             + "    SELECT '" + TENANT + "', n.m_chash_bytes, n.m_topic_id,"
-            + "           'projection', n.m_sim, now(), '" + COL_DENSE + "'"
+            + "           'projection', n.m_sim, now(), '" + COL_DENSE + "', n.m_model"
             + "      FROM nearest n"
             + "    ON CONFLICT (tenant_id, doc_id, topic_id) DO UPDATE SET"
             + "        similarity = GREATEST(COALESCE(ta.similarity, -1.0), EXCLUDED.similarity),"
@@ -680,6 +692,9 @@ class TaxonomyAssignCrossLateralHnswTest {
             + "                            THEN EXCLUDED.assigned_at ELSE ta.assigned_at END,"
             + "        source_collection = CASE WHEN EXCLUDED.similarity > COALESCE(ta.similarity, -1.0)"
             + "                            THEN EXCLUDED.source_collection ELSE ta.source_collection END,"
+            + "        -- the model moves with the source collection: the pair is one chunk reference.\n"
+            + "        embedding_model = CASE WHEN EXCLUDED.similarity > COALESCE(ta.similarity, -1.0)"
+            + "                            THEN EXCLUDED.embedding_model ELSE ta.embedding_model END,"
             + "        assigned_by = 'projection'"
             + "    RETURNING 1"
             + " ) SELECT n.m_chash, n.m_topic_id, n.m_sim FROM nearest n";
@@ -795,7 +810,9 @@ class TaxonomyAssignCrossLateralHnswTest {
                 + " crossover, so this only passes because of the enable_seqscan/"
                 + "enable_sort pin. Plan was:%n%s",
                 totalCentroidsSeeded(), totalCollectionsSeeded(), NAMED_COLLECTION_SIZES[0], plan)
-            .contains("idx_taxonomy_centroids_embedding_1024");
+            // RDR-225: the plan names the model/tenant LEAF's inherited index
+            // (<leaf>_embedding_1024_idx), not the parent's idx_taxonomy_centroids_embedding_1024.
+            .containsPattern("Index Scan using \"?\\S*taxonomy_centroids\\S*embedding_1024");
         assertThat(plan)
             .as("must not degrade to a sequential scan on taxonomy_centroids at this"
                 + " cardinality -- that degradation IS the regression this bead closes."

@@ -218,7 +218,10 @@ class HybridSelectiveGateTest {
         assertThat(rankPlan)
             .as("rank MUST NOT route through the HNSW index — that is what made the retired "
                 + "plan starvable by hnsw.max_scan_tuples. Plan was:%n%s", rankPlan)
-            .doesNotContain("idx_chunks_embedding_1024");
+            .doesNotContain("idx_chunks_embedding_1024")
+            // RDR-225: the HNSW index is created on the partitioned parent and PostgreSQL names each leaf's
+            // child index <leaf>_embedding_1024_idx, which is the name a plan over the leaf shows.
+            .doesNotContain("embedding_1024_idx");
         assertThat(rankPlan)
             .as("the rank MUST be a Sort over the chash-filtered set (exact distance), "
                 + "not an index-ordered scan. Plan was:%n%s", rankPlan)

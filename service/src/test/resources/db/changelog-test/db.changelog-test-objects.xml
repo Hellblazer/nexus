@@ -127,6 +127,33 @@ $$;
         <rollback>DROP FUNCTION IF EXISTS nexus_test.add_fk_not_valid_composite3(regclass, text, text, text, regclass, text, text, text)</rollback>
     </changeSet>
 
+    <changeSet id="test-objects-7b-composite3-model-aware" author="nexus-3wh8d.13">
+        <comment>RDR-225: nexus_test.add_fk_not_valid_composite3 re-adds a (tenant_id, collection, chash) foreign key; once both the referencing and the referenced table carry embedding_model (the partitioned chunks and the tables that reference it, after vectors-030-1) the key is the FOUR-column one, and a three-column key onto chunks has no unique key to rest on. The function therefore appends embedding_model to both column lists when both tables have the column, and is otherwise unchanged, so the pre-walk callers and the same signature keep working. SECURITY INVOKER.</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus_test.add_fk_not_valid_composite3(
+    p_table regclass, p_name text, p_col2 text, p_col3 text,
+    p_ref regclass, p_ref_col2 text, p_ref_col3 text, p_extra text
+) RETURNS void
+    LANGUAGE plpgsql
+    SECURITY INVOKER
+AS $$
+DECLARE
+    v_cols     text := format('tenant_id, %I, %I', p_col2, p_col3);
+    v_ref_cols text := format('tenant_id, %I, %I', p_ref_col2, p_ref_col3);
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_attribute a WHERE a.attrelid = p_table AND a.attname = 'embedding_model' AND NOT a.attisdropped)
+       AND EXISTS (SELECT 1 FROM pg_attribute a WHERE a.attrelid = p_ref AND a.attname = 'embedding_model' AND NOT a.attisdropped) THEN
+        v_cols := v_cols || ', embedding_model';
+        v_ref_cols := v_ref_cols || ', embedding_model';
+    END IF;
+    EXECUTE format('ALTER TABLE %s ADD CONSTRAINT %I FOREIGN KEY (%s) REFERENCES %s (%s) %s NOT VALID',
+        p_table, p_name, v_cols, p_ref, v_ref_cols, p_extra);
+END;
+$$;
+        </sql>
+        <rollback>SELECT 1</rollback>
+    </changeSet>
+
     <changeSet id="test-objects-8-grant-execute-on-function" author="nexus-cbo4a">
         <comment>nexus_test.grant_execute_on_function(text, text): plpgsql wrapper for GRANT
         EXECUTE ON FUNCTION p_signature TO p_role (nexus-cbo4a batch 11). GRANT EXECUTE
@@ -176,6 +203,45 @@ END;
 $$;
         </sql>
         <rollback>DROP FUNCTION IF EXISTS nexus_test.insert_chunk_bare_vector(text, text, bytea, int)</rollback>
+    </changeSet>
+
+    <changeSet id="test-objects-9b-insert-chunk-bare-vector-model" author="nexus-3wh8d.13">
+        <comment>RDR-225: nexus_test.insert_chunk_bare_vector supplies embedding_model once nexus.chunks has the column (vectors-030-1). The function is shared by two kinds of caller: the pre-walk dedicated containers (Hygiene002CollectionAttributesWalkTest, Hygiene004OwnerGrammarUnderscoreTest), where the column does not exist yet and the original three-column-key INSERT is the only valid one, and any caller on a fully walked cluster, where the row must carry its collection's model (a NOT NULL partition key, and the model partition's dimension CHECK). The function therefore asks information_schema which shape it is running against, at execution time, and takes the model from the collection's catalog_collections row; a collection with no row is refused by name instead of by the composite foreign key. Same signature, so the generated Routines.insertChunkBareVector is unchanged. SECURITY INVOKER.</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus_test.insert_chunk_bare_vector(
+    p_tenant text, p_collection text, p_chash bytea, p_dim int
+) RETURNS void
+    LANGUAGE plpgsql
+    SECURITY INVOKER
+AS $$
+DECLARE
+    v_lit   text;
+    v_model text;
+BEGIN
+    SELECT '[' || string_agg('0.1', ',') || ']' INTO v_lit FROM generate_series(1, p_dim);
+    IF EXISTS (SELECT 1 FROM information_schema.columns
+                WHERE table_schema = 'nexus' AND table_name = 'chunks' AND column_name = 'embedding_model') THEN
+        SELECT c.embedding_model INTO v_model
+          FROM nexus.catalog_collections c
+         WHERE c.tenant_id = p_tenant AND c.name = p_collection;
+        IF v_model IS NULL THEN
+            RAISE EXCEPTION 'nexus_test.insert_chunk_bare_vector: collection % is not registered for tenant % (a chunk carries its collection''s model)',
+                p_collection, p_tenant;
+        END IF;
+        EXECUTE format(
+            'INSERT INTO nexus.chunks (tenant_id, collection, chash, embedding_model, chunk_text, %I) VALUES ($1, $2, $3, $4, $5, $6::vector)',
+            'embedding_' || p_dim)
+            USING p_tenant, p_collection, p_chash, v_model, 'text', v_lit;
+    ELSE
+        EXECUTE format(
+            'INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, %I) VALUES ($1, $2, $3, $4, $5::vector)',
+            'embedding_' || p_dim)
+            USING p_tenant, p_collection, p_chash, 'text', v_lit;
+    END IF;
+END;
+$$;
+        </sql>
+        <rollback>SELECT 1</rollback>
     </changeSet>
 
     <changeSet id="test-objects-fts-matches" author="nexus-cbo4a">

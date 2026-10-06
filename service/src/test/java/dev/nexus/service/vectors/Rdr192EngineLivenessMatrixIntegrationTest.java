@@ -634,7 +634,8 @@ class Rdr192EngineLivenessMatrixIntegrationTest {
             // from this seam without hand-rolling the same literal this precedent uses.
             try (PreparedStatement ps = su.prepareStatement(
                     "INSERT INTO nexus.taxonomy_centroids"
-                    + " (tenant_id, collection, topic_id, label, embedding_384) VALUES (?, ?, ?, ?, ?::nexus.vector)")) {
+                    + " (tenant_id, collection, topic_id, label, embedding_384, embedding_model) VALUES (?, ?, ?, ?, ?::nexus.vector,"
+                    + " (SELECT embedding_model FROM nexus.catalog_collections WHERE tenant_id = ? AND name = ?))")) {
                 ps.setString(1, tenant);
                 ps.setString(2, collection);
                 ps.setLong(3, topicId);
@@ -646,6 +647,8 @@ class Rdr192EngineLivenessMatrixIntegrationTest {
                 }
                 sb.append(']');
                 ps.setString(5, sb.toString());
+                ps.setString(6, tenant);
+                ps.setString(7, collection);
                 ps.executeUpdate();
             }
         }

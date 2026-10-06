@@ -106,12 +106,16 @@ class CatalogHandlerSweepAndChashesManyTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             PgContainerHelper.setTenant(su, TenantScope.DEFAULT_TENANT_GUC, TENANT, false);
-            DSL.using(su, SQLDialect.POSTGRES)
-                .insertInto(CHUNKS,
-                    CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_384)
+            var ctx = DSL.using(su, SQLDialect.POSTGRES);
+            // RDR-225: this tenant holds no service token, so it has no partition leaves until asked.
+            PgContainerHelper.ensureTenantPartitions(ctx, TENANT);
+            ctx.insertInto(CHUNKS,
+                    CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL,
+                    CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_384)
                 .values(TENANT, collection, HexFormat.of().parseHex(hexChash),
+                    PgContainerHelper.collectionModel(ctx, TENANT, collection),
                     "seed text " + hexChash, Vector.of(new float[384]))
-                .onConflict(CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH)
+                .onConflict(CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL)
                 .doNothing()
                 .execute();
         }

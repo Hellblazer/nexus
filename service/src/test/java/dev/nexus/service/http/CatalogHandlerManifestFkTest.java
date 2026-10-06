@@ -297,7 +297,7 @@ class CatalogHandlerManifestFkTest {
     /**
      * RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk now requires a
      * matching nexus.chunks row for every catalog_document_chunks insert. Stub a
-     * minimal chunk (single embedding_384 vector, arbitrary text).
+     * minimal chunk (single embedding_768 vector, arbitrary text).
      */
     private void stubChunk(String collection, String chashHex) throws Exception {
         // SVC_ROLE's grants (startAll) are scoped to catalog_owners/documents/
@@ -311,14 +311,18 @@ class CatalogHandlerManifestFkTest {
             // PgVectorRepository#upsertChunks' own ensure-registered step. RDR-204
             // nexus-ft04v.4/.5: routed through PgContainerHelper.insertCollection.
             PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, collection);
+            // RDR-225: "knowledge__fk__v1" is not a conformant name, so insertCollection registers it
+            // under the bge-base-en-v15-768 fallback; the chunk carries that model and a 768-wide vector.
             try (var ps = su.prepareStatement(
-                    "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_384) "
-                    + "VALUES (?, ?, decode(?, 'hex'), 'stub', ?::nexus.vector) "
-                    + "ON CONFLICT (tenant_id, collection, chash) DO NOTHING")) {
+                    "INSERT INTO nexus.chunks (tenant_id, collection, chash, embedding_model, chunk_text, embedding_768) "
+                    + "VALUES (?, ?, decode(?, 'hex'), ?, 'stub', ?::nexus.vector) "
+                    + "ON CONFLICT (tenant_id, collection, chash, embedding_model) DO NOTHING")) {
                 ps.setString(1, TENANT);
                 ps.setString(2, collection);
                 ps.setString(3, chashHex);
-                ps.setString(4, "[" + "0.1,".repeat(383) + "0.1]");
+                ps.setString(4, PgContainerHelper.collectionModel(
+                    DSL.using(su, SQLDialect.POSTGRES), TENANT, collection));
+                ps.setString(5, "[" + "0.1,".repeat(767) + "0.1]");
                 ps.execute();
             }
         }

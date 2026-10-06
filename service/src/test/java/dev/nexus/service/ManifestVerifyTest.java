@@ -390,65 +390,65 @@ class ManifestVerifyTest {
     }
 
     // ══════════════════════════════════════════════════════════════════════════
-    // GROUP 5b — cross-dim false positive: DOCUMENTED TRADEOFF, not a bug.
+    // GROUP 5b — cross-model false positive: DOCUMENTED TRADEOFF, not a bug.
     //
-    // manifest_verify's presence check (catalog-020-3) is a single, dim-agnostic
+    // manifest_verify's presence check (catalog-020-3) is a single, model-agnostic
     // EXISTS(nexus.chunks) keyed on (tenant_id, collection, chash) (RDR-191 Phase
     // 4: was an OR across chunks_384/768/1024, now the unified table with no
-    // dim/embedding-column filter at all) — it does NOT verify the match came
-    // from the embedding_<dim> column the collection's model token
-    // (split_part(collection,'__',3)) actually declares. A manifest row stamped
-    // with a voyage-context-3 (1024-dim) collection name whose chash physically
-    // exists with embedding_384 populated (same tenant_id + collection string)
-    // reads PRESENT here — the shipped function cannot tell "wrong dim" apart
-    // from "right dim".
+    // dim/embedding-column filter at all) — it does NOT compare the manifest row's
+    // embedding_model with the chunk's. RDR-225 made the chunk's model part of its
+    // key (tenant, collection, chash, embedding_model) and every manifest row
+    // carries its chunk's model, so the old shape of this scenario (a chunk
+    // physically present with the WRONG vector column populated for the
+    // collection's declared model) is now UNREPRESENTABLE: a chunk's vector width
+    // must be its model's dimension (the model partition's CHECK) and a collection
+    // has exactly one model. The surviving form of the same gap is a manifest row
+    // stamped with a model that is NOT the chunk's: the composite foreign key
+    // would refuse it (this file's insertManifestRow helper re-adds that FK
+    // NOT VALID, so it tolerates one), and manifest_verify, which never reads the
+    // manifest's embedding_model, still reads the chash PRESENT — the shipped
+    // function cannot tell "stamped for another model" apart from "consistent".
     //
     // This was the SAME tradeoff nexus.remap_membership() made deliberately
-    // (RDR-186 nexus-146xx.5 — "membership must probe ALL chunk dims ...
-    // without being told which"); that function and its dim-agnostic-probe
-    // test are DELETED at nexus-lgdel.l2 (orphaned read surface). nexus.manifest_orphans(dim)
-    // (catalog-004-manifest-functions.xml) is the STRICTER tool when dim
-    // fidelity matters: it routes via split_part(collection,'__',3) to the ONE
-    // dim (embedding column) the collection name declares, so a wrong-dim chash
-    // reads as an orphan there instead of a false "present".
+    // (RDR-186 nexus-146xx.5); that function and its dim-agnostic-probe test are
+    // DELETED at nexus-lgdel.l2 (orphaned read surface). nexus.manifest_orphans(dim)
+    // (catalog-004-manifest-functions.xml) is the STRICTER tool when model/dim
+    // fidelity matters.
     //
     // This test PINS the current, accepted, documented behavior — it is not an
-    // aspiration. If manifest_verify is later tightened to add split_part
-    // routing (closing this gap), this assertion should flip to missing=1 at
-    // that time, not be treated as a regression to silently patch around.
+    // aspiration. If manifest_verify is later tightened to compare the model
+    // (closing this gap), this assertion should flip to missing=1 at that time,
+    // not be treated as a regression to silently patch around.
     // ══════════════════════════════════════════════════════════════════════════
 
     @Test
-    void manifestVerify_crossDimChash_countsAsPresent_documentedTradeoff() throws Exception {
+    void manifestVerify_crossModelChash_countsAsPresent_documentedTradeoff() throws Exception {
         String docId = "mvf-crossdim-doc-1";
-        String chashWrongDim = chash("mvf-crossdim-chash");
+        String chashWrongModel = chash("mvf-crossdim-chash");
 
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             insertCollection(su, TENANT, COLLECTION); // voyage-context-3 (1024-dim) collection
             insertDoc(su, TENANT, docId);
-            // Manifest row stamped with the 1024-dim collection name...
-            insertManifestRow(su, TENANT, docId, 0, chashWrongDim, COLLECTION);
-            // ...but the chash physically exists with embedding_384 populated, under
-            // the SAME (tenant_id, collection) pair — same tenant + collection string,
-            // wrong dim (RDR-191: same unified table, wrong embedding column).
-            insertChunk384(su, TENANT, COLLECTION, chashWrongDim);
+            // Manifest row stamped with a model that is NOT the chunk's (a 384-d model)...
+            insertManifestRow(su, TENANT, docId, 0, chashWrongModel, COLLECTION, "minilm-l6-v2-384");
+            // ...while the chash physically exists under the SAME (tenant_id, collection) pair
+            // with the collection's own model (voyage-context-3, 1024-d).
+            insertChunk1024(su, TENANT, COLLECTION, chashWrongModel);
         }
 
         long[] r = verify(docId);
         assertThat(r[0]).as("referenced").isEqualTo(1L);
         assertThat(r[1])
-            .as("DOCUMENTED TRADEOFF, not a bug: manifest_verify's dim-agnostic " +
-                "EXISTS(nexus.chunks) does not check that the match came from the " +
-                "embedding column the collection's model token declares. A chash " +
-                "physically present with only embedding_384 populated reads PRESENT " +
-                "even though the manifest row's collection is a voyage-context-3 " +
-                "(1024-dim) name — manifest_orphans(dim) is the stricter " +
-                "split_part-routed tool when dim fidelity matters.")
+            .as("DOCUMENTED TRADEOFF, not a bug: manifest_verify's model-agnostic " +
+                "EXISTS(nexus.chunks) does not check that the manifest row's embedding_model " +
+                "is the chunk's. A chash physically present under the collection's own model " +
+                "reads PRESENT even though the manifest row is stamped with a different model " +
+                "— manifest_orphans(dim) is the stricter tool when model fidelity matters.")
             .isEqualTo(1L);
         assertThat(r[2])
-            .as("missing is 0 for this cross-dim match — behavior-pinning assertion, not " +
-                "an aspiration; a future split_part-routing tightening should flip this to " +
+            .as("missing is 0 for this cross-model match — behavior-pinning assertion, not " +
+                "an aspiration; a future model-comparing tightening should flip this to " +
                 "missing=1, not be treated as breaking this test")
             .isEqualTo(0L);
     }
@@ -590,6 +590,24 @@ class ManifestVerifyTest {
     private static void insertManifestRow(Connection su, String tenantId, String docId,
                                            int position, String chashHex, String collection)
             throws Exception {
+        insertManifestRow(su, tenantId, docId, position, chashHex, collection, null);
+    }
+
+    /**
+     * {@link #insertManifestRow(Connection, String, String, int, String, String)} with the row's
+     * {@code embedding_model} stamped explicitly (RDR-225: the manifest row carries its chunk's model).
+     * {@code embeddingModel == null} stamps the collection's registered model, which is what every
+     * consistent row carries; an explicit value lets a test seed the inconsistent stamp the FK would
+     * refuse (this helper re-adds the FK NOT VALID, so it tolerates one).
+     */
+    private static void insertManifestRow(Connection su, String tenantId, String docId,
+                                           int position, String chashHex, String collection,
+                                           String embeddingModel)
+            throws Exception {
+        final String modelExpr = embeddingModel != null
+            ? "'" + embeddingModel + "'"
+            : "(SELECT embedding_model FROM nexus.catalog_collections WHERE tenant_id = '" + tenantId
+                + "' AND name = '" + collection + "')";
         // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk now requires a
         // matching nexus.chunks row for every catalog_document_chunks insert. This
         // file's whole purpose is manifest_verify's detection of a chash with NO
@@ -605,14 +623,15 @@ class ManifestVerifyTest {
             "ALTER TABLE nexus.catalog_document_chunks DROP CONSTRAINT IF EXISTS fk_catalog_chunks_chunk");
         su.createStatement().execute(
             "INSERT INTO nexus.catalog_document_chunks " +
-            "  (tenant_id, doc_id, position, chash, collection) " +
+            "  (tenant_id, doc_id, position, chash, collection, embedding_model) " +
             "VALUES ('" + tenantId + "', '" + docId + "', " + position + ", " +
-            "decode('" + chashHex + "', 'hex'), '" + collection + "') " +
+            "decode('" + chashHex + "', 'hex'), '" + collection + "', " + modelExpr + ") " +
             "ON CONFLICT (tenant_id, doc_id, position) DO NOTHING");
         su.createStatement().execute(
             "ALTER TABLE nexus.catalog_document_chunks " +
             "ADD CONSTRAINT fk_catalog_chunks_chunk " +
-            "FOREIGN KEY (tenant_id, collection, chash) REFERENCES nexus.chunks (tenant_id, collection, chash) " +
+            "FOREIGN KEY (tenant_id, collection, chash, embedding_model) " +
+            "REFERENCES nexus.chunks (tenant_id, collection, chash, embedding_model) " +
             "ON UPDATE CASCADE DEFERRABLE INITIALLY IMMEDIATE NOT VALID");
     }
 
@@ -621,33 +640,20 @@ class ManifestVerifyTest {
             throws Exception {
         su.createStatement().execute(
             "INSERT INTO nexus.catalog_document_chunks " +
-            "  (tenant_id, doc_id, position, chash) " +
+            "  (tenant_id, doc_id, position, chash, embedding_model) " +
             "VALUES ('" + tenantId + "', '" + docId + "', " + position + ", " +
-            "decode('" + chashHex + "', 'hex')) " +
+            "decode('" + chashHex + "', 'hex'), 'voyage-context-3') " +
             "ON CONFLICT (tenant_id, doc_id, position) DO NOTHING");
     }
 
     private static void insertChunk1024(Connection su, String tenantId, String collection,
                                          String chashHex) throws Exception {
         su.createStatement().execute(
-            "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(1024) + ") " +
+            "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, embedding_model, chunk_text, " + DimTables.embeddingColumn(1024) + ") " +
             "VALUES ('" + tenantId + "', '" + collection + "', decode('" + chashHex + "', 'hex'), " +
+            "(SELECT embedding_model FROM nexus.catalog_collections WHERE tenant_id = '" + tenantId
+            + "' AND name = '" + collection + "'), " +
             "'chunk text', ('[1" + ",0".repeat(1023) + "]')::nexus.vector) " +
-            "ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
-    }
-
-    /**
-     * Insert a nexus.chunks row with embedding_384 populated under the given
-     * (tenant_id, collection) pair (RDR-191 unified; formerly a chunks_384 row).
-     * Used ONLY by the cross-dim false-positive pinning test (GROUP 5b) to seed a
-     * chash under the WRONG dim (embedding column) for a 1024-dim-declared collection name.
-     */
-    private static void insertChunk384(Connection su, String tenantId, String collection,
-                                        String chashHex) throws Exception {
-        su.createStatement().execute(
-            "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(384) + ") " +
-            "VALUES ('" + tenantId + "', '" + collection + "', decode('" + chashHex + "', 'hex'), " +
-            "'chunk text', ('[1" + ",0".repeat(383) + "]')::nexus.vector) " +
-            "ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
+            "ON CONFLICT (tenant_id, collection, chash, embedding_model) DO NOTHING");
     }
 }

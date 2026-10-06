@@ -247,13 +247,16 @@ class CrossPreviewRepositoryTest {
             su.setAutoCommit(true);
             try (PreparedStatement ps = su.prepareStatement(
                     "INSERT INTO nexus.chunks"
-                    + " (tenant_id, collection, chash, chunk_text, embedding_" + DIM + ")"
-                    + " VALUES (?, ?, decode(?, 'hex'), ?, ?::nexus.vector)")) {
+                    + " (tenant_id, collection, chash, embedding_model, chunk_text, embedding_" + DIM + ")"
+                    + " VALUES (?, ?, decode(?, 'hex'), (SELECT embedding_model FROM nexus.catalog_collections"
+                    + " WHERE tenant_id = ? AND name = ?), ?, ?::nexus.vector)")) {
                 ps.setString(1, tenant);
                 ps.setString(2, collection);
                 ps.setString(3, hexChashValue);
-                ps.setString(4, "seed text " + hexChashValue);
-                ps.setString(5, vectorLiteral(emb));
+                ps.setString(4, tenant);
+                ps.setString(5, collection);
+                ps.setString(6, "seed text " + hexChashValue);
+                ps.setString(7, vectorLiteral(emb));
                 ps.executeUpdate();
             }
         }
@@ -276,12 +279,16 @@ class CrossPreviewRepositoryTest {
             su.setAutoCommit(true);
             try (PreparedStatement ps = su.prepareStatement(
                     "INSERT INTO nexus.taxonomy_centroids"
-                    + " (tenant_id, collection, topic_id, label, embedding_" + DIM + ") VALUES (?, ?, ?, ?, ?::nexus.vector)")) {
+                    + " (tenant_id, collection, topic_id, embedding_model, label, embedding_" + DIM + ")"
+                    + " VALUES (?, ?, ?, (SELECT embedding_model FROM nexus.catalog_collections"
+                    + " WHERE tenant_id = ? AND name = ?), ?, ?::nexus.vector)")) {
                 ps.setString(1, tenant);
                 ps.setString(2, collection);
                 ps.setLong(3, topicId);
-                ps.setString(4, "seed-centroid-label");
-                ps.setString(5, vectorLiteral(emb));
+                ps.setString(4, tenant);
+                ps.setString(5, collection);
+                ps.setString(6, "seed-centroid-label");
+                ps.setString(7, vectorLiteral(emb));
                 ps.executeUpdate();
             }
         }

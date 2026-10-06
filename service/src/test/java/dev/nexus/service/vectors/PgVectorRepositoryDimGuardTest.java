@@ -50,6 +50,15 @@ import static org.assertj.core.api.Assertions.assertThat;
  * (vectors-004-unify-chunks.xml) guarantees this is one row with exactly one
  * populated embedding column, not two rows sharing one physical slot.
  *
+ * <p><b>RDR-225 (nexus-3wh8d.13):</b> {@code nexus.chunks} is now partitioned by embedding model and a
+ * collection has exactly ONE model, so one dimension. A model partition carries a CHECK that its
+ * vector column is the only non-null one ({@code <partition>_dimension_chk}); the mixed-dim state the
+ * fixture above builds can no longer be represented at all. The foreign-dim inserts therefore now
+ * assert the REFUSAL (SQLSTATE 23514, naming the dimension CHECK), and the behavioural tests assert
+ * what the guard's callers see in the only state that remains: the collection holds its own-dim rows
+ * and nothing else. The dense-gate test needs two gate matches to leave the selective branch, so the
+ * null-guard collection holds a second own-dim row.
+ *
  * <p>Real Postgres round trip (Testcontainers pgvector/pgvector:pg17), same
  * fixture convention as {@code PgVectorRepositoryGetAllMetadataCapBoundaryTest}.
  */
@@ -78,6 +87,8 @@ class PgVectorRepositoryDimGuardTest {
         Chash.ofText("dim-guard-nullguard-own-dim-chunk").toHex();
     private static final String CHASH_NULLGUARD_FOREIGN =
         Chash.ofText("dim-guard-nullguard-foreign-dim-chunk").toHex();
+    private static final String CHASH_NULLGUARD_OWN_2 =
+        Chash.ofText("dim-guard-nullguard-own-dim-chunk-two").toHex();
 
     private PostgreSQLContainer<?> pg;
     private HikariDataSource svcDs;
@@ -85,6 +96,9 @@ class PgVectorRepositoryDimGuardTest {
     private PgVectorRepository repo;
     /** Backed by {@link UnitAxisEmbedder} -- for the nexus-74zvm search/hybridSearch tests. */
     private PgVectorRepository repoNullGuard;
+    /** What PostgreSQL said to each foreign-dim insert in the fixture (RDR-225: it must refuse). */
+    private java.sql.SQLException foreignDimRefusal;
+    private java.sql.SQLException foreignDimRefusalNullGuard;
 
     @BeforeAll
     void startAll() throws Exception {
@@ -130,21 +144,30 @@ class PgVectorRepositoryDimGuardTest {
         try (Connection su = pg.createConnection("");
              PreparedStatement ps = su.prepareStatement(
                  "INSERT INTO nexus.chunks "
-                 + "(tenant_id, collection, chash, chunk_text, embedding_768, metadata, created_at) "
-                 + "VALUES (?, ?, decode(?, 'hex'), ?, ?::nexus.vector, '{}'::jsonb, now())")) {
+                 + "(tenant_id, collection, chash, embedding_model, chunk_text, embedding_768, metadata, created_at) "
+                 + "VALUES (?, ?, decode(?, 'hex'), "
+                 + "(SELECT embedding_model FROM nexus.catalog_collections WHERE tenant_id = ? AND name = ?), "
+                 + "?, ?::nexus.vector, '{}'::jsonb, now())")) {
             su.setAutoCommit(true);
             ps.setString(1, TENANT);
             ps.setString(2, COLLECTION);
             ps.setString(3, CHASH_FOREIGN_DIM);
-            ps.setString(4, "foreign-dim chunk text");
-            ps.setString(5, zeroVectorLiteral(768));
-            ps.execute();
+            ps.setString(4, TENANT);
+            ps.setString(5, COLLECTION);
+            ps.setString(6, "foreign-dim chunk text");
+            ps.setString(7, zeroVectorLiteral(768));
+            try {
+                ps.execute();
+            } catch (java.sql.SQLException refused) {
+                foreignDimRefusal = refused;
+            }
         }
         // RDR-192 Step 5 (nexus-wbfpw.10): getEmbeddings/list now require a live
         // own-collection manifest owner -- own BOTH rows (list() is dim-agnostic and
         // must surface both; getEmbeddings' exclusion of the foreign-dim row is the
         // dim guard under test, not a manifest gap).
-        own(COLLECTION, CHASH_OWN_DIM, CHASH_FOREIGN_DIM);
+        // (RDR-225: the foreign-dim row was refused above, so only the own-dim row exists to own.)
+        own(COLLECTION, CHASH_OWN_DIM);
 
         // nexus-74zvm fixture: a SECOND mixed-dim collection, with well-defined
         // (unit, non-zero-norm) vectors so search/hybridSearch's <=> cosine-distance
@@ -161,24 +184,36 @@ class PgVectorRepositoryDimGuardTest {
         }
         repoNullGuard.upsertChunks(TENANT, COLLECTION_NULLGUARD,
             List.of(CHASH_NULLGUARD_OWN), List.of("own dim ng chunk text"), List.of(Map.of()));
+        // RDR-225: a second own-dim row, so the dense-gate test's selectiveGateMax=1 is exceeded
+        // (the foreign-dim row that used to be the second gate match cannot exist any more).
+        repoNullGuard.upsertChunks(TENANT, COLLECTION_NULLGUARD,
+            List.of(CHASH_NULLGUARD_OWN_2), List.of("own dim ng chunk text two"), List.of(Map.of()));
         try (Connection su = pg.createConnection("");
              PreparedStatement ps = su.prepareStatement(
                  "INSERT INTO nexus.chunks "
-                 + "(tenant_id, collection, chash, chunk_text, embedding_768, metadata, created_at) "
-                 + "VALUES (?, ?, decode(?, 'hex'), ?, ?::nexus.vector, '{}'::jsonb, now())")) {
+                 + "(tenant_id, collection, chash, embedding_model, chunk_text, embedding_768, metadata, created_at) "
+                 + "VALUES (?, ?, decode(?, 'hex'), "
+                 + "(SELECT embedding_model FROM nexus.catalog_collections WHERE tenant_id = ? AND name = ?), "
+                 + "?, ?::nexus.vector, '{}'::jsonb, now())")) {
             su.setAutoCommit(true);
             ps.setString(1, TENANT);
             ps.setString(2, COLLECTION_NULLGUARD);
             ps.setString(3, CHASH_NULLGUARD_FOREIGN);
-            ps.setString(4, "foreign dim ng chunk text");
-            ps.setString(5, unitVectorLiteral(768));
-            ps.execute();
+            ps.setString(4, TENANT);
+            ps.setString(5, COLLECTION_NULLGUARD);
+            ps.setString(6, "foreign dim ng chunk text");
+            ps.setString(7, unitVectorLiteral(768));
+            try {
+                ps.execute();
+            } catch (java.sql.SQLException refused) {
+                foreignDimRefusalNullGuard = refused;
+            }
         }
         // RDR-192 Step 5 (nexus-wbfpw.10): search/hybridSearch require a live
         // own-collection manifest owner too -- own the own-dim row search must
         // return; the foreign-dim row's exclusion is the dim guard under test, so
         // it deliberately stays unowned (excluded on both grounds).
-        own(COLLECTION_NULLGUARD, CHASH_NULLGUARD_OWN);
+        own(COLLECTION_NULLGUARD, CHASH_NULLGUARD_OWN, CHASH_NULLGUARD_OWN_2);
     }
 
     /**
@@ -214,6 +249,23 @@ class PgVectorRepositoryDimGuardTest {
             sb.append(",0");
         }
         return sb.append(']').toString();
+    }
+
+    /**
+     * RDR-225: the mixed-dim state this class used to build is unrepresentable. A 768-wide vector under a
+     * collection whose model is voyage-code-3 (1024) is refused by the model partition's dimension CHECK,
+     * for both fixture collections, so no foreign-dim row ever exists for the guards below to exclude.
+     */
+    @Test
+    void foreignDimRow_isRefusedByTheModelPartitionsDimensionCheck() {
+        assertThat((Throwable) foreignDimRefusal)
+            .as("a 768-wide vector in a 1024-wide (voyage-code-3) collection must be refused").isNotNull();
+        assertThat(foreignDimRefusal.getSQLState()).isEqualTo("23514");
+        assertThat(foreignDimRefusal.getMessage()).contains("_dimension_chk");
+        assertThat((Throwable) foreignDimRefusalNullGuard)
+            .as("the same refusal for the null-guard collection").isNotNull();
+        assertThat(foreignDimRefusalNullGuard.getSQLState()).isEqualTo("23514");
+        assertThat(foreignDimRefusalNullGuard.getMessage()).contains("_dimension_chk");
     }
 
     /**
@@ -262,11 +314,13 @@ class PgVectorRepositoryDimGuardTest {
     void count_isDimAgnostic_countsOwnDimAndForeignDimRows() {
         int c = repo.count(TENANT, COLLECTION);
 
+        // RDR-225: the foreign-dim row cannot exist (see
+        // foreignDimRow_isRefusedByTheModelPartitionsDimensionCheck), so the collection total is the
+        // own-dim row alone; count stays a collection total, with no dimension predicate.
         assertThat(c)
-            .as("count must be dim-agnostic (collection total), counting BOTH the "
-                + "own-dim (embedding_1024) row AND the foreign-dim (embedding_768) "
-                + "row -- must agree with stats/list_collections' cross-dim sum")
-            .isEqualTo(2);
+            .as("count is the collection total (dim-agnostic): the own-dim (embedding_1024) row, "
+                + "the only row a one-model collection can hold")
+            .isEqualTo(1);
     }
 
     /**
@@ -284,10 +338,10 @@ class PgVectorRepositoryDimGuardTest {
         List<String> ids = (List<String>) envelope.get("ids");
 
         assertThat(ids)
-            .as("list() must be dim-agnostic (collection membership only), surfacing BOTH "
-                + "the own-dim (embedding_1024) row AND the foreign-dim (embedding_768) row "
-                + "-- text/metadata is collection content regardless of embedding dim")
-            .containsExactlyInAnyOrder(CHASH_OWN_DIM, CHASH_FOREIGN_DIM);
+            .as("list() is dim-agnostic (collection membership only); RDR-225: the foreign-dim row "
+                + "cannot exist, so it surfaces the own-dim (embedding_1024) row")
+            .containsExactlyInAnyOrder(CHASH_OWN_DIM)
+            .doesNotContain(CHASH_FOREIGN_DIM);
     }
 
     /**
@@ -307,7 +361,7 @@ class PgVectorRepositoryDimGuardTest {
         assertThat(results)
             .as("search results must never include the foreign-dim row")
             .extracting(r -> r.get("id"))
-            .containsExactly(CHASH_NULLGUARD_OWN)
+            .containsExactlyInAnyOrder(CHASH_NULLGUARD_OWN, CHASH_NULLGUARD_OWN_2)
             .doesNotContain(CHASH_NULLGUARD_FOREIGN);
         assertThat(results)
             .as("every returned row must carry a real (non-null) distance")
@@ -330,7 +384,7 @@ class PgVectorRepositoryDimGuardTest {
             .as("hybridSearch results must never include the foreign-dim row even though "
                 + "its text matches the FTS/trigram gate")
             .extracting(r -> r.get("id"))
-            .containsExactly(CHASH_NULLGUARD_OWN)
+            .containsExactlyInAnyOrder(CHASH_NULLGUARD_OWN, CHASH_NULLGUARD_OWN_2)
             .doesNotContain(CHASH_NULLGUARD_FOREIGN);
         assertThat(results)
             .as("every returned row must carry a real (non-null) distance")
@@ -359,7 +413,7 @@ class PgVectorRepositoryDimGuardTest {
             .as("hybridSearch's DENSE-GATE (HNSW-first) branch must never include the "
                 + "foreign-dim row even though its text matches the FTS/trigram gate")
             .extracting(r -> r.get("id"))
-            .containsExactly(CHASH_NULLGUARD_OWN)
+            .containsExactlyInAnyOrder(CHASH_NULLGUARD_OWN, CHASH_NULLGUARD_OWN_2)
             .doesNotContain(CHASH_NULLGUARD_FOREIGN);
         assertThat(results)
             .as("every returned row must carry a real (non-null) distance")

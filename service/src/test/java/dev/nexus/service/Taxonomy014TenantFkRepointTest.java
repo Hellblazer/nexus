@@ -479,15 +479,19 @@ class Taxonomy014TenantFkRepointTest {
      */
     private static void seedChunkForAssignment(
             Connection c, String tenant, String collection, String chashHex) throws Exception {
-        int dim = 384;
+        // RDR-225: the collection name is not conformant, so it registers under the 768-wide
+        // fallback model, and the vector's width must be that model's dimension.
+        int dim = 768;
         // RDR-204 nexus-ft04v.4/.5: routed through PgContainerHelper.insertCollection.
         PgContainerHelper.insertCollection(DSL.using(c, SQLDialect.POSTGRES), tenant, collection);
         try (Statement st = c.createStatement()) {
             st.execute(
-                "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_" + dim + ") "
+                "INSERT INTO nexus.chunks (tenant_id, collection, chash, embedding_model, chunk_text, embedding_" + dim + ") "
                 + "VALUES ('" + tenant + "', '" + collection + "', decode('" + chashHex + "', 'hex'), "
+                + "(SELECT embedding_model FROM nexus.catalog_collections WHERE tenant_id = '" + tenant
+                + "' AND name = '" + collection + "'), "
                 + "'doc-count-trigger-test chunk', ('[" + "0.1,".repeat(dim - 1) + "0.1]')::nexus.vector) "
-                + "ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
+                + "ON CONFLICT (tenant_id, collection, chash, embedding_model) DO NOTHING");
         }
     }
 
@@ -497,12 +501,15 @@ class Taxonomy014TenantFkRepointTest {
             Connection c, String tenant, String docIdHex, long topicId, String sourceCollection) throws Exception {
         try (PreparedStatement ps = c.prepareStatement(
                 "INSERT INTO nexus.topic_assignments "
-                + "(tenant_id, doc_id, topic_id, assigned_by, source_collection) "
-                + "VALUES (?, decode(?, 'hex'), ?, 'manual', ?)")) {
+                + "(tenant_id, doc_id, topic_id, assigned_by, source_collection, embedding_model) "
+                + "VALUES (?, decode(?, 'hex'), ?, 'manual', ?, "
+                + "(SELECT embedding_model FROM nexus.catalog_collections WHERE tenant_id = ? AND name = ?))")) {
             ps.setString(1, tenant);
             ps.setString(2, docIdHex);
             ps.setLong(3, topicId);
             ps.setString(4, sourceCollection);
+            ps.setString(5, tenant);
+            ps.setString(6, sourceCollection);
             ps.executeUpdate();
         }
     }

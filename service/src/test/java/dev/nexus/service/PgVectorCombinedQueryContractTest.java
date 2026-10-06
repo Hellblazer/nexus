@@ -312,9 +312,9 @@ class PgVectorCombinedQueryContractTest {
         // chunk-level topic membership: topic_assignments.doc_id = chash (nexus-sa14p).
         // RDR-194 P3c: doc_id is bytea now — decode('hex').
         su.createStatement().execute(
-            "INSERT INTO nexus.topic_assignments (tenant_id, doc_id, topic_id, source_collection, assigned_at) "
+            "INSERT INTO nexus.topic_assignments (tenant_id, doc_id, topic_id, source_collection, assigned_at, embedding_model) "
             + "VALUES ('" + tenant + "', decode('" + chash + "', 'hex'), " + topicId + ", '" + collection + "', "
-            + "'2026-01-01T00:00:00+00'::timestamptz) ON CONFLICT (tenant_id, doc_id, topic_id) DO NOTHING");
+            + "'2026-01-01T00:00:00+00'::timestamptz, " + modelOf(tenant, collection) + ") ON CONFLICT (tenant_id, doc_id, topic_id) DO NOTHING");
     }
 
     private static void insertCollection(Connection su, String tenant, String name) throws Exception {
@@ -328,17 +328,26 @@ class PgVectorCombinedQueryContractTest {
     private static void insertManifest(Connection su, String tenant, String docId, String chash,
                                        String collection) throws Exception {
         su.createStatement().execute(
-            "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection) "
-            + "VALUES ('" + tenant + "', '" + docId + "', 0, decode('" + chash + "', 'hex'), '" + collection + "') "
+            "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection, embedding_model) "
+            + "VALUES ('" + tenant + "', '" + docId + "', 0, decode('" + chash + "', 'hex'), '" + collection + "', "
+            + modelOf(tenant, collection) + ") "
             + "ON CONFLICT (tenant_id, doc_id, position) DO NOTHING");
     }
 
     private static void insertChunk(Connection su, String tenant, int dim, String collection,
                                     String chash, String text, double x, double y) throws Exception {
         su.createStatement().execute(
-            "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(dim) + ") "
-            + "VALUES ('" + tenant + "', '" + collection + "', decode('" + chash + "', 'hex'), '" + text + "', "
-            + vec2(dim, x, y) + "::nexus.vector) ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
+            "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, embedding_model, chunk_text, " + DimTables.embeddingColumn(dim) + ") "
+            + "VALUES ('" + tenant + "', '" + collection + "', decode('" + chash + "', 'hex'), "
+            + modelOf(tenant, collection) + ", '" + text + "', "
+            + vec2(dim, x, y) + "::nexus.vector) ON CONFLICT (tenant_id, collection, chash, embedding_model) DO NOTHING");
+    }
+
+    /** RDR-225: SQL for the model {@code collection} is registered under; a chunk and every row that
+     *  references it carry that model. */
+    private static String modelOf(String tenant, String collection) {
+        return "(SELECT embedding_model FROM nexus.catalog_collections WHERE tenant_id = '" + tenant
+            + "' AND name = '" + collection + "')";
     }
 
     private static long insertTopic(Connection su, String tenant, String label, String collection)

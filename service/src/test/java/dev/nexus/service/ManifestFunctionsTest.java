@@ -477,13 +477,16 @@ class ManifestFunctionsTest {
             "ALTER TABLE nexus.catalog_document_chunks DROP CONSTRAINT IF EXISTS fk_catalog_chunks_chunk");
         su.createStatement().execute(
             "INSERT INTO nexus.catalog_document_chunks " +
-            "  (tenant_id, doc_id, position, chash, collection) " +
-            "VALUES ('" + tenantId + "', '" + docId + "', " + position + ", '" + chash + "', '" + collection + "') " +
+            "  (tenant_id, doc_id, position, chash, collection, embedding_model) " +
+            "VALUES ('" + tenantId + "', '" + docId + "', " + position + ", '" + chash + "', '" + collection + "', '"
+            + PgContainerHelper.collectionModel(DSL.using(su, SQLDialect.POSTGRES), tenantId, collection) + "') " +
             "ON CONFLICT (tenant_id, doc_id, position) DO NOTHING");
+        // RDR-225: the foreign key is four columns (the chunk's model is part of its identity).
         su.createStatement().execute(
             "ALTER TABLE nexus.catalog_document_chunks " +
             "ADD CONSTRAINT fk_catalog_chunks_chunk " +
-            "FOREIGN KEY (tenant_id, collection, chash) REFERENCES nexus.chunks (tenant_id, collection, chash) " +
+            "FOREIGN KEY (tenant_id, collection, chash, embedding_model) " +
+            "REFERENCES nexus.chunks (tenant_id, collection, chash, embedding_model) " +
             "ON UPDATE CASCADE DEFERRABLE INITIALLY IMMEDIATE NOT VALID");
     }
 
@@ -496,10 +499,11 @@ class ManifestFunctionsTest {
     private static void insertChunk384(Connection su, String tenantId, String collection,
                                         String chash, String chunkText) throws Exception {
         su.createStatement().execute(
-            "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(384) + ") " +
-            "VALUES ('" + tenantId + "', '" + collection + "', '" + chash + "', " +
+            "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, embedding_model, chunk_text, " + DimTables.embeddingColumn(384) + ") " +
+            "VALUES ('" + tenantId + "', '" + collection + "', '" + chash + "', '"
+            + PgContainerHelper.collectionModel(DSL.using(su, SQLDialect.POSTGRES), tenantId, collection) + "', " +
             "'" + chunkText.replace("'", "''") + "', " + vectorLiteral(384) + "::nexus.vector) " +
-            "ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
+            "ON CONFLICT (tenant_id, collection, chash, embedding_model) DO NOTHING");
     }
 
     /**

@@ -110,8 +110,15 @@ class QuarantineCollectionLifecycleTest extends AtomicWriteTestBase {
         try (Connection su = pg.createConnection("")) {
             DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
             PgContainerHelper.insertCollection(ctx, tenant, sibling);
+            // RDR-225: the vector is as wide as the sibling's registered model (a sibling registered under
+            // another model, as the other-model case does, is 768-wide).
+            int dim = switch (PgContainerHelper.collectionModel(ctx, tenant, sibling)) {
+                case "minilm-l6-v2-384" -> 384;
+                case "bge-base-en-v15-768" -> 768;
+                default -> 1024;
+            };
             PgContainerHelper.insertChunks(ctx, tenant, sibling, List.of(hex), List.of(seed + " text"),
-                List.of(new float[384]), List.of(meta));
+                List.of(new float[dim]), List.of(meta));
         }
         return hex;
     }

@@ -61,6 +61,7 @@ class PgVectorTombstoneFilterTest {
 
     private static final String TENANT = "tomb-search";
     private static final String COLLECTION = "knowledge__tomb-search__minilm-l6-v2-384__v1";
+    private static final String MODEL = "minilm-l6-v2-384";
 
     private static final String DOC_LIVE = "tomb-doc-live";
     private static final String DOC_DEAD = "tomb-doc-dead";
@@ -183,13 +184,15 @@ class PgVectorTombstoneFilterTest {
     private static void insertManifestRow(
             Connection su, String docId, String chashHex, int position, String collection) throws Exception {
         try (PreparedStatement ps = su.prepareStatement(
-                "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection) "
-                + "VALUES (?, ?, ?, decode(?, 'hex'), ?)")) {
+                "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection, embedding_model) "
+                + "VALUES (?, ?, ?, decode(?, 'hex'), ?, ?)")) {
             ps.setString(1, TENANT);
             ps.setString(2, docId);
             ps.setInt(3, position);
             ps.setString(4, chashHex);
             ps.setString(5, collection);
+            // RDR-225: the manifest row carries its chunk's model (both fixture collections are minilm).
+            ps.setString(6, MODEL);
             ps.execute();
         }
     }

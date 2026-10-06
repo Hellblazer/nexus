@@ -170,8 +170,10 @@ class BridgeAddressFieldsTest {
             // manifest row linking document -> chunk
             su.createStatement().execute(
                 "INSERT INTO nexus.catalog_document_chunks"
-                + " (tenant_id, doc_id, position, chash, chunk_index, collection)"
-                + " VALUES ('" + TENANT + "', 'g5addr.1', 0, decode('" + CHASH_WITH_URI + "', 'hex'), 0, '" + COL + "')"
+                + " (tenant_id, doc_id, position, chash, chunk_index, collection, embedding_model)"
+                + " VALUES ('" + TENANT + "', 'g5addr.1', 0, decode('" + CHASH_WITH_URI + "', 'hex'), 0, '" + COL + "',"
+                + " (SELECT embedding_model FROM nexus.catalog_collections WHERE tenant_id = '" + TENANT
+                + "' AND name = '" + COL + "'))"
                 + " ON CONFLICT DO NOTHING");
 
             // H2 isolation: TENANT2 owns the SAME tumbler string 'g5addr.1' with a DIFFERENT
@@ -213,6 +215,8 @@ class BridgeAddressFieldsTest {
                      java.util.HexFormat.of().parseHex(CHASH_WITHOUT_URI))
                 .set(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS.CHUNK_INDEX, 0)
                 .set(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS.COLLECTION, COL)
+                .set(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL,
+                     PgContainerHelper.collectionModel(ownCtx, TENANT, COL))
                 .onConflictDoNothing()
                 .execute();
         }
@@ -252,8 +256,10 @@ class BridgeAddressFieldsTest {
             su.setAutoCommit(true);
             su.createStatement().execute(
                 "INSERT INTO nexus.catalog_document_chunks"
-                + " (tenant_id, doc_id, position, chash, chunk_index, collection)"
-                + " VALUES ('" + TENANT2 + "', 'g5addr.1', 0, decode('" + CHASH_WITH_URI + "', 'hex'), 0, '" + COL + "')"
+                + " (tenant_id, doc_id, position, chash, chunk_index, collection, embedding_model)"
+                + " VALUES ('" + TENANT2 + "', 'g5addr.1', 0, decode('" + CHASH_WITH_URI + "', 'hex'), 0, '" + COL + "',"
+                + " (SELECT embedding_model FROM nexus.catalog_collections WHERE tenant_id = '" + TENANT2
+                + "' AND name = '" + COL + "'))"
                 + " ON CONFLICT DO NOTHING");
         }
     }

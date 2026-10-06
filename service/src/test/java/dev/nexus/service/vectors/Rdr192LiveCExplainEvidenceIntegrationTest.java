@@ -267,6 +267,8 @@ class Rdr192LiveCExplainEvidenceIntegrationTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(false);
             DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            // RDR-225: a manifest row and a topic assignment carry the model of the chunk they reference.
+            final String model = PgContainerHelper.collectionModel(ctx, TENANT, COLL);
             List<Query> docs = new ArrayList<>();
             for (int d = 0; d < NUM_DOCS; d++) {
                 docs.add(ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID,
@@ -283,8 +285,10 @@ class Rdr192LiveCExplainEvidenceIntegrationTest {
                     int d = Math.min(NUM_DOCS - 1, i / perDoc);
                     rows.add(ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID,
                             CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION,
-                            CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION)
-                        .values(TENANT, doc(d), i - d * perDoc, HexFormat.of().parseHex(chashHex.get(i)), COLL));
+                            CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION,
+                            CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
+                        .values(TENANT, doc(d), i - d * perDoc, HexFormat.of().parseHex(chashHex.get(i)), COLL,
+                                model));
                 }
                 ctx.batch(rows).execute();
                 su.commit();
@@ -307,9 +311,10 @@ class Rdr192LiveCExplainEvidenceIntegrationTest {
                 for (int i = start; i < Math.min(start + 1000, TOPIC_CHUNKS); i++) {
                     rows.add(ctx.insertInto(TOPIC_ASSIGNMENTS, TOPIC_ASSIGNMENTS.TENANT_ID,
                             TOPIC_ASSIGNMENTS.DOC_ID, TOPIC_ASSIGNMENTS.TOPIC_ID, TOPIC_ASSIGNMENTS.ASSIGNED_BY,
-                            TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, TOPIC_ASSIGNMENTS.ASSIGNED_AT)
+                            TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, TOPIC_ASSIGNMENTS.ASSIGNED_AT,
+                            TOPIC_ASSIGNMENTS.EMBEDDING_MODEL)
                         .values(TENANT, HexFormat.of().parseHex(chashHex.get(i)), topicId, "projection", COLL,
-                                OffsetDateTime.now()));
+                                OffsetDateTime.now(), model));
                 }
                 ctx.batch(rows).execute();
                 su.commit();
@@ -359,8 +364,10 @@ class Rdr192LiveCExplainEvidenceIntegrationTest {
             for (int i = 0; i < OTHER_CHUNKS; i++) {
                 rows.add(ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID,
                         CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION,
-                        CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION)
-                    .values(OTHER_TENANT, "rdr192-other-doc-0000", i, HexFormat.of().parseHex(ids.get(i)), OTHER_COLL));
+                        CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION,
+                        CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
+                    .values(OTHER_TENANT, "rdr192-other-doc-0000", i, HexFormat.of().parseHex(ids.get(i)), OTHER_COLL,
+                            PgContainerHelper.collectionModel(ctx, OTHER_TENANT, OTHER_COLL)));
             }
             ctx.batch(rows).execute();
         }
@@ -560,9 +567,11 @@ class Rdr192LiveCExplainEvidenceIntegrationTest {
     void gateProbe_selective_underNexusSvcRls_reachesAGinTextIndex() throws Exception {
         String plan = probeBodyPlan("text_gate_probe_384 (selective gate), body plan as nexus_svc", RARE_TOKEN);
         assertThat(plan)
-            .as("the selective gate must be driven by idx_chunks_tsv or idx_chunks_trgm. Plan was:%n%s", plan)
-            .containsPattern("Bitmap Index Scan on idx_chunks_(tsv|trgm)")
-            .doesNotContain("Seq Scan on chunks");
+            .as("the selective gate must be driven by idx_chunks_tsv or idx_chunks_trgm (RDR-225: their child"
+                + " indexes on the tenant's leaf). Plan was:%n%s", plan)
+            .containsPattern(ginIndexOnTheTenantLeaf());
+        assertThat(seqScansOfTheTenantLeaf(plan)).as("no sequential scan of the tenant's leaf. Plan was:%n%s", plan)
+            .isEmpty();
         assertThat(plan).as("live(c) stays inlined in the body. Plan was:%n%s", plan)
             .doesNotContain("chunk_live_owners")
             .contains("catalog_document_chunks");
@@ -591,8 +600,9 @@ class Rdr192LiveCExplainEvidenceIntegrationTest {
             .doesNotContain("chunk_live_owners")
             .contains("catalog_document_chunks");
         assertThat(plan).as("the dense gate's body is planned as the indexed plan. Plan was:%n%s", plan)
-            .containsPattern("Bitmap Index Scan on idx_chunks_(tsv|trgm)")
-            .doesNotContain("Seq Scan on chunks");
+            .containsPattern(ginIndexOnTheTenantLeaf());
+        assertThat(seqScansOfTheTenantLeaf(plan)).as("no sequential scan of the tenant's leaf. Plan was:%n%s", plan)
+            .isEmpty();
         String label = "text_gate_probe_384 (dense gate), call as nexus_svc";
         Table<?> fn = probe384(COMMON_TOKEN, COLL);
         explain(label, ctx -> ctx.selectFrom(fn));
@@ -801,7 +811,7 @@ class Rdr192LiveCExplainEvidenceIntegrationTest {
      * runs as the migration role, which owns the tables and, since vectors-029, holds a read-everything policy
      * on nexus.chunks, so a new one is an access path that needs a reviewer. The two ensure_vector_extensions_*
      * helpers are the DBA-side relocation helpers (installed by the test's owner bootstrap exactly as
-     * nexus.db.pg_provision installs them); the others are the three gate probes.
+     * nexus.db.pg_provision installs them); create_tenant_partitions is RDR-225's; the others are the three gate probes.
      */
     @Test
     void securityDefinerFunctionsInSchemaNexus_areExactlyTheAllowlist() throws Exception {
@@ -810,8 +820,10 @@ class Rdr192LiveCExplainEvidenceIntegrationTest {
                 .filter(PgCatalogProbes.FunctionShape::securityDefiner)
                 .map(f -> f.identity().substring(0, f.identity().indexOf('(')))
                 .sorted().toList();
+            // RDR-225 adds create_tenant_partitions: nexus_svc calls it for a tenant that has no service token
+            // yet, and it must create the tenant's partitions as their owner.
             assertThat(definers).containsExactly(
-                "ensure_vector_extensions_relocated", "ensure_vector_extensions_unrelocated",
+                "create_tenant_partitions", "ensure_vector_extensions_relocated", "ensure_vector_extensions_unrelocated",
                 "text_gate_probe_1024", "text_gate_probe_384", "text_gate_probe_768");
         }
     }
@@ -940,6 +952,45 @@ class Rdr192LiveCExplainEvidenceIntegrationTest {
             .as("%s: live(c) must be one per-chunk probe shared by both aggregates. Plan was:%n%s", what, plan)
             .contains("SubPlan 1")
             .doesNotContain("SubPlan 2");
+    }
+
+    /** RDR-225: the model every chunk of this fixture carries (the collections are minilm-l6-v2-384). */
+    private static final String MODEL = "minilm-l6-v2-384";
+
+    private String tenantLeaf;
+    private List<String> tenantLeafGinIndexes;
+
+    /** The leaf of nexus.chunks holding TENANT's chunks, and the names of its child indexes of idx_chunks_tsv and idx_chunks_trgm. */
+    private synchronized void readTenantLeaf() throws Exception {
+        if (tenantLeaf != null) return;
+        try (Connection su = pg.createConnection("")) {
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            tenantLeaf = dev.nexus.service.jooq.nexus.Routines.partitionName(ctx.configuration(), "chunks", MODEL, TENANT);
+            // The leaf's two GIN indexes are children of the MODEL partition's indexes (which are children of the
+            // parent's idx_chunks_tsv and idx_chunks_trgm), so they are found by their access method on the leaf.
+            Field<String> indexName = DSL.field(DSL.name("indexname"), String.class);
+            tenantLeafGinIndexes = ctx.select(indexName)
+                .from(DSL.table(DSL.name("pg_catalog", "pg_indexes")))
+                .where(DSL.field(DSL.name("schemaname"), String.class).eq("nexus"))
+                .and(DSL.field(DSL.name("tablename"), String.class).eq(tenantLeaf))
+                .and(DSL.field(DSL.name("indexdef"), String.class).like("%USING gin%"))
+                .fetch(indexName);
+        }
+        assertThat(tenantLeafGinIndexes).as("non-vacuity: leaf %s carries child indexes of both GIN text indexes",
+            tenantLeaf).hasSize(2);
+    }
+
+    /** {@code Bitmap Index Scan on <a child of idx_chunks_tsv or idx_chunks_trgm on the tenant's leaf>}. */
+    private Pattern ginIndexOnTheTenantLeaf() throws Exception {
+        readTenantLeaf();
+        return Pattern.compile("Bitmap Index Scan on (" + String.join("|", tenantLeafGinIndexes) + ")");
+    }
+
+    /** The plan lines that seq-scan the tenant's leaf. The tenant's other leaves (one per other model) are empty,
+     *  and the planner is right to seq-scan an empty relation; the claim is about the leaf that holds the rows. */
+    private List<String> seqScansOfTheTenantLeaf(String plan) throws Exception {
+        readTenantLeaf();
+        return plan.lines().filter(l -> l.contains("Seq Scan") && l.contains(tenantLeaf)).toList();
     }
 
     private static final String BODY_MARKER = "NULLIF(pg_catalog.current_setting('nexus.tenant', true)";

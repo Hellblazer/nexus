@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.nexus.service.db.CatalogRepository;
 import dev.nexus.service.db.ChashHex;
 import dev.nexus.service.db.CollectionRegistry;
+import dev.nexus.service.db.ModelPartitions;
 import dev.nexus.service.db.DeadlockRetry;
 import dev.nexus.service.db.PgSession;
 import dev.nexus.service.jooq.binding.Vector;
@@ -868,6 +869,13 @@ public final class PgVectorRepository {
                                       OwnershipGuard guard) {
         if (ids.isEmpty()) return;
         int dim = dimForCollection(tenant, collection);
+        // RDR-225 (nexus-3wh8d.13): the collection's model is what every chunk row carries and what
+        // routes it to its partition. A model with no partition is refused HERE, before the ownership
+        // check, the embedder and every write statement, naming the model; the lookup is a cache hit
+        // (dimForCollection just resolved the same row) and so is the partition answer after the first
+        // write of a model.
+        final String embeddingModel = CollectionRegistry.lookup(tenantScope, tenant, collection).embeddingModel();
+        ModelPartitions.require(tenantScope, tenant, ModelPartitions.CHUNKS, embeddingModel);
 
         // RDR-223 Phase 3 Step 2 (nexus-z0o2p.24): the ownership check runs here, after the
         // collection resolved (an unregistered collection answers 'register it first' ahead of
@@ -1156,16 +1164,17 @@ public final class PgVectorRepository {
                     // embeddings.get(idx) would silently pair the wrong vector with a chash.
                     DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
                     var insert = ctx.insertInto(ch.table())
-                        .columns(ch.tenantId(), ch.collection(), ch.chash(),
+                        .columns(ch.tenantId(), ch.collection(), ch.chash(), ch.embeddingModel(),
                                  ch.chunkText(), ch.embedding(), ch.metadata());
                     for (int k = 0; k < finalInsertIdx.size(); k++) {
                         int idx = finalInsertIdx.get(k);
-                        insert = insert.values(tenant, collection, dedupIds.get(idx),
+                        insert = insert.values(tenant, collection, dedupIds.get(idx), embeddingModel,
                                 dedupDocs.get(idx),
                                 Vector.of(embeddings.get(k)),
                                 JSONB.jsonb(toJson(dedupMetas.get(idx))));
                     }
-                    insert.onConflict(ch.tenantId(), ch.collection(), ch.chash())
+                    // RDR-225: the four-column primary key (the partition keys are part of it).
+                    insert.onConflict(ch.tenantId(), ch.collection(), ch.chash(), ch.embeddingModel())
                           .doUpdate()
                           .set(ch.chunkText(), DSL.excluded(ch.chunkText()))
                           .set(ch.embedding(), DSL.excluded(ch.embedding()))
@@ -1198,15 +1207,14 @@ public final class PgVectorRepository {
                           // INSERT takes the column DEFAULT now(), so only the conflict
                           // branch needs stating.
                           .set(ch.lastWrittenAt(), DimTables.lastWrittenNow())
-                          // RDR-222 Phase 0 (bead nexus-ulrjq, M-a): (xmax = 0) is the
-                          // standard Postgres RETURNING idiom for "this row was genuinely
-                          // INSERTed, not reached via the ON CONFLICT DO UPDATE branch" —
-                          // same DSL.field(DSL.name("xmax"), SQLDataType.INTEGER).eq(0)
-                          // form CatalogRepository#upsertLink already uses (RawSqlGateTest:
-                          // a typed dynamic-column reference, not a raw SQL string, so it
-                          // needs no SANCTIONED_STATEMENTS entry).
-                          .returningResult(ch.chash(), DSL.field(
-                              DSL.field(DSL.name("xmax"), SQLDataType.INTEGER).eq(0)))
+                          // RDR-222 Phase 0 (bead nexus-ulrjq, M-a): "this row was genuinely
+                          // INSERTed, not reached via the ON CONFLICT DO UPDATE branch". The usual
+                          // (xmax = 0) idiom is refused on a partitioned table (RDR-225, nexus-3wh8d.13:
+                          // "cannot retrieve a system column in this context"), so
+                          // DimTables#insertedByThisStatement reads the write-once created_at instead
+                          // (a typed field comparison, not a raw SQL string, so RawSqlGateTest needs no
+                          // SANCTIONED_STATEMENTS entry).
+                          .returningResult(ch.chash(), DSL.field(DimTables.insertedByThisStatement(ch)))
                           .fetch()
                           .forEach(r -> {
                               if (!Boolean.TRUE.equals(r.value2())
@@ -3549,8 +3557,13 @@ public final class PgVectorRepository {
      * <p>RDR-204 Phase 2 (bead nexus-ft04v.16): reads each collection's {@code
      * catalog_collections.embedding_model} via {@link CollectionRegistry#lookup} —
      * never a segment parsed out of the collection's own name.
+     *
+     * <p>RDR-225 (nexus-3wh8d.13): returns the one model every collection shares, so a caller that
+     * needs it (the read path's {@code embedding_model} predicate, Phase 2 Step 2) takes it from here
+     * instead of resolving it a second time. The write path resolves its own collection's model in
+     * {@link #upsertChunksInternal}.
      */
-    private void requireHomogeneousModel(String tenant, List<String> collectionNames) {
+    private String requireHomogeneousModel(String tenant, List<String> collectionNames) {
         String model = CollectionRegistry.lookup(tenantScope, tenant, collectionNames.get(0)).embeddingModel();
         for (String col : collectionNames) {
             String colModel = CollectionRegistry.lookup(tenantScope, tenant, col).embeddingModel();
@@ -3561,6 +3574,7 @@ public final class PgVectorRepository {
                     + "' - one query vector cannot serve two different embedding spaces");
             }
         }
+        return model;
     }
 
     /**

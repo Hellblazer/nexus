@@ -371,14 +371,20 @@ public final class PgCatalogProbes {
 
     /** {@code pg_constraint.convalidated} for the constraint named {@code conname}, or null. */
     public static Boolean constraintValidated(DSLContext ctx, String conname) {
-        Field<Boolean> convalidated = DSL.field(DSL.name("convalidated"), Boolean.class);
-        return ctx.select(convalidated)
-            .from(DSL.table(DSL.name("pg_constraint")))
-            .where(DSL.field(DSL.name("conname"), String.class).eq(conname))
+        var con = DSL.table(DSL.name("pg_catalog", "pg_constraint")).as("k");
+        var rel = DSL.table(DSL.name("pg_catalog", "pg_class")).as("r");
+        return ctx.select(DSL.field(DSL.name("k", "convalidated"), Boolean.class))
+            .from(con)
+            .join(rel).on(DSL.field(DSL.name("r", "oid")).eq(DSL.field(DSL.name("k", "conrelid"))))
+            .where(DSL.field(DSL.name("k", "conname"), String.class).eq(conname))
             // RDR-225: a foreign key onto a partitioned table is cloned onto the referencing table once per partition,
             // under the same name; only the top-level constraint (conparentid 0) is the one a caller names.
-            .and(DSL.field(DSL.name("conparentid"), Long.class).eq(0L))
-            .fetchOne(convalidated);
+            .and(DSL.field(DSL.name("k", "conparentid"), Long.class).eq(0L))
+            // A CHECK constraint a partition inherits carries conparentid 0 too; only the declaring table's is local.
+            .and(DSL.field(DSL.name("k", "conislocal"), Boolean.class).isTrue())
+            // The retired tables (chunks_retired_225, taxonomy_centroids_retired_225) keep their constraint names.
+            .and(DSL.not(DSL.field(DSL.name("r", "relname"), String.class).endsWith("_retired_225")))
+            .fetchOne(DSL.field(DSL.name("k", "convalidated"), Boolean.class));
     }
 
     /** The FOREIGN KEY constraint {@code conname} in {@code schema}, or null when absent. */
@@ -395,6 +401,13 @@ public final class PgCatalogProbes {
             .where(DSL.field(DSL.name("c", "contype"), String.class).eq("f"))
             .and(DSL.field(DSL.name("c", "conname"), String.class).eq(conname))
             .and(DSL.field(DSL.name("n", "nspname"), String.class).eq(schema))
+            // RDR-225: a foreign key onto a partitioned table is cloned once per partition under the same name;
+            // the caller names the top-level one (conparentid 0), and the retired tables keep their old names.
+            .and(DSL.field(DSL.name("c", "conparentid"), Long.class).eq(0L))
+            .and(DSL.not(DSL.field(DSL.name("c", "conrelid"), Object.class).in(
+                DSL.select(DSL.field(DSL.name("rr", "oid"), Object.class))
+                    .from(DSL.table(DSL.name("pg_class")).as("rr"))
+                    .where(DSL.field(DSL.name("rr", "relname"), String.class).endsWith("_retired_225")))))
             .fetchOne();
         return r == null ? null : new Constraint(r.get(convalidated), r.get(condeferrable),
             r.get(condeferred), r.get(confupdtype), r.get(confdeltype));

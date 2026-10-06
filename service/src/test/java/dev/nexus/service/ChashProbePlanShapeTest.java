@@ -112,11 +112,14 @@ class ChashProbePlanShapeTest {
 
             for (int dim : new int[] {384, 768, 1024}) {
                 // RDR-204 nexus-ft04v.4/.5: routed through PgContainerHelper.insertCollection.
-                PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, "plan-" + dim);
+                // RDR-225: each collection carries the one model whose dimension matches its vectors.
+                PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, "plan-" + dim,
+                    modelFor(dim));
                 st.execute(
                     "INSERT INTO nexus.chunks" +
-                    " (tenant_id, collection, chash, chunk_text, embedding_" + dim + ") " +
+                    " (tenant_id, collection, embedding_model, chash, chunk_text, embedding_" + dim + ") " +
                     "SELECT '" + TENANT + "', 'plan-" + dim + "', " +
+                    "       '" + modelFor(dim) + "', " +
                     "       decode(md5('p" + dim + "-' || i) || md5('q" + dim + "-' || i), 'hex'), " +
                     "       'plan chunk ' || i, v.vec " +
                     "FROM generate_series(1, " + CHUNKS_PER_DIM + ") i " +
@@ -128,8 +131,8 @@ class ChashProbePlanShapeTest {
             // Different collection ('plan-384' vs 'plan-768') means no PK
             // collision on (tenant_id, collection, chash).
             st.execute(
-                "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_384) " +
-                "SELECT '" + TENANT + "', 'plan-384', " +
+                "INSERT INTO nexus.chunks (tenant_id, collection, embedding_model, chash, chunk_text, embedding_384) " +
+                "SELECT '" + TENANT + "', 'plan-384', '" + modelFor(384) + "', " +
                 "       decode('" + liveChash(768, 42) + "', 'hex'), 'cross-model copy', " +
                 "       ('[1' || repeat(',0', 383) || ']')::nexus.vector");
             PgContainerHelper.analyzeTable(su, CHUNKS);
@@ -147,12 +150,20 @@ class ChashProbePlanShapeTest {
             }
             return sb.toString();
         });
-        assertThat(plan)
-            .as("lookup must use the unified table's (tenant_id, chash) index at 255k-row scale")
-            .contains("idx_chunks_tenant_chash");
-        assertThat(plan)
-            .as("lookup may not degrade to a sequential scan")
-            .doesNotContain("Seq Scan");
+        // RDR-225: nexus.chunks is LIST-partitioned by model then tenant, so the plan names the tenant's
+        // LEAF under each model partition (and each leaf's own copy of idx_chunks_tenant_chash, named
+        // <leaf>_tenant_id_chash_idx by Postgres), not the parent index. The three leaves that hold the seeded rows must each be
+        // probed through an index and never scanned sequentially; the leaves of models with no rows are
+        // empty, and the planner is free to seq-scan an empty relation.
+        for (int dim : new int[] {384, 768, 1024}) {
+            String leaf = leafName(modelFor(dim), TENANT);
+            assertThat(plan)
+                .as("lookup must use an index on the seeded leaf %s at 255k-row scale", leaf)
+                .contains(leaf + "_tenant_id_chash_idx");
+            assertThat(plan)
+                .as("lookup may not degrade to a sequential scan of the seeded leaf %s", leaf)
+                .doesNotContainPattern("Seq Scan on (nexus\\.)?" + leaf);
+        }
     }
 
     @Test
@@ -177,9 +188,37 @@ class ChashProbePlanShapeTest {
         }
     }
 
+    /** The embedding model whose dimension is {@code dim} (RDR-225: a collection has exactly one model). */
+    private static String modelFor(int dim) {
+        return switch (dim) {
+            case 384 -> "minilm-l6-v2-384";
+            case 768 -> "bge-base-en-v15-768";
+            case 1024 -> "voyage-code-3";
+            default -> throw new IllegalArgumentException("no model of dimension " + dim);
+        };
+    }
+
     /** The seeding formula's chash for row i of chunks_<dim>, computed Java-side. */
     private static String liveChash(int dim, int i) {
         return md5x2("p" + dim + "-" + i, "q" + dim + "-" + i);
+    }
+
+    /** {@code nexus.partition_name('chunks', model, tenant)}: the tenant's leaf under the model partition. */
+    private static String leafName(String model, String tenant) {
+        return "chunks_m" + sha256Hex(model).substring(0, 8) + "_t_" + sha256Hex(tenant).substring(0, 16);
+    }
+
+    private static String sha256Hex(String s) {
+        try {
+            var md = java.security.MessageDigest.getInstance("SHA-256");
+            StringBuilder sb = new StringBuilder();
+            for (byte x : md.digest(s.getBytes(java.nio.charset.StandardCharsets.UTF_8))) {
+                sb.append(String.format("%02x", x));
+            }
+            return sb.toString();
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
     }
 
     private static String md5x2(String a, String b) {

@@ -190,9 +190,11 @@ class ReferenceOnlyChunkReadPathTest {
             ctx.insertInto(CATALOG_DOCUMENT_CHUNKS)
                .columns(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
                         CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
-                        CATALOG_DOCUMENT_CHUNKS.COLLECTION)
+                        CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
                .values(TENANT, "refonly-owner", 0,
-                       dev.nexus.service.db.Chash.fromHex(REFONLY_CHASH).toBytes(), COL)
+                       dev.nexus.service.db.Chash.fromHex(REFONLY_CHASH).toBytes(), COL,
+                       // RDR-225: the manifest row carries the chunk's model.
+                       PgContainerHelper.collectionModel(ctx, TENANT, COL))
                .onConflictDoNothing()
                .execute();
         } catch (java.sql.SQLException e) {

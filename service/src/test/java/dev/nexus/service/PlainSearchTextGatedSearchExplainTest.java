@@ -262,7 +262,7 @@ class PlainSearchTextGatedSearchExplainTest {
             .as("plain_search_1024 must use the HNSW index idx_chunks_embedding_1024 for "
                 + "the ANN ordering — the vector is a plan-time argument and the function "
                 + "inlines. Plan was:%n%s", plan)
-            .contains("idx_chunks_embedding_1024");
+            .containsPattern("Index Scan using \"?\\S*embedding_1024_idx");
         assertThat(plan)
             .as("a Function Scan node means the function is not inlinable (plpgsql) — "
                 + "vectors-009 must use an inlinable LANGUAGE sql function. Plan was:%n%s",
@@ -312,12 +312,14 @@ class PlainSearchTextGatedSearchExplainTest {
                 + "vectors-011 must use an inlinable LANGUAGE sql function. Plan was:%n%s",
                 plan)
             .doesNotContain("Function Scan");
-        assertThat(plan)
+        // RDR-225: the read path does not prune by model yet, so the planner also visits the tenant's EMPTY leaves
+        // of the other 1024-d model, where an HNSW scan is cheap; the claim is about the leaf that holds the rows.
+        assertThat(plan.lines().toList())
             .as("text_gated_search_by_chash_1024's rank must NOT NATURALLY touch the "
-                + "HNSW index (the nexus-lcogi starvation class this design closes) "
-                + "under normal cost pressure (enable_seqscan=off only). Plan was:%n%s",
-                plan)
-            .doesNotContain("idx_chunks_embedding_1024");
+                + "HNSW index on the populated leaf (the nexus-lcogi starvation class this design closes) "
+                + "under normal cost pressure (enable_seqscan=off only). Plan was:%n%s", plan)
+            .noneMatch(line -> line.contains(PartitionScratch.expectedName("chunks", "voyage-context-3", TENANT))
+                && line.contains("Index Scan using") && line.contains("embedding_1024_idx"));
         assertThat(plan)
             .as("text_gated_search_by_chash_1024's plan must carry NO trigram `<%` "
                 + "operator -- the gate is not re-evaluated here, only chash = ANY(...) "
@@ -370,7 +372,7 @@ class PlainSearchTextGatedSearchExplainTest {
                 + "restored lcogi/x7z7l HNSW-first branch, the bare ORDER BY/LIMIT shape "
                 + "(no CTE, no window function) that keeps the index reachable exactly as "
                 + "the retired raw SQL did. Plan was:%n%s", plan)
-            .contains("idx_chunks_embedding_1024");
+            .containsPattern("Index Scan using \"?\\S*embedding_1024_idx");
         assertThat(plan)
             .as("a Function Scan node means the function is not inlinable (plpgsql) — "
                 + "vectors-011 must use an inlinable LANGUAGE sql function. Plan was:%n%s",

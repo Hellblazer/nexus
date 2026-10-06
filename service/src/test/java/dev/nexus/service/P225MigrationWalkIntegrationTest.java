@@ -68,13 +68,12 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * production runs it: a NOSUPERUSER, NOBYPASSRLS schema-owner role migrates a store that was walked up to, but
  * not including, the changeset and then seeded through the pre-walk layout.
  *
- * <p>The seed is two tenants with a token, one tenant with chunks and no token, one tenant with centroids only,
- * two real models per tenant, hidden rows (chunks no manifest row claims), a single-dimension disputed
- * collection at 768 and at 1024, two mixed-dimension collections (one that keeps its registered model's
- * dimension, one that has none), centroids that disagree with their collection's model, a centroid whose
- * collection is unregistered, and referencing rows on all three referencing tables, including ones that must
- * follow a chunk to a sibling collection. {@link #EXPECTED_CHUNKS} is the oracle, written down by hand from the
- * rules, not read back from the migrated store.
+ * <p>The seed is two tenants with a token, one tenant with chunks and no token, two real models per tenant,
+ * hidden rows (chunks no manifest row claims), a centroid whose collection is unregistered, and referencing
+ * rows on all three referencing tables. Legacy data shapes (a vector whose dimension disagrees with its
+ * collection's model) are not supported: the walk fails on one, and a test below pins that.
+ * {@link #EXPECTED_CHUNKS} is the oracle, written down by hand from the rules, not read back from the migrated
+ * store.
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
@@ -89,49 +88,30 @@ class P225MigrationWalkIntegrationTest {
     static final String TA = "p225-a";
     static final String TB = "p225-b";
     static final String TN = "p225-notoken";
-    static final String TC = "p225-centroid-only";
 
     // collections (the model token in the name is the registered model)
     static final String A_CODE = "code__a-owner__voyage-code-3__v1";
     static final String A_CTX = "docs__a-owner__voyage-context-3__v1";
     static final String A_MINI = "knowledge__a-owner__minilm-l6-v2-384__v1";
-    static final String A_D768 = "docs__a-disp768__voyage-context-3__v1";
-    static final String A_D1024 = "knowledge__a-disp1024__bge-base-en-v15-768__v1";
-    static final String A_MIX = "code__a-mix__voyage-code-3__v1";
-    static final String A_MIX2 = "docs__a-mix2__minilm-l6-v2-384__v1";
     static final String B_CODE = "code__b-owner__voyage-code-3__v1";
     static final String B_BGE = "docs__b-owner__bge-base-en-v15-768__v1";
     static final String N_CODE = "code__nt-owner__voyage-code-3__v1";
-    static final String C_CODE = "code__co-owner__voyage-code-3__v1";
     static final String GHOST = "ghost-collection-without-a-registry-row";
-
-    static final String SIB_MIX_384 = A_MIX + "__disputed-384";
-    static final String SIB_MIX_768 = A_MIX + "__disputed-768";
-    static final String SIB_MIX2_1024 = A_MIX2 + "__disputed-1024";
-
-    static final String D384 = "disputed-384";
-    static final String D768 = "disputed-768";
-    static final String D1024 = "disputed-1024";
 
     /** (model, tenant) -> chunk count after the walk, by the rules, from the seed. */
     static final Map<String, Long> EXPECTED_CHUNKS = new TreeMap<>(Map.of(
-        CODE_3 + "|" + TA, 5L,        // A_CODE 3 (one hidden) + A_MIX 2 that agree with voyage-code-3
+        CODE_3 + "|" + TA, 3L,        // A_CODE (one hidden)
         CODE_3 + "|" + TB, 2L,
         CODE_3 + "|" + TN, 1L,        // a tenant with chunks and no token row
         CONTEXT_3 + "|" + TA, 2L,
         MINILM_384 + "|" + TA, 2L,    // both hidden
-        BGE_768 + "|" + TB, 2L,
-        D768 + "|" + TA, 6L,          // A_D768 2 + A_MIX2 3 (its largest group) + the 768 chunk moved out of A_MIX
-        D1024 + "|" + TA, 3L,         // A_D1024 2 + the 1024 chunk moved out of A_MIX2
-        D384 + "|" + TA, 1L));        // the 384 chunk moved out of A_MIX
+        BGE_768 + "|" + TB, 2L));
 
     /** (model, tenant) -> centroid count after the walk. */
     static final Map<String, Long> EXPECTED_CENTROIDS = new TreeMap<>(Map.of(
-        CODE_3 + "|" + TA, 2L,        // the 768-d centroid of A_CODE is not copied
+        CODE_3 + "|" + TA, 2L,
         MINILM_384 + "|" + TA, 1L,
-        D768 + "|" + TA, 1L,          // A_D768's 768-d centroid; its 1024-d one is not copied
-        CODE_3 + "|" + TB, 1L,
-        CODE_3 + "|" + TC, 1L));      // the centroid-only tenant
+        CODE_3 + "|" + TB, 1L));
 
     PostgreSQLContainer<?> pg;
     HikariDataSource adminDs;
@@ -181,7 +161,7 @@ class P225MigrationWalkIntegrationTest {
             assertThat(ctx.fetchCount(CHUNKS, CHUNKS.COLLECTION.eq(A_MINI))).isEqualTo(2);
             assertThat(ctx.fetchCount(CHUNKS, CHUNKS.COLLECTION.eq(N_CODE))).isEqualTo(1);
             // And the old table still holds exactly what it held (a recovery copy).
-            assertThat(retiredCount(ctx, "chunks_retired_225")).isEqualTo(24L);
+            assertThat(retiredCount(ctx, "chunks_retired_225")).isEqualTo(12L);
         }
     }
 
@@ -203,15 +183,15 @@ class P225MigrationWalkIntegrationTest {
                 .on(CATALOG_COLLECTIONS.TENANT_ID.eq(CHUNKS.TENANT_ID)).and(CATALOG_COLLECTIONS.NAME.eq(CHUNKS.COLLECTION)),
                 CATALOG_COLLECTIONS.EMBEDDING_MODEL.ne(CHUNKS.EMBEDDING_MODEL))).isZero();
             // The dimension CHECK holds by construction: only the model's own vector column is populated.
-            assertThat(ctx.fetchCount(CHUNKS, CHUNKS.EMBEDDING_MODEL.in(CODE_3, CONTEXT_3, D1024), CHUNKS.EMBEDDING_1024.isNull())).isZero();
-            assertThat(ctx.fetchCount(CHUNKS, CHUNKS.EMBEDDING_MODEL.in(BGE_768, D768), CHUNKS.EMBEDDING_768.isNull())).isZero();
-            assertThat(ctx.fetchCount(CHUNKS, CHUNKS.EMBEDDING_MODEL.in(MINILM_384, D384), CHUNKS.EMBEDDING_384.isNull())).isZero();
+            assertThat(ctx.fetchCount(CHUNKS, CHUNKS.EMBEDDING_MODEL.in(CODE_3, CONTEXT_3), CHUNKS.EMBEDDING_1024.isNull())).isZero();
+            assertThat(ctx.fetchCount(CHUNKS, CHUNKS.EMBEDDING_MODEL.eq(BGE_768), CHUNKS.EMBEDDING_768.isNull())).isZero();
+            assertThat(ctx.fetchCount(CHUNKS, CHUNKS.EMBEDDING_MODEL.eq(MINILM_384), CHUNKS.EMBEDDING_384.isNull())).isZero();
         }
     }
 
     @Test
     @Order(3)
-    void centroidsFollowTheirCollectionsModel_andTheUnfilableOnesAreListedNotCopied() throws Exception {
+    void centroidsFollowTheirCollectionsModel_andTheOnesWithNoRegistryRowAreNotCopied() throws Exception {
         try (Connection su = pg.createConnection("")) {
             DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
             Map<String, Long> actual = new TreeMap<>();
@@ -219,69 +199,13 @@ class P225MigrationWalkIntegrationTest {
                 .from(TAXONOMY_CENTROIDS).groupBy(TAXONOMY_CENTROIDS.EMBEDDING_MODEL, TAXONOMY_CENTROIDS.TENANT_ID)
                 .forEach(r -> actual.put(r.value1() + "|" + r.value2(), r.value3().longValue()));
             assertThat(actual).isEqualTo(EXPECTED_CENTROIDS);
-            // 9 centroids seeded; 3 are not copied (dimension disagrees twice, one collection unregistered) and stay put.
-            assertThat(retiredCount(ctx, "taxonomy_centroids_retired_225")).isEqualTo(9L);
+            // 5 centroids seeded; 1 is not copied (its collection has no registry row: derived data) and stays put.
+            assertThat(retiredCount(ctx, "taxonomy_centroids_retired_225")).isEqualTo(5L);
             Field<String> leaf = tableoid();
             for (var r : ctx.select(TAXONOMY_CENTROIDS.TENANT_ID, TAXONOMY_CENTROIDS.EMBEDDING_MODEL, leaf)
                     .from(TAXONOMY_CENTROIDS).fetch()) {
                 assertThat(r.value3()).endsWith(expectedName("taxonomy_centroids", r.value2(), r.value1()));
             }
-            // The audit trail names each case that was not copied, per tenant.
-            var audits = ctx.select(GC_AUDIT.TENANT_ID, GC_AUDIT.COLLECTION, GC_AUDIT.CHASH_COUNT)
-                .from(GC_AUDIT).where(GC_AUDIT.OPERATION.eq("rdr225_centroids_not_copied")).fetch();
-            assertThat(audits.stream().map(r -> r.value1() + "|" + r.value2() + "|" + r.value3()).collect(Collectors.toSet()))
-                .containsExactlyInAnyOrder(TA + "|" + A_CODE + "|1", TA + "|" + A_D768 + "|1", TA + "|" + GHOST + "|1");
-        }
-    }
-
-    @Test
-    @Order(4)
-    void disputedCollections_areReRegisteredUnderPlaceholders_andEveryReferencingRowCarriesThem() throws Exception {
-        try (Connection su = pg.createConnection("")) {
-            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
-            // single-dimension disputes, 768 and 1024
-            assertThat(model(ctx, TA, A_D768)).isEqualTo(D768);
-            assertThat(model(ctx, TA, A_D1024)).isEqualTo(D1024);
-            assertThat(state(ctx, TA, A_D768)).isEqualTo("disputed");
-            // mixed (a): the registered model's own dimension is present, so the collection keeps its model
-            assertThat(model(ctx, TA, A_MIX)).isEqualTo(CODE_3);
-            // mixed (a): no stored dimension is the model's; the largest group stays, under its placeholder
-            assertThat(model(ctx, TA, A_MIX2)).isEqualTo(D768);
-            // siblings
-            assertThat(model(ctx, TA, SIB_MIX_384)).isEqualTo(D384);
-            assertThat(model(ctx, TA, SIB_MIX_768)).isEqualTo(D768);
-            assertThat(model(ctx, TA, SIB_MIX2_1024)).isEqualTo(D1024);
-            for (String sib : List.of(SIB_MIX_384, SIB_MIX_768, SIB_MIX2_1024)) {
-                assertThat(state(ctx, TA, sib)).as(sib).isEqualTo("disputed");
-                assertThat(ctx.fetchCount(CHUNKS, CHUNKS.TENANT_ID.eq(TA), CHUNKS.COLLECTION.eq(sib))).as(sib).isEqualTo(1);
-            }
-            // the placeholders exist, with the provider the doctor and search refusal key on, and only the three needed
-            assertThat(ctx.select(EMBEDDING_MODELS.EMBEDDING_MODEL, EMBEDDING_MODELS.DIMENSION, EMBEDDING_MODELS.PROVIDER)
-                    .from(EMBEDDING_MODELS).where(EMBEDDING_MODELS.PROVIDER.eq("disputed")).orderBy(EMBEDDING_MODELS.EMBEDDING_MODEL)
-                    .fetch(r -> r.value1() + "/" + r.value2() + "/" + r.value3()))
-                .containsExactly(D1024 + "/1024/disputed", D384 + "/384/disputed", D768 + "/768/disputed");
-            // referencing rows followed their chunk: the manifest row and the assignment of the moved 768-d chunk
-            String movedHex = h("a-mix-768");
-            var manifest = ctx.select(CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
-                .from(CATALOG_DOCUMENT_CHUNKS).where(CATALOG_DOCUMENT_CHUNKS.CHASH.eq(Chash.fromHex(movedHex).toBytes())).fetchOne();
-            assertThat(manifest.value1()).isEqualTo(SIB_MIX_768);
-            assertThat(manifest.value2()).isEqualTo(D768);
-            var assignment = ctx.select(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, TOPIC_ASSIGNMENTS.EMBEDDING_MODEL)
-                .from(TOPIC_ASSIGNMENTS).where(TOPIC_ASSIGNMENTS.DOC_ID.eq(Chash.fromHex(movedHex).toBytes())).fetchOne();
-            assertThat(assignment.value1()).isEqualTo(SIB_MIX_768);
-            assertThat(assignment.value2()).isEqualTo(D768);
-            // every referencing row's model equals its chunk's, on all three tables
-            assertThat(ctx.fetchCount(CATALOG_DOCUMENT_CHUNKS.join(CHUNKS)
-                .on(CHUNKS.TENANT_ID.eq(CATALOG_DOCUMENT_CHUNKS.TENANT_ID)).and(CHUNKS.COLLECTION.eq(CATALOG_DOCUMENT_CHUNKS.COLLECTION))
-                .and(CHUNKS.CHASH.eq(CATALOG_DOCUMENT_CHUNKS.CHASH)), CHUNKS.EMBEDDING_MODEL.ne(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL))).isZero();
-            assertThat(ctx.fetchCount(CATALOG_DOCUMENT_CHUNKS)).isEqualTo(manifestRowsSeeded());
-            assertThat(ctx.fetchCount(TOPIC_ASSIGNMENTS)).isEqualTo(3);
-            assertThat(ctx.fetchCount(CHUNK_ORPHANED_AT)).isEqualTo(2);
-            // the dispute and the move are in the audit trail, per tenant
-            assertThat(ctx.select(GC_AUDIT.OPERATION, GC_AUDIT.COLLECTION, GC_AUDIT.CHASH_COUNT).from(GC_AUDIT)
-                    .where(GC_AUDIT.OPERATION.like("rdr225_disputed%")).fetch(r -> r.value1() + "|" + r.value2() + "|" + r.value3()))
-                .contains("rdr225_disputed_collection|" + A_MIX + "|0", "rdr225_disputed_move|" + A_MIX + "|1",
-                    "rdr225_disputed_move|" + A_MIX2 + "|1", "rdr225_disputed_collection|" + A_D1024 + "|0");
         }
     }
 
@@ -290,8 +214,8 @@ class P225MigrationWalkIntegrationTest {
     void everyTenantSeenAnywhereHasALeafUnderEveryModelPartition_onBothParents() throws Exception {
         try (Connection su = pg.createConnection("")) {
             DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
-            List<String> models = List.of(CODE_3, CONTEXT_3, BGE_768, MINILM_384, D384, D768, D1024);
-            List<String> tenants = List.of("default", TA, TB, TN, TC);   // default, tokens, chunks-only, centroid-only
+            List<String> models = List.of(CODE_3, CONTEXT_3, BGE_768, MINILM_384);
+            List<String> tenants = List.of("default", TA, TB, TN);   // default, tokens, chunks-only
             for (String parent : List.of("chunks", "taxonomy_centroids")) {
                 List<String> modelParts = PartitionScratch.children(ctx, parent).stream().map(PartitionScratch.Child::name).toList();
                 assertThat(modelParts).containsExactlyInAnyOrderElementsOf(
@@ -319,7 +243,7 @@ class P225MigrationWalkIntegrationTest {
                     all.add(mp.name());
                     PartitionScratch.children(ctx, mp.name()).forEach(l -> all.add(l.name()));
                 }
-                assertThat(all).hasSize(1 + 7 + 7 * 5);
+                assertThat(all).hasSize(1 + 4 + 4 * 4);
                 for (String rel : all) {
                     var rls = PgCatalogProbes.rowSecurity(ctx, "nexus", rel);
                     assertThat(rls.enabled()).as("RLS enabled on %s", rel).isTrue();
@@ -445,7 +369,7 @@ class P225MigrationWalkIntegrationTest {
             String leaf = expectedName("chunks", MINILM_384, "p225-plan");
             assertThat(plan).as(plan).contains(leaf);
             assertThat(plan).as("a plan with literal tenant and model reads exactly one leaf").doesNotContain(expectedName("chunks", MINILM_384, TA))
-                .doesNotContain(expectedName("chunks", D384, "p225-plan"));
+                .doesNotContain(expectedName("chunks", CODE_3, "p225-plan"));
             assertThat(plan).as("the leaf's HNSW index serves the ordering").contains("Index Scan using").contains("embedding_384_idx");
         }
     }
@@ -458,7 +382,7 @@ class P225MigrationWalkIntegrationTest {
             assertThat(PartitionScratch.triggersCalling(ctx, "service_tokens", "service_tokens_create_tenant_partitions")).isEqualTo(1);
             PgContainerHelper.seedServiceToken(ctx, "tok-p225-new", "p225-new", "p225-new");
             for (String parent : List.of("chunks", "taxonomy_centroids")) {
-                for (String m : List.of(CODE_3, CONTEXT_3, BGE_768, MINILM_384, D384, D768, D1024)) {
+                for (String m : List.of(CODE_3, CONTEXT_3, BGE_768, MINILM_384)) {
                     assertThat(PartitionScratch.children(ctx, expectedName(parent, m, null)).stream().map(PartitionScratch.Child::name))
                         .as("%s/%s", parent, m).contains(expectedName(parent, m, "p225-new"));
                 }
@@ -564,18 +488,14 @@ class P225MigrationWalkIntegrationTest {
 
     @Test
     @Order(9)
-    void theWalkWroteItsLockCountAndEachDisputedCaseToTheServerLog() {
+    void theWalkWroteItsLockCountToTheServerLog() {
         String log = pg.getLogs();
         var lockLine = java.util.regex.Pattern.compile("rdr225 walk: (\\d+) relation lock").matcher(log);
         assertThat(lockLine.find()).isTrue();
         PartitionScratch.evidence("WALK relation locks held at the end of the walk: " + lockLine.group(1)
-            + " (70 leaves: 5 tenants x 7 models x 2 parents; 24 chunks)");
+            + " (32 leaves: 4 tenants x 4 models x 2 parents; 12 chunks)");
         System.out.println("WALK_LOCKS " + lockLine.group(1));
         assertThat(log).contains("rdr225 walk:").contains("relation lock(s) held at the end of the walk");
-        assertThat(log).contains("rdr225 step 2b: tenant " + TA + " collection " + A_D768)
-            .contains("re-registered under the placeholder model disputed-768")
-            .contains("moved to the new collection " + SIB_MIX_384 + " under disputed-384")
-            .contains("rdr225 step 3: 1 centroid(s) of tenant " + TA + " collection " + GHOST + " not copied (unregistered collection");
     }
 
     // ═══════════════════════════ other scenarios (their own stores) ═══════════════════════════
@@ -608,7 +528,38 @@ class P225MigrationWalkIntegrationTest {
                 applyRemaining(ds);
                 try (Connection su = c2.createConnection("")) {
                     DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
-                    assertThat(ctx.fetchCount(CHUNKS)).isEqualTo(24);
+                    assertThat(ctx.fetchCount(CHUNKS)).isEqualTo(12);
+                }
+            }
+        } finally {
+            c2.stop();
+        }
+    }
+
+    @Test
+    void aVectorWhoseDimensionDisagreesWithItsCollectionsModelFailsTheWalk_andLeavesEveryTableUnchanged() throws Exception {
+        PostgreSQLContainer<?> c2 = PgContainerHelper.startDedicated();
+        try {
+            Hygiene001NotNullMigrationRlsTest.bootstrapAdminRole(c2, ADMIN, ADMIN_PASS);
+            try (HikariDataSource ds = pool(c2, 3)) {
+                migrateUpTo(ds, WALK);
+                List<String> before;
+                try (Connection su = c2.createConnection("")) {
+                    su.setAutoCommit(true);
+                    DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+                    seedStore(ctx);
+                    // Legacy shape, not supported: a 768-wide vector in a collection registered under voyage-code-3 (1024).
+                    chunk(ctx, TA, A_CODE, "a-code-wrong-dimension", 768);
+                    before = snapshot(ctx);
+                }
+                // No pre-scan and no special message: the model partition's own dimension CHECK refuses the copy.
+                assertThatThrownBy(() -> applyRemaining(ds))
+                    .hasStackTraceContaining(expectedName("chunks", CODE_3, null) + "_dimension_chk");
+                try (Connection su = c2.createConnection("")) {
+                    DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+                    assertThat(snapshot(ctx)).as("a failed walk changes nothing: no table renamed, no row re-registered or moved").isEqualTo(before);
+                    assertThat(PgCatalogProbes.tableExists(ctx, "nexus", "chunks_new")).isFalse();
+                    assertThat(ctx.fetchCount(CHUNKS)).as("every old row is still in the old table").isEqualTo(13);
                 }
             }
         } finally {
@@ -638,7 +589,7 @@ class P225MigrationWalkIntegrationTest {
                     assertThat(viewDependsOn(ctx, "diag_chash_conformance", "chunks_retired_225")).isFalse();
                     assertThat(PartitionScratch.acl(ctx, "diag_chash_conformance").toString())
                         .as("the previous owner is not turned into a grantee").doesNotContain("postgres=");
-                    assertThat(ctx.fetchCount(CHUNKS)).isEqualTo(24);
+                    assertThat(ctx.fetchCount(CHUNKS)).isEqualTo(12);
                 }
             }
         } finally {
@@ -756,7 +707,7 @@ class P225MigrationWalkIntegrationTest {
                 try (Connection su = c2.createConnection("")) {
                     DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
                     assertThat(oldLayoutShape(ctx)).as("the old layout is back, including its keys, names and views").isEqualTo(preWalk);
-                    assertThat(ctx.fetchCount(DSL.table(DSL.name("nexus", "chunks")))).as("the pre-walk rows are the ones that return").isEqualTo(24);
+                    assertThat(ctx.fetchCount(DSL.table(DSL.name("nexus", "chunks")))).as("the pre-walk rows are the ones that return").isEqualTo(12);
                 }
                 applyRemaining(ds);
                 try (Connection su = c2.createConnection("")) {
@@ -804,13 +755,12 @@ class P225MigrationWalkIntegrationTest {
         }
     }
 
-    /** 24 chunks, 14 manifest rows, 3 assignments, 2 orphaned-at rows, 9 centroids. */
+    /** 12 chunks, 8 manifest rows, 2 assignments, 2 orphaned-at rows, 5 centroids. */
     static void seedStore(DSLContext su) {
         PgContainerHelper.seedServiceToken(su, "tok-p225-a", TA, "p225");
         PgContainerHelper.seedServiceToken(su, "tok-p225-b", TB, "p225");
         for (String[] tc : new String[][] {
-            {TA, A_CODE}, {TA, A_CTX}, {TA, A_MINI}, {TA, A_D768}, {TA, A_D1024}, {TA, A_MIX}, {TA, A_MIX2},
-            {TB, B_CODE}, {TB, B_BGE}, {TN, N_CODE}, {TC, C_CODE}}) {
+            {TA, A_CODE}, {TA, A_CTX}, {TA, A_MINI}, {TB, B_CODE}, {TB, B_BGE}, {TN, N_CODE}}) {
             PgContainerHelper.insertCollection(su, tc[0], tc[1]);
         }
         // A_CODE: three 1024-d chunks, one of them hidden (no manifest row)
@@ -825,25 +775,6 @@ class P225MigrationWalkIntegrationTest {
         // A_MINI: two 384-d chunks, both hidden, one marked orphaned
         chunk(su, TA, A_MINI, "a-mini-1", 384);
         chunk(su, TA, A_MINI, "a-mini-2", 384);
-        // A_D768: registered voyage-context-3 (1024) but stores 768
-        chunk(su, TA, A_D768, "a-d768-1", 768);
-        chunk(su, TA, A_D768, "a-d768-2", 768);
-        PgContainerHelper.ownChunks(su, TA, A_D768, h("a-d768-1"), h("a-d768-2"));
-        // A_D1024: registered bge (768) but stores 1024
-        chunk(su, TA, A_D1024, "a-d1024-1", 1024);
-        chunk(su, TA, A_D1024, "a-d1024-2", 1024);
-        PgContainerHelper.ownChunks(su, TA, A_D1024, h("a-d1024-1"), h("a-d1024-2"));
-        // A_MIX: registered voyage-code-3 (1024): two 1024-d chunks, one 384-d and one 768-d
-        chunk(su, TA, A_MIX, "a-mix-1", 1024);
-        chunk(su, TA, A_MIX, "a-mix-2", 1024);
-        chunk(su, TA, A_MIX, "a-mix-384", 384);
-        chunk(su, TA, A_MIX, "a-mix-768", 768);
-        PgContainerHelper.ownChunks(su, TA, A_MIX, h("a-mix-384"), h("a-mix-768"));
-        // A_MIX2: registered minilm (384), stores 768 x3 and 1024 x1, so no dimension is the model's
-        chunk(su, TA, A_MIX2, "a-mix2-768-1", 768);
-        chunk(su, TA, A_MIX2, "a-mix2-768-2", 768);
-        chunk(su, TA, A_MIX2, "a-mix2-768-3", 768);
-        chunk(su, TA, A_MIX2, "a-mix2-1024", 1024);
         // tenant B
         chunk(su, TB, B_CODE, "b-code-1", 1024);
         chunk(su, TB, B_CODE, "b-code-2", 1024);
@@ -858,7 +789,7 @@ class P225MigrationWalkIntegrationTest {
         su.insertInto(TOPICS, TOPICS.ID, TOPICS.TENANT_ID, TOPICS.LABEL, TOPICS.COLLECTION, TOPICS.DOC_COUNT,
                 TOPICS.CREATED_AT, TOPICS.REVIEW_STATUS)
             .values(9001L, TA, "p225-topic", A_CODE, 0, OffsetDateTime.now(), "pending").execute();
-        for (Object[] a : new Object[][] {{"a-code-1", A_CODE}, {"a-d768-1", A_D768}, {"a-mix-768", A_MIX}}) {
+        for (Object[] a : new Object[][] {{"a-code-1", A_CODE}, {"a-ctx-1", A_CTX}}) {
             su.insertInto(TOPIC_ASSIGNMENTS, TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID, TOPIC_ASSIGNMENTS.TOPIC_ID,
                     TOPIC_ASSIGNMENTS.ASSIGNED_BY, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, TOPIC_ASSIGNMENTS.ASSIGNED_AT)
                 .values(TA, hb((String) a[0]), 9001L, "projection", (String) a[1], OffsetDateTime.now()).execute();
@@ -869,21 +800,17 @@ class P225MigrationWalkIntegrationTest {
         su.insertInto(CHUNK_ORPHANED_AT, CHUNK_ORPHANED_AT.TENANT_ID, CHUNK_ORPHANED_AT.COLLECTION, CHUNK_ORPHANED_AT.CHASH,
                 CHUNK_ORPHANED_AT.ORPHANED_AT).values(TN, N_CODE, hb("n-code-1"), OffsetDateTime.now().minusDays(2)).execute();
 
-        // centroids: 9 seeded, 6 copied
+        // centroids: 5 seeded, 4 copied
         centroid(su, TA, A_CODE, 1, 1024);
         centroid(su, TA, A_CODE, 2, 1024);
-        centroid(su, TA, A_CODE, 3, 768);       // disagrees with voyage-code-3: not copied
         centroid(su, TA, A_MINI, 4, 384);
-        centroid(su, TA, A_D768, 5, 768);       // agrees with disputed-768 once re-registered
-        centroid(su, TA, A_D768, 6, 1024);      // does not: not copied
-        centroid(su, TA, GHOST, 7, 1024);       // no registry row: not copied
+        centroid(su, TA, GHOST, 7, 1024);       // no registry row: derived data, not copied
         centroid(su, TB, B_CODE, 1, 1024);
-        centroid(su, TC, C_CODE, 1, 1024);      // a tenant with centroids and nothing else
     }
 
-    /** Manifest rows ownChunks wrote: 2 + 2 + 2 + 2 + 2 + 2 + 2. */
+    /** Manifest rows ownChunks wrote: 2 + 2 + 2 + 2. */
     private static int manifestRowsSeeded() {
-        return 14;
+        return 8;
     }
 
     // ═══════════════════════════ helpers ═══════════════════════════

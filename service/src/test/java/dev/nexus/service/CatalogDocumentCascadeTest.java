@@ -242,10 +242,12 @@ class CatalogDocumentCascadeTest {
         // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk now requires a
         // matching nexus.chunks row for the manifest insert below.
         byte[] manifestChash = chashBytes("man" + tenant + tumbler);
-        ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.CHUNK_TEXT,
-                       CHUNKS.EMBEDDING_384)
-           .values(tenant, COLL, manifestChash, "text", vector384())
-           .onConflict(CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH)
+        // RDR-225: a chunk and every row that references it carry the collection's model.
+        final String model = PgContainerHelper.collectionModel(ctx, tenant, COLL);
+        ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL,
+                       CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_384)
+           .values(tenant, COLL, manifestChash, model, "text", vector384())
+           .onConflict(CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL)
            .doNothing()
            .execute();
         // nexus-7nrvr: catalog_document_chunks.collection is NOT NULL
@@ -253,8 +255,8 @@ class CatalogDocumentCascadeTest {
         // already registered under COLL, so stamp the manifest row the same.
         ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
                        CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
-                       CATALOG_DOCUMENT_CHUNKS.COLLECTION)
-           .values(tenant, tumbler, 0, manifestChash, COLL)
+                       CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
+           .values(tenant, tumbler, 0, manifestChash, COLL, model)
            .execute();
         // hygiene-001 steps 1/3 (nexus-tk070.p6a follow-on): document_aspects.source_uri
         // and document_highlights.source_uri are both NOT NULL now.
@@ -297,16 +299,17 @@ class CatalogDocumentCascadeTest {
         // ASCII bytes of the hex STRING via "escape format", never matching a real
         // decode()'d row).
         byte[] realChash = java.util.HexFormat.of().parseHex(hexChash(docId));
-        ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.CHUNK_TEXT,
-                       CHUNKS.EMBEDDING_384)
-           .values(tenant, COLL, realChash, "text", vector384())
-           .onConflict(CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH)
+        final String model = PgContainerHelper.collectionModel(ctx, tenant, COLL);
+        ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL,
+                       CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_384)
+           .values(tenant, COLL, realChash, model, "text", vector384())
+           .onConflict(CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL)
            .doNothing()
            .execute();
         ctx.insertInto(TOPIC_ASSIGNMENTS, TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID,
                        TOPIC_ASSIGNMENTS.TOPIC_ID, TOPIC_ASSIGNMENTS.ASSIGNED_BY, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION,
-                       TOPIC_ASSIGNMENTS.ASSIGNED_AT)
-           .values(tenant, realChash, topicId, "projection", COLL, java.time.OffsetDateTime.now())
+                       TOPIC_ASSIGNMENTS.ASSIGNED_AT, TOPIC_ASSIGNMENTS.EMBEDDING_MODEL)
+           .values(tenant, realChash, topicId, "projection", COLL, java.time.OffsetDateTime.now(), model)
            .execute();
     }
 
