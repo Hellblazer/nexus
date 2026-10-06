@@ -17,6 +17,11 @@
 # token-send.sh on the host, which writes it into host-recv.ps1's pipe; from
 # there it reaches the guest launcher through PowerShell Direct and a second
 # pipe. It is never written to a file, a task definition or a command line.
+# Residual exposure, accepted for a disposable test guest: the claude process
+# and its children hold it in their environment for the session's life, and a
+# Hyper-V checkpoint taken while the window is open stores it in saved memory,
+# so take checkpoints with the gate window closed.
+# RDR-219's inventory does not list this shape yet (nexus-pwscd).
 #
 # Host shape (qwentescence): the ssh endpoint is elevated PowerShell; the
 # POSIX shell the helper needs is Git for Windows' bash, because WSL interop on
@@ -52,7 +57,14 @@ if [[ ${#stage[@]} -gt 0 ]]; then
 fi
 
 out="$(mktemp "${TMPDIR:-/tmp}/nxgate-recv.XXXXXX")"
-trap 'rm -f "$out"' EXIT
+recv=''
+cleanup() {
+    # A receiver left behind holds the nxgate-host pipe (and the guest
+    # password in its memory) for up to 180 s and makes the next launch fail.
+    if [[ -n "$recv" ]] && kill -0 "$recv" 2>/dev/null; then kill "$recv" 2>/dev/null || true; wait "$recv" 2>/dev/null || true; fi
+    rm -f "$out"
+}
+trap cleanup EXIT
 security find-generic-password -a "$GUSER" -s "$KEYCHAIN_SERVICE" -w \
     | ssh "$HOST" "powershell -NoProfile -ExecutionPolicy Bypass -File C:\\build\\guest\\nxgate\\host-recv.ps1 -VMName $VM -GuestUser $GUSER" \
     >"$out" 2>&1 &
@@ -74,6 +86,7 @@ python3 "$repo/tests/e2e/lib/claude_credentials.py" run --remote "$HOST" \
     --remote-shell "$REMOTE_SHELL" -- "$HOST_DIR/token-send.sh" 2>&1 | quiet
 rc=0
 wait "$recv" || rc=$?
+recv=''
 quiet <"$out"
 if [[ $rc -ne 0 ]] || ! grep -q 'guest: handed-off' "$out"; then
     echo "launch.sh: FAILED (receiver exit $rc)" >&2

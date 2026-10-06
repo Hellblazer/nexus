@@ -47,24 +47,37 @@ try {
 
     Invoke-Command -Session $session -ArgumentList $tok {
         param($tok)
-        # Close an earlier gate window (its claude and its PowerShell).
+        # Close an earlier gate window with its whole process tree (claude and
+        # the MCP servers and hooks it started), so nothing is left orphaned.
         Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*nxgate-claude.ps1*' } | ForEach-Object {
-            Get-CimInstance Win32_Process -Filter "ParentProcessId=$($_.ProcessId)" | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
-            Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+            & taskkill.exe /T /F /PID $_.ProcessId 2>&1 | Out-Null
         }
         $launcher = "$env:USERPROFILE\nx-gate\nxgate-claude.ps1"
         New-Item -ItemType Directory -Force -Path (Split-Path $launcher) | Out-Null
         @'
 param([string]$Pipe)
+# Reads the token from the pipe and gives it to the claude child ONLY: this
+# window's own environment never holds it. Claude Code deletes
+# CLAUDE_CODE_OAUTH_TOKEN from its environment after reading it, so the token
+# is also passed as NX_HARNESS_CLAUDE_OAUTH_TOKEN, which its children inherit
+# (RDR-219 "The nx-mcp dispatch grant"; the gate's claude -p uses it).
 $c = New-Object System.IO.Pipes.NamedPipeClientStream('.', $Pipe, [System.IO.Pipes.PipeDirection]::In)
 $c.Connect(30000)
 $r = New-Object System.IO.StreamReader($c)
-[Environment]::SetEnvironmentVariable('CLAUDE_CODE_OAUTH_TOKEN', $r.ReadLine(), 'Process')
+$t = $r.ReadLine()
 $r.Dispose(); $c.Dispose()
+if (-not $t -or $t.Length -lt 20) { 'nx gate: no token from the pipe; not starting claude'; return }
 Set-Location $HOME
 $host.UI.RawUI.WindowTitle = 'nx gate: claude (automation token)'
-& "$HOME\.local\bin\claude.exe"
-"claude exited code=$LASTEXITCODE at $(Get-Date -Format o)" | Tee-Object -Append -FilePath "$HOME\nx-gate\nxgate-claude.log"
+$psi = New-Object System.Diagnostics.ProcessStartInfo("$HOME\.local\bin\claude.exe")
+$psi.UseShellExecute = $false
+$psi.WorkingDirectory = $HOME
+$psi.EnvironmentVariables['CLAUDE_CODE_OAUTH_TOKEN'] = $t
+$psi.EnvironmentVariables['NX_HARNESS_CLAUDE_OAUTH_TOKEN'] = $t
+$p = [System.Diagnostics.Process]::Start($psi)
+$t = $null; $psi = $null
+$p.WaitForExit()
+"claude exited code=$($p.ExitCode) at $(Get-Date -Format o)" | Tee-Object -Append -FilePath "$HOME\nx-gate\nxgate-claude.log"
 '@ | Set-Content -Encoding UTF8 $launcher
         $name = 'nxgate-' + [guid]::NewGuid().ToString('N')
         $sec = New-Object System.IO.Pipes.PipeSecurity
