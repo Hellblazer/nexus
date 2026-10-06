@@ -95,6 +95,22 @@ def _install_root() -> Path:
     return Path(str(md.distribution("conexus").locate_file("")))
 
 
+def venv_root_of_site_packages(site_packages: Path) -> Path:
+    """The venv root that holds *site_packages*.
+
+    POSIX venvs keep it at <venv>/lib/pythonX.Y/site-packages; Windows
+    venvs at <venv>\Lib\site-packages, one level shallower, so the fixed
+    parents[2] this replaced named the directory ABOVE a Windows generation
+    and the finish pass treated every Windows generation install as unmanaged
+    (nexus-f9bgu.47). Decided by the path's shape, not the host, so a POSIX root
+    resolves exactly as before. Raises IndexError for a root too shallow to be
+    either layout.
+    """
+    if site_packages.parent.name.lower() == "lib":
+        return site_packages.parents[1]
+    return site_packages.parents[2]
+
+
 def running_from_tool_install() -> bool:
     """True when this interpreter IS a MANAGED install (vs a dev checkout venv).
 
@@ -122,7 +138,7 @@ def running_from_tool_install() -> bool:
     root = _install_root()
 
     try:
-        venv_root = root.parents[2]
+        venv_root = venv_root_of_site_packages(root)
     except IndexError:  # a root too shallow to be a venv layout
         return False
 
@@ -517,7 +533,7 @@ def _process_markers() -> tuple[str, ...]:
     try:
         # No generation layout readable: the venv root of the running install,
         # which is what a pre-generation box carries.
-        return (str(_install_root().parents[2]),)
+        return (str(venv_root_of_site_packages(_install_root())),)
     except Exception:  # noqa: BLE001 — metadata unavailable: conventional layout
         return _PROC_MARKERS
 
