@@ -93,6 +93,7 @@ import structlog
 from nexus import _locking
 from nexus import pdeathsig as _pdeathsig
 from nexus.daemon import readiness
+from nexus.daemon import session_end as _session_end
 from nexus.db.onnx_model_root import ENV_MODEL_DIR, service_onnx_models_root
 from nexus.db.service_bge_model import service_bge_engine_dir_mismatch
 from nexus.db.service_crossencoder_model import service_crossencoder_engine_dir_mismatch
@@ -1113,6 +1114,8 @@ class StorageServiceSupervisor:
     _win_job: Any = _win_job
     _engine_job: int | None = None
     _stop_requested: threading.Event | None = None
+    #: Same reason (nexus-f9bgu.51); ``__init__`` gives each instance its own lock.
+    _engine_stop_lock: threading.Lock = threading.Lock()
 
     def __init__(
         self,
@@ -1174,6 +1177,10 @@ class StorageServiceSupervisor:
         #: The Job Object holding the engine (Windows only). It holds the
         #: engine and nothing else: PostgreSQL is never assigned to it.
         self._engine_job: int | None = None
+        #: Serialises the two engine stops: ``_stop_service`` on the main thread and
+        #: ``stop_engine_for_session_end`` on the console-control thread (nexus-f9bgu.51).
+        #: Whichever runs second finds the engine already gone and signals nothing.
+        self._engine_stop_lock = threading.Lock()
         #: Set by ``start`` so the Windows PostgreSQL start can see a stop.
         self._stop_requested: threading.Event | None = None
         self._proc: subprocess.Popen[bytes] | None = None
@@ -2290,20 +2297,53 @@ class StorageServiceSupervisor:
         moment the child actually exits, with no zombie ambiguity,
         because reaping and detecting death are the SAME syscall here.
         """
-        if self._proc is None:
-            return
-        proc = self._proc
-        pid = proc.pid
-        if _pid_is_alive(pid):
-            self._signal_engine(pid)
+        with self._engine_stop_lock:
+            if self._proc is None:
+                return
+            proc = self._proc
+            pid = proc.pid
+            if _pid_is_alive(pid):
+                self._signal_engine(pid)
+                try:
+                    proc.wait(timeout=_GRACEFUL_STOP_TIMEOUT)
+                except subprocess.TimeoutExpired:
+                    self._kill_engine(proc)
+                    with contextlib.suppress(subprocess.TimeoutExpired):
+                        proc.wait(timeout=_POST_KILL_REAP_TIMEOUT)
+            self._release_engine_job()
+            self._proc = None
+
+    def stop_engine_for_session_end(self, budget_s: float) -> bool:
+        """The engine half of the Windows session-end stop (nexus-f9bgu.51), run on the
+        console-control thread. ``CTRL_BREAK`` through the same channel as
+        :meth:`_stop_service`, a wait bounded by *budget_s*, then the job-object kill.
+
+        Shares ``_engine_stop_lock`` with :meth:`_stop_service`: the stop flag the handler
+        sets lets the main thread begin its own stop concurrently, and the engine must be
+        signalled once. When that stop holds the lock the whole budget, this returns
+        ``False`` and the caller goes on to PostgreSQL; the lock is not waited on past the
+        budget, because the process is terminated shortly after the handler returns.
+        Leaves ``self._proc`` and the job to ``_stop_service``, which runs afterwards (or
+        already ran) and is idempotent over a dead engine. Returns whether the engine is gone.
+        """
+        deadline = self._monotonic() + budget_s
+        if not self._engine_stop_lock.acquire(timeout=max(0.0, budget_s)):
+            _log.warning("storage_service_session_end_engine_lock_busy", budget_s=budget_s)
+            return False
+        try:
+            proc = self._proc
+            if proc is None or proc.poll() is not None:
+                return True
+            self._signal_engine(proc.pid)
             try:
-                proc.wait(timeout=_GRACEFUL_STOP_TIMEOUT)
+                proc.wait(timeout=max(0.0, deadline - self._monotonic()))
             except subprocess.TimeoutExpired:
                 self._kill_engine(proc)
                 with contextlib.suppress(subprocess.TimeoutExpired):
-                    proc.wait(timeout=_POST_KILL_REAP_TIMEOUT)
-        self._release_engine_job()
-        self._proc = None
+                    proc.wait(timeout=0.5)
+            return proc.poll() is not None
+        finally:
+            self._engine_stop_lock.release()
 
     # RDR-175: the in-process respawn mechanism (``_respawn`` + the windowed
     # restart budget ``_maybe_reset_restart_budget``) was retired. OS init
@@ -2961,6 +3001,71 @@ def start_storage_service(
     return sup.start()
 
 
+def _session_end_write_marker(
+    config_dir: Path, *, platform: str | None = None, scope_key: str | None = None,
+) -> Path | None:
+    """Write the stop marker the Windows launcher honours (``run_launcher``), so it does
+    not respawn the supervisor while the session is ending (nexus-f9bgu.51)."""
+    return write_stop_marker(
+        config_dir, _REGISTRY_TIER, scope_key or service_identity(), platform=platform,
+    )
+
+
+def _session_end_pg_stopper(creds: dict[str, str]) -> Callable[[float], bool]:
+    """The PostgreSQL stop for the session-end handler: ``pg_ctl stop -m fast -w``.
+
+    Everything heavy is resolved NOW, at install time, not inside the handler: a
+    shutdown-time import or binary discovery spends the few seconds the handler has.
+    """
+    from nexus.db.pg_provision import _run, discover_pg_binaries  # noqa: PLC0415 — deferred import — Windows-only path, resolved once at install
+
+    pg_data = creds.get("PG_DATA", "")
+    if not pg_data:
+        raise StorageServiceStartError("PG_DATA missing from pg_credentials")
+    pg_ctl = str(discover_pg_binaries().pg_ctl)
+
+    def run(cmd: list[str], timeout: float) -> int:
+        return _run(cmd, check=False, timeout=timeout).returncode
+
+    return _session_end.make_pg_stopper(pg_ctl=pg_ctl, pgdata=pg_data, run=run)
+
+
+def _install_session_end_handler(
+    sup: "StorageServiceSupervisor",
+    stop_requested: threading.Event,
+    config_dir: Path,
+    creds: dict[str, str],
+    *,
+    registrar: Any = None,
+    platform: str | None = None,
+) -> Callable[[], None]:
+    """Windows only: stop the engine and PostgreSQL cleanly when the session ends
+    (RDR-224, nexus-f9bgu.51; :mod:`nexus.daemon.session_end` has the design).
+
+    Returns the uninstall callable. POSIX returns a no-op without building anything, so
+    POSIX behaviour is unchanged. A PostgreSQL stopper that cannot be built (no
+    ``PG_DATA``, no bundle) is logged and the handler is not installed: stopping the
+    engine alone would still leave PostgreSQL to crash, the one thing this prevents.
+    """
+    plat = platform if platform is not None else sys.platform
+    if plat != "win32":
+        return lambda: None
+    try:
+        stop_pg = _session_end_pg_stopper(creds)
+    except Exception as exc:  # noqa: BLE001 — degrade to the old behaviour, never fail the supervisor
+        _log.warning("storage_service_session_end_pg_stopper_unavailable", error=str(exc))
+        return lambda: None
+    handler = _session_end.SessionEndHandler(
+        stop_requested=stop_requested,
+        stop_engine=sup.stop_engine_for_session_end,
+        stop_pg=stop_pg,
+        mark_stop=lambda: _session_end_write_marker(config_dir),
+    )
+    return _session_end.install_session_end_handler(
+        handler, registrar=registrar, platform=plat,
+    )
+
+
 def run_storage_supervisor(
     *,
     config_dir: Path | None = None,
@@ -3038,6 +3143,9 @@ def run_storage_supervisor(
         creds=creds,
         supervised=True,
     )
+    uninstall_session_end = _install_session_end_handler(
+        sup, stop_requested, config_dir, creds,
+    )
     try:
         return _supervise_until_stopped(sup, stop_requested, flush_logging)
     except Exception:
@@ -3047,6 +3155,8 @@ def run_storage_supervisor(
         _log.exception("storage_service_supervisor_crashed")
         flush_logging()
         raise
+    finally:
+        uninstall_session_end()
 
 
 def _supervise_until_stopped(
