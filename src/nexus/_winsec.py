@@ -52,6 +52,15 @@ __all__ = [
 _SID_SYSTEM = "S-1-5-18"
 _SID_ADMINISTRATORS = "S-1-5-32-544"
 _SID_OWNER_RIGHTS = "S-1-3-4"
+#: Groups every interactive or batch token of a local user carries, enabled (not
+#: deny-only, unlike Administrators under a filtered token): an allow ACE for any
+#: of them grants a non-elevated token of the user.
+_SIDS_EVERY_USER_TOKEN: frozenset[str] = frozenset({
+    "S-1-1-0",       # Everyone
+    "S-1-5-11",      # Authenticated Users
+    "S-1-5-32-545",  # BUILTIN\Users
+    "S-1-5-4",       # INTERACTIVE
+})
 
 #: Full control for one SID, protected (``P``) so nothing is inherited.
 _OWNER_ONLY_SDDL = "D:P(A;;FA;;;{sid})"
@@ -285,6 +294,73 @@ def _windows_dacl_trustees(path: str) -> list[str] | None:
         return trustees
     finally:
         kernel32.LocalFree(descriptor)
+
+
+def _windows_owner_sid(path: str) -> str:
+    """The owner SID of *path* as a string. Windows only; raises OSError when the
+    descriptor cannot be read."""
+    if os.name != "nt":
+        raise OSError("a Windows owner can only be read on Windows")
+    import ctypes  # noqa: PLC0415 — Windows-only branch
+
+    advapi32, kernel32 = _win_libs()
+    owner = ctypes.c_void_p()
+    descriptor = ctypes.c_void_p()
+    # SE_FILE_OBJECT = 1; OWNER_SECURITY_INFORMATION = 1
+    error = advapi32.GetNamedSecurityInfoW(
+        path, 1, 0x00000001, ctypes.byref(owner), None, None, None, ctypes.byref(descriptor),
+    )
+    if error:
+        raise ctypes.WinError(error)
+    try:
+        string_sid = ctypes.c_void_p()
+        if not advapi32.ConvertSidToStringSidW(owner, ctypes.byref(string_sid)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        try:
+            return ctypes.wstring_at(string_sid.value)
+        finally:
+            kernel32.LocalFree(string_sid)
+    finally:
+        kernel32.LocalFree(descriptor)
+
+
+def user_dir_problem(
+    path: str | os.PathLike[str],
+    *,
+    platform: str | None = None,
+    sid_lookup: Callable[[], str] | None = None,
+    trustees_lookup: Callable[[str], list[str] | None] | None = None,
+    owner_lookup: Callable[[str], str] | None = None,
+) -> str | None:
+    """Why a NON-elevated token of the current user cannot use the directory
+    *path*, or ``None`` when it can (nexus-f9bgu.50).
+
+    A directory an elevated process made with ``mkdir(mode=0o700)`` grants only
+    SYSTEM, Administrators and OWNER RIGHTS, and is owned by Administrators; a
+    normal token has Administrators deny-only and is not the owner, so it gets
+    WinError 5 on every listing and write (see :func:`make_user_dir`). Read from
+    the DACL and owner, not by trying, so the answer is right when the caller is
+    itself elevated. The directory is usable when an allow ACE names the user's
+    SID or a group every user token carries, or when the user owns it and an
+    OWNER RIGHTS ACE is present. POSIX: always ``None`` (mode bits, not ACLs).
+    """
+    if not _is_windows(platform):
+        return None
+    try:
+        user = (sid_lookup if sid_lookup is not None else _windows_user_sid)()
+        trustees = (trustees_lookup if trustees_lookup is not None else _windows_dacl_trustees)(str(path))
+        if trustees is None:
+            return None
+        if user in trustees or _SIDS_EVERY_USER_TOKEN.intersection(trustees):
+            return None
+        if _SID_OWNER_RIGHTS in trustees:
+            owner = (owner_lookup if owner_lookup is not None else _windows_owner_sid)(str(path))
+            if owner == user:
+                return None
+    except (OSError, AttributeError, ValueError) as exc:
+        return f"its access list cannot be read ({exc})"
+    granted = ", ".join(sorted(set(trustees))) or "nobody"
+    return f"grants only {granted}; no entry for this user ({user}), so a non-elevated session cannot list or write it"
 
 
 def owner_only_problem(

@@ -4302,6 +4302,53 @@ def _check_service_launchagent_stray() -> list[HealthResult]:
     )]
 
 
+def _check_config_dir_user_access(
+    config_dir: Path | None = None,
+    *,
+    platform: str | None = None,
+    problem: Callable[[Path], str | None] | None = None,
+) -> list[HealthResult]:
+    """nexus-f9bgu.50: on Windows, a config directory an ELEVATED process made
+    grants only SYSTEM, Administrators and OWNER RIGHTS and is owned by
+    Administrators, so a non-elevated session of the same user (the logon task,
+    a plain ``nx`` in a normal shell) gets WinError 5 on every read and write.
+    Read from the ACL (``nexus._winsec.user_dir_problem``), so the row is right
+    when ``nx doctor`` itself runs elevated. Silent off Windows and before the
+    directory exists (a virgin box has nothing to check).
+    """
+    import sys as _sys  # noqa: PLC0415 — deferred to keep CLI startup fast
+
+    if (platform if platform is not None else _sys.platform) != "win32":
+        return []
+    try:
+        if config_dir is None:
+            from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred to avoid circular import
+
+            config_dir = nexus_config_dir()
+        if not config_dir.is_dir():
+            return []
+        if problem is None:
+            from nexus._winsec import user_dir_problem  # noqa: PLC0415 — deferred, Windows-only path
+
+            reason = user_dir_problem(config_dir, platform=platform)
+        else:
+            reason = problem(config_dir)
+    except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash `nx doctor`
+        _log.debug("doctor_config_dir_access_check_failed", error=str(exc))
+        return []
+    label = "Config directory access (non-elevated)"
+    if reason is None:
+        return [HealthResult(label=label, ok=True, detail=f"{config_dir} is usable by a non-elevated session")]
+    return [HealthResult(
+        label=label,
+        ok=False,
+        detail=f"{config_dir} {reason}" + (" (made by an elevated process)" if reason.startswith("grants only") else ""),
+        fix_suggestions=[
+            f'from an elevated Command Prompt: icacls "{config_dir}" /grant "%USERDOMAIN%\\%USERNAME%:(OI)(CI)F" /T',
+        ],
+    )]
+
+
 def _check_service_autostart_drift() -> list[HealthResult]:
     """nexus-rlp0v (substantive-critic round 1, Significant): backstop for
     :func:`nexus.upgrade_finish.converge_service_autostart_unit`'s
@@ -9570,6 +9617,7 @@ def run_health_checks(
     results.extend(_check_t2_launchagent_stray())
     results.extend(_check_service_launchagent_stray())
     results.extend(_check_service_autostart_drift())
+    results.extend(_check_config_dir_user_access())  # nexus-f9bgu.50
     results.extend(_check_migration_state())
     results.extend(_check_rls_present())
     # RDR-205 Phase 2 Step 2 (bead nexus-em75s.10): the Linda tuple space's

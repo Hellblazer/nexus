@@ -4319,3 +4319,48 @@ class TestCheckTopicsDocCountDrift:
         r = self._run(monkeypatch, store)
         assert "nx taxonomy audit" in r.detail and "--fix-doc-count" in r.detail
         assert any("--fix-doc-count" in s for s in r.fix_suggestions)
+
+
+class TestConfigDirUserAccess:
+    """nexus-f9bgu.50: a config dir an elevated process made, seen from a non-elevated session."""
+
+    def test_silent_off_windows(self, tmp_path: Path) -> None:
+        from nexus.health import _check_config_dir_user_access
+
+        assert _check_config_dir_user_access(tmp_path, platform="darwin", problem=lambda _p: "x") == []
+
+    def test_silent_before_the_dir_exists(self, tmp_path: Path) -> None:
+        from nexus.health import _check_config_dir_user_access
+
+        assert _check_config_dir_user_access(tmp_path / "absent", platform="win32", problem=lambda _p: "x") == []
+
+    def test_a_usable_dir_passes(self, tmp_path: Path) -> None:
+        from nexus.health import _check_config_dir_user_access
+
+        (row,) = _check_config_dir_user_access(tmp_path, platform="win32", problem=lambda _p: None)
+        assert row.ok and not row.warn
+
+    def test_an_elevated_made_dir_fails_with_the_icacls_remedy(self, tmp_path: Path) -> None:
+        from nexus.health import _check_config_dir_user_access
+
+        (row,) = _check_config_dir_user_access(
+            tmp_path, platform="win32", problem=lambda _p: "grants only S-1-3-4, S-1-5-18, S-1-5-32-544; no entry",
+        )
+        assert not row.ok and not row.warn, "a session that cannot read its own config is a hard failure"
+        assert "made by an elevated process" in row.detail
+        assert any("icacls" in f and str(tmp_path) in f and "elevated" in f for f in row.fix_suggestions)
+
+    def test_a_probe_crash_never_breaks_doctor(self, tmp_path: Path) -> None:
+        from nexus.health import _check_config_dir_user_access
+
+        def boom(_p: Path) -> str | None:
+            raise RuntimeError("no")
+
+        assert _check_config_dir_user_access(tmp_path, platform="win32", problem=boom) == []
+
+    def test_registered_in_the_doctor_run(self) -> None:
+        import inspect
+
+        import nexus.health as h
+
+        assert "_check_config_dir_user_access()" in inspect.getsource(h)

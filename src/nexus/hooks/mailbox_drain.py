@@ -428,7 +428,8 @@ def _write_seen(config_dir: Path, address: str, dead_surfaced: set[str]) -> None
     noise; failing the drain over it would lose live mail, which is worse."""
     path = _seen_path(config_dir, address)
     try:
-        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        from nexus._winsec import make_user_dir  # noqa: PLC0415 -- deferred, hook import cost
+        make_user_dir(path.parent)
         tmp = path.with_suffix(".json.tmp")
         tmp.write_text(
             json.dumps({"dead_surfaced": sorted(dead_surfaced)}), encoding="utf-8",
@@ -465,7 +466,8 @@ def _save_pending(config_dir: Path, address: str, entries: list[dict[str, str]])
         if not entries:
             path.unlink(missing_ok=True)
             return
-        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        from nexus._winsec import make_user_dir  # noqa: PLC0415 -- deferred, hook import cost
+        make_user_dir(path.parent)
         tmp = path.with_suffix(".json.tmp")
         tmp.write_text(json.dumps({"entries": entries}), encoding="utf-8")
         tmp.replace(path)
@@ -509,7 +511,8 @@ def _pending_lock(config_dir: Path, address: str, *, deadline: float):
     """
     path = config_dir / "tuple-watch" / _address_file_name(address, ".pending.lock")
     try:
-        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        from nexus._winsec import make_user_dir  # noqa: PLC0415 -- deferred, hook import cost
+        make_user_dir(path.parent)
         fd = os.open(str(path), os.O_CREAT | os.O_RDWR, 0o600)
     except OSError:
         yield False

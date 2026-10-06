@@ -648,8 +648,58 @@ class TestPerProcessCaches:
             assert mod._WIN_LIBS == []
 
 
+USER = "S-1-5-21-1-2-3-1001"
+
+
+class TestUserDirProblem:
+    """nexus-f9bgu.50: can a NON-elevated token of this user use the directory?"""
+
+    def _ask(self, trustees: list[str] | None, owner: str = "S-1-5-32-544") -> str | None:
+        return _winsec.user_dir_problem(
+            "C:/cfg", platform="win32", sid_lookup=lambda: USER,
+            trustees_lookup=lambda _p: trustees, owner_lookup=lambda _p: owner,
+        )
+
+    def test_posix_is_never_a_problem(self) -> None:
+        assert _winsec.user_dir_problem("/tmp/x", platform="linux") is None
+
+    def test_an_elevated_mkdir_0o700_is_refused_naming_what_it_grants(self) -> None:
+        # Measured shape: SYSTEM, Administrators, OWNER RIGHTS, owned by Administrators.
+        reason = self._ask(["S-1-5-18", "S-1-5-32-544", "S-1-3-4"])
+        assert reason is not None and reason.startswith("grants only")
+        assert USER in reason and "S-1-5-32-544" in reason
+
+    def test_owner_rights_grants_when_this_user_owns_it(self) -> None:
+        # A non-elevated mkdir(0o700): same ACEs, but the user is the owner.
+        assert self._ask(["S-1-5-18", "S-1-5-32-544", "S-1-3-4"], owner=USER) is None
+
+    def test_owner_without_an_owner_rights_ace_is_not_enough(self) -> None:
+        assert self._ask(["S-1-5-18", "S-1-5-32-544"], owner=USER) is not None
+
+    @pytest.mark.parametrize("sid", [USER, "S-1-1-0", "S-1-5-11", "S-1-5-32-545", "S-1-5-4"])
+    def test_an_ace_for_the_user_or_a_group_every_token_carries_grants(self, sid: str) -> None:
+        assert self._ask(["S-1-5-18", "S-1-5-32-544", sid]) is None
+
+    def test_a_null_dacl_grants_everyone(self) -> None:
+        assert self._ask(None) is None
+
+    def test_an_unreadable_acl_is_reported_not_passed(self) -> None:
+        def boom(_p: str) -> list[str]:
+            raise OSError("access denied")
+
+        reason = _winsec.user_dir_problem("C:/cfg", platform="win32", sid_lookup=lambda: USER, trustees_lookup=boom)
+        assert reason is not None and "cannot be read" in reason
+
+
 @pytest.mark.skipif(sys.platform != "win32", reason="real advapi32 calls; the seams above cover the branch everywhere")
 class TestRealWindows:
+    def test_a_dir_make_user_dir_creates_is_usable_by_a_non_elevated_token(self, tmp_path: Path) -> None:
+        # nexus-f9bgu.50: the real DACL and owner readers agree with make_user_dir.
+        target = tmp_path / "cfg"
+        assert _winsec.make_user_dir(target)
+        assert _winsec.user_dir_problem(target) is None
+        assert _winsec._windows_owner_sid(str(target)).startswith("S-1-5-")  # non-vacuity: a real owner SID
+
     def test_the_sid_and_the_bindings_are_read_once_then_served_from_the_cache(self) -> None:
         _winsec._SID_CACHE.clear()
         _winsec._WIN_LIBS.clear()

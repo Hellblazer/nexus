@@ -16,6 +16,7 @@ import structlog
 
 from nexus._install import winproc_core
 from nexus.bounded_subprocess import run_bounded
+from nexus._winsec import make_user_dir
 
 _log = structlog.get_logger()
 
@@ -67,7 +68,7 @@ def generate_session_id() -> str:
 def write_claude_session_id(session_id: str) -> None:
     """Write the Claude session ID to the stable flat file (mode 0o600)."""
     path = claude_session_file()
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    make_user_dir(path.parent)
     fd = os.open(str(path), os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
     try:
         os.write(fd, session_id.encode())

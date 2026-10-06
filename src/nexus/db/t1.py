@@ -19,7 +19,7 @@ _log = structlog.get_logger(__name__)
 from datetime import UTC, datetime
 
 from nexus import _locking
-from nexus._winsec import open_private
+from nexus._winsec import make_user_dir, open_private
 from nexus.db.t2 import T2Database
 
 
@@ -782,7 +782,7 @@ def _cli_dedicated_session_id(config_dir: Path) -> str:
     blocking exclusive lock serializes the read-or-create critical
     section, and the publish itself can never be observed torn.
     """
-    config_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    make_user_dir(config_dir)
     path = config_dir / _CLI_DEDICATED_SESSION_FILENAME
     lock_path = config_dir / f"{_CLI_DEDICATED_SESSION_FILENAME}.lock"
 
@@ -910,7 +910,7 @@ def publish_t1_session_lease(
     not valid JSON, so a reader on the new code treats it as absent/stale
     (fail-safe) rather than fail-open.
     """
-    config_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    make_user_dir(config_dir)
     path = _t1_session_lease_path(session_id, config_dir)
     tmp = path.with_name(f"{path.name}.{os.getpid()}.{uuid4().hex}.tmp")
     payload = json.dumps(
@@ -1402,7 +1402,7 @@ def _lock_guarded_mint_or_borrow(
             on a mint failure. The lock is always released first (the
             failure unwinds through this function's own ``finally``).
     """
-    config_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    make_user_dir(config_dir)
     lock_path = _t1_session_mint_lock_path(session_id, config_dir)
 
     lock_fd = os.open(str(lock_path), os.O_WRONLY | os.O_CREAT, 0o600)
