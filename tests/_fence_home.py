@@ -26,6 +26,7 @@ cannot depend on a Python import.
 from __future__ import annotations
 
 import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -73,9 +74,35 @@ CREDENTIAL_SHADOWS: tuple[str, ...] = (
 ALWAYS_SHADOWS: tuple[str, ...] = (*AUTOSTART_SHADOWS, *INTERIM_SHADOWS, *CREDENTIAL_SHADOWS)
 
 
+def _windows_link(link: Path, entry: Path) -> None:
+    """Link *entry* through at *link* without a symlink: a junction for a
+    directory, a hard link for a file (a copy across volumes). Neither needs
+    SeCreateSymbolicLinkPrivilege, which a non-admin account such as the
+    win-release runner's lacks (WinError 1314, rehearsal run 37410530509)."""
+    if entry.is_dir():
+        import _winapi  # noqa: PLC0415 -- Windows only
+
+        _winapi.CreateJunction(str(entry), str(link))
+        return
+    try:
+        os.link(entry, link)
+    except OSError:
+        shutil.copy2(entry, link)
+
+
+def _link_through(link: Path, entry: Path) -> None:
+    try:
+        link.symlink_to(entry)
+    except OSError:
+        if sys.platform != "win32":
+            raise
+        _windows_link(link, entry)
+
+
 def fence_home(real_home: Path, gate_home: Path, shadow: str = ".config/nexus") -> Path:
     """Symlink every entry of *real_home* into *gate_home*, shadowing *shadow*
-    and :data:`ALWAYS_SHADOWS`.
+    and :data:`ALWAYS_SHADOWS`. On Windows without the symlink privilege an
+    entry is linked through by :func:`_windows_link` instead.
 
     A shadow is ``<top>/<leaf>`` or a bare ``<top>``. A bare ``top`` becomes an
     empty real directory. For ``<top>/<leaf>`` the ``top`` is recreated as a
@@ -100,7 +127,7 @@ def fence_home(real_home: Path, gate_home: Path, shadow: str = ".config/nexus") 
             continue
         link = gate_home / entry.name
         if not link.exists() and not link.is_symlink():
-            link.symlink_to(entry)
+            _link_through(link, entry)
 
     for top, leaves in leaves_by_top.items():
         real_top = real_home / top
@@ -110,7 +137,7 @@ def fence_home(real_home: Path, gate_home: Path, shadow: str = ".config/nexus") 
                     continue
                 link = gate_home / top / entry.name
                 if not link.exists() and not link.is_symlink():
-                    link.symlink_to(entry)
+                    _link_through(link, entry)
         for leaf in leaves:
             (gate_home / top / leaf).mkdir(parents=True, exist_ok=True)
     return gate_home
