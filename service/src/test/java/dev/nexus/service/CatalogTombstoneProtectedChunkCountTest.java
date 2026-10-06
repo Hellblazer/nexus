@@ -103,6 +103,10 @@ class CatalogTombstoneProtectedChunkCountTest {
 
         try (Connection su = pg.createConnection("")) {
             PgContainerHelper.applyProductSchema(su);
+            // RDR-225: the chunks written below go through the repository, which does not register a tenant's
+            // partition leaves (production does that with the tenant's first service token).
+            PgContainerHelper.ensureTenantPartitions(
+                org.jooq.impl.DSL.using(su, org.jooq.SQLDialect.POSTGRES), TENANT);
         }
 
         try (Connection su = pg.createConnection("")) {

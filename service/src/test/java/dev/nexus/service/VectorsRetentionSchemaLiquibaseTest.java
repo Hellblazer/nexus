@@ -107,9 +107,9 @@ class VectorsRetentionSchemaLiquibaseTest {
 
             assertThatThrownBy(() ->
                 ctx.insertInto(ch.table())
-                   .columns(ch.tenantId(), ch.collection(), ch.chash(), ch.chunkText(),
+                   .columns(ch.tenantId(), ch.collection(), ch.chash(), ch.embeddingModel(), ch.chunkText(),
                             ch.embedding(), ch.retention())
-                   .values(tenant, collection, chash, "text",
+                   .values(tenant, collection, chash, PgContainerHelper.collectionModel(ctx, tenant, collection), "text",
                            Vector.of(new float[DIM]), "bogus-retention-value")
                    .execute())
                 .as("a retention value outside {'reference-only','full'} must violate the CHECK")
@@ -130,8 +130,9 @@ class VectorsRetentionSchemaLiquibaseTest {
 
             // retention intentionally omitted from the column list.
             ctx.insertInto(ch.table())
-               .columns(ch.tenantId(), ch.collection(), ch.chash(), ch.chunkText(), ch.embedding())
-               .values(tenant, collection, chash, "full content, retention omitted",
+               .columns(ch.tenantId(), ch.collection(), ch.chash(), ch.embeddingModel(), ch.chunkText(), ch.embedding())
+               .values(tenant, collection, chash, PgContainerHelper.collectionModel(ctx, tenant, collection),
+                       "full content, retention omitted",
                        Vector.of(new float[DIM]))
                .execute();
 
@@ -155,9 +156,9 @@ class VectorsRetentionSchemaLiquibaseTest {
             PgContainerHelper.insertCollection(ctx, tenant, collection);
 
             ctx.insertInto(ch.table())
-               .columns(ch.tenantId(), ch.collection(), ch.chash(), ch.chunkText(),
+               .columns(ch.tenantId(), ch.collection(), ch.chash(), ch.embeddingModel(), ch.chunkText(),
                         ch.embedding(), ch.retention())
-               .values(tenant, collection, chash, null,
+               .values(tenant, collection, chash, PgContainerHelper.collectionModel(ctx, tenant, collection), null,
                        Vector.of(new float[DIM]), "reference-only")
                .execute();
 

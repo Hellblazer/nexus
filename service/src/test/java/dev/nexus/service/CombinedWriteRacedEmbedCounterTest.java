@@ -409,8 +409,9 @@ class CombinedWriteRacedEmbedCounterTest {
             String zeroVec = "[" + "0,".repeat(383) + "0]";
             var ps = su.prepareStatement(
                 "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME
-                + " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(384) + ")"
-                + " VALUES (?, ?, ?, ?, ?::nexus.vector) ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
+                + " (tenant_id, collection, chash, embedding_model, chunk_text, " + DimTables.embeddingColumn(384) + ")"
+                + " VALUES (?, ?, ?, 'minilm-l6-v2-384', ?, ?::nexus.vector)"
+                + " ON CONFLICT (tenant_id, collection, chash, embedding_model) DO NOTHING");
             ps.setString(1, TENANT);
             ps.setString(2, COLLECTION);
             ps.setBytes(3, java.util.HexFormat.of().parseHex(hexChash));

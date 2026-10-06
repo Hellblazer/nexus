@@ -978,6 +978,7 @@ class P225MigrationWalkIntegrationTest {
         for (String fn : List.of("gc_quarantine_orphans", "gc_quarantine_orphans_bounded", "gc_restore_rereferenced",
                 "gc_restore_rereferenced_bounded", "reaper_quarantine_chunks", "quarantine_restore_chunks",
                 "assign_from_chashes_384", "assign_from_chashes_768", "assign_from_chashes_1024",
+                "cross_preview_384", "cross_preview_768", "cross_preview_1024",
                 "stamp_chunks_on_manifest_delete", "stamp_chunks_on_manifest_update", "purge_trash")) {
             out.add("fn " + fn + " " + md5(String.valueOf(PgCatalogProbes.routineSignature(ctx, "nexus", fn)))
                 + " " + routineBodyHash(ctx, fn));

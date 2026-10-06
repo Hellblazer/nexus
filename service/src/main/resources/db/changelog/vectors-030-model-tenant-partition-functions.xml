@@ -70,7 +70,8 @@
           toggled, the service_tokens trigger attached.
       7.8 (PART C) every write site redefined once, from its LATEST live body: gc_quarantine_orphans and
           _bounded, gc_restore_rereferenced and _bounded, reaper_quarantine_chunks, quarantine_restore_chunks,
-          assign_from_chashes_384/768/1024, stamp_chunks_on_manifest_delete and _update, purge_trash.
+          assign_from_chashes_384/768/1024, cross_preview_384/768/1024 (the read-only twin of the cross branch, kept
+          byte-identical in its batch/nearest CTE), stamp_chunks_on_manifest_delete and _update, purge_trash.
       9.  PART D, post-conditions that fail the changeset: RLS enabled and forced on every parent, model
           partition and leaf; a leaf for every token tenant and 'default' under every model partition; the four
           foreign keys validated; the trigger attached. It also logs the relation locks the walk holds.
@@ -2846,6 +2847,156 @@ BEGIN
         )
         SELECT n.m_chash, n.m_topic_id, NULL::double precision FROM nearest n;
     END IF;
+END;
+$function$;
+
+-- ---- cross_preview_384
+CREATE OR REPLACE FUNCTION nexus.cross_preview_384(
+    p_collection text,
+    p_chashes    text[]
+) RETURNS TABLE(
+    chash      text,
+    topic_id   bigint,
+    similarity double precision
+)
+LANGUAGE plpgsql
+SECURITY INVOKER
+AS $function$
+#variable_conflict use_column
+BEGIN
+    -- nexus-v4pj4: read-only twin of assign_from_chashes_384's cross
+    -- branch (taxonomy-020-1). Same four transaction-local settings;
+    -- see that changeset's header for the full reasoning. NEVER writes
+    -- to topic_assignments.
+    -- RDR-225: the batch/nearest CTE is byte-identical to assign_from_chashes_<dim>'s cross branch (CrossPreviewDriftTest),
+    -- which now carries the chunk's embedding_model for the persist; the preview selects it and does not use it.
+    PERFORM set_config('hnsw.iterative_scan', 'strict_order', true);
+    PERFORM set_config('hnsw.ef_search', '400', true);
+    PERFORM set_config('enable_seqscan', 'off', true);
+    PERFORM set_config('enable_sort', 'off', true);
+
+    RETURN QUERY
+    WITH batch AS (
+        SELECT c.chash AS b_chash, c.embedding_384 AS b_emb, c.embedding_model AS b_model
+          FROM nexus.chunks c
+         WHERE c.collection = p_collection
+           AND c.embedding_384 IS NOT NULL
+           AND c.chash = ANY(ARRAY(SELECT decode(x, 'hex') FROM unnest(p_chashes) x))
+    ),
+    nearest AS (
+        SELECT encode(b.b_chash, 'hex')                     AS m_chash,
+               b.b_chash                                    AS m_chash_bytes,
+               b.b_model                                    AS m_model,
+               n.n_topic_id                                 AS m_topic_id,
+               (1 - n.n_dist)::double precision              AS m_sim
+          FROM batch b
+          CROSS JOIN LATERAL (
+              SELECT ct.topic_id AS n_topic_id,
+                     (ct.embedding_384 OPERATOR(nexus.<=>) b.b_emb) AS n_dist
+                FROM nexus.taxonomy_centroids ct
+               WHERE ct.collection <> p_collection
+                 AND ct.embedding_384 IS NOT NULL
+               ORDER BY ct.embedding_384 OPERATOR(nexus.<=>) b.b_emb, ct.topic_id ASC
+               LIMIT 1
+          ) n
+    )
+    SELECT n.m_chash, n.m_topic_id, n.m_sim FROM nearest n;
+END;
+$function$;
+
+-- ---- cross_preview_768
+CREATE OR REPLACE FUNCTION nexus.cross_preview_768(
+    p_collection text,
+    p_chashes    text[]
+) RETURNS TABLE(
+    chash      text,
+    topic_id   bigint,
+    similarity double precision
+)
+LANGUAGE plpgsql
+SECURITY INVOKER
+AS $function$
+#variable_conflict use_column
+BEGIN
+    PERFORM set_config('hnsw.iterative_scan', 'strict_order', true);
+    PERFORM set_config('hnsw.ef_search', '400', true);
+    PERFORM set_config('enable_seqscan', 'off', true);
+    PERFORM set_config('enable_sort', 'off', true);
+
+    RETURN QUERY
+    WITH batch AS (
+        SELECT c.chash AS b_chash, c.embedding_768 AS b_emb, c.embedding_model AS b_model
+          FROM nexus.chunks c
+         WHERE c.collection = p_collection
+           AND c.embedding_768 IS NOT NULL
+           AND c.chash = ANY(ARRAY(SELECT decode(x, 'hex') FROM unnest(p_chashes) x))
+    ),
+    nearest AS (
+        SELECT encode(b.b_chash, 'hex')                     AS m_chash,
+               b.b_chash                                    AS m_chash_bytes,
+               b.b_model                                    AS m_model,
+               n.n_topic_id                                 AS m_topic_id,
+               (1 - n.n_dist)::double precision              AS m_sim
+          FROM batch b
+          CROSS JOIN LATERAL (
+              SELECT ct.topic_id AS n_topic_id,
+                     (ct.embedding_768 OPERATOR(nexus.<=>) b.b_emb) AS n_dist
+                FROM nexus.taxonomy_centroids ct
+               WHERE ct.collection <> p_collection
+                 AND ct.embedding_768 IS NOT NULL
+               ORDER BY ct.embedding_768 OPERATOR(nexus.<=>) b.b_emb, ct.topic_id ASC
+               LIMIT 1
+          ) n
+    )
+    SELECT n.m_chash, n.m_topic_id, n.m_sim FROM nearest n;
+END;
+$function$;
+
+-- ---- cross_preview_1024
+CREATE OR REPLACE FUNCTION nexus.cross_preview_1024(
+    p_collection text,
+    p_chashes    text[]
+) RETURNS TABLE(
+    chash      text,
+    topic_id   bigint,
+    similarity double precision
+)
+LANGUAGE plpgsql
+SECURITY INVOKER
+AS $function$
+#variable_conflict use_column
+BEGIN
+    PERFORM set_config('hnsw.iterative_scan', 'strict_order', true);
+    PERFORM set_config('hnsw.ef_search', '400', true);
+    PERFORM set_config('enable_seqscan', 'off', true);
+    PERFORM set_config('enable_sort', 'off', true);
+
+    RETURN QUERY
+    WITH batch AS (
+        SELECT c.chash AS b_chash, c.embedding_1024 AS b_emb, c.embedding_model AS b_model
+          FROM nexus.chunks c
+         WHERE c.collection = p_collection
+           AND c.embedding_1024 IS NOT NULL
+           AND c.chash = ANY(ARRAY(SELECT decode(x, 'hex') FROM unnest(p_chashes) x))
+    ),
+    nearest AS (
+        SELECT encode(b.b_chash, 'hex')                     AS m_chash,
+               b.b_chash                                    AS m_chash_bytes,
+               b.b_model                                    AS m_model,
+               n.n_topic_id                                 AS m_topic_id,
+               (1 - n.n_dist)::double precision              AS m_sim
+          FROM batch b
+          CROSS JOIN LATERAL (
+              SELECT ct.topic_id AS n_topic_id,
+                     (ct.embedding_1024 OPERATOR(nexus.<=>) b.b_emb) AS n_dist
+                FROM nexus.taxonomy_centroids ct
+               WHERE ct.collection <> p_collection
+                 AND ct.embedding_1024 IS NOT NULL
+               ORDER BY ct.embedding_1024 OPERATOR(nexus.<=>) b.b_emb, ct.topic_id ASC
+               LIMIT 1
+          ) n
+    )
+    SELECT n.m_chash, n.m_topic_id, n.m_sim FROM nearest n;
 END;
 $function$;
 

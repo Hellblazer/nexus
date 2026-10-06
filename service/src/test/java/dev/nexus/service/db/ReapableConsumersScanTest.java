@@ -65,6 +65,10 @@ class ReapableConsumersScanTest {
         // sweep gate of this unit, and ChunkReaperIntegrationTest holds a shared gate to prove the gate is real.
         SQL_CONSUMERS.put("vectors-024-reaper-quarantine-chunks.xml#nexus.reaper_quarantine_chunks",
             "grace is injected by tests only; production passes NULL (the 30 day default), no setting, no clamp needed");
+        // RDR-225 (vectors-030) redefines the function for the partitioned layout with the same grace handling:
+        // p_grace passes straight through to chunk_is_reapable, production passes NULL, the sweep gate is still taken.
+        SQL_CONSUMERS.put("vectors-030-model-tenant-partition-functions.xml#nexus.reaper_quarantine_chunks",
+            "same as vectors-024's: grace is injected by tests only; production passes NULL, no setting, no clamp needed");
     }
 
     private static final Pattern UNIT_START = Pattern.compile(

@@ -129,7 +129,7 @@ class DenseGateScanBudgetIntegrationTest {
             // RDR-204 nexus-ft04v.4/.5: routed through PgContainerHelper.insertCollection,
             // which derives content_type from each RDR-103-conformant name.
             for (String col : new String[] {COL_TARGET, COL_NOISE}) {
-                PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, col);
+                PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, col, "minilm-l6-v2-384");
             }
             // RDR-191 Phase 4: idx_chunks_384_embedding -> idx_chunks_embedding_384 on
             // the unified nexus.chunks table.
@@ -138,9 +138,10 @@ class DenseGateScanBudgetIntegrationTest {
             // ordering realism at this granularity), text that can NEVER pass
             // the gate for QUERY.
             su.createStatement().execute(
-                "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(384) + ") "
+                "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, embedding_model, chunk_text, " + DimTables.embeddingColumn(384) + ") "
                 + "SELECT '" + TENANT + "', '" + COL_NOISE + "', "
                 + "  sha256(convert_to('noise doc ' || g, 'UTF8')), "
+                + "  'minilm-l6-v2-384', "
                 + "  'filler noise document number ' || g, "
                 + "  ('[' || (SELECT string_agg(random()::text, ',') "
                 + "            FROM generate_series(1, 384 + (g - g))) || ']')::nexus.vector "
@@ -151,9 +152,10 @@ class DenseGateScanBudgetIntegrationTest {
             // cluster would defeat the reproduction (HNSW yields a whole
             // mutual-neighbor cluster the moment the scan touches it).
             su.createStatement().execute(
-                "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(384) + ") "
+                "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, embedding_model, chunk_text, " + DimTables.embeddingColumn(384) + ") "
                 + "SELECT '" + TENANT + "', '" + COL_TARGET + "', "
                 + "  sha256(convert_to('gpu batch row ' || g, 'UTF8')), "
+                + "  'minilm-l6-v2-384', "
                 + "  'gpu batch scheduling design row ' || g, "
                 + "  ('[' || (SELECT string_agg(random()::text, ',') "
                 + "            FROM generate_series(1, 384 + (g - g))) || ']')::nexus.vector "

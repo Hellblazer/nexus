@@ -72,7 +72,8 @@ class CrossPreviewDriftTest {
      * The {@code batch}/{@code nearest} CTE text, hand-maintained here, in the
      * EXACT form both {@code assign_from_chashes_<dim>}'s cross branch and
      * {@code cross_preview_<dim>} carry verbatim (taxonomy-020/taxonomy-021's
-     * own changelog SQL — see either file's header). Ends right at the
+     * own changelog SQL as redefined by vectors-030, which adds the chunk's
+     * {@code embedding_model} to the batch for the persist — see either file's header). Ends right at the
      * {@code nearest} CTE's own closing paren, deliberately BEFORE the comma
      * that (only in {@code assign_from_chashes_<dim>}) introduces the
      * {@code persisted} INSERT CTE — {@code cross_preview_<dim>} has no such
@@ -81,7 +82,7 @@ class CrossPreviewDriftTest {
      */
     private static String sharedNearestCteText(int dim) {
         return "WITH batch AS ("
-            + "    SELECT c.chash AS b_chash, c.embedding_" + dim + " AS b_emb"
+            + "    SELECT c.chash AS b_chash, c.embedding_" + dim + " AS b_emb, c.embedding_model AS b_model"
             + "      FROM nexus.chunks c"
             + "     WHERE c.collection = p_collection"
             + "       AND c.embedding_" + dim + " IS NOT NULL"
@@ -90,6 +91,7 @@ class CrossPreviewDriftTest {
             + " nearest AS ("
             + "     SELECT encode(b.b_chash, 'hex')                     AS m_chash,"
             + "            b.b_chash                                    AS m_chash_bytes,"
+            + "            b.b_model                                    AS m_model,"
             + "            n.n_topic_id                                 AS m_topic_id,"
             + "            (1 - n.n_dist)::double precision              AS m_sim"
             + "       FROM batch b"

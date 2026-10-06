@@ -93,6 +93,21 @@ class ChashIndexDropLiquibaseTest {
         return ctx.fetchCount(DSL.table(DSL.name("pg_constraint")), conname.in(conNames));
     }
 
+    /** Constraints named {@code conName} that belong to {@code schema.table} ITSELF. A partitioned table's
+     *  CHECK is cloned onto every model partition and tenant leaf under the same name (RDR-225), so a count by
+     *  name alone multiplies by the partitions; the intent is the one constraint the parent carries. */
+    private int constraintCountOn(DSLContext ctx, String schema, String table, String conName) {
+        var con = DSL.table(DSL.name("pg_catalog", "pg_constraint")).as("k");
+        var cls = DSL.table(DSL.name("pg_catalog", "pg_class")).as("c");
+        var ns = DSL.table(DSL.name("pg_catalog", "pg_namespace")).as("n");
+        return ctx.fetchCount(con
+            .join(cls).on(DSL.field(DSL.name("c", "oid")).eq(DSL.field(DSL.name("k", "conrelid"))))
+            .join(ns).on(DSL.field(DSL.name("n", "oid")).eq(DSL.field(DSL.name("c", "relnamespace")))),
+            DSL.field(DSL.name("k", "conname"), String.class).eq(conName)
+                .and(DSL.field(DSL.name("c", "relname"), String.class).eq(table))
+                .and(DSL.field(DSL.name("n", "nspname"), String.class).eq(schema)));
+    }
+
     private int indexCountExact(DSLContext ctx, String schema, String indexName) {
         Field<String> schemaname = DSL.field(DSL.name("schemaname"), String.class);
         Field<String> indexname = DSL.field(DSL.name("indexname"), String.class);
@@ -143,8 +158,9 @@ class ChashIndexDropLiquibaseTest {
                 .isEqualTo(1);
             // The surviving octet CHECKs: chunks_chash_octet_check is now ONE
             // unified constraint (was three per-dim), plus the manifest's own.
-            assertThat(constraintCount(ctx,
-                "chunks_chash_octet_check", "catalog_document_chunks_chash_octet_check"))
+            // RDR-225: counted on the parent tables themselves, not on the partitions' clones of the CHECK.
+            assertThat(constraintCountOn(ctx, "nexus", "chunks", "chunks_chash_octet_check")
+                + constraintCountOn(ctx, "nexus", "catalog_document_chunks", "catalog_document_chunks_chash_octet_check"))
                 .isEqualTo(2);
         }
     }

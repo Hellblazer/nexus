@@ -134,6 +134,9 @@ class Rdr204Gh1461ProfileRestartJourneyTest {
         pg = PgContainerHelper.start();
         try (Connection su = pg.createConnection("")) {
             PgContainerHelper.applyProductSchema(su);
+            // RDR-225: production creates a tenant's partition leaves with its first service token; this
+            // tenant never gets one, and a chunk of a tenant with no leaf is refused by tuple routing.
+            PgContainerHelper.ensureTenantPartitions(DSL.using(su, SQLDialect.POSTGRES), TENANT);
         }
 
         var cfg = new com.zaxxer.hikari.HikariConfig();

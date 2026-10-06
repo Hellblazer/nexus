@@ -84,6 +84,9 @@ class HnswScanBudgetOnEverySearchPathIntegrationTest {
         // Seed with the probe disarmed.
         scope.withTenant(TENANT, ctx -> {
             PgContainerHelper.insertCollection(ctx, TENANT, COL);
+            // RDR-225: a centroid is filed under a registered collection, and its model must match the vector
+            // width; the centroid below is 384-wide and its collection name carries no model token.
+            PgContainerHelper.insertCollection(ctx, TENANT, "knowledge__scanbudget", "minilm-l6-v2-384");
             return null;
         });
         List<String> chashes = new ArrayList<>();
