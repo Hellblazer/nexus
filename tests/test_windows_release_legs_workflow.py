@@ -724,7 +724,7 @@ PHASE3_WINDOWS_MODULES = (
 WINDOWS_TEST_SET = (
     "tests/daemon/", "tests/test_process_group_safety.py", "tests/test_session_sweep_orphan_trackers.py",
     "tests/test_win_console.py", "tests/test_winsec.py", "tests/test_winproc_core.py",
-    "tests/test_install_generation_real_windows.py",
+    "tests/test_install_generation_real_windows.py", "tests/test_os_trust_store.py",
     "tests/hooks/test_endpoint_resolve_lease_retry.py",
 )
 
@@ -762,6 +762,7 @@ def test_the_windows_job_runs_the_whole_set_in_one_pytest_with_a_junit_floor() -
 REAL_KERNEL_PATTERNS = (
     "tests.test_winsec.TestRealWindows",
     "tests.test_winproc_core.TestRealWindowsKernel",
+    "tests.test_os_trust_store.TestRealWindows",
     "tests.test_install_generation_real_windows.TestRealWindows",
     "tests.daemon.test_pid_alive_windows.TestRealWindowsKernel",
     "test_hard_killing_the_supervisor_takes_its_job_engine_with_it",
