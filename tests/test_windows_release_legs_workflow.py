@@ -734,6 +734,37 @@ def test_the_windows_job_runs_the_whole_set_in_one_pytest_with_a_junit_floor() -
     assert skipped <= 50, skipped
 
 
+#: The tests only a real Windows run exercises. Each is a ``--require-passed`` pattern in the floor
+#: step, and each must exist in the suite: a pattern that matches nothing fails the gate on its first
+#: run, so a rename would otherwise surface only on the Windows runner.
+REAL_KERNEL_PATTERNS = (
+    "tests.test_winsec.TestRealWindows",
+    "tests.test_winproc_core.TestRealWindowsKernel",
+    "tests.daemon.test_pid_alive_windows.TestRealWindowsKernel",
+    "test_hard_killing_the_supervisor_takes_its_job_engine_with_it",
+)
+
+
+def test_the_floor_names_the_real_kernel_tests_that_must_have_passed() -> None:
+    job = _doc(REHEARSAL)["jobs"]["conformance"]
+    floor = next(s for s in job["steps"] if "check_junit_floor.py" in s.get("run", ""))
+    named = re.findall(r"--require-passed (\S+)", floor["run"])
+    assert tuple(named) == REAL_KERNEL_PATTERNS
+    root = Path(__file__).parent.parent
+    for pattern in named:
+        if pattern.startswith("tests."):
+            parts = pattern.split(".")
+            file = root.joinpath(*parts[:-1]).with_suffix(".py")
+            assert file.is_file(), f"{pattern}: no module {file}"
+            assert f"class {parts[-1]}" in file.read_text(encoding="utf-8"), f"{pattern}: no such class"
+        else:
+            hits = [
+                p for p in (root / "tests").rglob("*.py")
+                if f"def {pattern}" in p.read_text(encoding="utf-8")
+            ]
+            assert hits, f"{pattern}: no such test function"
+
+
 def test_the_windows_job_keeps_the_switch_the_actor_guard_and_never_runs_on_pull_request() -> None:
     doc = _doc(REHEARSAL)
     job = doc["jobs"]["conformance"]

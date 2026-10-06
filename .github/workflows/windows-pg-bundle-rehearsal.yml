@@ -297,8 +297,11 @@ jobs:
       # floor is sized from the measured run above: junit counts an xfail as a skip,
       # so the ceiling is 38 skips + 2 xfail = 40, plus 5 of headroom; the passed
       # floor is about 90% of the 1076 measured, so a suite that quietly lost a tenth
-      # of its tests fails while ordinary additions do not (nexus-f9bgu.33).
+      # of its tests fails while ordinary additions do not (nexus-f9bgu.33). The count
+      # names nothing, so a skipped real-kernel test would sit inside the skip ceiling:
+      # --require-passed names the tests only a real Windows run exercises (the three
+      # real-advapi32/kernel classes and the Job Object test), and each must have PASSED.
       - name: Non-vacuity floor
         if: ${{ !cancelled() }}
         run: |
-          uv run --python 3.13 --frozen python scripts/check_junit_floor.py windows-tests-junit.xml --min-passed 970 --max-skipped 45
+          uv run --python 3.13 --frozen python scripts/check_junit_floor.py windows-tests-junit.xml --min-passed 970 --max-skipped 45 --require-passed tests.test_winsec.TestRealWindows --require-passed tests.test_winproc_core.TestRealWindowsKernel --require-passed tests.daemon.test_pid_alive_windows.TestRealWindowsKernel --require-passed test_hard_killing_the_supervisor_takes_its_job_engine_with_it

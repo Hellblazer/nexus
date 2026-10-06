@@ -50,6 +50,61 @@ def test_a_failure_or_error_fails_a_run_that_otherwise_meets_the_floor(tmp_path:
     assert floor.main([str(report), "--min-passed", "65", "--max-skipped", "4"]) == 1
 
 
+def _named_report(tmp_path: Path, cases: list[tuple[str, str, str]]) -> Path:
+    """``(classname, name, "pass"|"skip"|"fail")`` testcases, plus filler to clear the count floor."""
+    body = []
+    for classname, name, status in cases:
+        inner = {"pass": "", "skip": '<skipped type="pytest.skip"/>', "fail": '<failure message="x"/>'}[status]
+        body.append(f'<testcase classname="{classname}" name="{name}">{inner}</testcase>')
+    body += [f'<testcase classname="tests.filler" name="p{i}"/>' for i in range(10)]
+    path = tmp_path / "named.xml"
+    path.write_text(f'<testsuites><testsuite name="pytest">{"".join(body)}</testsuite></testsuites>')
+    return path
+
+
+_FLOOR = ["--min-passed", "5", "--max-skipped", "9"]
+
+
+def test_a_required_test_that_passed_meets_the_floor(tmp_path: Path) -> None:
+    report = _named_report(tmp_path, [("tests.test_winsec.TestRealWindows", "test_a", "pass")])
+    assert floor.main([str(report), *_FLOOR, "--require-passed", "tests.test_winsec.TestRealWindows"]) == 0
+
+
+def test_a_required_test_that_was_skipped_fails_though_the_counts_are_fine(tmp_path: Path) -> None:
+    """The point of the option: a skipped real-kernel test sits well inside the skip ceiling."""
+    report = _named_report(tmp_path, [("tests.test_winsec.TestRealWindows", "test_a", "skip")])
+    assert floor.main([str(report), *_FLOOR]) == 0, "non-vacuity: the counts alone accept this run"
+    assert floor.main([str(report), *_FLOOR, "--require-passed", "tests.test_winsec.TestRealWindows"]) == 1
+
+
+def test_a_required_test_that_is_absent_from_the_report_fails(tmp_path: Path) -> None:
+    report = _named_report(tmp_path, [("tests.other", "test_a", "pass")])
+    problems = floor.check(report, min_passed=5, max_skipped=9, require_passed=["TestRealWindows"])
+    assert problems == ["required test 'TestRealWindows' is not in the report"]
+
+
+def test_every_match_must_pass_not_just_one(tmp_path: Path) -> None:
+    report = _named_report(tmp_path, [
+        ("tests.test_winsec.TestRealWindows", "test_a", "pass"),
+        ("tests.test_winsec.TestRealWindows", "test_b", "skip"),
+    ])
+    problems = floor.check(report, min_passed=5, max_skipped=9, require_passed=["TestRealWindows"])
+    assert len(problems) == 1 and "test_b (skipped)" in problems[0] and "test_a" not in problems[0]
+
+
+def test_a_required_test_that_failed_is_reported_as_not_passed(tmp_path: Path) -> None:
+    report = _named_report(tmp_path, [("tests.x.TestK", "test_job", "fail")])
+    problems = floor.check(report, min_passed=5, max_skipped=9, require_passed=["test_job"])
+    assert any("test_job (failed)" in p for p in problems)
+
+
+def test_the_pattern_may_be_given_more_than_once(tmp_path: Path) -> None:
+    report = _named_report(tmp_path, [("tests.a.TestA", "t", "pass"), ("tests.b.TestB", "t", "skip")])
+    argv = [str(report), *_FLOOR, "--require-passed", "TestA", "--require-passed", "TestB"]
+    assert floor.main(argv) == 1
+    assert floor.main(argv[:-2]) == 0
+
+
 def test_an_unreadable_report_is_a_failed_gate_not_a_pass(tmp_path: Path) -> None:
     assert floor.main([str(tmp_path / "missing.xml"), "--min-passed", "1", "--max-skipped", "9"]) == 2
     bad = tmp_path / "bad.xml"
