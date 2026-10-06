@@ -774,3 +774,16 @@ def test_the_windows_job_keeps_the_switch_the_actor_guard_and_never_runs_on_pull
     assert SWITCH in str(job["if"])
     assert "pull_request" not in _triggers(doc)
     assert doc["concurrency"]["cancel-in-progress"] is True
+
+
+def test_the_python_resolver_runs_native_commands_with_both_streams_redirected() -> None:
+    # Under the runner service, pwsh 7.6 refused `& uv python find 3.13 2>$null`
+    # with "StandardOutputEncoding is only supported when standard output is
+    # redirected" (seed run 37408239980), so the resolver drives every native
+    # call through Process with stdout and stderr redirected explicitly.
+    action = yaml.safe_load((ACTIONS / "resolve-windows-python" / "action.yml").read_text())
+    run = _code(action["runs"]["steps"][0]["run"])
+    assert "2>$null" not in run and "2>&1" not in run
+    assert "RedirectStandardOutput = $true" in run and "RedirectStandardError = $true" in run
+    assert not re.search(r"&\s*(?:uv|\$py)\b", run), "a bare `& uv`/`& $py` reintroduces pwsh's own native-command path"
+    assert "'python', 'install', '3.13'" in run, "uv keeps Pythons per user; a fresh service account has none"
