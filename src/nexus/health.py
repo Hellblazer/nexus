@@ -1688,6 +1688,17 @@ def _resolve_mcp_binary(binary_name: str) -> tuple[str | None, bool]:
         hit = shutil.which(binary_name, path=directory)
         if not hit:
             continue
+        # On Windows, Python 3.12's which() searches the current directory
+        # first even with path= set, so a planted nx-mcp.exe in the cwd would
+        # come back for every entry (RDR-224, nexus-f9bgu.35). Accept a hit
+        # only from the directory being scanned.
+        try:
+            if os.path.normcase(str(Path(hit).absolute().parent)) != os.path.normcase(
+                str(Path(directory).absolute())
+            ):
+                continue
+        except OSError:
+            continue
         try:
             resolved_dir = str(Path(hit).resolve().parent)
         except OSError:
