@@ -361,13 +361,8 @@ def _check_generation_layout() -> list[HealthResult]:
         return [HealthResult(
             label=label, ok=False, fatal=True,
             detail=(
-                f"{', '.join(reclaimed)} in {bin_dir} are "
-                + (
-                    "launcher copies nexus did not write (the shim record does not "
-                    "match them), not nexus-owned shims"
-                    if _win() else "symlinks, not nexus-owned shims"
-                )
-                + " — uv has taken them back (a stray "
+                f"{', '.join(reclaimed)} in {bin_dir} are symlinks, not "
+                "nexus-owned shims — uv has taken them back (a stray "
                 "`uv tool upgrade conexus` does this), so those commands "
                 "resolve through uv's tree instead of current"
             ),
@@ -384,7 +379,10 @@ def _check_generation_layout() -> list[HealthResult]:
             f"generation(s), shims owned by nexus"
         ),
     )]
-    results.extend(_check_shims_match_template(current, bin_dir, tools, owned))
+    if _win():
+        results.extend(_check_windows_user_path(tools))
+    else:
+        results.extend(_check_shims_match_template(current, bin_dir, tools, owned))
     results.extend(_check_base_interpreters(current, generations))
     results.extend(_check_orphan_uv_install())
     results.extend(_check_generation_holders(current, generations, tools=tools))
@@ -395,6 +393,39 @@ def _win() -> str | None:
     """``"win32"`` on native Windows, else ``None``: the platform argument the
     layout helpers take, and the one place tests move the Windows reading."""
     return "win32" if os.name == "nt" else None
+
+
+def _check_windows_user_path(tools, *, store=None, environ=None) -> list[HealthResult]:
+    """The Windows shim row: the user PATH must carry ``<tools>\\current\\bin``
+    ahead of every other directory that provides ``nx.exe``, and that directory
+    must hold ``nx.exe``.
+
+    Windows nexus writes no launcher into uv's bin dir (a running one cannot be
+    replaced), so this PATH entry IS the shim; if it is missing or shadowed,
+    every new terminal runs whatever ``nx.exe`` comes first instead of
+    ``current``. The persisted user PATH is read, not this process's, which may
+    predate it. ``nx self install`` re-ensures it.
+    """
+    from nexus._install import generation_core  # noqa: PLC0415 — Windows row only
+
+    entry = generation_core.current_launcher_dir(tools)
+    try:
+        problems = generation_core.inspect_user_path(entry, store=store, environ=environ)
+    except Exception as exc:  # noqa: BLE001 — never crash doctor
+        return [HealthResult(
+            label="User PATH", ok=False, warn=True,
+            detail=f"could not check the user PATH — {exc}",
+        )]
+    if not problems:
+        return [HealthResult(
+            label="User PATH", ok=True,
+            detail=f"{entry} is first on the user PATH and provides nx.exe",
+        )]
+    return [HealthResult(
+        label="User PATH", ok=False, fatal=True,
+        detail="; ".join(problems),
+        fix_suggestions=["nx self install    # re-ensures the user PATH entry and the launcher directory"],
+    )]
 
 
 def _check_shims_match_template(current, bin_dir, tools, owned) -> list[HealthResult]:
@@ -408,23 +439,6 @@ def _check_shims_match_template(current, bin_dir, tools, owned) -> list[HealthRe
     this compares against the source of truth rather than a restatement of it.
     """
     from nexus import install_layout  # noqa: PLC0415 — deferred import
-    if _win():
-        # Windows shims are byte copies of the generation's own launcher exe, so
-        # the "template" is that launcher, not render_shim's shell text.
-        bad = install_layout.windows_shim_mismatches(current, bin_dir, owned)
-        if not bad:
-            return [HealthResult(
-                label="Shim contents", ok=True,
-                detail=f"{len(owned)} shim(s) are copies of the current generation's launchers",
-            )]
-        return [HealthResult(
-            label="Shim contents", ok=False, fatal=True,
-            detail=(
-                f"{', '.join(bad)} in {bin_dir} are not copies of "
-                f"{current.name}'s launchers — they run a different generation"
-            ),
-            fix_suggestions=["nx self install    # rewrites the shims from the current generation"],
-        )]
     mismatched = []
     checked = 0
     for name in sorted(owned):  # the caller asked the generation once; no second spawn
@@ -524,9 +538,7 @@ def _check_orphan_uv_install() -> list[HealthResult]:
     # nexus-orhp5: one resolver for "where is uv's tool dir". This site
     # honoured UV_TOOL_DIR but not XDG_DATA_HOME, so it reported "no uv
     # install" on an XDG-relocated box while one sat right there.
-    from nexus.install_layout import uv_conexus_venv  # noqa: PLC0415 — deferred, avoids an import cycle
-
-    from nexus.install_layout import venv_bin  # noqa: PLC0415 — deferred import
+    from nexus.install_layout import uv_conexus_venv, venv_bin  # noqa: PLC0415 — deferred, avoids an import cycle
 
     legacy = uv_conexus_venv()
     if not venv_bin(legacy).is_dir():

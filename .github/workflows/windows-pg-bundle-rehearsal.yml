@@ -117,11 +117,10 @@ on:
       - src/nexus/_winsec.py
       - src/nexus/_install/winproc_core.py
       # The Windows generation installer (RDR-224, nexus-f9bgu.47): junction pointers,
-      # launcher shims and the Windows-aware reap, run natively by
+      # launcher directories, the user-PATH shim and the Windows-aware reap, run natively by
       # tests/test_install_generation_real_windows.py.
       - src/nexus/_install/generation_core.py
       - src/nexus/_install/layout_core.py
-      - src/nexus/_install/shims_core.py
       - src/nexus/_install/gc_core.py
       - src/nexus/db/pg_provision.py
       - src/nexus/db/pg_bundle.py

@@ -13,7 +13,6 @@ behaviour and this is the guard against the Windows branch leaking into it.
 """
 from __future__ import annotations
 
-import json
 import os
 from pathlib import Path
 
@@ -200,25 +199,13 @@ class TestOwnedAndReclaimedOnWindows:
         assert lc.owned_from_declared(frozenset({"nx"}), gen, platform=WIN) == frozenset()
         assert lc.owned_from_declared(frozenset({"nx"}), gen, platform=POSIX) == {"nx"}
 
-    def test_a_file_whose_hash_differs_from_the_record_is_reclaimed(self, tmp_path: Path) -> None:
+    def test_nothing_is_ever_reclaimed_on_windows(self, tmp_path: Path) -> None:
+        """No nexus file lives in uv's bin dir on Windows (the shims are a PATH
+        entry ahead of it), so a launcher uv rewrites there is not a takeover."""
         bin_dir = tmp_path / "bin"
         bin_dir.mkdir()
-        ours = bin_dir / "nx.exe"
-        ours.write_bytes(b"ours")
-        stolen = bin_dir / "nx-mcp.exe"
-        stolen.write_bytes(b"uv wrote this")
-        (bin_dir / lc.SHIMS_SIDECAR_NAME).write_text(json.dumps({
-            "schema": 1, "generation": "g",
-            "shims": {"nx": lc.file_sha256(ours), "nx-mcp": "0" * 64},
-        }))
-        got = lc.reclaimed_from_owned({"nx", "nx-mcp", "nx-gone"}, bin_dir, platform=WIN)
-        assert got == ["nx-mcp"]
-
-    def test_with_no_record_every_present_owned_file_is_reclaimed(self, tmp_path: Path) -> None:
-        bin_dir = tmp_path / "bin"
-        bin_dir.mkdir()
-        (bin_dir / "nx.exe").write_bytes(b"x")
-        assert lc.reclaimed_from_owned({"nx"}, bin_dir, platform=WIN) == ["nx"]
+        (bin_dir / "nx.exe").write_bytes(b"uv wrote this")
+        assert lc.reclaimed_from_owned({"nx"}, bin_dir, platform=WIN) == []
 
     def test_posix_still_means_symlink(self, tmp_path: Path) -> None:
         bin_dir = tmp_path / "bin"
@@ -226,20 +213,6 @@ class TestOwnedAndReclaimedOnWindows:
         (bin_dir / "real").write_text("x")
         (bin_dir / "taken").symlink_to(bin_dir / "real")
         assert lc.reclaimed_from_owned({"real", "taken"}, bin_dir, platform=POSIX) == ["taken"]
-
-    def test_a_shim_that_is_not_a_copy_of_the_generations_launcher_mismatches(self, tmp_path: Path) -> None:
-        gen = _generation(tmp_path, ("nx", "nx-mcp"), platform=WIN)
-        bin_dir = tmp_path / "bin"
-        bin_dir.mkdir()
-        (bin_dir / "nx.exe").write_bytes(lc.venv_script(gen, "nx", platform=WIN).read_bytes())
-        (bin_dir / "nx-mcp.exe").write_bytes(b"another generation's launcher")
-        assert lc.windows_shim_mismatches(gen, bin_dir, {"nx", "nx-mcp"}) == ["nx-mcp"]
-
-    def test_an_unreadable_sidecar_is_no_record(self, tmp_path: Path) -> None:
-        (tmp_path / lc.SHIMS_SIDECAR_NAME).write_text("{not json")
-        assert lc.read_shim_record(tmp_path) == {}
-        (tmp_path / lc.SHIMS_SIDECAR_NAME).write_text('{"schema": 99, "shims": {"nx": "a"}}')
-        assert lc.read_shim_record(tmp_path) == {}
 
 
 class TestIsStaleOnWindows:

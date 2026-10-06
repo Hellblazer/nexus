@@ -5,7 +5,7 @@
 RDR-224, nexus-f9bgu.47. Same claim and same enforcement as the layout, census,
 gc and shims cores. The Windows generation installer is what builds the
 replacement tree while the running nexus keeps executing from its own, and it
-reaches three siblings (``layout_core``, ``shims_core``, ``gc_core``) through
+reaches three siblings (``layout_core``, ``gc_core``, ``winproc_core``) through
 ``_sibling``. That accessor is the thing most likely to be "simplified" later
 into a package import, which would pass every test and fail during an install.
 """
@@ -17,7 +17,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from nexus._install import gc_core, generation_core, shims_core
+from nexus._install import gc_core, generation_core
 from nexus._install import layout_core as package_layout
 
 _INSTALL = Path(__file__).resolve().parents[1] / "src" / "nexus" / "_install"
@@ -76,9 +76,11 @@ assert os.readlink(tools / "previous") == str(tools / "gen-A"), "previous"
 ns["register_legacy"](Path({str(legacy)!r}), tools, ops=ops, platform="linux")
 assert os.readlink(tools / "gen-legacy-uv-tool") == {str(legacy)!r}, "register"
 assert ns["legacy_extras"](Path({str(legacy)!r})) == ["local"], "extras"
+store = ns["FileUserPath"](tools / "p.txt")
+result = ns["ensure_user_path"]("C:/nx/current/bin", uv_bin="C:/uv", store=store, environ=dict())
+assert result.changed and store.read()[0] == "C:/nx/current/bin", "user path"
 # One module object per process: the three siblings, loaded by path.
 assert ns["_layout"]() is ns["_gc"]()._layout()
-assert ns["_layout"]() is ns["_shims"]()._layout()
 print("OK")
 '''
     r = subprocess.run(
@@ -91,5 +93,4 @@ print("OK")
 
 def test_the_package_world_shares_one_module_per_sibling() -> None:
     assert generation_core._layout() is package_layout
-    assert generation_core._shims() is shims_core
     assert generation_core._gc() is gc_core

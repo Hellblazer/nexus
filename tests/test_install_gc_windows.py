@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from shutil import rmtree as shutil_rmtree
 
 import pytest
 
@@ -247,6 +248,62 @@ class TestWindowsLegacyLedger:
         assert lines[0].startswith(f"kept {pointer}: in use"), lines
         assert venv.is_dir() and pointer.is_symlink()
 
+    def test_a_half_deleted_legacy_tree_keeps_its_pointer_and_is_reaped_on_a_later_run(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A running Scripts\\python.exe stops the delete after pyvenv.cfg is gone.
+        The next run must not read that as "not a venv", unlink the pointer and
+        say reaped: the partial tree would be stranded with nothing naming it."""
+        _tools, venv, pointer = self._legacy(tmp_path)
+        (venv / "Scripts" / "python.exe").write_bytes(b"locked")
+        real_unlink = os.unlink
+
+        def locked_run(path, on_error):
+            # Everything but the locked interpreter and its parent goes, and
+            # pyvenv.cfg is among what went.
+            (path / "pyvenv.cfg").unlink(missing_ok=True)
+            shutil_rmtree(path / "Lib", ignore_errors=True)
+            on_error(os.unlink, str(path / "Scripts" / "python.exe"), PermissionError(32, "in use"))
+
+        def unlink(p, *a, **kw):
+            if str(p).endswith("python.exe"):
+                raise PermissionError(32, "in use")
+            return real_unlink(p, *a, **kw)
+
+        monkeypatch.setattr(gc_core, "_rmtree", locked_run)
+        monkeypatch.setattr(os, "unlink", unlink)
+        first = gc_core._reap(pointer, lambda _m: None, WIN)
+        assert first[0].startswith(f"kept {pointer}: in use"), first
+        assert not (venv / "pyvenv.cfg").exists() and (venv / "Scripts" / "python.exe").exists()
+        assert pointer.is_symlink()
+
+        # Still locked on the second run: still kept, still never "reaped".
+        second = gc_core._reap(pointer, lambda _m: None, WIN)
+        assert second[0].startswith(f"kept {pointer}: in use") and "reaped" not in second[0]
+        assert pointer.is_symlink() and venv.is_dir()
+
+        # Unlocked: the real deletion finishes the tree and then the pointer.
+        monkeypatch.undo()
+        monkeypatch.setattr(os.path, "realpath", lambda s, **_kw: s)
+        third = gc_core._reap(pointer, lambda _m: None, WIN)
+        assert third == [f"reaped {pointer}"]
+        assert not venv.exists() and not pointer.is_symlink()
+
+    def test_a_tree_with_neither_a_cfg_nor_a_venv_interpreter_is_still_not_a_venv(
+        self, tmp_path: Path,
+    ) -> None:
+        tools = tmp_path / "tools"
+        tools.mkdir()
+        python_root = tmp_path / "Python313"
+        (python_root / "Scripts").mkdir(parents=True)
+        (python_root / "python.exe").write_bytes(b"p")
+        (python_root / "Scripts" / "pip.exe").write_bytes(b"p")
+        pointer = tools / "gen-legacy-uv-tool"
+        pointer.symlink_to(python_root)
+        gc_core._reap(pointer, lambda _m: None, WIN)
+        assert (python_root / "python.exe").exists() and (python_root / "Scripts" / "pip.exe").exists()
+        assert not pointer.is_symlink()
+
     def test_a_pointer_at_a_non_venv_unlinks_only_the_pointer(self, tmp_path: Path) -> None:
         tools = tmp_path / "tools"
         tools.mkdir()
@@ -259,6 +316,21 @@ class TestWindowsLegacyLedger:
         gc_core._reap(pointer, errs.append, WIN)
         assert (home / "keep.txt").exists()
         assert not pointer.is_symlink()
+
+
+def test_the_plan_attributes_holders_with_the_windows_folding(tmp_path: Path) -> None:
+    """generation_holder_pids was called without the platform, so a holder whose
+    argv spells the tree in another case read as absent: the under-reporting
+    direction. With platform=win32 it is held."""
+    tools = tmp_path / "tools"
+    gens = [_gen(tools, f"gen-{n}") for n in "ABC"]
+    _ages(*gens)
+    spelt = str(gens[0]).replace(os.sep, "/").upper()
+    snapshot = f"4242 {spelt}/Scripts/PYTHON.EXE -m nexus\n"
+    held = _actions(gc_core.plan(tools, keep=1, snapshot=snapshot, platform=WIN))
+    assert held["gen-A"] == "keep"
+    free = _actions(gc_core.plan(tools, keep=1, snapshot=snapshot, platform="linux"))
+    assert free["gen-A"] == "reap"
 
 
 def test_the_full_sweep_on_windows_keeps_held_and_protected(tmp_path: Path) -> None:

@@ -15,7 +15,9 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 import time
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -23,7 +25,6 @@ import pytest
 from nexus._install import gc_core
 from nexus._install import generation_core as gen_core
 from nexus._install import layout_core as lc
-from nexus._install import shims_core
 
 ON_WINDOWS = os.name == "nt"
 
@@ -95,32 +96,30 @@ class TestRealWindows:
         gen_core.rollback_current(tools)
         assert lc.current_generation(tools=tools).name == "gen-A"
 
-    def test_a_running_launcher_is_displaced_and_replaced(self, tmp_path: Path) -> None:
-        running = _copy_of_cmd(tmp_path / "nx.exe")
-        replacement = _copy_of_cmd(tmp_path / "new-launcher.exe")
-        replacement.write_bytes(replacement.read_bytes() + b"\0new")
-        again = tmp_path / "again.exe"
-        shutil.copyfile(replacement, again)
-        child = _sleeper(running)
-        try:
-            time.sleep(0.5)
-            assert child.poll() is None
-            with pytest.raises(PermissionError):
-                os.replace(replacement, running)  # the premise: a plain overwrite is refused
-            shims_core._install_exe(again, running)
-            assert running.read_bytes() == replacement.read_bytes()
-            aside = list(tmp_path.glob("nx.exe.old-*"))
-            assert len(aside) == 1, aside
-            assert child.poll() is None
-        finally:
-            child.kill()
-            child.wait()
-        for _ in range(50):  # the image section is released a moment after exit
-            shims_core._sweep_displaced(tmp_path)
-            if not list(tmp_path.glob("nx.exe.old-*")):
-                break
-            time.sleep(0.1)
-        assert list(tmp_path.glob("nx.exe.old-*")) == []
+    def test_the_real_user_path_registry_value_is_readable_and_left_untouched(self) -> None:
+        """Read-only: the store seam reads HKCU\\Environment without writing."""
+        value, reg_type = gen_core.RegistryUserPath().read()
+        assert isinstance(value, str)
+        assert reg_type in (1, 2), reg_type  # REG_SZ or REG_EXPAND_SZ
+
+    def test_gc_plan_protects_real_junction_current_and_previous(self, tmp_path: Path) -> None:
+        tools = tmp_path / "tools"
+        tools.mkdir()
+        gens = {}
+        for name in ("A", "B", "C", "D"):
+            gen = tools / f"gen-{name}"
+            gen.mkdir()
+            (gen / "nexus-install.json").write_text("{}\n")
+            gens[name] = gen
+        gen_core.flip_current(gens["B"], tools)
+        gen_core.flip_current(gens["C"], tools)  # current -> C, previous -> B, both junctions
+        assert lc.is_link(tools / "current") and lc.is_link(tools / "previous")
+        plan = {entry.name: (action, detail) for action, entry, detail in gc_core.plan(
+            tools, keep=1, snapshot="",
+        )}
+        assert plan["gen-C"] == ("skip", "protected pointer"), plan
+        assert plan["gen-B"] == ("skip", "protected pointer"), plan
+        assert plan["gen-A"][0] == "reap", plan
 
     def test_a_generation_held_by_an_open_file_is_kept_then_reaped(self, tmp_path: Path) -> None:
         tools = tmp_path / "tools"
@@ -150,3 +149,56 @@ class TestRealWindows:
         assert gc_core._reap(pointer, errors.append) == []
         assert (target / "data.txt").read_text() == "data"
         assert any("unrecognised generation symlink" in e for e in errors)
+
+
+def _build_demo_wheel(directory: Path) -> Path:
+    """A one-module wheel whose console script prints ``sys.prefix``: a real
+    launcher without a network, a build backend or a package index."""
+    wheel = directory / "nxdemo-1.0-py3-none-any.whl"
+    info = "nxdemo-1.0.dist-info"
+    files = {
+        "nxdemo.py": "import sys\n\n\ndef main():\n    print(sys.prefix)\n",
+        f"{info}/METADATA": "Metadata-Version: 2.1\nName: nxdemo\nVersion: 1.0\n",
+        f"{info}/WHEEL": "Wheel-Version: 1.0\nGenerator: test\nRoot-Is-Purelib: true\nTag: py3-none-any\n",
+        f"{info}/entry_points.txt": "[console_scripts]\nnxdemo = nxdemo:main\n",
+    }
+    record = "".join(f"{name},,\n" for name in files) + f"{info}/RECORD,,\n"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        for name, body in files.items():
+            archive.writestr(name, body)
+        archive.writestr(f"{info}/RECORD", record)
+    return wheel
+
+
+class TestRealLauncherThroughJunction:
+    """A launcher copied into ``<gen>\\bin`` and run through ``current`` reports
+    the REAL generation as ``sys.prefix``, not the junction: the property the
+    whole PATH-entry design depends on. Needs ``uv`` (present on the runner);
+    skips with that reason where it is not, and is not in the floor's
+    ``--require-passed`` set for that reason."""
+
+    @pytest.mark.skipif(not ON_WINDOWS, reason="needs the Windows launcher and junctions")
+    def test_sys_prefix_through_current_bin_is_the_real_generation(self, tmp_path: Path) -> None:
+        uv = shutil.which("uv")
+        if uv is None:
+            pytest.skip("uv is not on PATH, so no real venv can be built here")
+        gen = tmp_path / "tools" / "gen-A"
+        gen.parent.mkdir()
+        wheel = _build_demo_wheel(tmp_path)
+        subprocess.run([uv, "venv", "--python", sys.executable, str(gen)], check=True, capture_output=True)
+        subprocess.run(
+            [uv, "pip", "install", "--offline", "--no-deps", "--python", str(gen / "Scripts" / "python.exe"), str(wheel)],
+            check=True, capture_output=True,
+        )
+        assert (gen / "Scripts" / "nxdemo.exe").is_file(), "the install made no launcher"
+        gen_core.populate_launchers(gen, dist="nxdemo")
+        assert (gen / "bin" / "nxdemo.exe").is_file()
+        current = gen.parent / "current"
+        gen_core.swap_link(str(gen), current, gen_core.LinkOps())
+        done = subprocess.run(
+            [str(current / "bin" / "nxdemo.exe")], check=True, capture_output=True, text=True,
+        )
+        printed = done.stdout.strip()
+        assert printed, "the launcher printed nothing"
+        assert lc.compare_key(printed) == lc.compare_key(str(gen)), printed
+        assert "current" not in Path(printed).parts, "sys.prefix leaked the junction"

@@ -461,7 +461,7 @@ def test_the_pid_recycle_guard_still_refuses_a_foreign_command(
 
 
 def test_the_gate_is_true_for_a_windows_shaped_generation(tmp_path, monkeypatch) -> None:
-    """nexus-f9bgu.47: a Windows venv keeps site-packages at <venv>\Lib\site-packages,
+    """nexus-f9bgu.47: a Windows venv keeps site-packages at <venv>/Lib/site-packages,
     one level shallower than POSIX; the fixed parents[2] named the tools dir instead."""
     tools = tmp_path / "tools"
     tools.mkdir()

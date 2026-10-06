@@ -87,7 +87,6 @@ state) -- so the rule is implemented once, not twice.
 from __future__ import annotations
 
 import dataclasses
-import hashlib
 import json
 import ntpath
 import os
@@ -168,17 +167,6 @@ for ep in eps:
 # default on a POSIX host every one of them returns exactly what it returned
 # before, which is what keeps the shell twins' pins green.
 # ---------------------------------------------------------------------------
-
-#: ``<bin>/.nexus-shims.json``, the Windows shim ownership record. POSIX shims
-#: are text files that carry a marker line; a Windows shim is a copy of the
-#: generation's own launcher exe, which has no room for one, so ownership is
-#: recorded beside the shims instead: the names nexus wrote and the sha256 of
-#: each file it wrote.
-SHIMS_SIDECAR_NAME = ".nexus-shims.json"
-
-#: Format version of the sidecar. An unknown schema reads as "no record".
-SHIMS_SIDECAR_SCHEMA = 1
-
 
 def _is_nt(platform: str | None = None) -> bool:
     """True for the native-Windows reading of a path question."""
@@ -300,30 +288,6 @@ def remove_link(path: Path | str) -> None:
         os.rmdir(candidate)
     else:
         raise LayoutError(f"refusing to remove {candidate}: it is not a link")
-
-
-def file_sha256(path: Path) -> str:
-    """sha256 of the file at *path*, hex."""
-    digest = hashlib.sha256()
-    with open(path, "rb") as handle:
-        for block in iter(lambda: handle.read(1 << 20), b""):
-            digest.update(block)
-    return digest.hexdigest()
-
-
-def read_shim_record(bin_dir: Path) -> dict[str, str]:
-    """``{shim name: sha256}`` from the Windows sidecar; empty when it is absent,
-    unreadable, or of a schema this code does not know."""
-    try:
-        payload = json.loads((bin_dir / SHIMS_SIDECAR_NAME).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
-    if not isinstance(payload, dict) or payload.get("schema") != SHIMS_SIDECAR_SCHEMA:
-        return {}
-    shims = payload.get("shims")
-    if not isinstance(shims, dict):
-        return {}
-    return {str(k): str(v) for k, v in shims.items()}
 
 
 def declared_console_scripts_detail(
@@ -464,52 +428,15 @@ def owned_shim_names(
 def reclaimed_from_owned(
     owned: frozenset[str] | set[str], bin_dir: Path, *, platform: str | None = None,
 ) -> list[str]:
-    """Which of the *owned* shim names at *bin_dir* are not nexus's own file.
+    """Which of the *owned* shim names at *bin_dir* are symlinks (uv's).
 
-    POSIX: the ones that are symlinks (uv's). Windows: uv writes a COPY of its
-    launcher there, not a link, so the test is the sidecar's record -- an owned
-    name whose file is present and either has no record or no longer hashes to
-    the record is a file nexus did not write.
+    POSIX only. On Windows there is nothing to reclaim: nexus writes no files
+    into uv's bin dir (the shims are a PATH entry, ``<tools>\\current\\bin``,
+    ahead of it), so uv rewriting its own launchers there is harmless.
     """
-    if not _is_nt(platform):
-        return [name for name in sorted(owned) if (bin_dir / name).is_symlink()]
-    record = read_shim_record(bin_dir)
-    out: list[str] = []
-    for name in sorted(owned):
-        exe = bin_dir / exe_name(name, platform=platform)
-        if not exe.is_file():
-            continue
-        try:
-            written = record.get(name)
-            if written is None or written != file_sha256(exe):
-                out.append(name)
-        except OSError:
-            out.append(name)
-    return out
-
-
-def windows_shim_mismatches(
-    generation: Path, bin_dir: Path, owned: frozenset[str] | set[str],
-    *, platform: str | None = "win32",
-) -> list[str]:
-    """Owned shims whose file is not a byte copy of *generation*'s own launcher.
-
-    The Windows counterpart of comparing a shim to ``render_shim``'s text: the
-    template IS the generation's launcher exe, so a shim that differs is bound
-    to some other generation (or to nothing nexus wrote).
-    """
-    out: list[str] = []
-    for name in sorted(owned):
-        shim = bin_dir / exe_name(name, platform=platform)
-        source = venv_script(generation, name, platform=platform)
-        if not shim.is_file() or not source.is_file():
-            continue
-        try:
-            if file_sha256(shim) != file_sha256(source):
-                out.append(name)
-        except OSError:
-            out.append(name)
-    return out
+    if _is_nt(platform):
+        return []
+    return [name for name in sorted(owned) if (bin_dir / name).is_symlink()]
 
 
 def reclaimed_shims(

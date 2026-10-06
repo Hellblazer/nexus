@@ -274,7 +274,7 @@ def plan(
             out.append(("skip", entry, "protected pointer"))
             continue
 
-        holders = census.generation_holder_pids(entry, snapshot=view)
+        holders = census.generation_holder_pids(entry, snapshot=view, platform=platform)
         if holders:
             # Said on stdout: a held tree outside the keep window is 1.7 GB the
             # operator cannot see go, and a reap that only reported deletions
@@ -340,6 +340,28 @@ def _reap_windows_tree(path: Path) -> tuple[bool, str]:
     return False, f"could not remove {len(failures) or 1} item(s), first {first[0]}: {first[1]}"
 
 
+def _looks_like_venv(target: Path, nt: bool) -> bool:
+    """Whether *target* is the venv the ledger claims, as far as a reap can tell.
+
+    ``pyvenv.cfg`` alone is the POSIX test. On Windows it is not enough: a reap
+    that a running ``Scripts\\python.exe`` stops half-way has already removed
+    ``pyvenv.cfg`` (NTFS lists ``Include``, ``Lib``, ``pyvenv.cfg``, ``Scripts``),
+    so the NEXT run read the remains as "not a venv", unlinked the pointer, and
+    printed ``reaped``, stranding the partial tree with nothing left to name it.
+    A tree that still holds uv's receipt or a venv interpreter is the same
+    venv, mid-delete. A Python install root (``python.exe`` at the root, not in
+    ``Scripts``) and a home directory are neither.
+    """
+    if (target / "pyvenv.cfg").is_file():
+        return True
+    if not nt:
+        return False
+    layout = _layout()
+    return (target / "uv-receipt.toml").is_file() or layout.venv_python(
+        target, platform="win32",
+    ).is_file()
+
+
 def _reap(entry: Path, emit_err, platform: str | None = None) -> list[str]:
     """Delete one planned entry. Returns the lines to print on stdout.
 
@@ -390,7 +412,7 @@ def _reap(entry: Path, emit_err, platform: str | None = None) -> list[str]:
         return []
 
     target = Path(real)
-    if not target.is_dir() or not (target / "pyvenv.cfg").is_file():
+    if not target.is_dir() or not _looks_like_venv(target, nt):
         emit_err(f"nexus: ledger target is not a venv, unlinking the pointer only: {real}")
         if nt:
             layout.remove_link(entry)

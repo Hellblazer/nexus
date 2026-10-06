@@ -38,10 +38,11 @@ caller. It now distinguishes three sites rather than two:
 NATIVE WINDOWS (RDR-224, nexus-f9bgu.47). ``bash`` on Windows is the WSL
 launcher, so every ``_sh``/``bash`` call here has a Windows twin that calls
 ``nexus._install.generation_core`` directly: build with uv, flip junctions,
-copy launcher shims, reap with Windows-aware rules, migrate a legacy uv tree.
-Each branch asks ``_is_windows()``; the POSIX path below it is unchanged.
-Out of scope on Windows: the dev-checkout reinstall script, and
-``repair_uv_takeover`` (it refuses, naming that).
+put ``<tools>\\current\\bin`` first on the user PATH (the Windows shim: nexus
+writes no launcher into uv's bin dir, because a running one cannot be
+replaced), reap with Windows-aware rules, migrate a legacy uv tree. Each branch
+asks ``_is_windows()``; the POSIX path below it is unchanged. Out of scope on
+Windows: the dev-checkout reinstall script.
 
 SCOPE FENCE. This replaces the MECHANISM of ``uv tool upgrade conexus``. It
 does NOT merge that with ``nx upgrade``. RDR-143 CA-2 keeps them two commands
@@ -551,10 +552,18 @@ def _build_flip_shims(build, *, install_dir: Path, tools: Path, bin_dir: Path) -
     return generation
 
 
+def _echo_path_result(result) -> None:
+    """Tell the operator when the user PATH changed: the one-time step whose
+    effect reaches only programs started AFTER it."""
+    if result.changed:
+        click.echo(_generation().restart_notice(result.entry))
+
+
 def _windows_build_flip_shims(build: _WindowsBuild, *, tools: Path, bin_dir: Path) -> Path:
     """The Windows twin of the build, flip and shim steps, through
-    ``generation_core``. A build failure keeps the POSIX path's wording and its
-    package-index diagnosis; nothing is flipped unless the build finished."""
+    ``generation_core``: the shim step is the user PATH entry. A build failure
+    keeps the POSIX path's wording and its package-index diagnosis; nothing is
+    flipped unless the build finished."""
     core = _generation()
     try:
         generation = core.build_generation(
@@ -571,10 +580,12 @@ def _windows_build_flip_shims(build: _WindowsBuild, *, tools: Path, bin_dir: Pat
         ) from exc
     try:
         core.flip_current(generation, tools, platform=_plat())
-        for line in core.write_shims(generation, bin_dir, platform=_plat()):
-            click.echo(line, err=True)
+        _echo_path_result(core.ensure_user_path(core.current_launcher_dir(tools)))
     except core.GenerationError as exc:
-        raise click.ClickException(f"flip or shim write failed:\n{exc}") from exc
+        raise click.ClickException(
+            f"flip or user PATH update failed (`nx self install` re-runs the missing "
+            f"steps):\n{exc}"
+        ) from exc
     return generation
 
 
@@ -650,14 +661,15 @@ def repair_uv_takeover(*, dry_run: bool = False) -> list[str]:
     a takeover; ``nx self install`` converges it) or nothing is wrong.
     """
     if _is_windows():
-        # Not ported (RDR-224, nexus-f9bgu.47): the repair rewrites shims over
-        # uv symlinks and compares uv's tree to ``current``, and on Windows uv
-        # copies launchers rather than linking them. Refuse rather than guess.
-        raise click.ClickException(
-            "repairing a uv takeover is not supported on Windows. Run "
-            "`nx self install` to build a fresh generation and rewrite the "
-            "shims, then `nx self gc` once nothing runs from uv's tree."
-        )
+        # uv rewriting its own launchers is harmless on Windows (current\\bin is
+        # ahead of them on the PATH), so the repair is to re-ensure the PATH
+        # entry, the launcher directory and the legacy ledger. The same call
+        # finishes a migration that stopped after the flip.
+        core = _generation()
+        try:
+            return core.repair_layout(dry_run=dry_run, platform="win32")
+        except core.GenerationError as exc:
+            raise click.ClickException(f"repairing the Windows layout failed:\n{exc}") from exc
     from nexus import install_layout  # noqa: PLC0415 — deferred import
 
     tools = install_layout.tools_dir()
@@ -857,6 +869,7 @@ def _windows_converge_legacy_install(
     try:
         generation = core.migrate_legacy(
             "conexus", version=version or "", tools=tools, platform=_plat(),
+            on_path=_echo_path_result,
         )
     except core.GenerationError as exc:
         detail = str(exc)
@@ -907,16 +920,7 @@ def _reap_generations(
     generation and never raises: a reap that cannot run leaves the trees
     where they are, which is the safe direction."""
     if _is_windows():
-        core = _generation()
-        try:
-            return core.reap(
-                tools, keep=keep, self_generation=self_generation, dry_run=dry_run,
-                platform="win32",
-            )
-        except (OSError, core.GenerationError) as exc:
-            # A reap that cannot run leaves the trees where they are.
-            click.echo(f"nexus: generation reap did not run: {exc}", err=True)
-            return []
+        return _windows_reap(tools, keep=keep, self_generation=self_generation, dry_run=dry_run)
     self_arg = f' --self "{self_generation}"' if self_generation is not None else ""
     dry_arg = " --dry-run" if dry_run else ""
     out = _sh(
@@ -925,6 +929,46 @@ def _reap_generations(
         check=False,
     )
     return [line for line in out.splitlines() if line.strip()]
+
+
+def _windows_reap(
+    tools: Path, *, keep: int, self_generation: Path | None, dry_run: bool,
+) -> list[str]:
+    """The Windows reap: ``generation_core.reap``, then uv's old launchers.
+
+    Once the legacy uv tree is gone (reaped just now, or long ago), uv's
+    conexus launchers in uv's bin dir are dead weight that ``current\\bin``
+    already precedes; they are removed best-effort, a locked one is ``kept (in
+    use)`` for the next run. The names come from the legacy ``uv-receipt.toml``,
+    read BEFORE the reap deletes it, else the distribution's declared console
+    scripts. Never anything else, and never when ``current\\bin`` has no
+    replacement.
+    """
+    from nexus import install_layout  # noqa: PLC0415 — deferred import
+
+    core = _generation()
+    legacy = install_layout.uv_conexus_venv(platform="win32")
+    names = core.legacy_launcher_names(legacy) if legacy.is_dir() else []
+    try:
+        lines = core.reap(
+            tools, keep=keep, self_generation=self_generation, dry_run=dry_run,
+            platform="win32",
+        )
+    except (OSError, core.GenerationError) as exc:
+        # A reap that cannot run leaves the trees where they are.
+        click.echo(f"nexus: generation reap did not run: {exc}", err=True)
+        return []
+    if legacy.is_dir():
+        return lines  # uv's tree is still there (held, or registered for a later pass)
+    try:
+        current = install_layout.current_generation(tools=tools, platform="win32")
+    except install_layout.InstallLayoutError:
+        return lines
+    names = names or core.declared_launcher_names(current, platform="win32")
+    return lines + core.remove_uv_launchers(
+        core.uv_bin_dir(), names, core.current_launcher_dir(tools),
+        dry_run=dry_run, platform="win32",
+    )
 
 
 def perform_self_gc(*, keep: int = 3, dry_run: bool = False) -> list[str] | None:
