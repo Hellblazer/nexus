@@ -30,6 +30,10 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+
+# Anchored to the repo root, not the cwd: another test in the same xdist worker
+# can leave the cwd changed, and these reads then miss (seen on hellmini).
+_SRC = Path(__file__).resolve().parents[1] / "src" / "nexus"
 from click.testing import CliRunner
 
 from nexus.commands.store import _list_documents
@@ -443,13 +447,13 @@ class TestDriftGuard:
         ``note_write.fire_note_chains`` (the batch chain without the manifest hook: the one request
         already wrote the manifest). ``nx store import`` still goes through ``fire_store_chains``."""
         for rel, function in (("commands/memory.py", "promote_cmd"), ("commands/store.py", "put_cmd")):
-            calls = self._calls_in(Path("src/nexus", rel).read_text(), function)
+            calls = self._calls_in((_SRC / rel).read_text(), function)
             assert "fire_note_chains" in calls, (
                 f"src/nexus/{rel}::{function} must fire the post-store chains through "
                 "note_write.fire_note_chains (nexus-9099 regression)")
             assert not calls & {"fire_single", "fire_batch", "fire_document", "fire_store_chains"}, (
                 f"{function} must not hand-copy the firing: {sorted(calls)}")
-        exporter_calls = self._calls_in(Path("src/nexus/exporter.py").read_text())
+        exporter_calls = self._calls_in((_SRC / "exporter.py").read_text())
         assert exporter_calls & {"fire_store_chains", "_fire_store_chains_grouped_by_doc"}, (
             "src/nexus/exporter.py must call HookRegistry.fire_store_chains "
             "from import_collection (nexus-9099 regression)")
@@ -468,7 +472,7 @@ class TestDriftGuard:
 
     def test_the_chains_are_fired_after_put_note_in_put_cmd(self):
         """In commands/store.py:put_cmd, the chains are fired only after put_note returned."""
-        src = Path("src/nexus/commands/store.py").read_text()
+        src = (_SRC / "commands" / "store.py").read_text()
         tree = ast.parse(src)
         for node in ast.walk(tree):
             if isinstance(node, ast.FunctionDef) and node.name == "put_cmd":
