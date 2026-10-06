@@ -35,7 +35,9 @@ import static org.assertj.core.api.Assertions.assertThat;
  * {@code plpgsql_check} extension. PostgreSQL checks a plpgsql body against its tables only when the body runs,
  * so a write site that missed the {@code embedding_model} column or kept a three-column conflict target would
  * surface only when some path executed it (the RDR's "a write site missed in the rewrite" failure mode). This
- * gate catches it at build time.
+ * gate catches an arity mismatch or a conflict target that matches no unique constraint at build time. It cannot
+ * see an INSERT that omits a NOT NULL column (the omitted column is not a static error), so a writer that never
+ * lists {@code embedding_model} is caught only by the runtime write-family tests.
  *
  * <p>The database is the FULL master changelog walked into an image built {@code FROM} the engine tests' own
  * pgvector image plus the {@code postgresql-17-plpgsql-check} package, then {@code CREATE EXTENSION
@@ -67,8 +69,10 @@ class PlpgsqlCheckGateTest {
     static final List<Allowed> ALLOWED_IN_VECTORS_030 = List.of(
         // The three GC/reaper movers create a TEMP TABLE inside the body and read it afterwards. The relation does
         // not exist when the analyser runs, so every later reference is reported. These are the bodies' own run-time
-        // tables (vectors-022, vectors-024), not missing objects; the mutation checks below show a real missing
-        // column in the same functions is still caught.
+        // tables (vectors-022, vectors-024), not missing objects. The analyser skips the statements over those
+        // tables, so a column dropped from the INSERT list of one of these three movers is NOT caught here: they
+        // are covered by their runtime tests (GcQuarantineOrphansBoundedTest, PgVectorRepositoryGcQuarantineTest,
+        // ChunkReaperIntegrationTest).
         new Allowed("gc_quarantine_orphans", "error", "_wbfpw16_victim", "run-time TEMP TABLE the body creates"),
         new Allowed("gc_quarantine_orphans_bounded", "error", "_a6mon_victim", "run-time TEMP TABLE the body creates"),
         new Allowed("reaper_quarantine_chunks", "error", "_x9_victim", "run-time TEMP TABLE the body creates"),

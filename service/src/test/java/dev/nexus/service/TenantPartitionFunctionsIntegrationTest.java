@@ -277,6 +277,27 @@ class TenantPartitionFunctionsIntegrationTest {
         }
     }
 
+    @Test
+    void createModelPartition_alsoCoversATenantThatHasLeavesUnderASiblingModelButNoToken() throws Exception {
+        // RDR-225 (nexus-3wh8d.10 M5): the walk gives leaves to every tenant seen in chunks or centroids, token
+        // or not. A model added LATER must cover the same set, or such a tenant's first write under the new
+        // model fails with "no partition of relation found for row".
+        try (Connection a = admin(); Connection s = svc()) {
+            var ctx = dsl(a);
+            PgContainerHelper.seedServiceToken(ctx, "tok-alpha-p225", "alpha", "p225");
+            PartitionScratch.createModelPartition(ctx, CHUNKS_NEW, CODE_3, true);
+            // a tenant with data and no token: the walk's shape, made here through the definer function
+            assertThat(PartitionScratch.createTenantPartitions(dsl(s), CHUNKS_NEW, "notoken", true)).isEqualTo(1);
+
+            PartitionScratch.createModelPartition(ctx, CHUNKS_NEW, CONTEXT_3, true);
+
+            assertThat(names(PartitionScratch.children(ctx, expectedName(CHUNKS_NEW, CONTEXT_3, null))))
+                .containsExactlyInAnyOrder(
+                    expectedName(CHUNKS_NEW, CONTEXT_3, "alpha"), expectedName(CHUNKS_NEW, CONTEXT_3, "notoken"),
+                    expectedName(CHUNKS_NEW, CONTEXT_3, "default"));
+        }
+    }
+
     // ── 4. create_tenant_partitions ──────────────────────────────────────────
 
     private void twoModelsOnBothParents() throws Exception {

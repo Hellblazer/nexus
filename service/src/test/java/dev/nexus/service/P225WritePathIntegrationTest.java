@@ -505,7 +505,7 @@ class P225WritePathIntegrationTest {
         register(t2, CODE_3);
         chunk(repo(1024), s, 91, "rehome me");
         assertThatThrownBy(() -> catalog.rehomeCollection(TA, s, t))
-            .isInstanceOf(CatalogRepository.RehomeRefused.class)
+            .isInstanceOf(dev.nexus.service.db.CollectionModelMismatchException.class)
             .hasMessageContaining(CODE_3).hasMessageContaining(CONTEXT_3).hasMessageContaining(s).hasMessageContaining(t);
         assertThat(countIn(s)).isEqualTo(1);
         var result = catalog.rehomeCollection(TA, s, t2);

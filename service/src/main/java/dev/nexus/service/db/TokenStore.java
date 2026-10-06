@@ -98,9 +98,9 @@ public final class TokenStore {
 
     /**
      * Run {@code work} in a transaction with the tenant-creation bound, retrying a lock wait. A
-     * SQLSTATE 55P03 (a lock the creation needed was held past its {@code lock_timeout}) or 57014 (the
-     * statement ran past {@link TenantCreationBound#statementTimeout()}) rolls the attempt back;
-     * anything else propagates unchanged. Exhausting the attempts throws
+     * SQLSTATE 55P03 (a lock the creation needed was held past its {@code lock_timeout}), 57014 (the
+     * statement ran past {@link TenantCreationBound#statementTimeout()}) or 40P01 (the transaction was
+     * the victim of a deadlock) rolls the attempt back; anything else propagates unchanged. Exhausting the attempts throws
      * {@link TenantCreationBusyException}.
      */
     private <T> T boundedTokenTransaction(String tenant, java.util.function.Function<DSLContext, T> work) {
@@ -142,12 +142,19 @@ public final class TokenStore {
         return lockWaitState(t) != null;
     }
 
-    /** "55P03" or "57014" when a cause in {@code t}'s chain carries it, else null. */
-    private static String lockWaitState(Throwable t) {
+    /**
+     * "55P03", "57014" or "40P01" when a cause in {@code t}'s chain carries it, else null. 40P01 is a
+     * deadlock this transaction was chosen to lose: the partition creation holds ACCESS EXCLUSIVE on a
+     * model partition and then queues for the tables that reference chunks, so a writer that holds one
+     * of them and needs that partition closes a cycle, and PostgreSQL may end it on the token
+     * transaction. Nothing was issued, so it is retried like the other two.
+     */
+    static String lockWaitState(Throwable t) {
         Throwable c = t;
         for (int depth = 0; c != null && depth < 32; depth++, c = c.getCause()) {
             if (c instanceof java.sql.SQLException se
-                    && ("55P03".equals(se.getSQLState()) || "57014".equals(se.getSQLState()))) {
+                    && ("55P03".equals(se.getSQLState()) || "57014".equals(se.getSQLState())
+                        || "40P01".equals(se.getSQLState()))) {
                 return se.getSQLState();
             }
         }

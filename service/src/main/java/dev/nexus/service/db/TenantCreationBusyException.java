@@ -9,8 +9,8 @@ package dev.nexus.service.db;
  * <p>The first token row of a tenant fires {@code nexus.service_tokens_create_tenant_partitions},
  * which takes ACCESS EXCLUSIVE on each model partition and ShareRowExclusive on the registry and on
  * each table that references {@code chunks}. Behind a conflicting lock it fails at its own
- * {@code lock_timeout} (SQLSTATE 55P03) or at the caller-side {@code statement_timeout} (57014);
- * {@code TokenStore} retries a bounded number of times and then throws this. The transaction is rolled
+ * {@code lock_timeout} (SQLSTATE 55P03), at the caller-side {@code statement_timeout} (57014) or as a
+ * deadlock victim (40P01); {@code TokenStore} retries a bounded number of times and then throws this. The transaction is rolled
  * back, nothing was issued, and the caller may retry, so
  * {@link dev.nexus.service.http.HttpUtil#sendTypedDbError} maps it to a retryable 503.
  */
@@ -20,8 +20,9 @@ public final class TenantCreationBusyException extends RuntimeException {
     private final int attempts;
 
     public TenantCreationBusyException(String tenant, int attempts, Throwable cause) {
-        super("creating the partitions for tenant '" + tenant + "' waited on a lock after " + attempts
-            + " attempts; nothing was issued, retry", cause);
+        super("issuing a token for tenant '" + tenant + "' waited on a lock or ran past its time bound on "
+            + attempts + " attempts (a tenant's first token also creates its partitions); nothing was "
+            + "issued, retry", cause);
         this.tenant = tenant;
         this.attempts = attempts;
     }

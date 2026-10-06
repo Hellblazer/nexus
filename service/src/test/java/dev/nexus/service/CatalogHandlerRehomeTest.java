@@ -173,6 +173,33 @@ class CatalogHandlerRehomeTest {
     }
 
     @Test
+    void post_acrossModels_returns409CarryingTheCollectionModelMismatchReason() throws Exception {
+        // RDR-225 (nexus-3wh8d.10 I1): HttpUtil and engine_reasons.py both document
+        // POST /v1/catalog/collections/rehome as answering 409 reason=collection_model_mismatch,
+        // so a client can decide on the reason instead of the prose.
+        String src = "knowledge__hrehome-xm-src__minilm-l6-v2-384__v1";
+        String dst = "knowledge__hrehome-xm-dst__bge-base-en-v15-768__v1";
+        try (Connection su = pg.createConnection("")) {
+            var dsl = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCollection(dsl, TENANT, src, "minilm-l6-v2-384");
+            PgContainerHelper.insertCollection(dsl, TENANT, dst, "bge-base-en-v15-768");
+        }
+        vecRepo.upsertChunks(TENANT, src,
+            java.util.List.of(dev.nexus.service.db.Chash.ofText("xm-text").toHex()),
+            java.util.List.of("xm-text"), java.util.List.of(java.util.Map.of()));
+
+        var resp = post("/v1/catalog/collections/rehome",
+            "{\"source\":\"" + src + "\",\"target\":\"" + dst + "\"}");
+        assertThat(resp.statusCode()).as(resp.body()).isEqualTo(409);
+        var body = mapper.readValue(resp.body(), MAP_T);
+        assertThat(body.get("reason")).isEqualTo("collection_model_mismatch");
+        assertThat(body.get("source_collection")).isEqualTo(src);
+        assertThat(body.get("source_model")).isEqualTo("minilm-l6-v2-384");
+        assertThat(body.get("target_collection")).isEqualTo(dst);
+        assertThat(body.get("target_model")).isEqualTo("bge-base-en-v15-768");
+    }
+
+    @Test
     void post_unregisteredSource_returns409_notASilentAllZeroNoOp() throws Exception {
         var resp = post("/v1/catalog/collections/rehome",
             "{\"source\":\"knowledge__hrehome-absent__minilm-l6-v2-384__v1\","

@@ -447,6 +447,50 @@ class TenantTokenPartitionsIntegrationTest {
     }
 
     @Test
+    @Order(9)
+    void everyOtherTokenEntryPoint_answersTheSameLockWaitAsTheSameRetryable503_andIssuesNothing() throws Exception {
+        // nexus-3wh8d.14: /v1/tenants/create is driven above; service-tokens/issue, data-tokens/mint and a
+        // rotation of a tenant with no token reach the same sendTypedDbError ladder from other handlers.
+        // Same lock fixture: an open reader on the first model partition parks each creation behind it.
+        JsonNode mint = postOk(BOOT, "/v1/service-tokens/issue",
+            "{\"tenant\":\"p225-tok-edge-busy\",\"label\":\"edge\",\"scope\":\"mint\"}");   // before the blocker goes up
+        String mintToken = mint.get("token").asText();
+        String firstModelPartition;
+        try (Connection su = pg.createConnection("")) {
+            firstModelPartition = PartitionScratch.children(dsl(su), "chunks").stream()
+                .map(PartitionScratch.Child::name).sorted().findFirst().orElseThrow();
+        }
+        String[][] cases = {
+            {"/v1/service-tokens/issue", BOOT, "p225-tok-busy-issue", "{\"tenant\":\"p225-tok-busy-issue\"}"},
+            {"/v1/data-tokens/mint", mintToken, "p225-tok-busy-mint", "{\"tenant\":\"p225-tok-busy-mint\"}"},
+            {"/v1/service-tokens/rotate", BOOT, "p225-tok-busy-rotate", "{\"tenant\":\"p225-tok-busy-rotate\",\"grace_seconds\":300}"},
+        };
+        try (Connection blocker = pg.createConnection("")) {
+            blocker.setAutoCommit(false);
+            dsl(blocker).fetchCount(DSL.table(DSL.name("nexus", firstModelPartition)));
+            for (String[] c : cases) {
+                var resp = post(c[1], c[0], c[3]);
+                assertThat(resp.statusCode()).as("%s: %s", c[0], resp.body()).isEqualTo(503);
+                JsonNode body = MAPPER.readTree(resp.body());
+                assertThat(body.get("reason").asText()).as(c[0]).isEqualTo("tenant_creation_busy");
+                assertThat(body.get("retry_after_seconds").asInt()).as(c[0]).isPositive();
+                assertThat(resp.headers().firstValue("Retry-After")).as(c[0]).isPresent();
+                assertThat(body.get("error").asText()).as(c[0]).contains(c[2]);
+                try (Connection su = pg.createConnection("")) {
+                    assertThat(dsl(su).fetchCount(SERVICE_TOKENS, SERVICE_TOKENS.TENANT_ID.eq(c[2])))
+                        .as("%s issued nothing", c[0]).isZero();
+                }
+            }
+            blocker.rollback();
+        }
+        // With the blocker gone each request succeeds and the tenant has its leaves.
+        for (String[] c : cases) {
+            assertThat(post(c[1], c[0], c[3]).statusCode()).as(c[0]).isEqualTo(200);
+            assertLeavesExist(c[2]);
+        }
+    }
+
+    @Test
     @Order(8)
     void theStoreThrowsTenantCreationBusy_whenEveryAttemptWaits_andACustomBoundIsHonoured() throws Exception {
         String tenant = "p225-tok-busy-store";

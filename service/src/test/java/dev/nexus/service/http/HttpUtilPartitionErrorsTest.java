@@ -35,10 +35,13 @@ class HttpUtilPartitionErrorsTest {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
+    // The two shapes below are what PostgreSQL itself produces (captured by HttpUtilPartitionErrorsPgTest, which
+    // asserts them against a real partition tree): a failure at a level reports THAT level's key only, so a
+    // missing model partition names the model and a missing leaf names the tenant, never both.
     private static final String NO_LEAF =
         "ERROR: no partition of relation \"chunks_m0a90d9bc\" found for row\n  Detail: Partition key of the failing row contains (tenant_id) = (acme).";
     private static final String NO_MODEL_PARTITION =
-        "ERROR: no partition of relation \"chunks\" found for row\n  Detail: Partition key of the failing row contains (embedding_model, tenant_id) = (new-model, acme, corp).";
+        "ERROR: no partition of relation \"chunks\" found for row\n  Detail: Partition key of the failing row contains (embedding_model) = (new-model).";
     private static final String DIMENSION_CHECK =
         "ERROR: new row for relation \"chunks_m0a90d9bc_t_7ec7c1dcb9736273\" violates check constraint \"chunks_m0a90d9bc_dimension_chk\"";
 
@@ -61,12 +64,23 @@ class HttpUtilPartitionErrorsTest {
     }
 
     @Test
-    void aModelPartitionMissing_is500_namingTheModelAndTheTenant_evenWhenAValueHasACommaInIt() throws Exception {
+    void aModelPartitionMissing_is500_namingOnlyTheModel_whichIsAllPostgreSQLReports() throws Exception {
         var ex = send(new SQLException(NO_MODEL_PARTITION, "23514"));
         assertThat(ex.status).isEqualTo(500);
         JsonNode body = MAPPER.readTree(ex.body());
+        assertThat(body.get("reason").asText()).isEqualTo("tenant_partition_missing");
         assertThat(body.get("model").asText()).isEqualTo("new-model");
-        assertThat(body.get("tenant").asText()).isEqualTo("acme, corp");
+        assertThat(body.has("tenant")).isFalse();
+        assertThat(body.get("error").asText()).contains("(not reported by the server)").contains("'new-model'");
+        assertThat(HttpUtil.partitionKeyOf(NO_MODEL_PARTITION)).isEqualTo(new String[] {null, "new-model"});
+    }
+
+    @Test
+    void aKeyValueWithACommaInIt_isKeptWhole() {
+        assertThat(HttpUtil.partitionKeyOf(NO_LEAF.replace("(acme)", "(acme, corp)")))
+            .isEqualTo(new String[] {"acme, corp", null});
+        assertThat(HttpUtil.partitionKeyOf(NO_MODEL_PARTITION.replace("(new-model)", "(a, b)")))
+            .isEqualTo(new String[] {null, "a, b"});
     }
 
     @Test

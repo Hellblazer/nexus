@@ -9554,10 +9554,9 @@ public final class CatalogRepository {
                 .fetchOne(CATALOG_COLLECTIONS.EMBEDDING_MODEL);
             if (!sourceModel.equals(targetModel)
                     && ctx.fetchExists(ctx.selectOne().from(CHUNKS).where(CHUNKS.COLLECTION.eq(source)))) {
-                throw new RehomeRefused("collection " + source + " (embedding model " + sourceModel
-                    + ") holds chunks and cannot be re-homed onto " + target + " (embedding model "
-                    + targetModel + "): a chunk keeps its collection's model, and a move between models "
-                    + "is a cross-model migration into a new collection.");
+                // The typed exception, not RehomeRefused: HttpUtil.sendTypedDbError answers it as a 409
+                // carrying reason=collection_model_mismatch, the contract the route documents.
+                throw new CollectionModelMismatchException(source, sourceModel, target, targetModel);
             }
 
             Map<String, Integer> moved = new LinkedHashMap<>();

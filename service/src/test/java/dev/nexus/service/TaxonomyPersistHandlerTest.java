@@ -19,6 +19,7 @@ import java.sql.Connection;
 import java.util.List;
 import java.util.Map;
 
+import static dev.nexus.service.jooq.nexus.Tables.TOPIC_ASSIGNMENTS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -262,6 +263,36 @@ class TaxonomyPersistHandlerTest {
     }
 
     @Test
+    void renameCollection_acrossModels_refilesTheAssignmentsUnderTheTargetsModel() throws Exception {
+        // RDR-225 (nexus-3wh8d.10 C1): topic_assignments_chunk_fk is (tenant, source_collection, doc_id,
+        // embedding_model) -> chunks. The RDR-162 cross-model ref-remap renames the T2 rows from the
+        // source collection to a target that holds the SAME chashes under the TARGET's model, so the
+        // UPDATE must carry the target's model with it; leaving the old one matches no chunk (23514 /
+        // 23503, a 409 "T2 reference cascade failed").
+        String oldCol = "knowledge__rn-xm-old";
+        String newCol = "knowledge__rn-xm-new";
+        String oldModel = "voyage-code-3";
+        String newModel = "bge-base-en-v15-768";
+        seedChunk(oldCol, hexChash("rn-xm-1"), 1024, oldModel);
+        seedChunk(newCol, hexChash("rn-xm-1"), 768, newModel);
+        var spec = Map.of(
+            "label", "rn-xm-topic", "doc_count", 1, "terms", "[\"x\"]",
+            "assigned_by", "hdbscan", "doc_ids", List.of(hexChash("rn-xm-1")));
+        assertThat(post("/v1/taxonomy/topics/persist_discovered",
+            mapper.writeValueAsString(Map.of("collection", oldCol, "specs", List.of(spec))))
+            .statusCode()).isEqualTo(200);
+        assertThat(assignmentModels(oldCol)).containsExactly(oldModel);
+
+        var resp = post("/v1/taxonomy/rename_collection",
+            mapper.writeValueAsString(Map.of("old", oldCol, "new", newCol)));
+        assertThat(resp.statusCode()).as(resp.body()).isEqualTo(200);
+        assertThat(assignmentModels(oldCol)).isEmpty();
+        assertThat(assignmentModels(newCol))
+            .as("the assignment now belongs to the target and carries the target's model")
+            .containsExactly(newModel);
+    }
+
+    @Test
     void renameCollection_missingFields_returns400() throws Exception {
         // The wrong field names (the old outlier contract) must be rejected loud.
         assertThat(post("/v1/taxonomy/rename_collection",
@@ -289,13 +320,16 @@ class TaxonomyPersistHandlerTest {
      * NOTHING).
      */
     private void seedChunk(String collection, String chashHex, int dim) throws Exception {
+        seedChunk(collection, chashHex, dim, dim == 384 ? "minilm-l6-v2-384" : "bge-base-en-v15-768");
+    }
+
+    private void seedChunk(String collection, String chashHex, int dim, String model) throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             // RDR-204 nexus-ft04v.4/.5: routed through PgContainerHelper.insertCollection.
             // RDR-225: the collection's model fixes the width of its vectors, so the model is the one whose
             // dimension is `dim` (these collection names are not conformant, so the helper's name-derived
             // default would be the 768-wide model).
-            String model = dim == 384 ? "minilm-l6-v2-384" : "bge-base-en-v15-768";
             PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, collection, model);
             String embeddingCol = "embedding_" + dim;
             su.createStatement().execute(
@@ -305,6 +339,15 @@ class TaxonomyPersistHandlerTest {
                 + "', 'persist-test chunk', " +
                 "('[" + "0.1,".repeat(dim - 1) + "0.1]')::nexus.vector) " +
                 "ON CONFLICT (tenant_id, collection, chash, embedding_model) DO NOTHING");
+        }
+    }
+
+    private List<String> assignmentModels(String collection) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            return DSL.using(su, SQLDialect.POSTGRES)
+                .select(TOPIC_ASSIGNMENTS.EMBEDDING_MODEL).from(TOPIC_ASSIGNMENTS)
+                .where(TOPIC_ASSIGNMENTS.TENANT_ID.eq(TENANT)).and(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION.eq(collection))
+                .fetch(TOPIC_ASSIGNMENTS.EMBEDDING_MODEL);
         }
     }
 

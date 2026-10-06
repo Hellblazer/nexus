@@ -88,6 +88,8 @@ class P225MigrationWalkIntegrationTest {
     static final String TA = "p225-a";
     static final String TB = "p225-b";
     static final String TN = "p225-notoken";
+    /** A tenant with no token row and no chunk, holding only a centroid in a registered collection. */
+    static final String TC = "p225-centroidonly";
 
     // collections (the model token in the name is the registered model)
     static final String A_CODE = "code__a-owner__voyage-code-3__v1";
@@ -96,6 +98,7 @@ class P225MigrationWalkIntegrationTest {
     static final String B_CODE = "code__b-owner__voyage-code-3__v1";
     static final String B_BGE = "docs__b-owner__bge-base-en-v15-768__v1";
     static final String N_CODE = "code__nt-owner__voyage-code-3__v1";
+    static final String C_CODE = "code__c-owner__voyage-code-3__v1";
     static final String GHOST = "ghost-collection-without-a-registry-row";
 
     /** (model, tenant) -> chunk count after the walk, by the rules, from the seed. */
@@ -111,7 +114,8 @@ class P225MigrationWalkIntegrationTest {
     static final Map<String, Long> EXPECTED_CENTROIDS = new TreeMap<>(Map.of(
         CODE_3 + "|" + TA, 2L,
         MINILM_384 + "|" + TA, 1L,
-        CODE_3 + "|" + TB, 1L));
+        CODE_3 + "|" + TB, 1L,
+        CODE_3 + "|" + TC, 1L));       // a tenant with no token and no chunk: only the centroid arm of step 2 reaches it
 
     PostgreSQLContainer<?> pg;
     HikariDataSource adminDs;
@@ -199,8 +203,8 @@ class P225MigrationWalkIntegrationTest {
                 .from(TAXONOMY_CENTROIDS).groupBy(TAXONOMY_CENTROIDS.EMBEDDING_MODEL, TAXONOMY_CENTROIDS.TENANT_ID)
                 .forEach(r -> actual.put(r.value1() + "|" + r.value2(), r.value3().longValue()));
             assertThat(actual).isEqualTo(EXPECTED_CENTROIDS);
-            // 5 centroids seeded; 1 is not copied (its collection has no registry row: derived data) and stays put.
-            assertThat(retiredCount(ctx, "taxonomy_centroids_retired_225")).isEqualTo(5L);
+            // 6 centroids seeded; 1 is not copied (its collection has no registry row: derived data) and stays put.
+            assertThat(retiredCount(ctx, "taxonomy_centroids_retired_225")).isEqualTo(6L);
             Field<String> leaf = tableoid();
             for (var r : ctx.select(TAXONOMY_CENTROIDS.TENANT_ID, TAXONOMY_CENTROIDS.EMBEDDING_MODEL, leaf)
                     .from(TAXONOMY_CENTROIDS).fetch()) {
@@ -215,7 +219,9 @@ class P225MigrationWalkIntegrationTest {
         try (Connection su = pg.createConnection("")) {
             DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
             List<String> models = List.of(CODE_3, CONTEXT_3, BGE_768, MINILM_384);
-            List<String> tenants = List.of("default", TA, TB, TN);   // default, tokens, chunks-only
+            // default, tokens, chunks-only, and TC: a centroid in a registered collection and nothing else, so it
+            // gets leaves only through the taxonomy_centroids arm of step 2 (deleting that arm fails the copy).
+            List<String> tenants = List.of("default", TA, TB, TN, TC);
             for (String parent : List.of("chunks", "taxonomy_centroids")) {
                 List<String> modelParts = PartitionScratch.children(ctx, parent).stream().map(PartitionScratch.Child::name).toList();
                 assertThat(modelParts).containsExactlyInAnyOrderElementsOf(
@@ -243,7 +249,7 @@ class P225MigrationWalkIntegrationTest {
                     all.add(mp.name());
                     PartitionScratch.children(ctx, mp.name()).forEach(l -> all.add(l.name()));
                 }
-                assertThat(all).hasSize(1 + 4 + 4 * 4);
+                assertThat(all).hasSize(1 + 4 + 4 * 5);
                 for (String rel : all) {
                     var rls = PgCatalogProbes.rowSecurity(ctx, "nexus", rel);
                     assertThat(rls.enabled()).as("RLS enabled on %s", rel).isTrue();
@@ -347,6 +353,13 @@ class P225MigrationWalkIntegrationTest {
     void statisticsExistOnEveryLeafAndBothParents_andAPlanPrunesToOneLeafAndUsesItsHnsw() throws Exception {
         try (Connection su = pg.createConnection("")) {
             DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            // The two PARENTS carry inherited statistics: step 5 ANALYZEs them, autovacuum never does (it skips
+            // partitioned tables), and nothing earlier in this class analyses them. Taken before the hand-made
+            // ANALYZE of the parent further down.
+            for (String parent : List.of("chunks", "taxonomy_centroids")) {
+                assertThat(inheritedStatsRows(ctx, parent)).as("pg_stats rows with inherited = true on the parent %s", parent)
+                    .isGreaterThan(0);
+            }
             for (String parent : List.of("chunks", "taxonomy_centroids")) {
                 for (var mp : PartitionScratch.children(ctx, parent)) {
                     for (var leaf : PartitionScratch.children(ctx, mp.name())) {
@@ -359,7 +372,11 @@ class P225MigrationWalkIntegrationTest {
             String populated = expectedName("chunks", CODE_3, TA);
             assertThat(statsRows(ctx, populated)).as("pg_stats rows of %s", populated).isGreaterThan(0);
             assertThat(statsRows(ctx, expectedName("taxonomy_centroids", CODE_3, TA))).isGreaterThan(0);
-            // A plan against a leaf big enough for the planner to choose HNSW: seed one, ANALYZE, EXPLAIN.
+            // A plan against a leaf big enough for the planner to choose HNSW: seed one AFTER the walk, ANALYZE it by
+            // hand, EXPLAIN. This shows pruning to one leaf and that leaf's HNSW index serving the ordering. It does
+            // not show that the walk's own statistics are what makes the planner choose the index on a copied leaf:
+            // the leaves the walk filled hold a few rows each, far too few for the planner to prefer HNSW whatever
+            // its statistics say. What the walk's ANALYZE is shown by is the statistics assertions above.
             String coll = "knowledge__plan-owner__minilm-l6-v2-384__v1";
             PgContainerHelper.insertCollection(ctx, "p225-plan", coll);
             PgContainerHelper.seedServiceToken(ctx, "tok-p225-plan", "p225-plan", "p225-plan");   // the trigger makes its leaves
@@ -391,6 +408,31 @@ class P225MigrationWalkIntegrationTest {
             String leaf = expectedName("chunks", CODE_3, "p225-new");
             assertThat(PgCatalogProbes.rowSecurity(ctx, "nexus", leaf).forced()).isTrue();
             assertThat(PartitionScratch.acl(ctx, leaf)).isEqualTo(PartitionScratch.acl(ctx, "chunks"));
+        }
+    }
+
+    @Test
+    @Order(24)
+    void createTenantPartitions_refusesForceFalseOnALiveParent_andMakesNoLeaf() throws Exception {
+        // RDR-225 (nexus-3wh8d.10 M1): p_force = false exists for the walk, which fills the *_new parents with
+        // FORCE off. nexus_svc can execute the SECURITY DEFINER function, so on a live parent it would make
+        // leaves without FORCE ROW LEVEL SECURITY.
+        try (Connection svc = DriverManager.getConnection(pg.getJdbcUrl(), PgContainerHelper.SVC_USERNAME, PgContainerHelper.SVC_PASSWORD);
+             Connection a = pg.createConnection("")) {
+            svc.setAutoCommit(true);
+            DSLContext ctx = DSL.using(svc, SQLDialect.POSTGRES);
+            for (String parent : List.of("chunks", "taxonomy_centroids")) {
+                assertThatThrownBy(() -> PartitionScratch.createTenantPartitions(ctx, parent, "p225-noforce", false))
+                    .satisfies(t -> assertThat(sqlState(t)).isEqualTo("22023"))
+                    .hasMessageContaining("p_force");
+                for (String m : List.of(CODE_3, CONTEXT_3, BGE_768, MINILM_384)) {
+                    assertThat(PartitionScratch.children(DSL.using(a, SQLDialect.POSTGRES), expectedName(parent, m, null))
+                        .stream().map(PartitionScratch.Child::name))
+                        .doesNotContain(expectedName(parent, m, "p225-noforce"));
+                }
+                // the default, force = true, is untouched
+                assertThat(PartitionScratch.createTenantPartitions(ctx, parent, "p225-force", true)).isEqualTo(4);
+            }
         }
     }
 
@@ -493,7 +535,7 @@ class P225MigrationWalkIntegrationTest {
         var lockLine = java.util.regex.Pattern.compile("rdr225 walk: (\\d+) relation lock").matcher(log);
         assertThat(lockLine.find()).isTrue();
         PartitionScratch.evidence("WALK relation locks held at the end of the walk: " + lockLine.group(1)
-            + " (32 leaves: 4 tenants x 4 models x 2 parents; 12 chunks)");
+            + " (40 leaves: 5 tenants x 4 models x 2 parents; 12 chunks)");
         System.out.println("WALK_LOCKS " + lockLine.group(1));
         assertThat(log).contains("rdr225 walk:").contains("relation lock(s) held at the end of the walk");
     }
@@ -677,6 +719,9 @@ class P225MigrationWalkIntegrationTest {
 
     @Test
     void rollingBackTheChangesetRestoresTheOldLayout_andForwardReApplyRebuildsTheSameShape() throws Exception {
+        // The rollback exists to keep the rollback test chain executable. It restores table shape only: the step 7.8
+        // function bodies stay in their post-walk form and every row written since the walk is discarded, which
+        // oldLayoutShape (no function bodies, no post-walk rows) cannot see. It is not a recovery path; PITR is.
         PostgreSQLContainer<?> c2 = PgContainerHelper.startDedicated();
         try {
             Hygiene001NotNullMigrationRlsTest.bootstrapAdminRole(c2, ADMIN, ADMIN_PASS);
@@ -755,7 +800,7 @@ class P225MigrationWalkIntegrationTest {
         }
     }
 
-    /** 12 chunks, 8 manifest rows, 2 assignments, 2 orphaned-at rows, 5 centroids. */
+    /** 12 chunks, 8 manifest rows, 2 assignments, 2 orphaned-at rows, 6 centroids. */
     static void seedStore(DSLContext su) {
         PgContainerHelper.seedServiceToken(su, "tok-p225-a", TA, "p225");
         PgContainerHelper.seedServiceToken(su, "tok-p225-b", TB, "p225");
@@ -800,12 +845,16 @@ class P225MigrationWalkIntegrationTest {
         su.insertInto(CHUNK_ORPHANED_AT, CHUNK_ORPHANED_AT.TENANT_ID, CHUNK_ORPHANED_AT.COLLECTION, CHUNK_ORPHANED_AT.CHASH,
                 CHUNK_ORPHANED_AT.ORPHANED_AT).values(TN, N_CODE, hb("n-code-1"), OffsetDateTime.now().minusDays(2)).execute();
 
-        // centroids: 5 seeded, 4 copied
+        // centroids: 6 seeded, 5 copied
         centroid(su, TA, A_CODE, 1, 1024);
         centroid(su, TA, A_CODE, 2, 1024);
         centroid(su, TA, A_MINI, 4, 384);
         centroid(su, TA, GHOST, 7, 1024);       // no registry row: derived data, not copied
         centroid(su, TB, B_CODE, 1, 1024);
+        // a tenant with no token row and no chunk, holding a centroid in a REGISTERED collection: without the
+        // taxonomy_centroids arm of step 2's tenant query it gets no leaf and the copy fails with 23514
+        PgContainerHelper.insertCollection(su, TC, C_CODE);
+        centroid(su, TC, C_CODE, 1, 1024);
     }
 
     /** Manifest rows ownChunks wrote: 2 + 2 + 2 + 2. */
@@ -857,6 +906,12 @@ class P225MigrationWalkIntegrationTest {
     private static int statsRows(DSLContext ctx, String rel) {
         return ctx.fetchCount(DSL.table(DSL.name("pg_catalog", "pg_stats")),
             DSL.field(DSL.name("schemaname"), String.class).eq("nexus").and(DSL.field(DSL.name("tablename"), String.class).eq(rel)));
+    }
+
+    private static int inheritedStatsRows(DSLContext ctx, String rel) {
+        return ctx.fetchCount(DSL.table(DSL.name("pg_catalog", "pg_stats")),
+            DSL.field(DSL.name("schemaname"), String.class).eq("nexus").and(DSL.field(DSL.name("tablename"), String.class).eq(rel))
+                .and(DSL.field(DSL.name("inherited"), Boolean.class).isTrue()));
     }
 
     /** True when the view's rewrite rule depends on the named nexus table. */

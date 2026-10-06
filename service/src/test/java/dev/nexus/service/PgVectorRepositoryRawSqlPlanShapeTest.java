@@ -70,10 +70,9 @@ import static org.assertj.core.api.Assertions.assertThat;
  * batch 3, critic follow-up), and proves it does not defeat the FULL-index bind this class
  * exists to verify: pgvector's
  * HNSW index structurally never contains a NULL-valued row (there is no vector to place in
- * the graph), so the predicate is redundant at the index and free. See {@code
- * PgVectorRepositoryDimGuardTest}'s {@code search_foreignDimRow_neverEmittedWithNullDistance}
- * / {@code hybridSearch_foreignDimRow_neverEmittedWithNullDistance} for the behavioral
- * (non-EXPLAIN) proof that a foreign-dim row is actually excluded.
+ * the graph), so the predicate is redundant at the index and free. (A foreign-dim row can no
+ * longer exist since RDR-225, so no data exercises the predicate's exclusion; this suite
+ * proves only that it costs nothing in the plan.)
  *
  * <p><strong>Correction (Step G cluster-B triage, nexus-o8dil.16/.48):</strong> the
  * selective-gate branch of {@code hybridSearch} does NOT fit the "still binds to the FULL

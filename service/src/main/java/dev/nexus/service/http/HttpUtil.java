@@ -209,8 +209,9 @@ public final class HttpUtil {
      *       {@code service_tokens} trigger was disabled ({@link #TENANT_PARTITION_MISSING_REASON}, RDR-225).
      *       An engine invariant, so a 500 and not the 409 a CHECK violation gets; the body names the
      *       tenant and the model when the server's detail carries them.</li>
-     *   <li>{@code tenant_creation_busy} (503): issuing a tenant's first token waited on a lock the
-     *       partition creation needs, past the bound {@code TokenStore} gives it
+     *   <li>{@code tenant_creation_busy} (503): a token insert waited on a lock, ran past its statement
+     *       bound or lost a deadlock on every attempt (a tenant's first token also creates its partitions
+     *       and is the usual cause), past the bound {@code TokenStore} gives it
      *       ({@link #TENANT_CREATION_BUSY_REASON}, RDR-225). Nothing was issued; retryable, the body
      *       carries {@code retry_after_seconds}.</li>
      *   <li>{@code quarantine_restore_busy} (503): {@code POST /gc/quarantine-restore} could not take the

@@ -25,13 +25,14 @@
 
     3. nexus.create_model_partition(parent, model, force): the model partition FOR VALUES IN (model),
        PARTITION BY LIST (tenant_id), with a CHECK that the model's vector column is the only non-null
-       one, then a leaf for every tenant with a token row plus "default". Idempotent by partition bound.
+       one, then a leaf for 'default', every tenant with a token row and every tenant that already has a leaf
+       under a sibling model partition of the parent. Idempotent by partition bound.
 
     4. nexus.create_tenant_partitions(parent, tenant, force): for every model partition of the parent,
        creates the tenant's leaf unless a partition with that bound exists (decided by pg_inherits plus the
        bound expression, never by name). SECURITY DEFINER with a fixed search_path; EXECUTE revoked from
        PUBLIC and granted to nexus_svc. A second call for a tenant that has every leaf is one catalog query
-       and takes no lock.
+       and takes no lock. p_force = false is accepted only for a *_new parent (the walk's), refused otherwise.
 
     5. nexus.service_tokens_create_tenant_partitions(): the AFTER INSERT trigger function for
        nexus.service_tokens. PART B attaches it at step 7.7, the only place it is attached.
@@ -363,6 +364,13 @@ BEGIN
             USING ERRCODE = 'null_value_not_allowed';
     END IF;
     PERFORM nexus.partition_parent_check(p_parent);
+    -- p_force = false exists for the walk, which fills the *_new parents with FORCE ROW LEVEL SECURITY off.
+    -- This function is SECURITY DEFINER and nexus_svc may call it, so on a live parent it would make leaves
+    -- without FORCE: refused there.
+    IF NOT p_force AND (SELECT c.relname FROM pg_catalog.pg_class c WHERE c.oid = p_parent) !~ '_new$' THEN
+        RAISE EXCEPTION 'nexus.create_tenant_partitions: p_force = false is accepted only for a *_new parent, not %', p_parent
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
     -- The common case, a second token for a tenant that already has every leaf: ONE catalog query, no lock taken.
     -- A concurrent first creation is invisible here until it commits, so the caller falls through to the advisory
     -- lock below and waits for it (bounded by lock_timeout) instead of racing it.
@@ -456,13 +464,23 @@ BEGIN
         PERFORM nexus.partition_copy_access(p_parent, v_mp_oid, p_force);
     END IF;
 
+    -- The tenants the walk gives leaves to: 'default', every token tenant, and every tenant that already has a
+    -- leaf under a sibling model partition of this parent (a tenant with data and no token row got its leaves from
+    -- the walk, and a model added later must cover it too).
     FOR v_tenant IN
         SELECT t.tenant_id FROM nexus.service_tokens t
         UNION
         SELECT 'default'
+        UNION
+        SELECT nexus.partition_bound_value(l.inhrelid)
+          FROM pg_catalog.pg_inherits mp
+          JOIN pg_catalog.pg_inherits l ON l.inhparent = mp.inhrelid
+         WHERE mp.inhparent = p_parent
         ORDER BY 1
     LOOP
-        PERFORM nexus.partition_ensure_leaf(p_parent, v_mp_oid, v_tenant, p_force);
+        IF v_tenant IS NOT NULL THEN
+            PERFORM nexus.partition_ensure_leaf(p_parent, v_mp_oid, v_tenant, p_force);
+        END IF;
     END LOOP;
     RETURN v_mp_oid;
 END
@@ -3013,13 +3031,14 @@ $w9$;
         <rollback>
             <sql splitStatements="false" stripComments="false"><![CDATA[
 -- ROLLBACK: the inverse of the swap, valid only while nexus.chunks_retired_225 and
--- nexus.taxonomy_centroids_retired_225 still hold the pre-walk tables. It exists so the rollback chain stays
--- executable (SchemaRollbackRoundTripIntegrationTest rolls older changesets back through a partitioned
--- chunks otherwise, and their forward re-apply adds three-column foreign keys to it). The engine never calls a
--- Liquibase rollback, and this one is NOT a supported recovery: it discards every write made since the walk
--- (the rows live only in the partitioned tables it drops), and
--- the step 7.8 function bodies stay in their post-walk form until the rollback of the changeset that last
--- defined each of them runs. The recovery for a committed walk is a PITR restore (RDR-225, Failure and rollback).
+-- nexus.taxonomy_centroids_retired_225 still hold the pre-walk tables. It exists to keep the rollback test chain
+-- executable (SchemaRollbackRoundTripIntegrationTest rolls older changesets back through a partitioned chunks
+-- otherwise, and their forward re-apply adds three-column foreign keys to it). It restores TABLE SHAPE only.
+-- It leaves every step 7.8 function body in its post-walk form (they insert embedding_model into a table that no
+-- longer has the column), until the rollback of the changeset that last defined each of them runs, and it
+-- discards every row written since the walk (those rows live only in the partitioned tables it drops). It is NOT
+-- a recovery path. The engine never calls a Liquibase rollback; the recovery for a committed walk is a PITR
+-- restore (RDR-225, Failure and rollback).
 DO $rb$
 DECLARE
     r record;

@@ -1476,8 +1476,13 @@ public final class TaxonomyRepository {
                 .set(TOPICS.COLLECTION, newCol)
                 .where(TOPICS.COLLECTION.eq(oldCol))
                 .execute();
+            // RDR-225: topic_assignments_chunk_fk is (tenant_id, source_collection, doc_id,
+            // embedding_model) -> chunks, and a chunk carries its collection's model. The target holds
+            // the same chashes under ITS model (the RDR-162 cross-model ref-remap is the caller), so
+            // the re-filed assignment must name the target's model or it matches no chunk (23503).
             int assignments = ctx.update(TOPIC_ASSIGNMENTS)
                 .set(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, newCol)
+                .set(TOPIC_ASSIGNMENTS.EMBEDDING_MODEL, modelOf(ctx, tenant, newCol))
                 .where(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION.eq(oldCol))
                 .execute();
             int meta = ctx.update(TAXONOMY_META)
