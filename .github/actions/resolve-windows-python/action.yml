@@ -15,11 +15,12 @@ runs:
       shell: pwsh
       run: |
         $ErrorActionPreference = 'Stop'
-        # Native commands run through Process with both streams redirected.
-        # Under the runner SERVICE (no console), pwsh 7.6 refuses `& uv ... 2>$null`
-        # with "StandardOutputEncoding is only supported when standard output is
-        # redirected" (seed run 37408239980), so nothing here uses pwsh's own
-        # native-command redirection.
+        # Native commands run through Process with both streams redirected, so
+        # a start failure surfaces as the OS error. Through `& uv ... 2>$null`
+        # pwsh 7.6 reported a ghwin "Access is denied" on uv.exe (a winget ACL
+        # that left Users out) as "StandardOutputEncoding is only supported when
+        # standard output is redirected" (seed run 37408239980; rehearsal run
+        # 37410530509 showed the real error).
         function Invoke-Captured([string]$exe, [string[]]$argv) {
           $psi = [System.Diagnostics.ProcessStartInfo]::new($exe)
           foreach ($a in $argv) { $psi.ArgumentList.Add($a) }

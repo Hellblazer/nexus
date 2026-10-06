@@ -777,10 +777,10 @@ def test_the_windows_job_keeps_the_switch_the_actor_guard_and_never_runs_on_pull
 
 
 def test_the_python_resolver_runs_native_commands_with_both_streams_redirected() -> None:
-    # Under the runner service, pwsh 7.6 refused `& uv python find 3.13 2>$null`
-    # with "StandardOutputEncoding is only supported when standard output is
-    # redirected" (seed run 37408239980), so the resolver drives every native
-    # call through Process with stdout and stderr redirected explicitly.
+    # pwsh 7.6 reported an "Access is denied" starting uv.exe under the runner
+    # service as "StandardOutputEncoding is only supported when standard output
+    # is redirected" (seed run 37408239980). Driving every native call through
+    # Process with both streams redirected surfaces the OS error instead.
     action = yaml.safe_load((ACTIONS / "resolve-windows-python" / "action.yml").read_text())
     run = _code(action["runs"]["steps"][0]["run"])
     assert "2>$null" not in run and "2>&1" not in run
