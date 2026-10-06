@@ -812,3 +812,17 @@ def test_the_windows_test_job_repairs_the_checkout_before_pytest() -> None:
     assert "throw 'no tracked symlinks found" in run, "non-vacuity: a step with nothing to do fails"
     attrs = (REPO / ".gitattributes").read_text()
     assert "tests/fixtures/** -text" in attrs
+
+
+@pytest.mark.parametrize(("name", "job"), [(RELEASE, "build-publish-pg-bundle-windows"), (SEED, "seed-windows")])
+def test_the_windows_cache_jobs_append_gits_usr_bin_before_the_cache_step(name: str, job: str) -> None:
+    # Git's tar -z runs gzip from Git's usr\bin, which the runner service's PATH
+    # lacks: seed run 37421965631 saved nothing ("gzip: command not found").
+    steps = _doc(name)["jobs"][job]["steps"]
+    idx = next(i for i, s in enumerate(steps) if "usr\\bin to PATH" in s.get("name", ""))
+    cache = next(i for i, s in enumerate(steps) if "actions/cache" in s.get("uses", ""))
+    assert idx < cache, "the PATH must hold gzip before the restore, which unpacks with it too"
+    run = steps[idx]["run"]
+    assert '"PATH=$env:PATH;$d" >> $env:GITHUB_ENV' in run, "appended through GITHUB_ENV"
+    assert "GITHUB_PATH" not in run, "GITHUB_PATH prepends: msys perl/link/find would shadow the build's"
+    assert "gzip.exe" in run, "fails loud when Git's gzip is absent"

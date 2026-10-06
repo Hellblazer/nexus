@@ -1125,6 +1125,19 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           "key=$("$key".Trim())" >> $env:GITHUB_OUTPUT
 
+      # actions/cache packs and unpacks with Git's tar -z, which runs gzip from
+      # Git's usr\bin; the runner service's PATH has only Git\cmd (seed run
+      # 37421965631: "gzip: command not found", nothing saved, so every release
+      # leg rebuilt PG from source). APPENDED, never prepended (GITHUB_PATH would):
+      # usr\bin also holds an msys perl.exe, link.exe and find.exe that would
+      # shadow Strawberry Perl, MSVC's linker and Windows' find in the build.
+      - name: Append Git's usr\bin to PATH (gzip for actions/cache)
+        shell: pwsh
+        run: |
+          $d = 'C:\Program Files\Git\usr\bin'
+          if (-not (Test-Path -LiteralPath (Join-Path $d 'gzip.exe'))) { throw "no gzip.exe in $d" }
+          "PATH=$env:PATH;$d" >> $env:GITHUB_ENV
+
       - name: Restore compiled PG bundle cache
         id: pg-bundle-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v5
