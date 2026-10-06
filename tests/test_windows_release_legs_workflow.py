@@ -715,7 +715,7 @@ PHASE3_WINDOWS_MODULES = (
     "src/nexus/daemon/windows_autostart.py", "src/nexus/daemon/replace_*.py",
     "src/nexus/_install/winproc_core.py", "src/nexus/daemon/binary_install.py",
     "src/nexus/_install/generation_core.py", "src/nexus/_install/layout_core.py",
-    "src/nexus/_install/gc_core.py",
+    "src/nexus/_install/gc_core.py", "src/nexus/_install/census_core.py",
     "src/nexus/db/pg_provision.py", "src/nexus/db/pg_bundle.py", "src/nexus/commands/daemon.py",
     "src/nexus/daemon/storage_service_daemon.py", "src/nexus/daemon/service_registry.py",
     "src/nexus/daemon/aspect_worker_daemon.py",
