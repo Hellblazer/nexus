@@ -527,6 +527,26 @@ def test_install_stops_before_the_first_replace_and_starts_after_the_last(tmp_pa
     assert len(observed["at_start"]) == 5
 
 
+def test_the_runtime_libraries_are_placed_first_and_the_executable_last(tmp_path, monkeypatch):
+    """The set goes in DLLs first, exe last, so a failure part-way never leaves a new exe beside
+    old libraries (BI1). The order is the contract, not the membership."""
+    _write_set(tmp_path / "service", "old")
+    seen: list[tuple[str, ...]] = []
+    real = b.place_set_with_rollback
+
+    def spy(stage, dest_dir, names, **kw):
+        seen.append(tuple(names))
+        return real(stage, dest_dir, names, **kw)
+
+    monkeypatch.setattr(b, "place_set_with_rollback", spy)
+    _install(tmp_path, monkeypatch, _Ops())
+    assert seen == [(*WINDOWS_RUNTIME_DLLS, WINDOWS_ENGINE_EXE)], "non-vacuity: it placed once"
+    assert seen[0][-1] == "nexus-service.exe"
+    assert set(seen[0][:-1]) == {
+        "vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll", "msvcp140_1.dll",
+    }
+
+
 def test_install_refused_across_sessions_replaces_nothing(tmp_path, monkeypatch):
     svc = tmp_path / "service"
     _write_set(svc, "old")
@@ -672,4 +692,133 @@ def test_bundle_swap_refused_across_sessions_keeps_the_old_tree(tmp_path, make_p
     assert pg_bundle.is_bundle_extracted(root)
     assert not (tmp_path / "pg-bundle.incoming").exists()  # staging cleaned up
     assert not (tmp_path / "pg-bundle.replaced").exists()
+    assert fake.events == ["stop_service"]
+
+
+def _swap_with(monkeypatch, *, fail_when, slept=None):
+    """Route ``pg_bundle``'s renames through the real retry loop with a scripted
+    ``os.replace``: ``fail_when(n, src, dst)`` returns an exception to raise on the
+    n-th call (1-based), or None to let the real rename run."""
+    calls: list[tuple[str, str]] = []
+    real = rg.replace_with_retry
+
+    def fake_replace(src, dst):
+        calls.append((Path(src).name, Path(dst).name))
+        exc = fail_when(len(calls), Path(src).name, Path(dst).name)
+        if exc is not None:
+            raise exc
+        os.replace(src, dst)
+
+    def wrapped(src, dst, **kw):
+        return real(src, dst, sleep=(slept.append if slept is not None else (lambda s: None)),
+                    replace=fake_replace, **kw)
+
+    monkeypatch.setattr(pg_bundle, "replace_with_retry", wrapped)
+    return calls
+
+
+def test_a_failed_second_rename_puts_the_old_tree_back_and_leaves_the_marker(
+    tmp_path, monkeypatch, make_pg_bundle_txz,
+):
+    """The swap is two renames. When the one that moves the proven tree into place fails, the
+    old tree must come back: the window with neither in place is one rename wide and
+    recoverable (PB1)."""
+    _first, second, root, bin_dir = _two_archives(tmp_path, make_pg_bundle_txz)
+    marker_before = (root / _MARKER).read_text()
+    calls = _swap_with(
+        monkeypatch,
+        fail_when=lambda n, src, dst: OSError("disk full") if src == "pg-bundle.incoming" else None,
+    )
+    fake = _Ops(pg_up=True)
+    with pytest.raises(OSError, match="disk full"):
+        pg_bundle.extract_bundle(second, root, platform=_WIN, quiesce=rq.quiesced(
+            tmp_path, replacing="pg_bundle", platform=_WIN, ops=fake.ops()))
+    # non-vacuity: all three renames were attempted (aside, in place, back).
+    assert calls == [
+        ("pg-bundle", "pg-bundle.replaced"),
+        ("pg-bundle.incoming", "pg-bundle"),
+        ("pg-bundle.replaced", "pg-bundle"),
+    ]
+    assert _initdb(bin_dir).read_text() == "FROM-FIRST-ARCHIVE\n", "the OLD tree must be back in place"
+    assert (root / _MARKER).read_text() == marker_before, "the marker must still name the old archive"
+    assert pg_bundle.is_bundle_extracted(root)
+    assert not (tmp_path / "pg-bundle.replaced").exists()
+    assert not (tmp_path / "pg-bundle.incoming").exists()
+    assert fake.events[-2:] == ["start_pg", "start_service"], "what was stopped is started again"
+
+
+def test_a_first_rename_held_by_a_scan_is_retried_on_windows_and_the_swap_completes(
+    tmp_path, monkeypatch, make_pg_bundle_txz,
+):
+    """``postgres.exe`` or a scanner can hold the bundle directory for a moment; the rename that
+    moves it aside is retried, not given up on (PB5)."""
+    _first, second, root, bin_dir = _two_archives(tmp_path, make_pg_bundle_txz)
+    slept: list[float] = []
+    calls = _swap_with(
+        monkeypatch, slept=slept,
+        fail_when=lambda n, src, dst: PermissionError(13, "held open") if n <= 2 else None,
+    )
+    pg_bundle.extract_bundle(second, root, platform=_WIN, quiesce=rq.quiesced(
+        tmp_path, replacing="pg_bundle", platform=_WIN, ops=_Ops(pg_up=True).ops()))
+    assert calls[:3] == [("pg-bundle", "pg-bundle.replaced")] * 3, "twice refused, then it went"
+    assert slept == list(rg.RETRY_DELAYS_S[:2])
+    assert _initdb(bin_dir).read_text() != "FROM-FIRST-ARCHIVE\n", "the swap completed onto the new tree"
+    assert (root / _MARKER).read_text() == pg_bundle._archive_identity(second)
+
+
+# ── partial stop in quiesce ───────────────────────────────────────────────────
+
+
+def test_a_partial_stop_refuses_the_replacement_and_never_starts_onto_the_survivor(tmp_path):
+    """The realistic failure: the supervisor exited, its engine did not. The replacement is
+    refused, and the service is not started back (a start would short-circuit onto the live
+    engine and leave a supervisor in front of a file about to be replaced) (Q02)."""
+    from structlog.testing import capture_logs
+
+    fake = _Ops(pg_up=True, outcome=SimpleNamespace(
+        pids=(100, 200), stubborn=(200,), refused=(), source="lease"))
+    with capture_logs() as logs:
+        with pytest.raises(rg.ReplaceBlockedError, match="survived the stop escalation"):
+            with rq.quiesced(tmp_path, replacing="engine", platform=_WIN, ops=fake.ops()):
+                pytest.fail("the body must not run")
+    assert fake.events == ["stop_service"], "no restart, no PostgreSQL probe, nothing"
+    blocked = [e for e in logs if e["event"] == "replace_quiesce_blocked"]
+    assert len(blocked) == 1
+    assert blocked[0]["stopped_service"] is True, "the supervisor (pid 100) DID stop"
+
+
+def test_only_a_survivor_stopped_nothing_so_the_service_counts_as_not_stopped(tmp_path):
+    """A signalled pid that is still running is not a stopped service (Q03)."""
+    from structlog.testing import capture_logs
+
+    fake = _Ops(outcome=SimpleNamespace(pids=(200,), stubborn=(200,), refused=(), source="lease"))
+    with capture_logs() as logs:
+        with pytest.raises(rg.ReplaceBlockedError):
+            with rq.quiesced(tmp_path, replacing="engine", platform=_WIN, ops=fake.ops()):
+                pass
+    blocked = [e for e in logs if e["event"] == "replace_quiesce_blocked"]
+    assert blocked and blocked[0]["stopped_service"] is False
+    assert fake.events == ["stop_service"]
+
+
+def test_a_refused_pid_is_not_reported_twice_as_survivor_and_refusal(tmp_path):
+    """A refused pid sits in ``stubborn`` by design; the message names it once, as a refusal (QZ2)."""
+    refusal = _refusal(7, target=2, own=1)
+    fake = _Ops(outcome=SimpleNamespace(
+        pids=(), stubborn=(7,), refused=(refusal,), source="refused"))
+    with pytest.raises(rg.ReplaceBlockedError) as err:
+        with rq.quiesced(tmp_path, replacing="engine", platform=_WIN, ops=fake.ops()):
+            pass
+    assert str(err.value).count("pid 7") == 1
+    assert "survived the stop escalation" not in str(err.value)
+
+
+def test_a_helper_that_could_not_answer_is_named_as_such_and_replaces_nothing(tmp_path):
+    refusal = GracefulStopSend(pid=9, sent=False, refused=True, stage="helper")
+    fake = _Ops(outcome=SimpleNamespace(
+        pids=(), stubborn=(9,), refused=(refusal,), source="refused"))
+    with pytest.raises(rg.ReplaceBlockedError, match="console helper did not answer") as err:
+        with rq.quiesced(tmp_path, replacing="engine", platform=_WIN, ops=fake.ops()):
+            pass
+    assert "access was denied" not in str(err.value)
     assert fake.events == ["stop_service"]

@@ -152,3 +152,115 @@ class TestUpgradeFinishUsesTheResolver:
         assert spawned, "the function spawned nothing: the test would pass vacuously"
         assert all(a[0] != "nx" for a in spawned)
         assert spawned[0][:3] == [r"C:\tools\conexus\Scripts\python.exe", "-m", "nexus.cli"]
+
+
+class TestWhichOffCwd:
+    """``shutil.which`` on Windows answers with a current-directory hit first; a
+    result that reaches an argv must not be one (RDR-224 test review S3)."""
+
+    CWD = r"C:\work\clone"
+    TOOLS = r"C:\tools\bin"
+
+    @pytest.fixture(autouse=True)
+    def _where(self, windows: None, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("os.getcwd", lambda: self.CWD)
+        monkeypatch.setattr("os.pathsep", ";")  # the Windows separator, on every host
+        monkeypatch.setenv("PATH", f"{self.CWD};{self.TOOLS}")
+
+    def test_a_relative_cwd_hit_is_retried_against_path_without_the_cwd(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        calls: list[object] = []
+
+        def which(name: str, *, path: str | None = None) -> str | None:
+            calls.append(path)
+            return rf".\{name}.exe" if path is None else rf"{self.TOOLS}\{name}.exe"
+
+        monkeypatch.setattr(shutil, "which", which)
+        assert nx_argv_mod.which_off_cwd("claude") == rf"{self.TOOLS}\claude.exe"
+        assert calls == [None, self.TOOLS], "the retry must drop the working directory's own entry"
+
+    def test_an_absolute_hit_inside_the_cwd_is_a_cwd_hit_too(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        planted = rf"{self.CWD}\claude.exe"
+        monkeypatch.setattr(shutil, "which", lambda name, *, path=None: planted)
+        assert nx_argv_mod.which_off_cwd("claude") is None  # the retry hands the same file back
+
+    def test_a_lookup_that_finds_nothing_off_the_cwd_is_none(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(
+            shutil, "which", lambda name, *, path=None: rf".\{name}.exe" if path is None else None,
+        )
+        assert nx_argv_mod.which_off_cwd("bd") is None
+
+    def test_a_hit_on_path_is_returned_unchanged(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(shutil, "which", lambda name, *, path=None: rf"{self.TOOLS}\{name}.exe")
+        assert nx_argv_mod.which_off_cwd("git") == rf"{self.TOOLS}\git.exe"
+
+    def test_posix_is_shutil_which_unchanged(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(nx_argv_mod, "_platform", lambda: "linux")
+        monkeypatch.setattr(shutil, "which", lambda name, *, path=None: "./looks-like-cwd")
+        assert nx_argv_mod.which_off_cwd("nx") == "./looks-like-cwd"
+
+    def test_nx_argv_for_is_the_interpreter_form_on_windows_and_the_lookup_on_posix(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(sys, "executable", r"C:\tools\conexus\Scripts\python.exe")
+        assert nx_argv_mod.nx_argv_for(r"C:\anything\nx.exe", "self", "gc") == [
+            r"C:\tools\conexus\Scripts\python.exe", "-m", "nexus.cli", "self", "gc",
+        ]
+        monkeypatch.setattr(nx_argv_mod, "_platform", lambda: "linux")
+        assert nx_argv_mod.nx_argv_for("/opt/bin/nx", "self", "gc") == ["/opt/bin/nx", "self", "gc"]
+
+
+class TestWindowsSpawnSitesNeverSpawnALookup:
+    """The two session-start hooks, on Windows, with a working-directory plant in
+    front of PATH. (The plugin lockstep's ``claude`` is pinned in
+    ``tests/test_plugin_lockstep.py``.)"""
+
+    @pytest.fixture(autouse=True)
+    def _windows(self, windows: None, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("os.getcwd", lambda: r"C:\work\clone")
+        monkeypatch.setattr(sys, "executable", r"C:\tools\conexus\Scripts\python.exe")
+
+    def test_self_gc_spawns_the_interpreter_form(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import subprocess
+
+        from nexus.hooks import self_gc
+
+        monkeypatch.setattr(shutil, "which", lambda name, *, path=None: r"C:\tools\bin\nx.exe")
+        argvs: list[list[str]] = []
+        monkeypatch.setattr(subprocess, "run", lambda argv, **k: argvs.append(list(argv)))
+        self_gc.run(None)
+        assert argvs == [[r"C:\tools\conexus\Scripts\python.exe", "-m", "nexus.cli", "self", "gc"]]
+
+    def test_self_gc_does_nothing_when_only_a_planted_nx_is_found(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import subprocess
+
+        from nexus.hooks import self_gc
+
+        monkeypatch.setattr(shutil, "which", lambda name, *, path=None: r".\nx.exe")
+        argvs: list[list[str]] = []
+        monkeypatch.setattr(subprocess, "run", lambda argv, **k: argvs.append(list(argv)))
+        self_gc.run(None)
+        assert argvs == []
+
+    def test_upgrade_auto_spawns_the_interpreter_form(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from nexus.hooks import upgrade_auto
+
+        monkeypatch.setattr(shutil, "which", lambda name, *, path=None: r"C:\tools\bin\nx.exe")
+        spawned: list[list[str]] = []
+
+        def spawn(argv: list[str], *a: object, **k: object) -> object:
+            spawned.append(list(argv))
+            raise OSError("stop here: the argv is what is under test")
+
+        monkeypatch.setattr(upgrade_auto, "_spawn_detached", spawn)
+        upgrade_auto.run(None)
+        assert spawned == [
+            [r"C:\tools\conexus\Scripts\python.exe", "-m", "nexus.cli", "upgrade", "--auto"],
+        ]

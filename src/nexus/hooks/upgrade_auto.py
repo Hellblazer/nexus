@@ -72,7 +72,6 @@ the spawn event and the stderr log are how one is found.
 from __future__ import annotations
 
 import os
-import shutil
 import subprocess
 import sys
 import warnings
@@ -199,11 +198,13 @@ def run(payload: dict | None) -> HookResult:  # noqa: ARG001 — reads no stdin,
     ``hook.log`` with the pid, argv and (if it exited inside the wait) its
     exit status.
     """
-    nx = shutil.which("nx")
+    from nexus.util.nx_argv import nx_argv_for, which_off_cwd  # noqa: PLC0415 — stdlib-only, a few microseconds; function-level so the hook module itself stays import-light
+
+    nx = which_off_cwd("nx")
     if nx is None:
         sys.stderr.write(SKEW_GUIDANCE + "\n")
         return HookResult()
-    argv = [nx, "upgrade", "--auto"]
+    argv = nx_argv_for(nx, "upgrade", "--auto")
     log_handle, log_path = _open_child_log()
     try:
         proc = _spawn_detached(argv, log_handle if log_handle is not None else subprocess.DEVNULL)

@@ -1811,6 +1811,9 @@ class GracefulStopSend:
     error: int | None = None
     target_session: int | None = None
     own_session: int | None = None
+    #: Where a failed send stopped (``win_console.ConsoleBreakResult.stage``);
+    #: ``"helper"`` marks a refusal that is "could not ask", not "access denied".
+    stage: str | None = None
 
 
 def request_graceful_stop(
@@ -1855,6 +1858,7 @@ def request_graceful_stop(
         error=result.error,
         target_session=result.target_session,
         own_session=result.own_session,
+        stage=result.stage,
     )
 
 
@@ -2087,6 +2091,17 @@ def storage_service_stack_matcher(
     process-table abstraction allows; it cannot help a config_dir that
     also embeds a value indistinguishable from a following flag or the
     NUL-turned-space bytes.
+
+    Windows spellings (RDR-224 test review m5, nexus-f9bgu.35): a Windows row
+    reaches this function through ``winproc_core.render_command_line``, so a
+    quoted, backslashed config_dir with a space in it is matched like any other
+    (``tests/daemon/test_windows_case_insensitive_paths.py``). A ``--config-dir``
+    spelt with a trailing separator or a ``\\\\?\\`` prefix is NOT normalised, on
+    purpose: every command line nexus writes (the CLI spawn, the Task Scheduler
+    launcher, the unit templates) is ``str(Path)``, which carries neither, so the
+    matcher reads what nexus writes; a hand-typed ``start --foreground`` in one
+    of those spellings is outside that contract and is still stopped through its
+    lease.
     """
     # The installed engine is nexus-service.exe on Windows (nexus-f9bgu.15),
     # so the exact path comes from the one function that knows that.

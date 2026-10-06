@@ -20,6 +20,8 @@ Stdlib only: the hooks import this on every tool call
 """
 from __future__ import annotations
 
+import os
+import shutil
 import sys
 from pathlib import PureWindowsPath
 
@@ -48,4 +50,46 @@ def nx_argv(*args: str) -> list[str]:
     return ["nx", *args]
 
 
-__all__ = ["console_python", "nx_argv"]
+def nx_argv_for(resolved: str, *args: str) -> list[str]:
+    """argv for ``nx <args...>`` given *resolved*, the path a PATH lookup found.
+
+    POSIX spawns exactly what the lookup found. Windows never spawns a looked-up
+    path: it is the interpreter form of :func:`nx_argv`, so a lookup that went
+    wrong (a working-directory hit) still cannot reach the argv."""
+    if _platform() == "win32":
+        return nx_argv(*args)
+    return [resolved, *args]
+
+
+def _in_cwd(found: str) -> bool:
+    """True when *found* sits in the current directory: a relative ``.\\x.exe``
+    (what ``shutil.which`` returns for a current-directory hit) or an absolute
+    path whose directory is the working directory. Windows path rules, no I/O."""
+    path = PureWindowsPath(found)
+    if not path.is_absolute():
+        return True
+    return path.parent == PureWindowsPath(os.getcwd())
+
+
+def which_off_cwd(name: str) -> str | None:
+    """``shutil.which(name)`` that never answers with a current-directory hit on
+    Windows, where ``which`` (and ``CreateProcess``) search the working directory
+    before ``PATH``. A hit there is retried against ``PATH`` with the working
+    directory's own entry removed, and still refused if ``which`` hands back the
+    planted file again. POSIX is ``shutil.which`` unchanged: its search is
+    ``PATH`` only. Use it whenever the result reaches an argv (RDR-224 test review
+    S3, nexus-f9bgu.35); a bare existence probe may keep ``shutil.which``."""
+    found = shutil.which(name)
+    if found is None or _platform() != "win32" or not _in_cwd(found):
+        return found
+    cwd = PureWindowsPath(os.getcwd())
+    others = [
+        entry
+        for entry in os.environ.get("PATH", "").split(os.pathsep)
+        if entry and PureWindowsPath(entry) != cwd
+    ]
+    retry = shutil.which(name, path=os.pathsep.join(others))
+    return None if retry is None or _in_cwd(retry) else retry
+
+
+__all__ = ["console_python", "nx_argv", "nx_argv_for", "which_off_cwd"]

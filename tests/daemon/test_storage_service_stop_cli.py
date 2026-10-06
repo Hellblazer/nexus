@@ -355,8 +355,11 @@ def test_refusal_message_names_the_owning_session_and_the_remedy_and_exits_nonze
 ) -> None:
     refusal = GracefulStopSend(pid=4242, sent=False, refused=True, error=5,
                                target_session=1, own_session=0)
+    # sweep_verified=False is what the lease-branch refusal in stop_storage_service
+    # builds; the default True would never reach the guarded "process table" Note.
     outcome = ssd.StopOutcome(
-        pids=(), stubborn=(4242,), source="refused", lease_seen=True, refused=(refusal,),
+        pids=(), stubborn=(4242,), source="refused", lease_seen=True, sweep_verified=False,
+        refused=(refusal,),
     )
     result = _invoke_stop(outcome, config_dir)
     text = result.output
@@ -387,6 +390,19 @@ def test_refusal_without_session_ids_still_says_what_to_do(config_dir: Path) -> 
     assert result.exit_code == 1
     assert "pid 4242" in result.output
     assert "access was denied" in result.output
+    assert "nothing was signalled or killed" in result.output.lower()
+
+
+def test_an_unanswered_helper_refusal_says_so_and_still_kills_nothing(config_dir: Path) -> None:
+    refusal = GracefulStopSend(pid=4242, sent=False, refused=True, stage="helper")
+    outcome = ssd.StopOutcome(
+        pids=(), stubborn=(4242,), source="refused", lease_seen=True, sweep_verified=False,
+        refused=(refusal,),
+    )
+    result = _invoke_stop(outcome, config_dir)
+    assert result.exit_code == 1
+    assert "console helper did not answer" in result.output
+    assert "access was denied" not in result.output
     assert "nothing was signalled or killed" in result.output.lower()
 
 

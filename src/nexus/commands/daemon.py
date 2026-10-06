@@ -962,7 +962,11 @@ def _refused_stop_lines(refusals: object) -> list[str]:
     lines: list[str] = []
     remedies: list[str] = []
     for r in refusals:  # type: ignore[attr-defined]
-        if r.target_session is not None and r.target_session != r.own_session:
+        if (
+            r.target_session is not None
+            and r.own_session is not None
+            and r.target_session != r.own_session
+        ):
             lines.append(
                 f"nx daemon service stop: REFUSED. The storage service (pid {r.pid}) "
                 f"runs in Windows session {r.target_session}; this shell is in "
@@ -972,6 +976,16 @@ def _refused_stop_lines(refusals: object) -> list[str]:
             remedy = (
                 f"Run 'nx daemon service stop' from session {r.target_session}: "
                 "sign in to that session, or use a terminal on that desktop."
+            )
+        elif getattr(r, "stage", None) == "helper":
+            lines.append(
+                f"nx daemon service stop: REFUSED. The storage service (pid {r.pid}) "
+                "could not be reached: the console helper did not answer, and the "
+                "service is not known to be in this Windows session."
+            )
+            remedy = (
+                "Run 'nx daemon service stop' again from the session that started "
+                "the service."
             )
         else:
             lines.append(

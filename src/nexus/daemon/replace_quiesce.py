@@ -139,7 +139,11 @@ def blocked_message(outcome: Any, *, replacing: Replacing) -> str | None:
     parts: list[str] = []
     remedies: list[str] = []
     for r in refused:
-        if r.target_session is not None and r.target_session != r.own_session:
+        if (
+            r.target_session is not None
+            and r.own_session is not None
+            and r.target_session != r.own_session
+        ):
             parts.append(
                 f"the storage service (pid {r.pid}) runs in Windows session "
                 f"{r.target_session}; this shell is in session {r.own_session}, and "
@@ -149,6 +153,13 @@ def blocked_message(outcome: Any, *, replacing: Replacing) -> str | None:
                 f"Run this upgrade from session {r.target_session}: sign in to that "
                 "session, or use a terminal on that desktop."
             )
+        elif getattr(r, "stage", None) == "helper":
+            parts.append(
+                f"the storage service (pid {r.pid}) could not be reached: the console "
+                "helper did not answer, and the service is not known to be in this "
+                "Windows session"
+            )
+            remedy = "Run this upgrade again from the session that started the service."
         else:
             parts.append(
                 f"the storage service (pid {r.pid}) could not be reached: access was "
@@ -212,7 +223,10 @@ def quiesced(
     )
     blocked = blocked_message(outcome, replacing=replacing)
     if blocked is not None:
-        _log.warning("replace_quiesce_blocked", replacing=replacing, reason=blocked)
+        _log.warning(
+            "replace_quiesce_blocked", replacing=replacing, reason=blocked,
+            stopped_service=state.stopped_service,
+        )
         if state.stopped_service and not survivors and not refused_pids:
             _restart_best_effort(effects, state)
         raise ReplaceBlockedError(blocked)

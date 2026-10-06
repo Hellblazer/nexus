@@ -247,6 +247,24 @@ def test_claude_missing_names_the_manual_route(registry, wheel, monkeypatch: pyt
     assert len(lines) == 1 and "/plugin update" in lines[0] and "conexus@nexus-plugins" in lines[0]
 
 
+def test_a_claude_planted_in_the_working_directory_is_never_the_one_that_runs_on_windows(
+        registry, wheel, monkeypatch: pytest.MonkeyPatch) -> None:
+    """On Windows ``shutil.which`` answers with ``.\\claude.exe`` first; that is a binary in
+    the user's working directory, not an install (RDR-224 test review S3)."""
+    import shutil
+
+    from nexus.util import nx_argv
+
+    registry({"conexus@nexus-plugins": "7.34.1"})
+    monkeypatch.setattr(nx_argv, "_platform", lambda: "win32")
+    monkeypatch.setattr(os, "getcwd", lambda: r"C:\work\clone")
+    monkeypatch.setattr(shutil, "which", lambda name, *, path=None: rf".\{name}.exe")
+    ran: list[object] = []
+    r = pl.converge_plugins(run=lambda cmd, **kw: ran.append(cmd))
+    assert r.status == "claude_missing"
+    assert ran == [], "nothing may be spawned from a planted claude.exe"
+
+
 def test_dry_run_runs_nothing(registry, fake_claude: Path, wheel) -> None:
     registry({"conexus@nexus-plugins": "7.34.1"})
     r = pl.converge_plugins(dry_run=True)

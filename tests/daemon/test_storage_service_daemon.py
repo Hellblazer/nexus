@@ -3598,7 +3598,10 @@ class TestStopDoesNotWaitOnAnAlreadyDeadSupervisor:
         intervals = [
             float(v)
             for v in re.findall(
-                r"time\.sleep\(([0-9.]+)\)", inspect.getsource(stop_storage_service)
+                r"time\.sleep\(([0-9.]+)\)",
+                # The wait loops live in the signalling half, which the public function
+                # calls after writing the stop marker (nexus-f9bgu.35).
+                inspect.getsource(stop_storage_service) + inspect.getsource(sys.modules[stop_storage_service.__module__]._stop_marked_service),
             )
         ]
         assert intervals and min(intervals) > ps_reap_sleep_cap_s, (

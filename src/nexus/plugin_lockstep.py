@@ -87,7 +87,6 @@ from __future__ import annotations
 import json
 import os
 import re
-import shutil
 import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -98,6 +97,7 @@ import structlog
 
 from nexus.bounded_subprocess import run_bounded
 from nexus.plugin_registry import known_plugins
+from nexus.util.nx_argv import which_off_cwd
 
 _log = structlog.get_logger(__name__)
 
@@ -315,7 +315,7 @@ def converge_plugins(
     at_wheel = {k: v for k, v in installed.items() if parse_version(v.version) == wheel_v}
     if not behind and not at_wheel:
         return LockstepReport(status="in_lockstep", wheel=wheel)
-    claude = claude_path or shutil.which("claude")
+    claude = claude_path or which_off_cwd("claude")
     if claude is None:
         return LockstepReport(status="claude_missing", wheel=wheel,
                               outcomes=[PluginOutcome(k, v.version, "failed", "claude CLI not on PATH", scope=v.scope)

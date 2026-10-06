@@ -205,6 +205,55 @@ class TestLauncherHonoursAStop:
         assert len(run.spawns) == 2
 
 
+class TestTheLaunchersOwnStopCheck:
+    """``run_launcher`` with NO injected ``stop_requested`` (S1): the check production
+    uses must read the marker ``stop_storage_service`` writes. Every other launcher test
+    injects its own check, so a wrong tier, identity or directory in the default survived."""
+
+    def _run(self, cfg: Path, writes: object) -> tuple[int, list[float]]:
+        spawns: list[float] = []
+        now = [1000.0]
+
+        def supervise(_cfg: Path) -> int:
+            spawns.append(now[0])
+            if len(spawns) == 1:
+                writes()  # type: ignore[operator]
+            if len(spawns) > 3:
+                raise AssertionError("the launcher kept respawning: its own stop check missed the marker")
+            now[0] += 10.0
+            return 1  # the hard-kill exit
+
+        code = windows_autostart.run_launcher(
+            cfg, supervise=supervise, sleep=lambda s: None, throttle_s=0.0, clock=lambda: now[0],
+        )
+        return code, spawns
+
+    def test_the_default_check_stops_the_launcher_after_a_stop_marker_written_for_this_service(
+        self, cfg: Path,
+    ) -> None:
+        code, spawns = self._run(
+            cfg,
+            lambda: sr.write_stop_marker(
+                cfg, "storage_service", sr.service_identity(), platform="win32",
+                clock=lambda: 1001.0,
+            ),
+        )
+        assert code == 0
+        assert len(spawns) == 1, "a hard-killed supervisor was respawned despite a stop marker"
+
+    def test_the_default_check_is_not_fooled_by_a_marker_for_another_identity_or_tier(
+        self, cfg: Path,
+    ) -> None:
+        def other() -> None:
+            sr.write_stop_marker(cfg, "storage_service", "S-1-5-21-999-1-1-1", platform="win32",
+                                 clock=lambda: 1001.0)
+            sr.write_stop_marker(cfg, "t3_daemon", sr.service_identity(), platform="win32",
+                                 clock=lambda: 1001.0)
+
+        with pytest.raises(AssertionError, match="kept respawning"):
+            self._run(cfg, other)  # the control: a wrong marker must not stop it
+
+
 class TestStopWritesTheMarkerBeforeItSignals:
     def _lease(self, cfg: Path, pid: int) -> None:
         reg = sr.ServiceRegistry(dir=cfg, tier=TIER)
@@ -262,6 +311,101 @@ class TestStopWritesTheMarkerBeforeItSignals:
         monkeypatch.setattr(sr, "sweep_matching_processes", lambda *a, **k: _EMPTY_SWEEP)
         outcome = ssd.stop_storage_service(config_dir=cfg, platform="win32")
         assert outcome.source == "none"  # it ran to completion
+
+    def _marker(self, cfg: Path) -> Path:
+        return sr.stop_marker_path(cfg, TIER, sr.service_identity())
+
+    def test_a_refused_stop_leaves_no_marker(
+        self, cfg: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A refusal promises nothing was signalled; the service keeps running. A marker left
+        behind would stop the launcher respawning it when it later exits non-zero (S2)."""
+
+        class _Refusing:
+            def free_console(self) -> bool:
+                return True
+
+            def attach_console(self, pid: int) -> tuple[bool, int]:
+                return False, 5  # ERROR_ACCESS_DENIED: another session
+
+            def generate_ctrl_break(self, pid: int) -> tuple[bool, int]:
+                raise AssertionError("a refused stop must not send")
+
+            def attach_parent_console(self) -> tuple[bool, int]:
+                return True, 0
+
+            def session_of(self, pid: int) -> int | None:
+                return 1 if pid == 999001 else 0
+
+        self._lease(cfg, 999001)
+        monkeypatch.setattr(ssd, "_pid_is_alive", lambda pid: True)
+        monkeypatch.setattr(sr, "sweep_matching_processes", lambda *a, **k: _EMPTY_SWEEP)
+        outcome = ssd.stop_storage_service(config_dir=cfg, platform="win32", console_api=_Refusing())
+        assert outcome.source == "refused"  # non-vacuity: this IS the refused path
+        assert self._marker(cfg) in OPENED, "non-vacuity: the marker was written before the send"
+        assert not self._marker(cfg).exists(), "a refused stop must not leave a stop marker"
+
+    def test_a_stop_that_leaves_a_stubborn_survivor_leaves_no_marker(
+        self, cfg: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The twin: the break was sent, the supervisor outlived the hard kill. It is still
+        running, so the launcher must stay free to respawn it when it exits on its own."""
+
+        class _Api:
+            def free_console(self) -> bool:
+                return True
+
+            def attach_console(self, pid: int) -> tuple[bool, int]:
+                return True, 0
+
+            def generate_ctrl_break(self, pid: int) -> tuple[bool, int]:
+                return True, 0
+
+            def attach_parent_console(self) -> tuple[bool, int]:
+                return True, 0
+
+            def session_of(self, pid: int) -> int | None:
+                return 0
+
+        self._lease(cfg, os.getpid())
+        monkeypatch.setattr(ssd, "_pid_is_alive", lambda pid: True)
+        monkeypatch.setattr(ssd, "_pid_is_running", lambda pid: True)  # never exits
+        monkeypatch.setattr(ssd, "_SUPERVISOR_STOP_GRACE", 0.0)
+        monkeypatch.setattr(ssd, "hard_kill_pid", lambda *a, **k: None)
+        monkeypatch.setattr(ssd, "wait_for_exit", lambda pids, **k: list(pids))
+        monkeypatch.setattr(sr, "sweep_matching_processes", lambda *a, **k: _EMPTY_SWEEP)
+        outcome = ssd.stop_storage_service(config_dir=cfg, platform="win32", console_api=_Api())
+        assert outcome.stubborn == (os.getpid(),)  # non-vacuity: the survivor is reported
+        assert not self._marker(cfg).exists(), "a stop that left a survivor must not leave a marker"
+
+    def test_a_clean_stop_with_a_lease_keeps_the_marker(
+        self, cfg: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The other half of S2: the fix must not drop the marker for a stop that worked."""
+
+        class _Api:
+            def free_console(self) -> bool:
+                return True
+
+            def attach_console(self, pid: int) -> tuple[bool, int]:
+                return True, 0
+
+            def generate_ctrl_break(self, pid: int) -> tuple[bool, int]:
+                return True, 0
+
+            def attach_parent_console(self) -> tuple[bool, int]:
+                return True, 0
+
+            def session_of(self, pid: int) -> int | None:
+                return 0
+
+        self._lease(cfg, os.getpid())
+        monkeypatch.setattr(ssd, "_pid_is_alive", lambda pid: True)
+        monkeypatch.setattr(ssd, "_pid_is_running", lambda pid: False)
+        monkeypatch.setattr(sr, "sweep_matching_processes", lambda *a, **k: _EMPTY_SWEEP)
+        outcome = ssd.stop_storage_service(config_dir=cfg, platform="win32", console_api=_Api())
+        assert outcome.pids == (os.getpid(),) and outcome.stubborn == ()
+        assert self._marker(cfg).exists()
 
     def test_a_posix_stop_writes_no_marker(self, cfg: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(sr, "sweep_matching_processes", lambda *a, **k: _EMPTY_SWEEP)

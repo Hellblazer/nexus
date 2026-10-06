@@ -118,8 +118,10 @@ class ConsoleBreakResult:
     """Outcome of one :func:`send_ctrl_break_via_console`.
 
     ``sent`` is ``GenerateConsoleCtrlEvent``'s return value and is NOT proof
-    the target received anything. ``refused`` is True only for
-    ``ERROR_ACCESS_DENIED`` from ``AttachConsole``. ``stage`` names where a
+    the target received anything. ``refused`` is True for
+    ``ERROR_ACCESS_DENIED`` from ``AttachConsole``, and for a helper that could
+    not answer when the target is not known to share the caller's session
+    (:func:`_unanswered`). ``stage`` names where a
     failure happened: ``"invalid"``, ``"attach"``, ``"generate"`` or ``"ok"``.
     ``reattached`` says whether the caller's own console came back (False
     when the caller never had a parent console to return to).
@@ -205,11 +207,45 @@ def _parse_helper_answer(stdout: str) -> ConsoleBreakResult | None:
     return None
 
 
+def _default_session_reader() -> Callable[[int], int | None]:
+    """``ProcessIdToSessionId`` through the real binding; every pid reads as
+    unknown (``None``) where there is no kernel32 to ask."""
+
+    def read(pid: int) -> int | None:
+        try:
+            return ctypes_win_console_api().session_of(pid)
+        except Exception:  # noqa: BLE001 — no kernel32 here, or the call failed: unknown
+            return None
+
+    return read
+
+
+def _unanswered(
+    pid: int, session_of: Callable[[int], int | None] | None,
+) -> ConsoleBreakResult:
+    """The result for a helper that could not answer (spawn failure, timeout, no
+    JSON). Not a send. A target in ANOTHER Windows session, or one whose session
+    (or ours) cannot be read, is reported ``refused``: the stop ladder hard-kills
+    after a send that did not take, and a cross-session stop fails loud and never
+    kills (Sam, 2026-10-05; RDR-224 test review m7, nexus-f9bgu.35). A target
+    known to share our session stays a plain not-sent, so the ladder carries on as
+    it does for any ignored break."""
+    read = session_of if session_of is not None else _default_session_reader()
+    target = read(pid)
+    own = read(os.getpid())
+    if target is not None and own is not None and target == own:
+        return ConsoleBreakResult(sent=False, stage="helper")
+    return ConsoleBreakResult(
+        sent=False, refused=True, stage="helper", target_session=target, own_session=own,
+    )
+
+
 def send_ctrl_break_via_helper(
     pid: int,
     *,
     run: Callable[..., "subprocess.CompletedProcess[str]"] | None = None,
     timeout_s: float = HELPER_TIMEOUT_S,
+    session_of: Callable[[int], int | None] | None = None,
 ) -> ConsoleBreakResult:
     """:func:`send_ctrl_break_via_console` in a short-lived helper process, so
     the calling process's console is never detached. Never raises.
@@ -242,11 +278,11 @@ def send_ctrl_break_via_helper(
         )
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
         _log.warning("win_console_helper_failed", pid=pid, error=repr(exc))
-        return ConsoleBreakResult(sent=False, stage="helper")
+        return _unanswered(pid, session_of)
     answer = _parse_helper_answer(done.stdout)
     if answer is None:
         _log.warning("win_console_helper_no_answer", pid=pid, returncode=done.returncode)
-        return ConsoleBreakResult(sent=False, stage="helper")
+        return _unanswered(pid, session_of)
     return answer
 
 

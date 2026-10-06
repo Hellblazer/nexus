@@ -133,11 +133,41 @@ class TestHelperSpawn:
         ],
         ids=["timeout", "oserror", "garbage", "empty-nonzero"],
     )
-    def test_a_helper_that_cannot_answer_is_not_a_send_and_never_raises(self, run: _Run) -> None:
-        result = win_console.send_ctrl_break_via_helper(9, run=run)
+    def test_a_helper_that_cannot_answer_in_our_own_session_is_a_plain_not_sent_and_never_raises(
+        self, run: _Run,
+    ) -> None:
+        result = win_console.send_ctrl_break_via_helper(9, run=run, session_of=lambda pid: 1)
         assert run.calls, "the spawner was never called: the test is vacuous"
         assert result.sent is False and result.refused is False
         assert result.stage == "helper"
+
+    @pytest.mark.parametrize(
+        "run",
+        [
+            _Run("", raises=subprocess.TimeoutExpired(["x"], 1)),
+            _Run("", raises=OSError("no interpreter")),
+            _Run("not json at all"),
+            _Run("", rc=1),
+        ],
+        ids=["timeout", "oserror", "garbage", "empty-nonzero"],
+    )
+    @pytest.mark.parametrize(
+        ("target", "own"), [(3, 1), (None, 1), (3, None), (None, None)],
+        ids=["other-session", "target-unreadable", "own-unreadable", "both-unreadable"],
+    )
+    def test_a_helper_that_cannot_answer_for_a_target_not_known_to_share_our_session_is_refused(
+        self, run: _Run, target: int | None, own: int | None,
+    ) -> None:
+        """Sam, 2026-10-05: a cross-session stop fails loud and never hard-kills. A helper that
+        cannot answer used to read as plain not-sent, and the ladder then hard-killed."""
+        import os
+
+        sessions = {9: target, os.getpid(): own}
+        result = win_console.send_ctrl_break_via_helper(9, run=run, session_of=sessions.get)
+        assert run.calls, "the spawner was never called: the test is vacuous"
+        assert result.sent is False and result.refused is True
+        assert result.stage == "helper"
+        assert (result.target_session, result.own_session) == (target, own)
 
     def test_an_invalid_pid_never_spawns_anything(self) -> None:
         run = _Run(_ok())
@@ -196,6 +226,26 @@ class TestRequestGracefulStopUsesTheHelper:
         )
         r = sr.request_graceful_stop(5, platform="win32")
         assert (r.refused, r.target_session, r.own_session) == (True, 3, 1)
+
+    def test_a_helper_that_cannot_answer_never_reaches_the_hard_kill_for_a_foreign_session(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The whole ladder, not the helper alone: no hard kill after an unanswered helper."""
+        import os
+
+        from nexus.daemon import storage_service_daemon as ssd
+
+        monkeypatch.setattr(
+            win_console, "send_ctrl_break_via_helper",
+            lambda pid, **_k: win_console._unanswered(pid, {pid: 3, os.getpid(): 1}.get),
+        )
+        killed: list[int] = []
+        monkeypatch.setattr(sr, "hard_kill_pid", lambda pid, **_k: killed.append(pid))
+        monkeypatch.setattr(ssd, "hard_kill_pid", lambda pid, **_k: killed.append(pid))
+        monkeypatch.setattr(sr, "pid_running", lambda pid: True)
+        out = sr.terminate_pids([4321], grace_s=0.2, platform="win32")
+        assert killed == [], "a stop that could not ask must never kill"
+        assert out == [4321], "the target is reported still running"
 
     def test_posix_never_reaches_the_helper(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(

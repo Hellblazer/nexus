@@ -19,7 +19,6 @@ them. See that module's docstring for the full argument.
 """
 from __future__ import annotations
 
-import shutil
 import subprocess
 
 from nexus._hook_runtime._io import HookResult
@@ -32,12 +31,14 @@ def run(payload: dict | None) -> HookResult:  # noqa: ARG001 — reads no stdin,
     a failed spawn are all the ``|| true`` case: this hook has no opinion worth
     interrupting a session start for.
     """
-    nx = shutil.which("nx")
+    from nexus.util.nx_argv import nx_argv_for, which_off_cwd  # noqa: PLC0415 — stdlib-only, a few microseconds; function-level so the hook module itself stays import-light
+
+    nx = which_off_cwd("nx")
     if nx is None:
         return HookResult()
     try:
-        subprocess.run(  # noqa: S603 — argv list, resolved binary, no shell
-            [nx, "self", "gc"],
+        subprocess.run(  # noqa: S603 — argv list, absolute interpreter on Windows, no shell
+            nx_argv_for(nx, "self", "gc"),
             capture_output=True,
             text=True,
             stdin=subprocess.DEVNULL,

@@ -105,6 +105,7 @@ from nexus.daemon.service_registry import (
     GracefulStopSend,
     ServiceRegistry,
     ServiceSupervisor,
+    clear_stop_marker,
     exit_if_process_unowned,
     fenced_exit_code,
     hard_kill_pid,
@@ -3343,11 +3344,6 @@ def stop_storage_service(
     port's ``/health`` with the exact expected body, which a coincidental
     pid-reuse victim answering by accident is not a realistic risk.
     """
-    from nexus.daemon.service_registry import (  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
-        storage_service_stack_matcher,
-        sweep_matching_processes,
-    )
-
     if config_dir is None:
         from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
 
@@ -3366,6 +3362,40 @@ def stop_storage_service(
         # The marker is the launcher's hint, never a precondition of stopping: a
         # config dir that cannot take the file must not stop the stop itself.
         _log.warning("storage_service_stop_marker_failed", error=str(exc))
+    outcome = _stop_marked_service(
+        config_dir=config_dir,
+        registry=registry,
+        scope=scope,
+        platform=platform,
+        console_api=console_api,
+    )
+    if outcome.refused or outcome.stubborn:
+        # The marker said "this service is meant to stay down". It must be
+        # written BEFORE the signal (the signal itself can produce the exit the
+        # launcher would otherwise answer with a respawn), so it cannot wait for
+        # the verdict; but a stop that was refused, or that left a survivor,
+        # did NOT bring the service down, and a marker left behind would
+        # suppress the launcher's respawn when that survivor later exits on its
+        # own (RDR-224 test review S2, nexus-f9bgu.35).
+        clear_stop_marker(config_dir, _REGISTRY_TIER, scope)
+    return outcome
+
+
+def _stop_marked_service(
+    *,
+    config_dir: Path,
+    registry: ServiceRegistry,
+    scope: str,
+    platform: str | None,
+    console_api: Any,
+) -> StopOutcome:
+    """The signalling half of :func:`stop_storage_service`, run with the stop
+    marker already on disk (Windows)."""
+    from nexus.daemon.service_registry import (  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
+        storage_service_stack_matcher,
+        sweep_matching_processes,
+    )
+
     # Freshness gate: discover() reaps stale leases; non-None means live.
     record = registry.discover(scope)
     # Independent of what gets signalled below: did discover() find a
