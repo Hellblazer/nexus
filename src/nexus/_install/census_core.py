@@ -218,8 +218,12 @@ def _match_prefix(generation: Path | str, platform: str | None = None) -> str:
         if resolved:
             path = Path(resolved)
 
-    text = _boundary_text(str(path), platform)
     is_nt = (platform if platform is not None else sys.platform) == "win32"
+    # Separators follow the HOST as well as the target: on a Windows host
+    # str(path) is backslash-spelt whatever platform is being asked about, and
+    # the snapshot rows are slash-spelt (the rehearsal caught platform="linux" on a
+    # Windows host matching nothing).
+    text = _boundary_text(str(path), "win32" if (is_nt or sys.platform == "win32") else platform)
     if not text or (is_nt and len(text) == 2 and text[1] == ":"):
         # "/" normalises to empty, and an empty match makes the boundary "/" —
         # every process on the machine a holder of everything. Refuse instead;

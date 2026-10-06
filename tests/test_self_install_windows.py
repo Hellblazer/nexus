@@ -172,7 +172,11 @@ class TestGenerationSite:
         host = _generation(tools, "20260101T000000Z")
         for n in range(2, 5):
             _generation(tools, f"2026010{n}T000000Z")
-        monkeypatch.setattr(sys, "prefix", str(host).upper())
+        upper = str(host).upper()
+        if not Path(upper).is_dir():
+            pytest.skip("case-sensitive filesystem: the upper-cased sys.prefix does not exist here "
+                        "(rule (d)'s folded comparison is covered directly in tests/test_install_gc_windows.py)")
+        monkeypatch.setattr(sys, "prefix", upper)
         # Not a generation under tools by exact spelling; the folded key matches.
         new = self_cmd.perform_self_install(keep=1)
         assert new is not None
