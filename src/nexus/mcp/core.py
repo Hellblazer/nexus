@@ -12864,6 +12864,13 @@ def _resolve_mode_diagnostics() -> dict[str, str | None]:
 
 
 def main():
+    # nexus-jg99b: on Windows, take the stdio protocol off fd 0 before anything
+    # can load a DLL that inspects stdin (OpenBLAS hangs under the loader lock
+    # while the transport's read is pending). A no-op elsewhere; never raises.
+    from nexus.mcp._win_stdin import isolate_stdin  # noqa: PLC0415 — entry-point only
+
+    _stdin_isolation = isolate_stdin()
+
     # nexus-4xgfy (critique 38b7db3d C1): the dominant post-upgrade path is
     # a Claude session spawning THIS process with no bare `nx` invocation in
     # between — the finish trigger must fire here too. Report-safe: the MCP
@@ -12905,6 +12912,14 @@ def main():
 
     configure_logging("mcp")
     log = structlog.get_logger("nexus.mcp.core")
+    if _stdin_isolation.step != "not-windows":
+        log.info(
+            "mcp_stdin_isolation",
+            server="nx-mcp",
+            isolated=_stdin_isolation.isolated,
+            step=_stdin_isolation.step,
+            error=_stdin_isolation.error,
+        )
 
     # Report the import-time SDK patching NOW, because now is the first moment
     # a handler exists to receive it. Without this the statuses are computed

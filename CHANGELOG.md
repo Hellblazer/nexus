@@ -6,6 +6,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **On native Windows, an MCP `search` no longer hangs forever** (nexus-jg99b, RDR-224). The MCP stdio transport keeps a thread blocked reading the stdin pipe, and while that read is pending Windows makes other calls on the same handle wait. Loading the OpenBLAS DLL that numpy and scipy ship makes one of those calls under the loader lock, so the first search that needed numpy never returned, and no new thread could start in the server. `nx-mcp` and `nx-mcp-catalog` now move the protocol to a private descriptor at startup and point stdin at `NUL`, which covers every library that inspects stdin while loading, and stops tool subprocesses inheriting the protocol pipe. On the RDR-224 guest, store then search went from a hang to 0.2 s. POSIX is unchanged.
+
 ## [7.72.0] - 2026-10-06
 
 ### Added

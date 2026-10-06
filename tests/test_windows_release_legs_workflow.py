@@ -714,6 +714,7 @@ PHASE3_WINDOWS_MODULES = (
     "src/nexus/util/win_console.py", "src/nexus/util/win_job.py", "src/nexus/_winsec.py",
     "src/nexus/daemon/windows_autostart.py", "src/nexus/daemon/session_end.py", "src/nexus/daemon/replace_*.py",
     "src/nexus/_install/winproc_core.py", "src/nexus/daemon/binary_install.py",
+    "src/nexus/mcp/_win_stdin.py",
     "src/nexus/_install/generation_core.py", "src/nexus/_install/layout_core.py",
     "src/nexus/_install/gc_core.py", "src/nexus/_install/census_core.py",
     "src/nexus/db/pg_provision.py", "src/nexus/db/pg_bundle.py", "src/nexus/commands/daemon.py",
@@ -725,6 +726,7 @@ WINDOWS_TEST_SET = (
     "tests/daemon/", "tests/test_process_group_safety.py", "tests/test_session_sweep_orphan_trackers.py",
     "tests/test_win_console.py", "tests/test_winsec.py", "tests/test_winproc_core.py",
     "tests/test_install_generation_real_windows.py", "tests/test_session_end_real_windows.py",
+    "tests/test_mcp_win_stdin.py", "tests/test_mcp_win_stdin_real_windows.py",
     "tests/test_os_trust_store.py", "tests/hooks/test_endpoint_resolve_lease_retry.py",
 )
 
@@ -766,6 +768,7 @@ REAL_KERNEL_PATTERNS = (
     "tests.test_install_generation_real_windows.TestRealWindows",
     "tests.daemon.test_pid_alive_windows.TestRealWindowsKernel",
     "tests.test_session_end_real_windows.TestRealWindows",
+    "tests.test_mcp_win_stdin_real_windows.TestRealWindows",
     "test_hard_killing_the_supervisor_takes_its_job_engine_with_it",
 )
 
