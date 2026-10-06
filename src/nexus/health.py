@@ -4322,9 +4322,9 @@ def _check_config_dir_user_access(
         return []
     try:
         if config_dir is None:
-            from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred to avoid circular import
+            import nexus.config as _config  # noqa: PLC0415 — deferred to avoid circular import
 
-            config_dir = nexus_config_dir()
+            config_dir = _config.nexus_config_dir()
         if not config_dir.is_dir():
             return []
         if problem is None:
