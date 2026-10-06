@@ -401,6 +401,79 @@ BEGIN
 END
 $fn$;
 
+-- The inverse of create_tenant_partitions for ONE tenant: the tenant's rows in the three tables that reference
+-- chunks, then its leaf under every model partition of nexus.chunks and nexus.taxonomy_centroids (found by
+-- partition bound, never by name), DETACHed and DROPped. Returns the number of leaves dropped; a tenant with no
+-- leaves is a no-op, so a repeat returns 0. Refuses 'default'.
+--
+-- It is NOT SECURITY DEFINER and no engine role may execute it (EXECUTE is revoked from PUBLIC below and granted to
+-- nobody): the tenant-removal runbook (RDR-225 Phase 3 Step 2) and the test substrate run it as the schema owner. A
+-- definer function here would let any role it was granted to drop another tenant's data.
+--
+-- The three referencing tables are FORCE ROW LEVEL SECURITY, which binds a non-superuser owner, so the function
+-- scopes nexus.tenant to the tenant for its deletes and restores the caller's value before it returns. Without
+-- that the deletes would match no row, the drops would still succeed, and the manifest rows of a chunk that no
+-- longer exists would be left behind.
+--
+-- The tenant's service_tokens rows are NOT deleted. The trigger that makes leaves fires on INSERT only, so a
+-- token left behind does not bring the leaves back, but a token for a tenant that has no leaves cannot write a
+-- chunk: removing the tokens is the runbook's separate, later step (referencing rows, then leaves, then tokens),
+-- because revoking access is an authorization decision that belongs in its own visible statement.
+CREATE OR REPLACE FUNCTION nexus.drop_tenant_partitions(p_tenant text) RETURNS integer
+LANGUAGE plpgsql
+SET search_path = pg_catalog, pg_temp
+SET lock_timeout = '10s'
+AS $fn$
+DECLARE
+    v_dropped integer := 0;
+    v_prev    text;
+    r         record;
+BEGIN
+    IF p_tenant IS NULL THEN
+        RAISE EXCEPTION 'nexus.drop_tenant_partitions: a tenant is required'
+            USING ERRCODE = 'null_value_not_allowed';
+    END IF;
+    IF p_tenant = 'default' THEN
+        RAISE EXCEPTION 'nexus.drop_tenant_partitions: the default tenant is never dropped'
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+    -- The same advisory lock create_tenant_partitions takes: a creation and a drop for one tenant serialize.
+    PERFORM pg_catalog.pg_advisory_xact_lock(
+        pg_catalog.hashtextextended('nexus.create_tenant_partitions:' || p_tenant, 0));
+
+    v_prev := pg_catalog.current_setting('nexus.tenant', true);
+    PERFORM pg_catalog.set_config('nexus.tenant', p_tenant, true);
+    -- Manifest rows first: their foreign key to the chunks does not cascade, and deleting them stamps
+    -- chunk_orphaned_at for the chunks it releases, which is why that table is cleared last.
+    DELETE FROM nexus.catalog_document_chunks WHERE tenant_id = p_tenant;
+    DELETE FROM nexus.topic_assignments WHERE tenant_id = p_tenant;
+    DELETE FROM nexus.chunk_orphaned_at WHERE tenant_id = p_tenant;
+    PERFORM pg_catalog.set_config('nexus.tenant', COALESCE(v_prev, ''), true);
+
+    FOR r IN
+        SELECT mn.nspname::text AS mp_ns, mp.relname::text AS mp_name,
+               ln.nspname::text AS leaf_ns, lc.relname::text AS leaf_name
+          FROM pg_catalog.pg_class par
+          JOIN pg_catalog.pg_namespace pn ON pn.oid = par.relnamespace AND pn.nspname = 'nexus'
+          JOIN pg_catalog.pg_inherits i1 ON i1.inhparent = par.oid
+          JOIN pg_catalog.pg_class mp ON mp.oid = i1.inhrelid
+          JOIN pg_catalog.pg_namespace mn ON mn.oid = mp.relnamespace
+          JOIN pg_catalog.pg_inherits i2 ON i2.inhparent = mp.oid
+          JOIN pg_catalog.pg_class lc ON lc.oid = i2.inhrelid
+          JOIN pg_catalog.pg_namespace ln ON ln.oid = lc.relnamespace
+         WHERE par.relname IN ('chunks', 'taxonomy_centroids')
+           AND nexus.partition_bound_value(lc.oid) = p_tenant
+         ORDER BY par.relname, mp.relname
+    LOOP
+        EXECUTE pg_catalog.format('ALTER TABLE %I.%I DETACH PARTITION %I.%I',
+                                  r.mp_ns, r.mp_name, r.leaf_ns, r.leaf_name);
+        EXECUTE pg_catalog.format('DROP TABLE %I.%I', r.leaf_ns, r.leaf_name);
+        v_dropped := v_dropped + 1;
+    END LOOP;
+    RETURN v_dropped;
+END
+$fn$;
+
 -- The model partition, its dimension CHECK, and a leaf for every existing tenant. Runs as its caller
 -- (a changeset, so the schema owner); not reachable by nexus_svc.
 CREATE OR REPLACE FUNCTION nexus.create_model_partition(
@@ -541,6 +614,7 @@ REVOKE EXECUTE ON FUNCTION nexus.create_model_partition(regclass, text, boolean)
 REVOKE EXECUTE ON FUNCTION nexus.partition_sync_access(regclass, boolean) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION nexus.service_tokens_create_tenant_partitions() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION nexus.create_tenant_partitions(regclass, text, boolean) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION nexus.drop_tenant_partitions(text) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION nexus.create_tenant_partitions(regclass, text, boolean) TO nexus_svc;
         </sql>
         <!-- PART B: the walk, steps 2 to 7.7 (nexus-3wh8d.8). -->

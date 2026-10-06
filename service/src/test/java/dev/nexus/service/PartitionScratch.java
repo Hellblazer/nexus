@@ -107,6 +107,31 @@ final class PartitionScratch {
             ctx.configuration(), parentRelName, model, tenantOrNull);
     }
 
+    @SuppressWarnings("deprecation")
+    static int dropTenantPartitions(DSLContext ctx, String tenant) {
+        return dev.nexus.service.jooq.nexus.Routines.dropTenantPartitions(ctx.configuration(), tenant);
+    }
+
+    /**
+     * {@code definer=<prosecdef>;config=<proconfig>;public=<PUBLIC may execute>;nexus_svc=<nexus_svc may execute>}
+     * for a nexus function, read from {@code pg_proc.proacl} text (a null ACL is the default, PUBLIC may execute).
+     */
+    static String functionFacts(DSLContext ctx, String function) {
+        var r = ctx.select(DSL.field(DSL.name("p", "prosecdef"), Boolean.class),
+                DSL.function("array_to_string", String.class, DSL.field(DSL.name("p", "proconfig")), DSL.inline(",")),
+                DSL.field(DSL.name("p", "proacl")).cast(String.class))
+            .from(DSL.table(DSL.name("pg_catalog", "pg_proc")).as("p"))
+            .join(DSL.table(DSL.name("pg_catalog", "pg_namespace")).as("n"))
+                .on(DSL.field(DSL.name("n", "oid")).eq(DSL.field(DSL.name("p", "pronamespace"))))
+            .where(DSL.field(DSL.name("n", "nspname"), String.class).eq("nexus"))
+            .and(DSL.field(DSL.name("p", "proname"), String.class).eq(function))
+            .fetchOne();
+        String acl = r.get(2, String.class);
+        boolean pub = acl == null || acl.startsWith("{=X/") || acl.contains(",=X/");
+        boolean svc = acl != null && acl.contains("nexus_svc=X/");
+        return "definer=" + r.get(0, Boolean.class) + ";config=" + r.get(1, String.class) + ";public=" + pub + ";nexus_svc=" + svc;
+    }
+
     // ── catalog reads ────────────────────────────────────────────────────────
 
     private static Field<String> relname(String alias) {

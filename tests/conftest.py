@@ -2561,7 +2561,7 @@ def _pin_mineru_autostart_off(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture
 def t2_service_env(request: pytest.FixtureRequest,
-                   monkeypatch: pytest.MonkeyPatch) -> str:
+                   monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
     """Engine-backed T2 substrate env for one test (RDR-155 P4b P0a', D-A).
 
     Boots the session-scoped hermetic PG + service JAR on first use
@@ -2569,13 +2569,15 @@ def t2_service_env(request: pytest.FixtureRequest,
     it with a freshly MINTED tenant + tenant-bound token — the engine
     binds tenant to the BEARER server-side (AuthFilter Decision 1; the
     X-Nexus-Tenant header is ignored), so per-test isolation is a
-    per-test token. Tests never share or clean up state. Returns the
-    tenant name.
+    per-test token. Tests never share state. Yields the tenant name; when
+    the test is done, pass or fail, the tenant's partition leaves are
+    dropped (``minted_test_tenant``, RDR-225), so a worker's PG does not
+    grow by about 50 relations per test.
 
     The suite default: ``_pin_t2_substrate`` pulls this fixture in for every
     test. Still requestable directly by tests that want the tenant name.
     """
-    from tests._engine_substrate import ensure_engine, mint_test_tenant
+    from tests._engine_substrate import ensure_engine, minted_test_tenant
     from tests.db._service_fixture import jar_freshness_skip_reason
 
     # CI leg (RDR-155 P4b P0a' registered question, now due): the Python
@@ -2593,35 +2595,35 @@ def t2_service_env(request: pytest.FixtureRequest,
                     "(tracked; NX_T2_SUBSTRATE_EXPECTED=1 re-arms fail-loud)")
 
     state = ensure_engine()
-    tenant, token = mint_test_tenant(state)
-    monkeypatch.setenv("NX_STORAGE_BACKEND", "service")
-    monkeypatch.setenv("NX_SERVICE_URL", state["base_url"])
-    monkeypatch.setenv("NX_SERVICE_TOKEN", token)
-    # ORTHOGONALITY PIN (nexus-aqbrk): this fixture selects a T2 SUBSTRATE.
-    # It must not also change the install's cloud/local POSTURE — a different
-    # axis entirely.
-    #
-    # ``NX_SERVICE_URL`` is overloaded. The T2 Http*Stores need it to find the
-    # engine, but ``config.is_local_mode()`` also reads ``service_url`` as the
-    # "this is a managed/cloud install" signal (nexus-3k43p, so a greenfield
-    # managed user is not mis-detected as local). Setting it therefore flips
-    # EVERY test in the suite from local to cloud posture as a side effect of
-    # choosing where T2 rows live. The sqlite arm has no service_url, so it is
-    # local — meaning the two arms were not comparing like with like.
-    #
-    # Measured, not assumed: tests/test_doc_indexer.py failed 12 on the engine
-    # arm, 8 of them ``CredentialsMissingError: cannot index in cloud mode
-    # without voyage_api_key``. Re-running with NX_LOCAL=1 took it to 8 — the
-    # 4 mode-posture failures are a pure artifact of the substrate pin, and the
-    # remainder are genuine catalog work.
-    #
-    # NX_LOCAL=1 restores the suite's default posture. Tests that WANT cloud
-    # posture use the ``cloud_mode`` fixture, which setenvs NX_LOCAL=0 and
-    # still wins: non-autouse fixtures resolve AFTER autouse ones, so its
-    # setenv lands later on the same monkeypatch — the same ordering contract
-    # documented on ``_isolate_service_endpoint_env`` below.
-    monkeypatch.setenv("NX_LOCAL", "1")
-    return tenant
+    with minted_test_tenant(state) as (tenant, token):
+        monkeypatch.setenv("NX_STORAGE_BACKEND", "service")
+        monkeypatch.setenv("NX_SERVICE_URL", state["base_url"])
+        monkeypatch.setenv("NX_SERVICE_TOKEN", token)
+        # ORTHOGONALITY PIN (nexus-aqbrk): this fixture selects a T2 SUBSTRATE.
+        # It must not also change the install's cloud/local POSTURE — a different
+        # axis entirely.
+        #
+        # ``NX_SERVICE_URL`` is overloaded. The T2 Http*Stores need it to find the
+        # engine, but ``config.is_local_mode()`` also reads ``service_url`` as the
+        # "this is a managed/cloud install" signal (nexus-3k43p, so a greenfield
+        # managed user is not mis-detected as local). Setting it therefore flips
+        # EVERY test in the suite from local to cloud posture as a side effect of
+        # choosing where T2 rows live. The sqlite arm has no service_url, so it is
+        # local — meaning the two arms were not comparing like with like.
+        #
+        # Measured, not assumed: tests/test_doc_indexer.py failed 12 on the engine
+        # arm, 8 of them ``CredentialsMissingError: cannot index in cloud mode
+        # without voyage_api_key``. Re-running with NX_LOCAL=1 took it to 8 — the
+        # 4 mode-posture failures are a pure artifact of the substrate pin, and the
+        # remainder are genuine catalog work.
+        #
+        # NX_LOCAL=1 restores the suite's default posture. Tests that WANT cloud
+        # posture use the ``cloud_mode`` fixture, which setenvs NX_LOCAL=0 and
+        # still wins: non-autouse fixtures resolve AFTER autouse ones, so its
+        # setenv lands later on the same monkeypatch — the same ordering contract
+        # documented on ``_isolate_service_endpoint_env`` below.
+        monkeypatch.setenv("NX_LOCAL", "1")
+        yield tenant
 
 
 @pytest.fixture(autouse=True)

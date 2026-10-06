@@ -63,6 +63,8 @@ def test_seed_leaves_a_dangling_row_and_a_not_valid_fk_within_the_test() -> None
     owner = cat.register_owner("fk-iso-guard-1", "curator")
     tumbler = cat.register(owner, "fk isolation guard doc", content_type="knowledge")
     chash = f"{0xF15A0:064x}"
+    # RDR-225: a manifest write needs its collection registered (the row carries the registry row's model).
+    cat.register_collection("knowledge__fk-iso-guard-1__bge-base-en-v15-768__v1")
     with fk_dropped_for_dangling_seed():
         cat.write_manifest(
             str(tumbler),
