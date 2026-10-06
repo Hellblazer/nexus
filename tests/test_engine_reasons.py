@@ -6,6 +6,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+import pytest
+
 from nexus.db.engine_reasons import (
     OWNERLESS_CHUNK_WRITE_REASON,
     UNREGISTERED_COLLECTION_REASON,
@@ -42,6 +44,24 @@ def test_the_quarantine_restore_busy_reason_equals_the_engines() -> None:
     )
     assert match, "HttpUtil no longer declares QUARANTINE_RESTORE_BUSY_REASON"
     assert match.group(1) == QUARANTINE_RESTORE_BUSY_REASON
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "COLLECTION_MODEL_MISMATCH_REASON",
+        "UNREGISTERED_EMBEDDING_MODEL_REASON",
+        "MODEL_PARTITION_MISSING_REASON",
+        "TENANT_PARTITION_MISSING_REASON",
+        "TENANT_CREATION_BUSY_REASON",
+    ],
+)
+def test_the_rdr225_partition_reasons_equal_the_engines(name: str) -> None:
+    from nexus.db import engine_reasons  # noqa: PLC0415 — test-local import
+
+    match = re.search(rf'{name}\s*=\s*"([a-z_]+)"', _HTTP_UTIL.read_text())
+    assert match, f"HttpUtil no longer declares {name}"
+    assert match.group(1) == getattr(engine_reasons, name)
 
 
 def test_every_reader_uses_the_one_module() -> None:
