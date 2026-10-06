@@ -185,6 +185,25 @@ def test_a_marker_that_cannot_be_written_does_not_stop_the_stop() -> None:
     assert rec.names() == ["engine", "pg"]
 
 
+def test_the_log_is_flushed_after_the_steps_even_when_the_flush_raises() -> None:
+    clock = _Clock()
+    rec = _Recorder(clock)
+    order: list[str] = []
+
+    def flush() -> None:
+        order.append("flush")
+        raise OSError("handler closed")
+
+    h = se.SessionEndHandler(
+        stop_requested=rec.stop_flag,
+        stop_engine=lambda b: (order.append("engine"), True)[1],
+        stop_pg=lambda b: (order.append("pg"), True)[1],
+        mark_stop=rec.mark, clock=clock, flush=flush,
+    )
+    assert h(5) is True
+    assert order == ["engine", "pg", "flush"]
+
+
 # ── idempotence ──────────────────────────────────────────────────────────────────
 
 
@@ -483,6 +502,9 @@ def test_the_wiring_on_windows_registers_a_handler_that_stops_everything_and_mar
     )
     monkeypatch.setattr(ssd, "_session_end_write_marker", lambda cd: se_marks.append(cd))
     se_marks: list[Path] = []
+    # This test is about the console handler; the window path has its own tests
+    # (test_session_end_window.py), so keep it from building a real window on a Windows host.
+    monkeypatch.setattr(se, "ctypes_window_backend", lambda: (_ for _ in ()).throw(OSError("off")))
     reg = _FakeRegistrar()
     uninstall = ssd._install_session_end_handler(
         sup, stop, tmp_path, {"PG_DATA": "/x"}, registrar=reg, platform="win32",

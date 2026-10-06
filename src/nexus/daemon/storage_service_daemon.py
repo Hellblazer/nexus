@@ -3037,6 +3037,7 @@ def _install_session_end_handler(
     creds: dict[str, str],
     *,
     registrar: Any = None,
+    window_backend: Any = None,
     platform: str | None = None,
 ) -> Callable[[], None]:
     """Windows only: stop the engine and PostgreSQL cleanly when the session ends
@@ -3050,6 +3051,8 @@ def _install_session_end_handler(
     plat = platform if platform is not None else sys.platform
     if plat != "win32":
         return lambda: None
+    from nexus.logging_setup import flush_logging as flush_log  # noqa: PLC0415 — deferred import — Windows-only path
+
     try:
         stop_pg = _session_end_pg_stopper(creds)
     except Exception as exc:  # noqa: BLE001 — degrade to the old behaviour, never fail the supervisor
@@ -3060,10 +3063,25 @@ def _install_session_end_handler(
         stop_engine=sup.stop_engine_for_session_end,
         stop_pg=stop_pg,
         mark_stop=lambda: _session_end_write_marker(config_dir),
+        flush=flush_log,
     )
-    return _session_end.install_session_end_handler(
+    # Two mechanisms, ONE handler. The hidden top-level window is the one that fires for
+    # logoff and shutdown (this process has user32 loaded, so Windows sends
+    # WM_ENDSESSION, not the console events); the console handler stays for CTRL_CLOSE.
+    # The shutdown priority is raised inside install_session_end_window, before the
+    # supervisor starts anything.
+    uninstall_window = _session_end.install_session_end_window(
+        handler, backend=window_backend, platform=plat,
+    )
+    uninstall_console = _session_end.install_session_end_handler(
         handler, registrar=registrar, platform=plat,
     )
+
+    def uninstall() -> None:
+        uninstall_console()
+        uninstall_window()
+
+    return uninstall
 
 
 def run_storage_supervisor(

@@ -25,12 +25,28 @@ stop (``mark_shutting_down`` / ``relinquish``) is unchanged and stays in
 ``StorageServiceSupervisor.stop``. The stop marker the callback writes IS the shared
 primitive's (``service_registry.write_stop_marker``).
 
-A process that loads ``user32`` / ``gdi32`` receives ``WM_QUERYENDSESSION`` /
-``WM_ENDSESSION`` instead of the LOGOFF and SHUTDOWN events and this callback never
-fires for them. That is verified only on a real session end; see the bead.
+THE CONSOLE HANDLER ALONE DOES NOT FIRE for logoff or shutdown (measured on a Hyper-V
+guest, round 1: installed, never called, engine killed, PostgreSQL crashed). The
+supervisor interpreter has ``USER32.dll``, ``GDI32.dll`` and ``win32u.dll`` loaded, and
+Windows does not deliver ``CTRL_LOGOFF_EVENT`` / ``CTRL_SHUTDOWN_EVENT`` to a console
+process that loaded user32: it sends ``WM_QUERYENDSESSION`` / ``WM_ENDSESSION`` to the
+process's top-level windows instead. So the PRIMARY mechanism is a hidden top-level
+window on a dedicated daemon thread (:func:`install_session_end_window`). It must be
+top-level, not ``HWND_MESSAGE``: message-only windows are not sent the broadcast. The
+console handler stays, harmless, and still covers ``CTRL_CLOSE_EVENT``. Both feed ONE
+:class:`SessionEndHandler`, so whichever arrives first does the stop and the other waits
+and returns.
 
-Every OS touchpoint is injectable (registrar, the two stoppers, the clock), so the logic
-is tested on every host. Nothing here imports a Windows-only module at import time.
+``SetProcessShutdownParameters(0x3FF, 0)`` runs first. Windows notifies processes at
+shutdown highest level first; the default is 0x280 and 0x300..0x3FF is the application
+range notified before it, so 0x3FF puts this supervisor ahead of the processes it has to
+stop first (the engine and the postmaster keep the default) and ahead of anything that
+would otherwise be terminated before the notification. That ordering is from the
+documented level ranges, not measured on a guest; the guest run is what shows it.
+
+Every OS touchpoint is injectable (registrar, window backend, the two stoppers, the
+clock), so the logic is tested on every host. Nothing here imports a Windows-only module
+at import time.
 """
 from __future__ import annotations
 
@@ -103,7 +119,11 @@ class SessionEndHandler:
         budget_s: float = HANDLER_BUDGET_S,
         engine_budget_s: float = ENGINE_BUDGET_S,
         pg_min_budget_s: float = PG_MIN_BUDGET_S,
+        flush: Callable[[], Any] | None = None,
     ) -> None:
+        #: Called after the steps and before returning: the process is terminated shortly
+        #: after, and a buffered ``session_end_done`` line is the evidence this ran.
+        self._flush = flush
         self._stop_requested = stop_requested
         self._stop_engine = stop_engine
         self._stop_pg = stop_pg
@@ -131,6 +151,11 @@ class SessionEndHandler:
         try:
             self._run(event)
         finally:
+            if self._flush is not None:
+                try:
+                    self._flush()
+                except Exception as exc:  # noqa: BLE001 — a flush that fails must not mask the stop
+                    _log.warning("session_end_flush_failed", error=str(exc))
             self._done.set()
         return True
 
@@ -288,6 +313,291 @@ def _noop() -> None:
     return None
 
 
+# ── The hidden top-level window (the primary mechanism) ──────────────────────────
+
+WM_CLOSE: int = 0x0010
+WM_DESTROY: int = 0x0002
+WM_QUERYENDSESSION: int = 0x0011
+WM_ENDSESSION: int = 0x0016
+
+#: ``WM_ENDSESSION``'s lParam bit for a logoff (clear: a shutdown or restart).
+ENDSESSION_LOGOFF: int = 0x80000000
+
+#: ``SetProcessShutdownParameters`` level: the top of the application range that is
+#: notified before the default 0x280. See the module docstring.
+SHUTDOWN_LEVEL: int = 0x3FF
+
+#: The window class. One supervisor per user, so a fixed name is enough, and a test (or a
+#: debugger) can find the window with ``FindWindowW``.
+WINDOW_CLASS_NAME: str = "NexusStorageSupervisorSessionEnd"
+
+#: How long the install waits for the window thread to report. Creating a window takes
+#: milliseconds; this only bounds a wedged ``CreateWindowExW``.
+WINDOW_READY_TIMEOUT_S: float = 5.0
+
+#: How long uninstall waits for the window thread after asking it to close.
+WINDOW_JOIN_TIMEOUT_S: float = 2.0
+
+
+class SessionEndMessageHandler:
+    """The window procedure's logic, with no OS in it: ``handler(msg, wparam, lparam)``.
+
+    Returns the ``LRESULT`` for a message it owns and ``None`` for one it does not (the
+    backend then calls ``DefWindowProcW``).
+
+    * ``WM_QUERYENDSESSION``: ``1``, the session may end. Nothing is stopped yet; the end
+      can still be cancelled.
+    * ``WM_ENDSESSION`` with ``wParam != 0``: the session IS ending. Run *stop* (the shared
+      :class:`SessionEndHandler`) synchronously with ``CTRL_LOGOFF_EVENT`` when lParam has
+      :data:`ENDSESSION_LOGOFF`, else ``CTRL_SHUTDOWN_EVENT``, then return ``0``.
+    * ``WM_ENDSESSION`` with ``wParam == 0``: the end was cancelled; do nothing.
+    """
+
+    def __init__(self, stop: Callable[[int], bool]) -> None:
+        self._stop = stop
+
+    def __call__(self, msg: int, wparam: int, lparam: int) -> int | None:
+        if msg == WM_QUERYENDSESSION:
+            return 1
+        if msg != WM_ENDSESSION:
+            return None
+        if wparam == 0:
+            _log.info("session_end_cancelled")
+            return 0
+        # lParam is a signed LPARAM: a 32-bit one with the top bit set reads negative.
+        logoff = bool((lparam & 0xFFFFFFFF) & ENDSESSION_LOGOFF)
+        ctrl_event = CTRL_LOGOFF_EVENT if logoff else CTRL_SHUTDOWN_EVENT
+        _log.info("session_end_window_message", logoff=logoff, lparam=lparam & 0xFFFFFFFF)
+        try:
+            self._stop(ctrl_event)
+        except Exception as exc:  # noqa: BLE001 — an exception must not leave the window procedure
+            _log.warning("session_end_window_stop_failed", error=str(exc))
+        return 0
+
+
+class WindowBackend(Protocol):
+    """The OS window seam."""
+
+    def set_shutdown_level(self, level: int) -> None: ...
+
+    def run_message_loop(
+        self, dispatch: Callable[[int, int, int], int | None], ready: Callable[[bool], None],
+    ) -> None:
+        """On the CALLING thread: create the window, call ``ready(True)`` (``ready(False)`` if
+        it could not be created), pump messages until the window is closed, clean up."""
+        ...
+
+    def request_close(self) -> None:
+        """From any thread: make the message loop end."""
+        ...
+
+
+def install_session_end_window(
+    stop: Callable[[int], bool],
+    *,
+    backend: WindowBackend | None = None,
+    platform: str | None = None,
+    ready_timeout_s: float = WINDOW_READY_TIMEOUT_S,
+    join_timeout_s: float = WINDOW_JOIN_TIMEOUT_S,
+) -> Callable[[], None]:
+    """Start the hidden window thread for *stop*; return an idempotent uninstall.
+
+    A no-op off Windows (the backend is never built there). The shutdown priority is raised
+    before the window exists. Any failure (no backend, the window cannot be created, a
+    loop that dies before it reports) is logged and degrades to a no-op: the supervisor
+    still runs, with only the console handler.
+    """
+    if (platform if platform is not None else sys.platform) != "win32":
+        return _noop
+    try:
+        be = backend if backend is not None else ctypes_window_backend()
+    except Exception as exc:  # noqa: BLE001 — degrade, never fail the supervisor over this
+        _log.warning("session_end_window_unavailable", error=str(exc))
+        return _noop
+    try:
+        be.set_shutdown_level(SHUTDOWN_LEVEL)
+    except Exception as exc:  # noqa: BLE001 — a refused priority still leaves a working window
+        _log.warning("session_end_shutdown_level_failed", error=str(exc))
+
+    dispatch = SessionEndMessageHandler(stop)
+    outcome: list[bool] = []
+    reported = threading.Event()
+
+    def ready(ok: bool) -> None:
+        outcome.append(ok)
+        reported.set()
+
+    def thread_main() -> None:
+        try:
+            be.run_message_loop(dispatch, ready)
+        except Exception as exc:  # noqa: BLE001 — the thread must not die with a traceback on stderr
+            _log.warning("session_end_window_loop_failed", error=str(exc))
+        finally:
+            reported.set()  # a loop that died before reporting must not hold the install
+
+    thread = threading.Thread(target=thread_main, name="session-end-window", daemon=True)
+    thread.start()
+    if not reported.wait(timeout=ready_timeout_s) or not outcome or not outcome[0]:
+        _log.warning("session_end_window_not_created", reported=reported.is_set())
+        thread.join(timeout=join_timeout_s)
+        return _noop
+    _log.info("session_end_window_installed", level=hex(SHUTDOWN_LEVEL))
+    uninstalled = False
+
+    def uninstall() -> None:
+        nonlocal uninstalled
+        if uninstalled:
+            return
+        uninstalled = True
+        try:
+            be.request_close()
+        except Exception as exc:  # noqa: BLE001 — teardown must not raise
+            _log.warning("session_end_window_close_failed", error=str(exc))
+        thread.join(timeout=join_timeout_s)
+
+    return uninstall
+
+
+#: The ctypes window procedure, strongly referenced for the life of the process: the OS
+#: calls it from the window thread, and a collected ``WNDPROC`` is a call into freed memory.
+_WNDPROC_REFS: list[Any] = []
+
+
+class _CtypesWindowBackend:
+    """``user32`` / ``kernel32`` through ctypes. Windows only; built lazily."""
+
+    def __init__(self) -> None:
+        import ctypes  # noqa: PLC0415 — deferred import — Windows-only types are touched only here
+        from ctypes import wintypes  # noqa: PLC0415 — deferred import — Windows-only
+
+        self._ct = ctypes
+        lresult, wparam_t, lparam_t = ctypes.c_ssize_t, ctypes.c_size_t, ctypes.c_ssize_t
+        self._wndproc_t = ctypes.WINFUNCTYPE(  # type: ignore[attr-defined]
+            lresult, wintypes.HWND, wintypes.UINT, wparam_t, lparam_t,
+        )
+
+        class WNDCLASSEXW(ctypes.Structure):
+            _fields_ = [  # noqa: RUF012 — ctypes layout
+                ("cbSize", wintypes.UINT), ("style", wintypes.UINT),
+                ("lpfnWndProc", self._wndproc_t), ("cbClsExtra", ctypes.c_int),
+                ("cbWndExtra", ctypes.c_int), ("hInstance", wintypes.HINSTANCE),
+                ("hIcon", wintypes.HANDLE), ("hCursor", wintypes.HANDLE),
+                ("hbrBackground", wintypes.HANDLE), ("lpszMenuName", wintypes.LPCWSTR),
+                ("lpszClassName", wintypes.LPCWSTR), ("hIconSm", wintypes.HANDLE),
+            ]
+
+        class MSG(ctypes.Structure):
+            _fields_ = [  # noqa: RUF012 — ctypes layout
+                ("hwnd", wintypes.HWND), ("message", wintypes.UINT), ("wParam", wparam_t),
+                ("lParam", lparam_t), ("time", wintypes.DWORD), ("pt", wintypes.POINT),
+            ]
+
+        self._WNDCLASSEXW, self._MSG = WNDCLASSEXW, MSG
+        u = ctypes.WinDLL("user32", use_last_error=True)  # type: ignore[attr-defined]
+        k = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
+        u.DefWindowProcW.argtypes = [wintypes.HWND, wintypes.UINT, wparam_t, lparam_t]
+        u.DefWindowProcW.restype = lresult
+        u.RegisterClassExW.argtypes = [ctypes.POINTER(WNDCLASSEXW)]
+        u.RegisterClassExW.restype = wintypes.ATOM
+        u.UnregisterClassW.argtypes = [wintypes.LPCWSTR, wintypes.HINSTANCE]
+        u.UnregisterClassW.restype = wintypes.BOOL
+        u.CreateWindowExW.argtypes = [
+            wintypes.DWORD, wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.DWORD,
+            ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+            wintypes.HWND, wintypes.HMENU, wintypes.HINSTANCE, wintypes.LPVOID,
+        ]
+        u.CreateWindowExW.restype = wintypes.HWND
+        u.GetMessageW.argtypes = [ctypes.POINTER(MSG), wintypes.HWND, wintypes.UINT, wintypes.UINT]
+        u.GetMessageW.restype = ctypes.c_int
+        u.TranslateMessage.argtypes = [ctypes.POINTER(MSG)]
+        u.DispatchMessageW.argtypes = [ctypes.POINTER(MSG)]
+        u.DispatchMessageW.restype = lresult
+        u.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wparam_t, lparam_t]
+        u.PostMessageW.restype = wintypes.BOOL
+        u.PostQuitMessage.argtypes = [ctypes.c_int]
+        k.GetModuleHandleW.argtypes = [wintypes.LPCWSTR]
+        k.GetModuleHandleW.restype = wintypes.HMODULE
+        k.SetProcessShutdownParameters.argtypes = [wintypes.DWORD, wintypes.DWORD]
+        k.SetProcessShutdownParameters.restype = wintypes.BOOL
+        self._u, self._k = u, k
+        self._hwnd: int | None = None
+        self._lock = threading.Lock()
+
+    def set_shutdown_level(self, level: int) -> None:
+        if not self._k.SetProcessShutdownParameters(level, 0):
+            raise OSError(f"SetProcessShutdownParameters({level:#x}) failed: {self._ct.get_last_error()}")
+
+    def run_message_loop(
+        self, dispatch: Callable[[int, int, int], int | None], ready: Callable[[bool], None],
+    ) -> None:
+        ct, u = self._ct, self._u
+
+        def wndproc(hwnd: Any, msg: int, wparam: int, lparam: int) -> int:
+            if msg == WM_DESTROY:
+                u.PostQuitMessage(0)
+                return 0
+            try:
+                result = dispatch(int(msg), int(wparam), int(lparam))
+            except Exception:  # noqa: BLE001 — an exception out of a ctypes callback is printed and lost
+                _log.exception("session_end_wndproc_raised", msg=int(msg))
+                result = None
+            if result is None:
+                return int(u.DefWindowProcW(hwnd, msg, wparam, lparam))
+            return int(result)
+
+        proc = self._wndproc_t(wndproc)
+        _WNDPROC_REFS.append(proc)  # for the life of the process, deliberately
+        hinst = self._k.GetModuleHandleW(None)
+        cls = self._WNDCLASSEXW()
+        cls.cbSize = ct.sizeof(self._WNDCLASSEXW)
+        cls.lpfnWndProc = proc
+        cls.hInstance = hinst
+        cls.lpszClassName = WINDOW_CLASS_NAME
+        registered = bool(u.RegisterClassExW(ct.byref(cls)))
+        if not registered and ct.get_last_error() != 1410:  # ERROR_CLASS_ALREADY_EXISTS
+            ready(False)
+            raise OSError(f"RegisterClassExW failed: {ct.get_last_error()}")
+        # Top-level and hidden: no WS_VISIBLE, never shown, hWndParent NULL. NOT HWND_MESSAGE:
+        # a message-only window is not sent the broadcast WM_QUERYENDSESSION / WM_ENDSESSION.
+        hwnd = u.CreateWindowExW(
+            0, WINDOW_CLASS_NAME, "nexus storage supervisor", 0, 0, 0, 0, 0, None, None, hinst, None,
+        )
+        if not hwnd:
+            error = ct.get_last_error()
+            if registered:
+                u.UnregisterClassW(WINDOW_CLASS_NAME, hinst)
+            ready(False)
+            raise OSError(f"CreateWindowExW failed: {error}")
+        with self._lock:
+            self._hwnd = int(hwnd)
+        ready(True)
+        msg = self._MSG()
+        try:
+            while True:
+                got = u.GetMessageW(ct.byref(msg), None, 0, 0)
+                if got <= 0:  # 0: WM_QUIT; -1: error
+                    break
+                u.TranslateMessage(ct.byref(msg))
+                u.DispatchMessageW(ct.byref(msg))
+        finally:
+            with self._lock:
+                self._hwnd = None
+            if registered:
+                u.UnregisterClassW(WINDOW_CLASS_NAME, hinst)
+
+    def request_close(self) -> None:
+        with self._lock:
+            hwnd = self._hwnd
+        if hwnd:
+            # Posted, not DestroyWindow: only the owning thread may destroy a window.
+            self._u.PostMessageW(hwnd, WM_CLOSE, 0, 0)
+
+
+def ctypes_window_backend() -> WindowBackend:
+    """The real backend. Raises off Windows (``WINFUNCTYPE`` does not exist there)."""
+    return _CtypesWindowBackend()
+
+
 __all__ = [
     "CTRL_CLOSE_EVENT",
     "CTRL_LOGOFF_EVENT",
@@ -297,8 +607,17 @@ __all__ = [
     "OWNED_EVENTS",
     "PG_MIN_BUDGET_S",
     "CtrlHandlerRegistrar",
+    "ENDSESSION_LOGOFF",
+    "SHUTDOWN_LEVEL",
+    "WM_CLOSE",
+    "WM_ENDSESSION",
+    "WM_QUERYENDSESSION",
+    "WindowBackend",
     "SessionEndHandler",
+    "SessionEndMessageHandler",
     "ctypes_ctrl_registrar",
+    "ctypes_window_backend",
+    "install_session_end_window",
     "install_session_end_handler",
     "make_pg_stopper",
 ]
