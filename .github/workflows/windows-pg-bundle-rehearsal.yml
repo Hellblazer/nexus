@@ -101,6 +101,7 @@ on:
       - tests/test_win_console.py
       - tests/test_winsec.py
       - tests/test_winproc_core.py
+      - tests/test_install_generation_real_windows.py
       - tests/hooks/test_endpoint_resolve_lease_retry.py
       - tests/test_windows_service_stop_driver.py
       - scripts/windows_service_stop_driver.py
@@ -115,6 +116,13 @@ on:
       - src/nexus/util/process_group.py
       - src/nexus/_winsec.py
       - src/nexus/_install/winproc_core.py
+      # The Windows generation installer (RDR-224, nexus-f9bgu.47): junction pointers,
+      # launcher shims and the Windows-aware reap, run natively by
+      # tests/test_install_generation_real_windows.py.
+      - src/nexus/_install/generation_core.py
+      - src/nexus/_install/layout_core.py
+      - src/nexus/_install/shims_core.py
+      - src/nexus/_install/gc_core.py
       - src/nexus/db/pg_provision.py
       - src/nexus/db/pg_bundle.py
       - src/nexus/commands/daemon.py
@@ -318,7 +326,7 @@ jobs:
       # 2 xfailed, 0 failed.
       - name: Windows test set
         run: |
-          uv run --python 3.13 --frozen pytest tests/daemon/ tests/test_process_group_safety.py tests/test_session_sweep_orphan_trackers.py tests/test_win_console.py tests/test_winsec.py tests/test_winproc_core.py tests/hooks/test_endpoint_resolve_lease_retry.py -p no:cacheprovider -q -rs --junitxml=windows-tests-junit.xml
+          uv run --python 3.13 --frozen pytest tests/daemon/ tests/test_process_group_safety.py tests/test_session_sweep_orphan_trackers.py tests/test_win_console.py tests/test_winsec.py tests/test_winproc_core.py tests/test_install_generation_real_windows.py tests/hooks/test_endpoint_resolve_lease_retry.py -p no:cacheprovider -q -rs --junitxml=windows-tests-junit.xml
 
       # A run that skipped itself on Windows would pass having proved nothing. The
       # floor is sized from the measured run above: junit counts an xfail as a skip,
@@ -331,4 +339,4 @@ jobs:
       - name: Non-vacuity floor
         if: ${{ !cancelled() }}
         run: |
-          uv run --python 3.13 --frozen python scripts/check_junit_floor.py windows-tests-junit.xml --min-passed 1100 --max-skipped 52 --require-passed tests.test_winsec.TestRealWindows --require-passed tests.test_winproc_core.TestRealWindowsKernel --require-passed tests.daemon.test_pid_alive_windows.TestRealWindowsKernel --require-passed test_hard_killing_the_supervisor_takes_its_job_engine_with_it
+          uv run --python 3.13 --frozen python scripts/check_junit_floor.py windows-tests-junit.xml --min-passed 1100 --max-skipped 52 --require-passed tests.test_winsec.TestRealWindows --require-passed tests.test_winproc_core.TestRealWindowsKernel --require-passed tests.test_install_generation_real_windows.TestRealWindows --require-passed tests.daemon.test_pid_alive_windows.TestRealWindowsKernel --require-passed test_hard_killing_the_supervisor_takes_its_job_engine_with_it

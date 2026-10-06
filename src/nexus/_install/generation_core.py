@@ -300,7 +300,13 @@ def _run(argv: list[str], run, what: str) -> str:
     """Run one command; return its stdout, or raise with what it said."""
     runner = run if run is not None else subprocess.run
     try:
-        done = runner(argv, capture_output=True, text=True, check=False)  # noqa: S603 -- fixed argv, no shell
+        # utf-8 with replacement, not ``text=True``: that decodes with the
+        # console code page on Windows, and uv prints non-ASCII progress glyphs;
+        # a UnicodeDecodeError out of the reader thread would replace the
+        # build's own diagnostic with a decoding traceback.
+        done = runner(  # noqa: S603 -- fixed argv, no shell
+            argv, capture_output=True, encoding="utf-8", errors="replace", check=False,
+        )
     except FileNotFoundError as exc:
         raise GenerationError(
             f"{what}: {argv[0]} was not found on PATH. nx self install needs uv "

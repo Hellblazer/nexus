@@ -35,6 +35,14 @@ caller. It now distinguishes three sites rather than two:
   legacy uv tool  -> converge it via the packaged migrate_legacy.sh
   dev checkout    -> refuse, and name scripts/reinstall-tool.sh
 
+NATIVE WINDOWS (RDR-224, nexus-f9bgu.47). ``bash`` on Windows is the WSL
+launcher, so every ``_sh``/``bash`` call here has a Windows twin that calls
+``nexus._install.generation_core`` directly: build with uv, flip junctions,
+copy launcher shims, reap with Windows-aware rules, migrate a legacy uv tree.
+Each branch asks ``_is_windows()``; the POSIX path below it is unchanged.
+Out of scope on Windows: the dev-checkout reinstall script, and
+``repair_uv_takeover`` (it refuses, naming that).
+
 SCOPE FENCE. This replaces the MECHANISM of ``uv tool upgrade conexus``. It
 does NOT merge that with ``nx upgrade``. RDR-143 CA-2 keeps them two commands
 deliberately — binary upgrade versus migration ladder — and ``nx upgrade``
@@ -85,6 +93,66 @@ def running_generation() -> Path:
     return Path(sys.prefix)
 
 
+def _is_windows(platform: str | None = None) -> bool:
+    """True on native Windows. *platform* follows the ``nexus._winsec`` seam:
+    ``"win32"`` forces the Windows reading, anything else forces POSIX, and
+    ``None`` asks ``os.name``. Tests that drive the Windows branches on another
+    host patch THIS function, so there is one place the reading is decided."""
+    return (platform == "win32") if platform is not None else (os.name == "nt")
+
+
+def _plat() -> str | None:
+    """The platform argument the layout helpers take: ``"win32"`` when
+    :func:`_is_windows` says so, else ``None`` (the host's own reading)."""
+    return "win32" if _is_windows() else None
+
+
+def _generation():
+    """``nexus._install.generation_core``, imported only where it is used so a
+    POSIX run never loads it."""
+    from nexus._install import generation_core  # noqa: PLC0415 — Windows branches only
+
+    return generation_core
+
+
+def _same_dir(left: Path, right: Path) -> bool:
+    """Whether two spellings name one directory: ``==`` on POSIX, the Windows
+    folded real path (case, extended prefix, 8.3) on Windows."""
+    if not _is_windows():
+        return left == right
+    from nexus import install_layout  # noqa: PLC0415 — deferred import
+
+    return install_layout.compare_key(left, platform="win32") == install_layout.compare_key(
+        right, platform="win32",
+    )
+
+
+def _is_generation_name(name: str) -> bool:
+    """``gen-*``; on Windows without regard to case, because ``sys.prefix`` can
+    be spelt in any case NTFS accepts."""
+    from nexus import install_layout  # noqa: PLC0415 — deferred import
+
+    prefix = install_layout.GENERATION_PREFIX
+    return (name.lower().startswith(prefix) if _is_windows() else name.startswith(prefix))
+
+
+class _WindowsBuild:
+    """What a Windows generation build needs: there is no bash argv to hand over."""
+
+    def __init__(self, source: str, extras: list[str], version: str | None) -> None:
+        self.source = source
+        self.extras = extras
+        self.version = version
+
+    def describe(self) -> str:
+        parts = ["generation_core.build_generation", "--source", self.source]
+        if self.extras:
+            parts += ["--extras", ",".join(self.extras)]
+        if self.version:
+            parts += ["--version", self.version]
+        return " ".join(parts)
+
+
 def perform_self_install(
     *, keep: int = 3, version: str | None = None, dry_run: bool = False,
     add_extras: tuple[str, ...] = (),
@@ -120,7 +188,7 @@ def perform_self_install(
     # on the documented install route and sent the reader to a repo script they
     # have no copy of, which left commit 047dd80e7's migration -- written
     # expressly to converge that layout -- reachable only by cloning the repo.
-    if host.parent == tools and host.name.startswith(install_layout.GENERATION_PREFIX):
+    if _same_dir(host.parent, tools) and _is_generation_name(host.name):
         pass  # a generation: fall through to the upgrade path below
     elif new_extras:
         # nexus-pffc4: --extras is a GENERATION-install surface. The legacy
@@ -177,9 +245,9 @@ def perform_self_install(
     # install, and on a box whose current has already moved those differ.
     receipt = install_layout.read_receipt(host)
     extras = _merge_extras(receipt.extras, new_extras)
-    build = _build_argv(install_dir, receipt, version=version, extras=extras)
+    build = _build_request(install_dir, receipt, version=version, extras=extras)
     if dry_run:
-        click.echo(" ".join(build))
+        click.echo(build.describe() if isinstance(build, _WindowsBuild) else " ".join(build))
         return None
     generation = _build_flip_shims(build, install_dir=install_dir, tools=tools, bin_dir=bin_dir)
 
@@ -274,6 +342,17 @@ def _build_argv(
     if version:
         build += ["--version", version]
     return build
+
+
+def _build_request(
+    install_dir: Path, receipt, *, version: str | None, extras: list[str] | None = None,
+):
+    """What one generation build is asked to do: the bash argv on POSIX, a
+    :class:`_WindowsBuild` on Windows, where the build is a Python call."""
+    if _is_windows():
+        effective = receipt.extras if extras is None else extras
+        return _WindowsBuild(receipt.source, list(effective), version)
+    return _build_argv(install_dir, receipt, version=version, extras=extras)
 
 
 # ── Package-index failure diagnosis (nexus-12pyx) ───────────────────────────
@@ -443,7 +522,7 @@ def index_failure_hint(
     return "\n".join(lines)
 
 
-def _build_flip_shims(build: list[str], *, install_dir: Path, tools: Path, bin_dir: Path) -> Path:
+def _build_flip_shims(build, *, install_dir: Path, tools: Path, bin_dir: Path) -> Path:
     """Run one generation build, flip ``current`` to it, write the shims.
 
     No reap here: callers that reap do it afterwards and pass rule (d)
@@ -453,6 +532,8 @@ def _build_flip_shims(build: list[str], *, install_dir: Path, tools: Path, bin_d
     and nothing about this command needs the bit.
     """
     tools.mkdir(parents=True, exist_ok=True)
+    if isinstance(build, _WindowsBuild):
+        return _windows_build_flip_shims(build, tools=tools, bin_dir=bin_dir)
     built = subprocess.run(  # noqa: S603 — fixed argv, no shell
         build, capture_output=True, text=True, check=False,
     )
@@ -467,6 +548,33 @@ def _build_flip_shims(build: list[str], *, install_dir: Path, tools: Path, bin_d
     generation = Path(built.stdout.strip().splitlines()[-1])
     _sh(install_dir, f'nx_flip_current "{generation}" "{tools}"')
     _sh(install_dir, f'nx_write_shims "{generation}" "{bin_dir}"')
+    return generation
+
+
+def _windows_build_flip_shims(build: _WindowsBuild, *, tools: Path, bin_dir: Path) -> Path:
+    """The Windows twin of the build, flip and shim steps, through
+    ``generation_core``. A build failure keeps the POSIX path's wording and its
+    package-index diagnosis; nothing is flipped unless the build finished."""
+    core = _generation()
+    try:
+        generation = core.build_generation(
+            build.source, version=build.version or "", extras=build.extras, tools=tools,
+            platform=_plat(),
+        )
+    except core.GenerationError as exc:
+        detail = str(exc)
+        hint = index_failure_hint(detail)
+        if hint is None:
+            raise click.ClickException(f"generation build failed:\n{detail}") from exc
+        raise click.ClickException(
+            f"generation build failed:\n{hint}\n\nuv output:\n{detail}"
+        ) from exc
+    try:
+        core.flip_current(generation, tools, platform=_plat())
+        for line in core.write_shims(generation, bin_dir, platform=_plat()):
+            click.echo(line, err=True)
+    except core.GenerationError as exc:
+        raise click.ClickException(f"flip or shim write failed:\n{exc}") from exc
     return generation
 
 
@@ -488,7 +596,9 @@ def _installed_version(venv: Path) -> str | None:
     answer is what that tree would report about itself. ``None`` when the
     tree has no usable python or no conexus.
     """
-    python = venv / "bin" / "python"
+    from nexus import install_layout  # noqa: PLC0415 — deferred import
+
+    python = install_layout.venv_python(venv, platform=_plat())
     if not python.exists():
         return None
     r = run_bounded(  # noqa: S603 — fixed argv, no shell
@@ -539,6 +649,15 @@ def repair_uv_takeover(*, dry_run: bool = False) -> list[str]:
     Returns ``[]`` when there is no generation layout (a pure uv box is not
     a takeover; ``nx self install`` converges it) or nothing is wrong.
     """
+    if _is_windows():
+        # Not ported (RDR-224, nexus-f9bgu.47): the repair rewrites shims over
+        # uv symlinks and compares uv's tree to ``current``, and on Windows uv
+        # copies launchers rather than linking them. Refuse rather than guess.
+        raise click.ClickException(
+            "repairing a uv takeover is not supported on Windows. Run "
+            "`nx self install` to build a fresh generation and rewrite the "
+            "shims, then `nx self gc` once nothing runs from uv's tree."
+        )
     from nexus import install_layout  # noqa: PLC0415 — deferred import
 
     tools = install_layout.tools_dir()
@@ -609,11 +728,18 @@ def _register_legacy_tree_if_present(install_dir: Path, tools: Path) -> Path | N
     nexus-orhp5) rather than shelling ``uv tool dir``, so it answers the same
     way ``nx doctor`` does and needs no uv on PATH.
     """
-    from nexus.install_layout import uv_conexus_venv  # noqa: PLC0415 — deferred import
+    from nexus import install_layout  # noqa: PLC0415 — deferred import
 
-    legacy = uv_conexus_venv()
-    if not (legacy / "bin").is_dir():
+    legacy = install_layout.uv_conexus_venv(platform=_plat())
+    if not install_layout.venv_bin(legacy, platform=_plat()).is_dir():
         return None
+    if _is_windows():
+        core = _generation()
+        try:
+            core.register_legacy(legacy, tools, platform="win32")
+        except core.GenerationError as exc:
+            raise click.ClickException(f"registering the legacy uv tree failed:\n{exc}") from exc
+        return legacy
     _sh(install_dir, f'nx_register_legacy_generation "{legacy}" "{tools}"')
     return legacy
 
@@ -667,6 +793,8 @@ def _converge_legacy_install(
     replacement. Live holders keep running from the old tree and converge at
     their next spawn.
     """
+    if _is_windows():
+        return _windows_converge_legacy_install(tools, version=version, dry_run=dry_run)
     build = [
         "bash", str(install_dir / "migrate_legacy.sh"),
         # A packaged install's source is the distribution, not a checkout path.
@@ -712,6 +840,45 @@ def _converge_legacy_install(
     return generation
 
 
+def _windows_converge_legacy_install(
+    tools: Path, *, version: str | None, dry_run: bool,
+) -> Path | None:
+    """The Windows twin of the legacy convergence, ``generation_core.migrate_legacy``:
+    extras read from uv's receipt one last time, a generation built beside uv's
+    tree, ``current`` flipped, launcher shims written, the legacy tree
+    registered in the ledger as a junction. Never reaps, never uninstalls."""
+    core = _generation()
+    if dry_run:
+        click.echo(
+            "generation_core.migrate_legacy --source conexus"
+            + (f" --version {version}" if version else "")
+        )
+        return None
+    try:
+        generation = core.migrate_legacy(
+            "conexus", version=version or "", tools=tools, platform=_plat(),
+        )
+    except core.GenerationError as exc:
+        detail = str(exc)
+        hint = index_failure_hint(detail)
+        message = f"{hint}\n\nuv output:\n{detail}" if hint else detail
+        raise click.ClickException(f"legacy migration failed:\n{message}") from exc
+    if generation is None:
+        raise click.ClickException(
+            "this nx looks like a packaged uv-tool install, but the migration "
+            "found no legacy tree to converge. Since nexus-orhp5 both sides "
+            "resolve the uv tools directory by the same rule, so the likeliest "
+            "causes are that `uv` is absent or unresolvable here, or the tree "
+            "was removed between the two checks. Nothing was changed."
+        )
+    click.echo(
+        "converged the legacy uv-tool install onto the generation layout; "
+        "the old tree is retained for live holders and reaped by a later "
+        "`nx self install` once nothing is running from it"
+    )
+    return generation
+
+
 def _sh(install_dir: Path, snippet: str, *, check: bool = True) -> str:
     """Source the install library and run one statement against it.
     Returns the statement's stdout."""
@@ -739,6 +906,17 @@ def _reap_generations(
     live in gc.sh; this passes rule (d) when the caller runs from a
     generation and never raises: a reap that cannot run leaves the trees
     where they are, which is the safe direction."""
+    if _is_windows():
+        core = _generation()
+        try:
+            return core.reap(
+                tools, keep=keep, self_generation=self_generation, dry_run=dry_run,
+                platform="win32",
+            )
+        except (OSError, core.GenerationError) as exc:
+            # A reap that cannot run leaves the trees where they are.
+            click.echo(f"nexus: generation reap did not run: {exc}", err=True)
+            return []
     self_arg = f' --self "{self_generation}"' if self_generation is not None else ""
     dry_arg = " --dry-run" if dry_run else ""
     out = _sh(
@@ -770,7 +948,7 @@ def perform_self_gc(*, keep: int = 3, dry_run: bool = False) -> list[str] | None
     install_dir = packaged_install_dir()
     host = running_generation()
     self_generation = (
-        host if host.parent == tools and host.name.startswith(install_layout.GENERATION_PREFIX)
+        host if _same_dir(host.parent, tools) and _is_generation_name(host.name)
         else None
     )
     return _reap_generations(

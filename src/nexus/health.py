@@ -289,7 +289,9 @@ def _check_generation_layout() -> list[HealthResult]:
         # an empty tools root is a box that has not installed yet, and
         # hard-failing that would fail every fresh machine (RG-C).
         link = install_layout.current_link(tools=tools)
-        if not link.is_symlink() and not link.exists():
+        # is_link, not is_symlink: on Windows ``current`` is a junction, which
+        # pathlib reads as a plain directory (RDR-224, nexus-f9bgu.47).
+        if not install_layout.is_link(link) and not link.exists():
             generations = install_layout.list_generations(tools=tools)
             if not generations:
                 return [HealthResult(
@@ -354,13 +356,18 @@ def _check_generation_layout() -> list[HealthResult]:
                 f"— {exc}; the shim-ownership check cannot run"
             ),
         )]
-    reclaimed = [name for name in sorted(owned) if (bin_dir / name).is_symlink()]
+    reclaimed = install_layout.reclaimed_from_owned(owned, bin_dir, platform=_win())
     if reclaimed:
         return [HealthResult(
             label=label, ok=False, fatal=True,
             detail=(
-                f"{', '.join(reclaimed)} in {bin_dir} are symlinks, not "
-                "nexus-owned shims — uv has taken them back (a stray "
+                f"{', '.join(reclaimed)} in {bin_dir} are "
+                + (
+                    "launcher copies nexus did not write (the shim record does not "
+                    "match them), not nexus-owned shims"
+                    if _win() else "symlinks, not nexus-owned shims"
+                )
+                + " — uv has taken them back (a stray "
                 "`uv tool upgrade conexus` does this), so those commands "
                 "resolve through uv's tree instead of current"
             ),
@@ -384,6 +391,12 @@ def _check_generation_layout() -> list[HealthResult]:
     return results
 
 
+def _win() -> str | None:
+    """``"win32"`` on native Windows, else ``None``: the platform argument the
+    layout helpers take, and the one place tests move the Windows reading."""
+    return "win32" if os.name == "nt" else None
+
+
 def _check_shims_match_template(current, bin_dir, tools, owned) -> list[HealthResult]:
     """A shim must match the template, not merely be a regular file.
 
@@ -395,6 +408,23 @@ def _check_shims_match_template(current, bin_dir, tools, owned) -> list[HealthRe
     this compares against the source of truth rather than a restatement of it.
     """
     from nexus import install_layout  # noqa: PLC0415 — deferred import
+    if _win():
+        # Windows shims are byte copies of the generation's own launcher exe, so
+        # the "template" is that launcher, not render_shim's shell text.
+        bad = install_layout.windows_shim_mismatches(current, bin_dir, owned)
+        if not bad:
+            return [HealthResult(
+                label="Shim contents", ok=True,
+                detail=f"{len(owned)} shim(s) are copies of the current generation's launchers",
+            )]
+        return [HealthResult(
+            label="Shim contents", ok=False, fatal=True,
+            detail=(
+                f"{', '.join(bad)} in {bin_dir} are not copies of "
+                f"{current.name}'s launchers — they run a different generation"
+            ),
+            fix_suggestions=["nx self install    # rewrites the shims from the current generation"],
+        )]
     mismatched = []
     checked = 0
     for name in sorted(owned):  # the caller asked the generation once; no second spawn
@@ -496,8 +526,10 @@ def _check_orphan_uv_install() -> list[HealthResult]:
     # install" on an XDG-relocated box while one sat right there.
     from nexus.install_layout import uv_conexus_venv  # noqa: PLC0415 — deferred, avoids an import cycle
 
+    from nexus.install_layout import venv_bin  # noqa: PLC0415 — deferred import
+
     legacy = uv_conexus_venv()
-    if not (legacy / "bin").is_dir():
+    if not venv_bin(legacy).is_dir():
         return [HealthResult(
             label="Orphan uv install", ok=True,
             detail="no uv-managed conexus alongside the generation layout",
@@ -507,10 +539,10 @@ def _check_orphan_uv_install() -> list[HealthResult]:
     # `nx self install` once nothing runs from it. An unregistered one is
     # never reaped by anything -- the state every checkout-driven box sat in
     # until nexus-hibpr -- and the row used to render both identically.
-    from nexus.install_layout import legacy_generation_link  # noqa: PLC0415 — deferred import
+    from nexus.install_layout import is_link, legacy_generation_link  # noqa: PLC0415 — deferred import
 
     link = legacy_generation_link()
-    registered = link.is_symlink() and link.resolve() == legacy.resolve()
+    registered = is_link(link) and link.resolve() == legacy.resolve()
     if registered:
         return [HealthResult(
             label="Orphan uv install", ok=False, warn=True,

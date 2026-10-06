@@ -2,17 +2,12 @@
 """The Windows generation installer, ``_install/generation_core.py``
 (RDR-224, nexus-f9bgu.47).
 
-Two kinds of test share this file because the Windows rehearsal's test set
-runs the whole file on a real Windows host:
-
-* the injected-platform classes run everywhere. ``platform="win32"`` selects
-  the Windows reading, a fake ``uv`` stands in for the real one, and
-  :class:`SymlinkOps` makes a symlink where Windows makes a junction;
-* :class:`TestRealWindows` runs only on Windows and exercises what an injected
-  seam cannot prove: real junction create / swap / read, a swap while a process
-  runs through the junction, a running launcher replaced by rename-aside, and a
-  generation held by an open file kept by GC. Its tests never skip-pass once
-  they are selected: the rehearsal's junit floor requires them to have PASSED.
+Injected-platform tests: ``platform="win32"`` selects the Windows reading, a
+fake ``uv`` stands in for the real one, and :class:`SymlinkOps` makes a symlink
+where Windows makes a junction. They use ``#!/bin/sh`` interpreter stubs and
+symlinks, so they run on POSIX hosts and are NOT part of the Windows rehearsal's
+test set. What an injected seam cannot prove (real junctions, a running
+launcher, a file held open) is ``tests/test_install_generation_real_windows.py``.
 """
 from __future__ import annotations
 
@@ -20,17 +15,15 @@ import os
 import shutil
 import stat
 import subprocess
-import sys
-import time
 from pathlib import Path
 
 import pytest
 
-from nexus._install import gc_core, generation_core as gen_core, shims_core
+from nexus._install import gc_core
+from nexus._install import generation_core as gen_core
 from nexus._install import layout_core as lc
 
 WIN = "win32"
-ON_WINDOWS = os.name == "nt"
 
 
 class SymlinkOps(gen_core.LinkOps):
@@ -414,117 +407,3 @@ class TestReap:
         assert gen_core.reap(tools, keep=0, platform=WIN) == []
         assert "would retain no generations" in capsys.readouterr().err
         assert gen.exists()
-
-
-@pytest.mark.skipif(not ON_WINDOWS, reason="needs the Windows kernel's junctions and file locking")
-class TestRealWindows:
-    """What no seam can prove. Run by the rehearsal's Windows test set; each
-    test asserts it observed the real behaviour rather than returning early."""
-
-    def test_a_real_junction_is_created_read_and_swapped(self, tmp_path: Path) -> None:
-        one, two = tmp_path / "gen-1", tmp_path / "gen-2"
-        one.mkdir()
-        two.mkdir()
-        (one / "who").write_text("one")
-        (two / "who").write_text("two")
-        link = tmp_path / "current"
-        ops = gen_core.LinkOps()
-
-        gen_core.swap_link(str(one), link, ops)
-        assert lc.is_link(link)
-        assert not link.is_symlink(), "a junction is not a symlink to pathlib; that is the whole point"
-        assert os.path.isjunction(link)
-        read = lc.read_link(link)
-        assert not read.startswith("\\\\?\\")
-        assert lc.compare_key(read) == lc.compare_key(str(one))
-        assert (link / "who").read_text() == "one"
-
-        gen_core.swap_link(str(two), link, ops)
-        assert (link / "who").read_text() == "two"
-        assert one.is_dir() and (one / "who").read_text() == "one", "the old target must survive the swap"
-        assert [p.name for p in tmp_path.iterdir() if p.name.startswith(".")] == []
-
-    def test_a_swap_works_while_a_process_runs_through_the_junction(self, tmp_path: Path) -> None:
-        one, two = tmp_path / "gen-1", tmp_path / "gen-2"
-        one.mkdir()
-        two.mkdir()
-        link = tmp_path / "current"
-        gen_core.swap_link(str(one), link, gen_core.LinkOps())
-        child = subprocess.Popen(
-            [sys.executable, "-c", "import time; time.sleep(60)"], cwd=str(link),
-        )
-        try:
-            time.sleep(0.5)
-            assert child.poll() is None
-            gen_core.swap_link(str(two), link, gen_core.LinkOps())
-            assert lc.compare_key(lc.read_link(link)) == lc.compare_key(str(two))
-            assert child.poll() is None, "the swap must not disturb a running process"
-        finally:
-            child.kill()
-            child.wait()
-
-    def test_flip_and_rollback_on_real_junctions(self, tmp_path: Path) -> None:
-        tools = tmp_path / "tools"
-        tools.mkdir()
-        a, b = tools / "gen-A", tools / "gen-B"
-        a.mkdir()
-        b.mkdir()
-        gen_core.flip_current(a, tools)
-        gen_core.flip_current(b, tools)
-        assert lc.current_generation(tools=tools).name == "gen-B"
-        assert lc.compare_key(lc.read_link(tools / "previous")) == lc.compare_key(str(a))
-        gen_core.rollback_current(tools)
-        assert lc.current_generation(tools=tools).name == "gen-A"
-
-    def test_a_running_launcher_is_displaced_and_replaced(self, tmp_path: Path) -> None:
-        comspec = Path(os.environ["COMSPEC"])
-        running = tmp_path / "nx.exe"
-        shutil.copyfile(comspec, running)
-        replacement = tmp_path / "new-launcher.exe"
-        shutil.copyfile(comspec, replacement)
-        replacement.write_bytes(replacement.read_bytes() + b"\0new")
-        child = subprocess.Popen([str(running), "/c", "ping -n 30 127.0.0.1 >nul"])
-        try:
-            time.sleep(0.5)
-            assert child.poll() is None
-            with pytest.raises(PermissionError):
-                os.replace(replacement, running)  # the premise: a plain overwrite is refused
-            shutil.copyfile(replacement, tmp_path / "again.exe")
-            shims_core._install_exe(tmp_path / "again.exe", running)
-            assert running.read_bytes() == replacement.read_bytes()
-            aside = list(tmp_path.glob("nx.exe.old-*"))
-            assert len(aside) == 1, aside
-            assert child.poll() is None
-        finally:
-            child.kill()
-            child.wait()
-        shims_core._sweep_displaced(tmp_path)
-        assert list(tmp_path.glob("nx.exe.old-*")) == []
-
-    def test_a_generation_held_by_an_open_file_is_kept_then_reaped(self, tmp_path: Path) -> None:
-        tools = tmp_path / "tools"
-        gen = tools / "gen-A"
-        (gen / "Lib").mkdir(parents=True)
-        (gen / "nexus-install.json").write_text("{}\n")
-        held = gen / "Lib" / "held.pyd"
-        held.write_bytes(b"x")
-        errors: list[str] = []
-        with open(held, "rb"):  # Python opens without FILE_SHARE_DELETE
-            lines = gc_core._reap(gen, errors.append)
-            assert len(lines) == 1 and lines[0].startswith(f"kept {gen}: in use"), lines
-            assert held.exists() and gen.exists()
-        lines = gc_core._reap(gen, errors.append)
-        assert lines == [f"reaped {gen}"] and not gen.exists()
-
-    def test_gc_never_follows_a_real_junction_pointer_into_its_target(self, tmp_path: Path) -> None:
-        tools = tmp_path / "tools"
-        tools.mkdir()
-        target = tmp_path / "precious"
-        target.mkdir()
-        (target / "data.txt").write_text("data")
-        pointer = tools / "gen-rogue"
-        gen_core.LinkOps().create(str(target), pointer)
-        errors: list[str] = []
-        assert gc_core._reap(pointer, errors.append) == []
-        assert (target / "data.txt").read_text() == "data"
-        assert any("unrecognised generation symlink" in e for e in errors)
