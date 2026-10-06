@@ -2546,6 +2546,7 @@ BEGIN
                          (ct.embedding_384 OPERATOR(nexus.<=>) b.b_emb) AS n_dist
                     FROM nexus.taxonomy_centroids ct
                    WHERE ct.collection <> p_collection
+                     AND ct.embedding_model = b.b_model
                      AND ct.embedding_384 IS NOT NULL
                    ORDER BY ct.embedding_384 OPERATOR(nexus.<=>) b.b_emb, ct.topic_id ASC
                    LIMIT 1
@@ -2669,6 +2670,7 @@ BEGIN
                          (ct.embedding_768 OPERATOR(nexus.<=>) b.b_emb) AS n_dist
                     FROM nexus.taxonomy_centroids ct
                    WHERE ct.collection <> p_collection
+                     AND ct.embedding_model = b.b_model
                      AND ct.embedding_768 IS NOT NULL
                    ORDER BY ct.embedding_768 OPERATOR(nexus.<=>) b.b_emb, ct.topic_id ASC
                    LIMIT 1
@@ -2792,6 +2794,7 @@ BEGIN
                          (ct.embedding_1024 OPERATOR(nexus.<=>) b.b_emb) AS n_dist
                     FROM nexus.taxonomy_centroids ct
                    WHERE ct.collection <> p_collection
+                     AND ct.embedding_model = b.b_model
                      AND ct.embedding_1024 IS NOT NULL
                    ORDER BY ct.embedding_1024 OPERATOR(nexus.<=>) b.b_emb, ct.topic_id ASC
                    LIMIT 1
@@ -2869,7 +2872,7 @@ BEGIN
     -- see that changeset's header for the full reasoning. NEVER writes
     -- to topic_assignments.
     -- RDR-225: the batch/nearest CTE is byte-identical to assign_from_chashes_<dim>'s cross branch (CrossPreviewDriftTest),
-    -- which now carries the chunk's embedding_model for the persist; the preview selects it and does not use it.
+    -- which now carries the chunk's embedding_model for the persist; the preview selects it and does not persist it. Both match centroids of the chunk's own model only.
     PERFORM set_config('hnsw.iterative_scan', 'strict_order', true);
     PERFORM set_config('hnsw.ef_search', '400', true);
     PERFORM set_config('enable_seqscan', 'off', true);
@@ -2895,6 +2898,7 @@ BEGIN
                      (ct.embedding_384 OPERATOR(nexus.<=>) b.b_emb) AS n_dist
                 FROM nexus.taxonomy_centroids ct
                WHERE ct.collection <> p_collection
+                 AND ct.embedding_model = b.b_model
                  AND ct.embedding_384 IS NOT NULL
                ORDER BY ct.embedding_384 OPERATOR(nexus.<=>) b.b_emb, ct.topic_id ASC
                LIMIT 1
@@ -2943,6 +2947,7 @@ BEGIN
                      (ct.embedding_768 OPERATOR(nexus.<=>) b.b_emb) AS n_dist
                 FROM nexus.taxonomy_centroids ct
                WHERE ct.collection <> p_collection
+                 AND ct.embedding_model = b.b_model
                  AND ct.embedding_768 IS NOT NULL
                ORDER BY ct.embedding_768 OPERATOR(nexus.<=>) b.b_emb, ct.topic_id ASC
                LIMIT 1
@@ -2991,6 +2996,7 @@ BEGIN
                      (ct.embedding_1024 OPERATOR(nexus.<=>) b.b_emb) AS n_dist
                 FROM nexus.taxonomy_centroids ct
                WHERE ct.collection <> p_collection
+                 AND ct.embedding_model = b.b_model
                  AND ct.embedding_1024 IS NOT NULL
                ORDER BY ct.embedding_1024 OPERATOR(nexus.<=>) b.b_emb, ct.topic_id ASC
                LIMIT 1

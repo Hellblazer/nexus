@@ -100,6 +100,7 @@ class CrossPreviewDriftTest {
             + "                  (ct.embedding_" + dim + " OPERATOR(nexus.<=>) b.b_emb) AS n_dist"
             + "             FROM nexus.taxonomy_centroids ct"
             + "            WHERE ct.collection <> p_collection"
+            + "              AND ct.embedding_model = b.b_model"
             + "              AND ct.embedding_" + dim + " IS NOT NULL"
             + "            ORDER BY ct.embedding_" + dim + " OPERATOR(nexus.<=>) b.b_emb, ct.topic_id ASC"
             + "            LIMIT 1"

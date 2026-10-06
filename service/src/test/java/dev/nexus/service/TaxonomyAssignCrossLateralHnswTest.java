@@ -672,6 +672,7 @@ class TaxonomyAssignCrossLateralHnswTest {
             + "                 (ct.embedding_1024 OPERATOR(nexus.<=>) b.b_emb) AS n_dist"
             + "            FROM nexus.taxonomy_centroids ct"
             + "           WHERE ct.collection <> '" + COL_DENSE + "'"
+            + "             AND ct.embedding_model = b.b_model"
             + "             AND ct.embedding_1024 IS NOT NULL"
             + "           ORDER BY ct.embedding_1024 OPERATOR(nexus.<=>) b.b_emb, ct.topic_id ASC"
             + "           LIMIT 1"
