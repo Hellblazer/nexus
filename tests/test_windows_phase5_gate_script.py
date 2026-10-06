@@ -113,7 +113,7 @@ def test_verify_checks_versions_and_the_live_session() -> None:
     assert "service_release_version" in v0
     assert "(K $_ 'entrypoint') -eq 'cli'" in text
     # the launching call reaches the transcript after the tool starts: poll for it
-    assert "$runs = Find-VerifyCalls $tx" in v0 and "Start-Sleep -Seconds 3" in v0
+    assert "$runs = @(Find-VerifyCalls $tx)" in v0 and "Start-Sleep -Seconds 3" in v0
     assert "$claudePid = Claude-Ancestor" in v0
 
 
@@ -143,3 +143,10 @@ def test_k_returns_arrays_unrolled_by_nothing() -> None:
     # its element; the gate missed every single-tool-call message that way on
     # the first real run (2026-10-06).
     assert "return , $d[$k]" in _text()
+
+
+def test_no_k_result_is_wrapped_in_an_array_subexpression() -> None:
+    # K returns arrays intact, so @(K ...) nests them; the plugin check read ''
+    # that way on the 2026-10-06 run.
+    import re as _re
+    assert not _re.search(r"@\(\s*K\s", _text())

@@ -445,7 +445,8 @@ try {
     $s = Get-Status
     if ($s['service_release_version'] -ne $ExpectedEngine) { Fail ("engine now reports {0}, expected {1}" -f $s['service_release_version'], $ExpectedEngine) }
     $ip = Join-Path $env:USERPROFILE '.claude\plugins\installed_plugins.json'
-    $pv = K (@(K (K $Json.DeserializeObject((Get-Content -Raw $ip)) 'plugins') 'conexus@nexus-plugins') | Select-Object -First 1) 'version'
+    $entries = K (K $Json.DeserializeObject((Get-Content -Raw $ip)) 'plugins') 'conexus@nexus-plugins'
+    $pv = K $(if ($entries -is [array]) { $entries[0] } else { $entries }) 'version'
     if ($pv -ne $ExpectedVersion) { Fail "conexus plugin is '$pv', expected $ExpectedVersion" }
     # This verify was started by a Claude Code session: claude.exe is an
     # ancestor, and that session's transcript holds the tool call that ran it.
@@ -456,7 +457,7 @@ try {
     $deadline = (Get-Date).AddSeconds(60)
     do {
         $tx = Read-Transcripts
-        $runs = Find-VerifyCalls $tx
+        $runs = @(Find-VerifyCalls $tx)
         if ($runs.Count -gt 0) { break }
         Start-Sleep -Seconds 3
     } while ((Get-Date) -lt $deadline)
