@@ -454,6 +454,13 @@ _COUNT_PINNED_FILE_ALLOWLIST: dict[str, tuple[int, str]] = {
         "constraint-does-not-exist case for chunks_384; mirrors health.py's "
         "allowlist reason."
     ),
+    "tests/test_rdr225_inventory_scanner.py": (
+        1,
+        "nexus-3wh8d.6 (RDR-225 P1.1): the token-precision decoy list names the retired "
+        "per-dimension table on purpose. The inventory scanner must NOT match it as one of the "
+        "five tables, and the test proves that by running the retired name alone through the "
+        "matcher, so the name has to appear verbatim. A decoy, not a reference to a live table."
+    ),
     # WAS tests/upgrade/test_chash_rekey_rung.py (1 hit) — deleted at
     # nexus-lgdel.l1 (the rung it tested no longer exists).
     "tests/catalog/test_http_catalog_client.py": (
