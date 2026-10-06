@@ -53,7 +53,10 @@ done
 
 quiet() { grep -v -i -E 'post-quantum|store now, decrypt later|pq\.html' || true; }
 
-ssh "$HOST" 'cmd /c "if not exist C:\build\guest\nxgate\stage mkdir C:\build\guest\nxgate\stage & del /q C:\build\guest\nxgate\stage\*"' 2>&1 | quiet
+# The parentheses matter: cmd binds a bare "& del" to the if's body, so without
+# them nothing is deleted whenever the directory exists, and a stale staged file
+# overwrites the guest's copy on every launch (it did, 2026-10-06).
+ssh "$HOST" 'cmd /c "(if not exist C:\build\guest\nxgate\stage mkdir C:\build\guest\nxgate\stage) & del /q C:\build\guest\nxgate\stage\*"' 2>&1 | quiet
 scp -q "$here/host-recv.ps1" "$here/token-send.ps1" "$here/token-send.sh" "$HOST:$HOST_DIR/" 2>&1 | quiet
 if [[ ${#stage[@]} -gt 0 ]]; then
     scp -q "${stage[@]}" "$HOST:$HOST_DIR/stage/" 2>&1 | quiet
