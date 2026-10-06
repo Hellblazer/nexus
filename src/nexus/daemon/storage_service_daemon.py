@@ -3012,22 +3012,18 @@ def _session_end_write_marker(
 
 
 def _session_end_pg_stopper(creds: dict[str, str]) -> Callable[[float], bool]:
-    """The PostgreSQL stop for the session-end handler: ``pg_ctl stop -m fast -w``.
+    """The PostgreSQL stop for the session-end handler: a fast shutdown signalled
+    in-process through the postmaster's signal pipe, NOT ``pg_ctl``.
 
-    Everything heavy is resolved NOW, at install time, not inside the handler: a
-    shutdown-time import or binary discovery spends the few seconds the handler has.
+    Windows does not let a new process initialise in a session that is logging off
+    (``pg_ctl`` died in 29 ms with ``0xC000026B`` at ``WM_ENDSESSION``, measured), so no
+    child process is spawned. See :func:`nexus.daemon.session_end.make_inprocess_pg_stopper`.
+    The binding is built NOW, at install time; the pid is read when the handler runs.
     """
-    from nexus.db.pg_provision import _run, discover_pg_binaries  # noqa: PLC0415 — deferred import — Windows-only path, resolved once at install
-
     pg_data = creds.get("PG_DATA", "")
     if not pg_data:
         raise StorageServiceStartError("PG_DATA missing from pg_credentials")
-    pg_ctl = str(discover_pg_binaries().pg_ctl)
-
-    def run(cmd: list[str], timeout: float) -> int:
-        return _run(cmd, check=False, timeout=timeout).returncode
-
-    return _session_end.make_pg_stopper(pg_ctl=pg_ctl, pgdata=pg_data, run=run)
+    return _session_end.make_inprocess_pg_stopper(pgdata=pg_data)
 
 
 def _install_session_end_handler(

@@ -329,40 +329,6 @@ def test_importing_the_module_loads_no_windows_only_ctypes_module() -> None:
     assert subprocess.run([sys.executable, "-c", code], check=False).returncode == 0
 
 
-# ── the pg stopper ───────────────────────────────────────────────────────────────
-
-
-def test_the_pg_stopper_runs_fast_wait_stop_with_a_timeout_that_fits_the_budget() -> None:
-    seen: list[tuple[list[str], float]] = []
-
-    def run(cmd: list[str], timeout: float) -> int:
-        seen.append((cmd, timeout))
-        return 0
-
-    stop = se.make_pg_stopper(pg_ctl="C:/pg/bin/pg_ctl.exe", pgdata="C:/data", run=run)
-    assert stop(2.6) is True
-    (cmd, timeout), = seen
-    assert cmd[:2] == ["C:/pg/bin/pg_ctl.exe", "-D"] and cmd[2] == "C:/data"
-    assert "-m" in cmd and cmd[cmd.index("-m") + 1] == "fast"
-    assert "-w" in cmd and cmd[-1] == "stop"
-    # pg_ctl's own -t is whole seconds and never above the budget; the backstop sits just above it.
-    t_arg = int(cmd[cmd.index("-t") + 1])
-    assert 1 <= t_arg <= 2
-    assert t_arg < timeout <= 2.6 + 1.0
-
-
-def test_the_pg_stopper_reports_a_nonzero_exit_as_not_stopped() -> None:
-    stop = se.make_pg_stopper(pg_ctl="pg_ctl", pgdata="d", run=lambda c, t: 1)
-    assert stop(2.0) is False
-
-
-def test_the_pg_stopper_treats_a_timeout_as_not_stopped_not_as_an_error() -> None:
-    def run(cmd: list[str], timeout: float) -> int:
-        raise subprocess.TimeoutExpired(cmd, timeout)
-
-    assert se.make_pg_stopper(pg_ctl="pg_ctl", pgdata="d", run=run)(2.0) is False
-
-
 # ── the supervisor's engine stopper ──────────────────────────────────────────────
 
 

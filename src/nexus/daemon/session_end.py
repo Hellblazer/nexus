@@ -14,7 +14,8 @@ The callback runs on a system thread, and Windows ends the process a few seconds
 it returns (about 5 s; this module budgets 4). So the callback does the whole stop
 itself, synchronously: mark the stop for the launcher, set the supervisor's stop flag,
 stop the engine (``CTRL_BREAK`` through the existing stop channel, a short bounded
-wait), then ``pg_ctl stop -m fast -w``. It returns ``True`` for the three events it owns
+wait), then a fast PostgreSQL shutdown signalled IN-PROCESS through the postmaster's
+signal pipe (no ``pg_ctl``: see :func:`make_inprocess_pg_stopper`). It returns ``True`` for the three events it owns
 and ``False`` for everything else, so ``CTRL_C`` / ``CTRL_BREAK`` stay with the signal
 path in ``storage_service_daemon._install_stop_handlers``.
 
@@ -50,7 +51,6 @@ at import time.
 """
 from __future__ import annotations
 
-import subprocess
 import sys
 import threading
 import time
@@ -84,10 +84,6 @@ ENGINE_BUDGET_S: float = 2.0
 #: that leaves a clean ``pg.log`` is the reason this handler exists, so it is never given
 #: less than this however long the engine took.
 PG_MIN_BUDGET_S: float = 1.0
-
-#: ``pg_ctl``'s backstop sits this far above its own ``-t`` so pg_ctl reports its own
-#: timeout before this module kills it.
-_PG_BACKSTOP_SLACK_S: float = 0.5
 
 
 class CtrlHandlerRegistrar(Protocol):
@@ -195,33 +191,170 @@ class SessionEndHandler:
         return ok
 
 
-def make_pg_stopper(
-    *,
-    pg_ctl: str,
-    pgdata: str,
-    run: Callable[[list[str], float], int],
-) -> Callable[[float], bool]:
-    """``pg_ctl -D <pgdata> -m fast -w -t N stop`` as a ``stop(budget) -> bool``.
+#: The signal number PostgreSQL's Windows signal pipe takes for a FAST shutdown. PostgreSQL
+#: maps SIGTERM=smart, SIGINT=fast, SIGQUIT=immediate; ``pg_ctl stop -m fast`` sends SIGINT.
+PG_SIGNAL_FAST: int = 2
 
-    *run* executes the argv with a hard timeout and returns the exit code (the seam: tests
-    pass a fake, the supervisor passes ``pg_provision._run``). ``-t`` is whole seconds
-    and never above the budget; the hard timeout sits just above it. A non-zero exit
-    (including "server is not running") or a timeout is "not stopped", never an error.
+#: ``CallNamedPipeW``'s own timeout. The postmaster's signal thread answers in
+#: milliseconds; this only bounds a wedged one. Capped by the remaining budget.
+PG_PIPE_TIMEOUT_MS: int = 1000
+
+#: What ``postmaster.pid``'s owner must be called, or it is not signalled (a stale file whose
+#: pid Windows has since given to something else).
+POSTMASTER_IMAGE_STEM: str = "postgres"
+
+
+class PgStopApi(Protocol):
+    """The OS seam for the in-process PostgreSQL stop."""
+
+    def image_stem(self, pid: int) -> str:
+        """The executable name of *pid* without directory or ``.exe`` (lower case), or
+        ``""`` when no such process exists."""
+        ...
+
+    def send_signal(self, pid: int, signo: int, timeout_ms: int) -> tuple[bool, int]:
+        """The postmaster's signal pipe (``\\\\.\\pipe\\pgsignal_<pid>``) as ``pg_ctl``
+        writes to it. ``(delivered, last_error)``."""
+        ...
+
+    def wait_exit(self, pid: int, timeout_s: float) -> bool:
+        """True when *pid* has exited (or never existed) within *timeout_s*."""
+        ...
+
+
+def read_postmaster_pid(pgdata: str) -> int | None:
+    """The pid on the first line of ``<pgdata>/postmaster.pid``; ``None`` when the file is
+    missing or its first line is not a positive integer."""
+    try:
+        with open(f"{pgdata}/postmaster.pid", encoding="utf-8") as fh:
+            first = fh.readline().strip()
+        pid = int(first)
+    except (OSError, ValueError):
+        return None
+    return pid if pid > 0 else None
+
+
+def make_inprocess_pg_stopper(
+    *,
+    pgdata: str,
+    api: PgStopApi | None = None,
+    read_pid: Callable[[], int | None] | None = None,
+    clock: Callable[[], float] = time.monotonic,
+) -> Callable[[float], bool]:
+    """A fast PostgreSQL shutdown with NO child process, as ``stop(budget_s) -> bool``.
+
+    Windows does not let a NEW process initialise in a session that is logging off: the
+    first design ran ``pg_ctl stop -m fast`` at ``WM_ENDSESSION`` and ``pg_ctl`` died in
+    29 ms with ``0xC000026B`` (``STATUS_DLL_INIT_FAILED``), measured on a guest, and the
+    postmaster was then killed with the session (stale ``postmaster.pid``, crash
+    recovery at the next start). So this does what ``pg_ctl`` does itself, from inside
+    this process: read the postmaster's pid from the first line of ``postmaster.pid``,
+    check the pid is still ``postgres.exe`` (never signal a reused pid), write the
+    one-byte signal number 2 (SIGINT, fast) to ``\\\\.\\pipe\\pgsignal_<pid>``, and wait for
+    the postmaster to exit. ``pg_ctl`` is retired from the session-end path altogether;
+    a fallback that spawns it fails the same way at the one moment it would be needed.
+
+    *pgdata* is resolved at install time and the pid is read at call time (it changes
+    with every start). Returns True when PostgreSQL is gone (stopped by this call, or not
+    running to begin with), False when it could not be signalled or outlived the budget.
     """
+    stop_api = api if api is not None else ctypes_pg_stop_api()
+    pid_reader = read_pid if read_pid is not None else (lambda: read_postmaster_pid(pgdata))
 
     def stop(budget_s: float) -> bool:
-        wait_s = max(1, int(budget_s))
-        cmd = [pg_ctl, "-D", pgdata, "-m", "fast", "-w", "-t", str(wait_s), "stop"]
-        try:
-            code = run(cmd, wait_s + _PG_BACKSTOP_SLACK_S)
-        except subprocess.TimeoutExpired:
-            _log.warning("session_end_pg_stop_timeout", wait_s=wait_s)
+        deadline = clock() + budget_s
+        pid = pid_reader()
+        if pid is None:
+            _log.info("session_end_pg_not_running", reason="no readable postmaster.pid")
+            return True
+        stem = stop_api.image_stem(pid)
+        if not stem:
+            _log.info("session_end_pg_not_running", pid=pid, reason="no such process")
+            return True
+        if stem != POSTMASTER_IMAGE_STEM:
+            # A stale postmaster.pid whose pid now belongs to something else.
+            _log.warning("session_end_pg_pid_not_postgres", pid=pid, image=stem)
             return False
-        if code != 0:
-            _log.warning("session_end_pg_stop_nonzero", exit_code=code)
-        return code == 0
+        timeout_ms = max(100, min(PG_PIPE_TIMEOUT_MS, int((deadline - clock()) * 1000)))
+        delivered, error = stop_api.send_signal(pid, PG_SIGNAL_FAST, timeout_ms)
+        if not delivered:
+            _log.warning("session_end_pg_signal_failed", pid=pid, error=error)
+            return False
+        _log.info("session_end_pg_signal_sent", pid=pid, signal=PG_SIGNAL_FAST)
+        remaining = max(0.1, deadline - clock())
+        if stop_api.wait_exit(pid, remaining):
+            _log.info("session_end_pg_exited", pid=pid)
+            return True
+        _log.warning("session_end_pg_exit_timeout", pid=pid, waited_s=round(remaining, 3))
+        return False
 
     return stop
+
+
+class _CtypesPgStopApi:
+    """``kernel32`` through ctypes. Windows only; built lazily."""
+
+    #: winnt.h / winerror.h
+    _SYNCHRONIZE = 0x00100000
+    _WAIT_OBJECT_0 = 0x00000000
+    _ERROR_INVALID_PARAMETER = 87
+
+    def __init__(self) -> None:
+        import ctypes  # noqa: PLC0415 — deferred import — Windows-only
+        from ctypes import wintypes  # noqa: PLC0415 — deferred import — Windows-only
+
+        from nexus._install import winproc_core  # noqa: PLC0415 — deferred import — Windows-only path
+
+        self._ct = ctypes
+        self._wt = wintypes
+        self._core = winproc_core
+        self._info = winproc_core.ctypes_win_info_api()
+        k = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
+        k.CallNamedPipeW.argtypes = [
+            wintypes.LPCWSTR, wintypes.LPVOID, wintypes.DWORD, wintypes.LPVOID, wintypes.DWORD,
+            ctypes.POINTER(wintypes.DWORD), wintypes.DWORD,
+        ]
+        k.CallNamedPipeW.restype = wintypes.BOOL
+        k.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        k.OpenProcess.restype = wintypes.HANDLE
+        k.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+        k.WaitForSingleObject.restype = wintypes.DWORD
+        k.CloseHandle.argtypes = [wintypes.HANDLE]
+        k.CloseHandle.restype = wintypes.BOOL
+        self._k = k
+
+    def image_stem(self, pid: int) -> str:
+        path = self._core.process_image_path(pid, self._info)
+        return self._core.executable_stem(path).lower() if path else ""
+
+    def send_signal(self, pid: int, signo: int, timeout_ms: int) -> tuple[bool, int]:
+        ct, wt = self._ct, self._wt
+        sent = ct.c_ubyte(signo)
+        reply = ct.c_ubyte(0)
+        got = wt.DWORD(0)
+        ok = self._k.CallNamedPipeW(
+            f"\\\\.\\pipe\\pgsignal_{pid}", ct.byref(sent), 1, ct.byref(reply), 1,
+            ct.byref(got), timeout_ms,
+        )
+        if not ok:
+            return False, ct.get_last_error()  # type: ignore[attr-defined]
+        # pg_ctl's own check: one byte back, and it is the signal that was sent.
+        return got.value == 1 and reply.value == signo, 0
+
+    def wait_exit(self, pid: int, timeout_s: float) -> bool:
+        handle = self._k.OpenProcess(self._SYNCHRONIZE, False, pid)
+        if not handle:
+            # Invalid parameter: no such process, so it has already gone.
+            return self._ct.get_last_error() == self._ERROR_INVALID_PARAMETER  # type: ignore[attr-defined]
+        try:
+            return self._k.WaitForSingleObject(handle, max(0, int(timeout_s * 1000))) == self._WAIT_OBJECT_0
+        finally:
+            self._k.CloseHandle(handle)
+
+
+def ctypes_pg_stop_api() -> PgStopApi:
+    """The real binding. Raises off Windows (``ctypes.WinDLL`` does not exist there)."""
+    return _CtypesPgStopApi()
 
 
 #: Strong references to the ctypes callbacks the OS holds. A ``WINFUNCTYPE`` object that
@@ -619,5 +752,9 @@ __all__ = [
     "ctypes_window_backend",
     "install_session_end_window",
     "install_session_end_handler",
-    "make_pg_stopper",
+    "PG_SIGNAL_FAST",
+    "PgStopApi",
+    "ctypes_pg_stop_api",
+    "make_inprocess_pg_stopper",
+    "read_postmaster_pid",
 ]

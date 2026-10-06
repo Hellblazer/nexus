@@ -13,14 +13,19 @@ The real sign-out and restart are verified on a guest by hand (see the bead).
 from __future__ import annotations
 
 import ctypes
+import os
+import subprocess
 import sys
 import threading
+from collections.abc import Callable
 from ctypes import wintypes
+from pathlib import Path
 
 import pytest
-import structlog.testing
 
 from nexus.daemon import session_end as se
+from tests.daemon._children import CHILD_PYTHON
+from tests.daemon._logs import info_logs
 
 pytestmark = pytest.mark.skipif(sys.platform != "win32", reason="SetConsoleCtrlHandler is Windows-only")
 
@@ -101,7 +106,7 @@ class TestRealWindows:
             assert user32.SendMessageW(hwnd, se.WM_ENDSESSION, 0, se.ENDSESSION_LOGOFF) == 0
             assert steps.calls == [] and not steps.stop.is_set()
 
-            with structlog.testing.capture_logs() as logs:
+            with info_logs() as logs:
                 assert user32.SendMessageW(hwnd, se.WM_ENDSESSION, 1, se.ENDSESSION_LOGOFF) == 0
             assert steps.calls == ["mark", "engine", "pg"]
             assert steps.stop.is_set()
@@ -130,6 +135,142 @@ class TestRealWindows:
         finally:
             uninstall()
         assert seen == [se.CTRL_SHUTDOWN_EVENT]
+
+
+    # ── the in-process PostgreSQL stop against the real kernel ──
+
+    def test_the_real_signal_pipe_call_delivers_one_byte_and_reads_the_echo(self) -> None:
+        api = se.ctypes_pg_stop_api()
+        received: list[int] = []
+        server = _PipeServer(f"\\\\.\\pipe\\pgsignal_{os.getpid()}", received)
+        server.start()
+        try:
+            assert server.ready.wait(5), "the in-test pipe server did not come up"
+            delivered, error = api.send_signal(os.getpid(), se.PG_SIGNAL_FAST, 2000)
+        finally:
+            server.join(10)
+        assert (delivered, error) == (True, 0)
+        assert received == [se.PG_SIGNAL_FAST], "the pipe got exactly the one fast-shutdown byte"
+
+    def test_a_missing_signal_pipe_is_reported_not_delivered(self) -> None:
+        delivered, error = se.ctypes_pg_stop_api().send_signal(0x7FFFFFF0, se.PG_SIGNAL_FAST, 200)
+        assert delivered is False and error != 0
+
+    def test_the_real_wait_sees_a_live_process_then_its_exit(self) -> None:
+        api = se.ctypes_pg_stop_api()
+        child = subprocess.Popen([CHILD_PYTHON, "-c", "import time; time.sleep(60)"])  # noqa: S603
+        try:
+            assert api.wait_exit(child.pid, 0.2) is False, "a live process has not exited"
+            child.kill()
+            assert api.wait_exit(child.pid, 10) is True
+        finally:
+            child.kill()
+            child.wait(10)
+        assert api.wait_exit(child.pid, 1) is True, "a pid that no longer exists has exited"
+
+    def test_the_real_image_identity_names_this_interpreter_and_nothing_for_a_dead_pid(self) -> None:
+        api = se.ctypes_pg_stop_api()
+        assert "python" in api.image_stem(os.getpid())
+        child = subprocess.Popen([CHILD_PYTHON, "-c", "pass"])  # noqa: S603
+        child.wait(10)
+        assert api.image_stem(child.pid) == ""
+
+    def test_the_whole_in_process_stop_end_to_end_with_a_stand_in_postmaster(
+        self, tmp_path: Path,
+    ) -> None:
+        """A real child is the postmaster, a real named pipe is its signal pipe, and the
+        server thread exits the child on receiving the byte, as a postmaster does on SIGINT.
+        Only the image-name check is faked (the stand-in is python.exe, not postgres.exe);
+        the pid file, the pipe write and the process wait are the real calls."""
+        child = subprocess.Popen([CHILD_PYTHON, "-c", "import time; time.sleep(60)"])  # noqa: S603
+        received: list[int] = []
+        server = _PipeServer(f"\\\\.\\pipe\\pgsignal_{child.pid}", received, then=child.kill)
+        try:
+            (tmp_path / "postmaster.pid").write_text(f"{child.pid}\nC:/pgdata\n", encoding="utf-8")
+
+            class _Api:
+                def __init__(self) -> None:
+                    self.real = se.ctypes_pg_stop_api()
+
+                def image_stem(self, pid: int) -> str:
+                    return "postgres"
+
+                def send_signal(self, pid: int, signo: int, timeout_ms: int) -> tuple[bool, int]:
+                    return self.real.send_signal(pid, signo, timeout_ms)
+
+                def wait_exit(self, pid: int, timeout_s: float) -> bool:
+                    return self.real.wait_exit(pid, timeout_s)
+
+            server.start()
+            assert server.ready.wait(5)
+            stop = se.make_inprocess_pg_stopper(pgdata=str(tmp_path), api=_Api())
+            with info_logs() as logs:
+                assert stop(5.0) is True
+            assert received == [se.PG_SIGNAL_FAST]
+            assert child.wait(10) is not None
+            names = [e["event"] for e in logs]
+            assert names == ["session_end_pg_signal_sent", "session_end_pg_exited"]
+        finally:
+            child.kill()
+            child.wait(10)
+            server.join(10)
+
+    def test_the_real_stop_refuses_a_pid_that_is_not_postgres(self, tmp_path: Path) -> None:
+        # Real identity check: this very process is python, so a postmaster.pid naming it
+        # must not be signalled. No pipe server exists; reaching the pipe would fail loudly.
+        (tmp_path / "postmaster.pid").write_text(f"{os.getpid()}\n", encoding="utf-8")
+        stop = se.make_inprocess_pg_stopper(pgdata=str(tmp_path))
+        with info_logs() as logs:
+            assert stop(2.0) is False
+        assert [e["event"] for e in logs] == ["session_end_pg_pid_not_postgres"]
+
+
+class _PipeServer(threading.Thread):
+    """A one-shot named-pipe server shaped like the postmaster's signal pipe: read one byte,
+    run *then*, echo the byte back."""
+
+    def __init__(self, name: str, received: list[int], then: Callable[[], object] | None = None) -> None:
+        super().__init__(daemon=True)
+        self.pipe_name, self.received, self.then = name, received, then
+        self.ready = threading.Event()
+
+    def run(self) -> None:
+        k = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
+        h = wintypes.HANDLE
+        k.CreateNamedPipeW.argtypes = [
+            wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.DWORD,
+            wintypes.DWORD, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID,
+        ]
+        k.CreateNamedPipeW.restype = h
+        for name in ("ConnectNamedPipe",):
+            getattr(k, name).argtypes = [h, wintypes.LPVOID]
+            getattr(k, name).restype = wintypes.BOOL
+        for name in ("ReadFile", "WriteFile"):
+            getattr(k, name).argtypes = [
+                h, wintypes.LPVOID, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD), wintypes.LPVOID,
+            ]
+            getattr(k, name).restype = wintypes.BOOL
+        for name in ("FlushFileBuffers", "DisconnectNamedPipe", "CloseHandle"):
+            getattr(k, name).argtypes = [h]
+            getattr(k, name).restype = wintypes.BOOL
+        # PIPE_ACCESS_DUPLEX, PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT, one instance.
+        handle = k.CreateNamedPipeW(self.pipe_name, 3, 6, 1, 16, 16, 0, None)
+        if handle in (None, ctypes.c_void_p(-1).value):
+            self.ready.set()
+            return
+        self.ready.set()
+        try:
+            k.ConnectNamedPipe(handle, None)  # 0 with ERROR_PIPE_CONNECTED if the client beat us
+            buf, count = ctypes.c_ubyte(0), wintypes.DWORD(0)
+            if k.ReadFile(handle, ctypes.byref(buf), 1, ctypes.byref(count), None):
+                self.received.append(buf.value)
+                if self.then is not None:
+                    self.then()
+                k.WriteFile(handle, ctypes.byref(buf), 1, ctypes.byref(count), None)
+                k.FlushFileBuffers(handle)
+            k.DisconnectNamedPipe(handle)
+        finally:
+            k.CloseHandle(handle)
 
 
 _GA_PARENT = 1
