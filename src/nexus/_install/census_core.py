@@ -179,7 +179,7 @@ def _boundary_text(path_text: str, platform: str | None = None) -> str:
     return path_text.rstrip("/")
 
 
-def _match_prefix(generation: Path | str) -> str:
+def _match_prefix(generation: Path | str, platform: str | None = None) -> str:
     """The string an argv must contain to count as running from *generation*.
 
     Mirrors the shell half exactly, including two properties that were paid for:
@@ -208,13 +208,19 @@ def _match_prefix(generation: Path | str) -> str:
         raise ValueError(
             f"generation must be an absolute path, got {str(generation)!r}"
         )
-    if path.is_symlink():
-        resolved = os.readlink(path)
+    layout = _sibling_layout()
+    # ``is_link`` rather than ``is_symlink``: on Windows the registered ledger
+    # pointer is a junction, which ``is_symlink`` reads as a plain directory, so
+    # the pointer's own path was matched and a live holder (whose argv names the
+    # real tree) read as absent -- the under-reporting direction.
+    if layout.is_link(path, platform=platform):
+        resolved = layout.read_link(path, platform=platform)
         if resolved:
             path = Path(resolved)
 
-    text = _boundary_text(str(path))
-    if not text or (sys.platform == "win32" and len(text) == 2 and text[1] == ":"):
+    text = _boundary_text(str(path), platform)
+    is_nt = (platform if platform is not None else sys.platform) == "win32"
+    if not text or (is_nt and len(text) == 2 and text[1] == ":"):
         # "/" normalises to empty, and an empty match makes the boundary "/" —
         # every process on the machine a holder of everything. Refuse instead;
         # answering "no holders" would be worse, being the answer that invites
@@ -257,7 +263,7 @@ def generation_holder_pids(
     would end the over-attribution and buy under-reporting instead, and
     under-reporting is the direction that lets a live tree look free.
     """
-    prefix = _fold(_match_prefix(generation), platform)
+    prefix = _fold(_match_prefix(generation, platform), platform)
     text = ps_snapshot() if snapshot is None else snapshot
 
     # THE CENSUS IS NOT A HOLDER. When census.sh dispatches here, this process
@@ -356,7 +362,9 @@ def generation_match_pairs(
     return tuple(pairs)
 
 
-def legacy_tree_candidates(*, tools: Path | None = None) -> list[Path]:
+def legacy_tree_candidates(
+    *, tools: Path | None = None, platform: str | None = None,
+) -> list[Path]:
     """The legacy ``uv tool install`` tree(s) live processes may run from.
 
     Two structural locations, in ledger-first order: the target of the
@@ -374,15 +382,17 @@ def legacy_tree_candidates(*, tools: Path | None = None) -> list[Path]:
     out: list[Path] = []
     try:
         link = install_layout.legacy_generation_link(tools=tools)
-        if link.is_symlink():
-            target = Path(os.readlink(link))
-            if target.is_absolute() and (target / "bin").is_dir():
+        if install_layout.is_link(link, platform=platform):
+            target = Path(install_layout.read_link(link, platform=platform))
+            if target.is_absolute() and install_layout.venv_bin(
+                target, platform=platform,
+            ).is_dir():
                 out.append(target)
     except Exception:  # noqa: BLE001 — an unreadable ledger is "cannot tell", not "none"
         pass
     try:
-        venv = install_layout.uv_conexus_venv()
-        if (venv / "bin").is_dir() and venv not in out:
+        venv = install_layout.uv_conexus_venv(platform=platform)
+        if install_layout.venv_bin(venv, platform=platform).is_dir() and venv not in out:
             out.append(venv)
     except Exception:  # noqa: BLE001 — same posture
         pass

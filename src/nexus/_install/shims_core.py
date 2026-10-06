@@ -60,7 +60,9 @@ nothing to read.
 """
 from __future__ import annotations
 
+import json
 import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -175,6 +177,8 @@ def write_shims(
     generation: Path | str,
     bin_dir: Path | str | None = None,
     dist: str = "conexus",
+    *,
+    platform: str | None = None,
 ) -> list[str]:
     """Write every shim *generation* should own, then prune what it should not.
 
@@ -184,6 +188,10 @@ def write_shims(
     Raises :class:`ShimsError` for every refusal, all of them BEFORE any file
     is written: a partial shim set is worse than none, because the operator
     sees mineru appear and nx quietly vanish.
+
+    *platform* (``"win32"`` or ``None`` for the host) selects the Windows
+    writer, which copies the generation's own launcher exes instead of writing
+    shell scripts; see :func:`_write_windows`. POSIX is the body below, unchanged.
     """
     layout = _layout()
     gen = Path(generation)
@@ -204,7 +212,9 @@ def write_shims(
     # imports, which in an installed venv prints to stdout. The refused names
     # come back as data and are placed on stderr below.
     try:
-        declared, refused = layout.declared_console_scripts_detail(gen, dist)
+        declared, refused = layout.declared_console_scripts_detail(
+            gen, dist, platform=platform,
+        )
     except Exception as exc:
         raise ShimsError(
             f"could not read console scripts from distribution '{dist}' in {gen} "
@@ -212,7 +222,7 @@ def write_shims(
         ) from exc
 
     # ONE owned set for both phases; see the module docstring.
-    owned = layout.owned_from_declared(declared, gen)
+    owned = layout.owned_from_declared(declared, gen, platform=platform)
 
     target.mkdir(parents=True, exist_ok=True)
 
@@ -224,6 +234,9 @@ def write_shims(
         "— its name is not a valid shim command, so no shim was written"
         for name in refused
     ]
+    if layout._is_nt(platform):
+        diagnostics.extend(_write_windows(gen, target, owned, platform=platform))
+        return diagnostics
     for name in sorted(owned):
         # VALIDATION LIVES IN THE CONTRACT and there is no second copy here.
         # declared_console_scripts already ran the allowlist and said which
@@ -245,6 +258,141 @@ def write_shims(
         _write_one(target, name, body)
 
     diagnostics.extend(_prune(target, gen, owned))
+    return diagnostics
+
+
+# ---------------------------------------------------------------------------
+# Windows (RDR-224, nexus-f9bgu.47)
+#
+# A POSIX shim is a shell script that resolves ``current`` and execs. Windows
+# has no shell on PATH to rely on, and a ``.cmd`` shim would put cmd.exe
+# between every console script and its stdin/stdout. So a Windows shim is the
+# generation's OWN launcher, ``<gen>\Scripts\<name>.exe``, copied into the bin
+# dir. That launcher is a trampoline with the generation's interpreter path
+# embedded (measured: it runs from another directory), so each flip rewrites
+# the copies -- the shims bind to a generation at write time rather than
+# resolving a pointer at spawn.
+#
+# Two Windows facts shape the writer. A running exe cannot be replaced but CAN
+# be renamed (measured), so a copy that cannot replace its target renames the
+# target aside as ``<name>.exe.old-<pid>`` and sweeps such leftovers on later
+# runs. And an exe has no room for the ownership marker the POSIX shims carry,
+# so ownership is the sidecar ``<bin>\.nexus-shims.json`` (names and sha256 of
+# what was written); layout_core reads it for the reclaim check.
+# ---------------------------------------------------------------------------
+
+#: A displaced running launcher: ``<name>.exe.old-<pid>``.
+_OLD_GLOB = "*.exe.old-*"
+
+
+def _sweep_displaced(bin_dir: Path) -> None:
+    """Remove launchers an earlier run renamed aside. One still running stays."""
+    try:
+        leftovers = list(bin_dir.glob(_OLD_GLOB))
+    except OSError:
+        return
+    for leftover in leftovers:
+        try:
+            leftover.unlink()
+        except OSError:
+            pass  # still executing; the next run retries
+
+
+def _displace(path: Path, *, rename=None) -> Path:
+    """Rename a (possibly running) file aside and return where it went."""
+    rename = rename if rename is not None else os.rename
+    for attempt in range(100):
+        suffix = f"{os.getpid()}" if attempt == 0 else f"{os.getpid()}-{attempt}"
+        aside = path.with_name(f"{path.name}.old-{suffix}")
+        if aside.exists():
+            continue
+        rename(path, aside)
+        return aside
+    raise OSError(f"no free .old- name beside {path}")
+
+
+def _install_exe(src: Path, dst: Path, *, replace=None, rename=None) -> None:
+    """Copy *src* over *dst*, displacing *dst* when it is running.
+
+    The copy lands under a temporary name first, so a reader on PATH sees the
+    old launcher or the new one, never half of one. The seams default to the
+    ``os`` functions looked up at CALL time, so a test patching ``os.replace``
+    reaches them.
+    """
+    replace = replace if replace is not None else os.replace
+    tmp = dst.with_name(f".{dst.name}.tmp.{os.getpid()}")
+    shutil.copyfile(src, tmp)
+    try:
+        try:
+            replace(tmp, dst)
+        except PermissionError:
+            # The running image cannot be overwritten, only renamed.
+            _displace(dst, rename=rename)
+            replace(tmp, dst)
+    except OSError as exc:
+        tmp.unlink(missing_ok=True)
+        raise ShimsError(f"could not write the shim {dst}: {exc}") from exc
+
+
+def _remove_exe(path: Path, *, rename=None) -> None:
+    try:
+        path.unlink()
+    except PermissionError:
+        _displace(path, rename=rename)
+
+
+def _write_windows(
+    gen: Path, target: Path, owned: frozenset[str] | set[str], *, platform: str | None,
+    replace=None, rename=None,
+) -> list[str]:
+    """Copy each owned launcher into *target*, prune what *gen* no longer owns,
+    and record both in the sidecar. Returns the diagnostics."""
+    layout = _layout()
+    diagnostics: list[str] = []
+    _sweep_displaced(target)
+    before = layout.read_shim_record(target)
+
+    record: dict[str, str] = {}
+    for name in sorted(owned):
+        src = layout.venv_script(gen, name, platform=platform)
+        dst = target / layout.exe_name(name, platform=platform)
+        _install_exe(src, dst, replace=replace, rename=rename)
+        record[name] = layout.file_sha256(dst)
+
+    for name, written in sorted(before.items()):
+        if name in owned:
+            continue
+        stale = target / layout.exe_name(name, platform=platform)
+        try:
+            ours = stale.is_file() and layout.file_sha256(stale) == written
+        except OSError:
+            ours = False
+        if not ours:
+            continue  # absent, or something else's file now: not ours to remove
+        try:
+            _remove_exe(stale, rename=rename)
+        except OSError:
+            diagnostics.append(
+                f"nexus: could not remove stale shim '{stale}' — remove it by hand; "
+                "it resolves but cannot exec"
+            )
+            record[name] = written
+        else:
+            diagnostics.append(
+                f"nexus: removed stale shim '{stale.name}' — this generation "
+                "ships no such program"
+            )
+
+    sidecar = target / layout.SHIMS_SIDECAR_NAME
+    tmp = target / f".{layout.SHIMS_SIDECAR_NAME}.tmp.{os.getpid()}"
+    tmp.write_text(
+        json.dumps(
+            {"schema": layout.SHIMS_SIDECAR_SCHEMA, "generation": str(gen), "shims": record},
+            indent=2, sort_keys=True,
+        ) + "\n",
+        encoding="utf-8",
+    )
+    os.replace(tmp, sidecar)
     return diagnostics
 
 
