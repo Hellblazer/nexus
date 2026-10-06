@@ -125,3 +125,52 @@ def test_the_result_is_logged_after_logging_is_configured(module: str) -> None:
     text = (SRC / module).read_text(encoding="utf-8")
     main = text[text.index("\ndef main():"):]
     assert main.index("configure_logging(") < main.index('"mcp_stdin_isolation"')
+
+
+def test_a_set_std_handle_that_returns_false_is_a_failure() -> None:
+    # subprocess takes a child's default stdin from STD_INPUT_HANDLE, so a
+    # handle left unset is not isolation even though fd 0 is NUL.
+    fake = _Fake()
+    ops = fake.ops()
+    ops = StdinOps(dup=ops.dup, rebind=ops.rebind, open_nul=ops.open_nul, dup2=ops.dup2, close=ops.close,
+                   set_std_input=lambda fd: False)
+    r = isolate_stdin(platform="win32", ops=ops)
+    assert (r.isolated, r.step) == (False, "std-handle")
+    assert fake.stdin_fd == 7
+
+
+def test_the_sdk_stdio_server_reads_the_rebound_sys_stdin() -> None:
+    # The fix moves the protocol by rebinding sys.stdin; that only works while
+    # the installed MCP SDK's stdio_server reads sys.stdin.buffer when it is
+    # called rather than fd 0. Drive the real stdio_server through a swapped
+    # sys.stdin on every host, so an SDK change that breaks it fails here and
+    # not only on a Windows box at server start.
+    import io
+    import os
+    import sys
+
+    import anyio
+    from mcp.server.stdio import stdio_server
+
+    r, w = os.pipe()
+    os.write(w, b'{"jsonrpc": "2.0", "id": 1, "method": "ping"}\n')
+    os.close(w)
+    swapped = io.TextIOWrapper(io.BufferedReader(io.FileIO(r, "rb", closefd=True)), encoding="utf-8")
+    saved = sys.stdin
+    sink = io.StringIO()
+
+    async def first_message() -> object:
+        with anyio.fail_after(10):
+            async with stdio_server(stdout=anyio.wrap_file(sink)) as (read_stream, write_stream):
+                msg = await read_stream.receive()
+                await write_stream.aclose()  # lets the transport's writer task finish
+                return msg
+
+    try:
+        sys.stdin = swapped
+        msg = anyio.run(first_message)
+    finally:
+        sys.stdin = saved
+        swapped.close()
+    assert getattr(getattr(msg, "message", None), "root", None) is not None, msg
+    assert msg.message.root.method == "ping"  # type: ignore[union-attr]

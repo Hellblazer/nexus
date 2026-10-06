@@ -83,7 +83,13 @@ def test_assertion_4_runs_against_the_launcher_stack() -> None:
     text = _text()
     a4 = text[text.index("Run-Assertion 4 "):text.index("Run-Assertion 5 ")]
     assert a4.index("Supervisor-From-Launcher $k") < a4.index("'stop', '--with-pg'")
-    assert "Invoke-ClaudeP 'no-endpoint'" in a4
+    assert "Try-ClaudeP 'no-endpoint'" in a4
+    # the plain-stop leg runs on a stack the logon task started, not a direct spawn
+    restart = a4.index("Start-ScheduledTask -TaskName 'NexusStorageService'")
+    assert restart < a4.index("@('daemon', 'service', 'stop')")
+    assert "@('daemon', 'service', 'start')" not in a4
+    assert a4.index("Wait-Gone @('supervisor', 'engine', 'postgres') 90") < a4.index("Try-ClaudeP 'no-endpoint'")
+    assert "'was interrupted|not properly shut down|redo starts|automatic recovery'" in a4
 
 
 def test_claude_p_gets_the_harness_token_and_no_session_markers() -> None:
@@ -112,3 +118,18 @@ def test_refuses_off_windows_before_touching_paths() -> None:
     text = _text()
     refuse = text.index("$env:OS -ne 'Windows_NT'")
     assert refuse < text.index("Join-Path $env:USERPROFILE")
+
+
+def test_assertion_bodies_keep_their_deciding_clauses() -> None:
+    text = _text()
+    a2 = text[text.index("Run-Assertion 2 "):text.index("Run-Assertion 3 ")]
+    assert "'mcp__plugin_conexus_nexus__store_put'" in a2 and '-like "*$nonce*"' in a2
+    assert "'mcp__plugin_conexus_nexus__search'" in a2 and "-not $v.results[(K $_ 'id')].is_error" in a2
+    assert "nx search outside the session does not find the nonce" in a2
+    a3 = text[text.index("Run-Assertion 3 "):text.index("function Invoke-ClaudeP")]
+    assert """"$(K $_ 'type')" -ne 'hook_success' -or [int](K $_ 'exitCode') -ne 0""" in a3
+    assert "'nx-hook session-start'" in a3
+    a5 = text[text.index("Run-Assertion 5 "):text.index("# -------------------------------------------------------------- verdict ----")]
+    assert "a credential file appeared during the run" in a5
+    setup = text[text.index("Run-Assertion 1 "):text.index("# --------------------------------------------------------------- verify ----")]
+    assert "setup cannot be re-run on this box" in setup and "exit 1" in setup

@@ -13,7 +13,8 @@ RDR-224 guest; T2 nexus_rdr/224-mcp-search-hang-diagnosis.
 
 The cure removes the shared handle rather than any one importer: the pipe is
 duplicated to a private descriptor, ``sys.stdin`` is rebound to it (the
-transport reads ``sys.stdin.buffer`` when it starts), and fd 0 plus
+transport reads ``sys.stdin.buffer`` when it starts, a contract pinned by
+tests/test_mcp_win_stdin.py), and fd 0 plus
 ``STD_INPUT_HANDLE`` are pointed at ``NUL``. A DLL that inspects stdin then sees
 NUL, and a child process a tool spawns inherits NUL instead of the protocol
 pipe. POSIX is untouched.
@@ -94,9 +95,11 @@ def windows_ops() -> StdinOps:
 def isolate_stdin(*, platform: str | None = None, ops: StdinOps | None = None) -> IsolationResult:
     """On Windows, move the stdio protocol to a private fd and give fd 0 NUL.
 
-    ``isolated`` is True when fd 0 now refers to NUL. Never raises and never
-    logs: a failure is reported in the result and leaves a working
-    ``sys.stdin`` (the protocol is never lost).
+    ``isolated`` is True only when fd 0 and STD_INPUT_HANDLE both refer to
+    NUL. Never raises and never logs: a failure is reported in the result and
+    leaves a working ``sys.stdin`` (the protocol is never lost). A failed
+    SetStdHandle counts as a failure, because subprocess takes a child's
+    default stdin from that handle.
     """
     if (platform if platform is not None else sys.platform) != "win32":
         return IsolationResult(False, step="not-windows")
@@ -122,4 +125,6 @@ def isolate_stdin(*, platform: str | None = None, ops: StdinOps | None = None) -
         std_ok = ops.set_std_input(0)
     except Exception as exc:  # noqa: BLE001 — sys.stdin already reads the private fd, so the protocol is intact
         return IsolationResult(False, step="nul", error=str(exc))
-    return IsolationResult(True, step="done" if std_ok else "done-std-handle-unset")
+    if not std_ok:
+        return IsolationResult(False, step="std-handle", error="SetStdHandle(STD_INPUT_HANDLE) failed")
+    return IsolationResult(True, step="done")

@@ -939,7 +939,7 @@ def main():
     configure_logging("mcp")
     log = structlog.get_logger("nexus.mcp.catalog")
     if _stdin_isolation.step != "not-windows":
-        log.info(
+        (log.info if _stdin_isolation.isolated else log.warning)(
             "mcp_stdin_isolation",
             server="nx-mcp-catalog",
             isolated=_stdin_isolation.isolated,

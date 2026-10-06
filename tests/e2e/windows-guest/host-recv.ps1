@@ -66,9 +66,9 @@ $c.Connect(30000)
 $r = New-Object System.IO.StreamReader($c)
 $t = $r.ReadLine()
 $r.Dispose(); $c.Dispose()
-if (-not $t -or $t.Length -lt 20) { 'nx gate: no token from the pipe; not starting claude'; return }
+if (-not $t -or $t.Length -lt 20) { 'Phase 5 gate launcher: no token from the pipe; not starting claude'; return }
 Set-Location $HOME
-$host.UI.RawUI.WindowTitle = 'nx gate: claude (automation token)'
+$host.UI.RawUI.WindowTitle = 'Phase 5 gate: claude (automation token)'
 $psi = New-Object System.Diagnostics.ProcessStartInfo("$HOME\.local\bin\claude.exe")
 $psi.UseShellExecute = $false
 $psi.WorkingDirectory = $HOME

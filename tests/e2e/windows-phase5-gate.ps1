@@ -38,10 +38,12 @@
 #   5. In that session, ask Claude to store the printed nonce text with
 #      mcp__plugin_conexus_nexus__store_put (collection windows-phase5-gate),
 #      then search for it with mcp__plugin_conexus_nexus__search.
-#   6. In the same session, ask Claude to run the verify command setup printed,
-#      with a 600000 ms shell timeout (verify takes about 3 to 6 minutes; the
-#      shell tool's default 120 s would kill it mid-assertion 4). The verdict is
-#      the last line, and also in <RunDir>\verdict.txt.
+#   6. In the same session, ask Claude to run the verify command setup printed
+#      in the background and wait for it to finish (verify takes about 4 to 8
+#      minutes on a healthy box and can take up to 20 with every health wait
+#      exhausted, past the shell tool's 600 s cap). The verdict is the last
+#      line, and also in <RunDir>\verdict.txt. A run with no verdict line is
+#      FAILED.
 #
 # THE ASSERTIONS (DECLARED = 5; a precondition runs before each phase)
 #   P0  (setup) no system-wide VC++ runtime (vcruntime140*/msvcp140* in
@@ -70,10 +72,11 @@
 #   4   against the launcher-started stack: nx daemon service stop --with-pg
 #       leaves no supervisor, engine or postgres process, confirmed by the
 #       process table and again RECHECK_SECONDS later (the launcher respawns
-#       30 s after a non-zero supervisor exit); the next start's pg.log shows a
-#       clean shutdown and no crash recovery; then the Minimum Viable
-#       Validation leg: a plain nx daemon service stop leaves PostgreSQL up and
-#       the supervisor and engine stay down.
+#       30 s after a non-zero supervisor exit); the next start, through the
+#       logon task again, shows a clean shutdown in pg.log and no crash
+#       recovery; then the Minimum Viable Validation leg, on that
+#       launcher-started stack: a plain nx daemon service stop leaves
+#       PostgreSQL up and the supervisor and engine stay down.
 #   5   a plain `claude -p` returns within ClaudeTimeoutSec, twice: with the
 #       stack up, and with no endpoint (inside assertion 4, after the
 #       --with-pg stop; the RDR-218 leg). Claude Code deletes
@@ -387,7 +390,7 @@ function Read-Transcripts {
                 [void]$lines.Add($e)
             }
             $sr.Dispose()
-        } catch { Say "transcript unreadable, skipped: $($f.Name): $($_.Exception.Message)" }
+        } catch { [Console]::Error.WriteLine("transcript unreadable, skipped: $($f.Name): $($_.Exception.Message)") }
     }
     return @{ lines = $lines; files = $files.Count }
 }
@@ -452,7 +455,7 @@ Run-Assertion 2 'MCP store_put then search from the live session returns the sto
         (K $_ 'name') -eq 'mcp__plugin_conexus_nexus__search' -and $v.results.ContainsKey((K $_ 'id')) -and
         -not $v.results[(K $_ 'id')].is_error -and $v.results[(K $_ 'id')].text -like "*$nonce*" })
     if ($hits.Count -eq 0) { Fail "no search tool_result in live session $($script:sid) contains the nonce $nonce" }
-    $cli = Invoke-Nx 'nx-search-nonce' @('search', "nx phase5 gate nonce $nonce", '--corpus', 'knowledge')
+    $cli = Invoke-Nx 'nx-search-nonce' @('search', "nx phase5 gate nonce $nonce", '--corpus', 'knowledge', '-c')
     if ($cli.out -notlike "*$nonce*") { Fail "nx search outside the session does not find the nonce (exit $($cli.code), see nx-search-nonce.log)" }
     "session $($script:sid), Claude Code $($script:view.version), engine-service-v$ExpectedEngine; store_put ok ($($okStore.Count)); search returned the nonce ($($hits.Count)); nx search finds it outside the session"
 }
@@ -460,7 +463,7 @@ Run-Assertion 2 'MCP store_put then search from the live session returns the sto
 Run-Assertion 3 'the conexus hooks fire in the live session' {
     if (-not $script:view) { Fail 'no live session identified (V0 failed)' }
     $h = @($script:view.hooks)
-    $ours = @($h | Where-Object { "$(K $_ 'command')" -match '^nx-hook |nx_hook_shim\.py|nx-session-end-launcher' })
+    $ours = @($h | Where-Object { "$(K $_ 'command')" -match '^nx-hook |^uv run .*CLAUDE_PLUGIN_ROOT|nx_hook_shim\.py|nx-session-end-launcher' })
     $bad = @($ours | Where-Object { "$(K $_ 'type')" -ne 'hook_success' -or [int](K $_ 'exitCode') -ne 0 })
     if ($bad.Count -gt 0) { Fail ("{0} conexus hook run(s) failed, first: {1} {2} exit={3}" -f $bad.Count, (K $bad[0] 'type'), (K $bad[0] 'command'), (K $bad[0] 'exitCode')) }
     $start = @($ours | Where-Object { "$(K $_ 'command')" -eq 'nx-hook session-start' -and "$(K $_ 'hookEvent')" -eq 'SessionStart' -and "$(K $_ 'content')$(K $_ 'stdout')".Trim() })
@@ -512,7 +515,10 @@ function Invoke-ClaudeP([string]$label) {
 
 $script:claudeUp = $null
 $script:claudeNoEndpoint = $null
-if ($skipIds -notcontains 5) { $script:claudeUp = Invoke-ClaudeP 'stack-up' }
+function Try-ClaudeP([string]$label) {
+    try { return Invoke-ClaudeP $label } catch { return @{ ok = $false; why = "the claude -p leg threw: $($_.Exception.Message)" } }
+}
+if ($skipIds -notcontains 5) { $script:claudeUp = Try-ClaudeP 'stack-up' }
 
 Run-Assertion 4 'stop --with-pg leaves nothing (launcher stack); the next start is clean; a plain stop leaves PG running' {
     Wait-Healthy $HealthTimeoutSec | Out-Null
@@ -527,16 +533,23 @@ Run-Assertion 4 'stop --with-pg leaves nothing (launcher stack); the next start 
     $k = Get-Stack
     $aspect = ($k.aspect | ForEach-Object { "$($_.ProcessId):$($_.CommandLine)" }) -join ' | '
     "stop --with-pg (exit $($r.code)) from [$before]: no supervisor/engine/postgres at stop and ${RECHECK_SECONDS}s later; launcher processes left: $($k.launcher.Count); aspect-worker processes left: $($k.aspect.Count) $aspect"
-    if ($skipIds -notcontains 5) { $script:claudeNoEndpoint = Invoke-ClaudeP 'no-endpoint' }
+    if ($skipIds -notcontains 5) {
+        $script:claudeNoEndpoint = Try-ClaudeP 'no-endpoint'
+        Assert-Absent @('supervisor', 'engine', 'postgres') 'after the no-endpoint claude -p (it must not start the stack)'
+    }
 
+    # Restart through the logon task, so the plain-stop leg also runs against
+    # the launcher shape (the launcher exits with its supervisor's clean exit).
     $pgLog = Join-Path $cfg 'postgres\pg.log'
     $lineCount = @(Get-Content $pgLog -ErrorAction SilentlyContinue).Count
-    $r = Invoke-Nx 'start-after-with-pg' @('daemon', 'service', 'start')
+    Start-ScheduledTask -TaskName 'NexusStorageService'
     Wait-Healthy $HealthTimeoutSec | Out-Null
+    $k = Get-Stack
+    if (-not (Supervisor-From-Launcher $k)) { Fail ('after Start-ScheduledTask the stack is not launcher-started: ' + (Describe-Stack $k)) }
     $new = @(Get-Content $pgLog | Select-Object -Skip $lineCount) -join "`n"
     if ($new -match 'was interrupted|not properly shut down|redo starts|automatic recovery') { Fail "next start's pg.log shows crash recovery" }
     if ($new -notmatch 'database system was shut down at') { Fail "next start's pg.log has no 'database system was shut down at' line" }
-    'next start: clean shutdown recorded, no crash recovery'
+    'next start (logon task): launcher-started again, clean shutdown recorded, no crash recovery'
 
     # The Minimum Viable Validation leg: a plain stop leaves PostgreSQL up.
     $r = Invoke-Nx 'stop-plain' @('daemon', 'service', 'stop')

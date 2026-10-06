@@ -37,6 +37,9 @@ HOST_DIR='C:/build/guest/nxgate'
 
 here="$(cd "$(dirname "$0")" && pwd)"
 repo="$(cd "$here/../../.." && pwd)"
+# shellcheck source=../lib/python.sh
+source "$repo/tests/e2e/lib/python.sh"
+e2e_python_resolve || exit 2
 
 stage=()
 while [[ $# -gt 0 ]]; do
@@ -82,7 +85,7 @@ if ! grep -q host-pipe-listening "$out"; then
     exit 1
 fi
 
-python3 "$repo/tests/e2e/lib/claude_credentials.py" run --remote "$HOST" \
+"$E2E_PYTHON" "$repo/tests/e2e/lib/claude_credentials.py" run --remote "$HOST" \
     --remote-shell "$REMOTE_SHELL" -- "$HOST_DIR/token-send.sh" 2>&1 | quiet
 rc=0
 wait "$recv" || rc=$?
@@ -92,4 +95,4 @@ if [[ $rc -ne 0 ]] || ! grep -q 'guest: handed-off' "$out"; then
     echo "launch.sh: FAILED (receiver exit $rc)" >&2
     exit 1
 fi
-echo "launch.sh: Claude Code is open in the guest's console session (window 'nx gate: claude (automation token)')."
+echo "launch.sh: Claude Code is open in the guest's console session (window 'Phase 5 gate: claude (automation token)')."
