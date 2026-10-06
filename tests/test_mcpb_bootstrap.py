@@ -583,13 +583,12 @@ def test_real_job_object_is_created_on_windows(bootstrap):
 # ── manifest platform gate ──────────────────────────────────────────────────
 
 
-def test_manifest_holds_windows_out_until_the_windows_client_release(bootstrap):
-    """The Windows launch path exists, but the bundle still starts no service
-    on Windows (RDR-224 Phase 3) and no windows-x64 engine or PG asset is
-    published yet, so a win32 bundle would install and then fail. The gate
-    stays shut until the Windows client release (nexus-f9bgu.43), which adds
-    "win32" (the Claude Desktop process.platform token) and flips this
-    assert to ["darwin", "linux", "win32"]."""
+def test_manifest_admits_windows_from_the_windows_client_release(bootstrap):
+    """The Windows client release (nexus-f9bgu.43) lifts the gate: the
+    service starts on Windows (RDR-224 Phase 3) and engine-service-v0.1.149
+    publishes the windows-x64 engine and PG bundle, so "win32" (the Claude
+    Desktop process.platform token) joins the platforms. Before that release
+    the gate stayed shut because a win32 bundle would install and then fail."""
     platforms = json.loads(MANIFEST_PATH.read_text())["compatibility"]["platforms"]
-    assert sorted(platforms) == ["darwin", "linux"]
+    assert sorted(platforms) == ["darwin", "linux", "win32"]
     assert callable(bootstrap._launch_windows) and callable(bootstrap._resolve_executable)

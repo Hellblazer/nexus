@@ -127,7 +127,8 @@
   "compatibility": {
     "platforms": [
       "darwin",
-      "linux"
+      "linux",
+      "win32"
     ],
     "runtimes": {
       "python": ">=3.12,<3.14"
