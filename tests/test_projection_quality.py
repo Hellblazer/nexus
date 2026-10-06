@@ -21,6 +21,10 @@ from tests._t2_fixture_ops import canonical_chunk_id
 from tests.conftest import make_vector_test_client
 from typing import Any
 
+# RDR-225: the substrate registers every collection under bge-base-en-v15-768, and the
+# engine requires a centroid's width to equal its collection model's dimension.
+_DIM = 768
+
 
 def _seed_chunks_for_tenant(
     tenant: str, collection: str, chash_hexes: list[str], *, dim: int = 768,
@@ -203,7 +207,7 @@ def _build_two_clusters_in_chroma(
 ) -> list[dict]:
     """Seed ``collection_name`` centroids for two well-separated clusters."""
     rng = np.random.default_rng(42)
-    embeddings = rng.standard_normal((60, 384)).astype(np.float32) * 0.1
+    embeddings = rng.standard_normal((60, _DIM)).astype(np.float32) * 0.1
     embeddings[:30, 0] += 3.0
     embeddings[30:, 1] += 3.0
     return embeddings
@@ -218,7 +222,7 @@ class TestAssignSingleReturnsNamedTuple:
         from nexus.db.t2.taxonomy_compute import AssignResult
 
         rng = np.random.default_rng(42)
-        embeddings = rng.standard_normal((60, 384)).astype(np.float32) * 0.1
+        embeddings = rng.standard_normal((60, _DIM)).astype(np.float32) * 0.1
         embeddings[:30, 0] += 3.0
         embeddings[30:, 1] += 3.0
         doc_ids = [canonical_chunk_id(f"d-{i}") for i in range(60)]
@@ -232,7 +236,7 @@ class TestAssignSingleReturnsNamedTuple:
         )
 
         # Query with an embedding close to cluster A.
-        new_emb = rng.standard_normal(384).astype(np.float32) * 0.1
+        new_emb = rng.standard_normal(_DIM).astype(np.float32) * 0.1
         new_emb[0] += 3.0
         result = db.taxonomy.assign_single("nt_coll", new_emb, chroma_client)
         assert result is not None
@@ -251,7 +255,7 @@ class TestProjectAgainst3Tuple:
     ) -> None:
         rng = np.random.default_rng(42)
         for name in ("code__pA", "code__pB"):
-            embs = rng.standard_normal((60, 384)).astype(np.float32) * 0.1
+            embs = rng.standard_normal((60, _DIM)).astype(np.float32) * 0.1
             embs[:30, 0] += 3.0
             embs[30:, 1] += 3.0
             doc_ids = [canonical_chunk_id(f"{name}-d{i}") for i in range(60)]
@@ -449,7 +453,7 @@ def fixture_icf_ranking(
         col = f"code__icfR{idx:02d}"
         # 30 docs per collection — enough for HDBSCAN to form at least
         # one topic per well-separated cluster.
-        embs = rng.standard_normal((30, 384)).astype(np.float32) * 0.1
+        embs = rng.standard_normal((30, _DIM)).astype(np.float32) * 0.1
         embs[:15, 0] += 3.0
         embs[15:, 1] += 3.0
         doc_ids = [canonical_chunk_id(f"{col}-d{i}") for i in range(30)]
@@ -558,7 +562,7 @@ class TestProjectAgainstIcf:
     ) -> None:
         rng = np.random.default_rng(42)
         for name in ("code__icfA", "code__icfB"):
-            embs = rng.standard_normal((60, 384)).astype(np.float32) * 0.1
+            embs = rng.standard_normal((60, _DIM)).astype(np.float32) * 0.1
             embs[:30, 0] += 3.0
             embs[30:, 1] += 3.0
             doc_ids = [canonical_chunk_id(f"{name}-d{i}") for i in range(60)]

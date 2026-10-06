@@ -22,6 +22,7 @@ from nexus.db.local_ef import LocalEmbeddingFunction
 from nexus.db.t2 import T2Database
 from nexus.types import SearchResult
 from tests._t2_fixture_ops import canonical_chunk_id
+from tests._padded_minilm import PaddedMiniLM
 from tests.conftest import make_vector_test_client
 from typing import Any
 
@@ -112,7 +113,7 @@ def _seed_chunks_for_tenant(
 
 @pytest.fixture()
 def ef() -> LocalEmbeddingFunction:
-    return LocalEmbeddingFunction(model_name="all-MiniLM-L6-v2")
+    return PaddedMiniLM(model_name="all-MiniLM-L6-v2")
 
 
 @pytest.fixture()

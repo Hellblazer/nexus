@@ -49,11 +49,11 @@ from click.testing import CliRunner
 import nexus.mcp_infra as _mi
 from nexus.commands.taxonomy_cmd import taxonomy
 from nexus.commands import taxonomy_cmd
-from nexus.db.local_ef import LocalEmbeddingFunction
 from nexus.db.t2 import T2Database
 from nexus.logging_setup import configure_logging
 
 from tests._t2_fixture_ops import canonical_chunk_id
+from tests._padded_minilm import PaddedMiniLM
 from tests.conftest import make_vector_test_client
 
 pytestmark = pytest.mark.integration
@@ -224,7 +224,7 @@ class TestLabelPipelineJourney:
         configure_logging("cli")
 
         doc_ids, texts = _build_two_domain_corpus()
-        ef = LocalEmbeddingFunction(model_name="all-MiniLM-L6-v2")
+        ef = PaddedMiniLM(model_name="all-MiniLM-L6-v2")
         embeddings = np.asarray(ef(texts), dtype=np.float32)
 
         _seed_chunks_for_tenant(_current_tenant, collection, doc_ids)

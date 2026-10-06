@@ -438,6 +438,12 @@ def test_negative_control_tombstoned_owner_genuine_ghost_row_excluded(t2_service
         physical_collection=coll, meta={},
     )
     doc_id = str(tumbler)
+    # The manifest append 422s "not registered" unless the collection exists; register
+    # it (no chunk row, so the ghost stays a ghost). Registration takes the model from
+    # the substrate profile, not this name's voyage token, and no vector is written.
+    from nexus.corpus import ensure_collection_registered
+
+    ensure_collection_registered(coll)
     # Genuinely a class-(b) ghost: ghost_chash resolves in NO chunk table
     # anywhere (never uploaded to T3) -- same construction as the positive
     # control below, except this owner is tombstoned next. RDR-194 P3d /

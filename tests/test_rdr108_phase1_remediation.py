@@ -172,6 +172,12 @@ def _seed_chunk(
         }],
     )
     if not seed_fk:
+        # The manifest write 422s "not registered" before it can reach the chunk FK
+        # unless the collection exists; register it, still with no chunk row, so the
+        # write 409s on ``fk_catalog_chunks_chunk`` as these tests intend.
+        from nexus.corpus import ensure_collection_registered
+
+        ensure_collection_registered(collection)
         return
     # nexus-dbzxb (RDR-191 Phase 5 Python collateral): backfill_manifest's
     # WRITE side (write_manifest / atomic_manifest_replace) always goes

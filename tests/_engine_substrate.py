@@ -104,6 +104,11 @@ from tests.db._service_fixture import (
     wait_for_build_lease,
 )
 
+# The real ``subprocess.run``, bound at import. Fixture teardown runs while a test's own
+# ``monkeypatch.setattr(subprocess, "run", ...)`` is still live (function-scoped monkeypatch
+# unwinds after the fixtures that requested it), and the tenant drop must reach real psql.
+_REAL_SUBPROCESS_RUN = subprocess.run
+
 _log = structlog.get_logger(__name__)
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -1601,7 +1606,7 @@ def drop_test_tenant(state: dict, tenant: str) -> bool:
     is logged as ``test_tenant_drop_failed`` and the call returns False.
     """
     try:
-        proc = subprocess.run(
+        proc = _REAL_SUBPROCESS_RUN(
             [str(Path(state["pg_bin"]) / "psql"), "-X", "-q", "-h", "127.0.0.1", "-p", str(state["pg_port"]),
              "-U", state["pg_user"], "-d", state["pg_dbname"], "-t", "-A", "-v", "ON_ERROR_STOP=1",
              "-v", f"tenant={tenant}", "-f", "-"],
