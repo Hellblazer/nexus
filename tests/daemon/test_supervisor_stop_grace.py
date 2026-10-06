@@ -117,6 +117,33 @@ class TestGraceRelation:
     def test_the_module_constant_is_the_figure_for_this_host(self) -> None:
         assert ssd._SUPERVISOR_STOP_GRACE == ssd._supervisor_stop_grace(windows=sys.platform == "win32")
 
+    @pytest.mark.parametrize(("platform", "expected"), [("win32", 20.0), ("linux", 12.0), ("darwin", 12.0)])
+    def test_the_module_constant_expression_is_the_per_platform_figure_under_a_patched_platform(
+        self, platform: str, expected: float,
+    ) -> None:
+        """The check above compares the constant with the function evaluated for the host it
+        is running on, so off Windows it cannot fail when the constant uses the POSIX figure
+        there (A42). This evaluates the constant's OWN defining expression with ``sys.platform``
+        replaced, without reloading the module (other tests hold its classes)."""
+        import ast
+        from types import SimpleNamespace
+
+        tree = ast.parse(Path(ssd.__file__).read_text(encoding="utf-8"))
+        exprs = [
+            node.value
+            for node in tree.body
+            if isinstance(node, ast.AnnAssign)
+            and isinstance(node.target, ast.Name)
+            and node.target.id == "_SUPERVISOR_STOP_GRACE"
+            and node.value is not None
+        ]
+        assert len(exprs) == 1, "the constant's defining statement was not found"
+        value = eval(  # noqa: S307 — the repository's own source expression, fixed namespace
+            compile(ast.Expression(exprs[0]), ssd.__file__, "eval"),
+            {"sys": SimpleNamespace(platform=platform), "_supervisor_stop_grace": ssd._supervisor_stop_grace},
+        )
+        assert value == pytest.approx(expected)
+
 
 class TestTheCountOfRetriedOperationsIsMeasured:
     def test_a_violation_on_every_lease_operation_costs_four_budgets_and_fits_in_the_grace(

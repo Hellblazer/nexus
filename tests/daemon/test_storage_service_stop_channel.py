@@ -432,6 +432,54 @@ def test_postgres_is_never_assigned_to_the_engine_job(
 # ── step 2: no long wait on the supervisor's main thread ─────────────────────────
 
 
+class _LoopSupervisor:
+    """The minimum ``_supervise_until_stopped`` needs: a healthy beat, forever."""
+
+    owns_process = True
+    fenced = False
+    _scope = "test-scope"
+
+    def __init__(self) -> None:
+        self.beats = 0
+        self.stopped = False
+
+    def start(self, *, stop_requested: Any = None) -> None:
+        pass
+
+    def heartbeat_once(self) -> tuple[bool, bool]:
+        self.beats += 1
+        return True, True
+
+    def stop(self) -> None:
+        self.stopped = True
+
+
+def test_the_supervise_loop_waits_in_ticks_no_longer_than_one_second_and_a_stop_ends_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Windows stop handler (``SIGBREAK``) runs on this thread only between waits, and the
+    supervisor's grace is 20 s: a 30 s wait here would make every stop outlast the grace and
+    end in the hard kill (J06). Every wait is bounded by one second, and a stop set during a
+    wait ends the loop at the next iteration instead of beating again."""
+    stop = threading.Event()
+    sup = _LoopSupervisor()
+    sleeps: list[float] = []
+
+    def sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        if len(sleeps) == 3:
+            stop.set()  # the handler running during the third wait
+        if len(sleeps) > 6:
+            raise AssertionError("the loop kept waiting after a stop was set")
+
+    monkeypatch.setattr(ssd.time, "sleep", sleep)
+    code = ssd._supervise_until_stopped(sup, stop, lambda: None)  # type: ignore[arg-type]
+    assert code == 0 and sup.stopped
+    assert len(sleeps) == 3, "the loop must end at the iteration after the stop"
+    assert sup.beats == 3, "no heartbeat after the stop was set"
+    assert all(0 < s <= 1.0 for s in sleeps), sleeps
+
+
 def test_spawn_lock_wait_is_a_loop_of_short_nonblocking_tries_on_windows() -> None:
     attempts: list[bool] = []
     sleeps: list[float] = []

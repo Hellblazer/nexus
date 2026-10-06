@@ -68,3 +68,59 @@ class TestStackMatcher:
         match = storage_service_stack_matcher(self.CFG, platform="win32")
         assert not match(self._supervisor("/Users/Sam/Cfg/nexus-staging"))
         assert not match(self._supervisor("/users/sam/other/nexus"))
+
+
+class TestWindowsShapedCommandLines:
+    """The fixtures above are POSIX-shaped. A real Windows process table row is one string
+    with backslashes, drive letters and a user directory that holds a space; it reaches the
+    matcher through ``winproc_core.render_command_line`` (m5)."""
+
+    CFG = Path(r"C:\Users\Sam Smith\.config\nexus")
+    PY = r"C:\Users\Sam Smith\AppData\Local\Programs\Python\Python312\python.exe"
+
+    def _row(self, cfg: str) -> str:
+        from nexus._install.winproc_core import render_command_line
+
+        raw = (
+            f'"{self.PY}" -m nexus.cli daemon service start --foreground '
+            f'--config-dir "{cfg}"'
+        )
+        return render_command_line(raw)
+
+    def test_a_quoted_backslashed_spaced_config_dir_matches(self) -> None:
+        rendered = self._row(str(self.CFG))
+        assert "Sam Smith" in rendered and "\\" in rendered  # non-vacuity: the shape is real
+        assert storage_service_stack_matcher(self.CFG, platform="win32")(rendered)
+
+    def test_the_drive_letter_and_directory_case_do_not_matter(self) -> None:
+        match = storage_service_stack_matcher(self.CFG, platform="win32")
+        assert match(self._row(r"c:\users\sam smith\.config\nexus"))
+
+    def test_a_sibling_profile_with_the_same_prefix_does_not_match(self) -> None:
+        match = storage_service_stack_matcher(self.CFG, platform="win32")
+        assert not match(self._row(str(self.CFG) + "-staging"))
+        assert not match(self._row(r"C:\Users\Sam Smith\.config\other"))
+
+    def test_the_engine_row_with_a_spaced_path_matches(self) -> None:
+        engine = str(well_known_binary_path(self.CFG, platform_tag="windows-x64"))
+        from nexus._install.winproc_core import render_command_line
+
+        rendered = render_command_line(f'"{engine}" --some-flag')
+        assert " " in engine  # non-vacuity: the path being matched holds a space
+        assert storage_service_stack_matcher(
+            self.CFG, platform_tag="windows-x64", platform="win32",
+        )(rendered)
+
+    def test_nexus_writes_the_spelling_the_matcher_reads(self) -> None:
+        """Decision (m5): a ``--config-dir`` with a trailing separator, or a ``\\\\?\\`` prefix,
+        is not normalised by the matcher. Every command line nexus itself writes (the CLI
+        spawn, the Task Scheduler launcher, the unit templates) is ``str(Path)``, which never
+        carries either, so the matcher reads exactly what nexus writes. A hand-typed
+        ``start --foreground`` in one of those spellings is outside that contract, and it is
+        still stopped through its lease."""
+        from pathlib import PureWindowsPath
+
+        assert str(PureWindowsPath("C:\\Users\\Sam Smith\\cfg\\")) == "C:\\Users\\Sam Smith\\cfg"
+        match = storage_service_stack_matcher(self.CFG, platform="win32")
+        assert not match(self._row(str(self.CFG) + "\\")), "documented: not normalised"
+        assert not match(self._row("\\\\?\\" + str(self.CFG))), "documented: not normalised"

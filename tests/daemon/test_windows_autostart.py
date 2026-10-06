@@ -282,6 +282,10 @@ class _FakeSchtasks:
         if verb == "end":
             return subprocess.CompletedProcess(argv, 0, "", "")
         if verb == "delete":
+            if "/F" not in argv:
+                # Without /F, schtasks asks "Are you sure?" on a console nobody is
+                # reading, and the bounded call times out (T02).
+                raise subprocess.TimeoutExpired(argv, timeout)
             if not self.registered:
                 return subprocess.CompletedProcess(argv, 1, "", "ERROR: The system cannot find the file specified.")
             self.registered = False
@@ -491,6 +495,10 @@ class TestWindowsUninstall:
         assert result.status is installer.UninstallStatus.REMOVED
         assert result.deactivated is True
         assert win.verbs() == ["end", "delete"]
+        delete = next(c for c in win.calls if c[1] == "/Delete")
+        assert delete[1:] == ["/Delete", "/TN", windows_autostart.TASK_NAME, "/F"], (
+            "the delete must carry /F or schtasks prompts and the bounded call times out"
+        )
         assert not installed.dest.exists()
         assert win.registered is False
 
