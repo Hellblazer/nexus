@@ -2,8 +2,11 @@
 package dev.nexus.service.db;
 
 import org.jooq.DSLContext;
+import org.jooq.exception.DataAccessException;
 import org.jooq.impl.DSL;
 import org.jooq.impl.SQLDataType;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.Set;
 
@@ -26,6 +29,8 @@ import java.util.Set;
  * rather than shipping to Postgres.
  */
 public final class PgSession {
+
+    private static final Logger log = LoggerFactory.getLogger(PgSession.class);
 
     /** GUCs the service is allowed to set transaction-locally. */
     private static final Set<String> ALLOWED_GUCS = Set.of(
@@ -219,6 +224,151 @@ public final class PgSession {
         boundedTimeoutMs("NX_TAXONOMY_ASSIGN_LOCK_TIMEOUT_MS",
                          System.getenv("NX_TAXONOMY_ASSIGN_LOCK_TIMEOUT_MS"),
                          DEFAULT_TAXONOMY_ASSIGN_LOCK_TIMEOUT_MS);
+
+    // ── nexus-u9zkn: the per-path read bound ────────────────────────────────────────────────────
+    //
+    // Measured in the 2026-10-05 production failover: new connections recovered after 31.5 s, but a
+    // search read already in flight hung 59 s, because the old server sent no RST and a read with no
+    // network timeout waits on TCP. A pool-wide PgJDBC socketTimeout was rejected: a connection that is
+    // waiting on a busy server is as silent as one waiting on a dead one, and several main-pool statements
+    // legitimately run for minutes with no engine statement_timeout (collection re-home, quarantine,
+    // purge, delete and rename collection, the taxonomy link joins), and a socket timeout closes the
+    // socket without cancelling the backend, so the write rolls back and the retry stacks a second
+    // backend behind the first. So the bound is per path and exists only where the engine ALREADY bounds
+    // the statement: statement_timeout fires server-side first, its error comes back as a normal reply,
+    // and the network timeout (statement bound + margin) only ever fires when the server is silent past
+    // a bound it was itself told to enforce. Every Java-set statement bound and its read bound are set in ONE
+    // place, setLocal, so they cannot drift (server-side bounds set inside plpgsql functions are covered in
+    // setLocal's javadoc).
+
+    /** Env name; whole seconds, {@code 0} disables the per-path network bound. */
+    public static final String NETWORK_BOUND_MARGIN_ENV = "NX_PG_SOCKET_TIMEOUT_MARGIN_SECONDS";
+
+    /**
+     * Headroom above a statement bound before the read is given up. Large enough that the server's own
+     * cancel and its reply always win the race against the client's timer, small enough that a silent
+     * server is noticed within a minute of the default 30 s search bound.
+     */
+    public static final int DEFAULT_NETWORK_BOUND_MARGIN_SECONDS = 30;
+
+    /** Upper bound on the override: an hour. */
+    static final int NETWORK_BOUND_MARGIN_MAX_SECONDS = 3600;
+
+    /** Env-resolved margin, read once at class load and validated at boot by {@link #startupNetworkBoundMarginMs()}. */
+    private static final int NETWORK_BOUND_MARGIN_MS =
+        networkBoundMarginMs(System.getenv(NETWORK_BOUND_MARGIN_ENV));
+
+    /** Test seam, {@code -1} for none: see {@link #setNetworkBoundMarginMsForTests}. */
+    private static volatile int networkBoundMarginMsOverride = -1;
+
+    /**
+     * Parse {@code NX_PG_SOCKET_TIMEOUT_MARGIN_SECONDS} into milliseconds. Null or blank is the default;
+     * {@code 0} disables the per-path network bound; anything else must be an integer in
+     * [1, {@link #NETWORK_BOUND_MARGIN_MAX_SECONDS}]. A bad value throws, naming the variable.
+     */
+    static int networkBoundMarginMs(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return DEFAULT_NETWORK_BOUND_MARGIN_SECONDS * 1000;
+        }
+        int seconds;
+        try {
+            seconds = Integer.parseInt(raw.trim());
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException(NETWORK_BOUND_MARGIN_ENV + " must be an integer, got: " + raw, e);
+        }
+        if (seconds < 0 || seconds > NETWORK_BOUND_MARGIN_MAX_SECONDS) {
+            throw new IllegalArgumentException(NETWORK_BOUND_MARGIN_ENV + " must be 0 (disabled) or in 1.."
+                + NETWORK_BOUND_MARGIN_MAX_SECONDS + ", got: " + seconds);
+        }
+        return seconds * 1000;
+    }
+
+    /** Boot-time touch for {@code NX_PG_SOCKET_TIMEOUT_MARGIN_SECONDS}; returns milliseconds, {@code 0} when disabled. */
+    public static int startupNetworkBoundMarginMs() {
+        return NETWORK_BOUND_MARGIN_MS;
+    }
+
+    /**
+     * The network timeout a statement bound implies: {@code statementTimeoutMs + marginMs}, clamped to
+     * the int PgJDBC takes. {@code 0} (no timeout) for a non-positive statement bound, which is how
+     * Postgres reads {@code statement_timeout=0}, and for a disabled margin.
+     */
+    static int networkTimeoutMs(long statementTimeoutMs, int marginMs) {
+        if (statementTimeoutMs <= 0 || marginMs <= 0) {
+            return 0;
+        }
+        return (int) Math.min(statementTimeoutMs + marginMs, Integer.MAX_VALUE);
+    }
+
+    /**
+     * Test seam: replace the margin so a test can use a small one; {@code -1} restores the env-resolved
+     * value. Same shape as {@code TenantScope#replaceFanoutArmGateForTests}.
+     */
+    public static void setNetworkBoundMarginMsForTests(int marginMs) {
+        networkBoundMarginMsOverride = marginMs;
+    }
+
+    private static int effectiveMarginMs() {
+        int override = networkBoundMarginMsOverride;
+        return override >= 0 ? override : NETWORK_BOUND_MARGIN_MS;
+    }
+
+    /**
+     * Give the connection {@code ctx} runs on a network (socket read) timeout of {@code statementTimeoutMs}
+     * plus the margin, for the rest of this borrow. The Hikari proxy marks the connection's network
+     * timeout dirty and restores the pool's value (none) when the connection is closed, so nothing leaks
+     * to the next borrower; {@code SET LOCAL} values do not outlive the transaction and this does not
+     * outlive the borrow, which is the same lifetime for every request-path caller. A non-positive bound
+     * puts the connection back to no timeout. Does nothing when the margin is {@code 0}.
+     *
+     * <p>A failure to set it is logged and does not fail the request: it is a backstop, and the statement
+     * that follows on a dead connection fails on its own.
+     */
+    private static void bindNetworkTimeout(DSLContext ctx, long statementTimeoutMs) {
+        int marginMs = effectiveMarginMs();
+        if (marginMs <= 0) {
+            return;
+        }
+        int timeoutMs = networkTimeoutMs(statementTimeoutMs, marginMs);
+        try {
+            ctx.connection(conn -> conn.setNetworkTimeout(Runnable::run, timeoutMs));
+        } catch (DataAccessException e) {
+            log.warn("event=pg_network_timeout_not_set statement_timeout_ms={} error=\"{}\"",
+                     statementTimeoutMs, e.getMessage());
+        }
+    }
+
+    /**
+     * Floor on the tenant stamp's network bound: the stamp is one {@code set_config}, but the margin is
+     * the operator's choice for a statement's headroom and its accepted minimum is 1 s, which would kill a
+     * healthy server that is merely saturated and slow to answer a trivial statement. 5 s is far above a
+     * healthy answer and still ends a silent peer at the stamp quickly.
+     */
+    static final int STAMP_NETWORK_BOUND_FLOOR_MS = 5_000;
+
+    /** The network timeout the tenant stamp gets for a margin: {@code max(margin, 5 s)}; {@code 0} when disabled. */
+    static int stampNetworkTimeoutMs(int marginMs) {
+        return marginMs <= 0 ? 0 : Math.max(marginMs, STAMP_NETWORK_BOUND_FLOOR_MS);
+    }
+
+    /**
+     * Bound the tenant stamp, the first round trip of every {@code TenantScope} borrow, which runs before
+     * any path sets its statement bound. {@code on=true} sets a network timeout of {@code max(margin, 5 s)}
+     * ({@link #stampNetworkTimeoutMs}); {@code on=false} puts the connection back to no timeout, so a path
+     * with no statement bound still runs unbounded. Does nothing when the margin is {@code 0}. A failure to
+     * set it is logged, as in {@link #bindNetworkTimeout}.
+     */
+    public static void bindStampNetworkTimeout(java.sql.Connection conn, boolean on) {
+        int marginMs = effectiveMarginMs();
+        if (marginMs <= 0) {
+            return;
+        }
+        try {
+            conn.setNetworkTimeout(Runnable::run, on ? stampNetworkTimeoutMs(marginMs) : 0);
+        } catch (java.sql.SQLException e) {
+            log.warn("event=pg_network_timeout_not_set stage=tenant_stamp error=\"{}\"", e.getMessage());
+        }
+    }
 
     private PgSession() {
     }
@@ -705,6 +855,18 @@ public final class PgSession {
      * TenantScope block) — set_config with {@code is_local=true} outside a
      * transaction is a silent no-op, same as SET LOCAL.
      *
+     * <p>Setting {@code statement_timeout} here also gives the connection a network (socket read)
+     * timeout of that bound plus the margin (nexus-u9zkn, see {@link #bindNetworkTimeout}). Every
+     * statement bound the JAVA side sets goes through this method, so a bounded path and its read bound
+     * cannot drift apart; a path with no statement bound never calls it and gets no read bound. Call it
+     * FIRST among a borrow's {@code setLocal} round trips, so the others run under the read bound too.
+     *
+     * <p>Not covered: a plpgsql function that sets {@code statement_timeout} itself, server-side
+     * (the {@code gc_*} and {@code reaper_*} functions, 5 s or 25 s). The Java bound that precedes such a
+     * call is the one that arms the call's own timer, and on every production path that reaches a 25 s
+     * function it is itself 25 s, so the read bound (25 s plus a margin of at least 1 s) outlasts the
+     * function's value. A new path that calls a function setting 25 s must set a Java bound of at least 25 s.
+     *
      * @param ctx   transaction-bound DSL context
      * @param guc   GUC name; must be whitelisted in {@link #ALLOWED_GUCS}
      * @param value value to set for the remainder of the transaction
@@ -715,6 +877,11 @@ public final class PgSession {
             throw new IllegalArgumentException(
                 "GUC '" + guc + "' is not whitelisted for SET LOCAL (allowed: "
                 + ALLOWED_GUCS + ")");
+        }
+        // nexus-u9zkn: a statement bound and its network bound are set together here, before the
+        // set_config round trip so that round trip is covered too.
+        if ("statement_timeout".equals(guc)) {
+            bindNetworkTimeout(ctx, Long.parseLong(value));
         }
         ctx.select(DSL.function("set_config", SQLDataType.VARCHAR,
                 DSL.val(guc), DSL.val(value), DSL.inline(true)))

@@ -276,9 +276,13 @@ public final class TenantScope {
             // function. The PERMITTED_GUCS allowlist check above stays as defense in
             // depth (a programming-error guard, not an injection necessity now that the
             // name is bound rather than concatenated).
+            // nexus-u9zkn: the stamp is the first read of the borrow and runs before any path sets its
+            // statement bound, so it gets its own network bound, removed again before the work runs.
+            PgSession.bindStampNetworkTimeout(conn, true);
             ctx.select(DSL.function("set_config", SQLDataType.VARCHAR,
                     DSL.val(gucName), DSL.val(tenant), DSL.inline(true)))
                .fetch();
+            PgSession.bindStampNetworkTimeout(conn, false);
 
             T result = work.apply(ctx);
 

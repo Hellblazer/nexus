@@ -4970,18 +4970,19 @@ public final class CatalogRepository {
      * same thing (see {@link #runSweepTransaction}'s javadoc). Sets a
      * {@code lock_timeout} (bounding the ACQUISITION wait) and a {@code
      * statement_timeout} (bounding the HOLD once granted, i.e. the
-     * subsequent DELETE's own execution time) in one {@code set_config}
-     * call, then acquires the key EXCLUSIVE. Both timeouts raise a
+     * subsequent DELETE's own execution time) in two {@code set_config}
+     * calls, then acquires the key EXCLUSIVE. Both timeouts raise a
      * catchable PostgreSQL error ({@code 55P03} / {@code 57014}
      * respectively) that {@link #runSweepTransaction} maps to a fail-open
      * skip — this method itself does not catch anything.
      */
     private static void acquireSweepGateExclusive(DSLContext ctx, String tenant, String collection) {
+        // nexus-u9zkn: statement_timeout goes through PgSession.setLocal so its network (read) bound is
+        // set with it; lock_timeout is a lock-wait bound with no read-bound counterpart.
         ctx.select(DSL.function("set_config", String.class,
-                                DSL.val("lock_timeout"), DSL.val(SWEEP_GATE_LOCK_TIMEOUT_MS), DSL.val(true)),
-                   DSL.function("set_config", String.class,
-                                DSL.val("statement_timeout"), DSL.val(SWEEP_STATEMENT_TIMEOUT_MS), DSL.val(true)))
+                                DSL.val("lock_timeout"), DSL.val(SWEEP_GATE_LOCK_TIMEOUT_MS), DSL.val(true)))
            .fetch();
+        PgSession.setLocal(ctx, "statement_timeout", SWEEP_STATEMENT_TIMEOUT_MS);
         ctx.select(DSL.function("pg_advisory_xact_lock", Object.class,
                    DSL.function("hashtext", Integer.class, DSL.val("sweepgate:" + tenant + "/" + collection))))
            .fetch();

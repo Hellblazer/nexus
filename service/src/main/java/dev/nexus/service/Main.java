@@ -84,6 +84,11 @@ public final class Main {
 
         var hikari = new HikariConfig();
         hikari.setJdbcUrl(dbUrl);
+        // nexus-u9zkn: OS-level dead-peer backstop on an idle connection. The read bound on a request in
+        // flight is per path, set in PgSession#setLocal; there is no pool-wide socketTimeout. PoolKeepAlive,
+        // not PgSession, because this runs before the boot catch below and PgSession's static initializers
+        // parse env: a bad value must reach that catch, not escape main as ExceptionInInitializerError.
+        dev.nexus.service.db.PoolKeepAlive.apply(hikari, dbUrl);
         hikari.setUsername(dbUser);
         hikari.setPassword(dbPass);
         hikari.setMaximumPoolSize(poolSize);
@@ -331,10 +336,14 @@ public final class Main {
             log.info("event=taxonomy_assign_bounds statement_timeout_ms={} lock_timeout_ms={}",
                      dev.nexus.service.db.PgSession.startupTaxonomyAssignStatementTimeoutMs(),
                      dev.nexus.service.db.PgSession.startupTaxonomyAssignLockTimeoutMs());
+            // nexus-u9zkn: same fail-fast for NX_PG_SOCKET_TIMEOUT_MARGIN_SECONDS.
+            log.info("event=pg_network_bound margin_ms={} tcp_keep_alive=true",
+                     dev.nexus.service.db.PgSession.startupNetworkBoundMarginMs());
         } catch (Throwable t) {
             ds.close();
             // One catch for every env-resolved PgSession bound above (ef_search,
-            // the search statement timeout, the scan budget, the taxonomy assign bounds); the
+            // the search statement timeout, the scan budget, the taxonomy assign bounds, the network
+            // bound margin); the
             // parse's own message names the variable that failed.
             log.error("event=pg_session_env_invalid error=\"{}\"", t.getMessage(), t);
             System.exit(1);
@@ -477,6 +486,9 @@ public final class Main {
         cfg.setMinimumIdle(1);
         cfg.setConnectionTimeout(30_000);
         cfg.setPoolName("nexus-migration");
+        // nexus-u9zkn: tcpKeepAlive only. The migration walk has no statement bound (one changeset may
+        // rewrite gigabytes in a single transactional statement), so it gets no read bound either.
+        dev.nexus.service.db.PoolKeepAlive.apply(cfg, url);
         return new HikariDataSource(cfg);
     }
 

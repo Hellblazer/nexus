@@ -1,7 +1,6 @@
 package dev.nexus.service.db;
 
 import org.jooq.DSLContext;
-import org.jooq.impl.DSL;
 
 import java.time.Duration;
 
@@ -80,11 +79,8 @@ public final class SweepBounds {
         if (timeout == null) {
             return;
         }
-        tx.select(DSL.function("set_config", String.class,
-                               DSL.val("statement_timeout"),
-                               DSL.val(Long.toString(timeout.toMillis())),
-                               DSL.val(true)))
-          .fetch();
+        // nexus-u9zkn: through PgSession.setLocal so the matching network (read) bound is set with it.
+        PgSession.setLocal(tx, "statement_timeout", Long.toString(timeout.toMillis()));
     }
 
     private SweepBounds() {

@@ -181,6 +181,10 @@ public final class TaxonomyCentroidRepository {
             default   -> throw new IllegalArgumentException("unsupported dim " + dim);
         };
         Result<? extends Record> result = tenantScope.withTenant(tenant, ctx -> {
+            // nexus-g17tf: bound the statement so an orphaned or pathological
+            // scan cancels (57014) instead of pinning xmin for hours. First, so the
+            // GUC round trips below run under its network bound too (nexus-u9zkn).
+            PgSession.setSearchStatementTimeout(ctx);
             // Filtered-ANN recall: the collection predicate + RLS narrow the candidate set;
             // keep HNSW scanning past ef_search so a narrow collection returns its full set
             // (RDR-156 — without this, filtered HNSW silently under-returns). SET LOCAL is
@@ -195,9 +199,6 @@ public final class TaxonomyCentroidRepository {
             // filter on the unified table and a collection with fewer centroids than nResults
             // would otherwise exhaust the default cap. A no-op below 20000 centroid rows.
             PgSession.setHnswScanBudget(ctx);
-            // nexus-g17tf: bound the statement so an orphaned or pathological
-            // scan cancels (57014) instead of pinning xmin for hours.
-            PgSession.setSearchStatementTimeout(ctx);
             // nexus-6nkn3: a custom plan per execution so the planner sees the
             // collection set's selectivity (a cached generic HNSW plan on a tiny
             // collection ran ~30s and returned EMPTY in production).

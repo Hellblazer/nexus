@@ -1410,6 +1410,10 @@ public final class PgVectorRepository {
                                                              java.util.function.IntSupplier statementTimeoutMs,
                                                              boolean rebindBeforeExactRerun) {
         return tenantScope.withTenant(tenant, ctx -> {
+            // nexus-g17tf: bound the statement so an orphaned or pathological
+            // scan cancels (57014) instead of pinning xmin for hours. First, so the
+            // GUC round trips below run under its network bound too (nexus-u9zkn).
+            PgSession.setSearchStatementTimeout(ctx, statementTimeoutMs.getAsInt());
             // Filtered-ANN recall: keep HNSW scanning past ef_search when the RLS +
             // collection + metadata predicates narrow the candidate set. SET LOCAL is
             // txn-scoped (same pool discipline as the TenantScope GUC stamp).
@@ -1420,9 +1424,6 @@ public final class PgVectorRepository {
             PgSession.setHnswEfSearch(ctx, nResults);
             // nexus-wbfpw.47: raise the iterative-scan budget so recall holds past 95% dead.
             PgSession.setHnswScanBudget(ctx);
-            // nexus-g17tf: bound the statement so an orphaned or pathological
-            // scan cancels (57014) instead of pinning xmin for hours.
-            PgSession.setSearchStatementTimeout(ctx, statementTimeoutMs.getAsInt());
             // nexus-6nkn3: a custom plan per execution so the planner sees the
             // collection set's selectivity (a cached generic HNSW plan on a tiny
             // collection ran ~30s and returned EMPTY in production).
@@ -2545,16 +2546,17 @@ public final class PgVectorRepository {
         final int probeCap = selectiveGateMax + 1;
 
         Result<? extends Record> result = tenantScope.withTenant(tenant, ctx -> {
+            // nexus-g17tf: bound EVERY statement in this transaction -- the gate probe (a
+            // <% trigram heap-recheck), the selective rank, and the HNSW-first rank all
+            // inherit it. Set here, before the first fetch, rather than per branch: a
+            // branch without HNSW is still a scan that can pin xmin. First of the GUC round
+            // trips so the rest run under its network bound too (nexus-u9zkn).
+            PgSession.setSearchStatementTimeout(ctx);
             // Trigram gate calibration (contract anchor): word_similarity >= 0.6, pg_trgm's
             // default - typo-probe candidates sit at ~0.9 and pass, no-signal rows at ~0.1
             // do not. Pinned per-transaction so the gate is independent of cluster config --
             // every schema function below is LANGUAGE sql and cannot SET LOCAL its own GUC.
             PgSession.setLocal(ctx, "pg_trgm.word_similarity_threshold", "0.6");
-            // nexus-g17tf: bound EVERY statement in this transaction -- the gate probe (a
-            // <% trigram heap-recheck), the selective rank, and the HNSW-first rank all
-            // inherit it. Set here, before the first fetch, rather than per branch: a
-            // branch without HNSW is still a scan that can pin xmin.
-            PgSession.setSearchStatementTimeout(ctx);
             // nexus-6nkn3: a custom plan per execution so the planner sees the
             // collection set's selectivity (a cached generic HNSW plan on a tiny
             // collection ran ~30s and returned EMPTY in production).
@@ -3604,15 +3606,16 @@ public final class PgVectorRepository {
     private List<Map<String, Object>> runCombinedQuery(
             String tenant, org.jooq.Table<?> fn, int nResults) {
         Result<? extends Record> result = tenantScope.withTenant(tenant, ctx -> {
+            // nexus-g17tf: bound the statement so an orphaned or pathological
+            // scan cancels (57014) instead of pinning xmin for hours. First, so the
+            // GUC round trips below run under its network bound too (nexus-u9zkn).
+            PgSession.setSearchStatementTimeout(ctx);
             PgSession.setLocal(ctx, "hnsw.iterative_scan", "relaxed_order");
             // nexus-4ktfm: crowd-out headroom — the combined-query SQL functions run
             // inside this same transaction, so the GUC governs their HNSW scans.
             PgSession.setHnswEfSearch(ctx, nResults);
             // nexus-wbfpw.47: raise the iterative-scan budget so recall holds past 95% dead.
             PgSession.setHnswScanBudget(ctx);
-            // nexus-g17tf: bound the statement so an orphaned or pathological
-            // scan cancels (57014) instead of pinning xmin for hours.
-            PgSession.setSearchStatementTimeout(ctx);
             // nexus-6nkn3: a custom plan per execution so the planner sees the
             // collection set's selectivity (a cached generic HNSW plan on a tiny
             // collection ran ~30s and returned EMPTY in production).
@@ -3644,14 +3647,14 @@ public final class PgVectorRepository {
     private List<Map<String, Object>> runCombinedQueryWithChash(
             String tenant, org.jooq.Table<?> fn, int nResults) {
         Result<? extends Record> result = tenantScope.withTenant(tenant, ctx -> {
+            // nexus-g17tf: bound the statement first (see runCombinedQuery), so the GUC round
+            // trips below run under its network bound too (nexus-u9zkn).
+            PgSession.setSearchStatementTimeout(ctx);
             PgSession.setLocal(ctx, "hnsw.iterative_scan", "relaxed_order");
             // nexus-4ktfm: same crowd-out headroom as runCombinedQuery.
             PgSession.setHnswEfSearch(ctx, nResults);
             // nexus-wbfpw.47: raise the iterative-scan budget so recall holds past 95% dead.
             PgSession.setHnswScanBudget(ctx);
-            // nexus-g17tf: bound the statement so an orphaned or pathological
-            // scan cancels (57014) instead of pinning xmin for hours.
-            PgSession.setSearchStatementTimeout(ctx);
             // nexus-6nkn3: a custom plan per execution so the planner sees the
             // collection set's selectivity (a cached generic HNSW plan on a tiny
             // collection ran ~30s and returned EMPTY in production).
