@@ -141,6 +141,12 @@ dependencies = [
     # binary; verifies the new protobuf .sigstore.json bundle offline. 4.x and
     # 3.x both expose Verifier.production(offline=...) + verify_artifact.
     "sigstore>=3.0,<5",
+    # nexus-zw44w: sigstore reaches TUF through python-tuf, and tuf 7.0.0
+    # symlinks root.json on every Updater start. An unprivileged Windows
+    # account may not create symlinks (WinError 1314), so engine and PG bundle
+    # verification failed closed there (the win-release runner's ghwin, 2026-10-06).
+    # tuf 7.0.1 falls back to a hard link (python-tuf #2980 / PR #2981).
+    "tuf>=7.0.1,<8",
     # <2 is load-bearing: mcp 2.0.0 (2026-07-28) removed mcp.server.fastmcp,
     # and the uv TOOL venv re-resolves fresh at install (uv.lock does not
     # protect it) — an unbounded floor shipped 4 days of dead MCP servers to
