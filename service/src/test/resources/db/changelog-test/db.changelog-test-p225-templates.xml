@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    RDR-225 (nexus-3wh8d.7, reworked by nexus-3wh8d.8): the part-A tests (TenantPartitionFunctionsIntegrationTest,
+    TenantPartitionCreationTs1MeasurementIntegrationTest) exercise the partition functions on SCRATCH parents named
+    chunks_new and taxonomy_centroids_new, because the functions serve exactly those names beside chunks and
+    taxonomy_centroids. Once vectors-030 has walked the live tables, the live parents carry model partitions and
+    leaves under the very names the scratch parents' partitions get (the naming function strips _new on purpose),
+    and the live service_tokens trigger would create leaves for the tenants the tests seed. So this changelog, run
+    once after the migration, (1) copies what the scratch needs from the live tables (their column set and their
+    parent-level index definitions) into plain template tables, then (2) removes the walk's live objects from THIS
+    test database: the trigger and the two partitioned parents. The walk itself is tested by
+    P225MigrationWalkIntegrationTest, on its own databases. Test-only, run once per container.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="test-p225-templates-1" author="nexus-3wh8d.8">
+        <comment>Templates from the live column sets and index definitions, then drop the walk's live objects in this database.</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE TABLE nexus.t225_tpl_chunks (LIKE nexus.chunks INCLUDING DEFAULTS INCLUDING GENERATED INCLUDING CONSTRAINTS);
+CREATE TABLE nexus.t225_tpl_centroids (LIKE nexus.taxonomy_centroids INCLUDING DEFAULTS INCLUDING GENERATED INCLUDING CONSTRAINTS);
+CREATE TABLE nexus.t225_tpl_indexes AS
+    SELECT i.tablename, i.indexname, i.indexdef
+      FROM pg_catalog.pg_indexes i
+     WHERE i.schemaname = 'nexus'
+       AND i.tablename IN ('chunks', 'taxonomy_centroids')
+       AND i.indexdef NOT LIKE 'CREATE UNIQUE%';
+DROP TRIGGER trg_service_tokens_create_tenant_partitions ON nexus.service_tokens;
+DROP TABLE nexus.chunks CASCADE;
+DROP TABLE nexus.taxonomy_centroids CASCADE;
+        </sql>
+        <rollback/>
+    </changeSet>
+
+</databaseChangeLog>

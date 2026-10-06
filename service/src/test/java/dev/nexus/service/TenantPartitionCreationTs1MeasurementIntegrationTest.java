@@ -71,6 +71,10 @@ class TenantPartitionCreationTs1MeasurementIntegrationTest {
         cfg.setMaximumPoolSize(2);
         try (var adminDs = new HikariDataSource(cfg)) {
             SchemaMigrator.migrate(adminDs);
+            try (Connection a = adminDs.getConnection()) {
+                // vectors-030 has walked the live tables; free the scratch parents' partition names (see the changelog header)
+                PartitionScratch.captureTemplatesAndClearLiveParents(a);
+            }
         }
     }
 
@@ -94,7 +98,7 @@ class TenantPartitionCreationTs1MeasurementIntegrationTest {
                 ctx.insertInto(EMBEDDING_MODELS)
                     .set(EMBEDDING_MODELS.EMBEDDING_MODEL, "disputed-" + dim)
                     .set(EMBEDDING_MODELS.DIMENSION, dim)
-                    .set(EMBEDDING_MODELS.PROVIDER, "placeholder")
+                    .set(EMBEDDING_MODELS.PROVIDER, "disputed")
                     .onConflictDoNothing().execute();
             }
         }

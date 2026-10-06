@@ -375,6 +375,9 @@ public final class PgCatalogProbes {
         return ctx.select(convalidated)
             .from(DSL.table(DSL.name("pg_constraint")))
             .where(DSL.field(DSL.name("conname"), String.class).eq(conname))
+            // RDR-225: a foreign key onto a partitioned table is cloned onto the referencing table once per partition,
+            // under the same name; only the top-level constraint (conparentid 0) is the one a caller names.
+            .and(DSL.field(DSL.name("conparentid"), Long.class).eq(0L))
             .fetchOne(convalidated);
     }
 

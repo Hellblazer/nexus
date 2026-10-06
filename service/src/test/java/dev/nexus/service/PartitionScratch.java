@@ -44,6 +44,17 @@ final class PartitionScratch {
 
     private PartitionScratch() {}
 
+    /**
+     * Once per database, right after migration: copy the live column sets and parent-level index definitions
+     * into template tables, then drop the walk's live trigger and partitioned parents, so the scratch parents'
+     * partition names (which strip {@code _new}) cannot collide with the live ones. See the changelog's header.
+     */
+    static void captureTemplatesAndClearLiveParents(Connection admin) throws Exception {
+        PgContainerHelper.runSuperuserTestChangelog(admin,
+            "db/changelog-test/db.changelog-test-p225-templates.xml",
+            "databasechangelog_test_p225_templates", Map.of());
+    }
+
     /** Drop and rebuild the scratch parents on the schema owner's connection. */
     static void reset(Connection admin) throws Exception {
         PgContainerHelper.runSuperuserTestChangelog(admin,

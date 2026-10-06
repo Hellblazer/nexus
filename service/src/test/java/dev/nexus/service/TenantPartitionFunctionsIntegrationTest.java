@@ -76,6 +76,15 @@ class TenantPartitionFunctionsIntegrationTest {
         cfg.setMaximumPoolSize(3);
         adminDs = new HikariDataSource(cfg);
         SchemaMigrator.migrate(adminDs);
+        try (Connection a = adminDs.getConnection()) {
+            var ctx = dsl(a);
+            // The walk (vectors-030-1) has attached its trigger and partitioned the live tables; this class tests the
+            // part-A objects on scratch parents, so it records that, then makes room (see the templates changelog).
+            assertThat(PartitionScratch.triggersCalling(ctx, "service_tokens", "service_tokens_create_tenant_partitions"))
+                .as("the walk attaches the service_tokens trigger exactly once").isEqualTo(1);
+            PartitionScratch.captureTemplatesAndClearLiveParents(a);
+            assertThat(PartitionScratch.triggersCalling(ctx, "service_tokens", "service_tokens_create_tenant_partitions")).isZero();
+        }
     }
 
     @AfterAll
@@ -454,11 +463,15 @@ class TenantPartitionFunctionsIntegrationTest {
             // Right shape, wrong name.
             assertThatThrownBy(() -> PartitionScratch.createTenantPartitions(ctx, "t225_other_part", "x", true))
                 .satisfies(t -> assertThat(sqlState(t)).isEqualTo("22023"));
-            // Right name, not partitioned (the live table, until the migration swaps it).
-            assertThatThrownBy(() -> PartitionScratch.createTenantPartitions(ctx, "chunks", "x", true))
+            // Right name, not partitioned: a plain table squatting on a served name. (Since vectors-030 walked them
+            // the live chunks and taxonomy_centroids are partitioned and served, so the scratch names carry this.)
+            PgContainerHelper.runSuperuserDdl(a, "DROP TABLE nexus.chunks_new CASCADE");
+            PgContainerHelper.runSuperuserDdl(a, "CREATE TABLE nexus.chunks_new (tenant_id text, embedding_model text)");
+            assertThatThrownBy(() -> PartitionScratch.createTenantPartitions(ctx, "chunks_new", "x", true))
                 .satisfies(t -> assertThat(sqlState(t)).isEqualTo("42809"));
-            assertThatThrownBy(() -> PartitionScratch.createModelPartition(ctx, "taxonomy_centroids", CODE_3, true))
+            assertThatThrownBy(() -> PartitionScratch.createModelPartition(ctx, "chunks_new", CODE_3, true))
                 .satisfies(t -> assertThat(sqlState(t)).isEqualTo("42809"));
+
             // An unrelated table.
             assertThatThrownBy(() -> PartitionScratch.createTenantPartitions(ctx, "catalog_collections", "x", true))
                 .satisfies(t -> assertThat(sqlState(t)).isEqualTo("22023"));
@@ -521,10 +534,10 @@ class TenantPartitionFunctionsIntegrationTest {
         }
     }
 
-    // ── 6. the trigger function: defined, not attached ───────────────────────
+    // ── 6. the trigger function, attached to the scratch stand-in (the walk attaches it to the live table) ───
 
     @Test
-    void triggerFunction_createsLeavesForAnInsertedTenant_onceAttached_andIsNotAttachedToServiceTokens() throws Exception {
+    void triggerFunction_createsLeavesForAnInsertedTenant_onceAttached() throws Exception {
         twoModelsOnBothParents();
         try (Connection a = admin()) {
             // Attach it to the scratch stand-in for service_tokens, naming the scratch parents.
@@ -548,8 +561,9 @@ class TenantPartitionFunctionsIntegrationTest {
                 .set(DSL.field(DSL.name("tenant_id"), String.class), "trig-tenant").execute();
             assertThat(PartitionScratch.nexusRelationCount(actx)).as("a second token for the tenant adds nothing").isEqualTo(before);
             // The trigger function runs as the inserting role: nexus_svc has EXECUTE on create_tenant_partitions only.
-            // And the live service_tokens carries no such trigger until migration step 7.7 (bead nexus-3wh8d.8
-            // flips this assertion when it attaches it).
+            // The live service_tokens carries no such trigger in THIS database: the walk attached one (asserted in
+            // startAll) and the templates changelog removed it so the scratch parents' names are free. The walk's
+            // trigger is exercised against the real tables in P225MigrationWalkIntegrationTest.
             assertThat(PartitionScratch.triggersCalling(actx, "service_tokens", "service_tokens_create_tenant_partitions")).isZero();
         }
     }
@@ -750,12 +764,16 @@ class TenantPartitionFunctionsIntegrationTest {
         Map<String, List<String>> predicted = new LinkedHashMap<>();
         predicted.put(firstMp, List.of("model partition the creation reaches first"));
         predicted.put("catalog_collections", List.of("model partition the creation reaches first", "registry (insert a collection)"));
-        predicted.put("t225_ref_manifest", List.of("model partition the creation reaches first", "registry (insert a collection)",
-            "referencing table t225_ref_manifest"));
-        predicted.put("t225_ref_assign", List.of("model partition the creation reaches first", "registry (insert a collection)",
-            "referencing table t225_ref_manifest", "referencing table t225_ref_assign"));
-        predicted.put("t225_ref_orphan", List.of("model partition the creation reaches first", "registry (insert a collection)",
-            "referencing table t225_ref_manifest", "referencing table t225_ref_assign", "referencing table t225_ref_orphan"));
+        // The order in which the creation takes the referencing tables' locks is the order PostgreSQL walks the
+        // parent's foreign keys, which is not the order the tables were made in (it differed between a migrated
+        // database and the bare one this was first measured on), so it is observed, not assumed.
+        List<String> refOrder = runStaggered("order-probe", null).order().stream().filter(r -> r.startsWith("t225_ref_")).toList();
+        assertThat(refOrder).containsExactlyInAnyOrder("t225_ref_manifest", "t225_ref_assign", "t225_ref_orphan");
+        List<String> waiting = new ArrayList<>(List.of("model partition the creation reaches first", "registry (insert a collection)"));
+        for (String ref : refOrder) {
+            waiting.add("referencing table " + ref);
+            predicted.put(ref, List.copyOf(waiting));
+        }
         int round = 0;
         for (var e : predicted.entrySet()) {
             round++;

@@ -11,8 +11,10 @@
     with a live table. Leaves made under chunks_new carry the names the live parent's leaves will have
     after the swap (the naming function strips the _new suffix), so no live relation name is touched.
 
-    WHAT "FAITHFUL" MEANS HERE. The column set is the live nexus.chunks / nexus.taxonomy_centroids
-    (LIKE, so a later column is picked up) plus embedding_model; the parent-level indexes are the live
+    WHAT "FAITHFUL" MEANS HERE. The column set is the live nexus.chunks / nexus.taxonomy_centroids as captured
+    into plain template tables by db.changelog-test-p225-templates.xml (LIKE, so a later column is picked up;
+    since migration vectors-030 walked them, embedding_model is part of the live column set and LIKE carries it,
+    NOT NULL); the parent-level indexes are the live
     table's own definitions replayed on the scratch parent, so a leaf pays the real HNSW (three), GIN
     trigram, GIN tsvector and btree cost; the RLS policies and grants are the production shapes
     (tenant_isolation, the vectors-029 owner read policy, DML plus MAINTAIN for nexus_svc). Three
@@ -43,33 +45,30 @@ DROP TABLE IF EXISTS nexus.taxonomy_centroids_new CASCADE;
 DELETE FROM nexus.service_tokens WHERE label = 'p225';
 
 CREATE TABLE nexus.chunks_new (
-    LIKE nexus.chunks INCLUDING DEFAULTS INCLUDING GENERATED INCLUDING CONSTRAINTS,
-    embedding_model text NOT NULL
+    LIKE nexus.t225_tpl_chunks INCLUDING DEFAULTS INCLUDING GENERATED INCLUDING CONSTRAINTS
 ) PARTITION BY LIST (embedding_model);
 ALTER TABLE nexus.chunks_new
     ADD CONSTRAINT chunks_new_pk PRIMARY KEY (tenant_id, collection, chash, embedding_model);
 
 CREATE TABLE nexus.taxonomy_centroids_new (
-    LIKE nexus.taxonomy_centroids INCLUDING DEFAULTS INCLUDING GENERATED INCLUDING CONSTRAINTS,
-    embedding_model text NOT NULL
+    LIKE nexus.t225_tpl_centroids INCLUDING DEFAULTS INCLUDING GENERATED INCLUDING CONSTRAINTS
 ) PARTITION BY LIST (embedding_model);
 ALTER TABLE nexus.taxonomy_centroids_new
     ADD CONSTRAINT taxonomy_centroids_new_pk PRIMARY KEY (tenant_id, collection, topic_id, embedding_model);
 
--- Replay every non-unique index of the live tables on the scratch parents (index names get a _new suffix).
+-- Replay every non-unique index the live tables had (captured by db.changelog-test-p225-templates.xml before it
+-- removed the live partitioned parents from this database) on the scratch parents (index names get a _new suffix).
 DO $replay$
 DECLARE
     r record;
 BEGIN
     FOR r IN
         SELECT i.tablename, i.indexname, i.indexdef
-          FROM pg_catalog.pg_indexes i
-         WHERE i.schemaname = 'nexus'
-           AND i.tablename IN ('chunks', 'taxonomy_centroids')
-           AND i.indexdef NOT LIKE 'CREATE UNIQUE%'
+          FROM nexus.t225_tpl_indexes i
     LOOP
-        EXECUTE replace(replace(r.indexdef,
-                                ' ON nexus.' || r.tablename || ' ', ' ON nexus.' || r.tablename || '_new '),
+        -- A partitioned parent's index prints as ON ONLY nexus.TABLE, a plain table's as ON nexus.TABLE.
+        EXECUTE replace(regexp_replace(r.indexdef,
+                                       ' ON (ONLY )?nexus\.' || r.tablename || ' ', ' ON nexus.' || r.tablename || '_new '),
                         'INDEX ' || r.indexname || ' ', 'INDEX ' || r.indexname || '_new ');
     END LOOP;
 END

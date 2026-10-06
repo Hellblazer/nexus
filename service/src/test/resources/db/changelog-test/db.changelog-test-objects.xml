@@ -229,4 +229,109 @@ $$;
         <rollback>DROP FUNCTION IF EXISTS nexus_test.drop_index(regclass)</rollback>
     </changeSet>
 
+    <changeSet id="test-objects-p225-ts3-delete-and-reinsert" author="nexus-3wh8d.8">
+        <comment>nexus_test.p225_ts3_delete_and_reinsert(text, text, bytea): RDR-225 TS3 case (b) against the partitioned nexus.chunks (nexus-3wh8d.8). Under SET CONSTRAINTS nexus.fk_catalog_chunks_chunk DEFERRED it deletes one chunk row and re-inserts the same row in the same transaction; the deferred four-column manifest foreign key is checked at COMMIT and must pass. SET CONSTRAINTS has no jOOQ typed-DSL form, so it lives here (the test tree carries no raw SQL string). v_row is a RECORD, not nexus.chunks, because installTestObjects also runs at pre-walk migration points where that type may not exist yet. Called through the generated Routines on one autocommit statement, so the commit, and any foreign-key failure, is that statement's. SECURITY INVOKER: the caller's role and tenant GUC govern (nexus_svc under row-level security).</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus_test.p225_ts3_delete_and_reinsert(p_tenant text, p_collection text, p_chash bytea) RETURNS integer
+    LANGUAGE plpgsql
+    SECURITY INVOKER
+AS $$
+DECLARE
+    v_row record;
+BEGIN
+    SET CONSTRAINTS nexus.fk_catalog_chunks_chunk DEFERRED;
+    SELECT * INTO v_row FROM nexus.chunks c
+     WHERE c.tenant_id = p_tenant AND c.collection = p_collection AND c.chash = p_chash;
+    IF NOT FOUND THEN
+        RETURN 0;
+    END IF;
+    DELETE FROM nexus.chunks c
+     WHERE c.tenant_id = p_tenant AND c.collection = p_collection AND c.chash = p_chash;
+    INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_384, embedding_768, embedding_1024,
+                              metadata, created_at, retention, last_written_at, embedding_model)
+    VALUES (v_row.tenant_id, v_row.collection, v_row.chash, v_row.chunk_text, v_row.embedding_384, v_row.embedding_768,
+            v_row.embedding_1024, v_row.metadata, v_row.created_at, v_row.retention, v_row.last_written_at,
+            v_row.embedding_model);
+    RETURN 1;
+END;
+$$;
+        </sql>
+        <rollback>DROP FUNCTION IF EXISTS nexus_test.p225_ts3_delete_and_reinsert(text, text, bytea)</rollback>
+    </changeSet>
+
+    <changeSet id="test-objects-p225-ts3-delete-only" author="nexus-3wh8d.8">
+        <comment>nexus_test.p225_ts3_delete_only(text, text, bytea): RDR-225 TS3 case (c) (nexus-3wh8d.8). Under SET CONSTRAINTS nexus.fk_catalog_chunks_chunk DEFERRED it deletes one chunk row and leaves any manifest row that names it; the deferred foreign key must fail the statement's own commit (SQLSTATE 23503). Same rationale and role as p225_ts3_delete_and_reinsert.</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus_test.p225_ts3_delete_only(p_tenant text, p_collection text, p_chash bytea) RETURNS integer
+    LANGUAGE plpgsql
+    SECURITY INVOKER
+AS $$
+DECLARE
+    v_n integer;
+BEGIN
+    SET CONSTRAINTS nexus.fk_catalog_chunks_chunk DEFERRED;
+    DELETE FROM nexus.chunks c
+     WHERE c.tenant_id = p_tenant AND c.collection = p_collection AND c.chash = p_chash;
+    GET DIAGNOSTICS v_n = ROW_COUNT;
+    RETURN v_n;
+END;
+$$;
+        </sql>
+        <rollback>DROP FUNCTION IF EXISTS nexus_test.p225_ts3_delete_only(text, text, bytea)</rollback>
+    </changeSet>
+
+    <changeSet id="test-objects-p225-seed-random-chunks" author="nexus-3wh8d.8">
+        <comment>nexus_test.p225_seed_random_chunks(text, text, text, int, int): RDR-225 (nexus-3wh8d.8) bulk seeder for the plan and lock measurements: p_n chunks with distinct chashes (sha256 of the index, so reruns collide only on purpose) and random unit-ish vectors of p_dim, filed under p_model, built server side so the test tree carries no vector literal strings. Inserts through the partitioned parent as the caller (superuser in the tests). The collection must already be registered under p_model.</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus_test.p225_seed_random_chunks(
+    p_tenant text, p_collection text, p_model text, p_dim int, p_n int
+) RETURNS bigint
+    LANGUAGE plpgsql
+    SECURITY INVOKER
+AS $$
+DECLARE
+    v_n bigint;
+BEGIN
+    EXECUTE format(
+        'INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, %I, embedding_model) '
+        'SELECT $1, $2, sha256(convert_to($1 || $2 || g::text, ''UTF8'')), ''seeded'', '
+        '       (SELECT (''['' || string_agg(random()::text, '','') || '']'')::nexus.vector FROM generate_series(1, $3) WHERE g IS NOT NULL), $4 '
+        '  FROM generate_series(1, $5) AS g',
+        'embedding_' || p_dim)
+        USING p_tenant, p_collection, p_dim, p_model, p_n;
+    GET DIAGNOSTICS v_n = ROW_COUNT;
+    RETURN v_n;
+END;
+$$;
+        </sql>
+        <rollback>DROP FUNCTION IF EXISTS nexus_test.p225_seed_random_chunks(text, text, text, int, int)</rollback>
+    </changeSet>
+
+    <changeSet id="test-objects-p225-explain-knn" author="nexus-3wh8d.8">
+        <comment>nexus_test.p225_explain_knn(text, text, int): RDR-225 (nexus-3wh8d.8) plan probe: the EXPLAIN (COSTS OFF) text of a nearest-neighbour query on the partitioned nexus.chunks with LITERAL tenant_id and embedding_model predicates (the shape the read path adds), so plan-time pruning applies. p_dim picks the vector column; the query vector is a constant built server side. Returns one text, lines joined by newlines. jOOQ's DSLContext#explain cannot express the pgvector distance operator without a plain-SQL template, so the probe lives here.</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus_test.p225_explain_knn(p_tenant text, p_model text, p_dim int) RETURNS text
+    LANGUAGE plpgsql
+    SECURITY INVOKER
+AS $$
+DECLARE
+    v_lit  text;
+    v_line text;
+    v_out  text := '';
+BEGIN
+    SELECT '[' || string_agg('0.1', ',') || ']' INTO v_lit FROM generate_series(1, p_dim);
+    FOR v_line IN EXECUTE format(
+        'EXPLAIN (COSTS OFF) SELECT chash FROM nexus.chunks WHERE tenant_id = %L AND embedding_model = %L '
+        'ORDER BY %I OPERATOR(nexus.&lt;=&gt;) %L::nexus.vector LIMIT 10',
+        p_tenant, p_model, 'embedding_' || p_dim, v_lit)
+    LOOP
+        v_out := v_out || v_line || E'\n';
+    END LOOP;
+    RETURN v_out;
+END;
+$$;
+        </sql>
+        <rollback>DROP FUNCTION IF EXISTS nexus_test.p225_explain_knn(text, text, int)</rollback>
+    </changeSet>
+
 </databaseChangeLog>
