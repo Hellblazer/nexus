@@ -184,7 +184,12 @@ class TestSymlinkGuard:
         real = tmp_path / "real-file"
         real.write_text("<!-- real -->\n")
         link = tmp_path / "units" / "com.nexus.service.plist"
-        link.symlink_to(real)
+        try:
+            link.symlink_to(real)
+        except OSError as exc:
+            if sys.platform != "win32":
+                raise
+            pytest.skip(f"a file symlink needs SeCreateSymbolicLinkPrivilege, which this Windows account lacks ({exc})")
 
         with pytest.raises(installer.SymlinkRefusedError):
             installer.install_autostart(tier="service")

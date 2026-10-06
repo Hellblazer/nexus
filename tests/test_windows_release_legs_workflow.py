@@ -705,7 +705,8 @@ PHASE3_WINDOWS_MODULES = (
 #: What .44 proved green on native Windows, run as one pytest process.
 WINDOWS_TEST_SET = (
     "tests/daemon/", "tests/test_process_group_safety.py", "tests/test_session_sweep_orphan_trackers.py",
-    "tests/test_win_console.py", "tests/test_winsec.py", "tests/hooks/test_endpoint_resolve_lease_retry.py",
+    "tests/test_win_console.py", "tests/test_winsec.py", "tests/test_winproc_core.py",
+    "tests/hooks/test_endpoint_resolve_lease_retry.py",
 )
 
 
@@ -732,8 +733,8 @@ def test_the_windows_job_runs_the_whole_set_in_one_pytest_with_a_junit_floor() -
     # a floor that can be passed by a mostly-skipped or much smaller run is no floor
     passed = int(re.search(r"--min-passed (\d+)", floor["run"]).group(1))
     skipped = int(re.search(r"--max-skipped (\d+)", floor["run"]).group(1))
-    assert passed >= 900, passed
-    assert skipped <= 50, skipped
+    assert passed >= 1000, passed
+    assert skipped <= passed // 20, f"{skipped} skips against a {passed} pass floor is a mostly-skipped run"
 
 
 #: The tests only a real Windows run exercises. Each is a ``--require-passed`` pattern in the floor
@@ -753,11 +754,18 @@ def test_the_floor_names_the_real_kernel_tests_that_must_have_passed() -> None:
     named = re.findall(r"--require-passed (\S+)", floor["run"])
     assert tuple(named) == REAL_KERNEL_PATTERNS
     root = Path(__file__).parent.parent
+    pytest_run = next(s["run"] for s in job["steps"] if "pytest" in s.get("run", ""))
     for pattern in named:
         if pattern.startswith("tests."):
             parts = pattern.split(".")
             file = root.joinpath(*parts[:-1]).with_suffix(".py")
             assert file.is_file(), f"{pattern}: no module {file}"
+            # The module must be in the run, or the floor requires a test that never
+            # ran (rehearsal run 37411668705: tests/test_winproc_core.py was missing).
+            rel = file.relative_to(root).as_posix()
+            assert rel in pytest_run or any(
+                rel.startswith(t) for t in pytest_run.split() if t.endswith("/")
+            ), f"{pattern}: {rel} is not in the Windows test set's pytest command"
             assert f"class {parts[-1]}" in file.read_text(encoding="utf-8"), f"{pattern}: no such class"
         else:
             hits = [
@@ -787,3 +795,20 @@ def test_the_python_resolver_runs_native_commands_with_both_streams_redirected()
     assert "RedirectStandardOutput = $true" in run and "RedirectStandardError = $true" in run
     assert not re.search(r"&\s*(?:uv|\$py)\b", run), "a bare `& uv`/`& $py` reintroduces pwsh's own native-command path"
     assert "'python', 'install', '3.13'" in run, "uv keeps Pythons per user; a fresh service account has none"
+
+
+def test_the_windows_test_job_repairs_the_checkout_before_pytest() -> None:
+    # Git for Windows' system config (autocrlf=true, symlinks=false) and an account
+    # without the symlink privilege leave CRLF text and symlink stub files; 32
+    # tests failed on the missing daemon resources (rehearsal run 37411668705).
+    steps = _doc(REHEARSAL)["jobs"]["conformance"]["steps"]
+    names = [s.get("name", s.get("uses", "")) for s in steps]
+    fix = names.index("Checkout fixups (LF, symlinks materialised)")
+    assert names[fix - 1].startswith("actions/checkout@")
+    assert fix < names.index("Windows test set")
+    run = steps[fix]["run"]
+    assert "git config core.autocrlf false" in run and "git reset -q --hard HEAD" in run
+    assert "^120000 " in run, "tracked symlinks are found by their git mode"
+    assert "throw 'no tracked symlinks found" in run, "non-vacuity: a step with nothing to do fails"
+    attrs = (REPO / ".gitattributes").read_text()
+    assert "tests/fixtures/** -text" in attrs

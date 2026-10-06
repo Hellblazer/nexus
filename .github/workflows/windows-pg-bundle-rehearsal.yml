@@ -100,6 +100,7 @@ on:
       - tests/test_session_sweep_orphan_trackers.py
       - tests/test_win_console.py
       - tests/test_winsec.py
+      - tests/test_winproc_core.py
       - tests/hooks/test_endpoint_resolve_lease_retry.py
       - tests/test_windows_service_stop_driver.py
       - scripts/windows_service_stop_driver.py
@@ -284,19 +285,45 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
 
+      # Make the checkout the tree the tests read on POSIX. Git for Windows ships
+      # core.autocrlf=true and core.symlinks=false system-wide, and the runner's
+      # account holds no symlink privilege, so a plain checkout has CRLF text and
+      # each tracked symlink (src/nexus/_resources/daemon, plans, dt-scripts) as a
+      # stub file holding its target path: 32 tests failed on the missing daemon
+      # resources (rehearsal run 37411668705). Re-check out with autocrlf off,
+      # then replace each stub with a copy of what it points at.
+      - name: Checkout fixups (LF, symlinks materialised)
+        run: |
+          $ErrorActionPreference = 'Stop'
+          git config core.autocrlf false
+          git rm -r -q --cached .
+          git reset -q --hard HEAD
+          $links = @(git ls-files -s | Where-Object { $_ -match '^120000 ' } | ForEach-Object { ($_ -split "`t", 2)[1] })
+          if ($links.Count -eq 0) { throw 'no tracked symlinks found; this step has nothing to do and its premise moved' }
+          foreach ($rel in $links) {
+            $stub = Join-Path $PWD $rel
+            $target = [IO.Path]::GetFullPath((Join-Path (Split-Path $stub) (Get-Content -Raw -LiteralPath $stub).Trim()))
+            if (-not (Test-Path -LiteralPath $target)) { throw "symlink $rel points at $target, which does not exist" }
+            Remove-Item -LiteralPath $stub -Force
+            Copy-Item -LiteralPath $target -Destination $stub -Recurse
+            Write-Host "materialised $rel <- $target"
+          }
+
       # The set RDR-224 nexus-f9bgu.44 proved green on native Windows, in one pytest
       # process (default addopts: integration, slow and lint tests are deselected).
       # The conformance suite is tests/daemon/test_rdr149_lifecycle_conformance.py,
-      # inside tests/daemon/. Measured on qwentescence 2026-10-05, py3.13, this exact
-      # command: 1076 passed, 38 skipped, 2 xfailed, 0 failed in 78 s.
+      # inside tests/daemon/. Measured on qwentescence 2026-10-06, py3.13, this exact
+      # command in a fresh clone after the fixups above, from a non-elevated
+      # account without the symlink privilege: 1223 passed, 45 skipped,
+      # 2 xfailed, 0 failed.
       - name: Windows test set
         run: |
-          uv run --python 3.13 --frozen pytest tests/daemon/ tests/test_process_group_safety.py tests/test_session_sweep_orphan_trackers.py tests/test_win_console.py tests/test_winsec.py tests/hooks/test_endpoint_resolve_lease_retry.py -p no:cacheprovider -q -rs --junitxml=windows-tests-junit.xml
+          uv run --python 3.13 --frozen pytest tests/daemon/ tests/test_process_group_safety.py tests/test_session_sweep_orphan_trackers.py tests/test_win_console.py tests/test_winsec.py tests/test_winproc_core.py tests/hooks/test_endpoint_resolve_lease_retry.py -p no:cacheprovider -q -rs --junitxml=windows-tests-junit.xml
 
       # A run that skipped itself on Windows would pass having proved nothing. The
       # floor is sized from the measured run above: junit counts an xfail as a skip,
-      # so the ceiling is 38 skips + 2 xfail = 40, plus 5 of headroom; the passed
-      # floor is about 90% of the 1076 measured, so a suite that quietly lost a tenth
+      # so the ceiling is 45 skips + 2 xfail = 47, plus 5 of headroom; the passed
+      # floor is about 90% of the 1223 measured, so a suite that quietly lost a tenth
       # of its tests fails while ordinary additions do not (nexus-f9bgu.33). The count
       # names nothing, so a skipped real-kernel test would sit inside the skip ceiling:
       # --require-passed names the tests only a real Windows run exercises (the three
@@ -304,4 +331,4 @@ jobs:
       - name: Non-vacuity floor
         if: ${{ !cancelled() }}
         run: |
-          uv run --python 3.13 --frozen python scripts/check_junit_floor.py windows-tests-junit.xml --min-passed 970 --max-skipped 45 --require-passed tests.test_winsec.TestRealWindows --require-passed tests.test_winproc_core.TestRealWindowsKernel --require-passed tests.daemon.test_pid_alive_windows.TestRealWindowsKernel --require-passed test_hard_killing_the_supervisor_takes_its_job_engine_with_it
+          uv run --python 3.13 --frozen python scripts/check_junit_floor.py windows-tests-junit.xml --min-passed 1100 --max-skipped 52 --require-passed tests.test_winsec.TestRealWindows --require-passed tests.test_winproc_core.TestRealWindowsKernel --require-passed tests.daemon.test_pid_alive_windows.TestRealWindowsKernel --require-passed test_hard_killing_the_supervisor_takes_its_job_engine_with_it
