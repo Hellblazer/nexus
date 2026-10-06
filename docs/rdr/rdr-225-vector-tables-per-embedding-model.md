@@ -28,6 +28,24 @@ index, whichever model embedded it. Sam: "the mixing of embeddings is extremely
 bad and that needs fixed." Sam also asked why chunks are not partitioned by
 tenant, and stated that the cloud serves a handful of tenants.
 
+**Decision, 2026-10-06 (Sam): the up-front evaluation experiment is dropped.**
+Protocol steps 3 and 4 (§ Evaluation Protocol) are not run. The design is built
+as chosen: partitions by embedding model, then by tenant. The reasons:
+- Once the router ships (engine-service-v0.1.149), every collection is under its
+  60,000-row threshold, so about 82% of logged production searches (452 of 552
+  in the census) use exact search in both layouts and never touch an HNSW index.
+- The protocol could not decide on production's real shape. Building its harness
+  exposed cells that were UNKNOWN by construction, and each fix opened another.
+- The split is adopted on principle (one graph per embedding space), and tenant
+  isolation is a must; neither waited on the experiment.
+
+Quality is checked instead on the production-fork rehearsal (Phase 3, Step 1):
+real logged queries run before and after the migration, and their results and
+latency are compared. If they do not hold, the deploy does not go ahead, and
+rollback is a tag flip or a PITR restore. The shelved harness work is archived
+outside the repo (`~/nexus-evidence/rdr225-shelved-2026-10-06/`). The protocol
+text below is kept as history.
+
 ## Problem Statement
 
 An HNSW index (Hierarchical Navigable Small World) is a graph. Each vector is a
@@ -222,6 +240,8 @@ standard-8 and memory-16. Raw JSON is in `~/nexus-evidence/rdr225-2026-10-05/` (
   *Source: knowledge__dt-papers.*
 
 ### Evaluation Protocol (pre-registered, revision 6, frozen, 2026-10-05)
+
+*Steps 3 and 4 were dropped on 2026-10-06; see the Decision note at the top. Kept as history.*
 
 Sam: "let us prove out our design first this time rather than just reflexively
 jumping." Five critique rounds preceded this revision (T2
@@ -566,6 +586,8 @@ The steps:
 - **Local disk preflight.** Before the walk, the engine checks that free disk is at least 2.2x the chunks table plus its indexes: 1x for the copy, 0.2x headroom, and 1x for the WAL the copy generates (estimated as 1x the table). This is inferred, not measured, and the retired table already occupies its own space. If it is not, the engine refuses to start, naming the shortfall. Step 4 of the protocol measures the real peak.
 - A local install has the `default` tenant (and any it creates), so it holds eight leaves per tenant (one per model partition of `chunks` and of `taxonomy_centroids`, four models each), mostly empty. It gains nothing in isolation and still migrates, so that every install runs one schema.
 
+*Moot since 2026-10-06: step 3 was dropped and the per-model split is built (Decision note at the top). Kept as history.*
+
 **If step 3 is not PASS** (the per-model split is deferred), these differ from the design above:
 - `nexus.chunks` and `taxonomy_centroids` are LIST-partitioned by `tenant_id` only.
 - The PK keeps its three columns, which already include the partition key `tenant_id`. The referencing tables, their FKs, the conflict targets and the manifest triggers therefore keep their current form. No `embedding_model` column, composite model FK, dimension CHECK or `create_model_partition` is added.
@@ -675,21 +697,21 @@ already give.
 
 ### Prerequisites
 
-- [ ] The cardinality router (`feature/nexus-tu8wp.6-cardinality-router`) is merged to develop.
+- [x] The cardinality router (`feature/nexus-tu8wp.6-cardinality-router`) is merged to develop (7f111743c, efd0d709d).
 - [ ] Protocol step 2 PASS, apart from what is still open: F7, H5 and TS1-TS3 as recorded in Step-2 results, and H4 on four paths.
-- [ ] H4 bulk insert repeated on the step-3 fork, within the 1.25 rule. The protocol calls step-3 repeats descriptive; this one is gating, and over 1.25 again is DESIGN-H4.
+- ~~H4 bulk insert repeated on the step-3 fork.~~ Dropped with step 3 (2026-10-06); bulk-insert cost is measured on the Phase 3 rehearsal instead.
 - [ ] Taxonomy tenant-level pruning, TS1 to TS3 as written, and the orphaned-at FK and GC write families pass on the implementation substrate (Test Plan).
-- [ ] Protocol step 3 outcome recorded. PASS keeps the model level; any other outcome uses the tenant-only layout.
-- [ ] Protocol step 4 (H6, under write freeze) PASS.
+- ~~Protocol step 3 outcome recorded.~~ Dropped (2026-10-06): the model level is kept; the tenant-only layout is not used.
+- ~~Protocol step 4 (H6, under write freeze) PASS.~~ Dropped (2026-10-06): the Phase 3 rehearsal of the real changeset covers it.
 - [x] conexus confirmed the cloud deploy topology and the freeze mechanism on 2026-10-06 (T2 `nexus_rdr/225-cloud-topology`): stop-start, so the freeze is inherent and no engine-side mechanism is needed while that holds.
 - [x] Sam confirms the downtime budget (2026-10-06): Sam is the only tenant, so no tenant notice applies; about 15 minutes rehearsed is the default, and a longer walk needs only Sam's go.
 
 ### Minimum Viable Validation
 
-The real changeset migrates a fork of production. On it:
-- The engine serves the protocol's frozen query set through its own search functions.
+The real changeset migrates a fork of production. On it (revised 2026-10-06):
+- The engine serves a fixed set of real logged queries through its own search functions, before and after the migration.
+- Results and latency hold against the before run; a material loss stops the deploy.
 - Each plan touches one (model, tenant) leaf.
-- Recall against exact search is non-inferior to tenant-only partitioning, by the protocol's rule.
 - Row reconciliation per (model, tenant) is exact.
 
 ### Phase 1: Schema
@@ -701,6 +723,10 @@ Run H5's script to generate and pin every object naming `nexus.chunks`,
 `chunk_orphaned_at`: FKs, triggers, views, policies, grants, write sites and
 conflict targets. The last three are in scope because their writers must now
 supply `embedding_model`. Each item gets its new form, as in the Technical Design table.
+
+*2026-10-06: a generated inventory with a lint guard landed and was reverted
+(e01d1ea09); the guard taxed every change near these tables. Its findings are
+recorded on the Phase 1 and Phase 2 beads (nexus-3wh8d.8, .12, .13).*
 
 #### Step 2: Changesets for the new objects
 
@@ -890,3 +916,4 @@ steps on a fork of its own and does not run the real changeset. Both are in scop
   - corrections to the counts, wording and the history line.
 - 2026-10-05: Gate round 2 — PASSED (0 Critical, 3 Significant, 0 ship-blocker(s)); commit `7fafc96c2`; critique `nexus_rdr/225-gate-critique-2026-10-05-r2`.
 - 2026-10-06: Factual corrections from bead nexus-3wh8d.24, the P1.1 inventory critique and plan-audit round 2, with no change to any decision or to the Evaluation Protocol. Line citations refreshed against develop `8bfa4d01e` (Main.java, PgVectorRepository, CatalogRepository, health.py, TaxonomyCentroidRepository). Technical Design: row 1 names the one live `SET CONSTRAINTS` site; row 5 lists the live write-site bodies and drops the superseded ones; added the `ChashRepository.renameCollection` route, the `upsertManifestChunkVectors` writer, and the Java registries and VACUUM allowlists as items decided in P1.3; Day 2 gains the purge VACUUM scope question. Cloud topology recorded from conexus-eb (T2 `nexus_rdr/225-cloud-topology`): stop-start, freeze inherent, PITR owner, downtime budget confirmed by Sam (only tenant). Technical Environment: no replica, storage figures unreconciled. F7 and research-14/-15 relabelled Verified in part; the hidden-rows sentence, the doctor client change, the jOOQ exclude timing, Phase 2 Step 1's trigger scope, the disk preflight multiple, Scope Verification and the Contradiction Check count corrected. TS1 to TS3 and the H4 bulk repeat are implementation gates, as the Prerequisites already state; the frozen step-2 text is unchanged.
+- 2026-10-06: Decision (Sam): protocol steps 3 and 4 dropped; the design is built as chosen and checked on the production-fork rehearsal with real logged queries before and after. Prerequisites, Minimum Viable Validation and Phase 1 Step 1 updated to match. Protocol text kept as history.
