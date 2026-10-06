@@ -1,0 +1,529 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    RDR-225 P1.2 (nexus-3wh8d.7): the objects the model-then-tenant partition layout needs before the
+    migration can use them. THIS FILE IS THE FIRST PART OF ONE CHANGESET. Bead nexus-3wh8d.8 (P1.3)
+    extends vectors-030-1 with the migration steps 2 to 7.8 (the whole walk is one transaction), and
+    only then is the branch pushed, so no engine tag can carry a partial walk. Until then this
+    changeset holds only the step-2 objects below and nothing touches a live table.
+
+    WHAT IT HOLDS
+
+    1. UNIQUE (tenant_id, name, embedding_model) on nexus.catalog_collections. The composite foreign
+       key from chunks (tenant_id, collection, embedding_model) needs it as its referenced key, and
+       the walk adds that foreign key after the swap. It is migration step 2, before the foreign key.
+       The primary key (tenant_id, name) already makes every such triple unique, so adding it cannot
+       fail on existing data.
+
+    2. nexus.partition_name(parent_name, model, tenant): the ONE function that names a partition.
+       Model partition = <base>_m<8 hex of sha256(model)>, tenant leaf = <model partition>_t_<16 hex
+       of sha256(tenant)>, where <base> is the parent's relname with a trailing "_new" stripped.
+       Stripping is the point: leaves made under chunks_new during the walk then carry exactly the
+       names the trigger gives leaves under chunks after the swap (renaming a parent does not rename
+       its partitions). The longest name, taxonomy_centroids_m........_t_................, is 47 bytes
+       against the 63-byte limit; the function refuses a longer name rather than let PostgreSQL
+       truncate it silently (a truncated name could collide).
+
+    3. nexus.create_model_partition(parent, model, force): creates the model partition FOR VALUES IN
+       (model), PARTITION BY LIST (tenant_id), with a CHECK that the model's vector column is the only
+       non-null one (the dimension comes from nexus.embedding_models, the other columns from the
+       parent's own embedding_<dim> columns, so it serves chunks and taxonomy_centroids alike), then a
+       leaf for every tenant that has a token row plus "default". Idempotent by partition bound.
+
+    4. nexus.create_tenant_partitions(parent, tenant, force): for every model partition of the parent,
+       creates the tenant's leaf unless a partition with that bound already exists. Existence is
+       decided by pg_inherits plus the partition bound expression, never by name. A relation that
+       already holds the computed name but is not that tenant's leaf is a collision and is refused.
+       SECURITY DEFINER with a fixed search_path; EXECUTE is revoked from PUBLIC and granted to
+       nexus_svc. A second call for a tenant that already has every leaf is one catalog query and takes
+       no lock. See below for the lock and timeout behaviour.
+
+    5. nexus.service_tokens_create_tenant_partitions(): the AFTER INSERT trigger function for
+       nexus.service_tokens. It is DEFINED here and NOT ATTACHED: attaching it to the live table now
+       would call a function that refuses an unpartitioned parent. Bead nexus-3wh8d.8 attaches it at
+       migration step 7.7, once chunks and taxonomy_centroids are partitioned.
+
+    6. Internal helpers: partition_parent_check, partition_bound_value, partition_copy_access,
+       partition_ensure_leaf, and partition_sync_access (re-mirror the parent's RLS flags, policies
+       and grants onto every model partition and leaf; step 7.7 uses it after it recreates the
+       parent's policies and grants on the swapped table). None of them is granted to anyone.
+
+    DESIGN CHOICES THAT ARE NOT OBVIOUS
+
+    - The parent is checked, not trusted. create_tenant_partitions is SECURITY DEFINER and reachable by
+      nexus_svc, and it takes a regclass, so it would otherwise create tables as the schema owner next
+      to any partitioned table the owner has. partition_parent_check admits only nexus.chunks,
+      nexus.taxonomy_centroids and their _new forms, each partitioned BY LIST (embedding_model).
+    - RLS policies and grants on a model partition or leaf are COPIED from the parent's own catalog
+      rows (pg_policy and relacl), not written out, so the same function serves chunks,
+      taxonomy_centroids and the _new parents, and a policy added to the parent later reaches new
+      leaves with no code change. A policy that names CURRENT_USER (vectors-029's owner read policy)
+      is stored as the owner's role and copies as that role. ENABLE ROW LEVEL SECURITY is always
+      applied; FORCE ROW LEVEL SECURITY only when force is true. The walk's role has no BYPASSRLS, so
+      migration steps 2 to 6 pass force = false and step 7.7 restores FORCE through
+      partition_sync_access; the trigger uses the default, true.
+    - The leaf lookup compares the bound's value, parsed out of pg_get_expr, with the tenant. The
+      parse is pinned to standard_conforming_strings = on so a tenant containing a quote or a
+      backslash compares correctly.
+    - lock_timeout = 2s is a function-level SET, not SET LOCAL. A function-level SET reverts when the
+      function returns; SET LOCAL would leave 2 s on the rest of the transaction that inserted the
+      token. It bounds EACH lock acquisition. It does not bound the whole creation: creating a leaf
+      takes ACCESS EXCLUSIVE on the model partition and ShareRowExclusive on the tables that
+      reference the parent (measured by TenantPartitionFunctionsIntegrationTest and recorded in the
+      RDR), so worst case is the number of acquisitions times 2 s. A statement_timeout set inside the
+      function does not shorten the running statement either, because PostgreSQL arms that timer at
+      statement start, so none is set. A statement_timeout set by the CALLER before the inserting
+      statement does bound the whole creation (3 s ended a creation that would have taken 7 s, SQLSTATE
+      57014). The same test class pins all of these facts.
+    - Concurrent first tokens for one tenant are serialised by a transaction-scoped advisory lock on
+      the tenant.
+    - The force argument is reachable by nexus_svc, because create_tenant_partitions is. It matters only
+      to the table owner: FORCE ROW LEVEL SECURITY subjects the owner to the policies, and nexus_svc is
+      subject to them with or without it. The one posture where that is not true is the documented
+      single-role dev setup, where the migrating role is nexus_svc (vectors-029's header); the engine
+      calls the trigger path with the default, true.
+
+    No DATA EFFECT: one constraint and function definitions; no row changes.
+
+    ROLLBACK. The whole changeset will be irreversible once bead nexus-3wh8d.8 completes it, so it
+    declares itself irreversible now (an empty rollback, the repo's idiom) rather than half-undoing the
+    walk later. A refusing rollback was tried and breaks SchemaRollbackRoundTripIntegrationTest; see the
+    note at the rollback element.
+
+    Placed after vectors-029 and before the runAlways grants blocks, which must stay last so every
+    object exists before grants are issued.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="vectors-030-1" author="nexus-3wh8d.7">
+        <comment>RDR-225 step 2 objects: UNIQUE (tenant_id, name, embedding_model) on catalog_collections; the shared partition naming function; create_model_partition and create_tenant_partitions (SECURITY DEFINER, EXECUTE to nexus_svc only) with their helpers; the service_tokens trigger function, defined and not attached (migration step 7.7 attaches it). First part of the single P1.3 migration changeset, which completes it before anything is pushed. No data effect. RDR-225 / nexus-3wh8d.7.</comment>
+        <sql splitStatements="false" stripComments="false">
+-- Guarded: the changeset is declared irreversible (see the rollback element), so a rollback that stops short of
+-- catalog_collections leaves this constraint behind, and the forward re-apply must not fail on it.
+DO $guard$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_constraint k
+                    WHERE k.conrelid = 'nexus.catalog_collections'::pg_catalog.regclass
+                      AND k.conname = 'catalog_collections_tenant_name_model_uq') THEN
+        ALTER TABLE nexus.catalog_collections
+            ADD CONSTRAINT catalog_collections_tenant_name_model_uq UNIQUE (tenant_id, name, embedding_model);
+    END IF;
+END
+$guard$;
+
+-- The one naming function. Pure: text in, text out.
+CREATE OR REPLACE FUNCTION nexus.partition_name(
+    p_parent_name text,
+    p_model       text,
+    p_tenant      text DEFAULT NULL
+) RETURNS text
+LANGUAGE plpgsql
+IMMUTABLE
+SET search_path = pg_catalog, pg_temp
+AS $fn$
+DECLARE
+    v_name text;
+BEGIN
+    IF p_parent_name IS NULL OR p_model IS NULL THEN
+        RAISE EXCEPTION 'nexus.partition_name: a parent name and a model are required (parent %, model %)',
+            p_parent_name, p_model
+            USING ERRCODE = 'null_value_not_allowed';
+    END IF;
+    v_name := pg_catalog.regexp_replace(p_parent_name, '_new$', '')
+        || '_m'
+        || pg_catalog.left(pg_catalog.encode(pg_catalog.sha256(pg_catalog.convert_to(p_model, 'UTF8')), 'hex'), 8);
+    IF p_tenant IS NOT NULL THEN
+        v_name := v_name
+            || '_t_'
+            || pg_catalog.left(pg_catalog.encode(pg_catalog.sha256(pg_catalog.convert_to(p_tenant, 'UTF8')), 'hex'), 16);
+    END IF;
+    IF 63 &lt; pg_catalog.octet_length(v_name) THEN
+        RAISE EXCEPTION 'nexus.partition_name: % is % bytes, over the 63-byte identifier limit', v_name, pg_catalog.octet_length(v_name)
+            USING ERRCODE = 'name_too_long';
+    END IF;
+    RETURN v_name;
+END
+$fn$;
+
+-- The value of a single-value LIST partition bound (FOR VALUES IN ('x')), unquoted; NULL for any other bound.
+CREATE OR REPLACE FUNCTION nexus.partition_bound_value(p_rel regclass) RETURNS text
+LANGUAGE sql
+STABLE
+SET search_path = pg_catalog, pg_temp
+SET standard_conforming_strings = on
+AS $fn$
+    SELECT pg_catalog.replace(m[1], '''''', '''')
+      FROM pg_catalog.pg_class c,
+           LATERAL pg_catalog.regexp_match(pg_catalog.pg_get_expr(c.relpartbound, c.oid), '^FOR VALUES IN \(''(.*)''\)$') AS m
+     WHERE c.oid = p_rel
+$fn$;
+
+-- Refuses any parent but the four the layout is built for, and any of those that is not partitioned
+-- BY LIST (embedding_model).
+CREATE OR REPLACE FUNCTION nexus.partition_parent_check(p_parent regclass) RETURNS void
+LANGUAGE plpgsql
+STABLE
+SET search_path = pg_catalog, pg_temp
+AS $fn$
+DECLARE
+    v record;
+BEGIN
+    SELECT n.nspname, c.relname, c.relkind, pt.partstrat, pt.partnatts,
+           (SELECT a.attname FROM pg_catalog.pg_attribute a
+             WHERE a.attrelid = c.oid AND a.attnum = pt.partattrs[0]) AS keycol
+      INTO v
+      FROM pg_catalog.pg_class c
+      JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+      LEFT JOIN pg_catalog.pg_partitioned_table pt ON pt.partrelid = c.oid
+     WHERE c.oid = p_parent;
+    IF v.nspname IS DISTINCT FROM 'nexus' OR v.relname !~ '^(chunks|taxonomy_centroids)(_new)?$' THEN
+        RAISE EXCEPTION 'nexus partition functions: % is not a parent they serve (nexus.chunks, nexus.taxonomy_centroids and their _new forms)',
+            p_parent
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+    IF v.relkind IS DISTINCT FROM 'p' OR v.partstrat IS DISTINCT FROM 'l'
+       OR v.partnatts IS DISTINCT FROM 1 OR v.keycol IS DISTINCT FROM 'embedding_model' THEN
+        RAISE EXCEPTION 'nexus partition functions: % is not partitioned BY LIST (embedding_model)', p_parent
+            USING ERRCODE = 'wrong_object_type';
+    END IF;
+END
+$fn$;
+
+-- Mirror the parent's row-level-security flags, policies and grants onto one child (a model partition or
+-- a leaf). Safe to run on a child that already has some: policies and grants the parent does not have are
+-- removed, the rest are recreated.
+CREATE OR REPLACE FUNCTION nexus.partition_copy_access(p_parent regclass, p_child regclass, p_force boolean)
+RETURNS void
+LANGUAGE plpgsql
+SET search_path = pg_catalog, pg_temp
+AS $fn$
+DECLARE
+    v_ns    text;
+    v_child text;
+    r       record;
+BEGIN
+    SELECT n.nspname, c.relname INTO v_ns, v_child
+      FROM pg_catalog.pg_class c
+      JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+     WHERE c.oid = p_child;
+
+    EXECUTE pg_catalog.format('ALTER TABLE %I.%I ENABLE ROW LEVEL SECURITY', v_ns, v_child);
+    IF p_force THEN
+        EXECUTE pg_catalog.format('ALTER TABLE %I.%I FORCE ROW LEVEL SECURITY', v_ns, v_child);
+    ELSE
+        EXECUTE pg_catalog.format('ALTER TABLE %I.%I NO FORCE ROW LEVEL SECURITY', v_ns, v_child);
+    END IF;
+
+    -- Policies: drop what the parent does not have, then (re)create each of the parent's.
+    FOR r IN
+        SELECT p.polname
+          FROM pg_catalog.pg_policy p
+         WHERE p.polrelid = p_child
+           AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_policy q WHERE q.polrelid = p_parent AND q.polname = p.polname)
+    LOOP
+        EXECUTE pg_catalog.format('DROP POLICY %I ON %I.%I', r.polname, v_ns, v_child);
+    END LOOP;
+    FOR r IN
+        SELECT p.polname, p.polcmd, p.polpermissive,
+               (SELECT pg_catalog.string_agg(pg_catalog.quote_ident(ro.rolname), ', ' ORDER BY ro.rolname)
+                  FROM pg_catalog.pg_roles ro WHERE ro.oid = ANY (p.polroles)) AS roles,
+               pg_catalog.pg_get_expr(p.polqual, p.polrelid) AS qual,
+               pg_catalog.pg_get_expr(p.polwithcheck, p.polrelid) AS chk
+          FROM pg_catalog.pg_policy p
+         WHERE p.polrelid = p_parent
+         ORDER BY p.polname
+    LOOP
+        EXECUTE pg_catalog.format('DROP POLICY IF EXISTS %I ON %I.%I', r.polname, v_ns, v_child);
+        EXECUTE pg_catalog.format('CREATE POLICY %I ON %I.%I AS %s FOR %s TO %s%s%s',
+            r.polname, v_ns, v_child,
+            CASE WHEN r.polpermissive THEN 'PERMISSIVE' ELSE 'RESTRICTIVE' END,
+            CASE r.polcmd WHEN 'r' THEN 'SELECT' WHEN 'a' THEN 'INSERT' WHEN 'w' THEN 'UPDATE'
+                          WHEN 'd' THEN 'DELETE' ELSE 'ALL' END,
+            COALESCE(r.roles, 'PUBLIC'),
+            CASE WHEN r.qual IS NULL THEN '' ELSE ' USING (' || r.qual || ')' END,
+            CASE WHEN r.chk IS NULL THEN '' ELSE ' WITH CHECK (' || r.chk || ')' END);
+    END LOOP;
+
+    -- Grants: revoke what the child has beyond its owner, then grant what the parent has beyond its owner.
+    FOR r IN
+        SELECT DISTINCT a.grantee
+          FROM pg_catalog.pg_class c
+         CROSS JOIN LATERAL pg_catalog.aclexplode(c.relacl) a
+         WHERE c.oid = p_child AND a.grantee &lt;&gt; c.relowner
+    LOOP
+        EXECUTE pg_catalog.format('REVOKE ALL ON %I.%I FROM %s', v_ns, v_child,
+            CASE WHEN r.grantee = 0 THEN 'PUBLIC' ELSE pg_catalog.quote_ident(pg_catalog.pg_get_userbyid(r.grantee)) END);
+    END LOOP;
+    FOR r IN
+        SELECT a.grantee, a.privilege_type, a.is_grantable
+          FROM pg_catalog.pg_class c
+         CROSS JOIN LATERAL pg_catalog.aclexplode(c.relacl) a
+         WHERE c.oid = p_parent AND a.grantee &lt;&gt; c.relowner
+         ORDER BY a.grantee, a.privilege_type
+    LOOP
+        EXECUTE pg_catalog.format('GRANT %s ON %I.%I TO %s%s', r.privilege_type, v_ns, v_child,
+            CASE WHEN r.grantee = 0 THEN 'PUBLIC' ELSE pg_catalog.quote_ident(pg_catalog.pg_get_userbyid(r.grantee)) END,
+            CASE WHEN r.is_grantable THEN ' WITH GRANT OPTION' ELSE '' END);
+    END LOOP;
+END
+$fn$;
+
+-- Create one tenant's leaf under one model partition unless one with that bound exists. True when it created.
+CREATE OR REPLACE FUNCTION nexus.partition_ensure_leaf(p_parent regclass, p_model_part regclass, p_tenant text, p_force boolean)
+RETURNS boolean
+LANGUAGE plpgsql
+SET search_path = pg_catalog, pg_temp
+AS $fn$
+DECLARE
+    v_ns          text;
+    v_parent_name text;
+    v_mp_name     text;
+    v_model       text;
+    v_leaf        text;
+    v_taken       record;
+BEGIN
+    SELECT n.nspname, c.relname INTO v_ns, v_mp_name
+      FROM pg_catalog.pg_class c
+      JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+     WHERE c.oid = p_model_part;
+    SELECT c.relname INTO v_parent_name FROM pg_catalog.pg_class c WHERE c.oid = p_parent;
+    v_model := nexus.partition_bound_value(p_model_part);
+    IF v_model IS NULL THEN
+        RAISE EXCEPTION 'nexus.partition_ensure_leaf: % has no single-value LIST bound', p_model_part
+            USING ERRCODE = 'wrong_object_type';
+    END IF;
+
+    -- The existence check: by bound, never by name.
+    PERFORM 1
+       FROM pg_catalog.pg_inherits i
+      WHERE i.inhparent = p_model_part
+        AND nexus.partition_bound_value(i.inhrelid) = p_tenant;
+    IF FOUND THEN
+        RETURN false;
+    END IF;
+
+    v_leaf := nexus.partition_name(v_parent_name, v_model, p_tenant);
+    SELECT c.relkind, c.relispartition, pg_catalog.pg_get_expr(c.relpartbound, c.oid) AS bound
+      INTO v_taken
+      FROM pg_catalog.pg_class c
+      JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+     WHERE n.nspname = v_ns AND c.relname = v_leaf;
+    IF FOUND THEN
+        RAISE EXCEPTION 'nexus partition name collision: %.% already exists and is not the leaf of % under %',
+            v_ns, v_leaf, p_tenant, v_mp_name
+            USING ERRCODE = 'duplicate_table',
+                  DETAIL = pg_catalog.format('relkind %s, partition %s, bound %s',
+                                             v_taken.relkind, v_taken.relispartition, COALESCE(v_taken.bound, 'none')),
+                  HINT = 'Two tenants hash to one leaf name, or an unrelated relation holds it. The creation is refused.';
+    END IF;
+
+    EXECUTE pg_catalog.format('CREATE TABLE %I.%I PARTITION OF %I.%I FOR VALUES IN (%L)',
+                              v_ns, v_leaf, v_ns, v_mp_name, p_tenant);
+    PERFORM nexus.partition_copy_access(p_parent,
+        (pg_catalog.quote_ident(v_ns) || '.' || pg_catalog.quote_ident(v_leaf))::pg_catalog.regclass,
+        p_force);
+    RETURN true;
+END
+$fn$;
+
+-- The tenant's leaf under every model partition of the parent. SECURITY DEFINER: nexus_svc calls it (through
+-- the service_tokens trigger) and the leaves belong to the schema owner, like every other relation.
+CREATE OR REPLACE FUNCTION nexus.create_tenant_partitions(
+    p_parent regclass,
+    p_tenant text,
+    p_force  boolean DEFAULT true
+) RETURNS integer
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+SET lock_timeout = '2s'
+AS $fn$
+DECLARE
+    v_created integer := 0;
+    r         record;
+BEGIN
+    IF p_tenant IS NULL THEN
+        RAISE EXCEPTION 'nexus.create_tenant_partitions: a tenant is required'
+            USING ERRCODE = 'null_value_not_allowed';
+    END IF;
+    PERFORM nexus.partition_parent_check(p_parent);
+    -- The common case, a second token for a tenant that already has every leaf: ONE catalog query, no lock taken.
+    -- A concurrent first creation is invisible here until it commits, so the caller falls through to the advisory
+    -- lock below and waits for it (bounded by lock_timeout) instead of racing it.
+    IF NOT EXISTS (
+        SELECT 1
+          FROM pg_catalog.pg_inherits i
+         WHERE i.inhparent = p_parent
+           AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_inherits j
+                            WHERE j.inhparent = i.inhrelid
+                              AND nexus.partition_bound_value(j.inhrelid) = p_tenant)
+    ) THEN
+        RETURN 0;
+    END IF;
+    PERFORM pg_catalog.pg_advisory_xact_lock(
+        pg_catalog.hashtextextended('nexus.create_tenant_partitions:' || p_tenant, 0));
+    FOR r IN
+        SELECT i.inhrelid::pg_catalog.regclass AS mp
+          FROM pg_catalog.pg_inherits i
+          JOIN pg_catalog.pg_class c ON c.oid = i.inhrelid
+         WHERE i.inhparent = p_parent
+         ORDER BY c.relname
+    LOOP
+        IF nexus.partition_ensure_leaf(p_parent, r.mp, p_tenant, p_force) THEN
+            v_created := v_created + 1;
+        END IF;
+    END LOOP;
+    RETURN v_created;
+END
+$fn$;
+
+-- The model partition, its dimension CHECK, and a leaf for every existing tenant. Runs as its caller
+-- (a changeset, so the schema owner); not reachable by nexus_svc.
+CREATE OR REPLACE FUNCTION nexus.create_model_partition(
+    p_parent regclass,
+    p_model  text,
+    p_force  boolean DEFAULT true
+) RETURNS regclass
+LANGUAGE plpgsql
+SET search_path = pg_catalog, pg_temp
+AS $fn$
+DECLARE
+    v_ns          text;
+    v_parent_name text;
+    v_dim         integer;
+    v_dims        integer[];
+    v_mp          text;
+    v_mp_oid      regclass;
+    v_taken       boolean;
+    v_tenant      text;
+BEGIN
+    PERFORM nexus.partition_parent_check(p_parent);
+    SELECT n.nspname, c.relname INTO v_ns, v_parent_name
+      FROM pg_catalog.pg_class c
+      JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+     WHERE c.oid = p_parent;
+    SELECT m.dimension INTO v_dim FROM nexus.embedding_models m WHERE m.embedding_model = p_model;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'nexus.create_model_partition: % is not in nexus.embedding_models', p_model
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+    SELECT pg_catalog.array_agg(substring(a.attname FROM '^embedding_([0-9]+)$')::integer ORDER BY substring(a.attname FROM '^embedding_([0-9]+)$')::integer)
+      INTO v_dims
+      FROM pg_catalog.pg_attribute a
+     WHERE a.attrelid = p_parent AND a.attnum &gt; 0 AND NOT a.attisdropped AND a.attname ~ '^embedding_[0-9]+$';
+    IF v_dims IS NULL OR NOT (v_dim = ANY (v_dims)) THEN
+        RAISE EXCEPTION 'nexus.create_model_partition: % has dimension %, and % has no embedding_% column',
+            p_model, v_dim, p_parent, v_dim
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+
+    SELECT i.inhrelid::pg_catalog.regclass INTO v_mp_oid
+      FROM pg_catalog.pg_inherits i
+     WHERE i.inhparent = p_parent AND nexus.partition_bound_value(i.inhrelid) = p_model;
+    IF v_mp_oid IS NULL THEN
+        v_mp := nexus.partition_name(v_parent_name, p_model);
+        SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+                        WHERE n.nspname = v_ns AND c.relname = v_mp) INTO v_taken;
+        IF v_taken THEN
+            RAISE EXCEPTION 'nexus partition name collision: %.% already exists and is not the model partition of % under %',
+                v_ns, v_mp, p_model, v_parent_name
+                USING ERRCODE = 'duplicate_table';
+        END IF;
+        EXECUTE pg_catalog.format('CREATE TABLE %I.%I PARTITION OF %I.%I FOR VALUES IN (%L) PARTITION BY LIST (tenant_id)',
+                                  v_ns, v_mp, v_ns, v_parent_name, p_model);
+        EXECUTE pg_catalog.format('ALTER TABLE %I.%I ADD CONSTRAINT %I CHECK (%s)',
+            v_ns, v_mp, v_mp || '_dimension_chk',
+            (SELECT pg_catalog.string_agg(pg_catalog.format('%I IS %sNULL', 'embedding_' || d, CASE WHEN d = v_dim THEN 'NOT ' ELSE '' END),
+                                          ' AND ' ORDER BY d)
+               FROM pg_catalog.unnest(v_dims) AS d));
+        v_mp_oid := (pg_catalog.quote_ident(v_ns) || '.' || pg_catalog.quote_ident(v_mp))::pg_catalog.regclass;
+        PERFORM nexus.partition_copy_access(p_parent, v_mp_oid, p_force);
+    END IF;
+
+    FOR v_tenant IN
+        SELECT t.tenant_id FROM nexus.service_tokens t
+        UNION
+        SELECT 'default'
+        ORDER BY 1
+    LOOP
+        PERFORM nexus.partition_ensure_leaf(p_parent, v_mp_oid, v_tenant, p_force);
+    END LOOP;
+    RETURN v_mp_oid;
+END
+$fn$;
+
+-- Re-mirror the parent's RLS flags, policies and grants onto every model partition and leaf.
+CREATE OR REPLACE FUNCTION nexus.partition_sync_access(p_parent regclass, p_force boolean DEFAULT true)
+RETURNS integer
+LANGUAGE plpgsql
+SET search_path = pg_catalog, pg_temp
+AS $fn$
+DECLARE
+    v_n integer := 0;
+    r   record;
+BEGIN
+    PERFORM nexus.partition_parent_check(p_parent);
+    FOR r IN
+        SELECT t.relid
+          FROM pg_catalog.pg_partition_tree(p_parent) t
+         WHERE t.level &gt; 0
+         ORDER BY t.level, t.relid::pg_catalog.regclass::text
+    LOOP
+        PERFORM nexus.partition_copy_access(p_parent, r.relid, p_force);
+        v_n := v_n + 1;
+    END LOOP;
+    RETURN v_n;
+END
+$fn$;
+
+-- The service_tokens AFTER INSERT trigger function. Trigger arguments, when given, name the parents to
+-- serve; with none it serves chunks and taxonomy_centroids. DEFINED, NOT ATTACHED: migration step 7.7
+-- (bead nexus-3wh8d.8) attaches it, once both parents are partitioned.
+CREATE OR REPLACE FUNCTION nexus.service_tokens_create_tenant_partitions() RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, pg_temp
+AS $fn$
+DECLARE
+    v_parent text;
+BEGIN
+    IF TG_NARGS = 0 THEN
+        PERFORM nexus.create_tenant_partitions('nexus.chunks'::pg_catalog.regclass, NEW.tenant_id);
+        PERFORM nexus.create_tenant_partitions('nexus.taxonomy_centroids'::pg_catalog.regclass, NEW.tenant_id);
+    ELSE
+        FOREACH v_parent IN ARRAY TG_ARGV LOOP
+            PERFORM nexus.create_tenant_partitions(v_parent::pg_catalog.regclass, NEW.tenant_id);
+        END LOOP;
+    END IF;
+    RETURN NEW;
+END
+$fn$;
+
+REVOKE EXECUTE ON FUNCTION nexus.partition_name(text, text, text) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION nexus.partition_bound_value(regclass) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION nexus.partition_parent_check(regclass) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION nexus.partition_copy_access(regclass, regclass, boolean) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION nexus.partition_ensure_leaf(regclass, regclass, text, boolean) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION nexus.create_model_partition(regclass, text, boolean) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION nexus.partition_sync_access(regclass, boolean) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION nexus.service_tokens_create_tenant_partitions() FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION nexus.create_tenant_partitions(regclass, text, boolean) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION nexus.create_tenant_partitions(regclass, text, boolean) TO nexus_svc;
+        </sql>
+        <!--
+            DECLARED IRREVERSIBLE (catalog-016-0 and catalog-034-0 precedent): the empty rollback says so rather
+            than leaving it implied. It is NOT a refusing rollback, deliberately. A rollback that raises was
+            tried first and measured: SchemaRollbackRoundTripIntegrationTest's full rollback-to-zero chain and
+            two depth rollbacks all fail at it (3 of its 5 tests), because the chain must be executable all the
+            way down for that suite's guarantee to mean anything, and the changesets already declared
+            irreversible are empty rollbacks for exactly that reason. The forward SQL is re-runnable for the
+            same suite's depth round trips (the UNIQUE is guarded; the functions are CREATE OR REPLACE). The honest recovery for the finished walk
+            is a PITR fork or flipping the engine tag back, not a Liquibase rollback; the RDR's Failure and
+            rollback section says so.
+        -->
+        <rollback/>
+    </changeSet>
+
+</databaseChangeLog>
