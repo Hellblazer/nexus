@@ -300,7 +300,9 @@ def wer_events(since: float) -> list[str]:
         "Where-Object { $_.Message -match 'nexus-service' } | Select-Object -First 5 | "
         "ForEach-Object { $_.Id.ToString()+' '+$_.ProviderName }"
     )
-    o = subprocess.run(["powershell", "-NoProfile", "-Command", ps], capture_output=True, text=True, stdin=subprocess.DEVNULL)
+    # pwsh 7's module path breaks Windows PowerShell's own modules (nexus-f9bgu.14).
+    env = {k: v for k, v in os.environ.items() if k.upper() != "PSMODULEPATH"}
+    o = subprocess.run(["powershell", "-NoProfile", "-Command", ps], capture_output=True, text=True, stdin=subprocess.DEVNULL, env=env)
     return [ln for ln in o.stdout.splitlines() if ln.strip()]
 
 

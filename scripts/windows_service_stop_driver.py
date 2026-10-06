@@ -231,7 +231,9 @@ def schtasks_create_argv(task: str, user: str, program: str, arguments: str) -> 
 
 
 def _run(argv: list[str], *, timeout: float = 120.0) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(argv, capture_output=True, text=True, timeout=timeout, check=False)  # noqa: S603
+    # pwsh 7's module path breaks Windows PowerShell's own modules (nexus-f9bgu.14).
+    env = {k: v for k, v in os.environ.items() if k.upper() != "PSMODULEPATH"}
+    return subprocess.run(argv, capture_output=True, text=True, timeout=timeout, check=False, env=env)  # noqa: S603
 
 
 def own_session_id() -> int:

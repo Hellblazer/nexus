@@ -1055,16 +1055,22 @@ def test_the_windows_reader_passes_the_path_in_the_environment_and_parses_the_an
 
     monkeypatch.setattr(bw, "sys", types.SimpleNamespace(platform="win32"))
     monkeypatch.setattr(bw.subprocess, "run", fake_run)
+    monkeypatch.setenv("PSMODULEPATH", r"C:\Program Files\PowerShell\7\Modules")
     sig = REAL_READ_AUTHENTICODE(Path(r"C:\it's here\vcruntime140.dll"))
     assert sig == bw.Signature("Valid", MS_SUBJECT)
     (call,) = calls
     assert call["env"]["NX_SIGCHECK_PATH"] == r"C:\it's here\vcruntime140.dll"
+    assert not [k for k in call["env"] if k.upper() == "PSMODULEPATH"], (
+        "pwsh 7's module path breaks Windows PowerShell's Get-AuthenticodeSignature (rehearsal run 37410530509)"
+    )
     script = call["argv"][-1]
     assert "Get-AuthenticodeSignature" in script and "it's here" not in script, "the path is never quoted into the script"
     for bad in (
         types.SimpleNamespace(returncode=1, stdout="", stderr="boom"),
         types.SimpleNamespace(returncode=0, stdout="not json", stderr=""),
         types.SimpleNamespace(returncode=0, stdout="{}", stderr=""),
+        # The cmdlet failed to load: exit 0, empty Status (rehearsal run 37410530509).
+        types.SimpleNamespace(returncode=0, stdout='{"Status":"","Subject":""}', stderr="module could not be loaded"),
     ):
         monkeypatch.setattr(bw.subprocess, "run", lambda *a, _b=bad, **k: _b)
         with pytest.raises(bw.BuildError):

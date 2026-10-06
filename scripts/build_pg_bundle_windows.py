@@ -435,18 +435,28 @@ def read_authenticode(path: Path) -> Signature:
             f"cannot read the Authenticode signature of {path.name} on {sys.platform}: "
             "the runtime DLLs are packaged on Windows only"
         )
+    # PSModulePath goes: launched from a pwsh 7 step, Windows PowerShell 5.1
+    # inherits pwsh 7's module path, fails to load Microsoft.PowerShell.Security,
+    # and still exits 0 with an empty Status (rehearsal run 37410530509). Windows
+    # keys are case-insensitive, so match the name in any case.
+    env = {k: v for k, v in os.environ.items() if k.upper() != "PSMODULEPATH"}
+    env["NX_SIGCHECK_PATH"] = str(path)
     proc = subprocess.run(
         ["powershell", "-NoProfile", "-NonInteractive", "-Command", _AUTHENTICODE_PS],
-        env={**os.environ, "NX_SIGCHECK_PATH": str(path)},
+        env=env,
         stdin=subprocess.DEVNULL, capture_output=True, text=True, errors="replace",
     )
     if proc.returncode != 0:
         raise BuildError(f"Get-AuthenticodeSignature failed ({proc.returncode}) on {path.name}: {proc.stderr.strip()[:300]}")
     try:
         body = json.loads(proc.stdout)
-        return Signature(str(body["Status"]), str(body["Subject"]))
+        sig = Signature(str(body["Status"]), str(body["Subject"]))
     except (ValueError, KeyError, TypeError) as exc:
         raise BuildError(f"unreadable Get-AuthenticodeSignature output for {path.name}: {proc.stdout[:200]!r}") from exc
+    if not sig.status:
+        # A signature always has a status; an empty one means the cmdlet never ran.
+        raise BuildError(f"Get-AuthenticodeSignature returned no status for {path.name}: {proc.stderr.strip()[:300]}")
+    return sig
 
 
 def subject_attribute(subject: str, key: str) -> str | None:

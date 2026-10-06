@@ -101,6 +101,7 @@ def parse_process_list(text: str) -> list[Proc]:
 def list_processes() -> list[Proc]:
     proc = subprocess.run(
         ["powershell", "-NoProfile", "-NonInteractive", "-Command", _LIST_PS],
+        env={k: v for k, v in os.environ.items() if k.upper() != "PSMODULEPATH"},  # pwsh 7's module path breaks Windows PowerShell's own modules (nexus-f9bgu.14)
         stdin=subprocess.DEVNULL, capture_output=True, text=True, errors="replace",
     )
     if proc.returncode != 0:
