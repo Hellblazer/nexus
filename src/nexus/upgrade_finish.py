@@ -99,7 +99,7 @@ def venv_root_of_site_packages(site_packages: Path) -> Path:
     """The venv root that holds *site_packages*.
 
     POSIX venvs keep it at <venv>/lib/pythonX.Y/site-packages; Windows
-    venvs at <venv>\Lib\site-packages, one level shallower, so the fixed
+    venvs at <venv>/Lib/site-packages (backslashes there), one level shallower, so the fixed
     parents[2] this replaced named the directory ABOVE a Windows generation
     and the finish pass treated every Windows generation install as unmanaged
     (nexus-f9bgu.47). Decided by the path's shape, not the host, so a POSIX root
