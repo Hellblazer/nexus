@@ -83,7 +83,12 @@ runs:
       env:
         # nexus-zz2w7: native-image writes target/embedded-resources.json (every embedded
         # resource and the jar it came from) for the two checks below. No extra build.
-        NATIVE_IMAGE_OPTIONS: "-H:+UnlockExperimentalVMOptions -H:+GenerateEmbeddedResourcesFile"
+        # --parallelism=8: the runner shares qwentescence with a production llama-server.
+        # Measured 2026-10-06 (T2 nexus_rdr/224-windows-o2-build-timing): uncapped -O2 took
+        # 1:37-1:45 and halved llama-server's generation speed for ~40 s; capped took 1:54,
+        # a worst slowdown of 1.3-1.7x and ~2 GB less peak RSS. It must stay in this env
+        # var: as a cmd argument, cmd splits it at the '=' and native-image fails.
+        NATIVE_IMAGE_OPTIONS: "-H:+UnlockExperimentalVMOptions -H:+GenerateEmbeddedResourcesFile --parallelism=8"
       run: |
         rem No -q (the checker reads the Maven execution lines) and no clean (it would wipe
         rem the downloaded jOOQ sources). 12g: measured on this box (nexus-f9bgu.8).

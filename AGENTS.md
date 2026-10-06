@@ -182,8 +182,10 @@ jobs (the actions tool cache, uv and the Pythons it installs, the Visual Studio
 Build Tools). The runner's name and service must not contain `qwen` or `llama` (a host
 rule). Every job on it is gated on the repo variable `NX_WINDOWS_RELEASE_LEGS`
 being `on`; with it unset a tag run queues nothing and promotion expects no
-Windows asset, and with it `on` the Windows assets block promotion (P0.4). Sam
-registers the runner and flips the variable; agents never do either.
+Windows asset, and with it `on` the Windows assets block promotion (P0.4). The
+runner (`gtr9-win`, service account `ghwin`; T2 `nexus/qwentescence-win-release-runner`)
+was registered and the variable turned `on` by an agent on 2026-10-06, each on Sam's
+explicit go; any later change to either needs the same explicit go.
 
 **Before approving a fork-PR run, read its diff for:**
 

@@ -548,7 +548,9 @@ def test_the_composite_builds_once_without_docker_and_reports_embedded_resources
     build = steps[_step_index(steps, "Build native image")]
     assert build["shell"] == "cmd", "Maven warnings go to stderr; cmd redirects them without PowerShell turning them into errors"
     assert build["working-directory"] == "service"
-    assert build["env"]["NATIVE_IMAGE_OPTIONS"] == "-H:+UnlockExperimentalVMOptions -H:+GenerateEmbeddedResourcesFile"
+    assert build["env"]["NATIVE_IMAGE_OPTIONS"] == (
+        "-H:+UnlockExperimentalVMOptions -H:+GenerateEmbeddedResourcesFile --parallelism=8"
+    ), "the Windows build keeps the 8-thread cap that protects the box's llama-server (T2 nexus_rdr/224-windows-o2-build-timing)"
     run = _code(build["run"])
     assert len(re.findall(r"-Pnative\b", run)) == 1
     assert "-Pprebuilt-jooq" in run, "codegen needs Docker (testcontainers); this runner has none"
