@@ -253,6 +253,45 @@ def _converge_preconditions(*, auto_mode: bool, skip_t3: bool = False) -> None:
     except Exception as exc:  # noqa: BLE001 — best-effort trigger stage; the walk and T2 migration must not be blocked by a precondition probe failure
         _log.warning("upgrade_preconditions_failed", error=str(exc))
 
+    _converge_vc_runtime(auto_mode=auto_mode)
+
+
+#: How long ``nx upgrade --auto`` waits after a failed VC++ runtime download.
+_VC_RUNTIME_AUTO_BACKOFF_S: float = 6 * 3600.0
+
+
+def _converge_vc_runtime(*, auto_mode: bool) -> None:
+    """nexus-lqjll: on Windows without Microsoft's VC++ redistributable, place
+    ``msvcp140.dll`` and ``msvcp140_1.dll`` where the client's extension modules
+    find them. This is the automatic leg for installs that predate ``nx init``'s
+    step (a cloud-mode box has no engine or PG bundle carrying them): it rides the
+    SessionStart ``nx upgrade --auto``, which runs detached with no time ceiling,
+    so the download is safe there. A cheap three-directory stat on every run once
+    the DLLs are in place, a no-op off Windows. Runs after the engine axis so a
+    local-mode install gets the DLLs from its engine first. Never raises."""
+    try:
+        import nexus.config as _config  # noqa: PLC0415 — deferred to keep config import off the CLI's cold-start path; module attribute, not by-value (nexus-78blw ratchet)
+        from nexus.daemon.binary_install import ensure_vc_runtime  # noqa: PLC0415 — deferred to avoid import cost on cold CLI start
+
+        result = ensure_vc_runtime(
+            _config.nexus_config_dir(),
+            installed_by="nx upgrade",
+            # The hook runs this every session: after a failure wait before
+            # downloading ~40 MB again. A person running `nx upgrade` retries.
+            failure_backoff_s=_VC_RUNTIME_AUTO_BACKOFF_S if auto_mode else 0.0,
+        )
+    except Exception as exc:  # noqa: BLE001 — best-effort trigger stage; ensure_vc_runtime itself never raises, this guards the imports
+        _log.warning("upgrade_vc_runtime_failed", error=str(exc))
+        return
+    if result.status not in ("provisioned", "failed"):
+        return
+    if auto_mode:
+        _log.info("upgrade_vc_runtime", status=result.status, detail=result.detail)
+    elif result.status == "provisioned":
+        click.echo(f"VC++ runtime [client extension modules]: {result.detail}")
+    else:
+        click.echo(f"VC++ runtime [client extension modules] pending: {result.detail}")
+
 
 def _run_ladder(
     *,

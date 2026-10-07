@@ -35,7 +35,9 @@ import re
 import shutil
 import tarfile
 import tempfile
+import time
 import urllib.request
+from collections.abc import Callable
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -854,6 +856,28 @@ def pg_bundle_dest(config_dir: Path, *, platform_tag: str | None = None) -> Path
     return config_dir / "service" / pg_bundle_asset_name(platform_tag)
 
 
+def _fetch_verified(
+    tag: str, name: str, tmp: Path, checker: _SignatureChecker | None,
+) -> tuple[Path, str, str]:
+    """Download release asset *name* at *tag* into *tmp* and pass it through BOTH
+    fail-closed gates (sha256, then sigstore signature). Returns
+    ``(asset_path, sha256_hex, asset_url)``; raises
+    :class:`BinaryVerificationError` otherwise. The one verified seam the PG
+    bundle install and :func:`ensure_vc_runtime` share (RDR-161 Open Question 2)."""
+    asset_url = release_asset_url(tag, name)
+    asset = tmp / name
+    sha_sidecar = tmp / f"{name}.sha256"
+    bundle = tmp / f"{name}.sigstore.json"
+
+    _download(asset_url, asset)
+    _download(f"{asset_url}.sha256", sha_sidecar)
+    _download(f"{asset_url}.sigstore.json", bundle)
+
+    digest = verify_sha256(asset, sha_sidecar)
+    verify_signature(asset, bundle, checker=checker)
+    return asset, digest, asset_url
+
+
 def install_pg_bundle(
     tag: str,
     config_dir: Path,
@@ -872,22 +896,12 @@ def install_pg_bundle(
     """
     _validate_tag(tag)
     name = pg_bundle_asset_name(platform_tag)
-    asset_url = release_asset_url(tag, name)
 
     with tempfile.TemporaryDirectory(
         dir=str(download_dir) if download_dir else None, prefix="nx_install_pgbundle_"
     ) as td:
         tmp = Path(td)
-        asset = tmp / name
-        sha_sidecar = tmp / f"{name}.sha256"
-        bundle = tmp / f"{name}.sigstore.json"
-
-        _download(asset_url, asset)
-        _download(f"{asset_url}.sha256", sha_sidecar)
-        _download(f"{asset_url}.sigstore.json", bundle)
-
-        digest = verify_sha256(asset, sha_sidecar)
-        verify_signature(asset, bundle, checker=checker)
+        asset, digest, asset_url = _fetch_verified(tag, name, tmp, checker)
 
         dest = pg_bundle_dest(config_dir, platform_tag=platform_tag)
         _atomic_copy(asset, dest, executable=False)  # a tarball, not an executable
@@ -907,3 +921,171 @@ def install_pg_bundle(
         sha256=digest[:12],
     )
     return dest, provenance
+
+
+# ── VC++ runtime for the client's extension modules (nexus-lqjll) ───────────
+
+#: Where the two runtime DLLs sit inside the Windows PG bundle archive
+#: (``scripts/build_pg_bundle_windows.py``: every member under ``bundle/``).
+_PG_BUNDLE_BIN_PREFIX = "bundle/bin/"
+
+_VCRT_SIDECAR_NAME = "vcrt.meta.json"
+#: Stamped (empty file, mtime is the signal) when a provisioning attempt fails, so
+#: the automatic upgrade path does not repeat a ~40 MB download every session.
+_VCRT_FAILED_SENTINEL = ".vcrt_provision_failed"
+_WINDOWS_PLATFORM_TAG = "windows-x64"
+
+
+@dataclass(frozen=True)
+class VcRuntimeResult:
+    """What :func:`ensure_vc_runtime` did. ``status`` is one of
+    ``not_applicable`` (not Windows), ``present_system``, ``present_app_local``,
+    ``provisioned``, ``deferred`` (a recent attempt failed and the caller asked
+    for a backoff) or ``failed``; ``detail`` is a one-line account."""
+
+    status: str
+    detail: str = ""
+    dir: Path | None = None
+
+    @property
+    def ok(self) -> bool:
+        return self.status != "failed"
+
+
+def _extract_vc_runtime(archive: Path, dest_dir: Path, names: tuple[str, ...]) -> dict[str, str]:
+    """Copy exactly *names* out of the verified PG-bundle *archive* into *dest_dir*.
+
+    Members stream out of the tar (no ``extractall``): a member's name is only
+    compared against ``bundle/bin/<name>`` and never reaches the filesystem, and
+    only a regular file with an exact match is taken. Each file lands by
+    :func:`_atomic_copy` (temp, then rename), so a crash leaves no half-written
+    DLL. Returns ``{name: sha256}``; raises :class:`BinaryVerificationError` when
+    the archive is unreadable or lacks a name.
+    """
+    wanted = {f"{_PG_BUNDLE_BIN_PREFIX}{n}": n for n in names}
+    digests: dict[str, str] = {}
+    with tempfile.TemporaryDirectory(prefix="nx_vcrt_") as td:
+        stage = Path(td)
+        try:
+            with tarfile.open(archive, "r:xz") as tf:
+                for member in tf:
+                    key = member.name[2:] if member.name.startswith("./") else member.name
+                    name = wanted.get(key)
+                    if name is None or name in digests or not member.isreg():
+                        continue
+                    src = tf.extractfile(member)
+                    if src is None:  # defensive: isreg() members always have data
+                        continue
+                    sha = hashlib.sha256()
+                    with src, (stage / name).open("wb") as out:
+                        for block in iter(lambda: src.read(_HASH_BLOCK), b""):
+                            sha.update(block)
+                            out.write(block)
+                    digests[name] = sha.hexdigest()
+                    if len(digests) == len(wanted):
+                        break  # the rest of the archive is PostgreSQL itself
+        except (tarfile.TarError, lzma.LZMAError, EOFError) as exc:
+            raise BinaryVerificationError(
+                f"PG bundle {archive.name} could not be read: {exc}"
+            ) from exc
+        missing = [n for n in names if n not in digests]
+        if missing:
+            raise BinaryVerificationError(
+                f"PG bundle {archive.name} has no {_PG_BUNDLE_BIN_PREFIX}"
+                f"{', '.join(missing)}; not installing."
+            )
+        for name in names:
+            _atomic_copy(stage / name, dest_dir / name, executable=False)
+    return digests
+
+
+def ensure_vc_runtime(
+    config_dir: Path,
+    *,
+    platform: str | None = None,
+    system_dir: str | None = None,
+    tag: str | None = None,
+    installed_by: str = "",
+    checker: _SignatureChecker | None = None,
+    download_dir: Path | None = None,
+    failure_backoff_s: float = 0.0,
+    fetch: Callable[[str, str, Path, _SignatureChecker | None], tuple[Path, str, str]] | None = None,
+) -> VcRuntimeResult:
+    """Make the client's extension modules importable on a Windows machine that
+    lacks Microsoft's VC++ redistributable (nexus-lqjll, RDR-224 Step 0.6).
+
+    Does nothing off Windows, when the system has ``msvcp140.dll`` and
+    ``msvcp140_1.dll``, or when the engine dir, the PG bundle's ``bin`` or
+    ``<config>/vcrt`` already holds both. Otherwise it downloads the PG bundle
+    asset for the pinned engine tag through the same sha256 + sigstore gates
+    :func:`install_pg_bundle` uses, and copies ONLY those two DLLs into
+    ``<config_dir>/vcrt`` (PostgreSQL is not provisioned or started). The bundle
+    is the signed asset Sam's licensing reading covers (app-local, unmodified).
+
+    Idempotent, and NEVER raises: a failure comes back as ``status="failed"``
+    with a one-line reason the caller reports. When it provisions, the directory
+    joins this process's DLL search path too. A failed attempt stamps
+    ``<config_dir>/.vcrt_provision_failed``; with *failure_backoff_s* > 0 a later
+    call inside that many seconds returns ``deferred`` without touching the
+    network (the automatic upgrade path; ``nx init`` retries every time).
+    *platform*, *system_dir* and *fetch* (default :func:`_fetch_verified`) are
+    test seams.
+    """
+    from nexus import _vcrt  # noqa: PLC0415 - cheap; keeps this module's import graph unchanged
+
+    dest_dir = config_dir / _vcrt.VCRT_SUBDIR
+    try:
+        kind, where = _vcrt.runtime_source(platform, str(config_dir), system_dir)
+        if kind == _vcrt.NOT_APPLICABLE:
+            return VcRuntimeResult("not_applicable")
+        if kind == _vcrt.SYSTEM:
+            return VcRuntimeResult("present_system", f"found in {where}", Path(where) if where else None)
+        if kind == _vcrt.APP_LOCAL:
+            return VcRuntimeResult("present_app_local", f"found in {where}", Path(where) if where else None)
+
+        sentinel = config_dir / _VCRT_FAILED_SENTINEL
+        if failure_backoff_s > 0:
+            try:
+                age = time.time() - sentinel.stat().st_mtime
+            except OSError:
+                age = None
+            if age is not None and age < failure_backoff_s:
+                return VcRuntimeResult("deferred", f"the last attempt failed {int(age)}s ago; not retrying yet")
+
+        tag = tag if tag is not None else resolve_service_tag()
+        if not tag:
+            return VcRuntimeResult("failed", "no engine-service tag is pinned for this build")
+        _validate_tag(tag)
+        name = pg_bundle_asset_name(_WINDOWS_PLATFORM_TAG)
+        # make_user_dir resolves the REAL host platform (ACLs): a faked "win32"
+        # on a POSIX box must not reach icacls.
+        from nexus._winsec import make_user_dir  # noqa: PLC0415 - deferred, Windows ACL helper
+
+        make_user_dir(dest_dir)
+        with tempfile.TemporaryDirectory(
+            dir=str(download_dir) if download_dir else None, prefix="nx_vcrt_dl_"
+        ) as td:
+            asset, digest, asset_url = (fetch or _fetch_verified)(tag, name, Path(td), checker)
+            digests = _extract_vc_runtime(asset, dest_dir, _vcrt.VC_RUNTIME_DLLS)
+        provenance = _provenance(tag, name, digest, asset_url, installed_by)
+        provenance["dlls"] = digests
+        try:
+            _atomic_write_json(dest_dir / _VCRT_SIDECAR_NAME, provenance)
+        except OSError as exc:  # informational, like the engine and bundle sidecars
+            _log.warning("vc_runtime_sidecar_write_failed", error=str(exc))
+    except Exception as exc:  # noqa: BLE001 - the contract: never raise to the caller
+        _log.warning("vc_runtime_provision_failed", error_type=type(exc).__name__, error=str(exc))
+        with contextlib.suppress(OSError):
+            (config_dir / _VCRT_FAILED_SENTINEL).touch()
+        return VcRuntimeResult("failed", f"{type(exc).__name__}: {exc}")
+
+    with contextlib.suppress(OSError):
+        (config_dir / _VCRT_FAILED_SENTINEL).unlink(missing_ok=True)
+    try:
+        import nexus  # noqa: PLC0415 - the DLL search path of THIS process
+
+        nexus._add_vc_runtime_dirs(platform=platform, config_dir=str(config_dir), system_dir=system_dir)
+    except Exception as exc:  # noqa: BLE001 - later processes pick it up at import regardless
+        _log.debug("vc_runtime_activate_failed", error=str(exc))
+    _log.info("vc_runtime_provisioned", dest=str(dest_dir), tag=tag, sha256=digest[:12])
+    return VcRuntimeResult("provisioned", f"{', '.join(_vcrt.VC_RUNTIME_DLLS)} placed in {dest_dir}", dest_dir)
