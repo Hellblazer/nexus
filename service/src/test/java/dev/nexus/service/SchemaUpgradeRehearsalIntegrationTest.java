@@ -268,6 +268,21 @@ class SchemaUpgradeRehearsalIntegrationTest {
      * absorbed) — structurally unchanged. {@code engine-service-v0.1.17}
      * stays pinned. No manifest/seed-coverage regeneration needed (OLD_TAG
      * did not change).
+     *
+     * <p><strong>2026-10-07 rotation check (engine-service-v0.1.150, conexus
+     * 7.73.0 release prep): STILL NOT rotated, same reason.</strong> The
+     * release plan named {@code engine-service-v0.1.149} (the engine 7.72.1
+     * pinned) as the new OLD_TAG; the structural precondition fails for it.
+     * {@code git cat-file -e engine-service-v0.1.149:service/src/main/
+     * resources/db/changelog/catalog-013-chash-checks-validate.xml} succeeds,
+     * so the old leg applies catalog-013-2 and this class's own {@code
+     * changesetApplied(..., "catalog-013-2", ...).isFalse()} assertion would
+     * red; v0.1.17 lacks the file. The injection point has not moved
+     * (catalog-002-hygiene.xml still differs from v0.1.17 by the 3-line DATA
+     * EFFECT comment only). The v0.1.17-to-HEAD hop now also crosses the
+     * RDR-225 changesets (vectors-030-1 partitions {@code nexus.chunks} and
+     * {@code nexus.taxonomy_centroids}; vectors-031 follows), which the HEAD
+     * leg walks. {@code engine-service-v0.1.17} stays pinned.
      */
     private static final String OLD_TAG = "engine-service-v0.1.17";
 

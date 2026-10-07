@@ -611,7 +611,14 @@ from __future__ import annotations
 #: router (nexus-tu8wp.6), the PG socket read bound (nexus-u9zkn), the
 #: OrtInitGate break and ORT temp sweep (nexus-f9bgu.8/.11). No
 #: changesets; the engine deploys BEFORE this client tag.
-REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 149)
+#:
+#: 7.73.0 pairs with engine-service-v0.1.150 (tagged 2026-10-07 on
+#: c857a33e1), the RDR-225 engine: nexus.chunks and nexus.taxonomy_centroids
+#: partitioned by embedding model then tenant (vectors-030-1, one
+#: transaction, irreversible on a local install) and the model and tenant
+#: predicates in every search family (vectors-031) (nexus-3wh8d). All seven
+#: wire entries are [additive]; the engine deploys BEFORE this client tag.
+REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 150)
 
 #: nexus-5uoxu: the first engine version whose telemetry trim honors the
 #: ``dry_run`` field (the 3-arg ``trimSearchTelemetry`` overload, re-landed

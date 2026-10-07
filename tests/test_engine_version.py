@@ -573,6 +573,14 @@ class TestRequiredEngineVersion:
         # suite 2697/0/0/7, --shakeout PASSED, --candidate-migration PASSED
         # delta=9 invariants EXACT, write gate EXPECTED-INCOMPATIBLE under
         # f5wwx. Deploy after this client tag; PITR fork walk before it.
+        # ->(0,1,150) 2026-10-07 for 7.73.0 (paired, all wire entries
+        # [additive], engine deployed BEFORE the client tag): RDR-225 --
+        # vectors-030-1 partitions nexus.chunks and taxonomy_centroids by
+        # embedding model then tenant, in one transaction, irreversible on a
+        # local install; vectors-031 puts the model and tenant predicates in
+        # every search family. Local installs migrate on the first engine
+        # start after the upgrade, so this pin is their only delivery
+        # vehicle. Tagged on c857a33e1.
         # nexus-9gggv (2026-09-08): the tuple is no longer hand-typed here.
         # Every client release records its engine pairing in CHANGELOG.md's
         # newest released section (the first engine-service-vX.Y.Z it
