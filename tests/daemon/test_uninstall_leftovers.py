@@ -343,7 +343,15 @@ class TestRemoveDataRemovesTheModelCache:
         (target / "onnx_models").mkdir(parents=True)
         link = tmp_path / "home" / ".cache" / "nexus"
         link.parent.mkdir(parents=True)
-        link.symlink_to(target, target_is_directory=True)
+        try:
+            link.symlink_to(target, target_is_directory=True)
+        except OSError as exc:  # Windows without SeCreateSymbolicLinkPrivilege (WinError 1314)
+            if sys.platform != "win32":
+                raise
+            pytest.skip(
+                "a directory symlink needs SeCreateSymbolicLinkPrivilege, which this Windows "
+                f"account lacks ({exc})"
+            )
 
         report = installer.uninstall_daemon(confirm=True, remove_data=True)
 

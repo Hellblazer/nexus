@@ -91,6 +91,7 @@ from nexus.daemon.service_registry import (
 from nexus.util.process_group import KILL_SIGNAL
 from nexus.util.win_console import ConsoleBreakResult
 from nexus import session as _sess
+from tests._child_process import popen_in_group
 from tests._module_seam import patch_in, patch_time
 
 # RDR-224 (nexus-f9bgu.19): this suite runs on native Windows too. The three
@@ -945,7 +946,13 @@ _TEARDOWN_MARKER = "nexus-teardown-conformance-holder"
 
 
 def _spawn_holder() -> subprocess.Popen[bytes]:
-    return subprocess.Popen(
+    """A holder in its own process group, as production spawns every holder.
+
+    On Windows the teardown is a ``CTRL_BREAK`` addressed to the holder's pid;
+    a pid that is not a group id sends the break to every process on the
+    console, pytest included (the run died at 23%, nexus-f9bgu).
+    """
+    return popen_in_group(
         [sys.executable, "-c", "import time; time.sleep(120)", _TEARDOWN_MARKER],
         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )

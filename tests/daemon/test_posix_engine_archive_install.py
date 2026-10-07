@@ -15,6 +15,7 @@ import hashlib
 import io
 import json
 import stat
+import sys
 import tarfile
 import urllib.error
 from pathlib import Path
@@ -131,6 +132,11 @@ def test_archive_release_installs_the_binary_from_the_txz(tmp_path, monkeypatch,
     assert not [n for n in _service_files(tmp_path) if n.startswith(".nx_")]
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Windows has no POSIX execute bit: st_mode reports 0o100666 for every file, so the "
+    "installer's chmod cannot be observed there",
+)
 def test_archive_member_mode_does_not_decide_the_executable_bit(tmp_path, monkeypatch):
     _release(monkeypatch, {"nexus-service-linux-amd64.txz": _txz({"nexus-service": _BIN}, mode=0o600)},
              urls=[])
@@ -167,7 +173,8 @@ def test_single_file_release_falls_back_on_a_404_for_the_archive(tmp_path, monke
     dest, prov = _install(tmp_path, ptag, checker=chk)
 
     assert dest.read_bytes() == _BIN
-    assert stat.S_IMODE(dest.stat().st_mode) & stat.S_IXUSR
+    if sys.platform != "win32":  # no POSIX execute bit to observe on Windows
+        assert stat.S_IMODE(dest.stat().st_mode) & stat.S_IXUSR
     assert urls == [
         f"{_BASE}/{raw}.txz.sha256",
         f"{_BASE}/{raw}.sha256",
