@@ -664,6 +664,9 @@ class ReadPathLeafPruningIntegrationTest {
     /** Families whose body is not inlined into the caller's statement: the call is timed, with its inner planning. */
     private static final Set<String> TS2_OPAQUE = Set.of("text_gate_probe", "assign_from_chashes", "cross_preview");
 
+    /** The pool TS2 times on: its sessions were opened with auto_explain off (see the test). */
+    private TenantScope ts2Scope;
+
     /** Best p95 of {@link #TS2_ATTEMPTS} sets of {@link #TS2_SAMPLES} timings of one family at one dimension, in ms. */
     private double ts2P95(String family, String coll) {
         double best = Double.MAX_VALUE;
@@ -678,7 +681,7 @@ class ReadPathLeafPruningIntegrationTest {
         // One transaction, the serving settings set once, only the statement timed: the transaction's own round
         // trips (tenant stamp, GUCs, commit) are the same at any tenant count and would bury a planning cost of a
         // fraction of a millisecond.
-        probeScope.withTenant(TA, ctx -> {
+        ts2Scope.withTenant(TA, ctx -> {
             PgSession.setSearchPlanCacheMode(ctx);
             for (int i = -TS2_WARMUP; i < TS2_SAMPLES; i++) {      // warm-up runs, not recorded
                 Table<?> fn = fnFor(family, coll, TA, false);
@@ -706,6 +709,29 @@ class ReadPathLeafPruningIntegrationTest {
      */
     @Test
     void ts2_planningAt300Tenants_isWithinTwiceTheTwoTenantP95_andUnder25ms() throws Exception {
+        // TS2 times statements, so it runs on sessions that do NOT log every plan. auto_explain is per role and
+        // session_preload_libraries is read when a session starts, so a pool opened after the RESET below has no
+        // auto_explain. This is not only a timing nicety: TS2 executes the opaque families about ten thousand
+        // times, auto_explain wrote a nested plan for each into the server log, and observe() reads that whole log
+        // back (twice per call), so every leaf-pruning test that ran after TS2 paid for the bloat (20 minutes for
+        // the class, against under 10 seconds for the same tests run before TS2).
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.runSuperuserDdl(su, "ALTER ROLE " + PgContainerHelper.SVC_USERNAME
+                + " RESET session_preload_libraries");
+        }
+        try (HikariDataSource ts2Ds = svcPool("rp-ts2")) {
+            ts2Scope = new TenantScope(ts2Ds);
+            ts2Body();
+        } finally {
+            // the pooled sessions of the other tests keep what they were opened with; this is for any new one
+            try (Connection su = pg.createConnection("")) {
+                PgContainerHelper.enableAutoExplainForService(su);
+            }
+        }
+    }
+
+    private void ts2Body() throws Exception {
+        long started = System.nanoTime();
         // one unrecorded pass over every family first, so the first family measured does not carry the cold
         // start of the server's caches and the JIT of this JVM into the 2-tenant baseline
         for (String coll : List.of(CTX_1, BGE_1, MINI_1)) {
@@ -714,6 +740,7 @@ class ReadPathLeafPruningIntegrationTest {
                 ts2P95(family, coll);
             }
         }
+        long warmDone = System.nanoTime();
         Map<String, Double> at2 = new java.util.LinkedHashMap<>();
         for (String coll : List.of(CTX_1, BGE_1, MINI_1)) {
             for (String family : FAMILIES) {
@@ -721,6 +748,7 @@ class ReadPathLeafPruningIntegrationTest {
                 at2.put(family + " " + dimOf(coll), ts2P95(family, coll));
             }
         }
+        long at2Done = System.nanoTime();
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             DSLContext dsl = DSL.using(su, SQLDialect.POSTGRES);
@@ -728,6 +756,7 @@ class ReadPathLeafPruningIntegrationTest {
                 PgContainerHelper.ensureTenantPartitions(dsl, "ts2-tenant-" + i);
             }
         }
+        long tenantsDone = System.nanoTime();
         List<String> failures = new ArrayList<>();
         StringBuilder table = new StringBuilder("TS2 planning p95 (ms), best of " + TS2_ATTEMPTS + " sets of "
             + TS2_SAMPLES + " plans\n");
@@ -741,6 +770,9 @@ class ReadPathLeafPruningIntegrationTest {
                 if (p300 > 2 * p2 || p300 > 25.0) failures.add(String.format("%s: p95 %.3f ms at 300 vs %.3f ms at 2", key, p300, p2));
             }
         }
+        long end = System.nanoTime();
+        table.append(String.format("  wall: warm pass %.1f s, 2-tenant pass %.1f s, 298 tenants created %.1f s, 300-tenant pass %.1f s%n",
+            (warmDone - started) / 1e9, (at2Done - warmDone) / 1e9, (tenantsDone - at2Done) / 1e9, (end - tenantsDone) / 1e9));
         System.out.println(table);
         assertThat(failures).as("TS2 (p95 at 300 tenants <= 2x the 2-tenant p95 and <= 25 ms):%n%s", table).isEmpty();
     }
