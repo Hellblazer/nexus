@@ -1355,6 +1355,10 @@ public final class PgVectorRepository {
                     + "-dim - one query vector cannot serve both spaces");
             }
         }
+        // RDR-225: the statement reads ONE model's partition, so the set must be one model (the client
+        // already groups its calls by model; a registry that disagrees with a name is refused here, with
+        // the wording the combined-query routes use).
+        String model = requireHomogeneousModel(tenant, collectionNames);
 
         // Route by the first collection - the same-dim check above guarantees the set is
         // homogeneous, and the Python client never mixes embedder families in one call
@@ -1364,10 +1368,10 @@ public final class PgVectorRepository {
         WherePlan wherePlan = planWhere(where);
         String[] colls = collectionNames.toArray(String[]::new);
 
-        org.jooq.Table<?> fn = plainSearchFn(dim, queryVec, colls, wherePlan, nResults);
+        org.jooq.Table<?> fn = plainSearchFn(dim, queryVec, colls, wherePlan, nResults, model, tenant);
 
         Result<? extends Record> result = runPlainSearchStatement(
-            tenant, fn, dim, colls, nResults, PgSession::startupSearchStatementTimeoutMs, false);
+            tenant, model, fn, dim, colls, nResults, PgSession::startupSearchStatementTimeoutMs, false);
 
         List<Map<String, Object>> rows = plainSearchRows(result);
         // RDR-169 G5: surface address triple additively (chash + span always; source_uri opt-in)
@@ -1382,14 +1386,15 @@ public final class PgVectorRepository {
      * order, which is what the fan-out's equivalence contract rests on.
      */
     private static org.jooq.Table<?> plainSearchFn(int dim, Vector queryVec, String[] colls,
-                                                   WherePlan wherePlan, int nResults) {
+                                                   WherePlan wherePlan, int nResults,
+                                                   String model, String tenant) {
         return switch (dim) {
             case 384  -> PLAIN_SEARCH_384.call(
-                queryVec, colls, wherePlan.containment(), wherePlan.jsonPath(), nResults);
+                queryVec, colls, wherePlan.containment(), wherePlan.jsonPath(), nResults, model, tenant);
             case 768  -> PLAIN_SEARCH_768.call(
-                queryVec, colls, wherePlan.containment(), wherePlan.jsonPath(), nResults);
+                queryVec, colls, wherePlan.containment(), wherePlan.jsonPath(), nResults, model, tenant);
             case 1024 -> PLAIN_SEARCH_1024.call(
-                queryVec, colls, wherePlan.containment(), wherePlan.jsonPath(), nResults);
+                queryVec, colls, wherePlan.containment(), wherePlan.jsonPath(), nResults, model, tenant);
             default   -> throw new IllegalArgumentException("unsupported dim " + dim);
         };
     }
@@ -1401,6 +1406,8 @@ public final class PgVectorRepository {
      * transaction, a bounded count of the physical rows the selected collections hold decides whether
      * the statement runs exact or walks the shared HNSW index. See {@link #probeSelectedRows}.
      *
+     * @param model the embedding model every selected collection shares (RDR-225): the router's probe counts
+     *        this model's partition only, and {@code fn} was built with the same value
      * @param dim the dispatch dim {@code fn} was built for (names the chunks embedding column)
      * @param colls the collection names {@code fn} selects, the set the router's probe counts
      * @param statementTimeoutMs the statement bound, EVALUATED inside the transaction at the moment
@@ -1412,7 +1419,7 @@ public final class PgVectorRepository {
      *        immediately before the exact re-run, and its value bounds that re-run (the remaining
      *        budget shrinks while the first attempt runs); false keeps the first bound
      */
-    private Result<? extends Record> runPlainSearchStatement(String tenant, org.jooq.Table<?> fn,
+    private Result<? extends Record> runPlainSearchStatement(String tenant, String model, org.jooq.Table<?> fn,
                                                              int dim, String[] colls,
                                                              int nResults,
                                                              java.util.function.IntSupplier statementTimeoutMs,
@@ -1445,7 +1452,7 @@ public final class PgVectorRepository {
             try {
                 Result<? extends Record> result;
                 if (exactMaxRows > 0) {
-                    probedRows = probeSelectedRows(ctx, dim, colls, exactMaxRows);
+                    probedRows = probeSelectedRows(ctx, dim, colls, model, tenant, exactMaxRows);
                     exact = probedRows <= exactMaxRows;
                 }
                 if (exact) {
@@ -1480,20 +1487,41 @@ public final class PgVectorRepository {
      * live(c) subset the search returns), because that is the population the exact plan scans.
      *
      * <p>COUPLING: this WHERE clause must select the same rows as the {@code plain_search_<dim>} SQL
-     * function's predicate (collection = ANY(...), tenant through row-level security). A predicate
-     * added to one must be added to the other (RDR-225 adds model and tenant predicates). An
-     * under-count here routes exact over a collection set far larger than the threshold.
+     * function's predicate: the model, the tenant and {@code collection = ANY(...)} (RDR-225). A predicate
+     * added to one must be added to the other. An under-count here routes exact over a collection set far
+     * larger than the threshold. The model and tenant predicates are what confine the count to ONE leaf of
+     * the partitioned table, chosen when this statement is planned (the engine has set
+     * {@code force_custom_plan} before it runs).
      */
-    private static int probeSelectedRows(DSLContext ctx, int dim, String[] colls, int limit) {
-        DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
-        Integer n = ctx.selectCount()
-                       .from(ctx.selectOne()
-                                .from(ch.table())
-                                .where(ch.collection().eq(DSL.any(colls)))
-                                .limit(limit + 1)
-                                .asTable("probe"))
-                       .fetchOne(0, Integer.class);
+    private static int probeSelectedRows(DSLContext ctx, int dim, String[] colls, String model, String tenant,
+                                         int limit) {
+        Integer n = probeSelectedRowsQuery(ctx, dim, colls, model, tenant, limit).fetchOne(0, Integer.class);
         return n == null ? 0 : n;
+    }
+
+    /**
+     * The probe's statement, apart from running it, so the plan pin and the latency check in
+     * {@code RouterProbeShapeIntegrationTest} read the plan of the statement the engine runs and not of a copy.
+     *
+     * <p>Shape. A leaf now holds one model, so a collection is a larger share of it than of the old single
+     * per-tenant table (more than a quarter is expected). On a leaf that has been vacuumed the planner reads the
+     * first {@code limit + 1} qualifying keys from the primary key's (tenant, collection) prefix as an Index Only
+     * Scan at every share measured, up to 88 percent, with no change of shape. On a leaf that has been loaded and
+     * analyzed but not vacuumed, so its visibility map is empty, the same statement takes a Seq Scan at 26
+     * percent (measured; an ORDER BY on the collection does not help, it adds a Sort over the Seq Scan).
+     * Autovacuum sets the map on a leaf after a bulk load (until then the router's probe is slower, not wrong).
+     */
+    static org.jooq.Select<? extends org.jooq.Record1<Integer>> probeSelectedRowsQuery(
+            DSLContext ctx, int dim, String[] colls, String model, String tenant, int limit) {
+        DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
+        return ctx.selectCount()
+                  .from(ctx.selectOne()
+                           .from(ch.table())
+                           .where(ch.embeddingModel().eq(model))
+                           .and(ch.tenantId().eq(tenant))
+                           .and(ch.collection().eq(DSL.any(colls)))
+                           .limit(limit + 1)
+                           .asTable("probe"));
     }
 
     /** Statements routed exact / left on HNSW by the cardinality router (nexus-tu8wp.6). */
@@ -2061,7 +2089,7 @@ public final class PgVectorRepository {
         }
         List<String> skipped = new ArrayList<>();
         List<String> cols = registeredSurvivors(tenant, requested, "searchPerCollection", skipped);
-        requireHomogeneousModel(tenant, cols);
+        final String model = requireHomogeneousModel(tenant, cols);
         WherePlan wherePlan = planWhere(where);
 
         // Embed ONCE, before any arm borrows a connection (embed-before-borrow). The vector's width
@@ -2121,7 +2149,7 @@ public final class PgVectorRepository {
                             ArmRun run = new ArmRun();
                             long armStart = System.nanoTime();
                             try {
-                                List<Candidate> rows = runArm(tenant, col, dims[i], queryVec, wherePlan,
+                                List<Candidate> rows = runArm(tenant, model, col, dims[i], queryVec, wherePlan,
                                                               perCollectionK, requestDeadlineNanos,
                                                               fanoutDeadlineNanos, searchBoundMs, armGate, run);
                                 merger.accept(i, col, thresholdMap.get(col), rows);
@@ -2229,15 +2257,15 @@ public final class PgVectorRepository {
      * permit and a connection, so a waiting arm holds neither. The statement bound is computed
      * inside the transaction, at the moment it is set, and recomputed before an exact re-run.
      */
-    private List<Candidate> runArm(String tenant, String collection, int dim, Vector queryVec,
+    private List<Candidate> runArm(String tenant, String model, String collection, int dim, Vector queryVec,
                                    WherePlan wherePlan, int k, long requestDeadlineNanos,
                                    long fanoutDeadlineNanos, int searchBoundMs, Semaphore armGate,
                                    ArmRun run) {
         String[] colls = new String[] {collection};
-        org.jooq.Table<?> fn = plainSearchFn(dim, queryVec, colls, wherePlan, k);
+        org.jooq.Table<?> fn = plainSearchFn(dim, queryVec, colls, wherePlan, k, model, tenant);
         acquireArmSlot(armGate, requestDeadlineNanos, fanoutDeadlineNanos);
         try {
-            return plainSearchCandidates(runPlainSearchStatement(tenant, fn, dim, colls, k, () -> {
+            return plainSearchCandidates(runPlainSearchStatement(tenant, model, fn, dim, colls, k, () -> {
                 ArmBound bound = armBound(requestDeadlineNanos, fanoutDeadlineNanos, System.nanoTime(),
                                           searchBoundMs);
                 run.limiter = bound.limiter();
@@ -2537,6 +2565,8 @@ public final class PgVectorRepository {
                     + "-dim - one query vector cannot serve both spaces");
             }
         }
+        // RDR-225: the probe and both rank functions read ONE model's partition.
+        final String model = requireHomogeneousModel(tenant, collectionNames);
 
         EmbedResult hybridEmbed = embedQuery(tenant, collectionNames.get(0), queryText, dim);
         if (tokensOut != null) tokensOut[0] = hybridEmbed.tokens();
@@ -2578,11 +2608,11 @@ public final class PgVectorRepository {
             // expensive `<%` trigram gate a second time.
             org.jooq.Table<?> probeFn = switch (dim) {
                 case 384  -> TEXT_GATE_PROBE_384.call(
-                    gateQueryText, colls, wherePlan.containment(), wherePlan.jsonPath(), probeCap);
+                    gateQueryText, colls, wherePlan.containment(), wherePlan.jsonPath(), probeCap, model, tenant);
                 case 768  -> TEXT_GATE_PROBE_768.call(
-                    gateQueryText, colls, wherePlan.containment(), wherePlan.jsonPath(), probeCap);
+                    gateQueryText, colls, wherePlan.containment(), wherePlan.jsonPath(), probeCap, model, tenant);
                 case 1024 -> TEXT_GATE_PROBE_1024.call(
-                    gateQueryText, colls, wherePlan.containment(), wherePlan.jsonPath(), probeCap);
+                    gateQueryText, colls, wherePlan.containment(), wherePlan.jsonPath(), probeCap, model, tenant);
                 default   -> throw new IllegalArgumentException("unsupported dim " + dim);
             };
             Result<? extends Record> probeResult = ctx.selectFrom(probeFn).fetch();
@@ -2599,11 +2629,11 @@ public final class PgVectorRepository {
                 }
                 org.jooq.Table<?> fn = switch (dim) {
                     case 384  -> TEXT_GATED_SEARCH_BY_CHASH_384.call(
-                        queryVec, chashes, colls, wherePlan.containment(), wherePlan.jsonPath(), nResults);
+                        queryVec, chashes, colls, wherePlan.containment(), wherePlan.jsonPath(), nResults, model, tenant);
                     case 768  -> TEXT_GATED_SEARCH_BY_CHASH_768.call(
-                        queryVec, chashes, colls, wherePlan.containment(), wherePlan.jsonPath(), nResults);
+                        queryVec, chashes, colls, wherePlan.containment(), wherePlan.jsonPath(), nResults, model, tenant);
                     case 1024 -> TEXT_GATED_SEARCH_BY_CHASH_1024.call(
-                        queryVec, chashes, colls, wherePlan.containment(), wherePlan.jsonPath(), nResults);
+                        queryVec, chashes, colls, wherePlan.containment(), wherePlan.jsonPath(), nResults, model, tenant);
                     default   -> throw new IllegalArgumentException("unsupported dim " + dim);
                 };
                 return ctx.selectFrom(fn).fetch();
@@ -2619,11 +2649,11 @@ public final class PgVectorRepository {
             PgSession.setHnswScanBudget(ctx);
             org.jooq.Table<?> hnswFirstFn = switch (dim) {
                 case 384  -> TEXT_GATED_SEARCH_HNSW_FIRST_384.call(
-                    queryVec, gateQueryText, colls, wherePlan.containment(), wherePlan.jsonPath(), nResults);
+                    queryVec, gateQueryText, colls, wherePlan.containment(), wherePlan.jsonPath(), nResults, model, tenant);
                 case 768  -> TEXT_GATED_SEARCH_HNSW_FIRST_768.call(
-                    queryVec, gateQueryText, colls, wherePlan.containment(), wherePlan.jsonPath(), nResults);
+                    queryVec, gateQueryText, colls, wherePlan.containment(), wherePlan.jsonPath(), nResults, model, tenant);
                 case 1024 -> TEXT_GATED_SEARCH_HNSW_FIRST_1024.call(
-                    queryVec, gateQueryText, colls, wherePlan.containment(), wherePlan.jsonPath(), nResults);
+                    queryVec, gateQueryText, colls, wherePlan.containment(), wherePlan.jsonPath(), nResults, model, tenant);
                 default   -> throw new IllegalArgumentException("unsupported dim " + dim);
             };
             // nexus-bq06h: exactOnUnderReturn wraps ONLY the HNSW-first branch, exactly
@@ -3201,7 +3231,7 @@ public final class PgVectorRepository {
         collectionNames = registeredSurvivors(tenant, collectionNames, "searchMetadataScopedWithTokens",
                                               skippedCollections);
         int dim = requireHomogeneousDim(tenant, collectionNames);
-        requireHomogeneousModel(tenant, collectionNames);
+        String model = requireHomogeneousModel(tenant, collectionNames);
         EmbedResult embed = embedQuery(tenant, collectionNames.get(0), queryText, dim);
         Vector queryVec = Vector.of(embed.embeddings().get(0));
         JSONB whereJsonb = (where == null || where.isEmpty()) ? null : JSONB.jsonb(toJson(where));
@@ -3209,11 +3239,11 @@ public final class PgVectorRepository {
 
         org.jooq.Table<?> fn = switch (dim) {
             case 384  -> SEARCH_METADATA_SCOPED_384.call(
-                queryVec, colls, contentType, author, year, corpus, subtree, whereJsonb, nResults);
+                queryVec, colls, contentType, author, year, corpus, subtree, whereJsonb, nResults, model, tenant);
             case 768  -> SEARCH_METADATA_SCOPED_768.call(
-                queryVec, colls, contentType, author, year, corpus, subtree, whereJsonb, nResults);
+                queryVec, colls, contentType, author, year, corpus, subtree, whereJsonb, nResults, model, tenant);
             case 1024 -> SEARCH_METADATA_SCOPED_1024.call(
-                queryVec, colls, contentType, author, year, corpus, subtree, whereJsonb, nResults);
+                queryVec, colls, contentType, author, year, corpus, subtree, whereJsonb, nResults, model, tenant);
             default   -> throw new IllegalArgumentException("unsupported dim " + dim);
         };
         return new Tokened<>(runCombinedQueryWithChash(tenant, fn, nResults), embed.tokens(), skippedCollections);
@@ -3301,7 +3331,7 @@ public final class PgVectorRepository {
         collectionNames = registeredSurvivors(tenant, collectionNames, "searchAspectScopedWithTokens",
                                               skippedCollections);
         int dim = requireHomogeneousDim(tenant, collectionNames);
-        requireHomogeneousModel(tenant, collectionNames);
+        String model = requireHomogeneousModel(tenant, collectionNames);
         EmbedResult embed = embedQuery(tenant, collectionNames.get(0), queryText, dim);
         Vector queryVec = Vector.of(embed.embeddings().get(0));
         JSONB whereJsonb = (where == null || where.isEmpty()) ? null : JSONB.jsonb(toJson(where));
@@ -3309,11 +3339,11 @@ public final class PgVectorRepository {
 
         org.jooq.Table<?> fn = switch (dim) {
             case 384  -> SEARCH_ASPECT_SCOPED_384.call(
-                queryVec, colls, field, pattern, minConfidence, whereJsonb, nResults);
+                queryVec, colls, field, pattern, minConfidence, whereJsonb, nResults, model, tenant);
             case 768  -> SEARCH_ASPECT_SCOPED_768.call(
-                queryVec, colls, field, pattern, minConfidence, whereJsonb, nResults);
+                queryVec, colls, field, pattern, minConfidence, whereJsonb, nResults, model, tenant);
             case 1024 -> SEARCH_ASPECT_SCOPED_1024.call(
-                queryVec, colls, field, pattern, minConfidence, whereJsonb, nResults);
+                queryVec, colls, field, pattern, minConfidence, whereJsonb, nResults, model, tenant);
             default   -> throw new IllegalArgumentException("unsupported dim " + dim);
         };
         return new Tokened<>(runCombinedQueryWithChash(tenant, fn, nResults), embed.tokens(), skippedCollections);
@@ -3347,13 +3377,14 @@ public final class PgVectorRepository {
             throw new IllegalArgumentException("nResults must be >= 1, got " + nResults);
         }
         int dim = dimForCollection(tenant, collection);
+        String model = CollectionRegistry.lookup(tenantScope, tenant, collection).embeddingModel();
         EmbedResult embed = embedQuery(tenant, collection, queryText, dim);
         Vector queryVec = Vector.of(embed.embeddings().get(0));
 
         org.jooq.Table<?> fn = switch (dim) {
-            case 384  -> SEARCH_TOPIC_SCOPED_384.call(queryVec, topicLabel, collection, nResults);
-            case 768  -> SEARCH_TOPIC_SCOPED_768.call(queryVec, topicLabel, collection, nResults);
-            case 1024 -> SEARCH_TOPIC_SCOPED_1024.call(queryVec, topicLabel, collection, nResults);
+            case 384  -> SEARCH_TOPIC_SCOPED_384.call(queryVec, topicLabel, collection, nResults, model, tenant);
+            case 768  -> SEARCH_TOPIC_SCOPED_768.call(queryVec, topicLabel, collection, nResults, model, tenant);
+            case 1024 -> SEARCH_TOPIC_SCOPED_1024.call(queryVec, topicLabel, collection, nResults, model, tenant);
             default   -> throw new IllegalArgumentException("unsupported dim " + dim);
         };
         return new Tokened<>(runCombinedQuery(tenant, fn, nResults), embed.tokens());
@@ -3441,7 +3472,7 @@ public final class PgVectorRepository {
         collectionNames = registeredSurvivors(tenant, collectionNames, "searchGraphHopWithTokens",
                                               skippedCollections);
         int dim = requireHomogeneousDim(tenant, collectionNames);
-        requireHomogeneousModel(tenant, collectionNames);
+        String model = requireHomogeneousModel(tenant, collectionNames);
         EmbedResult embed = embedQuery(tenant, collectionNames.get(0), queryText, dim);
         Vector queryVec = Vector.of(embed.embeddings().get(0));
         JSONB whereJsonb = (where == null || where.isEmpty()) ? null : JSONB.jsonb(toJson(where));
@@ -3450,11 +3481,11 @@ public final class PgVectorRepository {
 
         org.jooq.Table<?> fn = switch (dim) {
             case 384  -> SEARCH_GRAPH_HOP_384.call(
-                queryVec, seedArr, colls, linkType, clampedDepth, dir, whereJsonb, nResults);
+                queryVec, seedArr, colls, linkType, clampedDepth, dir, whereJsonb, nResults, model, tenant);
             case 768  -> SEARCH_GRAPH_HOP_768.call(
-                queryVec, seedArr, colls, linkType, clampedDepth, dir, whereJsonb, nResults);
+                queryVec, seedArr, colls, linkType, clampedDepth, dir, whereJsonb, nResults, model, tenant);
             case 1024 -> SEARCH_GRAPH_HOP_1024.call(
-                queryVec, seedArr, colls, linkType, clampedDepth, dir, whereJsonb, nResults);
+                queryVec, seedArr, colls, linkType, clampedDepth, dir, whereJsonb, nResults, model, tenant);
             default   -> throw new IllegalArgumentException("unsupported dim " + dim);
         };
         return new Tokened<>(runCombinedQueryWithChash(tenant, fn, nResults), embed.tokens(), skippedCollections);

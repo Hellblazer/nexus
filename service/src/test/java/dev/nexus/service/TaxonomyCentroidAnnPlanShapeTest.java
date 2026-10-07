@@ -76,10 +76,13 @@ class TaxonomyCentroidAnnPlanShapeTest {
     private static final String SVC_PASS = "svc_centroid_planshape_pass";
     private static final String TENANT = "centroid-planshape-tenant";
 
-    private static final String COL_1024 = "knowledge__planshape1024";
-    private static final String COL_768  = "docs__planshape768";
-    private static final String COL_384  = "knowledge__planshape384";
-    private static final String COL_MIXED = "knowledge__planshapemixed";
+    // RDR-225: annQuery resolves the collection's model from the registry, so every collection here is
+    // registered (seedFixtures), under a conformant name that carries the model of its dimension.
+    private static final String COL_1024 = "knowledge__planshape__voyage-context-3__v1";
+    private static final String COL_768  = "docs__planshape__bge-base-en-v15-768__v1";
+    private static final String COL_384  = "knowledge__planshape__minilm-l6-v2-384__v1";
+    /** Registered under the 768-dimension model; two stray centroid rows of OTHER models sit beside its own. */
+    private static final String COL_MIXED = "docs__planshapemixed__bge-base-en-v15-768__v1";
 
     // Modest but non-trivial per-dim cardinality: large enough that the planner's default
     // cost model naturally prefers the HNSW index over Seq Scan + Sort, small enough to
@@ -145,9 +148,11 @@ class TaxonomyCentroidAnnPlanShapeTest {
                 + SVC_ROLE_REALCALL + "') THEN CREATE ROLE " + SVC_ROLE_REALCALL
                 + " LOGIN PASSWORD '" + SVC_PASS + "' NOSUPERUSER NOBYPASSRLS; END IF; END $$");
             su.createStatement().execute("GRANT USAGE ON SCHEMA nexus TO " + SVC_ROLE_REALCALL);
+            // RDR-225: annQuery reads the collection's model from the registry (catalog_collections and the
+            // embedding_models row its dimension comes from), so the same statement grants that read.
             su.createStatement().execute(
-                "GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.taxonomy_centroids TO "
-                + SVC_ROLE_REALCALL);
+                "GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.taxonomy_centroids TO " + SVC_ROLE_REALCALL
+                + "; GRANT SELECT ON nexus.catalog_collections, nexus.embedding_models TO " + SVC_ROLE_REALCALL);
             su.createStatement().execute(
                 "ALTER ROLE " + SVC_ROLE_REALCALL + " SET enable_indexscan = off");
             su.createStatement().execute(
@@ -209,6 +214,9 @@ class TaxonomyCentroidAnnPlanShapeTest {
             DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
             // RDR-225: TENANT is never issued a service token, so its partition leaves are made here.
             PgContainerHelper.ensureTenantPartitions(ctx, TENANT);
+            for (String coll : List.of(COL_1024, COL_768, COL_384, COL_MIXED)) {
+                PgContainerHelper.insertCollection(ctx, TENANT, coll);
+            }
             // Deterministic filler positions (CLAUDE.md: seeded randomness) -- a
             // client-side seeded Random replaces the retired setseed(0.42)/random()
             // SQL-side generation (nexus-cbo4a: the raw generate_series/LATERAL/
@@ -335,7 +343,7 @@ class TaxonomyCentroidAnnPlanShapeTest {
 
     @Test
     void annQuery_shape_usesFullHnswIndex_1024() {
-        Table<?> fn = TAXONOMY_ANN_QUERY_1024.call(queryVec(1024), COL_1024, false, 10);
+        Table<?> fn = TAXONOMY_ANN_QUERY_1024.call(queryVec(1024), COL_1024, false, 10, MODEL_1024, TENANT);
         String plan = explain(fn);
         assertThat(plan)
             .as("annQuery's distance projection (1024-dim) must bind to the HNSW index"
@@ -353,7 +361,7 @@ class TaxonomyCentroidAnnPlanShapeTest {
 
     @Test
     void annQuery_shape_usesFullHnswIndex_768() {
-        Table<?> fn = TAXONOMY_ANN_QUERY_768.call(queryVec(768), COL_768, false, 10);
+        Table<?> fn = TAXONOMY_ANN_QUERY_768.call(queryVec(768), COL_768, false, 10, MODEL_768, TENANT);
         String plan = explain(fn);
         assertThat(plan)
             .as("annQuery's distance projection (768-dim) must bind to the HNSW index"
@@ -369,7 +377,7 @@ class TaxonomyCentroidAnnPlanShapeTest {
 
     @Test
     void annQuery_shape_usesFullHnswIndex_384() {
-        Table<?> fn = TAXONOMY_ANN_QUERY_384.call(queryVec(384), COL_384, false, 10);
+        Table<?> fn = TAXONOMY_ANN_QUERY_384.call(queryVec(384), COL_384, false, 10, MODEL_384, TENANT);
         String plan = explain(fn);
         assertThat(plan)
             .as("annQuery's distance projection (384-dim) must bind to the HNSW index"
@@ -398,25 +406,24 @@ class TaxonomyCentroidAnnPlanShapeTest {
     }
 
     /**
-     * The regression proof for the {@code embedding_<dim> IS NOT NULL} fix: a collection
-     * whose centroids straddle two dims (topic 1 at 384, topic 2 at 768 — same physical
-     * table, same {@code collection}, disjoint {@code topic_id}) must have each dim's
-     * query see ONLY its own dim's row. Before the fix, ordering by a bare {@code
-     * embedding <=> ?} (or, post-repoint without the guard, an unfiltered {@code
-     * embedding_<dim> <=> ?}) risked ranking against — or silently including — the
-     * foreign-dim row (a NULL-distance row Postgres sorts last under default NULLS LAST,
-     * masking the defect at small scale but not the underlying wrong-population query
-     * shape this test pins).
+     * RDR-225: the centroids a query reads are the registered model's, only. A collection that has
+     * a stray centroid of another model beside its own (topic 1, at 384 dimensions, under the
+     * 384-dimension model; topic 2 is the collection's own, at 768 under its registered 768-dimension
+     * model) sees only its own: the 768-wide query finds topic 2, and the 384-wide query finds
+     * nothing, because it reads the 768-dimension model's leaf and that model has no 384-wide
+     * vector. Before the tables were partitioned this was the mixed-dimension collection test
+     * (each width saw its own row); mixed-dimension collections are no longer a supported shape.
      */
     @Test
-    void annQuery_mixedDimCollection_onlyMatchesQueriedDim() {
-        List<AnnHit> at384 = repo.annQuery(TENANT, unit(384, 1.0f), COL_MIXED, false, 10);
-        assertThat(at384).as("384-dim query in a mixed-dim collection sees only topic 1")
-            .extracting(AnnHit::topicId).containsExactly(1L);
-
+    void annQuery_readsOnlyTheRegisteredModelsCentroids() {
         List<AnnHit> at768 = repo.annQuery(TENANT, unit(768, 1.0f), COL_MIXED, false, 10);
-        assertThat(at768).as("768-dim query in a mixed-dim collection sees only topic 2")
+        assertThat(at768).as("the 768-dim query sees the collection's own centroid, topic 2")
             .extracting(AnnHit::topicId).containsExactly(2L);
+
+        List<AnnHit> at384 = repo.annQuery(TENANT, unit(384, 1.0f), COL_MIXED, false, 10);
+        assertThat(at384).as("a 384-dim query reads the registered model's leaf and finds no 384-wide centroid, "
+                + "not the stray topic 1 stored under another model")
+            .isEmpty();
     }
 
     @Test

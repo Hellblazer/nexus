@@ -205,7 +205,7 @@ class TopicsDocCountDeadlockConcurrencyTest {
             // EXECUTE ON FUNCTION is not part of bootstrapServiceRole's fixed grant
             // set -- kept as an explicit grant (nexus-cbo4a batch 1b).
             su.createStatement().execute(
-                "GRANT EXECUTE ON FUNCTION nexus.assign_from_chashes_" + DIM + "(text, text[], boolean) TO " + SVC_ROLE);
+                "GRANT EXECUTE ON FUNCTION nexus.assign_from_chashes_" + DIM + "(text, text[], boolean, text, text) TO " + SVC_ROLE);
         }
 
         var cfg = new com.zaxxer.hikari.HikariConfig();

@@ -83,7 +83,7 @@ class TaxonomyUnassignedChashesRepositoryTest {
                     + "(text, int, text) TO " + SVC_ROLE);
                 su.createStatement().execute(
                     "GRANT EXECUTE ON FUNCTION nexus.assign_from_chashes_" + dim
-                    + "(text, text[], boolean) TO " + SVC_ROLE);
+                    + "(text, text[], boolean, text, text) TO " + SVC_ROLE);
             }
         }
 

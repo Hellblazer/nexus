@@ -297,9 +297,9 @@ class VectorsRetentionSchemaLiquibaseTest {
             for (int dim : new int[]{384, 768, 1024}) {
                 String vec = "nexus.vector";
                 String[] sigs = {
-                    "nexus.plain_search_" + dim + "(" + vec + ", text[], jsonb, text, int)",
-                    "nexus.text_gated_search_hnsw_first_" + dim + "(" + vec + ", text, text[], jsonb, text, int)",
-                    "nexus.text_gated_search_by_chash_" + dim + "(" + vec + ", bytea[], text[], jsonb, text, int)",
+                    "nexus.plain_search_" + dim + "(" + vec + ", text[], jsonb, text, int, text, text)",
+                    "nexus.text_gated_search_hnsw_first_" + dim + "(" + vec + ", text, text[], jsonb, text, int, text, text)",
+                    "nexus.text_gated_search_by_chash_" + dim + "(" + vec + ", bytea[], text[], jsonb, text, int, text, text)",
                 };
                 for (String sig : sigs) {
                     assertThat(PgCatalogProbes.canExecuteFunction(ctx, "nexus_svc", sig))

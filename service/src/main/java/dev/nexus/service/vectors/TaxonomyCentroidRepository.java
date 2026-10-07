@@ -201,10 +201,21 @@ public final class TaxonomyCentroidRepository {
         // why both are load-bearing (a centroid collection can hold rows at two dims
         // mid-migration; this class's own dimensionProbe javadoc).
         Vector queryVec = Vector.of(embedding);
+        // RDR-225: the function reads the one (model, tenant) leaf of taxonomy_centroids. The model is the
+        // SOURCE collection's, also in the cross-collection branch: a centroid of another model is not a
+        // candidate (the same rule assign_from_chashes and cross_preview apply).
+        // An unregistered collection can hold no centroid (every centroid write needs the registration) and has
+        // no model to match, so the answer is none, as it was before the model was part of the query.
+        String model;
+        try {
+            model = CollectionRegistry.lookup(tenantScope, tenant, collection).embeddingModel();
+        } catch (dev.nexus.service.db.UnregisteredCollectionException e) {
+            return List.of();
+        }
         org.jooq.Table<?> fn = switch (dim) {
-            case 384  -> TAXONOMY_ANN_QUERY_384.call(queryVec, collection, crossCollection, nResults);
-            case 768  -> TAXONOMY_ANN_QUERY_768.call(queryVec, collection, crossCollection, nResults);
-            case 1024 -> TAXONOMY_ANN_QUERY_1024.call(queryVec, collection, crossCollection, nResults);
+            case 384  -> TAXONOMY_ANN_QUERY_384.call(queryVec, collection, crossCollection, nResults, model, tenant);
+            case 768  -> TAXONOMY_ANN_QUERY_768.call(queryVec, collection, crossCollection, nResults, model, tenant);
+            case 1024 -> TAXONOMY_ANN_QUERY_1024.call(queryVec, collection, crossCollection, nResults, model, tenant);
             default   -> throw new IllegalArgumentException("unsupported dim " + dim);
         };
         Result<? extends Record> result = tenantScope.withTenant(tenant, ctx -> {

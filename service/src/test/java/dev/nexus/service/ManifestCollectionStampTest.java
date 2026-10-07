@@ -199,7 +199,7 @@ class ManifestCollectionStampTest {
                  "SELECT count(*) FROM nexus.search_metadata_scoped_1024("
                  + "('[' || repeat('0.1,', 1023) || '0.1]')::nexus.vector, "
                  + "ARRAY['" + COLL + "'], NULL::text, NULL::text, NULL::int, "
-                 + "NULL::text, NULL::text, NULL::jsonb, 10)")) {
+                 + "NULL::text, NULL::text, NULL::jsonb, 10, 'voyage-context-3', '" + TENANT + "')")) {
             rs.next();
             return rs.getInt(1);
         }
@@ -580,7 +580,7 @@ class ManifestCollectionStampTest {
                  "SELECT count(*) FROM nexus.search_metadata_scoped_1024("
                  + "('[' || repeat('0.1,', 1023) || '0.1]')::nexus.vector, "
                  + "ARRAY['" + renamed + "'], NULL::text, NULL::text, NULL::int, "
-                 + "NULL::text, NULL::text, NULL::jsonb, 10)")) {
+                 + "NULL::text, NULL::text, NULL::jsonb, 10, 'voyage-context-3', '" + TENANT + "')")) {
             rs.next();
             assertThat(rs.getInt(1))
                 .as("combined query follows the rename end-to-end").isEqualTo(1);

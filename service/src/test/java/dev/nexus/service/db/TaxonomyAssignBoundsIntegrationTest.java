@@ -83,7 +83,7 @@ class TaxonomyAssignBoundsIntegrationTest {
             PgContainerHelper.bootstrapServiceRole(su, SVC_ROLE, SVC_PASS);
             for (int dim : new int[] {384, 768, 1024}) {
                 PgContainerHelper.grantExecuteOnFunction(
-                    su, "nexus.assign_from_chashes_" + dim + "(text, text[], boolean)", SVC_ROLE);
+                    su, "nexus.assign_from_chashes_" + dim + "(text, text[], boolean, text, text)", SVC_ROLE);
             }
         }
         var cfg = new com.zaxxer.hikari.HikariConfig();

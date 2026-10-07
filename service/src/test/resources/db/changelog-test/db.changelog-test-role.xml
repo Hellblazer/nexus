@@ -111,7 +111,10 @@ DECLARE
     dim text;
 BEGIN
     FOREACH dim IN ARRAY ARRAY['384', '768', '1024'] LOOP
-        IF to_regprocedure('nexus.text_gate_probe_' || dim || '(text, text[], jsonb, text, integer)') IS NOT NULL THEN
+        IF to_regprocedure('nexus.text_gate_probe_' || dim || '(text, text[], jsonb, text, integer, text, text)') IS NOT NULL THEN
+            EXECUTE format('GRANT EXECUTE ON FUNCTION nexus.text_gate_probe_%s(text, text[], jsonb, text, integer, text, text) TO ${svcRole}', dim);
+        ELSIF to_regprocedure('nexus.text_gate_probe_' || dim || '(text, text[], jsonb, text, integer)') IS NOT NULL THEN
+            -- the signature before RDR-225's read path (vectors-031) added the model and the tenant
             EXECUTE format('GRANT EXECUTE ON FUNCTION nexus.text_gate_probe_%s(text, text[], jsonb, text, integer) TO ${svcRole}', dim);
         END IF;
     END LOOP;

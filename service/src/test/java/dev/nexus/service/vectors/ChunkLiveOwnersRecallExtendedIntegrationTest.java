@@ -605,9 +605,9 @@ class ChunkLiveOwnersRecallExtendedIntegrationTest {
         Vector vec = Vector.of(q);
         String[] colls = {collection};
         return switch (DIM) {
-            case 384 -> PLAIN_SEARCH_384.call(vec, colls, (JSONB) null, (String) null, K);
-            case 768 -> PLAIN_SEARCH_768.call(vec, colls, (JSONB) null, (String) null, K);
-            case 1024 -> PLAIN_SEARCH_1024.call(vec, colls, (JSONB) null, (String) null, K);
+            case 384 -> PLAIN_SEARCH_384.call(vec, colls, (JSONB) null, (String) null, K, modelToken(), TENANT);
+            case 768 -> PLAIN_SEARCH_768.call(vec, colls, (JSONB) null, (String) null, K, modelToken(), TENANT);
+            case 1024 -> PLAIN_SEARCH_1024.call(vec, colls, (JSONB) null, (String) null, K, modelToken(), TENANT);
             default -> throw new IllegalArgumentException("unsupported dim " + DIM);
         };
     }

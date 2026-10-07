@@ -84,6 +84,8 @@ class TextGateProbeSingleRoleGuardIntegrationTest {
     private static final String TENANT_B = "single-role-b";
     private static final String COLL_A = "knowledge__single-role-a__minilm-l6-v2-384__v1";
     private static final String COLL_B = "knowledge__single-role-b__minilm-l6-v2-384__v1";
+    /** RDR-225: both collections are registered under this model, which every read function names. */
+    private static final String MODEL = "minilm-l6-v2-384";
     private static final String TOKEN = "qzvkwx";
     private static final int PER_TENANT = 3;
     private static final int DIM = 384;
@@ -203,12 +205,14 @@ class TextGateProbeSingleRoleGuardIntegrationTest {
         int seenByB = tenantScope.withTenant(TENANT_B, ctx -> ctx.fetchCount(CHUNKS));
         assertThat(seenByA).as("nexus_svc stamped A sees only A's chunks through the table").isEqualTo(PER_TENANT);
         assertThat(seenByB).as("nexus_svc stamped B sees only B's chunks through the table").isEqualTo(PER_TENANT);
-        var probe = TEXT_GATE_PROBE_384.call(TOKEN, new String[] {COLL_A, COLL_B}, null, null, 10_000);
-        List<String> fromA = tenantScope.withTenant(TENANT_A, ctx -> ctx.selectFrom(probe).fetch()
+        // RDR-225: the engine passes the session's own tenant as the probe's tenant parameter.
+        var probeA = TEXT_GATE_PROBE_384.call(TOKEN, new String[] {COLL_A, COLL_B}, null, null, 10_000, MODEL, TENANT_A);
+        var probeB = TEXT_GATE_PROBE_384.call(TOKEN, new String[] {COLL_A, COLL_B}, null, null, 10_000, MODEL, TENANT_B);
+        List<String> fromA = tenantScope.withTenant(TENANT_A, ctx -> ctx.selectFrom(probeA).fetch()
             .getValues(0, byte[].class).stream().map(b -> HexFormat.of().formatHex(b)).toList());
         assertThat(fromA).as("the probe stamped A, naming both collections: A's chunks only")
             .containsExactlyInAnyOrderElementsOf(idsA);
-        List<String> fromB = tenantScope.withTenant(TENANT_B, ctx -> ctx.selectFrom(probe).fetch()
+        List<String> fromB = tenantScope.withTenant(TENANT_B, ctx -> ctx.selectFrom(probeB).fetch()
             .getValues(0, byte[].class).stream().map(b -> HexFormat.of().formatHex(b)).toList());
         assertThat(fromB).as("the probe stamped B, naming both collections: B's chunks only")
             .containsExactlyInAnyOrderElementsOf(idsB);
@@ -278,7 +282,7 @@ class TextGateProbeSingleRoleGuardIntegrationTest {
     }
 
     private static List<String> probeIds(TenantScope scope, String tenant) {
-        var probe = TEXT_GATE_PROBE_384.call(TOKEN, new String[] {COLL_A, COLL_B}, null, null, 10_000);
+        var probe = TEXT_GATE_PROBE_384.call(TOKEN, new String[] {COLL_A, COLL_B}, null, null, 10_000, MODEL, tenant);
         return scope.withTenant(tenant, ctx -> ctx.selectFrom(probe).fetch()
             .getValues(0, byte[].class).stream().map(b -> HexFormat.of().formatHex(b)).toList());
     }
