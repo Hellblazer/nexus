@@ -609,9 +609,28 @@ public final class PgSession {
         return Math.min(EF_SEARCH_MAX, Math.max(1, Math.max(floor, nResults)));
     }
 
-    /** Sizing against the env-resolved floor. */
+    /** Sizing against the env-resolved floor, or the test pin when set. */
     static int efSearchFor(int nResults) {
-        return efSearchFor(nResults, EF_SEARCH_FLOOR);
+        Integer o = efSearchFloorOverride;
+        return efSearchFor(nResults, o != null ? o : EF_SEARCH_FLOOR);
+    }
+
+    /** Test pin for the serving floor; null means the env-resolved {@link #EF_SEARCH_FLOOR}. */
+    private static volatile Integer efSearchFloorOverride;
+
+    /**
+     * TEST SEAM (nexus-3wh8d.31): pin the serving {@code hnsw.ef_search} floor, so a
+     * fixture of a few hundred rows can starve an HNSW walk the way a large leaf does in
+     * production; at the 600 default the first ef batch covers such a fixture's whole
+     * graph. Pair with {@link #resetEfSearchFloorForTests()}.
+     */
+    public static void overrideEfSearchFloorForTests(int floor) {
+        efSearchFloorOverride = floor;
+    }
+
+    /** Drop the pinned floor; the env-resolved value applies again. */
+    public static void resetEfSearchFloorForTests() {
+        efSearchFloorOverride = null;
     }
 
     /**
