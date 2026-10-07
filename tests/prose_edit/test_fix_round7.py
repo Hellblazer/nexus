@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import signal
 import subprocess
 import time
@@ -123,6 +124,57 @@ def test_simultaneous_starts_over_a_dead_holder_never_both_hold_the_lock(tmp_pat
             for t in bad[:2] for i in range(procs)}
     assert not bad, (holders, said)  # exactly one runner holds each lock at once
     assert refused and set(refused) == {75}, refused  # every other runner gave up, none crashed
+
+
+# uutils coreutils 0.8.0, /usr/bin/mkdir on Ubuntu 26.04, checks for the path and then creates it, and reports an
+# EEXIST from the create as success: eight simultaneous `mkdir D` all exit 0 there, where GNU and BSD mkdir let one
+# through (nexus-6japn, measured on qwentescence). This stand-in does the same with a wide window, on any host.
+_RACY_MKDIR = """#!/bin/bash
+for a in "$@"; do case "$a" in -*) ;; *) p="$a" ;; esac; done
+if [ -e "$p" ]; then echo "mkdir: $p: File exists" >&2; exit 1; fi
+sleep 0.3
+"{real}" "$@" 2>/dev/null || echo "$p" >> "{log}"
+exit 0
+"""
+
+
+def test_simultaneous_starts_hold_the_lock_once_even_when_mkdir_reports_a_lost_race_as_success(
+        tmp_path: Path) -> None:
+    shim, log = tmp_path / "bin", tmp_path / "raced"
+    shim.mkdir()
+    real = shutil.which("mkdir")
+    assert real
+    (shim / "mkdir").write_text(_RACY_MKDIR.format(real=real, log=log), encoding="utf-8")
+    (shim / "mkdir").chmod(0o755)
+    trials, procs = 3, 4
+    go, release = tmp_path / "go", tmp_path / "release"
+    running = []
+    for t in range(trials):
+        lock = tmp_path / f"lock-{t}"
+        for i in range(procs):
+            held = tmp_path / f"held-{t}-{i}"
+            script = (f'set -u\nWT={ROOT}\n. {GUARD}\nwhile [ ! -e {go} ]; do :; done\n'
+                      f'runner_lock run-{t}-{i}.sh\n: > {held}\n'
+                      f'while [ ! -e {release} ]; do sleep 0.05; done\n')
+            running.append((t, i, subprocess.Popen(
+                ["bash", "-c", script],
+                env={**os.environ, "PATH": f"{shim}{os.pathsep}{os.environ['PATH']}",
+                     "PROSE_EDIT_RUNNER_LOCK": str(lock)},
+                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)))
+    time.sleep(0.5)
+    go.touch()
+    deadline = time.monotonic() + 60
+    while time.monotonic() < deadline:
+        if all(p.poll() is not None or (tmp_path / f"held-{t}-{i}").exists() for t, i, p in running):
+            break
+        time.sleep(0.05)
+    holders = {t: sum((tmp_path / f"held-{t}-{i}").exists() for i in range(procs)) for t in range(trials)}
+    refused = [p.returncode for _, _, p in running if p.poll() is not None]
+    release.touch()
+    errs = [p.communicate(timeout=60)[1][-300:] for _, _, p in running]
+    assert log.exists() and log.read_text(encoding="utf-8").strip(), "no mkdir lost a race: the test proved nothing"
+    assert all(n == 1 for n in holders.values()), (holders, errs)
+    assert len(refused) == trials * (procs - 1) and set(refused) == {75}, (refused, errs)
 
 
 def test_a_runner_that_is_killed_leaves_no_live_background_job_or_its_child(
