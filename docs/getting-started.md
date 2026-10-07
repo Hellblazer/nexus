@@ -7,14 +7,26 @@
 - **git**
 - **[Node.js](https://nodejs.org/)** — required *only* if you install the Claude Code plugin(s). The conexus plugin bundles the `sequential-thinking` MCP server, spawned via `npx -y …`; the companion `sn` plugin bundles `context7` the same way. Either requires `node` and `npm` on PATH. The `nx` CLI alone does not need it. Install with `brew install node` (macOS) or follow the [Node.js installer](https://nodejs.org/) for your platform.
 
-- **Hardware** — an Apple Silicon Mac (arm64), or Linux on x86-64 or arm64.
+- **Hardware** — an Apple Silicon Mac (arm64), Linux on x86-64 or arm64, or
+  Windows 11 on x64.
   Nexus ships its own PostgreSQL and **never** uses a host install: there is
   no fallback leg (`_NO_HOST_FALLBACK`, `nexus.db.pg_provision`), because the
   bundle is a specific PG17 carrying pgvector and a Homebrew or distro
   PostgreSQL is a different server with a different contrib set. The bundle
-  is built for those three targets only, so an **Intel Mac** or **Windows**
-  cannot run a local install: `nx init` stops with an error naming how to get
-  a bundle, rather than falling back to anything.
+  is built for those four targets only, so an **Intel Mac** or **Windows on
+  ARM** cannot run a local install: `nx init` stops with an error naming how to
+  get a bundle, rather than falling back to anything.
+  Native Windows x64 works through the same two steps as the other platforms,
+  `uv tool install conexus` and `nx init --service`, using the published
+  windows-x64 engine and PostgreSQL bundle. It passed a test from PyPI on a
+  clean Windows 11 x64 machine (conexus 7.72.1: `nx init --service`, a live
+  Claude Code session with MCP store and search, hooks, stop and restart), but
+  Windows is **not yet declared supported**. Known gaps: the Claude Desktop
+  extension has not been run on Windows (nexus-ijue9.21); the client's own
+  `onnxruntime` and `pymupdf` packages may need the Visual C++ runtime on a
+  clean machine (nexus-lqjll); the Windows binaries are not code-signed
+  (nexus-dj01b), and a machine with Smart App Control enforcing was not tested;
+  Windows on ARM is out of scope.
   No GPU is required, and none is used by default. Search embeds through a
   bundled ONNX model on CPU (`CPUExecutionProvider` is the only provider in
   the tree). On Linux the installer additionally pins torch to its CPU build,
