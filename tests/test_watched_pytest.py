@@ -40,7 +40,7 @@ def _watch(tmp_path: Path, body: str, *extra: str, env: dict[str, str] | None = 
     status = tmp_path / "status.json"
     proc = subprocess.run(
         [sys.executable, str(SCRIPT), "--log", str(tmp_path / "run.log"), "--status", str(status),
-         "--cwd", str(tmp_path), *extra, "--",
+         "--cwd", str(tmp_path), "--no-notify", *extra, "--",
          sys.executable, "-m", "pytest", "test_case.py", "-p", "no:cacheprovider", "-o", "addopts="],
         capture_output=True, text=True, timeout=120, env={**os.environ, **(env or {})},
     )
@@ -136,3 +136,51 @@ def test_the_hung_test_is_tracked_from_v_lines() -> None:
     # pytest leaves the line open while the test runs: the hang sits there.
     watch.feed("t.py::test_c ")
     assert watch.current_test == "t.py::test_c"
+
+
+def _status(state: str) -> "wp.Status":
+    return wp.Status(state=state, command=["pytest"], started_at=0.0, elapsed_s=12.0,
+                     exit_code=124, current_test="t.py::test_hangs", detail="no output for 180s",
+                     tail=["a", "b", "t.py::test_hangs "])
+
+
+def test_an_ntfy_url_publishes_text_with_ntfy_headers_over_https() -> None:
+    req = wp.notify_request("ntfy://ntfy.example/topic-x?title=Beszel&click=http://hub:8090",
+                            _status("stalled"), "qwentescence")
+    assert req.full_url == "https://ntfy.example/topic-x"
+    assert req.get_method() == "POST"
+    headers = {k.lower(): v for k, v in req.header_items()}
+    assert headers["title"] == "Beszel: qwentescence: pytest stalled"
+    assert headers["priority"] == "5" and "rotating_light" in headers["tags"]
+    assert headers["click"] == "http://hub:8090"
+    body = req.data.decode()
+    assert "t.py::test_hangs" in body and "no output for 180s" in body
+    assert "\na\n" not in f"\n{body}\n", "a named test needs no stack tail in the push"
+
+
+def test_a_pass_is_low_priority_and_carries_no_tail() -> None:
+    req = wp.notify_request("ntfy://ntfy.example/t", _status("passed"), "h")
+    headers = {k.lower(): v for k, v in req.header_items()}
+    assert headers["priority"] == "2" and "click" not in headers
+    assert "t.py::test_hangs " not in req.data.decode().splitlines()
+
+
+def test_any_other_url_gets_json() -> None:
+    req = wp.notify_request("https://hooks.example/x", _status("failed"), "h")
+    payload = json.loads(req.data)
+    assert payload["state"] == "failed" and payload["title"] == "h: pytest failed"
+
+
+def test_the_notify_url_resolves_flag_then_env_then_host_file(tmp_path: Path) -> None:
+    config = tmp_path / "notify-url"
+    assert wp.resolve_notify_url(None, env={}, config=config) is None
+    config.write_text("ntfy://from-file/t\n")
+    assert wp.resolve_notify_url(None, env={}, config=config) == "ntfy://from-file/t"
+    env = {"WATCHED_PYTEST_NOTIFY_URL": "ntfy://from-env/t"}
+    assert wp.resolve_notify_url(None, env=env, config=config) == "ntfy://from-env/t"
+    assert wp.resolve_notify_url("ntfy://flag/t", env=env, config=config) == "ntfy://flag/t"
+
+
+def test_a_failed_notify_never_echoes_the_private_topic() -> None:
+    problem = wp._notify("ntfy://127.0.0.1:1/secret-topic", _status("stalled"))
+    assert problem is not None and "secret-topic" not in problem

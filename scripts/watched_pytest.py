@@ -23,7 +23,8 @@ What it adds to the command:
   live and once at the end, that a poller reads in one call instead of
   guessing from a log: ``state`` is running, passed, failed, stalled,
   console_break, timeout or error.
-* Optionally a POST of the final status to ``--notify-url``.
+* A notification of the final status (ntfy, the same channel Beszel alerts
+  use, or any JSON webhook) when a URL is configured for the host.
 
 Exit codes: the command's own when it finished, 124 stalled, 125 killed by a
 console Ctrl event, 126 hit ``--max-total``, 2 bad arguments. Stdlib only.
@@ -39,12 +40,14 @@ import argparse
 import codecs
 import json
 import os
+import platform
 import re
 import signal
 import subprocess
 import sys
 import threading
 import time
+import urllib.parse
 import urllib.request
 from collections import deque
 from dataclasses import asdict, dataclass, field
@@ -216,18 +219,75 @@ def _write_status(path: Path | None, status: Status) -> None:
     os.replace(tmp, path)
 
 
-def _notify(url: str, status: Status) -> str | None:
+#: ntfy priorities by final state: a run that hung or was killed is urgent, a pass is not.
+_NTFY_PRIORITY: dict[str, str] = {
+    "stalled": "5", "console_break": "5", "timeout": "4", "error": "4", "failed": "4", "passed": "2",
+}
+_NTFY_TAGS: dict[str, str] = {
+    "stalled": "hourglass,rotating_light", "console_break": "boom,rotating_light",
+    "timeout": "hourglass", "error": "x", "failed": "x", "passed": "white_check_mark",
+}
+
+
+def resolve_notify_url(explicit: str | None, env: dict[str, str] | None = None,
+                       config: Path | None = None) -> str | None:
+    """``--notify-url``, else ``$WATCHED_PYTEST_NOTIFY_URL``, else the first line of
+    ``~/.config/watched-pytest/notify-url``. The URL carries a private ntfy topic, so
+    it lives on each host, never in the repo."""
+    if explicit:
+        return explicit
+    env = os.environ if env is None else env
+    if url := env.get("WATCHED_PYTEST_NOTIFY_URL", "").strip():
+        return url
+    config = config or Path.home() / ".config" / "watched-pytest" / "notify-url"
+    try:
+        return config.read_text(encoding="utf-8").strip().splitlines()[0].strip() or None
+    except (OSError, IndexError):
+        return None
+
+
+def notify_request(url: str, status: Status, host: str) -> urllib.request.Request:
+    """The HTTP request for *url*. ``ntfy://host/topic?title=..&click=..`` (the
+    shoutrrr form Beszel uses) publishes text with ntfy headers over HTTPS; any
+    other URL gets the status as JSON."""
+    title = f"{host}: pytest {status.state}"
+    lines = [_summary(status)]
+    if status.detail:
+        lines.append(status.detail)
+    if status.state != "passed":
+        # With a named test the tail is mostly faulthandler frames from the bottom of
+        # pytest's stack; the log and the status file carry them. Without one, the
+        # tail is the only clue.
+        lines.append(f"log: {status.log}" if status.current_test else "\n".join(status.tail[-5:]))
+    message = "\n".join(lines)
+    parsed = urllib.parse.urlsplit(url)
+    if parsed.scheme == "ntfy":
+        query = dict(urllib.parse.parse_qsl(parsed.query))
+        headers = {
+            "Title": f"{query['title']}: {title}" if query.get("title") else title,
+            "Priority": _NTFY_PRIORITY.get(status.state, "3"),
+            "Tags": _NTFY_TAGS.get(status.state, ""),
+        }
+        if query.get("click"):
+            headers["Click"] = query["click"]
+        target = urllib.parse.urlunsplit(("https", parsed.netloc, parsed.path, "", ""))
+        return urllib.request.Request(target, data=message.encode(), headers=headers, method="POST")
     body = json.dumps({
-        "title": f"watched_pytest {status.state}",
-        "message": _summary(status),
+        "title": title, "message": message,
         **{k: v for k, v in asdict(status).items() if k != "tail"},
     }).encode()
-    request = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"})
+    return urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"},
+                                  method="POST")
+
+
+def _notify(url: str, status: Status) -> str | None:
     try:
-        with urllib.request.urlopen(request, timeout=15):  # noqa: S310 -- caller-chosen URL
+        request = notify_request(url, status, platform.node() or "unknown-host")
+        with urllib.request.urlopen(request, timeout=15):  # noqa: S310 -- the host's own configured URL
             return None
-    except OSError as exc:
-        return f"notify failed: {exc}"
+    except (OSError, ValueError) as exc:
+        # Never echo the URL: it holds the private topic.
+        return f"notify failed: {type(exc).__name__}"
 
 
 def _summary(status: Status) -> str:
@@ -286,8 +346,8 @@ def run(args: argparse.Namespace, out: IO[str]) -> int:
                          "a test probably sent Ctrl+Break to a pid outside its own process group")
     elif state == "timeout":
         status.detail = f"ran past --max-total {args.max_total:.0f}s; killed the process tree"
-    if args.notify_url:
-        if (problem := _notify(args.notify_url, status)) is not None:
+    if not args.no_notify and (notify_url := resolve_notify_url(args.notify_url)):
+        if (problem := _notify(notify_url, status)) is not None:
             status.detail = f"{status.detail or ''}; {problem}".lstrip("; ")
     _write_status(status_path, status)
     print(f"watched_pytest: {_summary(status)}", file=out)
@@ -316,7 +376,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--status", default="watched-pytest.status.json",
                         help="JSON status file path ('' to disable)")
     parser.add_argument("--notify-url", default=None,
-                        help="POST the final status as JSON to this URL")
+                        help="where to send the final status: an ntfy://host/topic?title=..&click=.. "
+                             "URL (published as ntfy text) or any URL (JSON POST). Default: "
+                             "$WATCHED_PYTEST_NOTIFY_URL, else ~/.config/watched-pytest/notify-url, "
+                             "else none")
+    parser.add_argument("--no-notify", action="store_true",
+                        help="send nothing, even when a URL is configured")
     parser.add_argument("--cwd", default=None, help="run the command here")
     parser.add_argument("command", nargs=argparse.REMAINDER,
                         help="the pytest command, after --")
