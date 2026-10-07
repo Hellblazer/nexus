@@ -132,6 +132,16 @@ After the cut publishes (Step 4), confirm it carries them:
 uv run python scripts/check_engine_release_floor.py --require-windows engine-service-vX.Y.Z   # exit 0 = published, all 27 assets
 ```
 
+### 3g. PRE-TAG check: no held changeset in the tagged tree (nexus-3wh8d.28)
+
+```bash
+TAG_TREE=/path/to/worktree-at-the-commit-you-will-tag
+git -C "$TAG_TREE" status --short   # clean
+uv run python scripts/check_release_holds.py --root "$TAG_TREE"   # exit 0 = RELEASE_HOLDS_CLEAR
+```
+
+`scripts/release-holds.txt` lists changesets that have landed on develop ahead of their release gates; a tag from develop would ship them to the cloud and, through the pin, to every local install. Exit 1 names each held changeset and its bead: do not tag. Either cut from a commit without the changeset, or release it by deleting its line in a reviewed commit once its bead says it may ship (for `vectors-030-1`: RDR-225's .19 closed, the PITR-fork rehearsal recorded, and Sam's go). The release workflow's `create-release` job runs the same check on the tagged tree and refuses to create the release, so a tag pushed past this step builds nothing.
+
 ### 4. Push the tag (human, or AI when explicitly authorized)
 
 Releaser is **human, every time** (AI preps + validates; the human pushes the

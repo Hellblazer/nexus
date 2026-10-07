@@ -1,0 +1,3 @@
+# Changesets on develop that no engine tag may carry yet (scripts/check_release_holds.py, nexus-3wh8d.28).
+# One per line: <changeset-id> <bead> <reason>. Releasing a changeset is deleting its line in a reviewed commit.
+vectors-030-1 nexus-3wh8d.28 RDR-225 one-way partition walk; ships only with the RDR-225 release (.19 closed, PITR-fork rehearsal recorded, Sam's go)
