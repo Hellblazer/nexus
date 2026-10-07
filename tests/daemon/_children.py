@@ -91,6 +91,33 @@ def spawn_breakable(*, ignore_break: bool, where: Path) -> "subprocess.Popen[byt
     return proc
 
 
+def spawn_sleeper(tail: list[str], *, seconds: int = 120) -> "subprocess.Popen[bytes]":
+    """A live, sleeping child whose argv ends in *tail*, in its own process group, once it is UP.
+
+    For the tests that hand a pid to a real stop (``terminate_pids``, ``stop_tier_holders``,
+    uninstall). Three Windows facts decide the shape:
+
+    * its own group (:func:`tests._child_process.popen_in_group`), because the stop is a
+      ``CTRL_BREAK`` addressed to the pid, and a pid that is not a group id sends the break
+      to every process on the console, the pytest run included;
+    * :data:`CHILD_PYTHON`, because the venv launcher swallows a break and sleeps in a child
+      of its own, so the pid the test records is not the process that sleeps;
+    * it returns only after the child printed ``up``, because a break sent before a new
+      process has attached to the console reaches nobody and the stop then waits out its
+      whole grace window before the hard kill.
+    """
+    from tests._child_process import popen_in_group  # noqa: PLC0415 — keeps this module's import cost at what conftest already pays
+
+    proc = popen_in_group(
+        [CHILD_PYTHON, "-c", f"import time; print('up', flush=True); time.sleep({seconds})", *tail],
+        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+    )
+    assert proc.stdout is not None
+    assert proc.stdout.readline().strip() == b"up", "fixture must have started"
+    proc.stdout.close()
+    return proc
+
+
 @pytest.fixture
 def launchd_uid(monkeypatch: pytest.MonkeyPatch) -> int:
     """A POSIX uid for the tests that run launchd's arm on any host.

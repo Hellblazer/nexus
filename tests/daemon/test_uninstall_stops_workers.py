@@ -23,7 +23,6 @@ injected through the autostart layout.
 from __future__ import annotations
 
 import subprocess
-import sys
 from pathlib import Path
 
 import pytest
@@ -34,24 +33,15 @@ from nexus.commands import daemon as daemon_cmd
 from nexus.daemon import installer
 from nexus.daemon.aspect_worker_daemon import TIER as ASPECT_TIER
 from nexus.daemon.service_registry import ServiceRegistry
-from tests._child_process import popen_in_group
+from tests.daemon._children import spawn_sleeper
 
 _ASPECT_ARGV = ["-m", "nexus.cli", "daemon", "aspect-worker", "start"]
 _LABEL_ARGV = ["-m", "nexus.cli", "taxonomy", "label"]
 
 
 def _spawn(tail: list[str]) -> subprocess.Popen[bytes]:
-    """A live process whose command line reads like the worker's.
-
-    Spawned in its own process group, as production spawns every worker this
-    uninstall can stop: the Windows stop is a ``CTRL_BREAK`` addressed to the
-    pid, and a pid that is not a group id sends the break to every process on
-    the console, the test runner and its shell included.
-    """
-    return popen_in_group(
-        [sys.executable, "-c", "import time; time.sleep(120)", *tail],
-        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-    )
+    """A live process whose command line reads like the worker's, in its own group."""
+    return spawn_sleeper(tail)
 
 
 class _Manager:

@@ -91,7 +91,7 @@ from nexus.daemon.service_registry import (
 from nexus.util.process_group import KILL_SIGNAL
 from nexus.util.win_console import ConsoleBreakResult
 from nexus import session as _sess
-from tests._child_process import popen_in_group
+from tests.daemon._children import CHILD_PYTHON, spawn_sleeper
 from tests._module_seam import patch_in, patch_time
 
 # RDR-224 (nexus-f9bgu.19): this suite runs on native Windows too. The three
@@ -485,11 +485,30 @@ class StorageServiceRecordHarness(_LeaseHarness):
         sup._service_port = 1
         sup._pg_port = 1
 
-        engine = subprocess.Popen(  # noqa: S603 — fixed argv, this interpreter
-            [sys.executable, "-c", "import time; time.sleep(60)"],
+        # The stand-in engine must be UP before the loop runs, and must be the
+        # process that sleeps. On Windows the venv ``python.exe`` is a launcher that
+        # swallows a CTRL_BREAK and spawns the real interpreter as its child, and
+        # a break sent before that child is attached to the console reaches nobody:
+        # the loop's first tick fenced and stopped the engine within milliseconds,
+        # the break missed, and the stop waited the whole 5 s grace before its
+        # Job Object kill ("took 5.02s", measured on qwentescence, reproducible
+        # under ``pytest -q``, which starts the test sooner than ``-v``). The
+        # production engine is only stopped after its readiness probe passed, so
+        # the test waits for the same fact: the child has run its first line.
+        ready = self._cd.parent / "engine-stand-in.ready"  # beside the config dir, not in it
+        engine = subprocess.Popen(  # noqa: S603 — fixed argv, the launcher-free interpreter
+            [
+                CHILD_PYTHON, "-c",
+                "import sys, time; open(sys.argv[1], 'w').close(); time.sleep(60)",
+                str(ready),
+            ],
             start_new_session=True,
             **_OWN_GROUP,  # the supervisor's stop sends a REAL CTRL_BREAK on Windows
         )
+        ready_deadline = time.monotonic() + 30.0
+        while not ready.exists() and time.monotonic() < ready_deadline:
+            time.sleep(0.02)
+        assert ready.exists(), "the stand-in engine never started"
         sup._proc = engine
         owner_registry = ServiceRegistry(dir=self._cd, tier=self._REGISTRY_TIER, clock=self._clock)
         sup._registry = owner_registry
@@ -946,16 +965,13 @@ _TEARDOWN_MARKER = "nexus-teardown-conformance-holder"
 
 
 def _spawn_holder() -> subprocess.Popen[bytes]:
-    """A holder in its own process group, as production spawns every holder.
+    """A holder in its own process group, up and sleeping, as production holders are.
 
     On Windows the teardown is a ``CTRL_BREAK`` addressed to the holder's pid;
     a pid that is not a group id sends the break to every process on the
     console, pytest included (the run died at 23%, nexus-f9bgu).
     """
-    return popen_in_group(
-        [sys.executable, "-c", "import time; time.sleep(120)", _TEARDOWN_MARKER],
-        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-    )
+    return spawn_sleeper([_TEARDOWN_MARKER], seconds=120)
 
 
 class TestTeardownStopsHolders:

@@ -12,6 +12,7 @@ import subprocess
 from pathlib import Path
 
 from nexus.commands.index import _spawn_deferred_labeling
+from nexus.util.process_group import isolation_popen_kwargs
 
 
 class TestSpawnDeferredLabeling:
@@ -64,8 +65,6 @@ class TestSpawnDeferredLabeling:
         # detached: own session on POSIX, own process group on Windows (where
         # ``nx uninstall`` stops this run with a CTRL_BREAK that only reaches a
         # group leader), no inherited stdio pipes back to us
-        from nexus.util.process_group import isolation_popen_kwargs
-
         expected = isolation_popen_kwargs()
         assert expected, "the isolation kwargs are never empty"
         assert {k: calls[0].get(k) for k in expected} == expected
