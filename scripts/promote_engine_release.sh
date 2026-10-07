@@ -20,9 +20,14 @@
 # forever. The workflow normalises the variable to the literal "on" or "off" and
 # passes it as the optional third argument; this script reads no GitHub state and
 # no environment, so both states are driven by tests/scripts/. Omitted means off.
-# "on" expects 27 assets (the PG bundle and the engine archive add 6) and holds the
-# engine archive to its size ceiling too; "off" expects the 21 and measures only the
+# "on" expects 36 assets (the PG bundle and the engine archive add 6) and holds the
+# engine archive to its size ceiling too; "off" expects the 30 and measures only the
 # three binaries.
+#
+# Each Linux and macOS engine ships twice: the single file (with .cosign.bundle, for
+# the cloud deploy) and nexus-service-<arch>.txz (with .sha256 and .sigstore.json,
+# which the local install downloads). Both are required here; releases cut before the
+# archives existed carry only the single file, and the client reads either.
 # Any other value is a wiring bug and exits 2 before gh is called, never "off".
 #
 # Usage: promote_engine_release.sh <tag> <owner/repo> [on|off]
@@ -46,6 +51,7 @@ expected=""
 for arch in linux-amd64 linux-arm64 mac-arm64; do
   b="nexus-service-$arch"
   expected="$expected $b $b.sha256 $b.cosign.bundle $b.sigstore.json"
+  expected="$expected $b.txz $b.txz.sha256 $b.txz.sigstore.json"
   p="nexus-pg-$arch.txz"
   expected="$expected $p $p.sha256 $p.sigstore.json"
 done

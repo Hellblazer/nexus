@@ -803,7 +803,8 @@ class TestCheckDataEffectRelay:
 
 
 class TestRequireWindows:
-    """The opt-in Windows-assets check: 27 assets on a published tag, and nothing else changes."""
+    """The opt-in Windows-assets check: 36 assets on a published tag (27 on one cut before the
+    POSIX engine archives), and nothing else changes."""
 
     TAG = "engine-service-v0.1.140"
     ALL = gate.expected_engine_assets(windows=True)
@@ -812,9 +813,16 @@ class TestRequireWindows:
     def _release(names, *, draft=False):
         return _gh({"isDraft": draft, "assets": [{"name": n} for n in names]})
 
-    def test_the_asset_sets_are_21_and_27(self) -> None:
-        assert len(gate.expected_engine_assets(windows=False)) == 21
-        assert len(self.ALL) == 27 and len(set(self.ALL)) == 27
+    def test_the_asset_sets_are_30_and_36(self) -> None:
+        assert len(gate.expected_engine_assets(windows=False)) == 30
+        assert len(self.ALL) == 36 and len(set(self.ALL)) == 36
+        old = gate.expected_engine_assets(windows=True, posix_archives=False)
+        assert len(old) == 27 and set(old) < set(self.ALL)
+        assert set(self.ALL) - set(old) == {
+            f"nexus-service-{arch}.txz{suffix}"
+            for arch in ("linux-amd64", "linux-arm64", "mac-arm64")
+            for suffix in ("", ".sha256", ".sigstore.json")
+        }
         assert set(gate.expected_engine_assets(windows=False)) < set(self.ALL)
         windows = set(self.ALL) - set(gate.expected_engine_assets(windows=False))
         assert windows == {
@@ -826,13 +834,28 @@ class TestRequireWindows:
     def test_a_published_release_with_all_27_passes(self, capsys) -> None:
         with patch.object(gate.subprocess, "run", return_value=self._release(self.ALL)):
             assert gate.check_windows_assets(self.TAG) == 0
+        assert "all 36 assets" in capsys.readouterr().out
+
+    def test_a_release_from_before_the_posix_archives_is_held_to_its_27(self, capsys) -> None:
+        """The pinned engine at the time of this change (v0.1.149) has no .txz for Linux or macOS."""
+        old = gate.expected_engine_assets(windows=True, posix_archives=False)
+        with patch.object(gate.subprocess, "run", return_value=self._release(old)):
+            assert gate.check_windows_assets(self.TAG) == 0
         assert "all 27 assets" in capsys.readouterr().out
+
+    def test_a_partial_set_of_posix_archives_is_held_to_all_36(self, capsys) -> None:
+        old = gate.expected_engine_assets(windows=True, posix_archives=False)
+        with patch.object(gate.subprocess, "run",
+                          return_value=self._release([*old, "nexus-service-mac-arm64.txz"])):
+            assert gate.check_windows_assets(self.TAG) == 1
+        err = capsys.readouterr().err
+        assert "missing 8 of 36" in err and "nexus-service-linux-amd64.txz" in err
 
     def test_a_cut_with_the_switch_off_is_named_as_such(self, capsys) -> None:
         with patch.object(gate.subprocess, "run", return_value=self._release(gate.expected_engine_assets(windows=False))):
             assert gate.check_windows_assets(self.TAG) == 1
         err = capsys.readouterr().err
-        assert "missing 6 of 27" in err and "nexus-service-windows-x64.txz" in err
+        assert "missing 6 of 36" in err and "nexus-service-windows-x64.txz" in err
         assert "NX_WINDOWS_RELEASE_LEGS off" in err and "another cut" in err
 
     def test_any_single_missing_asset_fails_and_is_named(self, capsys) -> None:
