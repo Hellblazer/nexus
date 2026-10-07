@@ -7,105 +7,35 @@
 [![Python versions](https://img.shields.io/pypi/pyversions/conexus)](https://pypi.org/project/conexus/)
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 
-The package on PyPI is `conexus`. The command it installs is `nx`. The full install guide, with a version for each way of using Claude, is at [hellblazer.github.io/nexus](https://hellblazer.github.io/nexus/). The commands below are the same ones.
+**Install:** follow the [install guide at hellblazer.github.io/nexus](https://hellblazer.github.io/nexus/). It has a version for Claude Code, for the `nx` CLI alone, and for Claude Desktop, on macOS, Linux and Windows.
 
-## Before you start
+The package on PyPI is `conexus`. The command it installs is `nx`.
 
-| Need | Why | Check |
-|---|---|---|
-| Python 3.12 or 3.13 | Python 3.14 does not work yet, which is why the install command below names 3.12. uv downloads it for you. | `python3 --version` |
-| [uv](https://docs.astral.sh/uv/) | Installs and runs the `nx` command. | `uv --version` |
-| git | Nexus reads git information when it indexes a repository. | `git --version` |
-| About 600 MB, a few minutes | The first run downloads the service program, a database, and the search model. | |
-| Apple Silicon Mac, Linux on x86-64 or arm64, or Windows 11 on x64 | Nexus ships its own PostgreSQL and never uses one you installed. The bundle exists for these four only, so an Intel Mac or Windows on ARM cannot run a local install: setup stops with an error rather than falling back. On native Windows x64, `uv tool install conexus` followed by `nx init --service` installs and starts the service. That path passed a test on a clean Windows 11 x64 machine from PyPI (conexus 7.72.1), but Windows is not yet declared supported. Not yet covered: the Claude Desktop extension on Windows, the Visual C++ runtime that the client's own onnxruntime and pymupdf packages may need on a clean machine, and Smart App Control. The Windows binaries are not code-signed. | `uname -sm` (Windows: `systeminfo`, look for `x64-based PC`) |
-| No GPU | Search runs a bundled CPU model. On Linux the installer pins torch to its CPU build, since the default wheel pulls ~4.5 GB of CUDA packages nothing here uses; `NX_TORCH_BACKEND` opts a GPU box back in. | |
-| About 1.2 GB idle, up to about 4.5 GB while indexing | The bundled PostgreSQL is light; the engine process (embedding + reranking model) holds the rest. Measured on an Apple Silicon Mac indexing this repo (~2,500 files, `nx index repo`). | |
+## Quick start
 
-## Install
-
-Run the steps in this order. Each step can be run again without harm.
-
-**1. Install the `nx` command.** The second command moves it to the layout that Nexus manages.
+The common case: Claude Code on macOS or Linux, with [uv](https://docs.astral.sh/uv/) and git already installed.
 
 ```bash
-uv tool install conexus --python 3.12
-nx self install
+uv tool install conexus --python 3.12   # install nx; --python 3.12 is required, Python 3.14 does not work yet
+nx self install                         # move nx to the layout Nexus manages
+nx init                                 # download and start the storage service; answer yes to start at login
+nx doctor                               # every line must show ✓ ("credentials not set" is normal)
 ```
 
-`--python 3.12` is part of the command, not an option. Without it uv picks an interpreter itself, and on a machine that has no other one — a fresh Ubuntu 26.04, whose `python3` is 3.14 — it picks 3.14 and the install stops with a resolver error naming torch wheels. uv downloads 3.12 for you if you do not have it.
-
-If the terminal cannot find `nx` afterward, add `~/.local/bin` to your PATH and open a new terminal.
-
-**2. Set up the storage service.** This downloads the service program, the database, and the search model, starts the service, and asks whether it should start at login. Answer yes.
-
-```bash
-nx init
-```
-
-`nx init --yes` answers for you. `nx init --no-autostart` skips the login item.
-
-**3. Check the install.**
-
-```bash
-nx doctor
-```
-
-Every line must show ✓. One line may say "credentials not set". That is normal for a local install.
-
-**4. Add the Claude Code plugin.** Check `node --version` first. Then start `claude` and type these two commands inside Claude Code, not in the terminal:
+Then start `claude` and type these two lines inside Claude Code, not in the terminal:
 
 ```
 /plugin marketplace add Hellblazer/nexus
 /plugin install conexus@nexus-plugins
 ```
 
-Then run `/conexus:nx-preflight`. It checks that everything the plugin needs is present. The plugin uses the `nx` command from step 1, which is why step 1 comes first.
+The [install guide](https://hellblazer.github.io/nexus/#before) has the requirements, the Windows path, the Claude Desktop extension, and how to index your first repository.
 
-**5. Index a repository and search it.**
+## Update, remove, problems
 
-```bash
-cd your-project
-nx index repo .
-nx search "how does retry work"
-```
-
-Indexing the same repository again skips files that did not change. For a large repository, add `--monitor` to see progress per file.
-
-**Claude Desktop without Claude Code:** do steps 1 to 3, then download `conexus.mcpb` from the [latest release](https://github.com/Hellblazer/nexus/releases/latest) and double-click it. Claude Desktop adds it under Settings, Connectors, as "Conexus". If you already use the plugin in Claude Code, do not add the extension as well; Claude Desktop already sees the plugin's tools.
-
-## Update
-
-Two commands. Always run both.
-
-```bash
-nx self install   # install the new version next to the current one
-nx upgrade        # update the service, the data, and the plugins
-```
-
-Do not update with `uv tool install conexus` or with `--force`. That removes the local search model, and search then returns nothing. If that happened, `nx self install` repairs it.
-
-## Remove
-
-```bash
-nx uninstall                          # preview, changes nothing
-nx uninstall --yes --remove-data      # stop the service, remove autostart, delete the data
-uv tool uninstall conexus
-rm -rf ~/.local/share/nexus
-```
-
-The full sequence, including exporting your knowledge first and removing the Claude integration, is on the site under [Remove Nexus completely](https://hellblazer.github.io/nexus/#uninstall).
-
-## Problems
-
-| Symptom | Do this |
-|---|---|
-| `nx: command not found` | Add `~/.local/bin` to your PATH and open a new terminal. If PATH is right, run `nx self install`. |
-| The install itself fails with "No solution found when resolving dependencies" and a hint about torch ABI tags | You left `--python 3.12` off the install command and your `python3` is 3.14. Run it again with the flag. |
-| Crash on startup, or an import error naming voyageai or Pydantic v1 | You are on Python 3.14. Run `uv tool install conexus --force --python 3.12`, then `nx self install`. |
-| `nx doctor` says credentials not set | Normal for a local install. Only the cloud service needs a token. |
-| `nx search` returns nothing | Run `nx doctor`. If the index was interrupted, run `nx index repo .` again. If you updated with `uv tool install`, see Update above. |
-| Plugin installed but its tools never appear | The `nx` command is missing. Run `/conexus:nx-preflight`. |
-| Nothing above helps | Paste the [recovery runbook](https://gist.github.com/Hellblazer/08f0a615e3d73e47d8062bce4829b611) as the first message of a Claude Code session. It checks the install step by step and asks before changing any data. |
+- **Update:** run `nx self install`, then `nx upgrade`. Do not update with `uv tool install conexus` or `--force`: that removes the local search model and search returns nothing. Details: [Update Nexus](https://hellblazer.github.io/nexus/#update).
+- **Remove:** [Remove Nexus completely](https://hellblazer.github.io/nexus/#uninstall) covers exporting your knowledge first, removing the Claude integration, and deleting the service and data.
+- **Problems:** see [Problems](https://hellblazer.github.io/nexus/#problems). If nothing there helps, paste the [recovery runbook](https://gist.github.com/Hellblazer/08f0a615e3d73e47d8062bce4829b611) as the first message of a Claude Code session. It checks the install step by step and asks before it changes any data.
 
 ## What you installed
 
