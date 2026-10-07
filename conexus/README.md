@@ -54,7 +54,7 @@ story.
 - **5 standard pipelines** — feature, bug, research, onboarding, architecture (`plan-auditor` / `plan-enricher` / `knowledge-tidier` steps now direct MCP tool invocations per RDR-080)
 - **Session hooks** — surface T2 memory context, prime beads, health-check dependencies
 - **Permission auto-approval** — safe commands and all nexus MCP tools skip the confirmation prompt
-- **Two bundled MCP servers** — `nexus` (44 tools: search, query, store, memory, scratch, plans, traverse, scoped/graph-hop search, and 5 orchestration tools including `nx_answer` for plan-centric retrieval, whose plans run the 10 LLM-backed operators) and `nexus-catalog` (10 catalog tools) — plus `sequential-thinking` fetched via npx
+- **Two bundled MCP servers** — `nexus` (44 tools: search, query, store, memory, scratch, plans, traverse, scoped/graph-hop search, and 5 orchestration tools including `nx_answer` for plan-centric retrieval, whose plans run the 10 LLM-backed operators) and `nexus-catalog` (10 catalog tools) — plus `sequential-thinking`, a standard-library Python server started through uv
 
 ### Pick your entry point
 
@@ -432,7 +432,7 @@ The nexus core server exposes 42 MCP tools and the nexus-catalog server exposes 
 
 ### Sequential Thinking
 
-No separate install required — `npx` fetches `@modelcontextprotocol/server-sequential-thinking` on first use.
+No separate install required. The server is `mcp/sequential_thinking.py` in this plugin, a standard-library Python port of `@modelcontextprotocol/server-sequential-thinking` (same tool name and parameters), started with `uv tool run`. Node.js is not needed (nexus-f9bgu).
 
 ## Key Concepts
 

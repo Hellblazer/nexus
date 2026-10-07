@@ -427,16 +427,6 @@ def test_doctor_missing_git_hint_leads_windows_with_no_admin_portablegit(runner,
     assert "docs/windows-install.md#2-install-git" in out
 
 
-def test_doctor_missing_npx_includes_winget_hint(runner, mock_reg):
-    """nexus-njmg: Node.js (npx) Fix-line must include winget so
-    Windows plugin users can install the MCP-server runtime.
-    """
-    def which_side(name):
-        return None if name == "npx" else f"/usr/bin/{name}"
-    result = _invoke(runner, mock_reg, which=which_side)
-    assert "winget install --id OpenJS.NodeJS.LTS --scope user" in result.output
-
-
 def test_doctor_missing_bd_includes_release_zip_hint(runner, mock_reg):
     """nexus-njmg: bd has no winget package; the Fix-line must point
     at the GitHub releases page so Windows users can find the right
@@ -465,17 +455,15 @@ def test_doctor_missing_bd_output(runner, mock_reg):
     assert "BeadsProject/beads" in result.output
 
 
-def test_doctor_missing_npx_is_non_fatal_with_plugin_hint(runner, mock_reg):
-    """Missing npx is plugin-only — non-fatal for the CLI but reported with
-    a clear hint that the plugin's MCP servers will fail without it."""
+def test_doctor_has_no_npx_row(runner, mock_reg):
+    """nexus-f9bgu: no plugin MCP server needs Node.js any more, so doctor
+    must not tell a user without npx that plugin servers will fail."""
     def which_side(name):
         return None if name == "npx" else f"/usr/bin/{name}"
     result = _invoke(runner, mock_reg, which=which_side)
-    assert result.exit_code == 0, "missing npx must not fail nx doctor (plugin-only)"
-    assert "npx (Node.js, plugin-only)" in result.output
-    assert "not found" in result.output
-    assert "sequential-thinking" in result.output or "context7" in result.output
-    assert "nodejs.org" in result.output
+    assert "npx (Node.js" not in result.output
+    assert "nodejs.org" not in result.output
+    assert "OpenJS.NodeJS" not in result.output
 
 
 # ── Python version ──────────────────────────────────────────────────────────
