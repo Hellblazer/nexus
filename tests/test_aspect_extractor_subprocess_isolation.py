@@ -37,6 +37,7 @@ import pytest
 import nexus.aspect_extractor as ax
 import nexus.pdeathsig as pdeathsig
 from tests._module_seam import delattr_in, setattr_in
+from tests.test_win_job import live_children, reap_live_children
 
 
 def _pid_alive(pid: int) -> bool:
@@ -553,7 +554,14 @@ def windows_shaped_real_spawn(monkeypatch: pytest.MonkeyPatch):
     fake = _FakeKernel32()
     monkeypatch.setattr(win_job, "_kernel32", fake)
     monkeypatch.setattr(pg, "isolation_popen_kwargs", lambda: {})
-    return fake
+    yield fake
+    # The fake kernel32 closes the job without terminating anything, so a
+    # child the code under test "killed" is in fact still running. Each
+    # test reaps its own children; this check fails the test if one is
+    # still alive afterwards, and kills it anyway so a failure leaks nothing.
+    leaked = live_children(fake.opened_pids())
+    reap_live_children(leaked)
+    assert not leaked, f"child pid(s) {leaked} still alive after the test"
 
 
 def _job_handle_from(fake) -> int:
@@ -596,11 +604,15 @@ class TestJobHandleClosesOnEveryOutcome:
         self, windows_shaped_real_spawn,
     ) -> None:
         fake = windows_shaped_real_spawn
-        with pytest.raises(subprocess.TimeoutExpired):
-            ax._run_claude_isolated(
-                "x", timeout=0.2,
-                _argv=[sys.executable, "-c", "import time; time.sleep(999)"],
-            )
+        try:
+            with pytest.raises(subprocess.TimeoutExpired):
+                ax._run_claude_isolated(
+                    "x", timeout=0.2,
+                    _argv=[sys.executable, "-c", "import time; time.sleep(999)"],
+                )
+        finally:
+            # The fake job close terminated nothing: the child is ours to kill.
+            reap_live_children(fake.opened_pids())
         job = _job_handle_from(fake)
         assert fake.closed_handles.count(job) == 1, (
             f"job {job} closed {fake.closed_handles.count(job)} times on "
