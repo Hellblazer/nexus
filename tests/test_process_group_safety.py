@@ -22,7 +22,7 @@ import pytest
 
 from nexus.util.process_group import KILL_SIGNAL, safe_killpg
 from tests.daemon._children import CHILD_PYTHON, OWN_GROUP
-from tests._module_seam import setattr_in
+from tests._module_seam import delattr_in, setattr_in
 
 #: The primitive ``safe_killpg`` signals through on this host: ``os.killpg`` where it
 #: exists, ``os.kill`` on Windows (one process, no group). A test that traces "no
@@ -349,7 +349,7 @@ class TestIsolationPopenKwargsWindowsShaped:
         from nexus.util import process_group as pg
         from nexus.util import win_job
 
-        monkeypatch.delattr(os, "killpg", raising=False)
+        delattr_in(monkeypatch, ("nexus.bounded_subprocess", "nexus.util.process_group"), "os.killpg", raising=False)
         assert isinstance(pg.isolation_popen_kwargs(), dict)
         assert pg.isolation_popen_kwargs() == {
             "creationflags": win_job.CREATE_NEW_PROCESS_GROUP,
@@ -396,7 +396,7 @@ class TestContainAndKillTreeWindowsShaped:
         from nexus.util import win_job
         from tests.test_win_job import _FakeKernel32
 
-        monkeypatch.delattr(os, "killpg", raising=False)
+        delattr_in(monkeypatch, ("nexus.bounded_subprocess", "nexus.util.process_group"), "os.killpg", raising=False)
         monkeypatch.setattr(win_job, "IS_WINDOWS", True)
         fake = _FakeKernel32()
         monkeypatch.setattr(win_job, "_kernel32", fake)

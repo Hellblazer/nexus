@@ -24,7 +24,7 @@ import pytest
 from nexus.commands import init as init_cmd
 from nexus.db import pg_provision
 from nexus.db.pg_provision import PgRootUserError, refuse_root, provision
-from tests._module_seam import setattr_in
+from tests._module_seam import delattr_in, setattr_in
 
 
 class _Tripwire(Exception):
@@ -51,7 +51,7 @@ def test_refuse_root_treats_a_missing_geteuid_as_not_root(
 ) -> None:
     # os.geteuid is POSIX-only. Windows support is WSL2-only, so an absent
     # geteuid is 'not root' rather than an AttributeError mid-provision.
-    monkeypatch.delattr(pg_provision.os, "geteuid", raising=False)
+    delattr_in(monkeypatch, pg_provision, "os.geteuid", raising=False)
     refuse_root()
 
 

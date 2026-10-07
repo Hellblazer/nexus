@@ -8,12 +8,10 @@ ACL grant instead. The text and the behaviour are pinned together.
 """
 from __future__ import annotations
 
-import os
-
 import pytest
 
 from nexus.db import pg_provision
-from tests._module_seam import setattr_in
+from tests._module_seam import delattr_in, setattr_in
 
 
 def test_the_docstring_no_longer_calls_native_windows_out_of_scope() -> None:
@@ -23,7 +21,7 @@ def test_the_docstring_no_longer_calls_native_windows_out_of_scope() -> None:
 
 
 def test_without_a_geteuid_nothing_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delattr(os, "geteuid", raising=False)
+    delattr_in(monkeypatch, "nexus.db.pg_provision", "os.geteuid", raising=False)
     pg_provision.refuse_root()  # returns: Windows has no euid
 
 

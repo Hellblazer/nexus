@@ -20,7 +20,8 @@ whose ``path`` is a private ``os.path``.
 
 * :func:`patch_in` is ``unittest.mock.patch`` for such a path: context manager,
   decorator (it passes the mock in, as ``patch`` does), ``start``/``stop``.
-* :func:`setattr_in` is ``monkeypatch.setattr`` for such a path.
+* :func:`setattr_in` is ``monkeypatch.setattr`` for such a path, and
+  :func:`delattr_in` is ``monkeypatch.delattr``.
 * :func:`module_proxy` returns the installed proxy to set attributes on.
 * :func:`module_time` and :func:`patch_time` are those for ``time``.
 
@@ -43,6 +44,9 @@ import pytest
 ModuleRef = ModuleType | str
 ModuleRefs = ModuleRef | Sequence[ModuleRef]
 
+#: Stored on a proxy to make an attribute absent there (:func:`delattr_in`).
+_ABSENT = object()
+
 #: A test faking ``nexus.retry``'s sleep has always faked two more layers through
 #: the global module, and keeps doing so by sharing the proxy: the default
 #: ``RateLimitBrake``, whose sleep and clock are looked up in ``nexus.rate_brake``'s
@@ -62,8 +66,15 @@ class ModuleProxy:
     def __init__(self, real: ModuleType) -> None:
         object.__setattr__(self, "_seam_real", real)
 
-    def __getattr__(self, name: str) -> Any:
-        return getattr(object.__getattribute__(self, "_seam_real"), name)
+    def __getattribute__(self, name: str) -> Any:
+        own = object.__getattribute__(self, "__dict__")
+        if name in own:
+            if own[name] is _ABSENT:
+                raise AttributeError(f"{name!r} is hidden from this module by a test")
+            return own[name]
+        if name.startswith("__") and name.endswith("__"):
+            return object.__getattribute__(self, name)
+        return getattr(own["_seam_real"], name)
 
     def __repr__(self) -> str:
         real = object.__getattribute__(self, "_seam_real")
@@ -161,6 +172,17 @@ def setattr_in(
     if raising and not hasattr(leaf, attr):
         raise AttributeError(f"{path} does not exist")
     monkeypatch.setattr(leaf, attr, value, raising=False)
+
+
+def delattr_in(monkeypatch: pytest.MonkeyPatch, module: ModuleRefs, path: str, *, raising: bool = True) -> None:
+    """``monkeypatch.delattr(<module>.<path>)`` kept local to ``module``: the
+    attribute is absent (``hasattr`` is False, access raises ``AttributeError``)
+    as ``module`` sees it, e.g. ``os.killpg`` on a Windows-shaped run."""
+    mods = _targets(module, path.split(".", 1)[0])
+    leaf, attr = _install(mods, path, monkeypatch.setattr)
+    if raising and not hasattr(leaf, attr):
+        raise AttributeError(f"{path} does not exist")
+    monkeypatch.setattr(leaf, attr, _ABSENT, raising=False)
 
 
 class _SeamPatch(_patch):

@@ -34,7 +34,15 @@ import pytest
 import nexus.rate_brake as rate_brake_mod
 import nexus.retry as retry_mod
 from tests import _engine_substrate as sub
-from tests._module_seam import ModuleProxy, module_proxy, module_time, patch_in, patch_time, setattr_in
+from tests._module_seam import (
+    ModuleProxy,
+    delattr_in,
+    module_proxy,
+    module_time,
+    patch_in,
+    patch_time,
+    setattr_in,
+)
 
 _TESTS = Path(__file__).resolve().parent
 
@@ -209,6 +217,31 @@ def test_a_module_without_the_binding_is_refused() -> None:
         pass
 
 
+def test_delattr_in_hides_the_attribute_from_the_module_only() -> None:
+    """The Windows-shaped shape: ``os.killpg`` absent for the code under test,
+    present for every other thread and teardown in the worker."""
+    mp = pytest.MonkeyPatch()
+    delattr_in(mp, sub, "os.getpid")
+    try:
+        assert not hasattr(sub.os, "getpid")
+        assert getattr(sub.os, "getpid", None) is None
+        with pytest.raises(AttributeError):
+            sub.os.getpid()
+        assert os.getpid() > 0
+        assert sub.os.getcwd is os.getcwd
+    finally:
+        mp.undo()
+    assert sub.os is os
+    assert hasattr(os, "getpid")
+
+
+def test_delattr_in_tolerates_an_absent_attribute_when_asked(monkeypatch) -> None:
+    with pytest.raises(AttributeError):
+        delattr_in(monkeypatch, sub, "os.not_on_any_platform")
+    delattr_in(monkeypatch, sub, "os.not_on_any_platform", raising=False)
+    assert not hasattr(sub.os, "not_on_any_platform")
+
+
 def test_module_proxy_returns_the_installed_proxy(monkeypatch) -> None:
     proxy = module_proxy(monkeypatch, sub, "shutil")
     proxy.which = lambda _name: "/fake/bin/x"
@@ -262,6 +295,8 @@ ALLOWED: dict[tuple[str, str], str] = {
         "re-imports nexus.cli, whose import-time code reads sys.platform before any binding exists",
     ("tests/test_deferred_labeling.py", "subprocess.Popen"):
         "nexus.commands.index imports subprocess inside _spawn_deferred_labeling (spawn-only branch)",
+    ("tests/test_winsec.py", "os.fchmod"):
+        "models Windows' missing os.fchmod for every credential writer the fixture puts on the Windows branch",
     ("tests/test_enrich_aspects.py", "subprocess.run"):
         "tripwire: asserts no code path in the process spawns",
     ("tests/test_false_clean_diagnostics_service_mode.py", "sqlite3.connect"):
@@ -323,7 +358,8 @@ def _is_patch(func: ast.expr) -> bool:
 def _global_patches(source: str) -> list[tuple[int, str]]:
     """(line, stdlib target) for every call that patches a covered stdlib module
     process-wide: ``patch("…<mod>.<attr>")``, ``patch.object(<…mod>, "attr")``,
-    ``<mp>.setattr("…<mod>.<attr>", v)`` and ``<mp>.setattr(<…mod>, "attr", v)``."""
+    ``<mp>.setattr("…<mod>.<attr>", v)``, ``<mp>.setattr(<…mod>, "attr", v)`` and the
+    same two ``delattr`` forms."""
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", SyntaxWarning)  # a test file's own escape sequences
         tree = ast.parse(source)
@@ -334,7 +370,7 @@ def _global_patches(source: str) -> list[tuple[int, str]]:
             continue
         func, first = node.func, node.args[0]
         is_object = isinstance(func, ast.Attribute) and func.attr == "object" and _is_patch(func.value)
-        is_setattr = isinstance(func, ast.Attribute) and func.attr == "setattr"
+        is_setattr = isinstance(func, ast.Attribute) and func.attr in ("setattr", "delattr")
         if not (_is_patch(func) or is_object or is_setattr):
             continue
         target: str | None = None
@@ -403,6 +439,9 @@ _BAD_SAMPLES = (
     ('patch("socket.socket")', "socket.socket"),
     ('monkeypatch.setattr(m.uuid, "uuid4", f)', "uuid.uuid4"),
     ('patch("threading.Thread")', "threading.Thread"),
+    ('import os\nmonkeypatch.delattr(os, "killpg", raising=False)', "os.killpg"),
+    ('monkeypatch.delattr(pg_provision.os, "geteuid")', "os.geteuid"),
+    ('monkeypatch.delattr("nexus.x.os.fchmod")', "os.fchmod"),
 )
 
 _GOOD_SAMPLES = (
@@ -410,6 +449,8 @@ _GOOD_SAMPLES = (
     'module_time(monkeypatch, retry_mod).sleep = f',
     'patch_in("nexus.x", "subprocess.run")',
     'setattr_in(monkeypatch, sub, "subprocess.run", f)',
+    'delattr_in(monkeypatch, sub, "os.killpg", raising=False)',
+    'monkeypatch.delattr(mod, "killpg")',
     'patch("nexus.indexer.timeout_s", 3)',
     'patch("nexus.retry.random_jitter")',
     'monkeypatch.setattr(mod, "time", proxy)',

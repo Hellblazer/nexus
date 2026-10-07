@@ -36,7 +36,7 @@ import pytest
 
 import nexus.aspect_extractor as ax
 import nexus.pdeathsig as pdeathsig
-from tests._module_seam import setattr_in
+from tests._module_seam import delattr_in, setattr_in
 
 
 def _pid_alive(pid: int) -> bool:
@@ -547,8 +547,8 @@ def windows_shaped_real_spawn(monkeypatch: pytest.MonkeyPatch):
     from nexus.util import win_job
     from tests.test_win_job import _FakeKernel32
 
-    monkeypatch.delattr(os, "killpg", raising=False)
-    monkeypatch.delattr(os, "getpgid", raising=False)
+    delattr_in(monkeypatch, ("nexus.bounded_subprocess", "nexus.util.process_group"), "os.killpg", raising=False)
+    delattr_in(monkeypatch, ("nexus.bounded_subprocess", "nexus.util.process_group"), "os.getpgid", raising=False)
     monkeypatch.setattr(win_job, "IS_WINDOWS", True)
     fake = _FakeKernel32()
     monkeypatch.setattr(win_job, "_kernel32", fake)

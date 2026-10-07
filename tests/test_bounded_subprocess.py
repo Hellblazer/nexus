@@ -35,6 +35,7 @@ import time
 import pytest
 
 from nexus.bounded_subprocess import kill_child_and_descendants, run_bounded
+from tests._module_seam import delattr_in
 
 #: A child that spawns a grandchild inheriting the stdout pipe, then exits
 #: immediately itself. Killing only the direct child -- which is what
@@ -221,7 +222,7 @@ def test_windows_branch_reports_process_reach_without_raising(
     absent-primitive check is removed, this test raises AttributeError
     instead of returning.
     """
-    monkeypatch.delattr(os, "killpg", raising=True)
+    delattr_in(monkeypatch, ("nexus.bounded_subprocess", "nexus.util.process_group"), "os.killpg", raising=True)
 
     killed: list[bool] = []
 
@@ -250,7 +251,7 @@ def test_windows_branch_with_a_job_closes_it_for_group_reach(
     from nexus.util import win_job
     from tests.test_win_job import _FakeKernel32
 
-    monkeypatch.delattr(os, "killpg", raising=True)
+    delattr_in(monkeypatch, ("nexus.bounded_subprocess", "nexus.util.process_group"), "os.killpg", raising=True)
     monkeypatch.setattr(win_job, "IS_WINDOWS", True)
     fake = _FakeKernel32()
     monkeypatch.setattr(win_job, "_kernel32", fake)
@@ -282,7 +283,7 @@ def test_windows_branch_falls_back_to_process_when_job_close_fails(
     from nexus.util import win_job
     from tests.test_win_job import _FakeKernel32
 
-    monkeypatch.delattr(os, "killpg", raising=True)
+    delattr_in(monkeypatch, ("nexus.bounded_subprocess", "nexus.util.process_group"), "os.killpg", raising=True)
     monkeypatch.setattr(win_job, "IS_WINDOWS", True)
     fake = _FakeKernel32()
     fake.close_ok = False
@@ -310,7 +311,7 @@ def test_already_dead_child_reports_none(monkeypatch: pytest.MonkeyPatch) -> Non
         def kill(self) -> None:
             raise ProcessLookupError
 
-    monkeypatch.delattr(os, "killpg", raising=True)
+    delattr_in(monkeypatch, ("nexus.bounded_subprocess", "nexus.util.process_group"), "os.killpg", raising=True)
     assert kill_child_and_descendants(_GoneProc()) == "none"  # type: ignore[arg-type]
 
 
@@ -370,8 +371,8 @@ def windows_shaped_real_spawn(monkeypatch: pytest.MonkeyPatch):
     from nexus.util import win_job
     from tests.test_win_job import _FakeKernel32
 
-    monkeypatch.delattr(os, "killpg", raising=False)
-    monkeypatch.delattr(os, "getpgid", raising=False)
+    delattr_in(monkeypatch, ("nexus.bounded_subprocess", "nexus.util.process_group"), "os.killpg", raising=False)
+    delattr_in(monkeypatch, ("nexus.bounded_subprocess", "nexus.util.process_group"), "os.getpgid", raising=False)
     monkeypatch.setattr(win_job, "IS_WINDOWS", True)
     fake = _FakeKernel32()
     monkeypatch.setattr(win_job, "_kernel32", fake)
