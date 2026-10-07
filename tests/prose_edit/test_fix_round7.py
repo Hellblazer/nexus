@@ -13,9 +13,9 @@ from __future__ import annotations
 import json
 import os
 import re
-import shutil
 import signal
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -133,7 +133,7 @@ _RACY_MKDIR = """#!/bin/bash
 for a in "$@"; do case "$a" in -*) ;; *) p="$a" ;; esac; done
 if [ -e "$p" ]; then echo "mkdir: $p: File exists" >&2; exit 1; fi
 sleep 0.3
-"{real}" "$@" 2>/dev/null || echo "$p" >> "{log}"
+"{python}" -c 'import os, sys; os.mkdir(sys.argv[1])' "$p" 2>/dev/null || echo "$p" >> "{log}"
 exit 0
 """
 
@@ -142,9 +142,9 @@ def test_simultaneous_starts_hold_the_lock_once_even_when_mkdir_reports_a_lost_r
         tmp_path: Path) -> None:
     shim, log = tmp_path / "bin", tmp_path / "raced"
     shim.mkdir()
-    real = shutil.which("mkdir")
-    assert real
-    (shim / "mkdir").write_text(_RACY_MKDIR.format(real=real, log=log), encoding="utf-8")
+    # The create is a direct os.mkdir syscall, never the host mkdir: on a uutils host that one masks a lost race too,
+    # which would leave the raced log empty and fail the non-vacuity assert below (nexus-bo01z review).
+    (shim / "mkdir").write_text(_RACY_MKDIR.format(python=sys.executable, log=log), encoding="utf-8")
     (shim / "mkdir").chmod(0o755)
     trials, procs = 3, 4
     go, release = tmp_path / "go", tmp_path / "release"
