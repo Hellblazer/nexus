@@ -536,7 +536,7 @@ def _build_flip_shims(build, *, install_dir: Path, tools: Path, bin_dir: Path) -
     if isinstance(build, _WindowsBuild):
         return _windows_build_flip_shims(build, tools=tools, bin_dir=bin_dir)
     built = subprocess.run(  # noqa: S603 — fixed argv, no shell
-        build, capture_output=True, text=True, check=False,
+        build, capture_output=True, text=True, check=False, env=_script_env(),
     )
     if built.returncode != 0:
         detail = built.stderr.strip()
@@ -821,7 +821,7 @@ def _converge_legacy_install(
 
     tools.mkdir(parents=True, exist_ok=True)
     r = subprocess.run(  # noqa: S603 — fixed argv, no shell
-        build, capture_output=True, text=True, check=False,
+        build, capture_output=True, text=True, check=False, env=_script_env(),
     )
     if r.returncode != 0:
         raise click.ClickException(
@@ -892,6 +892,26 @@ def _windows_converge_legacy_install(
     return generation
 
 
+def _script_env() -> dict[str, str]:
+    """The environment for the POSIX install scripts.
+
+    layout.sh, gc.sh, census.sh, shims.sh and legacy.sh run their logic as
+    bare ``python3 <x>_core.py``, so a box with no ``python3`` on PATH failed
+    the first ``nx self install`` with "python3: command not found". Measured
+    2026-10-07 in a fresh ubuntu:24.04 container after the documented
+    ``uv tool install conexus``: uv brings its own Python, so nothing else
+    installs one. The running interpreter's directory is a venv ``bin``, and
+    every venv puts a ``python3`` there. Appending it, not prepending, leaves
+    every command an existing PATH resolves unchanged; it only fills the gap.
+    """
+    env = dict(os.environ)
+    venv_bin = str(Path(sys.executable).parent)
+    path = env.get("PATH", "")
+    if venv_bin not in path.split(os.pathsep):
+        env["PATH"] = f"{path}{os.pathsep}{venv_bin}" if path else venv_bin
+    return env
+
+
 def _sh(install_dir: Path, snippet: str, *, check: bool = True) -> str:
     """Source the install library and run one statement against it.
     Returns the statement's stdout."""
@@ -903,7 +923,7 @@ def _sh(install_dir: Path, snippet: str, *, check: bool = True) -> str:
          f'. "{install_dir}/layout.sh"; . "{install_dir}/flip.sh"; '
          f'. "{install_dir}/shims.sh"; . "{install_dir}/census.sh"; '
          f'. "{install_dir}/gc.sh"; . "{install_dir}/legacy.sh"; {snippet}'],
-        capture_output=True, text=True, check=False,
+        capture_output=True, text=True, check=False, env=_script_env(),
     )
     if check and r.returncode != 0:
         raise click.ClickException(f"{snippet.split()[0]} failed:\n{r.stderr.strip()}")
