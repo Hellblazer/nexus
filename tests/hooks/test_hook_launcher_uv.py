@@ -24,7 +24,7 @@ import os
 import shutil
 import subprocess
 import sys
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 
 import pytest
@@ -183,7 +183,28 @@ def test_the_hook_env_is_posix_minimal_and_windows_keeps_what_uv_needs() -> None
 _BLOCKING_EVENTS = {"PreToolUse", "PermissionRequest", "UserPromptSubmit"}
 
 
-def _no_interpreter_env(tmp_path) -> dict[str, str]:
+def _alias_executable(src: Path, bindir: Path, symlink: Callable[[Path, Path], None] = os.symlink) -> Path:
+    """Put *src* into *bindir* under its own name (``uv.exe`` keeps its suffix on
+    Windows) and return the alias.
+
+    A symlink where the token may create one; otherwise a hard link, otherwise a
+    copy. A non-elevated Windows token holds no SeCreateSymbolicLinkPrivilege, so
+    ``os.symlink`` raises WinError 1314 there (the win-release runner, nexus-f9bgu),
+    and a hard link fails across volumes. The caller needs only a runnable uv in
+    *bindir*, which all three give. *symlink* is injectable so a test can model
+    the refusing token without patching ``os`` process-wide."""
+    dst = bindir / src.name
+    try:
+        symlink(src, dst)
+    except OSError:
+        try:
+            os.link(src, dst)
+        except OSError:
+            shutil.copy2(src, dst)
+    return dst
+
+
+def _no_interpreter_env(tmp_path, *, symlink: Callable[[Path, Path], None] = os.symlink) -> dict[str, str]:
     """uv alone on PATH, an empty managed-Python directory, downloads off, offline:
     a box where uv can find no interpreter and cannot fetch one.
 
@@ -196,7 +217,7 @@ def _no_interpreter_env(tmp_path) -> dict[str, str]:
     where PATH was already the only source, it changes nothing."""
     bindir = tmp_path / "bin"
     bindir.mkdir()
-    (bindir / "uv").symlink_to(shutil.which("uv"))
+    _alias_executable(Path(shutil.which("uv")), bindir, symlink)
     pydir = tmp_path / "py"
     pydir.mkdir()
     return {
@@ -208,6 +229,22 @@ def _no_interpreter_env(tmp_path) -> dict[str, str]:
         "UV_OFFLINE": "1",
         "UV_CACHE_DIR": str(tmp_path / "cache"),
     }
+
+
+def test_the_uv_alias_needs_no_symlink_privilege(tmp_path) -> None:
+    """The no-interpreter box puts uv alone on PATH through an alias. A non-elevated
+    Windows token (the win-release runner's account, ghwin, is not an Administrator)
+    cannot create a symlink: os.symlink raises WinError 1314. The alias only has to
+    be a runnable uv in that directory, so a refused symlink falls back to a hard
+    link or a copy. Refusing the symlink here models that token on any host."""
+    def _refuse(*_a, **_k):
+        raise OSError(1314, "A required privilege is not held by the client")
+
+    env = _no_interpreter_env(tmp_path, symlink=_refuse)
+    alias = Path(env["PATH"]) / Path(shutil.which("uv")).name
+    assert alias.is_file() and not alias.is_symlink(), alias
+    proc = subprocess.run([str(alias), "--version"], capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0 and proc.stdout.startswith("uv "), (proc.returncode, proc.stderr)
 
 
 def test_uv_with_no_interpreter_exits_2_which_blocks_five_entries(tmp_path) -> None:

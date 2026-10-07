@@ -313,24 +313,31 @@ def _start_service(pg: dict, token: str, voyage_key: str | None = None,
     # production launcher (storage_service_daemon) redirects to log files for
     # exactly this reason.
     log_path = os.path.join(tempfile.gettempdir(), f"nexus-svc-parity-{svc_port}.log")
-    log_fh = open(log_path, "wb")
-    proc = popen_in_group(
-        jar_argv(_JAVA, _JAR),
-        env=env,
-        stdout=log_fh,
-        stderr=subprocess.STDOUT,
-    )
+    # The child holds its own handle to the log, so the parent's closes here.
+    with open(log_path, "wb") as log_fh:
+        proc = popen_in_group(
+            jar_argv(_JAVA, _JAR),
+            env=env,
+            stdout=log_fh,
+            stderr=subprocess.STDOUT,
+        )
+    # Every exit from the port wait that does not hand proc to the caller stops its
+    # group: a timeout, a KeyboardInterrupt, anything. Without this a failed boot
+    # leaked the JVM (nexus-f9bgu residuals; pinned by
+    # tests/db/test_embed_parity_spawn_teardown.py).
     try:
         _wait_tcp("127.0.0.1", svc_port, timeout=timeout)
-    except TimeoutError:
-        log_fh.flush()
+    except BaseException as exc:
+        stop_group(proc, grace_s=5)
+        if not isinstance(exc, TimeoutError):
+            raise
         try:
-            tail = open(log_path).read()[-1500:]
+            tail = Path(log_path).read_text(errors="replace")[-1500:]
         except OSError:
             tail = "(log unavailable)"
         raise TimeoutError(
             f"service did not bind {svc_port} in {timeout}s; JAR log tail:\n{tail}"
-        )
+        ) from exc
     return proc, svc_port
 
 
