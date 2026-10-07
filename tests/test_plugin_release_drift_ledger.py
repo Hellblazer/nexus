@@ -86,6 +86,7 @@ SURFACE_BY_PLUGIN: dict[str, tuple[str, ...]] = {
         "conexus/skills/",
         "conexus/agents/",
         "conexus/resources/",
+        "conexus/mcp/",
         "conexus/.mcp.json",
     ),
     "sn": (

@@ -16,7 +16,6 @@ The package on PyPI is `conexus`. The command it installs is `nx`. The full inst
 | Python 3.12 or 3.13 | Python 3.14 does not work yet, which is why the install command below names 3.12. uv downloads it for you. | `python3 --version` |
 | [uv](https://docs.astral.sh/uv/) | Installs and runs the `nx` command. | `uv --version` |
 | git | Nexus reads git information when it indexes a repository. | `git --version` |
-| Node.js with npm | Required for the Claude Code plugin. Without it the plugin installs but its tools never appear, with no error message. | `node --version` |
 | About 600 MB, a few minutes | The first run downloads the service program, a database, and the search model. | |
 | Apple Silicon Mac, or Linux on x86-64 or arm64 | Nexus ships its own PostgreSQL and never uses one you installed. The bundle exists for these three only, so an Intel Mac or Windows cannot run a local install: setup stops with an error rather than falling back. | `uname -sm` |
 | No GPU | Search runs a bundled CPU model. On Linux the installer pins torch to its CPU build, since the default wheel pulls ~4.5 GB of CUDA packages nothing here uses; `NX_TORCH_BACKEND` opts a GPU box back in. | |
@@ -105,7 +104,7 @@ The full sequence, including exporting your knowledge first and removing the Cla
 | Crash on startup, or an import error naming voyageai or Pydantic v1 | You are on Python 3.14. Run `uv tool install conexus --force --python 3.12`, then `nx self install`. |
 | `nx doctor` says credentials not set | Normal for a local install. Only the cloud service needs a token. |
 | `nx search` returns nothing | Run `nx doctor`. If the index was interrupted, run `nx index repo .` again. If you updated with `uv tool install`, see Update above. |
-| Plugin installed but its tools never appear | The `nx` command or Node.js is missing. Run `/conexus:nx-preflight`; it says which. |
+| Plugin installed but its tools never appear | The `nx` command is missing. Run `/conexus:nx-preflight`. |
 | Nothing above helps | Paste the [recovery runbook](https://gist.github.com/Hellblazer/08f0a615e3d73e47d8062bce4829b611) as the first message of a Claude Code session. It checks the install step by step and asks before changing any data. |
 
 ## What you installed

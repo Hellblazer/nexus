@@ -37,6 +37,7 @@ on:
       - 'conexus/skills/**'
       - 'conexus/agents/**'
       - 'conexus/resources/**'
+      - 'conexus/mcp/**'
       - 'conexus/PENDING_RELEASE.md'
       - 'sn/hooks/**'
       - 'sn/.mcp.json'

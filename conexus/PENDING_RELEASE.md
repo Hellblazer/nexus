@@ -45,6 +45,11 @@ stale -- and stays exactly where it is until moved back deliberately.
 
 ONE PATH PER BULLET, on the bullet's FIRST line.
 
+- MCP servers without Node (nexus-f9bgu): `conexus/.mcp.json` starts sequential-thinking as `uv tool run --directory ${CLAUDE_PLUGIN_ROOT} --no-config --quiet --python >=3.12 python ${CLAUDE_PLUGIN_ROOT}/mcp/sequential_thinking.py` instead of `npx -y @modelcontextprotocol/server-sequential-thinking`. A clean Windows box has no Node.js, so the server failed to connect in every session there. Tool name and parameters are unchanged.
+- MCP servers without Node (nexus-f9bgu): `conexus/mcp/sequential_thinking.py` is new: a standard-library Python port of the upstream server's one tool, `sequentialthinking`, with the same input schema and result JSON. It writes nothing to stderr.
+- MCP servers without Node (nexus-f9bgu): `sn/.mcp.json` declares context7 as the hosted HTTP endpoint `https://mcp.context7.com/mcp` instead of `npx -y @upstash/context7-mcp@4.0.5`. Same two tools; the version is the vendor's, no longer pinned here.
+- MCP servers without Node (nexus-f9bgu): `conexus/commands/nx-preflight.md` drops the Node.js / npx row from its summary table, matching the CLI, whose nx-preflight and doctor no longer check for npx.
+
 
 
 ## Deferred to the next client release

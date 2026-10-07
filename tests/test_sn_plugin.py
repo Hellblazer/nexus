@@ -215,17 +215,16 @@ class TestSnMcpConfig:
             offenders.append("serena is not launched with --context claude-code")
         if "--project-from-cwd" not in args:
             offenders.append("serena is not launched with --project-from-cwd")
-        if mcp_config["context7"]["command"] != "npx":
-            offenders.append("context7 command is not npx")
+        # nexus-f9bgu: the hosted endpoint, not npx (no Node.js on a clean
+        # Windows box); tests/test_plugin_mcp_windows_launch.py pins the shape.
+        if mcp_config["context7"].get("url") != "https://mcp.context7.com/mcp":
+            offenders.append("context7 is not the hosted HTTP endpoint")
         # nexus-jbt5x: an unpinned URL gives every fresh spawn a different Serena.
         url, rev = serena_pin()
         if url != "https://github.com/oraios/serena":
             offenders.append(f"serena pin url is {url!r}")
         if len(rev) != 40:
             offenders.append(f"serena pin {rev!r} is not a 40-character revision")
-        pkg = next((a for a in mcp_config["context7"]["args"] if a.startswith("@upstash/context7-mcp")), "")
-        if not re.fullmatch(r"@upstash/context7-mcp@\d+\.\d+\.\d+", pkg):
-            offenders.append(f"context7 is not pinned to an exact version: {pkg!r}")
         # serena-tools.txt was generated from the revision .mcp.json pins.
         snap_rev, available, _ = parse_snapshot()
         if snap_rev != rev:

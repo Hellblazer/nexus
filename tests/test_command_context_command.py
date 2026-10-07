@@ -1226,7 +1226,7 @@ def stub_preflight_subprocess(monkeypatch) -> None:
     """Stub subprocess so nx-preflight tests are fast and deterministic.
 
     nx-preflight shells to ``nx --version``, ``nx doctor``, ``bd --version``,
-    ``uv --version``, ``npx --version``.  ``nx doctor`` in particular spawns
+    ``uv --version``.  ``nx doctor`` in particular spawns
     the T2 daemon and touches storage, so running it once per test is slow
     and has side effects (orphan daemons, WAL contention).  Stubbing both
     subprocess entry points keeps these tests exercising the render
@@ -1307,28 +1307,31 @@ def test_nx_preflight_has_uv_section(
     assert "### 4. uv (package manager)" in result.output
 
 
-def test_nx_preflight_has_node_section(
+def test_nx_preflight_has_no_node_section(
     tmp_path: Path, monkeypatch, stub_preflight_subprocess
 ) -> None:
-    """nx-preflight output contains ### 5. Node.js / npx section."""
+    """nexus-f9bgu: no plugin MCP server needs Node.js, so nx-preflight no
+    longer checks for npx (it would send users to install Node for nothing)."""
     monkeypatch.chdir(tmp_path)
     runner = CliRunner()
     from nexus.cli import main
 
     result = runner.invoke(main, ["command-context", "nx-preflight"])
-    assert "### 5. Node.js / npx" in result.output
+    assert "### 4. uv (package manager)" in result.output
+    assert "npx" not in result.output
+    assert "Node.js" not in result.output
 
 
 def test_nx_preflight_has_claude_md_section(
     tmp_path: Path, monkeypatch, stub_preflight_subprocess
 ) -> None:
-    """nx-preflight output contains ### 6. CLAUDE.md Agent Readiness section."""
+    """nx-preflight output contains ### 5. CLAUDE.md Agent Readiness section."""
     monkeypatch.chdir(tmp_path)
     runner = CliRunner()
     from nexus.cli import main
 
     result = runner.invoke(main, ["command-context", "nx-preflight"])
-    assert "### 6. CLAUDE.md Agent Readiness" in result.output
+    assert "### 5. CLAUDE.md Agent Readiness" in result.output
 
 
 def test_nx_preflight_double_dash_terminator(

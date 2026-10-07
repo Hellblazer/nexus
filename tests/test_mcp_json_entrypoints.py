@@ -25,8 +25,9 @@ _MCP_JSON = _REPO_ROOT / "conexus" / ".mcp.json"
 _PYPROJECT = _REPO_ROOT / "pyproject.toml"
 
 #: Servers in conexus/.mcp.json backed by THIS repo's own console scripts
-#: (as opposed to an external package like sequential-thinking's npx
-#: invocation, which has no pyproject.toml entry to check against).
+#: (as opposed to sequential-thinking, a plugin-local script started through
+#: uv, which has no pyproject.toml entry to check against; its launch is
+#: pinned by tests/test_plugin_mcp_windows_launch.py).
 _LOCAL_SERVERS = {
     "nexus": "nx-mcp",
     "nexus-catalog": "nx-mcp-catalog",
