@@ -52,6 +52,7 @@ from tests.db._service_fixture import (
     spawn_service,
     wait_for_service,
 )
+from tests._pg_ctl import pg_ctl_start
 
 # ── Prerequisite paths ────────────────────────────────────────────────────────
 
@@ -143,12 +144,7 @@ def pg_instance():
 
         # 3. Start and WAIT until server is ready (-w flag)
         #    -o passes extra options to postmaster; -k sets the Unix socket dir.
-        subprocess.run(
-            [str(_PG_CTL), "-D", pgdata, "-l", pglog,
-             "-o", f"-p {pg_port} -k {pgdata}",
-             "start", "-w"],
-            check=True, capture_output=True,
-        )
+        pg_ctl_start(str(_PG_CTL), pgdata, pglog, f"-p {pg_port} -k {pgdata}")
 
         # 4. Create the test database (trust auth means no -W needed)
         subprocess.run(

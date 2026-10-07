@@ -67,6 +67,7 @@ from tests.db._service_fixture import spawn_service, wait_for_service
 
 from tests.benchmarks.test_retrieval_ndcg import ndcg_at_k
 from tests.db._service_fixture import ENGINE_ADMIN_DB_ENV_KEYS, SERVICE_ROLES_SQL, pg_bin_dir
+from tests._pg_ctl import pg_ctl_start
 
 _BENCH_DIR = Path(__file__).parent
 _REPO_ROOT = _BENCH_DIR.parent.parent
@@ -158,11 +159,7 @@ def pg_instance():
         )
         with open(os.path.join(pgdata, "postgresql.conf"), "a") as f:
             f.write(f"\nport = {pg_port}\nlisten_addresses = '127.0.0.1'\n")
-        subprocess.run(
-            [str(_PG_CTL), "-D", pgdata, "-l", os.path.join(pgdata, "pg.log"),
-             "-o", f"-p {pg_port} -k {pgdata}", "start", "-w"],
-            check=True, capture_output=True,
-        )
+        pg_ctl_start(str(_PG_CTL), pgdata, os.path.join(pgdata, "pg.log"), f"-p {pg_port} -k {pgdata}")
         subprocess.run(
             [str(_CREATEDB), "-h", "127.0.0.1", "-p", str(pg_port),
              "-U", pg_user, "nexusndcggate"],

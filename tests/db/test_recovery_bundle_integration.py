@@ -40,6 +40,7 @@ from tests.db._service_fixture import (
     spawn_service,
     wait_for_service,
 )
+from tests._pg_ctl import pg_ctl_start
 
 pytestmark = pytest.mark.integration
 
@@ -94,15 +95,7 @@ def pg_instance():
         )
         with open(os.path.join(pgdata, "postgresql.conf"), "a") as f:
             f.write(f"\nport = {pg_port}\nlisten_addresses = '127.0.0.1'\n")
-        subprocess.run(
-            [str(_PG_CTL), "-D", pgdata, "-l", pglog,
-             "-o", f"-p {pg_port} -k {pgdata}", "start", "-w"],
-            # Not capture_output: on Windows the postmaster pg_ctl starts inherits
-            # the pipe handles, so the pipes never reach EOF and run() never returns
-            # (measured on qwentescence, 2026-10-07). The server log is pglog.
-            check=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+        pg_ctl_start(str(_PG_CTL), pgdata, pglog, f"-p {pg_port} -k {pgdata}")
         subprocess.run(
             [str(_CREATEDB), "-h", "127.0.0.1", "-p", str(pg_port),
              "-U", pg_user, "nexusrecoverytest"],

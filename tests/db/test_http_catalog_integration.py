@@ -48,6 +48,7 @@ import pytest
 from nexus._install.layout_core import exe_name
 from nexus.db.pg_provision import bootstrap_superuser
 from tests.conftest import make_vector_test_client
+from tests._pg_ctl import pg_ctl_start
 
 # ── Prerequisite paths ─────────────────────────────────────────────────────────
 
@@ -372,12 +373,7 @@ def pg_instance():
         )
         with open(os.path.join(pgdata, "postgresql.conf"), "a") as f:
             f.write(f"\nport = {pg_port}\nlisten_addresses = '127.0.0.1'\n")
-        subprocess.run(
-            [str(_PG_CTL), "-D", pgdata, "-l", pglog,
-             "-o", f"-p {pg_port} -k {pgdata}",
-             "start", "-w"],
-            check=True, capture_output=True,
-        )
+        pg_ctl_start(str(_PG_CTL), pgdata, pglog, f"-p {pg_port} -k {pgdata}")
         subprocess.run(
             [str(_CREATEDB), "-h", "127.0.0.1", "-p", str(pg_port),
              "-U", pg_user, "nexuscattest"],

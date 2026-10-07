@@ -94,6 +94,7 @@ from pathlib import Path
 import structlog
 
 from nexus._locking import lock_file, unlock_file
+from tests._pg_ctl import pg_ctl_start
 from tests.db._service_fixture import (
     SERVICE_ROLES_SQL,
     jar_freshness_skip_reason,
@@ -748,11 +749,9 @@ def throwaway_pg_cluster(
                 try:
                     with open(pgdata / "postgresql.conf", "a") as f:
                         f.write("listen_addresses = ''\n")
-                    proc = subprocess.run(
-                        [str(bin_dir / "pg_ctl"), "-D", str(pgdata), "-l",
-                         str(pgdata / "pg.log"), "-o", f"-k {pgdata}",
-                         "start", "-w"],
-                        capture_output=True, text=True,
+                    proc = pg_ctl_start(
+                        bin_dir / "pg_ctl", pgdata, pgdata / "pg.log",
+                        f"-k {pgdata}", check=False,
                     )
                     if proc.returncode != 0:
                         try:
@@ -921,11 +920,9 @@ def _boot() -> dict:
             # The suite issues thousands of tiny transactions; keep fsync off
             # for the throwaway test cluster.
             f.write("fsync = off\nsynchronous_commit = off\nfull_page_writes = off\n")
-        _start = subprocess.run(
-            [str(bin_dir / "pg_ctl"), "-D", pgdata, "-l",
-             os.path.join(pgdata, "pg.log"),
-             "-o", f"-p {pg_port} -k {pgdata}", "start", "-w"],
-            capture_output=True, text=True, check=False,
+        _start = pg_ctl_start(
+            bin_dir / "pg_ctl", pgdata, os.path.join(pgdata, "pg.log"),
+            f"-p {pg_port} -k {pgdata}", check=False,
         )
         if _start.returncode != 0:
             # Carry pg_ctl's stderr and the log tail out (rbc7k critique):

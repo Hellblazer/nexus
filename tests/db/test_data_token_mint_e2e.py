@@ -41,6 +41,7 @@ from tests.db._service_fixture import (
     spawn_service,
     wait_for_service,
 )
+from tests._pg_ctl import pg_ctl_start
 
 # ── Prerequisites (mirrors test_health_service_integration) ──────────────────
 
@@ -115,11 +116,7 @@ def pg_instance():
         )
         with open(os.path.join(pgdata, "postgresql.conf"), "a") as f:
             f.write(f"\nport = {pg_port}\nlisten_addresses = '127.0.0.1'\n")
-        subprocess.run(
-            [str(_PG_CTL), "-D", pgdata, "-l", pglog,
-             "-o", f"-p {pg_port} -k {pgdata}", "start", "-w"],
-            check=True, capture_output=True,
-        )
+        pg_ctl_start(str(_PG_CTL), pgdata, pglog, f"-p {pg_port} -k {pgdata}")
         subprocess.run(
             [str(_CREATEDB), "-h", "127.0.0.1", "-p", str(pg_port),
              "-U", pg_user, "nexustest"],

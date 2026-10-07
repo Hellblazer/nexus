@@ -55,6 +55,7 @@ from tests.db._service_fixture import (
     pg_bin_dir,
     spawn_service,
 )
+from tests._pg_ctl import pg_ctl_start
 
 # ── Prerequisite paths ────────────────────────────────────────────────────────
 
@@ -144,11 +145,7 @@ def pg_service():
     with open(f"{pgdata}/postgresql.conf", "a") as f:
         f.write(f"\nport = {pgport}\nlisten_addresses = '127.0.0.1'\n")
 
-    subprocess.run(
-        [str(_PG_CTL), "-D", pgdata, "-l", f"{tmpdir}/pg.log",
-         "-o", f"-p {pgport} -k {pgdata}", "start", "-w"],
-        check=True, capture_output=True,
-    )
+    pg_ctl_start(str(_PG_CTL), pgdata, f"{tmpdir}/pg.log", f"-p {pgport} -k {pgdata}")
 
     subprocess.run(
         [str(_CREATEDB), "-h", "127.0.0.1", "-p", str(pgport),
