@@ -150,3 +150,18 @@ def test_no_k_result_is_wrapped_in_an_array_subexpression() -> None:
     # that way on the 2026-10-06 run.
     import re as _re
     assert not _re.search(r"@\(\s*K\s", _text())
+
+
+def test_aspect_worker_survivors_are_observed_with_the_rdr_citation_not_asserted() -> None:
+    """nexus-g5rz5: RDR-224 records that `service stop` leaves the aspect-worker
+    daemon running (it belongs to the store path), so assertion 4 reports it
+    with the citation and CPU seconds and does not fail on it. Asserting it gone
+    would contradict the recorded decision; this pins the observation shape."""
+    text = _text()
+    a4 = text[text.index("Run-Assertion 4 "):text.index("Run-Assertion 5 ")]
+    assert "by design per RDR-224" in a4
+    assert "aspect-worker processes left" in a4 and "cpu=" in a4
+    # observation only: no Fail and no Assert-Absent over the aspect kind
+    assert not re.search(r"Assert-Absent\s+@\([^)]*'aspect'", text)
+    assert not re.search(r"Wait-Gone\s+@\([^)]*'aspect'", text)
+    assert not re.search(r"\$k\.aspect\.Count[^\n]*\bFail\b|\bFail\b[^\n]*\$k\.aspect", a4)

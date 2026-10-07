@@ -6,6 +6,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **The aspect-worker daemon backs off its reclaim sweep while the service is down** (nexus-g5rz5). `nx daemon service stop` leaves the daemon running on every platform, by RDR-224's recorded decision (the worker belongs to the store path, not to the service). With the stack stopped, every reclaim sweep failed and the wait stayed at the 30 s base, about 2,880 failed attempts a day. A failed sweep now doubles the wait up to the stale window, as an empty sweep does, and a reclaim resets it to the base. The Phase 5 gate keeps reporting the surviving worker as an observation and cites the decision.
+
 ## [7.72.1] - 2026-10-06
 
 Pairs with engine-service-v0.1.149, unchanged from 7.72.0 (`REQUIRED_ENGINE_VERSION` stays 0.1.149). A Windows fix release: on native Windows 7.72.0's MCP search hung forever, and these fixes are what the RDR-224 Phase 5 gate passed with on a clean Windows 11 guest (T2 nexus_rdr/224-gate-run-2026-10-06). Windows is still not declared supported.
