@@ -148,9 +148,9 @@ def _venv_python_for_this_checkout() -> str | None:
     worktree, or one with a packaged ``nexus``, does not qualify.
 
     The project directory is ``CLAUDE_PROJECT_DIR``, never the process cwd: hooks
-    are launched with ``uv run --directory ${CLAUDE_PLUGIN_ROOT}`` so uv cannot
-    execute an interpreter planted in the project (finding C, nexus-f9bgu.36), and
-    the process cwd is therefore the plugin root. Unset (not under Claude Code)
+    are launched with ``uv tool run --directory ${CLAUDE_PLUGIN_ROOT}`` so uv
+    cannot execute an interpreter planted in a ``.venv`` (finding C,
+    nexus-f9bgu.36), and the process cwd is therefore the plugin root. Unset (not under Claude Code)
     means there is no checkout to match and the answer is None.
     """
     venv = os.environ.get("VIRTUAL_ENV")

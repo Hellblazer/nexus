@@ -60,9 +60,9 @@ def _project_dir(payload: bytes) -> str | None:
     """The directory ``nx-hook`` should run in: the payload's ``cwd``, else
     ``CLAUDE_PROJECT_DIR``, else ``None`` (inherit).
 
-    hooks.json launches the shim with ``uv run --directory ${CLAUDE_PLUGIN_ROOT}``
-    so uv cannot execute an interpreter planted in the project (finding C,
-    nexus-f9bgu.36); the shim's own cwd is therefore the plugin root, and the
+    hooks.json launches the shim with ``uv tool run --directory
+    ${CLAUDE_PLUGIN_ROOT}`` so uv cannot execute an interpreter planted in a
+    ``.venv`` (finding C, nexus-f9bgu.36); the shim's own cwd is therefore the plugin root, and the
     verbs resolve the project from theirs. Only a directory that exists counts.
     """
     candidates: list[object] = []

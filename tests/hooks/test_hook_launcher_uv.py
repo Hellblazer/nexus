@@ -3,8 +3,8 @@
 
 nexus-efk2h (RDR-224 Phase 4): the plugin-resident hooks were launched as
 ``python3``, which is not on PATH on stock Windows, so they never fired there.
-They now launch through ``uv run --no-project --no-config --quiet``, and each
-script's PEP 723 block carries the 3.12 floor. ``tests/test_hooks_json_shape_lint.py``
+They now launch through ``uv tool run ... --python >=3.12 python`` (the argv is
+``tests/_hook_wiring.UV_LAUNCHER_ARGV``), which carries the 3.12 floor. ``tests/test_hooks_json_shape_lint.py``
 pins the SHAPE and the blocks; this file
 runs the real argv, with the plugin root substituted, and checks the outcome:
 

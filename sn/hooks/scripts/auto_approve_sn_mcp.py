@@ -6,8 +6,8 @@ get no decision, so Claude Code's own permission flow decides. See
 ``SERENA_READ_TOOLS``.
 
 Declared in exec form (RDR-215 bead nexus-q02nx.23; launcher nexus-j4iy0) as
-``uv run --no-project --no-config --quiet
-${CLAUDE_PLUGIN_ROOT}/hooks/scripts/auto_approve_sn_mcp.py``, with
+``uv tool run --directory ${CLAUDE_PLUGIN_ROOT} --no-config --quiet --python >=3.12
+python ${CLAUDE_PLUGIN_ROOT}/hooks/scripts/auto_approve_sn_mcp.py``, with
 the hook payload on stdin and no argv, so the snapshot resolves to the
 sibling serena-tools.txt. The bash wrapper it replaces passed that path
 explicitly AND ended in an unconditional ``exit 0`` that hid a Python crash

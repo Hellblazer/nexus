@@ -19,7 +19,7 @@ ignores the cwd unless PATH itself names ``.`` or has an empty entry; the lookup
 is unchanged there.
 
 Standard library only, no ``nexus`` import: hook scripts run under
-``uv run --no-project``. ``bootstrap.py`` in ``mcpb/src`` carries the same rule
+``uv tool run python``. ``bootstrap.py`` in ``mcpb/src`` carries the same rule
 in its own file because the desktop bundle ships separately.
 
 ``platform``/``path``/``pathext`` are injectable so the Windows branch runs on any

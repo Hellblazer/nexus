@@ -9,9 +9,8 @@ decision that changes over time:
 * command tier -- ``{"type": "command", "command": "nx-hook",
   "args": ["<name-with-dashes>"], ...}``, or the same verb through the
   stdlib shim (nexus-rcoze, launched through ``uv`` since nexus-efk2h):
-  ``{"type": "command", "command": "uv", "args": ["run", "--no-project",
-  "--no-config", "--quiet", "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/nx_hook_shim.py",
-  "<name-with-dashes>"]}``, which is how a verb that an older CLI lacks
+  ``{"type": "command", "command": "uv", "args": [*UV_LAUNCHER_ARGV,
+  "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/nx_hook_shim.py", "<name-with-dashes>"]}``, which is how a verb that an older CLI lacks
   is wired so it cannot block. It is still the command tier.
 
 Tests that assert WHICH EVENT a hook fires on, or that it is wired
@@ -53,7 +52,7 @@ def command_verb(entry: dict) -> str | None:
 
 
 #: Everything `uv` is given before the script path (nexus-efk2h): sn's argv.
-UV_LAUNCHER_ARGV = ("run", "--directory", "${CLAUDE_PLUGIN_ROOT}", "--no-project", "--no-config", "--quiet")
+UV_LAUNCHER_ARGV = ("tool", "run", "--directory", "${CLAUDE_PLUGIN_ROOT}", "--no-config", "--quiet", "--python", ">=3.12", "python")
 
 
 def launcher_script_args(entry: dict) -> list[str]:
