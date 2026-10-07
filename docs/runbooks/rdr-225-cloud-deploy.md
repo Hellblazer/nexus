@@ -666,20 +666,30 @@ the retired tables hold the only copy of the old layout.
 
 ### 9.1 Placeholders the rehearsal (nexus-3wh8d.27) fills
 
-| Name | Used in | Filled from |
-| --- | --- | --- |
-| FORK_WALL_TIME, CAP_FACTOR | § 5.7 | Fork walk wall time; the cap is a multiple chosen before the live run |
-| FORK_TENANT_COUNT | § 3 Probe T | Tenant count on the fork |
-| FORK_RELATION_LOCKS, LOCK_HEADROOM | § 3 Probe T | The fork's `rdr225 walk: N relation lock(s)` line (engine log, § 4) |
-| FORK_ROW_COUNTS, DRIFT_TOLERANCE | § 3 Probe V, C2 | Fork census; the drift the live estate is allowed since the fork |
-| FORK_ORPHAN_CENTROIDS | § 3 Probe C2 | Probe C2 run on the fork |
-| FORK_PEAK_EXTRA_DISK, DISK_MARGIN, the factors 2.2 and 2.0 | § 3 Probe D | Peak extra disk on the fork; replaces the inferred factors |
-| WAL_PEAK | § 3 Probe W | Peak WAL on the fork against `max_wal_size` |
-| VACUUM_WALL_TIME, VACUUM_PEAK_EXTRA_IO | § 5.9 | `VACUUM (ANALYZE)` of both parents on the fork, after the walk |
-| PROBE_MS_BEFORE_VACUUM, PROBE_PLAN_BEFORE_VACUUM, PROBE_MS_AFTER_VACUUM, PROBE_PLAN_AFTER_VACUUM | § 7.2 | The router probe on the largest-share leaf of the fork, before and after the VACUUM |
-| FROZEN_QUERY_SET, OVERLAP_FLOOR, LATENCY_RATIO | § 7.3 | The set, its runner, and the pass rule, all fixed before the fork run |
-| maintenance_work_mem, parallel workers | § 7 record | The changeset sets neither; record the live values and the index build time |
-| local-install seed count | § 8 | A local walk at a stated seed count |
+Filled 2026-10-07 from the PITR-fork jar walk of develop `93562b96a` (conexus, Sam's go; record T2
+`nexus_rdr/225-rehearsal-2026-10-07` [29540], disk floor [29529]). Every `.27:` marker in this runbook refers to the
+Value column below. CAP_FACTOR, DRIFT_TOLERANCE, DISK_MARGIN and the frozen-query pass rule are decisions, not
+measurements; they are marked as such.
+
+| Name | Used in | Filled from | Value (fork, 2026-10-07) |
+| --- | --- | --- | --- |
+| FORK_WALL_TIME, CAP_FACTOR | § 5.7 | Fork walk wall time; the cap is a multiple chosen before the live run | 449 s JVM start to `schema_migration_complete` (vectors-030-1 435.7 s), run over the public host. Decision: CAP_FACTOR 2, so the cap is 15 min, inside the window budget. |
+| FORK_TENANT_COUNT | § 3 Probe T | Tenant count on the fork | 4 tenants, 4 models, 32 leaves (16 per parent), as predicted. |
+| FORK_RELATION_LOCKS, LOCK_HEADROOM | § 3 Probe T | The fork's `rdr225 walk: N relation lock(s)` line (engine log, § 4) | 979 locks (about 30.6 per leaf) against 32,000 slots (`max_locks_per_transaction` 64 x `max_connections` 500, live). |
+| FORK_ROW_COUNTS, DRIFT_TOLERANCE | § 3 Probe V, C2 | Fork census; the drift the live estate is allowed since the fork | chunks 434,617; catalog_collections 163; catalog_document_chunks 467,471; topic_assignments 433,293; chunk_orphaned_at 4,308; taxonomy_centroids 804. Decision: DRIFT_TOLERANCE 10% per count. |
+| FORK_ORPHAN_CENTROIDS | § 3 Probe C2 | Probe C2 run on the fork | 0. |
+| FORK_PEAK_EXTRA_DISK, DISK_MARGIN, the factors 2.2 and 2.0 | § 3 Probe D | Peak extra disk on the fork; replaces the inferred factors | Database 9.92 GB to 17.34 GB (+7.43 GB, kept for the 14-day window), plus up to 6.39 GB WAL: 13.8 GB worst case. Decision: keep the live gate at 33,792 MB free (2.45x the worst case); live read 42,242 MB free at 11:54Z. Read the gate BEFORE stopping the engine: the Crunchy API's `disk_used` froze mid-walk on the fork and cannot monitor during it. |
+| WAL_PEAK | § 3 Probe W | Peak WAL on the fork against `max_wal_size` | 6.39 GB to complete, 7.05 GB to the harness end; above `max_wal_size` 5 GB, so checkpoints and archiving carry it (archiver healthy, no slots). |
+| VACUUM_WALL_TIME, VACUUM_PEAK_EXTRA_IO | § 5.9 | `VACUUM (ANALYZE)` of both parents on the fork, after the walk | chunks 2.8 s, taxonomy_centroids 0.1 s, measured after autovacuum had already run (a lower bound). Not metered. |
+| PROBE_MS_BEFORE_VACUUM, PROBE_PLAN_BEFORE_VACUUM, PROBE_MS_AFTER_VACUUM, PROBE_PLAN_AFTER_VACUUM | § 7.2 | The router probe on the largest-share leaf of the fork, before and after the VACUUM | Before: not observable. Autovacuum processed every populated leaf 43 to 49 s after commit, before the first probe. After: Index Only Scan on the leaf primary key, Heap Fetches 0, 2.56 to 2.58 ms server-side, at 25.8% and 32.9% scope shares. The § 5.9 exposure is about 45 s on this estate. |
+| FROZEN_QUERY_SET, OVERLAP_FLOOR, LATENCY_RATIO | § 7.3 | The set, its runner, and the pass rule, all fixed before the fork run | The set conexus ran: 3 queries x {voyage-code-3, voyage-context-3} x {nexus, gate-xr789}, all 200 with 10 results, 0.9 to 2.5 s client-side including Voyage, identical before and after VACUUM. Decision: the live pass rule is the same 12 searches, all 200 with 10 results, client latency at most 2x the fork's. A minilm-384 collection answers 422 in cloud mode by design. |
+| maintenance_work_mem, parallel workers | § 7 record | The changeset sets neither; record the live values and the index build time | `maintenance_work_mem` 655 MB, 2 parallel maintenance workers (fork). The HNSW build logged `hnsw graph no longer fits into maintenance_work_mem after 142947 tuples`: harmless, a timing factor already inside FORK_WALL_TIME. |
+| local-install seed count | § 8 | A local walk at a stated seed count | Not measured on a real local estate. The walk is exercised at test-fixture scale (P225MigrationWalkIntegrationTest, 12 chunks, 5 tenants) and by the local preflight; a local install's estate is far smaller than the cloud's. |
+
+Operator notes from the rehearsal: conexus's `walk.sh` exits 1 on this walk because its relfilenode compare flags the
+rebuilt `chunks`; that is expected for vectors-030-1 and not a failure. Judge the walk by § 4 and § 6.1, not by that exit
+code. `nexus_diag` reading nothing from `catalog_collections`, `taxonomy_centroids`, `chunk_orphaned_at`,
+`service_tokens` or `chunks_retired_225` is the RDR-182 content boundary (`grants-nexus-diag.xml`), not a lost grant.
 
 ### 9.2 Questions for conexus
 
