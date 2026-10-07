@@ -190,3 +190,66 @@ def test_the_pdftext_bound_travels_as_a_project_dependency() -> None:
     assert specifier.contains("0.6.3"), specifier
     assert not specifier.contains("0.7.0"), specifier
     assert not specifier.contains("0.7.1"), specifier
+
+
+# Install-download trims (2026-10-07 audit, T2 nexus_rdr/install-download-audit-2026-10-07).
+# mineru requires opencv-python and albumentations/albucore require
+# opencv-python-headless; both dists write site-packages/cv2/, so a venv that
+# installs both downloads OpenCV twice and which cv2 wins depends on install
+# order. The override drops opencv-python, leaving headless as the one cv2
+# (mineru calls no highgui function, and headless needs no libGL on a Linux
+# server). albumentations cannot go instead: mineru's unimernet formula model
+# imports it.
+
+_OPENCV_DISTS = frozenset({
+    "opencv-python",
+    "opencv-python-headless",
+    "opencv-contrib-python",
+    "opencv-contrib-python-headless",
+})
+
+
+def _excluded_on_every_platform(entry: str, name: str) -> bool:
+    req = Requirement(entry)
+    if req.name != name or req.marker is None:
+        return False
+    return not any(
+        req.marker.evaluate({"sys_platform": plat}) for plat in ("linux", "darwin", "win32")
+    )
+
+
+def test_the_opencv_python_exclusion_is_in_all_three_override_homes() -> None:
+    for entries in (
+        _override_entries_from_toml("pyproject.toml"),
+        _override_entries_from_toml("mcpb/pyproject.toml"),
+        _override_entries_from_overrides_txt(),
+    ):
+        assert any(_excluded_on_every_platform(e, "opencv-python") for e in entries), entries
+        assert not any(Requirement(e).name == "opencv-python-headless" for e in entries), entries
+
+
+def test_the_lock_resolves_exactly_one_opencv_dist_and_no_av() -> None:
+    """The resolution itself, not only the override text: uv.lock is what CI,
+    the publish job and every checkout install. Exactly one OpenCV dist, the
+    headless one; PyAV stays out (nexus-usppl).
+
+    uv keeps an overridden-out dist as a ``[[package]]`` row; what removes it
+    is that every edge to it carries the never-true marker. So the check walks
+    the dependency edges: a dist is reachable when any edge to it can fire on
+    linux, darwin or win32."""
+    lock = tomllib.loads(_text("uv.lock"))
+    reachable: set[str] = set()
+    for pkg in lock["package"]:
+        edge_lists = [pkg.get("dependencies", [])]
+        edge_lists += list(pkg.get("optional-dependencies", {}).values())
+        for edges in edge_lists:
+            for edge in edges:
+                marker = edge.get("marker")
+                if marker is None or not _excluded_on_every_platform(
+                    f"{edge['name']}; {marker}", edge["name"]
+                ):
+                    reachable.add(edge["name"])
+    assert sorted(reachable & _OPENCV_DISTS) == ["opencv-python-headless"], sorted(
+        reachable & _OPENCV_DISTS
+    )
+    assert "av" not in reachable

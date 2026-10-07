@@ -383,6 +383,18 @@ override-dependencies = [
     # affects nothing else. Raise the ceiling once mineru's own
     # span_pre_proc.py handles the new PageChars shape upstream.
     "pdftext>=0.6.3,<0.7",
+    # One OpenCV (2026-10-07 install-download audit). mineru requires
+    # opencv-python; albumentations and albucore (mineru[pipeline], imported
+    # by its unimernet formula model) require opencv-python-headless. Both
+    # dists write site-packages/cv2/, so every install downloaded OpenCV twice
+    # (36-74 MB per platform) and which cv2 won depended on install order.
+    # Headless stays: mineru and docling call no highgui function, and
+    # headless needs no libGL on a Linux server. Like av above, this reaches
+    # only override-reading resolves (this checkout, every generation build
+    # through src/nexus/_install/overrides.txt, the .mcpb's uv sync); a bare
+    # `uv tool install conexus` still installs both, because no Requires-Dist
+    # entry can remove a transitive requirement.
+    "opencv-python; sys_platform == 'never'",
 ]
 
 # nexus-mt1tj (Sam, 2026-09-04): CPU-only torch on Linux by default. The PyPI

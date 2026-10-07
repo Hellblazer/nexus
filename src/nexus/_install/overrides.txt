@@ -10,3 +10,7 @@ av; sys_platform == 'never'
 # and mcpb/pyproject.toml -- pdftext 0.7.x broke mineru's span_pre_proc.py
 # (see root pyproject.toml for detail).
 pdftext>=0.6.3,<0.7
+# One OpenCV: mineru requires opencv-python, albumentations requires
+# opencv-python-headless, and both write site-packages/cv2/. Headless stays
+# (see root pyproject.toml for detail).
+opencv-python; sys_platform == 'never'
