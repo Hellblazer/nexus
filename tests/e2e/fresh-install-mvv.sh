@@ -518,7 +518,13 @@ if [ "$PUBLISHED_MODE" = 1 ]; then
         # call this function makes (the mandatory first attempt included,
         # not only the post-probe retries): one function, one cache
         # policy, nothing to keep in sync between call sites.
-        _uv_sandboxed tool install --python 3.12 --no-cache "$PKG_SPEC" \
+        # Linux installs with --torch-backend cpu, exactly as the install
+        # page and README tell Linux users to (the PyPI default there is the
+        # 3.9 GB CUDA torch). macOS and Windows torch wheels carry no CUDA,
+        # so the documented command there has no flag and neither does this.
+        local torch_flag=()
+        [ "$(uname -s)" = "Linux" ] && torch_flag=(--torch-backend cpu)
+        _uv_sandboxed tool install --python 3.12 --no-cache "$PKG_SPEC" "${torch_flag[@]+"${torch_flag[@]}"}" \
             >"$LOGS/install.log" 2>&1
     }
     # The one propagation-signature test, shared by the retry trigger and

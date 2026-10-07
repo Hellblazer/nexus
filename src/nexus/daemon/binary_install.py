@@ -931,7 +931,8 @@ _PG_BUNDLE_BIN_PREFIX = "bundle/bin/"
 
 _VCRT_SIDECAR_NAME = "vcrt.meta.json"
 #: Stamped (empty file, mtime is the signal) when a provisioning attempt fails, so
-#: the automatic upgrade path does not repeat a ~40 MB download every session.
+#: the automatic upgrade path does not repeat the PG bundle download (7.4 MB for
+#: windows-x64 at engine v0.1.149) every session.
 _VCRT_FAILED_SENTINEL = ".vcrt_provision_failed"
 _WINDOWS_PLATFORM_TAG = "windows-x64"
 

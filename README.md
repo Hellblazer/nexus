@@ -15,11 +15,22 @@ The package on PyPI is `conexus`. The command it installs is `nx`.
 
 The common case: Claude Code on macOS or Linux, with [uv](https://docs.astral.sh/uv/) and git already installed.
 
+On macOS:
+
 ```bash
 uv tool install conexus --python 3.12   # install nx; --python 3.12 is required, Python 3.14 does not work yet
 nx self install                         # move nx to the layout Nexus manages
 nx init                                 # download and start the storage service; answer yes to start at login
 nx doctor                               # every line must show ✓ ("credentials not set" is normal)
+```
+
+On Linux, the first command also names the CPU build of torch. Without `--torch-backend cpu`, uv installs the CUDA build on x86-64: 4.3 GB of downloads and 8 GB on disk that Nexus never uses. The flag needs uv 0.9.19 or newer (`uv self update`), and uv prints a warning that it is experimental.
+
+```bash
+uv tool install conexus --python 3.12 --torch-backend cpu
+nx self install
+nx init
+nx doctor
 ```
 
 Then start `claude` and type these two lines inside Claude Code, not in the terminal:

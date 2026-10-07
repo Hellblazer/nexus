@@ -28,11 +28,17 @@
   was not tested; Windows on ARM is out of scope.
   No GPU is required, and none is used by default. Search embeds through a
   bundled ONNX model on CPU (`CPUExecutionProvider` is the only provider in
-  the tree). On Linux the installer additionally pins torch to its CPU build,
-  because the PyPI wheel is the CUDA one and drags about 4.5 GB of nvidia
-  packages that nothing on this path uses; set `NX_TORCH_BACKEND` (to `auto`,
-  `cu130`, and so on) to opt a GPU box back in. macOS wheels carry no CUDA
-  payload, so nothing is pinned there.
+  the tree). On Linux, torch is pinned to its CPU build at both install steps:
+  the first command is `uv tool install conexus --python 3.12 --torch-backend cpu`
+  (uv 0.9.19 or newer; uv warns that the flag is experimental), and
+  `nx self install` passes the same backend to every generation it builds.
+  Without the flag, uv takes the CUDA torch from PyPI on x86-64 and with it 15
+  nvidia packages and triton that nothing on this path uses: measured
+  2026-10-07 in a fresh ubuntu:24.04 container, 4,264 MB downloaded and
+  7,955 MB unpacked, against 688 MB and 2,250 MB with the flag. Set
+  `NX_TORCH_BACKEND` (to `auto`, `cu130`, and so on) to opt a GPU box back in
+  at `nx self install`. macOS and Windows wheels carry no CUDA payload, so
+  nothing is pinned there.
 
   **Memory.** Measured on an Apple Silicon Mac, sampling the local-stack
   processes' own RSS (never a whole-machine reading, which a shared box's
