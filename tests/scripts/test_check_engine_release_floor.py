@@ -840,13 +840,13 @@ class TestRequireWindows:
     def test_a_release_from_before_the_posix_archives_is_held_to_its_27(self, capsys) -> None:
         """The pinned engine at the time of this change (v0.1.149) has no .txz for Linux or macOS."""
         old = gate.expected_engine_assets(windows=True, posix_archives=False)
-        with patch.object(gate.subprocess, "run", return_value=self._release(old)):
+        with patch_in(gate, "subprocess.run", return_value=self._release(old)):
             assert gate.check_windows_assets(self.TAG) == 0
         assert "all 27 assets" in capsys.readouterr().out
 
     def test_a_partial_set_of_posix_archives_is_held_to_all_36(self, capsys) -> None:
         old = gate.expected_engine_assets(windows=True, posix_archives=False)
-        with patch.object(gate.subprocess, "run",
+        with patch_in(gate, "subprocess.run",
                           return_value=self._release([*old, "nexus-service-mac-arm64.txz"])):
             assert gate.check_windows_assets(self.TAG) == 1
         err = capsys.readouterr().err

@@ -22,6 +22,7 @@ from pathlib import Path
 import pytest
 
 from nexus.daemon import binary_install as b
+from tests._module_seam import setattr_in
 
 _TAG = "engine-service-v0.1.300"
 _BASE = f"https://github.com/Hellblazer/nexus/releases/download/{_TAG}"
@@ -281,14 +282,14 @@ def _raise_http(code: int):
 
 
 def test_download_maps_404_to_asset_absent(tmp_path, monkeypatch):
-    monkeypatch.setattr(b.urllib.request, "urlopen", _raise_http(404))
+    setattr_in(monkeypatch, b, "urllib.request.urlopen", _raise_http(404))
     with pytest.raises(b.BinaryAssetAbsentError, match="HTTP 404"):
         b._download("https://example/x", tmp_path / "x")
 
 
 @pytest.mark.parametrize("code", [403, 500, 503])
 def test_download_other_http_errors_are_not_asset_absent(tmp_path, monkeypatch, code):
-    monkeypatch.setattr(b.urllib.request, "urlopen", _raise_http(code))
+    setattr_in(monkeypatch, b, "urllib.request.urlopen", _raise_http(code))
     with pytest.raises(b.BinaryDownloadError) as exc_info:
         b._download("https://example/x", tmp_path / "x")
     assert not isinstance(exc_info.value, b.BinaryAssetAbsentError)
