@@ -30,7 +30,7 @@ from click.testing import CliRunner
 
 from nexus.commands import daemon as daemon_mod
 from nexus.daemon import storage_service_daemon as ssd
-from nexus.daemon.service_registry import GracefulStopSend, LeaseRecord, service_identity
+from nexus.daemon.service_registry import GracefulStopSend, LeaseRecord, ServiceRegistry, service_identity
 from tests.daemon._children import KILLED_RC, break_file_for, spawn_breakable
 
 CREATE_NEW_PROCESS_GROUP = 0x00000200
@@ -214,6 +214,37 @@ def test_a_supervisor_that_ignores_the_break_is_hard_killed_after_the_grace_and_
     assert outcome.stubborn == ()
     unclean = [e for e in logs if e["event"] == "storage_service_supervisor_unclean_stop"]
     assert len(unclean) == 1 and unclean[0]["pid"] == sup.pid
+
+
+@pytest.mark.parametrize("platform", ["win32", "linux"])
+def test_a_hard_killed_supervisors_lease_is_released_by_the_stop(
+    config_dir: Path, monkeypatch: pytest.MonkeyPatch, platform: str,
+) -> None:
+    """A supervisor that dies by the hard kill never relinquishes its own lease,
+    and the lease is still TTL-fresh, so ``status`` said ``live`` beside
+    ``health: unreachable`` and the next start warned about a dead-lease reclaim
+    (RDR-224 guide walk on 7.72.1). The stopper confirmed the exit, so it
+    releases the lease itself."""
+    _no_sweep(monkeypatch)
+    monkeypatch.setattr(ssd, "_SUPERVISOR_STOP_GRACE", 0.6)
+    api = _ConsoleApi(config_dir, deliver=False)
+    if platform != "win32":
+        # POSIX: the child ignores SIGTERM the way the Windows child ignores the break.
+        monkeypatch.setattr(
+            ssd, "request_graceful_stop",
+            lambda pid, **_k: GracefulStopSend(pid=pid, sent=True),
+        )
+    with _reaped(_spawn(ignore_break=True, where=config_dir)) as sup:
+        lease = _write_lease(config_dir, supervisor_pid=sup.pid, engine_pid=None)
+        registry = ServiceRegistry(dir=config_dir, tier="storage_service")
+        assert registry.discover(service_identity()) is not None  # non-vacuity: fresh, so "live"
+        outcome = ssd.stop_storage_service(
+            config_dir=config_dir, platform=platform, console_api=api,
+        )
+        assert sup.wait(timeout=30) == KILLED_RC
+    assert outcome.stubborn == ()
+    assert not lease.exists()
+    assert registry.discover(service_identity()) is None
 
 
 def test_a_stop_from_another_session_is_refused_and_kills_nothing(

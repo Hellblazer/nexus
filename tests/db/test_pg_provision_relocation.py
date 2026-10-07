@@ -90,3 +90,25 @@ class TestRelocationAware:
         bin_dir = tmp_path / "empty" / "bin"
         bin_dir.mkdir(parents=True)
         check_pgvector_available(_bins(bin_dir))  # must NOT raise
+
+
+class TestWindowsPgConfigName:
+    """The Windows bundle ships ``pg_config.exe`` (``build_pg_bundle_windows.py``).
+    Probing the bare name skipped the preflight on every Windows install and
+    printed ``pgvector_preflight_no_pg_config``, a warning a new user reads as
+    a failure (RDR-224 guide walk, nexus-f9bgu)."""
+
+    def test_the_exe_is_found_and_the_preflight_runs(self, tmp_path):
+        bin_dir = tmp_path / "win-bundle" / "bin"
+        _write_pg_config(bin_dir, reported_prefix="/nonexistent/build/pg")
+        (bin_dir / "pg_config").rename(bin_dir / "pg_config.exe")
+        # No vector.control anywhere: a preflight that RAN must raise. One that
+        # missed pg_config.exe would warn and return, which is the defect.
+        with pytest.raises(PgVectorNotInstalledError):
+            check_pgvector_available(_bins(bin_dir), platform="win32")
+
+    def test_posix_still_probes_the_bare_name(self, tmp_path):
+        bin_dir = tmp_path / "posix-bundle" / "bin"
+        _write_pg_config(bin_dir, reported_prefix="/nonexistent/build/pg")
+        with pytest.raises(PgVectorNotInstalledError):
+            check_pgvector_available(_bins(bin_dir), platform="linux")

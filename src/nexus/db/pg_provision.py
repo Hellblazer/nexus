@@ -461,7 +461,8 @@ def check_pgvector_available(bins: PgBinaries, *, platform: str | None = None) -
     will fail loud at CREATE EXTENSION anyway; this gate exists to move the
     common failure earlier, not to add a new way to be wrong.
 
-    ``pg_config.exe`` on Windows (nexus-ja4pq): the bare name never exists in
+    ``pg_config.exe`` on Windows (nexus-ja4pq, also found by nexus-f9bgu's guide
+    walk): the bare name never exists in
     the Windows bundle, which made this whole preflight a silent no-op there.
     *platform* is the :func:`_on_windows` seam.
     """

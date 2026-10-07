@@ -615,8 +615,7 @@ def _acquire_pg_bundle_step(config_dir: Path) -> Path:
 def _provision_postgres_step() -> None:
     """Provision (or verify) the nx-managed local Postgres cluster.
 
-    Called from init_cmd when ``--service`` is passed or when the service
-    storage backend is already configured (``NX_STORAGE_BACKEND=service``).
+    Called from init_cmd on the service path (the only storage backend).
 
     Structured to be robust: any failure is reported as a clear, actionable
     error rather than a traceback — the user needs an install hint, not a
@@ -693,11 +692,11 @@ def _provision_postgres_step() -> None:
     if result.vector_extension_created:
         lines.append("  Extension 'vector' (pgvector) created.")
     lines.append(f"  Credentials written to {result.credentials_path} (0600).")
-    lines.append(
-        f"  Cluster listening on 127.0.0.1:{result.port}.\n"
-        f"  Set NX_STORAGE_BACKEND=service and source {result.credentials_path} "
-        f"before starting the service."
-    )
+    # No "set NX_STORAGE_BACKEND / source the credentials" advice: the service
+    # backend is the only one and the default (storage_mode), and the supervisor
+    # reads pg_credentials itself, so the line asked for an action nothing needs
+    # (RDR-224 guide walk, nexus-f9bgu).
+    lines.append(f"  Cluster listening on 127.0.0.1:{result.port}.")
     for line in lines:
         click.echo(line)
 

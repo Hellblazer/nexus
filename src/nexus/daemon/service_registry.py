@@ -1200,6 +1200,7 @@ def reclaim_lease_if_dead_owner(
     *,
     log: Any = None,
     event: str = "service_registry_dead_owner_reclaimed",
+    budget: Optional[float] = None,
 ) -> bool:
     """True when *record* was held by a DEAD supervisor and has just been
     relinquished — the caller must proceed to (re)spawn rather than
@@ -1253,6 +1254,13 @@ def reclaim_lease_if_dead_owner(
     Recorded here per AGENTS.md's pid-liveness exception list (this
     function is now named there alongside ``sweep_matching_processes``,
     the primitive's other documented pid-based mechanism).
+
+    *budget* bounds the election wait inside the relinquish, as
+    ``relinquish(budget=)`` does on every stop-path caller. The stop path calls
+    this once it has CONFIRMED its supervisor's exit (a hard-killed supervisor
+    never relinquishes its own lease, which left ``status`` reading ``live``
+    and the next start reclaiming a dead lease; RDR-224 guide walk,
+    nexus-f9bgu). ``None`` keeps the blocking wait the spawners use.
     """
     supervisor_pid = record.payload.get("supervisor_pid")
     if not (isinstance(supervisor_pid, int) and supervisor_pid > 0):
@@ -1267,7 +1275,7 @@ def reclaim_lease_if_dead_owner(
             msg="fresh lease held by a dead supervisor; relinquishing + re-spawning",
         )
     try:
-        registry.relinquish(record)
+        registry.relinquish(record, budget=budget)
     except Exception as exc:  # noqa: BLE001 — best-effort reclaim; generation fencing still protects ownership
         if log is not None:
             log.warning(

@@ -6,8 +6,9 @@ so the sender has to ``FreeConsole`` and ``AttachConsole`` to the target's.
 Done in the CLI process that rebinds the CLI's console (process-global: every
 thread loses it for the window) and leaves its std handles to whatever
 ``AttachConsole(ATTACH_PARENT_PROCESS)`` rebuilds. Production now runs the
-sequence in a short-lived helper process spawned ``DETACHED_PROCESS`` (no
-console of its own to begin with), and the CLI's console is never detached.
+sequence in a short-lived helper process spawned ``CREATE_NO_WINDOW`` (a
+hidden console of its own, freed before the attach; ``DETACHED_PROCESS`` hung
+the venv launcher, nexus-f9bgu), and the CLI's console is never detached.
 
 Every test injects the spawner or the platform, so they run on every host. The
 real helper, console hosts and the CLI's own handles are measured on Windows
@@ -95,7 +96,7 @@ def _ok(**overrides: object) -> str:
 
 
 class TestHelperSpawn:
-    def test_the_helper_is_a_detached_console_python_running_this_module(
+    def test_the_helper_is_a_hidden_console_python_running_this_module(
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         monkeypatch.setattr(sys, "executable", r"C:\venv\Scripts\pythonw.exe")
@@ -103,10 +104,16 @@ class TestHelperSpawn:
         result = win_console.send_ctrl_break_via_helper(4242, run=run)
         argv, kwargs = run.calls[0]
         assert argv == [r"C:\venv\Scripts\python.exe", "-m", "nexus.util.win_console", "4242"]
-        # No console of its own: the CLI's console is never detached. Not
-        # CREATE_NEW_CONSOLE (a window flash) and not CREATE_NO_WINDOW (a
-        # hidden console the helper would only have to free).
-        assert kwargs["extra_creationflags"] == win_console.DETACHED_PROCESS
+        # A hidden console of its own, which the sequence frees before it
+        # attaches. Not CREATE_NEW_CONSOLE (a window flash), and NOT
+        # DETACHED_PROCESS: the venv's Scripts\python.exe is a launcher whose
+        # real-python child never ran a line under DETACHED_PROCESS and the
+        # helper timed out on every stop (measured on a clean Windows 11 guest
+        # with conexus 7.72.1; CREATE_NO_WINDOW answered in 0.69 s and the
+        # supervisor exited 0.40 s later; RDR-224 guide walk, nexus-f9bgu).
+        flags = int(kwargs["extra_creationflags"])  # type: ignore[call-overload]
+        assert flags == win_console.CREATE_NO_WINDOW
+        assert flags & win_console.DETACHED_PROCESS == 0
         assert kwargs["stdin"] == subprocess.DEVNULL
         assert float(kwargs["timeout"]) > 0  # type: ignore[arg-type]
         assert result.sent is True  # non-vacuity: the answer round-tripped
@@ -259,22 +266,22 @@ class TestRequestGracefulStopUsesTheHelper:
         assert killed and killed[0][0] == 77
 
 
-class TestRunBoundedCarriesTheDetachedFlag:
+class TestRunBoundedCarriesTheHelperFlag:
     """The helper runs under ``run_bounded`` (the repo ratchet wants every capture-with-timeout
-    spawn bounded); ``extra_creationflags`` is how it asks for ``DETACHED_PROCESS`` without losing
+    spawn bounded); ``extra_creationflags`` is how it asks for ``CREATE_NO_WINDOW`` without losing
     the process-group kill ``run_bounded`` is for."""
 
     def test_the_flag_is_merged_into_the_windows_group_flag(self) -> None:
         from nexus.bounded_subprocess import _isolation_kwargs
 
         group = 0x00000200  # CREATE_NEW_PROCESS_GROUP
-        merged = _isolation_kwargs({"creationflags": group}, win_console.DETACHED_PROCESS)
-        assert merged == {"creationflags": group | win_console.DETACHED_PROCESS}
+        merged = _isolation_kwargs({"creationflags": group}, win_console.CREATE_NO_WINDOW)
+        assert merged == {"creationflags": group | win_console.CREATE_NO_WINDOW}
 
     def test_posix_isolation_is_untouched(self) -> None:
         from nexus.bounded_subprocess import _isolation_kwargs
 
-        assert _isolation_kwargs({"start_new_session": True}, win_console.DETACHED_PROCESS) == {
+        assert _isolation_kwargs({"start_new_session": True}, win_console.CREATE_NO_WINDOW) == {
             "start_new_session": True,
         }
 
@@ -303,5 +310,5 @@ class TestRunBoundedCarriesTheDetachedFlag:
         monkeypatch.setattr(bs.subprocess, "Popen", popen)
         monkeypatch.setattr(bs, "isolation_popen_kwargs", lambda: {"creationflags": 0x200}, raising=False)
         monkeypatch.setattr("nexus.util.process_group.isolation_popen_kwargs", lambda: {"creationflags": 0x200})
-        bs.run_bounded(["x"], timeout=5, extra_creationflags=win_console.DETACHED_PROCESS)
-        assert seen["creationflags"] == 0x200 | win_console.DETACHED_PROCESS
+        bs.run_bounded(["x"], timeout=5, extra_creationflags=win_console.CREATE_NO_WINDOW)
+        assert seen["creationflags"] == 0x200 | win_console.CREATE_NO_WINDOW

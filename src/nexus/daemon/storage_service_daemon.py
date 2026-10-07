@@ -3608,6 +3608,15 @@ def _stop_marked_service(
                 # SIGKILL and TerminateProcess both return before the process
                 # has left the table: a stop is done when it HAS exited.
                 lease_stubborn.extend(wait_for_exit([supervisor_pid]))
+            if supervisor_pid not in lease_stubborn:
+                # The exit is confirmed. A supervisor that exited cleanly has
+                # already relinquished (this is then a no-op); one that was
+                # hard-killed never got to, and its lease is still TTL-fresh,
+                # so status said "live" and the next start logged a dead-lease
+                # reclaim (RDR-224 guide walk, nexus-f9bgu). Release it here.
+                reclaim_lease_if_dead_owner(
+                    registry, record, budget=_STOP_ELECTION_BUDGET,
+                )
             signalled.append(supervisor_pid)
         elif isinstance(pid_to_signal, int) and pid_to_signal > 0:
             source = "lease"

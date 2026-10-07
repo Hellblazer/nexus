@@ -1242,6 +1242,47 @@ def _spawn_unreaped_zombie() -> "subprocess.Popen[bytes]":
     raise AssertionError("unreachable")  # pragma: no cover
 
 
+class TestDeadOwnerReclaimOnTheStopPath:
+    """``reclaim_lease_if_dead_owner(..., budget=)`` (RDR-224 guide walk,
+    nexus-f9bgu): a stop that confirmed its supervisor's exit releases the
+    dead owner's lease, so ``status`` stops saying ``live`` and the next start
+    has no dead lease to reclaim. On the stop path the election wait is
+    bounded the same way ``relinquish(budget=)`` is everywhere else there."""
+
+    @staticmethod
+    def _dead_owner_record(reg: "ServiceRegistry") -> "LeaseRecord":
+        dead = subprocess.Popen([sys.executable, "-c", "pass"])  # noqa: S603 — fixed argv, a genuinely dead pid
+        dead.wait()
+        return reg.publish(
+            "stop-scope",
+            endpoint={"host": "127.0.0.1", "port": 9999},
+            version="1.0",
+            owner_token="tok-dead",
+            payload={"supervisor_pid": dead.pid},
+        )
+
+    def test_a_free_election_releases_the_dead_owners_lease(self, config_dir: Path) -> None:
+        reg = ServiceRegistry(dir=config_dir, tier="storage_service")
+        record = self._dead_owner_record(reg)
+        assert reg.discover("stop-scope") is not None  # non-vacuity: fresh, read as live
+        assert sr.reclaim_lease_if_dead_owner(reg, record, budget=2.0) is True
+        assert reg.discover("stop-scope") is None
+
+    def test_a_busy_election_is_bounded_by_the_budget_and_never_raises(
+        self, config_dir: Path,
+    ) -> None:
+        reg = ServiceRegistry(dir=config_dir, tier="storage_service")
+        record = self._dead_owner_record(reg)
+        with reg.election("stop-scope"):
+            t0 = time.monotonic()
+            reclaimed = sr.reclaim_lease_if_dead_owner(reg, record, budget=0.3)
+            elapsed = time.monotonic() - t0
+        assert reclaimed is True
+        assert 0.3 <= elapsed < 5.0
+        # Nothing was written under a busy flock: the lease is left to its TTL.
+        assert reg.discover("stop-scope") is not None
+
+
 class TestTerminationSurvivorVerdict:
     """``terminate_pids`` is the ONE termination primitive every tier's stop
     path funnels through (``stop_storage_service``'s tree sweep,
