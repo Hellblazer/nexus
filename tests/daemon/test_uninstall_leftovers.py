@@ -44,6 +44,9 @@ def _layout(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, platform: str) -> t
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    # nexus_cache_root() reads HOME before Path.home(); without this a confirmed
+    # remove_data uninstall removes the suite's shared model cache.
+    monkeypatch.setenv("HOME", str(home))
     monkeypatch.setattr(daemon_cmd, "_autostart_platform", lambda: platform)
     monkeypatch.setattr(daemon_cmd, "_resolve_nx_bin", lambda: ["/opt/conexus/bin/nx"])
     monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path / "cfg"))

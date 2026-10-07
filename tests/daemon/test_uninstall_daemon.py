@@ -41,8 +41,13 @@ def _set_platform(monkeypatch: pytest.MonkeyPatch, platform: str) -> None:
 
 @pytest.fixture
 def _env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    """Isolated config dir + stubbed autostart paths + a legacy T2 unit."""
+    """Isolated config dir + stubbed autostart paths + a legacy T2 unit.
+
+    HOME moves too: a confirmed ``remove_data`` uninstall removes
+    ``nexus_cache_root()`` (``$HOME/.cache/nexus``), which under the suite is the
+    shared model cache every engine-booting test reads."""
     monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path / "cfg"))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
     _set_platform(monkeypatch, "darwin")
     monkeypatch.setattr(
         daemon_cmd, "_autostart_install_dir", lambda: tmp_path / "units"
