@@ -39,8 +39,10 @@ measured or seen. Section 10 collects them. **Placeholder `.27:`** marks a numbe
   plpgsql when `vectors-029`'s guard still holds (the owner policy `chunks_gate_probe_owner_read` names exactly the
   migrating role and no RLS-subject login role has that role's privileges), invoker SQL otherwise; its definer outcome
   ends with `vectors-029`'s post-condition. Function definitions and grants only: no data effect.
-- After boot the engine runs `ChunksIsolationCheck` over both partition trees (every parent, model partition and
-  leaf: RLS enabled and forced, the root's permissive policies present). A gap is a boot refusal (§ 6.1).
+- After the walk, `SchemaMigrator.migrate` reads both partition trees once and, only if a relation does not mirror its
+  parent, runs `partition_sync_access` for both parents as the schema owner (§ 6.1). After boot the engine runs
+  `ChunksIsolationCheck` over both trees (every parent, model partition and leaf: RLS enabled and forced, the root's
+  permissive policies present). A gap that survives the repair is a boot refusal (§ 6.1).
 - The cloud deploy is stop-start: `docker stop -t 30 conexus-engine`, `docker rm -f`, `docker run` of the new tag,
   one replica, no blue-green. Nothing serves `/v1/*` during the walk (T2 `nexus_rdr/225-cloud-topology`).
 - Downtime budget: about 15 minutes when the fork rehearsal measured it; longer needs only Sam's go, no tenant notice
@@ -385,7 +387,8 @@ conexus runs these; nexus watches and answers.
    this step is manual.
 6. Watch the engine log for, in order: `schema_migration_start`, `schema_migration_session`,
    `schema_migration_pending changesets=15`, then either `schema_migration_complete` (§ 4) or
-   `schema_migration_failed`. After complete: `chunks_isolation_check_failed` or `root_token_seed_*` are exits too.
+   `schema_migration_failed`. After complete: `partition_access_drift_repaired` (WARN) means the owner repair ran;
+   `chunks_isolation_check_failed` or `root_token_seed_*` are exits too.
 7. Walk time cap: the rehearsed time, FORK_WALL_TIME (`.27:`), times CAP_FACTOR (`.27:`), and never past the budget
    Sam set for the window (default about 15 minutes). At the cap: do not kill the container. Ask Sam to extend or abort.
    A kill before commit rolls back, so it is safe for data, but the migration backend can keep running and holding locks
@@ -478,7 +481,7 @@ remedy is fix-forward.
 | `vectors-031-2` post-condition, signatures | `vectors-031: expected exactly 3 read-path functions (one signature each), found N: ...` | The same, for `text_gate_probe_384`, `_768` and `_1024`. Same remedy. |
 | `vectors-031-2` owner assertion | `vectors-031-2: probe(s) ... are SECURITY DEFINER but not owned by the migrating role` | A definer probe is owned by a different role than the one migrating. The changeset recreates the probes as the migrating role, so this fires only when that did not happen. Remedy: `ALTER FUNCTION nexus.text_gate_probe_<dim>(text, text[], jsonb, text, int, text, text) OWNER TO <migrating role>`, or drop the probes and restart. Before the window: `SELECT proname, proowner::regrole, prosecdef FROM pg_proc WHERE proname LIKE 'text_gate_probe_%'`. |
 | `vectors-031-2` guard assertions | `vectors-031-2: policy chunks_gate_probe_owner_read must name exactly the migrating role ...` or `vectors-031-2: role(s) ... have the privileges of the migrating role ...` | The copy of `vectors-029`'s post-condition. The changeset chooses the invoker branch whenever the policy does not name the migrating role or a login role subject to RLS inherits that role, so these fire only when the state moves during the walk. Remedy: put the policy or the membership right (the second message names the roles), restart. Do not weaken the check. |
-| After the complete line | `event=chunks_isolation_check_failed` (a policy applies to the service role) or `event=chunks_isolation_structure_gaps` (a parent, model partition or leaf does not mirror its parent) | The engine refuses to serve and exits 1. Under `--restart unless-stopped` the container loops until someone repairs it (§ 5.5 sets `--restart=no` for the first boot). The log line names the relations. **Remedy, as the table owner (`nexus_admin`; the engine's runtime role cannot do this):** put any wrong policy on the PARENT right first (the function copies from it), then `SELECT nexus.partition_sync_access('nexus.chunks'::regclass);` and `SELECT nexus.partition_sync_access('nexus.taxonomy_centroids'::regclass);`. For a policy violation (`chunks_gate_probe_owner_read` applying to the service role): `DROP POLICY chunks_gate_probe_owner_read ON nexus.chunks` and then `partition_sync_access` for both parents (dropping it on the parent alone leaves its copy on every leaf, and the next boot refuses on each), or `REVOKE` the role membership. Then `docker start conexus-engine`. |
+| After the complete line | `event=chunks_isolation_check_failed` (a policy applies to the service role) or `event=chunks_isolation_structure_gaps` (a parent, model partition or leaf does not mirror its parent) | The engine refuses to serve and exits 1; under `--restart unless-stopped` the container loops until someone repairs it (§ 5.5 sets `--restart=no` for the first boot). **Drift on a model partition or leaf no longer loops here.** The migration step re-mirrors both parents onto their trees at every boot as the schema owner and logs `event=partition_access_drift_repaired count=N relations=[...]` at WARN when it had work to do (a healthy boot logs `event=partition_access_checked` at INFO and changes nothing). Read that WARN: it names the relations that drifted, and a repaired relation is a finding to explain (who created or edited it), not noise. The manual remedy remains only for drift the copy cannot fix, which is logged as `event=partition_access_drift_unrepaired` (ERROR, naming the relations and the problems) just before the refusal: a wrong policy or flag on the PARENT, or a migrating role that does not own the tables or the function. **Remedy, as the table owner (`nexus_admin`; the engine's runtime role cannot do this):** put any wrong policy on the PARENT right first (the function copies from it), then `SELECT nexus.partition_sync_access('nexus.chunks'::regclass);` and `SELECT nexus.partition_sync_access('nexus.taxonomy_centroids'::regclass);`. For a policy violation (`chunks_gate_probe_owner_read` applying to the service role): `DROP POLICY chunks_gate_probe_owner_read ON nexus.chunks` and then `partition_sync_access` for both parents (dropping it on the parent alone leaves its copy on every leaf, and the next boot refuses on each), or `REVOKE` the role membership. Then `docker start conexus-engine`. |
 | After the complete line | `root_token_seed_*` | Token seeding failed; unrelated to the layout. Read the line. |
 
 Rehearsal assertion (nexus-3wh8d.27): the engine on the fork, migrated by the production-shaped non-superuser role
@@ -631,8 +634,9 @@ that the data survived.
    (`_PARTITION_COMPARE_SQL` in `src/nexus/health.py`) without the two count rows; `service_tokens` carries
    row-level security, so read it as a role that bypasses it or under each tenant, as in § 3. The leaf count is
    `2 x models x tenants` (`pg_inherits` children of the model partitions of both parents).
-7. **Engine logs clean.** No `chunks_isolation_check_failed`, no `schema_migration_count_anomaly`, no
-   `root_token_seed_*` after the complete line.
+7. **Engine logs clean.** No `chunks_isolation_check_failed`, no `partition_access_drift_repaired` or
+   `partition_access_drift_unrepaired`, no `schema_migration_count_anomaly`, no `root_token_seed_*` after the
+   complete line.
 8. Record the actual walk time, the observed lock count, the peak disk and WAL, and every output above in T2
    `nexus_rdr/225-walk-rehearsal`, with the deploy date (Phase 3 Step 3's 14-day gate reads it). Then, and only then,
    the paired client release may go (§ 2.7), and `scripts/check_engine_release_floor.py` must pass.

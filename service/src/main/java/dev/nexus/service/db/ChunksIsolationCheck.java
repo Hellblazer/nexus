@@ -420,10 +420,11 @@ public final class ChunksIsolationCheck {
             + (gaps.size() > REFUSAL_GAPS_SHOWN ? "; " + (gaps.size() - REFUSAL_GAPS_SHOWN) + " more gap(s) follow" : "")
             + ". PostgreSQL inherits neither the row-security flags nor the policies down a partition tree, and a "
             + "model partition or leaf can be queried directly, so this service does not serve tenant traffic until "
-            + "every relation mirrors its parent (RDR-225). As the table owner, re-mirror each parent onto its "
-            + "whole tree: SELECT nexus.partition_sync_access('nexus.chunks'::regclass) and the same for "
-            + "nexus.taxonomy_centroids (after putting right any policy that is wrong on the PARENT, which the "
-            + "function copies from).";
+            + "every relation mirrors its parent (RDR-225). The schema migration already re-mirrors both parents "
+            + "onto their trees at every boot, so a gap that survives it is one the copy cannot fix: a wrong PARENT "
+            + "(the copy reads from it) or a migrating role that does not own the tables. As the table owner, put "
+            + "the parent right, then SELECT nexus.partition_sync_access('nexus.chunks'::regclass) and the same for "
+            + "nexus.taxonomy_centroids.";
     }
 
     private static boolean intact(DataSource ds) throws SQLException {
