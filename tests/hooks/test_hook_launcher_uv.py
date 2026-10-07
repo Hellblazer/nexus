@@ -133,3 +133,58 @@ def test_auto_approve_allows_through_uv_and_the_shim(event: str) -> None:
     )
     assert proc.returncode == 0, proc.stderr
     assert "allow" in proc.stdout, proc.stdout
+
+
+# -- the known blocking failure (RDR-224 review finding B, nexus-f9bgu.36) -----------
+
+#: Events on which Claude Code treats a hook's exit 2 as BLOCKING: the tool call,
+#: the permission request, or the prompt is refused.
+_BLOCKING_EVENTS = {"PreToolUse", "PermissionRequest", "UserPromptSubmit"}
+
+
+def _no_interpreter_env(tmp_path) -> dict[str, str]:
+    """uv alone on PATH, an empty managed-Python directory, downloads off, offline:
+    a box where uv can find no interpreter and cannot fetch one."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    (bindir / "uv").symlink_to(shutil.which("uv"))
+    pydir = tmp_path / "py"
+    pydir.mkdir()
+    return {
+        "PATH": str(bindir),
+        "HOME": str(tmp_path),
+        "UV_PYTHON_INSTALL_DIR": str(pydir),
+        "UV_PYTHON_DOWNLOADS": "never",
+        "UV_OFFLINE": "1",
+        "UV_CACHE_DIR": str(tmp_path / "cache"),
+    }
+
+
+def test_uv_with_no_interpreter_exits_2_which_blocks_five_entries(tmp_path) -> None:
+    """MEASURED, not fixed: hooks.json launches in exec form (``args`` set, so no
+    shell), and an exec-form entry cannot map a launcher failure to a non-blocking
+    code. With no Python 3.12+ findable and none fetchable (offline, proxied,
+    air-gapped), ``uv run`` exits 2; Claude Code reads exit 2 as a block on
+    PreToolUse, PermissionRequest and UserPromptSubmit. The test pins that premise
+    so a uv release that changes the code, or a hooks.json change that moves an
+    entry across the blocking line, is noticed; conexus/README.md documents the
+    remedy and the finding's record (nexus_rdr/224-phase4-fix-A-B) the options."""
+    env = _no_interpreter_env(tmp_path)
+    entries = _launcher_entries()
+    blocking = [(e, h) for e, h in entries if e in _BLOCKING_EVENTS]
+    assert len(blocking) == 5, [(e, _script(h)) for e, h in blocking]
+    for event, hook in entries:
+        proc = subprocess.run(
+            _argv(hook), input="{}", capture_output=True, text=True, timeout=60,
+            env=env, cwd=str(tmp_path),
+        )
+        assert proc.returncode == 2, (event, _script(hook), proc.returncode, proc.stderr)
+        assert "No interpreter found" in proc.stderr, (event, _script(hook), proc.stderr)
+
+
+def test_the_readme_documents_the_blocking_failure_and_its_remedy() -> None:
+    text = (REPO_ROOT / "conexus" / "README.md").read_text()
+    assert "exits 2" in text and "uv python install 3.12" in text, (
+        "conexus/README.md must say that uv exits 2 when it finds no Python and cannot "
+        "fetch one, that this blocks, and the remedy"
+    )

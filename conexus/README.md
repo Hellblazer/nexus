@@ -284,8 +284,20 @@ from syncing the session's project or reading a `.python-version`. The four plug
 carry a PEP 723 `requires-python = ">=3.12"` block, the floor their own guards enforce, so
 uv never runs them under an older interpreter it happens to find first; the shim is
 stdlib-only and has no floor. The first hook run on a machine with no Python 3.12 or newer
-makes uv fetch one, which can outlast a hook's timeout once; later runs find it. Direct
-`nx-hook <verb>` entries are unchanged.
+makes uv fetch one, which can outlast a hook's timeout once; later runs find it.
+
+**Known blocking failure.** When uv can find no Python 3.12 or newer and cannot fetch one
+(offline, behind a proxy that blocks the download, air-gapped), `uv run` exits 2 with
+`No interpreter found`. Claude Code treats a hook's exit 2 as blocking on `PreToolUse`,
+`PermissionRequest` and `UserPromptSubmit`, so five of the seven uv-launched entries (both
+Bash gates, both `auto-approve` entries, the mailbox drain) refuse every Bash call, every
+conexus tool call and every prompt until Python exists; the two `SessionStart` entries only
+print the error. The entries are in exec form (`args` is set, so there is no shell), and an
+exec-form entry cannot turn a launcher failure into a non-blocking code. The remedy is one
+command on that machine: `uv python install 3.12` (online once, then it is cached). A
+shell-form wrapper could map the failure to exit 0; it is not used because Claude Code runs
+shell-form hooks through Git Bash or PowerShell depending on the machine, and no one string is
+correct in both (nexus-f9bgu.36). Direct `nx-hook <verb>` entries are unchanged.
 
 | Event | Handler | Purpose |
 |-------|--------|---------|

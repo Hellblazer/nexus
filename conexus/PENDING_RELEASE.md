@@ -45,6 +45,13 @@ stale -- and stays exactly where it is until moved back deliberately.
 
 ONE PATH PER BULLET, on the bullet's FIRST line.
 
+- hook exec off the cwd (nexus-f9bgu.36, RDR-224 finding A): `conexus/hooks/scripts/_exec_path.py` is new, a stdlib `which_off_cwd` that resolves an executable on PATH alone (PATHEXT honoured, relative PATH entries skipped on Windows) and returns an absolute path. On Windows a bare name is searched in the cwd first and a hook's cwd is the project, so a planted `nx-hook.exe`, `git.exe` or `uv.exe` would have run. POSIX behaviour is `shutil.which`, unchanged.
+- hook exec off the cwd (nexus-f9bgu.36): `conexus/hooks/scripts/nx_hook_shim.py` spawns `nx-hook` by the absolute path `which_off_cwd` returns, and treats a CLI found only in the cwd as absent (exit 0 with the not-installed note). No change on POSIX.
+- hook exec off the cwd (nexus-f9bgu.36): `conexus/hooks/scripts/version_lockstep_action.py` resolves `uv` and `nx` through `which_off_cwd` and spawns the absolute path; one not on PATH is a failed command. No change on POSIX.
+- hook exec off the cwd (nexus-f9bgu.36): `conexus/hooks/scripts/version_lockstep_hook.py` resolves `git` through `which_off_cwd` for the ref-drift check. No change on POSIX.
+- hook exec off the cwd (nexus-f9bgu.36): `conexus/hooks/scripts/routing/subagent_git_write_requires_orchestrator.py` resolves `git` through `which_off_cwd` for the linked-worktree check, which runs with the project as cwd; none on PATH is the existing undeterminable (fail-open) answer. No change on POSIX.
+- hook exec off the cwd (nexus-f9bgu.36): `conexus/hooks/scripts/_interpreter.py` finds `python3.13` / `python3.12` through `which_off_cwd` before it re-execs. No change on POSIX.
+
 
 
 ## Deferred to the next client release

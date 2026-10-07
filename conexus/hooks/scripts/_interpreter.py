@@ -76,10 +76,14 @@ scripts whose whole purpose is to be reachable from a 3.9 interpreter.
 from __future__ import annotations
 
 import os
-import shutil
 import subprocess
 import sys
 import time
+
+# PATH-only lookup for the named interpreters (RDR-224 finding A,
+# nexus-f9bgu.36): a bare ``shutil.which`` searches the cwd first on Windows.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _exec_path  # noqa: E402 -- must follow the sys.path insert
 
 _PROBE_TIMEOUT_S = 1.5
 """Per-probe ceiling. A healthy interpreter starts in tens of ms; a probe
@@ -197,7 +201,7 @@ def resolve() -> str | None:
     if time.monotonic() >= deadline:
         return None
     for name in ("python3.13", "python3.12"):
-        found = shutil.which(name)
+        found = _exec_path.which_off_cwd(name)
         if found:
             return found
     return None

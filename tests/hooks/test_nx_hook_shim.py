@@ -168,7 +168,10 @@ def test_the_shim_imports_only_the_standard_library() -> None:
         elif isinstance(n, ast.ImportFrom) and n.module:
             found.add(n.module.split(".")[0])
     assert found, "no imports found; the scan examined nothing"
-    assert found <= set(sys.stdlib_module_names) | {"__future__"}, found
+    # ``_exec_path`` is the sibling PATH-only lookup (finding A, nexus-f9bgu.36);
+    # tests/hooks/test_exec_off_cwd.py pins that it is itself standard library only.
+    assert found <= set(sys.stdlib_module_names) | {"__future__", "_exec_path"}, found
+    assert "_exec_path" in found, "the shim no longer resolves nx-hook through the PATH-only helper"
 
 
 @pytest.mark.lint
