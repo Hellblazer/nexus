@@ -774,6 +774,13 @@ A PITR-fork walk rehearsal of the real changeset at production scale
 the stop-start topology conexus confirmed. Its measured walk time is the input to the
 downtime budget (confirmed by Sam 2026-10-06; see Prerequisites).
 
+The deploy and abort procedure is [`docs/runbooks/rdr-225-cloud-deploy.md`](../runbooks/rdr-225-cloud-deploy.md)
+(nexus-3wh8d.26): the pre-walk census with its abort thresholds, the prediction for the fork walk's
+`schema_migration_complete` line, the UTC restore-point capture, and the abort decision keyed on the database state
+(not on the absence of a log line: `vectors-030-1` can commit and a later `runAlways` changeset can still fail the
+boot). After the walk commits a tag flip to the previous engine is not a rollback; the choices are fix-forward or PITR,
+on Sam's go. The numbers the rehearsal must supply are listed there (nexus-3wh8d.27).
+
 #### Step 2: Tenant-removal runbook
 
 The runbook is [`docs/runbooks/rdr-225-tenant-removal.md`](../runbooks/rdr-225-tenant-removal.md) (nexus-3wh8d.21). `DropTenantPartitionsIntegrationTest` exercises it end to end, tokens included, and also pins the direct-DROP refusal (SQLSTATE `2BP01`).

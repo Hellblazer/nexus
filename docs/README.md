@@ -31,7 +31,7 @@ Start on the site, then find your section below by what you're trying to do.
 - [Migration Runbook](migration-runbook.md) — Operator's manual order of operations, quiescence, rollback, and the deprecation window
 - [Privacy Policy](privacy-policy.md) — What data nexus stores and where
 - [`operations/`](operations/) — Operator runbooks: [Apple code signing](operations/apple-code-signing.md), [audit-membership interpretation](operations/audit-membership-interpretation.md), [T3 health checks (historical template)](operations/t3-health.md), [Tuple space](operations/tuple-space.md) — the three `nx doctor` rows, dead-letter triage, sweep reading
-- [`runbooks/`](runbooks/) — One-off operational runbooks for specific incidents/phases: [RDR-191 Phase 5 cloud FK runbook](runbooks/rdr-191-phase5-cloud-fk.md)
+- [`runbooks/`](runbooks/) — One-off operational runbooks for specific incidents/phases: [RDR-191 Phase 5 cloud FK runbook](runbooks/rdr-191-phase5-cloud-fk.md), [RDR-225 cloud deploy and abort runbook](runbooks/rdr-225-cloud-deploy.md)
 
 ## Contributor reference
 
