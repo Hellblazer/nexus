@@ -85,14 +85,38 @@ def _is_resolution_unavailable(output: str) -> bool:
     )
 
 
+def _has_opencv_python(bundle_dir):
+    """True when the bundle venv still carries opencv-python's metadata.
+
+    Both OpenCV dists write ``cv2/``. The bundle now overrides opencv-python
+    out and keeps opencv-python-headless; uninstalling opencv-python from a
+    venv that had both deletes ``cv2/`` and leaves headless installed with no
+    files, so the sync that removes it must also reinstall headless.
+    """
+    venv = os.path.join(bundle_dir, ".venv")
+    candidates = [os.path.join(venv, "Lib", "site-packages")]
+    lib = os.path.join(venv, "lib")
+    if os.path.isdir(lib):
+        candidates += [os.path.join(lib, d, "site-packages") for d in os.listdir(lib)]
+    for site in candidates:
+        if os.path.isdir(site) and any(
+            n.startswith("opencv_python-") and n.endswith(".dist-info") for n in os.listdir(site)
+        ):
+            return True
+    return False
+
+
 def _sync_with_retry(bundle_dir, run=subprocess.run, sleep=time.sleep, sleeps=_RETRY_SLEEPS, uv="uv"):
     """``uv sync`` the bundle env, retrying only the propagation-window
     failure class. Raises SystemExit on terminal failure."""
     attempts = len(sleeps) + 1
     output = ""
+    cmd = [uv, "sync", "--directory", bundle_dir]
+    if _has_opencv_python(bundle_dir):
+        cmd += ["--reinstall-package", "opencv-python-headless"]
     for i in range(attempts):
         proc = run(
-            [uv, "sync", "--directory", bundle_dir],
+            cmd,
             capture_output=True,
             # uv must not read the host's protocol stdin (the MCP stream).
             stdin=subprocess.DEVNULL,

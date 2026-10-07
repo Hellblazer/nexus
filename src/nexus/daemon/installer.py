@@ -34,6 +34,7 @@ import ntpath
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -189,16 +190,105 @@ def _render_windows_task(_daemon: ModuleType) -> tuple[Path, str]:
     the RESOLVED ABSOLUTE config dir the install used, as the launchd and
     systemd units do, so the supervisor the launcher spawns is argv-explicit.
     """
-    from nexus.daemon.windows_autostart import task_xml  # noqa: PLC0415 — deferred import — Windows-only path
-
     install_dir = _daemon._autostart_install_dir()
     install_dir.mkdir(parents=True, exist_ok=True)
-    body = task_xml(
+    body = _windows_task_body(_daemon, pythonw=_task_pythonw())
+    return install_dir / _daemon._autostart_filename_service(), body
+
+
+def _windows_task_body(_daemon: ModuleType, *, pythonw: str) -> str:
+    """The task definition this version renders for *pythonw* (no side effects)."""
+    from nexus.daemon.windows_autostart import task_xml  # noqa: PLC0415 — deferred import — Windows-only path
+
+    return task_xml(
         sid=_task_user_sid(),
-        pythonw=_task_pythonw(),
+        pythonw=pythonw,
         config_dir=str(_daemon._config.nexus_config_dir().resolve()),
     )
-    return install_dir / _daemon._autostart_filename_service(), body
+
+
+_TASK_COMMAND_RE = re.compile(r"<Command>(.*?)</Command>", re.DOTALL)
+
+
+def retarget_windows_task(pythonw: str) -> list[str]:
+    """Point the installed Windows logon task at *pythonw*; stop and start nothing.
+
+    RDR-224. The task bakes the interpreter of the nx that installed it, where
+    the launchd and systemd units name the ``~/.local/bin/nx`` shim and follow
+    ``current`` for free. So after ``nx self install`` flips ``current``, the
+    task kept starting the OLD tree. Measured on nx-clean-win11 (2026-10-07): a
+    migrated box started the stack from the legacy uv tree, which therefore
+    stayed held and was never reaped; and once the stack is stopped and that
+    tree reaped, the logon task names a deleted file and the stack never starts
+    again. ``nx self install`` calls this after every Windows flip with the new
+    generation's interpreter.
+
+    ``schtasks /Create /XML /F`` replaces the definition only. No ``/End`` and no
+    ``/Run``: the stack running now keeps its tree (the Windows rule: never
+    replace what a running process uses) and moves at its next start.
+
+    Rewrites only what is safe to rewrite: the kept copy must be exactly what
+    this version renders for the interpreter it names (a hand edit or template
+    drift stays ``nx daemon restart-stale``'s decision), and the task must be
+    registered and enabled (a disabled task is the user's choice; re-creating
+    would re-enable it). Never raises. Returns lines for the operator; ``[]``
+    off Windows, with no task installed, or when it already names *pythonw*.
+    """
+    if not _is_windows():
+        return []
+    from xml.sax.saxutils import unescape  # noqa: PLC0415 — stdlib, Windows-only path
+
+    from nexus.commands import daemon as _daemon  # noqa: PLC0415 — deferred import — Windows-only path
+
+    name = _task_name()
+    remedy = "run `nx daemon restart-stale` from the new nx to repoint it"
+    dest = _daemon._autostart_install_dir() / _daemon._autostart_filename_service()
+    if not dest.is_file():
+        return []
+    try:
+        existing = dest.read_text()
+    except OSError as exc:
+        return [f"the {name} logon task was not repointed: {dest} could not be read ({exc}); {remedy}"]
+    match = _TASK_COMMAND_RE.search(existing)
+    old = unescape(match.group(1).strip()) if match else ""
+    if old and ntpath.normcase(old) == ntpath.normcase(pythonw):
+        return []
+    if not old or existing != _windows_task_body(_daemon, pythonw=old):
+        return [
+            f"the {name} logon task was not repointed at {pythonw}: {dest} differs from "
+            f"what this version renders (edited, or an older template); {remedy}"
+        ]
+    probe = autostart_activation_state(dest, tier="service")
+    if probe.state is not ActivationState.ACTIVE:
+        hint = f"; to use it again, `{probe.remedy}`" if probe.remedy else ""
+        return [
+            f"the {name} logon task was not repointed at {pythonw}: {probe.detail}{hint}, "
+            f"then {remedy}"
+        ]
+    dest.write_text(_windows_task_body(_daemon, pythonw=pythonw))
+    cmd = _activate_cmd(dest)
+    failure = ""
+    try:
+        result = _run_manager(
+            cmd, capture_output=True, text=True, check=False,
+            timeout=_MANAGER_ACTION_TIMEOUT_S,
+        )
+        if result.returncode != 0:
+            failure = f"`{' '.join(cmd)}` exited {result.returncode}: {_first_line(result)}"
+    except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
+        failure = f"`{' '.join(cmd)}` failed: {type(exc).__name__}: {exc}"
+    if failure:
+        try:
+            dest.write_text(existing)  # the kept copy keeps describing the registered task
+        except OSError:
+            pass
+        _log.warning("service_task_retarget_failed", detail=failure)
+        return [f"the {name} logon task was not repointed at {pythonw}: {failure}; {remedy}"]
+    return [
+        f"the {name} logon task now starts {pythonw}. The storage service running now "
+        "keeps its version until its next start (the next sign-in, or "
+        f"`nx daemon service stop` then `Start-ScheduledTask {name}`)"
+    ]
 
 
 def _render_for(tier: str) -> tuple[Path, str]:
@@ -1092,6 +1182,13 @@ class DaemonUninstallReport:
     #: ``unit_status``/``unit_dest`` remain the T2 unit for back-compat.
     service_unit_status: UninstallStatus = UninstallStatus.NOT_INSTALLED
     service_unit_dest: Path | None = None
+    #: RDR-224 (nexus-f9bgu): ``--remove-data`` also removes the nexus model
+    #: cache (``nexus.db.onnx_model_root.nexus_cache_root()``).
+    cache_removed: bool = False
+    cache_dir: Path | None = None
+    #: RDR-224 (nexus-7xzc1): pids of the background workers uninstall stopped
+    #: (aspect workers, a topic labeling run), sorted.
+    workers_stopped: tuple[int, ...] = ()
 
 
 # NO _stop_daemon_best_effort: it shelled out to ``nx daemon t2 stop``, a verb
@@ -1129,6 +1226,262 @@ def _stop_service_stack_best_effort() -> tuple[bool, str | None]:
     return True, None
 
 
+#: The log file the launchd plist and the systemd unit append to, under
+#: ``_autostart_log_dir()`` (``__LOG_DIR__/nexus-service.log`` in both templates;
+#: pinned by tests/daemon/test_uninstall_leftovers.py).
+AUTOSTART_SERVICE_LOG_NAME = "nexus-service.log"
+
+#: A directory is nexus's own when it, or its parent, carries this name:
+#: ``%LOCALAPPDATA%\nexus\autostart``, ``%LOCALAPPDATA%\nexus\logs`` and
+#: ``~/.local/state/nexus``. ``~/Library/LaunchAgents``, ``~/Library/Logs`` and
+#: ``~/.config/systemd/user`` hold other programs' files and are never removed.
+_NEXUS_DIR_NAME = "nexus"
+
+
+def _prune_autostart_dirs() -> list[str]:
+    """Remove the nexus-owned autostart and log directories that are empty.
+
+    RDR-224 (nexus-f9bgu): the Windows install creates
+    ``%LOCALAPPDATA%\\nexus\\autostart`` and nothing removed it. Only
+    directories nexus owns by path (see :data:`_NEXUS_DIR_NAME`) are candidates,
+    deepest first, then their ``nexus`` parent; each goes only if empty
+    (``rmdir``, never a recursive delete). Returns one note per nexus-owned
+    directory left in place because it still holds something, naming what.
+    Never raises.
+    """
+    from nexus.commands import daemon as _daemon  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
+
+    try:
+        dirs = [_daemon._autostart_install_dir(), _daemon._autostart_log_dir()]
+    except Exception:  # noqa: BLE001 — an unsupported platform has nothing to prune
+        return []
+    owned = [d for d in dirs if d.name == _NEXUS_DIR_NAME or d.parent.name == _NEXUS_DIR_NAME]
+    owned += [d.parent for d in dirs if d.parent.name == _NEXUS_DIR_NAME]
+    notes: list[str] = []
+    for d in dict.fromkeys(owned):
+        if d.is_symlink() or not d.is_dir():
+            continue
+        try:
+            d.rmdir()
+        except OSError:
+            try:
+                names = sorted(p.name for p in d.iterdir())
+            except OSError:
+                names = []
+            if names:
+                notes.append(
+                    f"left {d} in place: it holds entries uninstall did not create "
+                    f"({', '.join(names)})"
+                )
+    return notes
+
+
+def _remove_autostart_log() -> str | None:
+    """Delete the unit's log file (``--remove-data`` only). Returns a warning or None."""
+    from nexus.commands import daemon as _daemon  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
+
+    try:
+        log = _daemon._autostart_log_dir() / AUTOSTART_SERVICE_LOG_NAME
+    except Exception:  # noqa: BLE001 — an unsupported platform has no unit log
+        return None
+    try:
+        log.unlink(missing_ok=True)
+    except OSError as exc:
+        return f"could not remove {log}: {exc}"
+    return None
+
+
+def _user_model_root_outside(cache: Path) -> Path | None:
+    """The ``NX_ONNX_MODEL_DIR`` root when it lies outside ``cache``, else None.
+
+    That root is a directory the user chose; uninstall never removes it.
+    """
+    from nexus.db import onnx_model_root  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
+
+    if not os.environ.get(onnx_model_root.ENV_MODEL_DIR, "").strip():
+        return None
+    root = onnx_model_root.service_onnx_models_root()
+    try:
+        root.resolve().relative_to(cache.resolve())
+    except ValueError:
+        return root
+    return None
+
+
+def _force_remove(func, path, _exc) -> None:  # type: ignore[no-untyped-def]
+    """``rmtree`` onexc: Windows refuses to delete a read-only file, so clear
+    the flag and retry once. A second failure propagates to the caller.
+
+    Not a credential write: the mode only makes the entry deletable (Windows
+    reads the write bit alone; S_IRWXU keeps a directory traversable on POSIX).
+    """
+    os.chmod(path, stat.S_IRWXU)
+    func(path)
+
+
+def _remove_model_cache(cache: Path) -> str | None:
+    """Remove the nexus model cache directory. Returns a warning or None.
+
+    A symlink at the cache path is unlinked, never followed: what it points to
+    was placed there by the user.
+    """
+    try:
+        if cache.is_symlink():
+            cache.unlink()
+        elif cache.is_dir():
+            shutil.rmtree(cache, onexc=_force_remove)
+    except OSError as exc:
+        return f"could not remove model cache {cache}: {exc}"
+    return None
+
+
+#: The pid file the detached ``nx taxonomy label`` spawn writes under
+#: ``nexus_config_dir()`` (``commands.index._spawn_deferred_labeling``), so
+#: uninstall can find that run (RDR-224, nexus-7xzc1).
+DEFERRED_LABELING_PID_NAME = "deferred_labeling.pid"
+
+#: The pid file ``nx mineru start`` and the on-demand spawn write: its presence
+#: is how uninstall knows nexus started the MinerU server.
+_MINERU_PID_NAME = "mineru.pid"
+
+
+def _is_aspect_worker_command(command: str) -> bool:
+    """``python -m nexus.cli daemon aspect-worker start`` (any interpreter)."""
+    return "aspect-worker" in command and "nexus" in command
+
+
+def _is_deferred_labeling_command(command: str) -> bool:
+    """``python -m nexus.cli taxonomy label``, as the index chain spawns it."""
+    return "nexus" in command and "taxonomy" in command and " label" in command
+
+
+def _stop_deferred_labeling(config_dir: Path) -> tuple[tuple[int, ...], list[str]]:
+    """Stop the detached ``nx taxonomy label`` run named by its pid file.
+
+    The file is removed either way; the pid is signalled only while its live
+    command is that run (a stale file can name a reused pid). Returns
+    (stopped pids, warnings).
+    """
+    from nexus.daemon.service_registry import (  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
+        pid_running,
+        process_command,
+        terminate_pids,
+    )
+
+    pid_file = config_dir / DEFERRED_LABELING_PID_NAME
+    try:
+        pid = int(pid_file.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        pid = 0
+    warnings: list[str] = []
+    stopped: tuple[int, ...] = ()
+    if pid > 0 and pid != os.getpid():
+        command = process_command(pid)
+        if command and _is_deferred_labeling_command(command):
+            survivors = terminate_pids([pid], grace_s=5.0)
+            if survivors:
+                warnings.append(f"the topic labeling run (pid {pid}) is still running")
+            else:
+                stopped = (pid,)
+        elif not command and pid_running(pid):
+            warnings.append(
+                f"pid {pid} from {pid_file.name} is running but its command line could "
+                "not be read; not stopped"
+            )
+    try:
+        pid_file.unlink(missing_ok=True)
+    except OSError:
+        pass
+    return stopped, warnings
+
+
+def _stop_mineru_if_started(config_dir: Path) -> list[str]:
+    """``nx mineru stop`` when nexus started the server (``mineru.pid`` exists).
+
+    The verb owns the election, the pid re-check, the process-group stop and
+    the output-dir cleanup; this only decides whether to call it. Returns
+    warnings.
+    """
+    from nexus.commands import daemon as _daemon  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
+
+    if not (config_dir / _MINERU_PID_NAME).exists():
+        return []
+    cmd = [*_daemon._resolve_nx_bin(), "mineru", "stop"]
+    try:
+        result = run_bounded(cmd, timeout=60)
+    except Exception as exc:  # noqa: BLE001 — stop is best-effort
+        return [f"MinerU stop failed: {type(exc).__name__}: {exc}"]
+    if result.returncode != 0:
+        detail = (result.stderr or "").strip() or (result.stdout or "").strip()
+        return [f"MinerU stop exited {result.returncode}: {detail}"]
+    return []
+
+
+def _stop_background_workers(config_dir: Path) -> tuple[tuple[int, ...], list[str]]:
+    """Stop the nexus background workers uninstall can identify (RDR-224,
+    nexus-7xzc1). Returns (stopped pids, warnings).
+
+    Each is found from nexus's own records, never by matching names across the
+    process table: aspect workers from their leases (the shared
+    ``service_registry.stop_tier_holders``, which re-checks each pid's command
+    and relinquishes the leases), the detached ``nx taxonomy label`` run from
+    its pid file, and MinerU through ``nx mineru stop`` when ``mineru.pid``
+    says nexus started it. MCP hosts belong to live Claude sessions and are
+    never touched. ``nx daemon service stop`` leaves the aspect worker running
+    by design; on Windows it holds its crash log open, so the data dir could
+    not be removed while it ran.
+    """
+    from nexus.daemon.aspect_worker_daemon import TIER as _ASPECT_TIER  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
+    from nexus.daemon.service_registry import stop_tier_holders  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
+
+    warnings: list[str] = []
+    stopped: list[int] = []
+    try:
+        aspect = stop_tier_holders(
+            dir=config_dir, tier=_ASPECT_TIER, is_ours=_is_aspect_worker_command,
+        )
+    except Exception as exc:  # noqa: BLE001 — best-effort; a survivor shows up as a data-removal warning
+        warnings.append(f"aspect worker stop failed: {type(exc).__name__}: {exc}")
+    else:
+        stopped.extend(aspect.stopped)
+        refused = {send.pid: send for send in aspect.refused}
+        for pid in aspect.survivors:
+            send = refused.get(pid)
+            if send is not None and send.target_session is not None:
+                warnings.append(
+                    f"aspect worker pid {pid} runs in session {send.target_session}; "
+                    "nothing was signalled — stop it from there"
+                )
+            else:
+                warnings.append(f"aspect worker pid {pid} is still running")
+        for pid in aspect.unreadable:
+            warnings.append(
+                f"aspect worker pid {pid} is running but its command line could not be "
+                "read; not stopped"
+            )
+    labeling_stopped, labeling_warnings = _stop_deferred_labeling(config_dir)
+    stopped.extend(labeling_stopped)
+    warnings.extend(labeling_warnings)
+    warnings.extend(_stop_mineru_if_started(config_dir))
+    return tuple(sorted(stopped)), warnings
+
+
+def _service_stack_confirmed_stopped(stop_exit_ok: bool) -> tuple[bool, tuple[str, ...]]:
+    """Whether the engine-service + Postgres stack is gone after the stop.
+
+    RDR-224 (nexus-f9bgu): the processes being gone is the confirmation, not the
+    stop verb's exit (which is non-zero when nothing was running). Uses the
+    same survivor probe ``uninstall_autostart`` reports (lease freshness via the
+    RDR-149 registry, and the Postgres port). Falls back to the exit when the
+    probe itself fails. Returns (stopped, survivor lines).
+    """
+    try:
+        survivors = _probe_survivors(tier="service")
+    except Exception:  # noqa: BLE001 — a probe is never a verdict
+        return stop_exit_ok, ()
+    return not survivors, survivors
+
+
 def uninstall_daemon(*, confirm: bool = False, remove_data: bool = False) -> DaemonUninstallReport:
     """Orchestrate full daemon removal for the ``daemon_uninstall`` MCP tool.
 
@@ -1146,19 +1499,30 @@ def uninstall_daemon(*, confirm: bool = False, remove_data: bool = False) -> Dae
     install_dir = _daemon._autostart_install_dir()
     unit_dest = install_dir / _daemon._autostart_filename_t2()
     service_unit_dest = install_dir / _daemon._autostart_filename_service()
+    from nexus.db.onnx_model_root import nexus_cache_root  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
+
     data_dir = nexus_config_dir()
     marker = _first_run_marker_path()
+    cache_dir = nexus_cache_root()
+    user_model_root = _user_model_root_outside(cache_dir)
 
     if not confirm:
         parts = [
             f"the service autostart unit at {service_unit_dest}",
             f"the T2 autostart unit at {unit_dest}",
             "stop the engine-service + Postgres stack (service stop --with-pg)",
+            "stop the nexus background workers (aspect workers, a topic labeling "
+            "run, MinerU if nexus started it)",
         ]
         if marker.exists():
             parts.append(f"the first-run marker at {marker}")
         if remove_data:
             parts.append(f"ALL nexus data under {data_dir}")
+            parts.append(f"the nexus model cache at {cache_dir}")
+            if user_model_root is not None:
+                parts.append(
+                    f"(the NX_ONNX_MODEL_DIR model root at {user_model_root} is kept)"
+                )
         plan = "; ".join(parts)
         return DaemonUninstallReport(
             confirmed=False,
@@ -1204,15 +1568,32 @@ def uninstall_daemon(*, confirm: bool = False, remove_data: bool = False) -> Dae
     #    the daemon demonstrably SURVIVED. Claiming "daemon stopped" there is
     #    wrong in the dangerous direction — worse than the old code's
     #    permanent "stop not confirmed", which was merely pessimistic.
-    daemon_stopped = (
+    #
+    #    NOT_INSTALLED is "no T2 daemon exists", the state of every install made
+    #    since the daemon retired and of every Windows install: nothing can be
+    #    running, so it is a confirmed stop, not an unconfirmed one (RDR-224,
+    #    nexus-f9bgu: the Windows walk printed "daemon stop not confirmed" with
+    #    zero nexus processes left).
+    t2_absent = unit_result.status is UninstallStatus.NOT_INSTALLED
+    daemon_stopped = t2_absent or (
         unit_result.status is UninstallStatus.REMOVED and unit_result.deactivated
     )
 
     # 2. Stop the engine-service + Postgres stack (best-effort) — RDR-165 eu4u4.
-    #    A complete teardown must leave no running storage backend.
-    service_stopped, service_warning = _stop_service_stack_best_effort()
+    #    A complete teardown must leave no running storage backend. The summary
+    #    reports whether the processes are gone, not the stop verb's exit.
+    stop_exit_ok, service_warning = _stop_service_stack_best_effort()
     if service_warning:
         warnings.append(service_warning)
+    service_stopped, survivors = _service_stack_confirmed_stopped(stop_exit_ok)
+    warnings.extend(survivors)
+
+    # 2b. Stop the background workers the service stop leaves running
+    #     (RDR-224, nexus-7xzc1), before anything is removed: on Windows the
+    #     aspect worker holds a log under the data dir open and the removal
+    #     below fails (WinError 32) while it runs.
+    workers_stopped, worker_warnings = _stop_background_workers(data_dir)
+    warnings.extend(worker_warnings)
 
     # 3. Remove the first-run marker so a reinstall re-shows the banner.
     marker_removed = False
@@ -1250,16 +1631,57 @@ def uninstall_daemon(*, confirm: bool = False, remove_data: bool = False) -> Dae
             except OSError as exc:
                 warnings.append(f"could not remove data dir {data_dir}: {exc}")
 
+    # 4b. With remove_data, remove the nexus model cache (RDR-224): the service's
+    #     ONNX models and MinerU's fallback output. Only after a confirmed stop:
+    #     on Windows the engine holds the model files open, and a partial delete
+    #     leaves a cache that looks present and is broken. A user-chosen
+    #     NX_ONNX_MODEL_DIR root outside it is never touched.
+    cache_removed = False
+    if remove_data:
+        if user_model_root is not None:
+            warnings.append(
+                f"kept the NX_ONNX_MODEL_DIR model root {user_model_root}: "
+                "it is a directory you chose; remove it yourself if you no longer need it"
+            )
+        if cache_dir.exists() or cache_dir.is_symlink():
+            if not service_stopped:
+                warnings.append(
+                    f"kept model cache {cache_dir}: the service stack may still be "
+                    "running and holding files there; re-run once it has stopped"
+                )
+            elif cache_warning := _remove_model_cache(cache_dir):
+                warnings.append(cache_warning)
+            else:
+                cache_removed = True
+
+    # 5. Remove what the autostart install created outside the data dir: the
+    #    unit's log file (with remove_data) and the nexus-owned autostart/log
+    #    directories once empty (RDR-224). Anything else in them is named, kept.
+    if remove_data and (log_warning := _remove_autostart_log()):
+        warnings.append(log_warning)
+    warnings.extend(_prune_autostart_dirs())
+
     summary = [
         f"service autostart unit: {service_unit_result.status.value}",
         f"T2 autostart unit: {unit_result.status.value}",
     ]
     summary.append("service stack stopped" if service_stopped else "service stop not confirmed")
-    summary.append("daemon stopped" if daemon_stopped else "daemon stop not confirmed")
+    if t2_absent:
+        summary.append("no T2 daemon (nothing to stop)")
+    else:
+        summary.append("daemon stopped" if daemon_stopped else "daemon stop not confirmed")
+    if workers_stopped:
+        summary.append(
+            "background workers stopped (aspect worker / topic labeling pids "
+            + ", ".join(str(p) for p in workers_stopped)
+            + ")"
+        )
     if marker_removed:
         summary.append("first-run marker removed")
     if data_removed:
         summary.append(f"data dir {data_dir} wiped")
+    if cache_removed:
+        summary.append(f"model cache {cache_dir} removed")
     return DaemonUninstallReport(
         confirmed=True,
         unit_status=unit_result.status,
@@ -1271,6 +1693,9 @@ def uninstall_daemon(*, confirm: bool = False, remove_data: bool = False) -> Dae
         data_dir=data_dir,
         daemon_stopped=daemon_stopped,
         service_stopped=service_stopped,
+        cache_removed=cache_removed,
+        cache_dir=cache_dir,
+        workers_stopped=workers_stopped,
         warnings=tuple(warnings),
         message="Daemon uninstall complete: " + "; ".join(summary) + ".",
     )
@@ -1345,6 +1770,10 @@ def uninstall_autostart(*, tier: str = "t2") -> UninstallResult:
         deactivated = False
 
     dest.unlink(missing_ok=True)
+    # RDR-224: on Windows the unit's directory is nexus's own; remove it (and an
+    # empty %LOCALAPPDATA%\nexus) with the unit. Notes about a non-empty one are
+    # uninstall_daemon's to report, after it has removed what it removes.
+    _prune_autostart_dirs()
 
     # nexus-dmgvx: the unit is gone, so nothing will come BACK — but say what
     # is still running NOW. Probed after the unlink so the report describes

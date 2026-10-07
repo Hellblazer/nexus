@@ -554,3 +554,84 @@ class TestDoctorRowReachesTheWindowsTask:
         monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
         assert health._check_service_autostart_drift() == []
         assert win.calls == [], "a box with no kept task file must not even ask Task Scheduler"
+
+
+# ── repointing the task at a new generation (nx self install) ────────────────
+
+NEW_PYTHONW = r"C:\Users\sam\.local\share\nexus\tools\gen-20261007T184256Z\Scripts\pythonw.exe"
+
+
+class TestWindowsRetarget:
+    """``nx self install`` flips ``current`` but the task bakes the interpreter
+    that installed it, so without this the stack keeps starting the OLD tree:
+    the legacy uv tree after a migration (measured on nx-clean-win11,
+    2026-10-07), which then stays held and is never reaped, and once the stack
+    is stopped and that tree reaped, the logon task names a deleted file."""
+
+    def _installed(self, win: _FakeSchtasks) -> Path:
+        result = installer.install_autostart(tier="service")
+        win.calls.clear()
+        return result.dest
+
+    def test_the_task_is_repointed_without_stopping_or_starting_anything(self, win: _FakeSchtasks) -> None:
+        dest = self._installed(win)
+        lines = installer.retarget_windows_task(NEW_PYTHONW)
+        body = dest.read_text()
+        assert f"<Command>{NEW_PYTHONW}</Command>" in body and PYTHONW not in body
+        assert win.verbs() == ["query", "create"], "no /End, no /Delete, no /Run: the running stack is left alone"
+        assert win.calls[-1][-3:] == ["/XML", str(dest), "/F"]
+        assert len(lines) == 1 and NEW_PYTHONW in lines[0] and "next" in lines[0]
+        # The kept copy is what this version renders for the new interpreter, so
+        # a doctor run from the new generation sees no drift.
+        monkey_render = installer._windows_task_body(daemon_cmd, pythonw=NEW_PYTHONW)
+        assert body == monkey_render
+
+    def test_no_installed_task_is_a_silent_no_op(self, win: _FakeSchtasks) -> None:
+        assert installer.retarget_windows_task(NEW_PYTHONW) == []
+        assert win.calls == []
+
+    def test_a_task_already_naming_the_interpreter_is_left_alone(self, win: _FakeSchtasks) -> None:
+        self._installed(win)
+        installer.retarget_windows_task(NEW_PYTHONW)
+        win.calls.clear()
+        assert installer.retarget_windows_task(NEW_PYTHONW.upper()) == []
+        assert win.calls == []
+
+    def test_a_hand_edited_or_drifted_definition_is_not_overwritten(self, win: _FakeSchtasks) -> None:
+        dest = self._installed(win)
+        edited = dest.read_text().replace("<Priority>7</Priority>", "<Priority>4</Priority>")
+        dest.write_text(edited)
+        lines = installer.retarget_windows_task(NEW_PYTHONW)
+        assert dest.read_text() == edited
+        assert "create" not in win.verbs()
+        assert len(lines) == 1 and "nx daemon restart-stale" in lines[0]
+
+    def test_a_disabled_task_is_not_re_enabled(self, win: _FakeSchtasks) -> None:
+        dest = self._installed(win)
+        before = dest.read_text()
+        win.enabled = False
+        lines = installer.retarget_windows_task(NEW_PYTHONW)
+        assert dest.read_text() == before
+        assert "create" not in win.verbs()
+        assert len(lines) == 1 and "disabled" in lines[0]
+
+    def test_a_refused_registration_restores_the_kept_copy_and_never_raises(
+        self, win: _FakeSchtasks, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        dest = self._installed(win)
+        before = dest.read_text()
+
+        def refuse_create(argv: list[str], *, timeout: float, **kw: object) -> subprocess.CompletedProcess[str]:
+            if argv[1].lower() == "/create":
+                win.calls.append(list(argv))
+                return subprocess.CompletedProcess(argv, 1, "", "ERROR: Access is denied.")
+            return win(argv, timeout=timeout, **kw)
+
+        monkeypatch.setattr(installer, "run_bounded", refuse_create)
+        lines = installer.retarget_windows_task(NEW_PYTHONW)
+        assert dest.read_text() == before, "the kept copy must keep describing the registered task"
+        assert len(lines) == 1 and "Access is denied" in lines[0] and "nx daemon restart-stale" in lines[0]
+
+    def test_off_windows_nothing_happens(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        monkeypatch.setattr(daemon_cmd, "_autostart_platform", lambda: "linux")
+        assert installer.retarget_windows_task(NEW_PYTHONW) == []

@@ -179,7 +179,8 @@ nx uninstall --yes --remove-data   # perform the teardown, including local data
 
 Dry-run by default (`--yes` is required to act). With `--remove-data` it
 also wipes the local nexus data dir (irreversible; a shallow-path guard
-refuses a misconfigured `NEXUS_CONFIG_DIR`). On a local install this stops
+refuses a misconfigured `NEXUS_CONFIG_DIR`) and the model cache at
+`~/.cache/nexus`. On a local install this stops
 the engine-service + Postgres stack, removes the OS autostart unit, and
 clears the first-run marker. On a managed-only client there is no local
 service to stop — it clears the local endpoint config (`service_url` +

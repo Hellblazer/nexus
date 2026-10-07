@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Tests for the .mcpb bundle's resolve-with-retry bootstrap (nexus-r433b).
 
-The Claude Desktop extension resolves ``conexus[local]>=X.Y.Z`` from PyPI on
+The Claude Desktop extension resolves ``conexus>=X.Y.Z`` from PyPI on
 first launch. PyPI's simple index lags the upload by ~10-25 minutes after a
 release (four consecutive releases measured), so an install inside that
 window used to die with a bare resolver error before any of our code ran —
@@ -117,6 +117,36 @@ def test_immediate_success_never_sleeps(bootstrap):
     bootstrap._sync_with_retry("/bundle", run=runner, sleep=sleeps.append)
     assert sleeps == []
     assert runner.calls == [["uv", "sync", "--directory", "/bundle"]]
+
+
+@pytest.mark.parametrize(
+    "site_packages",
+    [".venv/lib/python3.12/site-packages", ".venv/Lib/site-packages"],
+    ids=["posix", "windows"],
+)
+def test_a_bundle_venv_with_opencv_python_reinstalls_headless_once(bootstrap, tmp_path, site_packages):
+    """Both OpenCV dists write cv2/. When the override drops opencv-python from
+    a venv that had both, uv deletes cv2/ with it and headless is left
+    installed with no files (measured: `uv sync` then `import cv2` fails;
+    `uv sync --reinstall-package opencv-python-headless` restores it in the
+    same sync). The bootstrap asks for the reinstall only while the old dist's
+    metadata is present, so it costs one sync, once."""
+    (tmp_path / site_packages / "opencv_python-4.13.0.92.dist-info").mkdir(parents=True)
+    runner = _Runner([_proc(0)])
+    bootstrap._sync_with_retry(str(tmp_path), run=runner, sleep=lambda s: None)
+    assert runner.calls == [[
+        "uv", "sync", "--directory", str(tmp_path),
+        "--reinstall-package", "opencv-python-headless",
+    ]]
+
+
+def test_a_bundle_venv_without_opencv_python_syncs_plainly(bootstrap, tmp_path):
+    (tmp_path / ".venv/lib/python3.12/site-packages/opencv_python_headless-4.13.0.92.dist-info").mkdir(
+        parents=True
+    )
+    runner = _Runner([_proc(0)])
+    bootstrap._sync_with_retry(str(tmp_path), run=runner, sleep=lambda s: None)
+    assert runner.calls == [["uv", "sync", "--directory", str(tmp_path)]]
 
 
 def test_sync_does_not_inherit_the_hosts_stdin_and_decodes_utf8(bootstrap):

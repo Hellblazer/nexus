@@ -596,6 +596,107 @@ class TestEnsureUserPath:
         assert gen_core.uv_bin_dir(run=FakeUv(), environ={}) == Path.home() / ".local" / "bin"
 
 
+class TestRemoveUserPath:
+    """``nx uninstall`` takes back the entry ``nx self install`` added (RDR-224,
+    nexus-7xzc1). A file or a spy stands in for HKCU\\Environment."""
+
+    ENTRY = "C:\\nx\\tools\\current\\bin"
+
+    def _store(self, tmp_path: Path, value: str) -> gen_core.FileUserPath:
+        store = gen_core.FileUserPath(tmp_path / "userpath.txt")
+        store.write(value, 2)
+        return store
+
+    def test_only_the_entry_goes_and_every_other_entry_stays_byte_for_byte(
+        self, tmp_path: Path,
+    ) -> None:
+        store = self._store(
+            tmp_path, f"{self.ENTRY};C:\\Windows;%USERPROFILE%\\bin;;%LOCALAPPDATA%\\x\\",
+        )
+        result = gen_core.remove_user_path(self.ENTRY, store=store, environ={})
+        assert result.removed == 1
+        assert store.read()[0] == "C:\\Windows;%USERPROFILE%\\bin;;%LOCALAPPDATA%\\x\\"
+
+    def test_every_spelling_of_the_entry_goes(self, tmp_path: Path) -> None:
+        env = {"USERPROFILE": "C:\\nx-home"}
+        store = self._store(
+            tmp_path,
+            f'c:\\NX\\Tools\\Current\\Bin\\;C:\\a;"{self.ENTRY}";%USERPROFILE%\\b',
+        )
+        result = gen_core.remove_user_path(self.ENTRY, store=store, environ=env)
+        assert result.removed == 2
+        assert store.read()[0] == "C:\\a;%USERPROFILE%\\b"
+
+    def test_a_percent_entry_that_expands_to_the_entry_goes(self, tmp_path: Path) -> None:
+        env = {"NXROOT": "C:\\nx"}
+        store = self._store(tmp_path, "%NXROOT%\\tools\\current\\bin;C:\\a")
+        assert gen_core.remove_user_path(self.ENTRY, store=store, environ=env).removed == 1
+        assert store.read()[0] == "C:\\a"
+
+    def test_the_registry_type_is_preserved_and_it_broadcasts_once(self) -> None:
+        class Spy(gen_core.UserPathStore):
+            kind = "spy"
+            written: list = []
+            broadcasts = 0
+
+            def read(self):
+                return f"C:\\Windows;{TestRemoveUserPath.ENTRY}", 1  # REG_SZ
+
+            def write(self, value, reg_type):
+                Spy.written.append((value, reg_type))
+
+            def broadcast(self):
+                Spy.broadcasts += 1
+
+        gen_core.remove_user_path(self.ENTRY, store=Spy(), environ={})
+        assert Spy.written == [("C:\\Windows", 1)]
+        assert Spy.broadcasts == 1
+
+    def test_an_absent_entry_writes_nothing_and_does_not_broadcast(self, tmp_path: Path) -> None:
+        class Spy(gen_core.FileUserPath):
+            broadcasts = 0
+
+            def broadcast(self):
+                Spy.broadcasts += 1
+
+        store = Spy(tmp_path / "p.txt")
+        store.write("C:\\Windows;C:\\nx\\tools\\gen-1\\bin", 2)
+        before = store.path.stat().st_mtime_ns
+        result = gen_core.remove_user_path(self.ENTRY, store=store, environ={})
+        assert result.removed == 0
+        assert store.path.stat().st_mtime_ns == before
+        assert Spy.broadcasts == 0
+
+    def test_a_failing_broadcast_does_not_fail_the_removal(self, tmp_path: Path) -> None:
+        class Hung(gen_core.FileUserPath):
+            def broadcast(self):
+                raise OSError("a window is hung")
+
+        store = Hung(tmp_path / "p.txt")
+        store.write(self.ENTRY, 2)
+        assert gen_core.remove_user_path(self.ENTRY, store=store, environ={}).removed == 1
+        assert store.read()[0] == ""
+
+    def test_an_unreadable_or_unwritable_store_is_a_generation_error(self, tmp_path: Path) -> None:
+        class Locked(gen_core.UserPathStore):
+            kind = "locked"
+
+            def read(self):
+                raise PermissionError(5, "denied")
+
+        with pytest.raises(gen_core.GenerationError, match="could not read the user PATH"):
+            gen_core.remove_user_path(self.ENTRY, store=Locked(), environ={})
+
+        class NoWrite(gen_core.FileUserPath):
+            def write(self, value, reg_type):
+                raise PermissionError(5, "denied")
+
+        store = NoWrite(tmp_path / "x.txt")
+        store.path.write_text(self.ENTRY + "\n")
+        with pytest.raises(gen_core.GenerationError, match="could not write the user PATH"):
+            gen_core.remove_user_path(self.ENTRY, store=store, environ={})
+
+
 class TestInspectUserPath:
     ENTRY_NAME = "current-bin"
 

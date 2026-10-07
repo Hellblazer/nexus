@@ -75,9 +75,19 @@ def embedder_startup_notice() -> str | None:
     is missing, so the resolver silently fell back to 384). Cloud mode and a
     correctly-active bge return ``None``.
     """
+    from nexus import config as _config  # noqa: PLC0415 — branch-local; only on local-mode advisory path
     from nexus.config import is_local_mode, local_embed_model_choice  # noqa: PLC0415 — branch-local; only on local-mode advisory path
 
     if not is_local_mode():
+        return None
+
+    # A service install (pg_credentials present) embeds T3 in the engine; the
+    # Python embedder serves only T1 and the plan cache, so the advisory's
+    # "search is running at 384-dim" is false there. `nx doctor` suppresses it
+    # on the same test (health._check_t3_local).
+    from nexus.db.pg_provision import CREDENTIALS_FILENAME  # noqa: PLC0415 — branch-local; only reached in local mode
+
+    if (_config.nexus_config_dir() / CREDENTIALS_FILENAME).exists():
         return None
 
     from nexus.db.local_ef import _resolve_local_model  # noqa: PLC0415 — branch-local; only reached in local mode

@@ -1658,6 +1658,16 @@ def _probe_mcp_server(
     return True, f"serverInfo.name={server_name!r}"
 
 
+def _own_prefix_is_generation() -> bool:
+    """Whether ``sys.prefix`` is a side-by-side generation. Never raises."""
+    try:
+        from nexus.upgrade_finish import generation_of  # noqa: PLC0415 — deferred to avoid circular import
+
+        return generation_of(Path(sys.prefix)) is not None
+    except Exception:  # noqa: BLE001 — unreadable layout: not a generation
+        return False
+
+
 def _resolve_mcp_binary(binary_name: str) -> tuple[str | None, bool]:
     """Resolve *binary_name* on PATH, preferring an entry NOT under this
     running process's own ``sys.prefix``.
@@ -1704,9 +1714,17 @@ def _resolve_mcp_binary(binary_name: str) -> tuple[str | None, bool]:
     ``test_home_scoping_tradeoff_outside_home_install_loses_to_own_venv``
     so a future change to this choice is deliberate, not accidental.
 
+    GENERATION EXCEPTION (RDR-224, nexus-7xzc1): when this process runs from
+    a side-by-side generation (``<tools>/gen-*``), its prefix is the
+    installed artifact, not a dev venv, and the plain first PATH hit is what
+    the plugin launches. On Windows ``current\\bin`` is a junction into the
+    running generation, so every hit there resolves under ``sys.prefix``;
+    demoting it probed uv's legacy launcher, which survives until the reap.
+
     Returns ``(path_or_none, is_own_venv)``.
     """
     own_prefix = str(Path(sys.prefix).resolve())
+    own_is_generation = _own_prefix_is_generation()
     try:
         home = str(Path.home().resolve())
     except (OSError, RuntimeError):
@@ -1743,6 +1761,8 @@ def _resolve_mcp_binary(binary_name: str) -> tuple[str | None, bool]:
             resolved_dir = str(Path(hit).resolve().parent)
         except OSError:
             resolved_dir = str(Path(directory).resolve())
+        if own_is_generation:
+            return hit, False
         if resolved_dir == own_prefix or resolved_dir.startswith(own_prefix + os.sep):
             if own_prefix_hit is None:
                 own_prefix_hit = hit

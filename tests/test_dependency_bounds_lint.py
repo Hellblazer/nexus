@@ -86,17 +86,14 @@ def _load_optional_dependencies() -> dict[str, list[str]]:
 #: Optional-dependency ("extra") groups in scope for this lint, with the
 #: reason each one's floor actually reaches a real install (not merely
 #: exists in pyproject.toml). ``[local]`` is the only extra defined today:
-#: ``mcpb/pyproject.toml`` pins ``conexus[local]>=X.Y.Z``, so its floor
-#: rides every mcpb (.mcpb Desktop Extension) bundle, and the documented
-#: ``uv tool install "conexus[local]"`` path (README) resolves it fresh off
+#: the documented ``uv tool install "conexus[local]"`` path resolves it fresh off
 #: PyPI exactly like ``[project.dependencies]`` does -- the nexus-l2ku5 class
 #: is agnostic to which table the unbounded floor sits in. A future extra
 #: joins this dict only once an install path is shown to resolve it.
 _IN_SCOPE_EXTRAS: dict[str, str] = {
     "local": (
-        'pinned by mcpb/pyproject.toml ("conexus[local]>=X.Y.Z", shipped in '
-        "every .mcpb bundle) and by the documented "
-        '`uv tool install "conexus[local]"` path'
+        'resolved by the documented `uv tool install "conexus[local]"` path '
+        "and carried into every generation by `nx self install --extras local`"
     ),
 }
 
@@ -203,8 +200,8 @@ def test_in_scope_extras_exist_in_pyproject() -> None:
 
 def test_every_extra_dependency_is_bounded_or_exempt() -> None:
     """Extras ship real dependency floors to real installs exactly like
-    ``[project.dependencies]`` does -- mcpb pins ``conexus[local]``, so the
-    ``[local]`` extra's floor rides every .mcpb bundle -- but this lint used
+    ``[project.dependencies]`` does -- mcpb then pinned ``conexus[local]``, so
+    the ``[local]`` extra's floor rode every .mcpb bundle -- but this lint used
     to scan only ``[project.dependencies]``. ``fastembed>=0.7.0`` in
     ``[local]`` was the gap: unbounded, and a fresh resolve landed on 0.8.0
     (2026-03-23) while uv.lock stayed on 0.7.4 -- the nexus-l2ku5 class,
