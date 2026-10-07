@@ -207,8 +207,9 @@ def _teardown_beads_prime(*, confirm: bool) -> tuple[list[str], list[str]]:
     "remove_data",
     is_flag=True,
     default=False,
-    help="ALSO wipe the local nexus data dir (notes + search index). Irreversible; "
-    "only acts with --yes. Does NOT touch a managed (remote) tenant's data.",
+    help="ALSO wipe the local nexus data dir (notes + search index) and the model "
+    "cache (~/.cache/nexus). Irreversible; only acts with --yes. Does NOT touch a "
+    "managed (remote) tenant's data.",
 )
 def uninstall_cmd(assume_yes: bool, remove_data: bool) -> None:
     """Cleanly remove the local nexus service stack and/or managed client config.

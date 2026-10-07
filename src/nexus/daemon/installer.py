@@ -34,6 +34,7 @@ import ntpath
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -1092,6 +1093,10 @@ class DaemonUninstallReport:
     #: ``unit_status``/``unit_dest`` remain the T2 unit for back-compat.
     service_unit_status: UninstallStatus = UninstallStatus.NOT_INSTALLED
     service_unit_dest: Path | None = None
+    #: RDR-224 (nexus-f9bgu): ``--remove-data`` also removes the nexus model
+    #: cache (``nexus.db.onnx_model_root.nexus_cache_root()``).
+    cache_removed: bool = False
+    cache_dir: Path | None = None
 
 
 # NO _stop_daemon_best_effort: it shelled out to ``nx daemon t2 stop``, a verb
@@ -1194,6 +1199,50 @@ def _remove_autostart_log() -> str | None:
     return None
 
 
+def _user_model_root_outside(cache: Path) -> Path | None:
+    """The ``NX_ONNX_MODEL_DIR`` root when it lies outside ``cache``, else None.
+
+    That root is a directory the user chose; uninstall never removes it.
+    """
+    from nexus.db import onnx_model_root  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
+
+    if not os.environ.get(onnx_model_root.ENV_MODEL_DIR, "").strip():
+        return None
+    root = onnx_model_root.service_onnx_models_root()
+    try:
+        root.resolve().relative_to(cache.resolve())
+    except ValueError:
+        return root
+    return None
+
+
+def _force_remove(func, path, _exc) -> None:  # type: ignore[no-untyped-def]
+    """``rmtree`` onexc: Windows refuses to delete a read-only file, so clear
+    the flag and retry once. A second failure propagates to the caller.
+
+    Not a credential write: the mode only makes the entry deletable (Windows
+    reads the write bit alone; S_IRWXU keeps a directory traversable on POSIX).
+    """
+    os.chmod(path, stat.S_IRWXU)
+    func(path)
+
+
+def _remove_model_cache(cache: Path) -> str | None:
+    """Remove the nexus model cache directory. Returns a warning or None.
+
+    A symlink at the cache path is unlinked, never followed: what it points to
+    was placed there by the user.
+    """
+    try:
+        if cache.is_symlink():
+            cache.unlink()
+        elif cache.is_dir():
+            shutil.rmtree(cache, onexc=_force_remove)
+    except OSError as exc:
+        return f"could not remove model cache {cache}: {exc}"
+    return None
+
+
 def _service_stack_confirmed_stopped(stop_exit_ok: bool) -> tuple[bool, tuple[str, ...]]:
     """Whether the engine-service + Postgres stack is gone after the stop.
 
@@ -1227,8 +1276,12 @@ def uninstall_daemon(*, confirm: bool = False, remove_data: bool = False) -> Dae
     install_dir = _daemon._autostart_install_dir()
     unit_dest = install_dir / _daemon._autostart_filename_t2()
     service_unit_dest = install_dir / _daemon._autostart_filename_service()
+    from nexus.db.onnx_model_root import nexus_cache_root  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
+
     data_dir = nexus_config_dir()
     marker = _first_run_marker_path()
+    cache_dir = nexus_cache_root()
+    user_model_root = _user_model_root_outside(cache_dir)
 
     if not confirm:
         parts = [
@@ -1240,6 +1293,11 @@ def uninstall_daemon(*, confirm: bool = False, remove_data: bool = False) -> Dae
             parts.append(f"the first-run marker at {marker}")
         if remove_data:
             parts.append(f"ALL nexus data under {data_dir}")
+            parts.append(f"the nexus model cache at {cache_dir}")
+            if user_model_root is not None:
+                parts.append(
+                    f"(the NX_ONNX_MODEL_DIR model root at {user_model_root} is kept)"
+                )
         plan = "; ".join(parts)
         return DaemonUninstallReport(
             confirmed=False,
@@ -1341,6 +1399,29 @@ def uninstall_daemon(*, confirm: bool = False, remove_data: bool = False) -> Dae
             except OSError as exc:
                 warnings.append(f"could not remove data dir {data_dir}: {exc}")
 
+    # 4b. With remove_data, remove the nexus model cache (RDR-224): the service's
+    #     ONNX models and MinerU's fallback output. Only after a confirmed stop:
+    #     on Windows the engine holds the model files open, and a partial delete
+    #     leaves a cache that looks present and is broken. A user-chosen
+    #     NX_ONNX_MODEL_DIR root outside it is never touched.
+    cache_removed = False
+    if remove_data:
+        if user_model_root is not None:
+            warnings.append(
+                f"kept the NX_ONNX_MODEL_DIR model root {user_model_root}: "
+                "it is a directory you chose; remove it yourself if you no longer need it"
+            )
+        if cache_dir.exists() or cache_dir.is_symlink():
+            if not service_stopped:
+                warnings.append(
+                    f"kept model cache {cache_dir}: the service stack may still be "
+                    "running and holding files there; re-run once it has stopped"
+                )
+            elif cache_warning := _remove_model_cache(cache_dir):
+                warnings.append(cache_warning)
+            else:
+                cache_removed = True
+
     # 5. Remove what the autostart install created outside the data dir: the
     #    unit's log file (with remove_data) and the nexus-owned autostart/log
     #    directories once empty (RDR-224). Anything else in them is named, kept.
@@ -1361,6 +1442,8 @@ def uninstall_daemon(*, confirm: bool = False, remove_data: bool = False) -> Dae
         summary.append("first-run marker removed")
     if data_removed:
         summary.append(f"data dir {data_dir} wiped")
+    if cache_removed:
+        summary.append(f"model cache {cache_dir} removed")
     return DaemonUninstallReport(
         confirmed=True,
         unit_status=unit_result.status,
@@ -1372,6 +1455,8 @@ def uninstall_daemon(*, confirm: bool = False, remove_data: bool = False) -> Dae
         data_dir=data_dir,
         daemon_stopped=daemon_stopped,
         service_stopped=service_stopped,
+        cache_removed=cache_removed,
+        cache_dir=cache_dir,
         warnings=tuple(warnings),
         message="Daemon uninstall complete: " + "; ".join(summary) + ".",
     )

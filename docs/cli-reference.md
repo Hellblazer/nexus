@@ -4469,13 +4469,13 @@ and handling BOTH install shapes — each branch is a no-op when its target is a
 ```
 nx uninstall                  # DRY RUN (default): preview what would be removed
 nx uninstall --yes            # Perform the teardown
-nx uninstall --yes --remove-data   # ALSO wipe the local data dir (notes + index)
+nx uninstall --yes --remove-data   # ALSO wipe the local data dir (notes + index) and model cache
 ```
 
 | Flag | Description |
 |------|-------------|
 | `--yes` | Perform the teardown. Without it, `nx uninstall` only previews (dry-run default). |
-| `--remove-data` | Also wipe the local nexus data dir (notes + search index). Irreversible; only acts with `--yes`. **Does NOT touch a managed/remote tenant's data.** |
+| `--remove-data` | Also wipe the local nexus data dir (notes + search index) and the model cache `~/.cache/nexus` (`%USERPROFILE%\.cache\nexus` on Windows; the ONNX models and MinerU scratch output). The cache goes only after the service stack is confirmed stopped; a model root you set with `NX_ONNX_MODEL_DIR` outside it is kept and named. Irreversible; only acts with `--yes`. **Does NOT touch a managed/remote tenant's data.** |
 
 **Managed env override:** if `NX_SERVICE_URL` / `NX_SERVICE_TOKEN` are exported in
 your shell (not just `config.yml`), `nx uninstall` clears `config.yml` and warns
