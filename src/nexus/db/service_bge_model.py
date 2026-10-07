@@ -29,6 +29,18 @@ anonymous HuggingFace: HF rate-limits anonymous bulk pulls (HTTP 429), which
 failed user installs the same way it flaked CI. No fallback origin — a failed
 download fails loud (feedback_no_silent_fallbacks_for_correctness).
 
+Compressed asset: the same release also carries ``model.onnx.xz`` (the same
+file, ``xz -6``: about 198 MB against 436 MB). The fetch asks for it first,
+decompresses it in a stream with a memory limit and an output cap, and checks
+the SAME pinned sha256 on the decompressed bytes before they are renamed into
+place, so the gate is unchanged. A 404 on the ``.xz``, and nothing else, means
+the release does not carry it and the raw ``model.onnx`` is fetched as before.
+Publishing it is one upload to the existing tag, from a model.onnx whose sha256
+is the pin: ``xz -6 -k model.onnx`` then ``gh release upload ci-assets-bge-768-v1
+model.onnx.xz``. Its own bytes need no pin (any xz encoder output decompresses to
+the pinned file or fails the gate). Never quantize instead: RDR-160 CA-3 measured
+int8/q4 below the 0.9999 cosine gate.
+
 ACCEPTED RISK: digest verification runs on the download path only. Files already
 on disk are trusted via the size floors (re-hashing 416 MB on every boot is not
 worth it), so a pre-5votw HuggingFace-sourced install or post-install disk
@@ -37,6 +49,7 @@ corruption above the floor is not detected; ``force=True`` re-fetches + re-verif
 from __future__ import annotations
 
 import hashlib
+import lzma
 import os
 import time
 from pathlib import Path
@@ -71,6 +84,26 @@ _TOKENIZER_SHA256 = "d241a60d5e8f04cc1b2b3e9ef7a4921b27bf526d9f6050ab90f9267a1f9
 
 MODEL_FILENAME = "model.onnx"
 TOKENIZER_FILENAME = "tokenizer.json"
+#: The same model, xz-compressed, on the same release tag. Optional: a release
+#: without it serves the raw ``MODEL_FILENAME`` (see the module docstring).
+MODEL_XZ_FILENAME = "model.onnx.xz"
+
+#: Decompression bounds for ``MODEL_XZ_FILENAME``, checked before the digest can
+#: be: an output cap well above the 436 MB model (a bomb stops here, not at a
+#: full disk) and the decoder's memory limit (``xz -6`` needs about 9 MB; ``-9e``
+#: about 65 MB). Module-level so tests can lower them.
+_MAX_MODEL_BYTES = 1 << 30
+_XZ_MEMLIMIT = 256 << 20
+_XZ_OUT_BLOCK = 1 << 22
+
+
+class BgeAssetAbsentError(RuntimeError):
+    """The release does not carry an asset (HTTP 404).
+
+    The default downloader surfaces a 404 as ``httpx.HTTPStatusError``; an
+    injected downloader raises this. :func:`fetch_service_bge_onnx` treats
+    either as "this release has no ``model.onnx.xz``", only for that asset.
+    """
 
 #: Operator/test override for the destination dir. MUST match the Java service's
 #: ``-Dnexus.bge.modelPath`` parent when set there too.
@@ -232,6 +265,65 @@ def _verify_sha256(path: Path, expected: str, label: str) -> None:
         )
 
 
+def _is_absent(exc: BaseException) -> bool:
+    """True for an HTTP 404 from either downloader, never for anything else."""
+    if isinstance(exc, BgeAssetAbsentError):
+        return True
+    response = getattr(exc, "response", None)
+    return getattr(response, "status_code", None) == 404
+
+
+def _decompress_verified(src: Path, dest: Path, expected: str, label: str) -> None:
+    """Decompress the xz file *src* to *dest*, gated on *expected* (sha256).
+
+    Streams through ``dest.part`` with the memory limit and output cap above,
+    hashing as it writes; *dest* appears only by one rename after the digest
+    matches, so a corrupt, truncated, oversized or wrong archive leaves no file
+    there. Raises ``RuntimeError`` naming what failed.
+    """
+    tmp = dest.with_suffix(dest.suffix + ".part")
+    dec = lzma.LZMADecompressor(format=lzma.FORMAT_XZ, memlimit=_XZ_MEMLIMIT)
+    h = hashlib.sha256()
+    written = 0
+    try:
+        with src.open("rb") as fin, tmp.open("wb") as fout:
+
+            def _drain(data: bytes) -> None:
+                nonlocal written
+                out = dec.decompress(data, max_length=_XZ_OUT_BLOCK)
+                while True:
+                    written += len(out)
+                    if written > _MAX_MODEL_BYTES:
+                        raise RuntimeError(
+                            f"{label} decompresses past {_MAX_MODEL_BYTES} bytes; refusing it"
+                        )
+                    h.update(out)
+                    fout.write(out)
+                    if dec.eof or dec.needs_input:
+                        return
+                    out = dec.decompress(b"", max_length=_XZ_OUT_BLOCK)
+
+            for block in iter(lambda: fin.read(1 << 20), b""):
+                if dec.eof:
+                    raise RuntimeError(f"{label} has data after the end of its xz stream")
+                _drain(block)
+        if not dec.eof:
+            raise RuntimeError(f"{label} is truncated (the xz stream does not end)")
+        if dec.unused_data:
+            raise RuntimeError(f"{label} has data after the end of its xz stream")
+        actual = h.hexdigest()
+        if actual != expected:
+            raise RuntimeError(
+                f"sha256 mismatch for {label} after decompression: expected {expected}, "
+                f"got {actual} (corrupt or tampered download from {BGE_ASSET_TAG})"
+            )
+        os.replace(tmp, dest)
+    except lzma.LZMAError as exc:
+        raise RuntimeError(f"{label} is not a readable xz file: {exc}") from exc
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
 def fetch_service_bge_onnx(
     *, force: bool = False, downloader: Downloader | None = None
 ) -> Path:
@@ -265,9 +357,22 @@ def fetch_service_bge_onnx(
     dest_dir.mkdir(parents=True, exist_ok=True)
 
     base = f"{_ASSET_DOWNLOAD_BASE}/{BGE_ASSET_TAG}"
+    xz_dest = dest_dir / MODEL_XZ_FILENAME
     try:
-        fetch(f"{base}/{MODEL_FILENAME}", model_dest)
-        _verify_sha256(model_dest, _MODEL_SHA256, MODEL_FILENAME)
+        try:
+            fetch(f"{base}/{MODEL_XZ_FILENAME}", xz_dest)
+        except Exception as exc:
+            if not _is_absent(exc):
+                raise
+            # A release without the compressed copy: the raw model, as before.
+            _log.info("service_bge_xz_absent_fetching_raw", tag=BGE_ASSET_TAG)
+            fetch(f"{base}/{MODEL_FILENAME}", model_dest)
+            _verify_sha256(model_dest, _MODEL_SHA256, MODEL_FILENAME)
+        else:
+            try:
+                _decompress_verified(xz_dest, model_dest, _MODEL_SHA256, MODEL_XZ_FILENAME)
+            finally:
+                xz_dest.unlink(missing_ok=True)
         fetch(f"{base}/{TOKENIZER_FILENAME}", tok_dest)
         _verify_sha256(tok_dest, _TOKENIZER_SHA256, TOKENIZER_FILENAME)
     except Exception as exc:
