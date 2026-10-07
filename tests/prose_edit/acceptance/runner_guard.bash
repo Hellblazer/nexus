@@ -114,16 +114,21 @@ runner_cleanup() {
 # and a human removes it. INT, TERM and HUP inside the gate release it; SIGKILL leaves it. The pid in the gate is a
 # record for that human, read by nothing here. A dead lock holder's pid reused by a live process also refuses until
 # a human removes the lock; the message says so.
+#
+# The gate is taken by creating its pid record exclusively (noclobber, so bash opens it O_EXCL), not by mkdir alone
+# (nexus-6japn). mkdir(1) is not a mutex everywhere: uutils coreutils 0.8.0, /usr/bin/mkdir on Ubuntu 26.04, checks
+# for the path and then creates it, and reports the EEXIST of a lost race as success, so all four runners of a trial
+# took the gate at once on qwentescence. The mkdir still keeps a planted or record-less gate closed; a runner whose
+# mkdir "succeeded" but whose record already exists, or whose gate vanished under it, keeps waiting.
 _runner_gate_take() {
   local gate="$1" limit polls=0
   limit=$(( 10#$2 * 20 ))
   [ -d "$(dirname "$gate")" ] && [ -w "$(dirname "$gate")" ] || return 2
-  until mkdir "$gate" 2>/dev/null; do
+  until mkdir "$gate" 2>/dev/null && (set -C; printf '%s\n' "$$" > "$gate/pid") 2>/dev/null; do
     polls=$((polls + 1))
     [ "$polls" -ge "$limit" ] && return 1
     sleep 0.05
   done
-  printf '%s\n' "$$" > "$gate/pid" 2>/dev/null
   return 0
 }
 
