@@ -31,6 +31,9 @@ from pathlib import Path
 
 import pytest
 
+from nexus._install.layout_core import exe_name
+from nexus.db.pg_provision import bootstrap_superuser
+
 from tests.db._service_fixture import (
     SERVICE_ROLES_SQL,
     pg_bin_dir,
@@ -43,9 +46,9 @@ pytestmark = pytest.mark.integration
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 _JAR = _REPO_ROOT / "service" / "target" / "nexus-service-1.0-SNAPSHOT.jar"
 _PG_BIN = pg_bin_dir()
-_INITDB = _PG_BIN / "initdb"
-_PG_CTL = _PG_BIN / "pg_ctl"
-_CREATEDB = _PG_BIN / "createdb"
+_INITDB = _PG_BIN / exe_name("initdb")
+_PG_CTL = _PG_BIN / exe_name("pg_ctl")
+_CREATEDB = _PG_BIN / exe_name("createdb")
 _JAVA_HOME = os.environ.get("JAVA_HOME", "")
 _JAVA = Path(_JAVA_HOME) / "bin" / "java" if _JAVA_HOME else Path(shutil.which("java") or "java")
 
@@ -67,7 +70,7 @@ def _free_port() -> int:
 
 def _psql(pg: dict, sql: str) -> None:
     subprocess.run(
-        [str(_PG_BIN / "psql"), "-h", "127.0.0.1", "-p", str(pg["port"]),
+        [str(_PG_BIN / exe_name("psql")), "-h", "127.0.0.1", "-p", str(pg["port"]),
          "-U", pg["user"], "-d", pg["dbname"], "-v", "ON_ERROR_STOP=1", "-c", sql],
         check=True, capture_output=True,
     )
@@ -78,10 +81,10 @@ def pg_instance():
     pgdata = tempfile.mkdtemp(prefix="nexus_recovery_inttest_pg_")
     pg_port = _free_port()
     pglog = os.path.join(pgdata, "pg.log")
-    pg_user = os.environ["USER"]
+    pg_user = bootstrap_superuser()
     try:
         subprocess.run(
-            [str(_INITDB), "-D", pgdata, "--no-locale", "-E", "UTF8", "--auth=trust"],
+            [str(_INITDB), "-D", pgdata, "-U", pg_user, "--no-locale", "-E", "UTF8", "--auth=trust"],
             check=True, capture_output=True,
         )
         with open(os.path.join(pgdata, "postgresql.conf"), "a") as f:

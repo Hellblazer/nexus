@@ -20,7 +20,6 @@ that the per-test restore in ``tests/conftest.py`` put the schema back.
 """
 from __future__ import annotations
 
-import os
 import subprocess
 from pathlib import Path
 
@@ -48,7 +47,7 @@ def _psql_scalar(sql: str) -> str:
     state = ensure_engine()
     proc = subprocess.run(
         [str(Path(state["pg_bin"]) / "psql"), "-h", "127.0.0.1", "-p", str(state["pg_port"]),
-         "-U", os.environ["USER"], "-d", _DBNAME, "-t", "-A", "-c", sql],
+         "-U", state["pg_user"], "-d", _DBNAME, "-t", "-A", "-c", sql],
         capture_output=True, text=True, timeout=60,
     )
     assert proc.returncode == 0, f"psql failed: {proc.stderr}\nSQL: {sql}"

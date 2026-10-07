@@ -43,6 +43,7 @@ from pathlib import Path
 
 import pytest
 
+from nexus._install.layout_core import exe_name
 from nexus.commands import init as init_mod
 from nexus.daemon import binary_install
 from nexus.db import pg_provision
@@ -101,7 +102,7 @@ def test_pinned_tag_downloads_extracts_selects(tmp_path, monkeypatch, make_pg_bu
 
     bin_dir = init_mod._acquire_pg_bundle_step(tmp_path)
 
-    assert (bin_dir / "initdb").is_file()
+    assert (bin_dir / exe_name("initdb")).is_file()
     assert calls["tag"] == "engine-service-v0.1.32"
     assert calls["config_dir"] == tmp_path
     # Selected for provisioning: discovery must resolve the bundle first.

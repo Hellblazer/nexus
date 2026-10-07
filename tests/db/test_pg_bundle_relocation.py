@@ -50,6 +50,7 @@ from pathlib import Path
 
 import pytest
 
+from nexus._install.layout_core import exe_name
 from tests.db._pg_auth import superuser_pgpass
 from nexus.db.pg_provision import (
     NEXUS_DB_NAME,
@@ -57,6 +58,7 @@ from nexus.db.pg_provision import (
     PgVectorNotInstalledError,
     ProvisionResult,
     _port_accepting,
+    bootstrap_superuser,
     check_pgvector_available,
     discover_pg_binaries,
     provision,
@@ -94,7 +96,7 @@ def _relocated_root() -> Path | None:
     if not raw:
         return None
     root = Path(raw)
-    return root if (root / "bin" / "initdb").is_file() else None
+    return root if (root / "bin" / exe_name("initdb")).is_file() else None
 
 
 _ROOT = _relocated_root()
@@ -367,9 +369,9 @@ class TestCreateExtensionFromRelocated:
     location — the failure mode relocation could introduce."""
 
     def _query(self, bins, port, sql) -> subprocess.CompletedProcess:
-        os_user = os.environ.get("USER") or os.environ.get("LOGNAME") or "postgres"
+        os_user = bootstrap_superuser()  # the SID-derived role on Windows (nexus-ja4pq)
         return subprocess.run(
-            [str(bins.bin_dir / "psql"), "-h", "127.0.0.1", "-p", str(port),
+            [str(bins.psql), "-w", "-h", "127.0.0.1", "-p", str(port),
              "-U", os_user, "-d", NEXUS_DB_NAME, "-t", "-A", "-c", sql],
             capture_output=True, text=True, timeout=30,
         )

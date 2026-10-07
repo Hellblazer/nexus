@@ -36,6 +36,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from nexus._install.layout_core import exe_name
 from nexus.daemon.service_registry import service_identity
 from nexus.db.pg_provision import (
     CREDENTIALS_FILENAME,
@@ -45,6 +46,7 @@ from nexus.db.pg_provision import (
     _port_accepting,
     _psql,
     _read_credentials,
+    bootstrap_superuser,
     discover_pg_binaries,
     provision,
 )
@@ -55,7 +57,7 @@ from tests.db._pg_auth import superuser_pgpass
 from tests.db._service_fixture import pg_bin_dir  # noqa: E402 — gate needs it here
 
 _PG_BIN = pg_bin_dir()
-_INITDB = _PG_BIN / "initdb"
+_INITDB = _PG_BIN / exe_name("initdb")
 
 pytestmark = [
     pytest.mark.integration,
@@ -68,12 +70,13 @@ pytestmark = [
 
 
 def _os_user() -> str:
-    return os.environ.get("USER") or os.environ.get("LOGNAME") or "postgres"
+    # The SID-derived role on Windows, where USER/LOGNAME are unset (nexus-ja4pq).
+    return bootstrap_superuser()
 
 
 def _query(bins: PgBinaries, port: int, db: str, user: str, sql: str) -> str:
     result = subprocess.run(
-        [str(bins.psql), "-h", "127.0.0.1", "-p", str(port),
+        [str(bins.psql), "-w", "-h", "127.0.0.1", "-p", str(port),
          "-U", user, "-d", db, "-t", "-A", "-c", sql],
         capture_output=True, text=True, check=True,
     )

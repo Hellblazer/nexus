@@ -211,7 +211,8 @@ def monitor_scoped_query(
     from nexus.db.pg_provision import _bundle_lib_env  # noqa: PLC0415 — circular-dep avoidance
 
     argv = [
-        str(psql_bin), "-h", creds.host, "-p", str(creds.port),
+        # -w: never prompt. A missing password key reads as "", which libpq treats as no password, and psql would then block on the terminal (nexus-ja4pq).
+        str(psql_bin), "-w", "-h", creds.host, "-p", str(creds.port),
         "-U", creds.user, "-d", creds.dbname,
         "-v", "ON_ERROR_STOP=1", "-t", "-A", "-q",
         "-c", "SET ROLE pg_monitor",

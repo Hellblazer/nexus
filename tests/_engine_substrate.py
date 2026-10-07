@@ -622,6 +622,7 @@ def _boot_semaphore_slot(
 
 def _initdb_cluster(
     bin_dir: Path, *, prefix: str, parent_dir: str | None = None,
+    username: str | None = None,
 ) -> str:
     """``mkdtemp`` + ``initdb`` a fresh cluster dir, cleaning up on failure.
 
@@ -649,11 +650,14 @@ def _initdb_cluster(
       (``could not create shared memory segment: No space left on device``,
       ``shmget`` -- macOS ``kern.sysv.shmmni`` is 32) that no consumer of
       this substrate could see.
+
+    *username* names the bootstrap superuser (``initdb -U``); None keeps
+    initdb's own default, the OS account name.
     """
     pgdata = tempfile.mkdtemp(prefix=prefix, dir=parent_dir)
     proc = subprocess.run(
         [str(bin_dir / "initdb"), "-D", pgdata, "--no-locale", "-E", "UTF8",
-         "--auth=trust"],
+         "--auth=trust", *(["-U", username] if username else [])],
         capture_output=True, text=True,
     )
     if proc.returncode != 0:
@@ -859,7 +863,11 @@ def _boot() -> dict:
     onnx_root = _ensure_onnx_models(dict(os.environ))
 
     pg_port = _free_port()
-    pg_user = os.environ["USER"]
+    # Named explicitly to initdb below: Windows sets no USER, and its
+    # superuser is the SID-derived bootstrap_superuser() name (nexus-ja4pq).
+    from nexus.db.pg_provision import bootstrap_superuser  # noqa: PLC0415 — deferred import, function-local as in tests/db/_service_fixture.py
+
+    pg_user = bootstrap_superuser()
     # Concurrency-window control's EARLIEST checkpoint (nexus-ui654
     # follow-up round 2, critic Q1/Q3 -- corrects round 1's "millisecond
     # window" docstring claim, which the critic showed was wrong under
@@ -901,7 +909,9 @@ def _boot() -> dict:
         # Cleans the dir up if initdb fails, and carries initdb's stderr out
         # (nexus-rbc7k) -- see _initdb_cluster's docstring for both, and for
         # the 21 empty cluster dirs the previous shape stranded here.
-        pgdata = _initdb_cluster(bin_dir, prefix="nexus_t2_substrate_pg_")
+        pgdata = _initdb_cluster(
+            bin_dir, prefix="nexus_t2_substrate_pg_", username=pg_user,
+        )
         sidecar_started_at = _write_sidecar(
             pgdata, pg_port=pg_port, svc_port=None,
             postmaster_pid=None, engine_pid=None,

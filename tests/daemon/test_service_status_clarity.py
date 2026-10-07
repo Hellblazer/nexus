@@ -270,6 +270,28 @@ class TestPgVectorPreflight:
         "preflight reads it as indeterminate and neither outcome under test can occur; a passing run there "
         "would be vacuous",
     )
+    def test_windows_layout_probes_pg_config_exe(self, tmp_path: Path) -> None:
+        """nexus-ja4pq: the Windows bundle ships ``pg_config.exe``. Probing the
+        bare name found nothing there, logged "no pg_config" and returned, so a
+        bundle missing pgvector passed the preflight on every Windows box."""
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        bins = PgBinaries.from_dir(bin_dir, platform="win32")
+        sharedir = tmp_path / "share"
+        (sharedir / "extension").mkdir(parents=True)
+        exe = bin_dir / "pg_config.exe"
+        exe.write_text(f"#!/bin/sh\necho {sharedir}\n")
+        exe.chmod(0o755)
+        assert not (bin_dir / "pg_config").exists()  # only the Windows name
+        with pytest.raises(PgVectorNotInstalledError, match="vector.control"):
+            check_pgvector_available(bins, platform="win32")
+
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="the fake pg_config is a #!/bin/sh script, which Windows cannot execute (WinError 193), so the "
+        "preflight reads it as indeterminate and neither outcome under test can occur; a passing run there "
+        "would be vacuous",
+    )
     def test_present_control_file_passes(self, tmp_path: Path) -> None:
         bins = self._bins(tmp_path)
         sharedir = tmp_path / "share"

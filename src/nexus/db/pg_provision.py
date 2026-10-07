@@ -451,7 +451,7 @@ def _candidate_sharedirs(pg_config: Path, bin_dir: Path, sharedir: str) -> list[
     return candidates
 
 
-def check_pgvector_available(bins: PgBinaries) -> None:
+def check_pgvector_available(bins: PgBinaries, *, platform: str | None = None) -> None:
     """Fail loud when pgvector is not installed for THIS PostgreSQL.
 
     Checks for ``<sharedir>/extension/vector.control``. ``pg_config`` reports the
@@ -460,8 +460,12 @@ def check_pgvector_available(bins: PgBinaries) -> None:
     Indeterminate (pg_config missing/failing) does NOT block — provisioning
     will fail loud at CREATE EXTENSION anyway; this gate exists to move the
     common failure earlier, not to add a new way to be wrong.
+
+    ``pg_config.exe`` on Windows (nexus-ja4pq): the bare name never exists in
+    the Windows bundle, which made this whole preflight a silent no-op there.
+    *platform* is the :func:`_on_windows` seam.
     """
-    pg_config = bins.bin_dir / "pg_config"
+    pg_config = bins.bin_dir / ("pg_config.exe" if _on_windows(platform) else "pg_config")
     if not pg_config.is_file():
         _log.warning("pgvector_preflight_no_pg_config", bin_dir=str(bins.bin_dir))
         return

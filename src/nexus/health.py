@@ -3805,6 +3805,8 @@ def _run_psql(
     """
     cmd = [
         str(psql_bin),
+        # -w: never prompt. A missing password key reads as "", which libpq treats as no password, and psql would then block on the terminal (nexus-ja4pq).
+        "-w",
         "-h", host,
         "-p", str(port),
         "-U", user,

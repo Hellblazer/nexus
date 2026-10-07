@@ -164,7 +164,8 @@ def run_diagnostic_sql(
     outputs: list[str] = []
     for stmt in statements:
         argv = [
-            str(psql_bin), "-h", creds.host, "-p", str(creds.port),
+            # -w: never prompt. A missing password key reads as "", which libpq treats as no password, and psql would then block on the terminal (nexus-ja4pq).
+            str(psql_bin), "-w", "-h", creds.host, "-p", str(creds.port),
             "-U", creds.user, "-d", creds.dbname,
             "-v", "ON_ERROR_STOP=1", "-tAc", stmt,
         ]
