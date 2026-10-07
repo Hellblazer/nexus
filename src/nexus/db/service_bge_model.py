@@ -111,7 +111,7 @@ _ENV_DIR = "NX_SERVICE_BGE_DIR"
 
 #: One-time download size of the STANDARD fp32 export (NOT the ~140 MB fastembed
 #: quantized model — that variant is rejected by the parity gate, RDR-160 CA-3).
-SERVICE_BGE_DOWNLOAD_HINT = "~416 MB"
+SERVICE_BGE_DOWNLOAD_HINT = "~200 MB compressed"
 
 #: Sanity floors for "this file is the real artifact, not a truncated download or
 #: the ~140 MB quantized/fused substitute". The standard fp32 model is ~416 MB;
