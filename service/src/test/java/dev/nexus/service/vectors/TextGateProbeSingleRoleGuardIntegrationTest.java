@@ -434,6 +434,115 @@ class TextGateProbeSingleRoleGuardIntegrationTest {
         }
     }
 
+    /** The SQL of vectors-031-2, the text-gate probe redefinition, exactly as Liquibase would run it. */
+    private String vectors0312Sql() throws Exception {
+        String xml;
+        try (InputStream in = getClass().getClassLoader()
+                .getResourceAsStream("db/changelog/vectors-031-read-path-model-tenant-predicates.xml")) {
+            assertThat(in).as("vectors-031 on the classpath").isNotNull();
+            xml = new String(in.readAllBytes(), StandardCharsets.UTF_8);
+        }
+        int cs = xml.indexOf("<changeSet id=\"vectors-031-2\"");
+        int from = xml.indexOf("<![CDATA[", cs) + "<![CDATA[".length();
+        int to = xml.indexOf("]]></sql>", from);
+        assertThat(cs).as("vectors-031-2 present").isPositive();
+        return xml.substring(from, to);
+    }
+
+    /**
+     * Re-run vectors-031-2 as the migrating role, the way a later boot migrated by that role would: its SQL, as it
+     * is in the changelog, in a one-changeset changelog run through Liquibase on an admin connection.
+     */
+    private void rerunVectors0312(PostgreSQLContainer<?> c, Path tmp) throws Exception {
+        String xml = "<databaseChangeLog xmlns=\"http://www.liquibase.org/xml/ns/dbchangelog\"\n"
+            + " xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\"\n"
+            + " xsi:schemaLocation=\"http://www.liquibase.org/xml/ns/dbchangelog\n"
+            + " http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd\">\n"
+            + "<changeSet id=\"rerun-vectors-031-2\" author=\"test\" runAlways=\"true\">\n"
+            + "<sql splitStatements=\"false\" stripComments=\"false\"><![CDATA[" + vectors0312Sql() + "]]></sql>\n"
+            + "</changeSet>\n</databaseChangeLog>\n";
+        Files.writeString(tmp.resolve("rerun-vectors-031-2.xml"), xml);
+        try (HikariDataSource adminDs = pool(c, ADMIN, ADMIN_PASS, "guard-rerun-0312", 1);
+             Connection conn = adminDs.getConnection()) {
+            Database database = DatabaseFactory.getInstance()
+                .findCorrectDatabaseImplementation(new JdbcConnection(conn));
+            database.setLiquibaseSchemaName("public");
+            database.setDefaultSchemaName("public");
+            try (Liquibase lb = new Liquibase("rerun-vectors-031-2.xml", new DirectoryResourceAccessor(tmp), database)) {
+                lb.update(new Contexts(), new LabelExpression());
+            }
+        }
+    }
+
+    /**
+     * RDR-225 review S2 (nexus-3wh8d.17): vectors-031-2 keeps vectors-029's guard. vectors-029 ran as nexus_admin
+     * (definer probes, owner policy TO nexus_admin); the policy is then moved to a different role, the state a
+     * later boot migrated by another role finds. 031-2 must NOT redefine the probes as definer functions beside
+     * a policy that does not name its own role: it takes the invoker branch. Fails when the policy check is
+     * removed from the definer decision (the probes stay definer) AND when the post-condition is removed from a
+     * definer outcome (see the exposed-role test).
+     */
+    @Test
+    void vectors0312_withTheOwnerPolicyNamingAnotherRole_takesTheInvokerBranch(@org.junit.jupiter.api.io.TempDir Path tmp) throws Exception {
+        PostgreSQLContainer<?> c = migratedAsAdmin(su -> { });
+        try (Connection su = c.createConnection("")) {
+            var ctx = DSL.using(su, SQLDialect.POSTGRES);
+            assertThat(definerProbes(ctx)).as("non-vacuity: a normal walk leaves 3 definer probes").hasSize(3);
+            PgContainerHelper.runSuperuserDdl(su, "CREATE ROLE guard_other_owner NOLOGIN");
+            PgContainerHelper.runSuperuserDdl(su, "DROP POLICY chunks_gate_probe_owner_read ON nexus.chunks");
+            PgContainerHelper.runSuperuserDdl(su,
+                "CREATE POLICY chunks_gate_probe_owner_read ON nexus.chunks FOR SELECT TO guard_other_owner USING (true)");
+            assertThat(PgCatalogProbes.policyRoles(ctx, "nexus", "chunks").stream()
+                    .map(PgCatalogProbes.PolicyRoles::toString).toList())
+                .as("non-vacuity: the owner policy no longer names the migrating role")
+                .contains("chunks_gate_probe_owner_read roles={guard_other_owner} cmd=SELECT");
+
+            rerunVectors0312(c, tmp);
+
+            assertThat(definerProbes(ctx))
+                .as("no definer probe beside an owner policy that does not name the migrating role").isEmpty();
+            assertServiceSeesOnlyItsOwnTenant(c);
+        } finally {
+            c.stop();
+        }
+    }
+
+    /**
+     * The exposed-role half of the same guard: a membership granted AFTER vectors-029 ran gives nexus_svc the
+     * migrating role's privileges, so the owner policy applies to the service role. 031-2 must not keep
+     * (or re-create) definer probes then.
+     */
+    @Test
+    void vectors0312_withNexusSvcInheritingTheMigrator_takesTheInvokerBranch(@org.junit.jupiter.api.io.TempDir Path tmp) throws Exception {
+        PostgreSQLContainer<?> c = migratedAsAdmin(su -> { });
+        try (Connection su = c.createConnection("")) {
+            var ctx = DSL.using(su, SQLDialect.POSTGRES);
+            assertThat(definerProbes(ctx)).as("non-vacuity: 3 definer probes after the normal walk").hasSize(3);
+            PgContainerHelper.grantRoleMembership(su, ADMIN, SVC, true, false);
+            assertThat(hasRole(ctx, SVC, ADMIN)).as("non-vacuity: nexus_svc has the migrator's privileges").isTrue();
+
+            rerunVectors0312(c, tmp);
+
+            assertThat(definerProbes(ctx)).as("no definer probe while nexus_svc has the migrator's privileges")
+                .isEmpty();
+        } finally {
+            c.stop();
+        }
+    }
+
+    /** The unchanged path: with the policy naming the migrator and nobody exposed, 031-2 keeps definer probes. */
+    @Test
+    void vectors0312_afterANormalWalk_keepsTheDefinerProbes(@org.junit.jupiter.api.io.TempDir Path tmp) throws Exception {
+        PostgreSQLContainer<?> c = migratedAsAdmin(su -> { });
+        try (Connection su = c.createConnection("")) {
+            rerunVectors0312(c, tmp);
+            assertThat(definerProbes(DSL.using(su, SQLDialect.POSTGRES))).hasSize(3);
+            assertServiceSeesOnlyItsOwnTenant(c);
+        } finally {
+            c.stop();
+        }
+    }
+
     /**
      * I1: the runtime backstop. nexus_admin ran the walk and created the owner policy while nobody inherited
      * it; afterwards a membership is granted to nexus_svc AND to a differently named role (the service may

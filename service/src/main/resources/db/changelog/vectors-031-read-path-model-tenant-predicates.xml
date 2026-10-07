@@ -46,10 +46,21 @@
     parameters and predicates. The explicit tenant predicate is in ADDITION to the GUC predicate,
     never instead of it: a definer function runs as its owner, so the session's own tenant is what bounds it
     (Rdr192LiveCExplainEvidenceIntegrationTest passes another tenant's id as the parameter and expects nothing).
-    vectors-031-2 chooses by what the old probes are: where vectors-029 ran (they are definer functions) it
-    redefines them as definer plpgsql functions, and otherwise (vectors-029 was skipped) as invoker functions that
-    stay LANGUAGE sql and inline into their caller. It is one changeset, not two with opposite preconditions, so a
-    normal walk records no MARK_RAN row for it. The owner policy vectors-029 created is not touched.
+    vectors-031-2 chooses by what the old probes are: where vectors-029 ran (they are definer functions) AND its
+    guard still holds it redefines them as definer plpgsql functions, and otherwise as invoker functions that stay
+    LANGUAGE sql and inline into their caller. "Its guard still holds" is vectors-029's own, copied: the owner
+    policy chunks_gate_probe_owner_read exists and names exactly the migrating role, and no RLS-subject login role
+    has that role's privileges (nexus_svc, or any other non-superuser, non-BYPASSRLS login role that inherits it).
+    A later boot migrated by a different role, or a membership granted since, therefore degrades to the invoker
+    probes (correct rows, the slower plan) and never leaves definer bodies beside a policy that does not name
+    their owner. The definer outcome ends with vectors-029's post-condition, so a drifted decision fails the walk
+    loudly. It is one changeset, not two with opposite preconditions, so a normal walk records no MARK_RAN row for
+    it. The owner policy vectors-029 created is not touched.
+
+    EDITED IN PLACE, TWICE. vectors-031 is unshipped, and so is vectors-030-1, whose SQL d3a1b0dbd also edited in
+    place (RAISE LOG became RAISE NOTICE). A database that already ran an earlier text of either changeset fails
+    its next migration on the checksum. That is accepted for the developer boxes and test containers on this
+    branch and is not a concern for any shipped database, because neither changeset has shipped.
 
     DROPS. Old signatures are dropped here, in the same changeset as the new definitions: the generated jOOQ
     .call(...) methods are per signature, and a surviving overload would leave the old arity callable and the
@@ -71,6 +82,9 @@
 
     ROLLBACK. Drops the new signatures. The older changesets' own rollbacks restore the old bodies in the
     reverse-order chain (SchemaRollbackRoundTripIntegrationTest), as vectors-030-1's rollback already relies on.
+    Rolling back 031 ALONE leaves none of the 33 read functions (the new signatures go, the old ones come back only
+    from the older changesets' rollbacks); it is valid only inside the full reverse chain, and the RDR says the
+    Liquibase rollback is not a recovery path.
 
     No DATA EFFECT: function definitions and grants only.
 
@@ -1679,17 +1693,35 @@ DROP FUNCTION IF EXISTS nexus.cross_preview_1024(text, text[], text, text);
     </changeSet>
 
     <changeSet id="vectors-031-2" author="nexus-3wh8d.15">
-        <comment>RDR-225 read path, the text-gate probe: text_gate_probe_384/768/1024 gain p_embedding_model and p_tenant with the same explicit predicates and keep the shape they have now. Where vectors-029 ran they are SECURITY DEFINER with a fixed search_path and the fail-closed GUC tenant predicate, and are redefined as plpgsql with a function-level plan_cache_mode = force_custom_plan (a SQL definer function is never inlined and its body is planned without the call's values, so the predicates could prune only at executor start-up; plpgsql plans with the call's values), EXECUTE revoked from PUBLIC and granted to nexus_svc, the owner policy untouched. Where vectors-029 was skipped (nexus_svc or another RLS-subject login role has the migrating role's privileges) they are still SECURITY INVOKER and stay LANGUAGE sql, which inlines into the caller, granted to nexus_svc. One changeset that chooses by what the old probes are, and not a pair of mutually exclusive preconditioned ones, so a normal walk records no MARK_RAN row for it. No data effect.</comment>
+        <comment>RDR-225 read path, the text-gate probe: text_gate_probe_384/768/1024 gain p_embedding_model and p_tenant with the same explicit predicates and keep the shape they have now. Where vectors-029 ran and its guard still holds (the owner policy names exactly the migrating role, no RLS-subject login role has that role's privileges) they are SECURITY DEFINER with a fixed search_path and the fail-closed GUC tenant predicate, and are redefined as plpgsql with a function-level plan_cache_mode = force_custom_plan (a SQL definer function is never inlined and its body is planned without the call's values, so the predicates could prune only at executor start-up; plpgsql plans with the call's values), EXECUTE revoked from PUBLIC and granted to nexus_svc, the owner policy untouched, and vectors-029's post-condition re-checked. Otherwise (vectors-029 was skipped, or the guard no longer holds: nexus_svc or another RLS-subject login role has the migrating role's privileges, or the policy does not name it) they are still SECURITY INVOKER and stay LANGUAGE sql, which inlines into the caller, granted to nexus_svc. One changeset that chooses by what the old probes are, and not a pair of mutually exclusive preconditioned ones, so a normal walk records no MARK_RAN row for it. No data effect.</comment>
         <sql splitStatements="false" stripComments="false"><![CDATA[
 DO $do$
 DECLARE
+    me      oid := (SELECT r.oid FROM pg_catalog.pg_roles r WHERE r.rolname = current_user);
     definer boolean;
+    pol_ok  boolean;
+    exposed boolean;
 BEGIN
     SELECT count(*) = 3 INTO definer
       FROM pg_catalog.pg_proc p
      WHERE p.pronamespace = 'nexus'::pg_catalog.regnamespace
        AND p.proname IN ('text_gate_probe_384', 'text_gate_probe_768', 'text_gate_probe_1024')
        AND p.prosecdef;
+    -- vectors-029's guard, kept: a definer probe is only safe beside the owner policy that names exactly the
+    -- migrating role, and only while no RLS-subject login role has that role's privileges. If any part is
+    -- missing (a later boot migrated as a different role, a membership granted since), take the invoker branch:
+    -- correct rows, the slower plan, and no definer body without the policy that makes it useful.
+    SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_policy pol
+                    WHERE pol.polrelid = 'nexus.chunks'::pg_catalog.regclass
+                      AND pol.polname = 'chunks_gate_probe_owner_read'
+                      AND pol.polroles = ARRAY[me])
+      INTO pol_ok;
+    SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_roles r
+                    WHERE (r.rolname = 'nexus_svc' AND (r.rolname = current_user OR pg_catalog.pg_has_role(r.oid, current_user, 'USAGE')))
+                       OR (r.rolname <> current_user AND pg_catalog.pg_has_role(r.oid, current_user, 'USAGE')
+                           AND NOT r.rolsuper AND NOT r.rolbypassrls AND r.rolcanlogin))
+      INTO exposed;
+    definer := definer AND pol_ok AND NOT exposed;
     DROP FUNCTION IF EXISTS nexus.text_gate_probe_384(text, text[], jsonb, text, int);
     DROP FUNCTION IF EXISTS nexus.text_gate_probe_768(text, text[], jsonb, text, int);
     DROP FUNCTION IF EXISTS nexus.text_gate_probe_1024(text, text[], jsonb, text, int);
@@ -1896,6 +1928,8 @@ DECLARE
     me         oid := (SELECT r.oid FROM pg_catalog.pg_roles r WHERE r.rolname = current_user);
     n_definer  int;
     bad_owner  text;
+    pol_roles  oid[];
+    exposed_roles text;
 BEGIN
     SELECT count(*) FILTER (WHERE p.prosecdef),
            string_agg(p.proname, ', ') FILTER (WHERE p.prosecdef AND p.proowner <> me)
@@ -1908,6 +1942,23 @@ BEGIN
     END IF;
     IF bad_owner IS NOT NULL THEN
         RAISE EXCEPTION 'vectors-031-2: probe(s) % are SECURITY DEFINER but not owned by the migrating role %', bad_owner, current_user;
+    END IF;
+    -- vectors-029's post-condition, kept for the definer shape (see THE GUARD in vectors-029).
+    IF n_definer = 3 THEN
+        SELECT pol.polroles INTO pol_roles
+          FROM pg_catalog.pg_policy pol
+         WHERE pol.polrelid = 'nexus.chunks'::pg_catalog.regclass AND pol.polname = 'chunks_gate_probe_owner_read';
+        IF pol_roles IS DISTINCT FROM ARRAY[me] THEN
+            RAISE EXCEPTION 'vectors-031-2: policy chunks_gate_probe_owner_read must name exactly the migrating role % and nothing else, found %', current_user, pol_roles;
+        END IF;
+        SELECT string_agg(r.rolname, ', ' ORDER BY r.rolname) INTO exposed_roles
+          FROM pg_catalog.pg_roles r
+         WHERE (r.rolname = 'nexus_svc' AND (r.rolname = current_user OR pg_catalog.pg_has_role(r.oid, current_user, 'USAGE')))
+            OR (r.rolname <> current_user AND pg_catalog.pg_has_role(r.oid, current_user, 'USAGE')
+                AND NOT r.rolsuper AND NOT r.rolbypassrls AND r.rolcanlogin);
+        IF exposed_roles IS NOT NULL THEN
+            RAISE EXCEPTION 'vectors-031-2: role(s) % have the privileges of the migrating role %; the owner policy would apply to them and let them read every tenant''s chunks', exposed_roles, current_user;
+        END IF;
     END IF;
 END
 $post$;
