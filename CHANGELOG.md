@@ -6,6 +6,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.72.1] - 2026-10-06
+
+Pairs with engine-service-v0.1.149, unchanged from 7.72.0 (`REQUIRED_ENGINE_VERSION` stays 0.1.149). A Windows fix release: on native Windows 7.72.0's MCP search hung forever, and these fixes are what the RDR-224 Phase 5 gate passed with on a clean Windows 11 guest (T2 nexus_rdr/224-gate-run-2026-10-06). Windows is still not declared supported.
+
 ### Fixed
 
 - **On native Windows, an MCP `search` no longer hangs forever** (nexus-jg99b, RDR-224). The MCP stdio transport keeps a thread blocked reading the stdin pipe, and while that read is pending Windows makes other calls on the same handle wait. Loading the OpenBLAS DLL that numpy and scipy ship makes one of those calls under the loader lock, so the first search that needed numpy never returned, and no new thread could start in the server. `nx-mcp` and `nx-mcp-catalog` now move the protocol to a private descriptor at startup and point stdin and `STD_INPUT_HANDLE` at `NUL`, so a DLL that inspects stdin while loading no longer meets the pending read (measured for numpy's OpenBLAS and for `GetFileSizeEx` and both CRTs' `_fstat64` on fd 0), and a subprocess a tool starts with default stdin gets `NUL` instead of the protocol pipe. With a Python MCP client driving the server on the RDR-224 guest, store then search went from a hang to 0.2 s; the Phase 5 gate covers the Claude Code launch path. POSIX is unchanged.
