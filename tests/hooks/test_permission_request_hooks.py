@@ -447,9 +447,10 @@ class TestPreToolUseApproval:
         nx_pre, nx_perm = handlers(self.NX_HOOKS, "PreToolUse"), handlers(self.NX_HOOKS, "PermissionRequest")
         # Through the nx-hook shim since nexus-rcoze: a 7.55.0 CLI does not
         # register auto-approve and a direct entry exits 2 on every MCP call.
-        # Launched through uv since nexus-efk2h (no python3 on stock Windows).
+        # Launched through uv since nexus-efk2h (no python3 on stock Windows), as
+        # `uv tool run` since nexus-f9bgu.36 (no .venv discovery).
         assert nx_pre == nx_perm == {
-            "uv run --directory ${CLAUDE_PLUGIN_ROOT} --no-project --no-config --quiet "
+            "uv tool run --directory ${CLAUDE_PLUGIN_ROOT} --no-config --quiet --python >=3.12 python "
             "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/nx_hook_shim.py auto-approve"
         }, (
             f"{self.NX_HOOKS}: PreToolUse {nx_pre} vs PermissionRequest {nx_perm}"
@@ -457,7 +458,7 @@ class TestPreToolUseApproval:
 
         sn_pre, sn_perm = handlers(self.SN_HOOKS, "PreToolUse"), handlers(self.SN_HOOKS, "PermissionRequest")
         assert sn_pre == sn_perm, f"{self.SN_HOOKS}: PreToolUse {sn_pre} vs PermissionRequest {sn_perm}"
-        assert all(c.startswith("uv run ") for c in sn_pre), sn_pre
+        assert all(c.startswith("uv tool run ") for c in sn_pre), sn_pre
         assert any(c.endswith("/auto_approve_sn_mcp.py") for c in sn_pre), sn_pre
 
 

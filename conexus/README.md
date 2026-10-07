@@ -276,24 +276,25 @@ A `hooks/scripts/nx_hook_shim.py <verb>` handler runs
 on a verb it does not know, which blocks the session, so any verb one of those CLIs lacks
 is wired through the shim, which skips it with a notice instead.
 
-Every `hooks/scripts/...` handler is launched as `uv run --directory ${CLAUDE_PLUGIN_ROOT}
---no-project --no-config --quiet <script>`, never as `python3 <script>` (nexus-efk2h,
-RDR-224). Stock Windows has no `python3` on PATH, so a `python3`-launched hook never fires
-there; `uv` is already required (sn's hooks use it, and it installs as `uv.exe`).
-`--no-project` and `--no-config` keep uv from syncing the session's project or reading a
-`.python-version`. `--directory` makes uv look for an interpreter from the plugin root: a
-hook's cwd is the project, and uv runs a `.venv/bin/python` it finds in the cwd or above
-(measured, uv 0.8.0), so a cloned repository could otherwise supply the interpreter that runs
-every hook (nexus-f9bgu.36). A script's process cwd is therefore the plugin root; it takes the
-project from the payload's `cwd`, else `CLAUDE_PROJECT_DIR`, and the shim starts `nx-hook`
-in that directory. The four plugin scripts
-carry a PEP 723 `requires-python = ">=3.12"` block, the floor their own guards enforce, so
-uv never runs them under an older interpreter it happens to find first; the shim is
-stdlib-only and has no floor. The first hook run on a machine with no Python 3.12 or newer
+Every `hooks/scripts/...` handler is launched as `uv tool run --directory
+${CLAUDE_PLUGIN_ROOT} --no-config --quiet --python >=3.12 python <script>`, never as
+`python3 <script>` (nexus-efk2h, RDR-224). Stock Windows has no `python3` on PATH, so a
+`python3`-launched hook never fires there; `uv` is already required (sn's hooks use it, and
+it installs as `uv.exe`). It is `uv tool run`, not `uv run` (nexus-f9bgu.36): looking for an
+interpreter, `uv run` executes a `.venv` Python it finds in its starting directory or any
+parent, even with `--no-project`. Started from the hook's cwd that is the project, so a
+cloned repository could supply the interpreter that runs every hook; started from the plugin
+root it still walks up to `~/.venv` and, on Windows, `C:\.venv`, which any local user can
+create (both measured, macOS and Windows 11). A tool environment is built from a uv-managed
+or PATH interpreter and never consults a `.venv`. `--python >=3.12` is the floor the
+scripts' own guards enforce, so uv never runs them under an older interpreter it finds
+first; `--no-config` keeps a `uv.toml` from choosing the interpreter. `--directory` makes a
+script's process cwd the plugin root; it takes the project from the payload's `cwd`, else
+`CLAUDE_PROJECT_DIR`, and the shim starts `nx-hook` in that directory. The first hook run on a machine with no Python 3.12 or newer
 makes uv fetch one, which can outlast a hook's timeout once; later runs find it.
 
 **Known blocking failure.** When uv can find no Python 3.12 or newer and cannot fetch one
-(offline, behind a proxy that blocks the download, air-gapped), `uv run` exits 2 with
+(offline, behind a proxy that blocks the download, air-gapped), `uv tool run` exits 2 with
 `No interpreter found`. Claude Code treats a hook's exit 2 as blocking on `PreToolUse`,
 `PermissionRequest` and `UserPromptSubmit`, so five of the seven uv-launched entries (both
 Bash gates, both `auto-approve` entries, the mailbox drain) refuse every Bash call, every

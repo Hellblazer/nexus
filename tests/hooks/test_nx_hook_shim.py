@@ -197,7 +197,7 @@ def test_the_shim_matches_the_message_those_releases_print(tag: str) -> None:
 
 # -- the project directory (finding C, nexus-f9bgu.36) -----------------------------
 #
-# hooks.json launches the shim with `uv run --directory ${CLAUDE_PLUGIN_ROOT}`, so
+# hooks.json launches the shim with `uv tool run --directory ${CLAUDE_PLUGIN_ROOT}`, so
 # its process cwd is the plugin root. `nx-hook` verbs resolve the project from their
 # own cwd, so the shim hands them the project: the payload's `cwd`, else
 # CLAUDE_PROJECT_DIR, else it inherits.
