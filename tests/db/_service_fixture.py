@@ -817,6 +817,7 @@ def spawn_service(
     fh = open(log_path, "wb")  # noqa: SIM115 — lifetime spans the spawned process
     proc = popen_in_group(
         cmd,
+        popen=subprocess.Popen,
         env=env,
         stdout=fh,
         stderr=subprocess.STDOUT,

@@ -94,8 +94,9 @@ from pathlib import Path
 import structlog
 
 from nexus._locking import lock_file, unlock_file
+from nexus._winsec import grant_user_tree_access
 from nexus.util.process_group import KILL_SIGNAL, safe_killpg
-from tests._child_process import kill_group, pg_data_tempdir, popen_in_group, stop_group
+from tests._child_process import kill_group, popen_in_group, stop_group
 from tests._pg_ctl import pg_ctl_start
 from tests.db._service_fixture import (
     SERVICE_ROLES_SQL,
@@ -657,9 +658,11 @@ def _initdb_cluster(
     *username* names the bootstrap superuser (``initdb -U``); None keeps
     initdb's own default, the OS account name.
     """
-    # The user's own SID gets an inheritable ACE on Windows, or initdb's
-    # restricted token cannot write the directory under an elevated session.
-    pgdata = pg_data_tempdir(prefix, parent_dir=parent_dir)
+    pgdata = tempfile.mkdtemp(prefix=prefix, dir=parent_dir)
+    # Windows: the user's own SID gets an inheritable ACE, or initdb's
+    # restricted token cannot write the directory under an elevated session
+    # (tests._child_process.pg_data_tempdir). A no-op on POSIX.
+    grant_user_tree_access(pgdata)
     proc = subprocess.run(
         [str(bin_dir / "initdb"), "-D", pgdata, "--no-locale", "-E", "UTF8",
          "--auth=trust", *(["-U", username] if username else [])],
@@ -1023,7 +1026,7 @@ def _boot() -> dict:
     svc_log_path = os.path.join(pgdata, "engine.log")
     svc_log = open(svc_log_path, "wb")  # noqa: SIM115 — lifetime spans the pytest session, closed with the process
     svc = popen_in_group(
-        engine_argv(java), env=env,
+        engine_argv(java), popen=subprocess.Popen, env=env,
         stdout=svc_log, stderr=subprocess.STDOUT,
     )
     # Checkpoint 3 of 3: svc.pid is known SYNCHRONOUSLY the instant Popen

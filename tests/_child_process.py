@@ -29,6 +29,7 @@ import shutil
 import signal
 import subprocess
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -55,14 +56,19 @@ def group_popen_kwargs() -> dict[str, Any]:
     return {"creationflags": win_job.CREATE_NEW_PROCESS_GROUP}
 
 
-def popen_in_group(argv: list[str], **kwargs: Any) -> subprocess.Popen:
+def popen_in_group(
+    argv: list[str], *, popen: Callable[..., subprocess.Popen] | None = None, **kwargs: Any,
+) -> subprocess.Popen:
     """``subprocess.Popen(argv, **kwargs)`` in a new process group, contained on Windows.
 
     On Windows the child goes into a fresh Job Object right after spawn; :func:`kill_group`
     and :func:`stop_group` close it. When the job cannot be created or assigned, stopping falls
     back to terminating the one process (``process_group.kill_tree``'s degraded reach).
+
+    *popen* is the caller's own ``subprocess.Popen`` binding, so a test that patches the
+    caller's module still intercepts the spawn.
     """
-    proc = subprocess.Popen(argv, **kwargs, **group_popen_kwargs())
+    proc = (popen or subprocess.Popen)(argv, **kwargs, **group_popen_kwargs())
     job = process_group.contain(proc)
     if job is not None:
         _JOBS[proc.pid] = job
