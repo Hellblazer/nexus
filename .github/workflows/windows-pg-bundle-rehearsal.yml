@@ -137,6 +137,11 @@ on:
       - conexus/hooks/scripts/_endpoint_resolve.py
       - tests/_engine_substrate.py
       - tests/conftest.py
+      # Dependency changes reach Windows too (nexus-6046d): tuf 7.0.0 in uv.lock
+      # broke signature verification for unprivileged Windows accounts, and its
+      # fix (tuf>=7.0.1, nexus-zw44w) did not rerun this set until dispatched by hand.
+      - pyproject.toml
+      - uv.lock
       - scripts/check_junit_floor.py
       - .github/actions/resolve-windows-python/**
       - .github/actions/windows-engine-leg/**

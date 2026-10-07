@@ -738,6 +738,8 @@ def test_the_rehearsal_triggers_on_every_phase3_windows_module_and_its_tests() -
     assert "tests/daemon/**" in paths
     for test in WINDOWS_TEST_SET[1:]:
         assert test in paths, test
+    # A dependency bump changes what runs on Windows (nexus-6046d / zw44w).
+    assert "pyproject.toml" in paths and "uv.lock" in paths
 
 
 def test_the_windows_job_runs_the_whole_set_in_one_pytest_with_a_junit_floor() -> None:
