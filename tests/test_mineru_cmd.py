@@ -10,6 +10,7 @@ import pytest
 from click.testing import CliRunner
 
 from nexus.cli import main
+from tests._time_seam import patch_time
 
 
 @pytest.fixture
@@ -81,7 +82,7 @@ class TestMineruStart:
         proc = MagicMock(); proc.pid = 99; proc.poll.return_value = None
         with patch("nexus.commands.mineru.subprocess.Popen", return_value=proc), \
              patch("nexus.commands.mineru.httpx.get", side_effect=httpx.ConnectError("refused")), \
-             patch("nexus.commands.mineru.time.sleep"), \
+             patch_time("nexus.commands.mineru", "sleep"), \
              patch("nexus.commands.mineru._HEALTH_TIMEOUT_SECONDS", 0.1), \
              patch("nexus.commands.mineru._find_free_port", return_value=8010), \
              patch("nexus.config.load_config", return_value={}):
@@ -162,7 +163,7 @@ class TestMineruStop:
              patch("nexus.commands.mineru._is_process_alive", side_effect=_alive), \
              patch("nexus.upgrade_finish.process_command",
                    return_value="python3 mineru-api --host 127.0.0.1"), \
-             patch("nexus.commands.mineru.time.sleep"):
+             patch_time("nexus.commands.mineru", "sleep"):
             result = runner.invoke(main, ["mineru", "stop"])
         assert result.exit_code == 0 and not pid_file.exists()
         assert (12345, signal.SIGTERM) in killpg_calls

@@ -11,6 +11,7 @@ from voyageai.object.embeddings import EmbeddingsObject
 
 from nexus.indexer import CredentialsMissingError, index_repository
 from tests.conftest import catalog_row_for_collection_name, make_vector_test_client
+from tests._time_seam import module_time
 
 # RDR-109 Phase 2: this file asserts cloud-mode canonical behavior
 # (voyage-* embedder names, canonical-set defaults). The cloud_mode
@@ -3114,7 +3115,7 @@ def test_drain_markers_heartbeats_carry_rate_and_eta(monkeypatch):
     from nexus import indexer as idx
 
     t = {"now": 1000.0}
-    monkeypatch.setattr(idx.time, "monotonic", lambda: t["now"])
+    module_time(monkeypatch, idx).monotonic = lambda: t["now"]
 
     class _TickingBatcher(_StubBatcher):
         def drain(self, on_progress=None):
@@ -3163,7 +3164,7 @@ def test_drain_markers_prints_per_flush_not_cumulative_g2(monkeypatch):
     from nexus import indexer as idx
 
     t = {"now": 1000.0}
-    monkeypatch.setattr(idx.time, "monotonic", lambda: t["now"])
+    module_time(monkeypatch, idx).monotonic = lambda: t["now"]
 
     class _UnevenBatcher(_StubBatcher):
         def drain(self, on_progress=None):

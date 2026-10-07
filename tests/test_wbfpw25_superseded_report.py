@@ -30,6 +30,7 @@ from nexus.cli import main
 from nexus.corpus import t3_collection_name
 from nexus.db.http_vector_client import HttpVectorClient
 from nexus.mcp.core import store_put
+from tests._time_seam import module_time
 
 
 def _chash(text: str) -> str:
@@ -361,7 +362,7 @@ def test_a_lost_ack_resend_prints_no_superseded_line_even_though_the_first_attem
     from nexus.catalog.factory import make_catalog_writer as real_factory
     from nexus.rate_brake import reset_brake
 
-    monkeypatch.setattr("nexus.retry.time.sleep", lambda seconds: None)
+    module_time(monkeypatch, "nexus.retry").sleep = lambda seconds: None
     reset_brake()
     client = HttpVectorClient(tenant=t2_service_env)
     subject, title = "wbfpw25-lostack", "wbfpw25-lostack-note"

@@ -16,6 +16,7 @@ import pytest
 
 from nexus.catalog.multi_document_write import MultiDocumentImportWriter
 from nexus.errors import BatchWriteFailedError, EngineOlderThanClientError
+from tests._time_seam import module_time
 
 _COLL = "code__fake__bge-base-en-v15-768__v1"
 _H = "f" * 64
@@ -464,7 +465,7 @@ def test_every_attempt_of_a_data_request_is_judged_not_only_the_last(monkeypatch
     writer must have seen the first attempt's in-flight error itself."""
     import pytest as _pytest
 
-    monkeypatch.setattr("nexus.retry.time.sleep", lambda s: None)
+    module_time(monkeypatch, "nexus.retry").sleep = lambda s: None
     read_error, connect_error = _httpx_errors()
     cat = _FlakyCat("write", read_error, connect_error, connect_error, connect_error, connect_error)
     w = _writer(cat)
@@ -477,7 +478,7 @@ def test_every_attempt_of_a_data_request_is_judged_not_only_the_last(monkeypatch
 def test_a_request_that_never_left_does_not_count_as_in_flight(monkeypatch):
     import pytest as _pytest
 
-    monkeypatch.setattr("nexus.retry.time.sleep", lambda s: None)
+    module_time(monkeypatch, "nexus.retry").sleep = lambda s: None
     _read_error, connect_error = _httpx_errors()
     cat = _FlakyCat("write", *[connect_error] * 8)
     w = _writer(cat)
@@ -505,7 +506,7 @@ def test_a_failed_stamp_only_request_does_not_make_the_run_look_in_flight(monkey
     """A stamp-only append_many carries no rows, so it cannot have created a phantom document."""
     import pytest as _pytest
 
-    monkeypatch.setattr("nexus.retry.time.sleep", lambda s: None)
+    module_time(monkeypatch, "nexus.retry").sleep = lambda s: None
     read_error, _connect = _httpx_errors()
     cat = _FlakyCat("append", *[read_error] * 8)
     w = _writer(cat, defer_completion=True)

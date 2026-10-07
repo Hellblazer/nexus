@@ -25,6 +25,7 @@ import pytest
 
 from nexus.db import service_endpoint as se
 from nexus.db.t2._refreshable_client import RefreshableHttpStoreMixin
+from tests._time_seam import module_time
 
 
 class _Probe(RefreshableHttpStoreMixin):
@@ -80,7 +81,7 @@ class TestIdempotentOptOut:
     def test_non_idempotent_gateway_failure_is_single_attempt(self, monkeypatch) -> None:
         import nexus.db.t2._refreshable_client as rc
 
-        monkeypatch.setattr(rc.time, "sleep", lambda s: None)
+        module_time(monkeypatch, rc).sleep = lambda s: None
         p = _Probe()
         p.fail_with = _gateway_503()
         with pytest.raises(httpx.HTTPStatusError):
@@ -100,7 +101,7 @@ class TestIdempotentOptOut:
         """The opt-out must not weaken the default path (regression pin)."""
         import nexus.db.t2._refreshable_client as rc
 
-        monkeypatch.setattr(rc.time, "sleep", lambda s: None)
+        module_time(monkeypatch, rc).sleep = lambda s: None
         p = _Probe()
         p.fail_with = _gateway_503()
         with pytest.raises(httpx.HTTPStatusError):

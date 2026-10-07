@@ -36,6 +36,7 @@ from nexus.catalog.multi_batch_write import (
     write_document,
 )
 from nexus.errors import CombinedWriteEmbedTimeoutError, IndexRunVerifyRefused
+from tests._time_seam import module_time
 
 _COLLECTION = "docs__mbw-unit__bge-base-en-v15-768__v1"
 _DOC = "1.1.1"
@@ -187,7 +188,7 @@ def _writer(cat: FakeCat, **kw: Any) -> MultiBatchDocumentWriter:
 def _no_retry_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
     import nexus.retry as retry
 
-    monkeypatch.setattr(retry.time, "sleep", lambda s: None)
+    module_time(monkeypatch, retry).sleep = lambda s: None
 
 
 # ── one request ───────────────────────────────────────────────────────────────

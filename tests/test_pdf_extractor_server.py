@@ -13,6 +13,7 @@ from structlog.testing import capture_logs
 
 from nexus.config import MineruSkewInfo
 from nexus.pdf_extractor import PDFExtractor
+from tests._time_seam import module_time
 
 
 @pytest.fixture
@@ -740,7 +741,7 @@ class TestMineruServerRecheck:
         import nexus.pdf_extractor as pe
 
         clock = {"t": 1000.0}
-        monkeypatch.setattr(pe.time, "monotonic", lambda: clock["t"])
+        module_time(monkeypatch, pe).monotonic = lambda: clock["t"]
         # First verdict: nothing answers, no autostart -> subprocess path.
         with (
             patch("nexus.pdf_extractor.httpx.get", side_effect=httpx.ConnectError("refused")),
@@ -775,7 +776,7 @@ class TestMineruServerRecheck:
         import nexus.pdf_extractor as pe
 
         clock = {"t": 1000.0}
-        monkeypatch.setattr(pe.time, "monotonic", lambda: clock["t"])
+        module_time(monkeypatch, pe).monotonic = lambda: clock["t"]
         with (
             patch("nexus.config.get_mineru_server_url", return_value=None),
             patch("nexus.config.get_mineru_skew_info", return_value=_SKEW),
@@ -792,7 +793,7 @@ class TestMineruServerRecheck:
         import nexus.pdf_extractor as pe
 
         clock = {"t": 1000.0}
-        monkeypatch.setattr(pe.time, "monotonic", lambda: clock["t"])
+        module_time(monkeypatch, pe).monotonic = lambda: clock["t"]
         extractor._mineru_server_checked = True
         extractor._mineru_server_up = True
         with (

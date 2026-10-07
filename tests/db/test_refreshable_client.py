@@ -106,6 +106,7 @@ import httpx
 import pytest
 
 from nexus.daemon.service_registry import ServiceRegistry
+from tests._time_seam import module_time
 
 # ── In-process fake service state (module-level, reset per test) ──────────────
 
@@ -1041,7 +1042,7 @@ class TestEmbedWrite504BackoffFloorWriteMany:
             return {"ok": True}
 
         monkeypatch.setattr(store, "_request_once", fake_once)
-        monkeypatch.setattr(mod.time, "sleep", lambda s: sleeps.append(s))
+        module_time(monkeypatch, mod).sleep = lambda s: sleeps.append(s)
         result = store._once_with_gateway_retry(
             "POST", "/v1/catalog/manifest/write_many",
             json={"docs": [], "collection": "docs__o__x__v1", "chunks": [{"chash": "a"}]},
@@ -1068,7 +1069,7 @@ class TestEmbedWrite504BackoffFloorWriteMany:
             return {"ok": True}
 
         monkeypatch.setattr(store, "_request_once", fake_once)
-        monkeypatch.setattr(mod.time, "sleep", lambda s: sleeps.append(s))
+        module_time(monkeypatch, mod).sleep = lambda s: sleeps.append(s)
         result = store._once_with_gateway_retry(
             "POST", "/v1/catalog/manifest/write_many",
             json={"docs": [], "collection": "docs__o__x__v1"},
@@ -1094,7 +1095,7 @@ class TestEmbedWrite504BackoffFloorWriteMany:
             return {"ok": True}
 
         monkeypatch.setattr(store, "_request_once", fake_once)
-        monkeypatch.setattr(mod.time, "sleep", lambda s: sleeps.append(s))
+        module_time(monkeypatch, mod).sleep = lambda s: sleeps.append(s)
         result = store._once_with_gateway_retry(
             "POST", "/v1/catalog/manifest/write_many",
             json={"docs": [], "collection": "docs__o__x__v1", "chunks": [{"chash": "a"}]},
@@ -1120,7 +1121,7 @@ class TestEmbedWrite504BackoffFloorWriteMany:
             return {"ok": True}
 
         monkeypatch.setattr(store, "_request_once", fake_once)
-        monkeypatch.setattr(mod.time, "sleep", lambda s: sleeps.append(s))
+        module_time(monkeypatch, mod).sleep = lambda s: sleeps.append(s)
         result = store._once_with_gateway_retry(
             "POST", "/v1/memory/put", json={"chunks": [{"chash": "a"}]},
         )
@@ -1144,7 +1145,7 @@ class TestEmbedWrite504BackoffFloorWriteMany:
             return {"ok": True}
 
         monkeypatch.setattr(store, "_request_once", fake_once)
-        monkeypatch.setattr(mod.time, "sleep", lambda s: None)
+        module_time(monkeypatch, mod).sleep = lambda s: None
         with capture_logs() as logs:
             store._once_with_gateway_retry(
                 "POST", "/v1/catalog/manifest/write_many",
@@ -1170,7 +1171,7 @@ class TestEmbedWrite504BackoffFloorWriteMany:
             raise self._http_error(504)
 
         monkeypatch.setattr(store, "_request_once", fake_once)
-        monkeypatch.setattr(mod.time, "sleep", lambda s: None)
+        module_time(monkeypatch, mod).sleep = lambda s: None
         with pytest.raises(httpx.HTTPStatusError):
             store._once_with_gateway_retry(
                 "POST", "/v1/catalog/manifest/write_many",

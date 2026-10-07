@@ -22,6 +22,7 @@ from click.testing import CliRunner
 
 import nexus.catalog.recovery_bundle as rb
 from nexus.catalog.recovery_bundle import ExportSummary, import_bundle, write_bundle
+from tests._time_seam import module_time
 
 _RECORDED = "knowledge__z0o2p18__bge-base-en-v15-768__v1"
 
@@ -76,7 +77,7 @@ def vec(t2_service_env):
 def _no_retry_sleeps(monkeypatch):
     from nexus.rate_brake import reset_brake
 
-    monkeypatch.setattr("nexus.retry.time.sleep", lambda seconds: None)
+    module_time(monkeypatch, "nexus.retry").sleep = lambda seconds: None
     reset_brake()
     yield
     reset_brake()

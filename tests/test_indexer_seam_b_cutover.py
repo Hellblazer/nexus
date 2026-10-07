@@ -16,6 +16,7 @@ from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 
 import pytest
+from tests._time_seam import module_time
 
 
 # ── Fixtures and helpers ─────────────────────────────────────────────────────
@@ -404,7 +405,7 @@ def test_run_index_batch_flush_retries_transient_failure_then_succeeds(tmp_path,
     # DELAYS[0]) — determinism/speed, not behavior: _manifest_write_with_
     # retry's control flow (attempt-then-retry-then-succeed) is what this
     # test asserts, not wall-clock timing.
-    monkeypatch.setattr("nexus.retry.time.sleep", lambda *_a, **_kw: None)
+    module_time(monkeypatch, "nexus.retry").sleep = lambda *_a, **_kw: None
 
     db = MagicMock(spec=HttpVectorClient)
     catalog_writer = MagicMock()

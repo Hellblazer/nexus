@@ -23,6 +23,7 @@ import pytest
 from nexus.catalog.note_write import NoteWriteError, put_note, write_note
 from nexus.catalog.store_hook import ManifestVerifyUncertainError, note_content_hash, note_manifest_metadata
 from nexus.errors import CombinedWriteEmbedTimeoutError
+from tests._time_seam import module_time
 
 _COLLECTION = "knowledge__z0o2p12-note__bge-base-en-v15-768__v1"
 _OTHER = "knowledge__z0o2p12-other__bge-base-en-v15-768__v1"
@@ -69,7 +70,7 @@ def _no_retry_sleeps(monkeypatch):
     across tests; neither is under test here, so neither may cost real time or leak."""
     from nexus.rate_brake import reset_brake
 
-    monkeypatch.setattr("nexus.retry.time.sleep", lambda seconds: None)
+    module_time(monkeypatch, "nexus.retry").sleep = lambda seconds: None
     reset_brake()
     yield
     reset_brake()

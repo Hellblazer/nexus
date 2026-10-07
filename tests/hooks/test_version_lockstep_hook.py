@@ -30,6 +30,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from tests._time_seam import module_time
 
 SCRIPT = (
     Path(__file__).resolve().parents[2]
@@ -798,7 +799,7 @@ class TestRefDriftGitBudget:
             return "c" * 40  # a resolved, drifted sha
 
         self._wire_two_plugins(mod, monkeypatch, fake_resolve)
-        monkeypatch.setattr(mod.time, "monotonic", _clock([0.0, 0.0, 3.0]))
+        module_time(monkeypatch, mod).monotonic = _clock([0.0, 0.0, 3.0])
 
         drift = mod.detect_ref_drift()
 
@@ -811,7 +812,7 @@ class TestRefDriftGitBudget:
         self, mod, monkeypatch, capsys
     ) -> None:
         self._wire_two_plugins(mod, monkeypatch, lambda *a, **k: "c" * 40)
-        monkeypatch.setattr(mod.time, "monotonic", _clock([0.0, 0.0, 3.0]))
+        module_time(monkeypatch, mod).monotonic = _clock([0.0, 0.0, 3.0])
         monkeypatch.setattr(mod, "DEBUG", True)
 
         drift = mod.detect_ref_drift()  # must not raise
@@ -834,7 +835,7 @@ class TestRefDriftGitBudget:
             return None
 
         self._wire_two_plugins(mod, monkeypatch, fake_resolve)
-        monkeypatch.setattr(mod.time, "monotonic", _clock([0.0, 0.5, 1.5]))
+        module_time(monkeypatch, mod).monotonic = _clock([0.0, 0.5, 1.5])
 
         mod.detect_ref_drift()
 

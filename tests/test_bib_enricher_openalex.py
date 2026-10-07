@@ -17,6 +17,8 @@ from unittest.mock import MagicMock, patch
 import httpx
 import pytest
 
+from tests._time_seam import patch_time
+
 
 def _make_response(status_code: int = 200, json_data: dict | None = None) -> MagicMock:
     resp = MagicMock(spec=httpx.Response)
@@ -130,7 +132,7 @@ def test_enrich_429_retries_with_backoff():
     mock_resp = _make_response(429, {"message": "rate limited"})
     with (
         patch("httpx.get", return_value=mock_resp),
-        patch("time.sleep", side_effect=sleep_calls.append),
+        patch_time("nexus.bib_enricher_openalex", "sleep", side_effect=sleep_calls.append),
     ):
         result = enrich("Some Paper")
 

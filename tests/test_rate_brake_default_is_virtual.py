@@ -28,6 +28,7 @@ import time
 import pytest
 
 from nexus.rate_brake import RateLimitBrake
+from tests._time_seam import module_time
 
 #: Comfortably above CPU noise on a loaded box, far below the delays tripped.
 _REAL_SECONDS_BUDGET = 1.0
@@ -45,11 +46,12 @@ def test_the_production_defaults_are_late_bound() -> None:
 
 
 def test_the_default_brake_sleeps_through_the_patched_time_module(monkeypatch) -> None:
-    """The seam the slow tests patch: ``monkeypatch.setattr("nexus.retry.time.sleep", ...)``.
+    """The seam the slow tests patch: ``module_time(monkeypatch, "nexus.retry").sleep``,
+    whose proxy ``tests/_time_seam.py`` shares with ``nexus.rate_brake`` (nexus-hkafl).
     A no-op there must make the brake's wait cost no real time, and the wait must
     still be REQUESTED (the brake asked to sleep ~3 s, it was not skipped)."""
     slept: list[float] = []
-    monkeypatch.setattr("nexus.retry.time.sleep", lambda seconds: slept.append(seconds))
+    module_time(monkeypatch, "nexus.retry").sleep = lambda seconds: slept.append(seconds)
     brake = RateLimitBrake()
     brake.trip(3.0, source="test")
 
@@ -66,12 +68,12 @@ def test_the_default_brake_reads_the_patched_monotonic_clock(monkeypatch) -> Non
     """The clock half: with ``time.monotonic`` and ``time.sleep`` replaced by a
     fake pair, the default brake runs entirely on them."""
     now = [1000.0]
-    monkeypatch.setattr(time, "monotonic", lambda: now[0])
+    module_time(monkeypatch, "nexus.rate_brake").monotonic = lambda: now[0]
 
     def fake_sleep(seconds: float) -> None:
         now[0] += seconds
 
-    monkeypatch.setattr(time, "sleep", fake_sleep)
+    module_time(monkeypatch, "nexus.rate_brake").sleep = fake_sleep
     brake = RateLimitBrake(jitter=lambda: 0.0)
     assert brake.trip(5.0, source="test") == 5.0
     assert brake.wait() == pytest.approx(5.0)
@@ -81,7 +83,7 @@ def test_the_default_brake_reads_the_patched_monotonic_clock(monkeypatch) -> Non
 def test_an_escalating_trip_sequence_costs_no_real_time(monkeypatch) -> None:
     """The widened-429 schedule that took 203 s: eight consecutive trips with no
     Retry-After escalate 2, 4, 8 ... 60 seconds."""
-    monkeypatch.setattr("nexus.retry.time.sleep", lambda _s: None)
+    module_time(monkeypatch, "nexus.retry").sleep = lambda _s: None
     brake = RateLimitBrake()
     started = time.monotonic()
     total_delay = 0.0
@@ -99,8 +101,8 @@ def test_a_brake_given_its_own_clock_ignores_the_time_module(monkeypatch) -> Non
     def boom(*_a, **_k):
         raise AssertionError("an explicit clock/sleep must not fall back to time.*")
 
-    monkeypatch.setattr(time, "sleep", boom)
-    monkeypatch.setattr(time, "monotonic", boom)
+    module_time(monkeypatch, "nexus.rate_brake").sleep = boom
+    module_time(monkeypatch, "nexus.rate_brake").monotonic = boom
 
     now = [100.0]
     slept: list[float] = []

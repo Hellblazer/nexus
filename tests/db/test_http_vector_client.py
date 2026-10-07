@@ -13,6 +13,7 @@ from nexus.db.http_vector_client import (
     is_vector_service_mode,
     reset_http_vector_client_for_tests,
 )
+from tests._time_seam import module_time
 
 
 @pytest.fixture(autouse=True)
@@ -2436,7 +2437,7 @@ class TestGatewayTransientRetry:
             return {"ok": True}
 
         monkeypatch.setattr(hv, "_request_once", fake_once)
-        monkeypatch.setattr(hv.time, "sleep", lambda s: sleeps.append(s))
+        module_time(monkeypatch, hv).sleep = lambda s: sleeps.append(s)
         result = hv._request("POST", "/v1/vectors/upsert-chunks",
                              tenant="default", timeout=600, body={})
         assert result == {"ok": True}
@@ -2470,7 +2471,7 @@ class TestGatewayTransientRetry:
             )
 
         monkeypatch.setattr(hv, "_request_once", aborted)
-        monkeypatch.setattr(hv.time, "sleep", lambda s: None)
+        module_time(monkeypatch, hv).sleep = lambda s: None
         with pytest.raises(urllib.error.HTTPError):
             hv._request("POST", "/v1/vectors/upsert-chunks",
                         tenant="default", timeout=600, body={})
@@ -2491,7 +2492,7 @@ class TestGatewayTransientRetry:
             )
 
         monkeypatch.setattr(hv, "_request_once", refused)
-        monkeypatch.setattr(hv.time, "sleep", lambda s: None)
+        module_time(monkeypatch, hv).sleep = lambda s: None
         with pytest.raises(urllib.error.HTTPError):
             hv._request("POST", "/v1/vectors/upsert-chunks",
                         tenant="default", timeout=600, body={})
@@ -2503,7 +2504,7 @@ class TestGatewayTransientRetry:
         calls: list[int] = []
         monkeypatch.setattr(hv, "_request_once",
                             lambda *a, **k: (calls.append(1), (_ for _ in ()).throw(self._http_error(504)))[1])
-        monkeypatch.setattr(hv.time, "sleep", lambda s: None)
+        module_time(monkeypatch, hv).sleep = lambda s: None
         with pytest.raises(urllib.error.HTTPError):
             hv._request("POST", "/v1/vectors/upsert-chunks",
                         tenant="default", timeout=600, body={})
@@ -2518,7 +2519,7 @@ class TestGatewayTransientRetry:
         calls: list[int] = []
         monkeypatch.setattr(hv, "_request_once",
                             lambda *a, **k: (calls.append(1), (_ for _ in ()).throw(self._http_error(code)))[1])
-        monkeypatch.setattr(hv.time, "sleep", lambda s: pytest.fail("must not sleep"))
+        module_time(monkeypatch, hv).sleep = lambda s: pytest.fail("must not sleep")
         with pytest.raises(urllib.error.HTTPError):
             hv._request("POST", "/v1/vectors/search",
                         tenant="default", timeout=120, body={})
@@ -2562,7 +2563,7 @@ class TestNonIdempotentSweepNeverAutoRetries:
             hv, "_request_once",
             lambda *a, **k: (calls.append(1), (_ for _ in ()).throw(self._http_error(code)))[1],
         )
-        monkeypatch.setattr(hv.time, "sleep", lambda s: pytest.fail("must not sleep/retry"))
+        module_time(monkeypatch, hv).sleep = lambda s: pytest.fail("must not sleep/retry")
         with pytest.raises(urllib.error.HTTPError):
             hv._request("POST", path, tenant="default", timeout=600, body={})
         assert len(calls) == 1, "must attempt exactly once -- no auto-retry"
@@ -2582,7 +2583,7 @@ class TestNonIdempotentSweepNeverAutoRetries:
             return {"ok": True}
 
         monkeypatch.setattr(hv, "_request_once", fake_once)
-        monkeypatch.setattr(hv.time, "sleep", lambda s: sleeps.append(s))
+        module_time(monkeypatch, hv).sleep = lambda s: sleeps.append(s)
         result = hv._request(
             "POST", "/v1/vectors/upsert-chunks", tenant="default", timeout=600, body={},
         )
@@ -2629,7 +2630,7 @@ class TestEmbedWrite504BackoffFloor:
             return {"ok": True}
 
         monkeypatch.setattr(hv, "_request_once", fake_once)
-        monkeypatch.setattr(hv.time, "sleep", lambda s: sleeps.append(s))
+        module_time(monkeypatch, hv).sleep = lambda s: sleeps.append(s)
         result = hv._request("POST", path, tenant="default", timeout=600, body={})
         assert result == {"ok": True}
         assert len(calls) == 3
@@ -2650,7 +2651,7 @@ class TestEmbedWrite504BackoffFloor:
             return {"ok": True}
 
         monkeypatch.setattr(hv, "_request_once", fake_once)
-        monkeypatch.setattr(hv.time, "sleep", lambda s: sleeps.append(s))
+        module_time(monkeypatch, hv).sleep = lambda s: sleeps.append(s)
         result = hv._request("POST", "/v1/vectors/search",
                              tenant="default", timeout=120, body={})
         assert result == {"ok": True}
@@ -2669,7 +2670,7 @@ class TestEmbedWrite504BackoffFloor:
             return {"ok": True}
 
         monkeypatch.setattr(hv, "_request_once", fake_once)
-        monkeypatch.setattr(hv.time, "sleep", lambda s: sleeps.append(s))
+        module_time(monkeypatch, hv).sleep = lambda s: sleeps.append(s)
         result = hv._request("POST", "/v1/vectors/upsert-chunks",
                              tenant="default", timeout=600, body={})
         assert result == {"ok": True}
@@ -2688,7 +2689,7 @@ class TestEmbedWrite504BackoffFloor:
             return {"ok": True}
 
         monkeypatch.setattr(hv, "_request_once", fake_once)
-        monkeypatch.setattr(hv.time, "sleep", lambda s: None)
+        module_time(monkeypatch, hv).sleep = lambda s: None
         with capture_logs() as logs:
             hv._request("POST", "/v1/vectors/upsert-chunks",
                         tenant="default", timeout=600, body={})
@@ -2705,7 +2706,7 @@ class TestEmbedWrite504BackoffFloor:
         calls: list[int] = []
         monkeypatch.setattr(hv, "_request_once",
                             lambda *a, **k: (calls.append(1), (_ for _ in ()).throw(self._http_error(504)))[1])
-        monkeypatch.setattr(hv.time, "sleep", lambda s: None)
+        module_time(monkeypatch, hv).sleep = lambda s: None
         with pytest.raises(urllib.error.HTTPError):
             hv._request("POST", "/v1/vectors/store-put",
                         tenant="default", timeout=120, body={})

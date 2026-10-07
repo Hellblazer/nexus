@@ -51,6 +51,7 @@ import pytest
 
 from tests._engine_substrate import engine_argv, ensure_engine
 from tests.db._service_fixture import jvm_error_file_arg
+from tests._time_seam import module_time
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _JAR = _REPO_ROOT / "service" / "target" / "nexus-service-1.0-SNAPSHOT.jar"
@@ -475,7 +476,7 @@ def test_wait_ready_returns_false_when_the_engine_exits_first(
 ) -> None:
     log = tmp_path / "e.log"
     log.write_text("booting\n")
-    monkeypatch.setattr(time, "sleep", lambda _s: None)
+    module_time(monkeypatch, sys.modules[__name__]).sleep = lambda _s: None
     assert _wait_ready(_FakeProc(1, polls=[None, None, 1]), log) is False
 
 

@@ -36,6 +36,7 @@ from nexus.daemon.aspect_worker_daemon import AspectWorkerDaemon, ensure_aspect_
 from nexus.daemon.service_registry import DEFAULT_HEARTBEAT_INTERVAL, request_graceful_stop
 from nexus.upgrade_finish import SkewReport, StaleProcess
 from nexus.util import win_job
+from tests._time_seam import patch_time
 
 # ── spawn flags ──────────────────────────────────────────────────────────────────
 
@@ -348,7 +349,7 @@ def test_posix_restart_still_sends_sigterm() -> None:
             patch.object(uf, "process_command", return_value=_COMMAND), \
             patch.object(uf, "_process_markers", return_value=("/uv/tools/conexus",)), \
             patch.object(uf, "_pid_alive", return_value=False), \
-            patch.object(uf.time, "sleep"), \
+            patch_time(uf, "sleep"), \
             patch("nexus.daemon.aspect_worker_daemon.ensure_aspect_worker_daemon", return_value=True):
         uf.restart_stale(_report())
     assert calls[0] == (4321, signal.SIGTERM)

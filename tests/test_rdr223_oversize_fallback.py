@@ -21,6 +21,7 @@ from nexus.errors import BatchWriteFailedError, CombinedWriteEmbedTimeoutError, 
 from nexus.hook_registry import HookRegistry
 from nexus.index_context import IndexContext
 from nexus.oversize_write import OversizeWriteDeferred
+from tests._time_seam import module_time
 
 _DOC = "1.9.42"
 _MODEL = "voyage-context-3"
@@ -104,7 +105,7 @@ def _install(monkeypatch, rec: _RecordingCat) -> _RecordingCat:
     monkeypatch.setattr(mi, "get_catalog_writer", lambda *a, **k: rec)
     monkeypatch.setattr(di, "_fence_begin", lambda *a, **k: None)
     monkeypatch.setattr(di, "_fence_fail", lambda *a, **k: None)
-    monkeypatch.setattr("nexus.retry.time.sleep", lambda *_a, **_k: None)
+    module_time(monkeypatch, "nexus.retry").sleep = lambda *_a, **_k: None
     return rec
 
 

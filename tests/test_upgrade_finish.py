@@ -33,6 +33,7 @@ from nexus.upgrade_finish import (
     unload_stale_t2_launchagent,
     unload_stale_service_launchagent,
 )
+from tests._time_seam import module_time, patch_time
 
 _REQUIRED_STR = ".".join(str(p) for p in REQUIRED_ENGINE_VERSION)
 _PINNED_TAG = "engine-service-v" + _REQUIRED_STR
@@ -313,7 +314,7 @@ class TestRestartStale:
         # its own seam (the transport has its own tests).
         with _pin_tool_root(), \
                 patch("nexus.upgrade_finish.os.kill", side_effect=_kill), \
-                patch("nexus.upgrade_finish.time.sleep"), \
+                patch_time("nexus.upgrade_finish", "sleep"), \
                 patch("nexus.upgrade_finish.process_command",
                       return_value=probe.stdout.strip()), \
                 patch("nexus.upgrade_finish.run_bounded", return_value=probe):
@@ -2003,7 +2004,7 @@ class TestConvergeEngineLiveVerification:
                     "nexus.upgrade_finish.run_bounded",
                     return_value=MagicMock(returncode=0),
                 ), \
-                patch("nexus.upgrade_finish.time.sleep") as slept, \
+                patch_time("nexus.upgrade_finish", "sleep") as slept, \
                 patch(
                     "nexus.upgrade_finish._running_engine", side_effect=probes,
                 ) as probe:
@@ -2035,7 +2036,7 @@ class TestConvergeEngineLiveVerification:
                     "nexus.upgrade_finish.run_bounded",
                     return_value=MagicMock(returncode=0),
                 ), \
-                patch("nexus.upgrade_finish.time.sleep"), \
+                patch_time("nexus.upgrade_finish", "sleep"), \
                 patch(
                     "nexus.upgrade_finish._running_engine",
                     return_value=self._running(
@@ -2457,7 +2458,7 @@ class TestAutostartBackupCollisionProofAndPruning:
         # First two candidate timestamps collide with the existing backup;
         # the third is free.
         calls = iter([1000, 1000, 2000])
-        monkeypatch.setattr(uf.time, "time_ns", lambda: next(calls))
+        module_time(monkeypatch, uf).time_ns = lambda: next(calls)
 
         result = uf._write_collision_proof_backup(dest, "SECOND backup content")
 
@@ -2471,7 +2472,7 @@ class TestAutostartBackupCollisionProofAndPruning:
         from nexus import upgrade_finish as uf
 
         dest = tmp_path / "unit.plist"
-        monkeypatch.setattr(uf.time, "time_ns", lambda: 42)
+        module_time(monkeypatch, uf).time_ns = lambda: 42
         dest.with_name(f"{dest.name}.pre-convergence.42").write_text("blocker")
 
         with pytest.raises(OSError):
@@ -2502,7 +2503,7 @@ class TestAutostartBackupCollisionProofAndPruning:
         dest = tmp_path / "unit.plist"
         n = uf._AUTOSTART_BACKUP_KEEP_COUNT + 2
         counter = iter(range(1000, 1000 + n))
-        monkeypatch.setattr(uf.time, "time_ns", lambda: next(counter))
+        module_time(monkeypatch, uf).time_ns = lambda: next(counter)
 
         for i in range(n):
             uf._write_collision_proof_backup(dest, f"content {i}")
@@ -2810,7 +2811,7 @@ class TestConvergeServiceAutostartUnit:
              patch("nexus.upgrade_finish.run_bounded", return_value=stop_result), \
              patch("nexus.upgrade_finish._running_engine",
                    return_value=_RunningEngine(up=False, version=None, reason="no lease")), \
-             patch("nexus.upgrade_finish.time.sleep"):
+             patch_time("nexus.upgrade_finish", "sleep"):
             actions = converge_service_autostart_unit(tmp_path)
         assert len(actions) == 1
         assert "NEEDS HUMAN" in actions[0]

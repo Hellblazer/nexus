@@ -27,6 +27,7 @@ from unittest.mock import MagicMock
 import httpx
 
 from nexus import mcp_infra
+from tests._time_seam import module_time
 
 
 def _http_error(status: int) -> httpx.HTTPStatusError:
@@ -283,7 +284,7 @@ def test_hook_recovers_from_a_split_batch_with_no_loss(monkeypatch):
     monkeypatch.setattr(mcp_infra, "t2_index_write", _capture_write)
     # Avoid a real wall-clock sleep for the ONE backoff this batch triggers
     # (32 -> two 16s), without touching the retry/split algorithm itself.
-    monkeypatch.setattr(mcp_infra.time, "sleep", lambda _seconds: None)
+    module_time(monkeypatch, mcp_infra).sleep = lambda _seconds: None
     doc_ids = [f"c{i}" for i in range(32)]
     mcp_infra.taxonomy_assign_batch_hook(
         doc_ids, "knowledge__tw__model-ctx__v1", ["x"] * 32, [[0.1]] * 32, None,

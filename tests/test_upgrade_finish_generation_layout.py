@@ -41,6 +41,7 @@ from pathlib import Path
 import pytest
 
 from nexus import upgrade_finish
+from tests._time_seam import module_time
 
 
 def _fake_generation(tools: Path, stamp: str) -> Path:
@@ -402,7 +403,7 @@ def test_restart_stale_actually_signals_a_generation_aspect_worker(
         "nexus.upgrade_finish.process_command", lambda pid: command
     )
     monkeypatch.setattr("nexus.upgrade_finish.os.kill", _kill)
-    monkeypatch.setattr("nexus.upgrade_finish.time.sleep", lambda _s: None)
+    module_time(monkeypatch, "nexus.upgrade_finish").sleep = lambda _s: None
 
     actions = upgrade_finish.restart_stale(report)
 

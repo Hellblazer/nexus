@@ -25,6 +25,7 @@ from nexus.mcp_infra import (
     reset_manifest_write_failures,
 )
 from nexus.retry import _is_connectivity_error
+from tests._time_seam import module_time, patch_time
 
 # RDR-191 (Hal ruling 2026-08-12): every manifest writer call in this file
 # now requires an explicit collection. A single shared constant keeps the
@@ -287,7 +288,7 @@ class TestWriteManifestManyReachesGatewayRetryFloor:
             return {"docs": 1, "rows": 1, "failed_doc_ids": [], "chunks_written": 1}
 
         monkeypatch.setattr(c, "_request_once", fake_request_once, raising=False)
-        monkeypatch.setattr(mod.time, "sleep", lambda s: sleeps.append(s))
+        module_time(monkeypatch, mod).sleep = lambda s: sleeps.append(s)
         # write_manifest_many registers the collection on this client's own
         # endpoint first (nexus-dvgsf), through a separate writer whose
         # transport this test does not patch; it would dial fake-svc.
@@ -845,21 +846,21 @@ class TestManifestWriteFailureSurfacing:
 
     def test_transient_connect_error_recovers_without_recording_failure(self) -> None:
         cat = _FlakyThenOkCat(fail_times=2)
-        with patch("nexus.retry.time.sleep"):
+        with patch_time("nexus.retry", "sleep"):
             _manifest_write_loop(cat, _by_doc(1), _COLLECTION, reader=cat)
         assert cat.replace_calls == ["1.9.0"]
         assert get_manifest_write_failures() == []
 
     def test_persistent_per_doc_failure_is_swallowed_and_recorded(self) -> None:
         cat = _AlwaysDownCat()
-        with patch("nexus.retry.time.sleep"):
+        with patch_time("nexus.retry", "sleep"):
             # Contract: must never raise out of the hook.
             _manifest_write_loop(cat, _by_doc(2), _COLLECTION, reader=cat)
         assert sorted(get_manifest_write_failures()) == ["1.9.0", "1.9.1"]
 
     def test_persistent_write_many_failure_is_swallowed_and_recorded(self) -> None:
         cat = _AlwaysDownManyCat()
-        with patch("nexus.retry.time.sleep"):
+        with patch_time("nexus.retry", "sleep"):
             _manifest_write_loop(cat, _by_doc(2), _COLLECTION, reader=cat)
         assert sorted(get_manifest_write_failures()) == ["1.9.0", "1.9.1"]
         # Not re-attempted per-doc after the batch path exhausted retries.
@@ -867,7 +868,7 @@ class TestManifestWriteFailureSurfacing:
 
     def test_reset_clears_prior_run_failures(self) -> None:
         cat = _AlwaysDownCat()
-        with patch("nexus.retry.time.sleep"):
+        with patch_time("nexus.retry", "sleep"):
             _manifest_write_loop(cat, _by_doc(1), _COLLECTION, reader=cat)
         assert get_manifest_write_failures() == ["1.9.0"]
         reset_manifest_write_failures()
@@ -911,7 +912,7 @@ class TestManifestWriteFailureSurfacing:
     def test_write_many_exception_records_each_docs_own_chashes(self) -> None:
         cat = _AlwaysDownManyCat()
         by_doc = _by_doc(2)
-        with patch("nexus.retry.time.sleep"):
+        with patch_time("nexus.retry", "sleep"):
             _manifest_write_loop(cat, by_doc, _COLLECTION, reader=cat)
         assert sorted(get_manifest_write_failures()) == ["1.9.0", "1.9.1"]
         expected = get_manifest_write_failure_chashes()
@@ -929,7 +930,7 @@ class TestManifestWriteFailureSurfacing:
                 (1, {"chunk_text_hash": "", "chunk_index": 1}),
             ],
         }
-        with patch("nexus.retry.time.sleep"):
+        with patch_time("nexus.retry", "sleep"):
             _manifest_write_loop(cat, by_doc, _COLLECTION, reader=cat)
         assert get_manifest_write_failures() == ["1.9.0"]
         assert get_manifest_write_failure_chashes()["1.9.0"] is None
@@ -937,7 +938,7 @@ class TestManifestWriteFailureSurfacing:
     def test_persistent_per_doc_failure_records_each_docs_own_chashes(self) -> None:
         cat = _AlwaysDownCat()
         by_doc = _by_doc(2)
-        with patch("nexus.retry.time.sleep"):
+        with patch_time("nexus.retry", "sleep"):
             _manifest_write_loop(cat, by_doc, _COLLECTION, reader=cat)
         expected = get_manifest_write_failure_chashes()
         for doc_id in ("1.9.0", "1.9.1"):
@@ -953,7 +954,7 @@ class TestManifestWriteFailureSurfacing:
                 (1, {"chunk_text_hash": "", "chunk_index": 1}),
             ],
         }
-        with patch("nexus.retry.time.sleep"):
+        with patch_time("nexus.retry", "sleep"):
             _manifest_write_loop(cat, by_doc, _COLLECTION, reader=cat)
         assert get_manifest_write_failures() == ["1.9.0"]
         assert get_manifest_write_failure_chashes()["1.9.0"] is None

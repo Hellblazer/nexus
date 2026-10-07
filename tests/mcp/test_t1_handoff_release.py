@@ -33,6 +33,7 @@ from nexus.daemon.t1_handoff import (
     read_handoff_marker,
     write_handoff_marker,
 )
+from tests._time_seam import module_time
 
 _CLAUDE_PID = 4242
 _MCP_PID = 4300
@@ -600,7 +601,7 @@ async def test_reinstated_marker_is_processed_by_a_later_tick(monkeypatch) -> No
         "nexus.session.find_immediate_claude_pid", lambda start_pid=None: _CLAUDE_PID,
     )
     clock = _FakeMonotonic()
-    monkeypatch.setattr(core.time, "monotonic", clock)
+    module_time(monkeypatch, core, "nexus.db.t1").monotonic = clock
     config_dir = nexus_config_dir()
     write_handoff_marker(
         _MCP_PID, new_session_id="new-sess", claude_pid=_CLAUDE_PID,
@@ -738,7 +739,7 @@ async def test_second_consecutive_failure_defers_the_next_mint_attempt(monkeypat
         "nexus.session.find_immediate_claude_pid", lambda start_pid=None: _CLAUDE_PID,
     )
     clock = _FakeMonotonic()
-    monkeypatch.setattr(core.time, "monotonic", clock)
+    module_time(monkeypatch, core, "nexus.db.t1").monotonic = clock
 
     mint_calls: list[str] = []
 
@@ -787,7 +788,7 @@ async def test_401_failure_starts_one_rung_up_and_reaches_the_cap(monkeypatch) -
         "nexus.session.find_immediate_claude_pid", lambda start_pid=None: _CLAUDE_PID,
     )
     clock = _FakeMonotonic()
-    monkeypatch.setattr(core.time, "monotonic", clock)
+    module_time(monkeypatch, core, "nexus.db.t1").monotonic = clock
     monkeypatch.setattr(t1_mod, "mint_t1_session_token", _unauthorized_boom)
 
     config_dir = nexus_config_dir()
@@ -824,7 +825,7 @@ async def test_backoff_reaching_the_cap_logs_giving_up_exactly_once(monkeypatch)
         "nexus.session.find_immediate_claude_pid", lambda start_pid=None: _CLAUDE_PID,
     )
     clock = _FakeMonotonic()
-    monkeypatch.setattr(core.time, "monotonic", clock)
+    module_time(monkeypatch, core, "nexus.db.t1").monotonic = clock
     monkeypatch.setattr(t1_mod, "mint_t1_session_token", _transient_boom)
 
     config_dir = nexus_config_dir()
@@ -866,7 +867,7 @@ async def test_successful_release_resets_the_failure_streak(monkeypatch) -> None
         "nexus.session.find_immediate_claude_pid", lambda start_pid=None: _CLAUDE_PID,
     )
     clock = _FakeMonotonic()
-    monkeypatch.setattr(core.time, "monotonic", clock)
+    module_time(monkeypatch, core, "nexus.db.t1").monotonic = clock
 
     config_dir = nexus_config_dir()
     write_handoff_marker(
@@ -900,7 +901,7 @@ async def test_a_different_session_id_is_not_deferred_by_a_prior_streak(monkeypa
         "nexus.session.find_immediate_claude_pid", lambda start_pid=None: _CLAUDE_PID,
     )
     clock = _FakeMonotonic()
-    monkeypatch.setattr(core.time, "monotonic", clock)
+    module_time(monkeypatch, core, "nexus.db.t1").monotonic = clock
 
     config_dir = nexus_config_dir()
     write_handoff_marker(

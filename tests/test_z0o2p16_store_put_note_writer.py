@@ -31,6 +31,7 @@ from nexus.catalog.note_write import (
 )
 from nexus.catalog.store_hook import note_pieces
 from nexus.cli import main
+from tests._time_seam import module_time
 
 _SUBJECT = "z0o2p16-note"
 _FRESH_SUBJECT = "z0o2p16-fresh"
@@ -177,7 +178,7 @@ def wire(monkeypatch) -> _Wire:
 def _no_retry_sleeps(monkeypatch):
     from nexus.rate_brake import reset_brake
 
-    monkeypatch.setattr("nexus.retry.time.sleep", lambda seconds: None)
+    module_time(monkeypatch, "nexus.retry").sleep = lambda seconds: None
     reset_brake()
     yield
     reset_brake()

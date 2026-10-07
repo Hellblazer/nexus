@@ -31,6 +31,7 @@ from nexus.retry import (
     _is_connectivity_error,
     _manifest_write_with_retry,
 )
+from tests._time_seam import patch_time
 
 
 class _FakeClock:
@@ -109,7 +110,7 @@ def test_succeeds_after_transient_connect_errors() -> None:
             raise httpx.ConnectError("transient connect failure")
         return "ok"
 
-    with patch("nexus.retry.time.sleep"):
+    with patch_time("nexus.retry", "sleep"):
         result = _manifest_write_with_retry(flaky_fn)
     assert result == "ok"
     assert call_count == 3
@@ -123,7 +124,7 @@ def test_raises_immediately_on_non_connection_error() -> None:
         call_count += 1
         raise ValueError("bad payload")
 
-    with patch("nexus.retry.time.sleep") as mock_sleep:
+    with patch_time("nexus.retry", "sleep") as mock_sleep:
         with pytest.raises(ValueError):
             _manifest_write_with_retry(failing_fn)
     assert call_count == 1
@@ -138,7 +139,7 @@ def test_raises_after_exhausting_retries_on_persistent_connection_error() -> Non
         call_count += 1
         raise httpx.ConnectError("connection refused")
 
-    with patch("nexus.retry.time.sleep") as mock_sleep:
+    with patch_time("nexus.retry", "sleep") as mock_sleep:
         with pytest.raises(httpx.ConnectError):
             _manifest_write_with_retry(always_down)
     # 1 initial + 3 retries = 4 attempts total; 3 sleeps between them.
@@ -156,7 +157,7 @@ def test_passes_through_args_and_kwargs() -> None:
     def fn(a: int, *, b: int) -> int:
         return a + b
 
-    with patch("nexus.retry.time.sleep"):
+    with patch_time("nexus.retry", "sleep"):
         assert _manifest_write_with_retry(fn, 1, b=2) == 3
 
 
@@ -167,7 +168,7 @@ def test_400_status_error_still_raises_immediately() -> None:
     response = httpx.Response(400, request=request)
     err = httpx.HTTPStatusError("Bad Request", request=request, response=response)
     fn = MagicMock(side_effect=err)
-    with patch("nexus.retry.time.sleep") as mock_sleep, pytest.raises(httpx.HTTPStatusError):
+    with patch_time("nexus.retry", "sleep") as mock_sleep, pytest.raises(httpx.HTTPStatusError):
         _manifest_write_with_retry(fn)
     fn.assert_called_once()
     mock_sleep.assert_not_called()
@@ -197,7 +198,7 @@ def test_429_is_retried_and_trips_shared_brake(monkeypatch) -> None:
         return "ok"
 
     # base connectivity delay (0.5) < brake delay (4.0) -> floor wins.
-    with patch("nexus.retry.time.sleep") as mock_sleep:
+    with patch_time("nexus.retry", "sleep") as mock_sleep:
         assert _manifest_write_with_retry(flaky) == "ok"
     assert call_count == 2
     assert test_brake.trips == 1
@@ -210,7 +211,7 @@ def test_success_releases_brake() -> None:
     test_brake.wait.return_value = 0.0
     with patch.object(retry_mod, "get_brake", return_value=test_brake):
         fn = MagicMock(return_value="ok")
-        with patch("nexus.retry.time.sleep"):
+        with patch_time("nexus.retry", "sleep"):
             assert _manifest_write_with_retry(fn) == "ok"
     test_brake.wait.assert_called_once()
     test_brake.release.assert_called_once()
@@ -237,7 +238,7 @@ def test_connect_error_also_trips_brake_with_escalating_default(monkeypatch) -> 
             raise httpx.ConnectError("transient connect failure")
         return "ok"
 
-    with patch("nexus.retry.time.sleep") as mock_sleep:
+    with patch_time("nexus.retry", "sleep") as mock_sleep:
         assert _manifest_write_with_retry(flaky) == "ok"
     test_brake.trip.assert_called_once_with(None, source="manifest")
     test_brake.release.assert_called_once()
@@ -271,7 +272,7 @@ def test_a_combined_write_deadline_503_widens_only_for_a_refusal(
         calls += 1
         raise httpx.HTTPStatusError("503", request=request, response=response)
 
-    with patch("nexus.retry.time.sleep"), pytest.raises(httpx.HTTPStatusError):
+    with patch_time("nexus.retry", "sleep"), pytest.raises(httpx.HTTPStatusError):
         _manifest_write_with_retry(always_503)
     expected = retry_mod._RATE_LIMIT_MAX_ATTEMPTS if widened else len(retry_mod._MANIFEST_WRITE_RETRY_DELAYS) + 1
     assert calls == expected

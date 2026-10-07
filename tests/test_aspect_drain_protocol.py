@@ -35,6 +35,7 @@ import pytest
 from nexus.db.t2 import T2Database
 
 from tests._catalog_fixture_ops import register_real_doc_id
+from tests._time_seam import patch_time
 
 # hygiene-001-1 (nexus-tk070.p6a follow-on): aspect_extraction_queue.doc_id
 # now carries a REAL FK to catalog_documents(tenant_id, tumbler) via the
@@ -394,7 +395,7 @@ class TestDrain:
         # regression present, since the assertion cares about REAL
         # scheduler-delay-inflated seconds rather than whether the
         # short-circuit engaged.
-        with patch("time.sleep") as mock_sleep:
+        with patch_time("nexus.aspect_worker", "sleep") as mock_sleep:
             drain_worker(queue_path=queue_path, timeout=5.0, _locks_dir=locks_dir)
         mock_sleep.assert_not_called()
 
@@ -472,7 +473,7 @@ class TestDrain:
         # nexus-scc9t: see test_drain_on_empty_queue_is_noop -- a queue
         # with only terminal (failed) rows is_drained() immediately, so
         # the short-circuit fires and time.sleep is never called.
-        with patch("time.sleep") as mock_sleep:
+        with patch_time("nexus.aspect_worker", "sleep") as mock_sleep:
             drain_worker(queue_path=queue_path, timeout=5.0, _locks_dir=locks_dir)
         mock_sleep.assert_not_called()
 

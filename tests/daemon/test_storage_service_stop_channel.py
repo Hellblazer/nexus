@@ -40,6 +40,7 @@ from nexus.util.process_group import KILL_SIGNAL
 from tests.daemon._children import KILLED_RC as _KILLED_RC
 from tests.daemon._children import WIN as _WIN
 from tests.daemon._children import spawn_breakable
+from tests._time_seam import module_time
 
 CREATE_NEW_PROCESS_GROUP = 0x00000200
 
@@ -472,7 +473,7 @@ def test_the_supervise_loop_waits_in_ticks_no_longer_than_one_second_and_a_stop_
         if len(sleeps) > 6:
             raise AssertionError("the loop kept waiting after a stop was set")
 
-    monkeypatch.setattr(ssd.time, "sleep", sleep)
+    module_time(monkeypatch, ssd).sleep = sleep
     code = ssd._supervise_until_stopped(sup, stop, lambda: None)  # type: ignore[arg-type]
     assert code == 0 and sup.stopped
     assert len(sleeps) == 3, "the loop must end at the iteration after the stop"

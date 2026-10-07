@@ -90,6 +90,7 @@ from nexus.daemon.service_registry import (
 from nexus.util.process_group import KILL_SIGNAL
 from nexus.util.win_console import ConsoleBreakResult
 from nexus import session as _sess
+from tests._time_seam import patch_time
 
 # RDR-224 (nexus-f9bgu.19): this suite runs on native Windows too. The three
 # places it used to assume POSIX are named once here so each platform branch is
@@ -1316,7 +1317,7 @@ class TestTerminationSurvivorVerdict:
             assert pid_running(pid) is False, (
                 f"a zombie is dead, not running: state={process_state(pid)!r}"
             )
-            with patch("time.sleep") as mock_sleep:
+            with patch_time(sr, "sleep") as mock_sleep:
                 stubborn = terminate_pids([pid], grace_s=5.0)
         finally:
             with contextlib.suppress(ChildProcessError, OSError, subprocess.TimeoutExpired):

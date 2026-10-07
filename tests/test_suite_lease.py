@@ -17,6 +17,7 @@ from pathlib import Path
 import pytest
 
 from tests import _suite_lease
+from tests._time_seam import module_time
 
 
 @pytest.fixture
@@ -550,7 +551,7 @@ def test_a_waiting_acquire_succeeds_once_a_pidless_lease_ages_past_the_grace(
         sleeps.append(seconds)
         clock["t"] += seconds
 
-    monkeypatch.setattr(_suite_lease.time, "sleep", fake_sleep)
+    module_time(monkeypatch, _suite_lease).sleep = fake_sleep
     release = _suite_lease.acquire("waiter", wait_seconds=3600, lease_root=lease_root, now=lambda: clock["t"])
     assert release is not None, "the wait must end when the lease passes its grace, not at the 3600 s deadline"
     assert 40 <= len(sleeps) <= 60, sleeps  # about the 50 seconds that were left of the grace
