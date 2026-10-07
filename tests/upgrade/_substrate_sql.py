@@ -32,9 +32,9 @@ def psql(sql: str) -> str:
         [
             str(Path(state["pg_bin"]) / "psql"), "-h", "127.0.0.1", "-p", str(state["pg_port"]),
             "-U", state["pg_user"], "-d", state["pg_dbname"],
-            "-v", "ON_ERROR_STOP=1", "-At", "-c", sql,
+            "-v", "ON_ERROR_STOP=1", "-At", "-1", "-f", "-",
         ],
-        capture_output=True, text=True, timeout=60,
+        input=sql, capture_output=True, text=True, timeout=60,
     )
     assert proc.returncode == 0, f"psql failed: {proc.stderr}\nSQL: {sql}"
     return proc.stdout

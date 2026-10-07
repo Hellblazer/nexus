@@ -25,6 +25,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -87,8 +89,16 @@ class TenantPartitionFunctionsIntegrationTest {
         }
     }
 
+    /**
+     * One thread per concurrent task. CompletableFuture's default, the common ForkJoin pool, has cores - 1 threads:
+     * on a 4-core CI runner the creation and six writers queue for three threads, a writer starts only after the
+     * creation's lock timeout, and its measured wait is 0 (develop c4e3dc15a, 8 ms where at least 1000 was expected).
+     */
+    private final ExecutorService tasks = Executors.newCachedThreadPool();
+
     @AfterAll
     void stopAll() {
+        tasks.shutdownNow();
         if (adminDs != null) adminDs.close();
         if (pg != null) pg.stop();
     }
@@ -719,7 +729,7 @@ class TenantPartitionFunctionsIntegrationTest {
                 } finally {
                     creatorEnd.set(System.nanoTime());
                 }
-            });
+            }, tasks);
             try (Connection probe = admin()) {
                 long deadline = System.nanoTime() + 5_000_000_000L;
                 while (System.nanoTime() < deadline) {
@@ -851,7 +861,7 @@ class TenantPartitionFunctionsIntegrationTest {
                 } finally {
                     endedAt.set(System.nanoTime());
                 }
-            });
+            }, tasks);
             List<String> order = new ArrayList<>();
             try (Connection probe = admin()) {
                 while (!creation.isDone() && (System.nanoTime() - t0) < 40_000_000_000L) {
@@ -945,7 +955,7 @@ class TenantPartitionFunctionsIntegrationTest {
             synchronized (out) {
                 out.put(label, (System.nanoTime() - t0) / 1_000_000);
             }
-        });
+        }, tasks);
     }
 
     private void insertChunkAs(String tenant, String collection, byte[] chash, String model, int dim) throws Exception {

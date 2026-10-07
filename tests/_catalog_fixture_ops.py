@@ -315,8 +315,8 @@ def _run_psql(sql: str) -> None:
     state = ensure_engine()
     proc = subprocess.run(
         [str(state["pg_bin"] / "psql"), "-h", "127.0.0.1", "-p", str(state["pg_port"]),
-         "-U", os.environ["USER"], "-d", _DBNAME, "-v", "ON_ERROR_STOP=1", "-c", sql],
-        capture_output=True, text=True,
+         "-U", os.environ["USER"], "-d", _DBNAME, "-v", "ON_ERROR_STOP=1", "-1", "-f", "-"],
+        input=sql, capture_output=True, text=True,
     )
     if proc.returncode != 0:
         raise RuntimeError(f"_run_psql: psql failed: {proc.stderr}\nSQL: {sql}")

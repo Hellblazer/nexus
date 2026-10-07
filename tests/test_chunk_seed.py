@@ -52,8 +52,8 @@ def _stored_row(tenant: str, chash: str) -> tuple[str, dict, list[float]]:
     )
     proc = subprocess.run(
         [str(Path(state["pg_bin"]) / "psql"), "-h", "127.0.0.1", "-p", str(state["pg_port"]),
-         "-U", state["pg_user"], "-d", state["pg_dbname"], "-v", "ON_ERROR_STOP=1", "-A", "-t", "-c", sql],
-        capture_output=True, text=True, timeout=60,
+         "-U", state["pg_user"], "-d", state["pg_dbname"], "-v", "ON_ERROR_STOP=1", "-A", "-t", "-1", "-f", "-"],
+        input=sql, capture_output=True, text=True, timeout=60,
     )
     assert proc.returncode == 0, proc.stderr
     row = json.loads(proc.stdout.strip())
@@ -139,8 +139,8 @@ def _psql_rows(sql: str) -> list:
     state = ensure_engine()
     proc = subprocess.run(
         [str(Path(state["pg_bin"]) / "psql"), "-h", "127.0.0.1", "-p", str(state["pg_port"]),
-         "-U", state["pg_user"], "-d", state["pg_dbname"], "-v", "ON_ERROR_STOP=1", "-A", "-t", "-c", sql],
-        capture_output=True, text=True, timeout=60,
+         "-U", state["pg_user"], "-d", state["pg_dbname"], "-v", "ON_ERROR_STOP=1", "-A", "-t", "-1", "-f", "-"],
+        input=sql, capture_output=True, text=True, timeout=60,
     )
     assert proc.returncode == 0, proc.stderr
     return [json.loads(line) for line in proc.stdout.splitlines() if line.strip()]
@@ -150,8 +150,8 @@ def _exec(sql: str) -> None:
     state = ensure_engine()
     proc = subprocess.run(
         [str(Path(state["pg_bin"]) / "psql"), "-h", "127.0.0.1", "-p", str(state["pg_port"]),
-         "-U", state["pg_user"], "-d", state["pg_dbname"], "-v", "ON_ERROR_STOP=1", "-c", sql],
-        capture_output=True, text=True, timeout=60,
+         "-U", state["pg_user"], "-d", state["pg_dbname"], "-v", "ON_ERROR_STOP=1", "-1", "-f", "-"],
+        input=sql, capture_output=True, text=True, timeout=60,
     )
     assert proc.returncode == 0, proc.stderr
 

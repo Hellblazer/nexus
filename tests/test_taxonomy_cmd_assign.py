@@ -64,9 +64,9 @@ def _seed_chunk(tenant: str, collection: str, chash_hex: str, *, dim: int = 768)
         [
             str(psql), "-h", "127.0.0.1", "-p", str(state["pg_port"]),
             "-U", state["pg_user"], "-d", state["pg_dbname"],
-            "-v", "ON_ERROR_STOP=1", "-c", sql,
+            "-v", "ON_ERROR_STOP=1", "-1", "-f", "-",
         ],
-        capture_output=True, text=True, timeout=30,
+        input=sql, capture_output=True, text=True, timeout=30,
     )
     assert proc.returncode == 0, f"_seed_chunk failed: {proc.stdout}\n{proc.stderr}"
 

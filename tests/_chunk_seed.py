@@ -91,8 +91,8 @@ def _vector_lit(vec: Sequence[float]) -> str:
 def _psql_superuser(state: dict, sql: str) -> str:
     proc = subprocess.run(
         [str(Path(state["pg_bin"]) / "psql"), "-h", "127.0.0.1", "-p", str(state["pg_port"]),
-         "-U", state["pg_user"], "-d", state["pg_dbname"], "-v", "ON_ERROR_STOP=1", "-A", "-t", "-c", sql],
-        capture_output=True, text=True, timeout=60,
+         "-U", state["pg_user"], "-d", state["pg_dbname"], "-v", "ON_ERROR_STOP=1", "-A", "-t", "-1", "-f", "-"],
+        input=sql, capture_output=True, text=True, timeout=60,
     )
     if proc.returncode != 0:
         raise RuntimeError(f"psql failed: {proc.stderr}\nSQL: {sql}")

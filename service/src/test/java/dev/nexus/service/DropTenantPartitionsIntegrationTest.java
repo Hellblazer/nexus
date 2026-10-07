@@ -32,6 +32,8 @@ import static dev.nexus.service.PartitionScratch.MINILM_384;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNK_ORPHANED_AT;
+import static dev.nexus.service.jooq.nexus.Tables.SERVICE_TOKENS;
+import static dev.nexus.service.jooq.nexus.Tables.SESSION_TOKENS;
 import static dev.nexus.service.jooq.nexus.Tables.TAXONOMY_CENTROIDS;
 import static dev.nexus.service.jooq.nexus.Tables.TOPICS;
 import static dev.nexus.service.jooq.nexus.Tables.TOPIC_ASSIGNMENTS;
@@ -306,8 +308,12 @@ class DropTenantPartitionsIntegrationTest {
         try (Connection su = pg.createConnection("")) {
             DSLContext ctx = dsl(su);
             seed(ctx, TA, 6000L);
-            ctx.execute("INSERT INTO nexus.session_tokens (session_token_hash, tenant_id, session_id, expires_at) "
-                + "VALUES (?, ?, ?, now() + interval '1 hour')", "sess-hash-" + TA, TA, "sess-" + TA);
+            ctx.insertInto(SESSION_TOKENS)
+                .set(SESSION_TOKENS.SESSION_TOKEN_HASH, "sess-hash-" + TA)
+                .set(SESSION_TOKENS.TENANT_ID, TA)
+                .set(SESSION_TOKENS.SESSION_ID, "sess-" + TA)
+                .set(SESSION_TOKENS.EXPIRES_AT, OffsetDateTime.now().plusHours(1))
+                .execute();
         }
         Map<String, Integer> bBefore = rowCounts(TB);
         int bTokens = tokenCount(TB);
@@ -317,8 +323,8 @@ class DropTenantPartitionsIntegrationTest {
             DSLContext ctx = dsl(a);
             assertThat(PartitionScratch.dropTenantPartitions(ctx, TA)).isEqualTo(modelPartitions(ctx));
             a.commit();
-            ctx.execute("DELETE FROM nexus.session_tokens WHERE tenant_id = ?", TA);
-            ctx.execute("DELETE FROM nexus.service_tokens WHERE tenant_id = ?", TA);
+            ctx.deleteFrom(SESSION_TOKENS).where(SESSION_TOKENS.TENANT_ID.eq(TA)).execute();
+            ctx.deleteFrom(SERVICE_TOKENS).where(SERVICE_TOKENS.TENANT_ID.eq(TA)).execute();
             a.commit();
             assertThat(leaves(ctx, TA)).isEmpty();
             assertThat(leaves(ctx, TB)).hasSize(modelPartitions(ctx));
@@ -341,15 +347,15 @@ class DropTenantPartitionsIntegrationTest {
             seed(dsl(su), TA, 7000L);
         }
         Map<String, Integer> before = rowCounts(TA);
-        String leaf;
-        try (Connection su = pg.createConnection("")) {
-            DSLContext ctx = dsl(su);
-            leaf = ctx.fetchValue("SELECT c.relname::text FROM nexus.chunks ch JOIN pg_catalog.pg_class c "
-                + "ON c.oid = ch.tableoid WHERE ch.tenant_id = ? AND ch.collection = ? LIMIT 1", TA, coll1(TA)).toString();
-        }
         try (Connection a = admin()) {
             DSLContext ctx = dsl(a);
-            assertThatThrownBy(() -> ctx.execute("DROP TABLE nexus.\"" + leaf + "\""))
+            // The tenant's leaf under the voyage-code-3 partition of chunks: it holds the manifest-referenced pair.
+            String leaf = PartitionScratch.children(ctx, "chunks").stream()
+                .filter(mp -> mp.bound().equals("FOR VALUES IN ('" + CODE_3 + "')"))
+                .flatMap(mp -> PartitionScratch.children(ctx, mp.name()).stream())
+                .filter(l -> l.bound().equals("FOR VALUES IN ('" + TA + "')"))
+                .map(PartitionScratch.Child::name).findFirst().orElseThrow();
+            assertThatThrownBy(() -> ctx.dropTable(DSL.name("nexus", leaf)).execute())
                 .satisfies(t -> assertThat(sqlState(t)).as("dependent objects still exist").isEqualTo("2BP01"));
             assertThat(leaves(ctx, TA)).contains(leaf).hasSize(modelPartitions(ctx));
         }
@@ -358,9 +364,9 @@ class DropTenantPartitionsIntegrationTest {
 
     private int tokenCount(String tenant) throws Exception {
         try (Connection su = pg.createConnection("")) {
-            Object n = dsl(su).fetchValue("SELECT (SELECT count(*) FROM nexus.service_tokens WHERE tenant_id = ?) "
-                + "+ (SELECT count(*) FROM nexus.session_tokens WHERE tenant_id = ?)", tenant, tenant);
-            return ((Number) n).intValue();
+            DSLContext ctx = dsl(su);
+            return ctx.fetchCount(SERVICE_TOKENS, SERVICE_TOKENS.TENANT_ID.eq(tenant))
+                + ctx.fetchCount(SESSION_TOKENS, SESSION_TOKENS.TENANT_ID.eq(tenant));
         }
     }
 
