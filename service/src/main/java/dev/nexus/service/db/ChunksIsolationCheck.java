@@ -16,7 +16,11 @@ import java.sql.SQLException;
 import java.sql.SQLTransientConnectionException;
 import java.time.Clock;
 import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.Callable;
 import java.util.concurrent.Executor;
 import java.util.concurrent.LinkedBlockingQueue;
@@ -48,6 +52,14 @@ import java.util.function.Supplier;
  * what it reads and the check passes for it ({@code pg_has_role} answers true for a superuser for every
  * role, which would otherwise read as a violation of every policy). RESTRICTIVE policies only narrow and are
  * not considered.
+ *
+ * <p><b>The partition tree (RDR-225, nexus-3wh8d.16).</b> {@code nexus.chunks} and
+ * {@code nexus.taxonomy_centroids} are LIST-partitioned by {@code embedding_model}, then by {@code tenant_id}.
+ * PostgreSQL inherits neither the row-security flags nor the policies down a partition tree, and a leaf can be
+ * queried directly, so the parents being right proves nothing about a model partition or a leaf. {@link #structure}
+ * therefore asserts, on every relation of both trees, that row security is enabled and forced and that the policy
+ * set is the parent's own, and {@link #verifyAtStartup} refuses to serve when one relation fails. The check is
+ * about the tables, not the role, so it runs for a SUPERUSER or BYPASSRLS role too.
  *
  * <p>Raw SQL is not allowed in this tree; every catalog read below goes through jOOQ's DSL.
  */
@@ -158,14 +170,22 @@ public final class ChunksIsolationCheck {
         verifyAtStartup(() -> probe(ds), STARTUP_BACKOFF_MILLIS, ChunksIsolationCheck::sleepMillis);
     }
 
-    /** What one startup probe saw: the connected role and the violations that apply to it. */
-    record Probe(String role, List<Violation> found) {}
+    /**
+     * What one startup probe saw: the connected role, the violations that apply to it, and the relations of the
+     * two partition trees that do not mirror their parent.
+     */
+    record Probe(String role, List<Violation> found, List<Gap> gaps) {
+        /** A probe that saw no structural gap. */
+        Probe(String role, List<Violation> found) {
+            this(role, found, List.of());
+        }
+    }
 
     private static Probe probe(DataSource ds) throws SQLException {
         try (Connection conn = ds.getConnection()) {
             DSLContext ctx = DSL.using(conn, SQLDialect.POSTGRES);
             String me = ctx.select(DSL.currentUser()).fetchOne(0, String.class);
-            return new Probe(me, violations(ctx));
+            return new Probe(me, violations(ctx), structure(ctx).gaps());
         }
     }
 
@@ -195,6 +215,11 @@ public final class ChunksIsolationCheck {
             if (!seen.found().isEmpty()) {
                 throw new IsolationException(refusal(seen.role(), seen.found()));
             }
+            if (!seen.gaps().isEmpty()) {
+                log.error("event=chunks_isolation_structure_gaps count={} relations={}", seen.gaps().size(),
+                    seen.gaps().stream().map(Gap::relation).toList());
+                throw new IsolationException(structureRefusal(seen.gaps()));
+            }
             log.info("event=chunks_isolation_check_ok role={}", seen.role());
             return;
         }
@@ -221,42 +246,196 @@ public final class ChunksIsolationCheck {
             || state.equals("40001"));
     }
 
+    /** The two partitioned parents and the trees under them. */
+    static final List<String> TREE_ROOTS = List.of("chunks", "taxonomy_centroids");
+
+    /** How many gaps a refusal spells out before it counts the rest (the log line carries every relation). */
+    static final int REFUSAL_GAPS_SHOWN = 3;
+
+    /** Bind-parameter slice for the policy read, well under PostgreSQL's 32767. */
+    private static final int POLICY_READ_SLICE = 4_000;
+
     /**
-     * Whether RLS is still wired on {@code nexus.chunks} at all: row security enabled and forced, and the
-     * tenant policy present. A status-field concern only; the boot refusal never asks it, so it adds no way to
-     * brick a start.
+     * One relation of a partition tree that does not mirror its parent.
+     *
+     * @param relation the relation's name in schema nexus
+     * @param problem  what is wrong with it, in words
      */
-    static boolean rlsStructureIntact(DSLContext ctx) {
-        var cls = DSL.table(DSL.name("pg_catalog", "pg_class")).as("c");
-        var ns = DSL.table(DSL.name("pg_catalog", "pg_namespace")).as("n");
-        boolean wired = ctx.fetchExists(
-            DSL.selectOne().from(cls).join(ns)
-                .on(DSL.field(DSL.name("c", "relnamespace")).eq(DSL.field(DSL.name("n", "oid"))))
+    public record Gap(String relation, String problem) {}
+
+    /**
+     * What {@link #structure} found.
+     *
+     * @param relationsInspected parents, model partitions and leaves read, so a caller can tell a clean tree from
+     *                           a scan that saw nothing
+     * @param gaps               every relation that failed, parents first, then model partitions, then leaves
+     */
+    public record StructureReport(int relationsInspected, List<Gap> gaps) {}
+
+    private record Rel(long oid, String name, boolean rowSecurity, boolean forceRowSecurity, Long parent) {}
+
+    private record PolicyShape(String signature) {}
+
+    /**
+     * Reads both partition trees and reports every relation whose row-level security does not mirror its root:
+     * row security off, FORCE off, or a PERMISSIVE policy set that is not the root's (a policy missing, an extra
+     * one, or one whose command, roles or expressions differ; RESTRICTIVE policies only narrow and are not compared). The root itself must carry
+     * {@value #TENANT_POLICY}. The trees are found through {@code pg_inherits}, never by name pattern.
+     */
+    static StructureReport structure(DSLContext ctx) {
+        var c = DSL.table(DSL.name("pg_catalog", "pg_class")).as("c");
+        var n = DSL.table(DSL.name("pg_catalog", "pg_namespace")).as("n");
+        var i = DSL.table(DSL.name("pg_catalog", "pg_inherits")).as("i");
+        var oid = DSL.field(DSL.name("c", "oid")).cast(SQLDataType.BIGINT);
+        var relname = DSL.field(DSL.name("c", "relname"), SQLDataType.VARCHAR);
+        var inhparent = DSL.field(DSL.name("i", "inhparent")).cast(SQLDataType.BIGINT);
+        Map<Long, Rel> byOid = new HashMap<>();
+        for (var row : ctx.select(oid, relname,
+                    DSL.field(DSL.name("c", "relrowsecurity"), SQLDataType.BOOLEAN),
+                    DSL.field(DSL.name("c", "relforcerowsecurity"), SQLDataType.BOOLEAN), inhparent)
+                .from(c)
+                .join(n).on(DSL.field(DSL.name("n", "oid")).eq(DSL.field(DSL.name("c", "relnamespace"))))
+                .leftJoin(i).on(DSL.field(DSL.name("i", "inhrelid")).eq(DSL.field(DSL.name("c", "oid"))))
                 .where(DSL.field(DSL.name("n", "nspname"), SQLDataType.VARCHAR).eq("nexus"))
-                .and(DSL.field(DSL.name("c", "relname"), SQLDataType.VARCHAR).eq("chunks"))
-                .and(DSL.condition(DSL.field(DSL.name("c", "relrowsecurity"), SQLDataType.BOOLEAN)))
-                .and(DSL.condition(DSL.field(DSL.name("c", "relforcerowsecurity"), SQLDataType.BOOLEAN))));
-        if (!wired) {
-            return false;
+                .and(DSL.field(DSL.name("c", "relkind")).cast(SQLDataType.VARCHAR).in("r", "p"))
+                .and(relname.in(TREE_ROOTS)
+                    .or(DSL.condition(DSL.field(DSL.name("c", "relispartition"), SQLDataType.BOOLEAN))))
+                .fetch()) {
+            long id = row.value1();
+            byOid.put(id, new Rel(id, row.value2(), Boolean.TRUE.equals(row.value3()),
+                Boolean.TRUE.equals(row.value4()), row.value5()));
         }
-        return ctx.fetchExists(
-            DSL.selectOne().from(DSL.table(DSL.name("pg_catalog", "pg_policies")))
-                .where(DSL.field(DSL.name("schemaname"), SQLDataType.VARCHAR).eq("nexus"))
-                .and(DSL.field(DSL.name("tablename"), SQLDataType.VARCHAR).eq("chunks"))
-                .and(DSL.field(DSL.name("policyname"), SQLDataType.VARCHAR).eq(TENANT_POLICY)));
+        Map<Long, List<Rel>> childrenOf = new HashMap<>();
+        for (Rel r : byOid.values()) {
+            if (r.parent() != null) {
+                childrenOf.computeIfAbsent(r.parent(), k -> new ArrayList<>()).add(r);
+            }
+        }
+        List<Gap> gaps = new ArrayList<>();
+        // root name -> every relation of its tree, root first, then level by level, by name within a level
+        Map<String, List<Rel>> trees = new LinkedHashMap<>();
+        for (String root : TREE_ROOTS) {
+            Rel rootRel = byOid.values().stream()
+                .filter(r -> r.parent() == null && r.name().equals(root)).findFirst().orElse(null);
+            if (rootRel == null) {
+                gaps.add(new Gap(root, "relation not found: row-level security cannot be checked"));
+                continue;
+            }
+            List<Rel> ordered = new ArrayList<>();
+            ordered.add(rootRel);
+            List<Rel> level = List.of(rootRel);
+            while (!level.isEmpty()) {
+                List<Rel> next = new ArrayList<>();
+                for (Rel p : level) {
+                    next.addAll(childrenOf.getOrDefault(p.oid(), List.of()));
+                }
+                next.sort(Comparator.comparing(Rel::name));
+                ordered.addAll(next);
+                level = next;
+            }
+            trees.put(root, ordered);
+        }
+        Map<String, Map<String, PolicyShape>> policiesOf = readPolicies(ctx, trees.values().stream()
+            .flatMap(List::stream).map(Rel::name).toList());
+        int inspected = 0;
+        for (var tree : trees.entrySet()) {
+            String root = tree.getKey();
+            Map<String, PolicyShape> rootPolicies = policiesOf.getOrDefault(root, Map.of());
+            for (Rel r : tree.getValue()) {
+                inspected++;
+                if (!r.rowSecurity()) {
+                    gaps.add(new Gap(r.name(), "row-level security is not enabled"));
+                }
+                if (!r.forceRowSecurity()) {
+                    gaps.add(new Gap(r.name(), "FORCE ROW LEVEL SECURITY is not set, so the table owner is not bound"));
+                }
+                Map<String, PolicyShape> mine = policiesOf.getOrDefault(r.name(), Map.of());
+                if (r.name().equals(root)) {
+                    if (!mine.containsKey(TENANT_POLICY)) {
+                        gaps.add(new Gap(r.name(), "the tenant policy " + TENANT_POLICY + " is missing"));
+                    }
+                    continue;
+                }
+                for (var want : rootPolicies.entrySet()) {
+                    PolicyShape have = mine.get(want.getKey());
+                    if (have == null) {
+                        gaps.add(new Gap(r.name(), "policy " + want.getKey() + " of nexus." + root + " is missing"));
+                    } else if (!have.equals(want.getValue())) {
+                        gaps.add(new Gap(r.name(), "policy " + want.getKey() + " differs from nexus." + root + "'s"));
+                    }
+                }
+                for (String extra : mine.keySet()) {
+                    if (!rootPolicies.containsKey(extra)) {
+                        gaps.add(new Gap(r.name(), "policy " + extra + " is not on nexus." + root));
+                    }
+                }
+            }
+        }
+        return new StructureReport(inspected, gaps);
+    }
+
+    /** Relation name -> policy name -> the policy's shape, for every named relation of schema nexus. */
+    private static Map<String, Map<String, PolicyShape>> readPolicies(DSLContext ctx, List<String> relations) {
+        var tablename = DSL.field(DSL.name("tablename"), SQLDataType.VARCHAR);
+        var policyname = DSL.field(DSL.name("policyname"), SQLDataType.VARCHAR);
+        var roles = DSL.field(DSL.name("roles"), SQLDataType.VARCHAR.array());
+        var cmd = DSL.field(DSL.name("cmd"), SQLDataType.VARCHAR);
+        var permissive = DSL.field(DSL.name("permissive"), SQLDataType.VARCHAR);
+        var qual = DSL.field(DSL.name("qual"), SQLDataType.VARCHAR);
+        var check = DSL.field(DSL.name("with_check"), SQLDataType.VARCHAR);
+        Map<String, Map<String, PolicyShape>> out = new HashMap<>();
+        for (int from = 0; from < relations.size(); from += POLICY_READ_SLICE) {
+            var slice = relations.subList(from, Math.min(relations.size(), from + POLICY_READ_SLICE));
+            for (var row : ctx.select(tablename, policyname, permissive, cmd, roles, qual, check)
+                    .from(DSL.table(DSL.name("pg_catalog", "pg_policies")))
+                    .where(DSL.field(DSL.name("schemaname"), SQLDataType.VARCHAR).eq("nexus"))
+                    .and(tablename.in(slice))
+                    // RESTRICTIVE policies only narrow what a relation shows, so one missing from, added to or
+                    // different on a child cannot widen what a tenant reads: not part of the mirror.
+                    .and(permissive.eq("PERMISSIVE"))
+                    .fetch()) {
+                String[] r = row.value5() == null ? new String[0] : row.value5().clone();
+                java.util.Arrays.sort(r);
+                String signature = String.join("\001", row.value3(), row.value4(), String.join(",", r),
+                    String.valueOf(row.value6()), String.valueOf(row.value7()));
+                out.computeIfAbsent(row.value1(), k -> new HashMap<>()).put(row.value2(), new PolicyShape(signature));
+            }
+        }
+        return out;
+    }
+
+    /** What {@link #verifyAtStartup} says for a tree that does not mirror its parent. Names the first gaps and the remedy. */
+    static String structureRefusal(List<Gap> gaps) {
+        var shown = new StringBuilder();
+        for (int k = 0; k < Math.min(REFUSAL_GAPS_SHOWN, gaps.size()); k++) {
+            if (k > 0) {
+                shown.append("; ");
+            }
+            shown.append("nexus.").append(gaps.get(k).relation()).append(": ").append(gaps.get(k).problem());
+        }
+        return "row-level security is not intact on the partition tree of nexus.chunks or nexus.taxonomy_centroids: "
+            + shown
+            + (gaps.size() > REFUSAL_GAPS_SHOWN ? "; " + (gaps.size() - REFUSAL_GAPS_SHOWN) + " more gap(s) follow" : "")
+            + ". PostgreSQL inherits neither the row-security flags nor the policies down a partition tree, and a "
+            + "model partition or leaf can be queried directly, so this service does not serve tenant traffic until "
+            + "every relation mirrors its parent (RDR-225). As the table owner, re-mirror each parent onto its "
+            + "whole tree: SELECT nexus.partition_sync_access('nexus.chunks'::regclass) and the same for "
+            + "nexus.taxonomy_centroids (after putting right any policy that is wrong on the PARENT, which the "
+            + "function copies from).";
     }
 
     private static boolean intact(DataSource ds) throws SQLException {
         try (Connection conn = ds.getConnection()) {
             DSLContext ctx = DSL.using(conn, SQLDialect.POSTGRES);
-            return violations(ctx).isEmpty() && rlsStructureIntact(ctx);
+            return violations(ctx).isEmpty() && structure(ctx).gaps().isEmpty();
         }
     }
 
     /**
      * What {@code GET /v1/status} reports as {@code chunks_tenant_isolation_intact}: no other permissive policy
-     * applies to the connected role AND row security on nexus.chunks is still enabled, forced and carries the
-     * tenant policy. Asked live (the boot check cannot see a grant made later) but never on the request thread:
+     * applies to the connected role AND every relation of the nexus.chunks and nexus.taxonomy_centroids partition
+     * trees (parents, model partitions, leaves) still has row security enabled and forced and the parent's policies
+     * ({@link #structure}). Asked live (the boot check cannot see a grant made later) but never on the request thread:
      * {@code get()} returns the last answer, or null (the field is omitted) before the first one or when the
      * probe could not run, and starts at most one background refresh once the answer is older than
      * {@link #STATUS_TTL_MILLIS}. A status request therefore never waits for a pool connection, which is

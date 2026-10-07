@@ -93,6 +93,68 @@ $$;
         <rollback>DROP FUNCTION IF EXISTS nexus_test.set_force_rls(regclass, boolean)</rollback>
     </changeSet>
 
+    <changeSet id="test-objects-p225-rls-defects" author="nexus-3wh8d.16">
+        <comment>RDR-225 (nexus-3wh8d.16) row-level-security defect injectors for the isolation-check tests, in the same shape as test-objects-5's set_force_rls: plpgsql wrappers over DDL with no jOOQ typed-DSL form (ALTER TABLE .. ENABLE/DISABLE ROW LEVEL SECURITY, DROP/ALTER/CREATE POLICY). Every table is a regclass so PostgreSQL resolves the identity with no string to validate; every policy name is %I-quoted. reset_tenant_policy puts the canonical tenant_isolation policy (tenant_id = current_setting('nexus.tenant', true), USING and WITH CHECK) back on a relation, which is how a test repairs a parent whose policy it dropped or widened. SECURITY INVOKER: the caller's own (table-owner) privilege authorizes the DDL.</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus_test.set_row_security(p_table regclass, p_enabled boolean) RETURNS void
+    LANGUAGE plpgsql
+    SECURITY INVOKER
+AS $$
+BEGIN
+    IF p_enabled THEN
+        EXECUTE format('ALTER TABLE %s ENABLE ROW LEVEL SECURITY', p_table);
+    ELSE
+        EXECUTE format('ALTER TABLE %s DISABLE ROW LEVEL SECURITY', p_table);
+    END IF;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION nexus_test.drop_policy(p_table regclass, p_policy text) RETURNS void
+    LANGUAGE plpgsql
+    SECURITY INVOKER
+AS $$
+BEGIN
+    EXECUTE format('DROP POLICY %I ON %s', p_policy, p_table);
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION nexus_test.widen_policy(p_table regclass, p_policy text) RETURNS void
+    LANGUAGE plpgsql
+    SECURITY INVOKER
+AS $$
+BEGIN
+    EXECUTE format('ALTER POLICY %I ON %s USING (true)', p_policy, p_table);
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION nexus_test.add_permissive_policy(p_table regclass, p_policy text) RETURNS void
+    LANGUAGE plpgsql
+    SECURITY INVOKER
+AS $$
+BEGIN
+    EXECUTE format('CREATE POLICY %I ON %s FOR SELECT USING (true)', p_policy, p_table);
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION nexus_test.reset_tenant_policy(p_table regclass) RETURNS void
+    LANGUAGE plpgsql
+    SECURITY INVOKER
+AS $$
+BEGIN
+    EXECUTE format('DROP POLICY IF EXISTS tenant_isolation ON %s', p_table);
+    EXECUTE format('CREATE POLICY tenant_isolation ON %s USING (tenant_id = current_setting(''nexus.tenant'', true)) WITH CHECK (tenant_id = current_setting(''nexus.tenant'', true))', p_table);
+END;
+$$;
+        </sql>
+        <rollback>
+            DROP FUNCTION IF EXISTS nexus_test.set_row_security(regclass, boolean);
+            DROP FUNCTION IF EXISTS nexus_test.drop_policy(regclass, text);
+            DROP FUNCTION IF EXISTS nexus_test.widen_policy(regclass, text);
+            DROP FUNCTION IF EXISTS nexus_test.add_permissive_policy(regclass, text);
+            DROP FUNCTION IF EXISTS nexus_test.reset_tenant_policy(regclass);
+        </rollback>
+    </changeSet>
+
     <changeSet id="test-objects-6-drop-constraint" author="nexus-cbo4a">
         <comment>nexus_test.drop_constraint(regclass, text): plpgsql wrapper for ALTER TABLE .. DROP CONSTRAINT IF EXISTS .. (nexus-cbo4a batch 11) -- a genuinely dangling manifest row can only be seeded by momentarily dropping its FK, inserting, then re-adding it NOT VALID; the insert must happen BETWEEN the drop and the re-add, so this is a standalone drop (paired with test-objects-7's add_fk_not_valid_composite3), not a combined drop-then-add like a caller that never needs to insert in between. p_table is regclass so PostgreSQL resolves the table identity with no string to validate; p_name is a %I-quoted constraint identifier. SECURITY INVOKER so the caller's own privilege authorizes the ALTER TABLE.</comment>
         <sql splitStatements="false" stripComments="false">

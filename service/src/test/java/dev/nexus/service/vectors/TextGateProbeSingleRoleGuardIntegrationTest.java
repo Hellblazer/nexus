@@ -611,10 +611,13 @@ class TextGateProbeSingleRoleGuardIntegrationTest {
 
     /**
      * M1: the status field is also false when row security on nexus.chunks is not enabled or not forced, or the
-     * tenant policy is gone. The boot check does not ask this, so none of these refuse a start.
+     * tenant policy is gone. Since RDR-225 (nexus-3wh8d.16) the boot check asks this too, of the parent and of
+     * every model partition and leaf (see {@code ChunksIsolationCheckPartitionsIntegrationTest}), so each of these
+     * now refuses a start; before it, the check looked only at policies that widen and none of them did. The
+     * earlier "boot still serves" assertions were the parent-only form of the same question and are superseded.
      */
     @Test
-    void theStatusFieldIsFalseWhenRlsIsNotWiredOnChunks_butBootStillServes() throws Exception {
+    void theStatusFieldIsFalseAndBootRefuses_whenRlsIsNotWiredOnChunks() throws Exception {
         PostgreSQLContainer<?> c = migratedAsAdmin(su -> { });
         try (HikariDataSource svc = pool(c, SVC, PgContainerHelper.SVC_PASSWORD, "guard-svc-rls", 2);
              Connection su = c.createConnection("")) {
@@ -622,19 +625,27 @@ class TextGateProbeSingleRoleGuardIntegrationTest {
 
             exec(su, "ALTER TABLE nexus.chunks NO FORCE ROW LEVEL SECURITY");
             assertThat(awaitAnswer(svc)).as("row security not forced").isFalse();
-            ChunksIsolationCheck.verifyAtStartup(svc);
+            assertThatThrownBy(() -> ChunksIsolationCheck.verifyAtStartup(svc))
+                .isInstanceOf(ChunksIsolationCheck.IsolationException.class)
+                .hasMessageContaining("nexus.chunks").hasMessageContaining("FORCE");
             exec(su, "ALTER TABLE nexus.chunks FORCE ROW LEVEL SECURITY");
             assertThat(awaitAnswer(svc)).as("restored").isTrue();
+            ChunksIsolationCheck.verifyAtStartup(svc);
 
             exec(su, "ALTER TABLE nexus.chunks DISABLE ROW LEVEL SECURITY");
             assertThat(awaitAnswer(svc)).as("row security disabled").isFalse();
-            ChunksIsolationCheck.verifyAtStartup(svc);
+            assertThatThrownBy(() -> ChunksIsolationCheck.verifyAtStartup(svc))
+                .isInstanceOf(ChunksIsolationCheck.IsolationException.class)
+                .hasMessageContaining("nexus.chunks").hasMessageContaining("not enabled");
             exec(su, "ALTER TABLE nexus.chunks ENABLE ROW LEVEL SECURITY");
             assertThat(awaitAnswer(svc)).as("restored").isTrue();
+            ChunksIsolationCheck.verifyAtStartup(svc);
 
             exec(su, "DROP POLICY tenant_isolation ON nexus.chunks");
             assertThat(awaitAnswer(svc)).as("tenant policy missing").isFalse();
-            ChunksIsolationCheck.verifyAtStartup(svc);
+            assertThatThrownBy(() -> ChunksIsolationCheck.verifyAtStartup(svc))
+                .isInstanceOf(ChunksIsolationCheck.IsolationException.class)
+                .hasMessageContaining("tenant_isolation");
         } finally {
             c.stop();
         }
