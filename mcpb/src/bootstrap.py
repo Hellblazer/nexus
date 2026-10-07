@@ -89,7 +89,13 @@ def _sync_with_retry(bundle_dir, run=subprocess.run, sleep=time.sleep, sleeps=_R
         proc = run(
             [uv, "sync", "--directory", bundle_dir],
             capture_output=True,
-            text=True,
+            # uv must not read the host's protocol stdin (the MCP stream).
+            stdin=subprocess.DEVNULL,
+            # Not text=True: that decodes with the Windows locale codepage, so
+            # an odd byte in uv's output would turn a retryable resolver
+            # failure into a UnicodeDecodeError traceback.
+            encoding="utf-8",
+            errors="replace",
         )
         if proc.returncode == 0:
             return
@@ -169,6 +175,11 @@ def _resolve_executable(name, platform=None, path=None, pathext=None):
 # pins the two against drift.
 
 _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
+# A child spawned with CREATE_BREAKAWAY_FROM_JOB may leave the job. Everything
+# else still joins it: the MCP server tree keeps the kill-on-close guarantee,
+# and only a daemon that must outlive the extension (the aspect worker, spawned
+# by nexus.daemon.aspect_worker_daemon) asks to leave.
+_JOB_OBJECT_LIMIT_BREAKAWAY_OK = 0x00000800
 _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
 _PROCESS_SET_QUOTA = 0x0100
 _PROCESS_TERMINATE = 0x0001
@@ -254,7 +265,9 @@ class _KillOnCloseJob(object):
         if not handle:
             raise OSError("CreateJobObjectW failed")
         info = _job_struct()()
-        info.BasicLimitInformation.LimitFlags = _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        info.BasicLimitInformation.LimitFlags = (
+            _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | _JOB_OBJECT_LIMIT_BREAKAWAY_OK
+        )
         # ctypes.pointer, not byref: a test double can read .contents back.
         ok = self._k.SetInformationJobObject(
             handle,

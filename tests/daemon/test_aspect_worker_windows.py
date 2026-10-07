@@ -61,13 +61,64 @@ def test_windows_spawn_gets_its_own_group_and_no_window(tmp_path: Path) -> None:
         config_dir=tmp_path, tenant="default", _popen=_FakePopen, _platform="win32",
     )
     kwargs = _FakePopen.calls[0]["kwargs"]
-    assert kwargs["creationflags"] == (
+    assert kwargs["creationflags"] & ~win_job.CREATE_BREAKAWAY_FROM_JOB == (
         win_job.CREATE_NEW_PROCESS_GROUP | win_job.CREATE_NO_WINDOW
     )
     # start_new_session is ignored on Windows; passing it would only mislead.
     assert "start_new_session" not in kwargs
     # NEVER DETACHED_PROCESS: the stopper attaches to the target's console.
     assert not kwargs["creationflags"] & 0x00000008
+
+
+def test_windows_spawn_breaks_away_from_the_hosts_job_first(tmp_path: Path) -> None:
+    """The daemon outlives the storing process. Under the desktop extension
+    that process sits in a kill-on-close Job Object, so a child that does not
+    break away dies when the extension closes (RDR-224 review finding E)."""
+    ensure_aspect_worker_daemon(
+        config_dir=tmp_path, tenant="default", _popen=_FakePopen, _platform="win32",
+    )
+    assert len(_FakePopen.calls) == 1
+    assert _FakePopen.calls[0]["kwargs"]["creationflags"] & win_job.CREATE_BREAKAWAY_FROM_JOB
+
+
+def test_windows_spawn_falls_back_to_a_plain_spawn_when_breakaway_is_refused(
+    tmp_path: Path,
+) -> None:
+    """A job that forbids breakaway refuses CreateProcess with access denied;
+    the spawn is retried once without the flag (the session-end launcher's
+    pattern) and the daemon still starts."""
+
+    class _RefusesBreakaway(_FakePopen):
+        def __init__(self, argv: list[str], **kwargs: Any) -> None:
+            if kwargs["creationflags"] & win_job.CREATE_BREAKAWAY_FROM_JOB:
+                type(self).calls.append({"argv": argv, "kwargs": kwargs, "refused": True})
+                raise PermissionError(5, "Access is denied")
+            super().__init__(argv, **kwargs)
+
+    assert ensure_aspect_worker_daemon(
+        config_dir=tmp_path, tenant="default", _popen=_RefusesBreakaway, _platform="win32",
+    )
+    first, second = _FakePopen.calls
+    assert first["refused"] is True
+    assert second["kwargs"]["creationflags"] == (
+        win_job.CREATE_NEW_PROCESS_GROUP | win_job.CREATE_NO_WINDOW
+    )
+    assert second["argv"] == first["argv"]
+
+
+def test_windows_spawn_that_fails_both_ways_raises_the_second_error(tmp_path: Path) -> None:
+    class _AlwaysFails:
+        calls = 0
+
+        def __init__(self, argv: list[str], **kwargs: Any) -> None:
+            type(self).calls += 1
+            raise FileNotFoundError(2, "nx not found")
+
+    with pytest.raises(FileNotFoundError):
+        ensure_aspect_worker_daemon(
+            config_dir=tmp_path, tenant="default", _popen=_AlwaysFails, _platform="win32",
+        )
+    assert _AlwaysFails.calls == 2
 
 
 def test_posix_spawn_is_unchanged(tmp_path: Path) -> None:
@@ -77,6 +128,7 @@ def test_posix_spawn_is_unchanged(tmp_path: Path) -> None:
     kwargs = _FakePopen.calls[0]["kwargs"]
     assert kwargs["start_new_session"] is True
     assert "creationflags" not in kwargs
+    assert len(_FakePopen.calls) == 1
 
 
 # ── SIGBREAK handler and the ticked wait ─────────────────────────────────────────

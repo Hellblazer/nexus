@@ -728,6 +728,12 @@ WINDOWS_TEST_SET = (
     "tests/test_install_generation_real_windows.py", "tests/test_session_end_real_windows.py",
     "tests/test_mcp_win_stdin.py", "tests/test_mcp_win_stdin_real_windows.py",
     "tests/test_os_trust_store.py", "tests/hooks/test_endpoint_resolve_lease_retry.py",
+    # Phase 4 (nexus-f9bgu.38 finding C): the desktop bootstrap and the uv hook launcher.
+    "tests/test_mcpb_bootstrap.py", "tests/hooks/test_hook_launcher_uv.py",
+)
+#: The Phase 4 code that only a native Windows run exercises, and the helper its tests import.
+PHASE4_WINDOWS_PATHS = (
+    "mcpb/src/bootstrap.py", "conexus/hooks/**", "tests/_hook_wiring.py",
 )
 
 
@@ -740,6 +746,12 @@ def test_the_rehearsal_triggers_on_every_phase3_windows_module_and_its_tests() -
         assert test in paths, test
     # A dependency bump changes what runs on Windows (nexus-6046d / zw44w).
     assert "pyproject.toml" in paths and "uv.lock" in paths
+
+
+def test_the_rehearsal_triggers_on_the_phase4_bootstrap_and_hook_launcher() -> None:
+    paths = _triggers(_doc(REHEARSAL))["push"]["paths"]
+    for path in PHASE4_WINDOWS_PATHS:
+        assert path in paths, path
 
 
 def test_the_windows_job_runs_the_whole_set_in_one_pytest_with_a_junit_floor() -> None:
@@ -772,6 +784,8 @@ REAL_KERNEL_PATTERNS = (
     "tests.test_session_end_real_windows.TestRealWindows",
     "tests.test_mcp_win_stdin_real_windows.TestRealWindows",
     "test_hard_killing_the_supervisor_takes_its_job_engine_with_it",
+    "tests.test_mcpb_bootstrap.TestRealWindows",
+    "test_the_credential_guard_still_denies_through_the_launcher",
 )
 
 

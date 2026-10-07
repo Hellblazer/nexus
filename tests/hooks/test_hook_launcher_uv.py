@@ -23,6 +23,9 @@ import json
 import os
 import shutil
 import subprocess
+import sys
+from collections.abc import Mapping
+from pathlib import Path
 
 import pytest
 
@@ -35,7 +38,6 @@ _CRED_READ = {
     "tool_name": "Bash",
     "tool_input": {"command": "cat ~/.claude/.credentials.json"},
     "session_id": "launcher-test",
-    "cwd": "/tmp",
 }
 
 
@@ -57,12 +59,33 @@ def _argv(hook: dict) -> list[str]:
     ]
 
 
-def _run(hook: dict, payload: dict) -> subprocess.CompletedProcess[str]:
-    # A scrubbed env: no VIRTUAL_ENV, no PYTHON*, only what a hook has anyway.
-    env = {"PATH": os.environ["PATH"], "HOME": os.environ.get("HOME", "")}
+def _hook_env(base: Mapping[str, str], platform: str) -> dict[str, str]:
+    """The environment a hook runs in: no VIRTUAL_ENV, no PYTHON*, only what a
+    hook has anyway.
+
+    POSIX gets exactly PATH and HOME, which is all uv needs there. Windows has
+    no HOME and a bare PATH is not enough: uv finds its managed Pythons and its
+    cache through USERPROFILE, LOCALAPPDATA and APPDATA, and Python itself needs
+    SYSTEMROOT, so the Windows arm keeps the rest of the host's environment and
+    drops only the interpreter-selection variables. Claude Code's own hook env
+    carries all of it. *platform* is injectable so both arms run on any host.
+    """
+    if platform != "win32":
+        return {"PATH": base["PATH"], "HOME": base.get("HOME", "")}
+    return {
+        k: v
+        for k, v in base.items()
+        if k.upper() != "VIRTUAL_ENV" and not k.upper().startswith("PYTHON")
+    }
+
+
+def _run(hook: dict, payload: dict, cwd: Path) -> subprocess.CompletedProcess[str]:
+    # The project directory is the hook's cwd; a tmp_path stands in for it on
+    # every host (there is no /tmp on Windows).
     return subprocess.run(
-        _argv(hook), input=json.dumps(payload), capture_output=True, text=True,
-        timeout=120, env=env, cwd="/tmp",
+        _argv(hook), input=json.dumps({**payload, "cwd": str(cwd)}), capture_output=True,
+        text=True, encoding="utf-8", timeout=120, env=_hook_env(os.environ, sys.platform),
+        cwd=cwd,
     )
 
 
@@ -88,9 +111,9 @@ def test_the_walk_finds_the_launcher_entries() -> None:
     }
 
 
-def test_the_credential_guard_still_denies_through_the_launcher() -> None:
+def test_the_credential_guard_still_denies_through_the_launcher(tmp_path: Path) -> None:
     (hook,) = [h for _, h in _launcher_entries() if _script(h) == "credential_print_guard.py"]
-    proc = _run(hook, _CRED_READ)
+    proc = _run(hook, _CRED_READ, tmp_path)
     assert proc.returncode == 0, proc.stderr
     assert "requires Python 3.12" not in proc.stderr
     verdict = json.loads(proc.stdout)["hookSpecificOutput"]
@@ -101,20 +124,21 @@ def test_the_credential_guard_still_denies_through_the_launcher() -> None:
     "script",
     ["subagent_git_write_requires_orchestrator.py", "credential_print_guard.py"],
 )
-def test_the_bash_gates_run_and_allow_a_benign_command(script: str) -> None:
+def test_the_bash_gates_run_and_allow_a_benign_command(script: str, tmp_path: Path) -> None:
     (hook,) = [h for _, h in _launcher_entries() if _script(h) == script]
     payload = {**_CRED_READ, "tool_input": {"command": "ls"}}
-    proc = _run(hook, payload)
+    proc = _run(hook, payload, tmp_path)
     assert proc.returncode == 0, proc.stderr
     assert "requires Python 3.12" not in proc.stderr
     assert "deny" not in proc.stdout
 
 
-def test_the_mailbox_drain_runs_under_the_floor_and_fails_open() -> None:
+def test_the_mailbox_drain_runs_under_the_floor_and_fails_open(tmp_path: Path) -> None:
     (hook,) = [h for _, h in _launcher_entries() if _script(h) == "mailbox_drain.py"]
     proc = _run(
         hook,
-        {"hook_event_name": "UserPromptSubmit", "prompt": "hi", "session_id": "launcher-test", "cwd": "/tmp"},
+        {"hook_event_name": "UserPromptSubmit", "prompt": "hi", "session_id": "launcher-test"},
+        tmp_path,
     )
     assert proc.returncode == 0, proc.stderr
     assert "requires Python 3.12" not in proc.stderr
@@ -122,7 +146,7 @@ def test_the_mailbox_drain_runs_under_the_floor_and_fails_open() -> None:
 
 @pytest.mark.skipif(shutil.which("nx-hook") is None, reason="needs the installed nx-hook the shim wraps")
 @pytest.mark.parametrize("event", ["PreToolUse", "PermissionRequest"])
-def test_auto_approve_allows_through_uv_and_the_shim(event: str) -> None:
+def test_auto_approve_allows_through_uv_and_the_shim(event: str, tmp_path: Path) -> None:
     (hook,) = [
         h for e, h in _launcher_entries()
         if e == event and launcher_script_args(h)[-1] == "auto-approve"
@@ -130,6 +154,23 @@ def test_auto_approve_allows_through_uv_and_the_shim(event: str) -> None:
     proc = _run(
         hook,
         {"hook_event_name": event, "tool_name": "mcp__plugin_conexus_nexus__search", "session_id": "launcher-test"},
+        tmp_path,
     )
     assert proc.returncode == 0, proc.stderr
     assert "allow" in proc.stdout, proc.stdout
+
+
+def test_the_hook_env_is_posix_minimal_and_windows_keeps_what_uv_needs() -> None:
+    """Both arms run here. The POSIX arm must stay scrubbed (so an ambient
+    VIRTUAL_ENV cannot make the launcher look as though it works), and the
+    Windows arm must carry the user-profile variables uv resolves its Pythons
+    through."""
+    base = {
+        "PATH": "p", "HOME": "h", "VIRTUAL_ENV": "v", "PYTHONPATH": "x", "UV_CACHE_DIR": "c",
+        "USERPROFILE": "C:\\Users\\u", "SYSTEMROOT": "C:\\Windows", "LOCALAPPDATA": "l",
+        "PythonHome": "y",
+    }
+    assert _hook_env(base, "linux") == {"PATH": "p", "HOME": "h"}
+    win = _hook_env(base, "win32")
+    assert {"PATH", "USERPROFILE", "SYSTEMROOT", "LOCALAPPDATA", "UV_CACHE_DIR"} <= set(win)
+    assert not {"VIRTUAL_ENV", "PYTHONPATH", "PythonHome"} & set(win)
