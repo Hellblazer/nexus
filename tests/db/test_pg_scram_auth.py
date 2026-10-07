@@ -28,18 +28,22 @@ from pathlib import Path
 
 import pytest
 
+from nexus._install.layout_core import exe_name
+from nexus._winsec import owner_only_problem
 from nexus.db import pg_provision as pp
 from nexus.db.pg_auth import cluster_auth_state, hba_has_trust
 from tests.db._service_fixture import pg_bin_dir
 
 _PG_BIN = pg_bin_dir()
+# initdb.exe on Windows: a bare "initdb" never exists there (nexus-ja4pq).
+_INITDB = _PG_BIN / exe_name("initdb")
 
 pytestmark = [
     pytest.mark.integration,
     pytest.mark.no_service_jar,
     pytest.mark.skipif(
-        not (_PG_BIN / "initdb").exists(),
-        reason=f"skipped: nexus-pg bundle self-provisioning failed (no {_PG_BIN / 'initdb'}). "
+        not _INITDB.exists(),
+        reason=f"skipped: nexus-pg bundle self-provisioning failed (no {_INITDB}). "
                "NOT a missing host PostgreSQL: these tests never use one.",
     ),
 ]
@@ -77,6 +81,22 @@ def _login(bins: pp.PgBinaries, port: int, user: str, password: str | None, db: 
          "-d", db, "-t", "-A", "-c", "SELECT current_user"],
         capture_output=True, text=True, env=env, timeout=60,
     )
+
+
+def _not_owner_only(path: Path) -> str | None:
+    """Why *path* is not exactly what ``restrict_to_owner`` makes, or None.
+
+    Stricter than ``owner_only_problem``, which also admits SYSTEM and
+    Administrators: a file that merely inherited a tight parent DACL would pass
+    that, so on Windows this demands the single ACE naming the current user."""
+    if sys.platform == "win32":
+        from nexus._winsec import _windows_dacl_trustees, _windows_user_sid  # noqa: PLC0415 — Windows-only
+
+        trustees = _windows_dacl_trustees(str(path))
+        user = _windows_user_sid()
+        return None if trustees == [user] else f"DACL grants {trustees}, expected only {user}"
+    mode = stat.S_IMODE(path.stat().st_mode)
+    return None if mode == 0o600 else f"mode {oct(mode)}"
 
 
 def _wait_for(predicate, *, timeout: float = 20.0) -> bool:
@@ -206,6 +226,9 @@ class TestFreshClusterDemandsPasswords:
         assert box.creds["PG_SUPERUSER_PASS"]
         if sys.platform != "win32":
             assert stat.S_IMODE(box.creds_path.stat().st_mode) == 0o600
+        # Windows: the mode bits say 0o666 for every file; the DACL is the check.
+        assert owner_only_problem(box.creds_path, box.creds_path.stat().st_mode) is None
+        assert _not_owner_only(box.creds_path) is None
 
     def test_no_pwfile_or_credentials_scratch_is_left_behind(self, box: _Box) -> None:
         leftovers = sorted(p.name for p in box.config_dir.iterdir() if p.name.startswith((".pg_pwfile_", ".pg_creds_", ".pg_hba_")))
@@ -220,6 +243,53 @@ class TestFreshClusterDemandsPasswords:
         assert box.hba_bytes == before
         assert box.creds["PG_SUPERUSER_PASS"] == creds_before["PG_SUPERUSER_PASS"]
         assert box.creds["NX_DB_PASS"] == creds_before["NX_DB_PASS"]
+
+
+class TestSecretFilesArePrivateWhileInUse:
+    """The initdb ``--pwfile`` and every ``_psql_secret`` file, seen at the moment
+    the client reads it: present, owner-only (the DACL on Windows), and gone after.
+
+    Observed through the module's one subprocess choke point, ``_run``, so the
+    check runs on the real file the real initdb and psql open."""
+
+    def test_pwfile_and_sql_files_are_owner_only_in_use_and_deleted_after(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        config_dir = tmp_path / "cfg"
+        config_dir.mkdir()
+        seen: list[tuple[str, Path, bool, str | None]] = []
+        real_run = pp._run
+
+        def spy(cmd, **kw):
+            for i, arg in enumerate(cmd):
+                path: Path | None = None
+                kind = ""
+                if arg.startswith("--pwfile="):
+                    kind, path = "pwfile", Path(arg.split("=", 1)[1])
+                elif arg == "-f" and i + 1 < len(cmd):
+                    kind, path = "sql", Path(cmd[i + 1])
+                if path is not None:
+                    present = path.exists()
+                    problem = _not_owner_only(path) if present else "missing"
+                    seen.append((kind, path, present, problem))
+            return real_run(cmd, **kw)
+
+        monkeypatch.setattr(pp, "_run", spy)
+        pgdata = config_dir / "postgres"
+        try:
+            pp.provision(config_dir, force_new_port=True)
+        finally:
+            _stop(pp.discover_pg_binaries(), pgdata)
+
+        kinds = [k for k, *_ in seen]
+        assert kinds.count("pwfile") == 1, seen
+        assert kinds.count("sql") >= 1, "CREATE ROLE ... PASSWORD must go through _psql_secret"
+        for kind, path, present, problem in seen:
+            assert present, f"{kind} {path} absent when the client read it"
+            assert problem is None, f"{kind} {path}: {problem}"
+            assert not path.exists(), f"{kind} {path} left behind"
+            if kind == "pwfile":
+                assert path.parent == pgdata.parent, "beside the data directory, never inside it"
 
 
 # ── an existing trust cluster ──────────────────────────────────────────────────

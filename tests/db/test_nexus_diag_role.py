@@ -48,8 +48,12 @@ from tests.db._service_fixture import pg_bin_dir
 #
 # max-skip guard (testval-182 Low): still a clean SKIP rather than an ERROR from
 # a fixture invoking a nonexistent initdb.
+from nexus._install.layout_core import exe_name  # noqa: E402
+
 _PG_BIN = pg_bin_dir()
-_INITDB = _PG_BIN / "initdb"
+# initdb.exe on Windows: a bare "initdb" never exists there, so the gate
+# skipped every test on the one host the Windows paths need (nexus-ja4pq).
+_INITDB = _PG_BIN / exe_name("initdb")
 
 pytestmark = [
     pytest.mark.integration,
@@ -99,7 +103,7 @@ def diag_cluster(tmp_path_factory):
     def su(sql: str) -> str:
         """Run sql as the cluster superuser (os_user)."""
         proc = subprocess.run(
-            [str(bins.psql), "-h", "127.0.0.1", "-p", str(port), "-U", os_user,
+            [str(bins.psql), "-w", "-h", "127.0.0.1", "-p", str(port), "-U", os_user,
              "-d", "nexus", "-v", "ON_ERROR_STOP=1", "-tAc", sql],
             capture_output=True, text=True, timeout=30,
             env={**os.environ, "PGPASSWORD": su_pw},
@@ -134,7 +138,7 @@ def diag_cluster(tmp_path_factory):
         import os as _os
         env = dict(_os.environ, PGPASSWORD="diag-pw")
         return subprocess.run(
-            [str(bins.psql), "-h", "127.0.0.1", "-p", str(port),
+            [str(bins.psql), "-w", "-h", "127.0.0.1", "-p", str(port),
              "-U", "nexus_diag", "-d", "nexus", "-v", "ON_ERROR_STOP=1",
              "-tAc", sql],
             capture_output=True, text=True, timeout=30, env=env,
