@@ -74,6 +74,7 @@ def test_promote_script_asserts_every_asset_and_the_size_ceilings_before_publish
     text = (Path(__file__).parent.parent / "scripts" / "promote_engine_release.sh").read_text()
     for name in (
         "nexus-service-$arch", "$b.sha256", "$b.cosign.bundle", "$b.sigstore.json",
+        "$b.txz", "$b.txz.sha256", "$b.txz.sigstore.json",
         "nexus-pg-$arch.txz", "$p.sha256", "$p.sigstore.json",
     ):
         assert name in text, f"asset {name} not asserted"

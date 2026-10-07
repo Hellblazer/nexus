@@ -137,6 +137,16 @@ REQUIRED_TOOLS: tuple[str, ...] = (
     "meson", "ninja", "perl", "win_bison", "win_flex", "cl", "nmake", "git",
 )
 
+#: Build-only trees, removed once pgvector is built (prune_build_only), the same
+#: set build_pg_bundle.sh's prune_build_only removes: headers, PGXS and
+#: pkg-config. Nothing at runtime reads them; initdb reads share/, CREATE
+#: EXTENSION reads share/extension and the lib/ modules, and the client's
+#: pgvector preflight runs bin/pg_config --sharedir.
+BUILD_ONLY_DIRS: tuple[str, ...] = ("include", "lib/pgxs", "lib/postgresql/pgxs", "lib/pkgconfig")
+#: Static archives and import libraries under lib/: link-time inputs only (every
+#: runtime DLL is a .dll, libpq.dll in bin/ and the modules in lib/).
+BUILD_ONLY_SUFFIXES: tuple[str, ...] = (".lib", ".a")
+
 #: Binaries every bundle must hold (mirrors verify_and_mark in the shell script).
 REQUIRED_BINARIES: tuple[str, ...] = (
     "initdb", "pg_ctl", "postgres", "psql", "createdb", "pg_config",
@@ -585,9 +595,14 @@ def verify_layout(bundle: Path, *, runtime: bool = True) -> list[str]:
     """Problems with the bundle tree (empty list = complete). Filesystem only,
     so it runs on any OS against a staged tree."""
     problems: list[str] = []
-    for d in ("bin", "include", "lib", "share"):
+    for d in ("bin", "lib", "share"):
         if not (bundle / d).is_dir():
             problems.append(f"missing directory {d}/")
+    for rel in BUILD_ONLY_DIRS:
+        if (bundle / rel).exists():
+            problems.append(f"build-only {rel}/ is still present (prune_build_only did not run)")
+    for f in _build_only_files(bundle):
+        problems.append(f"build-only {f.relative_to(bundle).as_posix()} is still present")
     for b in REQUIRED_BINARIES:
         if not (bundle / "bin" / f"{b}.exe").is_file():
             problems.append(f"missing bin/{b}.exe")
@@ -607,6 +622,29 @@ def verify_layout(bundle: Path, *, runtime: bool = True) -> list[str]:
         if not (bundle / NOTICE_NAME).is_file():
             problems.append(f"missing {NOTICE_NAME} (P0.6 condition 4)")
     return problems
+
+
+def _build_only_files(bundle: Path) -> list[Path]:
+    lib = bundle / "lib"
+    if not lib.is_dir():
+        return []
+    return sorted(f for f in lib.rglob("*") if f.is_file() and f.suffix.lower() in BUILD_ONLY_SUFFIXES)
+
+
+def prune_build_only(bundle: Path) -> list[str]:
+    """Remove the build-only trees and files (``BUILD_ONLY_DIRS``, ``BUILD_ONLY_SUFFIXES``)
+    from *bundle*; returns what was removed, bundle-relative. A failure raises: a bundle
+    that keeps them would fail ``verify_layout``, so it is never silently kept."""
+    removed: list[str] = []
+    for rel in BUILD_ONLY_DIRS:
+        path = bundle / rel
+        if path.is_dir():
+            shutil.rmtree(path)
+            removed.append(f"{rel}/")
+    for f in _build_only_files(bundle):
+        f.unlink()
+        removed.append(f.relative_to(bundle).as_posix())
+    return removed
 
 
 def package(bundle: Path, out_dir: Path, *, arcroot: str = ARCHIVE_ROOT) -> Path:
@@ -769,6 +807,10 @@ def build(
     }
     for cmd in pgvector_make_cmds(prefix, dirs):
         r.run(cmd, cwd=pgv_src, env=run_env, log=logs / "pgvector.log")
+
+    _log("prune build-only files (headers, static and import libraries, pgxs, pkgconfig)")
+    for rel in prune_build_only(prefix):
+        print(f"  removed {rel}", flush=True)
 
     _log("licenses, VC++ runtime, notice, .build_prefix")
     lic = prefix / LICENSES_DIR

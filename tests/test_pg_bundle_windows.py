@@ -332,9 +332,19 @@ def test_refresh_replaces_stale_dlls_from_the_current_redist(tmp_path: Path) -> 
 # --------------------------------------------------------------------------- #
 
 
-def stage_bundle(prefix: Path, *, runtime: bool = True) -> Path:
-    for d in ("bin", "include", "lib/postgresql", "share/postgresql/extension"):
+def stage_bundle(prefix: Path, *, runtime: bool = True, build_only: bool = False) -> Path:
+    """A bundle tree. ``build_only`` adds what ``ninja install`` and pgvector's
+    install leave that the build then prunes (headers, .lib files, pgxs, pkgconfig)."""
+    for d in ("bin", "lib/postgresql", "share/postgresql/extension"):
         (prefix / d).mkdir(parents=True, exist_ok=True)
+    if build_only:
+        for d in ("include/postgresql/server", "lib/postgresql/pgxs/src", "lib/pkgconfig"):
+            (prefix / d).mkdir(parents=True, exist_ok=True)
+        (prefix / "include" / "libpq-fe.h").write_text("h")
+        (prefix / "lib" / "libpq.lib").write_bytes(b"lib")
+        (prefix / "lib" / "libpgcommon.lib").write_bytes(b"lib")
+        (prefix / "lib" / "postgresql" / "vector.lib").write_bytes(b"lib")
+        (prefix / "lib" / "pkgconfig" / "libpq.pc").write_text("pc")
     for b in bw.REQUIRED_BINARIES:
         (prefix / "bin" / f"{b}.exe").write_bytes(b"MZ")
     (prefix / "bin" / "libpq.dll").write_bytes(b"MZ")
@@ -417,7 +427,7 @@ class FakeBuildRunner(bw.Runner):
         argv = list(argv)
         self.calls.append(("run", argv, dict(env)))
         if argv[0] == "ninja" and argv[-1] == "install":
-            stage_bundle(self.prefix, runtime=False)
+            stage_bundle(self.prefix, runtime=False, build_only=True)
             (self.prefix / ".build_prefix").unlink()
         if argv[0] == "git":
             dest = Path(argv[-1])
@@ -512,6 +522,12 @@ def test_build_runs_the_steps_in_the_order_the_hazards_demand(tmp_path: Path) ->
     build_call = next(c for c in runner.calls if _shape(c) == "ninja-build")
     assert "-j6" in build_call[1]
     assert bw.verify_layout(prefix) == []
+    # The build-only files ninja install left are gone; the runtime ones stay.
+    assert not (prefix / "include").exists() and not (prefix / "lib" / "pkgconfig").exists()
+    assert not (prefix / "lib" / "postgresql" / "pgxs").exists()
+    assert not list((prefix / "lib").rglob("*.lib"))
+    assert (prefix / "lib" / "postgresql" / "vector.dll").is_file()
+    assert (prefix / "bin" / "libpq.dll").is_file() and (prefix / "bin" / "pg_config.exe").is_file()
     assert (prefix / "licenses" / "postgresql-COPYRIGHT.txt").is_file()
     assert (prefix / "licenses" / "pgvector-LICENSE.txt").is_file()
     assert (prefix / ".build_prefix").read_text().strip() == os.path.realpath(prefix)
@@ -1269,3 +1285,29 @@ def test_resolve_long_path_normalises_dot_segments_on_any_os(tmp_path: Path) -> 
     (tmp_path / "b").mkdir()
     messy = str(tmp_path / "a" / ".." / "b")
     assert sm.resolve_long_path(messy, windows=False) == os.path.realpath(tmp_path / "b")
+
+
+# --------------------------------------------------------------------------- #
+# Build-only files (headers, .lib, pgxs, pkgconfig) never ship
+# --------------------------------------------------------------------------- #
+
+
+def test_prune_build_only_removes_exactly_the_build_only_set(tmp_path: Path) -> None:
+    bundle = stage_bundle(tmp_path / "bundle", build_only=True)
+    removed = bw.prune_build_only(bundle)
+    assert set(removed) == {
+        "include/", "lib/postgresql/pgxs/", "lib/pkgconfig/",
+        "lib/libpq.lib", "lib/libpgcommon.lib", "lib/postgresql/vector.lib",
+    }
+    assert bw.verify_layout(bundle) == []
+    assert bw.prune_build_only(bundle) == []  # idempotent
+
+
+@pytest.mark.parametrize("leftover", ["include/libpq-fe.h", "lib/pkgconfig/libpq.pc", "lib/libpq.lib",
+                                      "lib/postgresql/vector.lib", "lib/postgresql/pgxs/src/x.mk"])
+def test_verify_layout_names_a_build_only_leftover(tmp_path: Path, leftover: str) -> None:
+    bundle = stage_bundle(tmp_path / "bundle")
+    (bundle / leftover).parent.mkdir(parents=True, exist_ok=True)
+    (bundle / leftover).write_text("x")
+    problems = bw.verify_layout(bundle)
+    assert problems and all("build-only" in p for p in problems), problems

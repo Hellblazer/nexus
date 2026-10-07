@@ -70,10 +70,12 @@ It gates the DEPLOY, never the tag cut.
 **Windows-assets mode** (``--require-windows [TAG]``, nexus-f9bgu.28,
 RDR-224 critique S4): an OPT-IN check that the engine release TAG (default: the
 pinned ``REQUIRED_ENGINE_VERSION`` tag) is published and carries the full
-27-asset set, the 21 of the three native platforms plus the six Windows assets
+36-asset set, the 30 of the three native platforms plus the six Windows assets
 (``nexus-pg-windows-x64.txz`` and ``nexus-service-windows-x64.txz``, each with its
-``.sha256`` and ``.sigstore.json``). It exists because a tag cut with the
-``NX_WINDOWS_RELEASE_LEGS`` switch off publishes 21 assets, becomes immutable, and
+``.sha256`` and ``.sigstore.json``); a release cut before the Linux and macOS
+engine archives is held to its own 27 (21 native plus six). It exists because a
+tag cut with the ``NX_WINDOWS_RELEASE_LEGS`` switch off publishes no Windows
+assets, becomes immutable, and
 leaves a Windows client nothing to install from it; the only recovery is another
 cut. Run it after the cut that is meant to carry Windows and before the client
 release pins it. It changes nothing about any other mode: without the flag this
@@ -1234,19 +1236,24 @@ def check_client_precondition(engine_tag: str) -> int:
 
 #: The assets a Windows-carrying engine release holds, in lockstep with scripts/promote_engine_release.sh
 #: (a test runs that script against exactly this set, so the two cannot drift): per native platform the
-#: binary with .sha256, .cosign.bundle and .sigstore.json plus the PG bundle with .sha256 and
-#: .sigstore.json, then, with the Windows legs on, the PG bundle and the engine archive with .sha256
-#: and .sigstore.json each.
+#: binary with .sha256, .cosign.bundle and .sigstore.json, the same binary as nexus-service-<arch>.txz
+#: with .sha256 and .sigstore.json, plus the PG bundle with .sha256 and .sigstore.json, then, with the
+#: Windows legs on, the PG bundle and the engine archive with .sha256 and .sigstore.json each.
 _ENGINE_NATIVE_PLATFORMS = ("linux-amd64", "linux-arm64", "mac-arm64")
 _WINDOWS_ARCHIVES = ("nexus-pg-windows-x64.txz", "nexus-service-windows-x64.txz")
 
 
-def expected_engine_assets(*, windows: bool) -> tuple[str, ...]:
-    """The release's asset names: 21 without the Windows legs, 27 with them."""
+def expected_engine_assets(*, windows: bool, posix_archives: bool = True) -> tuple[str, ...]:
+    """The release's asset names: 30 without the Windows legs, 36 with them.
+
+    ``posix_archives=False`` drops the three ``nexus-service-<arch>.txz`` trios (9 names):
+    the set a release cut before those archives existed holds (21 and 27)."""
     names: list[str] = []
     for arch in _ENGINE_NATIVE_PLATFORMS:
         b = f"nexus-service-{arch}"
         names += [b, f"{b}.sha256", f"{b}.cosign.bundle", f"{b}.sigstore.json"]
+        if posix_archives:
+            names += [f"{b}.txz", f"{b}.txz.sha256", f"{b}.txz.sigstore.json"]
         pg = f"nexus-pg-{arch}.txz"
         names += [pg, f"{pg}.sha256", f"{pg}.sigstore.json"]
     if windows:
@@ -1256,11 +1263,14 @@ def expected_engine_assets(*, windows: bool) -> tuple[str, ...]:
 
 
 def check_windows_assets(tag: str, repo_root: pathlib.Path | None = None) -> int:
-    """Is ``tag`` a published engine release holding all 27 assets (``--require-windows``)?
+    """Is ``tag`` a published engine release holding every asset (``--require-windows``)?
 
-    Exit ``0`` when it is; ``1`` for a draft or named missing assets (the Windows ones are
-    called out, because 21 present and 6 absent means the cut ran with the switch off);
-    ``2`` when ``gh`` could not be consulted. Fail-closed like the paired-tag check."""
+    Every asset is 36, or 27 for a release cut before the Linux and macOS engine archives
+    (``nexus-service-<arch>.txz``): a release holding none of those three archives is held to
+    the older set, one holding any of them to the full set, the same rule the client uses to
+    pick an asset. Exit ``0`` when it is; ``1`` for a draft or named missing assets (the
+    Windows ones are called out, because only Windows names absent means the cut ran with the
+    switch off); ``2`` when ``gh`` could not be consulted. Fail-closed like the paired-tag check."""
     root = repo_root or pathlib.Path(__file__).resolve().parent.parent
     try:
         out = subprocess.run(
@@ -1286,7 +1296,8 @@ def check_windows_assets(tag: str, repo_root: pathlib.Path | None = None) -> int
         print(f"BLOCKED: release {tag} is still a DRAFT -- not published", file=sys.stderr)
         return 1
     present = {a.get("name") for a in payload["assets"] if isinstance(a, dict)}
-    expected = expected_engine_assets(windows=True)
+    archives = any(f"nexus-service-{a}.txz" in present for a in _ENGINE_NATIVE_PLATFORMS)
+    expected = expected_engine_assets(windows=True, posix_archives=archives)
     missing = [a for a in expected if a not in present]
     if missing:
         windows_missing = [a for a in missing if "windows" in a]
@@ -1403,7 +1414,8 @@ def main(argv: list[str] | None = None) -> int:
         metavar="TAG",
         help="Windows-assets mode (nexus-f9bgu.28), OPT-IN. Verify that TAG "
         "(default: the pinned REQUIRED_ENGINE_VERSION tag) is a published "
-        "release carrying all 27 assets, the six Windows ones included. Run it "
+        "release carrying every asset (36; 27 before the POSIX engine archives), "
+        "the six Windows ones included. Run it "
         "after the cut meant to carry Windows and before a client release pins "
         "it. Mutually exclusive with every other mode; no other mode's "
         "behaviour changes.",

@@ -17,6 +17,13 @@
 #   --without-openssl  loopback-only; EXPLICIT so an image that later ships
 #                      openssl-devel cannot silently link libssl.
 #
+# Build-only files are removed once pgvector is built (prune_build_only): the C
+# headers (include/), the static archives (lib/*.a), PGXS (the extension-build
+# makefiles) and the pkg-config files. Nothing at runtime reads them: initdb reads
+# share/ (postgres.bki and the rest), CREATE EXTENSION reads share/extension and
+# the pkglibdir modules, and the client's pgvector preflight runs bin/pg_config
+# --sharedir, all of which stay. About 10 MB of a 40 MB tree on mac-arm64.
+#
 # Produces a tree whose internal layout (bin/ lib/ share/) is relocation-stable:
 # PostgreSQL is relocatable by design — its programs (including pg_config)
 # resolve share/lib relative to the executable's own location via find_my_exec,
@@ -149,6 +156,25 @@ build_pgvector() {
     # pgvector's runtime dispatch (target_clones on supported paths).
     make -s PG_CONFIG="${BUNDLE_PREFIX}/bin/pg_config" OPTFLAGS=""
     make -s PG_CONFIG="${BUNDLE_PREFIX}/bin/pg_config" OPTFLAGS="" install
+}
+
+prune_build_only() {
+    # Files used only to BUILD against this PostgreSQL (pgvector is already built
+    # above), never at runtime: headers, static archives, PGXS, pkg-config. Paths
+    # come from pg_config (build prefix, before any relocation) and must sit
+    # inside BUNDLE_PREFIX before anything is removed.
+    local pgc="${BUNDLE_PREFIX}/bin/pg_config" libdir pkglibdir d
+    libdir="$("$pgc" --libdir)"
+    pkglibdir="$("$pgc" --pkglibdir)"
+    for d in "$libdir" "$pkglibdir"; do
+        case "$d" in
+            "${BUNDLE_PREFIX}"/*) ;;
+            *) echo "FATAL: pg_config reports $d outside ${BUNDLE_PREFIX}; not pruning" >&2; exit 1 ;;
+        esac
+    done
+    log "prune build-only files (include/, lib/*.a, pgxs, pkgconfig)"
+    rm -rf "${BUNDLE_PREFIX}/include" "${pkglibdir}/pgxs" "${libdir}/pkgconfig"
+    find "$libdir" -maxdepth 1 -type f -name '*.a' -delete
 }
 
 fixup_macos_relocatability() {
@@ -295,6 +321,14 @@ verify_and_mark() {
     test -f "${pkglib}/${vector_lib}" || { ls -la "${pkglib}"; exit 1; }
     test -f "${sharedir}/extension/vector.control" || { ls -la "${sharedir}/extension"; exit 1; }
     test -f "${sharedir}/extension/pg_trgm.control" || { ls -la "${sharedir}/extension"; exit 1; }
+    # prune_build_only took effect (a later edit that reorders it after a step
+    # that re-installs headers must fail here, not ship 10 MB back).
+    local libdir stray
+    libdir="$("${BUNDLE_PREFIX}/bin/pg_config" --libdir)"
+    test ! -e "${BUNDLE_PREFIX}/include" || { echo "include/ survived prune_build_only"; exit 1; }
+    test ! -e "${pkglib}/pgxs" || { echo "pgxs survived prune_build_only"; exit 1; }
+    stray="$(find "$libdir" -maxdepth 1 -name '*.a')"
+    test -z "$stray" || { echo "static archives survived prune_build_only: $stray"; exit 1; }
 
     # Record the configure --prefix so the relocation smoke can prove that an
     # extracted root differs from where the tree was built
@@ -311,6 +345,7 @@ mkdir -p "$BUNDLE_PREFIX"
 install_prereqs
 build_pg
 build_pgvector
+prune_build_only
 fixup_macos_relocatability
 fixup_linux_relocatability
 verify_and_mark

@@ -104,7 +104,7 @@ client nothing to install from it; the only recovery is another cut. So before t
 tag, say out loud which kind of cut this is and check the variable matches:
 
 ```bash
-gh variable get NX_WINDOWS_RELEASE_LEGS      # 'on' for a cut that must carry Windows (27 assets); anything else = 21
+gh variable get NX_WINDOWS_RELEASE_LEGS      # 'on' for a cut that must carry Windows (36 assets); anything else = 30
 ```
 
 A cut meant to carry Windows (the paired release's P5.0a cut, nexus-f9bgu.42) needs
@@ -129,7 +129,7 @@ Two more things must hold, and neither can be read from the variable:
 After the cut publishes (Step 4), confirm it carries them:
 
 ```bash
-uv run python scripts/check_engine_release_floor.py --require-windows engine-service-vX.Y.Z   # exit 0 = published, all 27 assets
+uv run python scripts/check_engine_release_floor.py --require-windows engine-service-vX.Y.Z   # exit 0 = published, all 36 assets (27 for a tag cut before the POSIX engine .txz assets)
 ```
 
 ### 3g. PRE-TAG check: no held changeset in the tagged tree (nexus-3wh8d.28)
@@ -156,9 +156,9 @@ git tag -a engine-service-vX.Y.Z -m "engine-service X.Y.Z" <commit>   # <commit>
 git push origin engine-service-vX.Y.Z
 ```
 
-Tag-push fires `engine-service-release.yml` → builds + cosign-signs the 3 native binaries for the supported targets (`linux-amd64`, `linux-arm64`, `mac-arm64`) plus their PG bundles, and publishes the GitHub release. The release is created as a DRAFT and promoted by the final `promote-release` job only after both matrices succeed and `scripts/promote_engine_release.sh` finds all 21 assets (nexus-cl14i); until then no consumer can resolve the tag, `check_engine_release_floor.py` reads it as unpublished, and a failed leg on any platform (mac-arm64 is the slowest) holds the whole release as a draft: rerun the failed jobs and promote runs again. (Intel macOS / `mac-amd64` is NOT a supported target — not built.) Publishes nothing to PyPI. Wait for the workflow to finish publishing before Step 5 (prior runs about 35 to 65 min (v0.1.118 took 36, a single measurement)).
+Tag-push fires `engine-service-release.yml` → builds + cosign-signs the 3 native binaries for the supported targets (`linux-amd64`, `linux-arm64`, `mac-arm64`), each also as `nexus-service-<arch>.txz` (the asset `nx init` downloads), plus their PG bundles, and publishes the GitHub release. The release is created as a DRAFT and promoted by the final `promote-release` job only after both matrices succeed and `scripts/promote_engine_release.sh` finds all 30 assets (nexus-cl14i; 36 with the Windows legs on); until then no consumer can resolve the tag, `check_engine_release_floor.py` reads it as unpublished, and a failed leg on any platform (mac-arm64 is the slowest) holds the whole release as a draft: rerun the failed jobs and promote runs again. (Intel macOS / `mac-amd64` is NOT a supported target — not built.) Publishes nothing to PyPI. Wait for the workflow to finish publishing before Step 5 (prior runs about 35 to 65 min (v0.1.118 took 36, a single measurement)).
 
-**With `NX_WINDOWS_RELEASE_LEGS` on and the `win-release` runner offline, every engine tag stays a draft until the Windows jobs time out** (nexus-f9bgu.28, code review m8). `promote-release` requires both Windows jobs to have succeeded while the switch is on (P0.4), the jobs queue with nothing to run them, and GitHub cancels a queued job after 24 hours; Linux and mac assets are attached all the while, so the release looks broken and is not. A hotfix cut during that window waits too. Recovery: Sam brings the runner back and runs `gh run rerun <run-id> --failed` (the Windows jobs run, `promote-release` follows). If the cut must ship WITHOUT Windows, Sam sets the variable to off first and then reruns the failed jobs: `vars` is read per job when it is scheduled, so `promote-release` then expects the 21 assets. Flipping the variable mid-run can make the jobs disagree with each other; every disagreement ends in a draft, never in a wrong publish.
+**With `NX_WINDOWS_RELEASE_LEGS` on and the `win-release` runner offline, every engine tag stays a draft until the Windows jobs time out** (nexus-f9bgu.28, code review m8). `promote-release` requires both Windows jobs to have succeeded while the switch is on (P0.4), the jobs queue with nothing to run them, and GitHub cancels a queued job after 24 hours; Linux and mac assets are attached all the while, so the release looks broken and is not. A hotfix cut during that window waits too. Recovery: Sam brings the runner back and runs `gh run rerun <run-id> --failed` (the Windows jobs run, `promote-release` follows). If the cut must ship WITHOUT Windows, Sam sets the variable to off first and then reruns the failed jobs: `vars` is read per job when it is scheduled, so `promote-release` then expects the 30 assets. Flipping the variable mid-run can make the jobs disagree with each other; every disagreement ends in a draft, never in a wrong publish.
 
 ### 5. POST-PUBLISH gate: `--acquire` (the leg that drives the PUBLISHED bytes)
 
