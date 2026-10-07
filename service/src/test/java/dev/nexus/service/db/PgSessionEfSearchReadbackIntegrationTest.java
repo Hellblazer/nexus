@@ -58,14 +58,14 @@ class PgSessionEfSearchReadbackIntegrationTest {
             // "" after rollback instead of the extension default 40).
             ctx.resultQuery("SELECT '[1]'::nexus.vector").fetch();
 
-            // Small request: the floor dominates (default 200 — no
+            // Small request: the floor dominates (default 600 — no
             // NX_HNSW_EF_SEARCH in the test env, pinned by the assertion).
             PgSession.setHnswEfSearch(ctx, 10);
-            assertThat(currentSetting(ctx)).isEqualTo("200");
+            assertThat(currentSetting(ctx)).isEqualTo("600");
 
             // Larger-than-floor request rises with nResults.
-            PgSession.setHnswEfSearch(ctx, 300);
-            assertThat(currentSetting(ctx)).isEqualTo("300");
+            PgSession.setHnswEfSearch(ctx, 800);
+            assertThat(currentSetting(ctx)).isEqualTo("800");
 
             c.rollback();
 

@@ -76,9 +76,10 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  *
  * <p><b>Recall under selectivity</b> uses the SAME HNSW GUCs production
  * search actually sets ({@code hnsw.iterative_scan=relaxed_order}, {@code
- * hnsw.ef_search=200} -- {@code PgVectorRepository#search}'s own {@code
+ * hnsw.ef_search=200} (the serving floor when this was measured; it is 600
+ * since nexus-3wh8d.31) -- {@code PgVectorRepository#search}'s own {@code
  * PgSession.setHnswEfSearch}/{@code hnsw.iterative_scan} calls, K=10 floored
- * to {@code PgSession.DEFAULT_EF_SEARCH_FLOOR}=200), measured against an
+ * to {@code PgSession.DEFAULT_EF_SEARCH_FLOOR}, then 200), measured against an
  * EXACT (ORDER BY rewritten so HNSW cannot serve it, see {@link #exactForm}) oracle graded
  * against its OWN predicate's live population. Round-3 rework added the
  * missing CONTROLS a standalone chunk_live_owners recall number cannot

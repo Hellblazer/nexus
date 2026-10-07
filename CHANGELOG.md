@@ -6,6 +6,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **The engine's default HNSW search floor rises from 200 to 600** (nexus-3wh8d.31). RDR-225 gives each (model, tenant) leaf its own HNSW graph, and the cloud gate then missed one true neighbor at ef 200 on one of its twelve queries (recall@10 0.90). A live sweep on the production leaves restored 12/12 at ef 400 with latency flat up to 1000, so 600 keeps headroom over the measured point. It applies to local installs at the next engine cut; the managed cloud sets its own floor through `NX_HNSW_EF_SEARCH`.
+
 ## [7.73.0] - 2026-10-07
 
 Pairs with engine-service-v0.1.150 (tagged 2026-10-07 on c857a33e1; `REQUIRED_ENGINE_VERSION` moves from 0.1.149 to 0.1.150), the RDR-225 engine. All seven wire-ledger entries are `[additive]` (an old client against the new engine is safe), so the engine deploys to the cloud before this client tag. **This release carries a one-way data migration. On a local install, the first engine start after the upgrade rewrites every vector into new tables (`vectors-030-1`), and that is IRREVERSIBLE: installing an older engine afterwards fails on the new layout.** The abort criteria and what stands in for a rollback are in `docs/runbooks/rdr-225-cloud-deploy.md` § 8 (local installs) and § 6 (cloud). Before you upgrade, make sure the disk holding the Postgres data directory has free space of at least 2.2 times the size of the vector tables, and reindex or delete any collection whose chunk vectors do not match its embedding model's width: the walk fails on one, and no legacy shape is supported.

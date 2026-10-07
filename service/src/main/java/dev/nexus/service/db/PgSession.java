@@ -75,11 +75,17 @@ public final class PgSession {
      * crowded the gate tenant's true top-2 out). {@code iterative_scan}
      * cannot recover them: it is starvation-triggered and scans OUTWARD from
      * the frontier; neighbors pruned by the ef-bounded traversal are gone.
-     * Only a larger candidate list finds them — 200 is 5x the default
-     * (the measured failure was marginal: a single insert displaced the
-     * top-2, i.e. the boundary sat right at 40).
+     * Only a larger candidate list finds them. The floor was 200 (5x the
+     * default; the measured failure was marginal: a single insert displaced
+     * the top-2, i.e. the boundary sat right at 40). RDR-225 replaced the one
+     * global graph with one graph per (model, tenant) leaf, and the cloud
+     * gate then missed one true neighbor at ef 200 (code-filtered-001,
+     * recall@10 0.90; tail variance near tied distances, nexus-3wh8d.31,
+     * T2 nexus_rdr/225-recall-per-leaf-analysis). The live sweep (conexus
+     * T2 [29566]) restored 12/12 at ef 400 with latency flat to 1000; 600
+     * keeps headroom over that measured point.
      */
-    static final int DEFAULT_EF_SEARCH_FLOOR = 200;
+    static final int DEFAULT_EF_SEARCH_FLOOR = 600;
 
     /**
      * Default serving value for {@code hnsw.max_scan_tuples} (nexus-wbfpw.47;
