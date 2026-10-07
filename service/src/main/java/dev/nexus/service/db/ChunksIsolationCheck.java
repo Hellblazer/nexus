@@ -151,7 +151,9 @@ public final class ChunksIsolationCheck {
             + "OR-ed, so this role would read or write every tenant's chunks (nexus-wbfpw.48)."
             + (violations.size() > 1 ? " " + (violations.size() - 1) + " more violation(s) follow it." : "")
             + " Either drop the policy as the table owner (DROP POLICY " + v.policy()
-            + " ON nexus.chunks), or stop " + connectedRole + " inheriting " + v.role()
+            + " ON nexus.chunks, then SELECT nexus.partition_sync_access('nexus.chunks'::regclass) so the copies"
+            + " on every model partition and leaf go with it; the next boot refuses on each leaf copy otherwise),"
+            + " or stop " + connectedRole + " inheriting " + v.role()
             + " (REVOKE it, or GRANT ... WITH INHERIT FALSE). For chunks_gate_probe_owner_read, which"
             + " vectors-029 creates for the migrating role, run migrations as a role the service does not"
             + " inherit (NX_DB_ADMIN_URL, NX_DB_ADMIN_USER and NX_DB_ADMIN_PASS), then drop the policy.";
@@ -418,10 +420,11 @@ public final class ChunksIsolationCheck {
             + (gaps.size() > REFUSAL_GAPS_SHOWN ? "; " + (gaps.size() - REFUSAL_GAPS_SHOWN) + " more gap(s) follow" : "")
             + ". PostgreSQL inherits neither the row-security flags nor the policies down a partition tree, and a "
             + "model partition or leaf can be queried directly, so this service does not serve tenant traffic until "
-            + "every relation mirrors its parent (RDR-225). As the table owner, re-mirror each parent onto its "
-            + "whole tree: SELECT nexus.partition_sync_access('nexus.chunks'::regclass) and the same for "
-            + "nexus.taxonomy_centroids (after putting right any policy that is wrong on the PARENT, which the "
-            + "function copies from).";
+            + "every relation mirrors its parent (RDR-225). The schema migration already re-mirrors both parents "
+            + "onto their trees at every boot, so a gap that survives it is one the copy cannot fix: a wrong PARENT "
+            + "(the copy reads from it) or a migrating role that does not own the tables. As the table owner, put "
+            + "the parent right, then SELECT nexus.partition_sync_access('nexus.chunks'::regclass) and the same for "
+            + "nexus.taxonomy_centroids.";
     }
 
     private static boolean intact(DataSource ds) throws SQLException {

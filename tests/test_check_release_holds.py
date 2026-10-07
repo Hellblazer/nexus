@@ -88,3 +88,12 @@ def test_this_repo_holds_vectors_030_1_until_rdr_225_is_released() -> None:
     # The hold this script exists for. Deleting its line in scripts/release-holds.txt is the release decision
     # (nexus-3wh8d.28); this test is deleted in the same commit.
     assert [h.changeset for h in crh.check(REPO)] == ["vectors-030-1"]
+
+
+def test_a_changeset_mentioned_only_in_an_xml_comment_is_not_defined(tmp_path: Path) -> None:
+    # nexus-3wh8d.17 M6: the scan reads raw XML, so a header that quotes `<changeSet id="x">` must not count as a
+    # definition. A hold on an id that exists only in a comment is the typo case, an error and not a pass.
+    commented = '<databaseChangeLog>\n  <!-- was <changeSet author="x" id="vectors-030-1"> -->\n</databaseChangeLog>\n'
+    root = _tree(tmp_path, "vectors-030-1 nexus-3wh8d.28 one-way walk\n", {"a.xml": commented})
+    with pytest.raises(crh.HoldsError, match="vectors-030-1"):
+        crh.check(root)

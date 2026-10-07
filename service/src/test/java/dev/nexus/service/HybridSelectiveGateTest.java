@@ -192,7 +192,8 @@ class HybridSelectiveGateTest {
         // production no longer executes. The behavioral tests below anchor that
         // production actually returns the right rows at fixture scale; production-scale
         // recall is the conexus xr7.8.9 gate's.
-        Table<?> gateFn = TEXT_GATE_PROBE_1024.call(TOKEN, new String[] {COLL}, null, null, TARGETS + 1);
+        Table<?> gateFn = TEXT_GATE_PROBE_1024.call(
+            TOKEN, new String[] {COLL}, null, null, TARGETS + 1, "voyage-context-3", TENANT);
         // Since vectors-029 (nexus-wbfpw.48) the probe is a SECURITY DEFINER function, which the planner
         // never inlines: EXPLAIN of the call is one Function Scan and shows nothing of the body. The
         // probe's index use is pinned where it can be seen and where it is true to production, in
@@ -209,7 +210,7 @@ class HybridSelectiveGateTest {
             .map(c -> Chash.fromHex(c).toBytes())
             .toArray(byte[][]::new);
         Table<?> rankFn = TEXT_GATED_SEARCH_BY_CHASH_1024.call(
-            queryVector(), chashes, new String[] {COLL}, null, null, 50);
+            queryVector(), chashes, new String[] {COLL}, null, null, 50, "voyage-context-3", TENANT);
         String rankPlan = explain(rankFn);
         // The rank filters by chash (PK) and sorts by exact distance — the ORDER BY embedding
         // can never be pushed into an HNSW index scan (which is what hnsw.max_scan_tuples

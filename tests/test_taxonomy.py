@@ -1010,7 +1010,10 @@ def test_assign_single_cross_collection_finds_foreign_topic(
     _seed_chunks_for_tenant(t2_service_env, "coll_A_xc", doc_ids)
     db.taxonomy.discover_topics("coll_A_xc", doc_ids, embeddings, texts, chroma_client)
 
-    # Query from collection B with cross_collection=True — should find A's topics
+    # Query from collection B with cross_collection=True — should find A's topics.
+    # RDR-225: a cross-collection query matches centroids of the SOURCE collection's model, so the
+    # source is registered (one stub chunk registers it under the substrate's model).
+    _seed_chunks_for_tenant(t2_service_env, "coll_B_xc", [canonical_chunk_id("doc-b-xc")])
     new_emb = rng.standard_normal(_DIM).astype(np.float32) * 0.1
     new_emb[0] += 3.0
     result = db.taxonomy.assign_single(

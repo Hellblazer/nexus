@@ -55,6 +55,8 @@ class PlainSearchTextGatedSearchExplainTest {
     private static final String SVC_ROLE = "svc_zrcj7_explain";
     private static final String SVC_PASS = "svc_zrcj7_explain_pass";
     private static final String COLL = "knowledge__zrcj7-explain__voyage-context-3__v1"; // 1024
+    /** RDR-225: the model every collection of this class is registered under; every read function names it. */
+    private static final String MODEL = "voyage-context-3";
     private static final String TOKEN = "zrcj7raretoken";
     private static final int FILLER = 200;  // vector-closest to the query, no token
     private static final int TARGETS = 4;   // farthest from the query, carry the token
@@ -256,7 +258,7 @@ class PlainSearchTextGatedSearchExplainTest {
 
     @Test
     void explain_plainSearch_usesHnswIndex_notFunctionScan() {
-        Table<?> fn = PLAIN_SEARCH_1024.call(vec(1.0, 0.0), colls(COLL), null, null, 10);
+        Table<?> fn = PLAIN_SEARCH_1024.call(vec(1.0, 0.0), colls(COLL), null, null, 10, MODEL, TENANT);
         String plan = explain(ctx -> ctx.select(fn.field("id")).from(fn));
         assertThat(plan)
             .as("plain_search_1024 must use the HNSW index idx_chunks_embedding_1024 for "
@@ -305,21 +307,26 @@ class PlainSearchTextGatedSearchExplainTest {
         // what the planner actually chooses under real cost pressure (the same
         // discipline the retired text_gated_search_1024 test used).
         Table<?> fn = TEXT_GATED_SEARCH_BY_CHASH_1024.call(
-            vec(1.0, 0.0), chashes(targetChashes), colls(COLL), null, null, 50);
+            vec(1.0, 0.0), chashes(targetChashes), colls(COLL), null, null, 50, MODEL, TENANT);
         String plan = explainSeqscanOff(ctx -> ctx.select(fn.field("id")).from(fn));
         assertThat(plan)
             .as("a Function Scan node means the function is not inlinable (plpgsql) — "
                 + "vectors-011 must use an inlinable LANGUAGE sql function. Plan was:%n%s",
                 plan)
             .doesNotContain("Function Scan");
-        // RDR-225: the read path does not prune by model yet, so the planner also visits the tenant's EMPTY leaves
-        // of the other 1024-d model, where an HNSW scan is cheap; the claim is about the leaf that holds the rows.
-        assertThat(plan.lines().toList())
+        // RDR-225: the function now names its (model, tenant) leaf, so the plan holds that one leaf and the claim is
+        // about the WHOLE plan again, as it was before the table was partitioned (Phase 1 had relaxed it to the
+        // populated leaf because the planner also visited the tenant's empty leaves of the other models).
+        assertThat(plan)
             .as("text_gated_search_by_chash_1024's rank must NOT NATURALLY touch the "
-                + "HNSW index on the populated leaf (the nexus-lcogi starvation class this design closes) "
-                + "under normal cost pressure (enable_seqscan=off only). Plan was:%n%s", plan)
-            .noneMatch(line -> line.contains(PartitionScratch.expectedName("chunks", "voyage-context-3", TENANT))
-                && line.contains("Index Scan using") && line.contains("embedding_1024_idx"));
+                + "HNSW index (the nexus-lcogi starvation class this design closes) "
+                + "under normal cost pressure (enable_seqscan=off only). Plan was:%n%s",
+                plan)
+            .doesNotContainPattern("Index Scan using \"?\\S*embedding_1024_idx");
+        assertThat(plan)
+            .as("the plan reads exactly one (model, tenant) leaf of nexus.chunks. Plan was:%n%s", plan)
+            .contains(PartitionScratch.expectedName("chunks", MODEL, TENANT))
+            .doesNotContain("Subplans Removed");
         assertThat(plan)
             .as("text_gated_search_by_chash_1024's plan must carry NO trigram `<%` "
                 + "operator -- the gate is not re-evaluated here, only chash = ANY(...) "
@@ -364,7 +371,7 @@ class PlainSearchTextGatedSearchExplainTest {
         // the regime where hybridSearch's Java dispatch routes to
         // text_gated_search_hnsw_first_1024, not the selective by-chash function.
         Table<?> fn = TEXT_GATED_SEARCH_HNSW_FIRST_1024.call(
-            vec(1.0, 0.0), DENSE_TOKEN, colls(DENSE_COLL), null, null, 50);
+            vec(1.0, 0.0), DENSE_TOKEN, colls(DENSE_COLL), null, null, 50, MODEL, TENANT);
         String plan = explain(ctx -> ctx.select(fn.field("id")).from(fn));
         assertThat(plan)
             .as("text_gated_search_hnsw_first_1024 must use the HNSW index "
@@ -461,7 +468,7 @@ class PlainSearchTextGatedSearchExplainTest {
         // correctness independent of when Java chooses to call it (coordinator: "add the
         // same oracle against the hnsw-first function").
         Table<?> fn = TEXT_GATED_SEARCH_HNSW_FIRST_1024.call(
-            vec(1.0, 0.0), ORDER_TOKEN, colls(ORDER_COLL), null, null, 50);
+            vec(1.0, 0.0), ORDER_TOKEN, colls(ORDER_COLL), null, null, 50, MODEL, TENANT);
         List<String> ids = new ArrayList<>();
         List<Double> distances = new ArrayList<>();
         tenantScope.withTenant(TENANT, ctx -> {

@@ -344,7 +344,8 @@ class GraphHopParityTest {
             ResultSet rs = su.createStatement().executeQuery(
                 "SELECT id, chash FROM nexus.search_graph_hop_1024(" +
                 queryVecLiteral(1024) + ", ARRAY['g0']::text[], " +
-                "ARRAY['" + COLL_G + "']::text[], 'cites', 1, 'out', NULL::jsonb, 10) ORDER BY distance");
+                "ARRAY['" + COLL_G + "']::text[], 'cites', 1, 'out', NULL::jsonb, 10, 'voyage-context-3', '" + TENANT_A
+                + "') ORDER BY distance");
             int seen = 0;
             while (rs.next()) {
                 String id = rs.getString("id");
@@ -603,7 +604,8 @@ class GraphHopParityTest {
             depth + ", " +
             sqlText(direction) + ", " +
             (whereJson == null ? "NULL::jsonb" : "'" + whereJson + "'::jsonb") + ", " +
-            n + ")";
+            n + ", " + sqlText(collection.contains("__minilm-l6-v2-384__") ? "minilm-l6-v2-384" : "voyage-context-3")
+            + ", " + sqlText(tenantFor(collection)) + ")";
         return runIds(conn, sql);
     }
 

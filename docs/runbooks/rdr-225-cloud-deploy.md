@@ -1,7 +1,8 @@
-# RDR-225 cloud deploy and abort runbook (vectors-030-1)
+# RDR-225 cloud deploy and abort runbook (vectors-030-1 and vectors-031)
 
 Operator runbook for the engine tag that carries changeset `vectors-030-1`, which partitions `nexus.chunks` and
-`nexus.taxonomy_centroids` by embedding model, then by tenant. Written for nexus-3wh8d.26 from the deploy-shape
+`nexus.taxonomy_centroids` by embedding model, then by tenant, and `vectors-031-1` and `-2`, which give every read
+function a model and a tenant predicate so each search reads one leaf. Written for nexus-3wh8d.26 from the deploy-shape
 critique (T2 `nexus_rdr/225-deploy-shape-review-by-eae`, Critical 1) and the cloud topology answer (T2
 `nexus_rdr/225-cloud-topology`). Shape follows `rdr-191-phase5-cloud-fk.md`.
 
@@ -14,7 +15,8 @@ name conexus's tooling (the PITR fork, the restore, the SSM redeploy document) a
 what must be true before and after them and does not give their commands.
 
 **How facts are marked.** A statement without a marker was read from the source named beside it, at develop
-`c4e3dc15a` (the commit that pinned `vectors-030-1` as one transaction). **Unverified:** marks a fact nobody here has
+`c4e3dc15a` (the commit that pinned `vectors-030-1` as one transaction); the `vectors-031` statements (§ 1, § 4, § 6.1)
+were read at `4fe5c20c1` plus the fix round of nexus-3wh8d.17 and .18. **Unverified:** marks a fact nobody here has
 measured or seen. Section 10 collects them. **Placeholder `.27:`** marks a number the PITR-fork rehearsal
 (nexus-3wh8d.27) measures and fills in; none was invented here.
 
@@ -30,6 +32,17 @@ measured or seen. Section 10 collects them. **Placeholder `.27:`** marks a numbe
   (an UPDATE of every row of each).
 - The changeset sits after `vectors-029` and before the `runAlways` grants (`grants-nexus-svc.xml`,
   `grants-nexus-diag.xml`), which run in the same walk, each as its own changeset.
+- `vectors-031-1` and `vectors-031-2` run after `vectors-030-1`, each in its own transaction, so each commits (or
+  fails) after the irreversible step. `vectors-031-1` drops the 30 old read-function signatures and creates the
+  new ones (two trailing parameters, `p_embedding_model` and `p_tenant`), then fails the walk unless each of the 30
+  names has exactly one signature. `vectors-031-2` redefines the three `text_gate_probe_<dim>` functions: definer
+  plpgsql when `vectors-029`'s guard still holds (the owner policy `chunks_gate_probe_owner_read` names exactly the
+  migrating role and no RLS-subject login role has that role's privileges), invoker SQL otherwise; its definer outcome
+  ends with `vectors-029`'s post-condition. Function definitions and grants only: no data effect.
+- After the walk, `SchemaMigrator.migrate` reads both partition trees once and, only if a relation does not mirror its
+  parent, runs `partition_sync_access` for both parents as the schema owner (§ 6.1). After boot the engine runs
+  `ChunksIsolationCheck` over both trees (every parent, model partition and leaf: RLS enabled and forced, the root's
+  permissive policies present). A gap that survives the repair is a boot refusal (§ 6.1).
 - The cloud deploy is stop-start: `docker stop -t 30 conexus-engine`, `docker rm -f`, `docker run` of the new tag,
   one replica, no blue-green. Nothing serves `/v1/*` during the walk (T2 `nexus_rdr/225-cloud-topology`).
 - Downtime budget: about 15 minutes when the fork rehearsal measured it; longer needs only Sam's go, no tenant notice
@@ -59,8 +72,8 @@ All must hold before conexus starts the window. Record the evidence for each in 
    deploy and is not flipped in the same window (`docs/operations/ownerless-write-cutover.md`). conexus reads
    `/v1/status` `ownerless_write_mode` and reports the value; the gate in § 7 asserts that value.
 7. Order against the client release. Recommendation of the critique, pending Sam's choice (the wire-ledger entries
-   for the 409 `collection_model_mismatch`, 422 `unregistered_collection` and 503 `tenant_creation_busy` changes are
-   still to be written by hand): deploy the engine first, soak, verify (§ 7), and only then push the client tag that
+   for the 409 `collection_model_mismatch`, 422 `unregistered_collection`, 503 `tenant_creation_busy`, the read-path
+   behavior changes and the `chunks_tenant_isolation_intact` semantics are in `docs/wire-contract-pending.md`): deploy the engine first, soak, verify (§ 7), and only then push the client tag that
    bumps `REQUIRED_ENGINE_VERSION`. A PITR restore after the floor-bumped client has shipped leaves local installs
    pinned to a tag the cloud abandoned; engine tags are immutable, so the fix would be a new engine tag and a new
    client.
@@ -163,6 +176,19 @@ SELECT (SELECT count(*) FROM nexus.catalog_document_chunks m
 ```
 
 ABORT if any is not 0.
+
+**Probe M (collection names against registry models).** The released client groups a search by the model token in
+the collection NAME; the engine now reads the REGISTRY model and refuses a combined call whose collections disagree
+(400 `mixed embedding models in one combined-query call`). A conformant name whose token differs from
+`catalog_collections.embedding_model` is how a released client would reach that refusal.
+
+```sql
+SELECT count(*) AS name_model_disagrees FROM nexus.catalog_collections
+ WHERE name ~ '^[a-z]+__.+__.+__v[0-9]+$' AND split_part(name, '__', 3) <> embedding_model;
+```
+
+Expect 0. HOLD if not, and tell Sam which collections. Unverified: the name grammar here is the RDR-103 shape read
+from AGENTS.md; legacy names that do not match it are not counted.
 
 **Probe O (owner of `diag_chash_conformance`).** The walk drops this view and recreates it. A superuser-owned copy is
 recreated owned by the migrating role. If the migrating role owns neither the view nor the schema, the walk logs a
@@ -267,14 +293,14 @@ event=schema_migration_complete new_changesets=<n> reexecuted_changesets=<r> pen
 The three counts partition `pending_at_start` exactly: `new + reexecuted + mark_ran = pending`. The counts are
 de-duplicated by changeset identity, so the duplicate `databasechangelog` rows production carries do not inflate them.
 
-With the cloud at `engine-service-v0.1.149` and the tag cut from develop at or after `c4e3dc15a`:
+With the cloud at `engine-service-v0.1.149` and the tag cut from develop at or after `86896d534` (the commit that added `vectors-031`):
 
 | Field | Predicted | Why |
 | --- | --- | --- |
-| `new_changesets` | 1 | `vectors-030-1`. The other changes since v0.1.149 are `db.changelog-master.xml` (the include) and the content of the `runAlways` `grants-nexus-svc.xml`. |
-| `reexecuted_changesets` | RUNALWAYS | The count of `runAlways` changesets at the tag. 12 at `engine-service-v0.1.149` and at `c4e3dc15a`: counted by a script over those trees; 5 in `grants-nexus-diag.xml`, 5 in `grants-nexus-svc.xml`, 1 each in `staging-001-landing-tables.xml` and `taxonomy-011-doc-id-bytea.xml`. |
+| `new_changesets` | 3 | `vectors-030-1`, `vectors-031-1` and `vectors-031-2`. The other changes since v0.1.149 are `db.changelog-master.xml` (the includes) and the content of the `runAlways` `grants-nexus-svc.xml`. |
+| `reexecuted_changesets` | RUNALWAYS | The count of `runAlways` changesets at the tag. 12 at `engine-service-v0.1.149` and at `4fe5c20c1` (recounted for this fix round; no `runAlways` changeset was added since v0.1.149): counted by a script over those trees; 5 in `grants-nexus-diag.xml`, 5 in `grants-nexus-svc.xml`, 1 each in `staging-001-landing-tables.xml` and `taxonomy-011-doc-id-bytea.xml`. |
 | `mark_ran_changesets` | 0 | A `runAlways` changeset whose precondition fails is MARK_RAN; any non-zero value names a skipped grant and must be explained. |
-| `pending_at_start` | 1 + RUNALWAYS = 13 | Liquibase counts every `runAlways` changeset as unrun on every walk. |
+| `pending_at_start` | 3 + RUNALWAYS = 15 | Liquibase counts every `runAlways` changeset as unrun on every walk. |
 
 Count RUNALWAYS at the tag, never from this table:
 
@@ -283,13 +309,14 @@ git grep -n -E '<changeSet [^>]*runAlways="true"' <engine-tag> -- service/src/ma
 ```
 
 This matches the changeset element only (comments that mention the attribute are not matched); it returned 12 at
-`engine-service-v0.1.149`. A changeset whose attributes wrap onto a second line would be missed: if the number
+`engine-service-v0.1.149` and at `4fe5c20c1`. A changeset whose attributes wrap onto a second line would be missed: if the number
 differs from 12 at the release tag, recount by script, not by eye. Also confirm no changeset was added or removed
-since `c4e3dc15a` with `git diff --stat c4e3dc15a <tag> -- service/src/main/resources/db/changelog/`.
+since `4fe5c20c1` with `git diff --stat 4fe5c20c1 <tag> -- service/src/main/resources/db/changelog/`; the expected
+changeset ids at the tag are `vectors-030-1`, `vectors-031-1`, `vectors-031-2` and nothing else new.
 
 Also expected, not anomalies:
 
-- `event=schema_migration_pending changesets=13` before the walk (the same `pending` figure).
+- `event=schema_migration_pending changesets=15` before the walk (the same `pending` figure).
 - `event=schema_changelog_duplicate_rows`: production carried 13 extra rows across `grants-nexus-diag-1` and `-2` on
   2026-09-14 (AGENTS.md § Engine-service release). The count may have changed; record it.
 - `event=disk_preflight_skipped` (cloud has no `NX_PG_DATA_DIR`).
@@ -359,15 +386,59 @@ conexus runs these; nexus watches and answers.
    The proper guard, a healthcheck and rollback in the document itself, is conexus bead conexus-6d2n; until it lands
    this step is manual.
 6. Watch the engine log for, in order: `schema_migration_start`, `schema_migration_session`,
-   `schema_migration_pending changesets=13`, then either `schema_migration_complete` (§ 4) or
-   `schema_migration_failed`. After complete: `chunks_isolation_check_failed` or `root_token_seed_*` are exits too.
+   `schema_migration_pending changesets=15`, then either `schema_migration_complete` (§ 4) or
+   `schema_migration_failed`. After complete: `partition_access_drift_repaired` (WARN) means the owner repair ran;
+   `chunks_isolation_check_failed` or `root_token_seed_*` are exits too.
 7. Walk time cap: the rehearsed time, FORK_WALL_TIME (`.27:`), times CAP_FACTOR (`.27:`), and never past the budget
    Sam set for the window (default about 15 minutes). At the cap: do not kill the container. Ask Sam to extend or abort.
    A kill before commit rolls back, so it is safe for data, but the migration backend can keep running and holding locks
    after its client is gone (the server notices a closed socket only when it next reads or writes). Find it by role,
    confirm it is the walk (`state = 'active'`, a `chunks_new` statement, `xact_start` at the walk's start), and have
    conexus terminate it with `pg_terminate_backend` before any restart. Unverified: this behaviour on Crunchy.
-8. After `schema_migration_complete` and a bound HTTP port: § 7.
+8. After `schema_migration_complete` and a bound HTTP port, and before § 7.3's frozen-query run: step 9, then § 7.
+9. **Post-boot VACUUM, run by conexus right after the engine is up** (nexus-3wh8d.17 code review S1, .18 critique 2).
+   The walk is one transaction and cannot VACUUM, and its step 5 ends with ANALYZE only, so every new leaf is loaded,
+   analyzed and never vacuumed: its visibility map is empty. Run, as the table owner (`nexus_admin`), one statement
+   per parent (VACUUM cannot run inside a transaction block, and on a partitioned parent it recurses into every
+   model partition and leaf):
+
+   ```sql
+   VACUUM (ANALYZE) nexus.chunks;
+   VACUUM (ANALYZE) nexus.taxonomy_centroids;
+   ```
+
+   Expected duration: placeholder `.27:` VACUUM_WALL_TIME (the fork measures it on the walked layout, per parent, with
+   VACUUM_PEAK_EXTRA_IO if the volume's throughput is metered). It runs while the engine serves and takes no lock that
+   blocks reads or writes (`VACUUM` takes SHARE UPDATE EXCLUSIVE); it competes for I/O, so conexus starts it in the
+   first minutes and reads `pg_stat_progress_vacuum` rather than assuming. `nexus_svc` holds MAINTAIN on the parents
+   and on the leaves it was granted (`grants-005`, `partition_sync_access`), so a role that is not the owner may also
+   run it; Unverified: whether PostgreSQL 17 on Crunchy accepts MAINTAIN on the parent alone for the recursion (it
+   checks each partition), so default to the owner. Confirm with
+   `SELECT relname, last_vacuum FROM pg_stat_user_tables WHERE schemaname = 'nexus' AND relname LIKE 'chunks%'`: every
+   leaf shows a `last_vacuum` after the walk. Autovacuum would do the same, cost-throttled, across all tenants, minutes
+   to hours later; this step removes the wait.
+
+   **What searches do until it has run.** The cardinality router (`NX_SEARCH_EXACT_MAX_ROWS`, default 10,000, on by
+   default) runs a probe before every plain search: it counts up to 10,001 rows of the (model, tenant, collections)
+   selection in that one leaf (`PgVectorRepository.probeSelectedRowsQuery`). On a vacuumed leaf the planner reads those
+   rows from the primary-key prefix as an Index Only Scan. On an unvacuumed leaf the same statement took a Seq Scan at
+   a 26 percent share (measured in the P0.2 prototype and in the Phase 2 pin work; the cause is the empty visibility
+   map, an inference from those runs and not verified on a production-shaped leaf). So until VACUUM runs, each plain
+   search over a collection that is more than about a quarter of its leaf pays that scan before the HNSW or exact plan
+   starts. Arithmetic, not measured: at a 26 percent share the scan reads about 40,000 rows (10,001 divided by 0.26)
+   when the matches are spread through the heap. The worst case is a collection indexed in one batch, whose rows sit
+   together late in the heap: the scan then reads every earlier page of the leaf before it finds its 10,001 rows, up
+   to most of a multi-gigabyte leaf per search, until the search hits `NX_SEARCH_STATEMENT_TIMEOUT_MS` (default
+   30,000 ms; SQLSTATE 57014). Results stay correct; the cost is latency and, at the worst, timeouts, on the largest
+   collections, in the window the deploy is being watched.
+
+   **Soak option.** If the VACUUM cannot start at once, set `NX_SEARCH_EXACT_MAX_ROWS=0` in the engine's environment
+   before the first boot (or restart the container with it; the value is read once at start-up and logged as
+   `event=search_exact_router max_rows=0`). Threshold 0 turns the router off: no probe runs and every plain search
+   takes the HNSW path, which is how the engine behaved before the router existed (with the exact fallback on an
+   empty or short result). Remove the variable and restart once
+   the VACUUM has finished, or leave it for the soak and record that in T2. Unverified: HNSW-only latency on the
+   walked layout; the rehearsal measures it.
 
 ## 6. Abort and rollback
 
@@ -399,6 +470,24 @@ SELECT (SELECT count(*) FROM public.databasechangelog WHERE id = 'vectors-030-1'
 Read the engine's own error text beside it: `schema_migration_failed error="..."` carries Liquibase's message, which
 names the failing changeset id. That tells you which branch of § 6.2 or § 6.3 you are in; it does not decide between
 them.
+
+**Failure points after `vectors-030-1` has committed.** Each of these leaves the walk committed (§ 6.3, no tag flip)
+and the engine exiting 1. A failed changeset rolls back its own transaction only, so the next boot resumes at it. The
+remedy is fix-forward.
+
+| Where | Message | What it means and the remedy |
+| --- | --- | --- |
+| `vectors-031-1` post-condition | `vectors-031-1: expected exactly 30 read-path functions (one signature each), found N: ...` | A read-function name still has a second signature after the drops: a hand-made overload the changeset does not know. The message lists every signature found. As the owner, `DROP FUNCTION` the stale one (the old ones carry no `p_embedding_model`), then restart the engine. Before the window: `SELECT proname, pg_get_function_identity_arguments(oid) FROM pg_proc WHERE pronamespace = 'nexus'::regnamespace AND proname ~ '_[0-9]{3,4}$'` should show one row per name. |
+| `vectors-031-2` post-condition, signatures | `vectors-031: expected exactly 3 read-path functions (one signature each), found N: ...` | The same, for `text_gate_probe_384`, `_768` and `_1024`. Same remedy. |
+| `vectors-031-2` owner assertion | `vectors-031-2: probe(s) ... are SECURITY DEFINER but not owned by the migrating role` | A definer probe is owned by a different role than the one migrating. The changeset recreates the probes as the migrating role, so this fires only when that did not happen. Remedy: `ALTER FUNCTION nexus.text_gate_probe_<dim>(text, text[], jsonb, text, int, text, text) OWNER TO <migrating role>`, or drop the probes and restart. Before the window: `SELECT proname, proowner::regrole, prosecdef FROM pg_proc WHERE proname LIKE 'text_gate_probe_%'`. |
+| `vectors-031-2` guard assertions | `vectors-031-2: policy chunks_gate_probe_owner_read must name exactly the migrating role ...` or `vectors-031-2: role(s) ... have the privileges of the migrating role ...` | The copy of `vectors-029`'s post-condition. The changeset chooses the invoker branch whenever the policy does not name the migrating role or a login role subject to RLS inherits that role, so these fire only when the state moves during the walk. Remedy: put the policy or the membership right (the second message names the roles), restart. Do not weaken the check. |
+| After the complete line | `event=chunks_isolation_check_failed` (a policy applies to the service role) or `event=chunks_isolation_structure_gaps` (a parent, model partition or leaf does not mirror its parent) | The engine refuses to serve and exits 1; under `--restart unless-stopped` the container loops until someone repairs it (§ 5.5 sets `--restart=no` for the first boot). **Drift on a model partition or leaf no longer loops here.** The migration step re-mirrors both parents onto their trees at every boot as the schema owner and logs `event=partition_access_drift_repaired count=N relations=[...]` at WARN when it had work to do (a healthy boot logs `event=partition_access_checked` at INFO and changes nothing). Read that WARN: it names the relations that drifted, and a repaired relation is a finding to explain (who created or edited it), not noise. The manual remedy remains only for drift the copy cannot fix, which is logged as `event=partition_access_drift_unrepaired` (ERROR, naming the relations and the problems) just before the refusal: a wrong policy or flag on the PARENT, or a migrating role that does not own the tables or the function. **Remedy, as the table owner (`nexus_admin`; the engine's runtime role cannot do this):** put any wrong policy on the PARENT right first (the function copies from it), then `SELECT nexus.partition_sync_access('nexus.chunks'::regclass);` and `SELECT nexus.partition_sync_access('nexus.taxonomy_centroids'::regclass);`. For a policy violation (`chunks_gate_probe_owner_read` applying to the service role): `DROP POLICY chunks_gate_probe_owner_read ON nexus.chunks` and then `partition_sync_access` for both parents (dropping it on the parent alone leaves its copy on every leaf, and the next boot refuses on each), or `REVOKE` the role membership. Then `docker start conexus-engine`. |
+| After the complete line | `root_token_seed_*` | Token seeding failed; unrelated to the layout. Read the line. |
+
+Rehearsal assertion (nexus-3wh8d.27): the engine on the fork, migrated by the production-shaped non-superuser role
+(`nexus_admin`), boots through `ChunksIsolationCheck` and logs `event=chunks_isolation_check_ok`. A rehearsal that
+migrated as a superuser proves nothing about this (a superuser holds USAGE on every role, so `vectors-029`'s
+precondition would MARK_RAN there and the owner policy would never exist).
 
 ### 6.2 Not committed: a tag flip is safe
 
@@ -482,7 +571,15 @@ that the data survived.
    per-table row counts of `catalog_document_chunks`, `topic_assignments` and `chunk_orphaned_at` equal their pre-flip
    counts. Zero tolerance: the walk's own step 6 reconciled the copy; this checks the live state after boot. Take the
    "before" counts in the same window as Probe V. Under RLS the same per-tenant caveat as § 3 applies.
-2. **ANALYZE fired.** Every leaf, both parents and the three referencing tables were analyzed in step 5.
+2. **VACUUM ran, and the probe on a leaf before and after.** § 5.9's VACUUM finished and every leaf shows a
+   `last_vacuum` after the walk. Record, from the fork rehearsal (nexus-3wh8d.27), the router probe's latency and its
+   plan on one large leaf BEFORE the VACUUM and AFTER it (`EXPLAIN (ANALYZE, BUFFERS)` of the statement
+   `probeSelectedRowsQuery` builds: `SELECT count(*) FROM (SELECT 1 FROM nexus.chunks WHERE embedding_model = <model>
+   AND tenant_id = <tenant> AND collection = ANY(<names>) LIMIT 10001) probe`): placeholders `.27:`
+   PROBE_MS_BEFORE_VACUUM, PROBE_PLAN_BEFORE_VACUUM, PROBE_MS_AFTER_VACUUM, PROBE_PLAN_AFTER_VACUUM, on the
+   collection with the largest share of its leaf. If the unvacuumed probe is not bounded well under
+   `NX_SEARCH_STATEMENT_TIMEOUT_MS`, the soak runs with `NX_SEARCH_EXACT_MAX_ROWS=0` (§ 5.9). Then the ANALYZE check:
+   every leaf, both parents and the three referencing tables were analyzed in step 5.
    `SELECT relname, last_analyze FROM pg_stat_user_tables WHERE schemaname = 'nexus' AND (relname LIKE 'chunks%'
    OR relname LIKE 'taxonomy_centroids%')` shows a `last_analyze` inside the walk's window for every leaf. A leaf without
    statistics turns the planner off HNSW (vectors-004 Step 5b, BUG-0148). Unverified: the view shows partitioned
@@ -501,13 +598,45 @@ that the data survived.
    `log-only` is right only if § 2.6 read `log-only`; use the mode conexus reported. Run plain, it fails leg B3 on any
    engine that reports a mode. Must end with its pass sentinel and `violations=0` with B3 asserted.
 5. **The deploy gate's parity and recall legs** (engine-release Step 5b.4), run by conexus.
-6. **Doctor rows.** `nx doctor` on a cloud-mode box: the RLS canary over the partitions and leaves, token tenants
-   against leaves, `embedding_models` against partitions, the leaf count, and the placeholder-collections row, as built
-   under nexus-3wh8d.16. Unverified: that bead is in progress; exact row names are not fixed, and the rows ship in the
-   paired client. Until the client carries them, read the same facts from SQL (counts of `pg_inherits` children of
-   `nexus.chunks` and `nexus.taxonomy_centroids` against `2 x models x tenants`).
-7. **Engine logs clean.** No `chunks_isolation_check_failed`, no `schema_migration_count_anomaly`, no
-   `root_token_seed_*` after the complete line.
+6. **Doctor rows, and what the cloud has instead.** The tenant, model and leaf rows of `nx doctor` (nexus-3wh8d.16) read
+   the database through local admin credentials, so on a cloud-mode box they report "not applicable"; the engine runs
+   no equivalent. Its boot check (`ChunksIsolationCheck`) covers the RLS structure of both trees and nothing about
+   token tenants or registered models, and the engine's `/v1/status` field `chunks_tenant_isolation_intact` mirrors
+   that. A tenant with a token and no leaf is otherwise found by a 500 `tenant_partition_missing` on its first write.
+   So conexus runs this read-only query after the walk, and after any tenant mint, and expects NO `T` and NO `M` rows:
+
+   ```sql
+   WITH parents AS (
+       SELECT c.oid, c.relname::text AS parent
+         FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = 'nexus' AND c.relkind = 'p' AND c.relname IN ('chunks', 'taxonomy_centroids')
+   ), mp AS (
+       SELECT p.parent, i.inhrelid AS oid,
+              replace((regexp_match(pg_get_expr(mc.relpartbound, mc.oid), '^FOR VALUES IN \(''(.*)''\)$'))[1], '''''', '''') AS model
+         FROM parents p JOIN pg_inherits i ON i.inhparent = p.oid JOIN pg_class mc ON mc.oid = i.inhrelid
+   ), lf AS (
+       SELECT mp.parent, mp.model,
+              replace((regexp_match(pg_get_expr(lc.relpartbound, lc.oid), '^FOR VALUES IN \(''(.*)''\)$'))[1], '''''', '''') AS tenant
+         FROM mp JOIN pg_inherits l ON l.inhparent = mp.oid JOIN pg_class lc ON lc.oid = l.inhrelid
+   ), tt AS (SELECT DISTINCT tenant_id FROM nexus.service_tokens)
+   SELECT 'T' AS kind, tt.tenant_id AS subject, mp.parent, string_agg(mp.model, ',' ORDER BY mp.model) AS detail
+     FROM tt CROSS JOIN mp
+    WHERE NOT EXISTS (SELECT 1 FROM lf WHERE lf.parent = mp.parent AND lf.model = mp.model AND lf.tenant = tt.tenant_id)
+    GROUP BY tt.tenant_id, mp.parent
+   UNION ALL
+   SELECT 'M', em.embedding_model, p.parent, ''
+     FROM nexus.embedding_models em CROSS JOIN parents p
+    WHERE NOT EXISTS (SELECT 1 FROM mp WHERE mp.parent = p.parent AND mp.model = em.embedding_model);
+   ```
+
+   `T` is a token tenant missing leaves under those model partitions (recovery: `nexus.create_tenant_partitions`, as
+   the table owner); `M` is a registered model without a partition. It is the doctor rows' own SQL
+   (`_PARTITION_COMPARE_SQL` in `src/nexus/health.py`) without the two count rows; `service_tokens` carries
+   row-level security, so read it as a role that bypasses it or under each tenant, as in § 3. The leaf count is
+   `2 x models x tenants` (`pg_inherits` children of the model partitions of both parents).
+7. **Engine logs clean.** No `chunks_isolation_check_failed`, no `partition_access_drift_repaired` or
+   `partition_access_drift_unrepaired`, no `schema_migration_count_anomaly`, no `root_token_seed_*` after the
+   complete line.
 8. Record the actual walk time, the observed lock count, the peak disk and WAL, and every output above in T2
    `nexus_rdr/225-walk-rehearsal`, with the deploy date (Phase 3 Step 3's 14-day gate reads it). Then, and only then,
    the paired client release may go (§ 2.7), and `scripts/check_engine_release_floor.py` must pass.
@@ -537,18 +666,30 @@ the retired tables hold the only copy of the old layout.
 
 ### 9.1 Placeholders the rehearsal (nexus-3wh8d.27) fills
 
-| Name | Used in | Filled from |
-| --- | --- | --- |
-| FORK_WALL_TIME, CAP_FACTOR | § 5.7 | Fork walk wall time; the cap is a multiple chosen before the live run |
-| FORK_TENANT_COUNT | § 3 Probe T | Tenant count on the fork |
-| FORK_RELATION_LOCKS, LOCK_HEADROOM | § 3 Probe T | The fork's `rdr225 walk: N relation lock(s)` line (engine log, § 4) |
-| FORK_ROW_COUNTS, DRIFT_TOLERANCE | § 3 Probe V, C2 | Fork census; the drift the live estate is allowed since the fork |
-| FORK_ORPHAN_CENTROIDS | § 3 Probe C2 | Probe C2 run on the fork |
-| FORK_PEAK_EXTRA_DISK, DISK_MARGIN, the factors 2.2 and 2.0 | § 3 Probe D | Peak extra disk on the fork; replaces the inferred factors |
-| WAL_PEAK | § 3 Probe W | Peak WAL on the fork against `max_wal_size` |
-| FROZEN_QUERY_SET, OVERLAP_FLOOR, LATENCY_RATIO | § 7.3 | The set, its runner, and the pass rule, all fixed before the fork run |
-| maintenance_work_mem, parallel workers | § 7 record | The changeset sets neither; record the live values and the index build time |
-| local-install seed count | § 8 | A local walk at a stated seed count |
+Filled 2026-10-07 from the PITR-fork jar walk of develop `93562b96a` (conexus, Sam's go; record T2
+`nexus_rdr/225-rehearsal-2026-10-07` [29540], disk floor [29529]). Every `.27:` marker in this runbook refers to the
+Value column below. CAP_FACTOR, DRIFT_TOLERANCE, DISK_MARGIN and the frozen-query pass rule are decisions, not
+measurements; they are marked as such.
+
+| Name | Used in | Filled from | Value (fork, 2026-10-07) |
+| --- | --- | --- | --- |
+| FORK_WALL_TIME, CAP_FACTOR | § 5.7 | Fork walk wall time; the cap is a multiple chosen before the live run | 449 s JVM start to `schema_migration_complete` (vectors-030-1 435.7 s), run over the public host. Decision: CAP_FACTOR 2, so the cap is 15 min, inside the window budget. |
+| FORK_TENANT_COUNT | § 3 Probe T | Tenant count on the fork | 4 tenants, 4 models, 32 leaves (16 per parent), as predicted. |
+| FORK_RELATION_LOCKS, LOCK_HEADROOM | § 3 Probe T | The fork's `rdr225 walk: N relation lock(s)` line (engine log, § 4) | 979 locks (about 30.6 per leaf) against 32,000 slots (`max_locks_per_transaction` 64 x `max_connections` 500, live). |
+| FORK_ROW_COUNTS, DRIFT_TOLERANCE | § 3 Probe V, C2 | Fork census; the drift the live estate is allowed since the fork | chunks 434,617; catalog_collections 163; catalog_document_chunks 467,471; topic_assignments 433,293; chunk_orphaned_at 4,308; taxonomy_centroids 804. Decision: DRIFT_TOLERANCE 10% per count. |
+| FORK_ORPHAN_CENTROIDS | § 3 Probe C2 | Probe C2 run on the fork | 0. |
+| FORK_PEAK_EXTRA_DISK, DISK_MARGIN, the factors 2.2 and 2.0 | § 3 Probe D | Peak extra disk on the fork; replaces the inferred factors | Database 9.92 GB to 17.34 GB (+7.43 GB, kept for the 14-day window), plus up to 6.39 GB WAL: 13.8 GB worst case. Decision: keep the live gate at 33,792 MB free (2.45x the worst case); live read 42,242 MB free at 11:54Z. Read the gate BEFORE stopping the engine: the Crunchy API's `disk_used` froze mid-walk on the fork and cannot monitor during it. |
+| WAL_PEAK | § 3 Probe W | Peak WAL on the fork against `max_wal_size` | 6.39 GB to complete, 7.05 GB to the harness end; above `max_wal_size` 5 GB, so checkpoints and archiving carry it (archiver healthy, no slots). |
+| VACUUM_WALL_TIME, VACUUM_PEAK_EXTRA_IO | § 5.9 | `VACUUM (ANALYZE)` of both parents on the fork, after the walk | chunks 2.8 s, taxonomy_centroids 0.1 s, measured after autovacuum had already run (a lower bound). Not metered. |
+| PROBE_MS_BEFORE_VACUUM, PROBE_PLAN_BEFORE_VACUUM, PROBE_MS_AFTER_VACUUM, PROBE_PLAN_AFTER_VACUUM | § 7.2 | The router probe on the largest-share leaf of the fork, before and after the VACUUM | Before: not observable. Autovacuum processed every populated leaf 43 to 49 s after commit, before the first probe. After: Index Only Scan on the leaf primary key, Heap Fetches 0, 2.56 to 2.58 ms server-side, at 25.8% and 32.9% scope shares. The § 5.9 exposure is about 45 s on this estate. |
+| FROZEN_QUERY_SET, OVERLAP_FLOOR, LATENCY_RATIO | § 7.3 | The set, its runner, and the pass rule, all fixed before the fork run | The set conexus ran: 3 queries x {voyage-code-3, voyage-context-3} x {nexus, gate-xr789}, all 200 with 10 results, 0.9 to 2.5 s client-side including Voyage, identical before and after VACUUM. Decision: the live pass rule is the same 12 searches, all 200 with 10 results, client latency at most 2x the fork's. A minilm-384 collection answers 422 in cloud mode by design. |
+| maintenance_work_mem, parallel workers | § 7 record | The changeset sets neither; record the live values and the index build time | `maintenance_work_mem` 655 MB, 2 parallel maintenance workers (fork). The HNSW build logged `hnsw graph no longer fits into maintenance_work_mem after 142947 tuples`: harmless, a timing factor already inside FORK_WALL_TIME. |
+| local-install seed count | § 8 | A local walk at a stated seed count | Not measured on a real local estate. The walk is exercised at test-fixture scale (P225MigrationWalkIntegrationTest, 12 chunks, 5 tenants) and by the local preflight; a local install's estate is far smaller than the cloud's. |
+
+Operator notes from the rehearsal: conexus's `walk.sh` exits 1 on this walk because its relfilenode compare flags the
+rebuilt `chunks`; that is expected for vectors-030-1 and not a failure. Judge the walk by § 4 and § 6.1, not by that exit
+code. `nexus_diag` reading nothing from `catalog_collections`, `taxonomy_centroids`, `chunk_orphaned_at`,
+`service_tokens` or `chunks_retired_225` is the RDR-182 content boundary (`grants-nexus-diag.xml`), not a lost grant.
 
 ### 9.2 Questions for conexus
 
@@ -585,7 +726,9 @@ Still open, each a NEEDS-LIVE-READ that needs Sam's go and belongs to the `.27` 
   tested here).
 - That the previous engine on the new layout fails the way § 6.3 says (read from the write sites and the new primary
   key, per the critique; not run).
-- The `runAlways` count at the release tag (12 at v0.1.149 and at `c4e3dc15a`, counted by a script over those trees).
+- The `runAlways` count at the release tag (12 at v0.1.149 and at `4fe5c20c1`, counted by a script over those trees).
+- That an unvacuumed leaf is the cause of the Seq Scan the router probe took at a 26 percent share (inferred from
+  the prototype and the Phase 2 pin; the 40,000-row and worst-case figures in § 5.9 are arithmetic, not measurements).
 - The 27 locks per leaf (the RDR's test layout) and the 2.0 factor for the referencing tables (this runbook's reading).
 - The conexus restore recipe and the redeploy document (conexus repo; known here only through the 2026-10-07 answers
   in T2 `nexus_rdr/225-conexus-answers`, read by conexus from its repo, not read here).

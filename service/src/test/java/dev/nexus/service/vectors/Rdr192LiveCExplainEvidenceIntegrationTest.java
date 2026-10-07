@@ -507,7 +507,7 @@ class Rdr192LiveCExplainEvidenceIntegrationTest {
 
     @Test
     void topicScopedSearch_inlinesLiveC() {
-        Table<?> fn = SEARCH_TOPIC_SCOPED_384.call(queryVec(), TOPIC_LABEL, COLL, 10);
+        Table<?> fn = SEARCH_TOPIC_SCOPED_384.call(queryVec(), TOPIC_LABEL, COLL, 10, MODEL, TENANT);
         String plan = explain("search_topic_scoped_384", ctx -> ctx.select(fn.field("id")).from(fn));
         assertInlinedLiveC(plan, "search_topic_scoped_384");
     }
@@ -530,7 +530,8 @@ class Rdr192LiveCExplainEvidenceIntegrationTest {
     // run the definer body past RLS.
 
     private static Table<?> probe384(String token, String... collections) {
-        return TEXT_GATE_PROBE_384.call(token, collections, null, null, PgVectorRepository.SELECTIVE_GATE_MAX + 1);
+        return TEXT_GATE_PROBE_384.call(token, collections, null, null, PgVectorRepository.SELECTIVE_GATE_MAX + 1,
+            MODEL, TENANT);
     }
 
     /** Chunks the selective token matches that live(c) shows, from the fixture's own arithmetic. */
@@ -647,27 +648,41 @@ class Rdr192LiveCExplainEvidenceIntegrationTest {
      * rests on its own predicate; this is the test of that predicate. A tenant that names ANOTHER tenant's
      * collection gets nothing, a tenant that names both gets only its own rows, and each tenant sees its own
      * rows (so the empty results are not vacuous).
+     *
+     * <p>RDR-225: the probe also takes the tenant as a parameter, which the engine sets to the session's own
+     * tenant. The caller supplies that value and the function runs as its owner, so a parameter that names
+     * ANOTHER tenant than the session's must not widen what the session sees: the last two groups of
+     * assertions pass tenant B's id from tenant A's session (and the reverse), naming the other tenant's
+     * collection, and expect nothing. They fail if the probe's own GUC-based predicate is removed and only
+     * the parameter is left.
      */
     @Test
     void gateProbes_neverReturnAnotherTenantsChunks_throughAnyDimension() {
         List<java.util.function.Function<Object[], Table<?>>> dims = List.of(
-            a -> TEXT_GATE_PROBE_384.call(RARE_TOKEN, (String[]) a[0], null, null, 10_000),
-            a -> TEXT_GATE_PROBE_768.call(RARE_TOKEN, (String[]) a[0], null, null, 10_000),
-            a -> TEXT_GATE_PROBE_1024.call(RARE_TOKEN, (String[]) a[0], null, null, 10_000));
+            a -> TEXT_GATE_PROBE_384.call(RARE_TOKEN, (String[]) a[0], null, null, 10_000, MODEL, (String) a[1]),
+            a -> TEXT_GATE_PROBE_768.call(RARE_TOKEN, (String[]) a[0], null, null, 10_000, MODEL, (String) a[1]),
+            a -> TEXT_GATE_PROBE_1024.call(RARE_TOKEN, (String[]) a[0], null, null, 10_000, MODEL, (String) a[1]));
         for (var dim : dims) {
             String[] mine = {COLL}, theirs = {OTHER_COLL}, both = {COLL, OTHER_COLL};
-            assertThat(probeAs(TENANT, dim.apply(new Object[] {theirs})))
+            assertThat(probeAs(TENANT, dim.apply(new Object[] {theirs, TENANT})))
                 .as("tenant A naming tenant B's collection").isEmpty();
-            List<String> aBoth = probeAs(TENANT, dim.apply(new Object[] {both}));
+            List<String> aBoth = probeAs(TENANT, dim.apply(new Object[] {both, TENANT}));
             assertThat(aBoth).as("tenant A naming both collections: its own live rows only")
                 .hasSize(expectedSelectiveLive()).doesNotContainAnyElementsOf(otherChashHex);
-            assertThat(probeAs(TENANT, dim.apply(new Object[] {mine})))
+            assertThat(probeAs(TENANT, dim.apply(new Object[] {mine, TENANT})))
                 .as("tenant A's own collection").hasSize(expectedSelectiveLive());
-            assertThat(probeAs(OTHER_TENANT, dim.apply(new Object[] {mine})))
+            assertThat(probeAs(OTHER_TENANT, dim.apply(new Object[] {mine, OTHER_TENANT})))
                 .as("tenant B naming tenant A's collection").isEmpty();
-            assertThat(probeAs(OTHER_TENANT, dim.apply(new Object[] {both})))
+            assertThat(probeAs(OTHER_TENANT, dim.apply(new Object[] {both, OTHER_TENANT})))
                 .as("tenant B naming both collections: its own rows only")
                 .containsExactlyInAnyOrderElementsOf(otherChashHex);
+            // The parameter names the OTHER tenant than the session's.
+            assertThat(probeAs(TENANT, dim.apply(new Object[] {theirs, OTHER_TENANT})))
+                .as("tenant A's session, tenant B's id and collection as parameters: nothing").isEmpty();
+            assertThat(probeAs(TENANT, dim.apply(new Object[] {both, OTHER_TENANT})))
+                .as("tenant A's session, tenant B's id as the parameter, both collections: nothing").isEmpty();
+            assertThat(probeAs(OTHER_TENANT, dim.apply(new Object[] {mine, TENANT})))
+                .as("tenant B's session, tenant A's id and collection as parameters: nothing").isEmpty();
         }
     }
 
@@ -680,8 +695,8 @@ class Rdr192LiveCExplainEvidenceIntegrationTest {
     void gateProbes_returnNothing_whenNoTenantIsStamped_orTheStampIsEmpty() throws Exception {
         List<Table<?>> fns = List.of(
             probe384(RARE_TOKEN, COLL, OTHER_COLL),
-            TEXT_GATE_PROBE_768.call(RARE_TOKEN, new String[] {COLL, OTHER_COLL}, null, null, 10_000),
-            TEXT_GATE_PROBE_1024.call(RARE_TOKEN, new String[] {COLL, OTHER_COLL}, null, null, 10_000));
+            TEXT_GATE_PROBE_768.call(RARE_TOKEN, new String[] {COLL, OTHER_COLL}, null, null, 10_000, MODEL, TENANT),
+            TEXT_GATE_PROBE_1024.call(RARE_TOKEN, new String[] {COLL, OTHER_COLL}, null, null, 10_000, MODEL, TENANT));
         Field<String> setting = DSL.function("current_setting", SQLDataType.VARCHAR,
             DSL.inline("nexus.tenant"), DSL.inline(true));
         try (Connection c = DriverManager.getConnection(pg.getJdbcUrl(), PgContainerHelper.SVC_USERNAME,
@@ -715,9 +730,12 @@ class Rdr192LiveCExplainEvidenceIntegrationTest {
     @Test
     void gateProbes_failClosedOnAnEmptyStamp_evenWhenAnEmptyIdTenantOwnsLiveMatches() throws Exception {
         List<Table<?>> fns = List.of(
-            probe384(RARE_TOKEN, EMPTY_COLL, COLL),
-            TEXT_GATE_PROBE_768.call(RARE_TOKEN, new String[] {EMPTY_COLL, COLL}, null, null, 10_000),
-            TEXT_GATE_PROBE_1024.call(RARE_TOKEN, new String[] {EMPTY_COLL, COLL}, null, null, 10_000));
+            // RDR-225: the tenant PARAMETER is the empty id too, so the explicit predicate alone would admit the
+            // empty-id tenant's chunk; the GUC predicate (NULLIF) is what must keep it out.
+            TEXT_GATE_PROBE_384.call(RARE_TOKEN, new String[] {EMPTY_COLL, COLL}, null, null,
+                PgVectorRepository.SELECTIVE_GATE_MAX + 1, MODEL, EMPTY_TENANT),
+            TEXT_GATE_PROBE_768.call(RARE_TOKEN, new String[] {EMPTY_COLL, COLL}, null, null, 10_000, MODEL, EMPTY_TENANT),
+            TEXT_GATE_PROBE_1024.call(RARE_TOKEN, new String[] {EMPTY_COLL, COLL}, null, null, 10_000, MODEL, EMPTY_TENANT));
         try (Connection c = DriverManager.getConnection(pg.getJdbcUrl(), PgContainerHelper.SVC_USERNAME,
                 PgContainerHelper.SVC_PASSWORD)) {
             c.setAutoCommit(false);
@@ -738,11 +756,12 @@ class Rdr192LiveCExplainEvidenceIntegrationTest {
 
     private static final String[] DIM_NAMES = {"384", "768", "1024"};
 
-    private static Table<?> probeByDim(int dimIndex, String token, String[] collections, String wherePath) {
+    private static Table<?> probeByDim(int dimIndex, String token, String[] collections, String wherePath,
+                                       String tenant) {
         return switch (dimIndex) {
-            case 0 -> TEXT_GATE_PROBE_384.call(token, collections, null, wherePath, 10_000);
-            case 1 -> TEXT_GATE_PROBE_768.call(token, collections, null, wherePath, 10_000);
-            default -> TEXT_GATE_PROBE_1024.call(token, collections, null, wherePath, 10_000);
+            case 0 -> TEXT_GATE_PROBE_384.call(token, collections, null, wherePath, 10_000, MODEL, tenant);
+            case 1 -> TEXT_GATE_PROBE_768.call(token, collections, null, wherePath, 10_000, MODEL, tenant);
+            default -> TEXT_GATE_PROBE_1024.call(token, collections, null, wherePath, 10_000, MODEL, tenant);
         };
     }
 
@@ -776,15 +795,15 @@ class Rdr192LiveCExplainEvidenceIntegrationTest {
         }
         for (int dim = 0; dim < DIM_NAMES.length; dim++) {
             String label = "dim " + DIM_NAMES[dim];
-            List<String> alone = probeAs(TENANT, probeByDim(dim, RARE_TOKEN, new String[] {META_COLL}, V_GT_1));
+            List<String> alone = probeAs(TENANT, probeByDim(dim, RARE_TOKEN, new String[] {META_COLL}, V_GT_1, TENANT));
             assertThat(alone).as("%s: tenant A's own matches (non-vacuity)", label)
                 .containsExactlyInAnyOrderElementsOf(metaMatchChashHex);
             List<String> withB = probeAs(TENANT,
-                probeByDim(dim, RARE_TOKEN, new String[] {META_COLL, OTHER_COLL}, V_GT_1));
+                probeByDim(dim, RARE_TOKEN, new String[] {META_COLL, OTHER_COLL}, V_GT_1, TENANT));
             assertThat(withB).as("%s: naming tenant B's hostile collection changes nothing for tenant A", label)
                 .containsExactlyInAnyOrderElementsOf(alone);
             List<String> b = probeAs(OTHER_TENANT,
-                probeByDim(dim, RARE_TOKEN, new String[] {META_COLL, OTHER_COLL}, V_GT_1));
+                probeByDim(dim, RARE_TOKEN, new String[] {META_COLL, OTHER_COLL}, V_GT_1, OTHER_TENANT));
             assertThat(b).as("%s: tenant B's own session evaluates its hostile metadata without error", label)
                 .isNotEmpty().isSubsetOf(otherChashHex).doesNotContainAnyElementsOf(metaMatchChashHex);
         }
@@ -864,7 +883,8 @@ class Rdr192LiveCExplainEvidenceIntegrationTest {
         List<String> some = new ArrayList<>();
         for (int i = 0; i < NUM_CHUNKS; i += 100) some.add(chashHex.get(i));
         byte[][] chashes = some.stream().map(h -> HexFormat.of().parseHex(h)).toArray(byte[][]::new);
-        Table<?> fn = TEXT_GATED_SEARCH_BY_CHASH_384.call(queryVec(), chashes, new String[] {COLL}, null, null, 10);
+        Table<?> fn = TEXT_GATED_SEARCH_BY_CHASH_384.call(
+            queryVec(), chashes, new String[] {COLL}, null, null, 10, MODEL, TENANT);
         String plan = explain("text_gated_search_by_chash_384", ctx -> ctx.select(fn.field("id")).from(fn));
         assertInlinedLiveC(plan, "text_gated_search_by_chash_384");
     }
@@ -872,14 +892,14 @@ class Rdr192LiveCExplainEvidenceIntegrationTest {
     @Test
     void hnswFirstRank_inlinesLiveC() {
         Table<?> fn = TEXT_GATED_SEARCH_HNSW_FIRST_384.call(queryVec(), COMMON_TOKEN, new String[] {COLL},
-            null, null, 10);
+            null, null, 10, MODEL, TENANT);
         String plan = explain("text_gated_search_hnsw_first_384", ctx -> ctx.select(fn.field("id")).from(fn));
         assertInlinedLiveC(plan, "text_gated_search_hnsw_first_384");
     }
 
     @Test
     void plainSearch_inlinesLiveC_reference() {
-        Table<?> fn = PLAIN_SEARCH_384.call(queryVec(), new String[] {COLL}, null, null, 10);
+        Table<?> fn = PLAIN_SEARCH_384.call(queryVec(), new String[] {COLL}, null, null, 10, MODEL, TENANT);
         String plan = explain("plain_search_384 (reference)", ctx -> ctx.select(fn.field("id")).from(fn));
         assertInlinedLiveC(plan, "plain_search_384");
     }
@@ -1024,10 +1044,17 @@ class Rdr192LiveCExplainEvidenceIntegrationTest {
             evidence.put(label, "rows=" + rows + "\n" + block);
         }
         // The log entry leads with the statement's own text, which names chunk_live_owners as written; the
-        // plan is what follows the parameters line, and that is what a caller may assert on.
+        // plan is what follows it, and that is what a caller may assert on. A statement run with bound
+        // parameters carries a "Query Parameters:" line before its plan. The probe's body, a plpgsql
+        // statement since RDR-225 (it is planned with the call's values so it can prune to one leaf), has none:
+        // its values are folded into the plan, so the plan starts at the first plan node.
         int params = block.indexOf("Query Parameters:");
-        assertThat(params).as("auto_explain's entry carries the parameters line. Entry was:%n%s", block).isNotNegative();
-        return block.substring(block.indexOf('\n', params) + 1);
+        if (params >= 0) {
+            return block.substring(block.indexOf('\n', params) + 1);
+        }
+        Matcher firstNode = Pattern.compile("(?m)^\\t\\S.*\\(cost=").matcher(block);
+        assertThat(firstNode.find()).as("auto_explain's entry carries a plan. Entry was:%n%s", block).isTrue();
+        return block.substring(firstNode.start() + 1);
     }
 
     private Vector queryVec() {

@@ -166,6 +166,8 @@ class TaxonomyAssignCrossLateralHnswTest {
 
     /** The collection under test: dense with its OWN centroids (the no-row hazard). */
     private static final String COL_DENSE = "code__afc_lateral_dense__voyage-code-3__v1";
+    /** RDR-225: COL_DENSE's registered model, which the function's model parameter and predicates name. */
+    private static final String MODEL = "voyage-code-3";
 
     private static final int DIM = 1024;
     /** >= 40: the benchmark's own no-row-hazard threshold at default ef_search. */
@@ -270,7 +272,7 @@ class TaxonomyAssignCrossLateralHnswTest {
             PgContainerHelper.bootstrapServiceRole(su, SVC_ROLE, SVC_PASS);
             for (int dim : new int[] {384, 768, 1024}) {
                 PgContainerHelper.grantExecuteOnFunction(
-                    su, "nexus.assign_from_chashes_" + dim + "(text, text[], boolean)", SVC_ROLE);
+                    su, "nexus.assign_from_chashes_" + dim + "(text, text[], boolean, text, text)", SVC_ROLE);
             }
         }
 
@@ -554,6 +556,14 @@ class TaxonomyAssignCrossLateralHnswTest {
                         + " pair above -- see taxonomy-020's own header. Actual: %s",
                         (Object) proconfig)
                     .noneMatch(c -> c.startsWith("enable_seqscan") || c.startsWith("enable_sort"));
+                // RDR-225 (nexus-3wh8d.15): the function's inner statements are planned with the call's own
+                // model and tenant, so the cached-generic-plan switch is off for the function's duration. It is
+                // a function-level SET, not a set_config call, so it adds nothing to the four pins above.
+                assertThat(proconfig)
+                    .as("assign_from_chashes_" + dim + " carries plan_cache_mode = force_custom_plan, so a"
+                        + " session's sixth call does not keep a generic plan that lists every leaf. Actual: %s",
+                        (Object) proconfig)
+                    .contains("plan_cache_mode=force_custom_plan");
                 // Round-3 review (critic, Significant, nexus-v4pj4): a
                 // per-line `.contains(...)` proves PRESENCE only -- not
                 // exclusivity, precedence, or reachability (a fifth
@@ -659,7 +669,9 @@ class TaxonomyAssignCrossLateralHnswTest {
             "WITH batch AS ("
             + "    SELECT c.chash AS b_chash, c.embedding_1024 AS b_emb, c.embedding_model AS b_model"
             + "      FROM nexus.chunks c"
-            + "     WHERE c.collection = '" + COL_DENSE + "'"
+            + "     WHERE c.embedding_model = '" + MODEL + "'"
+            + "       AND c.tenant_id = '" + TENANT + "' /*p_tenant*/"
+            + "       AND c.collection = '" + COL_DENSE + "'"
             + "       AND c.embedding_1024 IS NOT NULL"
             + "       AND c.chash = ANY(ARRAY(SELECT decode(x, 'hex') FROM unnest(" + chashArrayLiteral + ") x))"
             + " ), nearest AS ("
@@ -671,8 +683,9 @@ class TaxonomyAssignCrossLateralHnswTest {
             + "          SELECT ct.topic_id AS n_topic_id,"
             + "                 (ct.embedding_1024 OPERATOR(nexus.<=>) b.b_emb) AS n_dist"
             + "            FROM nexus.taxonomy_centroids ct"
-            + "           WHERE ct.collection <> '" + COL_DENSE + "'"
-            + "             AND ct.embedding_model = b.b_model"
+            + "           WHERE ct.embedding_model = '" + MODEL + "'"
+            + "             AND ct.tenant_id = '" + TENANT + "' /*p_tenant*/"
+            + "             AND ct.collection <> '" + COL_DENSE + "'"
             + "             AND ct.embedding_1024 IS NOT NULL"
             + "           ORDER BY ct.embedding_1024 OPERATOR(nexus.<=>) b.b_emb, ct.topic_id ASC"
             + "           LIMIT 1"
@@ -716,6 +729,8 @@ class TaxonomyAssignCrossLateralHnswTest {
             .map(h -> "'" + h + "'")
             .collect(Collectors.joining(",", "ARRAY[", "]::text[]"));
         return crossBranchStatementText()
+            .replace("'" + TENANT + "' /*p_tenant*/", "p_tenant")
+            .replace("'" + MODEL + "'", "p_embedding_model")
             .replace("'" + COL_DENSE + "'", "p_collection")
             .replace(chashArrayLiteral, "p_chashes")
             .replace("'" + TENANT + "'", "current_setting('nexus.tenant', true)");

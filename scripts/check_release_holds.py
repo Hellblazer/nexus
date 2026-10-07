@@ -34,6 +34,8 @@ HOLDS_FILE = Path("scripts") / "release-holds.txt"
 CHANGELOG_DIR = Path("service") / "src" / "main" / "resources" / "db" / "changelog"
 
 _CHANGESET_ID = re.compile(r'<changeSet\b[^>]*?\bid="([^"]+)"')
+# A changelog header may quote a changeSet element inside an XML comment; that is not a definition.
+_XML_COMMENT = re.compile(r"<!--.*?-->", re.DOTALL)
 
 
 class HoldsError(Exception):
@@ -69,7 +71,7 @@ def _defined_changesets(root: Path) -> dict[str, str]:
     d = root / CHANGELOG_DIR
     if d.is_dir():
         for xml in sorted(d.rglob("*.xml")):
-            for cid in _CHANGESET_ID.findall(xml.read_text(encoding="utf-8")):
+            for cid in _CHANGESET_ID.findall(_XML_COMMENT.sub("", xml.read_text(encoding="utf-8"))):
                 found.setdefault(cid, str(xml.relative_to(root)))
     return found
 

@@ -226,6 +226,10 @@ class VectorsRepointFunctionsIntegrationTest {
 
     private record Fixture(byte[] chash, String chashHex, String collection, String docTumbler) {}
 
+    /** RDR-225: the read functions take the model and the tenant; the fixture collection carries this model. */
+    private static final String MODEL_384 = "minilm-l6-v2-384";
+    private static final String MODEL_AND_TENANT = "'" + MODEL_384 + "', '" + TENANT + "'";
+
     private static Fixture seedFixture(PostgreSQLContainer<?> pg) throws Exception {
         byte[] chash = sha256("vectors-005 repoint fixture chunk text");
         String chashHex = bytesToHex(chash);
@@ -404,7 +408,7 @@ class VectorsRepointFunctionsIntegrationTest {
                 // search_metadata_scoped_384: must find the seeded chunk.
                 try (PreparedStatement ps = conn.prepareStatement(
                         "SELECT * FROM nexus.search_metadata_scoped_384("
-                            + "?::nexus.vector, ?, NULL, NULL, NULL, NULL, NULL, NULL, 10)")) {
+                            + "?::nexus.vector, ?, NULL, NULL, NULL, NULL, NULL, NULL, 10, " + MODEL_AND_TENANT + ")")) {
                     ps.setString(1, vectorLiteral(384, 0.01));
                     ps.setArray(2, conn.createArrayOf("text", new String[] {fx.collection()}));
                     var rs = ps.executeQuery();
@@ -417,7 +421,7 @@ class VectorsRepointFunctionsIntegrationTest {
                 for (int dim : new int[] {768, 1024}) {
                     try (PreparedStatement ps = conn.prepareStatement(
                             "SELECT * FROM nexus.search_metadata_scoped_" + dim + "("
-                                + "?::nexus.vector, ?, NULL, NULL, NULL, NULL, NULL, NULL, 10)")) {
+                                + "?::nexus.vector, ?, NULL, NULL, NULL, NULL, NULL, NULL, 10, " + MODEL_AND_TENANT + ")")) {
                         ps.setString(1, vectorLiteral(dim, 0.01));
                         ps.setArray(2, conn.createArrayOf("text", new String[] {fx.collection()}));
                         assertThatCode(ps::executeQuery)
@@ -428,7 +432,7 @@ class VectorsRepointFunctionsIntegrationTest {
 
                 // search_topic_scoped_384: must find the seeded chunk via topic_assignments.
                 try (PreparedStatement ps = conn.prepareStatement(
-                        "SELECT * FROM nexus.search_topic_scoped_384(?::nexus.vector, 'alpha', ?, 10)")) {
+                        "SELECT * FROM nexus.search_topic_scoped_384(?::nexus.vector, 'alpha', ?, 10, " + MODEL_AND_TENANT + ")")) {
                     ps.setString(1, vectorLiteral(384, 0.01));
                     ps.setString(2, fx.collection());
                     var rs = ps.executeQuery();
@@ -436,7 +440,7 @@ class VectorsRepointFunctionsIntegrationTest {
                 }
                 for (int dim : new int[] {768, 1024}) {
                     try (PreparedStatement ps = conn.prepareStatement(
-                            "SELECT * FROM nexus.search_topic_scoped_" + dim + "(?::nexus.vector, 'alpha', ?, 10)")) {
+                            "SELECT * FROM nexus.search_topic_scoped_" + dim + "(?::nexus.vector, 'alpha', ?, 10, " + MODEL_AND_TENANT + ")")) {
                         ps.setString(1, vectorLiteral(dim, 0.01));
                         ps.setString(2, fx.collection());
                         assertThatCode(ps::executeQuery)
@@ -449,7 +453,7 @@ class VectorsRepointFunctionsIntegrationTest {
                 // 'cites'), depth 1, direction both, from itself as the seed.
                 try (PreparedStatement ps = conn.prepareStatement(
                         "SELECT * FROM nexus.search_graph_hop_384("
-                            + "?::nexus.vector, ?, ?, NULL, 1, 'both', NULL, 10)")) {
+                            + "?::nexus.vector, ?, ?, NULL, 1, 'both', NULL, 10, " + MODEL_AND_TENANT + ")")) {
                     ps.setString(1, vectorLiteral(384, 0.01));
                     ps.setArray(2, conn.createArrayOf("text", new String[] {fx.docTumbler()}));
                     ps.setArray(3, conn.createArrayOf("text", new String[] {fx.collection()}));
@@ -459,7 +463,7 @@ class VectorsRepointFunctionsIntegrationTest {
                 for (int dim : new int[] {768, 1024}) {
                     try (PreparedStatement ps = conn.prepareStatement(
                             "SELECT * FROM nexus.search_graph_hop_" + dim + "("
-                                + "?::nexus.vector, ?, ?, NULL, 1, 'both', NULL, 10)")) {
+                                + "?::nexus.vector, ?, ?, NULL, 1, 'both', NULL, 10, " + MODEL_AND_TENANT + ")")) {
                         ps.setString(1, vectorLiteral(dim, 0.01));
                         ps.setArray(2, conn.createArrayOf("text", new String[] {fx.docTumbler()}));
                         ps.setArray(3, conn.createArrayOf("text", new String[] {fx.collection()}));
@@ -1188,7 +1192,7 @@ class VectorsRepointFunctionsIntegrationTest {
             throws Exception {
         try (PreparedStatement ps = conn.prepareStatement(
                 "SELECT id FROM nexus.search_graph_hop_384("
-                    + "?::nexus.vector, ?, ?, 'cites', ?, 'out', NULL, 10)")) {
+                    + "?::nexus.vector, ?, ?, 'cites', ?, 'out', NULL, 10, " + MODEL_AND_TENANT + ")")) {
             ps.setString(1, vectorLiteral(384, 0.09));
             ps.setArray(2, conn.createArrayOf("text", new String[] {seed}));
             ps.setArray(3, conn.createArrayOf("text", new String[] {collection}));
@@ -1215,7 +1219,7 @@ class VectorsRepointFunctionsIntegrationTest {
                 setTenantGuc(conn, TENANT);
 
                 try (PreparedStatement ps = conn.prepareStatement(
-                        "SELECT * FROM nexus.assign_from_chashes_384(?, ?, false)")) {
+                        "SELECT * FROM nexus.assign_from_chashes_384(?, ?, false, " + MODEL_AND_TENANT + ")")) {
                     ps.setString(1, fx.collection());
                     ps.setArray(2, conn.createArrayOf("text", new String[] {fx.chashHex()}));
                     var rs = ps.executeQuery();
@@ -1227,7 +1231,7 @@ class VectorsRepointFunctionsIntegrationTest {
                 }
                 for (int dim : new int[] {768, 1024}) {
                     try (PreparedStatement ps = conn.prepareStatement(
-                            "SELECT * FROM nexus.assign_from_chashes_" + dim + "(?, ?, false)")) {
+                            "SELECT * FROM nexus.assign_from_chashes_" + dim + "(?, ?, false, " + MODEL_AND_TENANT + ")")) {
                         ps.setString(1, "nonexistent-collection-" + dim);
                         ps.setArray(2, conn.createArrayOf("text", new String[] {fx.chashHex()}));
                         assertThatCode(ps::executeQuery)

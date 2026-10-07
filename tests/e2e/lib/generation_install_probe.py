@@ -276,8 +276,7 @@ def main() -> int:
     #
     # Getting this wrong is not a quiet failure, it is a MISLEADING one, and
     # this leg reproduced it: install_generation.sh claims its stamp with a
-    # bare `mkdir` (correct — that atomicity is what makes the claim
-    # race-free), but treats EVERY mkdir failure as a collision, so a missing
+    # bare `mkdir` (plus an exclusive build-marker create, nexus-bo01z), but treats EVERY mkdir failure as a collision, so a missing
     # parent reports "could not claim a generation directory ... (9
     # collisions)" on a virgin box where nothing could possibly have collided.
     # Filed as nexus-14u80; not fixed here, because the fix belongs in the

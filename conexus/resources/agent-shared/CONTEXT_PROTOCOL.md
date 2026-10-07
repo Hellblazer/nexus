@@ -129,9 +129,10 @@ serially, or kill and re-dispatch. "I will just message them" is not one. If
 you must send such a message anyway, give the recipient a fact it can verify in
 the repo — authority cannot be asserted over that channel.
 
-    until mkdir /tmp/<gate>.lock 2>/dev/null; do sleep 2; done
+    until mkdir /tmp/<gate>.lock 2>/dev/null \
+        && (set -C; echo $$ > /tmp/<gate>.lock/pid) 2>/dev/null; do sleep 2; done
     # mutate -> run -> RESTORE -> confirm `git status --short` is clean
-    rmdir /tmp/<gate>.lock
+    rm -rf /tmp/<gate>.lock
 
 **PREFER NOT SHARING THE TREE AT ALL — the lock is the fallback.** Ranked:
 give each agent its own `git worktree` (full isolation, the real suite still
@@ -145,8 +146,10 @@ the lock-holders did.
 
 **Every agent that mutates the SHARED tree:**
 
-- Take the lock before the first mutation. `mkdir` is atomic, so it is a real
-  mutex.
+- Take the lock before the first mutation. The exclusive `pid` write is the
+  mutex, not `mkdir` alone: uutils `mkdir` (Ubuntu 26.04) reports a lost
+  create race as success, so every racer "takes" a bare-`mkdir` lock there
+  (nexus-bo01z). `set -C` makes the shell create the file with O_EXCL.
 - Hold it for mutate → run → restore → verify, and nothing else. Never across
   analysis, write-up, or a full suite run you did not need under mutation.
 - Restore from a copy you took yourself, never by hand-reconstructing — and

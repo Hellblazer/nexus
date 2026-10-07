@@ -579,7 +579,7 @@ class Rdr192EngineLivenessMatrixIntegrationTest {
 
         List<String> probed = tenantScope.withTenant(tenant, ctx -> {
             org.jooq.Table<?> probe = TEXT_GATE_PROBE_384.call(
-                "text", new String[] {COLLECTION_A}, null, null, 300);
+                "text", new String[] {COLLECTION_A}, null, null, 300, "minilm-l6-v2-384", tenant);
             return ctx.selectFrom(probe).fetch(r -> java.util.HexFormat.of().formatHex(r.get(0, byte[].class)));
         });
         assertVisibility(probed, fx, "P1p");

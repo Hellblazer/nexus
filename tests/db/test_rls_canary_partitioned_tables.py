@@ -225,3 +225,42 @@ def test_a_stray_permissive_policy_on_a_leaf_is_fatal(state: dict) -> None:
         finally:
             _psql_rows(state, f"DROP POLICY rogue_p16 ON nexus.{leaf};")
         assert _run_canary(state).ok
+
+
+def test_a_multi_role_policy_whose_oid_order_differs_from_its_name_order_is_not_a_gap(state: dict) -> None:
+    """nexus-3wh8d.17 M5. ``partition_copy_access`` copies a policy's roles to every leaf in role-NAME order,
+    while the parent keeps them in the order they were given (oid order here: ``zz`` is created first, so its oid is
+    the smaller one). The canary compared the two as raw ``polroles`` text, so a healthy, fully synced tree read as
+    a gap. It now compares the role oids sorted. Control: with the comparison on the raw text this test is fatal."""
+    zz, aa = "zz_p16_multi", "aa_p16_multi"
+    _psql_rows(state, f"CREATE ROLE {zz} NOLOGIN;")
+    try:
+        _psql_rows(state, f"CREATE ROLE {aa} NOLOGIN;")
+        try:
+            _psql_rows(state, f"CREATE POLICY multi_p16 ON nexus.chunks AS PERMISSIVE FOR SELECT TO {zz}, {aa} USING (false);")
+            try:
+                _psql_rows(state, "SELECT nexus.partition_sync_access('nexus.chunks'::regclass);")
+                parent = _psql_rows(
+                    state,
+                    "SELECT array_to_string(polroles, ',') FROM pg_policy "
+                    "WHERE polrelid = 'nexus.chunks'::regclass AND polname = 'multi_p16';",
+                )[0]
+                leaf_orders = set(_psql_rows(
+                    state,
+                    "SELECT array_to_string(p.polroles, ',') FROM pg_policy p JOIN pg_class c ON c.oid = p.polrelid "
+                    "WHERE c.relispartition AND c.relnamespace = 'nexus'::regnamespace AND p.polname = 'multi_p16';",
+                ))
+                assert leaf_orders, "non-vacuity: the policy was copied to at least one partition"
+                assert parent not in leaf_orders, (
+                    "non-vacuity: the leaves must hold the roles in a DIFFERENT order than the parent, "
+                    f"or this test cannot tell a raw comparison from a sorted one (parent {parent}, leaves {leaf_orders})"
+                )
+                result = _run_canary(state)
+                assert result.ok and not result.fatal, result.detail
+            finally:
+                _psql_rows(state, "DROP POLICY multi_p16 ON nexus.chunks;")
+                _psql_rows(state, "SELECT nexus.partition_sync_access('nexus.chunks'::regclass);")
+        finally:
+            _psql_rows(state, f"DROP ROLE {aa};")
+    finally:
+        _psql_rows(state, f"DROP ROLE {zz};")

@@ -345,6 +345,7 @@ count.
 - **TS1, not yet met as written.** One run of 300 creations, `chunks` only (two leaves per tenant), with a 3 s lock timeout and no 100-tenant point: p95 40 ms against a 2 s bound. The design's eight leaves per tenant, the 2 s timeout and the 100-tenant point are re-run in implementation (Test Plan).
 - **TS1, measured in implementation (2026-10-06, nexus-3wh8d.7; `TenantPartitionCreationTs1MeasurementIntegrationTest`): met.** One new tenant across both parents (`chunks_new`, `taxonomy_centroids_new`) in one transaction, commit included, on a `nexus_svc` connection through the SECURITY DEFINER function, `lock_timeout` 2 s, as a non-superuser schema owner, on parents with the live column set and parent-level indexes (three HNSW, two GIN, one btree on chunks; three HNSW on centroids), the production RLS and grants, and three referencing tables with 4-column foreign keys. 310 creations per layout, fixed tenant names. With four models (eight leaves per tenant): about 2 tenants present, p50 14.5 ms, p95 19.5 ms (n = 2); about 100, p50 29.8 ms, p95 32.4 ms (n = 20); about 300, p50 56.3 ms, p95 69.3 ms (n = 20). Mean of the first 50 creations 17.6 ms, of the last 50 58.3 ms; least-squares slope 0.163 ms per tenant. A first run that also carried three disputed-dimension placeholder models (seven models, fourteen leaves per tenant) measured higher, but the placeholders were removed on 2026-10-06 and those figures describe a layout that no longer exists, so they are not restated. The four-model figures are far inside the 2 s bound at 300 tenants. The lock behaviour, the writers a pending creation holds up and the caller-side statement timeout are in Technical Design, Tenant creation, Locks and bounds. A drop of the roughly 2,500 leaves a finished run leaves behind, in one statement, ran out of shared memory at the default lock table (`max_locks_per_transaction` 64 times 100 slots); a migration that creates leaves for many tenants inside its one transaction holds every new relation's locks to the commit, so P1.3 sized that before the rehearsal. Measured (2026-10-06, nexus-3wh8d.8): the walk holds about 27 relation locks per leaf (1,899 locks for 70 leaves in the seven-model layout, which holds per leaf and so carries over). With four models and two parents a tenant holds 8 leaves, about 216 locks, so the default lock table (`max_locks_per_transaction` 64 times `max_connections` 100 = 6,400 slots) covers about 29 tenants. A production count above that needs a raised `max_locks_per_transaction`.
 - **TS2, not yet met as written.** Two families at n=40: 0.62 ms against 0.41 ms. Every family at 20 plans is re-run in implementation.
+- **TS2, measured in implementation (2026-10-07, nexus-3wh8d.15; `ReadPathLeafPruningIntegrationTest`): met as written.** Every search family at 384, 768 and 1024 (31 family and width pairs), four models, 2 against 300 tenants, 200 plans per set after 20 discarded warm-up plans, each figure the lowest p95 of 5 sets; the rule is the one above, p95 at 300 at most 2x the 2-tenant p95 and at most 25 ms, with no floor. Five consecutive runs passed. Per run, the worst ratio of 300-tenant to 2-tenant p95 was 1.26, 1.20, 1.25, 1.10 and 1.29, and the largest 300-tenant p95 was 1.47, 1.41, 1.51, 1.49 and 1.64 ms. Control: `plain_search_1024` with its tenant predicate removed reads 15.4 ms at 300 tenants against 0.9 ms at 2 and fails. The inlined families are timed as an EXPLAIN round trip (parse and plan, no execution) and the plpgsql ones (`text_gate_probe`, `assign_from_chashes`, `cross_preview`) as the call itself, so the figures include the client round trip.
 - **TS3, in part.** Cases (b) and (c) pass; case (a), the purge shape, was not run and is in the Test Plan. Built 2026-10-06 (nexus-3wh8d.8, `P225MigrationWalkIntegrationTest`) against the real migrated tables: (a) `purge_trash` commits, (b) delete and re-insert commits, (c) a delete that orphans a manifest row fails with SQLSTATE 23503. A foreign key onto a partitioned table is cloned onto the referencing table once per partition, so the violation in (c) names the auto-generated clone (`catalog_document_chunks_..._fkeyN`), not `fk_catalog_chunks_chunk`; `SET CONSTRAINTS nexus.fk_catalog_chunks_chunk DEFERRED` still defers the clones. Error mapping that keys on the constraint name must key on the referencing table instead.
 
 **Dated record of edits to frozen text (2026-10-05, after gate round 1).** These wordings were changed to describe the chosen layout, with no change to any rule, threshold or statistic:
@@ -734,7 +735,7 @@ recorded on the Phase 1 and Phase 2 beads (nexus-3wh8d.8, .12, .13).*
 
 - The UNIQUE on `catalog_collections`.
 - `create_tenant_partitions` and `create_model_partition`.
-- None of these is a separate earlier changeset. They all belong to the single migration changeset: the `service_tokens` trigger is attached in step 7.7, the functions are created in step 2, and the write-site and manifest-trigger redefinitions are made in step 7.8. A rolled-back walk therefore leaves nothing attached to the old layout.
+- Not in this list: the read functions' model and tenant predicates are `vectors-031-1` and `-2`, separate changesets after the walk (Phase 2 Step 2). None of the items above is a separate earlier changeset. They all belong to the single migration changeset: the `service_tokens` trigger is attached in step 7.7, the functions are created in step 2, and the write-site and manifest-trigger redefinitions are made in step 7.8. A rolled-back walk therefore leaves nothing attached to the old layout.
 - The same treatment for `taxonomy_centroids`.
 
 #### Step 3: The migration changeset
@@ -759,6 +760,36 @@ the local disk preflight.
 
 Add the model and tenant predicates to every search family and to the router
 probe.
+
+*2026-10-07 (nexus-3wh8d.15, as built).* The definitions live in two further
+changesets, `vectors-031-1` and `vectors-031-2`, after `vectors-030-1` and
+before the `runAlways` grants; they are not part of the single walk. `-1`
+redefines the ten families (`plain_search`, `text_gated_search_hnsw_first`,
+`text_gated_search_by_chash`, `search_metadata_scoped`, `search_aspect_scoped`,
+`search_graph_hop`, `search_topic_scoped`, `taxonomy_ann_query`,
+`assign_from_chashes`, `cross_preview`) at 384, 768 and 1024: two trailing
+parameters, `p_embedding_model` and `p_tenant`, an explicit predicate on both
+on every scan, the old signatures dropped in the same changeset and the new
+ones granted to `nexus_svc`, and a post-condition that fails the migration
+unless each of the 30 names has one signature. The two plpgsql taxonomy
+functions carry a function-level `SET plan_cache_mode = force_custom_plan`, so
+their inner statements are planned with the call's values; the inlined SQL
+functions get that from the engine's session setting. `-2` redefines
+`text_gate_probe_<dim>`: definer plpgsql where `vectors-029`'s guard still
+holds (the owner policy names exactly the migrating role and no RLS-subject
+login role has its privileges, the same test and post-condition as
+`vectors-029`), invoker SQL otherwise. The probe is plpgsql because a SQL
+definer function is never inlined and its body is planned without the call's
+values. The explicit tenant predicate is in addition to the session GUC
+predicate, never instead of it. `taxonomy_ann_query` takes the SOURCE
+collection's model in both branches, so cross-collection projection matches
+centroids of that model only, as `assign_from_chashes` and `cross_preview`
+already do. The two changesets run after `vectors-030-1` has committed, so each
+is a failure point after the irreversible step; the deploy runbook lists them.
+The walk's expected counts become `new_changesets=3`, `pending_at_start=15`.
+The walk ends with ANALYZE and cannot VACUUM, so every new leaf is unvacuumed
+until the post-boot VACUUM of the runbook (§ 5.9) or autovacuum has run; until
+then the router's probe can take a sequential scan on a large leaf.
 
 #### Step 3: Checks
 
@@ -796,6 +827,8 @@ The runbook is [`docs/runbooks/rdr-225-tenant-removal.md`](../runbooks/rdr-225-t
 | Tenant leaves (`chunks`, `taxonomy_centroids`) | In scope: doctor row | In scope: rows per (model, tenant) | In scope: runbook DETACH and DROP | In scope: doctor compares token tenants against leaves | Cluster backups |
 | Model partitions | In scope: catalog query | In scope | Deferred: retiring a model is its own changeset | In scope: doctor compares `embedding_models` against partitions | Cluster backups |
 | `chunks_retired_225` | N/A | N/A | In scope: Phase 3 Step 3 | N/A | Cluster backups during the window |
+
+**Where the doctor rows run (2026-10-07, nexus-3wh8d.18).** The tenant, model and leaf rows read the database through local admin credentials, so they run on a local install only; on a managed install they report "not applicable", and the engine has no server-side equivalent (its boot check, `ChunksIsolationCheck`, covers the RLS structure of both trees and says nothing about token tenants or registered models). In the cloud the "doctor compares token tenants against leaves" and "compares `embedding_models` against partitions" cells are conexus's read-only query, which the deploy runbook carries (§ 7.6). A cloud tenant with a token and no leaf is otherwise found by a 500 on its first write. Adding the comparison to the engine's status or boot check would be a wire-ledger change and is not built.
 
 **Decided in P1.3 (2026-10-06): the scope of the purge VACUUM.** After `purge_trash` commits, `CatalogRepository.runPostPurgeVacuum` runs `VACUUM (ANALYZE) nexus.chunks` (and two other tables) through `TenantScope.vacuumAnalyze`, whose allowlist names the parent tables. On a partitioned parent that statement processes every leaf of every tenant, although the purge touched one tenant. Either every tenant's leaves are vacuumed, as the parent-level statement does, or only the purging tenant's leaves, which needs leaf names the allowlist can validate (they are generated hashes) and MAINTAIN on each leaf. Decision: the VACUUM stays at the parent for every tenant, the same cost as the old statement, which vacuumed the whole table. `grants-005` grants MAINTAIN on every partition (it loops over the partition tree), because VACUUM checks MAINTAIN on each partition it recurses into. `TenantScope.VACUUM_ALLOWED_TABLES` and `CatalogRepository.PURGE_VACUUM_TABLES` keep naming `nexus.chunks`. No per-tenant leaf list was built.
 
@@ -937,3 +970,4 @@ steps on a fork of its own and does not run the real changeset. Both are in scop
 - 2026-10-06: TS1 measured in implementation (nexus-3wh8d.7) and the lock wording corrected to the measured behaviour: the lock timeout bounds each acquisition, not the whole creation; a pending creation holds up writers to the registry, the referencing tables and the model partition it is on, across tenants; no statement timeout inside the function, a caller-side one bounds the whole creation. Signatures updated to `create_tenant_partitions(parent, tenant, force)` and `create_model_partition(parent, model, force)`; leaf RLS policies and grants are copied from the parent. No decision changed.
 - 2026-10-06: Fix round after the Phase 1 code review and critique (nexus-3wh8d.10, .11, .14). Recorded, with no change to a decision of Sam's: what guards a missed write site now (`PlpgsqlCheckGateTest` and the runtime write-family tests, not the reverted inventory) and what `plpgsql_check` cannot see; the P1.3 decisions (purge VACUUM at the parent with MAINTAIN on every partition, the registries, 409 `collection_model_mismatch` on cross-model rename and re-home, 422 for manifest writes to an unregistered collection, centroid upserts requiring a registry row, and the user-visible change in `ChashRepository.renameCollection`); the Liquibase rollback restores table shape only and is not a recovery path; the lock figures restated for four models and two parents (about 29 tenants in the default lock table) and the seven-model figures withdrawn; the Failure Modes wording for plans and statistics reduced to what the tests show; `create_tenant_partitions` refuses `force = false` outside a `*_new` parent; `create_model_partition` covers every tenant that has a leaf under a sibling model; the unregistered-model refusal is reachable only by a direct call.
 - 2026-10-06: Test-suite teardown (nexus-3wh8d.7, Sam's decision): `nexus.drop_tenant_partitions(tenant)` added to `vectors-030-1`, and the Python engine substrate calls it for each minted test tenant when the test ends. Reason: one tenant per test, never removed, took a worker's PG past 2,000 tenants and the token insert past its bound (503 `tenant_creation_busy` on 6,106 tests). No design decision changed.
+- 2026-10-07: Phase 2 read path (nexus-3wh8d.15) and checks (.16) built; fix round after their code review and critique (nexus-3wh8d.17, .18). Recorded, with no change to a decision of Sam's: the read-path changesets `vectors-031-1` and `-2` (Phase 2 Step 2); the walk's expected counts (3 new, 15 pending); the unvacuumed-leaf state after the walk and the post-boot VACUUM; the local-only scope of the doctor rows (Day 2).

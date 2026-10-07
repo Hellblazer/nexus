@@ -49,6 +49,13 @@ _MANAGED_DEPLOYMENT_SKIP_DETAIL = (
     "from this client; skipping"
 )
 _LOCAL_MODE_NOT_CONFIGURED_DETAIL = "service mode not configured (pg_credentials absent); skipping"
+# The RDR-225 partition rows read the database through local admin credentials. A managed engine has no
+# server-side equivalent of them (nexus-3wh8d.18 review), so the shared "runs server-side" text would be false.
+_MANAGED_PARTITION_ROWS_SKIP_DETAIL = (
+    "managed deployment — these rows read the database through local admin credentials and the engine runs no "
+    "equivalent; the operator verifies tenant leaves and model partitions with the read-only query in "
+    "docs/runbooks/rdr-225-cloud-deploy.md; skipping"
+)
 
 
 @dataclass
@@ -4029,8 +4036,10 @@ def _check_chunks_tenant_isolation(engine_status: object = _ENGINE_STATUS_UNSET)
         fix_suggestions=[
             "Run the engine's migrations as a role the service role does not inherit (NX_DB_ADMIN_URL, "
             "NX_DB_ADMIN_USER, NX_DB_ADMIN_PASS), not the service role itself",
-            "As the table owner: DROP POLICY chunks_gate_probe_owner_read ON nexus.chunks; or stop the service "
-            "role inheriting the migrating role (REVOKE the membership, or GRANT ... WITH INHERIT FALSE)",
+            "As the table owner: DROP POLICY chunks_gate_probe_owner_read ON nexus.chunks, then SELECT "
+            "nexus.partition_sync_access('nexus.chunks'::regclass) so the copies on every model partition and "
+            "leaf go with it; or stop the service role inheriting the migrating role (REVOKE the membership, "
+            "or GRANT ... WITH INHERIT FALSE)",
             "If row-level security itself is off (no policy applies, the table is unprotected): as the table "
             "owner, ENABLE ROW LEVEL SECURITY and FORCE ROW LEVEL SECURITY on nexus.chunks, and "
             "restore the tenant_isolation policy",
@@ -5273,7 +5282,8 @@ WITH RECURSIVE tree AS (
       JOIN pg_class ch ON ch.oid = i.inhrelid
 ), pol AS (
     SELECT p.polrelid, p.polname::text AS polname,
-           concat_ws(chr(1), p.polcmd::text, p.polroles::text,
+           concat_ws(chr(1), p.polcmd::text,
+                     (SELECT string_agg(x::text, ',' ORDER BY x) FROM unnest(p.polroles) x),
                      pg_get_expr(p.polqual, p.polrelid), pg_get_expr(p.polwithcheck, p.polrelid)) AS shape
       FROM pg_policy p
      WHERE p.polpermissive
@@ -5739,8 +5749,11 @@ def _check_tenant_model_partitions(
     * ``Partition leaves``: the leaf count. Informational. Each new tenant adds one leaf per model partition of
       each table and a ``mint``-scoped credential can create tenants, so ``mint`` is an operator credential.
 
-    Reads the SAME local-only admin-psql path as ``_check_rls_present`` (managed deployments run these checks
-    server-side), so no engine route or wire field is involved. Not applicable (ok, "not applicable: ...",
+    Reads the SAME local-only admin-psql path as ``_check_rls_present``, so no engine route or wire field is
+    involved. These rows run on a local install only: a managed deployment has no ``pg_credentials`` here and the
+    engine has no server-side equivalent (its boot check, ``ChunksIsolationCheck``, covers the RLS structure of
+    both trees and nothing about token tenants or registered models), so on a managed install they report "not
+    applicable" and the comparison is conexus's read-only query (docs/runbooks/rdr-225-cloud-deploy.md). Not applicable (ok, "not applicable: ...",
     never a warning) where there is nothing to compare: no ``pg_credentials`` (a virgin box, or a managed
     deployment), parents that are not partitioned (an engine that predates RDR-225), no token tenant, or no
     registered model. A finding is evaluated first; not applicable replaces only the outcome "nothing to
@@ -5754,7 +5767,7 @@ def _check_tenant_model_partitions(
     if not creds_path.exists():
         from nexus.config import is_local_mode  # noqa: PLC0415 — deferred to avoid circular import
 
-        skip = _MANAGED_DEPLOYMENT_SKIP_DETAIL if not is_local_mode() else _LOCAL_MODE_NOT_CONFIGURED_DETAIL
+        skip = _MANAGED_PARTITION_ROWS_SKIP_DETAIL if not is_local_mode() else _LOCAL_MODE_NOT_CONFIGURED_DETAIL
         return _partition_rows(True, f"not applicable: {skip}")
 
     from nexus.db.pg_provision import (  # noqa: PLC0415 — deferred to avoid circular import

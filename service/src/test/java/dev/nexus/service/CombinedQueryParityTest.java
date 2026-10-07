@@ -476,7 +476,9 @@ class CombinedQueryParityTest {
                 .contains("p_corpus text")
                 .contains("p_subtree text")
                 .contains("p_where jsonb")
-                .contains("p_n integer");
+                .contains("p_n integer")
+                .contains("p_embedding_model text")
+                .contains("p_tenant text");
         }
     }
 
@@ -563,7 +565,9 @@ class CombinedQueryParityTest {
                 .as("topic-scoped signature: topic_label, collection, n")
                 .contains("p_topic_label text")
                 .contains("p_collection text")
-                .contains("p_n integer");
+                .contains("p_n integer")
+                .contains("p_embedding_model text")
+                .contains("p_tenant text");
         }
     }
 
@@ -901,7 +905,8 @@ class CombinedQueryParityTest {
             ResultSet rs = su.createStatement().executeQuery(
                 "SELECT id, chash FROM nexus.search_metadata_scoped_1024(" +
                 queryVecLiteral(1024) + ", ARRAY['" + COLL_M + "']::text[], 'paper', " +
-                "NULL, NULL::int, NULL, NULL::text, NULL::jsonb, 10) ORDER BY distance");
+                "NULL, NULL::int, NULL, NULL::text, NULL::jsonb, 10, 'voyage-context-3', '" + TENANT_A
+                + "') ORDER BY distance");
             int seen = 0;
             while (rs.next()) {
                 assertThat(rs.getString("chash"))
@@ -937,7 +942,9 @@ class CombinedQueryParityTest {
                 .contains("p_pattern text")
                 .contains("p_min_confidence double precision")
                 .contains("p_where jsonb")
-                .contains("p_n integer");
+                .contains("p_n integer")
+                .contains("p_embedding_model text")
+                .contains("p_tenant text");
         }
     }
 
@@ -1130,7 +1137,7 @@ class CombinedQueryParityTest {
             sqlText(corpus) + ", " +
             sqlText(subtree) + ", " +
             (whereJson == null ? "NULL::jsonb" : "'" + whereJson.replace("'", "''") + "'::jsonb") + ", " +
-            n + ")";
+            n + ", " + sqlText(modelFor(collection)) + ", " + sqlText(tenantFor(collection)) + ")";
         return runIds(conn, sql);
     }
 
@@ -1142,7 +1149,7 @@ class CombinedQueryParityTest {
             queryVecLiteral(dim) + ", " +
             sqlText(topicLabel) + ", " +
             sqlText(collection) + ", " +
-            n + ")";
+            n + ", " + sqlText(modelFor(collection)) + ", " + sqlText(tenantFor(collection)) + ")";
         return runIds(conn, sql);
     }
 
@@ -1153,11 +1160,11 @@ class CombinedQueryParityTest {
         String[] colls = {collection};
         Table<?> fn = switch (dim) {
             case 384  -> SEARCH_METADATA_SCOPED_384.call(
-                vec, colls, contentType, null, null, null, null, null, 10);
+                vec, colls, contentType, null, null, null, null, null, 10, modelFor(collection), tenantFor(collection));
             case 768  -> SEARCH_METADATA_SCOPED_768.call(
-                vec, colls, contentType, null, null, null, null, null, 10);
+                vec, colls, contentType, null, null, null, null, null, 10, modelFor(collection), tenantFor(collection));
             case 1024 -> SEARCH_METADATA_SCOPED_1024.call(
-                vec, colls, contentType, null, null, null, null, null, 10);
+                vec, colls, contentType, null, null, null, null, null, 10, modelFor(collection), tenantFor(collection));
             default   -> throw new IllegalArgumentException("unsupported dim " + dim);
         };
         return explain(fn);
@@ -1175,7 +1182,7 @@ class CombinedQueryParityTest {
             sqlText(pattern) + ", " +
             (minConfidence == null ? "NULL::float8" : minConfidence.toString()) + ", " +
             "NULL::jsonb, " +
-            n + ")";
+            n + ", " + sqlText(modelFor(collection)) + ", " + sqlText(tenantFor(collection)) + ")";
         return runIds(conn, sql);
     }
 
@@ -1186,11 +1193,11 @@ class CombinedQueryParityTest {
         String[] colls = {collection};
         Table<?> fn = switch (dim) {
             case 384  -> SEARCH_ASPECT_SCOPED_384.call(
-                vec, colls, field, pattern, null, null, 10);
+                vec, colls, field, pattern, null, null, 10, modelFor(collection), tenantFor(collection));
             case 768  -> SEARCH_ASPECT_SCOPED_768.call(
-                vec, colls, field, pattern, null, null, 10);
+                vec, colls, field, pattern, null, null, 10, modelFor(collection), tenantFor(collection));
             case 1024 -> SEARCH_ASPECT_SCOPED_1024.call(
-                vec, colls, field, pattern, null, null, 10);
+                vec, colls, field, pattern, null, null, 10, modelFor(collection), tenantFor(collection));
             default   -> throw new IllegalArgumentException("unsupported dim " + dim);
         };
         return explain(fn);
@@ -1201,9 +1208,12 @@ class CombinedQueryParityTest {
             throws Exception {
         Vector vec = queryVec(dim);
         Table<?> fn = switch (dim) {
-            case 384  -> SEARCH_TOPIC_SCOPED_384.call(vec, topicLabel, collection, 10);
-            case 768  -> SEARCH_TOPIC_SCOPED_768.call(vec, topicLabel, collection, 10);
-            case 1024 -> SEARCH_TOPIC_SCOPED_1024.call(vec, topicLabel, collection, 10);
+            case 384  -> SEARCH_TOPIC_SCOPED_384.call(vec, topicLabel, collection, 10,
+                modelFor(collection), tenantFor(collection));
+            case 768  -> SEARCH_TOPIC_SCOPED_768.call(vec, topicLabel, collection, 10,
+                modelFor(collection), tenantFor(collection));
+            case 1024 -> SEARCH_TOPIC_SCOPED_1024.call(vec, topicLabel, collection, 10,
+                modelFor(collection), tenantFor(collection));
             default   -> throw new IllegalArgumentException("unsupported dim " + dim);
         };
         return explain(fn);
@@ -1409,6 +1419,11 @@ class CombinedQueryParityTest {
     /** COLL_B belongs to tenant B; everything else to tenant A. */
     private static String tenantFor(String collection) {
         return COLL_B.equals(collection) ? TENANT_B : TENANT_A;
+    }
+
+    /** The embedding model a conformant collection name carries (RDR-225: every read function names it). */
+    private static String modelFor(String collection) {
+        return collection.contains("__minilm-l6-v2-384__") ? "minilm-l6-v2-384" : "voyage-context-3";
     }
 
     private static void insertCollection(Connection su, String tenantId, String name)
