@@ -643,28 +643,28 @@ class ReadPathLeafPruningIntegrationTest {
 
     // ── TS2: planning does not grow with the tenant count ───────────────────
 
-    private static final int TS2_SAMPLES = 20;
+    /**
+     * Plans per set. The rule is on a p95, and the p95 of 20 samples is the second-largest of 20, which moves by 2x
+     * from one run to the next on a shared box for a statement that plans in about a millisecond. The p95 of 200 is
+     * the tenth-largest, and does not.
+     */
+    private static final int TS2_SAMPLES = 200;
+    /** Plans run and discarded at the start of every set (plan cache, JIT, server caches). */
+    private static final int TS2_WARMUP = 20;
     private static final int TS2_TENANTS = 300;
     /**
-     * Each family's figure is the best of this many sets of {@link #TS2_SAMPLES} plans. A box that is also
-     * running a build or another suite (the shared lease keeps builds apart, not a peer's test run) inflates
-     * single sets by 5x and more, in either phase; a planning cost that GROWS with the tenant count shows in
-     * every set, so the minimum keeps the signal and drops the load.
+     * Each figure, at 2 tenants and at 300, is the best (lowest) p95 of this many sets, so both phases are read
+     * with the same statistic. A box that is also running a build or another suite inflates single sets by 5x and
+     * more in either phase; a planning cost that GROWS with the tenant count shows in every set, so the minimum
+     * keeps the signal and drops the load. The bound itself is the RDR's, unchanged: p95 at 300 tenants at most
+     * 2x the 2-tenant p95 and at most 25 ms, no floor.
      */
-    private static final int TS2_ATTEMPTS = 3;
-    /**
-     * The 2x rule is read against at least this many milliseconds: these statements take about one millisecond, and
-     * the p95 of 20 samples of one moves by 2x and more from one run to the next on a shared box (2.7 ms against
-     * 0.9 ms for search_topic_scoped_768, same plan, measured here), so a bound of 2x a baseline under 3 ms
-     * would be a coin flip. A planning cost that grows with the tenant count (47 ms at 302 tenants in the unpruned prototype)
-     * is far past it, and the 25 ms bound is unchanged.
-     */
-    private static final double TS2_RESOLUTION_MS = 3.0;
+    private static final int TS2_ATTEMPTS = 5;
 
     /** Families whose body is not inlined into the caller's statement: the call is timed, with its inner planning. */
     private static final Set<String> TS2_OPAQUE = Set.of("text_gate_probe", "assign_from_chashes", "cross_preview");
 
-    /** p95 of {@link #TS2_SAMPLES} timings of one family at one dimension, in milliseconds. */
+    /** Best p95 of {@link #TS2_ATTEMPTS} sets of {@link #TS2_SAMPLES} timings of one family at one dimension, in ms. */
     private double ts2P95(String family, String coll) {
         double best = Double.MAX_VALUE;
         for (int attempt = 0; attempt < TS2_ATTEMPTS; attempt++) {
@@ -680,7 +680,7 @@ class ReadPathLeafPruningIntegrationTest {
         // fraction of a millisecond.
         probeScope.withTenant(TA, ctx -> {
             PgSession.setSearchPlanCacheMode(ctx);
-            for (int i = -3; i < TS2_SAMPLES; i++) {      // three warm-up runs, not recorded
+            for (int i = -TS2_WARMUP; i < TS2_SAMPLES; i++) {      // warm-up runs, not recorded
                 Table<?> fn = fnFor(family, coll, TA, false);
                 long t0 = System.nanoTime();
                 if (TS2_OPAQUE.contains(family)) {
@@ -698,7 +698,7 @@ class ReadPathLeafPruningIntegrationTest {
     }
 
     /**
-     * TS2, as the RDR writes it: every search family planned 20 times at 2 tenants and at 300, p95 at 300 at most
+     * TS2, as the RDR writes it: every search family planned 200 times per set at 2 tenants and at 300, p95 at 300 at most
      * twice the 2-tenant p95 and at most 25 ms. A family is timed as EXPLAIN of its call (parse and plan, no
      * execution) when it is inlined into the caller's statement, and as the call itself when it is not (a
      * plpgsql function plans its own statements at call time: the probe, assign_from_chashes, cross_preview;
@@ -729,7 +729,8 @@ class ReadPathLeafPruningIntegrationTest {
             }
         }
         List<String> failures = new ArrayList<>();
-        StringBuilder table = new StringBuilder("TS2 planning p95 (ms), " + TS2_SAMPLES + " samples\n");
+        StringBuilder table = new StringBuilder("TS2 planning p95 (ms), best of " + TS2_ATTEMPTS + " sets of "
+            + TS2_SAMPLES + " plans\n");
         for (String coll : List.of(CTX_1, BGE_1, MINI_1)) {
             for (String family : FAMILIES) {
                 if (family.equals("cross_preview") && !coll.equals(CTX_1)) continue;
@@ -737,7 +738,7 @@ class ReadPathLeafPruningIntegrationTest {
                 double p2 = at2.get(key);
                 double p300 = ts2P95(family, coll);
                 table.append(String.format("  %-34s  2 tenants %7.3f   300 tenants %7.3f%n", key, p2, p300));
-                if (p300 > 2 * Math.max(p2, TS2_RESOLUTION_MS) || p300 > 25.0) failures.add(String.format("%s: p95 %.3f ms at 300 vs %.3f ms at 2", key, p300, p2));
+                if (p300 > 2 * p2 || p300 > 25.0) failures.add(String.format("%s: p95 %.3f ms at 300 vs %.3f ms at 2", key, p300, p2));
             }
         }
         System.out.println(table);

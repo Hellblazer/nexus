@@ -1510,6 +1510,9 @@ public final class PgVectorRepository {
      * analyzed but not vacuumed, so its visibility map is empty, the same statement takes a Seq Scan at 26
      * percent (measured; an ORDER BY on the collection does not help, it adds a Sort over the Seq Scan).
      * Autovacuum sets the map on a leaf after a bulk load (until then the router's probe is slower, not wrong).
+     * The RDR-225 walk is one transaction and ends with ANALYZE only, so every leaf starts in that unvacuumed state;
+     * the deploy runbook has the operator run VACUUM (ANALYZE) after boot, and {@code NX_SEARCH_EXACT_MAX_ROWS=0}
+     * turns this probe off meanwhile. {@code RouterProbeShapeIntegrationTest} pins the VACUUMED case only.
      */
     static org.jooq.Select<? extends org.jooq.Record1<Integer>> probeSelectedRowsQuery(
             DSLContext ctx, int dim, String[] colls, String model, String tenant, int limit) {

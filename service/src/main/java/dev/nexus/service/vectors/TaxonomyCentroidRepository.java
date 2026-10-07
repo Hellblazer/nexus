@@ -205,7 +205,10 @@ public final class TaxonomyCentroidRepository {
         // SOURCE collection's, also in the cross-collection branch: a centroid of another model is not a
         // candidate (the same rule assign_from_chashes and cross_preview apply).
         // An unregistered collection can hold no centroid (every centroid write needs the registration) and has
-        // no model to match, so the answer is none, as it was before the model was part of the query.
+        // no model to match, so the answer is none. That is unchanged for a same-collection query (v0.1.149 never
+        // looked the registry up and found no centroid either). For a cross-collection query it is a change: an
+        // unregistered source used to get other collections' centroids of the same width, and now gets none (a
+        // wire-ledger entry records it).
         String model;
         try {
             model = CollectionRegistry.lookup(tenantScope, tenant, collection).embeddingModel();

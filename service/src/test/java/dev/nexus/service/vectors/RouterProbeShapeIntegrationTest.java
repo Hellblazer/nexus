@@ -221,6 +221,12 @@ class RouterProbeShapeIntegrationTest {
      * Latency of the probe itself, as the engine runs it, at scopes just under, at and just over the threshold.
      * The bound is a catastrophe guard (a sequential scan of the leaf's heap is far over it on a cold leaf);
      * the measured medians are recorded in the bead's record.
+     *
+     * <p>What it does NOT cover. At this scale (a leaf of about 100 pages) even a sequential scan finishes in a
+     * few milliseconds, so this check cannot fail on the regression it names; the EXPLAIN pin above does that
+     * work. Both cover a VACUUMED leaf only. The state the cloud walk leaves every leaf in (loaded, analyzed,
+     * never vacuumed: the walk is one transaction and cannot VACUUM) is measured on the PITR fork before and after
+     * a VACUUM (docs/runbooks/rdr-225-cloud-deploy.md, § 7.2 and the .27 placeholders), not here.
      */
     @Test
     void probe_latency_atScopesNearTheThreshold() {
