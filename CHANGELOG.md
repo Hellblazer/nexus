@@ -6,6 +6,16 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.72.1] - 2026-10-06
+
+Pairs with engine-service-v0.1.149, unchanged from 7.72.0 (`REQUIRED_ENGINE_VERSION` stays 0.1.149). A Windows fix release: on native Windows 7.72.0's MCP search hung forever, and these fixes are what the RDR-224 Phase 5 gate passed with on a clean Windows 11 guest (T2 nexus_rdr/224-gate-run-2026-10-06). Windows is still not declared supported.
+
+### Fixed
+
+- **On native Windows, an MCP `search` no longer hangs forever** (nexus-jg99b, RDR-224). The MCP stdio transport keeps a thread blocked reading the stdin pipe, and while that read is pending Windows makes other calls on the same handle wait. Loading the OpenBLAS DLL that numpy and scipy ship makes one of those calls under the loader lock, so the first search that needed numpy never returned, and no new thread could start in the server. `nx-mcp` and `nx-mcp-catalog` now move the protocol to a private descriptor at startup and point stdin and `STD_INPUT_HANDLE` at `NUL`, so a DLL that inspects stdin while loading no longer meets the pending read (measured for numpy's OpenBLAS and for `GetFileSizeEx` and both CRTs' `_fstat64` on fd 0), and a subprocess a tool starts with default stdin gets `NUL` instead of the protocol pipe. With a Python MCP client driving the server on the RDR-224 guest, store then search went from a hang to 0.2 s; the Phase 5 gate covers the Claude Code launch path. POSIX is unchanged.
+- **On native Windows, the `preflight` SessionStart hook fits its 5 s budget on a fresh install** (nexus-3cydr, RDR-224). On Windows its `nx --version` probe ran this venv's own Python with `-m nexus.cli`, so it re-imported the whole CLI in the install that was already running the hook and could not see a missing or foreign `nx` anyway. With no compiled bytecode yet, that import took 2 to 7 s, and Claude Code cancelled the hook in a new user's first session (the Phase 5 gate's first session measured 6.0 s against 5 s). Windows now checks that `nx` resolves on PATH, spawns nothing when it sits beside the running `nx-hook`, and probes the `nx` on PATH when it does not. On the RDR-224 guest the hook went from about 1.35 s to 0.44 s warm and from about 4.0 s to 1.9 s with cold bytecode. POSIX is unchanged.
+- **On Windows, engine and PostgreSQL bundle signature checks work for accounts that may not create symlinks** (nexus-zw44w). sigstore checks signatures through python-tuf, and tuf 7.0.0, which the lock pinned, re-points its `root.json` with a symlink on every start; an unprivileged Windows account gets WinError 1314 and the check failed closed. That happened to the Windows release runner's account on 2026-10-06. tuf 7.0.1 falls back to a hard link (python-tuf #2980, PR #2981), and `tuf>=7.0.1,<8` is now a declared dependency. A test drives the installed tuf with the symlink refused.
+
 ## [7.72.0] - 2026-10-06
 
 ### Added

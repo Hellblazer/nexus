@@ -61,7 +61,7 @@ Full tool names follow `mcp__plugin_conexus_nexus__<tool>`.
 | `plan_delete` | Delete a plan-library entry by id (cleanup counterpart to `plan_save`) |
 | `traverse` | Walk the catalog link graph from seed tumblers with typed link filters or a named purpose. Depth capped at 3. Returns `{tumblers, ids, collections}` for downstream retrieval |
 
-### Tuple space (T2-adjacent, RDR-205, RDR-206)
+### Tuple space (T2, RDR-205, RDR-206)
 
 `nexus.db.t2.http_tuple_store.HttpTupleStore` (`db.tuples`) over the engine's `/v1/tuples`. See [Tuple Space](tuple-space.md) for the full reference and [Tuple Space Walkthroughs](tuple-space-walkthroughs.md) for scenario diagrams.
 

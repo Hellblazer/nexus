@@ -898,6 +898,13 @@ def catalog_link_bulk(
 
 
 def main():
+    # nexus-jg99b: on Windows, take the stdio protocol off fd 0 before anything
+    # can load a DLL that inspects stdin (OpenBLAS hangs under the loader lock
+    # while the transport's read is pending). A no-op elsewhere; never raises.
+    from nexus.mcp._win_stdin import isolate_stdin  # noqa: PLC0415 — entry-point only
+
+    _stdin_isolation = isolate_stdin()
+
     # nexus-4xgfy (critique 38b7db3d C1): the dominant post-upgrade path is
     # a Claude session spawning THIS process with no bare `nx` invocation in
     # between — the finish trigger must fire here too. Report-safe: the MCP
@@ -931,6 +938,14 @@ def main():
 
     configure_logging("mcp")
     log = structlog.get_logger("nexus.mcp.catalog")
+    if _stdin_isolation.step != "not-windows":
+        (log.info if _stdin_isolation.isolated else log.warning)(
+            "mcp_stdin_isolation",
+            server="nx-mcp-catalog",
+            isolated=_stdin_isolation.isolated,
+            step=_stdin_isolation.step,
+            error=_stdin_isolation.error,
+        )
 
     # This server is patched only TRANSITIVELY: nexus/mcp/__init__.py imports
     # nexus.mcp.core, and importing core is what applies the SDK patches.
