@@ -20,7 +20,6 @@ from __future__ import annotations
 import json
 import os
 import shutil
-import signal
 import socket
 import subprocess
 import tempfile
@@ -34,6 +33,7 @@ from nexus._install.layout_core import exe_name
 from nexus.db.pg_provision import bootstrap_superuser
 from click.testing import CliRunner
 
+from tests._child_process import java_available, java_executable, pg_data_tempdir, stop_group
 from tests.db._service_fixture import (
     SERVICE_ROLES_SQL,
     jar_freshness_skip_reason,
@@ -54,8 +54,7 @@ _PG_CTL   = _PG_BIN / exe_name("pg_ctl")
 _PSQL     = _PG_BIN / exe_name("psql")
 _CREATEDB = _PG_BIN / exe_name("createdb")
 
-_JAVA_HOME = os.environ.get("JAVA_HOME", "")
-_JAVA = Path(_JAVA_HOME) / "bin" / "java" if _JAVA_HOME else Path(shutil.which("java") or "java")
+_JAVA = java_executable()
 
 _ALL_PREREQS = (
     _JAR.exists()
@@ -63,7 +62,7 @@ _ALL_PREREQS = (
     and _PG_CTL.exists()
     and _PSQL.exists()
     and _CREATEDB.exists()
-    and (_JAVA.exists() if _JAVA_HOME else shutil.which("java") is not None)
+    and java_available()
 )
 
 _JAR_STALE = jar_freshness_skip_reason()
@@ -105,7 +104,7 @@ def _wait_tcp(host: str, port: int, timeout: float = 30.0) -> None:
 @pytest.fixture(scope="module")
 def pg_instance():
     """Hermetic Postgres 16 cluster (trust auth)."""
-    pgdata = tempfile.mkdtemp(prefix="nexus_dtmint_pg_")
+    pgdata = pg_data_tempdir("nexus_dtmint_pg_")
     pg_port = _free_port()
     pglog = os.path.join(pgdata, "pg.log")
     pg_user = bootstrap_superuser()
@@ -164,17 +163,7 @@ def service(pg_instance):
         wait_for_service("127.0.0.1", svc_port, proc=proc, log_path=_svc_log, timeout=60.0)
         yield {"port": svc_port, "token": _ROOT_TOKEN}
     finally:
-        try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-        except ProcessLookupError:
-            pass
-        try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            try:
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-            except ProcessLookupError:
-                pass
+        stop_group(proc, grace_s=5)
 
 
 def _post(port: int, bearer: str, path: str, body: dict) -> tuple[int, dict]:

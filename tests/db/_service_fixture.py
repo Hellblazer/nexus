@@ -37,7 +37,6 @@ from __future__ import annotations
 
 import json as _json
 import os
-import signal
 import socket
 import subprocess
 import sys
@@ -48,6 +47,8 @@ import zipfile
 import urllib.request
 import zipfile
 from pathlib import Path
+
+from tests._child_process import group_alive, kill_group, pid_alive, popen_in_group
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _SERVICE_JAR = _REPO_ROOT / "service" / "target" / "nexus-service-1.0-SNAPSHOT.jar"
@@ -416,26 +417,14 @@ def _build_lease_root() -> Path:
 
 
 def _pid_alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True  # alive, owned by another user — still a live build
-    return True
+    return pid_alive(pid)  # alive, or owned by another user — still a live build
 
 
 def _group_alive(pgid: int) -> bool:
     """Any member of process group *pgid* alive? Mirrors the shell lib's
     ``kill -0 -- -PGID``: EPERM counts as alive (the failure direction is
-    always "still held")."""
-    try:
-        os.killpg(pgid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    return True
+    always "still held"). See ``tests._child_process.group_alive``."""
+    return group_alive(pgid)
 
 
 def build_in_progress_reason(lease_root: Path | None = None) -> str | None:
@@ -826,12 +815,11 @@ def spawn_service(
     # Deliberately not a context manager: the handle's lifetime is the
     # service process's, and the caller owns termination.
     fh = open(log_path, "wb")  # noqa: SIM115 — lifetime spans the spawned process
-    proc = subprocess.Popen(
+    proc = popen_in_group(
         cmd,
         env=env,
         stdout=fh,
         stderr=subprocess.STDOUT,
-        preexec_fn=os.setsid,
     )
     return proc, log_path
 
@@ -868,10 +856,7 @@ def wait_for_service(
     if proc is not None:
         rc = proc.poll()
         detail += f"\nprocess exit code: {rc if rc is not None else 'still running (wedged?)'}"
-        try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-        except (ProcessLookupError, PermissionError):
-            pass
+        kill_group(proc)
     if log_path is not None:
         try:
             with open(log_path, encoding="utf-8", errors="replace") as fh:

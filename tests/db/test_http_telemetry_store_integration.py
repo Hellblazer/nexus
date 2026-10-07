@@ -48,6 +48,7 @@ import pytest
 from nexus._install.layout_core import exe_name
 from nexus.db.pg_provision import bootstrap_superuser
 
+from tests._child_process import java_available, java_executable, pg_data_tempdir
 from tests._t2_fixture_ops import canonical_chunk_id
 from tests.db._service_fixture import (
     SERVICE_ROLES_SQL,
@@ -68,12 +69,7 @@ _PG_CTL   = _PG_BIN / exe_name("pg_ctl")
 _PSQL     = _PG_BIN / exe_name("psql")
 _CREATEDB = _PG_BIN / exe_name("createdb")
 
-_JAVA_HOME = os.environ.get("JAVA_HOME", "")
-_JAVA = (
-    Path(_JAVA_HOME) / "bin" / "java"
-    if _JAVA_HOME
-    else Path(shutil.which("java") or "java")
-)
+_JAVA = java_executable()
 
 _ALL_PREREQS = (
     _JAR.exists()
@@ -81,7 +77,7 @@ _ALL_PREREQS = (
     and _PG_CTL.exists()
     and _PSQL.exists()
     and _CREATEDB.exists()
-    and (_JAVA.exists() if _JAVA_HOME else shutil.which("java") is not None)
+    and java_available()
 )
 
 pytestmark = [
@@ -134,7 +130,7 @@ def _find_free_port() -> int:
 def pg_service():
     """Spin up an ephemeral Postgres 16 instance, bootstrap telemetry schema, yield port."""
     pgport  = _find_free_port()
-    tmpdir  = tempfile.mkdtemp(prefix="nx_tel_inttest_")
+    tmpdir  = pg_data_tempdir("nx_tel_inttest_")
     pgdata  = f"{tmpdir}/pgdata"
     pg_user = bootstrap_superuser()
 
