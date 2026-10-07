@@ -2491,6 +2491,7 @@ def _spawn_deferred_labeling() -> bool:
     import sys  # noqa: PLC0415 — spawn-only branch
 
     from nexus.config import nexus_config_dir  # noqa: PLC0415 — circular-dep avoidance, mirrors _registry_path above
+    from nexus.util.process_group import isolation_popen_kwargs  # noqa: PLC0415 — spawn-only branch
 
     try:
         # nexus-pfuns: was a hardcoded ``Path.home()``, blind to
@@ -2510,12 +2511,17 @@ def _spawn_deferred_labeling() -> bool:
         # open on Windows (RDR-224, nexus-7xzc1). It re-checks the pid's live
         # command before signalling, so a stale file left after the run exits
         # is harmless. Nothing else kills this child.
+        # Own session (POSIX) / own process group (Windows): ``start_new_session``
+        # alone is ignored on Windows, and ``nx uninstall`` stops this run with
+        # ``CTRL_BREAK`` addressed to its pid, which only reaches the run when
+        # the pid is a process-group id. Without the group the break goes to
+        # every process on the console, uninstall itself included.
         proc = subprocess.Popen(
             [sys.executable, "-m", "nexus.cli", "taxonomy", "label"],
             stdin=subprocess.DEVNULL,
             stdout=log,
             stderr=log,
-            start_new_session=True,
+            **isolation_popen_kwargs(),
         )
         from nexus.daemon.installer import DEFERRED_LABELING_PID_NAME  # noqa: PLC0415 — spawn-only branch
 

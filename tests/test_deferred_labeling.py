@@ -61,8 +61,14 @@ class TestSpawnDeferredLabeling:
         # runs the module entry with the same interpreter — survives
         # PATH-less environments (launchd lesson, nexus-n8sbw)
         assert cmd[1:] == ["-m", "nexus.cli", "taxonomy", "label"]
-        # detached: new session, no inherited stdio pipes back to us
-        assert calls[0]["start_new_session"] is True
+        # detached: own session on POSIX, own process group on Windows (where
+        # ``nx uninstall`` stops this run with a CTRL_BREAK that only reaches a
+        # group leader), no inherited stdio pipes back to us
+        from nexus.util.process_group import isolation_popen_kwargs
+
+        expected = isolation_popen_kwargs()
+        assert expected, "the isolation kwargs are never empty"
+        assert {k: calls[0].get(k) for k in expected} == expected
         assert calls[0]["stdin"] == subprocess.DEVNULL
         # nexus-7xzc1: the pid is recorded where `nx uninstall` stops the run
         from nexus.daemon.installer import DEFERRED_LABELING_PID_NAME
