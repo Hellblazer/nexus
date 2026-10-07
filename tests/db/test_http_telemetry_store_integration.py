@@ -45,6 +45,9 @@ from pathlib import Path
 
 import pytest
 
+from nexus._install.layout_core import exe_name
+from nexus.db.pg_provision import bootstrap_superuser
+
 from tests._t2_fixture_ops import canonical_chunk_id
 from tests.db._service_fixture import (
     SERVICE_ROLES_SQL,
@@ -59,10 +62,10 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 _JAR       = _REPO_ROOT / "service" / "target" / "nexus-service-1.0-SNAPSHOT.jar"
 _PG_BIN    = pg_bin_dir()
 
-_INITDB   = _PG_BIN / "initdb"
-_PG_CTL   = _PG_BIN / "pg_ctl"
-_PSQL     = _PG_BIN / "psql"
-_CREATEDB = _PG_BIN / "createdb"
+_INITDB   = _PG_BIN / exe_name("initdb")
+_PG_CTL   = _PG_BIN / exe_name("pg_ctl")
+_PSQL     = _PG_BIN / exe_name("psql")
+_CREATEDB = _PG_BIN / exe_name("createdb")
 
 _JAVA_HOME = os.environ.get("JAVA_HOME", "")
 _JAVA = (
@@ -132,10 +135,10 @@ def pg_service():
     pgport  = _find_free_port()
     tmpdir  = tempfile.mkdtemp(prefix="nx_tel_inttest_")
     pgdata  = f"{tmpdir}/pgdata"
-    pg_user = os.environ["USER"]
+    pg_user = bootstrap_superuser()
 
     subprocess.run(
-        [str(_INITDB), "-D", pgdata, "--no-locale", "-E", "UTF8", "--auth=trust"],
+        [str(_INITDB), "-D", pgdata, "-U", pg_user, "--no-locale", "-E", "UTF8", "--auth=trust"],
         check=True, capture_output=True,
     )
     with open(f"{pgdata}/postgresql.conf", "a") as f:

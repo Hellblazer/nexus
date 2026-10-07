@@ -82,17 +82,30 @@ OUTPUT FILES (all under ``nexus_config_dir()``):
 
 The pg_credentials file contains NX_DB_ADMIN_* and NX_DB_* variables that
 the service daemon (bead .30) sources before starting the JVM.  It also
-contains PG_DATA and PG_PORT for daemon lifecycle use.
+contains PG_DATA and PG_PORT for daemon lifecycle use, and PG_SUPERUSER_PASS,
+the bootstrap superuser's password (provisioner-only; never handed to the JVM).
+
+AUTHENTICATION (nexus-ja4pq):
+  Every cluster nx creates uses ``scram-sha-256`` on every ``pg_hba.conf`` line;
+  it used to be ``trust``, which let any OS account on the box connect to the
+  loopback port as the superuser. The superuser's password goes to ``initdb`` by
+  ``--pwfile`` and to every later client by ``PGPASSWORD`` in the child's
+  environment, never on a command line. :func:`harden_cluster_auth` converts an
+  existing trust cluster in place and rolls back on any failure.
 """
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import hashlib
 import os
 import secrets
+import shutil
 import socket
 import subprocess
 import tempfile
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, NamedTuple
@@ -101,6 +114,13 @@ import structlog
 
 from nexus._winsec import grant_user_tree_access, restrict_to_owner
 from nexus.bounded_subprocess import run_bounded
+from nexus.db.pg_auth import (
+    SCRAM,
+    cluster_auth_state,
+    harden_hba_text,
+    hba_has_trust,
+    hba_path,
+)
 from nexus.redact import redact_credentials
 
 _log = structlog.get_logger(__name__)
@@ -115,6 +135,45 @@ _PG_VERSION_MARKER: str = "PG_VERSION"
 
 #: Name of the credentials env-file written under the config directory.
 CREDENTIALS_FILENAME: str = "pg_credentials"
+
+#: Credentials-file key holding the bootstrap superuser's password
+#: (nexus-ja4pq). A ``PG_*`` lifecycle key beside ``PG_DATA`` / ``PG_PORT``, NOT
+#: an ``NX_DB_*`` one: the service supervisor hands the JVM an explicit
+#: allow-list of ``NX_DB_*`` keys, and the engine never connects as the
+#: superuser, so this secret stays with the provisioner and never reaches it.
+SUPERUSER_PASS_KEY: str = "PG_SUPERUSER_PASS"
+
+#: The password this thread's psql/createdb calls authenticate as the bootstrap
+#: superuser with (nexus-ja4pq). A ContextVar so the ~15 repair helpers that take
+#: ``(bins, port, os_user)`` need no new parameter, and so it never outlives the
+#: scope that set it. :func:`provision` sets it for its own run;
+#: :func:`superuser_auth` is the explicit scope for any other caller. Unset means
+#: "no password", which a ``scram-sha-256`` cluster refuses and a legacy ``trust``
+#: cluster ignores.
+_SUPERUSER_PASSWORD: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "nexus_pg_superuser_password", default=None
+)
+
+
+@contextlib.contextmanager
+def superuser_auth(password: str | None) -> Iterator[None]:
+    """Authenticate this thread's superuser psql/createdb calls with *password*
+    for the duration of the block (nexus-ja4pq)."""
+    token = _SUPERUSER_PASSWORD.set(password or None)
+    try:
+        yield
+    finally:
+        _SUPERUSER_PASSWORD.reset(token)
+
+
+class PgAuthLockedError(RuntimeError):
+    """The cluster demands a password and no superuser password is on record.
+
+    Reachable only when ``pg_credentials`` lost :data:`SUPERUSER_PASS_KEY` while
+    the cluster already enforces ``scram-sha-256``, or when a crash left a
+    scram cluster behind with no credentials file. nx will not weaken
+    ``pg_hba.conf`` to get around it: that is the very hole this closes.
+    """
 
 # ── Binary discovery ───────────────────────────────────────────────────────────
 
@@ -392,7 +451,7 @@ def _candidate_sharedirs(pg_config: Path, bin_dir: Path, sharedir: str) -> list[
     return candidates
 
 
-def check_pgvector_available(bins: PgBinaries) -> None:
+def check_pgvector_available(bins: PgBinaries, *, platform: str | None = None) -> None:
     """Fail loud when pgvector is not installed for THIS PostgreSQL.
 
     Checks for ``<sharedir>/extension/vector.control``. ``pg_config`` reports the
@@ -401,8 +460,12 @@ def check_pgvector_available(bins: PgBinaries) -> None:
     Indeterminate (pg_config missing/failing) does NOT block — provisioning
     will fail loud at CREATE EXTENSION anyway; this gate exists to move the
     common failure earlier, not to add a new way to be wrong.
+
+    ``pg_config.exe`` on Windows (nexus-ja4pq): the bare name never exists in
+    the Windows bundle, which made this whole preflight a silent no-op there.
+    *platform* is the :func:`_on_windows` seam.
     """
-    pg_config = bins.bin_dir / "pg_config"
+    pg_config = bins.bin_dir / ("pg_config.exe" if _on_windows(platform) else "pg_config")
     if not pg_config.is_file():
         _log.warning("pgvector_preflight_no_pg_config", bin_dir=str(bins.bin_dir))
         return
@@ -467,6 +530,9 @@ class ProvisionResult:
     vector_extension_created: bool = False
     #: True when the cluster was already running and no work was needed.
     already_provisioned: bool = False
+    #: True when an existing ``trust`` cluster was converted to
+    #: ``scram-sha-256`` by this run (nexus-ja4pq).
+    auth_migrated: bool = False
     #: Port the cluster is listening on.
     port: int = 0
     #: Path to the credentials file (0600).
@@ -577,6 +643,11 @@ def _redacted(cmd: list[str]) -> list[str]:
     so a failed ALTER ROLE printed the cluster's passwords to the user's
     screen and into ``~/.config/nexus/logs/``.
 
+    (nexus-ja4pq: the role-password statements no longer take this route. They
+    go through :func:`_psql_secret`, a private temp file read by ``psql -f``, so
+    those secrets are not in argv at all. This scrub stays for any other
+    credential-bearing command.)
+
     That was live before nexus-9dkxu and is not introduced by it. It is
     fixed here rather than separately because adding ``timeout=`` adds a
     THIRD exception type carrying the same payload through these same
@@ -674,16 +745,103 @@ def _run(
         ) from None
 
 
+def _superuser_password(port: int) -> str | None:
+    """The bootstrap superuser's password for the cluster on *port*, or None.
+
+    The scoped value (:func:`superuser_auth`, :func:`provision`) wins. Failing
+    that, the live ``pg_credentials`` is consulted, but only when it names this
+    port, so a caller that reads the live credentials for its own port
+    (``upgrade_finish``'s two repair legs, the best-effort backfills below)
+    authenticates without being edited, and one pointed at a different
+    cluster never borrows this one's password.
+    """
+    scoped = _SUPERUSER_PASSWORD.get()
+    if scoped:
+        return scoped
+    try:
+        import nexus.config as _config  # noqa: PLC0415 — deferred, circular-dep avoidance
+
+        creds = _read_credentials(_config.nexus_config_dir() / CREDENTIALS_FILENAME)
+    except Exception:  # noqa: BLE001 — no readable live credentials means no ambient password
+        return None
+    if creds.get("PG_PORT") != str(port):
+        return None
+    return creds.get(SUPERUSER_PASS_KEY) or None
+
+
+def _client_env(port: int) -> dict[str, str] | None:
+    """The environment for a superuser client process, or None for "inherit".
+
+    The password travels as ``PGPASSWORD`` in the CHILD's environment only. It
+    never appears in argv, which any local account can read from ``ps``.
+    """
+    password = _superuser_password(port)
+    if password is None:
+        return None
+    return {**os.environ, "PGPASSWORD": password}
+
+
 def _psql(
     bins: PgBinaries, port: int, db: str, user: str, sql: str,
     *, timeout: float = _PSQL_TIMEOUT_S,
 ) -> subprocess.CompletedProcess:
     """Execute *sql* via psql against the local cluster."""
+    extra = {} if (env := _client_env(port)) is None else {"env": env}
     return _run(
-        [str(bins.psql), "-h", "127.0.0.1", "-p", str(port),
+        [str(bins.psql), "-w", "-h", "127.0.0.1", "-p", str(port),
          "-U", user, "-d", db, "-c", sql],
         timeout=timeout,
+        **extra,
     )
+
+
+def _sql_literal(value: str) -> str:
+    """*value* as a single-quoted SQL string literal."""
+    return "'" + value.replace("'", "''") + "'"
+
+
+def _sql_ident(name: str) -> str:
+    """*name* as a double-quoted SQL identifier."""
+    return '"' + name.replace('"', '""') + '"'
+
+
+def _psql_secret(
+    bins: PgBinaries, port: int, db: str, user: str, sql: str,
+    *, timeout: float = _PSQL_TIMEOUT_S,
+) -> subprocess.CompletedProcess:
+    """Run *sql*, which carries a secret, without putting it on a command line.
+
+    ``psql -c`` would put ``CREATE ROLE ... PASSWORD '<secret>'`` in argv for any
+    local account to read from ``ps`` (and into a ``CalledProcessError``, which
+    :func:`_redacted` scrubs but which should not carry it at all). The text goes
+    to a private temp file, ``psql -f`` reads it, and the file is deleted whether
+    or not psql succeeds.
+
+    Statements in the file run one at a time in a single session with
+    ``ON_ERROR_STOP``, so a ``SET`` ahead of an ``ALTER ROLE`` applies to it.
+    That is not the single implicit transaction ``-c "a; b"`` gives, so a caller
+    whose statements must be atomic uses ``BEGIN`` / ``COMMIT`` in the text.
+    """
+    fd, sql_path = tempfile.mkstemp(prefix=".pg_sql_", suffix=".sql")
+    try:
+        try:
+            restrict_to_owner(sql_path)  # before any secret byte is written
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(sql if sql.endswith("\n") else sql + "\n")
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.close(fd)
+            raise
+        extra = {} if (env := _client_env(port)) is None else {"env": env}
+        return _run(
+            [str(bins.psql), "-X", "-w", "-h", "127.0.0.1", "-p", str(port),
+             "-U", user, "-d", db, "-v", "ON_ERROR_STOP=1", "-f", sql_path],
+            timeout=timeout,
+            **extra,
+        )
+    finally:
+        with contextlib.suppress(OSError):
+            os.unlink(sql_path)
 
 
 def _db_exists(bins: PgBinaries, port: int, superuser: str, dbname: str) -> bool:
@@ -720,9 +878,10 @@ def windows_superuser_name(identity: str) -> str:
       sub-authorities is longer than that; a digest is always 19 characters.
     * NEVER RESERVED. ``pg_`` is a reserved role prefix; ``nx_`` is not.
 
-    The name carries no information a reader needs: the cluster is trust
-    authenticated on 127.0.0.1 for the owning OS user, so the role name is an
-    internal handle, not an identity anyone types.
+    The name carries no information a reader needs: it is an internal handle,
+    not an identity anyone types, and not a secret either (a SID is readable by
+    other accounts), which is why the cluster authenticates the role with a
+    password (nexus-ja4pq) rather than relying on the name.
     """
     digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16]
     return f"nx_{digest}"
@@ -734,9 +893,10 @@ def bootstrap_superuser(
     """The OS identity that owns this box's local cluster's superuser role.
 
     initdb is run with ``--username <this>`` (see :func:`_init_cluster`), and
-    the cluster's ``pg_hba.conf`` is ``trust``-authenticated for local TCP
-    (``--auth=trust``), so any caller on this box can open a superuser
-    session as this identity with no password. A single source of truth so
+    the cluster's ``pg_hba.conf`` is ``scram-sha-256`` for local TCP, so a caller
+    opens a superuser session as this identity only with the password recorded
+    as :data:`SUPERUSER_PASS_KEY` in ``pg_credentials`` (nexus-ja4pq; it was
+    ``--auth=trust``, open to every OS account on the box). A single source of truth so
     :func:`provision` and any later repair path that needs a superuser
     session on an ALREADY-RUNNING cluster (e.g.
     :func:`heal_diag_view_grants_and_ownership`, nexus-cfgo9) resolve the
@@ -771,10 +931,12 @@ def _psql_tuples(
     ``|``-separated row — the same convention ``tests/db/test_pg_provision.py``'s
     ``_query`` helper already uses.
     """
+    extra = {} if (env := _client_env(port)) is None else {"env": env}
     res = _run(
-        [str(bins.psql), "-h", "127.0.0.1", "-p", str(port),
+        [str(bins.psql), "-w", "-h", "127.0.0.1", "-p", str(port),
          "-U", user, "-d", db, "-t", "-A", "-c", sql],
         timeout=timeout,
+        **extra,
     )
     return res.stdout.strip()
 
@@ -1078,12 +1240,25 @@ def reassign_diag_view_owner_before_restart(
 
 
 def _init_cluster(
-    bins: PgBinaries, pgdata: Path, os_user: str, *, platform: str | None = None
+    bins: PgBinaries,
+    pgdata: Path,
+    os_user: str,
+    *,
+    superuser_password: str,
+    platform: str | None = None,
 ) -> bool:
-    """Run initdb to create a new cluster.
+    """Run initdb to create a new cluster that authenticates with a password.
 
     Returns True when initdb ran (new cluster), False when the cluster
     already exists (PG_VERSION marker present — idempotent skip).
+
+    ``--auth=scram-sha-256`` writes every ``pg_hba.conf`` line with that method
+    (nexus-ja4pq; it was ``trust``, which let any local OS account in as the
+    superuser). ``--pwfile`` gives the bootstrap superuser its password at
+    creation, so no window exists in which the cluster takes connections without
+    one. The password goes through a private temp file because it must not sit
+    on a command line; the file is created owner-only before the secret is
+    written and deleted whether or not initdb succeeds.
     """
     if (pgdata / _PG_VERSION_MARKER).exists():
         _log.info("pg_cluster_exists_skip_initdb", pgdata=str(pgdata))
@@ -1094,14 +1269,29 @@ def _init_cluster(
     # it, or an elevated session under a 0o700 config dir dies 0xC0000135
     # (see grant_user_tree_access). A no-op on POSIX.
     grant_user_tree_access(pgdata, platform=platform)
-    _run([
-        str(bins.initdb),
-        "-D", str(pgdata),
-        "--no-locale", "-E", "UTF8",
-        "--auth=trust",
-        "--username", os_user,
-    ], timeout=_INITDB_TIMEOUT_S)
-    _log.info("pg_cluster_initialised", pgdata=str(pgdata))
+    # Beside the data directory, not inside it: initdb refuses a non-empty target.
+    fd, pwfile = tempfile.mkstemp(dir=pgdata.parent, prefix=".pg_pwfile_")
+    try:
+        try:
+            restrict_to_owner(pwfile)  # before any secret byte is written
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(superuser_password + "\n")
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.close(fd)
+            raise
+        _run([
+            str(bins.initdb),
+            "-D", str(pgdata),
+            "--no-locale", "-E", "UTF8",
+            f"--auth={SCRAM}",
+            f"--pwfile={pwfile}",
+            "--username", os_user,
+        ], timeout=_INITDB_TIMEOUT_S)
+    finally:
+        with contextlib.suppress(OSError):
+            os.unlink(pwfile)
+    _log.info("pg_cluster_initialised", pgdata=str(pgdata), auth=SCRAM)
     return True
 
 
@@ -1397,12 +1587,13 @@ def _create_db(bins: PgBinaries, port: int, os_user: str) -> bool:
         _log.info("pg_db_exists_skip_createdb", dbname=NEXUS_DB_NAME)
         return False
 
+    extra = {} if (env := _client_env(port)) is None else {"env": env}
     _run([
-        str(bins.createdb),
+        str(bins.createdb), "-w",
         "-h", "127.0.0.1", "-p", str(port),
         "-U", os_user,
         NEXUS_DB_NAME,
-    ], timeout=_CREATEDB_TIMEOUT_S)
+    ], timeout=_CREATEDB_TIMEOUT_S, **extra)
     _log.info("pg_db_created", dbname=NEXUS_DB_NAME)
     return True
 
@@ -1909,7 +2100,8 @@ def reprovision_diag_view_best_effort() -> None:
             return
         bins = discover_pg_binaries()
         os_user = bootstrap_superuser()
-        _provision_diag_conformance_view(bins, port, os_user)
+        with superuser_auth(creds.get(SUPERUSER_PASS_KEY)):
+            _provision_diag_conformance_view(bins, port, os_user)
     except Exception as exc:  # noqa: BLE001 — best-effort; probe falls back to legacy statements
         _log.warning("pg_diag_view_reprovision_failed", error=str(exc))
 
@@ -1946,7 +2138,8 @@ def backfill_diag_role_best_effort() -> bool:
             return False
         bins = discover_pg_binaries()
         os_user = bootstrap_superuser()
-        _backfill_diag_role(bins, port, os_user, creds_path)
+        with superuser_auth(creds.get(SUPERUSER_PASS_KEY)):
+            _backfill_diag_role(bins, port, os_user, creds_path)
         _log.info("pg_diag_role_backfilled", via="poison_probe_self_heal")
         return True
     except Exception as exc:  # noqa: BLE001 — best-effort; the probe classifies UNKNOWN as before
@@ -2018,7 +2211,7 @@ def _create_roles(
     diag_created = False
 
     if not _role_exists(bins, port, os_user, "nexus_admin"):
-        _psql(
+        _psql_secret(
             bins, port, NEXUS_DB_NAME, os_user,
             f"CREATE ROLE nexus_admin "
             f"NOSUPERUSER NOCREATEDB NOCREATEROLE LOGIN "
@@ -2071,7 +2264,7 @@ def _create_roles(
     )
 
     if not _role_exists(bins, port, os_user, "nexus_svc"):
-        _psql(
+        _psql_secret(
             bins, port, NEXUS_DB_NAME, os_user,
             f"CREATE ROLE nexus_svc "
             f"NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOINHERIT LOGIN "
@@ -2083,7 +2276,7 @@ def _create_roles(
         _log.info("pg_role_exists_skip", role="nexus_svc")
 
     if not _role_exists(bins, port, os_user, "nexus_diag"):
-        _psql(
+        _psql_secret(
             bins, port, NEXUS_DB_NAME, os_user,
             f"CREATE ROLE nexus_diag "
             f"NOSUPERUSER NOCREATEDB NOCREATEROLE BYPASSRLS LOGIN "
@@ -2124,15 +2317,15 @@ def _create_roles(
     # run that crashed before writing credentials, this ensures DB state
     # matches the passwords we are about to persist.  ALTER ROLE … PASSWORD
     # is idempotent (updating to the current value is a no-op in PG).
-    _psql(
+    _psql_secret(
         bins, port, NEXUS_DB_NAME, os_user,
         f"ALTER ROLE nexus_admin PASSWORD '{admin_pass}'",
     )
-    _psql(
+    _psql_secret(
         bins, port, NEXUS_DB_NAME, os_user,
         f"ALTER ROLE nexus_svc PASSWORD '{svc_pass}'",
     )
-    _psql(
+    _psql_secret(
         bins, port, NEXUS_DB_NAME, os_user,
         f"ALTER ROLE nexus_diag PASSWORD '{diag_pass}'",
     )
@@ -2149,6 +2342,8 @@ def _write_credentials(
     svc_pass: str,
     service_token: str,
     diag_pass: str,
+    *,
+    superuser_pass: str = "",
 ) -> None:
     """Write the credentials env-file at 0600.
 
@@ -2172,7 +2367,10 @@ def _write_credentials(
         f"# Re-run 'nx init --service' to regenerate.\n"
         f"PG_DATA={pgdata}\n"
         f"PG_PORT={port}\n"
-        f"NX_DB_ADMIN_URL={db_url}\n"
+        # nexus-ja4pq: the bootstrap superuser's password. Provisioner-only; the
+        # supervisor's JVM env allow-list does not carry it.
+        + (f"{SUPERUSER_PASS_KEY}={superuser_pass}\n" if superuser_pass else "")
+        + f"NX_DB_ADMIN_URL={db_url}\n"
         f"NX_DB_ADMIN_USER=nexus_admin\n"
         f"NX_DB_ADMIN_PASS={admin_pass}\n"
         f"NX_DB_URL={db_url}\n"
@@ -2272,6 +2470,291 @@ def _persist_diag_credentials(creds_path: Path, diag_pass: str) -> None:
     _log.info("pg_diag_credentials_backfilled", path=str(creds_path))
 
 
+def _write_secret_file(path: Path, content: str) -> None:
+    """Atomically replace *path* with *content*, owner-only from the first byte.
+
+    The temp file sits in the same directory so ``os.replace`` stays on one
+    filesystem, and is restricted before any secret is written to it.
+    """
+    tmp_fd, tmp_path = tempfile.mkstemp(dir=path.parent, prefix=".pg_creds_")
+    try:
+        with os.fdopen(tmp_fd, "w") as fh:
+            restrict_to_owner(tmp_path)
+            fh.write(content)
+        os.replace(tmp_path, path)
+    except Exception:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp_path)
+        raise
+
+
+def _persist_superuser_password(creds_path: Path, password: str) -> None:
+    """Add :data:`SUPERUSER_PASS_KEY` to an existing credentials file, or create
+    the file holding only it. A no-op when the key is already present, so two
+    racing runs cannot append a second, conflicting value that
+    :func:`_read_credentials` would silently shadow (the same guarantee
+    :func:`_persist_service_token` gives).
+    """
+    if creds_path.exists():
+        if _read_credentials(creds_path).get(SUPERUSER_PASS_KEY):
+            return
+        existing = creds_path.read_text()
+        if existing and not existing.endswith("\n"):
+            existing += "\n"
+    else:
+        creds_path.parent.mkdir(parents=True, exist_ok=True)
+        existing = "# nexus-managed Postgres credentials — DO NOT EDIT MANUALLY\n"
+    _write_secret_file(creds_path, existing + f"{SUPERUSER_PASS_KEY}={password}\n")
+    _log.info("pg_superuser_password_persisted", path=str(creds_path))
+
+
+def _write_pending_credentials(
+    creds_path: Path,
+    *,
+    admin_pass: str,
+    svc_pass: str,
+    diag_pass: str,
+    service_token: str,
+    superuser_pass: str,
+    port: int,
+) -> None:
+    """Record a fresh cluster's passwords BEFORE ``initdb`` runs (nexus-ja4pq).
+
+    ``initdb`` now bakes the superuser's password into the cluster, and the real
+    credentials file is written last (after the roles exist), so a crash in
+    between would strand a password-protected cluster whose password nothing
+    recorded. This file closes that window. It deliberately carries no
+    ``PG_PORT``: the fast idempotency path in :func:`provision` requires one, so
+    a half-built cluster is never mistaken for a finished one, while the full
+    path reads these values back (it already reuses whatever the file holds) and
+    finishes the job. :func:`_write_credentials` replaces it at the end.
+
+    The chosen port is recorded as ``PG_PORT_PENDING`` for the same reason: a
+    crash leaves the postmaster running on it, and a retry that picked a fresh
+    port would configure one the running server is not on.
+    """
+    creds_path.parent.mkdir(parents=True, exist_ok=True)
+    _write_secret_file(
+        creds_path,
+        "# nexus-managed Postgres credentials (provisioning in progress)\n"
+        f"{SUPERUSER_PASS_KEY}={superuser_pass}\n"
+        f"NX_DB_ADMIN_PASS={admin_pass}\n"
+        f"NX_DB_PASS={svc_pass}\n"
+        f"NX_SERVICE_TOKEN={service_token}\n"
+        f"NX_DB_DIAG_PASS={diag_pass}\n"
+        f"PG_PORT_PENDING={port}\n",
+    )
+    _log.info("pg_pending_credentials_written", path=str(creds_path))
+
+
+#: Outcomes of :func:`harden_cluster_auth`.
+AUTH_ALREADY_SCRAM: str = "already_scram"
+AUTH_MIGRATED: str = "migrated"
+AUTH_FAILED: str = "failed"
+
+#: How long to wait for a reloaded ``pg_hba.conf`` to take effect. A backstop, in
+#: the sense the module's other timeouts are: ``pg_ctl reload`` returns when the
+#: signal is sent, not when the postmaster has re-read the file, and the wait ends
+#: the moment a password-less connection is refused, which on a working box is
+#: milliseconds.
+_AUTH_RELOAD_CONFIRM_TIMEOUT_S: float = 15.0
+
+#: Roles :func:`harden_cluster_auth` gives passwords to, with the credentials-file
+#: key each password lives under.
+_ROLE_PASSWORD_KEYS: tuple[tuple[str, str], ...] = (
+    ("nexus_admin", "NX_DB_ADMIN_PASS"),
+    ("nexus_svc", "NX_DB_PASS"),
+    ("nexus_diag", "NX_DB_DIAG_PASS"),
+)
+
+
+def _pg_reload(bins: PgBinaries, pgdata: Path) -> None:
+    """Ask the running postmaster to re-read ``pg_hba.conf``."""
+    _run(
+        [str(bins.pg_ctl), "-D", str(pgdata), "reload"],
+        timeout=_PG_CTL_STATUS_TIMEOUT_S,
+    )
+
+
+def _replace_hba(hba: Path, data: bytes) -> None:
+    """Atomically replace ``pg_hba.conf``, keeping the old file's permissions."""
+    tmp_fd, tmp_path = tempfile.mkstemp(dir=hba.parent, prefix=".pg_hba_")
+    try:
+        with os.fdopen(tmp_fd, "wb") as fh:
+            fh.write(data)
+        with contextlib.suppress(OSError):
+            shutil.copymode(hba, tmp_path)
+        os.replace(tmp_path, hba)
+    except Exception:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp_path)
+        raise
+
+
+def _login_works(
+    bins: PgBinaries, port: int, user: str, password: str | None,
+) -> bool:
+    """True when *user* can open a session on the cluster, with *password* or,
+    when None, with none at all. Never prompts and never reads ``~/.pgpass``."""
+    env = {k: v for k, v in os.environ.items() if k != "PGPASSWORD"}
+    env["PGPASSFILE"] = os.devnull
+    if password is not None:
+        env["PGPASSWORD"] = password
+    res = _run(
+        [str(bins.psql), "-X", "-w", "-h", "127.0.0.1", "-p", str(port),
+         "-U", user, "-d", "postgres", "-t", "-A", "-c", "SELECT 1"],
+        check=False,
+        env=env,
+        timeout=_PSQL_TIMEOUT_S,
+    )
+    return res.returncode == 0
+
+
+def _confirm_scram(
+    bins: PgBinaries,
+    port: int,
+    logins: list[tuple[str, str]],
+    *,
+    sleep: Callable[[float], None] = time.sleep,
+    timeout_s: float = _AUTH_RELOAD_CONFIRM_TIMEOUT_S,
+) -> str | None:
+    """None when the cluster enforces passwords and every login in *logins*
+    works with its own, else the reason it does not.
+
+    Both halves matter and neither implies the other. Under ``trust`` a wrong or
+    missing password still connects, so only a refused password-less attempt
+    proves the new file is live; and only a successful authenticated attempt
+    proves the password written is the one on record.
+    """
+    user0 = logins[0][0]
+    deadline = time.monotonic() + timeout_s
+    while _login_works(bins, port, user0, None):
+        if time.monotonic() >= deadline:
+            return "a password-less connection is still accepted after the reload"
+        sleep(0.25)
+    for user, password in logins:
+        if not _login_works(bins, port, user, password):
+            return f"role {user} cannot authenticate with its recorded password"
+    return None
+
+
+def harden_cluster_auth(
+    bins: PgBinaries,
+    pgdata: Path,
+    port: int,
+    os_user: str,
+    creds_path: Path,
+    *,
+    role_passwords: dict[str, str] | None = None,
+    superuser_password: str | None = None,
+    sleep: Callable[[float], None] = time.sleep,
+) -> str:
+    """Convert a RUNNING ``trust`` cluster to ``scram-sha-256`` in place
+    (nexus-ja4pq). Returns :data:`AUTH_ALREADY_SCRAM`, :data:`AUTH_MIGRATED` or
+    :data:`AUTH_FAILED`. Never raises: on a failure the cluster is left on
+    ``trust``, exactly as it was, and the reason is logged at warning level under
+    ``pg_auth_migration_failed`` (``nx doctor`` reports the trust state itself).
+
+    Idempotent. A ``pg_hba.conf`` with no active ``trust`` line is left alone.
+
+    The order is what makes it safe to run on a box in use, and each step is
+    chosen so a crash or failure at any point leaves a state the next run can
+    finish:
+
+    1. Persist the superuser password to the credentials file, if it is new.
+       Nothing yet depends on it, and doing this first means a later crash cannot
+       leave a database password that nothing recorded.
+    2. ``ALTER ROLE ... PASSWORD`` for the superuser and every nexus role, in one
+       session with ``password_encryption = scram-sha-256``. Trust still admits
+       us, and a role keeps working with a password it does not yet have to
+       present. The values written are the ones in the credentials file the
+       engine already reads, so a role's password is brought into line with the
+       file, never the other way round.
+    3. Rewrite ``pg_hba.conf`` (the only step that changes who may connect), then
+       reload.
+    4. Confirm: a password-less connection is now refused, and the superuser and
+       every role authenticates with its recorded password.
+    5. If any step from 3 on fails, restore the original ``pg_hba.conf`` bytes and
+       reload, so a failure never leaves users locked out.
+
+    The engine's pooled connections were authenticated before the reload and
+    stay up; its new ones present the password it already carries.
+    """
+    hba = hba_path(pgdata)
+    try:
+        original = hba.read_bytes()
+    except OSError as exc:
+        _log.warning("pg_auth_migration_failed", step="read_hba", error=str(exc))
+        return AUTH_FAILED
+    text = original.decode("utf-8", errors="replace")
+    if not hba_has_trust(text):
+        return AUTH_ALREADY_SCRAM
+
+    wrote_hba = False
+    step = "prepare"
+    try:
+        creds: dict[str, str] = {}
+        if creds_path.exists():
+            creds = _read_credentials(creds_path)
+        super_pass = (
+            superuser_password or creds.get(SUPERUSER_PASS_KEY) or secrets.token_hex(16)
+        )
+        passwords = dict(role_passwords or {})
+        for role, key in _ROLE_PASSWORD_KEYS:
+            if not passwords.get(role) and creds.get(key):
+                passwords[role] = creds[key]
+
+        step = "persist_password"
+        _persist_superuser_password(creds_path, super_pass)
+
+        step = "alter_roles"
+        targets = [(os_user, super_pass)]
+        for role, _key in _ROLE_PASSWORD_KEYS:
+            if passwords.get(role) and _role_exists(bins, port, os_user, role):
+                targets.append((role, passwords[role]))
+        _psql_secret(
+            bins, port, "postgres", os_user,
+            "SET password_encryption = 'scram-sha-256';\n"
+            + "\n".join(
+                f"ALTER ROLE {_sql_ident(role)} PASSWORD {_sql_literal(pw)};"
+                for role, pw in targets
+            ),
+        )
+
+        step = "rewrite_hba"
+        _replace_hba(hba, harden_hba_text(text).encode("utf-8"))
+        wrote_hba = True
+        step = "reload"
+        _pg_reload(bins, pgdata)
+
+        step = "confirm"
+        failure = _confirm_scram(bins, port, targets, sleep=sleep)
+        if failure is not None:
+            raise RuntimeError(failure)
+    except Exception as exc:  # noqa: BLE001 — never raises; the cluster is restored below
+        restored = True
+        if wrote_hba:
+            try:
+                _replace_hba(hba, original)
+                _pg_reload(bins, pgdata)
+            except Exception as undo_exc:  # noqa: BLE001 — reported, not raised
+                restored = False
+                _log.error(
+                    "pg_auth_migration_rollback_failed",
+                    pgdata=str(pgdata),
+                    error=str(undo_exc),
+                )
+        _log.warning(
+            "pg_auth_migration_failed",
+            step=step,
+            error=redact_credentials(str(exc)),
+            trust_restored=restored,
+        )
+        return AUTH_FAILED
+    _log.info("pg_auth_migrated", pgdata=str(pgdata), method=SCRAM)
+    return AUTH_MIGRATED
+
+
 def _backfill_diag_role(
     bins: PgBinaries, port: int, os_user: str, creds_path: Path
 ) -> None:
@@ -2301,7 +2784,7 @@ def _backfill_diag_role(
             f"PASSWORD '{diag_pass}'",
         )
         _log.info("pg_role_created", role="nexus_diag", via="fast_path_backfill")
-    _psql(
+    _psql_secret(
         bins, port, NEXUS_DB_NAME, os_user,
         f"ALTER ROLE nexus_diag PASSWORD '{diag_pass}'",
     )
@@ -2440,7 +2923,62 @@ def existing_cluster_present(config_dir: Path) -> bool:
     return (config_dir / "postgres" / _PG_VERSION_MARKER).exists()
 
 
+def _locked_message(pgdata: Path) -> str:
+    return (
+        f"The PostgreSQL cluster at {pgdata} requires a password, and "
+        f"pg_credentials holds no {SUPERUSER_PASS_KEY}. nx will not loosen "
+        "pg_hba.conf to get around that. Restore the key from a backup of "
+        "pg_credentials, or stop the cluster and reset the superuser's password "
+        f"in single-user mode (postgres --single -D {pgdata} postgres, then "
+        "ALTER ROLE <superuser> PASSWORD '<new>';) and record it as "
+        f"{SUPERUSER_PASS_KEY}=<new> in pg_credentials."
+    )
+
+
+def _converge_auth(
+    bins: PgBinaries,
+    pgdata: Path,
+    port: int,
+    os_user: str,
+    creds_path: Path,
+    result: ProvisionResult,
+) -> None:
+    """Fast-path step (nexus-ja4pq): convert a legacy trust cluster, then put
+    the superuser password into this run's scope so every call after it
+    authenticates.
+
+    Raises :class:`PgAuthLockedError` when the cluster enforces passwords and
+    none is on record; every superuser step after this would fail anyway, with a
+    worse message.
+    """
+    result.auth_migrated = (
+        harden_cluster_auth(bins, pgdata, port, os_user, creds_path) == AUTH_MIGRATED
+    )
+    password = ""
+    if creds_path.exists():
+        password = _read_credentials(creds_path).get(SUPERUSER_PASS_KEY, "")
+    if password:
+        _SUPERUSER_PASSWORD.set(password)
+    elif cluster_auth_state(pgdata) == "scram":
+        raise PgAuthLockedError(_locked_message(pgdata))
+
+
 def provision(
+    config_dir: Path | None = None,
+    *,
+    force_new_port: bool = False,
+) -> ProvisionResult:
+    """Provision (or verify) the nx-managed local Postgres cluster.
+
+    See :func:`_provision_impl` for the full contract. This wrapper only gives
+    the run its own superuser-password scope (nexus-ja4pq), so the password a run
+    mints or reads never outlives it in the calling thread's context.
+    """
+    with superuser_auth(None):
+        return _provision_impl(config_dir, force_new_port=force_new_port)
+
+
+def _provision_impl(
     config_dir: Path | None = None,
     *,
     force_new_port: bool = False,
@@ -2473,6 +3011,10 @@ def provision(
         When the calling process is root. initdb refuses to run as root, so
         no part of this function can succeed; refusing here keeps the user
         from paying for the bundle download first (nexus-ov1oq).
+    PgAuthLockedError
+        When the cluster enforces passwords and ``pg_credentials`` holds no
+        ``PG_SUPERUSER_PASS`` (nexus-ja4pq). nx never loosens ``pg_hba.conf``
+        to recover; the message names the single-user remedy.
     subprocess.CalledProcessError
         When any provisioning subprocess exits non-zero.
     """
@@ -2510,6 +3052,14 @@ def provision(
                 _bins = None
                 try:
                     _bins = discover_pg_binaries()
+                    # nexus-ja4pq: password authentication FIRST. Every
+                    # superuser call below (and in the backfills after this
+                    # try) needs it on a hardened cluster, and a legacy trust
+                    # cluster is converted here, on the same every-service-start
+                    # path the grant backfills ride.
+                    _converge_auth(
+                        _bins, pgdata, stored_port, os_user, creds_path, result
+                    )
                     check_pgvector_available(_bins)
                     result.vector_extension_created = _create_vector_extension(
                         _bins, stored_port, os_user
@@ -2673,7 +3223,8 @@ def provision(
     port: int = 0
     if creds_path.exists() and not force_new_port:
         creds = _read_credentials(creds_path)
-        port_str = creds.get("PG_PORT", "")
+        # PG_PORT_PENDING: a crashed first run's port (see _write_pending_credentials).
+        port_str = creds.get("PG_PORT", "") or creds.get("PG_PORT_PENDING", "")
         if port_str.isdigit():
             port = int(port_str)
     if not port:
@@ -2695,8 +3246,33 @@ def provision(
         service_token = secrets.token_hex(32)
         diag_pass = secrets.token_hex(16)
 
+    # ── Superuser password (nexus-ja4pq) ───────────────────────────────────────
+    # Reused from the credentials file whenever it holds one, even under
+    # force_new_port: an existing cluster already enforces whatever it was set to.
+    existing_super = ""
+    if creds_path.exists():
+        existing_super = _read_credentials(creds_path).get(SUPERUSER_PASS_KEY, "")
+    super_pass = existing_super or secrets.token_hex(16)
+    cluster_existed = (pgdata / _PG_VERSION_MARKER).exists()
+    if cluster_existed and not existing_super and cluster_auth_state(pgdata) == "scram":
+        raise PgAuthLockedError(_locked_message(pgdata))
+    if not cluster_existed:
+        # Before initdb bakes the password in, so a crash cannot strand a cluster
+        # whose password nothing recorded.
+        _write_pending_credentials(
+            creds_path,
+            admin_pass=admin_pass,
+            svc_pass=svc_pass,
+            diag_pass=diag_pass,
+            service_token=service_token,
+            superuser_pass=super_pass,
+            port=port,
+        )
+
     # ── initdb ─────────────────────────────────────────────────────────────────
-    result.cluster_created = _init_cluster(bins, pgdata, os_user)
+    result.cluster_created = _init_cluster(
+        bins, pgdata, os_user, superuser_password=super_pass
+    )
 
     # ── Configure conf (port, TCP-only, socket-disabled) ──────────────────────
     # Unconditional (idempotent via the BEGIN/END sentinel block): re-provisioning
@@ -2709,6 +3285,23 @@ def provision(
     # ── Start cluster ──────────────────────────────────────────────────────────
     _start_cluster(bins, pgdata, port)
     result.port = port
+
+    # ── Password authentication (nexus-ja4pq) ──────────────────────────────────
+    # A cluster this run just created is already scram. An existing legacy
+    # trust cluster (stopped when the fast path ran, so it landed here) is
+    # converted now; a failure leaves it on trust and provisioning continues.
+    _SUPERUSER_PASSWORD.set(super_pass)
+    if cluster_existed:
+        outcome = harden_cluster_auth(
+            bins, pgdata, port, os_user, creds_path,
+            role_passwords={
+                "nexus_admin": admin_pass,
+                "nexus_svc": svc_pass,
+                "nexus_diag": diag_pass,
+            },
+            superuser_password=super_pass,
+        )
+        result.auth_migrated = outcome == AUTH_MIGRATED
 
     # ── Create database ────────────────────────────────────────────────────────
     result.db_created = _create_db(bins, port, os_user)
@@ -2743,7 +3336,8 @@ def provision(
 
     # ── Write credentials ──────────────────────────────────────────────────────
     _write_credentials(
-        creds_path, pgdata, port, admin_pass, svc_pass, service_token, diag_pass
+        creds_path, pgdata, port, admin_pass, svc_pass, service_token, diag_pass,
+        superuser_pass=super_pass,
     )
 
     _log.info(

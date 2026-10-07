@@ -185,7 +185,10 @@ def _has_pgvector(bin_dir: Path) -> bool:
     bundle.
     """
     candidates: list[Path] = []
-    pg_config = bin_dir / "pg_config"
+    from nexus._install.layout_core import exe_name  # noqa: PLC0415 — deferred import, function-local by this file's convention
+
+    # pg_config.exe on Windows: a bare name never exists there (nexus-ja4pq).
+    pg_config = bin_dir / exe_name("pg_config")
     if pg_config.exists():
         try:
             out = subprocess.run(

@@ -26,14 +26,18 @@ from __future__ import annotations
 
 import getpass
 import socket
+import os
 import subprocess
 
 import pytest
 
+from nexus._install.layout_core import exe_name
 from tests.db._service_fixture import pg_bin_dir
 
 _PG_BIN = pg_bin_dir()
-_INITDB = _PG_BIN / "initdb"
+# initdb.exe on Windows: a bare "initdb" never exists there, so the gate
+# skipped every test on the one host the Windows paths need (nexus-ja4pq).
+_INITDB = _PG_BIN / exe_name("initdb")
 
 pytestmark = [
     pytest.mark.integration,
@@ -63,6 +67,7 @@ def svc_monitor_cluster(tmp_path_factory):
         _start_cluster,
         _configure_cluster,
         _create_db,
+        superuser_auth,
     )
 
     bins = PgBinaries.from_dir(pg_bin_dir())
@@ -70,19 +75,21 @@ def svc_monitor_cluster(tmp_path_factory):
     port = _free_port()
     os_user = getpass.getuser()
 
-    _init_cluster(bins, pgdata, os_user)
+    su_pw = "su-pw"  # nexus-ja4pq: the cluster demands a superuser password
+    _init_cluster(bins, pgdata, os_user, superuser_password=su_pw)
     _configure_cluster(pgdata, port)
     _start_cluster(bins, pgdata, port)
-    _create_db(bins, port, os_user)
-
-    created = _create_roles(bins, port, os_user, "admin-pw", "svc-pw", "diag-pw")
+    with superuser_auth(su_pw):
+        _create_db(bins, port, os_user)
+        created = _create_roles(bins, port, os_user, "admin-pw", "svc-pw", "diag-pw")
     assert created.svc_created is True  # non-vacuity: the role really was made
 
     def su(sql: str) -> str:
         proc = subprocess.run(
-            [str(bins.psql), "-h", "127.0.0.1", "-p", str(port), "-U", os_user,
+            [str(bins.psql), "-w", "-h", "127.0.0.1", "-p", str(port), "-U", os_user,
              "-d", "nexus", "-v", "ON_ERROR_STOP=1", "-tAc", sql],
             capture_output=True, text=True, timeout=30,
+            env={**os.environ, "PGPASSWORD": su_pw},
         )
         assert proc.returncode == 0, proc.stderr
         return proc.stdout.strip()
@@ -103,7 +110,7 @@ def svc_monitor_cluster(tmp_path_factory):
         import os as _os
         env = dict(_os.environ, PGPASSWORD="svc-pw")
         return subprocess.run(
-            [str(bins.psql), "-h", "127.0.0.1", "-p", str(port),
+            [str(bins.psql), "-w", "-h", "127.0.0.1", "-p", str(port),
              "-U", "nexus_svc", "-d", "nexus", "-v", "ON_ERROR_STOP=1",
              "-tAc", sql],
             capture_output=True, text=True, timeout=30, env=env,
@@ -146,7 +153,7 @@ class TestMembershipAloneIsNotUsablePrivilege:
         env = dict(_os.environ, PGPASSWORD="svc-pw")
         bins = svc_monitor_cluster["bins"]
         proc = subprocess.run(
-            [str(bins.psql), "-h", "127.0.0.1", "-p", str(svc_monitor_cluster["port"]),
+            [str(bins.psql), "-w", "-h", "127.0.0.1", "-p", str(svc_monitor_cluster["port"]),
              "-U", "nexus_svc", "-d", "nexus", "-v", "ON_ERROR_STOP=1",
              "-t", "-A", "-q",
              "-c", "SET ROLE pg_monitor", "-c", "SELECT count(*) FROM pg_ls_waldir()"],

@@ -459,7 +459,7 @@ def test_init_cluster_grants_the_data_dir_before_initdb_runs(tmp_path: Path, mon
     monkeypatch.setattr(pp, "_run", lambda cmd, **kw: order.append("initdb"))
     pgdata = tmp_path / "pg"
     bins = PgBinaries.from_dir(tmp_path / "bin", platform="win32")
-    assert pp._init_cluster(bins, pgdata, "nx_x", platform="win32") is True
+    assert pp._init_cluster(bins, pgdata, "nx_x", superuser_password="pw", platform="win32") is True
     assert order == ["grant", "initdb"]
 
 

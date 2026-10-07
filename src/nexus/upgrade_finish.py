@@ -2132,8 +2132,10 @@ def heal_diag_view(config_dir: Path) -> list[str]:
         from nexus.db.pg_provision import (  # noqa: PLC0415 — deferred, circular-dep avoidance
             _read_credentials,
             bootstrap_superuser,
+            SUPERUSER_PASS_KEY,
             discover_pg_binaries,
             heal_diag_view_grants_and_ownership,
+            superuser_auth,
         )
 
         creds = _read_credentials(creds_path)
@@ -2142,7 +2144,8 @@ def heal_diag_view(config_dir: Path) -> list[str]:
             return []
         bins = discover_pg_binaries()
         os_user = bootstrap_superuser()
-        return heal_diag_view_grants_and_ownership(bins, port, os_user)
+        with superuser_auth(creds.get(SUPERUSER_PASS_KEY)):
+            return heal_diag_view_grants_and_ownership(bins, port, os_user)
     except Exception as exc:  # noqa: BLE001 — best-effort heal; must never break the finish pass
         _log.debug("diag_view_heal_failed", error=str(exc))
         return []
@@ -2206,8 +2209,10 @@ def _reassign_diag_view_before_restart(config_dir: Path) -> list[str]:
         from nexus.db.pg_provision import (  # noqa: PLC0415 — deferred, circular-dep avoidance
             _read_credentials,
             bootstrap_superuser,
+            SUPERUSER_PASS_KEY,
             discover_pg_binaries,
             reassign_diag_view_owner_before_restart,
+            superuser_auth,
         )
 
         creds = _read_credentials(creds_path)
@@ -2216,7 +2221,8 @@ def _reassign_diag_view_before_restart(config_dir: Path) -> list[str]:
             return []
         bins = discover_pg_binaries()
         os_user = bootstrap_superuser()
-        return reassign_diag_view_owner_before_restart(bins, port, os_user)
+        with superuser_auth(creds.get(SUPERUSER_PASS_KEY)):
+            return reassign_diag_view_owner_before_restart(bins, port, os_user)
     except Exception as exc:  # noqa: BLE001 — best-effort; must never abort the restart it protects
         _log.debug("diag_view_predrop_failed", error=str(exc))
         return []

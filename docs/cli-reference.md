@@ -3277,6 +3277,16 @@ grants only Administrators and SYSTEM) or cannot be read, so a normal session
 cannot write it. The fix it prints is an `icacls` grant to the current
 user, run from an elevated Command Prompt. The row is absent on POSIX.
 
+**Local PostgreSQL authentication row (nexus-ja4pq).** "Local PostgreSQL
+authentication" reads the bundled cluster's own `pg_hba.conf` (no connection, no
+password) and fails while any active line still says `trust`, which let any
+local OS account connect to the cluster's port without a password. New clusters
+are `scram-sha-256` from creation; an older one is converted on the next
+`nx daemon service start`, and the row also stays red when that conversion
+failed and rolled back (the reason is the `pg_auth_migration_failed` line in the
+nx log). The row is absent where there is no bundled cluster: a box that has not
+run `nx init --service`, or one using a managed Postgres.
+
 **Supplementary checks (new in 7.11.0).** After the default sweep prints its
 own result, `nx doctor` additionally runs the cheap, read-only subset of the
 `--check-*` diagnostics inline: `resources`, `plan-library`, `taxonomy`,
