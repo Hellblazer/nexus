@@ -586,7 +586,31 @@ def _windows_build_flip_shims(build: _WindowsBuild, *, tools: Path, bin_dir: Pat
             f"flip or user PATH update failed (`nx self install` re-runs the missing "
             f"steps):\n{exc}"
         ) from exc
+    _retarget_autostart_task(generation)
     return generation
+
+
+def _retarget_autostart_task(generation: Path) -> None:
+    """Point the storage-service logon task at *generation* (Windows only).
+
+    The Windows task names an interpreter path, not a shim, so a flip alone
+    leaves it starting the old tree (``installer.retarget_windows_task`` has the
+    measurement). Best effort after a successful flip: a failure here is a line
+    for the operator, never a failed install."""
+    from nexus import install_layout  # noqa: PLC0415 — deferred import
+    from nexus.daemon import installer  # noqa: PLC0415 — deferred import
+    from nexus.daemon.windows_autostart import pythonw_for  # noqa: PLC0415 — deferred import
+
+    python = install_layout.venv_python(generation, platform="win32")
+    try:
+        lines = installer.retarget_windows_task(pythonw_for(str(python)))
+    except Exception as exc:  # noqa: BLE001 — the install already succeeded
+        lines = [
+            f"the storage-service logon task could not be repointed at {generation.name} "
+            f"({exc}); run `nx daemon restart-stale` to repoint it"
+        ]
+    for line in lines:
+        click.echo(line)
 
 
 def _generation_layout_present(tools: Path) -> bool:
@@ -884,6 +908,7 @@ def _windows_converge_legacy_install(
             "causes are that `uv` is absent or unresolvable here, or the tree "
             "was removed between the two checks. Nothing was changed."
         )
+    _retarget_autostart_task(generation)
     click.echo(
         "converged the legacy uv-tool install onto the generation layout; "
         "the old tree is retained for live holders and reaped by a later "

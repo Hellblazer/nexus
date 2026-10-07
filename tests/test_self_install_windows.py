@@ -418,3 +418,68 @@ def test_posix_still_builds_a_bash_argv(monkeypatch: pytest.MonkeyPatch, tmp_pat
     request = self_cmd._build_request(Path("/pkg/_install"), receipt, version=None)
     assert request[:2] == ["bash", "/pkg/_install/install_generation.sh"]
     assert not isinstance(request, self_cmd._WindowsBuild)
+
+
+class TestAutostartTaskFollowsTheFlip:
+    """After the flip the storage-service logon task names the NEW generation's
+    interpreter (measured defect, nx-clean-win11 2026-10-07: it kept starting
+    the legacy uv tree, which held that tree and blocked its reap)."""
+
+    @pytest.fixture
+    def spy(self, monkeypatch: pytest.MonkeyPatch) -> list[str]:
+        from nexus.daemon import installer
+
+        seen: list[str] = []
+
+        def fake(pythonw: str) -> list[str]:
+            seen.append(pythonw)
+            return [f"repointed to {pythonw}"]
+
+        monkeypatch.setattr(installer, "retarget_windows_task", fake)
+        return seen
+
+    def test_the_generation_path_repoints_the_task_at_the_new_generation(
+        self, win, spy: list[str], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        tools, _bin, _spy = win
+        host = _generation(tools, "20260101T000000Z")
+        os.symlink(str(host), tools / "current")
+        _host(monkeypatch, host)
+        new = self_cmd.perform_self_install(keep=3)
+        assert new is not None and len(spy) == 1
+        assert new.name in spy[0] and host.name not in spy[0]
+        assert spy[0].lower().endswith("python.exe") or spy[0].lower().endswith("pythonw.exe")
+        assert f"repointed to {spy[0]}" in capsys.readouterr().out
+
+    def test_the_legacy_migration_repoints_the_task_at_the_new_generation(
+        self, win, spy: list[str], monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    ) -> None:
+        tools, _bin, fake_uv = win
+        legacy = TestLegacySite()._legacy(tmp_path, monkeypatch)
+        fake_uv.tool_dir = legacy.parent
+        generation = self_cmd.perform_self_install()
+        assert generation is not None and len(spy) == 1
+        assert generation.name in spy[0] and "uvtools" not in spy[0]
+
+    def test_a_retarget_that_raises_does_not_fail_the_install(
+        self, win, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        from nexus.daemon import installer
+
+        def boom(pythonw: str) -> list[str]:
+            raise RuntimeError("scheduler gone")
+
+        monkeypatch.setattr(installer, "retarget_windows_task", boom)
+        tools, _bin, _spy = win
+        host = _generation(tools, "20260101T000000Z")
+        _host(monkeypatch, host)
+        assert self_cmd.perform_self_install(keep=3) is not None
+        out = capsys.readouterr().out
+        assert "scheduler gone" in out and "nx daemon restart-stale" in out
+
+    def test_a_dry_run_repoints_nothing(self, win, spy: list[str], monkeypatch: pytest.MonkeyPatch) -> None:
+        tools, _bin, _spy = win
+        host = _generation(tools, "20260101T000000Z")
+        _host(monkeypatch, host)
+        self_cmd.perform_self_install(dry_run=True)
+        assert spy == []

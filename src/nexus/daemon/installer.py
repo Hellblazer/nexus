@@ -189,16 +189,105 @@ def _render_windows_task(_daemon: ModuleType) -> tuple[Path, str]:
     the RESOLVED ABSOLUTE config dir the install used, as the launchd and
     systemd units do, so the supervisor the launcher spawns is argv-explicit.
     """
-    from nexus.daemon.windows_autostart import task_xml  # noqa: PLC0415 — deferred import — Windows-only path
-
     install_dir = _daemon._autostart_install_dir()
     install_dir.mkdir(parents=True, exist_ok=True)
-    body = task_xml(
+    body = _windows_task_body(_daemon, pythonw=_task_pythonw())
+    return install_dir / _daemon._autostart_filename_service(), body
+
+
+def _windows_task_body(_daemon: ModuleType, *, pythonw: str) -> str:
+    """The task definition this version renders for *pythonw* (no side effects)."""
+    from nexus.daemon.windows_autostart import task_xml  # noqa: PLC0415 — deferred import — Windows-only path
+
+    return task_xml(
         sid=_task_user_sid(),
-        pythonw=_task_pythonw(),
+        pythonw=pythonw,
         config_dir=str(_daemon._config.nexus_config_dir().resolve()),
     )
-    return install_dir / _daemon._autostart_filename_service(), body
+
+
+_TASK_COMMAND_RE = re.compile(r"<Command>(.*?)</Command>", re.DOTALL)
+
+
+def retarget_windows_task(pythonw: str) -> list[str]:
+    """Point the installed Windows logon task at *pythonw*; stop and start nothing.
+
+    RDR-224. The task bakes the interpreter of the nx that installed it, where
+    the launchd and systemd units name the ``~/.local/bin/nx`` shim and follow
+    ``current`` for free. So after ``nx self install`` flips ``current``, the
+    task kept starting the OLD tree. Measured on nx-clean-win11 (2026-10-07): a
+    migrated box started the stack from the legacy uv tree, which therefore
+    stayed held and was never reaped; and once the stack is stopped and that
+    tree reaped, the logon task names a deleted file and the stack never starts
+    again. ``nx self install`` calls this after every Windows flip with the new
+    generation's interpreter.
+
+    ``schtasks /Create /XML /F`` replaces the definition only. No ``/End`` and no
+    ``/Run``: the stack running now keeps its tree (the Windows rule: never
+    replace what a running process uses) and moves at its next start.
+
+    Rewrites only what is safe to rewrite: the kept copy must be exactly what
+    this version renders for the interpreter it names (a hand edit or template
+    drift stays ``nx daemon restart-stale``'s decision), and the task must be
+    registered and enabled (a disabled task is the user's choice; re-creating
+    would re-enable it). Never raises. Returns lines for the operator; ``[]``
+    off Windows, with no task installed, or when it already names *pythonw*.
+    """
+    if not _is_windows():
+        return []
+    from xml.sax.saxutils import unescape  # noqa: PLC0415 — stdlib, Windows-only path
+
+    from nexus.commands import daemon as _daemon  # noqa: PLC0415 — deferred import — Windows-only path
+
+    name = _task_name()
+    remedy = "run `nx daemon restart-stale` from the new nx to repoint it"
+    dest = _daemon._autostart_install_dir() / _daemon._autostart_filename_service()
+    if not dest.is_file():
+        return []
+    try:
+        existing = dest.read_text()
+    except OSError as exc:
+        return [f"the {name} logon task was not repointed: {dest} could not be read ({exc}); {remedy}"]
+    match = _TASK_COMMAND_RE.search(existing)
+    old = unescape(match.group(1).strip()) if match else ""
+    if old and ntpath.normcase(old) == ntpath.normcase(pythonw):
+        return []
+    if not old or existing != _windows_task_body(_daemon, pythonw=old):
+        return [
+            f"the {name} logon task was not repointed at {pythonw}: {dest} differs from "
+            f"what this version renders (edited, or an older template); {remedy}"
+        ]
+    probe = autostart_activation_state(dest, tier="service")
+    if probe.state is not ActivationState.ACTIVE:
+        hint = f"; to use it again, `{probe.remedy}`" if probe.remedy else ""
+        return [
+            f"the {name} logon task was not repointed at {pythonw}: {probe.detail}{hint}, "
+            f"then {remedy}"
+        ]
+    dest.write_text(_windows_task_body(_daemon, pythonw=pythonw))
+    cmd = _activate_cmd(dest)
+    failure = ""
+    try:
+        result = _run_manager(
+            cmd, capture_output=True, text=True, check=False,
+            timeout=_MANAGER_ACTION_TIMEOUT_S,
+        )
+        if result.returncode != 0:
+            failure = f"`{' '.join(cmd)}` exited {result.returncode}: {_first_line(result)}"
+    except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
+        failure = f"`{' '.join(cmd)}` failed: {type(exc).__name__}: {exc}"
+    if failure:
+        try:
+            dest.write_text(existing)  # the kept copy keeps describing the registered task
+        except OSError:
+            pass
+        _log.warning("service_task_retarget_failed", detail=failure)
+        return [f"the {name} logon task was not repointed at {pythonw}: {failure}; {remedy}"]
+    return [
+        f"the {name} logon task now starts {pythonw}. The storage service running now "
+        "keeps its version until its next start (the next sign-in, or "
+        f"`nx daemon service stop` then `Start-ScheduledTask {name}`)"
+    ]
 
 
 def _render_for(tier: str) -> tuple[Path, str]:
