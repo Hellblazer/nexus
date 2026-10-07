@@ -94,7 +94,13 @@ def _record_root_if_startup() -> None:
 def main() -> int:
     _record_root_if_startup()
     text = (pathlib.Path(__file__).resolve().parent / SECTION).read_text(encoding="utf-8")
-    sys.stdout.write(text)  # write, not print: `cat` added no trailing newline and neither does this
+    # The file's own UTF-8 bytes, as `cat` sent them: no trailing newline added,
+    # and no text-mode stream in between. On Windows a piped sys.stdout is in the
+    # locale code page with CRLF translation, which sent cp1252 em dashes and
+    # CRLF line ends to a reader that decodes UTF-8 (RDR-224).
+    sys.stdout.flush()
+    sys.stdout.buffer.write(text.encode("utf-8"))
+    sys.stdout.buffer.flush()
     return 0
 
 

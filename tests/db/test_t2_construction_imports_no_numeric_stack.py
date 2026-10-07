@@ -30,6 +30,7 @@ from pathlib import Path
 import pytest
 
 from nexus._lazy_module import LazyModule, lazy_module
+from tests._platform import scrubbed_env
 
 _HEAVY = ("numpy", "scipy", "sklearn")
 
@@ -47,12 +48,12 @@ print(json.dumps({"outcome": outcome,
 
 
 def _probe(tmp_path: Path, extra_env: dict[str, str]) -> dict:
-    env = {
-        "PATH": os.environ.get("PATH", ""),
-        "HOME": str(tmp_path / "home"),
-        "NEXUS_CONFIG_DIR": str(tmp_path / "config"),
+    env = scrubbed_env(
+        PATH=os.environ.get("PATH", ""),
+        HOME=str(tmp_path / "home"),
+        NEXUS_CONFIG_DIR=str(tmp_path / "config"),
         **extra_env,
-    }
+    )
     proc = subprocess.run(
         [sys.executable, "-c", _PROBE, str(tmp_path)],
         env=env, capture_output=True, text=True, timeout=120,

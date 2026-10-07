@@ -58,6 +58,10 @@ ONE PATH PER BULLET, on the bullet's FIRST line.
 - MCP servers without Node (nexus-f9bgu): `conexus/mcp/sequential_thinking.py` is new: a standard-library Python port of the upstream server's one tool, `sequentialthinking`, with the same input schema and result JSON. It writes nothing to stderr.
 - MCP servers without Node (nexus-f9bgu): `sn/.mcp.json` declares context7 as the hosted HTTP endpoint `https://mcp.context7.com/mcp` instead of `npx -y @upstash/context7-mcp@4.0.5`. Same two tools; the version is the vendor's, no longer pinned here.
 - MCP servers without Node (nexus-f9bgu): `conexus/commands/nx-preflight.md` drops the Node.js / npx row from its summary table, matching the CLI, whose nx-preflight and doctor no longer check for npx.
+- Windows hook output (nexus-f9bgu): `conexus/hooks/scripts/nx_hook_shim.py` recognises the older CLIs' unknown-verb line when it ends in CRLF. On Windows `nx-hook` writes stderr in text mode, so the line ended `\r\n`, the pattern's `$` did not match, and an older CLI's unknown verb exited 2 there instead of being skipped. No change on POSIX.
+- Windows hook output (nexus-f9bgu): `sn/hooks/scripts/session_start.py` writes the section file's own UTF-8 bytes to stdout. On Windows a piped stdout is cp1252 text mode, so the em dashes went out as cp1252 bytes and every newline as CRLF to a reader that decodes UTF-8. No change on POSIX.
+- SubagentStart budget (nexus-wd0at): `sn/hooks/scripts/serena-section.md` is 850 bytes shorter. The six ToolSearch example lines become one sentence and one example, and the two paragraphs on the worktree root and on write approval say the same things in fewer words. Every instruction stays.
+- SubagentStart budget (nexus-wd0at): `sn/hooks/scripts/context7-section.md` drops the stray `CONTEXT7` heredoc terminator that every subagent received as its last line, and folds the when-to-use lists into two lines.
 
 
 

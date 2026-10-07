@@ -2,24 +2,13 @@
 
 **Use Serena for symbol tasks; Grep for text.** Project auto-activated via `--project-from-cwd`.
 
-**Root is fixed at server start.** Serena resolves every path against the project root it found when the MCP server started, not against your cwd. If your cwd is a linked git worktree (dispatched with `isolation: "worktree"`), Serena's write tools are denied by the sn hook and a worktree section above this one tells you what to use instead; read tools still answer, against the primary checkout.
+**Root is fixed at server start.** Serena resolves every path against the project root it found when its MCP server started, not against your cwd. In a linked git worktree (`isolation: "worktree"`) the sn hook denies Serena's write tools and the worktree section above says what to use instead; read tools still answer, against the primary checkout.
 
-**Serena writes are not auto-approved.** The sn plugin approves Serena's read tools only. Its write tools, `jet_brains_debug`, `query_project`, `onboarding` and `restart_language_server` go through Claude Code's own permission flow, like Edit and Write. If a Serena write is denied or never answered, do not retry it: make the change with Edit or Write on the absolute path, or report that you are blocked.
+**Serena writes are not auto-approved.** sn approves Serena's read tools only. Its write tools, `jet_brains_debug`, `query_project`, `onboarding` and `restart_language_server` go through Claude Code's permission flow, like Edit and Write. If one is denied or never answered, do not retry it: use Edit or Write on the absolute path, or report that you are blocked.
 
 ### Setup — load tools before first use
 
-Tool names vary by backend. The JetBrains backend prefixes `jet_brains_`; the LSP backend is unprefixed. Load both variants via ToolSearch; only the available ones resolve:
-
-```
-ToolSearch("select:mcp__plugin_sn_serena__jet_brains_find_symbol,mcp__plugin_sn_serena__find_symbol")
-ToolSearch("select:mcp__plugin_sn_serena__jet_brains_find_referencing_symbols,mcp__plugin_sn_serena__find_referencing_symbols")
-ToolSearch("select:mcp__plugin_sn_serena__jet_brains_get_symbols_overview,mcp__plugin_sn_serena__get_symbols_overview")
-ToolSearch("select:mcp__plugin_sn_serena__jet_brains_type_hierarchy,mcp__plugin_sn_serena__jet_brains_find_implementations,mcp__plugin_sn_serena__find_implementations")
-ToolSearch("select:mcp__plugin_sn_serena__jet_brains_rename,mcp__plugin_sn_serena__rename_symbol")
-ToolSearch("select:mcp__plugin_sn_serena__replace_in_files,mcp__plugin_sn_serena__replace_symbol_body,mcp__plugin_sn_serena__insert_before_symbol,mcp__plugin_sn_serena__insert_after_symbol")
-```
-
-Then call `mcp__plugin_sn_serena__initial_instructions` for full backend-specific usage guidance.
+Tool names vary by backend: JetBrains prefixes `jet_brains_`, LSP is unprefixed. Load what you need in one ToolSearch call naming both variants, as full names `mcp__plugin_sn_serena__<tool>` from the table below; only the available ones resolve. Example: `ToolSearch("select:mcp__plugin_sn_serena__jet_brains_find_symbol,mcp__plugin_sn_serena__find_symbol")`. Then call `mcp__plugin_sn_serena__initial_instructions` for backend-specific usage.
 
 ### Task → Tool Mapping
 
@@ -37,7 +26,7 @@ Then call `mcp__plugin_sn_serena__initial_instructions` for full backend-specifi
 | Move a symbol | `jet_brains_move` | (Edit) |
 | Static analysis on a file | `jet_brains_run_inspections` | `get_diagnostics_for_file` |
 
-`find_file`, `list_dir`, and `search_for_pattern` are excluded in this context: use Glob, Bash, and Grep. Standard tools for broad text search (Grep), reading known files (Read), writing new files (Write).
+`find_file`, `list_dir` and `search_for_pattern` are excluded here: use Glob, Bash and Grep.
 
 ### Rules
 

@@ -83,7 +83,7 @@ def _skip_gate_calls(path: Path) -> list[str]:
     to a fixpoint through a module-level symbol table, so any number of hops
     between the gate and the ambient call is followed.
     """
-    tree = ast.parse(path.read_text())
+    tree = ast.parse(path.read_text(encoding="utf-8"))
 
     # Module-level symbol table: name -> defining node.
     symbols: dict[str, ast.AST] = {}

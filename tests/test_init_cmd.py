@@ -15,6 +15,8 @@ import os
 from pathlib import Path
 
 import pytest
+
+from nexus.daemon.service_registry import service_identity
 import yaml
 from click.testing import CliRunner
 
@@ -1913,7 +1915,7 @@ class TestPollServiceLeaseMarksEvidence:
 
         registry = ServiceRegistry(dir=config_dir, tier="storage_service")
         registry.publish(
-            str(_os.getuid()),
+            service_identity(),
             endpoint={"host": "127.0.0.1", "port": 18101},
             version="7.40.0",
             owner_token=mint_owner_token(),

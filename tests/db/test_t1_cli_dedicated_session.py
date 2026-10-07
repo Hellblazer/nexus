@@ -38,6 +38,9 @@ from typing import Any
 
 import pytest
 
+from nexus._locking import lock_fd, unlock_fd
+from tests._platform import assert_owner_only
+
 SERVICE_TOKEN = "fake-cli-dedicated-service-token"
 
 # ── In-process fake service state (module-level, reset per test) ──────────────
@@ -515,14 +518,11 @@ class TestLiveSessionLease:
         clear_t1_session_lease("sess-1", tmp_path)
 
     def test_lease_file_mode_is_0600(self, tmp_path: Path) -> None:
-        import stat
-
+        """Owner-only: mode 0o600 on POSIX, an owner-only DACL on Windows."""
         from nexus.db.t1 import _t1_session_lease_path, publish_t1_session_lease
 
         publish_t1_session_lease("sess-perm", "secret-token", tmp_path)
-        path = _t1_session_lease_path("sess-perm", tmp_path)
-        mode = stat.S_IMODE(path.stat().st_mode)
-        assert mode == 0o600, f"expected 0o600, got {oct(mode)}"
+        assert_owner_only(_t1_session_lease_path("sess-perm", tmp_path))
 
     def test_get_t1_database_uses_published_lease_over_cli_dedicated(
         self, fake_service, config_dir, monkeypatch
@@ -2651,14 +2651,12 @@ class TestCliOpBudgetEnforcement:
         """Critic Critical: a sibling holding the mint lock must not wedge a
         budgeted caller — the bounded-poll acquire raises the remedy at the
         deadline instead of blocking forever."""
-        import fcntl as _fcntl
-
         from nexus.db.t1 import _lock_guarded_mint_or_borrow, _t1_session_mint_lock_path
 
         lock_path = _t1_session_mint_lock_path("held-id", config_dir)
         config_dir.mkdir(parents=True, exist_ok=True)
         holder_fd = os.open(str(lock_path), os.O_WRONLY | os.O_CREAT, 0o600)
-        _fcntl.flock(holder_fd, _fcntl.LOCK_EX)
+        lock_fd(holder_fd, blocking=True)
         try:
             import time as _time
 
@@ -2668,7 +2666,7 @@ class TestCliOpBudgetEnforcement:
                     deadline=_time.monotonic() + 0.2,
                 )
         finally:
-            _fcntl.flock(holder_fd, _fcntl.LOCK_UN)
+            unlock_fd(holder_fd)
             os.close(holder_fd)
 
     def test_budget_env_parsing(self, monkeypatch: pytest.MonkeyPatch) -> None:

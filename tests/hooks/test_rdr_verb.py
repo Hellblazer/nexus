@@ -40,6 +40,8 @@ from nexus.hooks import rdr_verb as rdr_hook_module
 pytestmark = pytest.mark.usefixtures("cloud_mode")
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+#: ``docs/rdr`` as the hook prints it: relative, with the platform separator.
+_RDR_REL = os.path.join("docs", "rdr")
 PACKAGE_TABLE_PATH = REPO_ROOT / "src" / "nexus" / "tables" / "rdr-lifecycle.toml"
 
 
@@ -162,7 +164,11 @@ def test_summary_prints_for_this_repos_real_tree(rdr_hook_mod, monkeypatch) -> N
     result = mod.run(None)
     assert not result.crashed
     out = result.stdout or ""
-    m = re.search(r"^RDR: (\d+) documents \((\d+) RDRs: 2 closed, 1 accepted\) in docs/rdr but NOT indexed\.$", out, re.M)
+    # The relative path is printed with the platform separator (a backslash on Windows).
+    m = re.search(
+        r"^RDR: (\d+) documents \((\d+) RDRs: 2 closed, 1 accepted\) in "
+        + re.escape(_RDR_REL) + r" but NOT indexed\.$", out, re.M,
+    )
     assert m, out
     documents, rdrs = int(m.group(1)), int(m.group(2))
     assert rdrs > 200, out
@@ -871,7 +877,7 @@ def test_run_does_not_say_not_indexed_when_the_index_state_is_unknown(
     assert "unknown" in out, out
     assert "NOT indexed" not in out, out
     assert "Run: nx index repo" not in out, out
-    assert out.startswith("RDR: 1 documents (1 RDRs) in docs/rdr"), out
+    assert out.startswith(f"RDR: 1 documents (1 RDRs) in {_RDR_REL}"), out
 
 
 def test_a_t2_fetch_that_cannot_start_still_prints_the_summary(
@@ -891,7 +897,7 @@ def test_a_t2_fetch_that_cannot_start_still_prints_the_summary(
     monkeypatch.setattr(mod, "_resolve_rdr_collection", lambda r: None)
     monkeypatch.setattr(mod, "_start_t2_fetch", cannot_start)
     out = mod.run(None).stdout or ""
-    assert out.startswith("RDR: 1 documents (1 RDRs) in docs/rdr"), out
+    assert out.startswith(f"RDR: 1 documents (1 RDRs) in {_RDR_REL}"), out
 
 
 def test_a_listing_that_answers_absent_still_says_not_indexed(

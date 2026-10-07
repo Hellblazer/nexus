@@ -17,6 +17,7 @@ discovery, and that ordering is itself what two of them assert.
 from __future__ import annotations
 
 import contextlib
+import sys
 from pathlib import Path
 
 import pytest
@@ -184,7 +185,7 @@ def test_run_still_spawns_for_an_unprivileged_user(
 ) -> None:
     """Non-vacuity: with only the euid changed, _run reaches subprocess.run."""
     setattr_in(monkeypatch, pg_provision, "os.geteuid", lambda: 1000, raising=False)
-    out = pg_provision._run(["/bin/echo", "ok"], timeout=pg_provision._PSQL_TIMEOUT_S)
+    out = pg_provision._run([sys.executable, "-c", "print('ok')"], timeout=pg_provision._PSQL_TIMEOUT_S)
     assert out.returncode == 0
 
 

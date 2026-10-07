@@ -21,8 +21,11 @@ which is exactly the bare-python case a hook driver runs in.
 """
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
+
+from tests._platform import IS_WINDOWS, scrubbed_env
 
 _PROBE = """
 import sys, io
@@ -38,12 +41,18 @@ print(buf.getvalue(), end='')
 
 
 def _run_probe() -> subprocess.CompletedProcess[str]:
+    env = {"PATH": "/usr/bin:/bin", "HOME": "/tmp", "NX_SERVICE_URL": "http://127.0.0.1:1"}
+    if IS_WINDOWS:
+        # /tmp is not a directory there: home is the suite's fenced HOME, given
+        # as USERPROFILE too, which is the variable Windows reads.
+        env["HOME"] = env["USERPROFILE"] = os.environ.get("HOME") or os.environ.get("USERPROFILE", "")
+    env = scrubbed_env(**env)
     return subprocess.run(
         [sys.executable, "-c", _PROBE],
         capture_output=True,
         text=True,
         timeout=120,
-        env={"PATH": "/usr/bin:/bin", "HOME": "/tmp", "NX_SERVICE_URL": "http://127.0.0.1:1"},
+        env=env,
     )
 
 

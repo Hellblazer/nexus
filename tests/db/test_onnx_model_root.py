@@ -15,6 +15,7 @@ import re
 from pathlib import Path
 
 from nexus.db import onnx_model_root as omr
+from tests._platform import IS_WINDOWS
 
 _JAVA_PATHS = (
     Path(__file__).resolve().parents[2]
@@ -27,11 +28,18 @@ def test_env_override_wins(tmp_path, monkeypatch):
     assert omr.service_onnx_models_root() == tmp_path / "custom-root"
 
 
+def _home_rung() -> Path:
+    """Rung 2's base: ``$HOME`` itself. Not ``Path.home()``, which on Windows
+    reads ``USERPROFILE`` and ignores ``HOME`` (the suite sets ``HOME``)."""
+    home = os.environ.get("HOME", "").strip()
+    return Path(home) if home else Path.home()
+
+
 def test_default_is_home_cache(monkeypatch):
     monkeypatch.delenv(omr.ENV_MODEL_DIR, raising=False)
     assert (
         omr.service_onnx_models_root()
-        == Path.home() / ".cache" / "nexus" / "onnx_models"
+        == _home_rung() / ".cache" / "nexus" / "onnx_models"
     )
 
 
@@ -39,7 +47,7 @@ def test_blank_env_is_absence(monkeypatch):
     monkeypatch.setenv(omr.ENV_MODEL_DIR, "   ")
     assert (
         omr.service_onnx_models_root()
-        == Path.home() / ".cache" / "nexus" / "onnx_models"
+        == _home_rung() / ".cache" / "nexus" / "onnx_models"
     )
 
 
@@ -56,14 +64,18 @@ def test_blank_home_falls_to_passwd_entry(monkeypatch):
     """Rung parity for HOME="" (code-review-expert Important, 2026-08-30):
     Java blank-checks HOME and falls to user.home; bare Path.home() is
     presence-only and resolves HOME="" to ``/``. Both sides must land on the
-    passwd entry."""
-    import pwd
-
+    passwd entry. Windows has no passwd database: there the last rung is the
+    profile directory (``Path.home()``, from ``USERPROFILE``), which is what
+    Java's ``user.home`` reads on Windows."""
     monkeypatch.delenv(omr.ENV_MODEL_DIR, raising=False)
     monkeypatch.setenv("HOME", "")
-    expected = (
-        Path(pwd.getpwuid(os.getuid()).pw_dir) / ".cache" / "nexus" / "onnx_models"
-    )
+    if IS_WINDOWS:
+        user_home = Path.home()
+    else:
+        import pwd  # noqa: PLC0415 — POSIX-only, this branch only
+
+        user_home = Path(pwd.getpwuid(os.getuid()).pw_dir)
+    expected = user_home / ".cache" / "nexus" / "onnx_models"
     assert omr.service_onnx_models_root() == expected
 
 

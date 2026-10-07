@@ -17,6 +17,7 @@ No T2/chroma opens; no epsilon-allow needed (RDR-128 lint must stay clean).
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from unittest.mock import patch
 
@@ -1866,7 +1867,13 @@ def test_continuation_target_file_is_in_tmp(
     from nexus.cli import main
 
     result = runner.invoke(main, ["command-context", "continuation"])
-    assert "/tmp/nexus-continuation-" in result.output
+    if os.name == "nt":
+        # Windows has no /tmp: the handoff goes to the user's temp directory.
+        import tempfile
+
+        assert f"{Path(tempfile.gettempdir()) / 'nexus-continuation-'}" in result.output
+    else:
+        assert "/tmp/nexus-continuation-" in result.output
 
 
 # ---------------------------------------------------------------------------
