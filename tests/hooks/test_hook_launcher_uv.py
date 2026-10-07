@@ -192,15 +192,17 @@ def _alias_executable(src: Path, bindir: Path, symlink: Callable[[Path, Path], N
     ``os.symlink`` raises WinError 1314 there (the win-release runner, nexus-f9bgu),
     and a hard link fails across volumes. The caller needs only a runnable uv in
     *bindir*, which all three give. *symlink* is injectable so a test can model
-    the refusing token without patching ``os`` process-wide."""
+    the refusing token without patching ``os`` process-wide. The fallbacks take the
+    resolved target: Linux ``link(2)`` does not follow a symlink, so hard-linking a
+    pipx-installed ``uv`` (itself a symlink) would make another symlink."""
     dst = bindir / src.name
     try:
         symlink(src, dst)
     except OSError:
         try:
-            os.link(src, dst)
+            os.link(src.resolve(), dst)
         except OSError:
-            shutil.copy2(src, dst)
+            shutil.copy2(src.resolve(), dst)
     return dst
 
 
