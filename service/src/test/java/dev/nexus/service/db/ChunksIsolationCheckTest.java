@@ -242,6 +242,8 @@ class ChunksIsolationCheckTest {
         assertThat(msg).contains("chunks_gate_probe_owner_read", "nexus_svc", "nexus_admin",
             "DROP POLICY chunks_gate_probe_owner_read ON nexus.chunks", "NX_DB_ADMIN_URL", "WITH INHERIT FALSE",
             "read or write every tenant's chunks");
+        assertThat(msg).as("dropping a policy on the parent alone leaves its copy on every leaf (nexus-3wh8d.17 M1)")
+            .contains("partition_sync_access('nexus.chunks'::regclass)");
         assertThat(ChunksIsolationCheck.refusal("nexus_svc", java.util.List.of(
                 new ChunksIsolationCheck.Violation("some_policy", "public"))))
             .as("a policy for PUBLIC says PUBLIC").contains("through PUBLIC");

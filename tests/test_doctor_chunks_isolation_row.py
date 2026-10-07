@@ -60,6 +60,8 @@ def test_false_is_a_hard_failure_that_names_the_policy_and_both_remedies() -> No
     fixes = " ".join(r.fix_suggestions)
     assert "NX_DB_ADMIN_URL" in fixes
     assert "DROP POLICY chunks_gate_probe_owner_read ON nexus.chunks" in fixes
+    drop = next(f for f in r.fix_suggestions if "DROP POLICY chunks_gate_probe_owner_read" in f)
+    assert "partition_sync_access('nexus.chunks'::regclass)" in drop, "the DROP POLICY remedy must also re-sync the leaves"
     assert "chunks_isolation_check_failed" in fixes
 
 

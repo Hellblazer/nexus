@@ -151,7 +151,9 @@ public final class ChunksIsolationCheck {
             + "OR-ed, so this role would read or write every tenant's chunks (nexus-wbfpw.48)."
             + (violations.size() > 1 ? " " + (violations.size() - 1) + " more violation(s) follow it." : "")
             + " Either drop the policy as the table owner (DROP POLICY " + v.policy()
-            + " ON nexus.chunks), or stop " + connectedRole + " inheriting " + v.role()
+            + " ON nexus.chunks, then SELECT nexus.partition_sync_access('nexus.chunks'::regclass) so the copies"
+            + " on every model partition and leaf go with it; the next boot refuses on each leaf copy otherwise),"
+            + " or stop " + connectedRole + " inheriting " + v.role()
             + " (REVOKE it, or GRANT ... WITH INHERIT FALSE). For chunks_gate_probe_owner_read, which"
             + " vectors-029 creates for the migrating role, run migrations as a role the service does not"
             + " inherit (NX_DB_ADMIN_URL, NX_DB_ADMIN_USER and NX_DB_ADMIN_PASS), then drop the policy.";
