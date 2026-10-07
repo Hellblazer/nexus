@@ -550,6 +550,16 @@ depends on how much output follows it, which inverts against its value: the
 longer and more expensive the run, the further the warning sits from the
 tail. `head` as well as `tail`, or grep the warning shape.
 
+**A remote pytest hand run goes through `scripts/watched_pytest.py`** (nexus-hlvg1),
+on qwentescence, qwent-test and hellmini alike:
+`python scripts/watched_pytest.py --stall 180 --status <file> -- uv run pytest ...`.
+It adds `-v` and `faulthandler_timeout`, kills the process tree after
+`--stall` seconds of silence and names the hung test (exit 124), names a run
+killed by a console Ctrl event (exit 125), and keeps a JSON status file current.
+Read that file to check on a run; never sleep and guess. Measured 2026-10-07: a
+native-Windows run was killed at 23% by a test's console-wide Ctrl+Break, and
+behind `-q` and a blind wait nobody knew for 30 minutes.
+
 ## Task tracking
 
 Use **beads** (`bd`) for issue tracking. Find work with `bd ready`; claim with `bd update <id> --claim`; close with `bd close <id>`. Use `nx memory put` for project-context notes that persist across sessions. See `docs/contributing.md` § Git Workflow for branch naming (`feature/<bead-id>-<description>`).
