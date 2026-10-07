@@ -31,7 +31,7 @@ from nexus.retry import (
     _is_connectivity_error,
     _manifest_write_with_retry,
 )
-from tests._time_seam import patch_time
+from tests._module_seam import patch_time
 
 
 class _FakeClock:

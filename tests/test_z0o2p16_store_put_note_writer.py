@@ -31,7 +31,7 @@ from nexus.catalog.note_write import (
 )
 from nexus.catalog.store_hook import note_pieces
 from nexus.cli import main
-from tests._time_seam import module_time
+from tests._module_seam import module_time
 
 _SUBJECT = "z0o2p16-note"
 _FRESH_SUBJECT = "z0o2p16-fresh"

@@ -39,7 +39,7 @@ import pytest
 from nexus.db.t2 import T2Database
 
 from tests._catalog_fixture_ops import register_real_doc_id
-from tests._time_seam import module_time
+from tests._module_seam import module_time
 
 # hygiene-001-1 (nexus-tk070.p6a follow-on): document_aspects.doc_id (and,
 # since the same turn, aspect_extraction_queue.doc_id via the engine's

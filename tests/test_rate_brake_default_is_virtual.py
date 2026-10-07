@@ -28,7 +28,7 @@ import time
 import pytest
 
 from nexus.rate_brake import RateLimitBrake
-from tests._time_seam import module_time
+from tests._module_seam import module_time
 
 #: Comfortably above CPU noise on a loaded box, far below the delays tripped.
 _REAL_SECONDS_BUDGET = 1.0

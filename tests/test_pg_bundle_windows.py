@@ -24,6 +24,7 @@ import pytest
 
 import build_pg_bundle_windows as bw
 import pg_bundle_windows_smoke as sm
+from tests._module_seam import setattr_in
 
 REPO = Path(__file__).resolve().parent.parent
 SCRIPT = REPO / "scripts" / "build_pg_bundle_windows.py"
@@ -845,7 +846,7 @@ def test_windows_workdir_inherits_its_parents_acl_and_posix_is_private(
         calls.append((Path(path).name, args, kwargs))
         return real(path, *args, **kwargs)
 
-    monkeypatch.setattr(sm.os, "mkdir", spy)
+    setattr_in(monkeypatch, sm, "os.mkdir", spy)
     win = sm.make_workdir(tmp_path / "a", sm.Platform(windows=True))
     posix = sm.make_workdir(tmp_path / "b", sm.Platform(windows=False))
     assert win.is_dir() and posix.is_dir() and win.name.startswith("pgsmoke-")
@@ -1054,7 +1055,7 @@ def test_the_windows_reader_passes_the_path_in_the_environment_and_parses_the_an
         return types.SimpleNamespace(returncode=0, stdout=json.dumps({"Status": "Valid", "Subject": MS_SUBJECT}), stderr="")
 
     monkeypatch.setattr(bw, "sys", types.SimpleNamespace(platform="win32"))
-    monkeypatch.setattr(bw.subprocess, "run", fake_run)
+    setattr_in(monkeypatch, bw, "subprocess.run", fake_run)
     monkeypatch.setenv("PSMODULEPATH", r"C:\Program Files\PowerShell\7\Modules")
     sig = REAL_READ_AUTHENTICODE(Path(r"C:\it's here\vcruntime140.dll"))
     assert sig == bw.Signature("Valid", MS_SUBJECT)
@@ -1072,7 +1073,7 @@ def test_the_windows_reader_passes_the_path_in_the_environment_and_parses_the_an
         # The cmdlet failed to load: exit 0, empty Status (rehearsal run 37410530509).
         types.SimpleNamespace(returncode=0, stdout='{"Status":"","Subject":""}', stderr="module could not be loaded"),
     ):
-        monkeypatch.setattr(bw.subprocess, "run", lambda *a, _b=bad, **k: _b)
+        setattr_in(monkeypatch, bw, "subprocess.run", lambda *a, _b=bad, **k: _b)
         with pytest.raises(bw.BuildError):
             REAL_READ_AUTHENTICODE(Path("x.dll"))
 

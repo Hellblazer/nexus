@@ -17,7 +17,6 @@ discovery, and that ordering is itself what two of them assert.
 from __future__ import annotations
 
 import contextlib
-import subprocess
 from pathlib import Path
 
 import pytest
@@ -25,6 +24,7 @@ import pytest
 from nexus.commands import init as init_cmd
 from nexus.db import pg_provision
 from nexus.db.pg_provision import PgRootUserError, refuse_root, provision
+from tests._module_seam import setattr_in
 
 
 class _Tripwire(Exception):
@@ -32,7 +32,7 @@ class _Tripwire(Exception):
 
 
 def test_refuse_root_raises_when_euid_is_zero(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(pg_provision.os, "geteuid", lambda: 0, raising=False)
+    setattr_in(monkeypatch, pg_provision, "os.geteuid", lambda: 0, raising=False)
     with pytest.raises(PgRootUserError):
         refuse_root()
 
@@ -42,7 +42,7 @@ def test_refuse_root_is_silent_for_an_unprivileged_euid(
 ) -> None:
     # Non-vacuity for the test above: the guard keys on the euid VALUE, so it
     # cannot be passing merely because it raises unconditionally.
-    monkeypatch.setattr(pg_provision.os, "geteuid", lambda: 1000, raising=False)
+    setattr_in(monkeypatch, pg_provision, "os.geteuid", lambda: 1000, raising=False)
     refuse_root()
 
 
@@ -58,7 +58,7 @@ def test_refuse_root_treats_a_missing_geteuid_as_not_root(
 def test_provision_refuses_as_root_before_touching_the_bundle(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    monkeypatch.setattr(pg_provision.os, "geteuid", lambda: 0, raising=False)
+    setattr_in(monkeypatch, pg_provision, "os.geteuid", lambda: 0, raising=False)
     # Everything provision() would reach after the guard trips the tripwire,
     # so a PgRootUserError here proves the guard ran FIRST — which is the
     # point of the fix, the old failure being a paid-for download away.
@@ -82,7 +82,7 @@ def test_provision_reaches_the_bundle_when_not_root(
     # only difference being the euid, provision() gets PAST the guard. Without
     # this, the assertion above would hold for a provision() that raised
     # PgRootUserError unconditionally.
-    monkeypatch.setattr(pg_provision.os, "geteuid", lambda: 1000, raising=False)
+    setattr_in(monkeypatch, pg_provision, "os.geteuid", lambda: 1000, raising=False)
     monkeypatch.setattr(
         pg_provision, "bootstrap_superuser", lambda: (_ for _ in ()).throw(_Tripwire())
     )
@@ -131,7 +131,7 @@ def test_init_refuses_root_before_the_bundle_is_acquired(
     provision(). The effect worth asserting is that a root user never reaches
     the acquisition at all.
     """
-    monkeypatch.setattr(pg_provision.os, "geteuid", lambda: 0, raising=False)
+    setattr_in(monkeypatch, pg_provision, "os.geteuid", lambda: 0, raising=False)
     reached = _tripwired_init(monkeypatch)
 
     with pytest.raises(SystemExit) as exc:
@@ -149,7 +149,7 @@ def test_init_reaches_the_bundle_when_not_root(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Non-vacuity: with ONLY the euid changed, the bundle path IS reached."""
-    monkeypatch.setattr(pg_provision.os, "geteuid", lambda: 1000, raising=False)
+    setattr_in(monkeypatch, pg_provision, "os.geteuid", lambda: 1000, raising=False)
     reached = _tripwired_init(monkeypatch)
 
     # What happens AFTER the bundle path is not this test's business — the
@@ -171,9 +171,8 @@ def test_every_pg_subprocess_refuses_as_root(monkeypatch: pytest.MonkeyPatch) ->
     _start_cluster or _psql directly bypasses them, which is exactly what the
     daemon does.
     """
-    monkeypatch.setattr(pg_provision.os, "geteuid", lambda: 0, raising=False)
-    monkeypatch.setattr(
-        subprocess, "run",
+    setattr_in(monkeypatch, pg_provision, "os.geteuid", lambda: 0, raising=False)
+    setattr_in(monkeypatch, "nexus.db.pg_provision", "subprocess.run",
         lambda *_a, **_k: (_ for _ in ()).throw(_Tripwire("subprocess spawned")),
     )
     with pytest.raises(PgRootUserError):
@@ -184,7 +183,7 @@ def test_run_still_spawns_for_an_unprivileged_user(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Non-vacuity: with only the euid changed, _run reaches subprocess.run."""
-    monkeypatch.setattr(pg_provision.os, "geteuid", lambda: 1000, raising=False)
+    setattr_in(monkeypatch, pg_provision, "os.geteuid", lambda: 1000, raising=False)
     out = pg_provision._run(["/bin/echo", "ok"], timeout=pg_provision._PSQL_TIMEOUT_S)
     assert out.returncode == 0
 
@@ -200,13 +199,12 @@ def test_the_daemon_self_heal_path_refuses_as_root(
     StorageServiceStartError. Asserted through _start_cluster, which is the
     function the daemon actually calls.
     """
-    monkeypatch.setattr(pg_provision.os, "geteuid", lambda: 0, raising=False)
+    setattr_in(monkeypatch, pg_provision, "os.geteuid", lambda: 0, raising=False)
     # Trip on the SPAWN, not on a missing fake binary. Without this the
     # deletion check fails with FileNotFoundError for tmp_path/pg_ctl —
     # which is an incidental reason, and would report the guard "working"
     # on any box where that path happened to exist.
-    monkeypatch.setattr(
-        subprocess, "run",
+    setattr_in(monkeypatch, "nexus.db.pg_provision", "subprocess.run",
         lambda *_a, **_k: (_ for _ in ()).throw(_Tripwire("pg_ctl spawned")),
     )
     bins = pg_provision.PgBinaries(

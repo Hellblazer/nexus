@@ -12,6 +12,7 @@ from nexus.cli import main
 from nexus.commands.hooks import _stanza_for
 from nexus.db.http_vector_client import HttpVectorClient
 from tests._catalog_fixture_ops import ActiveCatalog, only_document
+from tests._module_seam import patch_in
 
 SENTINEL_BEGIN = "# >>> nexus managed begin >>>"
 
@@ -122,10 +123,10 @@ def _invoke(runner, mock_reg, *, cred="sk-key", which="/usr/bin/tool",
         # `which=` callable keeps working unchanged.
         def _which_side_effect(name, *_args, **_kwargs):
             return which(name)
-        patches.append(patch("nexus.health.shutil.which",
+        patches.append(patch_in("nexus.health", "shutil.which",
                              side_effect=_which_side_effect))
     else:
-        patches.append(patch("nexus.health.shutil.which",
+        patches.append(patch_in("nexus.health", "shutil.which",
                              return_value=which))
     # nexus-l2ku5: `which` above is faked to a placeholder path for every
     # binary name (including nx-mcp / nx-mcp-catalog) that doesn't
@@ -667,7 +668,7 @@ def test_doctor_local_mode_shows_local_checks(runner, mock_reg, tmp_path):
     # code rather than passing for unrelated reasons.
     with (
         patch("nexus.config.is_local_mode", return_value=True),
-        patch("nexus.health.shutil.which", return_value="/usr/bin/rg"),
+        patch_in("nexus.health", "shutil.which", return_value="/usr/bin/rg"),
         # nexus-l2ku5: stub the real handshake — /usr/bin/rg is not an MCP
         # entry point; the real behavior is unit-tested directly in
         # tests/test_health_mcp_entrypoints.py.
@@ -709,7 +710,7 @@ def test_doctor_local_mode_shows_collection_count(runner, mock_reg, tmp_path):
     with (
         patch("nexus.config.is_local_mode", return_value=True),
         patch("nexus.config.local_embed_model_choice", return_value="all-MiniLM-L6-v2"),
-        patch("nexus.health.shutil.which", return_value="/usr/bin/rg"),
+        patch_in("nexus.health", "shutil.which", return_value="/usr/bin/rg"),
         # nexus-l2ku5: stub the real handshake — /usr/bin/rg is not an MCP
         # entry point; the real behavior is unit-tested directly in
         # tests/test_health_mcp_entrypoints.py.

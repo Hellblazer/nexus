@@ -18,7 +18,7 @@ Coverage:
 * Manifest references real package-data files (no orphan entries).
 
 Tests pass on every platform via ``--app-scripts-dir`` override (for
-the install path) and ``monkeypatch.setattr("sys.platform", ...)``
+the install path) and ``setattr_in(monkeypatch, "nexus.devonthink", "sys.platform", ...)``
 (for the platform gate).
 """
 from __future__ import annotations
@@ -27,6 +27,7 @@ from pathlib import Path
 
 import pytest
 from click.testing import CliRunner
+from tests._module_seam import setattr_in
 
 
 @pytest.fixture
@@ -37,7 +38,7 @@ def runner() -> CliRunner:
 @pytest.fixture
 def darwin(monkeypatch) -> None:
     """Pretend the test host is macOS so the platform gate passes."""
-    monkeypatch.setattr("sys.platform", "darwin")
+    setattr_in(monkeypatch, "nexus.devonthink", "sys.platform", "darwin")
 
 
 @pytest.fixture
@@ -340,7 +341,7 @@ class TestPlatformGate:
     ) -> None:
         from nexus.cli import main
 
-        monkeypatch.setattr("sys.platform", "linux")
+        setattr_in(monkeypatch, "nexus.devonthink", "sys.platform", "linux")
         result = runner.invoke(
             main,
             ["dt", "install-scripts", "--app-scripts-dir", str(fake_dt_dir)],

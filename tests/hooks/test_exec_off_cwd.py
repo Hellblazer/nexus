@@ -24,6 +24,7 @@ import types
 from pathlib import Path
 
 import pytest
+from tests._module_seam import setattr_in
 
 _ROOT = Path(__file__).resolve().parents[2]
 _SCRIPTS = _ROOT / "conexus" / "hooks" / "scripts"
@@ -44,7 +45,7 @@ def _fake_subprocess(
 ) -> None:
     """Replace *mod*'s own ``subprocess`` binding with a copy carrying *overrides*.
 
-    ``monkeypatch.setattr(mod.subprocess, "Popen", ...)`` would patch the one shared
+    ``setattr_in(monkeypatch, mod, "subprocess.Popen", ...)`` would patch the one shared
     ``subprocess`` module for the whole worker until the test's monkeypatch is undone,
     and the engine substrate's fixture teardown (``drop_test_tenant``'s psql) runs
     before that and spawned into the fake: "Failed: spawned" at teardown on the
@@ -223,7 +224,7 @@ def test_the_shim_spawns_the_path_nx_hook_not_the_planted_one(
             return b"verdict", b""
 
     _fake_subprocess(shim, monkeypatch, Popen=_Proc)
-    monkeypatch.setattr(shim.signal, "signal", lambda *a: None)
+    setattr_in(monkeypatch, shim, "signal.signal", lambda *a: None)
     monkeypatch.setattr(sys, "stdin", types.SimpleNamespace(buffer=io.BytesIO(b"{}")))
     monkeypatch.setattr(sys, "stdout", types.SimpleNamespace(buffer=io.BytesIO()))
     assert shim.main(["auto-approve"]) == 0

@@ -52,7 +52,7 @@ from nexus.mcp_server import (
 from nexus.types import SearchResult
 from tests._catalog_fixture_ops import seed_manifest_chunks
 from tests.conftest import make_vector_test_client
-from tests._time_seam import module_time
+from tests._module_seam import module_time
 
 # RDR-109 Phase 2: this file asserts cloud-mode canonical behavior
 # (voyage-* embedder names, canonical-set defaults). The cloud_mode

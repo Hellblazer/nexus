@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 import re
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 import voyageai.error as _ve
 
 from nexus.retry import _is_retryable_voyage_error, _voyage_with_retry
-from tests._time_seam import patch_time
+from tests._module_seam import patch_in, patch_time
 
 #: structlog's ConsoleRenderer emits ANSI colour when FORCE_COLOR is set, which
 #: interleaves escape codes inside `key=value` pairs. Log-content assertions
@@ -137,8 +137,7 @@ def test_retry_accumulator_tracks_voyage_backoff_seconds() -> None:
         "ok",
     ])
     # nexus-8g79.32: pin random.random()=0.5 so jitter factor = 1.0.
-    with patch_time("nexus.retry", "sleep"), patch(
-        "nexus.retry.random.random", return_value=0.5,
+    with patch_time("nexus.retry", "sleep"), patch_in("nexus.retry", "random.random", return_value=0.5,
     ):
         assert _voyage_with_retry(fn) == "ok"
     stats = get_retry_stats()
@@ -160,8 +159,7 @@ def test_retry_accumulator_tracks_chroma_backoff_seconds() -> None:
     reset_retry_stats()
     fn = MagicMock(side_effect=[Exception("503"), Exception("503"), "ok"])
     # nexus-8g79.32: pin random.random()=0.5 so jitter factor = 1.0.
-    with patch_time("nexus.retry", "sleep"), patch(
-        "nexus.retry.random.random", return_value=0.5,
+    with patch_time("nexus.retry", "sleep"), patch_in("nexus.retry", "random.random", return_value=0.5,
     ):
         assert _vector_with_retry(fn, max_attempts=3) == "ok"
     stats = get_retry_stats()

@@ -25,7 +25,7 @@ from nexus.mcp_infra import (
     reset_manifest_write_failures,
 )
 from nexus.retry import _is_connectivity_error
-from tests._time_seam import module_time, patch_time
+from tests._module_seam import module_time, patch_time
 
 # RDR-191 (Hal ruling 2026-08-12): every manifest writer call in this file
 # now requires an explicit collection. A single shared constant keeps the

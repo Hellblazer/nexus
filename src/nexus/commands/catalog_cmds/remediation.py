@@ -22,6 +22,7 @@ through the ``nexus.commands.catalog`` module object inside each command body
 from __future__ import annotations
 
 import re as _re
+import sys
 from pathlib import Path
 
 import click
@@ -103,8 +104,6 @@ def _resolve_via_devonthink(entry: object) -> Path | None:
     we can still recover from DT relocations using the meta we already
     record on entries that came in via DEVONthink.
     """
-    import sys  # noqa: PLC0415  — stdlib deferred to call site (sys)
-
     if sys.platform != "darwin":
         return None
     meta = getattr(entry, "meta", {}) or {}

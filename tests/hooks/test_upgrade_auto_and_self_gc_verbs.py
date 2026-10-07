@@ -38,7 +38,6 @@ from __future__ import annotations
 
 import contextlib
 import os
-import shutil
 import signal
 import subprocess
 import sys
@@ -49,6 +48,7 @@ import pytest
 from nexus._hook_runtime._io import HookResult
 from nexus._hook_runtime.entry import VERB_TABLE
 from nexus.hooks import self_gc, upgrade_auto
+from tests._module_seam import setattr_in
 
 
 class _FakeCompleted:
@@ -73,7 +73,7 @@ def spy(monkeypatch):
         )
         return _FakeCompleted(state["rc"], state["stdout"], state["stderr"])
 
-    monkeypatch.setattr(subprocess, "run", _fake_run)
+    setattr_in(monkeypatch, "nexus.hooks.self_gc", "subprocess.run", _fake_run)
     return calls, state
 
 
@@ -115,7 +115,7 @@ def fake_nx(tmp_path, monkeypatch):
             f"{body}\n"
         )
         script.chmod(0o755)
-        monkeypatch.setattr(shutil, "which", lambda _: str(script))
+        setattr_in(monkeypatch, "nexus.util.nx_argv", "shutil.which", lambda _: str(script))
         return argv_file, pid_file
 
     return install
@@ -174,8 +174,8 @@ def test_upgrade_auto_emits_the_skew_guidance_on_a_nonzero_child(fake_nx, capsys
 def test_upgrade_auto_emits_the_guidance_when_nx_is_not_on_path(monkeypatch, capsys):
     """`nx` absent was exit 127 under the shell, which fired the same `||`."""
     spawned: list[object] = []
-    monkeypatch.setattr(shutil, "which", lambda _: None)
-    monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: spawned.append(a))
+    setattr_in(monkeypatch, "nexus.util.nx_argv", "shutil.which", lambda _: None)
+    setattr_in(monkeypatch, "nexus.hooks.upgrade_auto", "subprocess.Popen", lambda *a, **k: spawned.append(a))
     result = upgrade_auto.run(None)
     captured = capsys.readouterr()
     assert spawned == [], "nothing is spawned when there is no nx to spawn"
@@ -185,12 +185,12 @@ def test_upgrade_auto_emits_the_guidance_when_nx_is_not_on_path(monkeypatch, cap
 
 def test_upgrade_auto_swallows_a_spawn_failure(monkeypatch, capsys, emitted):
     """An OSError from the spawn itself is still a hook that must not fail."""
-    monkeypatch.setattr(shutil, "which", lambda _: "/gen/bin/nx")
+    setattr_in(monkeypatch, "nexus.util.nx_argv", "shutil.which", lambda _: "/gen/bin/nx")
 
     def _boom(cmd, **kwargs):
         raise OSError("no fork for you")
 
-    monkeypatch.setattr(subprocess, "Popen", _boom)
+    setattr_in(monkeypatch, "nexus.hooks.upgrade_auto", "subprocess.Popen", _boom)
     result = upgrade_auto.run(None)
     assert result.stdout is None
     assert upgrade_auto.SKEW_GUIDANCE in capsys.readouterr().err
@@ -277,14 +277,14 @@ def test_an_unopenable_child_log_falls_back_to_the_null_device(monkeypatch, tmp_
     blocker = tmp_path / "not-a-dir"
     blocker.write_text("x")
     monkeypatch.setattr(upgrade_auto, "_child_log_path", lambda: blocker / "logs" / "child.log")
-    monkeypatch.setattr(shutil, "which", lambda _: "/gen/bin/nx")
+    setattr_in(monkeypatch, "nexus.util.nx_argv", "shutil.which", lambda _: "/gen/bin/nx")
     seen: list[dict] = []
 
     def _popen(argv, **kwargs):
         seen.append(kwargs)
         raise OSError("stop here")
 
-    monkeypatch.setattr(subprocess, "Popen", _popen)
+    setattr_in(monkeypatch, "nexus.hooks.upgrade_auto", "subprocess.Popen", _popen)
     upgrade_auto.run(None)
     assert seen[0]["stderr"] == subprocess.DEVNULL
 
@@ -307,7 +307,7 @@ def _windows_popen(monkeypatch, *, refuse_first: int = 0):
             raise PermissionError("breakaway not permitted by the job")
         return object()
 
-    monkeypatch.setattr(subprocess, "Popen", _popen)
+    setattr_in(monkeypatch, "nexus.hooks.upgrade_auto", "subprocess.Popen", _popen)
     return seen
 
 
@@ -347,7 +347,7 @@ def test_windows_spawn_raises_when_both_attempts_fail(monkeypatch):
 
 def test_self_gc_spawns_nx_self_gc(spy, monkeypatch):
     calls, _ = spy
-    monkeypatch.setattr(shutil, "which", lambda _: "/gen/bin/nx")
+    setattr_in(monkeypatch, "nexus.util.nx_argv", "shutil.which", lambda _: "/gen/bin/nx")
     result = self_gc.run(None)
     assert calls == [["/gen/bin/nx", "self", "gc"]]
     assert isinstance(result, HookResult)
@@ -360,7 +360,7 @@ def test_self_gc_is_silent_on_every_exit_code(spy, monkeypatch, capsys, rc):
     state["rc"] = rc
     state["stdout"] = "reclaimed 3 generations"
     state["stderr"] = "could not stat gen-20260101"
-    monkeypatch.setattr(shutil, "which", lambda _: "/gen/bin/nx")
+    setattr_in(monkeypatch, "nexus.util.nx_argv", "shutil.which", lambda _: "/gen/bin/nx")
     result = self_gc.run(None)
     captured = capsys.readouterr()
     assert result.stdout is None
@@ -371,7 +371,7 @@ def test_self_gc_is_silent_on_every_exit_code(spy, monkeypatch, capsys, rc):
 def test_self_gc_is_silent_when_nx_is_not_on_path(spy, monkeypatch, capsys):
     """Unlike upgrade-auto, self-gc has no guidance to emit: it was `|| true`."""
     calls, _ = spy
-    monkeypatch.setattr(shutil, "which", lambda _: None)
+    setattr_in(monkeypatch, "nexus.util.nx_argv", "shutil.which", lambda _: None)
     result = self_gc.run(None)
     captured = capsys.readouterr()
     assert calls == []
@@ -381,12 +381,12 @@ def test_self_gc_is_silent_when_nx_is_not_on_path(spy, monkeypatch, capsys):
 
 
 def test_self_gc_swallows_a_spawn_failure(monkeypatch, capsys):
-    monkeypatch.setattr(shutil, "which", lambda _: "/gen/bin/nx")
+    setattr_in(monkeypatch, "nexus.util.nx_argv", "shutil.which", lambda _: "/gen/bin/nx")
 
     def _boom(cmd, **kwargs):
         raise OSError("no fork for you")
 
-    monkeypatch.setattr(subprocess, "run", _boom)
+    setattr_in(monkeypatch, "nexus.hooks.self_gc", "subprocess.run", _boom)
     result = self_gc.run(None)
     captured = capsys.readouterr()
     assert result.stdout is None

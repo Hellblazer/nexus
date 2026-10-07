@@ -21,6 +21,7 @@ import sys
 from unittest.mock import patch
 
 import pytest
+from tests._module_seam import patch_in
 
 
 @pytest.fixture(autouse=True)
@@ -128,7 +129,7 @@ def test_cleanup_not_called_in_daemonize_parent_path() -> None:
         return 12345  # simulate parent side of first fork
 
     with (
-        patch("os.fork", side_effect=fake_fork),
+        patch_in("nexus._session_end_launcher", "os.fork", side_effect=fake_fork),
         patch.object(
             launcher, "_run_session_end_synchronously",
             side_effect=lambda: cleanup_calls.append(None),
@@ -347,7 +348,7 @@ def test_daemonize_parent_path_returns_without_running_cleanup() -> None:
         return 12345
 
     with (
-        patch("os.fork", side_effect=fake_fork),
+        patch_in("nexus._session_end_launcher", "os.fork", side_effect=fake_fork),
         patch.object(launcher, "_run_session_end_synchronously",
                      side_effect=lambda: cleanup_calls.append(None)),
     ):
@@ -366,7 +367,7 @@ def test_daemonize_falls_through_to_sync_on_oserror() -> None:
 
     calls: list[str] = []
     with (
-        patch("os.fork", side_effect=OSError("fork unavailable")),
+        patch_in("nexus._session_end_launcher", "os.fork", side_effect=OSError("fork unavailable")),
         patch.object(launcher, "_run_session_end_synchronously",
                      side_effect=lambda: calls.append("sync")),
     ):

@@ -21,6 +21,7 @@ import subprocess
 import pytest
 
 import check_dependency_drift as drift
+from tests._module_seam import setattr_in
 
 _SAMPLE_OUTPUT = """\
 Resolved 262 packages in 428ms
@@ -212,7 +213,7 @@ class TestCheck:
             captured["cmd"] = cmd
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
-        monkeypatch.setattr(subprocess, "run", fake_run)
+        setattr_in(monkeypatch, "check_dependency_drift", "subprocess.run", fake_run)
         drift.run_uv_dry_run_upgrade()
         assert "--dry-run" in captured["cmd"]
         assert "--upgrade" in captured["cmd"]
@@ -221,7 +222,7 @@ class TestCheck:
         def fake_run(cmd, **kwargs):
             raise subprocess.TimeoutExpired(cmd, kwargs.get("timeout", 300))
 
-        monkeypatch.setattr(subprocess, "run", fake_run)
+        setattr_in(monkeypatch, "check_dependency_drift", "subprocess.run", fake_run)
         result = drift.run_uv_dry_run_upgrade()
         assert result is drift.UV_UNAVAILABLE
 
@@ -229,7 +230,7 @@ class TestCheck:
         def fake_run(cmd, **kwargs):
             raise FileNotFoundError("uv not found")
 
-        monkeypatch.setattr(subprocess, "run", fake_run)
+        setattr_in(monkeypatch, "check_dependency_drift", "subprocess.run", fake_run)
         result = drift.run_uv_dry_run_upgrade()
         assert result is drift.UV_UNAVAILABLE
 
@@ -237,7 +238,7 @@ class TestCheck:
         def fake_run(cmd, **kwargs):
             return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="error: locking failed")
 
-        monkeypatch.setattr(subprocess, "run", fake_run)
+        setattr_in(monkeypatch, "check_dependency_drift", "subprocess.run", fake_run)
         result = drift.run_uv_dry_run_upgrade()
         assert result is drift.UV_UNAVAILABLE
 

@@ -176,7 +176,8 @@ def test_control_tool_granting_dispatch_binds_and_clears_the_childs_own_session(
         t1mod, "mint_t1_session_token",
         lambda sid, *, context: {"session_token": "child-token", "expires_in_seconds": 3600},
     )
-    monkeypatch.setattr(uuid, "uuid4", lambda: child_session, raising=False)
+    # dispatch binds ``from uuid import uuid4``; fake that name, not the uuid module.
+    monkeypatch.setattr("nexus.operators.dispatch.uuid4", lambda: child_session)
 
     child_env = _build_dispatch_env(
         ephemeral=True, parent_session_id=PARENT_SESSION, grants_tool_access=True,

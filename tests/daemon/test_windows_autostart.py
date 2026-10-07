@@ -22,6 +22,7 @@ from nexus.commands import daemon as daemon_cmd
 from nexus.daemon import installer, windows_autostart
 from nexus.daemon.service_registry import ttl_for_tier
 from nexus.util import win_job
+from tests._module_seam import setattr_in
 
 NS = {"t": "http://schemas.microsoft.com/windows/2004/02/mit/task"}
 SID = "S-1-5-21-111-222-333-1001"
@@ -214,7 +215,7 @@ class TestSuperviseOnce:
     def test_spawns_the_supervisor_with_the_stop_channel_flags_and_returns_its_exit_code(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setattr(windows_autostart.sys, "executable", PYTHONW)
+        setattr_in(monkeypatch, windows_autostart, "sys.executable", PYTHONW)
         seen: dict[str, object] = {}
 
         class _Proc:

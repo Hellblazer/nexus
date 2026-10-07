@@ -33,7 +33,7 @@ from nexus.upgrade_finish import (
     unload_stale_t2_launchagent,
     unload_stale_service_launchagent,
 )
-from tests._time_seam import module_time, patch_time
+from tests._module_seam import module_time, patch_in, patch_time, setattr_in
 
 _REQUIRED_STR = ".".join(str(p) for p in REQUIRED_ENGINE_VERSION)
 _PINNED_TAG = "engine-service-v" + _REQUIRED_STR
@@ -274,7 +274,7 @@ class TestRestartStale:
         return r
 
     def test_dry_run_touches_nothing(self):
-        with patch("nexus.upgrade_finish.os.kill") as k, \
+        with patch_in(("nexus.upgrade_finish", "nexus.daemon.service_registry", "nexus.util.process_group"), "os.kill") as k, \
                 patch("nexus.upgrade_finish.run_bounded") as sp:
             actions = restart_stale(self._report(), dry_run=True)
         sp.assert_not_called()
@@ -313,7 +313,7 @@ class TestRestartStale:
         # test's subject is the KILL choreography; pin the command-read at
         # its own seam (the transport has its own tests).
         with _pin_tool_root(), \
-                patch("nexus.upgrade_finish.os.kill", side_effect=_kill), \
+                patch_in(("nexus.upgrade_finish", "nexus.daemon.service_registry", "nexus.util.process_group"), "os.kill", side_effect=_kill), \
                 patch_time("nexus.upgrade_finish", "sleep"), \
                 patch("nexus.upgrade_finish.process_command",
                       return_value=probe.stdout.strip()), \
@@ -706,7 +706,7 @@ class TestRecycledPid:
         r = SkewReport(installed_version="6.8.0")
         r.stale = [StaleProcess(pid=200, kind="aspect-worker", command="w", age_s=9)]
         probe = MagicMock(returncode=0, stdout="/usr/bin/vim innocent.txt\n")
-        with patch("nexus.upgrade_finish.os.kill") as k, \
+        with patch_in(("nexus.upgrade_finish", "nexus.daemon.service_registry", "nexus.util.process_group"), "os.kill") as k, \
                 patch("nexus.upgrade_finish.run_bounded", return_value=probe):
             actions = restart_stale(r)
         k.assert_not_called()
@@ -1136,7 +1136,7 @@ class TestPidAliveAmbiguousOSErrorSemantics:
         # local copy also special-cased, making the probe vacuous (critique
         # T2 [21510] round 3 falsified exactly that). EIO stays a plain
         # OSError, so only the alive-on-ambiguity semantics pass this.
-        with patch("os.kill", side_effect=OSError(_errno.EIO, "ambiguous")):
+        with patch_in(("nexus.upgrade_finish", "nexus.daemon.service_registry", "nexus.util.process_group"), "os.kill", side_effect=OSError(_errno.EIO, "ambiguous")):
             assert _pid_alive(12345) is True, (
                 "an OSError other than ESRCH must be treated as ALIVE, not "
                 "dead — the safe direction for both this module's "
@@ -1148,12 +1148,12 @@ class TestPidAliveAmbiguousOSErrorSemantics:
         'no such process' must still read as dead."""
         import errno as _errno
         from nexus.upgrade_finish import _pid_alive
-        with patch("os.kill", side_effect=OSError(_errno.ESRCH, "no such process")):
+        with patch_in(("nexus.upgrade_finish", "nexus.daemon.service_registry", "nexus.util.process_group"), "os.kill", side_effect=OSError(_errno.ESRCH, "no such process")):
             assert _pid_alive(12345) is False
 
     def test_process_lookup_error_still_means_dead(self) -> None:
         from nexus.upgrade_finish import _pid_alive
-        with patch("os.kill", side_effect=ProcessLookupError()):
+        with patch_in(("nexus.upgrade_finish", "nexus.daemon.service_registry", "nexus.util.process_group"), "os.kill", side_effect=ProcessLookupError()):
             assert _pid_alive(12345) is False
 
 
@@ -3998,8 +3998,7 @@ class TestCheckVersionTransitionPreview:
             "nexus.upgrade_finish.converge_engine", return_value=[],
         ), patch(
             "nexus.upgrade_finish.pending_data_rung_callout", return_value=[],
-        ), patch(
-            "nexus.upgrade_finish.os.kill",
+        ), patch_in(("nexus.upgrade_finish", "nexus.daemon.service_registry", "nexus.util.process_group"), "os.kill",
         ) as kill:
             line = check_version_transition(tmp_path, preview=True)
 
@@ -4034,7 +4033,7 @@ class TestAspectWorkerIsRestartedNotJustStopped:
         def _fake_kill(pid, sig):
             return None
 
-        monkeypatch.setattr(uf.os, "kill", _fake_kill)
+        setattr_in(monkeypatch, (uf, "nexus.daemon.service_registry", "nexus.util.process_group"), "os.kill", _fake_kill)
         # The pid is gone on the first poll: the drain succeeded.
         calls = {"n": 0}
 
@@ -4044,7 +4043,7 @@ class TestAspectWorkerIsRestartedNotJustStopped:
                 raise ProcessLookupError
             return None
 
-        monkeypatch.setattr(uf.os, "kill", _kill_probe)
+        setattr_in(monkeypatch, (uf, "nexus.daemon.service_registry", "nexus.util.process_group"), "os.kill", _kill_probe)
 
         import nexus.daemon.aspect_worker_daemon as awd
 

@@ -34,7 +34,7 @@ import sys
 import types
 
 import pytest
-from tests._time_seam import module_time
+from tests._module_seam import module_time, setattr_in
 
 pytestmark = pytest.mark.lint
 
@@ -141,7 +141,7 @@ def _run_one_with_fake_subprocess(monkeypatch, tmp_path: pathlib.Path):
         stdout = "Bypass permissions on\n" if isinstance(cmd, list) and "capture-pane" in cmd else ""
         return types.SimpleNamespace(stdout=stdout, returncode=0, args=cmd)
 
-    monkeypatch.setattr(mod.subprocess, "run", fake_run)
+    setattr_in(monkeypatch, mod, "subprocess.run", fake_run)
     args = types.SimpleNamespace(
         out=str(tmp_path / "out"), python=sys.executable, hook_python="python3",
         claude="fake-claude-binary-not-executed", sock="test-veh77-sock",
@@ -247,7 +247,7 @@ def test_server_is_killed_when_run_one_raises(monkeypatch, tmp_path: pathlib.Pat
         stdout = "Bypass permissions on\n" if "capture-pane" in cmd else ""
         return types.SimpleNamespace(stdout=stdout, returncode=0, args=cmd)
 
-    monkeypatch.setattr(mod.subprocess, "run", fake_run)
+    setattr_in(monkeypatch, mod, "subprocess.run", fake_run)
     args = types.SimpleNamespace(
         out=str(tmp_path / "out"), python=sys.executable, hook_python="python3",
         claude="fake-claude-binary-not-executed", sock="test-veh77-sock",

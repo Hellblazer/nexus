@@ -12,7 +12,6 @@ nx-init shell env (RDR-144 CRITICAL-1).
 """
 from __future__ import annotations
 
-import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -20,6 +19,7 @@ import pytest
 
 from nexus.config import fastembed_cache_dir
 from nexus.db.local_ef import LocalEmbeddingFunction, _TIER0_MODEL, _TIER1_MODEL
+from tests._module_seam import setattr_in
 
 
 # ── (C) config-driven model selection (RDR-144 P3 deliverable C) ──────────────
@@ -187,9 +187,10 @@ class TestFastembedCacheDirResolution:
         cfg_dir.mkdir()
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(cfg_dir))
         monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg"))
-        monkeypatch.setattr(
-            tempfile,
-            "gettempdir",
+        setattr_in(
+            monkeypatch,
+            "nexus.config",
+            "tempfile.gettempdir",
             MagicMock(side_effect=AssertionError("resolver must not consult $TMPDIR")),
         )
 

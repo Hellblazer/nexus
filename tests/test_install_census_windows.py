@@ -9,12 +9,12 @@ armed to explode so a fall-through to ``ps`` fails the test.
 """
 from __future__ import annotations
 
-import subprocess
 
 import pytest
 
 from nexus._install import census_core as cc
 from tests._win_proc_fake import FakeProc, FakeWinInfoApi
+from tests._module_seam import setattr_in
 
 NOW = 2_000_000_000.0
 
@@ -24,7 +24,7 @@ def _no_ps(monkeypatch: pytest.MonkeyPatch) -> None:
     def boom(*a, **k):
         raise AssertionError(f"Windows census reached ps: {a!r}")
 
-    monkeypatch.setattr(subprocess, "run", boom)
+    setattr_in(monkeypatch, "nexus._install.census_core", "subprocess.run", boom)
 
 
 def _api() -> FakeWinInfoApi:
@@ -89,6 +89,6 @@ def test_posix_snapshot_still_runs_ps(monkeypatch: pytest.MonkeyPatch) -> None:
         returncode = 0
         stdout = "1 /bin/x\n"
 
-    monkeypatch.setattr(subprocess, "run", lambda *a, **k: calls.append(a) or R())
+    setattr_in(monkeypatch, "nexus._install.census_core", "subprocess.run", lambda *a, **k: calls.append(a) or R())
     assert cc.ps_snapshot(platform="linux") == "1 /bin/x\n"
     assert calls and calls[0][0] == cc.PS_COMMAND

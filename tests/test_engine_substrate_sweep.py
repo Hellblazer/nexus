@@ -56,6 +56,7 @@ from tests._engine_substrate import (
     sweep_stale_substrate_clusters,
     throwaway_pg_cluster,
 )
+from tests._module_seam import setattr_in
 
 
 def _dead_pid() -> int:
@@ -417,7 +418,7 @@ class TestKillEngineLegUsesProcessGroup:
             killpg_calls.append((pgid, sig))
             return real_killpg(pgid, sig)
 
-        monkeypatch.setattr(os, "killpg", _tracking_killpg)
+        setattr_in(monkeypatch, "tests._engine_substrate", "os.killpg", _tracking_killpg)
 
         _kill_engine_leg(proc.pid, grace_s=1.0)
 

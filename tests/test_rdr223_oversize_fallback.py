@@ -21,7 +21,7 @@ from nexus.errors import BatchWriteFailedError, CombinedWriteEmbedTimeoutError, 
 from nexus.hook_registry import HookRegistry
 from nexus.index_context import IndexContext
 from nexus.oversize_write import OversizeWriteDeferred
-from tests._time_seam import module_time
+from tests._module_seam import module_time
 
 _DOC = "1.9.42"
 _MODEL = "voyage-context-3"

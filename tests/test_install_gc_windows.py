@@ -18,6 +18,7 @@ from shutil import rmtree as shutil_rmtree
 import pytest
 
 from nexus._install import gc_core
+from tests._module_seam import setattr_in
 
 WIN = "win32"
 RECEIPT = "nexus-install.json"
@@ -28,7 +29,7 @@ EMPTY_PS = ""
 def _identity_realpath(monkeypatch: pytest.MonkeyPatch) -> None:
     """compare_key resolves paths; on a macOS host that would case-fold through
     the real filesystem. Identity keeps the Windows reading under test."""
-    monkeypatch.setattr(os.path, "realpath", lambda s, **_kw: s)
+    setattr_in(monkeypatch, "nexus._install.layout_core", "os.path.realpath", lambda s, **_kw: s)
 
 
 def _gen(tools: Path, name: str, *, receipt: bool = True) -> Path:
@@ -86,10 +87,10 @@ class TestRulesCompareFoldedPaths:
         (tools / "current").mkdir()
         (tools / "previous").mkdir()
         targets = {"current": gens["A"], "previous": gens["B"]}
-        monkeypatch.setattr(os.path, "isjunction", lambda p: Path(p).name in targets, raising=False)
+        setattr_in(monkeypatch, "nexus._install.layout_core", "os.path.isjunction", lambda p: Path(p).name in targets, raising=False)
         real_readlink = os.readlink
-        monkeypatch.setattr(
-            os, "readlink",
+        setattr_in(
+            monkeypatch, "nexus._install.layout_core", "os.readlink",
             lambda p, **kw: "\\\\?\\" + str(targets[Path(p).name]) if Path(p).name in targets
             else real_readlink(p, **kw),
         )
@@ -109,8 +110,8 @@ class TestRulesCompareFoldedPaths:
         tools.mkdir()
         rogue = tools / "gen-rogue"
         rogue.mkdir()  # stands in for the junction
-        monkeypatch.setattr(os.path, "isjunction", lambda p: Path(p).name == "gen-rogue", raising=False)
-        monkeypatch.setattr(os, "readlink", lambda p, **kw: "\\\\?\\" + str(victim))
+        setattr_in(monkeypatch, "nexus._install.layout_core", "os.path.isjunction", lambda p: Path(p).name == "gen-rogue", raising=False)
+        setattr_in(monkeypatch, "nexus._install.layout_core", "os.readlink", lambda p, **kw: "\\\\?\\" + str(victim))
         errors: list[str] = []
         lines = gc_core._reap(rogue, errors.append, WIN)
         assert lines == []
@@ -165,7 +166,7 @@ class TestWindowsReap:
             return real_unlink(p, *a, **kw)
 
         monkeypatch.setattr(gc_core, "_rmtree", partial)
-        monkeypatch.setattr(os, "unlink", unlink)
+        setattr_in(monkeypatch, ("nexus._install.gc_core", __name__), "os.unlink", unlink)  # the fake rmtree hands os.unlink to the handler
         lines = gc_core._reap(gen, lambda _m: None, WIN)
         assert len(lines) == 1
         assert lines[0].startswith(f"kept {gen}: in use"), lines
@@ -271,7 +272,7 @@ class TestWindowsLegacyLedger:
             return real_unlink(p, *a, **kw)
 
         monkeypatch.setattr(gc_core, "_rmtree", locked_run)
-        monkeypatch.setattr(os, "unlink", unlink)
+        setattr_in(monkeypatch, ("nexus._install.gc_core", __name__), "os.unlink", unlink)  # the fake rmtree hands os.unlink to the handler
         first = gc_core._reap(pointer, lambda _m: None, WIN)
         assert first[0].startswith(f"kept {pointer}: in use"), first
         assert not (venv / "pyvenv.cfg").exists() and (venv / "Scripts" / "python.exe").exists()
@@ -284,7 +285,7 @@ class TestWindowsLegacyLedger:
 
         # Unlocked: the real deletion finishes the tree and then the pointer.
         monkeypatch.undo()
-        monkeypatch.setattr(os.path, "realpath", lambda s, **_kw: s)
+        setattr_in(monkeypatch, "nexus._install.layout_core", "os.path.realpath", lambda s, **_kw: s)
         third = gc_core._reap(pointer, lambda _m: None, WIN)
         assert third == [f"reaped {pointer}"]
         assert not venv.exists() and not pointer.is_symlink()

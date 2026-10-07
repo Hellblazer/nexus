@@ -14,6 +14,7 @@ from click.testing import CliRunner
 
 from nexus.cli import main
 from nexus.indexer import index_repository
+from tests._module_seam import patch_in
 
 
 # ── fixtures ──────────────────────────────────────────────────────────────────
@@ -465,7 +466,7 @@ def test_skip_contender_does_not_corrupt_or_unlock_live_holder(
         dead = subprocess.Popen([sys.executable, "-c", "pass"])
         dead.wait()
 
-        with patch("nexus.indexer.os.getpid", return_value=dead.pid):
+        with patch_in("nexus.indexer", "os.getpid", return_value=dead.pid):
             with patch("nexus.indexer._run_index") as mock_b:
                 result_b = index_repository(tmp_path, registry, on_locked="skip")
         assert result_b == {}

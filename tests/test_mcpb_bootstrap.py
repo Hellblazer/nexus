@@ -32,6 +32,7 @@ from types import SimpleNamespace
 import pytest
 
 from nexus.util import win_job
+from tests._module_seam import setattr_in
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BOOTSTRAP_PATH = REPO_ROOT / "mcpb" / "src" / "bootstrap.py"
@@ -243,7 +244,7 @@ def test_bootstrap_execs_uv_run_server(bootstrap, monkeypatch):
     """main() syncs then execs the real server through uv run (stdio must
     land on the server process for the MCP handshake — exec, not spawn)."""
     execs: list[list[str]] = []
-    monkeypatch.setattr(bootstrap.os, "execvp", lambda prog, argv: execs.append([prog, *argv]))
+    setattr_in(monkeypatch, bootstrap, "os.execvp", lambda prog, argv: execs.append([prog, *argv]))
     monkeypatch.setattr(bootstrap, "_sync_with_retry", lambda d: None)
     monkeypatch.delenv("NX_MCPB_SKIP_RESOLVE_RETRY", raising=False)
     bootstrap.main(platform="linux")
@@ -252,7 +253,7 @@ def test_bootstrap_execs_uv_run_server(bootstrap, monkeypatch):
 
 
 def test_skip_env_bypasses_sync(bootstrap, monkeypatch):
-    monkeypatch.setattr(bootstrap.os, "execvp", lambda prog, argv: None)
+    setattr_in(monkeypatch, bootstrap, "os.execvp", lambda prog, argv: None)
     called = []
     monkeypatch.setattr(bootstrap, "_sync_with_retry", lambda d: called.append(d))
     monkeypatch.setenv("NX_MCPB_SKIP_RESOLVE_RETRY", "1")

@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 
 from tests import _suite_lease
-from tests._time_seam import module_time
+from tests._module_seam import module_time
 
 
 @pytest.fixture

@@ -33,7 +33,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from nexus.mcp_infra import get_t1_plan_cache
-from tests._time_seam import patch_time
+from tests._module_seam import patch_time
 
 
 @pytest.fixture(autouse=True)

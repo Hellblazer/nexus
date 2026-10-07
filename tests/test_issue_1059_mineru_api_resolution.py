@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import os
 import stat
-import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -28,6 +27,7 @@ import pytest
 # nexus-1qdb9 review M1: the resolver moved to the spawn-core module —
 # the __file__ anchor and the function under test both live there now.
 import nexus._mineru_spawn as _mineru_mod
+from tests._module_seam import patch_in, setattr_in
 
 
 # ---------------------------------------------------------------------------
@@ -43,7 +43,7 @@ def _make_executable(p: Path) -> Path:
 
 def _resolver_ctx(monkeypatch, *, sys_exe: str, file_anchor: str):
     """Context that patches both sys.executable and the module's __file__."""
-    monkeypatch.setattr(sys, "executable", sys_exe)
+    setattr_in(monkeypatch, "nexus._mineru_spawn", "sys.executable", sys_exe)
     monkeypatch.setattr(_mineru_mod, "__file__", file_anchor)
 
 
@@ -88,8 +88,7 @@ class TestResolveMineruApiBin:
             sys_exe=str(fake_python),
             file_anchor=str(tmp_path / "isolated" / "lib" / "site-packages" / "nexus" / "commands" / "mineru.py"),
         )
-        import shutil
-        monkeypatch.setattr(shutil, "which", lambda name: None)
+        setattr_in(monkeypatch, "nexus._mineru_spawn", "shutil.which", lambda name: None)
 
         result = _mineru_mod._resolve_mineru_api_bin()
         assert result is None, (
@@ -109,8 +108,7 @@ class TestResolveMineruApiBin:
             sys_exe=str(fake_python),
             file_anchor=str(tmp_path / "isolated" / "lib" / "site-packages" / "nexus" / "commands" / "mineru.py"),
         )
-        import shutil
-        monkeypatch.setattr(shutil, "which", lambda name: "/usr/local/bin/mineru-api")
+        setattr_in(monkeypatch, "nexus._mineru_spawn", "shutil.which", lambda name: "/usr/local/bin/mineru-api")
 
         result = _mineru_mod._resolve_mineru_api_bin()
         assert result == str(venv_exe), (
@@ -150,8 +148,7 @@ class TestResolveMineruApiBin:
             sys_exe=str(other_python),
             file_anchor=str(fake_file),
         )
-        import shutil
-        monkeypatch.setattr(shutil, "which", lambda name: None)
+        setattr_in(monkeypatch, "nexus._mineru_spawn", "shutil.which", lambda name: None)
 
         result = _mineru_mod._resolve_mineru_api_bin()
         assert result == str(expected), (
@@ -160,7 +157,6 @@ class TestResolveMineruApiBin:
 
     def test_which_fallback_when_venv_absent(self, tmp_path: Path, monkeypatch) -> None:
         """Candidates (a) and (b) miss -> falls back to shutil.which()."""
-        import shutil
 
         other_bin = tmp_path / "other" / "bin"
         other_bin.mkdir(parents=True)
@@ -173,14 +169,13 @@ class TestResolveMineruApiBin:
             file_anchor=str(tmp_path / "isolated" / "lib" / "site-packages" / "nexus" / "commands" / "mineru.py"),
         )
         sentinel = "/usr/local/bin/mineru-api"
-        monkeypatch.setattr(shutil, "which", lambda name: sentinel)
+        setattr_in(monkeypatch, "nexus._mineru_spawn", "shutil.which", lambda name: sentinel)
 
         result = _mineru_mod._resolve_mineru_api_bin()
         assert result == sentinel
 
     def test_both_absent_returns_none(self, tmp_path: Path, monkeypatch) -> None:
         """All candidates miss -> returns None."""
-        import shutil
 
         other_bin = tmp_path / "other" / "bin"
         other_bin.mkdir(parents=True)
@@ -192,7 +187,7 @@ class TestResolveMineruApiBin:
             sys_exe=str(fake_python),
             file_anchor=str(tmp_path / "isolated" / "lib" / "site-packages" / "nexus" / "commands" / "mineru.py"),
         )
-        monkeypatch.setattr(shutil, "which", lambda name: None)
+        setattr_in(monkeypatch, "nexus._mineru_spawn", "shutil.which", lambda name: None)
 
         result = _mineru_mod._resolve_mineru_api_bin()
         assert result is None
@@ -220,7 +215,7 @@ class TestStartCommandUsesResolver:
 
         with patch("nexus._mineru_spawn._resolve_mineru_api_bin",
                    return_value=sentinel_bin) as mock_resolver, \
-             patch("nexus._mineru_spawn.subprocess.Popen",
+             patch_in("nexus._mineru_spawn", "subprocess.Popen",
                    return_value=proc) as mock_popen, \
              patch("nexus.commands.mineru.httpx.get", return_value=resp), \
              patch("nexus.commands.mineru._find_free_port", return_value=8010), \

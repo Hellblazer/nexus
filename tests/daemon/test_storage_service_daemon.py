@@ -56,7 +56,7 @@ from nexus.daemon.storage_service_daemon import (
     stop_storage_service,
     start_storage_service,
 )
-from tests._time_seam import module_time, patch_time
+from tests._module_seam import module_time, patch_in, patch_time
 
 
 # ---------------------------------------------------------------------------
@@ -1454,8 +1454,7 @@ class TestRunStorageSupervisorFunction:
                 # False, no escalation needed.
                 side_effect=[True, False, False],
             ),
-            patch(
-                "nexus.daemon.storage_service_daemon.os.kill",
+            patch_in("nexus.daemon.storage_service_daemon", "os.kill",
             ),
             patch(
                 "nexus.daemon.service_registry.all_process_rows",

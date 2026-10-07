@@ -106,7 +106,7 @@ import httpx
 import pytest
 
 from nexus.daemon.service_registry import ServiceRegistry
-from tests._time_seam import module_time
+from tests._module_seam import module_time
 
 # ── In-process fake service state (module-level, reset per test) ──────────────
 

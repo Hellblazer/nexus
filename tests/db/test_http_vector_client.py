@@ -13,7 +13,7 @@ from nexus.db.http_vector_client import (
     is_vector_service_mode,
     reset_http_vector_client_for_tests,
 )
-from tests._time_seam import module_time
+from tests._module_seam import module_time
 
 
 @pytest.fixture(autouse=True)

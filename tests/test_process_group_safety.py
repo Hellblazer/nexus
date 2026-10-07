@@ -22,6 +22,7 @@ import pytest
 
 from nexus.util.process_group import KILL_SIGNAL, safe_killpg
 from tests.daemon._children import CHILD_PYTHON, OWN_GROUP
+from tests._module_seam import setattr_in
 
 #: The primitive ``safe_killpg`` signals through on this host: ``os.killpg`` where it
 #: exists, ``os.kill`` on Windows (one process, no group). A test that traces "no
@@ -259,7 +260,7 @@ def test_group_sweep_refuses_unsafe_ids(pgid, monkeypatch):
     from nexus.util.process_group import safe_killpg_group
 
     calls: list = []
-    monkeypatch.setattr(os, "killpg", lambda g, s: calls.append(g), raising=False)
+    setattr_in(monkeypatch, "nexus.util.process_group", "os.killpg", lambda g, s: calls.append(g), raising=False)
     assert safe_killpg_group(pgid) is False
     assert calls == []
 

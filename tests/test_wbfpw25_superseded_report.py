@@ -30,7 +30,7 @@ from nexus.cli import main
 from nexus.corpus import t3_collection_name
 from nexus.db.http_vector_client import HttpVectorClient
 from nexus.mcp.core import store_put
-from tests._time_seam import module_time
+from tests._module_seam import module_time
 
 
 def _chash(text: str) -> str:

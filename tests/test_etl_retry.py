@@ -32,7 +32,7 @@ import nexus.retry as retry_mod
 from nexus.db.http_vector_client import VectorServiceError
 from nexus.rate_brake import RateLimitBrake, reset_brake
 from nexus.retry import EtlCircuitBreaker, _etl_batch_with_breaker, _etl_with_retry, _is_retryable_etl_error
-from tests._time_seam import patch_time
+from tests._module_seam import patch_in, patch_time
 
 
 class _FakeClock:
@@ -130,8 +130,7 @@ def test_retries_on_transient_503_then_succeeds() -> None:
             raise _make_status_exc(503)
         return "ok"
 
-    with patch_time("nexus.retry", "sleep") as mock_sleep, patch(
-        "nexus.retry.random.random", return_value=0.5,
+    with patch_time("nexus.retry", "sleep") as mock_sleep, patch_in("nexus.retry", "random.random", return_value=0.5,
     ):
         assert _etl_with_retry(flaky) == "ok"
     assert call_count == 2
@@ -175,8 +174,7 @@ def test_backoff_curve_1_2() -> None:
             raise _make_status_exc(502)
         return "ok"
 
-    with patch_time("nexus.retry", "sleep") as mock_sleep, patch(
-        "nexus.retry.random.random", return_value=0.5,
+    with patch_time("nexus.retry", "sleep") as mock_sleep, patch_in("nexus.retry", "random.random", return_value=0.5,
     ):
         assert _etl_with_retry(fn_succeeds_on_3rd, max_attempts=3) == "ok"
     # nexus-cy9u7 CRITICAL-2: brake floors both sleeps now (escalating
@@ -217,8 +215,7 @@ def test_429_trips_shared_brake_and_floors_sleep_at_retry_after(monkeypatch) -> 
             raise _make_status_exc(429, {"Retry-After": "6"})
         return "ok"
 
-    with patch_time("nexus.retry", "sleep") as mock_sleep, patch(
-        "nexus.retry.random.random", return_value=0.5,
+    with patch_time("nexus.retry", "sleep") as mock_sleep, patch_in("nexus.retry", "random.random", return_value=0.5,
     ):
         assert _etl_with_retry(flaky) == "ok"
     assert test_brake.trips == 1
@@ -246,8 +243,7 @@ def test_503_without_retry_after_now_trips_brake_with_escalating_default(
         return "ok"
 
     with patch.object(retry_mod, "get_brake", return_value=test_brake):
-        with patch_time("nexus.retry", "sleep") as mock_sleep, patch(
-            "nexus.retry.random.random", return_value=0.5,
+        with patch_time("nexus.retry", "sleep") as mock_sleep, patch_in("nexus.retry", "random.random", return_value=0.5,
         ):
             assert _etl_with_retry(flaky) == "ok"
     test_brake.trip.assert_called_once_with(None, source="etl")
@@ -286,8 +282,7 @@ def test_real_vector_service_error_429_recognised_with_retry_after(monkeypatch) 
     monkeypatch.setattr(retry_mod, "get_brake", lambda: test_brake)
 
     fn = MagicMock(side_effect=[_make_vector_service_error(429, retry_after="4"), "ok"])
-    with patch_time("nexus.retry", "sleep") as mock_sleep, patch(
-        "nexus.retry.random.random", return_value=0.5,
+    with patch_time("nexus.retry", "sleep") as mock_sleep, patch_in("nexus.retry", "random.random", return_value=0.5,
     ):
         assert _etl_with_retry(fn) == "ok"
     assert test_brake.trips == 1
@@ -391,8 +386,7 @@ def test_verify_fill_call_site_uses_exactly_one_retry_layer_real_server(
     host, port = httpd.server_address
     monkeypatch.setattr(hvc, "_resolve_endpoint", lambda: (f"http://{host}:{port}", "tok"))
 
-    with patch_time("nexus.retry", "sleep"), patch(
-        "nexus.retry.random.random", return_value=0.5,
+    with patch_time("nexus.retry", "sleep"), patch_in("nexus.retry", "random.random", return_value=0.5,
     ):
         client = hvc.HttpVectorClient()
         breaker = EtlCircuitBreaker()

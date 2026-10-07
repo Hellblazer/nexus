@@ -35,7 +35,7 @@ import pytest
 from nexus.db.t2 import T2Database
 
 from tests._catalog_fixture_ops import register_real_doc_id
-from tests._time_seam import patch_time
+from tests._module_seam import patch_time
 
 # hygiene-001-1 (nexus-tk070.p6a follow-on): aspect_extraction_queue.doc_id
 # now carries a REAL FK to catalog_documents(tenant_id, tumbler) via the

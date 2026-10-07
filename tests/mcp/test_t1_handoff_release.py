@@ -33,7 +33,7 @@ from nexus.daemon.t1_handoff import (
     read_handoff_marker,
     write_handoff_marker,
 )
-from tests._time_seam import module_time
+from tests._module_seam import module_time
 
 _CLAUDE_PID = 4242
 _MCP_PID = 4300

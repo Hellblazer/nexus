@@ -13,7 +13,7 @@ from structlog.testing import capture_logs
 
 from nexus.config import MineruSkewInfo
 from nexus.pdf_extractor import PDFExtractor
-from tests._time_seam import module_time
+from tests._module_seam import module_time, patch_in
 
 
 @pytest.fixture
@@ -328,7 +328,7 @@ class TestMineruRunViaServer:
     ) -> None:
         extractor._mineru_run_total_pages = total
         with (
-            patch("nexus.pdf_extractor.subprocess.Popen") as mock_popen,
+            patch_in("nexus.pdf_extractor", "subprocess.Popen") as mock_popen,
             pytest.raises(ValueError, match="MinerU page range|past the last page|zero-page"),
         ):
             extractor._mineru_run_subprocess(dummy_pdf, start, end)

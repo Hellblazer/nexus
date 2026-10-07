@@ -29,7 +29,7 @@ _spec = importlib.util.spec_from_file_location("measure_search_per_collection", 
 drv = importlib.util.module_from_spec(_spec)
 # registered before exec: the dataclasses in the script resolve their module by name
 import sys  # noqa: E402
-from tests._time_seam import module_time
+from tests._module_seam import module_time
 
 sys.modules[_spec.name] = drv
 _spec.loader.exec_module(drv)

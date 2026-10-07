@@ -20,7 +20,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from nexus.plans.match import Match
-from tests._time_seam import patch_time
+from tests._module_seam import patch_in, patch_time
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -2558,7 +2558,7 @@ class TestNxAnswerLatencyProxy:
                 "nexus.mcp.core", "sleep", also=("nexus.mcp_infra", "nexus.plans.runner"),
             ) as mock_sleep,
             patch("asyncio.sleep", new=AsyncMock()) as mock_async_sleep,
-            patch("asyncio.create_subprocess_exec") as mock_subproc,
+            patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec") as mock_subproc,
         ):
             from nexus.mcp.core import nx_answer
             await nx_answer("fast question")

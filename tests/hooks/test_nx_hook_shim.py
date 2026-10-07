@@ -24,6 +24,7 @@ import types
 from pathlib import Path
 
 import pytest
+from tests._module_seam import setattr_in
 
 _ROOT = Path(__file__).resolve().parents[2]
 _SHIM = _ROOT / "conexus" / "hooks" / "scripts" / "nx_hook_shim.py"
@@ -150,7 +151,7 @@ def test_the_shim_runs_where_signal_has_no_sighup(monkeypatch: pytest.MonkeyPatc
         def communicate(self, payload: bytes) -> tuple[bytes, bytes]:
             return b"verdict", b""
 
-    monkeypatch.setattr(shim.subprocess, "Popen", lambda *a, **k: _Proc())
+    setattr_in(monkeypatch, shim, "subprocess.Popen", lambda *a, **k: _Proc())
     monkeypatch.setattr(sys, "stdin", types.SimpleNamespace(buffer=io.BytesIO(b"{}")))
     out = io.BytesIO()
     monkeypatch.setattr(sys, "stdout", types.SimpleNamespace(buffer=out))

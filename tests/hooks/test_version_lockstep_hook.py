@@ -30,7 +30,7 @@ import sys
 from pathlib import Path
 
 import pytest
-from tests._time_seam import module_time
+from tests._module_seam import module_time, setattr_in
 
 SCRIPT = (
     Path(__file__).resolve().parents[2]
@@ -229,7 +229,7 @@ class TestDispatchIsNonBlocking:
             def communicate(self, *a, **k):  # pragma: no cover
                 calls["communicated"] = True
 
-        monkeypatch.setattr(mod.subprocess, "Popen", FakePopen)
+        setattr_in(monkeypatch, mod, "subprocess.Popen", FakePopen)
         mod.dispatch_action("9.9.9")
 
         assert calls.get("started") is True
@@ -615,7 +615,7 @@ class TestDispatchRefDriftActionIsNonBlocking:
             def wait(self, *a, **k):  # pragma: no cover - must not be called
                 calls["waited"] = True
 
-        monkeypatch.setattr(mod.subprocess, "Popen", FakePopen)
+        setattr_in(monkeypatch, mod, "subprocess.Popen", FakePopen)
         mod.dispatch_ref_drift_action()
 
         assert calls.get("started") is True

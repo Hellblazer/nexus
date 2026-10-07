@@ -30,6 +30,7 @@ from pathlib import Path
 import pytest
 
 from nexus.db.t2.http_tuple_store import _MAX_CLAIMANT_BYTES
+from tests._module_seam import setattr_in
 
 #: ``-m`` rather than the installed ``nx-hook`` console script, so these run
 #: against this checkout's code, through the same ``main()`` the shim calls.
@@ -1854,11 +1855,11 @@ def test_drain_claimant_length_is_independent_of_address_and_pid(monkeypatch) ->
     """
     module = _load_module()
 
-    monkeypatch.setattr(module.os, "getpid", lambda: 7)
+    setattr_in(monkeypatch, module, "os.getpid", lambda: 7)
     short_pid_short_addr = module._drain_claimant("a")
     short_pid_long_addr = module._drain_claimant("a" * 248)
 
-    monkeypatch.setattr(module.os, "getpid", lambda: 2147483647)  # max signed-32-bit pid
+    setattr_in(monkeypatch, module, "os.getpid", lambda: 2147483647)  # max signed-32-bit pid
     long_pid_short_addr = module._drain_claimant("a")
 
     lengths = {
@@ -1878,7 +1879,7 @@ def test_drain_claimant_pid_of_maximum_width_still_fits(monkeypatch) -> None:
     fixed pid width instead of allowed to grow the string.
     """
     module = _load_module()
-    monkeypatch.setattr(module.os, "getpid", lambda: 999999999999999999999)  # 21 digits
+    setattr_in(monkeypatch, module, "os.getpid", lambda: 999999999999999999999)  # 21 digits
 
     claimant = module._drain_claimant("a" * 248)
 

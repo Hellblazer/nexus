@@ -23,6 +23,7 @@ from urllib.parse import quote
 
 import pytest
 from tests.conftest import make_vector_test_client
+from tests._module_seam import setattr_in
 
 
 # ── CHROMA_IDENTITY_FIELD dispatch ───────────────────────────────────────────
@@ -1305,7 +1306,7 @@ class TestReadSourceDispatch:
         # ``read_source`` doesn't pass dt_resolver — it must fall through
         # to the patched default. We also patch sys.platform so the
         # reader's macOS gate accepts the call on non-darwin runners.
-        monkeypatch.setattr("sys.platform", "darwin")
+        setattr_in(monkeypatch, "nexus.aspect_readers", "sys.platform", "darwin")
 
         result = read_source("x-devonthink-item://DISPATCH-UUID")
         assert isinstance(result, ReadOk)
@@ -1420,7 +1421,7 @@ class TestReadDevonthinkUri:
         """
         from nexus.aspect_readers import ReadFail, _read_devonthink_uri
 
-        monkeypatch.setattr("sys.platform", "linux")
+        setattr_in(monkeypatch, "nexus.aspect_readers", "sys.platform", "linux")
         result = _read_devonthink_uri("x-devonthink-item://UUID")
         assert isinstance(result, ReadFail)
         assert result.reason == "unreachable"

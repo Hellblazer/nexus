@@ -22,6 +22,7 @@ import pytest
 from nexus._install import gc_core
 from nexus._install import generation_core as gen_core
 from nexus._install import layout_core as lc
+from tests._module_seam import setattr_in
 
 WIN = "win32"
 
@@ -184,7 +185,7 @@ class TestBuildGeneration:
                 raise PermissionError(13, "Access is denied")
             return real(path, *a, **kw)
 
-        monkeypatch.setattr(os, "mkdir", mkdir)
+        setattr_in(monkeypatch, "nexus._install.generation_core", "os.mkdir", mkdir)
         with pytest.raises(gen_core.GenerationError, match="could not create the generation directory") as raised:
             _build(tools, FakeUv())
         assert str(tools) in str(raised.value)
@@ -199,7 +200,7 @@ class TestBuildGeneration:
                 raise OSError(28, "No space left on device")
             return real(src, dst, *a, **kw)
 
-        monkeypatch.setattr(os, "replace", replace)
+        setattr_in(monkeypatch, "nexus._install.generation_core", "os.replace", replace)
         with pytest.raises(gen_core.GenerationError, match="failed"):
             _build(tools, FakeUv())
         assert list(tools.iterdir()) == []
@@ -339,7 +340,7 @@ class TestFlipAndRollback:
                 raise PermissionError(5, "denied")
             return real(src, dst, *args, **kw)
 
-        monkeypatch.setattr(os, "rename", rename)
+        setattr_in(monkeypatch, "nexus._install.generation_core", "os.rename", rename)
         with pytest.raises(gen_core.GenerationError, match="could not repoint"):
             self._flip(b, tools)
         assert os.readlink(tools / "current") == str(a)
@@ -399,7 +400,7 @@ class TestFlipAndRollback:
         """os.kill(pid, 0) calls TerminateProcess on Windows. The Windows reading
         asks the process table, so on that reading os.kill must not be reached."""
         calls: list[int] = []
-        monkeypatch.setattr(os, "kill", lambda pid, sig: calls.append(pid))
+        setattr_in(monkeypatch, "nexus._install.generation_core", "os.kill", lambda pid, sig: calls.append(pid))
         winproc = gen_core._sibling("winproc_core")
         monkeypatch.setattr(winproc, "ctypes_win_info_api", lambda: object())
         monkeypatch.setattr(winproc, "process_age_seconds", lambda pid, api: 5.0 if pid == 7 else None)
@@ -412,7 +413,7 @@ class TestFlipAndRollback:
     ) -> None:
         """Flipping to the generation current already names, spelt in another
         case, must not rewrite previous to name that same generation."""
-        monkeypatch.setattr(os.path, "realpath", lambda s, **_kw: s)
+        setattr_in(monkeypatch, "nexus._install.layout_core", "os.path.realpath", lambda s, **_kw: s)
         a, b = _gen(tools, "gen-A"), _gen(tools, "gen-B")
         gen_core.flip_current(a, tools, ops=SymlinkOps(), platform=WIN)
         gen_core.flip_current(b, tools, ops=SymlinkOps(), platform=WIN)
@@ -833,7 +834,7 @@ class TestRepairLayout:
 
 class TestReap:
     def test_reaps_through_gc_core_with_rule_d(self, tools: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(os.path, "realpath", lambda s, **_kw: s)
+        setattr_in(monkeypatch, "nexus._install.layout_core", "os.path.realpath", lambda s, **_kw: s)
         gens = [_gen(tools, f"gen-{n}") for n in "ABCD"]
         for gen in gens:
             (gen / "nexus-install.json").write_text("{}\n")

@@ -40,7 +40,7 @@ from nexus.util.process_group import KILL_SIGNAL
 from tests.daemon._children import KILLED_RC as _KILLED_RC
 from tests.daemon._children import WIN as _WIN
 from tests.daemon._children import spawn_breakable
-from tests._time_seam import module_time
+from tests._module_seam import module_time
 
 CREATE_NEW_PROCESS_GROUP = 0x00000200
 

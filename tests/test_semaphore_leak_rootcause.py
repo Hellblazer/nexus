@@ -24,6 +24,7 @@ import time
 from unittest.mock import MagicMock, patch
 
 import pytest
+from tests._module_seam import setattr_in
 
 
 # ── session.start_t1_server: must isolate into a new process group ──────────
@@ -73,9 +74,9 @@ def test_mineru_stop_uses_killpg(monkeypatch, tmp_path) -> None:
     from nexus import upgrade_finish as _uf  # noqa: PLC0415 — file pattern: deferred imports
 
     monkeypatch.setattr(_uf, "process_command", lambda pid: "python3 mineru-api --host 127.0.0.1")
-    monkeypatch.setattr(mineru.os, "killpg", _fake_killpg)
-    monkeypatch.setattr(mineru.os, "kill", _fake_kill)
-    monkeypatch.setattr(mineru.os, "getpgid", lambda pid: pid)
+    setattr_in(monkeypatch, (mineru, "nexus.util.process_group"), "os.killpg", _fake_killpg)
+    setattr_in(monkeypatch, (mineru, "nexus.daemon.service_registry", "nexus.util.process_group"), "os.kill", _fake_kill)
+    setattr_in(monkeypatch, (mineru, "nexus.util.process_group"), "os.getpgid", lambda pid: pid)
 
     runner = CliRunner()
     result = runner.invoke(mineru.mineru_group, ["stop"])

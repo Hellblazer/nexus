@@ -34,6 +34,7 @@ from nexus.db.pg_provision import (
     bootstrap_superuser,
     windows_superuser_name,
 )
+from tests._module_seam import setattr_in
 
 CREATE_NEW_PROCESS_GROUP = 0x00000200
 SID_A = "S-1-5-21-3623811015-3361044348-30300820-1013"
@@ -243,7 +244,7 @@ def test_posix_start_is_unchanged_and_never_spawns_detached(start_env, tmp_path:
 def test_windows_start_keeps_the_root_refusal(start_env, monkeypatch: pytest.MonkeyPatch) -> None:
     bins, pgdata, *_ = start_env
     monkeypatch.undo()  # drop the fixture's refuse_root stub; use the real one
-    monkeypatch.setattr(os, "geteuid", lambda: 0, raising=False)
+    setattr_in(monkeypatch, "nexus.db.pg_provision", "os.geteuid", lambda: 0, raising=False)
     spawn = _Spawner(_Proc(0))
     with pytest.raises(PgRootUserError):
         pp._pg_ctl_start_detached(bins, pgdata, 5433, platform="win32", popen=spawn)

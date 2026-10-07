@@ -39,7 +39,7 @@ from nexus.catalog.note_write import (
     fire_note_chains,
     put_note,
 )
-from tests._time_seam import module_time
+from tests._module_seam import module_time
 
 _COLLECTION = "knowledge__z0o2p-landing__bge-base-en-v15-768__v1"
 _SRC = pathlib.Path(__file__).resolve().parent.parent / "src" / "nexus"

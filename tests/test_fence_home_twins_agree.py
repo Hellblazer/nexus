@@ -23,6 +23,7 @@ from unittest.mock import patch
 import pytest
 
 from tests._fence_home import fence_home
+from tests._module_seam import patch_in, setattr_in
 
 _SHELL_FENCE = Path(__file__).parent / "e2e" / "lib" / "fence_home.sh"
 
@@ -170,7 +171,7 @@ def _python_manager_env(tmp_path: Path, real_runtime: Path, platform: str, docke
     from tests._fence_home import fence_manager_env
 
     gate = tmp_path / "py-gate"
-    with patch.dict(os.environ), patch("tests._fence_home.sys.platform", platform):
+    with patch.dict(os.environ), patch_in("tests._fence_home", "sys.platform", platform):
         os.environ["XDG_RUNTIME_DIR"] = str(real_runtime)
         os.environ["DBUS_SESSION_BUS_ADDRESS"] = f"unix:path={real_runtime}/bus"
         os.environ.pop("DOCKER_HOST", None)
@@ -264,11 +265,11 @@ def test_a_refused_symlink_on_windows_links_through_without_one(
     linked: list[tuple[str, str]] = []
     monkeypatch.setattr(Path, "symlink_to", refuse)
     monkeypatch.setattr(fh, "_windows_link", lambda link, entry: linked.append((link.name, entry.name)))
-    monkeypatch.setattr(fh.sys, "platform", "win32")
+    setattr_in(monkeypatch, fh, "sys.platform", "win32")
     fh.fence_home(real, tmp_path / "gate", ".config/nexus")
     assert sorted(linked) == [(".gitconfig", ".gitconfig"), ("proj", "proj")]
 
     # Off Windows the same refusal is not swallowed.
-    monkeypatch.setattr(fh.sys, "platform", "linux")
+    setattr_in(monkeypatch, fh, "sys.platform", "linux")
     with pytest.raises(OSError):
         fh.fence_home(real, tmp_path / "gate2", ".config/nexus")

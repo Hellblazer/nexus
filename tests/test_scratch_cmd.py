@@ -10,6 +10,7 @@ import pytest
 from click.testing import CliRunner
 
 from nexus.cli import main
+from tests._module_seam import patch_in
 
 
 @pytest.fixture
@@ -40,7 +41,7 @@ def fake_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 def test_scratch_put_from_stdin(runner: CliRunner, fake_home: Path) -> None:
     """When content is '-', scratch put reads from stdin."""
-    with patch("nexus.session.os.getsid", return_value=99900):
+    with patch_in("nexus.session", "os.getsid", return_value=99900):
         result = runner.invoke(main, ["scratch", "put", "-"], input="hello from stdin\n")
 
     assert result.exit_code == 0, result.output
@@ -56,7 +57,7 @@ def test_scratch_put_from_stdin(runner: CliRunner, fake_home: Path) -> None:
 
 def test_scratch_get_missing_entry_shows_error(runner: CliRunner, fake_home: Path) -> None:
     """get with non-existent ID raises ClickException (exit code 1, 'Not found')."""
-    with patch("nexus.session.os.getsid", return_value=99901):
+    with patch_in("nexus.session", "os.getsid", return_value=99901):
         result = runner.invoke(main, ["scratch", "get", "nonexistent-id-000"])
 
     assert result.exit_code != 0
@@ -67,7 +68,7 @@ def test_scratch_get_missing_entry_shows_error(runner: CliRunner, fake_home: Pat
 
 def test_scratch_search_no_results(runner: CliRunner, fake_home: Path) -> None:
     """search with no matches shows 'No results.' message."""
-    with patch("nexus.session.os.getsid", return_value=99902):
+    with patch_in("nexus.session", "os.getsid", return_value=99902):
         result = runner.invoke(main, ["scratch", "search", "nonexistent query"])
 
     assert result.exit_code == 0
@@ -100,7 +101,7 @@ def test_scratch_flag_nonexistent_raises(runner: CliRunner, fake_home: Path) -> 
     helper ``get`` uses (``_resolve_entry_id``), so a clean miss surfaces its
     "not found" phrasing rather than the backend's raw KeyError text.
     """
-    with patch("nexus.session.os.getsid", return_value=99903):
+    with patch_in("nexus.session", "os.getsid", return_value=99903):
         result = runner.invoke(main, ["scratch", "flag", "bad-id-000"])
 
     assert result.exit_code != 0
@@ -118,7 +119,7 @@ def test_scratch_flag_nonexistent_raises(runner: CliRunner, fake_home: Path) -> 
 def test_scratch_flag_resolves_id_prefix(runner: CliRunner, fake_home: Path) -> None:
     """flag accepts the 8-char prefix 'scratch list' displays, not just the
     full UUID obtainable only from the one-time 'Stored:' line."""
-    with patch("nexus.session.os.getsid", return_value=99908):
+    with patch_in("nexus.session", "os.getsid", return_value=99908):
         put_result = runner.invoke(main, ["scratch", "put", "flag me by prefix"])
         assert put_result.exit_code == 0, put_result.output
         doc_id = put_result.output.strip().split("Stored: ")[1]
@@ -135,7 +136,7 @@ def test_scratch_flag_resolves_id_prefix(runner: CliRunner, fake_home: Path) -> 
 
 def test_scratch_unflag_resolves_id_prefix(runner: CliRunner, fake_home: Path) -> None:
     """unflag accepts the same 8-char prefix as flag/get/delete."""
-    with patch("nexus.session.os.getsid", return_value=99909):
+    with patch_in("nexus.session", "os.getsid", return_value=99909):
         put_result = runner.invoke(main, ["scratch", "put", "unflag me by prefix"])
         assert put_result.exit_code == 0, put_result.output
         doc_id = put_result.output.strip().split("Stored: ")[1]
@@ -174,7 +175,7 @@ def test_scratch_flag_ambiguous_prefix_errors_cleanly(runner: CliRunner) -> None
 
 def test_scratch_flag_full_uuid_still_works(runner: CliRunner, fake_home: Path) -> None:
     """The full UUID (not just a prefix) must keep working for flag."""
-    with patch("nexus.session.os.getsid", return_value=99911):
+    with patch_in("nexus.session", "os.getsid", return_value=99911):
         put_result = runner.invoke(main, ["scratch", "put", "flag by full id"])
         assert put_result.exit_code == 0, put_result.output
         doc_id = put_result.output.strip().split("Stored: ")[1]
@@ -188,7 +189,7 @@ def test_scratch_flag_full_uuid_still_works(runner: CliRunner, fake_home: Path) 
 
 def test_scratch_unflag_success(runner: CliRunner, fake_home: Path) -> None:
     """unflag command works on a previously-flagged entry."""
-    with patch("nexus.session.os.getsid", return_value=99904):
+    with patch_in("nexus.session", "os.getsid", return_value=99904):
         # Put an entry, capture the ID
         put_result = runner.invoke(main, ["scratch", "put", "will be flagged"])
         assert put_result.exit_code == 0, put_result.output
@@ -213,7 +214,7 @@ def test_scratch_unflag_nonexistent_raises(runner: CliRunner, fake_home: Path) -
     nexus-wzkzr: see ``test_scratch_flag_nonexistent_raises`` — same
     resolve-then-not-found phrasing shift.
     """
-    with patch("nexus.session.os.getsid", return_value=99905):
+    with patch_in("nexus.session", "os.getsid", return_value=99905):
         result = runner.invoke(main, ["scratch", "unflag", "bad-id-000"])
 
     assert result.exit_code != 0
@@ -224,7 +225,7 @@ def test_scratch_unflag_nonexistent_raises(runner: CliRunner, fake_home: Path) -
 
 def test_scratch_promote_success(runner: CliRunner, fake_home: Path) -> None:
     """promote command copies T1 entry to T2 successfully."""
-    with patch("nexus.session.os.getsid", return_value=99906):
+    with patch_in("nexus.session", "os.getsid", return_value=99906):
         # Put an entry
         put_result = runner.invoke(main, ["scratch", "put", "promote me"])
         assert put_result.exit_code == 0, put_result.output
@@ -243,7 +244,7 @@ def test_scratch_promote_success(runner: CliRunner, fake_home: Path) -> None:
 
 def test_scratch_promote_nonexistent_raises(runner: CliRunner, fake_home: Path) -> None:
     """promote with bad ID raises ClickException."""
-    with patch("nexus.session.os.getsid", return_value=99907):
+    with patch_in("nexus.session", "os.getsid", return_value=99907):
         result = runner.invoke(
             main, ["scratch", "promote", "bad-id-000", "-p", "proj", "-t", "t.md"]
         )
@@ -259,7 +260,7 @@ def test_scratch_promote_nonexistent_raises(runner: CliRunner, fake_home: Path) 
 
 def test_scratch_delete_not_found(runner: CliRunner, fake_home: Path) -> None:
     """delete with an unknown ID prefix exits non-zero."""
-    with patch("nexus.session.os.getsid", return_value=99941):
+    with patch_in("nexus.session", "os.getsid", return_value=99941):
         result = runner.invoke(main, ["scratch", "delete", "00000000"])
         assert result.exit_code != 0
         assert "not found" in result.output
@@ -279,7 +280,7 @@ def test_scratch_clear_bare_invocation_prompts_and_aborts(
 ) -> None:
     """Without -y, a declined confirmation aborts (rc != 0) and leaves
     entries intact."""
-    with patch("nexus.session.os.getsid", return_value=99950):
+    with patch_in("nexus.session", "os.getsid", return_value=99950):
         put_result = runner.invoke(main, ["scratch", "put", "must survive"])
         assert put_result.exit_code == 0, put_result.output
 
@@ -295,7 +296,7 @@ def test_scratch_clear_yes_flag_clears_without_prompting(
     runner: CliRunner, fake_home: Path
 ) -> None:
     """-y / --yes skips the prompt and clears immediately."""
-    with patch("nexus.session.os.getsid", return_value=99951):
+    with patch_in("nexus.session", "os.getsid", return_value=99951):
         put_result = runner.invoke(main, ["scratch", "put", "will be cleared"])
         assert put_result.exit_code == 0, put_result.output
 
@@ -313,7 +314,7 @@ def test_scratch_clear_preview_counts_flagged_entries(
     """The preview names how many entries are flagged for SessionEnd flush
     to T2 — the wave-2 escalation: clear silently destroyed flush-flagged
     entries with no callout."""
-    with patch("nexus.session.os.getsid", return_value=99952):
+    with patch_in("nexus.session", "os.getsid", return_value=99952):
         plain = runner.invoke(main, ["scratch", "put", "plain entry"])
         flagged = runner.invoke(main, ["scratch", "put", "flagged entry"])
         assert plain.exit_code == 0 and flagged.exit_code == 0
@@ -336,7 +337,7 @@ def test_scratch_clear_no_entries_short_circuits(
     runner: CliRunner, fake_home: Path
 ) -> None:
     """Nothing to clear: no prompt, clean exit."""
-    with patch("nexus.session.os.getsid", return_value=99953):
+    with patch_in("nexus.session", "os.getsid", return_value=99953):
         result = runner.invoke(main, ["scratch", "clear"])
         assert result.exit_code == 0, result.output
         assert "No scratch entries." in result.output

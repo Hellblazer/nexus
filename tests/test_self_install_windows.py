@@ -15,7 +15,6 @@ from __future__ import annotations
 import os
 import stat
 import subprocess
-import sys
 from pathlib import Path
 
 import click
@@ -24,6 +23,7 @@ import pytest
 from nexus import install_layout
 from nexus._install import generation_core as gen_core
 from nexus.commands import self_cmd
+from tests._module_seam import setattr_in
 
 
 class FakeUvAndSpy:
@@ -74,7 +74,7 @@ def win(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("NX_BIN_DIR", str(bin_dir))
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.setattr(self_cmd, "_is_windows", lambda platform=None: True)
-    monkeypatch.setattr(os.path, "realpath", lambda s, **_kw: s)
+    setattr_in(monkeypatch, "nexus._install.layout_core", "os.path.realpath", lambda s, **_kw: s)
     monkeypatch.setattr(
         gen_core.LinkOps, "create",
         lambda self, target, link: os.symlink(target, link, target_is_directory=True),
@@ -85,8 +85,8 @@ def win(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("NX_USER_PATH_STORE", str(store))
     monkeypatch.setenv("PATH", "C:\\Windows")
     spy = FakeUvAndSpy(subprocess.run, uv_bin=uv_bin)
-    monkeypatch.setattr(gen_core.subprocess, "run", spy)
-    monkeypatch.setattr(self_cmd.subprocess, "run", spy)
+    setattr_in(monkeypatch, gen_core, "subprocess.run", spy)
+    setattr_in(monkeypatch, self_cmd, "subprocess.run", spy)
     return tools, uv_bin, spy
 
 
@@ -106,7 +106,7 @@ def _generation(tools: Path, stamp: str, *, extras: list[str] | None = None) -> 
 
 
 def _host(monkeypatch: pytest.MonkeyPatch, gen: Path) -> None:
-    monkeypatch.setattr(sys, "prefix", str(gen))
+    setattr_in(monkeypatch, ("nexus.commands.self_cmd", "nexus._install.generation_core"), "sys.prefix", str(gen))
 
 
 def _bash_calls(spy: FakeUvAndSpy) -> list[list[str]]:
@@ -176,7 +176,7 @@ class TestGenerationSite:
         if not Path(upper).is_dir():
             pytest.skip("case-sensitive filesystem: the upper-cased sys.prefix does not exist here "
                         "(rule (d)'s folded comparison is covered directly in tests/test_install_gc_windows.py)")
-        monkeypatch.setattr(sys, "prefix", upper)
+        setattr_in(monkeypatch, ("nexus.commands.self_cmd", "nexus._install.generation_core"), "sys.prefix", upper)
         # Not a generation under tools by exact spelling; the folded key matches.
         new = self_cmd.perform_self_install(keep=1)
         assert new is not None
@@ -212,13 +212,13 @@ class TestGenerationSite:
         assert sorted(p.name for p in tools.iterdir()) == [host.name], "an unfinished tree is removed"
 
     def test_a_dev_checkout_still_refuses(self, win, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-        monkeypatch.setattr(sys, "prefix", str(tmp_path / "checkout" / ".venv"))
+        setattr_in(monkeypatch, ("nexus.commands.self_cmd", "nexus._install.generation_core"), "sys.prefix", str(tmp_path / "checkout" / ".venv"))
         monkeypatch.setattr(self_cmd, "_running_from_legacy_tool_install", lambda: False)
         with pytest.raises(click.ClickException, match="not a generation"):
             self_cmd.perform_self_install()
 
     def test_extras_are_refused_off_the_generation_layout(self, win, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-        monkeypatch.setattr(sys, "prefix", str(tmp_path / "elsewhere"))
+        setattr_in(monkeypatch, ("nexus.commands.self_cmd", "nexus._install.generation_core"), "sys.prefix", str(tmp_path / "elsewhere"))
         with pytest.raises(click.ClickException, match="--extras applies to a generation install"):
             self_cmd.perform_self_install(add_extras=("local",))
 
@@ -233,7 +233,7 @@ class TestLegacySite:
             '[tool]\nrequirements = [{ name = "conexus", extras = ["local", "mineru"] }]\n'
         )
         monkeypatch.setenv("UV_TOOL_DIR", str(root))
-        monkeypatch.setattr(sys, "prefix", str(legacy))
+        setattr_in(monkeypatch, ("nexus.commands.self_cmd", "nexus._install.generation_core"), "sys.prefix", str(legacy))
         monkeypatch.setattr(self_cmd, "_running_from_legacy_tool_install", lambda: True)
         return legacy
 

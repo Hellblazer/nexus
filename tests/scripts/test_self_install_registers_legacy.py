@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import json
 import os
-import sys
 from pathlib import Path
 
 import pytest
@@ -30,6 +29,7 @@ from nexus.commands.self_cmd import (
     packaged_install_dir,
     perform_self_install,
 )
+from tests._module_seam import setattr_in
 
 
 def _receipt(gen: Path, *, source: str) -> None:
@@ -83,7 +83,7 @@ def bed(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     host = _hosting_generation(tools, "20260101T000000Z", source=str(src))
     (tools / "current").symlink_to(host)
-    monkeypatch.setattr(sys, "prefix", str(host))
+    setattr_in(monkeypatch, "nexus.commands.self_cmd", "sys.prefix", str(host))
     return tools, uv_tools
 
 

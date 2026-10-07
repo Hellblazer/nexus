@@ -26,6 +26,7 @@ from click.testing import CliRunner
 import nexus
 from nexus import _vcrt
 from nexus.daemon import binary_install as b
+from tests._module_seam import setattr_in
 
 _DLLS = _vcrt.VC_RUNTIME_DLLS
 _BODY = {n: f"fake {n}".encode() for n in (*_DLLS, "vcruntime140.dll", "postgres.exe")}
@@ -206,7 +207,7 @@ def test_a_failed_rename_leaves_no_partial_dll_and_no_temp_file(
             raise PermissionError("held by a scanner")
         return real_replace(src, dst, *a, **k)
 
-    monkeypatch.setattr(os, "replace", refuse)
+    setattr_in(monkeypatch, "nexus.daemon.binary_install", "os.replace", refuse)
     r = _ensure(cfg, system, net)
     assert r.status == "failed"
     left = _vcrt_files(cfg)

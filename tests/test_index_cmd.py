@@ -9,7 +9,7 @@ import pytest
 from click.testing import CliRunner
 
 from nexus.cli import main
-from tests._time_seam import module_time
+from tests._module_seam import module_time
 
 # RDR-109 Phase 2: this file asserts cloud-mode canonical behavior
 # (voyage-* embedder names, canonical-set defaults). The cloud_mode

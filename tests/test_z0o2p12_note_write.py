@@ -23,7 +23,7 @@ import pytest
 from nexus.catalog.note_write import NoteWriteError, put_note, write_note
 from nexus.catalog.store_hook import ManifestVerifyUncertainError, note_content_hash, note_manifest_metadata
 from nexus.errors import CombinedWriteEmbedTimeoutError
-from tests._time_seam import module_time
+from tests._module_seam import module_time
 
 _COLLECTION = "knowledge__z0o2p12-note__bge-base-en-v15-768__v1"
 _OTHER = "knowledge__z0o2p12-other__bge-base-en-v15-768__v1"

@@ -35,6 +35,7 @@ from unittest.mock import patch
 
 import pytest
 from click.testing import CliRunner
+from tests._module_seam import setattr_in
 
 
 # ── core.py: the stdio transport primitive ──────────────────────────────────
@@ -435,8 +436,8 @@ class TestSigtermHandler:
         # process, so intercept os.kill to prove the re-dispatch happens
         # without actually terminating anything.
         kill_calls: list[tuple[int, int]] = []
-        monkeypatch.setattr(dt.os, "kill", lambda pid, sig: kill_calls.append((pid, sig)))
-        monkeypatch.setattr(dt.signal, "signal", lambda *a, **k: None)
+        setattr_in(monkeypatch, dt, "os.kill", lambda pid, sig: kill_calls.append((pid, sig)))
+        setattr_in(monkeypatch, dt, "signal.signal", lambda *a, **k: None)
 
         dt._sigterm_handler(signal.SIGTERM, None)
 

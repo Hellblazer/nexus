@@ -61,6 +61,7 @@ from tests._xdist_cap import (
     cap_from_headroom,
     clamp_numprocesses,
 )
+from tests._module_seam import setattr_in
 
 
 class TestCapFromHeadroom:
@@ -169,7 +170,7 @@ class TestDegradesRatherThanCrashes:
         def boom(*a, **k):
             raise OSError("no sysctl on this box")
 
-        monkeypatch.setattr(mod.subprocess, "run", boom)
+        setattr_in(monkeypatch, mod, "subprocess.run", boom)
         assert mod._sysctl_int("kern.sysv.shmmni") is None
         assert mod.segments_in_use() is None
         assert mod.effective_cap() is None
@@ -181,7 +182,7 @@ class TestDegradesRatherThanCrashes:
             returncode = 0
             stdout = "not-a-number\n"
 
-        monkeypatch.setattr(mod.subprocess, "run", lambda *a, **k: R())
+        setattr_in(monkeypatch, mod, "subprocess.run", lambda *a, **k: R())
         assert mod._sysctl_int("kern.sysv.shmmni") is None
 
     def test_env_opt_out_yields_no_cap(self, monkeypatch: pytest.MonkeyPatch) -> None:

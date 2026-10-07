@@ -39,7 +39,7 @@ from nexus.db.t2 import T2Database
 from nexus.db.t3 import T3Database
 from tests._catalog_fixture_ops import documents_by_title
 from tests.conftest import make_vector_test_client
-from tests._time_seam import module_time
+from tests._module_seam import module_time
 
 _COLLECTION = "knowledge__fixture-subject__bge-base-en-v15-768__v1"
 _SRC = pathlib.Path(__file__).parent.parent / "src" / "nexus"

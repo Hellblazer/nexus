@@ -90,7 +90,7 @@ from nexus.daemon.service_registry import (
 from nexus.util.process_group import KILL_SIGNAL
 from nexus.util.win_console import ConsoleBreakResult
 from nexus import session as _sess
-from tests._time_seam import patch_time
+from tests._module_seam import patch_in, patch_time
 
 # RDR-224 (nexus-f9bgu.19): this suite runs on native Windows too. The three
 # places it used to assume POSIX are named once here so each platform branch is
@@ -1519,7 +1519,7 @@ class TestGracefulStopChannel:
             proc.wait(timeout=5)
 
     def test_posix_gone_pid_is_not_sent_and_not_refused(self) -> None:
-        with patch("os.kill", side_effect=ProcessLookupError):
+        with patch_in("nexus.daemon.service_registry", "os.kill", side_effect=ProcessLookupError):
             send = request_graceful_stop(424244, platform="linux")
         assert (send.sent, send.refused, send.gone) == (False, False, True)
 
@@ -1527,13 +1527,13 @@ class TestGracefulStopChannel:
         # POSIX behaviour is unchanged: EPERM was swallowed and the caller's
         # escalation ladder carried on. Only the Windows cross-session case
         # stops the ladder.
-        with patch("os.kill", side_effect=PermissionError):
+        with patch_in("nexus.daemon.service_registry", "os.kill", side_effect=PermissionError):
             send = request_graceful_stop(424245, platform="linux")
         assert (send.sent, send.refused) == (False, False)
 
     def test_windows_never_reaches_os_kill_and_sends_ctrl_break(self) -> None:
         api = _ScriptedConsoleApi()
-        with patch("os.kill", side_effect=AssertionError("os.kill is TerminateProcess on Windows")):
+        with patch_in("nexus.daemon.service_registry", "os.kill", side_effect=AssertionError("os.kill is TerminateProcess on Windows")):
             send = request_graceful_stop(4242, platform="win32", console_api=api)
         assert send.sent is True
         assert api.attached == [4242] and api.sent == [4242]
@@ -2039,7 +2039,7 @@ class TestHardKillOfAGonePid:
 
     @pytest.mark.parametrize(("exc", "platform"), _GONE_PID_ERRORS)
     def test_a_gone_or_foreign_pid_is_reported_not_raised(self, exc: OSError, platform: str) -> None:
-        with patch("os.kill", side_effect=exc):
+        with patch_in("nexus.daemon.service_registry", "os.kill", side_effect=exc):
             assert hard_kill_pid(424246, platform=platform) is False
 
     def test_a_live_child_is_killed(self) -> None:
@@ -2060,7 +2060,7 @@ class TestHardKillOfAGonePid:
         monkeypatch.setattr("nexus.daemon.service_registry.process_state", lambda _pid: "D")
         monkeypatch.setattr("nexus.daemon.service_registry._POST_KILL_SETTLE_S", 0.05)
         # The Windows graceful arm, scripted, so the only os.kill is the hard one.
-        with patch("os.kill", side_effect=exc):
+        with patch_in("nexus.daemon.service_registry", "os.kill", side_effect=exc):
             stubborn = terminate_pids(
                 [424242], grace_s=0.05, platform="win32", console_api=_ScriptedConsoleApi(),
             )
@@ -2426,7 +2426,7 @@ class TestLeaseReplaceUnderConcurrentReaders:
                 raise _sharing_violation()
             real_replace(src, dst)
 
-        with patch("os.replace", flaky):
+        with patch_in("nexus.daemon.service_registry", "os.replace", flaky):
             refreshed = reg.heartbeat(record)
 
         assert failures[0] == 0 and len(clock.sleeps) == 3
@@ -2440,7 +2440,7 @@ class TestLeaseReplaceUnderConcurrentReaders:
         clock = _SleepClock()
         reg = self._registry(config_dir, "win32", clock)
         record = self._published(reg)
-        with patch("os.replace", side_effect=_sharing_violation()):
+        with patch_in("nexus.daemon.service_registry", "os.replace", side_effect=_sharing_violation()):
             with pytest.raises(PermissionError):
                 reg.heartbeat(record)
         assert _WINDOWS_SHARING_RETRY_BUDGET_S <= clock.t < _WINDOWS_SHARING_RETRY_BUDGET_S + 0.2, f"gave up after {clock.t:.3f}s, budget {_WINDOWS_SHARING_RETRY_BUDGET_S}"
@@ -2452,7 +2452,7 @@ class TestLeaseReplaceUnderConcurrentReaders:
         clock = _SleepClock()
         reg = self._registry(config_dir, "linux", clock)
         record = self._published(reg)
-        with patch("os.replace", side_effect=_sharing_violation()) as replace:
+        with patch_in("nexus.daemon.service_registry", "os.replace", side_effect=_sharing_violation()) as replace:
             with pytest.raises(PermissionError):
                 reg.heartbeat(record)
         assert replace.call_count == 1 and clock.sleeps == [], (

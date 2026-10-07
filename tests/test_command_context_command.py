@@ -22,6 +22,7 @@ from unittest.mock import patch
 
 import pytest
 from click.testing import CliRunner
+from tests._module_seam import setattr_in
 
 
 # ---------------------------------------------------------------------------
@@ -1243,8 +1244,8 @@ def stub_preflight_subprocess(monkeypatch) -> None:
     def _fake_run(cmd, *args, **kwargs):
         return _sp.CompletedProcess(cmd, 0, stdout="doctor: ok\n", stderr="")
 
-    monkeypatch.setattr(cc.subprocess, "check_output", _fake_check_output)
-    monkeypatch.setattr(cc.subprocess, "run", _fake_run)
+    setattr_in(monkeypatch, cc, "subprocess.check_output", _fake_check_output)
+    setattr_in(monkeypatch, cc, "subprocess.run", _fake_run)
 
 
 def test_nx_preflight_exits_zero(
@@ -1610,8 +1611,8 @@ def stub_continuation_subprocess(monkeypatch) -> None:
     def _fake_run(cmd, *args, **kwargs):  # noqa: ANN001
         return _sp.CompletedProcess(cmd, 0, stdout="", stderr="")
 
-    monkeypatch.setattr(cc.subprocess, "check_output", _fake_check_output)
-    monkeypatch.setattr(cc.subprocess, "run", _fake_run)
+    setattr_in(monkeypatch, cc, "subprocess.check_output", _fake_check_output)
+    setattr_in(monkeypatch, cc, "subprocess.run", _fake_run)
 
 
 # ---------------------------------------------------------------------------

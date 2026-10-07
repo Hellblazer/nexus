@@ -36,7 +36,7 @@ from nexus.daemon.aspect_worker_daemon import AspectWorkerDaemon, ensure_aspect_
 from nexus.daemon.service_registry import DEFAULT_HEARTBEAT_INTERVAL, request_graceful_stop
 from nexus.upgrade_finish import SkewReport, StaleProcess
 from nexus.util import win_job
-from tests._time_seam import patch_time
+from tests._module_seam import patch_in, patch_time
 
 # ── spawn flags ──────────────────────────────────────────────────────────────────
 
@@ -299,7 +299,7 @@ def _run_restart(api: _ConsoleApi, *, alive: list[bool]) -> tuple[list[str], Mag
     kill = MagicMock()
     alive_iter = iter(alive)
     with patch.object(uf, "request_graceful_stop", windows_stop), \
-            patch.object(uf.os, "kill", kill), \
+            patch_in((uf, "nexus.daemon.service_registry", "nexus.util.process_group"), "os.kill", kill), \
             patch.object(uf, "process_command", return_value=_COMMAND), \
             patch.object(uf, "_process_markers", return_value=("/uv/tools/conexus",)), \
             patch.object(uf, "_pid_alive", side_effect=lambda _p: next(alive_iter, True)), \
@@ -345,7 +345,7 @@ def test_posix_restart_still_sends_sigterm() -> None:
 
     posix_stop = functools.partial(request_graceful_stop, platform="linux")
     with patch.object(uf, "request_graceful_stop", posix_stop), \
-            patch.object(uf.os, "kill", side_effect=_kill), \
+            patch_in((uf, "nexus.daemon.service_registry", "nexus.util.process_group"), "os.kill", side_effect=_kill), \
             patch.object(uf, "process_command", return_value=_COMMAND), \
             patch.object(uf, "_process_markers", return_value=("/uv/tools/conexus",)), \
             patch.object(uf, "_pid_alive", return_value=False), \

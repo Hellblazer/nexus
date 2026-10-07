@@ -34,7 +34,6 @@ import json
 import os
 import stat
 import subprocess
-import sys
 from pathlib import Path
 
 import pytest
@@ -62,6 +61,7 @@ from nexus.install_layout import (
     render_shim,
     tools_dir,
 )
+from tests._module_seam import setattr_in
 
 
 @pytest.fixture(autouse=True)
@@ -729,9 +729,9 @@ class TestIsStale:
     ) -> None:
         gen = _make_complete_generation(tmp_path, "genA")
         current_link(tools=tmp_path).symlink_to(gen)
-        monkeypatch.setattr(sys, "prefix", str(gen))
+        setattr_in(monkeypatch, "nexus._install.layout_core", "sys.prefix", str(gen))
         assert is_stale(tools=tmp_path) is False
-        monkeypatch.setattr(sys, "prefix", str(tmp_path / "somewhere-else"))
+        setattr_in(monkeypatch, "nexus._install.layout_core", "sys.prefix", str(tmp_path / "somewhere-else"))
         assert is_stale(tools=tmp_path) is True
 
     def test_propagates_when_current_is_missing(self, tmp_path: Path) -> None:

@@ -19,6 +19,7 @@ from pathlib import Path
 import pytest
 
 from nexus._install import layout_core as lc
+from tests._module_seam import setattr_in
 
 WIN = "win32"
 POSIX = "linux"
@@ -220,7 +221,7 @@ class TestIsStaleOnWindows:
         gen = tmp_path / "gen-1"
         gen.mkdir()
         (tmp_path / "current").symlink_to(gen)
-        monkeypatch.setattr(os.path, "realpath", lambda s: s)
+        setattr_in(monkeypatch, "nexus._install.layout_core", "os.path.realpath", lambda s: s)
         upper = Path(str(gen).upper())
         assert lc.is_stale(upper, tools=tmp_path, platform=WIN) is False
         assert lc.is_stale(upper, tools=tmp_path, platform=POSIX) is True
@@ -229,5 +230,5 @@ class TestIsStaleOnWindows:
         gen = tmp_path / "gen-1"
         gen.mkdir()
         (tmp_path / "current").symlink_to(gen)
-        monkeypatch.setattr(os.path, "realpath", lambda s: s)
+        setattr_in(monkeypatch, "nexus._install.layout_core", "os.path.realpath", lambda s: s)
         assert lc.is_stale(tmp_path / "gen-0", tools=tmp_path, platform=WIN) is True

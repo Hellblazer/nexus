@@ -31,6 +31,7 @@ from bench.paths import (  # noqa: E402
     run_path_c,
 )
 from bench.schema import Query  # noqa: E402
+from tests._module_seam import setattr_in
 
 
 def _q() -> Query:
@@ -113,8 +114,7 @@ class TestRunPathA:
             {"id": "c", "_display_path": "/r/rdr-053-y.md", "distance": 0.3},
             {"id": "d", "_display_path": "/r/rdr-100-z.md", "distance": 0.4},
         ]
-        monkeypatch.setattr(
-            "bench.paths.subprocess.run", lambda *a, **k: _fake_search_proc(chunks),
+        setattr_in(monkeypatch, "bench.paths", "subprocess.run", lambda *a, **k: _fake_search_proc(chunks),
         )
         row = run_path_a(_q(), corpus="rdr__x")
         assert row["error"] is None and row["unresolved_count"] == 0
@@ -128,8 +128,7 @@ class TestRunPathA:
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         chunks = [{"id": "a", "distance": 0.1}, {"id": "b", "source_path": ""}]
-        monkeypatch.setattr(
-            "bench.paths.subprocess.run", lambda *a, **k: _fake_search_proc(chunks),
+        setattr_in(monkeypatch, "bench.paths", "subprocess.run", lambda *a, **k: _fake_search_proc(chunks),
         )
         row = run_path_a(_q(), corpus="rdr__x")
         assert row["error"] is not None and "vacuous" in row["error"]
@@ -143,8 +142,7 @@ class TestRunPathA:
             {"id": "a", "distance": 0.1},
             {"id": "b", "_display_path": "/r/rdr-049-x.md", "distance": 0.2},
         ]
-        monkeypatch.setattr(
-            "bench.paths.subprocess.run", lambda *a, **k: _fake_search_proc(chunks),
+        setattr_in(monkeypatch, "bench.paths", "subprocess.run", lambda *a, **k: _fake_search_proc(chunks),
         )
         row = run_path_a(_q(), corpus="rdr__x")
         assert row["error"] is None
@@ -154,8 +152,7 @@ class TestRunPathA:
     def test_zero_chunks_is_not_flagged_vacuous(
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        monkeypatch.setattr(
-            "bench.paths.subprocess.run", lambda *a, **k: _fake_search_proc([]),
+        setattr_in(monkeypatch, "bench.paths", "subprocess.run", lambda *a, **k: _fake_search_proc([]),
         )
         row = run_path_a(_q(), corpus="rdr__x")
         assert row["error"] is None and row["ndcg_at_3"] == 0.0

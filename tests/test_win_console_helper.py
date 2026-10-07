@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import json
 import subprocess
-import sys
 from dataclasses import asdict
 
 import pytest
@@ -27,6 +26,7 @@ from nexus.daemon import service_registry as sr
 from nexus.util import nx_argv as nx_argv_mod
 from nexus.util import win_console
 from nexus.util.win_console import ConsoleBreakResult, send_ctrl_break_via_console
+from tests._module_seam import setattr_in
 
 
 class _Api:
@@ -99,7 +99,7 @@ class TestHelperSpawn:
     def test_the_helper_is_a_hidden_console_python_running_this_module(
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        monkeypatch.setattr(sys, "executable", r"C:\venv\Scripts\pythonw.exe")
+        setattr_in(monkeypatch, "nexus.util.win_console", "sys.executable", r"C:\venv\Scripts\pythonw.exe")
         run = _Run(_ok())
         result = win_console.send_ctrl_break_via_helper(4242, run=run)
         argv, kwargs = run.calls[0]
@@ -261,7 +261,7 @@ class TestRequestGracefulStopUsesTheHelper:
         )
         monkeypatch.setattr(nx_argv_mod, "_platform", lambda: "linux")
         killed: list[tuple[int, int]] = []
-        monkeypatch.setattr(sr.os, "kill", lambda pid, sig: killed.append((pid, sig)))
+        setattr_in(monkeypatch, sr, "os.kill", lambda pid, sig: killed.append((pid, sig)))
         assert sr.request_graceful_stop(77, platform="linux").sent is True
         assert killed and killed[0][0] == 77
 
@@ -307,7 +307,7 @@ class TestRunBoundedCarriesTheHelperFlag:
             seen.update(kwargs)
             return _Proc()
 
-        monkeypatch.setattr(bs.subprocess, "Popen", popen)
+        setattr_in(monkeypatch, bs, "subprocess.Popen", popen)
         monkeypatch.setattr(bs, "isolation_popen_kwargs", lambda: {"creationflags": 0x200}, raising=False)
         monkeypatch.setattr("nexus.util.process_group.isolation_popen_kwargs", lambda: {"creationflags": 0x200})
         bs.run_bounded(["x"], timeout=5, extra_creationflags=win_console.CREATE_NO_WINDOW)

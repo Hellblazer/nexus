@@ -16,7 +16,7 @@ import pytest
 
 from nexus.catalog.multi_document_write import MultiDocumentImportWriter
 from nexus.errors import BatchWriteFailedError, EngineOlderThanClientError
-from tests._time_seam import module_time
+from tests._module_seam import module_time
 
 _COLL = "code__fake__bge-base-en-v15-768__v1"
 _H = "f" * 64

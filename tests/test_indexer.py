@@ -11,7 +11,7 @@ from voyageai.object.embeddings import EmbeddingsObject
 
 from nexus.indexer import CredentialsMissingError, index_repository
 from tests.conftest import catalog_row_for_collection_name, make_vector_test_client
-from tests._time_seam import module_time
+from tests._module_seam import module_time
 
 # RDR-109 Phase 2: this file asserts cloud-mode canonical behavior
 # (voyage-* embedder names, canonical-set defaults). The cloud_mode

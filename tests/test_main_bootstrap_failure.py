@@ -51,7 +51,7 @@ import pytest
 
 from tests._engine_substrate import engine_argv, ensure_engine
 from tests.db._service_fixture import jvm_error_file_arg
-from tests._time_seam import module_time
+from tests._module_seam import module_time, setattr_in
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _JAR = _REPO_ROOT / "service" / "target" / "nexus-service-1.0-SNAPSHOT.jar"
@@ -533,8 +533,8 @@ def _capture_spawn(state: dict, tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
             seen["argv"] = argv
             seen["env"] = kwargs["env"]
 
-    monkeypatch.setattr(subprocess, "Popen", _Popen)
-    monkeypatch.setattr(shutil, "which", lambda _name: "/usr/bin/java")
+    setattr_in(monkeypatch, __name__, "subprocess.Popen", _Popen)
+    setattr_in(monkeypatch, __name__, "shutil.which", lambda _name: "/usr/bin/java")
     _spawn_engine(state, "db", "tok", tmp_path / "e.log")[1].close()
     return seen["argv"], seen["env"]
 

@@ -30,6 +30,7 @@ from nexus.health import (
     _probe_mcp_server,
     _resolve_mcp_binary,
 )
+from tests._module_seam import setattr_in
 
 
 def _write_fake_binary(path: Path, script: str) -> None:
@@ -219,7 +220,7 @@ class TestResolveMcpBinary:
         _write_fake_binary(installed_dir / "nx-mcp", _HEALTHY_NEXUS_RESPONSE)
         # own_venv_dir listed FIRST on PATH — a naive `which` would pick it.
         monkeypatch.setenv("PATH", f"{own_venv_dir}{os.pathsep}{installed_dir}")
-        monkeypatch.setattr("nexus.health.sys.prefix", str(own_venv_dir))
+        setattr_in(monkeypatch, "nexus.health", "sys.prefix", str(own_venv_dir))
 
         path, is_own_venv = _resolve_mcp_binary("nx-mcp")
 
@@ -243,13 +244,13 @@ class TestResolveMcpBinary:
         empty_dir = tmp_path / "empty-bin"
         empty_dir.mkdir()
         monkeypatch.setenv("PATH", f"{empty_dir}{os.pathsep}{installed_dir}")
-        monkeypatch.setattr("nexus.health.sys.prefix", str(tmp_path / "elsewhere"))
+        setattr_in(monkeypatch, "nexus.health", "sys.prefix", str(tmp_path / "elsewhere"))
 
         def _which_with_cwd_first(name, path=None):
             # The Windows behaviour: the cwd wins before the named directory.
             return str(planted)
 
-        monkeypatch.setattr("nexus.health.shutil.which", _which_with_cwd_first)
+        setattr_in(monkeypatch, "nexus.health", "shutil.which", _which_with_cwd_first)
 
         path, _ = _resolve_mcp_binary("nx-mcp")
 
@@ -275,7 +276,7 @@ class TestResolveMcpBinary:
         # sandbox bin, then the inherited host PATH tail.
         monkeypatch.setenv("PATH", f"{own_venv_dir}{os.pathsep}{foreign_dir}")
         monkeypatch.setenv("HOME", str(home))
-        monkeypatch.setattr("nexus.health.sys.prefix", str(own_venv_dir))
+        setattr_in(monkeypatch, "nexus.health", "sys.prefix", str(own_venv_dir))
 
         path, is_own_venv = _resolve_mcp_binary("nx-mcp")
 
@@ -296,7 +297,7 @@ class TestResolveMcpBinary:
         _write_fake_binary(installed_dir / "nx-mcp", _HEALTHY_NEXUS_RESPONSE)
         monkeypatch.setenv("PATH", f"{own_venv_dir}{os.pathsep}{installed_dir}")
         monkeypatch.setenv("HOME", str(home))
-        monkeypatch.setattr("nexus.health.sys.prefix", str(own_venv_dir))
+        setattr_in(monkeypatch, "nexus.health", "sys.prefix", str(own_venv_dir))
 
         path, is_own_venv = _resolve_mcp_binary("nx-mcp")
 
@@ -317,7 +318,7 @@ class TestResolveMcpBinary:
         _write_fake_binary(own_venv_dir / "nx-mcp", _HEALTHY_NEXUS_RESPONSE)
         _write_fake_binary(installed_dir / "nx-mcp", _HEALTHY_NEXUS_RESPONSE)
         monkeypatch.setenv("PATH", f"{own_venv_dir}{os.pathsep}{installed_dir}")
-        monkeypatch.setattr("nexus.health.sys.prefix", str(own_venv_dir))
+        setattr_in(monkeypatch, "nexus.health", "sys.prefix", str(own_venv_dir))
         monkeypatch.setattr(
             "nexus.health.Path.home",
             classmethod(lambda cls: (_ for _ in ()).throw(
@@ -346,7 +347,7 @@ class TestResolveMcpBinary:
         _write_fake_binary(system_dir / "nx-mcp", _HEALTHY_NEXUS_RESPONSE)
         monkeypatch.setenv("PATH", f"{own_venv_dir}{os.pathsep}{system_dir}")
         monkeypatch.setenv("HOME", str(home))
-        monkeypatch.setattr("nexus.health.sys.prefix", str(own_venv_dir))
+        setattr_in(monkeypatch, "nexus.health", "sys.prefix", str(own_venv_dir))
 
         path, is_own_venv = _resolve_mcp_binary("nx-mcp")
 
@@ -367,7 +368,7 @@ class TestResolveMcpBinary:
         _write_fake_binary(foreign_dir / "nx-mcp", _HEALTHY_NEXUS_RESPONSE)
         monkeypatch.setenv("PATH", str(foreign_dir))
         monkeypatch.setenv("HOME", str(home))
-        monkeypatch.setattr("nexus.health.sys.prefix", str(own_prefix))
+        setattr_in(monkeypatch, "nexus.health", "sys.prefix", str(own_prefix))
 
         path, is_own_venv = _resolve_mcp_binary("nx-mcp")
 
@@ -384,7 +385,7 @@ class TestResolveMcpBinary:
         own_venv_dir.mkdir()
         _write_fake_binary(own_venv_dir / "nx-mcp", _HEALTHY_NEXUS_RESPONSE)
         monkeypatch.setenv("PATH", str(own_venv_dir))
-        monkeypatch.setattr("nexus.health.sys.prefix", str(own_venv_dir))
+        setattr_in(monkeypatch, "nexus.health", "sys.prefix", str(own_venv_dir))
 
         path, is_own_venv = _resolve_mcp_binary("nx-mcp")
 
@@ -399,7 +400,7 @@ class TestResolveMcpBinary:
         _write_fake_binary(own_venv_dir / "nx-mcp", _HEALTHY_NEXUS_RESPONSE)
         _write_fake_binary(own_venv_dir / "nx-mcp-catalog", _HEALTHY_CATALOG_RESPONSE)
         monkeypatch.setenv("PATH", str(own_venv_dir))
-        monkeypatch.setattr("nexus.health.sys.prefix", str(own_venv_dir))
+        setattr_in(monkeypatch, "nexus.health", "sys.prefix", str(own_venv_dir))
 
         results = _check_mcp_entry_points()
 

@@ -32,6 +32,7 @@ from nexus.commands import daemon as daemon_mod
 from nexus.daemon import storage_service_daemon as ssd
 from nexus.daemon.service_registry import GracefulStopSend, LeaseRecord, ServiceRegistry, service_identity
 from tests.daemon._children import KILLED_RC, break_file_for, spawn_breakable
+from tests._module_seam import patch_in
 
 CREATE_NEW_PROCESS_GROUP = 0x00000200
 CREATE_NO_WINDOW = 0x08000000
@@ -178,7 +179,7 @@ def test_windows_stop_attaches_sends_and_confirms_by_the_supervisors_exit(
     api = _ConsoleApi(config_dir, deliver=True)
     with _reaped(_spawn(ignore_break=False, where=config_dir)) as sup:
         _write_lease(config_dir, supervisor_pid=sup.pid, engine_pid=None)
-        with patch("os.kill", wraps=os.kill) as spy:
+        with patch_in(("nexus.daemon.storage_service_daemon", "nexus.daemon.service_registry", "nexus.util.process_group"), "os.kill", wraps=os.kill) as spy:
             outcome = ssd.stop_storage_service(
                 config_dir=config_dir, platform="win32", console_api=api,
             )
@@ -262,7 +263,7 @@ def test_a_stop_from_another_session_is_refused_and_kills_nothing(
             assert sig == 0, f"a refused stop must not signal (sent {sig})"
             real_kill(pid, sig)  # the liveness probe is signal 0
 
-        with patch("os.kill", side_effect=only_probes):
+        with patch_in(("nexus.daemon.storage_service_daemon", "nexus.daemon.service_registry", "nexus.util.process_group"), "os.kill", side_effect=only_probes):
             outcome = ssd.stop_storage_service(
                 config_dir=config_dir, platform="win32", console_api=api,
             )

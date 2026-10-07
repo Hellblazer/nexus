@@ -24,6 +24,7 @@ import pytest
 
 from nexus.daemon import service_registry as sr
 from nexus.daemon import storage_service_daemon as ssd
+from tests._module_seam import setattr_in
 
 TIER = "storage_service"
 SCOPE = "S-1-5-21-111-222-333-1001"
@@ -89,7 +90,7 @@ def _measured_sharing_seconds(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
     start = clock.now
     with monkeypatch.context() as patched:
         patched.setattr(Path, "read_text", read_text)
-        patched.setattr(os, "replace", replace)
+        setattr_in(patched, "nexus.daemon.service_registry", "os.replace", replace)
         patched.setattr(Path, "unlink", unlink)
         reg.mark_shutting_down(record, budget=ssd._STOP_ELECTION_BUDGET)
         reg.relinquish(record, budget=ssd._STOP_ELECTION_BUDGET)

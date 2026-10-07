@@ -17,7 +17,7 @@ from unittest.mock import MagicMock, patch
 import httpx
 import pytest
 
-from tests._time_seam import patch_time
+from tests._module_seam import patch_time
 
 
 def _make_response(status_code: int = 200, json_data: dict | None = None) -> MagicMock:

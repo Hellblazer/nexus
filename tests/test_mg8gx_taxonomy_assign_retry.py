@@ -27,7 +27,7 @@ from unittest.mock import MagicMock
 import httpx
 
 from nexus import mcp_infra
-from tests._time_seam import module_time
+from tests._module_seam import module_time
 
 
 def _http_error(status: int) -> httpx.HTTPStatusError:

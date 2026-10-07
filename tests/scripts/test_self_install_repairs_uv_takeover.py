@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import json
 import os
-import sys
 from pathlib import Path
 
 import pytest
@@ -32,6 +31,7 @@ from _generation_harness import SAFE_BASE_PATH, stub_uv
 from nexus import install_layout
 from nexus.commands import self_cmd
 from nexus.commands.self_cmd import perform_self_install, repair_uv_takeover
+from tests._module_seam import setattr_in
 
 ENTRY_POINTS = ("nx", "nx-mcp")
 
@@ -246,7 +246,7 @@ def test_self_install_from_uvs_tree_repairs_instead_of_migrating(bed, monkeypatc
     # packaged-vs-checkout gate reads the DISTRIBUTION's install root, which
     # in a test is the dev venv -- so patch the gate the way self_cmd's own
     # docstring says to.
-    monkeypatch.setattr(sys, "prefix", str(legacy))
+    setattr_in(monkeypatch, ("nexus.commands.self_cmd", "nexus.upgrade_finish"), "sys.prefix", str(legacy))
     monkeypatch.setattr("nexus.upgrade_finish.running_from_tool_install", lambda: True)
 
     result = perform_self_install()

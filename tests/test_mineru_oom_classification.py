@@ -19,6 +19,7 @@ from nexus.pdf_extractor import (
     MineruMemoryError,
     PDFExtractor,
 )
+from tests._module_seam import patch_in
 
 
 # ── worker script carries the MemoryError -> sentinel exit ───────────
@@ -45,7 +46,7 @@ def _run_with_returncode(returncode: int, *, ceiling: bool):
     proc = MagicMock(pid=4321)
     proc.wait.return_value = returncode
     with contextlib.ExitStack() as stack:
-        stack.enter_context(patch("subprocess.Popen", return_value=proc))
+        stack.enter_context(patch_in("nexus.pdf_extractor", "subprocess.Popen", return_value=proc))
         stack.enter_context(patch("nexus.util.process_group.safe_killpg"))
         # nexus-5ny9r: the sibling sweeps by the recorded group id, and the
         # mocked Popen hands the worker a real int pid — unpatched, this
@@ -60,7 +61,7 @@ def _run_with_returncode(returncode: int, *, ceiling: bool):
         ))
         if ceiling:
             # Ceiling is only applied (and the flag only set) on Linux.
-            stack.enter_context(patch("sys.platform", "linux"))
+            stack.enter_context(patch_in("nexus.pdf_extractor", "sys.platform", "linux"))
         return ext._mineru_run_subprocess(Path("/tmp/does-not-matter.pdf"), 0, 1)
 
 
@@ -87,7 +88,7 @@ def test_windows_shaped_kill_tree_failure_falls_back_to_proc_kill() -> None:
     # test's subject.
     proc.wait.side_effect = [subprocess.TimeoutExpired(cmd="worker", timeout=1), 0]
     with contextlib.ExitStack() as stack:
-        stack.enter_context(patch("subprocess.Popen", return_value=proc))
+        stack.enter_context(patch_in("nexus.pdf_extractor", "subprocess.Popen", return_value=proc))
         stack.enter_context(patch("nexus.util.process_group.kill_tree", return_value=False))
         stack.enter_context(patch("nexus.util.process_group.safe_killpg_group"))
         stack.enter_context(patch(
@@ -110,7 +111,7 @@ def test_an_interrupted_wait_still_kills_the_worker_tree() -> None:
     proc = MagicMock(pid=4321)
     proc.wait.side_effect = KeyboardInterrupt()
     with contextlib.ExitStack() as stack:
-        stack.enter_context(patch("subprocess.Popen", return_value=proc))
+        stack.enter_context(patch_in("nexus.pdf_extractor", "subprocess.Popen", return_value=proc))
         kill_tree = stack.enter_context(
             patch("nexus.util.process_group.kill_tree", return_value=True),
         )
@@ -263,7 +264,7 @@ def _run_capturing_popen(*, ceiling_mb: int, platform: str, start=0, end=1):
         return -9
     proc.wait.side_effect = _wait
     with contextlib.ExitStack() as stack:
-        mock_popen = stack.enter_context(patch("subprocess.Popen", return_value=proc))
+        mock_popen = stack.enter_context(patch_in("nexus.pdf_extractor", "subprocess.Popen", return_value=proc))
         stack.enter_context(patch("nexus.util.process_group.safe_killpg"))
         # nexus-5ny9r: the sibling sweeps by the recorded group id, and the
         # mocked Popen hands the worker a real int pid — unpatched, this
@@ -275,7 +276,7 @@ def _run_capturing_popen(*, ceiling_mb: int, platform: str, start=0, end=1):
         stack.enter_context(patch(
             "nexus.config.get_mineru_page_timeout_s", return_value=10,
         ))
-        stack.enter_context(patch("sys.platform", platform))
+        stack.enter_context(patch_in("nexus.pdf_extractor", "sys.platform", platform))
         with pytest.raises(RuntimeError) as exc_info:
             ext._mineru_run_subprocess(Path("/tmp/x.pdf"), start, end)
     return ext, mock_popen, proc, exc_info.value
@@ -330,7 +331,7 @@ def test_per_page_timeout_scales_for_whole_doc_batch() -> None:
     proc.wait.side_effect = _wait
 
     with contextlib.ExitStack() as stack:
-        stack.enter_context(patch("subprocess.Popen", return_value=proc))
+        stack.enter_context(patch_in("nexus.pdf_extractor", "subprocess.Popen", return_value=proc))
         stack.enter_context(patch("nexus.util.process_group.safe_killpg"))
         # nexus-5ny9r: the sibling sweeps by the recorded group id, and the
         # mocked Popen hands the worker a real int pid — unpatched, this
@@ -361,7 +362,7 @@ def test_whole_doc_batch_without_total_pages_falls_back_to_one_page() -> None:
     proc.wait.side_effect = _wait
 
     with contextlib.ExitStack() as stack:
-        stack.enter_context(patch("subprocess.Popen", return_value=proc))
+        stack.enter_context(patch_in("nexus.pdf_extractor", "subprocess.Popen", return_value=proc))
         stack.enter_context(patch("nexus.util.process_group.safe_killpg"))
         # nexus-5ny9r: the sibling sweeps by the recorded group id, and the
         # mocked Popen hands the worker a real int pid — unpatched, this

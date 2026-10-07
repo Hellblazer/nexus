@@ -27,6 +27,7 @@ from structlog.testing import capture_logs
 
 from nexus import _mineru_spawn
 from nexus.config import _read_live_mineru_port as _live_port
+from tests._module_seam import setattr_in
 
 
 @pytest.fixture(autouse=True)
@@ -290,7 +291,7 @@ def test_mineru_start_binds_configured_port_not_random_free_port(monkeypatch) ->
         captured_cmd["cmd"] = cmd
         return _FakeProc()
 
-    monkeypatch.setattr(mineru_mod.subprocess, "Popen", _fake_popen)
+    setattr_in(monkeypatch, (mineru_mod, "nexus._mineru_spawn"), "subprocess.Popen", _fake_popen)
     monkeypatch.setattr(mineru_mod, "_write_pid_file", lambda *a, **kw: None)
 
     class _FakeResp:

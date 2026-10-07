@@ -36,6 +36,7 @@ import pytest
 
 import nexus.aspect_extractor as ax
 import nexus.pdeathsig as pdeathsig
+from tests._module_seam import setattr_in
 
 
 def _pid_alive(pid: int) -> bool:
@@ -226,7 +227,7 @@ def test_run_claude_isolated_arms_pdeathsig_preexec(monkeypatch) -> None:
         captured.update(kw)
         return _Reaped()
 
-    monkeypatch.setattr(ax.subprocess, "Popen", _spy_popen)
+    setattr_in(monkeypatch, ax, "subprocess.Popen", _spy_popen)
     ax._run_claude_isolated("x", timeout=1, _argv=["python", "-c", "pass"])
     assert captured.get("start_new_session") is True
     if pdeathsig.LIBC is not None:
@@ -259,7 +260,7 @@ def test_run_claude_isolated_redirects_stdin_from_file_not_pipe(monkeypatch) -> 
         captured["popen_kwargs"] = kw
         return _Reaped()
 
-    monkeypatch.setattr(ax.subprocess, "Popen", _spy_popen)
+    setattr_in(monkeypatch, ax, "subprocess.Popen", _spy_popen)
     ax._run_claude_isolated("race-free-prompt", timeout=1, _argv=["python", "-c", "pass"])
 
     stdin_arg = captured["popen_kwargs"].get("stdin")
@@ -301,7 +302,7 @@ def test_default_argv_carries_strict_mcp_config(monkeypatch) -> None:
         captured_argv.append(argv)
         return _Reaped()
 
-    monkeypatch.setattr(ax.subprocess, "Popen", _spy_popen)
+    setattr_in(monkeypatch, ax, "subprocess.Popen", _spy_popen)
     ax._run_claude_isolated("x", timeout=1)  # no _argv -- exercises the real default
     assert len(captured_argv) == 1
     assert "--strict-mcp-config" in captured_argv[0], (
@@ -323,7 +324,7 @@ def test_default_argv_pins_the_config_model(monkeypatch) -> None:
         def communicate(self, *a, **k):
             return ('{"result": "{}"}', "")
 
-    monkeypatch.setattr(ax.subprocess, "Popen", lambda argv, **kw: captured.append(argv) or _Reaped())
+    setattr_in(monkeypatch, ax, "subprocess.Popen", lambda argv, **kw: captured.append(argv) or _Reaped())
     ax._run_claude_isolated("x", timeout=1, model="claude-haiku-4-5-20251001")
     ax._run_claude_isolated("x", timeout=1)
     assert captured[0][captured[0].index("--model") + 1] == "claude-haiku-4-5-20251001"

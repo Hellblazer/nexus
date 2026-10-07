@@ -325,6 +325,21 @@ ratchets the remaining sites (nexus-78blw; src-side by-value imports are
 nexus-grg79). Production modules resolve the dir at call time via
 `from nexus import config as _config` + `_config.nexus_config_dir()`.
 
+## Faking a stdlib function: patch the module's binding, never the stdlib module
+
+`patch("nexus.x.subprocess.run")`, `monkeypatch.setattr(mod.os, "kill", f)` and
+`patch("asyncio.create_subprocess_exec")` all replace the attribute on the one
+stdlib module the whole worker shares, so every thread and fixture teardown
+sees the fake while it is live (a fake `time.sleep` hung a substrate teardown's
+`subprocess.run` for 50 minutes, nexus-hkafl). Use `tests/_module_seam.py`:
+`patch_in("nexus.x", "subprocess.run", ...)` (context manager, decorator,
+`start()`), `setattr_in(monkeypatch, mod, "os.kill", f)`, `module_proxy` /
+`module_time` / `patch_time`. Name every module the code under test reaches
+the function through, as a tuple. A module that does `from subprocess import
+run` is patched as `mod.run`. `tests/test_module_seam.py` (`-m lint`) rejects
+the global forms; a site that must stay process-wide goes in its `ALLOWED`
+with the reason.
+
 ## Lint guard
 
 `tests/test_mode_declarations_are_explicit.py` enforces the convention. For every collected test whose source contains the regex `voyage-(context|code)-3`, it requires one of:

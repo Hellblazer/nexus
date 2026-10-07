@@ -30,6 +30,7 @@ import time
 from pathlib import Path
 
 import pytest
+from tests._module_seam import setattr_in
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -241,7 +242,7 @@ class TestKillOrphanTrackerPidsGoneShapes:
         def _gone(pid, sig):
             raise OSError(22, "The parameter is incorrect")  # the WinError 87 shape
 
-        monkeypatch.setattr(session.os, "kill", _gone)
+        setattr_in(monkeypatch, session, "os.kill", _gone)
         monkeypatch.setattr(session, "_is_pid_alive", lambda pid: False)
         assert session._kill_orphan_tracker_pids([4242], grace_seconds=0.0) == 0
 
@@ -254,7 +255,7 @@ class TestKillOrphanTrackerPidsGoneShapes:
 
         sigterms: list[int] = []
         hard: list[int] = []
-        monkeypatch.setattr(session.os, "kill", lambda pid, sig: sigterms.append(pid))
+        setattr_in(monkeypatch, session, "os.kill", lambda pid, sig: sigterms.append(pid))
         monkeypatch.setattr(session, "_is_pid_alive", lambda pid: True)
         monkeypatch.setattr(
             registry, "hard_kill_pid", lambda pid: hard.append(pid) or True
@@ -292,7 +293,7 @@ class TestKillOrphanTrackerPidsGoneShapes:
             if len(calls) > 1:  # the SIGKILL step: the pid is already gone
                 raise gone_exc
 
-        monkeypatch.setattr(session.os, "kill", _kill)
+        setattr_in(monkeypatch, session, "os.kill", _kill)
         monkeypatch.setattr(session, "_is_pid_alive", lambda pid: True)
         monkeypatch.setattr(
             registry, "hard_kill_pid",

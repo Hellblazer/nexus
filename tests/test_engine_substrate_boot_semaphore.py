@@ -30,7 +30,7 @@ from tests._engine_substrate import (
     _boot_semaphore_slot,
     _try_acquire_boot_slot,
 )
-from tests._time_seam import patch_time
+from tests._module_seam import patch_time
 
 
 @pytest.fixture

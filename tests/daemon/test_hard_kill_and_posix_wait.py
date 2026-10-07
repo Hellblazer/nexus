@@ -17,38 +17,38 @@ from __future__ import annotations
 
 import errno
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
 from nexus.daemon import service_registry as sr
 from nexus.daemon import storage_service_daemon as ssd
+from tests._module_seam import patch_in
 
 
 class TestOnlyGonePidErrorsAreSwallowed:
     def test_a_bad_signal_number_is_not_a_dead_process_on_posix(self) -> None:
-        with patch("os.kill", side_effect=OSError(errno.EINVAL, "Invalid argument")):
+        with patch_in("nexus.daemon.service_registry", "os.kill", side_effect=OSError(errno.EINVAL, "Invalid argument")):
             with pytest.raises(OSError, match="Invalid argument"):
                 sr.hard_kill_pid(4242, platform="linux")
 
     def test_the_same_errno_is_a_gone_pid_on_windows(self) -> None:
         # Non-vacuity for the test above: EINVAL IS swallowed where it means WinError 87.
-        with patch("os.kill", side_effect=OSError(errno.EINVAL, "The parameter is incorrect")):
+        with patch_in("nexus.daemon.service_registry", "os.kill", side_effect=OSError(errno.EINVAL, "The parameter is incorrect")):
             assert sr.hard_kill_pid(4242, platform="win32") is False
 
     def test_an_unrelated_windows_error_propagates(self) -> None:
-        with patch("os.kill", side_effect=OSError(errno.EIO, "I/O error")):
+        with patch_in("nexus.daemon.service_registry", "os.kill", side_effect=OSError(errno.EIO, "I/O error")):
             with pytest.raises(OSError, match="I/O error"):
                 sr.hard_kill_pid(4242, platform="win32")
 
     @pytest.mark.parametrize("platform", ["linux", "win32"])
     def test_a_foreign_process_is_reported_not_raised_on_both(self, platform: str) -> None:
-        with patch("os.kill", side_effect=PermissionError(13, "access denied")):
+        with patch_in("nexus.daemon.service_registry", "os.kill", side_effect=PermissionError(13, "access denied")):
             assert sr.hard_kill_pid(4242, platform=platform) is False
 
     @pytest.mark.parametrize("platform", ["linux", "win32"])
     def test_a_delivered_kill_is_true(self, platform: str) -> None:
-        with patch("os.kill") as kill:
+        with patch_in("nexus.daemon.service_registry", "os.kill") as kill:
             assert sr.hard_kill_pid(4242, platform=platform) is True
         assert kill.call_args.args[0] == 4242
 

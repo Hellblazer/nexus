@@ -16,7 +16,7 @@ from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 
 import pytest
-from tests._time_seam import module_time
+from tests._module_seam import module_time
 
 
 # ── Fixtures and helpers ─────────────────────────────────────────────────────

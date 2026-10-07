@@ -26,6 +26,7 @@ import json
 from unittest.mock import AsyncMock, MagicMock, patch, call
 
 import pytest
+from tests._module_seam import patch_in
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────
@@ -132,7 +133,7 @@ class TestEventLoopSafety:
 
         proc.stdout.read = yielding_stdout_read
 
-        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+        with patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
             counter_task = asyncio.create_task(counter())
             await claude_dispatch("prompt", _SIMPLE_SCHEMA)
             await counter_task
@@ -152,7 +153,7 @@ class TestEventLoopSafety:
         proc = _make_proc()
 
         with patch("subprocess.run", side_effect=lambda *a, **kw: sync_calls.append(a)), \
-             patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+             patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
             await claude_dispatch("prompt", _SIMPLE_SCHEMA)
 
         assert not sync_calls, (
@@ -169,7 +170,7 @@ class TestEventLoopSafety:
         proc = _make_proc()
 
         with patch("subprocess.Popen", side_effect=lambda *a, **kw: popen_calls.append(a)), \
-             patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+             patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
             await claude_dispatch("prompt", _SIMPLE_SCHEMA)
 
         assert not popen_calls, "subprocess.Popen was called — blocks event loop"
@@ -193,7 +194,7 @@ class TestNoAuthCheck:
                 auth_invocations.append(args)
             return proc
 
-        with patch("asyncio.create_subprocess_exec", side_effect=intercept):
+        with patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", side_effect=intercept):
             await claude_dispatch("prompt", _SIMPLE_SCHEMA)
 
         assert not auth_invocations, (
@@ -245,7 +246,7 @@ class TestOptInToolAccess:
             captured.append(args)
             return proc
 
-        with patch("asyncio.create_subprocess_exec", side_effect=intercept):
+        with patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", side_effect=intercept):
             await claude_dispatch("prompt", _SIMPLE_SCHEMA)
 
         argv = captured[0]
@@ -281,7 +282,7 @@ class TestOptInToolAccess:
             captured.append(args)
             return proc
 
-        with patch("asyncio.create_subprocess_exec", side_effect=intercept):
+        with patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", side_effect=intercept):
             await claude_dispatch(
                 "prompt", _SIMPLE_SCHEMA,
                 allowed_tools=["Read", "Grep", "mcp__nexus"],
@@ -308,7 +309,7 @@ class TestOptInToolAccess:
             return proc
 
         servers = {"nexus": {"command": "nx-mcp", "args": []}}
-        with patch("asyncio.create_subprocess_exec", side_effect=intercept):
+        with patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", side_effect=intercept):
             await claude_dispatch(
                 "prompt", _SIMPLE_SCHEMA, mcp_servers=servers,
             )
@@ -343,7 +344,7 @@ class TestOptInToolAccess:
             captured.append(args)
             return proc
 
-        with patch("asyncio.create_subprocess_exec", side_effect=intercept):
+        with patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", side_effect=intercept):
             await call_operator()
 
         assert captured, "operator never reached create_subprocess_exec"
@@ -365,7 +366,7 @@ class TestOptInToolAccess:
         payload = {"result": "ok"}
         proc = _make_proc(stdout=json.dumps(payload).encode())
 
-        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+        with patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
             result = await claude_dispatch(
                 "prompt", _SIMPLE_SCHEMA,
                 allowed_tools=["Read"],
@@ -391,7 +392,7 @@ class TestSubprocessContract:
             captured.append((args, kwargs))
             return proc
 
-        with patch("asyncio.create_subprocess_exec", side_effect=intercept):
+        with patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", side_effect=intercept):
             await claude_dispatch("prompt", _SIMPLE_SCHEMA)
 
         assert captured, "asyncio.create_subprocess_exec was never called"
@@ -408,7 +409,7 @@ class TestSubprocessContract:
             captured.append(args)
             return proc
 
-        with patch("asyncio.create_subprocess_exec", side_effect=intercept):
+        with patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", side_effect=intercept):
             await claude_dispatch("prompt", _SIMPLE_SCHEMA)
 
         assert captured[0][0] == "claude", (
@@ -432,7 +433,7 @@ class TestSubprocessContract:
             return proc
 
         with (
-            patch("asyncio.create_subprocess_exec", side_effect=intercept),
+            patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", side_effect=intercept),
             patch("nexus.session.read_claude_session_id", return_value="parent-uuid-from-flat-file"),
         ):
             await claude_dispatch("prompt", _SIMPLE_SCHEMA)
@@ -460,7 +461,7 @@ class TestSubprocessContract:
             return proc
 
         with (
-            patch("asyncio.create_subprocess_exec", side_effect=intercept),
+            patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", side_effect=intercept),
             patch("nexus.session.read_claude_session_id", return_value=None),
         ):
             await claude_dispatch("prompt", _SIMPLE_SCHEMA)
@@ -491,7 +492,7 @@ class TestSubprocessContract:
             return {"session_token": f"tok-for-{session_id}", "expires_in_seconds": 3600}
 
         with (
-            patch("asyncio.create_subprocess_exec", side_effect=intercept),
+            patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", side_effect=intercept),
             patch("nexus.db.t1.mint_t1_session_token", side_effect=_fake_mint),
         ):
             await claude_dispatch("prompt", _SIMPLE_SCHEMA)
@@ -524,7 +525,7 @@ class TestSubprocessContract:
             return {"session_token": f"tok-for-{session_id}", "expires_in_seconds": 3600}
 
         with (
-            patch("asyncio.create_subprocess_exec", side_effect=intercept),
+            patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", side_effect=intercept),
             patch("nexus.db.t1.mint_t1_session_token", side_effect=_fake_mint),
         ):
             await claude_dispatch(
@@ -551,7 +552,7 @@ class TestSubprocessContract:
             captured.append(args)
             return proc
 
-        with patch("asyncio.create_subprocess_exec", side_effect=intercept):
+        with patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", side_effect=intercept):
             await claude_dispatch("prompt", _SIMPLE_SCHEMA)
 
         assert "-p" in captured[0], f"'-p' flag missing from {captured[0]}"
@@ -579,7 +580,7 @@ class TestSubprocessContract:
             captured.append(stdin_file.read())
             return proc
 
-        with patch("asyncio.create_subprocess_exec", side_effect=intercept):
+        with patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", side_effect=intercept):
             await claude_dispatch("my unique prompt text", _SIMPLE_SCHEMA)
 
         assert captured, "create_subprocess_exec was never called"
@@ -618,7 +619,7 @@ class TestSubprocessContract:
             captured_kwargs.append(stdin_file.read())
             return proc
 
-        with patch("asyncio.create_subprocess_exec", side_effect=intercept):
+        with patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", side_effect=intercept):
             task = asyncio.create_task(claude_dispatch("prompt", _SIMPLE_SCHEMA))
             try:
                 for _ in range(200):
@@ -645,7 +646,7 @@ class TestSubprocessContract:
         payload = {"extractions": [{"title": "Foo"}]}
         proc = _make_proc(stdout=json.dumps(payload).encode())
 
-        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+        with patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
             result = await claude_dispatch("prompt", _SIMPLE_SCHEMA)
 
         assert result == payload
@@ -683,7 +684,7 @@ class TestPromptDeliveryRaceFree:
             captured_kwargs.append(kwargs)
             return proc
 
-        with patch("asyncio.create_subprocess_exec", side_effect=intercept):
+        with patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", side_effect=intercept):
             await claude_dispatch("prompt", _SIMPLE_SCHEMA)
 
         assert captured_kwargs, "create_subprocess_exec was never called"
@@ -827,7 +828,7 @@ class TestPromptFileCleanup:
             captured_paths.append(Path(kwargs["stdin"].name))
             return proc
 
-        with patch("asyncio.create_subprocess_exec", side_effect=intercept):
+        with patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", side_effect=intercept):
             await claude_dispatch("prompt", _SIMPLE_SCHEMA)
 
         assert captured_paths, "create_subprocess_exec was never called"
@@ -849,7 +850,7 @@ class TestPromptFileCleanup:
             captured_paths.append(Path(kwargs["stdin"].name))
             return proc
 
-        with patch("asyncio.create_subprocess_exec", side_effect=intercept):
+        with patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", side_effect=intercept):
             with pytest.raises(OperatorError):
                 await claude_dispatch("prompt", _SIMPLE_SCHEMA)
 
@@ -886,7 +887,7 @@ class TestPromptFileCleanup:
             captured_paths.append(Path(kwargs["stdin"].name))
             return proc
 
-        with patch("asyncio.create_subprocess_exec", side_effect=intercept):
+        with patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", side_effect=intercept):
             with pytest.raises(OperatorTimeoutError):
                 await claude_dispatch("prompt", _SIMPLE_SCHEMA, timeout=0.01)
 
@@ -918,7 +919,7 @@ class TestPromptFileCleanup:
 
         with (
             patch("nexus.operators.dispatch._write_prompt_file", side_effect=_spying_write_prompt_file),
-            patch("asyncio.create_subprocess_exec", side_effect=_boom),
+            patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", side_effect=_boom),
         ):
             from nexus.operators.dispatch import claude_dispatch
 
@@ -952,7 +953,7 @@ class TestModelAndOperatorKwargs:
             captured.append(args)
             return proc
 
-        with patch("asyncio.create_subprocess_exec", side_effect=intercept):
+        with patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", side_effect=intercept):
             await claude_dispatch("prompt", _SIMPLE_SCHEMA)
 
         assert "--model" not in captured[0], (
@@ -972,7 +973,7 @@ class TestModelAndOperatorKwargs:
             captured.append(args)
             return proc
 
-        with patch("asyncio.create_subprocess_exec", side_effect=intercept):
+        with patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", side_effect=intercept):
             await claude_dispatch("prompt", _SIMPLE_SCHEMA, model="haiku")
 
         argv = captured[0]
@@ -997,7 +998,7 @@ class TestModelAndOperatorKwargs:
         from nexus.operators.dispatch import claude_dispatch
 
         proc = _make_proc()
-        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+        with patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
             await claude_dispatch("prompt", _SIMPLE_SCHEMA)
 
         # The real assertion: dispatch.py's own source has no IMPORT
@@ -1034,7 +1035,7 @@ class TestModelAndOperatorKwargs:
             returncode=1,
         )
 
-        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+        with patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
             with pytest.raises(OperatorError) as exc_info:
                 await claude_dispatch(
                     "prompt", _SIMPLE_SCHEMA,
@@ -1060,7 +1061,7 @@ class TestModelAndOperatorKwargs:
             stdout=b"", stderr=b"some unrelated failure", returncode=1,
         )
 
-        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+        with patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
             with pytest.raises(OperatorError) as exc_info:
                 await claude_dispatch("prompt", _SIMPLE_SCHEMA)
 
@@ -1111,7 +1112,7 @@ class TestModelAndOperatorKwargs:
             captured.append(args)
             return proc
 
-        with patch("asyncio.create_subprocess_exec", side_effect=intercept):
+        with patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", side_effect=intercept):
             await claude_dispatch(
                 "prompt", _SIMPLE_SCHEMA, model=alias, usage_sink=sink,
             )
@@ -1140,7 +1141,7 @@ class TestModelAndOperatorKwargs:
             returncode=1,
         )
 
-        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+        with patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
             with patch("nexus.operators.dispatch._log") as mock_log:
                 with pytest.raises(OperatorError):
                     await claude_dispatch(
@@ -1166,7 +1167,7 @@ class TestModelAndOperatorKwargs:
 
         proc = _make_proc(stdout=b"", stderr=b"some unrelated failure", returncode=1)
 
-        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+        with patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
             with patch("nexus.operators.dispatch._log") as mock_log:
                 with pytest.raises(OperatorError):
                     await claude_dispatch("prompt", _SIMPLE_SCHEMA)
@@ -1195,7 +1196,7 @@ class TestModelAndOperatorKwargs:
             captured.append(args)
             return proc
 
-        with patch("asyncio.create_subprocess_exec", side_effect=intercept):
+        with patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", side_effect=intercept):
             with patch("nexus.operators.dispatch._log") as mock_log:
                 await claude_dispatch(
                     "prompt", _SIMPLE_SCHEMA, model="   ", operator="operator_extract",
@@ -1218,7 +1219,7 @@ class TestModelAndOperatorKwargs:
 
         proc = _make_proc(stdout=b"", stderr=b"some unrelated failure", returncode=1)
 
-        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+        with patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
             with pytest.raises(OperatorError) as exc_info:
                 await claude_dispatch(
                     "prompt", _SIMPLE_SCHEMA, model="", operator="operator_rank",
@@ -1253,7 +1254,7 @@ class TestMaxBudgetUsd:
             captured.append(args)
             return proc
 
-        with patch("asyncio.create_subprocess_exec", side_effect=intercept):
+        with patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", side_effect=intercept):
             await claude_dispatch("prompt", _SIMPLE_SCHEMA)
 
         assert "--max-budget-usd" not in captured[0], (
@@ -1273,7 +1274,7 @@ class TestMaxBudgetUsd:
             captured.append(args)
             return proc
 
-        with patch("asyncio.create_subprocess_exec", side_effect=intercept):
+        with patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", side_effect=intercept):
             await claude_dispatch("prompt", _SIMPLE_SCHEMA, max_budget_usd=1.5)
 
         argv = captured[0]
@@ -1298,7 +1299,7 @@ class TestMaxBudgetUsd:
             captured.append(args)
             return proc
 
-        with patch("asyncio.create_subprocess_exec", side_effect=intercept):
+        with patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", side_effect=intercept):
             await claude_dispatch("prompt", _SIMPLE_SCHEMA, max_budget_usd=0.000001)
 
         argv = captured[0]
@@ -1323,7 +1324,7 @@ class TestMaxBudgetUsd:
             captured.append(args)
             return proc
 
-        with patch("asyncio.create_subprocess_exec", side_effect=intercept):
+        with patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", side_effect=intercept):
             await claude_dispatch("prompt", _SIMPLE_SCHEMA)
 
         argv = captured[0]
@@ -1345,7 +1346,7 @@ class TestMaxBudgetUsd:
             captured.append(args)
             return proc
 
-        with patch("asyncio.create_subprocess_exec", side_effect=intercept):
+        with patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", side_effect=intercept):
             await claude_dispatch("prompt", _SIMPLE_SCHEMA, max_budget_usd=0.5)
 
         argv = captured[0]
@@ -1363,7 +1364,7 @@ class TestMaxBudgetUsd:
 
         monkeypatch.setenv("NX_DISPATCH_MAX_BUDGET_USD", "not-a-number")
 
-        with patch("asyncio.create_subprocess_exec", new=AsyncMock()) as mock_spawn:
+        with patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", new=AsyncMock()) as mock_spawn:
             with pytest.raises(ValueError, match="NX_DISPATCH_MAX_BUDGET_USD"):
                 await claude_dispatch("prompt", _SIMPLE_SCHEMA)
 
@@ -1379,13 +1380,13 @@ class TestMaxBudgetUsd:
         from nexus.operators.dispatch import claude_dispatch
 
         monkeypatch.setenv("NX_DISPATCH_MAX_BUDGET_USD", bad)
-        with patch("asyncio.create_subprocess_exec", new=AsyncMock()) as mock_spawn:
+        with patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", new=AsyncMock()) as mock_spawn:
             with pytest.raises(ValueError, match="finite positive"):
                 await claude_dispatch("prompt", _SIMPLE_SCHEMA)
         mock_spawn.assert_not_called()
 
         monkeypatch.delenv("NX_DISPATCH_MAX_BUDGET_USD")
-        with patch("asyncio.create_subprocess_exec", new=AsyncMock()) as mock_spawn:
+        with patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", new=AsyncMock()) as mock_spawn:
             with pytest.raises(ValueError, match="finite positive"):
                 await claude_dispatch("prompt", _SIMPLE_SCHEMA,
                                       max_budget_usd=float(bad))
@@ -1407,7 +1408,7 @@ class TestMaxBudgetUsd:
             captured.append(args)
             return proc
 
-        with patch("asyncio.create_subprocess_exec", side_effect=intercept):
+        with patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", side_effect=intercept):
             await claude_dispatch("prompt", _SIMPLE_SCHEMA)
 
         assert "--max-budget-usd" not in captured[0]
@@ -1445,7 +1446,7 @@ class TestMaxBudgetUsd:
             return "/fake/budget/log/path.log"
 
         with (
-            patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)),
+            patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)),
             patch("nexus.operators.dispatch._persist_budget_log", side_effect=fake_persist),
         ):
             with pytest.raises(OperatorBudgetExceededError) as exc_info:
@@ -1477,7 +1478,7 @@ class TestMaxBudgetUsd:
             returncode=1,
         )
 
-        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+        with patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
             with pytest.raises(OperatorError) as exc_info:
                 await claude_dispatch("prompt", _SIMPLE_SCHEMA)
 
@@ -1503,7 +1504,7 @@ class TestMaxBudgetUsd:
             stdout=b"", stderr=b"rate limit exceeded", returncode=1,
         )
 
-        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+        with patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
             with pytest.raises(OperatorError) as exc_info:
                 await claude_dispatch(
                     "prompt", _SIMPLE_SCHEMA, max_budget_usd=5.0,
@@ -1530,7 +1531,7 @@ class TestMaxBudgetUsd:
             captured.append(args)
             return proc
 
-        with patch("asyncio.create_subprocess_exec", side_effect=intercept):
+        with patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", side_effect=intercept):
             with pytest.raises(OperatorError) as exc_info:
                 await claude_dispatch(
                     "prompt", _SIMPLE_SCHEMA, max_budget_usd=1.0,
@@ -1780,7 +1781,7 @@ class TestDispatchSessionClose:
             return {"session_token": f"tok-for-{session_id}"}
 
         with (
-            patch("asyncio.create_subprocess_exec", side_effect=intercept),
+            patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", side_effect=intercept),
             patch("nexus.db.t1.mint_t1_session_token", side_effect=_fake_mint),
             patch("nexus.db.http_scratch_store.HttpScratchStore", _FakeScratchStore),
             patch("nexus.db.t2.http_token_store.HttpTokenStore", _FakeTokenStore),
@@ -1828,7 +1829,7 @@ class TestDispatchSessionClose:
             return proc
 
         with (
-            patch("asyncio.create_subprocess_exec", side_effect=intercept),
+            patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", side_effect=intercept),
             patch("nexus.db.http_scratch_store.HttpScratchStore", _FakeScratchStore),
             patch("nexus.db.t2.http_token_store.HttpTokenStore", _FakeTokenStore),
         ):
@@ -1870,7 +1871,7 @@ class TestDispatchSessionClose:
                 pass
 
         with (
-            patch("asyncio.create_subprocess_exec", side_effect=intercept),
+            patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", side_effect=intercept),
             patch("nexus.db.t1.mint_t1_session_token", side_effect=_fake_mint),
             patch("nexus.db.http_scratch_store.HttpScratchStore", _FailingScratchStore),
             patch("nexus.db.t2.http_token_store.HttpTokenStore", _FakeTokenStore),
@@ -1927,7 +1928,7 @@ class TestDispatchSessionClose:
                 raise RuntimeError("token close: storage service unreachable")
 
         with (
-            patch("asyncio.create_subprocess_exec", side_effect=intercept),
+            patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", side_effect=intercept),
             patch("nexus.db.t1.mint_t1_session_token", side_effect=_fake_mint),
             patch("nexus.db.http_scratch_store.HttpScratchStore", _FakeScratchStore),
             patch("nexus.db.t2.http_token_store.HttpTokenStore", _FailingTokenStore),
@@ -1966,7 +1967,7 @@ class TestDispatchSessionClose:
             raise OSError("fork failed: resource temporarily unavailable")
 
         with (
-            patch("asyncio.create_subprocess_exec", side_effect=_boom),
+            patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", side_effect=_boom),
             patch("nexus.db.t1.mint_t1_session_token", side_effect=_fake_mint),
             patch("nexus.db.http_scratch_store.HttpScratchStore", _FakeScratchStore),
             patch("nexus.db.t2.http_token_store.HttpTokenStore", _FakeTokenStore),
@@ -2012,7 +2013,7 @@ class TestErrorHandling:
         proc.stdout.read = hang
         proc.stderr.read = hang
 
-        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+        with patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
             with pytest.raises(OperatorTimeoutError):
                 await claude_dispatch("prompt", _SIMPLE_SCHEMA, timeout=0.01)
 
@@ -2051,7 +2052,7 @@ class TestErrorHandling:
 
         proc.wait = wait_side_effect
 
-        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+        with patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
             with pytest.raises(OperatorTimeoutError):
                 # Outer bound: on a real regression (wait() back outside the
                 # guard) the dispatch hangs for the mock's 999s sleep; fail
@@ -2069,7 +2070,7 @@ class TestErrorHandling:
 
         proc = _make_proc(stdout=b'', returncode=1, stderr=b'rate limit exceeded')
 
-        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+        with patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
             with pytest.raises(OperatorError, match="rate limit exceeded"):
                 await claude_dispatch("prompt", _SIMPLE_SCHEMA)
 
@@ -2091,7 +2092,7 @@ class TestErrorHandling:
             stderr=b'',
         )
 
-        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+        with patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
             with pytest.raises(OperatorError, match="error_during_execution"):
                 await claude_dispatch("prompt", _SIMPLE_SCHEMA)
 
@@ -2121,7 +2122,7 @@ class TestErrorHandling:
         ])
         proc = _make_proc(stdout=ndjson.encode(), returncode=1, stderr=b"")
 
-        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+        with patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
             with pytest.raises(OperatorError) as exc:
                 await claude_dispatch("prompt", _SIMPLE_SCHEMA)
 
@@ -2151,7 +2152,7 @@ class TestErrorHandling:
             stderr=b'stderr-diagnosis',
         )
 
-        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+        with patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
             with pytest.raises(OperatorError) as exc:
                 await claude_dispatch("prompt", _SIMPLE_SCHEMA)
 
@@ -2170,7 +2171,7 @@ class TestErrorHandling:
 
         proc = _make_proc(stdout=b'', returncode=1, stderr=b'')
 
-        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+        with patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
             with pytest.raises(OperatorError, match="no output on stdout or stderr"):
                 await claude_dispatch("prompt", _SIMPLE_SCHEMA)
 
@@ -2192,7 +2193,7 @@ class TestErrorHandling:
             stdout=b'stdout-diagnosis', returncode=7, stderr=b'stderr-diagnosis',
         )
 
-        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+        with patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
             with patch("nexus.operators.dispatch._log") as mock_log:
                 with pytest.raises(OperatorError):
                     await claude_dispatch("prompt", _SIMPLE_SCHEMA)
@@ -2221,7 +2222,7 @@ class TestErrorHandling:
             stdout=long_diagnostic.encode(), returncode=1, stderr=b'',
         )
 
-        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+        with patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
             with patch("nexus.operators.dispatch._log") as mock_log:
                 with pytest.raises(OperatorError) as exc:
                     await claude_dispatch("prompt", _SIMPLE_SCHEMA)
@@ -2247,7 +2248,7 @@ class TestErrorHandling:
         oversized = "D" * (_LOG_STREAM_CAP + 500)
         proc = _make_proc(stdout=oversized.encode(), returncode=1, stderr=b'')
 
-        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+        with patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
             with patch("nexus.operators.dispatch._log") as mock_log:
                 with pytest.raises(OperatorError):
                     await claude_dispatch("prompt", _SIMPLE_SCHEMA)
@@ -2265,7 +2266,7 @@ class TestErrorHandling:
         exact = "D" * _LOG_STREAM_CAP
         proc = _make_proc(stdout=exact.encode(), returncode=1, stderr=b'')
 
-        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+        with patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
             with patch("nexus.operators.dispatch._log") as mock_log:
                 with pytest.raises(OperatorError):
                     await claude_dispatch("prompt", _SIMPLE_SCHEMA)
@@ -2281,7 +2282,7 @@ class TestErrorHandling:
 
         proc = _make_proc(stdout=b'not valid json {{{{')
 
-        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+        with patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
             with pytest.raises(OperatorOutputError):
                 await claude_dispatch("prompt", _SIMPLE_SCHEMA)
 
@@ -2314,7 +2315,7 @@ class TestErrorHandling:
         line2 = '{"type":"weird_unexpected_event","note":"THE-OFFENDING-CONTENT-MARKER"}'
         proc = _make_proc(stdout=(line1 + "\n" + line2).encode())
 
-        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+        with patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
             with pytest.raises(OperatorOutputError) as exc_info:
                 await claude_dispatch("prompt", _SIMPLE_SCHEMA)
 
@@ -2338,7 +2339,7 @@ class TestErrorHandling:
 
         proc = _make_proc(stdout=b'')
 
-        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+        with patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
             with pytest.raises(OperatorOutputError):
                 await claude_dispatch("prompt", _SIMPLE_SCHEMA)
 
@@ -2507,7 +2508,7 @@ class TestTimeoutPartialCapture:
             return "/fake/log/path.log"
 
         with (
-            patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)),
+            patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)),
             patch("nexus.operators.dispatch._persist_timeout_log", side_effect=fake_persist),
         ):
             with pytest.raises(OperatorTimeoutError) as exc_info:
@@ -2563,7 +2564,7 @@ def _wait_for_file_snippet(path: "pathlib.Path | str", max_wait: float = 30.0) -
 
 
 def _real_create_subprocess_exec_side_effect(script_path: str):
-    """Return a ``side_effect`` for ``patch("asyncio.create_subprocess_exec")``
+    """Return a ``side_effect`` for ``patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec")``
     that ignores the ``("claude", "-p", ...)`` argv ``claude_dispatch``
     hardcodes and instead really execs *script_path* under this same
     interpreter (``sys.executable``), forwarding every kwarg
@@ -2623,8 +2624,7 @@ class TestRealSubprocessDrain:
             "time.sleep(60)\n"  # never reaches a terminal 'result' event
         )
 
-        with patch(
-            "asyncio.create_subprocess_exec",
+        with patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec",
             side_effect=_real_create_subprocess_exec_side_effect(str(script)),
         ):
             with pytest.raises(OperatorTimeoutError) as exc_info:
@@ -2674,8 +2674,7 @@ class TestRealSubprocessDrain:
 
         TIMEOUT = 5.0
         t0 = time.monotonic()
-        with patch(
-            "asyncio.create_subprocess_exec",
+        with patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec",
             side_effect=_real_create_subprocess_exec_side_effect(str(script)),
         ):
             result = await claude_dispatch("prompt", _SIMPLE_SCHEMA, timeout=TIMEOUT)
@@ -2721,8 +2720,7 @@ class TestRealSubprocessDrain:
 
         TIMEOUT = 1.5
         t0 = time.monotonic()
-        with patch(
-            "asyncio.create_subprocess_exec",
+        with patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec",
             side_effect=_real_create_subprocess_exec_side_effect(str(script)),
         ):
             with pytest.raises(OperatorTimeoutError):
@@ -2789,8 +2787,7 @@ class TestRealSubprocessDrain:
         STALL = 2.0
         TIMEOUT = 3.0
 
-        with patch(
-            "asyncio.create_subprocess_exec",
+        with patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec",
             side_effect=_real_create_subprocess_exec_side_effect(str(script)),
         ):
             task = asyncio.ensure_future(
@@ -2855,11 +2852,10 @@ class TestRealSubprocessDrain:
                 phase_durations.append(time.monotonic() - t0)
 
         with (
-            patch(
-                "asyncio.create_subprocess_exec",
+            patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec",
                 side_effect=_real_create_subprocess_exec_side_effect(str(script)),
             ),
-            patch("asyncio.wait_for", new=_timed_wait_for),
+            patch_in("nexus.operators.dispatch", "asyncio.wait_for", new=_timed_wait_for),
         ):
             with pytest.raises(OperatorTimeoutError) as exc_info:
                 await claude_dispatch("prompt", _SIMPLE_SCHEMA, timeout=TIMEOUT)
@@ -2918,8 +2914,8 @@ class TestClaudeDispatchDeadline:
 
         deadline = time.monotonic() + 0.05
         with (
-            patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)),
-            patch("asyncio.wait_for", side_effect=_spy_wait_for),
+            patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)),
+            patch_in("nexus.operators.dispatch", "asyncio.wait_for", side_effect=_spy_wait_for),
         ):
             with pytest.raises(_dispatch_mod.OperatorTimeoutError):
                 await _dispatch_mod.claude_dispatch(
@@ -3974,7 +3970,7 @@ class TestFailureRecordAddressability:
         from nexus.operators.dispatch import claude_dispatch, OperatorError
 
         proc = _make_proc(stdout=b'model-ish error text', returncode=1, stderr=b'')
-        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+        with patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
             with pytest.raises(OperatorError) as exc:
                 await claude_dispatch("prompt", _SIMPLE_SCHEMA)
         msg = str(exc.value)
@@ -4002,8 +3998,7 @@ class TestFailureRecordAddressability:
         root.addHandler(handler)
         try:
             proc = _make_proc(stdout=b'boom', returncode=1, stderr=b'')
-            with patch(
-                "asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc),
+            with patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc),
             ):
                 with pytest.raises(OperatorError) as exc:
                     await claude_dispatch("prompt", _SIMPLE_SCHEMA)
@@ -4033,7 +4028,7 @@ class TestFailureRecordAddressability:
             root.removeHandler(h)
         try:
             proc = _make_proc(stdout=b'boom', returncode=1, stderr=b'')
-            with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+            with patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
                 with pytest.raises(OperatorError) as exc:
                     await claude_dispatch("prompt", _SIMPLE_SCHEMA)
         finally:
@@ -4056,7 +4051,7 @@ class TestRolledUpFailureDemotion:
         )
 
         proc = _make_proc(stdout=b'x', returncode=1, stderr=b'')
-        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+        with patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
             with patch("nexus.operators.dispatch._log") as mock_log:
                 with rolled_up_dispatch_failures():
                     with pytest.raises(OperatorError):
@@ -4069,7 +4064,7 @@ class TestRolledUpFailureDemotion:
         from nexus.operators.dispatch import claude_dispatch, OperatorError
 
         proc = _make_proc(stdout=b'x', returncode=1, stderr=b'')
-        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+        with patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
             with patch("nexus.operators.dispatch._log") as mock_log:
                 with pytest.raises(OperatorError):
                     await claude_dispatch("prompt", _SIMPLE_SCHEMA)
@@ -4465,7 +4460,7 @@ class TestClaudeDispatchUsageSink:
         from nexus.operators.dispatch import claude_dispatch
 
         proc = _make_proc(stdout=b'{"ok": true}')
-        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+        with patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
             result = await claude_dispatch("prompt", _SIMPLE_SCHEMA)
 
         assert result == {"ok": True}
@@ -4483,7 +4478,7 @@ class TestClaudeDispatchUsageSink:
         proc = _make_proc(stdout=raw)
 
         sink: list[DispatchUsage] = []
-        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+        with patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
             result = await claude_dispatch("prompt", _SIMPLE_SCHEMA, usage_sink=sink)
 
         assert result == {"ok": True}, "usage_sink must not change claude_dispatch's return contract"
@@ -4504,7 +4499,7 @@ class TestClaudeDispatchUsageSink:
 
         proc = _make_proc(stdout=b'{"ok": true}')
         sink: list[DispatchUsage] = []
-        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+        with patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
             result = await claude_dispatch("prompt", _SIMPLE_SCHEMA, usage_sink=sink)
 
         assert result == {"ok": True}
@@ -4550,7 +4545,7 @@ class TestUsageSinkAppendsBeforeSubsequentRaises:
         proc = _make_proc(stdout=ndjson.encode(), returncode=0, stderr=b"")
         sink: list[DispatchUsage] = []
 
-        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+        with patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
             with pytest.raises(OperatorError, match="rate limit exceeded"):
                 await claude_dispatch("prompt", _SIMPLE_SCHEMA, usage_sink=sink)
 
@@ -4580,7 +4575,7 @@ class TestUsageSinkAppendsBeforeSubsequentRaises:
         proc = _make_proc(stdout=ndjson.encode(), returncode=0, stderr=b"")
         sink: list[DispatchUsage] = []
 
-        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+        with patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
             with pytest.raises(OperatorOutputError, match="null structured_output"):
                 await claude_dispatch("prompt", _SIMPLE_SCHEMA, usage_sink=sink)
 
@@ -4599,7 +4594,7 @@ class TestUsageSinkAppendsBeforeSubsequentRaises:
         proc = _make_proc(stdout=b'not valid json {{{{', returncode=0, stderr=b"")
         sink: list[DispatchUsage] = []
 
-        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+        with patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
             with pytest.raises(OperatorOutputError, match="not valid JSON"):
                 await claude_dispatch("prompt", _SIMPLE_SCHEMA, usage_sink=sink)
 
@@ -4667,7 +4662,7 @@ class TestAmbientUsageSink:
         explicit_sink: list[DispatchUsage] = []
         ambient_sink: list[DispatchUsage] = []
 
-        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+        with patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
             with ambient_usage_sink(ambient_sink):
                 await claude_dispatch("prompt", _SIMPLE_SCHEMA, usage_sink=explicit_sink)
 
@@ -4700,7 +4695,7 @@ class TestAmbientUsageSink:
         async def _child() -> None:
             await claude_dispatch("prompt", _SIMPLE_SCHEMA)
 
-        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+        with patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
             with ambient_usage_sink(sink):
                 task = asyncio.create_task(_child())
                 await task
@@ -4727,7 +4722,7 @@ class TestAmbientUsageSink:
             ),
             returncode=0, stderr=b"",
         )
-        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc_a)):
+        with patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc_a)):
             with ambient_usage_sink(sink_a):
                 await claude_dispatch("prompt-a", _SIMPLE_SCHEMA)
 
@@ -4740,7 +4735,7 @@ class TestAmbientUsageSink:
             ),
             returncode=0, stderr=b"",
         )
-        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc_b)):
+        with patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc_b)):
             with ambient_usage_sink(sink_b):
                 await claude_dispatch("prompt-b", _SIMPLE_SCHEMA)
 
@@ -4767,7 +4762,7 @@ class TestAmbientUsageSink:
         )
         sink: list[DispatchUsage] = []
 
-        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+        with patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
             with ambient_usage_sink(sink):
                 result = await operator_summarize(content="some long content")
 
@@ -5134,7 +5129,7 @@ class TestIsolatedHermeticChild:
             captured.append(args)
             return proc
 
-        with patch("asyncio.create_subprocess_exec", side_effect=intercept):
+        with patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", side_effect=intercept):
             await claude_dispatch("prompt", _SIMPLE_SCHEMA, **kwargs)
         return list(captured[0])
 
@@ -5193,7 +5188,7 @@ class TestIsolatedHermeticChild:
             return {"session_token": f"tok-for-{session_id}", "expires_in_seconds": 3600}
 
         with (
-            patch("asyncio.create_subprocess_exec", side_effect=intercept),
+            patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", side_effect=intercept),
             patch("nexus.db.t1.mint_t1_session_token", side_effect=_fake_mint),
         ):
             await claude_dispatch(
@@ -5223,7 +5218,7 @@ class TestIsolatedHermeticChild:
             return {"session_token": "t", "expires_in_seconds": 3600}
 
         with (
-            patch("asyncio.create_subprocess_exec", side_effect=intercept),
+            patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", side_effect=intercept),
             patch("nexus.db.t1.mint_t1_session_token", side_effect=_fake_mint),
         ):
             await claude_dispatch("prompt", _SIMPLE_SCHEMA, isolated=True)
@@ -5287,7 +5282,7 @@ class TestJobHandleClosesOnEveryOutcome:
             stdout=b'{"structured_output": {"result": "ok"}}', returncode=0,
         )
         proc.pid = 4321
-        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+        with patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
             await claude_dispatch("prompt", _SIMPLE_SCHEMA, timeout=5)
         job = _job_handle_from(fake)
         assert fake.closed_handles.count(job) == 1, (
@@ -5304,7 +5299,7 @@ class TestJobHandleClosesOnEveryOutcome:
         fake = windows_shaped_dispatch
         proc = _make_proc(stdout=b"", returncode=1)
         proc.pid = 4321
-        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+        with patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
             with pytest.raises(OperatorError):
                 await claude_dispatch("prompt", _SIMPLE_SCHEMA, timeout=5)
         job = _job_handle_from(fake)
@@ -5333,7 +5328,7 @@ class TestJobHandleClosesOnEveryOutcome:
         proc.stdout.read = hang
         proc.stderr.read = hang
 
-        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+        with patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
             with pytest.raises(OperatorTimeoutError):
                 await claude_dispatch("prompt", _SIMPLE_SCHEMA, timeout=0.01)
         job = _job_handle_from(fake)

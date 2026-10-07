@@ -25,7 +25,7 @@ import pytest
 
 from nexus.db import service_endpoint as se
 from nexus.db.t2._refreshable_client import RefreshableHttpStoreMixin
-from tests._time_seam import module_time
+from tests._module_seam import module_time
 
 
 class _Probe(RefreshableHttpStoreMixin):

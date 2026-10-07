@@ -29,7 +29,7 @@ from tests.integration.test_rdr223_index_repo_oversize_journey import (
     _traffic,
     flush_repo,  # noqa: F401 — the fixture
 )
-from tests._time_seam import module_time
+from tests._module_seam import module_time
 
 pytestmark = [pytest.mark.integration]
 

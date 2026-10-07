@@ -22,7 +22,7 @@ from click.testing import CliRunner
 
 import nexus.catalog.recovery_bundle as rb
 from nexus.catalog.recovery_bundle import ExportSummary, import_bundle, write_bundle
-from tests._time_seam import module_time
+from tests._module_seam import module_time
 
 _RECORDED = "knowledge__z0o2p18__bge-base-en-v15-768__v1"
 
