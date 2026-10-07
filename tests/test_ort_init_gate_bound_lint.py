@@ -36,7 +36,8 @@ def _java_default_ms() -> int:
 
 def _substrate_teardown_grace_s() -> float:
     src = _SUBSTRATE.read_text()
-    m = re.search(r"def _teardown\(\).*?svc\.wait\(timeout=([\d.]+)\)", src, re.S)
+    # The SIGTERM-then-SIGKILL grace is stop_group's grace_s (tests/_child_process.py).
+    m = re.search(r"def _teardown\(\).*?stop_group\([^)]*grace_s=([\d.]+)\)", src, re.S)
     assert m, "the substrate teardown's SIGTERM grace was not found; update this lint"
     return float(m.group(1))
 
