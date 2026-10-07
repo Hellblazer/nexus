@@ -21,12 +21,12 @@
   windows-x64 engine and PostgreSQL bundle. It passed a test from PyPI on a
   clean Windows 11 x64 machine (conexus 7.72.1: `nx init --service`, a live
   Claude Code session with MCP store and search, hooks, stop and restart), but
-  Windows is **not yet declared supported**. Known gaps: the Claude Desktop
-  extension has not been run on Windows (nexus-ijue9.21); the client's own
-  `onnxruntime` and `pymupdf` packages may need the Visual C++ runtime on a
-  clean machine (nexus-lqjll); the Windows binaries are not code-signed
-  (nexus-dj01b), and a machine with Smart App Control enforcing was not tested;
-  Windows on ARM is out of scope.
+  Windows is **not yet declared supported**. The step-by-step path, with what
+  was and was not measured, is [Installing nexus on Windows](windows-install.md).
+  Known gaps: the Claude Desktop install dialog has not been walked (the
+  extension itself was run headless, nexus-ijue9.21); the Windows binaries are
+  not code-signed (nexus-dj01b), and a machine with Smart App Control enforcing
+  was not tested; Windows on ARM is out of scope.
   No GPU is required, and none is used by default. Search embeds through a
   bundled ONNX model on CPU (`CPUExecutionProvider` is the only provider in
   the tree). On Linux the installer additionally pins torch to its CPU build,
