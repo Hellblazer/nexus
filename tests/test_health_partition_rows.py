@@ -185,11 +185,11 @@ def test_healthy_layout_reports_each_comparison_and_the_leaf_count(tmp_path):
 
 
 def test_a_tenant_with_a_token_and_a_missing_leaf_is_a_finding_with_the_recovery(tmp_path):
-    compare = ["T|acme|chunks|voyage-code-3,minilm-l6-v2-384", "T|acme|taxonomy_centroids|voyage-code-3"] + _HEALTHY
+    compare = ["T|acme|chunks|bge-base-en-v15-768,minilm-l6-v2-384", "T|acme|taxonomy_centroids|bge-base-en-v15-768"] + _HEALTHY
     rows = _rows(tmp_path, _rows_runner(_LAYOUT, compare))
     t = rows["Tenant partitions"]
     assert not t.ok and not t.warn
-    assert "acme" in t.detail and "chunks" in t.detail and "voyage-code-3" in t.detail
+    assert "acme" in t.detail and "chunks" in t.detail and "bge-base-en-v15-768" in t.detail
     fix = "\n".join(t.fix_suggestions)
     assert "create_tenant_partitions" in fix
     assert "'nexus.chunks'::regclass, 'acme'" in fix
@@ -198,7 +198,7 @@ def test_a_tenant_with_a_token_and_a_missing_leaf_is_a_finding_with_the_recovery
 
 
 def test_a_tenant_name_is_quoted_in_the_recovery_statement(tmp_path):
-    compare = ["T|o'brien|chunks|voyage-code-3"] + _HEALTHY
+    compare = ["T|o'brien|chunks|bge-base-en-v15-768"] + _HEALTHY
     t = _rows(tmp_path, _rows_runner(_LAYOUT, compare))["Tenant partitions"]
     assert "'o''brien'" in "\n".join(t.fix_suggestions)
 
@@ -214,7 +214,7 @@ def test_a_model_with_no_partition_is_a_finding(tmp_path):
 
 
 def test_the_leaf_count_row_stays_informational_beside_findings(tmp_path):
-    compare = ["T|acme|chunks|voyage-code-3", "M|x|chunks|"] + _HEALTHY
+    compare = ["T|acme|chunks|bge-base-en-v15-768", "M|x|chunks|"] + _HEALTHY
     n = _rows(tmp_path, _rows_runner(_LAYOUT, compare))["Partition leaves"]
     assert n.ok and not n.warn
 
