@@ -49,3 +49,5 @@ ONE PATH PER BULLET, on the bullet's FIRST line.
 
 ## Deferred to the next client release
 
+- `conexus/resources/agent-shared/CONTEXT_PROTOCOL.md` (nexus-bo01z): the shared-tree lock snippet claims by an exclusive `pid` write after `mkdir`, because uutils `mkdir` on Ubuntu 26.04 reports a lost create race as success. Deferred because the bead also changes `src/nexus/_install/install_generation.sh`.
+

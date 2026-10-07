@@ -44,8 +44,9 @@
 # (see repo-root `.gitignore`) — it is process-local runtime state, never
 # committed.
 #
-# LEASE SHAPE. service/.build-lease/<name> is a DIRECTORY — mkdir is
-# POSIX-atomic on every filesystem this repo targets, the same rationale
+# LEASE SHAPE. service/.build-lease/<name> is a DIRECTORY — mkdir(2) is
+# POSIX-atomic on every filesystem this repo targets (mkdir(1) is not
+# everywhere: see _build_lease_claim, nexus-bo01z), the same rationale
 # tests/e2e/lib/lock.sh documents for choosing mkdir over flock (flock is
 # absent on darwin, the primary dev platform). This deliberately does NOT
 # source or depend on tests/e2e/lib/lock.sh: that lib lives under tests/ and
@@ -80,9 +81,10 @@
 # RECLAIM below) — a rename onto a nonexistent destination is a true,
 # unambiguous, atomic POSIX rename, not the nesting case.
 #
-# `mkdir` claims the path atomically, but the four files are then written
-# into it in place, one `printf` at a time — a racing acquirer can observe
-# the directory before `pid` exists. That used to be accepted as a
+# `mkdir` makes the path, the exclusive `pid` create claims it (see
+# _build_lease_claim), and the other three files are then written into it
+# in place — a racing acquirer can observe the directory before `pid`
+# exists. That used to be accepted as a
 # "spurious stale reclaim" residual; with the lease shared across worktrees
 # and build_lease_acquire_wait polling every 5s (nexus-g6xpa) the odds
 # stopped being negligible, and the failure direction was the wrong one: a
@@ -271,12 +273,34 @@ _build_lease_group_alive() {
 # already-`mkdir`'d (freshly claimed) lease dir with the four flat files.
 # No `pgid` file is written here — see build_lease_track_pid, called
 # separately once (if ever) the real build child exists.
+#
+# `pid` is NOT written here: _build_lease_claim already created it, and its
+# exclusive creation is the claim itself (see MKDIR(1) IS NOT A MUTEX
+# EVERYWHERE below).
 _build_lease_populate() {
     local dir="$1" holder_label="$2" command_line="$3"
-    printf '%s\n' "$$" > "$dir/pid"
     _build_lease_ts > "$dir/ts"
     printf '%s\n' "$holder_label" > "$dir/label"
     printf '%s\n' "$command_line" > "$dir/command"
+}
+
+# _build_lease_claim <dir> — claim <dir> for $$: 0 when THIS process now
+# holds it, non-zero otherwise. mkdir's stderr goes to the caller's stderr
+# so build_lease_acquire can report a genuine filesystem error.
+#
+# MKDIR(1) IS NOT A MUTEX EVERYWHERE (nexus-bo01z). uutils coreutils 0.8.0,
+# /usr/bin/mkdir on Ubuntu 26.04, checks for the path and then creates it,
+# and reports the EEXIST of a lost race as success: eight simultaneous
+# `mkdir D` all exit 0 there (measured on qwentescence, nexus-6japn), where
+# GNU and BSD mkdir let exactly one through. So the claim is the EXCLUSIVE
+# creation of `pid` inside the directory — noclobber makes bash open it
+# O_EXCL, a syscall no userland tool can soften — and mkdir only makes the
+# directory exist. A racer whose mkdir "succeeded" but whose pid create
+# found a file already there lost, and goes on to the held/stale decision
+# below like any other contender, where the winner's pid reads as live.
+_build_lease_claim() {
+    local dir="$1"
+    mkdir "$dir" && (set -C; printf '%s\n' "$$" > "$dir/pid") 2>/dev/null
 }
 
 # build_lease_track_pid <name> <pgid> — record the process-group id of the
@@ -312,14 +336,15 @@ build_lease_acquire() {
     local holder_label="${NX_AGENT:-${USER:-unknown}}"
     local command_line="$0 $*"
 
-    # `mkdir` is the ONLY claim primitive here (see ACQUIRE-PATH ATOMICITY
-    # above for why `mv` onto a possibly-existing path is unsafe). Its
+    # `mkdir` plus the exclusive pid create (_build_lease_claim) is the ONLY
+    # claim primitive here (see ACQUIRE-PATH ATOMICITY above for why `mv`
+    # onto a possibly-existing path is unsafe). mkdir's
     # stderr is captured so a genuine filesystem error (permission denied,
     # ENOSPC, missing parent) can be told apart from plain EEXIST below
     # (review finding: reporting a permission/ENOSPC failure as "held by
     # <pid>" would be actively misleading — there is no holder at all).
     local mkdir_err
-    if mkdir_err="$(mkdir "$dir" 2>&1)"; then
+    if mkdir_err="$(_build_lease_claim "$dir" 2>&1)"; then
         _build_lease_populate "$dir" "$holder_label" "$command_line"
         return 0
     fi
@@ -373,7 +398,7 @@ build_lease_acquire() {
     fi
     rm -rf "$capture" 2>/dev/null
 
-    if mkdir_err="$(mkdir "$dir" 2>&1)"; then
+    if mkdir_err="$(_build_lease_claim "$dir" 2>&1)"; then
         _build_lease_populate "$dir" "$holder_label" "$command_line"
         return 0
     fi
