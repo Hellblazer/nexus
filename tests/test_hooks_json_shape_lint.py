@@ -55,6 +55,14 @@ pinned whole: `--no-project` keeps uv from syncing whatever project the
 session's cwd is in, and `--no-config` keeps a `.python-version` from
 choosing, or downloading, the interpreter. uv 0.8 finds that file above the
 cwd and uv 0.12 above the script's directory, so the flag covers both.
+
+`--directory ${CLAUDE_PLUGIN_ROOT}` is the first argument after `run`, in every uv
+entry of both plugins (finding C, nexus-f9bgu.36). A hook's cwd is the project, and
+uv EXECUTES a `.venv/bin/python` it finds in the cwd or above while it looks for an
+interpreter, even with `--no-project`, `--python` or `--managed-python`; measured
+on macOS with uv 0.8.0. A repository could commit one. The flag makes uv discover
+from the plugin root instead, so a script's process cwd is the plugin root and it
+takes the project from the payload's `cwd` or `CLAUDE_PROJECT_DIR`.
 """
 from __future__ import annotations
 
@@ -120,7 +128,7 @@ CONEXUS_COMMANDS = frozenset({"nx-hook", "nx-session-end-launcher", "uv"})
 #: reads; ``test_every_launched_script_declares_the_interpreter_floor`` pins
 #: it. A ``--python ">=3.12"`` argv would do the same job but puts ``>`` in
 #: argv, which a shell would read as a redirect.
-CONEXUS_UV_ARGV = ("run", "--no-project", "--no-config", "--quiet")
+CONEXUS_UV_ARGV = ("run", "--directory", "${CLAUDE_PLUGIN_ROOT}", "--no-project", "--no-config", "--quiet")
 
 #: The stdlib wrapper an entry uses for a verb that some fail-closed CLI
 #: (7.55.0 through 7.57.x) does not register: `uv run ... <shim> <verb>`.
@@ -143,7 +151,7 @@ PLUGIN_RESIDENT_SCRIPTS = frozenset(
 SN_SCRIPT_PREFIX = "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/"
 
 #: Everything before the script path, in order. See the module docstring.
-SN_UV_ARGV = ("run", "--no-project", "--no-config", "--quiet")
+SN_UV_ARGV = ("run", "--directory", "${CLAUDE_PLUGIN_ROOT}", "--no-project", "--no-config", "--quiet")
 
 REGISTERED_TOOLS = frozenset(f"hook_{spec.name}" for spec in HOOK_TOOLS)
 
@@ -399,7 +407,7 @@ CONEXUS_REJECTS = [
             "type": "command",
             "command": "uv",
             "args": [
-                "run", "--no-project", "--no-config", "--quiet",
+                "run", "--directory", "${CLAUDE_PLUGIN_ROOT}", "--no-project", "--no-config", "--quiet",
                 "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/old_hook.sh",
             ],
         },
@@ -451,7 +459,7 @@ CONEXUS_REJECTS = [
             "type": "command",
             "command": "uv",
             "args": [
-                "run", "--no-project", "--no-config", "--quiet",
+                "run", "--directory", "${CLAUDE_PLUGIN_ROOT}", "--no-project", "--no-config", "--quiet",
                 "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/rdr_hook.py",
             ],
         },
@@ -463,7 +471,7 @@ CONEXUS_REJECTS = [
             "type": "command",
             "command": "uv",
             "args": [
-                "run", "--no-project", "--no-config", "--quiet",
+                "run", "--directory", "${CLAUDE_PLUGIN_ROOT}", "--no-project", "--no-config", "--quiet",
                 "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/mailbox_drain.py",
                 "--extra",
             ],
@@ -476,7 +484,7 @@ CONEXUS_REJECTS = [
             "type": "command",
             "command": "uv",
             "args": [
-                "run", "--no-project", "--no-config", "--quiet",
+                "run", "--directory", "${CLAUDE_PLUGIN_ROOT}", "--no-project", "--no-config", "--quiet",
                 "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/nx_hook_shim.py", "no-such-verb",
             ],
         },
@@ -488,7 +496,7 @@ CONEXUS_REJECTS = [
             "type": "command",
             "command": "uv",
             "args": [
-                "run", "--no-project", "--no-config", "--quiet",
+                "run", "--directory", "${CLAUDE_PLUGIN_ROOT}", "--no-project", "--no-config", "--quiet",
                 "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/nx_hook_shim.py",
                 "mailbox-drain",
                 "mcp-connect-check",
@@ -524,9 +532,33 @@ CONEXUS_REJECTS = [
         {
             "type": "command",
             "command": "uv",
-            "args": ["run", "--no-project", "--no-config", "--quiet"],
+            "args": ["run", "--directory", "${CLAUDE_PLUGIN_ROOT}", "--no-project", "--no-config", "--quiet"],
         },
         id="uv-with-no-script",
+    ),
+    pytest.param(
+        "UserPromptSubmit",
+        {
+            "type": "command",
+            "command": "uv",
+            "args": [
+                "run", "--no-project", "--no-config", "--quiet",
+                "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/mailbox_drain.py",
+            ],
+        },
+        id="uv-without-directory",
+    ),
+    pytest.param(
+        "UserPromptSubmit",
+        {
+            "type": "command",
+            "command": "uv",
+            "args": [
+                "run", "--directory", "${CLAUDE_PROJECT_DIR}", "--no-project", "--no-config", "--quiet",
+                "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/mailbox_drain.py",
+            ],
+        },
+        id="uv-directory-is-the-project",
     ),
     # The default-branch gap. Each of these was ACCEPTED before
     # nexus-q02nx.29, because anything that was not `mcp_tool` fell
@@ -666,6 +698,18 @@ SN_REJECTS = [
         "SessionStart",
         _sn("x.py", args=[]),
         id="uv-with-empty-args",
+    ),
+    # Without --directory uv discovers interpreters from the project (the hook's cwd)
+    # and EXECUTES a .venv/bin/python it finds there (finding C, nexus-f9bgu.36).
+    pytest.param(
+        "SessionStart",
+        _sn("x.py", args=["run", "--no-project", "--no-config", "--quiet", f"{SN_SCRIPT_PREFIX}session_start.py"]),
+        id="uv-without-directory",
+    ),
+    pytest.param(
+        "SessionStart",
+        _sn("x.py", args=["run", "--directory", "/tmp", "--no-project", "--no-config", "--quiet", f"{SN_SCRIPT_PREFIX}session_start.py"]),
+        id="uv-directory-not-the-plugin-root",
     ),
 ]
 

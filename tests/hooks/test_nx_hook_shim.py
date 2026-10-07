@@ -13,6 +13,7 @@ from __future__ import annotations
 import ast
 import importlib.util
 import io
+import json
 import os
 import re
 import signal
@@ -168,7 +169,10 @@ def test_the_shim_imports_only_the_standard_library() -> None:
         elif isinstance(n, ast.ImportFrom) and n.module:
             found.add(n.module.split(".")[0])
     assert found, "no imports found; the scan examined nothing"
-    assert found <= set(sys.stdlib_module_names) | {"__future__"}, found
+    # ``_exec_path`` is the sibling PATH-only lookup (finding A, nexus-f9bgu.36);
+    # tests/hooks/test_exec_off_cwd.py pins that it is itself standard library only.
+    assert found <= set(sys.stdlib_module_names) | {"__future__", "_exec_path"}, found
+    assert "_exec_path" in found, "the shim no longer resolves nx-hook through the PATH-only helper"
 
 
 @pytest.mark.lint
@@ -189,3 +193,56 @@ def test_the_shim_matches_the_message_those_releases_print(tag: str) -> None:
     shim = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(shim)
     assert shim.UNKNOWN_VERB_LINE.search(rendered), (tag, rendered)
+
+
+# -- the project directory (finding C, nexus-f9bgu.36) -----------------------------
+#
+# hooks.json launches the shim with `uv run --directory ${CLAUDE_PLUGIN_ROOT}`, so
+# its process cwd is the plugin root. `nx-hook` verbs resolve the project from their
+# own cwd, so the shim hands them the project: the payload's `cwd`, else
+# CLAUDE_PROJECT_DIR, else it inherits.
+
+_CWD_FAKE = """#!{python}
+import os, sys
+sys.stdin.buffer.read()
+sys.stdout.write(os.path.realpath(os.getcwd()))
+"""
+
+
+def _run_cwd(tmp_path: Path, *, payload: bytes, project_env: Path | None, shim_cwd: Path):
+    bindir = tmp_path / "bin"
+    bindir.mkdir(exist_ok=True)
+    fake = bindir / "nx-hook"
+    fake.write_text(_CWD_FAKE.format(python=sys.executable))
+    fake.chmod(0o755)
+    env = {"PATH": str(bindir)}
+    if project_env is not None:
+        env["CLAUDE_PROJECT_DIR"] = str(project_env)
+    return subprocess.run(
+        [sys.executable, str(_SHIM), "auto-approve"],
+        input=payload, capture_output=True, env=env, timeout=30, check=False, cwd=str(shim_cwd),
+    )
+
+
+def test_nx_hook_runs_in_the_payload_cwd_not_the_plugin_root(tmp_path: Path) -> None:
+    plugin_root, project, other = tmp_path / "plugin", tmp_path / "project", tmp_path / "other"
+    for d in (plugin_root, project, other):
+        d.mkdir()
+    r = _run_cwd(tmp_path, payload=json.dumps({"cwd": str(project)}).encode(), project_env=other, shim_cwd=plugin_root)
+    assert r.stdout.decode() == os.path.realpath(project), r
+
+
+def test_nx_hook_falls_back_to_claude_project_dir(tmp_path: Path) -> None:
+    plugin_root, project = tmp_path / "plugin", tmp_path / "project"
+    plugin_root.mkdir()
+    project.mkdir()
+    for payload in (b"{}", b"not json", json.dumps({"cwd": str(tmp_path / "gone")}).encode()):
+        r = _run_cwd(tmp_path, payload=payload, project_env=project, shim_cwd=plugin_root)
+        assert r.stdout.decode() == os.path.realpath(project), (payload, r)
+
+
+def test_nx_hook_inherits_the_cwd_when_no_project_is_known(tmp_path: Path) -> None:
+    plugin_root = tmp_path / "plugin"
+    plugin_root.mkdir()
+    r = _run_cwd(tmp_path, payload=b"{}", project_env=None, shim_cwd=plugin_root)
+    assert r.stdout.decode() == os.path.realpath(plugin_root), r

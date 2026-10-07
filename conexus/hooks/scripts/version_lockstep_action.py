@@ -71,9 +71,15 @@ if sys.version_info < (3, 12):
 
 import os
 import re
-import shutil
 import subprocess
 from pathlib import Path
+
+# PATH-only lookup (finding A, nexus-f9bgu.36): on Windows a bare name is
+# searched in the cwd first, and this detached action inherits the project cwd.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _exec_path  # noqa: E402 -- must follow the sys.path insert
+
+which_off_cwd = _exec_path.which_off_cwd
 
 DEBUG = os.environ.get("NX_HOOK_DEBUG", "0") == "1"
 
@@ -250,11 +256,12 @@ def uv_receipt_present() -> bool:
     Absence of the receipt means a dev/editable tree (or no uv): SKIP, so we
     never clobber a developer checkout. All edge cases fail-safe to False.
     """
-    if shutil.which("uv") is None:
+    uv = which_off_cwd("uv")
+    if uv is None:
         return False
     try:
         out = subprocess.run(
-            ["uv", "tool", "dir"],
+            [uv, "tool", "dir"],
             capture_output=True, text=True, timeout=10, check=True,
         )
     except (subprocess.SubprocessError, OSError) as exc:
@@ -270,11 +277,12 @@ def installed_nx_version() -> str | None:
     ``nx --version`` prints e.g. ``nx, version 5.7.0``. Returns None when nx
     is absent or the output cannot be parsed.
     """
-    if shutil.which("nx") is None:
+    nx = which_off_cwd("nx")
+    if nx is None:
         return None
     try:
         out = subprocess.run(
-            ["nx", "--version"],
+            [nx, "--version"],
             capture_output=True, text=True, timeout=15, check=True,
         )
     except (subprocess.SubprocessError, OSError) as exc:
@@ -316,10 +324,17 @@ def satisfies(installed: str | None, target: str) -> bool:
 
 
 def run_cmd(cmd: list[str], timeout: int = 300) -> bool:
-    """Run a command; return True on exit 0, False otherwise. Never raises."""
+    """Run a command; return True on exit 0, False otherwise. Never raises.
+
+    ``cmd[0]`` is resolved on PATH alone and spawned by absolute path; a name
+    that is not on PATH is a failed command, never a cwd lookup."""
+    exe = which_off_cwd(cmd[0])
+    if exe is None:
+        debug(f"{cmd[0]} not found on PATH")
+        return False
     try:
         result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=timeout,
+            [exe, *cmd[1:]], capture_output=True, text=True, timeout=timeout,
         )
         if DEBUG and result.stdout:
             debug(f"{cmd[0]} stdout: {result.stdout[:500]}")
@@ -349,9 +364,12 @@ def _run_nx_upgrade_for_ref_drift(timeout: int) -> None:
     upgrade`` itself (the reason is printed instead), so this is a
     durable record of the outcome, not a gate. No CLI binary upgrade and
     no marker write: ref drift is not a CLI-version fact."""
+    nx = which_off_cwd("nx")
     try:
+        if nx is None:
+            raise FileNotFoundError("nx not found on PATH")
         result = subprocess.run(
-            ["nx", "upgrade"], capture_output=True, text=True, timeout=timeout,
+            [nx, "upgrade"], capture_output=True, text=True, timeout=timeout,
         )
     except (subprocess.SubprocessError, OSError) as exc:
         debug(f"nx upgrade raised for ref-drift reinstall: {exc}")

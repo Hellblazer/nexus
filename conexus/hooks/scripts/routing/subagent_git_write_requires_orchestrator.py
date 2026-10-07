@@ -436,6 +436,7 @@ from typing import Any
 # `_run_python_hook.sh` used to perform, before anything that needs 3.12
 # or `nexus` is imported. See _interpreter.py for what is at stake.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import _exec_path  # noqa: E402 -- must follow the sys.path insert
 import _interpreter  # noqa: E402 -- must follow the sys.path insert
 
 _interpreter.reexec_if_needed()
@@ -1221,12 +1222,17 @@ def _in_linked_worktree(cwd: str) -> bool | None:
     checkout). ``None`` when undeterminable (not a repo, git missing,
     timeout) — the caller treats None as fail-open."""
     try:
+        # PATH-only lookup: this runs with cwd=<the project>, where a planted
+        # git.exe would win a bare-name spawn on Windows (finding A).
+        git = _exec_path.which_off_cwd("git")
+        if git is None:
+            return None
         git_dir = subprocess.run(
-            ["git", "rev-parse", "--git-dir"],
+            [git, "rev-parse", "--git-dir"],
             cwd=cwd, capture_output=True, text=True, timeout=5,
         )
         common = subprocess.run(
-            ["git", "rev-parse", "--git-common-dir"],
+            [git, "rev-parse", "--git-common-dir"],
             cwd=cwd, capture_output=True, text=True, timeout=5,
         )
     except Exception:  # noqa: BLE001 — undeterminable: fail open
@@ -1384,8 +1390,12 @@ def body(payload: dict[str, Any]) -> None:
         )
         _lib.pass_through()
 
-    cwd = str(payload.get("cwd") or "") or os.getcwd()
-    worktree = _in_linked_worktree(cwd)
+    # The project comes from the payload, then CLAUDE_PROJECT_DIR. Never from the
+    # process cwd: uv launches this script with `--directory ${CLAUDE_PLUGIN_ROOT}`
+    # (finding C, nexus-f9bgu.36), so that is the plugin root. Neither given means
+    # undeterminable, which the branch below treats like the primary checkout.
+    cwd = str(payload.get("cwd") or "") or os.environ.get("CLAUDE_PROJECT_DIR", "")
+    worktree = _in_linked_worktree(cwd) if cwd else None
     if worktree is True:
         # Linked worktree, POSITIVELY PROVEN: the agent owns its tree,
         # including destroying it. This is the ONLY exemption from either

@@ -21,7 +21,10 @@ must not block a session either, and the version-lockstep hook is what repairs
 it.
 
 Standard library only, and no ``nexus`` import: it has to run under whatever
-CLI is installed, including none. It sets no timeout of its own; the entry's
+CLI is installed, including none. ``nx-hook`` is found by a PATH-only lookup
+(``_exec_path.which_off_cwd``, also standard library) and spawned by absolute
+path, because on Windows a bare name is searched in the current directory first
+and a hook's cwd is the project (RDR-224 review finding A, nexus-f9bgu.36). It sets no timeout of its own; the entry's
 ``timeout`` in hooks.json bounds the whole call. When that timeout, or anything
 else, signals the shim with SIGTERM, SIGINT or SIGHUP (SIGHUP where the platform
 has it; Windows does not), the shim terminates the
@@ -31,10 +34,17 @@ their own subprocess work.
 """
 from __future__ import annotations
 
+import json
+import os
 import re
 import signal
 import subprocess
 import sys
+
+# A PATH-only lookup (finding A, nexus-f9bgu.36): never spawn a bare name, or a
+# planted nx-hook.exe in the project's cwd runs as the hook's verdict on Windows.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _exec_path  # noqa: E402 -- must follow the sys.path insert
 
 #: What ``nx-hook`` prints for an unregistered verb in every release that exits
 #: 2 on one (7.55.0 through 7.57.x), from ``main()`` in
@@ -46,16 +56,43 @@ UNKNOWN_VERB_LINE = re.compile(
 )
 
 
+def _project_dir(payload: bytes) -> str | None:
+    """The directory ``nx-hook`` should run in: the payload's ``cwd``, else
+    ``CLAUDE_PROJECT_DIR``, else ``None`` (inherit).
+
+    hooks.json launches the shim with ``uv run --directory ${CLAUDE_PLUGIN_ROOT}``
+    so uv cannot execute an interpreter planted in the project (finding C,
+    nexus-f9bgu.36); the shim's own cwd is therefore the plugin root, and the
+    verbs resolve the project from theirs. Only a directory that exists counts.
+    """
+    candidates: list[object] = []
+    try:
+        data = json.loads(payload)
+        if isinstance(data, dict):
+            candidates.append(data.get("cwd"))
+    except ValueError:
+        pass
+    candidates.append(os.environ.get("CLAUDE_PROJECT_DIR"))
+    for cand in candidates:
+        if isinstance(cand, str) and cand and os.path.isdir(cand):
+            return cand
+    return None
+
+
 def main(argv: list[str]) -> int:
     if len(argv) != 1:
         sys.stderr.write("nx_hook_shim: expected exactly one argument, the nx-hook verb\n")
         return 0
     verb = argv[0]
     payload = sys.stdin.buffer.read()
+    exe = _exec_path.which_off_cwd("nx-hook")
     try:
+        if exe is None:
+            raise FileNotFoundError("nx-hook")
         proc = subprocess.Popen(
-            ["nx-hook", verb],
+            [exe, verb],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            cwd=_project_dir(payload),
         )
     except FileNotFoundError:
         sys.stderr.write(

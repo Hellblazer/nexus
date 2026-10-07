@@ -94,6 +94,7 @@ import sys
 # `_run_python_hook.sh` used to perform, before anything that needs 3.12
 # or `nexus` is imported. See _interpreter.py for what is at stake.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _exec_path  # noqa: E402 -- must follow the sys.path insert
 import _interpreter  # noqa: E402 -- must follow the sys.path insert
 
 _interpreter.reexec_if_needed()
@@ -446,9 +447,13 @@ def _resolve_ref_sha(install_location: Path, ref: str, timeout: float) -> str | 
     absent, timeout). *timeout* is the caller's REMAINING share of the
     shared ``_GIT_TIMEOUT_S`` budget (nexus-konsk fix round 2), never
     the full constant -- see ``detect_ref_drift``."""
+    # PATH-only lookup: a bare name is searched in the cwd first on Windows.
+    git = _exec_path.which_off_cwd("git")
     try:
+        if git is None:
+            raise FileNotFoundError("git not found on PATH")
         proc = subprocess.run(
-            ["git", "-C", str(install_location), "rev-parse", f"{ref}^{{commit}}"],
+            [git, "-C", str(install_location), "rev-parse", f"{ref}^{{commit}}"],
             capture_output=True, text=True, timeout=timeout,
         )
     except (subprocess.TimeoutExpired, OSError) as exc:
