@@ -65,7 +65,10 @@ from nexus.db.pg_provision import (
 )
 
 _IS_DARWIN = sys.platform == "darwin"
-_VECTOR_LIB = "vector.dylib" if _IS_DARWIN else "vector.so"
+_IS_LINUX = sys.platform.startswith("linux")
+# The Windows bundle ships vector.dll (and pg_trgm.dll) in lib\postgresql. Since
+# nexus-ja4pq this module's skip gate finds initdb.exe, so it runs on Windows.
+_VECTOR_LIB = "vector.dylib" if _IS_DARWIN else ("vector.dll" if sys.platform == "win32" else "vector.so")
 
 # Pinned floors for the PACKAGED artifact (must match the CA-3 gate's floors in
 # tests/db/test_pg_provision_ca3_bundle.py). The relocation smoke re-checks them
@@ -306,7 +309,7 @@ class TestRelocatedBundleComplete:
 
 # ── Test 3: the PACKAGED artifact's compat floor is preserved ───────────────────
 
-@pytest.mark.skipif(_IS_DARWIN, reason="GLIBC floor is linux-only; macOS uses TestPackagedMacosFloor")
+@pytest.mark.skipif(not _IS_LINUX, reason="GLIBC floor is linux-only; macOS uses TestPackagedMacosFloor, and the Windows bundle has no glibc (its VC++ runtime is checked by the Windows bundle's own verify step)")
 class TestPackagedGlibcFloor:
     """The .txz uploaded by this step is what P3.2/P3.4 consume; re-assert the
     glibc floor on the EXTRACTED libs so an artifact-boundary regression fails

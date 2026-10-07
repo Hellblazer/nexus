@@ -52,10 +52,15 @@ _CREATEDB = _PG_BIN / exe_name("createdb")
 _JAVA_HOME = os.environ.get("JAVA_HOME", "")
 _JAVA = Path(_JAVA_HOME) / "bin" / "java" if _JAVA_HOME else Path(shutil.which("java") or "java")
 
-_SUBSTRATE_OK = _JAR.exists() and _INITDB.exists() and _PG_CTL.exists()
+_SUBSTRATE_OK = (
+    _JAR.exists() and _INITDB.exists() and _PG_CTL.exists()
+    # Same java gate as the sibling tests/db suites: without it a box with no JVM
+    # booted a cluster and then failed in the service fixture.
+    and (_JAVA.exists() if _JAVA_HOME else shutil.which("java") is not None)
+)
 if not _SUBSTRATE_OK:
     pytest.skip(
-        "engine substrate absent (service jar or PG bundle missing)",
+        "engine substrate absent (service jar, PG bundle or java missing)",
         allow_module_level=True,
     )
 
@@ -92,7 +97,11 @@ def pg_instance():
         subprocess.run(
             [str(_PG_CTL), "-D", pgdata, "-l", pglog,
              "-o", f"-p {pg_port} -k {pgdata}", "start", "-w"],
-            check=True, capture_output=True,
+            # Not capture_output: on Windows the postmaster pg_ctl starts inherits
+            # the pipe handles, so the pipes never reach EOF and run() never returns
+            # (measured on qwentescence, 2026-10-07). The server log is pglog.
+            check=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
         )
         subprocess.run(
             [str(_CREATEDB), "-h", "127.0.0.1", "-p", str(pg_port),

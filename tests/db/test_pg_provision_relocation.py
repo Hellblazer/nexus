@@ -14,9 +14,18 @@ from __future__ import annotations
 
 import os
 import stat
+import sys
 from pathlib import Path
 
 import pytest
+
+# The stub pg_config is a bash script, which Windows cannot execute, so every case
+# there degrades to "indeterminate" and no raise (measured on qwentescence,
+# 2026-10-07). The Windows probe (pg_config.exe) is covered here by injecting
+# platform="win32" on a POSIX host.
+pytestmark = pytest.mark.skipif(
+    sys.platform == "win32", reason="the stub pg_config is a bash script",
+)
 
 from nexus.db.pg_provision import (
     PgBinaries,
