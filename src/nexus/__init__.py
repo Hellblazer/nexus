@@ -18,7 +18,9 @@ VC++ redistributable (measured on the RDR-224 clean guest; numpy, pandas and
 scikit-learn carry their own copy, and uv's CPython ships ``vcruntime140*``).
 The engine and PostgreSQL bundle assets already ship those DLLs app-local
 (RDR-224 Step 0.6, Sam's signed-off reading), so when the system lacks them the
-installed engine directory and the bundle's ``bin`` join the DLL search path.
+installed engine directory and the bundle's ``bin`` join the DLL search path, and
+so does ``<config>/vcrt``, where a cloud-mode install (no engine, no bundle) gets
+the two DLLs from ``nx init`` or ``nx upgrade --auto``.
 """
 from __future__ import annotations
 
@@ -39,9 +41,10 @@ def _use_os_trust_store(platform: str | None = None) -> bool:
 
 _use_os_trust_store()
 
-#: The VC++ runtime DLLs the failing extension modules need (measured: msvcp140
-#: alone is not enough for onnxruntime; uv's CPython supplies vcruntime140*).
-_VC_RUNTIME_DLLS: tuple[str, ...] = ("msvcp140.dll", "msvcp140_1.dll")
+from nexus import _vcrt  # noqa: E402 -- stdlib-only, import-cheap
+
+#: The VC++ runtime DLLs the failing extension modules need (see _vcrt).
+_VC_RUNTIME_DLLS: tuple[str, ...] = _vcrt.VC_RUNTIME_DLLS
 
 #: Handles from os.add_dll_directory; a directory leaves the search path when its
 #: handle is closed, so they are kept for the life of the process.
@@ -55,23 +58,21 @@ def _add_vc_runtime_dirs(
     add=None,  # noqa: ANN001 -- os.add_dll_directory, injectable for tests
 ) -> list[str]:
     """On Windows without a system VC++ runtime, put nx's app-local copies on the
-    DLL search path. Returns the directories added (empty elsewhere)."""
+    DLL search path: the engine dir, the PG bundle's bin, and ``<config>/vcrt``
+    (which ``nx init`` / ``nx upgrade --auto`` fill on a cloud-mode install).
+    Returns the directories added (empty elsewhere)."""
     import os  # noqa: PLC0415 -- keep the package import light
 
-    if (platform if platform is not None else sys.platform) != "win32":
+    if not _vcrt.is_windows(platform):
         return []
-    system = system_dir or os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32")
-    if all(os.path.isfile(os.path.join(system, d)) for d in _VC_RUNTIME_DLLS):
+    if _vcrt.has_runtime(system_dir or _vcrt.system_dir()):
         return []
-    # Mirrors nexus.config.nexus_config_dir without importing it here.
-    cfg = config_dir or os.environ.get("NEXUS_CONFIG_DIR", "").strip() or os.path.join(
-        os.path.expanduser("~"), ".config", "nexus")
     adder = add if add is not None else getattr(os, "add_dll_directory", None)
     if adder is None:
         return []
     added: list[str] = []
-    for d in (os.path.join(cfg, "service"), os.path.join(cfg, "pg-bundle", "bundle", "bin")):
-        if all(os.path.isfile(os.path.join(d, n)) for n in _VC_RUNTIME_DLLS):
+    for d in _vcrt.app_local_dirs(config_dir or _vcrt.default_config_dir()):
+        if _vcrt.has_runtime(d):
             try:
                 _VC_DLL_DIR_HANDLES.append(adder(d))
                 added.append(d)

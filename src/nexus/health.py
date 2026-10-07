@@ -4393,6 +4393,59 @@ def _check_config_dir_user_access(
     )]
 
 
+#: Microsoft's VC++ redistributable, the manual remedy (nexus-lqjll).
+VC_REDIST_URL = "https://aka.ms/vs/17/release/vc_redist.x64.exe"
+
+
+def _check_vc_runtime(
+    config_dir: Path | None = None,
+    *,
+    platform: str | None = None,
+    system_dir: str | None = None,
+) -> list[HealthResult]:
+    """nexus-lqjll: on Windows, can the client's own extension modules (onnxruntime,
+    pymupdf, torch, fasttext) find ``msvcp140.dll`` and ``msvcp140_1.dll``?
+
+    Passes when System32 has both or an app-local directory does (the engine dir,
+    the PG bundle's ``bin``, or ``<config>/vcrt``, which ``nx init`` and
+    ``nx upgrade --auto`` fill); fails, with both remedies, when neither does.
+    Silent (``[]``) off Windows, the not-applicable shape of the sibling Windows
+    rows, so a POSIX box and the fresh-install MVV never see it. A probe crash
+    never breaks doctor.
+    """
+    from nexus import _vcrt  # noqa: PLC0415 - cheap, stdlib-only
+
+    if not _vcrt.is_windows(platform):
+        return []
+    label = "VC++ runtime for the client's extension modules"
+    try:
+        if config_dir is None:
+            import nexus.config as _config  # noqa: PLC0415 - deferred to avoid circular import
+
+            config_dir = _config.nexus_config_dir()
+        kind, where = _vcrt.runtime_source(platform, str(config_dir), system_dir)
+    except Exception as exc:  # noqa: BLE001 - best-effort: failure logged, must not crash `nx doctor`
+        _log.debug("doctor_vc_runtime_check_failed", error=str(exc))
+        return []
+    names = " and ".join(_vcrt.VC_RUNTIME_DLLS)
+    if kind == _vcrt.SYSTEM:
+        return [HealthResult(label=label, ok=True, detail=f"{names} found in {where}")]
+    if kind == _vcrt.APP_LOCAL:
+        return [HealthResult(label=label, ok=True, detail=f"{names} found app-local in {where}")]
+    return [HealthResult(
+        label=label,
+        ok=False,
+        detail=(
+            f"{names} not found in System32 or under {config_dir}; PDF extraction and local "
+            "embedding (onnxruntime, pymupdf, torch, fasttext) fail to import"
+        ),
+        fix_suggestions=[
+            "nx init    # downloads the two DLLs into the config directory",
+            f"or install Microsoft's VC++ redistributable: {VC_REDIST_URL}",
+        ],
+    )]
+
+
 def _check_service_autostart_drift() -> list[HealthResult]:
     """nexus-rlp0v (substantive-critic round 1, Significant): backstop for
     :func:`nexus.upgrade_finish.converge_service_autostart_unit`'s
@@ -9669,6 +9722,7 @@ def run_health_checks(
     results.extend(_check_service_launchagent_stray())
     results.extend(_check_service_autostart_drift())
     results.extend(_check_config_dir_user_access())  # nexus-f9bgu.50
+    results.extend(_check_vc_runtime())  # nexus-lqjll; [] off Windows
     results.extend(_check_migration_state())
     results.extend(_check_rls_present())
     # RDR-205 Phase 2 Step 2 (bead nexus-em75s.10): the Linda tuple space's
