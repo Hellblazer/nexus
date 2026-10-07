@@ -233,7 +233,7 @@ dependencies = [
 local = ["fastembed>=0.7.0,<0.8"]
 
 [project.urls]
-Homepage = "https://github.com/Hellblazer/nexus"
+Homepage = "https://hellblazer.github.io/nexus/"
 Repository = "https://github.com/Hellblazer/nexus"
 Documentation = "https://github.com/Hellblazer/nexus/tree/main/docs"
 "Bug Tracker" = "https://github.com/Hellblazer/nexus/issues"
