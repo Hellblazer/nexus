@@ -42,7 +42,8 @@ def _watch(tmp_path: Path, body: str, *extra: str, env: dict[str, str] | None = 
         [sys.executable, str(SCRIPT), "--log", str(tmp_path / "run.log"), "--status", str(status),
          "--cwd", str(tmp_path), "--no-notify", *extra, "--",
          sys.executable, "-m", "pytest", "test_case.py", "-p", "no:cacheprovider", "-o", "addopts="],
-        capture_output=True, text=True, timeout=120, env={**os.environ, **(env or {})},
+        capture_output=True, text=True, timeout=120,
+        env={**os.environ, "NX_TEST_T2_SUBSTRATE": "none", **(env or {})},
     )
     return proc.returncode, json.loads(status.read_text()), proc.stdout
 
