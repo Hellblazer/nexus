@@ -6,6 +6,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **On a Windows machine without the VC++ redistributable, the client's PDF extraction and local embedding load** (nexus-lqjll, RDR-224). onnxruntime, pymupdf, torch and fasttext link the system `msvcp140.dll` and `msvcp140_1.dll` and failed to import on a clean Windows 11 install. The engine and PostgreSQL bundle already ship those DLLs app-local, so on Windows without a system runtime `import nexus` adds the installed engine directory and the bundle's `bin` to the DLL search path. Measured on the clean guest: all four imported afterwards. A cloud-mode Windows install, which has no local engine, still needs the redistributable. POSIX is unchanged.
+
 ## [7.72.1] - 2026-10-06
 
 Pairs with engine-service-v0.1.149, unchanged from 7.72.0 (`REQUIRED_ENGINE_VERSION` stays 0.1.149). A Windows fix release: on native Windows 7.72.0's MCP search hung forever, and these fixes are what the RDR-224 Phase 5 gate passed with on a clean Windows 11 guest (T2 nexus_rdr/224-gate-run-2026-10-06). Windows is still not declared supported.
