@@ -1129,6 +1129,87 @@ def _stop_service_stack_best_effort() -> tuple[bool, str | None]:
     return True, None
 
 
+#: The log file the launchd plist and the systemd unit append to, under
+#: ``_autostart_log_dir()`` (``__LOG_DIR__/nexus-service.log`` in both templates;
+#: pinned by tests/daemon/test_uninstall_leftovers.py).
+AUTOSTART_SERVICE_LOG_NAME = "nexus-service.log"
+
+#: A directory is nexus's own when it, or its parent, carries this name:
+#: ``%LOCALAPPDATA%\nexus\autostart``, ``%LOCALAPPDATA%\nexus\logs`` and
+#: ``~/.local/state/nexus``. ``~/Library/LaunchAgents``, ``~/Library/Logs`` and
+#: ``~/.config/systemd/user`` hold other programs' files and are never removed.
+_NEXUS_DIR_NAME = "nexus"
+
+
+def _prune_autostart_dirs() -> list[str]:
+    """Remove the nexus-owned autostart and log directories that are empty.
+
+    RDR-224 (nexus-f9bgu): the Windows install creates
+    ``%LOCALAPPDATA%\\nexus\\autostart`` and nothing removed it. Only
+    directories nexus owns by path (see :data:`_NEXUS_DIR_NAME`) are candidates,
+    deepest first, then their ``nexus`` parent; each goes only if empty
+    (``rmdir``, never a recursive delete). Returns one note per nexus-owned
+    directory left in place because it still holds something, naming what.
+    Never raises.
+    """
+    from nexus.commands import daemon as _daemon  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
+
+    try:
+        dirs = [_daemon._autostart_install_dir(), _daemon._autostart_log_dir()]
+    except Exception:  # noqa: BLE001 — an unsupported platform has nothing to prune
+        return []
+    owned = [d for d in dirs if d.name == _NEXUS_DIR_NAME or d.parent.name == _NEXUS_DIR_NAME]
+    owned += [d.parent for d in dirs if d.parent.name == _NEXUS_DIR_NAME]
+    notes: list[str] = []
+    for d in dict.fromkeys(owned):
+        if d.is_symlink() or not d.is_dir():
+            continue
+        try:
+            d.rmdir()
+        except OSError:
+            try:
+                names = sorted(p.name for p in d.iterdir())
+            except OSError:
+                names = []
+            if names:
+                notes.append(
+                    f"left {d} in place: it holds entries uninstall did not create "
+                    f"({', '.join(names)})"
+                )
+    return notes
+
+
+def _remove_autostart_log() -> str | None:
+    """Delete the unit's log file (``--remove-data`` only). Returns a warning or None."""
+    from nexus.commands import daemon as _daemon  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
+
+    try:
+        log = _daemon._autostart_log_dir() / AUTOSTART_SERVICE_LOG_NAME
+    except Exception:  # noqa: BLE001 — an unsupported platform has no unit log
+        return None
+    try:
+        log.unlink(missing_ok=True)
+    except OSError as exc:
+        return f"could not remove {log}: {exc}"
+    return None
+
+
+def _service_stack_confirmed_stopped(stop_exit_ok: bool) -> tuple[bool, tuple[str, ...]]:
+    """Whether the engine-service + Postgres stack is gone after the stop.
+
+    RDR-224 (nexus-f9bgu): the processes being gone is the confirmation, not the
+    stop verb's exit (which is non-zero when nothing was running). Uses the
+    same survivor probe ``uninstall_autostart`` reports (lease freshness via the
+    RDR-149 registry, and the Postgres port). Falls back to the exit when the
+    probe itself fails. Returns (stopped, survivor lines).
+    """
+    try:
+        survivors = _probe_survivors(tier="service")
+    except Exception:  # noqa: BLE001 — a probe is never a verdict
+        return stop_exit_ok, ()
+    return not survivors, survivors
+
+
 def uninstall_daemon(*, confirm: bool = False, remove_data: bool = False) -> DaemonUninstallReport:
     """Orchestrate full daemon removal for the ``daemon_uninstall`` MCP tool.
 
@@ -1204,15 +1285,25 @@ def uninstall_daemon(*, confirm: bool = False, remove_data: bool = False) -> Dae
     #    the daemon demonstrably SURVIVED. Claiming "daemon stopped" there is
     #    wrong in the dangerous direction — worse than the old code's
     #    permanent "stop not confirmed", which was merely pessimistic.
-    daemon_stopped = (
+    #
+    #    NOT_INSTALLED is "no T2 daemon exists", the state of every install made
+    #    since the daemon retired and of every Windows install: nothing can be
+    #    running, so it is a confirmed stop, not an unconfirmed one (RDR-224,
+    #    nexus-f9bgu: the Windows walk printed "daemon stop not confirmed" with
+    #    zero nexus processes left).
+    t2_absent = unit_result.status is UninstallStatus.NOT_INSTALLED
+    daemon_stopped = t2_absent or (
         unit_result.status is UninstallStatus.REMOVED and unit_result.deactivated
     )
 
     # 2. Stop the engine-service + Postgres stack (best-effort) — RDR-165 eu4u4.
-    #    A complete teardown must leave no running storage backend.
-    service_stopped, service_warning = _stop_service_stack_best_effort()
+    #    A complete teardown must leave no running storage backend. The summary
+    #    reports whether the processes are gone, not the stop verb's exit.
+    stop_exit_ok, service_warning = _stop_service_stack_best_effort()
     if service_warning:
         warnings.append(service_warning)
+    service_stopped, survivors = _service_stack_confirmed_stopped(stop_exit_ok)
+    warnings.extend(survivors)
 
     # 3. Remove the first-run marker so a reinstall re-shows the banner.
     marker_removed = False
@@ -1250,12 +1341,22 @@ def uninstall_daemon(*, confirm: bool = False, remove_data: bool = False) -> Dae
             except OSError as exc:
                 warnings.append(f"could not remove data dir {data_dir}: {exc}")
 
+    # 5. Remove what the autostart install created outside the data dir: the
+    #    unit's log file (with remove_data) and the nexus-owned autostart/log
+    #    directories once empty (RDR-224). Anything else in them is named, kept.
+    if remove_data and (log_warning := _remove_autostart_log()):
+        warnings.append(log_warning)
+    warnings.extend(_prune_autostart_dirs())
+
     summary = [
         f"service autostart unit: {service_unit_result.status.value}",
         f"T2 autostart unit: {unit_result.status.value}",
     ]
     summary.append("service stack stopped" if service_stopped else "service stop not confirmed")
-    summary.append("daemon stopped" if daemon_stopped else "daemon stop not confirmed")
+    if t2_absent:
+        summary.append("no T2 daemon (nothing to stop)")
+    else:
+        summary.append("daemon stopped" if daemon_stopped else "daemon stop not confirmed")
     if marker_removed:
         summary.append("first-run marker removed")
     if data_removed:
@@ -1345,6 +1446,10 @@ def uninstall_autostart(*, tier: str = "t2") -> UninstallResult:
         deactivated = False
 
     dest.unlink(missing_ok=True)
+    # RDR-224: on Windows the unit's directory is nexus's own; remove it (and an
+    # empty %LOCALAPPDATA%\nexus) with the unit. Notes about a non-empty one are
+    # uninstall_daemon's to report, after it has removed what it removes.
+    _prune_autostart_dirs()
 
     # nexus-dmgvx: the unit is gone, so nothing will come BACK — but say what
     # is still running NOW. Probed after the unlink so the report describes
