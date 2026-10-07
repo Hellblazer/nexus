@@ -50,8 +50,10 @@ import _exec_path  # noqa: E402 -- must follow the sys.path insert
 #: 2 on one (7.55.0 through 7.57.x), from ``main()`` in
 #: ``src/nexus/_hook_runtime/entry.py`` at those tags. Pinned against the tag
 #: text by tests/hooks/test_nx_hook_shim.py.
+#: ``\r?``: on Windows ``nx-hook`` writes stderr in text mode, so the line ends
+#: ``\r\n`` and a bare ``$`` (which matches only before ``\n``) missed it.
 UNKNOWN_VERB_LINE = re.compile(
-    r"^nx-hook: unknown verb '[^']*' -- no hook is registered under that name$",
+    r"^nx-hook: unknown verb '[^']*' -- no hook is registered under that name\r?$",
     re.MULTILINE,
 )
 

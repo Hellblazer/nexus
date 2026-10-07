@@ -33,6 +33,7 @@ from nexus.db.svc_monitor import (
     wal_retained_bytes,
     wal_retention_report,
 )
+from tests._platform import IS_WINDOWS
 
 _CREDS = SvcCredentials(port=5599, user="nexus_svc", password="pw")
 
@@ -118,7 +119,11 @@ class TestMonitorScopedQuery:
         assert env["PGOPTIONS"] == "-c default_transaction_read_only=on"
         assert env["PGPASSWORD"] == "pw"
         lib = str(tmp_path / "bundle" / "lib")
-        assert env.get("LD_LIBRARY_PATH", "").split(os.pathsep)[0] == lib
+        if IS_WINDOWS:
+            # Windows loads the bundle's DLLs from beside the .exe: no loader variable.
+            assert "LD_LIBRARY_PATH" not in env
+        else:
+            assert env.get("LD_LIBRARY_PATH", "").split(os.pathsep)[0] == lib
 
     def test_set_role_refusal_raises_with_grants_004_remedy(self, tmp_path):
         """The NOINHERIT permission-denied shape this bead exists to fix:

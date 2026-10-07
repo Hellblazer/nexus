@@ -8,7 +8,6 @@ every existing line.
 """
 from __future__ import annotations
 
-import stat
 from pathlib import Path
 
 from nexus.db.pg_provision import (
@@ -16,6 +15,7 @@ from nexus.db.pg_provision import (
     _read_credentials,
     _write_credentials,
 )
+from tests._platform import assert_owner_only
 
 
 def test_write_credentials_includes_service_token(tmp_path: Path) -> None:
@@ -36,8 +36,7 @@ def test_write_credentials_is_0600(tmp_path: Path) -> None:
     creds_path = tmp_path / "pg_credentials"
     _write_credentials(creds_path, tmp_path / "postgres", 15999,
                        "adminpw", "svcpw", "tok", "diagpw")
-    mode = stat.S_IMODE(creds_path.stat().st_mode)
-    assert mode == 0o600
+    assert_owner_only(creds_path)
 
 
 def test_persist_service_token_backfills_and_preserves(tmp_path: Path) -> None:
@@ -56,7 +55,7 @@ def test_persist_service_token_backfills_and_preserves(tmp_path: Path) -> None:
     assert creds["PG_DATA"] == "/x/postgres"
     assert creds["PG_PORT"] == "15999"
     assert creds["NX_DB_PASS"] == "svcpw"
-    assert stat.S_IMODE(creds_path.stat().st_mode) == 0o600
+    assert_owner_only(creds_path)
 
 
 def test_persist_service_token_is_idempotent(tmp_path: Path) -> None:

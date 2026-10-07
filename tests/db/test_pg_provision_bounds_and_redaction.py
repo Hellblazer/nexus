@@ -30,6 +30,7 @@ once. Each test's docstring names what it would look like unfixed.
 from __future__ import annotations
 
 import subprocess
+import sys
 
 import pytest
 
@@ -123,7 +124,7 @@ def test_a_hung_spawn_is_bounded_rather_than_forever(monkeypatch) -> None:
     monkeypatch.setattr(pp, "_bundle_lib_env", lambda _cmd, _env: None)
 
     with pytest.raises(subprocess.TimeoutExpired):
-        pp._run(["/bin/sh", "-c", "sleep 30"], check=False, timeout=0.5)
+        pp._run([sys.executable, "-c", "import time; time.sleep(30)"], check=False, timeout=0.5)
 
 
 def test_a_timed_out_spawn_takes_its_grandchildren_with_it(monkeypatch, tmp_path) -> None:
@@ -141,15 +142,27 @@ def test_a_timed_out_spawn_takes_its_grandchildren_with_it(monkeypatch, tmp_path
     monkeypatch.setattr(pp, "_bundle_lib_env", lambda _cmd, _env: None)
     marker = tmp_path / "grandchild-survived"
 
-    # sh backgrounds a grandchild that outlives it, then sleeps so the
-    # bound fires on the direct child while the grandchild still holds on.
-    script = f"( sleep 3; touch {marker!s} ) & sleep 30"
+    started = tmp_path / "grandchild-started"
+
+    # The child starts a grandchild that outlives it, then sleeps so the bound
+    # fires on the direct child while the grandchild still holds on. Python,
+    # not sh, so the same tree runs on Windows, where the bound is a job object
+    # rather than a process group.
+    grandchild = (
+        "import pathlib, time; "
+        f"pathlib.Path({str(started)!r}).touch(); time.sleep(3); pathlib.Path({str(marker)!r}).touch()"
+    )
+    script = (
+        "import subprocess, sys, time; "
+        f"subprocess.Popen([sys.executable, '-c', {grandchild!r}]); time.sleep(30)"
+    )
     with pytest.raises(subprocess.TimeoutExpired):
-        pp._run(["/bin/sh", "-c", script], check=False, timeout=0.5)
+        pp._run([sys.executable, "-c", script], check=False, timeout=2.0)
 
     import time
 
     time.sleep(4.0)
+    assert started.exists(), "the grandchild never started, so the kill proved nothing"
     assert not marker.exists(), (
         "a grandchild of the timed-out spawn outlived the bound and kept "
         "running -- the process group was not killed"

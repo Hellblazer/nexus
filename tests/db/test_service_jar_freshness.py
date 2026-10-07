@@ -11,6 +11,9 @@ from pathlib import Path
 
 import pytest
 
+from nexus._install.layout_core import exe_name
+from tests._platform import posix_only
+
 
 @pytest.fixture(autouse=True)
 def _no_live_build_lease(tmp_path, monkeypatch):
@@ -138,7 +141,7 @@ def _fake_pg_bin(tmp_path: Path) -> Path:
     bin_dir = tmp_path / "pgbin"
     bin_dir.mkdir()
     for name in _PG_TOOL_NAMES:
-        (bin_dir / name).write_text("#!/bin/sh\n")
+        (bin_dir / exe_name(name)).write_text("#!/bin/sh\n")  # initdb.exe on Windows
     return bin_dir
 
 
@@ -389,6 +392,7 @@ class TestBuildInProgressIsRefusedLoudly:
         assert build_in_progress_reason(tmp_path / "nope") is None
 
 
+@posix_only("the build lease names the ./mvnw build's POSIX process group (pgid; os.getpgid/os.killpg)")
 class TestLeaseHolderLiveness:
     """The lease directory in the git common dir never disappears on its own
     (nexus-pv93h): a reader keys on the HOLDER, never on the path. The lease

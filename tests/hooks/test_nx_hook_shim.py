@@ -25,6 +25,7 @@ from pathlib import Path
 
 import pytest
 from tests._module_seam import setattr_in
+from tests._platform import IS_WINDOWS, posix_only, scrubbed_env
 
 _ROOT = Path(__file__).resolve().parents[2]
 _SHIM = _ROOT / "conexus" / "hooks" / "scripts" / "nx_hook_shim.py"
@@ -52,14 +53,31 @@ if mode == "sleep":
 """
 
 
+def _install_fake(bindir: Path, source: str) -> dict[str, str]:
+    """Put a fake ``nx-hook`` first on PATH; returns the env the shim needs.
+
+    POSIX: a shebang script. Windows cannot execute one, and the shim finds
+    ``nx-hook`` through PATHEXT, as it finds the real console-script ``.exe``:
+    there the fake is ``nx-hook.cmd`` running the same Python source, and the
+    env carries ``SYSTEMROOT``/``COMSPEC`` (``scrubbed_env``).
+    """
+    env = scrubbed_env(PATH=str(bindir))
+    if not IS_WINDOWS:
+        fake = bindir / "nx-hook"
+        fake.write_text(source.format(python=sys.executable))
+        fake.chmod(0o755)
+        return env
+    script = bindir / "nx-hook.py"
+    script.write_text(source.format(python=sys.executable))
+    (bindir / "nx-hook.cmd").write_text(f'@"{sys.executable}" "{script}" %*\r\n')
+    return env
+
+
 def _run(tmp_path: Path, mode: str | None, verb: str = "mcp-connect-check", payload: bytes = b"{}"):
     bindir = tmp_path / "bin"
     bindir.mkdir(exist_ok=True)
-    if mode is not None:
-        fake = bindir / "nx-hook"
-        fake.write_text(_FAKE.format(python=sys.executable))
-        fake.chmod(0o755)
-    env = {"PATH": str(bindir), "FAKE_MODE": mode or "", "FAKE_PIDFILE": str(tmp_path / "child.pid")}
+    env = _install_fake(bindir, _FAKE) if mode is not None else scrubbed_env(PATH=str(bindir))
+    env |= {"FAKE_MODE": mode or "", "FAKE_PIDFILE": str(tmp_path / "child.pid")}
     return subprocess.run(
         [sys.executable, str(_SHIM), verb],
         input=payload, capture_output=True, env=env, timeout=30, check=False,
@@ -96,6 +114,7 @@ def test_no_nx_hook_at_all_is_exit_0_with_a_notice(tmp_path: Path) -> None:
     assert b"`nx-hook` is not installed" in r.stderr
 
 
+@posix_only("SIGTERM sent to the shim and forwarded to its nx-hook child; Windows has no signal delivery between processes")
 def test_a_signalled_shim_takes_its_nx_hook_child_down_with_it(tmp_path: Path) -> None:
     """hooks.json's timeout ends the shim with a signal; the child must not
     outlive it (review finding, nexus-rcoze). Verified RED against the shim
@@ -196,19 +215,26 @@ def test_the_shim_matches_the_message_those_releases_print(tag: str) -> None:
     assert shim.UNKNOWN_VERB_LINE.search(rendered), (tag, rendered)
 
 
+def test_the_unknown_verb_line_matches_with_a_crlf_ending() -> None:
+    """On Windows ``nx-hook`` writes its stderr in text mode, so the line ends
+    ``\\r\\n``; a ``$`` that only matches before ``\\n`` missed it and an older
+    CLI's unknown verb blocked the session there (RDR-224)."""
+    spec = importlib.util.spec_from_file_location("nx_hook_shim_crlf", _SHIM)
+    assert spec is not None and spec.loader is not None
+    shim = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(shim)
+    line = "nx-hook: unknown verb 'mailbox-drain' -- no hook is registered under that name"
+    assert shim.UNKNOWN_VERB_LINE.search(line + "\r\n")
+    assert shim.UNKNOWN_VERB_LINE.search("warning\r\n" + line + "\r\n")
+    assert not shim.UNKNOWN_VERB_LINE.search(line + " and more\r\n")
+
+
 # -- the project directory (finding C, nexus-f9bgu.36) -----------------------------
 #
 # hooks.json launches the shim with `uv tool run --directory ${CLAUDE_PLUGIN_ROOT}`, so
 # its process cwd is the plugin root. `nx-hook` verbs resolve the project from their
 # own cwd, so the shim hands them the project: the payload's `cwd`, else
 # CLAUDE_PROJECT_DIR, else it inherits.
-
-#: The fake ``nx-hook`` below is a shebang script, which Windows cannot execute
-#: (the shim then reports nx-hook as not installed), the same reason the older
-#: fake-nx-hook tests in this file fail there.
-_POSIX_FAKE = pytest.mark.skipif(
-    sys.platform == "win32", reason="the fake nx-hook is a shebang script",
-)
 
 _CWD_FAKE = """#!{python}
 import os, sys
@@ -220,10 +246,7 @@ sys.stdout.write(os.path.realpath(os.getcwd()))
 def _run_cwd(tmp_path: Path, *, payload: bytes, project_env: Path | None, shim_cwd: Path):
     bindir = tmp_path / "bin"
     bindir.mkdir(exist_ok=True)
-    fake = bindir / "nx-hook"
-    fake.write_text(_CWD_FAKE.format(python=sys.executable))
-    fake.chmod(0o755)
-    env = {"PATH": str(bindir)}
+    env = _install_fake(bindir, _CWD_FAKE)
     if project_env is not None:
         env["CLAUDE_PROJECT_DIR"] = str(project_env)
     return subprocess.run(
@@ -232,7 +255,6 @@ def _run_cwd(tmp_path: Path, *, payload: bytes, project_env: Path | None, shim_c
     )
 
 
-@_POSIX_FAKE
 def test_nx_hook_runs_in_the_payload_cwd_not_the_plugin_root(tmp_path: Path) -> None:
     plugin_root, project, other = tmp_path / "plugin", tmp_path / "project", tmp_path / "other"
     for d in (plugin_root, project, other):
@@ -241,7 +263,6 @@ def test_nx_hook_runs_in_the_payload_cwd_not_the_plugin_root(tmp_path: Path) -> 
     assert r.stdout.decode() == os.path.realpath(project), r
 
 
-@_POSIX_FAKE
 def test_nx_hook_falls_back_to_claude_project_dir(tmp_path: Path) -> None:
     plugin_root, project = tmp_path / "plugin", tmp_path / "project"
     plugin_root.mkdir()
@@ -251,7 +272,6 @@ def test_nx_hook_falls_back_to_claude_project_dir(tmp_path: Path) -> None:
         assert r.stdout.decode() == os.path.realpath(project), (payload, r)
 
 
-@_POSIX_FAKE
 def test_nx_hook_inherits_the_cwd_when_no_project_is_known(tmp_path: Path) -> None:
     plugin_root = tmp_path / "plugin"
     plugin_root.mkdir()

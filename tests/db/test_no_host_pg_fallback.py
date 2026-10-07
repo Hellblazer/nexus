@@ -42,6 +42,7 @@ from pathlib import Path
 
 import pytest
 
+from nexus._install.layout_core import exe_name
 from nexus.db import pg_provision
 from nexus.db.pg_provision import PgBinaryNotFoundError, discover_pg_binaries
 
@@ -50,7 +51,7 @@ _SOURCE = Path(pg_provision.__file__)
 
 def test_no_host_candidate_directories_remain() -> None:
     """No hardcoded host PG path may appear in the module at all."""
-    src = _SOURCE.read_text()
+    src = _SOURCE.read_text(encoding="utf-8")
     tree = ast.parse(src)
 
     # String CONSTANTS only — the docstrings deliberately name these paths to
@@ -80,7 +81,7 @@ def test_no_host_candidate_directories_remain() -> None:
 
 def test_discovery_never_reaches_for_path() -> None:
     """``shutil.which`` must not be how a PostgreSQL gets chosen."""
-    tree = ast.parse(_SOURCE.read_text())
+    tree = ast.parse(_SOURCE.read_text(encoding="utf-8"))
     which_calls = [
         node
         for node in ast.walk(tree)
@@ -125,7 +126,7 @@ def test_no_host_pg_leg_anywhere_in_product_or_tooling() -> None:
     for path in sources:
         if path == Path(__file__):
             continue
-        tree = ast.parse(path.read_text())
+        tree = ast.parse(path.read_text(encoding="utf-8"))
         rel = path.relative_to(_REPO_ROOT).as_posix()
 
         for node in ast.walk(tree):
@@ -215,13 +216,13 @@ def test_the_two_sanctioned_legs_still_work(monkeypatch, tmp_path) -> None:
     bundle_bin = tmp_path / "bundle" / "bin"
     bundle_bin.mkdir(parents=True)
     for name in ("initdb", "pg_ctl", "psql", "createdb"):
-        binary = bundle_bin / name
+        binary = bundle_bin / exe_name(name)  # initdb.exe on Windows
         binary.write_text("#!/bin/sh\nexit 0\n")
         binary.chmod(0o755)
 
     monkeypatch.setenv("NEXUS_PG_BIN", str(bundle_bin))
     bins = discover_pg_binaries()
-    assert bins.initdb == bundle_bin / "initdb"
+    assert bins.initdb == bundle_bin / exe_name("initdb")
     assert bins.all_present()
 
 
@@ -251,7 +252,7 @@ def test_no_module_prose_promises_a_host_postgresql_fallback() -> None:
     pass.
     """
     src = pathlib.Path(__file__).parents[2] / "src" / "nexus" / "db" / "pg_bundle.py"
-    text = src.read_text()
+    text = src.read_text(encoding="utf-8")
     assert len(text) > 2000, f"{src} is implausibly short; the scan would be vacuous"
 
     # Promissory shapes only: something FALLING BACK or PROCEEDING to host PG.

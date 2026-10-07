@@ -17,6 +17,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 import nexus.hooks.subagent_start as _subagent_start_mod
+from tests._platform import posix_only
 from tests.db._fake_t2_server import FakeT2HandlerBase, fake_http_server
 
 STDIN_PAYLOAD = json.dumps({
@@ -156,7 +157,7 @@ class TestClaimantIdInjection:
         module. Re-pointed at the Python module (nexus-q02nx.21): the
         bash script this used to scan no longer runs in production.
         """
-        src = Path(_subagent_start_mod.__file__).read_text()
+        src = Path(_subagent_start_mod.__file__).read_text(encoding="utf-8")
         for forbidden in ("curl ", "wget ", "urllib", "socket.", "requests."):
             assert forbidden not in src, (
                 f"nexus.hooks.subagent_start must perform no network I/O; found {forbidden!r}"
@@ -187,6 +188,7 @@ class TestSessionIdExport:
         nx_script.chmod(0o755)
         return fake_bin
 
+    @posix_only("a fake `nx` script first on PATH; on Windows the hook spawns `python -m nexus.cli` (nx_argv), never a PATH lookup")
     def test_exports_session_id_from_stdin_payload(self, tmp_path) -> None:
         fake_bin = self._make_fake_nx(tmp_path)
         log_file = tmp_path / "nx_calls.log"
@@ -202,6 +204,7 @@ class TestSessionIdExport:
         log_contents = log_file.read_text() if log_file.exists() else ""
         assert "NX_SESSION_ID=test-session" in log_contents, log_contents
 
+    @posix_only("a fake `nx` script first on PATH; on Windows the hook spawns `python -m nexus.cli` (nx_argv), never a PATH lookup")
     def test_missing_session_id_in_payload_preserves_ambient_env(
         self, tmp_path
     ) -> None:

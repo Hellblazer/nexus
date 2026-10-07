@@ -104,7 +104,7 @@ def test_extract_bundle_is_idempotent_no_reextract(tmp_path, make_pg_bundle_txz)
     extract_root = tmp_path / "cache"
     bin_dir = pg_bundle.extract_bundle(archive, extract_root)
     # Stamp a sentinel inside the extracted tree; a re-extract would wipe it.
-    sentinel = bin_dir / "initdb"
+    sentinel = PgBinaries.from_dir(bin_dir).initdb  # initdb.exe on Windows
     sentinel.write_text("MUTATED-BY-TEST\n")
     again = pg_bundle.extract_bundle(archive, extract_root)
     assert again == bin_dir
@@ -126,14 +126,15 @@ def test_extract_bundle_reextracts_when_handed_a_DIFFERENT_archive(
     extract_root = tmp_path / "cache"
     first = make_pg_bundle_txz(tmp_path, "nexus-pg-first.txz")
     bin_dir = pg_bundle.extract_bundle(first, extract_root)
-    (bin_dir / "initdb").write_text("FROM-FIRST-ARCHIVE\n")
+    initdb = PgBinaries.from_dir(bin_dir).initdb  # initdb.exe on Windows
+    initdb.write_text("FROM-FIRST-ARCHIVE\n")
 
     # A genuinely different archive: distinct file, distinct content.
     second = make_pg_bundle_txz(tmp_path / "second", "nexus-pg-second.txz")
     again = pg_bundle.extract_bundle(second, extract_root)
 
     assert again == bin_dir
-    assert (bin_dir / "initdb").read_text() != "FROM-FIRST-ARCHIVE\n", (
+    assert initdb.read_text() != "FROM-FIRST-ARCHIVE\n", (
         "a different archive must re-extract, not return the old binaries"
     )
 
@@ -167,7 +168,7 @@ def test_a_failed_reextract_leaves_the_WORKING_bundle_intact(
     extract_root = tmp_path / "cache"
     good = make_pg_bundle_txz(tmp_path, "nexus-pg-good.txz")
     bin_dir = pg_bundle.extract_bundle(good, extract_root)
-    (bin_dir / "initdb").write_text("THE-WORKING-BUNDLE\n")
+    PgBinaries.from_dir(bin_dir).initdb.write_text("THE-WORKING-BUNDLE\n")
 
     # Simulate a pre-xzop6 install: marker with no comparable identity.
     (extract_root / pg_bundle._EXTRACT_MARKER).write_text(f"source={good}\n")
@@ -182,7 +183,7 @@ def test_a_failed_reextract_leaves_the_WORKING_bundle_intact(
     assert pg_bundle.is_bundle_extracted(extract_root), (
         "a failed re-extract destroyed the working bundle"
     )
-    assert (bin_dir / "initdb").read_text() == "THE-WORKING-BUNDLE\n"
+    assert PgBinaries.from_dir(bin_dir).initdb.read_text() == "THE-WORKING-BUNDLE\n"
 
 
 def test_an_incomplete_replacement_archive_also_leaves_the_bundle_intact(
@@ -192,7 +193,7 @@ def test_an_incomplete_replacement_archive_also_leaves_the_bundle_intact(
     extract_root = tmp_path / "cache"
     good = make_pg_bundle_txz(tmp_path, "nexus-pg-good2.txz")
     bin_dir = pg_bundle.extract_bundle(good, extract_root)
-    (bin_dir / "initdb").write_text("THE-WORKING-BUNDLE\n")
+    PgBinaries.from_dir(bin_dir).initdb.write_text("THE-WORKING-BUNDLE\n")
     (extract_root / pg_bundle._EXTRACT_MARKER).write_text(f"source={good}\n")
 
     no_prefix = make_pg_bundle_txz(
@@ -202,7 +203,7 @@ def test_an_incomplete_replacement_archive_also_leaves_the_bundle_intact(
         pg_bundle.extract_bundle(no_prefix, extract_root)
 
     assert pg_bundle.is_bundle_extracted(extract_root)
-    assert (bin_dir / "initdb").read_text() == "THE-WORKING-BUNDLE\n"
+    assert PgBinaries.from_dir(bin_dir).initdb.read_text() == "THE-WORKING-BUNDLE\n"
 
 
 def test_a_pre_xzop6_marker_upgrades_in_place_without_losing_the_bundle(
@@ -286,7 +287,7 @@ def test_ensure_is_idempotent(tmp_path, monkeypatch, make_pg_bundle_txz) -> None
     config_dir.mkdir()
     first = pg_bundle.ensure_pg_bundle(config_dir)
     assert first is not None
-    sentinel = first / "psql"
+    sentinel = PgBinaries.from_dir(first).psql
     sentinel.write_text("KEEP\n")
     second = pg_bundle.ensure_pg_bundle(config_dir)
     assert second == first

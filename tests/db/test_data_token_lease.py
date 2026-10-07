@@ -27,6 +27,7 @@ from nexus.db.data_token import (
     _data_token_lease_path,
     _lease_key,
 )
+from tests._platform import assert_owner_only
 
 
 class _FakeClock:
@@ -120,8 +121,7 @@ def test_lease_written_after_mint_has_tight_perms_and_shape(tmp_path: Path) -> N
     lease_files = list(tmp_path.glob("data_token_lease.*"))
     assert len(lease_files) == 1
     path = lease_files[0]
-    mode = path.stat().st_mode & 0o777
-    assert mode == 0o600
+    assert_owner_only(path)
 
     raw = path.read_text()
     data = json.loads(raw)

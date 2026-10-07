@@ -654,9 +654,7 @@ class _MintAwareScratchHandler(FakeT2HandlerBase):
     def _handle_mint(self) -> None:
         global _MINT_CALLS
         _MINT_CALLS += 1
-        length = int(self.headers.get("Content-Length", "0"))
-        if length:
-            self.rfile.read(length)
+        self._raw_body()
         auth = self.headers.get("Authorization", "")
         if auth != f"Bearer {_MINT_CREDENTIAL}":
             self._send(401, {"error": "bad mint credential"})

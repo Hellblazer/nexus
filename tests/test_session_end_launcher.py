@@ -22,6 +22,7 @@ from unittest.mock import patch
 
 import pytest
 from tests._module_seam import patch_in
+from tests._platform import posix_only, scrubbed_env
 
 
 @pytest.fixture(autouse=True)
@@ -118,6 +119,7 @@ def test_run_session_end_synchronously_swallows_exceptions() -> None:
         launcher._run_session_end_synchronously()  # must not raise
 
 
+@posix_only("_daemonize_and_run is the POSIX double fork (os.fork); Windows takes _spawn_detached_cleanup")
 def test_cleanup_not_called_in_daemonize_parent_path() -> None:
     """The first-fork parent must return without running the storage
     flush -- it lives only in the grandchild."""
@@ -321,11 +323,11 @@ def test_detached_child_code_runs_the_cleanup(tmp_path) -> None:
 
     proc = subprocess.run(
         [sys.executable, "-c", launcher._DETACHED_CHILD_CODE],
-        env={
-            "PATH": os.environ.get("PATH", ""),
-            "HOME": str(tmp_path / "home"),
-            "NEXUS_CONFIG_DIR": str(tmp_path / "config"),
-        },
+        env=scrubbed_env(
+            PATH=os.environ.get("PATH", ""),
+            HOME=str(tmp_path / "home"),
+            NEXUS_CONFIG_DIR=str(tmp_path / "config"),
+        ),
         capture_output=True, text=True, timeout=120,
     )
     assert proc.returncode == 0, proc.stderr
@@ -334,6 +336,7 @@ def test_detached_child_code_runs_the_cleanup(tmp_path) -> None:
     assert "session_end_storage_error" in proc.stdout + proc.stderr
 
 
+@posix_only("_daemonize_and_run is the POSIX double fork (os.fork); Windows takes _spawn_detached_cleanup")
 def test_daemonize_parent_path_returns_without_running_cleanup() -> None:
     """The first-fork parent returns immediately so Claude Code sees
     exit 0 in single-digit milliseconds. Cleanup does NOT run in the
@@ -359,6 +362,7 @@ def test_daemonize_parent_path_returns_without_running_cleanup() -> None:
     )
 
 
+@posix_only("_daemonize_and_run is the POSIX double fork (os.fork); Windows takes _spawn_detached_cleanup")
 def test_daemonize_falls_through_to_sync_on_oserror() -> None:
     """If ``os.fork`` raises (e.g. fork rate-limit), fall through to
     synchronous cleanup rather than drop it.

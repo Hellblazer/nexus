@@ -1111,6 +1111,21 @@ class TestSnSessionStart:
         assert result.stdout == (SN_DIR / "hooks" / "scripts" / "session-start-section.md").read_bytes()
         assert b"crashed, event continues" not in result.stderr
 
+    def test_stdout_is_the_section_bytes_whatever_the_stream_encoding(self) -> None:
+        """Claude Code reads the hook's stdout as UTF-8. On Windows a piped
+        stdout is in the locale code page (cp1252) and text mode, so a bare
+        ``sys.stdout.write`` sent the section's em dashes as cp1252 bytes and
+        every newline as CRLF (RDR-224). Forcing a non-UTF-8 stream encoding
+        reproduces that on any host: the output must still be the file's bytes."""
+        env = {k: v for k, v in os.environ.items() if k not in ("PYTHONIOENCODING", "PYTHONUTF8")}
+        env["PYTHONIOENCODING"] = "latin-1"
+        result = subprocess.run(
+            [sys.executable, str(SESSION_START)], input=b"{}",
+            capture_output=True, timeout=10, cwd=str(REPO_ROOT), env=env,
+        )
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == (SN_DIR / "hooks" / "scripts" / "session-start-section.md").read_bytes()
+
 
 class TestSnHookErrorBoundary:
     """Every sn hook script survives its own crash (RDR-215).

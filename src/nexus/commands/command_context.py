@@ -683,6 +683,17 @@ def compute_continuation_path(
     return base
 
 
+def _continuation_dir() -> Path:
+    """Where a continuation handoff is written: ``/tmp`` on POSIX, the user's
+    temp directory on Windows, where ``/tmp`` names ``\\tmp`` on the current
+    drive, a directory that does not normally exist (RDR-224)."""
+    if os.name == "nt":
+        import tempfile  # noqa: PLC0415 — Windows-only branch
+
+        return Path(tempfile.gettempdir())
+    return Path("/tmp")
+
+
 def _git_working_state(cwd: Path) -> list[str]:
     """Return working-state bullet lines for the continuation block.
 
@@ -1539,7 +1550,7 @@ def continuation(args: tuple[str, ...]) -> None:
         repo_safe=repo_safe,
         slug=slug,
         now=datetime.now(),
-        out_dir=Path("/tmp"),
+        out_dir=_continuation_dir(),
         exists=Path.exists,
     )
 

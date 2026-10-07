@@ -25,6 +25,8 @@ import urllib.parse
 
 import pytest
 
+from nexus.daemon.service_registry import service_identity
+
 PROJECT_ROOT = pathlib.Path(__file__).parent.parent
 #: The plugin-resident library both live routing guards import. The wheel
 #: copy (`src/nexus/hooks/_routing_lib.py`) had no importer left after
@@ -586,7 +588,7 @@ def test_log_routing_event_resolves_from_lease_file_with_no_env_set(tmp_path, mo
 
     # A whole record, as ServiceRegistry writes it — see _write_lease below
     # for why a hand-written partial is not a lease file (nexus-t9klx).
-    (cfg_dir / f"storage_service_addr.{os.getuid()}").write_text(
+    (cfg_dir / f"storage_service_addr.{service_identity()}").write_text(
         LeaseRecord(
             scope_key="storage_service",
             generation=1,
@@ -632,7 +634,7 @@ def test_log_routing_event_expired_lease_is_ignored(tmp_path, monkeypatch):
     monkeypatch.delenv("NX_SERVICE_HOST", raising=False)
     monkeypatch.delenv("NX_SERVICE_PORT", raising=False)
     monkeypatch.delenv("NX_SERVICE_TOKEN", raising=False)
-    lease_path = cfg_dir / f"storage_service_addr.{os.getuid()}"
+    lease_path = cfg_dir / f"storage_service_addr.{service_identity()}"
     lease_path.write_text(json.dumps({
         "status": "live",
         "heartbeat_epoch": _time.time() - 120.0,
@@ -1070,7 +1072,7 @@ def _write_lease(config_dir, *, age: float = 0.0, ttl: float = 60.0) -> None:
         endpoint={"host": "127.0.0.1", "port": 4242, "token": "tok"},
         version="0.0.0-fixture",
     )
-    (config_dir / f"storage_service_addr.{os.getuid()}").write_text(record.to_json())
+    (config_dir / f"storage_service_addr.{service_identity()}").write_text(record.to_json())
 
 
 def test_read_service_lease_fresh(tmp_path):
@@ -1086,7 +1088,7 @@ def test_read_service_lease_expired(tmp_path):
 
 
 def test_read_service_lease_malformed(tmp_path):
-    (tmp_path / f"storage_service_addr.{os.getuid()}").write_text("not json")
+    (tmp_path / f"storage_service_addr.{service_identity()}").write_text("not json")
     assert _load_lib()._read_service_lease(tmp_path) is None
 
 

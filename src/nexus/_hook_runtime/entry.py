@@ -239,6 +239,25 @@ def _resolve_verb_module(verb: str) -> str | None:
     return module if isinstance(module, str) else None
 
 
+
+def _write_utf8(stream, text: str) -> None:
+    """Write *text* to *stream* as UTF-8 bytes with no newline translation.
+
+    Claude Code decodes a hook's stdout as UTF-8. A piped ``sys.stdout`` on
+    Windows is in the locale code page (cp1252) and text mode, so a plain
+    ``write`` sent other bytes and CRLF line ends, and a character outside the
+    code page raised after ``never_fail`` had already returned (RDR-224). A
+    stream with no ``buffer`` (a test's ``StringIO``) takes the text as is.
+    """
+    buffer = getattr(stream, "buffer", None)
+    if buffer is None:
+        stream.write(text)
+        stream.flush()
+        return
+    stream.flush()
+    buffer.write(text.encode("utf-8"))
+    buffer.flush()
+
 def main() -> None:
     """Dispatch ``sys.argv[1]`` to its verb's ``run()``.
 
@@ -385,8 +404,7 @@ def main() -> None:
                 while data:
                     data = data[os.write(saved_stdout_fd, data):]
             else:
-                real_stdout.write(text + "\n")
-                real_stdout.flush()
+                _write_utf8(real_stdout, text + "\n")
 
         install_stream_sink(_sink)
 
@@ -410,8 +428,7 @@ def main() -> None:
             os.close(saved_stdout_fd)
 
     if result.stdout is not None:
-        real_stdout.write(result.stdout + "\n")
-        real_stdout.flush()
+        _write_utf8(real_stdout, result.stdout + "\n")
 
     # Every verb is forced to 0: a crash IS the hook choosing to say nothing,
     # which is failing open.

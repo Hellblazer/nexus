@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import pytest
 
+from nexus._install.layout_core import exe_name
 from nexus.db.pg_provision import PgBinaryNotFoundError, discover_pg_binaries
 
 
@@ -71,8 +72,8 @@ class TestConfigDirBundleBootSafeDiscovery:
         bundle_bin = tmp_path / "bundle" / "bin"
         bundle_bin.mkdir(parents=True)
         for name in ("initdb", "pg_ctl", "psql", "createdb"):
-            (bundle_bin / name).write_text("#!/bin/sh\n")
-            (bundle_bin / name).chmod(0o755)
+            (bundle_bin / exe_name(name)).write_text("#!/bin/sh\n")  # initdb.exe on Windows
+            (bundle_bin / exe_name(name)).chmod(0o755)
 
         # Force the config-dir bundle seam to resolve to our fake bundle,
         # exactly as it would on a local-distribution machine at boot.
@@ -81,7 +82,7 @@ class TestConfigDirBundleBootSafeDiscovery:
         bins = discover_pg_binaries()
 
         assert bins.all_present(), "config-dir bundle must satisfy discovery at boot"
-        assert bins.initdb == bundle_bin / "initdb"
+        assert bins.initdb == bundle_bin / exe_name("initdb")
         # Belt-and-suspenders: every binary resolved from the bundle, not a
         # host PG that happens to be on PATH / in a candidate dir.
         assert bins.initdb.parent == bundle_bin

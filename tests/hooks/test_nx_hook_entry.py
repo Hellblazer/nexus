@@ -44,7 +44,7 @@ def _write_fixture_verb(tmp_path: Path, module_name: str, body: str) -> Path:
     for the caller to add to PYTHONPATH."""
     fixtures = tmp_path / "fixtures"
     fixtures.mkdir(exist_ok=True)
-    (fixtures / f"{module_name}.py").write_text(textwrap.dedent(body))
+    (fixtures / f"{module_name}.py").write_text(textwrap.dedent(body), encoding="utf-8")
     return fixtures
 
 
@@ -154,6 +154,35 @@ def test_malformed_stdin_reaches_the_verb_as_a_none_payload(tmp_path: Path) -> N
     proc = _run(["echo"], env, stdin="{not json")
     assert proc.returncode == 0, proc.stderr
     assert json.loads(proc.stdout) == {"received": None}
+
+
+_PLAIN_TEXT_VERB = textwrap.dedent(
+    """
+    def run(payload):
+        from nexus._hook_runtime._io import HookResult
+        return HookResult(stdout="RDR: 3 documents \u2192 indexed \u2014 ok\\nsecond line")
+    """
+)
+
+
+def test_plain_text_stdout_is_utf8_bytes_whatever_the_stream_encoding(tmp_path: Path) -> None:
+    """Claude Code decodes a hook's stdout as UTF-8. On Windows a piped stdout is
+    in the locale code page (cp1252) with CRLF translation, so writing the
+    verb's text through it sent the wrong bytes, and a character outside the
+    code page raised after ``never_fail`` had returned, exiting 1 (RDR-224). A
+    non-UTF-8 stream encoding reproduces that on any host."""
+    fixtures = _write_fixture_verb(tmp_path, "plain_verb", _PLAIN_TEXT_VERB)
+    env = _env(
+        tmp_path,
+        PYTHONPATH=str(fixtures),
+        PYTHONIOENCODING="latin-1",
+        _NX_HOOK_TEST_VERB_OVERRIDE=json.dumps({"plain": "plain_verb"}),
+    )
+    proc = subprocess.run(
+        [*_ENTRY_ARGV, "plain"], input=b"{}", env=env, capture_output=True, timeout=30,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout == "RDR: 3 documents \u2192 indexed \u2014 ok\nsecond line\n".encode("utf-8")
 
 
 # -- a crashing verb: exits 0, prints nothing on stdout, logs to stderr ----

@@ -21,8 +21,9 @@ the winner PUBLISHES, without ever itself acquiring the lock.
 
 Deterministic: injected clock + wall_clock + poster + (optionally) sleep, no
 real network. The concurrency tests use REAL OS threads and a REAL
-``fcntl.flock`` against a real ``tmp_path`` lock file -- flock semantics are
-per OPEN FILE DESCRIPTION, not per process, so genuine intra-process
+lock (``nexus._locking.lock_fd``: ``flock`` on POSIX, ``msvcrt.locking`` on
+Windows, the product's own primitive) against a real ``tmp_path`` lock file --
+both are per OPEN FILE (description or handle), not per process, so genuine intra-process
 contention between independently-``os.open``'d file descriptors (one per
 simulated "cold process", exactly as separate ``DataTokenManager``
 instances model separate ``nx`` subprocesses sharing one ``config_dir``)
@@ -30,7 +31,6 @@ is exactly what real cross-process contention would do.
 """
 from __future__ import annotations
 
-import fcntl
 import os
 import threading
 import time
@@ -39,6 +39,8 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+
+from nexus._locking import lock_fd, unlock_fd
 
 from nexus.db.data_token import (
     _MINT_LOCK_WAIT_CEILING_S,
@@ -154,7 +156,7 @@ def test_lock_wait_timeout_message_names_degraded_server_alongside_stuck_sibling
     lock_path = _data_token_mint_lock_path(BASE_URL, TENANT, tmp_path)
     tmp_path.mkdir(parents=True, exist_ok=True)
     fd = os.open(str(lock_path), os.O_WRONLY | os.O_CREAT, 0o600)
-    fcntl.flock(fd, fcntl.LOCK_EX)
+    lock_fd(fd, blocking=True)
     try:
         poster = _FakePoster()
         mgr = _manager(
@@ -172,7 +174,7 @@ def test_lock_wait_timeout_message_names_degraded_server_alongside_stuck_sibling
         # so a chain timeout is not misread as a stuck sibling.
         assert "chain of siblings" in message
     finally:
-        fcntl.flock(fd, fcntl.LOCK_UN)
+        unlock_fd(fd)
         os.close(fd)
 
 
@@ -345,11 +347,11 @@ def test_uncontended_mint_returns_normally_and_releases_lock(tmp_path: Path) -> 
     fd = os.open(str(lock_path), os.O_WRONLY | os.O_CREAT, 0o600)
     try:
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            lock_fd(fd, blocking=False)
         except BlockingIOError:
             pytest.fail("lock was still held after an uncontended mint returned")
         else:
-            fcntl.flock(fd, fcntl.LOCK_UN)
+            unlock_fd(fd)
     finally:
         os.close(fd)
 
@@ -430,14 +432,14 @@ def test_mint_guarded_failure_releases_lock_and_raises(tmp_path: Path) -> None:
     fd = os.open(str(lock_path), os.O_WRONLY | os.O_CREAT, 0o600)
     try:
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            lock_fd(fd, blocking=False)
         except BlockingIOError:
             pytest.fail(
                 "lock was still held after a mint failure -- bearer_for "
                 "must release it even on error"
             )
         else:
-            fcntl.flock(fd, fcntl.LOCK_UN)
+            unlock_fd(fd)
     finally:
         os.close(fd)
 
@@ -460,10 +462,10 @@ def test_waiting_racer_falls_through_to_its_own_mint_after_holders_failure(
     def _sibling_holds_then_releases_without_publishing() -> None:
         fd = os.open(str(lock_path), os.O_WRONLY | os.O_CREAT, 0o600)
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX)
+            lock_fd(fd, blocking=True)
             held.set()
             release.wait(timeout=5)
-            fcntl.flock(fd, fcntl.LOCK_UN)
+            unlock_fd(fd)
         finally:
             os.close(fd)
 
@@ -500,7 +502,7 @@ def test_lock_wait_ceiling_exceeded_raises_named_error(tmp_path: Path) -> None:
     lock_path = _data_token_mint_lock_path(BASE_URL, TENANT, tmp_path)
     tmp_path.mkdir(parents=True, exist_ok=True)
     fd = os.open(str(lock_path), os.O_WRONLY | os.O_CREAT, 0o600)
-    fcntl.flock(fd, fcntl.LOCK_EX)
+    lock_fd(fd, blocking=True)
     try:
         poster = _FakePoster()
         mgr = _manager(
@@ -511,7 +513,7 @@ def test_lock_wait_ceiling_exceeded_raises_named_error(tmp_path: Path) -> None:
             mgr.bearer_for(BASE_URL, TENANT)
         assert poster.calls == []  # never attempted its own mint
     finally:
-        fcntl.flock(fd, fcntl.LOCK_UN)
+        unlock_fd(fd)
         os.close(fd)
 
 

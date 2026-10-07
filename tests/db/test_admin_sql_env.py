@@ -18,6 +18,7 @@ from nexus.db.admin_sql import (
     run_admin_sql,
     run_admin_sql_detailed,
 )
+from tests._platform import IS_WINDOWS
 
 
 class _RecordingRunner:
@@ -59,7 +60,11 @@ def test_admin_env_carries_bundle_lib_path(tmp_path, monkeypatch):
     assert ok is True
     env = runner.envs[0]
     lib = str(tmp_path / "bundle" / "lib")
-    assert env.get("LD_LIBRARY_PATH", "").split(os.pathsep)[0] == lib
+    if IS_WINDOWS:
+        # Windows loads the bundle's DLLs from beside the .exe: no loader variable.
+        assert "LD_LIBRARY_PATH" not in env
+    else:
+        assert env.get("LD_LIBRARY_PATH", "").split(os.pathsep)[0] == lib
     assert env["PGPASSWORD"] == "apw"
 
 
