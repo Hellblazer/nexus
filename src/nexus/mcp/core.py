@@ -12774,7 +12774,8 @@ def daemon_uninstall(
         description=(
             "When true (and confirm=true), ALSO deletes the nexus CONFIG "
             "directory (~/.config/nexus/, or NEXUS_CONFIG_DIR) — notes, "
-            "plans, and the catalog. Irreversible."
+            "plans, and the catalog — and the model cache (~/.cache/nexus/). "
+            "Irreversible."
         ),
     )] = False,
 ) -> str:
@@ -12789,9 +12790,12 @@ def daemon_uninstall(
 
     Constraints:
     - Nothing is removed until `confirm=True`.
+    - `remove_data=True` removes `~/.cache/nexus/` (the ONNX model cache)
+      only after the stack is confirmed stopped, and never a model root set
+      with `NX_ONNX_MODEL_DIR` outside it.
     - `remove_data=True` does NOT touch `~/.local/share/nexus/` (the
-      embedding-model cache, and any relic Chroma directory from a
-      pre-PG install) — remove that separately for a full wipe.
+      fastembed cache, and any relic Chroma directory from a pre-PG
+      install) — remove that separately for a full wipe.
     """
     from nexus.daemon import installer  # noqa: PLC0415 — circular-dep avoidance (lifecycle module imports mcp at top)
 
