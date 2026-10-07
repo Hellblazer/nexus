@@ -1359,10 +1359,18 @@ def _check_tools() -> list[HealthResult]:
         fatal=True,
     )
     if not git_path:
+        # Windows: Git for Windows' installer always asks for elevation, through
+        # winget too (`--scope user` and an `/CURRENTUSER` override included,
+        # measured on a clean Windows 11 guest 2026-10-07). PortableGit
+        # extracted under %LOCALAPPDATA% needs no admin rights and carries the
+        # Git Bash Claude Code uses, so it is the hint; the guide has the
+        # PowerShell that does it.
         r.fix_suggestions = [
             "brew install git                                              (macOS)",
             "apt install git                                               (Ubuntu/Debian)",
-            "winget install --id Git.Git --scope user                      (Windows)",
+            "PortableGit in %LOCALAPPDATA%\\Programs\\Git, cmd\\ on the user PATH (Windows, no admin)",
+            "  steps: https://github.com/Hellblazer/nexus/blob/main/docs/windows-install.md#2-install-git",
+            "winget install --id Git.Git -e --source winget                (Windows, asks for admin)",
             "https://git-scm.com/downloads",
         ]
     results.append(r)

@@ -404,7 +404,27 @@ def test_doctor_missing_git_includes_winget_hint(runner, mock_reg):
     def which_side(name):
         return None if name == "git" else f"/usr/bin/{name}"
     result = _invoke(runner, mock_reg, which=which_side)
-    assert "winget install --id Git.Git --scope user" in result.output
+    assert "winget install --id Git.Git -e --source winget" in result.output
+
+
+def test_doctor_missing_git_hint_leads_windows_with_no_admin_portablegit(runner, mock_reg):
+    """nexus-f9bgu: Git for Windows' installer raises UAC through winget,
+    with ``--scope user`` and an ``/CURRENTUSER`` override alike (measured
+    on a clean Windows 11 guest, 2026-10-07). The Windows hint must lead
+    with the no-admin PortableGit path, point at the guide's Git section,
+    and label the winget line as needing admin, never pair it with
+    ``--scope user`` as if that avoided elevation.
+    """
+    def which_side(name):
+        return None if name == "git" else f"/usr/bin/{name}"
+    out = _invoke(runner, mock_reg, which=which_side).output
+    assert "--scope user" not in out.split("git:", 1)[1].split("bd (beads", 1)[0]
+    portable = out.index("PortableGit in %LOCALAPPDATA%\\Programs\\Git")
+    winget = out.index("winget install --id Git.Git")
+    assert portable < winget
+    assert "(Windows, no admin)" in out
+    assert "(Windows, asks for admin)" in out
+    assert "docs/windows-install.md#2-install-git" in out
 
 
 def test_doctor_missing_npx_includes_winget_hint(runner, mock_reg):
