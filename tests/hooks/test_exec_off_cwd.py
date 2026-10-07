@@ -39,6 +39,26 @@ def _load(path: Path, name: str) -> types.ModuleType:
     return mod
 
 
+def _fake_subprocess(
+    mod: types.ModuleType, monkeypatch: pytest.MonkeyPatch, **overrides: object,
+) -> None:
+    """Replace *mod*'s own ``subprocess`` binding with a copy carrying *overrides*.
+
+    ``monkeypatch.setattr(mod.subprocess, "Popen", ...)`` would patch the one shared
+    ``subprocess`` module for the whole worker until the test's monkeypatch is undone,
+    and the engine substrate's fixture teardown (``drop_test_tenant``'s psql) runs
+    before that and spawned into the fake: "Failed: spawned" at teardown on the
+    qwentescence full suite, 2026-10-07. Rebinding the name in the loaded script
+    alone keeps the fake where the test means it.
+    """
+    import subprocess as real  # noqa: PLC0415 -- only the attribute copy needs it
+
+    ns = types.SimpleNamespace(**{k: getattr(real, k) for k in dir(real) if not k.startswith("__")})
+    for name, value in overrides.items():
+        setattr(ns, name, value)
+    monkeypatch.setattr(mod, "subprocess", ns)
+
+
 @pytest.fixture()
 def exec_path() -> types.ModuleType:
     return _load(_SCRIPTS / "_exec_path.py", "_exec_path_under_test")
@@ -177,7 +197,7 @@ def _record(mod: types.ModuleType, monkeypatch: pytest.MonkeyPatch) -> list[list
         seen.append(list(argv))
         return _Done()
 
-    monkeypatch.setattr(mod.subprocess, "run", fake)
+    _fake_subprocess(mod, monkeypatch, run=fake)
     return seen
 
 
@@ -202,7 +222,7 @@ def test_the_shim_spawns_the_path_nx_hook_not_the_planted_one(
         def communicate(self, payload: bytes) -> tuple[bytes, bytes]:
             return b"verdict", b""
 
-    monkeypatch.setattr(shim.subprocess, "Popen", _Proc)
+    _fake_subprocess(shim, monkeypatch, Popen=_Proc)
     monkeypatch.setattr(shim.signal, "signal", lambda *a: None)
     monkeypatch.setattr(sys, "stdin", types.SimpleNamespace(buffer=io.BytesIO(b"{}")))
     monkeypatch.setattr(sys, "stdout", types.SimpleNamespace(buffer=io.BytesIO()))
@@ -223,7 +243,7 @@ def test_the_shim_skips_with_a_note_when_only_a_planted_nx_hook_exists(
     monkeypatch.setattr(sys, "platform", "win32")
     shim = _load(_SCRIPTS / "nx_hook_shim.py", "nx_hook_shim_offcwd_absent")
     spawned: list[object] = []
-    monkeypatch.setattr(shim.subprocess, "Popen", lambda *a, **k: spawned.append(a) or pytest.fail("spawned"))
+    _fake_subprocess(shim, monkeypatch, Popen=lambda *a, **k: spawned.append(a) or pytest.fail("spawned"))
     monkeypatch.setattr(sys, "stdin", types.SimpleNamespace(buffer=io.BytesIO(b"{}")))
     assert shim.main(["auto-approve"]) == 0
     assert not spawned
