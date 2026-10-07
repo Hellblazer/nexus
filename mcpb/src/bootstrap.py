@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
 """Resolve-with-retry bootstrap for the Claude Desktop .mcpb bundle (nexus-r433b).
 
-Claude Desktop launches this file via ``uv run --no-project`` (see
-manifest.json's mcp_config). The bundle's real dependency resolution — the
+Claude Desktop launches this file via ``uv tool run ... --python >=3.12
+python`` (see manifest.json's mcp_config), outside the bundle's project. The
+launcher is a tool run, not ``uv run --no-project``, because ``uv run`` searches
+the bundle directory and every parent for a ``.venv`` and runs the first one: a
+``~/.venv`` or a ``C:\\.venv`` above the bundle supplied the interpreter
+(nexus-92gxf). A tool environment is built from a managed or PATH interpreter
+only. The bundle's real dependency resolution — the
 step that pulls ``conexus[local]>=X.Y.Z`` from PyPI — used to happen inside
 the ``uv run src/server.py`` invocation itself, which meant a resolver
 failure killed the extension before any of our code ran. PyPI's simple
@@ -26,8 +31,8 @@ output: behavior unchanged from before this file existed.
 Set ``NX_MCPB_SKIP_RESOLVE_RETRY=1`` to skip the sync-with-retry and hand
 off to the server directly (the pre-r433b behavior).
 
-Deliberately conservative syntax: under ``--no-project`` uv runs this on
-whatever Python it discovers, which need not satisfy the bundle's own
+Deliberately conservative syntax: the launcher runs this on whatever Python
+>=3.12 uv finds, which need not satisfy the bundle's own
 ``requires-python`` (that constraint governs the project venv ``uv sync``
 creates, not this file). Standard library only, for the same reason: conexus
 is not installed yet when this runs.
@@ -169,7 +174,7 @@ def _resolve_executable(name, platform=None, path=None, pathext=None):
 
 # ── Windows Job Object (kill-on-close) ──────────────────────────────────────
 #
-# Standard library only: this file runs under ``uv run --no-project`` BEFORE
+# Standard library only: this file runs under the tool-run launcher BEFORE
 # conexus is installed, so it cannot import nexus.util.win_job. The constants
 # and struct layout below duplicate that module's; tests/test_mcpb_bootstrap.py
 # pins the two against drift.

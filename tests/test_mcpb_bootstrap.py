@@ -11,7 +11,7 @@ the resolution happened inside ``uv run src/server.py`` itself.
 backoff on exactly the propagation-window failure class, then exec of the
 real server. These tests pin the retry loop's classification and bounds
 (injected runner/sleeper — no real uv, no network) and the manifest wiring
-that makes Desktop launch the bootstrap under ``--no-project`` (without
+that makes Desktop launch the bootstrap outside the project (without
 which uv would resolve the project BEFORE our retry code could run, which
 is the exact defect this fixes).
 
@@ -202,20 +202,28 @@ def test_default_schedule_spans_the_measured_window(bootstrap):
 # ── manifest wiring ─────────────────────────────────────────────────────────
 
 
-def test_manifest_launches_bootstrap_with_no_project(bootstrap):
-    """--no-project is load-bearing: without it, `uv run` resolves the
-    bundle's project deps BEFORE bootstrap.py executes — the resolver
-    failure then kills the extension before any retry code can run, which
-    is the pre-r433b behavior this whole arrangement replaces."""
+def test_manifest_launches_bootstrap_outside_the_project(bootstrap):
+    """The launcher must not touch the bundle's project: a project-mode
+    `uv run` resolves the bundle's deps BEFORE bootstrap.py executes, and the
+    resolver failure then kills the extension before any retry code can run
+    (the pre-r433b behavior). `uv tool run ... python` has no project at all,
+    and, unlike the earlier `uv run --no-project`, never runs an interpreter
+    from a `.venv` above the bundle (nexus-92gxf,
+    tests/test_mcpb_launcher_venv.py)."""
     manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
     server = manifest["server"]
     assert server["entry_point"] == "src/bootstrap.py"
     assert server["mcp_config"]["command"] == "uv"
     assert server["mcp_config"]["args"] == [
+        "tool",
         "run",
-        "--no-project",
         "--directory",
         "${__dirname}",
+        "--no-config",
+        "--quiet",
+        "--python",
+        ">=3.12",
+        "python",
         "src/bootstrap.py",
     ]
 
