@@ -588,24 +588,44 @@ runs, release-shaped `-Ob` native exe; nothing here ran on a workflow runner):
   the timeout rows, because the process was gone before the hook wrote it; the
   `-O2` release exe and the 5 s supervisor grace against the 3 s bound are
   unmeasured.
-- [ ] Claude Code on native Windows runs the conexus plugin's hooks once they
+- [x] Claude Code on native Windows runs the conexus plugin's hooks once they
   are launched by something present on stock Windows (`uv run` or the `py`
-  launcher, per nexus-efk2h's proposed fix) — **Status**: Unverified —
-  **Method**: Spike in a native Windows Claude Code session.
-- [ ] The packaged engine archive and PG bundle run on a clean Windows machine
-  with no VC++ redistributable — **Status**: Unverified — **Method**: a
-  hand-run clean guest (Phase 0 Step 0.5). The clean-VM spike (above) used loose
+  launcher, per nexus-efk2h's proposed fix) — **Status**: Verified (2026-10-07)
+  — **Method**: Phase 5 gate assertion 3 on published conexus 7.72.1 in the
+  clean guest's first, cold Claude Code 2.1.292 session: six conexus hook runs,
+  none failed, `nx-hook session-start` and the `uv run ... nx_hook_shim.py`
+  launcher both produced output (T2 `224-gate-run-7.72.1-2026-10-07`). On
+  7.72.0 the cold session had `nx-hook preflight` cancelled at 6.0 s against
+  its 5 s budget; fixed in 7.72.1 (nexus-3cydr).
+- [x] The packaged engine archive and PG bundle run on a clean Windows machine
+  with no VC++ redistributable — **Status**: Verified (2026-10-06/07) —
+  **Method**: the clean guest `nx-clean-win11` (Phase 0 Step 0.5): the
+  candidate-asset run (T2 `224-f9bgu45-clean-guest-candidate-run`), then Phase 5
+  gate precondition P0 (no `vcruntime140*`/`msvcp140*` outside the .NET
+  `_clr0400` copies, no VC++ runtime keys or uninstall entries) and assertion 1,
+  which installed the published `engine-service-v0.1.149` windows-x64 archives
+  on both init paths and served from them (T2 `224-gate-run-7.72.1-2026-10-07`).
+  Earlier text, kept for the record: the hand-run clean guest was the method. The clean-VM spike (above) used loose
   files, not the packaged archives, and the smokes ran on a host that has the
   runtime system-wide; the module-resolution check proves the shipped copies
   were used, not that the system copies are absent.
-- [ ] The Windows release-workflow jobs (cosign, upload, cache restore, the
+- [x] The Windows release-workflow jobs (cosign, upload, cache restore, the
   cross-job bundle artifact, promotion against a 27-asset release) run on
-  `win-release` — **Status**: Unverified — **Method**: a `workflow_dispatch` run
-  of the release workflow before the first cut (Phase 0 Step 0.5). No workflow
+  `win-release` — **Status**: Verified — **Method**: the
+  `engine-service-v0.1.149` tag ran them: its published, non-draft release
+  carries `nexus-service-windows-x64.txz` and `nexus-pg-windows-x64.txz` with
+  their `.sha256` and `.sigstore.json` files, and `nx init --service` on the
+  clean guest downloaded and signature-verified both (gate assertion 1). Earlier
+  method: a `workflow_dispatch` run of the release workflow before the first cut
+  (Phase 0 Step 0.5). No workflow
   step has run on that runner; the scripts they call ran by hand.
 - [ ] A host shutdown, logoff or sleep with PostgreSQL running recovers cleanly
-  on the next start — **Status**: Unverified — **Method**: a measurement on a
-  real host; none has been run (T2 `224-research-32`).
+  on the next start — **Status**: Partially verified — **Method**: measured on
+  the clean guest (nexus-f9bgu.46, fixed by nexus-f9bgu.51; T2
+  `224-f9bgu51-guest-verification`): sign-out and restart with the stack running
+  stop the engine and PostgreSQL cleanly (`database system is shut down`,
+  `postmaster.pid` removed), and the next boot starts with no crash recovery.
+  Sleep is unmeasured, so the box stays open (T2 `224-research-32`).
 
 ## Proposed Solution
 
@@ -1104,9 +1124,10 @@ the supervisor and the engine from a same-session sender (T2 `224-research-20`,
 
 ### Prerequisites
 
-- [ ] The remaining Critical Assumptions verified: hooks in a native Windows
+- [x] The remaining Critical Assumptions verified: hooks in a native Windows
   Claude Code session, the packaged archives on a clean machine, and the
-  Windows release-workflow jobs on `win-release` (§ Critical Assumptions). The
+  Windows release-workflow jobs on `win-release` (§ Critical Assumptions;
+  verified 2026-10-07 by the Phase 5 gate on published 7.72.1). The
   stop on the real supervisor and engine and the stop during ONNX Runtime
   initialisation are verified.
 - [x] The Phase 0 signing decision recorded: deferred (nexus-dj01b), no route
@@ -1739,3 +1760,12 @@ Right-sized for an Architecture record that replaces an accepted direction.
   stop` leaves it running as on POSIX, and the stale `.nx_old_*` sweep. The
   rehearsal's Windows job now runs the 1076-test native set under a junit floor,
   and a real-stack stop driver is committed (`scripts/windows_service_stop_driver.py`).
+- 2026-10-07: evidence update after the Phase 5 gate passed 5/5 on published
+  conexus 7.72.1 (paired with `engine-service-v0.1.149`) on the clean guest,
+  unattended, in its first cold session (T2 `224-gate-run-7.72.1-2026-10-07`).
+  Checked: hooks under native Claude Code, the packaged archives on a clean
+  machine, the Windows release-workflow jobs, and the prerequisite naming them.
+  The host-shutdown assumption gains the nexus-f9bgu.46/.51 measurement and stays
+  open for sleep. 7.72.1 carries the Windows fixes the gate needed: the MCP stdio
+  protocol off fd 0 (nexus-jg99b), the preflight budget (nexus-3cydr) and
+  `tuf>=7.0.1` (nexus-zw44w). Text and evidence only; no status change.
