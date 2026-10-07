@@ -105,6 +105,12 @@ def test_windows_needs_no_exec_bit(exec_path, tmp_path: Path) -> None:
     assert exec_path.which_off_cwd("git", platform="win32", path=str(tmp_path / "bin"), pathext=".exe") == str(real)
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="compares against shutil.which over a ':'-separated PATH; a Windows tmp_path's "
+    "drive colon splits that PATH apart, and X_OK is true for every file there. The "
+    "Windows arm has its own tests above",
+)
 def test_posix_ignores_the_current_directory_and_matches_shutil_which(
     exec_path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

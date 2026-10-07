@@ -36,11 +36,21 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
 from tests._hook_wiring import REPO_ROOT, UV_LAUNCHER_ARGV
+
+# The plants are POSIX shell scripts under ``.venv/bin``; a Windows venv keeps
+# ``Scripts\\python.exe`` and cannot run a shebang file, so on Windows the
+# never-runs cases would pass vacuously and the two controls fail (measured on
+# qwentescence, 2026-10-07). The Windows evidence for finding C is the real Claude
+# Code session the module docstring cites.
+pytestmark = pytest.mark.skipif(
+    sys.platform == "win32", reason="the planted interpreters are POSIX shell scripts",
+)
 
 _PLUGINS = ("conexus", "sn")
 _NAMES = ("python", "python3", "python3.12", "python3.13")

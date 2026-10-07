@@ -202,6 +202,13 @@ def test_the_shim_matches_the_message_those_releases_print(tag: str) -> None:
 # own cwd, so the shim hands them the project: the payload's `cwd`, else
 # CLAUDE_PROJECT_DIR, else it inherits.
 
+#: The fake ``nx-hook`` below is a shebang script, which Windows cannot execute
+#: (the shim then reports nx-hook as not installed), the same reason the older
+#: fake-nx-hook tests in this file fail there.
+_POSIX_FAKE = pytest.mark.skipif(
+    sys.platform == "win32", reason="the fake nx-hook is a shebang script",
+)
+
 _CWD_FAKE = """#!{python}
 import os, sys
 sys.stdin.buffer.read()
@@ -224,6 +231,7 @@ def _run_cwd(tmp_path: Path, *, payload: bytes, project_env: Path | None, shim_c
     )
 
 
+@_POSIX_FAKE
 def test_nx_hook_runs_in_the_payload_cwd_not_the_plugin_root(tmp_path: Path) -> None:
     plugin_root, project, other = tmp_path / "plugin", tmp_path / "project", tmp_path / "other"
     for d in (plugin_root, project, other):
@@ -232,6 +240,7 @@ def test_nx_hook_runs_in_the_payload_cwd_not_the_plugin_root(tmp_path: Path) -> 
     assert r.stdout.decode() == os.path.realpath(project), r
 
 
+@_POSIX_FAKE
 def test_nx_hook_falls_back_to_claude_project_dir(tmp_path: Path) -> None:
     plugin_root, project = tmp_path / "plugin", tmp_path / "project"
     plugin_root.mkdir()
@@ -241,6 +250,7 @@ def test_nx_hook_falls_back_to_claude_project_dir(tmp_path: Path) -> None:
         assert r.stdout.decode() == os.path.realpath(project), (payload, r)
 
 
+@_POSIX_FAKE
 def test_nx_hook_inherits_the_cwd_when_no_project_is_known(tmp_path: Path) -> None:
     plugin_root = tmp_path / "plugin"
     plugin_root.mkdir()
