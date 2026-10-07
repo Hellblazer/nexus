@@ -24,8 +24,17 @@ import org.jooq.impl.SQLDataType;
 import org.junit.jupiter.api.Test;
 import org.testcontainers.containers.PostgreSQLContainer;
 
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.sql.Connection;
 import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.TimeUnit;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.OptionalLong;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -138,6 +147,91 @@ class P225DiskPreflightIntegrationTest {
             }
         } finally {
             pg.stop();
+        }
+    }
+
+    /**
+     * The wiring gap (nexus-3wh8d.19, DP3): every test above injects its own free-space supplier through the
+     * three-argument overload, so none would notice {@code migrate(ds)}, the single entry point {@code Main}
+     * calls, passing an empty supplier and switching the preflight off. A real child JVM runs that entry point
+     * with {@code NX_PG_DATA_DIR} naming a real directory; the preflight must read that directory's filesystem
+     * and report it. With an empty supplier the check returns silently and the event never appears.
+     *
+     * <p>The environment cannot be set in-process, hence the child. A refusal cannot be provoked from here (it
+     * needs a filesystem with less than 2.2x the store's size free), so the pin is on the free figure the
+     * preflight logs, which only the real supplier can produce.
+     */
+    @Test
+    void migrateDataSource_readsTheFreeSpaceOfNxPgDataDir() throws Exception {
+        PostgreSQLContainer<?> pg = PgContainerHelper.startDedicated();
+        Path dataDir = Files.createTempDirectory("p225-disk-wiring");
+        try {
+            Hygiene001NotNullMigrationRlsTest.bootstrapAdminRole(pg, ADMIN, ADMIN_PASS);
+            try (HikariDataSource ds = pool(pg)) {
+                migrateUpTo(ds, WALK);
+                assertThat(requiredBytes(pg)).as("a walk is pending with data to copy").isPositive();
+
+                var pb = new ProcessBuilder(
+                    Path.of(System.getProperty("java.home"), "bin", "java").toString(),
+                    "-cp", System.getProperty("java.class.path"),
+                    MigrateEntryPoint.class.getName())
+                    .redirectErrorStream(true);
+                pb.environment().put("NX_DB_URL", pg.getJdbcUrl());
+                pb.environment().put("NX_DB_USER", ADMIN);
+                pb.environment().put("NX_DB_PASS", ADMIN_PASS);
+                pb.environment().put(dev.nexus.service.db.LocalDiskPreflight.DATA_DIR_ENV, dataDir.toString());
+                Process p = pb.start();
+                var out = new CopyOnWriteArrayList<String>();
+                try {
+                    Thread reader = new Thread(() -> {
+                        try (var r = new BufferedReader(
+                                new InputStreamReader(p.getInputStream(), StandardCharsets.UTF_8))) {
+                            String line;
+                            while ((line = r.readLine()) != null) out.add(line);
+                        } catch (java.io.IOException ignored) {
+                            // torn down mid-read
+                        }
+                    }, "migrate-entry-reader");
+                    reader.setDaemon(true);
+                    reader.start();
+                    boolean exited = p.waitFor(240, TimeUnit.SECONDS);
+                    reader.join(5_000);
+                    String log = String.join("\n", out);
+                    assertThat(exited).as("the child exits by itself; output:%n%s", log).isTrue();
+                    assertThat(p.exitValue()).as("the walk ran; output:%n%s", log).isZero();
+
+                    Matcher m = Pattern.compile("event=disk_preflight_passed required_bytes=(\\d+) free_bytes=(\\d+)")
+                        .matcher(log);
+                    assertThat(m.find())
+                        .as("migrate(ds) ran the disk preflight against the NX_PG_DATA_DIR filesystem; output:%n%s", log)
+                        .isTrue();
+                    long reported = Long.parseLong(m.group(2));
+                    long actual = Files.getFileStore(dataDir).getUsableSpace();
+                    assertThat(reported).as("free_bytes is the data directory's filesystem, not a stub")
+                        .isBetween(Math.max(0, actual - (256L << 20)), actual + (256L << 20));
+                    assertThat(walkApplied(pg)).isTrue();
+                } finally {
+                    p.destroyForcibly();
+                }
+            }
+        } finally {
+            Files.deleteIfExists(dataDir);
+            pg.stop();
+        }
+    }
+
+    /** The production entry point, in a child JVM: exactly the call {@code Main} makes, with the env it was given. */
+    public static final class MigrateEntryPoint {
+        public static void main(String[] args) {
+            var cfg = new HikariConfig();
+            cfg.setJdbcUrl(System.getenv("NX_DB_URL"));
+            cfg.setUsername(System.getenv("NX_DB_USER"));
+            cfg.setPassword(System.getenv("NX_DB_PASS"));
+            cfg.setMaximumPoolSize(2);
+            try (HikariDataSource ds = new HikariDataSource(cfg)) {
+                SchemaMigrator.migrate(ds);
+            }
+            System.exit(0);
         }
     }
 
