@@ -277,7 +277,8 @@ def _converge_vc_runtime(*, auto_mode: bool) -> None:
             _config.nexus_config_dir(),
             installed_by="nx upgrade",
             # The hook runs this every session: after a failure wait before
-            # downloading ~40 MB again. A person running `nx upgrade` retries.
+            # downloading the 7.4 MB PG bundle again. A person running
+            # `nx upgrade` retries.
             failure_backoff_s=_VC_RUNTIME_AUTO_BACKOFF_S if auto_mode else 0.0,
         )
     except Exception as exc:  # noqa: BLE001 — best-effort trigger stage; ensure_vc_runtime itself never raises, this guards the imports

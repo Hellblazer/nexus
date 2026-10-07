@@ -151,3 +151,19 @@ def test_configuration_doc_install_commands_name_the_same_interpreter() -> None:
         f"docs/configuration.md names {sorted(set(pins))}, README.md names "
         f"{_readme_pin()}."
     )
+
+
+#: The Linux first-install line. Without ``--torch-backend cpu`` uv resolves
+#: the CUDA torch from PyPI on x86-64 (pyproject's [tool.uv.sources] CPU route
+#: never travels in wheel metadata): measured 2026-10-07 in a fresh
+#: ubuntu:24.04 container, 4,264 MB downloaded against 688 MB with the flag.
+_LINUX_CPU_RE = re.compile(
+    r"uv tool install conexus --python \d+\.\d+ --torch-backend cpu"
+)
+
+
+def test_readme_linux_install_names_the_cpu_torch_backend() -> None:
+    assert _LINUX_CPU_RE.search(_README.read_text(encoding="utf-8")), (
+        "README.md has no Linux install line with `--torch-backend cpu`; a "
+        "Linux x86-64 user who copies it downloads the CUDA torch tree."
+    )
