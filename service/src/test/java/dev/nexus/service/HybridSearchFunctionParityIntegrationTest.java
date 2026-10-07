@@ -354,8 +354,9 @@ class HybridSearchFunctionParityIntegrationTest {
                 ctx.insertInto(CATALOG_DOCUMENT_CHUNKS,
                         CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
                         CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
-                        CATALOG_DOCUMENT_CHUNKS.COLLECTION)
-                    .values(TENANT_A, id, 0, HexFormat.of().parseHex(corpusChash.get(id)), COL_MAIN)
+                        CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
+                    .values(TENANT_A, id, 0, HexFormat.of().parseHex(corpusChash.get(id)), COL_MAIN,
+                        PgContainerHelper.collectionModel(ctx, TENANT_A, COL_MAIN))
                     .onConflict(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
                         CATALOG_DOCUMENT_CHUNKS.POSITION)
                     .doNothing()
@@ -426,8 +427,9 @@ class HybridSearchFunctionParityIntegrationTest {
                 ctx.insertInto(CATALOG_DOCUMENT_CHUNKS,
                         CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
                         CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
-                        CATALOG_DOCUMENT_CHUNKS.COLLECTION)
-                    .values(tenant, docId, i, HexFormat.of().parseHex(chashes.get(i)), collection)
+                        CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
+                    .values(tenant, docId, i, HexFormat.of().parseHex(chashes.get(i)), collection,
+                        PgContainerHelper.collectionModel(ctx, tenant, collection))
                     .onConflict(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
                         CATALOG_DOCUMENT_CHUNKS.POSITION)
                     .doNothing()
@@ -483,16 +485,18 @@ class HybridSearchFunctionParityIntegrationTest {
             ctx.insertInto(CATALOG_DOCUMENT_CHUNKS,
                     CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
                     CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
-                    CATALOG_DOCUMENT_CHUNKS.COLLECTION)
+                    CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
                 .values(TENANT_CROSS, DOC_CROSS_DEAD, 0,
-                    HexFormat.of().parseHex(CHASH_CROSS_768), COL_CROSS_A)
+                    HexFormat.of().parseHex(CHASH_CROSS_768), COL_CROSS_A,
+                    PgContainerHelper.collectionModel(ctx, TENANT_CROSS, COL_CROSS_A))
                 .execute();
             ctx.insertInto(CATALOG_DOCUMENT_CHUNKS,
                     CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
                     CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
-                    CATALOG_DOCUMENT_CHUNKS.COLLECTION)
+                    CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
                 .values(TENANT_CROSS, DOC_CROSS_LIVE, 0,
-                    HexFormat.of().parseHex(CHASH_CROSS_768), COL_CROSS_B)
+                    HexFormat.of().parseHex(CHASH_CROSS_768), COL_CROSS_B,
+                    PgContainerHelper.collectionModel(ctx, TENANT_CROSS, COL_CROSS_B))
                 .execute();
         }
     }

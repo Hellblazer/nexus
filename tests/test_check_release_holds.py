@@ -84,10 +84,10 @@ def test_cli_exits_1_naming_the_hold_and_0_when_clear(tmp_path: Path) -> None:
     assert r.returncode == 0, r.stdout + r.stderr
 
 
-def test_this_repo_holds_vectors_030_1_until_rdr_225_is_released() -> None:
-    # The hold this script exists for. Deleting its line in scripts/release-holds.txt is the release decision
-    # (nexus-3wh8d.28); this test is deleted in the same commit.
-    assert [h.changeset for h in crh.check(REPO)] == ["vectors-030-1"]
+def test_this_repos_holds_file_parses_and_holds_nothing_today() -> None:
+    # vectors-030-1 was released for the RDR-225 engine cut (nexus-3wh8d.20: .19 closed, PITR-fork rehearsal
+    # recorded in T2 nexus_rdr/225-rehearsal-2026-10-07, Sam's go). A new hold adds its line and updates this list.
+    assert crh.check(REPO) == []
 
 
 def test_a_changeset_mentioned_only_in_an_xml_comment_is_not_defined(tmp_path: Path) -> None:
