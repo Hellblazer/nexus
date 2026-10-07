@@ -81,8 +81,34 @@ machine PATH; approve the UAC prompt when it appears.
 ## 3. Install conexus and start the local stack
 
 ```powershell
-uv tool install --python 3.13 conexus
+uv tool install conexus --python 3.12
+nx self install
 ```
+
+uv downloads Python 3.12 for you. Measured on the clean machine on 2026-10-07
+with conexus 7.72.1: the install took about two minutes (CPython 3.12.15, 218
+packages), and `nx init`, `nx doctor` and `nx daemon service status` below all
+came out as described. The earlier walks used `--python 3.13` and also worked;
+3.12 is the interpreter the install page names, so the two agree.
+
+`nx self install` moves the install to the layout Nexus manages: each version
+in its own folder under `%USERPROFILE%\.local\share\nexus\tools`, a `current`
+junction naming the one in use, and `tools\current\bin` added to the front of
+your user PATH (it prints a line saying so). Upgrades then build the new version
+next to the running one and never replace a file a running process uses. The
+uv copy it replaces stays until nothing runs from it; the next `nx self install`,
+`nx self gc`, or the start of a Claude Code session with the plugin removes it,
+together with uv's `nx.exe` launchers in `.local\bin`. Until then `nx doctor`
+shows one ⚠ row, "Orphan uv install", which is expected.
+
+Measured on the clean machine on 2026-10-07 with a test build of the branch
+that carries the Windows layout (not yet a release): `nx self install` took
+35 s and downloaded nothing new, the new window resolved `nx` to
+`tools\current\bin\nx.exe`, `nx init` registered the logon task against the new
+layout, `nx doctor` ended "All checks passed" (with the ⚠ row above), store and
+search worked, and `nx self gc` then removed the uv copy and its launchers. The
+installed version has no `av` and no `opencv-python` package, which a plain
+`uv tool install` still pulls in.
 
 Open a new window, then:
 
@@ -104,10 +130,22 @@ nx daemon service status
 `nx doctor` should end with "All checks passed", and `status` should show
 `health: ok` and `pg: up`.
 
-Downloads, measured on the clean machine with conexus 7.72.1: about 0.6 GB for
-`uv tool install` (packages and a Python), and about 0.75 GB for `nx init`
-(engine, PostgreSQL, embedding model and reranker). Counting uv's cache, the
-whole install takes about 4 GB of disk.
+Downloads for conexus 7.72.1: about 0.67 GB for `uv tool install` (653 MB of
+packages and a 21 MB Python), and about 0.58 GB for `nx init` (engine 42 MB,
+PostgreSQL 7 MB, embedding model 436 MB, reranker 91 MB), so about 1.25 GB in
+all. These are the published file sizes of what each step fetches. On disk,
+`nx init` unpacks to about 0.75 GB.
+
+The whole install takes about 2.5 GB of disk. A folder-size tool reports about
+4 GB, because it counts some files twice: on Windows uv installs packages as
+hardlinks to the copies in its cache (`%LOCALAPPDATA%\uv\cache`, about 1.7 GB),
+so the tool environment under `%APPDATA%\uv` (about 1.6 GB) is mostly the same
+data under a second name. The 2.5 GB is the cache, plus the Python uv
+downloaded, plus the 0.75 GB from `nx init`. It was computed from the walk's
+folder sizes and uv's documented Windows link mode, not measured with a
+hardlink-aware tool on Windows. The same install on Linux, measured
+hardlink-aware, shows the effect: 2.2 GB in uv's cache and 2.1 GB in the tool
+environment occupy 2.25 GB together.
 
 ## 4. Claude Code and the plugin
 
@@ -161,14 +199,86 @@ has not been walked on Windows.
 - Upgrade with `nx self install`, then `nx upgrade`. `nx self install` builds the
   new version beside the running one and never replaces files a running process
   uses; it upgrades the program only. `nx upgrade` then runs the migrations the
-  new version needs. The first `nx self install` on an install made with
-  `uv tool install` converts it to the side-by-side layout first (its
-  `--dry-run` on Windows shows that step; the conversion itself has not been run
-  there). Do not use `uv tool install --force conexus` while the stack runs: it
-  replaces files in use.
+  new version needs. It also points the `NexusStorageService` task at the new
+  version and says so. The storage service that is running keeps its version
+  until its next start: the next sign-in, or `nx daemon service stop` followed
+  by `Start-ScheduledTask NexusStorageService`. The old version stays on disk
+  until nothing runs from it, and a later `nx self install` or `nx self gc`
+  removes it. Measured on the clean machine (test build, 2026-10-07): with the
+  stack running, `nx self install` took 14 s, the service kept its process and
+  stayed healthy, and after a stop and `Start-ScheduledTask` it ran the new
+  version within 11 s. If you skipped `nx self install` in step 3, the first
+  `nx self install` converts the uv install the same way (about 20 s, measured
+  with the stack stopped), and the stack moves off the uv copy at its next
+  start. Do not
+  use `uv tool install --force conexus` while the stack runs: it replaces files
+  in use.
 - Remove the logon task with `nx daemon service uninstall --autostart`. That
   leaves the running stack up; stop it as above. Put the task back with
   `nx daemon service install --autostart`.
+
+## Removing Nexus
+
+Run these in a normal PowerShell window, in this order. Remove the plugin first
+if you added it (`/plugin uninstall conexus@nexus-plugins` inside Claude Code).
+
+```powershell
+nx uninstall --yes --remove-data
+uv tool uninstall conexus
+Remove-Item -Recurse -Force "$HOME\.local\share\nexus" -ErrorAction SilentlyContinue
+Remove-Item -Force "$HOME\.local\bin\nx.exe", "$HOME\.local\bin\nx-mcp.exe", "$HOME\.local\bin\nx-mcp-catalog.exe", "$HOME\.local\bin\nx-session-end-launcher.exe", "$HOME\.local\bin\nx-hook.exe" -ErrorAction SilentlyContinue
+```
+
+`nx uninstall --yes --remove-data` stops the stack (PostgreSQL included) and
+the background workers nexus started (the aspect worker that `nx store put` and
+the plugin start, a topic labeling run after `nx index`, and MinerU), removes
+the `NexusStorageService` task and `%LOCALAPPDATA%\nexus`, takes
+`tools\current\bin`, which `nx self install` added, off your user PATH, and
+deletes `%USERPROFILE%\.config\nexus`, which holds the database, notes, plans
+and catalog, and `%USERPROFILE%\.cache\nexus`, which holds the search models
+(about 500 MB). The PATH edit keeps every other entry as written, `%VAR%`
+entries included, and keeps the value's registry type. Windows that are already
+open keep their old PATH. `nx uninstall` without flags only shows what it would
+do. `nx store export --all -o <dir>` keeps a copy of the knowledge store first
+if you want one.
+
+The `Remove-Item` lines remove the program itself, which `nx` cannot delete
+while it runs. On an install that `nx self install` converted,
+`uv tool uninstall conexus` prints "`conexus` is not installed" because the uv
+copy is already gone; that is expected. On an install made only with
+`uv tool install`, `uv tool uninstall conexus` already removes the five `.exe`
+files and `.local\share\nexus` never exists; the `Remove-Item` lines skip
+missing files quietly.
+
+Releases up to 7.73.0 do less. They leave the search models, the aspect worker
+(so `nx uninstall` warns "could not remove data dir ... being used by another
+process"), `%LOCALAPPDATA%\nexus` and the PATH entry. On those, run this after
+the lines above:
+
+```powershell
+Get-CimInstance Win32_Process -Filter "Name='python.exe'" | Where-Object { $_.CommandLine -like '*aspect-worker*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
+Remove-Item -Recurse -Force "$HOME\.config\nexus", "$HOME\.cache\nexus", "$HOME\.local\share\nexus", "$env:LOCALAPPDATA\nexus" -ErrorAction SilentlyContinue
+$k = Get-Item 'HKCU:\Environment'
+$kind = $k.GetValueKind('Path')
+$path = ($k.GetValue('Path', '', 'DoNotExpandEnvironmentNames') -split ';' | Where-Object { $_ -and $_ -notlike '*\.local\share\nexus\tools\current\bin' }) -join ';'
+Set-ItemProperty 'HKCU:\Environment' -Name Path -Value $path -Type $kind
+```
+
+Measured on the clean machine (test build, 2026-10-07, non-elevated window) on
+an install converted by `nx self install`, with the stack running and an aspect
+worker started by `nx store put`: `nx uninstall --yes --remove-data` took 9 s
+and left no `nx`, PostgreSQL, `nexus-service`, `pythonw` or aspect-worker
+process, no task, nothing under `.config\nexus`, `.cache\nexus` or
+`%LOCALAPPDATA%\nexus`, and no `tools\current\bin` on the user PATH; a
+`%USERPROFILE%` entry and the value's `REG_SZ` type were kept. The `Remove-Item`
+lines then took 16 s and left nothing under `.local\share\nexus` and no `nx`
+launcher in `.local\bin`, and a new window found no `nx`. With conexus 7.72.1
+on a uv-only install, `nx uninstall --yes --remove-data` took 6 s and the same
+lines left nothing once the models and `%LOCALAPPDATA%\nexus` were removed as
+above.
+What stays belongs to uv and to you: uv, the Python 3.12 it downloaded, its
+cache (about 2.5 GB after this install; `uv cache clean` empties it) and
+PortableGit.
 
 ## Signing and SmartScreen
 
