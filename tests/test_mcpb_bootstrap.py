@@ -25,6 +25,7 @@ import importlib.util
 import json
 import subprocess
 import sys
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -117,6 +118,44 @@ def test_immediate_success_never_sleeps(bootstrap):
     assert runner.calls == [["uv", "sync", "--directory", "/bundle"]]
 
 
+def test_sync_does_not_inherit_the_hosts_stdin_and_decodes_utf8(bootstrap):
+    """``uv sync`` must never read the MCP protocol stdin, and its output is
+    decoded as UTF-8 with replacement: ``text=True`` uses the Windows locale
+    codepage, so an odd byte would turn a retryable resolver failure into a
+    UnicodeDecodeError traceback (RDR-224 review F1)."""
+    seen: list[dict] = []
+
+    def run(cmd, **kwargs):
+        seen.append(kwargs)
+        return _proc(0)
+
+    bootstrap._sync_with_retry("/bundle", run=run, sleep=lambda s: None)
+    (kw,) = seen
+    assert kw["stdin"] is subprocess.DEVNULL
+    assert kw["encoding"] == "utf-8" and kw["errors"] == "replace"
+    assert "text" not in kw and "universal_newlines" not in kw
+    assert kw["capture_output"] is True
+
+
+def test_sync_survives_undecodable_output_from_a_real_subprocess(bootstrap):
+    """The real ``subprocess.run`` with a child that writes bytes invalid in
+    UTF-8: the failure text comes back with a replacement character, and the
+    propagation class is still recognised."""
+    child_code = (
+        "import sys; "
+        "sys.stderr.buffer.write(b'No solution found: no version of conexus \\xff\\xfe\\n'); "
+        "sys.exit(1)"
+    )
+    sleeps: list[float] = []
+
+    def run(cmd, **kwargs):
+        return subprocess.run([sys.executable, "-c", child_code], **kwargs)
+
+    with pytest.raises(SystemExit):
+        bootstrap._sync_with_retry("/bundle", run=run, sleep=sleeps.append, sleeps=(1,))
+    assert sleeps == [1], "the mangled byte must not stop the retry classification"
+
+
 def test_propagation_failures_retry_with_backoff_then_succeed(bootstrap):
     runner = _Runner([_proc(1, _NO_SOLUTION_GE), _proc(1, _NO_SOLUTION_GE), _proc(0)])
     sleeps: list[float] = []
@@ -168,7 +207,7 @@ def test_manifest_launches_bootstrap_with_no_project(bootstrap):
     bundle's project deps BEFORE bootstrap.py executes — the resolver
     failure then kills the extension before any retry code can run, which
     is the pre-r433b behavior this whole arrangement replaces."""
-    manifest = json.loads(MANIFEST_PATH.read_text())
+    manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
     server = manifest["server"]
     assert server["entry_point"] == "src/bootstrap.py"
     assert server["mcp_config"]["command"] == "uv"
@@ -187,7 +226,7 @@ def test_bundle_ships_both_bootstrap_and_server(bootstrap):
     assert (REPO_ROOT / "mcpb" / "src" / "server.py").exists()
     # And .mcpbignore must not exclude either (they live in src/, only
     # caches and lockfiles are excluded).
-    ignore = (REPO_ROOT / "mcpb" / ".mcpbignore").read_text()
+    ignore = (REPO_ROOT / "mcpb" / ".mcpbignore").read_text(encoding="utf-8")
     assert "server.py" not in ignore
     assert "bootstrap.py" not in ignore
 
@@ -281,6 +320,14 @@ def test_windows_explicit_path_is_used_as_given_not_searched(bootstrap, tmp_path
     assert bootstrap._resolve_executable(str(tmp_path / "gone.exe"), platform="win32", path="") is None
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason=(
+        "POSIX resolution is a ':'-separated PATH walk plus os.access(X_OK). On a real Windows "
+        "host a tmp_path holds a drive colon that splits a ':' PATH apart, and X_OK is true for "
+        "every file, so neither premise holds there; the Windows branch has its own tests"
+    ),
+)
 def test_posix_resolution_ignores_pathext_and_needs_exec_bit(bootstrap, tmp_path):
     _exe(tmp_path, "uv.exe")
     _exe(tmp_path, "tool", executable=False)
@@ -445,6 +492,9 @@ for line in sys.stdin:
 """
 
 
+_STDIO_EXCHANGE_DEADLINE_S = 30
+
+
 @pytest.mark.parametrize(
     "platform",
     [
@@ -473,18 +523,41 @@ def test_stdio_and_exit_code_survive_the_handoff(tmp_path, platform):
         stderr=subprocess.PIPE,
         text=True,
     )
+    # A read deadline for the whole exchange. A child that never sees the
+    # bytes (the mutant that gave it a PIPE stdin instead of the host's)
+    # leaves ``readline`` blocked forever; the timer kills the driver so the
+    # read returns EOF and the assertion below FAILS instead of hanging.
+    expired = threading.Event()
+
+    def _expire() -> None:
+        expired.set()
+        proc.kill()
+
+    deadline = threading.Timer(_STDIO_EXCHANGE_DEADLINE_S, _expire)
+    deadline.start()
+
+    def _next_line() -> str:
+        line = proc.stdout.readline()
+        assert not expired.is_set(), (
+            "no reply within %ds: the bytes written to the bootstrap's stdin "
+            "never reached the child" % _STDIO_EXCHANGE_DEADLINE_S
+        )
+        return line
+
     try:
         proc.stdin.write("hello\n")
         proc.stdin.flush()
-        assert proc.stdout.readline() == "echo:hello\n"
+        assert _next_line() == "echo:hello\n"
         proc.stdin.write("again\n")
         proc.stdin.flush()
-        assert proc.stdout.readline() == "echo:again\n"
+        assert _next_line() == "echo:again\n"
         proc.stdin.write("quit\n")
         proc.stdin.flush()
-        assert proc.wait(timeout=30) == 7
+        assert proc.wait(timeout=_STDIO_EXCHANGE_DEADLINE_S) == 7
+        assert not expired.is_set()
         assert proc.stderr.read() == ""
     finally:
+        deadline.cancel()
         proc.kill()
         proc.wait()
         for f in (proc.stdin, proc.stdout, proc.stderr):
@@ -531,7 +604,11 @@ def test_job_is_created_kill_on_close_and_assigns_self_and_pid(bootstrap):
     k = _FakeKernel32()
     job = bootstrap._KillOnCloseJob(kernel32=k)
     assert k.info_class == 9
-    assert k.limit_flags == 0x2000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+    # KILL_ON_JOB_CLOSE (0x2000) keeps the MCP server tree tied to this
+    # process; BREAKAWAY_OK (0x800) lets a child spawned with
+    # CREATE_BREAKAWAY_FROM_JOB (the aspect-worker daemon) leave the job.
+    assert k.limit_flags == 0x2000 | 0x800
+    assert k.limit_flags & 0x2000, "the kill-on-close guarantee must survive"
     assert job.assign_self() is True
     assert ("Assign", 77, -1) in k.calls
     assert job.assign_pid(555) is True
@@ -556,6 +633,7 @@ def test_job_constants_and_layout_match_nexus_win_job(bootstrap):
         bootstrap._JOB_OBJECT_EXTENDED_LIMIT_INFORMATION
         == win_job._JOB_OBJECT_EXTENDED_LIMIT_INFORMATION
     )
+    assert bootstrap._JOB_OBJECT_LIMIT_BREAKAWAY_OK == 0x00000800  # winnt.h
     assert bootstrap._PROCESS_SET_QUOTA == win_job._PROCESS_SET_QUOTA
     assert bootstrap._PROCESS_TERMINATE == win_job._PROCESS_TERMINATE
     ours = bootstrap._job_struct()
@@ -575,9 +653,15 @@ def test_job_constants_and_layout_match_nexus_win_job(bootstrap):
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="real Job Object needs Windows")
-def test_real_job_object_is_created_on_windows(bootstrap):
-    job = bootstrap._make_job()
-    assert job is not None, "Job Object creation failed on a real Windows host"
+class TestRealWindows:
+    """The kernel32 leg only a real Windows run exercises. The class is a
+    ``--require-passed`` pattern in the Windows conformance job's junit floor
+    (windows-pg-bundle-rehearsal.yml), so a skip here fails that job instead of
+    passing it having proved nothing."""
+
+    def test_real_job_object_is_created_on_windows(self, bootstrap):
+        job = bootstrap._make_job()
+        assert job is not None, "Job Object creation failed on a real Windows host"
 
 
 # ── manifest platform gate ──────────────────────────────────────────────────
@@ -589,6 +673,6 @@ def test_manifest_admits_windows_from_the_windows_client_release(bootstrap):
     publishes the windows-x64 engine and PG bundle, so "win32" (the Claude
     Desktop process.platform token) joins the platforms. Before that release
     the gate stayed shut because a win32 bundle would install and then fail."""
-    platforms = json.loads(MANIFEST_PATH.read_text())["compatibility"]["platforms"]
+    platforms = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))["compatibility"]["platforms"]
     assert sorted(platforms) == ["darwin", "linux", "win32"]
     assert callable(bootstrap._launch_windows) and callable(bootstrap._resolve_executable)

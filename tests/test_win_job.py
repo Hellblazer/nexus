@@ -155,6 +155,7 @@ class TestWin32ConstantsArePinnedAsLiterals:
         assert win_job.CTRL_BREAK_EVENT == 1  # wincon.h: CTRL_BREAK_EVENT
         assert win_job.CREATE_NEW_PROCESS_GROUP == 0x00000200
         assert win_job.CREATE_NO_WINDOW == 0x08000000
+        assert win_job.CREATE_BREAKAWAY_FROM_JOB == 0x01000000
 
     def test_the_job_object_and_process_access_values(self) -> None:
         assert win_job._JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE == 0x00002000
