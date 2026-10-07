@@ -256,10 +256,18 @@ def substrate_cache_root() -> Path:
     its caches with ``XDG_CACHE_HOME`` still grew a second cache under HOME.
     No Java side reads this path, so the rung cannot diverge the way the
     onnx_models root would (see ``nexus.db.onnx_model_root``).
+
+    HOME is read first, then ``Path.home()``, the order the product's engine
+    model root uses (``nexus.db.onnx_model_root``). On POSIX that is what
+    ``Path.home()`` already does; on Windows ``Path.home()`` reads USERPROFILE,
+    so a test that redirects HOME would otherwise still land in the real
+    profile's cache.
     """
     xdg = os.environ.get("XDG_CACHE_HOME", "").strip()
-    base = Path(xdg) if xdg else Path.home() / ".cache"
-    return base / "nexus-test-substrate"
+    if xdg:
+        return Path(xdg) / "nexus-test-substrate"
+    home = os.environ.get("HOME", "").strip()
+    return (Path(home) if home else Path.home()) / ".cache" / "nexus-test-substrate"
 
 
 def _self_provision_pg_bundle() -> Path | None:
