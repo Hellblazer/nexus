@@ -55,8 +55,9 @@ import static org.assertj.core.api.Assertions.assertThat;
  * (their own javadoc names this exact drop-insert-readd shape): register, write
  * the chunk (satisfying the FK), momentarily {@link
  * PgContainerHelper#dropConstraint drop} {@code chunks_collection_fk}, delete the
- * {@code catalog_collections} row via typed DSL, then {@link
- * PgContainerHelper#addFkNotValid re-add} the constraint — leaving the {@code
+ * {@code catalog_collections} row via typed DSL, and (RDR-225) leave the constraint off, since
+ * it could only return NOT VALID and PostgreSQL refuses that on the partitioned {@code
+ * nexus.chunks} — leaving the {@code
  * collection_vector_stats} row an orphan on purpose. This proves the LEFT JOIN's
  * defensive behavior even though the orphan state is not reachable via any code
  * path in this repository today.
@@ -77,7 +78,9 @@ class VectorStatsCatalogJoinTest {
     // lifecycle_state=live.
     private static final String COL_REGISTERED = "code__vscj-owner__voyage-code-3__v1";
     // Non-conformant name -> insertCollection's "unknown" branch: content_type=unknown,
-    // owner_id=TENANT, embedding_model=bge-base-en-v15-768 (fallback), lifecycle_state=live.
+    // owner_id=TENANT, lifecycle_state=live. RDR-225: the fallback model is bge-base-en-v15-768, but this
+    // collection's chunk is 384 wide, so it is registered under minilm-l6-v2-384 explicitly (a chunk's
+    // vector width must be its collection's model dimension).
     // Its catalog_collections row is deleted after the chunk write (see fixture below),
     // leaving an orphan stats row on purpose.
     private static final String COL_ORPHAN = "vscj-orphan-coll";
@@ -135,7 +138,7 @@ class VectorStatsCatalogJoinTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             var ctx = DSL.using(su, SQLDialect.POSTGRES);
-            PgContainerHelper.insertCollection(ctx, TENANT, COL_ORPHAN);
+            PgContainerHelper.insertCollection(ctx, TENANT, COL_ORPHAN, "minilm-l6-v2-384");
             insertChunk384(ctx, TENANT, COL_ORPHAN, chashBytes("vscj-orphan-c1"), vector(384));
             // RDR-192 Step 5 (nexus-wbfpw.10): collection_vector_stats now requires
             // live(c) too -- give the chunk a live manifest owner. Independent of
@@ -151,8 +154,10 @@ class VectorStatsCatalogJoinTest {
             DSL.using(su, SQLDialect.POSTGRES).deleteFrom(CATALOG_COLLECTIONS)
                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT).and(CATALOG_COLLECTIONS.NAME.eq(COL_ORPHAN)))
                .execute();
-            PgContainerHelper.addFkNotValid(su, CHUNKS, "chunks_collection_fk", "collection",
-                CATALOG_COLLECTIONS, "name", "ON DELETE RESTRICT");
+            // RDR-225: the key is NOT re-added. It would have to go back NOT VALID (the orphan chunk
+            // violates it), and PostgreSQL refuses NOT VALID on a partitioned table. This class owns its
+            // database (PgContainerHelper.start clones a fresh one per class) and only reads from here on, so
+            // leaving chunks_collection_fk off changes nothing any other class or test in this one sees.
         }
     }
 
@@ -257,26 +262,23 @@ class VectorStatsCatalogJoinTest {
             .execute();
         ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID,
                 CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION,
-                CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION)
-            .values(TENANT, docId, 0, chashBytes, collection)
+                CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION,
+                CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
+            .values(TENANT, docId, 0, chashBytes, collection,
+                PgContainerHelper.collectionModel(ctx, TENANT, collection))
             .onConflictDoNothing()
             .execute();
     }
 
     private static void insertChunk384(org.jooq.DSLContext ctx, String tenant, String collection,
                                         byte[] chashBytes, Vector v) {
-        ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.CHUNK_TEXT,
-                       CHUNKS.EMBEDDING_384)
-           .values(tenant, collection, chashBytes, "text", v)
-           .execute();
+        // RDR-225: the chunk carries its collection's model (the shared seed reads it from the registry row).
+        PgContainerHelper.insertChunk384(ctx, tenant, collection, chashBytes, v);
     }
 
     private static void insertChunk1024(org.jooq.DSLContext ctx, String tenant, String collection,
                                          byte[] chashBytes, Vector v) {
-        ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.CHUNK_TEXT,
-                       CHUNKS.EMBEDDING_1024)
-           .values(tenant, collection, chashBytes, "text", v)
-           .execute();
+        PgContainerHelper.insertChunk1024(ctx, tenant, collection, chashBytes, v);
     }
 
     /** A pgvector value with every one of {@code dim} components equal to {@code 0.1}. */

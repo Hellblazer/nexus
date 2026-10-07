@@ -75,17 +75,19 @@ class TaxonomyCentroidSchemaLiquibaseTest {
 
                 // Exact column set: three nullable embedding_<dim> columns, no chash
                 // (taxonomy-007's own DIVERGENCE 1 note: centroids have no content-hash
-                // concept at all).
+                // concept at all), plus embedding_model, the LIST-partition key added by
+                // vectors-030-1 (RDR-225).
                 List<String> cols = columnNames(ctx, "nexus", TABLE);
                 assertThat(cols).as("columns of nexus." + TABLE).containsExactlyInAnyOrder(
                     "tenant_id", "collection", "topic_id",
                     "embedding_384", "embedding_768", "embedding_1024",
-                    "label", "doc_count", "created_at");
+                    "label", "doc_count", "created_at", "embedding_model");
 
-                // Primary key is (tenant_id, collection, topic_id) in order
+                // Primary key is (tenant_id, collection, topic_id, embedding_model) in order:
+                // vectors-030-1 widens it to carry the partition key.
                 assertThat(primaryKeyColumns(ctx, "nexus", TABLE))
                     .as("PK of nexus." + TABLE)
-                    .containsExactly("tenant_id", "collection", "topic_id");
+                    .containsExactly("tenant_id", "collection", "topic_id", "embedding_model");
 
                 // exactly-one-embedding CHECK constraint present
                 assertThat(constraintExists(ctx, "taxonomy_centroids_exactly_one_embedding"))

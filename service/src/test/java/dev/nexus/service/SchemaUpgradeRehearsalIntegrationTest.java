@@ -268,6 +268,21 @@ class SchemaUpgradeRehearsalIntegrationTest {
      * absorbed) — structurally unchanged. {@code engine-service-v0.1.17}
      * stays pinned. No manifest/seed-coverage regeneration needed (OLD_TAG
      * did not change).
+     *
+     * <p><strong>2026-10-07 rotation check (engine-service-v0.1.150, conexus
+     * 7.73.0 release prep): STILL NOT rotated, same reason.</strong> The
+     * release plan named {@code engine-service-v0.1.149} (the engine 7.72.1
+     * pinned) as the new OLD_TAG; the structural precondition fails for it.
+     * {@code git cat-file -e engine-service-v0.1.149:service/src/main/
+     * resources/db/changelog/catalog-013-chash-checks-validate.xml} succeeds,
+     * so the old leg applies catalog-013-2 and this class's own {@code
+     * changesetApplied(..., "catalog-013-2", ...).isFalse()} assertion would
+     * red; v0.1.17 lacks the file. The injection point has not moved
+     * (catalog-002-hygiene.xml still differs from v0.1.17 by the 3-line DATA
+     * EFFECT comment only). The v0.1.17-to-HEAD hop now also crosses the
+     * RDR-225 changesets (vectors-030-1 partitions {@code nexus.chunks} and
+     * {@code nexus.taxonomy_centroids}; vectors-031 follows), which the HEAD
+     * leg walks. {@code engine-service-v0.1.17} stays pinned.
      */
     private static final String OLD_TAG = "engine-service-v0.1.17";
 
@@ -529,6 +544,13 @@ class SchemaUpgradeRehearsalIntegrationTest {
                     // old leg, enforce on new writes).
                     for (String[] tc : new String[][]{
                         {"t1", "code__x"}, {"t1", "code__y"}, {"t2", "code__z"},
+                        // RDR-225 (nexus-3wh8d.13): a centroid is copied under its collection's model, and a
+                        // vector whose dimension disagrees with that model fails the model partition's CHECK
+                        // (legacy data shapes are not supported). The 2-segment names above are registered by
+                        // hygiene-002 under the grandfathered fallback bge-base-en-v15-768, so only the 768-d
+                        // centroid may live there; the 384-d and 1024-d taxonomy-007-1 centroids are seeded in
+                        // collections whose 4-segment names register them under a model of their own width.
+                        {"t1", "code__cx__minilm-l6-v2-384__v1"}, {"t2", "code__cz__voyage-code-3__v1"},
                         // nexus-tk070.p3b: two collections DEDICATED to taxonomy-010-1's
                         // ambiguous-arm seed below, distinct from code__x/code__y so its
                         // fresh chunks_384/768 rows don't perturb vectors-004-1's own
@@ -652,9 +674,9 @@ class SchemaUpgradeRehearsalIntegrationTest {
                         "6".repeat(32), "legacy chunk dim768");
                     seedChunkDimLegacyContent(su, 1024, "t2", "code__z",
                         "7".repeat(32), "legacy chunk dim1024");
-                    seedTaxonomyCentroidLegacyContent(su, 384, "t1", "code__x", 900L, "centroid-384");
+                    seedTaxonomyCentroidLegacyContent(su, 384, "t1", "code__cx__minilm-l6-v2-384__v1", 900L, "centroid-384");
                     seedTaxonomyCentroidLegacyContent(su, 768, "t1", "code__y", 901L, "centroid-768");
-                    seedTaxonomyCentroidLegacyContent(su, 1024, "t2", "code__z", 902L, "centroid-1024");
+                    seedTaxonomyCentroidLegacyContent(su, 1024, "t2", "code__cz__voyage-code-3__v1", 902L, "centroid-1024");
 
                     // catalog-032-1 (nexus-tk070.p1, RDR-194 § D2): catalog_links carries
                     // NO FK on the old leg's tree, so both rows below write freely.
@@ -1500,7 +1522,7 @@ class SchemaUpgradeRehearsalIntegrationTest {
                     // above (no chunks-style j862l reuse available here).
                     assertThat(count(su,
                         "SELECT count(*) FROM nexus.taxonomy_centroids WHERE tenant_id = 't1' "
-                        + "AND collection = 'code__x' AND embedding_384 IS NOT NULL "
+                        + "AND collection = 'code__cx__minilm-l6-v2-384__v1' AND embedding_384 IS NOT NULL "
                         + "AND embedding_768 IS NULL AND embedding_1024 IS NULL"))
                         .as("the seeded taxonomy_centroids_384 row landed under embedding_384 only")
                         .isEqualTo(1);
@@ -1512,7 +1534,7 @@ class SchemaUpgradeRehearsalIntegrationTest {
                         .isEqualTo(1);
                     assertThat(count(su,
                         "SELECT count(*) FROM nexus.taxonomy_centroids WHERE tenant_id = 't2' "
-                        + "AND collection = 'code__z' AND embedding_1024 IS NOT NULL "
+                        + "AND collection = 'code__cz__voyage-code-3__v1' AND embedding_1024 IS NOT NULL "
                         + "AND embedding_384 IS NULL AND embedding_768 IS NULL"))
                         .as("the seeded taxonomy_centroids_1024 row landed under embedding_1024 only")
                         .isEqualTo(1);
@@ -1662,8 +1684,10 @@ class SchemaUpgradeRehearsalIntegrationTest {
 
                     // hygiene-001-9b: the dedicated code__hyg9b taxonomy_centroids row
                     // (label=null at seed time) must end up with label = ''.
+                    // RDR-225: code__hyg9b has no registry row, so the walk does not copy its centroid (derived
+                    // data, taxonomy rebuilds it); it stays in the retired table, which still proves the backfill.
                     assertThat(count(su,
-                        "SELECT count(*) FROM nexus.taxonomy_centroids "
+                        "SELECT count(*) FROM nexus.taxonomy_centroids_retired_225 "
                         + "WHERE tenant_id = 't1' AND collection = 'code__hyg9b' "
                         + "AND topic_id = 999 AND label = ''"))
                         .as("hygiene-001-9b must backfill taxonomy_centroids.label to "
@@ -3270,7 +3294,7 @@ class SchemaUpgradeRehearsalIntegrationTest {
 
     private static Set<String> tablesInSchema(Connection conn, String schema) throws Exception {
         Set<String> names = new java.util.HashSet<>();
-        ResultSet rs = conn.getMetaData().getTables(null, schema, null, new String[]{"TABLE"});
+        ResultSet rs = conn.getMetaData().getTables(null, schema, null, new String[]{"TABLE", "PARTITIONED TABLE"});
         while (rs.next()) {
             names.add(rs.getString("TABLE_NAME").toLowerCase());
         }

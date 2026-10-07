@@ -493,15 +493,20 @@ class ReadShapeViewsTest {
         // mirrors seedColl above) rather than relying on every call site to have
         // already called it for this exact collection.
         seedColl(ctx, tenant, collection);
-        float[] v = new float[384];
+        // RDR-225: these collection names are not conformant, so insertCollection registers them under the
+        // 768-d bge fallback; the chunk carries that model and a 768-wide vector, and so does its manifest row.
+        float[] v = new float[768];
         java.util.Arrays.fill(v, 0.1f);
-        ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_384)
-            .values(tenant, collection, c, "stub", Vector.of(v))
+        final String model = PgContainerHelper.collectionModel(ctx, tenant, collection);
+        ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL,
+                CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_768)
+            .values(tenant, collection, c, model, "stub", Vector.of(v))
             .onConflictDoNothing()
             .execute();
         ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
-                CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION)
-            .values(tenant, docId, pos, c, collection)
+                CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION,
+                CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
+            .values(tenant, docId, pos, c, collection, model)
             .execute();
     }
 

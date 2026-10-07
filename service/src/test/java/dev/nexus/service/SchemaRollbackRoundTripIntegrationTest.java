@@ -818,7 +818,7 @@ class SchemaRollbackRoundTripIntegrationTest {
                         assertThat(f.config()).as("rolled back: %s carries no SET clause", f).isNull();
                         assertThat(f.acl()).as("rolled back: %s keeps no explicit nexus_svc grant", f)
                             .doesNotContain("nexus_svc=");
-                        assertThat(f.acl()).as("rolled back: %s is executable by PUBLIC again", f).contains(",=X/");
+                        assertThat(f.acl()).as("rolled back: %s is executable by PUBLIC again", f).containsPattern("[{,]=X/");
                     }
                     assertThat(PgCatalogProbes.policyExists(dsl(c), "nexus", "chunks", "chunks_gate_probe_owner_read"))
                         .as("rolled back: the owner policy is gone").isFalse();

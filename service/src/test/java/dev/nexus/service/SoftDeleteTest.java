@@ -249,7 +249,7 @@ class SoftDeleteTest {
             su.setAutoCommit(true);
             DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
             PgContainerHelper.insertCatalogDocument(ctx, TENANT_A, tumbler);
-            PgContainerHelper.insertCollection(ctx, TENANT_A, "knowledge__sd-tomb__v1");
+            registerMinilm(ctx, TENANT_A, "knowledge__sd-tomb__v1");
 
             // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk requires a
             // matching nexus.chunks row for every manifest insert below.
@@ -388,7 +388,7 @@ class SoftDeleteTest {
             DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
 
             // Register collection so fk-002 NOT VALID FK is satisfied for new inserts
-            PgContainerHelper.insertCollection(ctx, TENANT_A, COLLECTION_A);
+            registerMinilm(ctx, TENANT_A, COLLECTION_A);
 
             // Insert the actual chunk rows into nexus.chunks (embedding_384) FIRST —
             // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk requires a
@@ -514,7 +514,7 @@ class SoftDeleteTest {
             su.setAutoCommit(true);
             DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
             PgContainerHelper.insertCatalogDocument(ctx, TENANT_A, tumbler);
-            PgContainerHelper.insertCollection(ctx, TENANT_A, "knowledge__sd-age__v1");
+            registerMinilm(ctx, TENANT_A, "knowledge__sd-age__v1");
             // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk requires a
             // matching nexus.chunks row before the manifest insert below.
             insertChunk384(ctx, TENANT_A, "knowledge__sd-age__v1", chashBytes("age-filter-chunk0"), "age filter chunk 0");
@@ -582,7 +582,7 @@ class SoftDeleteTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
-            PgContainerHelper.insertCollection(ctx, TENANT_A, COLLECTION_B);
+            registerMinilm(ctx, TENANT_A, COLLECTION_B);
 
             // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk requires a
             // matching nexus.chunks row before any manifest row can reference it.
@@ -747,7 +747,7 @@ class SoftDeleteTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
-            PgContainerHelper.insertCollection(ctx, TENANT_A, COLLECTION_A);
+            registerMinilm(ctx, TENANT_A, COLLECTION_A);
             insertChunk384(ctx, TENANT_A, COLLECTION_A, manifestlessChash, "manifest-less note chunk");
         }
 
@@ -795,7 +795,7 @@ class SoftDeleteTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
-            PgContainerHelper.insertCollection(ctx, TENANT_A, COLLECTION_A);
+            registerMinilm(ctx, TENANT_A, COLLECTION_A);
             insertChunk384(ctx, TENANT_A, COLLECTION_A, manifestlessChash, "manifest-less live_chunks note");
         }
 
@@ -1002,8 +1002,10 @@ class SoftDeleteTest {
     private static void insertManifestRow(DSLContext ctx, String tenantId, String docId,
                                            int position, byte[] chash, String collection) {
         ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
-                CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION)
-            .values(tenantId, docId, position, chash, collection)
+                CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION,
+                CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
+            .values(tenantId, docId, position, chash, collection,
+                PgContainerHelper.collectionModel(ctx, tenantId, collection))
             .onConflictDoNothing()
             .execute();
     }
@@ -1030,15 +1032,27 @@ class SoftDeleteTest {
     /**
      * Insert a nexus.chunks row with embedding_384 populated (RDR-191 unified;
      * formerly a chunks_384 row). Collection must be pre-registered (fk-002 NOT VALID
-     * FK). PK: (tenant_id, collection, chash). Superuser insert bypasses FORCE RLS
+     * FK). PK: (tenant_id, collection, chash, embedding_model). Superuser insert bypasses FORCE RLS
      * so direct fixture setup is possible.
      */
     private static void insertChunk384(DSLContext ctx, String tenantId, String collection,
                                         byte[] chash, String chunkText) {
-        ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_384)
-            .values(tenantId, collection, chash, chunkText, vector(384))
+        ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL,
+                CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_384)
+            .values(tenantId, collection, chash, PgContainerHelper.collectionModel(ctx, tenantId, collection),
+                chunkText, vector(384))
             .onConflictDoNothing()
             .execute();
+    }
+
+    /**
+     * RDR-225: register {@code collection} under the 384-dimension model. A chunk carries its collection's
+     * model and the model's partition holds one vector width, so a fixture that seeds {@code embedding_384}
+     * rows registers its collections here whatever their names say (two of them carry a voyage token, two
+     * no model token at all).
+     */
+    private static void registerMinilm(DSLContext ctx, String tenantId, String collection) {
+        PgContainerHelper.insertCollection(ctx, tenantId, collection, "minilm-l6-v2-384");
     }
 
     /**

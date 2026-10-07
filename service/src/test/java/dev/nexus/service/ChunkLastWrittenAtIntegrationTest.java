@@ -391,12 +391,14 @@ class ChunkLastWrittenAtIntegrationTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             PgContainerHelper.dropConstraint(su, CATALOG_DOCUMENT_CHUNKS, "fk_catalog_chunks_chunk");
-            DSL.using(su, SQLDialect.POSTGRES)
-               .insertInto(CATALOG_DOCUMENT_CHUNKS,
+            var suCtx = DSL.using(su, SQLDialect.POSTGRES);
+            // RDR-225: the manifest row carries the model of the collection it names.
+            suCtx.insertInto(CATALOG_DOCUMENT_CHUNKS,
                     CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
                     CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
-                    CATALOG_DOCUMENT_CHUNKS.COLLECTION)
-               .values(TENANT, docId, 0, Chash.fromHex(chashHex).toBytes(), collection)
+                    CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
+               .values(TENANT, docId, 0, Chash.fromHex(chashHex).toBytes(), collection,
+                    PgContainerHelper.collectionModel(suCtx, TENANT, collection))
                .execute();
             PgContainerHelper.addFkNotValidComposite3(su, CATALOG_DOCUMENT_CHUNKS, "fk_catalog_chunks_chunk",
                 "collection", "chash", CHUNKS, "collection", "chash",

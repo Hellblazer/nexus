@@ -124,6 +124,54 @@ def test_fk_census_runs_and_is_non_vacuous(census_state):
     )
 
 
+def test_census_ignores_partition_leaves_and_cloned_constraints(census_state):
+    """RDR-225: chunks and taxonomy_centroids are LIST-partitioned by model, then tenant, so the
+    catalog holds a relation per model and per (model, tenant) leaf, and every constraint is cloned
+    onto each of them. The census reports the declared schema, so no partition may appear in it.
+
+    Non-vacuity first: the substrate really has partitions of both parents, or the assertion below
+    would pass on a schema the census never had to filter."""
+    parents = _psql_csv(
+        census_state,
+        "SELECT pr.relname, count(*) FROM pg_inherits i "
+        "JOIN pg_class pr ON pr.oid = i.inhparent JOIN pg_class ch ON ch.oid = i.inhrelid "
+        "JOIN pg_namespace n ON n.oid = pr.relnamespace "
+        "WHERE n.nspname = 'nexus' AND pr.relname IN ('chunks', 'taxonomy_centroids') "
+        "GROUP BY pr.relname ORDER BY pr.relname;",
+    )
+    counted = {r.split(",")[0]: int(r.split(",")[1]) for r in parents}
+    assert set(counted) == {"chunks", "taxonomy_centroids"} and min(counted.values()) >= 2, (
+        f"expected model partitions under both partitioned parents, got {counted}: "
+        "the partition exclusion below would be vacuous"
+    )
+    cloned = _psql_csv(
+        census_state,
+        "SELECT count(*) FROM pg_constraint con JOIN pg_class c ON c.oid = con.conrelid "
+        "JOIN pg_namespace n ON n.oid = c.relnamespace "
+        "WHERE n.nspname = 'nexus' AND con.conparentid <> 0;",
+    )
+    assert int(cloned[0]) > 0, "no cloned constraints in the substrate: the conparentid filter is vacuous"
+
+    partition_names = {
+        r for r in _psql_csv(
+            census_state,
+            "SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
+            "WHERE n.nspname = 'nexus' AND c.relispartition AND c.relkind IN ('r', 'p');",
+        ) if r
+    }
+    assert partition_names, "relispartition found nothing although pg_inherits has children"
+    output = _run_census_file(census_state)
+    leaked = sorted(
+        {name for name in partition_names if f",{name}," in output or f",{name}\n" in output}
+    )
+    assert not leaked, f"fk_census.sql reports partitions as tables: {leaked[:5]} (of {len(leaked)})"
+    # and the parents it speaks for are still there, with the key the census exists to show
+    assert ",chunks," in output, "fk_census.sql lost the partitioned parent nexus.chunks"
+    assert "{tenant_id,collection,chash,embedding_model}" in output, (
+        "result set 4 does not show the four-column chunks primary key"
+    )
+
+
 def test_join_column_census_nonempty(census_state):
     """Result set 1 (join-column census) alone must return a substantial
     number of rows — the schema has dozens of *_id / tumbler / chash /
@@ -154,6 +202,7 @@ def test_ground_truth_fk_catalog_chunks_chunk_is_validated(census_state):
     JOIN pg_class c ON c.oid = con.conrelid
     JOIN pg_namespace n ON n.oid = c.relnamespace
     WHERE con.conname = 'fk_catalog_chunks_chunk'
+      AND con.conparentid = 0
       AND n.nspname = 'nexus' AND c.relname = 'catalog_document_chunks';
     """
     rows = _psql_csv(census_state, sql)
@@ -182,6 +231,7 @@ def test_ground_truth_topic_assignments_doc_id_is_fk_enforced(census_state):
     JOIN LATERAL unnest(con.conkey) WITH ORDINALITY AS k(attnum, ord) ON true
     JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = k.attnum
     WHERE con.contype = 'f'
+      AND con.conparentid = 0
       AND n.nspname = 'nexus' AND c.relname = 'topic_assignments'
       AND a.attname = 'doc_id';
     """

@@ -132,6 +132,9 @@ class TopicsDocCountDeadlockConcurrencyTest {
     private static final String SVC_PASS = "svc_dcdl_test_pass";
     private static final String TENANT   = "dcdl-tenant";
     private static final int    DIM      = 1024;
+    /** RDR-225: the model the fixture collections' names (voyage-code-3) register them under; every
+     *  chunk, centroid and assignment row carries it. */
+    private static final String MODEL    = "voyage-code-3";
 
     /** Batch A covers topics [0..6] (7 topics); batch B covers the shared subset [2..6]
      *  (5 topics) — differing set SIZES between the two concurrent invocations is what
@@ -202,7 +205,7 @@ class TopicsDocCountDeadlockConcurrencyTest {
             // EXECUTE ON FUNCTION is not part of bootstrapServiceRole's fixed grant
             // set -- kept as an explicit grant (nexus-cbo4a batch 1b).
             su.createStatement().execute(
-                "GRANT EXECUTE ON FUNCTION nexus.assign_from_chashes_" + DIM + "(text, text[], boolean) TO " + SVC_ROLE);
+                "GRANT EXECUTE ON FUNCTION nexus.assign_from_chashes_" + DIM + "(text, text[], boolean, text, text) TO " + SVC_ROLE);
         }
 
         var cfg = new com.zaxxer.hikari.HikariConfig();
@@ -523,10 +526,10 @@ class TopicsDocCountDeadlockConcurrencyTest {
                 PgContainerHelper.setTenant(conn, TenantScope.DEFAULT_TENANT_GUC, TENANT, true);
                 StringBuilder sql = new StringBuilder(
                     "INSERT INTO nexus.topic_assignments"
-                    + " (tenant_id, doc_id, topic_id, assigned_by, source_collection) VALUES ");
+                    + " (tenant_id, doc_id, topic_id, assigned_by, source_collection, embedding_model) VALUES ");
                 for (int i = 0; i < sorted.size(); i++) {
                     if (i > 0) sql.append(", ");
-                    sql.append("(?, decode(?, 'hex'), ?, 'centroid', ?)");
+                    sql.append("(?, decode(?, 'hex'), ?, 'centroid', ?, ?)");
                 }
                 try (PreparedStatement ps = conn.prepareStatement(sql.toString())) {
                     int p = 1;
@@ -535,6 +538,7 @@ class TopicsDocCountDeadlockConcurrencyTest {
                         ps.setString(p++, ct.chashHex());
                         ps.setLong(p++, ct.topicId());
                         ps.setString(p++, collection);
+                        ps.setString(p++, MODEL);
                     }
                     barrier.await(BARRIER_AWAIT_S, TimeUnit.SECONDS);
                     ps.execute();
@@ -693,12 +697,14 @@ class TopicsDocCountDeadlockConcurrencyTest {
                 // label: taxonomy_centroids.label is NOT NULL (hygiene-001-9b,
                 // nexus-tk070.p6a follow-on) -- no assertion in this class
                 // reads the label value.
-                + " (tenant_id, collection, topic_id, label, embedding_" + DIM + ") VALUES (?, ?, ?, ?, ?::nexus.vector)")) {
+                + " (tenant_id, collection, topic_id, label, embedding_model, embedding_" + DIM
+                + ") VALUES (?, ?, ?, ?, ?, ?::nexus.vector)")) {
             ps.setString(1, TENANT);
             ps.setString(2, collection);
             ps.setLong(3, topicId);
             ps.setString(4, "seed-centroid-label");
-            ps.setString(5, vectorLiteral(emb));
+            ps.setString(5, MODEL);
+            ps.setString(6, vectorLiteral(emb));
             ps.executeUpdate();
         }
     }
@@ -706,13 +712,14 @@ class TopicsDocCountDeadlockConcurrencyTest {
     private void seedChunk(Connection su, String collection, String hexChashValue, float[] emb) throws Exception {
         try (PreparedStatement ps = su.prepareStatement(
                 "INSERT INTO nexus.chunks"
-                + " (tenant_id, collection, chash, chunk_text, embedding_" + DIM + ")"
-                + " VALUES (?, ?, decode(?, 'hex'), ?, ?::nexus.vector)")) {
+                + " (tenant_id, collection, chash, embedding_model, chunk_text, embedding_" + DIM + ")"
+                + " VALUES (?, ?, decode(?, 'hex'), ?, ?, ?::nexus.vector)")) {
             ps.setString(1, TENANT);
             ps.setString(2, collection);
             ps.setString(3, hexChashValue);
-            ps.setString(4, "seed text " + hexChashValue);
-            ps.setString(5, vectorLiteral(emb));
+            ps.setString(4, MODEL);
+            ps.setString(5, "seed text " + hexChashValue);
+            ps.setString(6, vectorLiteral(emb));
             ps.executeUpdate();
         }
     }

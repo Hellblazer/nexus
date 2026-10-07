@@ -599,9 +599,10 @@ class CollectionVectorStatsTest {
             throws Exception {
         su.createStatement().execute(
             "INSERT INTO nexus.catalog_document_chunks " +
-            "  (tenant_id, doc_id, position, chash, collection) " +
+            "  (tenant_id, doc_id, position, chash, collection, embedding_model) " +
             "VALUES ('" + tenantId + "', '" + docId + "', " + position + ", '" + chash + "', '" +
-            collection + "') " +
+            collection + "', (SELECT embedding_model FROM nexus.catalog_collections WHERE tenant_id = '" +
+            tenantId + "' AND name = '" + collection + "')) " +
             "ON CONFLICT (tenant_id, doc_id, position) DO NOTHING");
     }
 
@@ -616,11 +617,13 @@ class CollectionVectorStatsTest {
             throws Exception {
         su.createStatement().execute(
             "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME +
-            " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(dim) + ", created_at) " +
+            " (tenant_id, collection, chash, embedding_model, chunk_text, " + DimTables.embeddingColumn(dim) + ", created_at) " +
             "VALUES ('" + tenantId + "', '" + collection + "', '" + chash + "', " +
+            "(SELECT embedding_model FROM nexus.catalog_collections WHERE tenant_id = '" + tenantId +
+            "' AND name = '" + collection + "'), " +
             "'" + chunkText.replace("'", "''") + "', " + vectorLiteral(dim) + "::nexus.vector, " +
             "'" + createdAt + "'::timestamptz) " +
-            "ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
+            "ON CONFLICT (tenant_id, collection, chash, embedding_model) DO NOTHING");
     }
 
     /**

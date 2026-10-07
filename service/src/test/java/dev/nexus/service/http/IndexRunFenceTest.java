@@ -121,6 +121,11 @@ class IndexRunFenceTest {
         // row seeded for this tenant/content_type -- name the model explicitly (the
         // COLLECTION name's own token, a real client's derivation before calling this
         // route).
+        // RDR-225: chunks are partitioned by model, then tenant; this test writes chunks for TENANT
+        // without ever issuing it a service token, so its leaves are made here.
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.ensureTenantPartitions(DSL.using(su, SQLDialect.POSTGRES), TENANT);
+        }
         repo.upsertCollection(TENANT, Map.of("name", COLLECTION, "content_type", "knowledge",
             "owner_id", "irf-owner", "embedding_model", "voyage-context-3"));
     }
@@ -584,7 +589,8 @@ class IndexRunFenceTest {
             su.createStatement().execute(
                 "ALTER TABLE nexus.catalog_document_chunks "
                 + "ADD CONSTRAINT fk_catalog_chunks_chunk "
-                + "FOREIGN KEY (tenant_id, collection, chash) REFERENCES nexus.chunks (tenant_id, collection, chash) "
+                + "FOREIGN KEY (tenant_id, collection, chash, embedding_model) "
+                + "REFERENCES nexus.chunks (tenant_id, collection, chash, embedding_model) "
                 + "ON UPDATE CASCADE DEFERRABLE INITIALLY IMMEDIATE NOT VALID");
         }
         assertThat(result.get("docs"))
@@ -659,7 +665,8 @@ class IndexRunFenceTest {
             su.createStatement().execute(
                 "ALTER TABLE nexus.catalog_document_chunks "
                 + "ADD CONSTRAINT fk_catalog_chunks_chunk "
-                + "FOREIGN KEY (tenant_id, collection, chash) REFERENCES nexus.chunks (tenant_id, collection, chash) "
+                + "FOREIGN KEY (tenant_id, collection, chash, embedding_model) "
+                + "REFERENCES nexus.chunks (tenant_id, collection, chash, embedding_model) "
                 + "ON UPDATE CASCADE DEFERRABLE INITIALLY IMMEDIATE NOT VALID");
         }
 
@@ -844,7 +851,8 @@ class IndexRunFenceTest {
             su.createStatement().execute(
                 "ALTER TABLE nexus.catalog_document_chunks "
                 + "ADD CONSTRAINT fk_catalog_chunks_chunk "
-                + "FOREIGN KEY (tenant_id, collection, chash) REFERENCES nexus.chunks (tenant_id, collection, chash) "
+                + "FOREIGN KEY (tenant_id, collection, chash, embedding_model) "
+                + "REFERENCES nexus.chunks (tenant_id, collection, chash, embedding_model) "
                 + "ON UPDATE CASCADE DEFERRABLE INITIALLY IMMEDIATE NOT VALID");
         }
     }
@@ -864,10 +872,12 @@ class IndexRunFenceTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             su.createStatement().execute(
-                "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(1024) + ") " +
+                "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, embedding_model, chunk_text, " + DimTables.embeddingColumn(1024) + ") " +
                 "VALUES ('" + TENANT + "', '" + COLLECTION + "', decode('" + chashHex + "', 'hex'), " +
+                "(SELECT embedding_model FROM nexus.catalog_collections WHERE tenant_id = '" + TENANT
+                + "' AND name = '" + COLLECTION + "'), " +
                 "'chunk text', ('[1" + ",0".repeat(1023) + "]')::nexus.vector) " +
-                "ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
+                "ON CONFLICT (tenant_id, collection, chash, embedding_model) DO NOTHING");
         } catch (Exception e) {
             throw new RuntimeException(e);
         }

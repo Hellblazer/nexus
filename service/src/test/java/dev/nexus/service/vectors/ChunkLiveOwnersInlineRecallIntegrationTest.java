@@ -209,8 +209,9 @@ class ChunkLiveOwnersInlineRecallIntegrationTest {
                 ctx.insertInto(CATALOG_DOCUMENT_CHUNKS,
                         CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
                         CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
-                        CATALOG_DOCUMENT_CHUNKS.COLLECTION)
-                    .values(TENANT, id, 0, HexFormat.of().parseHex(liveChashes.get(i)), COLLECTION)
+                        CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
+                    .values(TENANT, id, 0, HexFormat.of().parseHex(liveChashes.get(i)), COLLECTION,
+                        PgContainerHelper.collectionModel(ctx, TENANT, COLLECTION))
                     .onConflict(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
                         CATALOG_DOCUMENT_CHUNKS.POSITION)
                     .doNothing()
@@ -250,7 +251,8 @@ class ChunkLiveOwnersInlineRecallIntegrationTest {
     /** "before": today's shipped predicate, {@code nexus.plain_search_384}, via the
      *  generated typed table function -- not raw SQL, native Vector binding. */
     private List<String> plainSearch384(float[] vec, int n) {
-        Table<?> fn = PLAIN_SEARCH_384.call(Vector.of(vec), new String[] {COLLECTION}, null, null, n);
+        Table<?> fn = PLAIN_SEARCH_384.call(
+            Vector.of(vec), new String[] {COLLECTION}, null, null, n, "minilm-l6-v2-384", TENANT);
         return tenantScope.withTenant(TENANT, ctx -> ctx.selectFrom(fn)
             .fetch(r -> r.get("id", String.class)));
     }

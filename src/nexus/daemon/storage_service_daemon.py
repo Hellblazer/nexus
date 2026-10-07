@@ -1295,6 +1295,13 @@ class StorageServiceSupervisor:
         ):
             if k in self._creds:
                 env[k] = self._creds[k]
+        # RDR-225 P1.4 (nexus-3wh8d.9): tell the engine where the bundled cluster's data directory is, so its
+        # pre-walk disk preflight can read free space there. The engine cannot assume it shares a filesystem
+        # with Postgres (managed and BYO databases are remote), so it checks only a directory it is told about;
+        # a credentials file with no PG_DATA (no bundled cluster) names nothing and the check skips.
+        pg_data = self._creds.get("PG_DATA", "").strip()
+        if pg_data:
+            env["NX_PG_DATA_DIR"] = pg_data
         env["NX_SERVICE_PORT"] = str(port)
         # NX_CHROMA_PATH injection removed (RDR-155 P4a.2, nexus-1k8s1): the
         # Java service no longer reads any NX_CHROMA_* variable — it serves

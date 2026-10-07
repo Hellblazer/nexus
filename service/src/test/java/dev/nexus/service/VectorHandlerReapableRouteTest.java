@@ -194,8 +194,10 @@ class VectorHandlerReapableRouteTest {
     private void manifest(String tenant, String docId, String collection, String hex) throws Exception {
         su(ctx -> ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID,
                 CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
-                CATALOG_DOCUMENT_CHUNKS.COLLECTION)
-            .values(tenant, docId, 0, bytes(hex), collection).onConflictDoNothing().execute());
+                CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
+            .values(tenant, docId, 0, bytes(hex), collection,
+                PgContainerHelper.collectionModel(ctx, tenant, collection))
+            .onConflictDoNothing().execute());
     }
 
     /** The S1a rows R1 to R9 (docs/rdr/rdr-192, Step 1), in tenant A's COL_A and COL_B, aged 40 days. */
@@ -484,8 +486,8 @@ class VectorHandlerReapableRouteTest {
     private void recordOrphaning(String tenant, String collection, String hex, Duration age) throws Exception {
         OffsetDateTime then = OffsetDateTime.now().minus(age);
         su(ctx -> ctx.insertInto(CHUNK_ORPHANED_AT, CHUNK_ORPHANED_AT.TENANT_ID, CHUNK_ORPHANED_AT.COLLECTION,
-                CHUNK_ORPHANED_AT.CHASH, CHUNK_ORPHANED_AT.ORPHANED_AT)
-            .values(tenant, collection, bytes(hex), then)
+                CHUNK_ORPHANED_AT.CHASH, CHUNK_ORPHANED_AT.ORPHANED_AT, CHUNK_ORPHANED_AT.EMBEDDING_MODEL)
+            .values(tenant, collection, bytes(hex), then, PgContainerHelper.collectionModel(ctx, tenant, collection))
             .onConflict(CHUNK_ORPHANED_AT.TENANT_ID, CHUNK_ORPHANED_AT.COLLECTION, CHUNK_ORPHANED_AT.CHASH)
             .doUpdate().set(CHUNK_ORPHANED_AT.ORPHANED_AT, then).execute());
     }

@@ -111,10 +111,26 @@ DECLARE
     dim text;
 BEGIN
     FOREACH dim IN ARRAY ARRAY['384', '768', '1024'] LOOP
-        IF to_regprocedure('nexus.text_gate_probe_' || dim || '(text, text[], jsonb, text, integer)') IS NOT NULL THEN
+        IF to_regprocedure('nexus.text_gate_probe_' || dim || '(text, text[], jsonb, text, integer, text, text)') IS NOT NULL THEN
+            EXECUTE format('GRANT EXECUTE ON FUNCTION nexus.text_gate_probe_%s(text, text[], jsonb, text, integer, text, text) TO ${svcRole}', dim);
+        ELSIF to_regprocedure('nexus.text_gate_probe_' || dim || '(text, text[], jsonb, text, integer)') IS NOT NULL THEN
+            -- the signature before RDR-225's read path (vectors-031) added the model and the tenant
             EXECUTE format('GRANT EXECUTE ON FUNCTION nexus.text_gate_probe_%s(text, text[], jsonb, text, integer) TO ${svcRole}', dim);
         END IF;
     END LOOP;
+END
+$$;
+
+-- RDR-225 (nexus-3wh8d.13): create_tenant_partitions is SECURITY DEFINER with EXECUTE revoked from PUBLIC and
+-- granted to nexus_svc only (vectors-030-1), so a per-class service role needs its own grant, exactly as
+-- nexus_svc has it. The tests' collection seed (PgContainerHelper#insertCollection) calls it for the tenant it
+-- registers a collection for, standing in for the first service token a production tenant gets. Guarded: this
+-- changelog also runs against schemas migrated before vectors-030 existed.
+DO $$
+BEGIN
+    IF to_regprocedure('nexus.create_tenant_partitions(regclass, text, boolean)') IS NOT NULL THEN
+        EXECUTE 'GRANT EXECUTE ON FUNCTION nexus.create_tenant_partitions(regclass, text, boolean) TO ${svcRole}';
+    END IF;
 END
 $$;
         </sql>

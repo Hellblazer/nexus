@@ -23,7 +23,6 @@ import java.util.List;
 import java.util.Map;
 
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
-import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -200,11 +199,8 @@ class CollectionListLifecycleFilterRouteTest {
             su.setAutoCommit(true);
             var ctx = DSL.using(su, SQLDialect.POSTGRES);
             PgContainerHelper.insertCollection(ctx, TENANT, collection);
-            ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.CHUNK_TEXT,
-                           CHUNKS.EMBEDDING_1024)
-               .values(TENANT, collection, chash, "bc7ps chunk", Vector.of(v))
-               .onConflictDoNothing()
-               .execute();
+            // RDR-225: the chunk carries its collection's model (voyage-code-3, from the name).
+            PgContainerHelper.insertChunk1024(ctx, TENANT, collection, chash, Vector.of(v));
             // RDR-192 Step 5 (nexus-wbfpw.10): collection_vector_stats now requires
             // live(c) too -- give the chunk a live manifest owner.
             PgContainerHelper.ownChunks(ctx, TENANT, collection,

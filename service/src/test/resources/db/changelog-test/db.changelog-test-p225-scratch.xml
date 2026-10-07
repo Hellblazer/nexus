@@ -1,0 +1,151 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    RDR-225 P1.2 (nexus-3wh8d.7): the scratch partitioned parents the tenant/model partition functions
+    (vectors-030) are tested on. Test-only; run by PartitionScratchFixture through
+    PgContainerHelper#runTestChangelog, on the connection of the schema owner (the production
+    nexus_admin equivalent), so the scratch tables are owned by the role that owns the functions.
+
+    WHY nexus.chunks_new AND nexus.taxonomy_centroids_new. The functions accept exactly the parents the
+    migration (bead nexus-3wh8d.8) will build, by name, in the nexus schema. Neither table exists on
+    develop, so a scratch table with the migration's own name is a faithful target and cannot collide
+    with a live table. Leaves made under chunks_new carry the names the live parent's leaves will have
+    after the swap (the naming function strips the _new suffix), so no live relation name is touched.
+
+    WHAT "FAITHFUL" MEANS HERE. The column set is the live nexus.chunks / nexus.taxonomy_centroids as captured
+    into plain template tables by db.changelog-test-p225-templates.xml (LIKE, so a later column is picked up;
+    since migration vectors-030 walked them, embedding_model is part of the live column set and LIKE carries it,
+    NOT NULL); the parent-level indexes are the live
+    table's own definitions replayed on the scratch parent, so a leaf pays the real HNSW (three), GIN
+    trigram, GIN tsvector and btree cost; the RLS policies and grants are the production shapes
+    (tenant_isolation, the vectors-029 owner read policy, DML plus MAINTAIN for nexus_svc). Three
+    referencing tables carry 4-column foreign keys onto chunks_new with the same actions as the
+    manifest, assignment and orphaned-at foreign keys, and chunks_new carries the composite outbound
+    foreign key onto catalog_collections, so a leaf creation takes the same locks it will in production.
+
+    runAlways: every call drops and rebuilds the scratch objects. DROP TABLE ... CASCADE takes the
+    leaves with their parents.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="test-p225-scratch-1" author="nexus-3wh8d.7" runAlways="true">
+        <comment>Drop and rebuild the scratch partitioned parents, their referencing tables and the scratch token table.</comment>
+        <sql splitStatements="false" stripComments="false">
+DROP TABLE IF EXISTS nexus.t225_ref_manifest CASCADE;
+DROP TABLE IF EXISTS nexus.t225_ref_assign CASCADE;
+DROP TABLE IF EXISTS nexus.t225_ref_orphan CASCADE;
+DROP TABLE IF EXISTS nexus.t225_tokens CASCADE;
+DROP TABLE IF EXISTS nexus.t225_other_part CASCADE;
+DROP FUNCTION IF EXISTS nexus.t225_sleepy();
+DROP TABLE IF EXISTS nexus.chunks_new CASCADE;
+DROP TABLE IF EXISTS nexus.taxonomy_centroids_new CASCADE;
+DELETE FROM nexus.service_tokens WHERE label = 'p225';
+
+CREATE TABLE nexus.chunks_new (
+    LIKE nexus.t225_tpl_chunks INCLUDING DEFAULTS INCLUDING GENERATED INCLUDING CONSTRAINTS
+) PARTITION BY LIST (embedding_model);
+ALTER TABLE nexus.chunks_new
+    ADD CONSTRAINT chunks_new_pk PRIMARY KEY (tenant_id, collection, chash, embedding_model);
+
+CREATE TABLE nexus.taxonomy_centroids_new (
+    LIKE nexus.t225_tpl_centroids INCLUDING DEFAULTS INCLUDING GENERATED INCLUDING CONSTRAINTS
+) PARTITION BY LIST (embedding_model);
+ALTER TABLE nexus.taxonomy_centroids_new
+    ADD CONSTRAINT taxonomy_centroids_new_pk PRIMARY KEY (tenant_id, collection, topic_id, embedding_model);
+
+-- Replay every non-unique index the live tables had (captured by db.changelog-test-p225-templates.xml before it
+-- removed the live partitioned parents from this database) on the scratch parents (index names get a _new suffix).
+DO $replay$
+DECLARE
+    r record;
+BEGIN
+    FOR r IN
+        SELECT i.tablename, i.indexname, i.indexdef
+          FROM nexus.t225_tpl_indexes i
+    LOOP
+        -- A partitioned parent's index prints as ON ONLY nexus.TABLE, a plain table's as ON nexus.TABLE.
+        EXECUTE replace(regexp_replace(r.indexdef,
+                                       ' ON (ONLY )?nexus\.' || r.tablename || ' ', ' ON nexus.' || r.tablename || '_new '),
+                        'INDEX ' || r.indexname || ' ', 'INDEX ' || r.indexname || '_new ');
+    END LOOP;
+END
+$replay$;
+
+ALTER TABLE nexus.chunks_new ADD CONSTRAINT chunks_new_collection_fk
+    FOREIGN KEY (tenant_id, collection, embedding_model)
+    REFERENCES nexus.catalog_collections (tenant_id, name, embedding_model) ON DELETE RESTRICT;
+
+ALTER TABLE nexus.chunks_new ENABLE ROW LEVEL SECURITY;
+ALTER TABLE nexus.chunks_new FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON nexus.chunks_new
+    USING      (tenant_id = current_setting('nexus.tenant', true))
+    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
+CREATE POLICY chunks_gate_probe_owner_read ON nexus.chunks_new
+    FOR SELECT TO CURRENT_USER USING (true);
+GRANT SELECT, INSERT, UPDATE, DELETE, MAINTAIN ON nexus.chunks_new TO nexus_svc;
+
+ALTER TABLE nexus.taxonomy_centroids_new ENABLE ROW LEVEL SECURITY;
+ALTER TABLE nexus.taxonomy_centroids_new FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON nexus.taxonomy_centroids_new
+    USING      (tenant_id = current_setting('nexus.tenant', true))
+    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
+GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.taxonomy_centroids_new TO nexus_svc;
+
+-- Referencing tables: the manifest (deferrable, no delete action), the topic assignments and the
+-- orphaned-at table (delete cascade). Each has a 4-column foreign key onto the partitioned parent.
+CREATE TABLE nexus.t225_ref_manifest (
+    tenant_id       text   NOT NULL,
+    doc_id          text   NOT NULL,
+    position        int    NOT NULL,
+    collection      text   NOT NULL,
+    chash           bytea  NOT NULL,
+    embedding_model text   NOT NULL,
+    CONSTRAINT t225_ref_manifest_pk PRIMARY KEY (tenant_id, doc_id, position),
+    CONSTRAINT t225_ref_manifest_chunk_fk FOREIGN KEY (tenant_id, collection, chash, embedding_model)
+        REFERENCES nexus.chunks_new (tenant_id, collection, chash, embedding_model)
+        ON UPDATE CASCADE DEFERRABLE INITIALLY IMMEDIATE
+);
+CREATE TABLE nexus.t225_ref_assign (
+    tenant_id       text   NOT NULL,
+    doc_id          text   NOT NULL,
+    topic_id        bigint NOT NULL,
+    collection      text   NOT NULL,
+    chash           bytea  NOT NULL,
+    embedding_model text   NOT NULL,
+    CONSTRAINT t225_ref_assign_pk PRIMARY KEY (tenant_id, doc_id, topic_id),
+    CONSTRAINT t225_ref_assign_chunk_fk FOREIGN KEY (tenant_id, collection, chash, embedding_model)
+        REFERENCES nexus.chunks_new (tenant_id, collection, chash, embedding_model)
+        ON UPDATE CASCADE ON DELETE CASCADE
+);
+CREATE TABLE nexus.t225_ref_orphan (
+    tenant_id       text   NOT NULL,
+    collection      text   NOT NULL,
+    chash           bytea  NOT NULL,
+    embedding_model text   NOT NULL,
+    CONSTRAINT t225_ref_orphan_pk PRIMARY KEY (tenant_id, collection, chash, embedding_model),
+    CONSTRAINT t225_ref_orphan_chunk_fk FOREIGN KEY (tenant_id, collection, chash, embedding_model)
+        REFERENCES nexus.chunks_new (tenant_id, collection, chash, embedding_model)
+        ON UPDATE CASCADE ON DELETE CASCADE
+);
+ALTER TABLE nexus.t225_ref_manifest ENABLE ROW LEVEL SECURITY;
+ALTER TABLE nexus.t225_ref_manifest FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON nexus.t225_ref_manifest
+    USING      (tenant_id = current_setting('nexus.tenant', true))
+    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
+GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.t225_ref_manifest TO nexus_svc;
+GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.t225_ref_assign TO nexus_svc;
+GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.t225_ref_orphan TO nexus_svc;
+
+-- A stand-in for nexus.service_tokens: the tenant-creation trigger function is attached to this one in tests.
+CREATE TABLE nexus.t225_tokens (tenant_id text NOT NULL);
+GRANT SELECT, INSERT ON nexus.t225_tokens TO nexus_svc;
+        </sql>
+        <rollback>
+            <!-- Test-only; the container is thrown away. -->
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

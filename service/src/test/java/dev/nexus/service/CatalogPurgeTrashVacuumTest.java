@@ -3,6 +3,7 @@
 package dev.nexus.service;
 
 import org.jooq.impl.DSL;
+import org.jooq.DSLContext;
 import org.jooq.SQLDialect;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
@@ -220,12 +221,16 @@ class CatalogPurgeTrashVacuumTest {
             // the no-longer-existent NULL default.
             for (int i = 0; i < count; i++) {
                 try (PreparedStatement ps = su.prepareStatement(
-                        "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection) "
-                        + "VALUES (?, ?, 0, decode(?, 'hex'), ?)")) {
+                        "INSERT INTO nexus.catalog_document_chunks"
+                        + " (tenant_id, doc_id, position, chash, collection, embedding_model) "
+                        + "VALUES (?, ?, 0, decode(?, 'hex'), ?, (SELECT embedding_model FROM nexus.catalog_collections"
+                        + " WHERE tenant_id = ? AND name = ?))")) {
                     ps.setString(1, tenant);
                     ps.setString(2, docIds.get(i));
                     ps.setString(3, chashes.get(i));
                     ps.setString(4, collection);
+                    ps.setString(5, tenant);
+                    ps.setString(6, collection);
                     ps.execute();
                 }
             }
@@ -412,21 +417,50 @@ class CatalogPurgeTrashVacuumTest {
         }
     }
 
+    /**
+     * RDR-225: {@code nexus.chunks} is a partitioned parent (model, then tenant), and VACUUM on a
+     * partitioned parent runs on its leaves, so the {@code last_vacuum} the server records is the
+     * leaves', never the parent's. The relations whose counters speak for {@code qualifiedTable}: the
+     * table itself plus, for a partitioned one, every leaf under it.
+     */
+    private List<String> statRelations(DSLContext ctx, String qualifiedTable) {
+        String[] parts = qualifiedTable.split("\\.", 2);
+        List<String> out = new ArrayList<>();
+        out.add(parts[1]);
+        for (PartitionScratch.Child model : PartitionScratch.children(ctx, parts[1])) {
+            List<PartitionScratch.Child> tenants = PartitionScratch.children(ctx, model.name());
+            if (tenants.isEmpty()) {
+                out.add(model.name());
+            }
+            for (PartitionScratch.Child tenantLeaf : tenants) {
+                out.add(tenantLeaf.name());
+            }
+        }
+        return out;
+    }
+
     private void resetVacuumStats(String qualifiedTable) throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            String[] parts = qualifiedTable.split("\\.", 2);
-            PgCatalogProbes.resetTableCounters(DSL.using(su, SQLDialect.POSTGRES), parts[0], parts[1]);
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            String schema = qualifiedTable.split("\\.", 2)[0];
+            for (String rel : statRelations(ctx, qualifiedTable)) {
+                PgCatalogProbes.resetTableCounters(ctx, schema, rel);
+            }
         }
     }
 
     private boolean lastVacuumIsRecent(String qualifiedTable) throws Exception {
         try (Connection su = pg.createConnection("")) {
-            String[] parts = qualifiedTable.split("\\.", 2);
-            PgCatalogProbes.TableStats stats = PgCatalogProbes.tableStats(
-                DSL.using(su, SQLDialect.POSTGRES), parts[0], parts[1]);
-            if (stats == null) return false;
-            return stats.lastVacuum() != null && stats.lastAnalyze() != null;
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            String schema = qualifiedTable.split("\\.", 2)[0];
+            for (String rel : statRelations(ctx, qualifiedTable)) {
+                PgCatalogProbes.TableStats stats = PgCatalogProbes.tableStats(ctx, schema, rel);
+                if (stats != null && stats.lastVacuum() != null && stats.lastAnalyze() != null) {
+                    return true;
+                }
+            }
+            return false;
         }
     }
 }

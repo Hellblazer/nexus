@@ -153,9 +153,10 @@ class ChunkIsReapableIntegrationTest {
     /** Writes (or overwrites) the chunk's orphaning record, {@code age} ago. A fixture for the predicate's tests. */
     private void recordOrphaning(String tenant, String collection, String hex, Duration age) throws Exception {
         OffsetDateTime then = OffsetDateTime.now().minus(age);
+        // RDR-225: the record carries its chunk's embedding model (the four-column chunk foreign key).
         su(ctx -> ctx.insertInto(CHUNK_ORPHANED_AT, CHUNK_ORPHANED_AT.TENANT_ID, CHUNK_ORPHANED_AT.COLLECTION,
-                CHUNK_ORPHANED_AT.CHASH, CHUNK_ORPHANED_AT.ORPHANED_AT)
-            .values(tenant, collection, bytes(hex), then)
+                CHUNK_ORPHANED_AT.CHASH, CHUNK_ORPHANED_AT.ORPHANED_AT, CHUNK_ORPHANED_AT.EMBEDDING_MODEL)
+            .values(tenant, collection, bytes(hex), then, PgContainerHelper.collectionModel(ctx, tenant, collection))
             .onConflict(CHUNK_ORPHANED_AT.TENANT_ID, CHUNK_ORPHANED_AT.COLLECTION, CHUNK_ORPHANED_AT.CHASH)
             .doUpdate().set(CHUNK_ORPHANED_AT.ORPHANED_AT, then).execute());
     }
@@ -196,8 +197,10 @@ class ChunkIsReapableIntegrationTest {
             throws Exception {
         su(ctx -> ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID,
                 CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION,
-                CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION)
-            .values(tenant, docId, position, bytes(hex), collection).execute());
+                CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION,
+                CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
+            .values(tenant, docId, position, bytes(hex), collection,
+                PgContainerHelper.collectionModel(ctx, tenant, collection)).execute());
     }
 
     private OffsetDateTime lastWrittenAt(String tenant, String collection, String hex) throws Exception {
@@ -608,8 +611,9 @@ class ChunkIsReapableIntegrationTest {
 
         su(ctx -> ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID,
                 CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
-                CATALOG_DOCUMENT_CHUNKS.COLLECTION)
-            .values(t, "stamp-up1", 3, bytes(incoming), KNOWLEDGE)
+                CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
+            .values(t, "stamp-up1", 3, bytes(incoming), KNOWLEDGE,
+                PgContainerHelper.collectionModel(ctx, t, KNOWLEDGE))
             .onConflict(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION)
             .doUpdate().set(CATALOG_DOCUMENT_CHUNKS.CHASH, bytes(incoming)).execute());
 
@@ -948,7 +952,8 @@ class ChunkIsReapableIntegrationTest {
     void theSideTableIsTenantScopedAndKeyedByItsChunk() throws Exception {
         su(ctx -> {
             assertThat(PgCatalogProbes.columnNames(ctx, "nexus", "chunk_orphaned_at"))
-                .containsExactlyInAnyOrder("tenant_id", "collection", "chash", "orphaned_at");
+                // RDR-225: the record carries its chunk's embedding_model (the four-column chunk foreign key).
+                .containsExactlyInAnyOrder("tenant_id", "collection", "chash", "orphaned_at", "embedding_model");
             PgCatalogProbes.RowSecurity rls = PgCatalogProbes.rowSecurity(ctx, "nexus", "chunk_orphaned_at");
             assertThat(rls).as("nexus.chunk_orphaned_at must exist").isNotNull();
             assertThat(rls.enabled()).as("RLS ENABLE").isTrue();

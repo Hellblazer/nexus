@@ -267,6 +267,8 @@ class Rdr192LiveCExplainEvidenceIntegrationTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(false);
             DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            // RDR-225: a manifest row and a topic assignment carry the model of the chunk they reference.
+            final String model = PgContainerHelper.collectionModel(ctx, TENANT, COLL);
             List<Query> docs = new ArrayList<>();
             for (int d = 0; d < NUM_DOCS; d++) {
                 docs.add(ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID,
@@ -283,8 +285,10 @@ class Rdr192LiveCExplainEvidenceIntegrationTest {
                     int d = Math.min(NUM_DOCS - 1, i / perDoc);
                     rows.add(ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID,
                             CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION,
-                            CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION)
-                        .values(TENANT, doc(d), i - d * perDoc, HexFormat.of().parseHex(chashHex.get(i)), COLL));
+                            CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION,
+                            CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
+                        .values(TENANT, doc(d), i - d * perDoc, HexFormat.of().parseHex(chashHex.get(i)), COLL,
+                                model));
                 }
                 ctx.batch(rows).execute();
                 su.commit();
@@ -307,9 +311,10 @@ class Rdr192LiveCExplainEvidenceIntegrationTest {
                 for (int i = start; i < Math.min(start + 1000, TOPIC_CHUNKS); i++) {
                     rows.add(ctx.insertInto(TOPIC_ASSIGNMENTS, TOPIC_ASSIGNMENTS.TENANT_ID,
                             TOPIC_ASSIGNMENTS.DOC_ID, TOPIC_ASSIGNMENTS.TOPIC_ID, TOPIC_ASSIGNMENTS.ASSIGNED_BY,
-                            TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, TOPIC_ASSIGNMENTS.ASSIGNED_AT)
+                            TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, TOPIC_ASSIGNMENTS.ASSIGNED_AT,
+                            TOPIC_ASSIGNMENTS.EMBEDDING_MODEL)
                         .values(TENANT, HexFormat.of().parseHex(chashHex.get(i)), topicId, "projection", COLL,
-                                OffsetDateTime.now()));
+                                OffsetDateTime.now(), model));
                 }
                 ctx.batch(rows).execute();
                 su.commit();
@@ -359,8 +364,10 @@ class Rdr192LiveCExplainEvidenceIntegrationTest {
             for (int i = 0; i < OTHER_CHUNKS; i++) {
                 rows.add(ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID,
                         CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION,
-                        CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION)
-                    .values(OTHER_TENANT, "rdr192-other-doc-0000", i, HexFormat.of().parseHex(ids.get(i)), OTHER_COLL));
+                        CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION,
+                        CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
+                    .values(OTHER_TENANT, "rdr192-other-doc-0000", i, HexFormat.of().parseHex(ids.get(i)), OTHER_COLL,
+                            PgContainerHelper.collectionModel(ctx, OTHER_TENANT, OTHER_COLL)));
             }
             ctx.batch(rows).execute();
         }
@@ -500,7 +507,7 @@ class Rdr192LiveCExplainEvidenceIntegrationTest {
 
     @Test
     void topicScopedSearch_inlinesLiveC() {
-        Table<?> fn = SEARCH_TOPIC_SCOPED_384.call(queryVec(), TOPIC_LABEL, COLL, 10);
+        Table<?> fn = SEARCH_TOPIC_SCOPED_384.call(queryVec(), TOPIC_LABEL, COLL, 10, MODEL, TENANT);
         String plan = explain("search_topic_scoped_384", ctx -> ctx.select(fn.field("id")).from(fn));
         assertInlinedLiveC(plan, "search_topic_scoped_384");
     }
@@ -523,7 +530,8 @@ class Rdr192LiveCExplainEvidenceIntegrationTest {
     // run the definer body past RLS.
 
     private static Table<?> probe384(String token, String... collections) {
-        return TEXT_GATE_PROBE_384.call(token, collections, null, null, PgVectorRepository.SELECTIVE_GATE_MAX + 1);
+        return TEXT_GATE_PROBE_384.call(token, collections, null, null, PgVectorRepository.SELECTIVE_GATE_MAX + 1,
+            MODEL, TENANT);
     }
 
     /** Chunks the selective token matches that live(c) shows, from the fixture's own arithmetic. */
@@ -560,9 +568,11 @@ class Rdr192LiveCExplainEvidenceIntegrationTest {
     void gateProbe_selective_underNexusSvcRls_reachesAGinTextIndex() throws Exception {
         String plan = probeBodyPlan("text_gate_probe_384 (selective gate), body plan as nexus_svc", RARE_TOKEN);
         assertThat(plan)
-            .as("the selective gate must be driven by idx_chunks_tsv or idx_chunks_trgm. Plan was:%n%s", plan)
-            .containsPattern("Bitmap Index Scan on idx_chunks_(tsv|trgm)")
-            .doesNotContain("Seq Scan on chunks");
+            .as("the selective gate must be driven by idx_chunks_tsv or idx_chunks_trgm (RDR-225: their child"
+                + " indexes on the tenant's leaf). Plan was:%n%s", plan)
+            .containsPattern(ginIndexOnTheTenantLeaf());
+        assertThat(seqScansOfTheTenantLeaf(plan)).as("no sequential scan of the tenant's leaf. Plan was:%n%s", plan)
+            .isEmpty();
         assertThat(plan).as("live(c) stays inlined in the body. Plan was:%n%s", plan)
             .doesNotContain("chunk_live_owners")
             .contains("catalog_document_chunks");
@@ -591,8 +601,9 @@ class Rdr192LiveCExplainEvidenceIntegrationTest {
             .doesNotContain("chunk_live_owners")
             .contains("catalog_document_chunks");
         assertThat(plan).as("the dense gate's body is planned as the indexed plan. Plan was:%n%s", plan)
-            .containsPattern("Bitmap Index Scan on idx_chunks_(tsv|trgm)")
-            .doesNotContain("Seq Scan on chunks");
+            .containsPattern(ginIndexOnTheTenantLeaf());
+        assertThat(seqScansOfTheTenantLeaf(plan)).as("no sequential scan of the tenant's leaf. Plan was:%n%s", plan)
+            .isEmpty();
         String label = "text_gate_probe_384 (dense gate), call as nexus_svc";
         Table<?> fn = probe384(COMMON_TOKEN, COLL);
         explain(label, ctx -> ctx.selectFrom(fn));
@@ -637,27 +648,41 @@ class Rdr192LiveCExplainEvidenceIntegrationTest {
      * rests on its own predicate; this is the test of that predicate. A tenant that names ANOTHER tenant's
      * collection gets nothing, a tenant that names both gets only its own rows, and each tenant sees its own
      * rows (so the empty results are not vacuous).
+     *
+     * <p>RDR-225: the probe also takes the tenant as a parameter, which the engine sets to the session's own
+     * tenant. The caller supplies that value and the function runs as its owner, so a parameter that names
+     * ANOTHER tenant than the session's must not widen what the session sees: the last two groups of
+     * assertions pass tenant B's id from tenant A's session (and the reverse), naming the other tenant's
+     * collection, and expect nothing. They fail if the probe's own GUC-based predicate is removed and only
+     * the parameter is left.
      */
     @Test
     void gateProbes_neverReturnAnotherTenantsChunks_throughAnyDimension() {
         List<java.util.function.Function<Object[], Table<?>>> dims = List.of(
-            a -> TEXT_GATE_PROBE_384.call(RARE_TOKEN, (String[]) a[0], null, null, 10_000),
-            a -> TEXT_GATE_PROBE_768.call(RARE_TOKEN, (String[]) a[0], null, null, 10_000),
-            a -> TEXT_GATE_PROBE_1024.call(RARE_TOKEN, (String[]) a[0], null, null, 10_000));
+            a -> TEXT_GATE_PROBE_384.call(RARE_TOKEN, (String[]) a[0], null, null, 10_000, MODEL, (String) a[1]),
+            a -> TEXT_GATE_PROBE_768.call(RARE_TOKEN, (String[]) a[0], null, null, 10_000, MODEL, (String) a[1]),
+            a -> TEXT_GATE_PROBE_1024.call(RARE_TOKEN, (String[]) a[0], null, null, 10_000, MODEL, (String) a[1]));
         for (var dim : dims) {
             String[] mine = {COLL}, theirs = {OTHER_COLL}, both = {COLL, OTHER_COLL};
-            assertThat(probeAs(TENANT, dim.apply(new Object[] {theirs})))
+            assertThat(probeAs(TENANT, dim.apply(new Object[] {theirs, TENANT})))
                 .as("tenant A naming tenant B's collection").isEmpty();
-            List<String> aBoth = probeAs(TENANT, dim.apply(new Object[] {both}));
+            List<String> aBoth = probeAs(TENANT, dim.apply(new Object[] {both, TENANT}));
             assertThat(aBoth).as("tenant A naming both collections: its own live rows only")
                 .hasSize(expectedSelectiveLive()).doesNotContainAnyElementsOf(otherChashHex);
-            assertThat(probeAs(TENANT, dim.apply(new Object[] {mine})))
+            assertThat(probeAs(TENANT, dim.apply(new Object[] {mine, TENANT})))
                 .as("tenant A's own collection").hasSize(expectedSelectiveLive());
-            assertThat(probeAs(OTHER_TENANT, dim.apply(new Object[] {mine})))
+            assertThat(probeAs(OTHER_TENANT, dim.apply(new Object[] {mine, OTHER_TENANT})))
                 .as("tenant B naming tenant A's collection").isEmpty();
-            assertThat(probeAs(OTHER_TENANT, dim.apply(new Object[] {both})))
+            assertThat(probeAs(OTHER_TENANT, dim.apply(new Object[] {both, OTHER_TENANT})))
                 .as("tenant B naming both collections: its own rows only")
                 .containsExactlyInAnyOrderElementsOf(otherChashHex);
+            // The parameter names the OTHER tenant than the session's.
+            assertThat(probeAs(TENANT, dim.apply(new Object[] {theirs, OTHER_TENANT})))
+                .as("tenant A's session, tenant B's id and collection as parameters: nothing").isEmpty();
+            assertThat(probeAs(TENANT, dim.apply(new Object[] {both, OTHER_TENANT})))
+                .as("tenant A's session, tenant B's id as the parameter, both collections: nothing").isEmpty();
+            assertThat(probeAs(OTHER_TENANT, dim.apply(new Object[] {mine, TENANT})))
+                .as("tenant B's session, tenant A's id and collection as parameters: nothing").isEmpty();
         }
     }
 
@@ -670,8 +695,8 @@ class Rdr192LiveCExplainEvidenceIntegrationTest {
     void gateProbes_returnNothing_whenNoTenantIsStamped_orTheStampIsEmpty() throws Exception {
         List<Table<?>> fns = List.of(
             probe384(RARE_TOKEN, COLL, OTHER_COLL),
-            TEXT_GATE_PROBE_768.call(RARE_TOKEN, new String[] {COLL, OTHER_COLL}, null, null, 10_000),
-            TEXT_GATE_PROBE_1024.call(RARE_TOKEN, new String[] {COLL, OTHER_COLL}, null, null, 10_000));
+            TEXT_GATE_PROBE_768.call(RARE_TOKEN, new String[] {COLL, OTHER_COLL}, null, null, 10_000, MODEL, TENANT),
+            TEXT_GATE_PROBE_1024.call(RARE_TOKEN, new String[] {COLL, OTHER_COLL}, null, null, 10_000, MODEL, TENANT));
         Field<String> setting = DSL.function("current_setting", SQLDataType.VARCHAR,
             DSL.inline("nexus.tenant"), DSL.inline(true));
         try (Connection c = DriverManager.getConnection(pg.getJdbcUrl(), PgContainerHelper.SVC_USERNAME,
@@ -705,9 +730,12 @@ class Rdr192LiveCExplainEvidenceIntegrationTest {
     @Test
     void gateProbes_failClosedOnAnEmptyStamp_evenWhenAnEmptyIdTenantOwnsLiveMatches() throws Exception {
         List<Table<?>> fns = List.of(
-            probe384(RARE_TOKEN, EMPTY_COLL, COLL),
-            TEXT_GATE_PROBE_768.call(RARE_TOKEN, new String[] {EMPTY_COLL, COLL}, null, null, 10_000),
-            TEXT_GATE_PROBE_1024.call(RARE_TOKEN, new String[] {EMPTY_COLL, COLL}, null, null, 10_000));
+            // RDR-225: the tenant PARAMETER is the empty id too, so the explicit predicate alone would admit the
+            // empty-id tenant's chunk; the GUC predicate (NULLIF) is what must keep it out.
+            TEXT_GATE_PROBE_384.call(RARE_TOKEN, new String[] {EMPTY_COLL, COLL}, null, null,
+                PgVectorRepository.SELECTIVE_GATE_MAX + 1, MODEL, EMPTY_TENANT),
+            TEXT_GATE_PROBE_768.call(RARE_TOKEN, new String[] {EMPTY_COLL, COLL}, null, null, 10_000, MODEL, EMPTY_TENANT),
+            TEXT_GATE_PROBE_1024.call(RARE_TOKEN, new String[] {EMPTY_COLL, COLL}, null, null, 10_000, MODEL, EMPTY_TENANT));
         try (Connection c = DriverManager.getConnection(pg.getJdbcUrl(), PgContainerHelper.SVC_USERNAME,
                 PgContainerHelper.SVC_PASSWORD)) {
             c.setAutoCommit(false);
@@ -728,11 +756,12 @@ class Rdr192LiveCExplainEvidenceIntegrationTest {
 
     private static final String[] DIM_NAMES = {"384", "768", "1024"};
 
-    private static Table<?> probeByDim(int dimIndex, String token, String[] collections, String wherePath) {
+    private static Table<?> probeByDim(int dimIndex, String token, String[] collections, String wherePath,
+                                       String tenant) {
         return switch (dimIndex) {
-            case 0 -> TEXT_GATE_PROBE_384.call(token, collections, null, wherePath, 10_000);
-            case 1 -> TEXT_GATE_PROBE_768.call(token, collections, null, wherePath, 10_000);
-            default -> TEXT_GATE_PROBE_1024.call(token, collections, null, wherePath, 10_000);
+            case 0 -> TEXT_GATE_PROBE_384.call(token, collections, null, wherePath, 10_000, MODEL, tenant);
+            case 1 -> TEXT_GATE_PROBE_768.call(token, collections, null, wherePath, 10_000, MODEL, tenant);
+            default -> TEXT_GATE_PROBE_1024.call(token, collections, null, wherePath, 10_000, MODEL, tenant);
         };
     }
 
@@ -766,15 +795,15 @@ class Rdr192LiveCExplainEvidenceIntegrationTest {
         }
         for (int dim = 0; dim < DIM_NAMES.length; dim++) {
             String label = "dim " + DIM_NAMES[dim];
-            List<String> alone = probeAs(TENANT, probeByDim(dim, RARE_TOKEN, new String[] {META_COLL}, V_GT_1));
+            List<String> alone = probeAs(TENANT, probeByDim(dim, RARE_TOKEN, new String[] {META_COLL}, V_GT_1, TENANT));
             assertThat(alone).as("%s: tenant A's own matches (non-vacuity)", label)
                 .containsExactlyInAnyOrderElementsOf(metaMatchChashHex);
             List<String> withB = probeAs(TENANT,
-                probeByDim(dim, RARE_TOKEN, new String[] {META_COLL, OTHER_COLL}, V_GT_1));
+                probeByDim(dim, RARE_TOKEN, new String[] {META_COLL, OTHER_COLL}, V_GT_1, TENANT));
             assertThat(withB).as("%s: naming tenant B's hostile collection changes nothing for tenant A", label)
                 .containsExactlyInAnyOrderElementsOf(alone);
             List<String> b = probeAs(OTHER_TENANT,
-                probeByDim(dim, RARE_TOKEN, new String[] {META_COLL, OTHER_COLL}, V_GT_1));
+                probeByDim(dim, RARE_TOKEN, new String[] {META_COLL, OTHER_COLL}, V_GT_1, OTHER_TENANT));
             assertThat(b).as("%s: tenant B's own session evaluates its hostile metadata without error", label)
                 .isNotEmpty().isSubsetOf(otherChashHex).doesNotContainAnyElementsOf(metaMatchChashHex);
         }
@@ -801,7 +830,7 @@ class Rdr192LiveCExplainEvidenceIntegrationTest {
      * runs as the migration role, which owns the tables and, since vectors-029, holds a read-everything policy
      * on nexus.chunks, so a new one is an access path that needs a reviewer. The two ensure_vector_extensions_*
      * helpers are the DBA-side relocation helpers (installed by the test's owner bootstrap exactly as
-     * nexus.db.pg_provision installs them); the others are the three gate probes.
+     * nexus.db.pg_provision installs them); create_tenant_partitions is RDR-225's; the others are the three gate probes.
      */
     @Test
     void securityDefinerFunctionsInSchemaNexus_areExactlyTheAllowlist() throws Exception {
@@ -810,8 +839,10 @@ class Rdr192LiveCExplainEvidenceIntegrationTest {
                 .filter(PgCatalogProbes.FunctionShape::securityDefiner)
                 .map(f -> f.identity().substring(0, f.identity().indexOf('(')))
                 .sorted().toList();
+            // RDR-225 adds create_tenant_partitions: nexus_svc calls it for a tenant that has no service token
+            // yet, and it must create the tenant's partitions as their owner.
             assertThat(definers).containsExactly(
-                "ensure_vector_extensions_relocated", "ensure_vector_extensions_unrelocated",
+                "create_tenant_partitions", "ensure_vector_extensions_relocated", "ensure_vector_extensions_unrelocated",
                 "text_gate_probe_1024", "text_gate_probe_384", "text_gate_probe_768");
         }
     }
@@ -852,7 +883,8 @@ class Rdr192LiveCExplainEvidenceIntegrationTest {
         List<String> some = new ArrayList<>();
         for (int i = 0; i < NUM_CHUNKS; i += 100) some.add(chashHex.get(i));
         byte[][] chashes = some.stream().map(h -> HexFormat.of().parseHex(h)).toArray(byte[][]::new);
-        Table<?> fn = TEXT_GATED_SEARCH_BY_CHASH_384.call(queryVec(), chashes, new String[] {COLL}, null, null, 10);
+        Table<?> fn = TEXT_GATED_SEARCH_BY_CHASH_384.call(
+            queryVec(), chashes, new String[] {COLL}, null, null, 10, MODEL, TENANT);
         String plan = explain("text_gated_search_by_chash_384", ctx -> ctx.select(fn.field("id")).from(fn));
         assertInlinedLiveC(plan, "text_gated_search_by_chash_384");
     }
@@ -860,14 +892,14 @@ class Rdr192LiveCExplainEvidenceIntegrationTest {
     @Test
     void hnswFirstRank_inlinesLiveC() {
         Table<?> fn = TEXT_GATED_SEARCH_HNSW_FIRST_384.call(queryVec(), COMMON_TOKEN, new String[] {COLL},
-            null, null, 10);
+            null, null, 10, MODEL, TENANT);
         String plan = explain("text_gated_search_hnsw_first_384", ctx -> ctx.select(fn.field("id")).from(fn));
         assertInlinedLiveC(plan, "text_gated_search_hnsw_first_384");
     }
 
     @Test
     void plainSearch_inlinesLiveC_reference() {
-        Table<?> fn = PLAIN_SEARCH_384.call(queryVec(), new String[] {COLL}, null, null, 10);
+        Table<?> fn = PLAIN_SEARCH_384.call(queryVec(), new String[] {COLL}, null, null, 10, MODEL, TENANT);
         String plan = explain("plain_search_384 (reference)", ctx -> ctx.select(fn.field("id")).from(fn));
         assertInlinedLiveC(plan, "plain_search_384");
     }
@@ -942,6 +974,45 @@ class Rdr192LiveCExplainEvidenceIntegrationTest {
             .doesNotContain("SubPlan 2");
     }
 
+    /** RDR-225: the model every chunk of this fixture carries (the collections are minilm-l6-v2-384). */
+    private static final String MODEL = "minilm-l6-v2-384";
+
+    private String tenantLeaf;
+    private List<String> tenantLeafGinIndexes;
+
+    /** The leaf of nexus.chunks holding TENANT's chunks, and the names of its child indexes of idx_chunks_tsv and idx_chunks_trgm. */
+    private synchronized void readTenantLeaf() throws Exception {
+        if (tenantLeaf != null) return;
+        try (Connection su = pg.createConnection("")) {
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            tenantLeaf = dev.nexus.service.jooq.nexus.Routines.partitionName(ctx.configuration(), "chunks", MODEL, TENANT);
+            // The leaf's two GIN indexes are children of the MODEL partition's indexes (which are children of the
+            // parent's idx_chunks_tsv and idx_chunks_trgm), so they are found by their access method on the leaf.
+            Field<String> indexName = DSL.field(DSL.name("indexname"), String.class);
+            tenantLeafGinIndexes = ctx.select(indexName)
+                .from(DSL.table(DSL.name("pg_catalog", "pg_indexes")))
+                .where(DSL.field(DSL.name("schemaname"), String.class).eq("nexus"))
+                .and(DSL.field(DSL.name("tablename"), String.class).eq(tenantLeaf))
+                .and(DSL.field(DSL.name("indexdef"), String.class).like("%USING gin%"))
+                .fetch(indexName);
+        }
+        assertThat(tenantLeafGinIndexes).as("non-vacuity: leaf %s carries child indexes of both GIN text indexes",
+            tenantLeaf).hasSize(2);
+    }
+
+    /** {@code Bitmap Index Scan on <a child of idx_chunks_tsv or idx_chunks_trgm on the tenant's leaf>}. */
+    private Pattern ginIndexOnTheTenantLeaf() throws Exception {
+        readTenantLeaf();
+        return Pattern.compile("Bitmap Index Scan on (" + String.join("|", tenantLeafGinIndexes) + ")");
+    }
+
+    /** The plan lines that seq-scan the tenant's leaf. The tenant's other leaves (one per other model) are empty,
+     *  and the planner is right to seq-scan an empty relation; the claim is about the leaf that holds the rows. */
+    private List<String> seqScansOfTheTenantLeaf(String plan) throws Exception {
+        readTenantLeaf();
+        return plan.lines().filter(l -> l.contains("Seq Scan") && l.contains(tenantLeaf)).toList();
+    }
+
     private static final String BODY_MARKER = "NULLIF(pg_catalog.current_setting('nexus.tenant', true)";
     private static final Pattern NEXT_LOG_LINE = Pattern.compile("\n\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:");
 
@@ -973,10 +1044,17 @@ class Rdr192LiveCExplainEvidenceIntegrationTest {
             evidence.put(label, "rows=" + rows + "\n" + block);
         }
         // The log entry leads with the statement's own text, which names chunk_live_owners as written; the
-        // plan is what follows the parameters line, and that is what a caller may assert on.
+        // plan is what follows it, and that is what a caller may assert on. A statement run with bound
+        // parameters carries a "Query Parameters:" line before its plan. The probe's body, a plpgsql
+        // statement since RDR-225 (it is planned with the call's values so it can prune to one leaf), has none:
+        // its values are folded into the plan, so the plan starts at the first plan node.
         int params = block.indexOf("Query Parameters:");
-        assertThat(params).as("auto_explain's entry carries the parameters line. Entry was:%n%s", block).isNotNegative();
-        return block.substring(block.indexOf('\n', params) + 1);
+        if (params >= 0) {
+            return block.substring(block.indexOf('\n', params) + 1);
+        }
+        Matcher firstNode = Pattern.compile("(?m)^\\t\\S.*\\(cost=").matcher(block);
+        assertThat(firstNode.find()).as("auto_explain's entry carries a plan. Entry was:%n%s", block).isTrue();
+        return block.substring(firstNode.start() + 1);
     }
 
     private Vector queryVec() {

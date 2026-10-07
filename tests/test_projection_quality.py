@@ -21,9 +21,13 @@ from tests._t2_fixture_ops import canonical_chunk_id
 from tests.conftest import make_vector_test_client
 from typing import Any
 
+# RDR-225: the substrate registers every collection under bge-base-en-v15-768, and the
+# engine requires a centroid's width to equal its collection model's dimension.
+_DIM = 768
+
 
 def _seed_chunks_for_tenant(
-    tenant: str, collection: str, chash_hexes: list[str], *, dim: int = 384,
+    tenant: str, collection: str, chash_hexes: list[str], *, dim: int = 768,
 ) -> None:
     """RDR-194 P3d (nexus-tk070.p3d): seed real nexus.chunks rows so a
     topic_assignments insert for (tenant, collection, chash) satisfies the
@@ -47,7 +51,11 @@ def _seed_chunks_for_tenant(
     # registered with a different model". The stub chunk's own dim is
     # an unrelated FK-satisfaction detail (which embedding_<dim> column
     # holds the zero-vector), not a model choice.
+    # RDR-225: a model partition holds one vector width (its dimension CHECK) and this
+    # substrate registers every collection under the bge-768 profile, so the stub is a
+    # 768-wide chunk; a stub of another width would not route to any partition.
     model_for_dim = "bge-base-en-v15-768"
+    assert dim == 768, f"stub chunks follow the substrate's bge-768 profile, not dim={dim}"
     vec = "[" + ",".join(["0"] * dim) + "]"
     values = ", ".join(
         f"('{tenant}', '{collection}', decode('{c}', 'hex'), 'seed', '{vec}'::nexus.vector)"
@@ -58,17 +66,17 @@ def _seed_chunks_for_tenant(
         "(tenant_id, name, content_type, owner_id, embedding_model, lifecycle_state) "
         f"VALUES ('{tenant}', '{collection}', 'knowledge', 'test-seed', '{model_for_dim}', 'live') "
         "ON CONFLICT DO NOTHING; "
-        f"INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, {embed_col}) "
-        f"VALUES {values} ON CONFLICT DO NOTHING;"
+        f"INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, {embed_col}, embedding_model) "
+        f"SELECT v.*, '{model_for_dim}' FROM (VALUES {values}) AS v ON CONFLICT DO NOTHING;"
     )
     psql = Path(state["pg_bin"]) / "psql"
     proc = subprocess.run(
         [
             str(psql), "-h", "127.0.0.1", "-p", str(state["pg_port"]),
             "-U", state["pg_user"], "-d", state["pg_dbname"],
-            "-v", "ON_ERROR_STOP=1", "-c", sql,
+            "-v", "ON_ERROR_STOP=1", "-1", "-f", "-",
         ],
-        capture_output=True, text=True, timeout=60,
+        input=sql, capture_output=True, text=True, timeout=60,
     )
     assert proc.returncode == 0, f"_seed_chunks_for_tenant failed: {proc.stdout}\n{proc.stderr}"
 
@@ -199,7 +207,7 @@ def _build_two_clusters_in_chroma(
 ) -> list[dict]:
     """Seed ``collection_name`` centroids for two well-separated clusters."""
     rng = np.random.default_rng(42)
-    embeddings = rng.standard_normal((60, 384)).astype(np.float32) * 0.1
+    embeddings = rng.standard_normal((60, _DIM)).astype(np.float32) * 0.1
     embeddings[:30, 0] += 3.0
     embeddings[30:, 1] += 3.0
     return embeddings
@@ -214,7 +222,7 @@ class TestAssignSingleReturnsNamedTuple:
         from nexus.db.t2.taxonomy_compute import AssignResult
 
         rng = np.random.default_rng(42)
-        embeddings = rng.standard_normal((60, 384)).astype(np.float32) * 0.1
+        embeddings = rng.standard_normal((60, _DIM)).astype(np.float32) * 0.1
         embeddings[:30, 0] += 3.0
         embeddings[30:, 1] += 3.0
         doc_ids = [canonical_chunk_id(f"d-{i}") for i in range(60)]
@@ -228,7 +236,7 @@ class TestAssignSingleReturnsNamedTuple:
         )
 
         # Query with an embedding close to cluster A.
-        new_emb = rng.standard_normal(384).astype(np.float32) * 0.1
+        new_emb = rng.standard_normal(_DIM).astype(np.float32) * 0.1
         new_emb[0] += 3.0
         result = db.taxonomy.assign_single("nt_coll", new_emb, chroma_client)
         assert result is not None
@@ -247,7 +255,7 @@ class TestProjectAgainst3Tuple:
     ) -> None:
         rng = np.random.default_rng(42)
         for name in ("code__pA", "code__pB"):
-            embs = rng.standard_normal((60, 384)).astype(np.float32) * 0.1
+            embs = rng.standard_normal((60, _DIM)).astype(np.float32) * 0.1
             embs[:30, 0] += 3.0
             embs[30:, 1] += 3.0
             doc_ids = [canonical_chunk_id(f"{name}-d{i}") for i in range(60)]
@@ -445,7 +453,7 @@ def fixture_icf_ranking(
         col = f"code__icfR{idx:02d}"
         # 30 docs per collection — enough for HDBSCAN to form at least
         # one topic per well-separated cluster.
-        embs = rng.standard_normal((30, 384)).astype(np.float32) * 0.1
+        embs = rng.standard_normal((30, _DIM)).astype(np.float32) * 0.1
         embs[:15, 0] += 3.0
         embs[15:, 1] += 3.0
         doc_ids = [canonical_chunk_id(f"{col}-d{i}") for i in range(30)]
@@ -554,7 +562,7 @@ class TestProjectAgainstIcf:
     ) -> None:
         rng = np.random.default_rng(42)
         for name in ("code__icfA", "code__icfB"):
-            embs = rng.standard_normal((60, 384)).astype(np.float32) * 0.1
+            embs = rng.standard_normal((60, _DIM)).astype(np.float32) * 0.1
             embs[:30, 0] += 3.0
             embs[30:, 1] += 3.0
             doc_ids = [canonical_chunk_id(f"{name}-d{i}") for i in range(60)]

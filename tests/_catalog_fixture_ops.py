@@ -315,8 +315,8 @@ def _run_psql(sql: str) -> None:
     state = ensure_engine()
     proc = subprocess.run(
         [str(state["pg_bin"] / "psql"), "-h", "127.0.0.1", "-p", str(state["pg_port"]),
-         "-U", os.environ["USER"], "-d", _DBNAME, "-v", "ON_ERROR_STOP=1", "-c", sql],
-        capture_output=True, text=True,
+         "-U", os.environ["USER"], "-d", _DBNAME, "-v", "ON_ERROR_STOP=1", "-1", "-f", "-"],
+        input=sql, capture_output=True, text=True,
     )
     if proc.returncode != 0:
         raise RuntimeError(f"_run_psql: psql failed: {proc.stderr}\nSQL: {sql}")
@@ -392,17 +392,26 @@ def bypass_fk_seed_chunk(
     # registered with a different model". The stub chunk's own dim is
     # an unrelated FK-satisfaction detail (which embedding_<dim> column
     # holds the zero-vector), not a model choice.
+    # RDR-225: a model partition holds one vector width (its dimension CHECK) and this
+    # substrate registers every collection under the bge-768 profile, so the stub is a
+    # 768-wide chunk; a stub of another width would not route to any partition.
     model_for_dim = "bge-base-en-v15-768"
+    assert dim == 768, f"stub chunks follow the substrate's bge-768 profile, not dim={dim}"
     sql = (
         "INSERT INTO nexus.catalog_collections "
         "(tenant_id, name, content_type, owner_id, embedding_model, lifecycle_state) "
         f"VALUES ({tenant!r}, {collection!r}, 'knowledge', 'test-seed', "
         f"{model_for_dim!r}, 'live') "
         "ON CONFLICT (tenant_id, name) DO NOTHING;\n"
+        # RDR-225: the row's embedding_model is its collection's registered model (the
+        # composite foreign key and the partition route both need it), so it is read
+        # back from the registry row the statement above just made or found.
         "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, "
-        f"{vec_col}) VALUES ({tenant!r}, {collection!r}, "
-        f"decode({chash!r}, 'hex'), 'fk-bypass-stub', {vec_literal!r}::nexus.vector) "
-        "ON CONFLICT (tenant_id, collection, chash) DO NOTHING;"
+        f"{vec_col}, embedding_model) VALUES ({tenant!r}, {collection!r}, "
+        f"decode({chash!r}, 'hex'), 'fk-bypass-stub', {vec_literal!r}::nexus.vector, "
+        "(SELECT embedding_model FROM nexus.catalog_collections "
+        f"WHERE tenant_id = {tenant!r} AND name = {collection!r})) "
+        "ON CONFLICT (tenant_id, collection, chash, embedding_model) DO NOTHING;"
     )
     _run_psql(sql)
 
@@ -461,8 +470,8 @@ def fk_dropped_for_dangling_seed():
         _run_psql(
             "ALTER TABLE nexus.catalog_document_chunks "
             "ADD CONSTRAINT fk_catalog_chunks_chunk "
-            "FOREIGN KEY (tenant_id, collection, chash) "
-            "REFERENCES nexus.chunks (tenant_id, collection, chash) "
+            "FOREIGN KEY (tenant_id, collection, chash, embedding_model) "
+            "REFERENCES nexus.chunks (tenant_id, collection, chash, embedding_model) "
             "ON UPDATE CASCADE DEFERRABLE INITIALLY IMMEDIATE NOT VALID;"
         )
 
@@ -490,7 +499,7 @@ def restore_fk_after_dangling_seeds() -> None:
         "DELETE FROM nexus.catalog_document_chunks d "
         "WHERE NOT EXISTS (SELECT 1 FROM nexus.chunks c "
         "WHERE c.tenant_id = d.tenant_id AND c.collection = d.collection "
-        "AND c.chash = d.chash); "
+        "AND c.chash = d.chash AND c.embedding_model = d.embedding_model); "
         "ALTER TABLE nexus.catalog_document_chunks "
         "VALIDATE CONSTRAINT fk_catalog_chunks_chunk;"
     )

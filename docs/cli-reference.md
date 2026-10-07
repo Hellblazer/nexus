@@ -3821,18 +3821,48 @@ judged on the time alone.
 `chunks_tenant_isolation_intact` from `GET /v1/status`: true when no permissive row-level-security
 policy on `nexus.chunks` other than `tenant_isolation` applies to the role the engine serves
 tenant traffic as, and row-level security on the table is still enabled, forced and carrying
-`tenant_isolation`. `false` is a hard failure: either that role can read or write every tenant's
+`tenant_isolation`. Since RDR-225 the table is partitioned by embedding model and then by tenant,
+and PostgreSQL inherits neither the row-security flags nor the policies down that tree, so the field
+also reads the tree: every model partition and tenant leaf of `nexus.chunks` and of
+`nexus.taxonomy_centroids` must have row security enabled and forced and the parent's permissive
+policies (RESTRICTIVE policies only narrow and are not compared). `false` is a hard failure: either that
+role can read or write every tenant's
 chunks (usually the owner policy `chunks_gate_probe_owner_read` from engine changeset vectors-029 reaching the
 service role through the migrating role being the service role, or through a role membership
-with INHERIT), or the table lost its row-level security. A restarted engine refuses to boot while
-a policy applies to its role (a table that lost its row security does not stop the boot) and logs
-`chunks_isolation_check_failed` naming the policy and the role; the field is a boolean because the
+with INHERIT), or a table of the tree lost its row-level security, or a partition or leaf does not
+mirror its parent. A restarted engine refuses to boot in every one of those cases and logs
+`chunks_isolation_check_failed` naming the policy and the role, or
+`chunks_isolation_structure_gaps` listing the relations; the field is a boolean because the
 route is unauthenticated. The field is refreshed in the background, never on the status request,
 so a saturated connection pool cannot stall `/v1/status`. The row is green and says "not applicable" when the engine cannot be
 reached, predates the field, or could not run the probe. The remedy is to run the engine's
 migrations as a role the service role does not inherit (`NX_DB_ADMIN_URL`, `NX_DB_ADMIN_USER`,
 `NX_DB_ADMIN_PASS`) and, as the table owner, `DROP POLICY chunks_gate_probe_owner_read ON
-nexus.chunks` or revoke the inheriting membership.
+nexus.chunks` or revoke the inheriting membership. For a partition or leaf that does not mirror its
+parent, as the table owner run `SELECT nexus.partition_sync_access('nexus.chunks'::regclass)` and the
+same for `nexus.taxonomy_centroids` (put right any wrong policy on the parent first: the function copies
+from it).
+
+**Partition rows (RDR-225, nexus-3wh8d.16).** Four `nx doctor` rows cover the per-model, per-tenant layout of
+`nexus.chunks` and `nexus.taxonomy_centroids`. They read the engine's PostgreSQL through the same local admin
+`psql` path as "RLS policies" (a managed deployment runs them server-side), so they need no engine route.
+
+- "RLS policies" also walks both partition trees and is fatal on any model partition or leaf whose
+  row security is off or not forced, or whose permissive policies are not the parent's.
+- "Tenant partitions": every tenant that has a token must have a leaf under each model partition of both tables. A
+  tenant without one cannot write (a 500 naming the tenant). The row prints the recovery as the table owner,
+  `SELECT nexus.create_tenant_partitions('nexus.chunks'::regclass, '<tenant>'), nexus.create_tenant_partitions('nexus.taxonomy_centroids'::regclass, '<tenant>')`.
+  A tenant removed on purpose with `nexus.drop_tenant_partitions` keeps its tokens until you delete them (the
+  runbook's last step), and reads as a finding until you do.
+- "Model partitions": every row of `nexus.embedding_models` must have a partition under both tables. The engine
+  changeset that registers a model creates them, so a finding means that changeset has not run
+  (`nx init --service`).
+- "Partition leaves": the leaf count, informational. Each new tenant adds one leaf per model partition of each
+  table and a `mint`-scoped credential can create tenants, so `mint` is an operator credential.
+
+The new rows read "not applicable" (green, never a warning) where there is nothing to compare: no
+`pg_credentials` (a virgin box, or a managed deployment), tables that are not partitioned (an engine that
+predates RDR-225), no token tenant, or no registered model. A finding is evaluated first.
 
 **Restart after the ownerless-write release.** The engine in this release refuses a chunk
 write that no document owns, and a local install enforces from the first boot of the

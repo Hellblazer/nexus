@@ -505,7 +505,7 @@ def _ch(seed: str) -> str:
     return hashlib.sha256(seed.encode()).hexdigest()
 
 
-def _seed_chunks(pg: dict, tenant: str, collection: str, chash_hexes: list[str], *, dim: int = 1024) -> None:
+def _seed_chunks(pg: dict, tenant: str, collection: str, chash_hexes: list[str], *, dim: int = 768) -> None:
     """RDR-194 P3d (nexus-tk070.p3d) / RDR-191 (catalog-029-manifest-chunk-fk.xml):
     seed real ``nexus.chunks`` rows so a ``write_manifest``/``append_manifest_chunks``/
     ``atomic_manifest_replace`` call for ``(tenant, collection, chash)`` satisfies the
@@ -531,7 +531,11 @@ def _seed_chunks(pg: dict, tenant: str, collection: str, chash_hexes: list[str],
     # registered with a different model". The stub chunk's own dim is
     # an unrelated FK-satisfaction detail (which embedding_<dim> column
     # holds the zero-vector), not a model choice.
+    # RDR-225: a model partition holds one vector width (its dimension CHECK) and this
+    # substrate registers every collection under the bge-768 profile, so the stub is a
+    # 768-wide chunk; a stub of another width would not route to any partition.
     model_for_dim = "bge-base-en-v15-768"
+    assert dim == 768, f"stub chunks follow the substrate's bge-768 profile, not dim={dim}"
     vec = "[" + ",".join(["0"] * dim) + "]"
     values = ", ".join(
         f"('{tenant}', '{collection}', decode('{c}', 'hex'), 'seed', '{vec}'::nexus.vector)"
@@ -542,12 +546,12 @@ def _seed_chunks(pg: dict, tenant: str, collection: str, chash_hexes: list[str],
         "(tenant_id, name, content_type, owner_id, embedding_model, lifecycle_state) "
         f"VALUES ('{tenant}', '{collection}', 'knowledge', 'test-seed', '{model_for_dim}', 'live') "
         "ON CONFLICT DO NOTHING; "
-        f"INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, {embed_col}) "
-        f"VALUES {values} ON CONFLICT DO NOTHING;"
+        f"INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, {embed_col}, embedding_model) "
+        f"SELECT v.*, '{model_for_dim}' FROM (VALUES {values}) AS v ON CONFLICT DO NOTHING;"
     ))
 
 
-def _seed_chunk(pg: dict, tenant: str, collection: str, chash_hex: str, *, dim: int = 1024) -> None:
+def _seed_chunk(pg: dict, tenant: str, collection: str, chash_hex: str, *, dim: int = 768) -> None:
     """Single-chash convenience wrapper for :func:`_seed_chunks`."""
     _seed_chunks(pg, tenant, collection, [chash_hex], dim=dim)
 

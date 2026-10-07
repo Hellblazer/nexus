@@ -4,6 +4,8 @@ package dev.nexus.service;
 
 import dev.nexus.service.db.CatalogRepository;
 import dev.nexus.service.db.TenantScope;
+import org.jooq.SQLDialect;
+import org.jooq.impl.DSL;
 import org.junit.jupiter.api.*;
 import org.testcontainers.containers.PostgreSQLContainer;
 
@@ -73,8 +75,19 @@ class CatalogEngineDefects70Test {
      * as catalog_document_chunks, so a wrong-length stub would itself violate that
      * check rather than reaching whatever violation a given test is actually after.
      */
-    private static final String STUB_VECTOR_384 =
-        "[" + "0.1,".repeat(383) + "0.1]";
+    private static String stubVector(int dim) {
+        return "[" + "0.1,".repeat(dim - 1) + "0.1]";
+    }
+
+    /** RDR-225: a chunk's vector width must be its collection's model's dimension. */
+    private static int dimOf(String model) {
+        return switch (model) {
+            case "minilm-l6-v2-384" -> 384;
+            case "bge-base-en-v15-768" -> 768;
+            case "voyage-code-3", "voyage-context-3", "voyage-3" -> 1024;
+            default -> throw new IllegalArgumentException("unknown embedding model " + model);
+        };
+    }
 
     private void stubChunk(String tenant, String collection, Object chashObj) {
         if (!(chashObj instanceof String chashHex) || chashHex.length() != 64) {
@@ -90,11 +103,15 @@ class CatalogEngineDefects70Test {
             // PgVectorRepository#upsertChunks' own ensure-registered step. RDR-204
             // nexus-ft04v.4/.5: routed through PgContainerHelper.insertCollection.
             PgContainerHelper.insertCollection(ctx, tenant, collection);
+            // RDR-225: the chunk carries its collection's model, and its vector the model's width
+            // (the fixture collections span 1024-d voyage names and model-less names that default to 768-d).
+            final String model = PgContainerHelper.collectionModel(ctx, tenant, collection);
+            final int dim = dimOf(model);
             return ctx.execute(
-                "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_384) "
-                + "VALUES (?, ?, decode(?, 'hex'), 'stub', ?::nexus.vector) "
-                + "ON CONFLICT (tenant_id, collection, chash) DO NOTHING",
-                tenant, collection, chashHex, STUB_VECTOR_384);
+                "INSERT INTO nexus.chunks (tenant_id, collection, chash, embedding_model, chunk_text, embedding_" + dim + ") "
+                + "VALUES (?, ?, decode(?, 'hex'), ?, 'stub', ?::nexus.vector) "
+                + "ON CONFLICT (tenant_id, collection, chash, embedding_model) DO NOTHING",
+                tenant, collection, chashHex, model, stubVector(dim));
         });
     }
 
@@ -1283,13 +1300,15 @@ class CatalogEngineDefects70Test {
             "embedding_model", "voyage-code-3", "model_version", "v1"));
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
+            // RDR-225: this tenant holds no service token, so its partition leaves exist only once asked for.
+            PgContainerHelper.ensureTenantPartitions(DSL.using(su, SQLDialect.POSTGRES), TENANT);
             try (var st = su.createStatement()) {
                 st.execute(
-                    "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_1024) "
-                    + "VALUES ('" + TENANT + "', '" + collection + "', decode('" + chash + "', 'hex'), '"
+                    "INSERT INTO nexus.chunks (tenant_id, collection, chash, embedding_model, chunk_text, embedding_1024) "
+                    + "VALUES ('" + TENANT + "', '" + collection + "', decode('" + chash + "', 'hex'), 'voyage-code-3', '"
                     + text.replace("'", "''") + "', "
                     + "('[' || repeat('0.1,', 1023) || '0.1]')::nexus.vector) "
-                    + "ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
+                    + "ON CONFLICT (tenant_id, collection, chash, embedding_model) DO NOTHING");
             }
         }
     }

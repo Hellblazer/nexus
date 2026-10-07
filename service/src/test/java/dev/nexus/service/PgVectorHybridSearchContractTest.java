@@ -71,7 +71,9 @@ class PgVectorHybridSearchContractTest {
 
     private static final String COL_HY   = "knowledge__hybrid__voyage-context-3__v1";
     private static final String COL_MA   = "knowledge__hyba__voyage-context-3__v1";
-    private static final String COL_MB   = "code__hybb__voyage-code-3__v1";
+    // RDR-225: one call reads one model's partition, so the two collections of the multi-collection test share a
+    // model (a call naming two models is refused: ReadPathLeafPruningIntegrationTest).
+    private static final String COL_MB   = "docs__hybb__voyage-context-3__v1";
     private static final String COL_WH   = "docs__hybridwhere__bge-base-en-v15-768__v1";
     private static final String COL_384H = "knowledge__hybrid384__minilm-l6-v2-384__v1";
     private static final String COL_MINI = "knowledge__alpha__minilm-l6-v2-384__v1";

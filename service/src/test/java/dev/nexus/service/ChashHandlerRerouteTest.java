@@ -56,6 +56,8 @@ class ChashHandlerRerouteTest {
 
     private static final String COLL_384 = "wire-coll-384";
     private static final String COLL_768 = "wire-coll-768";
+    private static final String MODEL_384 = "minilm-l6-v2-384";
+    private static final String MODEL_768 = "bge-base-en-v15-768";
 
     private static final Chash MULTI = Chash.ofText("wire-multi");
     private static final Chash REF_ONLY = Chash.ofText("wire-ref-only");
@@ -84,9 +86,11 @@ class ChashHandlerRerouteTest {
                 DSL.using(su, SQLDialect.POSTGRES), TOKEN, TENANT, "chash-reroute-test");
 
             // RDR-204 nexus-ft04v.4/.5: routed through PgContainerHelper.insertCollection.
-            for (String coll : new String[] {COLL_384, COLL_768}) {
-                PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, coll);
-            }
+            // RDR-225: a chunk carries its collection's model and a vector's width must be that model's
+            // dimension, and these names carry no model token, so each registers under its model explicitly.
+            var ctx = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCollection(ctx, TENANT, COLL_384, MODEL_384);
+            PgContainerHelper.insertCollection(ctx, TENANT, COLL_768, MODEL_768);
             chunk(su, 384, COLL_384, MULTI,    "2026-07-02 08:00:01+00");
             chunk(su, 768, COLL_768, MULTI,    "2026-07-02 08:00:02+00");
             chunk(su, 768, COLL_768, REF_ONLY, "2026-07-02 08:00:03+00");
@@ -252,13 +256,14 @@ class ChashHandlerRerouteTest {
         Chash renamed = Chash.ofText("wire-rename");
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, "wire-ren-src");
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, "wire-ren-src", MODEL_384);
             chunk(su, 384, "wire-ren-src", renamed, "2026-07-02 08:00:04+00");
             // RDR-204 Phase 1 (bead nexus-ft04v.7): /rename_collection no longer
             // auto-registers a not-yet-seen destination name (the stub-insert
             // that used to do it is retired) -- register the rename TARGET too,
             // matching the coherent rename path's own precondition.
-            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, "wire-ren-dst");
+            // (same model as the source: a rename across models is refused, RDR-225)
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, "wire-ren-dst", MODEL_384);
         }
         var resp = post("/v1/chash/rename_collection",
             "{\"old\":\"wire-ren-src\",\"new\":\"wire-ren-dst\"}");
@@ -306,8 +311,9 @@ class ChashHandlerRerouteTest {
         // target embedding_<dim> column instead.
         su.createStatement().execute(
             "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME +
-            " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(dim) + ", created_at) VALUES " +
-            "('" + TENANT + "', '" + collection + "', decode('" + chash.toHex() + "', 'hex'), " +
+            " (tenant_id, collection, chash, embedding_model, chunk_text, " + DimTables.embeddingColumn(dim) + ", created_at) VALUES " +
+            "('" + TENANT + "', '" + collection + "', decode('" + chash.toHex() + "', 'hex'), '" +
+            (dim == 384 ? MODEL_384 : MODEL_768) + "', " +
             "'wire chunk " + chash.toHex().substring(0, 8) + "', " + vec + "::nexus.vector, " +
             "TIMESTAMPTZ '" + createdAt + "')");
     }

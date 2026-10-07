@@ -97,6 +97,38 @@ class ManifestChunkFkTest {
         if (pg != null) pg.stop();
     }
 
+    /**
+     * The top-level constraint behind the foreign key a message names. A foreign key onto a partitioned table is
+     * cloned once per partition and PostgreSQL gives each clone a generated name, so a violation raised from a
+     * leaf names the clone; follow {@code conparentid} up to the constraint the migration declared.
+     */
+    private String rootOfViolatedForeignKey(String message) throws Exception {
+        var m = java.util.regex.Pattern.compile("violates foreign key constraint \"([^\"]+)\"").matcher(message);
+        assertThat(m.find()).as("a foreign-key violation message: " + message).isTrue();
+        try (Connection su = pg.createConnection("")) {
+            var ctx = DSL.using(su, SQLDialect.POSTGRES);
+            var c = DSL.table(DSL.name("pg_catalog", "pg_constraint")).as("c");
+            var rel = DSL.table(DSL.name("pg_catalog", "pg_class")).as("r");
+            var conname = DSL.field(DSL.name("c", "conname"), String.class);
+            var parent = DSL.field(DSL.name("c", "conparentid"), Long.class);
+            var oid = DSL.field(DSL.name("c", "oid"), Long.class);
+            var rec = ctx.select(conname, parent).from(c)
+                .join(rel).on(DSL.field(DSL.name("r", "oid")).eq(DSL.field(DSL.name("c", "conrelid"))))
+                .where(conname.eq(m.group(1))).and(DSL.field(DSL.name("r", "relname"), String.class).eq("catalog_document_chunks"))
+                .fetchOne();
+            assertThat(rec).as("constraint " + m.group(1) + " on catalog_document_chunks").isNotNull();
+            String name = rec.get(conname);
+            long up = rec.get(parent);
+            while (up != 0L) {
+                final long at = up;
+                var next = ctx.select(conname, parent).from(c).where(oid.eq(at)).fetchOne();
+                name = next.get(conname);
+                up = next.get(parent);
+            }
+            return name;
+        }
+    }
+
     // ══════════════════════════════════════════════════════════════════════════
     // GROUP 1 — constraint shape (F10/F10a/F10b/F8a)
     // ══════════════════════════════════════════════════════════════════════════
@@ -135,7 +167,11 @@ class ManifestChunkFkTest {
         catalogRepo.upsertDocument(TENANT, Map.of(
             "tumbler", doc, "title", "FK reject doc", "content_type", "paper",
             "corpus", "knowledge", "physical_collection", COLLECTION));
-        // Deliberately NO nexus.chunks row for this chash.
+        // The collection is registered (a manifest write into an unregistered one is refused before the foreign key
+        // is reached), but there is deliberately NO nexus.chunks row for this chash.
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, COLLECTION);
+        }
         assertThatThrownBy(() -> catalogRepo.writeManifest(TENANT, doc, COLLECTION,
                 List.of(Map.of("position", 0, "chash", chash))))
             .as("a manifest row naming a chash with no nexus.chunks row must be refused by " + FK_NAME)
@@ -244,7 +280,10 @@ class ManifestChunkFkTest {
                     + "AND chash = decode('" + chash + "', 'hex')"))
                 .as("an undeferred DELETE of a chunk still referenced by a manifest row "
                     + "must be rejected by " + FK_NAME + " at statement time")
-                .hasMessageContaining(FK_NAME);
+                .satisfies(t -> assertThat(rootOfViolatedForeignKey(t.getMessage()))
+                    .as("the DELETE reaches a leaf, and PostgreSQL names the per-partition clone it fired; "
+                        + "that clone is a child (conparentid) of " + FK_NAME)
+                    .isEqualTo(FK_NAME));
             ResultSet rs = su.createStatement().executeQuery(
                 "SELECT count(*) AS n FROM nexus.catalog_document_chunks "
                 + "WHERE tenant_id = '" + TENANT + "' AND doc_id = '" + doc + "'");

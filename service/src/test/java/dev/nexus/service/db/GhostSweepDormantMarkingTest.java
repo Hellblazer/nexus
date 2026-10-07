@@ -228,8 +228,10 @@ class GhostSweepDormantMarkingTest {
                 insertChunk384(ctx, TENANT_PARAM, coll, chashBytes(coll + "-mf"), vector(384));
                 ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID,
                                CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION,
-                               CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION)
-                   .values(TENANT_PARAM, ANCHOR_DOC, 0, chashBytes(coll + "-mf"), coll)
+                               CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION,
+                               CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
+                   .values(TENANT_PARAM, ANCHOR_DOC, 0, chashBytes(coll + "-mf"), coll,
+                           PgContainerHelper.collectionModel(ctx, TENANT_PARAM, coll))
                    .execute();
             }
             case "topic_assignments" -> {
@@ -242,9 +244,10 @@ class GhostSweepDormantMarkingTest {
                 insertChunk384(ctx, TENANT_PARAM, coll, hexChashBytes(coll + "-ta"), vector(384));
                 ctx.insertInto(TOPIC_ASSIGNMENTS, TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID,
                                TOPIC_ASSIGNMENTS.TOPIC_ID, TOPIC_ASSIGNMENTS.ASSIGNED_BY,
-                               TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, TOPIC_ASSIGNMENTS.ASSIGNED_AT)
+                               TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, TOPIC_ASSIGNMENTS.ASSIGNED_AT,
+                               TOPIC_ASSIGNMENTS.EMBEDDING_MODEL)
                    .values(TENANT_PARAM, hexChashBytes(coll + "-ta"), topicId, "projection", coll,
-                           OffsetDateTime.now())
+                           OffsetDateTime.now(), PgContainerHelper.collectionModel(ctx, TENANT_PARAM, coll))
                    .execute();
             }
             case "topics" -> {
@@ -259,9 +262,10 @@ class GhostSweepDormantMarkingTest {
             case "taxonomy_centroids" -> {
                 long topicId = Math.abs((long) (coll + "-centroid").hashCode());
                 ctx.insertInto(TAXONOMY_CENTROIDS, TAXONOMY_CENTROIDS.TENANT_ID, TAXONOMY_CENTROIDS.COLLECTION,
-                               TAXONOMY_CENTROIDS.TOPIC_ID, TAXONOMY_CENTROIDS.LABEL,
-                               TAXONOMY_CENTROIDS.EMBEDDING_384)
-                   .values(TENANT_PARAM, coll, topicId, "", vector(384))
+                               TAXONOMY_CENTROIDS.TOPIC_ID, TAXONOMY_CENTROIDS.EMBEDDING_MODEL,
+                               TAXONOMY_CENTROIDS.LABEL, TAXONOMY_CENTROIDS.EMBEDDING_384)
+                   .values(TENANT_PARAM, coll, topicId, PgContainerHelper.collectionModel(ctx, TENANT_PARAM, coll),
+                           "", vector(384))
                    .execute();
             }
             case "document_aspects" -> ctx.insertInto(DOCUMENT_ASPECTS, DOCUMENT_ASPECTS.TENANT_ID,
@@ -836,8 +840,10 @@ class GhostSweepDormantMarkingTest {
                .values(tenant, "gs-tombstoned-doc", "Tombstoned", coll, OffsetDateTime.now()).execute();
             ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID,
                            CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION,
-                           CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION)
-               .values(tenant, "gs-tombstoned-doc", 0, chashBytes(coll), coll).execute();
+                           CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION,
+                           CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
+               .values(tenant, "gs-tombstoned-doc", 0, chashBytes(coll), coll,
+                       PgContainerHelper.collectionModel(ctx, tenant, coll)).execute();
         }
 
         CatalogRepository.GhostSweepResult result = repo.sweepGhostsAndMarkDormant(tenant);
@@ -955,10 +961,8 @@ class GhostSweepDormantMarkingTest {
 
     private static void insertChunk384(DSLContext ctx, String tenant, String collection, byte[] chashBytes,
                                         Vector v) {
-        ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.CHUNK_TEXT,
-                       CHUNKS.EMBEDDING_384)
-           .values(tenant, collection, chashBytes, "text", v)
-           .execute();
+        // RDR-225: the chunk carries its collection's model (every collection here is minilm-384).
+        PgContainerHelper.insertChunk384(ctx, tenant, collection, chashBytes, v);
     }
 
     private static Vector vector(int dim) {

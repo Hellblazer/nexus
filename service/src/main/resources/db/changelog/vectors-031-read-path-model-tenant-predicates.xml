@@ -1,0 +1,1975 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    RDR-225 Phase 2 step 2 (nexus-3wh8d.15): the read path. Every search family names the (model, tenant) leaf
+    it reads, so the planner reaches one leaf of nexus.chunks (or of nexus.taxonomy_centroids) when it plans the
+    statement, not when the executor starts it.
+
+    WHY. vectors-030 LIST-partitions chunks and taxonomy_centroids by embedding_model, then by tenant_id.
+    The search functions still said only "collection = ANY(...)", and the tenant came from row-level security,
+    whose qual (tenant_id = current_setting(...)) is a STABLE expression: PostgreSQL can prune on it only when the
+    executor starts, after the planner has already built a subplan for every leaf of every model. Planning cost
+    then grows with the leaf count (47 ms at 302 tenants in the A1t prototype, 0.6 ms with explicit predicates;
+    T2 nexus/rdr225-step2-local-feasibility-2026-10-05). An explicit predicate on a parameter is a constant to a
+    planner that is given the call's values, so the leaves of the other models and of every other tenant are
+    gone from the plan.
+
+    WHAT CHANGES, for each of the ten families at 384, 768 and 1024: two trailing parameters, p_embedding_model
+    and p_tenant, and AND embedding_model = p_embedding_model AND tenant_id = p_tenant on every scan of
+    chunks or taxonomy_centroids. The engine passes the model CollectionRegistry resolves for the collection(s)
+    and the session tenant. Row-level security stays: a p_tenant that is not the session's tenant returns no
+    rows (the GUC and the parameter must agree), so the parameter narrows what the policy already allows and
+    never widens it.
+
+    taxonomy_ann_query's model is the SOURCE collection's, in both branches, so the cross-collection branch
+    matches centroids of that one model only, as assign_from_chashes and cross_preview already do (84c95c3f7,
+    Sam). assign_from_chashes and cross_preview keep their hand-copied shared CTE (CrossPreviewDriftTest), now
+    with the same predicates in both; the chunk's own model is still persisted from the batch.
+
+    PLAN-TIME PRUNING IN THE PLPGSQL FUNCTIONS. A SQL function the planner inlines (every family but the two
+    taxonomy functions and the probe) is planned as part of the caller's statement, and the engine already sets
+    plan_cache_mode = force_custom_plan for that transaction (PgSession.setSearchPlanCacheMode, nexus-6nkn3), so
+    the call's values are constants. assign_from_chashes and cross_preview are plpgsql: their statements are
+    planned on their own, and from the sixth call in a session a cached GENERIC plan would keep every leaf. They
+    therefore carry a function-level SET plan_cache_mode = force_custom_plan. It is NOT done with set_config()
+    beside the four hnsw / planner pins: CrossPreviewDriftTest and TaxonomyAssignCrossLateralHnswTest require
+    those four set_config calls to be exactly the effective pins, and HnswServingGucParityTest counts the Java
+    sites that pair iterative_scan with the plan-mode setting; a function-level SET touches neither. plan_cache_mode
+    is a core user-settable parameter, so (unlike hnsw.*, see taxonomy-018) CREATE FUNCTION ... SET accepts it for a
+    non-superuser migration role.
+
+    THE PROBE. text_gate_probe_<dim> is SECURITY DEFINER where vectors-029 ran, and a definer function is never
+    inlined. A LANGUAGE sql function that is not inlined is planned without the call's values (the pin
+    ReadPathLeafPruningIntegrationTest caught this: its body still listed every leaf and pruned at executor
+    start-up, "Subplans Removed"), so the definer probe is redefined in plpgsql, whose statements are planned
+    with the call's values, and carries the same function-level plan_cache_mode as the two taxonomy functions.
+    It keeps its definer clauses, its fixed search_path and its fail-closed GUC predicate, and gains the two
+    parameters and predicates. The explicit tenant predicate is in ADDITION to the GUC predicate,
+    never instead of it: a definer function runs as its owner, so the session's own tenant is what bounds it
+    (Rdr192LiveCExplainEvidenceIntegrationTest passes another tenant's id as the parameter and expects nothing).
+    vectors-031-2 chooses by what the old probes are: where vectors-029 ran (they are definer functions) AND its
+    guard still holds it redefines them as definer plpgsql functions, and otherwise as invoker functions that stay
+    LANGUAGE sql and inline into their caller. "Its guard still holds" is vectors-029's own, copied: the owner
+    policy chunks_gate_probe_owner_read exists and names exactly the migrating role, and no RLS-subject login role
+    has that role's privileges (nexus_svc, or any other non-superuser, non-BYPASSRLS login role that inherits it).
+    A later boot migrated by a different role, or a membership granted since, therefore degrades to the invoker
+    probes (correct rows, the slower plan) and never leaves definer bodies beside a policy that does not name
+    their owner. The definer outcome ends with vectors-029's post-condition, so a drifted decision fails the walk
+    loudly. It is one changeset, not two with opposite preconditions, so a normal walk records no MARK_RAN row for
+    it. The owner policy vectors-029 created is not touched.
+
+    EDITED IN PLACE, TWICE. vectors-031 is unshipped, and so is vectors-030-1, whose SQL d3a1b0dbd also edited in
+    place (RAISE LOG became RAISE NOTICE). A database that already ran an earlier text of either changeset fails
+    its next migration on the checksum. That is accepted for the developer boxes and test containers on this
+    branch and is not a concern for any shipped database, because neither changeset has shipped.
+
+    DROPS. Old signatures are dropped here, in the same changeset as the new definitions: the generated jOOQ
+    .call(...) methods are per signature, and a surviving overload would leave the old arity callable and the
+    EXPECTED_RECORD_TYPES count in JooqRecordReflectionFeatureTest moved. A post-condition fails the migration
+    unless each function name has exactly one signature. hybrid_search_<dim> has no caller and is not touched.
+
+    GRANTS. A function in this schema is created with PUBLIC EXECUTE; nexus_svc is granted EXECUTE on each new
+    signature explicitly, as vectors-016-2 did, so the grant does not depend on the PUBLIC default.
+
+    WHY A NEW FILE AND NOT AN EDIT OF vectors-030-1. vectors-030 is unshipped, so it could be edited. It is not,
+    because (1) vectors-030-1 is one 3,400-line transaction whose shape Vectors030TransactionalChangesetTest
+    pins, and these definitions add nothing to what that walk has to hold; (2) any database that already ran
+    vectors-030-1 (every developer box and test container on this branch) carries its checksum, and an edit
+    would fail their next migration; (3) the function bodies read the model and tenant columns, which exist only
+    after that walk, and a SQL-language body is validated when the function is created, so the order is the
+    same either way; (4) a rollback of this file is a clean DROP of new signatures and does not have to
+    reverse a walk. Nothing needs the definitions to sit inside the walk's transaction: until this file runs,
+    the old signatures are still there and still correct against the partitioned tables (they only plan slower).
+
+    ROLLBACK. Drops the new signatures. The older changesets' own rollbacks restore the old bodies in the
+    reverse-order chain (SchemaRollbackRoundTripIntegrationTest), as vectors-030-1's rollback already relies on.
+    Rolling back 031 ALONE leaves none of the 33 read functions (the new signatures go, the old ones come back only
+    from the older changesets' rollbacks); it is valid only inside the full reverse chain, and the RDR says the
+    Liquibase rollback is not a recovery path.
+
+    No DATA EFFECT: function definitions and grants only.
+
+    Placed after vectors-030 and before the runAlways grants blocks.
+-->
+
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="vectors-031-1" author="nexus-3wh8d.15">
+        <comment>RDR-225 read path: the ten search families (plain_search, text_gated_search_hnsw_first, text_gated_search_by_chash, search_metadata_scoped, search_aspect_scoped, search_graph_hop, search_topic_scoped, taxonomy_ann_query, assign_from_chashes, cross_preview), each at 384, 768 and 1024, gain p_embedding_model and p_tenant and an explicit predicate on both, so a statement the engine plans with those values reaches one (model, tenant) leaf of nexus.chunks or nexus.taxonomy_centroids when it is planned. The old signatures are dropped in the same changeset (a surviving overload breaks the generated .call arity), the new ones are granted to nexus_svc explicitly, and a post-condition fails the migration unless each name has exactly one signature. assign_from_chashes and cross_preview are plpgsql and carry a function-level plan_cache_mode = force_custom_plan, so their inner statements are planned with the call's own values; the inlinable SQL functions get that from the engine's session setting. No data effect: function definitions only.</comment>
+        <sql splitStatements="false" stripComments="false"><![CDATA[
+DROP FUNCTION IF EXISTS nexus.plain_search_384(nexus.vector, text[], jsonb, text, int);
+DROP FUNCTION IF EXISTS nexus.plain_search_768(nexus.vector, text[], jsonb, text, int);
+DROP FUNCTION IF EXISTS nexus.plain_search_1024(nexus.vector, text[], jsonb, text, int);
+DROP FUNCTION IF EXISTS nexus.text_gated_search_hnsw_first_384(nexus.vector, text, text[], jsonb, text, int);
+DROP FUNCTION IF EXISTS nexus.text_gated_search_hnsw_first_768(nexus.vector, text, text[], jsonb, text, int);
+DROP FUNCTION IF EXISTS nexus.text_gated_search_hnsw_first_1024(nexus.vector, text, text[], jsonb, text, int);
+DROP FUNCTION IF EXISTS nexus.text_gated_search_by_chash_384(nexus.vector, bytea[], text[], jsonb, text, int);
+DROP FUNCTION IF EXISTS nexus.text_gated_search_by_chash_768(nexus.vector, bytea[], text[], jsonb, text, int);
+DROP FUNCTION IF EXISTS nexus.text_gated_search_by_chash_1024(nexus.vector, bytea[], text[], jsonb, text, int);
+DROP FUNCTION IF EXISTS nexus.search_metadata_scoped_384(nexus.vector, text[], text, text, int, text, text, jsonb, int);
+DROP FUNCTION IF EXISTS nexus.search_metadata_scoped_768(nexus.vector, text[], text, text, int, text, text, jsonb, int);
+DROP FUNCTION IF EXISTS nexus.search_metadata_scoped_1024(nexus.vector, text[], text, text, int, text, text, jsonb, int);
+DROP FUNCTION IF EXISTS nexus.search_aspect_scoped_384(nexus.vector, text[], text, text, float8, jsonb, int);
+DROP FUNCTION IF EXISTS nexus.search_aspect_scoped_768(nexus.vector, text[], text, text, float8, jsonb, int);
+DROP FUNCTION IF EXISTS nexus.search_aspect_scoped_1024(nexus.vector, text[], text, text, float8, jsonb, int);
+DROP FUNCTION IF EXISTS nexus.search_graph_hop_384(nexus.vector, text[], text[], text, int, text, jsonb, int);
+DROP FUNCTION IF EXISTS nexus.search_graph_hop_768(nexus.vector, text[], text[], text, int, text, jsonb, int);
+DROP FUNCTION IF EXISTS nexus.search_graph_hop_1024(nexus.vector, text[], text[], text, int, text, jsonb, int);
+DROP FUNCTION IF EXISTS nexus.search_topic_scoped_384(nexus.vector, text, text, int);
+DROP FUNCTION IF EXISTS nexus.search_topic_scoped_768(nexus.vector, text, text, int);
+DROP FUNCTION IF EXISTS nexus.search_topic_scoped_1024(nexus.vector, text, text, int);
+DROP FUNCTION IF EXISTS nexus.taxonomy_ann_query_384(nexus.vector, text, boolean, int);
+DROP FUNCTION IF EXISTS nexus.taxonomy_ann_query_768(nexus.vector, text, boolean, int);
+DROP FUNCTION IF EXISTS nexus.taxonomy_ann_query_1024(nexus.vector, text, boolean, int);
+DROP FUNCTION IF EXISTS nexus.assign_from_chashes_384(text, text[], boolean);
+DROP FUNCTION IF EXISTS nexus.assign_from_chashes_768(text, text[], boolean);
+DROP FUNCTION IF EXISTS nexus.assign_from_chashes_1024(text, text[], boolean);
+DROP FUNCTION IF EXISTS nexus.cross_preview_384(text, text[]);
+DROP FUNCTION IF EXISTS nexus.cross_preview_768(text, text[]);
+DROP FUNCTION IF EXISTS nexus.cross_preview_1024(text, text[]);
+
+CREATE OR REPLACE FUNCTION nexus.plain_search_384(
+    p_query        nexus.vector(384),
+    p_collections  text[],
+    p_where        jsonb,
+    p_where_path   text,
+    p_n            int,
+    p_embedding_model text,
+    p_tenant          text
+) RETURNS TABLE(id text, content text, collection text, distance float8, metadata jsonb, retention text)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT encode(c.chash, 'hex'),
+           c.chunk_text,
+           c.collection,
+           (c.embedding_384 OPERATOR(nexus.<=>) p_query)::float8,
+           c.metadata,
+           c.retention
+      FROM nexus.chunks c
+     WHERE c.embedding_model = p_embedding_model
+       AND c.tenant_id = p_tenant
+       AND c.collection = ANY(p_collections)
+       AND c.embedding_384 IS NOT NULL
+       AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))
+       AND (p_where IS NULL OR c.metadata @> p_where)
+       AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
+     ORDER BY c.embedding_384 OPERATOR(nexus.<=>) p_query, encode(c.chash, 'hex')
+     LIMIT p_n
+$$;
+
+CREATE OR REPLACE FUNCTION nexus.plain_search_768(
+    p_query        nexus.vector(768),
+    p_collections  text[],
+    p_where        jsonb,
+    p_where_path   text,
+    p_n            int,
+    p_embedding_model text,
+    p_tenant          text
+) RETURNS TABLE(id text, content text, collection text, distance float8, metadata jsonb, retention text)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT encode(c.chash, 'hex'),
+           c.chunk_text,
+           c.collection,
+           (c.embedding_768 OPERATOR(nexus.<=>) p_query)::float8,
+           c.metadata,
+           c.retention
+      FROM nexus.chunks c
+     WHERE c.embedding_model = p_embedding_model
+       AND c.tenant_id = p_tenant
+       AND c.collection = ANY(p_collections)
+       AND c.embedding_768 IS NOT NULL
+       AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))
+       AND (p_where IS NULL OR c.metadata @> p_where)
+       AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
+     ORDER BY c.embedding_768 OPERATOR(nexus.<=>) p_query, encode(c.chash, 'hex')
+     LIMIT p_n
+$$;
+
+CREATE OR REPLACE FUNCTION nexus.plain_search_1024(
+    p_query        nexus.vector(1024),
+    p_collections  text[],
+    p_where        jsonb,
+    p_where_path   text,
+    p_n            int,
+    p_embedding_model text,
+    p_tenant          text
+) RETURNS TABLE(id text, content text, collection text, distance float8, metadata jsonb, retention text)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT encode(c.chash, 'hex'),
+           c.chunk_text,
+           c.collection,
+           (c.embedding_1024 OPERATOR(nexus.<=>) p_query)::float8,
+           c.metadata,
+           c.retention
+      FROM nexus.chunks c
+     WHERE c.embedding_model = p_embedding_model
+       AND c.tenant_id = p_tenant
+       AND c.collection = ANY(p_collections)
+       AND c.embedding_1024 IS NOT NULL
+       AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))
+       AND (p_where IS NULL OR c.metadata @> p_where)
+       AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
+     ORDER BY c.embedding_1024 OPERATOR(nexus.<=>) p_query, encode(c.chash, 'hex')
+     LIMIT p_n
+$$;
+
+CREATE OR REPLACE FUNCTION nexus.text_gated_search_hnsw_first_384(
+    p_query        nexus.vector(384),
+    p_query_text   text,
+    p_collections  text[],
+    p_where        jsonb,
+    p_where_path   text,
+    p_n            int,
+    p_embedding_model text,
+    p_tenant          text
+) RETURNS TABLE(id text, content text, collection text, distance float8, metadata jsonb, retention text)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT encode(c.chash, 'hex'),
+           c.chunk_text,
+           c.collection,
+           (c.embedding_384 OPERATOR(nexus.<=>) p_query)::float8,
+           c.metadata,
+           c.retention
+      FROM nexus.chunks c
+     WHERE c.embedding_model = p_embedding_model
+       AND c.tenant_id = p_tenant
+       AND c.collection = ANY(p_collections)
+       AND c.embedding_384 IS NOT NULL
+       AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))
+       AND (p_where IS NULL OR c.metadata @> p_where)
+       AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
+       AND (c.chunk_tsv @@ plainto_tsquery('english', p_query_text) OR p_query_text OPERATOR(nexus.<%) c.chunk_text)
+     ORDER BY c.embedding_384 OPERATOR(nexus.<=>) p_query, encode(c.chash, 'hex')
+     LIMIT p_n
+$$;
+
+CREATE OR REPLACE FUNCTION nexus.text_gated_search_hnsw_first_768(
+    p_query        nexus.vector(768),
+    p_query_text   text,
+    p_collections  text[],
+    p_where        jsonb,
+    p_where_path   text,
+    p_n            int,
+    p_embedding_model text,
+    p_tenant          text
+) RETURNS TABLE(id text, content text, collection text, distance float8, metadata jsonb, retention text)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT encode(c.chash, 'hex'),
+           c.chunk_text,
+           c.collection,
+           (c.embedding_768 OPERATOR(nexus.<=>) p_query)::float8,
+           c.metadata,
+           c.retention
+      FROM nexus.chunks c
+     WHERE c.embedding_model = p_embedding_model
+       AND c.tenant_id = p_tenant
+       AND c.collection = ANY(p_collections)
+       AND c.embedding_768 IS NOT NULL
+       AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))
+       AND (p_where IS NULL OR c.metadata @> p_where)
+       AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
+       AND (c.chunk_tsv @@ plainto_tsquery('english', p_query_text) OR p_query_text OPERATOR(nexus.<%) c.chunk_text)
+     ORDER BY c.embedding_768 OPERATOR(nexus.<=>) p_query, encode(c.chash, 'hex')
+     LIMIT p_n
+$$;
+
+CREATE OR REPLACE FUNCTION nexus.text_gated_search_hnsw_first_1024(
+    p_query        nexus.vector(1024),
+    p_query_text   text,
+    p_collections  text[],
+    p_where        jsonb,
+    p_where_path   text,
+    p_n            int,
+    p_embedding_model text,
+    p_tenant          text
+) RETURNS TABLE(id text, content text, collection text, distance float8, metadata jsonb, retention text)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT encode(c.chash, 'hex'),
+           c.chunk_text,
+           c.collection,
+           (c.embedding_1024 OPERATOR(nexus.<=>) p_query)::float8,
+           c.metadata,
+           c.retention
+      FROM nexus.chunks c
+     WHERE c.embedding_model = p_embedding_model
+       AND c.tenant_id = p_tenant
+       AND c.collection = ANY(p_collections)
+       AND c.embedding_1024 IS NOT NULL
+       AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))
+       AND (p_where IS NULL OR c.metadata @> p_where)
+       AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
+       AND (c.chunk_tsv @@ plainto_tsquery('english', p_query_text) OR p_query_text OPERATOR(nexus.<%) c.chunk_text)
+     ORDER BY c.embedding_1024 OPERATOR(nexus.<=>) p_query, encode(c.chash, 'hex')
+     LIMIT p_n
+$$;
+
+CREATE OR REPLACE FUNCTION nexus.text_gated_search_by_chash_384(
+    p_query        nexus.vector(384),
+    p_chashes      bytea[],
+    p_collections  text[],
+    p_where        jsonb,
+    p_where_path   text,
+    p_n            int,
+    p_embedding_model text,
+    p_tenant          text
+) RETURNS TABLE(id text, content text, collection text, distance float8, metadata jsonb, retention text)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT encode(c.chash, 'hex'),
+           c.chunk_text,
+           c.collection,
+           (c.embedding_384 OPERATOR(nexus.<=>) p_query)::float8,
+           c.metadata,
+           c.retention
+      FROM nexus.chunks c
+     WHERE c.embedding_model = p_embedding_model
+       AND c.tenant_id = p_tenant
+       AND c.collection = ANY(p_collections)
+       AND c.embedding_384 IS NOT NULL
+       AND c.chash = ANY(p_chashes)
+       AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))
+       AND (p_where IS NULL OR c.metadata @> p_where)
+       AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
+     ORDER BY c.embedding_384 OPERATOR(nexus.<=>) p_query, encode(c.chash, 'hex')
+     LIMIT p_n
+$$;
+
+CREATE OR REPLACE FUNCTION nexus.text_gated_search_by_chash_768(
+    p_query        nexus.vector(768),
+    p_chashes      bytea[],
+    p_collections  text[],
+    p_where        jsonb,
+    p_where_path   text,
+    p_n            int,
+    p_embedding_model text,
+    p_tenant          text
+) RETURNS TABLE(id text, content text, collection text, distance float8, metadata jsonb, retention text)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT encode(c.chash, 'hex'),
+           c.chunk_text,
+           c.collection,
+           (c.embedding_768 OPERATOR(nexus.<=>) p_query)::float8,
+           c.metadata,
+           c.retention
+      FROM nexus.chunks c
+     WHERE c.embedding_model = p_embedding_model
+       AND c.tenant_id = p_tenant
+       AND c.collection = ANY(p_collections)
+       AND c.embedding_768 IS NOT NULL
+       AND c.chash = ANY(p_chashes)
+       AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))
+       AND (p_where IS NULL OR c.metadata @> p_where)
+       AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
+     ORDER BY c.embedding_768 OPERATOR(nexus.<=>) p_query, encode(c.chash, 'hex')
+     LIMIT p_n
+$$;
+
+CREATE OR REPLACE FUNCTION nexus.text_gated_search_by_chash_1024(
+    p_query        nexus.vector(1024),
+    p_chashes      bytea[],
+    p_collections  text[],
+    p_where        jsonb,
+    p_where_path   text,
+    p_n            int,
+    p_embedding_model text,
+    p_tenant          text
+) RETURNS TABLE(id text, content text, collection text, distance float8, metadata jsonb, retention text)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT encode(c.chash, 'hex'),
+           c.chunk_text,
+           c.collection,
+           (c.embedding_1024 OPERATOR(nexus.<=>) p_query)::float8,
+           c.metadata,
+           c.retention
+      FROM nexus.chunks c
+     WHERE c.embedding_model = p_embedding_model
+       AND c.tenant_id = p_tenant
+       AND c.collection = ANY(p_collections)
+       AND c.embedding_1024 IS NOT NULL
+       AND c.chash = ANY(p_chashes)
+       AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))
+       AND (p_where IS NULL OR c.metadata @> p_where)
+       AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
+     ORDER BY c.embedding_1024 OPERATOR(nexus.<=>) p_query, encode(c.chash, 'hex')
+     LIMIT p_n
+$$;
+
+CREATE OR REPLACE FUNCTION nexus.search_metadata_scoped_384(
+    p_query        nexus.vector(384),
+    p_collections  text[],
+    p_content_type text,
+    p_author       text,
+    p_year         int,
+    p_corpus       text,
+    p_subtree      text,
+    p_where        jsonb,
+    p_n            int,
+    p_embedding_model text,
+    p_tenant          text
+) RETURNS TABLE(id text, content text, collection text, distance float8, chash text, retention text)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT d.tumbler,
+           c.chunk_text,
+           c.collection,
+           (c.embedding_384 OPERATOR(nexus.<=>) p_query)::float8,
+           encode(c.chash, 'hex'),
+           c.retention
+      FROM nexus.chunks c
+      JOIN nexus.catalog_document_chunks m
+        ON m.tenant_id = c.tenant_id AND m.collection = c.collection AND m.chash = c.chash
+      JOIN nexus.catalog_documents d
+        ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+     WHERE c.embedding_model = p_embedding_model
+       AND c.tenant_id = p_tenant
+       AND c.collection = ANY(p_collections)
+       AND d.deleted_at IS NULL
+       AND (p_content_type IS NULL OR d.content_type = p_content_type)
+       AND (p_author       IS NULL OR d.author ILIKE '%' || p_author || '%')
+       AND (p_year         IS NULL OR d.year         = p_year)
+       AND (p_corpus       IS NULL OR d.corpus       = p_corpus)
+       AND d.alias_of = ''
+       AND (p_subtree      IS NULL OR d.tumbler LIKE p_subtree || '.%')
+       AND (p_where        IS NULL OR c.metadata @> p_where)
+       AND c.embedding_384 IS NOT NULL
+     ORDER BY c.embedding_384 OPERATOR(nexus.<=>) p_query
+     LIMIT p_n
+$$;
+
+CREATE OR REPLACE FUNCTION nexus.search_metadata_scoped_768(
+    p_query        nexus.vector(768),
+    p_collections  text[],
+    p_content_type text,
+    p_author       text,
+    p_year         int,
+    p_corpus       text,
+    p_subtree      text,
+    p_where        jsonb,
+    p_n            int,
+    p_embedding_model text,
+    p_tenant          text
+) RETURNS TABLE(id text, content text, collection text, distance float8, chash text, retention text)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT d.tumbler,
+           c.chunk_text,
+           c.collection,
+           (c.embedding_768 OPERATOR(nexus.<=>) p_query)::float8,
+           encode(c.chash, 'hex'),
+           c.retention
+      FROM nexus.chunks c
+      JOIN nexus.catalog_document_chunks m
+        ON m.tenant_id = c.tenant_id AND m.collection = c.collection AND m.chash = c.chash
+      JOIN nexus.catalog_documents d
+        ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+     WHERE c.embedding_model = p_embedding_model
+       AND c.tenant_id = p_tenant
+       AND c.collection = ANY(p_collections)
+       AND d.deleted_at IS NULL
+       AND (p_content_type IS NULL OR d.content_type = p_content_type)
+       AND (p_author       IS NULL OR d.author ILIKE '%' || p_author || '%')
+       AND (p_year         IS NULL OR d.year         = p_year)
+       AND (p_corpus       IS NULL OR d.corpus       = p_corpus)
+       AND d.alias_of = ''
+       AND (p_subtree      IS NULL OR d.tumbler LIKE p_subtree || '.%')
+       AND (p_where        IS NULL OR c.metadata @> p_where)
+       AND c.embedding_768 IS NOT NULL
+     ORDER BY c.embedding_768 OPERATOR(nexus.<=>) p_query
+     LIMIT p_n
+$$;
+
+CREATE OR REPLACE FUNCTION nexus.search_metadata_scoped_1024(
+    p_query        nexus.vector(1024),
+    p_collections  text[],
+    p_content_type text,
+    p_author       text,
+    p_year         int,
+    p_corpus       text,
+    p_subtree      text,
+    p_where        jsonb,
+    p_n            int,
+    p_embedding_model text,
+    p_tenant          text
+) RETURNS TABLE(id text, content text, collection text, distance float8, chash text, retention text)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT d.tumbler,
+           c.chunk_text,
+           c.collection,
+           (c.embedding_1024 OPERATOR(nexus.<=>) p_query)::float8,
+           encode(c.chash, 'hex'),
+           c.retention
+      FROM nexus.chunks c
+      JOIN nexus.catalog_document_chunks m
+        ON m.tenant_id = c.tenant_id AND m.collection = c.collection AND m.chash = c.chash
+      JOIN nexus.catalog_documents d
+        ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+     WHERE c.embedding_model = p_embedding_model
+       AND c.tenant_id = p_tenant
+       AND c.collection = ANY(p_collections)
+       AND d.deleted_at IS NULL
+       AND (p_content_type IS NULL OR d.content_type = p_content_type)
+       AND (p_author       IS NULL OR d.author ILIKE '%' || p_author || '%')
+       AND (p_year         IS NULL OR d.year         = p_year)
+       AND (p_corpus       IS NULL OR d.corpus       = p_corpus)
+       AND d.alias_of = ''
+       AND (p_subtree      IS NULL OR d.tumbler LIKE p_subtree || '.%')
+       AND (p_where        IS NULL OR c.metadata @> p_where)
+       AND c.embedding_1024 IS NOT NULL
+     ORDER BY c.embedding_1024 OPERATOR(nexus.<=>) p_query
+     LIMIT p_n
+$$;
+
+CREATE OR REPLACE FUNCTION nexus.search_aspect_scoped_384(
+    p_query           nexus.vector(384),
+    p_collections     text[],
+    p_field           text,
+    p_pattern         text,
+    p_min_confidence  float8,
+    p_where           jsonb,
+    p_n               int,
+    p_embedding_model text,
+    p_tenant          text
+) RETURNS TABLE(id text, content text, collection text, distance float8, chash text, retention text)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT d.tumbler,
+           c.chunk_text,
+           c.collection,
+           (c.embedding_384 OPERATOR(nexus.<=>) p_query)::float8,
+           encode(c.chash, 'hex'),
+           c.retention
+      FROM nexus.chunks c
+      JOIN nexus.catalog_document_chunks m
+        ON m.tenant_id = c.tenant_id AND m.collection = c.collection AND m.chash = c.chash
+      JOIN nexus.catalog_documents d
+        ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+      JOIN nexus.document_aspects a
+        ON a.tenant_id = d.tenant_id AND a.doc_id = d.tumbler
+     WHERE c.embedding_model = p_embedding_model
+       AND c.tenant_id = p_tenant
+       AND c.collection = ANY(p_collections)
+       AND d.deleted_at IS NULL
+       AND d.alias_of = ''
+       AND c.embedding_384 IS NOT NULL
+       AND (p_where IS NULL OR c.metadata @> p_where)
+       AND (p_min_confidence IS NULL OR a.confidence >= p_min_confidence)
+       AND (p_field IS NULL OR CASE p_field
+               WHEN 'problem_formulation'    THEN a.problem_formulation
+               WHEN 'proposed_method'        THEN a.proposed_method
+               WHEN 'experimental_datasets'  THEN a.experimental_datasets
+               WHEN 'experimental_baselines' THEN a.experimental_baselines
+               WHEN 'experimental_results'   THEN a.experimental_results
+           END ILIKE '%' || p_pattern || '%')
+     ORDER BY c.embedding_384 OPERATOR(nexus.<=>) p_query
+     LIMIT p_n
+$$;
+
+CREATE OR REPLACE FUNCTION nexus.search_aspect_scoped_768(
+    p_query           nexus.vector(768),
+    p_collections     text[],
+    p_field           text,
+    p_pattern         text,
+    p_min_confidence  float8,
+    p_where           jsonb,
+    p_n               int,
+    p_embedding_model text,
+    p_tenant          text
+) RETURNS TABLE(id text, content text, collection text, distance float8, chash text, retention text)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT d.tumbler,
+           c.chunk_text,
+           c.collection,
+           (c.embedding_768 OPERATOR(nexus.<=>) p_query)::float8,
+           encode(c.chash, 'hex'),
+           c.retention
+      FROM nexus.chunks c
+      JOIN nexus.catalog_document_chunks m
+        ON m.tenant_id = c.tenant_id AND m.collection = c.collection AND m.chash = c.chash
+      JOIN nexus.catalog_documents d
+        ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+      JOIN nexus.document_aspects a
+        ON a.tenant_id = d.tenant_id AND a.doc_id = d.tumbler
+     WHERE c.embedding_model = p_embedding_model
+       AND c.tenant_id = p_tenant
+       AND c.collection = ANY(p_collections)
+       AND d.deleted_at IS NULL
+       AND d.alias_of = ''
+       AND c.embedding_768 IS NOT NULL
+       AND (p_where IS NULL OR c.metadata @> p_where)
+       AND (p_min_confidence IS NULL OR a.confidence >= p_min_confidence)
+       AND (p_field IS NULL OR CASE p_field
+               WHEN 'problem_formulation'    THEN a.problem_formulation
+               WHEN 'proposed_method'        THEN a.proposed_method
+               WHEN 'experimental_datasets'  THEN a.experimental_datasets
+               WHEN 'experimental_baselines' THEN a.experimental_baselines
+               WHEN 'experimental_results'   THEN a.experimental_results
+           END ILIKE '%' || p_pattern || '%')
+     ORDER BY c.embedding_768 OPERATOR(nexus.<=>) p_query
+     LIMIT p_n
+$$;
+
+CREATE OR REPLACE FUNCTION nexus.search_aspect_scoped_1024(
+    p_query           nexus.vector(1024),
+    p_collections     text[],
+    p_field           text,
+    p_pattern         text,
+    p_min_confidence  float8,
+    p_where           jsonb,
+    p_n               int,
+    p_embedding_model text,
+    p_tenant          text
+) RETURNS TABLE(id text, content text, collection text, distance float8, chash text, retention text)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT d.tumbler,
+           c.chunk_text,
+           c.collection,
+           (c.embedding_1024 OPERATOR(nexus.<=>) p_query)::float8,
+           encode(c.chash, 'hex'),
+           c.retention
+      FROM nexus.chunks c
+      JOIN nexus.catalog_document_chunks m
+        ON m.tenant_id = c.tenant_id AND m.collection = c.collection AND m.chash = c.chash
+      JOIN nexus.catalog_documents d
+        ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+      JOIN nexus.document_aspects a
+        ON a.tenant_id = d.tenant_id AND a.doc_id = d.tumbler
+     WHERE c.embedding_model = p_embedding_model
+       AND c.tenant_id = p_tenant
+       AND c.collection = ANY(p_collections)
+       AND d.deleted_at IS NULL
+       AND d.alias_of = ''
+       AND c.embedding_1024 IS NOT NULL
+       AND (p_where IS NULL OR c.metadata @> p_where)
+       AND (p_min_confidence IS NULL OR a.confidence >= p_min_confidence)
+       AND (p_field IS NULL OR CASE p_field
+               WHEN 'problem_formulation'    THEN a.problem_formulation
+               WHEN 'proposed_method'        THEN a.proposed_method
+               WHEN 'experimental_datasets'  THEN a.experimental_datasets
+               WHEN 'experimental_baselines' THEN a.experimental_baselines
+               WHEN 'experimental_results'   THEN a.experimental_results
+           END ILIKE '%' || p_pattern || '%')
+     ORDER BY c.embedding_1024 OPERATOR(nexus.<=>) p_query
+     LIMIT p_n
+$$;
+
+CREATE OR REPLACE FUNCTION nexus.search_graph_hop_384(
+    p_query       nexus.vector(384),
+    p_seeds       text[],
+    p_collections text[],
+    p_link_type   text,
+    p_depth       int,
+    p_direction   text,
+    p_where       jsonb,
+    p_n           int,
+    p_embedding_model text,
+    p_tenant          text
+) RETURNS TABLE(id text, content text, collection text, distance float8, chash text, retention text)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    WITH RECURSIVE reach(tumbler, d) AS (
+            SELECT s, 0 FROM unnest(p_seeds) AS s
+        UNION
+            SELECT CASE WHEN l.from_tumbler = r.tumbler THEN l.to_tumbler ELSE l.from_tumbler END,
+                   r.d + 1
+              FROM reach r
+              JOIN nexus.catalog_links l
+                ON ((p_direction = 'out'  AND l.from_tumbler = r.tumbler)
+                 OR (p_direction = 'in'   AND l.to_tumbler   = r.tumbler)
+                 OR (p_direction = 'both' AND (l.from_tumbler = r.tumbler OR l.to_tumbler = r.tumbler)))
+              JOIN nexus.catalog_documents fd ON fd.tumbler = l.from_tumbler AND fd.deleted_at IS NULL
+              JOIN nexus.catalog_documents td ON td.tumbler = l.to_tumbler   AND td.deleted_at IS NULL
+             WHERE r.d < p_depth
+               AND (p_link_type IS NULL OR l.link_type = p_link_type)
+    ),
+    reached AS (SELECT DISTINCT tumbler FROM reach)
+    SELECT d.tumbler,
+           c.chunk_text,
+           c.collection,
+           (c.embedding_384 OPERATOR(nexus.<=>) p_query)::float8,
+           encode(c.chash, 'hex'),
+           c.retention
+      FROM nexus.chunks c
+      JOIN nexus.catalog_document_chunks m
+        ON m.tenant_id = c.tenant_id AND m.collection = c.collection AND m.chash = c.chash
+      JOIN nexus.catalog_documents d
+        ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+      JOIN reached rd
+        ON rd.tumbler = d.tumbler
+     WHERE c.embedding_model = p_embedding_model
+       AND c.tenant_id = p_tenant
+       AND c.collection = ANY(p_collections)
+       AND d.deleted_at IS NULL
+       AND (p_where IS NULL OR c.metadata @> p_where)
+       AND c.embedding_384 IS NOT NULL
+     ORDER BY c.embedding_384 OPERATOR(nexus.<=>) p_query
+     LIMIT p_n
+$$;
+
+CREATE OR REPLACE FUNCTION nexus.search_graph_hop_768(
+    p_query       nexus.vector(768),
+    p_seeds       text[],
+    p_collections text[],
+    p_link_type   text,
+    p_depth       int,
+    p_direction   text,
+    p_where       jsonb,
+    p_n           int,
+    p_embedding_model text,
+    p_tenant          text
+) RETURNS TABLE(id text, content text, collection text, distance float8, chash text, retention text)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    WITH RECURSIVE reach(tumbler, d) AS (
+            SELECT s, 0 FROM unnest(p_seeds) AS s
+        UNION
+            SELECT CASE WHEN l.from_tumbler = r.tumbler THEN l.to_tumbler ELSE l.from_tumbler END,
+                   r.d + 1
+              FROM reach r
+              JOIN nexus.catalog_links l
+                ON ((p_direction = 'out'  AND l.from_tumbler = r.tumbler)
+                 OR (p_direction = 'in'   AND l.to_tumbler   = r.tumbler)
+                 OR (p_direction = 'both' AND (l.from_tumbler = r.tumbler OR l.to_tumbler = r.tumbler)))
+              JOIN nexus.catalog_documents fd ON fd.tumbler = l.from_tumbler AND fd.deleted_at IS NULL
+              JOIN nexus.catalog_documents td ON td.tumbler = l.to_tumbler   AND td.deleted_at IS NULL
+             WHERE r.d < p_depth
+               AND (p_link_type IS NULL OR l.link_type = p_link_type)
+    ),
+    reached AS (SELECT DISTINCT tumbler FROM reach)
+    SELECT d.tumbler,
+           c.chunk_text,
+           c.collection,
+           (c.embedding_768 OPERATOR(nexus.<=>) p_query)::float8,
+           encode(c.chash, 'hex'),
+           c.retention
+      FROM nexus.chunks c
+      JOIN nexus.catalog_document_chunks m
+        ON m.tenant_id = c.tenant_id AND m.collection = c.collection AND m.chash = c.chash
+      JOIN nexus.catalog_documents d
+        ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+      JOIN reached rd
+        ON rd.tumbler = d.tumbler
+     WHERE c.embedding_model = p_embedding_model
+       AND c.tenant_id = p_tenant
+       AND c.collection = ANY(p_collections)
+       AND d.deleted_at IS NULL
+       AND (p_where IS NULL OR c.metadata @> p_where)
+       AND c.embedding_768 IS NOT NULL
+     ORDER BY c.embedding_768 OPERATOR(nexus.<=>) p_query
+     LIMIT p_n
+$$;
+
+CREATE OR REPLACE FUNCTION nexus.search_graph_hop_1024(
+    p_query       nexus.vector(1024),
+    p_seeds       text[],
+    p_collections text[],
+    p_link_type   text,
+    p_depth       int,
+    p_direction   text,
+    p_where       jsonb,
+    p_n           int,
+    p_embedding_model text,
+    p_tenant          text
+) RETURNS TABLE(id text, content text, collection text, distance float8, chash text, retention text)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    WITH RECURSIVE reach(tumbler, d) AS (
+            SELECT s, 0 FROM unnest(p_seeds) AS s
+        UNION
+            SELECT CASE WHEN l.from_tumbler = r.tumbler THEN l.to_tumbler ELSE l.from_tumbler END,
+                   r.d + 1
+              FROM reach r
+              JOIN nexus.catalog_links l
+                ON ((p_direction = 'out'  AND l.from_tumbler = r.tumbler)
+                 OR (p_direction = 'in'   AND l.to_tumbler   = r.tumbler)
+                 OR (p_direction = 'both' AND (l.from_tumbler = r.tumbler OR l.to_tumbler = r.tumbler)))
+              JOIN nexus.catalog_documents fd ON fd.tumbler = l.from_tumbler AND fd.deleted_at IS NULL
+              JOIN nexus.catalog_documents td ON td.tumbler = l.to_tumbler   AND td.deleted_at IS NULL
+             WHERE r.d < p_depth
+               AND (p_link_type IS NULL OR l.link_type = p_link_type)
+    ),
+    reached AS (SELECT DISTINCT tumbler FROM reach)
+    SELECT d.tumbler,
+           c.chunk_text,
+           c.collection,
+           (c.embedding_1024 OPERATOR(nexus.<=>) p_query)::float8,
+           encode(c.chash, 'hex'),
+           c.retention
+      FROM nexus.chunks c
+      JOIN nexus.catalog_document_chunks m
+        ON m.tenant_id = c.tenant_id AND m.collection = c.collection AND m.chash = c.chash
+      JOIN nexus.catalog_documents d
+        ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+      JOIN reached rd
+        ON rd.tumbler = d.tumbler
+     WHERE c.embedding_model = p_embedding_model
+       AND c.tenant_id = p_tenant
+       AND c.collection = ANY(p_collections)
+       AND d.deleted_at IS NULL
+       AND (p_where IS NULL OR c.metadata @> p_where)
+       AND c.embedding_1024 IS NOT NULL
+     ORDER BY c.embedding_1024 OPERATOR(nexus.<=>) p_query
+     LIMIT p_n
+$$;
+
+CREATE OR REPLACE FUNCTION nexus.search_topic_scoped_384(
+    p_query       nexus.vector(384),
+    p_topic_label text,
+    p_collection  text,
+    p_n           int,
+    p_embedding_model text,
+    p_tenant          text
+) RETURNS TABLE(id text, content text, collection text, distance float8, retention text)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT encode(c.chash, 'hex'),
+           c.chunk_text,
+           c.collection,
+           (c.embedding_384 OPERATOR(nexus.<=>) p_query)::float8,
+           c.retention
+      FROM nexus.chunks c
+      JOIN nexus.topic_assignments ta
+        ON ta.tenant_id = c.tenant_id AND ta.doc_id = c.chash
+      JOIN nexus.topics t
+        ON t.tenant_id = ta.tenant_id AND t.id = ta.topic_id
+     WHERE c.embedding_model = p_embedding_model
+       AND c.tenant_id = p_tenant
+       AND c.collection = p_collection
+       AND t.collection = p_collection
+       AND t.label = p_topic_label
+       AND c.embedding_384 IS NOT NULL
+       AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))
+     ORDER BY c.embedding_384 OPERATOR(nexus.<=>) p_query
+     LIMIT p_n
+$$;
+
+CREATE OR REPLACE FUNCTION nexus.search_topic_scoped_768(
+    p_query       nexus.vector(768),
+    p_topic_label text,
+    p_collection  text,
+    p_n           int,
+    p_embedding_model text,
+    p_tenant          text
+) RETURNS TABLE(id text, content text, collection text, distance float8, retention text)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT encode(c.chash, 'hex'),
+           c.chunk_text,
+           c.collection,
+           (c.embedding_768 OPERATOR(nexus.<=>) p_query)::float8,
+           c.retention
+      FROM nexus.chunks c
+      JOIN nexus.topic_assignments ta
+        ON ta.tenant_id = c.tenant_id AND ta.doc_id = c.chash
+      JOIN nexus.topics t
+        ON t.tenant_id = ta.tenant_id AND t.id = ta.topic_id
+     WHERE c.embedding_model = p_embedding_model
+       AND c.tenant_id = p_tenant
+       AND c.collection = p_collection
+       AND t.collection = p_collection
+       AND t.label = p_topic_label
+       AND c.embedding_768 IS NOT NULL
+       AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))
+     ORDER BY c.embedding_768 OPERATOR(nexus.<=>) p_query
+     LIMIT p_n
+$$;
+
+CREATE OR REPLACE FUNCTION nexus.search_topic_scoped_1024(
+    p_query       nexus.vector(1024),
+    p_topic_label text,
+    p_collection  text,
+    p_n           int,
+    p_embedding_model text,
+    p_tenant          text
+) RETURNS TABLE(id text, content text, collection text, distance float8, retention text)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT encode(c.chash, 'hex'),
+           c.chunk_text,
+           c.collection,
+           (c.embedding_1024 OPERATOR(nexus.<=>) p_query)::float8,
+           c.retention
+      FROM nexus.chunks c
+      JOIN nexus.topic_assignments ta
+        ON ta.tenant_id = c.tenant_id AND ta.doc_id = c.chash
+      JOIN nexus.topics t
+        ON t.tenant_id = ta.tenant_id AND t.id = ta.topic_id
+     WHERE c.embedding_model = p_embedding_model
+       AND c.tenant_id = p_tenant
+       AND c.collection = p_collection
+       AND t.collection = p_collection
+       AND t.label = p_topic_label
+       AND c.embedding_1024 IS NOT NULL
+       AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))
+     ORDER BY c.embedding_1024 OPERATOR(nexus.<=>) p_query
+     LIMIT p_n
+$$;
+
+CREATE OR REPLACE FUNCTION nexus.taxonomy_ann_query_384(
+    p_embedding         nexus.vector(384),
+    p_collection        text,
+    p_cross_collection  boolean,
+    p_n                 int,
+    p_embedding_model text,
+    p_tenant          text
+) RETURNS TABLE(topic_id bigint, distance float8)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT topic_id,
+           (embedding_384 OPERATOR(nexus.<=>) p_embedding)::float8 AS distance
+      FROM nexus.taxonomy_centroids
+     WHERE embedding_model = p_embedding_model
+       AND tenant_id = p_tenant
+       AND embedding_384 IS NOT NULL
+       AND (CASE WHEN p_cross_collection THEN collection <> p_collection
+                 ELSE collection = p_collection END)
+     ORDER BY embedding_384 OPERATOR(nexus.<=>) p_embedding, topic_id ASC
+     LIMIT p_n
+$$;
+
+CREATE OR REPLACE FUNCTION nexus.taxonomy_ann_query_768(
+    p_embedding         nexus.vector(768),
+    p_collection        text,
+    p_cross_collection  boolean,
+    p_n                 int,
+    p_embedding_model text,
+    p_tenant          text
+) RETURNS TABLE(topic_id bigint, distance float8)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT topic_id,
+           (embedding_768 OPERATOR(nexus.<=>) p_embedding)::float8 AS distance
+      FROM nexus.taxonomy_centroids
+     WHERE embedding_model = p_embedding_model
+       AND tenant_id = p_tenant
+       AND embedding_768 IS NOT NULL
+       AND (CASE WHEN p_cross_collection THEN collection <> p_collection
+                 ELSE collection = p_collection END)
+     ORDER BY embedding_768 OPERATOR(nexus.<=>) p_embedding, topic_id ASC
+     LIMIT p_n
+$$;
+
+CREATE OR REPLACE FUNCTION nexus.taxonomy_ann_query_1024(
+    p_embedding         nexus.vector(1024),
+    p_collection        text,
+    p_cross_collection  boolean,
+    p_n                 int,
+    p_embedding_model text,
+    p_tenant          text
+) RETURNS TABLE(topic_id bigint, distance float8)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT topic_id,
+           (embedding_1024 OPERATOR(nexus.<=>) p_embedding)::float8 AS distance
+      FROM nexus.taxonomy_centroids
+     WHERE embedding_model = p_embedding_model
+       AND tenant_id = p_tenant
+       AND embedding_1024 IS NOT NULL
+       AND (CASE WHEN p_cross_collection THEN collection <> p_collection
+                 ELSE collection = p_collection END)
+     ORDER BY embedding_1024 OPERATOR(nexus.<=>) p_embedding, topic_id ASC
+     LIMIT p_n
+$$;
+
+CREATE OR REPLACE FUNCTION nexus.assign_from_chashes_384(p_collection text, p_chashes text[], p_cross_collection boolean,
+                                              p_embedding_model text, p_tenant text)
+ RETURNS TABLE(chash text, topic_id bigint, similarity double precision)
+ LANGUAGE plpgsql
+ SET plan_cache_mode = force_custom_plan
+AS $function$
+#variable_conflict use_column
+BEGIN
+    IF p_cross_collection THEN
+        -- Sam's standing rule for this RDR: one fail-loud path for every
+        -- stub-insert, nothing mints a catalog_collections row from a name
+        -- any more. Post-nexus-ft04v.7, chunks_collection_fk already requires
+        -- p_collection to be registered before any chunk can exist under it,
+        -- so if the batch below finds rows at all, the row is guaranteed
+        -- present -- this guard only ever fires on a genuinely absent
+        -- registration (a caller naming a collection with zero chunks), and
+        -- names the remedy instead of silently minting the row this branch
+        -- used to stub-insert here.
+        IF NOT EXISTS (
+            SELECT 1 FROM nexus.catalog_collections
+             WHERE tenant_id = current_setting('nexus.tenant', true)
+               AND name = p_collection
+               AND embedding_model = p_embedding_model
+        ) THEN
+            RAISE EXCEPTION
+                'assign_from_chashes_384: collection % is not registered for tenant % -- register it first via POST /v1/catalog/collections/upsert',
+                p_collection, current_setting('nexus.tenant', true)
+                USING ERRCODE = 'foreign_key_violation';
+        END IF;
+
+        -- nexus-f3yxx: the LATERAL's recall settings, transaction-local.
+        -- NOT a function-level SET clause: CREATE FUNCTION ... SET hnsw.*
+        -- fails with 'permission denied to set parameter' for a
+        -- non-superuser migration role when pgvector's library is not yet
+        -- loaded in that session (hnsw.* is then an unknown placeholder),
+        -- which is every production boot (candidate-migration leg,
+        -- 2026-09-25). set_config is allowed to any role. is_local=true
+        -- scopes it to this transaction, which since the rework is the
+        -- cross pass alone.
+        PERFORM set_config('hnsw.iterative_scan', 'strict_order', true);
+        PERFORM set_config('hnsw.ef_search', '400', true);
+
+        -- nexus-swam7: pin the ACCESS PATH itself, not just the ANN recall
+        -- settings. At ef_search=400 the planner's own cost model prefers a
+        -- per-chunk Seq Scan + top-N Sort over taxonomy_centroids until
+        -- ~8,000 centroids/dim (T2 nexus/p02-hnsw-incremental-recall-
+        -- 2026-09-25); below that, this pin is what makes the "measured
+        -- equal to exact at ef400" claim (taxonomy-018's header) actually
+        -- true, by forcing the HNSW index scan the recall claim assumes.
+        -- Legal as a function-level SET (these are core GUCs, unlike
+        -- hnsw.*), but kept as set_config for consistency with the two
+        -- calls above -- see this changeset's own header for the full
+        -- reasoning and the measurement that verified each pin's effect.
+        PERFORM set_config('enable_seqscan', 'off', true);
+        PERFORM set_config('enable_sort', 'off', true);
+
+        RETURN QUERY
+        WITH batch AS (
+            SELECT c.chash AS b_chash, c.embedding_384 AS b_emb, c.embedding_model AS b_model
+              FROM nexus.chunks c
+             WHERE c.embedding_model = p_embedding_model
+               AND c.tenant_id = p_tenant
+               AND c.collection = p_collection
+               AND c.embedding_384 IS NOT NULL
+               AND c.chash = ANY(ARRAY(SELECT decode(x, 'hex') FROM unnest(p_chashes) x))
+        ),
+        nearest AS (
+            SELECT encode(b.b_chash, 'hex')                     AS m_chash,
+                   b.b_chash                                    AS m_chash_bytes,
+                   b.b_model                                    AS m_model,
+                   n.n_topic_id                                 AS m_topic_id,
+                   (1 - n.n_dist)::double precision              AS m_sim
+              FROM batch b
+              CROSS JOIN LATERAL (
+                  SELECT ct.topic_id AS n_topic_id,
+                         (ct.embedding_384 OPERATOR(nexus.<=>) b.b_emb) AS n_dist
+                    FROM nexus.taxonomy_centroids ct
+                   WHERE ct.embedding_model = p_embedding_model
+                     AND ct.tenant_id = p_tenant
+                     AND ct.collection <> p_collection
+                     AND ct.embedding_384 IS NOT NULL
+                   ORDER BY ct.embedding_384 OPERATOR(nexus.<=>) b.b_emb, ct.topic_id ASC
+                   LIMIT 1
+              ) n
+        ),
+        persisted AS (
+            -- RDR-225: embedding_model is the chunk's own (it is part of the four-column chunk foreign key).
+            INSERT INTO nexus.topic_assignments AS ta
+                (tenant_id, doc_id, topic_id, assigned_by, similarity, assigned_at, source_collection,
+                 embedding_model)
+            SELECT current_setting('nexus.tenant', true), n.m_chash_bytes, n.m_topic_id,
+                   'projection', n.m_sim, now(), p_collection, n.m_model
+              FROM nearest n
+            ON CONFLICT (tenant_id, doc_id, topic_id) DO UPDATE SET
+                similarity = GREATEST(COALESCE(ta.similarity, -1.0), EXCLUDED.similarity),
+                assigned_at = CASE WHEN EXCLUDED.similarity > COALESCE(ta.similarity, -1.0)
+                                    THEN EXCLUDED.assigned_at ELSE ta.assigned_at END,
+                source_collection = CASE WHEN EXCLUDED.similarity > COALESCE(ta.similarity, -1.0)
+                                    THEN EXCLUDED.source_collection ELSE ta.source_collection END,
+                -- the model moves with the source collection: the pair is one chunk reference.
+                embedding_model = CASE WHEN EXCLUDED.similarity > COALESCE(ta.similarity, -1.0)
+                                    THEN EXCLUDED.embedding_model ELSE ta.embedding_model END,
+                assigned_by = 'projection'
+            RETURNING 1
+        )
+        SELECT n.m_chash, n.m_topic_id, n.m_sim FROM nearest n;
+    ELSE
+        RETURN QUERY
+        WITH nearest AS (
+            SELECT DISTINCT ON (c.chash)
+                   encode(c.chash, 'hex')                                          AS m_chash,
+                   c.chash                                                         AS m_chash_bytes,
+                   c.embedding_model AS m_model,
+                   ct.topic_id                                                     AS m_topic_id,
+                   (1 - (c.embedding_384 OPERATOR(nexus.<=>) ct.embedding_384))::double precision AS m_sim
+              FROM nexus.chunks c
+              JOIN nexus.taxonomy_centroids ct
+                ON ct.embedding_model = p_embedding_model
+               AND ct.tenant_id = p_tenant
+               AND ct.collection = p_collection
+               AND ct.embedding_384 IS NOT NULL
+             WHERE c.embedding_model = p_embedding_model
+               AND c.tenant_id = p_tenant
+               AND c.collection = p_collection
+               AND c.embedding_384 IS NOT NULL
+               AND c.chash = ANY(ARRAY(SELECT decode(x, 'hex') FROM unnest(p_chashes) x))
+             ORDER BY c.chash, (c.embedding_384 OPERATOR(nexus.<=>) ct.embedding_384) ASC, ct.topic_id ASC
+        ),
+        persisted AS (
+            INSERT INTO nexus.topic_assignments
+                (tenant_id, doc_id, topic_id, assigned_by, source_collection, embedding_model)
+            SELECT current_setting('nexus.tenant', true), n.m_chash_bytes, n.m_topic_id, 'centroid', p_collection,
+                   n.m_model
+              FROM nearest n
+            ON CONFLICT (tenant_id, doc_id, topic_id) DO NOTHING
+            RETURNING 1
+        )
+        SELECT n.m_chash, n.m_topic_id, NULL::double precision FROM nearest n;
+    END IF;
+END;
+$function$;
+
+CREATE OR REPLACE FUNCTION nexus.assign_from_chashes_768(p_collection text, p_chashes text[], p_cross_collection boolean,
+                                              p_embedding_model text, p_tenant text)
+ RETURNS TABLE(chash text, topic_id bigint, similarity double precision)
+ LANGUAGE plpgsql
+ SET plan_cache_mode = force_custom_plan
+AS $function$
+#variable_conflict use_column
+BEGIN
+    IF p_cross_collection THEN
+        IF NOT EXISTS (
+            SELECT 1 FROM nexus.catalog_collections
+             WHERE tenant_id = current_setting('nexus.tenant', true)
+               AND name = p_collection
+               AND embedding_model = p_embedding_model
+        ) THEN
+            RAISE EXCEPTION
+                'assign_from_chashes_768: collection % is not registered for tenant % -- register it first via POST /v1/catalog/collections/upsert',
+                p_collection, current_setting('nexus.tenant', true)
+                USING ERRCODE = 'foreign_key_violation';
+        END IF;
+
+        -- nexus-f3yxx: the LATERAL's recall settings, transaction-local.
+        -- NOT a function-level SET clause: CREATE FUNCTION ... SET hnsw.*
+        -- fails with 'permission denied to set parameter' for a
+        -- non-superuser migration role when pgvector's library is not yet
+        -- loaded in that session (hnsw.* is then an unknown placeholder),
+        -- which is every production boot (candidate-migration leg,
+        -- 2026-09-25). set_config is allowed to any role. is_local=true
+        -- scopes it to this transaction, which since the rework is the
+        -- cross pass alone.
+        PERFORM set_config('hnsw.iterative_scan', 'strict_order', true);
+        PERFORM set_config('hnsw.ef_search', '400', true);
+
+        -- nexus-swam7: pin the ACCESS PATH itself, not just the ANN recall
+        -- settings. At ef_search=400 the planner's own cost model prefers a
+        -- per-chunk Seq Scan + top-N Sort over taxonomy_centroids until
+        -- ~8,000 centroids/dim (T2 nexus/p02-hnsw-incremental-recall-
+        -- 2026-09-25); below that, this pin is what makes the "measured
+        -- equal to exact at ef400" claim (taxonomy-018's header) actually
+        -- true, by forcing the HNSW index scan the recall claim assumes.
+        -- Legal as a function-level SET (these are core GUCs, unlike
+        -- hnsw.*), but kept as set_config for consistency with the two
+        -- calls above -- see this changeset's own header for the full
+        -- reasoning and the measurement that verified each pin's effect.
+        PERFORM set_config('enable_seqscan', 'off', true);
+        PERFORM set_config('enable_sort', 'off', true);
+
+        RETURN QUERY
+        WITH batch AS (
+            SELECT c.chash AS b_chash, c.embedding_768 AS b_emb, c.embedding_model AS b_model
+              FROM nexus.chunks c
+             WHERE c.embedding_model = p_embedding_model
+               AND c.tenant_id = p_tenant
+               AND c.collection = p_collection
+               AND c.embedding_768 IS NOT NULL
+               AND c.chash = ANY(ARRAY(SELECT decode(x, 'hex') FROM unnest(p_chashes) x))
+        ),
+        nearest AS (
+            SELECT encode(b.b_chash, 'hex')                     AS m_chash,
+                   b.b_chash                                    AS m_chash_bytes,
+                   b.b_model                                    AS m_model,
+                   n.n_topic_id                                 AS m_topic_id,
+                   (1 - n.n_dist)::double precision              AS m_sim
+              FROM batch b
+              CROSS JOIN LATERAL (
+                  SELECT ct.topic_id AS n_topic_id,
+                         (ct.embedding_768 OPERATOR(nexus.<=>) b.b_emb) AS n_dist
+                    FROM nexus.taxonomy_centroids ct
+                   WHERE ct.embedding_model = p_embedding_model
+                     AND ct.tenant_id = p_tenant
+                     AND ct.collection <> p_collection
+                     AND ct.embedding_768 IS NOT NULL
+                   ORDER BY ct.embedding_768 OPERATOR(nexus.<=>) b.b_emb, ct.topic_id ASC
+                   LIMIT 1
+              ) n
+        ),
+        persisted AS (
+            -- RDR-225: embedding_model is the chunk's own (it is part of the four-column chunk foreign key).
+            INSERT INTO nexus.topic_assignments AS ta
+                (tenant_id, doc_id, topic_id, assigned_by, similarity, assigned_at, source_collection,
+                 embedding_model)
+            SELECT current_setting('nexus.tenant', true), n.m_chash_bytes, n.m_topic_id,
+                   'projection', n.m_sim, now(), p_collection, n.m_model
+              FROM nearest n
+            ON CONFLICT (tenant_id, doc_id, topic_id) DO UPDATE SET
+                similarity = GREATEST(COALESCE(ta.similarity, -1.0), EXCLUDED.similarity),
+                assigned_at = CASE WHEN EXCLUDED.similarity > COALESCE(ta.similarity, -1.0)
+                                    THEN EXCLUDED.assigned_at ELSE ta.assigned_at END,
+                source_collection = CASE WHEN EXCLUDED.similarity > COALESCE(ta.similarity, -1.0)
+                                    THEN EXCLUDED.source_collection ELSE ta.source_collection END,
+                -- the model moves with the source collection: the pair is one chunk reference.
+                embedding_model = CASE WHEN EXCLUDED.similarity > COALESCE(ta.similarity, -1.0)
+                                    THEN EXCLUDED.embedding_model ELSE ta.embedding_model END,
+                assigned_by = 'projection'
+            RETURNING 1
+        )
+        SELECT n.m_chash, n.m_topic_id, n.m_sim FROM nearest n;
+    ELSE
+        RETURN QUERY
+        WITH nearest AS (
+            SELECT DISTINCT ON (c.chash)
+                   encode(c.chash, 'hex')                                          AS m_chash,
+                   c.chash                                                         AS m_chash_bytes,
+                   c.embedding_model AS m_model,
+                   ct.topic_id                                                     AS m_topic_id,
+                   (1 - (c.embedding_768 OPERATOR(nexus.<=>) ct.embedding_768))::double precision AS m_sim
+              FROM nexus.chunks c
+              JOIN nexus.taxonomy_centroids ct
+                ON ct.embedding_model = p_embedding_model
+               AND ct.tenant_id = p_tenant
+               AND ct.collection = p_collection
+               AND ct.embedding_768 IS NOT NULL
+             WHERE c.embedding_model = p_embedding_model
+               AND c.tenant_id = p_tenant
+               AND c.collection = p_collection
+               AND c.embedding_768 IS NOT NULL
+               AND c.chash = ANY(ARRAY(SELECT decode(x, 'hex') FROM unnest(p_chashes) x))
+             ORDER BY c.chash, (c.embedding_768 OPERATOR(nexus.<=>) ct.embedding_768) ASC, ct.topic_id ASC
+        ),
+        persisted AS (
+            INSERT INTO nexus.topic_assignments
+                (tenant_id, doc_id, topic_id, assigned_by, source_collection, embedding_model)
+            SELECT current_setting('nexus.tenant', true), n.m_chash_bytes, n.m_topic_id, 'centroid', p_collection,
+                   n.m_model
+              FROM nearest n
+            ON CONFLICT (tenant_id, doc_id, topic_id) DO NOTHING
+            RETURNING 1
+        )
+        SELECT n.m_chash, n.m_topic_id, NULL::double precision FROM nearest n;
+    END IF;
+END;
+$function$;
+
+CREATE OR REPLACE FUNCTION nexus.assign_from_chashes_1024(p_collection text, p_chashes text[], p_cross_collection boolean,
+                                              p_embedding_model text, p_tenant text)
+ RETURNS TABLE(chash text, topic_id bigint, similarity double precision)
+ LANGUAGE plpgsql
+ SET plan_cache_mode = force_custom_plan
+AS $function$
+#variable_conflict use_column
+BEGIN
+    IF p_cross_collection THEN
+        IF NOT EXISTS (
+            SELECT 1 FROM nexus.catalog_collections
+             WHERE tenant_id = current_setting('nexus.tenant', true)
+               AND name = p_collection
+               AND embedding_model = p_embedding_model
+        ) THEN
+            RAISE EXCEPTION
+                'assign_from_chashes_1024: collection % is not registered for tenant % -- register it first via POST /v1/catalog/collections/upsert',
+                p_collection, current_setting('nexus.tenant', true)
+                USING ERRCODE = 'foreign_key_violation';
+        END IF;
+
+        -- nexus-f3yxx: the LATERAL's recall settings, transaction-local.
+        -- NOT a function-level SET clause: CREATE FUNCTION ... SET hnsw.*
+        -- fails with 'permission denied to set parameter' for a
+        -- non-superuser migration role when pgvector's library is not yet
+        -- loaded in that session (hnsw.* is then an unknown placeholder),
+        -- which is every production boot (candidate-migration leg,
+        -- 2026-09-25). set_config is allowed to any role. is_local=true
+        -- scopes it to this transaction, which since the rework is the
+        -- cross pass alone.
+        PERFORM set_config('hnsw.iterative_scan', 'strict_order', true);
+        PERFORM set_config('hnsw.ef_search', '400', true);
+
+        -- nexus-swam7: pin the ACCESS PATH itself, not just the ANN recall
+        -- settings. At ef_search=400 the planner's own cost model prefers a
+        -- per-chunk Seq Scan + top-N Sort over taxonomy_centroids until
+        -- ~8,000 centroids/dim (T2 nexus/p02-hnsw-incremental-recall-
+        -- 2026-09-25); below that, this pin is what makes the "measured
+        -- equal to exact at ef400" claim (taxonomy-018's header) actually
+        -- true, by forcing the HNSW index scan the recall claim assumes.
+        -- Legal as a function-level SET (these are core GUCs, unlike
+        -- hnsw.*), but kept as set_config for consistency with the two
+        -- calls above -- see this changeset's own header for the full
+        -- reasoning and the measurement that verified each pin's effect.
+        PERFORM set_config('enable_seqscan', 'off', true);
+        PERFORM set_config('enable_sort', 'off', true);
+
+        RETURN QUERY
+        WITH batch AS (
+            SELECT c.chash AS b_chash, c.embedding_1024 AS b_emb, c.embedding_model AS b_model
+              FROM nexus.chunks c
+             WHERE c.embedding_model = p_embedding_model
+               AND c.tenant_id = p_tenant
+               AND c.collection = p_collection
+               AND c.embedding_1024 IS NOT NULL
+               AND c.chash = ANY(ARRAY(SELECT decode(x, 'hex') FROM unnest(p_chashes) x))
+        ),
+        nearest AS (
+            SELECT encode(b.b_chash, 'hex')                     AS m_chash,
+                   b.b_chash                                    AS m_chash_bytes,
+                   b.b_model                                    AS m_model,
+                   n.n_topic_id                                 AS m_topic_id,
+                   (1 - n.n_dist)::double precision              AS m_sim
+              FROM batch b
+              CROSS JOIN LATERAL (
+                  SELECT ct.topic_id AS n_topic_id,
+                         (ct.embedding_1024 OPERATOR(nexus.<=>) b.b_emb) AS n_dist
+                    FROM nexus.taxonomy_centroids ct
+                   WHERE ct.embedding_model = p_embedding_model
+                     AND ct.tenant_id = p_tenant
+                     AND ct.collection <> p_collection
+                     AND ct.embedding_1024 IS NOT NULL
+                   ORDER BY ct.embedding_1024 OPERATOR(nexus.<=>) b.b_emb, ct.topic_id ASC
+                   LIMIT 1
+              ) n
+        ),
+        persisted AS (
+            -- RDR-225: embedding_model is the chunk's own (it is part of the four-column chunk foreign key).
+            INSERT INTO nexus.topic_assignments AS ta
+                (tenant_id, doc_id, topic_id, assigned_by, similarity, assigned_at, source_collection,
+                 embedding_model)
+            SELECT current_setting('nexus.tenant', true), n.m_chash_bytes, n.m_topic_id,
+                   'projection', n.m_sim, now(), p_collection, n.m_model
+              FROM nearest n
+            ON CONFLICT (tenant_id, doc_id, topic_id) DO UPDATE SET
+                similarity = GREATEST(COALESCE(ta.similarity, -1.0), EXCLUDED.similarity),
+                assigned_at = CASE WHEN EXCLUDED.similarity > COALESCE(ta.similarity, -1.0)
+                                    THEN EXCLUDED.assigned_at ELSE ta.assigned_at END,
+                source_collection = CASE WHEN EXCLUDED.similarity > COALESCE(ta.similarity, -1.0)
+                                    THEN EXCLUDED.source_collection ELSE ta.source_collection END,
+                -- the model moves with the source collection: the pair is one chunk reference.
+                embedding_model = CASE WHEN EXCLUDED.similarity > COALESCE(ta.similarity, -1.0)
+                                    THEN EXCLUDED.embedding_model ELSE ta.embedding_model END,
+                assigned_by = 'projection'
+            RETURNING 1
+        )
+        SELECT n.m_chash, n.m_topic_id, n.m_sim FROM nearest n;
+    ELSE
+        RETURN QUERY
+        WITH nearest AS (
+            SELECT DISTINCT ON (c.chash)
+                   encode(c.chash, 'hex')                                            AS m_chash,
+                   c.chash                                                           AS m_chash_bytes,
+                   c.embedding_model AS m_model,
+                   ct.topic_id                                                       AS m_topic_id,
+                   (1 - (c.embedding_1024 OPERATOR(nexus.<=>) ct.embedding_1024))::double precision AS m_sim
+              FROM nexus.chunks c
+              JOIN nexus.taxonomy_centroids ct
+                ON ct.embedding_model = p_embedding_model
+               AND ct.tenant_id = p_tenant
+               AND ct.collection = p_collection
+               AND ct.embedding_1024 IS NOT NULL
+             WHERE c.embedding_model = p_embedding_model
+               AND c.tenant_id = p_tenant
+               AND c.collection = p_collection
+               AND c.embedding_1024 IS NOT NULL
+               AND c.chash = ANY(ARRAY(SELECT decode(x, 'hex') FROM unnest(p_chashes) x))
+             ORDER BY c.chash, (c.embedding_1024 OPERATOR(nexus.<=>) ct.embedding_1024) ASC, ct.topic_id ASC
+        ),
+        persisted AS (
+            INSERT INTO nexus.topic_assignments
+                (tenant_id, doc_id, topic_id, assigned_by, source_collection, embedding_model)
+            SELECT current_setting('nexus.tenant', true), n.m_chash_bytes, n.m_topic_id, 'centroid', p_collection,
+                   n.m_model
+              FROM nearest n
+            ON CONFLICT (tenant_id, doc_id, topic_id) DO NOTHING
+            RETURNING 1
+        )
+        SELECT n.m_chash, n.m_topic_id, NULL::double precision FROM nearest n;
+    END IF;
+END;
+$function$;
+
+CREATE OR REPLACE FUNCTION nexus.cross_preview_384(
+    p_collection text,
+    p_chashes    text[],
+    p_embedding_model text,
+    p_tenant          text
+) RETURNS TABLE(
+    chash      text,
+    topic_id   bigint,
+    similarity double precision
+)
+LANGUAGE plpgsql
+SECURITY INVOKER
+SET plan_cache_mode = force_custom_plan
+AS $function$
+#variable_conflict use_column
+BEGIN
+    -- nexus-v4pj4: read-only twin of assign_from_chashes_384's cross
+    -- branch (taxonomy-020-1). Same four transaction-local settings;
+    -- see that changeset's header for the full reasoning. NEVER writes
+    -- to topic_assignments.
+    -- RDR-225: the batch/nearest CTE is byte-identical to assign_from_chashes_<dim>'s cross branch (CrossPreviewDriftTest),
+    -- which now carries the chunk's embedding_model for the persist; the preview selects it and does not persist it. Both match centroids of the chunk's own model only.
+    PERFORM set_config('hnsw.iterative_scan', 'strict_order', true);
+    PERFORM set_config('hnsw.ef_search', '400', true);
+    PERFORM set_config('enable_seqscan', 'off', true);
+    PERFORM set_config('enable_sort', 'off', true);
+
+    RETURN QUERY
+    WITH batch AS (
+        SELECT c.chash AS b_chash, c.embedding_384 AS b_emb, c.embedding_model AS b_model
+          FROM nexus.chunks c
+         WHERE c.embedding_model = p_embedding_model
+           AND c.tenant_id = p_tenant
+           AND c.collection = p_collection
+           AND c.embedding_384 IS NOT NULL
+           AND c.chash = ANY(ARRAY(SELECT decode(x, 'hex') FROM unnest(p_chashes) x))
+    ),
+    nearest AS (
+        SELECT encode(b.b_chash, 'hex')                     AS m_chash,
+               b.b_chash                                    AS m_chash_bytes,
+               b.b_model                                    AS m_model,
+               n.n_topic_id                                 AS m_topic_id,
+               (1 - n.n_dist)::double precision              AS m_sim
+          FROM batch b
+          CROSS JOIN LATERAL (
+              SELECT ct.topic_id AS n_topic_id,
+                     (ct.embedding_384 OPERATOR(nexus.<=>) b.b_emb) AS n_dist
+                FROM nexus.taxonomy_centroids ct
+               WHERE ct.embedding_model = p_embedding_model
+                 AND ct.tenant_id = p_tenant
+                 AND ct.collection <> p_collection
+                 AND ct.embedding_384 IS NOT NULL
+               ORDER BY ct.embedding_384 OPERATOR(nexus.<=>) b.b_emb, ct.topic_id ASC
+               LIMIT 1
+          ) n
+    )
+    SELECT n.m_chash, n.m_topic_id, n.m_sim FROM nearest n;
+END;
+$function$;
+
+CREATE OR REPLACE FUNCTION nexus.cross_preview_768(
+    p_collection text,
+    p_chashes    text[],
+    p_embedding_model text,
+    p_tenant          text
+) RETURNS TABLE(
+    chash      text,
+    topic_id   bigint,
+    similarity double precision
+)
+LANGUAGE plpgsql
+SECURITY INVOKER
+SET plan_cache_mode = force_custom_plan
+AS $function$
+#variable_conflict use_column
+BEGIN
+    PERFORM set_config('hnsw.iterative_scan', 'strict_order', true);
+    PERFORM set_config('hnsw.ef_search', '400', true);
+    PERFORM set_config('enable_seqscan', 'off', true);
+    PERFORM set_config('enable_sort', 'off', true);
+
+    RETURN QUERY
+    WITH batch AS (
+        SELECT c.chash AS b_chash, c.embedding_768 AS b_emb, c.embedding_model AS b_model
+          FROM nexus.chunks c
+         WHERE c.embedding_model = p_embedding_model
+           AND c.tenant_id = p_tenant
+           AND c.collection = p_collection
+           AND c.embedding_768 IS NOT NULL
+           AND c.chash = ANY(ARRAY(SELECT decode(x, 'hex') FROM unnest(p_chashes) x))
+    ),
+    nearest AS (
+        SELECT encode(b.b_chash, 'hex')                     AS m_chash,
+               b.b_chash                                    AS m_chash_bytes,
+               b.b_model                                    AS m_model,
+               n.n_topic_id                                 AS m_topic_id,
+               (1 - n.n_dist)::double precision              AS m_sim
+          FROM batch b
+          CROSS JOIN LATERAL (
+              SELECT ct.topic_id AS n_topic_id,
+                     (ct.embedding_768 OPERATOR(nexus.<=>) b.b_emb) AS n_dist
+                FROM nexus.taxonomy_centroids ct
+               WHERE ct.embedding_model = p_embedding_model
+                 AND ct.tenant_id = p_tenant
+                 AND ct.collection <> p_collection
+                 AND ct.embedding_768 IS NOT NULL
+               ORDER BY ct.embedding_768 OPERATOR(nexus.<=>) b.b_emb, ct.topic_id ASC
+               LIMIT 1
+          ) n
+    )
+    SELECT n.m_chash, n.m_topic_id, n.m_sim FROM nearest n;
+END;
+$function$;
+
+CREATE OR REPLACE FUNCTION nexus.cross_preview_1024(
+    p_collection text,
+    p_chashes    text[],
+    p_embedding_model text,
+    p_tenant          text
+) RETURNS TABLE(
+    chash      text,
+    topic_id   bigint,
+    similarity double precision
+)
+LANGUAGE plpgsql
+SECURITY INVOKER
+SET plan_cache_mode = force_custom_plan
+AS $function$
+#variable_conflict use_column
+BEGIN
+    PERFORM set_config('hnsw.iterative_scan', 'strict_order', true);
+    PERFORM set_config('hnsw.ef_search', '400', true);
+    PERFORM set_config('enable_seqscan', 'off', true);
+    PERFORM set_config('enable_sort', 'off', true);
+
+    RETURN QUERY
+    WITH batch AS (
+        SELECT c.chash AS b_chash, c.embedding_1024 AS b_emb, c.embedding_model AS b_model
+          FROM nexus.chunks c
+         WHERE c.embedding_model = p_embedding_model
+           AND c.tenant_id = p_tenant
+           AND c.collection = p_collection
+           AND c.embedding_1024 IS NOT NULL
+           AND c.chash = ANY(ARRAY(SELECT decode(x, 'hex') FROM unnest(p_chashes) x))
+    ),
+    nearest AS (
+        SELECT encode(b.b_chash, 'hex')                     AS m_chash,
+               b.b_chash                                    AS m_chash_bytes,
+               b.b_model                                    AS m_model,
+               n.n_topic_id                                 AS m_topic_id,
+               (1 - n.n_dist)::double precision              AS m_sim
+          FROM batch b
+          CROSS JOIN LATERAL (
+              SELECT ct.topic_id AS n_topic_id,
+                     (ct.embedding_1024 OPERATOR(nexus.<=>) b.b_emb) AS n_dist
+                FROM nexus.taxonomy_centroids ct
+               WHERE ct.embedding_model = p_embedding_model
+                 AND ct.tenant_id = p_tenant
+                 AND ct.collection <> p_collection
+                 AND ct.embedding_1024 IS NOT NULL
+               ORDER BY ct.embedding_1024 OPERATOR(nexus.<=>) b.b_emb, ct.topic_id ASC
+               LIMIT 1
+          ) n
+    )
+    SELECT n.m_chash, n.m_topic_id, n.m_sim FROM nearest n;
+END;
+$function$;
+
+GRANT EXECUTE ON FUNCTION nexus.plain_search_384(nexus.vector, text[], jsonb, text, int, text, text) TO nexus_svc;
+GRANT EXECUTE ON FUNCTION nexus.plain_search_768(nexus.vector, text[], jsonb, text, int, text, text) TO nexus_svc;
+GRANT EXECUTE ON FUNCTION nexus.plain_search_1024(nexus.vector, text[], jsonb, text, int, text, text) TO nexus_svc;
+GRANT EXECUTE ON FUNCTION nexus.text_gated_search_hnsw_first_384(nexus.vector, text, text[], jsonb, text, int, text, text) TO nexus_svc;
+GRANT EXECUTE ON FUNCTION nexus.text_gated_search_hnsw_first_768(nexus.vector, text, text[], jsonb, text, int, text, text) TO nexus_svc;
+GRANT EXECUTE ON FUNCTION nexus.text_gated_search_hnsw_first_1024(nexus.vector, text, text[], jsonb, text, int, text, text) TO nexus_svc;
+GRANT EXECUTE ON FUNCTION nexus.text_gated_search_by_chash_384(nexus.vector, bytea[], text[], jsonb, text, int, text, text) TO nexus_svc;
+GRANT EXECUTE ON FUNCTION nexus.text_gated_search_by_chash_768(nexus.vector, bytea[], text[], jsonb, text, int, text, text) TO nexus_svc;
+GRANT EXECUTE ON FUNCTION nexus.text_gated_search_by_chash_1024(nexus.vector, bytea[], text[], jsonb, text, int, text, text) TO nexus_svc;
+GRANT EXECUTE ON FUNCTION nexus.search_metadata_scoped_384(nexus.vector, text[], text, text, int, text, text, jsonb, int, text, text) TO nexus_svc;
+GRANT EXECUTE ON FUNCTION nexus.search_metadata_scoped_768(nexus.vector, text[], text, text, int, text, text, jsonb, int, text, text) TO nexus_svc;
+GRANT EXECUTE ON FUNCTION nexus.search_metadata_scoped_1024(nexus.vector, text[], text, text, int, text, text, jsonb, int, text, text) TO nexus_svc;
+GRANT EXECUTE ON FUNCTION nexus.search_aspect_scoped_384(nexus.vector, text[], text, text, float8, jsonb, int, text, text) TO nexus_svc;
+GRANT EXECUTE ON FUNCTION nexus.search_aspect_scoped_768(nexus.vector, text[], text, text, float8, jsonb, int, text, text) TO nexus_svc;
+GRANT EXECUTE ON FUNCTION nexus.search_aspect_scoped_1024(nexus.vector, text[], text, text, float8, jsonb, int, text, text) TO nexus_svc;
+GRANT EXECUTE ON FUNCTION nexus.search_graph_hop_384(nexus.vector, text[], text[], text, int, text, jsonb, int, text, text) TO nexus_svc;
+GRANT EXECUTE ON FUNCTION nexus.search_graph_hop_768(nexus.vector, text[], text[], text, int, text, jsonb, int, text, text) TO nexus_svc;
+GRANT EXECUTE ON FUNCTION nexus.search_graph_hop_1024(nexus.vector, text[], text[], text, int, text, jsonb, int, text, text) TO nexus_svc;
+GRANT EXECUTE ON FUNCTION nexus.search_topic_scoped_384(nexus.vector, text, text, int, text, text) TO nexus_svc;
+GRANT EXECUTE ON FUNCTION nexus.search_topic_scoped_768(nexus.vector, text, text, int, text, text) TO nexus_svc;
+GRANT EXECUTE ON FUNCTION nexus.search_topic_scoped_1024(nexus.vector, text, text, int, text, text) TO nexus_svc;
+GRANT EXECUTE ON FUNCTION nexus.taxonomy_ann_query_384(nexus.vector, text, boolean, int, text, text) TO nexus_svc;
+GRANT EXECUTE ON FUNCTION nexus.taxonomy_ann_query_768(nexus.vector, text, boolean, int, text, text) TO nexus_svc;
+GRANT EXECUTE ON FUNCTION nexus.taxonomy_ann_query_1024(nexus.vector, text, boolean, int, text, text) TO nexus_svc;
+GRANT EXECUTE ON FUNCTION nexus.assign_from_chashes_384(text, text[], boolean, text, text) TO nexus_svc;
+GRANT EXECUTE ON FUNCTION nexus.assign_from_chashes_768(text, text[], boolean, text, text) TO nexus_svc;
+GRANT EXECUTE ON FUNCTION nexus.assign_from_chashes_1024(text, text[], boolean, text, text) TO nexus_svc;
+GRANT EXECUTE ON FUNCTION nexus.cross_preview_384(text, text[], text, text) TO nexus_svc;
+GRANT EXECUTE ON FUNCTION nexus.cross_preview_768(text, text[], text, text) TO nexus_svc;
+GRANT EXECUTE ON FUNCTION nexus.cross_preview_1024(text, text[], text, text) TO nexus_svc;
+
+DO $post$
+DECLARE
+    n int;
+    stale text;
+BEGIN
+    SELECT count(*) INTO n
+      FROM pg_catalog.pg_proc p
+     WHERE p.pronamespace = 'nexus'::pg_catalog.regnamespace AND p.proname IN ('plain_search_384', 'plain_search_768', 'plain_search_1024', 'text_gated_search_hnsw_first_384', 'text_gated_search_hnsw_first_768', 'text_gated_search_hnsw_first_1024', 'text_gated_search_by_chash_384', 'text_gated_search_by_chash_768', 'text_gated_search_by_chash_1024', 'search_metadata_scoped_384', 'search_metadata_scoped_768', 'search_metadata_scoped_1024', 'search_aspect_scoped_384', 'search_aspect_scoped_768', 'search_aspect_scoped_1024', 'search_graph_hop_384', 'search_graph_hop_768', 'search_graph_hop_1024', 'search_topic_scoped_384', 'search_topic_scoped_768', 'search_topic_scoped_1024', 'taxonomy_ann_query_384', 'taxonomy_ann_query_768', 'taxonomy_ann_query_1024', 'assign_from_chashes_384', 'assign_from_chashes_768', 'assign_from_chashes_1024', 'cross_preview_384', 'cross_preview_768', 'cross_preview_1024');
+    IF n <> 30 THEN
+        SELECT string_agg(p.proname || '(' || pg_catalog.pg_get_function_identity_arguments(p.oid) || ')', ', ')
+          INTO stale
+          FROM pg_catalog.pg_proc p
+         WHERE p.pronamespace = 'nexus'::pg_catalog.regnamespace AND p.proname IN ('plain_search_384', 'plain_search_768', 'plain_search_1024', 'text_gated_search_hnsw_first_384', 'text_gated_search_hnsw_first_768', 'text_gated_search_hnsw_first_1024', 'text_gated_search_by_chash_384', 'text_gated_search_by_chash_768', 'text_gated_search_by_chash_1024', 'search_metadata_scoped_384', 'search_metadata_scoped_768', 'search_metadata_scoped_1024', 'search_aspect_scoped_384', 'search_aspect_scoped_768', 'search_aspect_scoped_1024', 'search_graph_hop_384', 'search_graph_hop_768', 'search_graph_hop_1024', 'search_topic_scoped_384', 'search_topic_scoped_768', 'search_topic_scoped_1024', 'taxonomy_ann_query_384', 'taxonomy_ann_query_768', 'taxonomy_ann_query_1024', 'assign_from_chashes_384', 'assign_from_chashes_768', 'assign_from_chashes_1024', 'cross_preview_384', 'cross_preview_768', 'cross_preview_1024');
+        RAISE EXCEPTION 'vectors-031-1: expected exactly 30 read-path functions (one signature each), found %: %', n, stale;
+    END IF;
+END
+$post$;
+]]></sql>
+        <rollback>
+            <sql splitStatements="false" stripComments="false"><![CDATA[
+DROP FUNCTION IF EXISTS nexus.plain_search_384(nexus.vector, text[], jsonb, text, int, text, text);
+DROP FUNCTION IF EXISTS nexus.plain_search_768(nexus.vector, text[], jsonb, text, int, text, text);
+DROP FUNCTION IF EXISTS nexus.plain_search_1024(nexus.vector, text[], jsonb, text, int, text, text);
+DROP FUNCTION IF EXISTS nexus.text_gated_search_hnsw_first_384(nexus.vector, text, text[], jsonb, text, int, text, text);
+DROP FUNCTION IF EXISTS nexus.text_gated_search_hnsw_first_768(nexus.vector, text, text[], jsonb, text, int, text, text);
+DROP FUNCTION IF EXISTS nexus.text_gated_search_hnsw_first_1024(nexus.vector, text, text[], jsonb, text, int, text, text);
+DROP FUNCTION IF EXISTS nexus.text_gated_search_by_chash_384(nexus.vector, bytea[], text[], jsonb, text, int, text, text);
+DROP FUNCTION IF EXISTS nexus.text_gated_search_by_chash_768(nexus.vector, bytea[], text[], jsonb, text, int, text, text);
+DROP FUNCTION IF EXISTS nexus.text_gated_search_by_chash_1024(nexus.vector, bytea[], text[], jsonb, text, int, text, text);
+DROP FUNCTION IF EXISTS nexus.search_metadata_scoped_384(nexus.vector, text[], text, text, int, text, text, jsonb, int, text, text);
+DROP FUNCTION IF EXISTS nexus.search_metadata_scoped_768(nexus.vector, text[], text, text, int, text, text, jsonb, int, text, text);
+DROP FUNCTION IF EXISTS nexus.search_metadata_scoped_1024(nexus.vector, text[], text, text, int, text, text, jsonb, int, text, text);
+DROP FUNCTION IF EXISTS nexus.search_aspect_scoped_384(nexus.vector, text[], text, text, float8, jsonb, int, text, text);
+DROP FUNCTION IF EXISTS nexus.search_aspect_scoped_768(nexus.vector, text[], text, text, float8, jsonb, int, text, text);
+DROP FUNCTION IF EXISTS nexus.search_aspect_scoped_1024(nexus.vector, text[], text, text, float8, jsonb, int, text, text);
+DROP FUNCTION IF EXISTS nexus.search_graph_hop_384(nexus.vector, text[], text[], text, int, text, jsonb, int, text, text);
+DROP FUNCTION IF EXISTS nexus.search_graph_hop_768(nexus.vector, text[], text[], text, int, text, jsonb, int, text, text);
+DROP FUNCTION IF EXISTS nexus.search_graph_hop_1024(nexus.vector, text[], text[], text, int, text, jsonb, int, text, text);
+DROP FUNCTION IF EXISTS nexus.search_topic_scoped_384(nexus.vector, text, text, int, text, text);
+DROP FUNCTION IF EXISTS nexus.search_topic_scoped_768(nexus.vector, text, text, int, text, text);
+DROP FUNCTION IF EXISTS nexus.search_topic_scoped_1024(nexus.vector, text, text, int, text, text);
+DROP FUNCTION IF EXISTS nexus.taxonomy_ann_query_384(nexus.vector, text, boolean, int, text, text);
+DROP FUNCTION IF EXISTS nexus.taxonomy_ann_query_768(nexus.vector, text, boolean, int, text, text);
+DROP FUNCTION IF EXISTS nexus.taxonomy_ann_query_1024(nexus.vector, text, boolean, int, text, text);
+DROP FUNCTION IF EXISTS nexus.assign_from_chashes_384(text, text[], boolean, text, text);
+DROP FUNCTION IF EXISTS nexus.assign_from_chashes_768(text, text[], boolean, text, text);
+DROP FUNCTION IF EXISTS nexus.assign_from_chashes_1024(text, text[], boolean, text, text);
+DROP FUNCTION IF EXISTS nexus.cross_preview_384(text, text[], text, text);
+DROP FUNCTION IF EXISTS nexus.cross_preview_768(text, text[], text, text);
+DROP FUNCTION IF EXISTS nexus.cross_preview_1024(text, text[], text, text);
+]]></sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="vectors-031-2" author="nexus-3wh8d.15">
+        <comment>RDR-225 read path, the text-gate probe: text_gate_probe_384/768/1024 gain p_embedding_model and p_tenant with the same explicit predicates and keep the shape they have now. Where vectors-029 ran and its guard still holds (the owner policy names exactly the migrating role, no RLS-subject login role has that role's privileges) they are SECURITY DEFINER with a fixed search_path and the fail-closed GUC tenant predicate, and are redefined as plpgsql with a function-level plan_cache_mode = force_custom_plan (a SQL definer function is never inlined and its body is planned without the call's values, so the predicates could prune only at executor start-up; plpgsql plans with the call's values), EXECUTE revoked from PUBLIC and granted to nexus_svc, the owner policy untouched, and vectors-029's post-condition re-checked. Otherwise (vectors-029 was skipped, or the guard no longer holds: nexus_svc or another RLS-subject login role has the migrating role's privileges, or the policy does not name it) they are still SECURITY INVOKER and stay LANGUAGE sql, which inlines into the caller, granted to nexus_svc. One changeset that chooses by what the old probes are, and not a pair of mutually exclusive preconditioned ones, so a normal walk records no MARK_RAN row for it. No data effect.</comment>
+        <sql splitStatements="false" stripComments="false"><![CDATA[
+DO $do$
+DECLARE
+    me      oid := (SELECT r.oid FROM pg_catalog.pg_roles r WHERE r.rolname = current_user);
+    definer boolean;
+    pol_ok  boolean;
+    exposed boolean;
+BEGIN
+    SELECT count(*) = 3 INTO definer
+      FROM pg_catalog.pg_proc p
+     WHERE p.pronamespace = 'nexus'::pg_catalog.regnamespace
+       AND p.proname IN ('text_gate_probe_384', 'text_gate_probe_768', 'text_gate_probe_1024')
+       AND p.prosecdef;
+    -- vectors-029's guard, kept: a definer probe is only safe beside the owner policy that names exactly the
+    -- migrating role, and only while no RLS-subject login role has that role's privileges. If any part is
+    -- missing (a later boot migrated as a different role, a membership granted since), take the invoker branch:
+    -- correct rows, the slower plan, and no definer body without the policy that makes it useful.
+    SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_policy pol
+                    WHERE pol.polrelid = 'nexus.chunks'::pg_catalog.regclass
+                      AND pol.polname = 'chunks_gate_probe_owner_read'
+                      AND pol.polroles = ARRAY[me])
+      INTO pol_ok;
+    SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_roles r
+                    WHERE (r.rolname = 'nexus_svc' AND (r.rolname = current_user OR pg_catalog.pg_has_role(r.oid, current_user, 'USAGE')))
+                       OR (r.rolname <> current_user AND pg_catalog.pg_has_role(r.oid, current_user, 'USAGE')
+                           AND NOT r.rolsuper AND NOT r.rolbypassrls AND r.rolcanlogin))
+      INTO exposed;
+    definer := definer AND pol_ok AND NOT exposed;
+    DROP FUNCTION IF EXISTS nexus.text_gate_probe_384(text, text[], jsonb, text, int);
+    DROP FUNCTION IF EXISTS nexus.text_gate_probe_768(text, text[], jsonb, text, int);
+    DROP FUNCTION IF EXISTS nexus.text_gate_probe_1024(text, text[], jsonb, text, int);
+    IF definer THEN
+        EXECUTE $f$CREATE OR REPLACE FUNCTION nexus.text_gate_probe_384(
+    p_text         text,
+    p_collections  text[],
+    p_where        jsonb,
+    p_where_path   text,
+    p_cap          int,
+    p_embedding_model text,
+    p_tenant          text
+) RETURNS SETOF bytea
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+SET plan_cache_mode = force_custom_plan
+AS $$
+BEGIN
+    RETURN QUERY
+    SELECT c.chash
+      FROM nexus.chunks c
+     WHERE c.embedding_model = p_embedding_model
+       AND c.tenant_id = p_tenant
+       AND c.tenant_id = NULLIF(pg_catalog.current_setting('nexus.tenant', true), '')
+       AND c.collection = ANY(p_collections)
+       AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))
+       AND (p_where IS NULL OR c.metadata @> p_where)
+       AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
+       AND (c.chunk_tsv @@ pg_catalog.plainto_tsquery('english', p_text) OR p_text OPERATOR(nexus.<%) c.chunk_text)
+     LIMIT p_cap;
+END
+$$$f$;
+        EXECUTE $f$CREATE OR REPLACE FUNCTION nexus.text_gate_probe_768(
+    p_text         text,
+    p_collections  text[],
+    p_where        jsonb,
+    p_where_path   text,
+    p_cap          int,
+    p_embedding_model text,
+    p_tenant          text
+) RETURNS SETOF bytea
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+SET plan_cache_mode = force_custom_plan
+AS $$
+BEGIN
+    RETURN QUERY
+    SELECT c.chash
+      FROM nexus.chunks c
+     WHERE c.embedding_model = p_embedding_model
+       AND c.tenant_id = p_tenant
+       AND c.tenant_id = NULLIF(pg_catalog.current_setting('nexus.tenant', true), '')
+       AND c.collection = ANY(p_collections)
+       AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))
+       AND (p_where IS NULL OR c.metadata @> p_where)
+       AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
+       AND (c.chunk_tsv @@ pg_catalog.plainto_tsquery('english', p_text) OR p_text OPERATOR(nexus.<%) c.chunk_text)
+     LIMIT p_cap;
+END
+$$$f$;
+        EXECUTE $f$CREATE OR REPLACE FUNCTION nexus.text_gate_probe_1024(
+    p_text         text,
+    p_collections  text[],
+    p_where        jsonb,
+    p_where_path   text,
+    p_cap          int,
+    p_embedding_model text,
+    p_tenant          text
+) RETURNS SETOF bytea
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+SET plan_cache_mode = force_custom_plan
+AS $$
+BEGIN
+    RETURN QUERY
+    SELECT c.chash
+      FROM nexus.chunks c
+     WHERE c.embedding_model = p_embedding_model
+       AND c.tenant_id = p_tenant
+       AND c.tenant_id = NULLIF(pg_catalog.current_setting('nexus.tenant', true), '')
+       AND c.collection = ANY(p_collections)
+       AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))
+       AND (p_where IS NULL OR c.metadata @> p_where)
+       AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
+       AND (c.chunk_tsv @@ pg_catalog.plainto_tsquery('english', p_text) OR p_text OPERATOR(nexus.<%) c.chunk_text)
+     LIMIT p_cap;
+END
+$$$f$;
+        REVOKE EXECUTE ON FUNCTION nexus.text_gate_probe_384(text, text[], jsonb, text, int, text, text) FROM PUBLIC;
+        GRANT EXECUTE ON FUNCTION nexus.text_gate_probe_384(text, text[], jsonb, text, int, text, text) TO nexus_svc;
+        REVOKE EXECUTE ON FUNCTION nexus.text_gate_probe_768(text, text[], jsonb, text, int, text, text) FROM PUBLIC;
+        GRANT EXECUTE ON FUNCTION nexus.text_gate_probe_768(text, text[], jsonb, text, int, text, text) TO nexus_svc;
+        REVOKE EXECUTE ON FUNCTION nexus.text_gate_probe_1024(text, text[], jsonb, text, int, text, text) FROM PUBLIC;
+        GRANT EXECUTE ON FUNCTION nexus.text_gate_probe_1024(text, text[], jsonb, text, int, text, text) TO nexus_svc;
+    ELSE
+        EXECUTE $f$CREATE OR REPLACE FUNCTION nexus.text_gate_probe_384(
+    p_text         text,
+    p_collections  text[],
+    p_where        jsonb,
+    p_where_path   text,
+    p_cap          int,
+    p_embedding_model text,
+    p_tenant          text
+) RETURNS SETOF bytea
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT c.chash
+      FROM nexus.chunks c
+     WHERE c.embedding_model = p_embedding_model
+       AND c.tenant_id = p_tenant
+       AND c.tenant_id = NULLIF(pg_catalog.current_setting('nexus.tenant', true), '')
+       AND c.collection = ANY(p_collections)
+       AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))
+       AND (p_where IS NULL OR c.metadata @> p_where)
+       AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
+       AND (c.chunk_tsv @@ pg_catalog.plainto_tsquery('english', p_text) OR p_text OPERATOR(nexus.<%) c.chunk_text)
+     LIMIT p_cap
+$$$f$;
+        EXECUTE $f$CREATE OR REPLACE FUNCTION nexus.text_gate_probe_768(
+    p_text         text,
+    p_collections  text[],
+    p_where        jsonb,
+    p_where_path   text,
+    p_cap          int,
+    p_embedding_model text,
+    p_tenant          text
+) RETURNS SETOF bytea
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT c.chash
+      FROM nexus.chunks c
+     WHERE c.embedding_model = p_embedding_model
+       AND c.tenant_id = p_tenant
+       AND c.tenant_id = NULLIF(pg_catalog.current_setting('nexus.tenant', true), '')
+       AND c.collection = ANY(p_collections)
+       AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))
+       AND (p_where IS NULL OR c.metadata @> p_where)
+       AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
+       AND (c.chunk_tsv @@ pg_catalog.plainto_tsquery('english', p_text) OR p_text OPERATOR(nexus.<%) c.chunk_text)
+     LIMIT p_cap
+$$$f$;
+        EXECUTE $f$CREATE OR REPLACE FUNCTION nexus.text_gate_probe_1024(
+    p_text         text,
+    p_collections  text[],
+    p_where        jsonb,
+    p_where_path   text,
+    p_cap          int,
+    p_embedding_model text,
+    p_tenant          text
+) RETURNS SETOF bytea
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT c.chash
+      FROM nexus.chunks c
+     WHERE c.embedding_model = p_embedding_model
+       AND c.tenant_id = p_tenant
+       AND c.tenant_id = NULLIF(pg_catalog.current_setting('nexus.tenant', true), '')
+       AND c.collection = ANY(p_collections)
+       AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))
+       AND (p_where IS NULL OR c.metadata @> p_where)
+       AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
+       AND (c.chunk_tsv @@ pg_catalog.plainto_tsquery('english', p_text) OR p_text OPERATOR(nexus.<%) c.chunk_text)
+     LIMIT p_cap
+$$$f$;
+        GRANT EXECUTE ON FUNCTION nexus.text_gate_probe_384(text, text[], jsonb, text, int, text, text) TO nexus_svc;
+        GRANT EXECUTE ON FUNCTION nexus.text_gate_probe_768(text, text[], jsonb, text, int, text, text) TO nexus_svc;
+        GRANT EXECUTE ON FUNCTION nexus.text_gate_probe_1024(text, text[], jsonb, text, int, text, text) TO nexus_svc;
+    END IF;
+END
+$do$;
+
+DO $post$
+DECLARE
+    n int;
+    stale text;
+BEGIN
+    SELECT count(*) INTO n
+      FROM pg_catalog.pg_proc p
+     WHERE p.pronamespace = 'nexus'::pg_catalog.regnamespace AND p.proname IN ('text_gate_probe_384', 'text_gate_probe_768', 'text_gate_probe_1024');
+    IF n <> 3 THEN
+        SELECT string_agg(p.proname || '(' || pg_catalog.pg_get_function_identity_arguments(p.oid) || ')', ', ')
+          INTO stale
+          FROM pg_catalog.pg_proc p
+         WHERE p.pronamespace = 'nexus'::pg_catalog.regnamespace AND p.proname IN ('text_gate_probe_384', 'text_gate_probe_768', 'text_gate_probe_1024');
+        RAISE EXCEPTION 'vectors-031: expected exactly 3 read-path functions (one signature each), found %: %', n, stale;
+    END IF;
+END
+$post$;
+
+DO $post$
+DECLARE
+    me         oid := (SELECT r.oid FROM pg_catalog.pg_roles r WHERE r.rolname = current_user);
+    n_definer  int;
+    bad_owner  text;
+    pol_roles  oid[];
+    exposed_roles text;
+BEGIN
+    SELECT count(*) FILTER (WHERE p.prosecdef),
+           string_agg(p.proname, ', ') FILTER (WHERE p.prosecdef AND p.proowner <> me)
+      INTO n_definer, bad_owner
+      FROM pg_catalog.pg_proc p
+     WHERE p.pronamespace = 'nexus'::pg_catalog.regnamespace
+       AND p.proname IN ('text_gate_probe_384', 'text_gate_probe_768', 'text_gate_probe_1024');
+    IF n_definer NOT IN (0, 3) THEN
+        RAISE EXCEPTION 'vectors-031-2: % of the 3 text_gate_probe functions are SECURITY DEFINER; the three must agree', n_definer;
+    END IF;
+    IF bad_owner IS NOT NULL THEN
+        RAISE EXCEPTION 'vectors-031-2: probe(s) % are SECURITY DEFINER but not owned by the migrating role %', bad_owner, current_user;
+    END IF;
+    -- vectors-029's post-condition, kept for the definer shape (see THE GUARD in vectors-029).
+    IF n_definer = 3 THEN
+        SELECT pol.polroles INTO pol_roles
+          FROM pg_catalog.pg_policy pol
+         WHERE pol.polrelid = 'nexus.chunks'::pg_catalog.regclass AND pol.polname = 'chunks_gate_probe_owner_read';
+        IF pol_roles IS DISTINCT FROM ARRAY[me] THEN
+            RAISE EXCEPTION 'vectors-031-2: policy chunks_gate_probe_owner_read must name exactly the migrating role % and nothing else, found %', current_user, pol_roles;
+        END IF;
+        SELECT string_agg(r.rolname, ', ' ORDER BY r.rolname) INTO exposed_roles
+          FROM pg_catalog.pg_roles r
+         WHERE (r.rolname = 'nexus_svc' AND (r.rolname = current_user OR pg_catalog.pg_has_role(r.oid, current_user, 'USAGE')))
+            OR (r.rolname <> current_user AND pg_catalog.pg_has_role(r.oid, current_user, 'USAGE')
+                AND NOT r.rolsuper AND NOT r.rolbypassrls AND r.rolcanlogin);
+        IF exposed_roles IS NOT NULL THEN
+            RAISE EXCEPTION 'vectors-031-2: role(s) % have the privileges of the migrating role %; the owner policy would apply to them and let them read every tenant''s chunks', exposed_roles, current_user;
+        END IF;
+    END IF;
+END
+$post$;
+]]></sql>
+        <rollback>
+            <sql splitStatements="false" stripComments="false"><![CDATA[
+DROP FUNCTION IF EXISTS nexus.text_gate_probe_384(text, text[], jsonb, text, int, text, text);
+DROP FUNCTION IF EXISTS nexus.text_gate_probe_768(text, text[], jsonb, text, int, text, text);
+DROP FUNCTION IF EXISTS nexus.text_gate_probe_1024(text, text[], jsonb, text, int, text, text);
+]]></sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

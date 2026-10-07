@@ -69,6 +69,9 @@ class CatalogGcAuditProducersTest {
 
         try (Connection su = pg.createConnection("")) {
             PgContainerHelper.applyProductSchema(su);
+            // RDR-225: this tenant is written to by the engine and by direct seeds without ever being
+            // issued a service token, so its partition leaves are created here.
+            PgContainerHelper.ensureTenantPartitions(DSL.using(su, SQLDialect.POSTGRES), TENANT);
         }
 
         try (Connection su = pg.createConnection("")) {
@@ -107,12 +110,15 @@ class CatalogGcAuditProducersTest {
     private void insertManifestRow(Connection su, String tenant, String docId, String chashHex, String collection)
             throws Exception {
         try (PreparedStatement ps = su.prepareStatement(
-                "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection) "
-                + "VALUES (?, ?, 0, decode(?, 'hex'), ?)")) {
+                "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection, embedding_model) "
+                + "VALUES (?, ?, 0, decode(?, 'hex'), ?, (SELECT embedding_model FROM nexus.catalog_collections "
+                + "WHERE tenant_id = ? AND name = ?))")) {
             ps.setString(1, tenant);
             ps.setString(2, docId);
             ps.setString(3, chashHex);
             ps.setString(4, collection);
+            ps.setString(5, tenant);
+            ps.setString(6, collection);
             ps.execute();
         }
     }
@@ -188,13 +194,17 @@ class CatalogGcAuditProducersTest {
             String zeroVec = "[" + "0,".repeat(383) + "0]";
             for (String c : List.of(dropped)) {
                 var ps = su.prepareStatement(
-                    "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_384)"
-                    + " VALUES (?, ?, decode(?, 'hex'), ?, ?::nexus.vector) ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
+                    "INSERT INTO nexus.chunks (tenant_id, collection, chash, embedding_model, chunk_text, embedding_384)"
+                    + " VALUES (?, ?, decode(?, 'hex'), (SELECT embedding_model FROM nexus.catalog_collections"
+                    + " WHERE tenant_id = ? AND name = ?), ?, ?::nexus.vector)"
+                    + " ON CONFLICT (tenant_id, collection, chash, embedding_model) DO NOTHING");
                 ps.setString(1, TENANT);
                 ps.setString(2, collection);
                 ps.setString(3, c);
-                ps.setString(4, "seed text " + c);
-                ps.setString(5, zeroVec);
+                ps.setString(4, TENANT);
+                ps.setString(5, collection);
+                ps.setString(6, "seed text " + c);
+                ps.setString(7, zeroVec);
                 ps.executeUpdate();
             }
         }
@@ -216,13 +226,17 @@ class CatalogGcAuditProducersTest {
             su.setAutoCommit(true);
             String zeroVec = "[" + "0,".repeat(383) + "0]";
             var ps = su.prepareStatement(
-                "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_384)"
-                + " VALUES (?, ?, decode(?, 'hex'), ?, ?::nexus.vector) ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
+                "INSERT INTO nexus.chunks (tenant_id, collection, chash, embedding_model, chunk_text, embedding_384)"
+                + " VALUES (?, ?, decode(?, 'hex'), (SELECT embedding_model FROM nexus.catalog_collections"
+                + " WHERE tenant_id = ? AND name = ?), ?, ?::nexus.vector)"
+                + " ON CONFLICT (tenant_id, collection, chash, embedding_model) DO NOTHING");
             ps.setString(1, TENANT);
             ps.setString(2, collection);
             ps.setString(3, kept);
-            ps.setString(4, "seed text " + kept);
-            ps.setString(5, zeroVec);
+            ps.setString(4, TENANT);
+            ps.setString(5, collection);
+            ps.setString(6, "seed text " + kept);
+            ps.setString(7, zeroVec);
             ps.executeUpdate();
         }
 
@@ -286,13 +300,17 @@ class CatalogGcAuditProducersTest {
             su.setAutoCommit(true);
             String zeroVec = "[" + "0,".repeat(383) + "0]";
             var ps = su.prepareStatement(
-                "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_384)"
-                + " VALUES (?, ?, decode(?, 'hex'), ?, ?::nexus.vector) ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
+                "INSERT INTO nexus.chunks (tenant_id, collection, chash, embedding_model, chunk_text, embedding_384)"
+                + " VALUES (?, ?, decode(?, 'hex'), (SELECT embedding_model FROM nexus.catalog_collections"
+                + " WHERE tenant_id = ? AND name = ?), ?, ?::nexus.vector)"
+                + " ON CONFLICT (tenant_id, collection, chash, embedding_model) DO NOTHING");
             ps.setString(1, TENANT);
             ps.setString(2, collection);
             ps.setString(3, orphan);
-            ps.setString(4, "seed text " + orphan);
-            ps.setString(5, zeroVec);
+            ps.setString(4, TENANT);
+            ps.setString(5, collection);
+            ps.setString(6, "seed text " + orphan);
+            ps.setString(7, zeroVec);
             ps.executeUpdate();
         }
         // No manifest row for `orphan` -- it is unreferenced, so quarantineOrphans moves it
@@ -551,7 +569,8 @@ class CatalogGcAuditProducersTest {
             su.createStatement().execute(
                 "ALTER TABLE nexus.catalog_document_chunks "
                 + "ADD CONSTRAINT fk_catalog_chunks_chunk "
-                + "FOREIGN KEY (tenant_id, collection, chash) REFERENCES nexus.chunks (tenant_id, collection, chash) "
+                + "FOREIGN KEY (tenant_id, collection, chash, embedding_model) "
+                + "REFERENCES nexus.chunks (tenant_id, collection, chash, embedding_model) "
                 + "ON UPDATE CASCADE DEFERRABLE INITIALLY IMMEDIATE NOT VALID");
         }
     }

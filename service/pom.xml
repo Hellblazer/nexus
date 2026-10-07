@@ -423,7 +423,18 @@
                                     <database>
                                         <name>org.jooq.meta.postgres.PostgresDatabase</name>
                                         <includes>.*</includes>
-                                        <excludes>databasechangelog|databasechangeloglock</excludes>
+                                        <!-- RDR-225 (nexus-3wh8d.8): chunks and taxonomy_centroids are LIST-partitioned
+                                             by embedding_model, then tenant_id, and the second level is DDL created at run
+                                             time (one leaf per tenant per model), so codegen must see only the PARENTS.
+                                             Excluded by name: the model partitions chunks_m<8 hex> and the tenant leaves
+                                             chunks_m<8 hex>_t_<16 hex> (the same two shapes under taxonomy_centroids), the
+                                             retired pre-walk tables kept for 14 days (chunks_retired_225,
+                                             taxonomy_centroids_retired_225), and the walk's staging names (chunks_new,
+                                             taxonomy_centroids_new, which the swap renames away). A pattern that missed
+                                             one would generate a Record class per leaf and move
+                                             JooqRecordReflectionFeatureTest's count with every tenant in the build's
+                                             database. -->
+                                        <excludes>databasechangelog|databasechangeloglock|(chunks|taxonomy_centroids)_m[0-9a-f]{8}(_t_[0-9a-f]{16})?|(chunks|taxonomy_centroids)_retired_225|(chunks|taxonomy_centroids)_new</excludes>
                                         <schemata>
                                             <schema>
                                                 <inputSchema>nexus</inputSchema>

@@ -1645,9 +1645,9 @@ class SchemaMigratorIntegrationTest {
                     // schema-qualified ::nexus.vector cast, which would silently change what
                     // this exact statement proves (that a bare cast still resolves here).
                     su.createStatement().execute(
-                        "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_384) VALUES "
+                        "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_1024) VALUES "
                         + "('" + tenant + "', '" + collection + "', decode('" + goodChash + "', 'hex'), 'good text', "
-                        + "('[" + "0.1,".repeat(383) + "0.1]')::vector)");
+                        + "('[" + "0.1,".repeat(1023) + "0.1]')::vector)");   // RDR-225: voyage-context-3 is 1024-wide
                     dsl(su).insertInto(CATALOG_DOCUMENT_CHUNKS,
                             CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
                             CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
@@ -1983,25 +1983,31 @@ class SchemaMigratorIntegrationTest {
                     dsl(su).alterTable(CHUNKS).dropConstraintIfExists("chunks_collection_fk").execute();
                     // Legal here: the FK is absent. A genuinely unregistered
                     // collection -- no catalog_collections row for (tenant, name).
+                    // RDR-225: a chunk carries a model, and the tenant needs its partition leaves.
+                    PgContainerHelper.ensureTenantPartitions(dsl(su), tenant);
                     dsl(su).insertInto(CHUNKS,
-                            CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.CHUNK_TEXT,
-                            CHUNKS.EMBEDDING_1024)
-                        .values(tenant, unregCollection, java.util.HexFormat.of().parseHex(chash), "neg text",
+                            CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL,
+                            CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_1024)
+                        .values(tenant, unregCollection, java.util.HexFormat.of().parseHex(chash),
+                            "voyage-context-3", "neg text",
                             dev.nexus.service.jooq.binding.Vector.parse(
                                 "[" + "0.1,".repeat(1023) + "0.1]"))
                         .execute();
-                    PgContainerHelper.addFkNotValid(su, CHUNKS, "chunks_collection_fk", "collection",
-                        CATALOG_COLLECTIONS, "name", "ON DELETE RESTRICT");
 
-                    // The naive shape: VALIDATE alone, skipping fk-004-1-reconcile's
-                    // additive stub-register. Must throw against the unregistered row.
-                    // A jOOQ Routine call wraps the underlying PSQLException in jOOQ's own
-                    // DataAccessException.
-                    assertThatThrownBy(() -> PgContainerHelper.validateConstraint(su, CHUNKS,
-                            "chunks_collection_fk"))
-                        .as("VALIDATE CONSTRAINT alone, without fk-004-1-reconcile's additive "
+                    // The naive shape: adding the registry FK without fk-004-1-reconcile's
+                    // additive stub-register. RDR-225: chunks is partitioned, and PostgreSQL does
+                    // not accept NOT VALID for a partitioned referencing table, so the FK is
+                    // validated as it is added; either way it must throw against the unregistered row.
+                    // jOOQ wraps the underlying PSQLException in its own DataAccessException.
+                    assertThatThrownBy(() -> dsl(su).alterTable(CHUNKS).add(
+                            org.jooq.impl.DSL.constraint("chunks_collection_fk")
+                                .foreignKey(CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.EMBEDDING_MODEL)
+                                .references(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID,
+                                    CATALOG_COLLECTIONS.NAME, CATALOG_COLLECTIONS.EMBEDDING_MODEL)
+                                .onDeleteRestrict()).execute())
+                        .as("adding the registry FK, without fk-004-1-reconcile's "
                             + "stub-register, must fail loud against a genuinely unregistered "
-                            + "collection -- proves the VALIDATE changeset actually enforces the "
+                            + "collection -- proves the FK actually enforces the "
                             + "invariant rather than trivially passing (nexus-o8dil.49)")
                         .isInstanceOf(org.jooq.exception.DataAccessException.class)
                         .hasMessageContaining("chunks_collection_fk");
@@ -2830,8 +2836,10 @@ class SchemaMigratorIntegrationTest {
 
     private Set<String> tablesInSchema(Connection conn, String schema) throws Exception {
         Set<String> names = new HashSet<>();
+        // RDR-225: chunks and taxonomy_centroids are partitioned parents, which JDBC reports as
+        // "PARTITIONED TABLE" (their partitions and leaves are plain "TABLE" rows, harmless to containsAll).
         ResultSet rs = conn.getMetaData().getTables(null, schema, null,
-            new String[]{"TABLE"});
+            new String[]{"TABLE", "PARTITIONED TABLE"});
         while (rs.next()) {
             names.add(rs.getString("TABLE_NAME").toLowerCase());
         }

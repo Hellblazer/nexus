@@ -32,9 +32,9 @@ def psql(sql: str) -> str:
         [
             str(Path(state["pg_bin"]) / "psql"), "-h", "127.0.0.1", "-p", str(state["pg_port"]),
             "-U", state["pg_user"], "-d", state["pg_dbname"],
-            "-v", "ON_ERROR_STOP=1", "-At", "-c", sql,
+            "-v", "ON_ERROR_STOP=1", "-At", "-1", "-f", "-",
         ],
-        capture_output=True, text=True, timeout=60,
+        input=sql, capture_output=True, text=True, timeout=60,
     )
     assert proc.returncode == 0, f"psql failed: {proc.stderr}\nSQL: {sql}"
     return proc.stdout
@@ -60,9 +60,15 @@ def seed_chunk(tenant: str, collection: str, text: str, metadata: dict) -> str:
     register_collection(tenant, collection)
     vec = "[" + ",".join(["0"] * 768) + "]"
     psql(
-        "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_768, metadata) "
+        "INSERT INTO nexus.chunks "
+        "(tenant_id, collection, chash, chunk_text, embedding_768, metadata, embedding_model) "
         f"VALUES ({lit(tenant)}, {lit(collection)}, decode({lit(chash)}, 'hex'), {lit(text)}, "
-        f"{lit(vec)}::nexus.vector, {lit(json.dumps({'chunk_text_hash': chash, **metadata}))}::jsonb) "
+        f"{lit(vec)}::nexus.vector, {lit(json.dumps({'chunk_text_hash': chash, **metadata}))}::jsonb, "
+        # RDR-225: the row carries its collection's registered model (the partition route and the
+        # composite foreign key), which a caller that registered the collection under another
+        # state has already fixed.
+        "(SELECT embedding_model FROM nexus.catalog_collections "
+        f"WHERE tenant_id = {lit(tenant)} AND name = {lit(collection)})) "
         "ON CONFLICT DO NOTHING"
     )
     return chash

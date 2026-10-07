@@ -192,7 +192,8 @@ class HybridSelectiveGateTest {
         // production no longer executes. The behavioral tests below anchor that
         // production actually returns the right rows at fixture scale; production-scale
         // recall is the conexus xr7.8.9 gate's.
-        Table<?> gateFn = TEXT_GATE_PROBE_1024.call(TOKEN, new String[] {COLL}, null, null, TARGETS + 1);
+        Table<?> gateFn = TEXT_GATE_PROBE_1024.call(
+            TOKEN, new String[] {COLL}, null, null, TARGETS + 1, "voyage-context-3", TENANT);
         // Since vectors-029 (nexus-wbfpw.48) the probe is a SECURITY DEFINER function, which the planner
         // never inlines: EXPLAIN of the call is one Function Scan and shows nothing of the body. The
         // probe's index use is pinned where it can be seen and where it is true to production, in
@@ -209,7 +210,7 @@ class HybridSelectiveGateTest {
             .map(c -> Chash.fromHex(c).toBytes())
             .toArray(byte[][]::new);
         Table<?> rankFn = TEXT_GATED_SEARCH_BY_CHASH_1024.call(
-            queryVector(), chashes, new String[] {COLL}, null, null, 50);
+            queryVector(), chashes, new String[] {COLL}, null, null, 50, "voyage-context-3", TENANT);
         String rankPlan = explain(rankFn);
         // The rank filters by chash (PK) and sorts by exact distance — the ORDER BY embedding
         // can never be pushed into an HNSW index scan (which is what hnsw.max_scan_tuples
@@ -218,7 +219,10 @@ class HybridSelectiveGateTest {
         assertThat(rankPlan)
             .as("rank MUST NOT route through the HNSW index — that is what made the retired "
                 + "plan starvable by hnsw.max_scan_tuples. Plan was:%n%s", rankPlan)
-            .doesNotContain("idx_chunks_embedding_1024");
+            .doesNotContain("idx_chunks_embedding_1024")
+            // RDR-225: the HNSW index is created on the partitioned parent and PostgreSQL names each leaf's
+            // child index <leaf>_embedding_1024_idx, which is the name a plan over the leaf shows.
+            .doesNotContain("embedding_1024_idx");
         assertThat(rankPlan)
             .as("the rank MUST be a Sort over the chash-filtered set (exact distance), "
                 + "not an index-ordered scan. Plan was:%n%s", rankPlan)

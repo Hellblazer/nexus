@@ -164,7 +164,7 @@ class Hygiene004OwnerGrammarUnderscoreTest {
                     assertThat(c.ownerId()).as("branch C owner_id").isEqualTo("legacy_owner");
                     assertThat(c.embeddingModel()).as("branch C embedding_model")
                         .isEqualTo("bge-base-en-v15-768");
-                    assertThat(c.dimension()).as("branch C dimension").isEqualTo(1024);
+                    assertThat(c.dimension()).as("branch C dimension").isEqualTo(768);
                     assertThat(c.lifecycleState()).as("branch C lifecycle_state").isEqualTo("disputed");
 
                     // (4) a genuinely unparseable name (no "__" separator at
@@ -299,15 +299,15 @@ class Hygiene004OwnerGrammarUnderscoreTest {
             chashBytes(TENANT + "-agree"), 1024);
 
         PgContainerHelper.insertCollection(ctx, TENANT, BRANCH_B_QUARANTINE);
-        // Deliberately DISAGREEING dimension (768) against the name's own
-        // token, voyage-code-3 (a known 1024-dim model) -- proves branch B's
+        // (RDR-225: no longer a DISAGREEING dimension; the walk does not carry that legacy shape.)
+        // The name's own token, voyage-code-3, is a 1024-dim model -- branch B's
         // 'quarantine' outcome is unconditional, not dimension-gated.
         Routines.insertChunkBareVector(ctx.configuration(), TENANT, BRANCH_B_QUARANTINE,
-            chashBytes(TENANT + "-quar"), 768);
+            chashBytes(TENANT + "-quar"), 1024);
 
         PgContainerHelper.insertCollection(ctx, TENANT, BRANCH_C_WITH_CHUNKS);
         Routines.insertChunkBareVector(ctx.configuration(), TENANT, BRANCH_C_WITH_CHUNKS,
-            chashBytes(TENANT + "-legacy"), 1024);
+            chashBytes(TENANT + "-legacy"), 768);   // the grandfathered fallback model's width
 
         PgContainerHelper.insertCollection(ctx, TENANT, CONTROL_CONFORMANT);
         Routines.insertChunkBareVector(ctx.configuration(), TENANT, CONTROL_CONFORMANT,

@@ -40,10 +40,125 @@ public final class TokenStore {
 
     private final DataSource dataSource;
     private final java.time.Clock clock;
+    private final TenantCreationBound tenantCreationBound;
 
     public TokenStore(DataSource dataSource, java.time.Clock clock) {
+        this(dataSource, clock, TenantCreationBound.DEFAULT);
+    }
+
+    public TokenStore(DataSource dataSource, java.time.Clock clock, TenantCreationBound tenantCreationBound) {
         this.dataSource = dataSource;
         this.clock = clock;
+        this.tenantCreationBound = tenantCreationBound;
+    }
+
+    /**
+     * RDR-225 (nexus-3wh8d.13): the bound a token INSERT runs under, because the first token row of a
+     * tenant fires {@code nexus.service_tokens_create_tenant_partitions}, which creates the tenant's
+     * leaves under every model partition of {@code chunks} and {@code taxonomy_centroids} inside the
+     * inserting statement.
+     *
+     * <p>That function bounds each lock acquisition with a {@code lock_timeout} of 2 s, not the
+     * creation, and a creation parked on an acquisition holds the earlier ones and queues every
+     * writer that arrives behind it for a lock it holds or waits for, across tenants. Only a
+     * caller-side {@code statement_timeout} bounds the whole creation (a timer inside the function
+     * would arm after the statement started: measured, RDR-225 Technical Design, Locks and bounds), so
+     * each token-insert transaction sets one with {@code SET LOCAL}, and a creation that runs past it
+     * is rolled back, released, and tried again after a pause. The pause is what lets the writers
+     * queued behind it through. After {@code attempts} the call fails with
+     * {@link TenantCreationBusyException}, a retryable 503, and nothing was issued.
+     *
+     * <p>The default is {@link #DEFAULT}: 1 s per attempt, 3 attempts, 200 ms plus up to 200 ms of
+     * jitter between them. The measurement behind each number is in RDR-225 (Locks and bounds,
+     * "Token-insert bound"): a healthy creation took 14 to 140 ms (p95) at four to seven models and
+     * 2 to 300 tenants, so 1 s is seven times the slowest healthy p95 and a stuck creation holds a
+     * writer at most 1 s per attempt instead of 2 s per acquisition (up to 28 s).
+     *
+     * @param statementTimeout per-attempt {@code statement_timeout}
+     * @param attempts         total attempts, at least 1
+     * @param backoff          base pause between attempts; up to the same again is added as jitter
+     */
+    public record TenantCreationBound(java.time.Duration statementTimeout, int attempts,
+                                      java.time.Duration backoff) {
+        public static final TenantCreationBound DEFAULT = new TenantCreationBound(
+            java.time.Duration.ofMillis(1000), 3, java.time.Duration.ofMillis(200));
+
+        public TenantCreationBound {
+            if (statementTimeout == null || statementTimeout.isZero() || statementTimeout.isNegative()) {
+                throw new IllegalArgumentException("statementTimeout must be positive");
+            }
+            if (attempts < 1) {
+                throw new IllegalArgumentException("attempts must be at least 1");
+            }
+            if (backoff == null || backoff.isNegative()) {
+                throw new IllegalArgumentException("backoff must not be negative");
+            }
+        }
+    }
+
+    /**
+     * Run {@code work} in a transaction with the tenant-creation bound, retrying a lock wait. A
+     * SQLSTATE 55P03 (a lock the creation needed was held past its {@code lock_timeout}), 57014 (the
+     * statement ran past {@link TenantCreationBound#statementTimeout()}) or 40P01 (the transaction was
+     * the victim of a deadlock) rolls the attempt back; anything else propagates unchanged. Exhausting the attempts throws
+     * {@link TenantCreationBusyException}.
+     */
+    private <T> T boundedTokenTransaction(String tenant, java.util.function.Function<DSLContext, T> work) {
+        RuntimeException last = null;
+        for (int attempt = 1; attempt <= tenantCreationBound.attempts(); attempt++) {
+            try {
+                return dsl().transactionResult(cfg -> {
+                    DSLContext tx = DSL.using(cfg);
+                    SweepBounds.applyStatementTimeout(tx, tenantCreationBound.statementTimeout());
+                    return work.apply(tx);
+                });
+            } catch (RuntimeException e) {
+                if (!isLockWait(e)) {
+                    throw e;
+                }
+                last = e;
+                log.warn("event=token_insert_lock_wait tenant={} attempt={} of={} sqlstate={}",
+                         tenant, attempt, tenantCreationBound.attempts(), lockWaitState(e));
+                if (attempt < tenantCreationBound.attempts()) {
+                    pauseBeforeRetry();
+                }
+            }
+        }
+        throw new TenantCreationBusyException(tenant, tenantCreationBound.attempts(), last);
+    }
+
+    private void pauseBeforeRetry() {
+        long base = tenantCreationBound.backoff().toMillis();
+        long pause = base + (base == 0 ? 0 : java.util.concurrent.ThreadLocalRandom.current().nextLong(base + 1));
+        try {
+            Thread.sleep(pause);
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("interrupted while waiting to retry a token insert", ie);
+        }
+    }
+
+    private static boolean isLockWait(Throwable t) {
+        return lockWaitState(t) != null;
+    }
+
+    /**
+     * "55P03", "57014" or "40P01" when a cause in {@code t}'s chain carries it, else null. 40P01 is a
+     * deadlock this transaction was chosen to lose: the partition creation holds ACCESS EXCLUSIVE on a
+     * model partition and then queues for the tables that reference chunks, so a writer that holds one
+     * of them and needs that partition closes a cycle, and PostgreSQL may end it on the token
+     * transaction. Nothing was issued, so it is retried like the other two.
+     */
+    static String lockWaitState(Throwable t) {
+        Throwable c = t;
+        for (int depth = 0; c != null && depth < 32; depth++, c = c.getCause()) {
+            if (c instanceof java.sql.SQLException se
+                    && ("55P03".equals(se.getSQLState()) || "57014".equals(se.getSQLState())
+                        || "40P01".equals(se.getSQLState()))) {
+                return se.getSQLState();
+            }
+        }
+        return null;
     }
 
     // ── Scope vocabulary (nexus-868dq, conexus RDR-005 A1) ────────────────────
@@ -238,14 +353,16 @@ public final class TokenStore {
         if (incumbent == null) {
             // Scope set explicitly (not via the column default): root provisioning must
             // never silently change if the default ever does (nexus-868dq).
-            int inserted = dsl()
+            // RDR-225: bounded like every token insert; the default tenant's leaves exist from the
+            // migration, so on this path the trigger finds them and creates nothing.
+            int inserted = boundedTokenTransaction(tenantId, tx -> tx
                 .insertInto(SERVICE_TOKENS)
                 .columns(SERVICE_TOKENS.TOKEN_HASH, SERVICE_TOKENS.TENANT_ID,
                          SERVICE_TOKENS.LABEL, SERVICE_TOKENS.SCOPE)
                 .values(hash, tenantId, ROOT_TOKEN_LABEL, SCOPE_ROOT)
                 .onConflict(SERVICE_TOKENS.TOKEN_HASH)
                 .doNothing()
-                .execute();
+                .execute());
             if (inserted > 0) {
                 log.info("event=root_token_seeded tenant={}", tenantId);
             }
@@ -435,11 +552,13 @@ public final class TokenStore {
         OffsetDateTime expiresAt = ttlSeconds == null
             ? null
             : OffsetDateTime.ofInstant(clock.instant().plusSeconds(ttlSeconds), ZoneOffset.UTC);
-        dsl().insertInto(SERVICE_TOKENS)
+        // RDR-225 (nexus-3wh8d.13): the first token of a tenant creates its partition leaves inside
+        // this INSERT, so it runs in a bounded, retried transaction (see TenantCreationBound).
+        boundedTokenTransaction(tenant, tx -> tx.insertInto(SERVICE_TOKENS)
             .columns(SERVICE_TOKENS.TOKEN_HASH, SERVICE_TOKENS.TENANT_ID,
                      SERVICE_TOKENS.LABEL, SERVICE_TOKENS.EXPIRES_AT, SERVICE_TOKENS.SCOPE)
             .values(hash, tenant, label, expiresAt, scope)
-            .execute();
+            .execute());
         log.info("event=service_token_issued tenant={} label={} ttl={} scope={}",
                  tenant, label, ttlSeconds, scope);
         return new IssuedToken(raw, hash);
@@ -532,8 +651,9 @@ public final class TokenStore {
         }
         OffsetDateTime graceDeadline =
             OffsetDateTime.ofInstant(clock.instant().plusSeconds(graceSeconds), ZoneOffset.UTC);
-        return dsl().transactionResult(cfg -> {
-            DSLContext tx = DSL.using(cfg);
+        // RDR-225: the whole rotation (select, expire, insert) is one bounded, retried transaction;
+        // the replacement row's INSERT fires the tenant-partition trigger like any other token insert.
+        return boundedTokenTransaction(tenant, tx -> {
             org.jooq.Condition condition = SERVICE_TOKENS.TENANT_ID.eq(tenant)
                 .and(SERVICE_TOKENS.REVOKED_AT.isNull())
                 .and(SERVICE_TOKENS.LABEL.isDistinctFrom(ROOT_TOKEN_LABEL))

@@ -586,13 +586,15 @@ class RemapHandlerTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             // RDR-204 nexus-ft04v.4/.5: routed through PgContainerHelper.insertCollection.
-            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, collection);
+            // RDR-225: a chunk carries its collection's model and a 1024-wide vector needs a 1024-dim one.
+            final String model = "voyage-context-3";
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, collection, model);
             for (int i = 1; i <= count; i++) {
                 su.createStatement().execute(
-                    "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(1024) + ") " +
+                    "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, embedding_model, chunk_text, " + DimTables.embeddingColumn(1024) + ") " +
                     "VALUES ('" + TENANT + "', '" + collection + "', decode('" + chash(seedPrefix + i) + "', 'hex'), " +
-                    "'text', ('[1" + ",0".repeat(1023) + "]')::nexus.vector) " +
-                    "ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
+                    "'" + model + "', 'text', ('[1" + ",0".repeat(1023) + "]')::nexus.vector) " +
+                    "ON CONFLICT (tenant_id, collection, chash, embedding_model) DO NOTHING");
             }
         }
     }

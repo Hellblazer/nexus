@@ -330,12 +330,15 @@ class PgVectorEmbedSkipGcRaceTest {
         try (Connection su = pg.createConnection("");
              PreparedStatement ps = su.prepareStatement(
                  "INSERT INTO nexus.catalog_document_chunks "
-                 + "(tenant_id, doc_id, position, chash, collection) VALUES (?, ?, ?, ?, ?)")) {
+                 + "(tenant_id, doc_id, position, chash, collection, embedding_model) VALUES (?, ?, ?, ?, ?, "
+                 + "(SELECT embedding_model FROM nexus.catalog_collections WHERE tenant_id = ? AND name = ?))")) {
             ps.setString(1, TENANT);
             ps.setString(2, tumbler);
             ps.setInt(3, position);
             ps.setBytes(4, java.util.HexFormat.of().parseHex(chash));
             ps.setString(5, COLLECTION);
+            ps.setString(6, TENANT);
+            ps.setString(7, COLLECTION);
             ps.executeUpdate();
         }
     }

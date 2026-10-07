@@ -2,6 +2,9 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.vectors;
 
+import dev.nexus.service.db.CollectionRegistry;
+import dev.nexus.service.db.CollectionRow;
+import dev.nexus.service.db.ModelPartitions;
 import dev.nexus.service.db.PgSession;
 import dev.nexus.service.jooq.binding.Vector;
 import dev.nexus.service.db.TenantScope;
@@ -82,58 +85,82 @@ public final class TaxonomyCentroidRepository {
     }
 
     /**
-     * Upsert centroids, routing each to the {@code embedding_<dim>} column of the unified
-     * {@code nexus.taxonomy_centroids} table by the vector's length. Re-upserting an
-     * existing {@code (tenant, collection, topic_id)} updates the embedding, label, and
-     * doc_count in place (ON CONFLICT update — chroma upsert parity).
+     * Upsert centroids into the {@code embedding_<dim>} column of the unified
+     * {@code nexus.taxonomy_centroids} table. Re-upserting an existing
+     * {@code (tenant, collection, topic_id)} updates the embedding, label, and doc_count in place
+     * (ON CONFLICT update, chroma upsert parity).
      *
-     * <p><b>Dim transition (nexus-2qryr).</b> A re-upsert of the same key with a vector of
-     * a DIFFERENT length — a re-embed under a new model — REPLACES the embedding: the
-     * incoming dim's column is set and the other two are cleared in the same UPDATE, so
-     * the row always satisfies {@code taxonomy_centroids_exactly_one_embedding}. Before
-     * the tables were unified this silently landed the new vector in another shard and
-     * orphaned the old row; after unification, without the clearing, it raised the CHECK
-     * violation. "Fail loud" was considered and rejected: a re-embed is exactly the
-     * legitimate upsert this method's contract promises, and a deployment is single-dim
-     * (RDR-075/077), so a stranded old-dim vector would be unreachable dead data, not
-     * information worth protecting. Pinned by
+     * <p><b>Model and partition (RDR-225, nexus-3wh8d.13).</b> The table is LIST-partitioned by
+     * {@code embedding_model}, then by tenant. Each centroid carries the model of its collection's
+     * {@code catalog_collections} row (an unregistered collection is refused with a 422, since there
+     * is no model to file it under), the primary key is {@code (tenant, collection, topic_id, model)},
+     * and the conflict target names all four. A model with no partition is refused before any SQL,
+     * naming the model. A vector whose length is not the model's dimension is refused before any SQL
+     * too; the partition's CHECK would refuse it anyway, with a message that names neither.
+     *
+     * <p><b>Dim transition (nexus-2qryr).</b> A centroid whose dimension changes is a re-embed under
+     * a new model: the collection was re-registered, so its model differs from the model of the rows
+     * already stored. An upsert cannot move a row across partitions, so the stored row of the same
+     * {@code (tenant, collection, topic_id)} under any OTHER model is deleted and the new one
+     * inserted, in the same transaction. Before the tables were partitioned this was a column swap
+     * inside one row (the other dimension columns cleared in the same UPDATE); a re-embed is still
+     * exactly the legitimate upsert this method's contract promises, and a stranded old-dim vector
+     * would be unreachable dead data. Pinned by
      * {@code TaxonomyCentroidRepositoryTest.upsert_dimTransition_replacesEmbedding}.
      *
-     * @throws IllegalArgumentException if any embedding length is not 384/768/1024
+     * @throws IllegalArgumentException if any embedding length is not 384/768/1024, or is not the
+     *         dimension of its collection's model
+     * @throws dev.nexus.service.db.UnregisteredCollectionException if a record's collection has no
+     *         {@code catalog_collections} row
+     * @throws dev.nexus.service.db.ModelPartitions.ModelPartitionMissingException if a collection's
+     *         model has no partition of {@code nexus.taxonomy_centroids}
      */
     public void upsertCentroids(String tenant, List<CentroidRecord> records) {
         if (records == null || records.isEmpty()) return;
-        // Fail loud BEFORE any SQL if a vector has no per-dim table.
+        // Fail loud BEFORE any SQL if a vector has no per-dim column.
         for (CentroidRecord r : records) {
             int dim = r.embedding().length;
             if (!VALID_DIMS.contains(dim)) {
                 throw new IllegalArgumentException(
                     "centroid for topic " + r.topicId() + " in collection '" + r.collection()
-                    + "' is " + dim + "-dim — no taxonomy_centroids_<dim> table (valid: "
+                    + "' is " + dim + "-dim — no taxonomy_centroids embedding column (valid: "
                     + VALID_DIMS + ")");
             }
         }
         tenantScope.withTenant(tenant, ctx -> {
             for (CentroidRecord r : records) {
-                DimTables.CentroidTable ct = DimTables.CENTROIDS.get(r.embedding().length);
-                var upsert = ctx.insertInto(ct.table())
-                   .columns(ct.tenantId(), ct.collection(), ct.topicId(),
+                int dim = r.embedding().length;
+                // RDR-225: the collection's registry row is the authority for the model; the vector's
+                // length must agree with it, and the model must have a partition, before any write.
+                CollectionRow collectionRow = CollectionRegistry.require(ctx, tenant, r.collection());
+                String model = collectionRow.embeddingModel();
+                if (dim != collectionRow.dimension()) {
+                    throw new IllegalArgumentException(
+                        "centroid for topic " + r.topicId() + " in collection '" + r.collection()
+                        + "' is " + dim + "-dim but the collection's embedding model '" + model
+                        + "' is " + collectionRow.dimension() + "-dim");
+                }
+                ModelPartitions.require(ctx, ModelPartitions.CENTROIDS, model);
+                DimTables.CentroidTable ct = DimTables.CENTROIDS.get(dim);
+                // nexus-2qryr, RDR-225: a re-embed under a new model deletes the row stored under the
+                // old one (an upsert cannot move a row across partitions) before the new one is written.
+                ctx.deleteFrom(ct.table())
+                   .where(ct.tenantId().eq(tenant)
+                       .and(ct.collection().eq(r.collection()))
+                       .and(ct.topicId().eq(r.topicId()))
+                       .and(ct.embeddingModel().ne(model)))
+                   .execute();
+                ctx.insertInto(ct.table())
+                   .columns(ct.tenantId(), ct.collection(), ct.topicId(), ct.embeddingModel(),
                             ct.embedding(), ct.label(), ct.docCount())
-                   .values(tenant, r.collection(), r.topicId(),
+                   .values(tenant, r.collection(), r.topicId(), model,
                            Vector.of(r.embedding()), r.label(), r.docCount())
-                   .onConflict(ct.tenantId(), ct.collection(), ct.topicId())
+                   .onConflict(ct.tenantId(), ct.collection(), ct.topicId(), ct.embeddingModel())
                    .doUpdate()
                    .set(ct.embedding(), DSL.excluded(ct.embedding()))
                    .set(ct.label(),     DSL.excluded(ct.label()))
-                   .set(ct.docCount(),  DSL.excluded(ct.docCount()));
-                // nexus-2qryr: clear the OTHER dim columns so a dim transition
-                // replaces the embedding instead of tripping the exactly-one CHECK.
-                for (DimTables.CentroidTable other : DimTables.CENTROIDS.values()) {
-                    if (!other.embedding().getName().equals(ct.embedding().getName())) {
-                        upsert = upsert.set(other.embedding(), (Vector) null);
-                    }
-                }
-                upsert.execute();
+                   .set(ct.docCount(),  DSL.excluded(ct.docCount()))
+                   .execute();
             }
             return null;
         });
@@ -174,10 +201,24 @@ public final class TaxonomyCentroidRepository {
         // why both are load-bearing (a centroid collection can hold rows at two dims
         // mid-migration; this class's own dimensionProbe javadoc).
         Vector queryVec = Vector.of(embedding);
+        // RDR-225: the function reads the one (model, tenant) leaf of taxonomy_centroids. The model is the
+        // SOURCE collection's, also in the cross-collection branch: a centroid of another model is not a
+        // candidate (the same rule assign_from_chashes and cross_preview apply).
+        // An unregistered collection can hold no centroid (every centroid write needs the registration) and has
+        // no model to match, so the answer is none. That is unchanged for a same-collection query (v0.1.149 never
+        // looked the registry up and found no centroid either). For a cross-collection query it is a change: an
+        // unregistered source used to get other collections' centroids of the same width, and now gets none (a
+        // wire-ledger entry records it).
+        String model;
+        try {
+            model = CollectionRegistry.lookup(tenantScope, tenant, collection).embeddingModel();
+        } catch (dev.nexus.service.db.UnregisteredCollectionException e) {
+            return List.of();
+        }
         org.jooq.Table<?> fn = switch (dim) {
-            case 384  -> TAXONOMY_ANN_QUERY_384.call(queryVec, collection, crossCollection, nResults);
-            case 768  -> TAXONOMY_ANN_QUERY_768.call(queryVec, collection, crossCollection, nResults);
-            case 1024 -> TAXONOMY_ANN_QUERY_1024.call(queryVec, collection, crossCollection, nResults);
+            case 384  -> TAXONOMY_ANN_QUERY_384.call(queryVec, collection, crossCollection, nResults, model, tenant);
+            case 768  -> TAXONOMY_ANN_QUERY_768.call(queryVec, collection, crossCollection, nResults, model, tenant);
+            case 1024 -> TAXONOMY_ANN_QUERY_1024.call(queryVec, collection, crossCollection, nResults, model, tenant);
             default   -> throw new IllegalArgumentException("unsupported dim " + dim);
         };
         Result<? extends Record> result = tenantScope.withTenant(tenant, ctx -> {

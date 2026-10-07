@@ -1936,13 +1936,17 @@ class PgVectorRepositoryContractTest {
         try (Connection su = pg.createConnection("");
              PreparedStatement ps = su.prepareStatement(
                  "INSERT INTO nexus.catalog_document_chunks "
-                 + "(tenant_id, doc_id, position, chash, collection) VALUES (?, ?, ?, ?, ?)")) {
+                 + "(tenant_id, doc_id, position, chash, collection, embedding_model) VALUES (?, ?, ?, ?, ?, "
+                 + "(SELECT embedding_model FROM nexus.catalog_collections WHERE tenant_id = ? AND name = ?))")) {
             ps.setString(1, tenant);
             ps.setString(2, docId);
             ps.setInt(3, position);
             // chash is bytea(32) now (RDR-180) — bind the decoded digest, not hex text.
             ps.setBytes(4, java.util.HexFormat.of().parseHex(chash));
             ps.setString(5, collection);
+            // RDR-225: the manifest row carries its collection's model, as the chunk it points at does.
+            ps.setString(6, tenant);
+            ps.setString(7, collection);
             ps.executeUpdate();
         }
     }
@@ -1966,7 +1970,8 @@ class PgVectorRepositoryContractTest {
             su.createStatement().execute(
                 "ALTER TABLE nexus.catalog_document_chunks "
                 + "ADD CONSTRAINT fk_catalog_chunks_chunk "
-                + "FOREIGN KEY (tenant_id, collection, chash) REFERENCES nexus.chunks (tenant_id, collection, chash) "
+                + "FOREIGN KEY (tenant_id, collection, chash, embedding_model) "
+                + "REFERENCES nexus.chunks (tenant_id, collection, chash, embedding_model) "
                 + "ON UPDATE CASCADE DEFERRABLE INITIALLY IMMEDIATE NOT VALID");
         }
     }

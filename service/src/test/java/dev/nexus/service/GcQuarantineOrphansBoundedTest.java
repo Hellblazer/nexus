@@ -279,29 +279,47 @@ class GcQuarantineOrphansBoundedTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             var ctx = DSL.using(su, SQLDialect.POSTGRES);
+            // RDR-225: the chunk carries a model (a NOT NULL partition key) and the origin has no registry row to
+            // take it from, so it is named here, and the tenant's partition leaves are made explicitly.
+            PgContainerHelper.ensureTenantPartitions(ctx, TENANT);
             PgContainerHelper.dropConstraint(su, CHUNKS, "chunks_collection_fk");
-            float[] unit = new float[384];
-            unit[0] = 1f;
-            PgContainerHelper.insertChunk384(ctx, TENANT, src, Chash.ofText("a6mon unreg").toBytes(),
-                Vector.of(unit));
-            // RDR-192 Step 8: the function only reaches its registration check for a chunk
-            // older than the grace window; no origin row means it is aged by raw SQL here.
-            ctx.update(CHUNKS).set(CHUNKS.LAST_WRITTEN_AT, java.time.OffsetDateTime.now().minusDays(40))
-               .where(CHUNKS.TENANT_ID.eq(TENANT).and(CHUNKS.COLLECTION.eq(src))).execute();
-            PgContainerHelper.addFkNotValid(su, CHUNKS, "chunks_collection_fk", "collection",
-                CATALOG_COLLECTIONS, "name", "ON UPDATE CASCADE DEFERRABLE INITIALLY IMMEDIATE");
-            assertThat(ctx.fetchExists(ctx.selectOne().from(CATALOG_COLLECTIONS)
-                    .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT)).and(CATALOG_COLLECTIONS.NAME.eq(src))))
-                .as("precondition: the origin has a chunk but no catalog row").isFalse();
+            try {
+                float[] unit = new float[384];
+                unit[0] = 1f;
+                ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL,
+                               CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_384)
+                   .values(TENANT, src, Chash.ofText("a6mon unreg").toBytes(), "minilm-l6-v2-384", "text",
+                           Vector.of(unit))
+                   .execute();
+                // RDR-192 Step 8: the function only reaches its registration check for a chunk
+                // older than the grace window; no origin row means it is aged by raw SQL here.
+                ctx.update(CHUNKS).set(CHUNKS.LAST_WRITTEN_AT, java.time.OffsetDateTime.now().minusDays(40))
+                   .where(CHUNKS.TENANT_ID.eq(TENANT).and(CHUNKS.COLLECTION.eq(src))).execute();
+                assertThat(ctx.fetchExists(ctx.selectOne().from(CATALOG_COLLECTIONS)
+                        .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT)).and(CATALOG_COLLECTIONS.NAME.eq(src))))
+                    .as("precondition: the origin has a chunk but no catalog row").isFalse();
 
-            assertThatThrownBy(() -> Routines.gcQuarantineOrphansBounded(
-                    ctx.configuration(), 384, TENANT, src, dst, "2026-09-26T00:00:00Z", 20, 10))
-                .as("attributes come from the origin row, so an unregistered origin fails loud")
-                .hasMessageContaining("is not registered")
-                .hasMessageContaining(src);
-            assertThat(ctx.fetchExists(ctx.selectOne().from(CATALOG_COLLECTIONS)
-                    .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT)).and(CATALOG_COLLECTIONS.NAME.eq(dst))))
-                .as("a failed call registers no sibling").isFalse();
+                assertThatThrownBy(() -> Routines.gcQuarantineOrphansBounded(
+                        ctx.configuration(), 384, TENANT, src, dst, "2026-09-26T00:00:00Z", 20, 10))
+                    .as("attributes come from the origin row, so an unregistered origin fails loud")
+                    .hasMessageContaining("is not registered")
+                    .hasMessageContaining(src);
+                assertThat(ctx.fetchExists(ctx.selectOne().from(CATALOG_COLLECTIONS)
+                        .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT)).and(CATALOG_COLLECTIONS.NAME.eq(dst))))
+                    .as("a failed call registers no sibling").isFalse();
+            } finally {
+                // RDR-225: a foreign key on a partitioned table cannot be added NOT VALID, so the constraint
+                // goes back only once the dangling row is gone; the definition is the changelog's own
+                // (vectors-030 step 7.7), a three-column key through the collection's model.
+                ctx.deleteFrom(CHUNKS)
+                   .where(CHUNKS.TENANT_ID.eq(TENANT).and(CHUNKS.COLLECTION.eq(src))).execute();
+                ctx.alterTable(CHUNKS).add(DSL.constraint("chunks_collection_fk")
+                        .foreignKey(CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.EMBEDDING_MODEL)
+                        .references(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID,
+                            CATALOG_COLLECTIONS.NAME, CATALOG_COLLECTIONS.EMBEDDING_MODEL)
+                        .onDeleteRestrict())
+                   .execute();
+            }
         }
     }
 

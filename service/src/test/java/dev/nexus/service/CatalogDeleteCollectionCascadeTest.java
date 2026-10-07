@@ -205,8 +205,9 @@ class CatalogDeleteCollectionCascadeTest {
             // behind), so it is reachable by neither scope symmetrically.
             ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
                            CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
-                           CATALOG_DOCUMENT_CHUNKS.COLLECTION)
-               .values(TENANT_F8D, "f8d-doc", 0, chashBytes("f8dasym"), COLL_DEL)
+                           CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
+               .values(TENANT_F8D, "f8d-doc", 0, chashBytes("f8dasym"), COLL_DEL,
+                       PgContainerHelper.collectionModel(ctx, TENANT_F8D, COLL_DEL))
                .execute();
         }
 
@@ -309,8 +310,11 @@ class CatalogDeleteCollectionCascadeTest {
                        CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
            .values(tenant, "dc-doc-1", "Doc 1", COLL)
            .execute();
-        // chunks: 2/1/1 across three dims, one unified nexus.chunks table (RDR-191).
-        insertChunk384(ctx, tenant, COLL, chashBytes("dc384a"), vector(384));
+        // chunks: 4 rows (RDR-225: a collection has ONE model, hence one dimension, so the
+        // former 2/1/1 spread across 384/768/1024 is four 1024-wide rows of this voyage-context-3
+        // collection; the count the assertions pin is unchanged).
+        final String model = PgContainerHelper.collectionModel(ctx, tenant, COLL);
+        insertChunk1024(ctx, tenant, COLL, chashBytes("dc384a"), vector(1024));
         // RDR-194 P3d (nexus-tk070.p3d): dc384b and dc768a below are REPURPOSED
         // (HexFormat.parseHex(hexChash(...)) identity, not the file's own
         // chashBytes(seed) escape-format shape) to ALSO back the two
@@ -323,8 +327,8 @@ class CatalogDeleteCollectionCascadeTest {
         // chunk's chash is no longer chashBytes("dc384b") -- nothing else in this
         // file references it by that name (unlike dc384a, reused by the manifest
         // INSERT below).
-        insertChunk384(ctx, tenant, COLL, hexChashBytes("dc-doc-1"), vector(384));
-        insertChunk768(ctx, tenant, COLL, hexChashBytes("dc-doc-2"), vector(768));
+        insertChunk1024(ctx, tenant, COLL, hexChashBytes("dc-doc-1"), vector(1024));
+        insertChunk1024(ctx, tenant, COLL, hexChashBytes("dc-doc-2"), vector(1024));
         insertChunk1024(ctx, tenant, COLL, chashBytes("dc1024a"), vector(1024));
         // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk now requires a
         // matching nexus.chunks row for the manifest insert below -- reuse dc384a's
@@ -335,8 +339,8 @@ class CatalogDeleteCollectionCascadeTest {
         // already registered under COLL, so stamp the manifest row the same.
         ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
                        CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
-                       CATALOG_DOCUMENT_CHUNKS.COLLECTION)
-           .values(tenant, "dc-doc-1", 0, chashBytes("dc384a"), COLL)
+                       CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
+           .values(tenant, "dc-doc-1", 0, chashBytes("dc384a"), COLL, model)
            .execute();
         // (chash_index seeds removed — RDR-187/nexus-piwya.9: router dropped)
         // topics: 1 (explicit id)
@@ -362,13 +366,13 @@ class CatalogDeleteCollectionCascadeTest {
         // identities).
         ctx.insertInto(TOPIC_ASSIGNMENTS, TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID,
                        TOPIC_ASSIGNMENTS.TOPIC_ID, TOPIC_ASSIGNMENTS.ASSIGNED_BY, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION,
-                       TOPIC_ASSIGNMENTS.ASSIGNED_AT)
-           .values(tenant, hexChashBytes("dc-doc-1"), topicId, "projection", COLL, OffsetDateTime.now())
+                       TOPIC_ASSIGNMENTS.ASSIGNED_AT, TOPIC_ASSIGNMENTS.EMBEDDING_MODEL)
+           .values(tenant, hexChashBytes("dc-doc-1"), topicId, "projection", COLL, OffsetDateTime.now(), model)
            .execute();
         ctx.insertInto(TOPIC_ASSIGNMENTS, TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID,
                        TOPIC_ASSIGNMENTS.TOPIC_ID, TOPIC_ASSIGNMENTS.ASSIGNED_BY, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION,
-                       TOPIC_ASSIGNMENTS.ASSIGNED_AT)
-           .values(tenant, hexChashBytes("dc-doc-2"), topicId, "projection", COLL, OffsetDateTime.now())
+                       TOPIC_ASSIGNMENTS.ASSIGNED_AT, TOPIC_ASSIGNMENTS.EMBEDDING_MODEL)
+           .values(tenant, hexChashBytes("dc-doc-2"), topicId, "projection", COLL, OffsetDateTime.now(), model)
            .execute();
         // centroids: one per dim (cugrk), one unified nexus.taxonomy_centroids table
         // (RDR-191). PK is (tenant_id, collection, topic_id) -- three DIFFERENT
@@ -377,18 +381,14 @@ class CatalogDeleteCollectionCascadeTest {
         // tables and could legally share one topic_id).
         // hygiene-001 step 9b (nexus-tk070.p6a follow-on): label is NOT NULL now,
         // no default -- supply it explicitly.
-        ctx.insertInto(TAXONOMY_CENTROIDS, TAXONOMY_CENTROIDS.TENANT_ID, TAXONOMY_CENTROIDS.COLLECTION,
-                       TAXONOMY_CENTROIDS.TOPIC_ID, TAXONOMY_CENTROIDS.LABEL, TAXONOMY_CENTROIDS.EMBEDDING_384)
-           .values(tenant, COLL, topicId, "", vector(384))
-           .execute();
-        ctx.insertInto(TAXONOMY_CENTROIDS, TAXONOMY_CENTROIDS.TENANT_ID, TAXONOMY_CENTROIDS.COLLECTION,
-                       TAXONOMY_CENTROIDS.TOPIC_ID, TAXONOMY_CENTROIDS.LABEL, TAXONOMY_CENTROIDS.EMBEDDING_768)
-           .values(tenant, COLL, topicId + 1, "", vector(768))
-           .execute();
-        ctx.insertInto(TAXONOMY_CENTROIDS, TAXONOMY_CENTROIDS.TENANT_ID, TAXONOMY_CENTROIDS.COLLECTION,
-                       TAXONOMY_CENTROIDS.TOPIC_ID, TAXONOMY_CENTROIDS.LABEL, TAXONOMY_CENTROIDS.EMBEDDING_1024)
-           .values(tenant, COLL, topicId + 2, "", vector(1024))
-           .execute();
+        // RDR-225: three centroids, all of the collection's model (1024-wide), at three topic ids.
+        for (int i = 0; i < 3; i++) {
+            ctx.insertInto(TAXONOMY_CENTROIDS, TAXONOMY_CENTROIDS.TENANT_ID, TAXONOMY_CENTROIDS.COLLECTION,
+                           TAXONOMY_CENTROIDS.TOPIC_ID, TAXONOMY_CENTROIDS.LABEL,
+                           TAXONOMY_CENTROIDS.EMBEDDING_MODEL, TAXONOMY_CENTROIDS.EMBEDDING_1024)
+               .values(tenant, COLL, topicId + i, "", model, vector(1024))
+               .execute();
+        }
         // document_aspects: 2, both doc-rooted at dc-doc-1 (the collection's only
         // registered catalog_documents row -- catalog_documents count elsewhere in
         // this fixture is asserted ==1, so a second row cannot be introduced here).
@@ -430,27 +430,9 @@ class CatalogDeleteCollectionCascadeTest {
            .execute();
     }
 
-    /** RDR-191 (nexus-o8dil.48): chunks_384/768/1024 unified into nexus.chunks -- one
-     *  insert helper per dim since jOOQ's typed column list is fixed at compile time. */
-    private static void insertChunk384(DSLContext ctx, String tenant, String collection, byte[] chashBytes, Vector v) {
-        ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.CHUNK_TEXT,
-                       CHUNKS.EMBEDDING_384)
-           .values(tenant, collection, chashBytes, "text", v)
-           .execute();
-    }
-
-    private static void insertChunk768(DSLContext ctx, String tenant, String collection, byte[] chashBytes, Vector v) {
-        ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.CHUNK_TEXT,
-                       CHUNKS.EMBEDDING_768)
-           .values(tenant, collection, chashBytes, "text", v)
-           .execute();
-    }
-
+    /** RDR-225: the shared seed, which carries the collection's registered model. */
     private static void insertChunk1024(DSLContext ctx, String tenant, String collection, byte[] chashBytes, Vector v) {
-        ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.CHUNK_TEXT,
-                       CHUNKS.EMBEDDING_1024)
-           .values(tenant, collection, chashBytes, "text", v)
-           .execute();
+        PgContainerHelper.insertChunk1024(ctx, tenant, collection, chashBytes, v);
     }
 
     /** A pgvector value with every one of {@code dim} components equal to {@code 0.1}. */

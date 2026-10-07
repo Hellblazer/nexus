@@ -6,6 +6,13 @@
 -- twice, or running it against a schema that has gained/lost columns since
 -- this file was written, must change the OUTPUT, never require an edit HERE.
 --
+-- Partitions (RDR-225): nexus.chunks and nexus.taxonomy_centroids are LIST-partitioned by
+-- embedding_model, then tenant_id, so the catalog also carries one relation per model and one
+-- per (model, tenant) leaf, and PostgreSQL clones every constraint onto each of them
+-- (pg_constraint.conparentid <> 0). Every result set below is about the declared schema, so a
+-- partition is never a table of its own here (pg_class.relispartition) and a cloned constraint
+-- is never a constraint of its own (conparentid = 0): the parent speaks for all of them.
+--
 -- Scope: schemas 'nexus' and 't1' are live (in-scope); 'staging' rows are
 -- returned but labelled census_scope = 'EXEMPT' (RDR-194 Problem Statement:
 -- "the staging schema (deliberately typeless landing zone)" is explicitly
@@ -69,6 +76,8 @@ all_cols AS (
            c.character_maximum_length
     FROM information_schema.columns c
     JOIN scope_schemas s ON s.schema_name = c.table_schema
+    WHERE NOT EXISTS (SELECT 1 FROM pg_class cpc JOIN pg_namespace cpn ON cpn.oid = cpc.relnamespace
+                      WHERE cpn.nspname = c.table_schema AND cpc.relname = c.table_name AND cpc.relispartition)
 ),
 -- Single-column PK/UNIQUE targets across the same three schemas, used both
 -- to drive the name-equality heuristic and to test plausible-target
@@ -86,6 +95,8 @@ pk_unique_cols AS (
     JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = k.attnum
     WHERE con.contype IN ('p', 'u')
       AND cardinality(con.conkey) = 1
+      AND con.conparentid = 0
+      AND NOT c.relispartition
       AND n.nspname IN ('nexus', 't1', 'staging')
 ),
 join_col_candidates AS (
@@ -136,6 +147,8 @@ existing_fks AS (
     JOIN LATERAL unnest(con.confkey) WITH ORDINALITY AS tk(attnum, ord) ON true
     JOIN pg_attribute ta ON ta.attrelid = tc.oid AND ta.attnum = tk.attnum
     WHERE con.contype = 'f'
+      AND con.conparentid = 0
+      AND NOT c.relispartition
       AND n.nspname IN ('nexus', 't1', 'staging')
     GROUP BY n.nspname, c.relname, a.attname, con.conname, tn.nspname,
              tc.relname, con.convalidated, con.confdeltype
@@ -214,6 +227,8 @@ SELECT
     ) AS check_constraints
 FROM information_schema.columns c
 WHERE c.table_schema IN ('nexus', 't1', 'staging')
+  AND NOT EXISTS (SELECT 1 FROM pg_class cpc JOIN pg_namespace cpn ON cpn.oid = cpc.relnamespace
+                  WHERE cpn.nspname = c.table_schema AND cpc.relname = c.table_name AND cpc.relispartition)
   AND (c.column_name = 'chash'
        OR c.column_name ~ '_chash$'
        OR c.column_name ~ '^chash_'
@@ -238,8 +253,6 @@ SELECT
         ELSE 'unconstrained-other'
     END AS doc_id_semantics_class
 FROM information_schema.columns c
-LEFT JOIN pg_constraint con
-       ON con.contype = 'f'
 LEFT JOIN LATERAL (
     SELECT con2.conname, tn.nspname AS target_schema, tc.relname AS target_table, con2.convalidated AS validated
     FROM pg_constraint con2
@@ -251,11 +264,14 @@ LEFT JOIN LATERAL (
     JOIN pg_attribute a ON a.attrelid = rc.oid AND a.attnum = k.attnum
     WHERE con2.contype = 'f'
       AND rn.nspname = c.table_schema AND rc.relname = c.table_name
+      AND con2.conparentid = 0
       AND a.attname = 'doc_id'
     LIMIT 1
 ) ef ON true
 WHERE c.column_name = 'doc_id'
   AND c.table_schema IN ('nexus', 't1', 'staging')
+  AND NOT EXISTS (SELECT 1 FROM pg_class cpc JOIN pg_namespace cpn ON cpn.oid = cpc.relnamespace
+                  WHERE cpn.nspname = c.table_schema AND cpc.relname = c.table_name AND cpc.relispartition)
 ORDER BY c.table_schema, c.table_name;
 
 -- ============================================================================
@@ -271,7 +287,8 @@ WITH pk_cols AS (
     JOIN pg_namespace n ON n.oid = c.relnamespace
     JOIN LATERAL unnest(con.conkey) WITH ORDINALITY AS k(attnum, ord) ON true
     JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = k.attnum
-    WHERE con.contype = 'p' AND n.nspname IN ('nexus', 't1', 'staging')
+    WHERE con.contype = 'p' AND con.conparentid = 0 AND NOT c.relispartition
+      AND n.nspname IN ('nexus', 't1', 'staging')
     GROUP BY n.nspname, c.relname
 ),
 unique_has_tenant AS (
@@ -281,7 +298,8 @@ unique_has_tenant AS (
     JOIN pg_namespace n ON n.oid = c.relnamespace
     JOIN LATERAL unnest(con.conkey) WITH ORDINALITY AS k(attnum, ord) ON true
     JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = k.attnum
-    WHERE con.contype = 'u' AND n.nspname IN ('nexus', 't1', 'staging')
+    WHERE con.contype = 'u' AND con.conparentid = 0 AND NOT c.relispartition
+      AND n.nspname IN ('nexus', 't1', 'staging')
       AND a.attname = 'tenant_id'
     GROUP BY n.nspname, c.relname
 ),
@@ -291,11 +309,14 @@ rls AS (
            (SELECT count(*) FROM pg_policy p WHERE p.polrelid = c.oid) AS n_policies
     FROM pg_class c
     JOIN pg_namespace n ON n.oid = c.relnamespace
-    WHERE c.relkind IN ('r', 'p') AND n.nspname IN ('nexus', 't1', 'staging')
+    WHERE c.relkind IN ('r', 'p') AND NOT c.relispartition
+      AND n.nspname IN ('nexus', 't1', 'staging')
 ),
 has_tenant_col AS (
-    SELECT table_schema, table_name FROM information_schema.columns
-    WHERE column_name = 'tenant_id' AND table_schema IN ('nexus', 't1', 'staging')
+    SELECT c.table_schema, c.table_name FROM information_schema.columns c
+    WHERE c.column_name = 'tenant_id' AND c.table_schema IN ('nexus', 't1', 'staging')
+  AND NOT EXISTS (SELECT 1 FROM pg_class cpc JOIN pg_namespace cpn ON cpn.oid = cpc.relnamespace
+                  WHERE cpn.nspname = c.table_schema AND cpc.relname = c.table_name AND cpc.relispartition)
 )
 SELECT
     r.table_schema, r.table_name,
@@ -333,4 +354,6 @@ SELECT
 FROM information_schema.columns c
 WHERE c.table_schema IN ('nexus', 't1', 'staging')
   AND (c.column_name IN ('ttl', 'ttl_days') OR c.column_name ~ '_ttl$' OR c.column_name ~ '^ttl_')
+  AND NOT EXISTS (SELECT 1 FROM pg_class cpc JOIN pg_namespace cpn ON cpn.oid = cpc.relnamespace
+                  WHERE cpn.nspname = c.table_schema AND cpc.relname = c.table_name AND cpc.relispartition)
 ORDER BY c.table_schema, c.table_name, c.column_name;

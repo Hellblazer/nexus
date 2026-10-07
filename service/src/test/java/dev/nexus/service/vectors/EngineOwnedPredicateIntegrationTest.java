@@ -74,6 +74,9 @@ class EngineOwnedPredicateIntegrationTest {
     private static final String QUAR = "quarantine-engine-owned-a";
     private static final String OTHER = "knowledge__engine-owned-b__minilm-l6-v2-384__v1";
     private static final String STAMP = "2026-09-01T00:00:00Z";
+    /** RDR-225: every chunk here is 384-wide, and a chunk carries its collection's model, so the two quarantine
+     *  siblings (whose names carry no model token) are registered under this one explicitly. */
+    private static final String MODEL = "minilm-l6-v2-384";
 
     private PostgreSQLContainer<?> pg;
     private HikariDataSource svcDs;
@@ -99,7 +102,7 @@ class EngineOwnedPredicateIntegrationTest {
 
         try (Connection su = pg.createConnection("")) {
             DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
-            PgContainerHelper.insertCollection(ctx, TENANT, QUAR);
+            PgContainerHelper.insertCollection(ctx, TENANT, QUAR, MODEL);
             PgContainerHelper.insertCollection(ctx, TENANT, OTHER);
             PgContainerHelper.insertCollection(ctx, TENANT, ORIGIN_P);
             for (int i = 0; i < 300; i++) {
@@ -134,9 +137,10 @@ class EngineOwnedPredicateIntegrationTest {
                                      OffsetDateTime when, Vector vector, String metadataJson) {
         var series = DSL.generateSeries(1, count).as("g", "n");
         Field<Integer> n = series.field("n", Integer.class);
-        ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.CHUNK_TEXT,
-                CHUNKS.EMBEDDING_384, CHUNKS.CREATED_AT, CHUNKS.LAST_WRITTEN_AT, CHUNKS.METADATA)
-           .select(ctx.select(DSL.inline(TENANT), DSL.inline(collection), chash(prefix + collection, n), DSL.inline("x"),
+        ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL,
+                CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_384, CHUNKS.CREATED_AT, CHUNKS.LAST_WRITTEN_AT, CHUNKS.METADATA)
+           .select(ctx.select(DSL.inline(TENANT), DSL.inline(collection), chash(prefix + collection, n),
+                              DSL.inline(PgContainerHelper.collectionModel(ctx, TENANT, collection)), DSL.inline("x"),
                               DSL.val(vector, CHUNKS.EMBEDDING_384.getDataType()),
                               DSL.val(when), DSL.val(when), DSL.val(JSONB.valueOf(metadataJson))).from(series))
            .execute();
@@ -293,8 +297,36 @@ class EngineOwnedPredicateIntegrationTest {
         return DSL.condition(reaperOwnsQuarantinedRow(CHUNKS.METADATA));
     }
 
+    /**
+     * RDR-225: nexus.chunks is partitioned by model, then tenant, so a plan that names the tenant and the model as
+     * literals reads exactly one leaf. The engine's own statements carry the model of the collection they work on
+     * the same way; without it the plan is an Append over every model's leaf for the tenant, and the empty ones are
+     * rightly seq-scanned, which says nothing about the access path this class pins.
+     */
     private static Condition scope() {
-        return CHUNKS.TENANT_ID.eq(TENANT).and(CHUNKS.COLLECTION.eq(QUAR));
+        return CHUNKS.TENANT_ID.eq(TENANT).and(CHUNKS.EMBEDDING_MODEL.eq(MODEL)).and(CHUNKS.COLLECTION.eq(QUAR));
+    }
+
+    private String leafName;
+    private String leafPkName;
+
+    /** The leaf holding TENANT's rows of MODEL, and the name of its primary-key index, read from the catalog. */
+    private synchronized void readLeaf() throws Exception {
+        if (leafName != null) return;
+        try (Connection su = pg.createConnection("")) {
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            leafName = dev.nexus.service.jooq.nexus.Routines.partitionName(ctx.configuration(), "chunks", MODEL, TENANT);
+            leafPkName = ctx.select(DSL.field(DSL.name("i", "relname"), String.class))
+                .from(DSL.table(DSL.name("pg_catalog", "pg_constraint")).as("c"))
+                .join(DSL.table(DSL.name("pg_catalog", "pg_class")).as("r"))
+                    .on(DSL.field(DSL.name("r", "oid")).eq(DSL.field(DSL.name("c", "conrelid"))))
+                .join(DSL.table(DSL.name("pg_catalog", "pg_class")).as("i"))
+                    .on(DSL.field(DSL.name("i", "oid")).eq(DSL.field(DSL.name("c", "conindid"))))
+                .where(DSL.field(DSL.name("r", "relname"), String.class).eq(leafName))
+                .and(DSL.field(DSL.name("c", "contype"), String.class).eq("p"))
+                .fetchOne(DSL.field(DSL.name("i", "relname"), String.class));
+        }
+        assertThat(leafPkName).as("non-vacuity: leaf %s has a primary key", leafName).isNotNull();
     }
 
     private static final Pattern PLAN_NODE = Pattern.compile("^\\|\\s*(?:->\\s*)?(.*?)\\s+\\(cost=");
@@ -320,20 +352,22 @@ class EngineOwnedPredicateIntegrationTest {
         return path;
     }
 
-    private void assertInlinedWithTheSameAccessPath(String what, String viaFn, String open) {
+    private void assertInlinedWithTheSameAccessPath(String what, String viaFn, String open) throws Exception {
+        readLeaf();
         System.out.println("\n=== " + what + " via function (EXPLAIN)\n" + viaFn);
         System.out.println("=== " + what + " open-coded (EXPLAIN)\n" + open);
         assertThat(viaFn).as("%s: inlined, not an opaque call:%n%s", what, viaFn)
             .doesNotContain("reaper_owns_quarantined_row").doesNotContain("Function Scan");
         assertThat(viaFn).as("%s: the predicate's keys are evaluated on the scanned row:%n%s", what, viaFn)
             .contains("quarantined_by").contains("reaper_quarantined_at");
-        assertThat(viaFn).as("%s: candidates come from the (tenant, collection) primary-key range:%n%s", what, viaFn)
-            .contains("chunks_pk");
+        assertThat(viaFn).as("%s: candidates come from the (tenant, collection) primary-key range of the one leaf:%n%s",
+                what, viaFn)
+            .contains(leafPkName);
         assertThat(viaFn).as("%s: no sequential scan of nexus.chunks:%n%s", what, viaFn)
             .doesNotContain("Seq Scan on chunks");
         List<String> path = accessPath(viaFn);
         assertThat(path).as("non-vacuity: the access path parser read the plan:%n%s", viaFn)
-            .anyMatch(n -> n.startsWith("Index Scan using chunks_pk on chunks"))
+            .anyMatch(n -> n.startsWith("Index Scan using " + leafPkName + " on " + leafName))
             .anyMatch(n -> n.startsWith("Index Cond:"));
         assertThat(path).as("%s: the same access path as the open-coded predicate", what).isEqualTo(accessPath(open));
     }
@@ -349,7 +383,7 @@ class EngineOwnedPredicateIntegrationTest {
     }
 
     @Test
-    void select_inlines_andKeepsTheOpenCodedAccessPath() {
+    void select_inlines_andKeepsTheOpenCodedAccessPath() throws Exception {
         assertInlinedWithTheSameAccessPath("SELECT",
             plan(ctx -> ctx.select(CHUNKS.CHASH).from(CHUNKS).where(scope().and(viaFunction())).orderBy(CHUNKS.CHASH)
                 .limit(5000)),
@@ -358,7 +392,7 @@ class EngineOwnedPredicateIntegrationTest {
     }
 
     @Test
-    void delete_inlines_andKeepsTheOpenCodedAccessPath() {
+    void delete_inlines_andKeepsTheOpenCodedAccessPath() throws Exception {
         String viaFn = plan(ctx -> ctx.deleteFrom(CHUNKS).where(scope().and(viaFunction())));
         assertThat(viaFn).contains("Delete on chunks");
         assertInlinedWithTheSameAccessPath("DELETE", viaFn,
@@ -366,7 +400,7 @@ class EngineOwnedPredicateIntegrationTest {
     }
 
     @Test
-    void negatedForm_inlines_andKeepsTheOpenCodedAccessPath() {
+    void negatedForm_inlines_andKeepsTheOpenCodedAccessPath() throws Exception {
         // gc_expire_quarantine's shape: the client's rows are the ones the engine does not own.
         assertInlinedWithTheSameAccessPath("f(...) IS NOT TRUE",
             plan(ctx -> ctx.select(DSL.count()).from(CHUNKS)
@@ -376,7 +410,7 @@ class EngineOwnedPredicateIntegrationTest {
     }
 
     @Test
-    void negatedWithNot_inlines_andKeepsTheOpenCodedAccessPath() {
+    void negatedWithNot_inlines_andKeepsTheOpenCodedAccessPath() throws Exception {
         // The spelling a future caller reaches for first. Total function: safe, and it must cost the same.
         assertInlinedWithTheSameAccessPath("NOT f(...)",
             plan(ctx -> ctx.select(DSL.count()).from(CHUNKS)
@@ -386,12 +420,13 @@ class EngineOwnedPredicateIntegrationTest {
     }
 
     @Test
-    void distinctOriginRead_inlines() {
+    void distinctOriginRead_inlines() throws Exception {
+        readLeaf();
         Field<String> origin = key("origin_collection");
         String viaFn = plan(ctx -> ctx.selectDistinct(origin).from(CHUNKS)
             .where(scope().and(viaFunction()).and(origin.isNotNull())));
         assertThat(viaFn).doesNotContain("reaper_owns_quarantined_row").doesNotContain("Function Scan")
-            .contains("chunks_pk").contains("quarantined_by");
+            .contains(leafPkName).contains("quarantined_by");
     }
 
     // ---- 3b. the two expiry functions split the rows by the predicate, by behaviour -------------------------------
@@ -409,7 +444,7 @@ class EngineOwnedPredicateIntegrationTest {
         String quarantine = "quarantine-engine-owned-probe-" + slug;
         try (Connection su = pg.createConnection("")) {
             DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
-            PgContainerHelper.insertCollection(ctx, TENANT, quarantine);
+            PgContainerHelper.insertCollection(ctx, TENANT, quarantine, MODEL);
             Vector zero = Vector.of(new float[384]);
             OffsetDateTime old = OffsetDateTime.now().minusDays(40);
             insertChunks(ctx, quarantine, "own", 2, old, zero, tagged(ORIGIN_P, OLD, OLD));
@@ -580,7 +615,9 @@ class EngineOwnedPredicateIntegrationTest {
         assertThat(callSites).as("non-vacuity: reaper_expire_quarantine (3), gc_expire_quarantine (2) and"
                 + " reaper_expire_client_quarantine (3) call it")
             .isGreaterThanOrEqualTo(8);
-        assertThat(writes).as("non-vacuity: vectors-024-1 writes both keys, and the scan saw it").isEqualTo(2);
+        assertThat(writes).as("non-vacuity: vectors-024-1 writes both keys, vectors-030-1 (RDR-225) redefines that"
+                + " one write site to carry the model, and the scan saw both")
+            .isEqualTo(4);
         assertThat(removals).as("non-vacuity: vectors-025 removes both keys, and the scan saw it").isGreaterThanOrEqualTo(2);
         assertThat(offenders).isEmpty();
     }

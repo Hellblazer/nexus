@@ -3,6 +3,7 @@ package dev.nexus.service.db;
 import dev.nexus.service.vectors.DimTables;
 import org.jooq.DSLContext;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 
 import java.time.OffsetDateTime;
@@ -243,6 +244,20 @@ public final class ChashRepository {
                 CatalogRepository.acquireSweepGateShared(ctx, tenant, c);
             }
             ensureCollectionRegistered(ctx, tenant, newCollection);
+            // RDR-225 (nexus-3wh8d.13): a chunk carries its collection's model, so this re-home can
+            // only file rows under a target of the SAME model. The models are read from the
+            // registry rows themselves (not the cache: a revive can have swapped a tombstone's
+            // model), the source's null when it has no row (then it holds no rows either).
+            final String newModel = ctx.select(CATALOG_COLLECTIONS.EMBEDDING_MODEL)
+                .from(CATALOG_COLLECTIONS)
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant))
+                .and(CATALOG_COLLECTIONS.NAME.eq(newCollection))
+                .fetchOne(CATALOG_COLLECTIONS.EMBEDDING_MODEL);
+            final String oldModel = ctx.select(CATALOG_COLLECTIONS.EMBEDDING_MODEL)
+                .from(CATALOG_COLLECTIONS)
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant))
+                .and(CATALOG_COLLECTIONS.NAME.eq(oldCollection))
+                .fetchOne(CATALOG_COLLECTIONS.EMBEDDING_MODEL);
             // RDR-191 Phase 4 (lane D5, bead nexus-o8dil.48 part 2): was a
             // three-iteration loop over DimTables.CHUNKS, one delete+update
             // pass per dim key. Every dim key now resolves to the SAME
@@ -265,6 +280,16 @@ public final class ChashRepository {
                           .where(ch.tenantId().eq(tenant)
                               .and(ch.collection().eq(newCollection))))))
                .execute();
+            // RDR-225: after the collision delete, every row still at oldCollection would have to be
+            // re-filed under newCollection. Across models that is not an UPDATE the schema allows (the
+            // composite foreign key refuses it with a per-partition constraint name), so refuse it here,
+            // naming both models. The RDR-162 cross-model cascade is unaffected: its target already
+            // holds every chash, so the delete above leaves nothing to move.
+            if (oldModel != null && !oldModel.equals(newModel)
+                    && ctx.fetchExists(ctx.selectOne().from(ch.table())
+                        .where(ch.tenantId().eq(tenant).and(ch.collection().eq(oldCollection))))) {
+                throw new CollectionModelMismatchException(oldCollection, oldModel, newCollection, newModel);
+            }
             // nexus-wbfpw.43: deliberately does NOT refresh last_written_at. Re-homing
             // a chunk to another collection is maintenance: it re-writes no client
             // content, and refreshing the reapable(c) grace window here would keep an
@@ -276,8 +301,11 @@ public final class ChashRepository {
                         .execute();
             // Manifest re-home (collection is not part of its PK — no
             // collision handling needed).
+            // RDR-225: the model follows the collection (fk_catalog_chunks_chunk is on
+            // (tenant, collection, chash, model)); same-model it is the value already there.
             ctx.update(CATALOG_DOCUMENT_CHUNKS)
                .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, newCollection)
+               .set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, newModel)
                .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(tenant)
                    .and(CATALOG_DOCUMENT_CHUNKS.COLLECTION.eq(oldCollection)))
                .execute();

@@ -346,7 +346,7 @@ routes to (RDR-191 Phase 4: the three per-dim `chunks_384/768/1024` tables
 were unified into one `nexus.chunks` table with three nullable typed
 `embedding_384`/`embedding_768`/`embedding_1024` columns under an
 exactly-one-populated CHECK, plus three unconditional full HNSW indexes,
-one per column):
+one per column). Since RDR-225 (7.73.0) the table is LIST-partitioned by embedding model and then by tenant, the primary key is `(tenant_id, collection, chash, embedding_model)`, every referencing table carries `embedding_model` in its four-column FK, and each tenant leaf has its own HNSW indexes, so the two 1024-dimensional Voyage models no longer share one; the manifest-to-chunk join below is unchanged, because a collection has exactly one registered model:
 
 - **(a) Owner LIVE, no matching chunk row.** REAL dangling — the class every
   producer fix and every gate targets. This is the definition
@@ -693,7 +693,7 @@ search_cross_corpus()              # search_engine.py
 | `taxonomy_meta` | Per-collection discover stats (last_discover_at, last_discover_doc_count) |
 | `topic_links` | Aggregated inter-topic link counts derived from catalog link graph |
 
-**Centroid storage** (`nexus.taxonomy_centroids`, one unified table with three nullable typed `embedding_384`/`embedding_768`/`embedding_1024` columns under an exactly-one-populated CHECK — [RDR-191](rdr/rdr-191-unify-chunk-tables-enable-manifest-fk.md) Phase 4 unified the three prior per-dim `taxonomy_centroids_{384,768,1024}` tables the same way it unified T3 chunks): served through pgvector via `nexus-service` (`HttpCentroidStore`) since [RDR-155](rdr/rdr-155-pgvector-t3-consolidation.md) P4a.2. One row per topic holds the centroid vector, collection, topic_id, and label; `assign_single()` does the ANN lookup. Chroma is not a live substrate in any mode (RDR-155 P4b, shipped 2026-07-25) — the discover/rebuild centroid-write helpers go through `HttpCentroidStore` like every other centroid path.
+**Centroid storage** (`nexus.taxonomy_centroids`, one unified table with three nullable typed `embedding_384`/`embedding_768`/`embedding_1024` columns under an exactly-one-populated CHECK — [RDR-191](rdr/rdr-191-unify-chunk-tables-enable-manifest-fk.md) Phase 4 unified the three prior per-dim `taxonomy_centroids_{384,768,1024}` tables the same way it unified T3 chunks): served through pgvector via `nexus-service` (`HttpCentroidStore`) since [RDR-155](rdr/rdr-155-pgvector-t3-consolidation.md) P4a.2. One row per topic holds the centroid vector, collection, topic_id, and label; `assign_single()` does the ANN lookup. Since RDR-225 (7.73.0) the table is partitioned by embedding model then tenant like `nexus.chunks`, so a centroid lookup reads one (model, tenant) leaf. Chroma is not a live substrate in any mode (RDR-155 P4b, shipped 2026-07-25) — the discover/rebuild centroid-write helpers go through `HttpCentroidStore` like every other centroid path.
 
 ### Centroid Lifecycle
 

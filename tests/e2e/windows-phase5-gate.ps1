@@ -44,6 +44,13 @@
 #      exhausted, past the shell tool's 600 s cap). The verdict is the last
 #      line, and also in <RunDir>\verdict.txt. A run with no verdict line is
 #      FAILED.
+#   Unattended (no one at the guest's console): write steps 5 and 6 into a
+#   file in the guest (for example %USERPROFILE%\nx-gate\GATERUN.txt) and do
+#   step 4 as
+#      tests/e2e/windows-guest/launch.sh --permission-mode auto --prompt 'follow the instructions in C:\Users\<user>\nx-gate\GATERUN.txt'
+#   The session starts already working the prompt (first-run prompts are
+#   pre-accepted); read the verdict from <RunDir>\verdict.txt. Passed this way
+#   on published 7.72.1, 2026-10-07 (T2 nexus_rdr/224-gate-run-7.72.1-2026-10-07).
 #
 # THE ASSERTIONS (DECLARED = 5; a precondition runs before each phase)
 #   P0  (setup) no system-wide VC++ runtime (vcruntime140*/msvcp140* in

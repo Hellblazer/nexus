@@ -70,10 +70,9 @@ import static org.assertj.core.api.Assertions.assertThat;
  * batch 3, critic follow-up), and proves it does not defeat the FULL-index bind this class
  * exists to verify: pgvector's
  * HNSW index structurally never contains a NULL-valued row (there is no vector to place in
- * the graph), so the predicate is redundant at the index and free. See {@code
- * PgVectorRepositoryDimGuardTest}'s {@code search_foreignDimRow_neverEmittedWithNullDistance}
- * / {@code hybridSearch_foreignDimRow_neverEmittedWithNullDistance} for the behavioral
- * (non-EXPLAIN) proof that a foreign-dim row is actually excluded.
+ * the graph), so the predicate is redundant at the index and free. (A foreign-dim row can no
+ * longer exist since RDR-225, so no data exercises the predicate's exclusion; this suite
+ * proves only that it costs nothing in the plan.)
  *
  * <p><strong>Correction (Step G cluster-B triage, nexus-o8dil.16/.48):</strong> the
  * selective-gate branch of {@code hybridSearch} does NOT fit the "still binds to the FULL
@@ -115,6 +114,10 @@ class PgVectorRepositoryRawSqlPlanShapeTest {
     private static final String COL_1024 = "code__planshape__voyage-code-3__v1";
     private static final String COL_768  = "docs__planshape__bge-base-en-v15-768__v1";
     private static final String COL_384  = "knowledge__planshape__minilm-l6-v2-384__v1";
+    // RDR-225: every read function names the (model, tenant) leaf it reads.
+    private static final String MODEL_1024 = "voyage-code-3";
+    private static final String MODEL_768  = "bge-base-en-v15-768";
+    private static final String MODEL_384  = "minilm-l6-v2-384";
 
     // Modest but non-trivial per-dim cardinality: large enough that the planner's default
     // cost model naturally prefers the HNSW index over Seq Scan + Sort for an
@@ -151,13 +154,13 @@ class PgVectorRepositoryRawSqlPlanShapeTest {
             // helper's ALL TABLES IN SCHEMA nexus grant.
             su.createStatement().execute(
                 "GRANT EXECUTE ON FUNCTION nexus.search_metadata_scoped_1024"
-                + "(nexus.vector, text[], text, text, int, text, text, jsonb, int) TO " + SVC_ROLE);
+                + "(nexus.vector, text[], text, text, int, text, text, jsonb, int, text, text) TO " + SVC_ROLE);
             su.createStatement().execute(
                 "GRANT EXECUTE ON FUNCTION nexus.search_graph_hop_768"
-                + "(nexus.vector, text[], text[], text, int, text, jsonb, int) TO " + SVC_ROLE);
+                + "(nexus.vector, text[], text[], text, int, text, jsonb, int, text, text) TO " + SVC_ROLE);
             su.createStatement().execute(
                 "GRANT EXECUTE ON FUNCTION nexus.search_topic_scoped_384"
-                + "(nexus.vector, text, text, int) TO " + SVC_ROLE);
+                + "(nexus.vector, text, text, int, text, text) TO " + SVC_ROLE);
         }
 
         // Second role + pool, DEDICATED to the real-call companion test (found during
@@ -274,9 +277,11 @@ class PgVectorRepositoryRawSqlPlanShapeTest {
                 // the single "nearest" row seeded below — see the method javadoc for why
                 // this must be per-row-random rather than one repeated literal).
                 st.execute(
-                    "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, " + embCol + ") "
+                    "INSERT INTO nexus.chunks (tenant_id, collection, chash, embedding_model, chunk_text, " + embCol + ") "
                     + "SELECT '" + TENANT + "', '" + coll + "', "
                     + "       decode(md5('planshape-" + dim + "-' || i) || md5('fill-" + dim + "-' || i), 'hex'), "
+                    + "       (SELECT embedding_model FROM nexus.catalog_collections WHERE tenant_id = '" + TENANT
+                    + "' AND name = '" + coll + "'), "
                     + "       'planshape filler chunk ' || i, v.vec "
                     + "FROM generate_series(1, " + CHUNKS_PER_DIM + ") i "
                     + "CROSS JOIN LATERAL (SELECT (array_agg(random() * 2 - 1))::nexus.vector AS vec"
@@ -286,8 +291,10 @@ class PgVectorRepositoryRawSqlPlanShapeTest {
                 // assertion below checks for.
                 String nearestChash = md5x2("planshape-near-" + dim, "target-" + dim);
                 st.execute(
-                    "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, " + embCol + ") "
+                    "INSERT INTO nexus.chunks (tenant_id, collection, chash, embedding_model, chunk_text, " + embCol + ") "
                     + "VALUES ('" + TENANT + "', '" + coll + "', decode('" + nearestChash + "', 'hex'), "
+                    + "(SELECT embedding_model FROM nexus.catalog_collections WHERE tenant_id = '" + TENANT
+                    + "' AND name = '" + coll + "'), "
                     + "'planshape nearest target chunk', "
                     + "('[1' || repeat(',0', " + (dim - 1) + ") || ']')::nexus.vector)");
                 if (dim == 1024) {
@@ -317,8 +324,8 @@ class PgVectorRepositoryRawSqlPlanShapeTest {
                 + "VALUES ('" + TENANT + "', 'planshape-graphhop-doc', 'planshape graph-hop seed doc', '"
                 + COL_768 + "') ON CONFLICT (tenant_id, tumbler) DO NOTHING");
             st.execute(
-                "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection) "
-                + "SELECT tenant_id, 'planshape-graphhop-doc', row_number() OVER (ORDER BY chash), chash, collection "
+                "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection, embedding_model) "
+                + "SELECT tenant_id, 'planshape-graphhop-doc', row_number() OVER (ORDER BY chash), chash, collection, embedding_model "
                 + "FROM nexus.chunks WHERE tenant_id = '" + TENANT + "' AND collection = '" + COL_768 + "'");
 
             st.execute(
@@ -341,8 +348,8 @@ class PgVectorRepositoryRawSqlPlanShapeTest {
             // directly, no encode('hex').
             st.execute(
                 "INSERT INTO nexus.topic_assignments "
-                + "(tenant_id, doc_id, topic_id, assigned_by, source_collection, assigned_at) "
-                + "SELECT tenant_id, chash, 900001, 'planshape-seed', collection, NOW() "
+                + "(tenant_id, doc_id, topic_id, assigned_by, source_collection, assigned_at, embedding_model) "
+                + "SELECT tenant_id, chash, 900001, 'planshape-seed', collection, NOW(), embedding_model "
                 + "FROM nexus.chunks WHERE tenant_id = '" + TENANT + "' AND collection = '" + COL_384 + "' "
                 + "AND get_byte(chash, 0) < 26");
 
@@ -397,6 +404,30 @@ class PgVectorRepositoryRawSqlPlanShapeTest {
         });
     }
 
+    /**
+     * {@link #explain} with the plan's alternatives to the HNSW-ordered scan penalized (sequential and bitmap
+     * scans, explicit sorts, hash joins) and the engine's per-transaction {@code force_custom_plan}, to assert
+     * REACHABILITY of the index rather than the planner's cost choice. For a statement whose qualifying set is
+     * the whole leaf (every chunk of the collection belongs to the one reached document, as in the graph-hop
+     * fixture) a sequential scan, a hash join and a sort are a legitimate plan, and which one wins depends on
+     * the statistics ANALYZE sampled and on the machine's cost-model inputs: develop's CI runner chose them
+     * where the laptop and hellmini chose the index. What the pin must catch is a regression that makes the
+     * index UNREACHABLE (a vector sourced from a join, a guard that defeats the bind), and with the
+     * alternatives penalized that regression still fails it. Same technique as CombinedQueryParityTest's
+     * {@code explain} (its comment gives the same reasoning); the join keeps nested loops enabled, since the
+     * HNSW-ordered chunk scan joins the manifest through one.
+     */
+    private String explainIndexReachable(Table<?> fn) throws Exception {
+        return tenantScope.withTenant(TENANT, ctx -> {
+            dev.nexus.service.db.PgSession.setLocal(ctx, "hnsw.iterative_scan", "relaxed_order");
+            dev.nexus.service.db.PgSession.setSearchPlanCacheMode(ctx);
+            for (String guc : List.of("enable_seqscan", "enable_bitmapscan", "enable_sort", "enable_hashjoin")) {
+                dev.nexus.service.db.PgSession.setLocal(ctx, guc, "off");
+            }
+            return ctx.explain(ctx.select(fn.field("id")).from(fn)).plan();
+        });
+    }
+
     /** A length-{@code dim} typed pgvector value: first component 1.0, rest zero — the
      *  SAME shape as the retired {@code "[1" + ",0".repeat(dim - 1) + "]"} literals. */
     private static Vector queryVec(int dim) {
@@ -417,14 +448,15 @@ class PgVectorRepositoryRawSqlPlanShapeTest {
 
     @Test
     void searchWithTokens_shape_usesFullHnswIndex_1024() throws Exception {
-        Table<?> fn = PLAIN_SEARCH_1024.call(queryVec(1024), new String[] {COL_1024}, null, null, 10);
+        Table<?> fn = PLAIN_SEARCH_1024.call(
+            queryVec(1024), new String[] {COL_1024}, null, null, 10, MODEL_1024, TENANT);
         String plan = explain(fn);
         assertThat(plan)
             .as("searchWithTokens' distance projection (1024-dim) must bind to the FULL"
                 + " idx_chunks_embedding_1024 HNSW index with the nexus-74zvm"
                 + " embedding_1024 IS NOT NULL guard added — the guard must not defeat"
                 + " the index bind. Plan was:%n%s", plan)
-            .contains("idx_chunks_embedding_1024");
+            .containsPattern("Index Scan using \"?\\S*embedding_1024");
         assertThat(plan)
             .as("must not degrade to a sequential scan of the unified (mixed-dim) table's"
                 + " chunks rows (narrowed to the table this test actually targets, not the"
@@ -437,13 +469,14 @@ class PgVectorRepositoryRawSqlPlanShapeTest {
 
     @Test
     void searchWithTokens_shape_usesFullHnswIndex_768() throws Exception {
-        Table<?> fn = PLAIN_SEARCH_768.call(queryVec(768), new String[] {COL_768}, null, null, 10);
+        Table<?> fn = PLAIN_SEARCH_768.call(
+            queryVec(768), new String[] {COL_768}, null, null, 10, MODEL_768, TENANT);
         String plan = explain(fn);
         assertThat(plan)
             .as("searchWithTokens' distance projection (768-dim) must bind to the FULL"
                 + " idx_chunks_embedding_768 HNSW index with the nexus-74zvm guard added."
                 + " Plan was:%n%s", plan)
-            .contains("idx_chunks_embedding_768");
+            .containsPattern("Index Scan using \"?\\S*embedding_768");
         assertThat(plan)
             .as("no Seq Scan of the chunks table itself (see the 1024-dim test's assertion"
                 + " for why this is narrowed to \"on chunks\" rather than the whole plan)."
@@ -453,13 +486,14 @@ class PgVectorRepositoryRawSqlPlanShapeTest {
 
     @Test
     void searchWithTokens_shape_usesFullHnswIndex_384() throws Exception {
-        Table<?> fn = PLAIN_SEARCH_384.call(queryVec(384), new String[] {COL_384}, null, null, 10);
+        Table<?> fn = PLAIN_SEARCH_384.call(
+            queryVec(384), new String[] {COL_384}, null, null, 10, MODEL_384, TENANT);
         String plan = explain(fn);
         assertThat(plan)
             .as("searchWithTokens' distance projection (384-dim) must bind to the FULL"
                 + " idx_chunks_embedding_384 HNSW index with the nexus-74zvm guard added."
                 + " Plan was:%n%s", plan)
-            .contains("idx_chunks_embedding_384");
+            .containsPattern("Index Scan using \"?\\S*embedding_384");
         assertThat(plan)
             .as("no Seq Scan of the chunks table itself (see the 1024-dim test's assertion"
                 + " for why this is narrowed to \"on chunks\" rather than the whole plan)."
@@ -514,7 +548,7 @@ class PgVectorRepositoryRawSqlPlanShapeTest {
         // under test does not depend on which chashes are named.
         byte[] chash = Chash.fromHex(md5x2("planshape-near-768", "target-768")).toBytes();
         Table<?> fn = TEXT_GATED_SEARCH_BY_CHASH_768.call(
-            queryVec(768), new byte[][] {chash}, new String[] {COL_768}, null, null, 10);
+            queryVec(768), new byte[][] {chash}, new String[] {COL_768}, null, null, 10, MODEL_768, TENANT);
         String plan = explain(fn);
         assertThat(plan)
             .as("hybridSearch's selective-gate rank (768-dim) must project distance off the"
@@ -545,14 +579,14 @@ class PgVectorRepositoryRawSqlPlanShapeTest {
     @Test
     void hybridSearch_denseGateRank_shape_usesFullHnswIndex_384() throws Exception {
         Table<?> fn = TEXT_GATED_SEARCH_HNSW_FIRST_384.call(
-            queryVec(384), "planshape", new String[] {COL_384}, null, null, 10);
+            queryVec(384), "planshape", new String[] {COL_384}, null, null, 10, MODEL_384, TENANT);
         String plan = explain(fn);
         assertThat(plan)
             .as("hybridSearch's dense-gate HNSW-first rank (384-dim) must bind to the FULL"
                 + " idx_chunks_embedding_384 HNSW index for its distance ORDER BY, WITH the"
                 + " nexus-74zvm embedding_384 IS NOT NULL guard added — the guard must not"
                 + " defeat the index bind. Plan was:%n%s", plan)
-            .contains("idx_chunks_embedding_384");
+            .containsPattern("Index Scan using \"?\\S*embedding_384");
     }
 
     // ════════════════════════════════════════════════════════════════════════
@@ -572,14 +606,14 @@ class PgVectorRepositoryRawSqlPlanShapeTest {
     @Test
     void searchMetadataScoped_shape_usesFullHnswIndex_1024() throws Exception {
         Table<?> fn = SEARCH_METADATA_SCOPED_1024.call(
-            queryVec(1024), new String[] {COL_1024}, null, null, null, null, null, null, 10);
+            queryVec(1024), new String[] {COL_1024}, null, null, null, null, null, null, 10, MODEL_1024, TENANT);
         String plan = explain(fn);
         assertThat(plan)
             .as("search_metadata_scoped_1024's embedding_1024 IS NOT NULL guard "
                 + "(vectors-006-1) must not defeat the FULL idx_chunks_embedding_1024 "
                 + "HNSW bind this inlinable LANGUAGE sql function relies on. Plan was:%n%s",
                 plan)
-            .contains("idx_chunks_embedding_1024");
+            .containsPattern("Index Scan using \"?\\S*embedding_1024");
         assertThat(plan)
             .as("must not degrade to a sequential scan of nexus.chunks. Plan was:%n%s", plan)
             .doesNotContain("Seq Scan on chunks");
@@ -589,13 +623,15 @@ class PgVectorRepositoryRawSqlPlanShapeTest {
     void searchGraphHop_shape_usesFullHnswIndex_768() throws Exception {
         Table<?> fn = SEARCH_GRAPH_HOP_768.call(
             queryVec(768), new String[] {"planshape-graphhop-doc"}, new String[] {COL_768},
-            null, 1, "both", null, 10);
-        String plan = explain(fn);
+            null, 1, "both", null, 10, MODEL_768, TENANT);
+        // The qualifying set here is the whole leaf, so the planner may legitimately choose a sequential scan,
+        // a hash join and a sort (it did on develop's CI runner): the pin is that the HNSW scan is reachable.
+        String plan = explainIndexReachable(fn);
         assertThat(plan)
             .as("search_graph_hop_768's embedding_768 IS NOT NULL guard (vectors-006-2) "
                 + "must not defeat the FULL idx_chunks_embedding_768 HNSW bind for the "
                 + "outer SELECT's distance ORDER BY. Plan was:%n%s", plan)
-            .contains("idx_chunks_embedding_768");
+            .containsPattern("Index Scan using \"?\\S*embedding_768");
         assertThat(plan)
             .as("must not degrade to a sequential scan of nexus.chunks. Plan was:%n%s", plan)
             .doesNotContain("Seq Scan on chunks");
@@ -623,7 +659,8 @@ class PgVectorRepositoryRawSqlPlanShapeTest {
      */
     @Test
     void searchTopicScoped_shape_projectsCorrectDimColumn_andStaysCollectionScoped_384() throws Exception {
-        Table<?> fn = SEARCH_TOPIC_SCOPED_384.call(queryVec(384), "planshape-topic", COL_384, 10);
+        Table<?> fn = SEARCH_TOPIC_SCOPED_384.call(
+            queryVec(384), "planshape-topic", COL_384, 10, MODEL_384, TENANT);
         String plan = explain(fn);
         assertThat(plan)
             .as("search_topic_scoped_384's distance projection must still read the CORRECT "
@@ -647,7 +684,7 @@ class PgVectorRepositoryRawSqlPlanShapeTest {
             .as("search_topic_scoped_384's embedding_384 IS NOT NULL guard (vectors-006-3) must "
                 + "not degrade the scan into an UNSCOPED sequential scan of nexus.chunks -- it must "
                 + "still be scoped by tenant_id (chunks_pk or idx_chunks_tenant_chash). Plan was:%n%s", plan)
-            .containsAnyOf("chunks_pk", "idx_chunks_tenant_chash");
+            .containsAnyOf("_pkey", "_tenant_id_chash_idx", "_embedding_384_idx", "chunks_pk", "idx_chunks_tenant_chash");
         assertThat(plan)
             .as("must not degrade to a full sequential scan of nexus.chunks ignoring "
                 + "tenant/collection scoping. Plan was:%n%s", plan)

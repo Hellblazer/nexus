@@ -345,13 +345,19 @@ class OnjvyReadRoutesHandlerTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             // RDR-204 nexus-ft04v.4/.5: routed through PgContainerHelper.insertCollection.
-            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), tenant, collection);
+            // RDR-225: the collection's model fixes the width of its vectors, so the model is the one
+            // whose dimension is `dim` (these collection names are not conformant, so the helper's
+            // name-derived default would be the 768-wide model).
+            String model = dim == 384 ? "minilm-l6-v2-384" : "bge-base-en-v15-768";
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), tenant, collection, model);
             String embeddingCol = "embedding_" + dim;
             su.createStatement().execute(
-                "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, " + embeddingCol + ") VALUES " +
-                "('" + tenant + "', '" + collection + "', decode('" + chashHex + "', 'hex'), 'routes-test chunk', " +
-                "('[" + "0.1,".repeat(dim - 1) + "0.1]')::nexus.vector) " +
-                "ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
+                "INSERT INTO nexus.chunks (tenant_id, collection, chash, embedding_model, chunk_text, " + embeddingCol
+                + ") VALUES "
+                + "('" + tenant + "', '" + collection + "', decode('" + chashHex + "', 'hex'), '" + model
+                + "', 'routes-test chunk', "
+                + "('[" + "0.1,".repeat(dim - 1) + "0.1]')::nexus.vector) "
+                + "ON CONFLICT (tenant_id, collection, chash, embedding_model) DO NOTHING");
         }
     }
 

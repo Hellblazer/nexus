@@ -226,6 +226,10 @@ class VectorsRepointFunctionsIntegrationTest {
 
     private record Fixture(byte[] chash, String chashHex, String collection, String docTumbler) {}
 
+    /** RDR-225: the read functions take the model and the tenant; the fixture collection carries this model. */
+    private static final String MODEL_384 = "minilm-l6-v2-384";
+    private static final String MODEL_AND_TENANT = "'" + MODEL_384 + "', '" + TENANT + "'";
+
     private static Fixture seedFixture(PostgreSQLContainer<?> pg) throws Exception {
         byte[] chash = sha256("vectors-005 repoint fixture chunk text");
         String chashHex = bytesToHex(chash);
@@ -244,6 +248,7 @@ class VectorsRepointFunctionsIntegrationTest {
             // requires (the bare two-column raw INSERT this used to run 23502s on
             // lifecycle_state NOT NULL).
             PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, collection);
+            final String model = modelOf(su, collection);
 
             try (PreparedStatement ps = su.prepareStatement(
                     "INSERT INTO nexus.catalog_documents "
@@ -262,33 +267,36 @@ class VectorsRepointFunctionsIntegrationTest {
             // nexus.chunks row to exist before the manifest row referencing it is
             // inserted — chunk insert MUST precede the manifest insert below.
             try (PreparedStatement ps = su.prepareStatement(
-                    "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_384) "
-                        + "VALUES (?, ?, ?, ?, ?::nexus.vector)")) {
+                    "INSERT INTO nexus.chunks (tenant_id, collection, chash, embedding_model, chunk_text, embedding_384) "
+                        + "VALUES (?, ?, ?, ?, ?, ?::nexus.vector)")) {
                 ps.setString(1, TENANT);
                 ps.setString(2, collection);
                 ps.setBytes(3, chash);
-                ps.setString(4, "vectors-005 repoint fixture chunk text");
-                ps.setString(5, vectorLiteral(384, 0.01));
+                ps.setString(4, model);
+                ps.setString(5, "vectors-005 repoint fixture chunk text");
+                ps.setString(6, vectorLiteral(384, 0.01));
                 ps.executeUpdate();
             }
 
             try (PreparedStatement ps = su.prepareStatement(
                     "INSERT INTO nexus.catalog_document_chunks "
-                        + "(tenant_id, doc_id, position, chash, collection) VALUES (?, ?, 0, ?, ?)")) {
+                        + "(tenant_id, doc_id, position, chash, collection, embedding_model) VALUES (?, ?, 0, ?, ?, ?)")) {
                 ps.setString(1, TENANT);
                 ps.setString(2, docTumbler);
                 ps.setBytes(3, chash);
                 ps.setString(4, collection);
+                ps.setString(5, model);
                 ps.executeUpdate();
             }
 
             try (PreparedStatement ps = su.prepareStatement(
                     "INSERT INTO nexus.taxonomy_centroids "
-                        + "(tenant_id, collection, topic_id, embedding_384, label, doc_count) "
-                        + "VALUES (?, ?, 1, ?::nexus.vector, 'alpha', 1)")) {
+                        + "(tenant_id, collection, topic_id, embedding_model, embedding_384, label, doc_count) "
+                        + "VALUES (?, ?, 1, ?, ?::nexus.vector, 'alpha', 1)")) {
                 ps.setString(1, TENANT);
                 ps.setString(2, collection);
-                ps.setString(3, vectorLiteral(384, 0.02));
+                ps.setString(3, model);
+                ps.setString(4, vectorLiteral(384, 0.02));
                 ps.executeUpdate();
             }
 
@@ -310,9 +318,9 @@ class VectorsRepointFunctionsIntegrationTest {
                 // the seeded row for the wrong reason.
                 st.execute(
                     "INSERT INTO nexus.topic_assignments "
-                        + "(tenant_id, doc_id, topic_id, assigned_by, source_collection) "
+                        + "(tenant_id, doc_id, topic_id, assigned_by, source_collection, embedding_model) "
                         + "SELECT '" + TENANT + "', decode('" + chashHex + "', 'hex'), t.id, 'centroid', '"
-                        + collection + "' "
+                        + collection + "', '" + model + "' "
                         + "FROM nexus.topics t WHERE t.tenant_id = '" + TENANT + "' AND t.label = 'alpha'");
             }
 
@@ -327,6 +335,12 @@ class VectorsRepointFunctionsIntegrationTest {
             }
         }
         return new Fixture(chash, chashHex, collection, docTumbler);
+    }
+
+    /** RDR-225: the embedding model {@code collection} is registered under (a chunk and every table that
+     *  references it carries it). */
+    private static String modelOf(Connection c, String collection) {
+        return PgContainerHelper.collectionModel(DSL.using(c, SQLDialect.POSTGRES), TENANT, collection);
     }
 
     private static String bytesToHex(byte[] bytes) {
@@ -394,7 +408,7 @@ class VectorsRepointFunctionsIntegrationTest {
                 // search_metadata_scoped_384: must find the seeded chunk.
                 try (PreparedStatement ps = conn.prepareStatement(
                         "SELECT * FROM nexus.search_metadata_scoped_384("
-                            + "?::nexus.vector, ?, NULL, NULL, NULL, NULL, NULL, NULL, 10)")) {
+                            + "?::nexus.vector, ?, NULL, NULL, NULL, NULL, NULL, NULL, 10, " + MODEL_AND_TENANT + ")")) {
                     ps.setString(1, vectorLiteral(384, 0.01));
                     ps.setArray(2, conn.createArrayOf("text", new String[] {fx.collection()}));
                     var rs = ps.executeQuery();
@@ -407,7 +421,7 @@ class VectorsRepointFunctionsIntegrationTest {
                 for (int dim : new int[] {768, 1024}) {
                     try (PreparedStatement ps = conn.prepareStatement(
                             "SELECT * FROM nexus.search_metadata_scoped_" + dim + "("
-                                + "?::nexus.vector, ?, NULL, NULL, NULL, NULL, NULL, NULL, 10)")) {
+                                + "?::nexus.vector, ?, NULL, NULL, NULL, NULL, NULL, NULL, 10, " + MODEL_AND_TENANT + ")")) {
                         ps.setString(1, vectorLiteral(dim, 0.01));
                         ps.setArray(2, conn.createArrayOf("text", new String[] {fx.collection()}));
                         assertThatCode(ps::executeQuery)
@@ -418,7 +432,7 @@ class VectorsRepointFunctionsIntegrationTest {
 
                 // search_topic_scoped_384: must find the seeded chunk via topic_assignments.
                 try (PreparedStatement ps = conn.prepareStatement(
-                        "SELECT * FROM nexus.search_topic_scoped_384(?::nexus.vector, 'alpha', ?, 10)")) {
+                        "SELECT * FROM nexus.search_topic_scoped_384(?::nexus.vector, 'alpha', ?, 10, " + MODEL_AND_TENANT + ")")) {
                     ps.setString(1, vectorLiteral(384, 0.01));
                     ps.setString(2, fx.collection());
                     var rs = ps.executeQuery();
@@ -426,7 +440,7 @@ class VectorsRepointFunctionsIntegrationTest {
                 }
                 for (int dim : new int[] {768, 1024}) {
                     try (PreparedStatement ps = conn.prepareStatement(
-                            "SELECT * FROM nexus.search_topic_scoped_" + dim + "(?::nexus.vector, 'alpha', ?, 10)")) {
+                            "SELECT * FROM nexus.search_topic_scoped_" + dim + "(?::nexus.vector, 'alpha', ?, 10, " + MODEL_AND_TENANT + ")")) {
                         ps.setString(1, vectorLiteral(dim, 0.01));
                         ps.setString(2, fx.collection());
                         assertThatCode(ps::executeQuery)
@@ -439,7 +453,7 @@ class VectorsRepointFunctionsIntegrationTest {
                 // 'cites'), depth 1, direction both, from itself as the seed.
                 try (PreparedStatement ps = conn.prepareStatement(
                         "SELECT * FROM nexus.search_graph_hop_384("
-                            + "?::nexus.vector, ?, ?, NULL, 1, 'both', NULL, 10)")) {
+                            + "?::nexus.vector, ?, ?, NULL, 1, 'both', NULL, 10, " + MODEL_AND_TENANT + ")")) {
                     ps.setString(1, vectorLiteral(384, 0.01));
                     ps.setArray(2, conn.createArrayOf("text", new String[] {fx.docTumbler()}));
                     ps.setArray(3, conn.createArrayOf("text", new String[] {fx.collection()}));
@@ -449,7 +463,7 @@ class VectorsRepointFunctionsIntegrationTest {
                 for (int dim : new int[] {768, 1024}) {
                     try (PreparedStatement ps = conn.prepareStatement(
                             "SELECT * FROM nexus.search_graph_hop_" + dim + "("
-                                + "?::nexus.vector, ?, ?, NULL, 1, 'both', NULL, 10)")) {
+                                + "?::nexus.vector, ?, ?, NULL, 1, 'both', NULL, 10, " + MODEL_AND_TENANT + ")")) {
                         ps.setString(1, vectorLiteral(dim, 0.01));
                         ps.setArray(2, conn.createArrayOf("text", new String[] {fx.docTumbler()}));
                         ps.setArray(3, conn.createArrayOf("text", new String[] {fx.collection()}));
@@ -712,13 +726,14 @@ class VectorsRepointFunctionsIntegrationTest {
                 // A genuinely orphaned chunk: present in nexus.chunks, NOT
                 // referenced by any catalog_document_chunks row.
                 try (PreparedStatement ps = su.prepareStatement(
-                        "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_384) "
-                            + "VALUES (?, ?, ?, ?, ?::nexus.vector)")) {
+                        "INSERT INTO nexus.chunks (tenant_id, collection, chash, embedding_model, chunk_text, embedding_384) "
+                            + "VALUES (?, ?, ?, ?, ?, ?::nexus.vector)")) {
                     ps.setString(1, TENANT);
                     ps.setString(2, origin);
                     ps.setBytes(3, orphanChash);
-                    ps.setString(4, "gc real-execution orphan chunk text");
-                    ps.setString(5, vectorLiteral(384, 0.10));
+                    ps.setString(4, modelOf(su, origin));
+                    ps.setString(5, "gc real-execution orphan chunk text");
+                    ps.setString(6, vectorLiteral(384, 0.10));
                     ps.executeUpdate();
                 }
             }
@@ -767,12 +782,13 @@ class VectorsRepointFunctionsIntegrationTest {
                         "ALTER TABLE nexus.catalog_document_chunks DROP CONSTRAINT IF EXISTS fk_catalog_chunks_chunk");
                 }
                 try (PreparedStatement ps = conn.prepareStatement(
-                        "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection) "
-                            + "VALUES (?, ?, 1, ?, ?)")) {
+                        "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection, embedding_model) "
+                            + "VALUES (?, ?, 1, ?, ?, ?)")) {
                     ps.setString(1, TENANT);
                     ps.setString(2, fx.docTumbler());
                     ps.setBytes(3, orphanChash);
                     ps.setString(4, origin);
+                    ps.setString(5, modelOf(conn, origin));
                     ps.executeUpdate();
                 }
                 try (Connection ddl = rig.pg().createConnection("")) {
@@ -780,7 +796,8 @@ class VectorsRepointFunctionsIntegrationTest {
                     ddl.createStatement().execute(
                         "ALTER TABLE nexus.catalog_document_chunks "
                         + "ADD CONSTRAINT fk_catalog_chunks_chunk "
-                        + "FOREIGN KEY (tenant_id, collection, chash) REFERENCES nexus.chunks (tenant_id, collection, chash) "
+                        + "FOREIGN KEY (tenant_id, collection, chash, embedding_model) "
+                        + "REFERENCES nexus.chunks (tenant_id, collection, chash, embedding_model) "
                         + "ON UPDATE CASCADE DEFERRABLE INITIALLY IMMEDIATE NOT VALID");
                 }
                 try (PreparedStatement ps = conn.prepareStatement(
@@ -804,14 +821,16 @@ class VectorsRepointFunctionsIntegrationTest {
                 try (Connection su = rig.pg().createConnection("")) {
                     su.setAutoCommit(true);
                     try (PreparedStatement ps = su.prepareStatement(
-                            "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_384, metadata) "
-                                + "VALUES (?, ?, ?, ?, ?::nexus.vector, ?::jsonb)")) {
+                            "INSERT INTO nexus.chunks (tenant_id, collection, chash, embedding_model, chunk_text, embedding_384, metadata) "
+                                + "VALUES (?, ?, ?, ?, ?, ?::nexus.vector, ?::jsonb)")) {
                         ps.setString(1, TENANT);
                         ps.setString(2, quarantineFlow);
                         ps.setBytes(3, expireChash);
-                        ps.setString(4, "gc real-execution expire chunk text");
-                        ps.setString(5, vectorLiteral(384, 0.11));
-                        ps.setString(6, "{\"quarantined_at\":\"2020-01-01T00:00:00Z\",\"origin_collection\":\""
+                        // quarantineFlow was registered by gc_quarantine_orphans under the origin's model.
+                        ps.setString(4, modelOf(su, quarantineFlow));
+                        ps.setString(5, "gc real-execution expire chunk text");
+                        ps.setString(6, vectorLiteral(384, 0.11));
+                        ps.setString(7, "{\"quarantined_at\":\"2020-01-01T00:00:00Z\",\"origin_collection\":\""
                             + origin + "\"}");
                         ps.executeUpdate();
                     }
@@ -888,16 +907,21 @@ class VectorsRepointFunctionsIntegrationTest {
                 // nexus-ft04v.4/.5: routed through PgContainerHelper.insertCollection.
                 PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, quarantineShared);
                 // Pre-existing quarantined row under dim 768, at the SHARED
-                // quarantine target, same chash.
+                // quarantine target, same chash. RDR-225: the target's name is not conformant, so it is
+                // registered under the 768-wide fallback model (bge-base-en-v15-768) and the 768-wide
+                // row is that model's own dimension; the origin below is a 384-wide (minilm) collection,
+                // so the collision is between two collections of different models, still a
+                // different populated embedding column at the same (tenant, collection, chash).
                 try (PreparedStatement ps = su.prepareStatement(
-                        "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_768, metadata) "
-                            + "VALUES (?, ?, ?, ?, ?::nexus.vector, ?::jsonb)")) {
+                        "INSERT INTO nexus.chunks (tenant_id, collection, chash, embedding_model, chunk_text, embedding_768, metadata) "
+                            + "VALUES (?, ?, ?, ?, ?, ?::nexus.vector, ?::jsonb)")) {
                     ps.setString(1, TENANT);
                     ps.setString(2, quarantineShared);
                     ps.setBytes(3, collisionChash);
-                    ps.setString(4, "existing 768-dim quarantined chunk");
-                    ps.setString(5, vectorLiteral(768, 0.05));
-                    ps.setString(6, "{\"quarantined_at\":\"2026-01-01T00:00:00Z\",\"origin_collection\":\"some-768-collection\"}");
+                    ps.setString(4, modelOf(su, quarantineShared));
+                    ps.setString(5, "existing 768-dim quarantined chunk");
+                    ps.setString(6, vectorLiteral(768, 0.05));
+                    ps.setString(7, "{\"quarantined_at\":\"2026-01-01T00:00:00Z\",\"origin_collection\":\"some-768-collection\"}");
                     ps.executeUpdate();
                 }
                 // A DIFFERENT, orphaned 384-dim chunk in fx.collection() that
@@ -906,13 +930,14 @@ class VectorsRepointFunctionsIntegrationTest {
                 // quarantine_collection by convention, not server-enforced
                 // per-dim distinctness).
                 try (PreparedStatement ps = su.prepareStatement(
-                        "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_384) "
-                            + "VALUES (?, ?, ?, ?, ?::nexus.vector)")) {
+                        "INSERT INTO nexus.chunks (tenant_id, collection, chash, embedding_model, chunk_text, embedding_384) "
+                            + "VALUES (?, ?, ?, ?, ?, ?::nexus.vector)")) {
                     ps.setString(1, TENANT);
                     ps.setString(2, fx.collection());
                     ps.setBytes(3, collisionChash);
-                    ps.setString(4, "colliding 384-dim orphan chunk");
-                    ps.setString(5, vectorLiteral(384, 0.06));
+                    ps.setString(4, modelOf(su, fx.collection()));
+                    ps.setString(5, "colliding 384-dim orphan chunk");
+                    ps.setString(6, vectorLiteral(384, 0.06));
                     ps.executeUpdate();
                 }
             }
@@ -975,39 +1000,47 @@ class VectorsRepointFunctionsIntegrationTest {
                 // nexus-ft04v.4/.5: routed through PgContainerHelper.insertCollection.
                 PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, quarantineCollection);
                 // Pre-existing row ALREADY at the origin collection, under a
-                // DIFFERENT dim (1024) than the row being restored (384).
+                // DIFFERENT dim than the row being restored. RDR-225: the origin is a 384-wide (minilm)
+                // collection, so its row is 384-wide, and the row to restore is the 768-wide one
+                // (the quarantine target's name is not conformant, so it is registered under the 768-wide
+                // fallback model): the same two different-dim rows for one chash, built from rows each
+                // collection's own model accepts (the old 1024-wide origin row is refused by the
+                // minilm partition's dimension CHECK).
                 try (PreparedStatement ps = su.prepareStatement(
-                        "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_1024) "
-                            + "VALUES (?, ?, ?, ?, ?::nexus.vector)")) {
+                        "INSERT INTO nexus.chunks (tenant_id, collection, chash, embedding_model, chunk_text, embedding_384) "
+                            + "VALUES (?, ?, ?, ?, ?, ?::nexus.vector)")) {
                     ps.setString(1, TENANT);
                     ps.setString(2, fx.collection());
                     ps.setBytes(3, collisionChash);
-                    ps.setString(4, "existing 1024-dim origin row");
-                    ps.setString(5, vectorLiteral(1024, 0.07));
+                    ps.setString(4, modelOf(su, fx.collection()));
+                    ps.setString(5, "existing 384-dim origin row");
+                    ps.setString(6, vectorLiteral(384, 0.07));
                     ps.executeUpdate();
                 }
-                // The quarantined row to be restored, dim 384.
+                // The quarantined row to be restored, dim 768.
                 try (PreparedStatement ps = su.prepareStatement(
-                        "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_384, metadata) "
-                            + "VALUES (?, ?, ?, ?, ?::nexus.vector, ?::jsonb)")) {
+                        "INSERT INTO nexus.chunks (tenant_id, collection, chash, embedding_model, chunk_text, embedding_768, metadata) "
+                            + "VALUES (?, ?, ?, ?, ?, ?::nexus.vector, ?::jsonb)")) {
                     ps.setString(1, TENANT);
                     ps.setString(2, quarantineCollection);
                     ps.setBytes(3, collisionChash);
-                    ps.setString(4, "quarantined 384-dim chunk to restore");
-                    ps.setString(5, vectorLiteral(384, 0.08));
-                    ps.setString(6, "{\"quarantined_at\":\"2026-01-01T00:00:00Z\",\"origin_collection\":\""
+                    ps.setString(4, modelOf(su, quarantineCollection));
+                    ps.setString(5, "quarantined 768-dim chunk to restore");
+                    ps.setString(6, vectorLiteral(768, 0.08));
+                    ps.setString(7, "{\"quarantined_at\":\"2026-01-01T00:00:00Z\",\"origin_collection\":\""
                         + fx.collection() + "\"}");
                     ps.executeUpdate();
                 }
                 // Manifest row re-referencing it at the origin -- makes it a
                 // genuine restore candidate.
                 try (PreparedStatement ps = su.prepareStatement(
-                        "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection) "
-                            + "VALUES (?, ?, 2, ?, ?)")) {
+                        "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection, embedding_model) "
+                            + "VALUES (?, ?, 2, ?, ?, ?)")) {
                     ps.setString(1, TENANT);
                     ps.setString(2, fx.docTumbler());
                     ps.setBytes(3, collisionChash);
                     ps.setString(4, fx.collection());
+                    ps.setString(5, modelOf(su, fx.collection()));
                     ps.executeUpdate();
                 }
             }
@@ -1025,18 +1058,18 @@ class VectorsRepointFunctionsIntegrationTest {
                         .hasMessageContaining("cross-dim");
                 }
 
-                // Post-state: the pre-existing 1024-dim origin row is UNTOUCHED.
+                // Post-state: the pre-existing 384-dim origin row is UNTOUCHED.
                 try (PreparedStatement ps = conn.prepareStatement(
-                        "SELECT chunk_text, embedding_384 IS NULL AS no384, embedding_1024 IS NOT NULL AS has1024 "
+                        "SELECT chunk_text, embedding_768 IS NULL AS no768, embedding_384 IS NOT NULL AS has384 "
                             + "FROM nexus.chunks WHERE tenant_id = ? AND collection = ? AND chash = ?")) {
                     ps.setString(1, TENANT);
                     ps.setString(2, fx.collection());
                     ps.setBytes(3, collisionChash);
                     var rs = ps.executeQuery();
                     assertThat(rs.next()).as("the pre-existing origin row must still exist").isTrue();
-                    assertThat(rs.getString("chunk_text")).isEqualTo("existing 1024-dim origin row");
-                    assertThat(rs.getBoolean("no384")).as("embedding_384 must NOT have been set by the failed copy").isTrue();
-                    assertThat(rs.getBoolean("has1024")).as("embedding_1024 must remain populated, untouched").isTrue();
+                    assertThat(rs.getString("chunk_text")).isEqualTo("existing 384-dim origin row");
+                    assertThat(rs.getBoolean("no768")).as("embedding_768 must NOT have been set by the failed copy").isTrue();
+                    assertThat(rs.getBoolean("has384")).as("embedding_384 must remain populated, untouched").isTrue();
                 }
                 // And the quarantined row survives too -- the RAISE aborts
                 // before the DELETE runs.
@@ -1075,6 +1108,7 @@ class VectorsRepointFunctionsIntegrationTest {
                 // (tenant_id, name) — register the collection first. RDR-204
                 // nexus-ft04v.4/.5: routed through PgContainerHelper.insertCollection.
                 PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, collection);
+                final String relayModel = modelOf(su, collection);
                 for (var doc : new Object[][] {{"relay-a", chashA}, {"relay-b", chashB}, {"relay-c", chashC}}) {
                     String tumbler = (String) doc[0];
                     byte[] chash = (byte[]) doc[1];
@@ -1091,22 +1125,24 @@ class VectorsRepointFunctionsIntegrationTest {
                     // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk
                     // requires the nexus.chunks row before the manifest row below.
                     try (PreparedStatement ps = su.prepareStatement(
-                            "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_384) "
-                                + "VALUES (?, ?, ?, ?, ?::nexus.vector)")) {
+                            "INSERT INTO nexus.chunks (tenant_id, collection, chash, embedding_model, chunk_text, embedding_384) "
+                                + "VALUES (?, ?, ?, ?, ?, ?::nexus.vector)")) {
                         ps.setString(1, TENANT);
                         ps.setString(2, collection);
                         ps.setBytes(3, chash);
-                        ps.setString(4, tumbler + " chunk text");
-                        ps.setString(5, vectorLiteral(384, 0.09));
+                        ps.setString(4, relayModel);
+                        ps.setString(5, tumbler + " chunk text");
+                        ps.setString(6, vectorLiteral(384, 0.09));
                         ps.executeUpdate();
                     }
                     try (PreparedStatement ps = su.prepareStatement(
                             "INSERT INTO nexus.catalog_document_chunks "
-                                + "(tenant_id, doc_id, position, chash, collection) VALUES (?, ?, 0, ?, ?)")) {
+                                + "(tenant_id, doc_id, position, chash, collection, embedding_model) VALUES (?, ?, 0, ?, ?, ?)")) {
                         ps.setString(1, TENANT);
                         ps.setString(2, tumbler);
                         ps.setBytes(3, chash);
                         ps.setString(4, collection);
+                        ps.setString(5, relayModel);
                         ps.executeUpdate();
                     }
                 }
@@ -1156,7 +1192,7 @@ class VectorsRepointFunctionsIntegrationTest {
             throws Exception {
         try (PreparedStatement ps = conn.prepareStatement(
                 "SELECT id FROM nexus.search_graph_hop_384("
-                    + "?::nexus.vector, ?, ?, 'cites', ?, 'out', NULL, 10)")) {
+                    + "?::nexus.vector, ?, ?, 'cites', ?, 'out', NULL, 10, " + MODEL_AND_TENANT + ")")) {
             ps.setString(1, vectorLiteral(384, 0.09));
             ps.setArray(2, conn.createArrayOf("text", new String[] {seed}));
             ps.setArray(3, conn.createArrayOf("text", new String[] {collection}));
@@ -1183,7 +1219,7 @@ class VectorsRepointFunctionsIntegrationTest {
                 setTenantGuc(conn, TENANT);
 
                 try (PreparedStatement ps = conn.prepareStatement(
-                        "SELECT * FROM nexus.assign_from_chashes_384(?, ?, false)")) {
+                        "SELECT * FROM nexus.assign_from_chashes_384(?, ?, false, " + MODEL_AND_TENANT + ")")) {
                     ps.setString(1, fx.collection());
                     ps.setArray(2, conn.createArrayOf("text", new String[] {fx.chashHex()}));
                     var rs = ps.executeQuery();
@@ -1195,7 +1231,7 @@ class VectorsRepointFunctionsIntegrationTest {
                 }
                 for (int dim : new int[] {768, 1024}) {
                     try (PreparedStatement ps = conn.prepareStatement(
-                            "SELECT * FROM nexus.assign_from_chashes_" + dim + "(?, ?, false)")) {
+                            "SELECT * FROM nexus.assign_from_chashes_" + dim + "(?, ?, false, " + MODEL_AND_TENANT + ")")) {
                         ps.setString(1, "nonexistent-collection-" + dim);
                         ps.setArray(2, conn.createArrayOf("text", new String[] {fx.chashHex()}));
                         assertThatCode(ps::executeQuery)

@@ -164,8 +164,10 @@ class Taxonomy010BackfillDirectIntegrationTest {
             su.createStatement().execute(
                 "ALTER TABLE nexus.topic_assignments ALTER COLUMN doc_id TYPE TEXT USING encode(doc_id, 'hex')");
 
-            registerCollection(su, TENANT, "code__x");
-            registerCollection(su, TENANT, "code__y");
+            // RDR-225: a collection holds one embedding model, so one width. code__x holds the 384-wide chunks
+            // below and code__y the 768-wide one; the ambiguous chash is one chunk in each of the two.
+            registerCollection(su, TENANT, "code__x", "minilm-l6-v2-384");
+            registerCollection(su, TENANT, "code__y", "bge-base-en-v15-768");
             long topicId = seedTopic(su, TENANT, "code__x", "direct-p3b-topic");
 
             // (b) UNIQUE-RESOLUTION arm: fresh canonical 64-hex chash under
@@ -347,9 +349,9 @@ class Taxonomy010BackfillDirectIntegrationTest {
         return out;
     }
 
-    private static void registerCollection(Connection c, String tenant, String name) throws Exception {
+    private static void registerCollection(Connection c, String tenant, String name, String model) throws Exception {
         // RDR-204 nexus-ft04v.4/.5: delegates to PgContainerHelper.insertCollection.
-        PgContainerHelper.insertCollection(DSL.using(c, SQLDialect.POSTGRES), tenant, name);
+        PgContainerHelper.insertCollection(DSL.using(c, SQLDialect.POSTGRES), tenant, name, model);
     }
 
     private static long seedTopic(Connection c, String tenant, String collection, String label)
@@ -370,8 +372,8 @@ class Taxonomy010BackfillDirectIntegrationTest {
     private static void seedTopicAssignment(Connection c, String tenant, String docId, long topicId)
             throws Exception {
         try (var ps = c.prepareStatement(
-            "INSERT INTO nexus.topic_assignments (tenant_id, doc_id, topic_id, assigned_by) "
-            + "VALUES (?, ?, ?, 'direct-test-seed')")) {
+            "INSERT INTO nexus.topic_assignments (tenant_id, doc_id, topic_id, assigned_by, embedding_model) "
+            + "VALUES (?, ?, ?, 'direct-test-seed', 'bge-base-en-v15-768')")) {
             ps.setString(1, tenant);
             ps.setString(2, docId);
             ps.setLong(3, topicId);
@@ -392,8 +394,8 @@ class Taxonomy010BackfillDirectIntegrationTest {
             throws Exception {
         try (var ps = c.prepareStatement(
             "INSERT INTO nexus.topic_assignments "
-            + "(tenant_id, doc_id, topic_id, assigned_by, source_collection) "
-            + "VALUES (?, ?, ?, 'direct-test-seed', ?)")) {
+            + "(tenant_id, doc_id, topic_id, assigned_by, source_collection, embedding_model) "
+            + "VALUES (?, ?, ?, 'direct-test-seed', ?, 'bge-base-en-v15-768')")) {
             ps.setString(1, tenant);
             ps.setString(2, docId);
             ps.setLong(3, topicId);
@@ -407,14 +409,17 @@ class Taxonomy010BackfillDirectIntegrationTest {
             throws Exception {
         String embeddingCol = "embedding_" + dim;
         try (var ps = c.prepareStatement(
-            "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, " + embeddingCol + ") "
-            + "VALUES (?, ?, decode(?, 'hex'), ?, ?::nexus.vector) "
-            + "ON CONFLICT (tenant_id, collection, chash) DO NOTHING")) {
+            "INSERT INTO nexus.chunks (tenant_id, collection, chash, embedding_model, chunk_text, " + embeddingCol
+            + ") VALUES (?, ?, decode(?, 'hex'), (SELECT embedding_model FROM nexus.catalog_collections "
+            + "WHERE tenant_id = ? AND name = ?), ?, ?::nexus.vector) "
+            + "ON CONFLICT (tenant_id, collection, chash, embedding_model) DO NOTHING")) {
             ps.setString(1, tenant);
             ps.setString(2, collection);
             ps.setString(3, chashHex);
-            ps.setString(4, "direct test chunk " + chashHex.substring(0, 8));
-            ps.setString(5, "[" + "0,".repeat(dim - 1) + "0]");
+            ps.setString(4, tenant);
+            ps.setString(5, collection);
+            ps.setString(6, "direct test chunk " + chashHex.substring(0, 8));
+            ps.setString(7, "[" + "0,".repeat(dim - 1) + "0]");
             ps.executeUpdate();
         }
     }

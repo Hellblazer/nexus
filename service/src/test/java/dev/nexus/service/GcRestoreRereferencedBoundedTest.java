@@ -386,12 +386,14 @@ class GcRestoreRereferencedBoundedTest {
     }
 
     private void insertManifestRow(Connection su, String tenant, String docId, String chashHex, String collection) {
-        DSL.using(su, SQLDialect.POSTGRES)
-           .insertInto(CATALOG_DOCUMENT_CHUNKS,
+        var dsl = DSL.using(su, SQLDialect.POSTGRES);
+        // RDR-225: a manifest row carries the model of the collection (and so of the chunk) it names.
+        dsl.insertInto(CATALOG_DOCUMENT_CHUNKS,
                 CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
                 CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
-                CATALOG_DOCUMENT_CHUNKS.COLLECTION)
-           .values(tenant, docId, 0, Chash.fromHex(chashHex).toBytes(), collection)
+                CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
+           .values(tenant, docId, 0, Chash.fromHex(chashHex).toBytes(), collection,
+                PgContainerHelper.collectionModel(dsl, tenant, collection))
            .execute();
     }
 
@@ -414,7 +416,8 @@ class GcRestoreRereferencedBoundedTest {
             su.createStatement().execute(
                 "ALTER TABLE nexus.catalog_document_chunks "
                 + "ADD CONSTRAINT fk_catalog_chunks_chunk "
-                + "FOREIGN KEY (tenant_id, collection, chash) REFERENCES nexus.chunks (tenant_id, collection, chash) "
+                + "FOREIGN KEY (tenant_id, collection, chash, embedding_model) "
+                + "REFERENCES nexus.chunks (tenant_id, collection, chash, embedding_model) "
                 + "ON UPDATE CASCADE DEFERRABLE INITIALLY IMMEDIATE NOT VALID");
         }
     }

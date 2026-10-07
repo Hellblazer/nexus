@@ -68,6 +68,10 @@ class ForeignKeyConstraintTest {
     private static final String SVC_ROLE  = "svc_fk_test";
     private static final String SVC_PASS  = "svc_fk_test_pass";
 
+    /** RDR-225: the model every fixture collection here registers under (their names carry no
+     *  conformant model token, so {@link PgContainerHelper#insertCollection} defaults to this one, 768-d). */
+    private static final String MODEL = "bge-base-en-v15-768";
+
     // Tumbler values
     private static final String TUMBLER_A = "1.1";
     private static final String TUMBLER_B = "2.1";
@@ -252,8 +256,8 @@ class ForeignKeyConstraintTest {
             // decode() produces, so it would never match seedChunk's chunks row.
             ctx.insertInto(TOPIC_ASSIGNMENTS, TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID,
                     TOPIC_ASSIGNMENTS.TOPIC_ID, TOPIC_ASSIGNMENTS.ASSIGNED_BY, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION,
-                    TOPIC_ASSIGNMENTS.ASSIGNED_AT)
-                .values(TENANT_A, chashBytes, 100L, "hdbscan", "col-a", OffsetDateTime.now())
+                    TOPIC_ASSIGNMENTS.ASSIGNED_AT, TOPIC_ASSIGNMENTS.EMBEDDING_MODEL)
+                .values(TENANT_A, chashBytes, 100L, "hdbscan", "col-a", OffsetDateTime.now(), MODEL)
                 .execute();
             int count = ctx.selectCount().from(TOPIC_ASSIGNMENTS)
                 .where(TOPIC_ASSIGNMENTS.TENANT_ID.eq(TENANT_A)).and(TOPIC_ASSIGNMENTS.DOC_ID.eq(chashBytes))
@@ -272,14 +276,14 @@ class ForeignKeyConstraintTest {
             DataAccessException ex = assertThrows(DataAccessException.class, () ->
                 ctx.insertInto(TOPIC_ASSIGNMENTS, TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID,
                         TOPIC_ASSIGNMENTS.TOPIC_ID, TOPIC_ASSIGNMENTS.ASSIGNED_BY, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION,
-                        TOPIC_ASSIGNMENTS.ASSIGNED_AT)
+                        TOPIC_ASSIGNMENTS.ASSIGNED_AT, TOPIC_ASSIGNMENTS.EMBEDDING_MODEL)
                     // nexus-cbo4a batch 10 review fold-in: the pre-conversion raw SQL
                     // (git show 7cd690dde) inserted this doc_id as a bare quoted string
                     // literal with NO decode(..., 'hex') wrapper -- ASCII-escape-format
                     // bytes of the hex STRING, not a genuine hex-decode, unlike the
                     // sibling tests above/below that DO call decode() in the original.
                     .values(TENANT_A, chashAscii(hexChash("fk-topicAssignment-topicIdFk")), 999999L,
-                        "hdbscan", "col-a", OffsetDateTime.now())
+                        "hdbscan", "col-a", OffsetDateTime.now(), MODEL)
                     .execute()
             );
             assertThat(ex.getMessage()).containsIgnoringCase("foreign key");
@@ -306,8 +310,8 @@ class ForeignKeyConstraintTest {
             // Genuine hex-decoded bytes (RDR-194 P3d): see the sibling test's identical note.
             ctx.insertInto(TOPIC_ASSIGNMENTS, TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID,
                     TOPIC_ASSIGNMENTS.TOPIC_ID, TOPIC_ASSIGNMENTS.ASSIGNED_BY, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION,
-                    TOPIC_ASSIGNMENTS.ASSIGNED_AT)
-                .values(TENANT_A, chashBytes, 199L, "hdbscan", "col-a", OffsetDateTime.now())
+                    TOPIC_ASSIGNMENTS.ASSIGNED_AT, TOPIC_ASSIGNMENTS.EMBEDDING_MODEL)
+                .values(TENANT_A, chashBytes, 199L, "hdbscan", "col-a", OffsetDateTime.now(), MODEL)
                 .execute();
 
             ctx.deleteFrom(CATALOG_DOCUMENTS)
@@ -662,13 +666,15 @@ class ForeignKeyConstraintTest {
             // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk now requires
             // a matching nexus.chunks row for this CONTROL insert to succeed.
             byte[] chash = chashAscii("abc123abc123abc123abc123abc12300");
-            ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_384)
-                .values(TENANT_A, "fk-chunk-coll", chash, "text", vector(384))
+            ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL,
+                    CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_768)
+                .values(TENANT_A, "fk-chunk-coll", chash, MODEL, "text", vector(768))
                 .onConflictDoNothing()
                 .execute();
             ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
-                    CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION)
-                .values(TENANT_A, "chunk-doc-1", 0, chash, "fk-chunk-coll")
+                    CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION,
+                    CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
+                .values(TENANT_A, "chunk-doc-1", 0, chash, "fk-chunk-coll", MODEL)
                 .execute();
             int count = ctx.selectCount().from(CATALOG_DOCUMENT_CHUNKS)
                 .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(TENANT_A)).and(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq("chunk-doc-1"))
@@ -685,9 +691,10 @@ class ForeignKeyConstraintTest {
             PgContainerHelper.insertCollection(ctx, TENANT_A, "fk-chunk-coll");
             DataAccessException ex = assertThrows(DataAccessException.class, () ->
                 ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
-                        CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION)
+                        CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION,
+                    CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
                     .values(TENANT_A, "nonexistent-chunk-doc", 0, chashAscii("deadbeefdeadbeefdeadbeefdeadbeef"),
-                        "fk-chunk-coll")
+                        "fk-chunk-coll", MODEL)
                     .execute()
             );
             assertThat(ex.getMessage())
@@ -707,15 +714,17 @@ class ForeignKeyConstraintTest {
             // a matching nexus.chunks row for each of these two manifest inserts.
             byte[] chash0 = chashAscii("hash0000000000000000000000000000");
             byte[] chash1 = chashAscii("hash1111111111111111111111111111");
-            ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_384)
-                .values(TENANT_A, "fk-chunk-coll", chash0, "text0", vector(384))
-                .values(TENANT_A, "fk-chunk-coll", chash1, "text1", vector(384))
+            ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL,
+                    CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_768)
+                .values(TENANT_A, "fk-chunk-coll", chash0, MODEL, "text0", vector(768))
+                .values(TENANT_A, "fk-chunk-coll", chash1, MODEL, "text1", vector(768))
                 .onConflictDoNothing()
                 .execute();
             ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
-                    CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION)
-                .values(TENANT_A, "chunk-cascade-doc", 0, chash0, "fk-chunk-coll")
-                .values(TENANT_A, "chunk-cascade-doc", 1, chash1, "fk-chunk-coll")
+                    CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION,
+                    CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
+                .values(TENANT_A, "chunk-cascade-doc", 0, chash0, "fk-chunk-coll", MODEL)
+                .values(TENANT_A, "chunk-cascade-doc", 1, chash1, "fk-chunk-coll", MODEL)
                 .execute();
 
             int before = ctx.selectCount().from(CATALOG_DOCUMENT_CHUNKS)
@@ -748,8 +757,9 @@ class ForeignKeyConstraintTest {
             // (FK checks as table owner; without composite key this would silently succeed)
             DataAccessException ex = assertThrows(DataAccessException.class, () ->
                 ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
-                        CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION)
-                    .values(TENANT_B, TUMBLER_A, 0, chashAscii("crosshashcrosshashcrosshash00000"), "fk-chunk-coll")
+                        CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION,
+                    CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
+                    .values(TENANT_B, TUMBLER_A, 0, chashAscii("crosshashcrosshashcrosshash00000"), "fk-chunk-coll", MODEL)
                     .execute()
             );
             assertThat(ex.getMessage())
@@ -825,8 +835,8 @@ class ForeignKeyConstraintTest {
             // succeeds_noCatalogFk's identical note.
             ctx.insertInto(TOPIC_ASSIGNMENTS, TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID,
                     TOPIC_ASSIGNMENTS.TOPIC_ID, TOPIC_ASSIGNMENTS.ASSIGNED_BY, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION,
-                    TOPIC_ASSIGNMENTS.ASSIGNED_AT)
-                .values(TENANT_A, chashBytes, 300L, "hdbscan", "col-rls", OffsetDateTime.now())
+                    TOPIC_ASSIGNMENTS.ASSIGNED_AT, TOPIC_ASSIGNMENTS.EMBEDDING_MODEL)
+                .values(TENANT_A, chashBytes, 300L, "hdbscan", "col-rls", OffsetDateTime.now(), MODEL)
                 .execute();
         }
 
@@ -905,17 +915,19 @@ class ForeignKeyConstraintTest {
     // ══════════════════════════════════════════════════════════════════════════
 
     /**
-     * Insert a minimal nexus.chunks row at dim 384 (RDR-194 P3d, nexus-tk070.p3d):
+     * Insert a minimal nexus.chunks row at dim 768 (RDR-194 P3d, nexus-tk070.p3d; RDR-225: the
+     * fixture collections' names carry no model token, so they register under {@link #MODEL}):
      * every topic_assignments row now requires a matching (tenant_id,
      * source_collection, doc_id) -> chunks(tenant_id, collection, chash) parent via
      * topic_assignments_chunk_fk. Also registers the collection since
      * chunks_collection_fk requires it -- safe to call even when the caller already
-     * registered it. Every call site in this file uses dim 384.
+     * registered it. Every call site in this file uses dim 768.
      */
     private static void seedChunk(DSLContext ctx, String tenantId, String collection, byte[] chashBytes) {
         PgContainerHelper.insertCollection(ctx, tenantId, collection);
-        ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_384)
-            .values(tenantId, collection, chashBytes, "fk-test chunk", vector(384))
+        ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL,
+                CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_768)
+            .values(tenantId, collection, chashBytes, MODEL, "fk-test chunk", vector(768))
             .onConflictDoNothing()
             .execute();
     }

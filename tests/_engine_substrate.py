@@ -8,7 +8,8 @@ PG + one shaded-JAR service boot per pytest session; per-test isolation
 comes from a freshly MINTED tenant + tenant-bound token per test: the
 engine binds tenant to the BEARER server-side (AuthFilter Decision 1 —
 the ``X-Nexus-Tenant`` header is IGNORED), so handing each test its own
-token isolates every row via RLS with no sharing and no cleanup.
+token isolates every row via RLS with no sharing. The tenant's partition
+leaves are dropped when the test ends (``minted_test_tenant``, RDR-225).
 
 Laziness contract: nothing boots at import. ``ensure_engine()`` is
 memoized; the conftest autouse fixture calls it only when the collected
@@ -102,6 +103,11 @@ from tests.db._service_fixture import (
     build_lease_wait_seconds,
     wait_for_build_lease,
 )
+
+# The real ``subprocess.run``, bound at import. Fixture teardown runs while a test's own
+# ``monkeypatch.setattr(subprocess, "run", ...)`` is still live (function-scoped monkeypatch
+# unwinds after the fixtures that requested it), and the tenant drop must reach real psql.
+_REAL_SUBPROCESS_RUN = subprocess.run
 
 _log = structlog.get_logger(__name__)
 
@@ -1585,3 +1591,44 @@ def mint_test_tenant(state: dict) -> tuple[str, str]:
     if not token:
         raise RuntimeError(f"tenant mint returned no token: {body}")
     return name, token
+
+
+def drop_test_tenant(state: dict, tenant: str) -> bool:
+    """Drop a minted tenant's partition leaves, and the rows that reference them (RDR-225).
+
+    Every tenant owns a leaf under each model partition of nexus.chunks and nexus.taxonomy_centroids, so a suite
+    that mints one per test and never removes it grows its worker's PG without bound (past 2,000 tenants the
+    engine's token insert outran its 1 s x 3 bound and answered 503 tenant_creation_busy). This calls
+    ``nexus.drop_tenant_partitions`` over the substrate's direct PG access as the owning role: the function is not
+    granted to any engine role.
+
+    Never raises: it runs in fixture teardown, where an exception would replace the test's own result. A failure
+    is logged as ``test_tenant_drop_failed`` and the call returns False.
+    """
+    try:
+        proc = _REAL_SUBPROCESS_RUN(
+            [str(Path(state["pg_bin"]) / "psql"), "-X", "-q", "-h", "127.0.0.1", "-p", str(state["pg_port"]),
+             "-U", state["pg_user"], "-d", state["pg_dbname"], "-t", "-A", "-v", "ON_ERROR_STOP=1",
+             "-v", f"tenant={tenant}", "-f", "-"],
+            input="SELECT nexus.drop_tenant_partitions(:'tenant');",
+            capture_output=True, text=True, timeout=60,
+            env={**os.environ, "PGCONNECT_TIMEOUT": "10"},
+        )
+    except Exception as exc:  # noqa: BLE001 - teardown must not mask the test's result
+        _log.warning("test_tenant_drop_failed", tenant=tenant, error=repr(exc))
+        return False
+    if proc.returncode != 0:
+        _log.warning("test_tenant_drop_failed", tenant=tenant,
+                     error=(proc.stderr or proc.stdout).strip()[-300:])
+        return False
+    return True
+
+
+@contextmanager
+def minted_test_tenant(state: dict) -> Iterator[tuple[str, str]]:
+    """``mint_test_tenant`` for the length of a ``with`` block, then ``drop_test_tenant`` however the block ends."""
+    tenant, token = mint_test_tenant(state)
+    try:
+        yield tenant, token
+    finally:
+        drop_test_tenant(state, tenant)

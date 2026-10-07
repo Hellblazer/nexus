@@ -289,6 +289,7 @@ class ChunkLiveOwnersMsz9iScaleIntegrationTest {
             su.setAutoCommit(false);
             DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
             int manifestBatch = 5000;
+            String model = PgContainerHelper.collectionModel(ctx, TENANT, COLLECTION);
             for (int start = 0; start < NUM_MANIFEST; start += manifestBatch) {
                 int end = Math.min(start + manifestBatch, NUM_MANIFEST);
                 List<Query> chunkQueries = new ArrayList<>(end - start);
@@ -298,8 +299,8 @@ class ChunkLiveOwnersMsz9iScaleIntegrationTest {
                     chunkQueries.add(ctx.insertInto(CATALOG_DOCUMENT_CHUNKS,
                             CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
                             CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
-                            CATALOG_DOCUMENT_CHUNKS.COLLECTION)
-                        .values(TENANT, doc, position, HexFormat.of().parseHex(chashHex.get(i)), COLLECTION));
+                            CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
+                        .values(TENANT, doc, position, HexFormat.of().parseHex(chashHex.get(i)), COLLECTION, model));
                 }
                 ctx.batch(chunkQueries).execute();
                 su.commit();
@@ -705,6 +706,17 @@ class ChunkLiveOwnersMsz9iScaleIntegrationTest {
      * measured and printed SEPARATELY for before/after at each fraction -- never
      * compared against each other, only against their own opposite number.
      */
+    /**
+     * RDR-225: the plan names the model/tenant leaf's inherited HNSW index
+     * ({@code <leaf>_embedding_384_idx}), not the parent's {@code idx_chunks_embedding_384}. The
+     * pattern anchors on the scan node, so the ORDER BY key text cannot satisfy it.
+     */
+    private static final String HNSW_SCAN_PATTERN = "Index Scan using \"?\\S*embedding_384";
+
+    private static boolean usesHnswIndex(String plan) {
+        return java.util.regex.Pattern.compile(HNSW_SCAN_PATTERN).matcher(plan).find();
+    }
+
     @Test
     void explainAndLatency_acrossTombstoneFractions() throws Exception {
         Random rnd = new Random(20260927102L);
@@ -724,8 +736,8 @@ class ChunkLiveOwnersMsz9iScaleIntegrationTest {
             double beforeServerMs = parseExecutionTimeMs(beforePlan);
             double afterServerMs = parseExecutionTimeMs(afterPlan);
 
-            boolean beforeHnsw = beforePlan.contains("idx_chunks_embedding_384");
-            boolean afterHnsw = afterPlan.contains("idx_chunks_embedding_384");
+            boolean beforeHnsw = usesHnswIndex(beforePlan);
+            boolean afterHnsw = usesHnswIndex(afterPlan);
             boolean afterInlined = !afterPlan.contains("chunk_live_owners")
                 && afterPlan.contains("catalog_document_chunks");
 
@@ -814,7 +826,7 @@ class ChunkLiveOwnersMsz9iScaleIntegrationTest {
             String exactPlan = explainProd(exactForm(knn), pinVec, K);
             assertThat(exactPlan)
                 .as("the exact oracle must not use the HNSW index. Plan was:%n%s", exactPlan)
-                .doesNotContain("idx_chunks_embedding_384");
+                .doesNotContainPattern(HNSW_SCAN_PATTERN);
         }
 
         System.out.println("case     | tombstone% | avg_recall@10 | per_query                     | live_count(exact)");

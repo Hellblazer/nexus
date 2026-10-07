@@ -133,6 +133,9 @@ class TestManifestNullCollectionFalseClean:
         cat, tumbler = _register_ghost(seq, "baseline")
         collection = _ghost_write_collection("baseline", seq)
 
+        # RDR-225: a manifest row carries its collection's embedding_model, read from the registry row, so the
+        # write is refused for an unregistered collection. The chash stays dangling (the FK is dropped below).
+        cat.register_collection(collection)
         before = active_reader().manifest_null_collection_report()
         chash = _never_embedded_chash(seq)
         # nexus-dbzxb (RDR-191 Phase 5 Python collateral, idiom 3): this
@@ -206,6 +209,9 @@ class TestManifestNullCollectionFalseClean:
         seq = _next_seq()
         cat, tumbler = _register_ghost(seq, "fix")
         collection = _ghost_write_collection("fix", seq)
+        # RDR-225: a manifest row carries its collection's embedding_model, read from the registry row, so the
+        # write is refused for an unregistered collection. The chash stays dangling (the FK is dropped below).
+        cat.register_collection(collection)
         chash = _never_embedded_chash(seq + 3_000_000)
         with fk_dropped_for_dangling_seed():
             cat.write_manifest(str(tumbler), [_chunk(chash, 0)], collection=collection)

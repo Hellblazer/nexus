@@ -37,6 +37,27 @@ OWNERLESS_CHUNK_WRITE_REASON: str = "ownerless_chunk_write"
 #: does not retry it on its own; the CLI reads this and says so.
 QUARANTINE_RESTORE_BUSY_REASON: str = "quarantine_restore_busy"
 
+#: A re-home or rename across embedding models: the collection's chunks would
+#: move to a collection of another model (HTTP 409, RDR-225). Re-modelling a
+#: collection is a cross-model migration, never a rename.
+COLLECTION_MODEL_MISMATCH_REASON: str = "collection_model_mismatch"
+
+#: A write naming an embedding model registered nowhere (HTTP 422, RDR-225).
+UNREGISTERED_EMBEDDING_MODEL_REASON: str = "unregistered_embedding_model"
+
+#: A registered model whose partition was never created (HTTP 500, RDR-225):
+#: an engine invariant, not a caller mistake.
+MODEL_PARTITION_MISSING_REASON: str = "model_partition_missing"
+
+#: PostgreSQL found no tenant partition for the row (HTTP 500, RDR-225): an
+#: engine invariant, not a caller mistake.
+TENANT_PARTITION_MISSING_REASON: str = "tenant_partition_missing"
+
+#: A first token for a tenant waited on partition-creation locks past its
+#: bound and issued nothing (HTTP 503 with ``Retry-After``, RDR-225).
+#: Retryable: the same call may be sent again.
+TENANT_CREATION_BUSY_REASON: str = "tenant_creation_busy"
+
 
 def error_reason(body: Any) -> str | None:
     """The ``reason`` of a decoded error body, or None when it has none.

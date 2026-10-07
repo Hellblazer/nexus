@@ -172,8 +172,8 @@ class Hygiene007DocCountRecountTest {
     private static void seedAssignment(DSLContext ctx, long topicId, String seed) {
         byte[] chashBytes = HexFormat.of().parseHex(hexChash(seed));
         ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.CHUNK_TEXT,
-                       CHUNKS.EMBEDDING_384)
-           .values(TENANT, COLLECTION, chashBytes, "hygiene007 fixture chunk", vector(384))
+                       CHUNKS.EMBEDDING_1024)
+           .values(TENANT, COLLECTION, chashBytes, "hygiene007 fixture chunk", vector(1024))
            .onConflictDoNothing()
            .execute();
         ctx.insertInto(TOPIC_ASSIGNMENTS, TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID,

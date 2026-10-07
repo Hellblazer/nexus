@@ -52,6 +52,21 @@ try {
         Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*nxgate-claude.ps1*' } | ForEach-Object {
             & taskkill.exe /T /F /PID $_.ProcessId 2>&1 | Out-Null
         }
+        # Pre-accept Claude Code's first-run state for the home folder so an
+        # unattended launch is not left at the onboarding or trust prompts.
+        $cj = "$env:USERPROFILE\.claude.json"
+        $j = if (Test-Path $cj) { Get-Content -Raw $cj | ConvertFrom-Json } else { New-Object PSObject }
+        foreach ($kv in @{ hasCompletedOnboarding = $true; theme = 'dark' }.GetEnumerator()) {
+            if ($j.PSObject.Properties[$kv.Key]) { $j.($kv.Key) = $kv.Value } else { $j | Add-Member -NotePropertyName $kv.Key -NotePropertyValue $kv.Value }
+        }
+        if (-not $j.PSObject.Properties['projects']) { $j | Add-Member -NotePropertyName projects -NotePropertyValue (New-Object PSObject) }
+        foreach ($proj in @(($env:USERPROFILE -replace '\\', '/'), $env:USERPROFILE)) {
+            if (-not $j.projects.PSObject.Properties[$proj]) { $j.projects | Add-Member -NotePropertyName $proj -NotePropertyValue (New-Object PSObject) }
+            $pj = $j.projects.$proj
+            if ($pj.PSObject.Properties['hasTrustDialogAccepted']) { $pj.hasTrustDialogAccepted = $true } else { $pj | Add-Member -NotePropertyName hasTrustDialogAccepted -NotePropertyValue $true }
+        }
+        [IO.File]::WriteAllText($cj, ($j | ConvertTo-Json -Depth 64), (New-Object System.Text.UTF8Encoding($false)))
+
         $launcher = "$env:USERPROFILE\nx-gate\nxgate-claude.ps1"
         New-Item -ItemType Directory -Force -Path (Split-Path $launcher) | Out-Null
         @'
@@ -70,6 +85,14 @@ if (-not $t -or $t.Length -lt 20) { 'Phase 5 gate launcher: no token from the pi
 Set-Location $HOME
 $host.UI.RawUI.WindowTitle = 'Phase 5 gate: claude (automation token)'
 $psi = New-Object System.Diagnostics.ProcessStartInfo("$HOME\.local\bin\claude.exe")
+# One-shot arguments from launch.sh (--prompt, --permission-mode): one per line,
+# consumed and deleted so a later plain launch does not repeat them.
+$argsFile = "$HOME\nx-gate\claude-args.txt"
+if (Test-Path $argsFile) {
+    $parts = @(Get-Content -Encoding UTF8 $argsFile | Where-Object { $_ -ne '' } | ForEach-Object { '"' + ($_ -replace '"', '\"') + '"' })
+    $psi.Arguments = $parts -join ' '
+    Remove-Item $argsFile -Force
+}
 $psi.UseShellExecute = $false
 $psi.WorkingDirectory = $HOME
 $psi.EnvironmentVariables['CLAUDE_CODE_OAUTH_TOKEN'] = $t

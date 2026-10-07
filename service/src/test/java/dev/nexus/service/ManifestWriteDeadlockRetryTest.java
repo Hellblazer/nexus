@@ -163,8 +163,10 @@ class ManifestWriteDeadlockRetryTest {
             for (String h : List.of(s.c1(), s.c2())) {
                 ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID,
                         CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION,
-                        CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION)
-                   .values(TENANT, s.doc(), pos++, bytes(h), s.coll()).execute();
+                        CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION,
+                        CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
+                   .values(TENANT, s.doc(), pos++, bytes(h), s.coll(),
+                           PgContainerHelper.collectionModel(ctx, TENANT, s.coll())).execute();
             }
         });
         return s;

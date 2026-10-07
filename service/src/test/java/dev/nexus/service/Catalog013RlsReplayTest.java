@@ -237,18 +237,22 @@ class Catalog013RlsReplayTest {
         c.createStatement().execute(
             "ALTER TABLE nexus.catalog_document_chunks DROP CONSTRAINT IF EXISTS fk_catalog_chunks_chunk");
         try (var ps = c.prepareStatement(
-            "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection) "
-            + "VALUES (?, ?, 0, ?, ?)")) {
+            "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection, embedding_model) "
+            + "VALUES (?, ?, 0, ?, ?, (SELECT embedding_model FROM nexus.catalog_collections "
+            + "WHERE tenant_id = ? AND name = ?))")) {
             ps.setString(1, tenant);
             ps.setString(2, "replay-" + tenant);
             ps.setBytes(3, chash);
             ps.setString(4, collection);
+            ps.setString(5, tenant);
+            ps.setString(6, collection);
             ps.executeUpdate();
         }
         c.createStatement().execute(
             "ALTER TABLE nexus.catalog_document_chunks "
             + "ADD CONSTRAINT fk_catalog_chunks_chunk "
-            + "FOREIGN KEY (tenant_id, collection, chash) REFERENCES nexus.chunks (tenant_id, collection, chash) "
+            + "FOREIGN KEY (tenant_id, collection, chash, embedding_model) "
+            + "REFERENCES nexus.chunks (tenant_id, collection, chash, embedding_model) "
             + "ON UPDATE CASCADE DEFERRABLE INITIALLY IMMEDIATE NOT VALID");
     }
 

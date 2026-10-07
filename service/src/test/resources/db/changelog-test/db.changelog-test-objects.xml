@@ -93,6 +93,68 @@ $$;
         <rollback>DROP FUNCTION IF EXISTS nexus_test.set_force_rls(regclass, boolean)</rollback>
     </changeSet>
 
+    <changeSet id="test-objects-p225-rls-defects" author="nexus-3wh8d.16">
+        <comment>RDR-225 (nexus-3wh8d.16) row-level-security defect injectors for the isolation-check tests, in the same shape as test-objects-5's set_force_rls: plpgsql wrappers over DDL with no jOOQ typed-DSL form (ALTER TABLE .. ENABLE/DISABLE ROW LEVEL SECURITY, DROP/ALTER/CREATE POLICY). Every table is a regclass so PostgreSQL resolves the identity with no string to validate; every policy name is %I-quoted. reset_tenant_policy puts the canonical tenant_isolation policy (tenant_id = current_setting('nexus.tenant', true), USING and WITH CHECK) back on a relation, which is how a test repairs a parent whose policy it dropped or widened. SECURITY INVOKER: the caller's own (table-owner) privilege authorizes the DDL.</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus_test.set_row_security(p_table regclass, p_enabled boolean) RETURNS void
+    LANGUAGE plpgsql
+    SECURITY INVOKER
+AS $$
+BEGIN
+    IF p_enabled THEN
+        EXECUTE format('ALTER TABLE %s ENABLE ROW LEVEL SECURITY', p_table);
+    ELSE
+        EXECUTE format('ALTER TABLE %s DISABLE ROW LEVEL SECURITY', p_table);
+    END IF;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION nexus_test.drop_policy(p_table regclass, p_policy text) RETURNS void
+    LANGUAGE plpgsql
+    SECURITY INVOKER
+AS $$
+BEGIN
+    EXECUTE format('DROP POLICY %I ON %s', p_policy, p_table);
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION nexus_test.widen_policy(p_table regclass, p_policy text) RETURNS void
+    LANGUAGE plpgsql
+    SECURITY INVOKER
+AS $$
+BEGIN
+    EXECUTE format('ALTER POLICY %I ON %s USING (true)', p_policy, p_table);
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION nexus_test.add_permissive_policy(p_table regclass, p_policy text) RETURNS void
+    LANGUAGE plpgsql
+    SECURITY INVOKER
+AS $$
+BEGIN
+    EXECUTE format('CREATE POLICY %I ON %s FOR SELECT USING (true)', p_policy, p_table);
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION nexus_test.reset_tenant_policy(p_table regclass) RETURNS void
+    LANGUAGE plpgsql
+    SECURITY INVOKER
+AS $$
+BEGIN
+    EXECUTE format('DROP POLICY IF EXISTS tenant_isolation ON %s', p_table);
+    EXECUTE format('CREATE POLICY tenant_isolation ON %s USING (tenant_id = current_setting(''nexus.tenant'', true)) WITH CHECK (tenant_id = current_setting(''nexus.tenant'', true))', p_table);
+END;
+$$;
+        </sql>
+        <rollback>
+            DROP FUNCTION IF EXISTS nexus_test.set_row_security(regclass, boolean);
+            DROP FUNCTION IF EXISTS nexus_test.drop_policy(regclass, text);
+            DROP FUNCTION IF EXISTS nexus_test.widen_policy(regclass, text);
+            DROP FUNCTION IF EXISTS nexus_test.add_permissive_policy(regclass, text);
+            DROP FUNCTION IF EXISTS nexus_test.reset_tenant_policy(regclass);
+        </rollback>
+    </changeSet>
+
     <changeSet id="test-objects-6-drop-constraint" author="nexus-cbo4a">
         <comment>nexus_test.drop_constraint(regclass, text): plpgsql wrapper for ALTER TABLE .. DROP CONSTRAINT IF EXISTS .. (nexus-cbo4a batch 11) -- a genuinely dangling manifest row can only be seeded by momentarily dropping its FK, inserting, then re-adding it NOT VALID; the insert must happen BETWEEN the drop and the re-add, so this is a standalone drop (paired with test-objects-7's add_fk_not_valid_composite3), not a combined drop-then-add like a caller that never needs to insert in between. p_table is regclass so PostgreSQL resolves the table identity with no string to validate; p_name is a %I-quoted constraint identifier. SECURITY INVOKER so the caller's own privilege authorizes the ALTER TABLE.</comment>
         <sql splitStatements="false" stripComments="false">
@@ -125,6 +187,33 @@ END;
 $$;
         </sql>
         <rollback>DROP FUNCTION IF EXISTS nexus_test.add_fk_not_valid_composite3(regclass, text, text, text, regclass, text, text, text)</rollback>
+    </changeSet>
+
+    <changeSet id="test-objects-7b-composite3-model-aware" author="nexus-3wh8d.13">
+        <comment>RDR-225: nexus_test.add_fk_not_valid_composite3 re-adds a (tenant_id, collection, chash) foreign key; once both the referencing and the referenced table carry embedding_model (the partitioned chunks and the tables that reference it, after vectors-030-1) the key is the FOUR-column one, and a three-column key onto chunks has no unique key to rest on. The function therefore appends embedding_model to both column lists when both tables have the column, and is otherwise unchanged, so the pre-walk callers and the same signature keep working. SECURITY INVOKER.</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus_test.add_fk_not_valid_composite3(
+    p_table regclass, p_name text, p_col2 text, p_col3 text,
+    p_ref regclass, p_ref_col2 text, p_ref_col3 text, p_extra text
+) RETURNS void
+    LANGUAGE plpgsql
+    SECURITY INVOKER
+AS $$
+DECLARE
+    v_cols     text := format('tenant_id, %I, %I', p_col2, p_col3);
+    v_ref_cols text := format('tenant_id, %I, %I', p_ref_col2, p_ref_col3);
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_attribute a WHERE a.attrelid = p_table AND a.attname = 'embedding_model' AND NOT a.attisdropped)
+       AND EXISTS (SELECT 1 FROM pg_attribute a WHERE a.attrelid = p_ref AND a.attname = 'embedding_model' AND NOT a.attisdropped) THEN
+        v_cols := v_cols || ', embedding_model';
+        v_ref_cols := v_ref_cols || ', embedding_model';
+    END IF;
+    EXECUTE format('ALTER TABLE %s ADD CONSTRAINT %I FOREIGN KEY (%s) REFERENCES %s (%s) %s NOT VALID',
+        p_table, p_name, v_cols, p_ref, v_ref_cols, p_extra);
+END;
+$$;
+        </sql>
+        <rollback>SELECT 1</rollback>
     </changeSet>
 
     <changeSet id="test-objects-8-grant-execute-on-function" author="nexus-cbo4a">
@@ -178,6 +267,45 @@ $$;
         <rollback>DROP FUNCTION IF EXISTS nexus_test.insert_chunk_bare_vector(text, text, bytea, int)</rollback>
     </changeSet>
 
+    <changeSet id="test-objects-9b-insert-chunk-bare-vector-model" author="nexus-3wh8d.13">
+        <comment>RDR-225: nexus_test.insert_chunk_bare_vector supplies embedding_model once nexus.chunks has the column (vectors-030-1). The function is shared by two kinds of caller: the pre-walk dedicated containers (Hygiene002CollectionAttributesWalkTest, Hygiene004OwnerGrammarUnderscoreTest), where the column does not exist yet and the original three-column-key INSERT is the only valid one, and any caller on a fully walked cluster, where the row must carry its collection's model (a NOT NULL partition key, and the model partition's dimension CHECK). The function therefore asks information_schema which shape it is running against, at execution time, and takes the model from the collection's catalog_collections row; a collection with no row is refused by name instead of by the composite foreign key. Same signature, so the generated Routines.insertChunkBareVector is unchanged. SECURITY INVOKER.</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus_test.insert_chunk_bare_vector(
+    p_tenant text, p_collection text, p_chash bytea, p_dim int
+) RETURNS void
+    LANGUAGE plpgsql
+    SECURITY INVOKER
+AS $$
+DECLARE
+    v_lit   text;
+    v_model text;
+BEGIN
+    SELECT '[' || string_agg('0.1', ',') || ']' INTO v_lit FROM generate_series(1, p_dim);
+    IF EXISTS (SELECT 1 FROM information_schema.columns
+                WHERE table_schema = 'nexus' AND table_name = 'chunks' AND column_name = 'embedding_model') THEN
+        SELECT c.embedding_model INTO v_model
+          FROM nexus.catalog_collections c
+         WHERE c.tenant_id = p_tenant AND c.name = p_collection;
+        IF v_model IS NULL THEN
+            RAISE EXCEPTION 'nexus_test.insert_chunk_bare_vector: collection % is not registered for tenant % (a chunk carries its collection''s model)',
+                p_collection, p_tenant;
+        END IF;
+        EXECUTE format(
+            'INSERT INTO nexus.chunks (tenant_id, collection, chash, embedding_model, chunk_text, %I) VALUES ($1, $2, $3, $4, $5, $6::vector)',
+            'embedding_' || p_dim)
+            USING p_tenant, p_collection, p_chash, v_model, 'text', v_lit;
+    ELSE
+        EXECUTE format(
+            'INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, %I) VALUES ($1, $2, $3, $4, $5::vector)',
+            'embedding_' || p_dim)
+            USING p_tenant, p_collection, p_chash, 'text', v_lit;
+    END IF;
+END;
+$$;
+        </sql>
+        <rollback>SELECT 1</rollback>
+    </changeSet>
+
     <changeSet id="test-objects-fts-matches" author="nexus-cbo4a">
         <comment>nexus_test.fts_matches(tsvector, text, text): SQL-language wrapper for
         p_vector @@ plainto_tsquery(p_config::regconfig, p_query) (nexus-cbo4a batch 13).
@@ -227,6 +355,111 @@ END;
 $$;
         </sql>
         <rollback>DROP FUNCTION IF EXISTS nexus_test.drop_index(regclass)</rollback>
+    </changeSet>
+
+    <changeSet id="test-objects-p225-ts3-delete-and-reinsert" author="nexus-3wh8d.8">
+        <comment>nexus_test.p225_ts3_delete_and_reinsert(text, text, bytea): RDR-225 TS3 case (b) against the partitioned nexus.chunks (nexus-3wh8d.8). Under SET CONSTRAINTS nexus.fk_catalog_chunks_chunk DEFERRED it deletes one chunk row and re-inserts the same row in the same transaction; the deferred four-column manifest foreign key is checked at COMMIT and must pass. SET CONSTRAINTS has no jOOQ typed-DSL form, so it lives here (the test tree carries no raw SQL string). v_row is a RECORD, not nexus.chunks, because installTestObjects also runs at pre-walk migration points where that type may not exist yet. Called through the generated Routines on one autocommit statement, so the commit, and any foreign-key failure, is that statement's. SECURITY INVOKER: the caller's role and tenant GUC govern (nexus_svc under row-level security).</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus_test.p225_ts3_delete_and_reinsert(p_tenant text, p_collection text, p_chash bytea) RETURNS integer
+    LANGUAGE plpgsql
+    SECURITY INVOKER
+AS $$
+DECLARE
+    v_row record;
+BEGIN
+    SET CONSTRAINTS nexus.fk_catalog_chunks_chunk DEFERRED;
+    SELECT * INTO v_row FROM nexus.chunks c
+     WHERE c.tenant_id = p_tenant AND c.collection = p_collection AND c.chash = p_chash;
+    IF NOT FOUND THEN
+        RETURN 0;
+    END IF;
+    DELETE FROM nexus.chunks c
+     WHERE c.tenant_id = p_tenant AND c.collection = p_collection AND c.chash = p_chash;
+    INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_384, embedding_768, embedding_1024,
+                              metadata, created_at, retention, last_written_at, embedding_model)
+    VALUES (v_row.tenant_id, v_row.collection, v_row.chash, v_row.chunk_text, v_row.embedding_384, v_row.embedding_768,
+            v_row.embedding_1024, v_row.metadata, v_row.created_at, v_row.retention, v_row.last_written_at,
+            v_row.embedding_model);
+    RETURN 1;
+END;
+$$;
+        </sql>
+        <rollback>DROP FUNCTION IF EXISTS nexus_test.p225_ts3_delete_and_reinsert(text, text, bytea)</rollback>
+    </changeSet>
+
+    <changeSet id="test-objects-p225-ts3-delete-only" author="nexus-3wh8d.8">
+        <comment>nexus_test.p225_ts3_delete_only(text, text, bytea): RDR-225 TS3 case (c) (nexus-3wh8d.8). Under SET CONSTRAINTS nexus.fk_catalog_chunks_chunk DEFERRED it deletes one chunk row and leaves any manifest row that names it; the deferred foreign key must fail the statement's own commit (SQLSTATE 23503). Same rationale and role as p225_ts3_delete_and_reinsert.</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus_test.p225_ts3_delete_only(p_tenant text, p_collection text, p_chash bytea) RETURNS integer
+    LANGUAGE plpgsql
+    SECURITY INVOKER
+AS $$
+DECLARE
+    v_n integer;
+BEGIN
+    SET CONSTRAINTS nexus.fk_catalog_chunks_chunk DEFERRED;
+    DELETE FROM nexus.chunks c
+     WHERE c.tenant_id = p_tenant AND c.collection = p_collection AND c.chash = p_chash;
+    GET DIAGNOSTICS v_n = ROW_COUNT;
+    RETURN v_n;
+END;
+$$;
+        </sql>
+        <rollback>DROP FUNCTION IF EXISTS nexus_test.p225_ts3_delete_only(text, text, bytea)</rollback>
+    </changeSet>
+
+    <changeSet id="test-objects-p225-seed-random-chunks" author="nexus-3wh8d.8">
+        <comment>nexus_test.p225_seed_random_chunks(text, text, text, int, int): RDR-225 (nexus-3wh8d.8) bulk seeder for the plan and lock measurements: p_n chunks with distinct chashes (sha256 of the index, so reruns collide only on purpose) and random unit-ish vectors of p_dim, filed under p_model, built server side so the test tree carries no vector literal strings. Inserts through the partitioned parent as the caller (superuser in the tests). The collection must already be registered under p_model.</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus_test.p225_seed_random_chunks(
+    p_tenant text, p_collection text, p_model text, p_dim int, p_n int
+) RETURNS bigint
+    LANGUAGE plpgsql
+    SECURITY INVOKER
+AS $$
+DECLARE
+    v_n bigint;
+BEGIN
+    EXECUTE format(
+        'INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, %I, embedding_model) '
+        'SELECT $1, $2, sha256(convert_to($1 || $2 || g::text, ''UTF8'')), ''seeded'', '
+        '       (SELECT (''['' || string_agg(random()::text, '','') || '']'')::nexus.vector FROM generate_series(1, $3) WHERE g IS NOT NULL), $4 '
+        '  FROM generate_series(1, $5) AS g',
+        'embedding_' || p_dim)
+        USING p_tenant, p_collection, p_dim, p_model, p_n;
+    GET DIAGNOSTICS v_n = ROW_COUNT;
+    RETURN v_n;
+END;
+$$;
+        </sql>
+        <rollback>DROP FUNCTION IF EXISTS nexus_test.p225_seed_random_chunks(text, text, text, int, int)</rollback>
+    </changeSet>
+
+    <changeSet id="test-objects-p225-explain-knn" author="nexus-3wh8d.8">
+        <comment>nexus_test.p225_explain_knn(text, text, int): RDR-225 (nexus-3wh8d.8) plan probe: the EXPLAIN (COSTS OFF) text of a nearest-neighbour query on the partitioned nexus.chunks with LITERAL tenant_id and embedding_model predicates (the shape the read path adds), so plan-time pruning applies. p_dim picks the vector column; the query vector is a constant built server side. Returns one text, lines joined by newlines. jOOQ's DSLContext#explain cannot express the pgvector distance operator without a plain-SQL template, so the probe lives here.</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus_test.p225_explain_knn(p_tenant text, p_model text, p_dim int) RETURNS text
+    LANGUAGE plpgsql
+    SECURITY INVOKER
+AS $$
+DECLARE
+    v_lit  text;
+    v_line text;
+    v_out  text := '';
+BEGIN
+    SELECT '[' || string_agg('0.1', ',') || ']' INTO v_lit FROM generate_series(1, p_dim);
+    FOR v_line IN EXECUTE format(
+        'EXPLAIN (COSTS OFF) SELECT chash FROM nexus.chunks WHERE tenant_id = %L AND embedding_model = %L '
+        'ORDER BY %I OPERATOR(nexus.&lt;=&gt;) %L::nexus.vector LIMIT 10',
+        p_tenant, p_model, 'embedding_' || p_dim, v_lit)
+    LOOP
+        v_out := v_out || v_line || E'\n';
+    END LOOP;
+    RETURN v_out;
+END;
+$$;
+        </sql>
+        <rollback>DROP FUNCTION IF EXISTS nexus_test.p225_explain_knn(text, text, int)</rollback>
     </changeSet>
 
 </databaseChangeLog>

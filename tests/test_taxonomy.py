@@ -23,6 +23,22 @@ from nexus.taxonomy import (
 from tests._t2_fixture_ops import canonical_chunk_id
 from tests.conftest import make_vector_test_client
 
+# RDR-225: the substrate registers every collection under bge-base-en-v15-768, and the
+# engine requires a centroid's width to equal its collection model's dimension.
+_DIM = 768
+
+
+def _pad_minilm(vectors: Any) -> np.ndarray:
+    """Zero-pad real 384-wide MiniLM vectors to the substrate's 768-wide model.
+
+    The substrate's profile is bge-768 for every content type, so a collection
+    cannot register as a 384-wide model here and the engine rejects a 384-wide
+    centroid. Padding with zeros leaves every cosine and Euclidean distance
+    unchanged, so the semantic assertions still test the real embeddings.
+    """
+    arr = np.asarray(vectors, dtype=np.float32)
+    return np.pad(arr, ((0, 0), (0, _DIM - arr.shape[1])))
+
 
 @pytest.fixture()
 def chroma_client() -> Any:
@@ -70,7 +86,7 @@ def _seed_topic(
     )
 
 
-def _seed_chunk(topic_id: int, collection: str, chash_hex: str, *, dim: int = 384) -> None:
+def _seed_chunk(topic_id: int, collection: str, chash_hex: str, *, dim: int = 768) -> None:
     """RDR-194 P3d (nexus-tk070.p3d): seed a real ``nexus.chunks`` row so a
     ``topic_assignments`` insert for ``(tenant, collection, chash)``
     satisfies the new ``topic_assignments_chunk_fk`` composite FK
@@ -99,16 +115,11 @@ def _seed_chunk(topic_id: int, collection: str, chash_hex: str, *, dim: int = 38
 
     state = ensure_engine()
     embed_col = {384: "embedding_384", 768: "embedding_768", 1024: "embedding_1024"}[dim]
-    # RDR-204 Phase 1 (nexus-f5wwx): this test substrate's engine always
-    # boots local mode with the bge-768 profile, regardless of which
-    # pgvector dim column this stub chunk uses -- the model here must
-    # match the REAL registered profile (what nexus.corpus.
-    # effective_embedding_model_for_writes computes) or a real
-    # register_collection call on this name later 422s "already
-    # registered with a different model". The stub chunk's own dim is
-    # an unrelated FK-satisfaction detail (which embedding_<dim> column
-    # holds the zero-vector), not a model choice.
+    # RDR-225: a model partition holds one vector width (its dimension CHECK) and this
+    # substrate registers every collection under the bge-768 profile, so the stub is a
+    # 768-wide chunk; a stub of another width would not route to any partition.
     model_for_dim = "bge-base-en-v15-768"
+    assert dim == 768, f"stub chunks follow the substrate's bge-768 profile, not dim={dim}"
     vec = "[" + ",".join(["0"] * dim) + "]"
     sql = (
         "INSERT INTO nexus.catalog_collections "
@@ -116,8 +127,9 @@ def _seed_chunk(topic_id: int, collection: str, chash_hex: str, *, dim: int = 38
         f"SELECT tenant_id, '{collection}', 'knowledge', 'test-seed', '{model_for_dim}', 'live' "
         f"FROM nexus.topics WHERE id = {topic_id} "
         "ON CONFLICT DO NOTHING; "
-        f"INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, {embed_col}) "
-        f"SELECT tenant_id, '{collection}', decode('{chash_hex}', 'hex'), 'seed', '{vec}'::nexus.vector "
+        f"INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, {embed_col}, embedding_model) "
+        f"SELECT tenant_id, '{collection}', decode('{chash_hex}', 'hex'), 'seed', '{vec}'::nexus.vector, "
+        f"'{model_for_dim}' "
         f"FROM nexus.topics WHERE id = {topic_id} "
         "ON CONFLICT DO NOTHING;"
     )
@@ -134,14 +146,14 @@ def _run_seed_psql(sql: str, caller: str) -> None:
         [
             str(psql), "-h", "127.0.0.1", "-p", str(state["pg_port"]),
             "-U", state["pg_user"], "-d", state["pg_dbname"],
-            "-v", "ON_ERROR_STOP=1", "-c", sql,
+            "-v", "ON_ERROR_STOP=1", "-1", "-f", "-",
         ],
-        capture_output=True, text=True, timeout=60,
+        input=sql, capture_output=True, text=True, timeout=60,
     )
     assert proc.returncode == 0, f"{caller} failed: {proc.stdout}\n{proc.stderr}"
 
 
-def _seed_chunks(taxonomy: Any, collection: str, chash_hexes: list[str], *, dim: int = 384) -> None:
+def _seed_chunks(taxonomy: Any, collection: str, chash_hexes: list[str], *, dim: int = 768) -> None:
     """Bulk variant of :func:`_seed_chunk` for tests that need the FK's
     parent rows to exist BEFORE any topic does -- the discover/persist_
     discovered_topics/rebuild_taxonomy family, which create their OWN
@@ -162,16 +174,11 @@ def _seed_chunks(taxonomy: Any, collection: str, chash_hexes: list[str], *, dim:
         taxonomy, "chunk-seed-bootstrap", collection="__chunk_seed_bootstrap__",
     )
     embed_col = {384: "embedding_384", 768: "embedding_768", 1024: "embedding_1024"}[dim]
-    # RDR-204 Phase 1 (nexus-f5wwx): this test substrate's engine always
-    # boots local mode with the bge-768 profile, regardless of which
-    # pgvector dim column this stub chunk uses -- the model here must
-    # match the REAL registered profile (what nexus.corpus.
-    # effective_embedding_model_for_writes computes) or a real
-    # register_collection call on this name later 422s "already
-    # registered with a different model". The stub chunk's own dim is
-    # an unrelated FK-satisfaction detail (which embedding_<dim> column
-    # holds the zero-vector), not a model choice.
+    # RDR-225: a model partition holds one vector width (its dimension CHECK) and this
+    # substrate registers every collection under the bge-768 profile, so the stub is a
+    # 768-wide chunk; a stub of another width would not route to any partition.
     model_for_dim = "bge-base-en-v15-768"
+    assert dim == 768, f"stub chunks follow the substrate's bge-768 profile, not dim={dim}"
     vec = "[" + ",".join(["0"] * dim) + "]"
     values = ", ".join(
         f"(tenant_id, '{collection}', decode('{c}', 'hex'), 'seed', '{vec}'::nexus.vector)"
@@ -183,15 +190,15 @@ def _seed_chunks(taxonomy: Any, collection: str, chash_hexes: list[str], *, dim:
         f"SELECT tenant_id, '{collection}', 'knowledge', 'test-seed', '{model_for_dim}', 'live' "
         f"FROM nexus.topics WHERE id = {bootstrap_id} "
         "ON CONFLICT DO NOTHING; "
-        f"INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, {embed_col}) "
-        f"SELECT * FROM (VALUES {values}) AS v(tenant_id, collection, chash, chunk_text, {embed_col}) "
+        f"INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, {embed_col}, embedding_model) "
+        f"SELECT v.*, '{model_for_dim}' FROM (VALUES {values}) AS v(tenant_id, collection, chash, chunk_text, {embed_col}) "
         "ON CONFLICT DO NOTHING;"
     )
     _run_seed_psql(sql, "_seed_chunks")
 
 
 def _seed_chunks_for_tenant(
-    tenant: str, collection: str, chash_hexes: list[str], *, dim: int = 384,
+    tenant: str, collection: str, chash_hexes: list[str], *, dim: int = 768,
 ) -> None:
     """Explicit-tenant twin of :func:`_seed_chunk` (RDR-194 P3d,
     nexus-tk070.p3d) for callers that need to seed nexus.chunks rows
@@ -212,16 +219,11 @@ def _seed_chunks_for_tenant(
         return
     state = ensure_engine()
     embed_col = {384: "embedding_384", 768: "embedding_768", 1024: "embedding_1024"}[dim]
-    # RDR-204 Phase 1 (nexus-f5wwx): this test substrate's engine always
-    # boots local mode with the bge-768 profile, regardless of which
-    # pgvector dim column this stub chunk uses -- the model here must
-    # match the REAL registered profile (what nexus.corpus.
-    # effective_embedding_model_for_writes computes) or a real
-    # register_collection call on this name later 422s "already
-    # registered with a different model". The stub chunk's own dim is
-    # an unrelated FK-satisfaction detail (which embedding_<dim> column
-    # holds the zero-vector), not a model choice.
+    # RDR-225: a model partition holds one vector width (its dimension CHECK) and this
+    # substrate registers every collection under the bge-768 profile, so the stub is a
+    # 768-wide chunk; a stub of another width would not route to any partition.
     model_for_dim = "bge-base-en-v15-768"
+    assert dim == 768, f"stub chunks follow the substrate's bge-768 profile, not dim={dim}"
     vec = "[" + ",".join(["0"] * dim) + "]"
     values = ", ".join(
         f"('{tenant}', '{collection}', decode('{c}', 'hex'), 'seed', '{vec}'::nexus.vector)"
@@ -232,17 +234,17 @@ def _seed_chunks_for_tenant(
         "(tenant_id, name, content_type, owner_id, embedding_model, lifecycle_state) "
         f"VALUES ('{tenant}', '{collection}', 'knowledge', 'test-seed', '{model_for_dim}', 'live') "
         "ON CONFLICT DO NOTHING; "
-        f"INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, {embed_col}) "
-        f"VALUES {values} ON CONFLICT DO NOTHING;"
+        f"INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, {embed_col}, embedding_model) "
+        f"SELECT v.*, '{model_for_dim}' FROM (VALUES {values}) AS v ON CONFLICT DO NOTHING;"
     )
     psql = Path(state["pg_bin"]) / "psql"
     proc = subprocess.run(
         [
             str(psql), "-h", "127.0.0.1", "-p", str(state["pg_port"]),
             "-U", state["pg_user"], "-d", state["pg_dbname"],
-            "-v", "ON_ERROR_STOP=1", "-c", sql,
+            "-v", "ON_ERROR_STOP=1", "-1", "-f", "-",
         ],
-        capture_output=True, text=True, timeout=30,
+        input=sql, capture_output=True, text=True, timeout=30,
     )
     assert proc.returncode == 0, f"_seed_chunks_for_tenant failed: {proc.stdout}\n{proc.stderr}"
 
@@ -334,8 +336,8 @@ def test_discover_topics_creates_topics_and_centroids(
 ) -> None:
     """discover_topics persists topics to T2 and upserts centroids to ChromaDB."""
     rng = np.random.default_rng(42)
-    # Two well-separated clusters in 384d
-    embeddings = rng.standard_normal((60, 384)).astype(np.float32) * 0.1
+    # Two well-separated clusters in 768d
+    embeddings = rng.standard_normal((60, _DIM)).astype(np.float32) * 0.1
     embeddings[:30, 0] += 3.0
     embeddings[30:, 1] += 3.0
 
@@ -367,8 +369,8 @@ def test_discover_topics_creates_topics_and_centroids(
     # the engine) — read through the public rebuild-state surface.
     state = _centroid_state(db.taxonomy, "test__coll", chroma_client)
     assert len(state["old_centroid_topic_ids"]) >= 2
-    # Centroid embeddings are 384d
-    assert state["old_centroids"].shape[1] == 384
+    # Centroid embeddings are 768d
+    assert state["old_centroids"].shape[1] == _DIM
     # Every centroid maps back to a persisted topic id with its label.
     assert set(state["old_centroid_topic_ids"]) <= {t["id"] for t in topics}
     assert all(lbl for lbl in state["old_labels"])
@@ -385,7 +387,7 @@ def _seed_centroids(db: T2Database, chroma_client, tenant: str) -> list[str]:
     writes their topic_assignments rows.
     """
     rng = np.random.default_rng(7)
-    embeddings = rng.standard_normal((60, 384)).astype(np.float32) * 0.1
+    embeddings = rng.standard_normal((60, _DIM)).astype(np.float32) * 0.1
     embeddings[:30, 0] += 3.0
     embeddings[30:, 1] += 3.0
     doc_ids = [canonical_chunk_id(f"sd-{i}") for i in range(60)]
@@ -408,8 +410,8 @@ def test_compute_assignments_returns_json_serializable_dicts(
 
     _seed_centroids(db, chroma_client, t2_service_env)
     new_embs = [
-        (np.random.default_rng(1).standard_normal(384).astype(np.float32) * 0.1
-         + np.array([3.0] + [0.0] * 383, dtype=np.float32)).tolist()
+        (np.random.default_rng(1).standard_normal(_DIM).astype(np.float32) * 0.1
+         + np.array([3.0] + [0.0] * (_DIM - 1), dtype=np.float32)).tolist()
         for _ in range(3)
     ]
     # Substrate-neutral COMPUTE half: on the SQLite twin db.taxonomy IS
@@ -435,8 +437,8 @@ def test_persist_assignments_writes_rows(
     _seed_centroids(db, chroma_client, t2_service_env)
     _seed_chunks_for_tenant(t2_service_env, "split__coll", [canonical_chunk_id("persist-doc")])
     new_embs = [
-        (np.random.default_rng(2).standard_normal(384).astype(np.float32) * 0.1
-         + np.array([3.0] + [0.0] * 383, dtype=np.float32)).tolist()
+        (np.random.default_rng(2).standard_normal(_DIM).astype(np.float32) * 0.1
+         + np.array([3.0] + [0.0] * (_DIM - 1), dtype=np.float32)).tolist()
     ]
     out = db.taxonomy.compute_assignments(
         "split__coll", [canonical_chunk_id("persist-doc")], new_embs, chroma_client,
@@ -457,8 +459,8 @@ def test_assign_batch_still_composes_compute_and_persist(
     _seed_centroids(db, chroma_client, t2_service_env)
     _seed_chunks_for_tenant(t2_service_env, "split__coll", [canonical_chunk_id("batch-doc")])
     new_embs = [
-        (np.random.default_rng(3).standard_normal(384).astype(np.float32) * 0.1
-         + np.array([3.0] + [0.0] * 383, dtype=np.float32)).tolist()
+        (np.random.default_rng(3).standard_normal(_DIM).astype(np.float32) * 0.1
+         + np.array([3.0] + [0.0] * (_DIM - 1), dtype=np.float32)).tolist()
     ]
     expected = db.taxonomy.compute_assignments(
         "split__coll", [canonical_chunk_id("batch-doc")], new_embs, chroma_client,
@@ -493,9 +495,9 @@ def test_assign_batch_still_composes_compute_and_persist(
 
 
 def _discovery_inputs(seed: int = 11) -> tuple[list[str], np.ndarray, list[str]]:
-    """Two well-separated 384d clusters — same shape the discover test uses."""
+    """Two well-separated 768d clusters — same shape the discover test uses."""
     rng = np.random.default_rng(seed)
-    embeddings = rng.standard_normal((60, 384)).astype(np.float32) * 0.1
+    embeddings = rng.standard_normal((60, _DIM)).astype(np.float32) * 0.1
     embeddings[:30, 0] += 3.0
     embeddings[30:, 1] += 3.0
     doc_ids = [canonical_chunk_id(f"dd-{i}") for i in range(60)]
@@ -528,7 +530,7 @@ def test_compute_discovered_topics_returns_serializable_specs() -> None:
         assert isinstance(s["doc_count"], int) and s["doc_count"] > 0
         assert isinstance(s["doc_ids"], list) and s["doc_ids"]
         assert len(s["doc_ids"]) == s["doc_count"]
-        assert isinstance(s["centroid"], list) and len(s["centroid"]) == 384
+        assert isinstance(s["centroid"], list) and len(s["centroid"]) == _DIM
         assert all(isinstance(x, float) for x in s["centroid"])
         assert s["assigned_by"] == "hdbscan"
 
@@ -538,7 +540,7 @@ def test_compute_discovered_topics_empty_short_circuits() -> None:
     from nexus.db.t2 import taxonomy_compute as _tc
 
     out = _tc.compute_discovered_topics(
-        "tiny__disc", ["a", "b"], np.zeros((2, 384), dtype=np.float32), ["x", "y"],
+        "tiny__disc", ["a", "b"], np.zeros((2, _DIM), dtype=np.float32), ["x", "y"],
     )
     assert out == []
 
@@ -664,7 +666,7 @@ def test_taxonomy_hook_routes_persist_through_t2_index_write(monkeypatch) -> Non
 
     mi.taxonomy_assign_batch_hook(
         doc_ids=["d1"], collection="code__c", contents=["x"],
-        embeddings=[[0.1] * 384], metadatas=None,
+        embeddings=[[0.1] * _DIM], metadatas=None,
     )
 
     assert captured.get("routed") is True, "hook must call t2_index_write"
@@ -762,7 +764,7 @@ def test_rebuild_taxonomy_clears_and_rediscovers(
 ) -> None:
     """rebuild_taxonomy deletes old topics, then re-discovers fresh ones."""
     rng = np.random.default_rng(42)
-    embeddings = rng.standard_normal((60, 384)).astype(np.float32) * 0.1
+    embeddings = rng.standard_normal((60, _DIM)).astype(np.float32) * 0.1
     embeddings[:30, 0] += 3.0
     embeddings[30:, 1] += 3.0
     doc_ids = [canonical_chunk_id(f"doc-{i}") for i in range(60)]
@@ -914,7 +916,7 @@ def test_discover_topics_all_noise_returns_zero(
     """When HDBSCAN assigns all docs to noise (-1), return 0 and skip centroids."""
     rng = np.random.default_rng(42)
     # Too few scattered points — HDBSCAN cannot find clusters
-    embeddings = rng.standard_normal((8, 384)).astype(np.float32) * 100
+    embeddings = rng.standard_normal((8, _DIM)).astype(np.float32) * 100
     doc_ids = [canonical_chunk_id(f"noise-{i}") for i in range(8)]
     texts = [f"completely unrelated text {i}" for i in range(8)]
 
@@ -930,7 +932,7 @@ def test_assign_single_returns_nearest_topic(
 ) -> None:
     """assign_single returns the nearest topic_id via centroid ANN lookup."""
     rng = np.random.default_rng(42)
-    embeddings = rng.standard_normal((60, 384)).astype(np.float32) * 0.1
+    embeddings = rng.standard_normal((60, _DIM)).astype(np.float32) * 0.1
     embeddings[:30, 0] += 3.0
     embeddings[30:, 1] += 3.0
     doc_ids = [canonical_chunk_id(f"doc-{i}") for i in range(60)]
@@ -943,7 +945,7 @@ def test_assign_single_returns_nearest_topic(
     db.taxonomy.discover_topics("test__coll", doc_ids, embeddings, texts, chroma_client)
 
     # New embedding near cluster A (dimension 0 shifted)
-    new_emb = rng.standard_normal(384).astype(np.float32) * 0.1
+    new_emb = rng.standard_normal(_DIM).astype(np.float32) * 0.1
     new_emb[0] += 3.0
 
     result = db.taxonomy.assign_single("test__coll", new_emb, chroma_client)
@@ -962,7 +964,7 @@ def test_assign_single_no_centroids_returns_none(
     db: T2Database, chroma_client: Any,
 ) -> None:
     """assign_single returns None when no centroids exist for the collection."""
-    emb = np.random.default_rng(42).standard_normal(384).astype(np.float32)
+    emb = np.random.default_rng(42).standard_normal(_DIM).astype(np.float32)
     # Use a collection name with no centroids — EphemeralClient shares
     # in-process state, so centroids from other tests may exist.
     result = db.taxonomy.assign_single("nonexistent__coll", emb, chroma_client)
@@ -974,7 +976,7 @@ def test_assign_single_cross_collection_isolation(
 ) -> None:
     """assign_single returns None for collection B when centroids only exist for A."""
     rng = np.random.default_rng(42)
-    embeddings = rng.standard_normal((60, 384)).astype(np.float32) * 0.1
+    embeddings = rng.standard_normal((60, _DIM)).astype(np.float32) * 0.1
     embeddings[:30, 0] += 3.0
     embeddings[30:, 1] += 3.0
     doc_ids = [canonical_chunk_id(f"doc-{i}") for i in range(60)]
@@ -988,7 +990,7 @@ def test_assign_single_cross_collection_isolation(
     db.taxonomy.discover_topics("coll_A", doc_ids, embeddings, texts, chroma_client)
 
     # Query for collection B — should return None, not a topic from A
-    new_emb = rng.standard_normal(384).astype(np.float32) * 0.1
+    new_emb = rng.standard_normal(_DIM).astype(np.float32) * 0.1
     new_emb[0] += 3.0  # similar to cluster A's centroid
     result = db.taxonomy.assign_single("coll_B", new_emb, chroma_client)
     assert result is None, "assign_single must not cross collection boundaries"
@@ -1000,7 +1002,7 @@ def test_assign_single_cross_collection_finds_foreign_topic(
     """assign_single with cross_collection=True returns topics from other collections."""
     rng = np.random.default_rng(42)
     # Create topics in collection A
-    embeddings = rng.standard_normal((60, 384)).astype(np.float32) * 0.1
+    embeddings = rng.standard_normal((60, _DIM)).astype(np.float32) * 0.1
     embeddings[:30, 0] += 3.0
     embeddings[30:, 1] += 3.0
     doc_ids = [canonical_chunk_id(f"doc-{i}") for i in range(60)]
@@ -1008,8 +1010,11 @@ def test_assign_single_cross_collection_finds_foreign_topic(
     _seed_chunks_for_tenant(t2_service_env, "coll_A_xc", doc_ids)
     db.taxonomy.discover_topics("coll_A_xc", doc_ids, embeddings, texts, chroma_client)
 
-    # Query from collection B with cross_collection=True — should find A's topics
-    new_emb = rng.standard_normal(384).astype(np.float32) * 0.1
+    # Query from collection B with cross_collection=True — should find A's topics.
+    # RDR-225: a cross-collection query matches centroids of the SOURCE collection's model, so the
+    # source is registered (one stub chunk registers it under the substrate's model).
+    _seed_chunks_for_tenant(t2_service_env, "coll_B_xc", [canonical_chunk_id("doc-b-xc")])
+    new_emb = rng.standard_normal(_DIM).astype(np.float32) * 0.1
     new_emb[0] += 3.0
     result = db.taxonomy.assign_single(
         "coll_B_xc", new_emb, chroma_client, cross_collection=True,
@@ -1028,7 +1033,7 @@ def test_assign_batch_cross_collection(
 ) -> None:
     """assign_batch with cross_collection=True assigns from foreign centroids."""
     rng = np.random.default_rng(42)
-    embeddings = rng.standard_normal((60, 384)).astype(np.float32) * 0.1
+    embeddings = rng.standard_normal((60, _DIM)).astype(np.float32) * 0.1
     embeddings[:30, 0] += 3.0
     embeddings[30:, 1] += 3.0
     seed_doc_ids = [canonical_chunk_id(f"doc-{i}") for i in range(60)]
@@ -1042,7 +1047,7 @@ def test_assign_batch_cross_collection(
     )
 
     # New batch from collection B
-    new_embs = rng.standard_normal((3, 384)).astype(np.float32) * 0.1
+    new_embs = rng.standard_normal((3, _DIM)).astype(np.float32) * 0.1
     new_embs[:, 0] += 3.0
     new_ids = [
         canonical_chunk_id("xc-0"), canonical_chunk_id("xc-1"), canonical_chunk_id("xc-2"),
@@ -1072,7 +1077,7 @@ def test_assign_batch_assigns_multiple_docs(
 ) -> None:
     """assign_batch assigns multiple new docs to nearest topics."""
     rng = np.random.default_rng(42)
-    embeddings = rng.standard_normal((60, 384)).astype(np.float32) * 0.1
+    embeddings = rng.standard_normal((60, _DIM)).astype(np.float32) * 0.1
     embeddings[:30, 0] += 3.0
     embeddings[30:, 1] += 3.0
     doc_ids = [canonical_chunk_id(f"doc-{i}") for i in range(60)]
@@ -1085,7 +1090,7 @@ def test_assign_batch_assigns_multiple_docs(
     db.taxonomy.discover_topics("test__coll", doc_ids, embeddings, texts, chroma_client)
 
     # New batch: 3 docs near cluster A, 2 near cluster B
-    new_embs = rng.standard_normal((5, 384)).astype(np.float32) * 0.1
+    new_embs = rng.standard_normal((5, _DIM)).astype(np.float32) * 0.1
     new_embs[:3, 0] += 3.0  # near cluster A
     new_embs[3:, 1] += 3.0  # near cluster B
     new_ids = [canonical_chunk_id(f"new-doc-{i}") for i in range(5)]
@@ -1105,7 +1110,7 @@ def test_assign_batch_no_centroids_returns_zero(
     db: T2Database, chroma_client: Any,
 ) -> None:
     """assign_batch returns 0 when no centroids exist."""
-    embs = np.random.default_rng(42).standard_normal((3, 384)).astype(np.float32)
+    embs = np.random.default_rng(42).standard_normal((3, _DIM)).astype(np.float32)
     result = db.taxonomy.assign_batch(
         "nonexistent__coll",
         [canonical_chunk_id("a"), canonical_chunk_id("b"), canonical_chunk_id("c")],
@@ -1119,8 +1124,8 @@ def test_assign_single_dimension_mismatch(
 ) -> None:
     """assign_single returns None with warning on embedding dimension mismatch."""
     rng = np.random.default_rng(42)
-    # Create centroids with 384d embeddings
-    embeddings = rng.standard_normal((60, 384)).astype(np.float32) * 0.1
+    # Create centroids with 768d embeddings
+    embeddings = rng.standard_normal((60, _DIM)).astype(np.float32) * 0.1
     embeddings[:30, 0] += 3.0
     embeddings[30:, 1] += 3.0
     doc_ids = [canonical_chunk_id(f"doc-{i}") for i in range(60)]
@@ -1139,8 +1144,8 @@ def test_assign_batch_dimension_mismatch(
 ) -> None:
     """assign_batch returns 0 on embedding dimension mismatch."""
     rng = np.random.default_rng(42)
-    # Create centroids with 384d
-    embeddings = rng.standard_normal((60, 384)).astype(np.float32) * 0.1
+    # Create centroids with 768d
+    embeddings = rng.standard_normal((60, _DIM)).astype(np.float32) * 0.1
     embeddings[:30, 0] += 3.0
     embeddings[30:, 1] += 3.0
     doc_ids = [canonical_chunk_id(f"doc-{i}") for i in range(60)]
@@ -1164,13 +1169,13 @@ def test_project_against_basic(
     """project_against returns matched topics and novel chunks."""
     rng = np.random.default_rng(42)
     # Create source collection with 20 chunks in two clusters
-    src_embs = rng.standard_normal((20, 384)).astype(np.float32) * 0.1
+    src_embs = rng.standard_normal((20, _DIM)).astype(np.float32) * 0.1
     src_embs[:10, 0] += 3.0  # cluster A
     src_embs[10:, 1] += 3.0  # cluster B
     src_ids = [canonical_chunk_id(f"src-{i}") for i in range(20)]
 
     # Create target collection and discover topics (creates centroids)
-    tgt_embs = rng.standard_normal((60, 384)).astype(np.float32) * 0.1
+    tgt_embs = rng.standard_normal((60, _DIM)).astype(np.float32) * 0.1
     tgt_embs[:30, 0] += 3.0  # similar to source cluster A
     tgt_embs[30:, 1] += 3.0  # similar to source cluster B
     tgt_ids = [canonical_chunk_id(f"tgt-{i}") for i in range(60)]
@@ -1207,7 +1212,7 @@ def test_project_against_empty_target(
 ) -> None:
     """project_against with no target centroids returns all chunks as novel."""
     rng = np.random.default_rng(42)
-    src_embs = rng.standard_normal((5, 384)).astype(np.float32)
+    src_embs = rng.standard_normal((5, _DIM)).astype(np.float32)
     src_ids = [canonical_chunk_id(f"src-{i}") for i in range(5)]
 
     src_coll = chroma_client.get_or_create_collection(
@@ -1229,8 +1234,8 @@ def test_project_against_dimension_mismatch(
 ) -> None:
     """project_against raises ValueError on dimension mismatch."""
     rng = np.random.default_rng(42)
-    # Create target centroids with 384d
-    tgt_embs = rng.standard_normal((60, 384)).astype(np.float32) * 0.1
+    # Create target centroids with 768d
+    tgt_embs = rng.standard_normal((60, _DIM)).astype(np.float32) * 0.1
     tgt_embs[:30, 0] += 3.0
     tgt_embs[30:, 1] += 3.0
     tgt_ids = [canonical_chunk_id(f"tgt-{i}") for i in range(60)]
@@ -1257,7 +1262,7 @@ def test_assigned_by_column_populated(
 ) -> None:
     """discover_topics sets assigned_by='hdbscan' on topic_assignment rows."""
     rng = np.random.default_rng(42)
-    embeddings = rng.standard_normal((60, 384)).astype(np.float32) * 0.1
+    embeddings = rng.standard_normal((60, _DIM)).astype(np.float32) * 0.1
     embeddings[:30, 0] += 3.0
     embeddings[30:, 1] += 3.0
     doc_ids = [canonical_chunk_id(f"doc-{i}") for i in range(60)]
@@ -1631,7 +1636,7 @@ def test_rebuild_cli_is_discover_force_alias() -> None:
 class TestMiniLMTopicQuality:
     """Validate HDBSCAN topic quality on code-representative chunks.
 
-    Uses LocalEmbeddingFunction (MiniLM 384d) for real semantic embeddings
+    Uses LocalEmbeddingFunction (MiniLM, zero-padded to 768d) for real semantic embeddings
     rather than random vectors — validates that the clustering pipeline
     produces coherent topics from identifier-heavy code text.
     """
@@ -1674,7 +1679,7 @@ class TestMiniLMTopicQuality:
 
         texts = http_chunks + db_chunks + test_chunks
         doc_ids = [canonical_chunk_id(f"chunk-{i}") for i in range(len(texts))]
-        embeddings = np.array(ef(texts), dtype=np.float32)
+        embeddings = _pad_minilm(ef(texts))
         _seed_chunks_for_tenant(t2_service_env, "code__test", doc_ids)
 
         count = db.taxonomy.discover_topics(
@@ -1708,7 +1713,7 @@ class TestMiniLMTopicQuality:
 
         texts = http_chunks + db_chunks + test_chunks
         doc_ids = [canonical_chunk_id(f"chunk-{i}") for i in range(len(texts))]
-        embeddings = np.array(ef(texts), dtype=np.float32)
+        embeddings = _pad_minilm(ef(texts))
 
         # Hold out last 10% from each domain (3 per domain = 9 total)
         holdout_indices = list(range(27, 30)) + list(range(57, 60)) + list(range(87, 90))
@@ -1796,14 +1801,14 @@ class TestMiniLMTopicQuality:
 
 
 class TestSklearnHdbscanSmoke:
-    """Verify sklearn HDBSCAN + TF-IDF topic pipeline works on 384d embeddings."""
+    """Verify sklearn HDBSCAN + TF-IDF topic pipeline works on 768d embeddings."""
 
     def test_hdbscan_finds_clusters(self) -> None:
-        """HDBSCAN discovers clusters from well-separated 384d embeddings."""
+        """HDBSCAN discovers clusters from well-separated 768d embeddings."""
         from sklearn.cluster import HDBSCAN
 
         rng = np.random.default_rng(42)
-        embeddings = rng.standard_normal((60, 384)).astype(np.float32) * 0.1
+        embeddings = rng.standard_normal((60, _DIM)).astype(np.float32) * 0.1
         embeddings[:30, 0] += 3.0
         embeddings[30:, 1] += 3.0
 
@@ -1813,7 +1818,7 @@ class TestSklearnHdbscanSmoke:
         assert len(labels) == 60
         real_topics = {t for t in labels if t >= 0}
         assert len(real_topics) >= 2, f"Expected >=2 clusters, got {real_topics}"
-        assert clusterer.centroids_.shape[1] == 384
+        assert clusterer.centroids_.shape[1] == _DIM
 
     def test_tfidf_topic_labels(self) -> None:
         """c-TF-IDF produces meaningful per-cluster labels from doc text."""
@@ -1825,7 +1830,7 @@ class TestSklearnHdbscanSmoke:
         docs_b = [f"database query indexing sql schema {i}" for i in range(30)]
         docs = docs_a + docs_b
 
-        embeddings = rng.standard_normal((60, 384)).astype(np.float32) * 0.1
+        embeddings = rng.standard_normal((60, _DIM)).astype(np.float32) * 0.1
         embeddings[:30, 0] += 3.0
         embeddings[30:, 1] += 3.0
 
@@ -1853,7 +1858,7 @@ class TestSklearnHdbscanSmoke:
         from sklearn.metrics.pairwise import cosine_similarity
 
         rng = np.random.default_rng(42)
-        embeddings = rng.standard_normal((60, 384)).astype(np.float32) * 0.1
+        embeddings = rng.standard_normal((60, _DIM)).astype(np.float32) * 0.1
         embeddings[:30, 0] += 3.0
         embeddings[30:, 1] += 3.0
 
@@ -1861,7 +1866,7 @@ class TestSklearnHdbscanSmoke:
         labels = clusterer.fit_predict(embeddings)
 
         # New embedding near cluster A
-        new_emb = rng.standard_normal((1, 384)).astype(np.float32) * 0.1
+        new_emb = rng.standard_normal((1, _DIM)).astype(np.float32) * 0.1
         new_emb[0, 0] += 3.0
 
         sims = cosine_similarity(new_emb, clusterer.centroids_)
@@ -2040,7 +2045,7 @@ class TestDiscoverStoresTerms:
         import json
 
         rng = np.random.default_rng(42)
-        embeddings = rng.standard_normal((60, 384)).astype(np.float32) * 0.1
+        embeddings = rng.standard_normal((60, _DIM)).astype(np.float32) * 0.1
         embeddings[:30, 0] += 3.0
         embeddings[30:, 1] += 3.0
         doc_ids = [canonical_chunk_id(f"doc-{i}") for i in range(60)]
@@ -2342,7 +2347,7 @@ class TestSplitTopic:
         coll = chroma.get_or_create_collection(
             "test__split", embedding_function=None,
         )
-        emb_list = ef(texts)
+        emb_list = _pad_minilm(ef(texts)).tolist()
         coll.add(ids=doc_ids, documents=texts, embeddings=emb_list)
 
         # No parent-centroid pre-seed needed: on the engine substrate
@@ -2506,7 +2511,7 @@ class TestSplitCLI:
         chroma = make_vector_test_client()
         ef = LocalEmbeddingFunction(model_name="all-MiniLM-L6-v2")
         coll = chroma.get_or_create_collection(collection, embedding_function=None)
-        coll.add(ids=doc_ids, documents=texts, embeddings=ef(texts))
+        coll.add(ids=doc_ids, documents=texts, embeddings=_pad_minilm(ef(texts)).tolist())
 
         runner = CliRunner()
         with (
@@ -3045,7 +3050,7 @@ class TestManualPreservation:
         texts_b = [f"database query sql index {i}" for i in range(30)]
         texts = texts_a + texts_b
         doc_ids = [canonical_chunk_id(f"doc-{i}") for i in range(60)]
-        embeddings = np.array(ef(texts), dtype=np.float32)
+        embeddings = _pad_minilm(ef(texts))
         _seed_chunks_for_tenant(t2_service_env, "test__preserve", doc_ids)
 
         count = db.taxonomy.discover_topics(
@@ -3096,7 +3101,7 @@ class TestRediscoveryCentroidLifecycle:
     ) -> None:
         """rebuild_taxonomy clears old centroids before upserting new."""
         rng = np.random.default_rng(42)
-        embeddings = rng.standard_normal((60, 384)).astype(np.float32) * 0.1
+        embeddings = rng.standard_normal((60, _DIM)).astype(np.float32) * 0.1
         embeddings[:30, 0] += 3.0
         embeddings[30:, 1] += 3.0
         doc_ids = [canonical_chunk_id(f"doc-{i}") for i in range(60)]
@@ -3424,7 +3429,7 @@ class TestEdgeCases:
     def test_discover_topics_below_minimum(self, db: T2Database) -> None:
         """discover_topics with n < 5 returns 0 without crashing."""
         rng = np.random.default_rng(42)
-        embeddings = rng.standard_normal((3, 384)).astype(np.float32)
+        embeddings = rng.standard_normal((3, _DIM)).astype(np.float32)
         doc_ids = [canonical_chunk_id("doc-0"), canonical_chunk_id("doc-1"), canonical_chunk_id("doc-2")]
         texts = ["hello world", "foo bar", "baz qux"]
         chroma = make_vector_test_client()
@@ -3444,7 +3449,7 @@ class TestEdgeCases:
         _seed_topic(db.taxonomy, "old-topic", collection="shrunk__coll", doc_count=50)
 
         rng = np.random.default_rng(42)
-        embeddings = rng.standard_normal((3, 384)).astype(np.float32)
+        embeddings = rng.standard_normal((3, _DIM)).astype(np.float32)
 
         result = db.taxonomy.rebuild_taxonomy(
             "shrunk__coll",
@@ -3480,7 +3485,7 @@ class TestEdgeCases:
         """discover_topics skips if topics already exist for collection."""
         chroma = make_vector_test_client()
         rng = np.random.default_rng(42)
-        embeddings = rng.standard_normal((60, 384)).astype(np.float32) * 0.1
+        embeddings = rng.standard_normal((60, _DIM)).astype(np.float32) * 0.1
         embeddings[:30, 0] += 3.0
         embeddings[30:, 1] += 3.0
         doc_ids = [canonical_chunk_id(f"doc-{i}") for i in range(60)]
@@ -3784,7 +3789,7 @@ class TestProjectCmd:
         rng = np.random.default_rng(42)
 
         # Create target topics
-        tgt_embs = rng.standard_normal((60, 384)).astype(np.float32) * 0.1
+        tgt_embs = rng.standard_normal((60, _DIM)).astype(np.float32) * 0.1
         tgt_embs[:30, 0] += 3.0
         tgt_embs[30:, 1] += 3.0
         tgt_ids = [canonical_chunk_id(f"t-{i}") for i in range(60)]
@@ -3798,7 +3803,7 @@ class TestProjectCmd:
         )
 
         # Create source collection
-        src_embs = rng.standard_normal((10, 384)).astype(np.float32) * 0.1
+        src_embs = rng.standard_normal((10, _DIM)).astype(np.float32) * 0.1
         src_embs[:5, 0] += 3.0
         src_coll = chroma_client.get_or_create_collection(
             "src__coll", embedding_function=None, metadata={"hnsw:space": "cosine"},
@@ -3838,7 +3843,7 @@ class TestProjectCmd:
 
         rng = np.random.default_rng(42)
 
-        tgt_embs = rng.standard_normal((60, 384)).astype(np.float32) * 0.1
+        tgt_embs = rng.standard_normal((60, _DIM)).astype(np.float32) * 0.1
         tgt_embs[:30, 0] += 3.0
         tgt_embs[30:, 1] += 3.0
         tgt_ids = [canonical_chunk_id(f"t-{i}") for i in range(60)]
@@ -3851,7 +3856,7 @@ class TestProjectCmd:
             chroma_client,
         )
 
-        src_embs = rng.standard_normal((10, 384)).astype(np.float32) * 0.1
+        src_embs = rng.standard_normal((10, _DIM)).astype(np.float32) * 0.1
         src_embs[:5, 0] += 3.0
         src_coll = chroma_client.get_or_create_collection(
             "psrc__coll", embedding_function=None, metadata={"hnsw:space": "cosine"},

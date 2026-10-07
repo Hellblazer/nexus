@@ -72,8 +72,17 @@ class CatalogRepositoryTest {
      * stub would itself violate that check rather than reaching the manifest-side
      * violation the test is actually after.
      */
-    private static final String STUB_VECTOR_384 =
-        "[" + "0.1,".repeat(383) + "0.1]";
+    private static String stubVector(int dim) {
+        return "[" + "0.1,".repeat(dim - 1) + "0.1]";
+    }
+
+    /** The vector width of a registered embedding model (RDR-225: one model, one dimension). */
+    private static int modelDimension(String model) {
+        if (model.endsWith("-384")) return 384;
+        if (model.endsWith("-768")) return 768;
+        if (model.startsWith("voyage-")) return 1024;
+        throw new IllegalStateException("no known dimension for embedding model " + model);
+    }
 
     private void stubChunk(String tenant, String collection, Object chashObj) {
         if (!(chashObj instanceof String chashHex) || chashHex.length() != 64) {
@@ -92,11 +101,21 @@ class CatalogRepositoryTest {
             // requires (the bare two-column raw INSERT this used to run 23502s on
             // lifecycle_state NOT NULL).
             PgContainerHelper.insertCollection(ctx, tenant, collection);
+            // RDR-225: the row carries its collection's model, and the vector's width must be that
+            // model's dimension. Exactly one of the three embedding columns is non-null (the CASEs
+            // below), picked from the model's dimension.
+            String model = PgContainerHelper.collectionModel(ctx, tenant, collection);
+            int dim = modelDimension(model);
             ctx.execute(
-                "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_384) "
-                + "VALUES (?, ?, decode(?, 'hex'), 'stub', ?::nexus.vector) "
-                + "ON CONFLICT (tenant_id, collection, chash) DO NOTHING",
-                tenant, collection, chashHex, STUB_VECTOR_384);
+                "INSERT INTO nexus.chunks (tenant_id, collection, chash, embedding_model, chunk_text, "
+                + "embedding_384, embedding_768, embedding_1024) "
+                + "VALUES (?, ?, decode(?, 'hex'), ?, 'stub', "
+                + "CASE WHEN ? = 384 THEN ?::nexus.vector END, "
+                + "CASE WHEN ? = 768 THEN ?::nexus.vector END, "
+                + "CASE WHEN ? = 1024 THEN ?::nexus.vector END) "
+                + "ON CONFLICT (tenant_id, collection, chash, embedding_model) DO NOTHING",
+                tenant, collection, chashHex, model,
+                dim, stubVector(384), dim, stubVector(768), dim, stubVector(1024));
             return null;
         });
     }
@@ -4048,23 +4067,29 @@ class CatalogRepositoryTest {
         try (var su = pg.createConnection("")) {
             su.setAutoCommit(true);
             PgContainerHelper.setTenant(su, TenantScope.DEFAULT_TENANT_GUC, SPAN_TENANT, false);
+            // RDR-225: SPAN_TENANT has no service token, so its partition leaves are made here, and the
+            // row carries the model the collection was registered under above.
+            var suCtx = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.ensureTenantPartitions(suCtx, SPAN_TENANT);
+            String spanModel = PgContainerHelper.collectionModel(suCtx, SPAN_TENANT, SPAN_COLLECTION);
             // Build a zero-vector literal: '[0,0,...,0]' with 768 zeros.
             String zeroVec = "[" + "0,".repeat(767) + "0]";
             // RDR-191 (nexus-o8dil.48): chunks_768 unified into nexus.chunks --
             // embedding_768 replaces the bare embedding column.
             var ps = su.prepareStatement(
                 "INSERT INTO nexus.chunks"
-                + " (tenant_id, collection, chash, chunk_text, embedding_768, metadata)"
-                + " VALUES (?, ?, ?, ?, ?::nexus.vector, ?::jsonb)"
-                + " ON CONFLICT (tenant_id, collection, chash) DO NOTHING"
+                + " (tenant_id, collection, chash, embedding_model, chunk_text, embedding_768, metadata)"
+                + " VALUES (?, ?, ?, ?, ?, ?::nexus.vector, ?::jsonb)"
+                + " ON CONFLICT (tenant_id, collection, chash, embedding_model) DO NOTHING"
             );
             ps.setString(1, SPAN_TENANT);
             ps.setString(2, SPAN_COLLECTION);
             // chash column is bytea(32) now (RDR-180) — bind the decoded digest, not the hex text.
             ps.setBytes(3, java.util.HexFormat.of().parseHex(SPAN_CHASH));
-            ps.setString(4, "hello span text");
-            ps.setString(5, zeroVec);
-            ps.setString(6, "{\"lang\":\"en\"}");
+            ps.setString(4, spanModel);
+            ps.setString(5, "hello span text");
+            ps.setString(6, zeroVec);
+            ps.setString(7, "{\"lang\":\"en\"}");
             ps.executeUpdate();
         }
 

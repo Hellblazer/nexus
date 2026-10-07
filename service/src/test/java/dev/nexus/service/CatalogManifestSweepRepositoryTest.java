@@ -120,11 +120,13 @@ class CatalogManifestSweepRepositoryTest {
             // PgVectorRepository#upsertChunks' own ensure-registered step. RDR-204
             // nexus-ft04v.4/.5: routed through PgContainerHelper.insertCollection.
             PgContainerHelper.insertCollection(ctx, tenant, collection);
+            // RDR-225: a chunk carries its collection's model (every collection here is 384-d).
             return ctx.execute(
-                "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_384) "
-                + "VALUES (?, ?, decode(?, 'hex'), 'stub', ?::nexus.vector) "
-                + "ON CONFLICT (tenant_id, collection, chash) DO NOTHING",
-                tenant, collection, chashHex, STUB_VECTOR_384);
+                "INSERT INTO nexus.chunks (tenant_id, collection, chash, embedding_model, chunk_text, embedding_384) "
+                + "VALUES (?, ?, decode(?, 'hex'), ?, 'stub', ?::nexus.vector) "
+                + "ON CONFLICT (tenant_id, collection, chash, embedding_model) DO NOTHING",
+                tenant, collection, chashHex, PgContainerHelper.collectionModel(ctx, tenant, collection),
+                STUB_VECTOR_384);
         });
     }
 
@@ -205,18 +207,23 @@ class CatalogManifestSweepRepositoryTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             PgContainerHelper.setTenant(su, TenantScope.DEFAULT_TENANT_GUC, tenant, false);
+            // RDR-225: the tenant needs partition leaves before its first chunk (the upsertCollection
+            // above registers the collection but is not the leaf-creating call under every path).
+            PgContainerHelper.ensureTenantPartitions(DSL.using(su, org.jooq.SQLDialect.POSTGRES), tenant);
             String zeroVec = "[" + "0,".repeat(383) + "0]";
             // RDR-191 (nexus-o8dil.48): chunks_384 unified into nexus.chunks
             // (vectors-004-unify-chunks.xml) -- embedding_384 replaces the bare
             // embedding column.
             var ps = su.prepareStatement(
-                "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_384)"
-                + " VALUES (?, ?, ?, ?, ?::nexus.vector) ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
+                "INSERT INTO nexus.chunks (tenant_id, collection, chash, embedding_model, chunk_text, embedding_384)"
+                + " VALUES (?, ?, ?, ?, ?, ?::nexus.vector) ON CONFLICT (tenant_id, collection, chash, embedding_model) DO NOTHING");
             ps.setString(1, tenant);
             ps.setString(2, collection);
             ps.setBytes(3, java.util.HexFormat.of().parseHex(hexChash));
-            ps.setString(4, "seed text " + hexChash);
-            ps.setString(5, zeroVec);
+            ps.setString(4, PgContainerHelper.collectionModel(
+                DSL.using(su, org.jooq.SQLDialect.POSTGRES), tenant, collection));
+            ps.setString(5, "seed text " + hexChash);
+            ps.setString(6, zeroVec);
             ps.executeUpdate();
         }
     }
@@ -569,8 +576,8 @@ class CatalogManifestSweepRepositoryTest {
             // B now completes its manifest insert normally and commits.
             try (var psB = connB.prepareStatement(
                     "INSERT INTO nexus.catalog_document_chunks "
-                    + "(tenant_id, doc_id, position, chash, chunk_index, collection) "
-                    + "VALUES (?, ?, 0, decode(?, 'hex'), 0, ?)")) {
+                    + "(tenant_id, doc_id, position, chash, chunk_index, collection, embedding_model) "
+                    + "VALUES (?, ?, 0, decode(?, 'hex'), 0, ?, 'minilm-l6-v2-384')")) {
                 psB.setString(1, TENANT_A);
                 psB.setString(2, "swp.8a-b");
                 psB.setString(3, shared1);
@@ -609,8 +616,8 @@ class CatalogManifestSweepRepositoryTest {
             acquireGateShared(connB, TENANT_A, col2);
             try (var psB = connB.prepareStatement(
                     "INSERT INTO nexus.catalog_document_chunks "
-                    + "(tenant_id, doc_id, position, chash, chunk_index, collection) "
-                    + "VALUES (?, ?, 0, decode(?, 'hex'), 0, ?)")) {
+                    + "(tenant_id, doc_id, position, chash, chunk_index, collection, embedding_model) "
+                    + "VALUES (?, ?, 0, decode(?, 'hex'), 0, ?, 'minilm-l6-v2-384')")) {
                 psB.setString(1, TENANT_A);
                 psB.setString(2, "swp.8b-b");
                 psB.setString(3, shared2);
@@ -702,7 +709,7 @@ class CatalogManifestSweepRepositoryTest {
             su.createStatement().execute("REVOKE SELECT ON nexus.catalog_document_chunks FROM " + SVC_ROLE);
             su.createStatement().execute(
                 "GRANT SELECT (tenant_id, doc_id, \"position\", chunk_index, line_start, "
-                + "line_end, char_start, char_end, collection) ON nexus.catalog_document_chunks TO "
+                + "line_end, char_start, char_end, collection, embedding_model) ON nexus.catalog_document_chunks TO "
                 + SVC_ROLE);
         }
         // Only the operation under test runs with the column revoked — every

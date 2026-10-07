@@ -83,7 +83,7 @@ class TaxonomyAssignBoundsIntegrationTest {
             PgContainerHelper.bootstrapServiceRole(su, SVC_ROLE, SVC_PASS);
             for (int dim : new int[] {384, 768, 1024}) {
                 PgContainerHelper.grantExecuteOnFunction(
-                    su, "nexus.assign_from_chashes_" + dim + "(text, text[], boolean)", SVC_ROLE);
+                    su, "nexus.assign_from_chashes_" + dim + "(text, text[], boolean, text, text)", SVC_ROLE);
             }
         }
         var cfg = new com.zaxxer.hikari.HikariConfig();
@@ -331,10 +331,11 @@ class TaxonomyAssignBoundsIntegrationTest {
         registerCollection(tenant, collection);
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            DSL.using(su, SQLDialect.POSTGRES)
-               .insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH,
-                           CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_1024)
+            var ctx = DSL.using(su, SQLDialect.POSTGRES);
+            ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH,
+                           CHUNKS.EMBEDDING_MODEL, CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_1024)
                .values(tenant, collection, HexFormat.of().parseHex(hexChashValue),
+                       PgContainerHelper.collectionModel(ctx, tenant, collection),
                        "seed text " + hexChashValue, Vector.of(emb))
                .execute();
         }
@@ -348,10 +349,12 @@ class TaxonomyAssignBoundsIntegrationTest {
     private void seedCentroid(String tenant, String collection, long topicId, float[] emb) throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            DSL.using(su, SQLDialect.POSTGRES)
-               .insertInto(TAXONOMY_CENTROIDS, TAXONOMY_CENTROIDS.TENANT_ID, TAXONOMY_CENTROIDS.COLLECTION,
-                           TAXONOMY_CENTROIDS.TOPIC_ID, TAXONOMY_CENTROIDS.LABEL, TAXONOMY_CENTROIDS.EMBEDDING_1024)
-               .values(tenant, collection, topicId, "seed-centroid-label", Vector.of(emb))
+            var ctx = DSL.using(su, SQLDialect.POSTGRES);
+            ctx.insertInto(TAXONOMY_CENTROIDS, TAXONOMY_CENTROIDS.TENANT_ID, TAXONOMY_CENTROIDS.COLLECTION,
+                           TAXONOMY_CENTROIDS.TOPIC_ID, TAXONOMY_CENTROIDS.LABEL,
+                           TAXONOMY_CENTROIDS.EMBEDDING_MODEL, TAXONOMY_CENTROIDS.EMBEDDING_1024)
+               .values(tenant, collection, topicId, "seed-centroid-label",
+                       PgContainerHelper.collectionModel(ctx, tenant, collection), Vector.of(emb))
                .execute();
         }
     }

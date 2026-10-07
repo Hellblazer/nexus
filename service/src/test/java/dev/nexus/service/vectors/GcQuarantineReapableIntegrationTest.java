@@ -115,10 +115,12 @@ class GcQuarantineReapableIntegrationTest {
     private void recordOrphaning(String collection, String hex, Duration age) throws Exception {
         try (Connection su = pg.createConnection("")) {
             OffsetDateTime then = OffsetDateTime.now().minus(age);
-            DSL.using(su, SQLDialect.POSTGRES)
-               .insertInto(CHUNK_ORPHANED_AT, CHUNK_ORPHANED_AT.TENANT_ID, CHUNK_ORPHANED_AT.COLLECTION,
-                   CHUNK_ORPHANED_AT.CHASH, CHUNK_ORPHANED_AT.ORPHANED_AT)
-               .values(TENANT, collection, Chash.fromHex(hex).toBytes(), then)
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            // RDR-225: the record carries the model of the chunk it refers to (the collection's).
+            ctx.insertInto(CHUNK_ORPHANED_AT, CHUNK_ORPHANED_AT.TENANT_ID, CHUNK_ORPHANED_AT.COLLECTION,
+                   CHUNK_ORPHANED_AT.CHASH, CHUNK_ORPHANED_AT.ORPHANED_AT, CHUNK_ORPHANED_AT.EMBEDDING_MODEL)
+               .values(TENANT, collection, Chash.fromHex(hex).toBytes(), then,
+                   PgContainerHelper.collectionModel(ctx, TENANT, collection))
                .execute();
         }
     }

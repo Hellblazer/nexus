@@ -114,7 +114,7 @@ class TaxonomyAssignFromChashesRepositoryTest {
             for (int dim : new int[] {384, 768, 1024}) {
                 su.createStatement().execute(
                     "GRANT EXECUTE ON FUNCTION nexus.assign_from_chashes_" + dim
-                    + "(text, text[], boolean) TO " + SVC_ROLE);
+                    + "(text, text[], boolean, text, text) TO " + SVC_ROLE);
             }
         }
 
@@ -327,6 +327,45 @@ class TaxonomyAssignFromChashesRepositoryTest {
     }
 
     @Test
+    void crossPass_matchesOnlyCentroidsOfTheChunksOwnModel() throws Exception {
+        // RDR-225: voyage-code-3 and voyage-context-3 are both 1024-d but share no
+        // neighbours (RDR-225 E1), so the cross pass matches the chunk's own model only.
+        // The context-3 centroid is an exact match (cosine 1.0) and must still lose.
+        String tenant = "afc-tenant-crossmodel";
+        String col = "code__afc_xmodel__voyage-code-3__v1";
+        String sameModel = "code__afc_xmodelsame__voyage-code-3__v1";
+        String otherModel = "docs__afc_xmodelother__voyage-context-3__v1";
+        String c1 = hexChash("afc-chash-xmodel-1");
+        seedChunk(tenant, col, c1, unit(1.0f, 0.0f));
+        long tOther = seedTopic(tenant, otherModel, "xmodel-other");
+        seedCentroid(tenant, otherModel, tOther, unit(1.0f, 0.0f));
+        long tSame = seedTopic(tenant, sameModel, "xmodel-same");
+        seedCentroid(tenant, sameModel, tSame, unit(0.6f, 0.8f));
+
+        Map<String, Object> out = repo.assignFromChashes(tenant, col, List.of(c1), true);
+        assertThat(out.get("cross_assigned")).isEqualTo(1);
+        assertThat(repo.getAssignmentDetails(tenant, List.of(c1))).singleElement().satisfies(r -> {
+            assertThat(r.get("topic_id")).isEqualTo(tSame);
+            assertThat((Double) r.get("similarity")).isCloseTo(0.6, within(1e-4));
+        });
+    }
+
+    @Test
+    void crossPass_onlyOtherModelCentroids_assignsNothing() throws Exception {
+        String tenant = "afc-tenant-crossmodel-none";
+        String col = "code__afc_xmodelnone__voyage-code-3__v1";
+        String otherModel = "docs__afc_xmodelnoneother__voyage-context-3__v1";
+        String c1 = hexChash("afc-chash-xmodel-none-1");
+        seedChunk(tenant, col, c1, unit(1.0f, 0.0f));
+        long tOther = seedTopic(tenant, otherModel, "xmodel-none-other");
+        seedCentroid(tenant, otherModel, tOther, unit(1.0f, 0.0f));
+
+        Map<String, Object> out = repo.assignFromChashes(tenant, col, List.of(c1), true);
+        assertThat(out.get("cross_assigned")).isEqualTo(0);
+        assertThat(repo.getAssignmentDetails(tenant, List.of(c1))).isEmpty();
+    }
+
+    @Test
     void crossPass_onConflict_greatestSimilarityWins_bothDirections() throws Exception {
         // Dedicated tenant (see crossPass_assignsToForeignCollectionTopic's note) — cross
         // pass sees every foreign collection for the tenant, so an accumulated shared
@@ -356,12 +395,15 @@ class TaxonomyAssignFromChashesRepositoryTest {
             // RDR-194 P3c: doc_id is bytea now -- decode('hex') the bind parameter.
             try (PreparedStatement ps = su.prepareStatement(
                     "INSERT INTO nexus.topic_assignments"
-                    + " (tenant_id, doc_id, topic_id, assigned_by, similarity, assigned_at, source_collection)"
-                    + " VALUES (?, decode(?, 'hex'), ?, 'projection', 0.999, now(), ?)")) {
+                    + " (tenant_id, doc_id, topic_id, assigned_by, similarity, assigned_at, source_collection,"
+                    + " embedding_model)"
+                    + " VALUES (?, decode(?, 'hex'), ?, 'projection', 0.999, now(), ?, ?)")) {
                 ps.setString(1, tenant);
                 ps.setString(2, c1);
                 ps.setLong(3, tStrong);
                 ps.setString(4, col);
+                // RDR-225: the assignment carries the model of the chunk it references.
+                ps.setString(5, PgContainerHelper.collectionModel(DSL.using(su, SQLDialect.POSTGRES), tenant, col));
                 ps.executeUpdate();
             }
         }
@@ -621,13 +663,15 @@ class TaxonomyAssignFromChashesRepositoryTest {
             su.setAutoCommit(true);
             try (PreparedStatement ps = su.prepareStatement(
                     "INSERT INTO nexus.chunks"
-                    + " (tenant_id, collection, chash, chunk_text, embedding_" + dim + ")"
-                    + " VALUES (?, ?, decode(?, 'hex'), ?, ?::nexus.vector)")) {
+                    + " (tenant_id, collection, chash, embedding_model, chunk_text, embedding_" + dim + ")"
+                    + " VALUES (?, ?, decode(?, 'hex'), ?, ?, ?::nexus.vector)")) {
                 ps.setString(1, tenant);
                 ps.setString(2, collection);
                 ps.setString(3, hexChashValue);
-                ps.setString(4, "seed text " + hexChashValue);
-                ps.setString(5, vectorLiteral(emb));
+                // RDR-225: a chunk carries its collection's model (its vector width must be that model's dim).
+                ps.setString(4, PgContainerHelper.collectionModel(DSL.using(su, SQLDialect.POSTGRES), tenant, collection));
+                ps.setString(5, "seed text " + hexChashValue);
+                ps.setString(6, vectorLiteral(emb));
                 ps.executeUpdate();
             }
         }
@@ -681,12 +725,14 @@ class TaxonomyAssignFromChashesRepositoryTest {
                     // nexus-tk070.p6a follow-on) -- no test in this class asserts
                     // on the label value, so a fixed placeholder satisfies the
                     // constraint without changing any assertion surface.
-                    + " (tenant_id, collection, topic_id, label, embedding_" + dim + ") VALUES (?, ?, ?, ?, ?::nexus.vector)")) {
+                    + " (tenant_id, collection, topic_id, label, embedding_model, embedding_" + dim
+                    + ") VALUES (?, ?, ?, ?, ?, ?::nexus.vector)")) {
                 ps.setString(1, tenant);
                 ps.setString(2, collection);
                 ps.setLong(3, topicId);
                 ps.setString(4, "seed-centroid-label");
-                ps.setString(5, vectorLiteral(emb));
+                ps.setString(5, PgContainerHelper.collectionModel(DSL.using(su, SQLDialect.POSTGRES), tenant, collection));
+                ps.setString(6, vectorLiteral(emb));
                 ps.executeUpdate();
             }
         }

@@ -48,6 +48,8 @@ class TaxonomyHandlerAssignFromChashesTest {
     private static final String TENANT   = "afc-http-tenant";
     private static final String COL      = "code__afchttp__voyage-code-3__v1";
     private static final int DIM = 1024;
+    /** RDR-225: the model COL's name registers it under (a 1024-d model); rows carry it. */
+    private static final String MODEL = "voyage-code-3";
 
     PostgreSQLContainer<?> pg;
     TenantScope tenantScope;
@@ -200,13 +202,14 @@ class TaxonomyHandlerAssignFromChashesTest {
             su.setAutoCommit(true);
             try (PreparedStatement ps = su.prepareStatement(
                     "INSERT INTO nexus.chunks"
-                    + " (tenant_id, collection, chash, chunk_text, embedding_" + DIM + ")"
-                    + " VALUES (?, ?, decode(?, 'hex'), ?, ?::nexus.vector)")) {
+                    + " (tenant_id, collection, chash, embedding_model, chunk_text, embedding_" + DIM + ")"
+                    + " VALUES (?, ?, decode(?, 'hex'), ?, ?, ?::nexus.vector)")) {
                 ps.setString(1, TENANT);
                 ps.setString(2, COL);
                 ps.setString(3, hexChashValue);
-                ps.setString(4, "seed text " + hexChashValue);
-                ps.setString(5, vectorLiteral(emb));
+                ps.setString(4, MODEL);
+                ps.setString(5, "seed text " + hexChashValue);
+                ps.setString(6, vectorLiteral(emb));
                 ps.executeUpdate();
             }
         }
@@ -238,12 +241,14 @@ class TaxonomyHandlerAssignFromChashesTest {
                     // label: taxonomy_centroids.label is NOT NULL (hygiene-001-9b,
                     // nexus-tk070.p6a follow-on) -- no assertion in this class
                     // reads the label value.
-                    + " (tenant_id, collection, topic_id, label, embedding_" + DIM + ") VALUES (?, ?, ?, ?, ?::nexus.vector)")) {
+                    + " (tenant_id, collection, topic_id, label, embedding_model, embedding_" + DIM
+                    + ") VALUES (?, ?, ?, ?, ?, ?::nexus.vector)")) {
                 ps.setString(1, TENANT);
                 ps.setString(2, collection);
                 ps.setLong(3, topicId);
                 ps.setString(4, "seed-centroid-label");
-                ps.setString(5, vectorLiteral(emb));
+                ps.setString(5, MODEL);
+                ps.setString(6, vectorLiteral(emb));
                 ps.executeUpdate();
             }
         }

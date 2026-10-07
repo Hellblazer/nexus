@@ -15,6 +15,12 @@ import java.util.Map;
  * Typed accessors for the unified, dim-columned pgvector tables (nexus-xtmtf,
  * RDR-191 Phase 4 / nexus-o8dil.16 + .48).
  *
+ * <p>RDR-225: both tables are also LIST-partitioned by {@code embedding_model}, then by
+ * {@code tenant_id}. jOOQ generates the two parents only (the leaves are excluded in the pom), so
+ * these accessors still point at the parents. A typed INSERT supplies {@link ChunkTable#embeddingModel()}
+ * and {@link CentroidTable#embeddingModel()} and routes to its leaf; a write for a model with no
+ * partition is refused by {@link dev.nexus.service.db.ModelPartitions} before any SQL.
+ *
  * <p>{@code nexus.chunks} / {@code nexus.taxonomy_centroids} are now single
  * tables carrying one {@code embedding_384}/{@code embedding_768}/
  * {@code embedding_1024} column each (exactly one non-null, enforced by a DB
@@ -63,6 +69,11 @@ public final class DimTables {
         Field<String> tenantId,
         Field<String> collection,
         Field<String> chash,
+        // RDR-225 (nexus-3wh8d.13): text NOT NULL, the second partition key and the fourth column of
+        // the primary key and of every referencing foreign key. Every typed INSERT supplies it from
+        // the collection's catalog_collections row (never from a dimension), and every conflict
+        // target names it. Reads and UPDATEs need not mention it.
+        Field<String> embeddingModel,
         Field<String> chunkText,
         Field<Vector> embedding,
         Field<JSONB> metadata,
@@ -89,7 +100,10 @@ public final class DimTables {
         // never caused), and ChunkLastWrittenAtIntegrationTest pins it. Same runtime
         // field lookup as retention. ChunksWriterLastWrittenAtScanTest lists every
         // chunks writer and why it refreshes or not.
-        Field<OffsetDateTime> lastWrittenAt
+        Field<OffsetDateTime> lastWrittenAt,
+        // created_at TIMESTAMPTZ NOT NULL DEFAULT now(), write-once (no writer assigns it on conflict).
+        // RDR-225: read only by insertedByThisStatement.
+        Field<OffsetDateTime> createdAt
     ) {
         @SuppressWarnings("unchecked")
         static ChunkTable of(Table<?> t, int dim) {
@@ -101,12 +115,31 @@ public final class DimTables {
                 // ChashHex converted type binds/fetches through the codec,
                 // so every repository site stays hex-string-shaped.
                 dev.nexus.service.db.ChashHex.hex(t, "chash"),
+                t.field("embedding_model", String.class),
                 t.field("chunk_text", String.class),
                 (Field<Vector>) t.field(embeddingColumn(dim)),
                 t.field("metadata", JSONB.class),
                 t.field("retention", String.class),
-                t.field("last_written_at", OffsetDateTime.class));
+                t.field("last_written_at", OffsetDateTime.class),
+                t.field("created_at", OffsetDateTime.class));
         }
+    }
+
+    /**
+     * RETURNING predicate that is true for a row this INSERT created and false for a row it reached
+     * through {@code ON CONFLICT DO UPDATE}.
+     *
+     * <p>RDR-225 (nexus-3wh8d.13): this replaces {@code (xmax = 0)}, the usual idiom, which PostgreSQL
+     * refuses on a partitioned table ("cannot retrieve a system column in this context"). A new row takes
+     * {@code created_at} from its column DEFAULT {@code now()}, which is the transaction's start time, and
+     * {@code created_at} is write-once: no conflict arm assigns it. So {@code created_at = now()} holds for
+     * a row inserted in this transaction and fails for one that an earlier transaction committed, which is
+     * the distinction the raced-embed count needs ({@code RacedEmbedActivity}). The one blind spot is a row
+     * an earlier statement of the SAME transaction inserted, which reads as "inserted" here; the callers
+     * run one chunk INSERT per transaction.
+     */
+    public static org.jooq.Condition insertedByThisStatement(ChunkTable ch) {
+        return ch.createdAt().eq(DSL.currentOffsetDateTime());
     }
 
     /**
@@ -124,6 +157,8 @@ public final class DimTables {
         Field<String> tenantId,
         Field<String> collection,
         Field<Long> topicId,
+        // RDR-225 (nexus-3wh8d.13): the model partition key and the fourth column of the primary key.
+        Field<String> embeddingModel,
         Field<Vector> embedding,
         Field<String> label,
         Field<Integer> docCount
@@ -135,6 +170,7 @@ public final class DimTables {
                 t.field("tenant_id", String.class),
                 t.field("collection", String.class),
                 t.field("topic_id", Long.class),
+                t.field("embedding_model", String.class),
                 (Field<Vector>) t.field(embeddingColumn(dim)),
                 t.field("label", String.class),
                 t.field("doc_count", Integer.class));

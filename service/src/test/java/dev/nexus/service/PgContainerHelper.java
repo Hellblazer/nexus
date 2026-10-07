@@ -452,8 +452,14 @@ public final class PgContainerHelper {
             "databasechangelog_test_superuser_ddl", Map.of("ddl", ddl));
     }
 
-    private static void runSuperuserTestChangelog(Connection su, String changelog, String bookkeepingTable,
-                                                  Map<String, String> params) throws Exception {
+    /**
+     * Run a test changelog on {@code su} through its own bookkeeping table. Despite the name the
+     * connection may be any role the changelog's statements are allowed for: the RDR-225 scratch
+     * fixture runs as the schema owner so its scratch tables are owned by the role that owns the
+     * functions under test.
+     */
+    public static void runSuperuserTestChangelog(Connection su, String changelog, String bookkeepingTable,
+                                                 Map<String, String> params) throws Exception {
         Database db = DatabaseFactory.getInstance().findCorrectDatabaseImplementation(new JdbcConnection(su));
         db.setDatabaseChangeLogTableName(bookkeepingTable);
         db.setDatabaseChangeLogLockTableName(bookkeepingTable + "_lock");
@@ -661,6 +667,11 @@ public final class PgContainerHelper {
                 .execute();
             return;
         }
+        // RDR-225: a collection is registered so that chunks can be written under it, and a chunk of a
+        // tenant with no partition leaf is refused by tuple routing. Production creates the leaves with
+        // the tenant's first service token; a test that invents a tenant id never issues one, so the
+        // registration it already has to do stands in for it.
+        ensureTenantPartitions(dsl, tenantId);
 
         String contentType = "unknown";
         String ownerId = tenantId;
@@ -697,6 +708,51 @@ public final class PgContainerHelper {
     }
 
     /**
+     * Create {@code tenant}'s partition leaves under every model partition of {@code nexus.chunks} and
+     * {@code nexus.taxonomy_centroids} (RDR-225, nexus-3wh8d.13), as the {@code service_tokens} trigger
+     * does for a tenant's first token. Idempotent (the function looks leaves up by bound), and a no-op on
+     * a schema that has not been walked to the partitioned layout yet, so the pre-walk dedicated
+     * containers can call the seeds that call this. Runs as whatever role {@code ctx} carries, which must
+     * be allowed to EXECUTE the function (the superuser the schema was migrated under).
+     */
+    public static void ensureTenantPartitions(DSLContext ctx, String tenant) {
+        if (!PgCatalogProbes.columnExists(ctx, "nexus", "chunks", "embedding_model")
+                || !PgCatalogProbes.routineExists(ctx, "nexus", "create_tenant_partitions")) {
+            return;
+        }
+        PartitionScratch.createTenantPartitions(ctx, "chunks", tenant, true);
+        PartitionScratch.createTenantPartitions(ctx, "taxonomy_centroids", tenant, true);
+    }
+
+    /**
+     * True when {@code nexus.chunks} already has {@code embedding_model} (the schema has been walked past
+     * {@code vectors-030-1}). The chunk and manifest seeds below serve two kinds of caller: tests on a fully
+     * migrated schema, where every row must carry its collection's model, and the pre-walk containers
+     * (the Hygiene walks, the upgrade rehearsal, the migration-walk test), which seed the OLD layout before
+     * the walk and cannot name a column that does not exist yet.
+     */
+    public static boolean isPartitionedLayout(DSLContext ctx) {
+        return PgCatalogProbes.columnExists(ctx, "nexus", "chunks", "embedding_model");
+    }
+
+    /**
+     * {@link #insertCollection(DSLContext, String, String)} registered under an explicit embedding
+     * model (RDR-225, nexus-3wh8d.13). A chunk carries its collection's model and a vector's width must
+     * be that model's dimension, so a seed that writes 384- or 1024-wide vectors into a collection whose
+     * name does not carry the right model token registers it here. The model is applied to the freshly
+     * inserted row, which no chunk references yet, so the composite foreign key does not object; call
+     * it BEFORE the first chunk of the collection.
+     */
+    public static void insertCollection(DSLContext dsl, String tenantId, String name, String embeddingModel) {
+        insertCollection(dsl, tenantId, name);
+        dsl.update(CATALOG_COLLECTIONS)
+            .set(CATALOG_COLLECTIONS.EMBEDDING_MODEL, embeddingModel)
+            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenantId))
+            .and(CATALOG_COLLECTIONS.NAME.eq(name))
+            .execute();
+    }
+
+    /**
      * Seed a minimal {@code nexus.catalog_documents} row via generated jOOQ DSL
      * (nexus-cbo4a batch 10) — the {@code catalog_documents} counterpart to {@link
      * #insertCollection}, replacing the identical hand-rolled {@code INSERT INTO
@@ -717,6 +773,29 @@ public final class PgContainerHelper {
             .values(tenantId, tumbler, "Test Doc " + tumbler)
             .onConflictDoNothing()
             .execute();
+    }
+
+    /**
+     * The embedding model {@code collection} is registered under, for the seeds below (RDR-225,
+     * nexus-3wh8d.13): {@code nexus.chunks} and every table that references it carry
+     * {@code embedding_model NOT NULL}, taken from the collection's registry row, and a chunk's
+     * vector width must be that model's dimension (the model partition's CHECK). A seed that names a
+     * collection with no row fails here, naming the missing registration, instead of inserting a chunk
+     * the composite foreign key would refuse with a less direct message.
+     *
+     * @throws IllegalStateException when {@code (tenant, collection)} has no {@code catalog_collections} row
+     */
+    public static String collectionModel(DSLContext ctx, String tenant, String collection) {
+        String model = ctx.select(CATALOG_COLLECTIONS.EMBEDDING_MODEL)
+            .from(CATALOG_COLLECTIONS)
+            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant))
+            .and(CATALOG_COLLECTIONS.NAME.eq(collection))
+            .fetchOne(CATALOG_COLLECTIONS.EMBEDDING_MODEL);
+        if (model == null) {
+            throw new IllegalStateException("collection '" + collection + "' is not registered for tenant '"
+                + tenant + "'; call PgContainerHelper.insertCollection first (a chunk carries its collection's model)");
+        }
+        return model;
     }
 
     /**
@@ -766,14 +845,29 @@ public final class PgContainerHelper {
         // Single multi-row INSERT (one round trip regardless of chashHex.length) —
         // a fixture owning thousands of chashes (e.g. a dense-gate-scale fixture)
         // must not pay one round trip per chash.
+        if (!isPartitionedLayout(ctx)) {
+            var old = ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID,
+                    CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION,
+                    CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION)
+                .values(tenantId, docId, nextPosition,
+                        dev.nexus.service.db.Chash.fromHex(chashHex[0]).toBytes(), collection);
+            for (int i = 1; i < chashHex.length; i++) {
+                old = old.values(tenantId, docId, nextPosition + i,
+                        dev.nexus.service.db.Chash.fromHex(chashHex[i]).toBytes(), collection);
+            }
+            old.onConflictDoNothing().execute();
+            return;
+        }
+        String model = collectionModel(ctx, tenantId, collection);
         var step = ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID,
                 CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION,
-                CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION)
+                CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION,
+                CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
             .values(tenantId, docId, nextPosition,
-                    dev.nexus.service.db.Chash.fromHex(chashHex[0]).toBytes(), collection);
+                    dev.nexus.service.db.Chash.fromHex(chashHex[0]).toBytes(), collection, model);
         for (int i = 1; i < chashHex.length; i++) {
             step = step.values(tenantId, docId, nextPosition + i,
-                    dev.nexus.service.db.Chash.fromHex(chashHex[i]).toBytes(), collection);
+                    dev.nexus.service.db.Chash.fromHex(chashHex[i]).toBytes(), collection, model);
         }
         step.onConflictDoNothing().execute();
     }
@@ -797,25 +891,46 @@ public final class PgContainerHelper {
      * @param v          the 384-dim embedding vector
      */
     public static void insertChunk384(DSLContext ctx, String tenant, String collection, byte[] chashBytes, Vector v) {
-        ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.CHUNK_TEXT,
-                       CHUNKS.EMBEDDING_384)
-           .values(tenant, collection, chashBytes, "text", v)
+        if (!isPartitionedLayout(ctx)) {
+            ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.CHUNK_TEXT,
+                           CHUNKS.EMBEDDING_384)
+               .values(tenant, collection, chashBytes, "text", v)
+               .execute();
+            return;
+        }
+        ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL,
+                       CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_384)
+           .values(tenant, collection, chashBytes, collectionModel(ctx, tenant, collection), "text", v)
            .execute();
     }
 
     /** {@code nexus.chunks} seed at dim 768 — see {@link #insertChunk384} for the full contract. */
     public static void insertChunk768(DSLContext ctx, String tenant, String collection, byte[] chashBytes, Vector v) {
-        ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.CHUNK_TEXT,
-                       CHUNKS.EMBEDDING_768)
-           .values(tenant, collection, chashBytes, "text", v)
+        if (!isPartitionedLayout(ctx)) {
+            ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.CHUNK_TEXT,
+                           CHUNKS.EMBEDDING_768)
+               .values(tenant, collection, chashBytes, "text", v)
+               .execute();
+            return;
+        }
+        ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL,
+                       CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_768)
+           .values(tenant, collection, chashBytes, collectionModel(ctx, tenant, collection), "text", v)
            .execute();
     }
 
     /** {@code nexus.chunks} seed at dim 1024 — see {@link #insertChunk384} for the full contract. */
     public static void insertChunk1024(DSLContext ctx, String tenant, String collection, byte[] chashBytes, Vector v) {
-        ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.CHUNK_TEXT,
-                       CHUNKS.EMBEDDING_1024)
-           .values(tenant, collection, chashBytes, "text", v)
+        if (!isPartitionedLayout(ctx)) {
+            ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.CHUNK_TEXT,
+                           CHUNKS.EMBEDDING_1024)
+               .values(tenant, collection, chashBytes, "text", v)
+               .execute();
+            return;
+        }
+        ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL,
+                       CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_1024)
+           .values(tenant, collection, chashBytes, collectionModel(ctx, tenant, collection), "text", v)
            .execute();
     }
 
@@ -841,8 +956,9 @@ public final class PgContainerHelper {
      *       ({@code ON CONFLICT DO NOTHING}): no text or vector replace, no metadata merge,
      *       no {@code retention} reset, no {@code last_written_at} restamp, where the route
      *       and the Python twin all do those;</li>
-     *   <li>the embedding column follows the vector's width (384, 768 or 1024), not the
-     *       collection's registered model, so a mismatch is not refused.</li>
+     *   <li>the embedding column follows the vector's width (384, 768 or 1024), and the row carries
+     *       the collection's registered model (RDR-225), so a width that is not that model's
+     *       dimension is refused by the partition's CHECK, as the engine's writers refuse it.</li>
      * </ul>
      * The collection must already be registered ({@link #insertCollection}); the caller
      * pairs this with {@link #ownChunks} when the test wants the chunks live.
@@ -864,6 +980,9 @@ public final class PgContainerHelper {
             throw new IllegalArgumentException("insertChunks: ids/texts/embeddings/metadatas must align ("
                 + n + "/" + texts.size() + "/" + embeddings.size() + "/" + metadatas.size() + ")");
         }
+        // RDR-225: every row of the call carries the collection's model; a vector whose width is not
+        // that model's dimension is refused by the model partition's CHECK, as the engine's writers are.
+        final String model = isPartitionedLayout(ctx) ? collectionModel(ctx, tenant, collection) : null;
         for (int i = 0; i < n; i++) {
             byte[] chash = dev.nexus.service.db.Chash.fromHex(chashHex.get(i)).toBytes();
             float[] v = embeddings.get(i);
@@ -879,9 +998,17 @@ public final class PgContainerHelper {
                 case 1024 -> CHUNKS.EMBEDDING_1024;
                 default -> throw new IllegalArgumentException("insertChunks: no embedding column of width " + v.length);
             };
-            ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.CHUNK_TEXT,
-                           col, CHUNKS.METADATA)
-               .values(tenant, collection, chash, texts.get(i), Vector.of(v), meta)
+            if (model == null) {
+                ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.CHUNK_TEXT,
+                               col, CHUNKS.METADATA)
+                   .values(tenant, collection, chash, texts.get(i), Vector.of(v), meta)
+                   .onConflictDoNothing()
+                   .execute();
+                continue;
+            }
+            ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL,
+                           CHUNKS.CHUNK_TEXT, col, CHUNKS.METADATA)
+               .values(tenant, collection, chash, model, texts.get(i), Vector.of(v), meta)
                .onConflictDoNothing()
                .execute();
         }
@@ -957,10 +1084,11 @@ public final class PgContainerHelper {
                 "insertReferenceOnlyChunk: no embedding column of width " + embedding.length);
         };
         byte[] chash = dev.nexus.service.db.Chash.fromHex(chashHex).toBytes();
-        ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.CHUNK_TEXT,
-                       col, CHUNKS.METADATA, CHUNKS.RETENTION)
-           .values(tenant, collection, chash, null, Vector.of(embedding), meta, "reference-only")
-           .onConflict(CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH)
+        ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL,
+                       CHUNKS.CHUNK_TEXT, col, CHUNKS.METADATA, CHUNKS.RETENTION)
+           .values(tenant, collection, chash, collectionModel(ctx, tenant, collection), null,
+                   Vector.of(embedding), meta, "reference-only")
+           .onConflict(CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL)
            .doUpdate()
            .set(col, org.jooq.impl.DSL.excluded(col))
            .set(CHUNKS.METADATA, org.jooq.impl.DSL.excluded(CHUNKS.METADATA))

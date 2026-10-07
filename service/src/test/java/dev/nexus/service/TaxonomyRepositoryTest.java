@@ -97,8 +97,11 @@ class TaxonomyRepositoryTest {
      *  both inserts) so callers can seed the same (tenant, collection,
      *  chashHex) tuple more than once across a test's several assignments. */
     private void seedChunk(String tenant, String collection, String chashHex) {
+        // RDR-225: every collection this class seeds is registered under the 768-wide model (the
+        // non-conformant names take the bge-base-en-v15-768 fallback, the conformant ones name it), and
+        // the chunk carries its collection's model.
         StringBuilder zeroVec = new StringBuilder("[");
-        for (int i = 0; i < 384; i++) {
+        for (int i = 0; i < 768; i++) {
             if (i > 0) zeroVec.append(',');
             zeroVec.append('0');
         }
@@ -108,8 +111,10 @@ class TaxonomyRepositoryTest {
             // RDR-204 nexus-ft04v.4/.5: routed through PgContainerHelper.insertCollection.
             PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), tenant, collection);
             su.createStatement().execute(
-                "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_384) "
+                "INSERT INTO nexus.chunks (tenant_id, collection, chash, embedding_model, chunk_text, embedding_768) "
                 + "VALUES ('" + tenant + "', '" + collection + "', decode('" + chashHex + "', 'hex'), "
+                + "(SELECT embedding_model FROM nexus.catalog_collections WHERE tenant_id = '" + tenant
+                + "' AND name = '" + collection + "'), "
                 + "'seed', '" + zeroVec + "'::nexus.vector) ON CONFLICT DO NOTHING");
         } catch (Exception e) {
             throw new RuntimeException(e);

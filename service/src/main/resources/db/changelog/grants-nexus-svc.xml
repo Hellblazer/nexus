@@ -377,14 +377,21 @@ $$;
     </changeSet>
 
     <changeSet id="grants-005-chunks-unify-maintain" author="nexus-o8dil.12" runAlways="true">
-        <comment>MAINTAIN on nexus.chunks + catalog_document_chunks + catalog_documents, superseding grants-003's now-frozen chunks_384/768/1024 list. See vectors-004-unify-chunks.xml header for the full boot-brick analysis.</comment>
+        <comment>MAINTAIN on nexus.chunks + catalog_document_chunks + catalog_documents, superseding grants-003's now-frozen chunks_384/768/1024 list. See vectors-004-unify-chunks.xml header for the full boot-brick analysis. RDR-225 (nexus-3wh8d.8): nexus.chunks is a partitioned table, and VACUUM on it checks MAINTAIN on every partition (it skips, with a warning, one it may not vacuum), so the grant also goes to every model partition and tenant leaf. A leaf made later by the service_tokens trigger copies the parent's grants, so this loop is the self-heal for a leaf created before the parent held MAINTAIN (a fresh install: the walk runs before this changeset) or one whose grant was revoked.</comment>
         <sql splitStatements="false" stripComments="false">
 DO $$
+DECLARE
+    r record;
 BEGIN
     IF current_setting('server_version_num')::int >= 170000 THEN
         EXECUTE 'GRANT MAINTAIN ON nexus.chunks TO nexus_svc';
         EXECUTE 'GRANT MAINTAIN ON nexus.catalog_document_chunks TO nexus_svc';
         EXECUTE 'GRANT MAINTAIN ON nexus.catalog_documents TO nexus_svc';
+        -- Every partition below the parent (level 0 is the parent itself). On an unpartitioned nexus.chunks
+        -- pg_partition_tree returns that one row, so the loop is a no-op there.
+        FOR r IN SELECT t.relid::regclass AS rel FROM pg_partition_tree('nexus.chunks'::regclass) t WHERE t.level > 0 LOOP
+            EXECUTE format('GRANT MAINTAIN ON %s TO nexus_svc', r.rel);
+        END LOOP;
     ELSE
         RAISE NOTICE 'grants-005-chunks-unify-maintain: server % predates MAINTAIN (PG17+)', current_setting('server_version');
     END IF;

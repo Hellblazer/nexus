@@ -84,6 +84,8 @@ class TextGateProbeSingleRoleGuardIntegrationTest {
     private static final String TENANT_B = "single-role-b";
     private static final String COLL_A = "knowledge__single-role-a__minilm-l6-v2-384__v1";
     private static final String COLL_B = "knowledge__single-role-b__minilm-l6-v2-384__v1";
+    /** RDR-225: both collections are registered under this model, which every read function names. */
+    private static final String MODEL = "minilm-l6-v2-384";
     private static final String TOKEN = "qzvkwx";
     private static final int PER_TENANT = 3;
     private static final int DIM = 384;
@@ -203,12 +205,14 @@ class TextGateProbeSingleRoleGuardIntegrationTest {
         int seenByB = tenantScope.withTenant(TENANT_B, ctx -> ctx.fetchCount(CHUNKS));
         assertThat(seenByA).as("nexus_svc stamped A sees only A's chunks through the table").isEqualTo(PER_TENANT);
         assertThat(seenByB).as("nexus_svc stamped B sees only B's chunks through the table").isEqualTo(PER_TENANT);
-        var probe = TEXT_GATE_PROBE_384.call(TOKEN, new String[] {COLL_A, COLL_B}, null, null, 10_000);
-        List<String> fromA = tenantScope.withTenant(TENANT_A, ctx -> ctx.selectFrom(probe).fetch()
+        // RDR-225: the engine passes the session's own tenant as the probe's tenant parameter.
+        var probeA = TEXT_GATE_PROBE_384.call(TOKEN, new String[] {COLL_A, COLL_B}, null, null, 10_000, MODEL, TENANT_A);
+        var probeB = TEXT_GATE_PROBE_384.call(TOKEN, new String[] {COLL_A, COLL_B}, null, null, 10_000, MODEL, TENANT_B);
+        List<String> fromA = tenantScope.withTenant(TENANT_A, ctx -> ctx.selectFrom(probeA).fetch()
             .getValues(0, byte[].class).stream().map(b -> HexFormat.of().formatHex(b)).toList());
         assertThat(fromA).as("the probe stamped A, naming both collections: A's chunks only")
             .containsExactlyInAnyOrderElementsOf(idsA);
-        List<String> fromB = tenantScope.withTenant(TENANT_B, ctx -> ctx.selectFrom(probe).fetch()
+        List<String> fromB = tenantScope.withTenant(TENANT_B, ctx -> ctx.selectFrom(probeB).fetch()
             .getValues(0, byte[].class).stream().map(b -> HexFormat.of().formatHex(b)).toList());
         assertThat(fromB).as("the probe stamped B, naming both collections: B's chunks only")
             .containsExactlyInAnyOrderElementsOf(idsB);
@@ -278,7 +282,7 @@ class TextGateProbeSingleRoleGuardIntegrationTest {
     }
 
     private static List<String> probeIds(TenantScope scope, String tenant) {
-        var probe = TEXT_GATE_PROBE_384.call(TOKEN, new String[] {COLL_A, COLL_B}, null, null, 10_000);
+        var probe = TEXT_GATE_PROBE_384.call(TOKEN, new String[] {COLL_A, COLL_B}, null, null, 10_000, MODEL, tenant);
         return scope.withTenant(tenant, ctx -> ctx.selectFrom(probe).fetch()
             .getValues(0, byte[].class).stream().map(b -> HexFormat.of().formatHex(b)).toList());
     }
@@ -424,6 +428,115 @@ class TextGateProbeSingleRoleGuardIntegrationTest {
             assertThat(PgCatalogProbes.policyExists(ctx, "nexus", "chunks", "chunks_gate_probe_owner_read"))
                 .as("the policy the failed changeset created was rolled back").isFalse();
             assertThat(definerProbes(ctx)).as("the definer bodies were rolled back with it").isEmpty();
+            assertServiceSeesOnlyItsOwnTenant(c);
+        } finally {
+            c.stop();
+        }
+    }
+
+    /** The SQL of vectors-031-2, the text-gate probe redefinition, exactly as Liquibase would run it. */
+    private String vectors0312Sql() throws Exception {
+        String xml;
+        try (InputStream in = getClass().getClassLoader()
+                .getResourceAsStream("db/changelog/vectors-031-read-path-model-tenant-predicates.xml")) {
+            assertThat(in).as("vectors-031 on the classpath").isNotNull();
+            xml = new String(in.readAllBytes(), StandardCharsets.UTF_8);
+        }
+        int cs = xml.indexOf("<changeSet id=\"vectors-031-2\"");
+        int from = xml.indexOf("<![CDATA[", cs) + "<![CDATA[".length();
+        int to = xml.indexOf("]]></sql>", from);
+        assertThat(cs).as("vectors-031-2 present").isPositive();
+        return xml.substring(from, to);
+    }
+
+    /**
+     * Re-run vectors-031-2 as the migrating role, the way a later boot migrated by that role would: its SQL, as it
+     * is in the changelog, in a one-changeset changelog run through Liquibase on an admin connection.
+     */
+    private void rerunVectors0312(PostgreSQLContainer<?> c, Path tmp) throws Exception {
+        String xml = "<databaseChangeLog xmlns=\"http://www.liquibase.org/xml/ns/dbchangelog\"\n"
+            + " xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\"\n"
+            + " xsi:schemaLocation=\"http://www.liquibase.org/xml/ns/dbchangelog\n"
+            + " http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd\">\n"
+            + "<changeSet id=\"rerun-vectors-031-2\" author=\"test\" runAlways=\"true\">\n"
+            + "<sql splitStatements=\"false\" stripComments=\"false\"><![CDATA[" + vectors0312Sql() + "]]></sql>\n"
+            + "</changeSet>\n</databaseChangeLog>\n";
+        Files.writeString(tmp.resolve("rerun-vectors-031-2.xml"), xml);
+        try (HikariDataSource adminDs = pool(c, ADMIN, ADMIN_PASS, "guard-rerun-0312", 1);
+             Connection conn = adminDs.getConnection()) {
+            Database database = DatabaseFactory.getInstance()
+                .findCorrectDatabaseImplementation(new JdbcConnection(conn));
+            database.setLiquibaseSchemaName("public");
+            database.setDefaultSchemaName("public");
+            try (Liquibase lb = new Liquibase("rerun-vectors-031-2.xml", new DirectoryResourceAccessor(tmp), database)) {
+                lb.update(new Contexts(), new LabelExpression());
+            }
+        }
+    }
+
+    /**
+     * RDR-225 review S2 (nexus-3wh8d.17): vectors-031-2 keeps vectors-029's guard. vectors-029 ran as nexus_admin
+     * (definer probes, owner policy TO nexus_admin); the policy is then moved to a different role, the state a
+     * later boot migrated by another role finds. 031-2 must NOT redefine the probes as definer functions beside
+     * a policy that does not name its own role: it takes the invoker branch. Fails when the policy check is
+     * removed from the definer decision (the probes stay definer) AND when the post-condition is removed from a
+     * definer outcome (see the exposed-role test).
+     */
+    @Test
+    void vectors0312_withTheOwnerPolicyNamingAnotherRole_takesTheInvokerBranch(@org.junit.jupiter.api.io.TempDir Path tmp) throws Exception {
+        PostgreSQLContainer<?> c = migratedAsAdmin(su -> { });
+        try (Connection su = c.createConnection("")) {
+            var ctx = DSL.using(su, SQLDialect.POSTGRES);
+            assertThat(definerProbes(ctx)).as("non-vacuity: a normal walk leaves 3 definer probes").hasSize(3);
+            PgContainerHelper.runSuperuserDdl(su, "CREATE ROLE guard_other_owner NOLOGIN");
+            PgContainerHelper.runSuperuserDdl(su, "DROP POLICY chunks_gate_probe_owner_read ON nexus.chunks");
+            PgContainerHelper.runSuperuserDdl(su,
+                "CREATE POLICY chunks_gate_probe_owner_read ON nexus.chunks FOR SELECT TO guard_other_owner USING (true)");
+            assertThat(PgCatalogProbes.policyRoles(ctx, "nexus", "chunks").stream()
+                    .map(PgCatalogProbes.PolicyRoles::toString).toList())
+                .as("non-vacuity: the owner policy no longer names the migrating role")
+                .contains("chunks_gate_probe_owner_read roles={guard_other_owner} cmd=SELECT");
+
+            rerunVectors0312(c, tmp);
+
+            assertThat(definerProbes(ctx))
+                .as("no definer probe beside an owner policy that does not name the migrating role").isEmpty();
+            assertServiceSeesOnlyItsOwnTenant(c);
+        } finally {
+            c.stop();
+        }
+    }
+
+    /**
+     * The exposed-role half of the same guard: a membership granted AFTER vectors-029 ran gives nexus_svc the
+     * migrating role's privileges, so the owner policy applies to the service role. 031-2 must not keep
+     * (or re-create) definer probes then.
+     */
+    @Test
+    void vectors0312_withNexusSvcInheritingTheMigrator_takesTheInvokerBranch(@org.junit.jupiter.api.io.TempDir Path tmp) throws Exception {
+        PostgreSQLContainer<?> c = migratedAsAdmin(su -> { });
+        try (Connection su = c.createConnection("")) {
+            var ctx = DSL.using(su, SQLDialect.POSTGRES);
+            assertThat(definerProbes(ctx)).as("non-vacuity: 3 definer probes after the normal walk").hasSize(3);
+            PgContainerHelper.grantRoleMembership(su, ADMIN, SVC, true, false);
+            assertThat(hasRole(ctx, SVC, ADMIN)).as("non-vacuity: nexus_svc has the migrator's privileges").isTrue();
+
+            rerunVectors0312(c, tmp);
+
+            assertThat(definerProbes(ctx)).as("no definer probe while nexus_svc has the migrator's privileges")
+                .isEmpty();
+        } finally {
+            c.stop();
+        }
+    }
+
+    /** The unchanged path: with the policy naming the migrator and nobody exposed, 031-2 keeps definer probes. */
+    @Test
+    void vectors0312_afterANormalWalk_keepsTheDefinerProbes(@org.junit.jupiter.api.io.TempDir Path tmp) throws Exception {
+        PostgreSQLContainer<?> c = migratedAsAdmin(su -> { });
+        try (Connection su = c.createConnection("")) {
+            rerunVectors0312(c, tmp);
+            assertThat(definerProbes(DSL.using(su, SQLDialect.POSTGRES))).hasSize(3);
             assertServiceSeesOnlyItsOwnTenant(c);
         } finally {
             c.stop();
@@ -611,10 +724,13 @@ class TextGateProbeSingleRoleGuardIntegrationTest {
 
     /**
      * M1: the status field is also false when row security on nexus.chunks is not enabled or not forced, or the
-     * tenant policy is gone. The boot check does not ask this, so none of these refuse a start.
+     * tenant policy is gone. Since RDR-225 (nexus-3wh8d.16) the boot check asks this too, of the parent and of
+     * every model partition and leaf (see {@code ChunksIsolationCheckPartitionsIntegrationTest}), so each of these
+     * now refuses a start; before it, the check looked only at policies that widen and none of them did. The
+     * earlier "boot still serves" assertions were the parent-only form of the same question and are superseded.
      */
     @Test
-    void theStatusFieldIsFalseWhenRlsIsNotWiredOnChunks_butBootStillServes() throws Exception {
+    void theStatusFieldIsFalseAndBootRefuses_whenRlsIsNotWiredOnChunks() throws Exception {
         PostgreSQLContainer<?> c = migratedAsAdmin(su -> { });
         try (HikariDataSource svc = pool(c, SVC, PgContainerHelper.SVC_PASSWORD, "guard-svc-rls", 2);
              Connection su = c.createConnection("")) {
@@ -622,19 +738,27 @@ class TextGateProbeSingleRoleGuardIntegrationTest {
 
             exec(su, "ALTER TABLE nexus.chunks NO FORCE ROW LEVEL SECURITY");
             assertThat(awaitAnswer(svc)).as("row security not forced").isFalse();
-            ChunksIsolationCheck.verifyAtStartup(svc);
+            assertThatThrownBy(() -> ChunksIsolationCheck.verifyAtStartup(svc))
+                .isInstanceOf(ChunksIsolationCheck.IsolationException.class)
+                .hasMessageContaining("nexus.chunks").hasMessageContaining("FORCE");
             exec(su, "ALTER TABLE nexus.chunks FORCE ROW LEVEL SECURITY");
             assertThat(awaitAnswer(svc)).as("restored").isTrue();
+            ChunksIsolationCheck.verifyAtStartup(svc);
 
             exec(su, "ALTER TABLE nexus.chunks DISABLE ROW LEVEL SECURITY");
             assertThat(awaitAnswer(svc)).as("row security disabled").isFalse();
-            ChunksIsolationCheck.verifyAtStartup(svc);
+            assertThatThrownBy(() -> ChunksIsolationCheck.verifyAtStartup(svc))
+                .isInstanceOf(ChunksIsolationCheck.IsolationException.class)
+                .hasMessageContaining("nexus.chunks").hasMessageContaining("not enabled");
             exec(su, "ALTER TABLE nexus.chunks ENABLE ROW LEVEL SECURITY");
             assertThat(awaitAnswer(svc)).as("restored").isTrue();
+            ChunksIsolationCheck.verifyAtStartup(svc);
 
             exec(su, "DROP POLICY tenant_isolation ON nexus.chunks");
             assertThat(awaitAnswer(svc)).as("tenant policy missing").isFalse();
-            ChunksIsolationCheck.verifyAtStartup(svc);
+            assertThatThrownBy(() -> ChunksIsolationCheck.verifyAtStartup(svc))
+                .isInstanceOf(ChunksIsolationCheck.IsolationException.class)
+                .hasMessageContaining("tenant_isolation");
         } finally {
             c.stop();
         }

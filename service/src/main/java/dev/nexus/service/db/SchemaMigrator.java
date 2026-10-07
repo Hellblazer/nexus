@@ -409,6 +409,17 @@ public final class SchemaMigrator {
      * rehearsals) uses.
      */
     public static MigrationOutcome migrate(DataSource ds, Runnable afterUpdateHook) {
+        return migrate(ds, afterUpdateHook, LocalDiskPreflight::dataDirFreeBytesFromEnv);
+    }
+
+    /**
+     * Test seam (nexus-3wh8d.9): as {@link #migrate(DataSource, Runnable)} with the free-space source of the
+     * RDR-225 local disk preflight injected, so a test can simulate low free space without filling a disk. The
+     * source is read only while {@code vectors-030-1} is pending and there is data to copy; see {@link
+     * LocalDiskPreflight}. Public for the same cross-package reason as the overload above.
+     */
+    public static MigrationOutcome migrate(DataSource ds, Runnable afterUpdateHook,
+                                           java.util.function.Supplier<java.util.OptionalLong> dataDirFreeBytes) {
         log.info("event=schema_migration_start changelog={}", MASTER_CHANGELOG);
         try {
             pinJvmTimeZoneToUtc();
@@ -447,6 +458,9 @@ public final class SchemaMigrator {
             pinSearchPathToPublic(conn);
             refuseSplitHistory(conn);
             preflightChashConstraints(conn);
+            // RDR-225 P1.4 (nexus-3wh8d.9): refuse early, naming the shortfall, rather than fill the disk mid-walk.
+            // A refusal is a MigrationException, so Main exits non-zero exactly as for a failed walk.
+            LocalDiskPreflight.check(conn, dataDirFreeBytes);
 
             Database database = DatabaseFactory.getInstance()
                 .findCorrectDatabaseImplementation(new JdbcConnection(conn));
@@ -529,6 +543,7 @@ public final class SchemaMigrator {
 
                 liquibase.update(new Contexts(), new LabelExpression());
                 afterUpdateHook.run();
+                repairPartitionAccessDrift(conn);
 
                 if (orderExecutedWatermark == null) {
                     return countsUnavailableOutcome(pending);
@@ -609,6 +624,69 @@ public final class SchemaMigrator {
         } catch (LiquibaseException e) {
             throw new MigrationException("Liquibase migration failed", e);
         }
+    }
+
+    // ── RDR-225 (nexus-3wh8d.16, review item M2): partition access self-heal ──
+
+    /** The two partitioned parents whose access the repair re-mirrors onto every model partition and leaf. */
+    private static final List<String> PARTITION_PARENTS = List.of("nexus.chunks", "nexus.taxonomy_centroids");
+
+    /**
+     * Re-mirrors each partitioned parent's row-security flags, policies and grants onto its whole tree, as the
+     * schema owner (this connection's role owns the tables and the {@code partition_sync_access} function, and
+     * the function is revoked from PUBLIC), and only when {@link ChunksIsolationCheck#structure} reports a gap.
+     * PostgreSQL inherits none of this down a partition tree, so a tenant leaf created by a role that did not
+     * mirror it, or an owner's hand edit, would otherwise survive to the startup check and refuse the boot.
+     *
+     * <p>A healthy boot costs one catalog read and changes nothing. Nothing here throws: a store where
+     * {@code nexus.chunks} is not partitioned is skipped, and drift the copy cannot fix (a wrong PARENT, which the
+     * copy reads from; a migrating role that is not the owner) is logged at ERROR and left for
+     * {@link ChunksIsolationCheck#verifyAtStartup}, which refuses with the operator's remedy.
+     *
+     * <p>Runs on the migration connection AFTER Liquibase, which leaves auto-commit off; the repair needs it on,
+     * or the owner DDL is rolled back when the connection closes.
+     */
+    private static void repairPartitionAccessDrift(Connection conn) {
+        try {
+            DSLContext ctx = DSL.using(conn, SQLDialect.POSTGRES);
+            if (!chunksIsPartitioned(ctx)) {
+                return;
+            }
+            var before = ChunksIsolationCheck.structure(ctx);
+            if (before.gaps().isEmpty()) {
+                log.info("event=partition_access_checked relations_inspected={}", before.relationsInspected());
+                return;
+            }
+            log.warn("event=partition_access_drift_repaired count={} relations={}", before.gaps().size(),
+                before.gaps().stream().map(ChunksIsolationCheck.Gap::relation).distinct().toList());
+            conn.setAutoCommit(true);
+            for (String parent : PARTITION_PARENTS) {
+                try {
+                    dev.nexus.service.jooq.nexus.Routines.partitionSyncAccess(ctx.configuration(), parent, true);
+                } catch (DataAccessException e) {
+                    log.error("event=partition_access_sync_failed parent={} error={}", parent, e.getMessage());
+                }
+            }
+            var after = ChunksIsolationCheck.structure(ctx);
+            if (!after.gaps().isEmpty()) {
+                log.error("event=partition_access_drift_unrepaired count={} relations={} problems={}",
+                    after.gaps().size(),
+                    after.gaps().stream().map(ChunksIsolationCheck.Gap::relation).distinct().toList(),
+                    after.gaps().stream().map(ChunksIsolationCheck.Gap::problem).distinct().toList());
+            }
+        } catch (SQLException | RuntimeException e) {
+            log.error("event=partition_access_drift_unrepaired error={}", e.toString());
+        }
+    }
+
+    private static boolean chunksIsPartitioned(DSLContext ctx) {
+        var c = DSL.table(DSL.name("pg_catalog", "pg_class")).as("c");
+        var n = DSL.table(DSL.name("pg_catalog", "pg_namespace")).as("n");
+        return ctx.fetchExists(DSL.selectOne().from(c)
+            .join(n).on(DSL.field(DSL.name("n", "oid")).eq(DSL.field(DSL.name("c", "relnamespace"))))
+            .where(DSL.field(DSL.name("n", "nspname"), SQLDataType.VARCHAR).eq("nexus"))
+            .and(DSL.field(DSL.name("c", "relname"), SQLDataType.VARCHAR).eq("chunks"))
+            .and(DSL.field(DSL.name("c", "relkind")).cast(SQLDataType.VARCHAR).eq("p")));
     }
 
     // ── nexus-q81g7: session pin, walk-start diagnostics, split-history refusal ──

@@ -15,7 +15,7 @@ This test closes that gap by booting the real service JAR and feeding
   (``PgVectorRepository.upsertChunksInternal`` seen-HashSet, lines 292-313).
   Result: kept count == unique chash count.
 - **ON CONFLICT idempotency** — re-upsert the same chash in a second call
-  updates, not duplicates (``ON CONFLICT (tenant_id,collection,chash) DO UPDATE``),
+  updates, not duplicates (``ON CONFLICT (tenant_id,collection,chash,embedding_model) DO UPDATE``),
   verified by asserting the refreshed metadata persisted.
 - **>300-record round-trip** — a single logical ``upsert_chunks`` call with
   >300 ids traverses whatever client-side batching + server enforcement exists
@@ -523,7 +523,7 @@ def test_on_conflict_idempotency(
 ) -> None:
     """Re-upserting the same chash with updated metadata updates the row, not duplicates.
 
-    Exercises ``ON CONFLICT (tenant_id, collection, chash) DO UPDATE SET
+    Exercises ``ON CONFLICT (tenant_id, collection, chash, embedding_model) DO UPDATE SET
     chunk_text/embedding/metadata`` (lines 385-388, PgVectorRepository.java).
     """
     from nexus.db.http_vector_client import (

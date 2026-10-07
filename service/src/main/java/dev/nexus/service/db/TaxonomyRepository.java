@@ -125,6 +125,29 @@ public final class TaxonomyRepository {
     }
 
     /**
+     * RDR-225 (nexus-3wh8d.13): the embedding model a {@code topic_assignments} row must carry for
+     * {@code collection}, taken from the collection's registry row (a cache hit after
+     * {@link #ensureCollectionRegistered}). {@code topic_assignments_chunk_fk} is on
+     * {@code (tenant_id, source_collection, doc_id, embedding_model)}, so the model is the
+     * source collection's, never anything derived from the chunk's dimension. Null for a null or
+     * blank collection: the caller's own NOT NULL constraint refuses the row, as it did before.
+     */
+    private static String modelOf(DSLContext ctx, String tenant, String collection) {
+        if (collection == null || collection.isBlank()) return null;
+        return CollectionRegistry.require(ctx, tenant, collection).embeddingModel();
+    }
+
+    /**
+     * RDR-225: SET embedding_model alongside a conflict arm that re-points
+     * {@code source_collection}. The pair is one foreign key, so the model must take the value of
+     * whichever row wins, in the same statement and under the same condition as the collection.
+     */
+    private static Field<String> modelFollowing(org.jooq.Condition incomingWins) {
+        return when(incomingWins, org.jooq.impl.DSL.excluded(TOPIC_ASSIGNMENTS.EMBEDDING_MODEL))
+            .otherwise(TOPIC_ASSIGNMENTS.EMBEDDING_MODEL);
+    }
+
+    /**
      * Serialize taxonomy persist operations per (tenant, collection) within the
      * CURRENT transaction (nexus-n2ls1).
      *
@@ -462,7 +485,8 @@ public final class TaxonomyRepository {
                     TOPIC_ASSIGNMENTS.ASSIGNED_BY,
                     TOPIC_ASSIGNMENTS.SIMILARITY,
                     TOPIC_ASSIGNMENTS.ASSIGNED_AT,
-                    TOPIC_ASSIGNMENTS.SOURCE_COLLECTION)
+                    TOPIC_ASSIGNMENTS.SOURCE_COLLECTION,
+                    TOPIC_ASSIGNMENTS.EMBEDDING_MODEL)
                .select(
                     select(
                         TOPIC_ASSIGNMENTS.TENANT_ID,
@@ -471,7 +495,9 @@ public final class TaxonomyRepository {
                         TOPIC_ASSIGNMENTS.ASSIGNED_BY,
                         TOPIC_ASSIGNMENTS.SIMILARITY,
                         TOPIC_ASSIGNMENTS.ASSIGNED_AT,
-                        TOPIC_ASSIGNMENTS.SOURCE_COLLECTION)
+                        TOPIC_ASSIGNMENTS.SOURCE_COLLECTION,
+                        // RDR-225: the moved row keeps the model of the chunk it points at.
+                        TOPIC_ASSIGNMENTS.EMBEDDING_MODEL)
                     .from(TOPIC_ASSIGNMENTS)
                     .where(TOPIC_ASSIGNMENTS.TOPIC_ID.eq(sourceId)))
                .onConflict(
@@ -492,6 +518,9 @@ public final class TaxonomyRepository {
                         + " > COALESCE(nexus.topic_assignments.similarity, -1.0)"
                         + " THEN EXCLUDED.source_collection"
                         + " ELSE nexus.topic_assignments.source_collection END", String.class))
+               .set(TOPIC_ASSIGNMENTS.EMBEDDING_MODEL,
+                    modelFollowing(coalesce(org.jooq.impl.DSL.excluded(TOPIC_ASSIGNMENTS.SIMILARITY), -1.0)
+                        .gt(coalesce(TOPIC_ASSIGNMENTS.SIMILARITY, -1.0))))
                .execute();
 
             ctx.deleteFrom(TOPIC_ASSIGNMENTS)
@@ -609,8 +638,10 @@ public final class TaxonomyRepository {
                     TOPIC_ASSIGNMENTS.ASSIGNED_BY,
                     TOPIC_ASSIGNMENTS.SIMILARITY,
                     TOPIC_ASSIGNMENTS.ASSIGNED_AT,
-                    TOPIC_ASSIGNMENTS.SOURCE_COLLECTION)
-               .values(tenant, docIdBytes(docId), topicId, "projection", similarity, assignedAtTs, sourceCollection)
+                    TOPIC_ASSIGNMENTS.SOURCE_COLLECTION,
+                    TOPIC_ASSIGNMENTS.EMBEDDING_MODEL)
+               .values(tenant, docIdBytes(docId), topicId, "projection", similarity, assignedAtTs, sourceCollection,
+                       modelOf(ctx, tenant, sourceCollection))
                .onConflict(
                     TOPIC_ASSIGNMENTS.TENANT_ID,
                     TOPIC_ASSIGNMENTS.DOC_ID,
@@ -629,6 +660,9 @@ public final class TaxonomyRepository {
                         + " > COALESCE(nexus.topic_assignments.similarity, -1.0)"
                         + " THEN EXCLUDED.source_collection"
                         + " ELSE nexus.topic_assignments.source_collection END", String.class))
+               .set(TOPIC_ASSIGNMENTS.EMBEDDING_MODEL,
+                    modelFollowing(org.jooq.impl.DSL.excluded(TOPIC_ASSIGNMENTS.SIMILARITY)
+                        .gt(coalesce(TOPIC_ASSIGNMENTS.SIMILARITY, -1.0))))
                .set(TOPIC_ASSIGNMENTS.ASSIGNED_BY, "projection")
                .execute();
         } else {
@@ -653,8 +687,10 @@ public final class TaxonomyRepository {
                     TOPIC_ASSIGNMENTS.DOC_ID,
                     TOPIC_ASSIGNMENTS.TOPIC_ID,
                     TOPIC_ASSIGNMENTS.ASSIGNED_BY,
-                    TOPIC_ASSIGNMENTS.SOURCE_COLLECTION)
-               .values(tenant, docIdBytes(docId), topicId, assignedBy, sourceCollection)
+                    TOPIC_ASSIGNMENTS.SOURCE_COLLECTION,
+                    TOPIC_ASSIGNMENTS.EMBEDDING_MODEL)
+               .values(tenant, docIdBytes(docId), topicId, assignedBy, sourceCollection,
+                       modelOf(ctx, tenant, sourceCollection))
                .onConflict(
                    TOPIC_ASSIGNMENTS.TENANT_ID,
                    TOPIC_ASSIGNMENTS.DOC_ID,
@@ -741,7 +777,10 @@ public final class TaxonomyRepository {
         // Fail loud BEFORE opening a transaction — an unresolvable dim means no
         // per-dim table exists to query at all (RDR-204 Phase 2, bead nexus-ft04v.16:
         // the row's own dimension via CollectionRegistry, never a name-segment parse).
-        int dim = CollectionRegistry.lookup(tenantScope, tenant, collection).dimension();
+        CollectionRow collectionRow = CollectionRegistry.lookup(tenantScope, tenant, collection);
+        int dim = collectionRow.dimension();
+        // RDR-225: the functions and the existence probe read the one (model, tenant) leaf.
+        String model = collectionRow.embeddingModel();
         String[] chashArr = chashes.toArray(new String[0]);
 
         // nexus-r0vkh: ONE bounded retry after a lock timeout (55P03), outside
@@ -756,7 +795,8 @@ public final class TaxonomyRepository {
         // Worst-case connection hold is bounded either way: two lock bounds
         // plus the pause, never a head's lifetime.
         try {
-            return assignFromChashesRetryingDeadlocks(tenant, collection, chashes, chashArr, dim, crossCollection);
+            return assignFromChashesRetryingDeadlocks(tenant, collection, chashes, chashArr, dim, model,
+                                                      crossCollection);
         } catch (RuntimeException first) {
             String state = sqlState(first);
             if (LOCK_NOT_AVAILABLE.equals(state)) {
@@ -764,7 +804,8 @@ public final class TaxonomyRepository {
                          collection, chashes.size(), LOCK_TIMEOUT_RETRY_PAUSE_MS);
                 pause(LOCK_TIMEOUT_RETRY_PAUSE_MS);
                 try {
-                    return assignFromChashesRetryingDeadlocks(tenant, collection, chashes, chashArr, dim, crossCollection);
+                    return assignFromChashesRetryingDeadlocks(tenant, collection, chashes, chashArr, dim, model,
+                                                              crossCollection);
                 } catch (RuntimeException second) {
                     if (LOCK_NOT_AVAILABLE.equals(sqlState(second))) {
                         log.warn("event=taxonomy_assign_lock_timeout attempt=2 collection={} chashes={} outcome=failed",
@@ -840,7 +881,7 @@ public final class TaxonomyRepository {
 
     private Map<String, Object> assignFromChashesRetryingDeadlocks(
             String tenant, String collection, List<String> chashes, String[] chashArr,
-            int dim, boolean crossCollection) {
+            int dim, String model, boolean crossCollection) {
         // nexus-0uuit: belt, mirroring assignMany's own DeadlockRetry wrap above.
         // taxonomy-013-doc-count-lock-order.xml fixes the topics.doc_count trigger's
         // OWN lock-order self-conflict (Hal's named production root cause). That fix
@@ -906,8 +947,12 @@ public final class TaxonomyRepository {
                 // lock-hold risk of its own, and keeping it here means "found"/
                 // "unmatched" are computed against the exact same snapshot the own
                 // pass's assignment itself sees.
+                // RDR-225: the probe names the model and the tenant, so it reads the one leaf the
+                // functions below read, instead of every leaf of the tenant that row-level security allows.
                 List<String> found = ctx.select(ChashHex.hex(CHUNKS.CHASH)).from(CHUNKS)
-                        .where(CHUNKS.COLLECTION.eq(collection)
+                        .where(CHUNKS.EMBEDDING_MODEL.eq(model)
+                            .and(CHUNKS.TENANT_ID.eq(tenant))
+                            .and(CHUNKS.COLLECTION.eq(collection))
                             .and(ChashHex.hex(CHUNKS.CHASH).in(chashArr)))
                         .fetch(ChashHex.hex(CHUNKS.CHASH));
                 java.util.Set<String> foundSet = new java.util.HashSet<>(found);
@@ -916,7 +961,7 @@ public final class TaxonomyRepository {
                     .distinct()
                     .toList();
 
-                int assigned = assignFromChashesOnePass(ctx, dim, collection, chashArr, false).size();
+                int assigned = assignFromChashesOnePass(ctx, dim, tenant, model, collection, chashArr, false).size();
                 // Still INSIDE this transaction — the own pass's persisted row(s)
                 // and the doc_count trigger's topics lock are both live here.
                 duringOwnPassHookForTests.run();
@@ -934,7 +979,7 @@ public final class TaxonomyRepository {
                 () -> tenantScope.withTenant(tenant, ctx -> {
                     // Same bound discipline as the own pass, in its OWN transaction.
                     PgSession.setTaxonomyAssignBounds(ctx);
-                    return assignFromChashesOnePass(ctx, dim, collection, chashArr, true).size();
+                    return assignFromChashesOnePass(ctx, dim, tenant, model, collection, chashArr, true).size();
                 }));
         }
 
@@ -955,11 +1000,12 @@ public final class TaxonomyRepository {
      * post-upsert DB value (see taxonomy-006's changelog comment for why).
      */
     private static List<Map<String, Object>> assignFromChashesOnePass(
-            DSLContext ctx, int dim, String collection, String[] chashes, boolean crossCollection) {
+            DSLContext ctx, int dim, String tenant, String model, String collection, String[] chashes,
+            boolean crossCollection) {
         org.jooq.Table<?> fn = switch (dim) {
-            case 384  -> ASSIGN_FROM_CHASHES_384.call(collection, chashes, crossCollection);
-            case 768  -> ASSIGN_FROM_CHASHES_768.call(collection, chashes, crossCollection);
-            case 1024 -> ASSIGN_FROM_CHASHES_1024.call(collection, chashes, crossCollection);
+            case 384  -> ASSIGN_FROM_CHASHES_384.call(collection, chashes, crossCollection, model, tenant);
+            case 768  -> ASSIGN_FROM_CHASHES_768.call(collection, chashes, crossCollection, model, tenant);
+            case 1024 -> ASSIGN_FROM_CHASHES_1024.call(collection, chashes, crossCollection, model, tenant);
             default   -> throw new IllegalArgumentException("unsupported dim " + dim);
         };
         var result = ctx.selectFrom(fn).fetch();
@@ -1018,7 +1064,9 @@ public final class TaxonomyRepository {
         // consistent with its persisting sibling even though this route has
         // no existence-probe text comparison of its own to protect.
         List<String> chashes = rawChashes.stream().map(String::toLowerCase).toList();
-        int dim = CollectionRegistry.lookup(tenantScope, tenant, collection).dimension();
+        CollectionRow collectionRow = CollectionRegistry.lookup(tenantScope, tenant, collection);
+        int dim = collectionRow.dimension();
+        String model = collectionRow.embeddingModel();
         String[] chashArr = chashes.toArray(new String[0]);
         return tenantScope.withTenant(tenant, ctx -> {
             // Same statement/lock bound as assignFromChashes's own pass and
@@ -1036,7 +1084,7 @@ public final class TaxonomyRepository {
             // would break HnswServingGucParityTest's file-wide 4-way count
             // parity for a pairing this route was never part of.
             PgSession.setTaxonomyAssignBounds(ctx);
-            return crossPreviewOnePass(ctx, dim, collection, chashArr);
+            return crossPreviewOnePass(ctx, dim, tenant, model, collection, chashArr);
         });
     }
 
@@ -1055,11 +1103,11 @@ public final class TaxonomyRepository {
      * before this method runs.
      */
     private static List<Map<String, Object>> crossPreviewOnePass(
-            DSLContext ctx, int dim, String collection, String[] chashes) {
+            DSLContext ctx, int dim, String tenant, String model, String collection, String[] chashes) {
         org.jooq.Table<?> fn = switch (dim) {
-            case 384  -> CROSS_PREVIEW_384.call(collection, chashes);
-            case 768  -> CROSS_PREVIEW_768.call(collection, chashes);
-            case 1024 -> CROSS_PREVIEW_1024.call(collection, chashes);
+            case 384  -> CROSS_PREVIEW_384.call(collection, chashes, model, tenant);
+            case 768  -> CROSS_PREVIEW_768.call(collection, chashes, model, tenant);
+            case 1024 -> CROSS_PREVIEW_1024.call(collection, chashes, model, tenant);
             default   -> throw new IllegalArgumentException("unsupported dim " + dim);
         };
         List<Map<String, Object>> rows = new ArrayList<>();
@@ -1440,8 +1488,13 @@ public final class TaxonomyRepository {
                 .set(TOPICS.COLLECTION, newCol)
                 .where(TOPICS.COLLECTION.eq(oldCol))
                 .execute();
+            // RDR-225: topic_assignments_chunk_fk is (tenant_id, source_collection, doc_id,
+            // embedding_model) -> chunks, and a chunk carries its collection's model. The target holds
+            // the same chashes under ITS model (the RDR-162 cross-model ref-remap is the caller), so
+            // the re-filed assignment must name the target's model or it matches no chunk (23503).
             int assignments = ctx.update(TOPIC_ASSIGNMENTS)
                 .set(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, newCol)
+                .set(TOPIC_ASSIGNMENTS.EMBEDDING_MODEL, modelOf(ctx, tenant, newCol))
                 .where(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION.eq(oldCol))
                 .execute();
             int meta = ctx.update(TAXONOMY_META)
@@ -1928,8 +1981,10 @@ public final class TaxonomyRepository {
                     TOPIC_ASSIGNMENTS.ASSIGNED_BY,
                     TOPIC_ASSIGNMENTS.SIMILARITY,
                     TOPIC_ASSIGNMENTS.ASSIGNED_AT,
-                    TOPIC_ASSIGNMENTS.SOURCE_COLLECTION)
-               .values(tenant, docIdBytes(docId), topicId, assignedBy, similarity, assignedAtTs, sourceCollection)
+                    TOPIC_ASSIGNMENTS.SOURCE_COLLECTION,
+                    TOPIC_ASSIGNMENTS.EMBEDDING_MODEL)
+               .values(tenant, docIdBytes(docId), topicId, assignedBy, similarity, assignedAtTs, sourceCollection,
+                       modelOf(ctx, tenant, sourceCollection))
                .onConflict(
                     TOPIC_ASSIGNMENTS.TENANT_ID,
                     TOPIC_ASSIGNMENTS.DOC_ID,
@@ -1948,6 +2003,8 @@ public final class TaxonomyRepository {
                     field("EXCLUDED.assigned_at", OffsetDateTime.class))
                .set(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION,
                     field("EXCLUDED.source_collection", String.class))
+               .set(TOPIC_ASSIGNMENTS.EMBEDDING_MODEL,
+                    org.jooq.impl.DSL.excluded(TOPIC_ASSIGNMENTS.EMBEDDING_MODEL))
                .execute();
             return null;
         });
@@ -2138,7 +2195,7 @@ public final class TaxonomyRepository {
                 .comparing((Map<String, Object> r) -> reqS(r, "doc_id"))
                 .thenComparing(r -> reqL(r, "topic_id")));
 
-        final int cols = 7;
+        final int cols = 8;
         final int chunkSize = Math.max(1, MAX_BATCH_PARAMS / cols);
         for (int start = 0; start < deduped.size(); start += chunkSize) {
             List<Map<String, Object>> batch = deduped.subList(start, Math.min(start + chunkSize, deduped.size()));
@@ -2146,14 +2203,14 @@ public final class TaxonomyRepository {
                     TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID,
                     TOPIC_ASSIGNMENTS.TOPIC_ID, TOPIC_ASSIGNMENTS.ASSIGNED_BY,
                     TOPIC_ASSIGNMENTS.SIMILARITY, TOPIC_ASSIGNMENTS.ASSIGNED_AT,
-                    TOPIC_ASSIGNMENTS.SOURCE_COLLECTION);
+                    TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, TOPIC_ASSIGNMENTS.EMBEDDING_MODEL);
             for (var r : batch) {
                 String assignedAt = optS(r, "assigned_at");
                 OffsetDateTime assignedAtTs = (assignedAt != null && !assignedAt.isBlank())
                     ? parseTsStrict(assignedAt) : null;
                 insert = insert.values(tenant, docIdBytes(reqS(r, "doc_id")), reqL(r, "topic_id"),
                         optS(r, "assigned_by"), optD(r, "similarity"), assignedAtTs,
-                        optS(r, "source_collection"));
+                        optS(r, "source_collection"), modelOf(ctx, tenant, optS(r, "source_collection")));
             }
             insert.onConflict(TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID,
                                TOPIC_ASSIGNMENTS.TOPIC_ID)
@@ -2169,6 +2226,8 @@ public final class TaxonomyRepository {
                        field("EXCLUDED.assigned_at", OffsetDateTime.class))
                   .set(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION,
                        field("EXCLUDED.source_collection", String.class))
+                  .set(TOPIC_ASSIGNMENTS.EMBEDDING_MODEL,
+                       org.jooq.impl.DSL.excluded(TOPIC_ASSIGNMENTS.EMBEDDING_MODEL))
                   .execute();
         }
         return rows.size();
@@ -2938,8 +2997,10 @@ public final class TaxonomyRepository {
                             TOPIC_ASSIGNMENTS.DOC_ID,
                             TOPIC_ASSIGNMENTS.TOPIC_ID,
                             TOPIC_ASSIGNMENTS.ASSIGNED_BY,
-                            TOPIC_ASSIGNMENTS.SOURCE_COLLECTION)
-                       .values(tenant, docIdBytes(e.getKey()), topicIds.get(specIndex), "manual", collection)
+                            TOPIC_ASSIGNMENTS.SOURCE_COLLECTION,
+                            TOPIC_ASSIGNMENTS.EMBEDDING_MODEL)
+                       .values(tenant, docIdBytes(e.getKey()), topicIds.get(specIndex), "manual", collection,
+                               modelOf(ctx, tenant, collection))
                        .onConflict(
                            TOPIC_ASSIGNMENTS.TENANT_ID,
                            TOPIC_ASSIGNMENTS.DOC_ID,
@@ -2947,6 +3008,7 @@ public final class TaxonomyRepository {
                        .doUpdate()
                        .set(TOPIC_ASSIGNMENTS.ASSIGNED_BY, "manual")
                        .set(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, collection)
+                       .set(TOPIC_ASSIGNMENTS.EMBEDDING_MODEL, modelOf(ctx, tenant, collection))
                        .execute();
                 }
             }
@@ -3074,8 +3136,10 @@ public final class TaxonomyRepository {
                                                long topicId, List<String> docIds,
                                                String assignedBy, String sourceCollection) {
         if (docIds == null || docIds.isEmpty()) return;
-        // 5 bind params per row (RDR-194 D1/P3b, nexus-tk070.p3b: source_collection
-        // added) → 5000 rows = 25000 params, still under PG's Int16 Bind-message
+        // RDR-225 (nexus-3wh8d.13): one source collection per call, so one model per call.
+        final String model = modelOf(ctx, tenant, sourceCollection);
+        // 6 bind params per row (RDR-194 D1/P3b, nexus-tk070.p3b: source_collection
+        // added; RDR-225: embedding_model) → 5000 rows = 30000 params, still under PG's Int16 Bind-message
         // parameter-count limit of 32767. (A topic with >5000 docs fires the
         // trigger ceil(N/5000) times — still vastly better than per-row;
         // realistic topics are hundreds to low-thousands.)
@@ -3085,9 +3149,9 @@ public final class TaxonomyRepository {
             var insert = ctx.insertInto(TOPIC_ASSIGNMENTS,
                     TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID,
                     TOPIC_ASSIGNMENTS.TOPIC_ID, TOPIC_ASSIGNMENTS.ASSIGNED_BY,
-                    TOPIC_ASSIGNMENTS.SOURCE_COLLECTION);
+                    TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, TOPIC_ASSIGNMENTS.EMBEDDING_MODEL);
             for (String docId : batch) {
-                insert = insert.values(tenant, docIdBytes(docId), topicId, assignedBy, sourceCollection);
+                insert = insert.values(tenant, docIdBytes(docId), topicId, assignedBy, sourceCollection, model);
             }
             insert.onConflict(TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID,
                               TOPIC_ASSIGNMENTS.TOPIC_ID)

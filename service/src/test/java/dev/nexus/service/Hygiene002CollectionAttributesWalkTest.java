@@ -76,10 +76,11 @@ class Hygiene002CollectionAttributesWalkTest {
             // Branch A, agreement: name token matches the collection's one stored dimension.
             Map.entry("code__agree-owner__voyage-code-3__v1",
                 new Expected("code", "agree-owner", "voyage-code-3", 1024, "live")),
-            // Branch A, disagreement: voyage-context-3 is a KNOWN token (dim 1024) but the
-            // fixture's chunk is stored at 768 -- kept (never guessed from the dimension).
+            // Branch A, known token, no chunks. RDR-225: a chunk whose dimension disagrees with its
+            // collection's model is a legacy data shape the migration walk no longer carries (the model
+            // partition's dimension CHECK refuses it), so this fixture holds none and reads as 'live'.
             Map.entry("docs__disagree-owner__voyage-context-3__v1",
-                new Expected("docs", "disagree-owner", "voyage-context-3", 768, "disputed")),
+                new Expected("docs", "disagree-owner", "voyage-context-3", null, "live")),
             // Branch A, unseeded token: voyage-3 is on the engine's MODEL_DIMS but deliberately
             // not seeded into embedding_models -- ALWAYS disputed, even with zero chunks.
             Map.entry("code__unseeded-owner__voyage-3__v1",
@@ -95,7 +96,7 @@ class Hygiene002CollectionAttributesWalkTest {
             // Branch C, grandfathered 2-segment WITH chunks: no profile row exists at walk time,
             // so this always falls back and is 'disputed' (never guessed live).
             Map.entry("docs__legacy-with-chunks",
-                new Expected("docs", "legacy-with-chunks", "bge-base-en-v15-768", 1024, "disputed")),
+                new Expected("docs", "legacy-with-chunks", "bge-base-en-v15-768", 768, "disputed")),
             // Branch C, grandfathered 2-segment WITHOUT chunks: nothing to dispute -> 'live'.
             Map.entry("docs__legacy-no-chunks",
                 new Expected("docs", "legacy-no-chunks", "bge-base-en-v15-768", null, "live")),
@@ -201,8 +202,6 @@ class Hygiene002CollectionAttributesWalkTest {
             chashBytes(tenant + "-agree"), 1024);
 
         PgContainerHelper.insertCollection(ctx, tenant, "docs__disagree-owner__voyage-context-3__v1");
-        Routines.insertChunkBareVector(ctx.configuration(), tenant, "docs__disagree-owner__voyage-context-3__v1",
-            chashBytes(tenant + "-disagree"), 768);
 
         PgContainerHelper.insertCollection(ctx, tenant, "code__unseeded-owner__voyage-3__v1");
         // deliberately no chunk -- proves the unseeded-token rule fires with zero chunks too.
@@ -231,8 +230,9 @@ class Hygiene002CollectionAttributesWalkTest {
             "quarantine-code__quar-owner__voyage-code-3__v1", chashBytes(tenant + "-quar"), 1024);
 
         PgContainerHelper.insertCollection(ctx, tenant, "docs__legacy-with-chunks");
+        // 768 = the fallback model's dimension (RDR-225: a chunk of another width cannot be walked).
         Routines.insertChunkBareVector(ctx.configuration(), tenant, "docs__legacy-with-chunks",
-            chashBytes(tenant + "-legacy-with-chunks"), 1024);
+            chashBytes(tenant + "-legacy-with-chunks"), 768);
 
         PgContainerHelper.insertCollection(ctx, tenant, "docs__legacy-no-chunks");
         // deliberately no chunk.
@@ -292,7 +292,7 @@ class Hygiene002CollectionAttributesWalkTest {
      * </ol>
      */
     private static void assertWalkCompletedOnDisputedFixture(DSLContext ctx, String tenant) {
-        String disputedFixture = "docs__disagree-owner__voyage-context-3__v1";
+        String disputedFixture = "code__unseeded-owner__voyage-3__v1";
 
         // (1) the changeset applied -- house pattern (DSL.table/DSL.name) for a
         // table with no generated jOOQ binding, e.g. StagingPromoteOps's own

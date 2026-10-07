@@ -198,13 +198,17 @@ class GraphHopParityTest {
         // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk requires the
         // nexus.chunks row before the manifest row below -- chunk insert first.
         su.createStatement().execute(
-            "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(1024) + ") " +
-            "SELECT '" + TENANT_A + "', '" + COLL_EXPLAIN + "', decode(lpad(g::text, 64, '0'), 'hex'), 'ex'||g, " +
+            "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, embedding_model, chunk_text, " + DimTables.embeddingColumn(1024) + ") " +
+            "SELECT '" + TENANT_A + "', '" + COLL_EXPLAIN + "', decode(lpad(g::text, 64, '0'), 'hex'), " +
+            "(SELECT embedding_model FROM nexus.catalog_collections WHERE tenant_id = '" + TENANT_A +
+            "' AND name = '" + COLL_EXPLAIN + "'), 'ex'||g, " +
             "('[' || ((g % 100)::float8 / 100.0) || ',1' || repeat(',0', 1022) || ']')::nexus.vector " +
             "FROM generate_series(1, " + EXPLAIN_ROWS + ") g");
         su.createStatement().execute(
-            "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection) " +
-            "SELECT '" + TENANT_A + "', 'ex'||g, 0, decode(lpad(g::text, 64, '0'), 'hex'), '" + COLL_EXPLAIN + "' " +
+            "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection, embedding_model) " +
+            "SELECT '" + TENANT_A + "', 'ex'||g, 0, decode(lpad(g::text, 64, '0'), 'hex'), '" + COLL_EXPLAIN + "', " +
+            "(SELECT embedding_model FROM nexus.catalog_collections WHERE tenant_id = '" + TENANT_A +
+            "' AND name = '" + COLL_EXPLAIN + "') " +
             "FROM generate_series(1, " + EXPLAIN_ROWS + ") g");
         // edges exseed --cites--> ex1..exN
         su.createStatement().execute(
@@ -340,7 +344,8 @@ class GraphHopParityTest {
             ResultSet rs = su.createStatement().executeQuery(
                 "SELECT id, chash FROM nexus.search_graph_hop_1024(" +
                 queryVecLiteral(1024) + ", ARRAY['g0']::text[], " +
-                "ARRAY['" + COLL_G + "']::text[], 'cites', 1, 'out', NULL::jsonb, 10) ORDER BY distance");
+                "ARRAY['" + COLL_G + "']::text[], 'cites', 1, 'out', NULL::jsonb, 10, 'voyage-context-3', '" + TENANT_A
+                + "') ORDER BY distance");
             int seen = 0;
             while (rs.next()) {
                 String id = rs.getString("id");
@@ -547,7 +552,10 @@ class GraphHopParityTest {
             "  JOIN (SELECT DISTINCT to_tumbler AS tumbler FROM nexus.catalog_links " +
             "         WHERE from_tumbler = 'exseed' AND link_type = 'cites') rd " +
             "    ON rd.tumbler = d.tumbler " +
-            " WHERE c.collection = '" + COLL_EXPLAIN + "' AND d.deleted_at IS NULL " +
+            // RDR-225: a literal tenant and model prune the plan to the one model/tenant leaf the
+            // fixture lives in, as the engine's own call does (it always knows both).
+            " WHERE c.tenant_id = '" + TENANT_A + "' AND c.embedding_model = 'voyage-context-3'" +
+            " AND c.collection = '" + COLL_EXPLAIN + "' AND d.deleted_at IS NULL " +
             // RDR-191 repoint (nexus-o8dil.16/.48, Step G cluster-B triage): the unified
             // nexus.chunks table carries three nullable embedding_384/768/1024 columns,
             // not one bare `embedding` column - this test's own hand-rolled probe SQL
@@ -561,7 +569,10 @@ class GraphHopParityTest {
             .as("materialize-reached-then-rank must use the HNSW index "
                 + "idx_chunks_embedding_1024 (rank OUTSIDE the recursive CTE keeps the "
                 + "probe vector a plan-time literal). Plan was:%n%s", plan)
-            .contains("idx_chunks_embedding_1024");
+            // RDR-225: the plan names the model/tenant LEAF's inherited index
+            // (<leaf>_embedding_1024_idx), not the parent's idx_chunks_embedding_1024; the
+            // pattern anchors on the scan node so the ORDER BY key text cannot satisfy it.
+            .containsPattern("Index Scan using \"?\\S*embedding_1024");
         assertThat(plan)
             .as("the reached-set join must NOT defeat the index into a Seq Scan on "
                 + "nexus.chunks. Plan was:%n%s", plan)
@@ -593,7 +604,8 @@ class GraphHopParityTest {
             depth + ", " +
             sqlText(direction) + ", " +
             (whereJson == null ? "NULL::jsonb" : "'" + whereJson + "'::jsonb") + ", " +
-            n + ")";
+            n + ", " + sqlText(collection.contains("__minilm-l6-v2-384__") ? "minilm-l6-v2-384" : "voyage-context-3")
+            + ", " + sqlText(tenantFor(collection)) + ")";
         return runIds(conn, sql);
     }
 
@@ -686,12 +698,16 @@ class GraphHopParityTest {
         // chunk row to land BEFORE the manifest row (previously order-independent).
         su.createStatement().execute(
             "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME +
-            " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(dim) + ") VALUES ('" +
-            tenant + "', '" + collection + "', decode('" + chash + "', 'hex'), '" + tumbler + "', " +
-            vec2(dim, x, y) + "::nexus.vector) ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
+            " (tenant_id, collection, chash, embedding_model, chunk_text, " + DimTables.embeddingColumn(dim) + ") VALUES ('" +
+            tenant + "', '" + collection + "', decode('" + chash + "', 'hex'), " +
+            "(SELECT embedding_model FROM nexus.catalog_collections WHERE tenant_id = '" + tenant +
+            "' AND name = '" + collection + "'), '" + tumbler + "', " +
+            vec2(dim, x, y) + "::nexus.vector) ON CONFLICT (tenant_id, collection, chash, embedding_model) DO NOTHING");
         su.createStatement().execute(
-            "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection) " +
-            "VALUES ('" + tenant + "', '" + tumbler + "', 0, decode('" + chash + "', 'hex'), '" + collection + "') " +
+            "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection, embedding_model) " +
+            "VALUES ('" + tenant + "', '" + tumbler + "', 0, decode('" + chash + "', 'hex'), '" + collection + "', " +
+            "(SELECT embedding_model FROM nexus.catalog_collections WHERE tenant_id = '" + tenant +
+            "' AND name = '" + collection + "')) " +
             "ON CONFLICT (tenant_id, doc_id, position) DO NOTHING");
     }
 

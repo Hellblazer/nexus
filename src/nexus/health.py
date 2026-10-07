@@ -49,6 +49,13 @@ _MANAGED_DEPLOYMENT_SKIP_DETAIL = (
     "from this client; skipping"
 )
 _LOCAL_MODE_NOT_CONFIGURED_DETAIL = "service mode not configured (pg_credentials absent); skipping"
+# The RDR-225 partition rows read the database through local admin credentials. A managed engine has no
+# server-side equivalent of them (nexus-3wh8d.18 review), so the shared "runs server-side" text would be false.
+_MANAGED_PARTITION_ROWS_SKIP_DETAIL = (
+    "managed deployment — these rows read the database through local admin credentials and the engine runs no "
+    "equivalent; the operator verifies tenant leaves and model partitions with the read-only query in "
+    "docs/runbooks/rdr-225-cloud-deploy.md; skipping"
+)
 
 
 @dataclass
@@ -4031,18 +4038,26 @@ def _check_chunks_tenant_isolation(engine_status: object = _ENGINE_STATUS_UNSET)
             "always chunks_gate_probe_owner_read (engine changeset vectors-029, created for the migrating "
             "role) reaching the service role through the migrating role being the service role or through a "
             "role membership with INHERIT. The field is also false when row-level security on nexus.chunks "
-            "is no longer enabled and forced, or the tenant_isolation policy is gone."
+            "is no longer enabled and forced, or the tenant_isolation policy is gone, or when a model partition "
+            "or tenant leaf of nexus.chunks or nexus.taxonomy_centroids does not mirror its parent (RDR-225: "
+            "PostgreSQL inherits neither the flags nor the policies down a partition tree)."
         ),
         fix_suggestions=[
             "Run the engine's migrations as a role the service role does not inherit (NX_DB_ADMIN_URL, "
             "NX_DB_ADMIN_USER, NX_DB_ADMIN_PASS), not the service role itself",
-            "As the table owner: DROP POLICY chunks_gate_probe_owner_read ON nexus.chunks; or stop the service "
-            "role inheriting the migrating role (REVOKE the membership, or GRANT ... WITH INHERIT FALSE)",
+            "As the table owner: DROP POLICY chunks_gate_probe_owner_read ON nexus.chunks, then SELECT "
+            "nexus.partition_sync_access('nexus.chunks'::regclass) so the copies on every model partition and "
+            "leaf go with it; or stop the service role inheriting the migrating role (REVOKE the membership, "
+            "or GRANT ... WITH INHERIT FALSE)",
             "If row-level security itself is off (no policy applies, the table is unprotected): as the table "
             "owner, ENABLE ROW LEVEL SECURITY and FORCE ROW LEVEL SECURITY on nexus.chunks, and "
             "restore the tenant_isolation policy",
-            "A restarted engine refuses to boot while a policy applies to its role; its log line "
-            "`chunks_isolation_check_failed` names the policy and the role",
+            "A partition or leaf that does not mirror its parent: as the table owner, SELECT "
+            "nexus.partition_sync_access('nexus.chunks'::regclass) and the same for nexus.taxonomy_centroids; "
+            "the \"RLS policies\" row names the relations",
+            "A restarted engine refuses to boot while a policy applies to its role or a relation of the "
+            "partition trees is out of line; its log line `chunks_isolation_check_failed` or "
+            "`chunks_isolation_structure_gaps` names them",
         ],
     )]
 
@@ -5129,6 +5144,124 @@ def _check_migration_state(
     return results
 
 
+_PARTITION_PARENTS: tuple[str, ...] = ("chunks", "taxonomy_centroids")
+
+#: How many offending relations a doctor line spells out before it counts the rest.
+_PARTITION_GAPS_SHOWN = 5
+
+_PARTITION_TREE_FIXES: tuple[str, ...] = (
+    "As the table owner, re-mirror each parent onto its whole tree: "
+    "SELECT nexus.partition_sync_access('nexus.chunks'::regclass); and the same for "
+    "nexus.taxonomy_centroids (put right any wrong policy on the PARENT first: the function copies from it)",
+    "Restart the engine: it refuses to serve while a model partition or leaf does not mirror its parent "
+    "(log line chunks_isolation_check_failed)",
+)
+
+# One row per relation of the two partition trees that does not mirror its parent, plus one count row per
+# tree. Eight pipe-separated columns for both kinds: kind | root | relation (or count) | level | rls | force |
+# permissive policies of the root this relation lacks or has different | permissive policies it has that the
+# root does not. RESTRICTIVE policies only narrow and are not compared (the engine's own check agrees).
+_PARTITION_TREE_RLS_SQL = """
+WITH RECURSIVE tree AS (
+    SELECT c.oid, c.oid AS root_oid, c.relname::text AS relname, c.relname::text AS root, 0 AS lvl
+      FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+     WHERE n.nspname = 'nexus' AND c.relkind = 'p' AND c.relname IN ('chunks', 'taxonomy_centroids')
+    UNION ALL
+    SELECT ch.oid, t.root_oid, ch.relname::text, t.root, t.lvl + 1
+      FROM tree t
+      JOIN pg_inherits i ON i.inhparent = t.oid
+      JOIN pg_class ch ON ch.oid = i.inhrelid
+), pol AS (
+    SELECT p.polrelid, p.polname::text AS polname,
+           concat_ws(chr(1), p.polcmd::text,
+                     (SELECT string_agg(x::text, ',' ORDER BY x) FROM unnest(p.polroles) x),
+                     pg_get_expr(p.polqual, p.polrelid), pg_get_expr(p.polwithcheck, p.polrelid)) AS shape
+      FROM pg_policy p
+     WHERE p.polpermissive
+), diff AS (
+    SELECT t.root, t.relname, t.lvl,
+           CASE WHEN c.relrowsecurity THEN 't' ELSE 'f' END AS rls,
+           CASE WHEN c.relforcerowsecurity THEN 't' ELSE 'f' END AS frc,
+           CASE WHEN t.oid = t.root_oid
+                     AND NOT EXISTS (SELECT 1 FROM pol WHERE pol.polrelid = t.oid AND pol.polname = 'tenant_isolation')
+                THEN 'tenant_isolation'
+                ELSE COALESCE((SELECT string_agg(rp.polname, ',' ORDER BY rp.polname)
+                                 FROM pol rp
+                                WHERE rp.polrelid = t.root_oid AND t.oid <> t.root_oid
+                                  AND NOT EXISTS (SELECT 1 FROM pol mp
+                                                   WHERE mp.polrelid = t.oid AND mp.polname = rp.polname
+                                                     AND mp.shape = rp.shape)), '')
+           END AS lacks,
+           COALESCE((SELECT string_agg(mp.polname, ',' ORDER BY mp.polname)
+                       FROM pol mp
+                      WHERE mp.polrelid = t.oid AND t.oid <> t.root_oid
+                        AND NOT EXISTS (SELECT 1 FROM pol rp
+                                         WHERE rp.polrelid = t.root_oid AND rp.polname = mp.polname)), '') AS extra
+      FROM tree t
+      JOIN pg_class c ON c.oid = t.oid
+)
+SELECT 'N', root, count(*)::text, '', '', '', '', '' FROM diff GROUP BY root
+UNION ALL
+SELECT 'B', root, relname, lvl::text, rls, frc, lacks, extra
+  FROM diff
+ WHERE rls = 'f' OR frc = 'f' OR lacks <> '' OR extra <> ''
+ORDER BY 1, 2, 4, 3;
+""".strip()
+
+
+def _partition_tree_rls(
+    psql_bin: Path, host: str, port: int, dbname: str, user: str, password: str, *, psql_runner=None,
+) -> tuple[int, list[tuple[str, ...]], str | None]:
+    """RDR-225 (nexus-3wh8d.16): walk the partition trees of ``nexus.chunks`` and
+    ``nexus.taxonomy_centroids`` and return ``(relations read, offending rows, error)``.
+
+    An offending row is ``(root, relation, level, rls, force, lacks, extra)``. A box whose parents are not
+    partitioned (an engine that predates RDR-225) yields ``(0, [], None)``: nothing to walk. Lines the query
+    does not own (a test double that answers every query with the table verdict) are ignored.
+    """
+    proc = _run_psql(psql_bin, host, port, dbname, user, password, _PARTITION_TREE_RLS_SQL, psql_runner=psql_runner)
+    if proc.returncode != 0:
+        return 0, [], f"psql exit {proc.returncode}: {(proc.stderr or '').strip()[:300]}"
+    inspected = 0
+    gaps: list[tuple[str, ...]] = []
+    for line in proc.stdout.splitlines():
+        parts = line.strip().split("|")
+        if len(parts) != 8 or parts[0] not in ("N", "B"):
+            continue
+        if parts[0] == "N":
+            try:
+                inspected += int(parts[2])
+            except ValueError:
+                continue
+        else:
+            gaps.append(tuple(parts[1:]))
+    return inspected, gaps, None
+
+
+def _format_partition_tree_gaps(gaps: list[tuple[str, ...]], inspected: int) -> str:
+    """One sentence naming the first few offending relations and what is wrong with each; empty when none."""
+    if not gaps:
+        return ""
+    shown: list[str] = []
+    for _root, rel, _lvl, rls, frc, lacks, extra in gaps[:_PARTITION_GAPS_SHOWN]:
+        reasons: list[str] = []
+        if rls != "t":
+            reasons.append("RLS not enabled")
+        if frc != "t":
+            reasons.append("RLS not forced")
+        if lacks:
+            reasons.append(f"policy {lacks} missing or different")
+        if extra:
+            reasons.append(f"policy {extra} not on the parent")
+        shown.append(f"{rel} ({', '.join(reasons)})")
+    more = len(gaps) - _PARTITION_GAPS_SHOWN
+    return (
+        f"RLS does not mirror the parent on {len(gaps)}/{inspected} relation(s) of the nexus.chunks and "
+        f"nexus.taxonomy_centroids partition trees: {', '.join(shown)}"
+        + (f" (and {more} more)" if more > 0 else "")
+    )
+
+
 def _check_rls_present(
     creds_path: Path | None = None,
     psql_bin: Path | None = None,
@@ -5219,6 +5352,15 @@ def _check_rls_present(
     # rather than by position (ORDER BY is alphabetical, not VALUES-list order).
     # Uses a VALUES list as the driving table so we get one output row per
     # expected table even if the table doesn't exist in pg_class (NULL row).
+    # RDR-225: nexus.chunks and nexus.taxonomy_centroids are partitioned, and each model
+    # partition and tenant leaf is a pg_class row with RLS flags and pg_policies rows of its
+    # own. Both joins below are by EXACT relation name and a leaf's name is never a listed
+    # name (chunks_m<hash>_t_<hash>), so a leaf cannot add a row or inflate a policy count:
+    # each parent is judged on its own flags and its own policies.
+    # tests/db/test_rls_canary_partitioned_tables.py pins that on a migrated schema. That the
+    # partitions and leaves are ALSO enabled, forced and policed is the second query below
+    # (nexus-3wh8d.16, _partition_tree_rls): PostgreSQL inherits neither the flags nor the
+    # policies down a partition tree, and a leaf can be queried directly.
     table_values = ", ".join(
         f"('{schema}', '{tname}')"
         for schema, _, tname in (t.partition(".") for t in _RLS_TENANT_TABLES)
@@ -5327,6 +5469,29 @@ ORDER BY tbl.schema_name, tbl.table_name;
 
     present_count = len(_RLS_TENANT_TABLES) - len(absent)
 
+    # RDR-225 (nexus-3wh8d.16): every model partition and tenant leaf of the two partitioned
+    # parents, judged against the parent. A security canary: a gap is fatal.
+    tree_inspected, tree_gaps, tree_error = _partition_tree_rls(
+        psql_bin, host, port, dbname, user, password, psql_runner=psql_runner,
+    )
+    if tree_error is not None:
+        return [HealthResult(
+            label="RLS policies",
+            ok=False,
+            detail=f"RLS introspection query failed on the partition trees ({tree_error})",
+            fatal=True,
+        )]
+    tree_text = _format_partition_tree_gaps(tree_gaps, tree_inspected)
+
+    if not failed and tree_text:
+        return [HealthResult(
+            label="RLS policies",
+            ok=False,
+            detail=tree_text,
+            fix_suggestions=list(_PARTITION_TREE_FIXES),
+            fatal=True,
+        )]
+
     if failed:
         absent_note = (
             f" ({len(absent)} listed table(s) not yet present, reported "
@@ -5339,11 +5504,13 @@ ORDER BY tbl.schema_name, tbl.table_name;
             detail=(
                 f"RLS missing on {len(failed)}/{present_count} "
                 f"present tenant table(s): {', '.join(failed)}{absent_note}"
+                + (f"; {tree_text}" if tree_text else "")
             ),
             fix_suggestions=[
                 "Re-run migrations: nx init --service",
                 "Verify the Liquibase changeset applied RLS: "
                 "check service/src/main/resources/db/changelog/",
+                *(_PARTITION_TREE_FIXES if tree_text else ()),
             ],
             fatal=True,
         )]
@@ -5374,8 +5541,282 @@ ORDER BY tbl.schema_name, tbl.table_name;
         detail=(
             f"RLS policies: present on {len(_RLS_TENANT_TABLES)}/"
             f"{len(_RLS_TENANT_TABLES)} tenant tables"
+            + (
+                f", and on all {tree_inspected} relations of the nexus.chunks and "
+                f"nexus.taxonomy_centroids partition trees (parents, model partitions, tenant leaves)"
+                if tree_inspected else ""
+            )
         ),
     )]
+
+
+_PARTITION_TENANTS_LABEL = "Tenant partitions"
+_PARTITION_MODELS_LABEL = "Model partitions"
+_PARTITION_LEAVES_LABEL = "Partition leaves"
+_PARTITION_LABELS: tuple[str, ...] = (_PARTITION_TENANTS_LABEL, _PARTITION_MODELS_LABEL, _PARTITION_LEAVES_LABEL)
+
+# The bound of a single-value LIST partition (FOR VALUES IN ('x')), unquoted: the same reading as the
+# engine's nexus.partition_bound_value, inlined so the row does not depend on a function's grants.
+_PARTITION_BOUND_SQL = (
+    "replace((regexp_match(pg_get_expr({rel}.relpartbound, {rel}.oid), "
+    "'^FOR VALUES IN \\(''(.*)''\\)$'))[1], '''''', '''')"
+)
+
+_PARTITION_PARENTS_CTE = """
+parents AS (
+    SELECT c.oid, c.relname::text AS parent
+      FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+     WHERE n.nspname = 'nexus' AND c.relkind = 'p' AND c.relname IN ('chunks', 'taxonomy_centroids')
+)""".strip()
+
+# The layout probe reads only the catalog, so it works on an engine that has none of the tables the
+# comparison needs. ``P | parent | model partitions | leaves`` per partitioned parent.
+_PARTITION_LAYOUT_SQL = f"""
+WITH {_PARTITION_PARENTS_CTE},
+mp AS (SELECT p.parent, i.inhrelid AS oid FROM parents p JOIN pg_inherits i ON i.inhparent = p.oid)
+SELECT 'P', p.parent,
+       (SELECT count(*) FROM mp WHERE mp.parent = p.parent)::text,
+       (SELECT count(*) FROM mp JOIN pg_inherits l ON l.inhparent = mp.oid WHERE mp.parent = p.parent)::text
+  FROM parents p
+ ORDER BY p.parent;
+""".strip()
+
+# ``T | tenant | parent | models`` a token tenant that lacks a leaf under those model partitions of that parent,
+# ``M | model | parent |`` a registered model with no partition under that parent, ``K | count`` the distinct
+# token tenants and ``R | count`` the registered models (always present, so a silent query is not a pass).
+_PARTITION_COMPARE_SQL = f"""
+WITH {_PARTITION_PARENTS_CTE},
+mp AS (
+    SELECT p.parent, i.inhrelid AS oid, {_PARTITION_BOUND_SQL.format(rel="mc")} AS model
+      FROM parents p
+      JOIN pg_inherits i ON i.inhparent = p.oid
+      JOIN pg_class mc ON mc.oid = i.inhrelid
+), lf AS (
+    SELECT mp.parent, mp.model, {_PARTITION_BOUND_SQL.format(rel="lc")} AS tenant
+      FROM mp
+      JOIN pg_inherits l ON l.inhparent = mp.oid
+      JOIN pg_class lc ON lc.oid = l.inhrelid
+), tt AS (
+    SELECT DISTINCT tenant_id FROM nexus.service_tokens
+)
+SELECT 'T', tt.tenant_id, mp.parent, string_agg(mp.model, ',' ORDER BY mp.model)
+  FROM tt CROSS JOIN mp
+ WHERE NOT EXISTS (SELECT 1 FROM lf WHERE lf.parent = mp.parent AND lf.model = mp.model AND lf.tenant = tt.tenant_id)
+ GROUP BY tt.tenant_id, mp.parent
+UNION ALL
+SELECT 'M', em.embedding_model, p.parent, ''
+  FROM nexus.embedding_models em CROSS JOIN parents p
+ WHERE NOT EXISTS (SELECT 1 FROM mp WHERE mp.parent = p.parent AND mp.model = em.embedding_model)
+UNION ALL
+SELECT 'K', count(*)::text, '', '' FROM tt
+UNION ALL
+SELECT 'R', count(*)::text, '', '' FROM nexus.embedding_models
+ORDER BY 1, 2, 3;
+""".strip()
+
+
+def _partition_rows(ok: bool, detail: str, *, warn: bool = False) -> list[HealthResult]:
+    """The same verdict on all three partition rows (not applicable, or a probe that could not run)."""
+    return [HealthResult(label=lab, ok=ok, warn=warn, detail=detail) for lab in _PARTITION_LABELS]
+
+
+def _sql_literal(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
+
+
+def _check_tenant_model_partitions(
+    creds_path: Path | None = None,
+    psql_bin: Path | None = None,
+    psql_runner=None,  # injectable for unit tests
+) -> list[HealthResult]:
+    """RDR-225 Day 2 (nexus-3wh8d.16): three doctor rows over the partition layout of ``nexus.chunks`` and
+    ``nexus.taxonomy_centroids``.
+
+    * ``Tenant partitions``: every tenant that has a token must have a leaf under each model partition of both
+      tables. A missing leaf fails that tenant's writes (a 500 naming the tenant); the recovery is
+      ``nexus.create_tenant_partitions``, which the row prints.
+    * ``Model partitions``: every row of ``nexus.embedding_models`` must have a partition under both tables.
+      A model added without one is refused at write; the engine adds both in the changeset that registers it.
+    * ``Partition leaves``: the leaf count. Informational. Each new tenant adds one leaf per model partition of
+      each table and a ``mint``-scoped credential can create tenants, so ``mint`` is an operator credential.
+
+    Reads the SAME local-only admin-psql path as ``_check_rls_present``, so no engine route or wire field is
+    involved. These rows run on a local install only: a managed deployment has no ``pg_credentials`` here and the
+    engine has no server-side equivalent (its boot check, ``ChunksIsolationCheck``, covers the RLS structure of
+    both trees and nothing about token tenants or registered models), so on a managed install they report "not
+    applicable" and the comparison is conexus's read-only query (docs/runbooks/rdr-225-cloud-deploy.md). Not applicable (ok, "not applicable: ...",
+    never a warning) where there is nothing to compare: no ``pg_credentials`` (a virgin box, or a managed
+    deployment), parents that are not partitioned (an engine that predates RDR-225), no token tenant, or no
+    registered model. A finding is evaluated first; not applicable replaces only the outcome "nothing to
+    check".
+    """
+    if creds_path is None:
+        from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred to avoid circular import
+        from nexus.db.pg_provision import CREDENTIALS_FILENAME  # noqa: PLC0415 — deferred to avoid circular import
+        creds_path = nexus_config_dir() / CREDENTIALS_FILENAME
+
+    if not creds_path.exists():
+        from nexus.config import is_local_mode  # noqa: PLC0415 — deferred to avoid circular import
+
+        skip = _MANAGED_PARTITION_ROWS_SKIP_DETAIL if not is_local_mode() else _LOCAL_MODE_NOT_CONFIGURED_DETAIL
+        return _partition_rows(True, f"not applicable: {skip}")
+
+    from nexus.db.pg_provision import (  # noqa: PLC0415 — deferred to avoid circular import
+        _read_credentials,
+        discover_pg_binaries,
+        PgBinaryNotFoundError,
+    )
+
+    creds = _read_credentials(creds_path)
+    host = "127.0.0.1"
+    try:
+        port = int(creds.get("PG_PORT", 0))
+    except ValueError:
+        port = 0
+    if port <= 0:
+        return _partition_rows(False, "pg_credentials missing PG_PORT; cannot connect", warn=True)
+    db_url = creds.get("NX_DB_ADMIN_URL", "")
+    dbname = "nexus"
+    if "/" in db_url:
+        dbname = db_url.rstrip("/").rsplit("/", 1)[-1] or "nexus"
+    user = creds.get("NX_DB_ADMIN_USER", "nexus_admin")
+    password = creds.get("NX_DB_ADMIN_PASS", "")
+    if psql_bin is None:
+        try:
+            psql_bin = discover_pg_binaries().psql
+        except PgBinaryNotFoundError as exc:
+            return _partition_rows(False, f"psql binary not found: {exc}", warn=True)
+
+    proc = _run_psql(psql_bin, host, port, dbname, user, password, _PARTITION_LAYOUT_SQL, psql_runner=psql_runner)
+    if proc.returncode != 0:
+        snip = (proc.stderr or "").strip()[:300]
+        return _partition_rows(False, f"engine unreachable (psql exit {proc.returncode}): {snip}", warn=True)
+    layout: dict[str, tuple[int, int]] = {}
+    for line in proc.stdout.splitlines():
+        parts = line.strip().split("|")
+        if len(parts) == 4 and parts[0] == "P":
+            try:
+                layout[parts[1]] = (int(parts[2]), int(parts[3]))
+            except ValueError:
+                continue
+    if not layout:
+        return _partition_rows(
+            True,
+            "not applicable: nexus.chunks and nexus.taxonomy_centroids are not partitioned by model on this "
+            "engine (it predates RDR-225)",
+        )
+
+    proc = _run_psql(psql_bin, host, port, dbname, user, password, _PARTITION_COMPARE_SQL, psql_runner=psql_runner)
+    if proc.returncode != 0:
+        snip = (proc.stderr or "").strip()[:300]
+        return _partition_rows(False, f"engine unreachable (psql exit {proc.returncode}): {snip}", warn=True)
+    missing_leaves: dict[str, dict[str, str]] = {}   # tenant -> parent -> comma-joined models
+    missing_models: dict[str, list[str]] = {}        # model -> parents
+    token_tenants: int | None = None
+    registered_models: int | None = None
+    for line in proc.stdout.splitlines():
+        parts = line.strip().split("|")
+        if len(parts) != 4:
+            continue
+        kind = parts[0]
+        try:
+            if kind == "T":
+                missing_leaves.setdefault(parts[1], {})[parts[2]] = parts[3]
+            elif kind == "M":
+                missing_models.setdefault(parts[1], []).append(parts[2])
+            elif kind == "K":
+                token_tenants = int(parts[1])
+            elif kind == "R":
+                registered_models = int(parts[1])
+        except ValueError:
+            continue
+    if token_tenants is None or registered_models is None:
+        return _partition_rows(False, "the partition comparison returned no census row; cannot judge", warn=True)
+
+    parents_text = " and ".join(f"nexus.{p}" for p in _PARTITION_PARENTS)
+
+    # ── tenants against leaves ──
+    if missing_leaves:
+        tenants = sorted(missing_leaves)
+        shown = [
+            f"{t}: " + ", ".join(f"{p} ({m})" for p, m in sorted(missing_leaves[t].items()))
+            for t in tenants[:_PARTITION_GAPS_SHOWN]
+        ]
+        more = len(tenants) - _PARTITION_GAPS_SHOWN
+        fixes = [
+            "As the table owner: SELECT nexus.create_tenant_partitions('nexus.chunks'::regclass, "
+            f"{_sql_literal(t)}), nexus.create_tenant_partitions('nexus.taxonomy_centroids'::regclass, "
+            f"{_sql_literal(t)});"
+            for t in tenants[:_PARTITION_GAPS_SHOWN]
+        ]
+        fixes.append(
+            "A tenant removed on purpose (nexus.drop_tenant_partitions drops its leaves and keeps its tokens) is "
+            "not a fault: finish the removal runbook by deleting its service_tokens rows instead"
+        )
+        tenants_row = HealthResult(
+            label=_PARTITION_TENANTS_LABEL, ok=False,
+            detail=(
+                f"{len(tenants)} of {token_tenants} token tenant(s) lack a leaf (their writes fail until it "
+                f"exists): " + "; ".join(shown) + (f"; and {more} more" if more > 0 else "")
+            ),
+            fix_suggestions=fixes,
+        )
+    elif token_tenants == 0:
+        tenants_row = HealthResult(
+            label=_PARTITION_TENANTS_LABEL, ok=True, detail="not applicable: no tenant has a token",
+        )
+    else:
+        tenants_row = HealthResult(
+            label=_PARTITION_TENANTS_LABEL, ok=True,
+            detail=(
+                f"every one of {token_tenants} token tenant(s) has a leaf under each model partition of "
+                f"{parents_text}"
+            ),
+        )
+
+    # ── models against partitions ──
+    if missing_models:
+        shown_m = [f"{m} ({', '.join(sorted(ps))})" for m, ps in sorted(missing_models.items())]
+        models_row = HealthResult(
+            label=_PARTITION_MODELS_LABEL, ok=False,
+            detail=(
+                f"{len(missing_models)} registered embedding model(s) have no partition, so a write for them is "
+                f"refused: " + "; ".join(shown_m[:_PARTITION_GAPS_SHOWN])
+                + (f"; and {len(shown_m) - _PARTITION_GAPS_SHOWN} more" if len(shown_m) > _PARTITION_GAPS_SHOWN else "")
+            ),
+            fix_suggestions=[
+                "Run the engine's pending migrations: nx init --service (the changeset that registers a model "
+                "also creates its partitions)",
+                "As the migrating role, per missing pair: SELECT nexus.create_model_partition("
+                "'nexus.<parent>'::regclass, '<model>');",
+            ],
+        )
+    elif registered_models == 0:
+        models_row = HealthResult(
+            label=_PARTITION_MODELS_LABEL, ok=True, detail="not applicable: nexus.embedding_models is empty",
+        )
+    else:
+        models_row = HealthResult(
+            label=_PARTITION_MODELS_LABEL, ok=True,
+            detail=(
+                f"every one of {registered_models} embedding model(s) in nexus.embedding_models has a partition "
+                f"in {parents_text}"
+            ),
+        )
+
+    # ── the leaf count ──
+    total = sum(leaves for _mp, leaves in layout.values())
+    per_parent = "; ".join(
+        f"{p}: {layout[p][1]} leaves under {layout[p][0]} model partitions" for p in sorted(layout)
+    )
+    leaves_row = HealthResult(
+        label=_PARTITION_LEAVES_LABEL, ok=True,
+        detail=(
+            f"{total} leaves in all ({per_parent}). Each new tenant adds one leaf per model partition of each "
+            "table, and a mint-scoped credential can create tenants, so mint is an operator credential"
+        ),
+    )
+    return [tenants_row, models_row, leaves_row]
 
 
 def _installed_conexus_plugin_versions(registry_path: Path | None = None) -> list[str] | None:
@@ -9664,6 +10105,9 @@ def run_health_checks(
     results.extend(_check_config_dir_user_access())  # nexus-f9bgu.50
     results.extend(_check_migration_state())
     results.extend(_check_rls_present())
+    # RDR-225 Day 2 (bead nexus-3wh8d.16): token tenants against leaves, embedding_models against model
+    # partitions, and the leaf count. Not applicable (never a warning) where there is nothing to compare.
+    results.extend(_check_tenant_model_partitions())
     # RDR-205 Phase 2 Step 2 (bead nexus-em75s.10): the Linda tuple space's
     # three doctor rows. All three degrade internally (route_predates_floor
     # gate; managed/local-not-configured skip on the two psql-backed rows).

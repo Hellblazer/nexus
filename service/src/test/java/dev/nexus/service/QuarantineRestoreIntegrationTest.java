@@ -183,8 +183,10 @@ class QuarantineRestoreIntegrationTest extends AtomicWriteTestBase {
                 embedder.embed(List.of(seed + " text")), List.of(Map.<String, Object>of("title", seed)));
             ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
                     CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
-                    CATALOG_DOCUMENT_CHUNKS.CHUNK_INDEX, CATALOG_DOCUMENT_CHUNKS.COLLECTION)
-               .values(tenant, doc, position, Chash.fromHex(hex).toBytes(), position, collection).execute();
+                    CATALOG_DOCUMENT_CHUNKS.CHUNK_INDEX, CATALOG_DOCUMENT_CHUNKS.COLLECTION,
+                    CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
+               .values(tenant, doc, position, Chash.fromHex(hex).toBytes(), position, collection,
+                    PgContainerHelper.collectionModel(ctx, tenant, collection)).execute();
         }
         return hex;
     }
@@ -499,7 +501,14 @@ class QuarantineRestoreIntegrationTest extends AtomicWriteTestBase {
         String c = col("knowledge");
         String h = quarantined(t, c, "dim-clash").get(0);
         try (Connection su = pg.createConnection("")) {
-            PgContainerHelper.insertChunks(DSL.using(su, SQLDialect.POSTGRES), t, c, List.of(h), List.of("origin 768 text"),
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            // RDR-225: a collection holds ONE embedding model, so a row of another width cannot sit beside the
+            // quarantine copy under the same registration. The clash is now what it can only be: the origin
+            // collection is registered under a 768-wide model while its quarantine sibling (registered by the
+            // reaper under the origin's original minilm-384) still holds the 384-wide copy. Re-register the
+            // origin (it holds no chunk at this point: the reaper moved them) and seed its 768-wide row.
+            PgContainerHelper.insertCollection(ctx, t, c, "bge-base-en-v15-768");
+            PgContainerHelper.insertChunks(ctx, t, c, List.of(h), List.of("origin 768 text"),
                 List.of(new float[768]), List.of(Map.<String, Object>of()));
         }
 
@@ -1484,11 +1493,13 @@ class QuarantineRestoreIntegrationTest extends AtomicWriteTestBase {
         liveDoc(t, c, doc, "Re-indexed", 1, "r.md", Map.of());
         String current = orphan(t, c, "current-keyed", Map.<String, Object>of("catalog_doc_id", doc, "chunk_index", 0));
         try (Connection su = pg.createConnection("")) {
-            DSL.using(su, SQLDialect.POSTGRES)
-                .insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
                     CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
-                    CATALOG_DOCUMENT_CHUNKS.CHUNK_INDEX, CATALOG_DOCUMENT_CHUNKS.COLLECTION)
-                .values(t, doc, 0, Chash.fromHex(current).toBytes(), 0, c).execute();
+                    CATALOG_DOCUMENT_CHUNKS.CHUNK_INDEX, CATALOG_DOCUMENT_CHUNKS.COLLECTION,
+                    CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
+                .values(t, doc, 0, Chash.fromHex(current).toBytes(), 0, c,
+                    PgContainerHelper.collectionModel(ctx, t, c)).execute();
         }
 
         QuarantineRestoreOutcome out = vectors.quarantineRestore(t, c, quarantineOf(c), List.of(stale), ACTOR, false);

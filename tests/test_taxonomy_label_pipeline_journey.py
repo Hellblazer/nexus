@@ -49,11 +49,11 @@ from click.testing import CliRunner
 import nexus.mcp_infra as _mi
 from nexus.commands.taxonomy_cmd import taxonomy
 from nexus.commands import taxonomy_cmd
-from nexus.db.local_ef import LocalEmbeddingFunction
 from nexus.db.t2 import T2Database
 from nexus.logging_setup import configure_logging
 
 from tests._t2_fixture_ops import canonical_chunk_id
+from tests._padded_minilm import PaddedMiniLM
 from tests.conftest import make_vector_test_client
 
 pytestmark = pytest.mark.integration
@@ -70,7 +70,7 @@ def _engine_substrate(t2_service_env: str):
 
 
 def _seed_chunks_for_tenant(
-    tenant: str, collection: str, chash_hexes: list[str], *, dim: int = 384,
+    tenant: str, collection: str, chash_hexes: list[str], *, dim: int = 768,
 ) -> None:
     """Seed real nexus.chunks rows so topic_assignments_chunk_fk is
     satisfied. Duplicated locally per this repo's established convention
@@ -91,7 +91,11 @@ def _seed_chunks_for_tenant(
     # registered with a different model". The stub chunk's own dim is
     # an unrelated FK-satisfaction detail (which embedding_<dim> column
     # holds the zero-vector), not a model choice.
+    # RDR-225: a model partition holds one vector width (its dimension CHECK) and this
+    # substrate registers every collection under the bge-768 profile, so the stub is a
+    # 768-wide chunk; a stub of another width would not route to any partition.
     model_for_dim = "bge-base-en-v15-768"
+    assert dim == 768, f"stub chunks follow the substrate's bge-768 profile, not dim={dim}"
     vec = "[" + ",".join(["0"] * dim) + "]"
     values = ", ".join(
         f"('{tenant}', '{collection}', decode('{c}', 'hex'), 'seed', '{vec}'::nexus.vector)"
@@ -102,17 +106,17 @@ def _seed_chunks_for_tenant(
         "(tenant_id, name, content_type, owner_id, embedding_model, lifecycle_state) "
         f"VALUES ('{tenant}', '{collection}', 'knowledge', 'test-seed', '{model_for_dim}', 'live') "
         "ON CONFLICT DO NOTHING; "
-        f"INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, {embed_col}) "
-        f"VALUES {values} ON CONFLICT DO NOTHING;"
+        f"INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, {embed_col}, embedding_model) "
+        f"SELECT v.*, '{model_for_dim}' FROM (VALUES {values}) AS v ON CONFLICT DO NOTHING;"
     )
     psql = Path(state["pg_bin"]) / "psql"
     proc = subprocess.run(
         [
             str(psql), "-h", "127.0.0.1", "-p", str(state["pg_port"]),
             "-U", state["pg_user"], "-d", state["pg_dbname"],
-            "-v", "ON_ERROR_STOP=1", "-c", sql,
+            "-v", "ON_ERROR_STOP=1", "-1", "-f", "-",
         ],
-        capture_output=True, text=True, timeout=60,
+        input=sql, capture_output=True, text=True, timeout=60,
     )
     assert proc.returncode == 0, f"_seed_chunks_for_tenant failed: {proc.stdout}\n{proc.stderr}"
 
@@ -220,7 +224,7 @@ class TestLabelPipelineJourney:
         configure_logging("cli")
 
         doc_ids, texts = _build_two_domain_corpus()
-        ef = LocalEmbeddingFunction(model_name="all-MiniLM-L6-v2")
+        ef = PaddedMiniLM(model_name="all-MiniLM-L6-v2")
         embeddings = np.asarray(ef(texts), dtype=np.float32)
 
         _seed_chunks_for_tenant(_current_tenant, collection, doc_ids)

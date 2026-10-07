@@ -2,7 +2,9 @@ package dev.nexus.service;
 
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
+import dev.nexus.service.db.CollectionRegistry;
 import dev.nexus.service.db.TenantScope;
+import dev.nexus.service.db.UnregisteredCollectionException;
 import dev.nexus.service.vectors.TaxonomyCentroidRepository;
 import dev.nexus.service.vectors.TaxonomyCentroidRepository.AnnHit;
 import dev.nexus.service.vectors.TaxonomyCentroidRepository.CentroidRecord;
@@ -17,6 +19,7 @@ import org.testcontainers.containers.PostgreSQLContainer;
 import java.sql.Connection;
 import java.sql.SQLException;
 import java.util.List;
+import java.util.Map;
 
 import static dev.nexus.service.jooq.nexus.Tables.TAXONOMY_CENTROIDS;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -55,6 +58,12 @@ import static org.assertj.core.api.Assertions.within;
  *       table (a deployment is single-dim per RDR-075/077; only one dim has rows).</li>
  * </ul>
  *
+ * <p><b>RDR-225 (nexus-3wh8d.13).</b> {@code nexus.taxonomy_centroids} is LIST-partitioned by
+ * {@code embedding_model}, then by tenant. A centroid is filed under its collection's registered
+ * model, so every collection a test upserts into is registered first (under the model whose
+ * dimension matches the vectors), and a vector whose length is not that model's dimension is
+ * refused. A dimension change is a re-registration under another model.
+ *
  * <p>Plain-LOGIN NOSUPERUSER NOBYPASSRLS service role (nexus-5j7pb class) so the RLS
  * assertions are non-vacuous. Hermetic Testcontainers pgvector, PER_CLASS lifecycle.
  */
@@ -71,6 +80,12 @@ class TaxonomyCentroidRepositoryTest {
     // the repo routes by embedding length, not by parsing a model segment.
     private static final String COL_A = "knowledge__alpha";
     private static final String COL_B = "docs__beta";
+
+    /** Seeded {@code nexus.embedding_models} rows by dimension (catalog-036-embedding-profile.xml). */
+    private static final Map<Integer, String> MODEL_BY_DIM = Map.of(
+        384, "minilm-l6-v2-384",
+        768, "bge-base-en-v15-768",
+        1024, "voyage-context-3");
 
     PostgreSQLContainer<?> pg;
     TenantScope tenantScope;
@@ -113,13 +128,32 @@ class TaxonomyCentroidRepositoryTest {
         return v;
     }
 
+    /**
+     * Register {@code collection} for {@code tenant} under the seeded model of dimension {@code dim}
+     * (creating the tenant's partition leaves), as the production registration path would before a
+     * centroid can be filed. Re-registering an existing collection under another dimension's model is
+     * the RDR-225 form of a dimension transition; the process-wide registry cache is evicted, as the
+     * production re-registration path does, so the next upsert reads the new row.
+     */
+    private void reg(String tenant, String collection, int dim) {
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            PgContainerHelper.insertCollection(
+                DSL.using(su, SQLDialect.POSTGRES), tenant, collection, MODEL_BY_DIM.get(dim));
+            CollectionRegistry.evict(tenant, collection);
+        } catch (SQLException e) {
+            throw new IllegalStateException("could not register " + collection, e);
+        }
+    }
+
     // ── upsert + count + RLS ────────────────────────────────────────────────────
 
     @Test
-    void upsert_landsInPerDimTableByEmbeddingLength_andRlsScopes() throws Exception {
+    void upsert_landsInModelPartitionByEmbeddingLength_andRlsScopes() throws Exception {
         // Unique collection: PER_CLASS shares the DB, so this name is owned by this test
         // (cross_collection scans pull every foreign collection — see the cross test).
         String col = "knowledge__landrls";
+        reg(TENANT_A, col, 384);
         repo.upsertCentroids(TENANT_A, List.of(
             new CentroidRecord(col, 10L, unit(384, 1.0f, 0.0f), "alpha", 5),
             new CentroidRecord(col, 20L, unit(384, 0.6f, 0.8f), "beta",  3),
@@ -129,6 +163,11 @@ class TaxonomyCentroidRepositoryTest {
         assertThat(superuserCount(384, col)).as("all three at embedding_384").isEqualTo(3L);
         assertThat(superuserCount(768, col)).as("none at embedding_768").isEqualTo(0L);
         assertThat(superuserCount(1024, col)).as("none at embedding_1024").isEqualTo(0L);
+        // RDR-225: every row carries the collection's registered model, which names its partition.
+        assertThat(superuserModelCount(col, MODEL_BY_DIM.get(384)))
+            .as("all three filed under the collection's model").isEqualTo(3L);
+        assertThat(superuserModelCount(col, MODEL_BY_DIM.get(768)))
+            .as("none under another model").isEqualTo(0L);
 
         assertThat(repo.count(TENANT_A, col)).as("tenant-A sees 3").isEqualTo(3);
         assertThat(repo.count(TENANT_B, col)).as("tenant-B sees 0 under RLS").isEqualTo(0);
@@ -136,15 +175,19 @@ class TaxonomyCentroidRepositoryTest {
 
     @Test
     void upsert_768vector_landsInCentroids768Only() throws Exception {
+        reg(TENANT_A, "knowledge__sevensix", 768);
         repo.upsertCentroids(TENANT_A, List.of(
             new CentroidRecord("knowledge__sevensix", 1L, unit(768, 1.0f, 0.0f), "x", 1)));
         assertThat(superuserCount(768, "knowledge__sevensix")).isEqualTo(1L);
         assertThat(superuserCount(384, "knowledge__sevensix")).isEqualTo(0L);
         assertThat(superuserCount(1024, "knowledge__sevensix")).isEqualTo(0L);
+        assertThat(superuserModelCount("knowledge__sevensix", MODEL_BY_DIM.get(768)))
+            .as("filed under the 768-dim model").isEqualTo(1L);
     }
 
     @Test
     void upsert_isUpsertNotInsert_updatesInPlace() {
+        reg(TENANT_A, "knowledge__upd", 384);
         repo.upsertCentroids(TENANT_A, List.of(
             new CentroidRecord("knowledge__upd", 1L, unit(384, 1.0f, 0.0f), "old", 1)));
         repo.upsertCentroids(TENANT_A, List.of(
@@ -159,29 +202,72 @@ class TaxonomyCentroidRepositoryTest {
     }
 
     @Test
-    void upsert_dimTransition_replacesEmbedding() {
-        // nexus-2qryr: same key, new model, new dim — the documented contract is
-        // REPLACE (clear the other dim columns), never a CHECK violation and never
-        // a stranded old-dim vector.
+    void upsert_dimTransition_replacesEmbedding() throws Exception {
+        // nexus-2qryr, RDR-225: a dimension change is a re-embed under a new model, i.e. the
+        // collection is re-registered. The documented contract is REPLACE: the row filed under the
+        // old model is deleted and the new one inserted, never a stranded old-dim vector and never
+        // a duplicate under two partitions.
+        String col = "knowledge__dimflip";
+        reg(TENANT_A, col, 384);
         repo.upsertCentroids(TENANT_A, List.of(
-            new CentroidRecord("knowledge__dimflip", 1L, unit(384, 1.0f, 0.0f), "v1", 1)));
-        repo.upsertCentroids(TENANT_A, List.of(
-            new CentroidRecord("knowledge__dimflip", 1L, unit(768, 0.0f, 1.0f), "v2", 2)));
+            new CentroidRecord(col, 1L, unit(384, 1.0f, 0.0f), "v1", 1)));
+        assertThat(superuserModelCount(col, MODEL_BY_DIM.get(384))).isEqualTo(1L);
 
-        assertThat(repo.count(TENANT_A, "knowledge__dimflip")).isEqualTo(1);
-        assertThat(repo.getByCollection(TENANT_A, "knowledge__dimflip")).singleElement().satisfies(r -> {
+        reg(TENANT_A, col, 768);
+        repo.upsertCentroids(TENANT_A, List.of(
+            new CentroidRecord(col, 1L, unit(768, 0.0f, 1.0f), "v2", 2)));
+
+        assertThat(repo.count(TENANT_A, col)).isEqualTo(1);
+        assertThat(repo.getByCollection(TENANT_A, col)).singleElement().satisfies(r -> {
             assertThat(r.embedding()).hasSize(768);
             assertThat(r.label()).isEqualTo("v2");
             assertThat(r.docCount()).isEqualTo(2);
         });
+        assertThat(superuserModelCount(col, MODEL_BY_DIM.get(384)))
+            .as("old-model row deleted").isEqualTo(0L);
+        assertThat(superuserModelCount(col, MODEL_BY_DIM.get(768)))
+            .as("new-model row inserted").isEqualTo(1L);
         // The old-dim query space no longer sees it; the new one does.
-        assertThat(repo.annQuery(TENANT_A, unit(384, 1.0f, 0.0f), "knowledge__dimflip", false, 1)).isEmpty();
-        assertThat(repo.annQuery(TENANT_A, unit(768, 0.0f, 1.0f), "knowledge__dimflip", false, 1)).hasSize(1);
-        // And on again — the transition is symmetric.
+        assertThat(repo.annQuery(TENANT_A, unit(384, 1.0f, 0.0f), col, false, 1)).isEmpty();
+        assertThat(repo.annQuery(TENANT_A, unit(768, 0.0f, 1.0f), col, false, 1)).hasSize(1);
+        // And on again: the transition is symmetric.
+        reg(TENANT_A, col, 1024);
         repo.upsertCentroids(TENANT_A, List.of(
-            new CentroidRecord("knowledge__dimflip", 1L, unit(1024, 1.0f, 0.0f), "v3", 3)));
-        assertThat(repo.getByCollection(TENANT_A, "knowledge__dimflip")).singleElement()
+            new CentroidRecord(col, 1L, unit(1024, 1.0f, 0.0f), "v3", 3)));
+        assertThat(repo.getByCollection(TENANT_A, col)).singleElement()
             .satisfies(r -> assertThat(r.embedding()).hasSize(1024));
+        assertThat(superuserModelCount(col, MODEL_BY_DIM.get(768))).isEqualTo(0L);
+        assertThat(superuserModelCount(col, MODEL_BY_DIM.get(1024))).isEqualTo(1L);
+    }
+
+    @Test
+    void upsert_dimensionDisagreeingWithCollectionModel_failsLoudAndWritesNothing() throws Exception {
+        String col = "knowledge__dimmismatch";
+        reg(TENANT_A, col, 768);
+        assertThatThrownBy(() -> repo.upsertCentroids(TENANT_A, List.of(
+            new CentroidRecord(col, 1L, unit(384, 1.0f, 0.0f), "x", 1))))
+            .as("a 384-dim centroid in a collection registered under a 768-dim model")
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining(MODEL_BY_DIM.get(768))
+            .hasMessageContaining("384-dim");
+        assertThat(repo.count(TENANT_A, col)).as("nothing written").isZero();
+    }
+
+    @Test
+    void upsert_unregisteredCollection_isRefused() {
+        assertThatThrownBy(() -> repo.upsertCentroids(TENANT_A, List.of(
+            new CentroidRecord("knowledge__neverregistered", 1L, unit(384, 1.0f, 0.0f), "x", 1))))
+            .as("no catalog_collections row means no model to file the centroid under")
+            .isInstanceOf(UnregisteredCollectionException.class);
+        assertThat(repo.count(TENANT_A, "knowledge__neverregistered")).isZero();
+    }
+
+    @Test
+    void upsert_collectionRegisteredForAnotherTenant_isRefused() {
+        reg(TENANT_A, "knowledge__ownedbya", 384);
+        assertThatThrownBy(() -> repo.upsertCentroids(TENANT_B, List.of(
+            new CentroidRecord("knowledge__ownedbya", 1L, unit(384, 1.0f, 0.0f), "x", 1))))
+            .isInstanceOf(UnregisteredCollectionException.class);
     }
 
     @Test
@@ -198,6 +284,7 @@ class TaxonomyCentroidRepositoryTest {
 
     @Test
     void annQuery_returnsNearestTopicWithCosineSimilarity() {
+        reg(TENANT_A, "knowledge__ann", 384);
         repo.upsertCentroids(TENANT_A, List.of(
             new CentroidRecord("knowledge__ann", 100L, unit(384, 1.0f, 0.0f), "near", 1),
             new CentroidRecord("knowledge__ann", 200L, unit(384, 0.6f, 0.8f), "mid",  1),
@@ -220,6 +307,7 @@ class TaxonomyCentroidRepositoryTest {
         // of iterative_scan, so this is a connectivity/ordering proof, NOT proof that
         // relaxed_order prevents production-scale silent under-return — that recall guarantee
         // is owned by the production-scale recall gate (RDR-156), not this fixture.
+        reg(TENANT_A, "knowledge__narrow", 384);
         repo.upsertCentroids(TENANT_A, List.of(
             new CentroidRecord("knowledge__narrow", 1L, unit(384, 1.0f, 0.0f), "a", 1),
             new CentroidRecord("knowledge__narrow", 2L, unit(384, 0.6f, 0.8f), "b", 1),
@@ -240,6 +328,8 @@ class TaxonomyCentroidRepositoryTest {
         // Dedicated tenant: cross_collection returns EVERY foreign collection (oracle
         // `where collection != name`), so RLS-isolate from sibling tests' centroids.
         String tenant = "tenant-xcoll";
+        reg(tenant, COL_A, 384);
+        reg(tenant, COL_B, 384);
         repo.upsertCentroids(tenant, List.of(
             new CentroidRecord(COL_A, 11L, unit(384, 1.0f, 0.0f), "a-near", 1)));
         repo.upsertCentroids(tenant, List.of(
@@ -256,6 +346,9 @@ class TaxonomyCentroidRepositoryTest {
     void getForeignCentroids_returnsAllCollectionsExceptGiven() {
         // Dedicated tenant: foreign = every collection != the given one (oracle $ne).
         String tenant = "tenant-foreign";
+        reg(tenant, "knowledge__fa", 384);
+        reg(tenant, "docs__fb", 384);
+        reg(tenant, "rdr__fc", 384);
         repo.upsertCentroids(tenant, List.of(
             new CentroidRecord("knowledge__fa", 1L, unit(384, 1.0f, 0.0f), "a", 1),
             new CentroidRecord("docs__fb",      2L, unit(384, 0.6f, 0.8f), "b", 1),
@@ -276,6 +369,7 @@ class TaxonomyCentroidRepositoryTest {
     void dimensionProbe_returnsDimWithRows_minusOneWhenEmpty() {
         assertThat(repo.dimensionProbe(TENANT_B)).as("tenant-B has no centroids").isEqualTo(-1);
 
+        reg(TENANT_A, "knowledge__probe", 384);
         repo.upsertCentroids(TENANT_A, List.of(
             new CentroidRecord("knowledge__probe", 1L, unit(384, 1.0f, 0.0f), "x", 1)));
         // tenant-A already has 384-dim centroids from other tests too; probe is 384.
@@ -284,6 +378,7 @@ class TaxonomyCentroidRepositoryTest {
 
     @Test
     void getByCollection_roundTripsEmbeddingExactly() {
+        reg(TENANT_A, "knowledge__rt", 384);
         repo.upsertCentroids(TENANT_A, List.of(
             new CentroidRecord("knowledge__rt", 7L, unit(384, 0.6f, 0.8f), "rt", 4)));
 
@@ -301,6 +396,7 @@ class TaxonomyCentroidRepositoryTest {
 
     @Test
     void deleteByIds_thenPurge() {
+        reg(TENANT_A, "knowledge__del", 384);
         repo.upsertCentroids(TENANT_A, List.of(
             new CentroidRecord("knowledge__del", 1L, unit(384, 1.0f, 0.0f), "a", 1),
             new CentroidRecord("knowledge__del", 2L, unit(384, 0.6f, 0.8f), "b", 1),
@@ -338,6 +434,19 @@ class TaxonomyCentroidRepositoryTest {
             return DSL.using(su, SQLDialect.POSTGRES)
                 .fetchCount(TAXONOMY_CENTROIDS,
                     TAXONOMY_CENTROIDS.COLLECTION.eq(collection).and(embeddingField.isNotNull()));
+        }
+    }
+
+    /**
+     * Superuser row count for one collection filed under one {@code embedding_model} (bypasses RLS):
+     * the partition a centroid lives in is named by this column (RDR-225).
+     */
+    private long superuserModelCount(String collection, String model) throws SQLException {
+        try (Connection su = pg.createConnection("")) {
+            return DSL.using(su, SQLDialect.POSTGRES)
+                .fetchCount(TAXONOMY_CENTROIDS,
+                    TAXONOMY_CENTROIDS.COLLECTION.eq(collection)
+                        .and(TAXONOMY_CENTROIDS.EMBEDDING_MODEL.eq(model)));
         }
     }
 }

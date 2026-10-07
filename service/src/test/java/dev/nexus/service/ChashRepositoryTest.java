@@ -61,6 +61,8 @@ class ChashRepositoryTest {
 
     private static final String TENANT_A = "chash-tenant-a";
     private static final String TENANT_B = "chash-tenant-b";
+    private static final String MODEL_384 = "minilm-l6-v2-384";
+    private static final String MODEL_1024 = "voyage-context-3";
     /** Never seeded — the fresh-install isEmpty guard. */
     private static final String TENANT_EMPTY = "chash-tenant-empty";
 
@@ -107,22 +109,30 @@ class ChashRepositoryTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             for (String[] tc : new String[][] {
-                    {TENANT_A, "coll-a-384"}, {TENANT_A, "coll-a-768"},
-                    {TENANT_A, "coll-a-1024"}, {TENANT_A, "stub-no-chunks"},
-                    {TENANT_A, "ren-src"}, {TENANT_A, "ren-collide-src"},
-                    {TENANT_A, "ren-collide-dst"},
-                    {TENANT_B, "coll-b-384"},
+                    // RDR-225: a collection has ONE embedding model and a chunk's vector is that
+                    // model's dimension, so the non-conformant fixture names register under the
+                    // model their vectors are sized for (third element); the default is the
+                    // 768-d bge fallback.
+                    {TENANT_A, "coll-a-384", MODEL_384}, {TENANT_A, "coll-a-768"},
+                    {TENANT_A, "coll-a-1024", MODEL_1024}, {TENANT_A, "stub-no-chunks"},
+                    {TENANT_A, "ren-src", MODEL_384}, {TENANT_A, "ren-collide-src", MODEL_384},
+                    {TENANT_A, "ren-collide-dst", MODEL_384},
+                    {TENANT_B, "coll-b-384", MODEL_384},
                     // RDR-204 Phase 1 (bead nexus-ft04v.7): renameCollection's
                     // NEW-side name now requires a real catalog_collections row
                     // (ChashRepository's stub-insert is retired) — pre-register
                     // every rename DESTINATION these tests target, plus the
                     // real-ingest-path fixture below.
-                    {TENANT_A, "ren-dst"},
+                    {TENANT_A, "ren-dst", MODEL_384},
                     {TENANT_A, "gate-rename-old-1-dst"},
                     {TENANT_A, "gate-rename-new-1-dst"},
                     {TENANT_A, "gate-deadlock-a"}, {TENANT_A, "gate-deadlock-b"},
                     {TENANT_A, "code__cr__minilm-l6-v2-384__v1"}}) {
-                PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), tc[0], tc[1]);
+                if (tc.length > 2) {
+                    PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), tc[0], tc[1], tc[2]);
+                } else {
+                    PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), tc[0], tc[1]);
+                }
             }
 
             // Multi-collection chash: 384 + 1024.
@@ -132,20 +142,24 @@ class ChashRepositoryTest {
             chunk(su, TENANT_A, 384,  "coll-a-384",  ch("only-384"),  "2026-07-01 00:00:03+00");
             chunk(su, TENANT_A, 768,  "coll-a-768",  ch("only-768"),  "2026-07-01 00:00:04+00");
             chunk(su, TENANT_A, 1024, "coll-a-1024", ch("only-1024"), "2026-07-01 00:00:05+00");
-            // Rename source: rows in two dim tables under one collection name
-            // (cross-model re-embed history makes this shape real), plus a
+            // Rename source: two rows under one collection name, plus a
             // manifest row — the rename must re-home the combined-query join
-            // key too (nexus-x6kdz class; .3 critique S2).
+            // key too (nexus-x6kdz class; .3 critique S2). RDR-225: both rows are 384-d,
+            // since a collection has exactly one model (the pre-RDR-225 fixture mixed a 384
+            // and a 768 row under one name, the cross-model re-embed history that layout
+            // can no longer hold).
             chunk(su, TENANT_A, 384, "ren-src", ch("ren-1"), "2026-07-01 00:00:06+00");
-            chunk(su, TENANT_A, 768, "ren-src", ch("ren-2"), "2026-07-01 00:00:07+00");
+            chunk(su, TENANT_A, 384, "ren-src", ch("ren-2"), "2026-07-01 00:00:07+00");
             su.createStatement().execute(
                 "INSERT INTO nexus.catalog_documents " +
                 "  (tenant_id, tumbler, title, author, year, content_type, corpus, physical_collection) " +
                 "VALUES ('" + TENANT_A + "', 'ren-doc-1', 'Ren Doc', 'a', 2026, " +
                 "'paper', 'research', 'ren-src')");
             su.createStatement().execute(
-                "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection) " +
-                "VALUES ('" + TENANT_A + "', 'ren-doc-1', 0, decode('" + ch("ren-1").toHex() + "', 'hex'), 'ren-src')");
+                "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection, embedding_model) " +
+                "VALUES ('" + TENANT_A + "', 'ren-doc-1', 0, decode('" + ch("ren-1").toHex() + "', 'hex'), 'ren-src', " +
+                "(SELECT embedding_model FROM nexus.catalog_collections " +
+                "WHERE tenant_id = '" + TENANT_A + "' AND name = 'ren-src'))");
             // Rename collision fixture: same chash on both sides.
             chunk(su, TENANT_A, 384, "ren-collide-src", ch("collide"),   "2026-07-01 00:00:08+00");
             chunk(su, TENANT_A, 384, "ren-collide-src", ch("collide-2"), "2026-07-01 00:00:09+00");
@@ -193,9 +207,9 @@ class ChashRepositoryTest {
     // ── rename_collection ────────────────────────────────────────────────────
 
     @Test
-    void renameCollection_rehomesAcrossDimTables_andIsIdempotent() {
+    void renameCollection_rehomesEveryRow_andIsIdempotent() {
         int updated = repo.renameCollection(TENANT_A, "ren-src", "ren-dst");
-        assertThat(updated).as("one 384 row + one 768 row re-homed").isEqualTo(2);
+        assertThat(updated).as("both rows of the source collection re-homed").isEqualTo(2);
 
         assertThat(repo.lookup(TENANT_A, ch("ren-1")))
             .extracting(r -> r.get("collection")).containsExactly("ren-dst");
@@ -475,8 +489,10 @@ class ChashRepositoryTest {
                        Chash chash, String createdAt) throws Exception {
         su.createStatement().execute(
             "INSERT INTO nexus.chunks" +
-            " (tenant_id, collection, chash, chunk_text, embedding_" + dim + ", created_at) VALUES " +
+            " (tenant_id, collection, chash, embedding_model, chunk_text, embedding_" + dim + ", created_at) VALUES " +
             "('" + tenant + "', '" + collection + "', decode('" + chash.toHex() + "', 'hex'), " +
+            "(SELECT embedding_model FROM nexus.catalog_collections " +
+            "WHERE tenant_id = '" + tenant + "' AND name = '" + collection + "'), " +
             "'chunk " + chash.toHex().substring(0, 8) + "', " + unitVec(dim) + "::nexus.vector, " +
             "TIMESTAMPTZ '" + createdAt + "')");
     }

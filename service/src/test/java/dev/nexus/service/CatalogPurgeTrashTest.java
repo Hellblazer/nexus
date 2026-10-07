@@ -94,6 +94,7 @@ class CatalogPurgeTrashTest {
 
     private static final String TENANT = "purge-trash";
     private static final String COLLECTION = "knowledge__purge-trash__minilm-l6-v2-384__v1";
+    private static final String MODEL = "minilm-l6-v2-384";
 
     private static final String DOC_LIVE        = "purge-doc-live";
     private static final String DOC_FRESH_TOMB  = "purge-doc-fresh-tomb";
@@ -220,12 +221,14 @@ class CatalogPurgeTrashTest {
      * shared {@link #COLLECTION} constant. */
     private static void insertManifestRow(Connection su, String docId, String chashHex, String collection) throws Exception {
         try (PreparedStatement ps = su.prepareStatement(
-                "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection) "
-                + "VALUES (?, ?, 0, decode(?, 'hex'), ?)")) {
+                "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection, embedding_model) "
+                + "VALUES (?, ?, 0, decode(?, 'hex'), ?, ?)")) {
             ps.setString(1, TENANT);
             ps.setString(2, docId);
             ps.setString(3, chashHex);
             ps.setString(4, collection);
+            // RDR-225: the manifest row carries its chunk's model (both fixture collections are minilm).
+            ps.setString(5, MODEL);
             ps.execute();
         }
     }

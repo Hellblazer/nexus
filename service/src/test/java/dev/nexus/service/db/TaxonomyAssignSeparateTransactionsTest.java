@@ -71,7 +71,7 @@ class TaxonomyAssignSeparateTransactionsTest {
             PgContainerHelper.bootstrapServiceRole(su, SVC_ROLE, SVC_PASS);
             for (int dim : new int[] {384, 768, 1024}) {
                 PgContainerHelper.grantExecuteOnFunction(
-                    su, "nexus.assign_from_chashes_" + dim + "(text, text[], boolean)", SVC_ROLE);
+                    su, "nexus.assign_from_chashes_" + dim + "(text, text[], boolean, text, text)", SVC_ROLE);
             }
         }
         var cfg = new com.zaxxer.hikari.HikariConfig();
@@ -215,10 +215,12 @@ class TaxonomyAssignSeparateTransactionsTest {
         registerCollection(tenant, collection);
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
+            // RDR-225: the chunk carries its collection's model (voyage-code-3, 1024-d).
             DSL.using(su, SQLDialect.POSTGRES)
-               .insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH,
+               .insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL,
                            CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_1024)
                .values(tenant, collection, HexFormat.of().parseHex(hexChashValue),
+                       PgContainerHelper.collectionModel(DSL.using(su, SQLDialect.POSTGRES), tenant, collection),
                        "seed text " + hexChashValue, Vector.of(emb))
                .execute();
         }
@@ -234,8 +236,11 @@ class TaxonomyAssignSeparateTransactionsTest {
             su.setAutoCommit(true);
             DSL.using(su, SQLDialect.POSTGRES)
                .insertInto(TAXONOMY_CENTROIDS, TAXONOMY_CENTROIDS.TENANT_ID, TAXONOMY_CENTROIDS.COLLECTION,
-                           TAXONOMY_CENTROIDS.TOPIC_ID, TAXONOMY_CENTROIDS.LABEL, TAXONOMY_CENTROIDS.EMBEDDING_1024)
-               .values(tenant, collection, topicId, "seed-centroid-label", Vector.of(emb))
+                           TAXONOMY_CENTROIDS.TOPIC_ID, TAXONOMY_CENTROIDS.EMBEDDING_MODEL,
+                           TAXONOMY_CENTROIDS.LABEL, TAXONOMY_CENTROIDS.EMBEDDING_1024)
+               .values(tenant, collection, topicId,
+                       PgContainerHelper.collectionModel(DSL.using(su, SQLDialect.POSTGRES), tenant, collection),
+                       "seed-centroid-label", Vector.of(emb))
                .execute();
         }
     }
