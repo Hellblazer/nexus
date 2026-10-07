@@ -776,6 +776,8 @@ downtime budget (confirmed by Sam 2026-10-06; see Prerequisites).
 
 #### Step 2: Tenant-removal runbook
 
+The runbook is [`docs/runbooks/rdr-225-tenant-removal.md`](../runbooks/rdr-225-tenant-removal.md) (nexus-3wh8d.21). `DropTenantPartitionsIntegrationTest` exercises it end to end, tokens included, and also pins the direct-DROP refusal (SQLSTATE `2BP01`).
+
 2026-10-06: `nexus.drop_tenant_partitions(tenant)` exists (changeset `vectors-030-1`, nexus-3wh8d.7) and the runbook calls it, as the schema owner, for its first two statements: it deletes the tenant's manifest, topic-assignment and orphaned-at rows, then DETACHes and DROPs the tenant's leaf under every model partition of `chunks` and `taxonomy_centroids`, and returns the number of leaves dropped. It refuses `default`, a second call returns 0, and it is not SECURITY DEFINER and is granted to no engine role. It does not delete the tenant's tokens: the runbook deletes them afterwards as its own statement.
 
 #### Step 3: Drop `chunks_retired_225` after 14 days

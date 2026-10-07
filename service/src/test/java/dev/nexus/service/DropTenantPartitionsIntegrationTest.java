@@ -296,6 +296,74 @@ class DropTenantPartitionsIntegrationTest {
         }
     }
 
+    /**
+     * The runbook end to end (docs/runbooks/rdr-225-tenant-removal.md), as the schema owner: the function, then the
+     * tenant's session and service tokens. Nothing of the tenant remains and the bystander is untouched.
+     */
+    @Test
+    void theRunbook_removesTheTenantsLeavesReferencingRowsAndTokens_andLeavesAnotherTenantUntouched() throws Exception {
+        final String TA = "p225-drop-runbook";
+        try (Connection su = pg.createConnection("")) {
+            DSLContext ctx = dsl(su);
+            seed(ctx, TA, 6000L);
+            ctx.execute("INSERT INTO nexus.session_tokens (session_token_hash, tenant_id, session_id, expires_at) "
+                + "VALUES (?, ?, ?, now() + interval '1 hour')", "sess-hash-" + TA, TA, "sess-" + TA);
+        }
+        Map<String, Integer> bBefore = rowCounts(TB);
+        int bTokens = tokenCount(TB);
+        assertThat(tokenCount(TA)).isEqualTo(2);
+        try (Connection a = admin()) {
+            a.setAutoCommit(false);
+            DSLContext ctx = dsl(a);
+            assertThat(PartitionScratch.dropTenantPartitions(ctx, TA)).isEqualTo(modelPartitions(ctx));
+            a.commit();
+            ctx.execute("DELETE FROM nexus.session_tokens WHERE tenant_id = ?", TA);
+            ctx.execute("DELETE FROM nexus.service_tokens WHERE tenant_id = ?", TA);
+            a.commit();
+            assertThat(leaves(ctx, TA)).isEmpty();
+            assertThat(leaves(ctx, TB)).hasSize(modelPartitions(ctx));
+        }
+        assertThat(rowCounts(TA)).allSatisfy((t, n) -> assertThat(n).as("rows left in %s", t).isZero());
+        assertThat(tokenCount(TA)).isZero();
+        assertThat(rowCounts(TB)).isEqualTo(bBefore);
+        assertThat(tokenCount(TB)).isEqualTo(bTokens);
+    }
+
+    /**
+     * Why the runbook calls the function rather than dropping leaves by hand: a leaf whose chunks the manifest
+     * references cannot be dropped directly (its partition-level FK clone depends on it). The refusal changes
+     * nothing; DETACH then DROP, which the function does, is the path that works.
+     */
+    @Test
+    void aDirectDropOfAReferencedChunksLeaf_isRefused_andChangesNothing() throws Exception {
+        final String TA = "p225-drop-direct";
+        try (Connection su = pg.createConnection("")) {
+            seed(dsl(su), TA, 7000L);
+        }
+        Map<String, Integer> before = rowCounts(TA);
+        String leaf;
+        try (Connection su = pg.createConnection("")) {
+            DSLContext ctx = dsl(su);
+            leaf = ctx.fetchValue("SELECT c.relname::text FROM nexus.chunks ch JOIN pg_catalog.pg_class c "
+                + "ON c.oid = ch.tableoid WHERE ch.tenant_id = ? AND ch.collection = ? LIMIT 1", TA, coll1(TA)).toString();
+        }
+        try (Connection a = admin()) {
+            DSLContext ctx = dsl(a);
+            assertThatThrownBy(() -> ctx.execute("DROP TABLE nexus.\"" + leaf + "\""))
+                .satisfies(t -> assertThat(sqlState(t)).as("dependent objects still exist").isEqualTo("2BP01"));
+            assertThat(leaves(ctx, TA)).contains(leaf).hasSize(modelPartitions(ctx));
+        }
+        assertThat(rowCounts(TA)).isEqualTo(before);
+    }
+
+    private int tokenCount(String tenant) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            Object n = dsl(su).fetchValue("SELECT (SELECT count(*) FROM nexus.service_tokens WHERE tenant_id = ?) "
+                + "+ (SELECT count(*) FROM nexus.session_tokens WHERE tenant_id = ?)", tenant, tenant);
+            return ((Number) n).intValue();
+        }
+    }
+
     @Test
     void aDroppedTenantCanBeGivenItsLeavesAgain() throws Exception {
         try (Connection su = pg.createConnection("")) {
