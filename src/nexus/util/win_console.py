@@ -26,8 +26,10 @@ The sequence is process-global: while it runs, every thread of the process is
 off its console, and the CLI's own console is whatever
 ``AttachConsole(ATTACH_PARENT_PROCESS)`` rebuilds afterwards. So
 :func:`send_ctrl_break_via_helper` spawns ``python -m nexus.util.win_console
-<pid>`` as a ``DETACHED_PROCESS`` (no console of its own) and reads one JSON
-result from its stdout pipe; the stop CLI's console is never detached.
+<pid>`` with ``CREATE_NO_WINDOW`` (a hidden console of its own, freed first;
+never ``DETACHED_PROCESS``, which hung the venv launcher, see
+:data:`CREATE_NO_WINDOW`) and reads one JSON result from its stdout pipe; the
+stop CLI's console is never detached.
 :func:`send_ctrl_break_via_console` remains the sequence itself, run by the
 helper (``reattach=False``: there is nothing to restore) and by tests with an
 injected API.
@@ -73,11 +75,25 @@ ERROR_INVALID_HANDLE: int = 6
 
 _MAX_WINDOWS_PID: int = 0xFFFFFFFF
 
-#: ``CreateProcess`` flag: a child with no console at all. The helper must not
-#: start on one (``AttachConsole`` fails while the caller has a console, and the
-#: helper's ``FreeConsole`` then has nothing to free), and a ``CREATE_NEW_CONSOLE``
-#: child would flash a window.
+#: ``CreateProcess`` flag: a child with no console at all. NOT used for the
+#: helper (see :data:`CREATE_NO_WINDOW`); kept because callers and tests name it.
 DETACHED_PROCESS: int = 0x00000008
+
+#: ``CreateProcess`` flag the helper is spawned with: a HIDDEN console of its
+#: own. The sequence starts with ``FreeConsole``, so that console is dropped
+#: before ``AttachConsole(target)``, and no window ever shows
+#: (``CREATE_NEW_CONSOLE`` would flash one). It replaced ``DETACHED_PROCESS``
+#: (RDR-224 guide walk, nexus-f9bgu): the helper's ``python.exe`` is the venv's
+#: launcher, which starts the real interpreter as a child, and under
+#: ``DETACHED_PROCESS`` that child never ran a line (not even a first write to
+#: stderr), so every ``nx daemon service stop`` on a uv tool install waited out
+#: :data:`HELPER_TIMEOUT_S`, sent nothing, waited the supervisor's grace and
+#: hard-killed it: 41 s and three warnings. Measured on a clean Windows 11 guest
+#: with conexus 7.72.1: the launcher and its child both alive at the 10 s
+#: timeout with empty stdout and stderr; the base interpreter under
+#: ``DETACHED_PROCESS`` ran at once; the launcher under ``CREATE_NO_WINDOW``
+#: answered in 0.69 s and the supervisor exited 0.40 s later.
+CREATE_NO_WINDOW: int = 0x08000000
 
 #: Bound on the helper: interpreter start plus four kernel32 calls take well
 #: under a second; this only has to be finite.
@@ -252,7 +268,8 @@ def send_ctrl_break_via_helper(
 
     The helper is this interpreter (``pythonw`` mapped to ``python``: it needs a
     console-subsystem build to have a stdout) running this module as ``__main__``
-    with ``DETACHED_PROCESS``. A helper that cannot be started, times out or
+    with ``CREATE_NO_WINDOW`` (never ``DETACHED_PROCESS``, see
+    :data:`CREATE_NO_WINDOW`). A helper that cannot be started, times out or
     prints no result is reported as ``stage="helper"``, ``sent=False``: not a
     send and not a refusal, so the caller's escalation ladder carries on.
 
@@ -274,7 +291,7 @@ def send_ctrl_break_via_helper(
             argv,
             stdin=subprocess.DEVNULL,
             timeout=timeout_s,
-            extra_creationflags=DETACHED_PROCESS,
+            extra_creationflags=CREATE_NO_WINDOW,
         )
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
         _log.warning("win_console_helper_failed", pid=pid, error=repr(exc))
@@ -354,6 +371,7 @@ def ctypes_win_console_api() -> WinConsoleApi:
 
 __all__ = [
     "ATTACH_PARENT_PROCESS",
+    "CREATE_NO_WINDOW",
     "CTRL_BREAK_EVENT",
     "DETACHED_PROCESS",
     "ERROR_ACCESS_DENIED",

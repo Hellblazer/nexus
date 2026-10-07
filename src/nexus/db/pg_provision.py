@@ -392,7 +392,7 @@ def _candidate_sharedirs(pg_config: Path, bin_dir: Path, sharedir: str) -> list[
     return candidates
 
 
-def check_pgvector_available(bins: PgBinaries) -> None:
+def check_pgvector_available(bins: PgBinaries, *, platform: str | None = None) -> None:
     """Fail loud when pgvector is not installed for THIS PostgreSQL.
 
     Checks for ``<sharedir>/extension/vector.control``. ``pg_config`` reports the
@@ -401,8 +401,13 @@ def check_pgvector_available(bins: PgBinaries) -> None:
     Indeterminate (pg_config missing/failing) does NOT block — provisioning
     will fail loud at CREATE EXTENSION anyway; this gate exists to move the
     common failure earlier, not to add a new way to be wrong.
+
+    The Windows bundle ships ``pg_config.exe`` like its other binaries
+    (:meth:`PgBinaries.from_dir`); probing the bare name there skipped this gate
+    on every Windows install and logged a warning a new user read as a failure
+    (RDR-224 guide walk, nexus-f9bgu). *platform* is the test seam.
     """
-    pg_config = bins.bin_dir / "pg_config"
+    pg_config = bins.bin_dir / f"pg_config{'.exe' if _on_windows(platform) else ''}"
     if not pg_config.is_file():
         _log.warning("pgvector_preflight_no_pg_config", bin_dir=str(bins.bin_dir))
         return
