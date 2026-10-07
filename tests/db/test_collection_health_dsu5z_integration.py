@@ -34,7 +34,6 @@ from __future__ import annotations
 
 import os
 import shutil
-import signal
 import socket
 import subprocess
 import tempfile
@@ -47,6 +46,7 @@ import pytest
 from nexus._install.layout_core import exe_name
 from nexus.db.pg_provision import bootstrap_superuser
 
+from tests._child_process import java_available, java_executable, pg_data_tempdir, stop_group
 from tests.db._service_fixture import (
     ENGINE_ADMIN_DB_ENV_KEYS,
     SERVICE_ROLES_SQL,
@@ -67,12 +67,7 @@ _PG_CTL   = _PG_BIN / exe_name("pg_ctl")
 _PSQL     = _PG_BIN / exe_name("psql")
 _CREATEDB = _PG_BIN / exe_name("createdb")
 
-_JAVA_HOME = os.environ.get("JAVA_HOME", "")
-_JAVA = (
-    Path(_JAVA_HOME) / "bin" / "java"
-    if _JAVA_HOME
-    else Path(shutil.which("java") or "java")
-)
+_JAVA = java_executable()
 
 _ALL_PREREQS = (
     _JAR.exists()
@@ -80,7 +75,7 @@ _ALL_PREREQS = (
     and _PG_CTL.exists()
     and _PSQL.exists()
     and _CREATEDB.exists()
-    and (_JAVA.exists() if _JAVA_HOME else shutil.which("java") is not None)
+    and java_available()
 )
 
 pytestmark = [
@@ -144,7 +139,7 @@ def _psql(pg: dict, sql: str) -> None:
 @pytest.fixture(scope="module")
 def pg_instance():
     """Hermetic PostgreSQL 16 instance."""
-    pgdata = tempfile.mkdtemp(prefix="nexus_dsu5z_inttest_pg_")
+    pgdata = pg_data_tempdir("nexus_dsu5z_inttest_pg_")
     pg_port = _free_port()
     pglog = os.path.join(pgdata, "pg.log")
     pg_user = bootstrap_superuser()
@@ -211,17 +206,7 @@ def java_service(pg_instance):
         wait_for_service("127.0.0.1", svc_port, proc=proc, log_path=_svc_log, timeout=60.0)
         yield f"http://127.0.0.1:{svc_port}", _TOKEN, proc
     finally:
-        try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-        except ProcessLookupError:
-            pass
-        try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            try:
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-            except ProcessLookupError:
-                pass
+        stop_group(proc, grace_s=5)
         shutil.rmtree(chroma_data, ignore_errors=True)
 
 

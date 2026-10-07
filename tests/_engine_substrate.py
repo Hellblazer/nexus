@@ -94,6 +94,9 @@ from pathlib import Path
 import structlog
 
 from nexus._locking import lock_file, unlock_file
+from nexus._winsec import grant_user_tree_access
+from nexus.util.process_group import KILL_SIGNAL, safe_killpg
+from tests._child_process import kill_group, popen_in_group, stop_group
 from tests._pg_ctl import pg_ctl_start
 from tests.db._service_fixture import (
     SERVICE_ROLES_SQL,
@@ -656,6 +659,10 @@ def _initdb_cluster(
     initdb's own default, the OS account name.
     """
     pgdata = tempfile.mkdtemp(prefix=prefix, dir=parent_dir)
+    # Windows: the user's own SID gets an inheritable ACE, or initdb's
+    # restricted token cannot write the directory under an elevated session
+    # (tests._child_process.pg_data_tempdir). A no-op on POSIX.
+    grant_user_tree_access(pgdata)
     proc = subprocess.run(
         [str(bin_dir / "initdb"), "-D", pgdata, "--no-locale", "-E", "UTF8",
          "--auth=trust", *(["-U", username] if username else [])],
@@ -1018,10 +1025,9 @@ def _boot() -> dict:
     # 65,702 buffered bytes instantly unwedged the next mint.
     svc_log_path = os.path.join(pgdata, "engine.log")
     svc_log = open(svc_log_path, "wb")  # noqa: SIM115 — lifetime spans the pytest session, closed with the process
-    svc = subprocess.Popen(
-        engine_argv(java), env=env,
+    svc = popen_in_group(
+        engine_argv(java), popen=subprocess.Popen, env=env,
         stdout=svc_log, stderr=subprocess.STDOUT,
-        preexec_fn=os.setsid,
     )
     # Checkpoint 3 of 3: svc.pid is known SYNCHRONOUSLY the instant Popen
     # returns -- no reason to defer recording it until _wait_tcp succeeds
@@ -1036,10 +1042,7 @@ def _boot() -> dict:
     try:
         _wait_tcp("127.0.0.1", svc_port, timeout=60.0)
     except TimeoutError:
-        try:
-            os.killpg(os.getpgid(svc.pid), signal.SIGKILL)
-        except ProcessLookupError:
-            pass
+        kill_group(svc)
         svc_log.flush()
         with open(svc_log_path, encoding="utf-8", errors="replace") as fh:
             out = fh.read()[-2000:]
@@ -1074,15 +1077,7 @@ def _teardown() -> None:
     global _state
     if _state is None:
         return
-    svc = _state["svc"]
-    try:
-        os.killpg(os.getpgid(svc.pid), signal.SIGTERM)
-        svc.wait(timeout=5)
-    except (ProcessLookupError, subprocess.TimeoutExpired):
-        try:
-            os.killpg(os.getpgid(svc.pid), signal.SIGKILL)
-        except ProcessLookupError:
-            pass
+    stop_group(_state["svc"], grace_s=5)
     subprocess.run(
         [str(_state["pg_bin"] / "pg_ctl"), "-D", _state["pgdata"],
          "stop", "-m", "immediate"],
@@ -1382,8 +1377,8 @@ def _identify_leg(pid: int, expected_cmdline: str) -> str:
 def _kill_engine_leg(pid: int, *, grace_s: float = 5.0) -> None:
     """SIGTERM then SIGKILL the engine's PROCESS GROUP, not just *pid*.
 
-    Matches ``_boot()``'s ``preexec_fn=os.setsid`` and ``_teardown()``'s
-    ``os.killpg`` for this exact process shape (round-2 review, Important:
+    Matches ``_boot()``'s group spawn and ``_teardown()``'s group stop
+    (``tests._child_process``) for this exact process shape (round-2 review, Important:
     a single-PID signal would miss any child the JVM ever spawned, unlike
     every OTHER teardown path for this same process). Falls back to a
     bare single-PID signal only if ``getpgid`` fails (the process exited
@@ -1392,6 +1387,11 @@ def _kill_engine_leg(pid: int, *, grace_s: float = 5.0) -> None:
     from nexus.daemon.service_registry import pid_alive
 
     def _signal_group(sig: int) -> bool:
+        if getattr(os, "killpg", None) is None:
+            # Windows: no process group to reach. The owner's job object
+            # (tests._child_process.popen_in_group) already killed the tree
+            # when the owner died; this is the single-process fallback.
+            return safe_killpg(pid, sig)
         try:
             pgid = os.getpgid(pid)
         except ProcessLookupError:
@@ -1411,7 +1411,7 @@ def _kill_engine_leg(pid: int, *, grace_s: float = 5.0) -> None:
         time.sleep(0.1)
     if not pid_alive(pid):
         return
-    if not _signal_group(signal.SIGKILL):
+    if not _signal_group(KILL_SIGNAL):
         return
     time.sleep(0.2)
     if pid_alive(pid):
@@ -1437,7 +1437,7 @@ def _kill_postmaster_leg(pid: int, cluster_dir: Path, *, grace_s: float = 5.0) -
     *grace_s* — a last resort (e.g. the pgdata is not a live PG cluster
     ``pg_ctl`` can parse at all), not the normal path.
     """
-    from nexus.daemon.service_registry import pid_alive
+    from nexus.daemon.service_registry import hard_kill_pid, pid_alive
 
     subprocess.run(
         [str(_pg_bin() / "pg_ctl"), "-D", str(cluster_dir), "stop", "-m", "immediate"],
@@ -1450,9 +1450,9 @@ def _kill_postmaster_leg(pid: int, cluster_dir: Path, *, grace_s: float = 5.0) -
         time.sleep(0.1)
     if not pid_alive(pid):
         return
-    try:
-        os.kill(pid, signal.SIGKILL)
-    except ProcessLookupError:
+    # SIGKILL on POSIX, TerminateProcess on Windows; a pid that is already
+    # gone (ESRCH, or WinError 87 on Windows) is False, never a raise.
+    if not hard_kill_pid(pid):
         return
     time.sleep(0.2)
     if pid_alive(pid):

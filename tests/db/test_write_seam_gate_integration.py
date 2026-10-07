@@ -58,7 +58,6 @@ from __future__ import annotations
 import hashlib
 import os
 import shutil
-import signal
 import socket
 import subprocess
 import tempfile
@@ -67,6 +66,7 @@ from pathlib import Path
 
 import pytest
 
+from tests._child_process import java_available, java_executable, stop_group
 from tests.db._service_fixture import (
     SERVICE_ROLES_SQL,
     spawn_service,
@@ -78,18 +78,13 @@ from tests.db._service_fixture import (
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 _JAR = _REPO_ROOT / "service" / "target" / "nexus-service-1.0-SNAPSHOT.jar"
 
-_JAVA_HOME = os.environ.get("JAVA_HOME", "")
-_JAVA = (
-    Path(_JAVA_HOME) / "bin" / "java"
-    if _JAVA_HOME
-    else Path(shutil.which("java") or "java")
-)
+_JAVA = java_executable()
 
 _DOCKER = shutil.which("docker")
 
 # JAR check is enforced via the conftest autouse fixture.
 # Docker is the only PG path for this test — no Homebrew fallback.
-_JAVA_OK = _JAVA_HOME and (Path(_JAVA_HOME) / "bin" / "java").exists() or shutil.which("java") is not None
+_JAVA_OK = java_available()
 _DOCKER_OK = _DOCKER is not None
 
 _ALL_PREREQS = _JAR.exists() and _JAVA_OK and _DOCKER_OK
@@ -131,17 +126,7 @@ def _wait_tcp(host: str, port: int, timeout: float = 60.0) -> None:
 
 
 def _stop_service(proc: subprocess.Popen) -> None:
-    try:
-        os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-    except ProcessLookupError:
-        pass
-    try:
-        proc.wait(timeout=8)
-    except subprocess.TimeoutExpired:
-        try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-        except ProcessLookupError:
-            pass
+    stop_group(proc, grace_s=8)
 
 
 def _chunk_id(text: str) -> str:

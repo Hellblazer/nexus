@@ -50,7 +50,6 @@ import hashlib
 import json
 import os
 import shutil
-import signal
 import socket
 import subprocess
 import tempfile
@@ -63,6 +62,7 @@ import pytest
 from nexus._install.layout_core import exe_name
 from nexus.db.pg_provision import bootstrap_superuser
 
+from tests._child_process import java_available, java_executable, pg_data_tempdir, stop_group
 from tests.db._service_fixture import spawn_service, wait_for_service
 
 from tests.benchmarks.test_retrieval_ndcg import ndcg_at_k
@@ -79,12 +79,7 @@ _PG_CTL = _PG_BIN / exe_name("pg_ctl")
 _PSQL = _PG_BIN / exe_name("psql")
 _CREATEDB = _PG_BIN / exe_name("createdb")
 
-_JAVA_HOME = os.environ.get("JAVA_HOME", "")
-_JAVA = (
-    Path(_JAVA_HOME) / "bin" / "java"
-    if _JAVA_HOME
-    else Path(shutil.which("java") or "java")
-)
+_JAVA = java_executable()
 
 
 def _bge_model_present() -> bool:
@@ -97,7 +92,7 @@ _ALL_PREREQS = (
     and _INITDB.exists()
     and _PG_CTL.exists()
     and _PSQL.exists()
-    and (_JAVA.exists() if _JAVA_HOME else shutil.which("java") is not None)
+    and java_available()
     and _bge_model_present()
 )
 
@@ -149,7 +144,7 @@ def _wait_tcp(host: str, port: int, timeout: float = 120.0) -> None:
 @pytest.fixture(scope="module")
 def pg_instance():
     """Hermetic PostgreSQL with the service schema (Liquibase runs in-jar)."""
-    pgdata = tempfile.mkdtemp(prefix="nexus_ndcg_gate_pg_")
+    pgdata = pg_data_tempdir("nexus_ndcg_gate_pg_")
     pg_port = _free_port()
     pg_user = bootstrap_superuser()
     try:
@@ -216,17 +211,7 @@ def java_service(pg_instance):
         )
         yield f"http://127.0.0.1:{svc_port}", _TOKEN
     finally:
-        try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-        except ProcessLookupError:
-            pass
-        try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            try:
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-            except ProcessLookupError:
-                pass
+        stop_group(proc, grace_s=5)
         shutil.rmtree(chroma_data, ignore_errors=True)
 
 

@@ -53,7 +53,6 @@ from __future__ import annotations
 
 import os
 import shutil
-import signal
 import socket
 import subprocess
 import tempfile
@@ -67,6 +66,7 @@ import pytest
 from nexus._install.layout_core import exe_name
 from nexus.db.pg_provision import bootstrap_superuser
 
+from tests._child_process import java_available, java_executable, pg_data_tempdir, popen_in_group, stop_group
 from tests.db._service_fixture import SERVICE_ROLES_SQL, jar_argv, pg_bin_dir
 from tests._pg_ctl import pg_ctl_start
 
@@ -81,12 +81,7 @@ _PG_CTL   = _PG_BIN / exe_name("pg_ctl")
 _PSQL     = _PG_BIN / exe_name("psql")
 _CREATEDB = _PG_BIN / exe_name("createdb")
 
-_JAVA_HOME = os.environ.get("JAVA_HOME", "")
-_JAVA = (
-    Path(_JAVA_HOME) / "bin" / "java"
-    if _JAVA_HOME
-    else Path(shutil.which("java") or "java")
-)
+_JAVA = java_executable()
 
 _HAS_VOYAGE_KEY = bool(os.environ.get("VOYAGE_API_KEY"))
 
@@ -112,7 +107,7 @@ _ALL_PREREQS = (
     and _PG_CTL.exists()
     and _PSQL.exists()
     and _CREATEDB.exists()
-    and (_JAVA.exists() if _JAVA_HOME else shutil.which("java") is not None)
+    and java_available()
 )
 
 pytestmark = [
@@ -225,7 +220,7 @@ def _provision_pg() -> tuple[dict, str]:
     old module-scoped ``pg_instance``) collided on it. Per-service PGs isolate
     the bootstrap.
     """
-    pgdata  = tempfile.mkdtemp(prefix="nexus_parity_pg_")
+    pgdata  = pg_data_tempdir("nexus_parity_pg_")
     pg_port = _free_port()
     pglog   = os.path.join(pgdata, "pg.log")
     pg_user = bootstrap_superuser()
@@ -318,40 +313,36 @@ def _start_service(pg: dict, token: str, voyage_key: str | None = None,
     # production launcher (storage_service_daemon) redirects to log files for
     # exactly this reason.
     log_path = os.path.join(tempfile.gettempdir(), f"nexus-svc-parity-{svc_port}.log")
-    log_fh = open(log_path, "wb")
-    proc = subprocess.Popen(
-        jar_argv(_JAVA, _JAR),
-        env=env,
-        stdout=log_fh,
-        stderr=subprocess.STDOUT,
-        preexec_fn=os.setsid,
-    )
+    # The child holds its own handle to the log, so the parent's closes here.
+    with open(log_path, "wb") as log_fh:
+        proc = popen_in_group(
+            jar_argv(_JAVA, _JAR),
+            env=env,
+            stdout=log_fh,
+            stderr=subprocess.STDOUT,
+        )
+    # Every exit from the port wait that does not hand proc to the caller stops its
+    # group: a timeout, a KeyboardInterrupt, anything. Without this a failed boot
+    # leaked the JVM (nexus-f9bgu residuals; pinned by
+    # tests/db/test_embed_parity_spawn_teardown.py).
     try:
         _wait_tcp("127.0.0.1", svc_port, timeout=timeout)
-    except TimeoutError:
-        log_fh.flush()
+    except BaseException as exc:
+        stop_group(proc, grace_s=5)
+        if not isinstance(exc, TimeoutError):
+            raise
         try:
-            tail = open(log_path).read()[-1500:]
+            tail = Path(log_path).read_text(errors="replace")[-1500:]
         except OSError:
             tail = "(log unavailable)"
         raise TimeoutError(
             f"service did not bind {svc_port} in {timeout}s; JAR log tail:\n{tail}"
-        )
+        ) from exc
     return proc, svc_port
 
 
 def _stop_service(proc: subprocess.Popen) -> None:
-    try:
-        os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-    except ProcessLookupError:
-        pass
-    try:
-        proc.wait(timeout=5)
-    except subprocess.TimeoutExpired:
-        try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-        except ProcessLookupError:
-            pass
+    stop_group(proc, grace_s=5)
 
 
 @pytest.fixture(scope="module")
