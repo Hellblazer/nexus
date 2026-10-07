@@ -6,6 +6,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **The Claude Desktop extension no longer runs a Python interpreter from a `.venv` above its own directory** (nexus-92gxf). Desktop starts the bundle with the manifest's `mcp_config`, which was `uv run --no-project --directory ${__dirname} src/bootstrap.py`. `uv run` searches that directory and every parent for a `.venv`, so a `~/.venv`, or a `C:\.venv` that any local Windows user may create, ran the bootstrap. The launcher is now `uv tool run --directory ${__dirname} --no-config --quiet --python >=3.12 python src/bootstrap.py`, the form the plugin hooks use: a tool environment is built from a managed or PATH interpreter, never a `.venv`. A second path reached the server itself: the bootstrap's `uv sync` and `uv run` treat the bundle as a project, and uv adopted an ancestor `pyproject.toml` whose `[tool.uv.workspace]` members matched the bundle as the workspace root, so the server ran in that ancestor's `.venv`. `mcpb/pyproject.toml` now declares the bundle its own workspace root (`members = []`). Measured on a Windows 11 guest (uv 0.12.23) by launching each bundle's manifest command over MCP stdio (initialize, 44 tools, store_put, search): the old bundle ran a planted `%USERPROFILE%\.venv`, and with that removed a planted `C:\.venv`; the new bundle ran neither, and a planted `C:\pyproject.toml` workspace with `C:\.venv` ran the server only when the bundle lacked its own workspace table. `tests/test_mcpb_launcher_venv.py` runs the manifest command against real planted venvs with both controls.
+
 ## [7.72.1] - 2026-10-06
 
 Pairs with engine-service-v0.1.149, unchanged from 7.72.0 (`REQUIRED_ENGINE_VERSION` stays 0.1.149). A Windows fix release: on native Windows 7.72.0's MCP search hung forever, and these fixes are what the RDR-224 Phase 5 gate passed with on a clean Windows 11 guest (T2 nexus_rdr/224-gate-run-2026-10-06). Windows is still not declared supported.

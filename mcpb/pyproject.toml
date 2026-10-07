@@ -25,3 +25,12 @@ override-dependencies = [
     # broke mineru's span_pre_proc.py (see root pyproject.toml for detail).
     "pdftext>=0.6.3,<0.7",
 ]
+
+# nexus-92gxf: the bundle is its own workspace root. Without this table uv walks
+# up from the bundle for a pyproject.toml whose [tool.uv.workspace] members match
+# it, and a match (~/pyproject.toml, or C:\pyproject.toml, which any local Windows
+# user may create) makes that ancestor the root: its .venv becomes the server's
+# environment and its settings drive the sync. Pinned by
+# tests/test_mcpb_launcher_venv.py.
+[tool.uv.workspace]
+members = []
