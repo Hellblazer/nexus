@@ -263,14 +263,41 @@ def test_spawn_detached_cleanup_asks_for_breakaway_first_then_retries_without() 
     with patch.object(subprocess, "Popen", side_effect=_popen):
         assert launcher._spawn_detached_cleanup() is True
 
-    base = launcher._DETACHED_PROCESS | launcher._CREATE_NEW_PROCESS_GROUP
+    base = 0x08000000 | 0x00000200  # CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP
     assert [c["creationflags"] for c in seen] == [
-        base | launcher._CREATE_BREAKAWAY_FROM_JOB, base,
+        base | 0x01000000, base,  # first attempt adds CREATE_BREAKAWAY_FROM_JOB
     ]
     for call in seen:
         assert call["argv"] == [sys.executable, "-c", launcher._DETACHED_CHILD_CODE]
         assert call["stdin"] == call["stdout"] == call["stderr"] == subprocess.DEVNULL
         assert call["close_fds"] is True
+
+
+def test_spawn_detached_cleanup_never_uses_detached_process() -> None:
+    """``sys.executable`` on a uv tool install is the venv launcher
+    (``Scripts\\python.exe``), which starts the real interpreter as its own
+    child. Started with DETACHED_PROCESS, that child never ran a line on the
+    clean Windows 11 guest (conexus 7.72.1, CPython 3.13.16): launcher and
+    child were both still alive 20 s later and the cleanup never happened.
+    CREATE_NO_WINDOW ran the same child in 0.11 s (T2
+    nexus_rdr/224-windows-session-end-launcher). No attempt may carry
+    DETACHED_PROCESS, and every attempt carries CREATE_NO_WINDOW."""
+    import subprocess
+
+    import nexus._session_end_launcher as launcher
+
+    seen: list[int] = []
+
+    def _popen(argv, **kwargs):
+        seen.append(kwargs["creationflags"])
+        raise OSError("refused")
+
+    with patch.object(subprocess, "Popen", side_effect=_popen):
+        assert launcher._spawn_detached_cleanup() is False
+    assert len(seen) == 2
+    for flags in seen:
+        assert not flags & 0x00000008, f"DETACHED_PROCESS in 0x{flags:08x}"
+        assert flags & 0x08000000, f"CREATE_NO_WINDOW missing from 0x{flags:08x}"
 
 
 def test_spawn_detached_cleanup_reports_failure_when_both_attempts_fail() -> None:

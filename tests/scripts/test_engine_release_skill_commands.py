@@ -102,7 +102,8 @@ def test_standing_instructions_that_run_the_cloud_gate_name_the_mode_variable() 
 # Step 3f: the pre-cut Windows commands exist and parse (RDR-224 review finding 11)
 # --------------------------------------------------------------------------- #
 
-S3F = SKILL.split("### 3f.")[1].split("### 4.")[0]
+S3F = SKILL.split("### 3f.")[1].split("### 3g.")[0]
+S3G = SKILL.split("### 3g.")[1].split("### 4.")[0]
 #: The `gh run list --json` fields gh documents; the skill's command may name only these.
 GH_RUN_LIST_FIELDS = {
     "attempt", "conclusion", "createdAt", "databaseId", "displayTitle", "event", "headBranch", "headSha",
@@ -125,6 +126,13 @@ def test_step_3f_has_the_two_commands_a_pre_cut_reader_runs() -> None:
     assert ["gh", "variable", "get", "NX_WINDOWS_RELEASE_LEGS"] in cmds
     assert any(c[:4] == ["uv", "run", "python", "scripts/check_engine_release_floor.py"] for c in cmds), cmds
     assert len(cmds) == 2, f"a third command was added to step 3f without a pin: {cmds}"
+
+
+def test_step_3g_checks_the_release_holds_on_the_tree_it_will_tag() -> None:
+    """nexus-3wh8d.28: the pre-tag release-holds check runs the real script against the worktree being tagged."""
+    cmds = _bash_commands(S3G)
+    assert ["uv", "run", "python", "scripts/check_release_holds.py", "--root", "$TAG_TREE"] in cmds, cmds
+    assert (Path(__file__).resolve().parents[2] / "scripts" / "check_release_holds.py").is_file()
 
 
 def test_the_switch_variable_step_3f_reads_is_the_one_the_workflows_use() -> None:

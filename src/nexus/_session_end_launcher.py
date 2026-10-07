@@ -89,14 +89,21 @@ _DETACHED_CHILD_CODE: str = (
 #: Windows CreateProcess flags, spelled out because ``subprocess`` defines
 #: them only on Windows and is not imported here at module scope: POSIX pays
 #: the pre-fork budget above, and ``subprocess`` costs ~5ms of it (measured
-#: 2026-09-24). DETACHED_PROCESS gives the child no console, so nothing
-#: flashes on screen and nothing ties it to the hook's console.
+#: 2026-09-24). CREATE_NO_WINDOW gives the child a console of its own that
+#: is never shown, so nothing flashes on screen and nothing ties it to the
+#: hook's console. NEVER DETACHED_PROCESS: ``sys.executable`` on a uv tool
+#: install is the venv launcher (``Scripts\python.exe``), which starts the
+#: real interpreter as its own child, and under DETACHED_PROCESS that child
+#: never ran a line (clean Windows 11 guest, conexus 7.72.1, CPython 3.13.16:
+#: launcher and child both alive 20 s later, no cleanup; CREATE_NO_WINDOW ran
+#: it in 0.11 s; T2 nexus_rdr/224-windows-session-end-launcher). The stop
+#: helper had the same defect (nexus.util.win_console, nexus-f9bgu).
 #: CREATE_NEW_PROCESS_GROUP keeps a console CTRL event aimed at the hook
 #: from reaching it. CREATE_BREAKAWAY_FROM_JOB takes it out of any job
 #: object the hook runs in, so closing that job does not kill it; a job
 #: that forbids breakaway refuses the spawn, and the spawn is retried
 #: without the flag.
-_DETACHED_PROCESS: int = 0x00000008
+_CREATE_NO_WINDOW: int = 0x08000000
 _CREATE_NEW_PROCESS_GROUP: int = 0x00000200
 _CREATE_BREAKAWAY_FROM_JOB: int = 0x01000000
 
@@ -250,13 +257,17 @@ def _spawn_detached_cleanup() -> bool:
     hook is cancelled the child is not safe regardless of breakaway.
     NOT MEASURED: the no-breakaway fallback arm (``base`` without
     ``_CREATE_BREAKAWAY_FROM_JOB``) below -- breakaway succeeded on every
-    attempt in that run, so the fallback was never exercised.
+    attempt in that run, so the fallback was never exercised. That run
+    used DETACHED_PROCESS in a ``uv pip install`` venv on CPython 3.12.13;
+    on a uv tool install (CPython 3.13.16) the same flags left the child
+    hung before its first line, which is why the flags are now
+    CREATE_NO_WINDOW (see the constants above).
     """
     import subprocess  # noqa: PLC0415 — deferred: off the POSIX pre-fork path (module docstring)
     import warnings  # noqa: PLC0415 — deferred with subprocess, for the same reason
 
     argv = [sys.executable, "-c", _DETACHED_CHILD_CODE]
-    base = _DETACHED_PROCESS | _CREATE_NEW_PROCESS_GROUP
+    base = _CREATE_NO_WINDOW | _CREATE_NEW_PROCESS_GROUP
     for flags in (base | _CREATE_BREAKAWAY_FROM_JOB, base):
         try:
             child = subprocess.Popen(
