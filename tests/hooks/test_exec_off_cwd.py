@@ -292,3 +292,31 @@ def test_the_interpreter_shim_execs_the_path_python_not_a_planted_one(
     monkeypatch.setenv("NX_TOOLS_DIR", str(windows_box["uv.exe"].parent / "no-tools"))
     got = mod.resolve()
     assert got == str(windows_box["python3.13.exe"])
+
+
+def test_the_dev_venv_match_uses_claude_project_dir_never_the_process_cwd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Finding C (nexus-f9bgu.36): uv launches hooks with ``--directory
+    ${CLAUDE_PLUGIN_ROOT}``, so the process cwd is the plugin root. The check that
+    an active venv's ``nexus`` is THIS checkout compares against the project
+    directory, and has no project to compare against when it is unset."""
+    mod = _load(_SCRIPTS / "_interpreter.py", "_interpreter_projectdir")
+    probes: list[str] = []
+
+    def fake_runs(exe: str, *, probe: str = "") -> bool:
+        probes.append(probe)
+        return True
+
+    monkeypatch.setattr(mod, "_runs", fake_runs)
+    project = tmp_path / "project"
+    project.mkdir()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("VIRTUAL_ENV", str(tmp_path / "venv"))
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project))
+    assert mod._venv_python_for_this_checkout() is not None
+    assert repr(str(project)) in probes[0] and "getcwd" not in probes[0], probes
+    monkeypatch.delenv("CLAUDE_PROJECT_DIR")
+    probes.clear()
+    assert mod._venv_python_for_this_checkout() is None
+    assert probes == [], "with no project directory the venv was still probed against the process cwd"

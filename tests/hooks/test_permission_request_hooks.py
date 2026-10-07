@@ -449,7 +449,7 @@ class TestPreToolUseApproval:
         # register auto-approve and a direct entry exits 2 on every MCP call.
         # Launched through uv since nexus-efk2h (no python3 on stock Windows).
         assert nx_pre == nx_perm == {
-            "uv run --no-project --no-config --quiet "
+            "uv run --directory ${CLAUDE_PLUGIN_ROOT} --no-project --no-config --quiet "
             "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/nx_hook_shim.py auto-approve"
         }, (
             f"{self.NX_HOOKS}: PreToolUse {nx_pre} vs PermissionRequest {nx_perm}"

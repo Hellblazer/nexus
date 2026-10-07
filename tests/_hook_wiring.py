@@ -53,7 +53,7 @@ def command_verb(entry: dict) -> str | None:
 
 
 #: Everything `uv` is given before the script path (nexus-efk2h): sn's argv.
-UV_LAUNCHER_ARGV = ("run", "--no-project", "--no-config", "--quiet")
+UV_LAUNCHER_ARGV = ("run", "--directory", "${CLAUDE_PLUGIN_ROOT}", "--no-project", "--no-config", "--quiet")
 
 
 def launcher_script_args(entry: dict) -> list[str]:

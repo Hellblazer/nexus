@@ -1390,8 +1390,12 @@ def body(payload: dict[str, Any]) -> None:
         )
         _lib.pass_through()
 
-    cwd = str(payload.get("cwd") or "") or os.getcwd()
-    worktree = _in_linked_worktree(cwd)
+    # The project comes from the payload, then CLAUDE_PROJECT_DIR. Never from the
+    # process cwd: uv launches this script with `--directory ${CLAUDE_PLUGIN_ROOT}`
+    # (finding C, nexus-f9bgu.36), so that is the plugin root. Neither given means
+    # undeterminable, which the branch below treats like the primary checkout.
+    cwd = str(payload.get("cwd") or "") or os.environ.get("CLAUDE_PROJECT_DIR", "")
+    worktree = _in_linked_worktree(cwd) if cwd else None
     if worktree is True:
         # Linked worktree, POSITIVELY PROVEN: the agent owns its tree,
         # including destroying it. This is the ONLY exemption from either

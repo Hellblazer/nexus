@@ -140,21 +140,28 @@ def _runs(exe: str, *, probe: str = "") -> bool:
 
 
 def _venv_python_for_this_checkout() -> str | None:
-    """An active venv whose ``nexus`` is the checkout under the cwd.
+    """An active venv whose ``nexus`` is the checkout under the project directory.
 
     A developer's editable install must win over the installed generation,
     or every nexus-importing hook silently reads production while the tree
     is being edited (critique [24988]). A stale ``VIRTUAL_ENV`` from another
     worktree, or one with a packaged ``nexus``, does not qualify.
+
+    The project directory is ``CLAUDE_PROJECT_DIR``, never the process cwd: hooks
+    are launched with ``uv run --directory ${CLAUDE_PLUGIN_ROOT}`` so uv cannot
+    execute an interpreter planted in the project (finding C, nexus-f9bgu.36), and
+    the process cwd is therefore the plugin root. Unset (not under Claude Code)
+    means there is no checkout to match and the answer is None.
     """
     venv = os.environ.get("VIRTUAL_ENV")
-    if not venv:
+    project = os.environ.get("CLAUDE_PROJECT_DIR")
+    if not venv or not project:
         return None
     exe = os.path.join(venv, "bin", "python")
     probe = (
         "import os, sys, nexus; "
         "sys.exit(0 if os.path.realpath(nexus.__file__)"
-        ".startswith(os.path.realpath(os.getcwd()) + os.sep) else 1)"
+        f".startswith(os.path.realpath({project!r}) + os.sep) else 1)"
     )
     return exe if _runs(exe, probe=probe) else None
 

@@ -34,6 +34,7 @@ their own subprocess work.
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 import signal
@@ -55,6 +56,29 @@ UNKNOWN_VERB_LINE = re.compile(
 )
 
 
+def _project_dir(payload: bytes) -> str | None:
+    """The directory ``nx-hook`` should run in: the payload's ``cwd``, else
+    ``CLAUDE_PROJECT_DIR``, else ``None`` (inherit).
+
+    hooks.json launches the shim with ``uv run --directory ${CLAUDE_PLUGIN_ROOT}``
+    so uv cannot execute an interpreter planted in the project (finding C,
+    nexus-f9bgu.36); the shim's own cwd is therefore the plugin root, and the
+    verbs resolve the project from theirs. Only a directory that exists counts.
+    """
+    candidates: list[object] = []
+    try:
+        data = json.loads(payload)
+        if isinstance(data, dict):
+            candidates.append(data.get("cwd"))
+    except ValueError:
+        pass
+    candidates.append(os.environ.get("CLAUDE_PROJECT_DIR"))
+    for cand in candidates:
+        if isinstance(cand, str) and cand and os.path.isdir(cand):
+            return cand
+    return None
+
+
 def main(argv: list[str]) -> int:
     if len(argv) != 1:
         sys.stderr.write("nx_hook_shim: expected exactly one argument, the nx-hook verb\n")
@@ -68,6 +92,7 @@ def main(argv: list[str]) -> int:
         proc = subprocess.Popen(
             [exe, verb],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            cwd=_project_dir(payload),
         )
     except FileNotFoundError:
         sys.stderr.write(

@@ -173,9 +173,18 @@ def test_uv_with_no_interpreter_exits_2_which_blocks_five_entries(tmp_path) -> N
     entries = _launcher_entries()
     blocking = [(e, h) for e, h in entries if e in _BLOCKING_EVENTS]
     assert len(blocking) == 5, [(e, _script(h)) for e, h in blocking]
+    # The plugin root is a copy outside the repo: `--directory <plugin root>` makes uv
+    # discover interpreters from there, and the repo's own .venv above conexus/ would
+    # supply one.
+    root = tmp_path / "plugin"
+    shutil.copytree(REPO_ROOT / "conexus" / "hooks", root / "hooks")
     for event, hook in entries:
+        argv = [
+            hook["command"],
+            *(a.replace("${CLAUDE_PLUGIN_ROOT}", str(root)) for a in hook["args"]),
+        ]
         proc = subprocess.run(
-            _argv(hook), input="{}", capture_output=True, text=True, timeout=60,
+            argv, input="{}", capture_output=True, text=True, timeout=60,
             env=env, cwd=str(tmp_path),
         )
         assert proc.returncode == 2, (event, _script(hook), proc.returncode, proc.stderr)
