@@ -217,8 +217,9 @@ class CombinedQueryParityIntegrationTest {
                     .insertInto(CATALOG_DOCUMENT_CHUNKS,
                         CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
                         CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
-                        CATALOG_DOCUMENT_CHUNKS.COLLECTION)
-                    .values(TENANT, c.tumbler(), 0, HexFormat.of().parseHex(c.chash()), COLL)
+                        CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
+                    .values(TENANT, c.tumbler(), 0, HexFormat.of().parseHex(c.chash()), COLL,
+                        PgContainerHelper.collectionModel(DSL.using(su, SQLDialect.POSTGRES), TENANT, COLL))
                     .onConflict(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
                         CATALOG_DOCUMENT_CHUNKS.POSITION)
                     .doNothing()
@@ -228,9 +229,11 @@ class CombinedQueryParityIntegrationTest {
                     DSL.using(su, SQLDialect.POSTGRES)
                         .insertInto(TOPIC_ASSIGNMENTS,
                             TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID, TOPIC_ASSIGNMENTS.TOPIC_ID,
-                            TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, TOPIC_ASSIGNMENTS.ASSIGNED_AT)
+                            TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, TOPIC_ASSIGNMENTS.ASSIGNED_AT,
+                            TOPIC_ASSIGNMENTS.EMBEDDING_MODEL)
                         .values(TENANT, HexFormat.of().parseHex(c.chash()), topicId, COLL,
-                            OffsetDateTime.parse("2026-01-01T00:00:00+00:00"))
+                            OffsetDateTime.parse("2026-01-01T00:00:00+00:00"),
+                            PgContainerHelper.collectionModel(DSL.using(su, SQLDialect.POSTGRES), TENANT, COLL))
                         .onConflict(TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID,
                             TOPIC_ASSIGNMENTS.TOPIC_ID)
                         .doNothing()

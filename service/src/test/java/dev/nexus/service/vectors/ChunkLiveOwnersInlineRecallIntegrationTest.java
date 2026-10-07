@@ -209,8 +209,9 @@ class ChunkLiveOwnersInlineRecallIntegrationTest {
                 ctx.insertInto(CATALOG_DOCUMENT_CHUNKS,
                         CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
                         CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
-                        CATALOG_DOCUMENT_CHUNKS.COLLECTION)
-                    .values(TENANT, id, 0, HexFormat.of().parseHex(liveChashes.get(i)), COLLECTION)
+                        CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
+                    .values(TENANT, id, 0, HexFormat.of().parseHex(liveChashes.get(i)), COLLECTION,
+                        PgContainerHelper.collectionModel(ctx, TENANT, COLLECTION))
                     .onConflict(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
                         CATALOG_DOCUMENT_CHUNKS.POSITION)
                     .doNothing()
