@@ -98,6 +98,8 @@ class TestMarker:
 
     def test_default_marker_location(self, mod, monkeypatch) -> None:
         monkeypatch.delenv("NX_LOCKSTEP_MARKER", raising=False)
+        monkeypatch.delenv("NEXUS_CONFIG_DIR", raising=False)
+        monkeypatch.delenv("NX_CONFIG_DIR", raising=False)
         p = mod.marker_path()
         assert p.name == "cli_lockstep_marker"
         assert p.parent.name == "nexus"
@@ -670,10 +672,56 @@ class TestRefDriftMarker:
 
     def test_default_ref_drift_marker_location(self, mod, monkeypatch) -> None:
         monkeypatch.delenv("NX_LOCKSTEP_REF_DRIFT_MARKER", raising=False)
+        monkeypatch.delenv("NEXUS_CONFIG_DIR", raising=False)
+        monkeypatch.delenv("NX_CONFIG_DIR", raising=False)
         p = mod.ref_drift_marker_path()
         assert p.name == "ref_drift_lockstep_marker"
         assert p.parent.name == "nexus"
         assert ".config" in str(p)
+
+
+class TestMarkersFollowNexusConfigDir:
+    """nexus-f9bgu: with no per-file override, both markers live in the config
+    dir the CLI uses, so the hook reads what the action writes and a session
+    with ``NEXUS_CONFIG_DIR`` set never touches the real ``~/.config/nexus``."""
+
+    @pytest.fixture()
+    def cfg(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("NX_LOCKSTEP_MARKER", raising=False)
+        monkeypatch.delenv("NX_LOCKSTEP_REF_DRIFT_MARKER", raising=False)
+        monkeypatch.delenv("NX_CONFIG_DIR", raising=False)
+        cfg = tmp_path / "cfg"
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(cfg))
+        return cfg
+
+    def test_cli_marker_follows_nexus_config_dir(self, mod, cfg) -> None:
+        assert mod.marker_path() == cfg / "cli_lockstep_marker"
+
+    def test_ref_drift_marker_follows_nexus_config_dir(self, mod, cfg) -> None:
+        assert mod.ref_drift_marker_path() == cfg / "ref_drift_lockstep_marker"
+
+    def test_write_ref_drift_marker_lands_under_nexus_config_dir(self, mod, cfg) -> None:
+        mod.write_ref_drift_marker({"conexus@nexus-plugins": "abc123"})
+        assert (cfg / "ref_drift_lockstep_marker").is_file()
+        assert mod.read_ref_drift_marker() == {"conexus@nexus-plugins": "abc123"}
+
+    def test_hook_action_and_cli_agree_on_the_cli_marker(self, mod, cfg) -> None:
+        import importlib.util
+
+        from nexus.config import nexus_config_dir
+        from nexus.upgrade_ladder import preconditions
+
+        spec = importlib.util.spec_from_file_location(
+            "version_lockstep_action_parity",
+            Path(mod.__file__).with_name("version_lockstep_action.py"),
+        )
+        action = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(action)
+        assert mod.marker_path() == action.marker_path()
+        assert mod.marker_path().parent == nexus_config_dir()
+        (cfg).mkdir(parents=True, exist_ok=True)
+        (cfg / "cli_lockstep_marker").write_text("9.9.9")
+        assert preconditions._default_lockstep_marker() == "9.9.9"
 
     def test_read_missing_marker_returns_empty(self, mod, tmp_path, monkeypatch) -> None:
         monkeypatch.setenv("NX_LOCKSTEP_REF_DRIFT_MARKER", str(tmp_path / "absent"))

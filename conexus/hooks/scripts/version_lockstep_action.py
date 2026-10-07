@@ -77,6 +77,7 @@ from pathlib import Path
 # PATH-only lookup (finding A, nexus-f9bgu.36): on Windows a bare name is
 # searched in the cwd first, and this detached action inherits the project cwd.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _endpoint_resolve  # noqa: E402 -- must follow the sys.path insert
 import _exec_path  # noqa: E402 -- must follow the sys.path insert
 
 which_off_cwd = _exec_path.which_off_cwd
@@ -129,11 +130,16 @@ def debug(msg: str) -> None:
 
 
 def marker_path() -> Path:
-    """Per-user lockstep marker (see version_lockstep_hook.marker_path)."""
+    """Per-user lockstep marker (see version_lockstep_hook.marker_path).
+
+    In the config dir the CLI uses (``NEXUS_CONFIG_DIR``, else
+    ``~/.config/nexus``; the stdlib mirror in ``_endpoint_resolve``), so the
+    hook, this action and ``nexus.upgrade_ladder.preconditions`` read and
+    write one file (nexus-f9bgu)."""
     override = os.environ.get("NX_LOCKSTEP_MARKER")
     if override:
         return Path(override)
-    return Path.home() / ".config" / "nexus" / "cli_lockstep_marker"
+    return _endpoint_resolve.default_config_dir() / "cli_lockstep_marker"
 
 
 def log_path() -> Path:
@@ -155,7 +161,7 @@ def log_path() -> Path:
     override = os.environ.get("NX_LOCKSTEP_LOG")
     if override:
         return Path(override)
-    return Path.home() / ".config" / "nexus" / "lockstep.log"
+    return _endpoint_resolve.default_config_dir() / "lockstep.log"
 
 
 #: code-review Important-3 (2026-08-08): a bare unbounded `open("a")`

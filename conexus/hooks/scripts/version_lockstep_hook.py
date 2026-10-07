@@ -113,6 +113,8 @@ import subprocess
 import time
 from pathlib import Path
 
+import _endpoint_resolve  # noqa: E402 -- stdlib-only; sys.path set above
+
 DEBUG = os.environ.get("NX_HOOK_DEBUG", "0") == "1"
 
 # Detached action script lives beside this hook. Launched with
@@ -173,14 +175,16 @@ def debug(msg: str) -> None:
 def marker_path() -> Path:
     """Per-user marker recording the last CLI version confirmed in lockstep.
 
-    Lives under ``~/.config/nexus/`` so it survives ``/plugin update``
-    (CLAUDE_PLUGIN_ROOT is replaced wholesale on update). ``NX_LOCKSTEP_MARKER``
-    overrides the location for tests.
+    Lives in the nexus config dir (``NEXUS_CONFIG_DIR``, else
+    ``~/.config/nexus/``, resolved as the CLI does through
+    ``_endpoint_resolve.default_config_dir``, nexus-f9bgu) so it survives
+    ``/plugin update`` (CLAUDE_PLUGIN_ROOT is replaced wholesale on update).
+    ``NX_LOCKSTEP_MARKER`` overrides the location for tests.
     """
     override = os.environ.get("NX_LOCKSTEP_MARKER")
     if override:
         return Path(override)
-    return Path.home() / ".config" / "nexus" / "cli_lockstep_marker"
+    return _endpoint_resolve.default_config_dir() / "cli_lockstep_marker"
 
 
 def read_plugin_version() -> str | None:
@@ -564,13 +568,13 @@ def ref_drift_marker_path() -> Path:
     """Per-user marker recording, per plugin id, the target sha of the
     LAST ref-drift dispatch attempted for that plugin (nexus-konsk fix
     round 2). Mirrors ``marker_path()``'s shape and override convention
-    -- lives beside the CLI-version marker under ``~/.config/nexus/`` so
+    -- lives beside the CLI-version marker in the nexus config dir so
     it too survives ``/plugin update``. ``NX_LOCKSTEP_REF_DRIFT_MARKER``
     overrides the location for tests."""
     override = os.environ.get(_REF_DRIFT_MARKER_ENV, "").strip()
     if override:
         return Path(override)
-    return Path.home() / ".config" / "nexus" / "ref_drift_lockstep_marker"
+    return _endpoint_resolve.default_config_dir() / "ref_drift_lockstep_marker"
 
 
 def read_ref_drift_marker() -> dict[str, str]:

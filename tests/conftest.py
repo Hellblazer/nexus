@@ -725,8 +725,9 @@ _APPEND_ONLY_REAL_CONFIG_LOGS = frozenset({
     "index.log",
     "dropped_writes.jsonl",
     # version_lockstep_action.log_event: one line per real CLI upgrade the
-    # SessionStart lockstep hook starts, appended under Path.home() by any
-    # session on the box (see the cli_lockstep_marker allowlist entry).
+    # SessionStart lockstep hook starts, appended in the config dir of any
+    # session on the box, the real one for a session without NEXUS_CONFIG_DIR
+    # (see the cli_lockstep_marker allowlist entry).
     "lockstep.log",
 })
 
@@ -1244,11 +1245,13 @@ _REAL_CONFIG_DIR_ALLOWLIST_PREFIXES: tuple[str, ...] = (
     # The conexus plugin's SessionStart:startup lockstep hook
     # (conexus/hooks/scripts/version_lockstep_hook.py) dispatches
     # version_lockstep_action.py when the marker differs from the plugin
-    # version; the action's fast path rewrites ``cli_lockstep_marker`` under
-    # Path.home() (it does not read NEXUS_CONFIG_DIR). The same hook writes
-    # ``ref_drift_lockstep_marker`` on a ref drift. Any Claude Code session
-    # starting on this box fires it, so the first session after a plugin
-    # update rewrites the marker mid-run. MEASURED 2026-10-07: an
+    # version; the action's fast path rewrites ``cli_lockstep_marker`` in the
+    # session's config dir. The same hook writes ``ref_drift_lockstep_marker``
+    # on a ref drift. Both follow NEXUS_CONFIG_DIR since nexus-f9bgu, but a
+    # developer's live Claude Code session normally has no NEXUS_CONFIG_DIR,
+    # so its config dir IS the real one this guard watches: any session
+    # starting on this box fires the hook, and the first session after a
+    # plugin update rewrites the marker mid-run. That is why the entries stay. MEASURED 2026-10-07: an
     # engine-substrate run failed on ``MODIFIED cli_lockstep_marker``; the
     # marker's mtime (11:47:52 PDT, content 7.73.0) is the SessionStart of the
     # only session born that hour (transcript first entry 18:47:51.9Z,

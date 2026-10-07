@@ -269,6 +269,54 @@ class TestMarkerOnConfirmedSuccess:
         assert marker.parent.is_dir()
 
 
+class TestConfigDirFollowsNexusConfigDir:
+    """nexus-f9bgu: with no per-file override, the marker and the log live in
+    the config dir the CLI uses (``nexus.config.nexus_config_dir``), so a
+    session with ``NEXUS_CONFIG_DIR`` set writes there and never into the
+    real ``~/.config/nexus``. The action ran under ``Path.home()``
+    unconditionally before."""
+
+    @pytest.fixture()
+    def cfg(self, tmp_path: Path, monkeypatch) -> Path:
+        monkeypatch.delenv("NX_LOCKSTEP_MARKER", raising=False)
+        monkeypatch.delenv("NX_LOCKSTEP_LOG", raising=False)
+        monkeypatch.delenv("NX_CONFIG_DIR", raising=False)
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setenv("USERPROFILE", str(home))
+        cfg = tmp_path / "cfg"
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(cfg))
+        return cfg
+
+    def test_marker_and_log_paths_follow_nexus_config_dir(self, mod, cfg) -> None:
+        assert mod.marker_path() == cfg / "cli_lockstep_marker"
+        assert mod.log_path() == cfg / "lockstep.log"
+
+    def test_write_marker_lands_under_nexus_config_dir_not_home(
+        self, mod, cfg, monkeypatch
+    ) -> None:
+        _wire(
+            mod, monkeypatch, receipt=True,
+            installed_versions=["1.0.0", "9.9.9"], run_results={},
+        )
+        mod.main(["action", "9.9.9"])
+        assert (cfg / "cli_lockstep_marker").read_text().strip() == "9.9.9"
+        assert "installed=" in (cfg / "lockstep.log").read_text()
+        assert not (Path.home() / ".config" / "nexus").exists()
+
+    def test_default_is_home_config_nexus_without_env(self, mod, cfg, monkeypatch) -> None:
+        monkeypatch.delenv("NEXUS_CONFIG_DIR", raising=False)
+        assert mod.marker_path() == Path.home() / ".config" / "nexus" / "cli_lockstep_marker"
+        assert mod.log_path() == Path.home() / ".config" / "nexus" / "lockstep.log"
+
+    def test_matches_the_cli_resolution(self, mod, cfg) -> None:
+        from nexus.config import nexus_config_dir
+
+        assert mod.marker_path().parent == nexus_config_dir()
+        assert mod.log_path().parent == nexus_config_dir()
+
+
 class TestFailureLeavesMarkerStale:
     def test_uv_upgrade_failure_no_marker(self, mod, marker, monkeypatch) -> None:
         calls = _wire(
