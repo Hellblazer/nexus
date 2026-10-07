@@ -120,6 +120,14 @@ class P225MigrationWalkIntegrationTest {
     PostgreSQLContainer<?> pg;
     HikariDataSource adminDs;
 
+    /**
+     * What the ENGINE's log saw while the seeded walk ran (nexus-3wh8d.30). Liquibase logs through
+     * java.util.logging (its default {@code JavaLogService}, no bridge to the engine's logback), so this is a JUL
+     * handler on the root logger: the same stream the engine process writes to its console and CloudWatch gets. It is
+     * not {@code pg.getLogs()}: a Crunchy server log has no sink.
+     */
+    final List<String> engineLog = new java.util.concurrent.CopyOnWriteArrayList<>();
+
     /** Pre-walk facts the post-walk assertions compare against. */
     List<PartitionScratch.PolicyRow> preWalkChunksPolicies;
     TreeSet<String> preWalkChunksAcl;
@@ -137,7 +145,20 @@ class P225MigrationWalkIntegrationTest {
             preWalkChunksPolicies = PartitionScratch.policies(ctx, "chunks");
             preWalkChunksAcl = PartitionScratch.acl(ctx, "chunks");
         }
-        applyRemaining(adminDs);
+        java.util.logging.Logger jul = java.util.logging.Logger.getLogger("");
+        java.util.logging.Handler capture = new java.util.logging.Handler() {
+            @Override public void publish(java.util.logging.LogRecord r) {
+                engineLog.add(r.getLevel() + " " + r.getLoggerName() + " " + new java.util.logging.SimpleFormatter().formatMessage(r));
+            }
+            @Override public void flush() { }
+            @Override public void close() { }
+        };
+        jul.addHandler(capture);
+        try {
+            applyRemaining(adminDs);
+        } finally {
+            jul.removeHandler(capture);
+        }
         try (Connection a = adminDs.getConnection()) {
             PgContainerHelper.installTestObjects(a);
         }
@@ -530,14 +551,20 @@ class P225MigrationWalkIntegrationTest {
 
     @Test
     @Order(9)
-    void theWalkWroteItsLockCountToTheServerLog() {
-        String log = pg.getLogs();
-        var lockLine = java.util.regex.Pattern.compile("rdr225 walk: (\\d+) relation lock").matcher(log);
-        assertThat(lockLine.find()).isTrue();
+    void theWalksCountsReachTheEngineLog() {
+        // RAISE NOTICE arrives as a JDBC SQLWarning, which Liquibase's JdbcExecutor logs (SHOW_SQL_WARNING_MESSAGES,
+        // on by default, at JUL WARNING). A RAISE LOG goes only to the PostgreSQL server log and never reaches here.
+        // The seed is 12 chunks and 6 centroids, one centroid without a registered collection.
+        String all = String.join("\n", engineLog);
+        var lockLine = java.util.regex.Pattern.compile("rdr225 walk: (\\d+) relation lock").matcher(all);
+        assertThat(lockLine.find()).as("the end-of-walk lock count is in the engine log").isTrue();
         PartitionScratch.evidence("WALK relation locks held at the end of the walk: " + lockLine.group(1)
             + " (40 leaves: 5 tenants x 4 models x 2 parents; 12 chunks)");
         System.out.println("WALK_LOCKS " + lockLine.group(1));
-        assertThat(log).contains("rdr225 walk:").contains("relation lock(s) held at the end of the walk");
+        assertThat(all).contains("relation lock(s) held at the end of the walk")
+            .contains("rdr225 step 3: 12 chunk row(s) copied")
+            .contains("rdr225 step 3: 5 centroid row(s) copied")
+            .contains("rdr225 step 6: reconciled");
     }
 
     // ═══════════════════════════ other scenarios (their own stores) ═══════════════════════════

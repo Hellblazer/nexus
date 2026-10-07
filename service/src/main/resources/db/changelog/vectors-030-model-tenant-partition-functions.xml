@@ -757,7 +757,7 @@ BEGIN
         GET DIAGNOSTICS v_n = ROW_COUNT;
         v_total := v_total + v_n;
     END LOOP;
-    RAISE LOG 'rdr225 step 3: % chunk row(s) copied', v_total;
+    RAISE NOTICE 'rdr225 step 3: % chunk row(s) copied', v_total;
 
     INSERT INTO nexus.taxonomy_centroids_new
         (tenant_id, collection, topic_id, embedding_384, embedding_768, embedding_1024, label, doc_count,
@@ -767,7 +767,7 @@ BEGIN
       FROM nexus.taxonomy_centroids ct
       JOIN nexus.catalog_collections cc ON cc.tenant_id = ct.tenant_id AND cc.name = ct.collection;
     GET DIAGNOSTICS v_n = ROW_COUNT;
-    RAISE LOG 'rdr225 step 3: % centroid row(s) copied', v_n;
+    RAISE NOTICE 'rdr225 step 3: % centroid row(s) copied', v_n;
 END
 $w3$;
 
@@ -908,7 +908,7 @@ BEGIN
     IF v_old <> v_new + v_skipped THEN
         RAISE EXCEPTION 'vectors-030-1 step 6: % centroid row(s) in the old table, % copied and % with no registered collection', v_old, v_new, v_skipped;
     END IF;
-    RAISE LOG 'rdr225 step 6: reconciled';
+    RAISE NOTICE 'rdr225 step 6: reconciled';
 END
 $w6$;
 
@@ -3254,7 +3254,10 @@ BEGIN
     END IF;
 
     -- What the one-transaction walk holds until it commits (sizes max_locks_per_transaction).
-    RAISE LOG 'rdr225 walk: % relation lock(s) held at the end of the walk',
+    -- NOTICE, not LOG: a NOTICE reaches the client as a JDBC SQLWarning, which Liquibase logs into the engine's
+    -- log (SHOW_SQL_WARNING_MESSAGES, on by default); a LOG goes only to the PostgreSQL server log, and Crunchy's
+    -- has no sink (nexus-3wh8d.30). The step 3 and step 6 lines above follow the same rule.
+    RAISE NOTICE 'rdr225 walk: % relation lock(s) held at the end of the walk',
         (SELECT count(*) FROM pg_catalog.pg_locks l WHERE l.pid = pg_catalog.pg_backend_pid() AND l.locktype = 'relation');
 END
 $w9$;

@@ -47,8 +47,9 @@ All must hold before conexus starts the window. Record the evidence for each in 
 2. The fork was taken as close to the flip as conexus can manage, and the live `public.databasechangelog` has the same
    set of ids as the fork's. Live data drifts after the fork; the census in § 3 is how the drift is measured.
 3. Sam has given the go for THIS window, in conexus's session, having read the IRREVERSIBLE statement.
-4. conexus has answered the open questions in § 9.2 that the window depends on (restart policy, migration path,
-   control-plane database).
+4. conexus's answers in § 9.2 are in hand (T2 `nexus_rdr/225-conexus-answers` [29505], 2026-10-07). Three live reads
+   are still open and belong to the `.27` rehearsal pass: the owner of `diag_chash_conformance` and of the `nexus`
+   schema, `pg_stat_archiver`, and the lock and connection settings.
 5. The engine tag is cut, signed and its release is published (not a draft); `scripts/list_data_effects.py
    engine-service-v0.1.149 <tag> --record-relay-attestation` was run and the table was pasted into the relay. The
    table must list `vectors-030-1` and must carry the centroid statement of § 3 probe C2 (the DATA EFFECT line in the
@@ -111,9 +112,10 @@ documentation; the default 64 x 100 gives 6,400).
 - ABORT if `tenants` is greater than FORK_TENANT_COUNT (`.27:`): the fork's wall time, lock count and disk peak
   describe a smaller walk.
 - ABORT if `leaves x 27` is at or above the slot count less LOCK_HEADROOM (`.27:`; the fork's logged
-  `rdr225 walk: N relation lock(s)` replaces the 27 and fixes the headroom). The failure it prevents is
+  `rdr225 walk: N relation lock(s)` line, read from the engine log (§ 4), replaces the 27 and fixes the headroom). The failure it prevents is
   `out of shared memory` in the middle of the walk, after the copy.
-- Unverified: the live `max_locks_per_transaction` and `max_connections` on the cloud cluster. The critique's figure of
+- Unverified (NEEDS-LIVE-READ, no recorded measurement; conexus answer 7): the live `max_locks_per_transaction`,
+  `max_connections` and `max_prepared_transactions` on the cloud cluster. The critique's figure of
   about 216 locks per tenant is 8 leaves x 27.
 
 **Probe C1 (chunk vectors against the collection's model).** The walk fails, and rolls back after the copy, on any
@@ -202,6 +204,11 @@ hex>`; the engine's shutdown hook terminates only those. The migration connectio
 **Probe D (free disk floor).** The engine's own local preflight (`LocalDiskPreflight`) requires free disk of at least
 2.2 x `pg_total_relation_size(chunks) + pg_total_relation_size(taxonomy_centroids)`: 1x copy, 1x WAL, 0.2x headroom,
 inferred and never measured. It is skipped in the cloud (`NX_PG_DATA_DIR` is unset), so this is the only cloud check.
+conexus's own disk gate is regressed: `deploy/gate/disk_preflight.py` on conexus main reads host CloudWatch metrics
+only and exits 2 against Crunchy (P0 fix in progress, conexus-kwlv.35). Until it lands, conexus runs the pre-kwlv.9
+version (commit 15701c2 of the conexus repo, which reads the Crunchy API's `disk_available_mb`) or reads the Crunchy
+dashboard. The last recorded figure is 41.9 GB free of 52 GB on 2026-10-05 (T2 conexus [29187]); read it again at
+the window (T2 `nexus_rdr/225-conexus-answers` [29505], answer 6).
 Step 4's UPDATE of three referencing tables rewrites every row and is not in the engine's rule; this runbook adds it.
 
 ```sql
@@ -217,8 +224,8 @@ minutes before the flip, is below the floor. Placeholder `.27:` replaces both fa
 measured peak extra disk and WAL. Arithmetic on the RDR's own figures: 41.9 GB free (2026-10-05) against a "15 GB
 copy estimate" is 8.9 GB of margin if that 15 GB is `vector_bytes`, because 2.2 x 15 = 33 GB; the RDR records its size
 figures as unreconciled, so measure. After the walk the retired tables stay for 14 days: free space settles at about
-`free_before - vector_bytes - (new column bytes)`, and conexus's disk alert must not fire on it. Unverified: how
-conexus reads free disk on Crunchy, the volume's autoscaling, and `max_wal_size`.
+`free_before - vector_bytes - (new column bytes)`, and conexus's disk alert must not fire on it. Recorded 2026-10-05
+on memory-16: `max_wal_size` 5 GB (T2 conexus [29187]). Unverified: the volume's autoscaling.
 
 **Probe W (WAL).** Inactive replication slots and a failing archiver stop WAL from recycling, so the copy's WAL piles
 up on the volume.
@@ -231,7 +238,10 @@ SHOW max_wal_size;
 
 ABORT if any slot is inactive and retains WAL, or if `last_failed_time` is later than `last_archived_time`. Placeholder
 `.27:` WAL_PEAK is the fork's peak WAL; ABORT if `max_wal_size` is under it and the volume cannot hold it.
-Unverified: Crunchy's slot and archiving setup, and whether the migration role may read these views.
+`pg_replication_slots` is readable by a non-superuser (measured as `nexus_svc` on 2026-07-11 and 2026-08-13, so
+`nexus_admin` can read it too); the 2026-08-13 reading was 0 slots, `archive_mode=always`, `max_slot_wal_keep_size` 2 GB.
+Unverified (NEEDS-LIVE-READ): `pg_stat_archiver` for `nexus_admin` (it needs `pg_monitor`, which `nexus_admin` holds
+`WITH ADMIN OPTION` per the engine-redeploy skill; no recorded read), and the WAL settings after the 2026-10-05 resize.
 
 **Probe P (pending changesets match the prediction).**
 
@@ -289,13 +299,24 @@ moved, or a second writer ran: `event=schema_migration_count_anomaly` must not a
 window. `counts_unavailable=true` on the complete line is not a failure of the walk (the diagnostic query failed after
 the update returned), but the identity cannot be checked then; read `databasechangelog` instead.
 
-Where the walk's own lines land. `RAISE LOG` writes to the PostgreSQL server log and is not sent to a client at the
-default `client_min_messages`, so the lines `rdr225 step 3: N chunk row(s) copied`, `rdr225 step 3: N centroid
-row(s) copied`, `rdr225 step 6: reconciled` and `rdr225 walk: N relation lock(s) held at the end of the walk` are in
-the server log, not the engine log. `RAISE WARNING` (`rdr225 step 2`, `step 7.1`) may or may not reach the engine log.
-Unverified: whether conexus can read the Crunchy server log, and whether the engine logs Liquibase's per-changeset
-lines (RDR-191's runbook relied on them: "the three changesets executed (by id) in the boot log"). Ask conexus for
-both, and for the fork run, capture both logs.
+Where the walk's own lines land. They are `RAISE NOTICE` (nexus-3wh8d.30), so they reach the engine log and not
+only the PostgreSQL server log, which on Crunchy has no sink. A `NOTICE` arrives at the engine as a JDBC `SQLWarning`;
+Liquibase 4.29's `JdbcExecutor` logs every warning of a statement through its own logger (`liquibase.executor`) at
+level WARNING, under `liquibase.sql.showSqlWarnings`, which defaults to true and which the engine does not change.
+Liquibase logs through `java.util.logging`, so the line is printed by the JUL console handler, not by the engine's
+logback format, and it carries the WARNING label whatever the PostgreSQL severity was. Grep the engine log (CloudWatch
+`/conexus/dev/engine`) for `rdr225`:
+
+- `WARNING: rdr225 step 3: N chunk row(s) copied` and `WARNING: rdr225 step 3: N centroid row(s) copied`
+- `WARNING: rdr225 step 6: reconciled`
+- `WARNING: rdr225 walk: N relation lock(s) held at the end of the walk`
+
+`RAISE WARNING` lines (`rdr225 step 2`, `step 7.1`) take the same path. Liquibase's per-changeset lines with their
+durations also reach the engine log and CloudWatch (T2 `nexus_rdr/225-conexus-answers` [29505], answer 3). The
+engine-side capture is pinned by `P225MigrationWalkIntegrationTest.theWalksCountsReachTheEngineLog`. A `NOTICE` is
+below the server's default `log_min_messages`, so these lines are no longer written to the PostgreSQL server log;
+do not look for them there. The server log carries `pgaudit` output and verbatim `ALTER ROLE ... PASSWORD`
+statements, so never paste it raw (answer 6).
 
 ## 5. Deploy steps
 
@@ -307,17 +328,36 @@ conexus runs these; nexus watches and answers.
      name the migration role, which must be the schema owner. The fork must have used the same role and path.
    - `NX_OWNERLESS_WRITE_MODE`: unchanged from § 2.6.
    - `NX_PG_DATA_DIR`: unset (cloud).
-   - Unverified: whether Liquibase connects directly or through a pooler, and the container restart policy.
-3. Stop the engine: `docker stop -t 30 conexus-engine` (the redeploy document does this). Confirm no
-   `nexus-service/...` backends remain, then run Probe L's second pass.
-4. **Capture the restore point, in UTC, from the database, immediately before the stop and again after it returns.**
-   Run `SELECT now() AT TIME ZONE 'utc', pg_current_wal_lsn();` on the primary. T0 is the value taken before the stop.
-   Put both values in the window log and in T2 `nexus_rdr/225-walk-rehearsal` before the new container starts. The
-   engine writes nothing while stopped, so any restore target between the stop returning and the walk starting loses no
-   engine writes; T0 loses the few seconds the old engine served during its 30-second grace. Unverified: whether
-   conexus's restore takes a timestamp, an LSN, or both, and whether the redeploy document can be paused between stop
-   and run (if not, T0 is the only capture).
-5. `docker run` of the new tag. Start the clock.
+   - Liquibase connects direct as `nexus_admin` (`NX_DB_ADMIN_URL` equals `NX_DB_URL`, `sslmode=verify-full`, no
+     pooler: RDR-003 is deferred); the runtime role is `nexus_svc`. The fork walk reads the same secret and uses the
+     same direct path, but is reached from the operator's Mac over the public host, so its wall time carries that
+     round trip (T2 `nexus_rdr/225-conexus-answers` [29505], answer 3).
+   - The redeploy document runs the engine with `--restart unless-stopped` and has no `HEALTHCHECK` and no automatic
+     rollback. Its wait is about 90 s on `/version`, which binds only after the walk, so a legitimate walk makes the
+     document report Failed while the walk continues, and nothing kills it. A failing walk exits 1, `unless-stopped`
+     restarts the container, and every restart re-runs the copy and its WAL. See step 3 and step 5 for the guard.
+3. Stop the engine AND the control plane before the new tag runs. The conexus database shares the Crunchy cluster
+   (database `conexus` beside `nexus`), and conexus's `RESTORE.md` repoints both secrets, so a restore to T0 rewinds
+   control-plane writes made after T0 (usage and billing rows, token mints and revocations) unless the control plane
+   is stopped with the engine (T2 `nexus_rdr/225-conexus-answers` [29505], answer 1). The redeploy document cannot be
+   paused between its stop and its run: one script removes the sidecar, runs `docker stop -t 30`, removes the
+   container and runs the new one, back to back (answer 2). So the window stops them by hand first, through
+   conexus-RunShell, with Sam's go as for every other step of this runbook:
+   `docker rm -f conexus-engine-tls; docker stop -t 30 conexus-engine` (stop, do not remove: the document's own stop
+   is then a no-op, and its image prune keeps the stopped container's image), plus `docker stop conexus-controlplane`.
+   The cost is that the document's image pull and signature check now fall inside the outage. Confirm no
+   `nexus-service/...`, `conexus_svc` or `conexus_cp` backends remain, then run Probe L's second pass.
+4. **Capture the restore point from the database AFTER both stops return, as an RFC3339 UTC timestamp.** Run
+   `SELECT now() AT TIME ZONE 'utc';` on the primary and keep it as `YYYY-MM-DDTHH:MM:SSZ`. Crunchy's fork recipe takes
+   `target_time` as RFC3339 and has no LSN option (`RESTORE.md`, answer 5), so an LSN is not a restore point here. T0 is
+   this value. Put it in the window log and in T2 `nexus_rdr/225-walk-rehearsal` before the new container starts.
+   Nothing writes to either database between the stops and the walk, so a target at T0 loses nothing on either side.
+5. Send the redeploy document for the new tag; it runs `docker run`. Start the clock. **Immediately run
+   `docker update --restart=no conexus-engine`** through conexus-RunShell (Sam's go, as above), so a failing walk
+   stays stopped instead of looping through restarts; restore `unless-stopped` only after a clean boot. The document
+   will report Failed after its 90 s wait while a legitimate walk is still running: that is expected, not an abort.
+   The proper guard, a healthcheck and rollback in the document itself, is conexus bead conexus-6d2n; until it lands
+   this step is manual.
 6. Watch the engine log for, in order: `schema_migration_start`, `schema_migration_session`,
    `schema_migration_pending changesets=13`, then either `schema_migration_complete` (§ 4) or
    `schema_migration_failed`. After complete: `chunks_isolation_check_failed` or `root_token_seed_*` are exits too.
@@ -367,9 +407,10 @@ The walk is one transaction, so a failure inside it leaves the old layout intact
 1. Make sure no backend of the failed or killed engine is still running (§ 5.7). A leftover holding the walk's locks
    would block the next boot.
 2. conexus redeploys PREV_TAG (the `release_version` read in § 2; expected `engine-service-v0.1.149`) with the previous
-   image. Revert the tag pin in conexus's deploy configuration first, so no automated redeploy puts the new tag back.
-   Unverified: whether a restart policy or health-check timeout inside the SSM document kills a legitimate walk, or
-   loops a failing one (each loop re-runs the copy and its WAL).
+   image. Flip the SSM image tag `/conexus/dev/engine/image-tag` back to PREV_TAG first, so no redeploy and no fresh
+   boot picks the new tag up. The document's 90 s wait does not kill a legitimate walk, but a failing walk under
+   `--restart unless-stopped` loops, and each loop re-runs the copy and its WAL, which is why § 5.5 sets
+   `--restart=no` (answer 2).
 3. Verify with `nx service probe` (live `/version`), then `NX_EXPECTED_OWNERLESS_WRITE_MODE=<the live mode>
    tests/e2e/cloud-client-path-gate.sh`.
 4. Record the failure text and the probes in T2, find the cause, and cut a new tag. Nothing about the data changed.
@@ -392,24 +433,31 @@ The choices, both on Sam's go typed in conexus's session:
   skill, a human push of the tag and a conexus deploy while the cloud is down. Sam sets the time he will wait.
 - **PITR restore to T0** (the timestamp captured in § 5.4), then PREV_TAG. Use it when the committed walk is wrong
   (reconciliation passed but results fail, an unfixable post-condition), or when fix-forward would run past Sam's
-  patience. Writes made after T0 are lost: with the engine stopped from T0, those are only the writes the control plane
-  made, if its database is in the same cluster (§ 9.2).
+  patience. Writes made after T0 are lost: with the engine and the control plane both stopped before T0 (§ 5.3), there
+  are none. The control plane's database shares the cluster, so a restore that skipped that stop would rewind its
+  writes too (§ 9.2 answer 1).
 
 ### 6.4 PITR sequence (conexus-owned; the shape, not commands)
 
-The recipe is conexus's `deploy/RESTORE.md` (conexus repo; not read here). Today it is Crunchy Bridge continuous PITR
-to a point in time, restore or fork, then repoint; after conexus RDR-007's move to self-managed Postgres it is
-`pgBackRest restore --type=time`. Unverified: which of the two is current on the deploy date, and the exact commands.
+Production is Crunchy Bridge on the deploy date (`conexus-dev`, memory-16, 50 GB since 2026-10-05); the pgBackRest
+path of conexus RDR-007 has no production runbook yet. The recipe is conexus's `deploy/RESTORE.md`, as relayed in T2
+`nexus_rdr/225-conexus-answers` [29505] (answer 5; the file itself is not read here). A Crunchy PITR is a FORK into a
+new cluster, not an in-place rewind: `POST /clusters/$CID/forks` with the plan, storage, `network_id` and `target_time`
+as RFC3339, ready in about 6 minutes, then both Secrets Manager secrets are repointed (`conexus/dev/engine-db` and
+`conexus/dev/controlplane-db`) to the fork's host and the engine and edge are replaced with `terraform apply -replace`
+(run terraform-apply-safety first). The old cluster survives until conexus deletes it, so writes after T0 stay
+recoverable from it.
 
 1. Sam's go for the restore, in conexus's session. Record the time of the go.
-2. Keep the engine stopped. Stop the control plane too if it shares the cluster (§ 9.2), so nothing writes to the
-   database being replaced.
-3. Restore or fork to T0 (the UTC timestamp, or the LSN, from § 5.4). The restore replaces the database; the retired
-   tables and the committed walk are not in it.
-4. Repoint the engine and, if applicable, the control plane at the restored database.
-5. Deploy PREV_TAG with its previous image. **Not the new tag.** The restored database is on the old layout, and the new
-   tag would walk it again. Revert the tag pin in conexus's deploy configuration first. The previous tag is PREV_TAG as
-   read in § 2, expected `engine-service-v0.1.149`.
+2. Keep the engine and the control plane stopped (§ 5.3), so nothing writes to either database while the fork is made.
+3. Fork to T0, the RFC3339 UTC timestamp from § 5.4. The fork replaces the database; the retired tables and the
+   committed walk are not in it. Confirm the fork's `network_id` equals the live one.
+4. **Flip the SSM image tag `/conexus/dev/engine/image-tag` back to PREV_TAG BEFORE any engine replacement.** A fresh
+   boot reads that parameter, so replacing the engine first would start the new tag on the restored database. Then
+   repoint both secrets at the fork, which moves the engine and the control plane together.
+5. Deploy PREV_TAG with its previous image, and re-run the redeploy document after the replacement so
+   `NX_INSTALL_PING_TRUSTED_PROXIES` is rewritten. **Not the new tag.** The restored database is on the old layout, and
+   the new tag would walk it again. The previous tag is PREV_TAG as read in § 2, expected `engine-service-v0.1.149`.
 6. Verify: `nx service probe` shows PREV_TAG; `public.databasechangelog` has no `vectors-030-1`; `nexus.chunks` is
    `relkind = 'r'`; `NX_EXPECTED_OWNERLESS_WRITE_MODE=<the live mode> tests/e2e/cloud-client-path-gate.sh` is green.
 7. If the floor-bumped client has already shipped, local installs are pinned to the abandoned tag. A tag cannot be
@@ -493,7 +541,7 @@ the retired tables hold the only copy of the old layout.
 | --- | --- | --- |
 | FORK_WALL_TIME, CAP_FACTOR | § 5.7 | Fork walk wall time; the cap is a multiple chosen before the live run |
 | FORK_TENANT_COUNT | § 3 Probe T | Tenant count on the fork |
-| FORK_RELATION_LOCKS, LOCK_HEADROOM | § 3 Probe T | The fork's `rdr225 walk: N relation lock(s)` line (server log) |
+| FORK_RELATION_LOCKS, LOCK_HEADROOM | § 3 Probe T | The fork's `rdr225 walk: N relation lock(s)` line (engine log, § 4) |
 | FORK_ROW_COUNTS, DRIFT_TOLERANCE | § 3 Probe V, C2 | Fork census; the drift the live estate is allowed since the fork |
 | FORK_ORPHAN_CENTROIDS | § 3 Probe C2 | Probe C2 run on the fork |
 | FORK_PEAK_EXTRA_DISK, DISK_MARGIN, the factors 2.2 and 2.0 | § 3 Probe D | Peak extra disk on the fork; replaces the inferred factors |
@@ -504,33 +552,43 @@ the retired tables hold the only copy of the old layout.
 
 ### 9.2 Questions for conexus
 
-1. Does the conexus control-plane database share the cluster that a PITR restores? T2 `nexus_rdr/225-cloud-topology`
-   says the walk does not touch it, not that a restore does not. If it shares the cluster, a restore to T0 rewinds
-   control-plane writes after T0 too.
-2. The redeploy document: container restart policy, HEALTHCHECK start period, and any timeout or automated rollback
-   that could kill a legitimate 15-minute walk or loop a failing one. Can it pause between stop and run, so the
-   restore point is captured after the stop?
-3. Does Liquibase connect with `NX_DB_ADMIN_*` directly or through a pooler, and with which role? The fork must match.
-4. Is `diag_chash_conformance` owned by a superuser on Crunchy, and does the migration role own the `nexus` schema?
-5. The database platform on the deploy date (Crunchy PITR, or pgBackRest after RDR-007), and the restore recipe in
-   `deploy/RESTORE.md` for each.
-6. How conexus reads free disk, WAL retention and the PostgreSQL server log, and whether the migration role may read
-   `pg_replication_slots` and `pg_stat_archiver`.
+Answered by conexus on 2026-10-07 (T2 `nexus_rdr/225-conexus-answers` [29505], read from conexus main and T2 only; no
+live reads):
+
+1. The control-plane database shares the cluster a PITR forks, and `RESTORE.md` repoints both secrets. The window stops
+   `conexus-controlplane` with the engine and T0 is taken after both stops (§ 5.3, § 5.4, § 6.4).
+2. The redeploy document: `--restart unless-stopped`, no `HEALTHCHECK`, no automatic rollback, a 90 s `/version` wait
+   that reports Failed while the walk continues, and stop and run back to back with no pause. The window guard is
+   manual (§ 5.3, § 5.5); the proper guard is conexus bead conexus-6d2n.
+3. Liquibase connects direct as `nexus_admin`, `verify-full`, no pooler (§ 5.2).
+5. Production is Crunchy; the fork recipe takes an RFC3339 `target_time` and no LSN (§ 5.4, § 6.4).
+6. Disk: conexus's gate exits 2 against Crunchy until conexus-kwlv.35 lands (§ 3 Probe D). The Crunchy server log has
+   no sink; `pg_replication_slots` is readable without superuser (§ 3 Probe W, § 4).
+8. `release_version` 0.1.149 and `ownerless_write_mode` `log-only`, recorded 2026-10-06 (T2 conexus [29413]). No later
+   deploy or flip is recorded; re-read both at the window (§ 2 requires it).
+
+Still open, each a NEEDS-LIVE-READ that needs Sam's go and belongs to the `.27` rehearsal pass:
+
+4. Whether `diag_chash_conformance` is owned by a superuser on Crunchy, and whether the migration role owns the `nexus`
+   schema. Expected `nexus_admin` for both (taxonomy-011 recreates the view Liquibase-owned), never read on production
+   since v0.1.77. Do not run `provision_diag_path.py` against production for this: it assumes a superuser-owned view.
+6. (part) `pg_stat_archiver` for `nexus_admin`, and the WAL settings after the 2026-10-05 resize.
 7. The live `max_locks_per_transaction`, `max_connections` and `max_prepared_transactions`.
-8. The live `release_version` and `ownerless_write_mode`.
 
 ## 10. Facts not verified
 
-- The live release_version, ownerless-write mode, lock settings, disk, WAL and slot state, and the owner of
-  `diag_chash_conformance`.
-- Whether Liquibase's per-changeset lines reach the engine log, and whether the PostgreSQL server log is readable.
+- The live release_version and ownerless-write mode (recorded 2026-10-06, to be re-read at the window), lock settings,
+  disk, WAL and archiver state, and the owner of `diag_chash_conformance` and of the `nexus` schema (§ 9.2, still open).
+- That the `rdr225` lines appear in CloudWatch `/conexus/dev/engine` on Crunchy. The test pins the engine-side
+  capture against a local PostgreSQL; conexus's relay is that the engine log ships there. Confirm on the fork run.
 - That a killed engine leaves its migration backend running until the socket read fails (PostgreSQL behaviour, not
   tested here).
 - That the previous engine on the new layout fails the way § 6.3 says (read from the write sites and the new primary
   key, per the critique; not run).
 - The `runAlways` count at the release tag (12 at v0.1.149 and at `c4e3dc15a`, counted by a script over those trees).
 - The 27 locks per leaf (the RDR's test layout) and the 2.0 factor for the referencing tables (this runbook's reading).
-- The conexus restore recipe and the redeploy document (conexus repo; not read).
+- The conexus restore recipe and the redeploy document (conexus repo; known here only through the 2026-10-07 answers
+  in T2 `nexus_rdr/225-conexus-answers`, read by conexus from its repo, not read here).
 
 ## References
 
@@ -539,6 +597,6 @@ the retired tables hold the only copy of the old layout.
 - Boot order: `service/src/main/java/dev/nexus/service/Main.java`; log events: `.../db/SchemaMigrator.java`;
   local disk rule: `.../db/LocalDiskPreflight.java`.
 - Skill: `.claude/skills/engine-release/SKILL.md` Steps 5b, 6, 6.1. Rationale: `docs/contributing.md` § Schema/data-migration releases.
-- T2: `nexus_rdr/225-deploy-shape-review-by-eae`, `nexus_rdr/225-cloud-topology`.
+- T2: `nexus_rdr/225-deploy-shape-review-by-eae`, `nexus_rdr/225-cloud-topology`, `nexus_rdr/225-conexus-answers`.
 - Beads: nexus-3wh8d.26 (this runbook), .27 (rehearsal measurements), .20 (rehearsal, tag, deploy), .16 (doctor rows).
 - Sibling runbooks: `rdr-191-phase5-cloud-fk.md` (shape), `rdr-225-tenant-removal.md`.
