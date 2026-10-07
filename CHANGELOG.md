@@ -9,6 +9,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Fixed
 
 - **On a Windows machine without the VC++ redistributable, the client's PDF extraction and local embedding load** (nexus-lqjll, RDR-224). onnxruntime, pymupdf, torch and fasttext link the system `msvcp140.dll` and `msvcp140_1.dll` and failed to import on a clean Windows 11 install. The engine and PostgreSQL bundle already ship those DLLs app-local, so on Windows without a system runtime `import nexus` adds the installed engine directory and the bundle's `bin` to the DLL search path. Measured on the clean guest: all four imported afterwards. A cloud-mode Windows install, which has no local engine, still needs the redistributable. POSIX is unchanged.
+- **The aspect-worker daemon backs off its reclaim sweep while the service is down** (nexus-g5rz5). `nx daemon service stop` leaves the daemon running on every platform, by RDR-224's recorded decision (the worker belongs to the store path, not to the service). With the stack stopped, every reclaim sweep failed and the wait stayed at the 30 s base, about 2,880 failed attempts a day. A failed sweep now doubles the wait up to the stale window, as an empty sweep does, and a reclaim resets it to the base. The Phase 5 gate keeps reporting the surviving worker as an observation and cites the decision.
 
 ## [7.72.1] - 2026-10-06
 

@@ -197,10 +197,22 @@ def test_next_reclaim_wait_resets_to_base_on_any_reclaim() -> None:
     assert next_reclaim_wait(60.0, reclaimed=7, base=30.0, stale_timeout=300) == 30.0
 
 
-def test_next_reclaim_wait_holds_on_a_failed_sweep() -> None:
-    """A failed sweep (reclaimed is None) is not evidence the queue is idle;
-    the cadence neither backs off nor resets."""
-    assert next_reclaim_wait(120.0, reclaimed=None, base=30.0, stale_timeout=300) == 120.0
+def test_next_reclaim_wait_backs_off_on_a_failed_sweep_up_to_the_stale_window() -> None:
+    """A failed sweep says nothing about whether the queue is idle, but it does
+    say the service cannot be asked: asking again every 30s cannot find rows
+    while the stack is stopped (nexus-g5rz5; ``nx daemon service stop`` leaves
+    this daemon running by design, RDR-224). Failures grow the wait on the same
+    ladder as empty sweeps and stop at the same cap, so recovery after the
+    service returns costs at most the window an idle queue already costs."""
+    base, window = 30.0, 300
+    waits = []
+    current = base
+    for _ in range(6):
+        current = next_reclaim_wait(current, reclaimed=None, base=base, stale_timeout=window)
+        waits.append(current)
+    assert waits == [60.0, 120.0, 240.0, 300.0, 300.0, 300.0]
+    # a reclaim after the outage snaps straight back to the base
+    assert next_reclaim_wait(300.0, reclaimed=3, base=base, stale_timeout=window) == base
 
 
 def test_next_reclaim_wait_never_below_base_even_when_window_is_smaller() -> None:
@@ -225,3 +237,49 @@ def test_daemon_backs_off_on_empty_sweeps_and_resets_on_a_hit(tmp_path: Path) ->
     q._reclaimed = 2
     d._reclaim_once()
     assert d._current_reclaim_wait == 30.0
+
+
+def test_daemon_backs_off_while_the_service_is_down(tmp_path: Path) -> None:
+    """The stack is stopped: the sweep raises, then the queue rebuild raises
+    too (no endpoint to resolve). Neither failure path may leave the wait at
+    the 30s base forever (nexus-g5rz5): 2,880 failed attempts a day against a
+    service that is not there."""
+    class _Down:
+        def reclaim_stale(self, timeout_seconds: int = 300) -> int:
+            raise ConnectionError("engine is down")
+
+        def close(self) -> None: ...
+
+    built = {"n": 0}
+
+    def _factory():
+        built["n"] += 1
+        if built["n"] == 1:
+            return _Down()
+        raise RuntimeError("storage service endpoint is not resolvable")
+
+    d = AspectWorkerDaemon(
+        config_dir=tmp_path, tenant="default",
+        worker_factory=_FakeWorker, queue_factory=_factory,
+        reclaim_interval=30.0, stale_timeout_seconds=300,
+    )
+    d._reclaim_queue = _factory()  # first handle, as start() builds it
+    seen = []
+    for _ in range(5):
+        assert d._reclaim_once() is None  # never raises, never claims success
+        seen.append(d._current_reclaim_wait)
+    assert seen == [60.0, 120.0, 240.0, 300.0, 300.0]
+
+
+def test_real_queue_with_no_service_is_a_quiet_failure_not_a_raise(tmp_path: Path, monkeypatch) -> None:
+    """The production factory against an empty config dir (no lease, no env):
+    the sweep reports a failure and backs off; it does not raise out of the loop."""
+    for var in ("NX_SERVICE_HOST", "NX_SERVICE_PORT", "NX_SERVICE_TOKEN", "NX_SERVICE_URL"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+    d = AspectWorkerDaemon(
+        config_dir=tmp_path, tenant="default", worker_factory=_FakeWorker,
+        reclaim_interval=30.0, stale_timeout_seconds=300,
+    )
+    assert d._reclaim_once() is None
+    assert d._current_reclaim_wait == 60.0
