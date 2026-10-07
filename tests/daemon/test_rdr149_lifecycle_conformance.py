@@ -82,6 +82,7 @@ from nexus.daemon.service_registry import (
     process_state,
     request_graceful_stop,
     service_identity,
+    stop_tier_holders,
     sweep_matching_processes,
     terminate_pids,
     ttl_for_tier,
@@ -701,6 +702,15 @@ EXPECTATIONS: dict[str, dict[str, Any]] = {
         "storage_service": "pass",  # nexus-cd1k0.2: _supervise_until_stopped checks fenced_exit_code
         "aspect_worker": "pass",  # RDR-173 P1: _heartbeat_loop already stands down on fenced
     },
+    "teardown_stops_holders": {
+        # RDR-224 nexus-7xzc1: `nx uninstall` stops every recorded holder of a
+        # tier and drops its records through the shared stop_tier_holders;
+        # a recycled pid running something else is never signalled. The
+        # aspect worker was the measured gap (it held a log file open on
+        # Windows and the data dir could not be removed).
+        "storage_service": "pass",
+        "aspect_worker": "pass",
+    },
     "dead_owner_lease_reclaimed": {
         # nexus-cd1k0.17: a TTL-fresh lease held by a DEAD supervisor_pid
         # (hard crash) must be reclaimed, not honored as live, so a
@@ -927,6 +937,75 @@ class TestLifecycleConformance:
 # ---------------------------------------------------------------------------
 # Non-vacuity guard (CA-1).
 # ---------------------------------------------------------------------------
+
+
+#: Where each tier's lease records the pid a teardown stops.
+_TEARDOWN_PID_KEY = {"storage_service": "supervisor_pid", "aspect_worker": "pid"}
+_TEARDOWN_MARKER = "nexus-teardown-conformance-holder"
+
+
+def _spawn_holder() -> subprocess.Popen[bytes]:
+    return subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(120)", _TEARDOWN_MARKER],
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+
+
+class TestTeardownStopsHolders:
+    """The ``teardown_stops_holders`` property, with real processes: the lease
+    names a live pid, the teardown stops it and drops the record, for every
+    tier. A pid whose command is not ours is left running."""
+
+    def _publish(self, config_dir: Path, tier: str, scope: str, pid: int) -> None:
+        key = _TEARDOWN_PID_KEY[tier]
+        endpoint: dict[str, Any] = {"host": "127.0.0.1", "port": 1}
+        payload: dict[str, Any] = {}
+        (payload if key == "supervisor_pid" else endpoint)[key] = pid
+        ServiceRegistry(dir=config_dir, tier=tier).publish(
+            scope, endpoint=endpoint, version="0", owner_token=f"tok-{scope}", payload=payload,
+        )
+
+    def test_every_recorded_holder_is_stopped_and_its_record_dropped(
+        self, tier: str, config_dir: Path,
+    ) -> None:
+        _maybe_xfail("teardown_stops_holders", tier)
+        holders = [_spawn_holder(), _spawn_holder()]
+        try:
+            for i, proc in enumerate(holders):
+                self._publish(config_dir, tier, f"scope{i}", proc.pid)
+            result = stop_tier_holders(
+                dir=config_dir, tier=tier, pid_key=_TEARDOWN_PID_KEY[tier],
+                is_ours=lambda cmd: _TEARDOWN_MARKER in cmd, grace_s=5.0,
+            )
+            for proc in holders:
+                proc.wait(timeout=10)
+            assert sorted(result.stopped) == sorted(p.pid for p in holders)
+            assert result.survivors == ()
+            assert ServiceRegistry(dir=config_dir, tier=tier).records() == []
+        finally:
+            for proc in holders:
+                if proc.poll() is None:
+                    proc.kill()
+                    proc.wait()
+
+    def test_a_recycled_pid_is_never_signalled(self, tier: str, config_dir: Path) -> None:
+        _maybe_xfail("teardown_stops_holders", tier)
+        stranger = _spawn_holder()
+        try:
+            self._publish(config_dir, tier, "default", stranger.pid)
+            result = stop_tier_holders(
+                dir=config_dir, tier=tier, pid_key=_TEARDOWN_PID_KEY[tier],
+                is_ours=lambda cmd: "aspect-worker" in cmd, grace_s=1.0,
+            )
+            assert stranger.poll() is None, "a pid running something else must not be signalled"
+            assert result.foreign == (stranger.pid,)
+            assert result.stopped == ()
+            assert ServiceRegistry(dir=config_dir, tier=tier).records() == [], (
+                "the dead holder's record goes even though the pid now runs something else"
+            )
+        finally:
+            stranger.kill()
+            stranger.wait()
 
 
 class TestMatrixIsNotVacuous:

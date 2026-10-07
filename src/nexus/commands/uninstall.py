@@ -27,6 +27,7 @@ touches nothing; pass ``--yes`` to perform the teardown (mirrors the
 from __future__ import annotations
 
 import os
+import sys
 
 import click
 
@@ -193,6 +194,43 @@ def _teardown_beads_prime(*, confirm: bool) -> tuple[list[str], list[str]]:
     return lines, warnings
 
 
+def _teardown_user_path(
+    *, confirm: bool, platform: str | None = None, store: object | None = None,
+    environ: dict[str, str] | None = None,
+) -> tuple[list[str], list[str]]:
+    """Take ``<tools>\\current\\bin`` off the Windows user PATH (RDR-224,
+    nexus-7xzc1). Returns (lines, warnings).
+
+    ``nx self install`` puts that one directory first on ``HKCU\\Environment``
+    ``Path``; this removes exactly it, keeps every other entry and the value's
+    registry type, and broadcasts ``WM_SETTINGCHANGE`` as the install did
+    (:func:`nexus._install.generation_core.remove_user_path`). Windows only:
+    the POSIX generation layout puts its shims in uv's own bin directory and
+    edits no PATH and no shell rc file, so there is nothing to revert. Mode-
+    agnostic and unconditional, like the beads PRIME.md step: a managed-only
+    Windows client has the entry too. A no-op when the entry is absent.
+    """
+    if (platform or sys.platform) != "win32":
+        return [], []
+    from nexus._install import generation_core  # noqa: PLC0415 — Windows branch only
+
+    entry = generation_core.current_launcher_dir()
+    try:
+        result = generation_core.remove_user_path(
+            entry, store=store, environ=environ, dry_run=not confirm,  # type: ignore[arg-type]
+        )
+    except generation_core.GenerationError as exc:
+        return [], [f"{exc}; remove {entry} from your user PATH yourself"]
+    if not result.removed:
+        return [], []
+    if not confirm:
+        return [f"User PATH: would remove {entry} (added by `nx self install`)."], []
+    return [
+        f"User PATH: removed {entry}. Terminals opened from now on no longer find nx; "
+        "`nx self install` puts it back."
+    ], []
+
+
 @click.command("uninstall")
 @click.option(
     "--yes",
@@ -237,6 +275,15 @@ def uninstall_cmd(assume_yes: bool, remove_data: bool) -> None:
     for line in beads_lines:
         click.echo(line)
 
+    # The Windows user PATH entry `nx self install` added (nexus-7xzc1) —
+    # unconditional, mode-agnostic, best-effort.
+    try:
+        path_lines, path_warnings = _teardown_user_path(confirm=assume_yes)
+    except Exception as exc:  # noqa: BLE001 — best-effort teardown step; never aborts uninstall
+        path_lines, path_warnings = [], [f"user PATH check failed: {exc}"]
+    for line in path_lines:
+        click.echo(line)
+
     # Local branch (eu4u4) — stop the service stack + daemon, remove autostart +
     # marker, optionally wipe local data. GATED on local presence (auto-detect):
     # skipped entirely for a managed-only / fresh install so no spurious
@@ -244,7 +291,9 @@ def uninstall_cmd(assume_yes: bool, remove_data: bool) -> None:
     # Probe local presence ONCE — a second call could disagree under a concurrent
     # install (lease appears mid-run) and would re-pay the stat/SQLite cost.
     local_present = _local_service_present()
-    warnings: tuple[str, ...] = (*managed_warnings, *lease_warnings, *beads_warnings)
+    warnings: tuple[str, ...] = (
+        *managed_warnings, *lease_warnings, *beads_warnings, *path_warnings,
+    )
     if local_present:
         report = uninstall_daemon(confirm=assume_yes, remove_data=remove_data)
         click.echo(report.message)
@@ -260,7 +309,10 @@ def uninstall_cmd(assume_yes: bool, remove_data: bool) -> None:
                 "managed-only client; the remote tenant's data is untouched."
             )
 
-    if not managed_lines and not lease_lines and not beads_lines and not local_present:
+    if (
+        not managed_lines and not lease_lines and not beads_lines and not path_lines
+        and not local_present
+    ):
         click.echo("Nothing to uninstall — no managed config and no local service found.")
 
     for w in warnings:

@@ -935,6 +935,28 @@ class ServiceRegistry:
             )
             self._write_record_atomic(marker)
 
+    def records(self) -> list[LeaseRecord]:
+        """Every readable record in this tier, fresh or not, ordered by scope.
+
+        For teardown (:func:`stop_tier_holders`), which must reach a holder
+        whose lease went stale while it kept running, so freshness is not a
+        filter here. Unreadable or corrupt records are skipped, as
+        :meth:`discover` skips them.
+        """
+        prefix = f"{self._tier}_addr."
+        try:
+            names = sorted(os.listdir(self._dir))
+        except OSError:
+            return []
+        out: list[LeaseRecord] = []
+        for name in names:
+            if not name.startswith(prefix) or len(name) == len(prefix):
+                continue
+            record = self._read_record(name[len(prefix):])
+            if record is not None:
+                out.append(record)
+        return out
+
     def relinquish(
         self, record: LeaseRecord, *, budget: Optional[float] = None
     ) -> None:
@@ -1929,6 +1951,101 @@ def terminate_pids(
                 break
             time.sleep(0.1)
     return live + [p for p in refused if pid_running(p)]
+
+
+@dataclass(frozen=True)
+class HolderStopResult:
+    """What :func:`stop_tier_holders` did.
+
+    ``stopped``: recorded pids that ran our command and are gone now.
+    ``survivors``: ours, still running after the hard kill, or refused.
+    ``refused``: the Windows cross-session refusals among the survivors.
+    ``unreadable``: alive, but the command line could not be read, so not
+    signalled (an empty read is inconclusive, never proof it is not ours).
+    ``foreign``: alive and running something else (a recycled pid); untouched.
+    """
+
+    stopped: tuple[int, ...] = ()
+    survivors: tuple[int, ...] = ()
+    refused: tuple[GracefulStopSend, ...] = ()
+    unreadable: tuple[int, ...] = ()
+    foreign: tuple[int, ...] = ()
+
+
+def stop_tier_holders(
+    *,
+    dir: Path,
+    tier: str,
+    is_ours: Callable[[str], bool],
+    pid_key: str = "pid",
+    grace_s: float = 12.0,
+    platform: str | None = None,
+    console_api: "win_console.WinConsoleApi | None" = None,
+    command: Callable[[int], str] | None = None,
+) -> HolderStopResult:
+    """Stop every process a tier's lease records name, and drop the records.
+
+    The TEARDOWN stop (``nx uninstall``, RDR-224 nexus-7xzc1): no respawn,
+    unlike ``nx daemon restart-stale``. Every record of *tier* under *dir* is
+    read, fresh or stale, since a holder whose heartbeat lapsed may still run
+    and still hold files open. A recorded pid is signalled only when its live
+    command line satisfies *is_ours* (the pid-recycle re-check every stop site
+    makes). The stop is :func:`terminate_pids`: the graceful send, *grace_s*
+    for the holder's bounded drain, then the hard kill; a Windows cross-session
+    refusal is never escalated. The pid is ``endpoint[pid_key]``, else
+    ``payload[pid_key]`` (the storage service records ``supervisor_pid`` in its
+    payload, the aspect worker ``pid`` in its endpoint). A record is relinquished unless its pid is
+    still running our command afterwards, so a dead holder's lease goes too.
+    Never raises for a missing or unreadable registry directory.
+    """
+    read_command = command or (lambda pid: process_command(pid, platform=platform))
+    registry = ServiceRegistry(dir=dir, tier=tier)
+    records = registry.records()
+    targets: list[int] = []
+    unreadable: list[int] = []
+    foreign: list[int] = []
+    def _pid_of(record: LeaseRecord) -> object:
+        return record.endpoint.get(pid_key, record.payload.get(pid_key))
+
+    for record in records:
+        pid = _pid_of(record)
+        if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0 or pid == os.getpid():
+            continue
+        if pid in targets or pid in unreadable or pid in foreign:
+            continue
+        cmd = read_command(pid)
+        if not cmd:
+            if pid_running(pid):
+                unreadable.append(pid)
+            continue
+        if is_ours(cmd):
+            targets.append(pid)
+        elif pid_running(pid):
+            foreign.append(pid)
+    refused: list[GracefulStopSend] = []
+    survivors = (
+        terminate_pids(
+            targets, grace_s=grace_s, platform=platform, console_api=console_api,
+            refused_out=refused,
+        )
+        if targets
+        else []
+    )
+    held = set(survivors) | set(unreadable)
+    for record in records:
+        if _pid_of(record) in held:
+            continue
+        try:
+            registry.relinquish(record, budget=DEFAULT_STOP_ELECTION_BUDGET)
+        except Exception:  # noqa: BLE001 — a record left behind ages out; the stop already happened
+            _log.debug("stop_tier_holders_relinquish_failed", tier=tier, scope=record.scope_key)
+    return HolderStopResult(
+        stopped=tuple(p for p in targets if p not in survivors),
+        survivors=tuple(survivors),
+        refused=tuple(refused),
+        unreadable=tuple(unreadable),
+        foreign=tuple(foreign),
+    )
 
 
 # -- stop marker (RDR-224, nexus-f9bgu.33) ----------------------------------

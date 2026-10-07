@@ -2505,17 +2505,26 @@ def _spawn_deferred_labeling() -> bool:
         log_dir = nexus_config_dir() / "logs"
         log_dir.mkdir(parents=True, exist_ok=True)
         log = open(log_dir / "deferred_labeling.log", "ab")  # noqa: SIM115 — handed to the child for its lifetime
-        # nexus-6y4e0 surveyed this site and left it unwired: nothing ever
-        # kills this child by pid -- it is a pure fire-and-forget spawn
-        # (the caller returns immediately and never records the pid at
-        # all). There is no kill call site for containment to serve.
-        subprocess.Popen(
+        # The pid is recorded for ONE reader: ``nx uninstall`` stops this run
+        # before it removes the config dir, which the run's log handle keeps
+        # open on Windows (RDR-224, nexus-7xzc1). It re-checks the pid's live
+        # command before signalling, so a stale file left after the run exits
+        # is harmless. Nothing else kills this child.
+        proc = subprocess.Popen(
             [sys.executable, "-m", "nexus.cli", "taxonomy", "label"],
             stdin=subprocess.DEVNULL,
             stdout=log,
             stderr=log,
             start_new_session=True,
         )
+        from nexus.daemon.installer import DEFERRED_LABELING_PID_NAME  # noqa: PLC0415 — spawn-only branch
+
+        try:
+            (nexus_config_dir() / DEFERRED_LABELING_PID_NAME).write_text(
+                f"{proc.pid}\n", encoding="utf-8",
+            )
+        except OSError:
+            _log.debug("deferred_labeling_pid_write_failed", exc_info=True)
         return True
     except Exception:  # noqa: BLE001 — labeling is best-effort; pending topics remain labelable manually
         _log.warning("deferred_labeling_spawn_failed", exc_info=True)

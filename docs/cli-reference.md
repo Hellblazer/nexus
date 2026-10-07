@@ -4450,7 +4450,19 @@ and handling BOTH install shapes — each branch is a no-op when its target is a
 
 - **Local service**: stops the engine-service + Postgres stack
   (`nx daemon service stop --with-pg`), stops the T2 daemon, removes the OS
-  autostart unit, and clears the first-run marker.
+  autostart unit, and clears the first-run marker. It then stops the background
+  workers the service stop leaves running, before anything is removed: every
+  aspect worker named by its lease, a detached `nx taxonomy label` run named by
+  `deferred_labeling.pid`, and the MinerU server when `mineru.pid` shows nexus
+  started it (`nx mineru stop`). Each recorded pid is signalled only while its
+  live command line is still that worker; MCP servers belong to Claude sessions
+  and are never stopped.
+- **Windows user PATH**: removes the `<tools>\current\bin` entry that
+  `nx self install` added to `HKCU\Environment` `Path`, keeping every other
+  entry (unexpanded `%VAR%` entries included) and the value's registry type, and
+  broadcasts the change as the install did. Unconditional, like the two steps
+  below. On macOS and Linux `nx self install` edits no PATH and no shell rc file,
+  so there is nothing to revert.
 - **Managed-only client**: clears the managed endpoint config
   (`service_url` + `service_token` + `mint_token` + `mint_tenant`) from `config.yml`. Skips service-stop (no
   local service) and never touches the remote tenant's data.

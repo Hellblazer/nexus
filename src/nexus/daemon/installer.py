@@ -1186,6 +1186,9 @@ class DaemonUninstallReport:
     #: cache (``nexus.db.onnx_model_root.nexus_cache_root()``).
     cache_removed: bool = False
     cache_dir: Path | None = None
+    #: RDR-224 (nexus-7xzc1): pids of the background workers uninstall stopped
+    #: (aspect workers, a topic labeling run), sorted.
+    workers_stopped: tuple[int, ...] = ()
 
 
 # NO _stop_daemon_best_effort: it shelled out to ``nx daemon t2 stop``, a verb
@@ -1332,6 +1335,137 @@ def _remove_model_cache(cache: Path) -> str | None:
     return None
 
 
+#: The pid file the detached ``nx taxonomy label`` spawn writes under
+#: ``nexus_config_dir()`` (``commands.index._spawn_deferred_labeling``), so
+#: uninstall can find that run (RDR-224, nexus-7xzc1).
+DEFERRED_LABELING_PID_NAME = "deferred_labeling.pid"
+
+#: The pid file ``nx mineru start`` and the on-demand spawn write: its presence
+#: is how uninstall knows nexus started the MinerU server.
+_MINERU_PID_NAME = "mineru.pid"
+
+
+def _is_aspect_worker_command(command: str) -> bool:
+    """``python -m nexus.cli daemon aspect-worker start`` (any interpreter)."""
+    return "aspect-worker" in command and "nexus" in command
+
+
+def _is_deferred_labeling_command(command: str) -> bool:
+    """``python -m nexus.cli taxonomy label``, as the index chain spawns it."""
+    return "nexus" in command and "taxonomy" in command and " label" in command
+
+
+def _stop_deferred_labeling(config_dir: Path) -> tuple[tuple[int, ...], list[str]]:
+    """Stop the detached ``nx taxonomy label`` run named by its pid file.
+
+    The file is removed either way; the pid is signalled only while its live
+    command is that run (a stale file can name a reused pid). Returns
+    (stopped pids, warnings).
+    """
+    from nexus.daemon.service_registry import (  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
+        pid_running,
+        process_command,
+        terminate_pids,
+    )
+
+    pid_file = config_dir / DEFERRED_LABELING_PID_NAME
+    try:
+        pid = int(pid_file.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        pid = 0
+    warnings: list[str] = []
+    stopped: tuple[int, ...] = ()
+    if pid > 0 and pid != os.getpid():
+        command = process_command(pid)
+        if command and _is_deferred_labeling_command(command):
+            survivors = terminate_pids([pid], grace_s=5.0)
+            if survivors:
+                warnings.append(f"the topic labeling run (pid {pid}) is still running")
+            else:
+                stopped = (pid,)
+        elif not command and pid_running(pid):
+            warnings.append(
+                f"pid {pid} from {pid_file.name} is running but its command line could "
+                "not be read; not stopped"
+            )
+    try:
+        pid_file.unlink(missing_ok=True)
+    except OSError:
+        pass
+    return stopped, warnings
+
+
+def _stop_mineru_if_started(config_dir: Path) -> list[str]:
+    """``nx mineru stop`` when nexus started the server (``mineru.pid`` exists).
+
+    The verb owns the election, the pid re-check, the process-group stop and
+    the output-dir cleanup; this only decides whether to call it. Returns
+    warnings.
+    """
+    from nexus.commands import daemon as _daemon  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
+
+    if not (config_dir / _MINERU_PID_NAME).exists():
+        return []
+    cmd = [*_daemon._resolve_nx_bin(), "mineru", "stop"]
+    try:
+        result = run_bounded(cmd, timeout=60)
+    except Exception as exc:  # noqa: BLE001 — stop is best-effort
+        return [f"MinerU stop failed: {type(exc).__name__}: {exc}"]
+    if result.returncode != 0:
+        detail = (result.stderr or "").strip() or (result.stdout or "").strip()
+        return [f"MinerU stop exited {result.returncode}: {detail}"]
+    return []
+
+
+def _stop_background_workers(config_dir: Path) -> tuple[tuple[int, ...], list[str]]:
+    """Stop the nexus background workers uninstall can identify (RDR-224,
+    nexus-7xzc1). Returns (stopped pids, warnings).
+
+    Each is found from nexus's own records, never by matching names across the
+    process table: aspect workers from their leases (the shared
+    ``service_registry.stop_tier_holders``, which re-checks each pid's command
+    and relinquishes the leases), the detached ``nx taxonomy label`` run from
+    its pid file, and MinerU through ``nx mineru stop`` when ``mineru.pid``
+    says nexus started it. MCP hosts belong to live Claude sessions and are
+    never touched. ``nx daemon service stop`` leaves the aspect worker running
+    by design; on Windows it holds its crash log open, so the data dir could
+    not be removed while it ran.
+    """
+    from nexus.daemon.aspect_worker_daemon import TIER as _ASPECT_TIER  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
+    from nexus.daemon.service_registry import stop_tier_holders  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
+
+    warnings: list[str] = []
+    stopped: list[int] = []
+    try:
+        aspect = stop_tier_holders(
+            dir=config_dir, tier=_ASPECT_TIER, is_ours=_is_aspect_worker_command,
+        )
+    except Exception as exc:  # noqa: BLE001 — best-effort; a survivor shows up as a data-removal warning
+        warnings.append(f"aspect worker stop failed: {type(exc).__name__}: {exc}")
+    else:
+        stopped.extend(aspect.stopped)
+        refused = {send.pid: send for send in aspect.refused}
+        for pid in aspect.survivors:
+            send = refused.get(pid)
+            if send is not None and send.target_session is not None:
+                warnings.append(
+                    f"aspect worker pid {pid} runs in session {send.target_session}; "
+                    "nothing was signalled — stop it from there"
+                )
+            else:
+                warnings.append(f"aspect worker pid {pid} is still running")
+        for pid in aspect.unreadable:
+            warnings.append(
+                f"aspect worker pid {pid} is running but its command line could not be "
+                "read; not stopped"
+            )
+    labeling_stopped, labeling_warnings = _stop_deferred_labeling(config_dir)
+    stopped.extend(labeling_stopped)
+    warnings.extend(labeling_warnings)
+    warnings.extend(_stop_mineru_if_started(config_dir))
+    return tuple(sorted(stopped)), warnings
+
+
 def _service_stack_confirmed_stopped(stop_exit_ok: bool) -> tuple[bool, tuple[str, ...]]:
     """Whether the engine-service + Postgres stack is gone after the stop.
 
@@ -1377,6 +1511,8 @@ def uninstall_daemon(*, confirm: bool = False, remove_data: bool = False) -> Dae
             f"the service autostart unit at {service_unit_dest}",
             f"the T2 autostart unit at {unit_dest}",
             "stop the engine-service + Postgres stack (service stop --with-pg)",
+            "stop the nexus background workers (aspect workers, a topic labeling "
+            "run, MinerU if nexus started it)",
         ]
         if marker.exists():
             parts.append(f"the first-run marker at {marker}")
@@ -1451,6 +1587,13 @@ def uninstall_daemon(*, confirm: bool = False, remove_data: bool = False) -> Dae
         warnings.append(service_warning)
     service_stopped, survivors = _service_stack_confirmed_stopped(stop_exit_ok)
     warnings.extend(survivors)
+
+    # 2b. Stop the background workers the service stop leaves running
+    #     (RDR-224, nexus-7xzc1), before anything is removed: on Windows the
+    #     aspect worker holds a log under the data dir open and the removal
+    #     below fails (WinError 32) while it runs.
+    workers_stopped, worker_warnings = _stop_background_workers(data_dir)
+    warnings.extend(worker_warnings)
 
     # 3. Remove the first-run marker so a reinstall re-shows the banner.
     marker_removed = False
@@ -1527,6 +1670,12 @@ def uninstall_daemon(*, confirm: bool = False, remove_data: bool = False) -> Dae
         summary.append("no T2 daemon (nothing to stop)")
     else:
         summary.append("daemon stopped" if daemon_stopped else "daemon stop not confirmed")
+    if workers_stopped:
+        summary.append(
+            "background workers stopped (aspect worker / topic labeling pids "
+            + ", ".join(str(p) for p in workers_stopped)
+            + ")"
+        )
     if marker_removed:
         summary.append("first-run marker removed")
     if data_removed:
@@ -1546,6 +1695,7 @@ def uninstall_daemon(*, confirm: bool = False, remove_data: bool = False) -> Dae
         service_stopped=service_stopped,
         cache_removed=cache_removed,
         cache_dir=cache_dir,
+        workers_stopped=workers_stopped,
         warnings=tuple(warnings),
         message="Daemon uninstall complete: " + "; ".join(summary) + ".",
     )

@@ -64,6 +64,10 @@ class TestSpawnDeferredLabeling:
         # detached: new session, no inherited stdio pipes back to us
         assert calls[0]["start_new_session"] is True
         assert calls[0]["stdin"] == subprocess.DEVNULL
+        # nexus-7xzc1: the pid is recorded where `nx uninstall` stops the run
+        from nexus.daemon.installer import DEFERRED_LABELING_PID_NAME
+
+        assert (tmp_path / DEFERRED_LABELING_PID_NAME).read_text().strip() == "4242"
 
     def test_spawn_failure_returns_false_never_raises(self, monkeypatch) -> None:
         def boom(cmd, **kw):

@@ -807,6 +807,51 @@ def ensure_user_path(
     return PathResult(entry, changed, process_new is not None, chosen.kind)
 
 
+@dataclass(frozen=True)
+class PathRemoval:
+    entry: str
+    removed: int  #: entries naming *entry* that were taken off the user PATH
+    store: str
+
+
+def remove_user_path(
+    entry: Path | str, *, store: UserPathStore | None = None, environ=None,
+    dry_run: bool = False,
+) -> PathRemoval:
+    """Take *entry* off the persistent user PATH: the inverse of
+    :func:`ensure_user_path`, for ``nx uninstall`` (RDR-224, nexus-7xzc1).
+
+    Every entry naming the same directory goes (compared as
+    :func:`ensure_user_path` compares them: unquoted, ``%VAR%`` expanded,
+    ``normcase``). Every other entry is written back byte-for-byte, unexpanded,
+    in order, empty ones included, under the value's own registry type. Writes
+    and broadcasts ``WM_SETTINGCHANGE`` only when something was removed; the
+    broadcast is best effort. This process's PATH is left alone. ``dry_run``
+    counts what would go and writes nothing.
+    """
+    env = os.environ if environ is None else environ
+    entry = str(entry)
+    chosen = store if store is not None else default_user_path_store(env)
+    try:
+        value, reg_type = chosen.read()
+    except OSError as exc:
+        raise GenerationError(f"could not read the user PATH ({chosen.kind}): {exc}") from exc
+    entries = value.split(";") if value else []
+    ekey = _path_key(entry, env)
+    kept = [e for e in entries if _path_key(e, env) != ekey]
+    removed = len(entries) - len(kept)
+    if removed and not dry_run:
+        try:
+            chosen.write(";".join(kept), reg_type)
+        except OSError as exc:
+            raise GenerationError(f"could not write the user PATH ({chosen.kind}): {exc}") from exc
+        try:
+            chosen.broadcast()
+        except Exception:  # noqa: BLE001 -- best effort by contract
+            pass
+    return PathRemoval(entry, removed, chosen.kind)
+
+
 def inspect_user_path(
     entry: Path | str, *, store: UserPathStore | None = None, environ=None,
 ) -> list[str]:

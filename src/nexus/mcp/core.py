@@ -12790,6 +12790,9 @@ def daemon_uninstall(
 
     Constraints:
     - Nothing is removed until `confirm=True`.
+    - `confirm=True` also stops the background workers the stack stop leaves
+      running (aspect workers, a topic labeling run, MinerU when nexus
+      started it), found from their leases and pid files.
     - `remove_data=True` removes `~/.cache/nexus/` (the ONNX model cache)
       only after the stack is confirmed stopped, and never a model root set
       with `NX_ONNX_MODEL_DIR` outside it.
