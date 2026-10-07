@@ -21,6 +21,7 @@ from __future__ import annotations
 import getpass
 import re
 import socket
+import os
 import subprocess
 from pathlib import Path
 
@@ -76,6 +77,7 @@ def diag_cluster(tmp_path_factory):
         _start_cluster,
         _configure_cluster,
         _create_db,
+        superuser_auth,
     )
 
     bins = PgBinaries.from_dir(pg_bin_dir())
@@ -83,14 +85,15 @@ def diag_cluster(tmp_path_factory):
     port = _free_port()
     os_user = getpass.getuser()
 
-    _init_cluster(bins, pgdata, os_user)
+    su_pw = "su-pw"  # nexus-ja4pq: the cluster demands a superuser password
+    _init_cluster(bins, pgdata, os_user, superuser_password=su_pw)
     _configure_cluster(pgdata, port)
     _start_cluster(bins, pgdata, port)
-    _create_db(bins, port, os_user)
-
-    created = _create_roles(
-        bins, port, os_user, "admin-pw", "svc-pw", "diag-pw"
-    )
+    with superuser_auth(su_pw):
+        _create_db(bins, port, os_user)
+        created = _create_roles(
+            bins, port, os_user, "admin-pw", "svc-pw", "diag-pw"
+        )
     assert created.diag_created is True  # non-vacuity: the role really was made
 
     def su(sql: str) -> str:
@@ -99,6 +102,7 @@ def diag_cluster(tmp_path_factory):
             [str(bins.psql), "-h", "127.0.0.1", "-p", str(port), "-U", os_user,
              "-d", "nexus", "-v", "ON_ERROR_STOP=1", "-tAc", sql],
             capture_output=True, text=True, timeout=30,
+            env={**os.environ, "PGPASSWORD": su_pw},
         )
         assert proc.returncode == 0, proc.stderr
         return proc.stdout.strip()
@@ -234,15 +238,16 @@ class TestDiagConnectionHelperLive:
 
 class TestIdempotency:
     def test_reprovision_is_a_clean_noop_with_password_sync(self, diag_cluster):
-        from nexus.db.pg_provision import PgBinaries, _create_roles
+        from nexus.db.pg_provision import PgBinaries, _create_roles, superuser_auth
 
         # Second run: nothing newly created, no error, passwords re-synced.
         # (Uses the same live cluster; _create_roles is skip-if-exists.)
         bins = PgBinaries.from_dir(pg_bin_dir())
         port = int(diag_cluster["su"]("SELECT inet_server_port()"))
-        created = _create_roles(
-            bins, port, getpass.getuser(), "admin-pw", "svc-pw", "diag-pw"
-        )
+        with superuser_auth("su-pw"):  # nexus-ja4pq: the fixture's superuser password
+            created = _create_roles(
+                bins, port, getpass.getuser(), "admin-pw", "svc-pw", "diag-pw"
+            )
         assert created.diag_created is False
         assert diag_cluster["diag"]("SELECT 1").returncode == 0
 

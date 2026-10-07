@@ -6,6 +6,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Security
+
+- **The local PostgreSQL cluster now demands a password (`scram-sha-256`) instead of trusting every local account** (nexus-ja4pq). The bundled cluster listens on 127.0.0.1 only, but it was created `initdb --auth=trust`, so any OS account on the same box could open a superuser session on its port with no password. Windows made that sharper, since the superuser's role name derives from a SID that other accounts can read. A new cluster is created with `--auth=scram-sha-256` and a superuser password handed to `initdb` through a private temp file (never a command line), recorded as `PG_SUPERUSER_PASS` in the owner-only `pg_credentials`. The engine already carried `nexus_admin` and `nexus_svc` passwords, so it needs no change; `PG_SUPERUSER_PASS` is not passed to it. An existing cluster is converted on the next service start (the provision fast path that already runs before every start): it sets the passwords, rewrites every `trust` line in `pg_hba.conf` to `scram-sha-256`, reloads, then confirms that a password-less connection is refused and that each role signs in with its recorded password. If any step fails it restores the original `pg_hba.conf`, leaves the cluster on `trust` and logs `pg_auth_migration_failed`, so a failure never locks anyone out. The conversion is idempotent. `nx doctor` gains a "Local PostgreSQL authentication" row that fails while any `pg_hba.conf` line is still `trust`. Role passwords no longer pass through `psql -c` on a command line. A cluster that already enforces passwords but has lost `PG_SUPERUSER_PASS` is refused with the single-user recovery steps; nx never loosens `pg_hba.conf` to recover.
+
 ## [7.72.1] - 2026-10-06
 
 Pairs with engine-service-v0.1.149, unchanged from 7.72.0 (`REQUIRED_ENGINE_VERSION` stays 0.1.149). A Windows fix release: on native Windows 7.72.0's MCP search hung forever, and these fixes are what the RDR-224 Phase 5 gate passed with on a clean Windows 11 guest (T2 nexus_rdr/224-gate-run-2026-10-06). Windows is still not declared supported.

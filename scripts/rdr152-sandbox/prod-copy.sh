@@ -203,6 +203,17 @@ PSQL_BIN=""
 if [[ -f "${CREDS_FILE}" ]]; then
     # shellcheck disable=SC1090
     source "${CREDS_FILE}"
+    # nexus-ja4pq: the sandbox cluster demands passwords (scram-sha-256). Hand libpq the
+    # ones pg_credentials records, through a private pgpass file, never on a command line.
+    PGPASSFILE="$(mktemp)"
+    chmod 600 "${PGPASSFILE}"
+    {
+        echo "127.0.0.1:${PG_PORT}:*:${USER:-$(id -un)}:${PG_SUPERUSER_PASS:-}"
+        echo "127.0.0.1:${PG_PORT}:*:${NX_DB_ADMIN_USER:-nexus_admin}:${NX_DB_ADMIN_PASS:-}"
+        echo "127.0.0.1:${PG_PORT}:*:${NX_DB_USER:-nexus_svc}:${NX_DB_PASS:-}"
+    } > "${PGPASSFILE}"
+    export PGPASSFILE
+    trap 'rm -f "${PGPASSFILE}"' EXIT
     PSQL_BIN="$(cd "${REPO_ROOT}" && uv run python "${SCRIPT_DIR}/sandbox_helper.py" pg-bin psql 2>/dev/null | grep -v '^\[' || echo '')"
 fi
 
@@ -230,7 +241,7 @@ verify_pg_count_exact() {
         SKIPPED=$((SKIPPED+1)); echo "[prod-copy] SKIP ${label} (psql not found)"
         return
     fi
-    # Query as OS superuser (trust auth) to bypass FORCE RLS on nexus tables.
+    # Query as the OS superuser (password via PGPASSFILE) to bypass FORCE RLS on nexus tables.
     # nexus_admin has FORCE RLS applied (it is not a BYPASSRLS role).
     SBX_COUNT="$("${PSQL_BIN}" -h 127.0.0.1 -p "${PG_PORT}" \
         -U "${OS_USER}" -d nexus \

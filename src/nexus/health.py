@@ -4393,6 +4393,71 @@ def _check_config_dir_user_access(
     )]
 
 
+def _check_local_pg_auth(config_dir: Path | None = None) -> list[HealthResult]:
+    """nexus-ja4pq: does the nx-managed local PostgreSQL demand a password?
+
+    The bundled cluster listens on 127.0.0.1 only, but until nexus-ja4pq it was
+    created ``--auth=trust``, so any OS account on the box could open a
+    superuser session on that port. New clusters are ``scram-sha-256`` from
+    creation, and an existing trust cluster is converted on the next service
+    start. This row reads the cluster's own ``pg_hba.conf`` (no connection, no
+    password) and fails while any active line is still ``trust``, which is also
+    what a migration that failed and rolled back looks like; the reason is in
+    the log under ``pg_auth_migration_failed``.
+
+    Not applicable (no row) where there is no bundled cluster to check: a
+    virgin box, or a managed/BYO Postgres (no ``PG_DATA`` in ``pg_credentials``).
+    A cluster whose ``pg_hba.conf`` cannot be read does get a row, since "could
+    not look" must not read as "fine".
+    """
+    try:
+        if config_dir is None:
+            import nexus.config as _config  # noqa: PLC0415 — deferred to avoid circular import
+
+            config_dir = _config.nexus_config_dir()
+        from nexus.db.pg_auth import cluster_auth_state  # noqa: PLC0415 — deferred, light module
+        from nexus.db.pg_provision import CREDENTIALS_FILENAME, _read_credentials  # noqa: PLC0415 — deferred, heavy module
+
+        creds_path = config_dir / CREDENTIALS_FILENAME
+        if not creds_path.is_file():
+            return []
+        pg_data = _read_credentials(creds_path).get("PG_DATA", "").strip()
+        if not pg_data:
+            return []
+        state = cluster_auth_state(Path(pg_data))
+    except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash `nx doctor`
+        _log.debug("doctor_local_pg_auth_check_failed", error=str(exc))
+        return []
+    label = "Local PostgreSQL authentication"
+    if state == "scram":
+        return [HealthResult(
+            label=label, ok=True,
+            detail="password authentication (scram-sha-256) on every pg_hba.conf line",
+        )]
+    if state == "trust":
+        return [HealthResult(
+            label=label, ok=False,
+            detail=(
+                "pg_hba.conf still has a 'trust' line: any local OS account can connect to the "
+                "bundled PostgreSQL port without a password"
+            ),
+            fix_suggestions=[
+                "nx daemon service start   # converts the cluster to scram-sha-256 on the way up",
+                "if it stays trust, read the 'pg_auth_migration_failed' line in the nx log for the reason",
+            ],
+        )]
+    if state == "absent":
+        return [HealthResult(
+            label=label, ok=False,
+            detail=f"cannot read pg_hba.conf under {pg_data}; the cluster's authentication is unknown",
+            fix_suggestions=["check that the PostgreSQL data directory named by PG_DATA exists and is readable"],
+        )]
+    return [HealthResult(
+        label=label, ok=True,
+        detail="pg_hba.conf has no trust line (operator-managed methods)",
+    )]
+
+
 def _check_service_autostart_drift() -> list[HealthResult]:
     """nexus-rlp0v (substantive-critic round 1, Significant): backstop for
     :func:`nexus.upgrade_finish.converge_service_autostart_unit`'s
@@ -9669,6 +9734,7 @@ def run_health_checks(
     results.extend(_check_service_launchagent_stray())
     results.extend(_check_service_autostart_drift())
     results.extend(_check_config_dir_user_access())  # nexus-f9bgu.50
+    results.extend(_check_local_pg_auth())  # nexus-ja4pq
     results.extend(_check_migration_state())
     results.extend(_check_rls_present())
     # RDR-205 Phase 2 Step 2 (bead nexus-em75s.10): the Linda tuple space's

@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import getpass
 import socket
+import os
 import subprocess
 
 import pytest
@@ -63,6 +64,7 @@ def svc_monitor_cluster(tmp_path_factory):
         _start_cluster,
         _configure_cluster,
         _create_db,
+        superuser_auth,
     )
 
     bins = PgBinaries.from_dir(pg_bin_dir())
@@ -70,12 +72,13 @@ def svc_monitor_cluster(tmp_path_factory):
     port = _free_port()
     os_user = getpass.getuser()
 
-    _init_cluster(bins, pgdata, os_user)
+    su_pw = "su-pw"  # nexus-ja4pq: the cluster demands a superuser password
+    _init_cluster(bins, pgdata, os_user, superuser_password=su_pw)
     _configure_cluster(pgdata, port)
     _start_cluster(bins, pgdata, port)
-    _create_db(bins, port, os_user)
-
-    created = _create_roles(bins, port, os_user, "admin-pw", "svc-pw", "diag-pw")
+    with superuser_auth(su_pw):
+        _create_db(bins, port, os_user)
+        created = _create_roles(bins, port, os_user, "admin-pw", "svc-pw", "diag-pw")
     assert created.svc_created is True  # non-vacuity: the role really was made
 
     def su(sql: str) -> str:
@@ -83,6 +86,7 @@ def svc_monitor_cluster(tmp_path_factory):
             [str(bins.psql), "-h", "127.0.0.1", "-p", str(port), "-U", os_user,
              "-d", "nexus", "-v", "ON_ERROR_STOP=1", "-tAc", sql],
             capture_output=True, text=True, timeout=30,
+            env={**os.environ, "PGPASSWORD": su_pw},
         )
         assert proc.returncode == 0, proc.stderr
         return proc.stdout.strip()

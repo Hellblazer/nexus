@@ -50,6 +50,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.db._pg_auth import superuser_pgpass
 from nexus.db.pg_provision import (
     NEXUS_DB_NAME,
     PgBinaries,
@@ -148,7 +149,10 @@ def provisioned(bins: PgBinaries, tmp_path_factory):
         else:
             os.environ["NEXUS_CONFIG_DIR"] = old_cfg
 
-    yield result, config_dir
+    # nexus-ja4pq: the cluster demands passwords; raw psql below uses the
+    # superuser's recorded one through PGPASSFILE.
+    with superuser_pgpass(config_dir):
+        yield result, config_dir
 
     pgdata = config_dir / "postgres"
     try:

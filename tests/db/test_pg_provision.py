@@ -30,6 +30,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.db._pg_auth import superuser_pgpass
 from nexus.db.pg_provision import (
     CREDENTIALS_FILENAME,
     NEXUS_DB_NAME,
@@ -165,7 +166,10 @@ def provisioned(bins: PgBinaries, tmp_path_factory) -> tuple[ProvisionResult, Pa
         else:
             os.environ["NEXUS_CONFIG_DIR"] = old_env
 
-    yield result, config_dir
+    # nexus-ja4pq: the cluster demands passwords; the raw psql calls in this
+    # module present the superuser's recorded one through PGPASSFILE.
+    with superuser_pgpass(config_dir):
+        yield result, config_dir
 
     # Teardown: stop the cluster.
     pgdata = config_dir / "postgres"
@@ -1183,7 +1187,8 @@ class TestFreshProvisionCreatesVectorDirectly:
                 os.environ.pop("NEXUS_CONFIG_DIR", None)
             else:
                 os.environ["NEXUS_CONFIG_DIR"] = old_env
-        yield result, config_dir
+        with superuser_pgpass(config_dir):
+            yield result, config_dir
         _stop_pg(bins, config_dir / "postgres")
 
     def test_vector_is_owned_by_os_user_after_fresh_provision(self, provisioned, bins):
@@ -1366,7 +1371,8 @@ class TestRelocateVectorExtensionsToNexusSchema:
               "CREATE EXTENSION pg_trgm;")
         assert _extension_schema(bins, result.port, os_user, "vector") == "public"
         assert _extension_schema(bins, result.port, os_user, "pg_trgm") == "public"
-        yield result, config_dir
+        with superuser_pgpass(config_dir):
+            yield result, config_dir
 
     def test_relocate_never_moves_the_extension_itself(
         self, pre_existing_install_shape, bins, os_user,
@@ -1713,7 +1719,8 @@ def e2e_provisioned(bins: PgBinaries, tmp_path_factory) -> tuple[ProvisionResult
     """
     config_dir = tmp_path_factory.mktemp("nexus_e2e_test")
     result = provision(config_dir, force_new_port=True)
-    yield result, config_dir
+    with superuser_pgpass(config_dir):
+        yield result, config_dir
     pgdata = config_dir / "postgres"
     _stop_pg(bins, pgdata)
 
@@ -1815,7 +1822,8 @@ def grant_proof_cluster(bins: PgBinaries, tmp_path_factory) -> tuple[ProvisionRe
     """
     config_dir = tmp_path_factory.mktemp("nexus_grant_proof")
     result = provision(config_dir, force_new_port=True)
-    yield result, config_dir
+    with superuser_pgpass(config_dir):
+        yield result, config_dir
     pgdata = config_dir / "postgres"
     _stop_pg(bins, pgdata)
 

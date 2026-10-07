@@ -39,8 +39,12 @@ from nexus.daemon import storage_service_daemon
 
 def test_provision_fast_path_calls_the_reassignment() -> None:
     """THE PRIMARY wiring (round 4): ``provision()``'s own source must call
-    ``reassign_diag_view_owner_before_restart`` somewhere in its body."""
-    source = inspect.getsource(pg_provision.provision)
+    ``reassign_diag_view_owner_before_restart`` somewhere in its body.
+
+    ``provision`` is a thin superuser-password scope around ``_provision_impl``
+    since nexus-ja4pq, so the body this reads is the implementation's."""
+    assert "_provision_impl(" in inspect.getsource(pg_provision.provision)
+    source = inspect.getsource(pg_provision._provision_impl)
     assert "reassign_diag_view_owner_before_restart(" in source, (
         "provision()'s fast idempotency path must call "
         "reassign_diag_view_owner_before_restart — without this, the "
