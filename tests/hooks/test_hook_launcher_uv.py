@@ -185,7 +185,15 @@ _BLOCKING_EVENTS = {"PreToolUse", "PermissionRequest", "UserPromptSubmit"}
 
 def _no_interpreter_env(tmp_path) -> dict[str, str]:
     """uv alone on PATH, an empty managed-Python directory, downloads off, offline:
-    a box where uv can find no interpreter and cannot fetch one."""
+    a box where uv can find no interpreter and cannot fetch one.
+
+    ``UV_PYTHON_PREFERENCE=only-managed`` is what makes that hold on Windows: there
+    uv also discovers interpreters through the PEP 514 registry (every Python uv or
+    python.org installed registers there) and the py launcher, neither of which
+    reads PATH, so on a host that has any Python the run found one and exited 0
+    (measured on qwentescence, 2026-10-07). Restricting discovery to the empty
+    managed directory models a box with no Python on every platform; on POSIX,
+    where PATH was already the only source, it changes nothing."""
     bindir = tmp_path / "bin"
     bindir.mkdir()
     (bindir / "uv").symlink_to(shutil.which("uv"))
@@ -195,6 +203,7 @@ def _no_interpreter_env(tmp_path) -> dict[str, str]:
         "PATH": str(bindir),
         "HOME": str(tmp_path),
         "UV_PYTHON_INSTALL_DIR": str(pydir),
+        "UV_PYTHON_PREFERENCE": "only-managed",
         "UV_PYTHON_DOWNLOADS": "never",
         "UV_OFFLINE": "1",
         "UV_CACHE_DIR": str(tmp_path / "cache"),
